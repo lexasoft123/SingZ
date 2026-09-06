@@ -131,6 +131,10 @@ export class MultitrackEngine {
   private countInfo: {
     firstCtx: number
     periodCtx: number
+    /** Each count-in click's context time, in order: the dots light on
+     *  these, not on an even division of the runway (a first beat 0.3 s
+     *  into the song makes the two differ by 210 ms on the last dot). */
+    clickCtx: number[]
     total: number
     perBar: number
   } | null = null
@@ -661,8 +665,9 @@ export class MultitrackEngine {
     // start does not, so the cutoff adds it before comparing.
     const now = this.ctx.currentTime - this.displayLag
     if (now >= this.startedAt + this.stretchLatency) return null
-    const done = Math.max(0, Math.min(c.total, Math.floor((now - c.firstCtx) / c.periodCtx) + 1))
-    return { total: c.total, done, perBar: c.perBar }
+    let done = 0
+    for (const at of c.clickCtx) if (now >= at) done++
+    return { total: c.total, done: Math.min(c.total, done), perBar: c.perBar }
   }
 
   setBeats(info: BeatInfo | null): void {
@@ -1005,9 +1010,11 @@ export class MultitrackEngine {
       const perBar = barLengthAt(g, this.startBeatIdx)
       const total = bars * perBar
       const span = this.startOffset - beatTime(g, this.nextClickIdx)
+      const first = this.nextClickIdx
       this.countInfo = {
-        firstCtx: this.clickCtxTime(beatTime(g, this.nextClickIdx), 0),
+        firstCtx: this.clickCtxTime(beatTime(g, first), 0),
         periodCtx: span / total / this.rate,
+        clickCtx: Array.from({ length: total }, (_, k) => this.clickCtxTime(beatTime(g, first + k), 0)),
         total,
         perBar
       }
@@ -1025,6 +1032,7 @@ export class MultitrackEngine {
       this.countInfo = {
         firstCtx,
         periodCtx: SEC_COUNT_PERIOD,
+        clickCtx: Array.from({ length: secTicks }, (_, k) => firstCtx + k * SEC_COUNT_PERIOD),
         total: secTicks,
         perBar: SEC_COUNT_TICKS
       }

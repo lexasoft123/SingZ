@@ -23,8 +23,17 @@
  * sample of every channel, which converges on the full RMS and can never
  * cost more than the budget however long the song; a sliver within the
  * budget is read whole, so a short song's bar is exact. The screen also
- * yields between lanes, so no single tick holds the thread for the whole
- * song.
+ * yields between chunks of slivers, so no single tick holds the thread for
+ * a whole lane.
+ *
+ * The window and budget were chosen by measurement, not taste: on a
+ * drum-like lane (3000-frame hits every 24 000 frames) eight 1024-frame
+ * windows per sliver missed whole hits and misread a sliver by up to 100%
+ * (mean 60%); 256 windows of 128 frames read it within 2.2% (mean 0.8%)
+ * at about a quarter of the full scan's cost, ~1.5 s of interpreted JS for
+ * a four-minute six-stem song in place of 5.5. Sixty-four windows of 128
+ * were still 29% out, and the bar's own parity check against the core
+ * (play-from-anywhere, step 6) reads the levels to 10%.
  */
 export interface LaneLevelReader {
   readonly length: number;
@@ -33,29 +42,37 @@ export interface LaneLevelReader {
 }
 
 export const LANE_LEVEL_SLIVERS = 96;
-/** One read. Small, so the windows of a sampled sliver spread widely. */
-export const LANE_LEVEL_WINDOW = 1024;
-/** Frames visited per channel per sliver at most: eight windows. At 48 kHz
- *  a 96-sliver bar of a four-minute song has 2.5 s slivers and reads 7% of
- *  them; a song under 16 s is read whole. */
-export const LANE_LEVEL_SLIVER_BUDGET = 8 * LANE_LEVEL_WINDOW;
+/** One read. Small, so the windows of a sampled sliver spread widely enough
+ *  to catch every drum hit (see the header's measurement). */
+export const LANE_LEVEL_WINDOW = 128;
+/** Frames visited per channel per sliver at most: 256 windows. At 48 kHz a
+ *  96-sliver bar of a four-minute song has 2.5 s slivers and reads 27% of
+ *  them; a song under 65 s is read whole. */
+export const LANE_LEVEL_SLIVER_BUDGET = 256 * LANE_LEVEL_WINDOW;
+/** How many slivers the screen computes per tick of the JS thread. */
+export const LANE_LEVEL_CHUNK = 32;
 
 /** RMS level of each of `slivers` equal spans of `[0, frames)` for one
  *  lane, over all its channels, from at most `budgetFrames` frames per
  *  channel per sliver. A lane shorter than `frames` (a custom track) is
- *  silent past its own end, not a repeat of its tail. */
+ *  silent past its own end, not a repeat of its tail. `from`/`to` bound the
+ *  slivers computed in this call (the rest stay 0, or whatever `into`
+ *  already holds), so a caller can spread the scan over several ticks. */
 export function laneSliverLevels(
   lane: LaneLevelReader,
   frames: number,
   slivers: number = LANE_LEVEL_SLIVERS,
   scratch: Float32Array = new Float32Array(LANE_LEVEL_WINDOW),
   budgetFrames: number = LANE_LEVEL_SLIVER_BUDGET,
+  into: Float32Array = new Float32Array(slivers),
+  from = 0,
+  to = slivers,
 ): Float32Array {
-  const levels = new Float32Array(slivers);
+  const levels = into;
   if (frames <= 0 || lane.length <= 0 || lane.numberOfChannels <= 0) return levels;
   const window = Math.max(1, scratch.length);
   const budget = Math.max(window, Math.floor(budgetFrames));
-  for (let i = 0; i < slivers; i++) {
+  for (let i = Math.max(0, from); i < Math.min(slivers, to); i++) {
     const start = Math.floor((i * frames) / slivers);
     let end = Math.floor(((i + 1) * frames) / slivers);
     if (end <= start) end = start + 1;

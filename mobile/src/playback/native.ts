@@ -1,4 +1,5 @@
 import { NativeModules, Platform } from 'react-native';
+import { barLengthAt, beatIndexAtOrAfter, beatTime } from '../beat';
 import type { MultitrackEngine } from '../engine';
 import { driveLocalFile, driveReadText } from '../gdrive';
 import { fmtBytes, fmtMs, log } from '../log';
@@ -4398,6 +4399,15 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
    *  fall on, which is what the legacy bar sweeps through. Set when the
    *  prepare request names the anchor, cleared by any prepare that does not. */
   private countInLandingFrame = 0;
+  /** The bar length the current count-in counts (set by countInBeatOffsets). */
+  private countInPerBar = 0;
+  /** Whether a pre-roll (or the playing that follows one) has been observed
+   *  since the current start was issued. Until it has, a start with a
+   *  count-in shows its row hollow, as legacy shows it from the tap; without
+   *  this the row appeared ~160 ms after Play, after the first click had
+   *  sounded. Reset by a new start and by a new prepare — whichever the
+   *  path runs last. */
+  private countInSeen = false;
   /** The last rendered frame as the core reported it — the SIGNED frame a
    *  log about the transport wants, where the snapshot holds the shown one. */
   private rawRenderedFrame = 0;
@@ -4488,6 +4498,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       countInAnchorSeconds === undefined
         ? 0
         : Math.max(0, Math.round(countInAnchorSeconds * this.sampleRate()));
+    this.countInSeen = false;
     return {
       playback: buildNativePlaybackPreparePlayback(
         this.beatInfo,
@@ -4718,6 +4729,41 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
 
   markStartIssued(generation: number): void {
     this.startIssuedGeneration = generation;
+    this.countInSeen = false;
+  }
+
+  /** The count-in clicks' times relative to the landing (≤ 0, seconds), as
+   *  the core's cue planner places them — a real beat each, or one tick a
+   *  second without a grid. The dots light on THESE, not on an even division
+   *  of the runway: a song whose first beat sits 0.3 s in has a pre-roll of
+   *  3.7 s for four beats a second apart, and even quarters lit the fourth
+   *  dot 210 ms before its click (measured on the simulator, 2026-09-06).
+   *  Computed on demand from the grid and metronome the current generation
+   *  was prepared with (a count-in change is structural and re-prepares), so
+   *  the first prepare and every rebuild answer alike. Empty when there is
+   *  no count-in. Mirrors playback_cue_plan.cpp: the entry beat is the first
+   *  at or after the anchor, the count-in is `bars` bars of the bar length AT
+   *  that beat, ending on the beat before it; gridless, a bar is three ticks
+   *  a second apart, scaled by the playback rate as the core scales them. */
+  private countInBeatOffsets(anchorSec: number): number[] {
+    const bars = this.metronomeConfig.countInBars;
+    this.countInPerBar = 0;
+    if (!(bars > 0)) return [];
+    const grid = this.beatInfo;
+    if (grid === null) {
+      const ticks = bars * 3;
+      this.countInPerBar = 3;
+      return Array.from({ length: ticks }, (_, k) => -(ticks - k) * this.playbackRate);
+    }
+    const entryBeat = beatIndexAtOrAfter(grid, anchorSec);
+    const perBar = barLengthAt(grid, entryBeat);
+    const count = bars * perBar;
+    if (!(count > 0)) return [];
+    this.countInPerBar = perBar;
+    const out: number[] = [];
+    for (let k = 0; k < count; k++)
+      out.push(beatTime(grid, entryBeat - count + k) - anchorSec);
+    return out;
   }
 
   startWasIssued(generation: number): boolean {
@@ -4898,10 +4944,14 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     };
   }
 
-  /** The frame the bar shows for a rendered frame: during a count-in that
-   *  lands mid-song the negative pre-roll frames read as the beats before the
-   *  landing, as the legacy bar sweeps them; everywhere else the frame
-   *  itself. The dots and the receipt logic keep the raw frame.
+  /** The frame the bar shows for a rendered frame: during a count-in the
+   *  bar HOLDS at the landing — legacy's clock clamps at the start offset
+   *  until the music enters (`Math.max(startOffset, elapsed)`), so its bar
+   *  and its lyrics sit on the line the singer chose while the count runs.
+   *  An earlier version swept the beats before the landing here, believing
+   *  legacy did; it reached a phone as the PREVIOUS line's words lighting up
+   *  through the count-in. Everywhere else the frame itself. The dots and
+   *  the receipt logic keep the raw frame.
    *
    *  Whether a frame is a pre-roll frame is decided by the frame the CORE
    *  reported (`reportedFrame`), never by the projected one: the clock
@@ -4915,7 +4965,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   private shownFrame(renderedFrame: number, reportedFrame = renderedFrame): number {
     this.rawRenderedFrame = renderedFrame;
     return reportedFrame < 0 && this.countInLandingFrame > 0
-      ? this.countInLandingFrame + renderedFrame
+      ? this.countInLandingFrame
       : renderedFrame;
   }
 
@@ -5302,7 +5352,36 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     renderedFrame: number,
     base: NativePlaybackSessionStatus | null,
   ): PlaybackCountInStatus | null {
-    if (transportState !== 'pre-roll' || base === null) return null;
+    if (transportState !== 'pre-roll') {
+      // Between the tap and the core's first pre-roll report the row is
+      // there, hollow — legacy shows 0/N from the tap and fills the first
+      // dot on the first click; native showed nothing until ~160 ms in.
+      if (
+        transportState === 'playing' ||
+        transportState === 'paused' ||
+        transportState === 'completed'
+      )
+        this.countInSeen = true;
+      else if (
+        !this.countInSeen &&
+        this.startWasIssued(this.generation) &&
+        // Only when a pre-roll is actually pending: the core parks one at
+        // −preRollFrames until its first callback. A mid-song cue rebuild
+        // with the count-in setting on starts FLAT at a positive frame and
+        // would otherwise flash a row nobody counts through (the metronome
+        // touches in the session scenario are exactly that path).
+        renderedFrame < 0
+      ) {
+        const total = this.countInBeatOffsets(
+          this.countInLandingFrame / this.sampleRate(),
+        ).length;
+        if (total > 0 && this.countInPerBar > 0)
+          return { kind: 'beats', total, done: 0, perBar: this.countInPerBar };
+      }
+      return null;
+    }
+    this.countInSeen = true;
+    if (base === null) return null;
     const sampleRate = base.sampleRate || this.sampleRate();
     // Output latency through the signed audible position, plus the singer's
     // own trim — the part the OS under-reports and therefore the part the
@@ -5329,11 +5408,21 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     const perBar = base.countInBeatsPerBar;
     const span = Math.abs(base.preRollFrames);
     if (total > 0 && perBar > 0 && span > 0) {
-      // The core owns how many beats the count-in sounds and how they group;
-      // this only asks how far through the runway the ear has got. Dividing
-      // that runway evenly is what the LEGACY engine does for its own dots
-      // (its clicks land on real beat times, its progress does not), so the
-      // two backends agree by construction rather than by coincidence.
+      // The core owns how many beats the count-in sounds and how they group.
+      // Where this facade planned the same count-in (it has the grid the
+      // core planned from), a dot lights when the ear reaches THAT click's
+      // beat; the heard position is the render head less latency and trim,
+      // signed, relative to the landing. Otherwise the runway divided evenly
+      // — the shape an older core's telemetry alone allows.
+      const offsets = this.countInBeatOffsets(
+        this.countInLandingFrame / sampleRate,
+      );
+      if (offsets.length === total) {
+        const heardSec = -remainingFrames / sampleRate;
+        let done = 0;
+        for (const offset of offsets) if (heardSec >= offset) done++;
+        return { kind: 'beats', total, done: Math.min(total, done), perBar };
+      }
       const elapsed = span - Math.max(0, remainingFrames);
       const done = Math.max(
         0,

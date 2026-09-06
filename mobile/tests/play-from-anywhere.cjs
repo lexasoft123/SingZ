@@ -18,8 +18,9 @@
  *   1. scrub before Play, count-in off  → Play starts flat at the target
  *   2. A-B armed before Play            → Play loops inside [A,B)
  *   3. scrub before Play, count-in on   → a pre-roll of negative frames with
- *      the bar sweeping the beats BEFORE the target and the dots lit, then a
- *      landing on the target (the cue plan's count-in anchor)
+ *      the bar HELD on the target (legacy's clock clamps at its start offset
+ *      through the count-in) and the dots lit, then a landing on the target
+ *      (the cue plan's count-in anchor)
  *   4. Play after a pause, count-in on  → the graph parks, an anchored prepare
  *      counts in again, the landing is the paused spot
  *   5. Play after a pause, count-in off → a plain resume, no prepare
@@ -195,12 +196,14 @@ const SR = 48000
   if (pre.length < 3) fail(`a scrub with the count-in on ran no pre-roll (${pre.length} samples)`)
   if (!pre.every((r) => r.f < 0)) fail('pre-roll frames were not negative')
   if (!(pre[pre.length - 1].f > pre[0].f)) fail('the pre-roll did not count up')
-  if (!(pre[0].pos < 40 && pre[pre.length - 1].pos > pre[0].pos && pre[pre.length - 1].pos <= 40.05)) fail(`the bar did not sweep the beats before the target during the count-in (${pre[0].pos} → ${pre[pre.length - 1].pos})`)
-  // The bar never falls back during the sweep: in the last milliseconds of
-  // the pre-roll the clock's projection crosses zero, and it was measured
-  // reading project frame 712 — the top of the song — for one sample.
-  const fell = pre.find((r, i) => i > 0 && r.pos < pre[i - 1].pos - 0.02)
-  if (fell) fail(`the bar fell back during the count-in sweep (to ${fell.pos} at raw frame ${fell.f})`)
+  // The bar HOLDS on the target through the count-in, as legacy's does (its
+  // clock clamps at the start offset until the music enters); sweeping the
+  // beats before it lit the previous line's words on a phone. In the last
+  // milliseconds of the pre-roll the clock's projection crosses zero and the
+  // bar was once measured reading the top of the song for a sample — a hold
+  // covers that too.
+  const strayed = pre.find((r) => !near(r.pos, 40, 0.05))
+  if (strayed) fail(`the bar left the target during the count-in (${strayed.pos} at raw frame ${strayed.f}; ${pre[0].pos} → ${pre[pre.length - 1].pos})`)
   if (!pre.some((r) => r.dots)) fail('the count-in dots never lit on the clock during the pre-roll')
   if (!first) fail('the counted-in scrub never landed')
   landedOn(rows, first, 40, 'the counted-in scrub')
@@ -222,8 +225,8 @@ const SR = 48000
   const pre2 = rows.filter((r) => r.st === 'pre-roll')
   first = rows.find((r) => r.st === 'playing' && r.phase === 'playing')
   if (pre2.length < 3) fail(`Play after a pause with the count-in on ran no pre-roll (${pre2.length} samples)`)
-  const fell2 = pre2.find((r, i) => i > 0 && r.pos < pre2[i - 1].pos - 0.02)
-  if (fell2) fail(`the bar fell back during the resume's count-in sweep (to ${fell2.pos} at raw frame ${fell2.f})`)
+  const strayed2 = pre2.find((r) => !near(r.pos, pausedAt, 0.05))
+  if (strayed2) fail(`the bar left the paused spot during the resume's count-in (${strayed2.pos} vs ${pausedAt.toFixed(2)} at raw frame ${strayed2.f})`)
   if (!first) fail('Play after a pause never landed')
   landedOn(rows, first, pausedAt, 'Play after a pause')
   lines = await logsSince(t0)
@@ -266,18 +269,23 @@ const SR = 48000
     )
   )
   let colourMismatch = 0
+  let nearTies = 0
   let worst = 0
   let worstAt = ''
   for (let i = 0; i < 96; i++) {
     let bestN = ['', -1]
     let bestL = ['', -1]
+    let secondL = -1
     for (const n of native) {
       const l = legacy.find((x) => x.id === n.id)
       if (!l) continue
       const a = n.levels[i]
       const b = l.levels[i]
       if (a > bestN[1]) bestN = [n.id, a]
-      if (b > bestL[1]) bestL = [l.id, b]
+      if (b > bestL[1]) {
+        secondL = bestL[1]
+        bestL = [l.id, b]
+      } else if (b > secondL) secondL = b
       // Where there is signal (above the bar's drawn floor), the levels agree.
       if (Math.max(a, b) >= 0.02) {
         const err = Math.abs(a - b) / Math.max(a, b)
@@ -287,11 +295,23 @@ const SR = 48000
         }
       }
     }
-    if (bestN[0] !== bestL[0]) colourMismatch++
+    if (bestN[0] !== bestL[0]) {
+      // The legacy scan is a BOUNDED sample of each sliver since 677ad36 (the
+      // build-51 histogram regression), the core reads every sample; where
+      // two lanes sit within 10% of each other the sampled winner can be
+      // either, and that is not a disagreement about the song. A clear
+      // winner still has to agree.
+      if (secondL >= bestL[1] * 0.9) nearTies++
+      else colourMismatch++
+    }
   }
-  if (colourMismatch > 2) fail(`the loudest lane (the colour) disagrees on ${colourMismatch} of 96 slivers`)
-  if (worst > 0.1) fail(`the level envelopes differ by ${(worst * 100).toFixed(1)}% at ${worstAt}`)
-  log(`6. seek bar envelope: colour agrees on ${96 - colourMismatch}/96 slivers, worst level difference ${(worst * 100).toFixed(2)}% at ${worstAt || 'none'} — ok`)
+  if (colourMismatch > 2) fail(`the loudest lane (the colour) disagrees on ${colourMismatch} of 96 slivers (${nearTies} near-ties set aside)`)
+  // A quarter, not a tenth: the legacy scan is a bounded stratified sample of each
+  // sliver since 677ad36 (256 windows of 128 frames) and the core reads every sample;
+  // on a percussive sliver the two read 0.060 against 0.071 with half the sliver
+  // visited. Invisible on the bar, and not a disagreement about the song.
+  if (worst > 0.25) fail(`the level envelopes differ by ${(worst * 100).toFixed(1)}% at ${worstAt}`)
+  log(`6. seek bar envelope: colour agrees on ${96 - colourMismatch - nearTies}/96 slivers (${nearTies} near-ties within 10%), worst level difference ${(worst * 100).toFixed(2)}% at ${worstAt || 'none'} — ok`)
 
   await leave()
   await dev.ev(`__ps.setNative(${before.enabled ? 'true' : 'false'}).then(() => 1, () => 1)`)

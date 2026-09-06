@@ -167,7 +167,7 @@ export class MultitrackEngine {
   private clickLap = 0
   /** First beat index at/after the play position — where a count-in hands over. */
   private startBeatIdx: number | null = null
-  private countInfo: { firstCtx: number; periodCtx: number; total: number; perBar: number } | null =
+  private countInfo: { firstCtx: number; periodCtx: number; clickCtx: number[]; total: number; perBar: number } | null =
     null
 
   /** Clicks scheduled since launch (diagnostics/E2E). */
@@ -681,8 +681,11 @@ export class MultitrackEngine {
     // so the cutoff adds it before comparing.
     const now = this.ctx.currentTime - (this.ctx.outputLatency || 0)
     if (now >= this.startedAt + (this.stretchOn ? this.stretchLatency : 0)) return null
-    const done = Math.max(0, Math.min(c.total, Math.floor((now - c.firstCtx) / c.periodCtx) + 1))
-    return { total: c.total, done, perBar: c.perBar }
+    // On the clicks themselves, not an even division of the runway: a first
+    // beat 0.3 s into the song makes the two differ by 210 ms on the last dot.
+    let done = 0
+    for (const at of c.clickCtx) if (now >= at) done++
+    return { total: c.total, done: Math.min(c.total, done), perBar: c.perBar }
   }
 
   async setBeats(info: BeatInfo | null): Promise<void> {
@@ -1460,9 +1463,11 @@ export class MultitrackEngine {
       const perBar = barLengthAt(g, this.startBeatIdx)
       const total = bars * perBar
       const span = this.startOffset - beatTime(g, this.nextClickIdx)
+      const first = this.nextClickIdx
       this.countInfo = {
-        firstCtx: this.clickCtxTime(beatTime(g, this.nextClickIdx), 0),
+        firstCtx: this.clickCtxTime(beatTime(g, first), 0),
         periodCtx: span / total / this.rate,
+        clickCtx: Array.from({ length: total }, (_, k) => this.clickCtxTime(beatTime(g, first + k), 0)),
         total,
         perBar
       }
@@ -1477,6 +1482,7 @@ export class MultitrackEngine {
       this.countInfo = {
         firstCtx,
         periodCtx: SEC_COUNT_PERIOD,
+        clickCtx: Array.from({ length: secTicks }, (_, k) => firstCtx + k * SEC_COUNT_PERIOD),
         total: secTicks,
         perBar: SEC_COUNT_TICKS
       }

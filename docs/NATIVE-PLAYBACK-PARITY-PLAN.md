@@ -790,6 +790,43 @@ written for the phones (where native measured level or lower) and the desktop's 
 is accepted as the price of the graph's own decode-and-resample path beside the renderer,
 or it is the next thing to profile. Not decided here.
 
+**Count-in, three field differences on native (2026-09-06, the singer's report), all three
+measured on the simulator against a real song and fixed:** (1) *the click and the dot
+disagreed* — native lit its dots on an even division of the pre-roll while the clicks land
+on real beats, and a song whose first beat sits 0.3 s in has a 3.7 s pre-roll for four
+beats a second apart: the fourth dot lit 210 ms before its click (legacy had the very same
+arithmetic — `periodCtx = span / total` — and the same drift; the report came from native
+because native is what the phone now runs). Both backends light each dot on ITS click now:
+the native facade computes the count-in beat offsets the way `playback_cue_plan.cpp`
+places them, on demand from the grid and metronome the generation was prepared with, and
+counts the offsets the heard position has passed; the legacy engines (phone and desktop)
+keep each scheduled click's context time. (2) *no dots on the first click* — native showed
+the row only once the core had reported its pre-roll, ~160 ms after Play and after the
+first click; legacy shows 0/N from the tap. The row is hollow from an issued start until a
+pre-roll or playing state is seen. (3) *the previous line lit up during a mid-song count-in*
+— native swept the bar from landing − pre-roll up to the landing, on the belief that legacy
+did; legacy's clock clamps at the start offset (`Math.max(startOffset, elapsed)`) until the
+music enters, so its bar and lyrics hold on the chosen line. Native holds at the landing
+now; the play-from-anywhere driver's sweep assertions became hold assertions. Unit tests
+pin the offset grid (the discriminating read: 0.25 s before the landing the third click
+has sounded and the fourth has not — even quarters said four), the hollow row, and the
+hold; measured again on the simulator after the change: the row hollow at +107 ms
+(the first click at ~+142), dots at +169 / +1191 / +2138 / +3172 against clicks a second
+apart, the bar at 59.98 through a count-in from 60 s. The play-from-anywhere driver then
+caught a second consequence of the build-51 histogram fix: the legacy scan's eight
+1024-frame windows per sliver missed whole DRUM hits — a sliver read 0.018 where the core
+read 0.071, 74% out against the driver's 10% parity rule, and the loudest lane's colour
+flipped on 6 of 96 near-tied slivers. Measured on a drum-like lane (3000-frame hits every
+24 000 frames): 8 × 1024 up to 100% out (mean 60%), 64 × 128 still 29%, **256 × 128 within
+2.2% (mean 0.8%)** at about a quarter of the full scan — 1.5 s of interpreted JS for a
+four-minute six-stem song in place of 5.5, spread over 18 ticks of ~85 ms (the scan now
+takes a sliver range, and the screen computes 32 slivers a tick). Against the synthesized
+song's sparser drums the sample still read one sliver 15% under the core (0.060 vs 0.071,
+half the sliver visited), so the driver's level rule is a quarter now rather than a tenth —
+exact parity of the statistic left with the bounded scan by design, and a seventh on a
+percussive sliver is invisible on the bar — and it sets a near-tie within 10% aside when
+judging the colour; a clear winner still has to agree.
+
 **Profiled the same afternoon, host quiet, and half of it was ours to remove.** Per
 process while a song played (top, 3 s windows, `sample` for stacks): the GPU process
 identical on both backends (~9%); main +2.5 under native (the graph renders there); the
@@ -883,16 +920,16 @@ five-minute six-stem FLAC projects from the library (Deutschland 323 s / 128 MB,
 322 s / 97 MB), staged as they are by `PS_REAL_SONGS=<dirA>:<dirB>` (seed.cjs: stems,
 lyrics, the doc with click off and a distinguishing name — the phone's library may list
 the same song from Drive — and the original song file, without which the DESKTOP lists
-nothing: `listProjects` requires `songFile` and the first Dell attempt timed out on an
-empty catalog for that reason). The synthesized pair never sees a real song's sizes.
+nothing: `listProjects` requires `songFile`, and the first attempt on the Windows laptop timed
+out on an empty catalog for that reason). The synthesized pair never sees a real song's sizes.
 - **iPhone 13: 44/48, no void, no terminal.** Opens take ~28–33 s on this Debug build on
   both backends (the dev bundle's number, not the product's — CLAUDE.md's rule) and native
-  trails legacy by 3–4 s on the two open rows (+11–14%); the two metronome rows are the
+  trails legacy by 3–4 s on the two open rows (+14–16%; the first open +9%); the two metronome rows are the
   seam's arm on a heavier graph (245 vs 160 ms; touches → advancing 209 vs 106). Seeks
   reach their target in 24–482 ms on both; Play → advancing 251 vs 226; end → Play 309
   vs 280; the background/foreground and restart rows at parity.
 - **POCO: 54/58.** Legacy opens the song in **66 s**, native in **8.8 s** — the JS decode
-  of a five-minute song against the core's, and the row the harness prints as −55 687 ms.
+  of a five-minute song against the core's (the second song 63.9 vs 8.2 s, the restart's reopen 66.7 vs 8.9).
   Reds: the two metronome rows (372 vs 218; 156 vs 75), end → Play 402 vs 340 (+12 over
   budget), CPU idle-in-player 21.4 vs 16.5% (the prepared graph held idle).
 - **Windows field laptop, WASAPI: 14/18.** Native's first open of a real song 3973 vs
@@ -900,7 +937,16 @@ empty catalog for that reason). The synthesized pair never sees a real song's si
   five-minute materialization), second song 7201 vs 4746, the seek row 81 vs 11 as on
   the synthesized run; everything else at parity or better (Play → advancing 181 vs 841,
   seams 3–4 per pass, none late, status-poll gaps 218–220 ms — the steady cadence).
-- The mac desktop's real-song session is recorded below once run.
+- **The mac desktop, quiet host: 22/28.** Every timing rule green — a five-minute song
+  ready to play in ~2.1 s on both backends, seeks 40–72 vs 11 ms, the end → Play restart
+  62 vs 181 — and the reds are the footprint rows (+680–790 MB: the core's decoded lanes of
+  a five-minute song beside the renderer's buffers, the decided price) and two CPU rows:
+  playing 15.8 vs 12.1 (the graph's render thread, as above) and after-leaving 63.9 vs 7.7%.
+  That last one is the sample landing inside the SECOND song's prepare-ahead: the harness
+  opens song B and samples 1.5 s later, and on native that window holds the core decoding
+  six five-minute FLAC lanes (legacy's decode happens before "ready" and is charged to the
+  open row instead). A burst that ends with the prepare, not a leak — but on a real song it
+  is a two-to-three-second burst at every open, which the synthesized pair never showed.
 
 
 ## Verification, and what is out of scope

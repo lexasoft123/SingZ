@@ -2921,9 +2921,11 @@ describe('iOS Phase 4B structural cue rebuild', () => {
     }
   });
 
-  it('during a count-in that lands mid-song the bar reads the beats before the landing, not the top', async () => {
-    // The core counts the pre-roll down through negative frames; the legacy
-    // bar sweeps through the real preceding beats up to the scrubbed spot.
+  it('during a count-in that lands mid-song the bar holds at the landing, as legacy holds at its start offset', async () => {
+    // The core counts the pre-roll down through negative frames; legacy's
+    // clock clamps at the start offset until the music enters, so the bar and
+    // the lyrics sit on the chosen line. Sweeping the beats before it lit the
+    // PREVIOUS line's words on a phone.
     const h = harness({ swapCapable: true, syncClock: true });
     const project = await h.load(entry({ beat, metronome: { ...initialMetronome, countInBars: 1 } }));
     const handle = project.nativePlayback!;
@@ -2943,11 +2945,11 @@ describe('iOS Phase 4B structural cue rebuild', () => {
       seekCount: 0,
       ageMs: 0,
     });
-    expect(handle.clock().renderedSec).toBeCloseTo(1.0, 3);
+    expect(handle.clock().renderedSec).toBeCloseTo(1.5, 3);
     // The last milliseconds of the pre-roll, read 20 ms after the report:
-    // the projection crosses zero (−248 + 960 = +712). That is the landing
-    // plus the overshoot, not project frame 712 — the bar was measured
-    // falling to 0 for one sample here on the emulator.
+    // the projection crosses zero (−248 + 960 = +712). Still the landing —
+    // a pre-roll REPORT holds, whatever the projection says (the bar was
+    // measured falling to 0 for one sample here on the emulator).
     h.setPositionNow({
       generation: 2,
       transportState: 'pre-roll',
@@ -2957,7 +2959,7 @@ describe('iOS Phase 4B structural cue rebuild', () => {
       seekCount: 0,
       ageMs: 20,
     });
-    expect(handle.clock().renderedSec).toBeCloseTo((72_000 + 712) / 48_000, 4);
+    expect(handle.clock().renderedSec).toBeCloseTo(1.5, 4);
     // Landed: the frame itself.
     h.setPositionNow({
       generation: 2,
@@ -4684,6 +4686,151 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
     await handle.start();
 
     expect(h.calls[0]).toBe(`native.transport:${generation}:seek`);
+  });
+
+  const countInFixtureMetronome = { click: true, countInBars: 1, volume: 0.5, accent: true } as const;
+  const countInFixtureGrid: NonNullable<ProjectDoc['settings']['beat']> = {
+    beats: [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5],
+    bpm: 120,
+    beatsPerBar: 4,
+    downbeat: 0,
+    downbeats: [0, 4],
+    source: 'manual',
+  };
+
+  it('lights each count-in dot on its own click beat, not on an even share of the runway', async () => {
+    // A song whose first beat sits 0.3 s in: the four count-in clicks are at
+    // −1.7, −1.2, −0.7 and −0.2 s before the landing (120 bpm), a 1.7 s
+    // pre-roll. An even division lit the fourth dot at −0.425 s — 225 ms
+    // before its click; the singer heard clicks and dots disagree.
+    const offsetGrid: NonNullable<ProjectDoc['settings']['beat']> = {
+      beats: [0.3, 0.8, 1.3, 1.8, 2.3, 2.8, 3.3, 3.8],
+      bpm: 120,
+      beatsPerBar: 4,
+      downbeat: 0,
+      downbeats: [0, 4],
+      source: 'manual',
+    };
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat: offsetGrid, metronome: countInFixtureMetronome }));
+    const handle = project.nativePlayback!;
+    open.push(handle);
+    const generation = handle.snapshot().generation;
+    const preRoll = Math.round(1.7 * 48_000);
+    const base = capability(generation, 'running', 0, 'ios');
+    const latency = base.session.presentationLatencyFrames;
+    h.native.status.mockImplementation(async () => ({
+      ...base,
+      session: {
+        ...base.session,
+        transportState: 'pre-roll',
+        preRollFrames: preRoll,
+        remainingPreRollFrames: preRoll,
+        audibleProjectFrame: -preRoll,
+        renderedProjectFrame: -preRoll + latency,
+        countInEventCount: 4,
+        countInBeatsPerBar: 4,
+      },
+    }) as never);
+    await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+    await h.coordinator.pollHandle(handle as never);
+    const at = (heardSec: number) => {
+      const audible = Math.round(heardSec * 48_000);
+      h.setPositionNow({
+        generation,
+        transportState: 'pre-roll',
+        renderedProjectFrame: audible + latency,
+        continuousFrame: preRoll + audible,
+        remainingPreRollFrames: Math.max(0, -audible - latency),
+        seekCount: 0,
+        ageMs: 0,
+      });
+      return handle.clock().countIn;
+    };
+    expect(at(-1.7)).toMatchObject({ kind: 'beats', total: 4, done: 1, perBar: 4 });
+    expect(at(-1.25)).toMatchObject({ done: 1 });
+    expect(at(-1.15)).toMatchObject({ done: 2 });
+    // The discriminating read: 0.25 s before the landing the third click has
+    // sounded and the fourth has not. Even quarters said 4 here.
+    expect(at(-0.25)).toMatchObject({ done: 3 });
+    expect(at(-0.15)).toMatchObject({ done: 4 });
+    await handle.stop('dot beats test complete');
+  });
+
+  it('shows the count-in row hollow from the tap until the core reports its pre-roll', async () => {
+    // Legacy shows 0/N the moment Play is tapped and fills the first dot on
+    // the first click. Native showed nothing until its first pre-roll report,
+    // ~160 ms after Play — after the first click had sounded.
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat: countInFixtureGrid, metronome: countInFixtureMetronome }));
+    const handle = project.nativePlayback!;
+    open.push(handle);
+    const generation = handle.snapshot().generation;
+    // What the core reports between the accepted start and its first
+    // callback (measured 76 ms after Play on the simulator): the transport
+    // still stopped at minus the pre-roll, the count-in's shape known.
+    const base = capability(generation, 'running', 0, 'ios');
+    h.native.status.mockImplementation(async () => ({
+      ...base,
+      session: {
+        ...base.session,
+        transportState: 'stopped',
+        preRollFrames: 96_000,
+        remainingPreRollFrames: 96_000,
+        renderedProjectFrame: -96_000,
+        audibleProjectFrame: -96_000,
+        countInEventCount: 4,
+        countInBeatsPerBar: 4,
+      },
+    }) as never);
+    await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+    // The core has not run its first callback: the sync read still says stopped.
+    h.setPositionNow({
+      generation,
+      transportState: 'stopped',
+      renderedProjectFrame: -96_000,
+      continuousFrame: 0,
+      remainingPreRollFrames: 96_000,
+      seekCount: 0,
+      ageMs: 0,
+    });
+    expect(handle.clock().countIn).toEqual({ kind: 'beats', total: 4, done: 0, perBar: 4 });
+    // Once the transport plays, the row is gone and stays gone.
+    h.setPositionNow({
+      generation,
+      transportState: 'playing',
+      renderedProjectFrame: 4_800,
+      continuousFrame: 100_800,
+      remainingPreRollFrames: 0,
+      seekCount: 0,
+      ageMs: 0,
+    });
+    expect(handle.clock().countIn).toBeNull();
+    h.setPositionNow({
+      generation,
+      transportState: 'stopped',
+      renderedProjectFrame: 4_800,
+      continuousFrame: 100_800,
+      remainingPreRollFrames: 0,
+      seekCount: 0,
+      ageMs: 0,
+    });
+    expect(handle.clock().countIn).toBeNull();
+    // A start that will NOT count in — a mid-song cue rebuild with the
+    // count-in setting on starts flat at a positive frame — shows no row in
+    // its stopped window: the pre-roll is real only at a negative frame.
+    ;(handle as unknown as { markStartIssued(g: number): void }).markStartIssued(generation);
+    h.setPositionNow({
+      generation,
+      transportState: 'stopped',
+      renderedProjectFrame: 4_320_000,
+      continuousFrame: 100_800,
+      remainingPreRollFrames: 0,
+      seekCount: 0,
+      ageMs: 0,
+    });
+    expect(handle.clock().countIn).toBeNull();
+    await handle.stop('hollow row test complete');
   });
 
   it('counts the singer in with beat dots, not a bare countdown', async () => {

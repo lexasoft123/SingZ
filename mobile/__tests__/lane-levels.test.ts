@@ -58,6 +58,35 @@ describe('legacy lane levels', () => {
     for (const level of levels) expect(level).toBeCloseTo(0.8 * Math.sqrt(0.1), 2);
   });
 
+  it('computes a sliver range into a shared array, so a screen can spread the scan over ticks', () => {
+    const frames = 48_000 * 10;
+    const src = lane(frames, 1, f => (f < frames / 2 ? 0.1 : 0.4));
+    const into = new Float32Array(4);
+    laneSliverLevels(src, frames, 4, undefined, undefined, into, 0, 2);
+    expect(Array.from(into).map(v => +v.toFixed(3))).toEqual([0.1, 0.1, 0, 0]);
+    laneSliverLevels(src, frames, 4, undefined, undefined, into, 2, 4);
+    expect(Array.from(into).map(v => +v.toFixed(3))).toEqual([0.1, 0.1, 0.4, 0.4]);
+  });
+
+  it('reads a bursty lane to within a few percent under the budget', () => {
+    // Drum-like: 3000-frame hits every 24 000 frames. Eight 1024-frame windows
+    // per sliver missed whole hits (a sliver read 0.018 where the full scan
+    // read 0.071 — the play-from-anywhere driver caught it at 74% out); the
+    // shipped window/budget read this within 2.2% worst in the study.
+    const frames = 48_000 * 60;
+    const hit = (f: number) => {
+      const k = f % 24_000;
+      return k < 3000 ? 0.6 * Math.exp(-k / 800) * Math.sin(k * 0.3) : 0;
+    };
+    const full = laneSliverLevels(lane(frames, 1, hit), frames, 24, undefined, Number.POSITIVE_INFINITY);
+    const bounded = laneSliverLevels(lane(frames, 1, hit), frames, 24);
+    let worst = 0;
+    for (let i = 0; i < 24; i++) worst = Math.max(worst, Math.abs(bounded[i] - full[i]) / full[i]);
+    // 2.5 s slivers here (the study's were 1.27 s): 6.3% worst, against the
+    // bar's 10% parity check and the 100% the old windows produced.
+    expect(worst).toBeLessThan(0.1);
+  });
+
   it('reads at most the budget per channel per sliver, however long the song', () => {
     // Build 51 read every sample: a four-minute six-stem song was ~140 M
     // Hermes iterations on the JS thread, and reached a phone as a player
