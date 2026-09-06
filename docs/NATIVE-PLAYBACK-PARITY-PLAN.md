@@ -733,13 +733,26 @@ read-back 81 ms worst against 11, twenty over budget on that laptop's IPC. CPU, 
 and host-quiet are not sampled on Windows and print n/a. This closes "no Dell run has
 exercised native playback"; ASIO stays behind the unsigned SDK agreement.
 
-Three consecutive green runs per platform on a quiet host (every compared rule — the
-Android harness judges 60 today, iOS 58, with two backgrounded rows uncompared when the
-backends disagree about rendering; the metronome-save rule flips on a heavy tail, so
-three greens, not one), the POCO run, an
-iPhone `--platform ios-device` for timings, the e2e-verifier pass, project memory and
-`DSP-GRAPH-PLAN.md` updated with the live command surface, then build 48 via the
-ship-ios-ipa skill.
+**Where the acceptance list stands, 2026-09-06 (tip cb20795):**
+
+- Three consecutive green runs per platform on a quiet host — every functional rule
+  has been green on the simulator, the emulator, the POCO and the desktop across every
+  run of the last two days; the host-quiet rows have not passed once, because this Mac
+  has run at load 6-12 all day from its owner's own apps, and the CPU rows it colours
+  are therefore unread. Owed: three runs on a quiet Mac, nothing to change.
+- The POCO run — done (55/58; the reds are the phone's own).
+- An iPhone `--platform ios-device` run — built, installed, waiting on the phone being
+  unlocked (it re-locks; devicectl cannot launch on a passcode-locked phone).
+- The e2e-verifier pass — done on both phones and the mac, plus the Windows laptop's
+  smoke and its native session.
+- Project memory and `DSP-GRAPH-PLAN.md` — updated with the live command surface.
+- Build 48 — superseded: builds 49, 50 and 51 shipped via the ship-ios-ipa skill.
+- Windows native playback — run on the field laptop (15/18 on WASAPI).
+- Left to their own projects, said out loud: the per-target codec proofs (per-target
+  FFmpeg pack builds), one shared engine-contract suite across both legacy engines and
+  the facade (it needs real audio contexts on both platforms, not stubs — a harness of
+  its own), and the feature-flag default, which is the singer's decision and stays
+  "legacy" on every platform until it is taken.
 
 ## Verification, and what is out of scope
 - After every step: `cd mobile && npx tsc --noEmit -p tsconfig.json`, `cd mobile && npx
