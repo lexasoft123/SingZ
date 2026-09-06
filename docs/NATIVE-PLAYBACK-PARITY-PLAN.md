@@ -776,6 +776,20 @@ vs 12 ms against the 62 ms budget (71 in the quiet run before it), second song 3
 desktop; the mac's seek row sits at its budget's edge run to run and is a separate
 question from this one.
 
+**Three quiet-host desktop runs, back to back (2026-09-06 midday, load 4.3–6.5 through
+every phase against the ≤ 8 rule b450cc1 set, the host-quiet rows green in all
+three): 20, 21 and 22 of 28.** Every
+functional rule green three times over; the seek → position row flickers at its budget's
+edge (72, 71, then 40 ms against 61); the footprint rows red by decision. What the quiet
+host finally READS is the CPU: playing, native 16.9–17.3% against legacy 13.5–14.3%;
+pitch-change 15.9–17.3% against 13.5–15.2% — 1.4 to 3.7 points over legacy across the
+three, about three and a half on the playing row in the two later runs, against a two-tick
+budget. Until now those rows were coloured by the Mac's own
+load and unread; they are a measurement now, and a decision: either the budget was
+written for the phones (where native measured level or lower) and the desktop's number
+is accepted as the price of the graph's own decode-and-resample path beside the renderer,
+or it is the next thing to profile. Not decided here.
+
 **The desktop footprint, decided rather than fixed (2026-09-06):** with the graph prepared
 at open the native pass reads +100-150 MB against Web Audio in every phase. The extra is
 the decoded lanes the core holds from open — the phones pay the same — beside the
@@ -810,9 +824,10 @@ exercised native playback"; ASIO stays behind the unsigned SDK agreement.
   has been green on the simulator, the emulator, the POCO and the desktop across every
   run of the last two days; the host-quiet rows had not passed once before this morning, because this Mac
   has run at load 6-12 all day from its owner's own apps, and the CPU rows it colours
-  are therefore unread. The first quiet mac run landed after the seek fix (load 4.5–5.5,
-  the host-quiet rows green, 20/28 with the reds the decided and known ones). Owed: two
-  more, nothing to change.
+  are therefore unread. Three quiet mac runs landed after the seek fix (load 4.3–6.5,
+  the host-quiet rows green in all three): 20, 21, 22 of 28, every functional rule green
+  each time. Done — and what it read is a CPU cost of 1.4–3.7 points over legacy while
+  playing on the desktop, recorded above as a decision still to take.
 - The POCO run — done: 55/58 on the earlier core, **58/58** on the fixed one (a96e09d).
 - An iPhone `--platform ios-device` run — done: 35/37 with the native pass voided by the
   end-of-song double seek, then **47/48 and no void** on the fixed core (a96e09d; the red
