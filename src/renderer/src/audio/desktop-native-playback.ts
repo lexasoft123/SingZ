@@ -28,6 +28,12 @@ import {
   synthesizedNativeGraphNodeCount
 } from '../../../shared/graph-document'
 
+/** Status poll cadence (see `activityAtMs`): 20 Hz for POLL_BURST_MS after a
+ * command or a transport change, 5 Hz while a song simply plays. */
+export const POLL_FAST_MS = 50
+export const POLL_STEADY_MS = 200
+export const POLL_BURST_MS = 2000
+
 export { DESKTOP_PLAYBACK_CAPABILITY }
 
 export type DesktopNativeTrainingIntent =
@@ -393,6 +399,18 @@ export class DesktopNativePlaybackClient {
    * the way the phones project theirs: a 50 ms poll over IPC is otherwise
    * the floor under every seek read-back and every bar step. */
   private lastAtMs = 0
+  /** When the transport last did something worth watching closely: a command
+   * was issued, or a status read showed a new transport state or boundary.
+   * The poll runs at POLL_FAST_MS for POLL_BURST_MS after that (a seek's
+   * read-back, Play → advancing, a pause's stop, a seam landing are all
+   * measured against that cadence) and at POLL_STEADY_MS otherwise. Measured
+   * on the desktop (2026-09-06, quiet host): the 20 Hz status invoke alone —
+   * IPC + structured clone of the status, not the UI it fed — cost the
+   * renderer ~2 CPU points while a song played, more than the whole graph
+   * costs main; held to 5 Hz the renderer sat below Web Audio's. The clock
+   * between reads is projected (audibleSeconds), so the bar does not move in
+   * poll steps either way. */
+  private activityAtMs = 0
   /** A seek the core has accepted but the status has not yet reflected: the
    * bar shows the target at once instead of one IPC round trip later. */
   private pendingSeekFrame: number | null = null
@@ -1313,12 +1331,23 @@ export class DesktopNativePlaybackClient {
     const operation = this.statusReadTail.then(async () => {
       if (!expectedGeneration || this.generation !== expectedGeneration) return null
       if (options.pollingEpoch !== undefined && options.pollingEpoch !== this.pollingEpoch) return null
-      if (options.requireCommandable) this.assertCommandableGeneration()
+      if (options.requireCommandable) {
+        this.assertCommandableGeneration()
+        this.activityAtMs = Date.now()
+      }
       try {
         const status = await window.singz.desktopPlaybackStatus()
         if (status.generation !== expectedGeneration || this.generation !== expectedGeneration ||
             (options.pollingEpoch !== undefined && options.pollingEpoch !== this.pollingEpoch)) {
           return null
+        }
+        const previous = this.last
+        if (!previous || previous.generation !== status.generation ||
+            previous.transportState !== status.transportState ||
+            previous.transportDiscontinuities !== status.transportDiscontinuities ||
+            previous.streamGeneration !== status.streamGeneration ||
+            previous.routeGeneration !== status.routeGeneration) {
+          this.activityAtMs = Date.now()
         }
         this.last = status
         this.lastAtMs = Date.now()
@@ -1393,8 +1422,21 @@ export class DesktopNativePlaybackClient {
     this.onStateChange(this.last)
   }
 
+  /** The next poll's delay: fast inside the burst after activity, during a
+   * pre-roll (the landing is watched frame by frame) and while a seek's
+   * read-back is outstanding; steady otherwise. */
+  private pollDelayMs(): number {
+    const now = Date.now()
+    if (now - this.activityAtMs < POLL_BURST_MS) return POLL_FAST_MS
+    if (this.pendingSeekFrame !== null) return POLL_FAST_MS
+    const state = this.last?.transportState
+    if (state === 'pre-roll') return POLL_FAST_MS
+    return POLL_STEADY_MS
+  }
+
   private startPolling(): void {
     this.stopPolling()
+    this.activityAtMs = Date.now()
     const pollingEpoch = this.pollingEpoch
     const schedule = (): void => {
       if (pollingEpoch !== this.pollingEpoch || this.poller !== null) return
@@ -1412,7 +1454,7 @@ export class DesktopNativePlaybackClient {
           // readStatus already made a current failure cleanup-only. A retired
           // epoch is intentionally silent and must not restart polling.
         })
-      }, 50)
+      }, this.pollDelayMs())
     }
     schedule()
   }

@@ -790,6 +790,28 @@ written for the phones (where native measured level or lower) and the desktop's 
 is accepted as the price of the graph's own decode-and-resample path beside the renderer,
 or it is the next thing to profile. Not decided here.
 
+**Profiled the same afternoon, host quiet, and half of it was ours to remove.** Per
+process while a song played (top, 3 s windows, `sample` for stacks): the GPU process
+identical on both backends (~9%); main +2.5 under native (the graph renders there); the
+renderer +1.0 under native although it renders no audio, its stacks all in IPC waits. The
+renderer's point was the STATUS POLL: the facade read the session status over an invoke
+every 50 ms, and an A/B on the running app (the facade instance's `readStatus` wrapped to
+reply after 150 ms — the preload object is frozen, the instance is not) took the renderer
+from 8.8 to 6.7%, below Web Audio's own 7.2–7.6, while silencing the per-tick engine emit
+changed nothing: the cost was the invoke and its structured clone, not the UI it fed. The
+poll is adaptive now (`POLL_FAST_MS` 50 for `POLL_BURST_MS` 2 s after any command or
+transport change and through a pre-roll or an outstanding seek read-back, `POLL_STEADY_MS`
+200 otherwise; the clock between reads was already projected), unit-tested for both
+cadences with a mutant at a 50 ms steady poll killed. Three quiet harness runs after it:
+CPU playing +2.5 / +1.5 / +0.2 (was +2.6 / +3.7 / +3.5), pitch-change −0.1 / +0.1 / +2.2
+(was +1.4 / +2.1 / +3.2), every other row as before. What remains is main's render
+thread: 512-frame callbacks at 91/s, our render ~1.4% of a core inside CoreAudio's IO
+loop, the samples spread across the positioned lane sources and the mix nodes with
+nothing pathological among them — the price of a six-lane mix on its own real-time thread
+instead of Chromium's. Lowering it means vectorizing the node loops (Accelerate/vDSP), a
+project of its own; against the two-tick budget the playing row now lands on either side
+of the line run to run, and the decision paragraph above still stands for that residual.
+
 **The desktop footprint, decided rather than fixed (2026-09-06):** with the graph prepared
 at open the native pass reads +100-150 MB against Web Audio in every phase. The extra is
 the decoded lanes the core holds from open — the phones pay the same — beside the

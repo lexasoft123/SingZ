@@ -1314,6 +1314,39 @@ describe('desktop native playback facade', () => {
     }
   )
 
+  it('polls at 20 Hz for two seconds after activity and at 5 Hz while a song simply plays', async () => {
+    // Measured on a quiet desktop: the 20 Hz status invoke alone cost the
+    // renderer ~2 CPU points while playing; at 5 Hz it sat below Web Audio.
+    // The burst keeps every command's read-back at the fast cadence.
+    let frame = 0
+    const api = asioPollingApi(
+      async () => ({ ...status('1', String((frame += 480))), transportState: 'playing', remainingPreRollFrames: '0' }),
+      async (generation) => result(generation, 'unloaded', true)
+    )
+    vi.stubGlobal('window', { singz: api })
+    const client = new DesktopNativePlaybackClient(
+      { releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined },
+      () => undefined
+    )
+    await client.prepareAndStart(asioRequest())
+    const reads = () => vi.mocked(api.desktopPlaybackStatus).mock.calls.length
+    const afterStart = reads()
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(reads() - afterStart).toBeGreaterThanOrEqual(18)
+    // Past the burst, with the transport steady: five reads a second.
+    await vi.advanceTimersByTimeAsync(1500)
+    const steadyFrom = reads()
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(reads() - steadyFrom).toBeGreaterThanOrEqual(4)
+    expect(reads() - steadyFrom).toBeLessThanOrEqual(6)
+    // A command re-arms the burst.
+    await client.setMasterGain(0.5)
+    const afterCommand = reads()
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(reads() - afterCommand).toBeGreaterThanOrEqual(18)
+    ;(client as unknown as { stopPolling: () => void }).stopPolling()
+  })
+
   it('makes a current polling rejection observable and cleanup-only', async () => {
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     let reads = 0
