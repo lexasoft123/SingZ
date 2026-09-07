@@ -58,14 +58,40 @@ written up in full below.
 **What is owed before a release** (nothing here blocks the merge to main; the first two
 block a `v*` tag):
 
-1. **Android at tip.** The last emulator/POCO runs were eight commits back, and three of
-   the commits since touch the poll cadence and the notification path — the machinery
-   Android's screen depends on.
+1. **Android at tip — RUN, and it is 53/58.** (2026-09-07, POCO F5 physical,
+   arm64-only debug APK built at `f32613e`, the synthesized 122 s pair.) **Run twice, and
+   the same five rules failed both times with the same signs, so this is not run noise:**
+
+   | rule | run 1 | run 2 |
+   |---|---|---|
+   | metronome save → accepted | native 226 vs legacy 147 ms | 371 vs 179 |
+   | training on → advancing again | 180 vs 113 | 212 vs 99 |
+   | end of song → Play restart | 450 vs 335 (budget 385) | 428 vs 368 (budget 418) |
+   | CPU (idle-in-player) | 28.5% vs 27.1% (budget 28.1) | 28.5 vs 27.0 (budget 28.0) |
+   | PSS (idle-in-player) | native 987 vs legacy 915 MB | 990 vs 924 |
+
+   The last two are the ones that carry information: idle-in-player is sampled BEFORE
+   Play, so neither can be about the transport, and the recorded run 4a-4 had native's
+   idle CPU at 17.5. The three timings are all control-plane, all on the native side, all
+   roughly doubled. Not yet bisected across the sixteen commits since the last run; the
+   two obvious suspects by subject are `67e7133` (the frame-paced start watch) and
+   `822671d` (the count-in's own timer), but the first is bounded at 3 s and self-clearing
+   and neither runs before Play, so neither explains the idle rows. **This is the release
+   blocker it was written to find.**
 2. **The Android relaunch crash.** Two deaths in nine harness runs on optimized-core
    builds; the tombstone lands in RN's own `pullTransaction` with react-native-screens and
    reanimated as the delegate registrants and no frame of ours in any of 62 threads; a
    plain relaunch loop was 0 of 12. Upstream-shaped, not upstream-proven. Written up in
    Step 6.
+   `mobile/tests/relaunch-after-session-android.cjs` now holds the variable those loops
+   did not: a FOUR-MINUTE session that seeks and transposes while it plays, then the
+   force-stop and start, repeated. (The 20-second loop that found nothing committed
+   almost nothing to the shadow tree, and the delegate this crash reaches for is the
+   layout-animation one.) One upstream lead worth trying if it reproduces:
+   react-native-reanimated 4.6.0 — this tree is on 4.5.3 — whose notes say it stops
+   taking over `UIManagerAnimationDelegate` and fixes a deadlock in
+   `ReanimatedCommitHook` surface initialization. react-native-screens is already at the
+   latest stable (4.27.0).
 3. **The iPhone route matrix** — Speaker, wired, Bluetooth and CarPlay, with a route change
    and a call interruption. DSP-GRAPH-PLAN's Phase 4 has asked for this since the start,
    and report 5 above is exactly a laggy-route behaviour that could only be tested here
