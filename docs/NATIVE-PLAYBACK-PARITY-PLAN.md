@@ -82,12 +82,26 @@ block a `v*` tag):
    Play, so neither it nor PSS can be about the transport, and the three timings are all
    control-plane work on a JS thread that is now twice as busy.
 
-   Not yet bisected across the sixteen commits since. The two whose subjects suggest
-   themselves — `67e7133` (the frame-paced start watch) and `822671d` (the count-in's own
-   timer) — are both bounded, self-clearing and armed only at Play, so neither can explain
-   an idle row; and neither is shared with legacy. A commit on the shared path is what to
-   look for, and `fa5b758` (the `@singz/ui` v1.7.0 bump) is the one that fits that
-   description.
+   Not yet bisected across the sixteen commits since, but the shared path narrows it
+   sharply. The two whose subjects suggest themselves — `67e7133` (the frame-paced start
+   watch) and `822671d` (the count-in's own timer) — are bounded, self-clearing, armed
+   only at Play and native-only, so none of them can reach an idle row on legacy. Nor can
+   `fa5b758`: `@singz/ui` v1.7.0 is four files and eighteen lines, all of them `Waveform`
+   taking a nullable buffer.
+
+   Only five commits in the window touch anything both backends run:
+   `807d785` (`RootNavigator`), `7915d69` and `0daed31` (`backend.ts`, `projects.ts`),
+   `67e7133` (four lines of `PlayerScreen`), and **`ae0298e`, which is the candidate**.
+   Alongside the count-in work it re-tuned the seek bar's lane-level scan for accuracy:
+   `LANE_LEVEL_WINDOW` 1024 → 128 and the per-sliver budget 8 windows → 256, which is
+   **four times the frames visited per sliver**, chunked 32 slivers to a JS tick on the
+   player screen. That is shared work, on the thread whose idle cost doubled, in the one
+   commit of the five that added any. Its own header measures the new setting at ~1.5 s of
+   interpreted JS for a four-minute six-stem song; what nobody has measured is whether it
+   is still running, or re-running, at the moment the harness samples idle.
+
+   The check is cheap and is the next step: sample `idle-in-player` on this phone with
+   `LANE_LEVEL_SLIVER_BUDGET` back at `8 * 1024`, both backends, nothing else changed.
 
    Caveats on the comparison, so it is not over-read: this APK was built arm64-only and
    with `-PdebugAppIdSuffix=.debug`, and the phone also carries a release SingZ. The CPU
