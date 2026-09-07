@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, shell, systemPreferences, type WebContents } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, shell, systemPreferences, type MenuItemConstructorOptions, type WebContents } from 'electron'
 import { loadWindowState, trackWindowState } from './window-state'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
@@ -182,6 +182,22 @@ function createWindow(): void {
   win.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url)
     return { action: 'deny' }
+  })
+  // Electron ships no context menu of its own, so a right-click anywhere in
+  // the app did nothing. Nothing is offered over bare chrome: the app is
+  // `user-select: none` everywhere but the log, and a menu of greyed-out
+  // items is worse than none.
+  win.webContents.on('context-menu', (_event, params) => {
+    const items: MenuItemConstructorOptions[] = params.isEditable
+      ? [
+          { role: 'cut', enabled: params.editFlags.canCut },
+          { role: 'copy', enabled: params.editFlags.canCopy },
+          { role: 'paste', enabled: params.editFlags.canPaste }
+        ]
+      : params.selectionText.trim()
+        ? [{ role: 'copy' }]
+        : []
+    if (items.length) Menu.buildFromTemplate(items).popup({ window: win })
   })
 
   if (process.env['ELECTRON_RENDERER_URL']) {
