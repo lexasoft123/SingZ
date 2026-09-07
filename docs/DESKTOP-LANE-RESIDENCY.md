@@ -1,9 +1,11 @@
-# The desktop's second copy of every song — scope
+# The desktop's second copy of every song
 
-Status: **kit landed, app change not started** (2026-09-07). The bytes are
-reclaimable — measured below — and the shape is bigger than it looks; the two
-things that make it so are in "What the first draft got wrong". `@singz/ui`
-v1.7.0 ships the nullable `buffer` this needs, and both apps are on it.
+Status: **released** (2026-09-07). Under native playback the renderer now lets
+its decode of every lane go the moment the core is playing, and fetches back
+whatever a later reason needs. What follows is the scope as it was measured
+and argued, then what the release actually turned out to be — including the
+double meaning the scoping pass had NOT found, which was the largest single
+piece of the work.
 
 ## The cost
 
@@ -175,7 +177,71 @@ tests and typecheck were green throughout.
 The lesson for the remaining steps: for each holder, find what asks "is it
 there?" before deciding what to do about the samples themselves.
 
-## Shape, if it goes ahead
+## The release, as built
+
+One `AudioBuffer` per lane, held in the engine, nulled by
+`releaseLaneBuffers()` and fetched back by `ensureTrackBuffer(id)`. Around
+that:
+
+- **The release is gated on `nativePlayback.active`**, not on the preference
+  or on the load. Native decides at every Play whether it can take the song
+  (`tryStart` can decline the fifth Play of a song it took four times), and
+  the Web Audio fallback lives on the other side of that decision. So the
+  buffers go only once the core is demonstrably playing, in `performPlay`,
+  before the `emit()` — one notification, one consistent picture.
+- **A released lane is always recoverable**, and this is what makes the whole
+  thing safe rather than merely careful: native REFUSES a song any of whose
+  lanes lacks a readable path (`desktopNativePlaybackSupported` checks every
+  one). A lane with no path is therefore never released.
+- **Web Audio never starts on a partial mix.** `performPlay` awaits
+  `ensureLaneBuffers()` before the fallback and throws if any lane cannot be
+  restored. A decode costs a second or two of silence at Play; a mix quietly
+  missing a lane costs the singer the take.
+- **The engine still does not speak to `window.singz`.** It is handed a
+  reader (`setLaneReader`) and decodes with its own context, so the samples
+  come back at the output device's rate, exactly as at load.
+- **The lanes on screen mirror the engine**, in both directions, from the
+  existing subscription — so `Waveform` draws from `peaks` while the samples
+  are away and gets its sample-accurate zoom back if a fallback restores
+  them. The mirror is skipped whenever the two sides disagree about which
+  lanes exist, because it fires from inside `engine.load`, one `setTracks`
+  before the app's lane list catches up, and matching an old lane id against
+  a new song's engine would put another song's samples on screen.
+
+## The four analysis refs were also FOUR SONG IDENTITIES
+
+The scoping pass had these as "a fallback, read live at Re-detect". They were
+also the thing seven `if` statements compared to decide whether the song had
+changed under a running analysis:
+
+```
+if (drumsBufRef.current !== drums) return // song changed mid-flight
+```
+
+That is an identity check that only means what it says while the ref outlives
+the whole pass. The moment a lane can be let go, a release mid-analysis reads
+as a song switch and the pass abandons its work — quietly, and only under
+native playback, and only on songs long enough for the release to land first.
+Every one of them is now `loadSeq`, which is what the other twenty long-running
+analyses in `App.tsx` already asked.
+
+With that, the refs answered nothing that something else did not answer
+better, and all five are gone: `drumsBufRef`, `bassBufRef`, `vocalsBufRef`,
+`instBufsRef` and `originalBufRef`. What replaced each meaning:
+
+| the ref used to mean | now |
+|---|---|
+| "this song has drums / harmonics / vocals" | `hasStem(id)` / `hasHarmonicStems()`, off `audibleIdsRef` |
+| "the song has not changed under me" | `loadSeq` |
+| "the analysis fallback samples" | `laneSamples(id)` — a re-decode, only on the path where a stem file cannot be read at its own rate |
+| "a split can hand over PCM" | a re-decode of `song.path`, inside the try, since `readAudio` throws on an unauthorized path |
+| "the vocals are long enough to judge a stored melody" | `vocalsSecondsRef` (landed earlier) |
+
+`melodyInput` can now answer null — neither the file nor a re-decode — and
+`prepMelody` stands its status back down to `none` when it does, so a later
+prep can try again rather than find `computing` forever.
+
+## Shape, as scoped
 
 - ~~Kit first: `Waveform` takes a nullable buffer and falls back to peaks.~~
   **Done** — `@singz/ui` v1.7.0, and both apps are on it.
@@ -184,17 +250,19 @@ there?" before deciding what to do about the samples themselves.
   start-offset clamp all read it rather than a buffer.
 - ~~The melody staleness gate stops reading its length off the buffer.~~
   **Done** — `vocalsSecondsRef`, see above for why not `tracks`.
-- **`prepMelody`'s `if (!buf) return`.** Once the buffer really is released,
-  a stale or non-fitting stored line falls past the adopt arm into that early
-  return and is neither adopted nor re-tracked — a silently empty pitch strip.
-  The core leg above it is file-driven and unaffected; it is the early return
-  that has to learn to fetch samples rather than give up.
-- Release covers the lane AND the analysis/original refs, or those refs are
-  converted to read from files at their own rate — the path `analysisStems`
-  already prefers.
-- Re-decode on demand from `sourcePath` when the view crosses the raw
-  threshold, the editor opens, a split needs PCM, or playback falls back to
-  Web Audio; drop again when the reason goes away.
+- ~~**`prepMelody`'s `if (!buf) return`.**~~ **Done** — it asks the inventory
+  (`hasStem('vocals')`) instead. "The vocals samples are not resident" is a
+  fact about memory; answering it there would have left the pitch strip empty
+  on every song the native graph was playing.
+- ~~Release covers the lane AND the analysis/original refs.~~ **Done** — the
+  refs are gone entirely; see above.
+- ~~Re-decode on demand.~~ **Done** for the editor (`ensureTrackBuffer`), the
+  split's PCM leg, the analyses' per-stem fallback and the Web Audio
+  fallback. **Not done, deliberately, for deep zoom**: past the 600-bucket
+  threshold `Waveform` draws from `peaks` instead of fetching a hundred
+  megabytes back for a picture. Peaks are what every wider view draws from
+  anyway, so this degrades detail rather than blanking, and a fallback to Web
+  Audio restores the sample-accurate draw as a side effect.
 
 Nothing here is new machinery — the phones do lazy decode plus explicit
 release for the same reason, with harsher consequences (a jetsam kill on the

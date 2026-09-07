@@ -6,8 +6,13 @@ export interface UITrack {
   label: string
   color: string
   peaks: Float32Array
-  /** Decoded audio + envelope normalization, for sample-accurate zoomed drawing. */
-  buffer: AudioBuffer
+  /**
+   * Decoded audio, for sample-accurate drawing past the zoom threshold —
+   * NULL once the lane's samples have gone to the native graph
+   * (docs/DESKTOP-LANE-RESIDENCY.md). `Waveform` falls back to `peaks`, which
+   * is what every wider view draws from anyway.
+   */
+  buffer: AudioBuffer | null
   /**
    * The lane's length in seconds, carried rather than read off `buffer`.
    *

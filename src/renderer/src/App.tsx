@@ -273,39 +273,53 @@ async function decodeStemAtFileRate(path: string): Promise<AudioBuffer | null> {
  *
  * Composes exactly the aux the playback refs did: `ids` is the AUDIBLE lane
  * order, so silent guitar/piano stems stay out of the vote here too. Per-stem
- * fallback to the playback buffer, loudly — a missing file should degrade one
+ * fallback to the playback decode, loudly — a missing file should degrade one
  * lane, not the song.
+ *
+ * That fallback is asked for by LANE ID rather than handed in as buffers,
+ * because the renderer no longer keeps the lanes resident: the samples are
+ * the native graph's once it is playing, and `LaneSamples` decodes the file
+ * again for whoever still needs them. It is called only on the path where a
+ * stem could not be read at its own rate, so the ordinary run costs nothing.
  */
+type LaneSamples = (id: string) => Promise<AudioBuffer | null>
+
 async function analysisStems(
   paths: Record<string, string> | null,
   ids: string[],
-  fallback: { drums: AudioBuffer | null; bass: AudioBuffer | null; vocals: AudioBuffer | null; inst: AudioBuffer[] }
+  fallback: LaneSamples
 ): Promise<{ drums: AudioBuffer | null; bass: AudioBuffer | null; vocals: AudioBuffer | null; inst: AudioBuffer[] }> {
-  const one = async (id: string, fb: AudioBuffer | null): Promise<AudioBuffer | null> => {
+  const one = async (id: string): Promise<AudioBuffer | null> => {
     const path = paths?.[id]
-    if (!path) return fb
-    const decoded = await decodeStemAtFileRate(path)
-    if (decoded) return decoded
-    // E2E drivers read these, the same way they read the beat-model warnings
-    console.warn(`analysis: ${path} could not be read at its own rate — using the playback buffer at ${fb?.sampleRate ?? '?'} Hz`)
-    return fb
+    if (path) {
+      const decoded = await decodeStemAtFileRate(path)
+      if (decoded) return decoded
+      // E2E drivers read these, the same way they read the beat-model warnings
+      console.warn(`analysis: ${path} could not be read at its own rate — falling back to the playback decode`)
+    }
+    return fallback(id)
   }
   const instIds = ids.filter((id) => id !== 'vocals' && id !== 'drums' && id !== 'bass')
-  const inst = (await Promise.all(instIds.map((id, i) => one(id, fallback.inst[i] ?? null)))).filter(
+  const inst = (await Promise.all(instIds.map((id) => one(id)))).filter(
     (b): b is AudioBuffer => b !== null
   )
   return {
-    drums: await one('drums', fallback.drums),
-    bass: await one('bass', fallback.bass),
-    vocals: await one('vocals', fallback.vocals),
+    drums: await one('drums'),
+    bass: await one('bass'),
+    vocals: await one('vocals'),
     inst
   }
 }
 
+/**
+ * The vocals, ready for pYIN — the file at its own rate, or the playback
+ * decode when the file cannot be read that way. Null when neither can be had:
+ * the caller must then leave the melody UNSTARTED rather than track silence.
+ */
 async function melodyInput(
   path: string | null,
-  buf: AudioBuffer
-): Promise<{ mono: Float32Array; sampleRate: number }> {
+  fallback: () => Promise<AudioBuffer | null>
+): Promise<{ mono: Float32Array; sampleRate: number } | null> {
   const fold = (b: AudioBuffer): Float32Array => {
     const chans = Math.min(2, b.numberOfChannels)
     const mono = new Float32Array(b.length)
@@ -319,8 +333,10 @@ async function melodyInput(
     const decoded = await decodeStemAtFileRate(path)
     if (decoded) return { mono: fold(decoded), sampleRate: decoded.sampleRate }
     // E2E drivers read these, the same way they read the beat-model warnings
-    console.warn(`melody: ${path} could not be read at its own rate — tracking the playback buffer at ${buf.sampleRate} Hz`)
+    console.warn(`melody: ${path} could not be read at its own rate — tracking the playback decode instead`)
   }
+  const buf = await fallback()
+  if (!buf) return null
   return { mono: fold(buf), sampleRate: buf.sampleRate }
 }
 
@@ -870,7 +886,6 @@ export default function App(): React.JSX.Element {
   )
   const beatInfoRef = useRef(beatInfo)
   beatInfoRef.current = beatInfo
-  const drumsBufRef = useRef<AudioBuffer | null>(null)
   const loadSeq = useRef(0)
   const beatMutationSeq = useRef(0)
   const metronomeMutationSeq = useRef(0)
@@ -884,10 +899,9 @@ export default function App(): React.JSX.Element {
   const trackInputRef = useRef<HTMLInputElement>(null)
   const sepRunningRef = useRef(false)
   sepRunningRef.current = sep !== null
-  const vocalsBufRef = useRef<AudioBuffer | null>(null)
   /**
-   * The vocals lane's length, kept beside the buffer and set at the same
-   * moments, so it survives the buffer being released.
+   * The vocals lane's length, set wherever the lane itself is, so it survives
+   * the samples being let go.
    *
    * Deliberately a ref and not `tracks`: `prepMelody` runs inside the load,
    * before React has committed the lane state — reading the length from
@@ -896,7 +910,7 @@ export default function App(): React.JSX.Element {
    * `stamp-upgrade-e2e.cjs` caught.
    */
   const vocalsSecondsRef = useRef<number | null>(null)
-  /** Where the vocals stem in `vocalsBufRef` came from. The melody is tracked
+  /** Where the vocals stem came from. The melody is tracked
    *  from the FILE, not from that buffer: `decodeAudioData` resamples to the
    *  playback device's rate, and every analysis derives something from the
    *  rate it is handed — the melody its hop, the beat detector its whole
@@ -913,12 +927,28 @@ export default function App(): React.JSX.Element {
    *  Kept beside the paths so the file-reading path composes exactly the aux
    *  the buffer path did: silent guitar/piano lanes stay out of the vote. */
   const audibleIdsRef = useRef<string[]>([])
-  const bassBufRef = useRef<AudioBuffer | null>(null)
-  /** Non-drum, non-bass, non-vocal stems (other/guitar/piano) — the beat
-   *  tracker's fill where drums are silent. */
-  const instBufsRef = useRef<AudioBuffer[]>([])
+  /**
+   * Which stems this song HAS — the question `drumsBufRef`, `bassBufRef` and
+   * `instBufsRef` used to answer by existing, back when the renderer kept
+   * every lane decoded for as long as the song was open. It stopped doing
+   * that (docs/DESKTOP-LANE-RESIDENCY.md), and "the samples are not here" is
+   * not the same answer as "this song has no drums" — one is about memory,
+   * the other about the song. The inventory is the honest source.
+   */
+  const hasStem = useCallback((id: string) => audibleIdsRef.current.includes(id), [])
+  /** Bass or any of other/guitar/piano — what the key detector votes on. */
+  const hasHarmonicStems = useCallback(
+    () => audibleIdsRef.current.some((id) => id !== 'vocals' && id !== 'drums'),
+    []
+  )
+  /**
+   * One lane's samples, decoded again off disk if the native graph has them.
+   * Every analysis prefers the stem FILE at its own rate; this is the
+   * fallback they name when that cannot be read, and it is the only thing in
+   * the renderer that still asks for a whole song's worth of floats.
+   */
+  const laneSamples = useCallback<LaneSamples>((id) => engine.ensureTrackBuffer(id), [engine])
   const linesRef = useRef<LyricLine[] | null>(null)
-  const originalBufRef = useRef<AudioBuffer | null>(null)
   const lyricsRef = useRef(lyrics)
   lyricsRef.current = lyrics
   const melodyRef = useRef(melody)
@@ -1253,9 +1283,38 @@ export default function App(): React.JSX.Element {
     }
   }, [selection, loopOn, song])
 
+  // How a released lane gets its samples back: the engine has never spoken to
+  // `window.singz` and a decode helper is not the reason to start.
+  useEffect(() => {
+    engine.setLaneReader((path) => window.singz.readAudio(path))
+    return () => engine.setLaneReader(null)
+  }, [engine])
+
   useEffect(() => engine.subscribe(() => {
     setPlaying(engine.playing)
     setNativePlaybackLeaseBlocked(engine.nativeMonitorOwnsOutput)
+    // The lanes on screen show whatever the engine is still holding. Once the
+    // native graph is playing the engine lets the samples go, and `Waveform`
+    // draws from `peaks` — which is what every view wider than 600 buckets
+    // draws from anyway. Mirrored in both directions, so a lane restored for
+    // a Web Audio fallback gets its sample-accurate zoom back.
+    //
+    // Skipped whenever the two sides disagree about WHICH lanes exist: this
+    // fires from inside `engine.load`, one `setTracks` before the app's own
+    // lane list catches up, and matching an old lane id against a new song's
+    // engine would put another song's samples on screen.
+    const live = engine.getTrackStates()
+    setTracks((ts) => {
+      if (ts.length !== live.length || ts.some((t, i) => t.id !== live[i].id)) return ts
+      let changed = false
+      const next = ts.map((t) => {
+        const buffer = engine.getTrackBuffer(t.id)
+        if (buffer === t.buffer) return t
+        changed = true
+        return { ...t, buffer }
+      })
+      return changed ? next : ts
+    })
     const playbackError = engine.playbackError
     if (playbackError !== enginePlaybackErrorRef.current) {
       enginePlaybackErrorRef.current = playbackError
@@ -1427,14 +1486,9 @@ export default function App(): React.JSX.Element {
       melodyWorkerRef.current?.terminate()
       melodyWorkerRef.current = null
       void window.singz.cancelAnalyzeNative() // the core's children die with the song too
-      vocalsBufRef.current = null
       vocalsSecondsRef.current = null
       stemPathsRef.current = null
       audibleIdsRef.current = []
-      drumsBufRef.current = null
-      instBufsRef.current = []
-      bassBufRef.current = null
-      originalBufRef.current = null
       setSongInfo({ key: null, bpm: null })
       setBeatInfo(null)
       setKeyInfo(null)
@@ -1537,15 +1591,9 @@ export default function App(): React.JSX.Element {
           setSplit(true)
           setStemFiles(stems)
           setIsProject(true)
-          vocalsBufRef.current = buffers[order.indexOf('vocals')] ?? null
-          vocalsSecondsRef.current = vocalsBufRef.current?.duration ?? null
+          vocalsSecondsRef.current = buffers[order.indexOf('vocals')]?.duration ?? null
           stemPathsRef.current = stems
           audibleIdsRef.current = order
-          drumsBufRef.current = buffers[order.indexOf('drums')] ?? null
-          bassBufRef.current = buffers[order.indexOf('bass')] ?? null
-          instBufsRef.current = order
-            .map((s, i) => (s !== 'vocals' && s !== 'drums' && s !== 'bass' ? buffers[i] : null))
-            .filter((b): b is AudioBuffer => !!b)
           // Restore training BEFORE karaoke may reopen: its auto-mute must
           // know training governs the vocals (the ref is set synchronously —
           // state alone would land a render too late).
@@ -1641,7 +1689,6 @@ export default function App(): React.JSX.Element {
         const buf = await window.singz.readAudio(reg.path)
         const audio = await engine.decode(buf)
         if (seq !== loadSeq.current) return
-        originalBufRef.current = audio
         // A project saved before it was ever split has no stems, but it can
         // still carry tracks the singer added — those lanes come back here.
         const lanes = [
@@ -1771,9 +1818,30 @@ export default function App(): React.JSX.Element {
       return
     }
     // Some engines want a plain 44.1k WAV — render it from the decoded
-    // buffer so any source format/sample-rate works.
-    if (status.needsPcm && originalBufRef.current) {
-      const orig = originalBufRef.current
+    // audio so any source format/sample-rate works.
+    //
+    // The samples are FETCHED here rather than assumed. This leg used to be
+    // guarded by `originalBufRef.current` being non-null, which meant two
+    // things at once: "this song's full mix is decoded" and "a PCM hand-off
+    // is possible". Now that the renderer lets its decode go to the native
+    // graph, the first can be false while the second is still true — and the
+    // old guard would then skip `provideSplitInput` ENTIRELY: no PCM, no
+    // error, a split running without the input it asked for. The song is on
+    // disk, right here in `song.path`, so the honest answer to "the samples
+    // are not resident" is to read them again.
+    if (status.needsPcm) {
+      let orig = engine.getTrackBuffer('original')
+      if (!orig) {
+        try {
+          // `readAudio` throws on a path main has not authorized, so it
+          // belongs inside the try with the decode.
+          orig = await engine.decode(await window.singz.readAudio(song.path))
+        } catch (err) {
+          console.error('split: could not re-read the song for PCM hand-off:', err)
+          setError('That song could not be re-read for splitting. Try opening it again.')
+          return
+        }
+      }
       const off = new OfflineAudioContext(2, Math.ceil(orig.duration * 44100), 44100)
       const src = off.createBufferSource()
       src.buffer = orig
@@ -1813,15 +1881,9 @@ export default function App(): React.JSX.Element {
       // Fresh stems in an open project are unsaved content.
       setDirty(true)
       setSaveState((st) => (st === 'saved' ? 'idle' : st))
-      vocalsBufRef.current = buffers[order.indexOf('vocals')] ?? null
-      vocalsSecondsRef.current = vocalsBufRef.current?.duration ?? null
+      vocalsSecondsRef.current = buffers[order.indexOf('vocals')]?.duration ?? null
       stemPathsRef.current = stems
       audibleIdsRef.current = order
-      drumsBufRef.current = buffers[order.indexOf('drums')] ?? null
-      bassBufRef.current = buffers[order.indexOf('bass')] ?? null
-      instBufsRef.current = order
-        .map((s, i) => (s !== 'vocals' && s !== 'drums' && s !== 'bass' ? buffers[i] : null))
-        .filter((b): b is AudioBuffer => !!b)
       // These are different stems than any line already on screen was tracked
       // from (re-splitting an open project), so that line — and the stored one
       // it came from — is retired here rather than left to be saved as this
@@ -2063,21 +2125,24 @@ export default function App(): React.JSX.Element {
   keyNeededRef.current = (): boolean => {
     const stored = keyInfoRef.current
     if (stored && !analysisIsStale(stored.detVersion, KEY_DETECT_VERSION)) return false
-    return instBufsRef.current.length > 0 || bassBufRef.current !== null
+    return hasHarmonicStems()
   }
 
   /** The standalone key derivation — core first, TS stems fallback, melody
    *  histogram as display-only last resort. Runs when the combined pass
    *  cannot carry the key: applyMelody's standalone arm, and the release
    *  path when a pass that CLAIMED the carry ends keyless after applyMelody
-   *  already stood down on it. Guards on the song's own buffers. */
+   *  already stood down on it. Guarded by the song's own sequence number. */
   const deriveStandaloneKey = useCallback((f0: Float32Array | null): void => {
-    const inst = instBufsRef.current
-    const bassBuf = bassBufRef.current
-    if (inst.length === 0 && !bassBuf) {
+    if (!hasHarmonicStems()) {
       if (f0) setSongInfo((s) => ({ ...s, key: estimateKey(f0) }))
       return
     }
+    // Which song this key is being derived for. The guards below used to
+    // compare the analysis buffer refs by identity, which worked only while
+    // those refs outlived the whole pass; `loadSeq` is what every other
+    // long-running analysis in this file already asks.
+    const seq = loadSeq.current
     void (async () => {
       const core = await runCombinedCore(
         { melody: false, key: true, beats: false },
@@ -2085,7 +2150,7 @@ export default function App(): React.JSX.Element {
         audibleIdsRef.current,
         async () => ({ ml: null, lineStarts: null, words: null })
       )
-      if (instBufsRef.current !== inst || bassBufRef.current !== bassBuf) return // song changed
+      if (seq !== loadSeq.current) return // song changed
       if (core.key) {
         ;(window as { __keySrc?: string }).__keySrc = 'core'
         applyKeyRef.current?.(core.key.pc, core.key.minor)
@@ -2099,17 +2164,18 @@ export default function App(): React.JSX.Element {
       const harmonicPaths = allPaths
         ? Object.fromEntries(Object.entries(allPaths).filter(([id]) => id !== 'drums' && id !== 'vocals'))
         : null
-      const fromDisk = await analysisStems(harmonicPaths, audibleIdsRef.current, {
-        drums: null,
-        bass: bassBuf,
-        vocals: null,
-        inst
-      })
+      // The fallback is narrowed to the same lanes as `harmonicPaths`. Without
+      // that, `analysisStems` would find no path for drums and vocals and ask
+      // for them anyway — and asking now means DECODING a stem this pass has
+      // deliberately excluded, where the old code simply handed it a null.
+      const fromDisk = await analysisStems(harmonicPaths, audibleIdsRef.current, (id) =>
+        id === 'drums' || id === 'vocals' ? Promise.resolve(null) : laneSamples(id)
+      )
       // let the melody paint before the synchronous chroma pass blocks
       await new Promise((r) => setTimeout(r, 30))
-      if (instBufsRef.current !== inst || bassBufRef.current !== bassBuf) return // song changed
+      if (seq !== loadSeq.current) return // song changed
       const { estimateKeyFromStems } = await loadAnalysisRuntime()
-      if (instBufsRef.current !== inst || bassBufRef.current !== bassBuf) return // song changed while loading detector
+      if (seq !== loadSeq.current) return // song changed while loading detector
       const stems = estimateKeyFromStems(fromDisk.inst, fromDisk.bass)
       ;(window as { __keySrc?: string }).__keySrc = stems ? 'ts' : 'melody-histogram'
       // A melody-histogram fallback is displayed but never stored under
@@ -2117,7 +2183,7 @@ export default function App(): React.JSX.Element {
       if (stems) applyKeyRef.current?.(stems.pc, stems.minor)
       else if (f0) setSongInfo((s) => ({ ...s, key: estimateKey(f0) }))
     })()
-  }, [])
+  }, [hasHarmonicStems, laneSamples])
   const deriveStandaloneKeyRef = useRef(deriveStandaloneKey)
   deriveStandaloneKeyRef.current = deriveStandaloneKey
 
@@ -2135,8 +2201,11 @@ export default function App(): React.JSX.Element {
       const info = beatInfoRef.current
       const fresh = !info
       const stale = info?.source === 'auto' && analysisIsStale(info.detVersion, BEAT_DETECT_VERSION)
-      if ((fresh || stale) && drumsBufRef.current) {
-        const drums = drumsBufRef.current
+      if ((fresh || stale) && hasStem('drums')) {
+        // Which song these beats are for — the guards below compared the
+        // drums buffer by identity, which stopped being a song identity the
+        // moment a lane could be let go mid-pass.
+        const seq = loadSeq.current
         void (async () => {
           setBeatProg(0.02)
           try {
@@ -2149,25 +2218,20 @@ export default function App(): React.JSX.Element {
             const pending = pendingCoreAnalysisRef.current
             pendingCoreAnalysisRef.current = null
             const stashed = pending && pending.seq === loadSeq.current ? await pending.promise : null
-            if (drumsBufRef.current !== drums) return // song changed while awaiting the pass
+            if (seq !== loadSeq.current) return // song changed while awaiting the pass
             // The stems off DISK, at the rate the files state — the model's
-            // mix and the detector both. The playing buffers are only the
+            // mix and the detector both. A re-decoded lane is only the
             // per-lane fallback (analysisStems says when one is taken).
             const stems =
               stashed?.stems ??
-              (await analysisStems(stemPathsRef.current, audibleIdsRef.current, {
-                drums,
-                bass: bassBufRef.current,
-                vocals: vocalsBufRef.current,
-                inst: instBufsRef.current
-              }))
-            if (drumsBufRef.current !== drums) return // song changed mid-flight
+              (await analysisStems(stemPathsRef.current, audibleIdsRef.current, laneSamples))
+            if (seq !== loadSeq.current) return // song changed mid-flight
             const ml = stashed?.stems ? stashed.ml : ((await fetchMlGridRef.current?.()) ?? null)
-            if (drumsBufRef.current !== drums) return // song changed mid-flight
+            if (seq !== loadSeq.current) return // song changed mid-flight
             // let the bar paint before the synchronous tracker blocks
             setBeatProg((cur) => (cur === null ? cur : Math.max(cur, 0.97)))
             await new Promise((r) => setTimeout(r, 30))
-            if (!stems.drums) return // no file and no buffer: nothing to track
+            if (!stems.drums) return // neither the file nor a re-decode: nothing to track
             const aux = {
               bass: stems.bass,
               vocals: stems.vocals,
@@ -2188,9 +2252,9 @@ export default function App(): React.JSX.Element {
                   audibleIdsRef.current,
                   async () => ({ ml, lineStarts: aux.lineStarts, words: aux.words })
                 )
-            if (drumsBufRef.current !== drums) return // song changed mid-flight
+            if (seq !== loadSeq.current) return // song changed mid-flight
             const { detectBeats, estimateKeyFromStems } = await loadAnalysisRuntime()
-            if (drumsBufRef.current !== drums) return // song changed while loading detector
+            if (seq !== loadSeq.current) return // song changed while loading detector
             const det = core.beats !== undefined ? core.beats : detectBeats(stems.drums, aux, dbg)
             publishBeatDbg('auto', core.beats !== undefined ? 'core' : 'ts', stems.drums, aux, det, dbg)
             if (keyWanted) {
@@ -2261,36 +2325,33 @@ export default function App(): React.JSX.Element {
       // only for songs the beat pass skips — no drums, or a current grid —
       // where the key still has to come from somewhere.
       const storedKey = keyInfoRef.current
-      const inst = instBufsRef.current
-      const bassBuf = bassBufRef.current
       const beatPassCarriesKey =
-        ((fresh || stale) && !!drumsBufRef.current) || keyCarriedBySeqRef.current === loadSeq.current
+        ((fresh || stale) && hasStem('drums')) || keyCarriedBySeqRef.current === loadSeq.current
       if (storedKey && !analysisIsStale(storedKey.detVersion, KEY_DETECT_VERSION)) {
         setSongInfo({ key: { pc: storedKey.pc, minor: storedKey.minor }, bpm: info?.bpm ?? null })
       } else if (beatPassCarriesKey) {
         setSongInfo({ key: null, bpm: info?.bpm ?? null }) // the combined pass fills it in
-      } else if (inst.length > 0 || bassBuf) {
+      } else if (hasHarmonicStems()) {
         setSongInfo({ key: null, bpm: info?.bpm ?? null })
         deriveStandaloneKeyRef.current?.(f0)
       } else {
         setSongInfo({ key: estimateKey(f0), bpm: info?.bpm ?? null })
       }
     },
-    [touchSettings]
+    [touchSettings, hasStem, hasHarmonicStems, laneSamples]
   )
 
   const prepMelody = useCallback(() => {
     if (melodyRef.current.status !== 'none') return
     const stored = storedMelodyRef.current
-    const buf = vocalsBufRef.current
-    // The vocals lane's length, NOT `buf.duration`. These are the same number
-    // and two different questions: how long the song is, and whether its
-    // samples are in hand. Reading the length off the buffer ties the
-    // staleness check to residency, so a released lane would take the "no
-    // lane at all" arm below and adopt a stored line WITHOUT checking that it
-    // fits — precisely the cross-song contamination that arm's own comment is
-    // about. The vocals lane specifically, not engine.duration: lanes may
-    // differ in length, since a custom track can outlast the song.
+    // The vocals lane's length, and not any buffer's duration. Those are the
+    // same number and two different questions: how long the song is, and
+    // whether its samples are in hand. Tying the staleness check to residency
+    // would make a released lane take the "no lane at all" arm below and
+    // adopt a stored line WITHOUT checking that it fits — precisely the
+    // cross-song contamination that arm's own comment is about. The vocals
+    // lane specifically, not engine.duration: lanes may differ in length,
+    // since a custom track can outlast the song.
     const songSeconds = vocalsSecondsRef.current
     // A stored line tracked by THIS detector, and covering THIS song, is
     // adopted as it is — the pitch strip draws instantly instead of after
@@ -2317,7 +2378,11 @@ export default function App(): React.JSX.Element {
       return
     }
     storedMelodyRef.current = null
-    if (!buf) return
+    // No vocals stem — an unsplit song, or a project whose stems went
+    // missing. Asked of the INVENTORY: "the vocals samples are not resident"
+    // is a fact about memory, and answering it here would leave the pitch
+    // strip empty on every song the native graph is playing.
+    if (!hasStem('vocals')) return
     setMelody({ status: 'computing', p: 0 })
     // The ref too: reading the stem back off disk below is asynchronous, so
     // without this a second prepMelody — karaoke opening in the same breath as
@@ -2351,7 +2416,7 @@ export default function App(): React.JSX.Element {
           const beatInfo = beatInfoRef.current
           const wantBeats =
             (!beatInfo || (beatInfo.source === 'auto' && analysisIsStale(beatInfo.detVersion, BEAT_DETECT_VERSION))) &&
-            drumsBufRef.current !== null
+            hasStem('drums')
           const wantKey = keyNeededRef.current?.() ?? false
           let stashStems: Awaited<ReturnType<typeof analysisStems>> | null = null
           let stashMl: MlGrid | null = null
@@ -2392,12 +2457,7 @@ export default function App(): React.JSX.Element {
             stemPathsRef.current,
             audibleIdsRef.current,
             async () => {
-              stashStems = await analysisStems(stemPathsRef.current, audibleIdsRef.current, {
-                drums: drumsBufRef.current,
-                bass: bassBufRef.current,
-                vocals: vocalsBufRef.current,
-                inst: instBufsRef.current
-              })
+              stashStems = await analysisStems(stemPathsRef.current, audibleIdsRef.current, laneSamples)
               if (seq !== loadSeq.current) return { ml: null, lineStarts: null, words: null }
               stashMl = (await fetchMlGridRef.current?.()) ?? null
               // gathered NOW, after the model render — the lyrics have loaded
@@ -2448,8 +2508,17 @@ export default function App(): React.JSX.Element {
           // when applyMelody fires at its end.
         }
       }
-      const src = await melodyInput(path, buf)
+      const src = await melodyInput(path, () => laneSamples('vocals'))
       if (seq !== loadSeq.current) return // a different song is open now
+      if (!src) {
+        // Neither the stem file nor a re-decode of it — there is nothing to
+        // track. Stand the status back down so a later prep (the karaoke
+        // open, a re-split) can try again rather than find 'computing'.
+        console.warn('melody: the vocals stem could not be read, so no line was tracked')
+        melodyRef.current = { status: 'none' }
+        setMelody({ status: 'none' })
+        return
+      }
       const worker = new Worker(new URL('./audio/pitch.worker.ts', import.meta.url), {
         type: 'module'
       })
@@ -2486,7 +2555,7 @@ export default function App(): React.JSX.Element {
       melodyRef.current = { status: 'none' }
       setMelody({ status: 'none' })
     })
-  }, [applyMelody])
+  }, [applyMelody, hasStem, laneSamples])
   const prepMelodyRef = useRef<(() => void) | null>(null)
   prepMelodyRef.current = prepMelody
 
@@ -2878,21 +2947,16 @@ export default function App(): React.JSX.Element {
 
   /** Re-track the beats from the stems (the popover's Re-detect). */
   const redetectBeat = useCallback(() => {
-    const buf = drumsBufRef.current
-    if (!buf) return
+    if (!hasStem('drums')) return
+    const seq = loadSeq.current
     void (async () => {
       setBeatProg(0.02)
       try {
-        // Same as the auto pass: files first, playing buffers as fallback.
-        const stems = await analysisStems(stemPathsRef.current, audibleIdsRef.current, {
-          drums: buf,
-          bass: bassBufRef.current,
-          vocals: vocalsBufRef.current,
-          inst: instBufsRef.current
-        })
-        if (drumsBufRef.current !== buf) return // song changed mid-flight
+        // Same as the auto pass: files first, a re-decode as fallback.
+        const stems = await analysisStems(stemPathsRef.current, audibleIdsRef.current, laneSamples)
+        if (seq !== loadSeq.current) return // song changed mid-flight
         const ml = await fetchMlGrid()
-        if (drumsBufRef.current !== buf) return // song changed mid-flight
+        if (seq !== loadSeq.current) return // song changed mid-flight
         setBeatProg((cur) => (cur === null ? cur : Math.max(cur, 0.97)))
         await new Promise((r) => setTimeout(r, 30))
         if (!stems.drums) return
@@ -2911,9 +2975,9 @@ export default function App(): React.JSX.Element {
           audibleIdsRef.current,
           async () => ({ ml: ml ?? null, lineStarts: aux.lineStarts, words: aux.words })
         )
-        if (drumsBufRef.current !== buf) return // song changed mid-flight
+        if (seq !== loadSeq.current) return // song changed mid-flight
         const { detectBeats } = await loadAnalysisRuntime()
-        if (drumsBufRef.current !== buf) return // song changed while loading detector
+        if (seq !== loadSeq.current) return // song changed while loading detector
         const det = core.beats !== undefined ? core.beats : detectBeats(stems.drums, aux, dbg)
         publishBeatDbg('redetect', core.beats !== undefined ? 'core' : 'ts', stems.drums, aux, det, dbg)
         if (det) {
@@ -2933,7 +2997,7 @@ export default function App(): React.JSX.Element {
         setBeatProg(null)
       }
     })()
-  }, [touchSettings, fetchMlGrid])
+  }, [touchSettings, fetchMlGrid, hasStem, laneSamples])
 
   const handleTempo = useCallback(
     (rate: number) => {
@@ -3554,7 +3618,7 @@ export default function App(): React.JSX.Element {
             analysis={analysisNote}
             beat={beatInfo}
             met={metCfg}
-            canDetectBeat={drumsBufRef.current !== null}
+            canDetectBeat={hasStem('drums')}
             onMetCfg={handleMetCfg}
             onBeat={handleBeat}
             onRedetectBeat={redetectBeat}

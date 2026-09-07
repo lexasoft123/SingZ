@@ -342,7 +342,12 @@ async function runPass(kind, songs) {
   await checkFatal(win, passStart, 'Play')
   await sleep(2500)
   pass.cpu.playing = sampleCpu(pid)
-  log(`  [${kind}] Play → advancing ${r.hit} ms · native=${await val(win, '__test.engine.nativeActive')} · cpu ${pass.cpu.playing.cpuPct}% (load ${pass.cpu.playing.load1})`)
+  // Whether the renderer is still holding its own decode of every lane while
+  // the core plays. The footprint rows below say the same thing in megabytes,
+  // but megabytes drift with the song and the host; this says it by name, so
+  // a change that quietly stops releasing is a red with a cause attached.
+  pass.lanesResident = await val(win, '__test.engine.lanesResident')
+  log(`  [${kind}] Play → advancing ${r.hit} ms · native=${await val(win, '__test.engine.nativeActive')} · lanes resident=${pass.lanesResident} · cpu ${pass.cpu.playing.cpuPct}% (load ${pass.cpu.playing.load1})`)
 
   // ---- metronome touches: volume 0, click on, count-in 1 --------------------
   const touches = [['volume', 0, 'volume: 0'], ['click', true, 'click: true'], ['countInBars', 1, 'countInBars: 1']]
@@ -498,6 +503,13 @@ function judge(legacy, native) {
     rows.push({ rule: `CPU (${phase}): native ≤ legacy + 2 ticks`, ok: n.cpuPct <= cpuBudget, detail: `native ${n.cpuPct}% vs legacy ${l.cpuPct}% (budget ${cpuBudget}%)${l.quiet && n.quiet ? '' : ' — host BUSY'}` })
     rows.push({ rule: `footprint (${phase}): native ≤ legacy`, ok: n.footprintMb <= l.footprintMb, detail: `native ${n.footprintMb} MB vs legacy ${l.footprintMb} MB` })
   }
+  // Web Audio plays FROM the renderer's buffers, so legacy must still hold
+  // them; the core plays from the stem files, so native must not.
+  rows.push({
+    rule: 'the renderer holds its own decode on legacy and has let it go on native',
+    ok: legacy.lanesResident === true && native.lanesResident === false,
+    detail: `legacy ${legacy.lanesResident} · native ${native.lanesResident}`
+  })
   for (const p of [legacy, native]) {
     const busy = CPU_PHASES.filter((ph) => p.cpu[ph] && !p.cpu[ph].quiet)
     if (CPU_PHASES.every((ph) => !p.cpu[ph] || p.cpu[ph].load1 === null)) {

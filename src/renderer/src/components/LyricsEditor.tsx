@@ -372,32 +372,39 @@ export default function LyricsEditor({
   })
   const { envelope, fineEnv } = envs
   useEffect(() => {
-    const buf = engine.getTrackBuffer('vocals')
-    if (!buf) return
-    const cached = envelopeCache.get(buf)
-    if (cached) {
-      setEnvs(cached)
-      return
-    }
     let dead = false
-    const t = setTimeout(() => {
-      const ch0 = buf.getChannelData(0)
-      let mono = ch0
-      if (buf.numberOfChannels > 1) {
-        const ch1 = buf.getChannelData(1)
-        mono = new Float32Array(ch0.length)
-        for (let i = 0; i < ch0.length; i++) mono[i] = (ch0[i] + ch1[i]) / 2
+    let t: ReturnType<typeof setTimeout> | null = null
+    // The vocals are ASKED FOR, not read off whatever is resident: under
+    // native playback the renderer has let its decode go, and the editor is
+    // exactly the sort of thing a singer opens minutes into a song. Without
+    // this the row voiceprints and the silent-line detector would simply be
+    // absent, with nothing on screen to say why.
+    void engine.ensureTrackBuffer('vocals').then((buf) => {
+      if (dead || !buf) return
+      const cached = envelopeCache.get(buf)
+      if (cached) {
+        setEnvs(cached)
+        return
       }
-      const computed = {
-        envelope: computeEnvelope(mono, buf.sampleRate),
-        fineEnv: computeEnvelope(mono, buf.sampleRate, 0.01)
-      }
-      envelopeCache.set(buf, computed)
-      if (!dead) setEnvs(computed)
-    }, 0)
+      t = setTimeout(() => {
+        const ch0 = buf.getChannelData(0)
+        let mono = ch0
+        if (buf.numberOfChannels > 1) {
+          const ch1 = buf.getChannelData(1)
+          mono = new Float32Array(ch0.length)
+          for (let i = 0; i < ch0.length; i++) mono[i] = (ch0[i] + ch1[i]) / 2
+        }
+        const computed = {
+          envelope: computeEnvelope(mono, buf.sampleRate),
+          fineEnv: computeEnvelope(mono, buf.sampleRate, 0.01)
+        }
+        envelopeCache.set(buf, computed)
+        if (!dead) setEnvs(computed)
+      }, 0)
+    })
     return () => {
       dead = true
-      clearTimeout(t)
+      if (t !== null) clearTimeout(t)
     }
   }, [engine])
 
