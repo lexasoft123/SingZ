@@ -117,6 +117,7 @@ import {
   TRACK_META,
   TRAIN_DEFAULTS,
   trainingWindows,
+  viewForOpen,
   type AudioPrefs,
   type TimeView,
   type TrainingConfig,
@@ -1577,10 +1578,10 @@ export default function App(): React.JSX.Element {
             // view existed must not switch them off underneath them.
             setMetCfg((cur) => ({ ...saved, grid: cur.grid }))
           }
-          const v = proj.settings.view
-          if (v && Number.isFinite(v.s) && Number.isFinite(v.e) && v.e - v.s > 0.05) {
-            setView({ s: Math.max(0, v.s), e: v.e })
-          }
+          // Keeps the singer's zoom, anchored where the song starts — see
+          // viewForOpen for the three symptoms that came of doing otherwise.
+          const openView = viewForOpen(proj.settings.view)
+          if (openView) setView(openView)
           const sel = proj.settings.selection
           if (sel && Number.isFinite(sel.s) && Number.isFinite(sel.e) && sel.e - sel.s > 0.05) {
             setSelection({ s: Math.max(0, sel.s), e: sel.e })
@@ -3157,6 +3158,14 @@ export default function App(): React.JSX.Element {
     if (!window.singz.e2eHooks) return
     ;(window as { __test?: unknown }).__test = {
       engine,
+      // The transport BUTTON's own state, which is not `engine.playing`: it is
+      // React state fed from the engine, and the two diverging is a bug a
+      // driver reading the engine alone cannot see. The phones learned this
+      // the hard way (PlayerScreen's `__test.playing`, added after a button
+      // that lagged the engine by a poll); the desktop shipped without it,
+      // and a field session then found the button stuck on Play through a
+      // whole song while the core played it.
+      playing,
       phase,
       showCatalog,
       tracks,
@@ -3175,7 +3184,7 @@ export default function App(): React.JSX.Element {
       },
       log: () => window.singz.getLog()
     }
-  }, [engine, phase, showCatalog, tracks, metCfg, training, trainCfg, transpose, loadPath])
+  }, [engine, playing, phase, showCatalog, tracks, metCfg, training, trainCfg, transpose, loadPath])
 
   return (
     <div className="app">

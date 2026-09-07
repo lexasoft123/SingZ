@@ -1677,6 +1677,12 @@ button.chip-status:hover {
 }
 
 .log-body {
+  /* The app sets `user-select: none` on body, because a desktop app that
+     selects its own chrome on a stray drag looks broken. The log is the one
+     place that is TEXT rather than chrome: without this, the only way to get
+     a line out is the Copy button, which takes all four thousand of them. */
+  user-select: text;
+  cursor: text;
   flex: 1;
   min-height: 240px;
   overflow-y: auto;

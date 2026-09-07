@@ -90,8 +90,24 @@ const METRICS = [
   { key: 'reopen', label: 'reopen after restart → ready to play', rule: 'compare' }
 ]
 const CPU_PHASES = ['idle-in-player', 'playing', 'pitch-change', 'after-leaving']
-/** Lines that end a pass on the spot. */
-const FATAL_LOG = [/native playback .*(failed|refused|quarantin)/i, /graph build refused/i, /cue rebuild failed/i]
+/**
+ * Lines that end a pass on the spot.
+ *
+ * The named patterns are kept for the sources that have no levels worth
+ * trusting, but the rule that matters is the LEVEL one below: every warn or
+ * error the dsp path writes is a failure of this session, because main only
+ * writes one when a native command was refused, threw, or came back
+ * incomplete. Three hand-written phrases were the whole net until a field
+ * session produced sixteen `resume failed · … Native playback is not paused`
+ * warnings and one `graph build refused`, and this harness would have called
+ * that run clean — the regexes want "native playback" FOLLOWED BY "failed",
+ * and the line says it the other way round. A list of remembered phrases can
+ * only catch the failures somebody already met.
+ */
+const FATAL_LOG = [/native playback .*(failed|refused|quarantin)/i, /cue rebuild failed/i]
+const isFatalLine = (entry) =>
+  (entry.source === 'dsp' && (entry.level === 'warn' || entry.level === 'error')) ||
+  FATAL_LOG.some((p) => p.test(entry.line))
 
 /** An in-renderer sampler: run `action`, sample position/playing every
  *  `every` ms until `cond` holds (+ hold) or `ms` elapse; resolve the trace. */
@@ -247,7 +263,7 @@ async function runPass(kind, songs) {
   }
   const checkFatal = async (win, fromMs, what) => {
     const lines = await logSince(win, fromMs)
-    const hits = lines.filter((x) => FATAL_LOG.some((p) => p.test(x.line))).map((x) => `${x.source}: ${x.line.slice(0, 200)}`)
+    const hits = lines.filter(isFatalLine).map((x) => `${x.source} [${x.level}]: ${x.line.slice(0, 200)}`)
     if (hits.length) { pass.fatal.push({ what, hits }); throw new Error(`fatal log during "${what}": ${hits[0]}`) }
   }
   // The native facade's last status, read through the engine (a JS runtime

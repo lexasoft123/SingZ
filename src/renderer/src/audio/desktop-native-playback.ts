@@ -1036,6 +1036,16 @@ export class DesktopNativePlaybackClient {
     })
   }
 
+  /**
+   * Continue a paused transport — and be IDEMPOTENT about it, because the
+   * core's resume() refuses a transport that is already playing and the
+   * caller cannot always know which it has. Status is polled at 5 Hz, so a
+   * Play that lands within 200 ms of a start (a second press, or a start this
+   * request raced) reads a stale 'paused' and asks anyway. The refusal used
+   * to throw, which left the renderer believing the song was stopped WHILE IT
+   * PLAYED: the button stayed on Play, and every further press asked again
+   * and was refused again — sixteen of them in one field session.
+   */
   async resume(): Promise<void> {
     return this.serialize(async () => {
       this.assertCommandableGeneration()
@@ -1043,9 +1053,51 @@ export class DesktopNativePlaybackClient {
         if (this.ownsOutput) throw new Error('Native playback has no commandable generation.')
         return
       }
-      ensure(await window.singz.resumeDesktopPlayback(this.generation), 'Native resume failed')
+      const generation = this.generation
+      const provider = this.request?.provider ?? 'coreaudio'
+      // Ask before telling. Status is polled at 5 Hz, so the caller's picture
+      // can be 200 ms old — old enough for a second Play inside one poll to
+      // think the transport is paused when it is already running. One status
+      // read on a keypress is cheap; a refused command is a round trip, a
+      // warning in the log, and an exception on a path where nothing is
+      // wrong.
+      //
+      // BOTH opinions have to agree before the command is skipped, and each
+      // one alone is wrong in a different direction.
+      //
+      // The SNAPSHOT alone: `pause()` flips the core's desired state
+      // synchronously but the published transportState comes from the render
+      // callback, so for one buffer period (11 ms at 512 frames, 42 ms on a
+      // 2048-frame route) a paused transport still reads 'playing'. Skipping
+      // on that would leave a Pause button over a silent song with no command
+      // in flight to correct it — this bug the other way up.
+      //
+      // The INTENT alone: a song that ran out completes in the core, and the
+      // intent only follows when the engine's status handler sees it and
+      // pauses — a poll later. Play inside that window would skip the Resume
+      // that restarts the song, which is a rule the session harness checks
+      // (end of song → Play restart).
+      await this.requireCommandStatus(
+        generation,
+        provider,
+        'Native playback could not be asked whether it is already playing.'
+      )
+      const already = this.last?.transportState
+      if (this.transportIntent === 'playing' && (already === 'playing' || already === 'pre-roll')) {
+        return
+      }
+      const result = await window.singz.resumeDesktopPlayback(generation)
+      if (!result.ok) {
+        // Only this one refusal is survivable, and only against a FRESH
+        // status: the core is already doing what was asked. Anything else —
+        // and a transport that is not in fact playing — still throws.
+        if (result.errorCode !== 'invalid-state') ensure(result, 'Native resume failed')
+        await this.refreshCommandStatus(generation, provider)
+        const state = this.last?.transportState
+        if (state !== 'playing' && state !== 'pre-roll') ensure(result, 'Native resume failed')
+      }
       this.transportIntent = 'playing'
-      await this.refreshCommandStatus(this.generation, this.request?.provider ?? 'coreaudio')
+      await this.refreshCommandStatus(generation, provider)
     })
   }
 

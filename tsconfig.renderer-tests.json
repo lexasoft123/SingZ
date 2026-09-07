@@ -9,6 +9,7 @@
   "include": [
     "src/preload/index.d.ts",
     "tests/unit/audio-devices.test.ts",
-    "tests/unit/desktop-native-playback.test.ts"
+    "tests/unit/desktop-native-playback.test.ts",
+    "tests/unit/view-for-open.test.ts"
   ]
 }

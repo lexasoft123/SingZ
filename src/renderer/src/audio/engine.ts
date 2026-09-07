@@ -207,6 +207,9 @@ export class MultitrackEngine {
    * left can never restore that song's grid, region or training into the
    * next one — the cross-song contamination class CLAUDE.md records. */
   private _songEpoch = 0
+  /** True from retireForSongSwitch() until the next load(): the tracks on
+   *  hand belong to the song being left. See both for why. */
+  private betweenSongs = false
   get songEpoch(): number {
     return this._songEpoch
   }
@@ -218,6 +221,15 @@ export class MultitrackEngine {
    * would roll the OLD grid into the NEW song's UI. */
   retireForSongSwitch(): void {
     if (this.teardownStarted) return
+    // Between songs from here until load() installs the next one's lanes.
+    // The loader resets a dozen controls in that window and every one of them
+    // re-arms the prepare-ahead timer, which then fires while `this.tracks`
+    // still holds the song being LEFT: a full graph built for the wrong song,
+    // 2.3 s of blocked main, discarded unused — or, when the two songs differ
+    // in length, refused outright by the core as a start position outside the
+    // timeline. The epochs cannot see it, because a re-arm captures whatever
+    // they are at the time.
+    this.betweenSongs = true
     this._songEpoch++
     this._playing = false
     this.aheadEpoch++
@@ -255,7 +267,8 @@ export class MultitrackEngine {
   private scheduleNativePrepareAhead(): void {
     if (this.aheadTimer !== null) clearTimeout(this.aheadTimer)
     this.aheadTimer = null
-    if (this.teardownStarted || this._playing || this.tracks.length === 0 || !this.aheadAllowed) return
+    if (this.teardownStarted || this._playing || this.tracks.length === 0 ||
+        !this.aheadAllowed || this.betweenSongs) return
     this.aheadTimer = setTimeout(() => {
       this.aheadTimer = null
       void this.prepareNativeAhead().catch((error) => {
@@ -266,13 +279,14 @@ export class MultitrackEngine {
 
   private async prepareNativeAhead(): Promise<void> {
     if (this.teardownStarted || this._playing || this.tracks.length === 0 ||
-        this.pendingPlayRequests.size > 0 || !this.aheadAllowed) return
+        this.pendingPlayRequests.size > 0 || !this.aheadAllowed || this.betweenSongs) return
     if (!desktopNativePlaybackPreferred()) return
     const epoch = this._songEpoch
     const ahead = this.aheadEpoch
     const stale = (): boolean =>
       epoch !== this._songEpoch || ahead !== this.aheadEpoch || this._playing ||
-      this.pendingPlayRequests.size > 0 || !this.aheadAllowed || this.teardownStarted
+      this.pendingPlayRequests.size > 0 || !this.aheadAllowed || this.teardownStarted ||
+      this.betweenSongs
     const module = await this.ensureNativePlayback()
     if (stale() || module.client.active || module.client.recoveryPending) return
     if (module.client.preparedAhead) await module.client.discardAhead()
@@ -1294,6 +1308,9 @@ export class MultitrackEngine {
     // must not allocate graph nodes, replace state or wake dead subscribers.
     if (this.teardownStarted) return
     this.clearRequestedPlaybackError()
+    // The lanes below are this song's, so preparing ahead means something
+    // again (see retireForSongSwitch).
+    this.betweenSongs = false
     this._songEpoch++
     this.aheadEpoch++
     if (this.aheadTimer !== null) clearTimeout(this.aheadTimer)
@@ -1342,6 +1359,28 @@ export class MultitrackEngine {
       // Play after the song ran out restarts it: the core's resume() only
       // continues a paused transport, and a seek while paused stays paused,
       // so seek first — to the region start when looping, else the top.
+      // Already running: there is nothing to ask for, and asking is worse
+      // than useless — resume() only continues a PAUSED transport. Adopt the
+      // core's truth instead. (resume() survives this race too, since the
+      // status behind the check is up to a poll old; this spares the round
+      // trip and the warning line in the ordinary case.)
+      //
+      // The SNAPSHOT alone will not do, and getting that wrong here would
+      // rebuild the very bug below it the other way up. The core publishes
+      // transportState from its render callback, so a pause that is queued
+      // but not yet drained still reads 'playing' — adopting that would set
+      // `_playing` true, show Pause, send no command, and leave the singer
+      // looking at a Pause button over a silent song with nothing to correct
+      // it. `transportParked` is the facade's own answer to exactly this
+      // question: it weighs the INTENT, not the picture. Anything it is not
+      // sure about falls through to resume(), which is idempotent now.
+      const live = this.nativePlayback.status?.transportState
+      if (!this.nativePlayback.transportParked && (live === 'playing' || live === 'pre-roll')) {
+        this._playing = true
+        this.clearRequestedPlaybackError()
+        this.emit()
+        return
+      }
       const atEnd = this.nativePlayback.status?.transportState === 'completed' ||
         this.startOffset >= this.duration - 0.01
       if (atEnd) {

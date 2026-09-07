@@ -1698,6 +1698,64 @@ describe('desktop native playback facade', () => {
     expect(api.unloadDesktopPlayback).not.toHaveBeenCalled()
     expect(client.active).toBe(true)
   })
+
+  it('does not ask a transport that is already playing to resume, and does ask one whose pause has not reached the callback yet', async () => {
+    // A field session pressed Play twice inside one 5 Hz status poll and got
+    // sixteen `resume failed · invalid-state · Native playback is not paused`
+    // warnings, with the button stuck on Play for the rest of the song. Both
+    // halves of the rule are here because each opinion alone is wrong in a
+    // different direction, and getting the second one wrong rebuilds the same
+    // bug upside down: `pause()` flips the core's desired state at once but
+    // the published transportState comes from the render callback, so a
+    // just-paused transport still READS playing for a buffer period.
+    const h = seamHarness((generation) => playing(generation))
+    expect(await h.start()).toBe(true)
+
+    // Intent playing, snapshot playing: nothing to ask for.
+    const before = h.calls.filter((c) => c.startsWith('resume:')).length
+    await h.client.resume()
+    expect(h.calls.filter((c) => c.startsWith('resume:')).length).toBe(before)
+
+    // Paused — and the fixture's pause deliberately answers 'running', which
+    // is exactly the lag. The command must still go out.
+    await h.client.pause()
+    await h.client.resume()
+    expect(h.calls.filter((c) => c.startsWith('resume:')).length).toBe(before + 1)
+  })
+
+  it('survives a resume the core refuses because it is already playing, instead of leaving the caller believing the song is stopped', async () => {
+    // The refusal used to throw, so the engine never recorded that the song
+    // was playing: the button stayed on Play while the core played on.
+    const h = seamHarness((generation, reads) =>
+      playing(generation, { transportState: reads < 3 ? 'paused' : 'playing' })
+    )
+    expect(await h.start()).toBe(true)
+    await h.client.pause()
+    ;(h.api.resumeDesktopPlayback as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      async (value: string) => ({
+        ...result(value, 'running'),
+        ok: false,
+        errorCode: 'invalid-state' as const,
+        error: 'Native playback is not paused'
+      })
+    )
+    await expect(h.client.resume()).resolves.toBeUndefined()
+  })
+
+  it('rethrows a resume the core refuses for any other reason', async () => {
+    const h = seamHarness((generation) => playing(generation, { transportState: 'paused' }))
+    expect(await h.start()).toBe(true)
+    await h.client.pause()
+    ;(h.api.resumeDesktopPlayback as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      async (value: string) => ({
+        ...result(value, 'running'),
+        ok: false,
+        errorCode: 'host-failure' as const,
+        error: 'the output went away'
+      })
+    )
+    await expect(h.client.resume()).rejects.toThrow(/the output went away/)
+  })
 })
 
 describe('desktop native transport boundaries', () => {
@@ -1870,6 +1928,20 @@ describe('desktop native control acceptance wiring', () => {
     assertAcceptedAfterAwait('setMetronome', 'this.met = m')
     assertAcceptedAfterAwait('setRegion', 'this.region = targetRegion')
     assertAcceptedAfterAwait('setTraining', 'this.training = spec')
+  })
+
+  it('adopts a running core rather than commanding it, but never adopts across a pause it has issued', () => {
+    // performPlay's guard, read from the source the way the sibling test
+    // above reads the completion rule: the snapshot alone lags a queued
+    // pause, so the facade's intent-aware `transportParked` has to agree.
+    const source = readFileSync('src/renderer/src/audio/engine.ts', 'utf8')
+    const play = source.indexOf('private async performPlay(')
+    expect(play).toBeGreaterThan(-1)
+    const guard = source.indexOf('const live = this.nativePlayback.status?.transportState', play)
+    const resume = source.indexOf('await this.nativePlayback.resume()', play)
+    expect(guard).toBeGreaterThan(play)
+    expect(guard).toBeLessThan(resume)
+    expect(source.slice(guard, resume)).toContain('!this.nativePlayback.transportParked')
   })
 
   it('parks a completed native transport and restarts it from a seek', () => {

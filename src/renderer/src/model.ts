@@ -33,6 +33,30 @@ export interface TimeView {
   e: number
 }
 
+/**
+ * The view a song OPENS with, given the one it was saved with.
+ *
+ * The ZOOM is the singer's choice and is kept. WHERE it sits is not restored,
+ * because the playhead is not saved beside it: every song opens at 0, so a
+ * window left where they were last working opens the song looking somewhere
+ * it is not playing. One field project held a 2.5 s window at 228 s, and from
+ * the singer's seat the app was broken three ways at once — no note bars in
+ * the pitch strip (they were 228 s away), no waveform under the playhead, and
+ * nothing scrolling when Play was pressed, because following only carries a
+ * view whose playhead is already ON SCREEN. Nothing was wrong with any of the
+ * three; they were all looking at the wrong part of the song.
+ *
+ * A window that already starts at the top is kept exactly as saved — that is
+ * the ordinary case and it must not be nudged.
+ */
+export function viewForOpen(saved: TimeView | null | undefined): TimeView | null {
+  if (!saved || !Number.isFinite(saved.s) || !Number.isFinite(saved.e)) return null
+  const span = saved.e - saved.s
+  if (!(span > 0.05)) return null
+  const start = Math.max(0, saved.s)
+  return start <= 0.05 ? { s: start, e: saved.e } : { s: 0, e: span }
+}
+
 /** Vocal-training setup (what alternates, how often, which stems the singer carries). */
 export interface TrainingConfig {
   mode: 'time' | 'lines'
