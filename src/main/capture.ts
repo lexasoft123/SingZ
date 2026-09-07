@@ -14,6 +14,7 @@ import {
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
+import { log } from './log'
 import type {
   DesktopAudioHostDevice,
   DesktopAudioHostInventoryResult,
@@ -313,6 +314,8 @@ export interface StagedCaptureArtifact {
 
 const CAPTURE_LOAD_PREFIX = 'singz-capture-load-'
 const CAPTURE_LOAD_STALE_MS = 24 * 60 * 60 * 1000
+/** How often an automatic re-anchor may write a line; see reanchorPlayback(). */
+const REANCHOR_LOG_INTERVAL_MS = 10_000
 
 function processIsLive(pid: number): boolean {
   try {
@@ -918,6 +921,10 @@ export class CaptureOwner {
   private binding: NativeCaptureBinding | null = null
   private loadError: string | null = null
   private loadRetryable = true
+  /** The last load outcome written to the log, so a change of outcome is
+   *  reported and a repeat is not; see native(). A retryable failure followed
+   *  by a rebuild is exactly the transition a boolean would swallow. */
+  private loadReported: 'loaded' | 'failed' | null = null
   private generation = ''
   private rendererId: number | null = null
   private monitorGeneration = ''
@@ -925,6 +932,10 @@ export class CaptureOwner {
   private monitorHighWater = 0n
   private playbackGeneration = ''
   private playbackRendererId: number | null = null
+  /** Re-anchor log throttling; see reanchorPlayback(). */
+  private reanchorGeneration = ''
+  private reanchorCount = 0
+  private reanchorLoggedAt = 0
   private playbackHighWater = 0n
   private cleanupRenderers = new Set<number>()
 
@@ -943,6 +954,10 @@ export class CaptureOwner {
       this.binding = this.bindingLoader()
       this.loadError = null
       this.loadRetryable = true
+      // Only on a change of outcome: every playback command asks for the
+      // binding, so logging unconditionally here would log at the command rate.
+      if (this.loadReported !== 'loaded') log('dsp', 'native capture addon loaded')
+      this.loadReported = 'loaded'
     } catch (error) {
       // Only a failure before native module initialization is retryable. If
       // require() returned an incompatible binding, Node cached that .node by
@@ -950,6 +965,17 @@ export class CaptureOwner {
       // rebuild can hot-replace it without restarting Electron.
       this.loadRetryable = error instanceof CaptureAddonLoadError && error.retryable
       this.loadError = `Native microphone support is unavailable: ${String(error)}`
+      // The addon carries native playback as well as the microphone, so this
+      // one failure silently sends playback back to Web Audio. Only the
+      // Settings panel's red line said so before, and it names the microphone.
+      if (this.loadReported !== 'failed')
+        log(
+          'dsp',
+          `native addon did not load · ${String(error)} · playback falls back to Web Audio` +
+            (this.loadRetryable ? ' (retryable)' : ' (a restart is needed even after a rebuild)'),
+          'warn'
+        )
+      this.loadReported = 'failed'
     }
     return this.binding
   }
@@ -1280,6 +1306,14 @@ export class CaptureOwner {
     lanes: DesktopPlaybackLaneConfig[],
     platform: NodeJS.Platform = process.platform
   ): DesktopPlaybackResult {
+    // Every refusal below is an answer to "why did this song end up on Web
+    // Audio?" — the renderer's fallback is deliberately silent, so the reason
+    // has to be written down here or it is written down nowhere.
+    const refused = (...args: Parameters<typeof failedPlayback>): DesktopPlaybackResult => {
+      const result = failedPlayback(...args)
+      log('dsp', `graph refused · ${result.errorCode} · ${result.error}`, 'warn')
+      return result
+    }
     // A SEAM names the running generation it replaces (the core prepares the
     // candidate on that generation's stream and retires the old graph
     // itself): the one prepare that is allowed while a player is active, and
@@ -1288,14 +1322,14 @@ export class CaptureOwner {
     const seamOfOwn = seam && this.playbackGeneration !== '' &&
       config.swapFromGeneration === this.playbackGeneration && this.playbackRendererId === rendererId
     if (this.playbackGeneration && !seamOfOwn) {
-      return failedPlayback(
+      return refused(
         'Unload the active native player before preparing another.',
         'native-audio-busy',
         this.playbackGeneration
       )
     }
     if (seam && !seamOfOwn) {
-      return failedPlayback(
+      return refused(
         'A native playback seam must name the active generation.',
         'invalid-generation'
       )
@@ -1305,14 +1339,14 @@ export class CaptureOwner {
       config.playback?.version !== DESKTOP_PLAYBACK_CONTRACT_VERSION ||
       config.accessMode !== (config.provider === 'asio' ? 'exclusive' : 'shared')
     ) {
-      return failedPlayback(
+      return refused(
         'The desktop native playback contract is not the current strict version.',
         'invalid-configuration'
       )
     }
     const provider = this.playbackProviders(platform).find((row) => row.id === config.provider)
     if (!provider?.available) {
-      return failedPlayback(
+      return refused(
         provider?.detail ?? 'The requested native playback provider is invalid.',
         provider && provider.errorCode !== 'wrong-platform'
           ? 'platform-not-ready'
@@ -1320,26 +1354,26 @@ export class CaptureOwner {
       )
     }
     if (this.playbackHighWater >= BigInt(Number.MAX_SAFE_INTEGER)) {
-      return failedPlayback('The native playback generation range is exhausted.', 'invalid-generation')
+      return refused('The native playback generation range is exhausted.', 'invalid-generation')
     }
     const binding = this.native()
-    if (!binding) return failedPlayback(this.loadError ?? 'Native playback unavailable')
+    if (!binding) return refused(this.loadError ?? 'Native playback unavailable')
     const codec = this.playbackCapability()
     if (lanes.some((lane) => !playbackCodecSupportsPath(codec, lane.path))) {
-      return failedPlayback(
+      return refused(
         'A native playback lane is not supported by the proven decoder runtime.',
         'invalid-configuration'
       )
     }
     try {
       if (binding.playbackStatus().capability !== DESKTOP_PLAYBACK_CAPABILITY) {
-        return failedPlayback(
+        return refused(
           'The loaded native playback addon does not implement the current capability.',
           'platform-not-ready'
         )
       }
     } catch (error) {
-      return failedPlayback(
+      return refused(
         `Could not verify the native playback capability: ${String(error)}`,
         'host-failure'
       )
@@ -1356,7 +1390,28 @@ export class CaptureOwner {
           : config),
         masterGain: mutedMasterGain(config.masterGain)
       }
+      log(
+        'dsp',
+        `preparing graph · generation ${rawGeneration} · ${lanes.length} lanes · ` +
+          `${config.sampleRate} Hz · ${config.bufferFrames} frames` +
+          (seamOfOwn ? ` · seam from ${config.swapFromGeneration}` : ' · fresh start')
+      )
+      const preparedAt = Date.now()
       const result = binding.preparePlayback(nativeConfig, lanes, generation)
+      if (result.ok)
+        log(
+          'dsp',
+          `graph ready · generation ${result.generation} · ${Date.now() - preparedAt} ms · ` +
+            `${result.format.sampleRate} Hz · ${result.format.nominalBufferFrames} frames · ` +
+            `${result.format.outputChannels} out · ` +
+            `${result.latency.outputDeviceFrames + result.latency.bufferFrames} frames of output latency`
+        )
+      else
+        log(
+          'dsp',
+          `graph build refused · generation ${rawGeneration} · ${result.errorCode} · ${result.error}`,
+          'warn'
+        )
       // Once the native session claims a generation, even a decode/graph
       // failure owns a cleanup receipt. Retain it until exact unload proves
       // every graph/host/quarantine domain empty. A seam that took moves the
@@ -1370,17 +1425,40 @@ export class CaptureOwner {
       }
       return result
     } catch (error) {
+      log('dsp', `graph build threw · generation ${rawGeneration} · ${String(error)}`, 'error')
       return failedPlayback(`Native playback prepare failed: ${String(error)}`, 'host-failure', rawGeneration)
     }
   }
 
+  /**
+   * Every native playback command but prepare goes through here, which makes
+   * it the one place that can say what the core was asked to do.
+   *
+   * `loud` commands are logged either way: they are the shape of a session —
+   * open, start, stop, unload — and there are a handful per song. The rest
+   * (seek, pause, resume, gain, loop) are logged only when they FAIL, because
+   * one scrub is dozens of seeks and a log nobody can read is a log nobody
+   * reads. Status is not routed through here at all: it is polled at 5 Hz.
+   */
   private playbackCommand(
     rendererId: number,
     rawGeneration: string,
-    invoke: (binding: NativeCaptureBinding, generation: bigint) => DesktopPlaybackResult
+    invoke: (binding: NativeCaptureBinding, generation: bigint) => DesktopPlaybackResult,
+    name: string,
+    loud = false
   ): DesktopPlaybackResult {
     const generation = parseGeneration(rawGeneration)
     if (!generation || this.playbackRendererId !== rendererId || this.playbackGeneration !== rawGeneration) {
+      // An UNLOAD of a generation that is not the active one is the ordinary
+      // shape of a refused seam: the renderer unloads the spent candidate, and
+      // main declines because it never moved to it. Nothing is wrong, so it is
+      // not a warning — the refusal itself already printed one.
+      log(
+        'dsp',
+        `${name} refused · generation ${rawGeneration} is not the active one ` +
+          `(active ${this.playbackGeneration || 'none'})`,
+        name === 'unload' ? 'info' : 'warn'
+      )
       return failedPlayback(
         'The native playback generation is no longer active.',
         'invalid-generation',
@@ -1388,36 +1466,54 @@ export class CaptureOwner {
       )
     }
     const binding = this.native()
-    if (!binding) return failedPlayback(this.loadError ?? 'Native playback unavailable', 'host-failure', rawGeneration)
+    if (!binding) {
+      log('dsp', `${name} refused · no native binding · ${this.loadError ?? 'unavailable'}`, 'warn')
+      return failedPlayback(this.loadError ?? 'Native playback unavailable', 'host-failure', rawGeneration)
+    }
     try {
-      return invoke(binding, generation)
+      const result = invoke(binding, generation)
+      if (!result.ok)
+        log(
+          'dsp',
+          `${name} failed · generation ${rawGeneration} · ${result.errorCode} · ${result.error}`,
+          'warn'
+        )
+      else if (loud) log('dsp', `${name} · generation ${rawGeneration} · ${result.state}`)
+      return result
     } catch (error) {
+      log('dsp', `${name} threw · generation ${rawGeneration} · ${String(error)}`, 'error')
       return failedPlayback(`Native playback command failed: ${String(error)}`, 'host-failure', rawGeneration)
     }
   }
 
   openPlayback(rendererId: number, generation: string): DesktopPlaybackResult {
-    return this.playbackCommand(rendererId, generation, (binding, value) => binding.openPlaybackOutput(value))
+    return this.playbackCommand(
+      rendererId, generation, (binding, value) => binding.openPlaybackOutput(value), 'open output', true)
   }
 
   startPlayback(rendererId: number, generation: string): DesktopPlaybackResult {
-    return this.playbackCommand(rendererId, generation, (binding, value) => binding.startPlayback(value))
+    return this.playbackCommand(
+      rendererId, generation, (binding, value) => binding.startPlayback(value), 'start', true)
   }
 
   pausePlayback(rendererId: number, generation: string): DesktopPlaybackResult {
-    return this.playbackCommand(rendererId, generation, (binding, value) => binding.pausePlayback(value))
+    return this.playbackCommand(
+      rendererId, generation, (binding, value) => binding.pausePlayback(value), 'pause', true)
   }
 
   resumePlayback(rendererId: number, generation: string): DesktopPlaybackResult {
-    return this.playbackCommand(rendererId, generation, (binding, value) => binding.resumePlayback(value))
+    return this.playbackCommand(
+      rendererId, generation, (binding, value) => binding.resumePlayback(value), 'resume', true)
   }
 
   stopPlayback(rendererId: number, generation: string): DesktopPlaybackResult {
-    return this.playbackCommand(rendererId, generation, (binding, value) => binding.stopPlayback(value))
+    return this.playbackCommand(
+      rendererId, generation, (binding, value) => binding.stopPlayback(value), 'stop', true)
   }
 
   seekPlayback(rendererId: number, generation: string, frame: number): DesktopPlaybackResult {
-    return this.playbackCommand(rendererId, generation, (binding, value) => binding.seekPlayback(value, frame))
+    return this.playbackCommand(
+      rendererId, generation, (binding, value) => binding.seekPlayback(value, frame), 'seek')
   }
 
   setPlaybackLoop(
@@ -1427,15 +1523,41 @@ export class CaptureOwner {
     endFrame: number
   ): DesktopPlaybackResult {
     return this.playbackCommand(rendererId, generation, (binding, value) =>
-      binding.setPlaybackLoop(value, startFrame, endFrame))
+      binding.setPlaybackLoop(value, startFrame, endFrame), 'set loop')
   }
 
   clearPlaybackLoop(rendererId: number, generation: string): DesktopPlaybackResult {
-    return this.playbackCommand(rendererId, generation, (binding, value) => binding.clearPlaybackLoop(value))
+    return this.playbackCommand(
+      rendererId, generation, (binding, value) => binding.clearPlaybackLoop(value), 'clear loop')
   }
 
   reanchorPlayback(rendererId: number, generation: string): DesktopPlaybackResult {
-    return this.playbackCommand(rendererId, generation, (binding, value) => binding.reanchorPlayback(value))
+    // The only lifecycle command whose caller is not a person: the renderer
+    // re-anchors whenever the render-failure count rose since the last status,
+    // and it re-baselines that count every poll — so a callback failing every
+    // block asks for one five times a second. The first per generation is the
+    // interesting one; after that a line every ten seconds carries the count,
+    // which is the signal anyway, and the ring still holds the fault that
+    // started it.
+    const now = Date.now()
+    const first = this.reanchorGeneration !== generation
+    if (first) {
+      this.reanchorGeneration = generation
+      this.reanchorCount = 0
+      this.reanchorLoggedAt = 0
+    }
+    this.reanchorCount += 1
+    const due = first || now - this.reanchorLoggedAt >= REANCHOR_LOG_INTERVAL_MS
+    if (due) this.reanchorLoggedAt = now
+    const result = this.playbackCommand(
+      rendererId, generation, (binding, value) => binding.reanchorPlayback(value), 'reanchor', false)
+    if (result.ok && due)
+      log(
+        'dsp',
+        `reanchor · generation ${generation} · ${result.state}` +
+          (this.reanchorCount > 1 ? ` · ${this.reanchorCount} so far` : '')
+      )
+    return result
   }
 
   setPlaybackLane(
@@ -1447,12 +1569,12 @@ export class CaptureOwner {
     solo: boolean
   ): DesktopPlaybackResult {
     return this.playbackCommand(rendererId, generation, (binding, value) =>
-      binding.setPlaybackLane(value, id, gain, muted, solo))
+      binding.setPlaybackLane(value, id, gain, muted, solo), 'set lane')
   }
 
   setPlaybackMasterGain(rendererId: number, generation: string, gain: number): DesktopPlaybackResult {
     return this.playbackCommand(rendererId, generation, (binding, value) =>
-      binding.setPlaybackMasterGain(value, mutedMasterGain(gain)))
+      binding.setPlaybackMasterGain(value, mutedMasterGain(gain)), 'master gain')
   }
 
   playbackStatus(): DesktopPlaybackStatus | null {
@@ -1465,7 +1587,23 @@ export class CaptureOwner {
   }
 
   unloadPlayback(rendererId: number, generation: string): DesktopPlaybackResult {
-    const result = this.playbackCommand(rendererId, generation, (binding, value) => binding.unloadPlayback(value))
+    const result = this.playbackCommand(
+      rendererId,
+      generation,
+      (binding, value) => binding.unloadPlayback(value),
+      'unload',
+      true
+    )
+    // The one command whose PARTIAL success matters: an unload that returns ok
+    // without a cleanup receipt has left the core holding audio, and on the
+    // desktop that is hundreds of megabytes per song sitting there unnamed.
+    if (result.ok && !result.cleanupComplete)
+      log(
+        'dsp',
+        `unload incomplete · generation ${generation} · ` +
+          `${result.retainedBytes ?? 'unknown'} bytes still held`,
+        'warn'
+      )
     if (result.ok && result.cleanupComplete) {
       this.playbackGeneration = ''
       this.playbackRendererId = null

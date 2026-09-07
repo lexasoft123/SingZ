@@ -585,6 +585,7 @@ function registerIpc(): void {
     'audio-host:playback-prepare',
     (event, rawConfig: unknown, rawLanes: unknown): DesktopPlaybackResult => {
       if (!rawConfig || typeof rawConfig !== 'object' || !Array.isArray(rawLanes)) {
+        log('dsp', 'graph refused · invalid-configuration · malformed prepare request', 'warn')
         return {
           ok: false,
           errorCode: 'invalid-configuration',
@@ -605,6 +606,11 @@ function registerIpc(): void {
           typeof lane.gain !== 'number' || !Number.isFinite(lane.gain) ||
           typeof lane.muted !== 'boolean' || typeof lane.solo !== 'boolean')
       ) {
+        log(
+          'dsp',
+          `graph refused · invalid-configuration · a lane in a list of ${lanes.length} failed schema validation`,
+          'warn'
+        )
         return {
           ok: false,
           errorCode: 'invalid-configuration',
@@ -621,6 +627,14 @@ function registerIpc(): void {
         !isAllowed(lane.path) || !codecCapability.available ||
         !playbackCodecSupportsPath(codecCapability, lane.path))
       if (unauthorized) {
+        // The owner never sees this one: an unauthorized or undecodable lane
+        // is refused here, and the renderer falls back without a word.
+        log(
+          'dsp',
+          `graph refused · unauthorized-path · ${unauthorized.id}` +
+            (codecCapability.available ? '' : ' · no proven decoder runtime'),
+          'warn'
+        )
         return {
           ok: false,
           errorCode: 'unauthorized-path',
@@ -633,15 +647,9 @@ function registerIpc(): void {
       }
       const result = captureOwner.preparePlayback(event.sender.id, config, authorized)
       bindNativeAudioCleanup(event.sender)
-      if (result.ok) {
-        log(
-          'dsp',
-          `desktop graph prepared · generation ${result.generation} · ${authorized.length} lanes · ` +
-            `${result.format.sampleRate / 1000} kHz · ${result.format.outputChannels} ch`
-        )
-      } else {
-        log('dsp', `desktop graph prepare failed · ${result.errorCode} · ${result.error}`, 'warn')
-      }
+      // Both outcomes are logged by the owner, which is where the timing, the
+      // seam and the negotiated format are known. Saying it twice here only
+      // made the log harder to read.
       return result
     }
   )
@@ -696,11 +704,9 @@ function registerIpc(): void {
     ))
   ipcMain.handle('audio-host:playback-status', () => captureOwner.playbackStatus())
   ipcMain.handle('audio-host:playback-unload', (event, generation: unknown) => {
-    const result = captureOwner.unloadPlayback(event.sender.id, playbackGeneration(generation))
-    if (result.ok && result.cleanupComplete) {
-      log('dsp', `desktop graph released · generation ${result.generation} · retained 0 kB`)
-    }
-    return result
+    // Logged by the owner, which also sees the unloads that come back ok
+    // WITHOUT a cleanup receipt — the case worth a line.
+    return captureOwner.unloadPlayback(event.sender.id, playbackGeneration(generation))
   })
 
   ipcMain.handle('stems:reveal', (_e, raw: string) => {
