@@ -36,6 +36,7 @@ import type { ModelsProgress, ProjectSettings } from '../shared/types'
 import { allowRoot, isAllowed, stemsRoot } from './media'
 import { registerSource, registerTrack } from './source'
 import { log, logEntries, saveLog } from './log'
+import { contextMenuItems } from './context-menu'
 import { clearDirty, dirtyDirs, dirtySeq, dirtyState, isDirty, markProjectDirty, onDirty } from './sync-dirty'
 import { replaySyncLog, syncLog } from './sync-log'
 import { SyncScheduler } from './sync-scheduler'
@@ -182,6 +183,14 @@ function createWindow(): void {
   win.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url)
     return { action: 'deny' }
+  })
+  // Electron ships no context menu of its own, so until this a right-click
+  // anywhere in the app did nothing at all — see contextMenuItems for what is
+  // offered and why.
+  win.webContents.on('context-menu', (_event, params) => {
+    const items = contextMenuItems(params)
+    if (items.length === 0) return
+    Menu.buildFromTemplate(items).popup({ window: win })
   })
 
   if (process.env['ELECTRON_RENDERER_URL']) {
