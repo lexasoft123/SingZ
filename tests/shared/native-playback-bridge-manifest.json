@@ -232,7 +232,7 @@
         "synchronous": true
       }
     ],
-    "desktopAddonNote": "synchronous says whether the call blocks the JS thread. Every one of these did until preparePlayback moved to a libuv worker: decoding six lanes on Electron's main thread froze the window for 2.7 s, measured. The desktop still has no counterpart to the phones' positionNow, so the playhead is reconstructed from playbackStatus \u2014 which takes the session control mutex that open, start and stop hold across host calls."
+    "desktopAddonNote": "Keep this file UTF-8 with no unicode escapes — its native reader implements a fixed escape set with no unicode case and ABORTS on one, so a JSON round-trip that escapes non-ASCII takes the sanitizer gate red. synchronous says whether the call blocks the JS thread. Every one of these did until preparePlayback moved to a libuv worker: decoding six lanes on Electron's main thread froze the window for 2.7 s, measured. The desktop still has no counterpart to the phones' positionNow, so the playhead is reconstructed from playbackStatus — which takes the session control mutex that open, start and stop hold across host calls."
   },
   "jni": {
     "kotlinExternals": [
@@ -543,7 +543,7 @@
     }
   },
   "positionNow": {
-    "note": "The synchronous clock payload. Built as a dictionary literal on iOS and a WritableMap on Android, parsed by parseNativePlaybackPositionNow. A key misspelled on one platform makes that parse return null and the player silently falls back to the polled clock on THAT PLATFORM ONLY, with every suite green \u2014 which is why both spellings are compared here rather than the parser alone.",
+    "note": "The synchronous clock payload. Built as a dictionary literal on iOS and a WritableMap on Android, parsed by parseNativePlaybackPositionNow. A key misspelled on one platform makes that parse return null and the player silently falls back to the polled clock on THAT PLATFORM ONLY, with every suite green — which is why both spellings are compared here rather than the parser alone.",
     "keys": [
       "available",
       "generation",
