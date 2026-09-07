@@ -157,6 +157,15 @@ tests and typecheck were green throughout.
   entirely when the buffer is gone — no error, no PCM, a split that proceeds
   without its input. The song file is on disk (`song.path` is right there in
   the same call), so this one wants a re-decode, not a guard.
+
+  Do it WITH the release, not before. That ref is only populated when a raw
+  song file is opened — for a project that already has stems it is null
+  today, so re-splitting one already takes the skip branch. Adding the
+  re-decode on its own therefore changes a live path (every `needsPcm`
+  re-split gains a decode and an offline render) for no benefit until
+  something is actually released. Written and reverted once for that reason.
+  Note also that `media:read` THROWS on an unauthorized path, so the read
+  belongs inside the try, not just the decode.
 - **The four analysis refs** are the fallback AND what Re-detect reads live.
   `analysisStems`/`melodyInput` prefer `decodeStemAtFileRate(path)` and use
   the refs only when a stem cannot be read at its own rate, so releasing them
