@@ -126,8 +126,23 @@ block a `v*` tag):
    registrants the delegate whose vtable the tombstone reads through is
    `screenRemovalListener_`, and a screen is only removed when a route pops. (`807d785`,
    "the player route no longer holds its own removal", lives in that same machinery.) So
-   the driver now navigates before the relaunch — four screen removals on a process that
-   has been playing for minutes — and `--navigate 0` re-runs the negative control. (The 20-second loop that found nothing committed
+   the driver now navigates before the relaunch — two player routes popped on a process
+   that has been playing for minutes — and `--navigate 0` re-runs the negative control.
+
+   **Second run, same day: 0 of 8.** So that is not it either. The tally across every
+   purpose-built loop is now **26 relaunches, no deaths** (0/12 short, 0/6 long play,
+   0/8 long play plus route pops) against **2 deaths in 9 full session passes**. Three
+   hypotheses about what the session does have each been tested and each been wrong, so
+   the next move is not a fourth loop. Either run the session harness itself in a loop
+   and catch the death with its tombstone, or take the upstream lead directly:
+   react-native-reanimated 4.6.0 (this tree is on 4.5.3) stops taking over
+   `UIManagerAnimationDelegate` and fixes a deadlock in `ReanimatedCommitHook` surface
+   initialization. react-native-screens is already at the latest stable, 4.27.0.
+
+   What the loops HAVE established is worth keeping: the crash does not follow a long
+   playing session, does not follow route pops, and does not follow either of them
+   combined with a force-stop. Whatever the condition is, it is further inside the
+   session than any of those. (The 20-second loop that found nothing committed
    almost nothing to the shadow tree, and the delegate this crash reaches for is the
    layout-animation one.) One upstream lead worth trying if it reproduces:
    react-native-reanimated 4.6.0 — this tree is on 4.5.3 — whose notes say it stops

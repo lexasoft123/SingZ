@@ -125,8 +125,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
       let removals = 0
       if (NAVIGATE) {
         /* Back to the catalog, into the second song, back again, into the
-           first — four screen removals on a process that has been playing for
-           minutes. This is the part the four-minute loop was missing. */
+           first: two player routes popped on a process that has been playing
+           for minutes, which is what the session pass does and what the
+           play-only loop never did. */
         for (const name of [songs[1].name, songs[0].name]) {
           await dev.ev('void __test.back()')
           await sleep(1500)
@@ -187,7 +188,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
     died += bad
     log(
       `${b}: ${bad} of ${ran} relaunches died after ${PLAY_SECONDS} s of playing` +
-        (NAVIGATE ? ' and four screen removals' : ' (no navigation)') +
+        (NAVIGATE ? ' and two route pops' : ' (no navigation)') +
         (ran === mine.length ? '' : ` · ${mine.length - ran} round(s) abandoned`)
     )
   }
