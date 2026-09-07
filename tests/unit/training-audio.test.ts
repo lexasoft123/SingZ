@@ -272,7 +272,7 @@ describe('engine-owned training audio', () => {
     const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
     const engine = new MultitrackEngine()
     const context = FakeAudioContext.last!
-    engine.load([{ id: 'vocals', buffer: { duration: 2 } as AudioBuffer }])
+    engine.load([{ id: 'vocals', buffer: { duration: 2 } as AudioBuffer, duration: 2 }])
     const resume = deferred()
     context.state = 'suspended'
     context.resumeGate = resume.promise
@@ -293,7 +293,7 @@ describe('engine-owned training audio', () => {
     const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
     const engine = new MultitrackEngine()
     const context = FakeAudioContext.last!
-    engine.load([{ id: 'vocals', buffer: { duration: 2 } as AudioBuffer }])
+    engine.load([{ id: 'vocals', buffer: { duration: 2 } as AudioBuffer, duration: 2 }])
     await engine.play({ countIn: false })
     engine.pause()
 
@@ -369,7 +369,7 @@ describe('engine-owned training audio', () => {
     }
     const loadEngine = new MultitrackEngine()
     ;(loadEngine as unknown as { nativePlayback: typeof loadClient }).nativePlayback = loadClient
-    loadEngine.load([{ id: 'vocals', buffer: { duration: 2 } as AudioBuffer }])
+    loadEngine.load([{ id: 'vocals', buffer: { duration: 2 } as AudioBuffer, duration: 2 }])
     const rejectedLoad = (loadEngine as unknown as {
       nativePlaybackUnload: Promise<void>
     }).nativePlaybackUnload
@@ -379,7 +379,7 @@ describe('engine-owned training audio', () => {
       cleanupError
     )
 
-    loadEngine.load([{ id: 'vocals', buffer: { duration: 2 } as AudioBuffer }])
+    loadEngine.load([{ id: 'vocals', buffer: { duration: 2 } as AudioBuffer, duration: 2 }])
     const retriedLoad = (loadEngine as unknown as {
       nativePlaybackUnload: Promise<void>
     }).nativePlaybackUnload
@@ -533,7 +533,7 @@ describe('engine-owned training audio', () => {
       client, tryStart, RecoveryError: DesktopNativeRecoveryError
     })
     engine.load([{
-      id: 'vocals', path: '/allowed/vocals.flac', buffer: { duration: 2 } as AudioBuffer
+      id: 'vocals', path: '/allowed/vocals.flac', buffer: { duration: 2 } as AudioBuffer, duration: 2
     }])
 
     const play = engine.play({ countIn: false })
@@ -570,7 +570,7 @@ describe('engine-owned training audio', () => {
     ;(engine as unknown as { ensureNativePlayback: () => Promise<unknown> }).ensureNativePlayback =
       async () => ({ client, tryStart, RecoveryError: DesktopNativeRecoveryError })
     engine.load([{
-      id: 'vocals', path: '/allowed/vocals.flac', buffer: { duration: 2 } as AudioBuffer
+      id: 'vocals', path: '/allowed/vocals.flac', buffer: { duration: 2 } as AudioBuffer, duration: 2
     }])
     const emissions = vi.fn()
     engine.subscribe(emissions)
@@ -705,7 +705,7 @@ describe('engine-owned training audio', () => {
     const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
     const engine = new MultitrackEngine()
     const context = FakeAudioContext.last!
-    engine.load([{ id: 'vocals', buffer: { duration: 2 } as AudioBuffer }])
+    engine.load([{ id: 'vocals', buffer: { duration: 2 } as AudioBuffer, duration: 2 }])
     await engine.teardown()
     const gains = context.gains.length
     const tracks = (engine as unknown as { tracks: unknown[] }).tracks
@@ -713,7 +713,7 @@ describe('engine-owned training audio', () => {
     engine.subscribe(emissions)
 
     engine.load(
-      [{ id: 'drums', buffer: { duration: 5 } as AudioBuffer }],
+      [{ id: 'drums', buffer: { duration: 5 } as AudioBuffer, duration: 5 }],
       { position: 1, play: true, graphDocument: null }
     )
     await flushPlaybackRequest()
@@ -847,7 +847,7 @@ describe('engine-owned training audio', () => {
       engine.subscribe(() => leaseStates.push(engine.nativeMonitorOwnsOutput))
       engine.setNativeAudioProvider('asio')
       engine.load([{
-        id: 'vocals', path: '/allowed/vocals.flac', buffer: { duration: 2 } as AudioBuffer
+        id: 'vocals', path: '/allowed/vocals.flac', buffer: { duration: 2 } as AudioBuffer, duration: 2
       }])
 
       await expect(engine.play({ countIn: false })).rejects.toMatchObject({
@@ -935,7 +935,7 @@ describe('engine-owned training audio', () => {
       client, tryStart, RecoveryError: DesktopNativeRecoveryError
     })
     engine.load([{
-      id: 'vocals', path: '/allowed/vocals.flac', buffer: { duration: 2 } as AudioBuffer
+      id: 'vocals', path: '/allowed/vocals.flac', buffer: { duration: 2 } as AudioBuffer, duration: 2
     }])
 
     engine.toggle()
@@ -1009,7 +1009,7 @@ describe('engine-owned training audio', () => {
       client, tryStart, RecoveryError: DesktopNativeRecoveryError
     })
     engine.load([{
-      id: 'vocals', path: '/allowed/vocals.flac', buffer: { duration: 2 } as AudioBuffer
+      id: 'vocals', path: '/allowed/vocals.flac', buffer: { duration: 2 } as AudioBuffer, duration: 2
     }])
 
     engine.toggle()
@@ -1017,7 +1017,7 @@ describe('engine-owned training audio', () => {
     expect(engine.playbackError).toMatchObject({
       reason: 'toggle', code: 'provider-cleanup-incomplete', provider: 'asio'
     })
-    expect(client.status.transportState).toBe('playing')
+    expect(client.status?.transportState).toBe('playing')
     expect(engine.playing).toBe(false)
 
     engine.toggle()
@@ -1071,7 +1071,7 @@ describe('engine-owned training audio', () => {
     })
 
     engine.load([{
-      id: 'vocals', path: '/allowed/vocals.flac', buffer: { duration: 2 } as AudioBuffer
+      id: 'vocals', path: '/allowed/vocals.flac', buffer: { duration: 2 } as AudioBuffer, duration: 2
     }], { play: true })
     await flushPlaybackRequest()
     expect(engine.playbackError).toMatchObject({
@@ -1095,7 +1095,7 @@ describe('engine-owned training audio', () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
     const engine = new MultitrackEngine()
-    engine.load([{ id: 'vocals', buffer: { duration: 2 } as AudioBuffer }])
+    engine.load([{ id: 'vocals', buffer: { duration: 2 } as AudioBuffer, duration: 2 }])
     const recoveryError = new DesktopNativeRecoveryError(
       'asio', 'provider-recovery-unavailable', null, 'ASIO retry is unavailable.'
     )
@@ -1184,7 +1184,7 @@ describe('engine-owned training audio', () => {
     expect(trainingBus.gain.calls.at(-1)).toEqual(['target', 0.4, 10])
 
     const cueVoice = context.oscillators[0]
-    engine.load([{ id: 'vocals', buffer: { duration: 2 } as AudioBuffer }])
+    engine.load([{ id: 'vocals', buffer: { duration: 2 } as AudioBuffer, duration: 2 }])
     await engine.play({ countIn: false })
     expect(engine.playing).toBe(true)
     expect(cueVoice.stops).toHaveLength(2)

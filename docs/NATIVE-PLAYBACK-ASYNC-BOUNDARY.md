@@ -14,35 +14,43 @@ for it moved:
 | before | 57 | **2621 ms**, ending on the millisecond `graph ready` was logged |
 | after | 107 | 272 ms — the addon's dylib load, before the prepare starts |
 
-Two items of step 1 are deliberately NOT done and are called out where they
-appear below: exporting `playbackPositionNow`, and the synchronous drain as
-its own export (the drain exists, but inside `unloadPlayback` and the env
-cleanup hook rather than as a separate call).
+Step 1 is complete as it stands. Two items it originally listed were dropped
+rather than deferred, each for a reason recorded where it appears below:
+exporting `playbackPositionNow` (the premise was wrong — the phones' value
+comes from a same-thread read the desktop renderer cannot have at any price
+worth paying), and the synchronous drain as its
+own export (unnecessary — the drain lives inside `unloadPlayback` and the env
+cleanup hook, so `stop()` and `before-quit` never had to change).
 
-## The defect
+## The defect, as it stood
 
-`preparePlayback` (`native/electron/playback_addon_bridge.cpp:1191`) is a
-plain synchronous N-API function. Nothing in the bridge uses
-`napi_create_async_work`. It runs `session.prepare(...)` on Electron's main
-thread and returns when the graph is built: **2,714 ms in a field log on
-2026-09-07**, during which every renderer IPC queues behind it and the window
-stops responding. It freezes on open (the prepare-ahead) as much as on Play.
+Everything in this section is the state BEFORE step 1; it is kept because it
+is the argument for the shape the fix took.
+
+`preparePlayback` was a plain synchronous N-API function, and nothing in the
+bridge used `napi_create_async_work`. It ran `session.prepare(...)` on
+Electron's main thread and returned when the graph was built: **2,714 ms in a
+field log on 2026-09-07**, during which every renderer IPC queued behind it
+and the window stopped responding. It froze on open (the prepare-ahead) as
+much as on Play.
 
 Two things about it that shape the fix:
 
-- **The decode is already parallel.** `prepare()` runs its lanes on a
-  `std::thread` pool (`native_playback_session.cpp:2251-2290`). Main is not
-  computing, it is *waiting*. Moving the wait off the JS thread adds no CPU
+- **The decode was already parallel.** `prepare()` runs its lanes on a
+  `std::thread` pool (`native_playback_session.cpp:2251-2290`). Main was not
+  computing, it was *waiting*. Moving the wait off the JS thread adds no CPU
   parallelism; it only stops blocking the UI.
-- **The seam blocks too.** A transpose, training or metronome change prepares
-  a candidate on the running generation's stream, and the facade already
-  documents that this holds main "for over half a second"
-  (`desktop-native-playback.ts:476-479`). That is the freeze felt *while
-  singing*. A fix that moves only the fresh-start prepare leaves it.
+- **The seam blocked too.** A transpose, training or metronome change prepares
+  a candidate on the running generation's stream, and the facade's
+  `audibleSeconds()` comment recorded that this held main for over half a
+  second — which is why its projection is bounded to a second at all. That was
+  the freeze felt *while singing*, and it is why the fix moves the seam's
+  prepare as well as the fresh start.
 
-Why the 5 Hz status poll blocks during a prepare: because the IPC handler runs
-on the same JS thread that is inside `preparePlayback`. Not because of
-`playback.mutex` — that becomes relevant only once the work leaves the thread.
+Why the 5 Hz status poll blocked during a prepare: because the IPC handler
+runs on the same JS thread that was inside `preparePlayback`. Not because of
+`playback.mutex` — that becomes relevant only once the work leaves the thread,
+which is why step 1 keeps that lock rather than removing it.
 
 ## Not the same defect as the stale picture
 
@@ -66,10 +74,12 @@ property; events would improve it and are scoped separately below.
 Long work off the JS thread, and **exactly one synchronous call**:
 `positionNow()`, O(1) over the lock-free `PlaybackPositionPublication`
 (`native_playback_session.h:945`, `.cpp:8021`). Both phone bridges export it;
-the manifest pins it as the one `synchronous: true` method. **The desktop
-bridge does not export it** (`playback_addon_bridge.cpp:1954-1987`), so the
-desktop paints the playhead from a 5 Hz poll plus linear extrapolation while
-the exact read sits unused in the core.
+the manifest pins it as the one `synchronous: true` method.
+
+The desktop bridge does not export it, and after step 1 that is a considered
+position rather than an omission — see item 6. The phones can be synchronous
+because their JS and their audio module share a process; the desktop's facade
+is in the renderer and reaches the addon only over IPC.
 
 Note what is NOT lock-free: `NativePlaybackSession::status()` takes
 `impl_->mutex` on its first line (`.cpp:7773`) and assembles ~75 fields. The
@@ -130,16 +140,34 @@ What it takes, in order of how easily it is forgotten:
 5. **No TSFN needed.** `napi_create_async_work` completes on the loop by
    itself; a TSFN is what a dedicated owner thread would have needed to
    resolve promises. One less thing to keep `ref`-counted.
-6. **Export `playbackPositionNow`** as the desktop's one synchronous call,
-   add it to `validateCaptureBindingIdentity` (`capture.ts:471-478`, which
-   already omits two exports by accident), and let the facade paint from it.
-   **NOT DONE, on purpose.** It was written and then withdrawn: the contract
-   suite refuses to model a half-wired export — an export with no caller is
-   indistinguishable from one whose caller was deleted by accident — so it is
-   either dormant and unmentioned in main, or live and wired through IPC,
-   preload and the facade. Wiring it changes what paints the playhead, which
-   is a behaviour change owing its own verification rather than a rider on
-   this one.
+6. **~~Export `playbackPositionNow` and let the facade paint from it.~~
+   DROPPED, and the reason is worth keeping.** It was written, withdrawn once
+   because the contract suite rightly refuses a half-wired export, and then
+   dropped outright on 2026-09-07 when the premise turned out to be false.
+
+   `positionNow` is valuable on the phones because it is a SYNCHRONOUS O(1)
+   read of a lock-free publication, on the same thread that paints. The
+   desktop cannot have that: the facade lives in the RENDERER and the addon in
+   main. A synchronous renderer→main read is *possible* — `ipcRenderer.sendSync`
+   is right there in the preload, used by `saveTrainingPreferencesSync` — but
+   it is a blocking round trip into another process that waits on main's event
+   loop, which is a far worse thing to do at frame rate than the poll it would
+   replace. So a desktop `positionNow` would in practice be POLLED, cheaply
+   (it never takes the session mutex), and that shortens the projection rather
+   than removing it.
+
+   And the projection got safer with step 1. `audibleSeconds()` extrapolates
+   from the last status by wall-clock, bounded to one second, and the reason
+   that bound existed was that "a seam's prepare holds main, and with it the
+   poll, for over half a second". Prepare no longer holds main at all, so the
+   poll keeps flowing and the extrapolation spans a poll interval rather than
+   a graph build.
+
+   What would actually pay for itself is the transition-event channel below —
+   or, for the playhead specifically, a shared-memory read the renderer can
+   make without a round trip. Both are their own scope. A desktop
+   `positionNow` bolted on before either would add an export, an IPC channel
+   and a poll to shave an error the async prepare already shrank.
 
 ## The contract
 

@@ -474,9 +474,12 @@ export class DesktopNativePlaybackClient {
 
   /** The audible position in seconds as the bar should show it: the last
    * status's audible frame, projected forward by the time since that read
-   * while playing (bounded to one second, as the phones bound theirs — a
-   * seam's prepare holds main, and with it the poll, for over half a second
-   * while the old graph plays on), folded at the loop end, and pre-empted by
+   * while playing (bounded to one second, as the phones bound theirs — the
+   * bound was sized when a seam's prepare held main, and with it the poll,
+   * for over half a second while the old graph played on; prepare runs on a
+   * worker now, so the span is an ordinary poll interval and the bound is
+   * headroom rather than the common case), folded at the loop end, and
+   * pre-empted by
    * a seek target the core has accepted but not yet reported. Null while no
    * status describes a transport. */
   audibleSeconds(): number | null {

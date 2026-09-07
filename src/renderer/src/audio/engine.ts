@@ -21,6 +21,8 @@ import type { ParsedGraphDocument } from '../../../shared/graph-document'
 export interface EngineTrackInput {
   id: string
   buffer: AudioBuffer
+  /** Seconds. Carried, not read off `buffer` — see UITrack.duration. */
+  duration: number
   /** Main-authorized source used by the portable native session. */
   path?: string
 }
@@ -28,6 +30,7 @@ export interface EngineTrackInput {
 interface EngineTrack {
   id: string
   buffer: AudioBuffer
+  duration: number
   path?: string
   gain: GainNode
   volume: number
@@ -1329,9 +1332,12 @@ export class MultitrackEngine {
     this.tracks = list.map((t) => {
       const gain = this.ctx.createGain()
       gain.connect(this.master)
-      return { id: t.id, buffer: t.buffer, path: t.path, gain, volume: 1, muted: false, solo: false }
+      return {
+        id: t.id, buffer: t.buffer, duration: t.duration, path: t.path,
+        gain, volume: 1, muted: false, solo: false
+      }
     })
-    this.duration = this.tracks.reduce((d, t) => Math.max(d, t.buffer.duration), 0)
+    this.duration = this.tracks.reduce((d, t) => Math.max(d, t.duration), 0)
     this.startOffset = Math.min(opts.position ?? 0, this.duration)
     this._playing = false
     this.applyGains(true)
@@ -1479,9 +1485,9 @@ export class MultitrackEngine {
       src.playbackRate.value = this.rate
       this.applyLoop(src)
       src.connect(t.gain)
-      src.start(when, Math.min(this.startOffset, t.buffer.duration))
+      src.start(when, Math.min(this.startOffset, t.duration))
       this.sources.push(src)
-      if (t.buffer.duration > this.tracks[longestIdx].buffer.duration) longestIdx = i
+      if (t.duration > this.tracks[longestIdx].duration) longestIdx = i
     })
     const watched = this.sources[longestIdx]
     if (watched) {
