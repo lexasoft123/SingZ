@@ -8,8 +8,11 @@
   },
   "include": [
     "src/preload/index.d.ts",
+    "src/renderer/src/env.d.ts",
+    "src/renderer/src/types/signalsmith-stretch.d.ts",
     "tests/unit/audio-devices.test.ts",
     "tests/unit/desktop-native-playback.test.ts",
-    "tests/unit/view-for-open.test.ts"
+    "tests/unit/view-for-open.test.ts",
+    "tests/unit/training-audio.test.ts"
   ]
 }

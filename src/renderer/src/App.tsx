@@ -537,7 +537,10 @@ function makeTrack(
 ): UITrack {
   const meta = TRACK_META[id] ?? { label: id, color: '#bfb49d' }
   const { peaks, scale } = computePeaks(buffer)
-  return { id, ...meta, peaks, buffer, scale, muted: false, solo: false, volume: 1, ...over }
+  return {
+    id, ...meta, peaks, buffer, duration: buffer.duration, scale,
+    muted: false, solo: false, volume: 1, ...over
+  }
 }
 
 function EngineChip({
@@ -1514,7 +1517,7 @@ export default function App(): React.JSX.Element {
           ]
           if (seq !== loadSeq.current) return
           engine.load(
-            lanes.map((t) => ({ id: t.id, buffer: t.buffer, path: t.sourcePath })),
+            lanes.map((t) => ({ id: t.id, buffer: t.buffer, duration: t.duration, path: t.sourcePath })),
             { graphDocument }
           )
           applySavedMix(lanes, proj.settings.tracks)
@@ -1634,7 +1637,7 @@ export default function App(): React.JSX.Element {
         ]
         if (seq !== loadSeq.current) return
         engine.load(
-          lanes.map((t) => ({ id: t.id, buffer: t.buffer, path: t.sourcePath })),
+          lanes.map((t) => ({ id: t.id, buffer: t.buffer, duration: t.duration, path: t.sourcePath })),
           { graphDocument }
         )
         applySavedMix(lanes, reg.project?.settings.tracks)
@@ -1726,7 +1729,7 @@ export default function App(): React.JSX.Element {
       const position = engine.position
       const play = engine.playing
       engine.load(
-        list.map((t) => ({ id: t.id, buffer: t.buffer, path: t.sourcePath })),
+        list.map((t) => ({ id: t.id, buffer: t.buffer, duration: t.duration, path: t.sourcePath })),
         { position, play }
       )
       for (const t of list) {
@@ -1898,7 +1901,7 @@ export default function App(): React.JSX.Element {
       loadLanes([...tracksRef.current, ...added])
       touchSettings()
       const names = added.map((t) => t.label).join(', ')
-      const longest = Math.max(...added.map((t) => t.buffer.duration))
+      const longest = Math.max(...added.map((t) => t.duration))
       setNotice(
         longest > before + 0.05
           ? `Added ${names} — it starts at 0:00 and runs past the song, so the timeline now ends at ${fmtTime(longest)}. Save the project to keep it.`

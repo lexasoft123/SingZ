@@ -8,6 +8,16 @@ export interface UITrack {
   peaks: Float32Array
   /** Decoded audio + envelope normalization, for sample-accurate zoomed drawing. */
   buffer: AudioBuffer
+  /**
+   * The lane's length in seconds, carried rather than read off `buffer`.
+   *
+   * Everything that needs a duration needs it whether or not the samples are
+   * still here — the view fractions are recomputed every render, and the
+   * renderer is meant to be able to let a lane's decoded audio go once the
+   * native graph owns playback (docs/DESKTOP-LANE-RESIDENCY.md). A number is
+   * a few bytes; the buffer it was read from is a hundred megabytes.
+   */
+  duration: number
   /** Registered file backing this lane when native playback can consume it. */
   sourcePath?: string
   scale: number

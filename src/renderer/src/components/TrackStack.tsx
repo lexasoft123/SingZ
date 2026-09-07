@@ -326,7 +326,7 @@ export default function TrackStack({
         // Waveform view fractions are per buffer, not per song: an added track
         // may be shorter or longer than the stems, and its wave has to sit
         // under the same seconds as everyone else's.
-        const d = t.buffer.duration
+        const d = t.duration
         return (
           <TrackLane
             key={t.id}
