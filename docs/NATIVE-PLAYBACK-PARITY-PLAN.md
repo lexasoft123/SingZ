@@ -114,9 +114,20 @@ block a `v*` tag):
    reanimated as the delegate registrants and no frame of ours in any of 62 threads; a
    plain relaunch loop was 0 of 12. Upstream-shaped, not upstream-proven. Written up in
    Step 6.
-   `mobile/tests/relaunch-after-session-android.cjs` now holds the variable those loops
-   did not: a FOUR-MINUTE session that seeks and transposes while it plays, then the
-   force-stop and start, repeated. (The 20-second loop that found nothing committed
+   `mobile/tests/relaunch-after-session-android.cjs` holds the variables those loops did
+   not. **First run, 2026-09-08: 6 of 6 native relaunches booted** after four minutes of
+   playing with a seek and a transpose every twenty seconds (a seventh round was
+   abandoned on an inspector timeout; the driver no longer lets one of those cost the
+   run). That rules something out worth as much as a reproduction: the crash does not
+   follow "the app played for a long time".
+
+   What the session pass does that the loop did not is the thing the failing frame is
+   about — it LEAVES the player, opens a second song and comes back. On one of the two
+   registrants the delegate whose vtable the tombstone reads through is
+   `screenRemovalListener_`, and a screen is only removed when a route pops. (`807d785`,
+   "the player route no longer holds its own removal", lives in that same machinery.) So
+   the driver now navigates before the relaunch — four screen removals on a process that
+   has been playing for minutes — and `--navigate 0` re-runs the negative control. (The 20-second loop that found nothing committed
    almost nothing to the shadow tree, and the delegate this crash reaches for is the
    layout-animation one.) One upstream lead worth trying if it reproduces:
    react-native-reanimated 4.6.0 — this tree is on 4.5.3 — whose notes say it stops

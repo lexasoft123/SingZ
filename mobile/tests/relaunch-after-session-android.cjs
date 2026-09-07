@@ -11,9 +11,21 @@
  * it blocks an Android release, because a release APK is optimized too.
  *
  * An earlier loop of TWENTY-SECOND sessions found nothing (0 of 6 on either
- * backend). Both real deaths followed a four-minute pass. So the variable this
- * driver holds is the one that loop did not: how long the app played, and how
- * much it re-rendered while playing, before the process was stopped.
+ * backend). Both real deaths followed a four-minute pass. So the first version
+ * of this driver held the variable that loop did not: how long the app played,
+ * and how much it re-rendered while playing.
+ *
+ * That was not it either — 6 of 6 booted after four minutes of playing with a
+ * seek and a transpose every twenty seconds (2026-09-08). What that run rules
+ * out is worth as much as a reproduction: the crash does not follow "the app
+ * played for a long time". The session pass does one more thing this loop did
+ * not, and it is the thing the failing frame is about — it LEAVES the player,
+ * opens a second song and comes back. The delegate whose vtable the tombstone
+ * reads through belongs, on one of the two registrants, to
+ * `screenRemovalListener_`, and a screen is only removed when a route pops.
+ * (`807d785`, "the player route no longer holds its own removal", is in that
+ * same machinery.) So the session now navigates before the relaunch, and
+ * `--navigate 0` turns that back off to re-run the negative control.
  *
  *   node mobile/tests/relaunch-after-session-android.cjs
  *   node mobile/tests/relaunch-after-session-android.cjs --rounds 10 --seconds 240
@@ -47,6 +59,9 @@ const argOf = (name, fallback) => {
 }
 const ROUNDS = Number(argOf('rounds', '6'))
 const PLAY_SECONDS = Number(argOf('seconds', '240'))
+/** Leave the player, open the other song, come back — the screen removals the
+ *  crash's own frame is about. Off with `--navigate 0`. */
+const NAVIGATE = argOf('navigate', '1') !== '0'
 const BACKENDS = String(argOf('backend', 'native,legacy'))
   .split(',')
   .map((s) => s.trim())
@@ -56,7 +71,7 @@ const log = (line) => console.log(line)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 ;(async () => {
-  const songs = stageSongs()
+  const songs = stageSongs(MOBILE_ROOT)
   const dev = createDevice({ port: PORT, log, mobileRoot: MOBILE_ROOT })
   dev.preflight()
   dev.seed(songs)
@@ -70,6 +85,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
       log(`\n---- round ${round}/${ROUNDS} · ${backend} · ${PLAY_SECONDS} s of playing ----`)
 
       // ---- the session the relaunch will follow --------------------------
+      // Wrapped because a single flaky inspector round trip should cost this
+      // round and not the other seven: the whole point is the sample size.
+      try {
       const launched = await dev.launch()
       await dev.awaitBoot(launched.t0)
       await dev.attach()
@@ -104,8 +122,24 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
         await dev.ev(`void __test.setPitchTempo(${touches % 2 ? 0 : 2}, 100)`)
         touches++
       }
+      let removals = 0
+      if (NAVIGATE) {
+        /* Back to the catalog, into the second song, back again, into the
+           first — four screen removals on a process that has been playing for
+           minutes. This is the part the four-minute loop was missing. */
+        for (const name of [songs[1].name, songs[0].name]) {
+          await dev.ev('void __test.back()')
+          await sleep(1500)
+          removals++
+          await dev.openProject(name)
+          await sleep(2500)
+          await dev.ev('try { __test.backend.setMasterGain(0) } catch (e) {}')
+          await dev.ev('void __test.backend.play()')
+          await sleep(4000)
+        }
+      }
       const pid = adb('shell', `pidof ${PKG} || true`).trim().split(/\s+/)[0] || 'gone'
-      log(`  played ${PLAY_SECONDS} s · ${touches} render touches · kind=${open.marks.kind} · pid ${pid}`)
+      log(`  played ${PLAY_SECONDS} s · ${touches} render touches · ${removals} screen removals · kind=${open.marks.kind} · pid ${pid}`)
 
       // ---- the relaunch --------------------------------------------------
       await dev.ev("void __r('src/latency.ts').setStoredText('singz.boot', '')")
@@ -131,6 +165,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
       }
       log(`  relaunch after ${PLAY_SECONDS} s on ${backend}: ${outcome} — ${detail}`)
       results.push({ round, backend, outcome })
+      } catch (err) {
+        log(`  round abandoned before the relaunch: ${String((err && err.message) || err).slice(0, 200)}`)
+        results.push({ round, backend, outcome: 'abandoned' })
+      }
       try {
         await dev.detach()
       } catch {
@@ -145,8 +183,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
   for (const b of BACKENDS) {
     const mine = results.filter((r) => r.backend === b)
     const bad = mine.filter((r) => r.outcome === 'DIED').length
+    const ran = mine.filter((r) => r.outcome !== 'abandoned').length
     died += bad
-    log(`${b}: ${bad} of ${mine.length} relaunches died after ${PLAY_SECONDS} s of playing`)
+    log(
+      `${b}: ${bad} of ${ran} relaunches died after ${PLAY_SECONDS} s of playing` +
+        (NAVIGATE ? ' and four screen removals' : ' (no navigation)') +
+        (ran === mine.length ? '' : ` · ${mine.length - ran} round(s) abandoned`)
+    )
   }
   log(died === 0 ? '\nPASS' : '\nFAIL')
   process.exit(died === 0 ? 0 : 1)
