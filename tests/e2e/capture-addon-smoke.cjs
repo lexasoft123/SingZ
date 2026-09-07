@@ -39,7 +39,7 @@ function writeSilentPcm16Wav(path, frames = 512) {
 process.env.SINGZ_MUTE = '1'
 app.commandLine.appendSwitch('mute-audio')
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   const target = `${process.platform}-${process.arch}`
   const requested = process.argv.slice(2).find((arg) => !arg.startsWith('--'))
   const expectsCurrentSource = process.argv.includes('--current-source')
@@ -254,12 +254,12 @@ app.whenReady().then(() => {
       graphDocument: { ...strictPlaybackConfig.graphDocument, unknown: true }
     }
   ]) {
-    const rejected = addon.preparePlayback(config, [], 3n)
+    const rejected = await addon.preparePlayback(config, [], 3n)
     assert.equal(rejected.ok, false)
     assert.equal(rejected.errorCode, 'invalid-configuration')
     assert.notEqual(rejected.ownershipRetained, true)
   }
-  const invalidPlayback = addon.preparePlayback({}, [], 3n)
+  const invalidPlayback = await addon.preparePlayback({}, [], 3n)
   assert.equal(invalidPlayback.ok, false)
   assert.equal(invalidPlayback.errorCode, 'invalid-configuration')
   assert.notEqual(invalidPlayback.ownershipRetained, true)
@@ -298,7 +298,7 @@ app.whenReady().then(() => {
   try {
     const preparedConfig = { ...strictPlaybackConfig }
     delete preparedConfig.graphDocument
-    const preparedResult = addon.preparePlayback(preparedConfig, [{
+    const preparedResult = await addon.preparePlayback(preparedConfig, [{
       id: 'smoke', path: wav, gain: 1, muted: false, solo: false
     }], 4n)
     assert.equal(preparedResult.ok, true, preparedResult.error)

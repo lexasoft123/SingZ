@@ -123,99 +123,116 @@
         "name": "preparePlayback",
         "ipc": "audio-host:playback-prepare",
         "preload": "prepareDesktopPlayback",
-        "dormant": false
+        "dormant": false,
+        "synchronous": false
       },
       {
         "name": "openPlaybackOutput",
         "ipc": "audio-host:playback-open",
         "preload": "openDesktopPlayback",
-        "dormant": false
+        "dormant": false,
+        "synchronous": true
       },
       {
         "name": "startPlayback",
         "ipc": "audio-host:playback-start",
         "preload": "startDesktopPlayback",
-        "dormant": false
+        "dormant": false,
+        "synchronous": true
       },
       {
         "name": "pausePlayback",
         "ipc": "audio-host:playback-pause",
         "preload": "pauseDesktopPlayback",
-        "dormant": false
+        "dormant": false,
+        "synchronous": true
       },
       {
         "name": "resumePlayback",
         "ipc": "audio-host:playback-resume",
         "preload": "resumeDesktopPlayback",
-        "dormant": false
+        "dormant": false,
+        "synchronous": true
       },
       {
         "name": "stopPlayback",
         "ipc": "audio-host:playback-stop",
         "preload": "stopDesktopPlayback",
-        "dormant": false
+        "dormant": false,
+        "synchronous": true
       },
       {
         "name": "seekPlayback",
         "ipc": "audio-host:playback-seek",
         "preload": "seekDesktopPlayback",
-        "dormant": false
+        "dormant": false,
+        "synchronous": true
       },
       {
         "name": "setPlaybackLoop",
         "ipc": "audio-host:playback-loop-set",
         "preload": "setDesktopPlaybackLoop",
-        "dormant": false
+        "dormant": false,
+        "synchronous": true
       },
       {
         "name": "clearPlaybackLoop",
         "ipc": "audio-host:playback-loop-clear",
         "preload": "clearDesktopPlaybackLoop",
-        "dormant": false
+        "dormant": false,
+        "synchronous": true
       },
       {
         "name": "reanchorPlayback",
         "ipc": "audio-host:playback-reanchor",
         "preload": "reanchorDesktopPlayback",
-        "dormant": false
+        "dormant": false,
+        "synchronous": true
       },
       {
         "name": "setPlaybackLane",
         "ipc": "audio-host:playback-lane",
         "preload": "setDesktopPlaybackLane",
-        "dormant": false
+        "dormant": false,
+        "synchronous": true
       },
       {
         "name": "setPlaybackMasterGain",
         "ipc": "audio-host:playback-master",
         "preload": "setDesktopPlaybackMasterGain",
-        "dormant": false
+        "dormant": false,
+        "synchronous": true
       },
       {
         "name": "playbackStatus",
         "ipc": "audio-host:playback-status",
         "preload": "desktopPlaybackStatus",
-        "dormant": false
+        "dormant": false,
+        "synchronous": true
       },
       {
         "name": "unloadPlayback",
         "ipc": "audio-host:playback-unload",
         "preload": "unloadDesktopPlayback",
-        "dormant": false
+        "dormant": false,
+        "synchronous": true
       },
       {
         "name": "unloadPlaybackRetainingLanes",
         "ipc": null,
         "preload": null,
-        "dormant": true
+        "dormant": true,
+        "synchronous": true
       },
       {
         "name": "playbackLanePeaks",
         "ipc": null,
         "preload": null,
-        "dormant": true
+        "dormant": true,
+        "synchronous": true
       }
-    ]
+    ],
+    "desktopAddonNote": "Keep this file UTF-8 with no unicode escapes — its native reader implements a fixed escape set with no unicode case and ABORTS on one, so a JSON round-trip that escapes non-ASCII takes the sanitizer gate red. synchronous says whether the call blocks the JS thread. Every one of these did until preparePlayback moved to a libuv worker: decoding six lanes on Electron's main thread froze the window for 2.7 s, measured. The desktop still has no counterpart to the phones' positionNow, so the playhead is reconstructed from playbackStatus — which takes the session control mutex that open, start and stop hold across host calls."
   },
   "jni": {
     "kotlinExternals": [

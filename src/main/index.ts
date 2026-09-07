@@ -599,7 +599,7 @@ function registerIpc(): void {
   ipcMain.handle('audio-host:playback-capability', () => captureOwner.playbackCapability())
   ipcMain.handle(
     'audio-host:playback-prepare',
-    (event, rawConfig: unknown, rawLanes: unknown): DesktopPlaybackResult => {
+    async (event, rawConfig: unknown, rawLanes: unknown): Promise<DesktopPlaybackResult> => {
       if (!rawConfig || typeof rawConfig !== 'object' || !Array.isArray(rawLanes)) {
         log('dsp', 'graph refused · invalid-configuration · malformed prepare request', 'warn')
         return {
@@ -661,8 +661,11 @@ function registerIpc(): void {
           latency: { inputDeviceFrames: 0, outputDeviceFrames: 0, bufferFrames: 0, externalRouteFrames: 0 }
         }
       }
-      const result = captureOwner.preparePlayback(event.sender.id, config, authorized)
+      // Bound BEFORE the await: the graph is claimed inside the addon the
+      // moment the call is made, so a renderer that dies while it decodes
+      // must already have its cleanup wired.
       bindNativeAudioCleanup(event.sender)
+      const result = await captureOwner.preparePlayback(event.sender.id, config, authorized)
       // Both outcomes are logged by the owner, which is where the timing, the
       // seam and the negotiated format are known. Saying it twice here only
       // made the log harder to read.
