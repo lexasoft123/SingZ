@@ -9,7 +9,8 @@
   "scripts": {
     "dev": "electron-vite dev",
     "postinstall": "node scripts/apply-gdrive-config.cjs && node mobile/scripts/apply-gdrive-config.js",
-    "build": "node scripts/apply-gdrive-config.cjs && electron-vite build && node scripts/check-renderer-split.mjs",
+    "build": "node scripts/apply-gdrive-config.cjs && electron-vite build && node scripts/check-renderer-split.mjs && node scripts/check-capture-addon.cjs",
+    "capture:addon:check": "node scripts/check-capture-addon.cjs --strict",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json --composite false && tsc --noEmit -p tsconfig.web.json --composite false && tsc --noEmit -p tsconfig.tests.json && tsc --noEmit -p tsconfig.renderer-tests.json",
     "dist": "node scripts/dist.cjs",
