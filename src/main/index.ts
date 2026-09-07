@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, shell, systemPreferences, type WebContents } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, shell, systemPreferences, type MenuItemConstructorOptions, type WebContents } from 'electron'
 import { loadWindowState, trackWindowState } from './window-state'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
@@ -36,7 +36,6 @@ import type { ModelsProgress, ProjectSettings } from '../shared/types'
 import { allowRoot, isAllowed, stemsRoot } from './media'
 import { registerSource, registerTrack } from './source'
 import { log, logEntries, saveLog } from './log'
-import { contextMenuItems } from './context-menu'
 import { clearDirty, dirtyDirs, dirtySeq, dirtyState, isDirty, markProjectDirty, onDirty } from './sync-dirty'
 import { replaySyncLog, syncLog } from './sync-log'
 import { SyncScheduler } from './sync-scheduler'
@@ -184,13 +183,21 @@ function createWindow(): void {
     void shell.openExternal(url)
     return { action: 'deny' }
   })
-  // Electron ships no context menu of its own, so until this a right-click
-  // anywhere in the app did nothing at all — see contextMenuItems for what is
-  // offered and why.
+  // Electron ships no context menu of its own, so a right-click anywhere in
+  // the app did nothing. Nothing is offered over bare chrome: the app is
+  // `user-select: none` everywhere but the log, and a menu of greyed-out
+  // items is worse than none.
   win.webContents.on('context-menu', (_event, params) => {
-    const items = contextMenuItems(params)
-    if (items.length === 0) return
-    Menu.buildFromTemplate(items).popup({ window: win })
+    const items: MenuItemConstructorOptions[] = params.isEditable
+      ? [
+          { role: 'cut', enabled: params.editFlags.canCut },
+          { role: 'copy', enabled: params.editFlags.canCopy },
+          { role: 'paste', enabled: params.editFlags.canPaste }
+        ]
+      : params.selectionText.trim()
+        ? [{ role: 'copy' }]
+        : []
+    if (items.length) Menu.buildFromTemplate(items).popup({ window: win })
   })
 
   if (process.env['ELECTRON_RENDERER_URL']) {
