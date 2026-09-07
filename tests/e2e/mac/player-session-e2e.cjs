@@ -505,6 +505,12 @@ function judge(legacy, native) {
   }
   // Web Audio plays FROM the renderer's buffers, so legacy must still hold
   // them; the core plays from the stem files, so native must not.
+  //
+  // NECESSARY, NOT SUFFICIENT, and that is not a quibble: this rule passed for
+  // a build in which 675 MB of released lanes were still pinned by a memoized
+  // closure from an earlier render, because the two places it asks had both
+  // genuinely let go. `tests/e2e/mac/lane-residency-probe.cjs` is what answers
+  // the other half — whether the bytes actually come back.
   rows.push({
     rule: 'the renderer holds its own decode on legacy and has let it go on native',
     ok: legacy.lanesResident === true && native.lanesResident === false,

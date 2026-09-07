@@ -546,6 +546,12 @@ function publishBeatDbg(
   }
 }
 
+/**
+ * A lane from freshly decoded audio. Everything a lane needs FOREVER is taken
+ * here — the peaks, the length, the envelope scale — and the samples
+ * themselves are not kept: they go to the engine, which is their one owner
+ * and the only thing that can release them (see UITrack).
+ */
 function makeTrack(
   id: string,
   buffer: AudioBuffer,
@@ -554,7 +560,7 @@ function makeTrack(
   const meta = TRACK_META[id] ?? { label: id, color: '#bfb49d' }
   const { peaks, scale } = computePeaks(buffer)
   return {
-    id, ...meta, peaks, buffer, duration: buffer.duration, scale,
+    id, ...meta, peaks, duration: buffer.duration, scale,
     muted: false, solo: false, volume: 1, ...over
   }
 }
@@ -735,6 +741,10 @@ export default function App(): React.JSX.Element {
   } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [playing, setPlaying] = useState(false)
+  /** Whether the engine still holds this song's samples. Not the samples
+   *  themselves — a boolean cannot be pinned by a stale closure — just the
+   *  re-render that lets the waveforms ask the engine again. */
+  const [lanesResident, setLanesResident] = useState(true)
   const [nativePlaybackLeaseBlocked, setNativePlaybackLeaseBlocked] = useState(false)
   const enginePlaybackErrorRef = useRef(engine.playbackError)
   const [enginePlaybackToast, setEnginePlaybackToast] = useState(
@@ -1293,28 +1303,12 @@ export default function App(): React.JSX.Element {
   useEffect(() => engine.subscribe(() => {
     setPlaying(engine.playing)
     setNativePlaybackLeaseBlocked(engine.nativeMonitorOwnsOutput)
-    // The lanes on screen show whatever the engine is still holding. Once the
-    // native graph is playing the engine lets the samples go, and `Waveform`
-    // draws from `peaks` — which is what every view wider than 600 buckets
-    // draws from anyway. Mirrored in both directions, so a lane restored for
-    // a Web Audio fallback gets its sample-accurate zoom back.
-    //
-    // Skipped whenever the two sides disagree about WHICH lanes exist: this
-    // fires from inside `engine.load`, one `setTracks` before the app's own
-    // lane list catches up, and matching an old lane id against a new song's
-    // engine would put another song's samples on screen.
-    const live = engine.getTrackStates()
-    setTracks((ts) => {
-      if (ts.length !== live.length || ts.some((t, i) => t.id !== live[i].id)) return ts
-      let changed = false
-      const next = ts.map((t) => {
-        const buffer = engine.getTrackBuffer(t.id)
-        if (buffer === t.buffer) return t
-        changed = true
-        return { ...t, buffer }
-      })
-      return changed ? next : ts
-    })
+    // Nothing here mirrors the samples — the lanes have none to mirror, and
+    // that is the point (see UITrack). This is only the re-render that lets
+    // the waveforms ask the engine again: once the native graph takes the
+    // song they draw from `peaks`, and a Web Audio fallback that fetches the
+    // lanes back gets the sample-accurate zoom returned.
+    setLanesResident(engine.lanesResident)
     const playbackError = engine.playbackError
     if (playbackError !== enginePlaybackErrorRef.current) {
       enginePlaybackErrorRef.current = playbackError
@@ -1515,11 +1509,12 @@ export default function App(): React.JSX.Element {
       setShowProjects(false)
       setShowCatalog(false)
       /** Decode the project's added tracks into lanes; a missing one is skipped. */
-      const decodeCustom = async (defs?: CustomTrack[]): Promise<UITrack[]> => {
+      const decodeCustom = async (defs: CustomTrack[] | undefined, fresh: Map<string, AudioBuffer>): Promise<UITrack[]> => {
         const out: UITrack[] = []
         for (const c of defs ?? []) {
           try {
             const buf = await engine.decode(await window.singz.readAudio(c.file))
+            fresh.set(c.id, buf)
             out.push(makeTrack(c.id, buf, {
               label: c.label,
               color: c.color,
@@ -1577,13 +1572,17 @@ export default function App(): React.JSX.Element {
       }
           // Tracks the singer added themselves decode after the stems and sit
           // below them; one that no longer decodes must not sink the song.
+          // The samples travel to the engine in their own map and stop
+          // there; the lanes carry only what the screen needs.
+          const fresh = new Map<string, AudioBuffer>()
+          order.forEach((s, i) => fresh.set(s, buffers[i]))
           const lanes = [
             ...order.map((s, i) => makeTrack(s, buffers[i], { sourcePath: stems[s] })),
-            ...(await decodeCustom(proj.settings.custom))
+            ...(await decodeCustom(proj.settings.custom, fresh))
           ]
           if (seq !== loadSeq.current) return
           engine.load(
-            lanes.map((t) => ({ id: t.id, buffer: t.buffer, duration: t.duration, path: t.sourcePath })),
+            lanes.map((t) => ({ id: t.id, buffer: fresh.get(t.id) ?? null, duration: t.duration, path: t.sourcePath })),
             { graphDocument }
           )
           applySavedMix(lanes, proj.settings.tracks)
@@ -1691,13 +1690,14 @@ export default function App(): React.JSX.Element {
         if (seq !== loadSeq.current) return
         // A project saved before it was ever split has no stems, but it can
         // still carry tracks the singer added — those lanes come back here.
+        const fresh = new Map<string, AudioBuffer>([['original', audio]])
         const lanes = [
           makeTrack('original', audio, { sourcePath: reg.path }),
-          ...(await decodeCustom(reg.project?.settings.custom))
+          ...(await decodeCustom(reg.project?.settings.custom, fresh))
         ]
         if (seq !== loadSeq.current) return
         engine.load(
-          lanes.map((t) => ({ id: t.id, buffer: t.buffer, duration: t.duration, path: t.sourcePath })),
+          lanes.map((t) => ({ id: t.id, buffer: fresh.get(t.id) ?? null, duration: t.duration, path: t.sourcePath })),
           { graphDocument }
         )
         applySavedMix(lanes, reg.project?.settings.tracks)
@@ -1785,13 +1785,20 @@ export default function App(): React.JSX.Element {
    * whether it was playing survive the swap.
    */
   const loadLanes = useCallback(
-    (list: UITrack[]) => {
+    (list: UITrack[], fresh?: Map<string, AudioBuffer>) => {
       const position = engine.position
       const play = engine.playing
-      engine.load(
-        list.map((t) => ({ id: t.id, buffer: t.buffer, duration: t.duration, path: t.sourcePath })),
-        { position, play }
-      )
+      // A lane already in the engine keeps the samples it has — which may be
+      // none, if the native graph took them; the engine reads its file again
+      // when something needs them. Only lanes decoded just now bring audio.
+      // Read before `load`, which replaces the engine's lane set.
+      const inputs = list.map((t) => ({
+        id: t.id,
+        buffer: fresh?.get(t.id) ?? engine.getTrackBuffer(t.id),
+        duration: t.duration,
+        path: t.sourcePath
+      }))
+      engine.load(inputs, { position, play })
       for (const t of list) {
         if (t.muted) engine.setMuted(t.id, true)
         if (t.solo) engine.setSolo(t.id, true)
@@ -1872,10 +1879,15 @@ export default function App(): React.JSX.Element {
       )
       const { order, buffers } = audibleStems(rawOrder, decoded)
       // The stems replace the full-mix lane; tracks the singer added stay.
-      loadLanes([
-        ...order.map((s, i) => makeTrack(s, buffers[i], { sourcePath: stems[s] })),
-        ...tracksRef.current.filter((t) => t.custom)
-      ])
+      const fresh = new Map<string, AudioBuffer>()
+      order.forEach((s, i) => fresh.set(s, buffers[i]))
+      loadLanes(
+        [
+          ...order.map((s, i) => makeTrack(s, buffers[i], { sourcePath: stems[s] })),
+          ...tracksRef.current.filter((t) => t.custom)
+        ],
+        fresh
+      )
       setStemFiles(stems)
       setSplit(true)
       // Fresh stems in an open project are unsaved content.
@@ -1946,6 +1958,7 @@ export default function App(): React.JSX.Element {
       const taken = new Set(tracksRef.current.map((t) => t.id))
       const customSoFar = tracksRef.current.filter((t) => t.custom).length
       const added: UITrack[] = []
+      const fresh = new Map<string, AudioBuffer>()
       for (const file of files) {
         const path = window.singz.pathForFile(file)
         if (!path) {
@@ -1961,6 +1974,7 @@ export default function App(): React.JSX.Element {
           const buf = await engine.decode(await window.singz.readAudio(reg.path))
           const id = customTrackId(reg.name, taken)
           taken.add(id)
+          fresh.set(id, buf)
           added.push(
             makeTrack(id, buf, {
               label: trackLabel(reg.name),
@@ -1974,7 +1988,7 @@ export default function App(): React.JSX.Element {
         }
       }
       if (added.length === 0) return
-      loadLanes([...tracksRef.current, ...added])
+      loadLanes([...tracksRef.current, ...added], fresh)
       touchSettings()
       const names = added.map((t) => t.label).join(', ')
       const longest = Math.max(...added.map((t) => t.duration))
@@ -3523,6 +3537,7 @@ export default function App(): React.JSX.Element {
               <TrackStack
                 tracks={tracks}
                 engine={engine}
+                lanesResident={lanesResident}
                 view={view}
                 beat={metCfg.grid ? beatInfo : null}
                 onMoveBar={handleMoveBar}

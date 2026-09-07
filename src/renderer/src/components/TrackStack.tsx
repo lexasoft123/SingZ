@@ -11,6 +11,11 @@ const RULER_H = 30
 interface Props {
   tracks: UITrack[]
   engine: MultitrackEngine
+  /** Whether the engine still holds this song's samples. The lanes carry
+   *  none of their own (see UITrack), so this is what says whether a waveform
+   *  can draw from samples or must draw from peaks — and, being state, it is
+   *  also what re-renders this stack when the answer changes. */
+  lanesResident: boolean
   view: TimeView | null
   /** Beat track to rule the lanes with — null when the grid view is off. */
   beat: BeatInfo | null
@@ -93,6 +98,7 @@ function makeTicks(
 export default function TrackStack({
   tracks,
   engine,
+  lanesResident,
   view,
   beat,
   onMoveBar,
@@ -331,6 +337,14 @@ export default function TrackStack({
           <TrackLane
             key={t.id}
             track={t}
+            // Asked of the engine at render time rather than carried on the
+            // lane: the engine owns the samples and is what releases them to
+            // the native graph, and a copy anywhere in React state outlives
+            // that release inside a memoized closure (see UITrack). Null
+            // draws from `peaks`, which every view wider than the raw
+            // threshold uses anyway. `lanesResident` is what brings this
+            // render around when the engine's answer changes.
+            buffer={lanesResident ? engine.getTrackBuffer(t.id) : null}
             index={i}
             dimmed={anySolo && !t.solo}
             ducked={ducked.includes(t.id)}

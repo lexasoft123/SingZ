@@ -4,6 +4,9 @@ import Waveform from './Waveform'
 
 interface Props {
   track: UITrack
+  /** This lane's decoded audio, for sample-accurate drawing past the zoom
+   *  threshold — null once the native graph has taken it (see UITrack). */
+  buffer: AudioBuffer | null
   dimmed: boolean
   /** Vocal training is currently silencing this stem — the singer has it. */
   ducked: boolean
@@ -22,6 +25,7 @@ interface Props {
 
 export default function TrackLane({
   track,
+  buffer,
   dimmed,
   ducked,
   onMute,
@@ -144,7 +148,7 @@ export default function TrackLane({
       >
         <Waveform
           peaks={track.peaks}
-          buffer={track.buffer}
+          buffer={buffer}
           scale={track.scale}
           color={track.color}
           viewStart={viewStart}
