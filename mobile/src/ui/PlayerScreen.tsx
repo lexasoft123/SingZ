@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { laneSliverLevels, LANE_LEVEL_CHUNK, LANE_LEVEL_SLIVERS, LANE_LEVEL_WINDOW } from '../playback/lane-levels'
-import { Alert, DeviceEventEmitter, Image, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
+import { Alert, DeviceEventEmitter, Image, PixelRatio, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import {
   createNativeStackNavigator,
   type NativeStackNavigationProp,
@@ -76,7 +76,7 @@ import {
   white
 } from './bits'
 import { KIT } from './tokens'
-import { Canvas, LinearGradient as SkLinearGradient, RadialGradient, Rect, vec } from '@shopify/react-native-skia'
+import { BlurMask, Canvas, Circle, LinearGradient as SkLinearGradient, RadialGradient, Rect, vec } from '@shopify/react-native-skia'
 import { perf } from './perf'
 import SkiaLyrics, {
   layoutColumn,
@@ -148,6 +148,29 @@ const LEAD_S = 0.15
 const LYR_PAD = 26
 const LYR_TOP = 250
 const LYR_BOTTOM = 300
+
+/**
+ * Count-in dots above the scrubber. Circles, not a run of ●/○ glyphs: one
+ * text shadow over the whole run merges into a single smear, because the
+ * blur reaches further than the gap between glyphs. Each dot carries its OWN
+ * blur, `style="solid"` so the core stays opaque and the glow rides only
+ * outside it — the treatment the lyric canvas already gives its cue dots
+ * (SkiaLyrics).
+ *
+ * CUE_GLOW is a Gaussian SIGMA, not a reach: Skia draws a mask blur out to
+ * about 3σ. Pad the canvas by CUE_REACH or the glow is clipped flat at the
+ * rect — a hard edge, which is the very artifact this replaced. A shadow
+ * spills outside its box for free; a canvas has to own the room.
+ */
+const CUE_R = 4 * PixelRatio.getFontScale()
+const CUE_GLOW = 3 * PixelRatio.getFontScale()
+/** How far the paint actually carries, and so the canvas padding. */
+const CUE_REACH = CUE_R + 3 * CUE_GLOW
+const CUE_PITCH = 18 * PixelRatio.getFontScale()
+/** Bars stay legible as groups, the way the run put a space between them. */
+const CUE_BAR_GAP = 8 * PixelRatio.getFontScale()
+/** Ring for a beat not yet landed; the stroke straddles r, hence the inset. */
+const CUE_RING_W = 1.5 * PixelRatio.getFontScale()
 
 export default function PlayerScreen({
   active = true,
@@ -1658,16 +1681,55 @@ export default function PlayerScreen({
         <Image source={SCRIM_BOTTOM} style={{ width: '100%', height: '100%' }} resizeMode="stretch" />
       </View>
       <View style={[s.foot, { bottom: Math.max(12, insets.bottom + 2) }]}>
-        {countInDisplay && (
-          <Text
-            style={s.countInFoot}
-            /* Rendered as a run of ● and ○ characters, which a screen reader
-               reads out one bullet at a time. */
-            accessibilityLabel={countInDisplay.accessibilityLabel}
-          >
-            {countInDisplay.text}
-          </Text>
-        )}
+        {countInDisplay &&
+          (countInDisplay.beatDots && countInSt?.kind === 'beats' ? (
+            (() => {
+              /* Centre of each dot, with an extra gap at every bar edge. */
+              const xs: number[] = []
+              for (let i = 0; i < countInSt.total; i++) {
+                const bars = Math.floor(i / countInSt.perBar)
+                xs.push(CUE_REACH + i * CUE_PITCH + bars * CUE_BAR_GAP)
+              }
+              const w = (xs[xs.length - 1] ?? 0) + CUE_REACH
+              const h = 2 * CUE_REACH
+              return (
+                /* The canvas is decoration; the label is what a screen reader
+                   gets, said once instead of one bullet at a time. */
+                <View
+                  accessible
+                  accessibilityLabel={countInDisplay.accessibilityLabel}
+                  style={s.countInDots}
+                >
+                  <Canvas style={{ width: w, height: h }}>
+                    {xs.map((cx, i) =>
+                      i < countInSt.done ? (
+                        <Circle key={i} cx={cx} cy={h / 2} r={CUE_R} color={C.amber}>
+                          <BlurMask blur={CUE_GLOW} style="solid" />
+                        </Circle>
+                      ) : (
+                        /* Beats still to come: the ring alone, unlit — the
+                           glow is what says a beat has landed. */
+                        <Circle
+                          key={i}
+                          cx={cx}
+                          cy={h / 2}
+                          r={CUE_R - CUE_RING_W / 2}
+                          color={C.amber}
+                          style="stroke"
+                          strokeWidth={CUE_RING_W}
+                        />
+                      )
+                    )}
+                  </Canvas>
+                </View>
+              )
+            })()
+          ) : (
+            /* The time count-in stays text — it is a number, not beats. */
+            <Text style={s.countInFoot} accessibilityLabel={countInDisplay.accessibilityLabel}>
+              {countInDisplay.text}
+            </Text>
+          ))}
         {/* The seek bar is the player's primary control, and the layout says
             so: full screen width, thumb height, drawn as the song's waveform
             — scrub by shape, see the chorus coming. The gesture, the touch
@@ -2668,11 +2730,21 @@ const s = StyleSheet.create({
      the only lyric glyph left in RN, because a system face has no emoji */
   micMark: { position: 'absolute', left: 0, top: 0, fontSize: 19, lineHeight: 37 },
   /* metronome count-in: dots fill beat by beat above the scrubber */
+  /* The canvas reserves room for the glow on every side. Only the dot band
+     should occupy layout, so the pure-spill padding is pulled back — a text
+     shadow spilled for free and the dock must not jump when a count-in
+     starts. */
+  countInDots: {
+    alignSelf: 'center',
+    marginTop: -(CUE_REACH - CUE_R),
+    marginBottom: 8 - (CUE_REACH - CUE_R)
+  },
+  /* Only the time count-in ("3s") comes through here now; the letter spacing
+     that separated ●/○ would just kern the number off centre. */
   countInFoot: {
     color: C.amber,
     paddingHorizontal: 22,
     fontSize: 13,
-    letterSpacing: 6,
     textAlign: 'center',
     marginBottom: 8,
     textShadowColor: 'rgba(255,160,40,0.6)',
