@@ -160,7 +160,46 @@ block a `v*` tag):
 
 **Parked by decision, each its own project:** the per-target codec proofs, one shared
 engine-contract suite across both legacy engines and the facade, and the desktop's
-playing-CPU residual (the graph's own render thread, ~1.4% of a core).
+playing-CPU residual — which has since been split per process, and is not what it was
+assumed to be (below).
+
+### Where the desktop's playing-CPU delta actually sits (2026-09-08)
+
+The harness sums the whole process tree, so its "+2.4 points while playing" never said
+WHICH process spends them. Measured per process on the mac, Deutschland (323 s, six
+lanes), the view reset to the whole song, median of three 2 s windows, repeated:
+
+| process | legacy | native | delta |
+|---|---|---|---|
+| main | 0.1 | 1.7 | **+1.6** |
+| renderer | 11.9 | 12.6 | +0.7 |
+| gpu | 17.1 | 20.8 | **+3.7** |
+| all | 29.3 | 35.1 | +5.8 |
+
+`main` is the core's own render thread, which is the ~1.4 points this list already
+accepted, and it is real work the legacy engine does elsewhere. **The surprise is the GPU
+process**, which is most of the delta and had never been attributed. Two explanations
+were tested and both are wrong:
+
+- **Not the renderer's AudioContext.** It is `suspended` for the whole native pass — the
+  engine only ever resumes it on the Web Audio play path (and for a metronome preview
+  tap), so under native it never starts. It costs nothing, and a plausible-looking day's
+  work on suspending it would have found nothing to suspend.
+- **Not the playhead.** `TrackStack` quantizes `--p` to whole device pixels and writes
+  only on change; instrumented, both backends write it **8.5 and 8.4 times a second with
+  no repeated values at all** — the quantizer is exact and the native clock does not
+  jitter across a pixel boundary.
+
+So the GPU delta is still unexplained and wants a Chrome trace of the GPU process, not
+another guess. Recorded here so the next attempt starts after these two, not before them.
+
+**Incidental, and worth more than the delta:** the app costs **~30% of a core at the
+whole-song view and ~80% zoomed in to a couple of seconds**, on either backend. At that
+zoom the playhead genuinely crosses a device pixel every frame, so `--p` is written ~82
+times a second and every write damages the playhead strip, six reveal clips and any glass
+above them — by design, and the comment in `TrackStack` says so. A project reopens at the
+view it was saved in, so a singer who left one zoomed pays that on every open. Nobody had
+measured it.
 
 ## Why the legacy engine measures faster: an architecture comparison
 
@@ -1136,6 +1175,35 @@ row to squeeze. The footprint rows therefore stay red on the desktop by decision
 way backgrounding stays uncompared, and the harness prints them so the number is never
 forgotten. The desktop's Step 4 closes here: every timing rule at parity or better, the
 seam, the projected clock, the intent-based park and the prepare ahead.
+
+**Native playback is the DEFAULT on Windows as of 2026-09-08 (tip c3252a0).** The
+condition `native-playback-preference.ts` set for itself was "until the field laptop's
+session reads the same"; three runs of the desktop session harness on WASAPI read
+**18/19, 17/19 and 18/19, with no rule red in more than one of them**:
+
+| run | reds |
+|---|---|
+| 1 | seek read-back, native 81 ms vs 17 (red on macOS at this tip too) |
+| 2 | the first open, twice — native 4048 vs legacy 2075 to the player |
+| 3 | training on → advancing, 60 ms against a legacy 0 with a 50 ms budget |
+
+The first-open red is **bimodal on that machine and flipped sign between runs** — run 1
+read native 2105 against legacy 4111, run 2 read native 4048 against legacy 2075. What
+the singer waits for is better and repeatably so: Play → advancing 181 ms against
+241–301, end of song → Play 61–92 against 211–240, every seam landed, no fatal native
+line in any pass. Against the 15/18 below, the two CONSISTENT reds — the first open,
+twice ~2 s slower — are gone, which is the prepare moving off the main thread
+(`44832c9`).
+
+The rows the whole exercise was for now read on Windows too: *"the renderer holds its own
+decode on legacy and has let it go on native — legacy true · native false"* passed in
+every run, so the Windows fleet gets the lane release with the default.
+
+Not a cleaner result than macOS's, the same shape of one; Settings carries the toggle.
+Linux has never run the harness and stays on Web Audio. The tree was staged by copying
+the previous verify tree's `node_modules` and its **prebuilt addon** — which the identity
+check accepted, because the addon is content-addressed by the native sources and
+`native/` and `zdsp/` had not moved since.
 
 **Windows native playback has run, on the field laptop (2026-09-06, tip ab2e856):** the
 desktop harness, shipped as an exported tree with a prestaged library (`PS_LIB`; the
