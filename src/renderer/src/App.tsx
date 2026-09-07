@@ -885,6 +885,17 @@ export default function App(): React.JSX.Element {
   const sepRunningRef = useRef(false)
   sepRunningRef.current = sep !== null
   const vocalsBufRef = useRef<AudioBuffer | null>(null)
+  /**
+   * The vocals lane's length, kept beside the buffer and set at the same
+   * moments, so it survives the buffer being released.
+   *
+   * Deliberately a ref and not `tracks`: `prepMelody` runs inside the load,
+   * before React has committed the lane state — reading the length from
+   * `tracksRef` there finds nothing, the staleness gate takes its "no lane at
+   * all" arm, and a v1 melody is adopted instead of re-derived. That is what
+   * `stamp-upgrade-e2e.cjs` caught.
+   */
+  const vocalsSecondsRef = useRef<number | null>(null)
   /** Where the vocals stem in `vocalsBufRef` came from. The melody is tracked
    *  from the FILE, not from that buffer: `decodeAudioData` resamples to the
    *  playback device's rate, and every analysis derives something from the
@@ -1417,6 +1428,7 @@ export default function App(): React.JSX.Element {
       melodyWorkerRef.current = null
       void window.singz.cancelAnalyzeNative() // the core's children die with the song too
       vocalsBufRef.current = null
+      vocalsSecondsRef.current = null
       stemPathsRef.current = null
       audibleIdsRef.current = []
       drumsBufRef.current = null
@@ -1526,6 +1538,7 @@ export default function App(): React.JSX.Element {
           setStemFiles(stems)
           setIsProject(true)
           vocalsBufRef.current = buffers[order.indexOf('vocals')] ?? null
+          vocalsSecondsRef.current = vocalsBufRef.current?.duration ?? null
           stemPathsRef.current = stems
           audibleIdsRef.current = order
           drumsBufRef.current = buffers[order.indexOf('drums')] ?? null
@@ -1801,6 +1814,7 @@ export default function App(): React.JSX.Element {
       setDirty(true)
       setSaveState((st) => (st === 'saved' ? 'idle' : st))
       vocalsBufRef.current = buffers[order.indexOf('vocals')] ?? null
+      vocalsSecondsRef.current = vocalsBufRef.current?.duration ?? null
       stemPathsRef.current = stems
       audibleIdsRef.current = order
       drumsBufRef.current = buffers[order.indexOf('drums')] ?? null
@@ -2269,19 +2283,28 @@ export default function App(): React.JSX.Element {
     if (melodyRef.current.status !== 'none') return
     const stored = storedMelodyRef.current
     const buf = vocalsBufRef.current
+    // The vocals lane's length, NOT `buf.duration`. These are the same number
+    // and two different questions: how long the song is, and whether its
+    // samples are in hand. Reading the length off the buffer ties the
+    // staleness check to residency, so a released lane would take the "no
+    // lane at all" arm below and adopt a stored line WITHOUT checking that it
+    // fits — precisely the cross-song contamination that arm's own comment is
+    // about. The vocals lane specifically, not engine.duration: lanes may
+    // differ in length, since a custom track can outlast the song.
+    const songSeconds = vocalsSecondsRef.current
     // A stored line tracked by THIS detector, and covering THIS song, is
     // adopted as it is — the pitch strip draws instantly instead of after
     // seconds of pYIN, and the phones' copy of the song stays the line the
     // singer already practised against. An older stamp — or a line whose
     // length says it was tracked from a different song — is re-tracked, and
     // the fresh line saves itself, which is how the two projects that caught a
-    // neighbour's line heal on the next open. With no vocals stem to track
-    // from (a project whose stems went missing) even a stale line beats none.
+    // neighbour's line heal on the next open. With no vocals lane at all (a
+    // project whose stems went missing) even a stale line beats none.
     if (
       stored &&
-      (!buf ||
+      (songSeconds === null ||
         (!analysisIsStale(stored.info.detVersion, PITCH_DETECT_VERSION) &&
-          melodyFitsSong(stored.f0, stored.info.hopSec, buf.duration)))
+          melodyFitsSong(stored.f0, stored.info.hopSec, songSeconds)))
     ) {
       storedMelodyRef.current = null
       ;(window as { __melody?: unknown }).__melody = {

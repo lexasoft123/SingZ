@@ -134,12 +134,52 @@ zero-or-one-sample duration makes every stored melody look like it was tracked
 from a different song, so the line re-tracks and auto-saves on every open —
 the exact corruption `melodyFitsSong` exists to catch.
 
+## Every holder has a second meaning, and that is the actual work
+
+Discovered by doing the first two steps rather than by reading. A holder is
+never only "the samples": each one is also a CONDITION somewhere, and
+releasing it answers that condition wrongly and silently. The type system
+cannot see any of this — `stamp-upgrade-e2e.cjs` caught the first one, unit
+tests and typecheck were green throughout.
+
+- **`vocalsBufRef`** is the samples AND "is there a song to measure". The
+  melody staleness gate read `buf.duration` for the length and `!buf` for "no
+  vocals lane at all — adopt whatever is stored". Release the buffer and the
+  second reading fires: a stale v1 melody is adopted instead of re-derived,
+  which is the cross-song contamination that arm exists to prevent. Fixed by
+  giving the length its own ref, set wherever the buffer is.
+  Beware the obvious repair: reading the length from `tracks` instead looks
+  equivalent and is not. `prepMelody` runs inside the load, before React has
+  committed the lane state, so `tracksRef` is empty there and the gate takes
+  the same wrong arm. It has to be a ref written beside the buffer.
+- **`originalBufRef`** is the samples AND "can a split provide PCM".
+  `if (status.needsPcm && originalBufRef.current)` skips `provideSplitInput`
+  entirely when the buffer is gone — no error, no PCM, a split that proceeds
+  without its input. The song file is on disk (`song.path` is right there in
+  the same call), so this one wants a re-decode, not a guard.
+- **The four analysis refs** are the fallback AND what Re-detect reads live.
+  `analysisStems`/`melodyInput` prefer `decodeStemAtFileRate(path)` and use
+  the refs only when a stem cannot be read at its own rate, so releasing them
+  removes a fallback rather than a primary — but it removes it at Re-detect
+  time, not at load, which is where it will be noticed.
+
+The lesson for the remaining steps: for each holder, find what asks "is it
+there?" before deciding what to do about the samples themselves.
+
 ## Shape, if it goes ahead
 
 - ~~Kit first: `Waveform` takes a nullable buffer and falls back to peaks.~~
   **Done** — `@singz/ui` v1.7.0, and both apps are on it.
-- `UITrack` carries `duration` (and the engine takes it from the lane rather
-  than the buffer), so nothing reads duration off a released lane.
+- ~~`UITrack` carries `duration`.~~ **Done** — the lane carries it, and the
+  song length, the per-lane view fractions, the added-track notice and the
+  start-offset clamp all read it rather than a buffer.
+- ~~The melody staleness gate stops reading its length off the buffer.~~
+  **Done** — `vocalsSecondsRef`, see above for why not `tracks`.
+- **`prepMelody`'s `if (!buf) return`.** Once the buffer really is released,
+  a stale or non-fitting stored line falls past the adopt arm into that early
+  return and is neither adopted nor re-tracked — a silently empty pitch strip.
+  The core leg above it is file-driven and unaffected; it is the early return
+  that has to learn to fetch samples rather than give up.
 - Release covers the lane AND the analysis/original refs, or those refs are
   converted to read from files at their own rate — the path `analysisStems`
   already prefers.
