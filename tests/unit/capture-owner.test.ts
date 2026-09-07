@@ -304,7 +304,7 @@ function fakeBinding(): NativeCaptureBinding & {
       this.activeMonitorGeneration = undefined
       return monitorEndResult(generation.toString())
     },
-    preparePlayback(_config, _lanes, generation) {
+    async preparePlayback(_config, _lanes, generation) {
       return playbackResult(generation.toString())
     },
     openPlaybackOutput: (generation) => playbackResult(generation.toString()),
@@ -328,7 +328,7 @@ function fakeBinding(): NativeCaptureBinding & {
 }
 
 describe('CaptureOwner', () => {
-  it('reports the full decoder matrix only for the exact proven runtime binding', () => {
+  it('reports the full decoder matrix only for the exact proven runtime binding', async () => {
     const codecRuntime: CaptureCodecRuntime = {
       format: 1,
       profile: DESKTOP_PLAYBACK_CODEC_PROFILE,
@@ -355,7 +355,7 @@ describe('CaptureOwner', () => {
         extensions: [...DESKTOP_PLAYBACK_CODEC_FULL_EXTENSIONS]
       }
     })
-    expect(owner.preparePlayback(7, playbackConfig(), [{
+    expect(await owner.preparePlayback(7, playbackConfig(), [{
       ...playbackLanes()[0], path: '/authorized/reference.m4a'
     }], 'darwin')).toMatchObject({ ok: true })
 
@@ -364,24 +364,24 @@ describe('CaptureOwner', () => {
       available: true,
       mediaCodec: { formatMask: 0x003, dynamicallyLinkedFfmpeg: false }
     })
-    expect(baseOwner.preparePlayback(7, playbackConfig(), [{
+    expect(await baseOwner.preparePlayback(7, playbackConfig(), [{
       ...playbackLanes()[0], path: '/authorized/reference.m4a'
     }], 'darwin')).toMatchObject({ ok: false, errorCode: 'invalid-configuration' })
   })
 
-  it('binds every desktop prepare to the exact v4 addon capability and v2 DTO', () => {
+  it('binds every desktop prepare to the exact v4 addon capability and v2 DTO', async () => {
     const binding = fakeBinding()
     let prepares = 0
     let nativeProvider = ''
     let nativeAccessMode = ''
-    binding.preparePlayback = ((config, _lanes, generation) => {
+    binding.preparePlayback = (async (config, _lanes, generation) => {
       prepares++
       nativeProvider = config.provider
       nativeAccessMode = config.accessMode
       return playbackResult(generation.toString())
     })
     const owner = new CaptureOwner(binding)
-    expect(owner.preparePlayback(7, playbackConfig(), playbackLanes(), 'darwin')).toMatchObject({
+    expect(await owner.preparePlayback(7, playbackConfig(), playbackLanes(), 'darwin')).toMatchObject({
       ok: true,
       generation: '1'
     })
@@ -395,25 +395,25 @@ describe('CaptureOwner', () => {
       capability: 'singz.native.playback-session.q32-time-pitch.v3'
     } as unknown as DesktopPlaybackStatus)
     let stalePrepares = 0
-    staleBinding.preparePlayback = ((_config, _lanes, generation) => {
+    staleBinding.preparePlayback = (async (_config, _lanes, generation) => {
       stalePrepares++
       return playbackResult(generation.toString())
     })
     const staleOwner = new CaptureOwner(staleBinding)
-    expect(staleOwner.preparePlayback(7, playbackConfig(), playbackLanes(), 'darwin')).toMatchObject({
+    expect(await staleOwner.preparePlayback(7, playbackConfig(), playbackLanes(), 'darwin')).toMatchObject({
       ok: false,
       errorCode: 'platform-not-ready'
     })
     expect(stalePrepares).toBe(0)
   })
 
-  it('mutes the native master gain under SINGZ_MUTE, at prepare and on every later set', () => {
+  it('mutes the native master gain under SINGZ_MUTE, at prepare and on every later set', async () => {
     // Automated runs are silent; Chromium's mute-audio never covered the
     // native graph, and a driver's one-second Play came out of the speakers
     // once native became the default.
     const seen: number[] = []
     const binding = fakeBinding()
-    binding.preparePlayback = ((config, _lanes, generation) => {
+    binding.preparePlayback = (async (config, _lanes, generation) => {
       seen.push(config.masterGain)
       return { ...playbackResult(generation.toString()), ownershipRetained: true }
     })
@@ -425,14 +425,14 @@ describe('CaptureOwner', () => {
     try {
       process.env.SINGZ_MUTE = '1'
       const owner = new CaptureOwner(binding)
-      expect(owner.preparePlayback(7, { ...playbackConfig(), masterGain: 0.8 }, playbackLanes(), 'darwin').ok).toBe(true)
+      expect((await owner.preparePlayback(7, { ...playbackConfig(), masterGain: 0.8 }, playbackLanes(), 'darwin')).ok).toBe(true)
       expect(owner.setPlaybackMasterGain(7, '1', 0.9)).toMatchObject({ ok: true })
       expect(seen).toEqual([0, 0])
 
       delete process.env.SINGZ_MUTE
       seen.length = 0
       const audibleBinding = fakeBinding()
-      audibleBinding.preparePlayback = ((_config, _lanes, generation) =>
+      audibleBinding.preparePlayback = (async (_config, _lanes, generation) =>
         ({ ...playbackResult(generation.toString()), ownershipRetained: true }))
       let arrived = -1
       audibleBinding.setPlaybackMasterGain = ((generation, gain) => {
@@ -440,7 +440,7 @@ describe('CaptureOwner', () => {
         return playbackResult(generation.toString())
       })
       const audible = new CaptureOwner(audibleBinding)
-      expect(audible.preparePlayback(7, { ...playbackConfig(), masterGain: 0.8 }, playbackLanes(), 'darwin').ok).toBe(true)
+      expect((await audible.preparePlayback(7, { ...playbackConfig(), masterGain: 0.8 }, playbackLanes(), 'darwin')).ok).toBe(true)
       expect(audible.setPlaybackMasterGain(7, '1', 0.9).ok).toBe(true)
       expect(arrived).toBe(0.9)
     } finally {
@@ -449,7 +449,7 @@ describe('CaptureOwner', () => {
     }
   })
 
-  it('fails closed with the typed native reason when ASIO is not compiled', () => {
+  it('fails closed with the typed native reason when ASIO is not compiled', async () => {
     const binding = fakeBinding()
     const owner = new CaptureOwner(binding)
     expect(owner.playbackProviders('win32').find((row) => row.id === 'asio')).toEqual({
@@ -459,7 +459,7 @@ describe('CaptureOwner', () => {
       errorCode: 'not-compiled',
       detail: 'SDK unavailable'
     })
-    expect(owner.preparePlayback(7, {
+    expect(await owner.preparePlayback(7, {
       ...playbackConfig(),
       provider: 'asio',
       accessMode: 'exclusive',
@@ -471,10 +471,10 @@ describe('CaptureOwner', () => {
     })
   })
 
-  it('rejects stale or unknown desktop prepare contracts before native ownership', () => {
+  it('rejects stale or unknown desktop prepare contracts before native ownership', async () => {
     const binding = fakeBinding()
     let prepares = 0
-    binding.preparePlayback = ((_config, _lanes, generation) => {
+    binding.preparePlayback = (async (_config, _lanes, generation) => {
       prepares++
       return playbackResult(generation.toString())
     })
@@ -483,7 +483,7 @@ describe('CaptureOwner', () => {
       ...playbackConfig(),
       capability: 'singz.native.playback-session.q32-time-pitch.v3'
     } as unknown as DesktopPlaybackPrepareConfig
-    expect(owner.preparePlayback(7, staleCapability, playbackLanes(), 'darwin')).toMatchObject({
+    expect(await owner.preparePlayback(7, staleCapability, playbackLanes(), 'darwin')).toMatchObject({
       ok: false,
       errorCode: 'invalid-configuration'
     })
@@ -491,7 +491,7 @@ describe('CaptureOwner', () => {
       ...playbackConfig(),
       playback: { ...playbackConfig().playback, version: 99 }
     } as unknown as DesktopPlaybackPrepareConfig
-    expect(owner.preparePlayback(7, unknownVersion, playbackLanes(), 'darwin')).toMatchObject({
+    expect(await owner.preparePlayback(7, unknownVersion, playbackLanes(), 'darwin')).toMatchObject({
       ok: false,
       errorCode: 'invalid-configuration'
     })
@@ -499,7 +499,7 @@ describe('CaptureOwner', () => {
       ...playbackConfig(),
       accessMode: 'exclusive'
     } as DesktopPlaybackPrepareConfig
-    expect(owner.preparePlayback(7, mismatchedProviderAccess, playbackLanes(), 'darwin')).toMatchObject({
+    expect(await owner.preparePlayback(7, mismatchedProviderAccess, playbackLanes(), 'darwin')).toMatchObject({
       ok: false,
       errorCode: 'invalid-configuration'
     })
@@ -902,7 +902,7 @@ describe('CaptureOwner', () => {
     expect(owner.beginMonitor(32, config)).toMatchObject({ ok: true, ownershipGeneration: '2' })
   })
 
-  it('admits a SEAM — a prepare naming the active generation from its owner — and moves the active generation with it', () => {
+  it('admits a SEAM — a prepare naming the active generation from its owner — and moves the active generation with it', async () => {
     // The one prepare allowed while a player is active. The core prepares the
     // candidate on the running generation's stream and retires the old graph
     // itself, so no unload for the old generation ever arrives from the
@@ -913,19 +913,19 @@ describe('CaptureOwner', () => {
     // The real addon retains ownership of every generation it claims, and
     // takes generations as BigInt — the seam's field included.
     const swapFieldsSeen: unknown[] = []
-    binding.preparePlayback = (config, _lanes, generation) => {
+    binding.preparePlayback = async (config, _lanes, generation) => {
       if ('swapFromGeneration' in config) swapFieldsSeen.push(config.swapFromGeneration)
       return { ...playbackResult(generation.toString()), ownershipRetained: true }
     }
     const owner = new CaptureOwner(binding)
-    expect(owner.preparePlayback(7, playbackConfig(), playbackLanes(), 'darwin')).toMatchObject({ ok: true, generation: '1' })
-    expect(owner.preparePlayback(7, playbackConfig(), playbackLanes(), 'darwin')).toMatchObject({
+    expect(await owner.preparePlayback(7, playbackConfig(), playbackLanes(), 'darwin')).toMatchObject({ ok: true, generation: '1' })
+    expect(await owner.preparePlayback(7, playbackConfig(), playbackLanes(), 'darwin')).toMatchObject({
       ok: false, errorCode: 'native-audio-busy', generation: '1'
     })
-    expect(owner.preparePlayback(8, { ...playbackConfig(), swapFromGeneration: '1' }, playbackLanes(), 'darwin')).toMatchObject({
+    expect(await owner.preparePlayback(8, { ...playbackConfig(), swapFromGeneration: '1' }, playbackLanes(), 'darwin')).toMatchObject({
       ok: false, errorCode: 'native-audio-busy'
     })
-    expect(owner.preparePlayback(7, { ...playbackConfig(), swapFromGeneration: '1' }, playbackLanes(), 'darwin')).toMatchObject({
+    expect(await owner.preparePlayback(7, { ...playbackConfig(), swapFromGeneration: '1' }, playbackLanes(), 'darwin')).toMatchObject({
       ok: true, generation: '2'
     })
     expect(swapFieldsSeen).toEqual([1n])
@@ -934,11 +934,11 @@ describe('CaptureOwner', () => {
     expect(owner.startPlayback(7, '2')).toMatchObject({ ok: true })
     expect(owner.startPlayback(7, '1')).toMatchObject({ ok: false, errorCode: 'invalid-generation' })
     // A seam naming a generation that is not the active one never reaches the addon.
-    expect(owner.preparePlayback(7, { ...playbackConfig(), swapFromGeneration: '1' }, playbackLanes(), 'darwin')).toMatchObject({
+    expect(await owner.preparePlayback(7, { ...playbackConfig(), swapFromGeneration: '1' }, playbackLanes(), 'darwin')).toMatchObject({
       ok: false, errorCode: 'native-audio-busy'
     })
     expect(owner.unloadPlayback(7, '2')).toMatchObject({ ok: true })
-    expect(owner.preparePlayback(7, { ...playbackConfig(), swapFromGeneration: '2' }, playbackLanes(), 'darwin')).toMatchObject({
+    expect(await owner.preparePlayback(7, { ...playbackConfig(), swapFromGeneration: '2' }, playbackLanes(), 'darwin')).toMatchObject({
       ok: false, errorCode: 'invalid-generation'
     })
   })

@@ -34,6 +34,15 @@
  * every desktop driver until now read only the engine, which was right all
  * along while the button was wrong. The phones learned this first.
  *
+ *   4. MAIN STAYS ANSWERABLE WHILE A GRAPH IS BUILT. `preparePlayback` used
+ *      to be a synchronous N-API call: decoding six lanes on Electron's main
+ *      thread, so nothing in the app answered for the duration. Measured
+ *      against the same song either side of the fix — before, main's own
+ *      event loop had a 2621 ms gap ending on the millisecond `graph ready`
+ *      was logged, and ticked 57 times through the run; after, 107 ticks and
+ *      a worst gap of 272 ms, which is the addon's dylib load and happens
+ *      before the prepare starts.
+ *
  * The whole run is also judged on the log: ANY dsp warning or error fails it.
  * Main writes one only when a native command was refused, threw, or came back
  * incomplete, so there is no such thing as a benign one during a clean
@@ -216,7 +225,25 @@ const buildCount = (lines) => lines.filter((x) => /^preparing graph/.test(x.line
       fail.push(`the core is ${core} and the button says ${button ? 'playing' : 'stopped'}`)
     }
 
-    // ── 3. Play the FIRST song after another one ────────────────────────
+    // ── 3. Main answers while the graph is built ────────────────────────
+    //
+    // The heartbeat runs in MAIN and measures its own event-loop lag, which
+    // is the only place that answers "is the app frozen". The renderer is the
+    // wrong vantage point: it decodes its own Web Audio copy of the song and
+    // blocks itself, which is a different (and still open) problem.
+    await app.evaluate(() => {
+      globalThis.__beat = { worst: 0, ticks: 0 }
+      let last = Date.now()
+      globalThis.__beatTimer = setInterval(() => {
+        const now = Date.now()
+        const lag = now - last - 50
+        last = now
+        globalThis.__beat.ticks += 1
+        if (lag > globalThis.__beat.worst) globalThis.__beat.worst = lag
+      }, 50)
+    })
+
+    // ── 4. Play the FIRST song after another one ────────────────────────
     //
     // The sequence the field report actually came from, and the one that
     // costs two builds when it is broken: leave a song, open a different one,
@@ -243,6 +270,20 @@ const buildCount = (lines) => lines.filter((x) => /^preparing graph/.test(x.line
     if (switchBuilds !== 1) {
       fail.push(`opening ${SONG_B} after ${SONG} cost ${switchBuilds} graph builds — one of them is for the wrong song`)
     }
+
+    const beat = await app.evaluate(() => {
+      clearInterval(globalThis.__beatTimer)
+      return globalThis.__beat
+    })
+    console.log(`main loop through the switch: ${beat.ticks} ticks · worst lag ${beat.worst} ms`)
+    // A prepare is seconds long, so a blocked main shows up here as a gap of
+    // that order. The bar is deliberately well under the build it spans: the
+    // measured lag after the fix is the addon load, and the measured lag
+    // before it was the whole 2.6 s decode.
+    if (beat.worst > 1200) {
+      fail.push(`main's event loop stalled ${beat.worst} ms while a graph was built`)
+    }
+    if (beat.ticks < 20) fail.push(`main only ticked ${beat.ticks} times — too few to judge`)
 
     // ── The log has the last word ───────────────────────────────────────
     const all = await logSince(win, t0)

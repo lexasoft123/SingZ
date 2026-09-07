@@ -67,11 +67,14 @@ export interface NativeCaptureBinding {
   setMonitorGain(generation: bigint, gainDb: number, enabled: boolean): DesktopMonitorResult
   monitorStatus(): DesktopMonitorStatus
   endMonitor(generation: bigint): DesktopMonitorResult
+  /** Resolves when the graph is built. The decode alone is seconds long, so
+   *  it runs on a worker: see the addon's PrepareJob for what stays on the
+   *  JS thread either side of it. */
   preparePlayback(
     config: DesktopPlaybackPrepareConfig,
     lanes: DesktopPlaybackLaneConfig[],
     generation: bigint
-  ): DesktopPlaybackResult
+  ): Promise<DesktopPlaybackResult>
   openPlaybackOutput(generation: bigint): DesktopPlaybackResult
   startPlayback(generation: bigint): DesktopPlaybackResult
   pausePlayback(generation: bigint): DesktopPlaybackResult
@@ -932,6 +935,13 @@ export class CaptureOwner {
   private monitorHighWater = 0n
   private playbackGeneration = ''
   private playbackRendererId: number | null = null
+  /** A prepare in flight: the generation the core has already claimed, and
+   *  who asked for it. See preparePlayback for why this is recorded before
+   *  the await rather than after it. */
+  private playbackPending: { generation: string; rendererId: number } | null = null
+  /** Set by a teardown that found a prepare in flight, so the graph is
+   *  unloaded when it lands instead of outliving the app. */
+  private playbackAbandoned = false
   /** Re-anchor log throttling; see reanchorPlayback(). */
   private reanchorGeneration = ''
   private reanchorCount = 0
@@ -1300,12 +1310,12 @@ export class CaptureOwner {
     }
   }
 
-  preparePlayback(
+  async preparePlayback(
     rendererId: number,
     config: DesktopPlaybackPrepareConfig,
     lanes: DesktopPlaybackLaneConfig[],
     platform: NodeJS.Platform = process.platform
-  ): DesktopPlaybackResult {
+  ): Promise<DesktopPlaybackResult> {
     // Every refusal below is an answer to "why did this song end up on Web
     // Audio?" — the renderer's fallback is deliberately silent, so the reason
     // has to be written down here or it is written down nowhere.
@@ -1314,6 +1324,13 @@ export class CaptureOwner {
       log('dsp', `graph refused · ${result.errorCode} · ${result.error}`, 'warn')
       return result
     }
+    // One graph at a time, and this guard cannot be folded into the busy
+    // check below: `playbackGeneration` is still '' while a prepare is in
+    // flight, so nothing else here can see one. The addon refuses the second
+    // call too — but by then this owner would already have overwritten the
+    // first one's pending record, which is what keeps its graph unloadable.
+    if (this.playbackPending)
+      return refused('A native playback graph is already being built.', 'native-audio-busy')
     // A SEAM names the running generation it replaces (the core prepares the
     // candidate on that generation's stream and retires the old graph
     // itself): the one prepare that is allowed while a player is active, and
@@ -1397,7 +1414,26 @@ export class CaptureOwner {
           (seamOfOwn ? ` · seam from ${config.swapFromGeneration}` : ' · fresh start')
       )
       const preparedAt = Date.now()
-      const result = binding.preparePlayback(nativeConfig, lanes, generation)
+      // Recorded BEFORE the await, not after. The core claims the generation
+      // synchronously inside the addon, so from this instant it owns audio
+      // resources — and the whole point of this call being asynchronous is
+      // that a renderer can go away, or the app can quit, while it decodes.
+      // Waiting for the result to record it left that window with no owner
+      // on record, so `rendererGone()` and `stop()` would skip the unload and
+      // the generation would hold the device with nobody to release it.
+      this.playbackPending = { generation: rawGeneration, rendererId }
+      let result: DesktopPlaybackResult
+      let abandoned = false
+      try {
+        result = await binding.preparePlayback(nativeConfig, lanes, generation)
+      } finally {
+        // Both in the finally, and both belonging to THIS call: a prepare
+        // that throws must not leave the flag stuck true, because every later
+        // rendererGone() would then tear down capture and monitoring too.
+        this.playbackPending = null
+        abandoned = this.playbackAbandoned
+        this.playbackAbandoned = false
+      }
       if (result.ok)
         log(
           'dsp',
@@ -1422,6 +1458,17 @@ export class CaptureOwner {
       if (result.generation === rawGeneration && result.ownershipRetained === true) {
         this.playbackGeneration = rawGeneration
         this.playbackRendererId = rendererId
+        // The renderer that asked for this graph is gone, or the app is on
+        // its way out, and the teardown that would have unloaded it ran while
+        // the decode was still going. Nothing else will ever unload it.
+        if (abandoned) {
+          log(
+            'dsp',
+            `graph ready for a caller that left · generation ${rawGeneration} · unloading`,
+            'warn'
+          )
+          this.unloadPlayback(rendererId, rawGeneration)
+        }
       }
       return result
     } catch (error) {
@@ -1715,9 +1762,14 @@ export class CaptureOwner {
   }
 
   rendererGone(rendererId: number): void {
+    // A graph still decoding for this renderer has no generation on record
+    // yet, so stop() below cannot unload it. Mark it instead: prepare unloads
+    // it the moment it lands.
+    const preparingForThisRenderer = this.playbackPending?.rendererId === rendererId
+    if (preparingForThisRenderer) this.playbackAbandoned = true
     if (
       rendererId === this.rendererId || rendererId === this.monitorRendererId ||
-      rendererId === this.playbackRendererId
+      rendererId === this.playbackRendererId || preparingForThisRenderer
     ) this.stop()
   }
 
@@ -1729,6 +1781,11 @@ export class CaptureOwner {
   }
 
   stop(): void {
+    // Same reason as in rendererGone: a prepare in flight owns audio the
+    // unload below cannot name. On the quit path the addon's env cleanup
+    // hook is the fail-closed owner — it cancels the decode and unloads —
+    // and this flag covers the teardowns the process survives.
+    if (this.playbackPending) this.playbackAbandoned = true
     if (this.playbackGeneration && this.binding) {
       try {
         const result = this.binding.unloadPlayback(BigInt(this.playbackGeneration))

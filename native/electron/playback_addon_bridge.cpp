@@ -7,10 +7,13 @@
 #include <algorithm>
 #include <charconv>
 #include <cmath>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <initializer_list>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -35,9 +38,72 @@ struct DesktopPlaybackOwner {
   uint64_t generation{0};
   uint64_t handoffLease{0};
   std::string provider;
+  // A prepare runs on a libuv worker (see preparePlayback): decoding six
+  // lanes takes seconds, and doing it on the JS thread froze the whole app.
+  // At most ONE is ever in flight — a second is refused under `mutex` — so
+  // the "chain one outstanding" ordering the design wants is structural
+  // rather than a queue. `mutex` guards the bookkeeping either side of the
+  // run and is NEVER held across it; the session does its own locking and
+  // holds none of it while decoding, which is what leaves status() and the
+  // commands answerable meanwhile.
+  bool preparePending{false};
+  uint64_t preparePendingGeneration{0};
+  // Signalled by the worker when the prepare call itself returns, so a
+  // teardown can wait for it without the JS thread's completion callback
+  // having run. Deliberately its own mutex: the worker must be able to
+  // signal without contending for the bookkeeping lock.
+  std::mutex prepareMutex;
+  std::condition_variable prepareIdle;
+  bool prepareRunning{false};
 };
 
 DesktopPlaybackOwner playback;
+
+/**
+ * Wait out an in-flight prepare, having first asked it to stop.
+ *
+ * Called before an unload and from the env cleanup hook. Cancellation is what
+ * bounds the wait: `requestCancellation` takes neither the session's control
+ * mutex nor anything the decode holds, the lane-decode pool polls it, and the
+ * prepare then unwinds promptly instead of finishing a song nobody wants. A
+ * queue alone would have made this WORSE than the synchronous code it
+ * replaces — an unload merely queued behind a prepare is observed only once
+ * the decode has finished, which turns a cancellable prepare into an
+ * uncancellable one.
+ */
+void drainPendingPrepare() noexcept {
+  uint64_t pending = 0;
+  {
+    std::lock_guard<std::mutex> lock(playback.prepareMutex);
+    if (!playback.prepareRunning) return;
+    pending = playback.preparePendingGeneration;
+  }
+  if (pending != 0) playback.session.requestCancellation(pending);
+  // What this waits for is the WORKER, not the completion callback — and it
+  // cannot be otherwise: `prepareComplete` runs on the JS thread, which is
+  // the thread calling this, so waiting for it here would deadlock outright.
+  // That is enough for what the drain is for: once `session.prepare` has
+  // returned, no other thread is touching the session, which is what an
+  // unload and an env teardown need. The window between the worker finishing
+  // and its completion callback running is closed on the JS side instead,
+  // and the two cases close differently. A FRESH start has no generation on
+  // record yet, so nothing can name it: `capture.ts` refuses a second prepare
+  // while one is pending and never unloads a generation it has not recorded.
+  // A SEAM can be unloaded in that window — the running generation is still
+  // the old one — and what saves it is that `armSwap` has already moved the
+  // session's active generation to the candidate, so the late unload of the
+  // old one fails `currentForCommand`, ownership is NOT released, and the
+  // rekey in `prepareComplete` still succeeds. A change that let a stale
+  // unload release ownership would break that silently.
+  std::unique_lock<std::mutex> lock(playback.prepareMutex);
+  // Bounded, though every path that sets the flag also clears it. A lost
+  // signal here would otherwise hang the app on quit with no way out, and a
+  // hung quit is a worse outcome than a worker the process outlives — the
+  // wait is long enough that expiry means something is genuinely wrong, not
+  // that a decode was slow.
+  playback.prepareIdle.wait_for(lock, std::chrono::seconds(30),
+                                [] { return !playback.prepareRunning; });
+}
 
 napi_value makeUndefined(napi_env env) {
   napi_value value{};
@@ -1188,6 +1254,141 @@ bool consumeProviderDeviceUid(const std::string &provider,
 #endif
 }
 
+/**
+ * One prepare, carried from the JS thread to a worker and back.
+ *
+ * The bookkeeping either side of it stays on the JS thread under
+ * `playback.mutex` — claiming the generation and acquiring ownership BEFORE
+ * the run (so a second prepare is refused while this one decodes), and the
+ * seam's rekey AFTER it (so the addon's notion of the active generation moves
+ * only once the core has taken the candidate). Only `session.prepare` itself,
+ * the part that takes seconds, runs on the worker.
+ */
+struct PrepareJob {
+  napi_deferred deferred{nullptr};
+  napi_async_work work{nullptr};
+  NativePlaybackPrepareConfig config;
+  std::vector<NativePlaybackLaneSource> lanes;
+  uint64_t generation{0};
+  // Non-zero for a SEAM: the running generation this candidate replaces.
+  uint64_t replaced{0};
+  NativePlaybackResult result;
+};
+
+void prepareExecute(napi_env, void *data) {
+  auto *job = static_cast<PrepareJob *>(data);
+  job->result = playback.session.prepare(std::move(job->config),
+                                         std::move(job->lanes),
+                                         job->generation);
+  {
+    std::lock_guard<std::mutex> lock(playback.prepareMutex);
+    playback.prepareRunning = false;
+  }
+  playback.prepareIdle.notify_all();
+}
+
+void prepareComplete(napi_env env, napi_status status, void *data) {
+  std::unique_ptr<PrepareJob> job(static_cast<PrepareJob *>(data));
+  bool retained = true;
+  {
+    std::lock_guard<std::mutex> lock(playback.mutex);
+    playback.preparePending = false;
+    playback.preparePendingGeneration = 0;
+    if (job->replaced != 0) {
+      // Took: the lease and the addon's notion of "the active generation"
+      // move forward with it; the old one is the core's to retire. Refused:
+      // the candidate's claim is spent and nothing of it exists — the running
+      // generation is exactly as it was, and main must not move either.
+      retained = job->result.ok &&
+                 playback.ownership->rekey(NativeAudioOwnerKind::Playback,
+                                           job->replaced, job->generation);
+      if (retained) playback.generation = job->generation;
+    }
+  }
+  // Unreachable today — nothing calls napi_cancel_async_work — but if that
+  // ever changes, prepareExecute never ran, so the flag it clears must be
+  // cleared here or drainPendingPrepare would wait for a worker that never
+  // started. The generation it claimed is still the bridge's to unload,
+  // exactly as a failed prepare's is.
+  if (status == napi_cancelled) {
+    {
+      std::lock_guard<std::mutex> running(playback.prepareMutex);
+      playback.prepareRunning = false;
+    }
+    playback.prepareIdle.notify_all();
+    job->result = simpleFailure(NativePlaybackError::InvalidState,
+                                job->generation,
+                                "Native playback prepare was cancelled");
+  }
+  napi_value result = resultValue(env, job->result);
+  setValue(env, result, "ownershipRetained", makeBool(env, retained));
+  napi_resolve_deferred(env, job->deferred, result);
+  napi_delete_async_work(env, job->work);
+}
+
+/**
+ * Hand `job` to a worker; the caller has already done the bookkeeping.
+ *
+ * CALLED WITH `playback.mutex` HELD — preparePlayback takes it for the whole
+ * admission and this is its tail call. Nothing here may lock it again.
+ */
+napi_value runPrepareJob(napi_env env, std::unique_ptr<PrepareJob> job) {
+  // Whatever goes wrong from here, the generation has already been claimed
+  // and (on a fresh start) ownership acquired, so it stays main's to unload:
+  // the flags come back down, and the result says ownershipRetained.
+  const auto abandon = [&](const char *reason) {
+    {
+      std::lock_guard<std::mutex> running(playback.prepareMutex);
+      playback.prepareRunning = false;
+    }
+    playback.prepareIdle.notify_all();
+    playback.preparePending = false;
+    playback.preparePendingGeneration = 0;
+    napi_value failed = resultValue(
+        env, simpleFailure(NativePlaybackError::InvalidState, job->generation,
+                           reason));
+    // A fresh start has already acquired ownership, so its generation stays
+    // main's to unload. A SEAM candidate never owned anything — the running
+    // generation is exactly as it was, and saying otherwise would move main
+    // onto a graph that does not exist.
+    setValue(env, failed, "ownershipRetained",
+             makeBool(env, job->replaced == 0));
+    return failed;
+  };
+  napi_value promise{};
+  // The one exit that is not thenable, because the thing that failed IS the
+  // promise. `await` on a plain object yields the object, so the caller reads
+  // the same refusal shape either way.
+  if (napi_create_promise(env, &job->deferred, &promise) != napi_ok)
+    return abandon("Native playback could not defer prepare");
+  napi_value name{};
+  napi_create_string_utf8(env, "singzPreparePlayback", NAPI_AUTO_LENGTH, &name);
+  PrepareJob *raw = job.get();
+  if (napi_create_async_work(env, nullptr, name, prepareExecute,
+                             prepareComplete, raw, &raw->work) != napi_ok) {
+    napi_resolve_deferred(env, job->deferred,
+                          abandon("Native playback could not schedule prepare"));
+    return promise;
+  }
+  if (napi_queue_async_work(env, raw->work) != napi_ok) {
+    napi_delete_async_work(env, raw->work);
+    napi_resolve_deferred(env, job->deferred,
+                          abandon("Native playback could not schedule prepare"));
+    return promise;
+  }
+  job.release();
+  return promise;
+}
+
+/** Resolve a promise immediately with a result the caller already has. */
+napi_value settledPromise(napi_env env, napi_value result) {
+  napi_deferred deferred{};
+  napi_value promise{};
+  if (napi_create_promise(env, &deferred, &promise) != napi_ok) return result;
+  napi_resolve_deferred(env, deferred, result);
+  return promise;
+}
+
 napi_value preparePlayback(napi_env env, napi_callback_info info) {
   size_t argc = 3;
   napi_value argv[3]{};
@@ -1199,12 +1400,26 @@ napi_value preparePlayback(napi_env env, napi_callback_info info) {
   if (argc != 3 || !exactU64(env, argv[2], &generation) ||
       !parseConfig(env, argv[0], &config, &provider) ||
       !parseLanes(env, argv[1], &lanes))
-    return resultValue(
-        env, simpleFailure(NativePlaybackError::InvalidConfiguration,
-                           generation,
-                           "Playback configuration or lane paths are invalid"));
+    return settledPromise(
+        env, resultValue(env,
+                         simpleFailure(
+                             NativePlaybackError::InvalidConfiguration,
+                             generation,
+                             "Playback configuration or lane paths are invalid")));
 
   std::lock_guard<std::mutex> lock(playback.mutex);
+  // One at a time. The facade serializes its own calls, but the refusal is
+  // what makes "at most one outstanding" a property of the bridge rather
+  // than a habit of its caller — and during a SEAM the running generation is
+  // still the old one, so nothing else would catch a second candidate.
+  if (playback.preparePending)
+    return settledPromise(
+        env, resultValue(env,
+                         simpleFailure(NativePlaybackError::InvalidState,
+                                       generation,
+                                       "A native playback prepare is already "
+                                       "in flight"),
+                         "native-audio-busy"));
   if (config.swapFromGeneration != 0) {
     // A SEAM: the candidate replaces the running generation on its stream.
     // No new backend, no new device lease — the stream, its format and its
@@ -1213,87 +1428,99 @@ napi_value preparePlayback(napi_env env, napi_callback_info info) {
     // generation may be named, and only on the provider it runs on.
     if (playback.generation == 0 ||
         config.swapFromGeneration != playback.generation)
-      return resultValue(env,
+      return settledPromise(env, resultValue(env,
                          simpleFailure(NativePlaybackError::InvalidGeneration,
                                        generation,
                                        "A native playback seam must name the "
                                        "active generation"),
-                         "invalid-generation");
+                         "invalid-generation"));
     if (provider != playback.provider ||
         !consumeProviderDeviceUid(provider, &config.outputDeviceUid))
-      return resultValue(
-          env, simpleFailure(NativePlaybackError::InvalidConfiguration,
-                             generation,
-                             "A native playback seam keeps the running "
-                             "provider and device"));
+      return settledPromise(
+          env, resultValue(
+                   env, simpleFailure(NativePlaybackError::InvalidConfiguration,
+                                      generation,
+                                      "A native playback seam keeps the running "
+                                      "provider and device")));
     const uint64_t replaced = playback.generation;
     const NativePlaybackResult claimed =
         playback.session.claimGeneration(generation, 0);
-    if (!claimed.ok) return resultValue(env, claimed);
+    if (!claimed.ok) return settledPromise(env, resultValue(env, claimed));
     config.handoffLease = 0;
-    const NativePlaybackResult prepared = playback.session.prepare(
-        std::move(config), std::move(lanes), generation);
-    // Took: the lease and the addon's notion of "the active generation" move
-    // forward with it; the old one is the core's to retire. Refused: the
-    // candidate's claim is spent and nothing of it exists — the running
-    // generation is exactly as it was, and main must not move either.
-    const bool took = prepared.ok &&
-                      playback.ownership->rekey(NativeAudioOwnerKind::Playback,
-                                                replaced, generation);
-    if (took) playback.generation = generation;
-    napi_value result = resultValue(env, prepared);
-    setValue(env, result, "ownershipRetained", makeBool(env, took));
-    return result;
+    auto job = std::make_unique<PrepareJob>();
+    job->config = std::move(config);
+    job->lanes = std::move(lanes);
+    job->generation = generation;
+    job->replaced = replaced;
+    playback.preparePending = true;
+    playback.preparePendingGeneration = generation;
+    {
+      std::lock_guard<std::mutex> running(playback.prepareMutex);
+      playback.prepareRunning = true;
+    }
+    return runPrepareJob(env, std::move(job));
   }
   if (playback.generation != 0)
-    return resultValue(env,
-                       simpleFailure(NativePlaybackError::InvalidState,
-                                     generation,
-                                     "Another native playback session is active"),
-                       "native-audio-busy");
+    return settledPromise(
+        env, resultValue(env,
+                         simpleFailure(NativePlaybackError::InvalidState,
+                                       generation,
+                                       "Another native playback session is active"),
+                         "native-audio-busy"));
   std::string unavailableReason;
   std::unique_ptr<AudioHostBackend> backend = playback.backendFactory == nullptr
       ? nullptr
       : playback.backendFactory(provider, &unavailableReason);
   if (!backend || !consumeProviderDeviceUid(provider, &config.outputDeviceUid))
-    return resultValue(
+    return settledPromise(
         env,
-        simpleFailure(
-            NativePlaybackError::InvalidConfiguration, generation,
-            unavailableReason.empty()
-                ? "The requested native audio provider or device identity is unavailable"
-                : unavailableReason),
-        "platform-not-ready");
+        resultValue(
+            env,
+            simpleFailure(
+                NativePlaybackError::InvalidConfiguration, generation,
+                unavailableReason.empty()
+                    ? "The requested native audio provider or device identity is unavailable"
+                    : unavailableReason),
+            "platform-not-ready"));
   if (!playback.session.replaceAudioHostBackend(std::move(backend)))
-    return resultValue(
-        env, simpleFailure(NativePlaybackError::InvalidState, generation,
-                           "The native audio provider cannot change while playback owns resources"));
+    return settledPromise(
+        env,
+        resultValue(
+            env, simpleFailure(NativePlaybackError::InvalidState, generation,
+                               "The native audio provider cannot change while playback owns resources")));
   const NativeAudioAcquireResult acquired = playback.ownership->acquire(
       NativeAudioOwnerKind::Playback, generation);
   if (acquired != NativeAudioAcquireResult::Acquired)
-    return resultValue(env,
-                       simpleFailure(NativePlaybackError::InvalidState,
-                                     generation,
-                                     "Another native audio owner is active"),
-                       acquired == NativeAudioAcquireResult::Busy
-                           ? "native-audio-busy"
-                           : "invalid-generation");
+    return settledPromise(
+        env, resultValue(env,
+                         simpleFailure(NativePlaybackError::InvalidState,
+                                       generation,
+                                       "Another native audio owner is active"),
+                         acquired == NativeAudioAcquireResult::Busy
+                             ? "native-audio-busy"
+                             : "invalid-generation"));
   const uint64_t handoff = playback.handoffLease;
   NativePlaybackResult claimed =
       playback.session.claimGeneration(generation, handoff);
   if (!claimed.ok) {
     playback.ownership->release(NativeAudioOwnerKind::Playback, generation);
-    return resultValue(env, claimed);
+    return settledPromise(env, resultValue(env, claimed));
   }
   playback.handoffLease = 0;
   playback.generation = generation;
   playback.provider = provider;
   config.handoffLease = handoff;
-  napi_value result = resultValue(
-      env, playback.session.prepare(std::move(config), std::move(lanes),
-                                    generation));
-  setValue(env, result, "ownershipRetained", makeBool(env, true));
-  return result;
+  auto job = std::make_unique<PrepareJob>();
+  job->config = std::move(config);
+  job->lanes = std::move(lanes);
+  job->generation = generation;
+  playback.preparePending = true;
+  playback.preparePendingGeneration = generation;
+  {
+    std::lock_guard<std::mutex> running(playback.prepareMutex);
+    playback.prepareRunning = true;
+  }
+  return runPrepareJob(env, std::move(job));
 }
 
 template <typename Invoke>
@@ -1542,6 +1769,12 @@ napi_value unloadPlaybackWithRetention(napi_env env,
     return resultValue(
         env, simpleFailure(NativePlaybackError::InvalidGeneration, 0,
                            "Playback generation is invalid"));
+  // Cancel and wait out a prepare still decoding, BEFORE taking the
+  // bookkeeping lock its completion also wants. Unload is the one command
+  // that cannot simply run beside a prepare: it is the caller saying this
+  // generation is over, and the receipt it returns must describe a session
+  // that has stopped working on it.
+  drainPendingPrepare();
   std::lock_guard<std::mutex> lock(playback.mutex);
   NativePlaybackUnloadReceipt receipt =
       playback.session.unloadWithCleanup(generation, retention);
@@ -1991,6 +2224,9 @@ void definePlaybackExports(napi_env env, napi_value exports,
 }
 
 void cleanupPlaybackBridge() noexcept {
+  // The env is going away: a worker still decoding would outlive it, and its
+  // completion callback would touch an env that is closing.
+  drainPendingPrepare();
   std::lock_guard<std::mutex> lock(playback.mutex);
   const uint64_t generation = playback.generation;
   if (generation == 0 || playback.ownership == nullptr)

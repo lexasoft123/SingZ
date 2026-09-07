@@ -68,6 +68,22 @@ describe('desktop playback addon exports', () => {
     }
   })
 
+  // The field would otherwise document rather than pin: a method that goes
+  // async and forgets it would be invisible. `preparePlayback` decodes six
+  // lanes, so it is the one that must not run on the JS thread — that was a
+  // 2.7 s freeze of the whole app, reported from the field.
+  it('marks exactly the promise-returning export as not synchronous, and the addon agrees', () => {
+    const asynchronous = manifest.methods.desktopAddon.filter(m => m.synchronous === false)
+    expect(asynchronous.map(m => m.name)).toEqual(['preparePlayback'])
+    for (const method of manifest.methods.desktopAddon) {
+      expect(typeof method.synchronous).toBe('boolean')
+    }
+    // The addon's own proof: prepare hands the session call to a worker and
+    // answers with a promise.
+    expect(addon).toContain('napi_create_async_work(env, nullptr, name, prepareExecute')
+    expect(addon).toContain('napi_create_promise(env, &job->deferred, &promise)')
+  })
+
   // An export with no caller is indistinguishable from one whose caller was
   // deleted by accident, so the two dormant ones are pinned as dormant rather
   // than left unmentioned. If either is ever wired up, this is the test that
