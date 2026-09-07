@@ -70,14 +70,31 @@ block a `v*` tag):
    | CPU (idle-in-player) | 28.5% vs 27.1% (budget 28.1) | 28.5 vs 27.0 (budget 28.0) |
    | PSS (idle-in-player) | native 987 vs legacy 915 MB | 990 vs 924 |
 
-   The last two are the ones that carry information: idle-in-player is sampled BEFORE
-   Play, so neither can be about the transport, and the recorded run 4a-4 had native's
-   idle CPU at 17.5. The three timings are all control-plane, all on the native side, all
-   roughly doubled. Not yet bisected across the sixteen commits since the last run; the
-   two obvious suspects by subject are `67e7133` (the frame-paced start watch) and
-   `822671d` (the count-in's own timer), but the first is bounded at 3 s and self-clearing
-   and neither runs before Play, so neither explains the idle rows. **This is the release
-   blocker it was written to find.**
+   **And the idle CPU row is not a native-playback regression at all**, which is the
+   finding worth acting on. The eighth run above (`poco-run-4c-1.log`, 57/58, same POCO)
+   recorded idle-in-player at **15.5% native / 16.0% legacy**. This run reads **28.5% /
+   27.0%**. BOTH backends nearly doubled. A shared regression cannot be in the playback
+   backend — it is in the UI or the JS the player screen runs while it sits still, and it
+   costs the singer's phone the same either way. The rule fails only incidentally, because
+   native's is 1.5 points the higher of two numbers that both moved.
+
+   The other rows read the same way once that is seen: idle-in-player is sampled BEFORE
+   Play, so neither it nor PSS can be about the transport, and the three timings are all
+   control-plane work on a JS thread that is now twice as busy.
+
+   Not yet bisected across the sixteen commits since. The two whose subjects suggest
+   themselves — `67e7133` (the frame-paced start watch) and `822671d` (the count-in's own
+   timer) — are both bounded, self-clearing and armed only at Play, so neither can explain
+   an idle row; and neither is shared with legacy. A commit on the shared path is what to
+   look for, and `fa5b758` (the `@singz/ui` v1.7.0 bump) is the one that fits that
+   description.
+
+   Caveats on the comparison, so it is not over-read: this APK was built arm64-only and
+   with `-PdebugAppIdSuffix=.debug`, and the phone also carries a release SingZ. The CPU
+   sample is per-pid, so a neighbour app does not enter it, but the device is not in the
+   same state 4c-1 found it in.
+
+   **This is the release blocker the run was written to find.**
 2. **The Android relaunch crash.** Two deaths in nine harness runs on optimized-core
    builds; the tombstone lands in RN's own `pullTransaction` with react-native-screens and
    reanimated as the delegate registrants and no frame of ours in any of 62 threads; a
