@@ -1,7 +1,9 @@
 # The desktop's second copy of every song — scope
 
-Status: **scoped, not started** (2026-09-07). Bigger than it looks; the two
-things that make it so are in "What the first draft got wrong".
+Status: **kit landed, app change not started** (2026-09-07). The bytes are
+reclaimable — measured below — and the shape is bigger than it looks; the two
+things that make it so are in "What the first draft got wrong". `@singz/ui`
+v1.7.0 ships the nullable `buffer` this needs, and both apps are on it.
 
 ## The cost
 
@@ -16,8 +18,10 @@ lanes in the graph, and the renderer's `AudioBuffer` per lane. Measured by
 | pitch change | 659 MB | 813 MB | +154 |
 | after leaving | 749 MB | 813 MB | +64 |
 
-Those are the four rules that harness reports red "by decision". The delta is
-the renderer's copy: legacy holds one, native holds two.
+Those are the four rules that harness reports red "by decision": legacy holds
+one copy of the song, native holds two. The delta is the SECOND copy — see the
+measured section for which of the two it is, and why that is not the one this
+work removes.
 
 **And it is macOS-only value today.** `desktopNativePlaybackPreferred` returns
 the stored choice, else `platform === 'darwin'` — Windows is still Web Audio by
@@ -55,14 +59,61 @@ that would have wasted the work — see below.
 8. **`prepMelody`'s staleness gate** — `melodyFitsSong(stored.f0, hopSec,
    buf.duration)` with `buf = vocalsBufRef.current`.
 
+## Measured, 2026-09-07: the bytes are reclaimable, and only a COMPLETE release returns them
+
+The doubt this had to settle was whether dropping references returns anything
+at all, given Chromium has no `AudioBuffer.release()`. A driver opened
+Deutschland (323.06 s, six stereo lanes) under native playback, forced GC with
+`--js-flags=--expose-gc`, and read the RENDERER process alone with
+`footprint -p <pid>`:
+
+| | renderer footprint |
+|---|---|
+| holding the lanes | 914 MB |
+| after dropping ONLY `engine.tracks[].buffer` | 865 MB |
+| after also dropping the React lane state and the analysis/original refs | **126 MB** |
+
+**This is NOT the number "The cost" reports, and the two must not be
+compared.** `player-session-e2e.cjs` sums `top`'s MEM column across the whole
+process tree — main, renderer, GPU, utility — on its own ~2-minute staged
+song. This is one process, a different metric, and a song two and a half times
+longer. It answers a different question, deliberately: *is the renderer's copy
+reclaimable at all?*
+
+Three conclusions:
+
+- **Reachability is retired.** 788 MB came back. Those six lanes are
+  6 × 323.06 s × 2 ch × 48 kHz × 4 B = 744 MB decimal — the same order, and
+  the excess is consistent with the peaks and analysis arrays going with them.
+  (`footprint` reports binary units and the computed figure is decimal, so
+  this is an order-of-magnitude agreement, not a match.) The rate is the
+  OUTPUT DEVICE's, not the file's — `decodeAudioData` resamples, so the same
+  song costs 684 MB against a 44.1 kHz device. The harness's staged song is
+  122.4 s, which scales to ~282 MB — still well above its largest delta, so
+  the comparison below is a cross-song extrapolation, safe in direction
+  rather than in magnitude.
+- **Timing is NOT retired.** This run forced GC, which production does not.
+  The Risks section below still stands in full.
+- **A partial release returns 6% and looks finished.** Dropping the engine's
+  lane references alone — the obvious change, and what the first draft of this
+  scope described — moved 49 MB of the 788.
+
+One thing the experiment implies that "The cost" does not say: the +80…+154 MB
+the harness reports is what NATIVE ADDS, i.e. the core's own decoded lanes.
+The renderer's copy — what this work removes — is the larger figure. Releasing
+it should take native's footprint BELOW legacy's rather than merely level with
+it. If it does not, the two copies are not the same size, and that is worth
+knowing before anything is claimed.
+
 ## What the first draft got wrong
 
 Both errors were found in review, before any code.
 
 **The analysis refs pin the same objects.** (7) holds its own references to the
 very `AudioBuffer`s the lanes hold. Dropping `track.buffer` alone frees
-NOTHING — the measured delta would not move, and the work would look done. Any
-release has to cover the lane and all five refs, or be scoped so those refs
+almost nothing — 49 MB of the 788 measured above — and the work would look
+done. Any release has to cover the lane, the four analysis refs and
+`originalBufRef`, or be scoped so those refs
 are re-read from files instead (which is what `analysisStems` prefers already;
 the refs are its fallback).
 
@@ -85,7 +136,8 @@ the exact corruption `melodyFitsSong` exists to catch.
 
 ## Shape, if it goes ahead
 
-- Kit first: `Waveform` takes a nullable buffer and falls back to peaks.
+- ~~Kit first: `Waveform` takes a nullable buffer and falls back to peaks.~~
+  **Done** — `@singz/ui` v1.7.0, and both apps are on it.
 - `UITrack` carries `duration` (and the engine takes it from the lane rather
   than the buffer), so nothing reads duration off a released lane.
 - Release covers the lane AND the analysis/original refs, or those refs are
@@ -107,7 +159,10 @@ fifth song).
   lands.
 - **GC is not release.** Chromium has no `AudioBuffer.release()` (the phones
   patched one in — audio-api patch 4). Dropping the last reference is all the
-  renderer can do, so the rows move on the collector's schedule, not ours.
+  renderer can do, so the rows move on the collector's schedule, not ours —
+  the measurement above forced GC explicitly, which production will not. The
+  harness samples per phase, so confirm the rows actually move before claiming
+  them.
 - **`prepMelody` and Re-detect are the blast radius** if a release is wrong:
   a wrong duration corrupts a stored line and saves it.
 
