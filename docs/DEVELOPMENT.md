@@ -9,6 +9,116 @@ scripts/build-onnx-pack.sh     # splitter pack for win32-x64 / darwin-x64
 npm run dev
 ```
 
+The desktop capture *addon* is a stable Node-API module built explicitly for
+the Electron version installed in `node_modules`. It is the in-process
+transport for the shared `AudioInput` core. Karaoke mic matching still captures
+via `getUserMedia` (echo cancellation intact), and vocal training talks to the
+same core through the spawned `singz-analyze` session (`src/main/audio-input.ts`).
+The experimental headphone monitor is app-shell owned: Settings configures its
+device, channels, gain and native DSP graph, while the persistent top bar keeps
+its status and Stop control available after Settings closes. It transfers
+exclusive output ownership from Web Audio before opening the native graph, and
+restores Web Audio readiness without resuming the song when monitoring ends.
+Swapping karaoke or vocal training capture onto the addon remains a deliberate
+future step, not a side effect of building it:
+
+```bash
+npm run capture:addon                    # current platform/architecture
+npm run capture:addon -- darwin-arm64   # release inputs on macOS
+npm run capture:addon -- darwin-x64
+npm run capture:addon -- win32-x64      # on Windows
+npm run capture:verify                  # load + compiled identity check
+npm run dist                            # host package; builds/verifies addon
+npm run dist -- --mac --x64             # cross-architecture package input
+npm run dist -- --mac --universal       # builds arm64 + x64 capture inputs
+```
+
+The script downloads Electron headers into ignored `.engines-src/`, builds
+with CMake under ignored `build/capture-<target>`, and publishes an immutable,
+content-addressed runtime artifact under this checkout's ignored
+`build/capture-runtime/<target>/<source-fingerprint>/<artifact-sha>/<generation>/`.
+The artifact carries a source sidecar, raw SHA-256 sidecar and manifest. Mac
+manifests also seal a signature-invariant canonical Mach-O digest: signatures
+are removed on a private copy, only codesign-owned `__LINKEDIT` virtual size is
+normalized, and meaningful thin/fat slices are hashed by CPU identity;
+`current.json` selects that exact immutable generation. A corrupt generation is
+never overwritten (especially important for a loaded Windows DLL): rebuilding
+publishes a fresh path, validates its Mach-O/PE architecture, then moves the
+selector. The builder fingerprints the source tree again after CMake and before
+selector publication, aborting if an edit raced the build. Capture never publishes into `vendor/`: that
+directory is shared by all worktrees, while `build/` is deliberately local.
+The app independently fingerprints this checkout's native inputs and only
+resolves the matching immutable path, so another worktree cannot redirect it.
+
+Each build also prepares a coherent per-worktree packaging snapshot under
+`build/capture-package/<target>/`. `electron-builder` copies that snapshot
+outside the asar beside the engines, including its manifest and both sidecars.
+The `dist.cjs` wrapper interprets builder platform/architecture flags, builds
+every requested capture target, verifies every checksum/manifest, load-smokes
+the host architecture inside Electron, then forwards the original flags. This
+is why release workflows call `npm run dist -- ...`, not electron-builder
+directly. Input/config/prepackaged overrides and ambiguous combined or valued
+target flags are rejected because they could make electron-builder package a
+different project, extraResources set or architecture than the addon wrapper
+verified. Cross-architecture Mac builds are supported; cross-OS builds are
+rejected until the project has a real toolchain (`--win` runs on Windows and
+`--mac` on macOS). A local universal package also needs the pre-existing whisper/analyze
+engines for both Mac architectures; the release workflow prepares those before
+calling the wrapper. The wrapper lipos both capture slices first and gives each
+temporary app the same addon and identity evidence; ad-hoc signing is deferred
+until electron-builder has merged the final universal bundle. A plain
+system-Node load is not the ABI gate.
+
+macOS signing rewrites the nested addon's Mach-O signature bytes after the
+package snapshot's SHA-256 was written. Development, environment overrides,
+Windows and every pre-package snapshot therefore require exact raw SHA-256.
+Only the default addon inside a packaged macOS app may differ: its sidecars
+must still exactly match the validated manifest, `codesign --verify --strict`
+must accept the transformed Mach-O, its canonical digest must equal the sealed
+manifest digest, and the loaded addon's compiled Electron and source identity
+must match the manifest. A new self-consistent ad-hoc signature is therefore
+not evidence for changed code. The package E2E deliberately
+removes and recreates the nested signature, reseals the app, proves the raw
+bytes changed, and load-smokes that narrow path; it then changes a compiled
+source-stamp byte, re-signs again, and proves canonical verification rejects it
+before native code loads.
+
+Package snapshots have one writer per checkout. This is the same repository
+rule that requires parallel sessions to use separate worktrees; the publisher
+does not add a stale lock. It validates a per-process staging directory, moves
+the last good snapshot aside, and restores it if installation fails. Old
+runtime generations are pruned only after a seven-day grace while retaining
+the eight newest; `current.json` is never removed, macOS mappings reported by
+`lsof` are skipped, and Windows skips all generations while `tasklist` reports
+any loaded capture addon. Abandoned staging/backup directories are pruned
+best-effort.
+
+Any metadata, checksum, or `require()` failure happens before a native binding
+is returned and may be retried after rebuilding. Only a successfully returned
+binding whose compiled Electron/source identity is wrong is cached and requires
+a restart. The loader reads the selected addon once, stages those exact bytes
+under a cryptographically random process-private temporary `.node` path, and
+hashes, code-signature/canonical-checks and `require()`s that one stable path.
+A selector/source replacement after the read therefore cannot change executed
+bytes, and every retry gets a new require-cache identity. Pre-load validation
+or `require()` failure removes the private attempt; once native loading returns,
+the path is retained (even if compiled identity is then refused) for the
+process lifetime because Windows may keep the DLL mapped. Bounded stale cleanup
+removes only old, strictly named, same-owner directories whose recorded PID is
+confirmed dead; every live PID (including another worktree's SingZ) is preserved.
+`SINGZ_CAPTURE_ADDON=/absolute/file.node` overrides the selected path
+for diagnostics only; it does not bypass identity checks. The file must match
+this checkout (in development) and carry its own matching
+`singz-capture.manifest.json`, `.source-hash` and `.sha256` files beside the
+override. On Windows,
+Electron's `node.lib` still names `node.exe`, so the CMake target must retain its
+delay-load hook and `/DELAYLOAD:node.exe`; a hard `node.exe` PE dependency loads
+in Node but fails before module initialization in `electron.exe`.
+
+The zcore host scripts key their temporary CMake directories on a hash of the
+complete checkout path, not its basename; two unrelated `foo` checkouts cannot
+reuse one CMake cache.
+
 Local clang builds pick up **ccache** automatically when it is installed
 (`brew install ccache`): `vendor-whisper.sh` and `npm run android` export
 CMake's compiler-launcher env (the mechanism the Android CI uses), and the
@@ -29,8 +139,10 @@ and both are needed for Debug builds (`base_dir` alone was still 0%):
 | `compiler_check = content` | survives an Xcode/CLT update re-stamping clang (unrelated to worktrees, cheap) |
 
 They are passed **per build, never written to the machine's ccache config**:
-`vendor-whisper.sh` exports them, `run-with-ccache.js` puts them in the child
-env, and `mobile/scripts/ccache-xcode-conf.js` appends them to react-native's
+`vendor-whisper.sh` exports them, Android's all-project CMake prelude installs
+one env-carrying compiler launcher (`run-with-ccache.js` also puts the settings
+in the child env), and `mobile/scripts/ccache-xcode-conf.js` appends them to
+react-native's
 `scripts/xcode/ccache.conf` at postinstall — that last one because RN's
 `ccache-clang.sh` sets `CCACHE_CONFIGPATH` to that file, which *replaces* the
 machine's config (so `ccache --set-config` never reaches a pod build), and a
@@ -43,9 +155,145 @@ source file — invisible while they agree, confusing when they differ. Drop
 `CCACHE_NOHASHDIR` (or the conf line) if you are stepping through native code
 in two diverged worktrees at once.
 
-Running `mobile/android/gradlew` directly instead of `npm run android`? Prefix
-`CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
-CCACHE_BASEDIR=$PWD/../.. CCACHE_NOHASHDIR=1`.
+Running `mobile/android/gradlew` directly instead of `npm run android` is also
+cached: `mobile/scripts/android-cmake-init.cmake` is injected into the app and
+every native React Native dependency and applies the same checkout root,
+`hash_dir = false` and compiler-content identity without changing machine
+configuration. `org.gradle.workers.max=1` serializes AGP worker actions so
+native dependency modules cannot overlap. The one active Ninja graph gives
+compile and link edges one shared eight-process ceiling: four edges when
+ccache is present on POSIX because both ccache and the compiler match
+`ps ... | grep clang`, two on Windows where the PowerShell launcher remains
+resident too, otherwise eight. The POSIX launcher `exec`s ccache so it adds no
+third process line. ABIs and dependency modules therefore cannot multiply into
+dozens of simultaneous clang lines. We still run only one native build at a
+time across worktrees because separate Gradle processes cannot share a
+project-level worker limit.
+
+### Target-executed mobile codec proof
+
+The full custom-track codec promise is not certified by inspecting FFmpeg's
+configure string. Each mobile target executes the committed twelve-file corpus
+through the packaged zcore descriptor decoder, then hashes the actual loaded
+runtime, target binary, fixture bytes, selection receipt and exact normalized
+case output. Canonical inputs and expectations live in
+`tests/fixtures/codecs/{data,target-contract.json,target/}`. A normal app build
+contains neither the proof runner nor its fixtures.
+
+This is a serialized native gate. Before either command sequence, ensure no
+other native build is running; while it runs, sample
+`ps wuax | grep '[c]lang' | wc -l` and stop immediately above eight. Android's
+single Gradle worker and iOS `-jobs 4` retain the shared ccache policy described
+above.
+
+For one Android ABI, stage the configuration-only pack only into the explicit
+proof build, run just the proof instrumentation, and pull its target-written
+evidence:
+
+```bash
+cd mobile/android
+./gradlew --no-daemon --max-workers 1 \
+  -Dorg.gradle.java.home=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home \
+  -PreactNativeArchitectures=arm64-v8a -PsingzCodecTargetProof=true \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.singzplayer.CodecTargetProofInstrumentedTest \
+  :app:connectedDebugAndroidTest
+cd ../..
+node mobile/scripts/pull-codec-target-proof-android.mjs \
+  --serial emulator-5554 --target android-arm64-v8a \
+  --output build/codec-proof/android-arm64-v8a.raw.json
+node scripts/create-target-codec-proof-receipt.mjs \
+  --target android-arm64-v8a \
+  --evidence build/codec-proof/android-arm64-v8a.raw.json \
+  --output build/codec-proof/android-arm64-v8a.receipt.json
+```
+
+The proof Gradle task itself exports `SINGZ_CODEC_TARGET_PROOF=1` and invokes
+the selector/verifier with `--proof-staging --require-android-set <ABI>`. It
+requires exactly one configured ABI and refuses any task graph containing a
+Release task.
+
+Use the actual serial and matching ABI; repeat per ABI. As with every emulator
+driver, confirm the installed package is debuggable and its APK matches this
+tree before interpreting the result. Never install that debug APK over the
+user's same-application-id phone.
+
+For iOS, first compose the three verified slice packs into real dynamic
+framework XCFrameworks. Each `libav*` framework owns an
+`@rpath/libav*.framework/libav*` install name and framework-form dependencies;
+raw-dylib XCFrameworks are invalid here because CocoaPods cannot embed them in
+SingZ's otherwise-static React Native/Fabric/SingzCore/ORT Pods graph. The
+composer verifies the device and universal-simulator architectures, platform
+load commands, install names, dependency closure, headers and modules before
+publishing the immutable pack. Do not set `USE_FRAMEWORKS`: ONNX Runtime is a
+static XCFramework and target-wide dynamic Pods are not a coherent graph.
+
+Materialize the canonical proof sources/resources before the opt-in Pod
+install, select the XCFramework only in proof-staging mode, then build one
+exact simulator/device target:
+
+```bash
+SINGZ_CODEC_TARGET_PROOF=1 node scripts/compose-ffmpeg-ios-xcframeworks.mjs \
+  --proof-staging
+node mobile/scripts/prepare-codec-target-proof.mjs
+SINGZ_CODEC_TARGET_PROOF=1 node mobile/scripts/select-ffmpeg-codec-runtime.mjs \
+  --proof-staging --require-ios
+cd mobile/ios
+LANG=en_US.UTF-8 SINGZ_CODEC_TARGET_PROOF=1 pod install
+xcodebuild -workspace SingZPlayer.xcworkspace -scheme SingZPlayer \
+  -configuration Debug -destination 'id=<SIMULATOR-OR-DEVICE-UDID>' \
+  -jobs 4 build
+cd ../..
+DEVICE_NAME='<exact Metro deviceName>' METRO_PORT=8081 \
+  node mobile/tests/codec-target-ios.cjs \
+  build/codec-proof/ios-arm64.raw.json
+node scripts/create-target-codec-proof-receipt.mjs \
+  --target ios-arm64 \
+  --evidence build/codec-proof/ios-arm64.raw.json \
+  --output build/codec-proof/ios-arm64.receipt.json
+```
+
+Use `ios-simulator-arm64` or `ios-simulator-x64` for simulator evidence. The
+driver requires an exact `DEVICE_NAME` (or `SIM_UDID`) and refuses Metro's
+first arbitrary target. Device installation/signing remains a separate step;
+the receipt creator will reject evidence whose architecture/target disagree.
+
+`--proof-staging` is accepted only with `SINGZ_CODEC_TARGET_PROOF=1` and writes
+a selection receipt marked `target-proof-staging`; ordinary/release verification
+must reject that receipt. Only the promoted format-2 receipt can satisfy the
+pack/XCFramework `--require-full` gate. That promotion preserves the manifest
+that was actually executed, avoiding a circular hash when the receipt is
+attached to the final immutable pack.
+
+**The extended codecs are opt-in, and an ordinary build is the base decoder.**
+Every consumer of the packs — `mobile/scripts/select-ffmpeg-codec-runtime.mjs`
+and its verifier (run by the Android `preBuild` tasks and the iOS Podfile),
+the Android CMake, the `SingzCore` podspec and `scripts/build-capture-addon.cjs`
+— reads `SINGZ_FFMPEG_CODECS`:
+
+- `auto` (the default, and what CI runs with no pack at all): a target's pack
+  is selected and linked only when it carries full target fixture evidence.
+  Otherwise RNAudioAPI keeps its own compatibility `libav*`, zcore compiles
+  without `SINGZ_ZCORE_FFMPEG`, and the native session reports the base
+  `wav-flac-v1` capability, which both the desktop renderer and the phone
+  facade already accept: WAV/FLAC lanes play natively and other custom-track
+  codecs stay on the legacy engine. A configuration-only pack is never linked,
+  so the capability a build claims is exactly what was decoded on that target.
+  On Android the selection is all-or-nothing across the shipping ABI set — one
+  APK carries one codec capability.
+- `required`: the pre-existing fail-closed behaviour, for a release lane that
+  must ship the full matrix; a missing or unproven pack stops the build.
+- `off`: never select a pack, even a proven one.
+
+The first selection on a fresh dependency moves RNAudioAPI's original bytes to
+`node_modules/react-native-audio-api/.singz-compatibility-runtime/`, and a
+later run that selects nothing restores them and drops the receipt, so
+switching a machine between proven and base builds needs no network. A
+dependency that was replaced before that copy existed (a proof-staging install
+from before this rule) cannot be restored offline; the selector says so and
+points at `scripts/worktree-setup.sh`, which re-downloads the prebuilt
+binaries. The Gradle `-PsingzCodecTargetProof=true` harness and
+`SINGZ_CODEC_TARGET_PROOF=1 pod install` are `required`-strict regardless of
+the variable: the proof has to execute the staged pack it is proving.
 
 A system `demucs` (pipx) is the easiest dev splitter — the app auto-prefers
 it and no pack is needed. Otherwise build/install the pack for your platform:
@@ -105,13 +353,13 @@ ccache caches are what make the second worktree fast (pods ~30 s warm).
 point. Third-party engine builds (whisper-cli, demucs-cli, the splitter
 packs) come from `.engines-src/` and downloads, cost minutes, and no branch
 of ours changes them — those stay symlinks to main's copies. Our own engine
-builds (`singz-analyze`, and `singz-capture.node` once the dsp-graph branch
-brings its build script) come from `mobile/native/core`, which is exactly
-what a feature branch edits — so the worktree gets an empty slot instead of a
-link. `worktree-setup.sh` fills the one it can build, `singz-analyze` (~10 s
-with a warm ccache); a slot with no producer on this tree stays empty, which
-is still the right answer, because empty degrades to the TS detectors whereas
-a link would have run another branch's engine.
+builds (`singz-analyze` and `singz-capture.node`) come from the shared
+`zcore`/`zdsp` tree, which is exactly what a feature branch edits — so the
+worktree gets an empty slot instead of a link. `worktree-setup.sh` builds
+`singz-analyze` (~10 s with a warm ccache); the capture addon stays empty until
+`npm run capture:addon` builds it for the current Electron/platform. An empty
+slot is the right answer because the app can fall back or report the missing
+transport, while a link would silently run another branch's engine.
 
 It used to link the whole directory, and that is how a sibling worktree's
 core reached the main checkout during the v0.19.0 cut: `vendor-analyze.sh`
@@ -120,8 +368,8 @@ desktop spawned that branch's binary — live-input adapter included — for
 hours, with `audio-devices-e2e.cjs` exercising the very path it had changed.
 Nothing shipped wrong; it was found by hand, days later, because the other
 session mentioned the rebuild in passing. When this was written, nine
-worktrees on the machine held nine different states of `mobile/native/core`
-behind one shared binary that matched none of them.
+worktrees on the machine held nine different states of the native core behind
+one shared binary that matched none of them.
 
 The safety net for what the mirror cannot reach — a packaged app, an
 `$SINGZ_ANALYZE` override, a hand-copied file — is
@@ -156,7 +404,8 @@ so validating a change to that path needs `FORCE_BUNDLING=1` or Release.
 
 `scripts/analyze-source-hash.sh` is the one definition of "which sources a
 `singz-analyze` was built from": a fingerprint over every file under
-`mobile/native/core` plus `vendor-analyze.sh` and the hash script itself.
+`zcore`, `zdsp`, `third_party/native`, `tools/native` and `cmake`, plus the
+root `CMakeLists.txt`, `vendor-analyze.sh` and the hash script itself.
 `vendor-analyze.sh` writes it to a `.source-hash` sidecar **and compiles it
 into the binary** (`-DSINGZ_SOURCE_HASH`, a generated TU in the build tree),
 so the executable answers for itself:
@@ -207,9 +456,67 @@ question, not only a correctness one.
 |---|---|
 | `npm test` | vitest: the desktop unit suites **and** `tests/roundtrip/` — the real `gdriveSync` writing to a fake Drive and the real phone code reading it back out of the same store |
 | `npm run typecheck` | node + web configs, plus `tsconfig.tests.json` over `tests/shared/` (the harness both roots import — vitest transpiles without typechecking, so nothing else checks it) |
+| `node tests/e2e/capture-artifact-rebuild.cjs` | corrupts the ignored current capture artifact, proves the builder detects/repairs it, and restores the original bytes if repair fails |
 | `cd mobile && npx jest` | the phone's Drive protocol, offline fallbacks, ✓ rule and log |
 | `cd mobile/android && ./gradlew :app:testDebugUnitTest` | Kotlin's half of the shared cache-currency table |
 | `mobile/scripts/test-swift-currency.sh` | Swift's half — swiftc only, no simulator, no Pods |
+| `bash mobile/scripts/test-native-playback-bridge-schema.sh` | the iOS bridge's request/result validators — one `clang++` call over the real `.mm` sources, no Xcode, no Pods, no simulator; run by the iOS native canary |
+| `bash zdsp/run-sanitizer-gates.sh` | the native gate, three presets (strict, asan/ubsan, tsan): the playback session and its two injected-failure runs, the bridge-contract test against `tests/shared/`, the graph and analysis suites, the realtime-source policies. What each preset runs is the `filter.include.name` regex in `CMakePresets.json` — a new `add_test` is NOT picked up until it is added there and to the build preset's `targets`, which is why `playback_cue_plan_tests` still runs only under the unfiltered Windows job |
+
+The three-language agreement fixtures under `tests/shared/` are read by more
+than one of these at once — `native-playback-bridge-manifest.json` by jest,
+vitest and ctest; `native-playback-agreement-cases.json` and
+`playback-cue-cases.json` by vitest and ctest; `currency-cases.json` by
+vitest, Kotlin and Swift. Editing one means running every runner that reads
+it, not the nearest one. What each pins is
+[docs/NATIVE-PLAYBACK-BRIDGE.md](NATIVE-PLAYBACK-BRIDGE.md).
+
+### Mutation-checking a native test (the stale-object trap)
+
+A new test in `tests/native/` is not finished until the code it covers has
+been broken and the test seen going red. The trap on this machine is that the
+rebuild can silently not happen: Apple's `make` compares whole-second mtimes,
+so `touch`ing the source is **not** enough when the object file was written in
+the same second — which is exactly what happens when you restore the original
+immediately after a mutation run and rebuild straight away. The binary keeps
+the mutation, the suite fails, and the obvious reading ("my restore was
+wrong") is the wrong one. It cost a confusing red during the Phase 4 lane-peaks
+work, on a source that `git diff` said was clean.
+
+Delete the object instead of relying on the timestamp:
+
+```bash
+rm -f build/phase4-tests/CMakeFiles/singz_native_playback_session.dir/native/playback/native_playback_session.cpp.o
+```
+
+The same hazard runs the other way — a mutation that never reached the binary
+reports a **pass** — so when a mutation comes back green, delete the object and
+run it again before believing it. `shasum` the test binary either side, or use
+the `build/p4-gate-inner.sh` freshness assertions (`test <binary> -nt
+<source>`), which exist for this.
+
+**A green mutation means "look again", and twice out of three times the answer
+was not the code.** All three were found in one session:
+
+1. The rebuild did not happen (above). The same thing bites at the END of a
+   mutation loop: if the final restore-and-rebuild is not checked for a
+   non-zero exit, a build that fails leaves the LAST MUTATION'S binary in
+   place, and the "restored" run reports that mutation's failure as though the
+   original code were broken. Check the exit status of every build in the
+   loop, including the restore.
+2. **The mutation landed somewhere else.** A text anchor that matches several
+   functions edits the first one. `if (generation == 0 || generation !=
+   impl_->generation || ...)` appears in `stop`, `unload` and `lanePeaks`, so a
+   patch aimed at one silently mutated another — and reported a pass for a
+   function it never touched. Anchor on something unique to the target (a
+   neighbouring line from that body), and `grep -c` the pattern first.
+3. **The test masked its own subject.** A stale-generation sweep probed
+   `stop(g)` first, and `stop` advances the cancellation epoch to `g` before
+   anything else reads it — so every later probe was refused by the epoch
+   rather than by the generation check under test, and deleting that check
+   changed nothing. When a mutation of a compound guard survives, check
+   whether an earlier line of the test already satisfies one of the other
+   terms.
 
 `tests/shared/` is one fake Drive (`serveRequest` as a pure function, with an
 http adapter for the desktop/emulator and a `fetch` adapter for jest), one
@@ -281,7 +588,7 @@ Rules learned the hard way:
 | `SINGZ_WHISPER_MODEL` | whisper size (tiny/base/small/…, default large-v3-turbo) |
 
 Full clean-OS check (as CI can't do): package with
-`npx electron-builder --mac --dir`, then drive
+`npm run dist -- --mac --arm64 --dir`, then drive
 `dist/mac-arm64/SingZ.app/Contents/MacOS/SingZ` with
 `SINGZ_NO_SYSTEM_ENGINES=1` + fresh `SINGZ_MODELS_DIR`/`SINGZ_PACK_DIR` —
 the setup wizard must appear, download the pack for real, and a split must
@@ -398,12 +705,14 @@ proved signing so far was a `workflow_dispatch`, and the attach step is gated
 on a tag ref — so a signed dmg has been *built* many times and never yet
 *attached* to a release.
 
-A local build with no Apple secrets set still runs the afterPack ad-hoc sign,
-because that hook keys on `CSC_LINK`/`CSC_NAME`/`CSC_KEY_PASSWORD` being in
-the environment — **not** on what is in your keychain. So on a Mac that has a
-Developer ID certificate installed, the hook ad-hoc signs and then
-electron-builder's auto-discovery finds the real identity and re-signs over
-it (the ordering saves us: `emitAfterPack` runs before `doSignAfterPack`).
+A local build always runs the afterPack ad-hoc sign. On a Mac that has a
+Developer ID certificate installed, electron-builder's auto-discovery then
+finds the real identity and re-signs over it (the ordering saves us:
+`emitAfterPack` runs before `doSignAfterPack`). The hook deliberately does
+not infer identity availability from individual `CSC_*` variables: a password
+alone does not name a certificate and must not leave the repacked app with an
+invalid stale signature.
+
 The wasted pass is harmless, and the result is a Developer ID-signed but
 **un-notarized** app — notarization needs the API-key secrets.
 
@@ -436,6 +745,10 @@ Field laptops (QHD+ panel + weak iGPU) taught these; keep them:
 
 ## Ideas parked for later
 
+- Native configurable input/output DSP graph, analyzer taps and desktop
+  plug-in hosting: see [DSP-GRAPH-PLAN.md](DSP-GRAPH-PLAN.md). The current
+  shared `AudioInput` core is its capture/analyzer foundation, not its future
+  direct-monitoring callback.
 - demucs-mlx as the Apple Silicon pack: ~2.6× faster than torch/MPS and much
   smaller; would also make an htdemucs_ft quality tier cheap.
 - htdemucs_ft quality mode (4-stem only upstream; ~4× slower, measured 38 s vs

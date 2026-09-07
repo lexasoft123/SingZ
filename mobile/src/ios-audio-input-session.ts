@@ -1,4 +1,4 @@
-import { NativeModules } from 'react-native'
+import { NativeEventEmitter, NativeModules } from 'react-native'
 import { AudioManager } from 'react-native-audio-api'
 
 type Permission = 'Undetermined' | 'Denied' | 'Granted'
@@ -38,10 +38,65 @@ export interface IosAudioInputLeaseNative {
   verifyPlaybackSession(): Promise<void>
   acquireLease(deviceUid: string, minimumChannels: number): Promise<string>
   releaseLease(token: string): Promise<void>
+  startCapture(
+    leaseToken: string,
+    deviceUid: string,
+    channel: number,
+    ownershipGeneration: number
+  ): Promise<{ ok: boolean; error?: string; sampleRate?: number }>
+  stopCapture(ownershipGeneration: number): Promise<void>
 }
 
 export interface IosAudioInputLease {
+  /** Ownership generation stamped onto every zcore/zdsp frame. */
+  readonly generation: number
   release(): Promise<void>
+}
+
+export interface IosAudioInputFrame {
+  generation: number
+  clockDomainId: string
+  streamGeneration: string
+  startSequence: string
+  endSequence: string
+  startSourceFrame: string
+  endSourceFrame: string
+  sampleHostTimeStartNs: string
+  sampleHostTimeEndNs: string
+  callbackHostTimeNs: string
+  startFlags: number
+  endFlags: number
+  timestampQuality: 'hardware' | 'callback-estimate' | 'unknown'
+  discontinuityReason: string
+  resetCount: string
+  sampleRate: number
+  frequency: number
+  clarity: number
+  peak: number
+  rms: number
+  dbfs: number
+}
+
+const isUint32 = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isInteger(value) &&
+  value >= 0 && value <= 0xffff_ffff
+
+/** Preserve all native flag bits. Known-bit policy belongs to the graph; the
+ * scalar bridge only rejects values that cannot be an exact uint32. */
+export const parseIosAudioInputFrame = (
+  value: unknown
+): IosAudioInputFrame | null => {
+  if (!value || typeof value !== 'object') return null
+  const frame = value as Partial<IosAudioInputFrame>
+  return isUint32(frame.startFlags) && isUint32(frame.endFlags)
+    ? value as IosAudioInputFrame
+    : null
+}
+
+export interface IosAudioInputState {
+  generation: number
+  state: 'running' | 'stopped' | 'error'
+  error?: string
 }
 
 export interface AcquireIosAudioInputOptions {
@@ -71,6 +126,7 @@ const captureSession: OwnedSessionOptions = {
 
 const lowLatencyBufferDuration = 0.005
 const routeSettleTimeoutMilliseconds = 1500
+const captureRouteRetryLimit = 2
 
 const rawDeviceUid = (uid: string | undefined): string | undefined =>
   uid?.startsWith('ios:') ? uid.slice(4) : uid
@@ -79,6 +135,9 @@ const portableDeviceUid = (uid: string): string => `ios:${uid}`
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error)
+
+const isTransientCaptureRouteChange = (error: unknown): boolean =>
+  errorMessage(error).startsWith('iOS audio route changed')
 
 const acquisitionAndRestorationError = (
   acquisitionError: unknown,
@@ -129,6 +188,8 @@ interface SessionContext {
   inputRestored: boolean
   playbackTransitionAttempted: boolean
   playbackRestored: boolean
+  captureGeneration?: number
+  captureStopped: boolean
 }
 
 type CoordinatorState =
@@ -143,6 +204,7 @@ type CoordinatorState =
 export class IosAudioInputSessionCoordinator {
   private tail: Promise<void> = Promise.resolve()
   private state: CoordinatorState | null = null
+  private nextCaptureGeneration = 1
 
   constructor(
     private readonly owner: IosAudioSessionOwner,
@@ -174,7 +236,8 @@ export class IosAudioInputSessionCoordinator {
         preferencesRestored: false,
         inputRestored: false,
         playbackTransitionAttempted: false,
-        playbackRestored: false
+        playbackRestored: false,
+        captureStopped: true
       }
       let transitionStarted = false
       try {
@@ -204,7 +267,14 @@ export class IosAudioInputSessionCoordinator {
         if (!prepared.ok)
           throw new Error(prepared.error ?? 'Could not prepare iOS capture preferences')
         await this.native.verifyCaptureSession(portableUid, minimumChannels)
-        context.leaseToken = await this.native.acquireLease(portableUid, minimumChannels)
+        context.captureGeneration = this.nextCaptureGeneration++
+        await this.startCaptureWithRouteRetry(
+          context,
+          portableUid,
+          channel,
+          minimumChannels
+        )
+        context.captureStopped = false
         this.state = { kind: 'active', context }
       } catch (acquisitionError) {
         if (!transitionStarted) throw acquisitionError
@@ -222,6 +292,7 @@ export class IosAudioInputSessionCoordinator {
 
       let released = false
       return {
+        generation: context.captureGeneration,
         release: async (): Promise<void> => {
           if (released) return
           await this.exclusive(async () => {
@@ -264,9 +335,69 @@ export class IosAudioInputSessionCoordinator {
     })
   }
 
+  private async startCaptureWithRouteRetry(
+    context: SessionContext,
+    portableUid: string,
+    channel: number,
+    minimumChannels: number
+  ): Promise<void> {
+    for (let retry = 0; ; ++retry) {
+      try {
+        context.leaseToken = await this.native.acquireLease(
+          portableUid,
+          minimumChannels
+        )
+        context.leaseReleased = false
+        const started = await this.native.startCapture(
+          context.leaseToken,
+          portableUid,
+          channel,
+          context.captureGeneration ?? 0
+        )
+        if (!started.ok)
+          throw new Error(started.error ?? 'Could not start iOS audio input')
+        return
+      } catch (error) {
+        if (
+          !isTransientCaptureRouteChange(error) ||
+          retry >= captureRouteRetryLimit
+        )
+          throw error
+
+        // AVAudioSession may post the category/route notification slightly
+        // after the selected route is already usable. The native generation
+        // guard correctly rejects that stale lease. Retire only that lease,
+        // confirm the exact device/channel again, then mint a fresh one. A
+        // real unplug or reroute fails verification and follows normal full
+        // restoration; playback/category ownership never cycles for this
+        // transient retry.
+        if (context.leaseToken && !context.leaseReleased) {
+          await this.native.releaseLease(context.leaseToken)
+          context.leaseReleased = true
+          context.leaseToken = undefined
+        }
+        await this.waitForCaptureReadiness(portableUid, minimumChannels)
+      }
+    }
+  }
+
   private async restore(context: SessionContext): Promise<void> {
     const errors: string[] = []
     let restorationRetryRequired = false
+    if (!context.captureStopped) {
+      try {
+        if (context.captureGeneration)
+          await this.native.stopCapture(context.captureGeneration)
+        context.captureStopped = true
+      } catch (error) {
+        // Native stop joins the AudioInput delivery thread. No session/route
+        // owner may be released or mutated while that join is unconfirmed.
+        throw new IosAudioSessionRestoreError(
+          [`stop native capture: ${errorMessage(error)}`],
+          true
+        )
+      }
+    }
     if (!context.leaseReleased) {
       try {
         if (context.leaseToken) await this.native.releaseLease(context.leaseToken)
@@ -415,15 +546,18 @@ export class IosAudioInputSessionCoordinator {
     // native safe-abandon can conclusively classify the saved route as gone.
     const verificationInput = selectedIsPresent ? selectedInput : currentInput
     if (verificationInput)
-      await this.waitForCleanupCaptureReadiness(verificationInput)
+      await this.waitForCaptureReadiness(portableDeviceUid(verificationInput), 1)
   }
 
-  private async waitForCleanupCaptureReadiness(deviceUid: string): Promise<void> {
+  private async waitForCaptureReadiness(
+    portableUid: string,
+    minimumChannels: number
+  ): Promise<void> {
     const deadline = Date.now() + routeSettleTimeoutMilliseconds
     let lastError: unknown
     do {
       try {
-        await this.native.verifyCaptureSession(portableDeviceUid(deviceUid), 1)
+        await this.native.verifyCaptureSession(portableUid, minimumChannels)
         return
       } catch (error) {
         lastError = error
@@ -431,7 +565,7 @@ export class IosAudioInputSessionCoordinator {
       await new Promise<void>((resolve) => setTimeout(resolve, 10))
     } while (Date.now() <= deadline)
     throw new Error(
-      `timed out waiting for the cleanup capture route: ${errorMessage(lastError)}`
+      `timed out waiting for the capture route: ${errorMessage(lastError)}`
     )
   }
 
@@ -454,3 +588,33 @@ export const acquireIosAudioInputSession = (
 
 export const retryIosAudioInputSessionRelease = (): Promise<void> =>
   coordinator.retryRelease()
+
+export const subscribeIosAudioInputFrames = (
+  callback: (frame: IosAudioInputFrame) => void
+): (() => void) => {
+  // RCTEventEmitter listener accounting drives startObserving/stopObserving;
+  // subscribing through DeviceEventEmitter would leave the native module at
+  // zero listeners and suppress its scalar capture events.
+  const subscription = new NativeEventEmitter(
+    NativeModules.AudioInputSession
+  ).addListener(
+    'singzAudioInputFrame',
+    (value: unknown) => {
+      const frame = parseIosAudioInputFrame(value)
+      if (frame) callback(frame)
+    }
+  )
+  return () => subscription.remove()
+}
+
+export const subscribeIosAudioInputState = (
+  callback: (state: IosAudioInputState) => void
+): (() => void) => {
+  const subscription = new NativeEventEmitter(
+    NativeModules.AudioInputSession
+  ).addListener(
+    'singzAudioInputState',
+    callback
+  )
+  return () => subscription.remove()
+}

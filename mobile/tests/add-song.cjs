@@ -17,6 +17,10 @@
  * Poll-don't-await throughout (Hermes CDP rules); the seeded file is MOVED
  * into the project by the flow, so each run reseeds its own copy.
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../tests/shared/watchdog.cjs').arm('add-song', { totalMinutes: 120 })
+
 const { execFileSync } = require('node:child_process')
 const { copyFileSync } = require('node:fs')
 const { join } = require('node:path')

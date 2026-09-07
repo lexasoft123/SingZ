@@ -1,0 +1,239 @@
+{
+  "knownTypeIds": [
+    "11111111111111111111111111111111",
+    "33333333333333333333333333333333"
+  ],
+  "base": {
+    "futureEnvelope": {
+      "keep": true,
+      "nested": [3, 1, 2]
+    },
+    "connections": [
+      {
+        "to": { "port": "in", "node": "30" },
+        "from": { "port": "out", "node": "20" },
+        "unknownConnectionField": "keep"
+      },
+      {
+        "to": { "port": "in", "node": "20" },
+        "from": { "port": "voice", "node": "10" }
+      }
+    ],
+    "nodes": [
+      {
+        "parameters": { "gain": 0.5, "mix": 1 },
+        "ports": {
+          "outputs": [
+            { "channels": 2, "id": "voice" },
+            { "channels": 1, "id": "analysis" }
+          ],
+          "inputs": []
+        },
+        "unavailable": "silence",
+        "execution": "native",
+        "typeVersion": 1,
+        "type": "11111111111111111111111111111111",
+        "id": "10",
+        "binding": { "laneId": "vocals", "kind": "project-lane" }
+      },
+      {
+        "id": "30",
+        "type": "33333333333333333333333333333333",
+        "typeVersion": 2,
+        "execution": "builtin",
+        "unavailable": "silence",
+        "ports": {
+          "inputs": [{ "id": "in", "channels": 2 }],
+          "outputs": []
+        },
+        "parameters": {},
+        "binding": { "kind": "project-output" }
+      },
+      {
+        "id": "20",
+        "type": "22222222222222222222222222222222",
+        "typeVersion": 7,
+        "execution": "plugin-bridge-vendor-x",
+        "unavailable": "bypass",
+        "ports": {
+          "inputs": [{ "id": "in", "channels": 2 }],
+          "outputs": [{ "id": "out", "channels": 2 }]
+        },
+        "parameters": { "vendor.depth": 0.25 },
+        "adapterState": {
+          "encoding": "base64",
+          "bytes": 5,
+          "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+          "data": "aGVsbG8=",
+          "vendorStateVersion": 91
+        },
+        "unknownNodeField": {
+          "preserve": "exactly",
+          "orderIsData": [2, 1]
+        }
+      }
+    ],
+    "engine": "singz-dsp",
+    "format": 1
+  },
+  "expect": {
+    "dispositions": ["available", "available", "placeholder"],
+    "dispositionByNodeId": {
+      "10": "available",
+      "20": "placeholder",
+      "30": "available"
+    },
+    "canonicalNodeIds": ["10", "20", "30"],
+    "canonicalConnections": [
+      "10:voice>20:in",
+      "20:out>30:in"
+    ],
+    "canonicalSourceOutputPorts": ["analysis", "voice"],
+    "opaqueStateBase64": "aGVsbG8="
+  },
+  "canonicalEquivalent": {
+    "format": 1,
+    "engine": "singz-dsp",
+    "nodes": [
+      {
+        "binding": { "kind": "project-lane", "laneId": "vocals" },
+        "execution": "native",
+        "id": "10",
+        "parameters": { "mix": 1, "gain": 0.5 },
+        "ports": {
+          "inputs": [],
+          "outputs": [
+            { "id": "analysis", "channels": 1 },
+            { "id": "voice", "channels": 2 }
+          ]
+        },
+        "type": "11111111111111111111111111111111",
+        "typeVersion": 1,
+        "unavailable": "silence"
+      },
+      {
+        "adapterState": {
+          "bytes": 5,
+          "data": "aGVsbG8=",
+          "encoding": "base64",
+          "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+          "vendorStateVersion": 91
+        },
+        "execution": "plugin-bridge-vendor-x",
+        "id": "20",
+        "parameters": { "vendor.depth": 0.25 },
+        "ports": {
+          "inputs": [{ "channels": 2, "id": "in" }],
+          "outputs": [{ "channels": 2, "id": "out" }]
+        },
+        "type": "22222222222222222222222222222222",
+        "typeVersion": 7,
+        "unavailable": "bypass",
+        "unknownNodeField": { "orderIsData": [2, 1], "preserve": "exactly" }
+      },
+      {
+        "binding": { "kind": "project-output" },
+        "execution": "builtin",
+        "id": "30",
+        "parameters": {},
+        "ports": {
+          "inputs": [{ "channels": 2, "id": "in" }],
+          "outputs": []
+        },
+        "type": "33333333333333333333333333333333",
+        "typeVersion": 2,
+        "unavailable": "silence"
+      }
+    ],
+    "connections": [
+      {
+        "from": { "node": "10", "port": "voice" },
+        "to": { "node": "20", "port": "in" }
+      },
+      {
+        "from": { "node": "20", "port": "out" },
+        "to": { "node": "30", "port": "in" },
+        "unknownConnectionField": "keep"
+      }
+    ],
+    "futureEnvelope": { "nested": [3, 1, 2], "keep": true }
+  },
+  "future": {
+    "format": 9,
+    "engine": "a-future-engine",
+    "nodes": "the version-1 reader must not interpret this",
+    "connections": null,
+    "opaqueEnvelope": {
+      "arrayOrder": [4, 2, 3, 1],
+      "unknown": true
+    }
+  },
+  "invalidMutations": [
+    {
+      "name": "leading-zero node id",
+      "path": ["nodes", 0, "id"],
+      "value": "01",
+      "code": "invalid-node-id"
+    },
+    {
+      "name": "uint64 overflow",
+      "path": ["nodes", 0, "id"],
+      "value": "18446744073709551616",
+      "code": "invalid-node-id"
+    },
+    {
+      "name": "non-canonical type id",
+      "path": ["nodes", 0, "type"],
+      "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "code": "invalid-type-id"
+    },
+    {
+      "name": "parameter above normalized range",
+      "path": ["nodes", 0, "parameters", "gain"],
+      "value": 1.0001,
+      "code": "invalid-parameter"
+    },
+    {
+      "name": "empty logical lane binding",
+      "path": ["nodes", 0, "binding", "laneId"],
+      "value": "",
+      "code": "invalid-stable-name"
+    },
+    {
+      "name": "unknown unavailable policy",
+      "path": ["nodes", 0, "unavailable"],
+      "value": "drop",
+      "code": "invalid-unavailable-policy"
+    },
+    {
+      "name": "adapter byte count mismatch",
+      "path": ["nodes", 2, "adapterState", "bytes"],
+      "value": 4,
+      "code": "invalid-adapter-state"
+    },
+    {
+      "name": "adapter digest mismatch",
+      "path": ["nodes", 2, "adapterState", "sha256"],
+      "value": "0000000000000000000000000000000000000000000000000000000000000000",
+      "code": "invalid-adapter-state"
+    },
+    {
+      "name": "non-zero base64 pad bits",
+      "path": ["nodes", 2, "adapterState", "data"],
+      "value": "aGVsbG9=",
+      "code": "invalid-adapter-state"
+    },
+    {
+      "name": "connection to missing port",
+      "path": ["connections", 0, "to", "port"],
+      "value": "missing",
+      "code": "invalid-connection"
+    },
+    {
+      "name": "duplicate node id",
+      "path": ["nodes", 1, "id"],
+      "value": "10",
+      "code": "duplicate-node-id"
+    }
+  ]
+}

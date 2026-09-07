@@ -187,7 +187,8 @@ test('recorder error mid-cue cancels the run and no late cue completion records 
   expect(mic.stop).toHaveBeenCalled()
   expect(engine.cancelTrainingCues).toHaveBeenCalled()
   expect(allText(tree)).toContain('Input route disappeared.')
-  expect(allText(tree)).toContain('Try again')
+  expect(button(tree, 'Start')).toBeTruthy()
+  expect(allText(tree)).not.toContain('Preparing')
 
   finishCue({ ok: true, endsAt: 1 })
   await ReactTestRenderer.act(async () => { await cue; await Promise.resolve() })
@@ -195,6 +196,72 @@ test('recorder error mid-cue cancels the run and no late cue completion records 
   expect(allText(tree)).not.toContain('Next note')
   const persistence = (globalThis as unknown as { trainingPersistence: { recordCompletion: jest.Mock } }).trainingPersistence
   expect(persistence.recordCompletion).not.toHaveBeenCalled()
+  await ReactTestRenderer.act(() => tree.unmount())
+})
+
+test('a call interruption exposes an intentional Start control and never reopens the mic automatically', async () => {
+  let audioInterruption!: (event: { type: string }) => void
+  ;(AudioManager.addSystemEventListener as jest.Mock).mockImplementation(
+    (_type: string, listener: (event: { type: string }) => void) => {
+      audioInterruption = listener
+      return { remove: jest.fn() }
+    }
+  )
+  const engine = {
+    trainingCurrentTime: 1,
+    outputDisplayLatency: 0,
+    pause: jest.fn(),
+    cancelTrainingCues: jest.fn(),
+    setTrainingCueVolume: jest.fn(),
+    playTrainingCues: jest.fn(async () => ({ ok: true as const, endsAt: 1 }))
+  } as unknown as MultitrackEngine
+  let tree!: ReactTestRenderer.ReactTestRenderer
+  await ReactTestRenderer.act(async () => {
+    tree = ReactTestRenderer.create(
+      <TrainingTestScreen active engine={engine} song={null} onBackToSong={jest.fn()} />
+    )
+    await Promise.resolve()
+  })
+  await openSingleNotePrompt(tree)
+  await ReactTestRenderer.act(async () => {
+    await Promise.resolve()
+    await Promise.resolve()
+  })
+  const mic = (globalThis as unknown as {
+    trainingMic: { start: jest.Mock; stop: jest.Mock }
+  }).trainingMic
+  expect(mic.start).toHaveBeenCalledTimes(1)
+
+  ReactTestRenderer.act(() => audioInterruption({ type: 'began' }))
+
+  expect(mic.stop).toHaveBeenCalled()
+  expect(allText(tree)).toContain('Audio was interrupted. Tap Start when you are ready.')
+  expect(allText(tree)).not.toContain('Preparing')
+  expect(button(tree, 'Start')).toBeTruthy()
+  expect(mic.start).toHaveBeenCalledTimes(1)
+
+  let finishRestart!: (value: { ok: true }) => void
+  const restartGate = new Promise<{ ok: true }>((resolve) => {
+    finishRestart = resolve
+  })
+  ;(globalThis as Record<string, unknown>).trainingMicStartGate = restartGate
+  await ReactTestRenderer.act(async () => {
+    button(tree, 'Start').props.onPress()
+    await Promise.resolve()
+    await Promise.resolve()
+  })
+  expect(mic.start).toHaveBeenCalledTimes(2)
+  await ReactTestRenderer.act(async () => {
+    await Promise.resolve()
+    await Promise.resolve()
+  })
+  expect(mic.start).toHaveBeenCalledTimes(2)
+  await ReactTestRenderer.act(async () => {
+    finishRestart({ ok: true })
+    await restartGate
+    await Promise.resolve()
+  })
+  delete (globalThis as Record<string, unknown>).trainingMicStartGate
   await ReactTestRenderer.act(() => tree.unmount())
 })
 

@@ -1,6 +1,7 @@
 import { NativeModules } from 'react-native'
 import { log } from '../log'
 import type { ProjectDoc } from '../model'
+import { mutateProjectDocument } from '../project-document'
 
 /**
  * Adoption of a finished split: the six stems move out of the service's job
@@ -58,8 +59,6 @@ export async function adoptSplit(
   jobDir: string,
   deps: AdoptDeps = realDeps()
 ): Promise<{ lanes: string[] }> {
-  const doc = JSON.parse(await deps.readText(project, 'project.json')) as ProjectDoc
-
   for (const stem of SPLIT_STEMS) {
     const rel = `stems/${stem}.wav`
     try {
@@ -75,9 +74,9 @@ export async function adoptSplit(
     }
   }
 
-  const stemHashes: NonNullable<ProjectDoc['stemHashes']> = { ...(doc.stemHashes ?? {}) }
+  const landedHashes: NonNullable<ProjectDoc['stemHashes']> = {}
   for (const stem of SPLIT_STEMS) {
-    stemHashes[`${stem}.wav`] = await deps.statFile(project, `stems/${stem}.wav`)
+    landedHashes[`${stem}.wav`] = await deps.statFile(project, `stems/${stem}.wav`)
   }
 
   // The pre-split listening copy goes away: out of settings, out of the
@@ -85,23 +84,32 @@ export async function adoptSplit(
   // is derived from songFile too, not only from settings — a crash between
   // last run's doc write and its delete leaves settings already empty, and
   // the orphan would otherwise live forever.
-  const custom = Array.isArray(doc.settings?.custom) ? doc.settings.custom : []
-  const original = custom.find((t) => t?.id === 'custom-original')
-  const keptCustom = custom.filter((t) => t?.id !== 'custom-original')
-  const ext = /\.[^./\\]+$/.exec(doc.songFile)?.[0] ?? ''
-  const laneFile = original?.file ?? `stems/custom-original${ext}`
-  delete stemHashes[laneFile.replace(/^stems\//, '')]
-
-  const next: ProjectDoc = {
-    ...doc,
-    savedAt: new Date().toISOString(),
-    settings: {
-      ...doc.settings,
-      custom: keptCustom.length > 0 ? keptCustom : undefined
+  let laneFile = ''
+  await mutateProjectDocument(
+    project,
+    (doc) => {
+      const stemHashes: NonNullable<ProjectDoc['stemHashes']> = {
+        ...(doc.stemHashes ?? {}),
+        ...landedHashes
+      }
+      const custom = Array.isArray(doc.settings?.custom) ? doc.settings.custom : []
+      const original = custom.find((t) => t?.id === 'custom-original')
+      const keptCustom = custom.filter((t) => t?.id !== 'custom-original')
+      const ext = /\.[^./\\]+$/.exec(doc.songFile)?.[0] ?? ''
+      laneFile = original?.file ?? `stems/custom-original${ext}`
+      delete stemHashes[laneFile.replace(/^stems\//, '')]
+      return {
+        ...doc,
+        savedAt: new Date().toISOString(),
+        settings: {
+          ...doc.settings,
+          custom: keptCustom.length > 0 ? keptCustom : undefined
+        },
+        stemHashes
+      }
     },
-    stemHashes
-  }
-  await deps.writeText(project, 'project.json', JSON.stringify(next, null, 2))
+    { readText: deps.readText, writeText: deps.writeText }
+  )
 
   if (laneFile) {
     await deps.deleteFile(project, laneFile) // missing is success, by contract

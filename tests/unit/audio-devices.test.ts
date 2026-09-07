@@ -86,6 +86,12 @@ describe('nativeInputUidForChromium', () => {
 })
 
 describe('sanitizeAudioPrefs', () => {
+  it('preserves only an explicit Windows native audio provider', () => {
+    expect(sanitizeAudioPrefs({ nativeAudioProvider: 'asio' })).toEqual({ nativeAudioProvider: 'asio' })
+    expect(sanitizeAudioPrefs({ nativeAudioProvider: 'wasapi' })).toEqual({ nativeAudioProvider: 'wasapi' })
+    expect(sanitizeAudioPrefs({ nativeAudioProvider: 'coreaudio' })).toEqual({})
+  })
+
   it('keeps opaque ids and drops everything else', () => {
     expect(sanitizeAudioPrefs({ outputId: 'x1', inputId: 'y2', nativeInputUid: 'core-3', inputChannel: 7, junk: 3 })).toEqual({
       outputId: 'x1',
@@ -114,5 +120,24 @@ describe('sanitizeAudioPrefs', () => {
     expect(sanitizeAudioPrefs({ referenceVolume: 8 }).referenceVolume).toBe(2)
     expect(sanitizeAudioPrefs({ referenceVolume: -1 }).referenceVolume).toBe(0.2)
     expect(sanitizeAudioPrefs({ referenceVolume: 'loud' }).referenceVolume).toBeUndefined()
+  })
+
+  it('persists only native monitor routing and bounded gain, never enabled or headphone state', () => {
+    expect(sanitizeAudioPrefs({
+      nativeMonitorOutputUid: 'coreaudio:usb',
+      nativeMonitorOutputChannels: [1, 3],
+      monitorGainDb: -12,
+      monitorEnabled: true,
+      wiredHeadphonesConfirmed: true
+    })).toEqual({
+      nativeMonitorOutputUid: 'coreaudio:usb',
+      nativeMonitorOutputChannels: [1, 3],
+      monitorGainDb: -12
+    })
+    expect(sanitizeAudioPrefs({
+      nativeMonitorOutputChannels: [1, 1],
+      monitorGainDb: 8
+    })).toEqual({ monitorGainDb: 0 })
+    expect(sanitizeAudioPrefs({ monitorGainDb: -90 })).toEqual({ monitorGainDb: -60 })
   })
 })

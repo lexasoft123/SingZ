@@ -4,7 +4,7 @@
 #   scripts/run-parity-gates.sh [--bin <singz-analyze>] [gate ...]
 #
 # The detectors exist twice — the desktop's TypeScript in
-# src/renderer/src/audio/ and the core's C++ in mobile/native/core/ — and the
+# src/renderer/src/audio/ and the core's C++ in zcore/ — and the
 # six harnesses under eval/ are the whole of what holds the two to the same
 # answer. Now that the core is the source of truth, these ARE the contract: a
 # divergence means the TypeScript has drifted off it.

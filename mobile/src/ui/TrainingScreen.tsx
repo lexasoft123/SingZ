@@ -396,8 +396,13 @@ export default function TrainingScreen({
 
   const beginPrompt = useCallback(async () => {
     const current = stateRef.current
-    const prompt = current.session?.prompts[current.session.currentIndex]
+    const session = current.session
+    const prompt = session?.prompts[session.currentIndex]
     if (!prompt || !activeRef.current) return
+    // Manual recovery clears state.error before native microphone acquisition
+    // resolves. Stamp the prompt first so the ready/no-error auto-start effect
+    // cannot enqueue a second acquisition in that window.
+    autoStartedPrompt.current = `${session.id}:${session.currentIndex}`
     const generation = ++runGeneration.current
     for (const timer of timers.current.splice(0)) clearTimeout(timer)
     vocalRun.current = null
@@ -1036,9 +1041,7 @@ function SingleNoteSessionBody({ phase, prompt, result, liveMidi, micHearing, lo
         />
         {phase === 'ready' && (
           <View style={styles.singleAction}>
-            {error
-              ? <Primary label="Try again" onPress={onBegin} />
-              : <Text accessibilityLiveRegion="polite" style={styles.singleInstruction}>Preparing next note…</Text>}
+            {!error && <Text accessibilityLiveRegion="polite" style={styles.singleInstruction}>Preparing next note…</Text>}
           </View>
         )}
         {phase === 'cue' && (
@@ -1050,7 +1053,7 @@ function SingleNoteSessionBody({ phase, prompt, result, liveMidi, micHearing, lo
             <Text accessibilityLiveRegion="assertive" style={styles.feedback}>{trainingFeedback(result)}</Text>
           </View>
         )}
-        <SingleNoteTransport phase={phase} onBegin={onBegin} onSkip={onSkip} />
+        <SingleNoteTransport phase={phase} error={error} onBegin={onBegin} onSkip={onSkip} />
       </View>
     </PracticeSwipeSurface>
   )
@@ -1083,14 +1086,18 @@ function PracticeSwipeSurface({ onSwipeLeft, onSwipeRight, children }: {
   return <View testID="training-swipe-surface" style={styles.swipeSurface} {...responder.panHandlers}>{children}</View>
 }
 
-function SingleNoteTransport({ phase, onBegin, onSkip }: {
+function SingleNoteTransport({ phase, error, onBegin, onSkip }: {
   phase: ReturnType<typeof initialTrainingState>['phase']
+  error: string | null
   onBegin: () => void
   onSkip: () => void
 }): React.JSX.Element {
+  const restartRequired = phase === 'ready' && error !== null
   const replayAvailable = phase === 'respond'
-  const swipeHint = phase === 'ready'
-    ? 'The next note starts automatically'
+  const swipeHint = restartRequired
+    ? 'Tap Start when you are ready'
+    : phase === 'ready'
+      ? 'The next note starts automatically'
     : phase === 'respond'
       ? 'Swipe right to replay · left to skip'
       : phase === 'feedback'
@@ -1101,7 +1108,7 @@ function SingleNoteTransport({ phase, onBegin, onSkip }: {
     : phase === 'feedback'
       ? <Text style={styles.transportNext}>›</Text>
       : <PlayPauseGlyph playing={phase === 'cue'} color={C.amberInk} />
-  return <TransportDock
+  const dock = <TransportDock
     left={replayAvailable ? {
       accessibilityLabel: 'Hear again',
       caption: 'Replay',
@@ -1109,8 +1116,8 @@ function SingleNoteTransport({ phase, onBegin, onSkip }: {
       onPress: onBegin
     } : undefined}
     center={{
-      accessibilityLabel: phase === 'ready' ? 'Preparing next note' : phase === 'cue' ? 'Playing target note' : phase === 'respond' ? 'Microphone listening' : 'Loading next note',
-      caption: phase === 'ready' ? 'Preparing' : phase === 'cue' ? 'Playing' : phase === 'respond' ? 'Listening' : 'Next note',
+      accessibilityLabel: restartRequired ? 'Start' : phase === 'ready' ? 'Preparing next note' : phase === 'cue' ? 'Playing target note' : phase === 'respond' ? 'Microphone listening' : 'Loading next note',
+      caption: restartRequired ? 'Start' : phase === 'ready' ? 'Preparing' : phase === 'cue' ? 'Playing' : phase === 'respond' ? 'Listening' : 'Next note',
       icon: centerIcon
     }}
     right={phase === 'respond' ? {
@@ -1121,6 +1128,9 @@ function SingleNoteTransport({ phase, onBegin, onSkip }: {
     } : undefined}
     hint={swipeHint}
   />
+  return restartRequired
+    ? <Pressable accessibilityRole="button" accessibilityLabel="Start" onPress={onBegin}>{dock}</Pressable>
+    : dock
 }
 
 /** What the microphone is doing, in the states a singer can act on

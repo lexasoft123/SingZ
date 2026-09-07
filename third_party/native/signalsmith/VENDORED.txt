@@ -1,0 +1,5 @@
+Vendored: signalsmith-stretch @57b93f4, signalsmith-linear @7f53cdd (MIT).
+Plain-C++ FFT path (no SIGNALSMITH_USE_* defines). The pinned implementation
+is compiled as its own static component outside zdsp_runtime's strict source
+policy. mobile/scripts/patch-audio-api.js copies the same authoritative files
+into react-native-audio-api until that legacy wrapper is retired.

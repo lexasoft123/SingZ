@@ -24,6 +24,118 @@ class AudioInputPolicyTest {
     assertEquals("android:41", AudioInputPolicy.portableUid(41))
   }
 
+  /* Which endpoint a song plays out of.
+   *
+   * These are the three routes a real handset published — measured, not
+   * invented: a TELEPHONY endpoint at 16 kHz, the earpiece, and the speaker.
+   * Nothing marked a default, so the app took the first by UID STRING, and
+   * "android:10" sorts before "android:3": six lanes were prepared at 16 kHz
+   * for the telephony path and Oboe refused to open it. */
+  @Test
+  fun `a song plays out of the speaker, never the earpiece or the telephony path`() {
+    val uids = arrayOf("android:10", "android:2", "android:3")
+    val telephonyEarpieceSpeaker = intArrayOf(18, 1, 2)
+    val allSinks = booleanArrayOf(true, true, true)
+    assertEquals(
+      "android:3",
+      AudioInputPolicy.mediaOutputUid(uids, telephonyEarpieceSpeaker, allSinks)
+    )
+
+    // Headphones outrank the speaker; a voice-call SCO profile outranks nothing.
+    assertEquals(
+      "android:9",
+      AudioInputPolicy.mediaOutputUid(
+        arrayOf("android:2", "android:9", "android:7"),
+        intArrayOf(2, 4, 7), // speaker, wired headphones, Bluetooth SCO
+        booleanArrayOf(true, true, true)
+      )
+    )
+    // A2DP is the Bluetooth profile music goes through, and beats the speaker.
+    assertEquals(
+      "android:8",
+      AudioInputPolicy.mediaOutputUid(
+        arrayOf("android:2", "android:8"),
+        intArrayOf(2, 8),
+        booleanArrayOf(true, true)
+      )
+    )
+
+    // A microphone is not an output however high its type would rank.
+    assertEquals(
+      "",
+      AudioInputPolicy.mediaOutputUid(
+        arrayOf("android:15"),
+        intArrayOf(15),
+        booleanArrayOf(false)
+      )
+    )
+    // A car's head unit publishes EVERY output context as TYPE_BUS, call
+    // buses included, and the platform declines to say what an IP or BUS sink
+    // is on the other end of. Ranking either playable would let the device id
+    // pick a call bus — the class this function exists to keep out — so both
+    // score zero and no default is published at all.
+    assertEquals(
+      "",
+      AudioInputPolicy.mediaOutputUid(
+        arrayOf("android:20", "android:21"),
+        intArrayOf(20, 21),
+        booleanArrayOf(true, true)
+      )
+    )
+    // A speaker still wins over them rather than being crowded out.
+    assertEquals(
+      "android:5",
+      AudioInputPolicy.mediaOutputUid(
+        arrayOf("android:21", "android:5"),
+        intArrayOf(21, 2),
+        booleanArrayOf(true, true)
+      )
+    )
+    // Nothing worth listening through: say so, rather than name a route the
+    // caller would then prepare a whole graph against. Native playback
+    // declines on such a device; it does not fall back to the first output.
+    assertEquals(
+      "",
+      AudioInputPolicy.mediaOutputUid(
+        arrayOf("android:1", "android:18"),
+        intArrayOf(1, 18),
+        booleanArrayOf(true, true)
+      )
+    )
+    assertEquals("", AudioInputPolicy.mediaOutputUid(arrayOf(), intArrayOf(), booleanArrayOf()))
+
+    // SPEAKER_SAFE is the same speaker with a volume ceiling, so it must lose
+    // to its twin from EITHER side of the device-id order. Ranking them equal
+    // would hand the choice back to the id, which is the whole accident this
+    // function exists to end.
+    assertEquals(
+      "android:2",
+      AudioInputPolicy.mediaOutputUid(
+        arrayOf("android:2", "android:24"),
+        intArrayOf(2, 24),
+        booleanArrayOf(true, true)
+      )
+    )
+    assertEquals(
+      "android:9",
+      AudioInputPolicy.mediaOutputUid(
+        arrayOf("android:4", "android:9"), // SPEAKER_SAFE numbered lower
+        intArrayOf(24, 2),
+        booleanArrayOf(true, true)
+      )
+    )
+    // Genuine ties still keep the caller's order (by device id), so a phone
+    // with two equal endpoints does not flip between them between refreshes.
+    assertEquals(
+      "android:3",
+      AudioInputPolicy.mediaOutputUid(
+        arrayOf("android:3", "android:9"),
+        intArrayOf(4, 3), // wired headphones and wired headset both rank 60
+        booleanArrayOf(true, true)
+      )
+    )
+  }
+
   @Test
   fun `empty or corrupt vendor metadata never invents hidden channels`() {
     assertEquals(1, AudioInputPolicy.channelCount(intArrayOf(), intArrayOf(), intArrayOf()))
@@ -45,12 +157,66 @@ class AudioInputPolicyTest {
   }
 
   @Test
+  fun `host inventory preserves every advertised rate and unknown`() {
+    assertTrue(AudioInputPolicy.hostSampleRates(intArrayOf()).isEmpty())
+    assertEquals(
+      listOf(44_100, 48_000, 96_000),
+      AudioInputPolicy.hostSampleRates(
+        intArrayOf(96_000, -1, 48_000, 44_100, 48_000)
+      ).toList()
+    )
+  }
+
+  @Test
+  fun `dormant host publish failure cannot break capture registry`() {
+    var capture = 0
+    var host = 0
+    AudioInputPolicy.publishCaptureThenBestEffortHost(
+      publishCapture = { capture++ },
+      publishHost = { host++; error("host JNI failed") }
+    )
+    assertEquals(1, capture)
+    assertEquals(1, host)
+  }
+
+  @Test(expected = IllegalStateException::class)
+  fun `capture publish failure does not proceed to dormant host`() {
+    var host = 0
+    try {
+      AudioInputPolicy.publishCaptureThenBestEffortHost(
+        publishCapture = { error("capture failed") },
+        publishHost = { host++ }
+      )
+    } finally {
+      assertEquals(0, host)
+    }
+  }
+
+  @Test
   fun `Bluetooth inputs are honest high-latency routes`() {
     assertTrue(AudioInputPolicy.highLatency(7)) // TYPE_BLUETOOTH_SCO
     assertTrue(AudioInputPolicy.highLatency(26)) // TYPE_BLE_HEADSET
     assertTrue(AudioInputPolicy.highLatency(23)) // TYPE_HEARING_AID
     assertTrue(AudioInputPolicy.highLatency(21)) // TYPE_BUS / automotive
     assertFalse(AudioInputPolicy.highLatency(11)) // TYPE_USB_DEVICE
+  }
+
+  @Test
+  fun `dormant host inventory classifies delayed sinks conservatively`() {
+    assertEquals("bluetooth", AudioInputPolicy.hostTransport(8))
+    assertEquals("bluetooth-low-energy", AudioInputPolicy.hostTransport(23))
+    assertEquals("bluetooth-low-energy", AudioInputPolicy.hostTransport(26))
+    assertEquals("vehicle", AudioInputPolicy.hostTransport(21))
+    assertEquals("usb", AudioInputPolicy.hostTransport(11))
+    assertEquals("hdmi", AudioInputPolicy.hostTransport(29))
+    assertEquals("unknown", AudioInputPolicy.hostTransport(0))
+    assertEquals("low-latency", AudioInputPolicy.hostMonitoringSuitability(2))
+    assertEquals("low-latency", AudioInputPolicy.hostMonitoringSuitability(3))
+    assertEquals("low-latency", AudioInputPolicy.hostMonitoringSuitability(11))
+    assertEquals("high-latency", AudioInputPolicy.hostMonitoringSuitability(8))
+    assertEquals("high-latency", AudioInputPolicy.hostMonitoringSuitability(21))
+    assertEquals("unknown", AudioInputPolicy.hostMonitoringSuitability(29))
+    assertEquals("unknown", AudioInputPolicy.hostMonitoringSuitability(0))
   }
 
   @Test

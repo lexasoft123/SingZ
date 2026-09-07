@@ -1,7 +1,7 @@
 /**
  * The core's own detectors, reached through the SingzSplit native module —
  * Phase 4c of docs/PHONE-STANDALONE.md: one C++ implementation
- * (mobile/native/core/melody.cpp, bit-identical to the desktop's pyin) that
+ * (zcore/src/legacy/melody.cpp, bit-identical to the desktop's pyin) that
  * reads the stem file itself on a native thread and answers in about a
  * second where the worklet-hosted TS took a minute and a half. Nothing
  * crosses a JS runtime for these; the file path is the whole request.

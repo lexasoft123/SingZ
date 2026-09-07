@@ -8,9 +8,9 @@ right-click-to-open flow, but every download needed that workaround. A
 entirely — Gatekeeper checks the notarization ticket instead of complaining.
 
 CI does that now and is verified (see below). **v0.19.1 is the first signed,
-notarized release**; the ad-hoc path in `afterPack.cjs` survives for forks
-and for machines with no certificate, and stands aside on its own when a real
-identity is configured.
+notarized release**. `afterPack.cjs` ad-hoc repairs every final bundle first;
+that remains the final signature for forks and machines with no certificate,
+while electron-builder's later Developer ID pass replaces it in release CI.
 
 One thing about that first tag is worth watching rather than assuming: the
 proving runs were `workflow_dispatch`es, and `build.yml`'s attach step is
@@ -186,7 +186,7 @@ keystroke from handing the Windows build an Apple `.p12`.
 `build/entitlements.mac.plist` / `entitlements.mac.inherit.plist` grant only
 `com.apple.security.cs.allow-jit` and
 `com.apple.security.cs.allow-unsigned-executable-memory` — what V8/Node need
-to keep running under Hardened Runtime, nothing more. Two things this
+to keep running under Hardened Runtime, nothing more. Three things this
 deliberately does *not* carry, and why adding them by reflex would be wrong:
 
 - **No App Sandbox entitlements** (`com.apple.security.app-sandbox` and its
@@ -201,16 +201,20 @@ deliberately does *not* carry, and why adding them by reflex would be wrong:
   matching was checked against exactly this before wiring hardened runtime
   in — getting it wrong would have silently broken the mic on every signed
   build, discoverable only by someone actually running one.
-- **No `disable-library-validation`.** The desktop has no native Node
-  addons (`npmRebuild: false`, no `binding.gyp` anywhere) — everything audio
-  runs as a spawned subprocess (`whisper-cli`, `singz-analyze`, downloaded
-  splitter packs), never a dylib loaded into the Electron process itself, so
-  there is nothing Hardened Runtime's library validation would block.
+- **No `disable-library-validation`.** The desktop now packages and loads the
+  native Node-API module `Contents/Resources/engines/singz-capture.node`.
+  electron-builder must sign that nested Mach-O with the same Developer ID
+  team as the containing app; Hardened Runtime's library validation then
+  allows the packaged Electron process to load it without weakening the app's
+  entitlements. The addon is an explicit `extraResources` input even though
+  `npmRebuild: false` and there is no `binding.gyp`, so neither setting is
+  evidence that the desktop is native-code-free.
 
-## This has now actually run — twice, and the vendored binaries were fine
+## Signing has run twice; the native addon adds a release load gate
 
 Superseding the "first real run is unverified" note that stood here: it is
-verified, on both a local build and on CI.
+verified for the signing/notarization pipeline and the then-vendored
+subprocesses, on both a local build and on CI.
 
 **Locally** (2026-08-29): a `--mac --arm64` build signed, notarized and
 stapled. Verified the way a downloader experiences it rather than by trusting
@@ -223,15 +227,29 @@ quarantined, mounted dmg.
 `notarization successful` twice — once per architecture — producing signed,
 notarized `SingZ-<version>-mac-x64.dmg` and `-mac-arm64.dmg`.
 
-The risk this section used to flag did **not** materialize. `electron-builder`
-deep-signs the whole bundle including the vendored `whisper-cli` and
-`singz-analyze` under `extraResources`, and Apple's notary service accepted
-them without complaint on every run. If that ever changes, the symptom would
-be a rejection naming `engines/whisper-cli` or `engines/singz-analyze` rather
-than the app ("not signed with a valid Developer ID certificate" / "missing a
-secure timestamp"), and electron-builder logs notary output to the job log
-either way — so that remains the first place to look, just not an expected
-one.
+Those two proving runs predate `singz-capture.node`, so they do not prove its
+Hardened Runtime load. Release acceptance now also requires launching a real
+Developer ID-signed, notarized SingZ build and opening Settings → Audio until
+the Headphone monitoring section's **Audio interface playback** picker lists
+the native output devices. That picker is populated only by the packaged
+addon's `audioHostDevices` export through the real app process, so success
+proves the same-team nested signature passes library validation; the separate
+Chromium microphone picker and a signature-only check do not. The existing
+capture package checks remain complementary:
+`capture-addon-signed-mac.cjs` verifies signed-Mach-O identity and tamper
+rejection in the ad-hoc CI package, while `capture-addon-smoke.cjs` verifies
+the exports and device-inventory result shapes. Neither should be described
+as a Developer ID load unless it ran through the notarized packaged app.
+
+The subprocess risk this section used to flag did **not** materialize.
+`electron-builder` deep-signs the whole bundle including the vendored
+`whisper-cli` and `singz-analyze` under `extraResources`, and Apple's notary
+service accepted them without complaint on every proving run. The capture
+addon joins that signed bundle now, but unlike a spawned executable it must
+also pass the real-app load gate above. A notary rejection names the failing
+path under `engines/` ("not signed with a valid Developer ID certificate" /
+"missing a secure timestamp"), and electron-builder logs that output to the
+job log either way — still the first place to look.
 
 What DID bite on the way there is recorded above: the `CSC_LINK` keychain-
 password bug, and a dangling absolute symlink in the bundle when packaging

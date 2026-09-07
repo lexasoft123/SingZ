@@ -26,6 +26,10 @@
  * with no pack the future leg still holds (nothing may be rewritten) and the
  * old leg's beat re-derives naked, which is still v23.
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../shared/watchdog.cjs').arm('stamp-upgrade-e2e')
+
 const { _electron } = require('playwright-core')
 const { readFileSync, writeFileSync, cpSync, rmSync, existsSync, readdirSync, statSync } = require('node:fs')
 const { join } = require('node:path')

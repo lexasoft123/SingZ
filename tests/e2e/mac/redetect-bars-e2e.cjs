@@ -31,6 +31,10 @@
  *      still 'auto'. What Drive syncs and the phones open is the file, not
  *      the React state
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../shared/watchdog.cjs').arm('redetect-bars-e2e')
+
 const { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } = require('node:fs')
 const { homedir, tmpdir } = require('node:os')
 const { join } = require('node:path')

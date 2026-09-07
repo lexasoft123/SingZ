@@ -119,7 +119,7 @@ describe('loadProject builds the lanes', () => {
     expect(p.stems[0].custom).toBeUndefined()
   })
 
-  it('skips an added track it cannot fetch, and still plays the song', async () => {
+  it('fails the whole load when a declared added track is unavailable', async () => {
     const { load } = setup(
       [
         { id: 'custom-gone', label: 'Gone', color: '#fff', file: 'stems/custom-gone.mp3' },
@@ -127,7 +127,8 @@ describe('loadProject builds the lanes', () => {
       ],
       { failing: ['stems/custom-gone.mp3'] }
     )
-    const p = await load()
-    expect(p.stems.map((l) => l.id)).toEqual(['vocals', 'drums', 'custom-here'])
+    await expect(load()).rejects.toThrow(
+      'Could not load the added track "Gone". The song was not opened because every saved lane must be available.'
+    )
   })
 })

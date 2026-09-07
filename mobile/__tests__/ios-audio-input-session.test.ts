@@ -1,8 +1,11 @@
 import {
   IosAudioInputSessionCoordinator,
+  subscribeIosAudioInputFrames,
+  subscribeIosAudioInputState,
   type IosAudioInputLeaseNative,
   type IosAudioSessionOwner
 } from '../src/ios-audio-input-session'
+import { NativeEventEmitter, NativeModules } from 'react-native'
 
 const harness = (permission: 'Undetermined' | 'Denied' | 'Granted' = 'Granted') => {
   const calls: string[] = []
@@ -62,7 +65,9 @@ const harness = (permission: 'Undetermined' | 'Denied' | 'Granted' = 'Granted') 
     },
     releaseLease: async (token) => {
       calls.push(`lease:release:${token}`)
-    }
+    },
+    startCapture: async () => ({ ok: true, sampleRate: 48000 }),
+    stopCapture: async () => undefined
   }
   return {
     calls,
@@ -75,6 +80,166 @@ const harness = (permission: 'Undetermined' | 'Denied' | 'Granted' = 'Granted') 
 }
 
 describe('iOS audio input session lease', () => {
+  test('subscribes through the native emitter so RCTEventEmitter observes listeners', () => {
+    const remove = jest.fn()
+    NativeModules.AudioInputSession = {
+      addListener: jest.fn(),
+      removeListeners: jest.fn()
+    }
+    const addListener = jest
+      .spyOn(NativeEventEmitter.prototype, 'addListener')
+      .mockReturnValue(
+        { remove } as unknown as ReturnType<NativeEventEmitter['addListener']>
+      )
+    const frameCallback = jest.fn()
+    const stateCallback = jest.fn()
+    const unsubscribeFrame = subscribeIosAudioInputFrames(frameCallback)
+    const unsubscribeState = subscribeIosAudioInputState(stateCallback)
+    expect(addListener.mock.calls[0][0]).toBe('singzAudioInputFrame')
+    const frameListener = addListener.mock.calls[0][1] as
+      (value: unknown) => void
+    frameListener({ startFlags: 0, endFlags: 0 })
+    frameListener({ startFlags: -1, endFlags: 0 })
+    expect(frameCallback).toHaveBeenCalledTimes(1)
+    expect(addListener).toHaveBeenNthCalledWith(
+      2,
+      'singzAudioInputState',
+      stateCallback
+    )
+    unsubscribeFrame()
+    unsubscribeState()
+    expect(remove).toHaveBeenCalledTimes(2)
+    addListener.mockRestore()
+  })
+
+  test('starts generation-bound native capture after the lease and stops it before release', async () => {
+    const h = harness()
+    h.native.startCapture = async (token, uid, channel, generation) => {
+      h.calls.push(`capture:start:${token}:${uid}:${channel}:${generation}`)
+      return { ok: true, sampleRate: 48000 }
+    }
+    h.native.stopCapture = async (generation) => {
+      h.calls.push(`capture:stop:${generation}`)
+    }
+    const coordinator = new IosAudioInputSessionCoordinator(h.owner, h.native)
+    const lease = await coordinator.acquire({ deviceUid: 'ios:usb', channel: 2 })
+    expect(lease.generation).toBe(1)
+    expect(h.calls.at(-1)).toBe('capture:start:7:ios:usb:2:1')
+    await lease.release()
+    expect(h.calls.indexOf('capture:stop:1')).toBeLessThan(
+      h.calls.indexOf('lease:release:7')
+    )
+  })
+
+  test('retries a delayed iOS route notification without cycling the owned session', async () => {
+    const h = harness()
+    let leaseNumber = 7
+    let starts = 0
+    h.native.acquireLease = async (uid, channels) => {
+      const token = String(leaseNumber++)
+      h.calls.push(`lease:acquire:${token}:${uid}:${channels}`)
+      return token
+    }
+    h.native.startCapture = async (token, uid, channel, generation) => {
+      h.calls.push(`capture:start:${token}:${uid}:${channel}:${generation}`)
+      if (++starts === 1)
+        throw new Error('iOS audio route changed after the input session was prepared')
+      return { ok: true, sampleRate: 48000 }
+    }
+    h.native.stopCapture = async (generation) => {
+      h.calls.push(`capture:stop:${generation}`)
+    }
+
+    const coordinator = new IosAudioInputSessionCoordinator(h.owner, h.native)
+    const lease = await coordinator.acquire({ deviceUid: 'ios:usb', channel: 2 })
+
+    expect(lease.generation).toBe(1)
+    expect(h.calls).toContain('lease:release:7')
+    expect(h.calls).toContain('verify:capture:ios:usb:3')
+    expect(h.calls.at(-1)).toBe('capture:start:8:ios:usb:2:1')
+    expect(h.calls.filter((call) => call === 'options:playAndRecord')).toHaveLength(1)
+    expect(h.calls).not.toContain('options:playback')
+
+    await lease.release()
+    expect(h.calls.indexOf('capture:stop:1')).toBeLessThan(
+      h.calls.indexOf('lease:release:8')
+    )
+  })
+
+  test('restores playback when a route retry confirms that the selected input is gone', async () => {
+    const h = harness()
+    let verifications = 0
+    h.native.startCapture = async () => {
+      throw new Error('iOS audio route changed while opening RemoteIO')
+    }
+    h.native.verifyCaptureSession = async (uid, channels) => {
+      h.calls.push(`verify:capture:${uid}:${channels}`)
+      if (++verifications > 1) throw new Error('selected input is no longer active')
+    }
+
+    const coordinator = new IosAudioInputSessionCoordinator(h.owner, h.native)
+    await expect(
+      coordinator.acquire({ deviceUid: 'ios:usb', channel: 2 })
+    ).rejects.toThrow('selected input is no longer active')
+    expect(h.calls).toContain('lease:release:7')
+    expect(h.calls.slice(-4)).toEqual([
+      'active:false',
+      'options:playback',
+      'active:true',
+      'verify:playback'
+    ])
+  })
+
+  test('does not retry an unrelated native capture failure', async () => {
+    const h = harness()
+    h.native.startCapture = async () => {
+      throw new Error('RemoteIO render callback failed')
+    }
+    const coordinator = new IosAudioInputSessionCoordinator(h.owner, h.native)
+
+    await expect(coordinator.acquire()).rejects.toThrow(
+      'RemoteIO render callback failed'
+    )
+    expect(
+      h.calls.filter((call) => call.startsWith('lease:acquire:'))
+    ).toHaveLength(1)
+  })
+
+  test('held native stop completion blocks lease, route, and playback cleanup', async () => {
+    const h = harness()
+    let completeStop!: () => void
+    let observeStopStart!: () => void
+    const stopStarted = new Promise<void>((resolve) => {
+      observeStopStart = resolve
+    })
+    h.native.stopCapture = (generation) => {
+      h.calls.push(`capture:stop:${generation}`)
+      observeStopStart()
+      return new Promise<void>((resolve) => {
+        completeStop = resolve
+      })
+    }
+    const coordinator = new IosAudioInputSessionCoordinator(h.owner, h.native)
+    const lease = await coordinator.acquire({ deviceUid: 'ios:usb' })
+    const beforeRelease = h.calls.length
+    const releasing = lease.release()
+    await stopStarted
+    expect(h.calls.slice(beforeRelease)).toEqual(['capture:stop:1'])
+
+    completeStop()
+    await releasing
+    const cleanup = h.calls.slice(beforeRelease)
+    expect(cleanup.indexOf('capture:stop:1')).toBeLessThan(
+      cleanup.indexOf('lease:release:7')
+    )
+    expect(cleanup.indexOf('lease:release:7')).toBeLessThan(
+      cleanup.indexOf('preferences:restore:11')
+    )
+    expect(cleanup.indexOf('preferences:restore:11')).toBeLessThan(
+      cleanup.indexOf('options:playback')
+    )
+  })
+
   test('deactivates before configuration, exposes USB channel 3, and restores in order', async () => {
     const h = harness()
     const coordinator = new IosAudioInputSessionCoordinator(h.owner, h.native)
@@ -355,6 +520,35 @@ describe('iOS audio input session lease', () => {
     await next.release()
   })
 
+  test('capture stop failure blocks every lease, route, and playback cleanup until retry', async () => {
+    const h = harness()
+    let stopFails = true
+    h.native.stopCapture = async (generation) => {
+      h.calls.push(`capture:stop:${generation}`)
+      if (stopFails) throw new Error('delivery join failed')
+    }
+    const coordinator = new IosAudioInputSessionCoordinator(h.owner, h.native)
+    const lease = await coordinator.acquire({ deviceUid: 'ios:usb' })
+    const beforeRelease = h.calls.length
+    await expect(lease.release()).rejects.toThrow(
+      'stop native capture: delivery join failed'
+    )
+    expect(h.calls.slice(beforeRelease)).toEqual(['capture:stop:1'])
+    await expect(coordinator.acquire()).rejects.toThrow('must be retried')
+
+    stopFails = false
+    const retryStart = h.calls.length
+    await coordinator.retryRelease()
+    const retryCalls = h.calls.slice(retryStart)
+    expect(retryCalls[0]).toBe('capture:stop:1')
+    expect(retryCalls.indexOf('capture:stop:1')).toBeLessThan(
+      retryCalls.indexOf('lease:release:7')
+    )
+    expect(retryCalls.indexOf('lease:release:7')).toBeLessThan(
+      retryCalls.indexOf('options:playback')
+    )
+  })
+
   test('present-route preference failure stays latched when safe abandon rejects', async () => {
     const h = harness()
     let transientFailure = true
@@ -598,7 +792,10 @@ describe('iOS audio input session lease', () => {
     const first = await coordinator.acquire()
     const releasing = first.release()
     const acquiring = coordinator.acquire()
-    await Promise.resolve()
+    // Native capture now retires before the lease, so allow the serialized
+    // restoration chain to cross that awaited boundary before inspecting it.
+    for (let turn = 0; turn < 10 && !finishRelease; ++turn)
+      await Promise.resolve()
     expect(finishRelease).toBeDefined()
     finishRelease?.()
     await releasing

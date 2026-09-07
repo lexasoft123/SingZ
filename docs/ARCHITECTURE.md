@@ -7,6 +7,8 @@ Electron app in three layers, communicating over a small typed IPC bridge
 renderer (React)               preload            main (Node)
 ──────────────────             ────────           ─────────────────────────────
 MultitrackEngine (Web Audio)   window.singz  ──►  media.ts     allowlisted file access
+  — the fallback now; the
+  native DSP graph is default
 TrackStack/Waveform (canvas)                      separation.ts engine ladder + runs
 PitchStrip (piano roll + mic)                     lyrics.ts    LRCLIB→whisper ladder
 BeatGrid (beat lines over the lanes)
@@ -15,6 +17,70 @@ SetupWizard (model manager)                       models.ts    versioned pack do
 LogPanel (diagnostics)                            log.ts       ring-buffer app log
 App.tsx (orchestration)                           projects.ts  ~/Documents/SingZ projects
 ```
+
+The current playback and capture paths are intentionally still separate. The
+phased proposal for a shared native input/output graph, built-in processors,
+analyzer taps and desktop plug-in hosting is in
+[DSP-GRAPH-PLAN.md](DSP-GRAPH-PLAN.md). Its platform, DAW/effects-engine,
+real-time scheduling, zero-copy and acceleration research is recorded in
+[DSP-IMPLEMENTATION-RESEARCH.md](DSP-IMPLEMENTATION-RESEARCH.md). The native
+C++ language profile, component targets, dependencies and scalable repository
+layout are in [NATIVE-CORE-DESIGN.md](NATIVE-CORE-DESIGN.md).
+
+Phases 3A through 3D add a standalone native conformance path only:
+`zcore_device` AudioHost/provider → `zdsp_host_adapter` → `zdsp_runtime`.
+Phase 3A introduced the portable contract, fake provider and macOS AUHAL host;
+Phase 3B adds the standalone Windows provider: one event-driven STA/MMCSS owner for two WASAPI endpoint clients
+bridged by a bounded planar SPSC FIFO; only that owner's render action enters
+the graph.
+Phase 3C adds an iOS RemoteIO provider whose output render callback is the
+graph clock. It validates an app-prepared audio session; the provider itself
+never configures `AVAudioSession`. Phase 3D provides the equivalent dormant
+Android Oboe/AAudio host. iOS Phase iOS-A packages the callback-safe runtime
+and host adapter as strict component pods, and Phase iOS-B1 adds the reusable,
+generation-bound WAV/FLAC frame-zero session: authorized descriptor decode and
+resample, sample-locked lane gain/mute/solo mixing, master limiting,
+output-host composition and deterministic ownership/telemetry.
+
+That session is now **the default playback backend on iOS, Android and macOS**
+(2026-09-06); Windows stays on Web Audio. It is a whole player, not the
+frame-zero preview it began as: transport, seek, loop, tempo and transpose,
+the metronome and its count-in, training ducking, custom lanes and the seek
+bar's own level envelope all run in the core, on one source tree for all three
+hosts. `mobile/src/playback/native.ts` is the phones' only bridge consumer: it selects
+the backend before project decode, materializes local WAV/FLAC paths, and
+creates no RNAudioAPI song `AudioBuffer`s on the native path.
+`src/renderer/src/audio/desktop-native-playback.ts` is the desktop's, and there
+the renderer KEEPS its decoded buffers — the fallback and the editor both need
+them — which is the desktop's decided footprint cost rather than an oversight.
+
+**Legacy is not going away.** It is the fallback when native refuses or is
+unavailable, it is the editor's engine, and it is the parity reference every
+rule in
+[NATIVE-PLAYBACK-PARITY-PLAN.md](NATIVE-PLAYBACK-PARITY-PLAN.md) is measured
+against — that document's first section is the live status of the cutover, and
+[DSP-GRAPH-PLAN.md](DSP-GRAPH-PLAN.md) is the roadmap it belongs to. At start,
+the coordinator suspends and releases legacy output, configures and verifies
+the intended playback session, then opens and starts the host. The Train tab is
+not activated until matching native stop/unload returns a process-global
+cleanup lease, so its mic session cannot race the native output owner.
+
+The boundary itself — the thirteen phone methods and their arity rule, the
+request DTOs with units and bounds, the session block field by field, the
+result/receipt/cleanup shapes, the enum tables, the lifetime protocol and the
+places the three bridges diverge — is
+[docs/NATIVE-PLAYBACK-BRIDGE.md](NATIVE-PLAYBACK-BRIDGE.md).
+
+Cleanup is a transferable ownership protocol rather than an empty-state
+snapshot. Lazy legacy fallback is allowed only when exact unload returns
+`cleanup.globallyComplete`, `cleanup.fallbackSafe` and a positive
+`handoffLease`; native re-entry first suspends legacy and consumes that same
+lease in `prepare`. Uncertain cleanup blocks fallback. A prepare/open failure
+may fall back after this proof, while a start-command or later terminal failure
+never auto-falls back. Immediate claims and stop/unload cancellation supersede
+in-flight decode; callback failure is sticky and fail-silent. The per-platform
+host details are in `docs/IOS-AUDIO.md`, `docs/ANDROID-AUDIO.md` and
+`docs/WINDOWS-AUDIO.md`.
 
 ## Audio playback (`renderer/src/audio/engine.ts`)
 
@@ -344,7 +410,7 @@ transpose-aware in the pitch strip's info card.
 
 **The detectors are moving into the shared C++ core, one implementation for
 every platform** (docs/PHONE-STANDALONE.md, Phase 4c): the melody tracker
-is there already — `mobile/native/core/melody.cpp` is pyin.ts + pitch.ts +
+is there already — `zcore/src/legacy/melody.cpp` is pyin.ts + pitch.ts +
 pitch-core.ts ported line for line and held bit-identical to this section's
 TS (float where the TS keeps Float32Array, double elsewhere, sums in the
 same order; the corpus gate is `singz-analyze melody` vs node, at the file's

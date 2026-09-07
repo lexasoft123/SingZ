@@ -31,6 +31,10 @@
  * SIGSEGV) — app-side opens are waited out on the persisted log; the
  * :split process has no Hermes, so polling during ITS decode is safe.
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../tests/shared/watchdog.cjs').arm('split-android', { totalMinutes: 120 })
+
 const { execFileSync, execSync } = require('node:child_process')
 const { join } = require('node:path')
 const { mkdtempSync } = require('node:fs')
@@ -310,7 +314,7 @@ async function main() {
   check('adoption: six stem rows', STEMS.every((s) => rows1.includes(`${s}.wav`)))
 
   // Phase 4c: the melody in project.json came from the CORE's tracker
-  // (native/core/melody.cpp via JNI), and on this device it agrees with the
+  // (zcore/src/legacy/melody.cpp via JNI), and on this device it agrees with the
   // desktop TS to the bit — asserted on song.wav (the seed as added; the
   // split's vocals stem of a synthetic vocal is silent, so it would be a
   // vacuous pass). The TS side decodes song.wav through audio-api INSIDE

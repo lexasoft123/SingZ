@@ -108,6 +108,36 @@ require Pod::Executable.execute_command('node', ['-p',
 platform :ios, min_ios_version_supported
 prepare_react_native_project!
 
+# CocoaPods snapshots RNAudioAPI's vendored XCFramework paths during install.
+# Promote the exact verified iOS product codec pack before that analysis so
+# zcore and RNAudioAPI resolve one shared libav* owner. Target-proof staging
+# is an explicit Debug-only harness mode; ordinary Pod installs require full
+# device/simulator receipts and fail closed.
+codec_target_proof = ENV['SINGZ_CODEC_TARGET_PROOF'] == '1'
+selector_args = [
+  File.expand_path('../scripts/select-ffmpeg-codec-runtime.mjs', __dir__),
+  '--require-ios'
+]
+selector_args << '--proof-staging' if codec_target_proof
+Pod::Executable.execute_command('node', selector_args)
+
+# CocoaPods consumes the materialized pod tree, not the source selector's
+# receipt beside RNAudioAPI. Refresh compliance after selection, then verify
+# both copies and every selected byte before any pod target is evaluated.
+Pod::Executable.execute_command('node', [
+  File.expand_path('../scripts/sync-singzcore.js', __dir__)
+])
+verifier_args = [
+  File.expand_path('../scripts/verify-ffmpeg-codec-runtime.mjs', __dir__),
+  '--require-ios', '--verify-ios-compliance'
+]
+if codec_target_proof
+  verifier_args << '--proof-staging'
+else
+  verifier_args << '--require-full'
+end
+Pod::Executable.execute_command('node', verifier_args)
+
 linkage = ENV['USE_FRAMEWORKS']
 if linkage != nil
   Pod::UI.puts "Configuring Pod with #{linkage}ally linked Frameworks".green
@@ -117,13 +147,27 @@ end
 target 'SingZPlayer' do
   config = use_native_modules!
 
+  # Dormant Phase iOS-B1 composition. It exposes generation-bound commands to
+  # the existing bridge pod but has no JS consumer or automatic activation.
+  pod 'SingzPlaybackSession', :path => './SingzPlaybackSession'
+
   # Project-folder access (document picker, iCloud downloads) — local pod so
   # no pbxproj surgery is needed.
   pod 'FolderAccess', :path => './FolderAccess'
 
-  # Shared C++ engine core (mobile/native/core): on-device stem split + beat
+  # Shared C++ zcore package: on-device stem split + beat
   # inference over ONNX Runtime (docs/PHONE-STANDALONE.md).
   pod 'SingzCore', :path => './SingzCore'
+
+  # Exact strict callback closure used by SingzCore's iOS providers. It owns
+  # zcore_device_callback plus the RemoteIO render callback definitions; the
+  # broad compatibility pod retains control/session code only.
+  pod 'SingzDeviceCallback', :path => './SingzDeviceCallback'
+
+  # Callback-safe zdsp runtime and AudioHostGraphAdapter. Phase iOS-A links
+  # the component plus an inert capability probe only; RNAudioAPI remains the
+  # sole output/session owner until ADR-0008's atomic cutover.
+  pod 'SingzDspRuntime', :path => './SingzDspRuntime'
 
   use_react_native!(
     :path => config[:reactNativePath],
@@ -145,5 +189,28 @@ target 'SingZPlayer' do
     # regenerates the aggregate xcconfigs from the in-memory spec, so running
     # first left the app target compiling against the absolute path again.
     singz_relativize_hermes_cli_path(installer)
+    singz_optimize_core_pods_in_debug(installer)
+  end
+end
+
+# CocoaPods compiles every pod's Debug configuration at -O0, and the Debug
+# simulator app is the only one the player-session harness can drive — so
+# every swap prime, every prepare and every CPU column measured on the
+# simulator was the unoptimized engine against Hermes, the same trap the
+# Android debug variant had until 2026-09-05 (its CMakeLists.txt says why).
+# The three pods that are ours and C++ compile Debug at -O2 here; asserts
+# stay in (no NDEBUG), so a Debug number is still a shade pessimistic, never
+# flattering. Swift stays unoptimized — it is UI glue, and stepping through
+# it is what Debug is for. SingzCore (split and beats) is deliberately NOT
+# on the list: this is for the playback harness, and a Debug-simulator split
+# or beat time keeps the -O0 trap — read neither as the product's.
+def singz_optimize_core_pods_in_debug(installer)
+  targets = %w[SingzPlaybackSession SingzDspRuntime FolderAccess]
+  installer.pods_project.targets.each do |target|
+    next unless targets.include?(target.name)
+    target.build_configurations.each do |config|
+      next unless config.name == 'Debug'
+      config.build_settings['GCC_OPTIMIZATION_LEVEL'] = '2'
+    end
   end
 end

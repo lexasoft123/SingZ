@@ -1,0 +1,1214 @@
+#import "NativePlaybackBridgeSupport.h"
+#import "NativePlaybackAudioSession.h"
+#import "NativePlaybackAuthorizedPath.h"
+#import "NativePlaybackBridgeBoundary.h"
+#import "NativePlaybackBridgeResult.h"
+#import "NativePlaybackBridgeSchema.h"
+
+#import <SingzDspRuntime/SingzDspRuntimeCapability.h>
+#import <SingzPlaybackSession/native_playback_session.h>
+#include <zcore/media/decoded_audio.h>
+
+#include <cstdint>
+#include <cstdlib>
+#include <malloc/malloc.h>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace {
+
+struct PlaybackBridgeOwner {
+  PlaybackBridgeOwner()
+      : session(std::make_unique<singz::NativePlaybackSession>()),
+        queue(
+            dispatch_queue_create("com.lexasoft.singz.native-playback-control",
+                                  DISPATCH_QUEUE_SERIAL)) {}
+
+  std::unique_ptr<singz::NativePlaybackSession> session;
+  dispatch_queue_t queue;
+  std::atomic<uint64_t> latestClaimedGeneration{0};
+  std::atomic<uint64_t> cancelledThrough{0};
+  SingzPlaybackAudioSessionIntent preparedAudioSessionIntent;
+
+  void noteCancellation(uint64_t generation) noexcept {
+    uint64_t previous = cancelledThrough.load(std::memory_order_relaxed);
+    while (previous < generation &&
+           !cancelledThrough.compare_exchange_weak(previous, generation,
+                                                   std::memory_order_release,
+                                                   std::memory_order_relaxed)) {
+    }
+  }
+};
+
+PlaybackBridgeOwner &owner() {
+  static auto *value = new PlaybackBridgeOwner();
+  return *value;
+}
+
+singz::NativePlaybackCleanupResult
+uncertainCleanup(uint64_t generation) noexcept {
+  return {singz::NativePlaybackCleanupSafety::Uncertain,
+          singz::NativePlaybackError::TeardownUncertain,
+          generation,
+          singz::NativePlaybackState::Quarantined,
+          0,
+          singz::AudioHostTerminalReason::ProviderFailure,
+          true};
+}
+
+singz::NativePlaybackCleanupResult
+failClaimedPrepare(void *context, uint64_t generation) noexcept {
+  auto *session = static_cast<singz::NativePlaybackSession *>(context);
+  if (session == nullptr)
+    return uncertainCleanup(generation);
+  singz::NativePlaybackCleanupResult cleanup = uncertainCleanup(generation);
+  const auto failure = SingzPlaybackBridgeBoundary([&] {
+    (void)session->failPrepareAdmission(
+        generation, singz::NativePlaybackError::DecodeFailure);
+    // Failed admission itself deliberately leaves an exact-generation
+    // handshake. Complete the matching unload here; an outer bridge failure
+    // is fallback-safe only after the session proves every global owner gone.
+    cleanup = session->abortPrepareDelivery(generation);
+  });
+  return failure == SingzPlaybackBridgeBoundaryFailure::None
+             ? cleanup
+             : uncertainCleanup(generation);
+}
+
+singz::NativePlaybackCleanupResult
+unloadMutatedPrepare(void *context, uint64_t generation) noexcept {
+  auto *session = static_cast<singz::NativePlaybackSession *>(context);
+  if (session == nullptr)
+    return uncertainCleanup(generation);
+  singz::NativePlaybackCleanupResult cleanup = uncertainCleanup(generation);
+  const auto failure = SingzPlaybackBridgeBoundary(
+      [&] { cleanup = session->abortPrepareDelivery(generation); });
+  return failure == SingzPlaybackBridgeBoundaryFailure::None
+             ? cleanup
+             : uncertainCleanup(generation);
+}
+
+bool acknowledgeCommandDelivery(
+    void *context, singz::NativePlaybackDeliveryToken token) noexcept {
+  auto *session = static_cast<singz::NativePlaybackSession *>(context);
+  if (session == nullptr)
+    return false;
+  bool acknowledged = false;
+  const auto failure = SingzPlaybackBridgeBoundary(
+      [&] { acknowledged = session->acknowledgeDelivery(token); });
+  return failure == SingzPlaybackBridgeBoundaryFailure::None && acknowledged;
+}
+
+singz::NativePlaybackCleanupResult
+abortCommandDelivery(void *context,
+                     singz::NativePlaybackDeliveryToken token) noexcept {
+  auto *session = static_cast<singz::NativePlaybackSession *>(context);
+  if (session == nullptr)
+    return uncertainCleanup(token.generation);
+  singz::NativePlaybackCleanupResult cleanup =
+      uncertainCleanup(token.generation);
+  const auto failure = SingzPlaybackBridgeBoundary(
+      [&] { cleanup = session->abortDelivery(token); });
+  return failure == SingzPlaybackBridgeBoundaryFailure::None
+             ? cleanup
+             : uncertainCleanup(token.generation);
+}
+
+singz::NativePlaybackCleanupResult
+abortGenerationDelivery(void *context, uint64_t generation) noexcept {
+  return unloadMutatedPrepare(context, generation);
+}
+
+NSString *fromStd(const std::string &value) {
+  return [NSString stringWithUTF8String:value.c_str()] ?: @"";
+}
+
+void rejectBoundaryFailure(RCTPromiseRejectBlock reject,
+                           SingzPlaybackBridgeBoundaryFailure failure,
+                           singz::NativePlaybackCleanupResult cleanup = {},
+                           bool cleanupRequired = false) noexcept {
+  if (cleanupRequired && !cleanup.globallyComplete()) {
+    (void)SingzPlaybackBridgeBoundary(^{
+      NSString *message = [NSString
+          stringWithFormat:
+              @"Native playback cleanup is uncertain (error=%s state=%u "
+              @"retainedBytes=%llu terminal=%u processQuarantineReserved=%d "
+              @"processQuarantinePoisoned=%d)",
+              singz::nativePlaybackErrorName(cleanup.error),
+              static_cast<unsigned int>(cleanup.state),
+              static_cast<unsigned long long>(cleanup.retainedBytes),
+              static_cast<unsigned int>(cleanup.terminalReason),
+              cleanup.processQuarantineReserved,
+              cleanup.processQuarantinePoisoned];
+      NSError *detail = [NSError
+          errorWithDomain:@"SingzNativePlayback"
+                     code:static_cast<NSInteger>(cleanup.error)
+                 userInfo:@{
+                   @"generation" : @(cleanup.generation),
+                   @"state" : @(static_cast<unsigned int>(cleanup.state)),
+                   @"retainedBytes" : @(cleanup.retainedBytes),
+                   @"terminalReason" :
+                       @(static_cast<unsigned int>(cleanup.terminalReason)),
+                   @"physicalOwnershipRetained" :
+                       @(cleanup.physicalOwnershipRetained),
+                   @"processQuarantineRetainedBytes" :
+                       @(cleanup.processQuarantineRetainedBytes),
+                   @"processQuarantineReserved" :
+                       @(cleanup.processQuarantineReserved),
+                   @"processQuarantinePoisoned" :
+                       @(cleanup.processQuarantinePoisoned),
+                   @"fallbackSafe" : @NO,
+                 }];
+      reject(@"E_NATIVE_PLAYBACK_TEARDOWN_UNCERTAIN", message, detail);
+    });
+    return;
+  }
+  if (failure == SingzPlaybackBridgeBoundaryFailure::None)
+    return;
+  NSString *code =
+      failure == SingzPlaybackBridgeBoundaryFailure::ResourceExhausted
+          ? @"E_NATIVE_PLAYBACK_RESOURCE_EXHAUSTED"
+          : @"E_NATIVE_PLAYBACK_PROVIDER";
+  NSString *message =
+      failure == SingzPlaybackBridgeBoundaryFailure::ResourceExhausted
+          ? @"Native playback could not allocate required resources"
+          : @"Native playback failed at the platform bridge boundary";
+  (void)SingzPlaybackBridgeBoundary(^{
+    reject(code, message, nil);
+  });
+}
+
+template <typename Callable>
+void runBridgeBoundary(RCTPromiseRejectBlock reject,
+                       Callable &&callable) noexcept {
+  const SingzPlaybackBridgeBoundaryFailure failure =
+      SingzPlaybackBridgeBoundary(std::forward<Callable>(callable));
+  rejectBoundaryFailure(reject, failure);
+}
+
+NSString *playbackState(singz::NativePlaybackState state) {
+  switch (state) {
+  case singz::NativePlaybackState::Unloaded:
+    return @"unloaded";
+  case singz::NativePlaybackState::Preparing:
+    return @"preparing";
+  case singz::NativePlaybackState::Prepared:
+    return @"prepared";
+  case singz::NativePlaybackState::OutputOpen:
+    return @"output-open";
+  case singz::NativePlaybackState::Running:
+    return @"running";
+  case singz::NativePlaybackState::Stopped:
+    return @"stopped";
+  case singz::NativePlaybackState::Terminal:
+    return @"terminal";
+  case singz::NativePlaybackState::Quarantined:
+    return @"quarantined";
+  }
+  return @"terminal";
+}
+
+NSString *hostState(singz::AudioHostState state) {
+  switch (state) {
+  case singz::AudioHostState::Closed:
+    return @"closed";
+  case singz::AudioHostState::Open:
+    return @"open";
+  case singz::AudioHostState::Running:
+    return @"running";
+  case singz::AudioHostState::Stopped:
+    return @"stopped";
+  case singz::AudioHostState::DeviceLost:
+    return @"device-lost";
+  case singz::AudioHostState::Error:
+    return @"error";
+  case singz::AudioHostState::Unsupported:
+    return @"unsupported";
+  case singz::AudioHostState::Suspended:
+    return @"suspended";
+  }
+  return @"error";
+}
+
+NSString *terminalReason(singz::AudioHostTerminalReason reason) {
+  switch (reason) {
+  case singz::AudioHostTerminalReason::None:
+    return @"none";
+  case singz::AudioHostTerminalReason::RouteChanged:
+    return @"route-changed";
+  case singz::AudioHostTerminalReason::Interrupted:
+    return @"interrupted";
+  case singz::AudioHostTerminalReason::MediaServicesLost:
+    return @"media-services-lost";
+  case singz::AudioHostTerminalReason::MediaServicesReset:
+    return @"media-services-reset";
+  case singz::AudioHostTerminalReason::DeviceLost:
+    return @"device-lost";
+  case singz::AudioHostTerminalReason::ProviderFailure:
+    return @"provider-failure";
+  }
+  return @"provider-failure";
+}
+
+NSString *transportState(singz::NativePlaybackTransportState state) {
+  switch (state) {
+  case singz::NativePlaybackTransportState::Stopped:
+    return @"stopped";
+  case singz::NativePlaybackTransportState::PreRoll:
+    return @"pre-roll";
+  case singz::NativePlaybackTransportState::Playing:
+    return @"playing";
+  case singz::NativePlaybackTransportState::Paused:
+    return @"paused";
+  case singz::NativePlaybackTransportState::Completed:
+    return @"completed";
+  }
+  return @"stopped";
+}
+
+NSString *transportTelemetryQuality(
+    singz::NativePlaybackTransportTelemetryQuality quality) {
+  switch (quality) {
+  case singz::NativePlaybackTransportTelemetryQuality::Unavailable:
+    return @"unavailable";
+  case singz::NativePlaybackTransportTelemetryQuality::Initial:
+    return @"initial";
+  case singz::NativePlaybackTransportTelemetryQuality::Current:
+    return @"current";
+  case singz::NativePlaybackTransportTelemetryQuality::LastGood:
+    return @"lastGood";
+  }
+  return @"unavailable";
+}
+
+NSString *transportBoundaryReason(
+    singz::NativePlaybackTransportBoundaryReason reason) {
+  switch (reason) {
+  case singz::NativePlaybackTransportBoundaryReason::None:
+    return @"none";
+  case singz::NativePlaybackTransportBoundaryReason::StreamGenerationChanged:
+    return @"stream-generation-changed";
+  case singz::NativePlaybackTransportBoundaryReason::SequenceGap:
+    return @"sequence-gap";
+  case singz::NativePlaybackTransportBoundaryReason::SampleRateChanged:
+    return @"sample-rate-changed";
+  case singz::NativePlaybackTransportBoundaryReason::RouteGenerationChanged:
+    return @"route-generation-changed";
+  case singz::NativePlaybackTransportBoundaryReason::TimestampQualityChanged:
+    return @"timestamp-quality-changed";
+  case singz::NativePlaybackTransportBoundaryReason::ClockReanchored:
+    return @"clock-reanchored";
+  case singz::NativePlaybackTransportBoundaryReason::SourceSeek:
+    return @"source-seek";
+  case singz::NativePlaybackTransportBoundaryReason::SourceLoop:
+    return @"source-loop";
+  case singz::NativePlaybackTransportBoundaryReason::DeviceLost:
+    return @"device-lost";
+  case singz::NativePlaybackTransportBoundaryReason::SourceFrameOverflow:
+    return @"source-frame-overflow";
+  }
+  return @"none";
+}
+
+NSString *audibleProjectionQuality(
+    singz::NativePlaybackAudibleProjectionQuality quality) {
+  return quality == singz::NativePlaybackAudibleProjectionQuality::Current
+             ? @"current"
+             : @"unavailable";
+}
+
+NSDictionary *resultDictionary(const singz::NativePlaybackResult &result) {
+  return SingzNativePlaybackResultDictionary(result);
+}
+
+NSArray *outputInventory(const singz::AudioHostInventory &inventory) {
+  NSMutableArray *outputs = [NSMutableArray array];
+  for (const auto &device : inventory.devices) {
+    if (device.outputChannels == 0)
+      continue;
+    NSMutableArray *labels = [NSMutableArray array];
+    for (const std::string &label : device.outputChannelLabels)
+      [labels addObject:fromStd(label)];
+    [outputs addObject:@{
+      @"uid" : fromStd(device.uid),
+      @"label" : fromStd(device.label),
+      @"default" : @(device.defaultOutput),
+      @"channels" : @(device.outputChannels),
+      @"channelLabels" : labels,
+      @"sampleRate" : @(device.nominalSampleRate),
+    }];
+  }
+  return outputs;
+}
+
+NSDictionary *statusDictionary(singz::NativePlaybackSession &session) {
+  const singz::NativePlaybackStatus status = session.status();
+  NSMutableArray *lanes = [NSMutableArray array];
+  for (const auto &lane : status.lanes) {
+    // No envelope here: it never changes for a generation and this runs every
+    // 200 ms. SingzNativePlaybackLanePeaks publishes it once instead.
+    [lanes addObject:@{
+      @"id" : fromStd(lane.id),
+      @"cursorFrames" : @(lane.cursorFrames),
+      @"totalFrames" : @(lane.totalFrames),
+      @"gain" : @(lane.gain),
+      @"muted" : @(lane.muted),
+      @"solo" : @(lane.solo),
+    }];
+  }
+  NSMutableArray *trainingLanes = [NSMutableArray array];
+  for (const std::string &lane : status.trainingLanes)
+    [trainingLanes addObject:fromStd(lane)];
+  return @{
+    @"generation" : @(status.generation),
+    @"state" : playbackState(status.state),
+    @"hostState" : hostState(status.host.state),
+    @"terminalReason" : terminalReason(status.terminalReason),
+    @"terminalOrdinal" : @(status.terminalOrdinal),
+    @"sampleRate" : @(status.host.format.sampleRate),
+    @"maximumFrames" : @(status.host.format.maximumFrames),
+    @"nominalBufferFrames" : @(status.host.format.nominalBufferFrames),
+    @"outputChannels" : @(status.host.format.outputChannels),
+    @"renderedFrames" : @(status.renderedFrames),
+    @"audibleFrames" : @(status.audibleFrames),
+    @"transportGeneration" : @(status.transportGeneration),
+    @"transportState" : transportState(status.transportState),
+    @"transportTelemetryQuality" :
+        transportTelemetryQuality(status.transportTelemetryQuality),
+    @"lastTransportBoundary" :
+        transportBoundaryReason(status.lastTransportBoundary),
+    @"renderedProjectFrame" : @(status.renderedProjectFrame),
+    @"audibleProjectFrame" : @(status.audibleProjectFrame),
+    @"audibleProjectionQuality" :
+        audibleProjectionQuality(status.audibleProjectionQuality),
+    @"continuousFrame" : @(status.continuousFrame),
+    @"durationFrames" : @(status.durationFrames),
+    @"remainingPreRollFrames" : @(status.remainingPreRollFrames),
+    @"cueEventsCompleted" : @(status.cueEventsCompleted),
+    @"nextCueEventIndex" : @(status.nextCueEventIndex),
+    @"loopEnabled" : @(status.loopEnabled),
+    @"loopStartFrame" : @(status.loopStartFrame),
+    @"loopEndFrame" : @(status.loopEndFrame),
+    @"loopCount" : @(status.loopCount),
+    @"seekCount" : @(status.seekCount),
+    @"transportDiscontinuities" : @(status.transportDiscontinuities),
+    @"presentationLatencyFrames" : @(status.presentationLatencyFrames),
+    @"playbackRate" : @(status.playbackRate),
+    @"transposeSemitones" : @(status.transposeSemitones),
+    @"graphLatencyFrames" : @(status.graphLatencyFrames),
+    @"timePitchAnchorsPrepared" : @(status.timePitchAnchorsPrepared),
+    @"timePitchAnchorsPublished" : @(status.timePitchAnchorsPublished),
+    @"timePitchAnchorMisses" : @(status.timePitchAnchorMisses),
+    @"timePitchReplacementReady" : @(status.timePitchReplacementReady),
+    @"timePitchLoopPriming" : @(status.timePitchLoopPriming),
+    @"devicePresentationLatencyFrames" :
+        @(status.devicePresentationLatencyFrames),
+    @"totalPresentationLatencyFrames" :
+        @(status.totalPresentationLatencyFrames),
+    @"preparedStartProjectFrame" : @(status.preparedStartProjectFrame),
+    @"swapPendingGeneration" : @(status.swapPendingGeneration),
+    @"retiringSwapGeneration" : @(status.retiringSwapGeneration),
+    @"swapLandings" : @(status.swapLandings),
+    @"swapLateLandings" : @(status.swapLateLandings),
+    @"swapPrimeNs" : @(status.swapPrimeNs),
+    @"swapLandingFrames" : @(status.swapLandingFrames),
+    @"retainedBytes" : @(status.retainedBytes),
+    @"graphArenaBytes" : @(status.graphArenaBytes),
+    @"parkedLaneBytes" : @(status.parkedLaneBytes),
+    @"parkedLaneCount" : @(status.parkedLaneCount),
+    @"masterGain" : @(status.masterGain),
+    @"referenceGain" : @(status.referenceGain),
+    @"trainingEnabled" : @(status.trainingEnabled),
+    @"trainingLanes" : trainingLanes,
+    @"preRollFrames" : @(status.preRollFrames),
+    @"cueEventCount" : @(status.cueEventCount),
+    @"countInEventCount" : @(status.countInEventCount),
+    @"countInBeatsPerBar" : @(status.countInBeatsPerBar),
+    @"previewClicksEnqueued" : @(status.previewClicksEnqueued),
+    @"previewClicksStarted" : @(status.previewClicksStarted),
+    @"previewClicksCompleted" : @(status.previewClicksCompleted),
+    @"previewClicksPending" : @(status.previewClicksPending),
+    @"graphNodeCount" : @(status.graphNodeCount),
+    @"graphConnectionCount" : @(status.graphConnectionCount),
+    @"latencyCompensatedEdgeCount" :
+        @(status.latencyCompensatedEdgeCount),
+    @"laneDecodeFallback" : fromStd(status.laneDecodeFallback),
+    @"topology" : fromStd(status.topology),
+    @"xruns" : @(status.host.xruns),
+    @"deadlineMisses" : @(status.host.deadlineMisses),
+    @"discontinuities" : @(status.host.discontinuities),
+    @"renderFailures" : @(status.host.renderFailures),
+    @"adapterRenderFailures" : @(status.adapterRenderFailures),
+    // The same three the Android bridge publishes. Without them the iOS half
+    // of a wedged graph prints `graph status 0/0 · anchor 0`, which is
+    // indistinguishable from "the graph reported nothing" — the exact false
+    // negative these fields exist to remove. The coordinator is shared, so a
+    // key missing here silently degrades one platform only.
+    @"graphStatusCode" : @(status.graphStatusCode),
+    @"graphStatusDetail" : @(status.graphStatusDetail),
+    @"timePitchAnchorOutcome" : @(status.timePitchAnchorOutcome),
+    @"terminalRenderFailures" : @(status.terminalRenderFailures),
+    @"parameterOverflows" : @(status.parameterOverflows),
+    @"nonFiniteSamples" : @(status.nonFiniteSamples),
+    @"rejectedBlocks" : @(status.rejectedBlocks),
+    @"latency" : @{
+      @"outputDeviceFrames" : @(status.host.latency.outputDeviceFrames),
+      @"bufferFrames" : @(status.host.latency.bufferFrames),
+      @"externalRouteFrames" : @(status.host.latency.externalRouteFrames),
+      @"presentationFrames" : @(status.presentationLatencyFrames),
+    },
+    @"lanes" : lanes,
+    @"message" : fromStd(status.error),
+  };
+}
+
+} // namespace
+
+void SingzNativePlaybackStatus(RCTPromiseResolveBlock resolve,
+                               RCTPromiseRejectBlock reject) {
+  runBridgeBoundary(reject, [&] {
+    PlaybackBridgeOwner &bridge = owner();
+    // A dispatch block nested inside this temporary C++ lambda must capture
+    // real local block values. Reaching through the lambda's `[&]` closure
+    // leaves a pointer to its dead stack object once this function returns.
+    RCTPromiseResolveBlock asyncResolve = [resolve copy];
+    RCTPromiseRejectBlock asyncReject = [reject copy];
+    dispatch_async(bridge.queue, ^{
+      runBridgeBoundary(asyncReject, [&] {
+        const SingzDspRuntimeLinkStatus *link = SingzDspRuntimeGetLinkStatus();
+        const singz::DecodedAudioCodecCapabilities mediaCodec =
+            singz::decodedAudioCodecCapabilities();
+        const bool available = link != nullptr && link->interfaceVersion >= 3 &&
+                               link->playbackContractVersion == 2 &&
+                               link->buildId != nullptr;
+        asyncResolve(@{
+          @"available" : @(available),
+          @"interfaceVersion" : available ? @(link->interfaceVersion) : @0,
+          @"playbackContractVersion" :
+                  available ? @(link->playbackContractVersion) : @0,
+          @"buildId" : available ? [NSString stringWithUTF8String:link->buildId]
+                                 : @"",
+          @"graph" : @(available && (link->capabilityFlags &
+                                     SingzDspRuntimeCapabilityGraph) != 0),
+          @"audioHostAdapter" :
+              @(available && (link->capabilityFlags &
+                              SingzDspRuntimeCapabilityAudioHostAdapter) != 0),
+          @"playbackSession" :
+              @(available && (link->capabilityFlags &
+                              SingzDspRuntimeCapabilityPlaybackCallback) != 0),
+          @"playbackCleanupProof" :
+              @(available &&
+                (link->capabilityFlags &
+                 SingzDspRuntimeCapabilityPlaybackCleanupProof) != 0),
+          @"playbackHandoffLease" :
+              @(available &&
+                (link->capabilityFlags &
+                 SingzDspRuntimeCapabilityPlaybackHandoffLease) != 0),
+          @"playbackTransport" :
+              @(available && (link->capabilityFlags &
+                              SingzDspRuntimeCapabilityPlaybackTransport) != 0),
+          @"scheduledCues" :
+              @(available && (link->capabilityFlags &
+                              SingzDspRuntimeCapabilityScheduledCues) != 0),
+          @"timePitch" :
+              @(available && (link->capabilityFlags &
+                              SingzDspRuntimeCapabilityTimePitch) != 0),
+          // The session in this binary replaces a generation on its running
+          // stream (prepare's swapFromGeneration). Additive: JS without the
+          // key ignores it, JS with it falls back to the six-call rebuild on
+          // a binary that says false.
+          @"playbackSwap" : @(available),
+          @"mediaCodec" : @{
+            @"abiVersion" : @(mediaCodec.abiVersion),
+            @"formatMask" : @(mediaCodec.formatMask),
+            @"dynamicallyLinkedFfmpeg" :
+                @(mediaCodec.dynamicallyLinkedFfmpeg),
+            @"runtimeVersion" : mediaCodec.runtimeVersion == nullptr
+                ? @""
+                : ([NSString stringWithUTF8String:mediaCodec.runtimeVersion]
+                       ?: @""),
+            @"capabilityTag" : [NSString
+                stringWithUTF8String:singz::decodedAudioCapabilityTag()],
+          },
+          @"playbackBuild" : [NSString
+              stringWithUTF8String:singz::nativePlaybackSessionCapabilityTag()],
+          @"ownership" : @"coordinated",
+          @"activation" : @"experimental-4c",
+          @"outputs" : outputInventory(bridge.session->enumerate()),
+          @"session" : statusDictionary(*bridge.session),
+        });
+      });
+    });
+  });
+}
+
+void SingzNativePlaybackSession(RCTPromiseResolveBlock resolve,
+                                RCTPromiseRejectBlock reject) {
+  runBridgeBoundary(reject, [&] {
+    PlaybackBridgeOwner &bridge = owner();
+    // Same shape as Status: the nested block captures real block values, not
+    // the lambda's closure, which is dead by the time the queue runs it.
+    RCTPromiseResolveBlock asyncResolve = [resolve copy];
+    RCTPromiseRejectBlock asyncReject = [reject copy];
+    dispatch_async(bridge.queue, ^{
+      runBridgeBoundary(asyncReject, [&] {
+        asyncResolve(statusDictionary(*bridge.session));
+      });
+    });
+  });
+}
+
+NSDictionary *SingzNativePlaybackPositionNow(void) {
+  // No queue hop and no boundary wrapper: positionNow() is noexcept and
+  // lock-free by contract, and this runs on the JS thread at UI rate. The
+  // numbers cross as NSNumbers, never as text — Foundation's JSON parser is
+  // the one that is not correctly rounded, and nothing here goes near it.
+  const singz::NativePlaybackPositionNow now = owner().session->positionNow();
+  return @{
+    @"available" : @(now.available),
+    @"generation" : @(now.generation),
+    @"transportState" : transportState(now.transportState),
+    @"renderedProjectFrame" : @(now.renderedProjectFrame),
+    @"continuousFrame" : @(now.continuousFrame),
+    @"remainingPreRollFrames" : @(now.remainingPreRollFrames),
+    @"seekCount" : @(now.seekCount),
+    @"ageMs" : @(static_cast<double>(now.ageNs) / 1.0e6),
+  };
+}
+
+// The same queue-dispatched shape as previewClick: parse, hop to the control
+// queue, answer the core's result. Neither is a teardown, so neither needs
+// stop's delivery guard.
+void SingzNativePlaybackSuspendOutput(NSNumber *generationValue,
+                                      RCTPromiseResolveBlock resolve,
+                                      RCTPromiseRejectBlock reject) {
+  runBridgeBoundary(reject, [&] {
+    uint64_t generation = 0;
+    if (!SingzParsePlaybackGeneration(generationValue, &generation)) {
+      reject(@"E_NATIVE_PLAYBACK",
+             @"The native playback generation is invalid", nil);
+      return;
+    }
+    PlaybackBridgeOwner &bridge = owner();
+    RCTPromiseResolveBlock asyncResolve = [resolve copy];
+    RCTPromiseRejectBlock asyncReject = [reject copy];
+    dispatch_async(bridge.queue, ^{
+      runBridgeBoundary(asyncReject, [&] {
+        asyncResolve(
+            resultDictionary(bridge.session->suspendOutput(generation)));
+      });
+    });
+  });
+}
+
+void SingzNativePlaybackResumeOutput(NSNumber *generationValue,
+                                     RCTPromiseResolveBlock resolve,
+                                     RCTPromiseRejectBlock reject) {
+  runBridgeBoundary(reject, [&] {
+    uint64_t generation = 0;
+    if (!SingzParsePlaybackGeneration(generationValue, &generation)) {
+      reject(@"E_NATIVE_PLAYBACK",
+             @"The native playback generation is invalid", nil);
+      return;
+    }
+    PlaybackBridgeOwner &bridge = owner();
+    RCTPromiseResolveBlock asyncResolve = [resolve copy];
+    RCTPromiseRejectBlock asyncReject = [reject copy];
+    dispatch_async(bridge.queue, ^{
+      runBridgeBoundary(asyncReject, [&] {
+        asyncResolve(
+            resultDictionary(bridge.session->resumeOutput(generation)));
+      });
+    });
+  });
+}
+
+void SingzNativePlaybackPrepare(NSNumber *generationValue,
+                                NSDictionary *request,
+                                RCTPromiseResolveBlock resolve,
+                                RCTPromiseRejectBlock reject) {
+  SingzPlaybackPrepareOwnershipGuard admissionGuard;
+  std::shared_ptr<SingzPlaybackPrepareOwnershipGuard> asyncGuard;
+  const SingzPlaybackBridgeBoundaryFailure failure =
+      SingzPlaybackBridgeBoundary([&] {
+        uint64_t generation = 0;
+        SingzParsedPlaybackPrepare parsed;
+        NSString *parseError = nil;
+        if (!SingzParsePlaybackGeneration(generationValue, &generation) ||
+            !SingzParsePlaybackPrepare(request, &parsed, &parseError)) {
+          reject(@"E_NATIVE_PLAYBACK",
+                 parseError
+                     ?: @"The native playback prepare request is invalid",
+                 nil);
+          return;
+        }
+        PlaybackBridgeOwner &bridge = owner();
+        const singz::NativePlaybackResult claim =
+            bridge.session->claimGeneration(generation,
+                                            parsed.config.handoffLease);
+        if (!claim.ok) {
+          resolve(resultDictionary(claim));
+          return;
+        }
+        bridge.latestClaimedGeneration.store(generation,
+                                             std::memory_order_release);
+        const SingzPlaybackPrepareCleanup cleanup{
+            bridge.session.get(), &failClaimedPrepare, &unloadMutatedPrepare};
+        admissionGuard.activate(cleanup, generation);
+        SingzPlaybackInjectPrepareFault(
+            SingzPlaybackPrepareFaultPoint::AfterGenerationClaim);
+        SingzPlaybackInjectPrepareFault(
+            SingzPlaybackPrepareFaultPoint::PrepareGuardAllocation);
+        asyncGuard = std::make_shared<SingzPlaybackPrepareOwnershipGuard>();
+        asyncGuard->activate(cleanup, generation);
+        // From this point the shared guard survives until either dispatch block
+        // delivery or the contained outer-boundary cleanup below.
+        admissionGuard.dismiss();
+        SingzPlaybackInjectPrepareFault(
+            SingzPlaybackPrepareFaultPoint::PrepareBlockCaptureConstruction);
+        SingzPlaybackPrepareBlockCopySentinel blockCopySentinel;
+        SingzPlaybackInjectPrepareFault(
+            SingzPlaybackPrepareFaultPoint::PrepareDispatch);
+        const auto dispatchedGuard = asyncGuard;
+        RCTPromiseResolveBlock asyncResolve = [resolve copy];
+        RCTPromiseRejectBlock asyncReject = [reject copy];
+        dispatch_async(bridge.queue, ^{
+          blockCopySentinel.touch();
+          const SingzPlaybackBridgeBoundaryFailure failure =
+              SingzPlaybackBridgeBoundary([&] {
+                SingzPlaybackInjectPrepareFault(
+                    SingzPlaybackPrepareFaultPoint::LaneVectorConstruction);
+                SingzPlaybackAudioSessionIntent audioSessionIntent{
+                    generation, parsed.config.outputDeviceUid,
+                    parsed.config.outputChannels,
+                    parsed.config.requestedSampleRate,
+                    parsed.config.maximumFrames};
+                std::vector<singz::NativePlaybackLaneSource> lanes;
+                lanes.reserve(parsed.lanes.size());
+                for (const SingzParsedPlaybackLane &lane : parsed.lanes) {
+                  SingzPlaybackInjectPrepareFault(
+                      SingzPlaybackPrepareFaultPoint::PathConstruction);
+                  NSString *path =
+                      [NSString stringWithUTF8String:lane.path.c_str()];
+                  std::string pathError;
+                  SingzPlaybackInjectPrepareFault(
+                      SingzPlaybackPrepareFaultPoint::DescriptorConstruction);
+                  singz::OwnedFileDescriptor descriptor =
+                      SingzOpenAuthorizedPlaybackPath(path, &pathError);
+                  if (!descriptor.valid()) {
+                    dispatchedGuard->markSessionMutation();
+                    const singz::NativePlaybackResult result =
+                        bridge.session->failPrepareAdmission(
+                            generation,
+                            singz::NativePlaybackError::DecodeFailure);
+                    SingzPlaybackInjectPrepareFault(
+                        SingzPlaybackPrepareFaultPoint::
+                            ResultDictionaryConversion);
+                    NSDictionary *dictionary = resultDictionary(result);
+                    SingzPlaybackInjectPrepareFault(
+                        SingzPlaybackPrepareFaultPoint::PrePromiseResolve);
+                    asyncResolve(dictionary);
+                    dispatchedGuard->markDelivered();
+                    return;
+                  }
+                  // The authorized path is this bridge's opaque identity for
+                  // the bytes: the core never opens or resolves it, it only
+                  // compares it when a retaining unload offers an already
+                  // decoded lane to the next prepare.
+                  lanes.push_back({lane.id, std::move(descriptor), lane.gain,
+                                   lane.muted, lane.solo, lane.path});
+                }
+                dispatchedGuard->markSessionMutation();
+                const singz::NativePlaybackResult result =
+                    bridge.session->prepare(std::move(parsed.config),
+                                            std::move(lanes), generation);
+                if (result.ok &&
+                    result.state == singz::NativePlaybackState::Prepared) {
+                  bridge.preparedAudioSessionIntent =
+                      std::move(audioSessionIntent);
+                }
+                // The lane decode's transient buffers are freed by now, but
+                // the small-allocation magazines they lived in stay resident
+                // until the zone is asked to let them go. Measured on the
+                // simulator idle in the player (vmmap --summary):
+                // MALLOC_SMALL (empty) 60 MB under native against 4 MB under
+                // legacy — the whole RSS gap the player-session rules read,
+                // and the same allocator on a phone. Here, on the bridge
+                // queue, never on the render thread.
+                if (result.ok) malloc_zone_pressure_relief(nullptr, 0);
+                SingzPlaybackInjectPrepareFault(
+                    SingzPlaybackPrepareFaultPoint::PostPreparePreResult);
+                SingzPlaybackInjectPrepareFault(
+                    SingzPlaybackPrepareFaultPoint::ResultDictionaryConversion);
+                NSDictionary *dictionary = resultDictionary(result);
+                SingzPlaybackInjectPrepareFault(
+                    SingzPlaybackPrepareFaultPoint::PrePromiseResolve);
+                asyncResolve(dictionary);
+                dispatchedGuard->markDelivered();
+              });
+          if (failure != SingzPlaybackBridgeBoundaryFailure::None) {
+            // Cleanup precedes rejection, so a B2 fallback cannot race decoded
+            // owners left behind by an exceptional result/delivery conversion.
+            const auto cleanupResult = dispatchedGuard->cleanupNow();
+            rejectBoundaryFailure(asyncReject, failure, cleanupResult, true);
+          }
+        });
+      });
+  const auto outer = SingzPlaybackFinishPrepareOuterBoundary(
+      failure, admissionGuard, asyncGuard.get());
+  if (failure != SingzPlaybackBridgeBoundaryFailure::None) {
+    rejectBoundaryFailure(reject, failure, outer.cleanup,
+                          outer.cleanupRequired);
+  }
+}
+
+void SingzNativePlaybackConfigureOutputSession(NSNumber *generationValue,
+                                               RCTPromiseResolveBlock resolve,
+                                               RCTPromiseRejectBlock reject) {
+  runBridgeBoundary(reject, [&] {
+    uint64_t generation = 0;
+    if (!SingzParsePlaybackGeneration(generationValue, &generation)) {
+      reject(@"E_NATIVE_PLAYBACK", @"The native playback generation is invalid",
+             nil);
+      return;
+    }
+    PlaybackBridgeOwner &bridge = owner();
+    RCTPromiseResolveBlock asyncResolve = [resolve copy];
+    RCTPromiseRejectBlock asyncReject = [reject copy];
+    dispatch_async(bridge.queue, ^{
+      runBridgeBoundary(asyncReject, [&] {
+        const singz::NativePlaybackStatus before = bridge.session->status();
+        const uint64_t latest =
+            bridge.latestClaimedGeneration.load(std::memory_order_acquire);
+        const uint64_t current =
+            before.generation == latest ? latest : uint64_t{0};
+        const uint64_t cancelled =
+            bridge.cancelledThrough.load(std::memory_order_acquire);
+        SingzPlaybackAudioSessionResult result =
+            SingzConfigurePlaybackAudioSession(
+                generation, current, cancelled, before.state,
+                bridge.preparedAudioSessionIntent);
+
+        // A synchronous newer claim or cancellation can race this queued
+        // platform call. Recheck at the command's publication boundary so a
+        // stale generation never receives a successful activation receipt.
+        if (result.ok) {
+          SingzPlaybackAudioSessionSnapshot configuredSession =
+              std::move(result.session);
+          const singz::NativePlaybackStatus after = bridge.session->status();
+          const uint64_t latestAfter =
+              bridge.latestClaimedGeneration.load(std::memory_order_acquire);
+          result = SingzPlaybackAudioSessionPreflight(
+              generation,
+              after.generation == latestAfter ? latestAfter : uint64_t{0},
+              bridge.cancelledThrough.load(std::memory_order_acquire),
+              after.state, bridge.preparedAudioSessionIntent);
+          if (result.ok) {
+            result = SingzVerifyPlaybackAudioSession(
+                generation, after.state, bridge.preparedAudioSessionIntent,
+                std::move(configuredSession));
+          }
+        }
+        asyncResolve(SingzPlaybackAudioSessionResultDictionary(result));
+      });
+    });
+  });
+}
+
+void SingzNativePlaybackOpenOutput(NSNumber *generationValue,
+                                   RCTPromiseResolveBlock resolve,
+                                   RCTPromiseRejectBlock reject) {
+  runBridgeBoundary(reject, [&] {
+    uint64_t generation = 0;
+    if (!SingzParsePlaybackGeneration(generationValue, &generation)) {
+      reject(@"E_NATIVE_PLAYBACK", @"The native playback generation is invalid",
+             nil);
+      return;
+    }
+    PlaybackBridgeOwner &bridge = owner();
+    const SingzPlaybackCommandDeliveryCleanup cleanup{
+        bridge.session.get(), &acknowledgeCommandDelivery,
+        &abortCommandDelivery};
+    auto asyncGuard =
+        std::make_shared<SingzPlaybackCommandDeliveryGuard>(cleanup);
+    RCTPromiseResolveBlock asyncResolve = [resolve copy];
+    RCTPromiseRejectBlock asyncReject = [reject copy];
+    dispatch_async(bridge.queue, ^{
+      const SingzPlaybackBridgeBoundaryFailure failure =
+          SingzPlaybackBridgeBoundary([&] {
+            const singz::NativePlaybackResult result =
+                bridge.session->openOutput(generation,
+                                           asyncGuard->tokenOutput());
+            SingzPlaybackInjectPrepareFault(
+                SingzPlaybackPrepareFaultPoint::OpenResultDictionaryConversion);
+            NSDictionary *dictionary = resultDictionary(result);
+            SingzPlaybackInjectPrepareFault(
+                SingzPlaybackPrepareFaultPoint::OpenPromiseDelivery);
+            asyncResolve(dictionary);
+            if (asyncGuard->token().valid()) {
+              if (!asyncGuard->acknowledge())
+                throw 1;
+            } else {
+              asyncGuard->dismissUnmutated();
+            }
+          });
+      if (failure != SingzPlaybackBridgeBoundaryFailure::None) {
+        const auto cleanupResult = asyncGuard->cleanupNow();
+        rejectBoundaryFailure(asyncReject, failure, cleanupResult, true);
+      }
+    });
+  });
+}
+
+void SingzNativePlaybackStart(NSNumber *generationValue,
+                              RCTPromiseResolveBlock resolve,
+                              RCTPromiseRejectBlock reject) {
+  runBridgeBoundary(reject, [&] {
+    uint64_t generation = 0;
+    if (!SingzParsePlaybackGeneration(generationValue, &generation)) {
+      reject(@"E_NATIVE_PLAYBACK", @"The native playback generation is invalid",
+             nil);
+      return;
+    }
+    PlaybackBridgeOwner &bridge = owner();
+    const SingzPlaybackCommandDeliveryCleanup cleanup{
+        bridge.session.get(), &acknowledgeCommandDelivery,
+        &abortCommandDelivery};
+    auto asyncGuard =
+        std::make_shared<SingzPlaybackCommandDeliveryGuard>(cleanup);
+    RCTPromiseResolveBlock asyncResolve = [resolve copy];
+    RCTPromiseRejectBlock asyncReject = [reject copy];
+    dispatch_async(bridge.queue, ^{
+      const SingzPlaybackBridgeBoundaryFailure failure =
+          SingzPlaybackBridgeBoundary([&] {
+            const singz::NativePlaybackResult result =
+                bridge.session->start(generation, asyncGuard->tokenOutput());
+            SingzPlaybackInjectPrepareFault(
+                SingzPlaybackPrepareFaultPoint::
+                    StartResultDictionaryConversion);
+            NSDictionary *dictionary = resultDictionary(result);
+            SingzPlaybackInjectPrepareFault(
+                SingzPlaybackPrepareFaultPoint::StartPromiseDelivery);
+            asyncResolve(dictionary);
+            if (asyncGuard->token().valid()) {
+              if (!asyncGuard->acknowledge())
+                throw 1;
+            } else {
+              asyncGuard->dismissUnmutated();
+            }
+          });
+      if (failure != SingzPlaybackBridgeBoundaryFailure::None) {
+        const auto cleanupResult = asyncGuard->cleanupNow();
+        rejectBoundaryFailure(asyncReject, failure, cleanupResult, true);
+      }
+    });
+  });
+}
+
+void SingzNativePlaybackStop(NSNumber *generationValue,
+                             RCTPromiseResolveBlock resolve,
+                             RCTPromiseRejectBlock reject) {
+  uint64_t generation = 0;
+  PlaybackBridgeOwner *bridge = nullptr;
+  bool cleanupClaimed = false;
+  std::shared_ptr<SingzPlaybackGenerationDeliveryGuard> asyncGuard;
+  const SingzPlaybackBridgeBoundaryFailure outerFailure =
+      SingzPlaybackBridgeBoundary([&] {
+        if (!SingzParsePlaybackGeneration(generationValue, &generation)) {
+          reject(@"E_NATIVE_PLAYBACK",
+                 @"The native playback generation is invalid", nil);
+          return;
+        }
+        bridge = &owner();
+        // Cancellation is deliberately synchronous and precedes serialization
+        // so a queued stop interrupts an in-flight decode immediately.
+        if (bridge->session->requestCancellation(generation))
+          bridge->noteCancellation(generation);
+        cleanupClaimed = true;
+        asyncGuard = std::make_shared<SingzPlaybackGenerationDeliveryGuard>();
+        asyncGuard->activate({bridge->session.get(), &abortGenerationDelivery},
+                             generation);
+        SingzPlaybackPrepareBlockCopySentinel blockCopySentinel(
+            SingzPlaybackPrepareFaultPoint::StopBlockCaptureCopy);
+        PlaybackBridgeOwner *dispatchedBridge = bridge;
+        const uint64_t dispatchedGeneration = generation;
+        const auto dispatchedGuard = asyncGuard;
+        RCTPromiseResolveBlock asyncResolve = [resolve copy];
+        RCTPromiseRejectBlock asyncReject = [reject copy];
+        dispatch_async(dispatchedBridge->queue, ^{
+          blockCopySentinel.touch();
+          const SingzPlaybackBridgeBoundaryFailure failure =
+              SingzPlaybackBridgeBoundary([&] {
+                const singz::NativePlaybackResult result =
+                    dispatchedBridge->session->stop(dispatchedGeneration);
+                SingzPlaybackInjectPrepareFault(
+                    SingzPlaybackPrepareFaultPoint::
+                        StopResultDictionaryConversion);
+                NSDictionary *dictionary = resultDictionary(result);
+                SingzPlaybackInjectPrepareFault(
+                    SingzPlaybackPrepareFaultPoint::StopPrePromiseResolve);
+                SingzPlaybackInjectPrepareFault(
+                    SingzPlaybackPrepareFaultPoint::StopPromiseDelivery);
+                asyncResolve(dictionary);
+                dispatchedGuard->markDelivered();
+              });
+          if (failure != SingzPlaybackBridgeBoundaryFailure::None) {
+            const auto cleanupResult = dispatchedGuard->cleanupNow();
+            rejectBoundaryFailure(asyncReject, failure, cleanupResult, true);
+          }
+        });
+      });
+  if (outerFailure != SingzPlaybackBridgeBoundaryFailure::None) {
+    singz::NativePlaybackCleanupResult cleanupResult =
+        SingzPlaybackNoCleanup(generation);
+    if (cleanupClaimed) {
+      cleanupResult = asyncGuard != nullptr
+                          ? asyncGuard->cleanupNow()
+                          : abortGenerationDelivery(bridge == nullptr
+                                                        ? nullptr
+                                                        : bridge->session.get(),
+                                                    generation);
+    }
+    rejectBoundaryFailure(reject, outerFailure, cleanupResult, cleanupClaimed);
+  }
+}
+
+static void SingzUnloadWithRetention(
+    NSNumber *generationValue, singz::NativePlaybackLaneRetention retention,
+    RCTPromiseResolveBlock resolve, RCTPromiseRejectBlock reject) {
+  uint64_t generation = 0;
+  PlaybackBridgeOwner *bridge = nullptr;
+  bool cleanupClaimed = false;
+  std::shared_ptr<SingzPlaybackGenerationDeliveryGuard> asyncGuard;
+  const SingzPlaybackBridgeBoundaryFailure outerFailure =
+      SingzPlaybackBridgeBoundary([&] {
+        if (!SingzParsePlaybackGeneration(generationValue, &generation)) {
+          reject(@"E_NATIVE_PLAYBACK",
+                 @"The native playback generation is invalid", nil);
+          return;
+        }
+        bridge = &owner();
+        // See stop: unload must advance the cancellation epoch before enqueue.
+        if (bridge->session->requestCancellation(generation))
+          bridge->noteCancellation(generation);
+        cleanupClaimed = true;
+        asyncGuard = std::make_shared<SingzPlaybackGenerationDeliveryGuard>();
+        asyncGuard->activate({bridge->session.get(), &abortGenerationDelivery},
+                             generation);
+        SingzPlaybackPrepareBlockCopySentinel blockCopySentinel(
+            SingzPlaybackPrepareFaultPoint::UnloadBlockCaptureCopy);
+        PlaybackBridgeOwner *dispatchedBridge = bridge;
+        const uint64_t dispatchedGeneration = generation;
+        const singz::NativePlaybackLaneRetention dispatchedRetention =
+            retention;
+        const auto dispatchedGuard = asyncGuard;
+        RCTPromiseResolveBlock asyncResolve = [resolve copy];
+        RCTPromiseRejectBlock asyncReject = [reject copy];
+        dispatch_async(dispatchedBridge->queue, ^{
+          blockCopySentinel.touch();
+          const SingzPlaybackBridgeBoundaryFailure failure =
+              SingzPlaybackBridgeBoundary([&] {
+                const singz::NativePlaybackUnloadReceipt receipt =
+                    dispatchedBridge->session->unloadWithCleanup(
+                        dispatchedGeneration, dispatchedRetention);
+                SingzPlaybackInjectPrepareFault(
+                    SingzPlaybackPrepareFaultPoint::
+                        UnloadResultDictionaryConversion);
+                NSDictionary *dictionary =
+                    SingzNativePlaybackUnloadResultDictionary(receipt.playback,
+                                                              receipt.cleanup);
+                SingzPlaybackInjectPrepareFault(
+                    SingzPlaybackPrepareFaultPoint::UnloadPrePromiseResolve);
+                SingzPlaybackInjectPrepareFault(
+                    SingzPlaybackPrepareFaultPoint::UnloadPromiseDelivery);
+                asyncResolve(dictionary);
+                dispatchedGuard->markDelivered();
+              });
+          if (failure != SingzPlaybackBridgeBoundaryFailure::None) {
+            const auto cleanupResult = dispatchedGuard->cleanupNow();
+            rejectBoundaryFailure(asyncReject, failure, cleanupResult, true);
+          }
+        });
+      });
+  if (outerFailure != SingzPlaybackBridgeBoundaryFailure::None) {
+    singz::NativePlaybackCleanupResult cleanupResult =
+        SingzPlaybackNoCleanup(generation);
+    if (cleanupClaimed) {
+      cleanupResult = asyncGuard != nullptr
+                          ? asyncGuard->cleanupNow()
+                          : abortGenerationDelivery(bridge == nullptr
+                                                        ? nullptr
+                                                        : bridge->session.get(),
+                                                    generation);
+    }
+    rejectBoundaryFailure(reject, outerFailure, cleanupResult, cleanupClaimed);
+  }
+}
+
+void SingzNativePlaybackLanePeaks(NSNumber *generationValue,
+                                  RCTPromiseResolveBlock resolve,
+                                  RCTPromiseRejectBlock reject) {
+  const SingzPlaybackBridgeBoundaryFailure failure =
+      SingzPlaybackBridgeBoundary([&] {
+        uint64_t generation = 0;
+        if (!SingzParsePlaybackGeneration(generationValue, &generation)) {
+          reject(@"E_NATIVE_PLAYBACK",
+                 @"The native playback generation is invalid", nil);
+          return;
+        }
+        const singz::NativePlaybackLanePeaksResult peaks =
+            owner().session->lanePeaks(generation);
+        NSMutableArray *lanes =
+            [NSMutableArray arrayWithCapacity:peaks.lanes.size()];
+        for (const auto &lane : peaks.lanes) {
+          // Built from the core's own floats, never from text: Foundation's
+          // JSON parser is not correctly rounded, so a number that crosses
+          // this boundary as a string is a different number on arrival.
+          NSMutableArray *values =
+              [NSMutableArray arrayWithCapacity:lane.peaks.size()];
+          for (const float peak : lane.peaks)
+            [values addObject:@(peak)];
+          [lanes addObject:@{
+            @"id" : fromStd(lane.id),
+            @"peaksValid" : @(lane.valid),
+            @"peaks" : values,
+          }];
+        }
+        resolve(@{
+          @"ok" : @(peaks.ok),
+          @"error" : fromStd(singz::nativePlaybackErrorName(peaks.error)),
+          @"generation" : @(peaks.generation),
+          @"bucketCount" : @(peaks.bucketCount),
+          @"lanes" : lanes,
+          @"message" : fromStd(peaks.message),
+        });
+      });
+  if (failure != SingzPlaybackBridgeBoundaryFailure::None)
+    rejectBoundaryFailure(reject, failure, SingzPlaybackNoCleanup(0), false);
+}
+
+void SingzNativePlaybackUnload(NSNumber *generationValue,
+                               RCTPromiseResolveBlock resolve,
+                               RCTPromiseRejectBlock reject) {
+  SingzUnloadWithRetention(generationValue,
+                           singz::NativePlaybackLaneRetention::Release, resolve,
+                           reject);
+}
+
+void SingzNativePlaybackUnloadRetainingLanes(NSNumber *generationValue,
+                                             RCTPromiseResolveBlock resolve,
+                                             RCTPromiseRejectBlock reject) {
+  SingzUnloadWithRetention(generationValue,
+                           singz::NativePlaybackLaneRetention::Park, resolve,
+                           reject);
+}
+
+void SingzNativePlaybackSetControl(NSNumber *generationValue,
+                                   NSDictionary *control,
+                                   RCTPromiseResolveBlock resolve,
+                                   RCTPromiseRejectBlock reject) {
+  runBridgeBoundary(reject, [&] {
+    uint64_t generation = 0;
+    SingzParsedPlaybackControl parsed;
+    if (!SingzParsePlaybackGeneration(generationValue, &generation) ||
+        !SingzParsePlaybackControl(control, &parsed)) {
+      reject(@"E_NATIVE_PLAYBACK", @"The native playback control is invalid",
+             nil);
+      return;
+    }
+    PlaybackBridgeOwner &bridge = owner();
+    RCTPromiseResolveBlock asyncResolve = [resolve copy];
+    RCTPromiseRejectBlock asyncReject = [reject copy];
+    dispatch_async(bridge.queue, ^{
+      runBridgeBoundary(asyncReject, [&] {
+        if (parsed.lane) {
+          asyncResolve(resultDictionary(bridge.session->setLaneControl(
+              generation, parsed.laneId, parsed.gain, parsed.muted,
+              parsed.solo)));
+          return;
+        }
+        if (parsed.training) {
+          asyncResolve(resultDictionary(
+              bridge.session->setTrainingEnabled(generation, parsed.enabled)));
+          return;
+        }
+        asyncResolve(resultDictionary(
+            bridge.session->setMasterGain(generation, parsed.gain)));
+      });
+    });
+  });
+}
+
+void SingzNativePlaybackTransport(NSNumber *generationValue,
+                                  NSDictionary *command,
+                                  RCTPromiseResolveBlock resolve,
+                                  RCTPromiseRejectBlock reject) {
+  runBridgeBoundary(reject, [&] {
+    uint64_t generation = 0;
+    SingzParsedPlaybackTransportCommand parsed;
+    if (!SingzParsePlaybackGeneration(generationValue, &generation) ||
+        !SingzParsePlaybackTransportCommand(command, &parsed)) {
+      reject(@"E_NATIVE_PLAYBACK_TRANSPORT_SCHEMA",
+             @"The native playback transport command is invalid", nil);
+      return;
+    }
+    PlaybackBridgeOwner &bridge = owner();
+    RCTPromiseResolveBlock asyncResolve = [resolve copy];
+    RCTPromiseRejectBlock asyncReject = [reject copy];
+    dispatch_async(bridge.queue, ^{
+      runBridgeBoundary(asyncReject, [&] {
+        singz::NativePlaybackResult result;
+        switch (parsed.kind) {
+        case SingzPlaybackTransportCommandKind::Pause:
+          result = bridge.session->pause(generation);
+          break;
+        case SingzPlaybackTransportCommandKind::Resume:
+          result = bridge.session->resume(generation);
+          break;
+        case SingzPlaybackTransportCommandKind::Seek:
+          result = bridge.session->seek(generation, parsed.projectFrame);
+          break;
+        case SingzPlaybackTransportCommandKind::SetLoop:
+          result = bridge.session->setLoop(generation, parsed.loopStartFrame,
+                                           parsed.loopEndFrame);
+          break;
+        case SingzPlaybackTransportCommandKind::ClearLoop:
+          result = bridge.session->clearLoop(generation);
+          break;
+        case SingzPlaybackTransportCommandKind::Reanchor:
+          result = bridge.session->reanchorTransport(generation);
+          break;
+        }
+        asyncResolve(resultDictionary(result));
+      });
+    });
+  });
+}
+
+void SingzNativePlaybackPreviewClick(NSNumber *generationValue,
+                                     NSNumber *soundValue,
+                                     RCTPromiseResolveBlock resolve,
+                                     RCTPromiseRejectBlock reject) {
+  runBridgeBoundary(reject, [&] {
+    uint64_t generation = 0;
+    singz::NativePlaybackPreviewClickSound sound =
+        singz::NativePlaybackPreviewClickSound::Ordinary;
+    if (!SingzParsePlaybackGeneration(generationValue, &generation) ||
+        !SingzParsePlaybackPreviewClickSound(soundValue, &sound)) {
+      reject(@"E_NATIVE_PLAYBACK_PREVIEW_SCHEMA",
+             @"The native playback preview sound is invalid", nil);
+      return;
+    }
+    PlaybackBridgeOwner &bridge = owner();
+    RCTPromiseResolveBlock asyncResolve = [resolve copy];
+    RCTPromiseRejectBlock asyncReject = [reject copy];
+    dispatch_async(bridge.queue, ^{
+      runBridgeBoundary(asyncReject, [&] {
+        asyncResolve(
+            resultDictionary(bridge.session->previewClick(generation, sound)));
+      });
+    });
+  });
+}

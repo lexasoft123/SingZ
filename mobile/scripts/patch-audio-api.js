@@ -56,7 +56,7 @@ if (applied > 0) {
 
 /*
  * Patch 3: SingzStretchNode — a master-bus pitch shifter (Signalsmith
- * Stretch, vendored in mobile/patches-src/singz) grafted into the library's
+ * Stretch, vendored once in third_party/native/signalsmith) grafted into the library's
  * node graph. New self-contained files are copied in (both platforms glob
  * common/cpp recursively); creation plumbing is four anchored insertions.
  * iOS: run `pod install` after this changes (the podspec glob is evaluated
@@ -64,14 +64,18 @@ if (applied > 0) {
  */
 const root = path.join(__dirname, '..', 'node_modules/react-native-audio-api/common/cpp/audioapi');
 const srcDir = path.join(__dirname, '..', 'patches-src', 'singz');
+const vendorDir = path.join(__dirname, '..', '..', 'third_party', 'native', 'signalsmith');
 const nodeDir = path.join(root, 'core', 'singz');
 
 fs.mkdirSync(path.join(nodeDir, 'signalsmith-linear'), { recursive: true });
-for (const f of ['SingzStretchNode.h', 'SingzStretchNode.cpp', 'SingzStretchNodeHostObject.h', 'signalsmith-stretch.h', 'VENDORED.txt']) {
+for (const f of ['SingzStretchNode.h', 'SingzStretchNode.cpp', 'SingzStretchNodeHostObject.h']) {
   fs.copyFileSync(path.join(srcDir, f), path.join(nodeDir, f));
 }
-for (const f of fs.readdirSync(path.join(srcDir, 'signalsmith-linear'))) {
-  fs.copyFileSync(path.join(srcDir, 'signalsmith-linear', f), path.join(nodeDir, 'signalsmith-linear', f));
+for (const f of ['signalsmith-stretch.h', 'VENDORED.txt', 'LICENSE-stretch.txt', 'LICENSE-linear.txt']) {
+  fs.copyFileSync(path.join(vendorDir, f), path.join(nodeDir, f));
+}
+for (const f of fs.readdirSync(path.join(vendorDir, 'signalsmith-linear'))) {
+  fs.copyFileSync(path.join(vendorDir, 'signalsmith-linear', f), path.join(nodeDir, 'signalsmith-linear', f));
 }
 
 function insertOnce(rel, anchor, addition, label) {

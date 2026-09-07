@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { DeviceEventEmitter, Image, Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
+import { laneSliverLevels, LANE_LEVEL_CHUNK, LANE_LEVEL_SLIVERS, LANE_LEVEL_WINDOW } from '../playback/lane-levels'
+import { Alert, DeviceEventEmitter, Image, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import {
   createNativeStackNavigator,
   type NativeStackNavigationProp,
@@ -17,6 +18,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { syncFrameCallbackVisibility } from './frame-visibility'
 import type { MultitrackEngine, TrackState, TrainingSpec } from '../engine'
 import type { RouteLatency } from '../latency'
+import { log } from '../log'
 import {
   ANALYSIS_EVENT,
   analysisPending,
@@ -44,7 +46,13 @@ import {
   type MetronomeConfig,
   type TrainingConfig
 } from '../model'
-import { readProjectText, type LoadedProject } from '../projects'
+import {
+  readProjectText,
+  HIDEABLE_LANE_IDS,
+  SILENT_LANE_LEVEL,
+  type LoadedProject,
+  type PlaybackCountInStatus
+} from '../projects'
 import type { ProjectDoc } from '../model'
 import {
   b,
@@ -79,6 +87,13 @@ import SkiaLyrics, {
 import { sheetRowState } from './song-sheet-copy'
 import { TEST } from './testhooks'
 import { nativeGlassStyle, nightStudioNativeTheme } from '@singz/ui/native'
+import { mobileMetronomePersistence } from '../playback/metronome-persistence'
+import {
+  createPlaybackBackend,
+  type PlaybackActionOutcome,
+  type PlaybackOperation
+} from '../playback/backend'
+import { playbackCountInDisplay } from '../playback/count-in-display'
 
 const SCRIM_TOP = require('../../assets/bg/scrim-top.png')
 const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
@@ -136,12 +151,13 @@ const LYR_BOTTOM = 300
 
 export default function PlayerScreen({
   active = true,
-  engine,
+  engine: legacyEngine,
   project,
   route,
   trimMs,
   onTrim,
   onBack,
+  onFallback,
   onTrainingFacts
 }: {
   active?: boolean
@@ -151,9 +167,41 @@ export default function PlayerScreen({
   trimMs: number
   onTrim: (ms: number) => void
   onBack: () => void
+  onFallback?: (project: LoadedProject) => void
   onTrainingFacts?: (facts: { keyInfo: NonNullable<NonNullable<ProjectDoc['settings']>['key']> | null; transpose: number }) => void
 }): React.JSX.Element {
-  const [tracks, setTracks] = useState<TrackState[]>([])
+  const engine = useMemo(
+    () => createPlaybackBackend(legacyEngine, project),
+    [legacyEngine, project]
+  )
+  const unsupported = useCallback(
+    (operation: PlaybackOperation): void => {
+      // Withdrawn for the moment is not the same as never implemented. A
+      // structural graph swap takes seeking away for a few seconds, and
+      // saying it "stays disabled until its native DSP control is connected"
+      // in a modal would be false — and toggling the click, or a grid
+      // arriving on its own, would raise it with no user action at all.
+      if (engine.reconfiguring) return
+      Alert.alert(
+        'Not available in native playback yet',
+        `${operation.replace('-', ' ')} stays disabled until its native DSP control is connected.`
+      )
+    },
+    [engine]
+  )
+  const finishPlaybackAction = useCallback(
+    (action: Promise<PlaybackActionOutcome>): void => {
+      void action
+        .then(outcome => {
+          if (outcome.kind === 'fallback') onFallback?.(outcome.project)
+        })
+        .catch(error =>
+          Alert.alert('Playback stopped', error instanceof Error ? error.message : String(error))
+        )
+    },
+    [onFallback]
+  )
+  const [allTracks, setTracks] = useState<TrackState[]>([])
   /** The fader being dragged right now, for the value bubble — set on every
    *  move, cleared on commit (Bar fires commit on release AND on the
    *  scroller stealing an engaged drag, so the bubble cannot strand). */
@@ -248,6 +296,12 @@ export default function PlayerScreen({
      tapping through the cycle does. */
   const loopARef = useRef<number | null>(null)
   const loopBRef = useRef<number | null>(null)
+  /* Native setLoop/clearLoop cross the bridge asynchronously. Keep the
+     button's three-state transaction ordered as well: three quick taps must
+     still mean mark A -> arm A-B -> clear, rather than queueing two stale
+     "arm" commands while the first one is in flight. */
+  const loopCycleTail = useRef<Promise<void>>(Promise.resolve())
+  const loopCycleEpoch = useRef(0)
   const markLoop = useCallback((a: number | null, b: number | null) => {
     loopARef.current = a
     loopBRef.current = b
@@ -255,53 +309,126 @@ export default function PlayerScreen({
     setLoopB(b)
   }, [])
   useEffect(() => {
+    loopCycleEpoch.current += 1
     markLoop(null, null)
   }, [project, markLoop])
 
   /** Off -> A marked -> looping -> off. One button, the order a singer works in. */
-  const cycleLoop = useCallback(() => {
-    const at = engine.audioPosition
-    const a0 = loopARef.current
-    if (a0 === null) {
-      markLoop(at, null)
-      return
-    }
-    if (loopBRef.current === null) {
-      const a = Math.min(a0, at)
-      const b = Math.max(a0, at)
-      // The engine will not loop a region shorter than 0.05s, and a region
-      // that short is a mis-tap anyway — treat it as re-marking A instead of
-      // arming something that silently does nothing.
-      if (b - a < 0.4) {
+  const cycleLoop = useCallback((): Promise<void> => {
+    const epoch = loopCycleEpoch.current
+    const run = loopCycleTail.current.then(async () => {
+      if (epoch !== loopCycleEpoch.current) return
+      if (!engine.capabilities.loopRegion) {
+        unsupported('loop-region')
+        return
+      }
+      const at = engine.audioPosition
+      const a0 = loopARef.current
+      if (a0 === null) {
         markLoop(at, null)
         return
       }
-      // No seek here: setRegion re-anchors the clock and puts the playhead
-      // inside the region itself, which it has to do anyway for the internal
-      // restart path the UI cannot reach.
-      engine.setRegion({ start: a, end: b }, true)
-      /* Read the region BACK rather than assuming the marks were taken.
-         setRegion may cap `end` to the song's length, and may reject the
-         span outright once capped — leaving the button lit and a band drawn
-         over a loop that was never armed. The engine owns the region; the UI
-         draws what the engine owns, which keeps this honest for any clamp
-         added inside setRegion later. */
+      if (loopBRef.current === null) {
+        const a = Math.min(a0, at)
+        const b = Math.max(a0, at)
+        // The engine will not loop a region shorter than 0.05s, and a region
+        // that short is a mis-tap anyway — treat it as re-marking A instead of
+        // arming something that silently does nothing.
+        if (b - a < 0.4) {
+          markLoop(at, null)
+          return
+        }
+        // setRegion may cross a native bridge, so its completion — not the
+        // call — is the point at which regionState is authoritative.
+        await engine.setRegion({ start: a, end: b }, true)
+        if (epoch !== loopCycleEpoch.current) return
+        /* Read the region BACK rather than assuming the marks were taken.
+           setRegion may cap `end` to the song's length, and may reject the
+           span outright once capped — leaving the button lit and a band drawn
+           over a loop that was never armed. The engine owns the region; the UI
+           draws what the engine owns, which keeps this honest for any clamp
+           added inside setRegion later. */
+        const armed = engine.regionState
+        markLoop(armed?.start ?? null, armed?.end ?? null)
+        return
+      }
+      await engine.setRegion(null, false)
+      if (epoch !== loopCycleEpoch.current) return
       const armed = engine.regionState
       markLoop(armed?.start ?? null, armed?.end ?? null)
-      return
-    }
-    markLoop(null, null)
-    engine.setRegion(null, false)
-  }, [engine, markLoop])
+    })
+    const handled = run.catch(error => {
+      if (epoch !== loopCycleEpoch.current) return
+      const armed = engine.regionState
+      markLoop(armed?.start ?? null, armed?.end ?? null)
+      log('playback', `loop command failed · ${String(error)}`, 'error')
+    })
+    loopCycleTail.current = handled
+    return handled
+  }, [engine, markLoop, unsupported])
   /** Key & speed — UI + persistence-ready; audio lands with the pitch engine. */
   const [ktPitch, setKtPitch] = useState(0)
   const [ktTempo, setKtTempo] = useState(100)
   /** Beat track from the project (desktop-saved) + metronome session prefs. */
-  const [beatInfo, setBeatInfo] = useState<BeatInfo | null>(null)
-  const [met, setMet] = useState<MetronomeConfig>(MET_DEFAULTS)
-  const [countInSt, setCountInSt] = useState<{ total: number; done: number; perBar: number } | null>(
-    null
+  // Start from the project's saved grid and metronome, derived exactly as
+  // the playback backend derives its own. The first render's effects push
+  // these into the engine, and under native playback a value that differs
+  // from what the backend already holds is a full graph rebuild: pushing
+  // the empty defaults first cost a refused rebuild on every song open, and
+  // the next Play then had to decode all six stems again.
+  const [beatInfo, setBeatInfo] = useState<BeatInfo | null>(() =>
+    sanitizeBeatInfo(project.doc.settings?.beat)
   )
+  const [met, setMet] = useState<MetronomeConfig>(() =>
+    project.doc.settings?.metronome ? sanitizeMetronome(project.doc.settings.metronome) : MET_DEFAULTS
+  )
+  const acceptedMetRef = useRef(met)
+  const desiredMetRef = useRef(met)
+  const metSaveSequence = useRef(0)
+  const metScreenMounted = useRef(true)
+  useEffect(() => {
+    metScreenMounted.current = true
+    return () => {
+      metScreenMounted.current = false
+    }
+  }, [])
+  const metronomeReadOnly = project.metronomeRef?.source === 'readonly'
+  const changeMet = useCallback(
+    (update: (current: MetronomeConfig) => MetronomeConfig): void => {
+      if (!engine.capabilities.metronome) {
+        unsupported('metronome')
+        return
+      }
+      if (metronomeReadOnly) return
+      const next = sanitizeMetronome(update(desiredMetRef.current))
+      desiredMetRef.current = next
+      const ref = project.metronomeRef
+      if (!ref) {
+        acceptedMetRef.current = next
+        setMet(next)
+        return
+      }
+      const request = ++metSaveSequence.current
+      void mobileMetronomePersistence
+        .save(ref, next)
+        .then(() => {
+          acceptedMetRef.current = next
+          if (metScreenMounted.current) setMet(next)
+        })
+        .catch(error => {
+          if (request === metSaveSequence.current)
+            desiredMetRef.current = acceptedMetRef.current
+          if (metScreenMounted.current)
+            Alert.alert(
+              'Metronome setting was not saved',
+              error instanceof Error ? error.message : String(error)
+            )
+        })
+    },
+    [engine, metronomeReadOnly, project.metronomeRef, unsupported]
+  )
+  const [countInSt, setCountInSt] = useState<PlaybackCountInStatus | null>(null)
+  const countInDisplay = countInSt === null ? null : playbackCountInDisplay(countInSt)
   /** Lyric viewport — the canvas is this size and the column scrolls under it. */
   const [view, setView] = useState({ w: 0, h: 0 })
   const lyrW = Math.max(0, view.w - 2 * LYR_PAD)
@@ -460,7 +587,39 @@ export default function PlayerScreen({
     })
     return () => lyricFrame.setActive(false)
   }, [active, engine, lastTs, lyricFrame, pendingMs, pushPos, sinceSample])
-  const stemIds = useMemo(() => project.stems.map((st) => st.id), [project])
+  /**
+   * Lanes the core's envelope shows to be silent.
+   *
+   * Legacy hides a stem whose RMS is under SILENT_LANE_LEVEL — a song with
+   * no guitar gets a guitar stem anyway, and a mixer row for silence is
+   * noise. Native decodes nothing in JS, so the same question is asked of
+   * the envelope, against the same constant but on the PEAK, and over the
+   * same lanes: peak is never below RMS and the id set is identical, so this
+   * hides a strict subset. A lane one backend shows and the other does not
+   * is always shown, never lost.
+   */
+  const [nativeSilent, setNativeSilent] = useState<readonly string[]>([])
+  /** What the singer is shown. `allTracks` is what the backend owns; a lane
+   *  the core's envelope proves silent is not a row, a fader or a pill —
+   *  the same lane legacy never builds in the first place. */
+  const tracks = useMemo(
+    () => (nativeSilent.length === 0
+      ? allTracks
+      : allTracks.filter(t => !nativeSilent.includes(t.id))),
+    [allTracks, nativeSilent]
+  )
+  /** The one filtered list. Everything the singer is shown counts from it,
+   *  so the header cannot disagree with the rows beside it. */
+  const visibleLanes = useMemo(
+    () =>
+      project.stems.length > 0
+        ? project.stems.map(st => ({ id: st.id, custom: st.custom === true }))
+        : (project.nativePlayback?.lanes
+            .filter(lane => !nativeSilent.includes(lane.id))
+            .map(lane => ({ id: lane.id, custom: lane.custom === true })) ?? []),
+    [project, nativeSilent]
+  )
+  const stemIds = useMemo(() => visibleLanes.map(lane => lane.id), [visibleLanes])
   /* Live window size for the tint washes — Android rotates and split-screens
      and the iPad target allows all four orientations, so a module-load
      capture would strand portrait extents on a landscape canvas. Still
@@ -486,6 +645,8 @@ export default function PlayerScreen({
         color: st.color ?? meta?.color ?? C.dim
       }
     }
+    for (const lane of project.nativePlayback?.lanes ?? [])
+      map[lane.id] = { label: lane.label, color: lane.color }
     return map
   }, [project])
   /**
@@ -503,37 +664,106 @@ export default function PlayerScreen({
   useEffect(() => {
     let cancelled = false
     setWave(null)
+    setNativeSilent([])
     const stems = project.stems
-    if (stems.length === 0) return
-    const N = 96
-    const WIN = 2048
-    const t = setTimeout(() => {
+    if (stems.length === 0) {
+      // Native playback never decodes in JS, so there are no buffers to
+      // scan. The core summarised the same audio while it decoded, once per
+      // prepared generation; ask it rather than leaving the rail blank.
+      const native = project.nativePlayback
+      if (!native) return
+      void native
+        .lanePeaks()
+        .then(envelope => {
+          if (cancelled || !envelope || envelope.lanes.length === 0) return
+          setNativeSilent(
+            envelope.lanes
+              .filter(
+                lane =>
+                  HIDEABLE_LANE_IDS.includes(lane.id) &&
+                  lane.peaksValid &&
+                  Math.max(...lane.peaks) < SILENT_LANE_LEVEL
+              )
+              .map(lane => lane.id)
+          )
+          const buckets = envelope.bucketCount
+          const raw: { level: number; color: string }[] = []
+          for (let i = 0; i < buckets; i++) {
+            let total = 0
+            let loudest = 0
+            let color: string = C.dim
+            for (const lane of envelope.lanes) {
+              if (!lane.peaksValid) continue
+              const level = lane.peaks[i] ?? 0
+              total += level * level
+              if (level > loudest) {
+                loudest = level
+                color = laneMeta[lane.id]?.color ?? C.dim
+              }
+            }
+            raw.push({ level: Math.sqrt(total), color })
+          }
+          const peak = Math.max(0.0001, ...raw.map(r => r.level))
+          setWave(
+            raw.map(r => ({ h: Math.max(0.1, Math.min(1, r.level / peak)), color: r.color }))
+          )
+        })
+        .catch(() => {
+          // A song whose waveform cannot be drawn is still a song that plays.
+        })
+      // Register the cleanup rather than returning past it: the project can
+      // be replaced in place under a mounted screen (the native pre-start
+      // fallback does exactly that), and without this the `cancelled` check
+      // above is dead and a late envelope repopulates what the re-run cleared.
+      return () => {
+        cancelled = true
+      }
+    }
+    // A chunk of slivers per macrotask, never the whole song in one tick:
+    // this is the JS thread, and a tap on Play queues behind whatever it is
+    // doing. The scan is bounded per sliver (lane-levels.ts) AND yields
+    // between chunks, so a long song costs many short ticks rather than one
+    // long one. Each tick re-checks `cancelled` — the song can close between
+    // them.
+    let t: ReturnType<typeof setTimeout> | null = null
+    const tick = (): Promise<void> =>
+      new Promise((resolve) => {
+        t = setTimeout(resolve, 0)
+      })
+    void (async () => {
       try {
+        await tick()
+        if (cancelled) return
+        // The same statistic the native core publishes for its lanes — the
+        // RMS over every channel in each sliver — so the two backends draw
+        // one bar (lane-levels.ts says what it replaced, and why the read
+        // is bounded).
         const frames = Math.max(...stems.map((st) => st.buffer.length))
-        const scratch = new Float32Array(WIN)
+        const scratch = new Float32Array(LANE_LEVEL_WINDOW)
+        const perLane: { color: string; levels: Float32Array }[] = []
+        for (const st of stems) {
+          const levels = new Float32Array(LANE_LEVEL_SLIVERS)
+          for (let from = 0; from < LANE_LEVEL_SLIVERS; from += LANE_LEVEL_CHUNK) {
+            laneSliverLevels(st.buffer, frames, LANE_LEVEL_SLIVERS, scratch, undefined, levels, from, from + LANE_LEVEL_CHUNK)
+            await tick()
+            if (cancelled) return
+          }
+          perLane.push({ color: laneMeta[st.id]?.color ?? C.dim, levels })
+        }
         const raw: { level: number; color: string }[] = []
-        for (let i = 0; i < N; i++) {
-          if (cancelled) return
-          const start = Math.floor((i / N) * frames)
+        for (let i = 0; i < LANE_LEVEL_SLIVERS; i++) {
           let total = 0
-          let bestRms = 0
-          let bestColor: string = C.dim
-          for (const st of stems) {
-            const b0 = st.buffer
-            // A lane shorter than the song (a custom track) is silent past
-            // its own end, not a repeat of its tail.
-            if (start >= b0.length) continue
-            b0.copyFromChannel(scratch, 0, Math.min(start, Math.max(0, b0.length - WIN)))
-            let sum = 0
-            for (let k = 0; k < WIN; k += 4) sum += scratch[k] * scratch[k]
-            const rms = Math.sqrt(sum / (WIN / 4))
-            total += rms * rms
-            if (rms > bestRms) {
-              bestRms = rms
-              bestColor = laneMeta[st.id]?.color ?? C.dim
+          let loudest = 0
+          let color: string = C.dim
+          for (const lane of perLane) {
+            const level = lane.levels[i]
+            total += level * level
+            if (level > loudest) {
+              loudest = level
+              color = lane.color
             }
           }
-          raw.push({ level: Math.sqrt(total), color: bestColor })
+          raw.push({ level: Math.sqrt(total), color })
         }
         const peak = Math.max(0.0001, ...raw.map((r) => r.level))
         if (!cancelled)
@@ -541,10 +771,10 @@ export default function PlayerScreen({
       } catch {
         // A released buffer mid-read: the song is gone; nothing to draw.
       }
-    }, 0)
+    })()
     return () => {
       cancelled = true
-      clearTimeout(t)
+      if (t !== null) clearTimeout(t)
     }
   }, [project, laneMeta])
   /** Measured band width, for the played-clip's inner copy. */
@@ -567,35 +797,43 @@ export default function PlayerScreen({
           : null
   const applyMixPreset = useCallback(
     (p: 'full' | 'novocals' | 'vocalsonly'): void => {
+      if (!engine.capabilities.mixer) {
+        unsupported('mixer')
+        return
+      }
       for (const t of engine.getTrackStates()) {
         engine.setMuted(t.id, p === 'novocals' && t.id === 'vocals')
         engine.setSolo(t.id, p === 'vocalsonly' && t.id === 'vocals')
       }
     },
-    [engine]
+    [engine, unsupported]
   )
 
   // The pre-split original lane is the app's, not the singer's: counting it
-  // made an unsplit song read "0 stems · 1 added".
+  // made an unsplit song read "0 stems · 1 added". Under native playback
+  // there are no JS stems to ask, so the same question goes to the lanes the
+  // core prepared — otherwise a six-stem song with one added track reads
+  // "7 stems" where legacy reads "6 stems · 1 added".
   const addedCount = useMemo(
-    () => project.stems.filter((st) => st.custom && st.id !== ORIGINAL_LANE_ID).length,
-    [project]
+    () => visibleLanes.filter(lane => lane.custom && lane.id !== ORIGINAL_LANE_ID).length,
+    [visibleLanes]
   )
   const originalOnly = useMemo(
-    () => project.stems.every((st) => st.custom) && project.stems.length > 0,
-    [project]
+    () => visibleLanes.every(lane => lane.custom) && visibleLanes.length > 0,
+    [visibleLanes]
   )
 
   /* Feed the engine + apply the project's saved settings. */
   useEffect(() => {
-    engine.load(project.stems.map(({ id, buffer, custom }) => ({ id, buffer, custom })))
+    engine.attach(project)
     const st = project.doc.settings
     if (st) {
-      for (const [id, t] of Object.entries(st.tracks ?? {})) {
-        engine.setMuted(id, t.muted)
-        engine.setSolo(id, t.solo)
-        engine.setVolume(id, t.volume)
-      }
+      if (engine.capabilities.mixer)
+        for (const [id, t] of Object.entries(st.tracks ?? {})) {
+          engine.setMuted(id, t.muted)
+          engine.setSolo(id, t.solo)
+          engine.setVolume(id, t.volume)
+        }
       const tn = st.training
       if (tn) {
         setTrainCfg(sanitizeTraining(tn))
@@ -604,24 +842,45 @@ export default function PlayerScreen({
       setKtPitch(Math.round(st.transpose ?? 0))
       setKtTempo(Math.round((st.tempo ?? 1) * 100))
       setBeatInfo(sanitizeBeatInfo(st.beat))
-      setMet(st.metronome ? sanitizeMetronome(st.metronome) : MET_DEFAULTS)
+      const loadedMet = st.metronome ? sanitizeMetronome(st.metronome) : MET_DEFAULTS
+      acceptedMetRef.current = loadedMet
+      desiredMetRef.current = loadedMet
+      setMet(loadedMet)
     }
     return () => {
       // unload, not pause: leaving the player must release the stems (see
       // MultitrackEngine.unload) — a paused engine still pins every buffer.
-      engine.unload()
+      void engine.unload('player screen unmounted').catch(error =>
+        log('playback', `player backend unload failed · ${String(error)}`, 'error')
+      )
     }
   }, [engine, project])
 
   useEffect(() => {
-    return engine.subscribe(() => {
+    const publish = (): void => {
       setTracks(engine.getTrackStates())
       setDucked(engine.duckedStems)
       setPlaying(engine.playing)
       pushPos(engine.position)
       setCountInSt(engine.countInStatus)
-    })
+    }
+    publish()
+    return engine.subscribe(publish)
   }, [engine, pushPos])
+
+  /* Leaving the Songs tab PAUSES, it does not tear down. Legacy has always
+   * paused here (App's changeTab pauses the engine and keeps its buffers),
+   * and native used to stop — which releases the decoded graph, zeroes the
+   * playhead, and makes coming back a full six-stem decode. Train is the one
+   * caller that genuinely needs the output, and it takes ownership through
+   * its own explicit handoff rather than through this effect. */
+  useEffect(() => {
+    if (active || engine.kind === 'legacy') return
+    // pause() is void and self-guarding on both backends: a graph that is
+    // merely prepared refuses it in the core and the backend swallows that,
+    // so leaving the tab before pressing Play costs nothing.
+    engine.pause()
+  }, [active, engine])
 
   useEffect(() => {
     if (!active || !playing) return
@@ -632,9 +891,18 @@ export default function PlayerScreen({
     return () => clearInterval(t)
   }, [active, engine, playing, pushPos])
 
+  /* The singer's own latency correction. The app shell folds it into the
+   * legacy engine's display latency, but the native backend never saw it, so
+   * on the routes the trim exists FOR — Bluetooth and CarPlay, where the OS
+   * under-reports by 30-100 ms — the highlight ran early by whatever had
+   * been dialled in. */
+  useEffect(() => {
+    engine.setDisplayTrim(trimMs / 1000)
+  }, [engine, trimMs])
+
   /* Beat track + metronome prefs -> engine. */
   useEffect(() => {
-    engine.setBeats(beatInfo)
+    if (engine.capabilities.metronome) engine.setBeats(beatInfo)
   }, [engine, beatInfo])
 
   /* A grid detected while this song is open lights the metronome up without
@@ -786,11 +1054,12 @@ export default function PlayerScreen({
   }, [active, project, refreshDoc])
 
   useEffect(() => {
-    engine.setMetronome(met)
+    if (engine.capabilities.metronome) engine.setMetronome(met)
   }, [engine, met])
 
   /* Training schedule -> engine spec (same derivation as desktop). */
   useEffect(() => {
+    if (!engine.capabilities.training) return
     if (!training) {
       engine.setTraining(null)
       return
@@ -890,7 +1159,7 @@ export default function PlayerScreen({
         scrollTo(scrollRef, 0, to, true)
       })()
     }
-  }, [currentLine, column])
+  }, [currentLine, column, scrollRef])
 
   const toggleTrainStem = (id: string): void => {
     setTrainCfg((c) => {
@@ -904,6 +1173,10 @@ export default function PlayerScreen({
   const preTrainMutes = useRef<Record<string, boolean> | null>(null)
 
   const armTraining = (): void => {
+    if (!engine.capabilities.training || !engine.capabilities.mixer) {
+      unsupported('training')
+      return
+    }
     if (!training) {
       // ducks need the train stems live, but remember what was muted
       preTrainMutes.current = Object.fromEntries(
@@ -922,6 +1195,40 @@ export default function PlayerScreen({
     if (!TEST) return
     TEST.project = project.name
     TEST.beatInfo = beatInfo
+    /* The PlaybackBackend itself — the one object BOTH playback paths share.
+       Every older driver reaches `__test.engine`, which is the legacy
+       MultitrackEngine and therefore the wrong object entirely under native
+       playback: a suite that must run the same scenario against both backends
+       has nothing else to hold. `kind` is what it should branch on. */
+    TEST.backend = engine
+    /* Metronome, pitch/tempo and the count-in through the SCREEN's own
+       handlers, never the backend's: `changeMet` is the path that persists
+       (a save that throws is exactly the bug the singer hit), and the
+       key/speed state is what the effect below pushes into the engine. A
+       driver calling engine.setPitchTempo directly proves neither. */
+    TEST.met = met
+    TEST.changeMet = (patch: Partial<MetronomeConfig>) =>
+      changeMet(current => ({ ...current, ...patch }))
+    TEST.setPitchTempo = (semitones: number, tempoPercent: number) => {
+      setKtPitch(semitones)
+      setKtTempo(tempoPercent)
+    }
+    TEST.keyTempo = { pitch: ktPitch, tempo: ktTempo }
+    /* What the count-in row actually shows: `beatDots` false means the
+       singer sees "2.4s" where the dots belong. */
+    /** What the header says, which nothing else in the suite can read. */
+    TEST.stems = {
+      total: stemIds.length,
+      added: addedCount,
+      originalOnly
+    }
+    /** The transport button's own state — what the singer sees, which is the
+     *  React state and not `engine.playing`. A driver comparing the two is
+     *  the only way to measure how long the button lags the transport. */
+    TEST.playing = playing
+    TEST.countIn = countInDisplay === null
+      ? null
+      : { ...countInDisplay, kind: countInSt?.kind ?? null }
     /** PROJECT-WIDE: the line for whatever detector is running, whichever it
      *  is. Never show it, or assert it, against ONE row — doing exactly that
      *  is what put "Listening for the beat" under a hand-tuned grid while the
@@ -974,7 +1281,9 @@ export default function PlayerScreen({
     TEST.cycleLoop = cycleLoop
     TEST.loopMarks = { a: loopA, b: loopB }
     TEST.sheet = sheet
-    TEST.tapLine = (i: number) => lines[i] && engine.seek(lines[i].start)
+    TEST.tapLine = (i: number) => {
+      if (lines[i] && engine.capabilities.seek) engine.seek(lines[i].start)
+    }
     TEST.back = onBack
     TEST.latency = () => ({
       route: route?.label ?? null,
@@ -1025,18 +1334,30 @@ export default function PlayerScreen({
     }
     /** Lane names/colors as the mixer shows them (added tracks bring their own). */
     TEST.lanes = () =>
-      project.stems.map((st) => ({
-        id: st.id,
-        label: laneMeta[st.id]?.label ?? st.id,
-        color: laneMeta[st.id]?.color ?? null,
-        custom: st.custom === true,
-        seconds: Math.round(st.buffer.duration * 10) / 10
-      }))
+      tracks.map(track => {
+        const stem = project.stems.find(candidate => candidate.id === track.id)
+        const nativeLane = project.nativePlayback?.lanes.find(candidate => candidate.id === track.id)
+        const longestNative = Math.max(
+          0,
+          ...(project.nativePlayback?.lanes.map(candidate => candidate.totalFrames) ?? [])
+        )
+        const seconds = stem?.buffer.duration ??
+          (nativeLane && longestNative > 0
+            ? (nativeLane.totalFrames / longestNative) * engine.duration
+            : 0)
+        return {
+          id: track.id,
+          label: laneMeta[track.id]?.label ?? track.id,
+          color: laneMeta[track.id]?.color ?? null,
+          custom: stem?.custom === true || nativeLane?.custom === true,
+          seconds: Math.round(seconds * 10) / 10
+        }
+      })
   })
 
   /* Key & speed apply live: varispeed sources + master-bus stretch. */
   useEffect(() => {
-    engine.setPitchTempo(ktPitch, ktTempo / 100)
+    if (engine.capabilities.pitchTempo) engine.setPitchTempo(ktPitch, ktTempo / 100)
   }, [engine, ktPitch, ktTempo])
 
   useEffect(() => {
@@ -1204,7 +1525,11 @@ export default function PlayerScreen({
             {column.boxes.map((b, i) => (
               <Pressable
                 key={i}
-                onPress={() => engine.seek(lines[i].start)}
+                onPress={() =>
+                  engine.capabilities.seek
+                    ? engine.seek(lines[i].start)
+                    : unsupported('seek')
+                }
                 /* The lyrics are painted on a Skia canvas, so there is no text
                    in the tree for a screen reader to find — the whole song's
                    words were silent. These invisible tap targets sit exactly
@@ -1333,20 +1658,14 @@ export default function PlayerScreen({
         <Image source={SCRIM_BOTTOM} style={{ width: '100%', height: '100%' }} resizeMode="stretch" />
       </View>
       <View style={[s.foot, { bottom: Math.max(12, insets.bottom + 2) }]}>
-        {countInSt && (
+        {countInDisplay && (
           <Text
             style={s.countInFoot}
             /* Rendered as a run of ● and ○ characters, which a screen reader
                reads out one bullet at a time. */
-            accessibilityLabel={`Count-in, beat ${countInSt.done} of ${countInSt.total}`}
+            accessibilityLabel={countInDisplay.accessibilityLabel}
           >
-            {Array.from({ length: countInSt.total }, (_, i) =>
-              i < countInSt.done ? '●' : '○'
-            ).reduce<string[]>((acc, d, i) => {
-              if (i > 0 && i % countInSt.perBar === 0) acc.push(' ')
-              acc.push(d)
-              return acc
-            }, []).join('')}
+            {countInDisplay.text}
           </Text>
         )}
         {/* The seek bar is the player's primary control, and the layout says
@@ -1360,7 +1679,8 @@ export default function PlayerScreen({
             onChange={setDragPos}
             onCommit={(v) => {
               setDragPos(null)
-              engine.seek(v * engine.duration)
+              if (engine.capabilities.seek) engine.seek(v * engine.duration)
+              else unsupported('seek')
             }}
             color="rgba(255,255,255,0.85)"
             height={40}
@@ -1457,26 +1777,46 @@ export default function PlayerScreen({
           <Text style={[s.tm, { textAlign: 'right' }]}>{fmtTime(engine.duration)}</Text>
         </View>
         <View style={s.btnRow}>
-          <RoundBtn onPress={() => setSheet('mixer')} label="Mixer">
+          <RoundBtn
+            onPress={() =>
+              engine.capabilities.mixer ? setSheet('mixer') : unsupported('mixer')
+            }
+            label="Mixer"
+          >
             <MixGlyph />
           </RoundBtn>
-          <RoundBtn onPress={() => engine.seek(0)} label="Back to start">
+          <RoundBtn
+            onPress={() =>
+              engine.capabilities.seek ? engine.seek(0) : unsupported('seek')
+            }
+            label="Back to start"
+          >
             {/* Drawn, like MicGlyph — Android faces render text glyphs at
                 whatever weight they please. */}
             <ToStartGlyph color={white(0.85)} />
           </RoundBtn>
-          <RoundBtn onPress={() => engine.seekBy(-5)} label="Back 5 seconds">
+          <RoundBtn
+            onPress={() =>
+              engine.capabilities.seek ? engine.seekBy(-5) : unsupported('seek')
+            }
+            label="Back 5 seconds"
+          >
             <Text style={s.skipText}>−5s</Text>
           </RoundBtn>
           <Pressable
-            onPress={() => engine.toggle()}
+            onPress={() => finishPlaybackAction(engine.toggle())}
             style={s.play}
             accessibilityRole="button"
             accessibilityLabel={playing ? 'Pause' : 'Play'}
           >
             <PlayPauseGlyph playing={playing} color="#17110a" />
           </Pressable>
-          <RoundBtn onPress={() => engine.seekBy(5)} label="Forward 5 seconds">
+          <RoundBtn
+            onPress={() =>
+              engine.capabilities.seek ? engine.seekBy(5) : unsupported('seek')
+            }
+            label="Forward 5 seconds"
+          >
             <Text style={s.skipText}>+5s</Text>
           </RoundBtn>
           <RoundBtn onPress={() => setSheet('practice')} label="Practice">
@@ -1561,8 +1901,10 @@ export default function PlayerScreen({
                     <Bar
                       value={t.volume}
                       onChange={(v) => {
-                        engine.setVolume(t.id, v)
-                        setDragVol({ id: t.id, v })
+                        if (engine.capabilities.mixer) {
+                          engine.setVolume(t.id, v)
+                          setDragVol({ id: t.id, v })
+                        }
                       }}
                       onCommit={() => setDragVol(null)}
                       color={meta.color}
@@ -1582,7 +1924,11 @@ export default function PlayerScreen({
                   </View>
                   <Pressable
                     hitSlop={4}
-                    onPress={() => engine.setMuted(t.id, !t.muted)}
+                    onPress={() =>
+                      engine.capabilities.mixer
+                        ? engine.setMuted(t.id, !t.muted)
+                        : unsupported('mixer')
+                    }
                     accessibilityRole="button"
                     accessibilityLabel={`Mute ${meta.label}`}
                     accessibilityState={{ selected: t.muted }}
@@ -1595,7 +1941,11 @@ export default function PlayerScreen({
                   </Pressable>
                   <Pressable
                     hitSlop={4}
-                    onPress={() => engine.setSolo(t.id, !t.solo)}
+                    onPress={() =>
+                      engine.capabilities.mixer
+                        ? engine.setSolo(t.id, !t.solo)
+                        : unsupported('mixer')
+                    }
                     accessibilityRole="button"
                     accessibilityLabel={`Solo ${meta.label}`}
                     accessibilityState={{ selected: t.solo }}
@@ -1839,11 +2189,11 @@ export default function PlayerScreen({
               {/* ---------- The full record: every lane, every byte -------- */}
               <View style={b.sec}>
                 <Text style={b.secLab}>Stems</Text>
-                {project.stems.map((st) => {
-                  const meta = laneMeta[st.id] ?? { label: st.id, color: C.dim }
-                  const file = stemFileInfo(project.doc, st.id)
+                {tracks.map((track) => {
+                  const meta = laneMeta[track.id] ?? { label: track.id, color: C.dim }
+                  const file = stemFileInfo(project.doc, track.id)
                   return (
-                    <View key={st.id} style={s.stemRow}>
+                    <View key={track.id} style={s.stemRow}>
                       <View style={[s.dot, { backgroundColor: meta.color }]} />
                       <Text style={s.stemName} numberOfLines={1}>
                         {meta.label}
@@ -1937,6 +2287,10 @@ export default function PlayerScreen({
                       label="Reset"
                       active={false}
                       onPress={() => {
+                        if (!engine.capabilities.pitchTempo) {
+                          unsupported('pitch-tempo')
+                          return
+                        }
                         setKtPitch(0)
                         setKtTempo(100)
                       }}
@@ -1946,7 +2300,11 @@ export default function PlayerScreen({
                 <Stepper
                   label="Pitch"
                   valueText={`${ktPitch > 0 ? '+' : ''}${ktPitch} st`}
-                  onStep={(d) => setKtPitch((v) => Math.max(-12, Math.min(12, v + d)))}
+                  onStep={(d) => {
+                    if (engine.capabilities.pitchTempo)
+                      setKtPitch((v) => Math.max(-12, Math.min(12, v + d)))
+                    else unsupported('pitch-tempo')
+                  }}
                   /* The consequence, not the arithmetic: the key you will
                      actually sing in. Unknown key or no shift, no suffix. */
                   suffix={
@@ -1958,7 +2316,11 @@ export default function PlayerScreen({
                 <Stepper
                   label="Tempo"
                   valueText={`${ktTempo}%`}
-                  onStep={(d) => setKtTempo((v) => Math.max(50, Math.min(150, v + d * 5)))}
+                  onStep={(d) => {
+                    if (engine.capabilities.pitchTempo)
+                      setKtTempo((v) => Math.max(50, Math.min(150, v + d * 5)))
+                    else unsupported('pitch-tempo')
+                  }}
                   suffix={
                     beatInfo != null && ktTempo !== 100
                       ? `→ ${Math.round((beatInfo.bpm * ktTempo) / 100)} bpm`
@@ -1995,33 +2357,40 @@ export default function PlayerScreen({
                     { key: '2', label: beatInfo ? '2 bars' : '6 s' }
                   ]}
                   active={String(met.countInBars)}
-                  onSelect={(k) => setMet((m) => ({ ...m, countInBars: Number(k) }))}
+                  onSelect={(k) => changeMet((m) => ({ ...m, countInBars: Number(k) }))}
                 />
                 <View style={[b.segs, { marginTop: 10 }]}>
                   {beatInfo != null && (
                     <Chip
                       label="Click"
                       active={met.click}
-                      onPress={() => setMet((m) => ({ ...m, click: !m.click }))}
+                      onPress={() => changeMet((m) => ({ ...m, click: !m.click }))}
                     />
                   )}
                   <Chip
                     label="Accent"
                     active={met.accent}
-                    onPress={() => setMet((m) => ({ ...m, accent: !m.accent }))}
+                    onPress={() => changeMet((m) => ({ ...m, accent: !m.accent }))}
                   />
                 </View>
                 <Stepper
                   label="Loudness"
                   valueText={`${Math.round(met.volume * 100)}%`}
                   onStep={(d) => {
-                    setMet((m) => ({
+                    changeMet((m) => ({
                       ...m,
                       volume: Math.max(0, Math.min(1, m.volume + d * 0.1))
                     }))
-                    engine.previewClick(met.accent)
+                    if (engine.capabilities.previewClick) engine.previewClick(met.accent)
+                    else unsupported('preview-click')
                   }}
                 />
+                {metronomeReadOnly && (
+                  <Text style={b.hint}>
+                    Metronome settings are read-only because this project was opened without a
+                    verified library location. Reopen it from the library to save changes.
+                  </Text>
+                )}
                 {beatInfo == null && (
                 <Text style={b.hint}>
                   {stepAt('beat')

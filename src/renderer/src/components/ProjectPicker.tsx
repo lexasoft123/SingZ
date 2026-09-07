@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { CloudRoot, ProjectListItem } from '../../../shared/types'
-import gdriveIcon from '../assets/gdrive.png'
 import { Modal } from '@singz/ui'
 
 function fmtDate(iso: string): string {
@@ -11,13 +10,15 @@ function fmtDate(iso: string): string {
 }
 
 interface Props {
+  /** Eager shell asset: recoverable route copies must not share a lazy child. */
+  gdriveIcon: string
   onOpen: (songPath: string) => void
   onBrowse: () => void
   onClose: () => void
 }
 
 /** In-app library of saved projects (~/Documents/SingZ or a cloud folder). */
-export default function ProjectPicker({ onOpen, onBrowse, onClose }: Props): React.JSX.Element {
+export default function ProjectPicker({ gdriveIcon, onOpen, onBrowse, onClose }: Props): React.JSX.Element {
   const [root, setRoot] = useState('')
   const [projects, setProjects] = useState<ProjectListItem[] | null>(null)
   const [cloud, setCloud] = useState<CloudRoot[]>([])

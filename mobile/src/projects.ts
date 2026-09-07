@@ -7,6 +7,15 @@ import type { LyricsDoc, ProjectDoc } from './model'
 import { isCurrent } from './current'
 import { fmtBytes, fmtMs, log } from './log'
 import { customTracks, STEM_ORDER_ALL } from './model'
+import { mobileMetronomePersistence } from './playback/metronome-persistence'
+import type { MetronomeProjectRef } from './playback/metronome-persistence'
+import {
+  GRAPH_DOCUMENT_FORMAT,
+  MAX_GRAPH_DOCUMENT_TEXT_BYTES,
+  parseGraphDocument,
+  type ParsedGraphDocument
+} from './gen/graph-document'
+import { md5Text, utf8TextByteLength } from './md5'
 
 /**
  * Bridge to the FolderAccess native module: the library root is either the
@@ -21,6 +30,7 @@ interface FolderAccessApi {
   listProjects(): Promise<NativeProject[]>
   readText(project: string, file: string): Promise<string>
   localFile(project: string, file: string): Promise<string>
+  statFile(project: string, file: string): Promise<{ md5: string; size: number; mtimeMs: number }>
   cacheUsage(): Promise<CacheUsage[]>
   clearCache(project: string): Promise<boolean>
 }
@@ -64,6 +74,52 @@ export interface ProjectEntry {
   hasLyrics: boolean
   /** Where the files live — a picked/local folder or the Google Drive API. */
   source?: 'folder' | 'gdrive'
+  /** Exact persistence authority supplied by the catalog owning this entry. */
+  metronomeRef?: MetronomeProjectRef
+}
+
+/**
+ * Return only a persistence authority that the catalog actually proved.
+ *
+ * A non-Drive entry without `metronomeRef` may be a phone Documents project,
+ * an exported project, or a picked-folder project. Its directory name cannot
+ * distinguish those roots, so treating it as phone-local can overwrite a
+ * same-named Documents project. Older/direct load paths therefore remain
+ * playable but metronome persistence fails closed until their catalog stamps
+ * the explicit source/root identity.
+ */
+/**
+ * Below this level a lane is silence, not audio.
+ *
+ * The desktop's audibleStems rule, and the reason a song with no guitar does
+ * not get a guitar row in the mixer. Legacy measures sampled RMS against it;
+ * the native player has no decoded audio in JS and measures the core's peak
+ * envelope against the same number, which hides strictly less because peak
+ * is never below RMS.
+ */
+export const SILENT_LANE_LEVEL = 0.004
+
+/**
+ * The only lanes the silence rule may hide.
+ *
+ * The splitter always returns six stems, and a song with no guitar gets a
+ * guitar lane of silence — but a vocals lane that happens to be silent is a
+ * song with no singing, which the singer still gets to see and unmute. The
+ * desktop's audibleStems rule is scoped this way and both phone backends
+ * follow it, or the same song shows different lanes on different devices.
+ */
+export const HIDEABLE_LANE_IDS: readonly string[] = ['guitar', 'piano']
+
+export function metronomeRefForEntry(
+  entry: Pick<ProjectEntry, 'dir' | 'metronomeRef' | 'source'>
+): MetronomeProjectRef {
+  if (entry.metronomeRef) return entry.metronomeRef
+  if (entry.source === 'gdrive') return { source: 'gdrive', dir: entry.dir }
+  const reason =
+    `Project ${entry.dir} has no explicit phone or picked-folder persistence identity.` +
+    ' Metronome changes will remain read-only for this load.'
+  log('metronome', reason, 'warn')
+  return { source: 'readonly', dir: entry.dir, reason }
 }
 
 /**
@@ -147,6 +203,160 @@ export interface LoadedLane {
   custom?: boolean
 }
 
+export interface NativePlaybackLaneView {
+  readonly id: string
+  readonly label: string
+  readonly color: string
+  /** True for an added/original project lane rather than a split stem. */
+  readonly custom: boolean
+  readonly totalFrames: number
+}
+
+/**
+ * Count-in presentation facts exposed by a playback owner.
+ *
+ * Beat dots require exact local-meter/cue facts. A backend that only knows
+ * truthful pre-roll time must use `time`; the UI must never infer dots by
+ * evenly dividing that interval or applying a song-wide beats-per-bar value.
+ */
+export type PlaybackCountInStatus =
+  | { readonly kind: 'beats'; readonly total: number; readonly done: number; readonly perBar: number }
+  | { readonly kind: 'time'; readonly remainingSeconds: number }
+
+export interface NativePlaybackViewState {
+  readonly phase: 'prepared' | 'starting' | 'playing' | 'paused' | 'stopping' | 'stopped' | 'error'
+  readonly generation: number
+  /** Listener-facing signed project time; negative values are count-in. */
+  readonly positionSec: number
+  /** Render-head signed project time before presentation latency. */
+  readonly renderedPositionSec: number
+  readonly durationSec: number
+  readonly displayLatencySec: number
+  readonly audibleFrames: number
+  readonly countInStatus: PlaybackCountInStatus | null
+  readonly regionState: { start: number; end: number; loop: boolean } | null
+  readonly terminalReason: string
+  readonly error: string | null
+  /** Wall-clock stamp of the telemetry behind the two positions, whether the
+   * transport was advancing then, and its rate. The player's clock no longer
+   * reads these on a native build that answers `positionNow()`; they remain
+   * the fallback projection for a build older than that method, where the
+   * position still arrives on the telemetry poll and is projected forward
+   * between polls so the sweep glides instead of stepping. */
+  readonly telemetryAtMs?: number
+  readonly advancing?: boolean
+  readonly playbackRate?: number
+}
+
+/**
+ * What the player's clock reads, as often as it likes.
+ *
+ * `renderedSec` is the render head — the signed project time the core had
+ * rendered up to, advanced by how long ago it said so — untrimmed and before
+ * presentation latency, exactly the legacy engine's `audioPosition`. While a
+ * song is SOUNDING, what the singer hears is that minus the latency and the
+ * trim, which the backend subtracts once; while the transport is stopped or
+ * counting in it is the shown position itself, which is what `preRoll` below
+ * and `playing` are for. `live` says whether this came from the synchronous
+ * native read (`positionNow`) or, on an older native build, from the last
+ * polled telemetry projected by wall time.
+ */
+export interface NativePlaybackClock {
+  readonly renderedSec: number
+  readonly playing: boolean
+  /** The transport is counting the singer in: `renderedSec` is the landing,
+   *  held, and no output-latency correction belongs on it (see the backend's
+   *  `position`). */
+  readonly preRoll: boolean
+  /** Where this run of playback began — the floor under the corrected
+   *  position, so the highlight cannot sit below the spot the singer started
+   *  from for the latency's worth of time it takes the ear to get there.
+   *  Legacy has always floored (`Math.max(startOffset, elapsed)`). Null when
+   *  no floor applies: not playing, or a loop is armed, where the fold takes
+   *  the position back below the start on purpose. */
+  readonly floorSec: number | null
+  readonly live: boolean
+  readonly countIn: PlaybackCountInStatus | null
+}
+
+export type NativePlaybackStartOutcome =
+  | { readonly kind: 'started' }
+  | { readonly kind: 'fallback'; readonly project: LoadedProject }
+  | { readonly kind: 'failed'; readonly error: string }
+
+export type NativePlaybackTrainingSpec =
+  | { readonly mode: 'period'; readonly periodSec: number; readonly stems: readonly string[] }
+  | {
+      readonly mode: 'windows'
+      readonly windows: readonly { readonly s: number; readonly e: number }[]
+      readonly stems: readonly string[]
+    }
+
+/** Narrow native product contract. It is deliberately not shaped like
+ * MultitrackEngine: unsupported parity operations therefore cannot compile
+ * against the mobile DSP session and cannot be accidentally exposed
+ * in the UI. */
+export interface NativePlaybackHandle {
+  readonly kind: 'ios-native' | 'android-native'
+  readonly lanes: readonly NativePlaybackLaneView[]
+  readonly transportControls: true
+  /** Generation-bound scalar controls are implemented by the shared
+   * NativePlaybackSession on both mobile platforms. They ramp through zdsp's
+   * bounded parameter queue; no per-platform mixer graph is allowed here. */
+  readonly mixerControls: true
+  snapshot(): NativePlaybackViewState
+  /** The clock, read synchronously: the render head now, whether the
+   * transport is moving, and the count-in in progress. Cheap enough to call
+   * from every render and every ticker tick — that is the point of it. */
+  clock(): NativePlaybackClock
+  /** Whether a structural change (cue, training, pitch/tempo) would be
+   * landed on the running stream as a seam rather than as a stop/unload/
+   * prepare/open/start rebuild — true only on a core that can swap and while
+   * the song is playing or paused on a running stream. The player's
+   * capabilities use it: a seam refuses no seek, a rebuild refuses every
+   * one for seconds. */
+  swapsInPlace(): boolean
+  subscribe(listener: () => void): () => void
+  /** The singer's per-route latency correction, in seconds. The count-in
+   * dots are derived from the same audible frame the lyric sweep uses, and
+   * that frame carries only the latency the OS reports — which is short on
+   * Bluetooth and CarPlay by exactly the amount this trim exists to add. */
+  setDisplayTrim(seconds: number): void
+  /** Per-lane amplitude envelope for the seek bar, or null when this build
+   * cannot produce one. Cached under the prepared generation by the owner. */
+  lanePeaks(): Promise<{
+    readonly bucketCount: number
+    readonly lanes: readonly {
+      readonly id: string
+      readonly peaksValid: boolean
+      readonly peaks: readonly number[]
+    }[]
+  } | null>
+  start(): Promise<NativePlaybackStartOutcome>
+  pause(): Promise<void>
+  seek(seconds: number): Promise<void>
+  setLoop(startSeconds: number, endSeconds: number): Promise<void>
+  clearLoop(): Promise<void>
+  reanchorTransport(): Promise<void>
+  setLaneControl(
+    id: string,
+    gain: number,
+    muted: boolean,
+    solo: boolean
+  ): Promise<void>
+  setMasterGain(gain: number): Promise<void>
+  /** Generation-bound one-shot through the prepared native reference branch. */
+  previewClick(accent?: boolean): Promise<void>
+  /** Tempo/transpose rebuilds the prepared whole-song processor at the exact
+   * signed render position; it is never a callback-time reconfiguration. */
+  setPitchTempo(semitones: number, rate: number): Promise<void>
+  /** A new schedule is a structural native graph rebuild; arming/disarming an
+   * already prepared schedule is a generation-bound scalar command. */
+  setTraining(spec: NativePlaybackTrainingSpec | null): Promise<void>
+  stop(reason?: string): Promise<void>
+  unload(reason?: string): Promise<void>
+}
+
 export interface LoadedProject {
   name: string
   /** The project folder this was loaded from — absent for the bundled
@@ -159,9 +369,17 @@ export interface LoadedProject {
    *  Set by the catalog, which knows the mode. */
   library?: 'phone' | 'folder' | 'gdrive'
   doc: ProjectDoc
+  /** Verified portable control graph. Absent means this is a legacy fixed-graph project. */
+  graph?: ParsedGraphDocument
   lyrics: LyricsDoc | null
   /** Stems first, in display order, then the tracks the singer added. */
   stems: LoadedLane[]
+  /** Present only for the experimental mobile DSP backend. Native
+   * decoded owners live below the bridge; `stems` stays empty so JS cannot
+   * retain a second RNAudioAPI PCM copy. */
+  nativePlayback?: NativePlaybackHandle
+  /** Exact source/root identity used to load and persist metronome state. */
+  metronomeRef?: MetronomeProjectRef
 }
 
 /** Decoded size of a stem set — float32 per channel, no compression in RAM. */
@@ -176,6 +394,51 @@ export function decodedBytes(stems: { buffer: AudioBuffer }[]): number {
  * is worse than saying so.
  */
 export const MAX_DECODED_BYTES = 1_250_000_000
+
+function validGraphRef(value: unknown): value is NonNullable<ProjectDoc['graphHash']> {
+  if (!value || typeof value !== 'object') return false
+  const h = value as Record<string, unknown>
+  return (
+    Number.isSafeInteger(h.format) &&
+    (h.format as number) > 0 &&
+    typeof h.md5 === 'string' &&
+    /^[a-f0-9]{32}$/.test(h.md5) &&
+    Number.isSafeInteger(h.size) &&
+    (h.size as number) >= 0 &&
+    Number.isFinite(h.mtimeMs) &&
+    (h.mtimeMs as number) >= 0
+  )
+}
+
+/** Resolve only the exact payload project.json names. A stray graph.json is
+ * ignored; missing, mismatched, invalid, and future graphs fail closed rather
+ * than silently switching this project to the legacy fixed composition. */
+export async function loadProjectGraph(entry: ProjectEntry, doc: ProjectDoc): Promise<ParsedGraphDocument | undefined> {
+  const ref = doc.graphHash
+  if (ref === undefined) return undefined
+  if (!validGraphRef(ref)) throw new Error('project.json has an invalid graphHash')
+  if (ref.size > MAX_GRAPH_DOCUMENT_TEXT_BYTES) throw new Error('graph.json exceeds the portable graph size limit')
+  if (ref.format > GRAPH_DOCUMENT_FORMAT) {
+    throw new Error(`graph.json format ${ref.format} is newer than this app supports`)
+  }
+  let text: string
+  if (entry.source === 'gdrive') {
+    text = await driveReadText(entry.dir, 'graph.json', ref.md5, ref.size)
+  } else {
+    text = await Folder.readText(entry.dir, 'graph.json')
+  }
+  // Verify the bytes actually returned to JS. A separate stat/hash followed
+  // by read was a TOCTOU window: replacing graph.json between those calls
+  // made the unbound second body authoritative.
+  if (utf8TextByteLength(text) !== ref.size || md5Text(text) !== ref.md5) {
+    throw new Error('graph.json does not match graphHash')
+  }
+  const parsed = parseGraphDocument(text)
+  if (parsed.kind !== 'known' || parsed.format !== ref.format) {
+    throw new Error(`graph.json is not a valid format-${ref.format} graph`)
+  }
+  return parsed
+}
 
 /**
  * Free the stems. Dropping references is not enough: Hermes sees a small
@@ -234,8 +497,15 @@ export async function loadProject(
       doc = entry.doc
     }
   }
+  // Resolve the one sanitized metronome state before any player sees this
+  // document. Local projects are re-read inside the resolver; Drive projects
+  // merge their account/project-scoped phone override over the remote doc.
+  const metronomeRef = metronomeRefForEntry(entry)
+  doc = await mobileMetronomePersistence.resolve(metronomeRef, doc)
+  await crumb?.('graph')
+  const graph = await loadProjectGraph(entry, doc)
 
-  const ids = STEM_ORDER_ALL.filter((s) => entry.stems[s])
+  const ids = STEM_ORDER_ALL.filter(s => entry.stems[s])
   const added = customTracks(doc?.settings)
   const total = ids.length + added.length
   const stems: LoadedLane[] = []
@@ -247,7 +517,7 @@ export async function loadProject(
   log(
     'song',
     `opening ${doc?.name ?? entry.dir} from ${source} · ${total} lanes` +
-      ` (${ids.map((s) => entry.stems[s]).join(', ')})`
+      ` (${ids.map(s => entry.stems[s]).join(', ')})`
   )
   const openedAt = Date.now()
   const spent: string[] = []
@@ -277,7 +547,10 @@ export async function loadProject(
     // as APK asset names ("Could not read asset bytes"); the scheme routes
     // them to the file decoder and is stripped on every other platform.
     const t0 = Date.now()
-    stems.push({ id, buffer: await decodeAudioData(`file://${path}`, sampleRate) })
+    stems.push({
+      id,
+      buffer: await decodeAudioData(`file://${path}`, sampleRate)
+    })
     spent.push(`${id} ${fmtMs(Date.now() - t0)}`)
     // Stems are all the same length, so one decoded stem projects the whole
     // set. Bail on the projection rather than on the total: refusing after
@@ -286,12 +559,12 @@ export async function loadProject(
     if (projected > MAX_DECODED_BYTES) tooBig(projected)
   }
   // Guitar/piano lanes only appear when the song actually has them — the
-  // desktop's audibleStems rule (sampled RMS < 0.004), ported so a
+  // desktop's audibleStems rule (sampled RMS < SILENT_LANE_LEVEL), ported so a
   // phone-split six-stem project shows the same lanes the desktop would.
   // Dropped buffers are released on the spot: the GC-is-too-late rule.
   for (let i = stems.length - 1; i >= 0; i--) {
     const lane = stems[i]
-    if (lane.id !== 'guitar' && lane.id !== 'piano') continue
+    if (!HIDEABLE_LANE_IDS.includes(lane.id)) continue
     const data = lane.buffer.getChannelData(0)
     let energy = 0
     let n = 0
@@ -300,7 +573,7 @@ export async function loadProject(
       energy += data[j] * data[j]
       n++
     }
-    if (Math.sqrt(energy / Math.max(1, n)) < 0.004) {
+    if (Math.sqrt(energy / Math.max(1, n)) < SILENT_LANE_LEVEL) {
       log('song', `${lane.id} lane is silent — hidden`)
       releaseStems([lane])
       stems.splice(i, 1)
@@ -308,8 +581,9 @@ export async function loadProject(
   }
   // Tracks the singer added on the desktop. They can be any length, so there
   // is nothing to project from — each one is checked against the budget as it
-  // lands, and a track this phone cannot fetch or decode is skipped rather
-  // than allowed to sink a song whose stems are all there.
+  // lands. A declared lane is part of the project, not an optional decoration:
+  // silently skipping one makes the mixer claim that it is playing the saved
+  // arrangement while audio is missing. Loading is therefore all-or-fail.
   for (let i = 0; i < added.length; i++) {
     const t = added[i]
     const at = ids.length + i
@@ -321,10 +595,22 @@ export async function loadProject(
       onStep(`Decoding ${t.label} · ${at + 1}/${total}`, (at + 0.5) / total)
       await crumb?.(`decoding ${t.id}`)
       const buffer = await decodeAudioData(`file://${path}`, sampleRate)
-      stems.push({ id: t.id, buffer, label: t.label, color: t.color, custom: true })
+      stems.push({
+        id: t.id,
+        buffer,
+        label: t.label,
+        color: t.color,
+        custom: true
+      })
     } catch (err) {
-      log('song', `added track "${t.label}" skipped — ${String(err)}`, 'warn')
-      continue
+      const detail = err instanceof Error ? err.message : String(err)
+      log('song', `could not load added track "${t.label}" — ${detail}`, 'error')
+      releaseStems(stems)
+      stems.length = 0
+      throw new Error(
+        `Could not load the added track "${t.label}". The song was not opened because ` +
+          `every saved lane must be available. ${detail}`
+      )
     }
     if (decodedBytes(stems) > MAX_DECODED_BYTES) tooBig(decodedBytes(stems))
   }
@@ -345,5 +631,5 @@ export async function loadProject(
       lyrics = null
     }
   }
-  return { name: doc.name ?? entry.dir, dir: entry.dir, doc, lyrics, stems }
+  return { name: doc.name ?? entry.dir, dir: entry.dir, doc, graph, lyrics, stems, metronomeRef }
 }

@@ -117,11 +117,33 @@ export async function setTrimMs(key: string, ms: number): Promise<void> {
   await Native.setPref(key, ms)
 }
 
+/**
+ * Where a missing native preference becomes `null` for every reader that
+ * goes through this module.
+ *
+ * `getTextPref` is typed `Promise<string | null>` and both natives return
+ * their platform's nothing for an absent key — but under the New Architecture
+ * an Objective-C `nil` crosses as **`undefined`**, not `null`
+ * (`convertObjCObjectToJSIValue` maps only `kCFNull` to null). Every caller
+ * comparing `raw === null` therefore hands its parser `undefined` for a key
+ * that has never been written, which is how the first metronome save on a
+ * device died with "Cannot read property 'length' of undefined" and, because
+ * the throw came before the write, died that way forever after.
+ *
+ * `gdrive.ts` and `log.ts` declare their own handle on the same native
+ * module and so bypass this; both test the value for truthiness, which is
+ * correct for either shape, but their interfaces still type it
+ * `Promise<string | null>` and the compiler cannot stop the next `=== null`
+ * written against one.
+ */
+const storedText = async (key: string): Promise<string | null> =>
+  (await Native.getTextPref(key)) ?? null
+
 /** Crash breadcrumbs: flushed to UserDefaults before each risky step. */
-export const getCrumb = (): Promise<string | null> => Native.getTextPref('singz.crumb')
+export const getCrumb = (): Promise<string | null> => storedText('singz.crumb')
 export const setCrumb = (note: string): Promise<void> => Native.setTextPref('singz.crumb', note)
 
 /** Generic persisted text (same native store as trims and crumbs). */
-export const getStoredText = (key: string): Promise<string | null> => Native.getTextPref(key)
+export const getStoredText = (key: string): Promise<string | null> => storedText(key)
 export const setStoredText = (key: string, value: string): Promise<void> =>
   Native.setTextPref(key, value)

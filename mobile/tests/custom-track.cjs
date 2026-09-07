@@ -9,6 +9,10 @@
  *   node mobile/tests/custom-track.cjs
  * Env: SIM_UDID, METRO_PORT (default 8081).
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../tests/shared/watchdog.cjs').arm('custom-track')
+
 const http = require('http');
 const { execSync, execFileSync } = require('child_process');
 const { mkdirSync, copyFileSync, writeFileSync, readFileSync, rmSync } = require('fs');

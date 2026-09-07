@@ -19,13 +19,32 @@
  *   node mobile/tests/open-close-memory.cjs            # asserts
  *   STRICT=0 node mobile/tests/open-close-memory.cjs   # report only
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../tests/shared/watchdog.cjs').arm('open-close-memory')
+
 const http = require('http');
 const { execSync } = require('child_process');
 const WebSocket = require('ws');
 
 const BUNDLE = 'io.s-dev.singz';
 const UDID = process.env.SIM_UDID || 'C624B667-6F58-4F85-B64F-63B75545DDE2';
-const DEVICE_NAME = process.env.SIM_DEVICE_NAME || 'iPhone 16 Pro';
+/* Metro lists targets by the simulator's NAME, and the name of whatever
+ * device SIM_UDID names is the one to match — a hardcoded 'iPhone 16 Pro'
+ * failed twice on a rig whose booted device was called something else,
+ * as "no debugger target", before anyone passed the name by hand
+ * (e2e-verifier, 2026-09-05). Resolve it from the UDID, as ab-repeat does;
+ * SIM_DEVICE_NAME stays as an override. */
+const DEVICE_NAME = process.env.SIM_DEVICE_NAME || (() => {
+  try {
+    const all = JSON.parse(require('child_process').execSync('xcrun simctl list devices --json').toString()).devices;
+    for (const list of Object.values(all)) {
+      const hit = list.find((d) => d.udid === UDID);
+      if (hit) return hit.name;
+    }
+  } catch {}
+  return 'iPhone 16 Pro';
+})();
 /* Another worktree's Metro on 8081 would hand us ITS app: keep them apart with
  * a second simulator, RCT_METRO_PORT=8082 + the RCT_jsLocation default, and
  * METRO_PORT here (see offline-cache.cjs). */

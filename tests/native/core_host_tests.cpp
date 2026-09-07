@@ -1,4 +1,4 @@
-// Host-compiled checks for the ORT-free half of mobile/native/core: the
+// Host-compiled checks for the ORT-free zcore component targets: the
 // resampler's quality claim and the WAV writer's byte contract. The
 // overlap-add loop and the resume tail live inside split_engine.cpp next to
 // the ORT session and are proven on-device instead (the LSB-parity gate and
@@ -17,26 +17,30 @@
 #include <cstring>
 #include <memory>
 #include <limits>
+#include <semaphore>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
 
-#include "analysis.h"
-#include "audio_input.h"
-#include "audio_input_analysis_adapter.h"
-#include "audio_input_android_policy.h"
-#include "audio_input_backend.h"
-#include "audio_input_callback_gate.h"
-#include "audio_input_convert.h"
-#include "audio_input_ios_session.h"
-#include "audio_input_timestamp.h"
-#include "flac_io.h"
-#include "beat_this.h"
-#include "beats.h"
-#include "melody.h"
-#include "resample.h"
-#include "wav.h"
+#include <zcore/legacy/analysis.h>
+#include <zcore/device/audio_input.h>
+#include <zcore/legacy/audio_input_analysis_adapter.h>
+#include <zcore/device/audio_input_android_policy.h>
+#include <zcore/device/audio_input_backend.h>
+#include <zcore/device/audio_input_callback_gate.h>
+#include <zcore/audio/audio_input_convert.h>
+#include <zcore/device/audio_input_ios_session.h>
+#include <zcore/audio/audio_input_timestamp.h>
+#include <zcore/media/flac_io.h>
+#include <zcore/legacy/beat_this.h>
+#include <zcore/legacy/beats.h>
+#include <zcore/legacy/live_input_analysis.h>
+#include <zcore/legacy/melody.h>
+#include <zcore/legacy/resample.h>
+#include <zcore/media/wav.h>
+
+#include "audio_input_callback.h"
 
 static int failures = 0;
 
@@ -190,7 +194,7 @@ static void audioInputConversionTests() {
 static void audioInputAnalysisAdapterTests() {
   constexpr double rate = 48000;
   constexpr uint64_t startNs = 2000000000ull;
-  auto timestamp = [rate](uint64_t start, uint64_t frame) {
+  auto timestamp = [](uint64_t start, uint64_t frame) {
     return static_cast<uint64_t>(static_cast<long double>(start) +
                                  static_cast<long double>(frame) * 1000000000.0L / rate);
   };
@@ -757,9 +761,368 @@ static void audioInputCallbackGateTests() {
   gate.beginClose();
   CHECK("audio callback gate: teardown rejects a late callback", !gate.enter());
   CHECK("audio callback gate: rejected callback leaves count unchanged", gate.inFlight() == 1);
+  gate.open();
+  CHECK("audio callback gate: closed epoch cannot reopen before quiescence",
+        !gate.accepting() && !gate.enter() && gate.inFlight() == 1);
   gate.leave();
   CHECK("audio callback gate: admitted callback quiesces before destruction",
         gate.inFlight() == 0 && !gate.accepting());
+  gate.open();
+  CHECK("audio callback gate: quiescent epoch can reopen", gate.enter());
+  gate.leave();
+  gate.beginClose();
+}
+
+struct CallbackOwnerProbe {
+  std::atomic<uint32_t> calls{0};
+};
+
+static void audioInputCallbackOwnerGateTests() {
+  constexpr uint32_t kSpinBudget = 1000000;
+  CallbackOwnerProbe probe;
+  singz::AudioInputCallbackOwnerGate<CallbackOwnerProbe> gate;
+  gate.open(&probe);
+  std::atomic<bool> ownerLoaded{false};
+  std::atomic<bool> release{false};
+
+  // Hold a callback after it has entered the bridge and loaded the raw owner.
+  // This is the exact window a bare atomic owner pointer left unprotected.
+  std::thread callback([&] {
+    singz::AudioInputCallbackOwnerScope<CallbackOwnerProbe> owner(gate);
+    if (!owner) return;
+    ownerLoaded.store(true, std::memory_order_release);
+    uint32_t spins = 0;
+    while (!release.load(std::memory_order_acquire) && ++spins < kSpinBudget)
+      std::this_thread::yield();
+    owner->calls.fetch_add(1, std::memory_order_relaxed);
+  });
+
+  bool loaded = false;
+  for (uint32_t i = 0; i < kSpinBudget; ++i) {
+    if (ownerLoaded.load(std::memory_order_acquire)) {
+      loaded = true;
+      break;
+    }
+    std::this_thread::yield();
+  }
+  gate.beginClose();
+  const bool refusedEarlyClear = !gate.clearOwnerIfQuiescent();
+  release.store(true, std::memory_order_release);
+  callback.join();
+  const bool cleared = gate.clearOwnerIfQuiescent();
+  singz::AudioInputCallbackOwnerScope<CallbackOwnerProbe> late(gate);
+
+  CHECK("audio callback owner gate: loaded owner remains pinned until callback exit",
+        loaded && refusedEarlyClear && probe.calls.load(std::memory_order_relaxed) == 1);
+  CHECK("audio callback owner gate: callback racing after close never reaches owner",
+        cleared && !late && gate.inFlight() == 0 && !gate.accepting());
+}
+
+static void countAudioInputNotification(void* context) noexcept {
+  auto* count = static_cast<uint32_t*>(context);
+  ++*count;
+}
+
+static void audioInputCallbackEndpointTests() {
+  singz::AudioInputRing ring(2, 4);
+  singz::AudioInputCallbackEndpoint endpoint;
+  uint32_t notifications = 0;
+  endpoint.prepare(ring.producer(), countAudioInputNotification,
+                   &notifications);
+  const float first[2] = {0.25f, -0.5f};
+  const float second[2] = {0.75f, 1.0f};
+  CHECK("audio callback endpoint: prepared callback accepts into the ring",
+        singz::AudioInputCallbackEndpoint::push(
+            &endpoint, first, 2, 100, 110,
+            singz::AudioInputTimestampQuality::Hardware));
+  CHECK("audio callback endpoint: pending notification is coalesced",
+        singz::AudioInputCallbackEndpoint::push(
+            &endpoint, second, 2, 200, 210,
+            singz::AudioInputTimestampQuality::CallbackEstimate) &&
+            notifications == 1);
+  CHECK("audio callback endpoint: consumer rearms exactly one publication",
+        endpoint.rearmNotification() && !endpoint.rearmNotification());
+  singz::AudioInputBlockView block;
+  CHECK("audio callback endpoint: first callback metadata is preserved",
+        ring.peek(block, 48000) && block.frames == 2 &&
+            block.sampleHostTimeNs == 100 && block.callbackHostTimeNs == 110 &&
+            block.timestampQuality ==
+                singz::AudioInputTimestampQuality::Hardware);
+  ring.consume();
+  CHECK("audio callback endpoint: rearmed callback signals again",
+        singz::AudioInputCallbackEndpoint::push(
+            &endpoint, first, 2, 300, 310,
+            singz::AudioInputTimestampQuality::Hardware) &&
+            notifications == 2);
+  endpoint.clear();
+  CHECK("audio callback endpoint: cleared endpoint is inert",
+        !singz::AudioInputCallbackEndpoint::push(
+            &endpoint, first, 2, 400, 410,
+            singz::AudioInputTimestampQuality::Hardware));
+}
+
+static bool boundedSpinUntil(const std::atomic<bool>& value,
+                             uint32_t maxYields = 1000000) {
+  for (uint32_t i = 0; i < maxYields; ++i) {
+    if (value.load(std::memory_order_acquire)) return true;
+    std::this_thread::yield();
+  }
+  return value.load(std::memory_order_acquire);
+}
+
+static void audioInputSpscStressTests() {
+  constexpr uint32_t kCapacity = 8;
+  constexpr uint32_t kBlocks = 8192;
+  constexpr uint32_t kSpinBudget = 4000000;
+  singz::AudioInputRing ring(kCapacity, 1);
+  const singz::AudioInputRingProducer producer = ring.producer();
+  std::atomic<bool> prefilled{false};
+  std::atomic<bool> consumeGo{false};
+  std::atomic<bool> abort{false};
+  std::atomic<bool> producerDone{false};
+  std::atomic<bool> fullObserved{false};
+  std::atomic<uint32_t> consumed{0};
+  std::atomic<uint32_t> errors{0};
+
+  std::thread producerThread([&] {
+    uint32_t item = 0;
+    for (; item < kCapacity; ++item) {
+      const float sample = static_cast<float>(item);
+      if (!producer.push(&sample, 1, 1000 + item, 2000 + item,
+                         singz::AudioInputTimestampQuality::Hardware)) {
+        errors.fetch_add(1, std::memory_order_relaxed);
+        abort.store(true, std::memory_order_release);
+        break;
+      }
+    }
+    if (!abort.load(std::memory_order_acquire)) {
+      const float fullSample = static_cast<float>(item);
+      fullObserved.store(
+          !producer.push(&fullSample, 1, 1000 + item, 2000 + item,
+                         singz::AudioInputTimestampQuality::Hardware),
+          std::memory_order_release);
+    }
+    prefilled.store(true, std::memory_order_release);
+    uint32_t waitYields = 0;
+    while (!consumeGo.load(std::memory_order_acquire) &&
+           !abort.load(std::memory_order_acquire) &&
+           ++waitYields < kSpinBudget)
+      std::this_thread::yield();
+    if (!consumeGo.load(std::memory_order_acquire))
+      abort.store(true, std::memory_order_release);
+
+    for (; item < kBlocks && !abort.load(std::memory_order_acquire); ++item) {
+      const float sample = static_cast<float>(item);
+      uint32_t attempts = 0;
+      while (!producer.push(&sample, 1, 1000 + item, 2000 + item,
+                            singz::AudioInputTimestampQuality::Hardware)) {
+        if (++attempts >= kSpinBudget) {
+          abort.store(true, std::memory_order_release);
+          break;
+        }
+        std::this_thread::yield();
+      }
+    }
+    producerDone.store(true, std::memory_order_release);
+  });
+
+  const bool reachedPrefill = boundedSpinUntil(prefilled);
+  std::thread consumerThread([&] {
+    uint32_t expected = 0;
+    uint32_t emptyYields = 0;
+    while (expected < kBlocks && !abort.load(std::memory_order_acquire)) {
+      singz::AudioInputBlockView block;
+      if (!ring.peek(block, 48000)) {
+        if (producerDone.load(std::memory_order_acquire)) {
+          // The empty peek preceded the acquire of producerDone. Recheck after
+          // that acquire so the producer's final ring release is visible.
+          if (ring.peek(block, 48000)) continue;
+          abort.store(true, std::memory_order_release);
+          break;
+        }
+        if (++emptyYields >= kSpinBudget) {
+          abort.store(true, std::memory_order_release);
+          break;
+        }
+        std::this_thread::yield();
+        continue;
+      }
+      emptyYields = 0;
+      const float wanted = static_cast<float>(expected);
+      if (block.frames != 1 || block.mono[0] != wanted ||
+          block.sampleHostTimeNs != 1000 + expected ||
+          block.callbackHostTimeNs != 2000 + expected ||
+          block.timestampQuality !=
+              singz::AudioInputTimestampQuality::Hardware)
+        errors.fetch_add(1, std::memory_order_relaxed);
+      ring.consume();
+      ++expected;
+      consumed.store(expected, std::memory_order_release);
+    }
+  });
+  consumeGo.store(true, std::memory_order_release);
+  producerThread.join();
+  consumerThread.join();
+
+  CHECK("audio input SPSC stress: producer reaches deterministic full boundary",
+        reachedPrefill && fullObserved.load(std::memory_order_acquire));
+  CHECK("audio input SPSC stress: bounded concurrent wrap preserves every block",
+        !abort.load(std::memory_order_acquire) &&
+            errors.load(std::memory_order_relaxed) == 0 &&
+            consumed.load(std::memory_order_acquire) == kBlocks &&
+            ring.overruns() >= 1);
+}
+
+struct AudioInputWakeHarness {
+  std::atomic<uint32_t> notifications{0};
+  std::counting_semaphore<65536> wake{0};
+};
+
+static void signalAudioInputWakeHarness(void* context) noexcept {
+  auto* harness = static_cast<AudioInputWakeHarness*>(context);
+  harness->notifications.fetch_add(1, std::memory_order_relaxed);
+  harness->wake.release();
+}
+
+static void audioInputWakePublicationStressTests() {
+  constexpr uint32_t kBlocks = 4096;
+  constexpr uint32_t kSpinBudget = 4000000;
+  singz::AudioInputRing ring(16, 1);
+  singz::AudioInputCallbackEndpoint endpoint;
+  AudioInputWakeHarness harness;
+  endpoint.prepare(ring.producer(), signalAudioInputWakeHarness, &harness);
+  std::atomic<bool> go{false};
+  std::atomic<bool> abort{false};
+  std::atomic<bool> producerDone{false};
+  std::atomic<uint32_t> consumed{0};
+  std::atomic<uint32_t> errors{0};
+
+  std::thread producerThread([&] {
+    uint32_t waitYields = 0;
+    while (!go.load(std::memory_order_acquire) &&
+           ++waitYields < kSpinBudget)
+      std::this_thread::yield();
+    if (!go.load(std::memory_order_acquire))
+      abort.store(true, std::memory_order_release);
+    for (uint32_t item = 0;
+         item < kBlocks && !abort.load(std::memory_order_acquire); ++item) {
+      const float sample = static_cast<float>(item);
+      uint32_t attempts = 0;
+      while (!singz::AudioInputCallbackEndpoint::push(
+          &endpoint, &sample, 1, 10000 + item, 20000 + item,
+          singz::AudioInputTimestampQuality::CallbackEstimate)) {
+        if (++attempts >= kSpinBudget) {
+          abort.store(true, std::memory_order_release);
+          break;
+        }
+        std::this_thread::yield();
+      }
+    }
+    producerDone.store(true, std::memory_order_release);
+  });
+
+  std::thread consumerThread([&] {
+    uint32_t expected = 0;
+    uint32_t waitTimeouts = 0;
+    while (expected < kBlocks && !abort.load(std::memory_order_acquire)) {
+      bool didWork = false;
+      singz::AudioInputBlockView block;
+      while (ring.peek(block, 48000)) {
+        didWork = true;
+        const float wanted = static_cast<float>(expected);
+        if (block.frames != 1 || block.mono[0] != wanted ||
+            block.sampleHostTimeNs != 10000 + expected ||
+            block.callbackHostTimeNs != 20000 + expected)
+          errors.fetch_add(1, std::memory_order_relaxed);
+        ring.consume();
+        ++expected;
+        waitTimeouts = 0;
+        consumed.store(expected, std::memory_order_release);
+      }
+      if (expected == kBlocks) break;
+      if (!didWork) {
+        [[maybe_unused]] const bool sawPublication =
+            endpoint.rearmNotification();
+        if (ring.peek(block, 48000)) continue;
+        if (!harness.wake.try_acquire_for(std::chrono::milliseconds(250))) {
+          const bool done = producerDone.load(std::memory_order_acquire);
+          // As above, the acquire may publish the final block after the last
+          // empty check. Accept that interleaving before bounded failure.
+          if (done && ring.peek(block, 48000)) continue;
+          if (done || ++waitTimeouts >= 32) {
+            abort.store(true, std::memory_order_release);
+            break;
+          }
+        }
+      }
+    }
+  });
+
+  go.store(true, std::memory_order_release);
+  producerThread.join();
+  consumerThread.join();
+  endpoint.clear();
+  const uint32_t notifications =
+      harness.notifications.load(std::memory_order_acquire);
+  CHECK("audio input wake stress: rearm and ring recheck lose no publication",
+        !abort.load(std::memory_order_acquire) &&
+            errors.load(std::memory_order_relaxed) == 0 &&
+            consumed.load(std::memory_order_acquire) == kBlocks);
+  CHECK("audio input wake stress: notification remains bounded and coalesced",
+        notifications > 0 && notifications <= kBlocks);
+}
+
+static void audioInputCallbackQuiescenceTests() {
+  constexpr uint32_t kSpinBudget = 1000000;
+  singz::AudioInputRing ring(2, 1);
+  singz::AudioInputCallbackEndpoint endpoint;
+  endpoint.prepare(ring.producer(), nullptr, nullptr);
+  singz::AudioInputCallbackGate gate;
+  gate.open();
+  std::atomic<bool> entered{false};
+  std::atomic<bool> release{false};
+  std::atomic<bool> pushed{false};
+
+  std::thread callbackThread([&] {
+    singz::AudioInputCallbackScope scope(gate);
+    if (!scope) return;
+    entered.store(true, std::memory_order_release);
+    uint32_t waitYields = 0;
+    while (!release.load(std::memory_order_acquire) &&
+           ++waitYields < kSpinBudget)
+      std::this_thread::yield();
+    const float sample = 0.5f;
+    pushed.store(singz::AudioInputCallbackEndpoint::push(
+                     &endpoint, &sample, 1, 100, 110,
+                     singz::AudioInputTimestampQuality::Hardware),
+                 std::memory_order_release);
+  });
+
+  const bool callbackEntered = boundedSpinUntil(entered);
+  gate.beginClose();
+  const bool lateRejected = !gate.enter();
+  release.store(true, std::memory_order_release);
+  bool quiesced = false;
+  for (uint32_t i = 0; i < kSpinBudget; ++i) {
+    if (gate.inFlight() == 0) {
+      quiesced = true;
+      break;
+    }
+    std::this_thread::yield();
+  }
+  callbackThread.join();
+  // Clear borrowed callback state only after join even when the bounded
+  // quiescence observation failed; `quiesced` still records that failure.
+  endpoint.clear();
+  const float lateSample = 1.0f;
+  const bool inertAfterClear = !singz::AudioInputCallbackEndpoint::push(
+      &endpoint, &lateSample, 1, 200, 210,
+      singz::AudioInputTimestampQuality::Hardware);
+  CHECK("audio callback quiescence: close rejects late entry and drains in-flight",
+        callbackEntered && lateRejected && quiesced &&
+            pushed.load(std::memory_order_acquire));
+  CHECK("audio callback quiescence: endpoint is cleared only after callback exit",
+        inertAfterClear && gate.inFlight() == 0 && !gate.accepting());
 }
 
 static void audioInputTimestampTests() {
@@ -825,9 +1188,16 @@ static void audioInputTimestampTests() {
   gate.beginClose();
   CHECK("audio timestamp query gate: teardown rejects a late timestamp query",
         !gate.enter());
+  gate.open();
+  CHECK("audio timestamp query gate: closed epoch cannot reopen before quiescence",
+        !gate.accepting() && !gate.enter() && gate.inFlight() == 1);
   gate.leave();
   CHECK("audio timestamp query gate: admitted query quiesces before stream close",
         gate.inFlight() == 0 && !gate.accepting());
+  gate.open();
+  CHECK("audio timestamp query gate: quiescent epoch can reopen", gate.enter());
+  gate.leave();
+  gate.beginClose();
 
   // macOS/iOS AudioUnit and Windows WASAPI all use the policy above. Replay
   // each backend shape through the production adapter to hold the essential
@@ -1043,6 +1413,72 @@ static void audioInputTests() {
           out.frames == 4 && out.mono[0] == 1 && out.mono[1] == 0 &&
               out.mono[2] == 0 && out.mono[3] == -1);
     corruptRing.consume();
+
+    singz::AudioInputRing fallbackRing(8, 4, 31, 32);
+    CHECK("audio input ring: hardware and fallback domain blocks publish",
+          fallbackRing.push(a, 4, 1000, 1010,
+                            singz::AudioInputTimestampQuality::Hardware) &&
+              fallbackRing.push(a, 4, 2000, 2010,
+                                singz::AudioInputTimestampQuality::CallbackEstimate) &&
+              fallbackRing.push(a, 4, 3000, 3010,
+                                singz::AudioInputTimestampQuality::CallbackEstimate) &&
+              fallbackRing.push(a, 4, 4000, 4010,
+                                singz::AudioInputTimestampQuality::CallbackEstimate) &&
+              fallbackRing.push(a, 4, 5000, 5010,
+                                singz::AudioInputTimestampQuality::Hardware));
+    CHECK("audio input ring: initial hardware domain is fresh",
+          fallbackRing.peek(out, 48000) && out.capture.sequence == 0 &&
+              out.capture.discontinuity ==
+                  singz::AudioInputDiscontinuityReason::None &&
+              (out.capture.flags & singz::AudioInputStaleAnchor) == 0);
+    fallbackRing.consume();
+    CHECK("audio input ring: fallback entry is typed and stale",
+          fallbackRing.peek(out, 48000) && out.capture.sequence == 1 &&
+              out.capture.discontinuity ==
+                  singz::AudioInputDiscontinuityReason::TimestampQualityChanged &&
+              (out.capture.flags & singz::AudioInputStaleAnchor) != 0);
+    fallbackRing.consume();
+    CHECK("audio input ring: fallback stale state persists without a second edge",
+          fallbackRing.peek(out, 48000) && out.capture.sequence == 2 &&
+              out.capture.discontinuity ==
+                  singz::AudioInputDiscontinuityReason::None &&
+              (out.capture.flags & singz::AudioInputStaleAnchor) != 0);
+    fallbackRing.consume();
+    CHECK("audio input ring: later fallback blocks remain stale and continuous",
+          fallbackRing.peek(out, 48000) && out.capture.sequence == 3 &&
+              out.capture.discontinuity ==
+                  singz::AudioInputDiscontinuityReason::None &&
+              (out.capture.flags & singz::AudioInputStaleAnchor) != 0);
+    fallbackRing.consume();
+    CHECK("audio input ring: hardware return clears stale with one typed edge",
+          fallbackRing.peek(out, 48000) && out.capture.sequence == 4 &&
+              out.capture.discontinuity ==
+                  singz::AudioInputDiscontinuityReason::TimestampQualityChanged &&
+              (out.capture.flags & singz::AudioInputStaleAnchor) == 0);
+    fallbackRing.consume();
+
+    singz::AudioInputRing overflowDomainRing(
+        4, 4, 33, 34, std::numeric_limits<uint64_t>::max() - 2);
+    CHECK("audio input ring: overflow domain blocks publish",
+          overflowDomainRing.push(a, 4, 6000, 6010,
+                                  singz::AudioInputTimestampQuality::Hardware) &&
+              overflowDomainRing.push(a, 4, 7000, 7010,
+                                      singz::AudioInputTimestampQuality::Hardware));
+    CHECK("audio input ring: valid-to-invalid source edge is typed once",
+          overflowDomainRing.peek(out, 48000) && out.capture.sequence == 0 &&
+              out.capture.sourceFrame ==
+                  std::numeric_limits<uint64_t>::max() - 2 &&
+              (out.capture.flags & singz::AudioInputSourceFrameValid) == 0 &&
+              out.capture.discontinuity ==
+                  singz::AudioInputDiscontinuityReason::SourceFrameOverflow);
+    overflowDomainRing.consume();
+    CHECK("audio input ring: saturated invalid source domain stays quiet",
+          overflowDomainRing.peek(out, 48000) && out.capture.sequence == 1 &&
+              out.capture.sourceFrame == std::numeric_limits<uint64_t>::max() &&
+              (out.capture.flags & singz::AudioInputSourceFrameValid) == 0 &&
+              out.capture.discontinuity ==
+                  singz::AudioInputDiscontinuityReason::None);
+    overflowDomainRing.consume();
   }
   {
     singz::AudioInputDevice device;
@@ -2004,6 +2440,11 @@ int main() {
   audioInputAnalysisAdapterTests();
   androidAudioInputPresetPolicyTests();
   audioInputCallbackGateTests();
+  audioInputCallbackOwnerGateTests();
+  audioInputCallbackEndpointTests();
+  audioInputSpscStressTests();
+  audioInputWakePublicationStressTests();
+  audioInputCallbackQuiescenceTests();
   audioInputTimestampTests();
   resamplerTests();
   wavTests();

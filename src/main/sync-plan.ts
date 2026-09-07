@@ -65,10 +65,14 @@ export function orphans(localNames: Set<string>, remote: RemoteEntry[]): RemoteE
 
 export interface ProjectSnapshot {
   dir: string
-  /** project.json and lyrics.json. */
+  /** project.json, lyrics.json, and the explicitly referenced graph.json. */
   top: LocalEntry[]
   /** Everything in stems/, the singer's own tracks included. */
   stems: LocalEntry[]
+  /** False when project.json could not be read here: the graph reference is
+   * then unknown, and Drive's graph.json must be left alone rather than
+   * trashed as unreferenced. */
+  docReadable?: boolean
 }
 
 export interface RemoteProject {
@@ -91,7 +95,7 @@ export interface ProjectPlan {
   upload: UploadStep[]
   unchanged: number
   /** Orphan FILES — folders are reconciled at library level. */
-  trash: RemoteEntry[]
+  trash: { entry: RemoteEntry; where: 'top' | 'stems' }[]
   /** Ids for the rows the catalog will carry; missing until an upload returns one. */
   rows: { name: string; size: string; md5Checksum: string; id?: string }[]
 }
@@ -99,7 +103,7 @@ export interface ProjectPlan {
 export function planProject(local: ProjectSnapshot, remote: RemoteProject): ProjectPlan {
   const steps: UploadStep[] = []
   let unchanged = 0
-  const trash: RemoteEntry[] = []
+  const trash: ProjectPlan['trash'] = []
 
   for (const [where, mine, theirs] of [
     ['top', local.top, remote.top],
@@ -118,9 +122,15 @@ export function planProject(local: ProjectSnapshot, remote: RemoteProject): Proj
         existingId: theirs.find((r) => r.name === name)?.id
       })
     }
-    // top-level orphans are left alone: song.mp3 and anything else a singer
-    // keeps beside the project are not ours to tidy. Only stems/ is ours.
-    if (where === 'stems') trash.push(...orphans(new Set(mine.map((f) => f.name)), theirs))
+    // Arbitrary top-level files belong to the singer. graph.json is the one
+    // managed top-level payload: removing its reference makes its old Drive
+    // copy stale, while every other unknown file must remain untouched.
+    if (where === 'stems') {
+      trash.push(...orphans(new Set(mine.map((f) => f.name)), theirs).map((entry) => ({ entry, where })))
+    }
+    else if (local.docReadable !== false && !mine.some((f) => f.name === 'graph.json')) {
+      trash.push(...theirs.filter((f) => f.name === 'graph.json').map((entry) => ({ entry, where })))
+    }
   }
 
   return {

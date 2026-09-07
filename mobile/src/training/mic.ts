@@ -1,8 +1,6 @@
-import { AudioManager, AudioRecorder, type AudioBuffer } from 'react-native-audio-api'
 import { Platform } from 'react-native'
 import {
   frequencyToFractionalMidi,
-  yinPitchInfo,
   type TrainingPitchObservation
 } from '../gen/training-lib'
 import {
@@ -18,12 +16,13 @@ import {
 } from '../android-audio-input-session'
 import {
   acquireIosAudioInputSession,
+  subscribeIosAudioInputFrames,
+  subscribeIosAudioInputState,
+  type IosAudioInputFrame,
   type IosAudioInputLease
 } from '../ios-audio-input-session'
 import { log } from '../log'
 
-const SAMPLE_RATE = 16_000
-const BUFFER_LENGTH = 1_024
 const MAX_OBSERVATIONS = 512
 /** Essentially digital silence — far below any room, let alone any voice. A
  * capture sitting here is delivering empty blocks, which is what a muted
@@ -32,10 +31,6 @@ const MAX_OBSERVATIONS = 512
  * core's to decide, in the core's units, and two constants pretending to be
  * one rule is how they drift apart. */
 export const SILENT_CAPTURE_DBFS = -90
-/** yinPitchInfo's gate, which the JS recorder path still runs unnormalized.
- * Only the Android core lifts capture to the detector's level; on the
- * recorder path a quiet phone really is too quiet, and can be told so. */
-const RECORDER_PITCH_GATE_DBFS = -40
 /** How long a capture may deliver nothing loud enough before it is written
  * down. A release APK has no inspector, so this line is the only evidence
  * that the microphone was open and heard nothing. */
@@ -63,9 +58,8 @@ export interface TrainingMicSignal {
   readonly peakDbfs: number | null
   /** The most recent block's level, dBFS; null before the first one. */
   readonly dbfs: number | null
-  /** True when the core lifted this capture to the detector's calibration.
-   * Only the Android native path does; the JS recorder path is judged at the
-   * level the device happened to give, so a quiet phone there IS too quiet. */
+  /** True when the shared native analyser can lift a voiced analysis copy to
+   * the detector's calibration. Reported levels remain the raw device level. */
   readonly normalized: boolean
 }
 
@@ -86,10 +80,6 @@ export type TrainingMicResult =
   | { readonly ok: false; readonly kind: TrainingMicErrorKind; readonly error: string }
 
 export interface TrainingMicDependencies {
-  readonly permission: () => Promise<'Undetermined' | 'Denied' | 'Granted'>
-  readonly requestPermission: () => Promise<'Undetermined' | 'Denied' | 'Granted'>
-  readonly setSession: (recording: boolean) => Promise<void>
-  readonly createRecorder: () => AudioRecorder
   readonly androidCore?: {
     acquire(): Promise<AndroidAudioInputLease>
     subscribeFrames(callback: (frame: AndroidAudioInputFrame) => void): () => void
@@ -99,25 +89,16 @@ export interface TrainingMicDependencies {
     stats?(): Promise<AndroidAudioInputStats | null>
     listInputs?(): Promise<AndroidAudioInputDevice[]>
   }
-  readonly acquireIosLease?: () => Promise<IosAudioInputLease>
+  readonly iosCore?: {
+    acquire(): Promise<IosAudioInputLease>
+    subscribeFrames(callback: (frame: IosAudioInputFrame) => void): () => void
+    subscribeState(
+      callback: (state: { generation: number; state: 'running' | 'stopped' | 'error'; error?: string }) => void
+    ): () => void
+  }
 }
 
 const nativeDependencies: TrainingMicDependencies = {
-  permission: () => AudioManager.checkRecordingPermissions(),
-  requestPermission: () => AudioManager.requestRecordingPermissions(),
-  async setSession(recording) {
-    AudioManager.setAudioSessionOptions(
-      recording
-        ? {
-            iosCategory: 'playAndRecord',
-            iosMode: 'measurement',
-            iosOptions: ['defaultToSpeaker', 'allowBluetoothHFP']
-          }
-        : { iosCategory: 'playback', iosMode: 'default' }
-    )
-    await AudioManager.setAudioSessionActivity(true)
-  },
-  createRecorder: () => new AudioRecorder(),
   androidCore:
     Platform.OS === 'android'
       ? {
@@ -132,27 +113,30 @@ const nativeDependencies: TrainingMicDependencies = {
           listInputs: listAndroidAudioInputs
         }
       : undefined,
-  acquireIosLease:
+  iosCore:
     Platform.OS === 'ios'
-      ? () => acquireIosAudioInputSession({ requestPermission: false })
+      ? {
+          acquire: () => acquireIosAudioInputSession({ requestPermission: true }),
+          subscribeFrames: subscribeIosAudioInputFrames,
+          subscribeState: subscribeIosAudioInputState
+        }
       : undefined
 }
 
-/** Generation-safe recorder owner. Late permission/start/stop completions can
- * never revive a capture belonging to a screen or prompt that has exited. */
+/** Generation-safe native capture owner. Late permission/start/stop
+ * completions can never revive a capture belonging to an exited prompt. */
 export class TrainingMicrophone {
   private generation = 0
   private transition: Promise<void> = Promise.resolve()
-  private recorder: AudioRecorder | null = null
   private androidLease: AndroidAudioInputLease | null = null
   private iosLease: IosAudioInputLease | null = null
   private unsubscribeAndroidFrames: (() => void) | null = null
   private unsubscribeAndroidState: (() => void) | null = null
+  private unsubscribeIosFrames: (() => void) | null = null
+  private unsubscribeIosState: (() => void) | null = null
   private nativeHostAnchorNs: bigint | null = null
   private nativeClockAnchorMs = 0
-  private ownsRecordingSession = false
   private observations: TrainingPitchObservation[] = []
-  private clockEpochMs: number | null = null
   private permissionPromptActive = false
   private cleanupError: string | null = null
   private latestMidi: number | null = null
@@ -186,20 +170,20 @@ export class TrainingMicrophone {
       voiced: this.voiced,
       peakDbfs: this.peakDbfs,
       dbfs: this.lastDbfs,
-      normalized: Boolean(this.deps.androidCore)
+      normalized: Boolean(this.deps.androidCore || this.deps.iosCore)
     }
   }
 
-  /** True when the level itself is the reason nothing is being detected —
-   * which only an unnormalized capture can be judged on. */
+  /** Kept as a UI contract for older injected/test sources. Production iOS
+   * and Android are always native and normalized, so they never guess that a
+   * quiet raw level is the reason pitch was not detected. */
   get tooQuiet(): boolean {
     const signal = this.signal
     return (
       !signal.normalized &&
       signal.windows > 0 &&
       signal.voiced === 0 &&
-      signal.peakDbfs !== null &&
-      signal.peakDbfs < RECORDER_PITCH_GATE_DBFS
+      signal.peakDbfs !== null
     )
   }
 
@@ -314,7 +298,7 @@ export class TrainingMicrophone {
     ++this.generation
     return this.enqueue(async () => {
       try {
-        await this.stopCapture(true)
+        await this.stopCapture()
         this.cleanupError = null
       } catch (error) {
         // The native coordinators retain their lease after a failed release,
@@ -323,7 +307,6 @@ export class TrainingMicrophone {
         // leaking an unhandled rejection.
         this.cleanupError = cleanupMessage(error)
       }
-      this.clockEpochMs = null
       this.latestMidi = null
       this.latestConfidence = 0
       this.latestTimestampMs = null
@@ -336,95 +319,19 @@ export class TrainingMicrophone {
     onError: (message: string) => void
   ): Promise<TrainingMicResult> {
     try {
-      await this.stopCapture(Boolean(this.deps.androidCore || this.deps.acquireIosLease))
+      await this.stopCapture()
       this.cleanupError = null
     } catch (error) {
       this.cleanupError = cleanupMessage(error)
       return { ok: false, kind: 'unavailable', error: this.cleanupError }
     }
-    this.clockEpochMs = null
     if (this.deps.androidCore)
       return this.startAndroidCore(generation, clockNowMs, onError)
-    let permission = await this.deps.permission().catch(() => 'Denied' as const)
-    if (generation !== this.generation) return cancelled()
-    if (permission === 'Undetermined') {
-      this.permissionPromptActive = true
-      try {
-        permission = await this.deps.requestPermission().catch(() => 'Denied' as const)
-      } finally {
-        this.permissionPromptActive = false
-      }
-    }
-    if (generation !== this.generation) return cancelled()
-    if (permission !== 'Granted') {
-      log('mic', `microphone permission is ${permission.toLowerCase()}`, 'warn')
-      return {
-        ok: false,
-        kind: 'permission-denied',
-        error: 'Microphone access is off. Allow it in Settings, then tap Start again.'
-      }
-    }
-
-    try {
-      if (this.deps.acquireIosLease) {
-        this.iosLease = await this.deps.acquireIosLease()
-      } else if (!this.ownsRecordingSession) {
-        // Options are applied before native activation awaits. Claim first so
-        // a rejected activation is still treated as a partial acquisition and
-        // catch restores playback instead of leaving playAndRecord behind.
-        this.ownsRecordingSession = true
-        await this.deps.setSession(true)
-      }
-      if (generation !== this.generation) return cancelled()
-      const recorder = this.deps.createRecorder()
-      this.recorder = recorder
-      this.observations = []
-      recorder.onError(({ message }) => {
-        if (generation !== this.generation) return
-        onError(message || 'The microphone stopped. Tap Start to try again.')
-        void this.stop()
-      })
-      const callback = recorder.onAudioReady(
-        { sampleRate: SAMPLE_RATE, bufferLength: BUFFER_LENGTH, channelCount: 1 },
-        ({ buffer, numFrames, when }) => this.consumeBuffer(buffer, numFrames, when, generation)
-      )
-      if (callback.status === 'error') throw new Error(callback.message || 'Could not read microphone audio.')
-      const started = await recorder.start()
-      if (started.status === 'error') throw new Error(started.message || 'Could not start the microphone.')
-      if (generation !== this.generation) {
-        await this.stopRecorder(true)
-        return cancelled()
-      }
-      // Permission prompts and AudioRecorder.start may take seconds (and on
-      // iOS can rebuild the shared audio engine). Anchor only after both have
-      // succeeded; callbacks delivered before this point are released but do
-      // not receive a fabricated old timestamp.
-      this.clockEpochMs = clockNowMs()
-      this.resetSignal()
-      this.captureStartedMs = Date.now()
-      log('mic', `listening · ${Platform.OS} recorder · ${SAMPLE_RATE} Hz · ${BUFFER_LENGTH}-frame blocks`)
-      this.startWatchdog()
-      return { ok: true }
-    } catch (error) {
-      const startError = error instanceof Error ? error.message : String(error)
-      log('mic', `could not start · ${startError}`, 'error')
-      try {
-        await this.stopCapture(true)
-        this.cleanupError = null
-      } catch (cleanupError) {
-        this.cleanupError = cleanupMessage(cleanupError)
-        return {
-          ok: false,
-          kind: 'unavailable',
-          error: `${startError}; ${this.cleanupError}`
-        }
-      }
-      return {
-        ok: false,
-        kind: 'unavailable',
-        error: startError
-      }
-    }
+    if (this.deps.iosCore)
+      return this.startIosCore(generation, clockNowMs, onError)
+    const error = 'Native audio input is unavailable on this device.'
+    log('mic', `could not start · ${error}`, 'error')
+    return { ok: false, kind: 'unavailable', error }
   }
 
   private async startAndroidCore(
@@ -458,7 +365,7 @@ export class TrainingMicrophone {
       this.nativeClockAnchorMs = clockNowMs()
       this.unsubscribeAndroidFrames = core.subscribeFrames((frame) => {
         if (generation !== this.generation || frame.generation !== lease.generation) return
-        this.consumeAndroidFrame(frame, clockNowMs)
+        this.consumeNativeFrame(frame, clockNowMs)
       })
       this.unsubscribeAndroidState = core.subscribeState((state) => {
         if (generation !== this.generation || state.generation !== lease.generation) return
@@ -499,6 +406,120 @@ export class TrainingMicrophone {
     }
   }
 
+  private async startIosCore(
+    generation: number,
+    clockNowMs: () => number,
+    onError: (message: string) => void
+  ): Promise<TrainingMicResult> {
+    const core = this.deps.iosCore
+    if (!core) return cancelled()
+    this.permissionPromptActive = true
+    let leaseGeneration: number | null = null
+    let pendingFrame: IosAudioInputFrame | null = null
+    let pendingError: {
+      generation: number
+      state: 'running' | 'stopped' | 'error'
+      error?: string
+    } | null = null
+    const consumeFrame = (frame: IosAudioInputFrame): void => {
+      if (generation !== this.generation) return
+      if (leaseGeneration === null) {
+        // Native capture starts inside acquire(). Retain only the newest
+        // pre-return frame so listener installation cannot miss startup but
+        // a slow permission prompt also cannot grow an unbounded queue.
+        pendingFrame = frame
+        return
+      }
+      if (frame.generation !== leaseGeneration) return
+      this.consumeNativeFrame(frame, clockNowMs)
+    }
+    const consumeState = (state: {
+      generation: number
+      state: 'running' | 'stopped' | 'error'
+      error?: string
+    }): void => {
+      if (generation !== this.generation || state.state !== 'error') return
+      if (leaseGeneration === null) {
+        // An input error may be emitted between native startCapture() and
+        // acquire() resolving. Preserve it until the returned lease tells us
+        // which generation belongs to this start.
+        pendingError = state
+        return
+      }
+      if (state.generation !== leaseGeneration) return
+      log('mic', `stopped by the system · ${state.error ?? 'no reason given'}`, 'error')
+      onError(state.error || 'The microphone stopped. Tap Start to try again.')
+      void this.stop()
+    }
+    try {
+      // RCTEventEmitter suppresses native events while it has no listeners.
+      // Subscribe before acquire(), because acquire itself starts capture.
+      this.unsubscribeIosFrames = core.subscribeFrames(consumeFrame)
+      this.unsubscribeIosState = core.subscribeState(consumeState)
+      const lease = await core.acquire()
+      // The coordinator has already started zcore capture and the zdsp
+      // analysis adapter. Retain the lease before any cancellation check so
+      // a failed native stop remains latched and retryable.
+      this.iosLease = lease
+      leaseGeneration = lease.generation
+      if (!Number.isSafeInteger(leaseGeneration) || !leaseGeneration)
+        throw new Error('iOS native audio input returned an invalid generation')
+      if (generation !== this.generation) {
+        try {
+          await this.stopIosCore()
+          this.cleanupError = null
+        } catch (error) {
+          this.cleanupError = cleanupMessage(error)
+        }
+        return cancelled()
+      }
+      this.observations = []
+      this.nativeHostAnchorNs = null
+      this.nativeClockAnchorMs = clockNowMs()
+      this.resetSignal()
+      this.captureStartedMs = Date.now()
+      if (pendingError) consumeState(pendingError)
+      pendingError = null
+      // consumeState invalidates this start synchronously before queuing its
+      // teardown, so a startup error cannot briefly publish an active mic.
+      if (generation !== this.generation) return cancelled()
+      if (pendingFrame) consumeFrame(pendingFrame)
+      pendingFrame = null
+      log('mic', 'listening · iOS native core · zcore capture → zdsp analysis')
+      this.startWatchdog()
+      return { ok: true }
+    } catch (error) {
+      const startError = error instanceof Error ? error.message : String(error)
+      try {
+        await this.stopIosCore()
+        this.cleanupError = null
+      } catch (cleanupError) {
+        this.cleanupError = cleanupMessage(cleanupError)
+        if (generation !== this.generation) return cancelled()
+        log('mic', `could not start · ${startError}; ${this.cleanupError}`, 'error')
+        return {
+          ok: false,
+          kind: /permission/i.test(startError) ? 'permission-denied' : 'unavailable',
+          error: `${startError}; ${this.cleanupError}`
+        }
+      }
+      // Stop/background invalidates the run immediately, even while native
+      // permission or acquisition is unresolved. Its eventual rejection is
+      // teardown evidence, not a new user-visible error for the exited run.
+      if (generation !== this.generation) return cancelled()
+      log('mic', `could not start · ${startError}`, 'error')
+      return {
+        ok: false,
+        kind: /permission/i.test(startError) ? 'permission-denied' : 'unavailable',
+        error: /permission/i.test(startError)
+          ? 'Microphone access is off. Allow it in Settings, then tap Start again.'
+          : startError
+      }
+    } finally {
+      this.permissionPromptActive = false
+    }
+  }
+
   private async reportInputs(core: NonNullable<TrainingMicDependencies['androidCore']>): Promise<void> {
     const devices = await core.listInputs?.().catch(() => null)
     if (!devices) return
@@ -515,8 +536,8 @@ export class TrainingMicrophone {
     log('mic', `inputs · ${inventory}`)
   }
 
-  private consumeAndroidFrame(
-    frame: AndroidAudioInputFrame,
+  private consumeNativeFrame(
+    frame: AndroidAudioInputFrame | IosAudioInputFrame,
     clockNowMs: () => number
   ): void {
     let midpoint: bigint
@@ -552,55 +573,6 @@ export class TrainingMicrophone {
       this.observations.splice(0, this.observations.length - MAX_OBSERVATIONS)
   }
 
-  private consumeBuffer(buffer: AudioBuffer, numFrames: number, when: number, generation: number): void {
-    try {
-      const clockEpochMs = this.clockEpochMs
-      if (generation !== this.generation || clockEpochMs === null) return
-      const frame = yinPitchInfo(buffer.getChannelData(0), SAMPLE_RATE)
-      const frequencyHz = frame.f0 > 0 ? frame.f0 : 0
-      const midi = frequencyToFractionalMidi(frequencyHz)
-      this.recordLevel(frame.rms, frequencyHz > 0)
-      const observation: TrainingPitchObservation = {
-        timestampMs: clockEpochMs + when * 1000 + (numFrames / SAMPLE_RATE) * 500,
-        frequencyHz,
-        midi,
-        confidence: frame.clarity
-      }
-      this.latestMidi = midi
-      this.latestConfidence = frame.clarity
-      this.latestTimestampMs = observation.timestampMs
-      this.observations.push(observation)
-      if (this.observations.length > MAX_OBSERVATIONS)
-        this.observations.splice(0, this.observations.length - MAX_OBSERVATIONS)
-    } finally {
-      // AudioBuffer is a host object owning native PCM. Hermes GC is far too
-      // late for a continuous callback, so every block is returned immediately.
-      const host = (buffer as unknown as { buffer?: { release?: () => void } }).buffer
-      host?.release?.()
-    }
-  }
-
-  private async stopRecorder(restorePlayback: boolean): Promise<void> {
-    const recorder = this.recorder
-    this.recorder = null
-    if (recorder) {
-      recorder.clearOnAudioReady()
-      recorder.clearOnError()
-      recorder.disconnect()
-      if (recorder.isRecording()) await recorder.stop().catch(() => undefined)
-    }
-    if (restorePlayback && this.iosLease) {
-      const lease = this.iosLease
-      await lease.release()
-      this.iosLease = null
-    } else if (restorePlayback && this.ownsRecordingSession) {
-      // Relinquish ownership before the await. A queued second stop is then
-      // idempotent even when native session restoration itself is slow.
-      this.ownsRecordingSession = false
-      await this.deps.setSession(false).catch(() => undefined)
-    }
-  }
-
   private async stopAndroidCore(): Promise<void> {
     this.unsubscribeAndroidFrames?.()
     this.unsubscribeAndroidFrames = null
@@ -614,10 +586,23 @@ export class TrainingMicrophone {
     this.nativeHostAnchorNs = null
   }
 
-  private async stopCapture(restorePlayback: boolean): Promise<void> {
+  private async stopIosCore(): Promise<void> {
+    this.unsubscribeIosFrames?.()
+    this.unsubscribeIosFrames = null
+    this.unsubscribeIosState?.()
+    this.unsubscribeIosState = null
+    const lease = this.iosLease
+    if (lease) {
+      await lease.release()
+      if (this.iosLease === lease) this.iosLease = null
+    }
+    this.nativeHostAnchorNs = null
+  }
+
+  private async stopCapture(): Promise<void> {
     await this.reportCaptureEnd()
     await this.stopAndroidCore()
-    await this.stopRecorder(restorePlayback)
+    await this.stopIosCore()
   }
 
   /** The one place a finished capture is written down. Teardown funnels
@@ -649,8 +634,9 @@ export class TrainingMicrophone {
     log('mic', `stopped · ${describeTrainingMicSignal(this.signal)}${transport}${lift}${timestamps}`)
   }
 
-  /** One lane owns recorder and audio-session transitions. In particular, a
-   * slow old stop must restore playback before—not underneath—a new capture. */
+  /** One lane owns native capture and audio-session transitions. In
+   * particular, a slow old stop must restore playback before—not underneath—
+   * a new capture. */
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
     const next = this.transition.then(operation, operation)
     this.transition = next.then(() => undefined, () => undefined)

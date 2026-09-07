@@ -1,0 +1,65 @@
+{
+  "format": 1,
+  "profile": "singz-playback-codecs-v1",
+  "source": {
+    "name": "FFmpeg",
+    "version": "8.0.1",
+    "url": "https://ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz",
+    "sha256": "05ee0b03119b45c0bdb4df654b96802e909e0a752f72e4fe3794f487229e5a41",
+    "license": "LGPL-2.1-or-later"
+  },
+  "abiMajors": {
+    "avcodec": 62,
+    "avformat": 62,
+    "avutil": 60,
+    "swresample": 6
+  },
+  "capabilityMask": "0x000001ff",
+  "containers": ["wav", "flac", "mp3", "aac", "mov", "ogg", "aiff"],
+  "audioCodecs": [
+    "pcm",
+    "flac",
+    "mp3",
+    "aac",
+    "alac",
+    "vorbis",
+    "opus"
+  ],
+  "requiredDemuxers": ["aac", "aiff", "mov", "mp3", "ogg"],
+  "requiredDecoders": [
+    "aac",
+    "alac",
+    "flac",
+    "mp3",
+    "opus",
+    "vorbis",
+    "pcm_s8",
+    "pcm_u8",
+    "pcm_s16be",
+    "pcm_s16le",
+    "pcm_s24be",
+    "pcm_s24le",
+    "pcm_s32be",
+    "pcm_s32le",
+    "pcm_f32be",
+    "pcm_f32le",
+    "pcm_f64be",
+    "pcm_f64le",
+    "pcm_alaw",
+    "pcm_mulaw"
+  ],
+  "requiredParsers": ["aac", "mpegaudio", "opus", "vorbis"],
+  "forbiddenConfigureFlags": ["--enable-gpl", "--enable-nonfree"],
+  "targets": [
+    "darwin-arm64",
+    "darwin-x64",
+    "win32-x64",
+    "android-arm64-v8a",
+    "android-armeabi-v7a",
+    "android-x86",
+    "android-x86_64",
+    "ios-arm64",
+    "ios-simulator-arm64",
+    "ios-simulator-x64"
+  ]
+}

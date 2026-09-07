@@ -38,7 +38,7 @@
  *    write earns its keep on the fallback and costs nothing on the core.)
  *
  * Memory: NOTHING crosses a JS runtime here any more. The grid, the key and
- * the melody all read their own stem files in the core (native/core —
+ * the melody all read their own stem files in top-level zcore —
  * detectBeats, estimateKeyFromStems and the pyin tracker, each bit-identical
  * to the desktop's), on a native thread. Where the core cannot read a stem —
  * a copied desktop project's FLAC, or an older native beside newer JS —
@@ -58,6 +58,7 @@ import {
 import type { MlGrid, StoredBeatInfo } from '../gen/analysis-lib'
 import type { BeatInfo, KeyInfo, LyricLine, MelodyInfo, ProjectDoc } from '../model'
 import { log } from '../log'
+import { mutateProjectDocument } from '../project-document'
 import type { MonoStem } from './host'
 
 /** Which detector a progress line is about. The line itself is written for
@@ -619,23 +620,27 @@ export async function analyzeProject(
         // may have moved the doc while the encoder ran. stemHashes entries
         // move wav->flac per converted stem; version flips only on a full
         // set, and savedAt moves because the project's files changed.
-        const onDisk = JSON.parse(await deps.readText(project, 'project.json')) as ProjectDoc
-        const nextHashes: Record<string, { md5: string; size: number; mtimeMs: number }> = {
-          ...(onDisk.stemHashes ?? {})
-        }
-        for (const id of ids) {
-          if (hashes[`${id}.flac`]) {
-            delete nextHashes[`${id}.wav`]
-            nextHashes[`${id}.flac`] = hashes[`${id}.flac`]
-          }
-        }
-        const next: ProjectDoc = {
-          ...onDisk,
-          version: allFlac ? Math.max(2, onDisk.version ?? 1) : onDisk.version,
-          stemHashes: nextHashes,
-          savedAt: deps.now()
-        }
-        await deps.writeText(project, 'project.json', JSON.stringify(next, null, 2))
+        await mutateProjectDocument(
+          project,
+          (onDisk) => {
+            const nextHashes: Record<string, { md5: string; size: number; mtimeMs: number }> = {
+              ...(onDisk.stemHashes ?? {})
+            }
+            for (const id of ids) {
+              if (hashes[`${id}.flac`]) {
+                delete nextHashes[`${id}.wav`]
+                nextHashes[`${id}.flac`] = hashes[`${id}.flac`]
+              }
+            }
+            return {
+              ...onDisk,
+              version: allFlac ? Math.max(2, onDisk.version ?? 1) : onDisk.version,
+              stemHashes: nextHashes,
+              savedAt: deps.now()
+            }
+          },
+          { readText: deps.readText, writeText: deps.writeText }
+        )
         log(
           'analysis',
           `${project}: compacted ${compacted} stem(s) to flac${allFlac ? ' — project is v2' : ' — some kept wav, still v1'}`
@@ -671,11 +676,21 @@ async function commit(
   used: string[],
   stampAtStart: string
 ): Promise<boolean> {
-  const onDisk = JSON.parse(await deps.readText(project, 'project.json')) as ProjectDoc
-  if (hashesOf(onDisk, used) !== stampAtStart) {
+  let stale = false
+  const written = await mutateProjectDocument(
+    project,
+    (onDisk) => {
+      if (hashesOf(onDisk, used) !== stampAtStart) {
+        stale = true
+        return null
+      }
+      return mergeAnalysis(onDisk, fresh, deps.now())
+    },
+    { readText: deps.readText, writeText: deps.writeText }
+  )
+  if (stale || written === null) {
     log('analysis', `${project}: stems changed while detecting — result dropped, not written`, 'warn')
     return false
   }
-  await deps.writeText(project, 'project.json', JSON.stringify(mergeAnalysis(onDisk, fresh, deps.now()), null, 2))
   return true
 }

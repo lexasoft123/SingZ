@@ -1,12 +1,18 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
 import { readdirSync } from 'node:fs'
-import { readFile, stat, writeFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import { extname, join, sep } from 'node:path'
 import { shell } from 'electron'
 import gdriveConfig from './gdrive-config'
 import { log } from './log'
-import { projectsRoot, refreshFileHash, refreshStemHashes, type StemHash } from './projects'
+import {
+  projectsRoot,
+  refreshFileHash,
+  refreshStemHashes,
+  withProjectDocumentTransaction,
+  type StemHash
+} from './projects'
 import {
   chunkParents,
   parentsQuery,
@@ -16,6 +22,12 @@ import {
 } from './sync-plan'
 import { readSettings, writeSettings } from './settings'
 import { syncLog } from './sync-log'
+import type { ProjectGraphHash } from '../shared/types'
+import {
+  GRAPH_DOCUMENT_FORMAT,
+  MAX_GRAPH_DOCUMENT_TEXT_BYTES,
+  parseGraphDocument
+} from '../shared/graph-document'
 
 /** Drive stores what we tell it; a wrong type makes phones refuse the stream. */
 function audioMime(name: string): string {
@@ -335,9 +347,8 @@ interface CatalogFile {
 /**
  * One catalog row (format 2): a project is its project.json — the doc itself
  * carries the stem list, hashes and sizes — so the catalog holds only the
- * two files a phone must be able to judge without fetching: project.json
- * (the project's fingerprint) and lyrics.json (the aligner rewrites it
- * without touching the doc). Ids ride along so a changed doc is one GET.
+ * small files a phone must judge without fetching: project.json, lyrics.json,
+ * and graph.json when project.json explicitly binds it.
  */
 interface CatalogProject {
   dir: string
@@ -351,6 +362,52 @@ interface SyncDoc {
   settings?: { custom?: unknown }
   stemHashes?: Record<string, StemHash>
   lyricsHash?: StemHash
+  graphHash?: ProjectGraphHash
+}
+
+function validGraphHash(value: unknown): value is ProjectGraphHash {
+  if (!value || typeof value !== 'object') return false
+  const h = value as Record<string, unknown>
+  return (
+    Number.isSafeInteger(h.format) &&
+    (h.format as number) > 0 &&
+    typeof h.md5 === 'string' &&
+    /^[a-f0-9]{32}$/.test(h.md5) &&
+    Number.isSafeInteger(h.size) &&
+    (h.size as number) >= 0 &&
+    Number.isFinite(h.mtimeMs) &&
+    (h.mtimeMs as number) >= 0
+  )
+}
+
+/** Verify the exact opaque payload named by project.json. Never backfill from
+ * a stray graph.json: adoption is an explicit graph edit. Future formats are
+ * transported byte-for-byte, but this older build does not parse or rewrite
+ * them. */
+async function graphEntry(projectDir: string, ref: unknown): Promise<LocalEntry | null> {
+  if (ref === undefined) return null
+  if (!validGraphHash(ref)) throw new Error(`${projectDir}: project.json has an invalid graphHash`)
+  if (ref.size > MAX_GRAPH_DOCUMENT_TEXT_BYTES) {
+    throw new Error(`${projectDir}: graph.json exceeds the portable graph size limit`)
+  }
+  const path = join(projectDir, 'graph.json')
+  let bytes: Buffer
+  try {
+    bytes = await readFile(path)
+  } catch {
+    throw new Error(`${projectDir}: project.json names graph.json, but the file is missing`)
+  }
+  const md5 = createHash('md5').update(bytes).digest('hex')
+  if (bytes.length !== ref.size || md5 !== ref.md5) {
+    throw new Error(`${projectDir}: graph.json does not match graphHash`)
+  }
+  if (ref.format <= GRAPH_DOCUMENT_FORMAT) {
+    const parsed = parseGraphDocument(bytes.toString('utf8'))
+    if (parsed.kind !== 'known' || parsed.format !== ref.format) {
+      throw new Error(`${projectDir}: graph.json is not a valid format-${ref.format} graph`)
+    }
+  }
+  return { name: 'graph.json', path, mime: 'application/json', md5, size: bytes.length }
 }
 
 export interface SyncReport {
@@ -452,52 +509,19 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
       // or changed stems are computed here and folded back into project.json
       // BEFORE that file is hashed below — this same sync uploads the updated
       // doc, and the next one opens no stem bytes at all.
+      const projectDir = join(root, dir)
       let doc: SyncDoc | null = null
       try {
-        doc = JSON.parse(await readFile(join(root, dir, 'project.json'), 'utf8')) as SyncDoc
+        doc = JSON.parse(await readFile(join(projectDir, 'project.json'), 'utf8')) as SyncDoc
       } catch {
         doc = null // unreadable — sync the raw bytes, keep it out of the manifest
       }
-      // A project folder with no stems/ at all (hand-copied, half-synced from
-      // a cloud folder, or pre-stems) must cost that project, not the run.
+
       let hashes: Record<string, StemHash> = {}
       let stemsReadable = true
-      try {
-        hashes = await refreshStemHashes(join(root, dir), doc?.stemHashes)
-      } catch {
-        hashes = doc?.stemHashes ?? {}
-        stemsReadable = false
-      }
-      // An empty local stems/ is not evidence that the song has no stems — a
-      // cloud folder mid-download, an unplugged volume and a genuinely empty
-      // project look identical from here, and the difference is whether the
-      // next few lines trash the only copy on Drive. Only a stems/ we could
-      // read AND that still holds files may drive the orphan logic.
-      const mayTrash = stemsReadable && Object.keys(hashes).length > 0
-      // lyrics.json rides in the doc as well: the aligner rewrites it without
-      // going through a save, and the phones must learn about that from the
-      // one checksum the catalog carries for this project.
-      let lyricsHash: StemHash | undefined
-      try {
-        lyricsHash = await refreshFileHash(join(root, dir, 'lyrics.json'), doc?.lyricsHash)
-      } catch {
-        // evicted-and-offline iCloud, or bad permissions: keep what the doc says
-        lyricsHash = doc?.lyricsHash
-      }
-      if (
-        doc &&
-        (JSON.stringify(doc.stemHashes ?? null) !== JSON.stringify(hashes) ||
-          JSON.stringify(doc.lyricsHash ?? null) !== JSON.stringify(lyricsHash ?? null))
-      ) {
-        doc.stemHashes = hashes
-        if (lyricsHash) doc.lyricsHash = lyricsHash
-        else delete doc.lyricsHash
-        await writeFile(join(root, dir, 'project.json'), JSON.stringify(doc, null, 2), 'utf8')
-      }
-
       const top: LocalEntry[] = []
-      for (const name of ['project.json', 'lyrics.json']) {
-        const path = join(root, dir, name)
+      const captureTop = async (name: string): Promise<void> => {
+        const path = join(projectDir, name)
         try {
           const bytes = await readFile(path)
           top.push({
@@ -511,6 +535,68 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
           /* optional file */
         }
       }
+
+      if (doc) {
+        // Re-read and maintain the document under the SAME queue as saves and
+        // explicit graph edits. This prevents a hash backfill based on a stale
+        // project.json from erasing a graph reference committed while sync was
+        // waiting for the project queue.
+        let prepared: SyncDoc
+        try {
+          prepared = await withProjectDocumentTransaction(projectDir, async (current, replace) => {
+            const syncDoc = current as SyncDoc
+            // Fail closed before changing even the maintenance fields: ordinary
+            // sync transports future graph bytes exactly, but never adopts a
+            // missing or mismatched referenced graph.
+            const graph = await graphEntry(projectDir, syncDoc.graphHash)
+            try {
+              hashes = await refreshStemHashes(projectDir, syncDoc.stemHashes)
+            } catch {
+              hashes = syncDoc.stemHashes ?? {}
+              stemsReadable = false
+            }
+            let lyricsHash: StemHash | undefined
+            try {
+              lyricsHash = await refreshFileHash(join(projectDir, 'lyrics.json'), syncDoc.lyricsHash)
+            } catch {
+              lyricsHash = syncDoc.lyricsHash
+            }
+            if (
+              JSON.stringify(syncDoc.stemHashes ?? null) !== JSON.stringify(hashes) ||
+              JSON.stringify(syncDoc.lyricsHash ?? null) !== JSON.stringify(lyricsHash ?? null)
+            ) {
+              syncDoc.stemHashes = hashes
+              if (lyricsHash) syncDoc.lyricsHash = lyricsHash
+              else delete syncDoc.lyricsHash
+              await replace(current)
+            }
+            await captureTop('project.json')
+            await captureTop('lyrics.json')
+            if (graph) top.push(graph)
+            return syncDoc
+          })
+        } catch (error) {
+          // A broken graph reference costs THIS project, never the run: the
+          // rest of the library keeps reaching the phones, and this song stays
+          // exactly as Drive last saw it — absent from the catalog, so a phone
+          // walks its folder — until the reference is repaired.
+          syncLog('error', `${dir}: ${error instanceof Error ? error.message : String(error)} — skipped this run`)
+          continue
+        }
+        doc = prepared
+      } else {
+        try {
+          hashes = await refreshStemHashes(projectDir, undefined)
+        } catch {
+          stemsReadable = false
+        }
+        await captureTop('project.json')
+        await captureTop('lyrics.json')
+      }
+
+      // An empty/unreadable stems folder is not proof Drive should lose its
+      // only copy. Only a readable non-empty folder may drive stem orphaning.
+      const mayTrash = stemsReadable && Object.keys(hashes).length > 0
       const stems: LocalEntry[] = Object.keys(hashes)
         .sort()
         .map((name) => ({
@@ -527,7 +613,7 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
         ? (stemsChildren.get(stemsId) ?? []).filter((f) => f.mimeType !== FOLDER)
         : []
       const plan = planProject(
-        { dir, top, stems },
+        { dir, top, stems, docReadable: doc !== null },
         {
           folderId,
           stemsId,
@@ -535,12 +621,14 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
           stems: remoteStems
         }
       )
-      if (!mayTrash && plan.trash.length > 0) {
+      const managedTopTrash = plan.trash.filter((f) => f.where === 'top')
+      const stemTrash = plan.trash.filter((f) => f.where === 'stems')
+      if (!mayTrash && stemTrash.length > 0) {
         syncLog(
           'error',
-          `${dir}: stems/ is empty or unreadable here — leaving ${plan.trash.length} file(s) on Drive alone`
+          `${dir}: stems/ is empty or unreadable here — leaving ${stemTrash.length} file(s) on Drive alone`
         )
-        plan.trash = []
+        plan.trash = managedTopTrash
       }
       unchanged += plan.unchanged
       if (plan.upload.length === 0 && plan.trash.length === 0) {
@@ -555,12 +643,14 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
 
       const freshIds = new Map<string, string>()
       try {
-        // Stems first, then project.json/lyrics.json. The doc is the fingerprint
+        // Stems first, then graph/lyrics, and project.json last. The doc is the fingerprint
         // for everything else, so a run interrupted between the two must leave
         // Drive BEHIND the doc, never ahead of it: a phone that meets a doc
         // naming md5s Drive cannot serve deletes the stem it just fetched and
         // the song stops opening at all.
-        const ordered = [...plan.upload].sort((a, b) => (a.where === b.where ? 0 : a.where === 'stems' ? -1 : 1))
+        const rank = (step: (typeof plan.upload)[number]): number =>
+          step.where === 'stems' ? 0 : step.name === 'project.json' ? 2 : 1
+        const ordered = [...plan.upload].sort((a, b) => rank(a) - rank(b))
         for (const step of ordered) {
           onProgress?.(`Uploading ${dir}/${step.name}…`, (i + 0.5) / projectDirs.length)
           const parent = step.where === 'top' ? projId : (stemsParent as string)
@@ -573,14 +663,15 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
         // hard-deleted: drive.file scope means these are all files this app
         // created, and Drive's trash keeps them recoverable for 30 days.
         for (const gone of plan.trash) {
-          onProgress?.(`Removing ${dir}/${gone.name} from Drive…`, (i + 0.75) / projectDirs.length)
-          await api(`/drive/v3/files/${gone.id}`, {
+          onProgress?.(`Removing ${dir}/${gone.entry.name} from Drive…`, (i + 0.75) / projectDirs.length)
+          await api(`/drive/v3/files/${gone.entry.id}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ trashed: true })
           })
           trashed++
-          syncLog('trash', `${dir}/stems/${gone.name} is no longer in the library — moved to Drive trash`)
+          const relative = gone.where === 'top' ? gone.entry.name : `stems/${gone.entry.name}`
+          syncLog('trash', `${dir}/${relative} is no longer in the library — moved to Drive trash`)
         }
       } catch (err) {
         // The library is a live folder: a project renamed or deleted here

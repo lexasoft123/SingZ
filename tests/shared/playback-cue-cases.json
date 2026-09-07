@@ -1,0 +1,327 @@
+{
+  "version": 2,
+  "frameRoundingGolden": [
+    { "seconds": 1.0416666666666666e-05, "sampleRate": 48000, "frame": 1 }
+  ],
+  "pcmGolden": [
+    {
+      "sampleRate": 48000,
+      "frames": 2640,
+      "absoluteTolerance": 2e-7,
+      "samples": [[0, 0, 0], [1, 0.0011738806497305632, 0.002543238690122962], [10, 0.08292639255523682, 0.10886885970830917], [72, -0.23218637704849243, 0.636642336845398], [100, 0.4718739092350006, 0.7524168491363525], [500, -0.15159302949905396, 0.32717597484588623], [2639, -0.0014119015540927649, 0.008885533548891544]]
+    },
+    {
+      "sampleRate": 44100,
+      "frames": 2426,
+      "absoluteTolerance": 2e-7,
+      "samples": [[0, 0, 0], [1, 0.0013896689051762223, 0.003008574713021517], [10, 0.09167932718992233, 0.10520543903112411], [66, -0.22060993313789368, 0.6509010195732117], [100, 0.3674156963825226, -0.2548167407512665], [500, -0.18071536719799042, -0.34455838799476624], [2425, -0.001793888513930142, 0.009067507460713387]]
+    },
+    {
+      "sampleRate": 8000,
+      "frames": 440,
+      "absoluteTolerance": 2e-7,
+      "samples": [[0, 0, 0], [1, 0.03745128959417343, 0.06999140232801437], [10, 0.4348514974117279, -0.16806620359420776], [12, -0.23218637704849243, 0.636642336845398], [100, 0.10689907521009445, -0.1866685301065445], [439, 0.002846351359039545, 0.0025370919611305]]
+    }
+  ],
+  "referenceGainGolden": [[0.37, 1052602532], [0.5, 1056964608], [0.7, 1060320051], [0.91, 1063843267], [1, 1065353216]],
+  "cases": [
+    {
+      "name": "uniform 4/4 click and count-in",
+      "sampleRate": 48000,
+      "entrySeconds": 2,
+      "durationSeconds": 4,
+      "playbackRate": 1,
+      "click": true,
+      "countInBars": 1,
+      "volume": 0.7,
+      "accent": true,
+      "beat": {
+        "beats": [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4],
+        "beatsPerBar": 4,
+        "downbeat": 0,
+        "downbeats": []
+      },
+      "expected": {
+        "sourceStartFrame": 96000,
+        "songDurationFrames": 96000,
+        "preRollFrames": 96000,
+        "landingProjectFrame": 0,
+        "countInEventCount": 4,
+        "countInBeatsPerBar": 4,
+        "clickFrames": 2640,
+        "events": [[-96000, "accent"], [-72000, "ordinary"], [-48000, "ordinary"], [-24000, "ordinary"], [0, "accent"], [24000, "ordinary"], [48000, "ordinary"], [72000, "ordinary"], [96000, "accent"]]
+      }
+    },
+    {
+      "name": "three-beat local bar",
+      "sampleRate": 48000,
+      "entrySeconds": 2.5,
+      "durationSeconds": 3.5,
+      "playbackRate": 1,
+      "click": true,
+      "countInBars": 1,
+      "volume": 0.7,
+      "accent": true,
+      "beat": {
+        "beats": [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4],
+        "beatsPerBar": 4,
+        "downbeat": 0,
+        "downbeats": [0, 4, 7]
+      },
+      "expected": {
+        "sourceStartFrame": 120000,
+        "songDurationFrames": 48000,
+        "preRollFrames": 72000,
+        "landingProjectFrame": 0,
+        "countInEventCount": 3,
+        "countInBeatsPerBar": 3,
+        "clickFrames": 2640,
+        "events": [[-72000, "ordinary"], [-48000, "ordinary"], [-24000, "accent"], [0, "ordinary"], [24000, "ordinary"], [48000, "accent"]]
+      }
+    },
+    {
+      "name": "explicit downbeat meter change",
+      "sampleRate": 48000,
+      "entrySeconds": 3,
+      "durationSeconds": 4.5,
+      "playbackRate": 1,
+      "click": true,
+      "countInBars": 1,
+      "volume": 0.7,
+      "accent": true,
+      "beat": {
+        "beats": [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5],
+        "beatsPerBar": 4,
+        "downbeat": 1,
+        "downbeats": [1, 5, 8]
+      },
+      "expected": {
+        "sourceStartFrame": 144000,
+        "songDurationFrames": 72000,
+        "preRollFrames": 72000,
+        "landingProjectFrame": 0,
+        "countInEventCount": 3,
+        "countInBeatsPerBar": 3,
+        "clickFrames": 2640,
+        "events": [[-72000, "ordinary"], [-48000, "ordinary"], [-24000, "accent"], [0, "ordinary"], [24000, "ordinary"], [48000, "accent"], [72000, "ordinary"]]
+      }
+    },
+    {
+      "name": "virtual pre-song beats",
+      "sampleRate": 48000,
+      "entrySeconds": 0.25,
+      "durationSeconds": 2.5,
+      "playbackRate": 1,
+      "click": true,
+      "countInBars": 1,
+      "volume": 0.7,
+      "accent": true,
+      "beat": {
+        "beats": [2, 2.5, 3, 3.5, 4],
+        "beatsPerBar": 4,
+        "downbeat": 0,
+        "downbeats": []
+      },
+      "expected": {
+        "sourceStartFrame": 12000,
+        "songDurationFrames": 108000,
+        "preRollFrames": 84000,
+        "landingProjectFrame": 0,
+        "countInEventCount": 4,
+        "countInBeatsPerBar": 4,
+        "clickFrames": 2640,
+        "events": [[-84000, "ordinary"], [-60000, "ordinary"], [-36000, "ordinary"], [-12000, "accent"], [12000, "ordinary"], [36000, "ordinary"], [60000, "ordinary"], [84000, "accent"], [108000, "ordinary"]]
+      }
+    },
+    {
+      "name": "gridless three ticks",
+      "sampleRate": 48000,
+      "entrySeconds": 1.25,
+      "durationSeconds": 4,
+      "playbackRate": 1.5,
+      "click": false,
+      "countInBars": 1,
+      "volume": 0.5,
+      "accent": true,
+      "beat": null,
+      "expected": {
+        "sourceStartFrame": 60000,
+        "songDurationFrames": 132000,
+        "preRollFrames": 216000,
+        "landingProjectFrame": 0,
+        "countInEventCount": 3,
+        "countInBeatsPerBar": 3,
+        "clickFrames": 2640,
+        "events": [[-216000, "accent"], [-144000, "ordinary"], [-72000, "ordinary"]]
+      }
+    },
+    {
+      "name": "gridless six ticks",
+      "sampleRate": 44100,
+      "entrySeconds": 0,
+      "durationSeconds": 6,
+      "playbackRate": 2,
+      "click": true,
+      "countInBars": 2,
+      "volume": 1,
+      "accent": true,
+      "beat": null,
+      "expected": {
+        "sourceStartFrame": 0,
+        "songDurationFrames": 264600,
+        "preRollFrames": 529200,
+        "landingProjectFrame": 0,
+        "countInEventCount": 6,
+        "countInBeatsPerBar": 3,
+        "clickFrames": 2426,
+        "events": [[-529200, "accent"], [-441000, "ordinary"], [-352800, "ordinary"], [-264600, "accent"], [-176400, "ordinary"], [-88200, "ordinary"]]
+      }
+    },
+    {
+      "name": "count-in only",
+      "sampleRate": 48000,
+      "entrySeconds": 2,
+      "durationSeconds": 3,
+      "playbackRate": 1,
+      "click": false,
+      "countInBars": 1,
+      "volume": 0.7,
+      "accent": true,
+      "beat": {
+        "beats": [0, 0.5, 1, 1.5, 2, 2.5, 3],
+        "beatsPerBar": 4,
+        "downbeat": 0,
+        "downbeats": []
+      },
+      "expected": {
+        "sourceStartFrame": 96000,
+        "songDurationFrames": 48000,
+        "preRollFrames": 96000,
+        "landingProjectFrame": 0,
+        "countInEventCount": 4,
+        "countInBeatsPerBar": 4,
+        "clickFrames": 2640,
+        "events": [[-96000, "accent"], [-72000, "ordinary"], [-48000, "ordinary"], [-24000, "ordinary"]]
+      }
+    },
+    {
+      "name": "rate-aware original-frame grid count-in",
+      "sampleRate": 48000,
+      "entrySeconds": 2,
+      "durationSeconds": 3,
+      "playbackRate": 2,
+      "click": false,
+      "countInBars": 1,
+      "volume": 0.7,
+      "accent": true,
+      "beat": {
+        "beats": [0, 0.5, 1, 1.5, 2, 2.5, 3],
+        "beatsPerBar": 4,
+        "downbeat": 0,
+        "downbeats": []
+      },
+      "expected": {
+        "sourceStartFrame": 96000,
+        "songDurationFrames": 48000,
+        "preRollFrames": 96000,
+        "landingProjectFrame": 0,
+        "countInEventCount": 4,
+        "countInBeatsPerBar": 4,
+        "clickFrames": 2640,
+        "events": [[-96000, "accent"], [-72000, "ordinary"], [-48000, "ordinary"], [-24000, "ordinary"]]
+      }
+    },
+    {
+      "name": "accent off",
+      "sampleRate": 48000,
+      "entrySeconds": 1.5,
+      "durationSeconds": 2.5,
+      "playbackRate": 1,
+      "click": true,
+      "countInBars": 1,
+      "volume": 0.7,
+      "accent": false,
+      "beat": {
+        "beats": [0, 0.5, 1, 1.5, 2, 2.5, 3],
+        "beatsPerBar": 3,
+        "downbeat": 0,
+        "downbeats": []
+      },
+      "expected": {
+        "sourceStartFrame": 72000,
+        "songDurationFrames": 48000,
+        "preRollFrames": 72000,
+        "landingProjectFrame": 0,
+        "countInEventCount": 3,
+        "countInBeatsPerBar": 3,
+        "clickFrames": 2640,
+        "events": [[-72000, "ordinary"], [-48000, "ordinary"], [-24000, "ordinary"], [0, "ordinary"], [24000, "ordinary"], [48000, "ordinary"]]
+      }
+    },
+    {
+      "name": "llround frame boundaries",
+      "sampleRate": 8000,
+      "entrySeconds": 1,
+      "durationSeconds": 2.1,
+      "playbackRate": 1,
+      "click": true,
+      "countInBars": 1,
+      "volume": 0.7,
+      "accent": true,
+      "beat": {
+        "beats": [0.0000625, 0.5000625, 1.0000625, 1.5000625, 2.0000625],
+        "beatsPerBar": 4,
+        "downbeat": 0,
+        "downbeats": []
+      },
+      "expected": {
+        "sourceStartFrame": 8000,
+        "songDurationFrames": 8800,
+        "preRollFrames": 16000,
+        "landingProjectFrame": 0,
+        "countInEventCount": 4,
+        "countInBeatsPerBar": 4,
+        "clickFrames": 440,
+        "events": [[-16000, "ordinary"], [-12000, "ordinary"], [-8000, "accent"], [-4000, "ordinary"], [1, "ordinary"], [4001, "ordinary"], [8000, "accent"]]
+      }
+    },
+    {
+      "name": "count-in anchored mid-song: one bar before 2.0 s, entry at 0",
+      "sampleRate": 48000,
+      "entrySeconds": 0,
+      "countInAnchorSeconds": 2,
+      "durationSeconds": 4,
+      "playbackRate": 1,
+      "click": true,
+      "countInBars": 1,
+      "volume": 0.7,
+      "accent": true,
+      "beat": {
+        "beats": [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4],
+        "beatsPerBar": 4,
+        "downbeat": 0,
+        "downbeats": []
+      },
+      "expected": {
+        "sourceStartFrame": 0,
+        "songDurationFrames": 192000,
+        "preRollFrames": 96000,
+        "landingProjectFrame": 96000,
+        "countInEventCount": 4,
+        "countInBeatsPerBar": 4,
+        "clickFrames": 2640,
+        "events": [[-96000, "accent"], [-72000, "ordinary"], [-48000, "ordinary"], [-24000, "ordinary"], [96000, "accent"], [120000, "ordinary"], [144000, "ordinary"], [168000, "ordinary"], [192000, "accent"]]
+      }
+    }
+  ],
+  "invalid": [
+    { "name": "nonfinite entry", "field": "entrySeconds", "value": "nan" },
+    { "name": "duration before entry", "field": "durationSeconds", "value": 0.5 },
+    { "name": "unsorted beats", "field": "beats", "value": [0, 1, 0.5] },
+    { "name": "nonfinite beat", "field": "beats", "value": [0, "nan"] },
+    { "name": "unsorted downbeats", "field": "downbeats", "value": [2, 1] },
+    { "name": "event count bound", "field": "denseDuration", "value": 43200 },
+    { "name": "beat count bound", "field": "beatCount", "value": 20001 },
+    { "name": "duration bound", "field": "durationLimit", "value": 43200.1 }
+  ]
+}

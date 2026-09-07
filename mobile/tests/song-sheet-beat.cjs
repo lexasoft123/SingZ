@@ -27,6 +27,10 @@
  *   node mobile/tests/song-sheet-beat.cjs
  * Env: SIM_UDID, METRO_PORT (default 8081).
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../tests/shared/watchdog.cjs').arm('song-sheet-beat')
+
 const http = require('http');
 const { createHash } = require('crypto');
 const { execSync, execFileSync } = require('child_process');

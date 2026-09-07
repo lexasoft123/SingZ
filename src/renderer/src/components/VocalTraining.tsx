@@ -25,6 +25,7 @@ import type { MultitrackEngine } from '../audio/engine'
 import type { DesktopTrainingCueController } from '../audio/training-audio'
 import type { DesktopTrainingMicCapture } from '../audio/training-mic'
 import type { MicDevice } from '../audio/mic'
+import { audioSafetyBlockedCopy } from '../audio/monitoring'
 import {
   audibleCueEndTimeSec,
   claimIdentifySubmission,
@@ -88,6 +89,11 @@ interface VocalTrainingProps {
   readonly onMicDevice: (device: MicDevice | null) => void
   /** Settings takes exclusive capture ownership and interrupts this attempt. */
   readonly settingsOwnsMic?: boolean
+  /** App-shell native or unresolved-preview lease. All cue/capture entry
+   * points remain closed until the lease is positively released. */
+  readonly audioLeaseBlocked?: boolean
+  /** Provenance-specific guidance for the app-level lease, when known. */
+  readonly audioLeaseCopy?: string
   readonly onSetupChange: (patch: Partial<DesktopTrainingSetup>) => void
   readonly referenceVolume: number
   readonly onReferenceVolumeChange: (volume: number) => void
@@ -138,6 +144,49 @@ const EXERCISES: readonly {
 const KEY_NAMES = ['C', 'D♭', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A', 'B♭', 'B']
 const INTERVAL_LABELS = ['Unison', 'Second', 'Third', 'Fourth', 'Fifth', 'Sixth', 'Seventh', 'Octave']
 let trainingSeedSequence = 0
+export const TRAINING_AUDIO_LEASE_COPY =
+  audioSafetyBlockedCopy('Training audio')
+
+export function runTrainingAudioAction(
+  blocked: boolean,
+  onBlocked: () => void,
+  action: () => void
+): boolean {
+  if (blocked) {
+    onBlocked()
+    return false
+  }
+  action()
+  return true
+}
+
+export function shouldAutoStartTrainingPrompt(
+  audioLeaseBlocked: boolean,
+  state: Pick<DesktopTrainingState, 'route' | 'exercisePhase' | 'session' | 'interrupted' | 'error'>
+): boolean {
+  return !audioLeaseBlocked && state.route === 'session' &&
+    state.exercisePhase === 'ready' && Boolean(state.session) &&
+    !state.interrupted && !state.error
+}
+
+/** Returns an effect cleanup. Re-evaluating this helper after the app-shell
+ * lease clears schedules the transition that was deliberately not consumed
+ * while native monitoring owned audio. */
+export function scheduleTrainingFeedbackAdvance(
+  audioLeaseBlocked: boolean,
+  state: Pick<DesktopTrainingState, 'route' | 'exercisePhase' | 'session'>,
+  nextPrompt: () => void
+): () => void {
+  if (
+    audioLeaseBlocked || state.route !== 'session' ||
+    state.exercisePhase !== 'feedback'
+  ) return () => undefined
+  const timer = globalThis.setTimeout(
+    nextPrompt,
+    state.session?.status === 'completed' ? 1_400 : 350
+  )
+  return () => globalThis.clearTimeout(timer)
+}
 
 export default function VocalTraining({
   state,
@@ -150,6 +199,8 @@ export default function VocalTraining({
   inputChannel,
   onMicDevice,
   settingsOwnsMic = false,
+  audioLeaseBlocked = false,
+  audioLeaseCopy = TRAINING_AUDIO_LEASE_COPY,
   onSetupChange,
   referenceVolume,
   onReferenceVolumeChange,
@@ -185,6 +236,8 @@ export default function VocalTraining({
   const identifyLock = useRef<TrainingSubmissionLock>({ current: null })
   const stateRef = useRef(state)
   stateRef.current = state
+  const audioLeaseBlockedRef = useRef(audioLeaseBlocked)
+  audioLeaseBlockedRef.current = audioLeaseBlocked
   const selected = selectTrainingExercise(state)
 
   const resetIdentify = useCallback(() => {
@@ -246,8 +299,8 @@ export default function VocalTraining({
   // exclusive interface. The exercise returns to Ready and is not silently
   // resumed; its next explicit start uses the new channel.
   useLayoutEffect(() => {
-    if (settingsOwnsMic) interruptRuntime()
-  }, [interruptRuntime, settingsOwnsMic])
+    if (settingsOwnsMic || audioLeaseBlocked) interruptRuntime()
+  }, [audioLeaseBlocked, interruptRuntime, settingsOwnsMic])
 
   useEffect(() => {
     const checkForeground = (): void => {
@@ -270,6 +323,15 @@ export default function VocalTraining({
     },
     [dispatch, stopRuntime]
   )
+
+  const rejectBlockedAudioAction = useCallback(() => {
+    stopRuntime()
+    dispatch({ type: 'set-error', error: TRAINING_AUDIO_LEASE_COPY })
+  }, [dispatch, stopRuntime])
+
+  const runAudioAction = useCallback((action: () => void): boolean =>
+    runTrainingAudioAction(audioLeaseBlockedRef.current, rejectBlockedAudioAction, action),
+  [rejectBlockedAudioAction])
 
   const finishVocalPrompt = useCallback((run: ActiveDesktopVocalRun) => {
     if (run.completed || vocalRun.current !== run || generation.current !== run.generation) return
@@ -391,6 +453,7 @@ export default function VocalTraining({
       setPitchLock(EMPTY_TRAINING_PITCH_LOCK)
       setCoarseGuidance('Listening for your voice.')
       try {
+        if (!runAudioAction(() => undefined)) return
         if (!trainingOwnsForeground()) {
           interruptRuntime()
           return
@@ -436,11 +499,12 @@ export default function VocalTraining({
         if (generation.current === run && !isTrainingStartCancellation(error)) reportError(error)
       }
     },
-    [capturePrompt, cues, dispatch, engine.context, interruptRuntime, reportError]
+    [capturePrompt, cues, dispatch, engine.context, interruptRuntime, reportError, runAudioAction]
   )
 
   const beginPrompt = useCallback(
     (prompt: TrainingPrompt, transition: 'activate-session' | 'next-prompt') => {
+      if (!runAudioAction(() => undefined)) return
       const beginRun = claimTrainingBegin(beginLock.current)
       if (beginRun === null) return
       setBeginBusy(true)
@@ -495,7 +559,7 @@ export default function VocalTraining({
         if (releaseTrainingBegin(beginLock.current, beginRun)) setBeginBusy(false)
       })
     },
-    [dispatch, engine.context, inputChannel, inputId, interruptRuntime, mic, nativeInputUid, onMicDevice, playPrompt, reportError, stopRuntime]
+    [dispatch, engine.context, inputChannel, inputId, interruptRuntime, mic, nativeInputUid, onMicDevice, playPrompt, reportError, runAudioAction, stopRuntime]
   )
 
   const beginSession = useCallback((): void => {
@@ -520,18 +584,20 @@ export default function VocalTraining({
   }, [beginPrompt, dispatch, resetIdentify, state.session, stopRuntime])
 
   const replayPrompt = useCallback((): void => {
-    const prompt = selectTrainingExercise(stateRef.current)?.prompt
-    if (!prompt || stateRef.current.exercisePhase !== 'respond') return
-    generation.current++
-    if (frame.current !== null) cancelAnimationFrame(frame.current)
-    frame.current = null
-    vocalRun.current = null
-    cues.cancel()
-    setLive(null)
-    setPitchLock(EMPTY_TRAINING_PITCH_LOCK)
-    dispatch({ type: 'replay-cue' })
-    void playPrompt(prompt)
-  }, [cues, dispatch, playPrompt])
+    runAudioAction(() => {
+      const prompt = selectTrainingExercise(stateRef.current)?.prompt
+      if (!prompt || stateRef.current.exercisePhase !== 'respond') return
+      generation.current++
+      if (frame.current !== null) cancelAnimationFrame(frame.current)
+      frame.current = null
+      vocalRun.current = null
+      cues.cancel()
+      setLive(null)
+      setPitchLock(EMPTY_TRAINING_PITCH_LOCK)
+      dispatch({ type: 'replay-cue' })
+      void playPrompt(prompt)
+    })
+  }, [cues, dispatch, playPrompt, runAudioAction])
 
   const skipPrompt = useCallback((): void => {
     const run = vocalRun.current
@@ -546,20 +612,22 @@ export default function VocalTraining({
   }, [onReferenceVolumeChange])
 
   const testReference = useCallback((): void => {
-    const testRun = ++referenceTestGeneration.current
-    setTestingReference(true)
-    void cues.schedule(
-      [{ purpose: 'answer', articulation: 'sequence', notes: [60] }],
-      { noteDurationSec: 2.75, attackSec: 0.032, releaseSec: 0.22 }
-    ).then((timeline) => {
-      const remainingMs = Math.max(0, (audibleCueEndTimeSec(timeline.endTime, engine.context) - engine.context.currentTime) * 1_000)
-      window.setTimeout(() => {
-        if (referenceTestGeneration.current === testRun) setTestingReference(false)
-      }, remainingMs)
-    }).catch((error: unknown) => {
-      if (referenceTestGeneration.current === testRun && !isTrainingStartCancellation(error)) reportError(error)
+    runAudioAction(() => {
+      const testRun = ++referenceTestGeneration.current
+      setTestingReference(true)
+      void cues.schedule(
+        [{ purpose: 'answer', articulation: 'sequence', notes: [60] }],
+        { noteDurationSec: 2.75, attackSec: 0.032, releaseSec: 0.22 }
+      ).then((timeline) => {
+        const remainingMs = Math.max(0, (audibleCueEndTimeSec(timeline.endTime, engine.context) - engine.context.currentTime) * 1_000)
+        window.setTimeout(() => {
+          if (referenceTestGeneration.current === testRun) setTestingReference(false)
+        }, remainingMs)
+      }).catch((error: unknown) => {
+        if (referenceTestGeneration.current === testRun && !isTrainingStartCancellation(error)) reportError(error)
+      })
     })
-  }, [cues, engine.context, reportError])
+  }, [cues, engine.context, reportError, runAudioAction])
 
   const submitIdentifyAnswer = (answer: TrainingIdentifyAnswer): void => {
     const prompt = selected?.prompt
@@ -587,55 +655,57 @@ export default function VocalTraining({
   }
 
   useEffect(() => {
-    if (
-      state.route !== 'session' ||
-      state.exercisePhase !== 'ready' ||
-      !state.session ||
-      state.interrupted ||
-      state.error
-    ) return
+    if (!shouldAutoStartTrainingPrompt(audioLeaseBlocked, state)) return
+    // shouldAutoStartTrainingPrompt confirms this before any transition is
+    // consumed. Keep the local guard for TypeScript's nullable session.
+    if (!state.session) return
     const prompt = state.session.prompts[state.session.currentIndex]
     if (!prompt) return
     const promptKey = `${state.session.id}:${prompt.id}`
     if (autoStartedPrompt.current === promptKey) return
     autoStartedPrompt.current = promptKey
     beginSession()
-  }, [beginSession, state.error, state.exercisePhase, state.interrupted, state.route, state.session])
+  }, [audioLeaseBlocked, beginSession, state.error, state.exercisePhase, state.interrupted, state.route, state.session])
 
   useEffect(() => {
-    if (state.route !== 'session' || state.exercisePhase !== 'feedback') return
-    const timer = window.setTimeout(nextPrompt, state.session?.status === 'completed' ? 1_400 : 350)
-    return () => window.clearTimeout(timer)
-  }, [nextPrompt, state.exercisePhase, state.route, state.session?.status])
+    return scheduleTrainingFeedbackAdvance(audioLeaseBlocked, state, nextPrompt)
+  }, [audioLeaseBlocked, nextPrompt, state.exercisePhase, state.route, state.session?.status])
 
   if (state.route === 'home') {
     return (
       <TrainingHome
         progress={progress}
         songPreparation={songPreparation}
+        audioBlocked={audioLeaseBlocked}
+        audioBlockedCopy={audioLeaseCopy}
         onChoose={(exercise) => {
           const taskMode = exercise === 'note' ? 'imitate' : stateRef.current.setup.taskMode
           onSetupChange({ exercise, taskMode })
           dispatch({ type: 'choose-exercise', exercise })
         }}
         onPrepare={(choice) => {
-          if (!songPreparation?.key) {
+          const preparation = songPreparation
+          // An unknown key opens non-audio setup only. Keep that navigation
+          // available while native monitoring owns the audio lease; the
+          // eventual session start remains guarded from the setup screen.
+          if (!preparation?.key) {
             dispatch({
               type: 'setup-song-preparation',
-              sourceSongId: songPreparation?.sourceSongId ?? '',
-              songName: songPreparation?.songName ?? 'this song',
+              sourceSongId: preparation?.sourceSongId ?? '',
+              songName: preparation?.songName ?? 'this song',
               choice
             })
             return
           }
-          dispatch({
+          const key = preparation.key
+          runAudioAction(() => dispatch({
             type: 'start-song-preparation',
-            sourceSongId: songPreparation.sourceSongId,
-            songName: songPreparation.songName,
+            sourceSongId: preparation.sourceSongId,
+            songName: preparation.songName,
             choice,
-            key: songPreparation.key,
-            seed: newTrainingSessionSeed(`${songPreparation.songName}:${songPreparation.key.tonicPc}:${songPreparation.key.mode}:${choice}`)
-          })
+            key,
+            seed: newTrainingSessionSeed(`${preparation.songName}:${key.tonicPc}:${key.mode}:${choice}`)
+          }))
         }}
         onProgress={() => dispatch({ type: 'show-progress' })}
       />
@@ -652,10 +722,12 @@ export default function VocalTraining({
         error={state.error}
         micAvailable={hasMicrophoneApi()}
         testingReference={testingReference}
+        audioBlocked={audioLeaseBlocked}
+        audioBlockedCopy={audioLeaseCopy}
         onChange={onSetupChange}
         onPracticeSettingsChange={updatePracticeSettings}
         onTestReference={testReference}
-        onStart={() => dispatch({ type: 'start-session', seed: newTrainingSessionSeed('custom') })}
+        onStart={() => runAudioAction(() => dispatch({ type: 'start-session', seed: newTrainingSessionSeed('custom') }))}
         onBack={() => dispatch({ type: 'back-home' })}
       />
     )
@@ -665,9 +737,13 @@ export default function VocalTraining({
       <TrainingSummary
         session={state.session}
         preparation={state.preparation}
+        audioBlocked={audioLeaseBlocked}
+        audioBlockedCopy={audioLeaseCopy}
         onRestart={() => {
-          resetIdentify()
-          dispatch({ type: 'restart', seed: newTrainingSessionSeed('restart') })
+          runAudioAction(() => {
+            resetIdentify()
+            dispatch({ type: 'restart', seed: newTrainingSessionSeed('restart') })
+          })
         }}
         onBack={backHome}
         onBackToSong={backToSong}
@@ -685,6 +761,8 @@ export default function VocalTraining({
       coarseGuidance={coarseGuidance}
       identifySubmitting={identifySubmitting}
       beginBusy={beginBusy}
+      audioBlocked={audioLeaseBlocked}
+      audioBlockedCopy={audioLeaseCopy}
       onBegin={beginSession}
       onAnswer={submitIdentifyAnswer}
       onReplay={replayPrompt}
@@ -703,12 +781,16 @@ export function shouldShowTrainingPitchMarker(live: { readonly midi: number | nu
 function TrainingHome({
   progress,
   songPreparation,
+  audioBlocked,
+  audioBlockedCopy,
   onChoose,
   onPrepare,
   onProgress
 }: {
   progress: TrainingProgress
   songPreparation: VocalTrainingProps['songPreparation']
+  audioBlocked: boolean
+  audioBlockedCopy: string
   onChoose: (exercise: TrainingExerciseSelection) => void
   onPrepare: (choice: SongPreparationChoice) => void
   onProgress: () => void
@@ -717,6 +799,7 @@ function TrainingHome({
   const snapshot = summarizeTrainingProgress(progress)
   return (
     <main className="vt-screen vt-home">
+      {audioBlocked && <TrainingAudioLeaseNotice copy={audioBlockedCopy} />}
       {songPreparation && (
         <section className="vt-song-prep" aria-labelledby="vt-song-prep-title">
           <div>
@@ -731,7 +814,12 @@ function TrainingHome({
           </div>
           <div className="vt-song-prep-actions" aria-label={`Prepare for ${songPreparation.songName}`}>
             {(['notes', 'intervals', 'chords', 'mixed'] as const).map((choice) => (
-              <button type="button" key={choice} onClick={() => onPrepare(choice)}>
+              <button
+                type="button"
+                key={choice}
+                disabled={audioBlocked && Boolean(songPreparation.key)}
+                onClick={() => onPrepare(choice)}
+              >
                 {choice === 'mixed' ? 'Mixed warm-up' : choice[0].toUpperCase() + choice.slice(1)}
               </button>
             ))}
@@ -811,6 +899,8 @@ function TrainingSetup({
   error,
   micAvailable,
   testingReference,
+  audioBlocked,
+  audioBlockedCopy,
   onChange,
   onPracticeSettingsChange,
   onTestReference,
@@ -822,6 +912,8 @@ function TrainingSetup({
   error: string | null
   micAvailable: boolean
   testingReference: boolean
+  audioBlocked: boolean
+  audioBlockedCopy: string
   onChange: (patch: Partial<DesktopTrainingSetup>) => void
   onPracticeSettingsChange: (patch: Partial<DesktopTrainingPracticeSettings>) => void
   onTestReference: () => void
@@ -841,6 +933,7 @@ function TrainingSetup({
   const referencePercent = Math.round(practiceSettings.referenceVolume * 100)
   return (
     <main className="vt-screen vt-setup">
+      {audioBlocked && <TrainingAudioLeaseNotice copy={audioBlockedCopy} />}
       <header className="vt-page-head">
         <button type="button" className="vt-back" onClick={onBack}>← Training</button>
         <p className="vt-eyebrow">Session setup</p>
@@ -940,7 +1033,7 @@ function TrainingSetup({
           <div className="vt-setting-block">
             <div className="vt-setting-head">
               <div><span>Note playback volume</span><strong>{referencePercent}%</strong></div>
-              <button type="button" className="pill primary vt-test-note" aria-busy={testingReference} onClick={onTestReference}>
+              <button type="button" className="pill primary vt-test-note" disabled={audioBlocked} aria-busy={testingReference} onClick={onTestReference}>
                 {testingReference ? 'Playing C4…' : '▶ Test C4'}
               </button>
             </div>
@@ -986,7 +1079,7 @@ function TrainingSetup({
             ))}
           </select>
         </label>
-        <button type="button" className="pill primary" disabled={invalidSelection} onClick={onStart}>Start practice</button>
+        <button type="button" className="pill primary" disabled={invalidSelection || audioBlocked} onClick={onStart}>Start practice</button>
       </footer>
     </main>
   )
@@ -1012,6 +1105,8 @@ function TrainingSession({
   coarseGuidance,
   identifySubmitting,
   beginBusy,
+  audioBlocked,
+  audioBlockedCopy,
   onBegin,
   onAnswer,
   onReplay,
@@ -1029,6 +1124,8 @@ function TrainingSession({
   coarseGuidance: string
   identifySubmitting: boolean
   beginBusy: boolean
+  audioBlocked: boolean
+  audioBlockedCopy: string
   onBegin: () => void
   onAnswer: (answer: TrainingIdentifyAnswer) => void
   onReplay: () => void
@@ -1067,6 +1164,7 @@ function TrainingSession({
     : null
   return (
     <main className="vt-screen vt-session">
+      {audioBlocked && <TrainingAudioLeaseNotice copy={audioBlockedCopy} />}
       <header className="vt-session-head">
         <button
           type="button"
@@ -1095,7 +1193,7 @@ function TrainingSession({
         {state.exercisePhase === 'ready' && (
           <div className="vt-ready">
             <p>{state.error ?? (state.interrupted ? 'Practice paused. Continue when you are ready.' : 'Preparing your exercise…')}</p>
-            {(state.error || state.interrupted) && <button ref={readyButtonRef} data-training-focus="ready-action" type="button" className="pill primary vt-main-action" disabled={beginBusy} aria-busy={beginBusy} onClick={onBegin}>Continue practice</button>}
+            {(state.error || state.interrupted) && <button ref={readyButtonRef} data-training-focus="ready-action" type="button" className="pill primary vt-main-action" disabled={beginBusy || audioBlocked} aria-busy={beginBusy} onClick={onBegin}>Continue practice</button>}
           </div>
         )}
         {acknowledgementResult && acknowledgementPrompt && (
@@ -1113,7 +1211,7 @@ function TrainingSession({
       </section>
       {state.exercisePhase === 'respond' && prompt.taskMode !== 'identify' && (
         <div className="vt-transport" role="group" aria-label="Practice controls">
-          <button className="vt-transport-action" type="button" aria-label="Replay target note" onClick={onReplay}>
+          <button className="vt-transport-action" type="button" aria-label="Replay target note" disabled={audioBlocked} onClick={onReplay}>
             <span className="vt-transport-icon" aria-hidden>
               <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 1-2.34-5.66L20 7.68" /><path d="M20 3v4.68h-4.68" /></svg>
             </span>
@@ -1213,7 +1311,7 @@ function feedbackMark(result: TrainingAttemptResult, good: boolean): string {
   return result.response === 'skipped' ? '→' : good ? '✓' : '↗'
 }
 
-function TrainingSummary({ session, preparation, onRestart, onBack, onBackToSong }: { session: NonNullable<DesktopTrainingState['session']>; preparation: DesktopTrainingState['preparation']; onRestart: () => void; onBack: () => void; onBackToSong: () => void }): React.JSX.Element {
+function TrainingSummary({ session, preparation, audioBlocked, audioBlockedCopy, onRestart, onBack, onBackToSong }: { session: NonNullable<DesktopTrainingState['session']>; preparation: DesktopTrainingState['preparation']; audioBlocked: boolean; audioBlockedCopy: string; onRestart: () => void; onBack: () => void; onBackToSong: () => void }): React.JSX.Element {
   const headingRef = useRouteHeadingFocus()
   const summary = useMemo(() => summarizeTrainingSession(session), [session])
   const finalResult = session.results[session.results.length - 1] ?? null
@@ -1224,6 +1322,7 @@ function TrainingSummary({ session, preparation, onRestart, onBack, onBackToSong
   const finalAnswer = finalPrompt ? identifyAnswerReveal(finalPrompt) : null
   return (
     <main className="vt-screen vt-summary">
+      {audioBlocked && <TrainingAudioLeaseNotice copy={audioBlockedCopy} />}
       <header className="vt-page-head">
         <p className="vt-eyebrow">Session complete</p>
         <h1 ref={headingRef} tabIndex={-1} aria-describedby="vt-summary-description">
@@ -1247,7 +1346,7 @@ function TrainingSummary({ session, preparation, onRestart, onBack, onBackToSong
         ))}
       </ol>
       <div className="vt-summary-actions">
-        <button type="button" className="pill primary" onClick={onRestart}>Restart</button>
+        <button type="button" className="pill primary" disabled={audioBlocked} onClick={onRestart}>Restart</button>
         <button type="button" className="pill ghost" onClick={onBack}>Back to training</button>
         {preparation && <button type="button" className="pill ghost" onClick={onBackToSong}>Back to song</button>}
       </div>
@@ -1257,6 +1356,10 @@ function TrainingSummary({ session, preparation, onRestart, onBack, onBackToSong
 
 function SummaryMetric({ label, value }: { label: string; value: string }): React.JSX.Element {
   return <div><span>{label}</span><strong>{value}</strong></div>
+}
+
+function TrainingAudioLeaseNotice({ copy }: { readonly copy: string }): React.JSX.Element {
+  return <p className="vt-audio-lease" role="status">{copy}</p>
 }
 
 function TrainingEmpty({ onExit }: { onExit: () => void }): React.JSX.Element {

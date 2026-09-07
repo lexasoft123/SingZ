@@ -23,6 +23,8 @@ scripts/build-onnx-pack.sh  # demucs-onnx splitter pack (win32-x64 | darwin-x64)
 cd mobile && npx jest                                  # phone-side Drive logic
 cd mobile/android && ./gradlew :app:testDebugUnitTest   # Kotlin cache-currency table
 mobile/scripts/test-swift-currency.sh                   # Swift cache-currency table
+bash mobile/scripts/test-native-playback-bridge-schema.sh  # iOS bridge validators (clang only, no Xcode)
+bash zdsp/run-sanitizer-gates.sh                        # the phase-4 native ctest gate (3 presets)
 ```
 
 All vendor scripts skip-guard on existing outputs; delete `vendor/…` to force.
@@ -30,7 +32,7 @@ All vendor scripts skip-guard on existing outputs; delete `vendor/…` to force.
 ## Verification policy
 
 **The C++ core is the source of truth for every detector** (decided 2026-08-22).
-New detector work lands in `mobile/native/core` first; the TypeScript in
+New detector work lands in `zcore/src/legacy` first; the TypeScript in
 `src/renderer/src/audio/` is a port of it, and a divergence means the TypeScript
 has drifted — not the port. What holds the two together is the seven parity gates
 under `eval/`, so they are the contract, not a diagnostic: `npm run gates`
@@ -58,17 +60,70 @@ on a 40 s synthesized sample, not a quality corpus — real-song runs
 staged, and no parity gate can see the two implementations being fed DIFFERENT
 INPUTS, which is exactly how the melody framing bug survived a year of green.
 
+**Every E2E driver runs under a deadline** (`tests/shared/watchdog.cjs`, armed
+by a single `require(...).arm('<name>')` line at the top of each): a hang —
+a CDP evaluate against a suspended app, a Metro target that never appears,
+`devicectl` waiting on a locked phone — otherwise sits there for ever, because
+the open socket keeps node's loop alive, and the next run contends with it.
+Three deadlines. The one that matters is the STEP: a named operation with a
+budget it must finish inside — `await watchdog().run('open the song', 300,
+() => …)`, from `current()` in the same module, a no-op before anything armed
+it. A blanket silence timer has to be generous enough for the slowest quiet
+stretch in the repo, so a wedged five-second call would burn ten minutes before
+saying anything; a step says what was being done, how long it was allowed and
+how long it had been, on the second it runs out. Steps nest (the innermost owns
+the deadline), `{ soft: true }` rejects with a StepTimeout instead of ending the
+run, and `E2E_STEP_SCALE` multiplies every budget for a slower machine. The
+device layers under `mobile/tests/player-session/` put launch, attach, hook
+install and song open under budgets there, so every mobile driver inherits
+them. Behind the step are the two blanket ones: no output for ten minutes, or
+sixty minutes in total (the long drivers say so at their arming;
+`E2E_WATCHDOG_MINUTES` / `E2E_WATCHDOG_IDLE_MINUTES` override, `0` disarms). On expiry it names the
+deadline, how long the run had been going and the last line printed, kills its
+own DIRECT children — an Electron does not die with `process.exit`, and one
+was found hidden at 66 minutes — and exits 1; killing a run by hand prints the
+same diagnosis. Progress is taken from the driver's own output (the arming
+patches `console.log`), so a new driver needs no watchdog calls, only the
+arming line — and `tests/unit/e2e-watchdog.test.ts` refuses one that skips it.
+
 UI or engine changes are verified by driving the real app with
 `playwright-core`'s `_electron` (session drivers live in the scratchpad, never
 in the repo; permanent harnesses are `tests/e2e/win-smoke.cjs` (run by
-the E2E Windows workflow, which also runs `npm test`) and the mac drivers
-in `tests/e2e/mac/` (eleven of them: align, lyrics editing (the editor's
+the E2E Windows workflow, which also runs `npm test`), the two capture-addon
+harnesses in `tests/e2e/` (`capture-addon-smoke.cjs`, the Electron ABI/load
+gate CI runs on both platforms; `capture-addon-hardware.cjs`, by-hand only —
+it opens the real microphone), and the mac drivers
+in `tests/e2e/mac/` (thirteen of them: align, lyrics editing (the editor's
 align-draft leg is a different code path from the panel's Check & align —
 both are covered), wizard/consent, audio settings,
 bar editing — TWO of those, because dragging a line and pressing Re-detect
 are different code paths and only the drag was covered — and the
 analysis-rule drivers: the two stem-rate ones, the two song-switch races,
-and stamp-upgrade; the `e2e-verifier` agent in
+and stamp-upgrade — and `player-session-e2e.cjs`, the desktop's
+native-vs-legacy session replay judged by the phone harness's rules, which needs the
+DSP-graph addon built for the tree; the native CoreAudio path bypasses Chromium's
+mute, so `SINGZ_MUTE` is honoured in MAIN instead (`mutedMasterGain` clamps the
+master gain every prepare and every master-gain command carries through), which
+is what keeps a native driver silent without each one remembering to zero it; and `transport-race-e2e.cjs`, which
+presses Play the way a singer does and the session replay by construction
+cannot — EARLY, while the graph prepared ahead is still building, and TWICE
+in a row, and opens a SECOND song after the first. A field session found two
+things broken with the session replay green throughout: opening a song AFTER
+another one built a whole graph for the song being LEFT — the loader resets a
+dozen controls on the way in and each re-arms the prepare-ahead timer, which
+fired while `engine.tracks` were still the old song's, so 2.3 s of blocked
+main went into a graph nobody could use (with two songs of different lengths
+the core refuses it outright, which is what the field log showed); and a
+second Play inside one 5 Hz status poll asked the core to resume a transport
+already playing, whose refusal threw and left the BUTTON on Play for the rest
+of the song. That second one is why it reads `__test.playing`, the button's own
+React state, alongside the core's transport state and requires all three
+opinions to agree — every desktop driver before it read `engine.playing`
+alone, which was right all along while the button was wrong, exactly the
+divergence the phones added their own `__test.playing` for. It also fails on
+ANY dsp warn or error, which is what the log is FOR now; the session replay
+policed three hand-written phrases until one of them missed sixteen
+`resume failed` warnings in a row; the `e2e-verifier` agent in
 `.claude/agents/` holds the roster of record, and a new driver is not
 finished until it is listed there — launch one instance per platform in
 parallel for cross-platform verification) — vitest unit tests in
@@ -160,7 +215,8 @@ directions. Details + env hooks:
 Mobile has its own permanent sim-driven tests in `mobile/tests/`
 (`seek-memory.cjs`, `open-close-memory.cjs`, `loop-region.cjs`,
 `ab-repeat.cjs`, `offline-cache.cjs`, `custom-track.cjs`,
-`beats-native-ios.cjs`, `song-sheet-beat.cjs`): CDP over
+`beats-native-ios.cjs`, `song-sheet-beat.cjs`, `player-session.cjs`,
+`focus-loss-android.cjs`, `play-from-anywhere.cjs`): CDP over
 Metro against the iOS
 Simulator — run them
 after engine or loading changes. `loop-region` and `ab-repeat` are a PAIR
@@ -171,7 +227,34 @@ hooks exported and nothing referencing either. `song-sheet-beat.cjs` is the one 
 a SCREEN rather than the engine: it seeds two phone-library projects (a
 hand-made grid, and a song with nothing detected), opens the Song sheet and
 reads the Beat row through somebody else's analysis — the rule in
-`song-sheet-copy.ts`, which no headless suite can see applied to a real row. `beats-native-{ios,android}.cjs` are a PAIR
+`song-sheet-copy.ts`, which no headless suite can see applied to a real row.
+`play-from-anywhere.cjs` drives the native Plays that are NOT a fresh song's first Play — a scrub or an A-B before Play, the count-in from a scrubbed spot, Play after a pause with and without the count-in — compares the seek bar's level envelope across both backends, and holds the two things the SCREEN owes a Play: the transport button turns to Pause when the song starts rather than when the next telemetry poll lands (it read `__test.playing`, the button's own React state, because `engine.playing` was right all along while the button was a second behind), and under a display trim standing in for a slow route every count-in dot lights before the row goes (the clicks sound on past the landing, so a row that ends at the landing loses them — two dots of four at 1.2 s); those paths reached a phone in build 49 with only jest and hand probes behind them, because the session harness below seeks, loops and pauses only after Play. `player-session.cjs` is the only one that runs the SAME session TWICE, once
+on each playback backend, and compares the two — and the only one that can
+drive a REAL iPhone (`--platform ios-device`, opt-in, named by `IOS_DEVICE`,
+never part of a bare run because it writes into somebody's own library; its
+CPU/memory columns are blank because a phone has no `top`): a singer's evening
+compressed into one script (a long six-lane song, three metronome touches,
+four seeks, three lane ramps, transpose, training, pause/resume,
+background/foreground, out to the end of the song, a second song, an app
+restart), every timing taken IN-APP, CPU and PSS/RSS sampled in five phases,
+and the app's own log read for `graph build refused` / `cue rebuild failed`
+/ `durable save failed`. Native must be no slower than legacy + max(50 ms,
+10%) and no heavier in any phase — with THREE carve-outs, all printed
+UNCOMPARED. The backgrounded phase is not compared at all when the two
+backends disagree about whether the transport is still running, because
+"still rendering six lanes" against "stopped" is two different jobs. The transpose is a full graph rebuild under native today and is
+held to an absolute 12 s ceiling instead, because a comparison nobody can
+pass teaches nothing; and first-audible is reported only, because legacy
+times it from its own position clock and native from the core's first audible
+callback, so the two columns are not the same measurement. Its CPU/memory columns are a legacy-vs-native comparison on ONE
+host and are never a phone's numbers. Two things to know before running it:
+the Mac's default output must be at 48 kHz or the simulator's RemoteIO
+refuses the native handoff and the "native" pass silently measures legacy
+(it refuses to start rather than produce that red), and NOTHING under
+`mobile/` may be edited while it runs — Metro reloads the app's JS on any
+change there, unmounting the player mid-session, so every measurement window
+carries a run id and a reload now fails loudly instead of arriving as a
+mystery stall. `beats-native-{ios,android}.cjs` are a PAIR
 and both are owed: the two bindings marshal differently (iOS builds its dict
 from the core's doubles, Android crosses a JSON line and parses it in Kotlin),
 so a value lost in that text hop is invisible to the iOS half. Both want a
@@ -179,7 +262,15 @@ project whose stems ALL carry audio — a silent stem discriminates nothing, and
 a fallback mutated to drop one passed until the mutation was moved to a stem
 with music in it — and both report whether the LATTICE and the aligned WORDS
 actually crossed, because a bare comparison sends neither and those are the
-two arguments the real pipeline always fills. `mic-android.cjs` is the one
+two arguments the real pipeline always fills. `focus-loss-android.cjs` takes audio
+focus away from NATIVE playback in the three windows the bridge's generation
+ledger has to get right — a playing song, an ARMED SWAP (the core keeps the
+song playing when only the candidate is cancelled, so the bridge must retire
+both generations), a HELD stream in the background — and asserts the song
+stops, the log says why, and Play afterwards starts fresh; the loss is
+delivered by `NativeAudioRuntime.debugAudioFocusChange`, a DEBUG-build-only
+method onto the same listener AudioManager calls, because nothing an `adb
+shell` can do takes focus deterministically. `mic-android.cjs` is the one
 that cannot run on a simulator AT ALL: it drives vocal-training CAPTURE
 through the `__test.audioInput` seam, so it wants a real phone with a real
 microphone — an AVD booted `-no-audio` has no input, and the driver then
@@ -298,7 +389,19 @@ was driven; the gotchas that follow from it are below.
   name, **method arity** and event payloads are identical on both platforms is
   written at the top of `SingzSplit.mm` for this reason; when a method changes
   on one side, sweep the whole surface against `SplitModule.kt`, not just the
-  method in hand. Suites that drive a native call need a settle DEADLINE, not
+  method in hand. For the PLAYBACK bridges the sweep is mechanical now:
+  `tests/shared/native-playback-bridge-manifest.json` pins every method with
+  its arity, every emitted key set, every enum table and the desktop's
+  renames, extracted from the three bridges' own sources by the two packaging
+  suites, a vitest over the addon and a native ctest — so a key added to one
+  bridge and forgotten on another is a red test rather than a platform that
+  quietly degrades. What it all means is
+  [docs/NATIVE-PLAYBACK-BRIDGE.md](docs/NATIVE-PLAYBACK-BRIDGE.md), which also
+  carries the core-encoded product policy (click timbre, gridless count-in,
+  BPM/meter bands, the −1 dBFS limiter, the two-decode budget, odd-period
+  training) and a divergence register. The manifest is edited BY HAND on
+  purpose: regenerating it would let drift fix itself.
+  Suites that drive a native call need a settle DEADLINE, not
   a poll count — an unsettled promise is what this looks like from the driver.
 - **Foundation's JSON parser is not correctly rounded, so no core number may
   reach iOS as text** — `NSJSONSerialization` reads `"0.053999999999999999"`
@@ -458,7 +561,9 @@ was driven; the gotchas that follow from it are below.
   validation — never SingZ's copy.
 - **macOS ad-hoc signing is mandatory** (scripts/afterPack.cjs): repacked
   Electron has a broken signature and quarantined downloads show the
-  unrecoverable "app is damaged" dialog. Hook skips itself when CSC_* is set.
+  unrecoverable "app is damaged" dialog. The hook repairs every final bundle
+  first; electron-builder's later Developer ID pass replaces that fallback
+  when a real identity is available.
 - **Packaging from a WORKTREE embeds absolute symlinks into the bundle** —
   `scripts/worktree-setup.sh` deliberately links the third-party engines to
   the main checkout rather than rebuilding whisper per worktree, so
@@ -525,8 +630,9 @@ was driven; the gotchas that follow from it are below.
   ReactNative-application.cmake)` first or `libappmodules.so` silently vanishes
   and the app dies at boot with "PlatformConstants could not be found". That
   include also GLOBS every `*.cpp` beside the CMakeLists into appmodules —
-  own sources live in `mobile/native/core/` (the shared C++ engine core; JNI
-  shim under `core/android/`), never next to the CMakeLists. The ORT Android
+  own reusable sources live in top-level `zcore/`; the package-specific JNI
+  shim lives under `mobile/native/bindings/android/`, never next to the
+  CMakeLists. The ORT Android
   AAR is legacy-layout (headers/ + jni/<abi>/, no prefab) — the `extractOrtSdk`
   gradle task unzips it and CMake imports the .so via `ORT_SDK_DIR`.
 - **A piped gradle build reports its failure as success** — `./gradlew … |
@@ -569,6 +675,19 @@ was driven; the gotchas that follow from it are below.
   that misses arrives as a null dereference three steps later. **`run-as` is useless for diagnosing any of this** — it does not
   inherit the app's storage sandbox, so it reports "Permission denied" even
   for directories the app itself created.
+- **The Android debug variant optimizes the app's own native code** —
+  AGP's Debug configuration hands clang `-g` and no `-O` at all, and the
+  `.debug` APK is the only one a driver can measure (no inspector, no
+  `run-as` on release), so until 2026-09-05 every phone CPU column and
+  every Stretch prime cost was the -O0 core against Hermes: a prime that
+  costs 5 ms optimized cost hundreds there, and the landing budget for a
+  swap seam was sized to that. `mobile/android/app/src/main/cpp/CMakeLists.txt`
+  adds `-O2` to the Debug configuration (asserts stay in — no NDEBUG — so a
+  debug number is still a shade pessimistic, never flattering);
+  `-PsingzNativeUnoptimized=1` is the opt-out for stepping through the core
+  in a debugger. Check `compile_commands.json` under
+  `app/.cxx/Debug/*/arm64-v8a/` for the flag before trusting a CPU number
+  from a build you did not make.
 - **Android builds need a JDK 21** (`brew install openjdk@21`; CI pins
   temurin 21). The Android Studio JBR moved to JDK 25, and AGP's
   GeneratePrefabPackages treats the JDK 24+ restricted-native-access warning
@@ -825,12 +944,13 @@ was driven; the gotchas that follow from it are below.
   adapter included, with `audio-devices-e2e.cjs` driving the very path it had
   changed — for hours; it was found by hand because the other session mentioned
   the rebuild. Nine worktrees on this machine held nine states of
-  `mobile/native/core` behind one binary matching none of them. Two changes,
+  the native core behind one binary matching none of them. Two changes,
   and they answer different halves: `scripts/worktree-setup.sh` now MIRRORS
   `vendor/` (third-party engines stay symlinks to main; `singz-analyze` and
-  `singz-capture.node` get per-worktree slots, and the setup script builds the
-  one that has a producer on this tree — an empty slot degrades to the TS
-  detectors, where a link runs another branch's engine), and
+  `singz-capture.node` get per-worktree slots, the setup script builds the
+  analyzer, and `npm run capture:addon` builds the addon when needed — an
+  empty slot degrades or reports the missing transport, where a link runs
+  another branch's engine), and
   `scripts/analyze-source-hash.sh` is the ONE definition of the fingerprint —
   written to the `.source-hash` sidecar, compiled into the binary
   (`singz-analyze build-info`), and recomputed at the first `resolveAnalyze()`

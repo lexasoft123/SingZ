@@ -1,7 +1,10 @@
 package com.singzplayer.split
 
+import com.singzplayer.playback.NativePlaybackGraphConnectionJni
+import com.singzplayer.playback.NativePlaybackGraphNodeJni
+
 /**
- * The shared C++ engine core (mobile/native/core, docs/PHONE-STANDALONE.md).
+ * The shared top-level C++ zcore package (docs/PHONE-STANDALONE.md).
  * Loading is lazy and failure is a value, not a crash: an ABI the core does
  * not ship for (or a broken .so) must degrade to "splitting unavailable on
  * this phone", never take the player down with it.
@@ -39,15 +42,25 @@ object SingzCore {
   /** Analyzed live-input evidence. Raw microphone PCM never crosses JNI. */
   interface AudioInputListener {
     fun onFrame(
+      ownershipGeneration: Long,
+      clockDomainId: Long,
+      streamGeneration: Long,
       startSequence: Long,
       endSequence: Long,
+      startSourceFrame: Long,
+      endSourceFrame: Long,
       sampleHostTimeStartNs: Long,
       sampleHostTimeEndNs: Long,
       callbackHostTimeNs: Long,
+      startFlags: Int,
+      endFlags: Int,
       timestampQuality: Int,
+      discontinuityReason: Int,
+      resetCount: Long,
       sampleRate: Double,
       frequency: Double,
       clarity: Double,
+      peak: Double,
       rms: Double,
       dbfs: Double
     )
@@ -61,6 +74,136 @@ object SingzCore {
     channels: IntArray
   )
 
+  /** Java AudioManager remains the authoritative dormant AudioHost inventory. */
+  external fun replaceAudioHostDevices(
+    uids: Array<String>,
+    labels: Array<String>,
+    sampleRates: Array<IntArray>,
+    channels: IntArray,
+    inputs: BooleanArray,
+    outputs: BooleanArray,
+    transports: Array<String>,
+    monitoringSuitability: Array<String>,
+    defaultOutputUid: String
+  )
+
+  /** Packaging probe only; it never opens a device or acquires audio focus. */
+  external fun hasAndroidAudioHostProvider(): Boolean
+
+  // Phase 4 native playback. Every method below is control-domain only. The
+  // Oboe callback stays wholly inside zcore -> zdsp and never calls JNI.
+  external fun nativePlaybackStatus(): String
+  external fun nativePlaybackSession(): String
+  /** Eight doubles, no JSON, no lock: available, generation, transport state
+   *  code, renderedProjectFrame, continuousFrame, remainingPreRollFrames,
+   *  seekCount, ageMs. The one native playback read that runs on the JS
+   *  thread rather than the control thread — see NativeAudioRuntimeModule. */
+  external fun nativePlaybackPositionNow(): DoubleArray
+  /** Hold a parked generation's Oboe stream (AAudio pause, nothing closed)
+   *  and let it go again; the result JSON is the same shape every command
+   *  answers with. See NativeAudioRuntimeModule.suspendOutput. */
+  external fun nativePlaybackSuspendOutput(generation: Long): String
+  external fun nativePlaybackResumeOutput(generation: Long): String
+  external fun nativePlaybackClaim(generation: Long, handoffLease: Long): String
+  external fun nativePlaybackRequestCancellation(generation: Long): Boolean
+  external fun nativePlaybackPrepare(
+    generation: Long,
+    outputDeviceUid: String,
+    outputChannels: IntArray,
+    sampleRate: Int,
+    maximumFrames: Int,
+    bufferFrames: Int,
+    masterGain: Float,
+    maximumRetainedBytes: Long,
+    handoffLease: Long,
+    swapFromGeneration: Long,
+    preparedStartProjectFramePresent: Boolean,
+    preparedStartProjectFrame: Long,
+    initialPaused: Boolean,
+    initialLoopPresent: Boolean,
+    initialLoopStartProjectFrame: Long,
+    initialLoopEndProjectFrame: Long,
+    laneIds: Array<String>,
+    lanePaths: Array<String>,
+    laneGains: FloatArray,
+    laneMuted: BooleanArray,
+    laneSolo: BooleanArray,
+    playbackPresent: Boolean,
+    entrySeconds: Double,
+    countInAnchorSeconds: Double,
+    playbackRate: Double,
+    transposeSemitones: Double,
+    click: Boolean,
+    countInBars: Int,
+    cueVolume: Double,
+    accent: Boolean,
+    beats: DoubleArray,
+    beatsPerBar: Int,
+    downbeat: Int,
+    downbeats: IntArray,
+    trainingPresent: Boolean,
+    trainingMode: Int,
+    trainingPeriodFrames: Long,
+    trainingWindowStarts: LongArray,
+    trainingWindowEnds: LongArray,
+    trainingLaneIds: Array<String>,
+    trainingEnabled: Boolean,
+    graphPresent: Boolean,
+    graphNodes: Array<NativePlaybackGraphNodeJni>,
+    graphConnections: Array<NativePlaybackGraphConnectionJni>,
+    authorizedRoots: Array<String>
+  ): String
+  external fun nativePlaybackConfigured(generation: Long): String
+  external fun nativePlaybackOpenOutput(generation: Long): String
+  external fun nativePlaybackStart(generation: Long): String
+  external fun nativePlaybackStop(generation: Long): String
+  external fun nativePlaybackPause(generation: Long): String
+  external fun nativePlaybackResume(generation: Long): String
+  external fun nativePlaybackSeek(generation: Long, projectFrame: Long): String
+  external fun nativePlaybackSetLoop(
+    generation: Long,
+    startProjectFrame: Long,
+    endProjectFrame: Long
+  ): String
+  external fun nativePlaybackClearLoop(generation: Long): String
+  external fun nativePlaybackReanchor(generation: Long): String
+  external fun nativePlaybackPreviewClick(generation: Long, sound: Int): String
+  external fun nativePlaybackSetLaneControl(
+    generation: Long,
+    laneId: String,
+    gain: Float,
+    muted: Boolean,
+    solo: Boolean
+  ): String
+  external fun nativePlaybackSetMasterGain(generation: Long, gain: Float): String
+  external fun nativePlaybackSetTrainingEnabled(generation: Long, enabled: Boolean): String
+  /**
+   * The prepared lane envelopes for one generation: immutable for it, so read
+   * once and cache under the generation. Deliberately not part of status,
+   * which is polled several times a second.
+   *
+   * JSON: {ok, error, generation, bucketCount, lanes[{id, peaksValid,
+   * peaks[bucketCount]}], message}. `generation` is a number here and on iOS;
+   * the desktop addon publishes it as a decimal string.
+   */
+  external fun nativePlaybackLanePeaks(generation: Long): String
+
+  external fun nativePlaybackUnload(generation: Long): String
+
+  /**
+   * Unload that parks this generation's decoded lanes for the very next
+   * prepare of the same files at the same rate — a tempo or transpose rebuild
+   * then costs a graph rebuild instead of a whole re-decode. Anything else
+   * releases them. iOS's unloadRetainingLanes is its exact twin.
+   */
+  external fun nativePlaybackUnloadRetainingLanes(generation: Long): String
+
+  /**
+   * Test-build-only full codec matrix proof. The native implementation is
+   * present only with -PsingzCodecTargetProof=true and never opens audio I/O.
+   */
+  external fun nativeCodecTargetProof(fixturePaths: Array<String>): String
+
   /**
    * [error, actualDeviceUid, sampleRate, deviceChannels, selectedChannel,
    * sampleFormat, sharingMode, performanceMode, inputPreset, timestampSource].
@@ -68,6 +211,7 @@ object SingzCore {
   external fun startAudioInput(
     deviceUid: String,
     channel: Int,
+    ownershipGeneration: Long,
     listener: AudioInputListener
   ): Array<String>
 

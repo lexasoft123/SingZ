@@ -1,5 +1,5 @@
 import { STEM_META, CUSTOM_COLORS as KIT_CUSTOM_COLORS } from '@singz/ui/stems'
-import type { StemName } from '../../shared/types'
+import type { DesktopPlaybackProvider, StemName } from '../../shared/types'
 
 export interface UITrack {
   id: string
@@ -8,6 +8,8 @@ export interface UITrack {
   peaks: Float32Array
   /** Decoded audio + envelope normalization, for sample-accurate zoomed drawing. */
   buffer: AudioBuffer
+  /** Registered file backing this lane when native playback can consume it. */
+  sourcePath?: string
   scale: number
   muted: boolean
   solo: boolean
@@ -29,6 +31,30 @@ export const CONTROLS_W = 228
 export interface TimeView {
   s: number
   e: number
+}
+
+/**
+ * The view a song OPENS with, given the one it was saved with.
+ *
+ * The ZOOM is the singer's choice and is kept. WHERE it sits is not restored,
+ * because the playhead is not saved beside it: every song opens at 0, so a
+ * window left where they were last working opens the song looking somewhere
+ * it is not playing. One field project held a 2.5 s window at 228 s, and from
+ * the singer's seat the app was broken three ways at once — no note bars in
+ * the pitch strip (they were 228 s away), no waveform under the playhead, and
+ * nothing scrolling when Play was pressed, because following only carries a
+ * view whose playhead is already ON SCREEN. Nothing was wrong with any of the
+ * three; they were all looking at the wrong part of the song.
+ *
+ * A window that already starts at the top is kept exactly as saved — that is
+ * the ordinary case and it must not be nudged.
+ */
+export function viewForOpen(saved: TimeView | null | undefined): TimeView | null {
+  if (!saved || !Number.isFinite(saved.s) || !Number.isFinite(saved.e)) return null
+  const span = saved.e - saved.s
+  if (!(span > 0.05)) return null
+  const start = Math.max(0, saved.s)
+  return start <= 0.05 ? { s: start, e: saved.e } : { s: 0, e: span }
 }
 
 /** Vocal-training setup (what alternates, how often, which stems the singer carries). */
@@ -84,6 +110,18 @@ export interface AudioPrefs {
   nativeInputUid?: string
   /** Zero-based hardware input channel. Absent and 0 both mean channel 1. */
   inputChannel?: number
+  /** Opaque OS-HAL output uid for the experimental native monitor. It is not
+   * and must never be compared with Chromium outputId. */
+  nativeMonitorOutputUid?: string
+  /** Zero-based physical output channels for the monitor's ChannelMap. */
+  nativeMonitorOutputChannels?: number[]
+  /** Native monitor gain only; enabled/headphone confirmation never persist. */
+  monitorGainDb?: number
+  /** Experimental portable zcore/zdsp song-output backend. */
+  nativePlayback?: boolean
+  /** Explicit native song-output provider. Only Windows persists a choice;
+   * other platforms keep their single platform provider. */
+  nativeAudioProvider?: Extract<DesktopPlaybackProvider, 'wasapi' | 'asio'>
   /** Master output level 0..1 — belongs to the machine, not to a project. */
   master?: number
   /** Reference-tone gain shared by every exercise, stored with app audio prefs. */
@@ -115,13 +153,34 @@ export function sanitizeAudioPrefs(raw: unknown): AudioPrefs {
     r.inputChannel < 32
       ? r.inputChannel
       : undefined
+  const nativeMonitorOutputChannels = Array.isArray(r.nativeMonitorOutputChannels) &&
+    r.nativeMonitorOutputChannels.length > 0 && r.nativeMonitorOutputChannels.length <= 64 &&
+    r.nativeMonitorOutputChannels.every((channel) =>
+      typeof channel === 'number' && Number.isInteger(channel) && channel >= 0 && channel < 64
+    ) && new Set(r.nativeMonitorOutputChannels).size === r.nativeMonitorOutputChannels.length
+      ? [...r.nativeMonitorOutputChannels] as number[]
+      : undefined
+  const monitorGainDb = typeof r.monitorGainDb === 'number' && Number.isFinite(r.monitorGainDb)
+    ? Math.max(-60, Math.min(0, r.monitorGainDb))
+    : undefined
+  const outputId = id(r.outputId)
+  const inputId = id(r.inputId)
+  const nativeInputUid = id(r.nativeInputUid)
+  const nativeMonitorOutputUid = id(r.nativeMonitorOutputUid)
+  const nativeAudioProvider = r.nativeAudioProvider === 'asio' ? 'asio'
+    : r.nativeAudioProvider === 'wasapi' ? 'wasapi' : undefined
   return {
-    outputId: id(r.outputId),
-    inputId: id(r.inputId),
-    nativeInputUid: id(r.nativeInputUid),
-    inputChannel,
-    master,
-    referenceVolume
+    ...(outputId ? { outputId } : {}),
+    ...(inputId ? { inputId } : {}),
+    ...(nativeInputUid ? { nativeInputUid } : {}),
+    ...(inputChannel === undefined ? {} : { inputChannel }),
+    ...(nativeMonitorOutputUid ? { nativeMonitorOutputUid } : {}),
+    ...(nativeMonitorOutputChannels ? { nativeMonitorOutputChannels } : {}),
+    ...(monitorGainDb === undefined ? {} : { monitorGainDb }),
+    ...(r.nativePlayback === true ? { nativePlayback: true } : {}),
+    ...(nativeAudioProvider ? { nativeAudioProvider } : {}),
+    ...(master === undefined ? {} : { master }),
+    ...(referenceVolume === undefined ? {} : { referenceVolume })
   }
 }
 
@@ -156,7 +215,7 @@ export function trainingWindows(
  * Lane labels and colours — the kit's table, because the phone draws the same
  * project and Bass has to be the same blue in both. They had drifted by a
  * digit before this was shared. `tests/unit/kit-tokens.test.ts` fails if the
- * phone's vendored copy stops matching.
+ * apps' published `@singz/ui` dependency specs or locked artifacts diverge.
  */
 export const TRACK_META: Record<string, { label: string; color: string }> = STEM_META
 

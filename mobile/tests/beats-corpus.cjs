@@ -28,6 +28,10 @@
  * grid, runs the host CLI over the SAME files, and compares. Ten or more
  * songs is the plan's bar; the summary says how many actually answered.
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../tests/shared/watchdog.cjs').arm('beats-corpus', { totalMinutes: 120 })
+
 const { execFileSync } = require('node:child_process')
 const fs = require('node:fs')
 const path = require('node:path')

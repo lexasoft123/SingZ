@@ -39,10 +39,10 @@ export function isCurrent(have: FileFacts | null | undefined, want: { size: numb
 /**
  * Every file the project is made of, as project.json states it: the six stems,
  * the singer's own tracks, and lyrics.json when the doc carries its hash.
- * Audio only by default — the ✓ counts what lands in the download folder, and
- * lyrics ride in prefs rather than on disk.
+ * Audio only by default — the ✓ and byte total describe playable media.
+ * Lyrics and graph documents ride in the small-text cache and are opt-in.
  */
-export function filesOfProject(doc: ProjectDoc | undefined, opts?: { lyrics?: boolean }): FileWant[] {
+export function filesOfProject(doc: ProjectDoc | undefined, opts?: { lyrics?: boolean; graph?: boolean }): FileWant[] {
   const out: FileWant[] = []
   for (const [name, h] of Object.entries(doc?.stemHashes ?? {})) {
     out.push({ path: `stems/${name}`, size: Number(h?.size ?? 0), md5: String(h?.md5 ?? '') })
@@ -50,6 +50,10 @@ export function filesOfProject(doc: ProjectDoc | undefined, opts?: { lyrics?: bo
   const lyrics = doc?.lyricsHash
   if (opts?.lyrics && lyrics) {
     out.push({ path: 'lyrics.json', size: Number(lyrics.size ?? 0), md5: String(lyrics.md5 ?? '') })
+  }
+  const graph = doc?.graphHash
+  if (opts?.graph && graph) {
+    out.push({ path: 'graph.json', size: Number(graph.size ?? 0), md5: String(graph.md5 ?? '') })
   }
   return out
 }

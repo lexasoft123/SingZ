@@ -1,21 +1,29 @@
 import { createNativeStackNavigator } from '@react-navigation/native-stack'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { StyleSheet, View } from 'react-native'
+import { Alert, AppState, StyleSheet, View } from 'react-native'
 import type { MultitrackEngine } from '../engine'
 import type { RouteLatency } from '../latency'
+import { log } from '../log'
 import type { ProjectDoc } from '../model'
+import {
+  flushMetronomeForLifecycle,
+  MetronomeBackgroundFailureDelivery
+} from '../playback/metronome-durability'
 import { releaseProject, type LoadedProject } from '../projects'
 import AddSongSheet, { type AddSongRequest } from './AddSongSheet'
 import CatalogScreen from './CatalogScreen'
 import LogPanel from './LogPanel'
 import PlayerScreen from './PlayerScreen'
+import SettingsScreen from './SettingsScreen'
 import { C, NATIVE_SHEET_FIT_SUPPORTED } from './bits'
+import { TEST } from './testhooks'
 
 type RootStackParamList = {
   Catalog: undefined
   Player: undefined
   AddSong: undefined
   Log: undefined
+  Settings: undefined
 }
 
 const Stack = createNativeStackNavigator<RootStackParamList>()
@@ -36,6 +44,7 @@ export function PlayerRoute({
   trimMs = 0,
   onTrim = () => undefined,
   onTrainingFacts,
+  onFallback = () => undefined,
   onBack,
   onClosed
 }: {
@@ -49,10 +58,16 @@ export function PlayerRoute({
     keyInfo: NonNullable<NonNullable<ProjectDoc['settings']>['key']> | null
     transpose: number
   }) => void
+  onFallback?: (project: LoadedProject) => void
   onBack: () => void
   onClosed: (project: LoadedProject) => void
 }): React.JSX.Element {
-  useEffect(() => () => onClosed(project), [onClosed, project])
+  const ownedProject = useRef(project)
+  ownedProject.current = project
+  // The native pre-start fallback replaces the buffer-free project in place.
+  // Route ownership ends only on unmount; cleaning on every prop replacement
+  // would mark the still-visible fallback player closed and release its PCM.
+  useEffect(() => () => onClosed(ownedProject.current), [onClosed])
   return (
     <PlayerScreen
       active={active}
@@ -63,13 +78,44 @@ export function PlayerRoute({
       onTrim={onTrim}
       onTrainingFacts={onTrainingFacts}
       onBack={onBack}
+      onFallback={onFallback}
     />
   )
 }
 
+/**
+ * Screen options for the Player route.
+ *
+ * The swipe-back gesture used to be switched off whenever the project carried
+ * a native handle, which made the two playback backends feel like different
+ * apps: the same screen, and the singer's habitual edge-swipe silently did
+ * nothing. Nothing about native playback needs it off — the metronome flush
+ * runs from the route's cleanup for both backends, and closePlayerProject
+ * already sequences the native unload ahead of releasing legacy ownership,
+ * whether the pop came from the button or from a gesture.
+ */
+export function playerScreenOptions(): {
+  gestureEnabled: boolean
+  fullScreenGestureEnabled: boolean
+} {
+  return { gestureEnabled: true, fullScreenGestureEnabled: false }
+}
+
 export function closePlayerProject(engine: MultitrackEngine, project: LoadedProject): void {
-  engine.unload()
-  releaseProject(project)
+  const releaseLegacyOwnership = (): void => {
+    engine.unload()
+    releaseProject(project)
+  }
+  if (!project.nativePlayback) {
+    releaseLegacyOwnership()
+    return
+  }
+  void project.nativePlayback
+    .unload('player route closed')
+    .catch(error =>
+      log('native-playback', `player route cleanup could not prove native unload · ${String(error)}`, 'error')
+    )
+    .finally(releaseLegacyOwnership)
 }
 
 function AddSongRoute({
@@ -109,6 +155,38 @@ function AddSongRoute({
   )
 }
 
+/**
+ * Flushes the metronome journal when the player route goes — WITHOUT holding
+ * the route. It used to prevent its own removal and re-dispatch the pop once
+ * the flush had landed, which on a native-stack swipe is a screen that has
+ * already left: the navigator pushes the player back to honour the
+ * prevention and the re-dispatched pop swipes it away again — "when I swipe
+ * back to the catalog, it opens once more and swipes back by itself" (a
+ * phone, 2026-09-06). Nothing needs the hold: accepted metronome edits live
+ * in the synchronously journaled phone entry before any flush, and the flush
+ * only reconciles them into project.json, so it runs from the route's
+ * cleanup instead, with the same alert on failure.
+ */
+function PlayerRemovalFence({
+  children,
+  rootMounted
+}: {
+  children: React.ReactNode
+  rootMounted: React.RefObject<boolean>
+}): React.JSX.Element {
+  useEffect(
+    () => () => {
+      void flushMetronomeForLifecycle('player back', {
+        onFailure: failure => {
+          if (rootMounted.current) Alert.alert('Metronome setting was not saved', failure)
+        }
+      })
+    },
+    [rootMounted]
+  )
+  return <>{children}</>
+}
+
 export default function RootNavigator({
   active = true,
   engine,
@@ -133,11 +211,40 @@ export default function RootNavigator({
 }): React.JSX.Element {
   const [project, setProject] = useState<LoadedProject | null>(null)
   const [addSong, setAddSong] = useState<AddSongRequest | null>(null)
+  const mounted = useRef(true)
+  const backgroundFailureDelivery = useRef<MetronomeBackgroundFailureDelivery | null>(null)
+  if (backgroundFailureDelivery.current === null)
+    backgroundFailureDelivery.current = new MetronomeBackgroundFailureDelivery(
+      failure => Alert.alert('Metronome setting was not saved', failure),
+      undefined,
+      AppState.currentState === 'active'
+    )
+
+  useEffect(() => {
+    mounted.current = true
+    const subscription = AppState.addEventListener('change', next => {
+      backgroundFailureDelivery.current?.appStateChanged(next)
+      if (next === 'inactive' || next === 'background') {
+        void flushMetronomeForLifecycle('background', {
+          onFailure: failure => backgroundFailureDelivery.current?.report(failure)
+        })
+      }
+    })
+    return () => {
+      mounted.current = false
+      backgroundFailureDelivery.current?.unmount()
+      subscription.remove()
+      // Best-effort eager reconciliation only. Accepted phone edits already
+      // live in the synchronously flushed native journal, so correctness does
+      // not depend on React cleanup remaining alive to await this promise.
+      void flushMetronomeForLifecycle('unmount')
+    }
+  }, [])
 
   const closeProject = useCallback(
     (closing: LoadedProject): void => {
       closePlayerProject(engine, closing)
-      setProject((current) => (current === closing ? null : current))
+      setProject(current => (current === closing ? null : current))
       onProjectClosed()
     },
     [engine, onProjectClosed]
@@ -145,7 +252,7 @@ export default function RootNavigator({
 
   const finishAddSong = useCallback((request: AddSongRequest, addedDir: string | null): void => {
     request.onClose(addedDir)
-    setAddSong((current) => (current === request ? null : current))
+    setAddSong(current => (current === request ? null : current))
   }, [])
 
   return (
@@ -156,19 +263,35 @@ export default function RootNavigator({
           headerShown: false,
           contentStyle: styles.root
         }}
+        screenListeners={{
+          // Dev-only: the stack's route names with a timestamp on every
+          // state change, so a driver can see a pop that came back (the
+          // double swipe-back of 2026-09-06 was invisible to `__test.screen`,
+          // which follows the loaded project, not the stack).
+          state: event => {
+            if (!TEST) return
+            const routes = (event.data as { state: { routes: { name: string }[] } }).state.routes.map(r => r.name)
+            const history = (TEST.stackHistory as { t: number; routes: string[] }[] | undefined) ?? []
+            const last = history[history.length - 1]
+            if (!last || last.routes.join('>') !== routes.join('>')) history.push({ t: Date.now(), routes })
+            TEST.stackHistory = history.slice(-40)
+          }
+        }}
       >
         <Stack.Screen name="Catalog">
           {({ navigation }) => (
             <CatalogScreen
               active={active}
+              engine={engine}
               sampleRate={engine.sampleRate}
+              onOpenSettings={() => navigation.navigate('Settings')}
               onOpenLog={() => navigation.navigate('Log')}
-              onOpenAddSong={(request) => {
+              onOpenAddSong={request => {
                 setAddSong(request)
                 navigation.navigate('AddSong')
               }}
               onCloseAddSong={() => navigation.goBack()}
-              onLoaded={(loaded) => {
+              onLoaded={loaded => {
                 setProject(loaded)
                 onProjectLoaded(loaded)
                 navigation.navigate('Player')
@@ -178,26 +301,26 @@ export default function RootNavigator({
         </Stack.Screen>
         <Stack.Screen
           name="Player"
-          options={{
-            gestureEnabled: true,
-            fullScreenGestureEnabled: false
-          }}
+          options={playerScreenOptions()}
         >
           {({ navigation }) =>
             project == null ? (
               <View style={styles.root} />
             ) : (
-              <PlayerRoute
-                active={active}
-                engine={engine}
-                project={project}
-                route={route}
-                trimMs={trimMs}
-                onTrim={onTrim}
-                onTrainingFacts={onTrainingFacts}
-                onBack={() => navigation.goBack()}
-                onClosed={closeProject}
-              />
+              <PlayerRemovalFence rootMounted={mounted}>
+                <PlayerRoute
+                  active={active}
+                  engine={engine}
+                  project={project}
+                  route={route}
+                  trimMs={trimMs}
+                  onTrim={onTrim}
+                  onTrainingFacts={onTrainingFacts}
+                  onBack={() => navigation.goBack()}
+                  onClosed={closeProject}
+                  onFallback={fallback => setProject(fallback)}
+                />
+              </PlayerRemovalFence>
             )
           }
         </Stack.Screen>
@@ -212,7 +335,7 @@ export default function RootNavigator({
             contentStyle: styles.sheet
           }}
           listeners={{
-            transitionEnd: (event) => {
+            transitionEnd: event => {
               if (!event.data.closing) addSong?.onShown?.()
             }
           }}
@@ -233,6 +356,15 @@ export default function RootNavigator({
           }}
         >
           {({ navigation }) => <LogPanel onClose={() => navigation.goBack()} />}
+        </Stack.Screen>
+        <Stack.Screen
+          name="Settings"
+          options={{
+            presentation: 'fullScreenModal',
+            contentStyle: styles.root
+          }}
+        >
+          {({ navigation }) => <SettingsScreen onClose={() => navigation.goBack()} />}
         </Stack.Screen>
       </Stack.Navigator>
     </View>

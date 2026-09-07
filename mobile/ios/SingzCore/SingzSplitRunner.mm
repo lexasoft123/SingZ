@@ -15,8 +15,8 @@
 #include <os/proc.h>
 #include <sys/sysctl.h>
 
-#include "progress.h"
-#include "split_engine.h"
+#include <zcore/base/progress.h>
+#include <zcore/legacy/split_engine.h>
 
 // Same six, same order, as kStemNames in split_engine.cpp (the caller owns
 // the .part renames, per the engine contract).

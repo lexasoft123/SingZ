@@ -9,7 +9,7 @@ import {
 } from 'react-native-audio-api'
 import { accentIndex, barLengthAt, beatIndexAtOrAfter, beatTime } from './beat'
 import { describeOutput } from './latency'
-import { log } from './log'
+import { fmtMs, log } from './log'
 // fmtTime here is the song-position one (M:SS); log.ts exports a same-named
 // wall-clock formatter, which is not what a play/pause line wants.
 import { fmtTime, MET_DEFAULTS, type BeatInfo, type MetronomeConfig } from './model'
@@ -70,7 +70,7 @@ function trainingLimiterCurve(size = 2_049, drive = 1.55): Float32Array {
   const curve = new Float32Array(size)
   const normalization = Math.tanh(drive)
   for (let index = 0; index < size; index++) {
-    const input = index * 2 / (size - 1) - 1
+    const input = (index * 2) / (size - 1) - 1
     curve[index] = Math.tanh(input * drive) / normalization
   }
   return curve
@@ -86,7 +86,14 @@ interface StretchHost {
 export class MultitrackEngine {
   private ctx = new AudioContext()
   private backgrounded = false
+  /** True while the process output lease belongs to the experimental native
+   * playback session. This is separate from backgrounding: a cleanup proof
+   * may return ownership to legacy while the app remains foregrounded. */
+  private nativeOutputHandoff = false
   private master = this.ctx.createGain()
+  /** Song-only master. Metronome/training references intentionally bypass
+   * this bus, matching NativePlaybackSession's song-gain/reference split. */
+  private songMasterGain = 1
   /** Cues bypass the song master/stretch chain: transposing or slowing a song
    * must never change the reference pitch the exercise core requested. */
   private trainingGain = this.ctx.createGain()
@@ -121,8 +128,16 @@ export class MultitrackEngine {
   private clickLap = 0
   /** First beat index at/after the play position — where a count-in hands over. */
   private startBeatIdx: number | null = null
-  private countInfo: { firstCtx: number; periodCtx: number; total: number; perBar: number } | null =
-    null
+  private countInfo: {
+    firstCtx: number
+    periodCtx: number
+    /** Each count-in click's context time, in order: the dots light on
+     *  these, not on an even division of the runway (a first beat 0.3 s
+     *  into the song makes the two differ by 210 ms on the last dot). */
+    clickCtx: number[]
+    total: number
+    perBar: number
+  } | null = null
 
   /** Clicks scheduled since launch (diagnostics/tests). */
   clickCount = 0
@@ -138,16 +153,17 @@ export class MultitrackEngine {
     // Master bus: tracks -> master -> [SingzStretch] -> destination. The
     // stretch node (patched into audio-api) corrects varispeed pitch and
     // applies transpose; at 0 semitones it bypasses with zero latency.
-    const ctxHost = (this.ctx as unknown as { context: { createSingzStretch?: () => StretchHost } })
-      .context
+    const ctxHost = (
+      this.ctx as unknown as {
+        context: { createSingzStretch?: () => StretchHost }
+      }
+    ).context
     if (typeof ctxHost.createSingzStretch === 'function') {
       this.stretchHost = ctxHost.createSingzStretch()
       ;(this.master as unknown as { node: { connect(n: unknown): void } }).node.connect(
         this.stretchHost
       )
-      this.stretchHost.connect(
-        (this.ctx.destination as unknown as { node: unknown }).node
-      )
+      this.stretchHost.connect((this.ctx.destination as unknown as { node: unknown }).node)
     } else {
       this.master.connect(this.ctx.destination)
     }
@@ -187,9 +203,20 @@ export class MultitrackEngine {
 
   /** Schedule a compact warm reference phrase on the engine clock. Song
    * playback is paused first, making cue and karaoke ownership exclusive. */
-  async playTrainingCues(cues: readonly VocalTrainingCue[]): Promise<{ ok: true; endsAt: number } | { ok: false; error: string }> {
+  async playTrainingCues(
+    cues: readonly VocalTrainingCue[]
+  ): Promise<{ ok: true; endsAt: number } | { ok: false; error: string }> {
     try {
-      if (this.backgrounded) return { ok: false, error: 'Audio is paused while SingZ is in the background.' }
+      if (this.backgrounded)
+        return {
+          ok: false,
+          error: 'Audio is paused while SingZ is in the background.'
+        }
+      if (this.nativeOutputHandoff)
+        return {
+          ok: false,
+          error: 'Song playback currently owns the iPhone audio output.'
+        }
       this.pause()
       this.cancelTrainingCues()
       const generation = ++this.trainingCueGeneration
@@ -198,10 +225,13 @@ export class MultitrackEngine {
         return { ok: false, error: 'Training cue was cancelled.' }
       const plan = planTrainingCues(cues, this.ctx.currentTime + START_DELAY)
       for (const voice of plan.voices) {
-        if (generation !== this.trainingCueGeneration) return { ok: false, error: 'Training cue was cancelled.' }
+        if (generation !== this.trainingCueGeneration)
+          return { ok: false, error: 'Training cue was cancelled.' }
         const { start, end } = voice
         const fundamental = 440 * 2 ** ((voice.midi - 69) / 12)
-        const concurrentVoices = plan.voices.filter((candidate) => candidate.start < end && candidate.end > start).length
+        const concurrentVoices = plan.voices.filter(
+          candidate => candidate.start < end && candidate.end > start
+        ).length
         const voiceScale = 1 / Math.max(1, concurrentVoices)
         // Hammond-like drawbars turn the reference into a small instrument:
         // a dominant fundamental, woody upper harmonics and restrained
@@ -233,7 +263,10 @@ export class MultitrackEngine {
       return { ok: true, endsAt: plan.endsAt }
     } catch (error) {
       this.cancelTrainingCues()
-      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error)
+      }
     }
   }
 
@@ -241,9 +274,21 @@ export class MultitrackEngine {
     this.trainingCueGeneration++
     const now = this.ctx.currentTime
     for (const { oscillator, gain } of this.trainingNodes.splice(0)) {
-      try { oscillator.stop(now) } catch { /* already ended */ }
-      try { oscillator.disconnect() } catch { /* already disconnected */ }
-      try { gain.disconnect() } catch { /* already disconnected */ }
+      try {
+        oscillator.stop(now)
+      } catch {
+        /* already ended */
+      }
+      try {
+        oscillator.disconnect()
+      } catch {
+        /* already disconnected */
+      }
+      try {
+        gain.disconnect()
+      } catch {
+        /* already disconnected */
+      }
     }
   }
 
@@ -260,12 +305,41 @@ export class MultitrackEngine {
     try {
       await this.ctx.suspend()
     } catch (error) {
-      log('engine', `background suspend failed · ${error instanceof Error ? error.message : String(error)}`, 'warn')
+      log(
+        'engine',
+        `background suspend failed · ${error instanceof Error ? error.message : String(error)}`,
+        'warn'
+      )
     }
   }
 
   allowForegroundAudio(): void {
     this.backgrounded = false
+  }
+
+  /** Quiesce RNAudioAPI before RemoteIO is allowed to open. `unload()` frees
+   * song graph ownership but deliberately leaves this AudioContext alive, so
+   * the explicit suspend barrier is required to prevent overlapping output
+   * renderers during the B2 handoff. */
+  async suspendOutputForNativePlayback(): Promise<void> {
+    this.nativeOutputHandoff = true
+    this.pause()
+    this.cancelTrainingCues()
+    this.cancelPendingClicks()
+    if (this.ctx.state === 'running') await this.ctx.suspend()
+    log('engine', 'legacy output suspended for native playback handoff')
+  }
+
+  /** Called only after native unload returned a process-global fallback
+   * lease. The next legacy play resumes the AudioContext lazily. */
+  allowLegacyOutputAfterNativeCleanup(): void {
+    if (!this.nativeOutputHandoff) return
+    this.nativeOutputHandoff = false
+    log('engine', 'legacy output allowed by native cleanup lease')
+  }
+
+  get outputHeldForNativePlayback(): boolean {
+    return this.nativeOutputHandoff
   }
 
   /** Decode stem bytes/asset at the context rate (no runtime resampling). */
@@ -333,6 +407,19 @@ export class MultitrackEngine {
 
   get pitchTempo(): { semitones: number; rate: number } {
     return { semitones: this.pitchSemis, rate: this.rate }
+  }
+
+  get masterGain(): number {
+    return this.songMasterGain
+  }
+
+  setMasterGain(gain: number): void {
+    if (!Number.isFinite(gain)) return
+    const next = Math.max(0, Math.min(1, gain))
+    if (next === this.songMasterGain) return
+    this.songMasterGain = next
+    this.master.gain.setTargetAtTime(next, this.ctx.currentTime, 0.02)
+    this.emit()
   }
 
   private applyStretch(): void {
@@ -489,8 +576,7 @@ export class MultitrackEngine {
        * truncated window: it would cycle on a shorter period than the stems
        * and drift out of phase with the music on the first wrap. Let it play
        * out and stop, which is what a short lane does anyway. */
-      src.loop =
-        src.loopEnd - src.loopStart > 0.05 && src.buffer.duration >= r.end - 0.001
+      src.loop = src.loopEnd - src.loopStart > 0.05 && src.buffer.duration >= r.end - 0.001
     } else {
       src.loop = false
     }
@@ -543,7 +629,7 @@ export class MultitrackEngine {
   private trainTick(): void {
     const tr = this.training
     const want = tr && this.duckAt(this.audioPosition) ? tr.stems : []
-    if (want.length === this.ducked.size && want.every((id) => this.ducked.has(id))) return
+    if (want.length === this.ducked.size && want.every(id => this.ducked.has(id))) return
     this.ducked = new Set(want)
     this.applyGains()
     this.emit()
@@ -579,8 +665,9 @@ export class MultitrackEngine {
     // start does not, so the cutoff adds it before comparing.
     const now = this.ctx.currentTime - this.displayLag
     if (now >= this.startedAt + this.stretchLatency) return null
-    const done = Math.max(0, Math.min(c.total, Math.floor((now - c.firstCtx) / c.periodCtx) + 1))
-    return { total: c.total, done, perBar: c.perBar }
+    let done = 0
+    for (const at of c.clickCtx) if (now >= at) done++
+    return { total: c.total, done: Math.min(c.total, done), perBar: c.perBar }
   }
 
   setBeats(info: BeatInfo | null): void {
@@ -607,7 +694,7 @@ export class MultitrackEngine {
 
   /** One immediate click — loudness preview in the practice sheet. */
   previewClick(accent = false): void {
-    if (this.backgrounded) return
+    if (this.backgrounded || this.nativeOutputHandoff) return
     if (this.ctx.state === 'suspended') void this.ctx.resume()
     this.scheduleClick(this.ctx.currentTime, accent)
   }
@@ -671,7 +758,7 @@ export class MultitrackEngine {
     } catch {
       // older audio-api without the null setter
     }
-    this.clickNodes = this.clickNodes.filter((c) => c.node !== src)
+    this.clickNodes = this.clickNodes.filter(c => c.node !== src)
   }
 
   private cancelPendingClicks(): void {
@@ -809,7 +896,12 @@ export class MultitrackEngine {
   }
 
   getTrackStates(): TrackState[] {
-    return this.tracks.map(({ id, muted, solo, volume }) => ({ id, muted, solo, volume }))
+    return this.tracks.map(({ id, muted, solo, volume }) => ({
+      id,
+      muted,
+      solo,
+      volume
+    }))
   }
 
   load(list: EngineTrackInput[], opts: { position?: number; play?: boolean } = {}): void {
@@ -820,7 +912,7 @@ export class MultitrackEngine {
     this.pitchSemis = 0
     this.stretchLatency = 0
     this.applyStretch()
-    this.tracks = list.map((t) => {
+    this.tracks = list.map(t => {
       const gain = this.ctx.createGain()
       gain.connect(this.master)
       return {
@@ -847,9 +939,13 @@ export class MultitrackEngine {
   }
 
   async play(opts: { countIn?: boolean } = {}): Promise<void> {
-    if (this.backgrounded || this._playing || this.tracks.length === 0) return
+    if (this.backgrounded || this.nativeOutputHandoff || this._playing || this.tracks.length === 0)
+      return
+    // What Play costs on this side, so the two backends' logs can be read
+    // against each other. Resuming a suspended context is the slow part.
+    const requestedAt = Date.now()
     if (this.ctx.state === 'suspended') await this.ctx.resume()
-    if (this.backgrounded) return
+    if (this.backgrounded || this.nativeOutputHandoff) return
     if (this.startOffset >= this.duration - 0.01) this.startOffset = 0
 
     const gen = ++this.generation
@@ -914,9 +1010,11 @@ export class MultitrackEngine {
       const perBar = barLengthAt(g, this.startBeatIdx)
       const total = bars * perBar
       const span = this.startOffset - beatTime(g, this.nextClickIdx)
+      const first = this.nextClickIdx
       this.countInfo = {
-        firstCtx: this.clickCtxTime(beatTime(g, this.nextClickIdx), 0),
+        firstCtx: this.clickCtxTime(beatTime(g, first), 0),
         periodCtx: span / total / this.rate,
+        clickCtx: Array.from({ length: total }, (_, k) => this.clickCtxTime(beatTime(g, first + k), 0)),
         total,
         perBar
       }
@@ -926,11 +1024,15 @@ export class MultitrackEngine {
       // last-tick→music gap is exactly one second at the ear.
       const firstCtx = when + this.stretchLatency - secTicks * SEC_COUNT_PERIOD
       for (let k = 0; k < secTicks; k++) {
-        this.scheduleClick(firstCtx + k * SEC_COUNT_PERIOD, this.met.accent && k % SEC_COUNT_TICKS === 0)
+        this.scheduleClick(
+          firstCtx + k * SEC_COUNT_PERIOD,
+          this.met.accent && k % SEC_COUNT_TICKS === 0
+        )
       }
       this.countInfo = {
         firstCtx,
         periodCtx: SEC_COUNT_PERIOD,
+        clickCtx: Array.from({ length: secTicks }, (_, k) => firstCtx + k * SEC_COUNT_PERIOD),
         total: secTicks,
         perBar: SEC_COUNT_TICKS
       }
@@ -945,9 +1047,12 @@ export class MultitrackEngine {
     // Deliberately not awaited: the route probe can take up to 3 s and play()
     // must not wait on a diagnostic. The line lands a moment after the music.
     const at = fmtTime(this.startOffset)
+    // Measured here, printed later: the route probe below is deliberately not
+    // awaited, so its own delay must not be charged to Play.
+    const started = fmtMs(Math.max(0, Date.now() - requestedAt))
     void describeOutput().then(({ text, silent }) => {
       if (gen !== this.generation) return // a newer play() already reported
-      log('engine', `play from ${at} · ${text}`)
+      log('engine', `play from ${at} · ${text} · started in ${started}`)
       if (silent) {
         log(
           'engine',
@@ -1039,7 +1144,7 @@ export class MultitrackEngine {
   }
 
   setMuted(id: string, muted: boolean): void {
-    const t = this.tracks.find((t) => t.id === id)
+    const t = this.tracks.find(t => t.id === id)
     if (!t) return
     t.muted = muted
     this.applyGains()
@@ -1047,7 +1152,7 @@ export class MultitrackEngine {
   }
 
   setSolo(id: string, solo: boolean): void {
-    const t = this.tracks.find((t) => t.id === id)
+    const t = this.tracks.find(t => t.id === id)
     if (!t) return
     t.solo = solo
     this.applyGains()
@@ -1055,7 +1160,7 @@ export class MultitrackEngine {
   }
 
   setVolume(id: string, volume: number): void {
-    const t = this.tracks.find((t) => t.id === id)
+    const t = this.tracks.find(t => t.id === id)
     if (!t) return
     t.volume = Math.max(0, Math.min(1, volume))
     this.applyGains()
@@ -1063,7 +1168,7 @@ export class MultitrackEngine {
   }
 
   private applyGains(instant = false): void {
-    const anySolo = this.tracks.some((t) => t.solo)
+    const anySolo = this.tracks.some(t => t.solo)
     for (const t of this.tracks) {
       const audible = !t.muted && (!anySolo || t.solo) && !this.ducked.has(t.id)
       const target = audible ? t.volume : 0
@@ -1138,8 +1243,14 @@ export class MultitrackEngine {
     // Leaving a song unloads then releases, and the teardown path can reach
     // here twice; the second call has nothing to free and saying so twice
     // just spends lines of a 400-line log.
-    if (this.tracks.length > 0) log('engine', `unload · ${this.tracks.length} lanes released`)
+    const releasedAt = Date.now()
+    const lanes = this.tracks.length
     this.teardown()
+    if (lanes > 0)
+      log(
+        'engine',
+        `unload · ${lanes} lanes released · ${fmtMs(Math.max(0, Date.now() - releasedAt))}`
+      )
     this.training = null
     this.duration = 0
     this.startOffset = 0

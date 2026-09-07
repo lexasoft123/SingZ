@@ -1,5 +1,5 @@
 /**
- * Adversarial logit rows for the Beat This! postprocessor (mobile/native/core/
+ * Adversarial logit rows for the Beat This! postprocessor (zcore/src/legacy/
  * beat_this.cpp), written to a temp dir on demand.
  *
  * These exist because a real song reaches almost none of the postprocessor's

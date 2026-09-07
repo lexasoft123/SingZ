@@ -24,7 +24,7 @@
  *      the generated bundle, so a bumped constant cannot pass by accident);
  *      the open player picks the grid up through the analysis event
  *      without a reopen; and the melody line comes from the CORE's tracker
- *      (native/core/melody.cpp — the desktop's pyin, ported), asserted
+ *      (zcore/src/legacy/melody.cpp — the desktop's pyin, ported), asserted
  *      bit-identical to the worklet-hosted TS on the project's own song.wav
  *      (Phase 4c). The melody's VOICED count is not asserted — the
  *      sample's "vocal" is synthetic and the splitter routes it away from
@@ -51,6 +51,10 @@
  * NSUserDefaults from outside); global polls during the add's decode are
  * fine on the sim (the Hermes-inspector SIGSEGV was Android hardware).
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../tests/shared/watchdog.cjs').arm('split-ios', { totalMinutes: 120 })
+
 const { execFileSync } = require('node:child_process')
 const { readFileSync, copyFileSync, readdirSync, existsSync } = require('node:fs')
 const { join } = require('node:path')

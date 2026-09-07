@@ -11,12 +11,11 @@
 # answer to the same question, which is how the drift it detects happens in
 # the first place.
 #
-# The fingerprint covers everything COMPILED INTO the binary plus everything
-# that decides how: mobile/native/core (the CMakeLists included, so build flags
-# count), mobile/native/third_party (the vendored libFLAC — singz_flac links
-# into singz_core, and flac_io.cpp is how the CLI reads v2 projects' stems at
-# all), and both scripts, since vendor-analyze.sh chooses the compiler flags
-# and this one chooses what is hashed.
+# The fingerprint covers everything compiled into the binary plus everything
+# that decides how: zcore, zdsp, the native third-party tree, the host tools,
+# root CMake and its modules, and both scripts. The vendored libFLAC matters:
+# zcore_media links it into singz-analyze, and flac_io.cpp is how the CLI reads
+# v2 project stems.
 #
 # third_party was NOT in the original set, and leaving it out was survivable
 # only while this was a build-cache key: patch the vendored FLAC, and
@@ -33,12 +32,28 @@
 set -euo pipefail
 
 ROOT=${1:-"$(cd "$(dirname "$0")/.." && pwd)"}
-CORE="$ROOT/mobile/native/core"
-THIRD="$ROOT/mobile/native/third_party"
+SOURCE_DIRS=(
+  "$ROOT/zcore"
+  "$ROOT/zdsp"
+  "$ROOT/third_party/native"
+  "$ROOT/tools/native"
+  "$ROOT/cmake"
+)
+SOURCE_FILES=(
+  "$ROOT/CMakeLists.txt"
+  "$ROOT/scripts/vendor-analyze.sh"
+  "$ROOT/scripts/analyze-source-hash.sh"
+)
 
-for required in "$CORE" "$THIRD"; do
+for required in "${SOURCE_DIRS[@]}"; do
   if [ ! -d "$required" ]; then
     echo "analyze-source-hash: no sources at $required" >&2
+    exit 1
+  fi
+done
+for required in "${SOURCE_FILES[@]}"; do
+  if [ ! -f "$required" ]; then
+    echo "analyze-source-hash: missing build input $required" >&2
     exit 1
   fi
 done
@@ -60,14 +75,14 @@ done
 list=$(mktemp) sorted=$(mktemp)
 trap 'rm -f "$list" "$sorted"' EXIT
 
-find "$CORE" "$THIRD" -type f -print > "$list"
-printf '%s\n' "$ROOT/scripts/vendor-analyze.sh" "$ROOT/scripts/analyze-source-hash.sh" >> "$list"
+find "${SOURCE_DIRS[@]}" -type f -print > "$list"
+printf '%s\n' "${SOURCE_FILES[@]}" >> "$list"
 LC_ALL=C sort "$list" > "$sorted"
 
 files=()
 while IFS= read -r source; do files+=("$source"); done < "$sorted"
 if [ "${#files[@]}" -eq 0 ]; then
-  echo "analyze-source-hash: no files to hash under $CORE" >&2
+  echo "analyze-source-hash: no native build inputs to hash under $ROOT" >&2
   exit 1
 fi
 

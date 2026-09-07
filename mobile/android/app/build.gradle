@@ -83,6 +83,15 @@ def jscFlavor = 'io.github.react-native-community:jsc-android:2026004.+'
  * submission, a corrected bundle). Play refuses a versionCode twice.
  */
 def pkg = new groovy.json.JsonSlurper().parse(file("../../../package.json"))
+def singzAndroidCmakeInit = rootProject.file("../scripts/android-cmake-init.cmake")
+def singzAndroidCmakePolicyDigest = java.security.MessageDigest.getInstance("SHA-256")
+[
+    singzAndroidCmakeInit,
+    rootProject.file("../scripts/android-ccache-launcher.sh"),
+    rootProject.file("../scripts/android-ccache-launcher.ps1")
+].each { policyFile -> singzAndroidCmakePolicyDigest.update(policyFile.bytes) }
+def singzAndroidCmakePolicyHash = singzAndroidCmakePolicyDigest.digest()
+    .encodeHex().toString().take(16)
 def semver = (pkg.version =~ /^(\d+)\.(\d+)\.(\d+)/)
 if (!semver.find()) {
     throw new GradleException("package.json version '${pkg.version}' is not major.minor.patch")
@@ -92,6 +101,29 @@ def singzVersionCode = System.getenv('SINGZ_VERSION_CODE')?.toInteger() ?:
     (semver.group(1).toInteger() * 10000 +
      semver.group(2).toInteger() * 100 +
      semver.group(3).toInteger())
+def singzCodecTargetProof = project.findProperty('singzCodecTargetProof') == 'true'
+def singzSupportedCodecAbis = ['armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64']
+def singzShippingCodecAbis = (project.findProperty('reactNativeArchitectures') ?:
+    'armeabi-v7a,arm64-v8a').toString().split(',').collect { it.trim() }.findAll { !it.isEmpty() }
+if (singzShippingCodecAbis.isEmpty() ||
+    singzShippingCodecAbis.toSet().size() != singzShippingCodecAbis.size() ||
+    !singzSupportedCodecAbis.containsAll(singzShippingCodecAbis)) {
+    throw new GradleException(
+        "reactNativeArchitectures must be a non-empty unique subset of ${singzSupportedCodecAbis}; " +
+        "got ${singzShippingCodecAbis}")
+}
+if (singzCodecTargetProof && singzShippingCodecAbis.size() != 1) {
+    throw new GradleException(
+        "-PsingzCodecTargetProof=true requires exactly one reactNativeArchitectures ABI; " +
+        "got ${singzShippingCodecAbis}")
+}
+
+gradle.taskGraph.whenReady { graph ->
+    if (singzCodecTargetProof && graph.allTasks.any { it.name.toLowerCase().contains('release') }) {
+        throw new GradleException(
+            'Codec target-proof staging is configuration-only and can never enter a Release APK/AAB')
+    }
+}
 
 /**
  * Release signing. The upload key never lives in the repo: locally it comes
@@ -135,15 +167,34 @@ android {
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode singzVersionCode
         versionName singzVersionName
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        // The selected product runtime and the APK ABI set are one policy.
+        // An ABI omitted here cannot be smuggled in by a stale jniLibs copy;
+        // every ABI included here is required by the strict selector below.
+        ndk {
+            abiFilters(*singzShippingCodecAbis)
+        }
         externalNativeBuild {
             cmake {
-                arguments "-DORT_SDK_DIR=${layout.buildDirectory.get().asFile}/ort-sdk"
+                // Repeat the root-project injection here because AGP treats a
+                // later arguments(...) call as replacement for the app's
+                // earlier defaultConfig value. Library modules retain the
+                // root injection directly.
+                arguments "-DORT_SDK_DIR=${layout.buildDirectory.get().asFile}/ort-sdk",
+                    "-DCMAKE_PROJECT_INCLUDE_BEFORE=${singzAndroidCmakeInit.absolutePath}",
+                    "-DSINGZ_ANDROID_NATIVE_MAX_JOBS=8",
+                    "-DSINGZ_ANDROID_BUILD_POLICY_HASH=${singzAndroidCmakePolicyHash}",
+                    "-DSINGZ_CODEC_TARGET_PROOF=${singzCodecTargetProof ? 'ON' : 'OFF'}",
+                    // The debug variant optimizes the app's own native code
+                    // (src/main/cpp/CMakeLists.txt says why); this is the
+                    // opt-out for stepping through the core in a debugger.
+                    "-DSINGZ_NATIVE_UNOPTIMIZED=${project.hasProperty('singzNativeUnoptimized') ? 'ON' : 'OFF'}"
             }
         }
     }
 
-    // libsingzcore: the shared C++ engine core (mobile/native/core) — split
-    // engine + Beat This runner + FLAC encode, one source tree with iOS
+    // libsingzcore: the JNI binding over the root zcore component targets —
+    // split engine + Beat This runner + FLAC encode, shared with iOS/desktop
     // (docs/PHONE-STANDALONE.md). The ORT AAR is legacy-layout (headers/ +
     // jni/<abi>/libonnxruntime.so, no prefab), so extractOrtSdk below unpacks
     // it and CMake imports the .so per ABI; the APK's copy still comes from
@@ -216,6 +267,71 @@ tasks.register("extractOrtSdk", Copy) {
 }
 preBuild.dependsOn("extractOrtSdk")
 
+tasks.register("selectFfmpegCodecRuntime", Exec) {
+    workingDir file("../../..")
+    def arguments = [
+        "mobile/scripts/select-ffmpeg-codec-runtime.mjs",
+        "--require-android-set", singzShippingCodecAbis.join(',')
+    ]
+    if (singzCodecTargetProof) {
+        arguments.add("--proof-staging")
+        environment "SINGZ_CODEC_TARGET_PROOF", "1"
+    }
+    commandLine "node", *arguments
+}
+tasks.register("verifyFfmpegCodecRuntime", Exec) {
+    workingDir file("../../..")
+    def arguments = [
+        "mobile/scripts/verify-ffmpeg-codec-runtime.mjs",
+        "--require-android-set", singzShippingCodecAbis.join(',')
+    ]
+    if (singzCodecTargetProof) {
+        arguments.add("--proof-staging")
+        environment "SINGZ_CODEC_TARGET_PROOF", "1"
+    } else {
+        arguments.add("--require-full")
+    }
+    commandLine "node", *arguments
+    dependsOn("selectFfmpegCodecRuntime")
+}
+preBuild.dependsOn("verifyFfmpegCodecRuntime")
+
+def ffmpegNoticeAssets = layout.buildDirectory.dir("generated/ffmpeg-notice-assets")
+tasks.register("prepareFfmpegNoticeAssets", Copy) {
+    dependsOn("verifyFfmpegCodecRuntime")
+    from(file("../../../third_party")) {
+        include "NOTICE-FFMPEG.md"
+        include "COPYING.LGPLv2.1-FFMPEG"
+        include "FFMPEG-SHA256SUMS"
+    }
+    from(file("../../../third_party/ffmpeg-codec")) {
+        include "profile.json"
+    }
+    from(file("../../node_modules/react-native-audio-api/common/cpp/audioapi/external")) {
+        include "singz-ffmpeg-selection.json"
+    }
+    into(ffmpegNoticeAssets.map { it.dir("third_party/ffmpeg") })
+}
+android.sourceSets.main.assets.srcDir(ffmpegNoticeAssets)
+preBuild.dependsOn("prepareFfmpegNoticeAssets")
+
+// The corpus belongs only to the instrumentation APK. Normal debug/release
+// product APKs contain neither these files nor the conditionally compiled
+// proof runner.
+android.sourceSets.androidTest.assets.srcDir(file("../../../tests/fixtures/codecs/data"))
+
+def signalsmithNoticeAssets = layout.buildDirectory.dir("generated/signalsmith-notice-assets")
+tasks.register("prepareSignalsmithNoticeAssets", Copy) {
+    from(file("../../../third_party/native/signalsmith")) {
+        include "VENDORED.txt"
+        include "LICENSE-stretch.txt"
+        include "LICENSE-linear.txt"
+    }
+    into(signalsmithNoticeAssets.map { it.dir("third_party/signalsmith") })
+}
+android.sourceSets.main.assets.srcDir(signalsmithNoticeAssets)
+preBuild.dependsOn("prepareSignalsmithNoticeAssets")
+
 dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
@@ -224,6 +340,8 @@ dependencies {
     // table TypeScript and Swift run (tests/shared/currency-cases.json)
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
     // Oboe: Google's AAudio wrapper, used by the core's Android capture
     // backend. The version is pinned to the one react-native-audio-api already
     // pulls in, so the APK carries exactly one liboboe.so. Its value here is

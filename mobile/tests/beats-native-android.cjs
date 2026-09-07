@@ -63,6 +63,10 @@
  * Reach Metro with `adb reverse tcp:8081 tcp:<METRO_PORT>`; a fresh
  * applicationId has no debug_http_host pref and defaults to localhost:8081.
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../tests/shared/watchdog.cjs').arm('beats-native-android')
+
 const { execFileSync } = require('node:child_process')
 const { PKG, dataDir, silenceDevice } = require('./android-lib.cjs')
 

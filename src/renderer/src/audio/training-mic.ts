@@ -19,7 +19,7 @@ export interface TrainingMicSource {
   readonly device: MicDevice | null
   start(context: AudioContext, options?: TrainingMicStartOptions): Promise<void>
   readInfo(): PitchFrame
-  stop(): void
+  stop(): void | Promise<void>
 }
 
 /** Desktop adapter over the shared C++ AudioInput pipeline. Raw native-rate
@@ -35,6 +35,7 @@ export class NativeTrainingMicSource implements TrainingMicSource {
   private dbfs = METER_FLOOR_DB
   private usingFallback = false
   private ended: (() => void) | undefined
+  private stopPending: Promise<void> | null = null
 
   constructor(fallback: TrainingMicSource = new MicPitch()) {
     this.fallback = fallback
@@ -49,6 +50,7 @@ export class NativeTrainingMicSource implements TrainingMicSource {
   }
 
   async start(context: AudioContext, options: TrainingMicStartOptions = {}): Promise<void> {
+    if (this.token || this.stopPending || this.usingFallback) await this.stop()
     const api = window.singz
     if (
       typeof api.startDesktopAudioInput !== 'function' ||
@@ -111,20 +113,37 @@ export class NativeTrainingMicSource implements TrainingMicSource {
     return { rms, dbfs, signal: dbfs > METER_FLOOR_DB }
   }
 
-  stop(): void {
-    if (this.usingFallback) {
-      this.fallback.stop()
-      this.usingFallback = false
-    }
+  async stop(): Promise<void> {
+    if (this.stopPending) return this.stopPending
+    const fallbackOwned = this.usingFallback
     const token = this.token
-    this.token = null
-    this.unsubscribe?.()
-    this.unsubscribe = null
-    this.dev = null
-    this.frame = { f0: 0, clarity: 0, rms: 0 }
-    this.dbfs = METER_FLOOR_DB
-    this.ended = undefined
-    if (token) void window.singz.stopDesktopAudioInput(token)
+    const operation = (async (): Promise<void> => {
+      if (fallbackOwned) {
+        await Promise.resolve(this.fallback.stop())
+        if (this.usingFallback) this.usingFallback = false
+      }
+      if (token) {
+        const stopped = await window.singz.stopDesktopAudioInput(token)
+        if (!stopped.ok) {
+          throw new Error(stopped.error || 'The native microphone did not confirm that it stopped.')
+        }
+        if (this.token === token) this.token = null
+      }
+      if (this.token === null && !this.usingFallback) {
+        this.unsubscribe?.()
+        this.unsubscribe = null
+        this.frame = { f0: 0, clarity: 0, rms: 0 }
+        this.dbfs = METER_FLOOR_DB
+        this.ended = undefined
+        this.dev = null
+      }
+    })()
+    this.stopPending = operation
+    try {
+      await operation
+    } finally {
+      if (this.stopPending === operation) this.stopPending = null
+    }
   }
 
   private onEvent(token: string, event: DesktopAudioInputEvent): void {
@@ -136,7 +155,10 @@ export class NativeTrainingMicSource implements TrainingMicSource {
     }
     if (event.type === 'error' || event.type === 'ended') {
       const ended = this.ended
-      this.stop()
+      void this.stop().catch(() => {
+        // Keep the token for an explicit retry; renderer destruction remains
+        // the final owner if the child cannot confirm termination.
+      })
       ended?.()
     }
   }
@@ -151,6 +173,8 @@ export class DesktopTrainingMicCapture {
   private readonly injectedNowMs: (() => number) | undefined
   private context: AudioContext | null = null
   private startPending: Promise<void> | null = null
+  private sourceStopPending: Promise<void> | null = null
+  private sourceTeardownRequired = false
   /** True only after stop() explicitly revoked the operation in startPending. */
   private pendingCancelled = false
   private generation = 0
@@ -163,6 +187,23 @@ export class DesktopTrainingMicCapture {
 
   async start(context: AudioContext, options: TrainingMicStartOptions = {}): Promise<void> {
     if (this.disposed) throw new Error('Training microphone capture is disposed.')
+    if (this.sourceTeardownRequired) {
+      const predecessor = this.startPending
+      const predecessorCancelled = this.pendingCancelled
+      await this.requestSourceStop()
+      if (this.disposed) throw new Error('Training microphone capture is disposed.')
+      // Keep the predecessor relationship even if its finally handler ran in
+      // the same microtask as teardown. Unexpected start failures must reach
+      // the queued caller instead of launching a new capture behind them.
+      if (predecessor && predecessorCancelled) {
+        if (this.startPending && this.startPending !== predecessor) {
+          if (this.context !== context)
+            throw new Error('Training microphone is starting on another audio context.')
+          return this.startPending
+        }
+        return this.launchStart(context, options, predecessor)
+      }
+    }
     if (this.source.active) {
       if (this.context !== context)
         throw new Error('Training microphone is already attached to another audio context.')
@@ -216,6 +257,7 @@ export class DesktopTrainingMicCapture {
     options: TrainingMicStartOptions,
     generation: number
   ): Promise<void> {
+    if (this.sourceTeardownRequired) await this.requestSourceStop()
     try {
       await this.source.start(context, options)
     } catch (error) {
@@ -223,7 +265,11 @@ export class DesktopTrainingMicCapture {
       throw error
     }
     if (this.disposed || this.generation !== generation || this.context !== context) {
-      this.source.stop()
+      if (this.sourceStopPending) {
+        try { await this.sourceStopPending } catch { /* retry below owns the result */ }
+      }
+      this.sourceTeardownRequired = true
+      await this.requestSourceStop()
       throw new Error('Training microphone start was cancelled.')
     }
   }
@@ -251,7 +297,26 @@ export class DesktopTrainingMicCapture {
     this.generation++
     this.context = null
     if (this.startPending) this.pendingCancelled = true
-    this.source.stop()
+    this.sourceTeardownRequired = true
+    void this.requestSourceStop().catch(() => {
+      // The source retains its token; a later start/stopAndWait retries.
+    })
+  }
+
+  async stopAndWait(): Promise<void> {
+    const pendingStart = this.startPending
+    this.stop()
+    await this.sourceStopPending
+    if (pendingStart) {
+      try {
+        await pendingStart
+      } catch {
+        // A stopped start normally rejects as cancelled; an independent start
+        // failure likewise owns no usable capture. In both cases the final
+        // source stop below is the safety boundary for any late native token.
+      }
+    }
+    await this.requestSourceStop()
   }
 
   dispose(): void {
@@ -260,7 +325,28 @@ export class DesktopTrainingMicCapture {
     this.generation++
     this.context = null
     if (this.startPending) this.pendingCancelled = true
-    this.source.stop()
+    this.sourceTeardownRequired = true
+    void this.requestSourceStop().catch(() => {
+      // Disposal observes the rejection; process cleanup remains fail-closed.
+    })
+  }
+
+  private requestSourceStop(): Promise<void> {
+    if (this.sourceStopPending) return this.sourceStopPending
+    let operation!: Promise<void>
+    let stopped: void | Promise<void>
+    try {
+      stopped = this.source.stop()
+    } catch (error) {
+      stopped = Promise.reject(error)
+    }
+    operation = Promise.resolve(stopped).then(() => {
+      this.sourceTeardownRequired = false
+    }).finally(() => {
+      if (this.sourceStopPending === operation) this.sourceStopPending = null
+    })
+    this.sourceStopPending = operation
+    return operation
   }
 }
 

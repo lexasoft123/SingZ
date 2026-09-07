@@ -62,24 +62,25 @@ link() { # link <relpath> — symlink main's copy when the worktree lacks it
 #     come from .engines-src/ and downloads. No branch of ours changes them,
 #     they cost minutes to rebuild, and every worktree wants the same copy.
 #
-#   our own engine builds (singz-analyze, singz-capture.node) come from
-#     mobile/native/core — which is exactly what a feature branch edits.
+#   our own engine builds (singz-analyze, singz-capture.node) come from the
+#     shared zcore/zdsp tree — which is exactly what a feature branch edits.
 #
 # Linking the whole directory shared the second kind too, and that is not a
 # theoretical hazard: during the v0.19.0 cut a sibling worktree ran
 # vendor-analyze.sh, wrote THROUGH this symlink into the main checkout's slot,
 # and the desktop spawned that branch's core — live-input adapter included —
 # for hours. On the machine where this was written, nine worktrees held nine
-# different states of mobile/native/core and one shared binary matching none
-# of them.
+# different states of the native core and one shared binary matching none of
+# them.
 #
 # So the directory is mirrored instead of linked: third-party artifacts are
 # symlinks to main's copies, ours are absent until this worktree builds its
-# own. Only singz-analyze is built below — singz-capture.node has no producer
-# on this tree yet (it arrives with the dsp-graph branch), so its slot is
-# simply left empty rather than pointing at another branch's addon, which is
-# the whole point. src/main/analyze-provenance.ts is the safety net for what
-# this cannot reach (a packaged app, a hand-copied binary); this is the fix.
+# own. Only singz-analyze is built below; the capture addon has a producer but
+# is Electron/platform-specific and is built explicitly with
+# `npm run capture:addon`. Its slot stays empty until then rather than pointing
+# at another branch's addon, which is the whole point.
+# src/main/analyze-provenance.ts is the safety net for what this cannot reach
+# (a packaged app, a hand-copied binary); this is the fix.
 REPO_BUILT='singz-analyze singz-analyze.exe singz-analyze.source-hash
             singz-analyze.exe.source-hash singz-capture.node
             singz-capture.node.source-hash'
@@ -91,10 +92,6 @@ is_repo_built() {
 }
 
 mirror_vendor() {
-  if [ ! -d "$MAIN/vendor" ]; then
-    echo "  skip  vendor (absent in main checkout too)"
-    return 0
-  fi
   # Migrate the old whole-directory symlink. Only ever a symlink is removed —
   # never a real directory, which in the main checkout is the actual engines.
   if [ -L "$WT/vendor" ]; then
@@ -102,6 +99,14 @@ mirror_vendor() {
     echo "  vendor was a symlink to the shared slot — replacing it with a mirror"
   fi
   mkdir -p "$WT/vendor"
+  # A worktree-local directory is still required when main has no vendor/: the
+  # analyzer built below needs somewhere real to publish. Returning before the
+  # symlink migration left an old dangling whole-vendor link in place, so
+  # vendor-analyze.sh could never create its per-platform output directory.
+  if [ ! -d "$MAIN/vendor" ]; then
+    echo "  skip  vendor mirror (absent in main checkout; local slot is ready)"
+    return 0
+  fi
   local entry name inner iname
   for entry in "$MAIN"/vendor/*; do
     [ -e "$entry" ] || continue
@@ -157,7 +162,8 @@ done
 # ccache needs no setup here: every worktree already shares one cache dir
 # (it is per-user, not per-checkout), and what makes a SIBLING worktree
 # actually hit — base_dir + hash_dir, against absolute paths and -g — is
-# passed per build by vendor-whisper.sh, run-with-ccache.js and, for Xcode,
+# passed per build by vendor-whisper.sh, Android's one env-carrying all-project
+# CMake launcher/run-with-ccache.js and, for Xcode,
 # mobile/scripts/ccache-xcode-conf.js at postinstall. Nothing outside the
 # project is written; see docs/DEVELOPMENT.md.
 
@@ -230,7 +236,7 @@ if [ "$MODE" != "--desktop-only" ]; then
   (cd "$WT/mobile" && node scripts/patch-audio-api.js)
 
   # mobile's postinstall (run by the npm ci above) materializes
-  # ios/SingzCore/core as a COPY of native/core, because CocoaPods drops
+  # ios/SingzCore/core as a filtered COPY of top-level zcore, because CocoaPods drops
   # source_files globs that reach above the podspec dir AND skips directory
   # symlinks. Assert it landed BEFORE pod install globs it: a worktree whose
   # tree moved without a re-install keeps building the stale mirror, and the
@@ -242,18 +248,40 @@ if [ "$MODE" != "--desktop-only" ]; then
   # .hpp, so a header could go out of date without anything asking.
   stale=$(cd "$WT" && node -e '
     const fs = require("fs")
-    const src = "mobile/native/core", dst = "mobile/ios/SingzCore/core"
+    const path = require("path")
+    const dst = "mobile/ios/SingzCore/core"
     if (!fs.existsSync(dst)) { console.log("it does not exist"); process.exit(0) }
-    const want = fs.readdirSync(src).filter((f) => /\.(h|hpp|cpp|mm)$/.test(f))
-    const bad = want.filter((f) => {
-      const to = dst + "/" + f
-      if (!fs.existsSync(to)) return true
-      return !fs.readFileSync(src + "/" + f).equals(fs.readFileSync(to))
-    })
-    if (bad.length) console.log(bad.slice(0, 3).join(", ") + (bad.length > 3 ? ` +${bad.length - 3} more` : ""))
+    const { iosAudioHostCallbackFiles, zcoreDeviceCallbackFiles } =
+      require("./mobile/scripts/native-component-sources")
+    const callbackDefinitions = new Set(
+      [...zcoreDeviceCallbackFiles, ...iosAudioHostCallbackFiles]
+        .filter((file) => file.endsWith(".cpp")))
+    const bad = []
+    const compare = (from, to, prefix, accept) => {
+      for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
+        const relative = prefix ? `${prefix}/${entry.name}` : entry.name
+        const source = path.join(from, entry.name)
+        const target = path.join(to, entry.name)
+        if (entry.isDirectory()) compare(source, target, relative, accept)
+        else if (accept(entry.name, relative) &&
+                 (!fs.existsSync(target) ||
+                  !fs.readFileSync(source).equals(fs.readFileSync(target))))
+          bad.push(relative)
+      }
+    }
+    const sourceFile = (name, relative) => /\.(cpp|mm|h|hpp)$/.test(name) &&
+      !callbackDefinitions.has(relative)
+    const iosFile = (name, relative) => /\.(cpp|mm|h|hpp)$/.test(name) &&
+      !callbackDefinitions.has(relative)
+    compare("zcore/include", `${dst}/include`, "include",
+            (name) => /\.(h|hpp)$/.test(name))
+    compare("zcore/src", `${dst}/src`, "src", sourceFile)
+    compare("zcore/platform/ios", `${dst}/platform/ios`, "platform/ios", iosFile)
+    if (bad.length) console.log(bad.slice(0, 3).join(", ") +
+      (bad.length > 3 ? ` +${bad.length - 3} more` : ""))
   ')
   if [ -n "$stale" ]; then
-    echo "FATAL: mobile/ios/SingzCore/core does not match mobile/native/core ($stale)." >&2
+    echo "FATAL: mobile/ios/SingzCore/core does not match top-level zcore ($stale)." >&2
     echo "       Expected mobile's postinstall to sync it. Run:" >&2
     echo "         (cd mobile && npm run postinstall)" >&2
     exit 1
@@ -282,8 +310,8 @@ fi
 # This worktree's OWN singz-analyze — one of the slots mirror_vendor
 # deliberately left empty. Without it the desktop finds no core and silently
 # falls back to the TS detectors, which is a quieter wrong answer than the
-# shared binary was. singz-capture.node is left to whoever adds its build
-# script; an empty slot is the correct state until then.
+# shared binary was. singz-capture.node is built explicitly when the current
+# Electron/platform addon is needed; an empty slot is the correct default.
 # Non-fatal: a machine with no cmake still gets a working checkout, and
 # analyze-provenance.ts says so at launch either way.
 if command -v cmake >/dev/null 2>&1; then

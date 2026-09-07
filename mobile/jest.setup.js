@@ -152,6 +152,10 @@ NativeModules.AudioRouteInfo ??= {
     }),
   getPref: () => Promise.resolve(null),
   setPref: () => Promise.resolve(),
-  getTextPref: () => Promise.resolve(null),
+  // `undefined`, NOT `null` — that is what an absent key actually resolves to
+  // on the device, because an Objective-C `nil` crosses the New Architecture
+  // bridge as undefined. Every suite mocked it as `null` and so could never
+  // see the crash a first-ever preference write hit in the field.
+  getTextPref: () => Promise.resolve(undefined),
   setTextPref: () => Promise.resolve(),
 };

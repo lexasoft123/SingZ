@@ -664,18 +664,21 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
   @ReactMethod
   fun writeText(project: String, file: String, text: String, promise: Promise) {
     exec.execute {
+      var tmp: File? = null
       try {
         val dir = docDirFor(project) ?: throw Exception("Bad project name")
         if (!relOk(file)) throw Exception("Bad file name")
         val out = File(dir, file)
         out.parentFile?.mkdirs()
-        val tmp = File(out.path + ".part")
-        tmp.writeText(text)
+        val part = File(out.path + ".part")
+        tmp = part
+        part.writeText(text)
         // renameTo replaces atomically (rename(2)) — no pre-delete, so a kill
         // here can never leave the project without its doc
-        if (!tmp.renameTo(out)) throw Exception("Cannot write $file")
+        if (!part.renameTo(out)) throw Exception("Cannot write $file")
         promise.resolve(true)
       } catch (e: Exception) {
+        tmp?.delete()
         promise.reject("write", e.message ?: "Cannot write $file")
       }
     }

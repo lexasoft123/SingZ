@@ -19,6 +19,10 @@
  * otherwise the app quietly loads the other tree's JS. The __test.forget
  * probe below is what catches that.
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../tests/shared/watchdog.cjs').arm('offline-cache')
+
 const http = require('http');
 const fs = require('node:fs');
 const { join } = require('node:path');

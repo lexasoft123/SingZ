@@ -1,0 +1,22 @@
+#pragma once
+
+#include <cstddef>
+
+namespace zdsp::analysis {
+
+const char* analysisBuildId() noexcept;
+
+struct LiveInputFrame {
+  double frequency = 0;
+  double clarity = 0;
+  double peak = 0;
+  double rms = 0;
+  double dbfs = -120;
+};
+
+LiveInputFrame analyzeLiveInput(const float* mono, size_t frames,
+                                double sampleRate,
+                                double minFrequency = 70.0,
+                                double maxFrequency = 1050.0);
+
+}  // namespace zdsp::analysis

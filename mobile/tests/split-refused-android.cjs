@@ -38,6 +38,10 @@
  * driver reconnects after every wake. Leaves appops and device_config as it
  * found them, and deletes its project.
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../tests/shared/watchdog.cjs').arm('split-refused-android')
+
 const { execFileSync } = require('node:child_process')
 const { join } = require('node:path')
 const { mkdirSync, writeFileSync } = require('node:fs')

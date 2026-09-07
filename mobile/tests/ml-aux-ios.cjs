@@ -24,6 +24,10 @@
  * from them with silent bass/guitar/piano beside). <models-dir>: the two
  * beat models, which the suite COPIES into the container at step 2.
  */
+// Every E2E driver runs under a deadline: a hang prints where it was and
+// exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
+require('../../tests/shared/watchdog.cjs').arm('ml-aux-ios')
+
 const { execFileSync } = require('node:child_process')
 const { createHash } = require('node:crypto')
 const fs = require('node:fs')

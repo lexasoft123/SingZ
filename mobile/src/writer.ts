@@ -1,6 +1,13 @@
 import { NativeModules } from 'react-native'
 import type { LyricLine, ProjectDoc, ProjectSettings } from './model'
 import { log } from './log'
+import { mutateProjectDocument } from './project-document'
+import {
+  GRAPH_DOCUMENT_FORMAT,
+  MAX_GRAPH_DOCUMENT_TEXT_BYTES,
+  parseGraphDocument,
+  serializeGraphDocument
+} from './gen/graph-document'
 
 /**
  * The phone's project writer (Phase 1, docs/PHONE-STANDALONE.md): a
@@ -137,24 +144,48 @@ export async function createProject(input: CreateProjectInput): Promise<CreatedP
   return { dir, doc }
 }
 
-/** Re-write lyrics.json + its hash + the doc (Find-lyrics retry). The CALLER
- *  re-reads project.json from disk (readText) and hands the string in —
- *  results merge into what is on disk, never into UI state; this function
- *  trusts that contract. */
+/** Re-write lyrics.json + its hash + the doc (Find-lyrics retry). The shared
+ * project transaction re-reads after any competing analysis/metronome write. */
 export async function writeLyrics(
   dir: string,
-  currentDocJson: string,
   lyrics: { lines: LyricLine[]; credit?: string }
 ): Promise<ProjectDoc> {
-  const doc = JSON.parse(currentDocJson) as ProjectDoc
   const lyricsDoc = { source: 'lrclib' as const, credit: lyrics.credit, lines: lyrics.lines }
   await Folder.writeText(dir, 'lyrics.json', JSON.stringify(lyricsDoc, null, 2))
-  const next: ProjectDoc = {
+  const lyricsHash = await Folder.statFile(dir, 'lyrics.json')
+  const next = await mutateProjectDocument(dir, (doc) => ({
     ...doc,
     savedAt: new Date().toISOString(),
-    lyricsHash: await Folder.statFile(dir, 'lyrics.json')
-  }
-  await Folder.writeText(dir, 'project.json', JSON.stringify(next, null, 2))
+    lyricsHash
+  }))
+  if (!next) throw new Error('Lyrics project update was not written.')
   return next
 }
 
+/** Explicit portable-graph transaction: canonical graph.json first, native
+ * stat/hash second, project.json last. The shared project-document queue spans
+ * the whole callback, so analysis, lyrics, and metronome writers cannot land
+ * between the graph bytes and their reference. */
+export async function writeProjectGraph(dir: string, source: string): Promise<ProjectDoc> {
+  let sourceBytes = 0
+  for (const char of source) {
+    const cp = char.codePointAt(0) ?? 0
+    sourceBytes += cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4
+  }
+  if (sourceBytes > MAX_GRAPH_DOCUMENT_TEXT_BYTES) {
+    throw new Error('Graph document exceeds the portable graph size limit.')
+  }
+  const parsed = parseGraphDocument(source)
+  if (parsed.kind !== 'known' || parsed.format !== GRAPH_DOCUMENT_FORMAT) {
+    throw new Error(`Graph document format ${parsed.format} is not writable by this app.`)
+  }
+  const canonical = serializeGraphDocument(parsed)
+  const next = await mutateProjectDocument(dir, async (doc) => {
+    const written = await Folder.writeText(dir, 'graph.json', canonical)
+    if (!written) throw new Error('Graph document was not written.')
+    const hash = await Folder.statFile(dir, 'graph.json')
+    return { ...doc, savedAt: new Date().toISOString(), graphHash: { format: parsed.format, ...hash } }
+  })
+  if (!next) throw new Error('Graph project update was not written.')
+  return next
+}

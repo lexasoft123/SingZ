@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fakeNativeWriter, type FakeNativeWriter } from '../shared/fake-native-cache'
 import lrcFixture from '../shared/lrc-fixture.json'
+import graphCases from '../shared/graph-document-cases.json'
 
 let docs: string
 let imports: string
@@ -100,13 +101,28 @@ describe('phone-created project → desktop reader', () => {
   it('writeLyrics refreshes lyrics.json and its hash from the doc on disk', async () => {
     const { dir } = await phoneAdd()
     const writer = await phoneWriter()
-    const before = readFileSync(join(docs, dir, 'project.json'), 'utf8')
-    const next = await writer.writeLyrics(dir, before, {
+    const next = await writer.writeLyrics(dir, {
       lines: lrcFixture.lines.slice(0, 2),
       credit: 'retry'
     })
     const onDisk = JSON.parse(readFileSync(join(docs, dir, 'lyrics.json'), 'utf8'))
     expect(onDisk.lines).toHaveLength(2)
     expect(next.lyricsHash!.size).toBe(readFileSync(join(docs, dir, 'lyrics.json')).length)
+  })
+
+  it('writes graph file-first and every later phone writer preserves its reference', async () => {
+    const { dir, doc } = await phoneAdd()
+    const writer = await phoneWriter()
+    const withGraph = await writer.writeProjectGraph(dir, JSON.stringify(graphCases.base))
+    expect(withGraph.graphHash?.format).toBe(1)
+    expect(withGraph.graphHash?.size).toBe(readFileSync(join(docs, dir, 'graph.json')).length)
+
+    const afterLyrics = await writer.writeLyrics(dir, { lines: lrcFixture.lines.slice(0, 1), credit: 'later' })
+    expect(afterLyrics.graphHash).toEqual(withGraph.graphHash)
+    const { readProjectGraph } = await import('../../src/main/projects')
+    expect(await readProjectGraph(join(docs, dir, doc.songFile))).toMatchObject({
+      ok: true,
+      graph: { hash: withGraph.graphHash }
+    })
   })
 })
