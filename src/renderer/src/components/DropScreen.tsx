@@ -46,6 +46,10 @@ interface Props {
   /** Eager shell asset: recoverable route copies must not share a lazy child. */
   gdriveIcon: string
   loading: boolean
+  /** What the open is doing and how far along — null until one starts. The
+   *  wait is under a second on a fast Mac and several on a field laptop, and
+   *  a spinner says the same thing either way. */
+  progress?: { msg: string; frac: number } | null
   songName?: string
   /** Song still open behind this page (Catalog view) — softens the hero copy. */
   openName?: string
@@ -62,6 +66,7 @@ interface Props {
 export default function DropScreen({
   gdriveIcon,
   loading,
+  progress,
   songName,
   openName,
   onBrowse,
@@ -256,7 +261,12 @@ export default function DropScreen({
             ) : (
               <h1>Reading “{songName}”…</h1>
             )}
-            <p>Decoding audio and drawing the timeline.</p>
+            <p>{progress?.msg ?? 'Decoding audio and drawing the timeline.'}</p>
+            {progress && (
+              <div className="open-rail" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress.frac * 100)}>
+                <div className="open-fill" style={{ width: `${Math.round(progress.frac * 100)}%` }} />
+              </div>
+            )}
           </>
         ) : openName ? (
           <>

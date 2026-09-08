@@ -1977,6 +1977,10 @@ export class IosNativePlaybackCoordinator {
     if (!options.isCurrent()) throw new Error('Song load was superseded.');
     return this.withOwnershipLock(async () => {
       if (!options.isCurrent()) throw new Error('Song load was superseded.');
+      // Everything from here is where the seconds actually go, and none of it
+      // said so. Retiring the last song's graph can take a moment of its own;
+      // the core's build takes most of it.
+      options.onStep('Releasing the last song…', MATERIALIZE_SHARE + 0.02);
       const retired = await this.retireActiveLocked(
         'new native project selected',
       );
@@ -1991,6 +1995,16 @@ export class IosNativePlaybackCoordinator {
       // the same ownership queue until prepare reaches an exact cleanup point.
       this.active = handle;
       let prepared: { ok: true } | { ok: false; error: string };
+      // One awaited call into the core with no events of its own, and the
+      // longest part of the open. The bar eases toward 0.95 and stops there
+      // until the song is really open — see `creepingProgress`.
+      const building = creepingProgress(
+        options.onStep,
+        'Building the audio graph…',
+        MATERIALIZE_SHARE + 0.05,
+        0.97,
+        1200,
+      );
       try {
         prepared = await this.prepareHandle(
           handle,
@@ -2018,6 +2032,11 @@ export class IosNativePlaybackCoordinator {
           );
         }
         throw error;
+      } finally {
+        // Every way out of the prepare — done, refused, cancelled, thrown —
+        // goes through here, so the bar can never be left creeping after the
+        // thing it was reporting has stopped.
+        building.stop();
       }
       if (
         !prepared.ok &&
@@ -6899,7 +6918,7 @@ async function materializeNativeProject(
     const wanted = doc.stemHashes?.[source.hashName];
     onStep(
       `Fetching ${source.label} · ${index + 1}/${sources.length}`,
-      index / sources.length,
+      MATERIALIZE_SHARE * (index / sources.length),
     );
     await crumb?.(`fetching ${source.id}`);
     const path =
@@ -6925,7 +6944,7 @@ async function materializeNativeProject(
   }
   let lyrics: LyricsDoc | null = null;
   if (entry.hasLyrics && isCurrent()) {
-    onStep('Fetching lyrics…', 0.98);
+    onStep('Fetching lyrics…', MATERIALIZE_SHARE * 0.9);
     try {
       const text =
         entry.source === 'gdrive'
@@ -6942,6 +6961,57 @@ async function materializeNativeProject(
       `${lyrics ? 'lyrics ready' : 'no lyrics'} · ${since(materializeStartedAt)}`,
   );
   return { entry, doc, graph, lyrics, lanes };
+}
+
+/**
+ * How much of the opening bar `materializeNativeProject` is worth.
+ *
+ * MEASURED, not reasoned about, and the reasoning was wrong. "Zero JS decode"
+ * in materialize's own log says nothing about its cost: resolving each stem's
+ * authorized path takes ~400 ms on the field phone, six of them in sequence,
+ * and with the lyrics that is ~3.0 s of a 4.5 s open — about 65%. The graph
+ * build after it is ~1.5 s.
+ *
+ * So the original 0-to-0.98 was nearly right about materialize and wrong about
+ * what follows: the core's build reported NOTHING, and the bar sat at 98%
+ * under a message still saying "Fetching lyrics…" for the last third of the
+ * wait. That is the "freezes at 100%" this fixes — by reporting the build, not
+ * by shrinking the fetch.
+ *
+ * (The first attempt at this file put materialize at 0.3, on the assumption
+ * that path resolution was free. `mobile/tests/open-steps-android.cjs` printed
+ * the steps and said otherwise.)
+ */
+const MATERIALIZE_SHARE = 0.65;
+
+/**
+ * A bar that keeps moving through a step that cannot report its own progress.
+ *
+ * `native.prepare` is one awaited call into the core — six stems decoded, no
+ * events — so there is nothing true to report between its start and its end.
+ * This eases from `from` toward `to` and NEVER reaches it: an asymptote is the
+ * honest shape for "still working, cannot say how much longer", where a bar
+ * pinned at 100% is a claim that it is finished.
+ *
+ * Ten ticks a second, and it stops in a `finally`, so a superseded or failed
+ * prepare takes it down with them.
+ */
+function creepingProgress(
+  onStep: (message: string, fraction: number) => void,
+  label: string,
+  from: number,
+  to: number,
+  halfLifeMs = 2500,
+): { stop: () => void } {
+  const startedAt = Date.now();
+  onStep(label, from);
+  const timer = setInterval(() => {
+    const t = Date.now() - startedAt;
+    onStep(label, from + (to - from) * (1 - Math.exp(-t / halfLifeMs)));
+  }, 100);
+  return {
+    stop: () => clearInterval(timer),
+  };
 }
 
 function message(error: unknown): string {

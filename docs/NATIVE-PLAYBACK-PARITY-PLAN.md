@@ -201,6 +201,97 @@ a moment the singer is browsing rather than waiting, and would take ~272 ms off 
 first Play as well. Not done here; it is a main-process change with its own trade-off
 (cold launch, or a stall while browsing) and wants its own decision.
 
+### "Real players do not decode in advance" — correct, and worth taking seriously
+
+Raised while reading the numbers below, and it is the right challenge. Nothing
+plays FLAC: the callback needs PCM floats, so a decode happens either way. But
+decoding the WHOLE song up front is a simplification this codebase chose, not a
+requirement it inherited. DAWs stream dozens of tracks from disk with a
+lookahead buffer each; six is not a lot.
+
+What SingZ bought with the simplification: the graph's source node is
+`DecodedBufferView`, a view over immutable planar floats for the whole song, so
+every seek, loop, scrub and count-in re-anchor is O(1) into an array. What it
+pays: ~1.5 s of every phone open, and ~141 MB per song resident in the core —
+which is the phone's jetsam risk, and the exact twin of the renderer copy this
+branch removed on the desktop. **Streaming would fix both.**
+
+What genuinely raises the bar above a media player, and should not be waved
+away either: six lanes rather than one, Signalsmith Stretch on top needing
+lookahead of its own, and a singer who scrubs and loops continuously rather
+than seeking occasionally.
+
+**An earlier draft of this note claimed DAWs "usually transcode a compressed
+import rather than stream it". That is wrong, and checking it settles the
+argument.** The behaviour is split, and the split matters:
+
+- **REAPER decodes compressed sources ON THE FLY, writing no intermediate
+  file** — the Cockos forum's own answer to "editing MP3 files directly
+  without converting to WAV" is that it converts the data to floating point
+  audio on the fly, without needing to create a new file. The only thing it
+  writes beside the media is `.reapeaks`, for drawing. That makes REAPER an
+  existence proof for route 4 below, in production, with compressed sources,
+  at track counts far past six.
+- **Ableton Live does transcode**, and documents it: a compressed sample is
+  decoded to a temporary uncompressed file in a "Decoding Cache" with a
+  maximum size, a minimum-free-space rule and a Cleanup button (Live manual,
+  *Managing Files and Sets*).
+
+So streaming compressed multitrack audio is ordinary, not exotic, and "FLAC is
+too awkward to stream" does not survive the check. What remains against it here
+is narrower and honest: the time-stretcher's lookahead, and continuous
+scrubbing.
+
+Four routes, cheapest first, and they are not exclusive:
+
+1. **Prepare behind the open**, as the desktop already does. Hides the 1.5 s
+   without making anything faster. Smallest change; nothing about memory.
+2. **Cache decoded PCM beside the stems**, the DAW's import step. Opens become
+   a read (or an mmap) instead of a decode. Costs disk — ~141 MB for a 2-minute
+   six-lane song, halvable with int16 — and a cache-invalidation rule.
+3. **Decode the head, start, decode the rest behind.** Fast open, bounded
+   complexity, and a seek past the decoded region needs an answer.
+4. **Stream with per-lane ring buffers**, the DAW architecture. Fixes the open
+   AND the residency. Largest change, and the one with real dropout risk on a
+   phone under a time-stretcher.
+
+**A cheaper thing to check first, independent of all four:** the stems are
+44.1 kHz and `requiredSampleRate` is the OUTPUT DEVICE's rate, so a phone or
+Mac running at 48 kHz resamples all six lanes on every open, after decoding
+them. Nobody has measured that share. If it is large, matching the rates is a
+smaller fix than any of the above — and note that a streaming design would pay
+it per block instead of once, so it is worth knowing either way.
+
+### What the graph build spends its seconds on (2026-09-08)
+
+Asked while reading the open-step tables, and answerable without a new run
+because both halves were already measured on the same phone and song.
+
+**Prepare is decode-bound and linear in audio length.** It releases any parked
+lanes, decodes every lane on a bounded worker pool
+(`decodeLanesConcurrently` — already parallel; the sequential loop survives as
+the fallback that owns every refusal), admits them in lane order against a
+running memory budget, then builds the arena, the graph nodes and the cue plan.
+The decode is nearly all of it.
+
+The POCO says so twice over, from the session harness:
+
+| on the POCO, 122 s six-lane project | |
+|---|---|
+| prepare at a fresh open — **decodes six stems** | ~1500 ms |
+| prepare on a pitch change — **adopts the parked lanes, no decode** | **88-229 ms** |
+
+Same machine, same song, same call: with the decode ~1.5 s, without it under a
+fifth of a second. So roughly **1.3 s of the 1.5 is FLAC → PCM**, and ~0.2 s is
+everything else. (`native_playback_session.h` records the same ratio from an
+emulator — a rebuild 3.2 s → ~200 ms once adoption skips the decode — and the
+parallel decode itself was worth ~2100 ms when it landed.)
+
+Which says what CANNOT fix it: the decode is already parallel, and it is real
+work — hundreds of megabytes of PCM either way. What can is not decoding during
+the open at all, which is exactly what the desktop does by preparing behind a
+song already on screen.
+
 ### The mac's playing CPU falls 40% on one CSS rule (2026-09-08)
 
 Researched because the Windows finding might transfer. It did not — and looking

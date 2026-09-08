@@ -573,6 +573,27 @@ button.chip-status:hover {
   filter: saturate(0.15);
 }
 
+/* The song-open bar. Deliberately not animated: it is on screen exactly when
+   the app is busiest — six stems decoding and the native graph building — and
+   an animated stripe would compete with the work it is reporting. It moves
+   because the steps move it. */
+.open-rail {
+  width: min(420px, 70%);
+  height: 4px;
+  margin: 14px auto 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+
+.open-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  /* The width steps rather than slides for the same reason: a transition here
+     would repaint the bar every frame of every step. */
+}
+
 /* scrub layer + playhead */
 
 .scrub-overlay {
