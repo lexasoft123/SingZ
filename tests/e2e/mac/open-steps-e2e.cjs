@@ -73,7 +73,25 @@ function table(title, rows, marks) {
     const ready = Date.now() - t0
     const rows = JSON.parse(await val(win, 'JSON.stringify(__test.loadSteps())'))
     const dur = await val(win, '__test.engine.duration')
-    table(`${label} — "${song}" (${dur.toFixed(0)} s)`, rows, `click → phase ready: ${ready} ms`)
+    /* The native graph is NOT built during a desktop open — it is prepared
+       ahead of Play, 400 ms after the controls stop moving, which is after the
+       song is already on screen. That is why no build step appears in the
+       table above, and it is the whole difference in shape from the phones,
+       which build theirs inside the open and make the singer wait for it.
+       Read it out of main's own log so the comparison is a number. */
+    let graph = 'no graph prepared within 30 s'
+    for (let i = 0; i < 300; i++) {
+      const lines = await val(win, 'window.singz.getLog()')
+      const started = lines.find((l) => /^preparing graph/.test(l.line) && l.t >= t0)
+      const done = lines.find((l) => /^graph ready · generation/.test(l.line) && l.t >= t0)
+      if (started && done) {
+        const ms = /· (\d+) ms/.exec(done.line)
+        graph = `graph prepared AFTER the open: started ${started.t - t0} ms after the click, took ${ms ? ms[1] : '?'} ms`
+        break
+      }
+      await sleep(100)
+    }
+    table(`${label} — "${song}" (${dur.toFixed(0)} s)`, rows, `click → phase ready: ${ready} ms\n  ${graph}`)
     // Let the prepare-ahead settle so the second open pays for retiring it.
     await sleep(6000)
     if (label === 'FIRST open') {
