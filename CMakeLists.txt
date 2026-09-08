@@ -500,6 +500,17 @@ if(SINGZ_CORE_TESTS)
     SingZ::zdsp_runtime)
   add_test(NAME prepared_audio_tests COMMAND prepared_audio_tests)
 
+  add_executable(flac_streaming_source_tests
+    ${SINGZ_REPO_ROOT}/tests/native/flac_streaming_source_tests.cpp)
+  target_compile_features(flac_streaming_source_tests PRIVATE cxx_std_20)
+  target_link_libraries(flac_streaming_source_tests PRIVATE SingZ::zcore_media)
+  add_test(NAME flac_streaming_source_tests COMMAND flac_streaming_source_tests)
+
+  add_executable(flac_streaming_benchmark
+    ${SINGZ_REPO_ROOT}/tests/native/flac_streaming_benchmark.cpp)
+  target_compile_features(flac_streaming_benchmark PRIVATE cxx_std_20)
+  target_link_libraries(flac_streaming_benchmark PRIVATE SingZ::zcore_media)
+
   add_executable(codec_provisioning_tests
     ${SINGZ_REPO_ROOT}/tests/native/codec_provisioning_tests.cpp)
   target_compile_features(codec_provisioning_tests PRIVATE cxx_std_20)

@@ -8,6 +8,42 @@ sees anything*.
 
 This is a research note, not a plan of record. Nothing here is implemented.
 
+## Built and measured (2026-09-08)
+
+`zcore/src/media/flac_streaming_source.cpp` implements `StreamingAudioSource`
+over the vendored libFLAC. Not wired into the graph — the realtime node that
+consumes it is the next step — but real, tested against the full decode, and
+benchmarked on hardware.
+
+`flac_streaming_benchmark <lane.flac>...`, the six Deutschland stems (323.1 s
+each), against `prepareDecodedAudio` — the path in use today:
+
+| | decode everything | stream: open + one 0.5 s window | |
+|---|---|---|---|
+| **Mac (M-series)** | 1359 ms · 652 MB | **2.0 ms · 1.1 MB** | 692x faster, 594x smaller |
+| **POCO F5 (arm64)** | 1858 ms · 652 MB | **3.0 ms · 1.1 MB** | 613x faster, 594x smaller |
+
+And the number that says it can actually play: refilling all six lanes runs at
+**1637x realtime on the Mac and 1348x on the POCO**. A ring buffer has three
+orders of magnitude of headroom to absorb a scrub, a busy phone or a slow disk.
+
+**iOS**: the same source and benchmark build clean for `arm64-apple-ios` (a
+device binary, not the simulator). RUNNING it on a phone needs signing and an
+app host, so there is no iPhone row above and there should not be one until
+there is a measurement rather than an extrapolation.
+
+Two things the implementation learned that the research did not predict:
+
+- **libFLAC's seek is ALREADY sample-exact.** This file was written expecting
+  the standard hazard — `seek_absolute` landing on the frame CONTAINING the
+  target, leaving the caller to drop up to a block of run-in (4096 frames,
+  92.9 ms here). It does not: after a seek libFLAC hands over a SHORTENED frame
+  whose header reports the target itself. Instrumented across seven targets
+  deliberately off block boundaries, the run-in was zero every time. The drop
+  logic written for it is gone.
+- **A negative control is what found that.** Breaking the drop changed no test,
+  which meant either the tests missed it or the code was dead. It was dead.
+
 ## The question
 
 SingZ decodes every lane of a song to planar float PCM before playback starts.
