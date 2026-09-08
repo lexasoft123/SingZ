@@ -6090,19 +6090,41 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
       if (combined.isRequested())
         return failPreparation(NativePlaybackError::Cancelled,
                                "Native playback preparation was superseded");
-      const DecodedAudioStatus status = streamingGroup->addLane(
-          std::move(source.descriptor), requiredSampleRate);
+      // A DUPLICATE, exactly as the parallel decode pool takes one: addLane
+      // consumes the descriptor it is given, and a fallback below still needs
+      // the caller's own — decoding with the files already closed would turn a
+      // slower open into a failed one.
+      const int copy = duplicateDescriptor(source.descriptor.get());
+      if (copy < 0) {
+        streamingGroup.reset();
+        break;
+      }
+      // Rate is checked below rather than here, so a mismatch can fall back
+      // instead of failing: passing 0 accepts whatever the file holds.
+      const DecodedAudioStatus status =
+          streamingGroup->addLane(OwnedFileDescriptor(copy), 0);
       if (status != DecodedAudioStatus::Ok) {
-        return failPreparation(
-            decodeError(status),
-            "A FLAC playback lane could not be opened for streaming");
+        streamingGroup.reset();
+        break;
       }
     }
-    if (streamingGroup->prime(0) != DecodedAudioStatus::Ok) {
-      return failPreparation(NativePlaybackError::DecodeFailure,
-                             "A streamed playback lane could not be primed");
+    // THE STREAMING SOURCE DOES NOT RESAMPLE, and the decoded path does. Our
+    // own stems are 44.1 kHz while a phone's session commonly runs at 48, so a
+    // mismatch is the ordinary case, not an exotic one — and refusing it would
+    // mean a build with streaming on could not open a song at all. Decoding is
+    // the correct answer here: slower, and right.
+    for (size_t index = 0; streamingGroup != nullptr && index < sources.size();
+         ++index) {
+      const StreamingAudioInfo *info = streamingGroup->info(index);
+      if (info == nullptr ||
+          (requiredSampleRate != 0 && info->sampleRate != requiredSampleRate))
+        streamingGroup.reset();
     }
-    for (size_t index = 0; index < sources.size(); ++index) {
+    if (streamingGroup != nullptr &&
+        streamingGroup->prime(0) != DecodedAudioStatus::Ok)
+      streamingGroup.reset();
+    for (size_t index = 0; streamingGroup != nullptr && index < sources.size();
+         ++index) {
       const StreamingAudioInfo *info = streamingGroup->info(index);
       if (info == nullptr)
         return failPreparation(NativePlaybackError::DecodeFailure,
@@ -6117,7 +6139,7 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
       authoritativeDurationFrames =
           std::max(authoritativeDurationFrames, info->frameCount);
       PreparedPlaybackGraph::Lane lane;
-      lane.id = std::move(sources[index].id);
+      lane.id = sources[index].id;
       lane.window = streamingGroup->window(index);
       lane.streamChannels = info->channels;
       lane.streamFrames = info->frameCount;
@@ -6132,6 +6154,14 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
       lane.muted = sources[index].muted;
       lane.solo = sources[index].solo;
       decoded.push_back(std::move(lane));
+    }
+    // A fallback decided after lanes were built must leave nothing behind, or
+    // the decode loop would append to a half-populated set and the aggregate
+    // accounting would count the same song twice.
+    if (streamingGroup == nullptr) {
+      decoded.clear();
+      retained = *graphArenaAdmission;
+      authoritativeDurationFrames = 0;
     }
   }
 

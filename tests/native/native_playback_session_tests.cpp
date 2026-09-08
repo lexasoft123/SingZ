@@ -75,12 +75,14 @@ int openRead(const std::string &path) noexcept {
 }
 
 std::string writeWav(const char *name, uint32_t channels,
-                     const std::vector<float> &interleaved) {
+                     const std::vector<float> &interleaved,
+                     uint32_t sampleRate = 48000) {
   const std::string path = scratch(name);
   std::remove(path.c_str());
   singz::WavWriter writer;
   CHECK(channels != 0 && interleaved.size() % channels == 0);
-  CHECK(writer.open(path, 48000, static_cast<int>(channels)));
+  CHECK(writer.open(path, static_cast<int>(sampleRate),
+                    static_cast<int>(channels)));
   CHECK(writer.append(interleaved.data(),
                       static_cast<int64_t>(interleaved.size() / channels)));
   CHECK(writer.finalize());
@@ -730,8 +732,40 @@ void streamedLanesPlayTheSameAudioAsDecodedOnes() {
     return out;
   };
 
-  const std::vector<float> decodedOut = play(false, 1);
-  const std::vector<float> streamedOut = play(true, 2);
+  // A stem at a DIFFERENT rate to the device must still open. Our own stems
+  // are 44.1 kHz and a phone's session commonly runs at 48, so this is the
+  // ordinary case: the streaming source cannot resample, the decoded one can,
+  // and the prepare has to fall back rather than refuse the song. Before this
+  // was handled, a build with streaming on could not open a single song.
+  {
+    std::vector<float> offRate(200000, 0.0F);
+    for (size_t i = 0; i < offRate.size(); i++)
+      offRate[i] = 0.3F * std::sin(static_cast<double>(i) * 0.01);
+    const std::string offWav = writeWav("streamed-44k.wav", 1, offRate, 44100);
+    const std::string offFlac = scratch("streamed-44k.flac");
+    std::remove(offFlac.c_str());
+    CHECK(singz::compactStem(offWav, offFlac).ok);
+
+    singz::NativePlaybackPrepareConfig request = config();
+    request.streamLanes = true;  // the device stays at 48000
+    auto offLanes = std::vector<singz::NativePlaybackLaneSource>{};
+    offLanes.push_back(lane("song", offFlac));
+    const auto fell = session.prepare(std::move(request), std::move(offLanes), 1);
+    CHECK(fell.ok);
+    const singz::NativePlaybackStatus status = session.status();
+    // Decoded, so it is resampled to the device rate and carries a waveform —
+    // both things a streamed lane would not have. The waveform is the visible
+    // proof that this went down the decode path and not the streamed one.
+    CHECK(status.lanes.size() == 1);
+    const auto peaks = session.lanePeaks(1);
+    CHECK(peaks.ok && peaks.lanes.size() == 1 && peaks.lanes[0].valid);
+    CHECK(session.unload(1).ok);
+    std::remove(offWav.c_str());
+    std::remove(offFlac.c_str());
+  }
+
+  const std::vector<float> decodedOut = play(false, 2);
+  const std::vector<float> streamedOut = play(true, 3);
   CHECK(decodedOut.size() == total && streamedOut.size() == total);
   // The reference must actually carry the tone, or "identical" would only be
   // proving that two silences match.
