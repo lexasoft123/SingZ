@@ -201,6 +201,48 @@ a moment the singer is browsing rather than waiting, and would take ~272 ms off 
 first Play as well. Not done here; it is a main-process change with its own trade-off
 (cold launch, or a stall while browsing) and wants its own decision.
 
+### "Real players do not decode in advance" — correct, and worth taking seriously
+
+Raised while reading the numbers below, and it is the right challenge. Nothing
+plays FLAC: the callback needs PCM floats, so a decode happens either way. But
+decoding the WHOLE song up front is a simplification this codebase chose, not a
+requirement it inherited. DAWs stream dozens of tracks from disk with a
+lookahead buffer each; six is not a lot.
+
+What SingZ bought with the simplification: the graph's source node is
+`DecodedBufferView`, a view over immutable planar floats for the whole song, so
+every seek, loop, scrub and count-in re-anchor is O(1) into an array. What it
+pays: ~1.5 s of every phone open, and ~141 MB per song resident in the core —
+which is the phone's jetsam risk, and the exact twin of the renderer copy this
+branch removed on the desktop. **Streaming would fix both.**
+
+What genuinely raises the bar above a media player, and should not be waved
+away either: six lanes rather than one, Signalsmith Stretch on top needing
+lookahead of its own, and a singer who scrubs and loops continuously rather
+than seeking occasionally. FLAC is variable-cost per frame and seek-unfriendly,
+which is why DAWs usually TRANSCODE a compressed import to an uncompressed
+working format rather than stream it directly.
+
+Four routes, cheapest first, and they are not exclusive:
+
+1. **Prepare behind the open**, as the desktop already does. Hides the 1.5 s
+   without making anything faster. Smallest change; nothing about memory.
+2. **Cache decoded PCM beside the stems**, the DAW's import step. Opens become
+   a read (or an mmap) instead of a decode. Costs disk — ~141 MB for a 2-minute
+   six-lane song, halvable with int16 — and a cache-invalidation rule.
+3. **Decode the head, start, decode the rest behind.** Fast open, bounded
+   complexity, and a seek past the decoded region needs an answer.
+4. **Stream with per-lane ring buffers**, the DAW architecture. Fixes the open
+   AND the residency. Largest change, and the one with real dropout risk on a
+   phone under a time-stretcher.
+
+**A cheaper thing to check first, independent of all four:** the stems are
+44.1 kHz and `requiredSampleRate` is the OUTPUT DEVICE's rate, so a phone or
+Mac running at 48 kHz resamples all six lanes on every open, after decoding
+them. Nobody has measured that share. If it is large, matching the rates is a
+smaller fix than any of the above — and note that a streaming design would pay
+it per block instead of once, so it is worth knowing either way.
+
 ### What the graph build spends its seconds on (2026-09-08)
 
 Asked while reading the open-step tables, and answerable without a new run
