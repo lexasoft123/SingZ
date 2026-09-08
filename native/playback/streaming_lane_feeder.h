@@ -148,6 +148,13 @@ class StreamingLaneGroup {
     std::vector<float> pending;
     size_t pendingRead{0};
     int64_t dropOutputFrames{0};
+    // Refill scratch, kept on the lane rather than made per call: a refill
+    // happens every few milliseconds per lane, and this is tens of kilobytes
+    // each time. Control domain, so allocating would be legal — just wasteful
+    // at a rate that adds up on a phone.
+    std::vector<std::vector<float>> decodePlanes;
+    std::vector<float*> decodePointers;
+    std::vector<float> interleaved;
     // Its own decoder, for the linear waveform pass.
     std::unique_ptr<StreamingAudioSource> analysis;
     std::vector<float> waveformBuckets;

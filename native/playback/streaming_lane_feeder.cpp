@@ -274,12 +274,15 @@ uint64_t StreamingLaneGroup::fillLane(Lane& lane, uint64_t index,
   }
 
   const size_t inputBlock = 4096;
-  std::vector<std::vector<float>> planes(channels,
-                                         std::vector<float>(inputBlock, 0.0F));
-  std::vector<float*> pointers(channels);
-  for (uint32_t channel = 0; channel < channels; ++channel)
-    pointers[channel] = planes[channel].data();
-  std::vector<float> interleaved;
+  if (lane.decodePlanes.size() != channels) {
+    lane.decodePlanes.assign(channels, std::vector<float>(inputBlock, 0.0F));
+    lane.decodePointers.resize(channels);
+    for (uint32_t channel = 0; channel < channels; ++channel)
+      lane.decodePointers[channel] = lane.decodePlanes[channel].data();
+  }
+  std::vector<std::vector<float>>& planes = lane.decodePlanes;
+  std::vector<float*>& pointers = lane.decodePointers;
+  std::vector<float>& interleaved = lane.interleaved;
 
   uint64_t placed = 0;
   while (placed < frames) {
