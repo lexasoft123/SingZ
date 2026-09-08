@@ -43,6 +43,7 @@
 #include <fcntl.h>
 #include <io.h>
 #else
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -52,21 +53,54 @@ namespace {
 // The same descriptor handover `decoded_audio.cpp` performs, and for the same
 // reason: the media layer never takes a path, and the descriptor must be
 // closed on every failure path rather than leaked into a half-open decoder.
-std::FILE* consumeAsFile(OwnedFileDescriptor* descriptor) noexcept {
-  if (descriptor == nullptr || !descriptor->valid()) return nullptr;
+//
+// Kept as a DESCRIPTOR with this source's own cursor, rather than as a FILE*
+// walking the descriptor's shared one. Two sources over one file is the
+// ordinary case here — playback seeks around a stem while the waveform pass
+// reads it straight through — and `dup` shares an open file description, so a
+// FILE* per source has them dragging each other's position about. Measured
+// before this changed: the second source could not even open, because the
+// first one's read had already carried the shared cursor past the signature.
+int consumeAsDescriptor(OwnedFileDescriptor* descriptor) noexcept {
+  if (descriptor == nullptr || !descriptor->valid()) return -1;
   const int raw = descriptor->release();
 #if defined(_WIN32)
   if (_setmode(raw, _O_BINARY) == -1) {
     _close(raw);
-    return nullptr;
+    return -1;
   }
-  std::FILE* file = _fdopen(raw, "rb");
-  if (file == nullptr) _close(raw);
-#else
-  std::FILE* file = fdopen(raw, "rb");
-  if (file == nullptr) close(raw);
 #endif
-  return file;
+  return raw;
+}
+
+// One positioned read. Every read in this file goes through it, so the file
+// position the kernel holds is never consulted and never moved.
+//
+// Windows has no pread and its _dup shares a position too; it seeks and reads,
+// which is correct for ONE source and no worse than what it had. Nothing on
+// Windows streams today, and a second source there would need overlapped IO.
+int64_t readAt(int fd, void* buffer, size_t bytes, int64_t offset) noexcept {
+  if (fd < 0) return -1;
+#if defined(_WIN32)
+  if (_lseeki64(fd, offset, SEEK_SET) < 0) return -1;
+  return _read(fd, buffer, static_cast<unsigned int>(bytes));
+#else
+  return ::pread(fd, buffer, bytes, static_cast<off_t>(offset));
+#endif
+}
+
+int64_t fileLength(int fd) noexcept {
+  if (fd < 0) return -1;
+#if defined(_WIN32)
+  const int64_t at = _lseeki64(fd, 0, SEEK_CUR);
+  const int64_t end = _lseeki64(fd, 0, SEEK_END);
+  if (at >= 0) (void)_lseeki64(fd, at, SEEK_SET);
+  return end;
+#else
+  struct stat info {};
+  if (::fstat(fd, &info) != 0) return -1;
+  return static_cast<int64_t>(info.st_size);
+#endif
 }
 
 // Cheap signature check before libFLAC is handed the file, so an input that is
@@ -74,23 +108,23 @@ std::FILE* consumeAsFile(OwnedFileDescriptor* descriptor) noexcept {
 // FLAC. The header promises the status says which, and a caller choosing
 // between adapters acts on that difference. An ID3 tag before the magic is
 // legal and common enough to skip.
-bool looksLikeFlac(std::FILE* file) {
+bool looksLikeFlac(int fd, int64_t* start) {
   unsigned char head[10] = {0};
-  if (std::fread(head, 1, sizeof(head), file) != sizeof(head)) return false;
-  long start = 0;
+  if (readAt(fd, head, sizeof(head), 0) != static_cast<int64_t>(sizeof(head))) return false;
+  int64_t at = 0;
   if (std::memcmp(head, "ID3", 3) == 0) {
-    const long tag = 10 + ((static_cast<long>(head[6] & 0x7F) << 21) |
-                           (static_cast<long>(head[7] & 0x7F) << 14) |
-                           (static_cast<long>(head[8] & 0x7F) << 7) |
-                           static_cast<long>(head[9] & 0x7F));
-    if (fseeko(file, tag, SEEK_SET) != 0) return false;
+    const int64_t tag = 10 + ((static_cast<int64_t>(head[6] & 0x7F) << 21) |
+                              (static_cast<int64_t>(head[7] & 0x7F) << 14) |
+                              (static_cast<int64_t>(head[8] & 0x7F) << 7) |
+                              static_cast<int64_t>(head[9] & 0x7F));
     unsigned char magic[4] = {0};
-    if (std::fread(magic, 1, 4, file) != 4 || std::memcmp(magic, "fLaC", 4) != 0) return false;
-    start = tag;
+    if (readAt(fd, magic, 4, tag) != 4 || std::memcmp(magic, "fLaC", 4) != 0) return false;
+    at = tag;
   } else if (std::memcmp(head, "fLaC", 4) != 0) {
     return false;
   }
-  return fseeko(file, start, SEEK_SET) == 0;
+  if (start != nullptr) *start = at;
+  return true;
 }
 
 // Frames libFLAC has handed over but the caller has not taken yet.
@@ -131,7 +165,13 @@ class FlacStreamingSource final : public StreamingAudioSource {
       FLAC__stream_decoder_finish(decoder_);
       FLAC__stream_decoder_delete(decoder_);
     }
-    if (file_ != nullptr) std::fclose(file_);
+    if (fd_ >= 0) {
+#if defined(_WIN32)
+      _close(fd_);
+#else
+      ::close(fd_);
+#endif
+    }
   }
 
   FlacStreamingSource(const FlacStreamingSource&) = delete;
@@ -151,9 +191,11 @@ class FlacStreamingSource final : public StreamingAudioSource {
     }
     if (!descriptor.valid()) return DecodedAudioStatus::InvalidArgument;
 
-    file_ = consumeAsFile(&descriptor);
-    if (file_ == nullptr) return DecodedAudioStatus::IoError;
-    if (!looksLikeFlac(file_)) return DecodedAudioStatus::UnsupportedFormat;
+    fd_ = consumeAsDescriptor(&descriptor);
+    if (fd_ < 0) return DecodedAudioStatus::IoError;
+    if (!looksLikeFlac(fd_, &offset_)) return DecodedAudioStatus::UnsupportedFormat;
+    length_ = fileLength(fd_);
+    if (length_ < 0) return DecodedAudioStatus::IoError;
 
     decoder_ = FLAC__stream_decoder_new();
     if (decoder_ == nullptr) return DecodedAudioStatus::ResourceExhausted;
@@ -325,48 +367,43 @@ class FlacStreamingSource final : public StreamingAudioSource {
                                               size_t* bytes, void* client) {
     auto* self = static_cast<FlacStreamingSource*>(client);
     if (*bytes == 0) return FLAC__STREAM_DECODER_READ_STATUS_ABORT;
-    const size_t got = std::fread(buffer, 1, *bytes, self->file_);
-    *bytes = got;
-    if (got == 0) {
-      return std::feof(self->file_) ? FLAC__STREAM_DECODER_READ_STATUS_END_OF_STREAM
-                                    : FLAC__STREAM_DECODER_READ_STATUS_ABORT;
+    const int64_t got = readAt(self->fd_, buffer, *bytes, self->offset_);
+    if (got < 0) {
+      *bytes = 0;
+      return FLAC__STREAM_DECODER_READ_STATUS_ABORT;
     }
+    self->offset_ += got;
+    *bytes = static_cast<size_t>(got);
+    if (got == 0)
+      return FLAC__STREAM_DECODER_READ_STATUS_END_OF_STREAM;
     return FLAC__STREAM_DECODER_READ_STATUS_CONTINUE;
   }
 
   static FLAC__StreamDecoderSeekStatus seekCb(const FLAC__StreamDecoder*,
                                               FLAC__uint64 offset, void* client) {
     auto* self = static_cast<FlacStreamingSource*>(client);
-    return fseeko(self->file_, static_cast<int64_t>(offset), SEEK_SET) == 0
-               ? FLAC__STREAM_DECODER_SEEK_STATUS_OK
-               : FLAC__STREAM_DECODER_SEEK_STATUS_ERROR;
+    self->offset_ = static_cast<int64_t>(offset);
+    return FLAC__STREAM_DECODER_SEEK_STATUS_OK;
   }
 
   static FLAC__StreamDecoderTellStatus tellCb(const FLAC__StreamDecoder*,
                                               FLAC__uint64* offset, void* client) {
     auto* self = static_cast<FlacStreamingSource*>(client);
-    const int64_t at = ftello(self->file_);
-    if (at < 0) return FLAC__STREAM_DECODER_TELL_STATUS_ERROR;
-    *offset = static_cast<FLAC__uint64>(at);
+    *offset = static_cast<FLAC__uint64>(self->offset_);
     return FLAC__STREAM_DECODER_TELL_STATUS_OK;
   }
 
   static FLAC__StreamDecoderLengthStatus lengthCb(const FLAC__StreamDecoder*,
                                                   FLAC__uint64* length, void* client) {
     auto* self = static_cast<FlacStreamingSource*>(client);
-    const int64_t at = ftello(self->file_);
-    if (at < 0 || fseeko(self->file_, 0, SEEK_END) != 0)
-      return FLAC__STREAM_DECODER_LENGTH_STATUS_ERROR;
-    const int64_t size = ftello(self->file_);
-    if (size < 0 || fseeko(self->file_, at, SEEK_SET) != 0)
-      return FLAC__STREAM_DECODER_LENGTH_STATUS_ERROR;
-    *length = static_cast<FLAC__uint64>(size);
+    if (self->length_ < 0) return FLAC__STREAM_DECODER_LENGTH_STATUS_ERROR;
+    *length = static_cast<FLAC__uint64>(self->length_);
     return FLAC__STREAM_DECODER_LENGTH_STATUS_OK;
   }
 
   static FLAC__bool eofCb(const FLAC__StreamDecoder*, void* client) {
     auto* self = static_cast<FlacStreamingSource*>(client);
-    return std::feof(self->file_) ? 1 : 0;
+    return self->length_ >= 0 && self->offset_ >= self->length_ ? 1 : 0;
   }
 
   static FLAC__StreamDecoderWriteStatus writeCb(const FLAC__StreamDecoder*,
@@ -426,7 +463,11 @@ class FlacStreamingSource final : public StreamingAudioSource {
     static_cast<FlacStreamingSource*>(client)->sawError_ = true;
   }
 
-  std::FILE* file_ = nullptr;
+  // This source's OWN position in the file. Never the descriptor's: two
+  // sources routinely share one, and the kernel holds only one cursor for it.
+  int fd_ = -1;
+  int64_t offset_ = 0;
+  int64_t length_ = -1;
   FLAC__StreamDecoder* decoder_ = nullptr;
   StreamingAudioInfo info_{};
   Staging staging_{};

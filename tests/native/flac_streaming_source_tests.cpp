@@ -533,6 +533,77 @@ int main() {
   }
 
   std::remove(flac.c_str());  // compactStem already removed the wav
+  // ---- 11. two sources over ONE descriptor read independently -------------
+  //
+  // The waveform pass reads the same stem linearly while playback seeks around
+  // it, on another thread. The obvious way to give it a handle is dup(), and
+  // dup SHARES the file offset — so unless each source tracks its own position
+  // and reads positionally, the two drag each other's cursor about and both
+  // return nonsense.
+  //
+  // The alternative was reopening the file by path (F_GETPATH on Apple,
+  // /proc/self/fd on Linux), which works on a Mac and is a question mark
+  // inside a sandboxed app on a phone — a question this test removes rather
+  // than answers.
+  {
+    const uint32_t rate2 = 44100;
+    const std::string wav2 = writeStereoWav(120000, rate2);
+    const std::string flac2 = tempPath(".flac");
+    std::remove(flac2.c_str());
+    check(singz::compactStem(wav2, flac2).ok, "a fixture for the shared descriptor");
+    const Reference reference = fullDecode(flac2);
+    check(reference.frames > 0, "and it decodes as a reference");
+
+    singz::OwnedFileDescriptor first = openRead(flac2);
+    int duplicated = -1;
+#if !defined(_WIN32)
+    duplicated = ::dup(first.get());
+#endif
+    check(duplicated >= 0, "the descriptor duplicates");
+
+    auto a = singz::openStreamingAudioSource(std::move(first), {}, nullptr);
+    auto b = duplicated < 0
+                 ? nullptr
+                 : singz::openStreamingAudioSource(
+                       singz::OwnedFileDescriptor(duplicated), {}, nullptr);
+    check(a != nullptr && b != nullptr, "and both sources open over it");
+
+    if (a != nullptr && b != nullptr) {
+      // Interleaved on purpose: one source seeking and reading between the
+      // other's reads is exactly what playback does to the waveform pass.
+      const size_t block = 4096;
+      std::vector<std::vector<float>> planesA(2, std::vector<float>(block, 0.0F));
+      std::vector<std::vector<float>> planesB(2, std::vector<float>(block, 0.0F));
+      float* pa[2] = {planesA[0].data(), planesA[1].data()};
+      float* pb[2] = {planesB[0].data(), planesB[1].data()};
+      bool matched = true;
+      uint64_t at = 0;
+      for (int round = 0; round < 8 && matched; round++) {
+        size_t gotA = 0;
+        size_t gotB = 0;
+        // B jumps about; A walks forward. Neither may disturb the other.
+        (void)b->seek(50000 + static_cast<uint64_t>(round) * 1000);
+        (void)b->read(pb, block, &gotB);
+        (void)a->read(pa, block, &gotA);
+        for (size_t frame = 0; frame < gotA; frame++)
+          for (uint32_t c = 0; c < 2; c++)
+            if (planesA[c][frame] != reference.channels[c][at + frame])
+              matched = false;
+        for (size_t frame = 0; frame < gotB; frame++)
+          for (uint32_t c = 0; c < 2; c++)
+            if (planesB[c][frame] !=
+                reference.channels[c][50000 + static_cast<uint64_t>(round) * 1000 + frame])
+              matched = false;
+        at += gotA;
+      }
+      check(matched,
+            "and neither disturbs the other's position, so one descriptor "
+            "serves playback and the waveform pass");
+    }
+    std::remove(wav2.c_str());
+    std::remove(flac2.c_str());
+  }
+
   if (failures == 0) std::printf("flac streaming source: every case matches the full decode\n");
   return failures == 0 ? 0 : 1;
 }

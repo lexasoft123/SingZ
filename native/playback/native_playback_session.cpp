@@ -27,10 +27,6 @@ static_assert(singz::kStreamingWaveformBuckets ==
 #if defined(_WIN32)
 #include <io.h>
 #else
-// For reopenIndependently: F_GETPATH/open on Apple, /proc/self/fd on Linux.
-#include <climits>
-#include <cstdio>
-#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -2057,37 +2053,6 @@ laneDecodeIdentity(const NativePlaybackLaneSource &source,
   return _dup(descriptor);
 #else
   return ::dup(descriptor);
-#endif
-}
-
-// A handle to the same file with its OWN offset.
-//
-// `dup` does not give one: duplicates share an open file description, so two
-// decoders reading through them fight over a single cursor and corrupt each
-// other. Playback and the waveform pass read the same stem at the same time
-// from different threads, so they need genuinely independent handles.
-//
-// Both platforms can reopen a descriptor without being told the path — Apple
-// through F_GETPATH, Linux through /proc/self/fd, where an open() really does
-// create a new description rather than an alias. A failure here is not fatal
-// anywhere it is used: the caller simply goes without.
-[[nodiscard]] int reopenIndependently(int descriptor) noexcept {
-#if defined(_WIN32)
-  (void)descriptor;
-  return -1;
-#elif defined(__APPLE__)
-  if (descriptor < 0)
-    return -1;
-  char path[PATH_MAX];
-  if (::fcntl(descriptor, F_GETPATH, path) == -1)
-    return -1;
-  return ::open(path, O_RDONLY);
-#else
-  if (descriptor < 0)
-    return -1;
-  char path[64];
-  std::snprintf(path, sizeof(path), "/proc/self/fd/%d", descriptor);
-  return ::open(path, O_RDONLY);
 #endif
 }
 
@@ -6058,11 +6023,13 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
         streamingGroup.reset();
         break;
       }
-      // An INDEPENDENT handle for the waveform pass, not a duplicate: it reads
-      // the file linearly on its own thread while playback seeks around it,
-      // and a shared offset would leave both reading nonsense. Optional — a
-      // lane that cannot get one still plays, it just draws no bar.
-      const int forWaveform = reopenIndependently(source.descriptor.get());
+      // A plain duplicate for the waveform pass. Sharing an open file
+      // description with playback is safe because the streaming source reads
+      // POSITIONALLY and carries its own cursor — which is also why this is no
+      // longer reopened by path. That reopen worked on a Mac and was an
+      // unanswered question inside a sandboxed app on a phone, which is a bad
+      // thing for a feature to depend on and impossible to test from here.
+      const int forWaveform = duplicateDescriptor(source.descriptor.get());
       // The DEVICE's rate: the feeder resamples into it as it fills, the same
       // way the decoded path resamples before publishing. Our stems are
       // 44.1 kHz and phones run at 48, so a feeder that could not do this
