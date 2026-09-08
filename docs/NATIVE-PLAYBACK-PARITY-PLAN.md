@@ -219,9 +219,28 @@ branch removed on the desktop. **Streaming would fix both.**
 What genuinely raises the bar above a media player, and should not be waved
 away either: six lanes rather than one, Signalsmith Stretch on top needing
 lookahead of its own, and a singer who scrubs and loops continuously rather
-than seeking occasionally. FLAC is variable-cost per frame and seek-unfriendly,
-which is why DAWs usually TRANSCODE a compressed import to an uncompressed
-working format rather than stream it directly.
+than seeking occasionally.
+
+**An earlier draft of this note claimed DAWs "usually transcode a compressed
+import rather than stream it". That is wrong, and checking it settles the
+argument.** The behaviour is split, and the split matters:
+
+- **REAPER decodes compressed sources ON THE FLY, writing no intermediate
+  file** — the Cockos forum's own answer to "editing MP3 files directly
+  without converting to WAV" is that it converts the data to floating point
+  audio on the fly, without needing to create a new file. The only thing it
+  writes beside the media is `.reapeaks`, for drawing. That makes REAPER an
+  existence proof for route 4 below, in production, with compressed sources,
+  at track counts far past six.
+- **Ableton Live does transcode**, and documents it: a compressed sample is
+  decoded to a temporary uncompressed file in a "Decoding Cache" with a
+  maximum size, a minimum-free-space rule and a Cleanup button (Live manual,
+  *Managing Files and Sets*).
+
+So streaming compressed multitrack audio is ordinary, not exotic, and "FLAC is
+too awkward to stream" does not survive the check. What remains against it here
+is narrower and honest: the time-stretcher's lookahead, and continuous
+scrubbing.
 
 Four routes, cheapest first, and they are not exclusive:
 
