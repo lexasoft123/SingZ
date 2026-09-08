@@ -59,9 +59,9 @@ per block rather than once — which at these throughputs is still nothing.
   more I/O and more frame headers parsed, per seek, which is the wrong cost to
   pay on a scrub.
 
-That last one is cheap to fix and would be step zero of any streaming work: a
-seek point per second on a 323 s file is 323 x 18 bytes = **5.8 KB**. The
-encoder in `zcore/media/flac_io.h` does not write one today.
+That last one looked like step zero of any streaming work — a seek point per
+second on a 323 s file is 323 x 18 bytes, **5.8 KB**. Investigated, and the
+conclusion flipped. See "Do we add a seektable?" below.
 
 ## What the core has today
 
@@ -75,6 +75,43 @@ encoder in `zcore/media/flac_io.h` does not write one today.
   as `sourceStartFrame + (projectTime - entryProjectTime)`. That mapping is
   exactly what a streaming source would keep — it is the buffer behind it that
   would become a window rather than the whole song.
+
+## Do we add a seektable? Probably not — build the index in memory instead
+
+Three routes exist, and checking them changed the recommendation:
+
+1. **The core's C++ encoder** (`zcore/src/media/flac_io.cpp`): trivial. libFLAC's
+   `FLAC__metadata_object_seektable_template_append_spaced_points_by_samples`
+   plus `FLAC__stream_encoder_set_metadata` before init, about ten lines. Covers
+   only the stems a PHONE writes.
+2. **The desktop's encoder** (`src/main/flac.ts`, libflacjs/WASM): awkward.
+   `FLAC__stream_encoder_set_metadata` IS exported by the build, but the object
+   constructors — `FLAC__metadata_object_new`,
+   `..._seektable_template_append_spaced_points_*` — are NOT, so the block would
+   have to be hand-built in WASM memory against libFLAC's struct layout. That is
+   ABI-fragile work for a cosmetic gain. And the desktop is where most stems are
+   made, because that is where the splitter runs.
+3. **A post-hoc writer**, which would serve both encoders AND backfill every
+   project already on disk. Viable, and the spec is what makes it viable: a seek
+   point's offset is **"from the first byte of the first frame header to the
+   first byte of the target frame's header"** — RELATIVE, not absolute. So
+   inserting a SEEKTABLE block before the audio does not invalidate the offsets
+   it contains. The work is a pass over the frame headers to collect
+   (sample, relative offset) pairs.
+
+**But none of them are the right answer**, and the interface above is why. A
+seektable only helps once something seeks in a streamed file, and nothing does
+today — so all three are preparation for unscheduled work, and two of them
+rewrite audio files that singers already own.
+
+`StreamingAudioSource::buildSeekIndex()` does the same job in memory, from one
+pass at open, and needs no migration, no file rewriting and no second encoder
+change. Every song already on disk gets it for free. If that open-time pass ever
+proves to cost too much, THEN writing a seektable into newly encoded files is
+the optimization — cheap, and by then it would be optimizing something real
+rather than guessing.
+
+Recorded because the question was asked and the obvious answer was wrong.
 
 ## The architecture, and what is genuinely hard here
 
@@ -114,16 +151,18 @@ So the field is split, and streaming compressed multitrack audio is ordinary.
 
 ## If it goes ahead, in this order
 
-1. **Write a SEEKTABLE when encoding stems** (one point per second, 5.8 KB).
-   Independent of everything else, cheap, and required by any streaming design.
-   Old projects need a backfill pass or a tolerated slow path.
-2. **Prepare behind the open** (mobile), as the desktop already does. Not
+1. **Prepare behind the open** (mobile), as the desktop already does. Not
    streaming at all — it moves the 1.5 s out of the singer's way and buys time
    to do the rest properly.
-3. **A streaming source node beside `DecodedBufferSource`**, chosen per lane, so
+2. **A streaming source node beside `DecodedBufferSource`**, chosen per lane, so
    the two can be compared on the same song with the existing harnesses. The
-   sanitizer gates and `player-session` are the judges.
-4. **Retire parking/adoption** once streaming is the only path.
+   sanitizer gates and `player-session` are the judges. It implements
+   `StreamingAudioSource` (`zcore/include/zcore/media/streaming_audio_source.h`,
+   interface only today) so MP3 and AAC adapters slot in behind the same
+   contract later.
+3. **Retire parking/adoption** once streaming is the only path.
+4. **Only then**, if `buildSeekIndex` proves expensive, write seektables into
+   newly encoded stems.
 
 ## What would say it is working
 
