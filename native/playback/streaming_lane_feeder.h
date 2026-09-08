@@ -19,6 +19,7 @@
 // therefore off limits, and the feeder waits rather than crossing that line.
 // It is the one rule that makes a torn frame impossible instead of unlikely.
 
+#include <zcore/legacy/resample.h>
 #include <zcore/media/decoded_audio.h>
 #include <zcore/media/streaming_audio_source.h>
 #include <zdsp/streaming_window_source.h>
@@ -75,9 +76,13 @@ class StreamingLaneGroup {
   StreamingLaneGroup& operator=(const StreamingLaneGroup&) = delete;
 
   // Open one lane. Call before `prime()`; both descriptors are consumed either
-  // way. `requiredSampleRate` of 0 accepts whatever the file holds — the
-  // streaming source does not resample, so a lane that disagrees with the
-  // device is refused here rather than played at the wrong speed.
+  // way.
+  //
+  // `requiredSampleRate` of 0 keeps the file's own rate. Anything else is the
+  // DEVICE's rate and the lane is resampled into it as it is fed — which is
+  // not a detail: our stems are 44.1 kHz and an iPhone's session runs at 48,
+  // so the mismatch is the ordinary case and a feeder that could not resample
+  // would never once be used on a phone.
   //
   // TWO descriptors because the waveform pass reads the same file
   // independently of playback: playback seeks wherever the singer goes, and a
@@ -105,6 +110,9 @@ class StreamingLaneGroup {
   // lane shorter than the window gets a smaller ring, and the memory budget
   // must be told the truth rather than the request.
   [[nodiscard]] size_t retainedBytes(size_t lane) const noexcept;
+  // The lane's length in OUTPUT frames — what the window holds and the graph
+  // counts. Equal to the file's own count only when no resampling is needed.
+  [[nodiscard]] uint64_t outputFrames(size_t lane) const noexcept;
 
   // The seek bar's envelope, decoded once in the background.
   //
@@ -129,6 +137,17 @@ class StreamingLaneGroup {
  private:
   struct Lane {
     std::unique_ptr<StreamingAudioSource> source;
+    // Null when the file already matches the device. Recreated on every seek:
+    // its filter history belongs to the audio before the jump, and there is no
+    // reset short of a new one.
+    std::unique_ptr<Resampler> resampler;
+    uint32_t sourceRate{0};
+    uint32_t outputRate{0};
+    // Interleaved resampler output not yet placed in the ring, and how many of
+    // its leading frames are the filter's priming delay rather than audio.
+    std::vector<float> pending;
+    size_t pendingRead{0};
+    int64_t dropOutputFrames{0};
     // Its own decoder, for the linear waveform pass.
     std::unique_ptr<StreamingAudioSource> analysis;
     std::vector<float> waveformBuckets;
@@ -148,6 +167,8 @@ class StreamingLaneGroup {
   };
 
   bool serviceLane(Lane& lane);
+  bool seekLane(Lane& lane, uint64_t outputFrame);
+  uint64_t fillLane(Lane& lane, uint64_t index, uint64_t frames);
   void loop();
   void waveformLoop();
 

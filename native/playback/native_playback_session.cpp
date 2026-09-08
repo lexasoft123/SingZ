@@ -6144,29 +6144,26 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
       // and a shared offset would leave both reading nonsense. Optional — a
       // lane that cannot get one still plays, it just draws no bar.
       const int forWaveform = reopenIndependently(source.descriptor.get());
-      // Rate is checked below rather than here, so a mismatch can fall back
-      // instead of failing: passing 0 accepts whatever the file holds.
+      // The DEVICE's rate: the feeder resamples into it as it fills, the same
+      // way the decoded path resamples before publishing. Our stems are
+      // 44.1 kHz and phones run at 48, so a feeder that could not do this
+      // would simply never be used.
       const DecodedAudioStatus status = streamingGroup->addLane(
           OwnedFileDescriptor(copy),
           forWaveform < 0 ? OwnedFileDescriptor() : OwnedFileDescriptor(forWaveform),
-          0);
+          requiredSampleRate);
       if (status != DecodedAudioStatus::Ok) {
         streamingGroup.reset();
         break;
       }
     }
-    // THE STREAMING SOURCE DOES NOT RESAMPLE, and the decoded path does. Our
-    // own stems are 44.1 kHz while a phone's session commonly runs at 48, so a
-    // mismatch is the ordinary case, not an exotic one — and refusing it would
-    // mean a build with streaming on could not open a song at all. Decoding is
-    // the correct answer here: slower, and right.
+    // A lane that could not be opened at all still falls back to decoding —
+    // an unreadable file, or one this build cannot stream. The RATE no longer
+    // decides that: the feeder resamples.
     for (size_t index = 0; streamingGroup != nullptr && index < sources.size();
-         ++index) {
-      const StreamingAudioInfo *info = streamingGroup->info(index);
-      if (info == nullptr ||
-          (requiredSampleRate != 0 && info->sampleRate != requiredSampleRate))
+         ++index)
+      if (streamingGroup->info(index) == nullptr)
         streamingGroup.reset();
-    }
     if (streamingGroup != nullptr &&
         streamingGroup->prime(0) != DecodedAudioStatus::Ok)
       streamingGroup.reset();
@@ -6183,13 +6180,16 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
             "Prepared playback lanes exceed the aggregate memory limit");
       }
       retained += bytes;
+      // OUTPUT frames: what the window holds and what the graph counts, which
+      // is not the file's own frame count once a lane is resampled.
+      const uint64_t laneFrames = streamingGroup->outputFrames(index);
       authoritativeDurationFrames =
-          std::max(authoritativeDurationFrames, info->frameCount);
+          std::max(authoritativeDurationFrames, laneFrames);
       PreparedPlaybackGraph::Lane lane;
       lane.id = sources[index].id;
       lane.window = streamingGroup->window(index);
       lane.streamChannels = info->channels;
-      lane.streamFrames = info->frameCount;
+      lane.streamFrames = laneFrames;
       lane.streamBytes = bytes;
       // KNOWN GAP, stated rather than hidden: the seek bar's waveform is a
       // linear pass over decoded PCM, and a streamed lane has none to pass

@@ -732,11 +732,11 @@ void streamedLanesPlayTheSameAudioAsDecodedOnes() {
     return out;
   };
 
-  // A stem at a DIFFERENT rate to the device must still open. Our own stems
-  // are 44.1 kHz and a phone's session commonly runs at 48, so this is the
-  // ordinary case: the streaming source cannot resample, the decoded one can,
-  // and the prepare has to fall back rather than refuse the song. Before this
-  // was handled, a build with streaming on could not open a single song.
+  // A stem at a DIFFERENT rate to the device is the ORDINARY case, not an edge
+  // one: our stems are 44.1 kHz and a phone's session runs at 48. The feeder
+  // resamples into the device rate as it fills, so such a song streams like
+  // any other — and its duration is reported in DEVICE frames, which is the
+  // part that would silently mistime a whole song if it were wrong.
   {
     std::vector<float> offRate(200000, 0.0F);
     for (size_t i = 0; i < offRate.size(); i++)
@@ -750,15 +750,17 @@ void streamedLanesPlayTheSameAudioAsDecodedOnes() {
     request.streamLanes = true;  // the device stays at 48000
     auto offLanes = std::vector<singz::NativePlaybackLaneSource>{};
     offLanes.push_back(lane("song", offFlac));
-    const auto fell = session.prepare(std::move(request), std::move(offLanes), 1);
-    CHECK(fell.ok);
+    const auto opened = session.prepare(std::move(request), std::move(offLanes), 1);
+    CHECK(opened.ok);
     const singz::NativePlaybackStatus status = session.status();
-    // Decoded, so it is resampled to the device rate and carries a waveform —
-    // both things a streamed lane would not have. The waveform is the visible
-    // proof that this went down the decode path and not the streamed one.
     CHECK(status.lanes.size() == 1);
-    const auto peaks = session.lanePeaks(1);
-    CHECK(peaks.ok && peaks.lanes.size() == 1 && peaks.lanes[0].valid);
+    // 200000 frames at 44.1 kHz is 4.535 s, which at 48 kHz is 217687 frames.
+    // Reported in SOURCE frames the song would be 9% short and every cue in it
+    // would land early.
+    const uint64_t expected = static_cast<uint64_t>(200000.0 * 48000.0 / 44100.0);
+    const uint64_t reported = status.lanes[0].totalFrames;
+    CHECK(reported > expected - 64 && reported < expected + 64);
+    CHECK(status.durationFrames == reported);
     CHECK(session.unload(1).ok);
     std::remove(offWav.c_str());
     std::remove(offFlac.c_str());

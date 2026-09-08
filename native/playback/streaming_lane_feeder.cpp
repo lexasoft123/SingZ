@@ -38,20 +38,26 @@ DecodedAudioStatus StreamingLaneGroup::addLane(OwnedFileDescriptor descriptor,
   const StreamingAudioInfo& info = source->info();
   if (info.channels == 0 || info.channels > 32 || info.sampleRate == 0)
     return DecodedAudioStatus::UnsupportedFormat;
-  // The streaming source does not resample. A lane that disagrees with the
-  // device is refused here, because the alternative is playing it at the wrong
-  // speed and calling that success.
-  if (requiredSampleRate != 0 && info.sampleRate != requiredSampleRate)
-    return DecodedAudioStatus::UnsupportedFormat;
+  // A lane whose file rate differs from the device's is RESAMPLED as it is
+  // fed. Our own stems are 44.1 kHz and phones commonly run at 48, so this is
+  // the ordinary path and not an edge case.
+  const uint32_t outputRate =
+      requiredSampleRate == 0 ? info.sampleRate : requiredSampleRate;
 
   // Never allocate a ring larger than the song it holds. A short stem would
   // otherwise be charged for a window it can never fill, and on a lane shorter
   // than the window the ring IS the whole lane — at which point streaming
   // costs the same as decoding and should at least not cost more.
+  const uint64_t outputFrames =
+      outputRate == info.sampleRate
+          ? info.frameCount
+          : static_cast<uint64_t>(static_cast<double>(info.frameCount) *
+                                  static_cast<double>(outputRate) /
+                                  static_cast<double>(info.sampleRate));
   uint64_t capacity = options_.windowFrames;
-  if (info.frameCount != 0 && info.frameCount < capacity) {
+  if (outputFrames != 0 && outputFrames < capacity) {
     capacity = 1;
-    while (capacity < info.frameCount)
+    while (capacity < outputFrames)
       capacity <<= 1;
   }
 
@@ -77,8 +83,17 @@ DecodedAudioStatus StreamingLaneGroup::addLane(OwnedFileDescriptor descriptor,
   lane->window.channels = lane->pointers.data();
   lane->window.channelCount = info.channels;
   lane->window.capacityFrames = capacity;
-  lane->window.totalFrames = info.frameCount;
-  lane->window.sampleRate = {static_cast<double>(info.sampleRate)};
+  lane->sourceRate = info.sampleRate;
+  lane->outputRate = outputRate;
+  // Everything the window and the graph deal in is OUTPUT frames; only the
+  // decoder and the waveform pass speak the file's own rate.
+  lane->window.totalFrames =
+      outputRate == info.sampleRate
+          ? info.frameCount
+          : static_cast<uint64_t>(static_cast<double>(info.frameCount) *
+                                  static_cast<double>(outputRate) /
+                                  static_cast<double>(info.sampleRate));
+  lane->window.sampleRate = {static_cast<double>(outputRate)};
   zdsp::streamingWindowInitialize(&lane->window, 0);
 
   std::lock_guard<std::mutex> lock(mutex_);
@@ -92,13 +107,12 @@ DecodedAudioStatus StreamingLaneGroup::prime(uint64_t startFrame) {
     return DecodedAudioStatus::InvalidArgument;
   for (std::unique_ptr<Lane>& holder : lanes_) {
     Lane& lane = *holder;
-    const DecodedAudioStatus status = lane.source->seek(startFrame);
-    if (status != DecodedAudioStatus::Ok)
-      return status;
+    lane.stats = StreamingLaneStats{};
+    if (!seekLane(lane, startFrame))
+      return DecodedAudioStatus::IoError;
     lane.residentStart = startFrame;
     lane.residentEnd = startFrame;
     lane.ended = false;
-    lane.stats = StreamingLaneStats{};
     // Demand starts where playback will, so the first service round has
     // somewhere to chase even before a block has run.
     zdsp::streamingWindowInitialize(&lane.window, startFrame);
@@ -139,8 +153,7 @@ bool StreamingLaneGroup::serviceLane(Lane& lane) {
   if (!inside || tooFarBehind) {
     if (demand >= lane.window.totalFrames)
       return false;
-    const DecodedAudioStatus status = lane.source->seek(demand);
-    if (status != DecodedAudioStatus::Ok) {
+    if (!seekLane(lane, demand)) {
       lane.ended = true;
       return false;
     }
@@ -188,41 +201,18 @@ bool StreamingLaneGroup::serviceLane(Lane& lane) {
                                          lane.residentEnd);
   }
 
-  // The decoder is positioned at residentEnd by construction: every refill
-  // appends, and every jump seeks and resets the range.
-  if (lane.source->position() != lane.residentEnd) {
-    const DecodedAudioStatus status = lane.source->seek(lane.residentEnd);
-    if (status != DecodedAudioStatus::Ok) {
-      lane.ended = true;
-      return false;
-    }
-    ++lane.stats.seeks;
-  }
-
-  // Decode straight into the ring. A chunk can straddle the wrap, so it is
-  // decoded in at most two pieces, each contiguous.
+  // Fill the ring with OUTPUT frames. A chunk can straddle the wrap, so it is
+  // placed in at most two contiguous pieces.
   uint64_t written = 0;
   while (written < chunk) {
     const uint64_t at = lane.residentEnd + written;
     const uint64_t index = at & (lane.window.capacityFrames - 1u);
     const uint64_t room =
         std::min(chunk - written, lane.window.capacityFrames - index);
-    std::vector<float*> destination(lane.pointers.size());
-    for (size_t channel = 0; channel < lane.pointers.size(); ++channel)
-      destination[channel] = lane.pointers[channel] + index;
-    size_t got = 0;
-    const DecodedAudioStatus status = lane.source->read(
-        destination.data(), static_cast<size_t>(room), &got);
+    const uint64_t got = fillLane(lane, index, room);
     written += got;
-    if (status != DecodedAudioStatus::Ok || got == 0) {
-      if (status != DecodedAudioStatus::Ok)
-        lane.ended = true;
-      if (got == 0) {
-        lane.ended = true;
-        break;
-      }
+    if (got < room)
       break;
-    }
   }
 
   if (written == 0)
@@ -233,6 +223,117 @@ bool StreamingLaneGroup::serviceLane(Lane& lane) {
   zdsp::streamingWindowPublishResident(&lane.window, lane.residentStart,
                                        lane.residentEnd);
   return true;
+}
+
+// Put the decoder, and the resampler with it, at an OUTPUT frame.
+//
+// The decoder is positioned at the corresponding INPUT frame; a fresh
+// resampler follows, because its history belongs to the audio before the jump.
+// Its priming delay is then dropped so the first frame handed to the ring is
+// the frame that was asked for — every lane computes this the same way from
+// the same rates, so lanes cannot drift apart even where the rounding is not
+// exact to the sample.
+bool StreamingLaneGroup::seekLane(Lane& lane, uint64_t outputFrame) {
+  lane.pending.clear();
+  lane.pendingRead = 0;
+  lane.dropOutputFrames = 0;
+  uint64_t inputFrame = outputFrame;
+  if (lane.sourceRate != lane.outputRate) {
+    inputFrame = static_cast<uint64_t>(static_cast<double>(outputFrame) *
+                                       static_cast<double>(lane.sourceRate) /
+                                       static_cast<double>(lane.outputRate));
+    lane.resampler = std::make_unique<Resampler>(
+        static_cast<int>(lane.sourceRate), static_cast<int>(lane.outputRate),
+        static_cast<int>(lane.window.channelCount));
+    lane.dropOutputFrames = lane.resampler->latencyOutFrames();
+  }
+  if (lane.source->seek(inputFrame) != DecodedAudioStatus::Ok)
+    return false;
+  ++lane.stats.seeks;
+  return true;
+}
+
+// Hand `frames` output frames to the ring at `index`, decoding and resampling
+// as much as that takes. Returns how many were actually placed; short means
+// the lane ended.
+uint64_t StreamingLaneGroup::fillLane(Lane& lane, uint64_t index,
+                                      uint64_t frames) {
+  const uint32_t channels = lane.window.channelCount;
+  if (lane.sourceRate == lane.outputRate) {
+    std::vector<float*> destination(channels);
+    for (uint32_t channel = 0; channel < channels; ++channel)
+      destination[channel] = lane.pointers[channel] + index;
+    size_t got = 0;
+    const DecodedAudioStatus status =
+        lane.source->read(destination.data(), static_cast<size_t>(frames), &got);
+    if (status != DecodedAudioStatus::Ok)
+      lane.ended = true;
+    if (got == 0)
+      lane.ended = true;
+    return got;
+  }
+
+  const size_t inputBlock = 4096;
+  std::vector<std::vector<float>> planes(channels,
+                                         std::vector<float>(inputBlock, 0.0F));
+  std::vector<float*> pointers(channels);
+  for (uint32_t channel = 0; channel < channels; ++channel)
+    pointers[channel] = planes[channel].data();
+  std::vector<float> interleaved;
+
+  uint64_t placed = 0;
+  while (placed < frames) {
+    // Drain whatever the resampler already produced before asking for more.
+    const size_t availableFrames =
+        (lane.pending.size() - lane.pendingRead) / channels;
+    if (availableFrames != 0) {
+      if (lane.dropOutputFrames > 0) {
+        const uint64_t drop = std::min<uint64_t>(
+            static_cast<uint64_t>(lane.dropOutputFrames), availableFrames);
+        lane.pendingRead += static_cast<size_t>(drop) * channels;
+        lane.dropOutputFrames -= static_cast<int64_t>(drop);
+        continue;
+      }
+      const uint64_t take = std::min<uint64_t>(frames - placed, availableFrames);
+      for (uint64_t frame = 0; frame < take; ++frame)
+        for (uint32_t channel = 0; channel < channels; ++channel)
+          lane.pointers[channel][index + placed + frame] =
+              lane.pending[lane.pendingRead +
+                           static_cast<size_t>(frame) * channels + channel];
+      lane.pendingRead += static_cast<size_t>(take) * channels;
+      placed += take;
+      continue;
+    }
+    lane.pending.clear();
+    lane.pendingRead = 0;
+    if (lane.ended)
+      break;
+
+    size_t got = 0;
+    const DecodedAudioStatus status =
+        lane.source->read(pointers.data(), inputBlock, &got);
+    if (status != DecodedAudioStatus::Ok) {
+      lane.ended = true;
+      break;
+    }
+    if (got == 0) {
+      // End of the file: push the filter's tail through so the last frames of
+      // the song are not lost to its history.
+      lane.ended = true;
+      if (lane.resampler != nullptr)
+        lane.resampler->flush(lane.pending);
+      if (lane.pending.empty())
+        break;
+      continue;
+    }
+    interleaved.resize(static_cast<size_t>(got) * channels);
+    for (size_t frame = 0; frame < got; ++frame)
+      for (uint32_t channel = 0; channel < channels; ++channel)
+        interleaved[frame * channels + channel] = planes[channel][frame];
+    lane.resampler->process(interleaved.data(), static_cast<int64_t>(got),
+                            lane.pending);
+  }
+  return placed;
 }
 
 bool StreamingLaneGroup::serviceOnceForTesting() {
@@ -421,6 +522,10 @@ size_t StreamingLaneGroup::retainedBytes(size_t lane) const noexcept {
     return 0;
   return static_cast<size_t>(lanes_[lane]->capacityFrames) *
          lanes_[lane]->window.channelCount * sizeof(float);
+}
+
+uint64_t StreamingLaneGroup::outputFrames(size_t lane) const noexcept {
+  return lane < lanes_.size() ? lanes_[lane]->window.totalFrames : 0;
 }
 
 StreamingLaneStats StreamingLaneGroup::stats(size_t lane) const noexcept {

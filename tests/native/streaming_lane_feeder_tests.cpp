@@ -316,6 +316,84 @@ int main() {
     (void)streamed.functions->destroy(streamed.state);
   }
 
+  // ---- 3b. a RESAMPLED lane matches the resampled decode ------------------
+  //
+  // The case every real song on a phone takes: 44.1 kHz stems into a 48 kHz
+  // session. The reference is the same decode the app does today, asked for
+  // the same output rate, so this compares two resamplings of one file rather
+  // than a resampling against an original.
+  {
+    const std::string wav441 = tempPath(".wav");
+    // 44.1 kHz fixture, written by hand: the helper above is fixed at kRate.
+    {
+      std::FILE* f = std::fopen(wav441.c_str(), "wb");
+      const uint32_t frames = 120000;
+      const uint32_t dataBytes = frames * 2 * 2;
+      auto u32 = [&](uint32_t v) { std::fwrite(&v, 4, 1, f); };
+      auto u16 = [&](uint16_t v) { std::fwrite(&v, 2, 1, f); };
+      std::fwrite("RIFF", 1, 4, f); u32(36 + dataBytes);
+      std::fwrite("WAVEfmt ", 1, 8, f);
+      u32(16); u16(1); u16(2); u32(44100); u32(44100 * 4); u16(4); u16(16);
+      std::fwrite("data", 1, 4, f); u32(dataBytes);
+      for (uint32_t i = 0; i < frames; i++) {
+        const auto left = static_cast<int16_t>(
+            std::lround(9000.0 * std::sin(i * 0.011)));
+        const auto right = static_cast<int16_t>(
+            std::lround(7000.0 * std::sin(i * 0.017 + 0.5)));
+        std::fwrite(&left, 2, 1, f);
+        std::fwrite(&right, 2, 1, f);
+      }
+      std::fclose(f);
+    }
+    const std::string flac441 = tempPath(".flac");
+    std::remove(flac441.c_str());
+    check(singz::compactStem(wav441, flac441).ok, "a 44.1 kHz fixture compacts");
+
+    singz::DecodedAudioPrepareOptions resampledOptions;
+    resampledOptions.sourceFormat = singz::DecodedAudioSourceFormat::Flac;
+    resampledOptions.requiredSampleRate = 48000;
+    const singz::DecodedAudioResult resampled =
+        singz::prepareDecodedAudio(openRead(flac441), resampledOptions);
+    check(resampled.ok(), "and the decoded reference resamples it to 48 kHz");
+
+    if (resampled.ok()) {
+      singz::StreamingLaneGroup group;
+      check(group.addLane(openRead(flac441), singz::OwnedFileDescriptor(), 48000) ==
+                singz::DecodedAudioStatus::Ok,
+            "a resampled lane opens");
+      check(group.prime(0) == singz::DecodedAudioStatus::Ok,
+            "and primes at the device rate");
+      // Within a frame or two of the decode: both round the same way from the
+      // same rates, which is what keeps six lanes together.
+      const uint64_t got = group.outputFrames(0);
+      const uint64_t want = resampled.audio->frameCount();
+      check(got + 2 >= want && want + 2 >= got,
+            "and its length agrees with the resampled decode");
+
+      // The samples themselves, over the first stretch the ring holds.
+      uint64_t start = 0;
+      uint64_t end = 0;
+      for (int round = 0; round < 200; round++) {
+        group.serviceOnceForTesting();
+        (void)zdsp::streamingWindowResident(group.window(0), &start, &end);
+        if (end > 20000) break;
+      }
+      check(end > 20000, "and the ring fills with resampled frames");
+      double worst = 0.0;
+      const uint64_t compare = std::min<uint64_t>(end, 20000);
+      for (uint64_t frame = 1000; frame < compare; frame++)
+        for (uint32_t c = 0; c < 2; c++) {
+          const float mine = group.window(0)->channels[c]
+              [frame & (group.window(0)->capacityFrames - 1)];
+          const float theirs = resampled.audio->channelData(c)[frame];
+          worst = std::max(worst, std::fabs(static_cast<double>(mine - theirs)));
+        }
+      check(worst < 1e-4, "and they are the same audio the decode produces");
+    }
+    std::remove(wav441.c_str());
+    std::remove(flac441.c_str());
+  }
+
   // ---- 4. the background waveform pass ----------------------------------
   {
     singz::StreamingLaneGroup group;
