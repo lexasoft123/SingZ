@@ -201,6 +201,36 @@ a moment the singer is browsing rather than waiting, and would take ~272 ms off 
 first Play as well. Not done here; it is a main-process change with its own trade-off
 (cold launch, or a stall while browsing) and wants its own decision.
 
+### What the graph build spends its seconds on (2026-09-08)
+
+Asked while reading the open-step tables, and answerable without a new run
+because both halves were already measured on the same phone and song.
+
+**Prepare is decode-bound and linear in audio length.** It releases any parked
+lanes, decodes every lane on a bounded worker pool
+(`decodeLanesConcurrently` — already parallel; the sequential loop survives as
+the fallback that owns every refusal), admits them in lane order against a
+running memory budget, then builds the arena, the graph nodes and the cue plan.
+The decode is nearly all of it.
+
+The POCO says so twice over, from the session harness:
+
+| on the POCO, 122 s six-lane project | |
+|---|---|
+| prepare at a fresh open — **decodes six stems** | ~1500 ms |
+| prepare on a pitch change — **adopts the parked lanes, no decode** | **88-229 ms** |
+
+Same machine, same song, same call: with the decode ~1.5 s, without it under a
+fifth of a second. So roughly **1.3 s of the 1.5 is FLAC → PCM**, and ~0.2 s is
+everything else. (`native_playback_session.h` records the same ratio from an
+emulator — a rebuild 3.2 s → ~200 ms once adoption skips the decode — and the
+parallel decode itself was worth ~2100 ms when it landed.)
+
+Which says what CANNOT fix it: the decode is already parallel, and it is real
+work — hundreds of megabytes of PCM either way. What can is not decoding during
+the open at all, which is exactly what the desktop does by preparing behind a
+song already on screen.
+
 ### The mac's playing CPU falls 40% on one CSS rule (2026-09-08)
 
 Researched because the Windows finding might transfer. It did not — and looking
