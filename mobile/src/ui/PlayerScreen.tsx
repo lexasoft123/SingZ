@@ -822,6 +822,11 @@ export default function PlayerScreen({
       // interval is generous because nothing is waiting on it — the song is
       // already playing.
       let attempts = 0
+      // The best answer drawn so far. The pass measures lanes one at a time,
+      // so the envelope IMPROVES: draw each improvement rather than settling
+      // for the first one and stopping, which is what left a six-lane song
+      // drawn from a single lane.
+      let drawn = 0
       const askedAt = Date.now()
       const ask = (): void => {
         void native
@@ -832,8 +837,43 @@ export default function PlayerScreen({
               envelope == null
                 ? 0
                 : envelope.lanes.filter(lane => lane.peaksValid).length
-            const usable = envelope != null && ready > 0
-            if (!usable) {
+            const total = envelope == null ? 0 : envelope.lanes.length
+            // EVERY lane, not merely one. The background pass measures the
+            // lanes one after another, so the first answer routinely has a
+            // single lane in it — and drawing that and never asking again is
+            // what a blank-looking seek bar actually was: "measured · 1/6
+            // lanes · 101 ms" in the app's own log, six lanes of song drawn
+            // from one. Past the quick attempts, take whatever exists rather
+            // than drawing nothing at all.
+            const complete = total > 0 && ready === total
+            // Draw as soon as there is anything, and keep drawing as more
+            // lanes land. On a Debug simulator build the core is compiled at
+            // -O0 and a lane takes seconds rather than milliseconds, so a
+            // deadline that gave up at twelve seconds reported "1/6" forever;
+            // on a release phone the whole set lands in about that many
+            // hundred milliseconds and the first draw is already complete.
+            if (envelope != null && ready > drawn) {
+              drawn = ready
+              log(
+                'waveform',
+                `measured · ${ready}/${total} lanes · ${Math.round(Date.now() - askedAt)} ms` +
+                  (complete ? '' : ' · so far')
+              )
+              consume(envelope)
+              // Cached only when every lane is in it: a partial envelope is
+              // refused on the next open anyway (cachedWaveform is
+              // all-or-nothing), so storing one buys nothing.
+              if (project.dir && complete)
+                void writeProjectWaveform(
+                  project.dir,
+                  waveformCacheFor(envelope, wanted)
+                ).catch(() => {
+                  // A cache that cannot be written costs a repeat pass, not a
+                  // wrong picture.
+                })
+            }
+            if (complete) return
+            {
               attempts += 1
               if (attempts < WAVEFORM_ATTEMPTS + WAVEFORM_SLOW_ATTEMPTS) {
                 setTimeout(
@@ -842,7 +882,7 @@ export default function PlayerScreen({
                     ? WAVEFORM_RETRY_MS
                     : WAVEFORM_SLOW_RETRY_MS
                 )
-              } else {
+              } else if (drawn === 0) {
                 // Said out loud, because a blank seek bar with a silent log is
                 // exactly what sent this back for a second look: nothing in
                 // the log named the waveform at all, so there was no way to
@@ -850,29 +890,12 @@ export default function PlayerScreen({
                 log(
                   'waveform',
                   `no waveform after ${Math.round((Date.now() - askedAt) / 1000)}s · ` +
-                    `${envelope == null ? 'the core returned none' : `0 of ${envelope.lanes.length} lanes measured`}`,
+                    `${envelope == null ? 'the core returned none' : `0 of ${total} lanes measured`}`,
                   'warn'
                 )
               }
               return
             }
-            log(
-              'waveform',
-              `measured · ${ready}/${envelope.lanes.length} lanes · ` +
-                `${Math.round(Date.now() - askedAt)} ms`
-            )
-            consume(envelope)
-            // Keep it, so no later open pays for this again.
-            if (project.dir)
-              void writeProjectWaveform(project.dir, waveformCacheFor(envelope, wanted)).catch(
-                () => {
-                  // A cache that cannot be written costs a repeat pass, not a
-                  // wrong picture.
-                }
-              )
-          })
-          .catch(() => {
-            // A song whose waveform cannot be drawn is still a song that plays.
           })
       }
       ask()
