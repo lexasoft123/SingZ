@@ -6034,87 +6034,6 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
   // rebuild. The published counters go to zero with the memory, not before.
   parked.release();
 
-  // Fast path: decode the lanes concurrently, then admit them in lane order
-  // with the exact running accounting the sequential loop performs. Six lanes
-  // decoded one after another is seconds of a song opening; the pool decides
-  // nothing, so a set it cannot deliver whole falls through to the sequential
-  // loop below and is refused there, in its own words.
-  const bool sequentialLaneDecodeForced =
-      impl_->testHooks != nullptr &&
-      impl_->testHooks->forceSequentialLaneDecode != nullptr &&
-      impl_->testHooks->forceSequentialLaneDecode(impl_->testHooks->context);
-  ParallelLaneDecode parallel =
-      adoptedParkedLanes || sequentialLaneDecodeForced
-          ? ParallelLaneDecode{}
-          : decodeLanesConcurrently(sources, config.decodeOptions,
-                                    requiredSampleRate,
-                                    config.maximumRetainedBytes,
-                                    *graphArenaAdmission, combined,
-                                    impl_->testHooks);
-  bool adoptedParallelLanes = false;
-  if (parallel.complete) {
-    size_t ordered = *graphArenaAdmission;
-    bool admissible = true;
-    // A fail-safe for the reservation above, and — while that reservation
-    // holds — unreachable: every lane publishes at most the allowance drawn
-    // for it, allowances are drawn from a pool that starts at the lane budget
-    // and is only replenished by what a lane did NOT use, so the decoded
-    // total cannot exceed the budget and no prefix of it can either. It stays
-    // because it is what makes a future regression in the reservation degrade
-    // to the sequential path instead of admitting an over-budget set, and it
-    // costs one pass over six integers. Mutating it away is green for that
-    // reason, not because the set below is unchecked: the budget invariant it
-    // guards is asserted directly in laneDecodePoolStaysInsideTheMemoryBudget.
-    for (const ParallelLaneDecode::Lane &lane : parallel.lanes) {
-      const size_t remaining = config.maximumRetainedBytes - ordered;
-      const size_t bytes = lane.result.audio->retainedBytes();
-      // Both are the sequential loop's own refusals: an exhausted budget
-      // before the lane, and a lane larger than the cap that budget would
-      // have given its decoder. Either one hands the lane set back.
-      if (remaining == 0 || bytes > remaining) {
-        admissible = false;
-        break;
-      }
-      ordered += bytes;
-    }
-    if (admissible) {
-      for (size_t index = 0; index < sources.size(); ++index) {
-        NativePlaybackLaneSource &source = sources[index];
-        ParallelLaneDecode::Lane &prepared = parallel.lanes[index];
-        retained += prepared.result.audio->retainedBytes();
-        authoritativeDurationFrames = std::max(
-            authoritativeDurationFrames, prepared.result.audio->frameCount());
-        PreparedPlaybackGraph::Lane lane;
-        lane.id = std::move(source.id);
-        lane.owner = std::move(prepared.result.audio);
-        lane.peaks = prepared.peaks;
-        lane.peaksValid = prepared.peaksValid;
-        lane.identity = laneDecodeIdentity(source, config.decodeOptions,
-                                           requiredSampleRate);
-        lane.gain = source.gain;
-        lane.muted = source.muted;
-        lane.solo = source.solo;
-        decoded.push_back(std::move(lane));
-        // Ordinary-thread fault injection stays on the ordinary thread, once
-        // per lane and in lane order, exactly as the sequential loop does it.
-        injectFailure(impl_->testHooks,
-                      NativePlaybackAllocationPoint::AfterDecode);
-      }
-      // The pool consumed its duplicates; a parallel prepare must not go on
-      // holding more descriptors than a sequential one.
-      for (NativePlaybackLaneSource &source : sources)
-        source.descriptor.reset();
-      adoptedParallelLanes = true;
-    }
-  }
-  // Release the pool's PCM before any fallback re-decode: the aggregate limit
-  // describes what a prepared graph holds, not what an abandoned attempt did.
-  // The reason it declined outlives the attempt, because it is the only
-  // explanation the singer's log will have for a slow open.
-  const std::string laneDecodeFallback = std::move(parallel.declineReason);
-  parallel.lanes.clear();
-  parallel.complete = false;
-
   // Streamed lanes: opened, primed, and never decoded whole. This runs before
   // the decode loop and takes the whole set or none — a mixture would mean two
   // residency models in one graph and two answers to every memory question.
@@ -6124,7 +6043,7 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
   // feeder seeks on the first block's published demand anyway, which is the
   // same mechanism a scrub uses and is already covered by its tests.
   std::shared_ptr<StreamingLaneGroup> streamingGroup;
-  if (config.streamLanes && !adoptedParallelLanes && !adoptedParkedLanes) {
+  if (config.streamLanes && !adoptedParkedLanes) {
     streamingGroup = std::make_shared<StreamingLaneGroup>();
     for (NativePlaybackLaneSource &source : sources) {
       if (combined.isRequested())
@@ -6211,6 +6130,88 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
       authoritativeDurationFrames = 0;
     }
   }
+
+  // Fast path: decode the lanes concurrently, then admit them in lane order
+  // with the exact running accounting the sequential loop performs. Six lanes
+  // decoded one after another is seconds of a song opening; the pool decides
+  // nothing, so a set it cannot deliver whole falls through to the sequential
+  // loop below and is refused there, in its own words.
+  const bool sequentialLaneDecodeForced =
+      impl_->testHooks != nullptr &&
+      impl_->testHooks->forceSequentialLaneDecode != nullptr &&
+      impl_->testHooks->forceSequentialLaneDecode(impl_->testHooks->context);
+  ParallelLaneDecode parallel =
+      adoptedParkedLanes || sequentialLaneDecodeForced ||
+              streamingGroup != nullptr
+          ? ParallelLaneDecode{}
+          : decodeLanesConcurrently(sources, config.decodeOptions,
+                                    requiredSampleRate,
+                                    config.maximumRetainedBytes,
+                                    *graphArenaAdmission, combined,
+                                    impl_->testHooks);
+  bool adoptedParallelLanes = false;
+  if (parallel.complete) {
+    size_t ordered = *graphArenaAdmission;
+    bool admissible = true;
+    // A fail-safe for the reservation above, and — while that reservation
+    // holds — unreachable: every lane publishes at most the allowance drawn
+    // for it, allowances are drawn from a pool that starts at the lane budget
+    // and is only replenished by what a lane did NOT use, so the decoded
+    // total cannot exceed the budget and no prefix of it can either. It stays
+    // because it is what makes a future regression in the reservation degrade
+    // to the sequential path instead of admitting an over-budget set, and it
+    // costs one pass over six integers. Mutating it away is green for that
+    // reason, not because the set below is unchecked: the budget invariant it
+    // guards is asserted directly in laneDecodePoolStaysInsideTheMemoryBudget.
+    for (const ParallelLaneDecode::Lane &lane : parallel.lanes) {
+      const size_t remaining = config.maximumRetainedBytes - ordered;
+      const size_t bytes = lane.result.audio->retainedBytes();
+      // Both are the sequential loop's own refusals: an exhausted budget
+      // before the lane, and a lane larger than the cap that budget would
+      // have given its decoder. Either one hands the lane set back.
+      if (remaining == 0 || bytes > remaining) {
+        admissible = false;
+        break;
+      }
+      ordered += bytes;
+    }
+    if (admissible) {
+      for (size_t index = 0; index < sources.size(); ++index) {
+        NativePlaybackLaneSource &source = sources[index];
+        ParallelLaneDecode::Lane &prepared = parallel.lanes[index];
+        retained += prepared.result.audio->retainedBytes();
+        authoritativeDurationFrames = std::max(
+            authoritativeDurationFrames, prepared.result.audio->frameCount());
+        PreparedPlaybackGraph::Lane lane;
+        lane.id = std::move(source.id);
+        lane.owner = std::move(prepared.result.audio);
+        lane.peaks = prepared.peaks;
+        lane.peaksValid = prepared.peaksValid;
+        lane.identity = laneDecodeIdentity(source, config.decodeOptions,
+                                           requiredSampleRate);
+        lane.gain = source.gain;
+        lane.muted = source.muted;
+        lane.solo = source.solo;
+        decoded.push_back(std::move(lane));
+        // Ordinary-thread fault injection stays on the ordinary thread, once
+        // per lane and in lane order, exactly as the sequential loop does it.
+        injectFailure(impl_->testHooks,
+                      NativePlaybackAllocationPoint::AfterDecode);
+      }
+      // The pool consumed its duplicates; a parallel prepare must not go on
+      // holding more descriptors than a sequential one.
+      for (NativePlaybackLaneSource &source : sources)
+        source.descriptor.reset();
+      adoptedParallelLanes = true;
+    }
+  }
+  // Release the pool's PCM before any fallback re-decode: the aggregate limit
+  // describes what a prepared graph holds, not what an abandoned attempt did.
+  // The reason it declined outlives the attempt, because it is the only
+  // explanation the singer's log will have for a slow open.
+  const std::string laneDecodeFallback = std::move(parallel.declineReason);
+  parallel.lanes.clear();
+  parallel.complete = false;
 
   // The one definition of lane admission. Every refusal below — its error
   // code and its exact words — is the original, and the parallel path above

@@ -813,8 +813,40 @@ void streamedLanesPlayTheSameAudioAsDecodedOnes() {
     CHECK(session.unload(5).ok);
   }
 
-  const std::vector<float> decodedOut = play(false, 6);
-  const std::vector<float> streamedOut = play(true, 7);
+  // SIX lanes, which is what a song actually is — and the only shape that can
+  // catch this. The concurrent decode pool declines a set of fewer than two
+  // lanes, so every single-lane case above streams whether or not the pool
+  // would have taken the set first. On a phone the pool won every open, the
+  // song decoded whole, and the log said 515-796 MB retained with streaming
+  // switched on. Nothing in this file could see it.
+  {
+    singz::NativePlaybackPrepareConfig request = config();
+    request.streamLanes = true;
+    auto six = std::vector<singz::NativePlaybackLaneSource>{};
+    for (const char *id : {"vocals", "drums", "bass", "guitar", "piano", "other"})
+      six.push_back(lane(id, toneFlac));
+    CHECK(session.prepare(std::move(request), std::move(six), 6).ok);
+    const singz::NativePlaybackStatus streamedSix = session.status();
+    CHECK(streamedSix.lanes.size() == 6);
+    const size_t streamedBytes = streamedSix.retainedBytes;
+    CHECK(session.unload(6).ok);
+
+    singz::NativePlaybackPrepareConfig decodedRequest = config();
+    decodedRequest.streamLanes = false;
+    auto sixDecoded = std::vector<singz::NativePlaybackLaneSource>{};
+    for (const char *id : {"vocals", "drums", "bass", "guitar", "piano", "other"})
+      sixDecoded.push_back(lane(id, toneFlac));
+    CHECK(session.prepare(std::move(decodedRequest), std::move(sixDecoded), 7).ok);
+    const size_t decodedBytes = session.status().retainedBytes;
+    CHECK(session.unload(7).ok);
+
+    // Six lanes of a 31 s song is ~36 MB decoded against six rings. Anything
+    // close to the decoded figure means the pool took the set first.
+    CHECK(decodedBytes > streamedBytes * 2);
+  }
+
+  const std::vector<float> decodedOut = play(false, 8);
+  const std::vector<float> streamedOut = play(true, 9);
   CHECK(decodedOut.size() == total && streamedOut.size() == total);
   // The reference must actually carry the tone, or "identical" would only be
   // proving that two silences match.
