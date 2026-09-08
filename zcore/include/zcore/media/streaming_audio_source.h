@@ -47,7 +47,11 @@ enum class SeekCost : uint8_t {
   RunUp,
 };
 
-// Everything the graph needs about a source, read once at open.
+// Everything the graph needs about a source.
+//
+// Read at open, and again after `buildSeekIndex()` — which is the one thing
+// that can change it, by turning `seekCost` from Search into Indexed. Read on
+// the same thread that drives `read()` and `seek()`; nothing here is atomic.
 struct StreamingAudioInfo {
   uint32_t sampleRate{0};
   uint16_t channels{0};
@@ -93,23 +97,49 @@ class StreamingAudioSource {
 
   // Position the next `read()` at an exact frame. Frames beyond the end
   // position at the end; `read()` then returns zero.
+  //
+  // WHEN THE END IS NOT KNOWN — `frameCount == 0`, which is an MP3 without a
+  // Xing or VBRI header — "beyond the end" cannot be detected up front. Such a
+  // source positions at the last frame it can reach and lets `read()` discover
+  // the end, rather than refusing a seek it cannot judge.
   [[nodiscard]] virtual DecodedAudioStatus seek(uint64_t frame) = 0;
 
   // Fill up to `frames` of PLANAR float, one pointer per channel, and report
   // how many were written. A short read means the end of the source, never a
   // hiccup: a source that needs to wait for I/O waits.
   //
+  // PARTIAL DATA THEN AN ERROR is reported across two calls, and this is not a
+  // stylistic choice. A read that hits damage part way has real frames in hand
+  // and a problem to report; returning the error immediately throws those
+  // frames away, and returning them with `Ok` hides the problem. So: this call
+  // returns `Ok` with what it has, and the NEXT call returns the error with
+  // `framesRead == 0`. A caller that stops at the first non-Ok status
+  // therefore loses nothing.
+  //
+  // `framesRead` counts frames the caller may keep, and `position()` advances
+  // by exactly that, on every path including the error one. A position that
+  // under-reports what it handed over drifts for the rest of the song.
+  //
   // Planar because that is what the graph's source node consumes, and
   // converting once here is cheaper than converting per callback.
   //
-  // The caller owns the memory. Nothing here allocates per read; whatever an
-  // implementation needs is reserved in `open`, so a filling thread that has
-  // started does not fail on allocation halfway through a song.
+  // The caller owns the memory. An implementation must not FAIL on allocation
+  // part way through a song — reserve in `open` — but "never allocates" is the
+  // wrong requirement to write down: an ffmpeg or mpg123 adapter has packet
+  // and resampler state of its own, and the rule that matters is that a song
+  // already playing cannot run out.
   [[nodiscard]] virtual DecodedAudioStatus read(float* const* channels,
                                                 size_t frames,
                                                 size_t* framesRead) = 0;
 
-  // Where the next read begins.
+  // Where the next read begins. Same thread as `read()` and `seek()` — not
+  // published for a UI to poll, and not atomic.
+  //
+  // After a FAILED seek this is not meaningful and the source says so by
+  // refusing to read: a decoder left wherever a binary search stopped would
+  // otherwise hand back plausible audio from an unknown offset while this
+  // still reported the old position, which is one stem drifting against the
+  // other five with nothing downstream able to see it.
   [[nodiscard]] virtual uint64_t position() const noexcept = 0;
 
   // Build whatever index makes `seekCost` Indexed, if this source can. Costs
@@ -127,6 +157,12 @@ class StreamingAudioSource {
 
 // What a caller asks for, independent of format.
 struct StreamingAudioOpenOptions {
+  // What the caller already knows the container to be. `Auto` sniffs content,
+  // which is right for a trusted stem and wrong in general: MP3 has no
+  // reliable magic — an ID3 tag is optional and a frame sync matches inside
+  // arbitrary data — so an adapter for it needs to be told. Matches the hint
+  // `prepareDecodedAudio` already takes, and for the same reason.
+  DecodedAudioSourceFormat sourceFormat{DecodedAudioSourceFormat::Auto};
   // Zero keeps the source's own rate. Non-zero resamples inside the adapter,
   // so the caller sees one rate across six lanes whatever the files hold.
   // (Measured before this was written: a resample costs ~60% on top of the

@@ -32,6 +32,34 @@ device binary, not the simulator). RUNNING it on a phone needs signing and an
 app host, so there is no iPhone row above and there should not be one until
 there is a measurement rather than an extrapolation.
 
+**A review pass (Fable, 2026-09-08) found three state-machine defects**, one of
+them the exact failure the interface's exactness contract exists to prevent:
+
+- **`process_single` can call the write callback MORE THAN ONCE.** libFLAC
+  synthesises silence for missing frames to keep a damaged stream aligned
+  (`stream_decoder.c`, "Check whether frames are missing") and delivers those
+  writes before the real frame. Staging reset itself on every write and kept
+  only the LAST, so a damaged file played back **shifted by a whole block —
+  4096 frames** — with `read()` still returning Ok. Staging appends now.
+- **Errors were swallowed mid-decode.** `process_single` loops past a bad frame
+  and returns TRUE with the next good one, so consulting the error flag only on
+  failure meant `Ok` was returned across damage. And an error path returned
+  `framesRead = 0` after already handing frames to the caller, so `position()`
+  under-reported them for the rest of the song. Partial data is now `Ok` with
+  the count, the error arrives on the next call, and `position()` always
+  advances by what was handed over.
+- **A failed seek left the source readable from an unknown offset**, with
+  `position()` still reporting the old one — one stem drifting against five
+  with nothing able to see it. It refuses to read until a seek succeeds.
+
+The first was reproduced by a test written for it, which drifts by exactly 4096
+frames against the fixed code and passes with it. Getting there took two
+attempts: the first version of that test stopped at the reported error, and the
+shift only appears in the audio AFTER the damage — the error fix hid the
+alignment bug from the test meant to catch it. The invariant that works is
+ALIGNMENT, not equality, because silence in the right place is a correct answer
+and audio in the wrong place is not.
+
 Two things the implementation learned that the research did not predict:
 
 - **libFLAC's seek is ALREADY sample-exact.** This file was written expecting

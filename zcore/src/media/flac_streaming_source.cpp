@@ -69,8 +69,17 @@ std::FILE* consumeAsFile(OwnedFileDescriptor* descriptor) noexcept {
   return file;
 }
 
-// Interleaved-by-channel staging for frames libFLAC has handed over but the
-// caller has not taken yet.
+// Frames libFLAC has handed over but the caller has not taken yet.
+//
+// APPEND, not overwrite, and that distinction is a bug this file shipped with:
+// `FLAC__stream_decoder_process_single` can call the write callback MORE THAN
+// ONCE. When libFLAC detects missing frames it synthesises silence to keep the
+// stream sample-aligned (stream_decoder.c, "Check whether frames are missing")
+// and delivers those writes before the real frame. A staging buffer that reset
+// itself on every write kept only the LAST one, so a damaged file played back
+// shifted by a whole block — 4096 frames, 92.9 ms — with `read()` still
+// returning Ok. That is precisely the silent drift the interface's exactness
+// contract exists to prevent.
 struct Staging {
   std::vector<std::vector<float>> channels;
   size_t begin = 0;  // first unread frame
@@ -80,6 +89,13 @@ struct Staging {
   void clear() noexcept { begin = end = 0; }
   void reserve(size_t channelCount, size_t frames) {
     channels.assign(channelCount, std::vector<float>(frames, 0.0F));
+  }
+  // Room for `extra` more frames after `end`, keeping what is unread.
+  void grow(size_t channelCount, size_t extra) {
+    if (channels.size() < channelCount) channels.resize(channelCount);
+    const size_t need = end + extra;
+    for (auto& plane : channels)
+      if (plane.size() < need) plane.resize(need, 0.0F);
   }
 };
 
@@ -105,6 +121,10 @@ class FlacStreamingSource final : public StreamingAudioSource {
     // rather than silently wrong-rate audio, which would drift one stem
     // against the other five.
     if (options.requiredSampleRate != 0) return DecodedAudioStatus::InvalidArgument;
+    if (options.sourceFormat != DecodedAudioSourceFormat::Auto &&
+        options.sourceFormat != DecodedAudioSourceFormat::Flac) {
+      return DecodedAudioStatus::UnsupportedFormat;
+    }
     if (!descriptor.valid()) return DecodedAudioStatus::InvalidArgument;
 
     file_ = consumeAsFile(&descriptor);
@@ -123,7 +143,7 @@ class FlacStreamingSource final : public StreamingAudioSource {
                                          this) != FLAC__STREAM_DECODER_INIT_STATUS_OK) {
       return DecodedAudioStatus::UnsupportedFormat;
     }
-    if (!FLAC__stream_decoder_process_until_end_of_metadata(decoder_) || failed_) {
+    if (!FLAC__stream_decoder_process_until_end_of_metadata(decoder_) || sawError_) {
       return DecodedAudioStatus::MalformedData;
     }
     if (info_.sampleRate == 0 || info_.channels == 0) return DecodedAudioStatus::MalformedData;
@@ -144,22 +164,35 @@ class FlacStreamingSource final : public StreamingAudioSource {
     if (decoder_ == nullptr) return DecodedAudioStatus::InvalidArgument;
     const uint64_t target = info_.frameCount > 0 ? std::min(frame, info_.frameCount) : frame;
     staging_.clear();
-    failed_ = false;
+    sawError_ = false;
+    pendingError_ = false;
+    // libFLAC refuses to seek from ABORTED or SEEK_ERROR, so a source that has
+    // hit either would fail its NEXT seek spuriously and only recover on the
+    // one after. Flush first and the first seek works.
+    const FLAC__StreamDecoderState state = FLAC__stream_decoder_get_state(decoder_);
+    if (state == FLAC__STREAM_DECODER_ABORTED || state == FLAC__STREAM_DECODER_SEEK_ERROR) {
+      FLAC__stream_decoder_flush(decoder_);
+    }
     if (target == info_.frameCount && info_.frameCount > 0) {
       // Positioning at the end is legal and reads zero; libFLAC would refuse
       // to seek past the last sample.
       atEnd_ = true;
+      broken_ = false;
       position_ = target;
       return DecodedAudioStatus::Ok;
     }
     if (!FLAC__stream_decoder_seek_absolute(decoder_, target)) {
-      // A failed seek leaves the decoder in the SEEK_ERROR state and it must
-      // be flushed before it will decode again — otherwise every later read
-      // fails and the lane goes silent for the rest of the song.
+      // Flushed so the decoder can be used again, but the file offset the
+      // binary search stopped at is arbitrary — so the source is BROKEN until
+      // a seek succeeds, rather than quietly readable from nowhere in
+      // particular. `position_` is left alone: it is no longer true of the
+      // decoder, and pretending otherwise is the drift this guards.
       FLAC__stream_decoder_flush(decoder_);
+      broken_ = true;
       return DecodedAudioStatus::IoError;
     }
     atEnd_ = false;
+    broken_ = false;
     position_ = target;
     return DecodedAudioStatus::Ok;
   }
@@ -170,14 +203,28 @@ class FlacStreamingSource final : public StreamingAudioSource {
     *framesRead = 0;
     if (decoder_ == nullptr || channels == nullptr) return DecodedAudioStatus::InvalidArgument;
 
+    // A source whose seek failed does not know where it is. Reading from it
+    // would return plausible audio from an unknown offset while `position()`
+    // reported the old one — a stem drifting against the other five, which
+    // nothing downstream can detect. It stays broken until a seek succeeds.
+    if (broken_) return DecodedAudioStatus::IoError;
+
     size_t written = 0;
+    bool errored = false;
     while (written < frames) {
       if (staging_.available() == 0) {
         if (atEnd_) break;
-        if (!decodeOneFrame()) {
-          if (failed_) return DecodedAudioStatus::MalformedData;
-          break;  // end of stream
+        const bool got = decodeOneFrame();
+        // Checked whether or not the decode "succeeded": libFLAC's
+        // process_single loops past a bad frame and returns TRUE with the next
+        // good one, so an error callback is the only evidence that something
+        // was skipped. Consulting it only on failure is how this returned Ok
+        // for three and a half seconds of shifted audio.
+        if (sawError_) {
+          errored = true;
+          break;
         }
+        if (!got) break;  // end of stream
         continue;
       }
       const size_t take = std::min(frames - written, staging_.available());
@@ -188,8 +235,20 @@ class FlacStreamingSource final : public StreamingAudioSource {
       staging_.begin += take;
       written += take;
     }
+    // ALWAYS, including on the error path: frames handed to the caller are
+    // frames consumed, and a position that under-reports them drifts for the
+    // rest of the song.
     position_ += written;
     *framesRead = written;
+    // Partial data now, the error on the next call — the contract the
+    // interface states, and the only shape that can report "here is what I
+    // had, and then it went wrong" without throwing the good frames away.
+    if (errored && written == 0) return DecodedAudioStatus::MalformedData;
+    if (errored) pendingError_ = true;
+    if (pendingError_ && written == 0) {
+      pendingError_ = false;
+      return DecodedAudioStatus::MalformedData;
+    }
     return DecodedAudioStatus::Ok;
   }
 
@@ -205,14 +264,17 @@ class FlacStreamingSource final : public StreamingAudioSource {
   }
 
  private:
+  // Called only with staging drained, so compacting to zero keeps nothing —
+  // it just stops `end` walking off the end of a long song.
   bool decodeOneFrame() {
     staging_.clear();
     if (FLAC__stream_decoder_get_state(decoder_) == FLAC__STREAM_DECODER_END_OF_STREAM) {
       atEnd_ = true;
       return false;
     }
+    sawError_ = false;
     if (!FLAC__stream_decoder_process_single(decoder_)) {
-      failed_ = true;
+      sawError_ = true;
       return false;
     }
     if (FLAC__stream_decoder_get_state(decoder_) == FLAC__STREAM_DECODER_END_OF_STREAM &&
@@ -280,28 +342,24 @@ class FlacStreamingSource final : public StreamingAudioSource {
     const unsigned channels = frame->header.channels;
     const unsigned blocksize = frame->header.blocksize;
     if (channels != self->info_.channels) {
-      self->failed_ = true;
+      self->sawError_ = true;
       return FLAC__STREAM_DECODER_WRITE_STATUS_ABORT;
     }
     // Whole after a straight read, SHORTER after a seek — libFLAC delivers the
     // tail of the containing frame starting at the requested sample. Either
     // way the block size is whatever the header says, never assumed.
-    const unsigned keep = blocksize;
-    if (self->staging_.channels.size() < channels ||
-        self->staging_.channels[0].size() < keep) {
-      for (auto& plane : self->staging_.channels) plane.assign(keep, 0.0F);
-      if (self->staging_.channels.size() < channels)
-        self->staging_.channels.resize(channels, std::vector<float>(keep, 0.0F));
-    }
+    //
+    // APPENDED after whatever is already staged, because one `process_single`
+    // can produce several of these (see Staging).
+    self->staging_.grow(channels, blocksize);
     // 2^(bps-1): the same scale the WAV reader and readFlacMono apply.
     const float scale = 1.0F / static_cast<float>(1u << (frame->header.bits_per_sample - 1));
     for (unsigned c = 0; c < channels; c++) {
-      float* dst = self->staging_.channels[c].data();
+      float* dst = self->staging_.channels[c].data() + self->staging_.end;
       const FLAC__int32* src = buffer[c];
-      for (unsigned i = 0; i < keep; i++) dst[i] = static_cast<float>(src[i]) * scale;
+      for (unsigned i = 0; i < blocksize; i++) dst[i] = static_cast<float>(src[i]) * scale;
     }
-    self->staging_.begin = 0;
-    self->staging_.end = keep;
+    self->staging_.end += blocksize;
     return FLAC__STREAM_DECODER_WRITE_STATUS_CONTINUE;
   }
 
@@ -320,7 +378,7 @@ class FlacStreamingSource final : public StreamingAudioSource {
   }
 
   static void errorCb(const FLAC__StreamDecoder*, FLAC__StreamDecoderErrorStatus, void* client) {
-    static_cast<FlacStreamingSource*>(client)->failed_ = true;
+    static_cast<FlacStreamingSource*>(client)->sawError_ = true;
   }
 
   std::FILE* file_ = nullptr;
@@ -328,7 +386,12 @@ class FlacStreamingSource final : public StreamingAudioSource {
   StreamingAudioInfo info_{};
   Staging staging_{};
   uint64_t position_ = 0;
-  bool failed_ = false;
+  // Set by the error callback during one decode, read straight after it.
+  bool sawError_ = false;
+  // An error already reported partial data; the next empty read returns it.
+  bool pendingError_ = false;
+  // A seek failed and the decoder's position is unknown. Reads refuse.
+  bool broken_ = false;
   bool atEnd_ = false;
   bool sawSeekTable_ = false;
 };

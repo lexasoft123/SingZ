@@ -166,12 +166,14 @@ int main() {
     check(source->position() == frames, "position ends at the frame count");
   }
 
-  // ---- 2. seek is sample-exact, not block-exact ------------------------
+  // ---- 2. seek is sample-exact -----------------------------------------
   //
-  // This is the case libFLAC does NOT do for you: `seek_absolute` lands on the
-  // frame containing the target, so a source that forwards it blindly reads up
-  // to 4095 frames of the wrong audio. Every target below is deliberately off
-  // a block boundary.
+  // libFLAC turns out to do this FOR you — after a seek it hands over a
+  // shortened frame whose header reports the requested sample, so the run-in
+  // this file once dropped by hand was always zero. These cases stay because
+  // they are what would notice if that ever changed: every target is
+  // deliberately off a block boundary, and each is compared against the full
+  // decode rather than against itself.
   {
     const uint64_t targets[] = {1, 4095, 4096, 4097, 10'000, 123'457, frames - 1};
     for (const uint64_t target : targets) {
@@ -233,6 +235,128 @@ int main() {
       auto none = singz::openStreamingAudioSource(openRead(flac), resample, &rs);
       check(none == nullptr && rs == singz::DecodedAudioStatus::InvalidArgument,
             "a rate this source cannot deliver is refused, not ignored");
+    }
+  }
+
+  // ---- 5. damage: never shifted audio reported as Ok --------------------
+  //
+  // The defect this case exists for: libFLAC's `process_single` can call the
+  // write callback SEVERAL times — it synthesises silence for missing frames
+  // to keep the stream aligned — and a staging buffer that reset on every
+  // write kept only the last, playing the rest of the song a block early with
+  // `Ok` returned. Corrupting the middle of the file is what provokes it.
+  {
+    const std::string broken = tempPath(".flac");
+    {
+      std::FILE* in = std::fopen(flac.c_str(), "rb");
+      std::FILE* out = std::fopen(broken.c_str(), "wb");
+      std::fseek(in, 0, SEEK_END);
+      const long size = std::ftell(in);
+      std::fseek(in, 0, SEEK_SET);
+      std::vector<unsigned char> bytes(static_cast<size_t>(size));
+      (void)std::fread(bytes.data(), 1, bytes.size(), in);
+      for (size_t i = bytes.size() / 2; i < bytes.size() / 2 + 64; i++) bytes[i] ^= 0xFFu;
+      (void)std::fwrite(bytes.data(), 1, bytes.size(), out);
+      std::fclose(in);
+      std::fclose(out);
+    }
+    singz::DecodedAudioStatus status = singz::DecodedAudioStatus::InvalidArgument;
+    auto source = singz::openStreamingAudioSource(openRead(broken), {}, &status);
+    if (source != nullptr) {
+      // Read the WHOLE file, continuing past the error rather than stopping at
+      // it. Stopping is what a well-behaved caller does and it is exactly what
+      // hides this bug: the shift only shows up in the audio AFTER the damage.
+      std::vector<std::vector<float>> got(2, std::vector<float>(frames, 0.0F));
+      float* planes[2] = {nullptr, nullptr};
+      uint64_t at = 0;
+      int emptyReads = 0;
+      while (at < frames && emptyReads < 2) {
+        const size_t want = static_cast<size_t>(std::min<uint64_t>(4096, frames - at));
+        planes[0] = got[0].data() + at;
+        planes[1] = got[1].data() + at;
+        size_t n = 0;
+        (void)source->read(planes, want, &n);  // status ignored ON PURPOSE
+        emptyReads = n == 0 ? emptyReads + 1 : 0;
+        at += n;
+      }
+      // The invariant is ALIGNMENT, not equality: libFLAC substitutes silence
+      // for frames it could not read, and silence in the right place is a
+      // correct answer. Audio in the WRONG place is not. So take a window well
+      // past the damage and find which offset it matches the reference at —
+      // zero is the only acceptable answer.
+      int drift = 9999;
+      if (at > frames / 2 + 40000) {
+        const size_t probe = static_cast<size_t>(frames / 2 + 30000);
+        const size_t width = 2048;
+        for (int off = -8192; off <= 8192 && drift == 9999; off += 1) {
+          const long long refAt = static_cast<long long>(probe) + off;
+          if (refAt < 0 || refAt + static_cast<long long>(width) > static_cast<long long>(frames))
+            continue;
+          if (std::memcmp(got[0].data() + probe, ref.channels[0].data() + refAt,
+                          width * sizeof(float)) == 0) {
+            drift = off;
+          }
+        }
+      }
+      check(drift == 0, "audio after damage stays ALIGNED with the source, not shifted by a block");
+      if (drift != 0 && drift != 9999)
+        std::fprintf(stderr, "  (drifted by %d frames)\n", drift);
+    }
+    std::remove(broken.c_str());
+  }
+
+  // ---- 6. truncation: the end is reported once and stays reported --------
+  {
+    const std::string cut = tempPath(".flac");
+    {
+      std::FILE* in = std::fopen(flac.c_str(), "rb");
+      std::FILE* out = std::fopen(cut.c_str(), "wb");
+      std::fseek(in, 0, SEEK_END);
+      const long size = std::ftell(in);
+      std::fseek(in, 0, SEEK_SET);
+      std::vector<unsigned char> bytes(static_cast<size_t>(size * 6 / 10));
+      (void)std::fread(bytes.data(), 1, bytes.size(), in);
+      (void)std::fwrite(bytes.data(), 1, bytes.size(), out);
+      std::fclose(in);
+      std::fclose(out);
+    }
+    singz::DecodedAudioStatus status = singz::DecodedAudioStatus::InvalidArgument;
+    auto source = singz::openStreamingAudioSource(openRead(cut), {}, &status);
+    if (source != nullptr) {
+      (void)readAll(*source, frames, 8192, 2);
+      // A seek into the missing tail must not leave a source that answers Ok
+      // from an unknown offset — it is broken until a seek succeeds.
+      const auto seeked = source->seek(frames - 100);
+      if (seeked != singz::DecodedAudioStatus::Ok) {
+        std::vector<float> l(64), r(64);
+        float* planes[2] = {l.data(), r.data()};
+        size_t n = 1;
+        check(source->read(planes, 64, &n) != singz::DecodedAudioStatus::Ok,
+              "a source whose seek failed refuses to read rather than inventing a position");
+        check(source->seek(0) == singz::DecodedAudioStatus::Ok,
+              "a successful seek un-breaks it");
+      }
+    }
+    std::remove(cut.c_str());
+  }
+
+  // ---- 7. the small awkward asks ----------------------------------------
+  {
+    singz::DecodedAudioStatus status = singz::DecodedAudioStatus::InvalidArgument;
+    auto source = singz::openStreamingAudioSource(openRead(flac), {}, &status);
+    if (source != nullptr) {
+      check(source->seek(frames + 5000) == singz::DecodedAudioStatus::Ok &&
+                source->position() == frames,
+            "seeking past the end clamps to the end rather than failing");
+      std::vector<float> l(8), r(8);
+      float* planes[2] = {l.data(), r.data()};
+      size_t n = 7;
+      check(source->read(planes, 0, &n) == singz::DecodedAudioStatus::Ok && n == 0,
+            "a zero-frame read is Ok and reads nothing");
+      check(source->seek(0) == singz::DecodedAudioStatus::Ok, "and it can seek back");
+      size_t m = 0;
+      check(source->read(planes, 8, &m) == singz::DecodedAudioStatus::Ok && m == 8,
+            "and read again afterwards");
     }
   }
 

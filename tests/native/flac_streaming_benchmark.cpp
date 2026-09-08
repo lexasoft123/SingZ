@@ -132,12 +132,17 @@ int main(int argc, char** argv) {
       scratch.assign(channels, std::vector<float>(block, 0.0F));
       std::vector<float*> planes(channels);
       for (uint16_t c = 0; c < channels; c++) planes[c] = scratch[c].data();
+      // Counted per block actually read, not per block ASKED for: a lane that
+      // ends early would otherwise be credited with audio it never produced
+      // and the headroom figure would flatter itself.
+      uint64_t framesRefilled = 0;
       for (int i = 0; i < blocks; i++) {
         size_t got = 0;
         if (source->read(planes.data(), block, &got) != singz::DecodedAudioStatus::Ok || got == 0)
           break;
+        framesRefilled += got;
       }
-      refilledSeconds += static_cast<double>(block) * blocks / source->info().sampleRate;
+      refilledSeconds += static_cast<double>(framesRefilled) / source->info().sampleRate;
     }
     refillMs = msSince(started);
   }
