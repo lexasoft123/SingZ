@@ -227,6 +227,17 @@ struct NativePlaybackPrepareConfig {
   // suspended.
   uint64_t handoffLease{0};
   DecodedAudioPrepareOptions decodeOptions{};
+  // Play the lanes STRAIGHT OUT OF THEIR FLAC instead of decoding every one
+  // to PCM first. The open then costs one window per lane rather than a whole
+  // song (measured: 610x faster to first audio, 594x less resident, on the
+  // POCO), and playback reads a ring a control-domain feeder keeps ahead.
+  //
+  // Off by default and deliberately a per-prepare choice, not a build flag:
+  // the two paths must stay comparable on the same device, on the same song,
+  // in the same session. A streamed lane is never parked for adoption — there
+  // is no decoded buffer to keep — so a rebuild re-opens instead, which is
+  // cheap for exactly the same reason.
+  bool streamLanes{false};
   // Optional portable scheduling intent. The session prepares and owns the
   // resulting immutable plan before publishing any callback-visible graph.
   // Absence preserves the original frame-zero, song-only topology exactly.

@@ -1,5 +1,7 @@
 #include "native_playback_session.h"
 
+#include "streaming_lane_feeder.h"
+
 #include "native_playback_callback.h"
 #include "native_playback_projection.h"
 #include "signalsmith_time_pitch.h"
@@ -2307,7 +2309,63 @@ struct ParallelLaneDecode {
 struct PreparedPlaybackGraph {
   struct Lane {
     std::string id;
+    // Exactly one of these backs the lane. `owner` is the decoded song, held
+    // whole; `window` is a moving view the feeder keeps ahead. Everything that
+    // used to ask `owner` a question now asks the lane, so the two backings
+    // answer through one place instead of at 24 call sites.
     std::shared_ptr<const DecodedAudio> owner;
+    zdsp::StreamingWindow *window{nullptr};
+    uint32_t streamChannels{0};
+    uint64_t streamFrames{0};
+    uint64_t streamBytes{0};
+
+    [[nodiscard]] uint32_t channels() const noexcept {
+      return owner != nullptr ? owner->channelCount() : streamChannels;
+    }
+    [[nodiscard]] uint64_t frames() const noexcept {
+      return owner != nullptr ? owner->frameCount() : streamFrames;
+    }
+    // What this lane costs to hold. For a streamed lane that is its ring, not
+    // its song — which is the entire point, and is why the budget it is
+    // checked against still means something.
+    [[nodiscard]] uint64_t bytes() const noexcept {
+      return owner != nullptr ? owner->retainedBytes() : streamBytes;
+    }
+    [[nodiscard]] bool streamed() const noexcept { return owner == nullptr; }
+
+    // The callback-owned play cursor. Each backing has its own reader and the
+    // handles are not interchangeable — asking the decoded reader about a
+    // streamed source returns zero, which would read as "the song is at the
+    // start" and is worse than an error. One place decides.
+    [[nodiscard]] uint64_t cursorFrames() const noexcept {
+      return streamed()
+                 ? zdsp::streamingWindowSourceCursor(source, &cursorReader)
+                 : zdsp::decodedBufferSourceCursor(source, &cursorReader);
+    }
+
+    // One frame of this lane, wherever it lives.
+    //
+    // False when a STREAMED lane's window does not hold the frame. The caller
+    // treats that as silence, which is exactly what the render thread does
+    // with the same miss — the anchor is warmed at a position the feeder has
+    // just primed, so a miss means the scrub outran the decoder rather than
+    // that anything is wrong. A decoded lane never misses.
+    [[nodiscard]] bool sampleAt(uint32_t channel, uint64_t frame,
+                                float *value) const noexcept {
+      if (value == nullptr || channel >= channels() || frame >= frames())
+        return false;
+      if (owner != nullptr) {
+        *value = owner->channelData(channel)[frame];
+        return true;
+      }
+      uint64_t start = 0;
+      uint64_t end = 0;
+      if (!zdsp::streamingWindowResident(window, &start, &end) ||
+          frame < start || frame >= end)
+        return false;
+      *value = window->channels[channel][frame & (window->capacityFrames - 1u)];
+      return true;
+    }
     std::array<const float *, zdsp::kMaximumChannelsPerBus> channelPointers{};
     std::array<zdsp::AudioChannelRole, zdsp::kMaximumChannelsPerBus> roles{};
     zdsp::AudioBusDescriptor sourceBus{};
@@ -2363,7 +2421,7 @@ struct PreparedPlaybackGraph {
     hasTimePitch = std::fabs(timePitchCorrectionSemitones) > 1e-6F ||
                    graphDocumentRequestsSignalsmith(graphDocument);
     for (const Lane &lane : lanes)
-      durationFrames = std::max(durationFrames, lane.owner->frameCount());
+      durationFrames = std::max(durationFrames, lane.frames());
     if (cuePlan != nullptr)
       durationFrames = static_cast<uint64_t>(cuePlan->songDurationFrames);
     if (training.has_value()) {
@@ -2402,6 +2460,10 @@ struct PreparedPlaybackGraph {
   }
 
   std::vector<Lane> lanes;
+  // Owns every streamed lane's decoder, ring and feeder thread. Null when the
+  // lanes are decoded. Held here because the source nodes point into its
+  // windows, so it must outlive the graph that reads them.
+  std::shared_ptr<StreamingLaneGroup> streaming;
   std::vector<uint8_t> arenaBytes;
   zdsp::RealtimeArena arena{};
   zdsp::CompiledGraph *graph{nullptr};
@@ -2591,16 +2653,17 @@ struct PreparedPlaybackGraph {
         if (elapsed > std::numeric_limits<uint64_t>::max() - sourceStart)
           continue;
         const uint64_t sourceFrame = sourceStart + elapsed;
-        if (sourceFrame >= lane.owner->frameCount())
+        if (sourceFrame >= lane.frames())
           continue;
         const uint64_t nextFrame = sourceFrame + 1u;
-        const uint32_t sourceChannels = lane.owner->channelCount();
+        const uint32_t sourceChannels = lane.channels();
         const auto sample = [&](uint32_t channel) {
-          const float first = lane.owner->channelData(channel)[sourceFrame];
-          const float second =
-              nextFrame < lane.owner->frameCount()
-                  ? lane.owner->channelData(channel)[nextFrame]
-                  : 0.0F;
+          float first = 0.0F;
+          if (!lane.sampleAt(channel, sourceFrame, &first))
+            return 0.0F;
+          float second = 0.0F;
+          if (!lane.sampleAt(channel, nextFrame, &second))
+            second = 0.0F;
           return static_cast<float>(
               static_cast<double>(first) +
               (static_cast<double>(second) - static_cast<double>(first)) *
@@ -2725,7 +2788,7 @@ struct PreparedPlaybackGraph {
     graphContext.lanes.reserve(lanes.size());
     for (const Lane &lane : lanes)
       graphContext.lanes.push_back(
-          {lane.id, lane.owner->channelCount(), lane.trainingSelected});
+          {lane.id, lane.channels(), lane.trainingSelected});
     NativePlaybackGraphDocument document =
         graphDocument.has_value()
             ? std::move(*graphDocument)
@@ -2903,25 +2966,35 @@ struct PreparedPlaybackGraph {
         if (lane == nullptr)
           return {zdsp::StatusCode::InvalidArgument, 20};
         lane->sourceNodeId = value.id;
-        const uint32_t sourceChannels = lane->owner->channelCount();
-        for (uint32_t channel = 0; channel < sourceChannels; ++channel)
-          lane->channelPointers[channel] = lane->owner->channelData(channel);
-        const size_t stateBytes = zdsp::decodedBufferSourceStateBytes();
+        const uint32_t sourceChannels = lane->channels();
+        const size_t stateBytes =
+            lane->streamed() ? zdsp::streamingWindowSourceStateBytes()
+                             : zdsp::decodedBufferSourceStateBytes();
         void *state = zdsp::arenaAllocate(&arena, stateBytes, 64);
         if (state == nullptr)
           return {zdsp::StatusCode::InsufficientStorage, 21};
-        lane->source = zdsp::createPositionedDecodedBufferSource(
-            {{value.id},
-             {lane->channelPointers.data(), sourceChannels,
-              lane->owner->frameCount(), {sampleRate}},
-             0,
-             std::min(sourceStartFrame, lane->owner->frameCount())},
-            {static_cast<uint8_t *>(state),
-             static_cast<uint32_t>(stateBytes)});
+        if (lane->streamed()) {
+          lane->source = zdsp::createPositionedStreamingSource(
+              {{value.id}, lane->window, 0,
+               std::min(sourceStartFrame, lane->frames())},
+              {static_cast<uint8_t *>(state),
+               static_cast<uint32_t>(stateBytes)});
+        } else {
+          for (uint32_t channel = 0; channel < sourceChannels; ++channel)
+            lane->channelPointers[channel] = lane->owner->channelData(channel);
+          lane->source = zdsp::createPositionedDecodedBufferSource(
+              {{value.id},
+               {lane->channelPointers.data(), sourceChannels,
+                lane->frames(), {sampleRate}},
+               0,
+               std::min(sourceStartFrame, lane->frames())},
+              {static_cast<uint8_t *>(state),
+               static_cast<uint32_t>(stateBytes)});
+        }
         storage.processor = lane->source;
         if (storage.processor.state == nullptr)
           return {zdsp::StatusCode::InsufficientStorage, 22};
-        retainedBytes += lane->owner->retainedBytes();
+        retainedBytes += lane->bytes();
         break;
       }
       case NativePlaybackGraphMaterializedKind::TrainingDuck: {
@@ -3329,30 +3402,40 @@ struct PreparedPlaybackGraph {
 
     for (size_t index = 0; index < lanes.size(); ++index) {
       Lane &lane = lanes[index];
-      const uint32_t sourceChannels = lane.owner->channelCount();
+      const uint32_t sourceChannels = lane.channels();
       const uint64_t laneSourceStartFrame =
-          std::min(sourceStartFrame, lane.owner->frameCount());
+          std::min(sourceStartFrame, lane.frames());
       lane.sourceBus = descriptor(sourceChannels, &lane.roles);
-      for (uint32_t channel = 0; channel < sourceChannels; ++channel)
-        lane.channelPointers[channel] = lane.owner->channelData(channel);
+      if (!lane.streamed())
+        for (uint32_t channel = 0; channel < sourceChannels; ++channel)
+          lane.channelPointers[channel] = lane.owner->channelData(channel);
       const uint64_t sourceNode = kLaneNodeBase + index * 3u;
       const uint64_t mapNode = sourceNode + 1u;
       const uint64_t gainNode = sourceNode + 2u;
 
-      const size_t sourceBytes = zdsp::decodedBufferSourceStateBytes();
+      const size_t sourceBytes =
+          lane.streamed() ? zdsp::streamingWindowSourceStateBytes()
+                          : zdsp::decodedBufferSourceStateBytes();
       void *sourceState = zdsp::arenaAllocate(&arena, sourceBytes, 64);
       if (sourceState == nullptr)
         return {zdsp::StatusCode::InsufficientStorage, 2};
-      lane.source = zdsp::createPositionedDecodedBufferSource(
-          {{sourceNode},
-           {lane.channelPointers.data(),
-            sourceChannels,
-            lane.owner->frameCount(),
-            {sampleRate}},
-           0,
-           laneSourceStartFrame},
-          {static_cast<uint8_t *>(sourceState),
-           static_cast<uint32_t>(sourceBytes)});
+      if (lane.streamed()) {
+        lane.source = zdsp::createPositionedStreamingSource(
+            {{sourceNode}, lane.window, 0, laneSourceStartFrame},
+            {static_cast<uint8_t *>(sourceState),
+             static_cast<uint32_t>(sourceBytes)});
+      } else {
+        lane.source = zdsp::createPositionedDecodedBufferSource(
+            {{sourceNode},
+             {lane.channelPointers.data(),
+              sourceChannels,
+              lane.frames(),
+              {sampleRate}},
+             0,
+             laneSourceStartFrame},
+            {static_cast<uint8_t *>(sourceState),
+             static_cast<uint32_t>(sourceBytes)});
+      }
       if (lane.source.state == nullptr)
         return {zdsp::StatusCode::InsufficientStorage, 3};
 
@@ -3484,7 +3567,7 @@ struct PreparedPlaybackGraph {
         composition.connect(
             {{gainNode}, 0, {kSongMixNode}, static_cast<uint32_t>(index)});
       }
-      retainedBytes += lane.owner->retainedBytes();
+      retainedBytes += lane.bytes();
     }
 
     const zdsp::AudioBusDescriptor monoBus = descriptor(1, nullptr);
@@ -3892,8 +3975,8 @@ struct PreparedPlaybackGraph {
             ? 0
             : static_cast<uint64_t>(cuePlan->sourceStartFrame);
     for (const Lane &lane : lanes)
-      if (zdsp::decodedBufferSourceCursor(lane.source, &lane.cursorReader) !=
-          std::min(selected, lane.owner->frameCount()))
+      if (lane.cursorFrames() !=
+          std::min(selected, lane.frames()))
         return false;
     return true;
   }
@@ -5621,9 +5704,21 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
       // a retaining unload's are: shared_ptr copies, nothing decoded twice.
       // The song they belong to keeps rendering from the same memory.
       parkedLanes.clear();
-      for (const PreparedPlaybackGraph::Lane &lane : impl_->prepared->lanes)
+      for (const PreparedPlaybackGraph::Lane &lane : impl_->prepared->lanes) {
+        // A STREAMED lane has no decoded buffer to offer, so it is not parked:
+        // there is nothing to keep and nothing to save. The rebuild re-opens
+        // it instead, which costs one window rather than one song — the same
+        // reason streaming is worth having at all. Parking a subset would be
+        // worse than parking none, because adoption is all-or-nothing on an
+        // exact whole-set match and a partial set would fail that check after
+        // paying for it.
+        if (lane.streamed()) {
+          parkedLanes.clear();
+          break;
+        }
         parkedLanes.push_back(
             {lane.id, lane.identity, lane.owner, lane.peaks, lane.peaksValid});
+      }
     } else if (impl_->prepared != nullptr || impl_->generation != 0 ||
                impl_->activeGeneration.load(std::memory_order_acquire) != 0 ||
                impl_->failedPrepareCleanupGeneration != 0 ||
@@ -5980,10 +6075,70 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
   parallel.lanes.clear();
   parallel.complete = false;
 
+  // Streamed lanes: opened, primed, and never decoded whole. This runs before
+  // the decode loop and takes the whole set or none — a mixture would mean two
+  // residency models in one graph and two answers to every memory question.
+  //
+  // The lanes are primed at frame zero rather than at the prepared start,
+  // because the start is not known until the cue plan below is built; the
+  // feeder seeks on the first block's published demand anyway, which is the
+  // same mechanism a scrub uses and is already covered by its tests.
+  std::shared_ptr<StreamingLaneGroup> streamingGroup;
+  if (config.streamLanes && !adoptedParallelLanes && !adoptedParkedLanes) {
+    streamingGroup = std::make_shared<StreamingLaneGroup>();
+    for (NativePlaybackLaneSource &source : sources) {
+      if (combined.isRequested())
+        return failPreparation(NativePlaybackError::Cancelled,
+                               "Native playback preparation was superseded");
+      const DecodedAudioStatus status = streamingGroup->addLane(
+          std::move(source.descriptor), requiredSampleRate);
+      if (status != DecodedAudioStatus::Ok) {
+        return failPreparation(
+            decodeError(status),
+            "A FLAC playback lane could not be opened for streaming");
+      }
+    }
+    if (streamingGroup->prime(0) != DecodedAudioStatus::Ok) {
+      return failPreparation(NativePlaybackError::DecodeFailure,
+                             "A streamed playback lane could not be primed");
+    }
+    for (size_t index = 0; index < sources.size(); ++index) {
+      const StreamingAudioInfo *info = streamingGroup->info(index);
+      if (info == nullptr)
+        return failPreparation(NativePlaybackError::DecodeFailure,
+                               "A streamed playback lane is missing");
+      const size_t bytes = streamingGroup->retainedBytes(index);
+      if (bytes > config.maximumRetainedBytes - retained) {
+        return failPreparation(
+            NativePlaybackError::LimitExceeded,
+            "Prepared playback lanes exceed the aggregate memory limit");
+      }
+      retained += bytes;
+      authoritativeDurationFrames =
+          std::max(authoritativeDurationFrames, info->frameCount);
+      PreparedPlaybackGraph::Lane lane;
+      lane.id = std::move(sources[index].id);
+      lane.window = streamingGroup->window(index);
+      lane.streamChannels = info->channels;
+      lane.streamFrames = info->frameCount;
+      lane.streamBytes = bytes;
+      // KNOWN GAP, stated rather than hidden: the seek bar's waveform is a
+      // linear pass over decoded PCM, and a streamed lane has none to pass
+      // over. Computing it here would mean decoding the whole song, which is
+      // the exact cost streaming exists to avoid, so the bar renders without
+      // a waveform until peaks are made asynchronous.
+      lane.peaksValid = false;
+      lane.gain = sources[index].gain;
+      lane.muted = sources[index].muted;
+      lane.solo = sources[index].solo;
+      decoded.push_back(std::move(lane));
+    }
+  }
+
   // The one definition of lane admission. Every refusal below — its error
   // code and its exact words — is the original, and the parallel path above
   // deliberately reports none of its own: it hands the set back to this loop.
-  if (!adoptedParallelLanes && !adoptedParkedLanes) {
+  if (!adoptedParallelLanes && !adoptedParkedLanes && streamingGroup == nullptr) {
     for (NativePlaybackLaneSource &source : sources) {
       if (combined.isRequested())
         return failPreparation(NativePlaybackError::Cancelled,
@@ -6116,6 +6271,14 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
       preparedStartProjectFrame,
       config.initialTransport, generation, impl_->testHooks);
   prepared->laneDecodeFallback = laneDecodeFallback;
+  // Handed over BEFORE prepare(): the source nodes built there point into this
+  // group's windows, so the graph must already own it. Starting the feeder
+  // here rather than at Start keeps the window ahead of a pre-roll or an
+  // initial seek, and an idle feeder costs one timed wait every 4 ms.
+  if (streamingGroup != nullptr) {
+    prepared->streaming = std::move(streamingGroup);
+    prepared->streaming->start();
+  }
   prepared->inject(NativePlaybackAllocationPoint::AfterArena);
   zdsp::GraphCompileError compileError{};
   const zdsp::Status graphStatus = prepared->prepare(&compileError);
@@ -6438,7 +6601,7 @@ NativePlaybackSession::armSwap(NativePlaybackPrepareConfig config,
       for (const PreparedPlaybackGraph::Lane &lane : candidate->lanes) {
         for (const PreparedPlaybackGraph::Lane &old : outgoing.lanes) {
           if (lane.owner != nullptr && lane.owner == old.owner) {
-            shared += lane.owner->retainedBytes();
+            shared += lane.bytes();
             break;
           }
         }
@@ -7989,8 +8152,8 @@ NativePlaybackStatus NativePlaybackSession::status() const {
       NativePlaybackLaneStatus laneStatus;
       laneStatus.id = lane.id;
       laneStatus.cursorFrames =
-          zdsp::decodedBufferSourceCursor(lane.source, &lane.cursorReader);
-      laneStatus.totalFrames = lane.owner->frameCount();
+          lane.cursorFrames();
+      laneStatus.totalFrames = lane.frames();
       laneStatus.gain = lane.gain;
       laneStatus.muted = lane.muted;
       laneStatus.solo = lane.solo;

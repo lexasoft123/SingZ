@@ -150,7 +150,9 @@ add_library(singz_native_playback_session STATIC EXCLUDE_FROM_ALL
   native/playback/playback_cue_plan.h
   native/playback/native_playback_projection.h
   native/playback/native_playback_session.cpp
-  native/playback/native_playback_session.h)
+  native/playback/native_playback_session.h
+  native/playback/streaming_lane_feeder.cpp
+  native/playback/streaming_lane_feeder.h)
 add_library(SingZ::native_playback_session ALIAS
   singz_native_playback_session)
 target_compile_features(singz_native_playback_session PUBLIC cxx_std_20)
@@ -499,6 +501,16 @@ if(SINGZ_CORE_TESTS)
     SingZ::zcore_media
     SingZ::zdsp_runtime)
   add_test(NAME prepared_audio_tests COMMAND prepared_audio_tests)
+
+  # The feeder is control-domain and links the playback session target, which
+  # is where it lives; the node comes with zdsp_runtime through it.
+  add_executable(streaming_lane_feeder_tests
+    ${SINGZ_REPO_ROOT}/tests/native/streaming_lane_feeder_tests.cpp)
+  target_compile_features(streaming_lane_feeder_tests PRIVATE cxx_std_20)
+  set_target_properties(streaming_lane_feeder_tests PROPERTIES CXX_EXTENSIONS OFF)
+  target_link_libraries(streaming_lane_feeder_tests PRIVATE
+    SingZ::native_playback_session SingZ::native_flac Threads::Threads)
+  add_test(NAME streaming_lane_feeder_tests COMMAND streaming_lane_feeder_tests)
 
   add_executable(flac_streaming_source_tests
     ${SINGZ_REPO_ROOT}/tests/native/flac_streaming_source_tests.cpp)

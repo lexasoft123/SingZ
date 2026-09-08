@@ -653,6 +653,109 @@ graphConnection(const singz::NativePlaybackGraphSnapshot &graph,
   return found == graph.connections.end() ? nullptr : &*found;
 }
 
+// Streamed lanes against decoded lanes, through the whole session.
+//
+// The pieces below this have their own tests; what only the session can answer
+// is whether a singer hears the same song. So the SAME flac is played twice
+// through the same graph — once decoded, once streamed — and the two captured
+// outputs must agree sample for sample. Anything less and the two paths are
+// not interchangeable, whatever the benchmarks say.
+void streamedLanesPlayTheSameAudioAsDecodedOnes() {
+  // Long enough to cross several refills and force the ring to wrap at the
+  // small window this configures, which is where an append/retire mistake
+  // would show up rather than in the first block.
+  // Long enough that the ring is genuinely smaller than the song — about 31 s
+  // against a ~6 s window. A song shorter than the window is a real case and
+  // handled (the ring is clamped to it), but it proves nothing about
+  // residency, because then the ring IS the song.
+  std::vector<float> tone(1500000, 0.0F);
+  for (size_t i = 0; i < tone.size(); i++)
+    tone[i] = 0.45F * std::sin(static_cast<double>(i) * 0.013);
+  const std::string toneWav = writeWav("streamed.wav", 1, tone);
+  const std::string toneFlac = scratch("streamed.flac");
+  std::remove(toneFlac.c_str());
+  CHECK(singz::compactStem(toneWav, toneFlac).ok);
+
+  const uint32_t total = 24000;
+  // ONE session, two generations. Playback ownership is a process-global
+  // claim held for the life of a session, so two sessions cannot take it in
+  // turn inside one test — the first version of this did exactly that and
+  // failed on ownership, which said nothing about streaming.
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+
+  size_t decodedRetained = 0;
+  size_t streamedRetained = 0;
+  auto play = [&](bool streamed, uint64_t generation) {
+    singz::NativePlaybackPrepareConfig request = config();
+    request.streamLanes = streamed;
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    lanes.push_back(lane("song", toneFlac));
+    const auto prepareResult =
+        session.prepare(std::move(request), std::move(lanes), generation);
+    if (!prepareResult.ok)
+      std::fprintf(stderr, "[diag] streamed=%d gen=%llu error=%s message=%s\n",
+                   streamed ? 1 : 0, (unsigned long long)generation,
+                   singz::nativePlaybackErrorName(prepareResult.error),
+                   prepareResult.message.c_str());
+    CHECK(prepareResult.ok);
+    const singz::NativePlaybackStatus prepared = session.status();
+    CHECK(prepared.lanes.size() == 1);
+    CHECK(prepared.durationFrames == tone.size());
+    (streamed ? streamedRetained : decodedRetained) = prepared.retainedBytes;
+    CHECK(session.openOutput(generation).ok &&
+          session.start(generation).ok);
+    fake->captureOutput = true;
+    fake->outputTrace.clear();
+    uint32_t rendered = 0;
+    bool first = true;
+    while (rendered < total) {
+      const uint32_t block = std::min<uint32_t>(512, total - rendered);
+      CHECK(fake->drive(block, first ? singz::AudioHostDiscontinuityStart
+                                     : singz::AudioHostDiscontinuityNone));
+      first = false;
+      rendered += block;
+      // A streamed lane is fed by its own thread; give it the same wall-clock
+      // room a device would. Without this the loop renders far faster than
+      // realtime and asks the decoder for something no device ever asks for.
+      if (streamed)
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    fake->captureOutput = false;
+    const singz::NativePlaybackStatus played = session.status();
+    CHECK(played.lanes[0].cursorFrames == total);
+    std::vector<float> out = fake->outputTrace;
+    CHECK(session.unload(generation).ok);
+    return out;
+  };
+
+  const std::vector<float> decodedOut = play(false, 1);
+  const std::vector<float> streamedOut = play(true, 2);
+  CHECK(decodedOut.size() == total && streamedOut.size() == total);
+  // The reference must actually carry the tone, or "identical" would only be
+  // proving that two silences match.
+  double energy = 0.0;
+  for (const float value : decodedOut)
+    energy += std::fabs(static_cast<double>(value));
+  CHECK(energy > static_cast<double>(total) * 0.05);
+  // PROOF THE FLAG DID SOMETHING. Identical audio is exactly what a silently
+  // ignored streamLanes would also produce, so the cheap half of the bargain
+  // has to be asserted too: the streamed generation holds a ring per lane,
+  // the decoded one holds the whole song.
+  CHECK(decodedRetained > streamedRetained);
+  CHECK(decodedRetained - streamedRetained >= tone.size() * sizeof(float) / 2);
+
+  size_t differing = 0;
+  for (uint32_t i = 0; i < total; i++)
+    if (decodedOut[i] != streamedOut[i])
+      differing++;
+  CHECK(differing == 0);
+
+  std::remove(toneWav.c_str());
+  std::remove(toneFlac.c_str());
+}
+
 void compositionAndLifetime() {
   std::vector<float> a(256, 0.1F);
   std::vector<float> b(384, 0.2F);
@@ -6590,6 +6693,7 @@ int main() {
     return 0;
   }
   compositionAndLifetime();
+  streamedLanesPlayTheSameAudioAsDecodedOnes();
   laneWaveformSummaryAndCountInMeter();
   parallelLaneDecodeMatchesSequential();
   laneDecodePoolStaysInsideTheMemoryBudget();
