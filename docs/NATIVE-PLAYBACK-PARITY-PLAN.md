@@ -242,6 +242,17 @@ unchanged: it had the rule already. The transport's backdrop blur, chased as
 the likely mechanism, turns out to be worth 0.9-1.7 and is not worth a visual
 trade.
 
+**Nothing of this ports to the phones, because they already do it better.**
+Asked and checked: `withRepeat` and `Animated.loop` appear NOWHERE in
+`mobile/src` — there is not one repeating animation to make cheaper. The
+count-in is static Skia (dots and an "N s" text, no fade), the word fill runs
+on the UI thread as a worklet so React never commits for it, and PlayerScreen
+throttles its React commits to 2 Hz for the clock and scrub bar on purpose. It
+even carries `TEST.uiFrames()` and `TEST.uiWrites()` — frames delivered against
+writes actually made, which is the same instrument the desktop had to grow for
+`--p` this week. The desktop is the platform that was behind here, and the
+borrowing runs the other way.
+
 ### What a Windows singer actually pays, and the one thing it is (2026-09-08)
 
 The hidden-window numbers above are the app's NON-PAINT cost. With the window
