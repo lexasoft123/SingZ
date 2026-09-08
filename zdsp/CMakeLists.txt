@@ -36,6 +36,7 @@ add_library(zdsp_runtime STATIC
   src/runtime/realtime_arena.cpp
   src/runtime/builtin_nodes.cpp
   src/runtime/decoded_buffer_source.cpp
+  src/runtime/streaming_window_source.cpp
   src/runtime/scheduled_cue_source.cpp
   src/runtime/scheduled_gain.cpp
   src/runtime/graph_compiler.cpp
@@ -56,6 +57,7 @@ target_sources(zdsp_runtime PRIVATE
   include/zdsp/queues.h
   include/zdsp/builtin_nodes.h
   include/zdsp/decoded_buffer_source.h
+  include/zdsp/streaming_window_source.h
   include/zdsp/scheduled_cue_source.h
   include/zdsp/scheduled_gain.h
   include/zdsp/graph.h

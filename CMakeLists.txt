@@ -639,6 +639,19 @@ if(SINGZ_CORE_TESTS)
     SingZ::zdsp_prototype SingZ::zdsp_control)
   add_test(NAME zdsp_contract_tests COMMAND zdsp_contract_tests)
 
+  # The streaming source is compared against the decoded source it replaces,
+  # so it links the runtime rather than the offline renderer: no graph, no WAV,
+  # just the two processors driven through the same transport.
+  add_executable(streaming_window_source_tests
+    ${SINGZ_REPO_ROOT}/zdsp/tests/streaming_window_source_tests.cpp)
+  target_compile_features(streaming_window_source_tests PRIVATE cxx_std_20)
+  set_target_properties(streaming_window_source_tests PROPERTIES
+    CXX_EXTENSIONS OFF)
+  target_link_libraries(streaming_window_source_tests
+    PRIVATE SingZ::zdsp_runtime)
+  add_test(NAME streaming_window_source_tests
+    COMMAND streaming_window_source_tests)
+
   add_executable(zdsp_graph_tests
     ${SINGZ_REPO_ROOT}/zdsp/tests/zdsp_graph_tests.cpp)
   set(_zdsp_allocation_trap_source
