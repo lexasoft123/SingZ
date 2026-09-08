@@ -675,7 +675,7 @@ bool SingzParsePlaybackPrepare(NSDictionary *request,
                              @"handoffLease", @"playback", @"training",
                              @"preparedStartProjectFrame",
                              @"initialTransport", @"graphDocument",
-                             @"swapFromGeneration"})) {
+                             @"swapFromGeneration", @"streamLanes"})) {
     *error = @"The native playback prepare schema is invalid";
     return false;
   }
@@ -751,6 +751,15 @@ bool SingzParsePlaybackPrepare(NSDictionary *request,
       return false;
     }
     candidate.config.graphDocument = std::move(graph);
+  }
+
+  // Play the lanes out of their FLAC rather than decoding each one whole.
+  // Absent means false, which is today's behaviour exactly.
+  id streamLanes = request[@"streamLanes"];
+  if (streamLanes != nil &&
+      !parseBool(streamLanes, &candidate.config.streamLanes)) {
+    *error = @"The playback lane streaming flag is invalid";
+    return false;
   }
 
   id maximumFrames = request[@"maximumFrames"];

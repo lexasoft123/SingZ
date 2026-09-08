@@ -52,6 +52,16 @@ class NativePlaybackBridgeSchemaTest {
   )
 
   @Test
+  fun `streamed lanes parse and default to decoding`() {
+    assertEquals(false, NativePlaybackBridgeSchema.prepare(validPrepare()).streamLanes)
+    val streamed = validPrepare() + ("streamLanes" to true)
+    assertEquals(true, NativePlaybackBridgeSchema.prepare(streamed).streamLanes)
+    assertThrows(IllegalArgumentException::class.java) {
+      NativePlaybackBridgeSchema.prepare(validPrepare() + ("streamLanes" to "yes"))
+    }
+  }
+
+  @Test
   fun `a swap source generation parses and defaults to an ordinary prepare`() {
     assertEquals(0L, NativePlaybackBridgeSchema.prepare(validPrepare()).swapFromGeneration)
     val swap = validPrepare() + ("swapFromGeneration" to 3.0)

@@ -44,6 +44,7 @@ import {
   iosNativePlaybackPreference,
   type IosNativePlaybackPreferenceStore,
 } from './preferences';
+import { FlacStreamingPreferenceStore } from './preferences';
 import { mobileMetronomePersistence } from './metronome-persistence';
 
 export interface NativePlaybackResult {
@@ -199,6 +200,45 @@ export const NATIVE_CLOCK_PROJECTION_LIMIT_SEC = 1;
 /** How often the facade looks for the transport to actually start moving
  *  after a Play, and how long it keeps looking (see `watchTransportStart`).
  *  A frame's worth: the read is the synchronous clock, not a bridge call. */
+// Streamed lanes, cached from the persisted preference.
+//
+// Read once and held here because the prepare request is built synchronously
+// and a preference load is not. Refreshed whenever the session initializes,
+// which is also when the backend gate is read, so the two cannot disagree
+// about which run they describe.
+// Default ON: this is the build that exists to exercise streaming. The stored
+// preference still wins once a singer has set one either way.
+//
+// NOT refreshed inside the ownership path. That path is driven by tests which
+// pump a fixed number of microtasks, so an extra await there changes ordering
+// rather than merely timing — it cost one red test to learn. The load is
+// kicked off once here instead, and settled long before a first prepare.
+let streamLanesEnabled = true;
+const flacStreamingPreference = new FlacStreamingPreferenceStore();
+void flacStreamingPreference
+  .load()
+  .then((enabled) => {
+    streamLanesEnabled = enabled;
+  })
+  .catch(() => {});
+
+export async function refreshFlacStreamingPreference(): Promise<boolean> {
+  streamLanesEnabled = await flacStreamingPreference.load();
+  return streamLanesEnabled;
+}
+
+export async function setFlacStreamingEnabled(
+  enabled: boolean,
+): Promise<boolean> {
+  await flacStreamingPreference.save(enabled);
+  streamLanesEnabled = enabled;
+  return enabled;
+}
+
+export function flacStreamingEnabled(): boolean {
+  return streamLanesEnabled;
+}
+
 const START_WATCH_TICK_MS = 33;
 const START_WATCH_LIMIT_MS = 3000;
 
@@ -646,6 +686,10 @@ interface NativePlaybackPrepareRequest {
    *  to be unloaded first (see NativePlaybackCapability.playbackSwap). Sent
    *  only when positive; absent is an ordinary prepare. */
   swapFromGeneration?: number;
+  /** Play the lanes straight out of their FLAC instead of decoding every one
+   *  to PCM before the first sound. Sent only when true; absent is today's
+   *  behaviour. See NativePlaybackPrepareConfig::streamLanes. */
+  streamLanes?: boolean;
 }
 
 interface NativePlaybackInitialTransport {
@@ -6835,6 +6879,7 @@ function prepareRequest(
     bufferFrames: 0,
     masterGain: overrides.masterGain ?? 1,
     maximumRetainedBytes: MAX_DECODED_BYTES,
+    ...(streamLanesEnabled ? { streamLanes: true } : {}),
     ...(overrides.playback ? { playback: overrides.playback } : {}),
     ...(overrides.training ? { training: overrides.training } : {}),
     ...(overrides.preparedStartProjectFrame === undefined

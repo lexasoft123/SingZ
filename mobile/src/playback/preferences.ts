@@ -3,6 +3,14 @@ import { getStoredText, setStoredText } from '../latency';
 export const IOS_NATIVE_PLAYBACK_PREFERENCE_KEY =
   'singz.playback.ios-native-experimental';
 
+/** Streamed lanes, opt-in and persisted like the backend gate above.
+ *
+ * Its own key for the same reason that one has its own: an unrelated save must
+ * not be able to erase it. Off by default while the seek bar has no waveform
+ * under streaming — the audio is identical, but a singer would notice the
+ * missing waveform before they noticed the faster open. */
+export const FLAC_STREAMING_PREFERENCE_KEY = 'singz.playback.flac-streaming';
+
 export interface PlaybackPreferenceApi {
   get(key: string): Promise<string | null>;
   set(key: string, value: string): Promise<void>;
@@ -44,6 +52,21 @@ export class IosNativePlaybackPreferenceStore {
       JSON.stringify(preference),
     );
     return preference;
+  }
+}
+
+export class FlacStreamingPreferenceStore {
+  constructor(private readonly api: PlaybackPreferenceApi = nativeApi) {}
+
+  /** Unset means ON in this build. An explicit 'false' still turns it off. */
+  async load(): Promise<boolean> {
+    const raw = await this.api.get(FLAC_STREAMING_PREFERENCE_KEY);
+    return raw === null ? true : raw === 'true';
+  }
+
+  async save(enabled: boolean): Promise<boolean> {
+    await this.api.set(FLAC_STREAMING_PREFERENCE_KEY, enabled ? 'true' : 'false');
+    return enabled;
   }
 }
 

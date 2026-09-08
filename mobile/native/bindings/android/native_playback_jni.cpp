@@ -1106,7 +1106,7 @@ static jstring nativePlaybackPrepare(
     JNIEnv *env, jobject, jlong generationValue, jstring outputDeviceUid,
     jintArray outputChannelsValue, jint sampleRate, jint maximumFrames,
     jint bufferFrames, jfloat masterGain, jlong maximumRetainedBytes,
-    jlong handoffLease, jlong swapFromGeneration,
+    jlong handoffLease, jlong swapFromGeneration, jboolean streamLanes,
     jboolean preparedStartProjectFramePresent,
     jlong preparedStartProjectFrame, jboolean initialPaused,
     jboolean initialLoopPresent, jlong initialLoopStartProjectFrame,
@@ -1243,6 +1243,7 @@ static jstring nativePlaybackPrepare(
     config.maximumRetainedBytes = static_cast<size_t>(maximumRetainedBytes);
     config.handoffLease = static_cast<uint64_t>(handoffLease);
     config.swapFromGeneration = static_cast<uint64_t>(swapFromGeneration);
+    config.streamLanes = streamLanes == JNI_TRUE;
     if (preparedStartProjectFramePresent == JNI_TRUE)
       config.preparedStartProjectFrame =
           static_cast<int64_t>(preparedStartProjectFrame);
@@ -1625,7 +1626,7 @@ static const JNINativeMethod kNativePlaybackMethods[] = {
      reinterpret_cast<void *>(nativePlaybackRequestCancellation)},
     {const_cast<char *>("nativePlaybackPrepare"),
      const_cast<char *>(
-         "(JLjava/lang/String;[IIIIFJJJZJZZJJ[Ljava/lang/String;[Ljava/lang/String;"
+         "(JLjava/lang/String;[IIIIFJJJZZJZZJJ[Ljava/lang/String;[Ljava/lang/String;"
          "[F[Z[ZZDDDDZIDZ[DII[IZIJ[J[J[Ljava/lang/String;Z"
          "Z[Lcom/singzplayer/playback/NativePlaybackGraphNodeJni;"
          "[Lcom/singzplayer/playback/NativePlaybackGraphConnectionJni;"

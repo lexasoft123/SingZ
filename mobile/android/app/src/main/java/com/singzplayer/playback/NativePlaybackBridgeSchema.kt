@@ -158,6 +158,10 @@ object NativePlaybackBridgeSchema {
     /** Replace this generation on its running stream; 0 is an ordinary
      *  prepare. See NativePlaybackPrepareConfig::swapFromGeneration. */
     val swapFromGeneration: Long,
+    /** Play the lanes out of their FLAC instead of decoding each one whole.
+     *  See NativePlaybackPrepareConfig::streamLanes; absent is false, which is
+     *  today's behaviour exactly. */
+    val streamLanes: Boolean,
     val preparedStartProjectFrame: Long?,
     val initialTransport: InitialTransport,
     val playback: Playback?,
@@ -209,7 +213,8 @@ object NativePlaybackBridgeSchema {
         "lanes", "outputDeviceUid", "outputChannels", "sampleRate",
         "maximumFrames", "bufferFrames", "masterGain", "maximumRetainedBytes",
         "handoffLease", "playback", "training", "preparedStartProjectFrame",
-        "initialTransport", "graphDocument", "swapFromGeneration"
+        "initialTransport", "graphDocument", "swapFromGeneration",
+        "streamLanes"
       )
     )
     val laneValues = list(value["lanes"], "lanes")
@@ -264,6 +269,7 @@ object NativePlaybackBridgeSchema {
       maximumRetainedBytes = retained,
       handoffLease = lease,
       swapFromGeneration = swapFrom,
+      streamLanes = optionalBoolean(value, "streamLanes", false),
       preparedStartProjectFrame = value["preparedStartProjectFrame"]?.let {
         signedInteger(it, "prepared start project frame")
       },

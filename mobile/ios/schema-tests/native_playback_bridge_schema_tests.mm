@@ -303,6 +303,25 @@ void injectPrepareFault(void *opaque, SingzPlaybackPrepareFaultPoint point,
 // So this test asserts the ACCEPTANCE. If someone adds the check here — a
 // reasonable thing to want — this goes red, and the matrix has to be updated
 // in the same change rather than quietly becoming wrong.
+// Streamed lanes: absent means decode, present means stream, and anything
+// that is not a boolean is refused rather than coerced. A flag that silently
+// parsed as false would look exactly like a singer who never turned it on.
+void testPlaybackStreamLanesSchema() {
+  SingzParsedPlaybackPrepare parsed;
+  NSString *error = nil;
+  CHECK(SingzParsePlaybackPrepare(validRequest(), &parsed, &error));
+  CHECK(!parsed.config.streamLanes);
+
+  NSMutableDictionary *streamed = [validRequest() mutableCopy];
+  streamed[@"streamLanes"] = @YES;
+  CHECK(SingzParsePlaybackPrepare(streamed, &parsed, &error));
+  CHECK(parsed.config.streamLanes);
+
+  NSMutableDictionary *bad = [validRequest() mutableCopy];
+  bad[@"streamLanes"] = @"yes";
+  CHECK(!SingzParsePlaybackPrepare(bad, &parsed, &error));
+}
+
 void testWhatTheSchemaLeavesToTheCore() {
   NSMutableDictionary *duplicated = [validRequest() mutableCopy];
   NSDictionary *lane = @{
@@ -1480,6 +1499,7 @@ int main() {
     testPlaybackInitialTransportSchema();
     testPlaybackPreviewClickSchema();
     testPlaybackTransportCommandSchema();
+    testPlaybackStreamLanesSchema();
     uint64_t generation = 0;
     CHECK(SingzParsePlaybackGeneration(@1, &generation) && generation == 1);
     for (id invalid in @[ @YES, @1.5, @0, @(-1), @"1", NSNull.null ]) {

@@ -117,6 +117,7 @@ object SingzCore {
     maximumRetainedBytes: Long,
     handoffLease: Long,
     swapFromGeneration: Long,
+    streamLanes: Boolean,
     preparedStartProjectFramePresent: Boolean,
     preparedStartProjectFrame: Long,
     initialPaused: Boolean,

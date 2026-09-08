@@ -257,6 +257,7 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
           parsed.maximumRetainedBytes,
           parsed.handoffLease,
           parsed.swapFromGeneration,
+          parsed.streamLanes,
           parsed.preparedStartProjectFrame != null,
           parsed.preparedStartProjectFrame ?: 0L,
           parsed.initialTransport.startPaused,
