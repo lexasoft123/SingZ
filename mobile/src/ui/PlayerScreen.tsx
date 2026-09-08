@@ -188,6 +188,11 @@ type NativeLaneEnvelope = {
  *  produce one stops rather than polling for the life of the song. */
 const WAVEFORM_RETRY_MS = 400
 const WAVEFORM_ATTEMPTS = 30
+/** After the quick attempts, keep asking slowly rather than giving up: a long
+ *  song on a busy phone can take longer than twelve seconds to measure, and
+ *  the cost of asking is one cheap bridge call. */
+const WAVEFORM_SLOW_RETRY_MS = 2000
+const WAVEFORM_SLOW_ATTEMPTS = 30
 
 /** lane id -> the md5 of the stem it is drawn from. The doc keys stemHashes by
  *  FILE name (`vocals.flac`) and the envelope keys lanes by id (`vocals`), so
@@ -806,6 +811,7 @@ export default function PlayerScreen({
           )
       }
       if (cachedEnvelope) {
+        log('waveform', `from the project · ${cachedEnvelope.lanes.length} lanes · 0 ms`)
         consume(cachedEnvelope)
         return () => {
           cancelled = true
@@ -816,20 +822,45 @@ export default function PlayerScreen({
       // interval is generous because nothing is waiting on it — the song is
       // already playing.
       let attempts = 0
+      const askedAt = Date.now()
       const ask = (): void => {
         void native
           .lanePeaks()
           .then(envelope => {
             if (cancelled) return
-            const usable =
-              envelope != null &&
-              envelope.lanes.length > 0 &&
-              envelope.lanes.some(lane => lane.peaksValid)
+            const ready =
+              envelope == null
+                ? 0
+                : envelope.lanes.filter(lane => lane.peaksValid).length
+            const usable = envelope != null && ready > 0
             if (!usable) {
-              if (++attempts < WAVEFORM_ATTEMPTS)
-                setTimeout(ask, WAVEFORM_RETRY_MS)
+              attempts += 1
+              if (attempts < WAVEFORM_ATTEMPTS + WAVEFORM_SLOW_ATTEMPTS) {
+                setTimeout(
+                  ask,
+                  attempts < WAVEFORM_ATTEMPTS
+                    ? WAVEFORM_RETRY_MS
+                    : WAVEFORM_SLOW_RETRY_MS
+                )
+              } else {
+                // Said out loud, because a blank seek bar with a silent log is
+                // exactly what sent this back for a second look: nothing in
+                // the log named the waveform at all, so there was no way to
+                // tell a slow measurement from one that never started.
+                log(
+                  'waveform',
+                  `no waveform after ${Math.round((Date.now() - askedAt) / 1000)}s · ` +
+                    `${envelope == null ? 'the core returned none' : `0 of ${envelope.lanes.length} lanes measured`}`,
+                  'warn'
+                )
+              }
               return
             }
+            log(
+              'waveform',
+              `measured · ${ready}/${envelope.lanes.length} lanes · ` +
+                `${Math.round(Date.now() - askedAt)} ms`
+            )
             consume(envelope)
             // Keep it, so no later open pays for this again.
             if (project.dir)

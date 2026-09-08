@@ -847,6 +847,34 @@ void streamedLanesPlayTheSameAudioAsDecodedOnes() {
 
   const std::vector<float> decodedOut = play(false, 8);
   const std::vector<float> streamedOut = play(true, 9);
+
+  // And SIX streamed lanes must each produce a waveform. The single-lane case
+  // above proves the pass runs; it cannot prove it runs for every lane, and a
+  // seek bar draws nothing unless they all do.
+  {
+    singz::NativePlaybackPrepareConfig request = config();
+    request.streamLanes = true;
+    auto six = std::vector<singz::NativePlaybackLaneSource>{};
+    for (const char *id : {"vocals", "drums", "bass", "guitar", "piano", "other"})
+      six.push_back(lane(id, toneFlac));
+    CHECK(session.prepare(std::move(request), std::move(six), 10).ok);
+    singz::NativePlaybackLanePeaksResult peaks;
+    for (int attempt = 0; attempt < 600; attempt++) {
+      peaks = session.lanePeaks(10);
+      if (peaks.ok && peaks.lanes.size() == 6 &&
+          std::all_of(peaks.lanes.begin(), peaks.lanes.end(),
+                      [](const auto &l) { return l.valid; }))
+        break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(peaks.ok && peaks.lanes.size() == 6);
+    size_t valid = 0;
+    for (const auto &entry : peaks.lanes)
+      if (entry.valid) valid++;
+    CHECK(valid == 6);
+    CHECK(session.unload(10).ok);
+  }
+
   CHECK(decodedOut.size() == total && streamedOut.size() == total);
   // The reference must actually carry the tone, or "identical" would only be
   // proving that two silences match.
