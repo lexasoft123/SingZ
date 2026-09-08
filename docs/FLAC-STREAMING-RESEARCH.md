@@ -228,6 +228,56 @@ So the field is split, and streaming compressed multitrack audio is ordinary.
 4. **Only then**, if `buildSeekIndex` proves expensive, write seektables into
    newly encoded stems.
 
+## Built (2026-09-08)
+
+Steps 1 and 2 are done, and step 2 is the one that changed shape while it was
+built. What shipped:
+
+| piece | where |
+|---|---|
+| the source node | `zdsp/include/zdsp/streaming_window_source.h` |
+| the feeder | `native/playback/streaming_lane_feeder.h` |
+| the session flag | `NativePlaybackPrepareConfig::streamLanes` |
+| the bridges | iOS schema, Kotlin schema, JNI, `mobile/src/playback/native.ts` |
+
+The design that survived contact:
+
+- The node is addressed by **source frame, never ring offset**, and the
+  transport mapping is copied verbatim from the positioned decoded source so a
+  seek, a count-in pre-roll and a loop re-anchor behave identically.
+- A frame the window does not hold renders **silence and is counted**. Silence
+  is the only honest answer on the render thread; the alternative is a file
+  operation there.
+- The ring is safe **without a lock** because the feeder never writes within
+  `safetyFrames` of the published demand, and retires before it overwrites.
+- One feeder thread for all lanes.
+
+Four things were only found by testing, and each would have shipped silently:
+
+1. **The window range check was unproven.** A mutant with it deleted passed —
+   the interpolation guard covered for it. The case that isolates it is
+   scrubbing BACKWARDS into a window whose end is far ahead.
+2. **The play cursor has a different reader per backing**, and the decoded one
+   answers zero for a streamed source, which reads as "the song is at the
+   start".
+3. **The JNI signature string** needed the extra `Z`. It is matched at runtime,
+   so a miss is a crash on the device, not a compile error.
+4. **Our stems are 44.1 kHz and a phone's session commonly runs at 48.** The
+   streaming source cannot resample and the decoded one can, so a mismatch now
+   falls back to decoding. Before that, a build with streaming on could not
+   have opened a single song — found by asking what rate the device actually
+   runs, not by any test.
+
+### Known gap: the waveform
+
+`summarizeLanePeaks` is a linear pass over decoded PCM, and a streamed lane has
+none to pass over. Computing it eagerly means decoding the whole song, which is
+the exact cost streaming removes — so a streamed lane reports no waveform and
+the seek bar draws none. Peaks have to become asynchronous (a background pass,
+published under its generation) before streaming can be the only path. Note
+that peaks are documented as immutable for a prepared generation, so this is a
+contract change and not just a background job.
+
 ## What would say it is working
 
 `mobile/tests/open-steps-android.cjs` and `tests/e2e/mac/open-steps-e2e.cjs`
