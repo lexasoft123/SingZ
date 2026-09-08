@@ -69,6 +69,30 @@ std::FILE* consumeAsFile(OwnedFileDescriptor* descriptor) noexcept {
   return file;
 }
 
+// Cheap signature check before libFLAC is handed the file, so an input that is
+// simply another format is refused as such rather than coming back as damaged
+// FLAC. The header promises the status says which, and a caller choosing
+// between adapters acts on that difference. An ID3 tag before the magic is
+// legal and common enough to skip.
+bool looksLikeFlac(std::FILE* file) {
+  unsigned char head[10] = {0};
+  if (std::fread(head, 1, sizeof(head), file) != sizeof(head)) return false;
+  long start = 0;
+  if (std::memcmp(head, "ID3", 3) == 0) {
+    const long tag = 10 + ((static_cast<long>(head[6] & 0x7F) << 21) |
+                           (static_cast<long>(head[7] & 0x7F) << 14) |
+                           (static_cast<long>(head[8] & 0x7F) << 7) |
+                           static_cast<long>(head[9] & 0x7F));
+    if (fseeko(file, tag, SEEK_SET) != 0) return false;
+    unsigned char magic[4] = {0};
+    if (std::fread(magic, 1, 4, file) != 4 || std::memcmp(magic, "fLaC", 4) != 0) return false;
+    start = tag;
+  } else if (std::memcmp(head, "fLaC", 4) != 0) {
+    return false;
+  }
+  return fseeko(file, start, SEEK_SET) == 0;
+}
+
 // Frames libFLAC has handed over but the caller has not taken yet.
 //
 // APPEND, not overwrite, and that distinction is a bug this file shipped with:
@@ -129,6 +153,7 @@ class FlacStreamingSource final : public StreamingAudioSource {
 
     file_ = consumeAsFile(&descriptor);
     if (file_ == nullptr) return DecodedAudioStatus::IoError;
+    if (!looksLikeFlac(file_)) return DecodedAudioStatus::UnsupportedFormat;
 
     decoder_ = FLAC__stream_decoder_new();
     if (decoder_ == nullptr) return DecodedAudioStatus::ResourceExhausted;
@@ -149,10 +174,12 @@ class FlacStreamingSource final : public StreamingAudioSource {
     if (info_.sampleRate == 0 || info_.channels == 0) return DecodedAudioStatus::MalformedData;
 
     info_.seekCost = sawSeekTable_ ? SeekCost::Indexed : SeekCost::Search;
-    info_.frameCountIsExact = info_.frameCount > 0;
-    // One block of headroom is the floor: frames arrive whole, so a read of
-    // any size can leave up to a full block staged.
-    staging_.reserve(info_.channels, std::max<size_t>(info_.seekGranularityFrames, 4096));
+    info_.frameCountFromContainer = info_.frameCount > 0;
+    // One block is the floor — frames arrive whole, so a read of any size can
+    // leave up to a full block staged — and the caller's window is taken when
+    // it asks for more, so a filling thread does not grow buffers mid-song.
+    const size_t floor = std::max<size_t>(info_.seekGranularityFrames, 4096);
+    staging_.reserve(info_.channels, std::max<size_t>(floor, options.windowFrames));
     return DecodedAudioStatus::Ok;
   }
 
@@ -214,6 +241,11 @@ class FlacStreamingSource final : public StreamingAudioSource {
     while (written < frames) {
       if (staging_.available() == 0) {
         if (atEnd_) break;
+        // Between blocks, not inside one: a decoded frame is bounded work and
+        // abandoning it half way would leave the decoder mid-stream for the
+        // next call. This is what lets a ring-fill thread stop when the singer
+        // leaves the song rather than when the read finishes.
+        if (cancel_.isRequested()) break;
         const bool got = decodeOneFrame();
         // Checked whether or not the decode "succeeded": libFLAC's
         // process_single loops past a bad frame and returns TRUE with the next
@@ -251,6 +283,8 @@ class FlacStreamingSource final : public StreamingAudioSource {
     }
     return DecodedAudioStatus::Ok;
   }
+
+  void setCancellation(const DecodeCancellation& cancel) override { cancel_ = cancel; }
 
   [[nodiscard]] DecodedAudioStatus buildSeekIndex(const DecodeCancellation&) override {
     // Not implemented. Building a real index means a pass over the frame
@@ -366,7 +400,18 @@ class FlacStreamingSource final : public StreamingAudioSource {
   static void metaCb(const FLAC__StreamDecoder*, const FLAC__StreamMetadata* meta, void* client) {
     auto* self = static_cast<FlacStreamingSource*>(client);
     if (meta->type == FLAC__METADATA_TYPE_SEEKTABLE) {
-      self->sawSeekTable_ = meta->data.seek_table.num_points > 0;
+      // PLACEHOLDER points do not count. A table may legally be padded with
+      // points whose sample number is all-ones, reserved for an encoder that
+      // will fill them in later; a source that counted those would report
+      // Indexed and then seek like Search, which is worse than admitting
+      // Search — a caller reads this to decide whether to coalesce scrubs.
+      self->sawSeekTable_ = false;
+      for (unsigned i = 0; i < meta->data.seek_table.num_points; i++) {
+        if (meta->data.seek_table.points[i].sample_number != ~FLAC__uint64{0}) {
+          self->sawSeekTable_ = true;
+          break;
+        }
+      }
       return;
     }
     if (meta->type != FLAC__METADATA_TYPE_STREAMINFO) return;
@@ -393,6 +438,7 @@ class FlacStreamingSource final : public StreamingAudioSource {
   // A seek failed and the decoder's position is unknown. Reads refuse.
   bool broken_ = false;
   bool atEnd_ = false;
+  DecodeCancellation cancel_{};
   bool sawSeekTable_ = false;
 };
 

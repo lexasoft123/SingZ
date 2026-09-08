@@ -10,6 +10,8 @@ add_library(singz_native_flac STATIC
   flac/src/lpc.c
   flac/src/md5.c
   flac/src/memory.c
+  flac/src/metadata_iterators.c
+  flac/src/metadata_object.c
   flac/src/stream_decoder.c
   flac/src/stream_encoder.c
   flac/src/stream_encoder_framing.c

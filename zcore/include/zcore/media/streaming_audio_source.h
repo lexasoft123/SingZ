@@ -56,10 +56,14 @@ struct StreamingAudioInfo {
   uint32_t sampleRate{0};
   uint16_t channels{0};
   // Frames of REAL audio, with any encoder delay and padding already excluded
-  // (see the exactness contract below). Zero when the container does not say
-  // and the source has not been asked to find out.
+  // (see the exactness contract below). Zero when the container does not say.
   uint64_t frameCount{0};
-  bool frameCountIsExact{false};
+  // Whether `frameCount` came from the CONTAINER rather than from counting.
+  // Named for what it is because the obvious name — "isExact" — promises
+  // something no source can deliver at open: a truncated file declares its
+  // original length in STREAMINFO and reports it here, and only reading to the
+  // end discovers otherwise. A caller that must know exactly has to read.
+  bool frameCountFromContainer{false};
   // The granularity a seek lands on before the adapter decodes forward to the
   // requested sample. FLAC's is its block size — 4096 samples, 92.9 ms at
   // 44.1 kHz, for every stem this app writes. Informational: `seek()` is
@@ -132,6 +136,14 @@ class StreamingAudioSource {
                                                 size_t frames,
                                                 size_t* framesRead) = 0;
 
+  // Stop whatever is in flight. A `seek()` that has to search a file, or a
+  // `read()` waiting on slow storage, is otherwise uninterruptible — and on a
+  // phone the thread filling the ring has to be stoppable when the singer
+  // leaves the song, not when the I/O finishes. Set once by the owner; the
+  // implementation polls it. `buildSeekIndex` takes its own because it may be
+  // started speculatively and abandoned on its own.
+  virtual void setCancellation(const DecodeCancellation& cancel) = 0;
+
   // Where the next read begins. Same thread as `read()` and `seek()` — not
   // published for a UI to poll, and not atomic.
   //
@@ -169,9 +181,13 @@ struct StreamingAudioOpenOptions {
   // decode at soxr quality and nothing at swr quality, against a decode that
   // runs at ~980x realtime. It is not the reason anything is slow.)
   uint32_t requiredSampleRate{0};
-  // Reserve for a window this long. The floor is not the audio callback's
-  // block but the TIME-STRETCHER's lookahead, which consumes ahead of the
-  // playhead — the ring must stay ahead of the stretcher, not of the callback.
+  // Reserve staging for a window this long, so a filling thread that has
+  // started does not grow buffers mid-song. Zero takes the source's own
+  // sensible floor (one decoded block).
+  //
+  // The floor a CALLER should pass is not the audio callback's block but the
+  // TIME-STRETCHER's lookahead, which consumes ahead of the playhead — the
+  // ring must stay ahead of the stretcher, not of the callback.
   uint32_t windowFrames{0};
   bool buildSeekIndexOnOpen{false};
 };

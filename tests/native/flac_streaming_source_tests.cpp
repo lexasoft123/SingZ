@@ -9,6 +9,11 @@
 #include <zcore/media/flac_io.h>
 #include <zcore/media/streaming_audio_source.h>
 
+#include <FLAC/metadata.h>
+#include <FLAC/stream_encoder.h>
+
+#include <algorithm>
+
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -76,6 +81,64 @@ std::string writeStereoWav(uint64_t frames, uint32_t rate) {
     std::fwrite(&right, 2, 1, f);
   }
   std::fclose(f);
+  return path;
+}
+
+// Encode a FLAC directly with libFLAC, so the cases the app's own encoder
+// cannot produce are still testable: a stream WITH a seektable (ours writes
+// none), and one that declares no total length (ours always declares it).
+//
+// `seekPointEvery` builds the seektable the way the app would: a template of
+// placeholder points attached BEFORE encoding, which libFLAC rewrites with
+// real offsets at finish(). Hence real points rather than placeholders, and
+// hence a fixture that exercises the Indexed path rather than merely looking
+// like it does.
+std::string encodeFlac(uint64_t frames, uint32_t rate, unsigned channels, bool declareTotal,
+                       uint64_t seekPointEvery = 0) {
+  const std::string path = tempPath(".flac");
+  FLAC__StreamEncoder* e = FLAC__stream_encoder_new();
+  FLAC__stream_encoder_set_channels(e, channels);
+  FLAC__stream_encoder_set_bits_per_sample(e, 16);
+  FLAC__stream_encoder_set_sample_rate(e, rate);
+  FLAC__stream_encoder_set_compression_level(e, 5);
+  if (declareTotal) FLAC__stream_encoder_set_total_samples_estimate(e, frames);
+  FLAC__StreamMetadata* seektable = nullptr;
+  if (seekPointEvery > 0) {
+    seektable = FLAC__metadata_object_new(FLAC__METADATA_TYPE_SEEKTABLE);
+    if (seektable == nullptr ||
+        !FLAC__metadata_object_seektable_template_append_spaced_points_by_samples(
+            seektable, static_cast<unsigned>(seekPointEvery), frames) ||
+        !FLAC__metadata_object_seektable_template_sort(seektable, true)) {
+      if (seektable != nullptr) FLAC__metadata_object_delete(seektable);
+      FLAC__stream_encoder_delete(e);
+      return {};
+    }
+    FLAC__stream_encoder_set_metadata(e, &seektable, 1);
+  }
+  if (FLAC__stream_encoder_init_file(e, path.c_str(), nullptr, nullptr) !=
+      FLAC__STREAM_ENCODER_INIT_STATUS_OK) {
+    if (seektable != nullptr) FLAC__metadata_object_delete(seektable);
+    FLAC__stream_encoder_delete(e);
+    return {};
+  }
+  std::vector<FLAC__int32> block(4096 * channels);
+  uint64_t at = 0;
+  while (at < frames) {
+    const uint64_t n = std::min<uint64_t>(4096, frames - at);
+    for (uint64_t i = 0; i < n; i++)
+      for (unsigned c = 0; c < channels; c++)
+        block[i * channels + c] = static_cast<FLAC__int32>(
+            std::lround(9000.0 * std::sin((at + i) * (0.011 + 0.003 * c))));
+    FLAC__stream_encoder_process_interleaved(e, block.data(), static_cast<unsigned>(n));
+    at += n;
+  }
+  FLAC__stream_encoder_finish(e);
+  FLAC__stream_encoder_delete(e);
+  // Deleted only after finish(): the encoder holds the template until then,
+  // and rewrites its points in place as it closes the file. Guarded because
+  // FLAC__metadata_object_delete dereferences its argument — the only null
+  // check is an assert, which is compiled out in a release build.
+  if (seektable != nullptr) FLAC__metadata_object_delete(seektable);
   return path;
 }
 
@@ -360,8 +423,116 @@ int main() {
     }
   }
 
-  std::remove(wav.c_str());
-  std::remove(flac.c_str());
+  // ---- 8. a stream WITH a seektable says Indexed, one without does not --
+  //
+  // Both halves matter: a source that reported Indexed unconditionally would
+  // pass the first check on its own, and Indexed is the answer that tells a
+  // scrub it need not coalesce, so getting it wrong is not cosmetic.
+  {
+    const std::string plain = encodeFlac(400000, rate, 2, true);
+    const std::string indexed = encodeFlac(400000, rate, 2, true, 4096 * 10);
+    check(!indexed.empty() && !plain.empty(), "a seektable fixture encodes");
+    if (!plain.empty()) {
+      auto bare = singz::openStreamingAudioSource(openRead(plain), {}, nullptr);
+      check(bare != nullptr && bare->info().seekCost != singz::SeekCost::Indexed,
+            "the same audio without a seektable is NOT reported as Indexed");
+      std::remove(plain.c_str());
+    }
+    if (!indexed.empty()) {
+      singz::DecodedAudioStatus status = singz::DecodedAudioStatus::InvalidArgument;
+      auto source = singz::openStreamingAudioSource(openRead(indexed), {}, &status);
+      check(source != nullptr, "a seektable stream opens");
+      if (source != nullptr) {
+        check(source->info().seekCost == singz::SeekCost::Indexed,
+              "a SEEKTABLE is reported as Indexed, so a scrub need not coalesce");
+        check(source->seek(123456) == singz::DecodedAudioStatus::Ok &&
+                  source->position() == 123456,
+              "and it still seeks exactly");
+      }
+      std::remove(indexed.c_str());
+    }
+  }
+
+  // ---- 9. MONO, and a stream that declares no length --------------------
+  //
+  // Every other case here is 16-bit stereo, which is what this app writes;
+  // these are the shapes a file from somewhere else can have. (24-bit is not
+  // covered because our own encoder cannot make one — it is fixed at 16 — so
+  // the fixture would have to come from outside the tree.)
+  {
+    const std::string mono = encodeFlac(50000, rate, 1, true);
+    if (!mono.empty()) {
+      singz::DecodedAudioStatus status = singz::DecodedAudioStatus::InvalidArgument;
+      auto source = singz::openStreamingAudioSource(openRead(mono), {}, &status);
+      check(source != nullptr && source->info().channels == 1, "a mono stream opens as mono");
+      if (source != nullptr) {
+        std::vector<float> only(1000, 0.0F);
+        float* planes[1] = {only.data()};
+        size_t n = 0;
+        check(source->read(planes, 1000, &n) == singz::DecodedAudioStatus::Ok && n == 1000,
+              "and reads its single channel");
+      }
+      std::remove(mono.c_str());
+    }
+    // An UNDECLARED length has to be made by hand: libFLAC's file encoder
+    // rewrites STREAMINFO at finish() with the true total whenever the output
+    // is seekable, so refusing to give it an estimate changes nothing. A
+    // stream that genuinely does not know its length is the pipe/MP3 case, and
+    // zeroing the field is the honest way to produce one here.
+    std::string unknown = encodeFlac(50000, rate, 2, true);
+    if (!unknown.empty()) {
+      std::FILE* f = std::fopen(unknown.c_str(), "r+b");
+      if (f != nullptr) {
+        // STREAMINFO payload starts at 8; total_samples is 36 bits ending at
+        // payload byte 17, i.e. the low nibble of byte 13 plus bytes 14-17.
+        unsigned char b13 = 0;
+        std::fseek(f, 8 + 13, SEEK_SET);
+        (void)std::fread(&b13, 1, 1, f);
+        b13 &= 0xF0;
+        std::fseek(f, 8 + 13, SEEK_SET);
+        std::fwrite(&b13, 1, 1, f);
+        const unsigned char zeros[4] = {0, 0, 0, 0};
+        std::fwrite(zeros, 1, 4, f);
+        std::fclose(f);
+      }
+    }
+    if (!unknown.empty()) {
+      singz::DecodedAudioStatus status = singz::DecodedAudioStatus::InvalidArgument;
+      auto source = singz::openStreamingAudioSource(openRead(unknown), {}, &status);
+      check(source != nullptr, "a stream with no declared length still opens");
+      if (source != nullptr) {
+        check(source->info().frameCount == 0 && !source->info().frameCountFromContainer,
+              "and says its length did not come from the container");
+        const auto got = readAll(*source, 60000, 4096, 2);
+        check(got[0].size() == 50000, "and reading discovers the real end");
+      }
+      std::remove(unknown.c_str());
+    }
+  }
+
+  // ---- 10. not a FLAC, and the descriptor either way --------------------
+  {
+    // A FRESH wav: compactStem deletes the one it compacted, which is what it
+    // is for (flac_io.h: "flac exists -> delete the wav if present"), so the
+    // fixture from the top of this file is long gone by here.
+    const std::string other = writeStereoWav(1000, rate);
+    singz::DecodedAudioStatus status = singz::DecodedAudioStatus::Ok;
+    auto none = singz::openStreamingAudioSource(openRead(other), {}, &status);
+    check(none == nullptr && status == singz::DecodedAudioStatus::UnsupportedFormat,
+          "a WAV is refused as UnsupportedFormat, not as damaged FLAC");
+
+    // The descriptor must be closed on every refusal, or a song's worth of
+    // lanes leaks one each time a format is guessed wrong.
+    singz::OwnedFileDescriptor probe = openRead(other);
+    const int raw = probe.get();
+    (void)singz::openStreamingAudioSource(std::move(probe), {}, &status);
+#if !defined(_WIN32)
+    check(::fcntl(raw, F_GETFD) == -1, "a refused open closes the descriptor it was given");
+#endif
+    std::remove(other.c_str());
+  }
+
+  std::remove(flac.c_str());  // compactStem already removed the wav
   if (failures == 0) std::printf("flac streaming source: every case matches the full decode\n");
   return failures == 0 ? 0 : 1;
 }

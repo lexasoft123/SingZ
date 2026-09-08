@@ -503,7 +503,9 @@ if(SINGZ_CORE_TESTS)
   add_executable(flac_streaming_source_tests
     ${SINGZ_REPO_ROOT}/tests/native/flac_streaming_source_tests.cpp)
   target_compile_features(flac_streaming_source_tests PRIVATE cxx_std_20)
-  target_link_libraries(flac_streaming_source_tests PRIVATE SingZ::zcore_media)
+  # native_flac too: the suite encodes its own fixtures, including shapes the
+  # app's encoder cannot make (mono, and a stream that declares no length).
+  target_link_libraries(flac_streaming_source_tests PRIVATE SingZ::zcore_media SingZ::native_flac)
   add_test(NAME flac_streaming_source_tests COMMAND flac_streaming_source_tests)
 
   add_executable(flac_streaming_benchmark

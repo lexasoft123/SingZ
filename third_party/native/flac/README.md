@@ -22,12 +22,13 @@ file from outside `src/libFLAC` can change the licence of the whole app.
 
 ## What was taken, and why only this
 
-The 15 `.c` files in `src/` are exactly the set that compiles and links a
-working encoder and decoder, determined by BUILDING rather than by reading a
-manifest: the candidate set was compiled one file at a time and then linked
-against a round-trip test, which passed with no undefined symbols. So
-`metadata_iterators.c` and `metadata_object.c` are genuinely not needed, and
-adding them "to be safe" would be adding code nothing calls.
+The 17 `.c` files in `src/` are every upstream source that can compile in this
+configuration at all. The remaining upstream files are excluded because they
+CANNOT build here, not as a matter of taste — see the list below.
+
+The first 15 were determined by BUILDING rather than by reading a manifest: the
+candidate set was compiled one file at a time and then linked against a
+round-trip test, which passed with no undefined symbols.
 
 That method has one blind spot, found in review and worth stating because the
 next vendor drop will have it too: an orphaned `#include` fragment is neither
@@ -38,6 +39,21 @@ whose includers are the `lpc_intrin_*.c` files we do not take) and have been
 dropped. **When a drop contains a `deduplication/`-style directory, check
 reachability by `#include` name as well as by linking.**
 
+`metadata_object.c` and `metadata_iterators.c` joined later, from the same
+sha256-verified tarball. They are the metadata-block API, and nothing in the
+encode path calls them — the reason they are here is the SEEKTABLE. A stem
+without one can only be seeked by searching the frames, and streaming playback
+(`zcore/src/media/flac_streaming_source.cpp`) wants to scrub instead. Writing a
+seektable means handing the encoder a template block, and a template block is
+`FLAC__metadata_object_new` — so the API had to be present before the encoder
+could ever gain the setting. `tests/native/flac_streaming_source_tests.cpp`
+uses it today to build the seektable fixture; before it was vendored, that test
+had to assemble a SEEKTABLE block byte by byte.
+
+Their arrival changes no output: the round-trip gate still writes the same two
+files it always did (the hashes recorded under *Divergences* below), which is
+what you would expect from code nothing on the encode path calls.
+
 One pair joined later (byte-identical to the same sha256-verified tarball):
 `include/share/win_utf8_io.h` + `src/share/win_utf8_io/win_utf8_io.c`, BSD
 like the rest. `compat.h`'s `_WIN32` branch includes the header
@@ -47,7 +63,10 @@ C1083 — none of the prior platforms ever took that branch. The `.c` sits in
 a subdirectory on purpose: the iOS pod's `src/*.c` glob must not compile it,
 and the root native CMake wrapper adds it only under `if(WIN32)`.
 
-Deliberately NOT taken:
+Deliberately NOT taken. **Both entries are hard blockers rather than
+preferences**, which matters because the iOS pod globs `flac/src/*.c` — putting
+a file in `src/` means every platform compiles it, so a source that cannot
+build on one of them cannot live there at all:
 
 - `ogg_*.c` — we write native FLAC, and they need libogg, which we do not ship.
 - `*_intrin_*.c` (avx2/sse/neon) — every one is guarded by the `FLAC__HAS_*INTRIN`
@@ -105,3 +124,11 @@ Re-take from a new tarball, keep `config.h`, and re-run the host round-trip
 gate (`scripts/run-core-host-tests.sh`, which the Android CI canary runs). If a
 new version needs a file this set does not have, the link fails loudly with an
 undefined symbol — which is the intended way to find out.
+
+Adding a file later touches exactly one build file — `third_party/native/
+CMakeLists.txt`, for host and Android. iOS needs no edit, because the
+SingzCore podspec globs `flac/src/*.c`; but that glob only sees the new file
+after the pod mirror is regenerated, since a changed file SET is precisely what
+moves it (`docs/IOS-RELEASE.md`). Build host, Android AND iOS before believing
+it: a source that compiles on the Mac can still fail an NDK or an arm64-iOS
+toolchain, and the pod glob means iOS has no opt-out.
