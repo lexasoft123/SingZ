@@ -33,6 +33,12 @@
 
 namespace singz {
 
+// The seek bar's bucket count, matching kNativePlaybackLaneSummaryBuckets.
+// Stated here rather than included, because this header is deliberately below
+// the session: the session depends on the feeder, not the other way round. A
+// static_assert in the session keeps the two honest.
+inline constexpr size_t kStreamingWaveformBuckets = 96;
+
 struct StreamingLaneOptions {
   // Ring capacity per lane, in frames. Must be a power of two. 262144 frames
   // is ~5.9 s at 44.1 kHz and ~2 MB per stereo lane — against ~109 MB for a
@@ -68,11 +74,17 @@ class StreamingLaneGroup {
   StreamingLaneGroup(const StreamingLaneGroup&) = delete;
   StreamingLaneGroup& operator=(const StreamingLaneGroup&) = delete;
 
-  // Open one lane. Call before `prime()`; the descriptor is consumed either
+  // Open one lane. Call before `prime()`; both descriptors are consumed either
   // way. `requiredSampleRate` of 0 accepts whatever the file holds — the
   // streaming source does not resample, so a lane that disagrees with the
   // device is refused here rather than played at the wrong speed.
+  //
+  // TWO descriptors because the waveform pass reads the same file
+  // independently of playback: playback seeks wherever the singer goes, and a
+  // linear pass sharing that decoder would be dragged along with it. An empty
+  // `analysis` descriptor simply means no waveform.
   [[nodiscard]] DecodedAudioStatus addLane(OwnedFileDescriptor descriptor,
+                                           OwnedFileDescriptor analysis,
                                            uint32_t requiredSampleRate);
 
   // Seek every lane to `startFrame` and fill `primeFrames` before returning,
@@ -94,6 +106,21 @@ class StreamingLaneGroup {
   // must be told the truth rather than the request.
   [[nodiscard]] size_t retainedBytes(size_t lane) const noexcept;
 
+  // The seek bar's envelope, decoded once in the background.
+  //
+  // This is the whole reason a streamed song can still draw a waveform: the
+  // statistic is a linear pass over every sample, which is exactly what
+  // streaming avoids paying for up front — so it is paid AFTER the song is
+  // already playing, on a thread nobody is waiting for, and the answer is
+  // meant to be cached by the caller against the stem's hash so it is paid
+  // once per file rather than once per open.
+  void startWaveformPass();
+  // False until this lane's pass has finished. `buckets` receives the same
+  // RMS-per-bucket statistic the decoded path publishes.
+  [[nodiscard]] bool waveform(size_t lane, float* buckets,
+                              size_t bucketCount) const noexcept;
+  [[nodiscard]] bool waveformComplete() const noexcept;
+
   // Test seam: run one round of refills on THIS thread instead of the feeder
   // thread, so a test can drive the whole protocol deterministically. Returns
   // true when any lane made progress.
@@ -102,6 +129,10 @@ class StreamingLaneGroup {
  private:
   struct Lane {
     std::unique_ptr<StreamingAudioSource> source;
+    // Its own decoder, for the linear waveform pass.
+    std::unique_ptr<StreamingAudioSource> analysis;
+    std::vector<float> waveformBuckets;
+    std::atomic<bool> waveformReady{false};
     std::vector<std::vector<float>> planes;
     std::vector<float*> pointers;
     zdsp::StreamingWindow window{};
@@ -118,11 +149,14 @@ class StreamingLaneGroup {
 
   bool serviceLane(Lane& lane);
   void loop();
+  void waveformLoop();
 
   StreamingLaneOptions options_{};
   std::vector<std::unique_ptr<Lane>> lanes_;
   std::thread thread_;
-  std::mutex mutex_;
+  std::thread waveformThread_;
+  std::atomic<bool> waveformRunning_{false};
+  mutable std::mutex mutex_;
   std::condition_variable wake_;
   std::atomic<bool> running_{false};
 

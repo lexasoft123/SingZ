@@ -54,6 +54,7 @@ import {
   type PlaybackCountInStatus
 } from '../projects'
 import type { ProjectDoc } from '../model'
+import { writeProjectWaveform } from '../writer'
 import {
   b,
   Bar,
@@ -171,6 +172,74 @@ const CUE_PITCH = 18 * PixelRatio.getFontScale()
 const CUE_BAR_GAP = 8 * PixelRatio.getFontScale()
 /** Ring for a beat not yet landed; the stroke straddles r, hence the inset. */
 const CUE_RING_W = 1.5 * PixelRatio.getFontScale()
+
+type NativeLaneEnvelope = {
+  readonly bucketCount: number
+  readonly lanes: readonly {
+    readonly id: string
+    readonly peaksValid: boolean
+    readonly peaks: readonly number[]
+  }[]
+}
+
+/** A streamed lane's envelope arrives from a background pass over the whole
+ *  stem — a second or two per song on a phone, once ever, because the answer is
+ *  cached in the project. These bound the asking, so a build that can never
+ *  produce one stops rather than polling for the life of the song. */
+const WAVEFORM_RETRY_MS = 400
+const WAVEFORM_ATTEMPTS = 30
+
+/** lane id -> the md5 of the stem it is drawn from. The doc keys stemHashes by
+ *  FILE name (`vocals.flac`) and the envelope keys lanes by id (`vocals`), so
+ *  this is where the two meet. A lane with no recorded hash is not cacheable:
+ *  there would be nothing to invalidate it with. */
+export function laneHashes(doc: ProjectDoc): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [file, hash] of Object.entries(doc.stemHashes ?? {})) {
+    const dot = file.lastIndexOf('.')
+    const id = dot > 0 ? file.slice(0, dot) : file
+    if (hash?.md5) out[id] = hash.md5
+  }
+  return out
+}
+
+/** The cached envelope, but ONLY when every lane in it was measured from the
+ *  bytes the project has now. A partly stale cache is discarded whole: a bar
+ *  drawn half from one split and half from another is worse than waiting. */
+export function cachedWaveform(
+  doc: ProjectDoc,
+  wanted: Record<string, string>
+): NativeLaneEnvelope | null {
+  const cache = doc.waveforms
+  if (!cache) return null
+  const ids = Object.keys(wanted)
+  if (ids.length === 0) return null
+  const lanes: { id: string; peaksValid: boolean; peaks: number[] }[] = []
+  let buckets = 0
+  for (const id of ids) {
+    const entry = cache[id]
+    if (!entry || entry.md5 !== wanted[id] || entry.peaks.length === 0) return null
+    if (buckets === 0) buckets = entry.peaks.length
+    if (entry.peaks.length !== buckets) return null
+    lanes.push({ id, peaksValid: true, peaks: entry.peaks })
+  }
+  return { bucketCount: buckets, lanes }
+}
+
+/** What to keep from an envelope the core just produced: only lanes whose bytes
+ *  we can name, so nothing is stored that cannot later be invalidated. */
+export function waveformCacheFor(
+  envelope: NativeLaneEnvelope,
+  wanted: Record<string, string>
+): Record<string, { md5: string; peaks: number[] }> {
+  const out: Record<string, { md5: string; peaks: number[] }> = {}
+  for (const lane of envelope.lanes) {
+    const md5 = wanted[lane.id]
+    if (!md5 || !lane.peaksValid || lane.peaks.length === 0) continue
+    out[lane.id] = { md5, peaks: Array.from(lane.peaks) }
+  }
+  return out
+}
 
 export default function PlayerScreen({
   active = true,
@@ -695,10 +764,15 @@ export default function PlayerScreen({
       // prepared generation; ask it rather than leaving the rail blank.
       const native = project.nativePlayback
       if (!native) return
-      void native
-        .lanePeaks()
-        .then(envelope => {
-          if (cancelled || !envelope || envelope.lanes.length === 0) return
+      // The project's own cache first. A streamed song has no decoded PCM to
+      // summarise, so its envelope arrives from a background pass seconds
+      // after the song starts — but only ever ONCE per file, because the
+      // answer is kept here against the stem's md5. On every later open the
+      // bar is drawn before the first frame plays.
+      const wanted = laneHashes(project.doc)
+      const cachedEnvelope = cachedWaveform(project.doc, wanted)
+      const consume = (envelope: NativeLaneEnvelope | null): void => {
+        if (cancelled || !envelope || envelope.lanes.length === 0) return
           setNativeSilent(
             envelope.lanes
               .filter(
@@ -730,10 +804,47 @@ export default function PlayerScreen({
           setWave(
             raw.map(r => ({ h: Math.max(0.1, Math.min(1, r.level / peak)), color: r.color }))
           )
-        })
-        .catch(() => {
-          // A song whose waveform cannot be drawn is still a song that plays.
-        })
+      }
+      if (cachedEnvelope) {
+        consume(cachedEnvelope)
+        return () => {
+          cancelled = true
+        }
+      }
+      // Not cached, or cached against different bytes: ask the core, and keep
+      // asking while a streamed song's background pass is still running. The
+      // interval is generous because nothing is waiting on it — the song is
+      // already playing.
+      let attempts = 0
+      const ask = (): void => {
+        void native
+          .lanePeaks()
+          .then(envelope => {
+            if (cancelled) return
+            const usable =
+              envelope != null &&
+              envelope.lanes.length > 0 &&
+              envelope.lanes.some(lane => lane.peaksValid)
+            if (!usable) {
+              if (++attempts < WAVEFORM_ATTEMPTS)
+                setTimeout(ask, WAVEFORM_RETRY_MS)
+              return
+            }
+            consume(envelope)
+            // Keep it, so no later open pays for this again.
+            if (project.dir)
+              void writeProjectWaveform(project.dir, waveformCacheFor(envelope, wanted)).catch(
+                () => {
+                  // A cache that cannot be written costs a repeat pass, not a
+                  // wrong picture.
+                }
+              )
+          })
+          .catch(() => {
+            // A song whose waveform cannot be drawn is still a song that plays.
+          })
+      }
+      ask()
       // Register the cleanup rather than returning past it: the project can
       // be replaced in place under a mounted screen (the native pre-start
       // fallback does exactly that), and without this the `cancelled` check

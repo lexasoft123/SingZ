@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 
 namespace singz {
 namespace {
@@ -21,6 +22,7 @@ StreamingLaneGroup::StreamingLaneGroup() = default;
 StreamingLaneGroup::~StreamingLaneGroup() { stop(); }
 
 DecodedAudioStatus StreamingLaneGroup::addLane(OwnedFileDescriptor descriptor,
+                                               OwnedFileDescriptor analysis,
                                                uint32_t requiredSampleRate) {
   if (!isPowerOfTwo(options_.windowFrames))
     return DecodedAudioStatus::InvalidArgument;
@@ -53,8 +55,20 @@ DecodedAudioStatus StreamingLaneGroup::addLane(OwnedFileDescriptor descriptor,
       capacity <<= 1;
   }
 
+  // The waveform decoder is optional on purpose: a song that cannot open a
+  // second handle still plays, it just draws no bar until something else
+  // supplies one.
+  DecodedAudioStatus analysisStatus = DecodedAudioStatus::InvalidArgument;
+  std::unique_ptr<StreamingAudioSource> analysisSource;
+  if (analysis.valid()) {
+    StreamingAudioOpenOptions analysisOpen{};
+    analysisSource = openStreamingAudioSource(std::move(analysis), analysisOpen,
+                                              &analysisStatus);
+  }
+
   auto lane = std::make_unique<Lane>();
   lane->source = std::move(source);
+  lane->analysis = std::move(analysisSource);
   lane->capacityFrames = capacity;
   lane->planes.assign(info.channels, std::vector<float>(capacity, 0.0F));
   lane->pointers.resize(info.channels);
@@ -229,6 +243,133 @@ bool StreamingLaneGroup::serviceOnceForTesting() {
   return progressed;
 }
 
+// One linear pass per lane, off the feeder thread and off the render thread.
+//
+// The bucket boundaries come from the container's frame count, so they match
+// the decoded path's exactly; the arithmetic is the same RMS over every
+// channel. Summation ORDER differs — this accumulates frame by frame where the
+// decoded pass goes channel by channel — so the two agree to floating-point
+// rounding rather than bit for bit, which is far below what a drawn bar can
+// show.
+void StreamingLaneGroup::waveformLoop() {
+  constexpr size_t kBuckets = kStreamingWaveformBuckets;
+  for (size_t index = 0; index < lanes_.size(); ++index) {
+    if (!waveformRunning_.load(std::memory_order_acquire))
+      return;
+    Lane& lane = *lanes_[index];
+    StreamingAudioSource* source = lane.analysis.get();
+    if (source == nullptr)
+      continue;
+    const uint64_t frames = source->info().frameCount;
+    const uint16_t channels = source->info().channels;
+    if (frames == 0 || channels == 0)
+      continue;
+
+    std::vector<double> energy(kBuckets, 0.0);
+    std::vector<uint64_t> counted(kBuckets, 0);
+    const size_t block = 16384;
+    std::vector<std::vector<float>> planes(channels,
+                                           std::vector<float>(block, 0.0F));
+    std::vector<float*> pointers(channels);
+    for (uint16_t channel = 0; channel < channels; ++channel)
+      pointers[channel] = planes[channel].data();
+
+    uint64_t at = 0;
+    bool ok = true;
+    size_t cursorBucket = 0;
+    uint64_t cursorEnd = frames / kBuckets;
+    if (cursorEnd == 0)
+      cursorEnd = 1;
+    while (at < frames && waveformRunning_.load(std::memory_order_acquire)) {
+      size_t got = 0;
+      const DecodedAudioStatus status =
+          source->read(pointers.data(), block, &got);
+      if (status != DecodedAudioStatus::Ok) {
+        ok = false;
+        break;
+      }
+      // A short read is the END of the source, not a failure — and treating it
+      // as one threw away every completed pass, because the last read of every
+      // file returns zero.
+      if (got == 0)
+        break;
+      for (size_t frame = 0; frame < got; ++frame) {
+        const uint64_t absolute = at + frame;
+        // The SAME partition the decoded summary uses, walked forward: bucket
+        // b is [b*frames/buckets, (b+1)*frames/buckets). Deriving the bucket
+        // from the frame instead (frame*buckets/frames) is the same partition
+        // only in real arithmetic — integer division moves a frame or two at
+        // each edge, which measured as a 4e-5 disagreement between the two
+        // pictures. Small, and avoidable for nothing.
+        while (cursorBucket + 1 < kBuckets && absolute >= cursorEnd) {
+          ++cursorBucket;
+          cursorEnd = (cursorBucket + 1) * frames / kBuckets;
+          if (cursorEnd <= cursorBucket * frames / kBuckets)
+            cursorEnd = cursorBucket * frames / kBuckets + 1;
+        }
+        const size_t bucket = cursorBucket;
+        for (uint16_t channel = 0; channel < channels; ++channel) {
+          const float sample = planes[channel][frame];
+          if (!std::isfinite(sample))
+            continue;
+          energy[bucket] +=
+              static_cast<double>(sample) * static_cast<double>(sample);
+          ++counted[bucket];
+        }
+      }
+      at += got;
+    }
+    if (!ok || !waveformRunning_.load(std::memory_order_acquire))
+      continue;
+
+    std::vector<float> buckets(kBuckets, 0.0F);
+    for (size_t bucket = 0; bucket < kBuckets; ++bucket)
+      buckets[bucket] =
+          counted[bucket] == 0
+              ? 0.0F
+              : static_cast<float>(std::sqrt(
+                    energy[bucket] / static_cast<double>(counted[bucket])));
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      lane.waveformBuckets = std::move(buckets);
+    }
+    lane.waveformReady.store(true, std::memory_order_release);
+  }
+}
+
+void StreamingLaneGroup::startWaveformPass() {
+  if (waveformRunning_.exchange(true, std::memory_order_acq_rel))
+    return;
+  try {
+    waveformThread_ = std::thread([this] { waveformLoop(); });
+  } catch (...) {
+    // A machine that will not give us a thread still plays the song.
+    waveformRunning_.store(false, std::memory_order_release);
+  }
+}
+
+bool StreamingLaneGroup::waveform(size_t lane, float* buckets,
+                                  size_t bucketCount) const noexcept {
+  if (lane >= lanes_.size() || buckets == nullptr ||
+      bucketCount != kStreamingWaveformBuckets ||
+      !lanes_[lane]->waveformReady.load(std::memory_order_acquire))
+    return false;
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (lanes_[lane]->waveformBuckets.size() != bucketCount)
+    return false;
+  for (size_t index = 0; index < bucketCount; ++index)
+    buckets[index] = lanes_[lane]->waveformBuckets[index];
+  return true;
+}
+
+bool StreamingLaneGroup::waveformComplete() const noexcept {
+  for (const std::unique_ptr<Lane>& lane : lanes_)
+    if (lane->analysis != nullptr &&
+        !lane->waveformReady.load(std::memory_order_acquire))
+      return false;
+  return true;
+}
+
 void StreamingLaneGroup::loop() {
   while (running_.load(std::memory_order_acquire)) {
     bool progressed = false;
@@ -254,6 +395,12 @@ void StreamingLaneGroup::start() {
 }
 
 void StreamingLaneGroup::stop() {
+  // The waveform pass is stopped first and unconditionally: it may be running
+  // even when the feeder never started, and it holds the lane storage the
+  // destructor is about to take away.
+  waveformRunning_.store(false, std::memory_order_release);
+  if (waveformThread_.joinable())
+    waveformThread_.join();
   if (!running_.exchange(false, std::memory_order_acq_rel))
     return;
   wake_.notify_all();

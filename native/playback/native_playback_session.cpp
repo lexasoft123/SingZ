@@ -2,6 +2,11 @@
 
 #include "streaming_lane_feeder.h"
 
+// The feeder cannot include the session (the dependency runs the other way),
+// so it states the bucket count itself. This is where the two are held equal.
+static_assert(singz::kStreamingWaveformBuckets ==
+              singz::kNativePlaybackLaneSummaryBuckets);
+
 #include "native_playback_callback.h"
 #include "native_playback_projection.h"
 #include "signalsmith_time_pitch.h"
@@ -22,6 +27,10 @@
 #if defined(_WIN32)
 #include <io.h>
 #else
+// For reopenIndependently: F_GETPATH/open on Apple, /proc/self/fd on Linux.
+#include <climits>
+#include <cstdio>
+#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -2048,6 +2057,37 @@ laneDecodeIdentity(const NativePlaybackLaneSource &source,
   return _dup(descriptor);
 #else
   return ::dup(descriptor);
+#endif
+}
+
+// A handle to the same file with its OWN offset.
+//
+// `dup` does not give one: duplicates share an open file description, so two
+// decoders reading through them fight over a single cursor and corrupt each
+// other. Playback and the waveform pass read the same stem at the same time
+// from different threads, so they need genuinely independent handles.
+//
+// Both platforms can reopen a descriptor without being told the path — Apple
+// through F_GETPATH, Linux through /proc/self/fd, where an open() really does
+// create a new description rather than an alias. A failure here is not fatal
+// anywhere it is used: the caller simply goes without.
+[[nodiscard]] int reopenIndependently(int descriptor) noexcept {
+#if defined(_WIN32)
+  (void)descriptor;
+  return -1;
+#elif defined(__APPLE__)
+  if (descriptor < 0)
+    return -1;
+  char path[PATH_MAX];
+  if (::fcntl(descriptor, F_GETPATH, path) == -1)
+    return -1;
+  return ::open(path, O_RDONLY);
+#else
+  if (descriptor < 0)
+    return -1;
+  char path[64];
+  std::snprintf(path, sizeof(path), "/proc/self/fd/%d", descriptor);
+  return ::open(path, O_RDONLY);
 #endif
 }
 
@@ -6099,10 +6139,17 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
         streamingGroup.reset();
         break;
       }
+      // An INDEPENDENT handle for the waveform pass, not a duplicate: it reads
+      // the file linearly on its own thread while playback seeks around it,
+      // and a shared offset would leave both reading nonsense. Optional — a
+      // lane that cannot get one still plays, it just draws no bar.
+      const int forWaveform = reopenIndependently(source.descriptor.get());
       // Rate is checked below rather than here, so a mismatch can fall back
       // instead of failing: passing 0 accepts whatever the file holds.
-      const DecodedAudioStatus status =
-          streamingGroup->addLane(OwnedFileDescriptor(copy), 0);
+      const DecodedAudioStatus status = streamingGroup->addLane(
+          OwnedFileDescriptor(copy),
+          forWaveform < 0 ? OwnedFileDescriptor() : OwnedFileDescriptor(forWaveform),
+          0);
       if (status != DecodedAudioStatus::Ok) {
         streamingGroup.reset();
         break;
@@ -6308,6 +6355,10 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
   if (streamingGroup != nullptr) {
     prepared->streaming = std::move(streamingGroup);
     prepared->streaming->start();
+    // Started here, after the graph is built: the waveform is wanted soon but
+    // never before the song plays, and a linear pass over six stems competing
+    // with the prime would be paying the up-front cost this exists to avoid.
+    prepared->streaming->startWaveformPass();
   }
   prepared->inject(NativePlaybackAllocationPoint::AfterArena);
   zdsp::GraphCompileError compileError{};
@@ -8204,8 +8255,20 @@ NativePlaybackSession::lanePeaks(uint64_t generation) const {
     return result;
   }
   result.lanes.reserve(impl_->prepared->lanes.size());
-  for (const PreparedPlaybackGraph::Lane &lane : impl_->prepared->lanes)
-    result.lanes.push_back({lane.id, lane.peaksValid, lane.peaks});
+  const std::shared_ptr<StreamingLaneGroup> &streaming =
+      impl_->prepared->streaming;
+  for (size_t index = 0; index < impl_->prepared->lanes.size(); ++index) {
+    const PreparedPlaybackGraph::Lane &lane = impl_->prepared->lanes[index];
+    NativePlaybackLanePeaks peaks = lane.peaks;
+    bool valid = lane.peaksValid;
+    // A streamed lane has no decoded PCM to summarize, so its envelope comes
+    // from the background pass instead — and is simply not ready yet for the
+    // first seconds of a song whose waveform nothing has cached. Reporting it
+    // as invalid until then is honest: the bar draws when the answer exists.
+    if (!valid && streaming != nullptr)
+      valid = streaming->waveform(index, peaks.data(), peaks.size());
+    result.lanes.push_back({lane.id, valid, peaks});
+  }
   result.ok = true;
   result.error = NativePlaybackError::None;
   return result;

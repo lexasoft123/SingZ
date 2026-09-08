@@ -764,8 +764,55 @@ void streamedLanesPlayTheSameAudioAsDecodedOnes() {
     std::remove(offFlac.c_str());
   }
 
-  const std::vector<float> decodedOut = play(false, 2);
-  const std::vector<float> streamedOut = play(true, 3);
+  // The WAVEFORM a streamed song eventually draws must be the same picture the
+  // decoded one draws immediately. It arrives late by design — a linear pass
+  // over every sample is exactly what streaming does not pay up front — so
+  // this waits for it, which is what the app does by caching it against the
+  // stem's hash and not asking again.
+  {
+    singz::NativePlaybackPrepareConfig request = config();
+    request.streamLanes = true;
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    lanes.push_back(lane("song", toneFlac));
+    CHECK(session.prepare(std::move(request), std::move(lanes), 4).ok);
+    singz::NativePlaybackLanePeaksResult streamedPeaks;
+    for (int attempt = 0; attempt < 400; attempt++) {
+      streamedPeaks = session.lanePeaks(4);
+      if (streamedPeaks.ok && streamedPeaks.lanes.size() == 1 &&
+          streamedPeaks.lanes[0].valid)
+        break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(streamedPeaks.ok && streamedPeaks.lanes.size() == 1);
+    CHECK(streamedPeaks.lanes[0].valid);
+    CHECK(session.unload(4).ok);
+
+    singz::NativePlaybackPrepareConfig decodedRequest = config();
+    decodedRequest.streamLanes = false;
+    auto decodedLanes = std::vector<singz::NativePlaybackLaneSource>{};
+    decodedLanes.push_back(lane("song", toneFlac));
+    CHECK(session.prepare(std::move(decodedRequest), std::move(decodedLanes), 5).ok);
+    const auto decodedPeaks = session.lanePeaks(5);
+    CHECK(decodedPeaks.ok && decodedPeaks.lanes.size() == 1 &&
+          decodedPeaks.lanes[0].valid);
+    // To rounding, not bit for bit: the streamed pass accumulates frame by
+    // frame where the decoded one goes channel by channel, so the sums differ
+    // in their last bits. Far below anything a drawn bar can show.
+    double worst = 0.0;
+    double loudest = 0.0;
+    for (size_t i = 0; i < decodedPeaks.lanes[0].peaks.size(); i++) {
+      const double a2 = decodedPeaks.lanes[0].peaks[i];
+      const double b2 = streamedPeaks.lanes[0].peaks[i];
+      worst = std::max(worst, std::fabs(a2 - b2));
+      loudest = std::max(loudest, a2);
+    }
+    CHECK(loudest > 0.05);  // the fixture really has a waveform to compare
+    CHECK(worst < 1e-5);
+    CHECK(session.unload(5).ok);
+  }
+
+  const std::vector<float> decodedOut = play(false, 6);
+  const std::vector<float> streamedOut = play(true, 7);
   CHECK(decodedOut.size() == total && streamedOut.size() == total);
   // The reference must actually carry the tone, or "identical" would only be
   // proving that two silences match.

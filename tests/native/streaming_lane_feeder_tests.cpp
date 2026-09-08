@@ -174,7 +174,7 @@ int main() {
     options.safetyFrames = 8192;
     options.primeFrames = 16384;
     group.setOptions(options);
-    check(group.addLane(openRead(flac), kRate) == singz::DecodedAudioStatus::Ok,
+    check(group.addLane(openRead(flac), openRead(flac), kRate) == singz::DecodedAudioStatus::Ok,
           "a lane opens");
     check(group.prime(0) == singz::DecodedAudioStatus::Ok,
           "and primes at the start");
@@ -227,7 +227,7 @@ int main() {
     options.safetyFrames = 8192;
     options.primeFrames = 16384;
     group.setOptions(options);
-    check(group.addLane(openRead(flac), kRate) == singz::DecodedAudioStatus::Ok,
+    check(group.addLane(openRead(flac), openRead(flac), kRate) == singz::DecodedAudioStatus::Ok,
           "a lane opens for the scrub case");
     check(group.prime(0) == singz::DecodedAudioStatus::Ok, "and primes");
 
@@ -280,7 +280,7 @@ int main() {
   // 20x realtime is far past what a phone asks for and still a real bar.
   {
     singz::StreamingLaneGroup group;
-    check(group.addLane(openRead(flac), kRate) == singz::DecodedAudioStatus::Ok,
+    check(group.addLane(openRead(flac), openRead(flac), kRate) == singz::DecodedAudioStatus::Ok,
           "a lane opens for the threaded case");
     check(group.prime(0) == singz::DecodedAudioStatus::Ok, "and primes");
     group.start();
@@ -314,6 +314,51 @@ int main() {
     check(matched, "the feeder thread delivers the same audio as the decode");
     (void)streamed.functions->deactivate(streamed.state);
     (void)streamed.functions->destroy(streamed.state);
+  }
+
+  // ---- 4. the background waveform pass ----------------------------------
+  {
+    singz::StreamingLaneGroup group;
+    check(group.addLane(openRead(flac), openRead(flac), kRate) ==
+              singz::DecodedAudioStatus::Ok,
+          "a lane opens for the waveform case");
+    group.startWaveformPass();
+    std::vector<float> buckets(singz::kStreamingWaveformBuckets, -1.0F);
+    bool ready = false;
+    for (int attempt = 0; attempt < 400 && !ready; attempt++) {
+      ready = group.waveform(0, buckets.data(), buckets.size());
+      if (!ready)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    check(ready, "the waveform pass finishes");
+    if (ready) {
+      double loudest = 0.0;
+      for (const float value : buckets)
+        loudest = std::max(loudest, static_cast<double>(value));
+      check(loudest > 0.05, "and it carries the fixture's actual level");
+      // Against the decoded summary of the same file, bucket for bucket.
+      const uint64_t frames = reference.audio->frameCount();
+      const uint32_t channels = reference.audio->channelCount();
+      double worst = 0.0;
+      for (size_t bucket = 0; bucket < buckets.size(); bucket++) {
+        const uint64_t begin = bucket * frames / buckets.size();
+        uint64_t end = (bucket + 1) * frames / buckets.size();
+        if (end <= begin) end = begin + 1;
+        if (end > frames) end = frames;
+        double sum = 0.0;
+        uint64_t count = 0;
+        for (uint32_t c = 0; c < channels; c++)
+          for (uint64_t f = begin; f < end; f++) {
+            const double v = reference.audio->channelData(c)[f];
+            sum += v * v;
+            count++;
+          }
+        const double expected = count == 0 ? 0.0 : std::sqrt(sum / count);
+        worst = std::max(worst, std::fabs(expected - buckets[bucket]));
+      }
+      check(worst < 1e-5, "and matches the decoded summary bucket for bucket");
+    }
+    group.stop();
   }
 
   std::remove(flac.c_str());

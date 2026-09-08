@@ -162,6 +162,24 @@ export async function writeLyrics(
   return next
 }
 
+/** Cache the seek bar's envelope in the project, against the stems it was
+ * measured from.
+ *
+ * Goes through the same document queue as every other writer, so a waveform
+ * landing while analysis or lyrics are being written cannot clobber either —
+ * this is a strictly additive field on whatever the doc says at the time. */
+export async function writeProjectWaveform(
+  dir: string,
+  waveforms: Record<string, { md5: string; peaks: number[] }>
+): Promise<ProjectDoc | null> {
+  if (Object.keys(waveforms).length === 0) return null
+  return mutateProjectDocument(dir, async (doc) => ({
+    ...doc,
+    savedAt: new Date().toISOString(),
+    waveforms: { ...(doc.waveforms ?? {}), ...waveforms },
+  }))
+}
+
 /** Explicit portable-graph transaction: canonical graph.json first, native
  * stat/hash second, project.json last. The shared project-document queue spans
  * the whole callback, so analysis, lyrics, and metronome writers cannot land

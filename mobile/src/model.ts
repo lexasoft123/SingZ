@@ -166,6 +166,18 @@ export interface ProjectDoc {
   /** The same, for lyrics.json: the doc states every file the project is made
    *  of, so one checksum per project in catalog.json covers the lot. */
   lyricsHash?: { md5: string; size: number; mtimeMs: number }
+  /** The seek bar's envelope, per lane, cached in the project.
+   *
+   *  Computing it means reading every sample of every stem — which is exactly
+   *  what streamed playback does not do up front, so a streamed song would
+   *  otherwise draw no bar until a background pass caught up, on every open.
+   *  Cached here it is paid once per file instead of once per open.
+   *
+   *  Each entry carries the md5 of the stem it was measured from, checked
+   *  against `stemHashes`, so a re-split or a re-import invalidates it without
+   *  anything having to remember to clear it. A stale entry is ignored, never
+   *  drawn: a waveform from the wrong audio is worse than none. */
+  waveforms?: Record<string, { md5: string; peaks: number[] }>
   /** Optional portable DSP graph. The member name is fixed as graph.json and
    * it remains small-text state, never part of the downloaded-audio byte sum. */
   graphHash?: { format: number; md5: string; size: number; mtimeMs: number }
