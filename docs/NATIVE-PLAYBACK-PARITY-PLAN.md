@@ -58,14 +58,97 @@ written up in full below.
 **What is owed before a release** (nothing here blocks the merge to main; the first two
 block a `v*` tag):
 
-1. **Android at tip.** The last emulator/POCO runs were eight commits back, and three of
-   the commits since touch the poll cadence and the notification path — the machinery
-   Android's screen depends on.
+1. **Android at tip — RUN, and it is 53/58.** (2026-09-07, POCO F5 physical,
+   arm64-only debug APK built at `f32613e`, the synthesized 122 s pair.) **Run twice, and
+   the same five rules failed both times with the same signs, so this is not run noise:**
+
+   | rule | run 1 | run 2 |
+   |---|---|---|
+   | metronome save → accepted | native 226 vs legacy 147 ms | 371 vs 179 |
+   | training on → advancing again | 180 vs 113 | 212 vs 99 |
+   | end of song → Play restart | 450 vs 335 (budget 385) | 428 vs 368 (budget 418) |
+   | CPU (idle-in-player) | 28.5% vs 27.1% (budget 28.1) | 28.5 vs 27.0 (budget 28.0) |
+   | PSS (idle-in-player) | native 987 vs legacy 915 MB | 990 vs 924 |
+
+   **And the idle CPU row is not a native-playback regression at all**, which is the
+   finding worth acting on. The eighth run above (`poco-run-4c-1.log`, 57/58, same POCO)
+   recorded idle-in-player at **15.5% native / 16.0% legacy**. This run reads **28.5% /
+   27.0%**. BOTH backends nearly doubled. A shared regression cannot be in the playback
+   backend — it is in the UI or the JS the player screen runs while it sits still, and it
+   costs the singer's phone the same either way. The rule fails only incidentally, because
+   native's is 1.5 points the higher of two numbers that both moved.
+
+   The other rows read the same way once that is seen: idle-in-player is sampled BEFORE
+   Play, so neither it nor PSS can be about the transport, and the three timings are all
+   control-plane work on a JS thread that is now twice as busy.
+
+   Not yet bisected across the sixteen commits since, but the shared path narrows it
+   sharply. The two whose subjects suggest themselves — `67e7133` (the frame-paced start
+   watch) and `822671d` (the count-in's own timer) — are bounded, self-clearing, armed
+   only at Play and native-only, so none of them can reach an idle row on legacy. Nor can
+   `fa5b758`: `@singz/ui` v1.7.0 is four files and eighteen lines, all of them `Waveform`
+   taking a nullable buffer.
+
+   Only five commits in the window touch anything both backends run:
+   `807d785` (`RootNavigator`), `7915d69` and `0daed31` (`backend.ts`, `projects.ts`),
+   `67e7133` (four lines of `PlayerScreen`), and **`ae0298e`, which is the candidate**.
+   Alongside the count-in work it re-tuned the seek bar's lane-level scan for accuracy:
+   `LANE_LEVEL_WINDOW` 1024 → 128 and the per-sliver budget 8 windows → 256, which is
+   **four times the frames visited per sliver**, chunked 32 slivers to a JS tick on the
+   player screen. That is shared work, on the thread whose idle cost doubled, in the one
+   commit of the five that added any. Its own header measures the new setting at ~1.5 s of
+   interpreted JS for a four-minute six-stem song; what nobody has measured is whether it
+   is still running, or re-running, at the moment the harness samples idle.
+
+   The check is cheap and is the next step: sample `idle-in-player` on this phone with
+   `LANE_LEVEL_SLIVER_BUDGET` back at `8 * 1024`, both backends, nothing else changed.
+
+   Caveats on the comparison, so it is not over-read: this APK was built arm64-only and
+   with `-PdebugAppIdSuffix=.debug`, and the phone also carries a release SingZ. The CPU
+   sample is per-pid, so a neighbour app does not enter it, but the device is not in the
+   same state 4c-1 found it in.
+
+   **This is the release blocker the run was written to find.**
 2. **The Android relaunch crash.** Two deaths in nine harness runs on optimized-core
    builds; the tombstone lands in RN's own `pullTransaction` with react-native-screens and
    reanimated as the delegate registrants and no frame of ours in any of 62 threads; a
    plain relaunch loop was 0 of 12. Upstream-shaped, not upstream-proven. Written up in
    Step 6.
+   `mobile/tests/relaunch-after-session-android.cjs` holds the variables those loops did
+   not. **First run, 2026-09-08: 6 of 6 native relaunches booted** after four minutes of
+   playing with a seek and a transpose every twenty seconds (a seventh round was
+   abandoned on an inspector timeout; the driver no longer lets one of those cost the
+   run). That rules something out worth as much as a reproduction: the crash does not
+   follow "the app played for a long time".
+
+   What the session pass does that the loop did not is the thing the failing frame is
+   about — it LEAVES the player, opens a second song and comes back. On one of the two
+   registrants the delegate whose vtable the tombstone reads through is
+   `screenRemovalListener_`, and a screen is only removed when a route pops. (`807d785`,
+   "the player route no longer holds its own removal", lives in that same machinery.) So
+   the driver now navigates before the relaunch — two player routes popped on a process
+   that has been playing for minutes — and `--navigate 0` re-runs the negative control.
+
+   **Second run, same day: 0 of 8.** So that is not it either. The tally across every
+   purpose-built loop is now **26 relaunches, no deaths** (0/12 short, 0/6 long play,
+   0/8 long play plus route pops) against **2 deaths in 9 full session passes**. Three
+   hypotheses about what the session does have each been tested and each been wrong, so
+   the next move is not a fourth loop. Either run the session harness itself in a loop
+   and catch the death with its tombstone, or take the upstream lead directly:
+   react-native-reanimated 4.6.0 (this tree is on 4.5.3) stops taking over
+   `UIManagerAnimationDelegate` and fixes a deadlock in `ReanimatedCommitHook` surface
+   initialization. react-native-screens is already at the latest stable, 4.27.0.
+
+   What the loops HAVE established is worth keeping: the crash does not follow a long
+   playing session, does not follow route pops, and does not follow either of them
+   combined with a force-stop. Whatever the condition is, it is further inside the
+   session than any of those. (The 20-second loop that found nothing committed
+   almost nothing to the shadow tree, and the delegate this crash reaches for is the
+   layout-animation one.) One upstream lead worth trying if it reproduces:
+   react-native-reanimated 4.6.0 — this tree is on 4.5.3 — whose notes say it stops
+   taking over `UIManagerAnimationDelegate` and fixes a deadlock in
+   `ReanimatedCommitHook` surface initialization. react-native-screens is already at the
+   latest stable (4.27.0).
 3. **The iPhone route matrix** — Speaker, wired, Bluetooth and CarPlay, with a route change
    and a call interruption. DSP-GRAPH-PLAN's Phase 4 has asked for this since the start,
    and report 5 above is exactly a laggy-route behaviour that could only be tested here
@@ -77,7 +160,191 @@ block a `v*` tag):
 
 **Parked by decision, each its own project:** the per-target codec proofs, one shared
 engine-contract suite across both legacy engines and the facade, and the desktop's
-playing-CPU residual (the graph's own render thread, ~1.4% of a core).
+playing-CPU residual — which has since been split per process, and is not what it was
+assumed to be (below).
+
+### Windows CPU, measured for the first time (2026-09-08) — native is CHEAPER in every phase
+
+Every CPU and memory row on Windows had printed `n/a` since the platform was added, so
+three field sessions had said nothing about what native costs there. With
+`tests/shared/win-process-sample.ps1` in place (see the commit for why Get-Counter cannot
+do this on a localized Windows, and why the first version read a flat 0%), the field
+laptop reads:
+
+| phase | legacy | native |
+|---|---|---|
+| idle in player | 2.2% | **0.9%** |
+| playing | 2.5% | **1.9%** |
+| pitch change | 4.7% | **2.2%** |
+| after leaving | 4.7% | **1.6%** |
+
+**The opposite of the mac**, where native costs 5.8 points more. Repeated at a 2 s window
+before the 5 s one: playing 6.9% legacy against 2.3% native, same direction, coarser
+numbers. So on the fleet that most needs the help, the default flipped to native is
+itself the CPU improvement — no further change required to get it.
+
+**Read the caveat with the numbers.** The harness runs the window HIDDEN
+(`SINGZ_E2E_HIDDEN`), and on Windows a hidden window composites little or nothing, so
+these are the app's non-paint cost. On the mac the same harness reads tens of percent
+because its hidden window still composites, and the GPU process is most of native's
+delta there. **What a Windows singer actually pays while WATCHING the player has still
+never been measured**, and given this machine's history — three Windows-only fixes in
+`styles.css` worth 15-20 points of an HD 4600 each — that is where any remaining win is.
+A visible-window probe through `schtasks /it` is the way to get it.
+
+**The bigger Windows number is not CPU at all.** Native's first open costs a flat
+**~1.9-2.0 s more than legacy's**, in every run and on the reopen after a restart too
+(native 4042 vs legacy 2052 to the player; 4691 vs 2810 reopening). That is the capture
+addon, which loads lazily on first use, so under native the prepare-ahead pays for it
+inside the song open. Warming it once after the catalog is ready would move that stall to
+a moment the singer is browsing rather than waiting, and would take ~272 ms off the mac's
+first Play as well. Not done here; it is a main-process change with its own trade-off
+(cold launch, or a stall while browsing) and wants its own decision.
+
+### The mac's playing CPU falls 40% on one CSS rule (2026-09-08)
+
+Researched because the Windows finding might transfer. It did not — and looking
+for it found something bigger that had been sitting in plain sight.
+
+`--p` costs the mac nothing: suppressing the write is −0.4 to −1.3 against a
+noise floor of 0.2-1.0, where on the field laptop it was −42.4. That answer is
+worth having on its own: **do not spend the kit redesign expecting a mac win.**
+
+What the mac's playback DOES cost is one animation. Pausing the transport takes
+the app from ~26% to 6.4%, and `document.getAnimations()` says exactly ONE
+animation runs while a song plays: `pulse` on the lyrics panel's long-pause
+countdown, `.lyr-line.count-sec::before`. Freezing it is −9.9. Every way of
+keeping it and making it cheap was measured and none worked:
+
+| variant | vs baseline |
+|---|---|
+| `animation: none` (what shipped) | **−9.9** |
+| `will-change: opacity` | −1.4 |
+| `transform: translateZ(0)` + will-change | +0.7 |
+| `contain: layout paint` on the row | −0.5 |
+| drop the `text-shadow` | −0.2 |
+| drop the transport's backdrop blur | −1.5 |
+
+`styles.css` already froze that pulse — **on Windows only**, for exactly this
+reason, measured at ~20pp of an HD 4600. macOS never got it. It does now.
+
+Verified by REVERSAL, which is the only honest way to sign off a change measured
+this way: with the rule shipped, putting the animation back costs **+10.3** and
+reproduces the old number.
+
+| | playing CPU | gpu | renderer |
+|---|---|---|---|
+| before | 25.9% | 13.9 | 10.4 |
+| **after** | **15.6%** | **6.5** | **7.6** |
+
+Playback now costs 9.2 points over paused where it cost ~22. Windows is
+unchanged: it had the rule already. The transport's backdrop blur, chased as
+the likely mechanism, turns out to be worth 0.9-1.7 and is not worth a visual
+trade.
+
+**Nothing of this ports to the phones, because they already do it better.**
+Asked and checked: `withRepeat` and `Animated.loop` appear NOWHERE in
+`mobile/src` — there is not one repeating animation to make cheaper. The
+count-in is static Skia (dots and an "N s" text, no fade), the word fill runs
+on the UI thread as a worklet so React never commits for it, and PlayerScreen
+throttles its React commits to 2 Hz for the clock and scrub bar on purpose. It
+even carries `TEST.uiFrames()` and `TEST.uiWrites()` — frames delivered against
+writes actually made, which is the same instrument the desktop had to grow for
+`--p` this week. The desktop is the platform that was behind here, and the
+borrowing runs the other way.
+
+### What a Windows singer actually pays, and the one thing it is (2026-09-08)
+
+The hidden-window numbers above are the app's NON-PAINT cost. With the window
+VISIBLE on the field laptop (`tests/e2e/win-visible-cpu.cjs`, which refuses to
+report a run under 30 fps or a `visibilityState` that is not 'visible'):
+
+| | legacy | native |
+|---|---|---|
+| idle in player | 3.1% | 3.7% |
+| **playing** | **48.6-68.3%** | **57.6-62.2%** |
+
+Playing costs **twenty to thirty times** what the hidden window suggested, and
+it splits roughly renderer 27 / GPU 25. **This machine's absolute numbers drift
+enormously** — the same build read 68.3% and 48.6% on two consecutive runs, and
+one baseline's spread across nine interleaved rounds was 51 points — so nothing
+here may be read from a single run, and the native-vs-legacy delta at this
+magnitude is NOT established (it came out −10.7 one run and +13.6 the next).
+
+**All of it is one line.** Interleaved A/B inside a single process, nine rounds,
+with a no-op CSS rule as a negative control to fix the noise floor:
+
+| variant | playing CPU | vs baseline |
+|---|---|---|
+| baseline | 60.0% | — |
+| control (a no-op rule) | 65.8% | +5.8 ← **the noise floor** |
+| lanes hidden | 52.2% | −7.8 |
+| **`--p` writes suppressed** | **17.6%** | **−42.4** |
+
+Suppressing the playhead's `--p` write takes playing CPU from 60% to 17.6%,
+GPU 29.8 → 7.5 and renderer 29.7 → 10.2. Seven times the noise floor, and the
+largest single number anywhere in this document. It is **not the painting**:
+hiding the waveform lanes entirely, hiding the playhead, and removing the
+bright layer were each inside the noise. `--p` is written on the stack ROOT,
+and a custom property on a subtree root invalidates style for everything under
+it — six lanes and all their children — whether or not any of it is visible.
+Eight to ten times a second at the whole-song view, and far more when zoomed.
+
+**The obvious fix is measured and it is WORSE.** Writing `--p` on the seven
+elements that read it instead of on the root: **+15.5 points** against
+baseline. Rejected on the measurement rather than shipped on the reasoning.
+
+What remains, and it is a design change rather than a tweak: `--p` has to reach
+the root only because the kit's `.wave-bright` clips itself with it in every
+lane (`clip-path: inset(0 calc(100% - var(--p)) 0 0)`). Decouple the played/
+unplayed reveal from that variable — a composited transform on a wrapper, say —
+and `--p` would need to reach one element, where a per-element write is cheap.
+That is a `@singz/ui` change with a visual contract attached, and it wants its
+own pass.
+
+**Two traps for whoever takes it**, both of which caught this one first:
+`filter: drop-shadow` on the wave layers looked like the culprit and its
+apparent 8-point win was exactly the noise floor; and three-round medians on
+this machine mean nothing. Interleave inside one process, and always carry a
+control that should change nothing.
+
+### Where the desktop's playing-CPU delta actually sits (2026-09-08)
+
+The harness sums the whole process tree, so its "+2.4 points while playing" never said
+WHICH process spends them. Measured per process on the mac, Deutschland (323 s, six
+lanes), the view reset to the whole song, median of three 2 s windows, repeated:
+
+| process | legacy | native | delta |
+|---|---|---|---|
+| main | 0.1 | 1.7 | **+1.6** |
+| renderer | 11.9 | 12.6 | +0.7 |
+| gpu | 17.1 | 20.8 | **+3.7** |
+| all | 29.3 | 35.1 | +5.8 |
+
+`main` is the core's own render thread, which is the ~1.4 points this list already
+accepted, and it is real work the legacy engine does elsewhere. **The surprise is the GPU
+process**, which is most of the delta and had never been attributed. Two explanations
+were tested and both are wrong:
+
+- **Not the renderer's AudioContext.** It is `suspended` for the whole native pass — the
+  engine only ever resumes it on the Web Audio play path (and for a metronome preview
+  tap), so under native it never starts. It costs nothing, and a plausible-looking day's
+  work on suspending it would have found nothing to suspend.
+- **Not the playhead.** `TrackStack` quantizes `--p` to whole device pixels and writes
+  only on change; instrumented, both backends write it **8.5 and 8.4 times a second with
+  no repeated values at all** — the quantizer is exact and the native clock does not
+  jitter across a pixel boundary.
+
+So the GPU delta is still unexplained and wants a Chrome trace of the GPU process, not
+another guess. Recorded here so the next attempt starts after these two, not before them.
+
+**Incidental, and worth more than the delta:** the app costs **~30% of a core at the
+whole-song view and ~80% zoomed in to a couple of seconds**, on either backend. At that
+zoom the playhead genuinely crosses a device pixel every frame, so `--p` is written ~82
+times a second and every write damages the playhead strip, six reveal clips and any glass
+above them — by design, and the comment in `TrackStack` says so. A project reopens at the
+view it was saved in, so a singer who left one zoomed pays that on every open. Nobody had
+measured it.
 
 ## Why the legacy engine measures faster: an architecture comparison
 
@@ -1053,6 +1320,35 @@ row to squeeze. The footprint rows therefore stay red on the desktop by decision
 way backgrounding stays uncompared, and the harness prints them so the number is never
 forgotten. The desktop's Step 4 closes here: every timing rule at parity or better, the
 seam, the projected clock, the intent-based park and the prepare ahead.
+
+**Native playback is the DEFAULT on Windows as of 2026-09-08 (tip c3252a0).** The
+condition `native-playback-preference.ts` set for itself was "until the field laptop's
+session reads the same"; three runs of the desktop session harness on WASAPI read
+**18/19, 17/19 and 18/19, with no rule red in more than one of them**:
+
+| run | reds |
+|---|---|
+| 1 | seek read-back, native 81 ms vs 17 (red on macOS at this tip too) |
+| 2 | the first open, twice — native 4048 vs legacy 2075 to the player |
+| 3 | training on → advancing, 60 ms against a legacy 0 with a 50 ms budget |
+
+The first-open red is **bimodal on that machine and flipped sign between runs** — run 1
+read native 2105 against legacy 4111, run 2 read native 4048 against legacy 2075. What
+the singer waits for is better and repeatably so: Play → advancing 181 ms against
+241–301, end of song → Play 61–92 against 211–240, every seam landed, no fatal native
+line in any pass. Against the 15/18 below, the two CONSISTENT reds — the first open,
+twice ~2 s slower — are gone, which is the prepare moving off the main thread
+(`44832c9`).
+
+The rows the whole exercise was for now read on Windows too: *"the renderer holds its own
+decode on legacy and has let it go on native — legacy true · native false"* passed in
+every run, so the Windows fleet gets the lane release with the default.
+
+Not a cleaner result than macOS's, the same shape of one; Settings carries the toggle.
+Linux has never run the harness and stays on Web Audio. The tree was staged by copying
+the previous verify tree's `node_modules` and its **prebuilt addon** — which the identity
+check accepted, because the addon is content-addressed by the native sources and
+`native/` and `zdsp/` had not moved since.
 
 **Windows native playback has run, on the field laptop (2026-09-06, tip ab2e856):** the
 desktop harness, shipped as an exported tree with a prestaged library (`PS_LIB`; the

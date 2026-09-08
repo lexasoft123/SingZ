@@ -1,9 +1,11 @@
-# The desktop's second copy of every song — scope
+# The desktop's second copy of every song
 
-Status: **kit landed, app change not started** (2026-09-07). The bytes are
-reclaimable — measured below — and the shape is bigger than it looks; the two
-things that make it so are in "What the first draft got wrong". `@singz/ui`
-v1.7.0 ships the nullable `buffer` this needs, and both apps are on it.
+Status: **released** (2026-09-07). Under native playback the renderer now lets
+its decode of every lane go the moment the core is playing, and fetches back
+whatever a later reason needs. What follows is the scope as it was measured
+and argued, then what the release actually turned out to be — including the
+double meaning the scoping pass had NOT found, which was the largest single
+piece of the work.
 
 ## The cost
 
@@ -11,17 +13,19 @@ Under native playback the desktop holds each song TWICE: the core's decoded
 lanes in the graph, and the renderer's `AudioBuffer` per lane. Measured by
 `player-session-e2e.cjs` on a quiet Mac, native against legacy:
 
-| phase | legacy | native | delta |
-|---|---|---|---|
-| idle in player | 624 MB | 704 MB | +80 |
-| playing | 672 MB | 805 MB | **+133** |
-| pitch change | 659 MB | 813 MB | +154 |
-| after leaving | 749 MB | 813 MB | +64 |
+| phase | legacy | native | delta | after the release |
+|---|---|---|---|---|
+| idle in player | 624 MB | 704 MB | +80 | +86 — unchanged, and should be: nothing has played yet |
+| playing | 672 MB | 805 MB | **+133** | **+23** |
+| pitch change | 659 MB | 813 MB | +154 | **+28** |
+| after leaving | 749 MB | 813 MB | +64 | **−60**, and green |
 
-Those are the four rules that harness reports red "by decision": legacy holds
-one copy of the song, native holds two. The delta is the SECOND copy — see the
-measured section for which of the two it is, and why that is not the one this
-work removes.
+Those were the four rules that harness reported red "by decision": legacy holds
+one copy of the song, native held two. The right-hand column is the same four
+rules after this work, on the harness's own 122 s song. `playing` and
+`pitch-change` are still nominally red at +23 and +28 MB, but that is the
+collector finishing rather than a copy: the probe below shows the bytes are
+gone about five seconds after Play, and the harness samples at 2.5.
 
 **And it is macOS-only value today.** `desktopNativePlaybackPreferred` returns
 the stored choice, else `platform === 'darwin'` — Windows is still Web Audio by
@@ -175,7 +179,124 @@ tests and typecheck were green throughout.
 The lesson for the remaining steps: for each holder, find what asks "is it
 there?" before deciding what to do about the samples themselves.
 
-## Shape, if it goes ahead
+## The release, as built
+
+One `AudioBuffer` per lane, held in the engine, nulled by
+`releaseLaneBuffers()` and fetched back by `ensureTrackBuffer(id)`. Around
+that:
+
+- **The release is gated on `nativePlayback.active`**, not on the preference
+  or on the load. Native decides at every Play whether it can take the song
+  (`tryStart` can decline the fifth Play of a song it took four times), and
+  the Web Audio fallback lives on the other side of that decision. So the
+  buffers go only once the core is demonstrably playing, in `performPlay`,
+  before the `emit()` — one notification, one consistent picture.
+- **A released lane is always recoverable**, and this is what makes the whole
+  thing safe rather than merely careful: native REFUSES a song any of whose
+  lanes lacks a readable path (`desktopNativePlaybackSupported` checks every
+  one). A lane with no path is therefore never released.
+- **Web Audio never starts on a partial mix.** `performPlay` awaits
+  `ensureLaneBuffers()` before the fallback and throws if any lane cannot be
+  restored. A decode costs a second or two of silence at Play; a mix quietly
+  missing a lane costs the singer the take.
+- **The engine still does not speak to `window.singz`.** It is handed a
+  reader (`setLaneReader`) and decodes with its own context, so the samples
+  come back at the output device's rate, exactly as at load.
+- **The engine is the only owner.** `UITrack` carries no samples; the load
+  paths hand the freshly decoded audio straight to `engine.load` in a map that
+  goes nowhere else, and `loadLanes` takes what it is given for new lanes and
+  leaves every existing lane to the engine (which may hold nothing, and reads
+  its file again when something needs it). Why this rather than a mirror is
+  the section above, and it is the difference between this working and not.
+
+## A reference in React state cannot be released, and a green rule said otherwise
+
+The largest finding, and it was invisible to every test. With the engine
+reporting `lanesResident === false` and the app's own lane state reporting no
+buffers, the renderer's footprint did not move: 810 MB before Play, 900 after,
+882 after a forced collection. The harness's new residency rule passed the
+whole time, because it asked the two places that had genuinely let go.
+
+A heap snapshot said where the other reference was:
+
+```
+AudioBuffer ← buffer in Object ← [5] in (object elements) ← elements in Array
+            ← tracks in system / Context / scope
+            ← context in closure ""  ← onToggleKaraoke in Object
+            ← pendingProps in FiberNode ← sibling ← return ← return
+```
+
+`toggleKaraoke` is a `useCallback` whose dependencies do not include `tracks`,
+so React keeps the closure from an earlier render — and a V8 closure keeps its
+whole enclosing CONTEXT, which holds that render's `tracks` array, which held
+the buffers. A fiber holds that closure as a prop. Nothing the release does can
+reach it, and no amount of `setTracks` can either: the surviving array is a
+previous one.
+
+This generalises past `tracks`: **any `AudioBuffer` reachable from a render
+scope is pinned by the first memoized callback that outlives it.** So the fix
+is not a better mirror. It is that React holds no samples at all: `UITrack`
+lost its `buffer` field, the engine is the single owner, `TrackStack` asks
+`engine.getTrackBuffer(id)` at render time, and a plain boolean —
+`lanesResident`, which no closure can pin into anything expensive — is what
+re-renders the stack when the engine's answer changes.
+
+`tests/e2e/mac/lane-residency-probe.cjs` is the instrument, and it opens by
+proving itself: it allocates 512 MB of `AudioBuffer`, drops it, collects, and
+refuses to judge the app unless that returns. (It does: −513 MB. Which is what
+made "the engine says it let go and nothing came back" a fact about the app
+rather than about `window.gc()`.)
+
+Measured after the ownership change, same song, same probe:
+
+| | renderer footprint |
+|---|---|
+| no song open | 55 MB |
+| holding the lanes | 810 MB |
+| native playing, 3 s after Play | 900 MB |
+| left alone, no forced collection | **290 MB after 5 s** |
+| after a forced collection | 135 MB |
+
+So the bytes come back on their own, within about five seconds of Play, without
+anything asking. The +90 MB at Play and the five-second delay are both the
+collector's schedule, not a leak — and the "no gc" row is why the harness's
+`playing` footprint rule, sampled 2.5 s after Play, sees the release only
+sometimes.
+
+## The four analysis refs were also FOUR SONG IDENTITIES
+
+The scoping pass had these as "a fallback, read live at Re-detect". They were
+also the thing seven `if` statements compared to decide whether the song had
+changed under a running analysis:
+
+```
+if (drumsBufRef.current !== drums) return // song changed mid-flight
+```
+
+That is an identity check that only means what it says while the ref outlives
+the whole pass. The moment a lane can be let go, a release mid-analysis reads
+as a song switch and the pass abandons its work — quietly, and only under
+native playback, and only on songs long enough for the release to land first.
+Every one of them is now `loadSeq`, which is what the other twenty long-running
+analyses in `App.tsx` already asked.
+
+With that, the refs answered nothing that something else did not answer
+better, and all five are gone: `drumsBufRef`, `bassBufRef`, `vocalsBufRef`,
+`instBufsRef` and `originalBufRef`. What replaced each meaning:
+
+| the ref used to mean | now |
+|---|---|
+| "this song has drums / harmonics / vocals" | `hasStem(id)` / `hasHarmonicStems()`, off `audibleIdsRef` |
+| "the song has not changed under me" | `loadSeq` |
+| "the analysis fallback samples" | `laneSamples(id)` — a re-decode, only on the path where a stem file cannot be read at its own rate |
+| "a split can hand over PCM" | a re-decode of `song.path`, inside the try, since `readAudio` throws on an unauthorized path |
+| "the vocals are long enough to judge a stored melody" | `vocalsSecondsRef` (landed earlier) |
+
+`melodyInput` can now answer null — neither the file nor a re-decode — and
+`prepMelody` stands its status back down to `none` when it does, so a later
+prep can try again rather than find `computing` forever.
+
+## Shape, as scoped
 
 - ~~Kit first: `Waveform` takes a nullable buffer and falls back to peaks.~~
   **Done** — `@singz/ui` v1.7.0, and both apps are on it.
@@ -184,17 +305,19 @@ there?" before deciding what to do about the samples themselves.
   start-offset clamp all read it rather than a buffer.
 - ~~The melody staleness gate stops reading its length off the buffer.~~
   **Done** — `vocalsSecondsRef`, see above for why not `tracks`.
-- **`prepMelody`'s `if (!buf) return`.** Once the buffer really is released,
-  a stale or non-fitting stored line falls past the adopt arm into that early
-  return and is neither adopted nor re-tracked — a silently empty pitch strip.
-  The core leg above it is file-driven and unaffected; it is the early return
-  that has to learn to fetch samples rather than give up.
-- Release covers the lane AND the analysis/original refs, or those refs are
-  converted to read from files at their own rate — the path `analysisStems`
-  already prefers.
-- Re-decode on demand from `sourcePath` when the view crosses the raw
-  threshold, the editor opens, a split needs PCM, or playback falls back to
-  Web Audio; drop again when the reason goes away.
+- ~~**`prepMelody`'s `if (!buf) return`.**~~ **Done** — it asks the inventory
+  (`hasStem('vocals')`) instead. "The vocals samples are not resident" is a
+  fact about memory; answering it there would have left the pitch strip empty
+  on every song the native graph was playing.
+- ~~Release covers the lane AND the analysis/original refs.~~ **Done** — the
+  refs are gone entirely; see above.
+- ~~Re-decode on demand.~~ **Done** for the editor (`ensureTrackBuffer`), the
+  split's PCM leg, the analyses' per-stem fallback and the Web Audio
+  fallback. **Not done, deliberately, for deep zoom**: past the 600-bucket
+  threshold `Waveform` draws from `peaks` instead of fetching a hundred
+  megabytes back for a picture. Peaks are what every wider view draws from
+  anyway, so this degrades detail rather than blanking, and a fallback to Web
+  Audio restores the sample-accurate draw as a side effect.
 
 Nothing here is new machinery — the phones do lazy decode plus explicit
 release for the same reason, with harsher consequences (a jetsam kill on the
@@ -217,7 +340,16 @@ fifth song).
 
 ## The measurement
 
-`player-session-e2e.cjs` on a quiet host, the four footprint rows — the reason
-this exists and the proof it worked. Run the melody/beat song-switch and
-bar-editing mac drivers too: the consumers most easily broken here are exactly
-what those cover.
+Two instruments, and the first one alone is not enough:
+
+- **`tests/e2e/mac/lane-residency-probe.cjs`** — does the memory come back?
+  One process, `footprint -p`, a forced collection, and a 512 MB control that
+  makes the probe prove itself before it judges anything. This is what caught
+  the pinned closure that every other check called green.
+- **`player-session-e2e.cjs`** on a quiet host — is native still no worse than
+  legacy for a singer? The four footprint rows and the residency rule beside
+  them. Its `playing` row samples 2.5 s after Play, which is inside the window
+  the collector has not finished, so read it together with the probe.
+
+Run the melody/beat song-switch and bar-editing mac drivers too: the consumers
+most easily broken here are exactly what those cover.

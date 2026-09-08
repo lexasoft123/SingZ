@@ -24,17 +24,19 @@ describe('desktop native playback preference', () => {
     expect(desktopNativePlaybackPreferred(platform)).toBe(false)
   })
 
-  it('defaults to native on macOS only', () => {
+  it('defaults to native on the two platforms whose session harness has run', () => {
     vi.stubGlobal('localStorage', storage(null))
     expect(desktopNativePlaybackPreferred('darwin')).toBe(true)
-    expect(desktopNativePlaybackPreferred('win32')).toBe(false)
+    expect(desktopNativePlaybackPreferred('win32')).toBe(true)
+    // Linux has never run the session harness; it stays on Web Audio.
     expect(desktopNativePlaybackPreferred('other')).toBe(false)
   })
 
   it('treats a missing localStorage as no stored choice', () => {
     vi.stubGlobal('localStorage', undefined)
     expect(desktopNativePlaybackPreferred('darwin')).toBe(true)
-    expect(desktopNativePlaybackPreferred('win32')).toBe(false)
+    expect(desktopNativePlaybackPreferred('win32')).toBe(true)
+    expect(desktopNativePlaybackPreferred('other')).toBe(false)
   })
 
   it('names the platform the way the backend selector does', () => {

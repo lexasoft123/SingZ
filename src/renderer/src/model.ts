@@ -6,8 +6,19 @@ export interface UITrack {
   label: string
   color: string
   peaks: Float32Array
-  /** Decoded audio + envelope normalization, for sample-accurate zoomed drawing. */
-  buffer: AudioBuffer
+  /*
+   * No `buffer` here, and that is load-bearing rather than tidy.
+   *
+   * The lane's samples live in ONE place, the engine, which is also what
+   * releases them to the native graph (docs/DESKTOP-LANE-RESIDENCY.md). A
+   * copy of the reference in React state cannot be released, because a
+   * `useCallback` from an earlier render keeps the whole render context alive
+   * — including the `tracks` array it closed over — for as long as a fiber
+   * holds that closure as a prop. A heap snapshot said so exactly: 744 MB
+   * still reachable through `onToggleKaraoke` → context → `tracks`, with the
+   * engine and the current state both empty. Whoever draws a waveform asks
+   * the engine for the samples at render time.
+   */
   /**
    * The lane's length in seconds, carried rather than read off `buffer`.
    *

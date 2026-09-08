@@ -20,7 +20,8 @@ import type { ParsedGraphDocument } from '../../../shared/graph-document'
 
 export interface EngineTrackInput {
   id: string
-  buffer: AudioBuffer
+  /** Null once the lane's samples have been let go — see `releaseLaneBuffers`. */
+  buffer: AudioBuffer | null
   /** Seconds. Carried, not read off `buffer` — see UITrack.duration. */
   duration: number
   /** Main-authorized source used by the portable native session. */
@@ -29,7 +30,7 @@ export interface EngineTrackInput {
 
 interface EngineTrack {
   id: string
-  buffer: AudioBuffer
+  buffer: AudioBuffer | null
   duration: number
   path?: string
   gain: GainNode
@@ -130,6 +131,8 @@ export class MultitrackEngine {
   private master = this.ctx.createGain()
   private tracks: EngineTrack[] = []
   private sources: AudioBufferSourceNode[] = []
+  /** Reads a lane's file back off disk — see `setLaneReader`. */
+  private readLaneFile: ((path: string) => Promise<ArrayBuffer>) | null = null
   private generation = 0
   private startedAt = 0
   private startOffset = 0
@@ -1291,10 +1294,81 @@ export class MultitrackEngine {
     return this.tracks.map(({ id, muted, solo, volume }) => ({ id, muted, solo, volume }))
   }
 
-  /** The decoded buffer of one lane (the lyrics editor reads the vocals'
-   *  envelope from it) — null while that lane isn't loaded. */
+  /** The decoded buffer of one lane, if its samples happen to be resident —
+   *  null while that lane isn't loaded AND null once it has been released to
+   *  the native graph. Callers that actually need the samples want
+   *  `ensureTrackBuffer`; this one is for the paths that can do without. */
   getTrackBuffer(id: string): AudioBuffer | null {
     return this.tracks.find((t) => t.id === id)?.buffer ?? null
+  }
+
+  /**
+   * How a released lane gets its samples back. Injected rather than reached
+   * for: the engine has never spoken to `window.singz`, and a decode helper
+   * is not the reason to start.
+   */
+  setLaneReader(read: ((path: string) => Promise<ArrayBuffer>) | null): void {
+    this.readLaneFile = read
+  }
+
+  /** True while every lane's samples are in the renderer — the state before
+   *  any release, and the state Web Audio needs to be in to play. */
+  get lanesResident(): boolean {
+    return this.tracks.every((t) => t.buffer !== null)
+  }
+
+  /**
+   * Let go of the renderer's copy of every lane.
+   *
+   * Under native playback the song is decoded TWICE: once in the core, which
+   * reads the stem FILES and does the playing, and once here, where Chromium
+   * decoded them for a Web Audio graph that is now silent. The second copy is
+   * ~130 MB per minute of a six-lane song (docs/DESKTOP-LANE-RESIDENCY.md).
+   *
+   * Only safe because native REFUSES a song any of whose lanes has no
+   * readable path (`desktopNativePlaybackSupported` checks every lane), so
+   * anything released here can always be decoded again from disk. A lane with
+   * no path is left alone.
+   */
+  releaseLaneBuffers(): void {
+    if (!this.nativePlayback?.active) return
+    for (const t of this.tracks) {
+      if (t.path) t.buffer = null
+    }
+  }
+
+  /** One lane's samples, decoding them again if they were let go. Null when
+   *  there is no such lane, or when its file can no longer be read. */
+  async ensureTrackBuffer(id: string): Promise<AudioBuffer | null> {
+    const t = this.tracks.find((track) => track.id === id)
+    if (!t) return null
+    if (t.buffer) return t.buffer
+    if (!t.path || !this.readLaneFile) return null
+    const path = t.path
+    try {
+      const decoded = await this.decode(await this.readLaneFile(path))
+      // The song may have changed while that ran; only fill the lane this
+      // decode was for, and only if it is still the one holding that path.
+      const live = this.tracks.find((track) => track.id === id)
+      if (live && live.path === path && !live.buffer) live.buffer = decoded
+      return decoded
+    } catch (error) {
+      console.error(`Could not re-read lane ${id} from ${path}:`, error)
+      return null
+    }
+  }
+
+  /**
+   * Every lane's samples, back in the renderer. Web Audio cannot start
+   * without them, so `performPlay` awaits this before falling back — a mix
+   * missing a lane is worse than a slow start, and silently missing one is
+   * worse than either. False when any lane could not be restored.
+   */
+  async ensureLaneBuffers(): Promise<boolean> {
+    if (this.lanesResident) return true
+    const ids = this.tracks.map((t) => t.id)
+    const restored = await Promise.all(ids.map((id) => this.ensureTrackBuffer(id)))
+    return restored.every((b) => b !== null)
   }
 
   load(
@@ -1362,6 +1436,11 @@ export class MultitrackEngine {
     if (requestGeneration !== this.generation) return
     const nativeRecoveryPending = this.nativePlayback?.recoveryPending === true
     if (this.nativePlayback?.active && !nativeRecoveryPending) {
+      // Anything fetched back since the last Play — the lyrics editor asks
+      // for the vocals, a re-split asks for the full mix — has served its
+      // purpose and is resident again. The core is still the one playing, so
+      // this Play is the moment to let it go a second time.
+      this.releaseLaneBuffers()
       // Play after the song ran out restarts it: the core's resume() only
       // continues a paused transport, and a seek while paused stays paused,
       // so seek first — to the region start when looping, else the top.
@@ -1432,6 +1511,10 @@ export class MultitrackEngine {
       this._playing = true
       this.clearRequestedPlaybackError()
       this.syncBoundWatcher()
+      // The core is playing from the stem files now, so the renderer's decode
+      // of the same six lanes is dead weight — let it go BEFORE the emit, so
+      // subscribers hear one notification and see one consistent picture.
+      this.releaseLaneBuffers()
       this.syncTrainWatcher()
       this.emit()
       return
@@ -1444,6 +1527,17 @@ export class MultitrackEngine {
         'The retained native provider cannot retry with the current runtime, toggle, or graph.'
       )
     }
+
+    // Native declined, so Web Audio is about to do the playing — and it can
+    // only do it from samples. A lane released to an earlier native
+    // generation is decoded again here, which costs a second or two of
+    // silence at Play; a mix quietly missing a lane costs the singer the
+    // take. If a lane cannot be restored at all, say so rather than start a
+    // partial mix.
+    if (!(await this.ensureLaneBuffers())) {
+      throw new Error('This song could not be re-read from disk, so playback has nothing to play.')
+    }
+    if (requestGeneration !== this.generation) return
 
     const gen = ++this.generation
     let when = this.ctx.currentTime + START_DELAY
@@ -1481,6 +1575,8 @@ export class MultitrackEngine {
     let longestIdx = 0
     this.tracks.forEach((t, i) => {
       const src = this.ctx.createBufferSource()
+      // `ensureLaneBuffers` above is what makes this non-null; a lane with no
+      // path and no samples has never been playable and still is not.
       src.buffer = t.buffer
       src.playbackRate.value = this.rate
       this.applyLoop(src)
