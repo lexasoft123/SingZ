@@ -4,6 +4,13 @@
 #include <chrono>
 #include <cmath>
 
+#if defined(__APPLE__)
+#include <pthread.h>
+#include <sys/qos.h>
+#elif defined(__ANDROID__) || defined(__linux__)
+#include <sys/resource.h>
+#endif
+
 namespace singz {
 namespace {
 
@@ -356,6 +363,23 @@ bool StreamingLaneGroup::serviceOnceForTesting() {
 // rounding rather than bit for bit, which is far below what a drawn bar can
 // show.
 void StreamingLaneGroup::waveformLoop() {
+  // Ask for a class that actually gets CPU.
+  //
+  // A std::thread inherits the quality-of-service of whatever created it, and
+  // prepare runs on a bridge queue that can be BACKGROUND — which iOS throttles
+  // so hard that the pass effectively stops while the app is busy. Measured on
+  // a phone: the FIRST lane took 18 s and the remaining five took two seconds
+  // between them, against ~2 s for the same six lanes decoded flat out. That
+  // shape is starvation, not throughput.
+  //
+  // UTILITY and not higher: this is work nobody is waiting on, and it must
+  // never compete with the render thread or the feeder that keeps it fed.
+#if defined(__APPLE__)
+  pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+#elif defined(__ANDROID__) || defined(__linux__)
+  // Nice, not real-time: the same intent, expressed the way Linux expresses it.
+  (void)::setpriority(PRIO_PROCESS, 0, 5);
+#endif
   constexpr size_t kBuckets = kStreamingWaveformBuckets;
   for (size_t index = 0; index < lanes_.size(); ++index) {
     if (!waveformRunning_.load(std::memory_order_acquire))
