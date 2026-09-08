@@ -169,7 +169,12 @@ function sampleCpu(rootPid, windowSec = 2) {
       const script = join(__dirname, '..', '..', 'shared', 'win-process-sample.ps1')
       const text = execFileSync(
         'powershell',
-        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-RootPid', String(rootPid), '-WindowSec', String(windowSec)],
+        // A longer window than the mac's: this app costs single-digit
+        // percent on Windows, where the mac reads tens, and Windows process
+        // CPU time advances in ~15 ms ticks — over 2 s that is a quarter of a
+        // point of resolution against a 2-point signal. The first honest run
+        // showed it: legacy's pitch-change phase read a flat 0%.
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-RootPid', String(rootPid), '-WindowSec', String(Math.max(windowSec, 5))],
         { encoding: 'utf8', windowsHide: true }
       )
       const v = JSON.parse(text.trim().split('\n').pop())

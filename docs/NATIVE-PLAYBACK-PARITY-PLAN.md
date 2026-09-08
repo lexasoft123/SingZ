@@ -163,6 +163,44 @@ engine-contract suite across both legacy engines and the facade, and the desktop
 playing-CPU residual — which has since been split per process, and is not what it was
 assumed to be (below).
 
+### Windows CPU, measured for the first time (2026-09-08) — native is CHEAPER in every phase
+
+Every CPU and memory row on Windows had printed `n/a` since the platform was added, so
+three field sessions had said nothing about what native costs there. With
+`tests/shared/win-process-sample.ps1` in place (see the commit for why Get-Counter cannot
+do this on a localized Windows, and why the first version read a flat 0%), the field
+laptop reads:
+
+| phase | legacy | native |
+|---|---|---|
+| idle in player | 2.2% | **0.9%** |
+| playing | 2.5% | **1.9%** |
+| pitch change | 4.7% | **2.2%** |
+| after leaving | 4.7% | **1.6%** |
+
+**The opposite of the mac**, where native costs 5.8 points more. Repeated at a 2 s window
+before the 5 s one: playing 6.9% legacy against 2.3% native, same direction, coarser
+numbers. So on the fleet that most needs the help, the default flipped to native is
+itself the CPU improvement — no further change required to get it.
+
+**Read the caveat with the numbers.** The harness runs the window HIDDEN
+(`SINGZ_E2E_HIDDEN`), and on Windows a hidden window composites little or nothing, so
+these are the app's non-paint cost. On the mac the same harness reads tens of percent
+because its hidden window still composites, and the GPU process is most of native's
+delta there. **What a Windows singer actually pays while WATCHING the player has still
+never been measured**, and given this machine's history — three Windows-only fixes in
+`styles.css` worth 15-20 points of an HD 4600 each — that is where any remaining win is.
+A visible-window probe through `schtasks /it` is the way to get it.
+
+**The bigger Windows number is not CPU at all.** Native's first open costs a flat
+**~1.9-2.0 s more than legacy's**, in every run and on the reopen after a restart too
+(native 4042 vs legacy 2052 to the player; 4691 vs 2810 reopening). That is the capture
+addon, which loads lazily on first use, so under native the prepare-ahead pays for it
+inside the song open. Warming it once after the catalog is ready would move that stall to
+a moment the singer is browsing rather than waiting, and would take ~272 ms off the mac's
+first Play as well. Not done here; it is a main-process change with its own trade-off
+(cold launch, or a stall while browsing) and wants its own decision.
+
 ### Where the desktop's playing-CPU delta actually sits (2026-09-08)
 
 The harness sums the whole process tree, so its "+2.4 points while playing" never said
