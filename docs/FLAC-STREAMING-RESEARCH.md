@@ -1,0 +1,141 @@
+# Playing FLAC without decoding the song first
+
+**Verdict: feasible, and the decode was never the expensive part.** Streaming six
+lanes in realtime costs **under 1% of a core on this Mac** and single-digit
+percent on the field phone. What costs 1.5 s of every phone open and ~141 MB per
+song is not the decoding — it is decoding *all of it at once, before the singer
+sees anything*.
+
+This is a research note, not a plan of record. Nothing here is implemented.
+
+## The question
+
+SingZ decodes every lane of a song to planar float PCM before playback starts.
+That is ~1.3 s of the ~1.5 s a phone spends preparing a graph, and it leaves
+~141 MB per song resident in the core — the twin of the renderer copy removed in
+`DESKTOP-LANE-RESIDENCY.md`, and the phone's jetsam risk. Asked: can we play the
+FLAC directly instead?
+
+Nothing plays FLAC. The audio callback needs PCM floats, so a decode happens
+either way. The real question is **when**, and **how much at once**.
+
+## Measured: the decode is cheap per second
+
+`ffmpeg -threads 1`, one stem, Deutschland's vocals (323.1 s, 44.1 kHz stereo),
+best of three warm runs on this Mac:
+
+| | throughput | six lanes in realtime |
+|---|---|---|
+| decode only | **982x realtime** | **0.6% of one core** |
+| decode + 44.1→48 kHz, soxr | 612x | 1.0% of one core |
+| decode + 44.1→48 kHz, swr | 970x | 0.6% of one core |
+
+(The first cold run read 416x; the rest is warm page cache. A streaming design
+reads from disk continuously, so the honest figure sits between the two — still
+two orders of magnitude above what playback needs.)
+
+On the POCO the whole-song decode of a 122 s six-lane project runs at roughly
+**560x realtime aggregate** (~1.3 s for 732 lane-seconds, across the pool).
+Realtime playback of six lanes needs 6x. That is about **1% of the decode
+capacity the phone already demonstrates during an open**.
+
+**So this measurement also kills a lead this note previously offered.** Matching
+the stems' 44.1 kHz to a 48 kHz device looked like a cheap win; measured, a
+high-quality resample costs ~60% on top of the decode and a cheap one costs
+nothing. It is not where the seconds are, and a streaming design would pay it
+per block rather than once — which at these throughputs is still nothing.
+
+## What FLAC gives us, and the one thing our files are missing
+
+- **Frames are independently decodable.** Each carries its own header and sample
+  number, so playback can start at any frame without touching what came before.
+  Unlike MP3 there is no bit reservoir and no encoder-delay ambiguity.
+- **Our stems use a 4096-sample block** (STREAMINFO says `block 4096-4096`),
+  which at 44.1 kHz is **92.9 ms** — the granularity a seek lands on before
+  decoding forward to the exact sample.
+- **Our stems carry NO SEEKTABLE.** Checked: STREAMINFO and a 40-byte
+  VORBIS_COMMENT, nothing else. libFLAC uses the seektable when present and
+  otherwise falls back to an interpolating binary search over the file —
+  more I/O and more frame headers parsed, per seek, which is the wrong cost to
+  pay on a scrub.
+
+That last one is cheap to fix and would be step zero of any streaming work: a
+seek point per second on a 323 s file is 323 x 18 bytes = **5.8 KB**. The
+encoder in `zcore/media/flac_io.h` does not write one today.
+
+## What the core has today
+
+- **Vendored libFLAC** (`third_party/native/flac`), the reference implementation
+  — which already has both the pull/push streaming API and
+  `FLAC__stream_decoder_seek_absolute`. The decoder we would need is in the tree.
+- **`DecodedBufferView`** (`zdsp/include/zdsp/decoded_buffer_source.h`): the
+  graph's source node is a view over immutable planar floats for the WHOLE song.
+  This is the thing that would change.
+- **`PositionedDecodedBufferSourceConfig`**: project time maps to source frame
+  as `sourceStartFrame + (projectTime - entryProjectTime)`. That mapping is
+  exactly what a streaming source would keep — it is the buffer behind it that
+  would become a window rather than the whole song.
+
+## The architecture, and what is genuinely hard here
+
+The shape is standard: a decoder thread per lane (or a pool) filling a lock-free
+ring buffer, the audio callback reading only from the ring and never decoding.
+Four things make SingZ harder than a media player, and none of them are FLAC:
+
+1. **Signalsmith Stretch wants lookahead.** The stretcher already consumes ahead
+   of the playhead; the ring has to stay ahead of *it*, not of the callback. The
+   buffer depth is set by the stretcher's window, not by taste.
+2. **Continuous scrubbing.** A singer drags the playhead; a media player seeks
+   occasionally. Every drag frame is a seek-and-refill across six lanes. This is
+   what the missing seektable would hurt most.
+3. **Count-in pre-roll runs at NEGATIVE project frames**, and A-B loops
+   re-anchor mid-playback. Both are already handled by the positioned-source
+   mapping, but both become refill events instead of pointer arithmetic.
+4. **A transpose or tempo change is a structural rebuild today**, and it is fast
+   only because the decoded lanes are PARKED and adopted (measured: 88-229 ms on
+   the POCO against ~1500 ms for a fresh decode). With streaming there is nothing
+   to park — the rebuild becomes cheap for the same reason the open does, but
+   the whole parking/adoption mechanism in `native_playback_session.cpp` becomes
+   dead and would need removing carefully rather than left to rot.
+
+## Prior art
+
+- **REAPER decodes compressed sources on the fly and writes no intermediate
+  file** — its forum's answer to editing MP3s without converting to WAV is that
+  it converts to floating point audio on the fly, without creating a new file.
+  The only thing written beside the media is `.reapeaks`, for drawing. An
+  existence proof at track counts far past six.
+- **Ableton Live transcodes**, and documents it: a compressed sample is decoded
+  to a temporary uncompressed file in a "Decoding Cache" with a maximum size, a
+  minimum-free-space rule and a Cleanup button.
+
+So the field is split, and streaming compressed multitrack audio is ordinary.
+"FLAC is too awkward to stream" is not a defensible reason.
+
+## If it goes ahead, in this order
+
+1. **Write a SEEKTABLE when encoding stems** (one point per second, 5.8 KB).
+   Independent of everything else, cheap, and required by any streaming design.
+   Old projects need a backfill pass or a tolerated slow path.
+2. **Prepare behind the open** (mobile), as the desktop already does. Not
+   streaming at all — it moves the 1.5 s out of the singer's way and buys time
+   to do the rest properly.
+3. **A streaming source node beside `DecodedBufferSource`**, chosen per lane, so
+   the two can be compared on the same song with the existing harnesses. The
+   sanitizer gates and `player-session` are the judges.
+4. **Retire parking/adoption** once streaming is the only path.
+
+## What would say it is working
+
+`mobile/tests/open-steps-android.cjs` and `tests/e2e/mac/open-steps-e2e.cjs`
+print the open step by step; the graph-build step should collapse. `player-
+session.cjs` already measures seek, loop, pitch-change and memory on both
+platforms — a streaming build that keeps those green while the open gets shorter
+and the retained bytes fall is the whole claim.
+
+Sources: [REAPER — editing MP3s without converting to
+WAV](https://forum.cockos.com/archive/index.php/t-29463.html) ·
+[Ableton — Managing Files and
+Sets](https://www.ableton.com/en/manual/managing-files-and-sets/) ·
+[libFLAC stream decoder
+API](https://xiph.org/flac/api/group__flac__stream__decoder.html)

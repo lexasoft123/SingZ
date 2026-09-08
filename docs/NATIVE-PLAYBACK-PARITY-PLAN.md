@@ -255,12 +255,15 @@ Four routes, cheapest first, and they are not exclusive:
    AND the residency. Largest change, and the one with real dropout risk on a
    phone under a time-stretcher.
 
-**A cheaper thing to check first, independent of all four:** the stems are
-44.1 kHz and `requiredSampleRate` is the OUTPUT DEVICE's rate, so a phone or
-Mac running at 48 kHz resamples all six lanes on every open, after decoding
-them. Nobody has measured that share. If it is large, matching the rates is a
-smaller fix than any of the above — and note that a streaming design would pay
-it per block instead of once, so it is worth knowing either way.
+**Researched since, in `docs/FLAC-STREAMING-RESEARCH.md`**, with the throughput
+numbers that decide it: decoding is **982x realtime on one thread**, so six
+lanes in realtime is **0.6% of a core**. The decode was never expensive per
+second — only in doing the whole song at once. That note also kills the lead
+this paragraph used to offer: matching the stems' 44.1 kHz to a 48 kHz device
+looked cheap and is worth nothing, because a resample costs ~60% on top of the
+decode at worst and nothing with a cheap resampler. And it finds the one thing
+that IS missing: our stems carry no SEEKTABLE, which is 5.8 KB per song and
+what a scrub would want most.
 
 ### What the graph build spends its seconds on (2026-09-08)
 
