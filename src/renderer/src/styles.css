@@ -2958,23 +2958,31 @@ body.win .transport {
   background: color-mix(in srgb, var(--panel) 72%, var(--bg));
 }
 
-/* The count-in pulse repaints a full-width glowing text row at 60 Hz, and it
-   was held steady on Windows alone (~20pp on the HD 4600 during lyric gaps).
-   It costs the same kind of money everywhere: measured on the mac, this ONE
-   animation is 8-10 points of the app's ~25% while a song plays — a third of
-   the total and half the GPU — and `document.getAnimations()` says it is the
-   only animation running at all during playback.
-   Every way of keeping it and making it cheap was tried and none worked:
-   `will-change: opacity` -1.4, `transform: translateZ(0)` +0.7,
-   `contain: layout paint` -0.5, dropping the text-shadow -0.2, dropping the
-   transport's backdrop blur -1.5, against the -9.9 of simply not running it.
-   So it is held steady everywhere now. The seconds still tick down and the
-   dots still appear; what goes is the fade, and it is one rule to restore. */
+/* STEPPED, not smooth, and this is the most expensive line in the player.
+   `document.getAnimations()` says this is the ONLY animation running while a
+   song plays, and at 60 fps it costs 9.6 points of the app's ~28% on the mac —
+   a third of the total and half the GPU. Windows had already frozen it outright
+   (~20pp of an HD 4600 during lyric gaps); macOS never did.
+
+   It cannot be made free. It is not composited and will not be: `will-change:
+   opacity` -1.4, `translateZ(0)` +0.7, promoting the LINE rather than the
+   pseudo +9.4 — none of them move it. Nor is it the area or the glow, which
+   is the surprise: `width: max-content` (a panel-wide box down to a few
+   characters) +9.5, `contain: layout paint` -0.5, no text-shadow -0.2, no
+   transport backdrop blur -1.5. What it costs is a fixed price per REPAINT.
+
+   So buy fewer repaints. `steps(n)` applies per keyframe INTERVAL, so the
+   repaint rate is 2n/duration — 16 a second here against 60, measured at
+   +2.6 instead of +9.6, a 73% cut. Smoothness is gradations per CYCLE and
+   cost is repaints per SECOND, which are separable: `3s steps(24)` measured
+   the same +2.6 with 48 gradations. The second stays because the pulse is
+   the seconds ticking down, and 16 levels of a slow opacity fade is not a
+   flicker. */
 .lyr-line.count-1::before,
 .lyr-line.count-2::before,
 .lyr-line.count-3::before,
 .lyr-line.count-sec::before {
-  animation: none;
+  animation: pulse 1s steps(8) infinite;
 }
 
 /* Infinite animations behind an open modal each force a full-window
