@@ -252,6 +252,19 @@ export default function CatalogScreen({
   const [root, setRoot] = useState<RootInfo | null>(null)
   const [projects, setProjects] = useState<ProjectEntry[] | null>(lastShelf?.items ?? null)
   const [loading, setLoading] = useState<Loading | null>(null)
+  /**
+   * Every step of the open that is in flight, with the millisecond it landed.
+   *
+   * The bar is the only thing that says where a song open spends its time, and
+   * reading it off a screen is guesswork — a step that takes four seconds and
+   * one that takes forty milliseconds look the same going past. `TEST.loadSteps()`
+   * hands the sequence back so a driver can print it, which is how the native
+   * path was found to reach 98% before the work had started.
+   */
+  const stepLog = useRef<{ t0: number; rows: { ms: number; frac: number; msg: string }[] }>({
+    t0: 0,
+    rows: []
+  })
   const [error, setError] = useState<string | null>(null)
   /** What the app was doing when it died last time, if it did.
    *
@@ -692,6 +705,7 @@ export default function CatalogScreen({
     async (entry: ProjectEntry) => {
       const tok = ++token.current
       setError(null)
+      stepLog.current = { t0: Date.now(), rows: [] }
       setLoading({ dir: entry.dir, msg: 'Opening…', frac: 0 })
       try {
         const pickedRoot =
@@ -716,7 +730,9 @@ export default function CatalogScreen({
           engine,
           sampleRate,
           onStep: (msg, frac) => {
-            if (tok === token.current) setLoading({ dir: entry.dir, msg, frac })
+            if (tok !== token.current) return
+            stepLog.current.rows.push({ ms: Date.now() - stepLog.current.t0, frac, msg })
+            setLoading({ dir: entry.dir, msg, frac })
           },
           crumb: setCrumb,
           isCurrent: () => tok === token.current
@@ -727,6 +743,7 @@ export default function CatalogScreen({
           return
         }
         await setCrumb('')
+        stepLog.current.rows.push({ ms: Date.now() - stepLog.current.t0, frac: 1, msg: 'open' })
         setLoading(null)
         onLoaded({ ...loaded, library: mode, metronomeRef })
         // A phone-library song missing its grid (or carrying an older
@@ -1362,6 +1379,7 @@ export default function CatalogScreen({
       return entry ? openEntry(entry) : Promise.reject(new Error(`no project ${dir}`))
     }
     TEST.cancelLoad = cancelLoad
+    TEST.loadSteps = () => stepLog.current.rows.slice()
     TEST.openDrive = openDrive
     TEST.selectMode = selectMode
     TEST.libMode = mode
