@@ -201,6 +201,47 @@ a moment the singer is browsing rather than waiting, and would take ~272 ms off 
 first Play as well. Not done here; it is a main-process change with its own trade-off
 (cold launch, or a stall while browsing) and wants its own decision.
 
+### The mac's playing CPU falls 40% on one CSS rule (2026-09-08)
+
+Researched because the Windows finding might transfer. It did not — and looking
+for it found something bigger that had been sitting in plain sight.
+
+`--p` costs the mac nothing: suppressing the write is −0.4 to −1.3 against a
+noise floor of 0.2-1.0, where on the field laptop it was −42.4. That answer is
+worth having on its own: **do not spend the kit redesign expecting a mac win.**
+
+What the mac's playback DOES cost is one animation. Pausing the transport takes
+the app from ~26% to 6.4%, and `document.getAnimations()` says exactly ONE
+animation runs while a song plays: `pulse` on the lyrics panel's long-pause
+countdown, `.lyr-line.count-sec::before`. Freezing it is −9.9. Every way of
+keeping it and making it cheap was measured and none worked:
+
+| variant | vs baseline |
+|---|---|
+| `animation: none` (what shipped) | **−9.9** |
+| `will-change: opacity` | −1.4 |
+| `transform: translateZ(0)` + will-change | +0.7 |
+| `contain: layout paint` on the row | −0.5 |
+| drop the `text-shadow` | −0.2 |
+| drop the transport's backdrop blur | −1.5 |
+
+`styles.css` already froze that pulse — **on Windows only**, for exactly this
+reason, measured at ~20pp of an HD 4600. macOS never got it. It does now.
+
+Verified by REVERSAL, which is the only honest way to sign off a change measured
+this way: with the rule shipped, putting the animation back costs **+10.3** and
+reproduces the old number.
+
+| | playing CPU | gpu | renderer |
+|---|---|---|---|
+| before | 25.9% | 13.9 | 10.4 |
+| **after** | **15.6%** | **6.5** | **7.6** |
+
+Playback now costs 9.2 points over paused where it cost ~22. Windows is
+unchanged: it had the rule already. The transport's backdrop blur, chased as
+the likely mechanism, turns out to be worth 0.9-1.7 and is not worth a visual
+trade.
+
 ### What a Windows singer actually pays, and the one thing it is (2026-09-08)
 
 The hidden-window numbers above are the app's NON-PAINT cost. With the window

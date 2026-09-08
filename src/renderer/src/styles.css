@@ -2958,13 +2958,22 @@ body.win .transport {
   background: color-mix(in srgb, var(--panel) 72%, var(--bg));
 }
 
-/* The count-in pulse repaints a full-width glowing text row at 60 Hz
-   (~20pp on the HD 4600 during lyric gaps) — hold it steady here; the
-   seconds still tick down and the dots still appear. */
-body.win .lyr-line.count-1::before,
-body.win .lyr-line.count-2::before,
-body.win .lyr-line.count-3::before,
-body.win .lyr-line.count-sec::before {
+/* The count-in pulse repaints a full-width glowing text row at 60 Hz, and it
+   was held steady on Windows alone (~20pp on the HD 4600 during lyric gaps).
+   It costs the same kind of money everywhere: measured on the mac, this ONE
+   animation is 8-10 points of the app's ~25% while a song plays — a third of
+   the total and half the GPU — and `document.getAnimations()` says it is the
+   only animation running at all during playback.
+   Every way of keeping it and making it cheap was tried and none worked:
+   `will-change: opacity` -1.4, `transform: translateZ(0)` +0.7,
+   `contain: layout paint` -0.5, dropping the text-shadow -0.2, dropping the
+   transport's backdrop blur -1.5, against the -9.9 of simply not running it.
+   So it is held steady everywhere now. The seconds still tick down and the
+   dots still appear; what goes is the fade, and it is one rule to restore. */
+.lyr-line.count-1::before,
+.lyr-line.count-2::before,
+.lyr-line.count-3::before,
+.lyr-line.count-sec::before {
   animation: none;
 }
 
