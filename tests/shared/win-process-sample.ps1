@@ -21,9 +21,18 @@ $ErrorActionPreference = 'Stop'
 # The tree, by parent id. Win32_Process is a class name, not a localized
 # string, so this survives the locale too.
 $all = @{}
-foreach ($p in Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId) {
+$role = @{}
+foreach ($p in Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, CommandLine) {
   if (-not $all.ContainsKey([int]$p.ParentProcessId)) { $all[[int]$p.ParentProcessId] = New-Object System.Collections.ArrayList }
   [void]$all[[int]$p.ParentProcessId].Add([int]$p.ProcessId)
+  # Which Chromium process this is, so a total can be broken down. Electron
+  # spells it on the command line; main is the one with no --type at all.
+  $cl = [string]$p.CommandLine
+  $role[[int]$p.ProcessId] = if ($cl -match '--type=renderer') { 'renderer' }
+    elseif ($cl -match '--type=gpu-process') { 'gpu' }
+    elseif ($cl -match '--type=utility') { 'utility' }
+    elseif ($cl -match '--type=') { 'other' }
+    else { 'main' }
 }
 $tree = New-Object System.Collections.ArrayList
 [void]$tree.Add($RootPid)
@@ -65,19 +74,30 @@ $elapsed = $t0.Elapsed.TotalSeconds
 # window is not counted (its share is small and its baseline unknown); one that
 # ended is simply absent instead of poisoning the total.
 $deltaCpu = 0.0
+$byRole = @{}
 foreach ($id in $b.cpu.Keys) {
   if ($a.cpu.ContainsKey($id)) {
     $d = $b.cpu[$id] - $a.cpu[$id]
-    if ($d -gt 0) { $deltaCpu += $d }
+    if ($d -gt 0) {
+      $deltaCpu += $d
+      $r = if ($role.ContainsKey([int]$id)) { $role[[int]$id] } else { 'other' }
+      if (-not $byRole.ContainsKey($r)) { $byRole[$r] = 0.0 }
+      $byRole[$r] += $d
+    }
   }
 }
 $pct = if ($elapsed -gt 0) { ($deltaCpu / $elapsed) * 100 } else { 0 }
+$roles = @{}
+foreach ($r in $byRole.Keys) {
+  $roles[$r] = if ($elapsed -gt 0) { [math]::Round(($byRole[$r] / $elapsed) * 100, 1) } else { 0 }
+}
 
 $out = @{
   cpuPct = [math]::Round($pct, 1)
   memMb  = [math]::Round($b.mem / 1MB, 0)
   procs  = $tree.Count
   paired = $(($b.cpu.Keys | Where-Object { $a.cpu.ContainsKey($_) }).Count)
+  roles  = $roles
   window = [math]::Round($elapsed, 2)
 }
 $out | ConvertTo-Json -Compress

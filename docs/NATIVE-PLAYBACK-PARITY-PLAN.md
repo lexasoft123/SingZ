@@ -201,6 +201,61 @@ a moment the singer is browsing rather than waiting, and would take ~272 ms off 
 first Play as well. Not done here; it is a main-process change with its own trade-off
 (cold launch, or a stall while browsing) and wants its own decision.
 
+### What a Windows singer actually pays, and the one thing it is (2026-09-08)
+
+The hidden-window numbers above are the app's NON-PAINT cost. With the window
+VISIBLE on the field laptop (`tests/e2e/win-visible-cpu.cjs`, which refuses to
+report a run under 30 fps or a `visibilityState` that is not 'visible'):
+
+| | legacy | native |
+|---|---|---|
+| idle in player | 3.1% | 3.7% |
+| **playing** | **48.6-68.3%** | **57.6-62.2%** |
+
+Playing costs **twenty to thirty times** what the hidden window suggested, and
+it splits roughly renderer 27 / GPU 25. **This machine's absolute numbers drift
+enormously** — the same build read 68.3% and 48.6% on two consecutive runs, and
+one baseline's spread across nine interleaved rounds was 51 points — so nothing
+here may be read from a single run, and the native-vs-legacy delta at this
+magnitude is NOT established (it came out −10.7 one run and +13.6 the next).
+
+**All of it is one line.** Interleaved A/B inside a single process, nine rounds,
+with a no-op CSS rule as a negative control to fix the noise floor:
+
+| variant | playing CPU | vs baseline |
+|---|---|---|
+| baseline | 60.0% | — |
+| control (a no-op rule) | 65.8% | +5.8 ← **the noise floor** |
+| lanes hidden | 52.2% | −7.8 |
+| **`--p` writes suppressed** | **17.6%** | **−42.4** |
+
+Suppressing the playhead's `--p` write takes playing CPU from 60% to 17.6%,
+GPU 29.8 → 7.5 and renderer 29.7 → 10.2. Seven times the noise floor, and the
+largest single number anywhere in this document. It is **not the painting**:
+hiding the waveform lanes entirely, hiding the playhead, and removing the
+bright layer were each inside the noise. `--p` is written on the stack ROOT,
+and a custom property on a subtree root invalidates style for everything under
+it — six lanes and all their children — whether or not any of it is visible.
+Eight to ten times a second at the whole-song view, and far more when zoomed.
+
+**The obvious fix is measured and it is WORSE.** Writing `--p` on the seven
+elements that read it instead of on the root: **+15.5 points** against
+baseline. Rejected on the measurement rather than shipped on the reasoning.
+
+What remains, and it is a design change rather than a tweak: `--p` has to reach
+the root only because the kit's `.wave-bright` clips itself with it in every
+lane (`clip-path: inset(0 calc(100% - var(--p)) 0 0)`). Decouple the played/
+unplayed reveal from that variable — a composited transform on a wrapper, say —
+and `--p` would need to reach one element, where a per-element write is cheap.
+That is a `@singz/ui` change with a visual contract attached, and it wants its
+own pass.
+
+**Two traps for whoever takes it**, both of which caught this one first:
+`filter: drop-shadow` on the wave layers looked like the culprit and its
+apparent 8-point win was exactly the noise floor; and three-round medians on
+this machine mean nothing. Interleave inside one process, and always carry a
+control that should change nothing.
+
 ### Where the desktop's playing-CPU delta actually sits (2026-09-08)
 
 The harness sums the whole process tree, so its "+2.4 points while playing" never said
