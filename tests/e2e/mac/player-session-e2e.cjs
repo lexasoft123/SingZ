@@ -155,10 +155,30 @@ function processTree(rootPid) {
 }
 function sampleCpu(rootPid, windowSec = 2) {
   const { load1 } = hostLoad()
-  // Windows has no `top` and no load average (os.loadavg() is zeros there):
-  // the CPU, footprint and host-quiet rows are not measured rather than
-  // measured wrongly, and print as n/a.
-  if (WIN) return { cpuPct: null, footprintMb: null, load1: null, quiet: true }
+  /* Windows has no `top`, and Get-Counter is not the substitute: its counter
+     PATHS are localized, so '\Process(*)\% Processor Time' returns nothing on
+     a non-English Windows and a busy machine reads as idle. Process CPU TIME
+     is a number of seconds under a property name that is the same in every
+     locale — `win-process-sample.ps1` samples it twice and divides.
+
+     The host-quiet row stays n/a: os.loadavg() is zeros on Windows and there
+     is no load average to compare against, so the rule is not measured rather
+     than measured wrongly. */
+  if (WIN) {
+    try {
+      const script = join(__dirname, '..', '..', 'shared', 'win-process-sample.ps1')
+      const text = execFileSync(
+        'powershell',
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-RootPid', String(rootPid), '-WindowSec', String(windowSec)],
+        { encoding: 'utf8', windowsHide: true }
+      )
+      const v = JSON.parse(text.trim().split('\n').pop())
+      return { cpuPct: v.cpuPct, footprintMb: v.memMb, load1: null, quiet: true }
+    } catch (error) {
+      console.error(`  CPU sample failed on Windows: ${String(error).split('\n')[0]}`)
+      return { cpuPct: null, footprintMb: null, load1: null, quiet: true }
+    }
+  }
   const pids = new Set(processTree(rootPid))
   const text = execFileSync('top', ['-l', '2', '-s', String(windowSec), '-stats', 'pid,cpu,mem'], { encoding: 'utf8' })
   const second = text.split(/\nProcesses:/).pop()
@@ -501,7 +521,11 @@ function judge(legacy, native) {
     const tick = 0.5 // top's %CPU over a 2 s window resolves to about half a point per process
     const cpuBudget = Math.round((l.cpuPct + 2 * tick) * 10) / 10
     rows.push({ rule: `CPU (${phase}): native ≤ legacy + 2 ticks`, ok: n.cpuPct <= cpuBudget, detail: `native ${n.cpuPct}% vs legacy ${l.cpuPct}% (budget ${cpuBudget}%)${l.quiet && n.quiet ? '' : ' — host BUSY'}` })
-    rows.push({ rule: `footprint (${phase}): native ≤ legacy`, ok: n.footprintMb <= l.footprintMb, detail: `native ${n.footprintMb} MB vs legacy ${l.footprintMb} MB` })
+    // macOS reports the physical footprint; Windows the summed working set.
+    // Named for what it is, because the two are not the same measurement and a
+    // row that pretends otherwise invites a cross-platform comparison.
+    const memLabel = WIN ? 'working set' : 'footprint'
+    rows.push({ rule: `${memLabel} (${phase}): native ≤ legacy`, ok: n.footprintMb <= l.footprintMb, detail: `native ${n.footprintMb} MB vs legacy ${l.footprintMb} MB` })
   }
   // Web Audio plays FROM the renderer's buffers, so legacy must still hold
   // them; the core plays from the stem files, so native must not.
