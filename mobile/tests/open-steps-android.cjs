@@ -32,27 +32,31 @@ const log = (l) => console.log(l)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 /** One open's steps, as a table with per-step deltas. */
-function table(title, rows) {
-  log(`\n${title}`)
-  if (!rows.length) return log('  (no steps reported)')
-  log('  ' + 'at'.padStart(7) + '  ' + 'took'.padStart(7) + '  ' + 'bar'.padStart(5) + '  step')
-  log('  ' + '-'.repeat(7) + '  ' + '-'.repeat(7) + '  ' + '-'.repeat(5) + '  ' + '-'.repeat(40))
-  let prev = 0
+function table(title, rows, marks) {
+  console.log(`\n${title}`)
+  if (!rows.length) return console.log('  (no steps reported)')
+  // Collapse the creep ticks, and credit each step with the time IT ran —
+  // the span until the next step starts. Crediting a row with the time since
+  // the previous one names the wrong step, which is how "Starting playback"
+  // was first reported as the longest part of a desktop open when the 420 ms
+  // belonged to drawing the waveforms before it.
+  const groups = []
   for (const r of rows) {
-    const took = r.ms - prev
-    prev = r.ms
-    log(
-      '  ' + `${r.ms} ms`.padStart(7) + '  ' + `${took} ms`.padStart(7) + '  ' +
-        `${Math.round(r.frac * 100)}%`.padStart(5) + '  ' + r.msg
-    )
+    const last = groups[groups.length - 1]
+    if (last && last.msg === r.msg) { last.frac = r.frac; continue }
+    groups.push({ msg: r.msg, ms: r.ms, frac: r.frac })
   }
   const total = rows[rows.length - 1].ms
-  const slowest = rows.reduce((a, r, i) => {
-    const took = r.ms - (i ? rows[i - 1].ms : 0)
-    return took > a.took ? { took, msg: r.msg } : a
-  }, { took: 0, msg: '' })
-  log(`  total ${total} ms · longest single step "${slowest.msg}" ${slowest.took} ms ` +
-    `(${Math.round((slowest.took / Math.max(1, total)) * 100)}% of the open)`)
+  console.log('  ' + 'starts'.padStart(8) + '  ' + 'runs for'.padStart(9) + '  ' + 'bar'.padStart(5) + '  step')
+  console.log('  ' + '-'.repeat(8) + '  ' + '-'.repeat(9) + '  ' + '-'.repeat(5) + '  ' + '-'.repeat(34))
+  const withRun = groups.map((g, i) => ({ ...g, ran: (i + 1 < groups.length ? groups[i + 1].ms : total) - g.ms }))
+  for (const g of withRun) {
+    console.log('  ' + `${g.ms} ms`.padStart(8) + '  ' + `${g.ran} ms`.padStart(9) + '  ' +
+      `${Math.round(g.frac * 100)}%`.padStart(5) + '  ' + g.msg)
+  }
+  const slow = withRun.reduce((a, g) => (g.ran > a.ran ? g : a), { ran: -1, msg: '' })
+  console.log(`  total ${total} ms · longest "${slow.msg}" ${slow.ran} ms (${Math.round((slow.ran / Math.max(1, total)) * 100)}%)`)
+  if (marks) console.log(`  ${marks}`)
 }
 
 ;(async () => {
@@ -86,8 +90,11 @@ function table(title, rows) {
 
   log(`\nbackend: ${BACKEND} · ${opened[0].marks.kind}`)
   for (const o of opened) {
-    table(`${o.label} — "${o.song.name}" (${o.song.seconds.toFixed(0)} s)`, o.rows)
-    log(`  the screen's own marks: player ${o.marks.player} ms · ready ${o.marks.ready} ms`)
+    table(
+      `${o.label} — "${o.song.name}" (${o.song.seconds.toFixed(0)} s)`,
+      o.rows,
+      `the screen's own marks: player ${o.marks.player} ms · ready ${o.marks.ready} ms`
+    )
   }
   await dev.detach()
 })().catch((e) => {

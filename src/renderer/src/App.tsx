@@ -552,6 +552,34 @@ function publishBeatDbg(
  * themselves are not kept: they go to the engine, which is their one owner
  * and the only thing that can release them (see UITrack).
  */
+/**
+ * Keep a bar moving through a step that cannot report its own progress.
+ *
+ * Six stems decode in parallel, so there is no honest fraction between "asked"
+ * and "all six are here" — counting completions reads as a stall then a leap,
+ * because they land together. This eases toward `to` and never arrives: an
+ * asymptote is the right shape for "still working, cannot say how much
+ * longer", where a bar that fills is a claim to be finished.
+ *
+ * Ten ticks a second, stopped in a `finally` so a failed or superseded load
+ * takes it down too.
+ */
+function creepUntil(
+  mark: (msg: string, frac: number) => void,
+  label: string,
+  from: number,
+  to: number,
+  halfLifeMs: number
+): { stop: () => void } {
+  const startedAt = performance.now()
+  mark(label, from)
+  const timer = setInterval(() => {
+    const t = performance.now() - startedAt
+    mark(label, from + (to - from) * (1 - Math.exp(-t / halfLifeMs)))
+  }, 100)
+  return { stop: () => clearInterval(timer) }
+}
+
 function makeTrack(
   id: string,
   buffer: AudioBuffer,
@@ -642,6 +670,21 @@ export default function App(): React.JSX.Element {
     setTrainingSaveError
   ))
   const [phase, setPhase] = useState<Phase>('empty')
+  /** What the open is doing and how far along, or null when nothing is
+   *  opening. The desktop had `phase: 'loading'` and nothing else — one
+   *  spinner for a wait that is seconds long on a field laptop. */
+  const [loadProgress, setLoadProgress] = useState<{ msg: string; frac: number } | null>(null)
+  /**
+   * Every step of the open with the millisecond it landed, for
+   * `__test.loadSteps()`. The phones grew this first: a step that takes four
+   * seconds and one that takes forty milliseconds look identical going past,
+   * and the fractions of a progress bar are only honest if somebody measured
+   * which is which.
+   */
+  const loadStepsRef = useRef<{ t0: number; rows: { ms: number; frac: number; msg: string }[] }>({
+    t0: 0,
+    rows: []
+  })
   const [song, setSong] = useState<LoadedSongIdentity | null>(null)
   const [tracks, setTracks] = useState<UITrack[]>([])
   const [split, setSplit] = useState(false)
@@ -1501,6 +1544,20 @@ export default function App(): React.JSX.Element {
       setDirty(false)
       setSaveState('idle')
       setPhase('loading')
+      loadStepsRef.current = { t0: performance.now(), rows: [] }
+      /** Report one step of this open — recorded for `__test.loadSteps()` and
+       *  shown on the drop screen. Silent once another song has been asked
+       *  for, like every other write in this function. */
+      const mark = (msg: string, frac: number): void => {
+        if (seq !== loadSeq.current) return
+        loadStepsRef.current.rows.push({
+          ms: Math.round(performance.now() - loadStepsRef.current.t0),
+          frac,
+          msg
+        })
+        setLoadProgress({ msg, frac })
+      }
+      mark('Opening…', 0)
       setSong(createLoadedSongIdentity(reg.path,reg.name,`song-load-${seq}`))
       setIsProject(Boolean(reg.project))
       setInLibrary(reg.project?.inLibrary ?? true)
@@ -1559,10 +1616,24 @@ export default function App(): React.JSX.Element {
           const proj = reg.project
           const stems = proj.stems as Record<string, string>
           const rawOrder = orderedStems(stems)
-          const decoded = await Promise.all(
-            rawOrder.map(async (s) => engine.decode(await window.singz.readAudio(stems[s])))
-          )
+          /* All six at once, deliberately — the phones fetch theirs one after
+             another and pay six times over for it. Which is why counting
+             completions here would be theatre: they finish within a few
+             milliseconds of each other after one long wait, so the bar would
+             sit still for a second and then leap. The decode is one opaque
+             step and it is reported as one, easing toward its share and never
+             reaching it until the stems are really in. */
+          const reading = creepUntil(mark, 'Reading the stems…', 0.05, 0.58, 1400)
+          let decoded: AudioBuffer[]
+          try {
+            decoded = await Promise.all(
+              rawOrder.map(async (st) => engine.decode(await window.singz.readAudio(stems[st])))
+            )
+          } finally {
+            reading.stop()
+          }
           if (seq !== loadSeq.current) return
+          mark('Drawing the waveforms…', 0.62)
           const { order, buffers } = audibleStems(rawOrder, decoded)
       const hidden = rawOrder.filter((st) => !order.includes(st))
       if (hidden.length > 0) {
@@ -1581,6 +1652,7 @@ export default function App(): React.JSX.Element {
             ...(await decodeCustom(proj.settings.custom, fresh))
           ]
           if (seq !== loadSeq.current) return
+          mark('Starting playback…', 0.9)
           engine.load(
             lanes.map((t) => ({ id: t.id, buffer: fresh.get(t.id) ?? null, duration: t.duration, path: t.sourcePath })),
             { graphDocument }
@@ -1652,7 +1724,9 @@ export default function App(): React.JSX.Element {
           if (proj.settings.loop === true) setLoopOn(true)
           selMemReadyRef.current = true
           setSaveState('saved')
+          mark('open', 1)
           setPhase('ready')
+          setLoadProgress(null)
           void prepLyricsRef.current?.()
           if ((proj.formatVersion ?? 1) < 2) {
             // Old WAV project: repack stems as FLAC in the background (the
@@ -1716,13 +1790,16 @@ export default function App(): React.JSX.Element {
           /* corrupt entry — ignore */
         }
         selMemReadyRef.current = true
+        mark('open', 1)
         setPhase('ready')
+        setLoadProgress(null)
         // Look for lyrics right away (cache/online only — never triggers the
         // model download without consent), so karaoke opens with answers ready.
         void prepLyricsRef.current?.()
       } catch (err) {
         console.error('song load failed:', err) // E2E drivers read this; the toast hides the cause
         if (seq !== loadSeq.current) return
+        setLoadProgress(null)
         setPhase('empty')
         setSong(null)
         setTracks([])
@@ -3286,7 +3363,8 @@ export default function App(): React.JSX.Element {
         setTranspose(st)
         void engine.setTranspose(st)
       },
-      log: () => window.singz.getLog()
+      log: () => window.singz.getLog(),
+      loadSteps: () => loadStepsRef.current.rows.slice()
     }
   }, [engine, playing, phase, showCatalog, tracks, metCfg, training, trainCfg, transpose, loadPath])
 
@@ -3650,6 +3728,7 @@ export default function App(): React.JSX.Element {
         <DropScreen
           gdriveIcon={gdriveIcon}
           loading={phase === 'loading'}
+          progress={loadProgress}
           songName={song?.name}
           openName={showCatalog ? song?.name : undefined}
           onBrowse={openPicker}
