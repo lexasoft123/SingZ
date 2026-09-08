@@ -17,7 +17,102 @@ import type {
   NativePlaybackStartOutcome,
   PlaybackCountInStatus
 } from '../projects'
+import { log } from '../log'
 import { rebuildNativePlaybackCues } from './native'
+
+/**
+ * What the singer just did, and how long it took them to get it.
+ *
+ * The graph lines under `dsp` already say a generation was prepared and a seam
+ * landed; what they do not say is which TOUCH caused it. A log showing
+ * "preparing graph · generation 4 · ×1.05" asks the reader to know that ×1.05
+ * is the pitch control, and a metronome toggle is only visible as the words
+ * "cues click off" inside a much longer line. Both were invisible to the
+ * person who pressed them.
+ *
+ * Timed from the touch to the point the change is actually in effect, which is
+ * the number a singer cares about and no other line reports: the graph lines
+ * time their own stage, so a slow pitch change could be a slow prepare, a slow
+ * seam, or a wait behind another action, and none of them would say so.
+ *
+ * Continuous controls (a volume drag, the master fader) are deliberately NOT
+ * logged: one line per animation frame would bury everything else in a log
+ * that keeps 400 lines.
+ */
+/** "pitch +1", "tempo x1.05", or both — and what it moved FROM, since a log
+ *  read after the fact cannot otherwise tell a nudge from a jump. */
+export function describePitchTempo(
+  semitones: number,
+  rate: number,
+  fromSemitones: number,
+  fromRate: number
+): string {
+  const parts: string[] = []
+  if (semitones !== fromSemitones) {
+    const signed = (value: number): string => (value > 0 ? `+${value}` : `${value}`)
+    parts.push(`pitch ${signed(semitones)}${
+      fromSemitones === 0 && semitones === 0 ? '' : ` (was ${signed(fromSemitones)})`
+    }`)
+  }
+  if (rate !== fromRate)
+    parts.push(`tempo x${rate.toFixed(2)} (was x${fromRate.toFixed(2)})`)
+  return parts.length === 0 ? 'pitch and tempo unchanged' : parts.join(' · ')
+}
+
+/** A metronome toggle reads as "cues click off" inside a 2000-character graph
+ *  line today, which is not something anyone finds. This is the short form:
+ *  what the singer turned on or off, and the count-in that came with it. */
+export function describeCueChange(
+  before: MetronomeConfig | null,
+  after: MetronomeConfig | null
+): string {
+  if (after === null) return 'metronome off'
+  const parts: string[] = []
+  if (before === null || before.click !== after.click)
+    parts.push(`metronome ${after.click ? 'on' : 'off'}`)
+  if (before === null || before.accent !== after.accent)
+    parts.push(`accent ${after.accent ? 'on' : 'off'}`)
+  if (before === null || before.countInBars !== after.countInBars)
+    parts.push(`count-in ${after.countInBars} ${after.countInBars === 1 ? 'bar' : 'bars'}`)
+  if (before === null || before.volume !== after.volume)
+    parts.push(`click volume ${Math.round(after.volume * 100)}%`)
+  // A beat-grid change with the metronome untouched still rebuilds the cue
+  // graph and still costs the singer the wait, so it says so rather than
+  // printing nothing.
+  return parts.length === 0 ? 'beat grid rebuilt' : parts.join(' · ')
+}
+
+/** Which lanes drop out and on what schedule — the two things that decide
+ *  whether training sounded the way the singer meant it to. */
+export function describeTraining(spec: TrainingSpec | null): string {
+  if (spec === null) return 'training off'
+  const lanes = spec.stems.length === 0 ? 'no lanes' : spec.stems.join('+')
+  return spec.mode === 'period'
+    ? `training on · ${lanes} · every ${spec.periodSec}s`
+    : `training on · ${lanes} · ${spec.windows.length} ${
+        spec.windows.length === 1 ? 'window' : 'windows'
+      }`
+}
+
+/** m:ss — a loop at "1:02-1:18" is readable; one at "62.4-78.9" is not. */
+export function fmtClock(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds))
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
+}
+
+function logAction(what: string, startedAt: number): void {
+  log('action', `${what} · ${fmtDuration(Date.now() - startedAt)}`)
+}
+
+function logActionFailed(what: string, startedAt: number): void {
+  log('action', `${what} · did not take · ${fmtDuration(Date.now() - startedAt)}`, 'warn')
+}
+
+/** Clamped, because a clock that steps backwards must not print nonsense. */
+export function fmtDuration(ms: number): string {
+  const value = Math.max(0, ms)
+  return value < 1000 ? `${Math.round(value)} ms` : `${(value / 1000).toFixed(1)} s`
+}
 
 export type PlaybackOperation =
   | 'pause'
@@ -583,10 +678,18 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
     loop: boolean
   ): Promise<void> {
     if (!this.capabilities.loopRegion) return this.unsupported('loop-region')
+    const startedAt = Date.now()
     if (region === null) {
-      return this.serialize(() => this.handle.clearLoop())
+      return this.serialize(() => this.handle.clearLoop()).then(
+        () => logAction('A-B cleared', startedAt),
+        error => {
+          logActionFailed('A-B cleared', startedAt)
+          throw error
+        }
+      )
     }
     if (!loop) return this.unsupported('loop-region')
+    const what = `A-B ${fmtClock(region.start)}-${fmtClock(region.end)}`
     return this.serialize(async () => {
       // Match MultitrackEngine: an armed loop owns [A,B). Relocate an
       // out-of-range render head to A first, then enable the loop in the same
@@ -596,7 +699,13 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
       if (at < region.start || at >= region.end)
         await this.handle.seek(region.start)
       await this.handle.setLoop(region.start, region.end)
-    })
+    }).then(
+      () => logAction(what, startedAt),
+      error => {
+        logActionFailed(what, startedAt)
+        throw error
+      }
+    )
   }
 
   setBeats(info: BeatInfo | null): void {
@@ -652,6 +761,11 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
   setPitchTempo(semitones: number, rate: number): void {
     if (!this.capabilities.pitchTempo) return this.unsupported('pitch-tempo')
     if (!Number.isFinite(semitones) || !Number.isFinite(rate)) return
+    // From the TOUCH, not from the point the queue reaches it: a pitch change
+    // behind a metronome rebuild waits seconds before its own work starts, and
+    // that wait is the singer's wait.
+    const startedAt = Date.now()
+    const what = describePitchTempo(semitones, rate, this.transposeSemitones, this.playbackRate)
     this.structuralChangesPending += 1
     this.refreshCapabilities()
     this.emit()
@@ -659,7 +773,16 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
       await this.handle.setPitchTempo(semitones, rate)
       this.transposeSemitones = semitones
       this.playbackRate = rate
-    }).then(() => this.finishStructuralChange(), () => this.finishStructuralChange())
+    }).then(
+      () => {
+        logAction(what, startedAt)
+        this.finishStructuralChange()
+      },
+      () => {
+        logActionFailed(what, startedAt)
+        this.finishStructuralChange()
+      }
+    )
   }
 
   setTraining(spec: TrainingSpec | null): void {
@@ -673,14 +796,18 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
             stems: [...spec.stems]
           }
     if (sameTrainingSpec(this.desiredTrainingSpec, next)) return
+    const startedAt = Date.now()
+    const what = describeTraining(next)
     const request = ++this.trainingRequest
     this.desiredTrainingSpec = next
     this.serialize(() => this.handle.setTraining(next)).then(() => {
       this.trainingSpec = cloneTrainingSpec(next)
+      logAction(what, startedAt)
       this.emit()
     }).catch(() => {
       if (request === this.trainingRequest)
         this.desiredTrainingSpec = cloneTrainingSpec(this.trainingSpec)
+      logActionFailed(what, startedAt)
       this.emit()
     })
   }
@@ -717,6 +844,11 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
   private reconcileCueState(): void {
     if (this.cueReconcileRunning) return
     this.cueReconcileRunning = true
+    // The touch, before the reconcile loop: the loop coalesces several
+    // toggles into one rebuild, and what the singer waited for is the time
+    // from the tap they made to the graph that finally carried it.
+    const startedAt = Date.now()
+    const before = this.metronomeConfig
     // A cue rebuild is a full generation swap — measured at 4.2 s of silence
     // on a phone — and the core refuses a seek throughout it. Without this
     // the scrub rail stayed live and every drag the singer made during those
@@ -757,6 +889,7 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
         }
         this.beatInfo = requested.beat
         this.metronomeConfig = requested.metronome
+        logAction(describeCueChange(before, requested.metronome), startedAt)
         this.emit()
         if (version === this.cueIntentVersion) return
       }
