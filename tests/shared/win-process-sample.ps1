@@ -32,14 +32,24 @@ for ($i = 0; $i -lt $tree.Count; $i++) {
   if ($kids) { foreach ($k in $kids) { [void]$tree.Add($k) } }
 }
 
+# PER PROCESS, and that is the whole correctness of this script. `.CPU` is
+# total processor SECONDS since the process started, so the interval cost is a
+# difference — and differencing the SUM is wrong: an Electron app retires
+# utility processes while it runs, and one that exits inside the window takes
+# its whole lifetime out of the second sum. That made the summed delta
+# NEGATIVE, and clamping a negative to zero is how this reported 0% CPU for a
+# song that was playing, in all eight rows, on the first run.
+#
+# Snapshot the value into a double as it is read: `.CPU` is a script property
+# on a LIVE Process object and re-reads the counter every time it is touched,
+# so holding the object and subtracting later gives exactly zero.
 function Sample($pids) {
-  $cpu = 0.0
+  $cpu = @{}
   $mem = 0.0
   foreach ($id in $pids) {
     $proc = Get-Process -Id $id -ErrorAction SilentlyContinue
     if ($null -eq $proc) { continue }
-    # .CPU is total processor SECONDS across all threads of the process.
-    if ($null -ne $proc.CPU) { $cpu += [double]$proc.CPU }
+    if ($null -ne $proc.CPU) { $cpu[[int]$id] = [double]$proc.CPU }
     $mem += [double]$proc.WorkingSet64
   }
   return @{ cpu = $cpu; mem = $mem }
@@ -51,15 +61,23 @@ Start-Sleep -Milliseconds ([int]($WindowSec * 1000))
 $b = Sample $tree
 $elapsed = $t0.Elapsed.TotalSeconds
 
-# A process that ENDED inside the window takes its total with it, so the delta
-# can come out negative; report 0 rather than a negative CPU.
-$deltaCpu = [math]::Max(0, $b.cpu - $a.cpu)
+# Only processes alive in BOTH samples contribute. One that started inside the
+# window is not counted (its share is small and its baseline unknown); one that
+# ended is simply absent instead of poisoning the total.
+$deltaCpu = 0.0
+foreach ($id in $b.cpu.Keys) {
+  if ($a.cpu.ContainsKey($id)) {
+    $d = $b.cpu[$id] - $a.cpu[$id]
+    if ($d -gt 0) { $deltaCpu += $d }
+  }
+}
 $pct = if ($elapsed -gt 0) { ($deltaCpu / $elapsed) * 100 } else { 0 }
 
 $out = @{
   cpuPct = [math]::Round($pct, 1)
   memMb  = [math]::Round($b.mem / 1MB, 0)
   procs  = $tree.Count
+  paired = $(($b.cpu.Keys | Where-Object { $a.cpu.ContainsKey($_) }).Count)
   window = [math]::Round($elapsed, 2)
 }
 $out | ConvertTo-Json -Compress
