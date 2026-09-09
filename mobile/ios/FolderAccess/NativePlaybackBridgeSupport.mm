@@ -1082,6 +1082,10 @@ void SingzNativePlaybackLanePeaks(NSNumber *generationValue,
           @"generation" : @(peaks.generation),
           @"bucketCount" : @(peaks.bucketCount),
           @"lanes" : lanes,
+          // Empty once every lane has an envelope; while any is missing it
+          // says what the background pass is doing, which is the difference
+          // between a fix and another guess.
+          @"waveformDiagnostics" : fromStd(peaks.waveformDiagnostics),
           @"message" : fromStd(peaks.message),
         });
       });

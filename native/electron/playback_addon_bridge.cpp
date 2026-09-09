@@ -1725,6 +1725,11 @@ napi_value playbackLanePeaks(napi_env env, napi_callback_info info) {
     napi_value empty{};
     napi_create_array_with_length(env, 0, &empty);
     setValue(env, result, "lanes", empty);
+    // The refusal path emits the SAME keys in the same order as the success
+    // path. It did not, and the manifest caught it: a caller that reads a key
+    // present on one path and absent on the other gets undefined exactly when
+    // something has already gone wrong.
+    setValue(env, result, "waveformDiagnostics", makeString(env, ""));
     setValue(env, result, "message",
              makeString(env, "Playback generation is invalid"));
     return result;
@@ -1754,6 +1759,11 @@ napi_value playbackLanePeaks(napi_env env, napi_callback_info info) {
     napi_set_element(env, lanes, index, lane);
   }
   setValue(env, result, "lanes", lanes);
+  // Same key as both phones. The manifest exists so a key added to one bridge
+  // and forgotten on another is a red test rather than a platform that quietly
+  // degrades — and it caught exactly that here.
+  setValue(env, result, "waveformDiagnostics",
+           makeString(env, peaks.waveformDiagnostics));
   setValue(env, result, "message", makeString(env, peaks.message));
   return result;
 }

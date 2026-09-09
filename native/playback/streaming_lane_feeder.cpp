@@ -75,6 +75,7 @@ DecodedAudioStatus StreamingLaneGroup::addLane(OwnedFileDescriptor descriptor,
   auto lane = std::make_unique<Lane>();
   lane->source = std::move(source);
   lane->analysis = std::move(analysisSource);
+  lane->stats.waveformSource = lane->analysis != nullptr;
   lane->capacityFrames = capacity;
   lane->planes.assign(info.channels, std::vector<float>(capacity, 0.0F));
   lane->pointers.resize(info.channels);
@@ -367,6 +368,7 @@ void StreamingLaneGroup::waveformLoop() {
     if (lane.waveformReady.load(std::memory_order_acquire))
       continue;
     StreamingAudioSource* source = lane.analysis.get();
+    lane.stats.waveformStarted = true;
     if (source == nullptr)
       continue;
     const uint64_t frames = source->info().frameCount;
@@ -394,6 +396,7 @@ void StreamingLaneGroup::waveformLoop() {
       const DecodedAudioStatus status =
           source->read(pointers.data(), block, &got);
       if (status != DecodedAudioStatus::Ok) {
+        lane.stats.waveformError = static_cast<uint32_t>(status);
         ok = false;
         break;
       }
@@ -427,6 +430,7 @@ void StreamingLaneGroup::waveformLoop() {
         }
       }
       at += got;
+      lane.stats.waveformFrames = at;
     }
     if (!ok || !waveformRunning_.load(std::memory_order_acquire))
       continue;
@@ -443,6 +447,7 @@ void StreamingLaneGroup::waveformLoop() {
       lane.waveformBuckets = std::move(buckets);
     }
     lane.waveformReady.store(true, std::memory_order_release);
+    lane.stats.waveformDone = true;
   }
 }
 

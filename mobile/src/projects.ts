@@ -331,6 +331,8 @@ export interface NativePlaybackHandle {
       readonly peaksValid: boolean
       readonly peaks: readonly number[]
     }[]
+    /** What the background pass is doing while a lane is still missing one. */
+    readonly waveformDiagnostics?: string
   } | null>
   start(): Promise<NativePlaybackStartOutcome>
   pause(): Promise<void>

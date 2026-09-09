@@ -180,6 +180,7 @@ type NativeLaneEnvelope = {
     readonly peaksValid: boolean
     readonly peaks: readonly number[]
   }[]
+  readonly waveformDiagnostics?: string
 }
 
 /** A streamed lane's envelope arrives from a background pass over the whole
@@ -193,6 +194,9 @@ const WAVEFORM_ATTEMPTS = 30
  *  the cost of asking is one cheap bridge call. */
 const WAVEFORM_SLOW_RETRY_MS = 2000
 const WAVEFORM_SLOW_ATTEMPTS = 30
+/** ~6 s in: long enough that a healthy pass has finished, early enough to be
+ *  in a log a singer sends before closing the song. */
+const WAVEFORM_DIAGNOSTIC_ATTEMPT = 15
 
 /** lane id -> the md5 of the stem it is drawn from. The doc keys stemHashes by
  *  FILE name (`vocals.flac`) and the envelope keys lanes by id (`vocals`), so
@@ -852,6 +856,13 @@ export default function PlayerScreen({
             // deadline that gave up at twelve seconds reported "1/6" forever;
             // on a release phone the whole set lands in about that many
             // hundred milliseconds and the first draw is already complete.
+            if (
+              attempts === WAVEFORM_DIAGNOSTIC_ATTEMPT &&
+              ready === 0 &&
+              envelope?.waveformDiagnostics
+            ) {
+              log('waveform', `still measuring · ${envelope.waveformDiagnostics}`, 'warn')
+            }
             if (envelope != null && ready > drawn) {
               drawn = ready
               log(

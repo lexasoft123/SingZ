@@ -631,6 +631,9 @@ export interface NativePlaybackLanePeaks {
 export interface NativePlaybackLanePeaksResult {
   readonly bucketCount: number;
   readonly lanes: readonly NativePlaybackLanePeaks[];
+  /** What the background waveform pass is doing while any lane is still
+   *  missing one; empty when they all have one. Older builds do not send it. */
+  readonly waveformDiagnostics?: string;
 }
 
 export interface NativePlaybackPreparePlayback {
@@ -994,7 +997,11 @@ export function parseNativePlaybackLanePeaks(
     }
     lanes.push({ id: lane.id, peaksValid: lane.peaksValid === true, peaks });
   }
-  return { bucketCount, lanes };
+  const diagnostics =
+    typeof root.waveformDiagnostics === 'string' && root.waveformDiagnostics.length > 0
+      ? root.waveformDiagnostics
+      : undefined;
+  return { bucketCount, lanes, waveformDiagnostics: diagnostics };
 }
 
 const emptyNativeSession = (): NativePlaybackSessionStatus => ({

@@ -65,6 +65,16 @@ struct StreamingLaneStats {
   uint64_t starvedBlocks{0};
   uint64_t waitedForGuard{0};
   bool ended{false};
+  // What the waveform pass is doing for this lane. It works on a Mac, on the
+  // POCO and on the simulator, and produced nothing at all on an iPhone — and
+  // "nothing" is the one answer that says nothing about why. These four say
+  // whether the pass ever reached the lane, whether it had a handle to read,
+  // how far it got and what stopped it.
+  bool waveformSource{false};   // a second handle was opened for it
+  bool waveformStarted{false};  // the pass reached this lane
+  bool waveformDone{false};     // and finished it
+  uint64_t waveformFrames{0};   // frames read so far
+  uint32_t waveformError{0};    // the DecodedAudioStatus that stopped it, if any
 };
 
 class StreamingLaneGroup {

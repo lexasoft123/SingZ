@@ -395,6 +395,13 @@ struct NativePlaybackLanePeaksEntry {
 // twice. Read this once when a generation is prepared and cache it under
 // that generation.
 struct NativePlaybackLanePeaksResult {
+  /** What the background waveform pass is doing, when it has not finished.
+   *
+   *  Empty once every lane has one. It exists because a phone reported no
+   *  waveform at all while a Mac, a POCO and the simulator all produced one —
+   *  and "none" is the single answer that cannot be acted on. A compact line
+   *  the app can log beats another build spent guessing. */
+  std::string waveformDiagnostics;
   bool ok{false};
   NativePlaybackError error{NativePlaybackError::InvalidGeneration};
   uint64_t generation{0};

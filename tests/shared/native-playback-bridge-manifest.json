@@ -645,6 +645,7 @@
       "generation",
       "bucketCount",
       "lanes",
+      "waveformDiagnostics",
       "message"
     ],
     "lane": [

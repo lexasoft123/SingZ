@@ -8276,6 +8276,28 @@ NativePlaybackSession::lanePeaks(uint64_t generation) const {
     }
     result.lanes.push_back({lane.id, valid, peaks});
   }
+  // While anything is still missing, say what the pass is doing rather than
+  // leaving the caller to infer it from silence.
+  if (streaming != nullptr) {
+    size_t missing = 0;
+    std::string detail;
+    for (size_t index = 0; index < result.lanes.size(); ++index) {
+      if (result.lanes[index].valid) continue;
+      ++missing;
+      const StreamingLaneStats stats = streaming->stats(index);
+      if (!detail.empty()) detail += ", ";
+      detail += result.lanes[index].id;
+      detail += stats.waveformSource ? ":handle" : ":NO-HANDLE";
+      if (stats.waveformStarted) detail += ",started";
+      if (stats.waveformDone) detail += ",done";
+      detail += ",frames=" + std::to_string(stats.waveformFrames);
+      if (stats.waveformError != 0)
+        detail += ",err=" + std::to_string(stats.waveformError);
+    }
+    if (missing != 0)
+      result.waveformDiagnostics =
+          std::to_string(missing) + " lane(s) unmeasured · " + detail;
+  }
   result.ok = true;
   result.error = NativePlaybackError::None;
   return result;

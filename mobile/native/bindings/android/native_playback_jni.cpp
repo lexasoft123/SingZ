@@ -1585,7 +1585,11 @@ static jstring nativePlaybackLanePeaks(JNIEnv *env, jobject,
     output.push_back(']');
     output.push_back('}');
   }
-  output += "],\"message\":";
+  // After lanes and before message, matching iOS, the desktop addon and the
+  // manifest: the ORDER is part of the contract these three are held to.
+  output += "],\"waveformDiagnostics\":";
+  appendQuoted(output, peaks.waveformDiagnostics);
+  output += ",\"message\":";
   appendQuoted(output, peaks.message);
   output.push_back('}');
   return javaJson(env, output);
