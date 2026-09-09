@@ -25,6 +25,7 @@
 #include <zdsp/streaming_window_source.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
@@ -75,6 +76,30 @@ struct StreamingLaneStats {
   bool waveformDone{false};     // and finished it
   uint64_t waveformFrames{0};   // frames read so far
   uint32_t waveformError{0};    // the DecodedAudioStatus that stopped it, if any
+  // The two numbers that tell the two remaining stories apart. A pass that is
+  // slow because the FILE is slow spends its whole elapsed time inside read();
+  // one that is slow because the THREAD is not being scheduled spends almost
+  // none of it there and the rest waiting to run. Six real lanes measure in
+  // 1.9 s on a Mac and had not finished in 390 s on an iPhone, so one of those
+  // two is happening and no amount of reading the source says which.
+  uint64_t waveformReadMs{0};     // wall time inside read(), this lane
+  uint64_t waveformElapsedMs{0};  // wall time since this lane's pass began
+  // What the pass thread actually got, rather than what it asked for.
+  int32_t waveformQos{-1};        // qos_class_self(), Apple only
+  int32_t waveformIoPolicy{-1};   // getiopolicy_np(DISK, THREAD), Apple only
+  // Is the pass thread still there, and how long since it started?
+  //
+  // The lane clocks above only advance while the loop is going round, so a
+  // thread that exited and a thread wedged inside one read() freeze them the
+  // same way — and a phone showed 155 ms of reading, 177 ms elapsed, and then
+  // nothing for another 66 s. These two separate the cases: alive with
+  // sinceStart climbing and frames stuck means wedged in a read, and gone
+  // without `done` means the loop returned early.
+  bool waveformAlive{false};       // the pass thread is inside waveformLoop()
+  // Wall time since the pass began, measured when stats() is CALLED rather
+  // than inside the loop — so it keeps climbing after the loop stops, which
+  // is the whole point of it.
+  uint64_t waveformSinceStartMs{0};
 };
 
 class StreamingLaneGroup {
@@ -207,6 +232,10 @@ class StreamingLaneGroup {
   std::thread thread_;
   std::thread waveformThread_;
   std::atomic<bool> waveformRunning_{false};
+  // Written once when the pass starts and read from stats(), so elapsed can be
+  // reported from OUTSIDE the loop that stopped advancing.
+  std::atomic<bool> waveformAlive_{false};
+  std::chrono::steady_clock::time_point waveformStartedAt_{};
   mutable std::mutex mutex_;
   std::condition_variable wake_;
   std::atomic<bool> running_{false};

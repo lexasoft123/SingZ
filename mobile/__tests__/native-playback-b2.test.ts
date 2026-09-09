@@ -3608,7 +3608,7 @@ describe('a slow open explains itself', () => {
 });
 
 describe("the seek bar's waveform", () => {
-  it('is read once per prepared generation and cached under it', async () => {
+  it('is read once per prepared generation and cached under it, ONCE COMPLETE', async () => {
     const h = harness();
     const project = await h.load();
     const handle = project.nativePlayback!;
@@ -3618,12 +3618,64 @@ describe("the seek bar's waveform", () => {
     const first = await handle.lanePeaks();
     const second = await handle.lanePeaks();
 
-    // Immutable while a generation is prepared, so a second read is free.
-    // This is why it is off the status poll at all.
+    // A FINISHED envelope is immutable while a generation is prepared, so a
+    // second read is free. This is why it is off the status poll at all.
     expect(h.calls).toEqual([`native.lanePeaks:${generation}`]);
     expect(first).toEqual(second);
     expect(first?.bucketCount).toBe(2);
     expect(first?.lanes.map(lane => lane.id)).toEqual(['vocals', 'drums']);
+  });
+
+  /*
+   * The waveform is measured by a BACKGROUND PASS that fills the lanes in one
+   * at a time, so the first answer of a generation is usually incomplete —
+   * and caching that one meant the bridge was never asked again. On a real
+   * iPhone, with a five-minute six-lane song, the seek bar polled a frozen
+   * "0 of 6 measured" for seventy-two seconds while the pass had in fact
+   * finished in four; on the 40.8 s sample every simulator run had a complete
+   * answer waiting before the first ask, which is how it survived four builds
+   * and every green suite. Partial answers are returned and NOT kept.
+   */
+  it('keeps asking while any lane is still unmeasured', async () => {
+    const h = harness();
+    const project = await h.load();
+    const handle = project.nativePlayback!;
+    const generation = handle.snapshot().generation;
+
+    let measured = 0;
+    h.native.lanePeaks = jest.fn(async (next: number) => {
+      h.calls.push(`native.lanePeaks:${next}`);
+      measured += 1;
+      return {
+        ok: true,
+        error: 'none',
+        generation: next,
+        bucketCount: 2,
+        lanes: [
+          { id: 'vocals', peaksValid: measured >= 2, peaks: [0.5, 1] },
+          { id: 'drums', peaksValid: measured >= 3, peaks: [1, 0.25] },
+        ],
+        message: '',
+      };
+    });
+    h.calls.length = 0;
+
+    const none = await handle.lanePeaks();
+    const half = await handle.lanePeaks();
+    const all = await handle.lanePeaks();
+    const cached = await handle.lanePeaks();
+
+    // Three real calls for the three states, and NOTHING for the fourth ask:
+    // the complete answer is the one that gets kept.
+    expect(h.calls).toEqual([
+      `native.lanePeaks:${generation}`,
+      `native.lanePeaks:${generation}`,
+      `native.lanePeaks:${generation}`,
+    ]);
+    expect(none?.lanes.filter(lane => lane.peaksValid)).toHaveLength(0);
+    expect(half?.lanes.filter(lane => lane.peaksValid)).toHaveLength(1);
+    expect(all?.lanes.filter(lane => lane.peaksValid)).toHaveLength(2);
+    expect(cached).toEqual(all);
   });
 
   it('draws nothing rather than throwing when the envelope is malformed', () => {

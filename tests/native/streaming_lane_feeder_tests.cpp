@@ -200,6 +200,18 @@ int main(int argc, char** argv) {
     const double ms = std::chrono::duration<double, std::milli>(
                           std::chrono::steady_clock::now() - started)
                           .count();
+    // The same per-lane line the phone logs, so a host number and a device
+    // number can be read side by side. read vs elapsed is the point of it:
+    // equal means the file is the cost, far apart means the thread is not
+    // being scheduled.
+    for (size_t lane = 0; lane < group.laneCount(); lane++) {
+      const singz::StreamingLaneStats stats = group.stats(lane);
+      std::printf("  lane %zu . frames=%llu . read=%llums . elapsed=%llums . qos=%d . iopol=%d\n",
+                  lane, static_cast<unsigned long long>(stats.waveformFrames),
+                  static_cast<unsigned long long>(stats.waveformReadMs),
+                  static_cast<unsigned long long>(stats.waveformElapsedMs),
+                  stats.waveformQos, stats.waveformIoPolicy);
+    }
     std::printf("waveform: %zu lanes · %.1f s each · feeder %s · measured in %.0f ms (%.0fx realtime)\n",
                 group.laneCount(), seconds, withFeeder ? "RUNNING" : "idle", ms,
                 ms > 0 ? seconds * group.laneCount() * 1000.0 / ms : 0.0);

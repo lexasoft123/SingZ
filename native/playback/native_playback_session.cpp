@@ -8291,6 +8291,16 @@ NativePlaybackSession::lanePeaks(uint64_t generation) const {
       if (stats.waveformStarted) detail += ",started";
       if (stats.waveformDone) detail += ",done";
       detail += ",frames=" + std::to_string(stats.waveformFrames);
+      // read vs elapsed is the whole diagnosis: equal means the FILE is slow,
+      // and read far below elapsed means the THREAD is not being run.
+      detail += ",read=" + std::to_string(stats.waveformReadMs) + "ms";
+      detail += ",elapsed=" + std::to_string(stats.waveformElapsedMs) + "ms";
+      detail += ",since=" + std::to_string(stats.waveformSinceStartMs) + "ms";
+      detail += stats.waveformAlive ? ",ALIVE" : ",THREAD-GONE";
+      if (stats.waveformQos >= 0)
+        detail += ",qos=" + std::to_string(stats.waveformQos);
+      if (stats.waveformIoPolicy >= 0)
+        detail += ",iopol=" + std::to_string(stats.waveformIoPolicy);
       if (stats.waveformError != 0)
         detail += ",err=" + std::to_string(stats.waveformError);
     }

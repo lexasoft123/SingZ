@@ -5017,9 +5017,24 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   /**
    * The prepared lanes' amplitude envelope, for the seek bar.
    *
-   * Immutable for the generation, so it is read once and cached under it; a
-   * rebuild simply asks again. Failure is a null, never a throw — a song
-   * whose waveform cannot be drawn is still a song that plays.
+   * Cached under the generation ONLY ONCE EVERY LANE HAS ONE. Failure is a
+   * null, never a throw — a song whose waveform cannot be drawn is still a
+   * song that plays.
+   *
+   * The cache used to keep whatever came back first, because the envelope was
+   * computed during prepare and so really was immutable for the generation.
+   * It stopped being immutable when the measurement moved to a background
+   * pass that fills the lanes in one at a time: the first ask lands 400 ms
+   * after the screen mounts, with nothing measured yet, and caching THAT
+   * answer meant the bridge was never called again — the seek bar polled a
+   * frozen "0 of 6" for seventy seconds and the progressive redraw above it
+   * could never see an improvement, on a song whose pass had in fact finished
+   * seconds earlier.
+   *
+   * It hid for four builds because the sample song is 40.8 s: six lanes of it
+   * measure in about a quarter of a second, so every simulator run had a
+   * complete answer waiting before the first ask, and only a real five-minute
+   * song loses that race. A partial answer is now returned but not kept.
    */
   async lanePeaks(): Promise<NativePlaybackLanePeaksResult | null> {
     const generation = this.generation;
@@ -5034,8 +5049,14 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       parsed = null;
     }
     if (this.generation !== generation) return null;
-    this.lanePeaksGeneration = generation;
-    this.lanePeaksCache = parsed;
+    const complete =
+      parsed != null &&
+      parsed.lanes.length > 0 &&
+      parsed.lanes.every(lane => lane.peaksValid);
+    if (complete) {
+      this.lanePeaksGeneration = generation;
+      this.lanePeaksCache = parsed;
+    }
     return parsed;
   }
 

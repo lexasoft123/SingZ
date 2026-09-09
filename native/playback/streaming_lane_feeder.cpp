@@ -4,6 +4,12 @@
 #include <chrono>
 #include <cmath>
 
+#if defined(__APPLE__)
+#include <pthread.h>
+#include <sys/qos.h>
+#include <sys/resource.h>
+#endif
+
 namespace singz {
 namespace {
 
@@ -108,7 +114,22 @@ DecodedAudioStatus StreamingLaneGroup::prime(uint64_t startFrame) {
     return DecodedAudioStatus::InvalidArgument;
   for (std::unique_ptr<Lane>& holder : lanes_) {
     Lane& lane = *holder;
-    lane.stats = StreamingLaneStats{};
+    // Everything about the FEEDER resets with a prime; nothing about the
+    // waveform pass does. They are independent, and priming used to assign a
+    // whole fresh StreamingLaneStats — which wiped the pass's fields too, and
+    // is why every lane reported NO-HANDLE on a phone that plainly had
+    // handles, sending one build off after a source that was never missing.
+    //
+    // Named one by one, and deliberately NOT as "keep a copy, blank the
+    // struct, restore what matters": that shape makes the DEFAULT for every
+    // field added later "silently wiped by prime()", which is this bug over
+    // again. Reset what a prime actually invalidates and nothing else.
+    lane.stats.refills = 0;
+    lane.stats.seeks = 0;
+    lane.stats.framesDecoded = 0;
+    lane.stats.starvedBlocks = 0;
+    lane.stats.waitedForGuard = 0;
+    lane.stats.ended = false;
     if (!seekLane(lane, startFrame))
       return DecodedAudioStatus::IoError;
     lane.residentStart = startFrame;
@@ -357,7 +378,26 @@ bool StreamingLaneGroup::serviceOnceForTesting() {
 // rounding rather than bit for bit, which is far below what a drawn bar can
 // show.
 void StreamingLaneGroup::waveformLoop() {
+  // Cleared on EVERY exit from this function, so "the thread is gone" is a
+  // fact the diagnostic can state rather than infer from frozen counters.
+  // startWaveformPass() already set it, so the window before this line runs
+  // does not read as a thread that died.
+  struct AliveUntilReturn {
+    std::atomic<bool>& flag;
+    ~AliveUntilReturn() { flag.store(false, std::memory_order_release); }
+  } aliveGuard{waveformAlive_};
   constexpr size_t kBuckets = kStreamingWaveformBuckets;
+  // Read back rather than assume. A std::thread inherits the quality of
+  // service of whoever created it, and on Apple a background class also drags
+  // the thread's disk policy down to throttled — which the kernel implements
+  // by DELAYING each read, not by using less CPU. Asking the thread what it
+  // ended up with costs nothing and settles the question.
+  int32_t qos = -1;
+  int32_t ioPolicy = -1;
+#if defined(__APPLE__)
+  qos = static_cast<int32_t>(qos_class_self());
+  ioPolicy = getiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_THREAD);
+#endif
   for (size_t index = 0; index < lanes_.size(); ++index) {
     if (!waveformRunning_.load(std::memory_order_acquire))
       return;
@@ -387,14 +427,23 @@ void StreamingLaneGroup::waveformLoop() {
 
     uint64_t at = 0;
     bool ok = true;
+    uint64_t readNs = 0;
+    const auto laneStarted = std::chrono::steady_clock::now();
+    lane.stats.waveformQos = qos;
+    lane.stats.waveformIoPolicy = ioPolicy;
     size_t cursorBucket = 0;
     uint64_t cursorEnd = frames / kBuckets;
     if (cursorEnd == 0)
       cursorEnd = 1;
     while (at < frames && waveformRunning_.load(std::memory_order_acquire)) {
       size_t got = 0;
+      const auto readStarted = std::chrono::steady_clock::now();
       const DecodedAudioStatus status =
           source->read(pointers.data(), block, &got);
+      readNs += static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - readStarted)
+              .count());
       if (status != DecodedAudioStatus::Ok) {
         lane.stats.waveformError = static_cast<uint32_t>(status);
         ok = false;
@@ -431,6 +480,11 @@ void StreamingLaneGroup::waveformLoop() {
       }
       at += got;
       lane.stats.waveformFrames = at;
+      lane.stats.waveformReadMs = readNs / 1000000;
+      lane.stats.waveformElapsedMs = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - laneStarted)
+              .count());
     }
     if (!ok || !waveformRunning_.load(std::memory_order_acquire))
       continue;
@@ -466,10 +520,17 @@ void StreamingLaneGroup::seedWaveform(size_t lane, const float* buckets,
 void StreamingLaneGroup::startWaveformPass() {
   if (waveformRunning_.exchange(true, std::memory_order_acq_rel))
     return;
+  waveformStartedAt_ = std::chrono::steady_clock::now();
+  // Set HERE rather than at the top of waveformLoop(): between creating the
+  // thread and its first instruction the pass exists but has not run, and a
+  // diagnostic taken in that window would report THREAD-GONE for a thread
+  // that had never started.
+  waveformAlive_.store(true, std::memory_order_release);
   try {
     waveformThread_ = std::thread([this] { waveformLoop(); });
   } catch (...) {
     // A machine that will not give us a thread still plays the song.
+    waveformAlive_.store(false, std::memory_order_release);
     waveformRunning_.store(false, std::memory_order_release);
   }
 }
@@ -557,6 +618,12 @@ StreamingLaneStats StreamingLaneGroup::stats(size_t lane) const noexcept {
   if (lane >= lanes_.size())
     return {};
   StreamingLaneStats copy = lanes_[lane]->stats;
+  copy.waveformAlive = waveformAlive_.load(std::memory_order_acquire);
+  if (waveformStartedAt_.time_since_epoch().count() != 0)
+    copy.waveformSinceStartMs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - waveformStartedAt_)
+            .count());
   copy.ended = lanes_[lane]->ended;
   copy.starvedBlocks =
       lanes_[lane]->window.starvedBlocks.load(std::memory_order_relaxed);
