@@ -46,12 +46,18 @@ constexpr uint32_t kRate = 44100;
 constexpr uint64_t kFrames = 400000;  // ~9 s
 constexpr uint32_t kBlock = 512;
 
+// Windows has no /tmp, so a hardcoded one made `init_file` fail and the suite
+// reported "the fixture could not be encoded" — a red that says nothing about
+// the feeder. Same shape as flac_streaming_source_tests' own tempPath.
 std::string tempPath(const char* suffix) {
   static int counter = 0;
-  std::string path = "/tmp/singz_feeder_";
-  path += std::to_string(counter++);
-  path += suffix;
-  return path;
+  const std::string base =
+#if defined(_WIN32)
+      std::string(std::getenv("TEMP") != nullptr ? std::getenv("TEMP") : ".");
+#else
+      std::string("/tmp");
+#endif
+  return base + "/singz_feeder_" + std::to_string(counter++) + suffix;
 }
 
 singz::OwnedFileDescriptor openRead(const std::string& path) {

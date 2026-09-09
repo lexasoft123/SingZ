@@ -555,8 +555,20 @@ int main() {
     check(reference.frames > 0, "and it decodes as a reference");
 
     singz::OwnedFileDescriptor first = openRead(flac2);
+    // `_dup` on Windows, so the case actually RUNS there. Guarding the dup
+    // but NOT the check that followed it left `duplicated` at -1 and failed
+    // the suite on Windows by construction — a red that says nothing.
+    //
+    // The Windows readAt seeks before every read and never consults the
+    // inherited position, so a shared file pointer cannot bite this serial
+    // interleaving on either platform; what the test pins is that neither
+    // source depends on where the other left the cursor. Two Windows sources
+    // reading CONCURRENTLY would be a different question, needing overlapped
+    // IO — see the note in flac_streaming_source.cpp — and nothing does that.
     int duplicated = -1;
-#if !defined(_WIN32)
+#if defined(_WIN32)
+    duplicated = _dup(first.get());
+#else
     duplicated = ::dup(first.get());
 #endif
     check(duplicated >= 0, "the descriptor duplicates");

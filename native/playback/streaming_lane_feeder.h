@@ -217,8 +217,35 @@ class StreamingLaneGroup {
     // publication, which it could otherwise lose to itself.
     uint64_t residentStart{0};
     uint64_t residentEnd{0};
-    StreamingLaneStats stats;
-    bool ended{false};
+    /* Every counter here is written by one thread and read by another —
+       the feeder writes refills/framesDecoded/seeks while it services, the
+       waveform pass writes its own fields as it goes, and the control thread
+       reads the lot through `stats()` for the diagnostics the seek bar logs.
+       They were plain members under no shared lock, which ThreadSanitizer
+       reported the moment `lanePeaks()` started reading them while the feeder
+       was running. Relaxed atomics: these are counters nobody orders anything
+       on, so the cost is nil and the read is defined. */
+    struct Live {
+      std::atomic<uint64_t> refills{0};
+      std::atomic<uint64_t> seeks{0};
+      std::atomic<uint64_t> framesDecoded{0};
+      std::atomic<uint64_t> waitedForGuard{0};
+      std::atomic<bool> waveformSource{false};
+      std::atomic<bool> waveformStarted{false};
+      std::atomic<bool> waveformDone{false};
+      std::atomic<uint64_t> waveformFrames{0};
+      std::atomic<uint32_t> waveformError{0};
+      std::atomic<uint64_t> waveformReadMs{0};
+      std::atomic<uint64_t> waveformElapsedMs{0};
+      std::atomic<int32_t> waveformQos{-1};
+      std::atomic<int32_t> waveformIoPolicy{-1};
+    } stats;
+    // Atomic for the same reason the counters above are: it is written by the
+    // feeder under mutex_ and read by stats() without it, for the diagnostic.
+    // One flip per lane rather than one per refill, so the window is narrow —
+    // narrow is not absent, and a race that only shows up on a busy phone is
+    // the worst kind to leave in.
+    std::atomic<bool> ended{false};
   };
 
   bool serviceLane(Lane& lane);

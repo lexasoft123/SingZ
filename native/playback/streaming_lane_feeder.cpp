@@ -81,7 +81,7 @@ DecodedAudioStatus StreamingLaneGroup::addLane(OwnedFileDescriptor descriptor,
   auto lane = std::make_unique<Lane>();
   lane->source = std::move(source);
   lane->analysis = std::move(analysisSource);
-  lane->stats.waveformSource = lane->analysis != nullptr;
+  lane->stats.waveformSource.store(lane->analysis != nullptr, std::memory_order_relaxed);
   lane->capacityFrames = capacity;
   lane->planes.assign(info.channels, std::vector<float>(capacity, 0.0F));
   lane->pointers.resize(info.channels);
@@ -124,24 +124,25 @@ DecodedAudioStatus StreamingLaneGroup::prime(uint64_t startFrame) {
     // struct, restore what matters": that shape makes the DEFAULT for every
     // field added later "silently wiped by prime()", which is this bug over
     // again. Reset what a prime actually invalidates and nothing else.
-    lane.stats.refills = 0;
-    lane.stats.seeks = 0;
-    lane.stats.framesDecoded = 0;
-    lane.stats.starvedBlocks = 0;
-    lane.stats.waitedForGuard = 0;
-    lane.stats.ended = false;
+    lane.stats.refills.store(0, std::memory_order_relaxed);
+    lane.stats.seeks.store(0, std::memory_order_relaxed);
+    lane.stats.framesDecoded.store(0, std::memory_order_relaxed);
+    lane.stats.waitedForGuard.store(0, std::memory_order_relaxed);
+    // starvedBlocks and ended are deliberately absent: stats() reads those
+    // from the window's own atomic and from lane.ended, so resetting a copy
+    // of them here only ever wrote a value nothing went on to read.
     if (!seekLane(lane, startFrame))
       return DecodedAudioStatus::IoError;
     lane.residentStart = startFrame;
     lane.residentEnd = startFrame;
-    lane.ended = false;
+    lane.ended.store(false, std::memory_order_relaxed);
     // Demand starts where playback will, so the first service round has
     // somewhere to chase even before a block has run.
     zdsp::streamingWindowInitialize(&lane.window, startFrame);
 
     const uint64_t want =
         std::min(startFrame + options_.primeFrames, lane.window.totalFrames);
-    while (lane.residentEnd < want && !lane.ended) {
+    while (lane.residentEnd < want && !lane.ended.load(std::memory_order_relaxed)) {
       const uint64_t before = lane.residentEnd;
       if (!serviceLane(lane))
         break;
@@ -157,7 +158,7 @@ DecodedAudioStatus StreamingLaneGroup::prime(uint64_t startFrame) {
 // One refill for one lane. Returns true when it made progress, so the loop can
 // tell a busy round from an idle one and sleep instead of spinning.
 bool StreamingLaneGroup::serviceLane(Lane& lane) {
-  if (lane.ended && lane.residentEnd >= lane.window.totalFrames)
+  if (lane.ended.load(std::memory_order_relaxed) && lane.residentEnd >= lane.window.totalFrames)
     return false;
 
   uint64_t demand = lane.residentStart;
@@ -176,14 +177,14 @@ bool StreamingLaneGroup::serviceLane(Lane& lane) {
     if (demand >= lane.window.totalFrames)
       return false;
     if (!seekLane(lane, demand)) {
-      lane.ended = true;
+      lane.ended.store(true, std::memory_order_relaxed);
       return false;
     }
     lane.residentStart = demand;
     lane.residentEnd = demand;
-    lane.ended = false;
+    lane.ended.store(false, std::memory_order_relaxed);
     zdsp::streamingWindowPublishResident(&lane.window, demand, demand);
-    ++lane.stats.seeks;
+    lane.stats.seeks.fetch_add(1, std::memory_order_relaxed);
     return true;
   }
 
@@ -200,7 +201,7 @@ bool StreamingLaneGroup::serviceLane(Lane& lane) {
       demand > options_.safetyFrames ? demand - options_.safetyFrames : 0;
   const uint64_t reach = guardStart + lane.window.capacityFrames;
   if (lane.residentEnd >= reach) {
-    ++lane.stats.waitedForGuard;
+    lane.stats.waitedForGuard.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
 
@@ -240,8 +241,8 @@ bool StreamingLaneGroup::serviceLane(Lane& lane) {
   if (written == 0)
     return false;
   lane.residentEnd += written;
-  lane.stats.framesDecoded += written;
-  ++lane.stats.refills;
+  lane.stats.framesDecoded.fetch_add(written, std::memory_order_relaxed);
+  lane.stats.refills.fetch_add(1, std::memory_order_relaxed);
   zdsp::streamingWindowPublishResident(&lane.window, lane.residentStart,
                                        lane.residentEnd);
   return true;
@@ -271,7 +272,7 @@ bool StreamingLaneGroup::seekLane(Lane& lane, uint64_t outputFrame) {
   }
   if (lane.source->seek(inputFrame) != DecodedAudioStatus::Ok)
     return false;
-  ++lane.stats.seeks;
+  lane.stats.seeks.fetch_add(1, std::memory_order_relaxed);
   return true;
 }
 
@@ -289,9 +290,9 @@ uint64_t StreamingLaneGroup::fillLane(Lane& lane, uint64_t index,
     const DecodedAudioStatus status =
         lane.source->read(destination.data(), static_cast<size_t>(frames), &got);
     if (status != DecodedAudioStatus::Ok)
-      lane.ended = true;
+      lane.ended.store(true, std::memory_order_relaxed);
     if (got == 0)
-      lane.ended = true;
+      lane.ended.store(true, std::memory_order_relaxed);
     return got;
   }
 
@@ -331,20 +332,20 @@ uint64_t StreamingLaneGroup::fillLane(Lane& lane, uint64_t index,
     }
     lane.pending.clear();
     lane.pendingRead = 0;
-    if (lane.ended)
+    if (lane.ended.load(std::memory_order_relaxed))
       break;
 
     size_t got = 0;
     const DecodedAudioStatus status =
         lane.source->read(pointers.data(), inputBlock, &got);
     if (status != DecodedAudioStatus::Ok) {
-      lane.ended = true;
+      lane.ended.store(true, std::memory_order_relaxed);
       break;
     }
     if (got == 0) {
       // End of the file: push the filter's tail through so the last frames of
       // the song are not lost to its history.
-      lane.ended = true;
+      lane.ended.store(true, std::memory_order_relaxed);
       if (lane.resampler != nullptr)
         lane.resampler->flush(lane.pending);
       if (lane.pending.empty())
@@ -408,7 +409,7 @@ void StreamingLaneGroup::waveformLoop() {
     if (lane.waveformReady.load(std::memory_order_acquire))
       continue;
     StreamingAudioSource* source = lane.analysis.get();
-    lane.stats.waveformStarted = true;
+    lane.stats.waveformStarted.store(true, std::memory_order_relaxed);
     if (source == nullptr)
       continue;
     const uint64_t frames = source->info().frameCount;
@@ -429,8 +430,8 @@ void StreamingLaneGroup::waveformLoop() {
     bool ok = true;
     uint64_t readNs = 0;
     const auto laneStarted = std::chrono::steady_clock::now();
-    lane.stats.waveformQos = qos;
-    lane.stats.waveformIoPolicy = ioPolicy;
+    lane.stats.waveformQos.store(qos, std::memory_order_relaxed);
+    lane.stats.waveformIoPolicy.store(ioPolicy, std::memory_order_relaxed);
     size_t cursorBucket = 0;
     uint64_t cursorEnd = frames / kBuckets;
     if (cursorEnd == 0)
@@ -445,7 +446,7 @@ void StreamingLaneGroup::waveformLoop() {
               std::chrono::steady_clock::now() - readStarted)
               .count());
       if (status != DecodedAudioStatus::Ok) {
-        lane.stats.waveformError = static_cast<uint32_t>(status);
+        lane.stats.waveformError.store(static_cast<uint32_t>(status), std::memory_order_relaxed);
         ok = false;
         break;
       }
@@ -479,12 +480,14 @@ void StreamingLaneGroup::waveformLoop() {
         }
       }
       at += got;
-      lane.stats.waveformFrames = at;
-      lane.stats.waveformReadMs = readNs / 1000000;
-      lane.stats.waveformElapsedMs = static_cast<uint64_t>(
-          std::chrono::duration_cast<std::chrono::milliseconds>(
-              std::chrono::steady_clock::now() - laneStarted)
-              .count());
+      lane.stats.waveformFrames.store(at, std::memory_order_relaxed);
+      lane.stats.waveformReadMs.store(readNs / 1000000, std::memory_order_relaxed);
+      lane.stats.waveformElapsedMs.store(
+          static_cast<uint64_t>(
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - laneStarted)
+                  .count()),
+          std::memory_order_relaxed);
     }
     if (!ok || !waveformRunning_.load(std::memory_order_acquire))
       continue;
@@ -501,7 +504,7 @@ void StreamingLaneGroup::waveformLoop() {
       lane.waveformBuckets = std::move(buckets);
     }
     lane.waveformReady.store(true, std::memory_order_release);
-    lane.stats.waveformDone = true;
+    lane.stats.waveformDone.store(true, std::memory_order_relaxed);
   }
 }
 
@@ -617,14 +620,33 @@ uint64_t StreamingLaneGroup::outputFrames(size_t lane) const noexcept {
 StreamingLaneStats StreamingLaneGroup::stats(size_t lane) const noexcept {
   if (lane >= lanes_.size())
     return {};
-  StreamingLaneStats copy = lanes_[lane]->stats;
+  // A SNAPSHOT, loaded field by field. The returned struct is a plain value
+  // on purpose — callers copy it around and put it in log lines — while the
+  // live counters behind it are atomics, because the feeder and the waveform
+  // pass write them on their own threads while this runs.
+  const Lane& live = *lanes_[lane];
+  StreamingLaneStats copy{};
+  const auto R = std::memory_order_relaxed;
+  copy.refills = live.stats.refills.load(R);
+  copy.seeks = live.stats.seeks.load(R);
+  copy.framesDecoded = live.stats.framesDecoded.load(R);
+  copy.waitedForGuard = live.stats.waitedForGuard.load(R);
+  copy.waveformSource = live.stats.waveformSource.load(R);
+  copy.waveformStarted = live.stats.waveformStarted.load(R);
+  copy.waveformDone = live.stats.waveformDone.load(R);
+  copy.waveformFrames = live.stats.waveformFrames.load(R);
+  copy.waveformError = live.stats.waveformError.load(R);
+  copy.waveformReadMs = live.stats.waveformReadMs.load(R);
+  copy.waveformElapsedMs = live.stats.waveformElapsedMs.load(R);
+  copy.waveformQos = live.stats.waveformQos.load(R);
+  copy.waveformIoPolicy = live.stats.waveformIoPolicy.load(R);
   copy.waveformAlive = waveformAlive_.load(std::memory_order_acquire);
   if (waveformStartedAt_.time_since_epoch().count() != 0)
     copy.waveformSinceStartMs = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - waveformStartedAt_)
             .count());
-  copy.ended = lanes_[lane]->ended;
+  copy.ended = live.ended.load(R);
   copy.starvedBlocks =
       lanes_[lane]->window.starvedBlocks.load(std::memory_order_relaxed);
   return copy;
