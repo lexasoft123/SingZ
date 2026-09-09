@@ -113,10 +113,18 @@ yarn-error.log
 !.yarn/sdks
 !.yarn/versions
 
-# device build output
-ios/build-device/
+# Every Xcode output directory under ios/, by GLOB, and the glob is the whole
+# lesson: this listed `ios/build-sim/` and `ios/build-device/` by exact name,
+# a build wrote `ios/build-sim-release/` — one suffix outside the rule — and
+# 2946 files and 1.24 GB of DerivedData (module caches, compilation caches,
+# build logs) were committed and rode a branch unnoticed until somebody
+# counted the files before a merge. Naming the variants that exist today only
+# moves that failure along by one token; `build-macos` or `build-catalyst`
+# would land exactly the same way. The trailing slash keeps it to
+# directories, so a file such as ios/build-settings.json is untouched, and
+# plain `build/` is already covered above.
+ios/build-*/
 gdrive.config.json
-ios/build-sim/
 /ios/SingzDspRuntime/zdsp/
 /ios/SingzDspRuntime/zcore/
 /ios/SingzDeviceCallback/zcore/
