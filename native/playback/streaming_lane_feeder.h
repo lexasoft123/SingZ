@@ -123,6 +123,19 @@ class StreamingLaneGroup {
   // meant to be cached by the caller against the stem's hash so it is paid
   // once per file rather than once per open.
   void startWaveformPass();
+  /**
+   * Hand this lane an envelope somebody already measured, so the pass skips it.
+   *
+   * A cue change, a pitch change and a tempo change each REBUILD the graph, and
+   * every rebuild used to construct a fresh group that started measuring from
+   * the first lane again — throwing away everything the last one had done. A
+   * singer who touches the metronome and the pitch in the first few seconds
+   * (which is exactly when they do) could restart the pass six times and see no
+   * waveform at all, while each individual attempt looked healthy.
+   *
+   * None of those changes touch the STEMS, so their envelope is still true.
+   */
+  void seedWaveform(size_t lane, const float* buckets, size_t bucketCount);
   // False until this lane's pass has finished. `buckets` receives the same
   // RMS-per-bucket statistic the decoded path publishes.
   [[nodiscard]] bool waveform(size_t lane, float* buckets,

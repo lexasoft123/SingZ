@@ -895,6 +895,83 @@ void streamedLanesPlayTheSameAudioAsDecodedOnes() {
       differing++;
   CHECK(differing == 0);
 
+  // A REBUILD must keep the waveform, and a different song must not inherit it.
+  //
+  // Every cue, pitch and tempo change rebuilds the graph. Each rebuild used to
+  // construct a fresh streaming group that began measuring at the first lane
+  // again, so a singer adjusting the metronome and the pitch in the first
+  // seconds — which is when they do it — restarted the pass over and over and
+  // saw no bar at all. Each attempt looked healthy on its own.
+  {
+    singz::NativePlaybackPrepareConfig request = config();
+    request.streamLanes = true;
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    auto one = lane("song", toneFlac);
+    one.sourceKey = toneFlac;  // the bridge's key for these bytes
+    lanes.push_back(std::move(one));
+    CHECK(session.prepare(std::move(request), std::move(lanes), 11).ok);
+    singz::NativePlaybackLanePeaksResult first;
+    for (int attempt = 0; attempt < 600; attempt++) {
+      first = session.lanePeaks(11);
+      if (first.ok && first.lanes.size() == 1 && first.lanes[0].valid) break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(first.ok && first.lanes.size() == 1 && first.lanes[0].valid);
+    CHECK(session.unload(11).ok);
+
+    // The rebuild: same stems, new generation. Its waveform must be there on
+    // the FIRST ask, not after another pass.
+    singz::NativePlaybackPrepareConfig again = config();
+    again.streamLanes = true;
+    auto rebuilt = std::vector<singz::NativePlaybackLaneSource>{};
+    auto second = lane("song", toneFlac);
+    second.sourceKey = toneFlac;
+    rebuilt.push_back(std::move(second));
+    CHECK(session.prepare(std::move(again), std::move(rebuilt), 12).ok);
+    const auto carried = session.lanePeaks(12);
+    CHECK(carried.ok && carried.lanes.size() == 1);
+    CHECK(carried.lanes[0].valid);
+    // And it is the SAME picture, not merely some picture.
+    double worst = 0.0;
+    for (size_t i = 0; i < carried.lanes[0].peaks.size(); i++)
+      worst = std::max(worst, std::fabs(static_cast<double>(carried.lanes[0].peaks[i]) -
+                                        static_cast<double>(first.lanes[0].peaks[i])));
+    CHECK(worst == 0.0);
+    CHECK(session.unload(12).ok);
+
+    // A DIFFERENT song, whose lane has the same id and different bytes, must
+    // measure its own. Every song has a lane called "vocals", so a cache keyed
+    // by lane id would draw the last song's waveform here — perfectly, and
+    // wrong.
+    const std::string otherWav = writeWav("carry-other.wav", 1,
+                                          std::vector<float>(60000, 0.02F));
+    const std::string otherFlac = scratch("carry-other.flac");
+    std::remove(otherFlac.c_str());
+    CHECK(singz::compactStem(otherWav, otherFlac).ok);
+    singz::NativePlaybackPrepareConfig third = config();
+    third.streamLanes = true;
+    auto otherLanes = std::vector<singz::NativePlaybackLaneSource>{};
+    auto otherLane = lane("song", otherFlac);
+    otherLane.sourceKey = otherFlac;
+    otherLanes.push_back(std::move(otherLane));
+    CHECK(session.prepare(std::move(third), std::move(otherLanes), 13).ok);
+    singz::NativePlaybackLanePeaksResult fresh;
+    for (int attempt = 0; attempt < 600; attempt++) {
+      fresh = session.lanePeaks(13);
+      if (fresh.ok && fresh.lanes.size() == 1 && fresh.lanes[0].valid) break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(fresh.ok && fresh.lanes.size() == 1 && fresh.lanes[0].valid);
+    double apart = 0.0;
+    for (size_t i = 0; i < fresh.lanes[0].peaks.size(); i++)
+      apart = std::max(apart, std::fabs(static_cast<double>(fresh.lanes[0].peaks[i]) -
+                                        static_cast<double>(first.lanes[0].peaks[i])));
+    CHECK(apart > 0.01);
+    CHECK(session.unload(13).ok);
+    std::remove(otherWav.c_str());
+    std::remove(otherFlac.c_str());
+  }
+
   std::remove(toneWav.c_str());
   std::remove(toneFlac.c_str());
 }

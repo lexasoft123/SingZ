@@ -75,6 +75,7 @@ import {
 } from './audio/training-cleanup'
 import { decodeMelody, encodeMelody, melodyFitsSong, PITCH_DETECT_VERSION } from './audio/melody'
 import type { MicDevice } from './audio/mic'
+import { laneEnvelope } from './audio/lane-envelope'
 import { computePeaks } from './audio/peaks'
 import { stemSampleRate } from './audio/stem-rate'
 import gdriveIcon from './assets/gdrive.png'
@@ -588,7 +589,7 @@ function makeTrack(
   const meta = TRACK_META[id] ?? { label: id, color: '#bfb49d' }
   const { peaks, scale } = computePeaks(buffer)
   return {
-    id, ...meta, peaks, duration: buffer.duration, scale,
+    id, ...meta, peaks, envelope: laneEnvelope(buffer), duration: buffer.duration, scale,
     muted: false, solo: false, volume: 1, ...over
   }
 }
@@ -2736,6 +2737,24 @@ export default function App(): React.JSX.Element {
             ? `Saved to ${res.dir} — Google Drive is signed out on this computer, so your phones won't see this until you sign in (Open… screen).`
             : `Saved to ${res.dir}`
       )
+      // The seek bar's envelope, measured from stems this app has ALREADY
+      // decoded and written beside the hashes the save just refreshed. It buys
+      // the phones the one thing they cannot cheaply have: a bar drawn before
+      // the first frame, without decoding every sample of every stem to
+      // measure it. Best-effort and deliberately unawaited-for-failure — a
+      // song whose envelope cannot be stored simply has the phone measure it.
+      void (async () => {
+        try {
+          const envelopes: Record<string, number[]> = {}
+          for (const track of tracks)
+            if (track.envelope && track.envelope.length > 0)
+              envelopes[track.id] = track.envelope
+          if (Object.keys(envelopes).length > 0)
+            await window.singz.saveProjectWaveforms(res.songPath, envelopes)
+        } catch {
+          // Costs the phone a background pass, never a wrong picture.
+        }
+      })()
       setTimeout(() => setSaveState('idle'), 2500)
     } else {
       setSaveState('idle')

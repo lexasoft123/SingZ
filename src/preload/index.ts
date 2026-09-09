@@ -228,6 +228,8 @@ const api: SingzApi = {
   saveProject: (songPath, name, settings) =>
     ipcRenderer.invoke('project:save', songPath, name, settings),
 
+  saveProjectWaveforms: (songPath, envelopes) =>
+    ipcRenderer.invoke('project:waveforms', songPath, envelopes),
   readProjectGraph: (songPath) => ipcRenderer.invoke('project:graph-read', songPath),
 
   writeProjectGraph: (songPath, text) =>

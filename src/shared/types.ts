@@ -1335,6 +1335,13 @@ export interface SingzApi {
     | { ok: false; error: string }
   >
   /** Read graph.json only when its project.json reference matches exactly. */
+  /** Store the seek bar's envelope per lane in project.json, so a phone that
+   *  opens this song draws its bar without decoding every stem to measure it.
+   *  Best-effort: a failure costs the phone one background pass. */
+  saveProjectWaveforms(
+    songPath: string,
+    envelopes: Record<string, number[]>
+  ): Promise<{ ok: boolean; stored?: number; error?: string }>
   readProjectGraph(songPath: string): Promise<ProjectGraphReadResult>
   /** Explicit graph edit transaction: graph.json first, project.json last. */
   writeProjectGraph(songPath: string, text: string): Promise<ProjectGraphWriteResult>

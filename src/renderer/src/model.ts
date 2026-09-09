@@ -6,6 +6,18 @@ export interface UITrack {
   label: string
   color: string
   peaks: Float32Array
+  /**
+   * The PHONES' envelope for this lane: 96 buckets of RMS over every channel,
+   * unnormalized (audio/lane-envelope.ts). Not what this app draws — `peaks`
+   * above is — and kept only so a save can write it into project.json, where a
+   * phone reads it and draws its bar without decoding the song.
+   *
+   * Measured HERE, beside computePeaks, because the lane's samples are in hand
+   * exactly once: the engine releases them to the native graph the moment
+   * playback starts (docs/DESKTOP-LANE-RESIDENCY.md), so by save time there is
+   * usually nothing left to measure. 96 doubles per lane is nothing to carry.
+   */
+  envelope?: number[]
   /*
    * No `buffer` here, and that is load-bearing rather than tidy.
    *

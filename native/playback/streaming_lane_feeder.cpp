@@ -361,6 +361,11 @@ void StreamingLaneGroup::waveformLoop() {
     if (!waveformRunning_.load(std::memory_order_acquire))
       return;
     Lane& lane = *lanes_[index];
+    // Already measured — by a previous generation of this song, handed over
+    // when the graph was rebuilt. Measuring it again would cost seconds and
+    // produce the same numbers.
+    if (lane.waveformReady.load(std::memory_order_acquire))
+      continue;
     StreamingAudioSource* source = lane.analysis.get();
     if (source == nullptr)
       continue;
@@ -439,6 +444,18 @@ void StreamingLaneGroup::waveformLoop() {
     }
     lane.waveformReady.store(true, std::memory_order_release);
   }
+}
+
+void StreamingLaneGroup::seedWaveform(size_t lane, const float* buckets,
+                                      size_t bucketCount) {
+  if (lane >= lanes_.size() || buckets == nullptr ||
+      bucketCount != kStreamingWaveformBuckets)
+    return;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    lanes_[lane]->waveformBuckets.assign(buckets, buckets + bucketCount);
+  }
+  lanes_[lane]->waveformReady.store(true, std::memory_order_release);
 }
 
 void StreamingLaneGroup::startWaveformPass() {

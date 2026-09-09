@@ -17,6 +17,7 @@ static_assert(singz::kStreamingWaveformBuckets ==
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <new>
 #include <stdexcept>
@@ -2338,6 +2339,12 @@ struct PreparedPlaybackGraph {
     }
     [[nodiscard]] bool streamed() const noexcept { return owner == nullptr; }
 
+    // The bridge's key for this lane's bytes, carried only so a measured
+    // envelope can be remembered across a rebuild under a name that cannot
+    // collide with another song's lane of the same id. Empty means "do not
+    // remember this one", exactly as it means "do not adopt this one".
+    std::string waveformKey;
+
     // The callback-owned play cursor. Each backing has its own reader and the
     // handles are not interchangeable — asking the decoded reader about a
     // streamed source returns zero, which would read as "the song is at the
@@ -4621,6 +4628,21 @@ struct NativePlaybackSession::Impl {
   // deliberately never takes. Lock order: this one is always innermost.
   mutable std::mutex parkedMutex;
   std::vector<ParkedLane> parkedLanes;
+  // Lane envelopes this session has already measured, keyed by the BRIDGE'S
+  // SOURCE KEY for the lane — never by its id.
+  //
+  // A cue, pitch or tempo change REBUILDS the graph, and a rebuilt graph used
+  // to start measuring from the first lane again, so a singer touching the
+  // metronome and the pitch in the first seconds of a song restarted the pass
+  // over and over and saw no waveform at all. None of those changes touch the
+  // stems, so the numbers stay true across every one of them.
+  //
+  // The key matters as much as the carrying: every song has a lane called
+  // "vocals", so an id-keyed cache would hand the next song the last one's
+  // waveform — drawn perfectly, and wrong. The source key names the bytes'
+  // location, which is the same comparison lane adoption already makes, and an
+  // empty key caches nothing for the same reason it never adopts.
+  std::map<std::string, NativePlaybackLanePeaks> measuredWaveforms;
   std::atomic<size_t> parkedLaneBytes{0};
   std::atomic<uint32_t> parkedLaneCount{0};
   // A short control-domain gate linearizes generation/cancellation claims
@@ -6076,6 +6098,7 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
       lane.window = streamingGroup->window(index);
       lane.streamChannels = info->channels;
       lane.streamFrames = laneFrames;
+      lane.waveformKey = sources[index].sourceKey;
       lane.streamBytes = bytes;
       // KNOWN GAP, stated rather than hidden: the seek bar's waveform is a
       // linear pass over decoded PCM, and a streamed lane has none to pass
@@ -6322,6 +6345,17 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
   // initial seek, and an idle feeder costs one timed wait every 4 ms.
   if (streamingGroup != nullptr) {
     prepared->streaming = std::move(streamingGroup);
+    // Hand over every envelope this session has already measured for these
+    // exact stems, so a rebuild costs nothing and the bar does not vanish the
+    // moment somebody touches the metronome.
+    for (size_t index = 0; index < prepared->lanes.size(); ++index) {
+      const std::string &key = prepared->lanes[index].waveformKey;
+      if (key.empty()) continue;
+      const auto found = impl_->measuredWaveforms.find(key);
+      if (found != impl_->measuredWaveforms.end())
+        prepared->streaming->seedWaveform(index, found->second.data(),
+                                          found->second.size());
+    }
     prepared->streaming->start();
     // Started here, after the graph is built: the waveform is wanted soon but
     // never before the song plays, and a linear pass over six stems competing
@@ -8233,8 +8267,13 @@ NativePlaybackSession::lanePeaks(uint64_t generation) const {
     // from the background pass instead — and is simply not ready yet for the
     // first seconds of a song whose waveform nothing has cached. Reporting it
     // as invalid until then is honest: the bar draws when the answer exists.
-    if (!valid && streaming != nullptr)
+    if (!valid && streaming != nullptr) {
       valid = streaming->waveform(index, peaks.data(), peaks.size());
+      // Remembered for the next generation of this song. This is the only
+      // place that sees a finished lane, and a rebuild is usually seconds away.
+      if (valid && !lane.waveformKey.empty())
+        impl_->measuredWaveforms[lane.waveformKey] = peaks;
+    }
     result.lanes.push_back({lane.id, valid, peaks});
   }
   result.ok = true;

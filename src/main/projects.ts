@@ -216,6 +216,10 @@ export interface ProjectFile {
   lyricsHash?: StemHash
   /** Fixed member graph.json. Its version is independent of project.version. */
   graphHash?: ProjectGraphHash
+  /** The seek bar's envelope per lane, 96 buckets of RMS over every channel,
+   *  each carrying the md5 of the stem it was measured from. Written here so a
+   *  phone draws the bar without decoding the song; see saveProjectWaveforms. */
+  waveforms?: Record<string, { md5: string; peaks: number[] }>
 }
 
 export interface StemHash {
@@ -503,6 +507,65 @@ export function withProjectDocumentTransaction<T>(
     const meta = await readMeta(dir)
     if (!meta) throw new Error(`${dir} is not a readable project folder.`)
     return run(meta, (next) => writeMetaAtomic(dir, next))
+  })
+}
+
+/**
+ * The seek bar's envelope, computed here and read by the phones.
+ *
+ * The phone can measure this itself, but only by decoding every sample of
+ * every stem — the one cost streamed playback exists to avoid, and a
+ * background pass it then has to run once per song. This desktop has already
+ * decoded them to play them, so writing the answer down costs nothing here and
+ * means a song arriving on a phone draws its bar before the first frame plays.
+ *
+ * Each entry carries the md5 of the stem it was measured from, checked against
+ * `stemHashes` on the phone, so a re-split invalidates it without anything
+ * having to remember to clear it. A lane whose stem this project cannot name
+ * is not stored: there would be nothing to invalidate it with.
+ *
+ * The numbers are `laneEnvelope` in the renderer — 96 buckets of RMS over
+ * every channel, unnormalized — which is the port of `summarizeLanePeaks` in
+ * the core. Nothing here interprets them; this pairs them with a hash and
+ * writes them down.
+ */
+export async function saveProjectWaveforms(
+  dir: string,
+  envelopes: Record<string, number[]>
+): Promise<{ ok: boolean; stored: number }> {
+  const ids = Object.keys(envelopes)
+  if (ids.length === 0) return { ok: true, stored: 0 }
+  return withProjectDocumentTransaction(dir, async (meta, replace) => {
+    const hashes = meta.stemHashes ?? {}
+    // stemHashes is keyed by FILE name (`vocals.flac`); the phone keys lanes by
+    // id (`vocals`). This is where the two meet, and the extension is whatever
+    // the project actually holds rather than an assumption about it.
+    const byLane = new Map<string, string>()
+    for (const [file, hash] of Object.entries(hashes)) {
+      const dot = file.lastIndexOf('.')
+      const id = dot > 0 ? file.slice(0, dot) : file
+      if (hash && typeof hash.md5 === 'string' && MD5.test(hash.md5)) byLane.set(id, hash.md5)
+    }
+    const waveforms: Record<string, { md5: string; peaks: number[] }> = {}
+    for (const id of ids) {
+      const md5 = byLane.get(id)
+      const peaks = envelopes[id]
+      if (!md5 || !Array.isArray(peaks) || peaks.length === 0) continue
+      if (!peaks.every((v) => Number.isFinite(v) && v >= 0)) continue
+      waveforms[id] = { md5, peaks }
+    }
+    const stored = Object.keys(waveforms).length
+    if (stored === 0) return { ok: true, stored: 0 }
+    // Merged, not replaced: a project can gain a lane (a custom track) without
+    // the others being re-measured, and a stale entry is refused on the phone
+    // by its hash rather than by being absent.
+    const next: ProjectFile = {
+      ...meta,
+      savedAt: new Date().toISOString(),
+      waveforms: { ...(meta.waveforms ?? {}), ...waveforms }
+    }
+    await replace(next)
+    return { ok: true, stored }
   })
 }
 

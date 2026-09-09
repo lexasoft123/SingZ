@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, shell, systemPreferences, type MenuItemConstructorOptions, type WebContents } from 'electron'
 import { loadWindowState, trackWindowState } from './window-state'
 import { readFile, rm, writeFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import type {
   DesktopMonitorConfig,
   DesktopPlaybackLaneConfig,
@@ -25,6 +25,7 @@ import {
   readProjectGraph,
   renameProject,
   saveProject,
+  saveProjectWaveforms,
   setProjectsRoot,
   writeProjectGraph
 } from './projects'
@@ -396,6 +397,27 @@ function registerIpc(): void {
     }
     return res
   })
+
+  // The seek bar's envelope, measured by the renderer from stems it has
+  // already decoded, so a phone opening this song draws its bar without
+  // decoding anything. Same allowlist as every other project write: the
+  // renderer names a song path it was given, never an arbitrary one.
+  ipcMain.handle(
+    'project:waveforms',
+    async (_e, raw: string, envelopes: Record<string, number[]>) => {
+      const full = resolve(String(raw))
+      if (!isAllowed(full)) {
+        return { ok: false, code: 'not-project', error: 'File is not registered.' }
+      }
+      try {
+        return await saveProjectWaveforms(dirname(full), envelopes ?? {})
+      } catch (error) {
+        // A waveform that cannot be written costs the phone one background
+        // pass, not a wrong picture, and must never fail a save.
+        return { ok: false, error: String((error as Error)?.message ?? error) }
+      }
+    }
+  )
 
   ipcMain.handle('project:graph-read', async (_e, raw: string) => {
     const full = resolve(String(raw))

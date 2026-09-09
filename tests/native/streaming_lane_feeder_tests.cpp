@@ -145,7 +145,68 @@ void renderBlock(const zdsp::ProcessorHandle& handle, Output* output,
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  // How long does the waveform pass ACTUALLY take, with nothing competing?
+  //
+  //   SINGZ_WAVEFORM_BENCH=1 streaming_lane_feeder_tests lane.flac [lane.flac...]
+  //
+  // A phone measured six lanes in 20 s, of which 18 s went into the first one.
+  // That is either throughput or scheduling, and the two want opposite fixes —
+  // so this measures throughput alone, on the same hardware, before anybody
+  // theorises about the other. Shipping a guess about it once was enough.
+  if (std::getenv("SINGZ_WAVEFORM_BENCH") != nullptr) {
+    singz::StreamingLaneGroup group;
+    for (int i = 1; i < argc; i++) {
+      if (group.addLane(openRead(argv[i]), openRead(argv[i]), 0) !=
+          singz::DecodedAudioStatus::Ok) {
+        std::fprintf(stderr, "could not open %s\n", argv[i]);
+        return 1;
+      }
+    }
+    if (group.laneCount() == 0) {
+      std::fprintf(stderr, "usage: SINGZ_WAVEFORM_BENCH=1 %s <lane.flac>...\n", argv[0]);
+      return 2;
+    }
+    // WITH the feeder running, when asked: that is the difference between this
+    // benchmark and the app, and the app is ten times slower. Measuring both
+    // says whether the two are competing or whether the phone is slow for some
+    // other reason.
+    const bool withFeeder = std::getenv("SINGZ_WAVEFORM_BENCH_FEEDER") != nullptr;
+    if (withFeeder) {
+      if (group.prime(0) != singz::DecodedAudioStatus::Ok) {
+        std::fprintf(stderr, "prime failed\n");
+        return 1;
+      }
+      group.start();
+    }
+    double seconds = 0;
+    for (size_t lane = 0; lane < group.laneCount(); lane++) {
+      const singz::StreamingAudioInfo* info = group.info(lane);
+      if (info != nullptr && info->sampleRate != 0)
+        seconds = std::max(seconds,
+                           static_cast<double>(info->frameCount) / info->sampleRate);
+    }
+    const auto started = std::chrono::steady_clock::now();
+    group.startWaveformPass();
+    std::vector<float> buckets(singz::kStreamingWaveformBuckets, 0.0F);
+    size_t done = 0;
+    while (done < group.laneCount()) {
+      done = 0;
+      for (size_t lane = 0; lane < group.laneCount(); lane++)
+        if (group.waveform(lane, buckets.data(), buckets.size())) done++;
+      if (done < group.laneCount())
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - started)
+                          .count();
+    std::printf("waveform: %zu lanes · %.1f s each · feeder %s · measured in %.0f ms (%.0fx realtime)\n",
+                group.laneCount(), seconds, withFeeder ? "RUNNING" : "idle", ms,
+                ms > 0 ? seconds * group.laneCount() * 1000.0 / ms : 0.0);
+    group.stop();
+    return 0;
+  }
+
   const std::string wav = tempPath(".wav");
   const std::string flac = encodeFlac(kFrames, kRate, 2);
   if (flac.empty()) {
