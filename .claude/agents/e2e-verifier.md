@@ -119,7 +119,8 @@ Android:
    instead by the host suite's mutation-checked fixtures (tests/native/core_host_tests.cpp).
    It drives `__test.audioInput` directly, never the training screen, because tapping fixed
    coordinates tests a layout and every fault this covers was in the transport.
-   Then, on the same build and package, `ANDROID_PKG=com.lexasoft.singz.debug node
+   Then, on the same build and package, run `focus-loss-android.cjs` (below) — the two share
+   a build, and the focus one is worthless against a package the driver cannot reach.
 - `node mobile/tests/play-from-anywhere.cjs --platform ios` (and `--platform android` on an
    emulator) — the native backend's Plays that are not "Play from the top of a fresh song",
    which the player-session harness never drives because it seeks, loops and pauses only
@@ -131,6 +132,22 @@ Android:
    paused spot) and off (a plain resume, no prepare), and the seek bar's level envelope
    compared across BOTH backends on one song (the colour agrees per sliver, the levels agree
    where there is signal). Silent throughout; ~2 min; prints PASS.
+- `node mobile/tests/waveform-streamed.cjs` (and `--platform android` with
+   `ANDROID_PKG=com.lexasoft.singz.debug` on a device or emulator) — the seek bar's waveform
+   on a STREAMED song, and the only driver whose song is deliberately LONG. The envelope is
+   measured by a background pass that fills the lanes in one at a time, and `lanePeaks()`
+   used to cache whichever answer it got first: the screen's first ask lands 400 ms after it
+   mounts, with nothing measured, so the bar polled a frozen "0 of 6" for seventy-two seconds
+   on a song whose pass had finished in four. Every suite stayed green through four broken
+   builds because the bundled sample is 40.8 s — six lanes of it measure in ~0.25 s, so the
+   race was always already won. This one loops the sample (LOOPS=16, ~11 min) so the pass is
+   still working when the screen mounts, samples the SAME object the seek bar asks while the
+   open is still running, and asserts the answer IMPROVED rather than merely arrived. A run
+   where the pass beat the first ask exits 2 as INCONCLUSIVE rather than passing — lower
+   LOOPS and it stops being able to fail, which is the whole failure mode it exists for.
+   Verified to fail against the old code on a POCO X6 Pro (frozen at 3 of 6 for 117 s).
+   ~2 min per platform; prints PASS.
+- `ANDROID_PKG=com.lexasoft.singz.debug node
    mobile/tests/focus-loss-android.cjs` — audio focus loss under NATIVE playback, the one
    thing the player-session comparison cannot take away from the app: a plain playing
    song, an ARMED SWAP (a metronome change has claimed a candidate generation and the seam

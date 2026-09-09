@@ -1400,6 +1400,20 @@ export default function PlayerScreen({
        playback: a suite that must run the same scenario against both backends
        has nothing else to hold. `kind` is what it should branch on. */
     TEST.backend = engine
+    /* The seek bar's envelope, asked of the SAME object the screen asks —
+       `project.nativePlayback`, not the backend, which is what makes it a
+       real regression seam rather than a parallel path.
+       The GENERATION comes back with it, and that is the load-bearing part:
+       the envelope is cached per prepared generation, so "the answer got
+       better" only says anything about the cache when both readings are the
+       same generation. A rebuild resets that cache for free and would
+       otherwise look exactly like the re-ask a driver is trying to prove. */
+    TEST.lanePeaks = async () => {
+      const handle = project.nativePlayback
+      if (!handle) return null
+      const envelope = await handle.lanePeaks()
+      return { generation: handle.snapshot().generation, envelope }
+    }
     /* Metronome, pitch/tempo and the count-in through the SCREEN's own
        handlers, never the backend's: `changeMet` is the path that persists
        (a save that throws is exactly the bug the singer hit), and the

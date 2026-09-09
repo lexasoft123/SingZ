@@ -216,10 +216,22 @@ Mobile has its own permanent sim-driven tests in `mobile/tests/`
 (`seek-memory.cjs`, `open-close-memory.cjs`, `loop-region.cjs`,
 `ab-repeat.cjs`, `offline-cache.cjs`, `custom-track.cjs`,
 `beats-native-ios.cjs`, `song-sheet-beat.cjs`, `player-session.cjs`,
-`focus-loss-android.cjs`, `play-from-anywhere.cjs`): CDP over
+`focus-loss-android.cjs`, `play-from-anywhere.cjs`,
+`waveform-streamed.cjs`): CDP over
 Metro against the iOS
 Simulator — run them
-after engine or loading changes. `loop-region` and `ab-repeat` are a PAIR
+after engine or loading changes.
+**`waveform-streamed.cjs` is the one whose song must stay LONG**, and it is
+the standing example of a suite that was green because its fixture was too
+small to lose a race: the seek bar's envelope is filled in by a background
+pass one lane at a time, `lanePeaks()` cached whichever answer arrived first,
+and four builds shipped a phone that drew no waveform at all while every
+simulator run passed — because six lanes of the 40.8 s sample measure in a
+quarter of a second, before the screen's first ask. It loops the sample to
+~11 minutes so the pass is still going when the screen mounts, asserts the
+answer IMPROVED rather than merely arrived, and exits 2 as INCONCLUSIVE
+rather than passing when the pass wins the race anyway. Shortening its song
+to save a minute takes its teeth out entirely. `loop-region` and `ab-repeat` are a PAIR
 and the split is the lesson: the first drives `engine.setRegion`, which was
 never the part in doubt, and the second drives the button's own
 handler — the three-state cycle and the marks the scrub band is drawn from shipped with their test
