@@ -35,9 +35,9 @@
  *                       native provider is WASAPI and the CPU/footprint rows are
  *                       not sampled (no `top`; they print as n/a).
  *        PS_STREAM_LANES=1|0  pin streamed lanes for both passes; unset = the
- *                       platform default (on for macOS, off for win32 until its
- *                       read path is positional) — how the other answer is
- *                       measured on a machine.
+ *                       platform default (on for macOS and win32, off
+ *                       elsewhere) — how the other answer is measured on a
+ *                       machine.
  */
 // Every E2E driver runs under a deadline: a hang prints where it was and
 // exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
@@ -336,9 +336,9 @@ async function runPass(kind, songs) {
   liveApp = app
   await val(win, `(() => { const p = JSON.parse(localStorage.getItem('singz.audio') || '{}'); p.nativePlayback = ${kind === 'native'}; localStorage.setItem('singz.audio', JSON.stringify(p)); localStorage.setItem('singz.desktop.native-playback', '${kind === 'native' ? 1 : 0}'); localStorage.setItem('singz.met', JSON.stringify({ click: false, countInBars: 0, volume: 0, accent: true, grid: true })); return 1 })()`)
   // PS_STREAM_LANES=1|0 pins the desktop's streamed-lanes preference for the
-  // run. The platform default (on for macOS, off for win32 until its read
-  // path is positional) is what a singer gets; this is how the OTHER answer
-  // is measured on a machine — the Windows streaming proof runs with it at 1.
+  // run. The platform default is what a singer gets; this is how the OTHER
+  // answer is measured on a machine — the Windows streaming proof ran with it
+  // at 1 while win32 still defaulted off, and at 0 for its control.
   if (process.env.PS_STREAM_LANES === '1' || process.env.PS_STREAM_LANES === '0') {
     await val(win, `localStorage.setItem('singz.desktop.stream-lanes', '${process.env.PS_STREAM_LANES}')`)
     log(`  [${kind}] streamed lanes pinned ${process.env.PS_STREAM_LANES === '1' ? 'ON' : 'OFF'} for this run`)

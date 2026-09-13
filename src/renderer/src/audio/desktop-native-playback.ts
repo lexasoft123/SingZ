@@ -874,9 +874,9 @@ export class DesktopNativePlaybackClient {
       ...(graphDocument ? { graphDocument } : {}),
       // In EVERY prepare — ahead, Play and seam alike — so it is part of the
       // ahead signature and a toggle between prepares is a rebuild, never a
-      // silent mismatch. On by default on macOS, as on the phones (Windows
-      // waits on a positional read path — see the preference); the core
-      // falls back to decoding any lane it cannot stream.
+      // silent mismatch. On by default on macOS and Windows, as on the
+      // phones (see the preference for the Windows read-path history); the
+      // core falls back to decoding any lane it cannot stream.
       streamLanes: desktopStreamLanesPreferred(detectedDesktopPlatform())
     }
   }

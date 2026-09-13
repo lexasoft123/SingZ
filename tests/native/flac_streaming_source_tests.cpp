@@ -13,6 +13,9 @@
 #include <FLAC/stream_encoder.h>
 
 #include <algorithm>
+#include <atomic>
+#include <random>
+#include <thread>
 
 #include <cmath>
 #include <cstdio>
@@ -559,12 +562,9 @@ int main() {
     // but NOT the check that followed it left `duplicated` at -1 and failed
     // the suite on Windows by construction — a red that says nothing.
     //
-    // The Windows readAt seeks before every read and never consults the
-    // inherited position, so a shared file pointer cannot bite this serial
-    // interleaving on either platform; what the test pins is that neither
-    // source depends on where the other left the cursor. Two Windows sources
-    // reading CONCURRENTLY would be a different question, needing overlapped
-    // IO — see the note in flac_streaming_source.cpp — and nothing does that.
+    // Serial interleaving: what this case pins is that neither source depends
+    // on where the other left the cursor. The CONCURRENT question — two
+    // threads on one shared file position — is case 12 below.
     int duplicated = -1;
 #if defined(_WIN32)
     duplicated = _dup(first.get());
@@ -614,6 +614,120 @@ int main() {
     }
     std::remove(wav2.c_str());
     std::remove(flac2.c_str());
+  }
+
+  // ---- 12. two sources over ONE descriptor read CONCURRENTLY ---------------
+  //
+  // Case 11 is serial. The prepare actually opens two sources per lane and
+  // drives them from two THREADS — the feeder's and the waveform pass's — and
+  // on Windows the first `readAt` was `_lseeki64` + `_read`: two calls on a
+  // file position that `_dup` shares, so each thread moved the other's cursor
+  // between its seek and its read and libFLAC got frames from the wrong
+  // offset. That did not fail at prepare, where the decode fallback engages,
+  // but mid-song, as malformed frames. The positioned `ReadFile` replaced it;
+  // this case is what would have caught the first version.
+  //
+  // A walks the whole file forward on one thread while B and C scrub at
+  // random on two more; every frame any of them returns is compared against
+  // the reference. Thousands of interleavings per run.
+  {
+    const uint32_t rate3 = 44100;
+    const std::string wav3 = writeStereoWav(200000, rate3);
+    const std::string flac3 = tempPath(".flac");
+    std::remove(flac3.c_str());
+    check(singz::compactStem(wav3, flac3).ok, "a fixture for the concurrent readers");
+    const Reference reference = fullDecode(flac3);
+    check(reference.frames > 0, "and it decodes as a reference");
+
+    singz::OwnedFileDescriptor first = openRead(flac3);
+    int duplicated = -1;
+#if defined(_WIN32)
+    duplicated = _dup(first.get());
+#else
+    duplicated = ::dup(first.get());
+#endif
+    int duplicated2 = -1;
+#if defined(_WIN32)
+    duplicated2 = _dup(first.get());
+#else
+    duplicated2 = ::dup(first.get());
+#endif
+    check(duplicated >= 0 && duplicated2 >= 0, "the descriptor duplicates for the concurrent trio");
+    auto walker = singz::openStreamingAudioSource(std::move(first), {}, nullptr);
+    auto scrubber = duplicated < 0
+                        ? nullptr
+                        : singz::openStreamingAudioSource(
+                              singz::OwnedFileDescriptor(duplicated), {}, nullptr);
+    auto scrubber2 = duplicated2 < 0
+                         ? nullptr
+                         : singz::openStreamingAudioSource(
+                               singz::OwnedFileDescriptor(duplicated2), {}, nullptr);
+    check(walker != nullptr && scrubber != nullptr && scrubber2 != nullptr,
+          "and all three concurrent sources open");
+
+    if (walker != nullptr && scrubber != nullptr && scrubber2 != nullptr) {
+      std::atomic<bool> walkerOk{true};
+      std::atomic<bool> scrubberOk{true};
+      std::atomic<uint64_t> walked{0};
+      std::atomic<uint64_t> scrubbed{0};
+      const size_t block = 1024;
+      std::thread walk([&] {
+        std::vector<std::vector<float>> planes(2, std::vector<float>(block, 0.0F));
+        float* out[2] = {planes[0].data(), planes[1].data()};
+        uint64_t at = 0;
+        while (walkerOk.load()) {
+          size_t got = 0;
+          if (walker->read(out, block, &got) != singz::DecodedAudioStatus::Ok) {
+            walkerOk.store(false);
+            break;
+          }
+          if (got == 0) break;
+          for (size_t frame = 0; frame < got && walkerOk.load(); frame++)
+            for (uint32_t c = 0; c < 2; c++)
+              if (planes[c][frame] != reference.channels[c][at + frame]) walkerOk.store(false);
+          at += got;
+        }
+        walked.store(at);
+      });
+      // A seek is a binary search of small positioned reads, so a scrubber is
+      // where the cursor traffic is; two of them on one shared position is
+      // what makes a seek+read race likely rather than merely possible.
+      auto scrubLoop = [&](singz::StreamingAudioSource* source, uint64_t seed) {
+        std::vector<std::vector<float>> planes(2, std::vector<float>(block, 0.0F));
+        float* out[2] = {planes[0].data(), planes[1].data()};
+        std::mt19937_64 rng(seed);
+        std::uniform_int_distribution<uint64_t> where(0, reference.frames - block - 1);
+        uint64_t total = 0;
+        for (int round = 0; round < 1500 && scrubberOk.load(); round++) {
+          const uint64_t target = where(rng);
+          if (source->seek(target) != singz::DecodedAudioStatus::Ok) {
+            scrubberOk.store(false);
+            break;
+          }
+          size_t got = 0;
+          if (source->read(out, block, &got) != singz::DecodedAudioStatus::Ok) {
+            scrubberOk.store(false);
+            break;
+          }
+          for (size_t frame = 0; frame < got && scrubberOk.load(); frame++)
+            for (uint32_t c = 0; c < 2; c++)
+              if (planes[c][frame] != reference.channels[c][target + frame]) scrubberOk.store(false);
+          total += got;
+        }
+        scrubbed.fetch_add(total);
+      };
+      std::thread scrub([&] { scrubLoop(scrubber.get(), 0x5EEDULL); });
+      std::thread scrub2([&] { scrubLoop(scrubber2.get(), 0xC0FFEEULL); });
+      walk.join();
+      scrub.join();
+      scrub2.join();
+      check(walkerOk.load() && walked.load() == reference.frames,
+            "the walker reads the whole file correctly while another thread scrubs the same descriptor");
+      check(scrubberOk.load() && scrubbed.load() > 0,
+            "and every scrub lands on the right frames while the walker reads");
+    }
+    std::remove(wav3.c_str());
+    std::remove(flac3.c_str());
   }
 
   if (failures == 0) std::printf("flac streaming source: every case matches the full decode\n");

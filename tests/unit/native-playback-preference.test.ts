@@ -57,14 +57,15 @@ describe('desktop native playback preference', () => {
       getItem: (key: string) => (key === DESKTOP_STREAM_LANES_KEY ? value : null)
     })
 
-    it('defaults on for macOS only — the Windows read path is not positional yet', () => {
-      // Two descriptors per lane read from two threads; on Windows `readAt`
-      // is seek+read on a shared file position, so the feeder and the
-      // waveform pass would corrupt each other's reads mid-song. Off there
-      // until that path is measured, not because streaming is slower.
+    it('defaults on for the two platforms whose read path is positional and whose harness has run', () => {
+      // Two descriptors per lane read from two threads. macOS reads with
+      // pread; Windows read with seek+read on a shared file position until
+      // `readAt` became a positioned ReadFile, which is when win32 joined —
+      // measured on the field laptop with streaming pinned on and off.
+      // Linux has never run the harness and stays on decode.
       vi.stubGlobal('localStorage', streamStorage(null))
       expect(desktopStreamLanesPreferred('darwin')).toBe(true)
-      expect(desktopStreamLanesPreferred('win32')).toBe(false)
+      expect(desktopStreamLanesPreferred('win32')).toBe(true)
       expect(desktopStreamLanesPreferred('other')).toBe(false)
     })
 
@@ -78,7 +79,8 @@ describe('desktop native playback preference', () => {
     it('treats a missing localStorage as no stored choice', () => {
       vi.stubGlobal('localStorage', undefined)
       expect(desktopStreamLanesPreferred('darwin')).toBe(true)
-      expect(desktopStreamLanesPreferred('win32')).toBe(false)
+      expect(desktopStreamLanesPreferred('win32')).toBe(true)
+      expect(desktopStreamLanesPreferred('other')).toBe(false)
     })
   })
 })

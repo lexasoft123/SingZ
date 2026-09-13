@@ -40,6 +40,14 @@
 #include <vector>
 
 #if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
 #include <fcntl.h>
 #include <io.h>
 #else
@@ -76,19 +84,32 @@ int consumeAsDescriptor(OwnedFileDescriptor* descriptor) noexcept {
 // One positioned read. Every read in this file goes through it, so the file
 // position the kernel holds is never consulted and never moved.
 //
-// Windows has no pread and its _dup shares a position too; it seeks and reads,
-// which is correct for ONE source and no worse than what it had. Nothing on
-// Windows streams today, and a second source there would need overlapped IO.
-// That "nothing" is held on the desktop side: `desktopStreamLanesPreferred`
-// (src/renderer/src/audio/native-playback-preference.ts) defaults streaming
-// off on win32 for exactly this reason — the prepare dups a second descriptor
-// per lane for the waveform pass, which is the second source. Lift both at
-// once, with a measurement.
+// Windows has no pread, and `_dup` shares a file position exactly as POSIX
+// dup does. The first version here seeked and then read — correct for ONE
+// source, and a race for the two the prepare actually opens per lane (the
+// feeder's and the waveform pass's, on two threads), each moving the other's
+// cursor between its seek and its read. `ReadFile` with an OVERLAPPED that
+// carries the offset is Windows' positioned read: on a synchronous handle it
+// reads at THAT offset regardless of the shared pointer (it also moves the
+// pointer afterwards, which nothing in this file ever reads). The CRT
+// descriptor's handle comes from `_get_osfhandle`; a dup'ed descriptor has a
+// duplicated handle onto the same file object, which is what makes the
+// offset-per-call the only position that matters. `ERROR_HANDLE_EOF` is a
+// read past the end, i.e. zero bytes, the same answer pread gives.
 int64_t readAt(int fd, void* buffer, size_t bytes, int64_t offset) noexcept {
   if (fd < 0) return -1;
 #if defined(_WIN32)
-  if (_lseeki64(fd, offset, SEEK_SET) < 0) return -1;
-  return _read(fd, buffer, static_cast<unsigned int>(bytes));
+  const HANDLE handle = reinterpret_cast<HANDLE>(_get_osfhandle(fd));
+  if (handle == INVALID_HANDLE_VALUE) return -1;
+  OVERLAPPED at{};
+  at.Offset = static_cast<DWORD>(static_cast<uint64_t>(offset) & 0xFFFFFFFFULL);
+  at.OffsetHigh = static_cast<DWORD>(static_cast<uint64_t>(offset) >> 32);
+  DWORD got = 0;
+  const DWORD want = static_cast<DWORD>(std::min<size_t>(bytes, 0x7FFFFFFFU));
+  if (!ReadFile(handle, buffer, want, &got, &at)) {
+    return GetLastError() == ERROR_HANDLE_EOF ? 0 : -1;
+  }
+  return static_cast<int64_t>(got);
 #else
   return ::pread(fd, buffer, bytes, static_cast<off_t>(offset));
 #endif
@@ -97,10 +118,14 @@ int64_t readAt(int fd, void* buffer, size_t bytes, int64_t offset) noexcept {
 int64_t fileLength(int fd) noexcept {
   if (fd < 0) return -1;
 #if defined(_WIN32)
-  const int64_t at = _lseeki64(fd, 0, SEEK_CUR);
-  const int64_t end = _lseeki64(fd, 0, SEEK_END);
-  if (at >= 0) (void)_lseeki64(fd, at, SEEK_SET);
-  return end;
+  // Asked of the handle, not walked with the cursor: nothing reads the
+  // shared position any more, and the length of a file is no reason to move
+  // it under a concurrent reader either.
+  const HANDLE handle = reinterpret_cast<HANDLE>(_get_osfhandle(fd));
+  if (handle == INVALID_HANDLE_VALUE) return -1;
+  LARGE_INTEGER size{};
+  if (!GetFileSizeEx(handle, &size)) return -1;
+  return static_cast<int64_t>(size.QuadPart);
 #else
   struct stat info {};
   if (::fstat(fd, &info) != 0) return -1;

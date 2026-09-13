@@ -52,23 +52,23 @@ export function desktopNativePlaybackPreferred(platform = detectedDesktopPlatfor
  *  costs ~3 s of decode per prepare on a six-lane song and pays it again on
  *  any Play the graph prepared ahead cannot serve.
  *
- *  **macOS only by default.** The core reads a streamed lane through TWO
- *  descriptors per lane — the feeder's and the waveform pass's, `dup`ed from
- *  one open — from two threads at once. On POSIX every read is a `pread`, so
- *  the shared file position is never consulted. Windows has no `pread`:
- *  `readAt` there is `_lseeki64` + `_read`, correct for ONE reader, and the
- *  two threads would move each other's cursor between the seek and the read
- *  (`zcore/src/media/flac_streaming_source.cpp`, `readAt`). That would not
- *  fail at prepare, where the decode fallback engages, but mid-song as
- *  malformed FLAC frames — and nothing on this Mac can measure it. Windows
- *  streams when its read path is positional and the field laptop has run the
- *  session harness on it; until then a stored '1' is the deliberate way to
- *  measure it there. */
+ *  On by default on macOS AND Windows. The core reads a streamed lane through
+ *  TWO descriptors per lane — the feeder's and the waveform pass's, `dup`ed
+ *  from one open — from two threads at once. POSIX reads are `pread`; the
+ *  Windows read was `_lseeki64` + `_read` on the shared file position, a
+ *  race the two threads would have lost mid-song as malformed frames, and the
+ *  reason the first cut of this preference defaulted win32 off. `readAt` is
+ *  a positioned `ReadFile` there now (`zcore/src/media/flac_streaming_source.cpp`),
+ *  pinned by a concurrent two-reader ctest, and the field laptop ran the
+ *  session harness with streaming on before and after: the streamed pass is
+ *  lighter (800 MB against 920 MB playing, 0.3% against 4.7% CPU) with a
+ *  clean feeder log. Linux ('other') has never run the harness; a stored '1'
+ *  is the deliberate way to measure it there. */
 export const DESKTOP_STREAM_LANES_KEY = 'singz.desktop.stream-lanes'
 
 export function desktopStreamLanesPreferred(platform = detectedDesktopPlatform()): boolean {
   const stored = typeof localStorage === 'undefined' ? null : localStorage.getItem(DESKTOP_STREAM_LANES_KEY)
   if (stored === '1') return true
   if (stored === '0') return false
-  return platform === 'darwin'
+  return platform === 'darwin' || platform === 'win32'
 }
