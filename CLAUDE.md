@@ -130,6 +130,29 @@ parallel for cross-platform verification) — vitest unit tests in
 `tests/unit/` covering the v2 FLAC format with electron aliased to a stub).
 Load files through the hidden `<input type=file>` — same code
 path as drag-drop. Read the screenshots you take.
+**A desktop change is verified on the Windows field laptop TOGETHER with the
+Mac, not after it, and not by CI alone** (the user's rule, 2026-09-13). The
+Mac is the dev box and most of the fleet is Windows, and the two have
+disagreed at every layer that matters: CoreAudio against WASAPI, `pread`
+against a seek-then-read on a shared file position (the streaming race that
+only MSVC on that machine could show — the Mac passed throughout), four cores
+where everything used to queue behind main. Neither Windows leg of CI opens a
+native transport: Core Windows is ctest, and the E2E Windows smoke never
+presses Play. So the laptop run is the ONLY place Windows native playback is
+exercised, and a playback or engine change reported "verified" on the Mac
+alone is not verified. The recipe is a repeatable half-hour and lives OUTSIDE
+this file on purpose — its host, user and paths are internal and this file is
+public: the machine half is `~/.claude/rules/dell-xps.md`, the SingZ half is
+the `dell-desktop-verification` project memory (export the tree, reuse
+`node_modules` from the newest tree with the same lockfile hash, build the
+addon under vcvars, then the session harness and any probe through a
+scheduled task in the interactive session — session 0 has no audio
+endpoint). Two rules ride with it: run the SAME harness against a control on
+that machine before calling a red a regression (its numbers are 10x the
+Mac's and it fails for its own reasons — CPU and working-set rows within a
+few percent are its noise, not yours), and report both platforms side by
+side in the same message. The `e2e-verifier` agent has a `windows-field`
+lane for exactly this; launch it alongside the mac one.
 **Metro serves JS live; NATIVE needs a rebuild+install, and a stale binary
 reports green** — a mobile run against an app built before the native change
 does not merely miss it, it turns every native-facing check VACUOUS: the

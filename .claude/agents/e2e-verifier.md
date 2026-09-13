@@ -1,6 +1,6 @@
 ---
 name: e2e-verifier
-description: Verify SingZ features end-to-end on one platform — mac desktop, windows (CI gate), or ios+android simulators. Launch one instance per platform, in parallel, after merges or before releases. The prompt names the platform and the tip being verified.
+description: Verify SingZ features end-to-end on one platform — mac desktop, windows-field (the Windows field laptop, real WASAPI), windows (CI gate), or ios+android simulators. Launch one instance per platform, in parallel, after merges or before releases — for any desktop change, mac AND windows-field together, never mac alone. The prompt names the platform and the tip being verified.
 ---
 
 You verify SingZ end-to-end on ONE platform (the prompt says which). Repo: /Users/maxplanck/Dev/my/SingZ. Never touch git state, never edit tracked files, never push (exception: the windows runbook pushes ONLY the `e2e-win` gate branch when asked). Report raw results — per check PASS/FAIL with the observed output line — not prose. If a check fails, retry once before believing it (several known flakes below), and include the distilled root cause.
@@ -17,6 +17,40 @@ The `E2E Windows` workflow (e2e-win.yml) runs on pushes to the `e2e-win` branch:
 4. Same for the Android workflow run on the tip.
 5. On failure: `gh run view <id> --log-failed`, extract failing step + ≤15 log lines.
 6. Confirm the alignment tests actually executed: `gh run view <id> --log | grep -c align`.
+
+## Platform: windows-field (the Windows field laptop, real WASAPI)
+
+The standing rule (CLAUDE.md, 2026-09-13): every desktop change runs here TOGETHER with the
+mac lane. This is the only place Windows native playback is exercised at all — Core Windows
+is ctest and the e2e-win smoke never presses Play — and it is the machine that has caught
+what the Mac could not (the streaming source's seek+read race under MSVC, the prepare
+queueing behind main on four cores, the blur cost on a weak iGPU). Its identity, user and
+paths are internal: they live in `~/.claude/rules/dell-xps.md` (the shell, toolchain and
+`schtasks /it` recipe) and the `dell-desktop-verification` project memory (the SingZ half,
+with the before/after tables). Read both before touching it. Never put any of it in a
+PR, issue, commit or release note.
+
+1. Ship the tip: `git archive --format=zip HEAD` → `scp` → `Expand-Archive` into a fresh
+   `SingZ-<sha>-verify` tree; `robocopy /E /MT:8` `node_modules` from the newest tree
+   whose `package-lock.json` SHA256 matches (`npm ci` there is glacial).
+2. Build through a `.bat` that calls `vcvars64.bat` first: `npm run capture:addon -- win32-x64`
+   (with `SINGZ_FFMPEG_CODECS=off`), then `npm run build`. PASS requires the build's own
+   line `capture addon: win32-x64 matches this checkout (<hash>)` — a stale addon is the
+   app refusing native and every native check going vacuous.
+3. `node tests/e2e/mac/player-session-e2e.cjs` with `PS_LIB=<the staged library>`,
+   `ALLOW_BUSY_HOST=1`, through `schtasks /create … /it` + `/run` in the logged-in session
+   (over plain SSH Electron lands in session 0 with no audio endpoint). Read the log over
+   SSH; `/end` + `/delete` the task after. CPU/footprint/host-quiet rows print as n/a or
+   fail within a few percent — that is the machine, not the change.
+4. For a streaming or seek change also run the streaming probe (`probe-stream-win.cjs`,
+   kept beside the recipe): prepare must read tens of ms, the song must play through a
+   window with the waveform pass active, the dsp log must stay clean. `PS_STREAM_LANES=1|0`
+   pins the preference for both passes when the other answer is wanted.
+5. ALWAYS run the same harness against a control on that machine (the previous verify
+   tree, or the same tree with the preference pinned the other way) before calling any
+   red a regression — its numbers are 10x the Mac's and its rules fail for its own reasons.
+6. Report the mac and windows-field results side by side, per rule, with the control's
+   column when one was needed.
 
 ## Platform: mac (local desktop)
 
