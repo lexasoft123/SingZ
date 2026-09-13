@@ -244,14 +244,19 @@ export class MultitrackEngine {
     if (this.nativePlayback?.active || this.nativePlayback?.preparedAhead) this.beginNativePlaybackUnload()
   }
 
-  /** The engine's request for the native graph, as Play builds it. */
-  private nativePlaybackRequest(countIn: boolean): DesktopNativePlaybackEngineRequest {
+  /** The engine's request for the native graph, as Play builds it. The
+   * position is the remembered start unless a caller names another — the
+   * count-in restart names the spot the transport is parked at. */
+  private nativePlaybackRequest(
+    countIn: boolean,
+    positionSeconds = this.startOffset
+  ): DesktopNativePlaybackEngineRequest {
     return {
       lanes: this.tracks,
       beat: this.beatsInfo,
       metronome: this.met,
       countIn,
-      positionSeconds: this.startOffset,
+      positionSeconds,
       durationSeconds: this.duration,
       sampleRate: this.ctx.sampleRate,
       masterGain: this.masterVol,
@@ -329,6 +334,7 @@ export class MultitrackEngine {
     client: DesktopNativePlaybackClient
     tryStart: typeof import('./desktop-native-playback').tryStartDesktopNativePlayback
     prepareAhead: typeof import('./desktop-native-playback').prepareDesktopNativePlaybackAhead
+    decide: typeof import('./desktop-native-playback').decideDesktopNativePlayback
     RecoveryError: typeof import('./desktop-native-playback').DesktopNativeRecoveryError
   }> {
     const module = await import('./desktop-native-playback')
@@ -343,6 +349,7 @@ export class MultitrackEngine {
       client: this.nativePlayback,
       tryStart: module.tryStartDesktopNativePlayback,
       prepareAhead: module.prepareDesktopNativePlaybackAhead,
+      decide: module.decideDesktopNativePlayback,
       RecoveryError: module.DesktopNativeRecoveryError
     }
   }
@@ -693,6 +700,7 @@ export class MultitrackEngine {
 
   /** Live count-in progress for the transport dots (null when not counting). */
   get countInStatus(): { total: number; done: number; perBar: number } | null {
+    if (this.nativePlayback?.active) return this._playing ? this.nativeCountInStatus() : null
     const c = this.countInfo
     if (c === null || !this._playing) return null
     // Dots flip when clicks are HEARD: the render clock leads the ear by the
@@ -706,6 +714,50 @@ export class MultitrackEngine {
     let done = 0
     for (const at of c.clickCtx) if (now >= at) done++
     return { total: c.total, done: Math.min(c.total, done), perBar: c.perBar }
+  }
+
+  /** The dots under native playback. The core owns the count-in — how many
+   *  clicks, how they group, where the ear is on the runway to the landing —
+   *  and this lays the same beats the Web Audio path would have clicked over
+   *  it, so a dot lights when the ear reaches THAT click's beat, exactly as
+   *  `countInStatus` lights them from `clickCtx`. Where the two disagree on
+   *  the count (a grid edited under a prepared plan) the runway is divided
+   *  evenly instead, the shape the telemetry alone allows. Before this the
+   *  dots never showed under native at all: `countInfo` is the Web Audio
+   *  schedule, and native never builds one. */
+  private nativeCountInStatus(): { total: number; done: number; perBar: number } | null {
+    const heard = this.nativePlayback?.countInHeard()
+    if (!heard) return null
+    const offsets = this.nativeCountInOffsets(heard.landingSeconds)
+    let done: number
+    if (offsets.length === heard.total) {
+      done = 0
+      for (const offset of offsets) if (heard.secondsToLanding >= offset) done++
+    } else if (heard.preRollSeconds > 0) {
+      const elapsed = Math.max(0, heard.preRollSeconds + heard.secondsToLanding)
+      done = Math.floor((elapsed * heard.total) / heard.preRollSeconds) + 1
+    } else {
+      done = 0
+    }
+    return { total: heard.total, done: Math.max(0, Math.min(heard.total, done)), perBar: heard.perBar }
+  }
+
+  /** The count-in clicks the core planned before `anchorSec`, in project
+   *  seconds relative to it (negative): the real preceding beats on a grid —
+   *  bar length AT the entry beat, as the planner and the Web Audio path
+   *  both take it — or the gridless ticks one output second apart, which in
+   *  project time is a playback rate each. */
+  private nativeCountInOffsets(anchorSec: number): number[] {
+    const bars = this.met.countInBars
+    if (!(bars > 0)) return []
+    const g = this.beatsInfo
+    if (g === null) {
+      const ticks = bars * SEC_COUNT_TICKS
+      return Array.from({ length: ticks }, (_, k) => -(ticks - k) * SEC_COUNT_PERIOD * this.rate)
+    }
+    const entryBeat = beatIndexAtOrAfter(g, anchorSec)
+    const count = bars * barLengthAt(g, entryBeat)
+    return Array.from({ length: count }, (_, k) => beatTime(g, entryBeat - count + k) - anchorSec)
   }
 
   async setBeats(info: BeatInfo | null): Promise<void> {
@@ -1468,8 +1520,36 @@ export class MultitrackEngine {
       }
       const atEnd = this.nativePlayback.status?.transportState === 'completed' ||
         this.startOffset >= this.duration - 0.01
+      const restart = this.regionLoop && this.region ? this.region.start : 0
+      // Every Play with the count-in on COUNTS IN, from wherever the singer
+      // is — legacy does (it schedules a fresh pre-roll on each play) and the
+      // phones do (a paused native transport is stopped, parked and prepared
+      // again anchored at the paused spot). A prepared plan's count-in is
+      // fixed at prepare, so resume() cannot count in: before this, the
+      // desktop counted in on the FIRST Play of a song and never again — not
+      // after a scrub, not after a Pause — which reached a singer as "the
+      // count-in is broken". Paused inside its own count-in, the position
+      // reads the landing (the facade holds the bar there), so it counts in
+      // again to the same landing. When native cannot take the request any
+      // more (it decides on the live graph, transpose and tempo) the plain
+      // resume below is still the right fallback.
+      if (opts.countIn !== false && this.met.countInBars > 0) {
+        const from = atEnd ? restart : this.position
+        const prepare = await (await this.ensureNativePlayback()).decide(this.nativePlaybackRequest(true, from))
+        if (requestGeneration !== this.generation) return
+        if (prepare) {
+          await this.nativePlayback.restartWithCountIn(prepare)
+          if (requestGeneration !== this.generation) return
+          this.startOffset = from
+          this._playing = true
+          this.clearRequestedPlaybackError()
+          this.syncBoundWatcher()
+          this.syncTrainWatcher()
+          this.emit()
+          return
+        }
+      }
       if (atEnd) {
-        const restart = this.regionLoop && this.region ? this.region.start : 0
         await this.nativePlayback.seek(restart)
         if (requestGeneration !== this.generation) return
         this.startOffset = restart
@@ -1647,6 +1727,7 @@ export class MultitrackEngine {
       // rebuild, which would otherwise restart playback under a paused UI.
       if (this.nativePlayback.transportParked && this.pendingPlayRequests.size === 0) {
         this._playing = false
+        this.startOffset = this.position
         this.syncBoundWatcher()
         this.syncTrainWatcher()
         this.emit()
@@ -1654,6 +1735,11 @@ export class MultitrackEngine {
       }
       void this.nativePlayback.pause().then(() => {
         this._playing = false
+        // Remember where it parked, as the Web Audio path does: the position
+        // a Play after this counts in to, and what the song reopens at once
+        // the native graph is gone. Paused inside a count-in this reads the
+        // landing, never the pre-roll frame.
+        this.startOffset = this.position
         this.syncBoundWatcher()
         this.syncTrainWatcher()
         this.emit()

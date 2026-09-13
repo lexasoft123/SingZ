@@ -290,6 +290,18 @@ export function mutedMasterGain(gain: number): number {
   return process.env.SINGZ_MUTE ? 0 : gain
 }
 
+/** The metronome is the OTHER thing the native graph plays, and it never
+ * passes through the master gain — the clicks bypass the master bus on
+ * purpose, so transpose, tempo and stem gains cannot colour them. Clamping
+ * the master alone therefore left every count-in and every click audible
+ * on a muted native run: the first driver to turn the count-in on came out
+ * of the singer's speakers, four clicks per Play, while its lanes were
+ * silent. The cue volume the renderer asks for is clamped to 0 here too, at
+ * prepare, which is the only place the plan's volume is set. */
+export function mutedCueVolume(volume: number): number {
+  return process.env.SINGZ_MUTE ? 0 : volume
+}
+
 export interface CaptureBindingLoadRuntime {
   addonPath: string
   electronVersion: string
@@ -1405,7 +1417,12 @@ export class CaptureOwner {
         ...(seamOfOwn
           ? { ...config, swapFromGeneration: BigInt(config.swapFromGeneration!) as unknown as string }
           : config),
-        masterGain: mutedMasterGain(config.masterGain)
+        masterGain: mutedMasterGain(config.masterGain),
+        // The clicks do not pass through the master gain (see mutedCueVolume).
+        playback: {
+          ...config.playback,
+          cues: { ...config.playback.cues, volume: mutedCueVolume(config.playback.cues.volume) }
+        }
       }
       log(
         'dsp',

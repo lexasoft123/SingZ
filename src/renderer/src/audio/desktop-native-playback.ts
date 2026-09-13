@@ -456,6 +456,59 @@ export class DesktopNativePlaybackClient {
     this.pendingSeekReceipt = null
     this.pendingSeekIssued = 0
   }
+  /** Where the current generation's count-in LANDS, in song seconds — the
+   *  anchor of a Play from mid-song, 0 for a count-in at the top — or null
+   *  for a generation with no pre-roll (count-in off, a seam, a rebuild at a
+   *  signed frame). The core runs a count-in at NEGATIVE project frames and
+   *  jumps to the landing when it ends, and the bar must not draw those
+   *  frames as song time: clamping them to 0 drew every mid-song count-in at
+   *  the top of the song for its whole length, and a Pause inside one parked
+   *  the bar there — the field report "the seek bar jumps to the song start
+   *  when I hit pause fast". The phones hold the bar AT the landing
+   *  (legacy's clock clamps at the start offset until the music enters), so
+   *  the bar and the lyrics sit on the line the singer chose while the count
+   *  runs; this is that rule on the desktop. */
+  private countInLandingSeconds: number | null = null
+  /** A pre-roll has been observed on the current generation. The count-in is
+   *  not over when the transport lands: the ear is a presentation latency
+   *  behind the render head, so the last clicks are still sounding — the
+   *  dots row stays up through that tail, and this is what says the tail
+   *  belongs to a count-in that actually ran (a rebuild at a signed frame
+   *  starts flat and has no tail). */
+  private countInSeen = false
+
+  /** Forget everything that described the generation being retired: the
+   *  seeks still owed a receipt, and the count-in landing the bar was holding
+   *  at. Every generation reset goes through here. */
+  private forgetTransport(): void {
+    this.clearPendingSeek()
+    this.countInLandingSeconds = null
+    this.countInSeen = false
+  }
+
+  /** The landing a prepare built from `request` counts in to, or null when
+   *  it has no pre-roll — the same reading of the request `configFor` makes
+   *  when it decides between a signed start frame and an anchor. */
+  private static countInLandingFor(
+    request: DesktopNativePlaybackPrepare,
+    preparedStartProjectFrame: number | undefined
+  ): number | null {
+    if (preparedStartProjectFrame !== undefined) return null
+    if (!request.countIn || request.metronome.countInBars <= 0) return null
+    return Math.max(0, request.positionSeconds)
+  }
+
+  /** The output latency as PROJECT frames — the span of song the ear is
+   *  behind the render head. The status reports it in output frames, and at
+   *  a non-unity playback rate the two differ by the rate, exactly as the
+   *  core scales it in its own audible projection. Null when the status
+   *  cannot say. */
+  private static latencyProjectFrames(status: DesktopPlaybackStatus): number | null {
+    const latency = Number(status.presentationLatencyFrames)
+    if (!Number.isSafeInteger(latency) || latency < 0) return null
+    const rate = Number.isFinite(status.playbackRate) && status.playbackRate > 0 ? status.playbackRate : 1
+    return Math.round(latency * rate)
+  }
   /** A generation prepared ahead of Play (see prepareAhead): prepared, never
    * opened, the output still Chromium's. Play opens and starts it when the
    * request it was prepared for is still the request; anything else unloads
@@ -541,6 +594,30 @@ export class DesktopNativePlaybackClient {
     }
     const frame = Number(status.audibleProjectFrame)
     if (!Number.isSafeInteger(frame)) return null
+    // A count-in in progress — or paused inside one: the core is at a
+    // negative frame counting up to 0, and the bar HOLDS at the landing. The
+    // decision is made on the frame the core REPORTED, not the projected
+    // one (the phones' rule): the audible frame is the rendered one less the
+    // output latency, so in the last milliseconds of a count-in the rendered
+    // frame has crossed zero while the audible one has not, and the other
+    // way round a moment later.
+    const landing = this.countInLandingSeconds
+    const rendered = Number(status.renderedProjectFrame)
+    if (landing !== null && Number.isSafeInteger(rendered)) {
+      if (rendered < 0) return landing
+      // Landed, with the ear still catching up: the audible frame reads a
+      // latency BEFORE the landing, which for a mid-song count-in is inside
+      // the song — a line the singer never chose. Floor it at the landing
+      // for that one latency span, as legacy floors its clock at the start
+      // offset. A seek back into that span shows the landing for a few
+      // milliseconds, which is harmless; a seek anywhere else is outside it.
+      const landingFrame = Math.round(landing * sampleRate)
+      const latency = DesktopNativePlaybackClient.latencyProjectFrames(status)
+      if (rendered >= landingFrame && frame < landingFrame &&
+          latency !== null && rendered - landingFrame <= latency) {
+        return landing
+      }
+    }
     let seconds = frame / sampleRate
     if (this.started && this.transportIntent === 'playing' &&
         (status.transportState === 'playing' || status.transportState === 'pre-roll')) {
@@ -553,6 +630,62 @@ export class DesktopNativePlaybackClient {
       }
     }
     return Math.max(0, seconds)
+  }
+
+  /** The count-in the EAR is inside, for the transport dots: how far the
+   *  heard position is from the landing (negative seconds while the clicks
+   *  are still to come), how many clicks the core planned and how they group,
+   *  and the pre-roll's span. Null when this generation has no count-in, or
+   *  when it is over — which is not when the transport lands but a
+   *  presentation latency later, because the last clicks are still sounding
+   *  then (the phones measured a 0.6 s route ending the row at three dots of
+   *  four). The engine turns this into dots on the same grid it would have
+   *  clicked itself. */
+  countInHeard(): {
+    secondsToLanding: number
+    landingSeconds: number
+    total: number
+    perBar: number
+    preRollSeconds: number
+  } | null {
+    const status = this.last
+    const sampleRate = status?.format.sampleRate
+    const landing = this.countInLandingSeconds
+    if (!status || !sampleRate || !this.ownsOutput || landing === null) return null
+    const total = status.countInEventCount
+    const perBar = status.countInBeatsPerBar
+    const rendered = Number(status.renderedProjectFrame)
+    const preRollFrames = Math.abs(Number(status.preRollFrames))
+    // The output latency is in OUTPUT frames; the runway is in project
+    // frames, and at a non-unity rate the two differ by the rate — exactly
+    // the scaling the core's own audible projection applies.
+    const latency = DesktopNativePlaybackClient.latencyProjectFrames(status)
+    if (!(total > 0) || !(perBar > 0) || !Number.isSafeInteger(rendered) ||
+        latency === null || !Number.isFinite(preRollFrames)) {
+      return null
+    }
+    const row = (heardFrames: number) => ({
+      secondsToLanding: heardFrames / sampleRate,
+      landingSeconds: landing,
+      total,
+      perBar,
+      preRollSeconds: preRollFrames / sampleRate
+    })
+    // Counting: the render head is at a negative frame and the ear a latency
+    // behind it.
+    if (rendered < 0) {
+      this.countInSeen = true
+      return row(rendered - latency)
+    }
+    // Landed, and this run DID count in: the tail runs forward from the
+    // landing for one latency span, then the row is over — and stays over,
+    // so a later scrub back below the landing cannot revive it.
+    if (!this.countInSeen) return null
+    const sinceLanding = rendered - Math.round(landing * sampleRate)
+    const remaining = latency - sinceLanding
+    if (sinceLanding >= 0 && remaining > 0) return row(-remaining)
+    this.countInSeen = false
+    return null
   }
 
   /** Whether the retained status still describes a live transport. Output
@@ -893,6 +1026,14 @@ export class DesktopNativePlaybackClient {
     const config = this.configFor(request, route, preparedStartProjectFrame, initialTransport)
     let generation = ''
     let started = false
+    // Where this generation's count-in lands, read off the same request the
+    // prepare was built from — an adopted generation was prepared from an
+    // identical config, so the same reading holds for it. Set before the
+    // first status arrives, so the very first pre-roll frame is drawn as
+    // the landing and never as 0.
+    this.countInLandingSeconds =
+      DesktopNativePlaybackClient.countInLandingFor(request, preparedStartProjectFrame)
+    this.countInSeen = false
     try {
       if (preparedGeneration) {
         generation = preparedGeneration
@@ -929,7 +1070,7 @@ export class DesktopNativePlaybackClient {
         )
         this.generation = ''
         this.last = null
-        this.clearPendingSeek()
+        this.forgetTransport()
       }
       // Once rendering started, or when ASIO was explicitly requested, a
       // provider error is never hidden by acquiring Chromium/WASAPI output in
@@ -997,15 +1138,45 @@ export class DesktopNativePlaybackClient {
           status.transportTelemetryQuality === 'unavailable') {
         throw new Error('Native rebuild has no trustworthy signed transport position.')
       }
-      const preparedStartProjectFrame = finiteSignedFrame(
+      const renderedFrame = finiteSignedFrame(
         status.renderedProjectFrame,
         'Native rendered project frame'
       )
+      // INSIDE A COUNT-IN the rendered frame is a pre-roll frame, negative,
+      // and it must not be carried into the next plan: a plan prepared at a
+      // signed frame gets no anchor, so its pre-roll lands at the ENTRY — the
+      // top of the song — and a seam hands the old pre-roll clock to a plan
+      // with the same landing of 0. Measured: the click turned on during a
+      // count-in from 60 s brought the song in at 0.01 s, and a control
+      // touched while paused inside one moved the bar to 0 and the next
+      // Play counted in to the top. So a change inside a count-in is a
+      // REBUILD anchored at the landing — the count-in starts over to the
+      // same spot, as a Play after a Pause does — never a seam, never the
+      // negative frame. With the count-in turned off by this very change the
+      // same request starts flat at the landing, which is where the singer
+      // asked to be.
+      //
+      // A count-in at the TOP is left to the seam while PLAYING, as before:
+      // its landing is the entry, so the carried clock lands in the right
+      // place with nothing added, and the seam keeps the count-in's timing.
+      // PAUSED inside one it is the rebuild too, because the rebuild would
+      // otherwise carry the negative frame as its signed start, and the
+      // core refuses a start below the NEW plan's own pre-roll — the
+      // count-in turned off, fewer bars, a grid edit — after the old
+      // generation is already gone: a playback error where the singer
+      // touched one control.
       // The intent, not the snapshot (see transportIntent). A song that ran
       // out is parked whatever was intended: the core says so itself.
       const state = this.transportIntent === 'playing' && status.transportState !== 'completed'
         ? 'playing'
         : 'paused'
+      const landing = this.countInLandingSeconds
+      const insideCountIn = renderedFrame < 0 && landing !== null &&
+        (landing > 0 || state !== 'playing')
+      const rebuilt: DesktopNativePlaybackPrepare = insideCountIn
+        ? { ...request, positionSeconds: landing }
+        : request
+      const preparedStartProjectFrame = insideCountIn ? undefined : renderedFrame
       const loop = request.loop
         ? {
             startProjectFrame: Math.round(request.loop.start * this.route.sampleRate),
@@ -1018,7 +1189,7 @@ export class DesktopNativePlaybackClient {
       }
       // Validate the signed restore request as well. Once the old rendered
       // generation is retired, failure is fail-closed and never wakes WebAudio.
-      this.configFor(request, this.route, preparedStartProjectFrame, initialTransport)
+      this.configFor(rebuilt, this.route, preparedStartProjectFrame, initialTransport)
       this.assertCommandableGeneration()
       // A SEAM first, as the phones do: while the song is rendering, the
       // candidate is prepared on the running stream (`swapFromGeneration`),
@@ -1031,10 +1202,10 @@ export class DesktopNativePlaybackClient {
       // the fallback then, exactly as before.
       // Never for a forced rebuild: that is the route-change path, where the
       // stream the seam would keep is the one that just went away.
-      const seamable = !options.force && this.started && state === 'playing' &&
+      const seamable = !insideCountIn && !options.force && this.started && state === 'playing' &&
         (status.transportState === 'playing' || status.transportState === 'pre-roll') &&
         status.swapPendingGeneration === '0' && status.retiringSwapGeneration === '0'
-      if (seamable && await this.seam(request, oldGeneration, preparedStartProjectFrame, initialTransport)) return
+      if (seamable && await this.seam(rebuilt, oldGeneration, renderedFrame, initialTransport)) return
       this.stopPolling()
       if (this.started) {
         try { await window.singz.stopDesktopPlayback(oldGeneration) } catch { /* unload is authoritative */ }
@@ -1048,9 +1219,9 @@ export class DesktopNativePlaybackClient {
       this.generation = ''
       this.started = false
       this.last = null
-      this.clearPendingSeek()
-      await this.activate(request, this.route, false, preparedStartProjectFrame, initialTransport)
-      this.request = request
+      this.forgetTransport()
+      await this.activate(rebuilt, this.route, false, preparedStartProjectFrame, initialTransport)
+      this.request = rebuilt
     })
   }
 
@@ -1090,8 +1261,15 @@ export class DesktopNativePlaybackClient {
     this.generation = generation
     this.request = request
     // A seam's generation counts its seeks from zero: a receipt base read off
-    // the old one is meaningless now.
-    this.clearPendingSeek()
+    // the old one is meaningless now — and it was prepared at a signed frame,
+    // so it has no count-in landing to hold at either. Except the one seam
+    // that is still inside a count-in: at the top of the song (a landing
+    // past the top is a rebuild, above), where the core carries the
+    // pre-roll clock across — the landing stays 0 so the dots go on
+    // counting the clicks that are still to come rather than vanishing.
+    const carriesCountIn = preparedStartProjectFrame < 0 && this.countInLandingSeconds !== null
+    this.forgetTransport()
+    if (carriesCountIn) this.countInLandingSeconds = 0
     // The landing: the transport telemetry names the old generation until
     // the render thread hands the clock across at a block boundary, then the
     // new one. Bounded by reads, not by a timer; a seam that has not landed
@@ -1120,6 +1298,62 @@ export class DesktopNativePlaybackClient {
       ensure(await window.singz.pauseDesktopPlayback(this.generation), 'Native pause failed')
       this.transportIntent = 'paused'
       await this.refreshCommandStatus(this.generation, this.request?.provider ?? 'coreaudio')
+    })
+  }
+
+  /**
+   * Play WITH a count-in from a parked transport — the phones' rule, and
+   * legacy's: every Play with the count-in on counts in from wherever the
+   * singer is, and a song paused inside its own count-in counts in again to
+   * the same landing. The count-in of a prepared plan is fixed at prepare,
+   * so a paused transport cannot be counted in by resuming it: the running
+   * generation is stopped and released and `request` — the same song at the
+   * paused spot, count-in on — is prepared anchored there, opened and
+   * started, through the same steps a structural rebuild takes. The output
+   * stays native's throughout; Chromium's sink is never touched.
+   *
+   * Under streamed lanes this is tens of milliseconds of prepare. Before it
+   * existed every Play after the first was a bare resume, so a song counted
+   * in once per open and never again — not after a scrub, not after a Pause.
+   */
+  async restartWithCountIn(request: DesktopNativePlaybackPrepare): Promise<void> {
+    return this.serialize(async () => {
+      this.assertCommandableGeneration()
+      if (!this.generation || !this.route) {
+        if (this.ownsOutput) throw new Error('Native playback has no restartable generation.')
+        return
+      }
+      // IDEMPOTENT, as resume() is: a second Play inside the first restart's
+      // window (a double press, or the second press inside one status poll
+      // the transport-race driver reproduces) queues behind it here and finds
+      // a generation already started with the intent to play — that IS the
+      // restart it asked for, so it adopts it. Without this the second press
+      // stopped and unloaded the generation the first had just started and
+      // built another: the count-in audibly began twice and the log carried
+      // two builds for one Play. A completed transport stays restartable —
+      // that is the end-of-song path.
+      if (this.started && this.transportIntent === 'playing' && this.last !== null &&
+          this.last.transportState !== 'completed') {
+        return
+      }
+      // Reject an unbuildable request before anything is torn down.
+      this.configFor(request, this.route)
+      const oldGeneration = this.generation
+      this.stopPolling()
+      if (this.started) {
+        try { await window.singz.stopDesktopPlayback(oldGeneration) } catch { /* unload is authoritative */ }
+      }
+      this.started = false
+      await this.requireUnloadReceipt(
+        oldGeneration,
+        request.provider,
+        'Native count-in restart could not release the old graph.'
+      )
+      this.generation = ''
+      this.last = null
+      this.forgetTransport()
+      await this.activate(request, this.route, false)
+      this.request = request
     })
   }
 
@@ -1364,7 +1598,7 @@ export class DesktopNativePlaybackClient {
       )
       this.generation = ''
       this.last = null
-      this.clearPendingSeek()
+      this.forgetTransport()
       this.recoveryProvider = this.request?.provider ?? this.recoveryProvider
       this.recoveryKind = 'route-restore'
       const provider = this.recoveryProvider ?? 'coreaudio'
@@ -1412,7 +1646,7 @@ export class DesktopNativePlaybackClient {
       )
       this.generation = ''
       this.last = null
-      this.clearPendingSeek()
+      this.forgetTransport()
       this.recoveryProvider = provider
       this.recoveryKind = 'prepare-retry'
       this.onStateChange(this.last)
