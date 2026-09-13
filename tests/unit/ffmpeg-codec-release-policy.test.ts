@@ -21,7 +21,11 @@ const { nativeBuildLockPath } = require('../../scripts/native-build-lock.cjs') a
   nativeBuildLockPath(root: string): string
 }
 const root = process.cwd()
-const read = (relative: string) => readFileSync(resolve(root, relative), 'utf8')
+// Windows runners check out with CRLF (Git for Windows' autocrlf), and the
+// multi-line `toContain` below compares against '\n'-joined text — the
+// 2026-09-07 scheduled desktop build failed on exactly that, Windows leg
+// only. Normalize on read so the assertions are about content, not line ends.
+const read = (relative: string) => readFileSync(resolve(root, relative), 'utf8').replace(/\r\n/g, '\n')
 const profile = JSON.parse(read('third_party/ffmpeg-codec/profile.json'))
 
 const machDylibCommand = (command: number, name: string): Buffer => {
