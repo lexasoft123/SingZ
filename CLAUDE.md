@@ -1175,11 +1175,21 @@ not because what it writes today could reach `signtool` (nothing on Windows
 reads `CSC_KEYCHAIN` or `CSC_NAME`). Notarization reuses the iOS
 pipeline's App Store Connect API key rather than minting a second one — see
 [docs/MACOS-SIGNING.md](docs/MACOS-SIGNING.md), including why the
-entitlements file carries only the two Hardened Runtime flags Electron
-itself needs (no App Sandbox entitlements — this is the `dmg` target, not
-`mas` — and no microphone entitlement: that one's an App Sandbox thing, mic
-access keeps working through the ordinary `NSMicrophoneUsageDescription` TCC
-prompt without it). `hardenedRuntime`/`entitlements`/`entitlementsInherit`
+entitlements files carry exactly three Hardened Runtime keys: the two
+JIT flags Electron itself needs, and
+`com.apple.security.device.audio-input` — no App Sandbox entitlements, this
+is the `dmg` target, not `mas`. **The audio-input key is a Hardened Runtime
+key, not only a sandbox one**, and an earlier version of this paragraph said
+the opposite: it told the reader mic access "keeps working through the
+ordinary `NSMicrophoneUsageDescription` TCC prompt without it", which was
+checked on ad-hoc dev builds that carry no `runtime` flag and so are never
+held to it. Every signed release from v0.19.1 to v0.20.1 shipped without it,
+and on those a hardened SingZ was refused by TCC before any prompt: no
+permission request, `askForMediaAccess` false with the status still
+`not-determined`, silence into the spawned `singz-analyze live-input`. The
+key lives in BOTH plists because the child process and the helpers are
+signed with the inherit file. `tests/unit/mac-entitlements.test.ts` pins it
+there. `hardenedRuntime`/`entitlements`/`entitlementsInherit`
 are flat `mac:` siblings, not nested under a `sign:` key — this repo pins
 electron-builder ^26.15.3, where `mac.sign` is a custom-sign-*function* slot
 (a later major's docs describe the nested object; the two schemas are not

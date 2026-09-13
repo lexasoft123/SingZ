@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, shell, systemPreferences, type MenuItemConstructorOptions, type WebContents } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, shell, type MenuItemConstructorOptions, type WebContents } from 'electron'
 import { loadWindowState, trackWindowState } from './window-state'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
@@ -46,6 +46,7 @@ import { cleanupObsoleteModels, dmlFlagPath, modelsDir, packDir, trtrtxFlagPath 
 import { Separator } from './separation'
 import { registerAnalyze } from './analyze'
 import { registerDesktopAudioInput } from './audio-input'
+import { askMicrophoneAccess } from './mic-access'
 import { cancelBeatsMl, registerBeatsIpc } from './beats-ml'
 import { CaptureOwner, playbackCodecSupportsPath } from './capture'
 
@@ -509,14 +510,7 @@ function registerIpc(): void {
 
   ipcMain.handle('app:version', () => (app.isPackaged ? app.getVersion() : 'dev'))
 
-  ipcMain.handle('mic:ask', async () => {
-    if (process.platform !== 'darwin') return true
-    try {
-      return await systemPreferences.askForMediaAccess('microphone')
-    } catch {
-      return false
-    }
-  })
+  ipcMain.handle('mic:ask', () => askMicrophoneAccess())
 
   ipcMain.handle('capture:devices', () => {
     try {

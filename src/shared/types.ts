@@ -1074,7 +1074,10 @@ export type DesktopAudioInputStartResult =
     }
   | {
       ok: false
-      kind: 'busy' | 'unavailable' | 'unavailable-core'
+      /** `denied`: macOS refused the microphone (or, on a signed build with
+       *  no audio-input entitlement, never asked) — permission, not a
+       *  device problem; the renderer shows its permission copy. */
+      kind: 'busy' | 'denied' | 'unavailable' | 'unavailable-core'
       error: string
     }
 

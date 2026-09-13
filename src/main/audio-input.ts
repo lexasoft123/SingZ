@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { onChildSettled } from './child-exit'
 import { resolveAnalyze } from './analyze'
+import { askMicrophoneAccess } from './mic-access'
 import { log, logChunk } from './log'
 import type {
   DesktopAudioInputDevice,
@@ -170,9 +171,14 @@ function runInventory(bin: string): Promise<DesktopAudioInputDevice[]> {
   })
 }
 
-class DesktopAudioInput {
+export class DesktopAudioInput {
   private active: ActiveInput | null = null
   private readonly startGate = new AudioInputStartGate()
+  private readonly askAccess: () => Promise<boolean>
+
+  constructor(askAccess: () => Promise<boolean> = askMicrophoneAccess) {
+    this.askAccess = askAccess
+  }
 
   async list(): Promise<{ ok: true; devices: DesktopAudioInputDevice[] } | { ok: false; error: string }> {
     try {
@@ -195,6 +201,17 @@ class DesktopAudioInput {
     const previous = this.active
     if (previous?.stopping) await waitForStopped(previous, 2500)
     if (this.active) return { ok: false, kind: 'busy', error: 'Another training microphone is active.' }
+    // Ask BEFORE the child opens the device: `live-input` opens the HAL
+    // AudioUnit itself and cannot ask, and a refused unit delivers silence
+    // that reads as a singer who is not singing. On a Mac this is where the
+    // permission prompt appears for a singer who trains before they ever
+    // touch the pitch strip; elsewhere it answers true.
+    if (!(await this.askAccess()))
+      return {
+        ok: false,
+        kind: 'denied',
+        error: 'Microphone access is blocked. Allow SingZ in System Settings › Privacy & Security › Microphone, then try again.'
+      }
     const bin = await resolveAnalyze()
     if (!bin)
       return {

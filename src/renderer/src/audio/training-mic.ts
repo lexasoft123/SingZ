@@ -82,6 +82,13 @@ export class NativeTrainingMicSource implements TrainingMicSource {
         await this.fallback.start(context, options)
         return
       }
+      if (started.kind === 'denied') {
+        // The shape Chromium's own getUserMedia refusal takes, so the
+        // training screen shows its one permission copy for both paths.
+        const denied = new Error(started.error)
+        denied.name = 'NotAllowedError'
+        throw denied
+      }
       throw new Error(started.error)
     }
     this.token = started.token

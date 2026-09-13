@@ -2,14 +2,32 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- Applied to child processes/frameworks Electron itself signs (helper
-	     apps, the GPU/renderer/plugin helpers) — same two entitlements as the
-	     main app, for the same reason: they run the same V8 under Hardened
-	     Runtime. See entitlements.mac.plist for what this deliberately does
-	     not include and why. -->
+	<!-- Applied to EVERY signed Mach-O in the bundle other than the main
+	     executable: electron-builder's getOptionsForFile hands this file to
+	     every path that is not the app itself, and @electron/osx-sign walks
+	     the whole of Contents/, so that is the Electron helper apps (GPU,
+	     renderer, plugin), the frameworks, AND the vendored engines under
+	     Contents/Resources/engines — whisper-cli, singz-analyze and the
+	     singz-capture.node addon — each signed with the `runtime` flag.
+
+	     The two cs.* keys are for the same reason as the main app: the
+	     helpers run the same V8 under Hardened Runtime.
+
+	     device.audio-input is here because the main executable is not the
+	     only process that opens the microphone. The training mic spawns
+	     `singz-analyze live-input`, a child process that opens the HAL
+	     AudioUnit itself (src/main/audio-input.ts); the pitch strip's
+	     getUserMedia goes through Chromium's audio service, which may live
+	     in a helper. Which signature TCC holds to the entitlement — the
+	     process opening the device, or the app responsible for it — is not
+	     something this repo has measured, and with the key on every
+	     signature it does not matter. See entitlements.mac.plist for what
+	     this deliberately does not include and why. -->
 	<key>com.apple.security.cs.allow-jit</key>
 	<true/>
 	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<key>com.apple.security.device.audio-input</key>
 	<true/>
 </dict>
 </plist>

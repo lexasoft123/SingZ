@@ -183,24 +183,67 @@ keystroke from handing the Windows build an Apple `.p12`.
 
 ## The entitlements file
 
-`build/entitlements.mac.plist` / `entitlements.mac.inherit.plist` grant only
-`com.apple.security.cs.allow-jit` and
-`com.apple.security.cs.allow-unsigned-executable-memory` — what V8/Node need
-to keep running under Hardened Runtime, nothing more. Three things this
-deliberately does *not* carry, and why adding them by reflex would be wrong:
+`build/entitlements.mac.plist` / `entitlements.mac.inherit.plist` grant three
+keys, all of them Hardened Runtime keys: `com.apple.security.cs.allow-jit`
+and `com.apple.security.cs.allow-unsigned-executable-memory` — what V8/Node
+need to keep running under Hardened Runtime — and
+`com.apple.security.device.audio-input`, the microphone.
+
+**`com.apple.security.device.audio-input` is a Hardened Runtime entitlement,
+and without it the signed app never asks for the microphone.** Apple's
+Hardened Runtime page lists it under *Resource Access*, beside camera,
+location and Apple events — the same key doubles as an App Sandbox key,
+which is how an earlier revision of this section came to say it was *only*
+that and to instruct the reader not to add it. The consequence was the
+field report against the signed v0.19.1–v0.20.1 builds: "no permission
+request, and the app gets no mic". A hardened process that lacks the key is
+refused by TCC before any prompt is shown — `askForMediaAccess` resolves
+`false` while `getMediaAccessStatus` stays `not-determined` (a real refusal
+by the singer moves it to `denied`; that difference is what the `mic` line
+in the app log now records), and CoreAudio input delivers silence to the
+spawned `singz-analyze live-input`. `NSMicrophoneUsageDescription` is still
+required — it is the text of the prompt — but it does not stand in for the
+entitlement. The earlier claim that the mic "was checked against exactly
+this before wiring hardened runtime in" was true of a build that could not
+show the problem: every local build on the dev Mac is ad-hoc signed
+(`codesign -dv` reports `flags=0x2(adhoc)` and no `runtime`), and an ad-hoc
+signature is never held to this key. Only a Developer ID build carries the
+`runtime` flag, and CI is the only thing that makes one.
+
+The key is in **both** files on purpose. electron-builder hands
+`entitlements.mac.plist` to the main executable alone and the inherit file
+to every other Mach-O `@electron/osx-sign` finds under `Contents/` — the
+helper apps, the frameworks, and the vendored engines under
+`Resources/engines/` (`singz-analyze`, `whisper-cli`, `singz-capture.node`),
+each signed with the `runtime` flag. The training microphone is opened by a
+child process (`singz-analyze live-input`, spawned by
+`src/main/audio-input.ts`), the pitch strip's `getUserMedia` by Chromium's
+audio service, and the Settings meter by the addon loaded into main. Which
+signature TCC holds to the entitlement — the process opening the device or
+the app responsible for it — has not been measured here; with the key on
+every signature it does not matter.
+
+To check a signed build rather than trust this page:
+
+```bash
+codesign -dv --entitlements - --xml /Applications/SingZ.app 2>&1 | grep -E 'flags=|audio-input'
+codesign -d --entitlements - --xml /Applications/SingZ.app/Contents/Resources/engines/singz-analyze | grep audio-input
+```
+
+The first line should show `flags=0x10000(runtime)` and the key; the second
+should show the key on the child too. On a singer's machine the evidence is
+the app log's `mic` line (a refusal with the status still `not-determined`)
+and, if they can run it, `log show --predicate 'subsystem == "com.apple.TCC"'
+--last 10m` around a mic attempt, where tccd names the missing entitlement
+outright.
+
+Two things this deliberately does *not* carry, and why adding them by reflex
+would be wrong:
 
 - **No App Sandbox entitlements** (`com.apple.security.app-sandbox` and its
   exceptions). Those apply to the `mas` (Mac App Store) target; this is
   `dmg` (direct distribution). Copying an App Sandbox guide's entitlements
   file here would sandbox an app that was never built for the sandbox.
-- **No `com.apple.security.device.audio-input`.** That entitlement is part
-  of the App Sandbox set too — under Hardened Runtime *without* the sandbox,
-  microphone access keeps working through the ordinary TCC prompt, gated by
-  `NSMicrophoneUsageDescription` (already in `electron-builder.yml`'s
-  `mac.extendInfo`), with no extra entitlement. SingZ's mic-driven pitch
-  matching was checked against exactly this before wiring hardened runtime
-  in — getting it wrong would have silently broken the mic on every signed
-  build, discoverable only by someone actually running one.
 - **No `disable-library-validation`.** The desktop now packages and loads the
   native Node-API module `Contents/Resources/engines/singz-capture.node`.
   electron-builder must sign that nested Mach-O with the same Developer ID

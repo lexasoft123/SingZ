@@ -7,15 +7,37 @@
 	distribution + notarization), not `mas` (Mac App Store), so the App
 	Sandbox entitlement set (com.apple.security.app-sandbox and its
 	per-resource exceptions) does not apply here and must not be added by
-	analogy with an App Sandbox guide. Under Hardened Runtime alone, network
-	access and microphone access (NSMicrophoneUsageDescription is already in
-	electron-builder.yml's mac.extendInfo) keep working through the normal
-	TCC prompt with no extra entitlement — these two are what V8/Node
-	themselves need to keep running under Hardened Runtime.
+	analogy with an App Sandbox guide.
+
+	Three keys, and all three are Hardened Runtime keys:
+
+	- allow-jit and allow-unsigned-executable-memory are what V8/Node need
+	  to keep running under Hardened Runtime.
+
+	- device.audio-input is Hardened Runtime's own "Resource Access" gate
+	  for the microphone. Apple's Hardened Runtime page lists it there,
+	  beside camera, location and Apple events — it is NOT only an App
+	  Sandbox key, which is what an earlier revision of this comment (and
+	  docs/MACOS-SIGNING.md, and CLAUDE.md) claimed. A hardened process
+	  without it is refused by TCC before any prompt: the singer never sees
+	  a permission request, `systemPreferences.askForMediaAccess` resolves
+	  false while the access status stays "not-determined", and CoreAudio
+	  input delivers silence. That was the field report against the signed
+	  v0.19.1–v0.20.1 builds — "no permission request, and no mic" — while
+	  every ad-hoc dev build on the dev Mac worked, because an ad-hoc
+	  signature carries no `runtime` flag and so is never held to this key.
+	  NSMicrophoneUsageDescription (electron-builder.yml, mac.extendInfo) is
+	  still required too — it is the text of the prompt — but it does not
+	  stand in for this entitlement.
+
+	The same key is in entitlements.mac.inherit.plist, on purpose: see the
+	note there for which processes actually open the device.
 	-->
 	<key>com.apple.security.cs.allow-jit</key>
 	<true/>
 	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<key>com.apple.security.device.audio-input</key>
 	<true/>
 </dict>
 </plist>
