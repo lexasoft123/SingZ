@@ -5,6 +5,8 @@ import { dirname, join, resolve } from 'node:path'
 import type {
   DesktopMonitorConfig,
   DesktopPlaybackLaneConfig,
+  DesktopPlaybackLaneMeasureRequest,
+  DesktopPlaybackLaneMeasureResult,
   DesktopPlaybackPrepareConfig,
   DesktopPlaybackResult,
   LyricsProgress,
@@ -738,6 +740,45 @@ function registerIpc(): void {
       typeof gain === 'number' ? gain : Number.NaN
     ))
   ipcMain.handle('audio-host:playback-status', () => captureOwner.playbackStatus())
+  // The open's lane measure. Same gate as prepare — every path registered
+  // and of a format the runtime reads — and the same silence on refusal: the
+  // renderer decodes what was refused, and the owner logs why.
+  ipcMain.handle(
+    'audio-host:playback-measure',
+    async (_event, raw: unknown): Promise<DesktopPlaybackLaneMeasureResult> => {
+      const refused = (error: string): DesktopPlaybackLaneMeasureResult => {
+        log('dsp', `lanes measured · refused · ${error}`, 'warn')
+        return { ok: false, error, lanes: [] }
+      }
+      if (!raw || typeof raw !== 'object') return refused('malformed measure request')
+      const request = raw as DesktopPlaybackLaneMeasureRequest
+      const wholeNumber = (value: unknown, min: number, max: number): boolean =>
+        typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max
+      if (
+        !Array.isArray(request.lanes) || request.lanes.length < 1 || request.lanes.length > 16 ||
+        !wholeNumber(request.peaksPerSecond, 1, 10000) ||
+        !wholeNumber(request.minimumPeaks, 1, 1_000_000) ||
+        !wholeNumber(request.maximumPeaks, request.minimumPeaks, 1_000_000) ||
+        request.lanes.some((lane) =>
+          !lane || typeof lane !== 'object' || typeof lane.id !== 'string' ||
+          lane.id.length < 1 || lane.id.length > 96 || typeof lane.path !== 'string')
+      ) {
+        return refused('a measure request failed schema validation')
+      }
+      const lanes = request.lanes.map((lane) => ({ id: lane.id, path: resolve(lane.path) }))
+      const codecCapability = captureOwner.playbackCapability()
+      const unauthorized = lanes.find((lane) =>
+        !isAllowed(lane.path) || !codecCapability.available ||
+        !playbackCodecSupportsPath(codecCapability, lane.path))
+      if (unauthorized) return refused(`unauthorized-path · ${unauthorized.id}`)
+      return captureOwner.measurePlaybackLanes({
+        lanes,
+        peaksPerSecond: request.peaksPerSecond,
+        minimumPeaks: request.minimumPeaks,
+        maximumPeaks: request.maximumPeaks
+      })
+    }
+  )
   ipcMain.handle('audio-host:playback-unload', (event, generation: unknown) => {
     // Logged by the owner, which also sees the unloads that come back ok
     // WITHOUT a cleanup receipt — the case worth a line.

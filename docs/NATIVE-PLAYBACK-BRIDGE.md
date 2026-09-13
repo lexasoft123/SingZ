@@ -212,7 +212,7 @@ compile error.
 
 ### The desktop: a different contract
 
-Sixteen addon exports, fourteen with an IPC channel and a preload method, two
+Seventeen addon exports, fifteen with an IPC channel and a preload method, two
 with neither.
 
 | export | IPC channel | preload |
@@ -233,8 +233,21 @@ with neither.
 | `unloadPlayback` | `audio-host:playback-unload` | `unloadDesktopPlayback` |
 | `unloadPlaybackRetainingLanes` | **none** | **none** |
 | `playbackLanePeaks` | **none** | **none** |
+| `measurePlaybackLanes` | `audio-host:playback-measure` | `measureDesktopPlaybackLanes` |
 
-The last two are **dormant**: compiled, exported, reachable by nothing. For
+`measurePlaybackLanes` is the one export with no phone counterpart at all,
+and the second promise-returning one (the manifest pins both as
+`synchronous: false`): the desktop open's **lane measure**, which reads every
+lane once through the streaming source on a worker and answers with the
+header, the lane waveform's peaks, the seek bar's envelope and the whole-lane
+RMS (`native/playback/lane_measure.h`), so a song native playback will play
+is put on screen without Chromium decoding it first. The phones never
+needed it — they open on the project doc and let the feeder's background
+pass draw the bar. Its shape is under `laneMeasure` in the manifest and in
+§6 below.
+
+`unloadPlaybackRetainingLanes` and `playbackLanePeaks` are **dormant**:
+compiled, exported, reachable by nothing. For
 lane parking the core says so itself — `NativePlaybackLaneRetention`,
 `native_playback_session.h:133-137`, "LIVE ON THE PHONES, DORMANT ON THE
 DESKTOP". Nothing vouches for `playbackLanePeaks` that way; it simply has no
@@ -558,6 +571,25 @@ pins `bucketCount` at 96 (`kNativePlaybackLaneSummaryBuckets`); TypeScript
 accepts up to 4096 as a defensive stack bound and requires
 `peaks.length === bucketCount` exactly.
 
+### `laneMeasure` (desktop only)
+
+`measurePlaybackLanes` takes one object, `{lanes: [{id, path}],
+peaksPerSecond, minimumPeaks, maximumPeaks}` — the three numbers are
+`bucketsFor` from `audio/peaks.ts`, sent rather than compiled in so the
+renderer owns how fine its waveform is — and answers `{ok, error, lanes}`
+with, per lane, `{id, ok, error, sampleRate, channels, frameCount,
+durationSeconds, rms, peaks, envelope}`. `peaks` and `envelope` are
+`Float32Array`s (a lane's peaks are up to 400k floats; boxed numbers that
+size would cost the IPC clone more than the measure), `frameCount` is a
+number rather than a decimal string because it is a length the renderer does
+arithmetic on and never a counter, and `error` is the `DecodedAudioStatus`
+name (`ok`, `unsupported-format`, `io-error`, `cancelled`, …). A lane with
+`ok: false` is the renderer's cue to decode that one lane itself; `ok: false`
+on the result means the measure did not run. The envelope is
+`summarizeLanePeaks`' statistic at the same 96 buckets as `lanePeaks`, and
+`tests/native/lane_measure_tests.cpp` holds both statistics to the full
+decode.
+
 ### Outputs
 
 `{uid, label, default, channels, sampleRate}` on both phones, plus
@@ -869,6 +901,14 @@ unnoticed, and each is a candidate for its own change — none should be
     period boundary.
 12. **Inbound transport frames are non-negative while outbound project frames
     are signed.** Both are deliberate; together they are easy to misread.
+13. **The desktop measures its lanes at open; the phones do not.**
+   `measurePlaybackLanes` exists on the desktop alone: its renderer draws a
+   lane waveform at one bucket per millisecond and hides a silent
+   guitar/piano lane before the song is on screen, both of which used to
+   come from a full Chromium decode. A phone draws a 96-bucket bar from
+   `lanePeaks` after the song is already playing and hides nothing, so there
+   is nothing for it to measure up front. Deliberate, and pinned as a
+   desktop-only export rather than a method the phones forgot.
 
 ## 12. Changing the contract
 

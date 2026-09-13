@@ -230,6 +230,13 @@
         "preload": null,
         "dormant": true,
         "synchronous": true
+      },
+      {
+        "name": "measurePlaybackLanes",
+        "ipc": "audio-host:playback-measure",
+        "preload": "measureDesktopPlaybackLanes",
+        "dormant": false,
+        "synchronous": false
       }
     ],
     "desktopAddonNote": "Keep this file UTF-8 with no unicode escapes — its native reader implements a fixed escape set with no unicode case and ABORTS on one, so a JSON round-trip that escapes non-ASCII takes the sanitizer gate red. synchronous says whether the call blocks the JS thread. Every one of these did until preparePlayback moved to a libuv worker: decoding six lanes on Electron's main thread froze the window for 2.7 s, measured. The desktop still has no counterpart to the phones' positionNow, so the playhead is reconstructed from playbackStatus — which takes the session control mutex that open, start and stop hold across host calls."
@@ -654,6 +661,36 @@
       "peaks"
     ],
     "bucketCount": 96
+  },
+  "laneMeasure": {
+    "keys": [
+      "ok",
+      "error",
+      "lanes"
+    ],
+    "lane": [
+      "id",
+      "ok",
+      "error",
+      "sampleRate",
+      "channels",
+      "frameCount",
+      "durationSeconds",
+      "rms",
+      "peaks",
+      "envelope"
+    ],
+    "envelopeBuckets": 96,
+    "request": [
+      "lanes",
+      "peaksPerSecond",
+      "minimumPeaks",
+      "maximumPeaks"
+    ],
+    "requestLane": [
+      "id",
+      "path"
+    ]
   },
   "outputs": {
     "common": [
