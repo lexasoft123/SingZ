@@ -49,6 +49,11 @@ Prereq state on this machine: models under "~/Library/Application Support/SingZ/
    driver staged on the Mac>` (no ffmpeg there), through a scheduled task in the
    interactive session (session 0 wedges Electron), and prints the CPU, footprint and
    host-quiet rows as n/a; first run 2026-09-06: 15/18 on WASAPI, every seam landing.
+   Streamed lanes are OFF by default on win32 (the Windows `readAt` is seek+read on a
+   shared file position), so a Windows run measures the decoded path unless
+   `PS_STREAM_LANES=1` pins streaming on — that is the opt-in a Windows streaming
+   proof needs, and the default there is not flipped without one (2026-09-13: pinned
+   on, 23/27, the streamed native pass played to the end of the song, no fatal line).
    As of 2026-09-06 (after the desktop seam, the projected clock, the intent-based park
    and the graph prepared AHEAD of Play) every one of its sixteen timing rules passes
    (Play → advancing 182 ms against legacy's 1322); the reds left are the footprint
