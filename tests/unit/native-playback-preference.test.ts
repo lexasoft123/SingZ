@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   DESKTOP_NATIVE_PLAYBACK_KEY,
+  DESKTOP_STREAM_LANES_KEY,
   desktopNativePlaybackPreferred,
+  desktopStreamLanesPreferred,
   detectedDesktopPlatform
 } from '../../src/renderer/src/audio/native-playback-preference'
 
@@ -48,5 +50,35 @@ describe('desktop native playback preference', () => {
     expect(detectedDesktopPlatform()).toBe('other')
     vi.stubGlobal('navigator', undefined)
     expect(detectedDesktopPlatform()).toBe('other')
+  })
+
+  describe('streamed lanes', () => {
+    const streamStorage = (value: string | null) => ({
+      getItem: (key: string) => (key === DESKTOP_STREAM_LANES_KEY ? value : null)
+    })
+
+    it('defaults on for macOS only — the Windows read path is not positional yet', () => {
+      // Two descriptors per lane read from two threads; on Windows `readAt`
+      // is seek+read on a shared file position, so the feeder and the
+      // waveform pass would corrupt each other's reads mid-song. Off there
+      // until that path is measured, not because streaming is slower.
+      vi.stubGlobal('localStorage', streamStorage(null))
+      expect(desktopStreamLanesPreferred('darwin')).toBe(true)
+      expect(desktopStreamLanesPreferred('win32')).toBe(false)
+      expect(desktopStreamLanesPreferred('other')).toBe(false)
+    })
+
+    it.each(['darwin', 'win32', 'other'] as const)('keeps a stored choice on %s', (platform) => {
+      vi.stubGlobal('localStorage', streamStorage('1'))
+      expect(desktopStreamLanesPreferred(platform)).toBe(true)
+      vi.stubGlobal('localStorage', streamStorage('0'))
+      expect(desktopStreamLanesPreferred(platform)).toBe(false)
+    })
+
+    it('treats a missing localStorage as no stored choice', () => {
+      vi.stubGlobal('localStorage', undefined)
+      expect(desktopStreamLanesPreferred('darwin')).toBe(true)
+      expect(desktopStreamLanesPreferred('win32')).toBe(false)
+    })
   })
 })

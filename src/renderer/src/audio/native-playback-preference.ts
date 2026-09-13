@@ -44,3 +44,31 @@ export function desktopNativePlaybackPreferred(platform = detectedDesktopPlatfor
   if (stored === '0') return false
   return platform === 'darwin' || platform === 'win32'
 }
+
+/** Stream the lanes out of their FLAC instead of decoding every one first —
+ *  the phones' default since 0.21.0, kept as a preference and not a build
+ *  flag for the same reason the core gives: the two paths must stay
+ *  comparable on the same machine, the same song, the same session. Off
+ *  costs ~3 s of decode per prepare on a six-lane song and pays it again on
+ *  any Play the graph prepared ahead cannot serve.
+ *
+ *  **macOS only by default.** The core reads a streamed lane through TWO
+ *  descriptors per lane — the feeder's and the waveform pass's, `dup`ed from
+ *  one open — from two threads at once. On POSIX every read is a `pread`, so
+ *  the shared file position is never consulted. Windows has no `pread`:
+ *  `readAt` there is `_lseeki64` + `_read`, correct for ONE reader, and the
+ *  two threads would move each other's cursor between the seek and the read
+ *  (`zcore/src/media/flac_streaming_source.cpp`, `readAt`). That would not
+ *  fail at prepare, where the decode fallback engages, but mid-song as
+ *  malformed FLAC frames — and nothing on this Mac can measure it. Windows
+ *  streams when its read path is positional and the field laptop has run the
+ *  session harness on it; until then a stored '1' is the deliberate way to
+ *  measure it there. */
+export const DESKTOP_STREAM_LANES_KEY = 'singz.desktop.stream-lanes'
+
+export function desktopStreamLanesPreferred(platform = detectedDesktopPlatform()): boolean {
+  const stored = typeof localStorage === 'undefined' ? null : localStorage.getItem(DESKTOP_STREAM_LANES_KEY)
+  if (stored === '1') return true
+  if (stored === '0') return false
+  return platform === 'darwin'
+}

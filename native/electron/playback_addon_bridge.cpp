@@ -1158,7 +1158,7 @@ bool parseConfig(napi_env env, napi_value value,
            "bufferFrames", "maximumFrames", "masterGain",
            "maximumRetainedBytes", "playback", "training",
            "preparedStartProjectFrame", "initialTransport",
-           "graphDocument", "swapFromGeneration"}))
+           "graphDocument", "swapFromGeneration", "streamLanes"}))
     return false;
   NativePlaybackPrepareConfig config;
   uint32_t sampleRate = 0;
@@ -1240,6 +1240,12 @@ bool parseConfig(napi_env env, napi_value value,
       return false;
     config.swapFromGeneration = swapGeneration;
   }
+  // Stream the lanes out of their FLAC instead of decoding first — the
+  // phones' default, and a plain optional bool here as on both of them
+  // (parseBool on iOS, a jboolean on Android). Absent = decode, the core's
+  // own default; a present non-boolean fails closed.
+  if (!boolProperty(env, value, "streamLanes", false, false, &config.streamLanes))
+    return false;
   if (named(env, value, "initialTransport", &initialTransport) &&
       !parseInitialTransport(env, initialTransport, &config.initialTransport)) {
     return false;

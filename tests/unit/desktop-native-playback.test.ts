@@ -857,6 +857,60 @@ describe('desktop native playback facade', () => {
     await h.client.unload()
   })
 
+  it('a refused seek drops its target at once, even with an earlier seek still owed a receipt', async () => {
+    // The refusal path used to keep `pendingSeekFrame` whenever another seek
+    // was still in flight, so the bar drew the REFUSED spot until that other
+    // receipt landed or the second-long expiry ran out — a position the song
+    // was never asked to reach. Now the target goes with the refusal and the
+    // earlier seek's receipt is still awaited on its own count.
+    vi.setSystemTime(new Date('2026-09-13T00:00:00Z'))
+    let seekCount = '0'
+    const h = seamHarness((generation) =>
+      playing(generation, { audibleProjectFrame: '48000', seekCount })
+    )
+    expect(await h.start()).toBe(true)
+    ;(h.client as unknown as { stopPolling: () => void }).stopPolling()
+    const refresh = (h.client as unknown as { refresh: (g: string) => Promise<void> }).refresh.bind(h.client)
+    const seekMock = h.api.seekDesktopPlayback as unknown as ReturnType<typeof vi.fn>
+
+    await h.client.seek(7)
+    seekMock.mockImplementationOnce(async () => ({
+      ...result('1', 'running'), ok: false, errorCode: 'invalid-configuration', error: 'The absolute playback seek is invalid'
+    }))
+    await expect(h.client.seek(9)).rejects.toThrow()
+    // Not 9 (refused) and not held: the core's own projection is what shows.
+    expect(h.client.audibleSeconds()).toBeCloseTo(1.0, 3)
+    // The first seek's receipt still retires cleanly on its own count.
+    seekCount = '1'
+    await refresh('1')
+    expect(h.client.audibleSeconds()).toBeCloseTo(1.0, 3)
+    await h.client.seek(3)
+    expect(h.client.audibleSeconds()).toBeCloseTo(3, 3)
+    seekCount = '2'
+    await refresh('1')
+    expect(h.client.audibleSeconds()).toBeCloseTo(1.0, 3)
+    await h.client.unload()
+  })
+
+  it('unloading forgets a seek still owed a receipt, so the next generation starts with none pending', async () => {
+    // A generation's `seekCount` starts at zero. A receipt base read off the
+    // previous generation would make the next one wait for a count it may
+    // never reach, holding a stale target for the whole expiry.
+    vi.setSystemTime(new Date('2026-09-13T00:00:00Z'))
+    const h = seamHarness((generation) =>
+      playing(generation, { audibleProjectFrame: '48000', seekCount: '0' })
+    )
+    expect(await h.start()).toBe(true)
+    ;(h.client as unknown as { stopPolling: () => void }).stopPolling()
+    await h.client.seek(7)
+    expect(h.client.audibleSeconds()).toBeCloseTo(7, 3)
+    await h.client.unload()
+    const pending = h.client as unknown as { pendingSeekFrame: number | null; pendingSeekReceipt: string | null; pendingSeekIssued: number }
+    expect(pending.pendingSeekFrame).toBeNull()
+    expect(pending.pendingSeekReceipt).toBeNull()
+    expect(pending.pendingSeekIssued).toBe(0)
+  })
+
   it('a graph prepared ahead of Play is opened and started by Play, with no second prepare and the output released only then', async () => {
     // The phones prepare at open; the desktop prepared at Play, which put
     // the whole decode and graph build inside "Play → advancing" (+0.7-2.8 s

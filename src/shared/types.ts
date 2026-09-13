@@ -826,6 +826,13 @@ export interface DesktopPlaybackPrepareConfig {
    * flight; the caller then falls back to unload-and-prepare. Absent = an
    * ordinary prepare. */
   swapFromGeneration?: string
+  /** Play the lanes STRAIGHT OUT OF THEIR FLAC instead of decoding every one
+   * to PCM first — the phones' default since 0.21.0, and the reason a song
+   * opens there in a moment while the desktop decoded six lanes for ~3 s and
+   * paid that again on any Play whose position differed from the graph
+   * prepared ahead. The core resamples into the device rate as it fills and
+   * falls back to decoding any lane it cannot stream. Absent = decode. */
+  streamLanes?: boolean
 }
 
 export interface DesktopPlaybackLaneConfig {

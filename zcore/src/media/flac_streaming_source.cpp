@@ -79,6 +79,11 @@ int consumeAsDescriptor(OwnedFileDescriptor* descriptor) noexcept {
 // Windows has no pread and its _dup shares a position too; it seeks and reads,
 // which is correct for ONE source and no worse than what it had. Nothing on
 // Windows streams today, and a second source there would need overlapped IO.
+// That "nothing" is held on the desktop side: `desktopStreamLanesPreferred`
+// (src/renderer/src/audio/native-playback-preference.ts) defaults streaming
+// off on win32 for exactly this reason — the prepare dups a second descriptor
+// per lane for the waveform pass, which is the second source. Lift both at
+// once, with a measurement.
 int64_t readAt(int fd, void* buffer, size_t bytes, int64_t offset) noexcept {
   if (fd < 0) return -1;
 #if defined(_WIN32)

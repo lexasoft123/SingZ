@@ -21,7 +21,11 @@ import {
   DESKTOP_PLAYBACK_CONTRACT_VERSION
 } from '../../../shared/types'
 import type { BeatInfo, MetronomeConfig } from './beat'
-import { desktopNativePlaybackPreferred, detectedDesktopPlatform } from './native-playback-preference'
+import {
+  desktopNativePlaybackPreferred,
+  desktopStreamLanesPreferred,
+  detectedDesktopPlatform
+} from './native-playback-preference'
 import type { ParsedGraphDocument } from '../../../shared/graph-document'
 import {
   MAX_NATIVE_GRAPH_NODES,
@@ -441,6 +445,17 @@ export class DesktopNativePlaybackClient {
    *  own. This is the give-up the blocking wait used to provide, kept as a
    *  deadline instead of as a stall. */
   private pendingSeekAtMs = 0
+
+  /** Forget every seek still owed a receipt. Called when the receipt can no
+   *  longer arrive: the generation is unloaded, or a seam replaced it and the
+   *  new generation counts its seeks from zero — a base read off the old one
+   *  would then wait for a count the new one may never reach, and the bar
+   *  would hold a target for the whole 1 s expiry. */
+  private clearPendingSeek(): void {
+    this.pendingSeekFrame = null
+    this.pendingSeekReceipt = null
+    this.pendingSeekIssued = 0
+  }
   /** A generation prepared ahead of Play (see prepareAhead): prepared, never
    * opened, the output still Chromium's. Play opens and starts it when the
    * request it was prepared for is still the request; anything else unloads
@@ -522,9 +537,7 @@ export class DesktopNativePlaybackClient {
         return Math.max(0, this.pendingSeekFrame / sampleRate)
       // Never acknowledged. Drop it rather than go on drawing a position the
       // song never reached.
-      this.pendingSeekFrame = null
-      this.pendingSeekReceipt = null
-      this.pendingSeekIssued = 0
+      this.clearPendingSeek()
     }
     const frame = Number(status.audibleProjectFrame)
     if (!Number.isSafeInteger(frame)) return null
@@ -858,7 +871,13 @@ export class DesktopNativePlaybackClient {
         state: 'playing',
         ...(loop ? { loop } : {})
       },
-      ...(graphDocument ? { graphDocument } : {})
+      ...(graphDocument ? { graphDocument } : {}),
+      // In EVERY prepare — ahead, Play and seam alike — so it is part of the
+      // ahead signature and a toggle between prepares is a rebuild, never a
+      // silent mismatch. On by default on macOS, as on the phones (Windows
+      // waits on a positional read path — see the preference); the core
+      // falls back to decoding any lane it cannot stream.
+      streamLanes: desktopStreamLanesPreferred(detectedDesktopPlatform())
     }
   }
 
@@ -910,6 +929,7 @@ export class DesktopNativePlaybackClient {
         )
         this.generation = ''
         this.last = null
+        this.clearPendingSeek()
       }
       // Once rendering started, or when ASIO was explicitly requested, a
       // provider error is never hidden by acquiring Chromium/WASAPI output in
@@ -1028,6 +1048,7 @@ export class DesktopNativePlaybackClient {
       this.generation = ''
       this.started = false
       this.last = null
+      this.clearPendingSeek()
       await this.activate(request, this.route, false, preparedStartProjectFrame, initialTransport)
       this.request = request
     })
@@ -1068,6 +1089,9 @@ export class DesktopNativePlaybackClient {
     const generation = prepared.generation
     this.generation = generation
     this.request = request
+    // A seam's generation counts its seeks from zero: a receipt base read off
+    // the old one is meaningless now.
+    this.clearPendingSeek()
     // The landing: the transport telemetry names the old generation until
     // the render thread hands the clock across at a block boundary, then the
     // new one. Bounded by reads, not by a timer; a seam that has not landed
@@ -1191,12 +1215,13 @@ export class DesktopNativePlaybackClient {
       try {
         ensure(await window.singz.seekDesktopPlayback(generation, targetFrame), 'Native seek failed')
       } catch (error) {
-        // This one never reached the core, so it owes no receipt.
+        // This one never reached the core, so it owes no receipt — and its
+        // target must not be shown for another second either: the bar falls
+        // back to the core's own position now, and an earlier seek still in
+        // flight lands there within a block anyway.
+        this.pendingSeekFrame = null
         this.pendingSeekIssued = Math.max(0, this.pendingSeekIssued - 1)
-        if (this.pendingSeekIssued === 0) {
-          this.pendingSeekFrame = null
-          this.pendingSeekReceipt = null
-        }
+        if (this.pendingSeekIssued === 0) this.pendingSeekReceipt = null
         this.onStateChange(this.last)
         throw error
       }
@@ -1339,6 +1364,7 @@ export class DesktopNativePlaybackClient {
       )
       this.generation = ''
       this.last = null
+      this.clearPendingSeek()
       this.recoveryProvider = this.request?.provider ?? this.recoveryProvider
       this.recoveryKind = 'route-restore'
       const provider = this.recoveryProvider ?? 'coreaudio'
@@ -1386,6 +1412,7 @@ export class DesktopNativePlaybackClient {
       )
       this.generation = ''
       this.last = null
+      this.clearPendingSeek()
       this.recoveryProvider = provider
       this.recoveryKind = 'prepare-retry'
       this.onStateChange(this.last)
@@ -1478,9 +1505,7 @@ export class DesktopNativePlaybackClient {
         // longer waits around for it.
         if (this.pendingSeekReceipt !== null &&
             Number(status.seekCount) >= Number(this.pendingSeekReceipt) + this.pendingSeekIssued) {
-          this.pendingSeekFrame = null
-          this.pendingSeekReceipt = null
-          this.pendingSeekIssued = 0
+          this.clearPendingSeek()
         }
         this.last = status
         this.lastAtMs = Date.now()
