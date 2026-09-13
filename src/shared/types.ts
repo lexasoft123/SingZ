@@ -751,7 +751,16 @@ export interface DesktopPlaybackRuntimeCapability {
 }
 
 export interface DesktopPlaybackTransportConfig {
+  /** Always 0 from the desktop facade, as from both phones: the frame origin
+   *  is the song's start and never moves. Where the singer IS travels as the
+   *  prepared start frame or as `countInAnchorSeconds`, never as the entry —
+   *  an entry that followed the position made the core's timeline relative
+   *  to it while every seek stayed absolute. */
   entrySeconds: number
+  /** Where a count-in LANDS when it is not the entry: a Play from a paused or
+   *  scrubbed spot with the count-in on. ≥ entrySeconds; absent = the entry.
+   *  Accepted by all three bridges per docs/NATIVE-PLAYBACK-BRIDGE.md. */
+  countInAnchorSeconds?: number
   durationSeconds?: number
   playbackRate: number
   transposeSemitones: number

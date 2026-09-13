@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <chrono>
 #include <string>
@@ -160,6 +161,49 @@ int main(int argc, char** argv) {
   // That is either throughput or scheduling, and the two want opposite fixes —
   // so this measures throughput alone, on the same hardware, before anybody
   // theorises about the other. Shipping a guess about it once was enough.
+  // What does ONE seek cost, per lane, on real stems?
+  //
+  //   SINGZ_SEEK_BENCH=1 streaming_lane_feeder_tests lane.flac [lane.flac...]
+  //
+  // The session harness measured a native seek at ~195 ms against legacy's 10,
+  // on a six-lane song. That is either one expensive seek six times over or
+  // one lane being pathological, and the two want opposite fixes — an index,
+  // or parallelism across lanes. Measuring one lane at a time settles it.
+  if (std::getenv("SINGZ_SEEK_BENCH") != nullptr) {
+    for (int i = 1; i < argc; i++) {
+      auto source = singz::openStreamingAudioSource(openRead(argv[i]), {}, nullptr);
+      if (source == nullptr) {
+        std::fprintf(stderr, "could not open %s\n", argv[i]);
+        return 1;
+      }
+      const singz::StreamingAudioInfo info = source->info();
+      const char* cost = info.seekCost == singz::SeekCost::Indexed ? "Indexed" : "Search";
+      // Somewhere past the middle every time, so no seek is answered from
+      // whatever the open happened to leave buffered.
+      double worst = 0, total = 0;
+      const int rounds = 8;
+      for (int r = 0; r < rounds; r++) {
+        const uint64_t target =
+            static_cast<uint64_t>(info.frameCount * (0.15 + 0.7 * (r / double(rounds))));
+        const auto t0 = std::chrono::steady_clock::now();
+        const singz::DecodedAudioStatus st = source->seek(target);
+        const double ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                .count();
+        if (st != singz::DecodedAudioStatus::Ok) {
+          std::fprintf(stderr, "seek failed on %s\n", argv[i]);
+          return 1;
+        }
+        total += ms;
+        if (ms > worst) worst = ms;
+      }
+      const char* name = std::strrchr(argv[i], '/');
+      std::printf("%-14s %-8s mean %6.1f ms · worst %6.1f ms over %d seeks\n",
+                  name != nullptr ? name + 1 : argv[i], cost, total / rounds, worst, rounds);
+    }
+    return 0;
+  }
+
   if (std::getenv("SINGZ_WAVEFORM_BENCH") != nullptr) {
     singz::StreamingLaneGroup group;
     for (int i = 1; i < argc; i++) {

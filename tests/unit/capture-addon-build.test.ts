@@ -120,7 +120,14 @@ describe('Electron capture addon build', () => {
     expect(addon).toContain('{"audioHostProviders", nullptr, audioHostProviders')
     for (const recursiveObject of [
       '{"version", "transport", "cues"}',
-      '{"entrySeconds", "durationSeconds", "playbackRate",',
+      // Five keys, the same five the phones accept and the contract doc
+      // names. This pin read the FOUR-key list for a long time, which made
+      // it a pin on the drift itself: without the anchor the desktop facade
+      // could only place a mid-song count-in by moving the entry, and that
+      // turned the core's timeline relative while every seek stayed
+      // absolute. A source-text pin can only hold a contract it was written
+      // against; the phones' own schema test is the one that named the key.
+      '{"entrySeconds", "countInAnchorSeconds",',
       '{"click", "countInBars", "volume", "accent",',
       '{"beats", "beatsPerBar", "downbeat", "downbeats"}',
       '{"mode", "periodFrames", "windows", "laneIds",',

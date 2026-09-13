@@ -5,6 +5,7 @@ import {
   DESKTOP_PLAYBACK_CAPABILITY,
   DesktopNativePlaybackClient,
   DesktopNativeProviderError,
+  PENDING_SEEK_MAX_MS,
   selectDesktopPlaybackBackend
 } from '../../src/renderer/src/audio/desktop-native-playback'
 import { playbackProviderCanChange } from '../../src/renderer/src/components/SettingsModal'
@@ -505,7 +506,10 @@ describe('desktop native playback facade', () => {
       preparedStartProjectFrame: 0,
       masterGain: 0.5,
       playback: {
-        transport: { playbackRate: 1.1, transposeSemitones: -2 },
+        // A rebuild keeps the origin too: the start frame above is the core's
+        // own entry-relative rendered frame, and it is only right against an
+        // entry that has not moved.
+        transport: { entrySeconds: 0, playbackRate: 1.1, transposeSemitones: -2 },
         cues: { click: false, countInBars: 0 }
       },
       training: { mode: 'period', periodFrames: 144_000, laneIds: ['vocals'], enabled: true },
@@ -793,16 +797,62 @@ describe('desktop native playback facade', () => {
     vi.advanceTimersByTime(100)
     expect(h.client.audibleSeconds()).toBeCloseTo(0.05, 3)
     // A seek shows its target the moment the core accepts it, before any
-    // status reflects it; the status never increments seekCount here, so the
-    // wait gives up after its bounded reads and the projection resumes.
+    // status reflects it — and it does NOT wait around for the receipt.
+    //
+    // It used to: a loop of up to 24 status reads, spinning until seekCount
+    // moved. Since the callback applies a queued seek at its next period, that
+    // put a fifth of a second inside every scrub (the session harness measured
+    // 191/201/191 ms against legacy's 10) and the singer saw the bar and the
+    // lanes lurch after the finger had stopped. One read now, and the target
+    // stands until the receipt lands on the ordinary poll.
     const during: number[] = []
     statusMock.mockImplementation(async () => {
       during.push(h.client.audibleSeconds() ?? -1)
       return playing(h.generationNow(), { audibleProjectFrame: '48000', seekCount: '0' })
     })
     await h.client.seek(7)
-    expect(during.length).toBeGreaterThan(1)
+    expect(during.length).toBe(1)
     expect(during.every((value) => Math.abs(value - 7) < 1e-6)).toBe(true)
+    // Still the target: this status never incremented seekCount, so the core
+    // has not said where it went yet.
+    expect(h.client.audibleSeconds()).toBeCloseTo(7, 3)
+    // But a seek the core NEVER acknowledges must not leave a phantom position
+    // on the bar for the rest of the song. That give-up used to come from the
+    // blocking wait running out of reads; it is a deadline now.
+    vi.advanceTimersByTime(PENDING_SEEK_MAX_MS + 1)
+    expect(h.client.audibleSeconds()).toBeCloseTo(2.0, 3)
+    await h.client.unload()
+  })
+
+  it('two seeks in flight keep the LAST target until the core has applied both', async () => {
+    // A scrub is several seeks in flight, and the core applies them one per
+    // callback block. Retiring the target the moment `seekCount` MOVED
+    // retired the second seek's target on the first seek's receipt: the bar
+    // showed the first spot for a poll, then jumped to the second — the same
+    // lurch this file's seek path was just cured of, one block wide. The
+    // target now stands until the receipt reaches base + issued.
+    vi.setSystemTime(new Date('2026-09-13T00:00:00Z'))
+    let seekCount = '0'
+    const h = seamHarness((generation) =>
+      playing(generation, { audibleProjectFrame: '48000', seekCount })
+    )
+    expect(await h.start()).toBe(true)
+    ;(h.client as unknown as { stopPolling: () => void }).stopPolling()
+    const refresh = (h.client as unknown as { refresh: (g: string) => Promise<void> }).refresh.bind(h.client)
+
+    await h.client.seek(7)
+    await h.client.seek(9)
+    expect(h.client.audibleSeconds()).toBeCloseTo(9, 3)
+
+    // The first receipt: seek A applied. The bar must NOT fall back to the
+    // status frame here — that is A's position, and B is still owed.
+    seekCount = '1'
+    await refresh('1')
+    expect(h.client.audibleSeconds()).toBeCloseTo(9, 3)
+
+    // The second receipt: both applied, and the core's own frame takes over.
+    seekCount = '2'
+    await refresh('1')
     expect(h.client.audibleSeconds()).toBeCloseTo(1.0, 3)
     await h.client.unload()
   })
@@ -874,6 +924,17 @@ describe('desktop native playback facade', () => {
     expect(await h.client.prepareAndStart({ ...request, positionSeconds: 3 })).toBe(true)
     expect(h.calls).toEqual(['unload:1', 'prepare:2', 'open:2', 'start:2'])
     expect(h.prepared[1]).not.toHaveProperty('swapFromGeneration')
+    // THE ENTRY DOES NOT FOLLOW THE POSITION. The scrubbed spot travels as
+    // the signed transport start; the frame origin stays at the song's top.
+    // This used to send `entrySeconds: 3`, which made the core's timeline
+    // relative to the scrub while every seek stayed absolute — seeks into the
+    // last three seconds refused as "The absolute playback seek is invalid",
+    // the rest landing three seconds late, and the bar drawn from a project
+    // frame nothing added the entry back to. A saved project reopens at its
+    // remembered position, so on a Mac this was every song, every time.
+    expect(h.prepared[1].playback.transport).toMatchObject({ entrySeconds: 0 })
+    expect(h.prepared[1].playback.transport).not.toHaveProperty('countInAnchorSeconds')
+    expect(h.prepared[1].preparedStartProjectFrame).toBe(144_000)
     await h.client.unload()
     // And a control change: a different graph.
     const h2 = seamHarness((generation) => playing(generation))
@@ -882,6 +943,37 @@ describe('desktop native playback facade', () => {
     expect(await h2.client.prepareAndStart({ ...request, masterGain: 0.5 })).toBe(true)
     expect(h2.calls).toEqual(['unload:1', 'prepare:2', 'open:2', 'start:2'])
     await h2.client.unload()
+  })
+
+  it('a Play from mid-song with the count-in on names the spot as the ANCHOR, and the entry still stays 0', async () => {
+    // The phones' rule, in their own words: "the source/cue plan stays
+    // anchored to the song's original entry ... changing both would
+    // double-offset the positioned decoded source." With the count-in on the
+    // remembered position is where the count-in LANDS, the start is the
+    // ordinary pre-rolled one, and the frame origin does not move. The
+    // desktop had no way to say this — its bridge refused the anchor key —
+    // and moved the entry instead, which is the double offset.
+    const h = seamHarness((generation) => playing(generation))
+    expect(await h.client.prepareAndStart({
+      provider: 'coreaudio',
+      lanes: [{ id: 'vocals', path: '/allowed/vocals.mp3', gain: 1, muted: false, solo: false }],
+      beat: { beats: [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5], bpm: 120, beatsPerBar: 4, downbeat: 0,
+        downbeats: [0, 4], source: 'auto' },
+      metronome: { ...h.metronome, click: true, countInBars: 1 },
+      countIn: true,
+      positionSeconds: 3,
+      durationSeconds: 10,
+      sampleRate: 48_000,
+      masterGain: 0,
+      playbackRate: 1,
+      transpose: 0,
+      training: null,
+      loop: null,
+      graphDocument: undefined
+    })).toBe(true)
+    expect(h.prepared[0].playback.transport).toMatchObject({ entrySeconds: 0, countInAnchorSeconds: 3 })
+    expect(h.prepared[0]).not.toHaveProperty('preparedStartProjectFrame')
+    await h.client.unload()
   })
 
   it('an adoption whose request cannot be built unloads the prepared generation before the error', async () => {

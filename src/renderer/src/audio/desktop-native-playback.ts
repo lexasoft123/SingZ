@@ -34,6 +34,11 @@ import {
 export const POLL_FAST_MS = 50
 export const POLL_STEADY_MS = 200
 export const POLL_BURST_MS = 2000
+/** How long the bar may show a seek's target while waiting for the core's
+ *  receipt. Generous against the real wait (the callback applies a queued seek
+ *  at its next period) and short enough that a core which never acknowledges
+ *  one cannot leave a phantom position on screen. */
+export const PENDING_SEEK_MAX_MS = 1000
 
 export { DESKTOP_PLAYBACK_CAPABILITY }
 
@@ -410,6 +415,32 @@ export class DesktopNativePlaybackClient {
   /** A seek the core has accepted but the status has not yet reflected: the
    * bar shows the target at once instead of one IPC round trip later. */
   private pendingSeekFrame: number | null = null
+  /** The seek receipt the pending target is waiting on. The target is shown
+   *  until the core's `seekCount` moves past this — the phones' rule ("read
+   *  the seek's target until the receipt moves") arriving on the desktop.
+   *
+   *  It used to be retired in the seek call's own `finally`, which meant the
+   *  call had to BLOCK until the receipt came. The core applies a queued seek
+   *  at its next callback period, and that period is 4096 frames, so a scrub
+   *  stalled about two of them and then threw the bar's own optimistic target
+   *  away at the end. The session harness measured it at 191/201/191 ms
+   *  against legacy's 10; a singer feels it as the seek bar and the lanes
+   *  lurching after the finger has stopped. */
+  private pendingSeekReceipt: string | null = null
+  /** How many seeks have been issued since `pendingSeekReceipt` was read.
+   *  A scrub is several seeks in flight, and the core applies them one per
+   *  callback block; retiring the target the moment `seekCount` MOVED
+   *  retired the second seek's target on the first seek's receipt, so the
+   *  bar showed the first spot for a poll and then jumped to the second — the
+   *  same lurch, one block wide. The target now stands until the receipt
+   *  reaches base + issued: every seek in flight has been applied. */
+  private pendingSeekIssued = 0
+  /** When that target was issued. The receipt normally lands within a callback
+   *  period, but a core that never acknowledges a seek must not leave the bar
+   *  showing a position the song never reached — so the target expires on its
+   *  own. This is the give-up the blocking wait used to provide, kept as a
+   *  deadline instead of as a stall. */
+  private pendingSeekAtMs = 0
   /** A generation prepared ahead of Play (see prepareAhead): prepared, never
    * opened, the output still Chromium's. Play opens and starts it when the
    * request it was prepared for is still the request; anything else unloads
@@ -486,7 +517,15 @@ export class DesktopNativePlaybackClient {
     const status = this.last
     const sampleRate = status?.format.sampleRate
     if (!status || !sampleRate || !this.ownsOutput) return null
-    if (this.pendingSeekFrame !== null) return Math.max(0, this.pendingSeekFrame / sampleRate)
+    if (this.pendingSeekFrame !== null) {
+      if (Date.now() - this.pendingSeekAtMs < PENDING_SEEK_MAX_MS)
+        return Math.max(0, this.pendingSeekFrame / sampleRate)
+      // Never acknowledged. Drop it rather than go on drawing a position the
+      // song never reached.
+      this.pendingSeekFrame = null
+      this.pendingSeekReceipt = null
+      this.pendingSeekIssued = 0
+    }
     const frame = Number(status.audibleProjectFrame)
     if (!Number.isSafeInteger(frame)) return null
     let seconds = frame / sampleRate
@@ -756,10 +795,30 @@ export class DesktopNativePlaybackClient {
         loop.endProjectFrame <= loop.startProjectFrame)) {
       throw new Error('Native loop bounds are invalid.')
     }
+    // THE FRAME ORIGIN NEVER MOVES. `entrySeconds` is 0 on every prepare, as
+    // it is on both phones, and the singer's position travels either as the
+    // signed transport start (count-in off: the song starts there flat) or as
+    // the count-in ANCHOR (count-in on: the pre-roll counts down to it).
+    //
+    // This used to send `entrySeconds: request.positionSeconds`, which turns
+    // the core's whole project timeline entry-relative — frame 0 becomes the
+    // paused spot and `durationFrames` becomes song-length-minus-entry —
+    // while everything else here stayed absolute: the start frame below was
+    // added on top (the double offset the phones' own comment warns about),
+    // every seek past `duration − entry` was refused as "The absolute
+    // playback seek is invalid", the ones that were accepted landed `entry`
+    // seconds late, and the bar painted `audibleProjectFrame` with nothing
+    // added back, so it read song-time-minus-entry and appeared to jump to
+    // the top of the song on Play and Pause. All three reached a Mac at
+    // once, because a saved project reopens at its remembered position and
+    // native is the default there.
+    const countsIn = request.countIn && request.metronome.countInBars > 0
     const startFrame = preparedStartProjectFrame ??
-      ((!request.countIn || request.metronome.countInBars === 0)
-        ? Math.round(request.positionSeconds * route.sampleRate)
-        : undefined)
+      (countsIn ? undefined : Math.round(request.positionSeconds * route.sampleRate))
+    const countInAnchorSeconds =
+      preparedStartProjectFrame === undefined && countsIn && request.positionSeconds > 0
+        ? request.positionSeconds
+        : undefined
     const graphDocument = request.graphDocument
       ? projectGraphDocumentForNative(request.graphDocument)
       : undefined
@@ -779,7 +838,8 @@ export class DesktopNativePlaybackClient {
       playback: {
         version: DESKTOP_PLAYBACK_CONTRACT_VERSION,
         transport: {
-          entrySeconds: request.positionSeconds,
+          entrySeconds: 0,
+          ...(countInAnchorSeconds === undefined ? {} : { countInAnchorSeconds }),
           durationSeconds: request.durationSeconds,
           playbackRate: request.playbackRate,
           transposeSemitones: request.transpose
@@ -1118,29 +1178,41 @@ export class DesktopNativePlaybackClient {
       // Shown the moment it is issued — the IPC round trip alone is 20-60 ms
       // on a busy main — and withdrawn only if the core refuses it.
       this.pendingSeekFrame = targetFrame
+      // The base is read ONCE, at the first seek of a run; every seek after
+      // it while the receipt is still owed adds to `issued` instead of moving
+      // the base, so the target stands until the core has applied them all.
+      if (this.pendingSeekReceipt === null) {
+        this.pendingSeekReceipt = before
+        this.pendingSeekIssued = 0
+      }
+      this.pendingSeekIssued += 1
+      this.pendingSeekAtMs = Date.now()
       this.onStateChange(this.last)
       try {
-        try {
-          ensure(await window.singz.seekDesktopPlayback(generation, targetFrame), 'Native seek failed')
-        } catch (error) {
+        ensure(await window.singz.seekDesktopPlayback(generation, targetFrame), 'Native seek failed')
+      } catch (error) {
+        // This one never reached the core, so it owes no receipt.
+        this.pendingSeekIssued = Math.max(0, this.pendingSeekIssued - 1)
+        if (this.pendingSeekIssued === 0) {
           this.pendingSeekFrame = null
-          this.onStateChange(this.last)
-          throw error
+          this.pendingSeekReceipt = null
         }
-        await this.refreshCommandStatus(generation, provider)
-      // The callback applies the queued seek at its next period. The core's
-      // resume() resolves Playing either way now and lets the callback end the
-      // song from its own frame, so this wait no longer decides whether the
-      // restart sounds; it keeps the status base fresh before the resume and
-      // gives up quietly. Bounded — status reads, not timers, so the wait is
-      // a few IPC round trips at most.
-        for (let attempt = 0; attempt < 24 && this.generation === generation &&
-             this.last?.seekCount === before; attempt++) {
-          await this.refreshCommandStatus(generation, provider)
-        }
-      } finally {
-        if (this.pendingSeekFrame === targetFrame) this.pendingSeekFrame = null
+        this.onStateChange(this.last)
+        throw error
       }
+      // One status read to keep the base fresh, and then done.
+      //
+      // What used to follow was a loop of up to 24 more, spinning until the
+      // core's receipt moved — and since the callback applies a queued seek at
+      // its next period, that is what made a seek cost a fifth of a second
+      // rather than the ~1 ms the file seek actually takes (measured on real
+      // stems: vocals 1.0 ms, drums 0.9, bass 0.6, with no seektable in any of
+      // them). The wait was never load-bearing, and its own comment said so:
+      // resume() resolves either way and the callback ends the song from its
+      // own frame. The bar goes on showing the target through
+      // `pendingSeekFrame` until the receipt lands on the ordinary poll, so
+      // nothing is drawn early and nothing lurches afterwards.
+      await this.refreshCommandStatus(generation, provider)
     })
   }
 
@@ -1399,6 +1471,16 @@ export class DesktopNativePlaybackClient {
             previous.streamGeneration !== status.streamGeneration ||
             previous.routeGeneration !== status.routeGeneration) {
           this.activityAtMs = Date.now()
+        }
+        // The receipt has landed, so stop showing where we ASKED the core to
+        // go and start showing where it says it is. This is the one place the
+        // optimistic target is retired now — not in the seek call, which no
+        // longer waits around for it.
+        if (this.pendingSeekReceipt !== null &&
+            Number(status.seekCount) >= Number(this.pendingSeekReceipt) + this.pendingSeekIssued) {
+          this.pendingSeekFrame = null
+          this.pendingSeekReceipt = null
+          this.pendingSeekIssued = 0
         }
         this.last = status
         this.lastAtMs = Date.now()

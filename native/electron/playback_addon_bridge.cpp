@@ -693,8 +693,16 @@ bool parsePlayback(napi_env env, napi_value value, double sampleRate,
                         kDesktopPlaybackContractVersion, 0, true, &version) ||
       version != kDesktopPlaybackContractVersion ||
       !named(env, value, "transport", &transport) ||
+      // The same five keys the phones accept (NativePlaybackBridgeSchema.mm,
+      // native_playback_jni.cpp) and the contract doc names. This list was
+      // four for a long time — without the anchor, the desktop facade could
+      // only express a mid-song count-in by MOVING THE ENTRY, which made the
+      // core's whole timeline relative to the paused spot while every seek
+      // stayed absolute. The bridge manifest pins this method by arity, not
+      // by key, so nothing went red when the desktop drifted from the phones.
       !objectWithOnlyKeys(env, transport,
-                          {"entrySeconds", "durationSeconds", "playbackRate",
+                          {"entrySeconds", "countInAnchorSeconds",
+                           "durationSeconds", "playbackRate",
                            "transposeSemitones"}) ||
       !named(env, value, "cues", &cues) ||
       !objectWithOnlyKeys(env, cues,
@@ -718,6 +726,17 @@ bool parsePlayback(napi_env env, napi_value value, double sampleRate,
       !numberProperty(env, cues, "volume", 0.0, 1.0, 0.7, true,
                       &request.volume) ||
       !boolProperty(env, cues, "accent", true, true, &request.accent))
+    return false;
+
+  // Optional, exactly as on iOS: where the count-in LANDS when that is not
+  // the entry (a Play from mid-song with the count-in on). Absent leaves the
+  // request's own default, -1, which the planner reads as "the count-in
+  // precedes the entry itself". The planner also refuses an anchor below the
+  // entry or past the song, so the range check here is the same coarse bound
+  // the other transport numbers get.
+  if (!numberProperty(env, transport, "countInAnchorSeconds", 0.0,
+                      kPlaybackCueMaximumDurationSeconds, -1.0, false,
+                      &request.countInAnchorSeconds))
     return false;
 
   request.durationSeconds = kPlaybackCueMaximumDurationSeconds;
