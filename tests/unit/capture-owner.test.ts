@@ -10,7 +10,7 @@ import {
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   CaptureAddonLoadError,
@@ -607,7 +607,8 @@ describe('CaptureOwner', () => {
       // remember it has already validated this file — and the second call
       // wrote nothing new.
       expect(again.path).toBe(first.path)
-      expect(first.path.endsWith('/singz-capture.node')).toBe(true)
+      // basename, not a '/' suffix: this suite runs on the Windows legs too.
+      expect(basename(first.path)).toBe('singz-capture.node')
       expect(readFileSync(first.path)).toEqual(Buffer.from(artifact))
       expect(readFileSync(first.companions!['ffmpeg/libavcodec.62.dylib']))
         .toEqual(Buffer.from(companion))
