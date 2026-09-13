@@ -105,12 +105,17 @@ const dspComplaints = (lines) =>
     // ── The open ─────────────────────────────────────────────────────────
     const t0 = Date.now()
     await win.click(`.lib-card:has-text("${SONG}")`)
-    await win.waitForFunction(() => __test?.phase === 'loading', null, { timeout: 30000 })
-    await win.waitForFunction(
-      () => __test?.phase === 'ready' && __test?.engine?.duration > 0,
-      null,
-      { timeout: 180000 }
-    )
+    // A NODE poll, not waitForFunction: that helper polls on requestAnimationFrame,
+    // which fires about once a second in the never-shown SINGZ_E2E_HIDDEN
+    // window on the field laptop, so a 'loading' phase a few hundred
+    // milliseconds long went by unseen there. Nothing was open before the
+    // click, so 'ready' with a duration is the whole transition.
+    for (;;) {
+      const state = await val(win, '({ phase: __test?.phase, duration: __test?.engine?.duration ?? 0 })')
+      if (state.phase === 'ready' && state.duration > 0) break
+      if (Date.now() - t0 > 180000) throw new Error(`the song never became ready (phase ${state.phase})`)
+      await sleep(50)
+    }
     const ready = Date.now() - t0
     const steps = await val(win, 'JSON.stringify(__test.loadSteps())').then(JSON.parse)
     const total = steps.length ? steps[steps.length - 1].ms : 0
