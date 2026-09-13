@@ -3006,6 +3006,20 @@ body.win .transport {
   animation: pulse 1s steps(8) infinite;
 }
 
+/* Windows stays frozen. The stepped fade above is priced on the mac only;
+   the fleet's QHD+ Intel iGPU paid ~20pp for the 60 Hz version during lyric
+   gaps, and a quarter of that is still the largest single painter there
+   until someone measures it (tests/e2e/win-visible-cpu.cjs on the field
+   laptop). This override was folded into the global freeze in 52e9b897 and
+   went with it when 11a20a35 un-froze the mac — v0.20.1 shipped Windows
+   frozen, and it stays that way. */
+body.win .lyr-line.count-1::before,
+body.win .lyr-line.count-2::before,
+body.win .lyr-line.count-3::before,
+body.win .lyr-line.count-sec::before {
+  animation: none;
+}
+
 /* Infinite animations behind an open modal each force a full-window
    backdrop re-raster — freeze them; they resume the moment it closes. */
 body.modal-open .dot.warn,
