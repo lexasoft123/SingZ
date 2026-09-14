@@ -507,7 +507,10 @@ export function enumerators(source: string, name: string): string[] {
 
 /** Keys of a TypeScript `interface Name { … }`, ignoring nested literals. */
 export function interfaceKeys(source: string, name: string): string[] {
-  const body = stripComments(functionBody(source, `interface ${name}`))
+  // The trailing space is the whole-name match: `DesktopPlaybackLaneMeasure`
+  // is a prefix of `DesktopPlaybackLaneMeasureRequest`, declared earlier in
+  // the same file, and the bare prefix answered with the wrong interface.
+  const body = stripComments(functionBody(source, `interface ${name} `))
   const keys: string[] = []
   let depth = 0
   const lines = body.split('\n')

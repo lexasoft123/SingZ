@@ -93,7 +93,7 @@ the E2E Windows workflow, which also runs `npm test`), the two capture-addon
 harnesses in `tests/e2e/` (`capture-addon-smoke.cjs`, the Electron ABI/load
 gate CI runs on both platforms; `capture-addon-hardware.cjs`, by-hand only —
 it opens the real microphone), and the mac drivers
-in `tests/e2e/mac/` (thirteen of them: align, lyrics editing (the editor's
+in `tests/e2e/mac/` (fifteen of them: align, lyrics editing (the editor's
 align-draft leg is a different code path from the panel's Check & align —
 both are covered), wizard/consent, audio settings,
 bar editing — TWO of those, because dragging a line and pressing Re-detect
@@ -103,7 +103,7 @@ and stamp-upgrade — and `player-session-e2e.cjs`, the desktop's
 native-vs-legacy session replay judged by the phone harness's rules, which needs the
 DSP-graph addon built for the tree; the native CoreAudio path bypasses Chromium's
 mute, so `SINGZ_MUTE` is honoured in MAIN instead (`mutedMasterGain` clamps the
-master gain every prepare and every master-gain command carries through), which
+master gain every prepare and every master-gain command carries through) — and `mutedCueVolume` clamps the metronome's cue volume at prepare, because the clicks bypass the master bus and a muted native run with the count-in on clicked out loud until it did, which
 is what keeps a native driver silent without each one remembering to zero it; and `transport-race-e2e.cjs`, which
 presses Play the way a singer does and the session replay by construction
 cannot — EARLY, while the graph prepared ahead is still building, and TWICE
@@ -123,7 +123,19 @@ alone, which was right all along while the button was wrong, exactly the
 divergence the phones added their own `__test.playing` for. It also fails on
 ANY dsp warn or error, which is what the log is FOR now; the session replay
 policed three hand-written phrases until one of them missed sixteen
-`resume failed` warnings in a row; the `e2e-verifier` agent in
+`resume failed` warnings in a row; and `open-native-e2e.cjs`, which holds
+the open to NOT decoding: under native playback the lanes are MEASURED off
+their files by the addon (`measurePlaybackLanes`, the header + computePeaks'
+peaks + the phones' envelope + the silent-lane RMS, one pass, nothing
+retained — `audio/lane-measure.ts`, `native/playback/lane_measure.h`), and
+the driver refuses to pass unless main's log says so, no lane has samples in
+the renderer after the open, native Play advances, and the measured vocals
+agree with a decode fetched back afterwards. Before it, every open decoded
+six lanes through Chromium for a duration and a drawing and released them
+after Play (2.7 s on this Mac, ~10x on the fleet); with it, 0.56 s. A lane
+the measure refuses decodes as before, so a green run here is also the
+promise that the fallback never got exercised for a healthy project; and `count-in-e2e.cjs`, the only desktop driver that turns the COUNT-IN on: it scrubs before the first Play, presses Pause INSIDE the count-in and Play after a Pause twice, and reads `engine.position` at 40 ms through every pre-roll — the two 0.21.1 field reports it guards were invisible to every driver before it because none of them counts in (every Play after a song's first was a bare resume, so the count-in sounded once per open; and the core's negative pre-roll frames were clamped to 0, so a mid-song count-in drew the bar at the top of the song and a Pause inside it parked it there — the bar HOLDS at the landing now, as the phones' does); the
+`e2e-verifier` agent in
 `.claude/agents/` holds the roster of record, and a new driver is not
 finished until it is listed there — launch one instance per platform in
 parallel for cross-platform verification) — vitest unit tests in
@@ -728,6 +740,18 @@ was driven; the gotchas that follow from it are below.
   GeneratePrefabPackages treats the JDK 24+ restricted-native-access warning
   from its `prefab` subprocess as a build error — any project with a prefab
   consumer (reanimated/worklets) fails to configure under the new JBR.
+- **macOS validates a Mach-O it has never mapped before on its first
+  `dlopen`, and caches the verdict PER FILE** — measured on the capture
+  addon: 200 ms warm, 950 ms right after launch, 1-2 ms for the same file
+  ever after. The loader used to stage a fresh random copy of the addon on
+  every launch, so every launch paid it — invisibly, on the prepare-ahead,
+  until the lane measure made the addon the first thing an open asks for and
+  the session harness read it as +1 s on the first open. The dev-tree source
+  fingerprint everyone suspected costs 68 ms. `stageArtifactForLoad` stages
+  at a content-addressed private path now (owner, mode and bytes checked
+  before the map; the random directory stays as the fallback). When a
+  first-use cost appears on a native path, measure the `require` before the
+  verification around it.
 - **zsh**: `status` is a read-only variable in scripts.
 - **npm majors**: `@vitejs/plugin-react` must match electron-vite's supported
   Vite major (currently plugin ^5 with electron-vite 5 / Vite 7).

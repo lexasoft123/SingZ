@@ -849,6 +849,47 @@ export interface DesktopPlaybackLaneConfig {
   solo: boolean
 }
 
+/**
+ * What the desktop open asks the addon for instead of decoding a lane: the
+ * lane's header and its three drawing statistics, read off the FILE through
+ * the streaming source (native/playback/lane_measure.h). The peaks policy is
+ * `bucketsFor` from audio/peaks.ts, sent rather than compiled into the addon
+ * so the renderer owns how fine its waveform is.
+ */
+export interface DesktopPlaybackLaneMeasureRequest {
+  lanes: { id: string; path: string }[]
+  peaksPerSecond: number
+  minimumPeaks: number
+  maximumPeaks: number
+}
+
+export interface DesktopPlaybackLaneMeasure {
+  id: string
+  /** False when the source could not read this lane; the renderer then
+   *  decodes that one lane the old way. `error` names the decode status. */
+  ok: boolean
+  error: string
+  sampleRate: number
+  channels: number
+  frameCount: number
+  durationSeconds: number
+  /** Whole-lane RMS over every channel: the silent-lane test. */
+  rms: number
+  /** computePeaks' statistic, unnormalized — per-bucket max |x| over the
+   *  first two channels, one bucket per millisecond under the policy. */
+  peaks: Float32Array
+  /** The phones' 96-bucket RMS envelope, laneEnvelope's statistic. */
+  envelope: Float32Array
+}
+
+export interface DesktopPlaybackLaneMeasureResult {
+  /** False when the measure did not run at all (no addon, a malformed
+   *  request, a teardown); the lanes then say nothing. */
+  ok: boolean
+  error: string
+  lanes: DesktopPlaybackLaneMeasure[]
+}
+
 export type DesktopPlaybackState =
   | 'unloaded'
   | 'preparing'
@@ -1317,6 +1358,12 @@ export interface SingzApi {
   ): Promise<DesktopPlaybackResult>
   desktopPlaybackStatus(): Promise<DesktopPlaybackStatus>
   unloadDesktopPlayback(generation: string): Promise<DesktopPlaybackResult>
+  /** The open's lane measure: header, peaks, envelope and RMS off the stem
+   *  files, so a song native playback will play is never decoded through
+   *  Chromium just to be drawn. */
+  measureDesktopPlaybackLanes(
+    request: DesktopPlaybackLaneMeasureRequest
+  ): Promise<DesktopPlaybackLaneMeasureResult>
   /** First-run setup: model inventory and the shared download flow. */
   modelsStatus(): Promise<ModelInfo[]>
   downloadModels(

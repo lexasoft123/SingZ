@@ -178,6 +178,8 @@ const api: SingzApi = {
   setDesktopPlaybackMasterGain: (generation, gain) =>
     ipcRenderer.invoke('audio-host:playback-master', generation, gain),
   desktopPlaybackStatus: () => ipcRenderer.invoke('audio-host:playback-status'),
+  measureDesktopPlaybackLanes: (request) =>
+    ipcRenderer.invoke('audio-host:playback-measure', request),
   unloadDesktopPlayback: (generation) =>
     ipcRenderer.invoke('audio-host:playback-unload', generation),
 

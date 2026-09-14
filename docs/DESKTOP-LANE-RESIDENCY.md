@@ -338,14 +338,83 @@ fifth song).
 - **`prepMelody` and Re-detect are the blast radius** if a release is wrong:
   a wrong duration corrupts a stored line and saves it.
 
+## The open no longer decodes at all (2026-09-13)
+
+The release above let the renderer's copy go a few seconds AFTER Play. The
+open still made it: every lane decoded through `decodeAudioData` before the
+song was on screen, for a duration, the lane waveform (`computePeaks`), the
+phones' envelope (`laneEnvelope`) and the silent guitar/piano test — then
+handed to `engine.load`, then released once the core, which had read the
+same files itself, was playing. Measured with `open-steps-e2e.cjs` on this
+Mac, Deutschland (323 s, six lanes): "Reading the stems" 1621 ms of decode,
+"Drawing the waveforms" 929 ms of JavaScript peak passes, click to ready
+2680 ms. The Windows fleet runs about ten times that.
+
+Now, when native playback will play the song (`desktopLaneMeasureApplies`,
+`audio/lane-measure.ts` — the facade's own backend gate with neutral
+controls), the renderer asks the addon for exactly those three things
+instead: `measurePlaybackLanes` (`native/playback/lane_measure.h`) reads
+every lane once through the streaming source, in blocks, on a thread per
+lane, and answers with the header, `computePeaks`' statistic at
+`computePeaks`' bucket count, `summarizeLanePeaks`' envelope and the
+whole-lane RMS — retaining nothing. The engine's lanes carry `buffer: null`
+from the first frame; `lanesResident` is false from the open; every consumer
+listed under "Who needs the decoded buffer" already knew how to fetch the
+samples back through `ensureTrackBuffer`, because the release taught them.
+
+Same song, same driver shape (`open-native-e2e.cjs`): the six lanes measure
+in 430-500 ms, click to ready 562 ms, no `AudioBuffer` anywhere in the
+renderer, native Play advancing, and the measured vocals against
+`computePeaks` over a decode fetched back afterwards: 99.92% of 323,056
+buckets within 0.05 (the decode is at the device's rate, the measure at the
+file's — resampling ripple, which is why the exact pin is the ctest,
+`tests/native/lane_measure_tests.cpp`, against the full decode).
+
+Two things it deliberately does not change. A lane the measure refuses — a
+WAV in a v1 project, a custom track in a format the streaming source does
+not read, a file that will not open — decodes exactly as before, one lane at
+a time, so the measure can make an open faster and never make one fail that
+used to succeed; main logs every refusal (`lanes measured · 5/6 lanes …
+decoding instead: …`, at info for a format the source does not read and at
+warn for a file that could not be read). The gate is decided ONCE over every
+lane the song will have — stems and the singer's added tracks alike —
+because Play asks the same gate over the same set: six FLAC stems judged on
+their own said "native" while the mp3 custom track beside them made Play
+say "legacy", and the first Play then decoded six lanes in front of the
+first sound. Caught in review, pinned by a unit test.
+
+And the addon's first load used to be paid by the prepare-ahead, 400 ms
+after the song was up; it is now the first thing an open asks for. What it
+cost was not the dev tree's source fingerprint (68 ms) but the `require`:
+macOS validates a Mach-O it has never mapped on its first dlopen — 200 ms
+warm, 950 ms right after launch — and the loader staged a FRESH random copy
+of the addon on every launch, so every launch paid it, and with this change
+the first open after launch paid it too (the session harness, which opens a
+song the instant the library appears, showed it as +1 s on the first open).
+The staging is content-addressed now (`stageArtifactForLoad`, capture.ts):
+the same bytes go to the same private path, checked for owner, mode and
+exact bytes before they are mapped, so the OS validates each artifact once;
+anything that fails a check falls back to the per-launch random directory.
+The renderer also warms the addon 800 ms after mount, so even that once is
+off every path a singer waits on.
+
 ## The measurement
 
 Two instruments, and the first one alone is not enough:
 
+- **`tests/e2e/mac/open-native-e2e.cjs`** — does the open decode at all?
+  It refuses to pass unless main's log says the lanes were measured, no
+  lane has samples in the renderer after the open, native Play advances,
+  and the measured picture agrees with a decode fetched back afterwards.
 - **`tests/e2e/mac/lane-residency-probe.cjs`** — does the memory come back?
   One process, `footprint -p`, a forced collection, and a 512 MB control that
   makes the probe prove itself before it judges anything. This is what caught
-  the pinned closure that every other check called green.
+  the pinned closure that every other check called green. It now finds one
+  of two shapes and says which: an open that decoded (native off, or a lane
+  the measure refused) gets the release measured as before; an open that
+  measured its lanes has no copy to release, and the probe holds it to the
+  stronger rule instead — the renderer over its no-song baseline weighs a
+  fraction of a decoded copy, before Play and after it.
 - **`player-session-e2e.cjs`** on a quiet host — is native still no worse than
   legacy for a singer? The four footprint rows and the residency rule beside
   them. Its `playing` row samples 2.5 s after Play, which is inside the window

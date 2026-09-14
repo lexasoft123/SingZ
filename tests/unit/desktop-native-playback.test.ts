@@ -1902,6 +1902,321 @@ describe('desktop native playback facade', () => {
     )
     await expect(h.client.resume()).rejects.toThrow(/the output went away/)
   })
+
+  // The count-in request the three tests below share: a grid, one bar of
+  // count-in, a Play from 3 s. The core runs that count-in at NEGATIVE
+  // project frames and lands on 3 s when it ends.
+  const countInRequest = (positionSeconds: number, countIn = true) => ({
+    provider: 'coreaudio' as const,
+    lanes: [{ id: 'vocals', path: '/allowed/vocals.mp3', gain: 1, muted: false, solo: false }],
+    beat: { beats: [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5], bpm: 120, beatsPerBar: 4, downbeat: 0,
+      downbeats: [0, 4, 8], source: 'auto' as const },
+    metronome: { click: false, countInBars: 1, volume: 0, accent: true, grid: false },
+    countIn,
+    positionSeconds,
+    durationSeconds: 10,
+    sampleRate: 48_000,
+    masterGain: 0,
+    playbackRate: 1,
+    transpose: 0,
+    training: null,
+    loop: null,
+    graphDocument: undefined
+  })
+
+  it('the bar HOLDS at the landing through a mid-song count-in, and through a Pause inside it — never at 0', async () => {
+    // Field report on 0.21.1: a Play from mid-song with the count-in on drew
+    // the bar at the top of the song for the whole count-in, and a Pause
+    // inside the count-in parked it there ("the seek bar jumps to the song
+    // start when I hit pause fast"). The core reports the pre-roll as
+    // negative frames counting up to 0, and `Math.max(0, …)` turned every
+    // one of them into the song's first second. The phones hold the bar at
+    // the LANDING (legacy's clock clamps at the start offset until the
+    // music enters) — the line the singer chose stays on screen.
+    let current: Partial<DesktopPlaybackStatus> = {
+      transportState: 'pre-roll', renderedProjectFrame: '-96000', audibleProjectFrame: '-96128'
+    }
+    const h = seamHarness((generation) => playing(generation, current))
+    expect(await h.client.prepareAndStart(countInRequest(3))).toBe(true)
+    expect(h.client.status?.transportState).toBe('pre-roll')
+    expect(h.client.audibleSeconds()).toBe(3)
+    // Paused inside the count-in: still the landing.
+    current = { transportState: 'paused', renderedProjectFrame: '-48000', audibleProjectFrame: '-48000' }
+    await h.client.pause()
+    expect(h.client.status?.transportState).toBe('paused')
+    expect(h.client.audibleSeconds()).toBe(3)
+    // Landed, with the ear one output latency (128 frames) behind the render
+    // head: the audible frame reads a hair BEFORE the landing, which for a
+    // mid-song start is a line the singer never chose — floored at the
+    // landing for that one latency span.
+    current = { transportState: 'playing', renderedProjectFrame: '144064', audibleProjectFrame: '143936' }
+    await h.client.resume()
+    expect(h.client.audibleSeconds()).toBe(3)
+    // Past it: the ordinary audible frame.
+    current = { transportState: 'playing', renderedProjectFrame: '148800', audibleProjectFrame: '148672' }
+    await h.client.setMasterGain(0.5)
+    expect(h.client.audibleSeconds()).toBeCloseTo(148_672 / 48_000, 3)
+    // A count-in at the TOP holds at 0, by the same rule rather than by the
+    // clamp; and a generation with the count-in OFF has no landing at all,
+    // so a negative frame there — which the core never produces — is not
+    // mistaken for one.
+    await h.client.unload()
+    current = { transportState: 'pre-roll', renderedProjectFrame: '-96000', audibleProjectFrame: '-96128' }
+    const top = seamHarness((generation) => playing(generation, current))
+    expect(await top.client.prepareAndStart(countInRequest(0))).toBe(true)
+    expect(top.client.audibleSeconds()).toBe(0)
+    await top.client.unload()
+    const off = seamHarness((generation) => playing(generation, current))
+    expect(await off.client.prepareAndStart(countInRequest(3, false))).toBe(true)
+    expect(off.client.countInHeard()).toBeNull()
+    await off.client.unload()
+  })
+
+  it('Play after a Pause with the count-in on is a RESTART anchored at the paused spot: stop, unload, prepare with the anchor and no signed start, open, start', async () => {
+    // Legacy counts in on every Play; the phones stop a paused native
+    // transport, park it and prepare it again anchored where it paused. The
+    // desktop resumed instead, so a song counted in on its first Play and
+    // never again — not after a scrub, not after a Pause.
+    let current: Partial<DesktopPlaybackStatus> = {
+      transportState: 'playing', renderedProjectFrame: '240000', audibleProjectFrame: '239872'
+    }
+    const h = seamHarness((generation) => playing(generation, current))
+    expect(await h.client.prepareAndStart(countInRequest(0))).toBe(true)
+    current = { transportState: 'paused', renderedProjectFrame: '240000', audibleProjectFrame: '240000' }
+    await h.client.pause()
+    h.calls.length = 0
+    current = { transportState: 'pre-roll', renderedProjectFrame: '-96000', audibleProjectFrame: '-96128' }
+    await h.client.restartWithCountIn(countInRequest(5))
+    expect(h.calls).toEqual(['stop:1', 'unload:1', 'prepare:2', 'open:2', 'start:2'])
+    expect(h.prepared[1].playback.transport).toMatchObject({ entrySeconds: 0, countInAnchorSeconds: 5 })
+    expect(h.prepared[1]).not.toHaveProperty('preparedStartProjectFrame')
+    expect(h.prepared[1]).not.toHaveProperty('swapFromGeneration')
+    expect(h.prepared[1].initialTransport).toEqual({ state: 'playing' })
+    expect(h.client.active).toBe(true)
+    expect(h.client.transportActive).toBe(true)
+    // And the new generation's landing is what the bar holds at.
+    expect(h.client.audibleSeconds()).toBe(5)
+    // From the top the same restart carries no anchor — the count-in
+    // precedes the entry itself — and still no signed start.
+    current = { transportState: 'paused', renderedProjectFrame: '-48000', audibleProjectFrame: '-48000' }
+    await h.client.pause()
+    h.calls.length = 0
+    await h.client.restartWithCountIn(countInRequest(0))
+    expect(h.calls).toEqual(['stop:2', 'unload:2', 'prepare:3', 'open:3', 'start:3'])
+    expect(h.prepared[2].playback.transport).not.toHaveProperty('countInAnchorSeconds')
+    expect(h.prepared[2]).not.toHaveProperty('preparedStartProjectFrame')
+    // A request the facade cannot build is refused BEFORE anything is torn
+    // down: the running generation stays exactly as it was.
+    await h.client.pause()
+    h.calls.length = 0
+    await expect(h.client.restartWithCountIn({
+      ...countInRequest(2), beat: null, metronome: { ...countInRequest(2).metronome, click: true }
+    })).rejects.toThrow(/beat grid/)
+    expect(h.calls).toEqual([])
+    expect(h.client.status?.generation).toBe('3')
+    await h.client.unload()
+  })
+
+  it('countInHeard reports the ear on its runway to the landing, keeps the row through the latency tail after it, and nothing for a run that never counted in', async () => {
+    // The transport dots under native. Before this the dots never showed at
+    // all on native playback: `countInfo` is the Web Audio schedule, and
+    // native never builds one.
+    let current: Partial<DesktopPlaybackStatus> = {
+      transportState: 'pre-roll', renderedProjectFrame: '-48000', audibleProjectFrame: '-48128',
+      presentationLatencyFrames: '128', preRollFrames: '96000', countInEventCount: 4, countInBeatsPerBar: 4
+    }
+    const h = seamHarness((generation) => playing(generation, current))
+    expect(await h.client.prepareAndStart(countInRequest(3))).toBe(true)
+    // Counting: the render head is at −1 s and the ear 128 frames behind it.
+    expect(h.client.countInHeard()).toEqual({
+      secondsToLanding: -(48_000 + 128) / 48_000, landingSeconds: 3, total: 4, perBar: 4, preRollSeconds: 2
+    })
+    // Landed 64 frames ago: the last click is still sounding for another 64
+    // frames, so the row stays up — the phones measured a 0.6 s route ending
+    // the row at three dots of four when it dropped at the landing.
+    current = {
+      ...current, transportState: 'playing', renderedProjectFrame: '144064', audibleProjectFrame: '143936'
+    }
+    await h.client.setMasterGain(0.5)
+    expect(h.client.countInHeard()).toEqual({
+      secondsToLanding: -64 / 48_000, landingSeconds: 3, total: 4, perBar: 4, preRollSeconds: 2
+    })
+    // The tail has passed: the row is over, and stays over.
+    current = { ...current, renderedProjectFrame: '144256', audibleProjectFrame: '144128' }
+    await h.client.setMasterGain(0.4)
+    expect(h.client.countInHeard()).toBeNull()
+    current = { ...current, renderedProjectFrame: '144100', audibleProjectFrame: '143972' }
+    await h.client.setMasterGain(0.3)
+    expect(h.client.countInHeard()).toBeNull()
+    await h.client.unload()
+    // A generation that started flat (a rebuild at a signed frame) has no
+    // landing and no row, whatever the telemetry says about the plan.
+    current = { ...current, transportState: 'playing', renderedProjectFrame: '144064', audibleProjectFrame: '143936' }
+    const flat = seamHarness((generation) => playing(generation, current))
+    expect(await flat.client.prepareAndStart(countInRequest(3))).toBe(true)
+    await flat.client.reconfigure({ playbackRate: 1.1 })
+    expect(flat.prepared[1]).toHaveProperty('preparedStartProjectFrame')
+    expect(flat.client.countInHeard()).toBeNull()
+    await flat.client.unload()
+  })
+
+  it('countInHeard scales the output latency by the playback rate, as the core projects it', async () => {
+    // The latency is output frames; the runway is project frames. At 0.5×
+    // the ear is 64 project frames behind a 128-frame route, not 128.
+    const current: Partial<DesktopPlaybackStatus> = {
+      transportState: 'pre-roll', renderedProjectFrame: '-48000', audibleProjectFrame: '-48064',
+      presentationLatencyFrames: '128', playbackRate: 0.5, preRollFrames: '96000',
+      countInEventCount: 4, countInBeatsPerBar: 4
+    }
+    const h = seamHarness((generation) => playing(generation, current))
+    expect(await h.client.prepareAndStart({ ...countInRequest(3), playbackRate: 0.5 })).toBe(true)
+    expect(h.client.countInHeard()).toMatchObject({ secondsToLanding: -(48_000 + 64) / 48_000, landingSeconds: 3 })
+    await h.client.unload()
+  })
+
+  it('a structural change INSIDE a count-in is a rebuild anchored at the landing — never a seam, never the pre-roll frame carried across', async () => {
+    // Measured on the real app: the click turned on during a count-in from
+    // 60 s brought the song in at 0.01 s (the seam handed the old pre-roll
+    // clock to a plan with no anchor, whose landing is the entry), and a
+    // control touched while PAUSED inside one moved the bar to 0 and the
+    // next Play counted in to the top (the rebuild carried the negative
+    // frame as its signed start, again with no anchor).
+    let current: Partial<DesktopPlaybackStatus> = {
+      transportState: 'pre-roll', renderedProjectFrame: '-96000', audibleProjectFrame: '-96128'
+    }
+    const h = seamHarness((generation) => playing(generation, current))
+    expect(await h.client.prepareAndStart(countInRequest(3))).toBe(true)
+    h.calls.length = 0
+    await h.client.reconfigure({ metronome: { ...countInRequest(3).metronome, click: true } })
+    expect(h.calls).toEqual(['stop:1', 'unload:1', 'prepare:2', 'open:2', 'start:2'])
+    expect(h.prepared[1]).not.toHaveProperty('swapFromGeneration')
+    expect(h.prepared[1]).not.toHaveProperty('preparedStartProjectFrame')
+    expect(h.prepared[1].playback.transport).toMatchObject({ entrySeconds: 0, countInAnchorSeconds: 3 })
+    expect(h.prepared[1].initialTransport).toEqual({ state: 'playing' })
+    expect(h.client.audibleSeconds()).toBe(3)
+    // Paused inside it: the rebuild is parked at the top of its pre-roll,
+    // still anchored, and the bar still holds at the landing.
+    current = { transportState: 'paused', renderedProjectFrame: '-48000', audibleProjectFrame: '-48000' }
+    await h.client.pause()
+    h.calls.length = 0
+    await h.client.reconfigure({ playbackRate: 1.1 })
+    expect(h.calls).toEqual(['stop:2', 'unload:2', 'prepare:3', 'open:3', 'start:3'])
+    expect(h.prepared[2]).not.toHaveProperty('preparedStartProjectFrame')
+    expect(h.prepared[2].playback.transport).toMatchObject({ countInAnchorSeconds: 3 })
+    expect(h.prepared[2].initialTransport).toEqual({ state: 'paused' })
+    expect(h.client.audibleSeconds()).toBe(3)
+    // Turning the count-in OFF inside one starts flat AT the landing: no
+    // anchor, a signed start there — where the singer asked to be.
+    h.calls.length = 0
+    await h.client.reconfigure({ metronome: { ...countInRequest(3).metronome, countInBars: 0 } })
+    expect(h.prepared[3]).toMatchObject({ preparedStartProjectFrame: 144_000 })
+    expect(h.prepared[3].playback.transport).not.toHaveProperty('countInAnchorSeconds')
+    expect(h.client.countInHeard()).toBeNull()
+    // Once the song has LANDED a control change seams at the signed frame,
+    // exactly as before.
+    current = { transportState: 'playing', renderedProjectFrame: '200000', audibleProjectFrame: '199872' }
+    await h.client.resume()
+    h.calls.length = 0
+    await h.client.reconfigure({ playbackRate: 1.2 })
+    expect(h.calls[0]).toBe('prepare:5:swap-from-4')
+    expect(h.prepared[4]).toMatchObject({ preparedStartProjectFrame: 200_000 })
+    await h.client.unload()
+  })
+
+  it('a second Play inside the first restart adopts it: one stop, one build, one count-in', async () => {
+    // A double press, or the second press inside one 5 Hz status poll the
+    // transport-race driver reproduces. The second restart queues behind the
+    // first and finds a generation already started with the intent to play —
+    // the restart it asked for. Without the guard it stopped and unloaded
+    // that generation and built another: the count-in began twice.
+    let current: Partial<DesktopPlaybackStatus> = {
+      transportState: 'playing', renderedProjectFrame: '240000', audibleProjectFrame: '239872'
+    }
+    const h = seamHarness((generation) => playing(generation, current))
+    expect(await h.client.prepareAndStart(countInRequest(0))).toBe(true)
+    current = { transportState: 'paused', renderedProjectFrame: '240000', audibleProjectFrame: '240000' }
+    await h.client.pause()
+    h.calls.length = 0
+    // The first snapshot of a started generation reads 'stopped' for ~80 ms.
+    current = { transportState: 'stopped', renderedProjectFrame: '-96000', audibleProjectFrame: '-96128' }
+    const first = h.client.restartWithCountIn(countInRequest(5))
+    const second = h.client.restartWithCountIn(countInRequest(5))
+    await Promise.all([first, second])
+    expect(h.calls).toEqual(['stop:1', 'unload:1', 'prepare:2', 'open:2', 'start:2'])
+    expect(h.client.transportActive).toBe(false) // 'stopped' is not yet running…
+    expect(h.client.audibleSeconds()).toBe(5) // …but the bar already holds at the landing
+    // A song that RAN OUT is still restartable: that is the end-of-song path.
+    current = { transportState: 'completed', renderedProjectFrame: '480000', audibleProjectFrame: '480000' }
+    await h.client.setMasterGain(0.5)
+    h.calls.length = 0
+    current = { transportState: 'pre-roll', renderedProjectFrame: '-96000', audibleProjectFrame: '-96128' }
+    await h.client.restartWithCountIn(countInRequest(0))
+    expect(h.calls).toEqual(['stop:2', 'unload:2', 'prepare:3', 'open:3', 'start:3'])
+    await h.client.unload()
+  })
+
+  it('paused inside a count-in at the TOP, a change that shortens the pre-roll rebuilds at the new plan\'s own start — never at the old negative frame', async () => {
+    // The commonest count-in of all, paused, then the count-in turned off by
+    // a singer annoyed by it. Carrying the paused pre-roll frame as the
+    // signed start hands the core a start below the NEW plan's pre-roll (0
+    // with the count-in off), which it refuses — after the old generation is
+    // already unloaded: a playback error, Chromium's sink not restored until
+    // the next Play retries.
+    let current: Partial<DesktopPlaybackStatus> = {
+      transportState: 'pre-roll', renderedProjectFrame: '-48000', audibleProjectFrame: '-48128'
+    }
+    const h = seamHarness((generation) => playing(generation, current))
+    expect(await h.client.prepareAndStart(countInRequest(0))).toBe(true)
+    current = { transportState: 'paused', renderedProjectFrame: '-48000', audibleProjectFrame: '-48000' }
+    await h.client.pause()
+    h.calls.length = 0
+    await h.client.reconfigure({ metronome: { ...countInRequest(0).metronome, countInBars: 0 } })
+    expect(h.calls).toEqual(['stop:1', 'unload:1', 'prepare:2', 'open:2', 'start:2'])
+    // Flat at the top, parked: a signed start of 0, no anchor, no pre-roll.
+    expect(h.prepared[1]).toMatchObject({ preparedStartProjectFrame: 0, initialTransport: { state: 'paused' } })
+    expect(h.prepared[1].playback.transport).not.toHaveProperty('countInAnchorSeconds')
+    expect(h.prepared[1].playback.cues.countInBars).toBe(0)
+    // And with the count-in KEPT (a different bar count), the rebuild is
+    // pre-rolled from the new plan's own start — no signed frame at all.
+    await h.client.unload()
+    current = { transportState: 'pre-roll', renderedProjectFrame: '-48000', audibleProjectFrame: '-48128' }
+    const kept = seamHarness((generation) => playing(generation, current))
+    expect(await kept.client.prepareAndStart(countInRequest(0))).toBe(true)
+    current = { transportState: 'paused', renderedProjectFrame: '-48000', audibleProjectFrame: '-48000' }
+    await kept.client.pause()
+    kept.calls.length = 0
+    await kept.client.reconfigure({ metronome: { ...countInRequest(0).metronome, countInBars: 2 } })
+    expect(kept.calls).toEqual(['stop:1', 'unload:1', 'prepare:2', 'open:2', 'start:2'])
+    expect(kept.prepared[1]).not.toHaveProperty('preparedStartProjectFrame')
+    expect(kept.prepared[1].playback.transport).not.toHaveProperty('countInAnchorSeconds')
+    expect(kept.prepared[1].initialTransport).toEqual({ state: 'paused' })
+    expect(kept.client.audibleSeconds()).toBe(0)
+    await kept.client.unload()
+  })
+
+  it('a seam inside a count-in at the top keeps the dots counting the clicks still to come', async () => {
+    // The one seam still allowed inside a count-in: playing, landing 0. The
+    // core carries the pre-roll clock across; the new generation's landing
+    // is 0 too, so the dots keep reporting instead of vanishing.
+    let current: Partial<DesktopPlaybackStatus> = {
+      transportState: 'pre-roll', renderedProjectFrame: '-48000', audibleProjectFrame: '-48128',
+      presentationLatencyFrames: '128', preRollFrames: '96000', countInEventCount: 4, countInBeatsPerBar: 4
+    }
+    const h = seamHarness((generation) => playing(generation, current))
+    expect(await h.client.prepareAndStart(countInRequest(0))).toBe(true)
+    expect(h.client.countInHeard()).toMatchObject({ landingSeconds: 0, total: 4 })
+    h.calls.length = 0
+    await h.client.reconfigure({ metronome: { ...countInRequest(0).metronome, click: true } })
+    expect(h.calls[0]).toBe('prepare:2:swap-from-1')
+    expect(h.prepared[1]).toMatchObject({ preparedStartProjectFrame: 0 })
+    current = { ...current, renderedProjectFrame: '-24000', audibleProjectFrame: '-24128' }
+    await h.client.setMasterGain(0.5)
+    expect(h.client.countInHeard()).toMatchObject({
+      landingSeconds: 0, secondsToLanding: -(24_000 + 128) / 48_000, total: 4
+    })
+    expect(h.client.audibleSeconds()).toBe(0)
+    await h.client.unload()
+  })
 })
 
 describe('desktop native transport boundaries', () => {
