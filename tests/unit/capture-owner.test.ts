@@ -429,9 +429,15 @@ describe('CaptureOwner', () => {
     // native graph, and a driver's one-second Play came out of the speakers
     // once native became the default.
     const seen: number[] = []
+    // The metronome does not pass through the master gain — the clicks
+    // bypass the master bus by design — so the mute has to reach the cue
+    // volume too, or a muted run with the count-in on clicks out loud (it
+    // did: four clicks per Play from the first driver to turn it on).
+    const cueVolumes: number[] = []
     const binding = fakeBinding()
     binding.preparePlayback = (async (config, _lanes, generation) => {
       seen.push(config.masterGain)
+      cueVolumes.push(config.playback.cues.volume)
       return { ...playbackResult(generation.toString()), ownershipRetained: true }
     })
     binding.setPlaybackMasterGain = ((generation, gain) => {
@@ -442,24 +448,33 @@ describe('CaptureOwner', () => {
     try {
       process.env.SINGZ_MUTE = '1'
       const owner = new CaptureOwner(binding)
-      expect((await owner.preparePlayback(7, { ...playbackConfig(), masterGain: 0.8 }, playbackLanes(), 'darwin')).ok).toBe(true)
+      const loud = playbackConfig()
+      loud.playback.cues.volume = 0.7
+      expect((await owner.preparePlayback(7, { ...loud, masterGain: 0.8 }, playbackLanes(), 'darwin')).ok).toBe(true)
       expect(owner.setPlaybackMasterGain(7, '1', 0.9)).toMatchObject({ ok: true })
       expect(seen).toEqual([0, 0])
+      expect(cueVolumes).toEqual([0])
 
       delete process.env.SINGZ_MUTE
       seen.length = 0
       const audibleBinding = fakeBinding()
-      audibleBinding.preparePlayback = (async (_config, _lanes, generation) =>
-        ({ ...playbackResult(generation.toString()), ownershipRetained: true }))
+      let audibleCueVolume = -1
+      audibleBinding.preparePlayback = (async (config, _lanes, generation) => {
+        audibleCueVolume = config.playback.cues.volume
+        return { ...playbackResult(generation.toString()), ownershipRetained: true }
+      })
       let arrived = -1
       audibleBinding.setPlaybackMasterGain = ((generation, gain) => {
         arrived = gain
         return playbackResult(generation.toString())
       })
       const audible = new CaptureOwner(audibleBinding)
-      expect((await audible.preparePlayback(7, { ...playbackConfig(), masterGain: 0.8 }, playbackLanes(), 'darwin')).ok).toBe(true)
+      const audibleConfig = playbackConfig()
+      audibleConfig.playback.cues.volume = 0.7
+      expect((await audible.preparePlayback(7, { ...audibleConfig, masterGain: 0.8 }, playbackLanes(), 'darwin')).ok).toBe(true)
       expect(audible.setPlaybackMasterGain(7, '1', 0.9).ok).toBe(true)
       expect(arrived).toBe(0.9)
+      expect(audibleCueVolume).toBe(0.7)
     } finally {
       if (before === undefined) delete process.env.SINGZ_MUTE
       else process.env.SINGZ_MUTE = before

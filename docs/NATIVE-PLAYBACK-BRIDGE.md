@@ -302,6 +302,20 @@ pre-roll down through negative frames to it, so a Play from a scrubbed or
 paused spot counts in there rather than at the top. The facade sends the spot
 the singer heard — the render head less presentation latency and the floored
 display trim — never the render head.
+Two consequences every facade owes, and the desktop owed them late (0.21.2):
+a plan's count-in is fixed at prepare, so **Play with the count-in on from a
+parked transport is a restart, not a resume** — stop, unload, prepare anchored
+at the paused spot, open, start (`restartWithCountIn` on the desktop, the
+phones' `restartPausedWithCountIn`); resuming instead counted in once per
+open and never again. And **the bar holds at the landing while the core is at
+a negative frame** (and when paused inside one), as legacy's clock clamps at
+the start offset until the music enters: the desktop clamped the negative
+frames to 0 instead, which drew every mid-song count-in at the top of the
+song and parked the bar there on a Pause inside it. The dots come from the
+core's `countInEventCount`/`countInBeatsPerBar`/`preRollFrames` laid over
+the grid the facade would have clicked itself, and stay up for one
+presentation latency after the landing because the last clicks are still
+sounding then.
 `durationSeconds` is schema-checked and then **discarded** by all three
 bridges, which is worth knowing before trusting it.
 
