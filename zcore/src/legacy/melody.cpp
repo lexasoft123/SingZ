@@ -2,6 +2,8 @@
 // the comments that mattered on the desktop travel with the code.
 #include <zcore/legacy/melody.h>
 
+#include <zcore/legacy/pitch_candidates.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -37,7 +39,7 @@ struct CmndProfile {
 CmndProfile cmndProfile(const float* buf, int n, double sampleRate, double fMin, double fMax) {
   CmndProfile p;
   const int tauMin = std::max(2, static_cast<int>(std::floor(sampleRate / fMax)));
-  const int tauMax = std::min(static_cast<int>(std::floor(sampleRate / fMin)), n / 2);
+  const int tauMax = std::min(static_cast<int>(std::ceil(sampleRate / fMin) + 1), n / 2);
   if (tauMax <= tauMin + 2) return p;
 
   const int w = n - tauMax;
@@ -95,8 +97,9 @@ CmndProfile cmndProfile(const float* buf, int n, double sampleRate, double fMin,
 // Beta(2,18) prior, Boltzmann-biased against subharmonics), and a banded
 // Viterbi over pitch × {voiced, unvoiced} states picks the most probable
 // melody path through the whole song.
-constexpr double FMIN = 65;
-constexpr double FMAX = 1000;
+constexpr double FMIN = 55;
+constexpr double FMAX = 1050;
+constexpr double BIN_REF_HZ = 65;
 constexpr int BINS_PER_ST = 2;  // 50-cent decode grid; output keeps candidate precision
 constexpr double SWITCH_PROB = 0.01;
 constexpr double NO_TROUGH_PROB = 0.01;
@@ -107,17 +110,18 @@ constexpr double LOG0 = -1e10;
 // Math.ceil(12 * Math.log2(FMAX / FMIN)) * BINS_PER_ST — computed at runtime
 // with the same libm call the rest of the file uses, so a log2 that differs
 // in its last ulp cannot silently give this file a different bin count from
-// the TS (12 * log2(1000/65) = 47.32…, comfortably off an integer).
-int nBins() {
-  static const int n = static_cast<int>(std::ceil(12 * std::log2(FMAX / FMIN))) * BINS_PER_ST;
+// the TS; parameters must match pyin.ts.
+int minBin() {
+  static const int n = static_cast<int>(std::floor(12 * std::log2(FMIN / BIN_REF_HZ) * BINS_PER_ST));
   return n;
 }
 
-struct Trough {
-  double tau;
-  double val;
-  double f0;
-};
+int nBins() {
+  static const int n = static_cast<int>(std::ceil(12 * std::log2(FMAX / BIN_REF_HZ))) * BINS_PER_ST - minBin();
+  return n;
+}
+
+using Trough = pitch::Candidate;
 
 // Regularized incomplete beta I_x(2,18), the threshold prior's CDF.
 double betaCdf218(double x) {
@@ -131,25 +135,10 @@ std::vector<Trough> findTroughs(const float* buf, int n, double sr) {
   std::vector<Trough> troughs;
   const CmndProfile p = cmndProfile(buf, n, sr, FMIN, FMAX);
   if (!p.ok) return troughs;
-  const std::vector<float>& cmnd = p.cmnd;
-  for (int t = std::max(p.tauMin, 2); t < p.tauMax; t++) {
-    const size_t ti = static_cast<size_t>(t);
-    if (cmnd[ti] < cmnd[ti - 1] && cmnd[ti] <= cmnd[ti + 1]) {
-      double tau = t;
-      const double s0 = cmnd[ti - 1];
-      const double s1 = cmnd[ti];
-      const double s2 = cmnd[ti + 1];
-      const double denom = 2 * (2 * s1 - s2 - s0);
-      double val = s1;
-      if (std::fabs(denom) > 1e-9) {
-        const double delta = (s2 - s0) / denom;
-        if (std::fabs(delta) < 1) {
-          tau = t + delta;
-          val = s1 - ((s2 - s0) * delta) / 4;
-        }
-      }
-      troughs.push_back({tau, std::max(0.0, val), sr / tau});
-    }
+  for (auto candidate : pitch::candidates(p.cmnd, p.tauMin, p.tauMax, sr, buf, n, true)) {
+    if (candidate.f0 < FMIN * 0.999 || candidate.f0 > FMAX * 1.005) continue;
+    candidate.f0 = std::clamp(candidate.f0, FMIN, FMAX);
+    troughs.push_back(candidate);
   }
   return troughs;
 }
@@ -168,7 +157,7 @@ Emissions frameEmissions(const std::vector<Trough>& troughs) {
     for (size_t i = 1; i < troughs.size(); i++)
       if (troughs[i].val < troughs[best].val) best = i;
     std::vector<double> prior(troughs.size());
-    for (size_t i = 0; i < troughs.size(); i++) prior[i] = std::exp(-static_cast<double>(i) / 2);
+    for (size_t i = 0; i < troughs.size(); i++) prior[i] = std::exp(-static_cast<double>(i) / 2) * troughs[i].weight;
     double prevCdf = 0;
     for (int k = 1; k <= N_THRESH; k++) {
       const double thresh = static_cast<double>(k) / N_THRESH;
@@ -197,7 +186,7 @@ Emissions frameEmissions(const std::vector<Trough>& troughs) {
 // differ for negative halves, which log2 ratios can produce).
 inline double jsRound(double x) { return std::floor(x + 0.5); }
 
-int binOfHz(double hz) { return static_cast<int>(jsRound(12 * std::log2(hz / FMIN) * BINS_PER_ST)); }
+int binOfHz(double hz) { return static_cast<int>(jsRound(12 * std::log2(hz / BIN_REF_HZ) * BINS_PER_ST)) - minBin(); }
 
 // Track the melody of decimated mono audio. Returns f0 per hop (0 =
 // unvoiced) at `hop` samples spacing; reports progress 0..1.
@@ -208,12 +197,13 @@ std::vector<float> pyinTrack(const std::vector<float>& dec, double sr, int win, 
   const int frames = static_cast<int>(std::max<int64_t>(0, (nn - win) / hop));
   const double hopSec = static_cast<double>(hop) / sr;
   const int N_STATES = 2 * N_BINS;
-  const int band = std::max(2, static_cast<int>(jsRound(12 * MAX_OCT_PER_SEC * hopSec * BINS_PER_ST)));
+  const int localBand = std::max(2, static_cast<int>(jsRound(12 * MAX_OCT_PER_SEC * hopSec * BINS_PER_ST)));
+  const int band = std::max(localBand, 12 * BINS_PER_ST + 2);
 
   std::vector<float> transW(static_cast<size_t>(2 * band + 1));
   double transSum = 0;
   for (int k = -band; k <= band; k++) {
-    transW[static_cast<size_t>(k + band)] = static_cast<float>(band + 1 - std::abs(k));
+    transW[static_cast<size_t>(k + band)] = static_cast<float>(std::abs(k) <= localBand ? localBand + 1 - std::abs(k) : 0.5);
     transSum += static_cast<double>(transW[static_cast<size_t>(k + band)]);
   }
   std::vector<float> logTransW(transW.size());
@@ -316,7 +306,7 @@ std::vector<float> pyinTrack(const std::vector<float>& dec, double sr, int win, 
       if (s < N_BINS) {
         const float hz = frameHz[static_cast<size_t>(fi)][static_cast<size_t>(s)];
         f0[static_cast<size_t>(fi)] =
-            hz > 0 ? hz : static_cast<float>(FMIN * std::pow(2.0, static_cast<double>(s) / (12 * BINS_PER_ST)));
+            hz > 0 ? hz : static_cast<float>(BIN_REF_HZ * std::pow(2.0, static_cast<double>(s + minBin()) / (12 * BINS_PER_ST)));
       }
       s = back[static_cast<size_t>(fi)][static_cast<size_t>(s)];
     }
@@ -330,8 +320,8 @@ constexpr int WIN = 1024;
 constexpr double HOP_SEC = 0.025;  // analysis hop in seconds (hop = round(sr * HOP_SEC))
 constexpr int MIN_RUN = 4;         // a real note holds for at least this many frames (~100 ms)
 
-inline double centsOf(double hz) { return 1200 * std::log2(hz / 55); }
-inline double hzOf(double cents) { return 55 * std::pow(2.0, cents / 1200); }
+inline double centsOf(double hz) { return 1200 * std::log2(hz / 27.5); }
+inline double hzOf(double cents) { return 27.5 * std::pow(2.0, cents / 1200); }
 
 // JS `vals.sort((a,b) => a-b)` then `vals[floor(len/2)]`.
 double medianOf(std::vector<double> vals) {
@@ -437,7 +427,9 @@ std::vector<float> cleanMelody(const std::vector<float>& raw, const std::vector<
 // Decimate, track (pYIN), frame-RMS, clean — trackMelodyCore's body.
 MelodyTrack trackMelody(const float* mono, size_t n, double sampleRate, const Progress* progress) {
   MelodyTrack t;
+  if (!mono || !std::isfinite(sampleRate) || sampleRate < 8000) return t;
   const double sr = sampleRate / DECIM;
+  const int win = std::max(WIN, static_cast<int>(std::ceil(sr * 0.064)));
 
   // average-pooling decimation — plenty for pitch, 3x less work
   const size_t dn = n / DECIM;
@@ -450,7 +442,7 @@ MelodyTrack trackMelody(const float* mono, size_t n, double sampleRate, const Pr
 
   const int hop = static_cast<int>(jsRound(sr * HOP_SEC));
   bool cancelled = false;
-  std::vector<float> raw = pyinTrack(dec, sr, WIN, hop, progress, &cancelled);
+  std::vector<float> raw = pyinTrack(dec, sr, win, hop, progress, &cancelled);
   if (cancelled) return t;
 
   // Same framing as pyinTrack, so rms[i] describes the window raw[i] came from.
@@ -458,8 +450,8 @@ MelodyTrack trackMelody(const float* mono, size_t n, double sampleRate, const Pr
   for (size_t i = 0; i < raw.size(); i++) {
     const size_t s = i * static_cast<size_t>(hop);
     double acc = 0;
-    for (size_t j = s; j < s + WIN; j++) acc += static_cast<double>(dec[j]) * static_cast<double>(dec[j]);
-    rms[i] = static_cast<float>(std::sqrt(acc / WIN));
+    for (size_t j = s; j < s + win; j++) acc += static_cast<double>(dec[j]) * static_cast<double>(dec[j]);
+    rms[i] = static_cast<float>(std::sqrt(acc / win));
   }
 
   t.f0 = cleanMelody(raw, rms);

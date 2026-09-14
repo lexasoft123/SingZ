@@ -16,7 +16,7 @@ struct LiveInputFrame {
 // the callback transport and device lifecycle contracts.
 LiveInputFrame analyzeLiveInput(const float* mono, size_t frames,
                                 double sampleRate,
-                                double minFrequency = 70.0,
+                                double minFrequency = 55.0,
                                 double maxFrequency = 1050.0);
 
 }  // namespace singz

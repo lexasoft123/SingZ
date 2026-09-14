@@ -1,7 +1,7 @@
 import { app } from 'electron'
 import { createHash } from 'node:crypto'
 import { existsSync, readdirSync } from 'node:fs'
-import { access, cp, copyFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { access, cp, copyFile, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import {
   STEMS,
@@ -29,6 +29,7 @@ import { describeProject } from './project-state'
 import { markLibraryDirty, markProjectDirty, withDirty } from './sync-dirty'
 import { allowRoot, stemsRoot } from './media'
 import { hashFile } from './separation'
+import { isIssuedLead } from './vocal-separation'
 import { readSettings, writeSettings } from './settings'
 import { AUDIO_EXT } from './source'
 
@@ -423,6 +424,17 @@ async function convertStemsToFlac(dir: string): Promise<boolean> {
     const wav = join(dir, 'stems', `${s}.wav`)
     const flac = join(dir, 'stems', `${s}.flac`)
     if (!(await exists(wav))) continue
+    // Model residuals are float WAV: quantizing can clip legitimate values
+    // above 1 and break lead+backing reconstruction. v1 readers accept WAV,
+    // so retain it losslessly until the project format supports float FLAC.
+    const file = await open(wav, 'r')
+    const header = Buffer.alloc(24)
+    let read = 0
+    try { read = (await file.read(header, 0, header.length, 0)).bytesRead } finally { await file.close() }
+    if (read >= 24 && header.toString('ascii', 12, 16) === 'fmt ' && header.readUInt16LE(20) === 3) {
+      allFlac = false
+      continue
+    }
     if (!(await exists(flac))) {
       const res = await wavToFlac(wav, flac)
       if (!res.ok) {
@@ -882,6 +894,16 @@ export async function saveProject(
           }
         }
 
+        // Explicit pending vocal replacement: publish the new WAV atomically,
+        // then remove the old preferred FLAC. Never leave a stale FLAC winning.
+        if (settings.pendingLeadVocal) {
+          if (!isIssuedLead(settings.pendingLeadVocal)) throw new Error('The replacement vocal was not produced by this session. Separate it again.')
+          const vocal = join(dir, 'stems', 'vocals.wav')
+          await copyFile(settings.pendingLeadVocal, vocal + '.part')
+          await rename(vocal + '.part', vocal)
+          await rm(join(dir, 'stems', 'vocals.flac'), { force: true })
+        }
+
         // v2 on-disk format: stems live as FLAC (the splitter cache stays WAV)
         const allFlac = await convertStemsToFlac(dir)
 
@@ -916,6 +938,8 @@ export async function saveProject(
         // the file is actually overwritten, so it covers every path that ever
         // reaches it, including ones not written yet.
         const storedSettings = mergeStoredSettings(prevMeta?.settings, settings, stored)
+        // A melody of the old combined vocals is invalid after replacement.
+        if (settings.pendingLeadVocal && !settings.melody) delete storedSettings.melody
         const meta: ProjectFile = {
           // Unknown top-level fields and future graph references belong to the
           // project, not this desktop build. A normal save updates only the

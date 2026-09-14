@@ -120,6 +120,9 @@ interface Props {
   onToggleKaraoke: () => void
   onSplit: () => void
   onResplit: (() => void) | null
+  onSplitBacking: (() => void) | null
+  vocalSplitProgress: number | null
+  onCancelVocalSplit: () => void
   onCancelSplit: () => void
   onReveal: (() => void) | null
 }
@@ -909,6 +912,9 @@ export default function Transport({
   onToggleKaraoke,
   onSplit,
   onResplit,
+  onSplitBacking,
+  vocalSplitProgress,
+  onCancelVocalSplit,
   onCancelSplit,
   onReveal
 }: Props): React.JSX.Element {
@@ -1116,6 +1122,17 @@ export default function Transport({
               </svg>
               Karaoke
             </button>
+            {vocalSplitProgress !== null ? (
+              <button type="button" className="pill ghost" onClick={onCancelVocalSplit}
+                title="Cancel lead and backing vocal separation">
+                Separating vocals {Math.round(vocalSplitProgress)}% · Cancel
+              </button>
+            ) : onSplitBacking && (
+              <button type="button" className="pill ghost" onClick={onSplitBacking}
+                title="Separate lead and backing harmonies with the optional vocal model. Takes several minutes per song.">
+                Separate backing vocals
+              </button>
+            )}
             {onResplit && (
               <button
                 type="button"

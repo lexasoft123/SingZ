@@ -96,6 +96,28 @@ int main() {
     sine[index] = static_cast<float>(
         0.25 * std::sin(2.0 * M_PI * 440.0 * index / 48000.0));
 
+  // Known fundamental, including dominant 2nd/3rd partials and a missing
+  // fundamental (2f + 3f). A pure high tone must retain its actual octave.
+  for (const double rate : {44100.0, 48000.0, 96000.0}) {
+    const size_t frames = rate > 48000 ? 4096 : 2048;
+    for (const double hz : {55.0, 82.4069, 110.0, 196.0, 440.0, 880.0}) {
+      for (const std::vector<double>& harmonics : {
+               std::vector<double>{1.0}, {0.1, 1.0, 0.1},
+               {0.0, 1.0, 0.3}, {0.2, 0.2, 1.0}}) {
+        std::vector<float> samples(frames);
+        for (size_t i = 0; i < frames; ++i) {
+          double value = 0;
+          for (size_t h = 0; h < harmonics.size(); ++h)
+            value += 0.3 * harmonics[h] * std::sin((h + 1) * 2 * M_PI * hz * (i + 1) / rate);
+          samples[i] = static_cast<float>(value);
+        }
+        const auto detected = zdsp::analysis::analyzeLiveInput(samples.data(), frames, rate);
+        CHECK("fundamental evidence preserves singing register",
+              detected.frequency > 0 && std::fabs(1200 * std::log2(detected.frequency / hz)) < 10);
+      }
+    }
+  }
+
   auto input = block(sine, 12, 4096);
   zdsp::CaptureTime adapted;
   CHECK("typed capture mapping succeeds",

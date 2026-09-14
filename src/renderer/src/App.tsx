@@ -74,6 +74,7 @@ import {
   type TrainingCleanupPhase
 } from './audio/training-cleanup'
 import { decodeMelody, encodeMelody, melodyFitsSong, PITCH_DETECT_VERSION } from './audio/melody'
+import { canResplitVocals, restartPendingLyrics, runVocalSplitRequest, settleCancelledLyrics, VocalSplitRequests } from './vocal-split-request'
 import type { MicDevice } from './audio/mic'
 import { laneEnvelope } from './audio/lane-envelope'
 import { computePeaks } from './audio/peaks'
@@ -690,6 +691,10 @@ export default function App(): React.JSX.Element {
   const [tracks, setTracks] = useState<UITrack[]>([])
   const [split, setSplit] = useState(false)
   const [stemFiles, setStemFiles] = useState<Record<string, string> | null>(null)
+  const [vocalSplitProgress, setVocalSplitProgress] = useState<number | null>(null)
+  const [pendingLeadVocal, setPendingLeadVocal] = useState<string | null>(null)
+  const vocalSplitBusyRef = useRef(false)
+  const vocalSplitRequestsRef = useRef(new VocalSplitRequests())
   const [sep, setSep] = useState<SeparationProgress | null>(null)
   const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null)
   const [showSetup, setShowSetup] = useState(false)
@@ -1003,6 +1008,8 @@ export default function App(): React.JSX.Element {
    */
   const laneSamples = useCallback<LaneSamples>((id) => engine.ensureTrackBuffer(id), [engine])
   const linesRef = useRef<LyricLine[] | null>(null)
+  const pendingLyricsRef = useRef<Promise<unknown> | null>(null)
+  const lyricsRequestRevisionRef = useRef(0)
   const lyricsRef = useRef(lyrics)
   lyricsRef.current = lyrics
   const melodyRef = useRef(melody)
@@ -1506,6 +1513,11 @@ export default function App(): React.JSX.Element {
       // that song's grid into this one).
       engine.retireForSongSwitch()
       await window.singz.cancelSeparation()
+      vocalSplitRequestsRef.current.cancel()
+      await window.singz.cancelVocalSplit()
+      if(!songLoadRequests.current.isAccepted(request)||seq!==loadSeq.current)return
+      setVocalSplitProgress(null)
+      setPendingLeadVocal(null)
       if(!songLoadRequests.current.isAccepted(request)||seq!==loadSeq.current)return
       await window.singz.cancelLyrics()
       if(!songLoadRequests.current.isAccepted(request)||seq!==loadSeq.current)return
@@ -1888,6 +1900,7 @@ export default function App(): React.JSX.Element {
   )
 
   const startSplit = useCallback(async () => {
+    if (!canResplitVocals(pendingLeadVocal, vocalSplitBusyRef.current)) return
     if (!song || sepRunningRef.current) return
     let status = engineStatus
     if (!status?.ok) {
@@ -1992,7 +2005,101 @@ export default function App(): React.JSX.Element {
       setError('Separation finished, but loading the stem files failed.')
     }
     setSep(null)
-  }, [song, engineStatus, engine, loadLanes])
+  }, [song, engineStatus, engine, loadLanes, pendingLeadVocal])
+
+  const cancelVocalSplit = useCallback(() => {
+    vocalSplitRequestsRef.current.cancel()
+    void window.singz.cancelVocalSplit()
+  }, [])
+
+  const splitBackingVocals = useCallback(async () => {
+    const path = stemPathsRef.current?.vocals
+    if (!path || vocalSplitBusyRef.current || pendingLeadVocal || sep || saveState === 'saving') return
+    const seq = loadSeq.current
+    let acceptedSeq = seq
+    const requestCurrent = vocalSplitRequestsRef.current.begin()
+    const current = (): boolean => requestCurrent() && acceptedSeq === loadSeq.current
+    vocalSplitBusyRef.current = true
+    setVocalSplitProgress(0)
+    setError(null)
+    let stoppedAnalysis = false
+    let stoppedLyrics = false
+    const retryLyrics = (): void => restartPendingLyrics(stoppedLyrics,
+      () => { lyricsRef.current = { status: 'idle' }; setLyrics({ status: 'idle' }) },
+      () => { void prepLyricsRef.current?.() })
+    const off = window.singz.onVocalSplitProgress(p => { if (current()) setVocalSplitProgress(p) })
+    try {
+      await runVocalSplitRequest(current, {
+        separate: () => window.singz.splitVocals(path),
+        read: file => window.singz.readAudio(file),
+        decode: bytes => engine.decode(bytes),
+        prepare: async checked => {
+          stoppedAnalysis = true
+          await checked(window.singz.cancelAnalyzeNative())
+          if (lyricsRef.current.status === 'loading') {
+            stoppedLyrics = true
+            // Disown progress/results now, before the old child exits. Await
+            // its actual request settlement even if this split is cancelled
+            // meanwhile, so recover cannot restart into Transcriber.busy.
+            ++lyricsRequestRevisionRef.current
+            await checked(settleCancelledLyrics(
+              () => window.singz.cancelLyrics(), pendingLyricsRef.current
+            ))
+          }
+        },
+        commit: (result, lead, backing) => {
+          // No await after this point: cancellation cannot interleave halfway
+          // through publishing the new lanes and retiring the old analyses.
+          acceptedSeq = ++loadSeq.current
+          melodyWorkerRef.current?.terminate()
+          melodyWorkerRef.current = null
+          pendingCoreAnalysisRef.current = null
+          keyCarriedBySeqRef.current = null
+          const taken = new Set(tracksRef.current.map(t => t.id))
+          const id = customTrackId('Backing vocals', taken)
+          const original = tracksRef.current.find(t => t.id === 'vocals')
+          const guide = makeTrack('vocals', lead, { sourcePath: result.lead })
+          if (original) { guide.muted = original.muted; guide.solo = original.solo; guide.volume = original.volume }
+          const harmony = makeTrack(id, backing, {
+            label: 'Backing vocals', color: CUSTOM_COLORS[0],
+            custom: { file: result.backing }, sourcePath: result.backing
+          })
+          loadLanes([...tracksRef.current.map(t => t.id === 'vocals' ? guide : t), harmony],
+            new Map([['vocals', lead], [id, backing]]))
+          const stems = { ...stemPathsRef.current, vocals: result.lead }
+          stemPathsRef.current = stems
+          setStemFiles(stems)
+          vocalsSecondsRef.current = lead.duration
+          setPendingLeadVocal(result.lead)
+          setDirty(true)
+          setSaveState('idle')
+          setMelody({ status: 'none' }); melodyRef.current = { status: 'none' }
+          setMelodyInfo(null); storedMelodyRef.current = null
+          setAnalysisAutoSave(false)
+          setNotice('Lead and backing vocals are ready. The melody now follows the lead. Save the project to keep both lanes; overlapping harmonies may still remain.')
+          retryLyrics()
+          prepMelodyRef.current?.()
+        },
+        recover: () => {
+          if (seq !== loadSeq.current) return
+          retryLyrics()
+          if (stoppedAnalysis && melodyRef.current.status === 'computing') {
+            melodyWorkerRef.current?.terminate()
+            melodyWorkerRef.current = null
+            pendingCoreAnalysisRef.current = null
+            keyCarriedBySeqRef.current = null
+            setMelody({ status: 'none' }); melodyRef.current = { status: 'none' }
+            prepMelodyRef.current?.()
+          }
+        }
+      })
+    } catch (error) {
+      if (requestCurrent() && acceptedSeq === loadSeq.current) setError(error instanceof Error ? error.message : String(error))
+    } finally {
+      off(); vocalSplitBusyRef.current = false
+      if (acceptedSeq === loadSeq.current) setVocalSplitProgress(null)
+    }
+  }, [engine, loadLanes, sep, saveState, pendingLeadVocal])
 
   /** Any settings change marks an open project as having unsaved changes. */
   const touchSettings = useCallback(() => {
@@ -2182,20 +2289,28 @@ export default function App(): React.JSX.Element {
       // detectBeats' lineStarts/words, and that grid is auto-saved into the
       // project. Same rule as prepMelody, for the same reason.
       const seq = loadSeq.current
+      const revision = ++lyricsRequestRevisionRef.current
+      const current = (): boolean => seq === loadSeq.current && revision === lyricsRequestRevisionRef.current
       // Ladder: cache → LRCLIB synced lyrics → whisper (with model consent).
-      setLyrics({ status: 'loading', progress: null })
+      lyricsRef.current = { status: 'loading', progress: null }
+      setLyrics(lyricsRef.current)
       const unsub = window.singz.onLyricsProgress((p) => {
-        if (seq === loadSeq.current) setLyrics({ status: 'loading', progress: p })
+        if (current()) setLyrics({ status: 'loading', progress: p })
       })
-      const res = await window.singz.getLyrics(
+      const pending = window.singz.getLyrics(
         song.path,
         engine.duration,
         allowDownload,
         preferRef.current
       )
-      unsub()
-      if (seq !== loadSeq.current) return // a different song is open now
-      applyLyricsResult(res)
+      pendingLyricsRef.current = pending
+      try {
+        const res = await pending
+        if (current()) applyLyricsResult(res)
+      } finally {
+        unsub()
+        if (pendingLyricsRef.current === pending) pendingLyricsRef.current = null
+      }
     },
     [song, engine, applyLyricsResult]
   )
@@ -2680,7 +2795,7 @@ export default function App(): React.JSX.Element {
   const openTrackPicker = useCallback(() => trackInputRef.current?.click(), [])
 
   const handleSaveProject = useCallback(async () => {
-    if (!song || saveState === 'saving') return
+    if (!song || saveState === 'saving' || vocalSplitBusyRef.current) return
     // Which song this save is about. Saving converts six stems to FLAC, so it
     // runs for seconds — long enough to open another song meanwhile — and its
     // answer carries the PATH of the folder it wrote. Splicing that onto the
@@ -2690,6 +2805,7 @@ export default function App(): React.JSX.Element {
     const seq = loadSeq.current
     setSaveState('saving')
     const settings = {
+      pendingLeadVocal: pendingLeadVocal ?? undefined,
       transpose,
       tempo: tempoRate,
       view: view ?? undefined,
@@ -2716,6 +2832,7 @@ export default function App(): React.JSX.Element {
     // screen's state that must not learn about a project it is no longer on.
     if (seq !== loadSeq.current) return
     if (res.ok) {
+      setPendingLeadVocal(null)
       setDirty(false)
       setSaveState('saved')
       // The song now lives inside its project folder — anchor there so
@@ -2760,13 +2877,13 @@ export default function App(): React.JSX.Element {
       setSaveState('idle')
       setError(`Could not save the project: ${res.error}`)
     }
-  }, [song, saveState, transpose, tempoRate, view, selection, loopOn, training, trainCfg, beatInfo, melodyInfo, keyInfo, metCfg, tracks, reanchorCustom])
+  }, [song, saveState, transpose, tempoRate, view, selection, loopOn, training, trainCfg, beatInfo, melodyInfo, keyInfo, metCfg, tracks, reanchorCustom, pendingLeadVocal])
 
   /** A silently tracked pitch line or (re)detected grid saves itself — but
    *  only into an existing project (never creating one under a raw file), and
    *  after the commit so the save closure already sees them. */
   useEffect(() => {
-    if (!analysisAutoSave) return
+    if (!analysisAutoSave || pendingLeadVocal || vocalSplitProgress !== null) return
     // A save already writing would swallow this one (handleSaveProject
     // early-returns mid-save) — leave the flag set so the effect re-fires
     // when saveState settles and the later analysis still reaches disk.
@@ -2775,7 +2892,7 @@ export default function App(): React.JSX.Element {
     if (saveState === 'saving') return
     setAnalysisAutoSave(false)
     if (song && isProject) void handleSaveProject()
-  }, [analysisAutoSave, saveState, song, isProject, handleSaveProject])
+  }, [analysisAutoSave, saveState, song, isProject, handleSaveProject, pendingLeadVocal, vocalSplitProgress])
 
   /** Bring a project opened from outside the library in, and follow it there. */
   const handleImport = useCallback(
@@ -3736,7 +3853,10 @@ export default function App(): React.JSX.Element {
             onRedetectBeat={redetectBeat}
             onToggleKaraoke={toggleKaraoke}
             onSplit={() => void startSplit()}
-            onResplit={split && !sep ? () => void startSplit() : null}
+            onResplit={split && !sep && canResplitVocals(pendingLeadVocal, vocalSplitProgress !== null) ? () => void startSplit() : null}
+            onSplitBacking={split && !sep && !pendingLeadVocal && vocalSplitProgress === null ? () => void splitBackingVocals() : null}
+            vocalSplitProgress={vocalSplitProgress}
+            onCancelVocalSplit={cancelVocalSplit}
             onCancelSplit={() => void window.singz.cancelSeparation()}
             onReveal={
               stemFiles ? () => void window.singz.revealInFolder(stemFiles.vocals) : null
