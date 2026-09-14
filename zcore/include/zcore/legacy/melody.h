@@ -42,12 +42,12 @@ struct MelodyTrack {
 // a three-millisecond coverage difference is far inside what melodyFitsSong
 // disowns, so each side adopted the other's line and never re-derived it. The
 // desktop now reads the file too; this stamp retires what the old path wrote.
-// v3 corrects parabolic residuals, uses harmonic waveform evidence, and
-// supports A1 through 1050 Hz with genuine octave transitions.
-constexpr int kPitchDetectVersion = 3;
+// v4 retains the established offline range/priors with corrected parabolic
+// residuals; live capture keeps its separate harmonic-evidence detector.
+constexpr int kPitchDetectVersion = 4;
 
 // Track `mono` (float32 samples at `sampleRate`) — trackMelodyCore's whole
-// body: 3x average-pooling decimation, pYIN over at least 1024 samples / 64 ms at a
+// body: 3x average-pooling decimation, pYIN over 1024-sample frames at a
 // 25 ms hop, frame RMS, the cleaner. `progress` (may be null) hears
 // "melody" with 0..1 every ~250 frames and can cancel; a cancelled run
 // returns an empty track.

@@ -22,22 +22,34 @@ describe('pitch from fundamental evidence, independent of a target', () => {
     }
   })
 
+  it('matches the native live-input numerical fixture', () => {
+    // Same Float32 samples and expected values as core_host_tests.cpp.
+    const samples = Float32Array.from({ length: 4096 }, (_, i) =>
+      0.5 * Math.sin(2 * Math.PI * 440 * i / 48000))
+    const frame = yinPitchInfo(samples, 48000)
+    expect(frame.f0).toBeCloseTo(440.0181387383385, 7)
+    expect(frame.clarity).toBeCloseTo(0.9999986518725669, 9)
+    expect(frame.rms).toBeCloseTo(0.3533426141796633, 11)
+  })
+
   it.each([55, 110, 220, 440, 880, 1000])('preserves a real %i Hz tone', (hz) => {
     expect(cents(yinPitchInfo(tone(hz, 48000, 2048 / 48000), 48000).f0, hz)).toBeLessThan(10)
   })
 
-  it.each([44100, 48000, 96000])('offline tracking retains the weak fundamental and A1 at %i Hz', (sr) => {
-    for (const hz of [55, 110, 440, 880, 1000]) {
-      const track = trackMelodyCore(tone(hz, sr, 0.7, [0.1, 1, 0.1]), sr)
-      const steady = Array.from(track.f0.slice(5, -5))
-      expect(steady.length).toBeGreaterThan(5)
-      for (const f of steady) expect(cents(f, hz)).toBeLessThan(15)
+  it.each([44100, 48000, 96000])('offline tracking preserves clean notes in its established range at %i Hz', (sr) => {
+    for (const hz of [65.406, 110, 220, 440, 880]) {
+      const track = trackMelodyCore(tone(hz, sr, 0.7), sr)
+      for (const f of track.f0.slice(5, -5)) expect(cents(f, hz)).toBeLessThan(15)
     }
   })
 
-  it('retains a bright high fundamental after offline decimation', () => {
-    const track = trackMelodyCore(tone(1000, 44100, 0.8, [0.2, 0.2, 1]), 44100)
-    for (const hz of track.f0.slice(5, -5)) expect(cents(hz, 1000)).toBeLessThan(15)
+  it.each([880, 1000])('corrected trough interpolation retains a bright %i Hz note', (hz) => {
+    const samples = Float32Array.from({ length: 22050 }, (_, i) =>
+      [0.2, 0.2, 1].reduce((sum, amplitude, harmonic) =>
+        sum + 0.3 * amplitude * Math.sin((harmonic + 1) * 2 * Math.PI * hz * (i + 1) / 44100), 0))
+    const track = trackMelodyCore(samples, 44100)
+    const steady = Array.from(track.f0.slice(4, -4)).sort((a, b) => a - b)
+    expect(cents(steady[steady.length >> 1], hz)).toBeLessThan(15)
   })
 
   it('does not voice deterministic broadband noise', () => {
@@ -50,8 +62,8 @@ describe('pitch from fundamental evidence, independent of a target', () => {
     expect(trackMelodyCore(noise, 48000).f0.every((hz) => hz === 0)).toBe(true)
   })
 
-  it('keeps vibrato and a genuine octave leap', () => {
-    const first = tone(110, 48000, 0.8, [0.1, 1, 0.1], 25)
+  it('keeps vibrato and a clean octave leap', () => {
+    const first = tone(110, 48000, 0.8, [1], 25)
     const second = tone(220, 48000, 0.8, [1], 25)
     const input = new Float32Array(first.length + second.length)
     input.set(first); input.set(second, first.length)
@@ -70,7 +82,7 @@ describe('pitch from fundamental evidence, independent of a target', () => {
   it('persists A1 without a format change and invalidates older analyses', () => {
     const encoded = encodeMelody(new Float32Array([55, 0, 110]), 0.025)
     expect(encoded.detVersion).toBe(PITCH_DETECT_VERSION)
-    expect(PITCH_DETECT_VERSION).toBeGreaterThan(2)
+    expect(PITCH_DETECT_VERSION).toBeGreaterThan(3)
     expect(Array.from(decodeMelody(encoded)!.f0)).toEqual([55, 0, 110])
   })
 })

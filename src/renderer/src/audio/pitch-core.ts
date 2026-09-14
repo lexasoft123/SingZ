@@ -138,7 +138,7 @@ export function trackMelodyCore(
   if (!Number.isFinite(sampleRate) || sampleRate < 8000)
     return { f0: new Float32Array(), raw: new Float32Array(), rms: new Float32Array(), hopSec: HOP_SEC }
   const sr = sampleRate / DECIM
-  const win = Math.max(WIN, Math.ceil(sr * 0.064))
+  const win = WIN
 
   // average-pooling decimation — plenty for pitch, 3x less work
   const dn = Math.floor(mono.length / DECIM)

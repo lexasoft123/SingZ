@@ -62,3 +62,9 @@ Turn The Page test through the untouched installed pack plus the optional
 runtime produced stereo output with identical length and a maximum
 `lead + backing − input` error of `2.98e-8`. This verifies time/level integrity,
 not the semantic accuracy of every separated harmony.
+
+The [version-4 pitch gate](../eval/pitch-regression-gate.md) rechecks separation
+with the final offline detector on all 44 vocal inputs. Separation improves
+aggregate independent-model agreement; it is still optional, and lead-retention
+listening flags remain. Live microphone and offline song tracking have different
+evidence requirements and do not share the experimental offline octave prior.

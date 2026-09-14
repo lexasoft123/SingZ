@@ -13,7 +13,9 @@ import type { MelodyInfo } from '../../../shared/types'
  * v1: first stored line — pYIN (Beta(2,18) threshold prior, banded Viterbi)
  * plus the RMS-gated cleaner (isolated-octave refold, quiet outlier-run drop).
  * v2: same tracker, tracked from the stem FILE at the rate the file states.
- * v3: harmonic-evidence candidate rejection and low-register A1 support.
+ * v3: experimental harmonic evidence and wider offline range.
+ * v4: established offline range/priors with corrected parabolic residuals;
+ * live capture keeps its separate harmonic-evidence detector.
  * v1 lines were tracked from the playing buffer, which `decodeAudioData` had
  * resampled to the output device's rate — and the hop is derived from the rate
  * it is handed, so a v1 line's framing says which machine opened the project,
@@ -23,9 +25,9 @@ import type { MelodyInfo } from '../../../shared/types'
  * and the two coverages of one song differ by about three milliseconds. The
  * bump is what retires them (audio/stem-rate.ts).
  */
-export const PITCH_DETECT_VERSION = 3
+export const PITCH_DETECT_VERSION = 4
 
-/** Encoding reference pitch (A1), the same one the worker's cleaner counts from. */
+/** Stored encoding reference pitch (A1), independent of the cleaner's reference. */
 const REF_HZ = 55
 
 /**
@@ -63,7 +65,7 @@ export function encodeMelody(f0: Float32Array, hopSec: number): MelodyInfo {
     }
     flush()
     // Clamped at 0: sub-55 Hz would encode as a negative number, and the
-    // token stream reserves nothing for one. The tracker floors at 55 Hz.
+    // token stream reserves nothing for one. The offline tracker floors at 65 Hz.
     out.push(String(Math.max(0, Math.round(1200 * Math.log2(f / REF_HZ)))))
   }
   flush()
