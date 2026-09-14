@@ -121,6 +121,16 @@ export default function TrackStack({
   const overlayRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{ mode: 'new' | 'resize'; anchor: number; x0: number; selecting: boolean } | null>(null)
   const [width, setWidth] = useState(0)
+  const displayTracks = useMemo(() => {
+    // Generated IDs survive renaming and project reloads; labels do not.
+    const isBacking = (track: UITrack): boolean => /^custom-backing-vocals(?:-\d+)?$/.test(track.id)
+    const backing = tracks.filter(isBacking)
+    if (!backing.length) return tracks
+    const remaining = tracks.filter((track) => !isBacking(track))
+    const vocalsIndex = remaining.findIndex((track) => track.id === 'vocals')
+    if (vocalsIndex < 0) return tracks
+    return [...remaining.slice(0, vocalsIndex + 1), ...backing, ...remaining.slice(vocalsIndex + 1)]
+  }, [tracks])
 
   const duration = engine.duration
   const viewS = view?.s ?? 0
@@ -328,7 +338,7 @@ export default function TrackStack({
         </div>
       </div>
 
-      {tracks.map((t, i) => {
+      {displayTracks.map((t, i) => {
         // Waveform view fractions are per buffer, not per song: an added track
         // may be shorter or longer than the stems, and its wave has to sit
         // under the same seconds as everyone else's.

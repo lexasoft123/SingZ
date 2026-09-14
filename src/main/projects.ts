@@ -817,6 +817,7 @@ const STORED_SETTING_KEYS = [
   'loop',
   'training',
   'custom',
+  'leadVocalSeparated',
   'tracks'
 ] as const
 
