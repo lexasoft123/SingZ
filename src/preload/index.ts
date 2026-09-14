@@ -185,6 +185,7 @@ const api: SingzApi = {
 
   listDesktopAudioInputs: () => ipcRenderer.invoke('audio-input:list'),
   startDesktopAudioInput: (options) => ipcRenderer.invoke('audio-input:start', options),
+  reportDesktopAudioInputFallback: (detail) => ipcRenderer.invoke('audio-input:fallback', detail),
   stopDesktopAudioInput: (token) => ipcRenderer.invoke('audio-input:stop', token),
   onDesktopAudioInputEvent: (cb) => {
     const listener = (

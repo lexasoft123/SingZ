@@ -457,6 +457,15 @@ export type CaptureDiscontinuity =
   | 'source-frame-overflow'
 
 /** Native input inventory. UIDs and channels belong to the OS HAL, not Chromium. */
+/** One completed native → browser microphone capture transition. No audio crosses IPC. */
+export interface DesktopAudioInputFallback {
+  reason: string
+  deviceLabel: string
+  channelIndex: number
+  channelCount: number
+  requestedChannel: number
+}
+
 export interface DesktopAudioInputDevice {
   uid: string
   label: string
@@ -1193,6 +1202,7 @@ export interface SingzApi {
     deviceUid?: string
     channel?: number
   }): Promise<DesktopAudioInputStartResult>
+  reportDesktopAudioInputFallback(detail: DesktopAudioInputFallback): Promise<{ ok: boolean; error?: string }>
   stopDesktopAudioInput(token: string): Promise<{ ok: boolean; error?: string }>
   onDesktopAudioInputEvent(
     cb: (token: string, event: DesktopAudioInputEvent) => void

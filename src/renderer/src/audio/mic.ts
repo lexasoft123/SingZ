@@ -7,7 +7,10 @@ export interface MicDevice {
   fallback: boolean
   /** The hardware channel actually connected to the analyser (zero-based). */
   channelIndex: number
-  /** Channels Chromium exposed for this capture. */
+  /** Capture backend actually in use; independent of the playback preference. */
+  captureBackend?: 'native' | 'web-audio'
+  nativeFallbackReason?: string
+  /** Channels exposed by the active capture backend. */
   channelCount: number
   /** The requested channel was outside the exposed range and was clamped. */
   channelFallback: boolean
@@ -27,7 +30,7 @@ export function shouldAdoptInputChannel(
   savedChannel: number | undefined
 ): device is MicDevice {
   return Boolean(
-    device?.channelFallback && !device.fallback && device.channelIndex !== (savedChannel ?? 0)
+    device?.channelFallback && !device.fallback && !device.nativeFallbackReason && device.channelIndex !== (savedChannel ?? 0)
   )
 }
 

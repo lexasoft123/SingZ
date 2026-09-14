@@ -359,9 +359,29 @@ export class DesktopAudioInput {
   }
 }
 
+/** Record the actual capture transition, once per start, in the existing app log. */
+export function reportDesktopAudioInputFallback(raw: unknown): { ok: boolean; error?: string } {
+  if (!raw || typeof raw !== 'object') return { ok: false, error: 'Invalid microphone fallback.' }
+  const detail = raw as Record<string, unknown>
+  const { reason, deviceLabel, channelIndex, channelCount, requestedChannel } = detail
+  if (
+    typeof reason !== 'string' || !reason.trim() || reason.length > 1000 ||
+    typeof deviceLabel !== 'string' || deviceLabel.length > 512 ||
+    typeof channelCount !== 'number' || !Number.isInteger(channelCount) || channelCount < 1 || channelCount > 4096 ||
+    typeof channelIndex !== 'number' || !Number.isInteger(channelIndex) || channelIndex < 0 || channelIndex >= channelCount ||
+    typeof requestedChannel !== 'number' || !Number.isInteger(requestedChannel) || requestedChannel < 0 || requestedChannel > 4095
+  ) return { ok: false, error: 'Invalid microphone fallback.' }
+  const singleLine = (value: string): string => value.replace(/[\r\n]/g, ' ')
+  log('audio-input', `Native microphone fallback to browser capture: ${singleLine(reason)} · ` +
+    `${singleLine(deviceLabel) || 'microphone'} · channel ${channelIndex + 1} of ${channelCount}` +
+    ` (requested ${requestedChannel + 1}). Browser capture may expose fewer input channels.`, 'warn')
+  return { ok: true }
+}
+
 const desktopAudioInput = new DesktopAudioInput()
 
 export function registerDesktopAudioInput(): void {
+  ipcMain.handle('audio-input:fallback', (_event, detail: unknown) => reportDesktopAudioInputFallback(detail))
   ipcMain.handle('audio-input:list', () => desktopAudioInput.list())
   ipcMain.handle('audio-input:start', (event, options: unknown) =>
     desktopAudioInput.start(event.sender, options)
