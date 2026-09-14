@@ -22,6 +22,12 @@
  * the release is actually worth. If (3) does not move, something still holds a
  * reference and the release is a no-op wearing a green rule.
  *
+ * That is the DECODE shape, and since the lane measure it is the exception:
+ * an open under native playback decodes nothing (`lanesResident` is false
+ * from the first frame), so there is no copy to release and the probe asks
+ * the stronger question instead — that the renderer never weighed a song
+ * over its baseline, before Play or after it. It says which shape it found.
+ *
  * Prereqs: `npm run build`; the capture addon built for this tree
  * (`npm run capture:addon`) — without a native graph there is no release to
  * measure and this says so rather than passing vacuously; no other instance
@@ -194,6 +200,24 @@ const diffCategories = (before, after) => {
     await sleep(2000)
     const holding = footprintMb(rpid)
     const holdingCats = categoriesMb(rpid)
+    /* Which of two shapes this open took. Since the lane measure
+       (audio/lane-measure.ts) an open under native playback DECODES NOTHING:
+       the engine's lanes carry `buffer: null` from the first frame, so there
+       is no copy to release at Play and the question this probe was built
+       for — did the release return the bytes — has no subject. The question
+       that replaces it is the stronger one: did the renderer ever hold the
+       song at all. `lanesResident` right after the open says which shape
+       this is; the decode shape (native off, or a lane the measure refused)
+       still gets the release measured exactly as before. */
+    const residentAtOpen = await val(win, '__test.engine.lanesResident')
+    const sampleRate = await val(win, '__test.engine.context.sampleRate')
+    // What a decoded copy of this song would weigh in this renderer.
+    const copyMb = Math.round((lanes * seconds * 2 * sampleRate * 4) / 1e6)
+    console.log(
+      residentAtOpen
+        ? `the open decoded the lanes (a ${copyMb} MB copy) — measuring the release`
+        : `the open measured the lanes off their files — no copy was made, measuring that it stays that way`
+    )
 
     await win.click('button.play')
     // `nativeActive` turns true inside `tryStart`, several statements BEFORE
@@ -218,7 +242,10 @@ const diffCategories = (before, after) => {
     /* What a singer actually gets. Nothing in production calls `gc()`, so the
        pages come back when V8 next decides to collect — and that is a
        different number from "are the bytes reachable". Watched, not assumed. */
-    const NATURAL_MS = Number(process.env.PROBE_NATURAL_MS ?? 120000)
+    // Two minutes of watching the collector only mean something when there
+    // was a release to collect; with nothing decoded there is nothing to
+    // wait for.
+    const NATURAL_MS = Number(process.env.PROBE_NATURAL_MS ?? (residentAtOpen ? 120000 : 0))
     const naturalStart = Date.now()
     let naturalHit = null
     let natural = afterPlay
@@ -253,10 +280,24 @@ const diffCategories = (before, after) => {
 
     if (nativeActive !== true) fail.push('native playback never took the song — there is no release to measure')
     if (resident !== false) fail.push(`the engine still holds its lanes under native playback (lanesResident=${resident})`)
-    // The lanes of a real six-lane song are hundreds of megabytes; anything
-    // under 100 means the references did not actually go.
-    if (holding - collected < 100) {
-      fail.push(`releasing the lanes returned only ${holding - collected} MB — something still holds a reference`)
+    if (residentAtOpen) {
+      // The lanes of a real six-lane song are hundreds of megabytes; anything
+      // under 100 means the references did not actually go.
+      if (holding - collected < 100) {
+        fail.push(`releasing the lanes returned only ${holding - collected} MB — something still holds a reference`)
+      }
+    } else {
+      // No copy was ever made, so the renderer over its no-song baseline must
+      // weigh a fraction of one — the peaks and the analyses, never the
+      // samples — and Play must not grow it by a song either.
+      const overBaseline = holding - withoutControl
+      console.log(`  over the no-song baseline    ${overBaseline} MB   (a decoded copy would be ${copyMb} MB)`)
+      if (overBaseline > copyMb * 0.25) {
+        fail.push(`the renderer holds ${overBaseline} MB over its baseline after an open that should have decoded nothing (a copy is ${copyMb} MB)`)
+      }
+      if (collected - holding > 100) {
+        fail.push(`Play grew the renderer by ${collected - holding} MB — something decoded the song after all`)
+      }
     }
   } finally {
     await app.close()

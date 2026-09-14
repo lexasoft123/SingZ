@@ -7,8 +7,10 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync
 } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -24,6 +26,8 @@ import type {
   DesktopMonitorResult,
   DesktopMonitorStatus,
   DesktopPlaybackLaneConfig,
+  DesktopPlaybackLaneMeasureRequest,
+  DesktopPlaybackLaneMeasureResult,
   DesktopPlaybackPrepareConfig,
   DesktopPlaybackProvider,
   DesktopPlaybackProviderInfo,
@@ -94,6 +98,12 @@ export interface NativeCaptureBinding {
   setPlaybackMasterGain(generation: bigint, gain: number): DesktopPlaybackResult
   playbackStatus(): DesktopPlaybackStatus
   unloadPlayback(generation: bigint): DesktopPlaybackResult
+  /** The open's lane measure, on a worker like prepare: it reads every lane
+   *  once through the streaming source. Takes no generation and holds no
+   *  session lock, so it may run beside a prepare. */
+  measurePlaybackLanes(
+    request: DesktopPlaybackLaneMeasureRequest
+  ): Promise<DesktopPlaybackLaneMeasureResult>
   /** Compiled-in identity — which Electron and which source tree built this binary. */
   buildInfo: { electronVersion: string; sourceStamp: string }
 }
@@ -317,6 +327,9 @@ export interface StagedCaptureArtifact {
 
 const CAPTURE_LOAD_PREFIX = 'singz-capture-load-'
 const CAPTURE_LOAD_STALE_MS = 24 * 60 * 60 * 1000
+const CAPTURE_STABLE_PREFIX = 'singz-capture-'
+const CAPTURE_STABLE_STALE_MS = 7 * 24 * 60 * 60 * 1000
+const CAPTURE_STABLE_NAME = /^singz-capture-[0-9a-f]{32}$/
 /** How often an automatic re-anchor may write a line; see reanchorPlayback(). */
 const REANCHOR_LOG_INTERVAL_MS = 10_000
 
@@ -346,7 +359,8 @@ export function pruneStaleCaptureLoadDirs(options: {
     entries = readdirSync(base, { withFileTypes: true })
       .filter((entry) =>
         entry.isDirectory() &&
-        /^singz-capture-load-([1-9]\d{0,9})-[0-9a-f]{32}$/.test(entry.name)
+        (/^singz-capture-load-([1-9]\d{0,9})-[0-9a-f]{32}$/.test(entry.name) ||
+          CAPTURE_STABLE_NAME.test(entry.name))
       )
       .slice(0, 256)
   } catch {
@@ -355,6 +369,22 @@ export function pruneStaleCaptureLoadDirs(options: {
   let removed = 0
   for (const entry of entries) {
     if (removed >= 8) break
+    if (CAPTURE_STABLE_NAME.test(entry.name)) {
+      // A stable staging directory is reaped by age alone: it is touched on
+      // every reuse, and a week untouched means no launch wants those bytes.
+      const candidate = join(base, entry.name)
+      try {
+        const stat = lstatSync(candidate)
+        if (
+          !stat.isDirectory() ||
+          now - stat.mtimeMs < CAPTURE_STABLE_STALE_MS ||
+          (typeof process.getuid === 'function' && stat.uid !== process.getuid())
+        ) continue
+        rmSync(candidate, { recursive: true, force: true })
+        removed += 1
+      } catch { /* active, replaced, protected, or already pruned */ }
+      continue
+    }
     const matched = entry.name.match(/^singz-capture-load-([1-9]\d{0,9})-[0-9a-f]{32}$/)
     if (!matched) continue
     const pid = Number(matched[1])
@@ -375,13 +405,95 @@ export function pruneStaleCaptureLoadDirs(options: {
   }
 }
 
-/** Stage exactly-read bytes at a unique path which require() can safely map. */
+/** A directory only this user can enter, owned by this user, and a plain
+ *  directory rather than a link — the three things that make a path under a
+ *  shared TMP ours to trust. Windows has no uid and a per-user TEMP. */
+function privateDirectoryIsOurs(path: string): boolean {
+  try {
+    const stat = lstatSync(path)
+    if (!stat.isDirectory()) return false
+    if (typeof process.getuid !== 'function') return true
+    return stat.uid === process.getuid() && (stat.mode & 0o077) === 0
+  } catch {
+    return false
+  }
+}
+
+/** A plain file, ours, holding exactly these bytes. */
+function stagedFileMatches(path: string, expected: Buffer): boolean {
+  try {
+    const stat = lstatSync(path)
+    if (!stat.isFile() || stat.size !== expected.byteLength) return false
+    if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) return false
+    return readFileSync(path).equals(expected)
+  } catch {
+    return false
+  }
+}
+
+/** Write `bytes` at `path` through a private temporary name and one rename,
+ *  so a reader never sees a half-written file, and read it back. */
+function writeStagedFile(path: string, bytes: Buffer): void {
+  const temporary = `${path}.${randomBytes(8).toString('hex')}.tmp`
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+  try {
+    writeFileSync(temporary, bytes, { flag: 'wx', mode: 0o500 })
+    chmodSync(temporary, 0o500)
+    if (!readFileSync(temporary).equals(bytes))
+      throw new Error('Private capture-addon staging changed artifact bytes')
+    renameSync(temporary, path)
+  } catch (error) {
+    try { rmSync(temporary, { force: true }) } catch { /* best effort */ }
+    throw error
+  }
+}
+
+function safeCompanionPath(path: string): boolean {
+  return Boolean(path) && !path.startsWith('/') && !path.includes('\\') &&
+    !path.split('/').includes('..')
+}
+
+/**
+ * Stage exactly-read bytes at a private path which require() can safely map.
+ *
+ * The path is STABLE for the bytes: `<tmp>/singz-capture-<sha256 prefix>/`,
+ * reused across launches when the file there is ours and byte-identical.
+ * macOS validates a Mach-O it has never mapped before on its first dlopen —
+ * measured at 200 ms warm and 950 ms right after launch for this addon — and
+ * caches the verdict per file; a fresh random copy per launch paid that on
+ * every launch, and since the lane measure is the first thing an open asks
+ * the addon for, it paid it on the open's own critical path. The same bytes
+ * at the same path pay it once per artifact.
+ *
+ * What makes the stable path as safe as the random one: the directory is
+ * created 0700 by us and checked (owner, mode, a real directory) before
+ * anything in it is trusted; the file is checked (owner, a real file, exactly
+ * the expected bytes) before it is mapped; writes go through a private
+ * temporary name and one rename, so a concurrent launch never reads half a
+ * file. Anything that fails a check — a directory somebody else created
+ * under the shared TMP, a file that is not ours, a rename Windows refused
+ * because the previous launch still maps the file — falls back to the
+ * per-process random directory this used to use every time, which
+ * `pruneStaleCaptureLoadDirs` still reaps once its process is gone. Stable
+ * directories are reaped by age instead: touched on every reuse, pruned
+ * after a week untouched.
+ */
 export function stageArtifactForLoad(
   bytes: Uint8Array,
-  companions: Array<{ path: string; bytes: Uint8Array }> = []
+  companions: Array<{ path: string; bytes: Uint8Array }> = [],
+  options: { base?: string } = {}
 ): StagedCaptureArtifact {
-  pruneStaleCaptureLoadDirs()
-  const base = tmpdir()
+  const base = options.base ?? tmpdir()
+  pruneStaleCaptureLoadDirs({ base })
+  const expected = Buffer.from(bytes)
+  for (const companion of companions) {
+    if (!safeCompanionPath(companion.path))
+      throw new Error('Private capture-addon companion path is unsafe')
+  }
+
+  const stable = stageAtStablePath(base, expected, companions)
+  if (stable) return stable
+
   let directory = ''
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const candidate = join(
@@ -398,24 +510,12 @@ export function stageArtifactForLoad(
   }
   if (!directory) throw new Error('Could not allocate a private capture-addon load directory')
   const path = join(directory, `${randomBytes(16).toString('hex')}.node`)
-  const expected = Buffer.from(bytes)
   const stagedCompanions: Record<string, string> = {}
   try {
-    writeFileSync(path, expected, { flag: 'wx', mode: 0o500 })
-    chmodSync(path, 0o500)
-    const staged = readFileSync(path)
-    if (!staged.equals(expected)) throw new Error('Private capture-addon staging changed artifact bytes')
+    writeStagedFile(path, expected)
     for (const companion of companions) {
-      if (!companion.path || companion.path.startsWith('/') ||
-          companion.path.includes('\\') || companion.path.split('/').includes('..'))
-        throw new Error('Private capture-addon companion path is unsafe')
       const companionPath = join(directory, companion.path)
-      mkdirSync(dirname(companionPath), { recursive: true, mode: 0o700 })
-      const companionBytes = Buffer.from(companion.bytes)
-      writeFileSync(companionPath, companionBytes, { flag: 'wx', mode: 0o500 })
-      chmodSync(companionPath, 0o500)
-      if (!readFileSync(companionPath).equals(companionBytes))
-        throw new Error('Private capture-addon companion staging changed artifact bytes')
+      writeStagedFile(companionPath, Buffer.from(companion.bytes))
       stagedCompanions[companion.path] = companionPath
     }
   } catch (error) {
@@ -428,6 +528,72 @@ export function stageArtifactForLoad(
     cleanup: () => {
       try { rmSync(directory, { recursive: true, force: true }) } catch { /* best effort */ }
     }
+  }
+}
+
+/** The stable staging, or null when anything about it cannot be trusted or
+ *  written — the caller then stages the old way. */
+function stageAtStablePath(
+  base: string,
+  expected: Buffer,
+  companions: Array<{ path: string; bytes: Uint8Array }>
+): StagedCaptureArtifact | null {
+  // The key describes everything the directory will hold: the addon AND its
+  // companions. Keyed on the addon alone, two builds with identical `.node`
+  // bytes and different codec libraries would share a directory and rewrite
+  // each other's companions on every switch.
+  const digest = createHash('sha256').update(expected)
+  for (const companion of companions) {
+    digest.update(`\0${companion.path}\0`)
+    digest.update(Buffer.from(companion.bytes))
+  }
+  const key = digest.digest('hex').slice(0, 32)
+  const directory = join(base, `${CAPTURE_STABLE_PREFIX}${key}`)
+  try {
+    try {
+      mkdirSync(directory, { mode: 0o700 })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return null
+    }
+    if (!privateDirectoryIsOurs(directory)) return null
+    const path = join(directory, 'singz-capture.node')
+    const files: Array<{ path: string; bytes: Buffer }> = [
+      { path, bytes: expected },
+      ...companions.map((companion) => ({
+        path: join(directory, companion.path),
+        bytes: Buffer.from(companion.bytes)
+      }))
+    ]
+    for (const file of files) {
+      if (stagedFileMatches(file.path, file.bytes)) continue
+      // Missing, or not what it should be: written fresh — after removing
+      // what is there. Every staged file is 0o500, which on Windows is the
+      // read-only attribute, and MoveFileEx will not replace a read-only
+      // target (measured on the field laptop: EPERM), while unlink clears
+      // the attribute first. A file another launch still maps refuses the
+      // unlink there too, and that refusal sends the caller to the random
+      // directory rather than to a file we did not verify.
+      try {
+        rmSync(file.path, { force: true })
+        writeStagedFile(file.path, file.bytes)
+      } catch {
+        return null
+      }
+      if (!stagedFileMatches(file.path, file.bytes)) return null
+    }
+    const now = new Date()
+    try { utimesSync(directory, now, now) } catch { /* the prune's clock, best effort */ }
+    const stagedCompanions: Record<string, string> = {}
+    for (const companion of companions) stagedCompanions[companion.path] = join(directory, companion.path)
+    return {
+      path,
+      companions: stagedCompanions,
+      // Nothing to clean: the directory is content-addressed, ours, and may
+      // be mapped by another launch. Age reaps it.
+      cleanup: () => undefined
+    }
+  } catch {
+    return null
   }
 }
 
@@ -477,7 +643,7 @@ export function validateCaptureBindingIdentity(
     , 'preparePlayback', 'openPlaybackOutput', 'startPlayback', 'pausePlayback',
     'resumePlayback', 'stopPlayback', 'seekPlayback', 'setPlaybackLoop',
     'clearPlaybackLoop', 'reanchorPlayback', 'setPlaybackLane',
-    'setPlaybackMasterGain', 'playbackStatus', 'unloadPlayback'
+    'setPlaybackMasterGain', 'playbackStatus', 'unloadPlayback', 'measurePlaybackLanes'
   ] as const) {
     if (typeof binding?.[name] !== 'function') {
       throw new Error(`singz-capture.node does not export ${name}`)
@@ -492,10 +658,30 @@ export function validateCaptureBindingIdentity(
  * binding was returned or cached and is retryable; only a successfully
  * returned binding with the wrong compiled identity is restart-required.
  */
+/**
+ * Where the last addon load spent its time, phase by phase, for the log line
+ * `native()` writes: the load sits on the open's path for a song opened
+ * within a second of launch (the lane measure is the first thing to ask for
+ * the addon now), so "it took a second" has to say which second.
+ */
+let lastCaptureLoadPhases = ''
+let lastCaptureResolvePhases = ''
+
+export function captureLoadPhases(): string {
+  return [lastCaptureResolvePhases, lastCaptureLoadPhases].filter((part) => part !== '').join(' · ')
+}
+
 export function loadCaptureBindingWith(runtime: CaptureBindingLoadRuntime): NativeCaptureBinding {
   const stampPath = captureAddonSourceStampPath(runtime.addonPath)
   const checksumPath = captureAddonChecksumPath(runtime.addonPath)
   let staged: StagedCaptureArtifact | null = null
+  const phases: string[] = []
+  let phaseStartedAt = Date.now()
+  const phase = (name: string): void => {
+    const now = Date.now()
+    phases.push(`${name} ${now - phaseStartedAt} ms`)
+    phaseStartedAt = now
+  }
   try {
     const publishedSourceStamp = runtime.readText(stampPath).trim()
     const publishedChecksum = runtime.readText(checksumPath).trim()
@@ -512,7 +698,9 @@ export function loadCaptureBindingWith(runtime: CaptureBindingLoadRuntime): Nati
       path: library.path,
       bytes: Buffer.from(runtime.readArtifact(join(dirname(runtime.addonPath), library.path)))
     }))
+    phase('read')
     staged = (runtime.stageArtifactForLoad ?? stageArtifactForLoad)(artifactBytes, companionBytes)
+    phase('stage')
     const actualChecksum = createHash('sha256').update(artifactBytes).digest('hex')
     if (actualChecksum !== publishedChecksum) {
       const acceptsSignedMutation =
@@ -546,9 +734,11 @@ export function loadCaptureBindingWith(runtime: CaptureBindingLoadRuntime): Nati
     )
   }
 
+  phase('verify')
   let binding: unknown
   try {
     binding = runtime.loadAddon(staged!.path)
+    phase('require')
   } catch (error) {
     staged?.cleanup()
     throw new CaptureAddonLoadError(
@@ -565,6 +755,8 @@ export function loadCaptureBindingWith(runtime: CaptureBindingLoadRuntime): Nati
       runtime.expectedSourceStamp
     )
     if (runtime.codecRuntime) codecRuntimeByBinding.set(validated, runtime.codecRuntime)
+    phase('validate')
+    lastCaptureLoadPhases = phases.join(' · ')
     return validated
   } catch (error) {
     throw new CaptureAddonLoadError(
@@ -610,7 +802,9 @@ function captureBindingLoadRuntime(): CaptureBindingLoadRuntime {
     })
   }
   if (!app.isPackaged) {
+    const fingerprintStartedAt = Date.now()
     const expectedSourceStamp = captureSourceFingerprint(root, electronVersion)
+    lastCaptureResolvePhases = `fingerprint ${Date.now() - fingerprintStartedAt} ms`
     if (manifest.sourceStamp !== expectedSourceStamp) {
       throw new CaptureAddonLoadError(
         'The capture addon belongs to an older or different checkout. Rebuild with npm run capture:addon and retry.',
@@ -961,12 +1155,19 @@ export class CaptureOwner {
     if (this.binding) return this.binding
     if (this.loadError && !this.loadRetryable) return null
     try {
+      const loadStartedAt = Date.now()
       this.binding = this.bindingLoader()
       this.loadError = null
       this.loadRetryable = true
       // Only on a change of outcome: every playback command asks for the
       // binding, so logging unconditionally here would log at the command rate.
-      if (this.loadReported !== 'loaded') log('dsp', 'native capture addon loaded')
+      if (this.loadReported !== 'loaded') {
+        const phases = captureLoadPhases()
+        log(
+          'dsp',
+          `native capture addon loaded · ${Date.now() - loadStartedAt} ms` + (phases ? ` · ${phases}` : '')
+        )
+      }
       this.loadReported = 'loaded'
     } catch (error) {
       // Only a failure before native module initialization is retryable. If
@@ -1631,6 +1832,50 @@ export class CaptureOwner {
     } catch {
       return null
     }
+  }
+
+  /**
+   * The open's lane measure. Not a playback command: it names no generation
+   * and no renderer owns it, and its refusals are the renderer's cue to decode
+   * that lane itself rather than a reason a song ended up on Web Audio — so
+   * they are logged as what they are, one line per call, not one per lane.
+   */
+  async measurePlaybackLanes(
+    request: DesktopPlaybackLaneMeasureRequest
+  ): Promise<DesktopPlaybackLaneMeasureResult> {
+    const binding = this.native()
+    if (!binding) {
+      return { ok: false, error: this.loadError ?? 'Native playback unavailable', lanes: [] }
+    }
+    const startedAt = Date.now()
+    let result: DesktopPlaybackLaneMeasureResult
+    try {
+      result = await binding.measurePlaybackLanes(request)
+    } catch (error) {
+      log('dsp', `lanes measured · failed · ${String(error)}`, 'warn')
+      return { ok: false, error: String(error), lanes: [] }
+    }
+    const refused = result.lanes.filter((lane) => !lane.ok)
+    const elapsed = Date.now() - startedAt
+    if (!result.ok) {
+      log('dsp', `lanes measured · refused · ${result.error} · ${elapsed} ms`, 'warn')
+    } else if (refused.length > 0) {
+      // A format the streaming source does not read (a v1 project's WAVs, a
+      // custom track in mp3) is refused by design on every open of that
+      // song and decodes as it always did; a lane that could not be READ is
+      // the one worth a warning. The E2E drivers fail a run on any dsp
+      // warning, and they are right to for the second kind only.
+      const expected = refused.every((lane) => lane.error === 'unsupported-format' || lane.error === 'cancelled')
+      log(
+        'dsp',
+        `lanes measured · ${result.lanes.length - refused.length}/${result.lanes.length} lanes · ${elapsed} ms · ` +
+          `decoding instead: ${refused.map((lane) => `${lane.id} (${lane.error})`).join(', ')}`,
+        expected ? 'info' : 'warn'
+      )
+    } else {
+      log('dsp', `lanes measured · ${result.lanes.length} lanes · ${elapsed} ms`)
+    }
+    return result
   }
 
   unloadPlayback(rendererId: number, generation: string): DesktopPlaybackResult {

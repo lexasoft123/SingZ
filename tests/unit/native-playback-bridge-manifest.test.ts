@@ -5,6 +5,7 @@ import manifest from '../shared/native-playback-bridge-manifest.json'
 import {
   addonExportNames,
   addonObjectKeys,
+  functionBody,
   interfaceKeys,
   switchStringTable
 } from '../shared/native-playback-bridge-sources'
@@ -86,16 +87,20 @@ describe('desktop playback addon exports', () => {
   // async and forgets it would be invisible. `preparePlayback` decodes six
   // lanes, so it is the one that must not run on the JS thread — that was a
   // 2.7 s freeze of the whole app, reported from the field.
-  it('marks exactly the promise-returning export as not synchronous, and the addon agrees', () => {
+  it('marks exactly the promise-returning exports as not synchronous, and the addon agrees', () => {
     const asynchronous = manifest.methods.desktopAddon.filter(m => m.synchronous === false)
-    expect(asynchronous.map(m => m.name)).toEqual(['preparePlayback'])
+    // The lane measure reads six files end to end, which is the same shape of
+    // work as the decode and belongs on the same kind of worker.
+    expect(asynchronous.map(m => m.name)).toEqual(['preparePlayback', 'measurePlaybackLanes'])
     for (const method of manifest.methods.desktopAddon) {
       expect(typeof method.synchronous).toBe('boolean')
     }
     // The addon's own proof: prepare hands the session call to a worker and
-    // answers with a promise.
+    // answers with a promise, and the measure does the same.
     expect(addon).toContain('napi_create_async_work(env, nullptr, name, prepareExecute')
+    expect(addon).toContain('napi_create_async_work(env, nullptr, name, measureExecute')
     expect(addon).toContain('napi_create_promise(env, &job->deferred, &promise)')
+    expect(addon).toContain('job->results = measureLanes(std::move(job->requests), cancel)')
   })
 
   // An export with no caller is indistinguishable from one whose caller was
@@ -194,6 +199,39 @@ describe('desktop result, receipt and peaks', () => {
     )
     expect(addonObjectKeys(addon, 'napi_value playbackLanePeaks(', 'lane')).toEqual(
       manifest.lanePeaks.lane
+    )
+  })
+
+  // Desktop-only by design (the phones open on the project doc and let the
+  // feeder's background pass draw the bar), so there is nothing to agree
+  // with — the pin is that the renderer's type and the addon's object stay one
+  // shape, and that the request the renderer sends is the request the addon
+  // validates key for key.
+  it('emits the lane measure the manifest describes, and declares it', () => {
+    expect(addonObjectKeys(addon, 'napi_value laneMeasureResultValue(', 'result')).toEqual(
+      manifest.laneMeasure.keys
+    )
+    expect(addonObjectKeys(addon, 'napi_value laneMeasureResultValue(', 'lane')).toEqual(
+      manifest.laneMeasure.lane
+    )
+    expect([...interfaceKeys(types, 'DesktopPlaybackLaneMeasureResult')].sort()).toEqual(
+      [...manifest.laneMeasure.keys].sort()
+    )
+    expect([...interfaceKeys(types, 'DesktopPlaybackLaneMeasure')].sort()).toEqual(
+      [...manifest.laneMeasure.lane].sort()
+    )
+    expect([...interfaceKeys(types, 'DesktopPlaybackLaneMeasureRequest')].sort()).toEqual(
+      [...manifest.laneMeasure.request].sort()
+    )
+    // The addon accepts exactly the request's keys and exactly the lane's.
+    const body = functionBody(addon, 'napi_value measurePlaybackLanes(')
+    const allowed = [...body.matchAll(/objectWithOnlyKeys\(env, [a-zA-Z\[\]0-9]+,\s*\{([^}]*)\}/g)].map(match =>
+      [...match[1].matchAll(/"([^"]+)"/g)].map(key => key[1])
+    )
+    expect(allowed).toEqual([manifest.laneMeasure.request, manifest.laneMeasure.requestLane])
+    expect(manifest.laneMeasure.envelopeBuckets).toBe(manifest.lanePeaks.bucketCount)
+    expect(read('native/playback/native_playback_session.h')).toContain(
+      'kNativePlaybackLaneSummaryBuckets = 96'
     )
   })
 })

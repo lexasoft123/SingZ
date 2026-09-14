@@ -2,14 +2,17 @@
 
 #include "native_audio_ownership.h"
 
+#include <lane_measure.h>
 #include <native_playback_session.h>
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <cmath>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <initializer_list>
 #include <limits>
@@ -103,6 +106,57 @@ void drainPendingPrepare() noexcept {
   // that a decode was slow.
   playback.prepareIdle.wait_for(lock, std::chrono::seconds(30),
                                 [] { return !playback.prepareRunning; });
+}
+
+// ── The desktop open's lane measure ─────────────────────────────────────
+//
+// `measurePlaybackLanes({lanes: [{id, path}], peaksPerSecond, minimumPeaks,
+// maximumPeaks})` reads every lane through the streaming source on a worker
+// and answers with the header, the fine peaks, the seek-bar envelope and the
+// whole-lane RMS (native/playback/lane_measure.h). It is what lets the
+// renderer put a song on screen without decoding it through Chromium first,
+// and it is a desktop-only export: the phones open on the project doc and
+// let the feeder's background pass draw the bar.
+//
+// Independent of the graph: it takes no generation, holds neither `mutex`
+// nor the session, and may run while a prepare does. At most one measure is
+// CURRENT — a later call supersedes the earlier one, whose lanes then come
+// back cancelled (the singer opened another song, and the renderer's load
+// guard would drop that answer anyway) — and the env teardown cancels and
+// waits for whichever is still running, since a worker that outlives the
+// env would complete into it.
+struct LaneMeasureOwner {
+  std::mutex mutex;
+  std::condition_variable idle;
+  uint32_t running{0};
+  uint64_t issued{0};
+  std::atomic<uint64_t> current{0};
+  std::atomic<bool> teardown{false};
+};
+
+LaneMeasureOwner laneMeasure;
+
+struct MeasureJob {
+  napi_deferred deferred{nullptr};
+  napi_async_work work{nullptr};
+  std::vector<LaneMeasureRequest> requests;
+  std::vector<LaneMeasure> results;
+  uint64_t epoch{0};
+};
+
+bool measureCancelled(void *context) noexcept {
+  const auto *job = static_cast<const MeasureJob *>(context);
+  return laneMeasure.teardown.load(std::memory_order_acquire) ||
+         laneMeasure.current.load(std::memory_order_acquire) != job->epoch;
+}
+
+void drainPendingMeasures() noexcept {
+  laneMeasure.teardown.store(true, std::memory_order_release);
+  std::unique_lock<std::mutex> lock(laneMeasure.mutex);
+  // Bounded like the prepare's drain: cancellation is polled per block, so
+  // a measure unwinds within one read of one lane.
+  laneMeasure.idle.wait_for(lock, std::chrono::seconds(30),
+                            [] { return laneMeasure.running == 0; });
 }
 
 napi_value makeUndefined(napi_env env) {
@@ -2214,6 +2268,212 @@ napi_value playbackStatus(napi_env env, napi_callback_info) {
 
 } // namespace
 
+const char *decodedAudioStatusName(DecodedAudioStatus status) noexcept {
+  switch (status) {
+  case DecodedAudioStatus::Ok:
+    return "ok";
+  case DecodedAudioStatus::InvalidArgument:
+    return "invalid-argument";
+  case DecodedAudioStatus::Cancelled:
+    return "cancelled";
+  case DecodedAudioStatus::IoError:
+    return "io-error";
+  case DecodedAudioStatus::UnsupportedFormat:
+    return "unsupported-format";
+  case DecodedAudioStatus::MalformedData:
+    return "malformed-data";
+  case DecodedAudioStatus::LimitExceeded:
+    return "limit-exceeded";
+  case DecodedAudioStatus::ResourceExhausted:
+    return "resource-exhausted";
+  }
+  return "unknown";
+}
+
+// A Float32Array of its own bytes: the peaks are up to 400k floats a lane,
+// and an array of boxed numbers that size is what the structured clone over
+// IPC would then have to walk element by element.
+napi_value floatArray(napi_env env, const float *data, size_t count) {
+  void *bytes = nullptr;
+  napi_value buffer{};
+  napi_create_arraybuffer(env, count * sizeof(float), &bytes, &buffer);
+  if (count != 0 && bytes != nullptr && data != nullptr)
+    std::memcpy(bytes, data, count * sizeof(float));
+  napi_value typed{};
+  napi_create_typedarray(env, napi_float32_array, count, buffer, 0, &typed);
+  return typed;
+}
+
+// The shape a measure answers with, on every path — the refusal in
+// measurePlaybackLanes sets the same three keys with an empty `lanes`. Keys
+// pinned by tests/shared/native-playback-bridge-manifest.json (`laneMeasure`).
+napi_value laneMeasureResultValue(napi_env env, const MeasureJob &job,
+                                  bool ran) {
+  napi_value result{};
+  napi_create_object(env, &result);
+  setValue(env, result, "ok", makeBool(env, ran));
+  setValue(env, result, "error",
+           makeString(env, ran ? "" : "Native lane measure did not run"));
+  napi_value lanes{};
+  napi_create_array_with_length(env, job.results.size(), &lanes);
+  for (size_t index = 0; index < job.results.size(); ++index) {
+    const LaneMeasure &measure = job.results[index];
+    napi_value lane{};
+    napi_create_object(env, &lane);
+    setValue(env, lane, "id", makeString(env, measure.id));
+    setValue(env, lane, "ok", makeBool(env, measure.ok));
+    setValue(env, lane, "error",
+             makeString(env, decodedAudioStatusName(measure.status)));
+    setValue(env, lane, "sampleRate", makeNumber(env, measure.sampleRate));
+    setValue(env, lane, "channels", makeNumber(env, measure.channels));
+    // A number, not a decimal string: this is a length the renderer does
+    // arithmetic on, bounded by the decoder's 2^32 frames, never a counter.
+    setValue(env, lane, "frameCount",
+             makeNumber(env, static_cast<double>(measure.frameCount)));
+    setValue(env, lane, "durationSeconds",
+             makeNumber(env, measure.durationSeconds));
+    setValue(env, lane, "rms", makeNumber(env, measure.rms));
+    setValue(env, lane, "peaks",
+             floatArray(env, measure.peaks.data(), measure.peaks.size()));
+    setValue(env, lane, "envelope",
+             floatArray(env, measure.envelope.data(),
+                        measure.ok ? measure.envelope.size() : 0));
+    napi_set_element(env, lanes, index, lane);
+  }
+  setValue(env, result, "lanes", lanes);
+  return result;
+}
+
+void measureExecute(napi_env, void *data) {
+  auto *job = static_cast<MeasureJob *>(data);
+  DecodeCancellation cancel;
+  cancel.context = job;
+  cancel.requested = measureCancelled;
+  job->results = measureLanes(std::move(job->requests), cancel);
+  {
+    std::lock_guard<std::mutex> lock(laneMeasure.mutex);
+    --laneMeasure.running;
+  }
+  laneMeasure.idle.notify_all();
+}
+
+void measureComplete(napi_env env, napi_status status, void *data) {
+  std::unique_ptr<MeasureJob> job(static_cast<MeasureJob *>(data));
+  if (status == napi_cancelled) {
+    // Unreachable today (nothing cancels async work), but measureExecute
+    // never ran, so the count it decrements must come down here.
+    {
+      std::lock_guard<std::mutex> lock(laneMeasure.mutex);
+      --laneMeasure.running;
+    }
+    laneMeasure.idle.notify_all();
+    job->results.clear();
+  }
+  napi_value result = laneMeasureResultValue(env, *job, status == napi_ok);
+  napi_resolve_deferred(env, job->deferred, result);
+  napi_delete_async_work(env, job->work);
+}
+
+napi_value measurePlaybackLanes(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1]{};
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  const auto refusal = [&](const char *why) {
+    MeasureJob empty;
+    napi_value result = laneMeasureResultValue(env, empty, false);
+    setValue(env, result, "error", makeString(env, why));
+    return result;
+  };
+  const auto refuse = [&](const char *why) {
+    return settledPromise(env, refusal(why));
+  };
+  if (argc != 1 ||
+      !objectWithOnlyKeys(env, argv[0],
+                          {"lanes", "peaksPerSecond", "minimumPeaks",
+                           "maximumPeaks"}))
+    return refuse("Native lane measure needs a lane list and a peaks policy");
+  LaneMeasurePolicy policy;
+  if (!unsignedProperty(env, argv[0], "peaksPerSecond", 1, 10000, 1000, true,
+                        &policy.peaksPerSecond) ||
+      !unsignedProperty(env, argv[0], "minimumPeaks", 1, 1000000, 2400, true,
+                        &policy.minimumPeaks) ||
+      !unsignedProperty(env, argv[0], "maximumPeaks", 1, 1000000, 400000,
+                        true, &policy.maximumPeaks) ||
+      policy.maximumPeaks < policy.minimumPeaks)
+    return refuse("Native lane measure peaks policy is out of range");
+  napi_value lanesValue{};
+  bool isArray = false;
+  uint32_t length = 0;
+  if (!named(env, argv[0], "lanes", &lanesValue) ||
+      napi_is_array(env, lanesValue, &isArray) != napi_ok || !isArray ||
+      napi_get_array_length(env, lanesValue, &length) != napi_ok ||
+      length == 0 || length > kLaneMeasureMaximumLanes)
+    return refuse("Native lane measure takes one to sixteen lanes");
+  auto job = std::make_unique<MeasureJob>();
+  job->requests.reserve(length);
+  for (uint32_t index = 0; index < length; ++index) {
+    napi_value laneValue{};
+    LaneMeasureRequest request;
+    std::string path;
+    if (napi_get_element(env, lanesValue, index, &laneValue) != napi_ok ||
+        !objectWithOnlyKeys(env, laneValue, {"id", "path"}) ||
+        !stringProperty(env, laneValue, "id", 96, &request.id) ||
+        !stringProperty(env, laneValue, "path", 32768, &path))
+      return refuse("Native lane measure lanes failed schema validation");
+    if (std::any_of(job->requests.begin(), job->requests.end(),
+                    [&](const LaneMeasureRequest &prior) {
+                      return prior.id == request.id;
+                    }))
+      return refuse("Native lane measure lanes must have distinct ids");
+    // A file that will not open is that ONE lane's refusal (the source
+    // reports it), not the call's: the renderer decodes it and measures the
+    // rest, exactly as it would for a lane the source cannot read.
+    request.descriptor = OwnedFileDescriptor(openReadOnly(path));
+    request.policy = policy;
+    job->requests.push_back(std::move(request));
+  }
+  {
+    std::lock_guard<std::mutex> lock(laneMeasure.mutex);
+    if (laneMeasure.teardown.load(std::memory_order_acquire))
+      return refuse("Native lane measure is shutting down");
+    job->epoch = ++laneMeasure.issued;
+    laneMeasure.current.store(job->epoch, std::memory_order_release);
+    ++laneMeasure.running;
+  }
+  // The job was counted as running above; whatever fails from here has to
+  // count it back down before answering, or the teardown drain waits on a
+  // measure that never started.
+  const auto abandon = [&](const char *why) {
+    {
+      std::lock_guard<std::mutex> lock(laneMeasure.mutex);
+      --laneMeasure.running;
+    }
+    laneMeasure.idle.notify_all();
+    return refusal(why);
+  };
+  napi_value promise{};
+  if (napi_create_promise(env, &job->deferred, &promise) != napi_ok)
+    return settledPromise(env, abandon("Native lane measure could not defer"));
+  napi_value name{};
+  napi_create_string_utf8(env, "singzMeasurePlaybackLanes", NAPI_AUTO_LENGTH,
+                          &name);
+  MeasureJob *raw = job.get();
+  if (napi_create_async_work(env, nullptr, name, measureExecute,
+                             measureComplete, raw, &raw->work) != napi_ok) {
+    napi_resolve_deferred(env, job->deferred,
+                          abandon("Native lane measure could not schedule"));
+    return promise;
+  }
+  if (napi_queue_async_work(env, raw->work) != napi_ok) {
+    napi_delete_async_work(env, raw->work);
+    napi_resolve_deferred(env, job->deferred,
+                          abandon("Native lane measure could not schedule"));
+    return promise;
+  }
+  job.release();
+  return promise;
+}
+
 void definePlaybackExports(napi_env env, napi_value exports,
                            NativeAudioOwnership *ownership,
                            DesktopPlaybackBackendFactory backendFactory) {
@@ -2252,6 +2512,8 @@ void definePlaybackExports(napi_env env, napi_value exports,
        nullptr, nullptr, nullptr, napi_default, nullptr},
       {"playbackLanePeaks", nullptr, playbackLanePeaks, nullptr, nullptr,
        nullptr, napi_default, nullptr},
+      {"measurePlaybackLanes", nullptr, measurePlaybackLanes, nullptr,
+       nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports,
                          sizeof(properties) / sizeof(properties[0]),
@@ -2260,7 +2522,9 @@ void definePlaybackExports(napi_env env, napi_value exports,
 
 void cleanupPlaybackBridge() noexcept {
   // The env is going away: a worker still decoding would outlive it, and its
-  // completion callback would touch an env that is closing.
+  // completion callback would touch an env that is closing. The lane measure
+  // is a worker of the same kind and drains the same way.
+  drainPendingMeasures();
   drainPendingPrepare();
   std::lock_guard<std::mutex> lock(playback.mutex);
   const uint64_t generation = playback.generation;
