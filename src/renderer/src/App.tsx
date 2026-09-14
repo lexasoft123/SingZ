@@ -3953,7 +3953,7 @@ export default function App(): React.JSX.Element {
             onToggleKaraoke={toggleKaraoke}
             onSplit={() => void startSplit()}
             onResplit={split && !sep && canResplitVocals(pendingLeadVocal, vocalSplitProgress !== null) ? () => void startSplit() : null}
-            onSplitBacking={split && !sep && !pendingLeadVocal && vocalSplitProgress === null ? () => void splitBackingVocals() : null}
+            onSplitBacking={split && !sep && !pendingLeadVocal && saveState !== 'saving' && vocalSplitProgress === null ? () => void splitBackingVocals() : null}
             vocalSplitProgress={vocalSplitProgress}
             onCancelVocalSplit={cancelVocalSplit}
             onCancelSplit={() => void window.singz.cancelSeparation()}
