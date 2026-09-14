@@ -23,6 +23,7 @@ import {
   parseGraphDocument,
   serializeGraphDocument
 } from '../shared/graph-document'
+import { customTrackPath } from '../shared/custom-track-path'
 import { wavToFlac } from './flac'
 import { log } from './log'
 import { describeProject } from './project-state'
@@ -348,7 +349,9 @@ async function resolveCustom(
   const root = resolve(dir)
   for (const t of list) {
     if (!t || typeof t.file !== 'string' || typeof t.id !== 'string') continue
-    const abs = resolve(root, t.file)
+    const file = customTrackPath(t.file)
+    if (!file) continue
+    const abs = resolve(root, file)
     if (!abs.startsWith(root + sep)) continue
     if (!(await exists(abs))) {
       log('app', `custom track "${t.label ?? t.id}" is missing from ${dir} — dropped`, 'warn')
@@ -394,7 +397,7 @@ async function storeCustomTracks(
       await copyFile(src, dst)
       log('app', `custom track "${t.label ?? t.id}" copied into the project as stems/${name}`)
     }
-    out.push({ id: t.id, label: t.label ?? t.id, color: t.color, file: join('stems', name) })
+    out.push({ id: t.id, label: t.label ?? t.id, color: t.color, file: `stems/${name}` })
   }
   // Tracks the singer removed leave their copy behind; it would keep syncing
   // to Drive and reappear in nobody's mix. Only our own prefix is touched,

@@ -20,6 +20,16 @@ describe('which added tracks a phone will trust', () => {
     ])
   })
 
+  it('normalizes an older Windows backing path without changing the lane identity', () => {
+    expect(customTracks(base([{
+      id: 'custom-backing-vocals', label: 'Harmony voices', color: '#c7e06a',
+      file: String.raw`stems\custom-backing-vocals.wav`
+    }]))).toEqual([{
+      id: 'custom-backing-vocals', label: 'Harmony voices', color: '#c7e06a',
+      file: 'stems/custom-backing-vocals.wav'
+    }])
+  })
+
   it('has none when the project has none', () => {
     expect(customTracks(base(undefined))).toEqual([])
     expect(customTracks(undefined)).toEqual([])
@@ -33,6 +43,10 @@ describe('which added tracks a phone will trust', () => {
       'C:\\Users\\singer\\stems\\custom-harmony.mp3',
       '../../../etc/passwd',
       'stems/../project.json',
+      'stems\\..\\project.json',
+      'stems\\sub\\custom-harmony.mp3',
+      'stems/custom-harmony.mp3:stream',
+      'stems/\0custom-harmony.mp3',
       'stems/sub/custom-harmony.mp3',
       'custom-harmony.mp3',
       'stems/',
@@ -117,6 +131,17 @@ describe('loadProject builds the lanes', () => {
     expect(p.stems[2]).toMatchObject({ label: 'Harmony', color: '#ff9ad5', custom: true })
     // stems keep their own identity — the UI reads TRACK_META for those
     expect(p.stems[0].custom).toBeUndefined()
+  })
+
+  it('loads the Windows-saved backing lane through its canonical project-relative path', async () => {
+    const { fetched, load } = setup([{
+      id: 'custom-backing-vocals', label: 'Harmony voices', color: '#c7e06a',
+      file: String.raw`stems\custom-backing-vocals.wav`
+    }])
+    const p = await load()
+    expect(fetched).toContain('stems/custom-backing-vocals.wav')
+    expect(p.stems.find((lane) => lane.id === 'custom-backing-vocals'))
+      .toMatchObject({ label: 'Harmony voices', custom: true })
   })
 
   it('fails the whole load when a declared added track is unavailable', async () => {
