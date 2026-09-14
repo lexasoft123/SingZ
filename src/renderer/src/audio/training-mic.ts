@@ -34,6 +34,7 @@ export class NativeTrainingMicSource implements TrainingMicSource {
   private frame: PitchFrame = { f0: 0, clarity: 0, rms: 0 }
   private dbfs = METER_FLOOR_DB
   private usingFallback = false
+  private fallbackReason: string | undefined
   private ended: (() => void) | undefined
   private stopPending: Promise<void> | null = null
 
@@ -46,7 +47,9 @@ export class NativeTrainingMicSource implements TrainingMicSource {
   }
 
   get device(): MicDevice | null {
-    return this.usingFallback ? this.fallback.device : this.dev
+    if (!this.usingFallback) return this.dev
+    const device = this.fallback.device
+    return device ? { ...device, captureBackend: 'web-audio', nativeFallbackReason: this.fallbackReason } : null
   }
 
   async start(context: AudioContext, options: TrainingMicStartOptions = {}): Promise<void> {
@@ -56,16 +59,14 @@ export class NativeTrainingMicSource implements TrainingMicSource {
       typeof api.startDesktopAudioInput !== 'function' ||
       typeof api.onDesktopAudioInputEvent !== 'function'
     ) {
-      this.usingFallback = true
-      await this.fallback.start(context, options)
+      await this.startFallback(context, options, 'The native microphone API is unavailable in this build.')
       return
     }
     // Preferences written before PR #13 contain only Chromium's unrelated id.
     // Preserve that exact saved route until Settings can migrate it by a unique
     // label match or the singer explicitly chooses a native AudioInput device.
     if (options.deviceId && !options.nativeDeviceUid) {
-      this.usingFallback = true
-      await this.fallback.start(context, options)
+      await this.startFallback(context, options, 'The saved microphone selection has not been matched to a native input. Reselect the microphone in Settings.')
       return
     }
     this.ended = options.onEnded
@@ -78,8 +79,7 @@ export class NativeTrainingMicSource implements TrainingMicSource {
       this.unsubscribe?.()
       this.unsubscribe = null
       if (started.kind === 'unavailable-core') {
-        this.usingFallback = true
-        await this.fallback.start(context, options)
+        await this.startFallback(context, options, started.error)
         return
       }
       if (started.kind === 'denied') {
@@ -93,12 +93,34 @@ export class NativeTrainingMicSource implements TrainingMicSource {
     }
     this.token = started.token
     this.dev = {
+      captureBackend: 'native',
       id: started.device.uid,
       label: started.device.label,
       fallback: started.fallback,
       channelIndex: started.channel,
       channelCount: started.device.channels,
       channelFallback: started.channel !== (options.channelIndex ?? 0)
+    }
+  }
+
+  private async startFallback(
+    context: AudioContext,
+    options: TrainingMicStartOptions,
+    reason: string
+  ): Promise<void> {
+    this.usingFallback = true
+    this.fallbackReason = reason
+    await this.fallback.start(context, options)
+    const device = this.device
+    if (device && typeof window.singz.reportDesktopAudioInputFallback === 'function') {
+      // Diagnostics must not interrupt a successfully opened microphone.
+      await window.singz.reportDesktopAudioInputFallback({
+        reason,
+        deviceLabel: device.label,
+        channelIndex: device.channelIndex,
+        channelCount: device.channelCount,
+        requestedChannel: options.channelIndex ?? 0
+      }).catch(() => undefined)
     }
   }
 
@@ -127,7 +149,10 @@ export class NativeTrainingMicSource implements TrainingMicSource {
     const operation = (async (): Promise<void> => {
       if (fallbackOwned) {
         await Promise.resolve(this.fallback.stop())
-        if (this.usingFallback) this.usingFallback = false
+        if (this.usingFallback) {
+          this.usingFallback = false
+          this.fallbackReason = undefined
+        }
       }
       if (token) {
         const stopped = await window.singz.stopDesktopAudioInput(token)
