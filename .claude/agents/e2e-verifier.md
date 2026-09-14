@@ -49,6 +49,16 @@ PR, issue, commit or release note.
 5. ALWAYS run the same harness against a control on that machine (the previous verify
    tree, or the same tree with the preference pinned the other way) before calling any
    red a regression — its numbers are 10x the Mac's and its rules fail for its own reasons.
+   Two of those reasons are the DRIVER's, and both come from the hidden window there
+   painting about once a second: `page.waitForFunction` polls on requestAnimationFrame, so
+   a wait for a short phase (a 2 s count-in) returns after it has ended — poll from node
+   with `page.evaluate`; and `page.click` waits for the element to be "stable" across two
+   animation frames before pressing, so every press lands ~2 s late — a press that must
+   land inside a short phase is a DOM click dispatched from the page (`press()` in
+   `count-in-e2e.cjs`). Both bit the count-in driver on 2026-09-14: four legs "raced
+   nothing" twice while the change itself behaved, then PASS 8/8 once the driver did both.
+   For that driver use `E2E_SONG="Player Session E2E" E2E_MID=20` against the staged
+   `ps-lib` (its song is 82 s; the legs need 30 s of runway past the spot).
 6. Report the mac and windows-field results side by side, per rule, with the control's
    column when one was needed.
 
