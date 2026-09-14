@@ -57,6 +57,8 @@ const nativePlaybackSessionFiles = [
   'playback/native_playback_session.h',
   'playback/streaming_lane_feeder.cpp',
   'playback/streaming_lane_feeder.h',
+  'playback/lane_measure.cpp',
+  'playback/lane_measure.h',
 ]
 
 const signalsmithTimePitchFiles = [

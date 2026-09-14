@@ -75,7 +75,14 @@ import {
 } from './audio/training-cleanup'
 import { decodeMelody, encodeMelody, melodyFitsSong, PITCH_DETECT_VERSION } from './audio/melody'
 import type { MicDevice } from './audio/mic'
-import { laneEnvelope } from './audio/lane-envelope'
+import {
+  desktopLaneMeasureApplies,
+  laneReadFromBuffer,
+  readLanes,
+  SILENT_LANE_RMS,
+  type LaneMeasureHost,
+  type LaneRead
+} from './audio/lane-measure'
 import { computePeaks } from './audio/peaks'
 import { stemSampleRate } from './audio/stem-rate'
 import gdriveIcon from './assets/gdrive.png'
@@ -482,26 +489,15 @@ async function runCombinedCore(
   return out
 }
 
-/** Guitar/piano lanes only appear when the song actually has them. */
-function audibleStems(order: string[], buffers: AudioBuffer[]): { order: string[]; buffers: AudioBuffer[] } {
-  const keptOrder: string[] = []
-  const keptBuffers: AudioBuffer[] = []
-  for (let i = 0; i < order.length; i++) {
-    if (order[i] === 'guitar' || order[i] === 'piano') {
-      const data = buffers[i].getChannelData(0)
-      let energy = 0
-      const step = Math.max(1, Math.floor(data.length / 200000))
-      let n = 0
-      for (let j = 0; j < data.length; j += step) {
-        energy += data[j] * data[j]
-        n++
-      }
-      if (Math.sqrt(energy / Math.max(1, n)) < 0.004) continue
-    }
-    keptOrder.push(order[i])
-    keptBuffers.push(buffers[i])
-  }
-  return { order: keptOrder, buffers: keptBuffers }
+/** Guitar/piano lanes only appear when the song actually has them. The RMS
+ *  is the lane's read (`LaneRead.rms`): the strided channel-0 sample when
+ *  Chromium decoded the lane, every sample of every channel when the core
+ *  measured it — either way "is there anything here at all". */
+function audibleStems(order: string[], reads: Map<string, LaneRead>): string[] {
+  return order.filter((id) => {
+    if (id !== 'guitar' && id !== 'piano') return true
+    return (reads.get(id)?.rms ?? 0) >= SILENT_LANE_RMS
+  })
 }
 
 /** Diagnostics hook (same idea as __melody/__mlGrid): every in-app beat
@@ -581,15 +577,16 @@ function creepUntil(
   return { stop: () => clearInterval(timer) }
 }
 
+/** A lane for the screen from its read — measured by the core or decoded by
+ *  Chromium, the lane cannot tell which and must not need to. */
 function makeTrack(
   id: string,
-  buffer: AudioBuffer,
+  read: LaneRead,
   over?: Partial<Pick<UITrack, 'label' | 'color' | 'custom' | 'sourcePath'>>
 ): UITrack {
   const meta = TRACK_META[id] ?? { label: id, color: '#bfb49d' }
-  const { peaks, scale } = computePeaks(buffer)
   return {
-    id, ...meta, peaks, envelope: laneEnvelope(buffer), duration: buffer.duration, scale,
+    id, ...meta, peaks: read.peaks, envelope: read.envelope, duration: read.duration, scale: read.scale,
     muted: false, solo: false, volume: 1, ...over
   }
 }
@@ -1344,6 +1341,20 @@ export default function App(): React.JSX.Element {
     return () => engine.setLaneReader(null)
   }, [engine])
 
+  // Warm the native addon once the library is on screen. Its first load
+  // verifies the binary and, in a dev tree, fingerprints every native source
+  // — and the open's lane measure is now the first thing to ask for it, where
+  // the prepare-ahead used to, 400 ms after the song was already up. Measured
+  // on the open's own critical path before this: the addon loaded 1.2 s after
+  // the click and the measure itself took 0.45 s. Nothing waits on this; a
+  // song opened inside the first second simply pays the load as it did.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      void window.singz.desktopPlaybackCapability().catch(() => {})
+    }, 800)
+    return () => clearTimeout(timer)
+  }, [])
+
   useEffect(() => engine.subscribe(() => {
     setPlaying(engine.playing)
     setNativePlaybackLeaseBlocked(engine.nativeMonitorOwnsOutput)
@@ -1566,22 +1577,34 @@ export default function App(): React.JSX.Element {
       setEditName(null)
       setShowProjects(false)
       setShowCatalog(false)
-      /** Decode the project's added tracks into lanes; a missing one is skipped. */
-      const decodeCustom = async (defs: CustomTrack[] | undefined, fresh: Map<string, AudioBuffer>): Promise<UITrack[]> => {
+      /** The project's added tracks as lanes, read like the stems (measured
+       *  where the core can, decoded where it cannot); a missing one is skipped. */
+      const decodeCustom = async (
+        defs: CustomTrack[] | undefined,
+        fresh: Map<string, AudioBuffer>,
+        host: LaneMeasureHost
+      ): Promise<UITrack[]> => {
         const out: UITrack[] = []
-        for (const c of defs ?? []) {
-          try {
-            const buf = await engine.decode(await window.singz.readAudio(c.file))
-            fresh.set(c.id, buf)
-            out.push(makeTrack(c.id, buf, {
-              label: c.label,
-              color: c.color,
-              custom: { file: c.file },
-              sourcePath: c.file
-            }))
-          } catch {
+        if (!defs || defs.length === 0) return out
+        const { reads, superseded } = await readLanes(
+          defs.map((c) => ({ id: c.id, path: c.file })),
+          async (path) => engine.decode(await window.singz.readAudio(path)),
+          host
+        )
+        if (superseded) return out
+        for (const c of defs) {
+          const read = reads.get(c.id)
+          if (!read) {
             setNotice(`“${c.label}” could not be read — that lane is missing from the mix.`)
+            continue
           }
+          if (read.buffer) fresh.set(c.id, read.buffer)
+          out.push(makeTrack(c.id, read, {
+            label: c.label,
+            color: c.color,
+            custom: { file: c.file },
+            sourcePath: c.file
+          }))
         }
         return out
       }
@@ -1621,36 +1644,66 @@ export default function App(): React.JSX.Element {
              another and pay six times over for it. Which is why counting
              completions here would be theatre: they finish within a few
              milliseconds of each other after one long wait, so the bar would
-             sit still for a second and then leap. The decode is one opaque
+             sit still for a second and then leap. The read is one opaque
              step and it is reported as one, easing toward its share and never
-             reaching it until the stems are really in. */
+             reaching it until the stems are really in.
+
+             The read is the core's measure when native playback will play
+             this song (audio/lane-measure.ts) and Chromium's decode otherwise
+             — the measure hands back the length, the picture and the
+             silent-lane test off the files and keeps no samples, which is
+             what "Reading the stems" used to spend its seconds decoding. A
+             stem that can be neither measured nor decoded sinks the open,
+             exactly as a stem that would not decode always has. */
           const reading = creepUntil(mark, 'Reading the stems…', 0.05, 0.58, 1400)
-          let decoded: AudioBuffer[]
+          let reads: Map<string, LaneRead>
+          // Decided ONCE over every lane the song will have — stems and the
+          // singer's added tracks alike — because Play asks the same gate
+          // over the same set: a song the measure takes must be a song
+          // native will play, or the first Play decodes six lanes in front
+          // of the first sound.
+          const host: LaneMeasureHost = {
+            api: window.singz,
+            applies: await desktopLaneMeasureApplies([
+              ...rawOrder.map((st) => ({ id: st, path: stems[st] })),
+              ...(proj.settings.custom ?? []).map((c) => ({ id: c.id, path: c.file }))
+            ])
+          }
           try {
-            decoded = await Promise.all(
-              rawOrder.map(async (st) => engine.decode(await window.singz.readAudio(stems[st])))
+            const read = await readLanes(
+              rawOrder.map((st) => ({ id: st, path: stems[st] })),
+              async (path) => engine.decode(await window.singz.readAudio(path)),
+              host
             )
+            if (read.superseded) return
+            const missing = rawOrder.find((st) => !read.reads.has(st))
+            if (missing) throw read.errors.get(missing) ?? new Error(`${missing} could not be read`)
+            reads = read.reads
           } finally {
             reading.stop()
           }
           if (seq !== loadSeq.current) return
           mark('Drawing the waveforms…', 0.62)
-          const { order, buffers } = audibleStems(rawOrder, decoded)
+          const order = audibleStems(rawOrder, reads)
       const hidden = rawOrder.filter((st) => !order.includes(st))
       if (hidden.length > 0) {
         setNotice(
           `Split into six stems — ${hidden.join(' and ')} ${hidden.length > 1 ? 'are' : 'is'} silent in this song, so ${hidden.length > 1 ? 'their lanes are' : 'its lane is'} hidden.`
         )
       }
-          // Tracks the singer added themselves decode after the stems and sit
-          // below them; one that no longer decodes must not sink the song.
-          // The samples travel to the engine in their own map and stop
-          // there; the lanes carry only what the screen needs.
+          // Tracks the singer added themselves are read after the stems and
+          // sit below them; one that can no longer be read must not sink the
+          // song. Whatever samples Chromium decoded travel to the engine in
+          // their own map and stop there; the lanes carry only what the
+          // screen needs, and a measured lane has no samples anywhere.
           const fresh = new Map<string, AudioBuffer>()
-          order.forEach((s, i) => fresh.set(s, buffers[i]))
+          for (const s of order) {
+            const buffer = reads.get(s)?.buffer
+            if (buffer) fresh.set(s, buffer)
+          }
           const lanes = [
-            ...order.map((s, i) => makeTrack(s, buffers[i], { sourcePath: stems[s] })),
-            ...(await decodeCustom(proj.settings.custom, fresh))
+            ...order.map((s) => makeTrack(s, reads.get(s)!, { sourcePath: stems[s] })),
+            ...(await decodeCustom(proj.settings.custom, fresh, host))
           ]
           if (seq !== loadSeq.current) return
           mark('Starting playback…', 0.9)
@@ -1663,7 +1716,7 @@ export default function App(): React.JSX.Element {
           setSplit(true)
           setStemFiles(stems)
           setIsProject(true)
-          vocalsSecondsRef.current = buffers[order.indexOf('vocals')]?.duration ?? null
+          vocalsSecondsRef.current = reads.get('vocals')?.duration ?? null
           stemPathsRef.current = stems
           audibleIdsRef.current = order
           // Restore training BEFORE karaoke may reopen: its auto-mute must
@@ -1766,9 +1819,20 @@ export default function App(): React.JSX.Element {
         // A project saved before it was ever split has no stems, but it can
         // still carry tracks the singer added — those lanes come back here.
         const fresh = new Map<string, AudioBuffer>([['original', audio]])
+        // The full mix is decoded whatever the gate says (a split needs its
+        // samples), but the gate for the added tracks still counts it: an
+        // mp3 original beside FLAC customs is a song native will refuse.
+        const rawHost: LaneMeasureHost = {
+          api: window.singz,
+          applies: await desktopLaneMeasureApplies([
+            { id: 'original', path: reg.path },
+            ...(reg.project?.settings.custom ?? []).map((c) => ({ id: c.id, path: c.file }))
+          ])
+        }
+        if (seq !== loadSeq.current) return
         const lanes = [
-          makeTrack('original', audio, { sourcePath: reg.path }),
-          ...(await decodeCustom(reg.project?.settings.custom, fresh))
+          makeTrack('original', laneReadFromBuffer(audio), { sourcePath: reg.path }),
+          ...(await decodeCustom(reg.project?.settings.custom, fresh, rawHost))
         ]
         if (seq !== loadSeq.current) return
         engine.load(
@@ -1952,16 +2016,36 @@ export default function App(): React.JSX.Element {
     try {
       const stems = res.stems as Record<string, string>
       const rawOrder = orderedStems(stems)
-      const decoded = await Promise.all(
-        rawOrder.map(async (s) => engine.decode(await window.singz.readAudio(stems[s])))
+      // Read like an open: measured by the core where native will play them,
+      // decoded otherwise. A stem that can be neither fails the split's
+      // loading step, as a stem that would not decode always has.
+      const kept = tracksRef.current.filter((t) => t.custom && t.sourcePath)
+      const { reads, errors, superseded } = await readLanes(
+        rawOrder.map((s) => ({ id: s, path: stems[s] })),
+        async (path) => engine.decode(await window.singz.readAudio(path)),
+        {
+          api: window.singz,
+          // Over the song as it will be: the new stems and the added tracks
+          // that stay with them.
+          applies: await desktopLaneMeasureApplies([
+            ...rawOrder.map((s) => ({ id: s, path: stems[s] })),
+            ...kept.map((t) => ({ id: t.id, path: t.sourcePath! }))
+          ])
+        }
       )
-      const { order, buffers } = audibleStems(rawOrder, decoded)
+      if (superseded) throw new Error('the split was superseded by another open')
+      const missing = rawOrder.find((s) => !reads.has(s))
+      if (missing) throw errors.get(missing) ?? new Error(`${missing} could not be read`)
+      const order = audibleStems(rawOrder, reads)
       // The stems replace the full-mix lane; tracks the singer added stay.
       const fresh = new Map<string, AudioBuffer>()
-      order.forEach((s, i) => fresh.set(s, buffers[i]))
+      for (const s of order) {
+        const buffer = reads.get(s)?.buffer
+        if (buffer) fresh.set(s, buffer)
+      }
       loadLanes(
         [
-          ...order.map((s, i) => makeTrack(s, buffers[i], { sourcePath: stems[s] })),
+          ...order.map((s) => makeTrack(s, reads.get(s)!, { sourcePath: stems[s] })),
           ...tracksRef.current.filter((t) => t.custom)
         ],
         fresh
@@ -1971,7 +2055,7 @@ export default function App(): React.JSX.Element {
       // Fresh stems in an open project are unsaved content.
       setDirty(true)
       setSaveState((st) => (st === 'saved' ? 'idle' : st))
-      vocalsSecondsRef.current = buffers[order.indexOf('vocals')]?.duration ?? null
+      vocalsSecondsRef.current = reads.get('vocals')?.duration ?? null
       stemPathsRef.current = stems
       audibleIdsRef.current = order
       // These are different stems than any line already on screen was tracked
@@ -2049,12 +2133,14 @@ export default function App(): React.JSX.Element {
           continue
         }
         try {
+          // Decoded rather than measured: a file the singer just picked can
+          // be any format, and the notice below is what a bad one gets.
           const buf = await engine.decode(await window.singz.readAudio(reg.path))
           const id = customTrackId(reg.name, taken)
           taken.add(id)
           fresh.set(id, buf)
           added.push(
-            makeTrack(id, buf, {
+            makeTrack(id, laneReadFromBuffer(buf), {
               label: trackLabel(reg.name),
               color: CUSTOM_COLORS[(customSoFar + added.length) % CUSTOM_COLORS.length],
               custom: { file: reg.path },
@@ -3383,7 +3469,15 @@ export default function App(): React.JSX.Element {
         void engine.setTranspose(st)
       },
       log: () => window.singz.getLog(),
-      loadSteps: () => loadStepsRef.current.rows.slice()
+      loadSteps: () => loadStepsRef.current.rows.slice(),
+      // The decode's own picture of a lane, for a driver to hold the core's
+      // measure against: null while the lane has no samples in the renderer
+      // (which, under native playback, is from the open onwards) — fetch
+      // them with `engine.ensureTrackBuffer(id)` first.
+      computePeaks: (id: string) => {
+        const buffer = engine.getTrackBuffer(id)
+        return buffer ? computePeaks(buffer) : null
+      }
     }
   }, [engine, playing, phase, showCatalog, tracks, metCfg, training, trainCfg, transpose, loadPath])
 

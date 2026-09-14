@@ -152,7 +152,9 @@ add_library(singz_native_playback_session STATIC EXCLUDE_FROM_ALL
   native/playback/native_playback_session.cpp
   native/playback/native_playback_session.h
   native/playback/streaming_lane_feeder.cpp
-  native/playback/streaming_lane_feeder.h)
+  native/playback/streaming_lane_feeder.h
+  native/playback/lane_measure.cpp
+  native/playback/lane_measure.h)
 add_library(SingZ::native_playback_session ALIAS
   singz_native_playback_session)
 target_compile_features(singz_native_playback_session PUBLIC cxx_std_20)
@@ -511,6 +513,17 @@ if(SINGZ_CORE_TESTS)
   target_link_libraries(streaming_lane_feeder_tests PRIVATE
     SingZ::native_playback_session SingZ::native_flac Threads::Threads)
   add_test(NAME streaming_lane_feeder_tests COMMAND streaming_lane_feeder_tests)
+
+  # The desktop open's lane measure against the full decode: the same three
+  # statistics the renderer used to take off Chromium's AudioBuffer, taken off
+  # the file through the streaming source instead.
+  add_executable(lane_measure_tests
+    ${SINGZ_REPO_ROOT}/tests/native/lane_measure_tests.cpp)
+  target_compile_features(lane_measure_tests PRIVATE cxx_std_20)
+  set_target_properties(lane_measure_tests PROPERTIES CXX_EXTENSIONS OFF)
+  target_link_libraries(lane_measure_tests PRIVATE
+    SingZ::native_playback_session SingZ::zcore_media SingZ::native_flac Threads::Threads)
+  add_test(NAME lane_measure_tests COMMAND lane_measure_tests)
 
   add_executable(flac_streaming_source_tests
     ${SINGZ_REPO_ROOT}/tests/native/flac_streaming_source_tests.cpp)

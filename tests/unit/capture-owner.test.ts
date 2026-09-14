@@ -6,10 +6,11 @@ import {
   readFileSync,
   rmSync,
   statSync,
-  utimesSync
+  utimesSync,
+  writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   CaptureAddonLoadError,
@@ -323,6 +324,22 @@ function fakeBinding(): NativeCaptureBinding & {
       ...playbackResult(generation.toString()),
       state: 'unloaded',
       cleanupComplete: true
+    }),
+    measurePlaybackLanes: async (request) => ({
+      ok: true,
+      error: '',
+      lanes: request.lanes.map((lane) => ({
+        id: lane.id,
+        ok: true,
+        error: 'ok',
+        sampleRate: 44100,
+        channels: 2,
+        frameCount: 44100,
+        durationSeconds: 1,
+        rms: 0.1,
+        peaks: new Float32Array(request.minimumPeaks),
+        envelope: new Float32Array(96)
+      }))
     })
   }
 }
@@ -591,27 +608,76 @@ describe('CaptureOwner', () => {
     })
   })
 
-  it('stages exact bytes at unique private paths and cleans only on request', () => {
+  it('stages exact bytes at a stable private path, reused for the same bytes', () => {
+    const base = mkdtempSync(join(tmpdir(), 'singz-load-stage-test-'))
     const companion = new Uint8Array([4, 3, 2, 1])
-    const first = stageArtifactForLoad(artifact, [
-      { path: 'ffmpeg/libavcodec.62.dylib', bytes: companion }
-    ])
-    const second = stageArtifactForLoad(artifact)
     try {
-      expect(first.path).not.toBe(second.path)
-      expect(first.path.endsWith('.node')).toBe(true)
+      const first = stageArtifactForLoad(artifact, [
+        { path: 'ffmpeg/libavcodec.62.dylib', bytes: companion }
+      ], { base })
+      const again = stageArtifactForLoad(artifact, [
+        { path: 'ffmpeg/libavcodec.62.dylib', bytes: companion }
+      ], { base })
+      // The same bytes land at the same path — that is what lets the OS
+      // remember it has already validated this file — and the second call
+      // wrote nothing new.
+      expect(again.path).toBe(first.path)
+      // basename, not a '/' suffix: this suite runs on the Windows legs too.
+      expect(basename(first.path)).toBe('singz-capture.node')
       expect(readFileSync(first.path)).toEqual(Buffer.from(artifact))
       expect(readFileSync(first.companions!['ffmpeg/libavcodec.62.dylib']))
         .toEqual(Buffer.from(companion))
       if (process.platform !== 'win32') {
         expect(statSync(first.path).mode & 0o777).toBe(0o500)
+        expect(statSync(dirname(first.path)).mode & 0o777).toBe(0o700)
+      }
+      // Different bytes are a different artifact, and a different path — and
+      // so are the same addon bytes beside different companions, since the
+      // key describes everything the directory holds.
+      const other = stageArtifactForLoad(new Uint8Array([1, 2, 3, 4, 5]), [], { base })
+      expect(other.path).not.toBe(first.path)
+      const otherCompanions = stageArtifactForLoad(artifact, [
+        { path: 'ffmpeg/libavcodec.62.dylib', bytes: new Uint8Array([1, 2, 3, 4]) }
+      ], { base })
+      expect(otherCompanions.path).not.toBe(first.path)
+      expect(stageArtifactForLoad(artifact, [], { base }).path).not.toBe(first.path)
+      // Cleanup leaves a stable staging alone: another launch may map it.
+      first.cleanup()
+      again.cleanup()
+      expect(existsSync(first.path)).toBe(true)
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  })
+
+  it('rewrites a stable file that is not the expected bytes, and falls back when the directory is not ours', () => {
+    const base = mkdtempSync(join(tmpdir(), 'singz-load-stage-test-'))
+    try {
+      const first = stageArtifactForLoad(artifact, [], { base })
+      // A staged file is read-only; corrupt it the way a stray writer would
+      // have to — replace it — and the next staging must notice and rewrite.
+      rmSync(first.path)
+      writeFileSync(first.path, Buffer.from([9, 9, 9]), { mode: 0o500 })
+      const repaired = stageArtifactForLoad(artifact, [], { base })
+      expect(repaired.path).toBe(first.path)
+      expect(readFileSync(repaired.path)).toEqual(Buffer.from(artifact))
+
+      if (process.platform !== 'win32') {
+        // A pre-existing directory anyone else can enter is not trusted, and
+        // the caller gets the per-process random directory instead — which
+        // cleanup DOES remove.
+        const other = new Uint8Array([7, 7, 7, 7])
+        const key = createHash('sha256').update(Buffer.from(other)).digest('hex').slice(0, 32)
+        mkdirSync(join(base, `singz-capture-${key}`), { mode: 0o755 })
+        const fallback = stageArtifactForLoad(other, [], { base })
+        expect(fallback.path).toMatch(new RegExp(`singz-capture-load-${process.pid}-[0-9a-f]{32}/[0-9a-f]{32}\\.node$`))
+        expect(readFileSync(fallback.path)).toEqual(Buffer.from(other))
+        fallback.cleanup()
+        expect(existsSync(fallback.path)).toBe(false)
       }
     } finally {
-      first.cleanup()
-      second.cleanup()
+      rmSync(base, { recursive: true, force: true })
     }
-    expect(existsSync(first.path)).toBe(false)
-    expect(existsSync(second.path)).toBe(false)
   })
 
   it('prunes only old confirmed-dead load dirs and preserves other live PIDs', () => {
@@ -619,6 +685,10 @@ describe('CaptureOwner', () => {
     const live = join(base, `singz-capture-load-222-${'a'.repeat(32)}`)
     const dead = join(base, `singz-capture-load-333-${'b'.repeat(32)}`)
     const unrelated = join(base, 'singz-capture-load-not-ours')
+    // Stable stagings are reaped by age alone: one untouched for eight days
+    // goes, one touched yesterday stays.
+    const staleStable = join(base, `singz-capture-${'c'.repeat(32)}`)
+    const freshStable = join(base, `singz-capture-${'d'.repeat(32)}`)
     try {
       // Regression: the real macOS TMP had 46,929 entries and SingZ candidates
       // began around index 6,161. Unrelated entries must not consume the scan
@@ -626,10 +696,13 @@ describe('CaptureOwner', () => {
       for (let index = 0; index < 300; index += 1) {
         mkdirSync(join(base, `unrelated-${index.toString().padStart(4, '0')}`))
       }
-      for (const dir of [live, dead, unrelated]) mkdirSync(dir)
+      for (const dir of [live, dead, unrelated, staleStable, freshStable]) mkdirSync(dir)
       const old = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
       utimesSync(live, old, old)
       utimesSync(dead, old, old)
+      const eightDays = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000)
+      utimesSync(staleStable, eightDays, eightDays)
+      utimesSync(freshStable, old, old)
       pruneStaleCaptureLoadDirs({
         base,
         now: Date.now(),
@@ -638,6 +711,8 @@ describe('CaptureOwner', () => {
       expect(existsSync(live)).toBe(true)
       expect(existsSync(dead)).toBe(false)
       expect(existsSync(unrelated)).toBe(true)
+      expect(existsSync(staleStable)).toBe(false)
+      expect(existsSync(freshStable)).toBe(true)
     } finally {
       rmSync(base, { recursive: true, force: true })
     }
