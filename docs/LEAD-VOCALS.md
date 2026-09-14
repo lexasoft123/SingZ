@@ -50,6 +50,12 @@ IEEE-float WAV preserves residual samples above 1 without clipping; those
 projects use the existing v1/mixed WAV+FLAC reader rather than quantizing the
 new vocal through the existing 16-bit FLAC encoder.
 
+The saved `leadVocalSeparated` setting persists across Save and reopening.
+It keeps **Re-split** unavailable: restoring combined vocals alongside the saved
+backing lane would play the backing twice. There is no reset or recombine
+workflow yet. Generated backing lanes display directly under the main vocals,
+and remain there after renaming their labels or reopening the project.
+
 Numerical checks live in `scripts/vocal_split_runner_test.py`; project-save
 regressions in `tests/unit/vocal-project-save.test.ts`. A full 366.916-second
 Turn The Page test through the untouched installed pack plus the optional

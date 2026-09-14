@@ -693,6 +693,7 @@ export default function App(): React.JSX.Element {
   const [stemFiles, setStemFiles] = useState<Record<string, string> | null>(null)
   const [vocalSplitProgress, setVocalSplitProgress] = useState<number | null>(null)
   const [pendingLeadVocal, setPendingLeadVocal] = useState<string | null>(null)
+  const [leadVocalSeparated, setLeadVocalSeparated] = useState(false)
   const vocalSplitBusyRef = useRef(false)
   const vocalSplitRequestsRef = useRef(new VocalSplitRequests())
   const [sep, setSep] = useState<SeparationProgress | null>(null)
@@ -1573,6 +1574,7 @@ export default function App(): React.JSX.Element {
       mark('Opening…', 0)
       setSong(createLoadedSongIdentity(reg.path,reg.name,`song-load-${seq}`))
       setIsProject(Boolean(reg.project))
+      setLeadVocalSeparated(reg.project?.settings.leadVocalSeparated === true)
       setInLibrary(reg.project?.inLibrary ?? true)
       setProjectDir(reg.project?.dir ?? null)
       setEditName(null)
@@ -1900,7 +1902,7 @@ export default function App(): React.JSX.Element {
   )
 
   const startSplit = useCallback(async () => {
-    if (!canResplitVocals(pendingLeadVocal, vocalSplitBusyRef.current)) return
+    if (!canResplitVocals(pendingLeadVocal, vocalSplitBusyRef.current, leadVocalSeparated)) return
     if (!song || sepRunningRef.current) return
     let status = engineStatus
     if (!status?.ok) {
@@ -2005,7 +2007,7 @@ export default function App(): React.JSX.Element {
       setError('Separation finished, but loading the stem files failed.')
     }
     setSep(null)
-  }, [song, engineStatus, engine, loadLanes, pendingLeadVocal])
+  }, [song, engineStatus, engine, loadLanes, pendingLeadVocal, leadVocalSeparated])
 
   const cancelVocalSplit = useCallback(() => {
     vocalSplitRequestsRef.current.cancel()
@@ -2071,6 +2073,7 @@ export default function App(): React.JSX.Element {
           setStemFiles(stems)
           vocalsSecondsRef.current = lead.duration
           setPendingLeadVocal(result.lead)
+          setLeadVocalSeparated(true)
           setDirty(true)
           setSaveState('idle')
           setMelody({ status: 'none' }); melodyRef.current = { status: 'none' }
@@ -2806,6 +2809,7 @@ export default function App(): React.JSX.Element {
     setSaveState('saving')
     const settings = {
       pendingLeadVocal: pendingLeadVocal ?? undefined,
+      leadVocalSeparated: leadVocalSeparated || undefined,
       transpose,
       tempo: tempoRate,
       view: view ?? undefined,
@@ -2877,7 +2881,7 @@ export default function App(): React.JSX.Element {
       setSaveState('idle')
       setError(`Could not save the project: ${res.error}`)
     }
-  }, [song, saveState, transpose, tempoRate, view, selection, loopOn, training, trainCfg, beatInfo, melodyInfo, keyInfo, metCfg, tracks, reanchorCustom, pendingLeadVocal])
+  }, [song, saveState, transpose, tempoRate, view, selection, loopOn, training, trainCfg, beatInfo, melodyInfo, keyInfo, metCfg, tracks, reanchorCustom, pendingLeadVocal, leadVocalSeparated])
 
   /** A silently tracked pitch line or (re)detected grid saves itself — but
    *  only into an existing project (never creating one under a raw file), and
@@ -3853,7 +3857,7 @@ export default function App(): React.JSX.Element {
             onRedetectBeat={redetectBeat}
             onToggleKaraoke={toggleKaraoke}
             onSplit={() => void startSplit()}
-            onResplit={split && !sep && canResplitVocals(pendingLeadVocal, vocalSplitProgress !== null) ? () => void startSplit() : null}
+            onResplit={split && !sep && canResplitVocals(pendingLeadVocal, vocalSplitProgress !== null, leadVocalSeparated) ? () => void startSplit() : null}
             onSplitBacking={split && !sep && !pendingLeadVocal && saveState !== 'saving' && vocalSplitProgress === null ? () => void splitBackingVocals() : null}
             vocalSplitProgress={vocalSplitProgress}
             onCancelVocalSplit={cancelVocalSplit}

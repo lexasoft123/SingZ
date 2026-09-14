@@ -82,14 +82,15 @@ describe('whole vocal split request ownership', () => {
     expect(ops.commit).toHaveBeenCalledOnce()
   })
 
-  it('keeps ready lyrics and blocks re-split until pending vocal changes are saved', () => {
+  it('keeps ready lyrics and blocks re-split for pending or saved separated vocals', () => {
     const reset = vi.fn(), start = vi.fn()
     restartPendingLyrics(false, reset, start)
     expect(reset).not.toHaveBeenCalled()
     expect(start).not.toHaveBeenCalled()
-    expect(canResplitVocals('lead.wav', false)).toBe(false)
-    expect(canResplitVocals(null, true)).toBe(false)
-    expect(canResplitVocals(null, false)).toBe(true)
+    expect(canResplitVocals('lead.wav', false, false)).toBe(false)
+    expect(canResplitVocals(null, true, false)).toBe(false)
+    expect(canResplitVocals(null, false, false)).toBe(true)
+    expect(canResplitVocals(null, false, true)).toBe(false)
   })
 
   it('waits for delayed lyrics cancellation to release busy before commit or recovery restarts', async () => {

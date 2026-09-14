@@ -213,6 +213,9 @@ export interface ProjectSettings {
   /** Pending lead stem produced by the vocal splitter; consumed by Save,
    * never written as an absolute path to project.json. */
   pendingLeadVocal?: string
+  /** The canonical vocals stem is separated lead; re-splitting the original
+   * song would restore combined vocals alongside the saved backing lane. */
+  leadVocalSeparated?: boolean
   tracks: Record<string, { muted: boolean; solo: boolean; volume: number }>
 }
 

@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 const issued = vi.hoisted(() => new Set<string>())
 vi.mock('../../src/main/vocal-separation', () => ({ isIssuedLead: (path: string) => issued.has(path) }))
 import { detectProject, saveProject } from '../../src/main/projects'
+import { canResplitVocals } from '../../src/renderer/src/vocal-split-request'
 
 function floatWav(): Buffer {
   const data = Buffer.alloc(44 + 64 * 8)
@@ -38,7 +39,7 @@ describe('saving a separated vocal', () => {
     const bytes = floatWav()
     await writeFile(lead, bytes); await writeFile(backing, bytes); issued.add(lead)
     const result = await saveProject(join(dir, 'song.mp3'), 'Lead test', {
-      transpose: 0, tracks: {}, pendingLeadVocal: lead,
+      transpose: 0, tracks: {}, pendingLeadVocal: lead, leadVocalSeparated: true,
       custom: [{ id: 'custom-backing-vocals', label: 'Backing vocals', color: '#123456', file: backing }]
     })
     expect(result.ok).toBe(true)
@@ -47,17 +48,24 @@ describe('saving a separated vocal', () => {
     const doc = JSON.parse(await readFile(join(dir, 'project.json'), 'utf8'))
     expect(doc.version).toBe(1) // existing reader supports mixed WAV/FLAC
     expect(doc.settings.pendingLeadVocal).toBeUndefined()
+    expect(doc.settings.leadVocalSeparated).toBe(true)
     expect(doc.settings.melody).toBeUndefined()
     expect(doc.settings.custom[0].file).toBe('stems/custom-backing-vocals.wav')
     expect(Object.keys(doc.stemHashes)).toContain('vocals.wav')
     expect(Object.keys(doc.stemHashes)).toContain('custom-backing-vocals.wav')
     const reopened = await detectProject(join(dir, 'song.mp3'))
     expect(reopened?.stems?.vocals).toBe(join(dir, 'stems', 'vocals.wav'))
+    expect(reopened?.settings.leadVocalSeparated).toBe(true)
+    expect(canResplitVocals(null, false, reopened?.settings.leadVocalSeparated === true)).toBe(false)
     expect(await readFile(lead)).toEqual(bytes) // cache source is never moved
     const again = await saveProject(join(dir, 'song.mp3'), 'Lead test', {
-      transpose: 0, tracks: {}, custom: reopened?.settings.custom
+      transpose: 0, tracks: {}, custom: reopened?.settings.custom,
+      leadVocalSeparated: reopened?.settings.leadVocalSeparated
     })
     expect(again.ok).toBe(true)
+    const reopenedAgain = await detectProject(join(dir, 'song.mp3'))
+    expect(reopenedAgain?.settings.leadVocalSeparated).toBe(true)
+    expect(canResplitVocals(null, false, reopenedAgain?.settings.leadVocalSeparated === true)).toBe(false)
     expect(await readFile(join(dir, 'stems', 'vocals.wav'))).toEqual(bytes)
   })
 

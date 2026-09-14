@@ -9,8 +9,12 @@ export class VocalSplitRequests {
   cancel(): void { ++this.revision }
 }
 
-export function canResplitVocals(pendingLead: string | null, splitting: boolean): boolean {
-  return pendingLead === null && !splitting
+export function canResplitVocals(
+  pendingLead: string | null,
+  splitting: boolean,
+  leadVocalSeparated: boolean
+): boolean {
+  return pendingLead === null && !splitting && !leadVocalSeparated
 }
 
 class DiscardedVocalSplit extends Error {}
