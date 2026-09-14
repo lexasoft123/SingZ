@@ -84,12 +84,41 @@ const MARKER = 'edited by the harness tonight';
     const MOD = process.platform === 'darwin' ? 'Meta' : 'Control';
 
     // ——— keyboard route into the word strip: Mod+E on the focused row
-    // opens it; Escape peels the STRIP off, never the editor
+    // opens it AND lands focus on the strip's FIRST word chip, so ←/→
+    // nudging works without a click; Escape peels the STRIP off, never the
+    // editor. The editor moves focus in a requestAnimationFrame AFTER the
+    // strip mounts, so reading activeElement straight after waitForSelector
+    // is a coin flip — measured 3 of 5 reads still on the row's text input,
+    // ~5 ms before the frame — and an <input> has no class, which is how
+    // that read used to print as "(none)" and pass. Wait for the landing
+    // under a budget, and when it never comes say where focus actually is.
     await win.focus('.lyed-row:nth-child(1) input');
     await win.keyboard.press(`${MOD}+KeyE`);
     await win.waitForSelector('.lyed-wordstrip', { timeout: 5000 });
-    const focusAfterE = await win.evaluate(() => document.activeElement?.className ?? '');
-    console.log('strip via keyboard; focus on:', focusAfterE || '(none)');
+    const focusLanded = await win
+      .waitForFunction(
+        () => {
+          const first = document.querySelector('.lyed-word');
+          return !!first && document.activeElement === first;
+        },
+        null,
+        { timeout: 2000, polling: 10 }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    if (!focusLanded) {
+      const where = await win.evaluate(() => {
+        const a = document.activeElement;
+        if (!a || a === document.body) return 'nothing';
+        return a.tagName.toLowerCase() + (a.className ? `.${a.className}` : '');
+      });
+      throw new Error(
+        `Mod+E opened the strip but focus never landed on its first word chip (focus is on ${where})`
+      );
+    }
+    console.log('strip via keyboard; focus landed on the first word chip');
     await win.keyboard.press('Escape');
     await win.waitForSelector('.lyed-wordstrip', { state: 'detached', timeout: 5000 });
     if (!(await win.$('.lyed-card'))) throw new Error('Escape on the strip closed the editor');
