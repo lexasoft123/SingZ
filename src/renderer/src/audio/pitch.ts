@@ -22,13 +22,17 @@ export function cmndProfile(
   buf: Float32Array,
   sampleRate: number,
   fMin: number,
-  fMax: number
+  fMax: number,
+  boundary: 'inclusive' | 'interior' = 'inclusive'
 ): { cmnd: Float32Array; tauMin: number; tauMax: number } | null {
   const n = buf.length
   if (n < 32 || !Number.isFinite(sampleRate) || sampleRate <= 0 ||
       !Number.isFinite(fMin) || !Number.isFinite(fMax) || fMin <= 0 || fMin >= fMax) return null
   const tauMin = Math.max(2, Math.floor(sampleRate / fMax))
-  const tauMax = Math.min(Math.ceil(sampleRate / fMin) + 1, Math.floor(n / 2))
+  // Live detection includes the lower boundary; offline pYIN retains its
+  // established integration length, which depends on the maximum lag.
+  const maxLag = boundary === 'inclusive' ? Math.ceil(sampleRate / fMin) + 1 : Math.floor(sampleRate / fMin)
+  const tauMax = Math.min(maxLag, Math.floor(n / 2))
   if (tauMax <= tauMin + 2) return null
 
   const w = n - tauMax

@@ -72,3 +72,12 @@ also match another song's mastering suffix. To refresh the selected detector on
 already available lead outputs, use `native --input-kind lead --available-only`
 with its final binary and `--label updated-lead`. The report records all executable
 hashes and warns when an in-progress label contains multiple versions.
+
+## Version-4 gate follow-up
+
+[The regression-gate report](pitch-regression-gate.md) supersedes experimental
+version-3 detector claims. Live capture retains its harmonic-evidence changes;
+offline tracking uses the established range/priors with corrected parabolic
+residuals. The historical corpus JSONs are retained unchanged. The final report
+states its fixed timestamp denominators, all-44 results, separate instrumental
+controls, and offline synthetic limitations explicitly.
