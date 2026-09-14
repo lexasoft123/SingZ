@@ -1,4 +1,4 @@
-import { cmndProfile } from './pitch'
+import { cmndProfile, pitchCandidates } from './pitch'
 
 /**
  * Probabilistic YIN (Mauch & Dixon 2014): instead of one pitch per frame,
@@ -9,10 +9,13 @@ import { cmndProfile } from './pitch'
  * roughly halves the sung time lost on distorted vocals.
  */
 
-const FMIN = 65
-const FMAX = 1000
+const FMIN = 55
+const FMAX = 1050
 const BINS_PER_ST = 2 // 50-cent decode grid; output keeps candidate precision
-const N_BINS = Math.ceil(12 * Math.log2(FMAX / FMIN)) * BINS_PER_ST
+// Extending the range must not move the pre-existing pitch quantization grid.
+const BIN_REF_HZ = 65
+const MIN_BIN = Math.floor(12 * Math.log2(FMIN / BIN_REF_HZ) * BINS_PER_ST)
+const N_BINS = Math.ceil(12 * Math.log2(FMAX / BIN_REF_HZ)) * BINS_PER_ST - MIN_BIN
 const SWITCH_PROB = 0.01
 const NO_TROUGH_PROB = 0.01
 const MAX_OCT_PER_SEC = 35.92
@@ -23,6 +26,7 @@ interface Trough {
   tau: number
   val: number
   f0: number
+  weight?: number
 }
 
 /** Regularized incomplete beta I_x(2,18), the threshold prior's CDF. */
@@ -36,27 +40,8 @@ function betaCdf218(x: number): number {
 function findTroughs(buf: Float32Array, sr: number): Trough[] {
   const profile = cmndProfile(buf, sr, FMIN, FMAX)
   if (!profile) return []
-  const { cmnd, tauMin, tauMax } = profile
-  const troughs: Trough[] = []
-  for (let t = Math.max(tauMin, 2); t < tauMax; t++) {
-    if (cmnd[t] < cmnd[t - 1] && cmnd[t] <= cmnd[t + 1]) {
-      let tau = t
-      const s0 = cmnd[t - 1]
-      const s1 = cmnd[t]
-      const s2 = cmnd[t + 1]
-      const denom = 2 * (2 * s1 - s2 - s0)
-      let val = s1
-      if (Math.abs(denom) > 1e-9) {
-        const delta = (s2 - s0) / denom
-        if (Math.abs(delta) < 1) {
-          tau = t + delta
-          val = s1 - ((s2 - s0) * delta) / 4
-        }
-      }
-      troughs.push({ tau, val: Math.max(0, val), f0: sr / tau })
-    }
-  }
-  return troughs
+  return pitchCandidates(profile, sr, buf, true).filter((c) => c.f0 >= FMIN * 0.999 && c.f0 <= FMAX * 1.005)
+    .map((c) => ({ ...c, f0: Math.max(FMIN, Math.min(FMAX, c.f0)) }))
 }
 
 function frameEmissions(troughs: Trough[]): { probs: Float32Array; voicedP: number } {
@@ -65,7 +50,7 @@ function frameEmissions(troughs: Trough[]): { probs: Float32Array; voicedP: numb
   if (troughs.length > 0) {
     let best = 0
     for (let i = 1; i < troughs.length; i++) if (troughs[i].val < troughs[best].val) best = i
-    const prior = troughs.map((_, i) => Math.exp(-i / 2))
+    const prior = troughs.map((candidate, i) => Math.exp(-i / 2) * (candidate.weight ?? 1))
     let prevCdf = 0
     for (let k = 1; k <= N_THRESH; k++) {
       const thresh = k / N_THRESH
@@ -88,7 +73,7 @@ function frameEmissions(troughs: Trough[]): { probs: Float32Array; voicedP: numb
 }
 
 function binOfHz(hz: number): number {
-  return Math.round(12 * Math.log2(hz / FMIN) * BINS_PER_ST)
+  return Math.round(12 * Math.log2(hz / BIN_REF_HZ) * BINS_PER_ST) - MIN_BIN
 }
 
 /**
@@ -105,12 +90,15 @@ export function pyinTrack(
   const frames = Math.max(0, Math.floor((dec.length - win) / hop))
   const hopSec = hop / sr
   const N_STATES = 2 * N_BINS
-  const band = Math.max(2, Math.round(12 * MAX_OCT_PER_SEC * hopSec * BINS_PER_ST))
+  const localBand = Math.max(2, Math.round(12 * MAX_OCT_PER_SEC * hopSec * BINS_PER_ST))
+  // Preserve pYIN's usual local transition prior, with rare edges for real
+  // octave attacks. Widening the whole triangle made mixed vocals jump more.
+  const band = Math.max(localBand, 12 * BINS_PER_ST + 2)
 
   const transW = new Float32Array(2 * band + 1)
   let transSum = 0
   for (let k = -band; k <= band; k++) {
-    transW[k + band] = band + 1 - Math.abs(k)
+    transW[k + band] = Math.abs(k) <= localBand ? localBand + 1 - Math.abs(k) : 0.5
     transSum += transW[k + band]
   }
   const logTransW = new Float32Array(transW.length)
@@ -197,7 +185,7 @@ export function pyinTrack(
     for (let fi = frames - 1; fi >= 0; fi--) {
       if (s < N_BINS) {
         const hz = frameHz[fi][s]
-        f0[fi] = hz > 0 ? hz : FMIN * Math.pow(2, s / (12 * BINS_PER_ST))
+        f0[fi] = hz > 0 ? hz : BIN_REF_HZ * Math.pow(2, (s + MIN_BIN) / (12 * BINS_PER_ST))
       }
       s = back[fi][s]
     }

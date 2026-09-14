@@ -22,7 +22,7 @@ export type EngineStatus =
       needsModels?: boolean
     }
 
-export type ModelId = 'gpu-splitter' | 'whisper' | 'aligner'
+export type ModelId = 'gpu-splitter' | 'whisper' | 'aligner' | 'backing-vocals'
 
 export interface ModelInfo {
   id: ModelId
@@ -210,6 +210,9 @@ export interface ProjectSettings {
   }
   /** Audio files the singer added as extra lanes (absolute over IPC). */
   custom?: CustomTrack[]
+  /** Pending lead stem produced by the vocal splitter; consumed by Save,
+   * never written as an absolute path to project.json. */
+  pendingLeadVocal?: string
   tracks: Record<string, { muted: boolean; solo: boolean; volume: number }>
 }
 
@@ -1170,6 +1173,9 @@ export interface SingzApi {
   ): Promise<{ ok: true; path: string; name: string; size: number } | { ok: false; error: string }>
   checkEngine(force?: boolean): Promise<EngineStatus>
   separate(path: string): Promise<SeparateResult>
+  splitVocals(path: string): Promise<{ ok: true; lead: string; backing: string } | { ok: false; error: string; cancelled?: boolean }>
+  cancelVocalSplit(): Promise<void>
+  onVocalSplitProgress(cb: (percent: number) => void): () => void
   cancelSeparation(): Promise<void>
   /** Does the installed splitter pack include the Beat This! beat model? */
   beatsMlAvailable(): Promise<{ ok: true; available: boolean }>

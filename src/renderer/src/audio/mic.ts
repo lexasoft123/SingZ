@@ -126,7 +126,8 @@ export class MicPitch {
       this.assertStarting(generation)
       source = ctx.createMediaStreamSource(stream)
       analyser = ctx.createAnalyser()
-      analyser.fftSize = 2048
+      // At least two A1 periods, including on a 96 kHz input device.
+      analyser.fftSize = Math.min(32768, Math.max(2048, 2 ** Math.ceil(Math.log2(analyser.context.sampleRate * 2 / 55))))
       const track = stream.getAudioTracks()[0] ?? null
       if (!track) throw new Error('The microphone returned no audio track.')
       const settings = typeof track.getSettings === 'function' ? track.getSettings() : {}
