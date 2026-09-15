@@ -5,3 +5,11 @@ source 'https://rubygems.org'
 # separate from it — the TestFlight/App Store upload job has no business
 # resolving a native CocoaPods extension to talk to App Store Connect.
 gem 'fastlane'
+
+# fastlane 2.240.0's Apple ID login (spaceship's fetch_service_key_from_signout)
+# calls CGI.parse without declaring the cgi gem — it only arrived through
+# fastlane's dev dependencies. Ruby 4.0 no longer ships CGI.parse, so on a
+# Ruby 4 machine the login dies with "undefined method 'parse' for class CGI"
+# (fastlane#30229; CI's Ruby 3.3 still has it built in). Drop this once the
+# locked fastlane declares cgi itself (2.240.1 is promised to).
+gem 'cgi'

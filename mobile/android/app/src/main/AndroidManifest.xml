@@ -7,6 +7,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
+    <!-- Keeps a PLAYING song alive once the app leaves the screen (NowPlayingService). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 
     <application
       android:name=".MainApplication"
@@ -39,5 +41,13 @@
         android:process=":split"
         android:exported="false"
         android:foregroundServiceType="dataSync|mediaProcessing" />
+      <!-- The media notification for a playing song, and the foreground service
+           that keeps it playing behind the lock screen. Same process as the
+           player on purpose: it talks to NowPlayingModule directly. Foreground
+           only while a song plays; see NowPlayingService. -->
+      <service
+        android:name=".NowPlayingService"
+        android:exported="false"
+        android:foregroundServiceType="mediaPlayback" />
     </application>
 </manifest>

@@ -331,10 +331,15 @@ same pid assertion applies.
 
 Note what backgrounding actually does to playback, because it is NOT the
 same on both backends and that difference is the whole reason the
-backgrounded phase is uncompared: `App.tsx` parks the native graph and
-suspends the legacy engine on `background`. Legacy stops on both platforms.
-Native pauses in place on Android and **keeps playing on iOS**, by choice —
-`parkForBackground` only logs and returns there. That is the product's
+backgrounded phase is uncompared: `App.tsx` suspends the legacy engine on
+`background`, and legacy stops on both platforms. Native **keeps playing on
+both** when the song was left playing — on iOS by the `audio` background mode
+(`parkForBackground` only logs and returns there), and on Android since 0.22.0
+under the media session's foreground service (`App.tsx` skips the park while
+`nowPlaying().keepsPlayingInBackground`). On Android a native song that was
+paused, or that stops behind Home, is parked with its stream held instead (iOS
+parks nothing; `parkForBackground` only logs there) — that path is
+`mobile/tests/now-playing.cjs`'s, not this suite's. This is the product's
 behaviour, recorded rather than asserted.
 
 ## Files

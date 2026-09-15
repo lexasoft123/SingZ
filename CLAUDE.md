@@ -252,7 +252,7 @@ Mobile has its own permanent sim-driven tests in `mobile/tests/`
 `ab-repeat.cjs`, `offline-cache.cjs`, `custom-track.cjs`,
 `beats-native-ios.cjs`, `song-sheet-beat.cjs`, `player-session.cjs`,
 `focus-loss-android.cjs`, `play-from-anywhere.cjs`,
-`waveform-streamed.cjs`): CDP over
+`waveform-streamed.cjs`, `now-playing.cjs`): CDP over
 Metro against the iOS
 Simulator — run them
 after engine or loading changes.
@@ -270,7 +270,15 @@ to save a minute takes its teeth out entirely. `loop-region` and `ab-repeat` are
 and the split is the lesson: the first drives `engine.setRegion`, which was
 never the part in doubt, and the second drives the button's own
 handler — the three-state cycle and the marks the scrub band is drawn from shipped with their test
-hooks exported and nothing referencing either. `song-sheet-beat.cjs` is the one that watches
+hooks exported and nothing referencing either. `now-playing.cjs` is the one that reads the OS
+back rather than the app: the Lock Screen / Control Center card and Android's media session and
+notification, the commands that come back from outside the app (Android's play and pause as
+REAL media keys), and a song left PLAYING that must keep advancing behind the Home Screen —
+the guard for App Review's 2.5.4 rejection of 0.19.0, which declared the `audio` background
+mode with nothing visible using it. On Android that song is kept alive by `NowPlayingService`,
+a mediaPlayback foreground service held only while a song plays; App.tsx skips the background
+park exactly while `nowPlaying().keepsPlayingInBackground`, and a pause from the notification
+parks and holds the stream as leaving the app does. `song-sheet-beat.cjs` is the one that watches
 a SCREEN rather than the engine: it seeds two phone-library projects (a
 hand-made grid, and a song with nothing detected), opens the Song sheet and
 reads the Beat row through somebody else's analysis — the rule in
@@ -313,7 +321,9 @@ two arguments the real pipeline always fills. `focus-loss-android.cjs` takes aud
 focus away from NATIVE playback in the three windows the bridge's generation
 ledger has to get right — a playing song, an ARMED SWAP (the core keeps the
 song playing when only the candidate is cancelled, so the bridge must retire
-both generations), a HELD stream in the background — and asserts the song
+both generations), a HELD stream in the background (the song PAUSED first: a song
+left playing is kept playing under the media session now), and a song PLAYING under
+that media session in the background — and asserts the song
 stops, the log says why, and Play afterwards starts fresh; the loss is
 delivered by `NativeAudioRuntime.debugAudioFocusChange`, a DEBUG-build-only
 method onto the same listener AudioManager calls, because nothing an `adb
@@ -1119,7 +1129,7 @@ deliberately ONE `upload_to_testflight` call rather than `beta` followed by
 `beta_external` — one wait, and the group named in one place — and NOT
 because chaining would race Apple, which it would not: the
 `upload_to_testflight` ACTION waits on the distribute-only path too
-(upload_to_testflight.rb:31 in the pinned 2.238.0), even though the
+(upload_to_testflight.rb:31 in the pinned 2.240.0), even though the
 `Pilot::BuildManager#distribute` it wraps does not wait itself. What IS
 sharp: `skip_waiting_for_build_processing: true` alongside a widen makes
 pilot abandon the distribution and still exit GREEN (build_manager.rb:202),

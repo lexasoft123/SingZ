@@ -27,6 +27,10 @@
 #     `security import` needs to put the certificate into a keychain, after
 #     which CSC_KEYCHAIN/CSC_NAME do the rest. See the note at its export
 #     below for why it is not called CSC_KEY_PASSWORD.
+#   SINGZ_APPLE_ID, SINGZ_APPLE_ID_PASSWORD_FILE — an Apple ID web login,
+#     read ONLY by `fastlane ios review_messages` (App Review's messages have
+#     no API-key surface). The password goes to a mode-600 temp file beside
+#     the .p8, never into the environment. See the note at the export below.
 #
 # Store layout and rationale: .sops.yaml at the repo root, ciphertext at
 # .keys/secrets.enc.yaml. See docs/IOS-RELEASE.md.
@@ -101,6 +105,12 @@ eval "$(
       if (s.mac_p12_password) {
         console.log(`SINGZ_MAC_P12_PASSWORD=${q(s.mac_p12_password)}`)
       }
+      // Apple ID web login for review_messages. Optional, and only ever
+      // useful as a pair.
+      if (s.apple_id && s.apple_id_password) {
+        console.log(`SINGZ_APPLE_ID=${q(s.apple_id)}`)
+        console.log(`SINGZ_APPLE_ID_PASSWORD=${q(s.apple_id_password)}`)
+      }
       console.log(`SINGZ_ASC_P8=${q(s.asc_key_p8)}`)
     })
   '
@@ -155,6 +165,27 @@ done
 if [ -n "${SINGZ_MAC_P12_PASSWORD:-}" ]; then
   export SINGZ_MAC_P12_PASSWORD
 fi
+
+# The Apple ID login, when the store carries it. Two decisions:
+#
+#   - SINGZ_ names, NOT FASTLANE_USER/FASTLANE_PASSWORD, for the same reason
+#     the .p12 password above is not CSC_KEY_PASSWORD: fastlane actions read
+#     those as defaults, so exporting them would hand an Apple ID to every
+#     lane this wrapper runs — beta, release, certs — where the API key is
+#     meant to be the only credential (see the Appfile).
+#   - The PASSWORD is a file, like the .p8, not a variable. Every command this
+#     wrapper runs inherits its environment — xcodebuild, pod, node, and the
+#     script phases whose environment Xcode writes into its build logs — and
+#     only review_messages wants this one. The file dies with $tmpdir.
+# Both halves tested: SINGZ_APPLE_ID can arrive from the caller's own shell
+# while the store carries no pair, and under `set -u` a bare
+# "$SINGZ_APPLE_ID_PASSWORD" would then kill every wrapped command.
+if [ -n "${SINGZ_APPLE_ID:-}" ] && [ -n "${SINGZ_APPLE_ID_PASSWORD:-}" ]; then
+  printf '%s' "$SINGZ_APPLE_ID_PASSWORD" > "$tmpdir/apple-id-password"
+  export SINGZ_APPLE_ID
+  export SINGZ_APPLE_ID_PASSWORD_FILE="$tmpdir/apple-id-password"
+fi
+unset SINGZ_APPLE_ID_PASSWORD
 
 # fastlane refuses to run under a non-UTF-8 locale, and the store metadata is
 # bilingual — a non-UTF-8 locale is how Cyrillic release notes get mangled.
