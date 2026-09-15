@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import type { SeparationProgress } from '../../../shared/types'
+import type { SplitMode, SplitProgress } from '../split-workflow'
+import SplitMenu from './SplitMenu'
 import type { MultitrackEngine } from '../audio/engine'
 import {
   BEATS_PER_BAR_CHOICES,
@@ -77,19 +78,12 @@ function CountInDots({ engine }: { engine: MultitrackEngine }): React.JSX.Elemen
   return <span className="countin-dots" ref={ref} />
 }
 
-const STAGE_LABEL: Record<SeparationProgress['stage'], string> = {
-  preparing: 'Warming up',
-  'downloading-model': 'Downloading model',
-  separating: 'Splitting stems',
-  'loading-stems': 'Loading stems'
-}
-
 interface Props {
   engine: MultitrackEngine
   playing: boolean
   onTogglePlay: () => void
   split: boolean
-  sep: SeparationProgress | null
+  sep: SplitProgress | null
   karaokeOn: boolean
   loopOn: boolean
   onToggleLoop: () => void
@@ -118,11 +112,10 @@ interface Props {
   onBeat: (g: BeatInfo) => void
   onRedetectBeat: () => void
   onToggleKaraoke: () => void
-  onSplit: () => void
-  onResplit: (() => void) | null
-  onSplitBacking: (() => void) | null
-  vocalSplitProgress: number | null
-  onCancelVocalSplit: () => void
+  onSplit: (mode: SplitMode) => void
+  canResplit: boolean
+  canSplitBacking: boolean
+  splitDisabled: boolean
   onCancelSplit: () => void
   onReveal: (() => void) | null
 }
@@ -911,10 +904,9 @@ export default function Transport({
   onRedetectBeat,
   onToggleKaraoke,
   onSplit,
-  onResplit,
-  onSplitBacking,
-  vocalSplitProgress,
-  onCancelVocalSplit,
+  canResplit,
+  canSplitBacking,
+  splitDisabled,
   onCancelSplit,
   onReveal
 }: Props): React.JSX.Element {
@@ -926,7 +918,8 @@ export default function Transport({
       {sep && (
         <div
           className="sep-line"
-          style={{ width: `${sep.stage === 'loading-stems' ? 100 : sep.percent}%` }}
+          role="progressbar" aria-label={sep.label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(sep.percent)}
+          style={{ width: `${sep.percent}%` }}
         />
       )}
 
@@ -1096,13 +1089,13 @@ export default function Transport({
           </div>
         )}
         {sep ? (
-          <div className="sep-pill">
-            <span className="sep-stage">{STAGE_LABEL[sep.stage]}</span>
+          <div className="sep-pill" role="status">
+            <span className="sep-stage">{sep.label}</span>
             <span className="sep-pct">
-              {sep.stage === 'loading-stems' ? '' : `${Math.round(sep.percent)}%`}
+              {`${Math.round(sep.percent)}%`}
             </span>
-            {sep.stage !== 'loading-stems' && (
-              <button type="button" className="sep-cancel" title="Cancel" onClick={onCancelSplit}>
+            {sep.cancellable && (
+              <button type="button" className="sep-cancel" title="Cancel" aria-label="Cancel splitting" onClick={onCancelSplit}>
                 ×
               </button>
             )}
@@ -1122,27 +1115,8 @@ export default function Transport({
               </svg>
               Karaoke
             </button>
-            {vocalSplitProgress !== null ? (
-              <button type="button" className="pill ghost" onClick={onCancelVocalSplit}
-                title="Cancel lead and backing vocal separation">
-                Separating vocals {Math.round(vocalSplitProgress)}% · Cancel
-              </button>
-            ) : onSplitBacking && (
-              <button type="button" className="pill ghost" onClick={onSplitBacking}
-                title="Separate lead and backing harmonies with the optional vocal model. Takes several minutes per song.">
-                Separate backing vocals
-              </button>
-            )}
-            {onResplit && (
-              <button
-                type="button"
-                className="pill ghost"
-                title="Split again with the current AI model — upgrades older four-stem splits to six"
-                onClick={onResplit}
-              >
-                ↻ Re-split
-              </button>
-            )}
+            <SplitMenu split disabled={splitDisabled} canResplit={canResplit}
+              canSplitBacking={canSplitBacking} onSplit={onSplit} />
             {onReveal && (
               <button
                 type="button"
@@ -1155,14 +1129,8 @@ export default function Transport({
             )}
           </>
         ) : (
-          <button
-            type="button"
-            className="pill primary"
-            disabled={engine.duration === 0}
-            onClick={onSplit}
-          >
-            ✦ Split into stems
-          </button>
+          <SplitMenu split={false} disabled={splitDisabled || engine.duration === 0}
+            canResplit={false} canSplitBacking={false} onSplit={onSplit} />
         )}
       </div>
     </footer>
