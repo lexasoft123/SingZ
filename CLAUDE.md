@@ -1119,7 +1119,7 @@ deliberately ONE `upload_to_testflight` call rather than `beta` followed by
 `beta_external` — one wait, and the group named in one place — and NOT
 because chaining would race Apple, which it would not: the
 `upload_to_testflight` ACTION waits on the distribute-only path too
-(upload_to_testflight.rb:31 in the pinned 2.238.0), even though the
+(upload_to_testflight.rb:31 in the pinned 2.240.0), even though the
 `Pilot::BuildManager#distribute` it wraps does not wait itself. What IS
 sharp: `skip_waiting_for_build_processing: true` alongside a widen makes
 pilot abandon the distribution and still exit GREEN (build_manager.rb:202),

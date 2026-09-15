@@ -19,6 +19,10 @@ very first bundle (see [ANDROID-RELEASE.md](ANDROID-RELEASE.md)). Everything
 after that — builds, TestFlight distribution, submitting for review, the
 store listing text — is scriptable and lives in CI.
 
+The other wall is *why* App Review said no. The API shows that a submission
+was rejected, but not the reviewer's message or the guideline they cited. See
+[When App Review says no](#when-app-review-says-no).
+
 ## One-time setup (do this once, by hand, in App Store Connect)
 
 The bundle ID is `io.s-dev.singz` — **not** `com.lexasoft.singz`, which
@@ -252,15 +256,17 @@ issuer id, the `.p8` body, the match passphrase, the App Review contact
 (`review_*`) and the Developer ID `.p12` export password
 (`mac_p12_password`, for a local signed macOS build — nothing reads it
 automatically; CI signs from its own repo secret. See
-[MACOS-SIGNING.md](MACOS-SIGNING.md)). Rules are in `.sops.yaml`
+[MACOS-SIGNING.md](MACOS-SIGNING.md)), and optionally an Apple ID login
+(`apple_id` and `apple_id_password`, used only by `review_messages`; see
+[When App Review says no](#when-app-review-says-no)). Rules are in `.sops.yaml`
 at the repo root; only values are encrypted, so `git diff` and a glance still
 show the structure.
 
 `scripts/with-apple-secrets.sh <command>` decrypts it, exports
 `APP_STORE_CONNECT_API_KEY_ID`, `APP_STORE_CONNECT_API_ISSUER_ID` and
-`MATCH_PASSWORD` — plus `SINGZ_REVIEW_*` and `SINGZ_MAC_P12_PASSWORD` when
-the store carries them — writes the `.p8` to a mode-600 temp file pointed at
-by `SINGZ_ASC_KEY_PATH`, runs the command, and deletes the temp file on the
+`MATCH_PASSWORD` — plus `SINGZ_REVIEW_*`, `SINGZ_MAC_P12_PASSWORD` and
+`SINGZ_APPLE_ID` when the store carries them — writes the `.p8` to a mode-600 temp file pointed at
+by `SINGZ_ASC_KEY_PATH` (and any Apple ID password to a second one, pointed at by `SINGZ_APPLE_ID_PASSWORD_FILE`), runs the command, and deletes the temp files on the
 way out, so no secret reaches a shell history, a process argument list, or a
 file that outlives the command. The script's own header is the list of
 record; keep it and this sentence in step.
@@ -453,3 +459,63 @@ It must run under `bundle exec` from `mobile/ios` (that is where spaceship
 resolves) and needs the API-key env the wrapper provides. Images live once in
 `docs/ios-assets/`, beside `docs/play-assets/`; 1320x2868 registers as the
 iPhone 6.9" slot, which is the only size App Store Connect now requires.
+
+## When App Review says no
+
+Two lanes, split by the credential each one needs:
+
+```bash
+scripts/with-apple-secrets.sh bash -c 'cd mobile/ios && bundle exec fastlane ios review_status'
+scripts/with-apple-secrets.sh bash -c 'cd mobile/ios && bundle exec fastlane ios review_messages'
+```
+
+**`review_status`** runs on the API key, is read-only, and works anywhere
+`beta` does. It lists every App Store version with its build and state, the
+review submissions (a rejection shows up as `UNRESOLVED_ISSUES` with a
+`REJECTED` item), and the newest TestFlight builds with their Beta App Review
+state (`builds:<n>` sets how many, default 10). Check this first. "Rejected"
+can mean the App Store *or* Beta App Review, and the two queues are
+independent: 0.19.0 (33) was rejected for the store while the same build
+passed Beta App Review.
+
+**`review_messages`** prints the reviewer's messages and the guidelines they
+cited. The public API has neither. Measured 2026-09-15: an API key gets 404
+"resource does not exist" from both `/v1/resolutionCenterThreads` and
+`/v1/reviewRejections`, and spaceship's own source says the same. spaceship
+instead calls App Store Connect's internal `iris` endpoints, the ones the
+website uses, and those need an Apple ID web session. The Apple ID and its
+password come from the secret store (`apple_id`, `apple_id_password`; add
+them with `sops .keys/secrets.enc.yaml`). The wrapper exports the Apple ID as
+`SINGZ_APPLE_ID` rather than fastlane's `FASTLANE_USER`, because fastlane
+actions read that as a default and every lane runs under the wrapper. The
+password never becomes an environment variable at all: it is written to a
+mode-600 file in the wrapper's temp directory (`SINGZ_APPLE_ID_PASSWORD_FILE`),
+like the `.p8`. Every command the wrapper runs inherits its environment,
+xcodebuild's script phases included, and Xcode writes that environment into
+its build logs. Without the keys, fastlane asks
+in the terminal instead (`apple_id:` names another account, and then the stored
+password is not sent). It must be the real Apple ID password: app-specific
+passwords do not open a web session. Even with the password stored, a 2FA code
+is still asked for whenever the cached session under `~/.fastlane/spaceship/`
+has expired, so the lane refuses to run on CI. It merges two thread lists:
+the ones owned by a review submission, and the app's own list, which also carries binary and metadata rejections
+that no submission owns. `json:<path>` (resolved against the repo root) keeps
+the raw HTML bodies and reason objects.
+
+`iris` is undocumented. If Apple renames a field, the lane prints the raw
+reason object rather than nothing. A thread listing or a thread's messages
+that fail to load are reported, and the lane goes on with the rest.
+
+**A rejection keeps its submission open, and that blocks every new one.**
+Apple allows one open review submission per platform, and `UNRESOLVED_ISSUES`
+counts as open. deliver refuses to create another while one is
+`WAITING_FOR_REVIEW`, `IN_REVIEW` or `UNRESOLVED_ISSUES`
+(`deliver/lib/deliver/submit_for_review.rb:33` in fastlane 2.240.0). It only
+finds out at the very end: after it has rewritten the editable version's text
+and build and, in `release`, after an archive and up to an hour of Apple's
+processing, leaving a second binary at Apple and nothing submitted. So
+`submit` and `release` now ask first and refuse in seconds, naming the open
+submission, before anything is built, uploaded or changed. Fix the problem,
+then resubmit or cancel the open submission in App Store Connect
+(Distribution ▸ App Review). Only after that can `submit build:<n>` (or
+`release`, when the fix needs a new binary) send a new one.
