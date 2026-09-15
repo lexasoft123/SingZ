@@ -74,6 +74,7 @@ import {
   type TrainingCleanupPhase
 } from './audio/training-cleanup'
 import { decodeMelody, encodeMelody, melodyFitsSong, PITCH_DETECT_VERSION } from './audio/melody'
+import { checkedSplit, runSplitPlan, splitProgress, SplitCancelled, type SplitMode, type SplitProgress } from './split-workflow'
 import { canResplitVocals, restartPendingLyrics, runVocalSplitRequest, settleCancelledLyrics, VocalSplitRequests } from './vocal-split-request'
 import type { MicDevice } from './audio/mic'
 import {
@@ -688,12 +689,12 @@ export default function App(): React.JSX.Element {
   const [tracks, setTracks] = useState<UITrack[]>([])
   const [split, setSplit] = useState(false)
   const [stemFiles, setStemFiles] = useState<Record<string, string> | null>(null)
-  const [vocalSplitProgress, setVocalSplitProgress] = useState<number | null>(null)
   const [pendingLeadVocal, setPendingLeadVocal] = useState<string | null>(null)
   const [leadVocalSeparated, setLeadVocalSeparated] = useState(false)
-  const vocalSplitBusyRef = useRef(false)
+  type SplitRun = { mode: SplitMode; seq: number; phase: 'stems' | 'vocals'; cancelled: boolean; stemsLoaded: boolean }
+  const splitRunRef = useRef<SplitRun | null>(null)
   const vocalSplitRequestsRef = useRef(new VocalSplitRequests())
-  const [sep, setSep] = useState<SeparationProgress | null>(null)
+  const [sep, setSep] = useState<SplitProgress | null>(null)
   const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null)
   const [showSetup, setShowSetup] = useState(false)
   const [showLog, setShowLog] = useState(false)
@@ -955,8 +956,6 @@ export default function App(): React.JSX.Element {
   const songLoadRequests=useRef(new SongLoadRequestEpoch())
   const fileInputRef = useRef<HTMLInputElement>(null)
   const trackInputRef = useRef<HTMLInputElement>(null)
-  const sepRunningRef = useRef(false)
-  sepRunningRef.current = sep !== null
   /**
    * The vocals lane's length, set wherever the lane itself is, so it survives
    * the samples being let go.
@@ -1521,6 +1520,8 @@ export default function App(): React.JSX.Element {
       setAppSection('songs')
       setShowCatalog(false)
       const seq = ++loadSeq.current
+      if (splitRunRef.current) splitRunRef.current.cancelled = true
+      splitRunRef.current = null
       // Native goes first: every control reset below would otherwise be a
       // structural rebuild of the song being left (and a failed one rolls
       // that song's grid into this one).
@@ -1529,7 +1530,6 @@ export default function App(): React.JSX.Element {
       vocalSplitRequestsRef.current.cancel()
       await window.singz.cancelVocalSplit()
       if(!songLoadRequests.current.isAccepted(request)||seq!==loadSeq.current)return
-      setVocalSplitProgress(null)
       setPendingLeadVocal(null)
       if(!songLoadRequests.current.isAccepted(request)||seq!==loadSeq.current)return
       await window.singz.cancelLyrics()
@@ -1966,21 +1966,28 @@ export default function App(): React.JSX.Element {
     [engine]
   )
 
-  const startSplit = useCallback(async () => {
-    if (!canResplitVocals(pendingLeadVocal, vocalSplitBusyRef.current, leadVocalSeparated)) return
-    if (!song || sepRunningRef.current) return
-    let status = engineStatus
-    if (!status?.ok) {
-      status = await window.singz.checkEngine(true)
-      setEngineStatus(status)
-    }
+  const splitIsCurrent = useCallback((run: SplitRun): boolean =>
+    splitRunRef.current === run && !run.cancelled && run.seq === loadSeq.current, [])
+
+  const showSplitProgress = useCallback((run: SplitRun, phase: 'stems' | 'vocals', percent: number,
+    stage: SeparationProgress['stage'] = 'separating'): void => {
+    if (!splitIsCurrent(run)) return
+    run.phase = phase
+    setSep(splitProgress(run.mode, phase, percent, stage))
+  }, [splitIsCurrent])
+
+  const startSplit = useCallback(async (run: SplitRun): Promise<boolean> => {
+    if (!song) return false
+    const current = (): boolean => splitIsCurrent(run)
+    const checked = <T,>(operation: Promise<T>): Promise<T> => checkedSplit(current, operation)
+    const status = await checked(window.singz.checkEngine(true))
+    setEngineStatus(status)
     if (!status.ok) {
       if (status.needsModels) {
-        await openWizard('auto')
-      } else {
-        setShowSetup(true)
-      }
-      return
+        const models = await checked(window.singz.modelsStatus())
+        setWizard({ models, origin: 'manual', focusModel: 'gpu-splitter' })
+      } else setShowSetup(true)
+      return false
     }
     // Some engines want a plain 44.1k WAV — render it from the decoded
     // audio so any source format/sample-rate works.
@@ -2000,11 +2007,12 @@ export default function App(): React.JSX.Element {
         try {
           // `readAudio` throws on a path main has not authorized, so it
           // belongs inside the try with the decode.
-          orig = await engine.decode(await window.singz.readAudio(song.path))
+          orig = await checked(engine.decode(await checked(window.singz.readAudio(song.path))))
         } catch (err) {
+          if (!current()) return false
           console.error('split: could not re-read the song for PCM hand-off:', err)
           setError('That song could not be re-read for splitting. Try opening it again.')
-          return
+          return false
         }
       }
       const off = new OfflineAudioContext(2, Math.ceil(orig.duration * 44100), 44100)
@@ -2012,23 +2020,27 @@ export default function App(): React.JSX.Element {
       src.buffer = orig
       src.connect(off.destination)
       src.start()
-      const rendered = await off.startRendering()
-      await window.singz.provideSplitInput(
+      const rendered = await checked(off.startRendering())
+      await checked(window.singz.provideSplitInput(
         song.path,
         rendered.getChannelData(0),
         rendered.numberOfChannels > 1 ? rendered.getChannelData(1) : rendered.getChannelData(0)
-      )
+      ))
     }
-    setSep({ stage: 'preparing', percent: 0 })
-    const unsub = window.singz.onSeparationProgress((p) => setSep(p))
-    const res = await window.singz.separate(song.path)
-    unsub()
+    showSplitProgress(run, 'stems', 0, 'preparing')
+    const unsub = window.singz.onSeparationProgress(p => showSplitProgress(run, 'stems', p.percent, p.stage))
+    const res = await checked(window.singz.separate(song.path).finally(unsub))
     if (!res.ok) {
-      setSep(null)
       if (!res.cancelled) setError(res.error)
-      return
+      return false
     }
-    setSep({ stage: 'loading-stems', percent: 100 })
+    showSplitProgress(run, 'stems', 100, 'loading-stems')
+    const seq = run.seq
+    let stoppedAnalysis = false
+    let stoppedLyrics = false
+    const retryLyrics = (): void => restartPendingLyrics(stoppedLyrics,
+      () => { lyricsRef.current = { status: 'idle' }; setLyrics({ status: 'idle' }) },
+      () => { void prepLyricsRef.current?.() })
     try {
       const stems = res.stems as Record<string, string>
       const rawOrder = orderedStems(stems)
@@ -2036,19 +2048,19 @@ export default function App(): React.JSX.Element {
       // decoded otherwise. A stem that can be neither fails the split's
       // loading step, as a stem that would not decode always has.
       const kept = tracksRef.current.filter((t) => t.custom && t.sourcePath)
-      const { reads, errors, superseded } = await readLanes(
+      const { reads, errors, superseded } = await checked(readLanes(
         rawOrder.map((s) => ({ id: s, path: stems[s] })),
         async (path) => engine.decode(await window.singz.readAudio(path)),
         {
           api: window.singz,
           // Over the song as it will be: the new stems and the added tracks
           // that stay with them.
-          applies: await desktopLaneMeasureApplies([
+          applies: await checked(desktopLaneMeasureApplies([
             ...rawOrder.map((s) => ({ id: s, path: stems[s] })),
             ...kept.map((t) => ({ id: t.id, path: t.sourcePath! }))
-          ])
+          ]))
         }
-      )
+      ))
       if (superseded) throw new Error('the split was superseded by another open')
       const missing = rawOrder.find((s) => !reads.has(s))
       if (missing) throw errors.get(missing) ?? new Error(`${missing} could not be read`)
@@ -2059,6 +2071,24 @@ export default function App(): React.JSX.Element {
         const buffer = reads.get(s)?.buffer
         if (buffer) fresh.set(s, buffer)
       }
+      // A cached re-split can finish while analysis of the previous vocals
+      // is still running. Settle shared children before changing ownership;
+      // no old callback may publish against the replacement lanes.
+      stoppedAnalysis = true
+      await checked(window.singz.cancelAnalyzeNative())
+      if (lyricsRef.current.status === 'loading') {
+        stoppedLyrics = true
+        ++lyricsRequestRevisionRef.current
+        await checked(settleCancelledLyrics(
+          () => window.singz.cancelLyrics(), pendingLyricsRef.current
+        ))
+      }
+      // Commit synchronously after the final cancellation check.
+      run.seq = ++loadSeq.current
+      melodyWorkerRef.current?.terminate()
+      melodyWorkerRef.current = null
+      pendingCoreAnalysisRef.current = null
+      keyCarriedBySeqRef.current = null
       loadLanes(
         [
           ...order.map((s) => makeTrack(s, reads.get(s)!, { sourcePath: stems[s] })),
@@ -2086,35 +2116,46 @@ export default function App(): React.JSX.Element {
       // Analyze right away (melody, key, bpm) so karaoke opens warm and the
       // bpm box fills in without a trip through karaoke mode. If karaoke was
       // open last session, reopen it.
-      if (localStorage.getItem('singz.karaoke') === '1') openKaraokeRef.current?.()
-      else prepMelodyRef.current?.()
-    } catch {
-      setError('Separation finished, but loading the stem files failed.')
+      run.stemsLoaded = true
+      setAnalysisAutoSave(false)
+      retryLyrics()
+      if (run.mode === 'stems') {
+        if (localStorage.getItem('singz.karaoke') === '1') openKaraokeRef.current?.()
+        else prepMelodyRef.current?.()
+      }
+      return true
+    } catch (error) {
+      // Cancellation during preparation keeps the original lanes usable.
+      // A song switch owns its own recovery and must never be touched here.
+      if (splitRunRef.current === run && seq === loadSeq.current) {
+        retryLyrics()
+        if (stoppedAnalysis && melodyRef.current.status === 'computing') {
+          melodyWorkerRef.current?.terminate()
+          melodyWorkerRef.current = null
+          pendingCoreAnalysisRef.current = null
+          keyCarriedBySeqRef.current = null
+          setMelody({ status: 'none' }); melodyRef.current = { status: 'none' }
+          prepMelodyRef.current?.()
+        }
+      }
+      if (!current()) return false
+      throw error instanceof SplitCancelled ? error : new Error('Separation finished, but loading the stem files failed.')
     }
-    setSep(null)
-  }, [song, engineStatus, engine, loadLanes, pendingLeadVocal, leadVocalSeparated])
+  }, [song, engine, loadLanes, splitIsCurrent, showSplitProgress])
 
-  const cancelVocalSplit = useCallback(() => {
-    vocalSplitRequestsRef.current.cancel()
-    void window.singz.cancelVocalSplit()
-  }, [])
-
-  const splitBackingVocals = useCallback(async () => {
+  const splitBackingVocals = useCallback(async (run: SplitRun) => {
     const path = stemPathsRef.current?.vocals
-    if (!path || vocalSplitBusyRef.current || pendingLeadVocal || sep || saveState === 'saving') return
+    if (!path || !splitIsCurrent(run)) return
     const seq = loadSeq.current
-    let acceptedSeq = seq
     const requestCurrent = vocalSplitRequestsRef.current.begin()
-    const current = (): boolean => requestCurrent() && acceptedSeq === loadSeq.current
-    vocalSplitBusyRef.current = true
-    setVocalSplitProgress(0)
-    setError(null)
+    const current = (): boolean => requestCurrent() && splitIsCurrent(run)
+    showSplitProgress(run, 'vocals', 0)
     let stoppedAnalysis = false
     let stoppedLyrics = false
     const retryLyrics = (): void => restartPendingLyrics(stoppedLyrics,
       () => { lyricsRef.current = { status: 'idle' }; setLyrics({ status: 'idle' }) },
       () => { void prepLyricsRef.current?.() })
-    const off = window.singz.onVocalSplitProgress(p => { if (current()) setVocalSplitProgress(p) })
+    const off = window.singz.onVocalSplitProgress(p => { if (current()) showSplitProgress(run, 'vocals', p) })
     try {
       await runVocalSplitRequest(current, {
         separate: () => window.singz.splitVocals(path),
@@ -2123,7 +2164,7 @@ export default function App(): React.JSX.Element {
           if (!current()) return
           setWizard({ models, origin: 'manual', focusModel: ids.includes('backing-vocals') ? 'backing-vocals' : ids[0] })
         },
-        read: file => window.singz.readAudio(file),
+        read: file => { showSplitProgress(run, 'vocals', 100, 'loading-stems'); return window.singz.readAudio(file) },
         decode: bytes => engine.decode(bytes),
         prepare: async checked => {
           stoppedAnalysis = true
@@ -2142,7 +2183,7 @@ export default function App(): React.JSX.Element {
         commit: (result, lead, backing) => {
           // No await after this point: cancellation cannot interleave halfway
           // through publishing the new lanes and retiring the old analyses.
-          acceptedSeq = ++loadSeq.current
+          run.seq = ++loadSeq.current
           melodyWorkerRef.current?.terminate()
           melodyWorkerRef.current = null
           pendingCoreAnalysisRef.current = null
@@ -2187,12 +2228,56 @@ export default function App(): React.JSX.Element {
         }
       })
     } catch (error) {
-      if (requestCurrent() && acceptedSeq === loadSeq.current) setError(error instanceof Error ? error.message : String(error))
+      if (current()) setError(error instanceof Error ? error.message : String(error))
     } finally {
-      off(); vocalSplitBusyRef.current = false
-      if (acceptedSeq === loadSeq.current) setVocalSplitProgress(null)
+      off()
     }
-  }, [engine, loadLanes, sep, saveState, pendingLeadVocal])
+  }, [engine, loadLanes, splitIsCurrent, showSplitProgress])
+
+  const cancelSplit = useCallback(() => {
+    const run = splitRunRef.current
+    if (!run) return
+    run.cancelled = true
+    setSep(p => p ? { ...p, label: 'Cancelling…', cancellable: false } : p)
+    vocalSplitRequestsRef.current.cancel()
+    if (run.phase === 'vocals') void window.singz.cancelVocalSplit()
+    else void window.singz.cancelSeparation()
+  }, [])
+
+  const beginSplit = useCallback(async (mode: SplitMode) => {
+    if (!song || splitRunRef.current || saveState === 'saving' || pendingLeadVocal || leadVocalSeparated) return
+    if (mode === 'vocals' && !stemPathsRef.current?.vocals) return
+    const run: SplitRun = { mode, seq: loadSeq.current, phase: mode === 'vocals' ? 'vocals' : 'stems', cancelled: false, stemsLoaded: false }
+    splitRunRef.current = run
+    setError(null)
+    showSplitProgress(run, run.phase, 0, 'preparing')
+    const current = (): boolean => splitIsCurrent(run)
+    try {
+      // Check the optional stage before doing an expensive instrument split.
+      // Opening the dialog does not start a download or resume this request.
+      if (mode !== 'stems') {
+        const models = await checkedSplit(current, window.singz.modelsStatus())
+        if (models.some(m => m.id === 'backing-vocals' && !m.present)) {
+          setWizard({ models, origin: 'manual', focusModel: 'backing-vocals' })
+          return
+        }
+      }
+      await runSplitPlan(mode, { current, stems: () => startSplit(run), vocals: () => splitBackingVocals(run) })
+    } catch (error) {
+      if (current() && !(error instanceof SplitCancelled)) setError(error instanceof Error ? error.message : String(error))
+    } finally {
+      if (splitRunRef.current === run) {
+        splitRunRef.current = null
+        setSep(null)
+        // If stage two was cancelled/failed, the successfully loaded stems
+        // remain useful and their analysis still needs to start.
+        if (run.seq === loadSeq.current && run.stemsLoaded && melodyRef.current.status === 'none') {
+          if (localStorage.getItem('singz.karaoke') === '1') openKaraokeRef.current?.()
+          else prepMelodyRef.current?.()
+        }
+      }
+    }
+  }, [song, saveState, pendingLeadVocal, leadVocalSeparated, showSplitProgress, splitIsCurrent, startSplit, splitBackingVocals])
 
   /** Any settings change marks an open project as having unsaved changes. */
   const touchSettings = useCallback(() => {
@@ -2890,7 +2975,7 @@ export default function App(): React.JSX.Element {
   const openTrackPicker = useCallback(() => trackInputRef.current?.click(), [])
 
   const handleSaveProject = useCallback(async () => {
-    if (!song || saveState === 'saving' || vocalSplitBusyRef.current) return
+    if (!song || saveState === 'saving' || splitRunRef.current !== null) return
     // Which song this save is about. Saving converts six stems to FLAC, so it
     // runs for seconds — long enough to open another song meanwhile — and its
     // answer carries the PATH of the folder it wrote. Splicing that onto the
@@ -2979,7 +3064,7 @@ export default function App(): React.JSX.Element {
    *  only into an existing project (never creating one under a raw file), and
    *  after the commit so the save closure already sees them. */
   useEffect(() => {
-    if (!analysisAutoSave || pendingLeadVocal || vocalSplitProgress !== null) return
+    if (!analysisAutoSave || pendingLeadVocal || sep !== null) return
     // A save already writing would swallow this one (handleSaveProject
     // early-returns mid-save) — leave the flag set so the effect re-fires
     // when saveState settles and the later analysis still reaches disk.
@@ -2988,7 +3073,7 @@ export default function App(): React.JSX.Element {
     if (saveState === 'saving') return
     setAnalysisAutoSave(false)
     if (song && isProject) void handleSaveProject()
-  }, [analysisAutoSave, saveState, song, isProject, handleSaveProject, pendingLeadVocal, vocalSplitProgress])
+  }, [analysisAutoSave, saveState, song, isProject, handleSaveProject, pendingLeadVocal, sep])
 
   /** Bring a project opened from outside the library in, and follow it there. */
   const handleImport = useCallback(
@@ -3726,7 +3811,7 @@ export default function App(): React.JSX.Element {
                   ? 'Save stems, lyrics and settings into this project folder'
                   : 'Save song, stems, lyrics and settings into your project library'
               }
-              disabled={saveState === 'saving'}
+              disabled={saveState === 'saving' || sep !== null}
               onClick={() => void handleSaveProject()}
             >
               {saveState === 'saved' ? (
@@ -3956,12 +4041,11 @@ export default function App(): React.JSX.Element {
             onBeat={handleBeat}
             onRedetectBeat={redetectBeat}
             onToggleKaraoke={toggleKaraoke}
-            onSplit={() => void startSplit()}
-            onResplit={split && !sep && canResplitVocals(pendingLeadVocal, vocalSplitProgress !== null, leadVocalSeparated) ? () => void startSplit() : null}
-            onSplitBacking={split && !sep && !pendingLeadVocal && saveState !== 'saving' && vocalSplitProgress === null ? () => void splitBackingVocals() : null}
-            vocalSplitProgress={vocalSplitProgress}
-            onCancelVocalSplit={cancelVocalSplit}
-            onCancelSplit={() => void window.singz.cancelSeparation()}
+            onSplit={mode => void beginSplit(mode)}
+            canResplit={split && canResplitVocals(pendingLeadVocal, sep !== null, leadVocalSeparated)}
+            canSplitBacking={split && !pendingLeadVocal && !leadVocalSeparated}
+            splitDisabled={saveState === 'saving'}
+            onCancelSplit={cancelSplit}
             onReveal={
               stemFiles ? () => void window.singz.revealInFolder(stemFiles.vocals) : null
             }

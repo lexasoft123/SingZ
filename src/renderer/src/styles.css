@@ -5318,3 +5318,15 @@ body.win .modal-card.lyed-card {
     transition: none;
   }
 }
+
+/* Split shares the transport's popover and progress styles. */
+.split-control { position: relative; }
+.train-pop.split-menu { width: min(320px, calc(100vw - 32px)); right: 0; left: auto; }
+.split-menu p { color: var(--dim); font-size: 13px; line-height: 1.5; margin: 0 0 14px; }
+.split-menu-option { display: flex; align-items: center; gap: 10px; font-size: 14px; cursor: pointer; }
+.split-menu-option input { accent-color: var(--accent); width: 17px; height: 17px; }
+.split-menu .split-menu-hint { margin: 8px 0 16px; font-size: 12px; }
+.split-menu-action { display: block; width: 100%; padding: 10px 8px; text-align: left; border-radius: 8px; font-size: 14px; }
+.split-menu-action:hover:not(:disabled) { background: var(--accent-soft); color: var(--accent); }
+.split-menu-action:disabled { opacity: 0.45; cursor: default; }
+.split-menu :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
