@@ -1,0 +1,81 @@
+<!doctype html>
+<meta charset="utf-8">
+<!--
+  The first App Store screenshot: a poster, not a capture. Rendered at
+  1320x2868 (the 6.9" iPhone slot, the only size App Store Connect requires)
+  by scripts/make-ios-poster.sh, which inlines raw/hero-lyrics.png into the
+  image placeholder below — the capture lives in raw/ only, never base64'd
+  into the repo.
+
+  The placeholder token must appear exactly ONCE in this file, and is never
+  spelled out in prose (see docs/play-assets/poster.tmpl.html for the time a
+  comment naming it produced an empty phone). The phone is shown whole at its
+  own aspect ratio: a cropped phone stops reading as a phone.
+-->
+<style>
+  html,body{margin:0;padding:0}
+  body{
+    width:1320px;height:2868px;overflow:hidden;background:#12100d;
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Helvetica Neue",Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .stage{
+    position:relative;width:1320px;height:2868px;
+    background:
+      radial-gradient(980px 760px at 50% 4%, rgba(255,160,40,.22), transparent 62%),
+      radial-gradient(760px 620px at 8% 52%, rgba(255,92,101,.09), transparent 60%),
+      radial-gradient(760px 620px at 96% 64%, rgba(39,231,187,.07), transparent 60%),
+      #12100d;
+  }
+  .copy{padding:112px 80px 0;text-align:center}
+  .eyebrow{
+    margin:0;font-size:36px;letter-spacing:.26em;font-weight:800;color:#ffa028;
+  }
+  h1{
+    margin:30px 0 0;font-size:124px;line-height:1.0;letter-spacing:-.04em;
+    font-weight:800;color:#f4efe6;
+  }
+  h1 em{font-style:normal;color:#c8b8a2}
+  p.sub{
+    margin:38px auto 0;max-width:1080px;font-size:44px;line-height:1.36;
+    color:#c3b9a5;font-weight:500;letter-spacing:-.005em;
+  }
+  p.sub b{color:#f4efe6;font-weight:700}
+  .device{
+    position:absolute;left:50%;transform:translateX(-50%);
+    top:720px;width:760px;box-sizing:border-box;
+    border-radius:78px;padding:16px;background:#2b2721;
+    box-shadow:0 40px 110px rgba(0,0,0,.65), 0 0 0 1px rgba(255,255,255,.08);
+  }
+  .device img{display:block;width:100%;height:auto;border-radius:64px}
+  .chips{
+    position:absolute;left:80px;right:80px;bottom:96px;
+    display:grid;grid-template-columns:1fr 1fr;gap:22px 24px;
+  }
+  .chip{
+    display:flex;align-items:center;gap:22px;
+    padding:26px 30px;border-radius:26px;
+    background:rgba(38,33,27,.92);border:1px solid rgba(255,255,255,.07);
+    font-size:38px;font-weight:650;color:#f4efe6;letter-spacing:-.01em;
+  }
+  .tick{
+    flex:none;width:44px;height:44px;border-radius:22px;background:#3a2c18;
+    color:#ffa028;font-size:28px;font-weight:900;display:grid;place-items:center;
+  }
+</style>
+<div class="stage">
+  <div class="copy">
+    <p class="eyebrow">SIX TRACKS · ONE SONG</p>
+    <h1>Take the song<br><em>apart. Sing it.</em></h1>
+    <p class="sub">Mute the singer and the band plays on — <b>even with your phone locked.</b> Follow the words as they light up.</p>
+  </div>
+  <div class="device"><img src="data:image/png;base64,__SHOT_B64__"></div>
+  <div class="chips">
+    <div class="chip"><span class="tick">✓</span>Synced lyrics</div>
+    <div class="chip"><span class="tick">✓</span>Split songs on the phone</div>
+    <div class="chip"><span class="tick">✓</span>Transpose &amp; slow down</div>
+    <div class="chip"><span class="tick">✓</span>Loop with a count-in</div>
+    <div class="chip"><span class="tick">✓</span>Ear &amp; voice training</div>
+    <div class="chip"><span class="tick">✓</span>Plays on when locked</div>
+  </div>
+</div>

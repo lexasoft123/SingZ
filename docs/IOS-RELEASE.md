@@ -447,7 +447,7 @@ run the `metadata` lane after changing any of them.
 per locale, measured twice, and `overwrite_screenshots: true` does not prevent
 it — so the `metadata` lane passes `skip_screenshots: true` and the script owns
 them instead. It deletes each locale's sets and re-uploads in filename order,
-which is why they are named `01-`…`05-`: sorted filename order IS the order on
+which is why they are named `01-`…`06-`: sorted filename order IS the order on
 the storefront, and the first is what App Store search results show.
 
 ```bash
@@ -459,6 +459,10 @@ It must run under `bundle exec` from `mobile/ios` (that is where spaceship
 resolves) and needs the API-key env the wrapper provides. Images live once in
 `docs/ios-assets/`, beside `docs/play-assets/`; 1320x2868 registers as the
 iPhone 6.9" slot, which is the only size App Store Connect now requires.
+The first image, `01-poster.png`, is rendered rather than captured:
+`scripts/make-ios-poster.sh` inlines `raw/hero-lyrics.png` (a Pro Max simulator
+capture of this tree's Debug build, status bar overridden, LogBox silenced) into
+`poster.tmpl.html` with headless Chrome. The rest are captures used as they are.
 
 ## When App Review says no
 
