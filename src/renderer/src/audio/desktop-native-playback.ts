@@ -592,7 +592,19 @@ export class DesktopNativePlaybackClient {
       // song never reached.
       this.clearPendingSeek()
     }
-    const frame = Number(status.audibleProjectFrame)
+    // The audible projection is published only once it has MATURED — a
+    // latency's worth of callbacks after every transport edge (a start, a
+    // pause, a seek, a count-in's landing) — and until then the field sits
+    // at its default, 0, with `audibleProjectionQuality: 'unavailable'`. Read
+    // as a position, that 0 is the top of the song: a burst of Space presses
+    // drew the bar at 0.00 for one poll on every playing→paused edge, with
+    // the count-in off as much as on. The phones keep their last position
+    // until the projection is current; here the render head stands in — at
+    // most one latency ahead while playing, and the exact park point once
+    // paused.
+    const frame = status.audibleProjectionQuality === 'current'
+      ? Number(status.audibleProjectFrame)
+      : Number(status.renderedProjectFrame)
     if (!Number.isSafeInteger(frame)) return null
     // A count-in in progress — or paused inside one: the core is at a
     // negative frame counting up to 0, and the bar HOLDS at the landing. The
