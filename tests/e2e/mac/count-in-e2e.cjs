@@ -41,6 +41,16 @@
  *      TWICE inside one restart: the second press must adopt the first,
  *      never stop it and build another (the count-in then started twice).
  *
+ *   4. SPACE, HAMMERED. "Still jumps if I press Space multiple times fast":
+ *      the core republishes its audible projection only once it has matured
+ *      — a latency after every transport edge — and until then the field is
+ *      its default 0 with the quality flag 'unavailable'; the facade read
+ *      the 0 as a position, so every playing→paused edge could draw one poll
+ *      at the top of the song. The phones check the flag; the desktop does
+ *      now (the render head stands in). Leg 9 fires bursts of real Space key
+ *      events and samples the bar at 30 ms, the only cadence that sees a
+ *      one-poll dip.
+ *
  * Reads three opinions where the transport-race driver taught us to:
  * `__test.playing` (the button), `engine.playing`, and the core's own
  * `transportState`. The whole run is also judged on the log: ANY dsp warning
@@ -53,7 +63,7 @@
  *
  * Env: E2E_SONG (library project with a beat grid, default "Mein Teil"),
  *      E2E_MID (the scrubbed spot in seconds, default 60 — past the song's
- *               first bar, with 30 s of song left after it: eight legs each
+ *               first bar, with 30 s of song left after it: nine legs each
  *               carry the song a few seconds further),
  *      E2E_PROJECTS_ROOT (default iCloud Drive/SingZ).
  */
@@ -164,6 +174,55 @@ async function pauseAndWait(win) {
   if (!(await waitFor(win, NOT_PLAYING, 8000))) throw new Error('Pause never reached the button within 8 s')
 }
 
+/** The Space key, as a singer presses it: a real key event through
+ * Chromium into the app's window keydown handler (the same toggle as the
+ * button, behind a preventDefault). No actionability wait is involved, so
+ * a burst of these lands at the cadence asked for. */
+const space = (win) => win.keyboard.press('Space')
+
+/** Fire `schedule` (gaps in ms before each Space) while sampling the bar
+ * every 30 ms, then keep sampling for `tailMs`. Judges what a burst must
+ * never do: move the bar BACKWARDS by more than 0.3 s between two samples,
+ * or below `floor`; and the three opinions must agree once it settles. The
+ * report "still jumps if I press Space multiple times fast" was one poll at
+ * 0.00 on every playing→paused edge — the core's audible projection is
+ * unavailable for a latency after each transport edge and its field defaults
+ * to 0, which the facade read as a position; the 200 ms polls of every other
+ * leg mostly stepped over that window, and a 30 ms sampler cannot. */
+async function burst(win, label, schedule, tailMs, floor, fail) {
+  const rows = []
+  let stop = false
+  // The sampler runs beside the presses, so its rejection (the app dying
+  // mid-burst, the page going away) has no handler until it is awaited
+  // below — an unhandled rejection would end the process BEFORE the
+  // driver's `finally` restored the singer's project.json. Caught at
+  // creation, rethrown once the presses are done.
+  let samplerError = null
+  const sampler = (async () => {
+    while (!stop) { rows.push(JSON.parse(await val(win, SNAP))); await sleep(30) }
+  })().catch((error) => { samplerError = error })
+  for (const gap of schedule) { await sleep(gap); await space(win) }
+  await sleep(tailMs)
+  stop = true
+  await sampler
+  if (samplerError) throw samplerError
+  const backwards = []
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i].pos - rows[i - 1].pos < -0.3) {
+      backwards.push(`${rows[i - 1].pos.toFixed(2)} → ${rows[i].pos.toFixed(2)} s (core ${rows[i - 1].core}→${rows[i].core})`)
+    }
+  }
+  const lowest = Math.min(...rows.map((r) => r.pos))
+  const last = rows[rows.length - 1]
+  if (backwards.length) fail.push(`${label}: the bar moved backwards ${backwards.length} time(s), first ${backwards[0]}`)
+  if (lowest < floor - SLACK) fail.push(`${label}: the bar fell to ${lowest.toFixed(2)} s, below ${floor.toFixed(2)}`)
+  const sounding = last.core === 'playing' || last.core === 'pre-roll'
+  if (sounding !== last.button || last.button !== last.engine) {
+    fail.push(`${label}: after the burst the core is ${last.core}, the button ${last.button ? 'Pause' : 'Play'}, the engine ${last.engine ? 'playing' : 'stopped'} — the three disagree`)
+  }
+  return `${rows.length} samples, bar ${lowest.toFixed(2)}..${Math.max(...rows.map((r) => r.pos)).toFixed(2)} s, ${backwards.length} backward move(s), ends ${last.core} at ${last.pos.toFixed(2)} s`
+}
+
 /** Judge one count-in, sampled from the press: a pre-roll must be seen, the
  * bar must hold at `landing` throughout it, the dots must fill, and the
  * song must then be running near the landing with all three opinions
@@ -232,7 +291,7 @@ function judgeCountIn(label, rows, landing, fail) {
     const duration = await val(win, '__test.engine.duration')
     const beats = await val(win, '__test.engine.beats ? __test.engine.beats.beats.length : 0')
     if (!(beats > 1)) throw new Error(`"${SONG}" has no beat grid — a count-in needs one; set E2E_SONG`)
-    // Eight legs each carry the song a few seconds further: the spot needs
+    // Nine legs each carry the song a few seconds further: the spot needs
     // half a minute of runway, or the last legs run into the end of the song
     // (measured on the field laptop's 82 s library song with E2E_MID=60).
     if (!(MID > 2 && MID + 30 <= duration)) {
@@ -418,6 +477,19 @@ function judgeCountIn(label, rows, landing, fail) {
     if (after.pos < before - SLACK || after.pos > before + 1.5) {
       fail.push(`count-in off: a fast Pause left the bar at ${after.pos.toFixed(2)} s, pressed at ${before.toFixed(2)} s`)
     }
+
+    // ── 9. Space, hammered ──────────────────────────────────────────────
+    //
+    // Bursts of the key with the count-in off and on: every playing→paused
+    // edge inside them is a chance for the bar to read the core's immature
+    // audible projection as 0. Sampled at 30 ms, which no other leg does.
+    const floor9 = JSON.parse(await val(win, SNAP)).pos
+    console.log(`9. count-in off, 6×Space at 90 ms: ${await burst(win, 'Space burst, count-in off', [0, 90, 90, 90, 90, 90], 2500, floor9, fail)}`)
+    await val(win, '__test.setMetCfg(Object.assign({}, __test.met, { countInBars: 1 }))')
+    await win.waitForFunction(() => __test.met.countInBars === 1, null, { timeout: 5000 })
+    await sleep(600)
+    const floor9b = JSON.parse(await val(win, SNAP)).pos
+    console.log(`   count-in on, 3×Space at 250 ms then 5×Space at 100 ms: ${await burst(win, 'Space burst, count-in on', [0, 250, 250, 1500, 100, 100, 100, 100], 3500, floor9b, fail)}`)
 
     // ── The log has the last word ───────────────────────────────────────
     const all = await logSince(win, t0)

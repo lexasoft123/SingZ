@@ -2060,6 +2060,37 @@ describe('desktop native playback facade', () => {
     await flat.client.unload()
   })
 
+  it('an audible projection the core has not matured yet reads the render head, never the default 0', async () => {
+    // After every transport edge the core republishes the audible frame only
+    // once a latency's worth of callbacks has passed; until then the field
+    // is its default 0 with the quality 'unavailable'. Read as a position
+    // that is the top of the song — a burst of Space presses drew the bar at
+    // 0.00 for one poll on every playing→paused edge. The render head stands
+    // in, as it does on the phones.
+    let current: Partial<DesktopPlaybackStatus> = {
+      transportState: 'playing', renderedProjectFrame: '2880000', audibleProjectFrame: '2879872',
+      audibleProjectionQuality: 'current'
+    }
+    const h = seamHarness((generation) => playing(generation, current))
+    expect(await h.client.prepareAndStart({ ...countInRequest(60), countIn: false })).toBe(true)
+    expect(h.client.audibleSeconds()).toBeCloseTo(2879872 / 48_000, 3)
+    // The pause lands: the projection is immature for the first status.
+    current = {
+      transportState: 'paused', renderedProjectFrame: '2881024', audibleProjectFrame: '0',
+      audibleProjectionQuality: 'unavailable'
+    }
+    await h.client.pause()
+    expect(h.client.audibleSeconds()).toBeCloseTo(2881024 / 48_000, 3)
+    // Matured: the audible frame is back and wins again.
+    current = {
+      transportState: 'paused', renderedProjectFrame: '2881024', audibleProjectFrame: '2881024',
+      audibleProjectionQuality: 'current'
+    }
+    await h.client.setMasterGain(0.5)
+    expect(h.client.audibleSeconds()).toBeCloseTo(2881024 / 48_000, 3)
+    await h.client.unload()
+  })
+
   it('countInHeard scales the output latency by the playback rate, as the core projects it', async () => {
     // The latency is output frames; the runway is project frames. At 0.5×
     // the ear is 64 project frames behind a 128-frame route, not 128.
