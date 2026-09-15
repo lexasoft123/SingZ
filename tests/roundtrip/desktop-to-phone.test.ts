@@ -129,6 +129,26 @@ describe('desktop → Drive → phone', () => {
     }
   })
 
+  it('opens an older Windows-saved backing lane and caches the exact audio bytes', async () => {
+    const scenario = scenarios.twoSongs()
+    const project = scenario.projects.find((p) => p.dir === 'Song Two')!
+    const audio = project.files.find((f) => f.path === 'stems/custom-harmony.mp3')!
+    audio.path = 'stems/custom-backing-vocals.wav'
+    project.custom = [{
+      id: 'custom-backing-vocals', label: 'Harmony voices', color: '#c7e06a',
+      file: String.raw`stems\custom-backing-vocals.wav`
+    }]
+    seed(scenario)
+    expect(await desktopSync()).toMatchObject({ ok: true })
+    const g = await phone()
+    const loaded = await openOnPhone(g, 'Song Two')
+    expect(loaded.stems).toContainEqual(expect.objectContaining({
+      id: 'custom-backing-vocals', label: 'Harmony voices', custom: true
+    }))
+    expect(native.read('Song Two', audio.path).toString()).toBe(audio.body)
+    expect(await requestsDuring(() => openOnPhone(g, 'Song Two'))).toBe(0)
+  })
+
   it('a second sync uploads nothing and reads no stem bytes', async () => {
     seed()
     await desktopSync()

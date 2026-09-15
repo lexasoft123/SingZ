@@ -59,7 +59,6 @@ import {
   SINGLE_NOTE_PITCH_WINDOW_OPTIONS,
   SingleNoteLockTracker,
   clampSingleNotePitchWindow,
-  foldSingleNoteOvertone,
   trainingMustStopForAppState,
   type SingleNoteLockState
 } from '../training/runtime'
@@ -330,16 +329,8 @@ export default function TrainingScreen({
       const fake = __DEV__ && TEST?.trainingFakeMic === true
       const observations = fake
         ? fakeObservations(run.prompt, windows)
-        : captured.map((observation) => {
-            if (observation.midi === null || observation.confidence < SINGLE_NOTE_MIN_CONFIDENCE) return observation
-            const window = windows.find((candidate) => observation.timestampMs >= candidate.startMs && observation.timestampMs <= candidate.endMs)
-            const targetMidi = window === undefined ? null : run.prompt.targets[window.targetIndex]?.midi
-            if (targetMidi === null || targetMidi === undefined) return observation
-            const midi = foldSingleNoteOvertone(observation.midi, targetMidi)
-            return midi === observation.midi
-              ? observation
-              : { ...observation, midi, frequencyHz: midiToFrequency(midi) }
-          })
+        : captured
+
       result = scoreVocalTrainingAttempt({
         prompt: run.prompt,
         targetWindows: windows,

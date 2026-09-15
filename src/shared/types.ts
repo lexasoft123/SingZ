@@ -22,7 +22,11 @@ export type EngineStatus =
       needsModels?: boolean
     }
 
-export type ModelId = 'gpu-splitter' | 'whisper' | 'aligner'
+export type VocalSplitResult =
+  | { ok: true; lead: string; backing: string }
+  | { ok: false; error: string; cancelled?: boolean; needsModels?: ModelId[] }
+
+export type ModelId = 'gpu-splitter' | 'whisper' | 'aligner' | 'backing-vocals'
 
 export interface ModelInfo {
   id: ModelId
@@ -210,6 +214,12 @@ export interface ProjectSettings {
   }
   /** Audio files the singer added as extra lanes (absolute over IPC). */
   custom?: CustomTrack[]
+  /** Pending lead stem produced by the vocal splitter; consumed by Save,
+   * never written as an absolute path to project.json. */
+  pendingLeadVocal?: string
+  /** The canonical vocals stem is separated lead; re-splitting the original
+   * song would restore combined vocals alongside the saved backing lane. */
+  leadVocalSeparated?: boolean
   tracks: Record<string, { muted: boolean; solo: boolean; volume: number }>
 }
 
@@ -451,6 +461,15 @@ export type CaptureDiscontinuity =
   | 'source-frame-overflow'
 
 /** Native input inventory. UIDs and channels belong to the OS HAL, not Chromium. */
+/** One completed native → browser microphone capture transition. No audio crosses IPC. */
+export interface DesktopAudioInputFallback {
+  reason: string
+  deviceLabel: string
+  channelIndex: number
+  channelCount: number
+  requestedChannel: number
+}
+
 export interface DesktopAudioInputDevice {
   uid: string
   label: string
@@ -1170,6 +1189,9 @@ export interface SingzApi {
   ): Promise<{ ok: true; path: string; name: string; size: number } | { ok: false; error: string }>
   checkEngine(force?: boolean): Promise<EngineStatus>
   separate(path: string): Promise<SeparateResult>
+  splitVocals(path: string): Promise<VocalSplitResult>
+  cancelVocalSplit(): Promise<void>
+  onVocalSplitProgress(cb: (percent: number) => void): () => void
   cancelSeparation(): Promise<void>
   /** Does the installed splitter pack include the Beat This! beat model? */
   beatsMlAvailable(): Promise<{ ok: true; available: boolean }>
@@ -1184,6 +1206,7 @@ export interface SingzApi {
     deviceUid?: string
     channel?: number
   }): Promise<DesktopAudioInputStartResult>
+  reportDesktopAudioInputFallback(detail: DesktopAudioInputFallback): Promise<{ ok: boolean; error?: string }>
   stopDesktopAudioInput(token: string): Promise<{ ok: boolean; error?: string }>
   onDesktopAudioInputEvent(
     cb: (token: string, event: DesktopAudioInputEvent) => void

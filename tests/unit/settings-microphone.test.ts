@@ -8,6 +8,7 @@ import {
 } from '../../src/renderer/src/audio/monitoring'
 import SettingsModal, {
   INPUT_CHANNEL_ROUTE_PENDING_COPY,
+  MicrophoneBackendStatus,
   MONITOR_DIAGNOSTIC_LABELS,
   OUTPUT_CHANNEL_ROUTE_PENDING_COPY,
   OutputRouteRecovery,
@@ -883,5 +884,37 @@ describe('native monitoring route policy', () => {
       'Xruns', 'Deadline misses', 'Render failures'
     ])
     expect(MONITOR_DIAGNOSTIC_LABELS.join(' ')).not.toMatch(/round.?trip/i)
+  })
+})
+
+
+describe('microphone backend disclosure', () => {
+  it('hides the stopped preview backend while monitoring or another owner holds capture', () => {
+    expect(renderToStaticMarkup(createElement(MicrophoneBackendStatus, {
+      device: { ...micDevice('Studio', 2), captureBackend: 'web-audio', nativeFallbackReason: 'Native core missing' },
+      inventoryError: 'Native core missing', paused: true
+    }))).toBe('')
+  })
+  it('shows the actual fallback reason and channel count without calling it native playback', () => {
+    const html = renderToStaticMarkup(createElement(MicrophoneBackendStatus, {
+      device: { ...micDevice('Studio', 2), captureBackend: 'web-audio', nativeFallbackReason: 'Native core missing' },
+      inventoryError: 'Different inventory failure'
+    }))
+    expect(html).toContain('Using browser microphone capture instead of native capture.')
+    expect(html).toContain('Native core missing')
+    expect(html).toContain('channel 1 of 2')
+    expect(html).not.toContain('Different inventory failure')
+    expect(html).toContain('role="status"')
+  })
+  it('shows discovery failure before capture and clears a stale warning once native capture is active', () => {
+    expect(renderToStaticMarkup(createElement(MicrophoneBackendStatus, {
+      device: null, inventoryError: 'Native core missing'
+    }))).toContain('Native microphone capture unavailable: Native core missing')
+    const html = renderToStaticMarkup(createElement(MicrophoneBackendStatus, {
+      device: { ...micDevice('Studio', 16), captureBackend: 'native' }, inventoryError: 'Old error'
+    }))
+    expect(html).toContain('Native microphone capture')
+    expect(html).not.toContain('Old error')
+    expect(html).not.toContain('warn')
   })
 })

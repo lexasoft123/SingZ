@@ -1,7 +1,7 @@
 import { app } from 'electron'
 import { createHash } from 'node:crypto'
 import { existsSync, readdirSync } from 'node:fs'
-import { access, cp, copyFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { access, cp, copyFile, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import {
   STEMS,
@@ -23,12 +23,14 @@ import {
   parseGraphDocument,
   serializeGraphDocument
 } from '../shared/graph-document'
+import { customTrackPath } from '../shared/custom-track-path'
 import { wavToFlac } from './flac'
 import { log } from './log'
 import { describeProject } from './project-state'
 import { markLibraryDirty, markProjectDirty, withDirty } from './sync-dirty'
 import { allowRoot, stemsRoot } from './media'
 import { hashFile } from './separation'
+import { isIssuedLead } from './vocal-separation'
 import { readSettings, writeSettings } from './settings'
 import { AUDIO_EXT } from './source'
 
@@ -347,7 +349,9 @@ async function resolveCustom(
   const root = resolve(dir)
   for (const t of list) {
     if (!t || typeof t.file !== 'string' || typeof t.id !== 'string') continue
-    const abs = resolve(root, t.file)
+    const file = customTrackPath(t.file)
+    if (!file) continue
+    const abs = resolve(root, file)
     if (!abs.startsWith(root + sep)) continue
     if (!(await exists(abs))) {
       log('app', `custom track "${t.label ?? t.id}" is missing from ${dir} — dropped`, 'warn')
@@ -393,7 +397,7 @@ async function storeCustomTracks(
       await copyFile(src, dst)
       log('app', `custom track "${t.label ?? t.id}" copied into the project as stems/${name}`)
     }
-    out.push({ id: t.id, label: t.label ?? t.id, color: t.color, file: join('stems', name) })
+    out.push({ id: t.id, label: t.label ?? t.id, color: t.color, file: `stems/${name}` })
   }
   // Tracks the singer removed leave their copy behind; it would keep syncing
   // to Drive and reappear in nobody's mix. Only our own prefix is touched,
@@ -423,6 +427,17 @@ async function convertStemsToFlac(dir: string): Promise<boolean> {
     const wav = join(dir, 'stems', `${s}.wav`)
     const flac = join(dir, 'stems', `${s}.flac`)
     if (!(await exists(wav))) continue
+    // Model residuals are float WAV: quantizing can clip legitimate values
+    // above 1 and break lead+backing reconstruction. v1 readers accept WAV,
+    // so retain it losslessly until the project format supports float FLAC.
+    const file = await open(wav, 'r')
+    const header = Buffer.alloc(24)
+    let read = 0
+    try { read = (await file.read(header, 0, header.length, 0)).bytesRead } finally { await file.close() }
+    if (read >= 24 && header.toString('ascii', 12, 16) === 'fmt ' && header.readUInt16LE(20) === 3) {
+      allFlac = false
+      continue
+    }
     if (!(await exists(flac))) {
       const res = await wavToFlac(wav, flac)
       if (!res.ok) {
@@ -805,6 +820,7 @@ const STORED_SETTING_KEYS = [
   'loop',
   'training',
   'custom',
+  'leadVocalSeparated',
   'tracks'
 ] as const
 
@@ -882,6 +898,16 @@ export async function saveProject(
           }
         }
 
+        // Explicit pending vocal replacement: publish the new WAV atomically,
+        // then remove the old preferred FLAC. Never leave a stale FLAC winning.
+        if (settings.pendingLeadVocal) {
+          if (!isIssuedLead(settings.pendingLeadVocal)) throw new Error('The replacement vocal was not produced by this session. Separate it again.')
+          const vocal = join(dir, 'stems', 'vocals.wav')
+          await copyFile(settings.pendingLeadVocal, vocal + '.part')
+          await rename(vocal + '.part', vocal)
+          await rm(join(dir, 'stems', 'vocals.flac'), { force: true })
+        }
+
         // v2 on-disk format: stems live as FLAC (the splitter cache stays WAV)
         const allFlac = await convertStemsToFlac(dir)
 
@@ -916,6 +942,8 @@ export async function saveProject(
         // the file is actually overwritten, so it covers every path that ever
         // reaches it, including ones not written yet.
         const storedSettings = mergeStoredSettings(prevMeta?.settings, settings, stored)
+        // A melody of the old combined vocals is invalid after replacement.
+        if (settings.pendingLeadVocal && !settings.melody) delete storedSettings.melody
         const meta: ProjectFile = {
           // Unknown top-level fields and future graph references belong to the
           // project, not this desktop build. A normal save updates only the

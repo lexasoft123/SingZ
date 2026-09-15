@@ -14,15 +14,7 @@ const SINGLE_NOTE_MAX_TICK_MS = 160
 const SINGLE_NOTE_DISPLAY_HOLD_MS = 280
 const SINGLE_NOTE_DISPLAY_TIME_CONSTANT_MS = 260
 const SINGLE_NOTE_DISPLAY_MAX_STEP_CENTS = 6
-const SINGLE_NOTE_OVERTONE_CAPTURE_CENTS = 180
 const SINGLE_NOTE_INSTANTANEOUS_MARGIN_CENTS = 7
-
-// A sung vowel can put more energy into a formant-aligned overtone than its
-// fundamental. Plain low-latency YIN can then select that overtone as f0. Keep
-// the full useful harmonic series here: for the bottom of the training range,
-// harmonics through 8 still fit below the detector's 1,050 Hz ceiling.
-const SINGLE_NOTE_OVERTONE_HARMONICS = [2, 3, 4, 5, 6, 7, 8] as const
-const SINGLE_NOTE_SUBHARMONIC_OCTAVES = [1, 2] as const
 
 export type SingleNoteLockStatus = 'waiting' | 'adjust' | 'holding' | 'locked'
 
@@ -51,33 +43,6 @@ export function clampSingleNotePitchWindow(value: number): number {
   return SINGLE_NOTE_PITCH_WINDOW_OPTIONS.reduce((nearest, option) =>
     Math.abs(option - value) < Math.abs(nearest - value) ? option : nearest
   )
-}
-
-/** Correct only a plausible octave/harmonic detector lock. A fifth or other
- * genuinely wrong note is deliberately left alone instead of being pulled
- * toward the answer. */
-export function foldSingleNoteOvertone(midi: number, targetMidi: number): number {
-  if (!Number.isFinite(midi) || !Number.isFinite(targetMidi)) return midi
-  let best = midi
-  let bestDistance = Math.abs(midi - targetMidi)
-  for (const harmonic of SINGLE_NOTE_OVERTONE_HARMONICS) {
-    const interval = 12 * Math.log2(harmonic)
-    const candidate = midi - interval
-    const distance = Math.abs(candidate - targetMidi)
-    if (distance < bestDistance) {
-      best = candidate
-      bestDistance = distance
-    }
-  }
-  for (const octaves of SINGLE_NOTE_SUBHARMONIC_OCTAVES) {
-    const candidate = midi + octaves * 12
-    const distance = Math.abs(candidate - targetMidi)
-    if (distance < bestDistance) {
-      best = candidate
-      bestDistance = distance
-    }
-  }
-  return best !== midi && bestDistance * 100 <= SINGLE_NOTE_OVERTONE_CAPTURE_CENTS ? best : midi
 }
 
 /** Singer-friendly target lock. The rolling median must sit inside the chosen
@@ -123,7 +88,7 @@ export class SingleNoteLockTracker {
     this.lastUpdateMs = nowMs
 
     const voiced = midi !== null && Number.isFinite(midi) && confidence >= SINGLE_NOTE_MIN_CONFIDENCE
-    const correctedMidi = voiced ? foldSingleNoteOvertone(midi, targetMidi) : null
+    const correctedMidi = voiced ? midi : null
     const currentCents = correctedMidi !== null ? (correctedMidi - targetMidi) * 100 : null
     if (currentCents !== null) this.lastVoicedAtMs = nowMs
     if (currentCents !== null) this.readings.push({ atMs: nowMs, cents: currentCents })
@@ -133,7 +98,7 @@ export class SingleNoteLockTracker {
       ? median(this.readings.map((reading) => reading.cents))
       : null
     if (rawMedianCents !== null) {
-      if (this.displayCents === null) {
+      if (this.displayCents === null || Math.abs(rawMedianCents - this.displayCents) >= 700) {
         this.displayCents = rawMedianCents
       } else {
         const smoothingElapsedMs = elapsedMs || 80
@@ -166,7 +131,7 @@ export class SingleNoteLockTracker {
       }
     }
 
-    const locked = this.progressMs >= SINGLE_NOTE_HOLD_MS
+    const locked = centered && this.progressMs >= SINGLE_NOTE_HOLD_MS
     return {
       status: locked ? 'locked' : centered ? 'holding' : voiced ? 'adjust' : 'waiting',
       progress: this.progressMs / SINGLE_NOTE_HOLD_MS,

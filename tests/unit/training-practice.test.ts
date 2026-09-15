@@ -5,7 +5,6 @@ import {
   desktopTrainingCountdownSeconds,
   desktopTrainingCueDurationSeconds,
   desktopTrainingCues,
-  foldTrainingOvertone,
   restoreDesktopTrainingPracticeSettings,
   trainingOrganOscillators
 } from '../../src/renderer/src/training-practice'
@@ -55,17 +54,50 @@ describe('desktop holder-friendly training practice', () => {
     expect(oscillators.reduce((sum, oscillator) => sum + oscillator.level, 0)).toBeCloseTo(0.99)
   })
 
-  it('folds high vocal overtones and locks only after a stable hold', () => {
+  it('locks only a stable note in the actual target octave', () => {
     const target = 48
-    expect(foldTrainingOvertone(target + 12 * Math.log2(7), target)).toBeCloseTo(target)
-    expect(foldTrainingOvertone(55, target)).toBe(55)
     const tracker = new TrainingPitchLockTracker()
     let lock = tracker.update(0, target, 0.95, target)
-    for (let at = 80; at <= 1_680; at += 80) {
-      const harmonic = [1, 2, 3, 5, 7][(at / 80) % 5]
-      lock = tracker.update(at, target + 0.04 + 12 * Math.log2(harmonic), 0.95, target)
-    }
+    for (let at = 80; at <= 1680; at += 80) lock = tracker.update(at, target + 0.04, 0.95, target)
     expect(lock.displayMidi).toBeCloseTo(target + 0.04, 1)
     expect(lock.locked).toBe(true)
   })
+
+  it.each([36, 60, 72, 48 + 12 * Math.log2(7)])('rejects a wrong register at MIDI %s', (midi) => {
+    const tracker = new TrainingPitchLockTracker()
+    let lock = tracker.update(0, midi, 0.95, 48)
+    for (let at = 80; at <= 2400; at += 80) lock = tracker.update(at, midi, 0.95, 48)
+    expect(lock.displayMidi).toBeCloseTo(midi)
+    expect(lock.locked).toBe(false)
+    expect(lock.progress).toBe(0)
+  })
+
+  it('recovers from the wrong octave without waiting for display smoothing', () => {
+    const tracker = new TrainingPitchLockTracker()
+    for (let at = 0; at < 2400; at += 80) tracker.update(at, 72, 0.95, 60)
+    let lock = tracker.update(2400, 60, 0.95, 60)
+    for (let at = 2480; at <= 2880; at += 80) lock = tracker.update(at, 60, 0.95, 60)
+    expect(lock.displayMidi).toBeCloseTo(60)
+    expect(lock.centered).toBe(true)
+    expect(lock.locked).toBe(false)
+    for (let at = 2960; at <= 4560; at += 80) lock = tracker.update(at, 60, 0.95, 60)
+    expect(lock.locked).toBe(true)
+  })
+
+  it('immediately stops awarding a lock when the singer changes octave', () => {
+    const tracker = new TrainingPitchLockTracker()
+    let lock = tracker.update(0, 60, 0.95, 60)
+    for (let at = 80; at <= 2400; at += 80) lock = tracker.update(at, 60, 0.95, 60)
+    expect(lock.locked).toBe(true)
+    const held = lock.progressMs
+    lock = tracker.update(2480, 72, 0.95, 60)
+    expect(lock.centered).toBe(false)
+    expect(lock.locked).toBe(false)
+    expect(lock.status).toBe('adjust')
+    expect(lock.progressMs).toBeLessThanOrEqual(held)
+    for (let at = 2560; at <= 3120; at += 80) lock = tracker.update(at, 72, 0.95, 60)
+    expect(lock.displayMidi).toBeCloseTo(72)
+    expect(lock.progressMs).toBeLessThan(held)
+  })
+
 })

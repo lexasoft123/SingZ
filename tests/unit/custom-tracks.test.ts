@@ -87,7 +87,7 @@ describe('saving custom tracks', () => {
         id: 'custom-harmony-take-2',
         label: 'Harmony take 2',
         color: '#8fd3ff',
-        file: join('stems', 'custom-harmony-take-2.mp3')
+        file: 'stems/custom-harmony-take-2.mp3'
       }
     ])
     // and the renderer gets absolute paths back to keep playing from
@@ -202,7 +202,7 @@ describe('saving custom tracks', () => {
         id: 'custom-take-3',
         label: 'Second voice',
         color: '#8fd3ff',
-        file: join('stems', 'custom-take-3.mp3')
+        file: 'stems/custom-take-3.mp3'
       }
     ])
     // the file keeps its name and its bytes: nothing to re-upload to Drive,
@@ -231,6 +231,42 @@ describe('saving custom tracks', () => {
 })
 
 describe('reading custom tracks back', () => {
+
+  it('opens an older Windows backing lane and resaves portable metadata without moving its audio', async () => {
+    const root = await makeLibrary(), dir = await makeProject(root, 'Windows Song')
+    const file = join(dir, 'stems', 'custom-backing-vocals.wav')
+    await writeFile(file, 'unchanged-backing-audio')
+    const meta = JSON.parse(await readFile(join(dir, 'project.json'), 'utf8'))
+    // Exact custom metadata produced by the Windows separation UI.
+    meta.settings.custom = [{
+      id: 'custom-backing-vocals', label: 'Harmony voices', color: '#c7e06a',
+      file: String.raw`stems\custom-backing-vocals.wav`
+    }]
+    await writeFile(join(dir, 'project.json'), JSON.stringify(meta))
+    const opened = await detectProject(join(dir, 'song.mp3'))
+    expect(opened?.settings.custom).toEqual([expect.objectContaining({
+      id: 'custom-backing-vocals', label: 'Harmony voices', file
+    })])
+    const saved = await saveProject(join(dir, 'song.mp3'), 'Windows Song', opened!.settings)
+    expect(saved.ok).toBe(true)
+    expect((await metaOf(dir)).settings.custom?.[0].file).toBe('stems/custom-backing-vocals.wav')
+    expect(await readFile(file, 'utf8')).toBe('unchanged-backing-audio')
+    expect((await readdir(join(dir, 'stems'))).filter((name) => name.startsWith('custom-')))
+      .toEqual(['custom-backing-vocals.wav'])
+  })
+
+  it('rejects Windows traversal, nested, and absolute paths even when their targets exist', async () => {
+    const root = await makeLibrary(), dir = await makeProject(root, 'Unsafe paths')
+    const meta = JSON.parse(await readFile(join(dir, 'project.json'), 'utf8'))
+    meta.settings.custom = [
+      String.raw`stems\..\song.mp3`, 'stems/../song.mp3', String.raw`..\Unsafe paths\song.mp3`,
+      String.raw`C:\stems\custom-x.wav`, String.raw`\\server\stems\custom-x.wav`,
+      join(dir, 'song.mp3'), 'stems/sub/custom-x.wav', 'stems/custom-x.wav:stream'
+    ].map((file, i) => track(`custom-invalid-${i}`, file))
+    await writeFile(join(dir, 'project.json'), JSON.stringify(meta))
+    expect((await detectProject(join(dir, 'song.mp3')))?.settings.custom).toBeUndefined()
+  })
+
   it('detectProject resolves them to absolute paths', async () => {
     const root = await makeLibrary()
     const dir = await makeProject(root, 'My Song')

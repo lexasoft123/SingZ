@@ -2,7 +2,6 @@ import {
   LoadedSongSequence,
   SINGLE_NOTE_HOLD_MS,
   SingleNoteLockTracker,
-  foldSingleNoteOvertone,
   trainingMustStopForAppState,
   trainingTargetWindows
 } from '../src/training/runtime'
@@ -39,41 +38,33 @@ describe('mobile training runtime rules', () => {
     expect(strictLock!.centered).toBe(false)
   })
 
-  test('folds the audible vocal harmonic series without pulling unrelated notes to target', () => {
-    expect(foldSingleNoteOvertone(72.08, 60)).toBeCloseTo(60.08)
-    expect(foldSingleNoteOvertone(79.01955, 60)).toBeCloseTo(60)
-    expect(foldSingleNoteOvertone(84.04, 60)).toBeCloseTo(60.04)
-    for (const harmonic of [5, 6, 7, 8]) {
-      const detectedOvertone = 48.06 + 12 * Math.log2(harmonic)
-      expect(foldSingleNoteOvertone(detectedOvertone, 48)).toBeCloseTo(48.06)
-    }
-    expect(foldSingleNoteOvertone(36.04, 60)).toBeCloseTo(60.04)
-    expect(foldSingleNoteOvertone(67, 60)).toBe(67)
-    expect(foldSingleNoteOvertone(64, 60)).toBe(64)
+  test.each([36, 48, 67, 72, 79.01955, 84, 96])('does not lock a wrong register or harmonic at MIDI %s', (midi) => {
+    const tracker = new SingleNoteLockTracker()
+    let lock = tracker.update(0, midi, 0.95, 60)
+    for (let atMs = 80; atMs <= 2400; atMs += 80) lock = tracker.update(atMs, midi, 0.95, 60)
+    expect(lock.displayMidi).toBeCloseTo(midi)
+    expect(lock.locked).toBe(false)
+    expect(lock.progress).toBe(0)
   })
 
-  test('uses overtone-corrected readings for a stable lock', () => {
+  test('shows a real octave change once the rolling median changes', () => {
     const tracker = new SingleNoteLockTracker()
-    let lock = tracker.update(0, 72.02, 0.95, 60)
-    for (let atMs = 80; atMs <= 1_680; atMs += 80) {
-      lock = tracker.update(atMs, atMs % 240 === 0 ? 79.03955 : 72.02, 0.95, 60)
-    }
-    expect(lock.displayMidi).toBeCloseTo(60.02, 1)
-    expect(lock.locked).toBe(true)
+    for (let at = 0; at < 800; at += 80) tracker.update(at, 60, 0.95, 60)
+    let lock = tracker.update(800, 72, 0.95, 60)
+    for (let at = 880; at <= 1200; at += 80) lock = tracker.update(at, 72, 0.95, 60)
+    expect(lock.displayMidi).toBeCloseTo(72)
+    expect(lock.centered).toBe(false)
   })
 
-  test('keeps a stable lock when plain YIN alternates across high vocal overtones', () => {
+  test('a held note immediately stops being locked in the wrong octave', () => {
     const tracker = new SingleNoteLockTracker()
-    const target = 48
-    const harmonics = [1, 2, 3, 5, 7, 4, 6, 8]
-    let lock = tracker.update(0, target, 0.95, target)
-    for (let atMs = 80; atMs <= 1_680; atMs += 80) {
-      const harmonic = harmonics[(atMs / 80) % harmonics.length]
-      const detected = target + 0.04 + 12 * Math.log2(harmonic)
-      lock = tracker.update(atMs, detected, 0.95, target)
-    }
-    expect(lock.displayMidi).toBeCloseTo(target + 0.04, 1)
+    let lock = tracker.update(0, 60, 0.95, 60)
+    for (let at = 80; at <= 2400; at += 80) lock = tracker.update(at, 60, 0.95, 60)
     expect(lock.locked).toBe(true)
+    lock = tracker.update(2480, 72, 0.95, 60)
+    expect(lock.locked).toBe(false)
+    expect(lock.centered).toBe(false)
+    expect(lock.status).toBe('adjust')
   })
 
   test('eases the displayed pitch instead of jumping to every new frame', () => {

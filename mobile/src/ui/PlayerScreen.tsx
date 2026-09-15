@@ -98,6 +98,7 @@ import { playbackCountInDisplay } from '../playback/count-in-display'
 
 const SCRIM_TOP = require('../../assets/bg/scrim-top.png')
 const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
+const isBackingVocalLane = (id: string): boolean => /^custom-backing-vocals(?:-\d+)?$/.test(id)
 
 type PlayerStackParamList = {
   Stage: undefined
@@ -704,9 +705,18 @@ export default function PlayerScreen({
    *  the core's envelope proves silent is not a row, a fader or a pill —
    *  the same lane legacy never builds in the first place. */
   const tracks = useMemo(
-    () => (nativeSilent.length === 0
-      ? allTracks
-      : allTracks.filter(t => !nativeSilent.includes(t.id))),
+    () => {
+      const visible = nativeSilent.length === 0
+        ? allTracks
+        : allTracks.filter(t => !nativeSilent.includes(t.id))
+      // Generated IDs survive desktop label changes and project reloads.
+      const backing = visible.filter(t => isBackingVocalLane(t.id))
+      if (!backing.length) return visible
+      const remaining = visible.filter(t => !isBackingVocalLane(t.id))
+      const vocalsIndex = remaining.findIndex(t => t.id === 'vocals')
+      if (vocalsIndex < 0) return visible
+      return [...remaining.slice(0, vocalsIndex + 1), ...backing, ...remaining.slice(vocalsIndex + 1)]
+    },
     [allTracks, nativeSilent]
   )
   /** The one filtered list. Everything the singer is shown counts from it,
@@ -2124,14 +2134,14 @@ export default function PlayerScreen({
             {tracks.map((t, i) => {
               const meta = laneMeta[t.id] ?? TRACK_META[t.id] ?? { label: t.id, color: C.dim }
               const isDucked = ducked.includes(t.id)
-              /* The six stems are the song; everything after them is the
-                 singer's own. The header lands before the FIRST added lane
-                 (they sit together at the end of the track list). The
+              /* Generated backing belongs beside vocals, without an Added
+                 header dividing the song's stems. The header marks the
+                 singer's own extra lanes. The
                  pre-split original lane is the app's, not the singer's —
                  the same exemption addedCount makes — or an unsplit song
                  would render an "Added" header over its own audio. */
-              const isCustom = !(t.id in TRACK_META) && t.id !== ORIGINAL_LANE_ID
-              const firstCustom = isCustom && (i === 0 || tracks[i - 1].id in TRACK_META)
+              const isCustom = !(t.id in TRACK_META) && t.id !== ORIGINAL_LANE_ID && !isBackingVocalLane(t.id)
+              const firstCustom = isCustom && (i === 0 || tracks[i - 1].id in TRACK_META || isBackingVocalLane(tracks[i - 1].id))
               return (
                 <React.Fragment key={t.id}>
                   {firstCustom && (

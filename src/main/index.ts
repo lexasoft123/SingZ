@@ -46,6 +46,7 @@ import { logHardwareInfo } from './hwinfo'
 import { installUpdate, startUpdater, updateState } from './updater'
 import { cleanupObsoleteModels, dmlFlagPath, modelsDir, packDir, trtrtxFlagPath } from './models'
 import { Separator } from './separation'
+import { registerVocalSeparation, vocalSeparator } from './vocal-separation'
 import { registerAnalyze } from './analyze'
 import { registerDesktopAudioInput } from './audio-input'
 import { askMicrophoneAccess } from './mic-access'
@@ -283,6 +284,7 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('separation:cancel', () => separator.cancel())
+  registerVocalSeparation()
 
   // ML beat/downbeat analysis (Beat This! runner inside the splitter pack)
   registerBeatsIpc()
@@ -848,6 +850,7 @@ app.on('before-quit', () => {
   captureOwner.stop()
   scheduler.stop()
   separator.cancel()
+  vocalSeparator.cancel()
   transcriber.cancel()
   cancelBeatsMl()
 })
@@ -855,6 +858,7 @@ app.on('before-quit', () => {
 app.on('window-all-closed', () => {
   captureOwner.stop()
   separator.cancel()
+  vocalSeparator.cancel()
   transcriber.cancel()
   cancelBeatsMl()
   if (process.platform !== 'darwin') app.quit()

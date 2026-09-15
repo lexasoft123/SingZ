@@ -16,10 +16,7 @@ const MAX_TICK_MS = 160
 const DISPLAY_HOLD_MS = 280
 const DISPLAY_TIME_CONSTANT_MS = 260
 const DISPLAY_MAX_STEP_CENTS = 6
-const OVERTONE_CAPTURE_CENTS = 180
 const INSTANTANEOUS_MARGIN_CENTS = 7
-const OVERTONE_HARMONICS = [2, 3, 4, 5, 6, 7, 8] as const
-const SUBHARMONIC_OCTAVES = [1, 2] as const
 
 export const TRAINING_ORGAN_DRAWBARS = [
   { ratio: 0.5, level: 0.025, chorus: false },
@@ -141,28 +138,6 @@ export function trainingOrganOscillators(): readonly TrainingOrganOscillator[] {
   })
 }
 
-export function foldTrainingOvertone(midi: number, targetMidi: number): number {
-  if (!Number.isFinite(midi) || !Number.isFinite(targetMidi)) return midi
-  let best = midi
-  let bestDistance = Math.abs(midi - targetMidi)
-  for (const harmonic of OVERTONE_HARMONICS) {
-    const candidate = midi - 12 * Math.log2(harmonic)
-    const distance = Math.abs(candidate - targetMidi)
-    if (distance < bestDistance) {
-      best = candidate
-      bestDistance = distance
-    }
-  }
-  for (const octaves of SUBHARMONIC_OCTAVES) {
-    const candidate = midi + octaves * 12
-    const distance = Math.abs(candidate - targetMidi)
-    if (distance < bestDistance) {
-      best = candidate
-      bestDistance = distance
-    }
-  }
-  return best !== midi && bestDistance * 100 <= OVERTONE_CAPTURE_CENTS ? best : midi
-}
 
 export class TrainingPitchLockTracker {
   private readings: { readonly atMs: number; readonly cents: number }[] = []
@@ -196,7 +171,7 @@ export class TrainingPitchLockTracker {
       : Math.max(0, Math.min(MAX_TICK_MS, nowMs - this.lastUpdateMs))
     this.lastUpdateMs = nowMs
     const voiced = midi !== null && Number.isFinite(midi) && confidence >= TRAINING_MIN_CONFIDENCE
-    const correctedMidi = voiced ? foldTrainingOvertone(midi, targetMidi) : null
+    const correctedMidi = voiced ? midi : null
     const currentCents = correctedMidi !== null ? (correctedMidi - targetMidi) * 100 : null
     if (currentCents !== null) this.lastVoicedAtMs = nowMs
     if (currentCents !== null) this.readings.push({ atMs: nowMs, cents: currentCents })
@@ -206,7 +181,7 @@ export class TrainingPitchLockTracker {
       ? median(this.readings.map((reading) => reading.cents))
       : null
     if (rawMedian !== null) {
-      if (this.displayCents === null) this.displayCents = rawMedian
+      if (this.displayCents === null || Math.abs(rawMedian - this.displayCents) >= 700) this.displayCents = rawMedian
       else {
         const alpha = 1 - Math.exp(-(elapsedMs || 80) / DISPLAY_TIME_CONSTANT_MS)
         this.displayCents += clamp(
@@ -233,7 +208,7 @@ export class TrainingPitchLockTracker {
       if (nowMs - this.outsideSinceMs > DRIFT_GRACE_MS)
         this.progressMs = Math.max(0, this.progressMs - elapsedMs * PROGRESS_DRAIN_RATE)
     }
-    const locked = this.progressMs >= TRAINING_HOLD_MS
+    const locked = centered && this.progressMs >= TRAINING_HOLD_MS
     return {
       status: locked ? 'locked' : centered ? 'holding' : voiced ? 'adjust' : 'waiting',
       progress: this.progressMs / TRAINING_HOLD_MS,

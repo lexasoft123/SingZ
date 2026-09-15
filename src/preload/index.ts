@@ -47,6 +47,13 @@ const api: SingzApi = {
   separate: (path) => ipcRenderer.invoke('separation:start', path),
 
   cancelSeparation: () => ipcRenderer.invoke('separation:cancel'),
+  splitVocals: path => ipcRenderer.invoke('vocals:split', path),
+  cancelVocalSplit: () => ipcRenderer.invoke('vocals:cancel'),
+  onVocalSplitProgress: cb => {
+    const listener = (_e: IpcRendererEvent, percent: number): void => cb(percent)
+    ipcRenderer.on('vocals:progress', listener)
+    return () => { ipcRenderer.removeListener('vocals:progress', listener) }
+  },
 
   beatsMlAvailable: () => ipcRenderer.invoke('beats:mlAvailable'),
   melodyNativeAvailable: () => ipcRenderer.invoke('melody:available'),
@@ -178,6 +185,7 @@ const api: SingzApi = {
 
   listDesktopAudioInputs: () => ipcRenderer.invoke('audio-input:list'),
   startDesktopAudioInput: (options) => ipcRenderer.invoke('audio-input:start', options),
+  reportDesktopAudioInputFallback: (detail) => ipcRenderer.invoke('audio-input:fallback', detail),
   stopDesktopAudioInput: (token) => ipcRenderer.invoke('audio-input:stop', token),
   onDesktopAudioInputEvent: (cb) => {
     const listener = (
