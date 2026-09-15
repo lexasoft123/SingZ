@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { laneSliverLevels, LANE_LEVEL_CHUNK, LANE_LEVEL_SLIVERS, LANE_LEVEL_WINDOW } from '../playback/lane-levels'
-import { Alert, DeviceEventEmitter, Image, PixelRatio, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
+import { Alert, AppState, DeviceEventEmitter, Image, PixelRatio, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import {
   createNativeStackNavigator,
   type NativeStackNavigationProp,
@@ -95,6 +95,8 @@ import {
   type PlaybackOperation
 } from '../playback/backend'
 import { playbackCountInDisplay } from '../playback/count-in-display'
+import { iosNativePlayback } from '../playback/native'
+import { nowPlaying } from '../playback/now-playing'
 
 const SCRIM_TOP = require('../../assets/bg/scrim-top.png')
 const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
@@ -1066,6 +1068,51 @@ export default function PlayerScreen({
     publish()
     return engine.subscribe(publish)
   }, [engine, pushPos])
+
+  /* The song on the Lock Screen, in Control Center and in Android's media
+   * notification (src/playback/now-playing.ts). Only while this is the tab the
+   * singer is on: Train takes the output over, and a Lock Screen Play then
+   * would fight it. Remote commands go through the same paths the transport
+   * buttons use, fallback handling included. */
+  const finishPlaybackActionRef = useRef(finishPlaybackAction)
+  finishPlaybackActionRef.current = finishPlaybackAction
+  useEffect(() => {
+    if (!active) return
+    const controller = nowPlaying()
+    if (controller == null) return
+    const { title, artist } = splitSongName(project.name)
+    const detach = controller.attach({
+      backend: engine,
+      title,
+      artist,
+      actions: {
+        play: () => finishPlaybackActionRef.current(engine.play()),
+        toggle: () => finishPlaybackActionRef.current(engine.toggle()),
+        seek: seconds => engine.seek(seconds),
+        pause: () => engine.pause()
+      },
+      // The one place a song that stops behind the home screen gets parked:
+      // paused from the notification, run out, stopped by a focus loss, or
+      // refused its foreground service. Parking holds the output stream, so
+      // it stops rendering silence while nobody is looking; the park's own
+      // branches handle a transport already paused or already stopped.
+      onBackgroundLost: () => {
+        if (engine.kind === 'android-native' && AppState.currentState !== 'active') {
+          void iosNativePlayback.parkForBackground('song stopped in the background')
+        }
+      }
+    })
+    if (TEST) {
+      TEST.nowPlaying = () => ({
+        attached: true,
+        keepsPlayingInBackground: controller.keepsPlayingInBackground
+      })
+    }
+    return () => {
+      detach()
+      if (TEST) TEST.nowPlaying = () => ({ attached: false, keepsPlayingInBackground: false })
+    }
+  }, [active, engine, project])
 
   /* Leaving the Songs tab PAUSES, it does not tear down. Legacy has always
    * paused here (App's changeTab pauses the engine and keeps its buffers),

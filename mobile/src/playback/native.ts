@@ -2219,8 +2219,11 @@ export class IosNativePlaybackCoordinator {
    *
    * iOS declares the `audio` background mode and its playback session stays
    * active, so the graph keeps rendering and there is nothing to restore.
-   * Android has no media-playback foreground service, so it parks paused at
-   * the current frame; Play on return resumes from there.
+   * On Android it parks paused at the current frame; Play on return resumes
+   * from there. The one exception is decided by the caller, not here: a song
+   * left PLAYING that NowPlayingService's media foreground service keeps alive
+   * is not parked at all (App.tsx asks `nowPlaying().keepsPlayingInBackground`),
+   * and pausing it from the notification comes back through this method.
    */
   async parkForBackground(reason: string): Promise<void> {
     const handle = this.active;

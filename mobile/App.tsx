@@ -18,6 +18,7 @@ import { LoadedSongSequence } from './src/training/runtime'
 import { TEST } from './src/ui/testhooks'
 import { getRouteLatency, getTrimMs, setTrimMs, type RouteLatency } from './src/latency'
 import { iosNativePlayback, nativeCodecTargetProof } from './src/playback/native'
+import { nowPlaying } from './src/playback/now-playing'
 
 const engine = new MultitrackEngine()
 const Tabs = createBottomTabNavigator<RootTabParamList>()
@@ -758,7 +759,16 @@ export default function App(): React.JSX.Element {
         // Park the native graph; never stop it. Stopping released the
         // decoded lanes, so returning to a song cost a full six-stem decode
         // before Play made a sound, and the playhead came back at zero.
-        void iosNativePlayback.parkForBackground('app backgrounded')
+        //
+        // Except a song the singer left PLAYING that the OS agreed to keep
+        // alive: on Android that is NowPlayingService's media foreground
+        // service, the one thing the park existed for want of. It parks the
+        // moment it is paused from the notification instead.
+        if (nowPlaying()?.keepsPlayingInBackground) {
+          log('dsp', 'native graph kept playing in background · media session holds it')
+        } else {
+          void iosNativePlayback.parkForBackground('app backgrounded')
+        }
         void engine.suspendForBackground()
       } else if (next === 'active') {
         // Let a held stream go as soon as the singer is back: the callback
