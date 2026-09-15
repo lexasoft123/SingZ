@@ -785,6 +785,7 @@ export default function App(): React.JSX.Element {
   const [wizard, setWizard] = useState<{
     models: import('../../shared/types').ModelInfo[]
     origin: 'auto' | 'manual'
+    focusModel?: import('../../shared/types').ModelId
   } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [playing, setPlaying] = useState(false)
@@ -2117,6 +2118,11 @@ export default function App(): React.JSX.Element {
     try {
       await runVocalSplitRequest(current, {
         separate: () => window.singz.splitVocals(path),
+        modelsRequired: async (ids) => {
+          const models = await window.singz.modelsStatus()
+          if (!current()) return
+          setWizard({ models, origin: 'manual', focusModel: ids.includes('backing-vocals') ? 'backing-vocals' : ids[0] })
+        },
         read: file => window.singz.readAudio(file),
         decode: bytes => engine.decode(bytes),
         prepare: async checked => {
@@ -4011,7 +4017,7 @@ export default function App(): React.JSX.Element {
       )}
 
       {wizard && (
-        <SetupWizard models={wizard.models} origin={wizard.origin} onClose={closeWizard} />
+        <SetupWizard models={wizard.models} origin={wizard.origin} focusModel={wizard.focusModel} onClose={closeWizard} />
       )}
 
       {showLog && (
