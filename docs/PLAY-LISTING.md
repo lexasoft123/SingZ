@@ -5,11 +5,16 @@ declarations, the questionnaire answers, and the reasoning behind them — writt
 out so they can be answered rather than improvised at the keyboard. The listing
 copy itself is version-controlled and pushed by fastlane; see below.
 
-> **The one claim to keep straight.** The phone app *plays* song projects; it
-> does not split them. Splitting happens in the SingZ desktop app, and the
-> phone reads the result. Every paragraph below is written so a stranger
-> installing this from a cold search understands that before they tap Install —
-> both because it is true and because "misleading claims" is a Play policy.
+> **The one claim to keep straight.** SingZ works on music the singer already
+> has — there is no catalogue, no store and no streaming. A song reaches the
+> phone either split ON the phone (a file the singer picks, separated on the
+> device after a one-time ~136 MB model download, on phones with enough
+> memory) or prepared in the SingZ desktop app and read over Google Drive or a
+> copied folder. Every paragraph below is written so a stranger installing
+> this from a cold search understands that before they tap Install — both
+> because it is true and because "misleading claims" is a Play policy. (The
+> phone once could not split at all, and this box said so; a listing that
+> still says it undersells the app and contradicts the Add a song button.)
 
 ---
 
@@ -116,8 +121,25 @@ the questionnaire is about the app.
 | Health apps | No |
 | Data deletion URL | Not required — no account exists to delete |
 
-**Permissions.** The app declares `INTERNET` and nothing else. No sensitive or
-restricted permission is used, so no permissions declaration form is triggered.
+**Permissions.** `INTERNET`; `RECORD_AUDIO` (asked only when the singer opens a
+listening feature — the pitch guide or vocal training — analysed live, never
+recorded or stored); `POST_NOTIFICATIONS`; and three foreground-service types,
+each of which Play asks about in its own declaration (below).
+
+### Foreground service permissions
+
+Play Console → App content → **Foreground service permissions**. Every type
+the manifest declares needs a description, the user impact if the task were
+deferred or interrupted, and a short video of the feature in use.
+
+| Permission | Service | What to answer |
+| --- | --- | --- |
+| `FOREGROUND_SERVICE_MEDIA_PLAYBACK` | `NowPlayingService` | **Media playback.** SingZ plays music (a song split into instrument tracks for singing practice). While a song is playing, a media notification with play, pause and skip keeps it playing when the user locks the phone or leaves the app. The service is foreground only while a song is actually playing; pausing detaches it. *Impact if interrupted:* the song the user is singing along to stops mid-song. *Video:* open the sample song, press Play, lock the phone, show the music continuing and the lock-screen controls pausing and resuming it. |
+| `FOREGROUND_SERVICE_MEDIA_PROCESSING` (API 35+) / `FOREGROUND_SERVICE_DATA_SYNC` (29–34) | `SplitService` | **Separating a song into tracks.** Started only when the user adds a song and asks for it to be split; the split runs on the device for several minutes with a progress notification and a Cancel button. *Impact if interrupted:* the split is lost and has to start again. *Video:* Add a song → pick a file → the progress notification counting chunks. |
+
+`mediaPlayback` was added in 0.22.0 (Now Playing). Update the declaration
+before sending that release for review — Play Console checks the declared
+types against the bundle's manifest at submission.
 
 ---
 

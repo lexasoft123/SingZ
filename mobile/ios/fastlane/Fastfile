@@ -200,6 +200,49 @@ def api_key
   )
 end
 
+# Apple keeps ONE open review submission per platform, and a rejection nobody
+# has answered is still open: deliver refuses to create another while a
+# submission is WAITING_FOR_REVIEW, IN_REVIEW or UNRESOLVED_ISSUES
+# (deliver/lib/deliver/submit_for_review.rb:33 via
+# App#get_in_progress_review_submission, fastlane 2.240.0). It only finds out at
+# the very end, after deliver has already rewritten the editable version's
+# text and build, and in `release` after an archive and up to an hour of
+# processing. So ask first, before anything is built, uploaded or changed.
+# Needs the API key token already set (call api_key first).
+def refuse_if_review_in_progress
+  app = Spaceship::ConnectAPI::App.find(BUNDLE_ID) or UI.user_error!("No App Store Connect app for #{BUNDLE_ID}")
+  open = app.get_in_progress_review_submission(
+    platform: Spaceship::ConnectAPI::Platform::IOS, includes: "appStoreVersionForReview"
+  )
+  return if open.nil?
+
+  UI.user_error!(
+    "Refusing to submit: review submission #{open.id} for version " \
+    "#{open.app_store_version_for_review&.version_string || '?'} is #{open.state}, and Apple allows one " \
+    "open submission per platform. A rejected one stays open until it is resubmitted or cancelled in " \
+    "App Store Connect (Distribution ▸ App Review). What the reviewer said: fastlane ios review_messages."
+  )
+end
+
+# The thread kinds App Store Connect's own Resolution Center page asks for.
+# The app-scoped listing returns nothing without a threadType filter, and the
+# binary and metadata rejections are the ones no review submission owns.
+RESOLUTION_THREAD_TYPES = %w[
+  REJECTION_BINARY REJECTION_METADATA REJECTION_REVIEW_SUBMISSION
+  APP_MESSAGE_ARC APP_MESSAGE_ARB APP_MESSAGE_COMM APP_MESSAGE_INFORMATIONAL
+].freeze
+
+# App Review writes its messages as HTML. Terminal-readable is enough here —
+# the raw body is what `review_messages json:` keeps.
+def review_plain_text(html)
+  require "cgi"
+  text = html.to_s
+             .gsub(%r{<br\s*/?>|</p>|</div>|</li>}i, "\n")
+             .gsub(/<li[^>]*>/i, "• ")
+             .gsub(/<[^>]+>/, "")
+  CGI.unescapeHTML(text).gsub(/\n{3,}/, "\n\n").strip
+end
+
 platform :ios do
   # The one lane that is ALLOWED to create signing assets, and it is never
   # run by CI — see the readonly note at the top of this file. Run it once
@@ -414,7 +457,7 @@ platform :ios do
       # followed by `beta_external`: one wait, and the group named in one
       # place. NOT because chaining would race Apple — it would not. The
       # `upload_to_testflight` ACTION waits on the distribute-only path too
-      # (upload_to_testflight.rb:31 in the pinned 2.238.0 calls
+      # (upload_to_testflight.rb:31 in the pinned 2.240.0 calls
       # wait_for_build_processing_to_be_complete unless
       # skip_waiting_for_build_processing is set), even though
       # Pilot::BuildManager#distribute, which it wraps, does not wait itself.
@@ -466,6 +509,7 @@ platform :ios do
     # as tags-ignore in ios.yml: better not to start.
     contact = review_contact
     key = api_key
+    refuse_if_review_in_progress
     install_signing(api_key: key)
     ipa = archive(build_number: build_number)
 
@@ -502,7 +546,164 @@ platform :ios do
     version = verify_marketing_version
     build_number = options[:build] || ci_build_number
     contact = review_contact
-    submit_build(version: version, build_number: build_number, api_key: api_key, contact: contact)
+    key = api_key
+    refuse_if_review_in_progress
+    submit_build(version: version, build_number: build_number, api_key: key, contact: contact)
+  end
+
+  # Where every submission stands, in one read: App Store versions, their
+  # review submissions, and Beta App Review per TestFlight build. API key
+  # only, so it runs anywhere `beta` does and changes nothing.
+  #
+  # It says THAT something was rejected, never WHY — the reviewer's message
+  # and the guidelines cited live in the Resolution Center, which the public
+  # API does not have. That is `review_messages`.
+  desc "Show App Store and TestFlight review state (API key, read-only)"
+  lane :review_status do |options|
+    api_key
+    api = Spaceship::ConnectAPI
+    app = api::App.find(BUNDLE_ID) or UI.user_error!("No App Store Connect app for #{BUNDLE_ID}")
+
+    UI.header("App Store versions")
+    app.get_app_store_versions(includes: "build").each do |v|
+      UI.message("#{v.version_string} (#{v.build&.version || 'no build'})  #{v.app_store_state}  created #{v.created_date}")
+    end
+
+    UI.header("App Store review submissions")
+    submissions = app.get_review_submissions(includes: "items,appStoreVersionForReview")
+    UI.message("none") if submissions.empty?
+    submissions.each do |s|
+      items = s.items.to_a.map(&:state).tally.map { |state, n| n > 1 ? "#{n}× #{state}" : state }.join(", ")
+      UI.message("#{s.submitted_date || 'not submitted'}  #{s.state}  version #{s.app_store_version_for_review&.version_string || '?'}  items: #{items.empty? ? '-' : items}")
+    end
+
+    UI.header("TestFlight builds (newest first)")
+    # One page on purpose: Build.all walks every page, and the newest few are
+    # the ones anybody is asking about.
+    api.get_builds(
+      filter: { app: app.id },
+      includes: "preReleaseVersion,buildBetaDetail,betaAppReviewSubmission",
+      sort: "-uploadedDate",
+      limit: (options[:builds] || 10).to_i
+    ).to_models.each do |b|
+      beta = b.build_beta_detail
+      review = b.beta_app_review_submission&.beta_review_state || "not submitted"
+      UI.message("#{b.pre_release_version&.version} (#{b.version})  #{b.processing_state}  external #{beta&.external_build_state || '?'}  Beta App Review #{review}  uploaded #{b.uploaded_date}")
+    end
+
+    if submissions.any? { |s| s.state == Spaceship::ConnectAPI::ReviewSubmission::ReviewSubmissionState::UNRESOLVED_ISSUES }
+      UI.important(
+        "A submission has unresolved issues. The reviewer's message (Apple ID login, local only): " \
+        "scripts/with-apple-secrets.sh bash -c 'cd mobile/ios && bundle exec fastlane ios review_messages'"
+      )
+    end
+  end
+
+  # WHY App Review said no: the reviewer's messages and the guidelines they
+  # cite. The public API has none of it — measured 2026-09-15, an API key
+  # gets 404 "resource does not exist" from /v1/resolutionCenterThreads and
+  # /v1/reviewRejections alike, and spaceship's own source says as much.
+  # spaceship reaches App Store Connect's internal iris endpoints instead,
+  # which take an Apple ID web session. Run under scripts/with-apple-secrets.sh
+  # and the Apple ID and password come from the SOPS store (apple_id,
+  # apple_id_password — the password handed over as a temp file, never an
+  # environment variable); without them fastlane asks in the terminal. The 2FA
+  # code is asked for either way whenever the cached session (under
+  # ~/.fastlane/spaceship) has expired — interactive by nature, so never on CI.
+  #
+  # Two scopes, merged: threads owned by a review submission (what a rejected
+  # submission shows), and the app's own list, which also carries binary and
+  # metadata rejections that no submission owns.
+  desc "Print App Review's Resolution Center messages and rejection reasons (Apple ID login, local only)"
+  lane :review_messages do |options|
+    UI.user_error!(
+      "Refusing to run on CI: this lane logs in with an Apple ID, password and 2FA code, interactively. " \
+      "For state alone use review_status, which needs only the API key."
+    ) if ENV["CI"]
+
+    api = Spaceship::ConnectAPI
+    # The stored password goes only to the Apple ID it was stored with: naming
+    # another account with apple_id: falls back to fastlane's own prompt or
+    # keychain entry instead of sending it the wrong password.
+    user = options[:apple_id] || ENV["SINGZ_APPLE_ID"] || ENV["FASTLANE_USER"]
+    password_file = ENV["SINGZ_APPLE_ID_PASSWORD_FILE"].to_s
+    password = File.read(password_file) if user && user == ENV["SINGZ_APPLE_ID"] && File.file?(password_file)
+    api.login(user, password, use_portal: false, use_tunes: true)
+    app = api::App.find(BUNDLE_ID) or UI.user_error!("No App Store Connect app for #{BUNDLE_ID}")
+
+    submissions = app.get_review_submissions(includes: "appStoreVersionForReview")
+    threads = {}
+    submissions.each do |s|
+      s.fetch_resolution_center_threads.each { |t| threads[t.id] ||= { thread: t, submission: s } }
+    rescue StandardError => e
+      UI.important("threads for submission #{s.id}: #{e.message}")
+    end
+    begin
+      client = api.tunes_request_client
+      params = client.build_params(filter: { threadType: RESOLUTION_THREAD_TYPES.join(",") })
+      client.get("v1/apps/#{app.id}/resolutionCenterThreads", params).all_pages.flat_map(&:to_models).each do |t|
+        threads[t.id] ||= { thread: t, submission: nil }
+      end
+    rescue StandardError => e
+      UI.important("app-scoped threads: #{e.message}")
+    end
+
+    if threads.empty?
+      UI.success("No Resolution Center threads for #{BUNDLE_ID}.")
+      next
+    end
+
+    report = threads.values.sort_by { |e| e[:thread].created_date.to_s }.map do |entry|
+      t = entry[:thread]
+      s = entry[:submission]
+      messages = begin
+        t.fetch_messages(includes: "fromActor,rejections").sort_by { |m| m.created_date.to_s }
+      rescue StandardError => e
+        # One unreadable thread must not cost the others (or the json: file).
+        UI.important("messages for thread #{t.id}: #{e.message}")
+        []
+      end
+      reasons = begin
+        t.fetch_rejection_reasons.flat_map { |r| r.reasons.to_a }
+      rescue StandardError => e
+        UI.important("rejection reasons for thread #{t.id}: #{e.message}")
+        []
+      end
+
+      scope = s ? "submission #{s.submitted_date}, version #{s.app_store_version_for_review&.version_string || '?'}" : "app-scoped"
+      # iris sends no thread state for a submission rejection (measured on
+      # 0.19.0's), so print one only when there is one.
+      UI.header("#{[t.thread_type, t.state].compact.join('  ')}  opened #{t.created_date}  (#{scope})")
+      reasons.each do |r|
+        # iris is undocumented: take either spelling, and never print nothing.
+        r = r.is_a?(Hash) ? r.transform_keys(&:to_s) : { "raw" => r }
+        line = [r["reasonSection"] || r["section"], r["reasonDescription"] || r["descriptionText"] || r["description"]].compact.join(" ")
+        code = r["reasonCode"] || r["code"]
+        UI.error(line.empty? ? r.to_json : "#{line}#{code ? "  [#{code}]" : ''}")
+      end
+      messages.each do |m|
+        actor = m.from_actor
+        who = [actor&.actor_type, [actor&.user_first_name, actor&.user_last_name].compact.join(" ")].reject { |x| x.to_s.empty? }.join(" · ")
+        puts("\n--- #{m.created_date}  #{who}\n#{review_plain_text(m.message_body)}")
+      end
+
+      {
+        id: t.id, type: t.thread_type, state: t.state, created: t.created_date,
+        submission: s && { id: s.id, submitted: s.submitted_date, state: s.state,
+                           version: s.app_store_version_for_review&.version_string },
+        reasons: reasons,
+        messages: messages.map { |m| { created: m.created_date, from: m.from_actor&.actor_type, html: m.message_body } }
+      }
+    end
+
+    if options[:json]
+      # Against the repo root: Fastfile code runs from inside fastlane/, so a
+      # bare relative path would land somewhere nobody looks.
+      path = File.expand_path(options[:json], REPO_ROOT)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, JSON.pretty_generate(report))
+      UI.success("Saved #{report.size} thread(s) to #{path}")
+    end
   end
 
   desc "Push store listing TEXT only — screenshots go via scripts/push-ios-screenshots.rb"

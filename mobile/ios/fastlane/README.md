@@ -87,6 +87,22 @@ Build, then submit to the App Store for review — GOES LIVE BY ITSELF on approv
 
 Submit an ALREADY-UPLOADED build for App Store review — no rebuild. GOES LIVE BY ITSELF on approval
 
+### ios review_status
+
+```sh
+[bundle exec] fastlane ios review_status
+```
+
+Show App Store and TestFlight review state (API key, read-only)
+
+### ios review_messages
+
+```sh
+[bundle exec] fastlane ios review_messages
+```
+
+Print App Review's Resolution Center messages and rejection reasons (Apple ID login, local only)
+
 ### ios metadata
 
 ```sh

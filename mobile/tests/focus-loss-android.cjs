@@ -12,9 +12,16 @@
  *      gives a candidate up, wrong here — so the bridge must retire BOTH
  *      generations. Before the ledger this window left the song rendering
  *      under lost focus (parity plan, Step 4);
- *   3. a HELD stream: the app is backgrounded (the native graph parked, the
- *      stream held) when the loss arrives; on foreground the release is
- *      refused, the poll reports the stop, and Play must work again.
+ *   3. a HELD stream: the song is paused and the app backgrounded (the
+ *      native graph parked, the stream held) when the loss arrives; on
+ *      foreground the release is refused, the poll reports the stop, and
+ *      Play must work again. PAUSED first on purpose: since Now Playing a
+ *      song left PLAYING is kept playing under the media session instead of
+ *      parked, which is window 4;
+ *   4. a song PLAYING under the media session in the background (the
+ *      mediaPlayback foreground service up, nothing parked) when the loss
+ *      arrives: the song stops, the log says why, the app parks what is left,
+ *      and Play in the app afterwards works.
  *
  * The loss is delivered by `NativeAudioRuntime.debugAudioFocusChange` (reached
  * as `__r('node_modules/react-native/index.js').NativeModules` — Metro's
@@ -160,6 +167,10 @@ async function main() {
     await playAgain(dev, 'armed swap')
 
     // ---- 3. a held stream --------------------------------------------------
+    // Pause first: a song left PLAYING is kept playing in the background under
+    // the media session now, and never parks — that is window 4.
+    r = await watch(dev, { ms: 6000, every: 30, action: 'b.pause();', cond: halted, holdAfterHitMs: 300, stopOnHit: false })
+    if (r.hit === null) throw new Error('the song never paused before window 3')
     since = await now(dev)
     const bg = await dev.background()
     // The park is logged when the hold lands, which under a busy host came
@@ -181,6 +192,21 @@ async function main() {
     rule('held stream: the app survived the loss and the foreground', fg.samePid !== false, fg.detail)
     await playAgain(dev, 'held stream')
     rule('held stream: the log carries the focus stop', lines.some((l) => /focus/i.test(l)), lines.slice(-3).join(' | ') || 'no lines')
+
+    // ---- 4. playing under the media session in the background -------------
+    since = await now(dev)
+    const bg4 = await dev.background()
+    await sleep(2500)
+    const kept = await logLines(dev, since, '/kept playing in background|parked for background/i')
+    rule('media session: a song left playing is kept playing, not parked', kept.some((l) => /kept playing in background/i.test(l)) && !kept.some((l) => /parked for background/i.test(l)), kept.join(' | ') || `no line · ${bg4.detail}`)
+    r = await watch(dev, { ms: 8000, every: 50, action: `void ${FOCUS_LOSS};`, cond: halted, holdAfterHitMs: 1500, stopOnHit: false })
+    rule('media session: a focus loss stops the song behind the home screen', r.hit !== null, r.hit !== null ? `halted after ${Math.round(r.hit)} ms` : 'still moving')
+    const fg4 = await dev.foreground()
+    await sleep(2500)
+    lines = await logLines(dev, since, '/focus|stopped in the background|parked/i')
+    rule('media session: the app survived the loss and the foreground', fg4.samePid !== false, fg4.detail)
+    rule('media session: the log carries the focus stop', lines.some((l) => /focus/i.test(l)), lines.slice(-3).join(' | ') || 'no lines')
+    await playAgain(dev, 'media session')
   } finally {
     try { await restoreVoice(dev) } catch {}
     try { await restorePreference(dev) } catch {}

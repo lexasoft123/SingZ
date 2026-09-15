@@ -27,12 +27,23 @@ WHAT YOU CAN DO WHILE SINGING
 • Six faders, one per instrument. Silence what you want to replace.
 • Lyrics that light up word by word as the song plays — tap any line to jump
   there.
-• A pitch guide that draws the melody and shows where your voice actually sits
-  against it.
 • Transpose to a key that suits your voice, without the song turning to chipmunk.
 • Slow a passage down without changing its pitch, until your mouth catches up.
-• Loop the eight bars you keep fumbling, with a count-in and a click if you
-  want one.
+• Loop the eight bars you keep fumbling, with a count-in that lights each click.
+• Lock the phone and keep going. The song plays on, and the Lock Screen and
+  Control Center have play, pause, a scrub bar and ten-second skips — so the
+  phone can sit in your pocket or on the music stand.
+
+Songs open in a moment: the tracks stream from their files as they play instead
+of the whole song being loaded into memory first.
+
+TRAIN YOUR EAR AND YOUR VOICE
+
+The Train tab plays you a note and listens: single notes, intervals, notes in a
+chord, carrying a line — in a key you pick, or the key of the song you just had
+open. It waits until you hold the note in tune for a moment before moving on.
+Not in the mood to sing? Switch to Identify and name what you heard instead.
+The microphone is only for listening; nothing is recorded or stored.
 
 PRACTICE THAT PUSHES BACK
 
@@ -40,13 +51,19 @@ Training mode drops the tracks you lean on, on a schedule — every few bars, or
 at the start of each lyric line. The backing vocal disappears and you find out
 whether you knew the harmony or were following it. Turn it up as you improve.
 
+LYRICS YOU CAN PUT RIGHT
+
+When a word comes out wrong, fix it in the desktop app: type the real words,
+drag a word onto the exact moment it is sung, or let SingZ line the whole song
+up for you. The corrected lyrics reach the phone the next time it syncs.
+
 OFFLINE, AND YOURS
 
 Songs you open are kept on the phone, so the train, the car park and the green
-room all work with no signal. iCloud/Google Drive sign-in is optional: SingZ
-asks only for access to files it created itself, never the rest of your
-storage, and there is no SingZ account to make. No ads, no analytics, no
-tracking — the code is public if you would like to check.
+room all work with no signal. Google Drive sign-in is optional: SingZ asks only
+for access to files it created itself, never the rest of your Drive, and there
+is no SingZ account to make. No ads, no analytics, no tracking — the code is
+public if you would like to check.
 
 Bring your own music. SingZ has no catalogue and no store; it works on the
 recordings you already have.
