@@ -1,3 +1,5 @@
+import type { ModelId, VocalSplitResult } from '../../shared/types'
+
 /** A cancellation owns the whole renderer request, including IPC reads and
  * opaque decode promises that continue after the main process has finished. */
 export class VocalSplitRequests {
@@ -26,7 +28,8 @@ export type CheckedAwait = <T>(operation: Promise<T>) => Promise<T>
 export async function runVocalSplitRequest<T>(
   current: () => boolean,
   operations: {
-    separate: () => Promise<{ ok: true; lead: string; backing: string } | { ok: false; error: string; cancelled?: boolean }>
+    separate: () => Promise<VocalSplitResult>
+    modelsRequired?: (ids: ModelId[]) => Promise<void>
     read: (path: string) => Promise<ArrayBuffer>
     decode: (bytes: ArrayBuffer) => Promise<T>
     prepare: (checked: CheckedAwait) => Promise<void>
@@ -44,6 +47,10 @@ export async function runVocalSplitRequest<T>(
     const paths = await checked(operations.separate())
     if (!paths.ok) {
       if (paths.cancelled) return 'discarded'
+      if (paths.needsModels?.length && operations.modelsRequired) {
+        await checked(operations.modelsRequired(paths.needsModels))
+        return 'discarded'
+      }
       throw new Error(paths.error)
     }
     const leadBytes = await checked(operations.read(paths.lead))

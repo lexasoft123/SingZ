@@ -123,3 +123,28 @@ describe('whole vocal split request ownership', () => {
   })
 
 })
+
+
+describe('missing vocal models', () => {
+  it('opens model setup without touching audio or cancelling analyses', async () => {
+    const ops = { ...operations(),
+      separate: vi.fn(async () => ({ ok: false as const, error: 'Download models', needsModels: ['backing-vocals' as const] })),
+      modelsRequired: vi.fn(async () => {})
+    }
+    expect(await runVocalSplitRequest(() => true, ops)).toBe('discarded')
+    expect(ops.modelsRequired).toHaveBeenCalledExactlyOnceWith(['backing-vocals'])
+    expect(ops.read).not.toHaveBeenCalled()
+    expect(ops.prepare).not.toHaveBeenCalled()
+    expect(ops.commit).not.toHaveBeenCalled()
+  })
+  it('does not open model setup for a request cancelled before the result arrives', async () => {
+    const requests = new VocalSplitRequests()
+    const response = deferred<{ ok: false; error: string; needsModels: ['backing-vocals'] }>()
+    const ops = { ...operations(), separate: () => response.promise, modelsRequired: vi.fn(async () => {}) }
+    const result = runVocalSplitRequest(requests.begin(), ops)
+    requests.cancel()
+    response.resolve({ ok: false, error: 'Download models', needsModels: ['backing-vocals'] })
+    expect(await result).toBe('discarded')
+    expect(ops.modelsRequired).not.toHaveBeenCalled()
+  })
+})

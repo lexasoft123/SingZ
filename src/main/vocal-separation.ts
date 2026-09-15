@@ -11,6 +11,7 @@ import { modelsDir, needsVocalRuntime, packPython, vocalRuntimeDir } from './mod
 import { VOCAL_MODEL_FILE, VOCAL_MODEL_SHA256 } from './vocal-model'
 import { hashFile, spawnEnv } from './separation'
 import { log } from './log'
+import type { VocalSplitResult } from '../shared/types'
 
 const issuedLeads = new Set<string>()
 const RUNNER_VERSION = createHash('sha256').update(RUNNER).digest('hex').slice(0, 12)
@@ -31,9 +32,7 @@ class VocalSeparator {
   private child: ChildProcess | null = null
   cancel(): void { this.cancelled = true; this.child?.kill('SIGKILL') }
 
-  async split(path: string, progress: (p: number) => void): Promise<
-    { ok: true; lead: string; backing: string } | { ok: false; error: string; cancelled?: boolean }
-  > {
+  async split(path: string, progress: (p: number) => void): Promise<VocalSplitResult> {
     if (this.busy) return { ok: false, error: 'Backing vocal separation is already running.' }
     this.busy = true
     this.cancelled = false
@@ -55,11 +54,11 @@ class VocalSeparator {
         return { ok: true, lead, backing }
       }
       try { await stat(packPython()); await stat(join(modelsDir(), VOCAL_MODEL_FILE)) } catch {
-        throw new Error('Open the model manager and download the stem splitter and Lead and backing vocals model first.')
+        return { ok: false, error: 'Download the models for vocal separation.', needsModels: ['gpu-splitter', 'backing-vocals'] }
       }
       if (needsVocalRuntime()) {
         try { await stat(join(vocalRuntimeDir(), 'onnxruntime', '__init__.py')) } catch {
-          throw new Error('Open the model manager and download Lead and backing vocals to install its optional runtime.')
+          return { ok: false, error: 'Download the vocal separation runtime.', needsModels: ['backing-vocals'] }
         }
       }
       if (this.cancelled) throw new Error('Cancelled')

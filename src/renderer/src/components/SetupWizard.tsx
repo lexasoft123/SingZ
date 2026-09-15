@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import type { ModelId, ModelInfo } from '../../../shared/types'
 import { Modal } from '@singz/ui'
 
 interface Props {
   models: ModelInfo[]
   origin: 'auto' | 'manual'
+  focusModel?: ModelId
   onClose: () => void
 }
 
@@ -15,12 +16,20 @@ export function setupWizardCloseAction(
   return origin === 'auto' && busy ? 'leave-running' : 'cancel'
 }
 
+/** The vocal model uses the downloaded splitter's Python, even with system demucs. */
+export function modelDownloadTargets(id: ModelId, models: ModelInfo[]): ModelId[] {
+  return id === 'backing-vocals' && models.some((model) => model.id === 'gpu-splitter' && !model.present)
+    ? ['gpu-splitter', id] : [id]
+}
+
 /**
  * Model manager / first-run setup. Required items download automatically
  * (auto origin); optional packs have their own Get button. Everything lands
  * in the shared local cache with per-model progress.
  */
-export default function SetupWizard({ models: initial, origin, onClose }: Props): React.JSX.Element {
+export default function SetupWizard({ models: initial, origin, focusModel, onClose }: Props): React.JSX.Element {
+  const focusRow = useRef<HTMLDivElement>(null)
+  useEffect(() => { focusRow.current?.scrollIntoView({ block: 'nearest' }) }, [focusModel])
   const [models, setModels] = useState(initial)
   const [progress, setProgress] = useState<Record<string, number>>({})
   const [running, setRunning] = useState<ReadonlySet<string>>(new Set())
@@ -85,8 +94,10 @@ export default function SetupWizard({ models: initial, origin, onClose }: Props)
           {models.map((m) => {
             const isRunning = running.has(m.id)
             const pct = progress[m.id] ?? 0
+            const targets = modelDownloadTargets(m.id, models)
+            const downloadMb = models.filter((model) => targets.includes(model.id)).reduce((sum, model) => sum + model.sizeMb, 0)
             return (
-              <div key={m.id} className={`wiz-row${m.present ? ' done' : ''}`}>
+              <div key={m.id} ref={m.id === focusModel ? focusRow : undefined} data-model-id={m.id} className={`wiz-row${m.present ? ' done' : ''}`}>
                 <div className="wiz-head">
                   <span className="wiz-name">{m.label}</span>
                   {m.present && !isRunning ? (
@@ -97,21 +108,21 @@ export default function SetupWizard({ models: initial, origin, onClose }: Props)
                         className="pill ghost small"
                         title="Download and install this again — fixes an install that exists but won't run"
                         disabled={busy}
-                        onClick={() => void download([m.id])}
+                        onClick={() => void download(targets)}
                       >
                         Reinstall
                       </button>
                     </span>
                   ) : isRunning ? (
                     <span className="wiz-size">{Math.round(pct)}%</span>
-                  ) : m.optional ? (
+                  ) : !m.present ? (
                     <button
                       type="button"
                       className="pill ghost small"
                       disabled={busy}
-                      onClick={() => void download([m.id])}
+                      onClick={() => void download(targets)}
                     >
-                      Get · {m.sizeMb} MB
+                      Get · {downloadMb} MB
                     </button>
                   ) : (
                     <span className="wiz-size">{m.sizeMb} MB</span>

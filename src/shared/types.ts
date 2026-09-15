@@ -22,6 +22,10 @@ export type EngineStatus =
       needsModels?: boolean
     }
 
+export type VocalSplitResult =
+  | { ok: true; lead: string; backing: string }
+  | { ok: false; error: string; cancelled?: boolean; needsModels?: ModelId[] }
+
 export type ModelId = 'gpu-splitter' | 'whisper' | 'aligner' | 'backing-vocals'
 
 export interface ModelInfo {
@@ -1185,7 +1189,7 @@ export interface SingzApi {
   ): Promise<{ ok: true; path: string; name: string; size: number } | { ok: false; error: string }>
   checkEngine(force?: boolean): Promise<EngineStatus>
   separate(path: string): Promise<SeparateResult>
-  splitVocals(path: string): Promise<{ ok: true; lead: string; backing: string } | { ok: false; error: string; cancelled?: boolean }>
+  splitVocals(path: string): Promise<VocalSplitResult>
   cancelVocalSplit(): Promise<void>
   onVocalSplitProgress(cb: (percent: number) => void): () => void
   cancelSeparation(): Promise<void>
