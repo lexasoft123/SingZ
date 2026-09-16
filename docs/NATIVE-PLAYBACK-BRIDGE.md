@@ -489,6 +489,30 @@ running generation, no stop, no unload, the landing awaited on
 song is paused, or on the forced route-change rebuild, where the stream a seam
 would keep is the one that went away.
 
+**A prepared graph names ONE output device, and a phone's route does not hold
+still.** The uid, the channels and the sample rate go into the prepare, and
+`SingzVerifyPlaybackAudioSession` refuses the handoff unless the active route
+is still that device — "The active iOS output route does not match the
+prepared device", which it also answers when iOS reports more than one output
+at once. The two drift apart routinely, because the graph is prepared when the
+song OPENS while Play can be minutes later, and in between a car connects,
+headphones come out, or a call ends on another endpoint. A field log caught it
+twice on one iPhone two days apart: the graph was prepared for the speaker,
+Play was refused, and the player sat STOPPED with an error until the song was
+closed and opened again, which prepared against whatever was live by then and
+played first time. Nothing retried, because the route was only ever read when
+a graph was prepared. The iOS coordinator now reads it again at exactly that
+refusal (`reprepareForMovedRoute`): the inventory is `currentRoute` at the
+moment it is asked (`zcore/platform/ios/audio_host_ios.mm`), so a status taken
+after the refusal is the route the session actually has — the same device
+means the refusal was about something else and is reported unchanged, a
+different one means the old generation is released and the graph prepared
+again for the route the singer is on. Once per Play, and only before `start`
+has been issued, since past that callbacks may have rendered and a retry would
+be a second audio owner. "Moved" is asked the way the verifier asks it — the
+device and the rate must match while the prepared channel INDICES only have to
+fit, so a route that grew a channel is the same route and buys no rebuild.
+
 ### Memory and retention
 
 `retainedBytes`, `graphArenaBytes` (bytes) and `laneDecodeFallback` (string,
