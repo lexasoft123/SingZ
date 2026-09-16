@@ -2568,6 +2568,128 @@ void countInLandsOnAnchorMidSong() {
   std::remove(wav.c_str());
 }
 
+// The same landing, with the pre-roll ending exactly where a hardware callback
+// ends. The transport jumps to the anchor at the head of the NEXT slice, and
+// telemetry is published at the end of a callback — so for one whole callback
+// the status said Playing at project frame 0, the top of the song, with the
+// landing still to come. Every count-in on the Windows field laptop ends that
+// way (WASAPI renders 480-frame callbacks, and a 120 bpm grid's beats sit on
+// 24000-frame multiples), and the desktop's seek bar read it as a jump to
+// 0.00 about one Space burst in five; a Pause landing in that callback parked
+// the transport there and reported the top of the song as the spot the next
+// Play would count in to, and a seam in it carried the song to the top. The
+// status says where the transport renders next, and a seam adopts that.
+void countInEndingOnACallbackBoundaryReportsTheLanding() {
+  constexpr uint32_t landing = 19200; // 0.4 s: one two-beat bar of pre-roll
+  constexpr uint32_t callback = 480;  // 40 callbacks of it, exactly
+  using State = singz::NativePlaybackTransportState;
+  std::vector<float> song(40000, 0.1F);
+  std::fill(song.begin() + landing, song.end(), 0.3F);
+  const std::string wav = writeWav("count-in-boundary.wav", 1, song);
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+
+  // Count in to the anchor and render exactly the pre-roll, reading the
+  // status after every callback of it.
+  const auto countInToTheBoundary = [&](uint64_t generation) {
+    singz::NativePlaybackPrepareConfig request = config();
+    request.cuePlan = cueRequest(false, 1, 0.0);
+    request.cuePlan->entrySeconds = 0.0;
+    request.cuePlan->countInAnchorSeconds = 0.4;
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    lanes.push_back(keyedLane("song", wav));
+    CHECK(session.prepare(std::move(request), std::move(lanes), generation).ok);
+    CHECK(session.status().preRollFrames == landing);
+    CHECK(session.openOutput(generation).ok && session.start(generation).ok);
+    for (uint32_t rendered = callback; rendered <= landing; rendered += callback) {
+      CHECK(fake->drive(callback, rendered == callback
+                                      ? singz::AudioHostDiscontinuityStart
+                                      : singz::AudioHostDiscontinuityNone));
+      const singz::NativePlaybackStatus status = session.status();
+      if (rendered < landing) {
+        CHECK(status.transportState == State::PreRoll &&
+              status.renderedProjectFrame ==
+                  static_cast<int64_t>(rendered) - landing);
+      }
+    }
+  };
+  const auto renderOneCallback = [&]() {
+    fake->captureOutput = true;
+    fake->outputTrace.clear();
+    CHECK(fake->drive(callback));
+    fake->captureOutput = false;
+    return fake->outputTrace;
+  };
+
+  // Playing through the boundary: the callback that ends the pre-roll reports
+  // the landing, as a transport edge (the projection that had matured since
+  // Start read a latency before frame 0), and the next one plays the anchor.
+  countInToTheBoundary(1);
+  const singz::NativePlaybackStatus boundary = session.status();
+  CHECK(boundary.transportState == State::Playing &&
+        boundary.renderedProjectFrame == static_cast<int64_t>(landing) &&
+        boundary.remainingPreRollFrames == 0 &&
+        boundary.audibleProjectionQuality !=
+            singz::NativePlaybackAudibleProjectionQuality::Current);
+  const std::vector<float> landed = renderOneCallback();
+  CHECK(!landed.empty() && near(landed[0], pcm16(0.3F), 0.0001F));
+  const singz::NativePlaybackStatus playing = session.status();
+  CHECK(playing.transportState == State::Playing &&
+        playing.renderedProjectFrame ==
+            static_cast<int64_t>(landing + callback) &&
+        playing.lanes[0].cursorFrames == landing + callback);
+  CHECK(session.unload(1).ok);
+
+  // Paused in that callback: parked AT the landing, and a resume plays the
+  // anchor rather than the top of the song.
+  countInToTheBoundary(2);
+  CHECK(session.pause(2).ok);
+  CHECK(fake->drive(callback));
+  const singz::NativePlaybackStatus parked = session.status();
+  // Parked, the projection matures on the Pause's own edge like any other.
+  CHECK(parked.transportState == State::Paused &&
+        parked.renderedProjectFrame == static_cast<int64_t>(landing) &&
+        parked.audibleProjectionQuality ==
+            singz::NativePlaybackAudibleProjectionQuality::Current &&
+        parked.audibleProjectFrame == static_cast<int64_t>(landing));
+  CHECK(session.resume(2).ok);
+  const std::vector<float> resumed = renderOneCallback();
+  CHECK(!resumed.empty() && near(resumed[0], pcm16(0.3F), 0.0001F));
+  const singz::NativePlaybackStatus afterResume = session.status();
+  CHECK(afterResume.transportState == State::Playing &&
+        afterResume.renderedProjectFrame ==
+            static_cast<int64_t>(landing + callback));
+  CHECK(session.unload(2).ok);
+
+  // Paused in that callback and then SEAMED — a control touched while parked,
+  // which the phones do as a paused swap, prepared at the frame the status
+  // reported. The replacement adopts the outgoing clock and has no landing of
+  // its own, so the clock it adopts has to be the landing.
+  countInToTheBoundary(3);
+  CHECK(session.pause(3).ok && fake->drive(callback));
+  singz::NativePlaybackPrepareConfig replacement = config();
+  replacement.swapFromGeneration = 3;
+  replacement.preparedStartProjectFrame = session.status().renderedProjectFrame;
+  replacement.initialTransport.startPaused = true;
+  auto replacementLanes = std::vector<singz::NativePlaybackLaneSource>{};
+  replacementLanes.push_back(keyedLane("song", wav));
+  CHECK(session.prepare(std::move(replacement), std::move(replacementLanes), 4)
+            .ok);
+  CHECK(fake->drive(callback));
+  const singz::NativePlaybackStatus seamed = session.status();
+  CHECK(seamed.generation == 4 && seamed.transportGeneration == 4 &&
+        seamed.swapLandings == 1 && seamed.transportState == State::Paused &&
+        seamed.renderedProjectFrame == static_cast<int64_t>(landing));
+  CHECK(session.resume(4).ok);
+  const std::vector<float> afterSeam = renderOneCallback();
+  CHECK(!afterSeam.empty() && near(afterSeam[0], pcm16(0.3F), 0.0001F));
+  CHECK(session.status().renderedProjectFrame ==
+        static_cast<int64_t>(landing + callback));
+  CHECK(session.unload(4).ok);
+  std::remove(wav.c_str());
+}
+
 void cueGraphTransportCompositionAndLifetime() {
   constexpr uint32_t preRoll = 19200;
   constexpr uint32_t songFramesToRender = 10000;
@@ -6923,6 +7045,7 @@ int main() {
   trainingDuckComposition();
   cueGraphTransportCompositionAndLifetime();
   countInLandsOnAnchorMidSong();
+  countInEndingOnACallbackBoundaryReportsTheLanding();
   nativeReferencePreviewClickContract();
   transportControlKernelAndTelemetry();
   resumeAfterAQueuedSeekPlaysFromWhereTheSeekLands();

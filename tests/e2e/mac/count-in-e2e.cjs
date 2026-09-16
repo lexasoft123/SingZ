@@ -51,6 +51,18 @@
  *      events and samples the bar at 30 ms, the only cadence that sees a
  *      one-poll dip.
  *
+ *   5. SPACE, HAMMERED, STILL — one burst in five on the Windows field
+ *      laptop, never on the Mac, after both fixes above. A count-in whose
+ *      pre-roll is a whole number of callbacks long ends on a callback
+ *      boundary, the landing is the next callback's first act, and the core
+ *      published "playing at frame 0" for the one callback in between; a
+ *      poll inside it drew 0.00. The laptop renders 480-frame callbacks and
+ *      its song's grid sits on them, so every count-in there was exposed and
+ *      only the 50 ms poll's luck decided the verdict. The core reports the
+ *      landing for that callback now, and leg 10 aims a count-in at a
+ *      callback boundary on purpose and reads the core's status back-to-back
+ *      across it, so the verdict no longer depends on the poll.
+ *
  * Reads three opinions where the transport-race driver taught us to:
  * `__test.playing` (the button), `engine.playing`, and the core's own
  * `transportState`. The whole run is also judged on the log: ANY dsp warning
@@ -110,11 +122,22 @@ const SNAP =
  * a few milliseconds before the engine's own flag and the button follow).
  * Every sample is a node-side evaluate, never a page-side wait: see waitFor.
  * The widest gap between two samples rides along, because a machine that
- * starves the sampling for longer than a count-in cannot be judged on it. */
+ * starves the sampling for longer than a count-in cannot be judged on it.
+ *
+ * The dots are ALSO recorded in the page, every 2 ms (`rows.dotsSeen`), so a
+ * dot that is lit for less than the 80-90 ms between samples is still seen.
+ * That does NOT make "the dots stopped at 3/4" go away when a Pause parks a
+ * few hundredths of a second past a beat: measured on the Mac, last clicks
+ * 19, 24 and 39 ms before the landing ended at 3/4 with the recorder seeing
+ * no fourth dot in 500+ ticks, while 54 ms and more lit all four. The dots
+ * are drawn from the last 50 ms status poll, unprojected, so a last click
+ * within about a poll of the landing can go unlit in the app itself — a red
+ * here is the product's, not the sampling's. */
 async function trace(win, ms, until = () => false) {
   const rows = []
   const t0 = Date.now()
   let fired = false
+  await val(win, DOTS_RECORD)
   while (Date.now() - t0 < ms) {
     const row = JSON.parse(await val(win, SNAP))
     rows.push(row)
@@ -130,8 +153,22 @@ async function trace(win, ms, until = () => false) {
     await sleep(400)
     rows.push(JSON.parse(await val(win, SNAP)))
   }
+  rows.dotsSeen = await val(win, DOTS_COLLECT)
   return rows
 }
+
+/** Start and collect the page-side dots recorder `trace` runs beside its
+ * samples: the most dots lit at once, the count they are out of, and how
+ * many 2 ms ticks showed a row at all. */
+const DOTS_RECORD =
+  '(function(){ if (window.__dotsRec) clearInterval(window.__dotsRec.id);' +
+  ' const rec = { done: 0, total: 0, ticks: 0 };' +
+  ' rec.id = setInterval(function(){ const ci = __test.engine.countInStatus;' +
+  ' if (ci) { rec.ticks++; rec.total = ci.total; if (ci.done > rec.done) rec.done = ci.done } }, 2);' +
+  ' window.__dotsRec = rec; return true })()'
+const DOTS_COLLECT =
+  '(function(){ const rec = window.__dotsRec; if (!rec) return null; clearInterval(rec.id);' +
+  ' window.__dotsRec = null; return { done: rec.done, total: rec.total, ticks: rec.ticks } })()'
 
 /** Wait for `expr` (evaluated in the page) to be truthy, polling FROM NODE
  * every 25 ms. Never `waitForFunction` for a short phase: that helper polls
@@ -223,6 +260,56 @@ async function burst(win, label, schedule, tailMs, floor, fail) {
   return `${rows.length} samples, bar ${lowest.toFixed(2)}..${Math.max(...rows.map((r) => r.pos)).toFixed(2)} s, ${backwards.length} backward move(s), ends ${last.core} at ${last.pos.toFixed(2)} s`
 }
 
+/** Press Play from the page and read the core's own status back-to-back —
+ * one IPC round trip after another, no sleep — with the bar beside each read,
+ * until the song has played half a second past `landingFrame` (or, with
+ * `landingFrame` null, a few reads after it is playing at all), or 12 s pass.
+ * The facade polls at 50 ms, so a window one callback wide is a lottery for
+ * it; this is not. The rows begin with the generation the press retires. */
+async function readAcross(win, landingFrame) {
+  const result = await val(win, `(async function(){
+    const b = document.querySelector('button.play')
+    if (!b || b.disabled) return { error: 'the transport button is ' + (b ? 'disabled' : 'missing') }
+    b.click()
+    const rows = []
+    const t0 = performance.now()
+    let after = 0
+    while (performance.now() - t0 < 12000) {
+      const s = await window.singz.desktopPlaybackStatus()
+      const r = Number(s.renderedProjectFrame)
+      rows.push({ gen: s.generation, st: s.transportState, r, cont: Number(s.continuousFrame),
+        pre: Number(s.preRollFrames), pos: __test.engine.position })
+      const past = ${landingFrame === null ? 'true' : `r > ${landingFrame} + s.format.sampleRate / 2`}
+      if (s.transportState === 'playing' && past && ++after > 3) break
+    }
+    return { rows }
+  })()`)
+  if (result.error) throw new Error(result.error)
+  return result.rows
+}
+
+/** The rows of the generation the press created: the last one read. */
+const ownGeneration = (rows) => rows.filter((r) => r.gen === rows[rows.length - 1].gen)
+
+/** The callback size the route renders, from the core's continuous frame
+ * between reads: the greatest common divisor of its steps, which is the
+ * callback when every callback has the same size. 0 when too few steps were
+ * seen to say. */
+function callbackFrames(rows) {
+  const gcd = (a, b) => (b === 0 ? a : gcd(b, a % b))
+  let result = 0
+  let steps = 0
+  const running = (r) => r.st === 'pre-roll' || r.st === 'playing'
+  for (let i = 1; i < rows.length; i++) {
+    // Between two reads of a running transport only: the step out of a
+    // stopped one starts wherever the stream's first callback put it.
+    if (!running(rows[i - 1]) || !running(rows[i])) continue
+    const step = rows[i].cont - rows[i - 1].cont
+    if (step > 0) { result = gcd(result, step); steps++ }
+  }
+  return steps >= 5 ? result : 0
+}
+
 /** Judge one count-in, sampled from the press: a pre-roll must be seen, the
  * bar must hold at `landing` throughout it, the dots must fill, and the
  * song must then be running near the landing with all three opinions
@@ -232,8 +319,11 @@ function judgeCountIn(label, rows, landing, fail) {
   const lowest = pre.length ? Math.min(...pre.map((r) => r.pos)) : NaN
   const highest = pre.length ? Math.max(...pre.map((r) => r.pos)) : NaN
   const dots = rows.filter((r) => r.dots !== null)
-  const maxDone = dots.length ? Math.max(...dots.map((r) => r.dots.done)) : 0
-  const total = dots.length ? dots[0].dots.total : 0
+  // The samples and the page's own 2 ms recorder together: see trace.
+  const recorded = rows.dotsSeen ?? { done: 0, total: 0, ticks: 0 }
+  const maxDone = Math.max(recorded.done, ...dots.map((r) => r.dots.done))
+  const total = dots.length ? dots[0].dots.total : recorded.total
+  const dotsShown = dots.length > 0 || recorded.ticks > 0
   const landed = rows.find((r) => r.core === 'playing' && r.pos >= landing - SLACK)
   const last = rows[rows.length - 1]
   const gap = rows.gapMs ?? 0
@@ -248,8 +338,8 @@ function judgeCountIn(label, rows, landing, fail) {
   if (pre.length && highest > landing + SLACK) {
     fail.push(`${label}: the bar ran ahead to ${highest.toFixed(2)} s during the count-in (landing ${landing} s)`)
   }
-  if (dots.length === 0) fail.push(`${label}: the count-in dots never showed`)
-  if (dots.length && maxDone < total) fail.push(`${label}: the dots stopped at ${maxDone}/${total}`)
+  if (!dotsShown) fail.push(`${label}: the count-in dots never showed`)
+  if (dotsShown && maxDone < total) fail.push(`${label}: the dots stopped at ${maxDone}/${total}`)
   if (!landed) fail.push(`${label}: the song never came in at the landing (last: ${last.core} at ${last.pos.toFixed(2)} s)`)
   if (landed && Math.abs(landed.pos - landing) > SLACK + 0.3) {
     fail.push(`${label}: landed at ${landed.pos.toFixed(2)} s, expected ${landing} s`)
@@ -257,7 +347,7 @@ function judgeCountIn(label, rows, landing, fail) {
   if (last.button !== last.engine || (last.core === 'playing') !== last.button) {
     fail.push(`${label}: button=${last.button} engine=${last.engine} core=${last.core} — the three disagree`)
   }
-  return `pre-roll ${pre.length} samples (widest sampling gap ${gap} ms), bar ${Number.isNaN(lowest) ? '-' : `${lowest.toFixed(2)}..${highest.toFixed(2)}`} s, dots ${maxDone}/${total}, landed at ${landed ? landed.pos.toFixed(2) : '-'} s`
+  return `pre-roll ${pre.length} samples (widest sampling gap ${gap} ms), bar ${Number.isNaN(lowest) ? '-' : `${lowest.toFixed(2)}..${highest.toFixed(2)}`} s, dots ${maxDone}/${total} (${dots.length} samples, ${recorded.ticks} page ticks lit), landed at ${landed ? landed.pos.toFixed(2) : '-'} s`
 }
 
 ;(async () => {
@@ -490,6 +580,57 @@ function judgeCountIn(label, rows, landing, fail) {
     await sleep(600)
     const floor9b = JSON.parse(await val(win, SNAP)).pos
     console.log(`   count-in on, 3×Space at 250 ms then 5×Space at 100 ms: ${await burst(win, 'Space burst, count-in on', [0, 250, 250, 1500, 100, 100, 100, 100], 3500, floor9b, fail)}`)
+
+    // ── 10. A count-in that ends exactly on a callback boundary ─────────
+    //
+    // The burst above caught this one run in five on the field laptop and
+    // never on the Mac, which is how it outlived two fixes. The core lands a
+    // count-in at the head of the slice AFTER the pre-roll's last frame, and
+    // publishes its status at the end of a callback — so a pre-roll that is
+    // a whole number of callbacks long reported "playing at frame 0" for one
+    // callback before the landing, and a poll inside that window drew the
+    // bar at 0.00. On the laptop every count-in is that long (480-frame
+    // WASAPI callbacks, a grid on the 20 ms lattice, spots on it). This leg
+    // does not wait for the luck: it learns the callback the route really
+    // renders, aims a count-in whose pre-roll is a multiple of it, and reads
+    // the core's status back-to-back across the landing — about one read a
+    // millisecond there, against a window of ten.
+    if (await val(win, '__test.playing === true')) await pauseAndWait(win)
+    const grid = await val(win, '__test.engine.beats.beats')
+    const rate = await val(win, '__test.engine.nativePlayback.status.format.sampleRate')
+    const entry = grid.findIndex((t, i) => i > 8 && t > MID + 1)
+    if (entry < 0) throw new Error(`no beat past ${MID + 1} s to aim a count-in at`)
+    const probeFrame = Math.round((grid[entry] - 0.4 * (grid[entry] - grid[entry - 1])) * rate)
+    await val(win, `__test.engine.seek(${probeFrame / rate})`)
+    await sleep(900)
+    const probe = ownGeneration(await readAcross(win, null))
+    await pauseAndWait(win)
+    const callback = callbackFrames(probe)
+    const probePreRoll = probe.find((r) => r.pre > 0)?.pre ?? 0
+    if (callback < 64 || probePreRoll <= 0) {
+      // Callbacks of varying size cannot be aimed at, and a boundary landing
+      // is then as rare as it is on any unaimed count-in: say so, loudly.
+      console.log(`10. count-in ending on a callback boundary: SKIPPED — callback ${callback} frames, pre-roll ${probePreRoll} (this route does not render fixed-size callbacks)`)
+    } else {
+      const aimedFrame = probeFrame - (probePreRoll % callback)
+      if (!(aimedFrame > Math.round(grid[entry - 1] * rate))) throw new Error('aiming the count-in moved it past a beat')
+      const aimed = aimedFrame / rate
+      await val(win, `__test.engine.seek(${aimed})`)
+      await sleep(900)
+      const across = ownGeneration(await readAcross(win, aimedFrame))
+      await pauseAndWait(win)
+      const preRoll = across.find((r) => r.pre > 0)?.pre ?? 0
+      const below = across.filter((r) => r.st === 'playing' && r.r < aimedFrame)
+      const low = Math.min(...across.map((r) => r.pos))
+      const nearLanding = across.filter((r) => (r.st === 'pre-roll' && r.r >= -callback) ||
+        (r.st === 'playing' && r.r >= 0 && r.r <= aimedFrame + callback))
+      console.log(`10. count-in ending on a callback boundary at ${aimed.toFixed(4)} s: callback ${callback} frames, pre-roll ${preRoll} (${preRoll / callback} callbacks), ${across.length} status reads, ${nearLanding.length} within a callback of the landing, ${below.length} playing below it, bar ${low.toFixed(2)} s at lowest`)
+      if (!across.some((r) => r.st === 'pre-roll')) fail.push('count-in on a callback boundary: no pre-roll — this Play did not count in')
+      if (preRoll % callback !== 0) fail.push(`count-in on a callback boundary: could not aim — pre-roll ${preRoll} frames is not a multiple of the ${callback}-frame callback`)
+      if (nearLanding.length === 0) fail.push('count-in on a callback boundary: no status read fell within a callback of the landing — the reads were too sparse to see the window this leg exists for')
+      if (below.length) fail.push(`count-in on a callback boundary: the core reported playing at frame ${below[0].r}, below the landing at ${aimedFrame}, in ${below.length} status read(s)`)
+      if (low < aimed - SLACK) fail.push(`count-in on a callback boundary: the bar fell to ${low.toFixed(2)} s, below the landing at ${aimed.toFixed(2)} s`)
+    }
 
     // ── The log has the last word ───────────────────────────────────────
     const all = await logSince(win, t0)

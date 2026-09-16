@@ -598,20 +598,34 @@ struct PreparedPlaybackTransport {
   }
 
   Telemetry callbackTelemetry() const noexcept {
+    /* A count-in that ran out on the last frame of a callback has not landed
+       yet: the landing is the next slice's first act, which is the next
+       callback. Nothing renders in between, so the frame this transport plays
+       next IS the landing — and that is what is reported, as the transport
+       edge it is. Reported raw, it was Playing at frame 0 (or Paused there,
+       when a Pause was drained first) for a whole callback: the top of the
+       song, which the desktop's seek bar drew and a Pause remembered as the
+       spot to count in to next. It happens on every count-in whose pre-roll
+       is a multiple of the callback — WASAPI's 480 frames against a grid on
+       the 20 ms lattice, from a spot on it — measured on the Windows field
+       laptop in 5 of 5 such landings (and 0 of 3 others), and the bar drew
+       0.00 in 2 of 10 Space bursts there.
+       The landing itself stays where it is. Moving it to the end of the slice
+       would put the source move ahead of the next callback's Stretch-anchor
+       guard, which is the ordering nextSlice's refusal 202 depends on. */
+    const bool landingDue = landingPending && callbackProjectFrame >= 0;
+    const int64_t frame = landingDue ? landingProjectFrame : callbackProjectFrame;
+    const uint32_t fraction = landingDue ? 0u : callbackProjectFractionQ32;
     const uint32_t cueIndex =
-        cueEvents == nullptr
-            ? 0
-            : cueIndexAt(callbackProjectFrame, callbackProjectFractionQ32);
+        cueEvents == nullptr ? 0 : cueIndexAt(frame, fraction);
     Telemetry telemetry;
     telemetry.generation = generation;
     telemetry.state = callbackState;
-    telemetry.projectFrame = callbackProjectFrame;
-    telemetry.projectFractionQ32 = callbackProjectFractionQ32;
+    telemetry.projectFrame = frame;
+    telemetry.projectFractionQ32 = fraction;
     telemetry.continuousFrame = callbackContinuousFrame;
     telemetry.remainingPreRoll =
-        callbackProjectFrame < 0
-            ? static_cast<uint64_t>(-(callbackProjectFrame + 1)) + 1u
-            : 0u;
+        frame < 0 ? static_cast<uint64_t>(-(frame + 1)) + 1u : 0u;
     telemetry.cueEventsCompleted = cueIndex;
     telemetry.nextCueEvent = cueIndex;
     telemetry.loopEnabled = callbackLoopEnabled;
@@ -620,8 +634,14 @@ struct PreparedPlaybackTransport {
     telemetry.loopCount = callbackLoopCount;
     telemetry.seekCount = callbackSeekCount;
     telemetry.discontinuities = callbackDiscontinuities;
+    // A landing anchors the audible projection where it happens (see nextSlice),
+    // so a running transport with one due starts it over here and now. Parked
+    // in that callback, the Pause's own anchor stands and matures as usual.
+    const bool running = callbackState == NativePlaybackTransportState::Playing ||
+                         callbackState == NativePlaybackTransportState::PreRoll;
     telemetry.projectionAnchorContinuousFrame =
-        callbackProjectionAnchorContinuousFrame;
+        landingDue && running ? callbackContinuousFrame
+                              : callbackProjectionAnchorContinuousFrame;
     telemetry.lastBoundary = callbackLastBoundary;
     return telemetry;
   }
@@ -1405,6 +1425,16 @@ struct PreparedPlaybackTransport {
     callbackState = from.callbackState;
     callbackProjectFrame = from.callbackProjectFrame;
     callbackProjectFractionQ32 = from.callbackProjectFractionQ32;
+    // A count-in that ran out on the outgoing transport's last callback has
+    // not landed yet (see callbackTelemetry), and this generation has no
+    // landing of its own to finish it: it adopts the frame the outgoing one
+    // would have rendered next, which is also the frame its status reported.
+    // Copied raw, a seam in that callback — a control touched while paused
+    // there, which the phones seam — carried the song to the top.
+    if (from.landingPending && from.callbackProjectFrame >= 0) {
+      callbackProjectFrame = from.landingProjectFrame;
+      callbackProjectFractionQ32 = 0;
+    }
     callbackContinuousFrame = from.callbackContinuousFrame;
     callbackRouteGeneration = from.callbackRouteGeneration;
     callbackStreamGeneration = from.callbackStreamGeneration;
