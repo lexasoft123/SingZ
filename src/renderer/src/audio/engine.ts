@@ -153,6 +153,13 @@ export class MultitrackEngine {
   private region: { start: number; end: number } | null = null
   private regionLoop = false
   private boundTimer: ReturnType<typeof setInterval> | null = null
+  /** Native seeks issued, numbered, so a receipt that comes back after a
+   *  newer seek was issued cannot write its older target over it. */
+  private seekSeq = 0
+  /** Native seeks issued and not yet settled. While any is in flight the
+   *  engine's start and the client's position can disagree, and the
+   *  selection watcher does not judge. */
+  private seeksOutstanding = 0
   private training: TrainingSpec | null = null
   private ducked = new Set<string>()
   private trainTimer: ReturnType<typeof setInterval> | null = null
@@ -889,7 +896,7 @@ export class MultitrackEngine {
     if (active && this.boundTimer === null) {
       this.boundTimer = setInterval(() => {
         const r = this.region
-        if (!this._playing || !r || this.regionLoop) return
+        if (!this._playing || !r || this.regionLoop || this.seeksOutstanding > 0) return
         if (this.startOffset < r.end && this.position >= r.end - 0.015) {
           this.pause()
           this.startOffset = Math.min(r.end, this.duration)
@@ -1515,6 +1522,11 @@ export class MultitrackEngine {
       if (!this.nativePlayback.transportParked && (live === 'playing' || live === 'pre-roll')) {
         this._playing = true
         this.clearRequestedPlaybackError()
+        // Adopting a transport that is already running is still entering
+        // 'playing': the selection bound and the training schedule belong to
+        // that state, not to the command that happened to reach it.
+        this.syncBoundWatcher()
+        this.syncTrainWatcher()
         this.emit()
         return
       }
@@ -1558,6 +1570,17 @@ export class MultitrackEngine {
       if (requestGeneration !== this.generation) return
       this._playing = true
       this.clearRequestedPlaybackError()
+      // Arm the watchers, as every other path into playing does. Without
+      // this a plain resume played with NO selection bound and NO training
+      // schedule: a song's first Play takes the fresh-start path below and
+      // stopped at the end of a non-looping selection, and every Play after
+      // it — each one a resume — ran straight past. "The first few times it
+      // plays just the selection, then the cursor leaves it and plays on" is
+      // the field report this is here for. `togglePlay` already seeks back to
+      // the selection's start when the cursor sits at its end; what was
+      // missing was anything to stop it at the end again.
+      this.syncBoundWatcher()
+      this.syncTrainWatcher()
       this.emit()
       return
     }
@@ -1768,11 +1791,46 @@ export class MultitrackEngine {
   seek(t: number): void {
     const clamped = Math.max(0, Math.min(t, this.duration))
     if (this.nativePlayback?.active) {
-      void this.nativePlayback.seek(clamped).then(() => {
-        this.startOffset = clamped
-        this.trainTick()
-        this.emit()
-      }).catch((error) => console.error('Native seek failed:', error))
+      // `startOffset` moves NOW, not when the seek's receipt comes back. The
+      // native client reports the target as `position` from the moment the
+      // seek is issued, while this used to update `startOffset` two IPC round
+      // trips later — and in between, the selection watcher saw the OLD
+      // start (before the selection's end) beside the NEW position (past it)
+      // and paused the song: click a lyric line past a playing selection,
+      // or press → across its end, and the song stopped where it landed.
+      // Only a song's first native Play armed that watcher until every path
+      // into playing did, so the window reached every Play at once; measured
+      // in a model of this seek, 4 watcher phases in 25 paused at 2 ms per
+      // round trip and 20 in 25 at 10 ms, against 20-60 ms on a busy main.
+      //
+      // Seeks also OVERLAP — a held arrow key repeats every ~33 ms and a seek
+      // is two round trips — and that broke the fix above both ways: the
+      // FIRST seek's receipt wrote its older target over the second's start,
+      // and a seek queued behind another moved the start before the client's
+      // position had moved at all, so the watcher paused the song either way
+      // (a model of this against the real engine: every phase paused at
+      // 30 ms a round trip, in both directions). Each seek is numbered, and
+      // only the latest may touch the start when it settles; and while any
+      // seek is still in flight the watcher does not judge.
+      const seq = ++this.seekSeq
+      const previous = this.startOffset
+      this.startOffset = clamped
+      this.seeksOutstanding++
+      void this.nativePlayback.seek(clamped).then(
+        () => {
+          if (seq === this.seekSeq) this.startOffset = clamped
+          this.trainTick()
+          this.emit()
+        },
+        (error) => {
+          // A refused seek left the transport where it was: put the start
+          // back, unless a newer seek has been issued since.
+          if (seq === this.seekSeq) this.startOffset = previous
+          console.error('Native seek failed:', error)
+        }
+      ).finally(() => {
+        this.seeksOutstanding--
+      }).catch((error) => console.error('Native seek bookkeeping failed:', error))
       return
     }
     if (this._playing) {
