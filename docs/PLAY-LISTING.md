@@ -141,6 +141,14 @@ deferred or interrupted, and a short video of the feature in use.
 before sending that release for review — Play Console checks the declared
 types against the bundle's manifest at submission.
 
+A declaration for a permission Play has never seen from this app cannot be
+filled in before that bundle is uploaded, and a finished release carrying it is
+refused until it is. `fastlane android draft` breaks the circle: it uploads the
+bundle as a draft, which reaches no tester but does make the form appear.
+`fastlane android promote` finishes the release afterwards. See
+[docs/ANDROID-RELEASE.md](ANDROID-RELEASE.md) § When a new permission deadlocks
+the release.
+
 ---
 
 ## Graphics

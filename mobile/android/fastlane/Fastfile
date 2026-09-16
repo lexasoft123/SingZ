@@ -72,6 +72,26 @@ platform :android do
     )
   end
 
+  # Play refuses a FINISHED release while a declaration the bundle needs is
+  # unanswered — and the declaration form only appears in the console once Play
+  # HAS the bundle. v0.22.0 met that circle: it added
+  # FOREGROUND_SERVICE_MEDIA_PLAYBACK, and `closed` died on "You must let us
+  # know whether your app uses any Foreground Service permissions", thrown by
+  # edits.commit, so the upload was rolled back whole and the form stayed
+  # locked. Every workaround written down on the web is "upload it by hand in
+  # the console"; measured 2026-09-16, a DRAFT release passes that same commit.
+  # It reaches no tester — it only puts the bundle where the console can see
+  # it. Fill the declaration, then `promote`.
+  desc "Upload as a DRAFT release on the closed track — reaches nobody, unlocks console declarations"
+  lane :draft do
+    play_publish(track: closed_track, release_status: "draft")
+  end
+
+  desc "Finish a draft already on the closed track — no rebuild, no re-upload"
+  lane :promote do
+    complete_draft(track: closed_track)
+  end
+
   desc "Show exactly what the metadata lane would push — stages files, no network"
   lane :preview do
     stage_images
@@ -168,7 +188,7 @@ private_lane :play_publish do |options|
       aab: AAB_PATH,
       validate_only: options[:validate_only] || false,
       rollout: options[:rollout],
-      release_status: options[:rollout] ? "inProgress" : "completed",
+      release_status: options[:release_status] || (options[:rollout] ? "inProgress" : "completed"),
       skip_upload_apk: true,
       # A binary upload must not rewrite the shopfront — that is the `metadata`
       # lane's job, run on purpose.
@@ -197,7 +217,115 @@ private_lane :play_publish do |options|
 
   if options[:validate_only]
     UI.success("Validated. Credentials and bundle are acceptable; nothing was shipped.")
+  elsif options[:release_status] == "draft"
+    UI.success(<<~MSG)
+      SingZ #{name} (#{code}) is a DRAFT on the #{options[:track]} track — no tester has it.
+
+      The console can see the bundle now, so any declaration it was waiting for
+      (App content -> Foreground service permissions, and friends) can be
+      answered. Then: fastlane android promote
+    MSG
   else
     UI.success("SingZ #{name} (#{code}) is on the #{options[:track]} track.")
   end
+end
+
+# The other half of `draft`, and the half supply cannot do: `release_status` is
+# only read while supply uploads a BINARY, so asking it to finish an existing
+# draft attaches the changelogs and leaves the release a draft — accepted,
+# ignored, and silent about it (measured 2026-09-16). The edit below changes
+# that one field with the same credentials supply itself uses.
+private_lane :complete_draft do |options|
+  require "google/apis/androidpublisher_v3"
+  require "googleauth"
+
+  _name, code = singz_version
+  track_name = options[:track]
+
+  key_data = ENV["SUPPLY_JSON_KEY_DATA"].to_s
+  key_file = ENV["SUPPLY_JSON_KEY"] || CredentialsManager::AppfileConfig.try_fetch_value(:json_key_file)
+  UI.user_error!("No Play credentials: set SUPPLY_JSON_KEY_DATA, or SUPPLY_JSON_KEY, or put play-service-account.json beside the Appfile") \
+    if key_data.empty? && (key_file.nil? || !File.exist?(key_file))
+  package = CredentialsManager::AppfileConfig.try_fetch_value(:package_name)
+
+  service = Google::Apis::AndroidpublisherV3::AndroidPublisherService.new
+  service.authorization = Google::Auth::ServiceAccountCredentials.make_creds(
+    json_key_io: key_data.empty? ? File.open(key_file) : StringIO.new(key_data),
+    scope: ["https://www.googleapis.com/auth/androidpublisher"]
+  )
+
+  # LOOK before touching anything. The changelog upload below is a commit of
+  # its own against a live release, so "there is no such release" and "that one
+  # is not a draft" have to be answered first or they arrive as supply's own
+  # error after the notes have already gone up. The probe edit is thrown away:
+  # an edit is a snapshot, and supply's commit would make this one stale.
+  probe = service.insert_edit(package)
+  found = begin
+    track = service.get_edit_track(package, probe.id, track_name)
+    track.releases.to_a.find { |r| r.version_codes.to_a.map(&:to_s).include?(code.to_s) }
+  rescue Google::Apis::Error => e
+    # Same lesson as play_publish's "targeting no countries": Play answers a
+    # track name it does not know with a bare "Invalid request", naming neither
+    # the track nor the cure. This catches the whole error class rather than
+    # matching that text, so it must not claim to know WHY Play refused — a 5xx
+    # or a rate limit on that read lands here too. (Credentials do not: an
+    # account that may not edit at all fails one line up, at insert_edit.)
+    # Print Play's own words, then the hint.
+    UI.user_error!(<<~MSG)
+      Play refused to read the '#{track_name}' track: #{e.message.to_s.lines.first&.strip}
+
+      If that track name is wrong, PLAY_CLOSED_TRACK is where it comes from —
+      a custom track's API name is whatever the console called it. Otherwise the
+      line above is Play's own reason. Nothing was changed.
+    MSG
+  ensure
+    service.delete_edit(package, probe.id) rescue nil
+  end
+
+  UI.user_error!("No release for versionCode #{code} on '#{track_name}' — upload one first (`fastlane android draft`)") unless found
+  if found.status == "completed"
+    UI.success("versionCode #{code} is already the completed release on '#{track_name}'. Nothing was changed.")
+    next
+  end
+  # inProgress and halted are a rollout's states, and a rollout carries a user
+  # fraction that Play refuses alongside "completed". Whatever put the track in
+  # that state owns it — say so rather than half-finishing somebody's rollout.
+  UI.user_error!("versionCode #{code} is '#{found.status}' on '#{track_name}', not a draft — finish or halt that rollout in the console") \
+    unless found.status == "draft"
+
+  # The notes still come from the release notes file, through supply, so this
+  # lane invents no second source for them.
+  sync_changelog
+  upload_to_play_store(
+    track: track_name,
+    version_code: code,
+    skip_upload_aab: true,
+    skip_upload_apk: true,
+    skip_upload_metadata: true,
+    skip_upload_images: true,
+    skip_upload_screenshots: true,
+    skip_upload_changelogs: false
+  )
+
+  edit = service.insert_edit(package)
+  begin
+    track = service.get_edit_track(package, edit.id, track_name)
+    release = track.releases.to_a.find { |r| r.version_codes.to_a.map(&:to_s).include?(code.to_s) }
+    UI.user_error!("versionCode #{code} left '#{track_name}' while this lane ran") unless release
+
+    UI.message("#{track_name}: #{release.name} #{release.status} -> completed")
+    release.status = "completed"
+    # ONE live release per track: leaving the previous completed release beside
+    # this one in the array is refused at commit.
+    track.releases = [release]
+    service.update_edit_track(package, edit.id, track_name, track)
+    service.commit_edit(package, edit.id)
+  rescue StandardError
+    # An uncommitted edit changes nothing, but leaving it lying around makes
+    # the next run's state harder to read.
+    service.delete_edit(package, edit.id) rescue nil
+    raise
+  end
+
+  UI.success("SingZ #{code} is live on the #{track_name} track.")
 end

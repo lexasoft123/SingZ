@@ -146,6 +146,8 @@ Lanes, all run from `mobile/android`:
 | `internal` | Bundle → internal track. |
 | `closed` | Bundle → the closed track (see `PLAY_CLOSED_TRACK` below). |
 | `production` | Bundle → production as a staged rollout (`PLAY_ROLLOUT`, default 10%). |
+| `draft` | Bundle → the closed track as a **draft**: reaches nobody, and is the way out of the deadlock below. |
+| `promote` | Finishes a draft already on that track. No rebuild, no re-upload. |
 | `metadata` | Listing text and graphics only, no binary. |
 
 ```bash
@@ -163,6 +165,52 @@ stored twice and `scripts/make-play-assets.sh` stays the one place they are made
 Release notes come from `docs/release-notes/v<version>.md`, folded into
 `changelogs/<versionCode>.txt` and truncated at Play's 500-character limit with a
 warning — write that file by hand when the note is longer than the store allows.
+
+### When a new permission deadlocks the release
+
+A bundle that declares a permission Play wants explained cannot be published
+until the declaration is filled in, and the declaration form only appears in
+the console once Play **has** that bundle. v0.22.0 walked into it: it added
+`FOREGROUND_SERVICE_MEDIA_PLAYBACK`, and the tag's publish job died on
+
+```
+Google Api Error: Invalid request - You must let us know whether your app uses
+any Foreground Service permissions.
+```
+
+thrown by `edits.commit`, which rolls the whole upload back — so the console
+never saw the bundle and the form stayed locked. Every workaround written down
+publicly is "upload it by hand in the console". It does not have to be:
+
+```bash
+cd mobile/android
+bundle exec fastlane android draft     # a draft release: no tester gets it
+# fill the declaration in Play Console -> App content
+bundle exec fastlane android promote   # the same bundle, now finished
+```
+
+A **draft** release passes the commit that a finished one fails (measured
+2026-09-16), and that is all it takes to put the bundle in front of the
+console. `promote` exists because supply cannot finish a draft: its
+`release_status` is only read while it uploads a binary, so asking it to
+complete an existing release attaches the changelogs and silently leaves the
+draft a draft. The lane changes that one field through the androidpublisher
+edit API with the same credentials supply uses.
+
+**Tag first, draft second** — that is the order v0.22.0 actually lived, and the
+other one traps you. A tag publishes a FINISHED release, so its publish job
+fails on the declaration and Play rolls the whole upload back, which leaves the
+version code free. Draft, fill in the form, promote, and the release is out.
+
+Drafting BEFORE the tag spends the version code: the draft is committed, so the
+tag's publish job is then refused for an entirely different reason — a version
+code Play already has — and answering the declaration does not clear that.
+`promote` is the only thing that finishes such a release; the red tag job is
+expected and is not retried.
+
+The workflow cannot do the drafting either way: its `track` input offers
+`validate`/`internal`/`closed`/`production` and a choice-typed input refuses
+anything else, so a dispatch asking for `draft` is rejected before a job starts.
 
 ### The service account
 

@@ -47,6 +47,22 @@ Upload to the closed testing track (PLAY_CLOSED_TRACK, default 'Testing')
 
 Upload to production as a staged rollout (PLAY_ROLLOUT, default 10%)
 
+### android draft
+
+```sh
+[bundle exec] fastlane android draft
+```
+
+Upload as a DRAFT release on the closed track — reaches nobody, unlocks console declarations
+
+### android promote
+
+```sh
+[bundle exec] fastlane android promote
+```
+
+Finish a draft already on the closed track — no rebuild, no re-upload
+
 ### android preview
 
 ```sh
