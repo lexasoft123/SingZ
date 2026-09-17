@@ -2792,7 +2792,7 @@ export class IosNativePlaybackCoordinator {
     );
     // This generation is audible because of the SWAP, not the last Play tap.
     handle.startRequestedAt = rebuildStartedAt;
-    handle.markStartIssued(generation);
+    handle.markStartIssued(generation, true);
     handle.update({
       phase: restoreTransport,
       error: null,
@@ -3371,6 +3371,25 @@ export class IosNativePlaybackCoordinator {
         const rememberedStartFrame = wasStarted
           ? undefined
           : handle.retryPreparedStartFrame(statusSampleRate);
+        // Still counting in to a landing past the top of the song: the next
+        // plan is the same count-in, anchored at the same landing, started
+        // over. Restarting at frame 0 (below) played a count-in aimed at
+        // 40 s from the top of the song, and a seam did the same — its
+        // candidate has no landing of its own, so the adopted pre-roll clock
+        // counted up to 0 and the song came in there (measured on the
+        // Android emulator, training on and the click alike). The desktop
+        // rebuilds inside a count-in for the same reason.
+        const countInLanding = wasStarted
+          ? handle.countInLandingWhileCounting(read.renderedProjectFrame)
+          : null;
+        // The change that turned the count-in OFF has nothing to count in
+        // with: the song starts flat at the landing, where the singer asked to
+        // be (the desktop's rule too). An anchor with no count-in plans no
+        // pre-roll, and the core then starts that plan at 0.
+        const countInAnchorSec =
+          countInLanding !== null && handle.countsInOnPlay()
+            ? countInLanding.seconds
+            : null;
         const preparedStartProjectFrame =
           rememberedStartFrame !== undefined
             ? rememberedStartFrame
@@ -3378,9 +3397,13 @@ export class IosNativePlaybackCoordinator {
               ? undefined
               : read.renderedProjectFrame >= 0
                 ? read.renderedProjectFrame
-                : restoreTransport === 'prepared'
-                  ? undefined
-                  : 0;
+                : countInLanding !== null
+                  ? countInAnchorSec !== null
+                    ? undefined
+                    : countInLanding.frame
+                  : restoreTransport === 'prepared'
+                    ? undefined
+                    : 0;
         const restoreLoop = read.loopEnabled
           ? {
               startProjectFrame: read.loopStartFrame,
@@ -3393,6 +3416,8 @@ export class IosNativePlaybackCoordinator {
           preparedStartProjectFrame,
           restoreLoop,
           statusSampleRate,
+          insideCountIn: countInLanding !== null,
+          countInAnchorSec,
         } as const;
       };
       let derived = await derive(session);
@@ -3413,7 +3438,11 @@ export class IosNativePlaybackCoordinator {
         // A seam still in the air: the core would refuse a second one, and
         // the rebuild below stops the song for it — which is the one case
         // awaitSeamLanded above is there to make rare.
-        handle.swappingFromGeneration === 0
+        handle.swappingFromGeneration === 0 &&
+        // Inside a mid-song count-in the rebuild below starts the count-in
+        // over to its landing; a seam would carry the pre-roll clock into a
+        // plan that lands at the top of the song (see derive).
+        !derived.insideCountIn
       ) {
         const swapped = await this.swapHandleGeneration(handle, {
           oldGeneration,
@@ -3438,6 +3467,7 @@ export class IosNativePlaybackCoordinator {
         preparedStartProjectFrame,
         restoreLoop,
         statusSampleRate,
+        countInAnchorSec,
       } = derived;
 
       handle.stopPolling();
@@ -3518,6 +3548,7 @@ export class IosNativePlaybackCoordinator {
                   ...(restoreLoop === null ? {} : { loop: restoreLoop }),
                 }
               : undefined,
+            countInAnchorSec ?? undefined,
           ),
         );
         // What was remembered before Play (a seek, a loop) stays remembered:
@@ -3625,7 +3656,11 @@ export class IosNativePlaybackCoordinator {
       log(
         'dsp',
         `cue graph rebuilt · generation ${oldGeneration}→${generation} · ` +
-          `signed project frame ${preparedStartProjectFrame ?? 'entry'} · no count-in replay · ` +
+          `signed project frame ${preparedStartProjectFrame ?? 'entry'} · ${
+            countInAnchorSec !== null
+              ? `count-in replayed to the landing at ${countInAnchorSec.toFixed(3)} s`
+              : 'no count-in replay'
+          } · ` +
           `rebuilt in ${since(rebuildStartedAt)} · ${handle.graphDescription()}`,
       );
       if (!wasStarted || restoreTransport === 'prepared') return;
@@ -4691,6 +4726,8 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   /** The furthest the transport has been past the landing during the tail,
    *  so a position that moves BACKWARDS retires it (see `countInAt`). */
   private countInTailFrame = 0;
+  /** `countInPlanKey()` of the count-in the tail state above was armed for. */
+  private countInPlan: string | null = null;
   /** The last rendered frame as the core reported it — the SIGNED frame a
    *  log about the transport wants, where the snapshot holds the shown one. */
   private rawRenderedFrame = 0;
@@ -4787,18 +4824,33 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
      *  run (a rebuild stops the stream; a Play or a recovery starts one). */
     continuesRun = false,
   ): NativePlaybackPrepareOverrides {
-    this.countInLandingFrame =
-      countInAnchorSeconds === undefined
-        ? 0
-        : Math.max(0, Math.round(countInAnchorSeconds * this.sampleRate()));
-    this.countInSeen = false;
-    this.countInSounding = false;
-    this.countInTailFrame = 0;
-    if (!continuesRun)
+    // A seam continues the run's count-in as much as its floor: the landing
+    // it counted in to and the tail still sounding past it. Reset here, a seam
+    // in the tail took the dots away a latency early.
+    if (!continuesRun) {
+      this.countInLandingFrame =
+        countInAnchorSeconds === undefined
+          ? 0
+          : Math.max(0, Math.round(countInAnchorSeconds * this.sampleRate()));
+      this.countInSeen = false;
+      this.countInSounding = false;
+      this.countInTailFrame = 0;
+      this.countInPlan = this.countInPlanKey();
       this.runStartFrame =
         countInAnchorSeconds === undefined
           ? Math.max(0, preparedStartProjectFrame ?? 0)
           : this.countInLandingFrame;
+    } else if (this.countInPlan !== this.countInPlanKey()) {
+      // A seam that changes the count-in itself (its bars, or the grid it
+      // clicks on): the tail on screen belongs to a plan that is gone, and
+      // carried across it read the NEW plan's telemetry — four dots turned
+      // into a seconds countdown, or into eight. It ends here, as it did
+      // before seams carried it; the landing and the floor still stand.
+      this.countInSeen = false;
+      this.countInSounding = false;
+      this.countInTailFrame = 0;
+      this.countInPlan = this.countInPlanKey();
+    }
     return {
       playback: buildNativePlaybackPreparePlayback(
         this.beatInfo,
@@ -5027,11 +5079,16 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       this.update({ phase: 'stopping' });
   }
 
-  markStartIssued(generation: number): void {
+  /** `continuesRun`: a seam, which issues its generation's start on a stream
+   *  that never stopped — the count-in the run was in (a tail still sounding)
+   *  is still the one on screen, as in prepareOverrides. */
+  markStartIssued(generation: number, continuesRun = false): void {
     this.startIssuedGeneration = generation;
-    this.countInSeen = false;
-    this.countInSounding = false;
-    this.countInTailFrame = 0;
+    if (!continuesRun) {
+      this.countInSeen = false;
+      this.countInSounding = false;
+      this.countInTailFrame = 0;
+    }
     this.awaitingTransportStart = true;
     this.watchTransportStart();
   }
@@ -6375,6 +6432,36 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
    *  both legacy behaviours, both planned by the core. */
   countsInOnPlay(): boolean {
     return this.metronomeConfig.countInBars > 0;
+  }
+
+  /** The landing — its project frame, and in seconds for a count-in anchor —
+   *  while `renderedFrame` is still inside the pre-roll of a count-in that
+   *  lands past the top of the song; null when there is no such count-in or
+   *  it has landed. A count-in at the top lands on the entry, which any
+   *  plan's pre-roll does by itself. */
+  countInLandingWhileCounting(
+    renderedFrame: number,
+  ): { frame: number; seconds: number } | null {
+    return renderedFrame < 0 && this.countInLandingFrame > 0
+      ? {
+          frame: this.countInLandingFrame,
+          seconds: this.countInLandingFrame / this.sampleRate(),
+        }
+      : null;
+  }
+
+  /** The count-in the dots describe: its bars and the grid they click on,
+   *  bar lines included (a bar's length is read off the downbeats). A seam
+   *  that changes any of them brings a different count-in plan. */
+  private countInPlanKey(): string {
+    const grid = this.beatInfo;
+    return `${this.metronomeConfig.countInBars}|${
+      grid === null
+        ? 'gridless'
+        : `${grid.beatsPerBar}|${grid.beats.length}|${grid.bpm}|${
+            grid.downbeats?.join(',') ?? ''
+          }`
+    }`;
   }
 
   /** A song paused inside its own mid-song count-in has no positive frame

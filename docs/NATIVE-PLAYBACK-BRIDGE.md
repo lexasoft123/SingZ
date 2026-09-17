@@ -307,7 +307,18 @@ a plan's count-in is fixed at prepare, so **Play with the count-in on from a
 parked transport is a restart, not a resume** — stop, unload, prepare anchored
 at the paused spot, open, start (`restartWithCountIn` on the desktop, the
 phones' `restartPausedWithCountIn`); resuming instead counted in once per
-open and never again. And **the bar holds at the landing while the core is at
+open and never again. For the same reason **a structural change inside a
+count-in that lands past the top of the song is a rebuild anchored at that
+landing**, never a seam: the core accepts a swap during a pre-roll, but the
+candidate has no landing of its own, so the adopted pre-roll clock counts up
+to 0 and the song comes in at the top (measured on both phones, training on
+and the click alike, before they learned it; the desktop's `reconfigure` does
+the same). The count-in starts over to the same spot, playing or paused as it
+was — and when the change turned the count-in OFF, the song starts flat at
+the landing instead, since an anchor on a plan with no pre-roll starts at 0. A
+seam anywhere else continues the run: its position floor and its landing
+carry across, and so does the count-in's tail still sounding past it unless
+the seam changed the count-in itself (its bars, or the grid it clicks on). And **the bar holds at the landing while the core is at
 a negative frame** (and when paused inside one), as legacy's clock clamps at
 the start offset until the music enters: the desktop clamped the negative
 frames to 0 instead, which drew every mid-song count-in at the top of the
