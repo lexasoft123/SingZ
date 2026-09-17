@@ -63,6 +63,13 @@
  *      callback boundary on purpose and reads the core's status back-to-back
  *      across it, so the verdict no longer depends on the poll.
  *
+ *   6. THE LAST DOT, found by the dots recorder the leg above needed: a last
+ *      click closer to the landing than one 50 ms status poll never lit its
+ *      dot, because the dots read the render head unprojected. Legs 4 and 6
+ *      went red on the Mac whenever a Pause parked a few hundredths of a
+ *      second past a beat. The dots project between polls now, and leg 11
+ *      aims the last click 20 and 35 ms before the landing.
+ *
  * Reads three opinions where the transport-race driver taught us to:
  * `__test.playing` (the button), `engine.playing`, and the core's own
  * `transportState`. The whole run is also judged on the log: ANY dsp warning
@@ -125,14 +132,9 @@ const SNAP =
  * starves the sampling for longer than a count-in cannot be judged on it.
  *
  * The dots are ALSO recorded in the page, every 2 ms (`rows.dotsSeen`), so a
- * dot that is lit for less than the 80-90 ms between samples is still seen.
- * That does NOT make "the dots stopped at 3/4" go away when a Pause parks a
- * few hundredths of a second past a beat: measured on the Mac, last clicks
- * 19, 24 and 39 ms before the landing ended at 3/4 with the recorder seeing
- * no fourth dot in 500+ ticks, while 54 ms and more lit all four. The dots
- * are drawn from the last 50 ms status poll, unprojected, so a last click
- * within about a poll of the landing can go unlit in the app itself — a red
- * here is the product's, not the sampling's. */
+ * dot that is lit for less than the 80-90 ms between samples is still seen:
+ * a last click a few hundredths of a second before the landing lights its
+ * dot for only that long (leg 11). */
 async function trace(win, ms, until = () => false) {
   const rows = []
   const t0 = Date.now()
@@ -630,6 +632,30 @@ function judgeCountIn(label, rows, landing, fail) {
       if (nearLanding.length === 0) fail.push('count-in on a callback boundary: no status read fell within a callback of the landing — the reads were too sparse to see the window this leg exists for')
       if (below.length) fail.push(`count-in on a callback boundary: the core reported playing at frame ${below[0].r}, below the landing at ${aimedFrame}, in ${below.length} status read(s)`)
       if (low < aimed - SLACK) fail.push(`count-in on a callback boundary: the bar fell to ${low.toFixed(2)} s, below the landing at ${aimed.toFixed(2)} s`)
+    }
+
+    // ── 11. The last click inside one status poll of the landing ────────
+    //
+    // The dots are drawn from the status the facade polls every 50 ms, and a
+    // last click closer to the landing than that is heard inside ONE poll
+    // interval. Read raw, the last status before the landing heard the ear
+    // just short of the click and the first one after was already past the
+    // latency tail, so the fourth dot never lit: legs 4 and 6 ended at three
+    // of four on the Mac whenever their Pause parked 19-39 ms past a beat,
+    // and an aimed probe measured 20 ms at 3/4 in 2 of 2 count-ins and 35 ms
+    // in 1 of 2. The facade projects the render head between polls now. This
+    // leg aims the last click 20 and 35 ms before the landing on purpose.
+    if (await val(win, '__test.playing === true')) await pauseAndWait(win)
+    const near = grid.findIndex((t, i) => i > 8 && t > MID + 4)
+    if (near < 0) throw new Error(`no beat past ${MID + 4} s to aim the last click at`)
+    for (const [k, margin] of [20, 35].entries()) {
+      const spot = grid[near + 2 * k] + margin / 1000
+      await val(win, `__test.engine.seek(${spot})`)
+      await sleep(900)
+      await press(win)
+      const rows = await trace(win, 12000, (r) => r.core === 'playing' && r.pos > spot + 0.6)
+      console.log(`11. last click ${margin} ms before the landing at ${spot.toFixed(3)} s: ${judgeCountIn(`last click ${margin} ms before the landing`, rows, spot, fail)}`)
+      await pauseAndWait(win)
     }
 
     // ── The log has the last word ───────────────────────────────────────

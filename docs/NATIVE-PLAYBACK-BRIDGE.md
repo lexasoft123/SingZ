@@ -323,7 +323,10 @@ fell to 0.00 one Space burst in five after the hold above had shipped. The dots 
 core's `countInEventCount`/`countInBeatsPerBar`/`preRollFrames` laid over
 the grid the facade would have clicked itself, and stay up for one
 presentation latency after the landing because the last clicks are still
-sounding then.
+sounding then. They are read on the render head projected from the last
+status, never on the status alone: a last click closer to the landing than
+one poll is heard between two polls, and the desktop's raw read left its dot
+unlit (the phones read the synchronous clock, projected by its age).
 `durationSeconds` is schema-checked and then **discarded** by all three
 bridges, which is worth knowing before trusting it.
 
