@@ -3802,123 +3802,263 @@ export class IosNativePlaybackCoordinator {
     }
     handle.update({ phase: 'starting', error: null });
     let generation = handle.generation;
-    try {
-      handle.options.engine.unload();
-      await handle.options.engine.suspendOutputForNativePlayback();
-      if (!this.startIsCurrent(handle, operation.token))
-        return this.cancelStartAfterAwait(
-          handle,
-          operation.token,
-          'Native output handoff was cancelled.',
-        );
-      generation = handle.generation;
-      const configured = await native.configureOutputSession(generation);
-      if (!this.startIsCurrent(handle, operation.token))
-        return this.cancelStartAfterAwait(
-          handle,
-          operation.token,
-          'Native output configuration was cancelled.',
-        );
-      if (!configured.ok)
-        return this.openFailure(
-          handle,
-          configured.message || configured.error,
-          operation.token,
-        );
-      log(
-        'dsp',
-        `${platformLabel(this.deps.platform)} audio session ready · generation ${generation} · ` +
-          `${formatSampleRate(configured.sampleRate)} · ${configured.outputChannels} ch · ` +
-          `${configured.nominalBufferFrames} frame nominal buffer · ` +
-          `${since(handle.startRequestedAt)} after Play`,
-      );
-      const opened = await native.openOutput(generation);
-      if (!this.startIsCurrent(handle, operation.token))
-        return this.cancelStartAfterAwait(
-          handle,
-          operation.token,
-          'Native output open was cancelled.',
-        );
-      if (!opened.ok)
-        return this.openFailure(
-          handle,
-          opened.message || opened.error,
-          operation.token,
-        );
-      log(
-        'dsp',
-        `zcore AudioHost open · generation ${generation} · ${handle.output?.label ?? 'native output'} · ` +
-          `${formatSampleRate(opened.sampleRate)} · ${opened.outputChannels} ch · ` +
-          /* The NEGOTIATED callback size: how many frames the hardware asks
-             for at a time. The first number to want when native playback
-             costs more CPU than it should — 960 on the Android emulator.
-
-             It is a floor on graph walks rather than a count of them — the
-             prepared path slices a callback at a boundary — and it says
-             nothing about the per-frame DSP work, which is frames per second
-             either way. */
-          `${opened.nominalBufferFrames} frame nominal buffer · ` +
-          `maximum ${opened.maximumFrames} frames · ` +
-          `${since(handle.startRequestedAt)} after Play`,
-      );
-      // A rejected/throwing configure or open command is still a pre-start
-      // failure: B1's exact unload proof can authorize lazy legacy fallback.
-      // Once start is invoked, callbacks may already have rendered before the
-      // promise settles, so failure must remain native-only and visible.
-      handle.markStartIssued(generation);
-      const started = await native.start(generation);
-      if (!this.startIsCurrent(handle, operation.token))
-        return this.cancelStartAfterAwait(
-          handle,
-          operation.token,
-          'Native start was cancelled.',
-        );
-      if (!started.ok) {
+    // Twice around at most: a refusal that turns out to be the output
+    // route moving under the prepared graph prepares again for the route
+    // the singer is on and comes back through here once. Every other path
+    // out of this block returns, so the loop cannot spin.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        handle.options.engine.unload();
+        await handle.options.engine.suspendOutputForNativePlayback();
+        if (!this.startIsCurrent(handle, operation.token))
+          return this.cancelStartAfterAwait(
+            handle,
+            operation.token,
+            'Native output handoff was cancelled.',
+          );
+        generation = handle.generation;
+        const configured = await native.configureOutputSession(generation);
+        if (!this.startIsCurrent(handle, operation.token))
+          return this.cancelStartAfterAwait(
+            handle,
+            operation.token,
+            'Native output configuration was cancelled.',
+          );
+        if (!configured.ok) {
+          const detail = configured.message || configured.error;
+          const moved =
+            attempt === 0
+              ? await this.reprepareForMovedRoute(handle, operation, detail)
+              : null;
+          if (moved === 'reprepared') continue;
+          if (moved !== null) return moved;
+          return this.openFailure(handle, detail, operation.token);
+        }
         log(
           'dsp',
-          `render start failed · generation ${generation} · ${
+          `${platformLabel(this.deps.platform)} audio session ready · generation ${generation} · ` +
+            `${formatSampleRate(configured.sampleRate)} · ${configured.outputChannels} ch · ` +
+            `${configured.nominalBufferFrames} frame nominal buffer · ` +
+            `${since(handle.startRequestedAt)} after Play`,
+        );
+        const opened = await native.openOutput(generation);
+        if (!this.startIsCurrent(handle, operation.token))
+          return this.cancelStartAfterAwait(
+            handle,
+            operation.token,
+            'Native output open was cancelled.',
+          );
+        if (!opened.ok) {
+          const detail = opened.message || opened.error;
+          const moved =
+            attempt === 0
+              ? await this.reprepareForMovedRoute(handle, operation, detail)
+              : null;
+          if (moved === 'reprepared') continue;
+          if (moved !== null) return moved;
+          return this.openFailure(handle, detail, operation.token);
+        }
+        log(
+          'dsp',
+          `zcore AudioHost open · generation ${generation} · ${handle.output?.label ?? 'native output'} · ` +
+            `${formatSampleRate(opened.sampleRate)} · ${opened.outputChannels} ch · ` +
+            /* The NEGOTIATED callback size: how many frames the hardware asks
+               for at a time. The first number to want when native playback
+               costs more CPU than it should — 960 on the Android emulator.
+
+               It is a floor on graph walks rather than a count of them — the
+               prepared path slices a callback at a boundary — and it says
+               nothing about the per-frame DSP work, which is frames per second
+               either way. */
+            `${opened.nominalBufferFrames} frame nominal buffer · ` +
+            `maximum ${opened.maximumFrames} frames · ` +
+            `${since(handle.startRequestedAt)} after Play`,
+        );
+        // A rejected/throwing configure or open command is still a pre-start
+        // failure: B1's exact unload proof can authorize lazy legacy fallback.
+        // Once start is invoked, callbacks may already have rendered before the
+        // promise settles, so failure must remain native-only and visible.
+        handle.markStartIssued(generation);
+        const started = await native.start(generation);
+        if (!this.startIsCurrent(handle, operation.token))
+          return this.cancelStartAfterAwait(
+            handle,
+            operation.token,
+            'Native start was cancelled.',
+          );
+        if (!started.ok) {
+          log(
+            'dsp',
+            `render start failed · generation ${generation} · ${
+              started.message || started.error
+            }`,
+            'error',
+          );
+          await this.cleanupGeneration(handle, generation);
+          const error = `Native start failed: ${
             started.message || started.error
-          }`,
+          }`;
+          if (this.startIsCurrent(handle, operation.token)) handle.fail(error);
+          return { kind: 'failed', error };
+        }
+        handle.update({ phase: 'playing' });
+        handle.clearRecoverySnapshot();
+        handle.startPolling();
+        log(
+          'dsp',
+          `rendering started · generation ${handle.generation} at signed project frame ${handle.lastRawRenderedFrame()} · ` +
+            `${since(handle.startRequestedAt)} after Play · ` +
+            `zdsp graph owns native output · ${handle.graphDescription()}`,
+        );
+        return { kind: 'started' };
+      } catch (error) {
+        if (!this.startIsCurrent(handle, operation.token))
+          return this.cancelStartAfterAwait(
+            handle,
+            operation.token,
+            'Native playback was cancelled during output handoff.',
+          );
+        if (!handle.startWasIssued(generation))
+          return this.openFailure(handle, message(error), operation.token);
+        log(
+          'dsp',
+          `render handoff failed after start · generation ${generation} · ${message(
+            error,
+          )}`,
           'error',
         );
         await this.cleanupGeneration(handle, generation);
-        const error = `Native start failed: ${
-          started.message || started.error
-        }`;
-        if (this.startIsCurrent(handle, operation.token)) handle.fail(error);
-        return { kind: 'failed', error };
+        const detail = `Native start handoff failed: ${message(error)}`;
+        if (this.startIsCurrent(handle, operation.token)) handle.fail(detail);
+        return { kind: 'failed', error: detail };
       }
-      handle.update({ phase: 'playing' });
-      handle.clearRecoverySnapshot();
-      handle.startPolling();
-      log(
-        'dsp',
-        `rendering started · generation ${handle.generation} at signed project frame ${handle.lastRawRenderedFrame()} · ` +
-          `${since(handle.startRequestedAt)} after Play · ` +
-          `zdsp graph owns native output · ${handle.graphDescription()}`,
+    }
+  }
+
+  /** Play, on a route that has moved under the prepared graph.
+   *
+   *  A graph is prepared for ONE device — its uid, its channels and its rate
+   *  go into the prepare, and `SingzVerifyPlaybackAudioSession` refuses the
+   *  output handoff unless the active route is still that device — while a
+   *  phone's route moves whenever it likes: a car connects, headphones come
+   *  out, a call ends somewhere else. The two are routinely apart because a
+   *  graph is prepared when the song OPENS and Play can be minutes later.
+   *
+   *  Field log, twice on one iPhone two days apart: prepared for the speaker,
+   *  Play refused with "The active iOS output route does not match the
+   *  prepared device", and the player sat stopped with an error until the
+   *  song was closed and opened again — the reopen prepared against whatever
+   *  was live by then and played first time. Nothing retried, because the
+   *  route was only ever read when a graph was prepared.
+   *
+   *  So it is read again here. The iOS inventory is `currentRoute` at the
+   *  moment it is asked (`zcore/platform/ios/audio_host_ios.mm`), so a status
+   *  taken after the refusal is the route the session actually has: the same
+   *  device means this refusal was about something else and the caller
+   *  reports it unchanged, a different one means the old generation is
+   *  released and the graph prepared again for the route the singer is
+   *  listening on.
+   *
+   *  Once per Play, and only before `start` has been issued — past that,
+   *  callbacks may already have rendered and a retry would be a second audio
+   *  owner. */
+  private async reprepareForMovedRoute(
+    handle: IosNativePlaybackHandle,
+    operation: NativeStartOperation,
+    reason: string,
+  ): Promise<'reprepared' | NativePlaybackStartOutcome | null> {
+    const native = this.deps.native;
+    const prepared = handle.output;
+    const generation = handle.generation;
+    if (!native || !prepared || generation <= 0) return null;
+    if (
+      !this.startIsCurrent(handle, operation.token) ||
+      handle.startWasIssued(generation)
+    )
+      return null;
+    let status: NativePlaybackCapability;
+    try {
+      status = await native.status();
+    } catch {
+      // The route cannot be read at all, so nothing here has been shown to
+      // move: the refusal the caller has is the honest answer.
+      return null;
+    }
+    if (!this.startIsCurrent(handle, operation.token)) return null;
+    const live = chooseOutput(status.outputs);
+    // No single current route — iOS publishes none while two outputs are up,
+    // which is its own reason for the same refusal — or the very route this
+    // graph was prepared for.
+    if (!live || nativeOutputStillFits(prepared, live)) return null;
+    log(
+      'dsp',
+      `the output route moved under the prepared graph · generation ${generation} · ` +
+        `prepared ${prepared.label} ${formatSampleRate(prepared.sampleRate)} ${prepared.channels} ch · ` +
+        `now ${live.label} ${formatSampleRate(live.sampleRate)} ${live.channels} ch · ${reason}`,
+      'warn',
+    );
+    const released = await this.cleanupGeneration(handle, generation);
+    if (!released) {
+      const error = cleanupUncertain(reason);
+      if (this.startIsCurrent(handle, operation.token)) handle.fail(error);
+      return { kind: 'failed', error };
+    }
+    if (!this.startIsCurrent(handle, operation.token))
+      return this.cancelStartAfterAwait(
+        handle,
+        operation.token,
+        'Native playback was cancelled while the output route moved.',
       );
-      return { kind: 'started' };
+    let reprepared: { ok: true } | { ok: false; error: string };
+    try {
+      reprepared = await this.prepareHandle(handle, status, () =>
+        this.startIsCurrent(handle, operation.token),
+      );
     } catch (error) {
-      if (!this.startIsCurrent(handle, operation.token))
-        return this.cancelStartAfterAwait(
-          handle,
-          operation.token,
-          'Native playback was cancelled during output handoff.',
-        );
-      if (!handle.startWasIssued(generation))
-        return this.openFailure(handle, message(error), operation.token);
-      log(
-        'dsp',
-        `render handoff failed after start · generation ${generation} · ${message(
-          error,
-        )}`,
-        'error',
-      );
-      await this.cleanupGeneration(handle, generation);
-      const detail = `Native start handoff failed: ${message(error)}`;
-      if (this.startIsCurrent(handle, operation.token)) handle.fail(detail);
+      // Two throw windows, and the rollback tells them apart. BEFORE the
+      // generation is claimed: the release above published a fallback lease,
+      // so `prepareHandle` takes its lease branch and awaits
+      // `suspendOutputForNativePlayback`, which can reject — nothing native
+      // exists, the lease is still the recorded one, and the rollback
+      // restores the gate and publishes 'stopped'. AFTER it: the native
+      // prepare has SUCCEEDED and a throw past it would leave a built
+      // six-lane graph nobody owns, so with no lease left to roll back the
+      // new generation is unloaded. The restart path answers the same two
+      // the same way.
+      const rollback = this.rollbackPreclaimHandle(handle);
+      if (rollback === null && handle.generation > 0)
+        await this.cleanupGeneration(handle, handle.generation);
+      const detail = `Native playback could not follow the output route: ${message(
+        error,
+      )}`;
+      if (this.startIsCurrent(handle, operation.token)) {
+        if (rollback === 'leased-stopped')
+          handle.update({ phase: 'stopped', error: detail });
+        else handle.fail(detail);
+      }
       return { kind: 'failed', error: detail };
     }
+    if (!this.startIsCurrent(handle, operation.token))
+      return this.cancelStartAfterAwait(
+        handle,
+        operation.token,
+        'Native playback was cancelled while the output route moved.',
+      );
+    if (!reprepared.ok) {
+      handle.fail(reprepared.error);
+      return { kind: 'failed', error: reprepared.error };
+    }
+    // `prepareHandle` publishes 'prepared', which is what `awaitingFirstPlay`
+    // reads: left alone, a seek or a loop set during the retry's configure and
+    // open would be REMEMBERED for a Play that is already under way instead of
+    // dispatched. This start says so again.
+    handle.update({ phase: 'starting', error: null });
+    log(
+      'dsp',
+      `graph prepared again for the live route · generation ${handle.generation} · ` +
+        `${live.label} · Play continues`,
+    );
+    return 'reprepared';
   }
 
   private async openFailure(
@@ -6754,6 +6894,25 @@ function chooseOutput(
   )
     return null;
   return candidate;
+}
+
+/** Can the graph prepared for `prepared` still open on `live`? Asked exactly
+    the way `SingzVerifyPlaybackAudioSession` asks it, so this never calls a
+    rebuild the session would not have refused: the device and the rate must
+    match, while the channels only have to FIT — the prepare takes indices
+    (`[0, 1]` on anything stereo or wider, `[0]` otherwise) and the verifier
+    wants each of them below the live count, so a route that grew a channel
+    is the same route as far as this graph is concerned. */
+function nativeOutputStillFits(
+  prepared: NativePlaybackOutput,
+  live: NativePlaybackOutput,
+): boolean {
+  const needed = prepared.channels >= 2 ? 2 : 1;
+  return (
+    prepared.uid === live.uid &&
+    prepared.sampleRate === live.sampleRate &&
+    live.channels >= needed
+  );
 }
 
 function cloneTrainingSpec(
