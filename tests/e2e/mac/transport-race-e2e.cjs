@@ -3,8 +3,8 @@
  * twice — and prove the native graph keeps up with the button. Permanent
  * harness used by the e2e-verifier agent.
  *
- * This guards two bugs that reached a field session on 2026-09-07, both
- * invisible to `player-session-e2e.cjs` by construction:
+ * This guards bugs that reached field sessions, every one invisible to
+ * `player-session-e2e.cjs` by construction:
  *
  *   1. PLAY DURING THE AHEAD BUILD. The session harness opens a song, waits
  *      for "ready to play", and only then presses Play — by which time the
@@ -42,6 +42,21 @@
  *      was logged, and ticked 57 times through the run; after, 107 ticks and
  *      a worst gap of 272 ms, which is the addon's dylib load and happens
  *      before the prepare starts.
+ *
+ *   5. A SELECTION THAT HELD ONLY ONCE. A non-looping selection stopped a
+ *      song's FIRST Play at its end and none after it: every later Play is a
+ *      plain native resume, and that path never armed the watcher that stops
+ *      it. Arming it everywhere exposed two seek races the first Play had
+ *      always had: a seek past the selection's end while it plays (a lyric
+ *      line, an arrow key) paused the song, because `startOffset` caught up
+ *      two round trips after the position; and moving it sooner broke
+ *      OVERLAPPING seeks (a held arrow key) both ways, until seeks were
+ *      numbered and the watcher learned to wait while one is in flight. Leg
+ *      5 plays a selection three times through the app's own selection state,
+ *      seeks past its end mid-play, and fires overlapping seeks out of it and
+ *      back into it. The overlap race only shows on a machine with slow round
+ *      trips: the Windows field laptop fails it on the broken engine, the Mac
+ *      passes it either way.
  *
  * The whole run is also judged on the log: ANY dsp warning or error fails it.
  * Main writes one only when a native command was refused, threw, or came back
@@ -284,6 +299,180 @@ const buildCount = (lines) => lines.filter((x) => /^preparing graph/.test(x.line
       fail.push(`main's event loop stalled ${beat.worst} ms while a graph was built`)
     }
     if (beat.ticks < 20) fail.push(`main only ticked ${beat.ticks} times — too few to judge`)
+
+    // ── 5. A SELECTION the singer is not looping ────────────────────────
+    //
+    // Field report: "select the part with the vocals, play without repeat;
+    // the first few times it plays just that, then the cursor leaves the
+    // selected area and plays on from there". The watcher that stops
+    // playback at the end of a non-looping selection was armed by the
+    // fresh-start path and by a count-in restart, but NOT by the plain
+    // resume every later Play takes — so a selection bounded a song's first
+    // Play and nothing after it. `togglePlay` did its part throughout (a Play
+    // with the cursor at the selection's end seeks back to its start); there
+    // was simply nothing to stop it at the end the second time.
+    const region = { start: 20, end: 26 }
+    // Leg 4 left the song PLAYING, and this leg is about what Play does from
+    // a parked transport: park it first, or the first press here is a pause.
+    await val(win, '(function(){ const b = document.querySelector("button.play"); if (b && !b.disabled && __test.playing) b.click() })()')
+    for (let i = 0; i < 40 && await val(win, '__test.playing'); i++) await sleep(100)
+    // Through the app's own selection state, the way dragging one out does:
+    // the region the engine gets is the App's effect's, and every Play below
+    // goes through `togglePlay`, which seeks to the selection's start when
+    // the cursor sits at its end. Setting the engine's region directly would
+    // skip that seek and test a route no singer takes.
+    // What the song was saved with would decide this leg for it: a saved LOOP
+    // turns the selection into a loop the watcher never polices, and a
+    // COUNT-IN sends every Play through the count-in restart, which armed the
+    // watcher before the fix too. Either one passes on the broken engine.
+    await val(win, '__test.setMetCfg(Object.assign({}, __test.met, { countInBars: 0 }))')
+    await val(win, `__test.setSelection({ s: ${region.start}, e: ${region.end} })`)
+    let accepted = ''
+    for (let i = 0; i < 50; i++) {
+      accepted = await val(win, 'JSON.stringify(__test.engine.acceptedRegion)')
+      if (accepted === JSON.stringify({ region: { start: region.start, end: region.end }, loop: false }) &&
+          await val(win, '__test.engine.metronome.countInBars') === 0) break
+      await sleep(100)
+    }
+    if (accepted !== JSON.stringify({ region: { start: region.start, end: region.end }, loop: false })) {
+      throw new Error(`leg 5 needs a NON-looping ${region.start}-${region.end} s selection, and the engine accepted ${accepted} — clear this song's saved loop`)
+    }
+    if (await val(win, '__test.engine.metronome.countInBars') !== 0) {
+      throw new Error('leg 5 needs the count-in off, and it would not turn off — every Play would take the count-in restart and pass without the fix')
+    }
+    await val(win, `__test.engine.seek(${region.end - 2})`)
+    await sleep(1200)
+    /** Play, then sample from node until the transport parks or time runs
+     *  out. Never `waitForFunction`: it polls on rAF, which the hidden
+     *  window services about once a second on the field laptop. */
+    const ROW = '(function(){ const e = __test.engine; return JSON.stringify({ pos: e.position, playing: __test.playing }) })()'
+    const playUntilParked = async (label, ms) => {
+      await val(win, '(function(){ const b = document.querySelector("button.play"); if (b && !b.disabled) b.click() })()')
+      const seen = []
+      const t = Date.now()
+      let row = JSON.parse(await val(win, ROW))
+      let started = false
+      while (Date.now() - t < ms) {
+        row = JSON.parse(await val(win, ROW))
+        seen.push(row.pos)
+        // The button is React state a beat behind the press, so "parked"
+        // only counts once this Play has been seen playing at all.
+        if (row.playing) started = true
+        else if (started) break
+        await sleep(120)
+      }
+      if (!started) fail.push(`${label}: the transport never reported playing`)
+      else if (row.playing) fail.push(`${label}: still playing after ${ms} ms — the selection never stopped it`)
+      const lowest = Math.min(...seen)
+      const highest = Math.max(...seen)
+      console.log(`5. ${label}: bar ${lowest.toFixed(2)}..${highest.toFixed(2)} s, parked at ${row.pos.toFixed(2)} s`)
+      return { lowest, highest, last: row }
+    }
+    const first = await playUntilParked('inside the selection, Play', 14000)
+    if (first.highest < region.end - 0.3) {
+      fail.push(`the first Play of the selection stopped at ${first.highest.toFixed(2)} s, short of its ${region.end} s end`)
+    }
+    if (first.highest > region.end + 0.5) {
+      fail.push(`a selection ${region.start}-${region.end} s did not hold the first Play: the bar reached ${first.highest.toFixed(2)} s`)
+    }
+    await sleep(600)
+    const second = await playUntilParked('Play again at the end of the selection', 16000)
+    if (second.lowest > region.start + 1) {
+      fail.push(`the Play after a selection ended did not play the selection again: the bar never went below ${second.lowest.toFixed(2)} s`)
+    }
+    if (second.highest < region.end - 0.3) {
+      fail.push(`the replayed selection stopped at ${second.highest.toFixed(2)} s, short of its ${region.end} s end`)
+    }
+    if (second.highest > region.end + 0.5) {
+      fail.push(`the replayed selection ran to ${second.highest.toFixed(2)} s, past its ${region.end} s end`)
+    }
+    const third = await playUntilParked('and once more', 16000)
+    if (third.lowest > region.start + 1 || third.highest > region.end + 0.5 || third.highest < region.end - 0.3) {
+      fail.push(`the third Play of the selection read ${third.lowest.toFixed(2)}..${third.highest.toFixed(2)} s — it did not stay inside ${region.start}-${region.end} s`)
+    }
+    // A seek PAST the selection's end while it plays — a lyric line clicked,
+    // the arrow keys — must land and play on. The watcher saw the old start
+    // beside the new position for two IPC round trips and paused the song
+    // where it landed; the leg repeats the seek at a few phases of the
+    // watcher's 25 ms tick, because one seek can miss the window by luck.
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await val(win, '(function(){ const b = document.querySelector("button.play"); if (b && !b.disabled && !__test.playing) b.click() })()')
+      for (let i = 0; i < 40 && !(await val(win, '__test.playing')); i++) await sleep(50)
+      await sleep(700 + attempt * 9)
+      await val(win, `__test.engine.seek(${region.end + 8})`)
+      await sleep(1200)
+      const landed = JSON.parse(await val(win, '(function(){ const e = __test.engine; return JSON.stringify({ pos: e.position, playing: __test.playing }) })()'))
+      console.log(`5. seek past the selection mid-play (${attempt}/3): bar ${landed.pos.toFixed(2)} s, ${landed.playing ? 'playing' : 'PAUSED'}`)
+      if (!landed.playing) fail.push(`a seek to ${region.end + 8} s while the selection played paused the song at ${landed.pos.toFixed(2)} s (attempt ${attempt})`)
+      else if (landed.pos < region.end + 8 - 0.5) fail.push(`a seek to ${region.end + 8} s while the selection played never landed: the bar is at ${landed.pos.toFixed(2)} s (attempt ${attempt})`)
+      await val(win, '(function(){ const b = document.querySelector("button.play"); if (b && !b.disabled && __test.playing) b.click() })()')
+      for (let i = 0; i < 40 && await val(win, '__test.playing'); i++) await sleep(50)
+      await val(win, `__test.engine.seek(${region.start + 1})`)
+      await sleep(600)
+    }
+    // OVERLAPPING seeks — a held arrow key repeats faster than a seek's two
+    // round trips. Inside then past the end: the first seek's receipt used to
+    // write its older target over the second's start and pause the song. Past
+    // the end then back inside: the second seek moved the start before the
+    // client's position had moved off the first seek's target, and paused it
+    // the other way. Both are issued in one evaluate, so the second is always
+    // queued behind the first.
+    // FOUR times each, at different phases of the watcher's 25 ms tick. The
+    // race is intermittent even where round trips are slow: against the
+    // broken engine on the Windows field laptop one run caught both
+    // directions on a single pair each and the next caught neither.
+    const overlap = async (label, from, first, second) => { for (let attempt = 1; attempt <= 4; attempt++) {
+      await val(win, `__test.engine.seek(${from})`)
+      await sleep(700)
+      await val(win, '(function(){ const b = document.querySelector("button.play"); if (b && !b.disabled && !__test.playing) b.click() })()')
+      for (let i = 0; i < 40 && !(await val(win, '__test.playing')); i++) await sleep(50)
+      await sleep(600 + attempt * 7)
+      await val(win, `(function(){ __test.engine.seek(${first}); __test.engine.seek(${second}); return 1 })()`)
+      await sleep(1500)
+      const r = JSON.parse(await val(win, '(function(){ const e = __test.engine; return JSON.stringify({ pos: e.position, playing: __test.playing }) })()'))
+      label = `${label.replace(/ \(\d\/4\)$/, '')} (${attempt}/4)`
+      console.log(`5. ${label}: seek ${first} then ${second} s back to back → bar ${r.pos.toFixed(2)} s after 1.5 s, ${r.playing ? 'playing' : 'PAUSED'}`)
+      // Landed AND moving. "Playing" alone is not enough: on the Mac, whose
+      // round trips are too quick for the race to pause the song outright,
+      // the broken engine still left the bar standing on the second target
+      // for the whole wait — 21.50 s after 1.5 s "playing" — and the button
+      // is not the transport.
+      if (!r.playing) fail.push(`${label}: two overlapping seeks (${first} then ${second} s) paused the song at ${r.pos.toFixed(2)} s`)
+      else if (r.pos < second + 0.5 || r.pos > second + 2.1) fail.push(`${label}: after two overlapping seeks the bar should be playing on from ${second} s, it is at ${r.pos.toFixed(2)} s after 1.5 s`)
+      await val(win, '(function(){ const b = document.querySelector("button.play"); if (b && !b.disabled && __test.playing) b.click() })()')
+      for (let i = 0; i < 40 && await val(win, '__test.playing'); i++) await sleep(50)
+    } }
+    // Both play from inside the selection: `togglePlay` seeks a Play from
+    // anywhere outside it to its start, so there is no playing "from past
+    // the end" with a selection set. What differs is where the two seeks go:
+    // inside then out, and out then back in.
+    await overlap('overlapping seeks out of the selection (inside, then past the end)', region.start + 1, region.start + 3, region.end + 4)
+    // This pair starts 3 s in, not 1: the check judges where the bar is 1.5 s
+    // after the seeks, and a Play from 21 s whose seeks were silently dropped
+    // would ALSO read about 23 s — right on top of a pair that landed at
+    // 21.5 s. From 23 s, dropped seeks read about 25 s or run into the
+    // selection's end and stop, and both fail.
+    await overlap('overlapping seeks out and back in (past the end, then inside)', region.start + 3, region.end + 3, region.start + 1.5)
+
+    // With the selection CLEARED, a resume must play on: the watchers are
+    // armed on more paths now, and a bound that outlived its selection would
+    // stop a singer mid-song for no reason they could see.
+    await val(win, '__test.setSelection(null)')
+    for (let i = 0; i < 40; i++) {
+      if ((await val(win, 'JSON.stringify(__test.engine.acceptedRegion)')).includes('"region":null')) break
+      await sleep(100)
+    }
+    await val(win, `__test.engine.seek(${region.end - 2})`)
+    await sleep(900)
+    await val(win, '(function(){ const b = document.querySelector("button.play"); if (b && !b.disabled && !__test.playing) b.click() })()')
+    await sleep(5000)
+    const free = JSON.parse(await val(win, '(function(){ const e = __test.engine; return JSON.stringify({ pos: e.position, playing: __test.playing }) })()'))
+    console.log(`5. no selection, Play from ${region.end - 2} s: bar at ${free.pos.toFixed(2)} s after 5 s, ${free.playing ? 'still playing' : 'STOPPED'}`)
+    if (!free.playing || free.pos < region.end + 1) {
+      fail.push(`with the selection cleared, playback stopped or stalled at ${free.pos.toFixed(2)} s instead of playing on past ${region.end} s`)
+    }
+    await val(win, '(function(){ const b = document.querySelector("button.play"); if (b && !b.disabled && __test.playing) b.click() })()')
+    await sleep(400)
 
     // ── The log has the last word ───────────────────────────────────────
     const all = await logSince(win, t0)
