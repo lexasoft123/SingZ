@@ -330,7 +330,15 @@ landing, as a transport edge (audible projection restarting), and a seam that
 lands in that callback carries the landing across. It used to report
 frame 0 for that callback — every count-in on WASAPI's 480-frame callbacks
 against a grid on the 20 ms lattice — which is how the desktop's bar still
-fell to 0.00 one Space burst in five after the hold above had shipped. The dots come from the
+fell to 0.00 one Space burst in five after the hold above had shipped.
+**While no generation answers at all**, between a stop and the first report
+of the generation prepared after it (a restart with the count-in, a six-call
+rebuild), the phones' bar shows where the next generation starts: the paused
+spot, the landing, the frame the rebuild read. Once a song is left stopped
+(stopped outright, or a rebuild that failed) it shows where Play will start,
+which is the top only when nothing is remembered. Their stop and prepare zeroed the position
+the clock falls back on, and the bar read 0:00 there for up to ~170 ms (the
+Android emulator, a Play from a pause at 40 s). The dots come from the
 core's `countInEventCount`/`countInBeatsPerBar`/`preRollFrames` laid over
 the grid the facade would have clicked itself, and stay up for one
 presentation latency after the landing because the last clicks are still

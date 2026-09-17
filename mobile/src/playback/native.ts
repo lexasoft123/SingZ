@@ -2593,8 +2593,8 @@ export class IosNativePlaybackCoordinator {
     if (handle.routeIsValid())
       handle.update({
         phase: 'stopped',
-        positionSec: 0,
-        renderedPositionSec: 0,
+        positionSec: handle.restartPositionSec(),
+        renderedPositionSec: handle.restartPositionSec(),
         audibleFrames: 0,
         countInStatus: null,
         regionState: handle.pendingRegionState(),
@@ -2845,6 +2845,10 @@ export class IosNativePlaybackCoordinator {
         return { ok: false, error: 'Native preparation was cancelled.' };
     }
     const generation = this.claimGeneration();
+    // One notification for the phase and the position together: the screen
+    // reads the bar on every notification, and beginPrepare's alone was read
+    // before the hold below — the last poll, up to a period behind the song.
+    const releaseNotifications = handle.holdNotifications();
     handle.beginPrepare(generation, output);
     const lease = this.fallbackLease;
     // Once the bridge is invoked the token may have been consumed even if JS
@@ -2852,11 +2856,20 @@ export class IosNativePlaybackCoordinator {
     if (lease !== null) this.fallbackLease = null;
     let result: NativePlaybackResult;
     try {
+      // After beginPrepare, which the restart overrides need (they are
+      // computed at the new output's rate).
+      let planned: NativePlaybackPrepareOverrides;
+      try {
+        planned = overrides ?? handle.prepareRestartOverrides(output.sampleRate);
+        handle.holdPositionThroughPrepare(planned, output.sampleRate);
+      } finally {
+        releaseNotifications();
+      }
       const request = prepareRequest(
         handle.materialized,
         output,
         lease?.token ?? 0,
-        overrides ?? handle.prepareRestartOverrides(output.sampleRate),
+        planned,
       );
       logDspGraphBuild(generation, handle.materialized, output, request);
       result = await native.prepare(generation, request);
@@ -3559,7 +3572,15 @@ export class IosNativePlaybackCoordinator {
         // no longer showed and the singer could not un-arm.
         if (!prepared.ok) {
           const generation = handle.generation;
-          handle.update({ phase: 'stopped', error: prepared.error });
+          // Stopped, the bar shows where Play starts: the rebuild remembers
+          // no position, so the prepare's hold at the frame it read would sit
+          // mid-song over a Play that starts from what IS remembered.
+          handle.update({
+            phase: 'stopped',
+            positionSec: handle.restartPositionSec(),
+            renderedPositionSec: handle.restartPositionSec(),
+            error: prepared.error,
+          });
           log(
             'dsp',
             `cue rebuild failed · generation ${oldGeneration}→${generation} · ${prepared.error}`,
@@ -3728,7 +3749,13 @@ export class IosNativePlaybackCoordinator {
         const detail = released
           ? `Native cue rebuild stopped and is retryable: ${message(error)}`
           : cleanupUncertain(error);
-        handle.update({ phase: released ? 'stopped' : 'error', error: detail });
+        // As a refused rebuild prepare: the bar shows where Play starts.
+        handle.update({
+          phase: released ? 'stopped' : 'error',
+          positionSec: handle.restartPositionSec(),
+          renderedPositionSec: handle.restartPositionSec(),
+          error: detail,
+        });
         log(
           'dsp',
           `cue rebuild activation failed · generation ${generation} · ${detail}`,
@@ -4221,10 +4248,14 @@ export class IosNativePlaybackCoordinator {
     }
     const safe = await this.cleanupGeneration(handle, generation, retention);
     if (safe) {
+      // Where Play starts again, not the top: the park before a count-in
+      // restart and the handoff that remembered the playhead both come back
+      // there, and the bar read 0:00 until the next generation answered.
+      const shownSec = handle.restartPositionSec();
       handle.update({
         phase: 'stopped',
-        positionSec: 0,
-        renderedPositionSec: 0,
+        positionSec: shownSec,
+        renderedPositionSec: shownSec,
         audibleFrames: 0,
         countInStatus: null,
         regionState: handle.pendingRegionState(),
@@ -5593,6 +5624,39 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     );
   }
 
+  /** Where Play starts this song again, which is what a stopped song shows:
+   *  the playhead a park or a handoff remembered, a count-in's landing, a
+   *  seek chosen before Play — the top only when nothing is remembered (a
+   *  song just opened, or stopped outright, which forgets the snapshot). */
+  restartPositionSec(): number {
+    const seconds =
+      this.recoverySnapshot?.shownSeconds ?? this.retryProjectSeconds ?? 0;
+    return Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
+  }
+
+  /** The bar while the generation being prepared cannot answer for itself:
+   *  where that generation starts. A count-in's landing, the frame a rebuild
+   *  or a restart prepares at, the entry for a song just opened. Zeroed
+   *  here, a Play from a pause with the count-in on and a rebuild inside a
+   *  mid-song count-in both drew 0:00 until the new generation answered —
+   *  measured in the app at 40 s, 129-171 ms on the Android emulator and
+   *  a sample on the iOS simulator. */
+  holdPositionThroughPrepare(
+    plan: NativePlaybackPrepareOverrides,
+    outputSampleRate: number,
+  ): void {
+    const transport = plan.playback?.transport;
+    const frame = plan.preparedStartProjectFrame;
+    const seconds =
+      transport?.countInAnchorSeconds !== undefined
+        ? transport.countInAnchorSeconds
+        : frame !== undefined && outputSampleRate > 0
+          ? frame / outputSampleRate
+          : (transport?.entrySeconds ?? 0);
+    const held = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
+    this.update({ positionSec: held, renderedPositionSec: held });
+  }
+
   beginPrepare(generation: number, output: NativePlaybackOutput): void {
     this.generation = generation;
     this.output = output;
@@ -5604,11 +5668,11 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     this.cleanupLease = 0;
     this.endOfSongParkedGeneration = 0;
     this.preparedStartedAt = Date.now();
+    // No position here: prepareHandle sets it from the plan this prepare
+    // carries (holdPositionThroughPrepare), in the same tick.
     this.update({
       phase: 'starting',
       generation,
-      positionSec: 0,
-      renderedPositionSec: 0,
       displayLatencySec: 0,
       audibleFrames: 0,
       countInStatus: null,
