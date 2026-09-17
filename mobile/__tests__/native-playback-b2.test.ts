@@ -3554,6 +3554,150 @@ describe('iOS Phase 4B structural cue rebuild', () => {
     await handle.stop('pause inside count-in test complete');
   });
 
+  /** The bar at every bridge call from here on, with the core answering
+   *  nothing once a stop has landed — the window a real restart or rebuild
+   *  has between the old generation going and the new one answering. Queue
+   *  the status answers first: this wraps the mock they are queued on. */
+  const watchTheBarWithoutACore = (
+    h: ReturnType<typeof harness>,
+    handle: NonNullable<Awaited<ReturnType<ReturnType<typeof harness>['load']>>['nativePlayback']>,
+  ) => {
+    const bars: Array<{ at: string; phase: string; sec: number }> = [];
+    const sample = (at: string) =>
+      bars.push({ at, phase: handle.snapshot().phase, sec: handle.clock().renderedSec });
+    const status = h.native.status;
+    (h.native as { status: typeof status }).status = (async () => {
+      sample('status');
+      return status();
+    }) as typeof status;
+    const stop = h.native.stop.getMockImplementation()!;
+    h.native.stop.mockImplementation(async (next: number) => {
+      const stopped = await stop(next);
+      h.setPositionNow(null);
+      return stopped;
+    });
+    const prepare = h.native.prepare.getMockImplementation()!;
+    h.native.prepare.mockImplementation(async (next: number, request: Record<string, unknown>) => {
+      sample('prepare');
+      return prepare(next, request);
+    });
+    return bars;
+  };
+
+  it('Play from a pause with the count-in on holds the bar at the paused spot through the stop and the prepare', async () => {
+    // Measured in the app at 40 s: the bar read 0:00 from the park until the
+    // new generation answered (129-171 ms on the Android emulator), because
+    // the stop and the prepare both zeroed the position the clock falls back
+    // on while no generation answers. Play starts at the paused spot, so that
+    // is what the bar shows until it does.
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat, metronome: { ...initialMetronome, countInBars: 1 } }));
+    const handle = project.nativePlayback!;
+    // A song just opened shows the top.
+    expect(handle.clock().renderedSec).toBe(0);
+    await handle.start();
+    await handle.pause();
+    h.setPositionNow({
+      generation: 1,
+      transportState: 'paused',
+      renderedProjectFrame: 72_000,
+      continuousFrame: 72_000,
+      remainingPreRollFrames: 0,
+      seekCount: 0,
+      ageMs: 0,
+    });
+    h.native.status
+      .mockResolvedValueOnce(swapCapability(1, 'running', 72_000, { transportState: 'paused', renderedProjectFrame: 72_000 }))
+      .mockResolvedValueOnce(capability(1, 'unloaded'))
+      .mockResolvedValueOnce(capability(2, 'prepared'))
+      .mockResolvedValueOnce(capability(2, 'running', 72_000));
+    const bars = watchTheBarWithoutACore(h, handle);
+    await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+    expect(h.prepareRequests[1]).toMatchObject({ playback: { transport: { countInAnchorSeconds: 1.5 } } });
+    // The capability read between the park and the prepare (nothing
+    // answering, the stop's position on screen), the prepare itself, and the
+    // start's read — the bar on the paused spot at every one.
+    expect(bars).toEqual([
+      { at: 'status', phase: 'starting', sec: expect.closeTo(1.5, 3) },
+      { at: 'prepare', phase: 'starting', sec: expect.closeTo(1.5, 3) },
+      { at: 'status', phase: 'starting', sec: expect.closeTo(1.5, 3) },
+    ]);
+    // Stopped outright, the song forgets where it was: the top again.
+    await handle.stop('bar hold restart test complete');
+    expect(handle.clock().renderedSec).toBe(0);
+  });
+
+  it('a rebuild inside a mid-song count-in holds the bar at the landing while it prepares', async () => {
+    // The rebuild that replaced a seam to the top (training on, the click)
+    // stops the song and prepares again, and the prepare zeroed the position:
+    // the iOS simulator drew one sample at 0:00 between the two generations.
+    const { h, handle } = await countingInToOnePointFive();
+    h.native.status.mockResolvedValueOnce(
+      swapCapability(2, 'running', 0, { transportState: 'pre-roll', renderedProjectFrame: -24_000 }),
+    );
+    const bars = watchTheBarWithoutACore(h, handle);
+    await rebuildIosNativePlaybackCues(handle, beat, { ...initialMetronome, countInBars: 1, volume: 0.42 });
+    expect(h.prepareRequests[h.prepareRequests.length - 1]).toMatchObject({
+      playback: { transport: { countInAnchorSeconds: 1.5 } },
+    });
+    const preparing = bars.filter(bar => bar.at === 'prepare');
+    expect(preparing).toEqual([{ at: 'prepare', phase: 'starting', sec: expect.closeTo(1.5, 3) }]);
+    await handle.stop('bar hold rebuild test complete');
+  });
+
+  it.each([
+    ['polled', false],
+    ['under the clock', true],
+  ] as const)('a six-call rebuild while playing holds the bar at the frame it restarts from, not at the last poll (%s)', async (_name, syncClock) => {
+    // Where the new generation starts is the read the rebuild took, not the
+    // poll before it: the poll is up to a period old, and holding it put the
+    // bar back that far until the rebuilt song answered. The screen reads the
+    // bar on every notification, and the one for the prepare's phase change
+    // used to go out before the hold was in (the reviewer's probe read 1.0
+    // there under the clock).
+    const h = harness({ syncClock });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.start();
+    const polled = capability(1, 'running', 48_000);
+    (polled.session as unknown as Record<string, unknown>).transportState = 'playing';
+    (polled.session as unknown as Record<string, unknown>).renderedProjectFrame = 48_000;
+    (handle as unknown as { publishTelemetry: (value: unknown) => void }).publishTelemetry(polled.session);
+    if (syncClock)
+      h.setPositionNow({
+        generation: 1,
+        transportState: 'playing',
+        renderedProjectFrame: 72_000,
+        continuousFrame: 72_000,
+        remainingPreRollFrames: 0,
+        seekCount: 0,
+        ageMs: 0,
+      });
+    const read = capability(1, 'running', 72_000);
+    (read.session as unknown as Record<string, unknown>).transportState = 'playing';
+    (read.session as unknown as Record<string, unknown>).renderedProjectFrame = 72_000;
+    h.native.status
+      .mockResolvedValueOnce(read)
+      .mockResolvedValueOnce(capability(1, 'unloaded'))
+      .mockResolvedValueOnce(capability(2, 'prepared'))
+      .mockResolvedValueOnce(capability(2, 'running', 72_000));
+    const bars = watchTheBarWithoutACore(h, handle);
+    const notified: Array<{ phase: string; sec: number }> = [];
+    const unsubscribe = handle.subscribe(() =>
+      notified.push({ phase: handle.snapshot().phase, sec: handle.clock().renderedSec }),
+    );
+    await rebuildIosNativePlaybackCues(handle, beat, { ...initialMetronome, volume: 0.3 });
+    unsubscribe();
+    expect(h.prepareRequests[1]).toMatchObject({ preparedStartProjectFrame: 72_000 });
+    expect(bars.filter(bar => bar.at === 'prepare')).toEqual([
+      { at: 'prepare', phase: 'starting', sec: expect.closeTo(1.5, 3) },
+    ]);
+    const starting = notified.filter(note => note.phase === 'starting');
+    expect(starting.length).toBeGreaterThan(0);
+    for (const note of starting) expect(note.sec).toBeCloseTo(1.5, 3);
+    await handle.stop('bar hold playing rebuild test complete');
+  });
+
   it('under the clock, a seam that changed nothing the screen shows does not notify', async () => {
     // The generation moved; nothing the singer sees did.
     const h = harness({ swapCapable: true, syncClock: true });
@@ -3884,6 +4028,10 @@ describe('iOS Phase 4B structural cue rebuild', () => {
       phase: 'stopped',
       error: expect.stringMatching(/prepare refused/i),
     });
+    // Stopped, the bar shows where Play starts. The rebuild remembers no
+    // position, so that is the top — not the prepare's hold at the frame it
+    // read, which put the bar mid-song over a Play from the beginning.
+    expect(handle.clock().renderedSec).toBe(0);
     expect(h.calls.indexOf('native.stop:1')).toBeLessThan(
       h.calls.indexOf('native.unloadRetainingLanes:1'),
     );
@@ -3895,6 +4043,39 @@ describe('iOS Phase 4B structural cue rebuild', () => {
     // releases them on the way out rather than stranding a song's PCM.
     expect(h.calls).toContain('native.unload:2');
     expect(h.legacyLoad).not.toHaveBeenCalled();
+  });
+
+  it('a rebuild that prepares but cannot start again stops with the bar where Play starts, not at the prepared frame', async () => {
+    // The prepared generation published its frame (1.5 s) before the start
+    // was refused; stopped and retryable, the song restarts from what is
+    // remembered — nothing, for a rebuild — so the bar says the top.
+    const h = harness();
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.start();
+    const read = capability(1, 'running', 72_000);
+    (read.session as unknown as Record<string, unknown>).transportState = 'playing';
+    (read.session as unknown as Record<string, unknown>).renderedProjectFrame = 72_000;
+    const prepared = capability(2, 'prepared', 72_000);
+    (prepared.session as unknown as Record<string, unknown>).renderedProjectFrame = 72_000;
+    h.native.status
+      .mockResolvedValueOnce(read)
+      .mockResolvedValueOnce(capability(1, 'unloaded'))
+      .mockResolvedValueOnce(prepared);
+    h.native.start.mockResolvedValueOnce({
+      ...result(2, 'output-open', false),
+      error: 'provider-failure',
+      message: 'injected start refusal',
+    });
+    await expect(
+      rebuildIosNativePlaybackCues(handle, beat, { ...initialMetronome, volume: 0.2 }),
+    ).rejects.toBeInstanceOf(NativePlaybackCommandError);
+    expect(h.prepareRequests[1]).toMatchObject({ preparedStartProjectFrame: 72_000 });
+    expect(handle.snapshot()).toMatchObject({
+      phase: 'stopped',
+      error: expect.stringMatching(/retryable/i),
+    });
+    expect(handle.clock().renderedSec).toBe(0);
   });
 
   it.each([
