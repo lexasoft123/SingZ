@@ -810,6 +810,34 @@ second apart, and the pre-roll is multiplied by `playbackRate` so the ticks
 stay a real second apart at any tempo. A gridless plan carrying downbeats is
 rejected outright.
 
+A click TRACK is a different question, and every bridge refuses one with no
+grid to click on (`playback_addon_bridge.cpp:812`, the Kotlin and TS schema
+validators). That refusal is a contract check, not a product answer: the
+click is a saved setting of the SONG (`settings.metronome`) while the grid is
+a detection that can be absent, stale, or still running, so the two disagree
+routinely and nothing turns a click off when a grid goes away. The desktop
+facade used to raise the mismatch as a product error and a singer met
+"Playback could not start: Native metronome playback requires a beat grid"
+over a song that would not play at all — Play, the prepare ahead and every
+structural change died on it, while Web Audio played the same song with its
+clicks silent (`armClicksFromCurrent` returns on a null grid). It sends
+`click: false` instead now, and the click returns on its own when a grid
+arrives and the running generation is rebuilt around it. That is a softer
+answer than the one an out-of-band grid gets: a median tempo outside 30..300
+BPM or a `beatsPerBar` that is not 2, 3, 4 or 6 is refused by `parseBeatGrid`
+and takes the whole prepare with it, so the song falls back to Web Audio
+rather than merely losing its click.
+
+**A divergence, deliberate and desktop-only:** the phones still throw for a
+click with no grid (`mobile/src/playback/native.ts`), and
+`nativePlaybackEligibility` turns that into `eligible: false` with "the saved
+metronome configuration is not supported natively" — so the same project
+plays on the phone's legacy engine while the desktop plays it natively with a
+silent click. The song plays either way, which is why the phones were left
+alone with the desktop field report in hand; the phone player also hides its
+Click chip when a song has no grid, so only a setting saved elsewhere gets
+there.
+
 **Tempo and meter admissibility** — `playback_cue_plan.cpp:21-22` and
 `isMeter` at ~:36-39. Median (not mean) inter-beat interval must land in
 30..300 BPM; `beatsPerBar` must be 2, 3, 4 or 6. A song outside those bands

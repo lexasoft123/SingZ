@@ -805,7 +805,7 @@ export class DesktopNativePlaybackClient {
         const ahead = this.ahead
         if (ahead) {
           this.ahead = null
-          // configFor can throw (a click with no grid, loop bounds, a graph
+          // configFor can throw (loop bounds it cannot represent, a graph
           // document past this runtime): the prepared generation must not
           // outlive that as nobody's — it would hold the device for the rest
           // of the process. Unload first, then let the error be the error.
@@ -938,9 +938,24 @@ export class DesktopNativePlaybackClient {
           downbeats: request.beat.downbeats ?? []
         }
       : undefined
-    if (request.metronome.click && !beatGrid) {
-      throw new Error('Native metronome playback requires a beat grid.')
-    }
+    // No grid, no click track — the same answer Web Audio gives, and never a
+    // refusal to play. The three bridges all hold that a click track needs a
+    // grid to click ON (the core would ignore one, the addon and both phone
+    // bridges reject it), and this used to raise that as a product error, so
+    // a song with no beat grid and the metronome left on could not be played
+    // AT ALL: Play, the prepare ahead, and every structural change while
+    // playing died on "Native metronome playback requires a beat grid",
+    // which a singer met as a toast over a song that would not start. The
+    // click is a setting of the SONG (`settings.metronome`, saved), the grid
+    // is a detection that may be absent, stale or still running, so the two
+    // disagree routinely — the popover already refuses to turn a click ON
+    // without a grid, but nothing turned one off when the grid went away.
+    // `armClicksFromCurrent` simply returns with no grid, so Web Audio has
+    // always played that song silently-clicked; native now does too, and
+    // when a grid does arrive `setBeats` reconfigures the running generation
+    // and the click the singer asked for starts sounding. The COUNT-IN is
+    // unaffected: it is gridless ticks without a grid, on both engines.
+    const click = request.metronome.click && beatGrid !== undefined
     const training = trainingConfig(request.training, request.lanes, route.sampleRate)
     const loop = request.loop
       ? {
@@ -1003,7 +1018,7 @@ export class DesktopNativePlaybackClient {
           transposeSemitones: request.transpose
         },
         cues: {
-          click: request.metronome.click,
+          click,
           countInBars: request.countIn ? request.metronome.countInBars : 0,
           volume: request.metronome.volume,
           accent: request.metronome.accent,
