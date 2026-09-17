@@ -3171,6 +3171,203 @@ describe('iOS Phase 4B structural cue rebuild', () => {
     await handle.stop('seam floor test complete');
   });
 
+  /** A song counting in to 1.5 s: started with the count-in on from a seek,
+   *  its clock read once inside the pre-roll (which is what marks the
+   *  count-in seen and sounding, as a frame on screen would). */
+  const countingInToOnePointFive = async () => {
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat, metronome: { ...initialMetronome, countInBars: 1 } }));
+    const handle = project.nativePlayback!;
+    await handle.seek(1.5);
+    const swappable = (value: ReturnType<typeof capability>) => ({ ...value, playbackSwap: true });
+    h.native.status
+      .mockResolvedValueOnce(swappable(capability(1, 'unloaded')))
+      .mockResolvedValueOnce(swappable(capability(2, 'prepared')))
+      .mockResolvedValueOnce(swappable(capability(2, 'running', 72_000)));
+    await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+    h.setPositionNow({
+      generation: 2,
+      transportState: 'pre-roll',
+      renderedProjectFrame: -24_000,
+      continuousFrame: 24_000,
+      remainingPreRollFrames: 24_000,
+      seekCount: 0,
+      ageMs: 0,
+    });
+    expect(handle.clock().renderedSec).toBeCloseTo(1.5, 3);
+    return { h, handle };
+  };
+
+  it('a cue or training change inside a mid-song count-in rebuilds anchored at the landing — never a seam to the top', async () => {
+    // Measured on the Android emulator: training on, or the click, 400 ms
+    // into a count-in landing at 40 s was accepted as a SEAM. The candidate
+    // was prepared at max(0, pre-roll frame) = 0 with no anchor, so it had no
+    // landing of its own: the adopted clock counted up to 0 and the song came
+    // in at 0.04 s instead of 40, the bar dropping to 0 with it. The rebuild
+    // it falls back on restarted at frame 0 as well. Inside a mid-song
+    // count-in the change is a rebuild anchored at the landing — the count-in
+    // starts over to the same spot, the desktop's rule.
+    const { h, handle } = await countingInToOnePointFive();
+    // What the rebuild reads once it has declined the seam: still counting.
+    h.native.status.mockResolvedValueOnce(
+      swapCapability(2, 'running', 0, { transportState: 'pre-roll', renderedProjectFrame: -24_000 }),
+    );
+    const before = h.prepareRequests.length;
+    await rebuildIosNativePlaybackCues(handle, beat, { ...initialMetronome, countInBars: 1, volume: 0.42 });
+    const requests = h.prepareRequests.slice(before);
+    expect(requests.length).toBeGreaterThan(0);
+    expect(requests.some(request => 'swapFromGeneration' in request)).toBe(false);
+    const rebuilt = requests[requests.length - 1] as {
+      preparedStartProjectFrame?: number;
+      initialTransport?: { state: string };
+      playback: { transport: { countInAnchorSeconds?: number } };
+    };
+    expect(rebuilt).not.toHaveProperty('preparedStartProjectFrame');
+    expect(rebuilt.playback.transport.countInAnchorSeconds).toBeCloseTo(1.5, 6);
+    expect(rebuilt.initialTransport).toMatchObject({ state: 'playing' });
+    // Counting in again on the rebuilt generation, the bar holds at the same
+    // landing.
+    h.setPositionNow({
+      generation: handle.snapshot().generation,
+      transportState: 'pre-roll',
+      renderedProjectFrame: -40_000,
+      continuousFrame: 60_000,
+      remainingPreRollFrames: 40_000,
+      seekCount: 0,
+      ageMs: 0,
+    });
+    expect(handle.clock().renderedSec).toBeCloseTo(1.5, 3);
+    await handle.stop('count-in rebuild test complete');
+  });
+
+  it('a seam in the count-in tail keeps the dots up until the ear reaches the landing', async () => {
+    // Landed, with the last clicks still sounding for a presentation latency.
+    // A seam there is an ordinary seam (the song is past its landing), and it
+    // used to wipe the handle's count-in state with the prepare: the landing
+    // read 0 and the row was gone a latency early.
+    const { h, handle } = await countingInToOnePointFive();
+    const tail = (generation: number, frame: number) => {
+      const telemetry = swapCapability(generation, 'running', frame, {
+        transportState: 'playing',
+        renderedProjectFrame: frame,
+        presentationLatencyFrames: 7_680,
+        countInEventCount: 4,
+        countInBeatsPerBar: 4,
+        preRollFrames: 48_000,
+      });
+      (handle as unknown as { publishTelemetry: (value: unknown) => void }).publishTelemetry(telemetry.session);
+      h.setPositionNow({
+        generation,
+        transportState: 'playing',
+        renderedProjectFrame: frame,
+        continuousFrame: 48_000 + frame - 72_000,
+        remainingPreRollFrames: 0,
+        seekCount: 0,
+        ageMs: 0,
+      });
+      return telemetry;
+    };
+    // 50 ms past the landing: the tail's row is up.
+    const landed = tail(2, 74_400);
+    expect(handle.clock().countIn).not.toBeNull();
+    h.native.status
+      .mockResolvedValueOnce(landed)
+      .mockResolvedValueOnce(
+        swapCapability(3, 'running', 74_400, {
+          transportState: 'playing',
+          transportGeneration: 2,
+          swapPendingGeneration: 2,
+          renderedProjectFrame: 74_400,
+        }),
+      );
+    await rebuildIosNativePlaybackCues(handle, beat, { ...initialMetronome, countInBars: 1, volume: 0.42 });
+    expect(h.prepareRequests[h.prepareRequests.length - 1]).toMatchObject({ swapFromGeneration: 2 });
+    // 100 ms past the landing, on the generation the seam put in: still
+    // inside the 160 ms latency, so still the row.
+    tail(3, 76_800);
+    expect(handle.clock().countIn).not.toBeNull();
+    await handle.stop('count-in tail seam test complete');
+  });
+
+  it('the count-in turned OFF inside a mid-song count-in starts the song flat at the landing, not at the top', async () => {
+    // The change that removes the count-in has nothing to count in with: an
+    // anchor on a plan with no count-in has no pre-roll, and the core starts
+    // such a plan at 0. Where the singer asked to be is the landing — the
+    // desktop's rule for the same touch.
+    const { h, handle } = await countingInToOnePointFive();
+    h.native.status.mockResolvedValueOnce(
+      swapCapability(2, 'running', 0, { transportState: 'pre-roll', renderedProjectFrame: -24_000 }),
+    );
+    const before = h.prepareRequests.length;
+    await rebuildIosNativePlaybackCues(handle, beat, { ...initialMetronome, countInBars: 0 });
+    const requests = h.prepareRequests.slice(before);
+    expect(requests.some(request => 'swapFromGeneration' in request)).toBe(false);
+    const rebuilt = requests[requests.length - 1] as {
+      preparedStartProjectFrame?: number;
+      initialTransport?: { state: string };
+      playback: { transport: Record<string, unknown> };
+    };
+    expect(rebuilt.preparedStartProjectFrame).toBe(72_000);
+    expect(rebuilt.playback.transport).not.toHaveProperty('countInAnchorSeconds');
+    expect(rebuilt.initialTransport).toMatchObject({ state: 'playing' });
+    await handle.stop('count-in off rebuild test complete');
+  });
+
+  it.each([
+    ['the count-in turned off', { countInBars: 0 }, null],
+    // Only the bar lines move: the bar the landing sits in is three beats
+    // long now, so the same one-bar count-in is three dots, not four.
+    ['the bar lines moved', {}, [0, 3]],
+  ] as const)('a seam in the count-in tail that changes the count-in (%s) ends the dots instead of redrawing them for the new plan', async (_name, metronomeChange, downbeats) => {
+    // Carried across, the tail read the NEW plan's telemetry: four lit dots
+    // became a seconds countdown (no count-in any more) or eight dots (two
+    // bars). A different count-in plan ends the tail at the seam.
+    const { h, handle } = await countingInToOnePointFive();
+    const countsIn = !('countInBars' in metronomeChange);
+    const tail = (generation: number, frame: number, events: number) => {
+      const telemetry = swapCapability(generation, 'running', frame, {
+        transportState: 'playing',
+        renderedProjectFrame: frame,
+        presentationLatencyFrames: 7_680,
+        countInEventCount: events,
+        countInBeatsPerBar: events,
+        preRollFrames: events === 0 ? 0 : 48_000,
+      });
+      (handle as unknown as { publishTelemetry: (value: unknown) => void }).publishTelemetry(telemetry.session);
+      h.setPositionNow({
+        generation,
+        transportState: 'playing',
+        renderedProjectFrame: frame,
+        continuousFrame: 48_000 + frame - 72_000,
+        remainingPreRollFrames: 0,
+        seekCount: 0,
+        ageMs: 0,
+      });
+      return telemetry;
+    };
+    const landed = tail(2, 74_400, 4);
+    expect(handle.clock().countIn).toMatchObject({ kind: 'beats' });
+    h.native.status
+      .mockResolvedValueOnce(landed)
+      .mockResolvedValueOnce(
+        swapCapability(3, 'running', 74_400, {
+          transportState: 'playing',
+          transportGeneration: 2,
+          swapPendingGeneration: 2,
+          renderedProjectFrame: 74_400,
+        }),
+      );
+    await rebuildIosNativePlaybackCues(
+      handle,
+      downbeats === null ? beat : { ...beat, downbeats: [...downbeats] },
+      { ...initialMetronome, countInBars: 1, ...metronomeChange },
+    );
+    expect(h.prepareRequests[h.prepareRequests.length - 1]).toMatchObject({ swapFromGeneration: 2 });
+    tail(3, 76_800, countsIn ? 3 : 0);
+    expect(handle.clock().countIn).toBeNull();
+    await handle.stop('count-in plan change seam test complete');
+  });
+
   it('during a count-in that lands mid-song the bar holds at the landing, as legacy holds at its start offset', async () => {
     // The core counts the pre-roll down through negative frames; legacy's
     // clock clamps at the start offset until the music enters, so the bar and
