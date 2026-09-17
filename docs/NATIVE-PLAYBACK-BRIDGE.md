@@ -500,6 +500,30 @@ running generation, no stop, no unload, the landing awaited on
 song is paused, or on the forced route-change rebuild, where the stream a seam
 would keep is the one that went away.
 
+**A prepared graph names ONE output device, and a phone's route does not hold
+still.** The uid, the channels and the sample rate go into the prepare, and
+`SingzVerifyPlaybackAudioSession` refuses the handoff unless the active route
+is still that device — "The active iOS output route does not match the
+prepared device", which it also answers when iOS reports more than one output
+at once. The two drift apart routinely, because the graph is prepared when the
+song OPENS while Play can be minutes later, and in between a car connects,
+headphones come out, or a call ends on another endpoint. A field log caught it
+twice on one iPhone two days apart: the graph was prepared for the speaker,
+Play was refused, and the player sat STOPPED with an error until the song was
+closed and opened again, which prepared against whatever was live by then and
+played first time. Nothing retried, because the route was only ever read when
+a graph was prepared. The iOS coordinator now reads it again at exactly that
+refusal (`reprepareForMovedRoute`): the inventory is `currentRoute` at the
+moment it is asked (`zcore/platform/ios/audio_host_ios.mm`), so a status taken
+after the refusal is the route the session actually has — the same device
+means the refusal was about something else and is reported unchanged, a
+different one means the old generation is released and the graph prepared
+again for the route the singer is on. Once per Play, and only before `start`
+has been issued, since past that callbacks may have rendered and a retry would
+be a second audio owner. "Moved" is asked the way the verifier asks it — the
+device and the rate must match while the prepared channel INDICES only have to
+fit, so a route that grew a channel is the same route and buys no rebuild.
+
 ### Memory and retention
 
 `retainedBytes`, `graphArenaBytes` (bytes) and `laneDecodeFallback` (string,
@@ -820,6 +844,34 @@ ordering.
 second apart, and the pre-roll is multiplied by `playbackRate` so the ticks
 stay a real second apart at any tempo. A gridless plan carrying downbeats is
 rejected outright.
+
+A click TRACK is a different question, and every bridge refuses one with no
+grid to click on (`playback_addon_bridge.cpp:812`, the Kotlin and TS schema
+validators). That refusal is a contract check, not a product answer: the
+click is a saved setting of the SONG (`settings.metronome`) while the grid is
+a detection that can be absent, stale, or still running, so the two disagree
+routinely and nothing turns a click off when a grid goes away. The desktop
+facade used to raise the mismatch as a product error and a singer met
+"Playback could not start: Native metronome playback requires a beat grid"
+over a song that would not play at all — Play, the prepare ahead and every
+structural change died on it, while Web Audio played the same song with its
+clicks silent (`armClicksFromCurrent` returns on a null grid). It sends
+`click: false` instead now, and the click returns on its own when a grid
+arrives and the running generation is rebuilt around it. That is a softer
+answer than the one an out-of-band grid gets: a median tempo outside 30..300
+BPM or a `beatsPerBar` that is not 2, 3, 4 or 6 is refused by `parseBeatGrid`
+and takes the whole prepare with it, so the song falls back to Web Audio
+rather than merely losing its click.
+
+**A divergence, deliberate and desktop-only:** the phones still throw for a
+click with no grid (`mobile/src/playback/native.ts`), and
+`nativePlaybackEligibility` turns that into `eligible: false` with "the saved
+metronome configuration is not supported natively" — so the same project
+plays on the phone's legacy engine while the desktop plays it natively with a
+silent click. The song plays either way, which is why the phones were left
+alone with the desktop field report in hand; the phone player also hides its
+Click chip when a song has no grid, so only a setting saved elsewhere gets
+there.
 
 **Tempo and meter admissibility** — `playback_cue_plan.cpp:21-22` and
 `isMeter` at ~:36-39. Median (not mean) inter-beat interval must land in

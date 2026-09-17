@@ -1032,9 +1032,10 @@ describe('desktop native playback facade', () => {
   })
 
   it('an adoption whose request cannot be built unloads the prepared generation before the error', async () => {
-    // A click with no grid is refused by configFor. Without this the ahead
-    // generation would be nobody's — not the facade's, not main's to unload —
-    // and it would hold the device for the rest of the process.
+    // Loop bounds the facade cannot represent are refused by configFor.
+    // Without this the ahead generation would be nobody's — not the
+    // facade's, not main's to unload — and it would hold the device for the
+    // rest of the process.
     const h = seamHarness((generation) => playing(generation))
     const request = {
       provider: 'coreaudio' as const,
@@ -1054,11 +1055,52 @@ describe('desktop native playback facade', () => {
     }
     expect(await h.client.prepareAhead(request)).toBe(true)
     h.calls.length = 0
-    await expect(h.client.prepareAndStart({ ...request, metronome: { ...h.metronome, click: true } }))
-      .rejects.toThrow(/beat grid/)
+    await expect(h.client.prepareAndStart({ ...request, loop: { start: 4, end: 4 } }))
+      .rejects.toThrow(/loop bounds/)
     expect(h.calls).toEqual(['unload:1'])
     expect(h.client.preparedAhead).toBe(false)
     expect(h.client.active).toBe(false)
+  })
+
+  it('a song with no beat grid plays with the click dropped, and the click sounds the moment a grid arrives', async () => {
+    // The field report: a Windows singer met "Playback could not start:
+    // Native metronome playback requires a beat grid." over a song that
+    // would not play at all. The click is a saved setting of the SONG
+    // (`settings.metronome`), the grid is a detection that can be absent,
+    // stale or still running, so the two disagree routinely — and nothing
+    // turns a click off when a grid goes away. Web Audio has always played
+    // that song with no clicks (`armClicksFromCurrent` returns on a null
+    // grid); refusing to play it was native's alone.
+    const h = seamHarness((generation) => playing(generation))
+    const request = {
+      provider: 'coreaudio' as const,
+      lanes: [{ id: 'vocals', path: '/allowed/vocals.mp3', gain: 1, muted: false, solo: false }],
+      beat: null,
+      metronome: { ...h.metronome, click: true, countInBars: 1 },
+      countIn: true,
+      positionSeconds: 0,
+      durationSeconds: 10,
+      sampleRate: 48_000,
+      masterGain: 0,
+      playbackRate: 1,
+      transpose: 0,
+      training: null,
+      loop: null,
+      graphDocument: undefined
+    }
+    expect(await h.client.prepareAndStart(request)).toBe(true)
+    // Nothing refused, nothing clicking, and the count-in the singer asked
+    // for is still asked for — the core counts that one in gridless.
+    expect(h.prepared[0].playback.cues).toMatchObject({ click: false, countInBars: 1 })
+    expect(h.prepared[0].playback.cues).not.toHaveProperty('beatGrid')
+    // Detection lands while the song plays: the saved click has a grid to
+    // click on now, and the same rebuild that adopts the grid starts it.
+    await h.client.reconfigure({
+      beat: { beats: [0, 0.5, 1, 1.5], bpm: 120, beatsPerBar: 4, downbeat: 0, downbeats: [0], source: 'auto' }
+    })
+    expect(h.prepared[1].playback.cues).toMatchObject({ click: true })
+    expect(h.prepared[1].playback.cues.beatGrid?.beats).toEqual([0, 0.5, 1, 1.5])
+    await h.client.unload()
   })
 
   it('a graph prepared ahead is let go by discardAhead and by unload, restoring nothing', async () => {
@@ -2011,8 +2053,8 @@ describe('desktop native playback facade', () => {
     await h.client.pause()
     h.calls.length = 0
     await expect(h.client.restartWithCountIn({
-      ...countInRequest(2), beat: null, metronome: { ...countInRequest(2).metronome, click: true }
-    })).rejects.toThrow(/beat grid/)
+      ...countInRequest(2), loop: { start: 4, end: 4 }
+    })).rejects.toThrow(/loop bounds/)
     expect(h.calls).toEqual([])
     expect(h.client.status?.generation).toBe('3')
     await h.client.unload()

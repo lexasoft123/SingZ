@@ -3461,6 +3461,11 @@ export default function App(): React.JSX.Element {
       transpose,
       loadPath,
       setMetCfg,
+      // The selection as the singer makes it. A driver that set the engine's
+      // region directly would skip `togglePlay`'s own seek to the selection's
+      // start, which is the route a real second Play takes.
+      selection,
+      setSelection,
       setTraining,
       setTrainCfg,
       setShowCatalog,
@@ -3479,7 +3484,7 @@ export default function App(): React.JSX.Element {
         return buffer ? computePeaks(buffer) : null
       }
     }
-  }, [engine, playing, phase, showCatalog, tracks, metCfg, training, trainCfg, transpose, loadPath])
+  }, [engine, playing, phase, showCatalog, tracks, metCfg, training, trainCfg, transpose, loadPath, selection])
 
   return (
     <div className="app">

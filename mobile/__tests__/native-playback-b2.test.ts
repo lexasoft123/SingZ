@@ -1049,6 +1049,157 @@ describe('iOS B2 backend selection and ownership', () => {
     },
   );
 
+  /* The route a graph is prepared for and the route the phone is actually
+     on are two different things, and a phone moves between them whenever it
+     likes: a car connects, headphones come out, a call ends somewhere else.
+     The graph is prepared when the song OPENS, so Play can be minutes later.
+     Field log, twice on one iPhone two days apart: prepared for the speaker,
+     Play refused with "The active iOS output route does not match the
+     prepared device", and the player sat stopped with an error until the
+     song was closed and reopened — the reopen prepared for whatever was live
+     by then and played first time. */
+  it('follows the output route when it moves between the prepare and Play', async () => {
+    const h = harness();
+    const project = await h.load();
+    h.native.configureOutputSession.mockResolvedValueOnce({
+      ...result(1, 'prepared', false),
+      error: 'invalid-configuration',
+      message: 'The active iOS output route does not match the prepared device',
+    });
+    // Only the ROUTE moves: the rest of the status stays the harness's own,
+    // so the generation the re-prepare claims still agrees with it.
+    const published = h.native.status.getMockImplementation()!;
+    h.native.status.mockImplementation(async () => ({
+      ...(await published()),
+      outputs: [
+        {
+          uid: 'ios-output:carplay',
+          label: 'CarPlay',
+          default: true,
+          channels: 2,
+          sampleRate: 48_000,
+        },
+      ],
+    }));
+
+    const outcome = await project.nativePlayback?.start();
+
+    expect(outcome).toMatchObject({ kind: 'started' });
+    // The graph aimed at the speaker is released, one is prepared for the
+    // route the singer is listening on, and THAT one plays.
+    expect(h.calls).toContain('native.unload:1');
+    expect(h.calls).toContain('native.prepare:2');
+    expect(h.calls).toContain('native.start:2');
+    expect(h.prepareRequests[h.prepareRequests.length - 1]).toMatchObject({
+      outputDeviceUid: 'ios-output:carplay',
+    });
+    expect(h.legacyLoad).not.toHaveBeenCalled();
+    // This is the one route test that reaches 'playing', so it owns the
+    // telemetry poll and has to give it back — a live interval keeps the
+    // whole jest process alive after the suite passes.
+    await project.nativePlayback?.stop('route test complete');
+  });
+
+  it('treats a route that merely grew a channel as the same route', async () => {
+    const h = harness();
+    const project = await h.load();
+    h.native.configureOutputSession.mockResolvedValueOnce({
+      ...result(1, 'prepared', false),
+      error: 'invalid-configuration',
+      message: 'The active iOS output route does not match the prepared device',
+    });
+    // Same device, same rate, one more channel than the prepare saw. The
+    // prepared indices still fit, so the session check would not refuse for
+    // THAT, and rebuilding here would be a rebuild bought on a refusal that
+    // was about something else.
+    const published = h.native.status.getMockImplementation()!;
+    h.native.status.mockImplementation(async () => ({
+      ...(await published()),
+      outputs: [
+        {
+          uid: 'ios-output:speaker',
+          label: 'iPhone Speaker',
+          default: true,
+          channels: 4,
+          sampleRate: 48_000,
+        },
+      ],
+    }));
+
+    const outcome = await project.nativePlayback?.start();
+
+    expect(outcome).toMatchObject({
+      kind: 'failed',
+      error: expect.stringMatching(/remains stopped on the native backend/i),
+    });
+    expect(h.calls).not.toContain('native.prepare:2');
+  });
+
+  it('reports a pre-start refusal that is not the route without preparing again', async () => {
+    const h = harness();
+    const project = await h.load();
+    // The same refusal shape, with the route exactly where the graph left
+    // it: nothing here is the route, so nothing is rebuilt and the singer
+    // gets the refusal.
+    h.native.configureOutputSession.mockResolvedValueOnce({
+      ...result(1, 'prepared', false),
+      error: 'invalid-configuration',
+      message: 'The iOS playback session is not active',
+    });
+
+    const outcome = await project.nativePlayback?.start();
+
+    expect(outcome).toMatchObject({
+      kind: 'failed',
+      error: expect.stringMatching(/remains stopped on the native backend/i),
+    });
+    expect(h.calls).not.toContain('native.prepare:2');
+    expect(h.legacyLoad).not.toHaveBeenCalled();
+  });
+
+  it('follows a moved route ONCE, then reports the refusal', async () => {
+    const h = harness();
+    const project = await h.load();
+    // Every configure refuses and the route keeps moving: one retry, never a
+    // loop chasing a route that will not settle.
+    h.native.configureOutputSession.mockImplementation(async (next: number) => {
+      h.calls.push(`native.configure:${next}`);
+      return {
+        ...result(next, 'prepared', false),
+        error: 'invalid-configuration',
+        message:
+          'The active iOS output route does not match the prepared device',
+      };
+    });
+    let moves = 0;
+    const published = h.native.status.getMockImplementation()!;
+    h.native.status.mockImplementation(async () => ({
+      ...(await published()),
+      outputs: [
+        {
+          uid: `ios-output:moving-${++moves}`,
+          label: `Route ${moves}`,
+          default: true,
+          channels: 2,
+          sampleRate: 48_000,
+        },
+      ],
+    }));
+
+    const outcome = await project.nativePlayback?.start();
+
+    expect(outcome).toMatchObject({
+      kind: 'failed',
+      error: expect.stringMatching(/remains stopped on the native backend/i),
+    });
+    expect(h.calls.filter(call => call.startsWith('native.prepare:'))).toEqual([
+      'native.prepare:1',
+      'native.prepare:2',
+    ]);
+    expect(h.calls).not.toContain('native.start:2');
+    expect(h.legacyLoad).not.toHaveBeenCalled();
+  });
+
   it('never falls back after the native start command may have rendered', async () => {
     const h = harness();
     const project = await h.load();

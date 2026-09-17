@@ -3,8 +3,8 @@
  * playback — from a scrubbed spot, again after a Pause, and with a Pause
  * INSIDE it. Permanent harness used by the e2e-verifier agent.
  *
- * Two field reports on 0.21.1, both invisible to every driver before this
- * one because none of them turns the count-in on:
+ * Field reports this driver holds, every one of them invisible to the
+ * drivers before it because none of those turns the count-in on:
  *
  *   1. "COUNT-IN IS BROKEN." A prepared plan's count-in is fixed at prepare,
  *      and every Play after a song's first was a bare resume() — so the
@@ -51,23 +51,33 @@
  *      events and samples the bar at 30 ms, the only cadence that sees a
  *      one-poll dip.
  *
- *   5. SPACE, HAMMERED, STILL — one burst in five on the Windows field
- *      laptop, never on the Mac, after both fixes above. A count-in whose
+ *   5. "PLAYBACK COULD NOT START: NATIVE METRONOME PLAYBACK REQUIRES A BEAT
+ *      GRID." A click track needs a grid, and the facade raised that as a
+ *      product error — so a song whose grid is absent, stale or still being
+ *      detected, with the metronome left on by its own saved settings,
+ *      could not be played AT ALL: Play, the prepare ahead and every
+ *      structural change died on it, while Web Audio played the same song
+ *      with its clicks silent. Leg 10 takes the grid away with the click on
+ *      and requires the song to play, count in gridless, and start clicking
+ *      again the moment a grid returns.
+ *
+ *   6. SPACE, HAMMERED, STILL — one burst in five on the Windows field
+ *      laptop, never on the Mac, after the fix in item 4. A count-in whose
  *      pre-roll is a whole number of callbacks long ends on a callback
  *      boundary, the landing is the next callback's first act, and the core
  *      published "playing at frame 0" for the one callback in between; a
  *      poll inside it drew 0.00. The laptop renders 480-frame callbacks and
  *      its song's grid sits on them, so every count-in there was exposed and
  *      only the 50 ms poll's luck decided the verdict. The core reports the
- *      landing for that callback now, and leg 10 aims a count-in at a
+ *      landing for that callback now, and leg 11 aims a count-in at a
  *      callback boundary on purpose and reads the core's status back-to-back
  *      across it, so the verdict no longer depends on the poll.
  *
- *   6. THE LAST DOT, found by the dots recorder the leg above needed: a last
+ *   7. THE LAST DOT, found by the dots recorder the leg above needed: a last
  *      click closer to the landing than one 50 ms status poll never lit its
  *      dot, because the dots read the render head unprojected. Legs 4 and 6
  *      went red on the Mac whenever a Pause parked a few hundredths of a
- *      second past a beat. The dots project between polls now, and leg 11
+ *      second past a beat. The dots project between polls now, and leg 12
  *      aims the last click 20 and 35 ms before the landing.
  *
  * Reads three opinions where the transport-race driver taught us to:
@@ -82,8 +92,9 @@
  *
  * Env: E2E_SONG (library project with a beat grid, default "Mein Teil"),
  *      E2E_MID (the scrubbed spot in seconds, default 60 — past the song's
- *               first bar, with 30 s of song left after it: nine legs each
- *               carry the song a few seconds further),
+ *               first bar, with 45 s of song left after it: the first ten
+ *               legs each carry the song a few seconds further, and legs 11
+ *               and 12 seek back to it),
  *      E2E_PROJECTS_ROOT (default iCloud Drive/SingZ).
  */
 // Every E2E driver runs under a deadline: a hang prints where it was and
@@ -134,7 +145,7 @@ const SNAP =
  * The dots are ALSO recorded in the page, every 2 ms (`rows.dotsSeen`), so a
  * dot that is lit for less than the 80-90 ms between samples is still seen:
  * a last click a few hundredths of a second before the landing lights its
- * dot for only that long (leg 11). */
+ * dot for only that long (leg 12). */
 async function trace(win, ms, until = () => false) {
   const rows = []
   const t0 = Date.now()
@@ -171,6 +182,10 @@ const DOTS_RECORD =
 const DOTS_COLLECT =
   '(function(){ const rec = window.__dotsRec; if (!rec) return null; clearInterval(rec.id);' +
   ' window.__dotsRec = null; return { done: rec.done, total: rec.total, ticks: rec.ticks } })()'
+/** The shortest dot the recorder is sure to see. Its 2 ms interval ticks
+ * about every 4 ms in practice (measured on the Mac and the field laptop,
+ * ~1400 ticks over 6 s), so a dot lit for 10 ms spans two ticks at least. */
+const DOT_RECORDER_RESOLUTION_MS = 10
 
 /** Wait for `expr` (evaluated in the page) to be truthy, polling FROM NODE
  * every 25 ms. Never `waitForFunction` for a short phase: that helper polls
@@ -312,11 +327,33 @@ function callbackFrames(rows) {
   return steps >= 5 ? result : 0
 }
 
+/** How long the LAST count-in dot is lit for, in milliseconds of wall clock:
+ * from the last tick to the landing, where the song comes in and the row goes.
+ * The ticks are the real beats before the ENTRY beat — the first grid beat at
+ * or after the landing — so this is a whole beat when the landing sits just
+ * before a beat and a few milliseconds when it sits just after one. The grid
+ * is in SONG seconds and this is wall clock, hence the rate; the gridless
+ * ticks are already an output second apart at any rate, so that window is a
+ * flat second. Answers Infinity when it cannot work the window out (a
+ * landing at or before the first beat), so an unknown never excuses a
+ * missing dot. */
+async function lastDotWindowMs(win, landing) {
+  return val(win, `(function(){ const e = __test.engine; const rate = e.tempo || 1;
+    const g = e.beats;
+    if (!g || g.beats.length < 2) return 1000;
+    const b = g.beats;
+    let i = b.findIndex((t) => t >= ${landing} - 1e-6);
+    if (i < 0) i = b.length;
+    if (i < 1) return null;
+    const previous = i < b.length ? b[i - 1] : b[b.length - 1];
+    return Math.round((${landing} - previous) * 1000 / rate) })()`)
+}
+
 /** Judge one count-in, sampled from the press: a pre-roll must be seen, the
  * bar must hold at `landing` throughout it, the dots must fill, and the
  * song must then be running near the landing with all three opinions
  * agreeing. Returns what it saw for the log line. */
-function judgeCountIn(label, rows, landing, fail) {
+function judgeCountIn(label, rows, landing, fail, lastDotMs) {
   const pre = rows.filter((r) => r.core === 'pre-roll')
   const lowest = pre.length ? Math.min(...pre.map((r) => r.pos)) : NaN
   const highest = pre.length ? Math.max(...pre.map((r) => r.pos)) : NaN
@@ -341,7 +378,20 @@ function judgeCountIn(label, rows, landing, fail) {
     fail.push(`${label}: the bar ran ahead to ${highest.toFixed(2)} s during the count-in (landing ${landing} s)`)
   }
   if (!dotsShown) fail.push(`${label}: the count-in dots never showed`)
-  if (dotsShown && maxDone < total) fail.push(`${label}: the dots stopped at ${maxDone}/${total}`)
+  // One short is accepted only where the last dot could not have been seen:
+  // lit for less than the page recorder's own tick. The last dot is lit from
+  // its click to the landing (`lastDotWindowMs`), and this used to forgive
+  // one short for any window under 200 ms, reading a 3/4 there as a dot the
+  // sampling could not see. It was not lit at all: the dots read the render
+  // head unprojected, so a last click within one 50 ms poll of the landing
+  // never lit (leg 12). With the projection and trace's 2 ms recorder a
+  // 20 ms dot is seen every time, and a 3/4 above the recorder's resolution
+  // is the app's.
+  const window = typeof lastDotMs === 'number' ? lastDotMs : Infinity
+  const unobservable = maxDone === total - 1 && window < DOT_RECORDER_RESOLUTION_MS
+  if (dotsShown && maxDone < total && !unobservable) {
+    fail.push(`${label}: the dots stopped at ${maxDone}/${total}`)
+  }
   if (!landed) fail.push(`${label}: the song never came in at the landing (last: ${last.core} at ${last.pos.toFixed(2)} s)`)
   if (landed && Math.abs(landed.pos - landing) > SLACK + 0.3) {
     fail.push(`${label}: landed at ${landed.pos.toFixed(2)} s, expected ${landing} s`)
@@ -349,7 +399,7 @@ function judgeCountIn(label, rows, landing, fail) {
   if (last.button !== last.engine || (last.core === 'playing') !== last.button) {
     fail.push(`${label}: button=${last.button} engine=${last.engine} core=${last.core} — the three disagree`)
   }
-  return `pre-roll ${pre.length} samples (widest sampling gap ${gap} ms), bar ${Number.isNaN(lowest) ? '-' : `${lowest.toFixed(2)}..${highest.toFixed(2)}`} s, dots ${maxDone}/${total} (${dots.length} samples, ${recorded.ticks} page ticks lit), landed at ${landed ? landed.pos.toFixed(2) : '-'} s`
+  return `pre-roll ${pre.length} samples (widest sampling gap ${gap} ms), bar ${Number.isNaN(lowest) ? '-' : `${lowest.toFixed(2)}..${highest.toFixed(2)}`} s, dots ${maxDone}/${total} (${dots.length} samples, ${recorded.ticks} page ticks lit${Number.isFinite(window) ? `, the last one lit for ${window} ms` : ''}${unobservable ? ', shorter than the recorder can see' : ''}), landed at ${landed ? landed.pos.toFixed(2) : '-'} s`
 }
 
 ;(async () => {
@@ -383,11 +433,12 @@ function judgeCountIn(label, rows, landing, fail) {
     const duration = await val(win, '__test.engine.duration')
     const beats = await val(win, '__test.engine.beats ? __test.engine.beats.beats.length : 0')
     if (!(beats > 1)) throw new Error(`"${SONG}" has no beat grid — a count-in needs one; set E2E_SONG`)
-    // Nine legs each carry the song a few seconds further: the spot needs
-    // half a minute of runway, or the last legs run into the end of the song
-    // (measured on the field laptop's 82 s library song with E2E_MID=60).
-    if (!(MID > 2 && MID + 30 <= duration)) {
-      throw new Error(`E2E_MID=${MID} leaves no runway in "${SONG}" (${duration.toFixed(1)} s) — the legs need 30 s past it`)
+    // Ten legs each carry the song a few seconds further: the spot needs
+    // three quarters of a minute of runway, or the last legs run into the
+    // end of the song (measured on the field laptop's 82 s library song,
+    // where this leaves E2E_MID at 37 or less — it runs at 20).
+    if (!(MID > 2 && MID + 45 <= duration)) {
+      throw new Error(`E2E_MID=${MID} leaves no runway in "${SONG}" (${duration.toFixed(1)} s) — the legs need 45 s past it`)
     }
     await val(win, '__test.engine.setMasterVolume(0)')
     // One bar of count-in, click off, and the metronome VOLUME at 0 — the
@@ -410,7 +461,7 @@ function judgeCountIn(label, rows, landing, fail) {
     const t1 = Date.now()
     await press(win)
     const first = await trace(win, 12000, (r) => r.core === 'playing' && r.pos > MID + 0.6)
-    console.log(`1. first Play from ${MID} s: ${judgeCountIn('first Play', first, MID, fail)}`)
+    console.log(`1. first Play from ${MID} s: ${judgeCountIn('first Play', first, MID, fail, await lastDotWindowMs(win, MID))}`)
     const native = await val(win, '!!__test.engine.nativeActive')
     if (!native) throw new Error('native playback never took the song — build the capture addon for this tree')
     const planned = first.find((r) => r.countIn > 0)
@@ -442,7 +493,7 @@ function judgeCountIn(label, rows, landing, fail) {
     const t3 = Date.now()
     await press(win)
     const again = await trace(win, 12000, (r) => r.core === 'playing' && r.pos > pausedAt + 0.6)
-    console.log(`3. Play after the pause inside the count-in: ${judgeCountIn('Play after a pause inside the count-in', again, pausedAt, fail)}`)
+    console.log(`3. Play after the pause inside the count-in: ${judgeCountIn('Play after a pause inside the count-in', again, pausedAt, fail, await lastDotWindowMs(win, pausedAt))}`)
 
     // ── 4. Pause well into the song, then Play: it counts in from there ─
     await sleep(1500)
@@ -451,7 +502,7 @@ function judgeCountIn(label, rows, landing, fail) {
     const spot = JSON.parse(await val(win, SNAP)).pos
     await press(win)
     const fromSpot = await trace(win, 12000, (r) => r.core === 'playing' && r.pos > spot + 0.6)
-    console.log(`4. Play after a pause at ${spot.toFixed(2)} s: ${judgeCountIn('Play after a pause mid-song', fromSpot, spot, fail)}`)
+    console.log(`4. Play after a pause at ${spot.toFixed(2)} s: ${judgeCountIn('Play after a pause mid-song', fromSpot, spot, fail, await lastDotWindowMs(win, spot))}`)
     await pauseAndWait(win)
 
     // Every count-in after the first is a restart: one graph build each,
@@ -479,7 +530,7 @@ function judgeCountIn(label, rows, landing, fail) {
     preRollSeen = await waitFor(win, IN_PRE_ROLL, 6000)
     await val(win, '__test.setMetCfg(Object.assign({}, __test.met, { click: true }))')
     const touched = await trace(win, 12000, (r) => r.core === 'playing' && r.pos > spot2 + 0.6)
-    console.log(`5. click turned on inside the count-in from ${spot2.toFixed(2)} s (pre-roll ${preRollSeen ? 'seen' : 'NOT seen'} before the touch): ${judgeCountIn('control change inside the count-in', touched, spot2, fail)}`)
+    console.log(`5. click turned on inside the count-in from ${spot2.toFixed(2)} s (pre-roll ${preRollSeen ? 'seen' : 'NOT seen'} before the touch): ${judgeCountIn('control change inside the count-in', touched, spot2, fail, await lastDotWindowMs(win, spot2))}`)
     await pauseAndWait(win)
     await val(win, '__test.setMetCfg(Object.assign({}, __test.met, { click: false }))')
     await sleep(600)
@@ -513,7 +564,7 @@ function judgeCountIn(label, rows, landing, fail) {
     if (Math.abs(rebuiltPaused.pos - spot3) > SLACK) fail.push(`control change while paused inside the count-in moved the bar to ${rebuiltPaused.pos.toFixed(2)} s from ${spot3.toFixed(2)} s`)
     await press(win)
     const afterTouch = await trace(win, 12000, (r) => r.core === 'playing' && r.pos > spot3 + 0.6)
-    console.log(`   Play after it: ${judgeCountIn('Play after a control change while paused inside the count-in', afterTouch, spot3, fail)}`)
+    console.log(`   Play after it: ${judgeCountIn('Play after a control change while paused inside the count-in', afterTouch, spot3, fail, await lastDotWindowMs(win, spot3))}`)
     await pauseAndWait(win)
     await val(win, '__test.setMetCfg(Object.assign({}, __test.met, { click: false }))')
     await sleep(600)
@@ -545,7 +596,7 @@ function judgeCountIn(label, rows, landing, fail) {
       if (twiceLast.button || twiceLast.engine) fail.push('double Play: parked in the core but the button or the engine says playing')
       if (Math.abs(twiceLast.pos - spot4) > SLACK) fail.push(`double Play: parked at ${twiceLast.pos.toFixed(2)} s, pressed at ${spot4.toFixed(2)} s`)
     } else {
-      console.log(`7. Play twice, fast, from ${spot4.toFixed(2)} s: ${judgeCountIn('double Play with the count-in on', twice, spot4, fail)}`)
+      console.log(`7. Play twice, fast, from ${spot4.toFixed(2)} s: ${judgeCountIn('double Play with the count-in on', twice, spot4, fail, await lastDotWindowMs(win, spot4))}`)
     }
     const twiceBuilds = buildCount(await logSince(win, t7))
     console.log(`   ${twiceBuilds} graph build(s) for the two presses`)
@@ -583,9 +634,55 @@ function judgeCountIn(label, rows, landing, fail) {
     const floor9b = JSON.parse(await val(win, SNAP)).pos
     console.log(`   count-in on, 3×Space at 250 ms then 5×Space at 100 ms: ${await burst(win, 'Space burst, count-in on', [0, 250, 250, 1500, 100, 100, 100, 100], 3500, floor9b, fail)}`)
 
-    // ── 10. A count-in that ends exactly on a callback boundary ─────────
+    // ── 10. No beat grid, the metronome on: the song must still play ───
     //
-    // The burst above caught this one run in five on the field laptop and
+    // The field report: "Playback could not start: Native metronome playback
+    // requires a beat grid.", over a song that would not start at all. A
+    // click TRACK does need a grid — all three bridges refuse one without —
+    // but the click is a saved setting of the SONG (`settings.metronome`)
+    // and the grid is a detection that can be absent, stale or still
+    // running, and nothing turns a click off when a grid goes away. So a
+    // song reaches Play with one and not the other routinely, and native
+    // raised that as a product error: Play, the prepare ahead and every
+    // structural change died on it. Web Audio has always played that song
+    // with its clicks silent (`armClicksFromCurrent` returns on a null
+    // grid). The count-in is gridless ticks there — one output second apart,
+    // three to the bar, on both engines — so a Play must still count in.
+    if (JSON.parse(await val(win, SNAP)).core !== 'paused') await pauseAndWait(win)
+    await sleep(400)
+    const savedGrid = await val(win, 'JSON.stringify(__test.engine.beats)')
+    const gridAway = await val(win, '__test.engine.setBeats(null).then(() => "", (e) => String(e && e.message || e))')
+    const clickOn = await val(win, '__test.engine.setMetronome(Object.assign({}, __test.engine.metronome, { click: true })).then(() => "", (e) => String(e && e.message || e))')
+    if (gridAway) fail.push(`no grid: taking the grid away was refused — ${gridAway}`)
+    if (clickOn) fail.push(`no grid: turning the click on was refused — ${clickOn}`)
+    const spot5 = JSON.parse(await val(win, SNAP)).pos
+    await press(win)
+    // This leg is only itself while the grid is really gone: with one back in
+    // place it reads exactly like leg 3. Two discriminators, both taken at
+    // the press — the engine's own grid, and the count-in's SHAPE, which is
+    // three ticks a bar gridless against `beatsPerBar` on a grid.
+    const gridAtPlay = await val(win, 'String(__test.engine.beats)')
+    const gridless = await trace(win, 14000, (r) => r.core === 'playing' && r.pos > spot5 + 0.6)
+    console.log(`10. no beat grid, click on, Play from ${spot5.toFixed(2)} s: ${judgeCountIn('no grid with the click on', gridless, spot5, fail, await lastDotWindowMs(win, spot5))}`)
+    if (gridAtPlay !== 'null') fail.push(`no grid: the engine still had a grid at the press (${gridAtPlay.slice(0, 40)}) — this leg counted in on it`)
+    const ticks = gridless.find((r) => r.dots !== null)?.dots.total ?? 0
+    if (ticks !== 3) fail.push(`no grid: the count-in was ${ticks} ticks, not the three a gridless bar plans`)
+    const refusal = await val(win, 'JSON.stringify(__test.engine.playbackError && __test.engine.playbackError.message)')
+    if (refusal !== 'null') fail.push(`no grid: Play was refused with ${refusal}`)
+    // And the click the singer asked for starts sounding the moment a grid
+    // exists again — the setting was kept, only the plan went without it.
+    const back = await val(win, `__test.engine.setBeats(${savedGrid}).then(() => "", (e) => String(e && e.message || e))`)
+    if (back) fail.push(`no grid: putting the grid back was refused — ${back}`)
+    await sleep(800)
+    const clicking = JSON.parse(await val(win, SNAP))
+    const cueEvents = await val(win, '(function(){ const s = __test.engine.nativePlayback.status; return s ? Number(s.cueEventCount) : 0 })()')
+    console.log(`    grid back while playing: core ${clicking.core} at ${clicking.pos.toFixed(2)} s, ${cueEvents} cue events for ${beats} beats`)
+    if (cueEvents <= beats / 2) fail.push(`the grid came back but the plan carries ${cueEvents} cue events for ${beats} beats — the click did not return`)
+    await val(win, '__test.engine.setMetronome(Object.assign({}, __test.engine.metronome, { click: false }))')
+
+    // ── 11. A count-in that ends exactly on a callback boundary ─────────
+    //
+    // Leg 9's Space burst caught this one run in five on the field laptop and
     // never on the Mac, which is how it outlived two fixes. The core lands a
     // count-in at the head of the slice AFTER the pre-roll's last frame, and
     // publishes its status at the end of a callback — so a pre-roll that is
@@ -612,7 +709,7 @@ function judgeCountIn(label, rows, landing, fail) {
     if (callback < 64 || probePreRoll <= 0) {
       // Callbacks of varying size cannot be aimed at, and a boundary landing
       // is then as rare as it is on any unaimed count-in: say so, loudly.
-      console.log(`10. count-in ending on a callback boundary: SKIPPED — callback ${callback} frames, pre-roll ${probePreRoll} (this route does not render fixed-size callbacks)`)
+      console.log(`11. count-in ending on a callback boundary: SKIPPED — callback ${callback} frames, pre-roll ${probePreRoll} (this route does not render fixed-size callbacks)`)
     } else {
       const aimedFrame = probeFrame - (probePreRoll % callback)
       if (!(aimedFrame > Math.round(grid[entry - 1] * rate))) throw new Error('aiming the count-in moved it past a beat')
@@ -626,7 +723,7 @@ function judgeCountIn(label, rows, landing, fail) {
       const low = Math.min(...across.map((r) => r.pos))
       const nearLanding = across.filter((r) => (r.st === 'pre-roll' && r.r >= -callback) ||
         (r.st === 'playing' && r.r >= 0 && r.r <= aimedFrame + callback))
-      console.log(`10. count-in ending on a callback boundary at ${aimed.toFixed(4)} s: callback ${callback} frames, pre-roll ${preRoll} (${preRoll / callback} callbacks), ${across.length} status reads, ${nearLanding.length} within a callback of the landing, ${below.length} playing below it, bar ${low.toFixed(2)} s at lowest`)
+      console.log(`11. count-in ending on a callback boundary at ${aimed.toFixed(4)} s: callback ${callback} frames, pre-roll ${preRoll} (${preRoll / callback} callbacks), ${across.length} status reads, ${nearLanding.length} within a callback of the landing, ${below.length} playing below it, bar ${low.toFixed(2)} s at lowest`)
       if (!across.some((r) => r.st === 'pre-roll')) fail.push('count-in on a callback boundary: no pre-roll — this Play did not count in')
       if (preRoll % callback !== 0) fail.push(`count-in on a callback boundary: could not aim — pre-roll ${preRoll} frames is not a multiple of the ${callback}-frame callback`)
       if (nearLanding.length === 0) fail.push('count-in on a callback boundary: no status read fell within a callback of the landing — the reads were too sparse to see the window this leg exists for')
@@ -634,7 +731,7 @@ function judgeCountIn(label, rows, landing, fail) {
       if (low < aimed - SLACK) fail.push(`count-in on a callback boundary: the bar fell to ${low.toFixed(2)} s, below the landing at ${aimed.toFixed(2)} s`)
     }
 
-    // ── 11. The last click inside one status poll of the landing ────────
+    // ── 12. The last click inside one status poll of the landing ────────
     //
     // The dots are drawn from the status the facade polls every 50 ms, and a
     // last click closer to the landing than that is heard inside ONE poll
@@ -654,7 +751,7 @@ function judgeCountIn(label, rows, landing, fail) {
       await sleep(900)
       await press(win)
       const rows = await trace(win, 12000, (r) => r.core === 'playing' && r.pos > spot + 0.6)
-      console.log(`11. last click ${margin} ms before the landing at ${spot.toFixed(3)} s: ${judgeCountIn(`last click ${margin} ms before the landing`, rows, spot, fail)}`)
+      console.log(`12. last click ${margin} ms before the landing at ${spot.toFixed(3)} s: ${judgeCountIn(`last click ${margin} ms before the landing`, rows, spot, fail, await lastDotWindowMs(win, spot))}`)
       await pauseAndWait(win)
     }
 
