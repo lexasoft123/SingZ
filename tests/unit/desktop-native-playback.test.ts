@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  COUNT_IN_PROJECTION_MAX_MS,
   DESKTOP_PLAYBACK_CAPABILITY,
   DesktopNativePlaybackClient,
   DesktopNativeProviderError,
@@ -2145,6 +2146,60 @@ describe('desktop native playback facade', () => {
     expect(await h.client.prepareAndStart({ ...countInRequest(3), playbackRate: 0.5 })).toBe(true)
     expect(h.client.countInHeard()).toMatchObject({ secondsToLanding: -(48_000 + 64) / 48_000, landingSeconds: 3 })
     await h.client.unload()
+  })
+
+  it('countInHeard projects the render head between polls, so a last click inside one poll of the landing still lights its dot', async () => {
+    // The dots are drawn every frame and the status arrives every 50 ms.
+    // Read raw, a last click 20 ms before the landing was heard inside ONE
+    // poll interval: the last pre-roll status heard the ear just short of it
+    // and the next was already past the tail — three dots of four, measured
+    // on the Mac. Only the clock moves below (setSystemTime fires no poll),
+    // exactly the time between two statuses.
+    const t0 = Date.parse('2026-09-17T00:00:00Z')
+    vi.setSystemTime(t0)
+    let current: Partial<DesktopPlaybackStatus> = {
+      transportState: 'pre-roll', renderedProjectFrame: '-2400', audibleProjectFrame: '-2528',
+      presentationLatencyFrames: '128', preRollFrames: '96000', countInEventCount: 4, countInBeatsPerBar: 4
+    }
+    const h = seamHarness((generation) => playing(generation, current))
+    expect(await h.client.prepareAndStart(countInRequest(3))).toBe(true)
+    expect(h.client.countInHeard()?.secondsToLanding).toBe(-(2400 + 128) / 48_000)
+    // 30 ms later, no new status: the ear has moved 1440 frames on.
+    vi.setSystemTime(t0 + 30)
+    expect(h.client.countInHeard()?.secondsToLanding).toBe(-(960 + 128) / 48_000)
+    // 60 ms: projected past the landing the core has not reported yet — the
+    // row stays, full, capped AT the landing, never past it.
+    vi.setSystemTime(t0 + 60)
+    expect(h.client.countInHeard()?.secondsToLanding).toBe(0)
+    // Landed 64 frames ago per the status; the tail's last 64 frames run out
+    // on the clock alone, and the row is over for good.
+    current = { ...current, transportState: 'playing', renderedProjectFrame: '144064', audibleProjectFrame: '143936' }
+    await h.client.setMasterGain(0.5)
+    expect(h.client.countInHeard()?.secondsToLanding).toBe(-64 / 48_000)
+    vi.setSystemTime(Date.now() + 1)
+    expect(h.client.countInHeard()?.secondsToLanding).toBe(-16 / 48_000)
+    vi.setSystemTime(Date.now() + 1)
+    expect(h.client.countInHeard()).toBeNull()
+    await h.client.unload()
+
+    // Bounded: a stalled read projects at most COUNT_IN_PROJECTION_MAX_MS, so
+    // the dots freeze rather than run ahead of the clicks.
+    vi.setSystemTime(t0)
+    current = {
+      transportState: 'pre-roll', renderedProjectFrame: '-48000', audibleProjectFrame: '-48128',
+      presentationLatencyFrames: '128', preRollFrames: '96000', countInEventCount: 4, countInBeatsPerBar: 4
+    }
+    const stalled = seamHarness((generation) => playing(generation, current))
+    expect(await stalled.client.prepareAndStart(countInRequest(3))).toBe(true)
+    vi.setSystemTime(t0 + 5000)
+    const bound = Math.round((COUNT_IN_PROJECTION_MAX_MS / 1000) * 48_000)
+    expect(stalled.client.countInHeard()?.secondsToLanding).toBe(-(48_000 - bound + 128) / 48_000)
+    // Paused inside the count-in: nothing is advancing, nothing is projected.
+    current = { ...current, transportState: 'paused' }
+    await stalled.client.pause()
+    vi.setSystemTime(Date.now() + 100)
+    expect(stalled.client.countInHeard()?.secondsToLanding).toBe(-(48_000 + 128) / 48_000)
+    await stalled.client.unload()
   })
 
   it('a structural change INSIDE a count-in is a rebuild anchored at the landing — never a seam, never the pre-roll frame carried across', async () => {

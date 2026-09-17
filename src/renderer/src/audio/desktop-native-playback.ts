@@ -43,6 +43,11 @@ export const POLL_BURST_MS = 2000
  *  at its next period) and short enough that a core which never acknowledges
  *  one cannot leave a phantom position on screen. */
 export const PENDING_SEEK_MAX_MS = 1000
+/** How far the count-in dots may project the render head past the last
+ *  status. The poll runs at POLL_FAST_MS through a pre-roll and the burst
+ *  after its landing, so a status older than four of those is a stalled read,
+ *  and a dot must not light for a click the core has not reached. */
+export const COUNT_IN_PROJECTION_MAX_MS = 4 * POLL_FAST_MS
 
 export { DESKTOP_PLAYBACK_CAPABILITY }
 
@@ -666,26 +671,41 @@ export class DesktopNativePlaybackClient {
     if (!status || !sampleRate || !this.ownsOutput || landing === null) return null
     const total = status.countInEventCount
     const perBar = status.countInBeatsPerBar
-    const rendered = Number(status.renderedProjectFrame)
+    const reported = Number(status.renderedProjectFrame)
     const preRollFrames = Math.abs(Number(status.preRollFrames))
     // The output latency is in OUTPUT frames; the runway is in project
     // frames, and at a non-unity rate the two differ by the rate — exactly
     // the scaling the core's own audible projection applies.
     const latency = DesktopNativePlaybackClient.latencyProjectFrames(status)
-    if (!(total > 0) || !(perBar > 0) || !Number.isSafeInteger(rendered) ||
+    if (!(total > 0) || !(perBar > 0) || !Number.isSafeInteger(reported) ||
         latency === null || !Number.isFinite(preRollFrames)) {
       return null
     }
+    // The render head NOW, projected from the last status the way the bar's
+    // is. The dots are drawn every frame but the status arrives every 50 ms,
+    // and a last click closer to the landing than that is heard inside ONE
+    // poll interval: read raw, the last status before the landing heard the
+    // ear just short of the click and the first one after it was already
+    // past the tail, so the last dot never lit — measured on the Mac, last
+    // clicks 20 ms before the landing ended at three dots of four in 2 of 2
+    // count-ins and 35 ms in 1 of 2. Pre-roll frames count up to the landing
+    // and the tail runs forward from it, so one projection serves both.
+    const rendered = reported + this.renderedAdvanceFrames(status, sampleRate)
     const row = (heardFrames: number) => ({
-      secondsToLanding: heardFrames / sampleRate,
+      // Never past the landing: a projection beyond it is the ear reaching a
+      // landing the core has not reported yet, and the row stays full until
+      // it does.
+      secondsToLanding: Math.min(0, heardFrames) / sampleRate,
       landingSeconds: landing,
       total,
       perBar,
       preRollSeconds: preRollFrames / sampleRate
     })
     // Counting: the render head is at a negative frame and the ear a latency
-    // behind it.
-    if (rendered < 0) {
+    // behind it. Decided on the REPORTED frame, never the projected one (the
+    // bar's rule): a projection past zero is still a count-in until the core
+    // says it has landed.
+    if (reported < 0) {
       this.countInSeen = true
       return row(rendered - latency)
     }
@@ -698,6 +718,21 @@ export class DesktopNativePlaybackClient {
     if (sinceLanding >= 0 && remaining > 0) return row(-remaining)
     this.countInSeen = false
     return null
+  }
+
+  /** How far the render head has moved since `status` was read, in project
+   *  frames: the time since the read at the playback rate, while the intent
+   *  is to play and the core says it is advancing; 0 otherwise. Bounded by
+   *  COUNT_IN_PROJECTION_MAX_MS, so a stalled read freezes the dots rather
+   *  than running them ahead of the clicks. */
+  private renderedAdvanceFrames(status: DesktopPlaybackStatus, sampleRate: number): number {
+    if (!this.started || this.transportIntent !== 'playing' ||
+        (status.transportState !== 'playing' && status.transportState !== 'pre-roll')) {
+      return 0
+    }
+    const elapsedMs = Math.max(0, Math.min(COUNT_IN_PROJECTION_MAX_MS, Date.now() - this.lastAtMs))
+    const rate = Number.isFinite(status.playbackRate) && status.playbackRate > 0 ? status.playbackRate : 1
+    return Math.round((elapsedMs / 1000) * rate * sampleRate)
   }
 
   /** Whether the retained status still describes a live transport. Output
