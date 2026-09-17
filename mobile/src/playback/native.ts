@@ -2701,6 +2701,8 @@ export class IosNativePlaybackCoordinator {
           state: restoreTransport,
           ...(restoreLoop === null ? {} : { loop: restoreLoop }),
         },
+        undefined,
+        true,
       ),
       swapFromGeneration: oldGeneration,
     };
@@ -4774,6 +4776,16 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     masterGain?: number,
     initialTransport?: NativePlaybackInitialTransport,
     countInAnchorSeconds?: number,
+    /** A SEAM: the candidate takes the running clock over at a block
+     *  boundary and the ear hears continuous audio, so no run begins and the
+     *  floor of the run in progress stands. Moving it to the seam's frame put
+     *  the corrected position (the render head less the output latency)
+     *  below it for one latency: the bar jumped forward a latency and froze
+     *  there for another — 179 ms at 157 ms of latency on the Android
+     *  emulator when training turned on, and the player-session "training on
+     *  → advancing again" red on both phones. Every other prepare starts a
+     *  run (a rebuild stops the stream; a Play or a recovery starts one). */
+    continuesRun = false,
   ): NativePlaybackPrepareOverrides {
     this.countInLandingFrame =
       countInAnchorSeconds === undefined
@@ -4782,10 +4794,11 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     this.countInSeen = false;
     this.countInSounding = false;
     this.countInTailFrame = 0;
-    this.runStartFrame =
-      countInAnchorSeconds === undefined
-        ? Math.max(0, preparedStartProjectFrame ?? 0)
-        : this.countInLandingFrame;
+    if (!continuesRun)
+      this.runStartFrame =
+        countInAnchorSeconds === undefined
+          ? Math.max(0, preparedStartProjectFrame ?? 0)
+          : this.countInLandingFrame;
     return {
       playback: buildNativePlaybackPreparePlayback(
         this.beatInfo,

@@ -190,8 +190,11 @@ Android:
    before Play (count-in off → flat start at the target; on → a pre-roll of negative frames
    with the bar sweeping the beats before the target, the dots lit on the clock, a landing on
    the target), an A-B armed before Play (loops inside [A,B)), Play after a pause with the
-   count-in on (the graph parks, an anchored prepare counts in again, the landing is the
-   paused spot) and off (a plain resume, no prepare), and the seek bar's level envelope
+   count-in on (the graph stops and an anchored prepare counts in again with NOTHING
+   DECODED — decoded lanes are parked and adopted, streamed lanes, the default since
+   bdaf4e8c, are released and streamed again, and the leg asks the restarted generation's
+   `laneDecodeFallback`; the landing is the paused spot) and off (a plain resume, no
+   prepare), and the seek bar's level envelope
    compared across BOTH backends on one song (the colour agrees per sliver, the levels agree
    where there is signal). Silent throughout; ~2 min; prints PASS.
 - `node mobile/tests/now-playing.cjs --platform ios` (and `--platform android` on an emulator,
