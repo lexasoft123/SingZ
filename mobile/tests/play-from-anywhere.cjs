@@ -21,8 +21,10 @@
  *      the bar HELD on the target (legacy's clock clamps at its start offset
  *      through the count-in) and the dots lit, then a landing on the target
  *      (the cue plan's count-in anchor)
- *   4. Play after a pause, count-in on  → the graph parks, an anchored prepare
- *      counts in again, the landing is the paused spot
+ *   4. Play after a pause, count-in on  → the graph stops, an anchored prepare
+ *      counts in again with nothing decoded (decoded lanes are parked and
+ *      adopted; streamed lanes are released and streamed again), the landing
+ *      is the paused spot
  *   5. Play after a pause, count-in off → a plain resume, no prepare
  *   6. the transport BUTTON               → it turns to Pause when the song
  *      starts, not when the next telemetry poll happens to land
@@ -112,7 +114,12 @@ const SR = 48000
         "(function(){ const b = __test.backend; const h = b.handle; const s = h ? h.snapshot() : {}; const m = __r('node_modules/react-native/index.js').NativeModules.NativeAudioRuntime; const n = m && m.positionNow ? m.positionNow() : null; return JSON.stringify({ t: Date.now(), phase: s.phase, error: s.error, pos: +b.position.toFixed(3), playing: b.playing, region: s.regionState, st: n && n.transportState, f: n && n.renderedProjectFrame, af: n && n.audibleFrames, cp: n && n.positionSec, pre: n && n.remainingPreRollFrames, dots: b.countInStatus, button: __test.playing === true }) })()"
       )
     )
+  // On the DEVICE's clock, like every sample's `t` it is compared with (snap
+  // reads Date.now() inside the app), and leaning early so the bound errs
+  // generous rather than strict.
+  let pressedAt = null
   const play = async () => {
+    pressedAt = Date.now() + clockOffsetMs - clockSlackMs
     await dev.ev('void __test.backend.play()')
     await sleep(50)
     await dev.ev('try { __test.backend.setMasterGain(0) } catch (e) {}')
@@ -131,16 +138,37 @@ const SR = 48000
   // has been playing since somewhere after the PREVIOUS sample, so the first
   // playing frame may sit up to one sampling gap past X (the emulator's CDP
   // round trip makes that gap 100-300 ms), and never measurably before it.
+  // When the very FIRST sample already shows it playing, the previous event is
+  // the press itself (`pressedAt`, stamped by play() on the device's clock): a
+  // flat 0.3 s stood in for that and failed a resume on the emulator whose
+  // first sample came 520 ms after the press, with the song running steadily
+  // from there.
   const landedOn = (rows, first, target, label) => {
     const i = rows.indexOf(first)
-    const gap = i > 0 ? (first.t - rows[i - 1].t) / 1000 : 0.3
+    const gap = i > 0
+      ? (first.t - rows[i - 1].t) / 1000
+      : pressedAt !== null ? Math.max(0, first.t - pressedAt) / 1000 : 0.3
     const at = first.f / SR
     if (at < target - 0.02 || at > target + gap + 0.15) fail(`${label} landed at ${at.toFixed(3)} s, not on ${target.toFixed(3)} s (sampling gap ${gap.toFixed(3)} s)`)
     return at
   }
+  // The app stamps its log with the DEVICE's clock and every `t0` here is this
+  // host's. An emulator's clock was measured 155 ms behind the Mac, which is
+  // longer than a quick CDP round trip: leg 1's "seek before Play remembered"
+  // was logged before `t0` by the device's reckoning, filtered out, and failed
+  // the leg on a run where it had plainly happened. The offset is measured
+  // once, bracketing a read of the device's clock, and every window is moved
+  // by it; the read's own half round trip is the uncertainty, taken on the
+  // early side so a line is never lost to it.
+  const hostBefore = Date.now()
+  const deviceNow = Number(await dev.val('Date.now()'))
+  const hostAfter = Date.now()
+  const clockOffsetMs = deviceNow - (hostBefore + hostAfter) / 2
+  const clockSlackMs = (hostAfter - hostBefore) / 2 + 20
+  log(`device clock ${clockOffsetMs >= 0 ? '+' : ''}${Math.round(clockOffsetMs)} ms from this host (±${Math.round(clockSlackMs)} ms)`)
   const logsSince = async (t) =>
     JSON.parse(
-      await dev.val(`__r('src/log.ts').logEntries().then(e => JSON.stringify(e.filter(x => x.t >= ${t}).map(x => x.line)))`, 20000)
+      await dev.val(`__r('src/log.ts').logEntries().then(e => JSON.stringify(e.filter(x => x.t >= ${Math.floor(t + clockOffsetMs - clockSlackMs)}).map(x => x.line)))`, 20000)
     )
   let lastRows = []
   const fail = (what) => {
@@ -239,9 +267,29 @@ const SR = 48000
   landedOn(rows, first, pausedAt, 'Play after a pause')
   lines = await logsSince(t0)
   if (!lines.some((l) => /Play counts in from here/.test(l))) fail('the pause was not stopped for the count-in')
-  if (!lines.some((l) => /parked for reuse/.test(l))) fail('the paused graph was released, not parked')
+  // What the park is FOR: a count-in restart never decodes the song again.
+  // With decoded lanes that is a park the next prepare adopts. With streamed
+  // lanes — the default since bdaf4e8c, two days after this leg was written —
+  // there is no decoded PCM to keep, the core parks nothing (a streamed lane
+  // has no owner) and the stop is an ordinary release; the restart streams.
+  // Requiring "parked for reuse" regardless failed this leg on both phones
+  // against a restart that prepared in ~65 ms with nothing decoded. So the
+  // leg asks the restarted generation itself whether any lane was decoded.
+  const streaming = (await dev.val("__r('src/playback/native.ts').flacStreamingEnabled()")) === true
+  const restarted = JSON.parse(
+    await dev.val("(function(){ const t = __test.backend.handle.lastTelemetry; return JSON.stringify(t ? { generation: t.generation, fallback: t.laneDecodeFallback || '' } : null) })()")
+  )
+  if (!restarted) fail('no telemetry describes the restarted generation')
+  if (streaming) {
+    if (!lines.some((l) => /graph released · generation \d+ · retained 0 kB/.test(l))) {
+      fail('streamed lanes: the paused graph did not release cleanly for the count-in restart')
+    }
+    if (restarted.fallback) fail(`streamed lanes: the count-in restart decoded instead of streaming — ${restarted.fallback}`)
+  } else if (!lines.some((l) => /parked for reuse/.test(l))) {
+    fail('decoded lanes: the paused graph was released, not parked')
+  }
   if (rows.some((r) => r.error)) fail(`an error surfaced during the counted-in resume: ${rows.find((r) => r.error).error}`)
-  log(`4. Play after pause (count-in on): paused at ${pausedAt.toFixed(2)} s, pre-roll ${pre2.length} samples, landed at ${(first.f / SR).toFixed(3)} s — ok`)
+  log(`4. Play after pause (count-in on): paused at ${pausedAt.toFixed(2)} s, pre-roll ${pre2.length} samples, landed at ${(first.f / SR).toFixed(3)} s, ${streaming ? 'streamed lanes, released and restarted with nothing decoded' : 'decoded lanes parked for reuse'} — ok`)
 
   // ---- 5. Play after a pause, count-in off --------------------------------
   await dev.ev('__test.changeMet({ countInBars: 0 })')

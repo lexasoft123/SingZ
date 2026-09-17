@@ -3118,6 +3118,59 @@ describe('iOS Phase 4B structural cue rebuild', () => {
     await handle.stop('floor retirement test complete');
   });
 
+  it('a seam keeps the floor of the run it lands in — it is not a start', async () => {
+    // A cue change on a running stream is a SEAM: the candidate takes the
+    // clock over at a block boundary and the ear hears continuous audio, so
+    // no run begins there. The prepare used to arm the floor at the seam's
+    // frame anyway, and the corrected position (the render head less the
+    // output latency) sits BELOW that frame for one latency — so the bar
+    // jumped forward a latency and froze there for another. Measured on the
+    // Android emulator turning training on: 179 ms at 157 ms of latency, the
+    // player-session "training on → advancing again" red on both phones.
+    const h = harness({ swapCapable: true, syncClock: true });
+    const project = await h.load(entry({ beat, metronome: initialMetronome }));
+    const handle = project.nativePlayback!;
+    await handle.start();
+    await handle.seek(0.2);
+    const at = (generation: number, seconds: number) => {
+      h.setPositionNow({
+        generation,
+        transportState: 'playing',
+        renderedProjectFrame: Math.round(seconds * 48_000),
+        continuousFrame: 480_000,
+        remainingPreRollFrames: 0,
+        seekCount: 1,
+        ageMs: 0,
+      });
+      return handle.clock();
+    };
+    // The seek began this run: that is the floor.
+    expect(at(1, 1.49).floorSec).toBeCloseTo(0.2, 5);
+    h.native.status
+      .mockResolvedValueOnce(
+        swapCapability(1, 'running', 71_520, { transportState: 'playing', renderedProjectFrame: 71_520 }),
+      )
+      .mockResolvedValueOnce(
+        swapCapability(2, 'running', 71_520, {
+          transportState: 'playing',
+          transportGeneration: 1,
+          swapPendingGeneration: 1,
+          renderedProjectFrame: 71_520,
+        }),
+      );
+    await rebuildIosNativePlaybackCues(handle, beat, { ...initialMetronome, volume: 0.42 });
+    // Prepared at the render head the clock last read — the seam's frame,
+    // which is where the floor used to be moved to.
+    expect(h.prepareRequests[h.prepareRequests.length - 1]).toMatchObject({
+      swapFromGeneration: 1,
+      preparedStartProjectFrame: Math.round(1.49 * 48_000),
+    });
+    // Across the seam the run is the same run: still floored where it began,
+    // never at the seam's own frame.
+    expect(at(2, 1.51).floorSec).toBeCloseTo(0.2, 5);
+    await handle.stop('seam floor test complete');
+  });
+
   it('during a count-in that lands mid-song the bar holds at the landing, as legacy holds at its start offset', async () => {
     // The core counts the pre-roll down through negative frames; legacy's
     // clock clamps at the start offset until the music enters, so the bar and
