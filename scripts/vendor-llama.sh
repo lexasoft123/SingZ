@@ -44,13 +44,29 @@ case "$TARGET" in
 esac
 
 BUILD="$SRC/build-$TARGET"
+# llama.cpp turns HTTPS on by default (LLAMA_OPENSSL, CMakeLists.txt:144) and
+# links whatever OpenSSL it finds by absolute path — Homebrew's here. Useless
+# for a server this app only ever reaches on 127.0.0.1, and fatal on a machine
+# without that library: the assertion below caught exactly that binary.
+# Turning the option off is what actually decides it. Ignoring the package
+# manager's prefixes as well is belt and braces for everything else CMake
+# might find there, and it is what the aligner's script does — but note the
+# prefix list cannot be exhaustive (conda, nix and vcpkg are not in it), which
+# is precisely why the option matters on win32, where no assertion runs.
+IGNORE="/opt/homebrew;/usr/local;/opt/local"
 # shellcheck disable=SC2086
 cmake -S "$SRC" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
-  -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_CURL=OFF $EXTRA
+  -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_CURL=OFF \
+  -DLLAMA_OPENSSL=OFF \
+  -DCMAKE_IGNORE_PREFIX_PATH="$IGNORE" -DCMAKE_IGNORE_PATH="$IGNORE" $EXTRA
 cmake --build "$BUILD" -j --config Release --target llama-server
 
 mkdir -p "$ROOT/vendor/$TARGET"
 BIN="$BUILD/bin/llama-server"
 [ -f "$BIN" ] || BIN="$BUILD/bin/Release/llama-server.exe"
 cp "$BIN" "$ROOT/vendor/$TARGET/llama-server$EXT"
+
+# BUILD_SHARED_LIBS=OFF above is the intention; this is the check. The sibling
+# script shipped a machine-local engine while every flag looked right.
+"$ROOT/scripts/assert-portable-binary.sh" "$TARGET" "$ROOT/vendor/$TARGET/llama-server$EXT" "$BUILD"
 echo "vendored: $ROOT/vendor/$TARGET/llama-server$EXT"

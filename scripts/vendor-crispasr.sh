@@ -72,24 +72,6 @@ BIN="$BUILD/bin/crispasr"
 [ -f "$BIN" ] || BIN="$BUILD/bin/Release/crispasr.exe"
 cp "$BIN" "$ROOT/vendor/$TARGET/crispasr$EXT"
 
-# Check the output, not just the flags. This script shipped once producing a
-# binary that ran here and nowhere else — GGML and CrispASR's own libraries by
-# @rpath out of the build tree, lame and opus by absolute Homebrew path — and
-# nothing noticed until the tree was moved away. The flags above prevent it;
-# this proves it, which is not the same thing: CMake caches find_library
-# results, so a build directory left by an earlier revision of this script
-# keeps pointing at Homebrew however the prefix is ignored now.
-# A failed check removes the engine, or the skip-guard at the top would hand
-# the next run the very binary that just failed.
-if [ "${TARGET#darwin-}" != "$TARGET" ]; then
-  STRAY=$(otool -L "$ROOT/vendor/$TARGET/crispasr" | tail -n +2 |
-    grep -v '^[[:space:]]*/usr/lib/\|^[[:space:]]*/System/' || true)
-  if [ -n "$STRAY" ]; then
-    rm -f "$ROOT/vendor/$TARGET/crispasr"
-    echo "vendor-crispasr: the engine links libraries a user machine will not have:" >&2
-    echo "$STRAY" >&2
-    echo "delete $BUILD and run again — CMake caches its find_library answers" >&2
-    exit 1
-  fi
-fi
+# Check the output, not just the flags — see the helper for what this caught.
+"$ROOT/scripts/assert-portable-binary.sh" "$TARGET" "$ROOT/vendor/$TARGET/crispasr$EXT" "$BUILD"
 echo "vendored: $ROOT/vendor/$TARGET/crispasr$EXT"
