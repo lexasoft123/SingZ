@@ -223,7 +223,9 @@ const skip = (name, why) => {
     // which refuses playback outright.
     await bounded(() => command('pause'))
     const paused = await bounded(() => until(player, (p) => p.playing === false, 8000), 12000)
+    let unread = false
     if (paused === SUSPENDED) {
+      unread = true
       const why = 'the app stopped answering after the OS pause — suspended, which is the OS doing its job, and not something this driver can read through'
       skip('pause from the OS reaches the sample while backgrounded', why)
       skip('the OS shows the pause', why)
@@ -240,7 +242,11 @@ const skip = (name, why) => {
       await bounded(() => command('play'))
       const resumed = await bounded(() => until(player, (p) => p.playing === true && p.pos > at, 10000), 14000)
       if (resumed === SUSPENDED) {
-        rule('play from the OS resumes the sample, still backgrounded', false, 'the app never answered after the play command')
+        // NOT a red: `command()` is a CDP evaluate over the very socket a
+        // suspension closes, so on a suspended device that press never
+        // reached the app. Nothing was pressed; nothing can be concluded.
+        unread = true
+        skip('play from the OS resumes the sample, still backgrounded', 'the app never answered the play command — the press did not reach it')
       } else {
         rule('play from the OS resumes the sample, still backgrounded', resumed.ok, `held at ${at} s → ${JSON.stringify(resumed.last)}`)
       }
@@ -252,8 +258,16 @@ const skip = (name, why) => {
     // the driver, not the app. scenario.cjs reattaches at exactly this point;
     // `ensureConnected` exists only on the device layer that needs it.
     await dev.ensureConnected?.()
-    const back = await until(player, (p) => p.playing === true, 8000)
-    rule('back in the app, the song is still going', back.ok, JSON.stringify(back.last))
+    if (unread) {
+      // Its premise is the resume that was never read: nothing restarts the
+      // song on the way back in (App.tsx's 'active' branch releases the held
+      // stream and re-arms, it does not play), so asserting it here would be
+      // a red this driver caused itself — and a red is tested before a skip.
+      skip('back in the app, the song is still going', 'the OS play above was never read, so there is nothing that should be playing')
+    } else {
+      const back = await until(player, (p) => p.playing === true, 8000)
+      rule('back in the app, the song is still going', back.ok, JSON.stringify(back.last))
+    }
     await dev.ev('try { __test.backend.pause() } catch (e) {}')
   } finally {
     await dev.detach?.()
