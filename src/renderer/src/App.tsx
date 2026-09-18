@@ -2191,9 +2191,9 @@ export default function App(): React.JSX.Element {
           const taken = new Set(tracksRef.current.map(t => t.id))
           const id = customTrackId('Backing vocals', taken)
           const original = tracksRef.current.find(t => t.id === 'vocals')
-          const guide = makeTrack('vocals', lead, { sourcePath: result.lead })
+          const guide = makeTrack('vocals', laneReadFromBuffer(lead), { sourcePath: result.lead })
           if (original) { guide.muted = original.muted; guide.solo = original.solo; guide.volume = original.volume }
-          const harmony = makeTrack(id, backing, {
+          const harmony = makeTrack(id, laneReadFromBuffer(backing), {
             label: 'Backing vocals', color: CUSTOM_COLORS[0],
             custom: { file: result.backing }, sourcePath: result.backing
           })
