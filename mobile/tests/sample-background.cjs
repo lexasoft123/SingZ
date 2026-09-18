@@ -218,6 +218,37 @@ const skip = (name, why) => {
       rule('Android: the media foreground service holds it', /isForeground=true/.test(services), `service foreground=${/isForeground=true/.test(services)}`)
     }
 
+    /* The scrub bar and the skip buttons, WHILE PLAYING and backgrounded —
+       the review notes tell App Review to drag that bar, and nothing had ever
+       driven it at a legacy song from out here. It is also the one place the
+       new quiesce could bite: each legacy seek restarts the sources and holds
+       `playing` false for ~80 ms, and a Now Playing settle landing inside that
+       window would read the song as stopped and suspend the context under the
+       restart. A drag is many seeks; two in a row is the shape to fear. */
+    await bounded(() => command('seek', 20))
+    let r = await bounded(() => until(player, (p) => Math.abs(p.pos - 20) < 0.8, 6000), 10000)
+    if (r === SUSPENDED) skip('a scrub from the OS lands where it was dragged, backgrounded', 'the app stopped answering')
+    else rule('a scrub from the OS lands where it was dragged, backgrounded', r.ok, `player at ${r.last.pos} s, asked 20 s · playing=${r.last.playing}`)
+    await bounded(() => command('skip', -10))
+    await bounded(() => command('skip', -10))
+    r = await bounded(() => until(player, (p) => p.pos > 0 && p.pos < 12 && p.playing === true, 8000), 12000)
+    if (r === SUSPENDED) skip('two skips back in a row leave the song playing, backgrounded', 'the app stopped answering')
+    else rule('two skips back in a row leave the song playing, backgrounded', r.ok, JSON.stringify(r.last))
+    // And it is still making sound, not merely reporting that it is: the
+    // position has to keep moving after the seeks settle.
+    const afterSeek = await bounded(() => player())
+    await sleep(3000)
+    const movedOn = await bounded(() => player())
+    if (afterSeek === SUSPENDED || movedOn === SUSPENDED) {
+      skip('the song is still advancing after a scrub from the OS', 'the app stopped answering')
+    } else {
+      rule(
+        'the song is still advancing after a scrub from the OS',
+        movedOn.pos - afterSeek.pos > 1.5 && movedOn.playing === true,
+        `${afterSeek.pos} s → ${movedOn.pos} s over ~3 s · playing=${movedOn.playing}`
+      )
+    }
+
     // The commands a Lock Screen offers must still reach a legacy song from
     // out here: the suspend this driver exists for also set `backgrounded`,
     // which refuses playback outright.
