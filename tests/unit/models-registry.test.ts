@@ -59,11 +59,19 @@ describe('registryEntryFor', () => {
   })
 
   /**
-   * The sung-lyrics model is 2.5 GB whose engine no shipped build can run yet
-   * (llama-server is not packaged, and only SINGZ_ASR=qwen selects it). Offered
-   * anyway it would sit beside the near-identically named whisper tile and
-   * take a singer's download for nothing — so the gate is the whole safety of
-   * shipping this half-finished, and it is one line.
+   * The sung-lyrics model is 2.5 GB that no shipped build can use. The engine
+   * is packaged now, but SINGZ_ASR=qwen remains the only thing that selects
+   * it and no UI sets that. Offered anyway, the tile would sit beside the
+   * near-identically named whisper one and take a singer's download for
+   * nothing — so this gate is the whole safety of shipping the feature
+   * half-finished, and it is one line.
+   *
+   * Removing `gated` breaks this test, which is the point: whoever does it is
+   * reading this. When the gate goes, the four `|| echo "::warning::…"` lines
+   * in .github/workflows/build.yml must become fatal again. They are soft
+   * only because an unvendored engine currently means "no Qwen in this
+   * build"; once the feature is on by default it would mean "the feature is
+   * here and broken", with the singer told nothing.
    */
   it('offers the sung-lyrics model only where its engine can be selected', () => {
     const before = process.env.SINGZ_ASR

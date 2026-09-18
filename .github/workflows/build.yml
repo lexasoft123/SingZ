@@ -81,7 +81,7 @@ jobs:
             vendor/darwin-x64
             vendor/win32-x64
             vendor/packs
-          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-whisper.sh', 'scripts/vendor-analyze.sh', 'scripts/analyze-source-hash.sh', 'CMakeLists.txt', 'cmake/**', 'zcore/**', 'zdsp/**', 'third_party/native/**', 'tools/native/**', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh') }}
+          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-whisper.sh', 'scripts/vendor-analyze.sh', 'scripts/vendor-llama.sh', 'scripts/vendor-crispasr.sh', 'scripts/assert-portable-binary.sh', 'scripts/analyze-source-hash.sh', 'CMakeLists.txt', 'cmake/**', 'zcore/**', 'zdsp/**', 'third_party/native/**', 'tools/native/**', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh') }}
 
       - name: Cache engine sources and build trees
         uses: actions/cache@v4
@@ -101,6 +101,25 @@ jobs:
           bash scripts/vendor-analyze.sh darwin-x64
           bash scripts/build-gpu-pack.sh
           bash scripts/build-onnx-pack.sh darwin-x64
+          # The Qwen pair goes LAST and cannot fail the job. Not squeamishness:
+          # this step also builds the splitter packs, the release block runs
+          # per-leg, and models.ts resolves the in-app pack from
+          # releases/latest/download — so a job that dies here publishes a
+          # release with no pack and 404s the splitter for the whole fleet, on
+          # every app version, not just this one. An engine that does not
+          # vendor is a case the app already handles: the filter matches
+          # nothing, resolveQwenServer returns null, qwenAvailable is false and
+          # both qwen paths hand the song back to whisper. The vendor scripts
+          # refuse to leave a binary that links anything outside the OS, so
+          # what a warning here means is "no Qwen in this build", never "a
+          # broken engine shipped". Read the annotations rather than the exit
+          # code. These become fatal again when the feature stops being
+          # opt-in — the reminder lives on the test that fails the day the
+          # model-tile gate is removed (tests/unit/models-registry.test.ts).
+          bash scripts/vendor-llama.sh darwin-arm64 || echo "::warning::llama-server darwin-arm64 not vendored"
+          bash scripts/vendor-llama.sh darwin-x64 || echo "::warning::llama-server darwin-x64 not vendored"
+          bash scripts/vendor-crispasr.sh darwin-arm64 || echo "::warning::crispasr darwin-arm64 not vendored"
+          bash scripts/vendor-crispasr.sh darwin-x64 || echo "::warning::crispasr darwin-x64 not vendored"
 
       - name: Build engines and splitter pack (Windows)
         if: runner.os == 'Windows'
@@ -111,6 +130,15 @@ jobs:
           bash scripts/vendor-whisper.sh win32-x64
           bash scripts/vendor-analyze.sh win32-x64
           bash scripts/build-onnx-pack.sh win32-x64
+          # Same rule as the macOS leg, and this is the leg that made it
+          # necessary: neither engine has ever been built for Windows, and
+          # `shell: bash` runs under set -e, so a compile failure here used to
+          # abort before the splitter pack above was even built. Last, and
+          # non-fatal. The portability assertion is a deliberate no-op here
+          # (no otool), so this leg proves they compile and package, not that
+          # they are self-contained.
+          bash scripts/vendor-llama.sh win32-x64 || echo "::warning::llama-server win32-x64 not vendored"
+          bash scripts/vendor-crispasr.sh win32-x64 || echo "::warning::crispasr win32-x64 not vendored"
 
       # Mac-only, and deliberately not folded into the Package step's own env
       # block. The literal reason is that this runs `security`, which exists

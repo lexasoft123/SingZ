@@ -364,11 +364,11 @@ const REGISTRY: RegistryEntry[] = [
     kind: 'file',
     parts: QWEN_PARTS,
     optional: true,
-    // Nothing in a shipped build can run this engine yet: llama-server is not
-    // in electron-builder's extraResources, and only SINGZ_ASR=qwen selects
-    // it. An offered tile downloads 2.5 GB that can never be used, beside a
-    // near-identically named one that works — so it is not offered until the
-    // engine ships and something other than an env var chooses it.
+    // The engine now ships in extraResources, but nothing in a shipped build
+    // SELECTS it: SINGZ_ASR=qwen is still the only switch, and no UI sets it.
+    // An offered tile would download 2.5 GB that can never be used, beside a
+    // near-identically named one that works — so it stays hidden until
+    // something other than an env var chooses the engine.
     gated: () => process.env.SINGZ_ASR === 'qwen'
   },
   {
