@@ -85,7 +85,7 @@ import SkiaLyrics, {
   type LyricsCue,
   type SkWord
 } from './SkiaLyrics'
-import { sheetRowState } from './song-sheet-copy'
+import { sheetRowState, stemFormatLine } from './song-sheet-copy'
 import { TEST } from './testhooks'
 import { nativeGlassStyle, nightStudioNativeTheme } from '@singz/ui/native'
 import { mobileMetronomePersistence } from '../playback/metronome-persistence'
@@ -2538,8 +2538,11 @@ export default function PlayerScreen({
               <View style={b.sec}>
                 <Text style={b.secLab}>Project</Text>
                 <Text style={s.songVal}>
-                  {`Format v${project.doc.version}` +
-                    (project.doc.version >= 2 ? ' · FLAC stems' : ' · WAV stems')}
+                  {/* From the FILES the doc names, not from the version: a
+                      v2 project keeps a float WAV lead lane when its vocals
+                      were separated, and saying "FLAC stems" over it tells
+                      the singer something untrue about the song on screen. */}
+                  {`Format v${project.doc.version} · ${stemFormatLine(project.doc)}`}
                 </Text>
                 <Text style={s.songMeta}>
                   {[

@@ -56,3 +56,34 @@ export function sheetRowState(a: {
   if (a.busy) return 'busy'
   return 'idle'
 }
+
+/**
+ * The Project row's format line.
+ *
+ * `doc.version` alone used to decide it, and that became untrue the day a v2
+ * project could keep a float WAV lead lane — the format lead/backing
+ * separation writes, which nothing converts. So the FILES the doc names
+ * decide, with one exception: a doc that names nothing is not a project
+ * without stems. The bundled sample is `{version: 2}` with six .flac lanes
+ * and no stemHashes at all, as is any folder-library project saved before
+ * stemHashes existed, and announcing "no stems" beside six visible lanes is
+ * the same mistake this sheet has already made once.
+ *
+ * `stemHashes` names custom tracks too, so a singer's own imported WAV take
+ * reads as mixed. That is accurate rather than unfortunate — a generated
+ * backing lane is a `custom-` track as well, and it is exactly the lane this
+ * line exists to describe.
+ */
+export function stemFormatLine(doc: {
+  version: number
+  stemHashes?: Record<string, unknown>
+}): string {
+  const names = Object.keys(doc.stemHashes ?? {})
+  if (names.length === 0) return doc.version >= 2 ? 'FLAC stems' : 'WAV stems'
+  const flac = names.some((n) => n.endsWith('.flac'))
+  const wav = names.some((n) => n.endsWith('.wav'))
+  if (flac && wav) return 'FLAC + WAV stems'
+  if (flac) return 'FLAC stems'
+  if (wav) return 'WAV stems'
+  return 'no stems'
+}

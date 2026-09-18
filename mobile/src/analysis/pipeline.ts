@@ -608,9 +608,14 @@ export async function analyzeProject(
           hashes[`${id}.flac`] = await deps.statFile(project, `stems/${id}.flac`)
           compacted++
         } catch (e) {
-          // The failed stem keeps its wav and the doc keeps naming it — the
-          // desktop's own rule (a project is v2 only when EVERY stem
-          // converted; src/main/projects.ts convertStemsToFlac).
+          // The failed stem keeps its wav and the doc keeps naming it. The
+          // desktop's rule is now "v2 once nothing is LEFT to compact"
+          // (src/main/projects.ts convertStemsToFlac), which is not the same
+          // as all-FLAC: it stamps v2 over a float lead lane that no build
+          // converts, and only a fixable failure holds a project at v1. This
+          // side cannot tell those apart — the core refuses a float stem with
+          // the same error as any other — so it keeps the stricter rule and
+          // leaves the doc alone. A desktop open settles it.
           log('analysis', `${project}: stem ${id} kept as wav — ${String(e instanceof Error ? e.message : e)}`, 'warn')
           allFlac = false
         }

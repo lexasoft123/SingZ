@@ -1,4 +1,4 @@
-import { sheetRowState } from '../src/ui/song-sheet-copy'
+import { sheetRowState, stemFormatLine } from '../src/ui/song-sheet-copy'
 
 const st = (o: Partial<Parameters<typeof sheetRowState>[0]>) =>
   sheetRowState({ step: null, hasGrid: false, verdict: false, busy: false, ...o })
@@ -80,5 +80,38 @@ describe('sheetRowState', () => {
         }
       }
     }
+  })
+})
+
+describe('stemFormatLine', () => {
+  // The bundled sample is the one song every new singer opens, and its doc
+  // names no files at all. Reading the files and announcing their absence
+  // printed "no stems" beside its own six lanes — the second time this sheet
+  // has told a singer a song was emptier than it is.
+  it('falls back to the version when the doc names nothing', () => {
+    expect(stemFormatLine({ version: 2 })).toBe('FLAC stems')
+    expect(stemFormatLine({ version: 1 })).toBe('WAV stems')
+    expect(stemFormatLine({ version: 2, stemHashes: {} })).toBe('FLAC stems')
+  })
+
+  it('reads the files once the doc names them', () => {
+    const six = Object.fromEntries(
+      ['vocals', 'drums', 'bass', 'guitar', 'piano', 'other'].map((s) => [`${s}.flac`, {}])
+    )
+    expect(stemFormatLine({ version: 2, stemHashes: six })).toBe('FLAC stems')
+    expect(stemFormatLine({ version: 1, stemHashes: { 'vocals.wav': {} } })).toBe('WAV stems')
+  })
+
+  it('says mixed for a separated project, which is what v2 now allows', () => {
+    // The float lead lane stays WAV for ever; calling that "FLAC stems"
+    // because the doc says v2 is the untruth this replaced.
+    expect(stemFormatLine({
+      version: 2,
+      stemHashes: { 'vocals.wav': {}, 'drums.flac': {}, 'custom-backing-vocals.wav': {} }
+    })).toBe('FLAC + WAV stems')
+  })
+
+  it('says no stems only when the doc names files and none are audio', () => {
+    expect(stemFormatLine({ version: 2, stemHashes: { 'notes.txt': {} } })).toBe('no stems')
   })
 })

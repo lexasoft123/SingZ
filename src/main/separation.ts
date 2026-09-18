@@ -267,16 +267,6 @@ export class Separator {
     }
   }
 
-  /** Is a splitter available besides our pack (a system demucs install)? */
-  async hasFastSplitter(): Promise<boolean> {
-    if (process.env.SINGZ_NO_SYSTEM_ENGINES) return false
-    if (this.engine?.kind === 'python' && !this.engine.cmd[0].startsWith(packDir())) return true
-    for (const cmd of pythonCandidates()) {
-      if (await probe(cmd)) return true
-    }
-    return false
-  }
-
   private describe(e: ResolvedEngine): string {
     if (e.kind === 'onnx') {
       if (process.platform !== 'win32') return 'splitter pack (ONNX)'

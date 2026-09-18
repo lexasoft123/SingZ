@@ -21,10 +21,10 @@ export function packDir(): string {
   return process.env.SINGZ_PACK_DIR ?? join(app.getPath('appData'), 'SingZ', 'gpu-splitter')
 }
 
-export function packPython(): string {
+export function packPython(root = packDir()): string {
   return process.platform === 'win32'
-    ? join(packDir(), 'python', 'python.exe')
-    : join(packDir(), 'python', 'bin', 'python3')
+    ? join(root, 'python', 'python.exe')
+    : join(root, 'python', 'bin', 'python3')
 }
 
 /**
@@ -57,10 +57,14 @@ export function packRtxEpPath(): string {
  * snapshot file so "installed" means "will actually split".
  */
 export async function packOnnxModel(
+  // `root` is FIRST on purpose: it is the argument a caller actually varies
+  // (judging an incoming pack), and a new default added ahead of it would
+  // silently re-aim verification at the installed model cache.
+  root = packDir(),
   repo = 'models--StemSplitio--htdemucs-6s-onnx',
   file = 'htdemucs_6s_fp16weights.onnx'
 ): Promise<string | null> {
-  const snaps = join(packDir(), 'python', 'model-cache', repo, 'snapshots')
+  const snaps = join(root, 'python', 'model-cache', repo, 'snapshots')
   try {
     for (const rev of await readdir(snaps)) {
       const candidate = join(snaps, rev, file)
@@ -104,8 +108,8 @@ export async function packOnnxModel(
 const PACK_FORMAT_REQUIRED = process.platform === 'win32' ? 9 : 5
 
 /** The UVR vocal model, inside the pack since format 5 (torch) / 9 (onnx). */
-export function packVocalModel(): string {
-  return join(packDir(), 'python', 'models', 'uvr', VOCAL_MODEL_FILE)
+export function packVocalModel(root = packDir()): string {
+  return join(root, 'python', 'models', 'uvr', VOCAL_MODEL_FILE)
 }
 
 /** First pack format that ships the Beat This! runner + weights. */
@@ -126,10 +130,10 @@ export async function packBeatsAvailable(): Promise<boolean> {
   )
 }
 
-async function packFormatVersion(): Promise<number> {
+async function packFormatVersion(root = packDir()): Promise<number> {
   try {
     const raw = JSON.parse(
-      await readFile(join(packDir(), 'python', 'pack.json'), 'utf8')
+      await readFile(join(root, 'python', 'pack.json'), 'utf8')
     ) as { formatVersion?: number }
     return raw.formatVersion ?? 0
   } catch {
@@ -137,19 +141,23 @@ async function packFormatVersion(): Promise<number> {
   }
 }
 
-/** Everything the pack needs to run — not just the interpreter. */
-async function packComplete(): Promise<boolean> {
-  if (!(await exists(packPython()))) return false
-  const version = await packFormatVersion()
+/**
+ * Everything the pack needs to run — not just the interpreter. `root` lets an
+ * INCOMING pack be judged where it was extracted, before it is allowed to
+ * replace the working one.
+ */
+async function packComplete(root = packDir()): Promise<boolean> {
+  if (!(await exists(packPython(root)))) return false
+  const version = await packFormatVersion(root)
   if (version < PACK_FORMAT_REQUIRED) {
     log('models', `splitter pack is format v${version}, app needs v${PACK_FORMAT_REQUIRED} — re-download it`, 'warn')
     return false
   }
-  if (!(await exists(packVocalModel()))) {
+  if (!(await exists(packVocalModel(root)))) {
     log('models', 'splitter pack has no vocal model — re-download it', 'warn')
     return false
   }
-  if (isOnnxPack()) return (await packOnnxModel()) !== null
+  if (isOnnxPack()) return (await packOnnxModel(root)) !== null
   return true
 }
 
@@ -308,12 +316,10 @@ const REGISTRY: RegistryEntry[] = [
         : process.arch === 'arm64'
           ? 'Splits songs into seven tracks — lead and backing vocals, drums, bass, guitar, piano and the rest — in seconds on the Apple Silicon GPU.'
           : 'Splits songs into seven tracks — lead and backing vocals, drums, bass, guitar, piano and the rest.',
-    // Was 296/272/259 before the vocal model moved inside. The model is
-    // 49.0 MB gzipped (measured on the pinned file); Apple Silicon also
-    // gained onnxruntime, whose wheel is 19.1 MB and lands near that
-    // compressed. Re-measure the three tarballs after the next pack build —
-    // this is what the wizard prints and what progress is divided by.
-    sizeMb: process.platform === 'win32' ? 345 : process.arch === 'arm64' ? 340 : 308,
+    // Measured on the tarballs CI actually built (run 35390756585, the first
+    // build carrying the vocal model): 344/336/273 MiB → the decimal MB this
+    // field is in. Was 296/272/259 before the model moved inside the pack.
+    sizeMb: process.platform === 'win32' ? 361 : process.arch === 'arm64' ? 352 : 286,
     kind: 'archive',
     url:
       process.env.SINGZ_GPU_PACK_URL ??
@@ -373,6 +379,102 @@ function forThisPlatform(here = `${process.platform}-${process.arch}`): Registry
  */
 export function registryEntryFor(id: string, here?: string): RegistryEntry | undefined {
   return forThisPlatform(here).find((e) => e.id === id)
+}
+
+/**
+ * Replace a pack directory only once its replacement has been verified where
+ * it was unpacked.
+ *
+ * This used to delete the working pack FIRST and check afterwards, so an
+ * interrupted download, a truncated archive, or a pack this build considers
+ * too old left the machine with no splitter at all and nothing to fall back
+ * to. That went from unlikely to routine the day PACK_FORMAT_REQUIRED moved:
+ * every existing install is then made to re-download, and a release whose
+ * pack assets failed to upload — which has happened here — answers with the
+ * old pack, which then fails verification and takes the good one with it.
+ *
+ * `fill` unpacks into a staging directory; `verify` judges it there. The
+ * installed pack is untouched unless both succeed, and a failure leaves only
+ * the staging copy to clean up.
+ */
+export async function swapInVerifiedPack(
+  dir: string,
+  fill: (staging: string) => Promise<void>,
+  verify: (staging: string) => Promise<boolean>
+): Promise<void> {
+  const incoming = `${dir}.incoming`
+  const previous = `${dir}.previous`
+  try {
+    await rm(incoming, { recursive: true, force: true })
+    await mkdir(incoming, { recursive: true })
+    await fill(incoming)
+    if (!(await verify(incoming))) {
+      // Retrying fetches the same pack, so do not ask for that. The reason —
+      // truncated, or older than this build requires — is in the log.
+      throw new Error(
+        'The downloaded stem splitter is not one this version can use. Your installed splitter was left alone.'
+      )
+    }
+    // Two renames on one filesystem: the window in which neither copy is in
+    // place is as short as it can be made, and it is recoverable.
+    await rm(previous, { recursive: true, force: true })
+    if (await exists(dir)) await rename(dir, previous)
+    try {
+      await rename(incoming, dir)
+    } catch (err) {
+      if (await exists(previous)) await rename(previous, dir)
+      throw err
+    }
+    // The verified pack is already in place; the old copy is now just disk.
+    // Letting its removal throw would report a SUCCESSFUL install as failed
+    // and skip clearing the GPU-disabled markers below it.
+    await rm(previous, { recursive: true, force: true }).catch(() => undefined)
+  } catch (err) {
+    // Only ever the staging copy: the installed pack is either untouched or
+    // already replaced by a verified one. Never let this replace the real
+    // error with a cleanup error.
+    await rm(incoming, { recursive: true, force: true }).catch(() => undefined)
+    throw err
+  }
+}
+
+/**
+ * Finish a pack swap the app did not live to finish.
+ *
+ * A kill between the two renames leaves the only good pack at
+ * `${dir}.previous` and nothing at `dir`, which reads as "not installed" —
+ * and the next download's leading `rm(previous)` would delete it. A kill
+ * during the unpack orphans a whole pack of disk at `${dir}.incoming` that
+ * nothing reclaims. Both are cheap to settle at startup and neither is
+ * recoverable later.
+ */
+export async function restoreInterruptedPackSwap(dir = packDir()): Promise<void> {
+  const previous = `${dir}.previous`
+  try {
+    if (!(await exists(dir)) && (await exists(previous))) {
+      // Never verified first: `.previous` is only ever produced by renaming
+      // the INSTALLED pack aside, so it is whole by construction — and the
+      // pack worth keeping here is precisely the one a newer build would
+      // reject, which is the whole point.
+      await rename(previous, dir)
+      log('models', 'restored the splitter pack an interrupted update left behind')
+      return
+    }
+    if (await exists(previous)) {
+      await rm(previous, { recursive: true, force: true })
+      log('models', 'removed a superseded splitter pack')
+    }
+  } catch (err) {
+    // This runs before the window exists. A pack that cannot be settled is a
+    // splitter the singer can re-download; an unhandled rejection here is an
+    // app that never opens, and it would fire exactly after a crash during an
+    // update — when they most need it to start.
+    log('models', `could not settle an interrupted pack update: ${String(err)}`, 'warn')
+  }
+  // `${dir}.incoming` is deliberately NOT swept: packDir() is shared by every
+  // userData identity on this machine, so it may be another instance's live
+  // staging directory mid-unpack. swapInVerifiedPack clears it before its own
+  // download, which reclaims a genuinely stale one without racing anybody.
 }
 
 export class ModelManager {
@@ -441,17 +543,11 @@ export class ModelManager {
           )
           onProgress({ id: entry.id, percent: 92 })
           try {
-            await rm(packDir(), { recursive: true, force: true })
-            await mkdir(packDir(), { recursive: true })
-            await untar(archive, packDir())
-            if (!(await packComplete())) {
-              throw new Error('The downloaded pack looks incomplete — try downloading it again.')
-            }
-          } catch (err) {
-            // A half-extracted pack must never look installed (or get picked
-            // as an engine) — remove it so the wizard offers a clean retry.
-            await rm(packDir(), { recursive: true, force: true })
-            throw err
+            await swapInVerifiedPack(
+              packDir(),
+              (staging) => untar(archive, staging),
+              packComplete
+            )
           } finally {
             await rm(archive, { force: true })
           }

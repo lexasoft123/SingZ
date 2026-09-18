@@ -44,7 +44,7 @@ import { replaySyncLog, syncLog } from './sync-log'
 import { SyncScheduler } from './sync-scheduler'
 import { logHardwareInfo } from './hwinfo'
 import { installUpdate, startUpdater, updateState } from './updater'
-import { cleanupObsoleteModels, dmlFlagPath, modelsDir, packDir, trtrtxFlagPath } from './models'
+import { cleanupObsoleteModels, dmlFlagPath, modelsDir, packDir, restoreInterruptedPackSwap, trtrtxFlagPath } from './models'
 import { Separator } from './separation'
 import { registerVocalSeparation, vocalSeparator } from './vocal-separation'
 import { registerAnalyze } from './analyze'
@@ -820,6 +820,9 @@ app.whenReady().then(async () => {
   // macOS keeps its menu (⌘-shortcuts live there); elsewhere it's just noise
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
   await migrateProjects()
+  // Before anything asks whether a splitter is installed: a kill during a
+  // pack update can leave the only good copy beside the slot it belongs in.
+  await restoreInterruptedPackSwap()
   await cleanupObsoleteModels()
   allowRoot(stemsRoot())
   allowRoot(projectsRoot())
