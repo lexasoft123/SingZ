@@ -317,6 +317,44 @@ export class MultitrackEngine {
     this.backgrounded = false
   }
 
+  /** Stop rendering behind the Home Screen WITHOUT disarming playback.
+   *
+   * For the song the OS agreed to keep playing and has since stopped — paused
+   * from the Lock Screen or the notification, or simply run out. The app's own
+   * backgrounding takes `suspendForBackground` above, which also sets
+   * `backgrounded` and so refuses `play()`; that is right when the singer
+   * leaves, and wrong here, because the Lock Screen's play button must still
+   * reach a song whose card is still on screen. `play()` resumes a suspended
+   * context on its way in, so suspending the context alone costs that press
+   * nothing and stops an idle graph rendering silence until the app comes
+   * back — which, behind a Home Screen, may be never.
+   *
+   * NOT setting `backgrounded` is the load-bearing half, and no unit suite can
+   * see it: the engine is mocked at module scope in jest.setup.js, and an
+   * engine with no tracks returns from `play()` either way, so `play()` cannot
+   * tell the two apart — so folding this method back into
+   * `suspendForBackground()` would
+   * pass typecheck and all 751 of them, and re-break guideline 2.5.4. What
+   * catches it is the last leg of `mobile/tests/sample-background.cjs`: the
+   * Lock Screen's play, pressed at a song whose context this just suspended.
+   * A driver rather than a unit test, deliberately, and recorded here so the
+   * next person knows the cover exists and where. Anyone who does unmock the
+   * engine later should reach for `playTrainingCues` instead: it reads the
+   * same flag with no tracks loaded at all. */
+  async quiesceInBackground(): Promise<void> {
+    if (this._playing || this.ctx.state !== 'running') return
+    try {
+      await this.ctx.suspend()
+      log('engine', 'context suspended in the background · the song it held has stopped')
+    } catch (error) {
+      log(
+        'engine',
+        `background quiesce failed · ${error instanceof Error ? error.message : String(error)}`,
+        'warn'
+      )
+    }
+  }
+
   /** Quiesce RNAudioAPI before RemoteIO is allowed to open. `unload()` frees
    * song graph ownership but deliberately leaves this AudioContext alive, so
    * the explicit suspend barrier is required to prevent overlapping output

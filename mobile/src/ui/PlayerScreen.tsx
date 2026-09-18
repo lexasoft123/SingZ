@@ -1097,8 +1097,17 @@ export default function PlayerScreen({
       // it stops rendering silence while nobody is looking; the park's own
       // branches handle a transport already paused or already stopped.
       onBackgroundLost: () => {
-        if (engine.kind === 'android-native' && AppState.currentState !== 'active') {
+        if (AppState.currentState === 'active') return
+        if (engine.kind === 'android-native') {
           void iosNativePlayback.parkForBackground('song stopped in the background')
+        } else if (engine.kind === 'legacy') {
+          // The legacy engine's own half of the park. A held legacy song —
+          // the bundled sample is always one — is no longer suspended when
+          // the app backgrounds, or it could not keep playing at all; so
+          // when the OS stops holding it, this is the only thing left to
+          // quiesce its context. Deliberately NOT `suspendForBackground`:
+          // that refuses the Lock Screen's play, which is still on screen.
+          void legacyEngine.quiesceInBackground()
         }
       }
     })

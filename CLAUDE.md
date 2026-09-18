@@ -252,7 +252,7 @@ Mobile has its own permanent sim-driven tests in `mobile/tests/`
 `ab-repeat.cjs`, `offline-cache.cjs`, `custom-track.cjs`,
 `beats-native-ios.cjs`, `song-sheet-beat.cjs`, `player-session.cjs`,
 `focus-loss-android.cjs`, `play-from-anywhere.cjs`,
-`waveform-streamed.cjs`, `now-playing.cjs`): CDP over
+`waveform-streamed.cjs`, `now-playing.cjs`, `sample-background.cjs`): CDP over
 Metro against the iOS
 Simulator — run them
 after engine or loading changes.
@@ -278,7 +278,20 @@ the guard for App Review's 2.5.4 rejection of 0.19.0, which declared the `audio`
 mode with nothing visible using it. On Android that song is kept alive by `NowPlayingService`,
 a mediaPlayback foreground service held only while a song plays; App.tsx skips the background
 park exactly while `nowPlaying().keepsPlayingInBackground`, and a pause from the notification
-parks and holds the stream as leaving the app does. `song-sheet-beat.cjs` is the one that watches
+parks and holds the stream as leaving the app does. `sample-background.cjs` is App Review's own path, and it exists because
+`now-playing.cjs` cannot take it: that driver turns the native backend ON and
+refuses any other, since its Lock Screen claims are about the native graph —
+while the BUNDLED SAMPLE, the only song a reviewer with no library can open and
+the one the review notes name, plays on LEGACY (it decodes bundled assets, not
+the lane files the native graph opens). So every green Now Playing run
+described a path no reviewer took, and 2.5.4 rejected the app twice for it:
+App.tsx kept the held NATIVE graph alive and then suspended the legacy engine
+two statements later, which paused the sample and, by setting `backgrounded`,
+made the Lock Screen's own play refuse it. This driver forces nothing — no
+preference, no seeded project, no backend — opens the sample from a fresh
+install, presses Play, presses Home, and asks whether the song still moves and
+whether pause and play from the OS still reach it. Four of its rules are red on
+the code that shipped in 0.22.0. `song-sheet-beat.cjs` is the one that watches
 a SCREEN rather than the engine: it seeds two phone-library projects (a
 hand-made grid, and a song with nothing detected), opens the Song sheet and
 reads the Beat row through somebody else's analysis — the rule in

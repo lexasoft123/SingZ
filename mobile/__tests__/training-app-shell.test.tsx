@@ -13,6 +13,7 @@ const mockSetTrimMs = jest.fn()
 const mockStopForOwnership = jest.fn()
 const mockParkForBackground = jest.fn()
 const mockReleaseHeldStream = jest.fn((..._args: unknown[]) => Promise.resolve())
+let mockHeldInBackground = false
 
 const shellProps = (): {
   catalog: Record<string, any>
@@ -36,6 +37,9 @@ jest.mock('../src/engine', () => ({
   MultitrackEngine: class {
     sampleRate = 48_000
     outputDisplayLatency = 0
+    // True only while the LEGACY engine is the one making the sound, which is
+    // what decides whether backgrounding may suspend it.
+    playing = false
     pause = jest.fn()
     cancelTrainingCues = jest.fn()
     suspendForBackground = jest.fn(() => Promise.resolve())
@@ -89,6 +93,15 @@ jest.mock('../src/playback/native', () => ({
   }
 }))
 jest.mock('../src/split/service', () => ({ replaySplitTrail: jest.fn() }))
+// The real controller is null here (no native NowPlaying module under jest),
+// and App asks it one question on the way to the background.
+jest.mock('../src/playback/now-playing', () => ({
+  nowPlaying: () => ({
+    get keepsPlayingInBackground() {
+      return mockHeldInBackground
+    }
+  })
+}))
 jest.mock('../src/projects', () => ({ releaseProject: (...args: unknown[]) => mockReleaseProject(...args) }))
 jest.mock('../src/ui/testhooks', () => ({ TEST: null }))
 jest.mock('../src/latency', () => ({
@@ -349,6 +362,59 @@ describe('mobile training app shell', () => {
     await ReactTestRenderer.act(() => tree.unmount())
     expect(remove).toHaveBeenCalledTimes(1)
     add.mockImplementation(defaultImplementation)
+  })
+
+  /* App Review rejected 0.22.0 and 0.19.0 under 2.5.4 — "unable to play any
+   * audible content when the app is running in the background" — because the
+   * suspend above ran unconditionally. The bundled sample, the only song a
+   * reviewer with no library can open, plays on the LEGACY engine (it decodes
+   * bundled assets rather than the files the native graph opens), so pressing
+   * Home paused it on every device. Both cases below are the same statement
+   * seen from its two sides, and each fails on the unconditional version. */
+  describe('a song the OS agreed to keep playing', () => {
+    const background = async (
+      held: boolean,
+      legacyPlaying: boolean
+    ): Promise<{ tree: ReactTestRenderer.ReactTestRenderer; restore: () => void }> => {
+      let appStateChange!: (state: 'active' | 'background') => void
+      const add = AppState.addEventListener as jest.Mock
+      const defaultImplementation = add.getMockImplementation()
+      add.mockImplementation((type, listener) => {
+        if (type === 'change') appStateChange = listener
+        return { remove: jest.fn() }
+      })
+      mockHeldInBackground = held
+      let tree!: ReactTestRenderer.ReactTestRenderer
+      await ReactTestRenderer.act(async () => {
+        tree = ReactTestRenderer.create(<App />)
+        await Promise.resolve()
+      })
+      ;(shellEngine() as unknown as { playing: boolean }).playing = legacyPlaying
+      await ReactTestRenderer.act(() => appStateChange('background'))
+      return {
+        tree,
+        restore: () => {
+          mockHeldInBackground = false
+          add.mockImplementation(defaultImplementation)
+        }
+      }
+    }
+
+    test('keeps the legacy engine running when it is the one being held', async () => {
+      const { tree, restore } = await background(true, true)
+      expect(shellEngine().suspendForBackground).not.toHaveBeenCalled()
+      expect(mockParkForBackground).not.toHaveBeenCalled()
+      await ReactTestRenderer.act(() => tree.unmount())
+      restore()
+    })
+
+    test('still suspends the idle legacy context while the NATIVE graph is the one held', async () => {
+      const { tree, restore } = await background(true, false)
+      expect(shellEngine().suspendForBackground).toHaveBeenCalledTimes(1)
+      expect(mockParkForBackground).not.toHaveBeenCalled()
+      await ReactTestRenderer.act(() => tree.unmount())
+      restore()
+    })
   })
 
   test('root route owner applies stored latency in Train and follows a post-mic route change', async () => {
