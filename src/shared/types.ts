@@ -22,7 +22,7 @@ export type EngineStatus =
       needsModels?: boolean
     }
 
-export type ModelId = 'gpu-splitter' | 'whisper' | 'aligner' | 'qwen-asr'
+export type ModelId = 'gpu-splitter' | 'whisper' | 'aligner' | 'qwen-asr' | 'qwen-aligner'
 
 export interface ModelInfo {
   id: ModelId
@@ -342,7 +342,7 @@ export interface LyricsProgress {
 export type LyricsSource = 'lrclib' | 'whisper' | 'edited'
 
 /** How word timing was produced: whisper transcription match or CTC forced alignment. */
-export type AlignMethod = 'whisper' | 'ctc'
+export type AlignMethod = 'whisper' | 'ctc' | 'qwen'
 
 /**
  * Verdict of checking database lyrics against what is actually sung.

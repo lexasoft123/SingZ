@@ -588,13 +588,39 @@ Rules learned the hard way:
 | `SINGZ_WHISPER_MODEL` | whisper size (tiny/base/small/…, default large-v3-turbo) |
 | `SINGZ_ASR=qwen` | transcribe a song with no online lyrics with Qwen3-ASR instead of whisper (see below) |
 | `SINGZ_LLAMA_SERVER` | override the llama-server binary Qwen3-ASR runs through |
+| `SINGZ_CRISPASR` | override the crispasr binary the Qwen word aligner runs through |
 
 ### The second recogniser (Qwen3-ASR)
 
-Whisper stays the default. `SINGZ_ASR=qwen` switches ONE path — transcribing a
-song LRCLIB has nothing for — to Qwen3-ASR 1.7B through llama.cpp's
-`llama-server` (`scripts/vendor-llama.sh`, model id `qwen-asr` in the model
-manager). Everything else, Check & align included, is untouched.
+Whisper stays the default. `SINGZ_ASR=qwen` switches both paths that listen to
+a song onto Qwen: transcribing a song LRCLIB has nothing for, and Check &
+align. Two engines and two models sit behind it —
+Qwen3-ASR 1.7B through llama.cpp's `llama-server` (`scripts/vendor-llama.sh`,
+model id `qwen-asr`) for the words, and Qwen3-ForcedAligner 0.6B through
+CrispASR (`scripts/vendor-crispasr.sh`, model id `qwen-aligner`) for their
+times. llama.cpp carries only the ASR model, which is why the aligner is a
+second runtime rather than another flag.
+
+Check & align without whisper works like this: the recogniser is asked about
+each sung chunk, the answer says which lyric words belong to which chunk (the
+existing `globalAnchors` matcher), and the aligner then times each chunk's own
+words. Measured over the 19 catalog songs whose Precise timing is stored,
+against the whisper tier it replaces:
+
+| | Qwen ASR + Qwen aligner | whisper tier |
+|---|---|---|
+| systematic offset | −0.04 s | +0.17 s late |
+| median error | 0.08 s | 0.19 s |
+| within 0.10 s | 55% | 30% |
+| within 0.50 s | 80% | 86% |
+| phrase onsets within 0.15 s | 65% | 45% |
+
+Better on 17 of the 19, and behind in the far tail on two: a recording every
+engine mishears, and one whose verses repeat so closely that a word can be
+matched to the wrong repetition — the price of a recogniser that reports no
+times of its own. Lines the recogniser could not hear are dropped from the
+anchors and carried by the lyrics' own phrasing, which is the app's existing
+rule and what keeps those two songs from being timed against the wrong bars.
 
 Why, measured over the whole 23-song catalog on 2026-09-17 against whisper
 large-v3-turbo with the app's own flags:

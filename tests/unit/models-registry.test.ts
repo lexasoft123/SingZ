@@ -32,6 +32,33 @@ describe('registryEntryFor', () => {
   })
 
   /**
+   * Two entries may share an id only when their platforms are disjoint (the
+   * torch and ONNX aligners are one tile on different machines). Two that
+   * both apply here means the wizard draws two identical tiles under one
+   * React key and `downloadModels` fetches the same file twice — which is
+   * exactly what a careless insert did to the qwen aligner.
+   */
+  it('never offers this platform two tiles with the same id', async () => {
+    const before = process.env.SINGZ_ASR
+    const dir = await mkdtemp(join(tmpdir(), 'singz-models-dup-'))
+    process.env.SINGZ_MODELS_DIR = dir
+    process.env.SINGZ_ASR = 'qwen'
+    try {
+      // status() is what the wizard renders, so it is where a duplicate shows
+      const rows = await new ModelManager().status(true)
+      const seen = new Map<string, number>()
+      for (const r of rows) seen.set(r.id, (seen.get(r.id) ?? 0) + 1)
+      for (const [id, n] of seen) expect(`${id} ×${n}`).toBe(`${id} ×1`)
+      expect(rows.some((r) => r.id === 'qwen-aligner')).toBe(true)
+    } finally {
+      delete process.env.SINGZ_MODELS_DIR
+      if (before === undefined) delete process.env.SINGZ_ASR
+      else process.env.SINGZ_ASR = before
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  /**
    * The sung-lyrics model is 2.5 GB whose engine no shipped build can run yet
    * (llama-server is not packaged, and only SINGZ_ASR=qwen selects it). Offered
    * anyway it would sit beside the near-identically named whisper tile and

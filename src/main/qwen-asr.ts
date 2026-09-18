@@ -50,6 +50,23 @@ export interface QwenChunkText {
   label: string | null
 }
 
+/**
+ * Full language names, which is what Qwen3-ASR answers with and takes. Only
+ * the languages the lyrics detector can name are here; anything else asks the
+ * model to decide for itself.
+ */
+const LANGUAGE_NAMES: Record<string, string> = {
+  en: 'English',
+  de: 'German',
+  ru: 'Russian',
+  fr: 'French',
+  es: 'Spanish',
+  it: 'Italian'
+}
+export function qwenLanguageName(code: string | null | undefined): string | null {
+  return code ? (LANGUAGE_NAMES[code] ?? null) : null
+}
+
 async function exists(path: string): Promise<boolean> {
   try {
     await access(path)

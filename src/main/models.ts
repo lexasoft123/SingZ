@@ -306,6 +306,16 @@ const QWEN_PARTS = [
   { file: QWEN_MODEL_FILE, url: `${QWEN_BASE}/${QWEN_MODEL_FILE}`, sizeMb: 2165 },
   { file: QWEN_MMPROJ_FILE, url: `${QWEN_BASE}/${QWEN_MMPROJ_FILE}`, sizeMb: 356 }
 ]
+/**
+ * Qwen3-ForcedAligner-0.6B, which gives Qwen's words their times. Q8_0: the
+ * quantizations differ by at most one 80 ms alignment class, and q8 is the
+ * one measured (median 0.09 s against the app's Precise timing).
+ */
+const QWEN_ALIGNER_FILE = 'qwen3-forced-aligner-0.6b-q8_0.gguf'
+const QWEN_ALIGNER_MB = 990
+export function qwenAlignerPath(): string {
+  return join(modelsDir(), QWEN_ALIGNER_FILE)
+}
 export function qwenModelPath(): string {
   return join(modelsDir(), QWEN_MODEL_FILE)
 }
@@ -372,6 +382,18 @@ const REGISTRY: RegistryEntry[] = [
     url: 'https://dl.fbaipublicfiles.com/mms/torchaudio/ctc_alignment_mling_uroman/model.pt',
     optional: true,
     platforms: ['darwin-arm64']
+  },
+  {
+    id: 'qwen-aligner',
+    label: 'Word timing · sung lyrics',
+    description:
+      'Gives every word of a sung lyric its moment, without the stem splitter. Pairs with the sung-lyrics speech model.',
+    sizeMb: QWEN_ALIGNER_MB,
+    kind: 'file',
+    file: QWEN_ALIGNER_FILE,
+    url: `https://huggingface.co/cstr/qwen3-forced-aligner-0.6b-GGUF/resolve/main/${QWEN_ALIGNER_FILE}`,
+    optional: true,
+    gated: () => process.env.SINGZ_ASR === 'qwen'
   },
   {
     id: 'aligner',
