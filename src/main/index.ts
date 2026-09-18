@@ -362,7 +362,7 @@ function registerIpc(): void {
   ipcMain.handle('lyrics:cancel', () => transcriber.cancel())
 
   ipcMain.handle('models:status', async () =>
-    modelManager.status(await separator.hasFastSplitter())
+    modelManager.status()
   )
 
   ipcMain.handle('models:download', async (e, ids?: string[]) => {
@@ -370,7 +370,6 @@ function registerIpc(): void {
       if (!e.sender.isDestroyed()) e.sender.send('models:progress', p)
     }
     const result = await modelManager.downloadModels(
-      await separator.hasFastSplitter(),
       send,
       Array.isArray(ids) && ids.length > 0 ? (ids as ModelsProgress['id'][]) : undefined
     )

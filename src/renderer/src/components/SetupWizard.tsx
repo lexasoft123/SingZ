@@ -16,12 +16,6 @@ export function setupWizardCloseAction(
   return origin === 'auto' && busy ? 'leave-running' : 'cancel'
 }
 
-/** The vocal model uses the downloaded splitter's Python, even with system demucs. */
-export function modelDownloadTargets(id: ModelId, models: ModelInfo[]): ModelId[] {
-  return id === 'backing-vocals' && models.some((model) => model.id === 'gpu-splitter' && !model.present)
-    ? ['gpu-splitter', id] : [id]
-}
-
 /**
  * Model manager / first-run setup. Required items download automatically
  * (auto origin); optional packs have their own Get button. Everything lands
@@ -94,8 +88,8 @@ export default function SetupWizard({ models: initial, origin, focusModel, onClo
           {models.map((m) => {
             const isRunning = running.has(m.id)
             const pct = progress[m.id] ?? 0
-            const targets = modelDownloadTargets(m.id, models)
-            const downloadMb = models.filter((model) => targets.includes(model.id)).reduce((sum, model) => sum + model.sizeMb, 0)
+            const targets: ModelId[] = [m.id]
+            const downloadMb = m.sizeMb
             return (
               <div key={m.id} ref={m.id === focusModel ? focusRow : undefined} data-model-id={m.id} className={`wiz-row${m.present ? ' done' : ''}`}>
                 <div className="wiz-head">

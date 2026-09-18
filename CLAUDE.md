@@ -543,7 +543,17 @@ was driven; the gotchas that follow from it are below.
   never stretched to the next timestamp (lag), unless AI-aligned.
 - **Splitting requires a downloaded pack** (no bundled engine since 0.3.0),
   and every split is six stems (htdemucs_6s; silent guitar/piano lanes are
-  hidden in the UI): torch/MPS on Apple Silicon; demucs-onnx elsewhere.
+  hidden in the UI) **followed by a lead/backing split of the vocal stem** —
+  seven lanes, one two-stage progress bar, no way to ask for six: a
+  monophonic detector handed two voices locks octave-below, and separating
+  first halves v4's octave errors ([docs/LEAD-VOCALS.md](docs/LEAD-VOCALS.md)
+  carries the numbers). The UVR model therefore ships INSIDE the pack rather
+  than as an optional download — **pack format 5 (torch) / 9 (onnx)**, and the
+  Apple Silicon pack pins its own `onnxruntime` because torch packs carried
+  none. `Separate backing vocals` survives in the Split menu for projects an
+  older build split, which are the only ones that can still have a combined
+  vocal lane; their Split button is amber. Engines: torch/MPS on Apple
+  Silicon; demucs-onnx elsewhere.
   Windows GPU = the TensorRT-RTX plugin EP (GeForce RTX 30xx+; pack v5+
   ships it under python/rtx, v6 adds the pre-simplified `_trt.onnx` graph
   (raw export = 20k shape/scatter glue nodes that shatter the TensorRT

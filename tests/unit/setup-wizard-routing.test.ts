@@ -5,7 +5,7 @@ import type { ModelInfo } from '../../src/shared/types'
 import { vi } from 'vitest'
 import { readFile } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
-import { modelDownloadTargets, setupWizardCloseAction } from '../../src/renderer/src/components/SetupWizard'
+import { setupWizardCloseAction } from '../../src/renderer/src/components/SetupWizard'
 
 describe('setup wizard routing ownership', () => {
   it('keeps an automatic model download alive when the persistent wizard closes', () => {
@@ -36,21 +36,21 @@ describe('setup wizard routing ownership', () => {
 
 const missingModels: ModelInfo[] = [
   { id: 'gpu-splitter', label: 'Stem splitter', description: 'Runtime', present: false, optional: false, required: false, sizeMb: 272 },
-  { id: 'backing-vocals', label: 'Lead and backing vocals', description: 'Vocal model', present: false, optional: true, required: false, sizeMb: 26 }
+  { id: 'whisper', label: 'Lyrics model', description: 'Transcription', present: false, optional: true, required: false, sizeMb: 1624 }
 ]
 describe('requested model downloads', () => {
-  it('includes the missing splitter runtime even if system demucs made it optional for ordinary splitting', () => {
-    expect(modelDownloadTargets('backing-vocals', missingModels)).toEqual(['gpu-splitter', 'backing-vocals'])
-    expect(modelDownloadTargets('backing-vocals', missingModels.map(m => ({ ...m, present: m.id === 'gpu-splitter' })))).toEqual(['backing-vocals'])
-    expect(modelDownloadTargets('whisper', missingModels)).toEqual(['whisper'])
-  })
-  it('gives missing non-optional models a download button in the manually opened dialog and includes dependency size', () => {
+  // The vocal model used to be a second download that only worked once the
+  // splitter pack was there, so a Get button had to pull both and price
+  // both. It rides inside the pack now: every row is its own download again,
+  // and its own size.
+  it('gives missing models a download button priced at their own size', () => {
     vi.stubGlobal('document', { body: { classList: { contains: () => false } } })
     try {
-      const html = renderToStaticMarkup(createElement(SetupWizard, { models: missingModels, origin: 'manual', focusModel: 'backing-vocals', onClose: () => {} }))
+      const html = renderToStaticMarkup(createElement(SetupWizard, { models: missingModels, origin: 'manual', focusModel: 'gpu-splitter', onClose: () => {} }))
       expect(html).toContain('Get · 272 MB')
-      expect(html).toContain('Get · 298 MB')
-      expect(html).toContain('data-model-id="backing-vocals"')
+      expect(html).toContain('Get · 1624 MB')
+      expect(html).toContain('data-model-id="gpu-splitter"')
+      expect(html).not.toContain('backing-vocals')
     } finally { vi.unstubAllGlobals() }
   })
 })

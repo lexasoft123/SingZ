@@ -26,7 +26,7 @@ export type VocalSplitResult =
   | { ok: true; lead: string; backing: string }
   | { ok: false; error: string; cancelled?: boolean; needsModels?: ModelId[] }
 
-export type ModelId = 'gpu-splitter' | 'whisper' | 'aligner' | 'backing-vocals'
+export type ModelId = 'gpu-splitter' | 'whisper' | 'aligner'
 
 export interface ModelInfo {
   id: ModelId
@@ -1454,7 +1454,8 @@ export interface SingzApi {
    * Runs after a v1 project opens; WAVs are deleted only once every stem
    * converted.
    */
-  upgradeProject(dir: string): Promise<{ ok: boolean; converted?: boolean; error?: string }>
+  /** `compacted` names the stems whose .wav became .flac — and only those. */
+  upgradeProject(dir: string): Promise<{ ok: boolean; converted?: boolean; compacted?: string[]; error?: string }>
   /** Where the library lives + cloud folders detected on this machine. */
   getStorage(): Promise<{ root: string; isDefault: boolean; cloud: CloudRoot[] }>
   /** Move the library (null = back to Documents/SingZ); existing projects are copied over. */

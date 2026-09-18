@@ -9,7 +9,6 @@ export default function SplitMenu({ split, disabled, canResplit, canSplitBacking
   onSplit: (mode: SplitMode) => void
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
-  const [backing, setBacking] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const button = useRef<HTMLButtonElement>(null)
   useEffect(() => {
@@ -35,8 +34,14 @@ export default function SplitMenu({ split, disabled, canResplit, canSplitBacking
     }
   }, [open])
   const start = (mode: SplitMode): void => { setOpen(false); onSplit(mode) }
+  // A project split before backing vocals became part of every split still
+  // has one combined vocal lane. The button says so rather than waiting to
+  // be opened — this is the only route those projects have.
+  const owesBacking = split && canSplitBacking
   return <div className="split-control" ref={ref}>
-    <button ref={button} type="button" className={`pill ${split ? 'ghost' : 'primary'}`}
+    <button ref={button} type="button"
+      className={`pill ${owesBacking ? 'attention' : split ? 'ghost' : 'primary'}`}
+      title={owesBacking ? 'Click to split for backing vocals' : undefined}
       disabled={disabled} aria-haspopup="dialog" aria-expanded={open}
       onClick={() => setOpen(v => !v)}>
       Split <span aria-hidden>▾</span>
@@ -50,13 +55,12 @@ export default function SplitMenu({ split, disabled, canResplit, canSplitBacking
           onClick={() => start('stems')}>Re-split instrument stems</button>
         {!canSplitBacking && !canResplit && <p>These vocals are already separated.</p>}
       </> : <>
-        <p>Create vocals, drums, bass, guitar, piano and instruments.</p>
-        <label className="split-menu-option">
-          <input type="checkbox" checked={backing} onChange={e => setBacking(e.target.checked)} />
-          <span>Separate backing vocals</span>
-        </label>
-        <p className="split-menu-hint">{backing ? 'Two steps. Takes a few extra minutes; an additional model may be needed.' : 'Takes a few minutes. Models are downloaded once.'}</p>
-        <button type="button" className="pill primary" onClick={() => start(backing ? 'stems-and-vocals' : 'stems')}>Split</button>
+        <p>Create vocals, drums, bass, guitar, piano and instruments, then split
+          the vocals into lead and backing.</p>
+        <p className="split-menu-hint">Two steps, a few minutes each. Models are downloaded
+          once. The lead and backing lanes are saved uncompressed — about 40 MB a minute
+          of song, so they stay exact.</p>
+        <button type="button" className="pill primary" onClick={() => start('stems-and-vocals')}>Split</button>
       </>}
     </div>}
   </div>

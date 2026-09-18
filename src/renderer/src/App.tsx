@@ -1809,17 +1809,21 @@ export default function App(): React.JSX.Element {
                 // a stale path here fails SILENTLY, falling back to the
                 // device-rate buffer under a v2 stamp, which is the old bug
                 // wearing the new stamp.
+                // Only the stems main says it moved. A lead/backing split
+                // leaves vocals.wav as float, which never compacts — repointing
+                // it at a vocals.flac nobody wrote is that silent failure.
+                const moved = new Set(r.compacted ?? [])
+                const repoint = (id: string, f: string): string =>
+                  moved.has(id) ? f.replace(/\.wav$/, '.flac') : f
                 stemPathsRef.current = stemPathsRef.current
                   ? Object.fromEntries(
-                      Object.entries(stemPathsRef.current).map(([id, f]) => [id, f.replace(/\.wav$/, '.flac')])
+                      Object.entries(stemPathsRef.current).map(([id, f]) => [id, repoint(id, f)])
                     )
                   : null
                 setStemFiles((prev) => {
                   if (!prev) return prev
                   const next: Record<string, string> = {}
-                  for (const [s, p] of Object.entries(prev)) {
-                    next[s] = p.replace(/\.wav$/, '.flac')
-                  }
+                  for (const [s, p] of Object.entries(prev)) next[s] = repoint(s, p)
                   return next
                 })
               }
@@ -2162,7 +2166,7 @@ export default function App(): React.JSX.Element {
         modelsRequired: async (ids) => {
           const models = await window.singz.modelsStatus()
           if (!current()) return
-          setWizard({ models, origin: 'manual', focusModel: ids.includes('backing-vocals') ? 'backing-vocals' : ids[0] })
+          setWizard({ models, origin: 'manual', focusModel: ids[0] })
         },
         read: file => { showSplitProgress(run, 'vocals', 100, 'loading-stems'); return window.singz.readAudio(file) },
         decode: bytes => engine.decode(bytes),
@@ -2253,14 +2257,17 @@ export default function App(): React.JSX.Element {
     showSplitProgress(run, run.phase, 0, 'preparing')
     const current = (): boolean => splitIsCurrent(run)
     try {
-      // Check the optional stage before doing an expensive instrument split.
-      // Opening the dialog does not start a download or resume this request.
-      if (mode !== 'stems') {
-        const models = await checkedSplit(current, window.singz.modelsStatus())
-        if (models.some(m => m.id === 'backing-vocals' && !m.present)) {
-          setWizard({ models, origin: 'manual', focusModel: 'backing-vocals' })
-          return
-        }
+      // The vocal stage spawns the PACK's python against the model inside the
+      // pack. `checkEngine` does not answer that: it passes on a system demucs
+      // with no pack at all, and on any pack whose interpreter runs, because
+      // it never reads pack.json. Asking here — before minutes of stem
+      // separation that would end in "download the splitter" — is the whole
+      // point of a pre-check. `gpu-splitter` present IS `packComplete()`:
+      // installed, new enough, and carrying the vocal model.
+      const models = await checkedSplit(current, window.singz.modelsStatus())
+      if (models.some(m => m.id === 'gpu-splitter' && !m.present)) {
+        setWizard({ models, origin: 'manual', focusModel: 'gpu-splitter' })
+        return
       }
       await runSplitPlan(mode, { current, stems: () => startSplit(run), vocals: () => splitBackingVocals(run) })
     } catch (error) {

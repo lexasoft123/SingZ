@@ -1,14 +1,12 @@
 import { app, net } from 'electron'
 import { spawn } from 'node:child_process'
 import { createWriteStream } from 'node:fs'
-import { createHash } from 'node:crypto'
-import { access, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { access, mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ModelId, ModelInfo, ModelsProgress } from '../shared/types'
 import { log } from './log'
 import { onChildSettled } from './child-exit'
-import VOCAL_LICENSE from '../../docs/licenses/UVR-MDX-Karaoke-2.txt?raw'
-import { VOCAL_MODEL_BYTES, VOCAL_MODEL_FILE, VOCAL_MODEL_SHA256, VOCAL_MODEL_URL, VOCAL_RUNTIME_BYTES, VOCAL_RUNTIME_SHA256, VOCAL_RUNTIME_URL } from './vocal-model'
+import { VOCAL_MODEL_FILE } from './vocal-model'
 
 /**
  * Shared local model cache, identical for every way the app runs (dev,
@@ -103,7 +101,12 @@ export async function packOnnxModel(
 // replacing the original+sibling pair), ONE onnxruntime (mainline in
 // site-packages — the DirectML wheel and rtx/ort side-load are gone),
 // pdb/tcl pruned, fp16 beat model.
-const PACK_FORMAT_REQUIRED = process.platform === 'win32' ? 8 : 4
+const PACK_FORMAT_REQUIRED = process.platform === 'win32' ? 9 : 5
+
+/** The UVR vocal model, inside the pack since format 5 (torch) / 9 (onnx). */
+export function packVocalModel(): string {
+  return join(packDir(), 'python', 'models', 'uvr', VOCAL_MODEL_FILE)
+}
 
 /** First pack format that ships the Beat This! runner + weights. */
 const PACK_FORMAT_WITH_BEATS = 4
@@ -142,6 +145,10 @@ async function packComplete(): Promise<boolean> {
     log('models', `splitter pack is format v${version}, app needs v${PACK_FORMAT_REQUIRED} — re-download it`, 'warn')
     return false
   }
+  if (!(await exists(packVocalModel()))) {
+    log('models', 'splitter pack has no vocal model — re-download it', 'warn')
+    return false
+  }
   if (isOnnxPack()) return (await packOnnxModel()) !== null
   return true
 }
@@ -151,7 +158,12 @@ export async function cleanupObsoleteModels(): Promise<void> {
   const names = [
     'ggml-model-htdemucs-4s-f16.bin',
     'ggml-model-htdemucs-4s-f16.bin.part',
-    'htdemucs_6s.ok'
+    'htdemucs_6s.ok',
+    // Downloaded separately until backing vocals joined the pack.
+    VOCAL_MODEL_FILE,
+    `${VOCAL_MODEL_FILE}.part`,
+    'UVR-MDX-Karaoke-2-LICENSE.txt',
+    'vocal-runtime.whl'
   ]
   if (isOnnxPack()) {
     // 0.10.0 resolved the aligner install to the Apple-Silicon torch entry
@@ -168,6 +180,12 @@ export async function cleanupObsoleteModels(): Promise<void> {
       await rm(p, { force: true })
       log('models', `removed obsolete ${name}`)
     }
+  }
+  // The side-loaded onnxruntime is a directory, not a file.
+  const runtime = join(modelsDir(), 'vocal-runtime-1.28.0')
+  if (await exists(runtime)) {
+    await rm(runtime, { recursive: true, force: true })
+    log('models', 'removed obsolete vocal-runtime-1.28.0')
   }
 }
 
@@ -280,52 +298,22 @@ export function mmsModelUrl(): string {
     : 'https://dl.fbaipublicfiles.com/mms/torchaudio/ctc_alignment_mling_uroman/model.pt'
 }
 
-export function vocalRuntimeDir(): string { return join(modelsDir(), 'vocal-runtime-1.28.0') }
-export function needsVocalRuntime(): boolean { return process.platform === 'darwin' && process.arch === 'arm64' }
-
-async function verifySha256(path: string, expected: string): Promise<void> {
-  if (createHash('sha256').update(await readFile(path)).digest('hex') !== expected) {
-    await rm(path, { force: true })
-    throw new Error('The downloaded vocal model failed its integrity check. Please try again.')
-  }
-}
-
-/** Add ORT as an optional isolated runtime. Existing splitter packs stay intact. */
-async function installVocalRuntime(signal: AbortSignal, onPct: (pct: number) => void): Promise<void> {
-  if (!needsVocalRuntime()) return
-  if (!(await exists(packPython()))) throw new Error('Download the stem splitter before the backing vocal model.')
-  const wheel = join(modelsDir(), 'vocal-runtime.whl')
-  await downloadFile(VOCAL_RUNTIME_URL, wheel, VOCAL_RUNTIME_BYTES, onPct, signal)
-  await verifySha256(wheel, VOCAL_RUNTIME_SHA256)
-  const dest = vocalRuntimeDir()
-  const pending = dest + '.part'
-  await rm(pending, { recursive: true, force: true })
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn(packPython(), ['-c', 'import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2]); sys.path.insert(0,sys.argv[2]); import onnxruntime; assert onnxruntime.__version__ == \"1.28.0\"', wheel, pending], { signal })
-      child.once('error', reject)
-      onChildSettled(child, 'vocal-runtime', code => code === 0 ? resolve() : reject(new Error('The optional vocal runtime needs macOS 14 or later and the current stem splitter pack. Re-download the stem splitter, then try again.')))
-    })
-    if (signal.aborted) throw new Error('Cancelled')
-    await rm(dest, { recursive: true, force: true })
-    await rename(pending, dest)
-  } finally {
-    await rm(wheel, { force: true })
-    await rm(pending, { recursive: true, force: true })
-  }
-}
-
 const REGISTRY: RegistryEntry[] = [
   {
     id: 'gpu-splitter',
     label: 'Stem splitter · AI',
     description:
       process.platform === 'win32'
-        ? 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest — on your GPU when it can (GeForce RTX 30xx or newer; CPU otherwise).'
+        ? 'Splits songs into seven tracks — lead and backing vocals, drums, bass, guitar, piano and the rest — on your GPU when it can (GeForce RTX 30xx or newer; CPU otherwise).'
         : process.arch === 'arm64'
-          ? 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest — in seconds on the Apple Silicon GPU.'
-          : 'Splits songs into six tracks — vocals, drums, bass, guitar, piano and the rest.',
-    sizeMb: process.platform === 'win32' ? 296 : process.arch === 'arm64' ? 272 : 259,
+          ? 'Splits songs into seven tracks — lead and backing vocals, drums, bass, guitar, piano and the rest — in seconds on the Apple Silicon GPU.'
+          : 'Splits songs into seven tracks — lead and backing vocals, drums, bass, guitar, piano and the rest.',
+    // Was 296/272/259 before the vocal model moved inside. The model is
+    // 49.0 MB gzipped (measured on the pinned file); Apple Silicon also
+    // gained onnxruntime, whose wheel is 19.1 MB and lands near that
+    // compressed. Re-measure the three tarballs after the next pack build —
+    // this is what the wizard prints and what progress is divided by.
+    sizeMb: process.platform === 'win32' ? 345 : process.arch === 'arm64' ? 340 : 308,
     kind: 'archive',
     url:
       process.env.SINGZ_GPU_PACK_URL ??
@@ -371,14 +359,6 @@ const REGISTRY: RegistryEntry[] = [
     optional: true,
     platforms: ['win32-x64', 'darwin-x64']
   },
-  {
-    id: 'backing-vocals',
-    label: 'Lead and backing vocals',
-    description: 'Separates backing harmonies from a vocal stem and reads the lead melody. Requires the stem splitter. A song can take several minutes; harmonies may still overlap.',
-    sizeMb: Math.ceil((VOCAL_MODEL_BYTES + (needsVocalRuntime() ? VOCAL_RUNTIME_BYTES : 0)) / 1e6),
-    kind: 'file', file: VOCAL_MODEL_FILE, url: VOCAL_MODEL_URL, optional: true,
-    platforms: ['darwin-arm64', 'darwin-x64', 'win32-x64']
-  }
 ]
 
 function forThisPlatform(here = `${process.platform}-${process.arch}`): RegistryEntry[] {
@@ -400,16 +380,16 @@ export class ModelManager {
 
   private async present(entry: RegistryEntry): Promise<boolean> {
     if (entry.kind === 'archive') return packComplete()
-    if (entry.id === 'backing-vocals') {
-      if (!(await exists(packPython()))) return false
-      if (needsVocalRuntime() && !(await exists(join(vocalRuntimeDir(), 'onnxruntime', '__init__.py')))) return false
-      try { return (await stat(join(modelsDir(), VOCAL_MODEL_FILE))).size === VOCAL_MODEL_BYTES } catch { return false }
-    }
     return exists(join(modelsDir(), entry.file as string))
   }
 
-  /** `systemSplitter` marks the pack optional when a system demucs exists. */
-  async status(systemSplitter: boolean): Promise<ModelInfo[]> {
+  /**
+   * A system demucs used to make the pack optional. It cannot any more: every
+   * split ends with the lead/backing stage, which spawns the PACK's python
+   * against the model inside the PACK. `systemSplitter` still decides nothing
+   * else, so it is gone rather than left as a lever that no longer moves.
+   */
+  async status(): Promise<ModelInfo[]> {
     const out: ModelInfo[] = []
     for (const entry of forThisPlatform()) {
       out.push({
@@ -419,21 +399,20 @@ export class ModelManager {
         sizeMb: entry.sizeMb,
         present: await this.present(entry),
         optional: entry.optional,
-        required: entry.optional ? false : !systemSplitter
+        required: !entry.optional
       })
     }
     return out
   }
 
   async downloadModels(
-    fastSplitter: boolean,
     onProgress: (p: ModelsProgress) => void,
     ids?: ModelId[]
   ): Promise<{ ok: true } | { ok: false; cancelled?: boolean; error: string }> {
     if (this.abort) return { ok: false, error: 'A model download is already running.' }
     this.abort = new AbortController()
     try {
-      const all = await this.status(fastSplitter)
+      const all = await this.status()
       // explicit ids re-download even when present (the wizard's Reinstall
       // lever for installs that exist on disk but fail to run)
       const wanted = all.filter((m) => (ids ? ids.includes(m.id) : m.required && !m.present))
@@ -442,23 +421,13 @@ export class ModelManager {
         if (!entry) continue
         onProgress({ id: entry.id, percent: 0 })
         if (entry.kind === 'file') {
-          if (entry.id === 'backing-vocals' && !(await exists(packPython()))) {
-            throw new Error('Download the stem splitter before the backing vocal model.')
-          }
-          const vocalModelShare = entry.id === 'backing-vocals' && needsVocalRuntime()
-            ? VOCAL_MODEL_BYTES / (VOCAL_MODEL_BYTES + VOCAL_RUNTIME_BYTES) : 1
           await downloadFile(
             entry.url as string,
             join(modelsDir(), entry.file as string),
             entry.sizeMb * 1e6,
-            (pct) => onProgress({ id: entry.id, percent: pct * vocalModelShare }),
+            (pct) => onProgress({ id: entry.id, percent: pct }),
             this.abort.signal
           )
-          if (entry.id === 'backing-vocals') {
-            await verifySha256(join(modelsDir(), VOCAL_MODEL_FILE), VOCAL_MODEL_SHA256)
-            await writeFile(join(modelsDir(), 'UVR-MDX-Karaoke-2-LICENSE.txt'), VOCAL_LICENSE)
-            await installVocalRuntime(this.abort.signal, pct => onProgress({ id: entry.id, percent: 100 * vocalModelShare + pct * (1 - vocalModelShare) }))
-          }
           log('models', `${entry.id} installed (${entry.file})`)
           onProgress({ id: entry.id, percent: 100 })
         } else {

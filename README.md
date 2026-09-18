@@ -16,7 +16,8 @@ built-in setup and keeps it updated automatically.
 
 ## What it does
 
-- **Stems** — split any song into six tracks: vocals, drums, bass, guitar,
+- **Stems** — split any song into seven tracks: lead and backing vocals,
+  drums, bass, guitar,
   piano and the rest; mute, solo and set volume per stem while it plays.
   Guitar and piano lanes appear only when the song actually has them. Results
   are cached per file, so a song is only ever split once.

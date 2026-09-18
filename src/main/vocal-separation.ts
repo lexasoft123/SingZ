@@ -3,12 +3,12 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { delimiter, join, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import RUNNER from '../../scripts/vocal_split_runner.py?raw'
 import { onChildSettled } from './child-exit'
 import { allowRoot, isAllowed } from './media'
-import { modelsDir, needsVocalRuntime, packPython, vocalRuntimeDir } from './models'
-import { VOCAL_MODEL_FILE, VOCAL_MODEL_SHA256 } from './vocal-model'
+import { packPython, packVocalModel } from './models'
+import { VOCAL_MODEL_SHA256 } from './vocal-model'
 import { hashFile, spawnEnv } from './separation'
 import { log } from './log'
 import type { VocalSplitResult } from '../shared/types'
@@ -53,13 +53,10 @@ class VocalSeparator {
         allowRoot(dest); issuedLeads.add(resolve(lead)); progress(100)
         return { ok: true, lead, backing }
       }
-      try { await stat(packPython()); await stat(join(modelsDir(), VOCAL_MODEL_FILE)) } catch {
-        return { ok: false, error: 'Download the models for vocal separation.', needsModels: ['gpu-splitter', 'backing-vocals'] }
-      }
-      if (needsVocalRuntime()) {
-        try { await stat(join(vocalRuntimeDir(), 'onnxruntime', '__init__.py')) } catch {
-          return { ok: false, error: 'Download the vocal separation runtime.', needsModels: ['backing-vocals'] }
-        }
+      // The model rides inside the pack, so one missing thing means one
+      // missing download rather than two that can disagree.
+      try { await stat(packPython()); await stat(packVocalModel()) } catch {
+        return { ok: false, error: 'Download the stem splitter to separate vocals.', needsModels: ['gpu-splitter'] }
       }
       if (this.cancelled) throw new Error('Cancelled')
       await mkdir(root, { recursive: true })
@@ -73,8 +70,7 @@ class VocalSeparator {
       progress(0)
       await new Promise<void>((done, reject) => {
         const env: NodeJS.ProcessEnv = { ...spawnEnv(), PYTHONUNBUFFERED: '1', HF_HUB_OFFLINE: '1', PYTHONDONTWRITEBYTECODE: '1' }
-        if (needsVocalRuntime()) env.PYTHONPATH = [vocalRuntimeDir(), process.env.PYTHONPATH].filter(Boolean).join(delimiter)
-        const child = spawn(packPython(), [runner, '--model', join(modelsDir(), VOCAL_MODEL_FILE), '--input', path, '--output', pending!], { env })
+        const child = spawn(packPython(), [runner, '--model', packVocalModel(), '--input', path, '--output', pending!], { env })
         this.child = child
         let tail = '', lines = ''
         child.stdout?.on('data', (chunk: Buffer) => {

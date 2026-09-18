@@ -46,7 +46,11 @@ describe('saving a separated vocal', () => {
     expect(await readFile(join(dir, 'stems', 'vocals.wav'))).toEqual(bytes)
     expect(await readdir(join(dir, 'stems'))).not.toContain('vocals.flac')
     const doc = JSON.parse(await readFile(join(dir, 'project.json'), 'utf8'))
-    expect(doc.version).toBe(1) // existing reader supports mixed WAV/FLAC
+    // v2 means "nothing left to compact", not "every stem is FLAC": the float
+    // lead lane never converts, and stamping v1 for it made every open run an
+    // upgrade that could not succeed. Readers take either — stemFile() prefers
+    // .flac and falls back to .wav.
+    expect(doc.version).toBe(2)
     expect(doc.settings.pendingLeadVocal).toBeUndefined()
     expect(doc.settings.leadVocalSeparated).toBe(true)
     expect(doc.settings.melody).toBeUndefined()

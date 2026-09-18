@@ -1,6 +1,19 @@
 # Lead and backing vocal separation
 
-The optional **Lead and backing vocals** model applies UVR MDX Karaoke 2 to an
+Every split produces seven lanes: the six htdemucs stems, with the vocal stem
+itself split into lead and backing. It is not an optional second pass and
+there is no way to ask for six. A monophonic detector handed two simultaneous
+voices locks onto subharmonics: across the 44-input corpus
+(`eval/pitch-regression-gate.md` describes it; its result files are private),
+running pitch v4 on the separated lead instead of the combined vocal stem took
+octave errors from 12,651 to 6,993 and agreement within 50 cents from 83.62%
+to 88.47%. Holding the reference fixed and comparing only frames both runs
+emit — the strict form — it is 88.07% to 89.33%. Nine tenths of those errors
+were octave-*below*, which is exactly what a harmony a third or a fifth under
+the lead does to the apparent period. On Pink Floyd's "Time" it is 618 octave
+errors to 85.
+
+The **Lead and backing vocals** model applies UVR MDX Karaoke 2 to that
 already separated vocal stem. Its trained primary output is **Instrumental**:
 on a vocal-only input this becomes the backing/harmony lane. Lead vocals are
 `input − backing`, preserving sample alignment and the original mixture level.
@@ -8,7 +21,14 @@ It estimates musical roles, not singer identities; unison singing, doubled leads
 and tightly overlapping harmonies can still cross between lanes.
 
 The model is 52,786,726 bytes, SHA-256
-`bf32e15105a09c0f7dddd2b67346146334d6f3ecb399ed7638eba2ab07cbf5f4`.
+`bf32e15105a09c0f7dddd2b67346146334d6f3ecb399ed7638eba2ab07cbf5f4`. It ships
+**inside the splitter pack** (`python/models/uvr/`) rather than as a separate
+download, because a split cannot finish without it — both pack builders fetch
+it against that sha, run the shipped runner on a synthesized two-voice clip
+offline, and assert that lead + backing reconstructs the input. `pack.json`
+records format 5 (Apple Silicon) / 9 (ONNX), which `PACK_FORMAT_REQUIRED` in
+`src/main/models.ts` refuses to go below; older packs are re-downloaded.
+`tests/unit/vocal-model-in-pack.test.ts` holds those three files in step.
 The official UVR parameter table, keyed by its tail-MD5
 `1d64a6d2c30f709b8c9b4ce1366d96ee`, supplies FFT 5120, hop 1024, 2048 frequency
 bins, 256 time frames and output compensation 1.065. The runner uses periodic
@@ -26,15 +46,19 @@ Karaoke 2 was selected for its directly downloadable ONNX weights, explicit
 lead/backing workflow, small size and reuse of local runtimes. This is a
 practical choice, not a claim that it beats every larger separation model.
 
-On Apple Silicon, model download also installs a SHA-256-pinned official
-ONNX Runtime 1.28.0 wheel (19,141,362 bytes; Python 3.12, macOS 14+) beside the
-model. The installed splitter pack is left untouched. Its `sphn` decoder reads
-FLAC/WAV input; Windows/Intel packs already have ONNX Runtime and soundfile.
+The Apple Silicon pack pins `onnxruntime==1.28.0` alongside torch so the ONNX
+graph has a runtime; the ONNX packs already carry one. This replaced a
+side-loaded wheel installed beside the model, which needed macOS 14 and a
+matching pack and could disagree with either. The torch pack's `sphn` decoder
+reads FLAC/WAV input; the ONNX packs use soundfile.
 A fixed batch dimension (`batch_size=1`) allows CoreML's static MLProgram path;
 CPU remains the fallback. The CPU path can take longer than the song itself.
 
-The **Separate backing vocals** transport action runs only on request, exposes
-progress/cancel, replaces the session's vocal lane with lead audio and adds a
+The second stage runs as part of every split, with one progress bar over both
+(`1/2`, `2/2`). **Separate backing vocals** survives in the Split menu for
+projects split by an older build, which are the only ones that can still have
+a combined vocal lane; the Split button turns amber and says so, because there
+is no other route for them. Either way the stage exposes progress/cancel, replaces the session's vocal lane with lead audio and adds a
 normal custom backing lane. It cancels and invalidates analyses of the old
 combined vocal. Melody is then tracked from the lead. Song changes disown late
 results. The cache keys on source bytes, model hash and runner source hash;

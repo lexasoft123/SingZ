@@ -280,6 +280,22 @@ button.chip-status:hover {
   box-shadow: 0 0 18px rgba(255, 160, 40, 0.15);
 }
 
+/* "This project still owes a backing-vocal split" — #e2a53e, the same amber
+   the grid version uses for act-on-me, so one colour means one thing across
+   the app. Deliberately static: an infinite pulse here would repaint the
+   transport every vsync on the weak-iGPU fleet, and this is already the only
+   coloured control in its row. */
+.pill.attention {
+  border: 1px solid rgba(226, 165, 62, 0.55);
+  background: rgba(226, 165, 62, 0.12);
+  color: #e2a53e;
+}
+
+.pill.attention:hover {
+  border-color: rgba(226, 165, 62, 0.8);
+  background: rgba(226, 165, 62, 0.18);
+}
+
 /* ————————————————————————————————— track stack ————— */
 
 .stack {
