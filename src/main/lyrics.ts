@@ -6,6 +6,8 @@ import { basename, dirname, join } from 'node:path'
 import type { AlignCheck, LyricLine, LyricWord, LyricsProgress, LyricsResult, LyricsSource } from '../shared/types'
 import { alignToTranscription, ctcOutcome, guessLanguage, transcriptionUsable } from './align'
 import { preciseCapable, runMmsAlign } from './align-mms'
+import { linesFromChunks, qwenAvailable, QwenServer, type QwenChunkText } from './qwen-asr'
+import { decodeVocalsMono16k, levelEnvelope, planChunks } from './vocal-chunks'
 import {
   fixTagEncoding,
   lookupLyrics,
@@ -36,6 +38,20 @@ const modelUrl = (m: string): string =>
   `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${m}.bin`
 
 const EXE = process.platform === 'win32' ? 'whisper-cli.exe' : 'whisper-cli'
+
+/** Recorded in lyrics.json so a re-listen can tell which engine wrote a line. */
+const QWEN_ENGINE_ID = 'qwen3-asr-1.7b'
+
+/**
+ * Qwen3-ASR is opt-in while it is being proven in the field: it hears sung
+ * words markedly better than whisper (measured over the whole catalog: WER
+ * 0.167 against 0.278 on songs with no online lyrics, and no invented
+ * subtitle phrases at all) but it is a second engine, a second download, and
+ * llama.cpp still calls its audio input experimental.
+ */
+function qwenPreferred(): boolean {
+  return process.env.SINGZ_ASR === 'qwen'
+}
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -121,6 +137,13 @@ interface LyricsCache {
   credit?: string
   aligned?: boolean
   check?: AlignCheck
+  /**
+   * Which recogniser heard these words, when they were transcribed rather
+   * than looked up. Additive and ignored by every older reader — `source`
+   * still says 'whisper' for any on-device transcription, because that is
+   * what the phones and the sync format mean by it.
+   */
+  engine?: string
   /**
    * true: transcribed while LRCLIB was unanswering — ask again on a later
    * open. false: LRCLIB answered "no match" — settled, stop asking. Absent:
@@ -233,9 +256,10 @@ export class Transcriber {
   private child: ChildProcess | null = null
   private cancelled = false
   private abort: AbortController | null = null
+  private qwen: QwenServer | null = null
 
   get busy(): boolean {
-    return this.child !== null || this.abort !== null
+    return this.child !== null || this.abort !== null || this.qwen !== null
   }
 
   private async cacheDir(songPath: string): Promise<string> {
@@ -256,6 +280,7 @@ export class Transcriber {
         credit: raw.credit,
         aligned: raw.aligned,
         check: raw.check,
+        engine: raw.engine,
         lrclibPending: raw.lrclibPending,
         lookup: raw.lookup,
         lines: raw.lines
@@ -663,6 +688,31 @@ export class Transcriber {
       }
     }
 
+    // A song with nothing online is where whisper is weakest — it decides the
+    // language from the first 30 s and invents lines over instrumentals — and
+    // where Qwen3-ASR is strongest. It hears words but tells no time, so this
+    // path only runs when the precise aligner can supply the timing.
+    if (!alignBase && qwenPreferred()) {
+      const qwen = await this.transcribeWithQwen(vocals, durationSec, onProgress)
+      if (qwen) {
+        try {
+          await this.writeCache(lyricsPath, {
+            source: 'whisper',
+            engine: QWEN_ENGINE_ID,
+            lines: qwen,
+            lrclibPending: lrclibDown,
+            lookup: LRCLIB_LADDER_VERSION
+          })
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          log('lyrics', `transcription failed: ${msg}`, 'error')
+          return { ok: false, error: `Transcription failed: ${msg}` }
+        }
+        return { ok: true, cached: false, source: 'whisper', lines: qwen }
+      }
+      if (this.cancelled) return { ok: false, cancelled: true, error: 'Cancelled.' }
+    }
+
     const prep = await this.ensureWhisper(allowDownload, onProgress)
     if (!prep.ok) return prep.res
     const { engine, model } = prep
@@ -906,6 +956,98 @@ export class Transcriber {
     })
   }
 
+  /**
+   * Transcribe a song nobody has lyrics for with Qwen3-ASR, and time the
+   * result with the precise aligner.
+   *
+   * Returns null — never an error — whenever anything it needs is missing or
+   * the song yields nothing: every one of those cases falls through to the
+   * whisper path that shipped before it, so enabling this can degrade to
+   * today's behaviour but never to no lyrics at all.
+   */
+  private async transcribeWithQwen(
+    vocals: string,
+    durationSec: number,
+    onProgress: (p: LyricsProgress) => void
+  ): Promise<LyricLine[] | null> {
+    if (!(await qwenAvailable())) {
+      log('lyrics', 'qwen: engine or model not installed — using whisper')
+      return null
+    }
+    // Qwen hears words but tells no time; without an aligner there is nothing
+    // to time them with, and provisional chunk timing is not karaoke.
+    if (!(await preciseCapable()) || !(await exists(mmsModelPath()))) {
+      log('lyrics', 'qwen: the precise aligner is not installed — using whisper for timing')
+      return null
+    }
+    this.cancelled = false
+    const server = new QwenServer()
+    this.qwen = server
+    try {
+      onProgress({ stage: 'preparing', percent: 0 })
+      const pcm = await decodeVocalsMono16k(vocals)
+      const { env, p90 } = levelEnvelope(pcm)
+      const chunks = planChunks(env, p90)
+      if (chunks.length === 0) {
+        log('lyrics', 'qwen: no sung stretch found in the vocals — using whisper')
+        return null
+      }
+      const sung = chunks.reduce((s, c) => s + (c.end - c.start), 0)
+      log(
+        'lyrics',
+        `qwen: ${chunks.length} sung stretches, ${Math.round(sung)}s of ${Math.round(durationSec)}s`
+      )
+      await server.start()
+      let texts: QwenChunkText[]
+      try {
+        texts = await server.transcribe(pcm, chunks, null, (pct) =>
+          onProgress({ stage: 'transcribing', percent: pct * 0.7 })
+        )
+      } finally {
+        server.stop()
+      }
+      const lines = linesFromChunks(texts)
+      if (lines.length === 0) {
+        log('lyrics', 'qwen: heard no words — using whisper')
+        return null
+      }
+      const heard = lines.reduce((s, l) => s + l.words.length, 0)
+      log('lyrics', `qwen: ${heard} words in ${lines.length} lines — timing them precisely`)
+
+      // the words are right but the times are a guess; the aligner fixes that
+      const run = await runMmsAlign(vocals, lines, (p) =>
+        onProgress({ stage: p.stage, percent: 70 + (p.percent ?? 0) * 0.3 })
+      )
+      this.child = run.child
+      const ctc = await run.done
+      const outcome = ctcOutcome(lines, ctc, durationSec)
+      log(
+        'lyrics',
+        `qwen: precise timing ${outcome.check.verdict} — ${outcome.check.matchedPct}% of the words placed`
+      )
+      // A mismatch means the aligner placed under a quarter of the words, so
+      // the only timing left is the even spread across each chunk that
+      // linesFromChunks guessed — up to tens of seconds out, with no `check`
+      // for the panel to warn with and no later pass to re-derive it (a
+      // 'whisper' source is never re-asked and Check & align refuses it).
+      // Whisper's own words come with real times, so hand the song to it.
+      if (outcome.check.verdict === 'mismatch') {
+        log('lyrics', 'qwen: the aligner could not place these words — using whisper', 'warn')
+        return null
+      }
+      return outcome.lines
+    } catch (err) {
+      if (this.cancelled) return null
+      const msg = err instanceof Error ? err.message : String(err)
+      log('lyrics', `qwen: ${msg} — using whisper`, 'warn')
+      return null
+    } finally {
+      server.stop()
+      this.qwen = null
+      this.child = null
+    }
+  }
+
   /** Shared tail of the whisper align path: judge the fit, retime, cache. */
   private async finishAlign(
     alignBase: LyricsCache,
@@ -1071,5 +1213,6 @@ export class Transcriber {
     this.cancelled = true
     this.abort?.abort()
     this.child?.kill('SIGTERM')
+    this.qwen?.stop()
   }
 }

@@ -586,6 +586,50 @@ Rules learned the hard way:
 | `SINGZ_MUTE=1` | mute the audio device (Chromium mute-audio) — every automated driver sets it; leave unset only for a human listening |
 | `SINGZ_DEMUCS` / `SINGZ_WHISPER` | override engine command |
 | `SINGZ_WHISPER_MODEL` | whisper size (tiny/base/small/…, default large-v3-turbo) |
+| `SINGZ_ASR=qwen` | transcribe a song with no online lyrics with Qwen3-ASR instead of whisper (see below) |
+| `SINGZ_LLAMA_SERVER` | override the llama-server binary Qwen3-ASR runs through |
+
+### The second recogniser (Qwen3-ASR)
+
+Whisper stays the default. `SINGZ_ASR=qwen` switches ONE path — transcribing a
+song LRCLIB has nothing for — to Qwen3-ASR 1.7B through llama.cpp's
+`llama-server` (`scripts/vendor-llama.sh`, model id `qwen-asr` in the model
+manager). Everything else, Check & align included, is untouched.
+
+Why, measured over the whole 23-song catalog on 2026-09-17 against whisper
+large-v3-turbo with the app's own flags:
+
+| | with lyrics | no lyrics | invented phrases |
+|---|---|---|---|
+| whisper turbo | WER 0.211 | WER 0.278 | 55 |
+| Qwen3-ASR 1.7B | WER 0.162 | WER 0.167 | 0 |
+
+The gap is widest exactly where this path lives: whisper decides a song's
+language from its first 30 s, so an organ or drum intro sent three catalog
+songs into the wrong language entirely (0%, 50% and 67% of their words heard;
+one came back as Russian «Продолжение следует…»). Qwen heard 88-99% of the
+same three.
+
+Four things are worth knowing before touching this code:
+
+- **It hears words but tells no time.** The path therefore refuses to run
+  unless the precise aligner is installed, and hands it Qwen's text to time.
+  Without the aligner it falls back to whisper, silently and by design.
+- **Everything goes through `vocal-chunks`.** llama.cpp returns an EMPTY
+  transcription past ~2 minutes of audio in one call
+  (ggml-org/llama.cpp#21847), and silence is where every recogniser invents
+  things. 30 s pieces beat 60 s ones (WER 0.167 vs 0.202): a long piece let
+  the model skip a whole verse when a song switched language mid-piece.
+- **The model's own language label is unreliable** in this GGUF — German
+  singing comes back labelled "English" with correct German text — so only
+  "None" (no singing) is trusted, and the song's majority answer decides.
+- **A forced language loops on a chunk with nobody singing** ("oh, oh, oh…"),
+  so a looping answer is discarded for the unforced one.
+
+On the Windows field laptop (4-core Haswell) it runs at 0.82x real time
+against whisper's 1.91x — no GPU is involved on either engine there, because
+llama.cpp's Vulkan backend needs Vulkan 1.2 and that machine's GPUs top out
+at 1.1 (Kepler) or have no Windows Vulkan at all (Haswell).
 
 Full clean-OS check (as CI can't do): package with
 `npm run dist -- --mac --arm64 --dir`, then drive

@@ -57,7 +57,7 @@ function flacReady(): Promise<FlacApi> {
   return flacPromise
 }
 
-interface WavPcm {
+export interface WavPcm {
   sampleRate: number
   channels: number
   bits: number
@@ -65,7 +65,7 @@ interface WavPcm {
 }
 
 /** Minimal RIFF walk — the splitter writes canonical 16-bit PCM stems. */
-function parseWav(buf: Buffer): WavPcm {
+export function parseWav(buf: Buffer): WavPcm {
   if (buf.toString('ascii', 0, 4) !== 'RIFF' || buf.toString('ascii', 8, 12) !== 'WAVE') {
     throw new Error('not a RIFF/WAVE file')
   }

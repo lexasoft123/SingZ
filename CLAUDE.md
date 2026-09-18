@@ -17,6 +17,7 @@ npm run build        # bundle into out/  — ALWAYS build before driving E2E
 npm run dist         # package installer for current platform
 npx electron .       # run the built app (out/) without packaging
 scripts/vendor-whisper.sh   # build whisper-cli into vendor/<platform>-<arch>/
+scripts/vendor-llama.sh     # build llama-server (the Qwen3-ASR engine) into vendor/ — opt-in, SINGZ_ASR=qwen
 scripts/vendor-analyze.sh   # build singz-analyze into vendor/ (ships dark; cmake, one defn with the host scripts)
 scripts/build-gpu-pack.sh   # torch/MPS splitter pack (Apple Silicon)
 scripts/build-onnx-pack.sh  # demucs-onnx splitter pack (win32-x64 | darwin-x64)

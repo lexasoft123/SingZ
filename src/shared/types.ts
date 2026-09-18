@@ -22,7 +22,7 @@ export type EngineStatus =
       needsModels?: boolean
     }
 
-export type ModelId = 'gpu-splitter' | 'whisper' | 'aligner'
+export type ModelId = 'gpu-splitter' | 'whisper' | 'aligner' | 'qwen-asr'
 
 export interface ModelInfo {
   id: ModelId
