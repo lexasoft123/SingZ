@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ModelManager, registryEntryFor } from '../../src/main/models'
@@ -100,6 +100,8 @@ describe('registryEntryFor', () => {
 describe('multi-part model installs', () => {
   let dir = ''
   let asked: string[] = []
+  const DECLARED = 1000
+  let served = DECLARED
   const fetched = (): string[] => asked.map((u) => u.split('/').pop() as string)
 
   beforeEach(async () => {
@@ -107,12 +109,25 @@ describe('multi-part model installs', () => {
     process.env.SINGZ_MODELS_DIR = dir
     process.env.SINGZ_ASR = 'qwen'
     asked = []
+    served = DECLARED
+    // A server that promises 1000 bytes has to hand over 1000 bytes: the old
+    // stub declared them and delivered none, which is precisely the failure
+    // downloadFile now refuses, so every test here rode on it.
     vi.spyOn(net, 'fetch').mockImplementation((async (url: string) => {
       asked.push(url)
+      let sent = false
       return {
         ok: true,
-        headers: { get: (): string => '1000' },
-        body: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) }
+        headers: { get: (): string => String(DECLARED) },
+        body: {
+          getReader: () => ({
+            read: async () => {
+              if (sent) return { done: true, value: undefined }
+              sent = true
+              return { done: false, value: new Uint8Array(served) }
+            }
+          })
+        }
       }
     }) as unknown as typeof net.fetch)
   })
@@ -143,6 +158,24 @@ describe('multi-part model installs', () => {
     const res = await new ModelManager().downloadModels(true, () => {}, ['qwen-asr'])
     expect(res.ok).toBe(true)
     expect(fetched()).toEqual(['Qwen3-ASR-1.7B-Q8_0.gguf', 'mmproj-Qwen3-ASR-1.7B-Q8_0.gguf'])
+  })
+
+  /**
+   * A connection that drops mid-file ends the stream without an error, and
+   * the half file used to be renamed over the model: the tile read
+   * "installed", llama-server exited 1 on every run, and nothing said why.
+   * Measured against the real thing — a 2.5 GB model whose 356 MB encoder
+   * was truncated to 80% ran, failed, and fell back to whisper in silence.
+   */
+  it('refuses a body that stops early, and leaves no model behind', async () => {
+    served = 600
+    const res = await new ModelManager().downloadModels(true, () => {}, ['qwen-aligner'])
+    expect(res.ok).toBe(false)
+    expect(res.ok === false && res.error).toContain('stopped short')
+    // neither the model nor the .part it was written through
+    expect(await readdir(dir)).toEqual([])
+    const rows = await new ModelManager().status(true)
+    expect(rows.find((r) => r.id === 'qwen-aligner')?.present).toBe(false)
   })
 
   it('reports one bar that only goes forward across the parts', async () => {

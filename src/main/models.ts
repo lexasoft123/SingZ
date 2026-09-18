@@ -196,7 +196,8 @@ export async function downloadFile(
     log('models', `downloading ${url}`)
     const res = await net.fetch(url, { signal })
     if (!res.ok || !res.body) throw new Error(`download failed (HTTP ${res.status})`)
-    const total = Number(res.headers.get('content-length')) || approxBytes
+    const declared = Number(res.headers.get('content-length')) || 0
+    const total = declared || approxBytes
     const out = createWriteStream(part)
     const reader = res.body.getReader()
     let got = 0
@@ -211,6 +212,19 @@ export async function downloadFile(
       out.end(() => resolve())
       out.on('error', reject)
     })
+    // A body that stops early is not an error anywhere in fetch — the stream
+    // just ends — so without this the half file is renamed over the model and
+    // reads "installed" for ever after. Measured with a truncated encoder:
+    // llama-server exits 1 on every run, the tile still says installed, and
+    // the singer is told nothing (today it silently falls back to whisper;
+    // once whisper is gone there is nothing to fall back to).
+    if (declared && got !== declared) {
+      throw new Error(
+        `the download ${got < declared ? 'stopped short' : 'overran'} — ${(got / 1e6).toFixed(
+          1
+        )} MB of the ${(declared / 1e6).toFixed(1)} MB the server promised. Try again.`
+      )
+    }
     await rename(part, dest)
     log('models', `saved ${dest} (${(got / 1e6).toFixed(1)} MB)`)
     onPct(100)
