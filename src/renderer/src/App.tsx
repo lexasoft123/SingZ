@@ -109,7 +109,7 @@ import WindowButtons from './components/WindowButtons'
 import Transport from './components/Transport'
 import VocalTraining from './components/VocalTrainingRoute'
 import { TrainingProgressMutations } from './training-progress-persistence'
-import { blocksSongTransportShortcut } from './keyboard'
+import { activatableAncestor, blocksSongTransportShortcut } from './keyboard'
 import { playbackErrorToast } from './playback-error-toast'
 import {
   DEFAULT_TRAINING_REFERENCE_VOLUME,
@@ -1447,10 +1447,9 @@ export default function App(): React.JSX.Element {
         openAudioSettingsRef.current()
         return
       }
-      const tgt = e.target as HTMLElement
       const modalOpen = document.body.classList.contains('modal-open') ||
         Boolean(document.querySelector('[role="dialog"]'))
-      if (blocksSongTransportShortcut(e.target, modalOpen)) return
+      if (blocksSongTransportShortcut(e.target, e.code, modalOpen)) return
       // Song transport shortcuts never leak into the training section. The
       // exercise owns Space/arrow semantics while it is visible.
       if (appSectionRef.current !== 'songs') return
@@ -1469,7 +1468,7 @@ export default function App(): React.JSX.Element {
         localStorage.setItem('singz.karaoke', '0')
       } else if (e.code === 'Space') {
         e.preventDefault()
-        ;(tgt.closest('button') as HTMLElement | null)?.blur()
+        activatableAncestor(e.target)?.blur()
         togglePlayRef.current()
       } else if (e.code === 'ArrowLeft') {
         e.preventDefault()
