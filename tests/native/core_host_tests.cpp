@@ -1697,12 +1697,12 @@ static void audioInputTests() {
     const singz::LiveInputFrame frame = singz::analyzeLiveInput(tone.data(), tone.size(), rate);
     // Golden values from renderer/audio/pitch.ts::yinPitchInfo over this
     // exact Float32 tone. This holds the native detector's Float32 store
-    // boundaries, fixed CMND window and interpolation to the existing mic
+    // boundaries, current CMND window and interpolation to the current mic
     // semantics rather than merely accepting any detector near 440 Hz.
     CHECK("live input analysis: renderer YIN frequency parity",
-          std::fabs(frame.frequency - 440.01758519081193) < 1e-5);
+          std::fabs(frame.frequency - 440.0181387383385) < 1e-5);
     CHECK("live input analysis: renderer YIN clarity parity",
-          std::fabs(frame.clarity - 0.9999863087477934) < 1e-7);
+          std::fabs(frame.clarity - 0.9999986518725669) < 1e-7);
     CHECK("live input analysis: renderer RMS parity",
           std::fabs(frame.rms - 0.3533426141796633) < 1e-9);
     CHECK("live input analysis: 440 Hz tone is within one hertz",

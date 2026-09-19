@@ -1,7 +1,7 @@
 import { app } from 'electron'
 import { createHash } from 'node:crypto'
 import { existsSync, readdirSync } from 'node:fs'
-import { access, cp, copyFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { access, cp, copyFile, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import {
   STEMS,
@@ -23,12 +23,14 @@ import {
   parseGraphDocument,
   serializeGraphDocument
 } from '../shared/graph-document'
+import { customTrackPath } from '../shared/custom-track-path'
 import { wavToFlac } from './flac'
 import { log } from './log'
 import { describeProject } from './project-state'
 import { markLibraryDirty, markProjectDirty, withDirty } from './sync-dirty'
 import { allowRoot, stemsRoot } from './media'
 import { hashFile } from './separation'
+import { isIssuedLead } from './vocal-separation'
 import { readSettings, writeSettings } from './settings'
 import { AUDIO_EXT } from './source'
 
@@ -347,7 +349,9 @@ async function resolveCustom(
   const root = resolve(dir)
   for (const t of list) {
     if (!t || typeof t.file !== 'string' || typeof t.id !== 'string') continue
-    const abs = resolve(root, t.file)
+    const file = customTrackPath(t.file)
+    if (!file) continue
+    const abs = resolve(root, file)
     if (!abs.startsWith(root + sep)) continue
     if (!(await exists(abs))) {
       log('app', `custom track "${t.label ?? t.id}" is missing from ${dir} — dropped`, 'warn')
@@ -393,7 +397,7 @@ async function storeCustomTracks(
       await copyFile(src, dst)
       log('app', `custom track "${t.label ?? t.id}" copied into the project as stems/${name}`)
     }
-    out.push({ id: t.id, label: t.label ?? t.id, color: t.color, file: join('stems', name) })
+    out.push({ id: t.id, label: t.label ?? t.id, color: t.color, file: `stems/${name}` })
   }
   // Tracks the singer removed leave their copy behind; it would keep syncing
   // to Drive and reappear in nobody's mix. Only our own prefix is touched,
@@ -414,27 +418,50 @@ async function storeCustomTracks(
 /**
  * Convert every WAV stem to FLAC; the WAVs are deleted only after each
  * conversion verified (encoder writes .part then renames), so an interrupted
- * run leaves a playable project. Returns true when the project ends up
- * all-FLAC.
+ * run leaves a playable project.
+ *
+ * `compact` means nothing is LEFT to do, which is not the same as all-FLAC: a
+ * float WAV lane is the format the lead/backing split intends and no build
+ * will ever convert it, so counting it as unfinished pins the project at v1
+ * for ever and fires a doomed upgrade on every single open. Only a stem that
+ * failed for a fixable reason keeps a project at v1, because only that one is
+ * worth retrying. `compacted` NAMES the stems whose WAV actually went away,
+ * because the renderer repoints those paths from .wav to .flac and a path
+ * that names a file nobody wrote fails silently — it used to rewrite all six
+ * on the strength of a single boolean, which was right only while "some
+ * converted" and "all converted" were the same thing.
  */
-async function convertStemsToFlac(dir: string): Promise<boolean> {
-  let allFlac = true
+async function convertStemsToFlac(dir: string): Promise<{ compact: boolean; compacted: string[] }> {
+  let failed = 0
+  const compacted: string[] = []
   for (const s of STEMS_6) {
     const wav = join(dir, 'stems', `${s}.wav`)
     const flac = join(dir, 'stems', `${s}.flac`)
     if (!(await exists(wav))) continue
+    // Model residuals are float WAV: quantizing can clip legitimate values
+    // above 1 and break lead+backing reconstruction. v1 readers accept WAV,
+    // so retain it losslessly until the project format supports float FLAC.
+    const file = await open(wav, 'r')
+    const header = Buffer.alloc(24)
+    let read = 0
+    try { read = (await file.read(header, 0, header.length, 0)).bytesRead } finally { await file.close() }
+    if (read >= 24 && header.toString('ascii', 12, 16) === 'fmt ' && header.readUInt16LE(20) === 3) {
+      // Deliberate, permanent, and not a failure — see above.
+      continue
+    }
     if (!(await exists(flac))) {
       const res = await wavToFlac(wav, flac)
       if (!res.ok) {
         log('app', `stem ${s}: FLAC conversion failed — keeping WAV (${res.error})`, 'warn')
-        allFlac = false
+        failed++
         continue
       }
       log('app', `stem ${s}: ${(res.bytes / 1e6).toFixed(1)} MB as FLAC`)
     }
     await rm(wav, { force: true })
+    compacted.push(s)
   }
-  return allFlac
+  return { compact: failed === 0, compacted }
 }
 
 /**
@@ -443,7 +470,7 @@ async function convertStemsToFlac(dir: string): Promise<boolean> {
  */
 export async function migrateProjectToV2(
   dir: string
-): Promise<{ ok: true; converted: boolean } | { ok: false; error: string }> {
+): Promise<{ ok: true; converted: boolean; compacted: string[] } | { ok: false; error: string }> {
   try {
     // repacking every stem takes seconds, and it runs unasked in the
     // background on open — a rename must wait for it, not move the folder
@@ -451,20 +478,22 @@ export async function migrateProjectToV2(
     return await withProjectLock(dir, async () => {
       const meta = await readMeta(dir)
       if (!meta) return { ok: false as const, error: 'not a project folder' }
-      if (meta.version >= 2) return { ok: true as const, converted: false }
-      const hadWavs = await exists(join(dir, 'stems', 'vocals.wav'))
-      const allFlac = await convertStemsToFlac(dir)
-      if (!allFlac) return { ok: false as const, error: 'some stems could not be converted' }
+      if (meta.version >= 2) return { ok: true as const, converted: false, compacted: [] }
+      const { compact, compacted } = await convertStemsToFlac(dir)
+      if (!compact) return { ok: false as const, error: 'some stems could not be converted' }
       meta.version = 2
       // the WAVs it just deleted are still what stemHashes names — leave that in
       // and project.json describes files that no longer exist (and a phone
       // reading it would ask Drive for them)
       meta.stemHashes = await refreshStemHashes(dir, undefined)
       await writeMetaAtomic(dir, meta)
-      // every stem is a different file now — Drive is holding the WAVs
-      markProjectDirty(dir, 'upgraded to compact stems')
-      if (hadWavs) log('app', `project upgraded to compact stems: ${dir}`)
-      return { ok: true as const, converted: hadWavs }
+      // project.json changed either way, so Drive is out of date either way.
+      markProjectDirty(dir, compacted.length > 0 ? 'upgraded to compact stems' : 'stamped v2')
+      log('app', compacted.length > 0
+        ? `project upgraded to compact stems: ${dir} (${compacted.join(', ')})`
+        : `project stamped v2 with nothing left to convert: ${dir}`)
+      // Only the stems that actually moved may move the renderer's paths.
+      return { ok: true as const, converted: compacted.length > 0, compacted }
     })
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
@@ -805,6 +834,7 @@ const STORED_SETTING_KEYS = [
   'loop',
   'training',
   'custom',
+  'leadVocalSeparated',
   'tracks'
 ] as const
 
@@ -882,8 +912,18 @@ export async function saveProject(
           }
         }
 
+        // Explicit pending vocal replacement: publish the new WAV atomically,
+        // then remove the old preferred FLAC. Never leave a stale FLAC winning.
+        if (settings.pendingLeadVocal) {
+          if (!isIssuedLead(settings.pendingLeadVocal)) throw new Error('The replacement vocal was not produced by this session. Separate it again.')
+          const vocal = join(dir, 'stems', 'vocals.wav')
+          await copyFile(settings.pendingLeadVocal, vocal + '.part')
+          await rename(vocal + '.part', vocal)
+          await rm(join(dir, 'stems', 'vocals.flac'), { force: true })
+        }
+
         // v2 on-disk format: stems live as FLAC (the splitter cache stays WAV)
-        const allFlac = await convertStemsToFlac(dir)
+        const { compact } = await convertStemsToFlac(dir)
 
         // The singer's own tracks land in stems/ too (Drive syncs that folder),
         // keeping whatever format they came in.
@@ -916,12 +956,18 @@ export async function saveProject(
         // the file is actually overwritten, so it covers every path that ever
         // reaches it, including ones not written yet.
         const storedSettings = mergeStoredSettings(prevMeta?.settings, settings, stored)
+        // A melody of the old combined vocals is invalid after replacement.
+        if (settings.pendingLeadVocal && !settings.melody) delete storedSettings.melody
         const meta: ProjectFile = {
           // Unknown top-level fields and future graph references belong to the
           // project, not this desktop build. A normal save updates only the
           // fields it owns and carries every other value through verbatim.
           ...(prevMeta ?? {}),
-          version: allFlac ? 2 : 1,
+          // v2 once nothing is left to compact — a float lead/backing lane
+          // stays WAV for ever, and stamping v1 for it made every open of
+          // every separated project run an upgrade that could never succeed.
+          // Readers take either: stemFile() prefers .flac and falls back.
+          version: compact ? 2 : 1,
           name: safeName(name),
           songFile,
           savedAt: new Date().toISOString(),

@@ -16,7 +16,11 @@ export default defineConfig({
   // tsconfig at all" (an object still triggers the lookup, then merges); the
   // values below are what every tsconfig in this repo already agrees on, so
   // the transform is unchanged.
-  esbuild: { tsconfigRaw: '{"compilerOptions":{"target":"ES2022","useDefineForClassFields":true}}' },
+  // "jsx" is part of that agreement and was missing: without it esbuild falls
+  // back to the classic transform, so a component under test compiled to
+  // React.createElement and threw "React is not defined" unless it happened
+  // to import React by name. The app builds with the automatic runtime.
+  esbuild: { tsconfigRaw: '{"compilerOptions":{"target":"ES2022","useDefineForClassFields":true,"jsx":"react-jsx"}}' },
   resolve: {
     alias: {
       electron: resolve(__dirname, 'tests/unit/electron-stub.ts'),
@@ -25,7 +29,11 @@ export default defineConfig({
     }
   },
   test: {
-    include: ['tests/unit/**/*.test.ts', 'tests/roundtrip/**/*.test.ts'],
+    // {ts,tsx} because .ts alone silently collects nothing for a component
+    // suite someone writes as .tsx: it passes when named on the command line
+    // and never runs under `npm test`, which is the quietest way to lose a
+    // test. No .tsx suite exists today — this is the guard, not a fix.
+    include: ['tests/unit/**/*.test.{ts,tsx}', 'tests/roundtrip/**/*.test.{ts,tsx}'],
     environment: 'node',
     testTimeout: 30000,
     // every file shares the one stubbed userData, so they take turns with

@@ -8,7 +8,7 @@
 // pitch-core.ts (decimate, frame-RMS, cleanMelody), ported line for line so
 // that ONE implementation serves the desktop (through the singz-analyze CLI)
 // and both phones (linked in-process). The bar is the desktop's own output:
-// bit-identical f0 on the eval corpus, PITCH_DETECT_VERSION untouched.
+// bit-identical f0 at the same stored analysis version.
 //
 // Bit-identity is not automatic in a port. The TS keeps its working state in
 // Float32Arrays and its arithmetic in doubles, so every store into one of
@@ -42,7 +42,9 @@ struct MelodyTrack {
 // a three-millisecond coverage difference is far inside what melodyFitsSong
 // disowns, so each side adopted the other's line and never re-derived it. The
 // desktop now reads the file too; this stamp retires what the old path wrote.
-constexpr int kPitchDetectVersion = 2;
+// v4 retains the established offline range/priors with corrected parabolic
+// residuals; live capture keeps its separate harmonic-evidence detector.
+constexpr int kPitchDetectVersion = 4;
 
 // Track `mono` (float32 samples at `sampleRate`) — trackMelodyCore's whole
 // body: 3x average-pooling decimation, pYIN over 1024-sample frames at a

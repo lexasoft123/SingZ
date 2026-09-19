@@ -1,3 +1,5 @@
+import { customTrackPath } from '../../src/shared/custom-track-path'
+
 /**
  * Shared SingZ project model — mirrors the desktop app's shapes
  * (src/shared/types.ts + src/renderer/src/model.ts). A mobile project is the
@@ -296,10 +298,9 @@ export function customTracks(settings: ProjectSettings | undefined): CustomTrack
   const out: CustomTrack[] = []
   for (const t of list) {
     const id = typeof t?.id === 'string' ? t.id : ''
-    const file = typeof t?.file === 'string' ? t.file : ''
+    const file = customTrackPath(t?.file)
     if (!id || stems.has(id) || seen.has(id)) continue
-    const m = /^stems\/([^/\\]+)$/.exec(file)
-    if (!m || m[1] === '.' || m[1] === '..') continue
+    if (!file) continue
     seen.add(id)
     out.push({
       id,

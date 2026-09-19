@@ -3,9 +3,9 @@ import { pyinTrack } from './pyin'
 /**
  * The melody tracker's whole math, host-free: pitch.worker.ts is now a thin
  * envelope over trackMelodyCore(), and the phone's analysis bundle imports it
- * directly (docs/PHONE-STANDALONE.md). Extracted verbatim from the worker —
- * identical math, so PITCH_DETECT_VERSION stays untouched; the equality
- * fixture in tests/unit/pitch-core.test.ts holds this to account.
+ * directly (docs/PHONE-STANDALONE.md). Native melody.cpp mirrors this math;
+ * eval/melody-parity.mjs checks exact agreement. Any algorithm change must
+ * bump both stored melody stamps.
  */
 
 export interface MelodyTrack {
@@ -24,12 +24,14 @@ const HOP_SEC = 0.025
 /** A real note holds for at least this many frames (~100 ms). */
 const MIN_RUN = 4
 
+// Keep voiced A1 strictly above the zero used for unvoiced frames. The
+// stored format still counts cents from 55 Hz; this reference is internal.
 function centsOf(hz: number): number {
-  return 1200 * Math.log2(hz / 55)
+  return 1200 * Math.log2(hz / 27.5)
 }
 
 function hzOf(cents: number): number {
-  return 55 * Math.pow(2, cents / 1200)
+  return 27.5 * Math.pow(2, cents / 1200)
 }
 
 /**
@@ -133,7 +135,10 @@ export function trackMelodyCore(
   sampleRate: number,
   onProgress?: (p: number) => void
 ): MelodyTrack {
+  if (!Number.isFinite(sampleRate) || sampleRate < 8000)
+    return { f0: new Float32Array(), raw: new Float32Array(), rms: new Float32Array(), hopSec: HOP_SEC }
   const sr = sampleRate / DECIM
+  const win = WIN
 
   // average-pooling decimation — plenty for pitch, 3x less work
   const dn = Math.floor(mono.length / DECIM)
@@ -144,15 +149,15 @@ export function trackMelodyCore(
   }
 
   const hop = Math.round(sr * HOP_SEC)
-  const raw = pyinTrack(dec, sr, WIN, hop, (p) => onProgress?.(p))
+  const raw = pyinTrack(dec, sr, win, hop, (p) => onProgress?.(p))
 
   // Same framing as pyinTrack, so rms[i] describes the window raw[i] came from.
   const rms = new Float32Array(raw.length)
   for (let i = 0; i < raw.length; i++) {
     const s = i * hop
     let acc = 0
-    for (let j = s; j < s + WIN; j++) acc += dec[j] * dec[j]
-    rms[i] = Math.sqrt(acc / WIN)
+    for (let j = s; j < s + win; j++) acc += dec[j] * dec[j]
+    rms[i] = Math.sqrt(acc / win)
   }
 
   const f0 = cleanMelody(raw, rms)
