@@ -10,6 +10,13 @@
 
 namespace singz::media_internal {
 
+// The media layer's own limits, shared by the whole-file decoder and the
+// streaming sources so a file is never acceptable to one and refused by the
+// other. Stated once: a second copy only agrees until someone edits the first.
+inline constexpr uint32_t kMaximumSupportedChannels = 64;
+inline constexpr uint32_t kMinimumSupportedSampleRate = 8000;
+inline constexpr uint32_t kMaximumSupportedSampleRate = 768000;
+
 struct WorkingAudio {
   uint32_t sampleRate = 0;
   uint64_t frameCount = 0;

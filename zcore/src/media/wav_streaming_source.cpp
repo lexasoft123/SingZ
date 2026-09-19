@@ -32,10 +32,6 @@
 namespace singz::media_internal {
 namespace {
 
-constexpr uint32_t kMinimumSampleRate = 8000;
-constexpr uint32_t kMaximumSampleRate = 768000;
-// The decoder's own channel ceiling (kMaximumSupportedChannels).
-constexpr uint32_t kMaximumChannels = 64;
 // Frames converted per positioned read. A chunk is bounded work between
 // cancellation polls, and the staging it needs is reserved once at open.
 constexpr uint64_t kChunkFrames = 4096;
@@ -168,8 +164,8 @@ DecodedAudioStatus parseWavLayout(const WavByteSource& source,
       continue;
     }
 
-    if (!haveFormat || channels == 0 || sampleRate < kMinimumSampleRate ||
-        sampleRate > kMaximumSampleRate)
+    if (!haveFormat || channels == 0 || sampleRate < kMinimumSupportedSampleRate ||
+        sampleRate > kMaximumSupportedSampleRate)
       return DecodedAudioStatus::MalformedData;
     const bool floatingPoint = format == 3 && bitsPerSample == 32;
     const bool integerPcm = format == 1 &&
@@ -257,7 +253,7 @@ class WavStreamingSource final : public StreamingAudioSource {
                               static_cast<uint64_t>(length)};
     const DecodedAudioStatus parsed = parseWavLayout(bytes, DecodeCancellation{}, &layout_);
     if (parsed != DecodedAudioStatus::Ok) return parsed;
-    if (layout_.channels > kMaximumChannels) return DecodedAudioStatus::LimitExceeded;
+    if (layout_.channels > kMaximumSupportedChannels) return DecodedAudioStatus::LimitExceeded;
 
     info_.sampleRate = layout_.sampleRate;
     info_.channels = layout_.channels;

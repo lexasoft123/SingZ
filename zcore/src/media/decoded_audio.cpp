@@ -27,9 +27,9 @@
 namespace singz {
 namespace {
 
-constexpr uint32_t kMaximumSupportedChannels = 64;
-constexpr uint32_t kMinimumSupportedSampleRate = 8000;
-constexpr uint32_t kMaximumSupportedSampleRate = 768000;
+using media_internal::kMaximumSupportedChannels;
+using media_internal::kMaximumSupportedSampleRate;
+using media_internal::kMinimumSupportedSampleRate;
 constexpr uint64_t kDecodeChunkFrames = 4096;
 constexpr uint32_t kMaximumReducedRateFactor = 4096;
 constexpr uint64_t kMaximumResampleOperationsPerPoll = 262144;
