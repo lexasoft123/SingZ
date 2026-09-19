@@ -111,7 +111,13 @@ describe('stemFormatLine', () => {
     })).toBe('FLAC + WAV stems')
   })
 
-  it('says no stems only when the doc names files and none are audio', () => {
+  it('says no stems only when the doc names files and none are STEM files', () => {
     expect(stemFormatLine({ version: 2, stemHashes: { 'notes.txt': {} } })).toBe('no stems')
+    // .m4a IS audio, and still yields "no stems": the line reports the
+    // FLAC/WAV stem formats a project keeps, and .m4a is neither. That is not
+    // true of every unsplit phone import — the picker accepts any audio/*
+    // and keys it as custom-original<ext>, so an unsplit .wav or .flac import
+    // reads "WAV stems" or "FLAC stems". This case pins the lossy one only.
+    expect(stemFormatLine({ version: 2, stemHashes: { 'custom-original.m4a': {} } })).toBe('no stems')
   })
 })

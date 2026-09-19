@@ -105,7 +105,7 @@ export async function packOnnxModel(
 // replacing the original+sibling pair), ONE onnxruntime (mainline in
 // site-packages — the DirectML wheel and rtx/ort side-load are gone),
 // pdb/tcl pruned, fp16 beat model.
-const PACK_FORMAT_REQUIRED = process.platform === 'win32' ? 9 : 5
+export const PACK_FORMAT_REQUIRED = process.platform === 'win32' ? 9 : 5
 
 /** The UVR vocal model, inside the pack since format 5 (torch) / 9 (onnx). */
 export function packVocalModel(root = packDir()): string {
@@ -146,15 +146,19 @@ async function packFormatVersion(root = packDir()): Promise<number> {
  * INCOMING pack be judged where it was extracted, before it is allowed to
  * replace the working one.
  */
-async function packComplete(root = packDir()): Promise<boolean> {
+export async function packComplete(root = packDir()): Promise<boolean> {
+  // The log is the only evidence a field machine keeps, so it must not tell
+  // someone to re-download a pack that was JUST downloaded — this runs over
+  // an incoming copy too, where the dialog says the opposite.
+  const which = root === packDir() ? 'installed splitter pack' : 'downloaded splitter pack'
   if (!(await exists(packPython(root)))) return false
   const version = await packFormatVersion(root)
   if (version < PACK_FORMAT_REQUIRED) {
-    log('models', `splitter pack is format v${version}, app needs v${PACK_FORMAT_REQUIRED} — re-download it`, 'warn')
+    log('models', `${which} is format v${version}, app needs v${PACK_FORMAT_REQUIRED}`, 'warn')
     return false
   }
   if (!(await exists(packVocalModel(root)))) {
-    log('models', 'splitter pack has no vocal model — re-download it', 'warn')
+    log('models', `${which} has no vocal model`, 'warn')
     return false
   }
   if (isOnnxPack()) return (await packOnnxModel(root)) !== null
@@ -441,12 +445,28 @@ export async function swapInVerifiedPack(
 /**
  * Finish a pack swap the app did not live to finish.
  *
- * A kill between the two renames leaves the only good pack at
- * `${dir}.previous` and nothing at `dir`, which reads as "not installed" —
- * and the next download's leading `rm(previous)` would delete it. A kill
- * during the unpack orphans a whole pack of disk at `${dir}.incoming` that
- * nothing reclaims. Both are cheap to settle at startup and neither is
- * recoverable later.
+ * A kill between the two renames leaves the pack that was INSTALLED at
+ * `${dir}.previous` and nothing at `dir`. Putting it back returns the machine
+ * to exactly where it stood before the update began — no better and no
+ * worse — so whatever sent the singer to update is still true afterwards.
+ * After a PACK_FORMAT_REQUIRED bump it still reads "not installed" here;
+ * after a Reinstall it reads "installed" and runs no better than it did,
+ * since that button exists for a pack that is present but will not run.
+ * What it never does is leave the machine with less than it had, and an
+ * older build on the same machine may still be able to use it — which is
+ * the whole case for restoring it rather than discarding it. (`${dir}.incoming` holds a verified pack in that
+ * window too, but a cold start cannot tell one from a directory still being
+ * unpacked, which is why only `.previous` is trusted.)
+ *
+ * A re-download that FAILS would not destroy `.previous` — `rm(previous)`
+ * sits behind the verify, and the only rm at the top of a swap is of
+ * `.incoming` — but nothing would ever put it back either. (A re-download
+ * that succeeds does remove it, just before installing a verified pack, which
+ * is the point.) A kill during the unpack instead orphans a pack's worth of
+ * disk at `${dir}.incoming`, which the next download reclaims on its own. A
+ * kill in the third window — after `dir` is back but before the superseded
+ * copy is gone — is the second branch below: nothing is missing, so the
+ * leftover is simply removed.
  */
 export async function restoreInterruptedPackSwap(dir = packDir()): Promise<void> {
   const previous = `${dir}.previous`

@@ -1,8 +1,10 @@
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { restoreInterruptedPackSwap, swapInVerifiedPack } from '../../src/main/models'
+import {
+  isOnnxPack, PACK_FORMAT_REQUIRED, packComplete, restoreInterruptedPackSwap, swapInVerifiedPack
+} from '../../src/main/models'
 
 async function installed(root: string, marker = 'working'): Promise<string> {
   const dir = join(root, 'gpu-splitter')
@@ -108,10 +110,11 @@ describe('swapInVerifiedPack', () => {
 })
 
 describe('restoreInterruptedPackSwap', () => {
-  it('puts back the only good pack when a kill landed between the two renames', async () => {
-    // dir gone, previous holding the working copy: without this the app reads
-    // "not installed", and the next download's leading rm(previous) deletes
-    // the one pack on the machine.
+  it('puts back the pack that was installed when a kill landed between the two renames', async () => {
+    // dir gone, previous holding what was installed: without this the machine
+    // is left with less than it had before the update began, and nothing would
+    // ever put it back. (This fixture's pack is marked 'working' only so the
+    // assertion can tell it apart — the restore makes no such claim.)
     const root = await mkdtemp(join(tmpdir(), 'singz-pack-'))
     const dir = await installed(root)
     await rename(dir, `${dir}.previous`)
@@ -167,11 +170,12 @@ describe('restoreInterruptedPackSwap', () => {
 })
 
 /**
- * The swap is only worth anything if the download actually goes through it,
- * and if verification is aimed at the incoming copy. Neither is reachable
- * from a unit test — downloadModels needs the network and packComplete is
- * module-local — so they are pinned at the source, which is also where a
- * revert would show up.
+ * The swap is only worth anything if the download actually goes through it.
+ * THAT is not reachable from a unit test — downloadModels needs the network —
+ * so it is pinned at the source, which is where a revert would show up. The
+ * other half, that verification is aimed at the incoming copy, is asserted
+ * for real against the exported packComplete by `judges the root it is
+ * handed` in this block — named, not counted, since a count goes stale.
  */
 describe('the real install routes through the swap', () => {
   it('has no delete-before-verify left in the archive path', async () => {
@@ -183,7 +187,62 @@ describe('the real install routes through the swap', () => {
     expect(source).not.toContain('await untar(archive, packDir())')
   })
 
-  it('judges the incoming pack, not the installed one', async () => {
+  it('judges the root it is handed — behaviourally, not by matching source', async () => {
+    // The textual pins below can drift under a reformat. This one cannot:
+    // two staging roots, one complete and one too old, judged by the real
+    // function.
+    //
+    // The ACCEPTANCE assertion is the one with teeth. Unthread `root` and
+    // packComplete falls back to packDir(), which does not exist under the
+    // unit stub — so the refusal passes for the wrong reason while the
+    // acceptance goes red. Both are asserted on every platform, which is why
+    // the ONNX fixture below bothers to exist.
+    const root = await mkdtemp(join(tmpdir(), 'singz-pack-'))
+    // Opened BEFORE the fixture, not just around the assertions: `good` writes
+    // the 101 MB file and `old` is built after it, so a throw in between would
+    // otherwise leak it on a filesystem that has no holes.
+    try {
+      const good = join(root, 'good')
+      const old = join(root, 'old')
+      const required = PACK_FORMAT_REQUIRED
+      for (const [dir, version] of [[good, required], [old, required - 1]] as const) {
+        const py = process.platform === 'win32'
+          ? join(dir, 'python', 'python.exe')
+          : join(dir, 'python', 'bin', 'python3')
+        await mkdir(dirname(py), { recursive: true })
+        await writeFile(py, '#!/bin/sh\n')
+        await writeFile(join(dir, 'python', 'pack.json'), JSON.stringify({ formatVersion: version }))
+        await mkdir(join(dir, 'python', 'models', 'uvr'), { recursive: true })
+        await writeFile(join(dir, 'python', 'models', 'uvr', 'UVR_MDXNET_KARA_2.onnx'), 'x')
+        // Those packs also resolve a splitter model out of a hub-style cache,
+        // and the resolver's only size test is `> 100e6`, so a 101 MB file with
+        // no contents satisfies it — which is what lets the acceptance be
+        // asserted on the platforms where the refusal proves nothing.
+        //
+        // Only for `good`: `old` is refused at the version check and never
+        // reaches that resolver, so a second one would be written and never
+        // read. That matters because the file is free only where the
+        // filesystem has holes — APFS and ext4 make none of it real, but NTFS
+        // reserves the clusters, so this is ~101 MB of transient disk on the
+        // Windows leg and doubling it buys nothing.
+        if (isOnnxPack() && dir === good) {
+          const snap = join(dir, 'python', 'model-cache',
+            'models--StemSplitio--htdemucs-6s-onnx', 'snapshots', 'rev0')
+          await mkdir(snap, { recursive: true })
+          const handle = await open(join(snap, 'htdemucs_6s_fp16weights.onnx'), 'w')
+          try { await handle.truncate(101e6) } finally { await handle.close() }
+        }
+      }
+      expect(await packComplete(old), 'a pack older than this build must be refused').toBe(false)
+      expect(await packComplete(good), 'a complete pack at a staging root must be accepted').toBe(true)
+    } finally {
+      // The other fixtures in this file are kilobytes and can rely on temp
+      // being swept; this one cannot.
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('hands verification the staging path', async () => {
     const source = await readFile(new URL('../../src/main/models.ts', import.meta.url), 'utf8')
     // every probe packComplete makes has to take the root it was handed
     for (const probe of ['packPython(root)', 'packFormatVersion(root)', 'packVocalModel(root)', 'packOnnxModel(root)']) {
