@@ -62,7 +62,9 @@ interface NativeProject {
 export interface ProjectEntry {
   dir: string
   doc: ProjectDoc
-  /** Per-stem on-disk format — v2 projects say flac, pre-conversion ones wav. */
+  /** Per-stem on-disk format, read from the FILES rather than from
+   *  `doc.version`: a v2 project can still hold a float WAV lead lane, which
+   *  is the format lead/backing separation intends and never compacts. */
   stems: Record<string, 'flac' | 'wav'>
   /** Every stem is materialized on this device (no iCloud download needed). */
   cached: boolean

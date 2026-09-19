@@ -48,6 +48,14 @@ ONNXSCRIPT_PIN="onnxscript==0.7.1"  # …and the dynamo fallback needs onnxscrip
 BEAT_CKPT_SHA256="8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e2febbf8eb8331"
 BEAT_CKPT_URL="https://cloud.cp.jku.at/public.php/dav/files/7ik4RrBKTS273gp/final0.ckpt"
 
+# UVR MDX Karaoke 2 (MIT, code AND weights) - lead/backing vocal separation,
+# shipped INSIDE the pack since format 9 because backing vocals are part of
+# every split now. This pack already carries the onnxruntime that runs it.
+# Keep the sha in step with src/main/vocal-model.ts.
+UVR_MODEL_FILE="UVR_MDXNET_KARA_2.onnx"
+UVR_MODEL_SHA256="bf32e15105a09c0f7dddd2b67346146334d6f3ecb399ed7638eba2ab07cbf5f4"
+UVR_MODEL_URL="https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/${UVR_MODEL_FILE}"
+
 # TensorRT-RTX plugin EP (win32 only): DML is frozen at ORT 1.24 (sustained
 # engineering) and dies on htdemucs both fused (TDR device-hung) and unfused
 # (ISTFT ConvTranspose OOM). NVIDIA's prebuilt zip is self-contained — the
@@ -437,6 +445,68 @@ print(f"parity OK: {len(t['beats'])} beats (max dt {db:.3f}s), "
 PYEOF
 rm -rf "$PARITY"
 
+# ---- UVR MDX Karaoke 2 --------------------------------------------------
+# Sha-pinned fetch cached in .engines-src, shared with the Apple Silicon pack
+# build. The runner loads it by explicit path and never reaches the network.
+UVR_MODEL="$ROOT/.engines-src/uvr-models/$UVR_MODEL_FILE"
+mkdir -p "$(dirname "$UVR_MODEL")"
+if [ -f "$UVR_MODEL" ] && [ "$(sha_of "$UVR_MODEL")" != "$UVR_MODEL_SHA256" ]; then
+  echo "cached UVR model has a wrong sha256 - refetching"
+  rm -f "$UVR_MODEL"
+fi
+if [ ! -f "$UVR_MODEL" ]; then
+  curl -L --fail -o "$UVR_MODEL" "$UVR_MODEL_URL"
+fi
+[ "$(sha_of "$UVR_MODEL")" = "$UVR_MODEL_SHA256" ] || { echo "UVR model sha256 mismatch" >&2; exit 1; }
+
+mkdir -p "$WORK/python/models/uvr"
+cp "$UVR_MODEL" "$WORK/python/models/uvr/$UVR_MODEL_FILE"
+cp "$ROOT/docs/licenses/UVR-MDX-Karaoke-2.txt" "$WORK/python/models/uvr/LICENSE.txt"
+
+# VOCAL SMOKE: the shipped runner must separate a stereo vocal WAV with this
+# pack's own onnxruntime, and lead + backing must reconstruct the input
+# sample for sample - the property "lead = input - backing" rests on.
+VSMOKE="$WORK/vocal-smoke"
+rm -rf "$VSMOKE"
+mkdir -p "$VSMOKE"
+"$PY" - "$VSMOKE/voice.wav" << 'FIXTURE_EOF'
+import struct
+import sys
+import numpy as np
+sr, secs = 44100, 6
+t = np.arange(sr * secs) / sr
+# A "lead" with vibrato over a steady "harmony" a major third below.
+lead = 0.30 * np.sin(2 * np.pi * (220 + 4 * np.sin(2 * np.pi * 5 * t)) * t)
+harmony = 0.18 * np.sin(2 * np.pi * 174.6 * t)
+stereo = np.stack([lead + harmony, lead + 0.9 * harmony]).astype(np.float32)
+data = np.ascontiguousarray(stereo.T, dtype="<f4").tobytes()
+header = struct.pack("<4sI4s4sIHHIIHH4sI", b"RIFF", 36 + len(data), b"WAVE", b"fmt ", 16,
+                     3, 2, sr, sr * 8, 8, 32, b"data", len(data))
+open(sys.argv[1], "wb").write(header + data)
+FIXTURE_EOF
+HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 "$PY" "$ROOT/scripts/vocal_split_runner.py" \
+  --model "$WORK/python/models/uvr/$UVR_MODEL_FILE" \
+  --input "$VSMOKE/voice.wav" --output "$VSMOKE/out" > "$VSMOKE/progress.jsonl"
+"$PY" - "$VSMOKE/voice.wav" "$VSMOKE/out" << 'CHECK_EOF'
+import sys
+import numpy as np
+
+
+def read(path):
+    raw = open(path, "rb").read()
+    return np.frombuffer(raw[raw.index(b"data") + 8:], dtype="<f4").reshape(-1, 2)
+
+
+source, out = read(sys.argv[1]), sys.argv[2]
+lead, backing = read(out + "/lead.wav"), read(out + "/backing.wav")
+assert lead.shape == source.shape == backing.shape, "vocal smoke: shape mismatch"
+error = float(np.abs(lead + backing - source).max())
+assert error < 1e-4, f"vocal smoke: lead + backing does not reconstruct the input ({error})"
+assert float(np.abs(backing).max()) > 1e-3, "vocal smoke: backing output is silent"
+print(f"vocal smoke OK (max reconstruction error {error:.3g})")
+CHECK_EOF
+rm -rf "$VSMOKE"
+
 find "$WORK/python" -name '__pycache__' -type d -prune -exec rm -rf {} +
 rm -rf "$WORK/$SITE/pip" "$WORK/$SITE/setuptools"
 if [ "$TARGET" = win32-x64 ]; then
@@ -452,10 +522,11 @@ fi
 # (v8 = ONE model file — simplified, OLA ISTFT, fp16 weights — replacing
 # the original+sibling pair; ONE onnxruntime — mainline in site-packages,
 # the DirectML wheel and the side-loaded rtx/ort copy are gone; pdb/tcl
-# pruned; fp16 beat model — keep in sync with PACK_FORMAT_REQUIRED in
-# src/main/models.ts)
+# pruned; fp16 beat model; v9 = the UVR vocal model rides along, because
+# backing vocals are part of every split now — keep in sync with
+# PACK_FORMAT_REQUIRED in src/main/models.ts)
 cat > "$WORK/python/pack.json" << EOF
-{ "formatVersion": 8, "target": "$TARGET", "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)" }
+{ "formatVersion": 9, "target": "$TARGET", "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)" }
 EOF
 
 tar -C "$WORK" -czf "$OUTFILE" python

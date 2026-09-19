@@ -9,6 +9,9 @@ import { cmndProfile } from './pitch'
  * roughly halves the sung time lost on distorted vocals.
  */
 
+// Keep the established offline range, frame geometry and transition prior.
+// Broader live harmonic selection regressed mixed and separated song stems;
+// see eval/pitch-regression-gate.md for the controlled ablation.
 const FMIN = 65
 const FMAX = 1000
 const BINS_PER_ST = 2 // 50-cent decode grid; output keeps candidate precision
@@ -34,7 +37,7 @@ function betaCdf218(x: number): number {
 }
 
 function findTroughs(buf: Float32Array, sr: number): Trough[] {
-  const profile = cmndProfile(buf, sr, FMIN, FMAX)
+  const profile = cmndProfile(buf, sr, FMIN, FMAX, 'interior')
   if (!profile) return []
   const { cmnd, tauMin, tauMax } = profile
   const troughs: Trough[] = []
@@ -50,7 +53,8 @@ function findTroughs(buf: Float32Array, sr: number): Trough[] {
         const delta = (s2 - s0) / denom
         if (Math.abs(delta) < 1) {
           tau = t + delta
-          val = s1 - ((s2 - s0) * delta) / 4
+          // Value at the parabola vertex: the correction lowers a minimum.
+          val = s1 + ((s2 - s0) * delta) / 4
         }
       }
       troughs.push({ tau, val: Math.max(0, val), f0: sr / tau })

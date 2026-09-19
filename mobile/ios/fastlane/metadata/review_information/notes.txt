@@ -1,6 +1,6 @@
-SingZ is a rehearsal player for singers. A song is six separate instrument
-tracks rather than one recording, so any part can be muted and sung or played
-live instead.
+SingZ is a rehearsal player for singers. A song is separated into its parts —
+drums, bass, the other instruments and the vocals — rather than one recording,
+so any part can be muted and sung or played live instead.
 
 NOTHING IS NEEDED TO START REVIEWING
 
@@ -24,7 +24,8 @@ on a music stand while you sing. To see it:
    scrub bar) with play, pause and 10-second skip back and forward. Pause and
    play from there; drag the scrub bar and the song moves with it.
 
-This is what the previous submission got wrong, and it is fixed in this build.
+An earlier version (0.22.0) was rejected for exactly this, and it is fixed in
+this build.
 The sample song always plays through the older of the app's two audio engines:
 it is unpacked from inside the app rather than read from files, so it cannot
 use the newer one. Leaving the app silenced that engine whatever it was doing,

@@ -145,7 +145,7 @@ std::vector<Trough> findTroughs(const float* buf, int n, double sr) {
         const double delta = (s2 - s0) / denom;
         if (std::fabs(delta) < 1) {
           tau = t + delta;
-          val = s1 - ((s2 - s0) * delta) / 4;
+          val = s1 + ((s2 - s0) * delta) / 4;
         }
       }
       troughs.push_back({tau, std::max(0.0, val), sr / tau});
@@ -330,8 +330,8 @@ constexpr int WIN = 1024;
 constexpr double HOP_SEC = 0.025;  // analysis hop in seconds (hop = round(sr * HOP_SEC))
 constexpr int MIN_RUN = 4;         // a real note holds for at least this many frames (~100 ms)
 
-inline double centsOf(double hz) { return 1200 * std::log2(hz / 55); }
-inline double hzOf(double cents) { return 55 * std::pow(2.0, cents / 1200); }
+inline double centsOf(double hz) { return 1200 * std::log2(hz / 27.5); }
+inline double hzOf(double cents) { return 27.5 * std::pow(2.0, cents / 1200); }
 
 // JS `vals.sort((a,b) => a-b)` then `vals[floor(len/2)]`.
 double medianOf(std::vector<double> vals) {
@@ -437,6 +437,7 @@ std::vector<float> cleanMelody(const std::vector<float>& raw, const std::vector<
 // Decimate, track (pYIN), frame-RMS, clean — trackMelodyCore's body.
 MelodyTrack trackMelody(const float* mono, size_t n, double sampleRate, const Progress* progress) {
   MelodyTrack t;
+  if (!mono || !std::isfinite(sampleRate) || sampleRate < 8000) return t;
   const double sr = sampleRate / DECIM;
 
   // average-pooling decimation — plenty for pitch, 3x less work

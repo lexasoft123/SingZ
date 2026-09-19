@@ -5,11 +5,11 @@ import {
   type TrainingMicStartOptions,
   type TrainingMicSource
 } from '../../src/renderer/src/audio/training-mic'
-import { MicPitch, shouldAdoptInputChannel } from '../../src/renderer/src/audio/mic'
+import { MicPitch, shouldAdoptInputChannel, type MicDevice } from '../../src/renderer/src/audio/mic'
 
 class FakeMicSource implements TrainingMicSource {
   active = false
-  device = null
+  device: MicDevice | null = null
   starts = 0
   stops = 0
   lastOptions: TrainingMicStartOptions = {}
@@ -357,6 +357,53 @@ describe('desktop native training microphone source', () => {
     source.stop()
     expect(fallback.stops).toBe(1)
   })
+
+  it.each(['missing-core', 'missing-api', 'legacy-route'] as const)(
+    'reports the actual browser route and reason once for %s, then clears it on native recovery',
+    async (cause) => {
+      const report = vi.fn(async () => ({ ok: true }))
+      const nativeStart = vi.fn(async () => ({
+        ok: false, kind: 'unavailable-core', error: 'Native core missing'
+      }))
+      const api = {
+        reportDesktopAudioInputFallback: report,
+        startDesktopAudioInput: cause === 'missing-api' ? undefined : nativeStart,
+        onDesktopAudioInputEvent: () => vi.fn(),
+        stopDesktopAudioInput: vi.fn(async () => ({ ok: true }))
+      }
+      vi.stubGlobal('window', { singz: api })
+      const fallback = new FakeMicSource()
+      fallback.device = {
+        id: 'browser-interface', label: 'Studio interface', fallback: false,
+        channelIndex: 1, channelCount: 2, channelFallback: true
+      }
+      const source = new NativeTrainingMicSource(fallback)
+      await source.start(context(), {
+        channelIndex: 2,
+        ...(cause === 'legacy-route' ? { deviceId: 'browser-interface' } : {})
+      })
+      expect(source.device).toMatchObject({ captureBackend: 'web-audio', channelCount: 2 })
+      expect(source.device?.nativeFallbackReason).toBeTruthy()
+      expect(shouldAdoptInputChannel(source.device, 2)).toBe(false)
+      for (let i = 0; i < 10; i++) source.readInfo()
+      expect(report).toHaveBeenCalledExactlyOnceWith({
+        reason: source.device?.nativeFallbackReason,
+        deviceLabel: 'Studio interface', channelIndex: 1, channelCount: 2, requestedChannel: 2
+      })
+      await source.stop()
+      expect(source.device).toBeNull()
+      window.singz.startDesktopAudioInput = vi.fn(async () => ({
+        ok: true, token: 'recovered', fallback: false, channel: 2,
+        device: { uid: 'native-interface', label: 'Studio interface', channels: 16,
+          isDefault: true, sampleRate: 48000, channelLabels: [] }
+      }))
+      await source.start(context(), { nativeDeviceUid: 'native-interface', channelIndex: 2 })
+      expect(source.device).toMatchObject({ captureBackend: 'native', channelCount: 16, channelIndex: 2 })
+      expect(source.device?.nativeFallbackReason).toBeUndefined()
+      expect(report).toHaveBeenCalledTimes(1)
+      await source.stop()
+    }
+  )
 
   it('retains asynchronous fallback ownership until stop is confirmed', async () => {
     let stopAttempts = 0

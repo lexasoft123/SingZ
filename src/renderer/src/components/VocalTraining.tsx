@@ -61,7 +61,6 @@ import {
 import {
   EMPTY_TRAINING_PITCH_LOCK,
   TRAINING_HOLD_MS,
-  TRAINING_MIN_CONFIDENCE,
   TRAINING_PITCH_WINDOW_OPTIONS,
   TRAINING_REFERENCE_VOLUME_MAX,
   TRAINING_REFERENCE_VOLUME_MIN,
@@ -71,7 +70,6 @@ import {
   desktopTrainingCountdownSeconds,
   desktopTrainingCueDurationSeconds,
   desktopTrainingCues,
-  foldTrainingOvertone,
   restoreDesktopTrainingPracticeSettings,
   type DesktopTrainingPracticeSettings,
   type TrainingPitchLockState
@@ -383,14 +381,9 @@ export default function VocalTraining({
       }
       const observation = mic.read()
       const target = prompt.targets[run.activeTarget]
-      const correctedMidi = observation.midi !== null && observation.confidence >= TRAINING_MIN_CONFIDENCE
-        ? foldTrainingOvertone(observation.midi, target.midi)
-        : observation.midi
-      const corrected = correctedMidi === observation.midi
-        ? observation
-        : { ...observation, midi: correctedMidi, frequencyHz: correctedMidi === null ? 0 : 440 * 2 ** ((correctedMidi - 69) / 12) }
-      run.observations.push(corrected)
-      const lock = run.tracker.update(observation.timestampMs, correctedMidi, observation.confidence, target.midi)
+      // The detector resolves harmonics from PCM; scoring keeps the sung octave.
+      run.observations.push(observation)
+      const lock = run.tracker.update(observation.timestampMs, observation.midi, observation.confidence, target.midi)
       const next = livePitchFromLock(lock, run.activeTarget, state.setup, practiceSettings.pitchWindowCents)
       setPitchLock(lock)
       const signature = livePitchSignature(next)

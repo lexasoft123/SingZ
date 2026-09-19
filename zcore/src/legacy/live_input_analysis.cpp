@@ -1,5 +1,7 @@
 #include <zcore/legacy/live_input_analysis.h>
 
+#include <zcore/legacy/pitch_candidates.h>
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -50,7 +52,7 @@ LiveInputFrame analyzeLiveInput(const float* mono, size_t frames,
       2, static_cast<size_t>(std::floor(sampleRate / maxFrequency)));
   const size_t maxTau = std::min(
       frames / 2,
-      static_cast<size_t>(std::floor(sampleRate / minFrequency)));
+      static_cast<size_t>(std::ceil(sampleRate / minFrequency) + 1));
   if (maxTau <= minTau + 2) return result;
 
   std::vector<float> difference(maxTau + 1, 0.0f);
@@ -74,33 +76,17 @@ LiveInputFrame analyzeLiveInput(const float* mono, size_t frames,
                                          static_cast<double>(tau) / running);
   }
 
-  size_t tau = minTau;
-  constexpr double threshold = 0.15;
-  for (; tau <= maxTau; ++tau) {
-    if (cmnd[tau] < threshold) {
-      while (tau + 1 <= maxTau && cmnd[tau + 1] < cmnd[tau]) ++tau;
-      break;
-    }
+  const auto candidates = pitch::candidates(cmnd, static_cast<int>(minTau),
+                                             static_cast<int>(maxTau), sampleRate, data, static_cast<int>(frames));
+  const pitch::Candidate* best = nullptr;
+  for (const auto& candidate : candidates) {
+    if (candidate.f0 < minFrequency * 0.999 || candidate.f0 > maxFrequency * 1.001) continue;
+    if (!best || candidate.val < best->val) best = &candidate;
+    if (candidate.val < 0.15) { best = &candidate; break; }
   }
-  if (tau > maxTau) {
-    tau = static_cast<size_t>(
-        std::min_element(cmnd.begin() + static_cast<std::ptrdiff_t>(minTau),
-                         cmnd.end()) -
-        cmnd.begin());
-    if (cmnd[tau] > 0.3f) return result;
-  }
-
-  double refined = static_cast<double>(tau);
-  if (tau > 1 && tau < maxTau) {
-    const double left = cmnd[tau - 1];
-    const double center = cmnd[tau];
-    const double right = cmnd[tau + 1];
-    const double denom = 2.0 * (2.0 * center - left - right);
-    if (std::fabs(denom) > 1e-9) refined += (right - left) / denom;
-  }
-  if (refined > 0) {
-    result.frequency = sampleRate / refined;
-    result.clarity = std::clamp(1.0 - cmnd[tau], 0.0, 1.0);
+  if (best && best->val <= 0.3) {
+    result.frequency = std::clamp(best->f0, minFrequency, maxFrequency);
+    result.clarity = std::clamp(1.0 - best->val, 0.0, 1.0);
   }
   return result;
 }

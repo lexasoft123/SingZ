@@ -39,6 +39,23 @@ const launch = (env = {}) =>
         }
   )
 
+/** The first-run wizard opens by itself on every launch while a required
+ *  model is missing, and since the splitter pack became required whether or
+ *  not a system demucs is installed, a fresh runner is always in that state.
+ *  Its scrim covers everything behind it, so a leg that clicks the app
+ *  closes it first — through its own button, because the wizard is a
+ *  persistent modal that ignores Escape and scrim clicks. "Skip for now"
+ *  leaves an auto-download running behind it, which is the product's
+ *  behaviour and not this leg's business. */
+const dismissSetup = async (page) => {
+  const shown = await page
+    .waitForSelector('.wizard', { timeout: 8000 })
+    .then(() => true, () => false)
+  if (!shown) return
+  await page.locator('.wizard button', { hasText: /^(Skip for now|Close)$/ }).click()
+  await page.waitForSelector('.modal-scrim', { state: 'hidden', timeout: 10000 })
+}
+
 ;(async () => {
   // ---- chrome + window buttons ----
   let app = await launch()
@@ -170,6 +187,7 @@ const launch = (env = {}) =>
   app = await launch({ SINGZ_FAKE_MIC: '1' })
   page = await app.firstWindow()
   await page.waitForSelector('.pill.gear', { timeout: 60000 })
+  await dismissSetup(page)
   await page.evaluate(() => localStorage.removeItem('singz.audio'))
   await page.click('.pill.gear')
   await page.waitForSelector('.settings-card', { timeout: 20000 })
