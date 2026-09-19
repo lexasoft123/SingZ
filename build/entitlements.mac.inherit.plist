@@ -7,7 +7,7 @@
 	     every path that is not the app itself, and @electron/osx-sign walks
 	     the whole of Contents/, so that is the Electron helper apps (GPU,
 	     renderer, plugin), the frameworks, AND the vendored engines under
-	     Contents/Resources/engines — whisper-cli, singz-analyze and the
+	     Contents/Resources/engines — llama-server, crispasr, singz-analyze and the
 	     singz-capture.node addon — each signed with the `runtime` flag.
 
 	     The two cs.* keys are for the same reason as the main app: the

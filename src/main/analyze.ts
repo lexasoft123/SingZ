@@ -8,8 +8,8 @@ import { log, logChunk } from './log'
 import { isAllowed } from './media'
 
 /**
- * The desktop's way into the C++ core: singz-analyze, spawned like
- * whisper-cli (docs/PHONE-STANDALONE.md, Phase 4c). Melody first — the
+ * The desktop's way into the C++ core: singz-analyze, a bundled engine
+ * spawned by main like the lyrics engines (docs/PHONE-STANDALONE.md, Phase 4c). Melody first — the
  * smallest detector and the one whose input already comes as a file path.
  *
  * The renderer decides whether to USE the result: the CLI reports the core's
@@ -52,8 +52,7 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-/** Bundled-first resolution — the same ladder as whisper-cli's resolveEngine:
- *  packaged resources → dev vendor dir → env override.
+/** Bundled-first resolution: packaged resources → dev vendor dir → env override.
  *
  *  Every spawn of the core comes through here — this module's, audio-input's
  *  and beats-ml's alike — which is why the provenance check hangs off it

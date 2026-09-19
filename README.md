@@ -37,10 +37,13 @@ built-in setup and keeps it updated automatically.
   re-detection.
 - **Lyrics** — fetched from [LRCLIB](https://lrclib.net) (time-synced, matched
   by tags + duration) the moment a song loads; a variant picker with manual
-  search handles other recordings. When nothing is found online, the bundled
-  [whisper.cpp](https://github.com/ggml-org/whisper.cpp) transcribes the vocals
-  stem on-device, and "Refine timing" aligns synced lyrics to a transcription
-  for word-exact karaoke timing.
+  search handles other recordings. When nothing is found online,
+  [Qwen3-ASR](https://huggingface.co/ggml-org/Qwen3-ASR-1.7B-GGUF) — a
+  speech model trained on singing — transcribes the vocals stem on-device,
+  and a forced aligner times every word. "Check & align" listens the same
+  way to lyrics found online, checks the words against what is actually
+  sung and retimes them for word-exact karaoke; "Precise" snaps them tighter
+  still with a multilingual CTC aligner that runs through the splitter pack.
 - **Transpose** — pitch-shift the whole mix in semitones (Signalsmith Stretch
   on the master bus): tempo unchanged, stems stay in sync, the melody lane and
   detected key follow.
@@ -69,9 +72,11 @@ built-in setup and keeps it updated automatically.
 
 ## AI engines & models
 
-The installer ships whisper-cli (~3 MB) for lyrics; the splitter arrives as
-one self-contained pack per platform, downloaded by the first-run setup
-(htdemucs_6s model embedded — no further downloads to split):
+The installer ships the two lyrics engines — llama.cpp's `llama-server`,
+which runs the recogniser, and CrispASR's `crispasr`, which runs its word
+aligner (~40 MB together); the splitter arrives as one self-contained pack
+per platform, downloaded by the first-run setup (htdemucs_6s model embedded
+— no further downloads to split):
 
 | Platform | Engine | Size |
 |---|---|---|
@@ -81,11 +86,17 @@ one self-contained pack per platform, downloaded by the first-run setup
 
 Packs are versioned: when an update ships, the app notices and re-downloads
 automatically. Machines whose GPU can't run the model are remembered after one
-attempt and start on CPU instantly from then on. The Whisper speech model
-(466 MB–1.6 GB) downloads only on the first lyrics fallback, with consent.
+attempt and start on CPU instantly from then on. The lyrics speech model
+(Qwen3-ASR 1.7B, its audio encoder and the 0.6B forced aligner — 3.5 GB, one
+tile, one download) arrives only when a song first needs transcribing or
+aligning, with consent. It replaced whisper, and hears sung words markedly
+better (over a 23-song catalog: WER 0.167 against whisper's 0.278 on songs
+with no online lyrics, and no invented phrases where whisper made up 55); a
+machine that already had a whisper model is offered it once at launch, and
+the old model is deleted once the new one is in — never before.
 A system-wide `demucs` install (pipx) is detected and preferred when present.
-Engine resolution can be steered with `SINGZ_DEMUCS`, `SINGZ_WHISPER`,
-`SINGZ_WHISPER_MODEL`, `SINGZ_MODELS_DIR`; `SINGZ_NO_SYSTEM_ENGINES=1`
+Engine resolution can be steered with `SINGZ_DEMUCS`, `SINGZ_LLAMA_SERVER`,
+`SINGZ_CRISPASR`, `SINGZ_MODELS_DIR`; `SINGZ_NO_SYSTEM_ENGINES=1`
 simulates a clean machine. The header's "splitter" chip opens the model
 manager at any time (with a Reinstall button if an install ever misbehaves).
 
@@ -96,10 +107,12 @@ npm install
 npm run dev
 ```
 
-whisper-cli is a vendored binary; the splitter packs are built by scripts:
+The lyrics engines are vendored binaries; they and the splitter packs are
+built by scripts:
 
 ```bash
-scripts/vendor-whisper.sh              # whisper.cpp (needs cmake)
+scripts/vendor-llama.sh                # llama-server, the recogniser's engine (needs cmake)
+scripts/vendor-crispasr.sh             # crispasr, the word aligner's engine (needs cmake)
 scripts/build-gpu-pack.sh              # torch/MPS pack (Apple Silicon)
 scripts/build-onnx-pack.sh win32-x64   # demucs-onnx packs (also darwin-x64)
 ```
@@ -118,8 +131,9 @@ npm run dist       # package an installer for the current platform
 
 CI ([.github/workflows/build.yml](.github/workflows/build.yml)) builds macOS
 (arm64 + x64 dmg) and Windows (x64 NSIS) on every `v*` tag, compiles
-whisper-cli and all three splitter packs, and attaches everything to the
-GitHub Release:
+the two lyrics engines and all three splitter packs, and attaches everything
+to the GitHub Release (a build missing either engine goes red — after the
+packs are attached, so the fleet's splitter never waits on it):
 
 ```bash
 git tag v0.2.0 && git push origin v0.2.0
@@ -147,7 +161,7 @@ Contributor docs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
 
 - **Main process** ([src/main](src/main)) — engine resolution (system demucs
   → the platform's splitter pack), model manager with versioned pack
-  downloads, whisper transcription + LRCLIB client + word alignment, project
+  downloads, Qwen3-ASR transcription + LRCLIB client + word alignment, project
   library, stems cache by content hash, in-app diagnostic log, allowlisted
   file access over IPC.
 - **Preload** ([src/preload](src/preload)) — small typed bridge (`window.singz`).

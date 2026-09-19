@@ -8,7 +8,7 @@ on:
   # tags: a run reads only its own ref and the DEFAULT BRANCH, never a sibling
   # ref. This workflow otherwise runs on tags alone, so every release wrote
   # engines-src/engines-out into a scope no later release could read, and each
-  # one re-cloned and rebuilt whisper.cpp on both macOS and Windows. Measured
+  # one re-cloned and rebuilt the engines on both macOS and Windows. Measured
   # on a real release: "Cache not found for input keys: engines-out-Windows-…"
   # for a key that existed in the repo, on another tag.
   #
@@ -81,7 +81,7 @@ jobs:
             vendor/darwin-x64
             vendor/win32-x64
             vendor/packs
-          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-whisper.sh', 'scripts/vendor-analyze.sh', 'scripts/vendor-llama.sh', 'scripts/vendor-crispasr.sh', 'scripts/assert-portable-binary.sh', 'scripts/analyze-source-hash.sh', 'CMakeLists.txt', 'cmake/**', 'zcore/**', 'zdsp/**', 'third_party/native/**', 'tools/native/**', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh') }}
+          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-analyze.sh', 'scripts/vendor-llama.sh', 'scripts/vendor-crispasr.sh', 'scripts/assert-portable-binary.sh', 'scripts/analyze-source-hash.sh', 'CMakeLists.txt', 'cmake/**', 'zcore/**', 'zdsp/**', 'third_party/native/**', 'tools/native/**', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh') }}
 
       - name: Cache engine sources and build trees
         uses: actions/cache@v4
@@ -95,31 +95,25 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          bash scripts/vendor-whisper.sh darwin-arm64
-          bash scripts/vendor-whisper.sh darwin-x64
           bash scripts/vendor-analyze.sh darwin-arm64
           bash scripts/vendor-analyze.sh darwin-x64
           bash scripts/build-gpu-pack.sh
           bash scripts/build-onnx-pack.sh darwin-x64
-          # The Qwen pair goes LAST and cannot fail the job. Not squeamishness:
-          # this step also builds the splitter packs, the release block runs
-          # per-leg, and models.ts resolves the in-app pack from
-          # releases/latest/download — so a job that dies here publishes a
+          # The lyrics engines go LAST and cannot fail THIS step. Not
+          # squeamishness: this step also builds the splitter packs, the
+          # release block runs per-leg, and models.ts resolves the in-app pack
+          # from releases/latest/download — so a job that dies here publishes a
           # release with no pack and 404s the splitter for the whole fleet, on
-          # every app version, not just this one. An engine that does not
-          # vendor is a case the app already handles: the filter matches
-          # nothing, resolveQwenServer returns null, qwenAvailable is false and
-          # both qwen paths hand the song back to whisper. The vendor scripts
-          # refuse to leave a binary that links anything outside the OS, so
-          # what a warning here means is "no Qwen in this build", never "a
-          # broken engine shipped". Read the annotations rather than the exit
-          # code. These become fatal again when the feature stops being
-          # opt-in — the reminder lives on the test that fails the day the
-          # model-tile gate is removed (tests/unit/models-registry.test.ts).
-          bash scripts/vendor-llama.sh darwin-arm64 || echo "::warning::llama-server darwin-arm64 not vendored"
-          bash scripts/vendor-llama.sh darwin-x64 || echo "::warning::llama-server darwin-x64 not vendored"
-          bash scripts/vendor-crispasr.sh darwin-arm64 || echo "::warning::crispasr darwin-arm64 not vendored"
-          bash scripts/vendor-crispasr.sh darwin-x64 || echo "::warning::crispasr darwin-x64 not vendored"
+          # every app version, not just this one. They are the ONLY lyrics
+          # engines since Qwen3-ASR replaced whisper, though, so a missing one
+          # is no longer "no Qwen in this build": it is a build whose Transcribe
+          # and Check & align say the engine is missing. "Lyrics engines
+          # shipped" at the end of the job turns it red AFTER the packs are
+          # attached — loud, without taking the fleet's splitter down with it.
+          bash scripts/vendor-llama.sh darwin-arm64 || echo "::error::llama-server darwin-arm64 not vendored"
+          bash scripts/vendor-llama.sh darwin-x64 || echo "::error::llama-server darwin-x64 not vendored"
+          bash scripts/vendor-crispasr.sh darwin-arm64 || echo "::error::crispasr darwin-arm64 not vendored"
+          bash scripts/vendor-crispasr.sh darwin-x64 || echo "::error::crispasr darwin-x64 not vendored"
 
       - name: Build engines and splitter pack (Windows)
         if: runner.os == 'Windows'
@@ -127,18 +121,17 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          bash scripts/vendor-whisper.sh win32-x64
           bash scripts/vendor-analyze.sh win32-x64
           bash scripts/build-onnx-pack.sh win32-x64
           # Same rule as the macOS leg, and this is the leg that made it
-          # necessary: neither engine has ever been built for Windows, and
-          # `shell: bash` runs under set -e, so a compile failure here used to
-          # abort before the splitter pack above was even built. Last, and
-          # non-fatal. The portability assertion is a deliberate no-op here
-          # (no otool), so this leg proves they compile and package, not that
-          # they are self-contained.
-          bash scripts/vendor-llama.sh win32-x64 || echo "::warning::llama-server win32-x64 not vendored"
-          bash scripts/vendor-crispasr.sh win32-x64 || echo "::warning::crispasr win32-x64 not vendored"
+          # necessary: `shell: bash` runs under set -e, so a compile failure
+          # here used to abort before the splitter pack above was even built.
+          # Last, non-fatal here, and checked by "Lyrics engines shipped". The
+          # portability assertion is a deliberate no-op here (no otool), so
+          # this leg proves they compile and package, not that they are
+          # self-contained.
+          bash scripts/vendor-llama.sh win32-x64 || echo "::error::llama-server win32-x64 not vendored"
+          bash scripts/vendor-crispasr.sh win32-x64 || echo "::error::crispasr win32-x64 not vendored"
 
       # Mac-only, and deliberately not folded into the Package step's own env
       # block. The literal reason is that this runs `security`, which exists
@@ -352,3 +345,24 @@ jobs:
           shopt -s nullglob
           FILES=(dist/*.dmg dist/*.exe dist/latest*.yml dist/*.blockmap vendor/packs/*.tar.gz)
           gh release upload "$TAG" "${FILES[@]}" --clobber
+
+      # Last, and after Attach on purpose: the splitter packs built above are
+      # already on the release by now, so failing here cannot 404 the fleet's
+      # splitter the way failing the engine step would. Qwen3-ASR is the only
+      # lyrics engine, and an installer without it answers every Transcribe
+      # and Check & align with "the lyrics engine is missing from this build"
+      # — this makes that a red run to re-run, not an annotation to miss.
+      - name: Lyrics engines shipped
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then targets="win32-x64"; exe=".exe"; else targets="darwin-arm64 darwin-x64"; exe=""; fi
+          missing=0
+          for t in $targets; do
+            for e in llama-server crispasr; do
+              if [ ! -f "vendor/$t/$e$exe" ]; then
+                echo "::error::vendor/$t/$e$exe is missing — this build has no lyrics engine"
+                missing=1
+              fi
+            done
+          done
+          exit $missing

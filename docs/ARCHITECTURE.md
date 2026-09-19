@@ -10,7 +10,7 @@ MultitrackEngine (Web Audio)   window.singz  ──►  media.ts     allowlisted
   — the fallback now; the
   native DSP graph is default
 TrackStack/Waveform (canvas)                      separation.ts engine ladder + runs
-PitchStrip (piano roll + mic)                     lyrics.ts    LRCLIB→whisper ladder
+PitchStrip (piano roll + mic)                     lyrics.ts    LRCLIB→Qwen3-ASR ladder
 BeatGrid (beat lines over the lanes)
 LyricsPanel (synced lyrics)                       lrclib.ts    lrclib.net client
 SetupWizard (model manager)                       models.ts    versioned pack downloads
@@ -169,11 +169,22 @@ Ladder, auto-started when a song loads:
 2. **LRCLIB** — matched by tags (music-metadata) or cleaned filename +
    duration (±5 s, synced-only). Word timing inside a line is distributed at
    ~12 chars/sec. Variant picker + manual search (`/api/search`, apply by id).
-3. **whisper.cpp fallback** — bundled `whisper-cli` on the vocals stem,
-   `-ml 1 --split-on-word` for word chunks; model weights download only after
-   user consent. "Refine timing" aligns LRCLIB text onto a whisper
-   transcription (anchor matching words, interpolate the rest, reject
-   non-monotonic lines).
+3. **Qwen3-ASR fallback** (`qwen-asr.ts`, `qwen-align.ts`) — the vocals stem
+   is cut into sung chunks (`vocal-chunks.ts`), Qwen3-ASR 1.7B hears each one
+   through the bundled `llama-server`, and the words are timed by the Precise
+   aligner when it is installed, else by Qwen3-ForcedAligner 0.6B through the
+   bundled `crispasr` — the recogniser tells no time of its own. The model
+   (3.5 GB, one tile, three files) downloads only after user consent. What
+   was heard is cached per song in `heard-words.json`, keyed to the vocals
+   file's size + mtime. Stored lyrics still say `source: 'whisper'` for an
+   on-device transcription (the name predates Qwen; `engine` says which).
+4. **Check & align** (on demand, not part of the auto ladder) — the same
+   listen on LRCLIB text: the heard words decide which lyric words sit in
+   which chunk (anchor matching; words nobody heard ride with their
+   neighbours), the forced aligner times them, and a text mismatch leaves the
+   lyrics untouched. **Precise** is MMS CTC forced
+   alignment through the splitter pack (`align-mms.ts`), whose verdict takes
+   its text check from the cached listen when there is one.
 
 ## Models & first-run setup (`main/models.ts`)
 
@@ -417,7 +428,7 @@ same order; the corpus gate is `singz-analyze melody` vs node, at the file's
 rate and at the other of the 44.1/48 pair); the phones call it in-process
 (`SingzSplit.analyzeMelody`), and the desktop NOW DOES too — for ALL THREE
 detectors, in ONE child per song: main spawns the vendored `singz-analyze
-analyze` like whisper-cli (`src/main/analyze.ts`), which reads every stem file
+analyze` like the lyrics engines (`src/main/analyze.ts`), which reads every stem file
 once and emits one flushed JSON line per part, so the melody is adopted
 seconds before the beats stage has even received its lattice; the lattice and
 the lyric aux — both only known late — arrive over the child's stdin
@@ -459,7 +470,7 @@ count-in), and the desktop adopts the rest as-is.
 <userData>/stems/<sha1-16>/         per-song cache (stems, lyrics.json)
 <userData>/settings.json            library root, Drive tokens, gdriveDirty ledger
 <userData>/sync-log.jsonl           what has gone to Drive, across restarts
-<appData>/SingZ/models/             shared model weights (whisper)
+<appData>/SingZ/models/             shared model weights (Qwen3-ASR + its aligner, MMS aligner)
 <appData>/SingZ/gpu-splitter/       splitter pack (python/, model caches, pack.json)
 ~/Documents/SingZ/<name>/           saved projects (song, stems/, lyrics.json, project.json)
 ```

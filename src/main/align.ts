@@ -331,7 +331,7 @@ export function alignToTranscription(
   ref: LyricLine[],
   hypRaw: LyricWord[],
   durationSec: number,
-  method: AlignMethod = 'whisper'
+  method: AlignMethod = 'qwen'
 ): AlignOutcome {
   const hyp = sanitizeHyp(hypRaw)
   const anchors = globalAnchors(ref, hyp)
@@ -481,10 +481,12 @@ const STOPWORDS: Record<string, string[]> = {
 }
 
 /**
- * Guess the lyrics' language so whisper can be told instead of asked.
- * Auto-detection reads the FIRST 30s of audio — for songs opening with a
- * long instrumental (Mr. Crowley's organ) it hears reverb, picks a random
- * language and hallucinates in it ("Продолжение следует…" × 10).
+ * Guess the lyrics' language so the recogniser can be told instead of asked.
+ * whisper's auto-detection read the FIRST 30 s of audio — for songs opening
+ * with a long instrumental (Mr. Crowley's organ) it heard reverb, picked a
+ * random language and hallucinated in it ("Продолжение следует…" × 10) — and
+ * Qwen3-ASR's own language label is unreliable in this GGUF; the aligner
+ * wants a language code either way.
  */
 export function guessLanguage(ref: LyricLine[]): string | null {
   const text = ref.map((l) => l.text).join(' ').toLowerCase()

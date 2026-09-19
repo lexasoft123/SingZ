@@ -58,7 +58,7 @@ link() { # link <relpath> — symlink main's copy when the worktree lacks it
 # vendor/ holds two different KINDS of artifact and they cannot be shared on
 # the same terms.
 #
-#   third-party engine builds (whisper-cli, demucs-cli, the splitter packs)
+#   third-party engine builds (llama-server, crispasr, the splitter packs)
 #     come from .engines-src/ and downloads. No branch of ours changes them,
 #     they cost minutes to rebuild, and every worktree wants the same copy.
 #
@@ -162,7 +162,7 @@ done
 # ccache needs no setup here: every worktree already shares one cache dir
 # (it is per-user, not per-checkout), and what makes a SIBLING worktree
 # actually hit — base_dir + hash_dir, against absolute paths and -g — is
-# passed per build by vendor-whisper.sh, Android's one env-carrying all-project
+# passed per build by vendor-llama.sh and vendor-crispasr.sh, Android's one env-carrying all-project
 # CMake launcher/run-with-ccache.js and, for Xcode,
 # mobile/scripts/ccache-xcode-conf.js at postinstall. Nothing outside the
 # project is written; see docs/DEVELOPMENT.md.

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build the singz-analyze CLI for THIS machine — the core's detectors as a
 # command-line tool: the parity harness's oracle (eval/*-parity.mjs) and the
-# desktop's way into the core (spawned by main like whisper-cli) as the
+# desktop's way into the core (spawned by main like the lyrics engines) as the
 # cutover lands. Prints the binary's path on stdout and NOTHING ELSE — the
 # gates capture stdout as the path.
 #   scripts/build-analyze-host.sh [out-path]  default: $TMPDIR/singz-analyze-<checkout>
@@ -33,7 +33,7 @@ OUT="${1:-${TMPDIR:-/tmp}/singz-analyze-$CHECKOUT_KEY}"
 BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-zcore-analyze-host-$CHECKOUT_KEY}"
 
 # Compiler cache when the machine has one — same launchers, base_dir and
-# hash_dir story as vendor-whisper.sh (a sibling worktree hits only with
+# hash_dir story as vendor-llama.sh (a sibling worktree hits only with
 # BASEDIR + NOHASHDIR, because absolute paths and -g hash the CWD).
 if command -v ccache >/dev/null 2>&1; then
   export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache

@@ -20,7 +20,7 @@ describe('setup wizard routing ownership', () => {
       'utf8'
     )
     expect(source).toContain("import SetupWizard from './components/SetupWizard'")
-    expect(source).toContain('<SetupWizard models={wizard.models}')
+    expect(source).toMatch(/<SetupWizard\s+models=\{wizard\.models\}/)
     expect(source).not.toContain('RecoverableSetupWizard')
     expect(source).not.toContain("import('./components/SetupWizard")
 
@@ -35,8 +35,10 @@ describe('setup wizard routing ownership', () => {
 
 
 const missingModels: ModelInfo[] = [
-  { id: 'gpu-splitter', label: 'Stem splitter', description: 'Runtime', present: false, optional: false, required: false, sizeMb: 272 },
-  { id: 'whisper', label: 'Lyrics model', description: 'Transcription', present: false, optional: true, required: false, sizeMb: 1624 }
+  { id: 'gpu-splitter', label: 'Stem splitter', description: 'Runtime', present: false, optional: false, required: false, sizeMb: 272, downloadMb: 272 },
+  // Two of the speech model's three parts already on disk: Get fetches only
+  // the 990 MB aligner, and the tile must say so rather than the 3.5 GB whole.
+  { id: 'qwen-asr', label: 'Speech model · lyrics', description: 'Transcription', present: false, optional: true, required: false, sizeMb: 3511, downloadMb: 990 }
 ]
 describe('requested model downloads', () => {
   // The vocal model used to be a second download that only worked once the
@@ -48,9 +50,30 @@ describe('requested model downloads', () => {
     try {
       const html = renderToStaticMarkup(createElement(SetupWizard, { models: missingModels, origin: 'manual', focusModel: 'gpu-splitter', onClose: () => {} }))
       expect(html).toContain('Get · 272 MB')
-      expect(html).toContain('Get · 1624 MB')
+      expect(html).toContain('Get · 990 MB')
+      expect(html).not.toContain('3511 MB')
       expect(html).toContain('data-model-id="gpu-splitter"')
       expect(html).not.toContain('backing-vocals')
+    } finally { vi.unstubAllGlobals() }
+  })
+
+  // The once-only Qwen offer opens the manager with a line saying why and the
+  // tile it is about marked; an ordinary manual open shows neither.
+  it('shows the launch-offer notice and marks the offered tile, and only then', () => {
+    vi.stubGlobal('document', { body: { classList: { contains: () => false } } })
+    try {
+      const offered = renderToStaticMarkup(createElement(SetupWizard, {
+        models: missingModels, origin: 'manual', focusModel: 'qwen-asr',
+        notice: 'Lyrics now use Qwen3-ASR.', onClose: () => {}
+      }))
+      expect(offered).toContain('data-testid="wiz-notice"')
+      expect(offered).toContain('Lyrics now use Qwen3-ASR.')
+      expect(offered).toMatch(/data-model-id="qwen-asr" class="wiz-row attention"/)
+      const plain = renderToStaticMarkup(createElement(SetupWizard, {
+        models: missingModels, origin: 'manual', focusModel: 'qwen-asr', onClose: () => {}
+      }))
+      expect(plain).not.toContain('wiz-notice')
+      expect(plain).not.toContain('attention')
     } finally { vi.unstubAllGlobals() }
   })
 })

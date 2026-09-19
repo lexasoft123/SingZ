@@ -4,7 +4,8 @@
 
 ```bash
 npm install
-scripts/vendor-whisper.sh      # once per machine (needs cmake)
+scripts/vendor-llama.sh        # llama-server, the lyrics recogniser — once per machine (needs cmake)
+scripts/vendor-crispasr.sh     # crispasr, its word aligner — once per machine (needs cmake)
 scripts/build-onnx-pack.sh     # splitter pack for win32-x64 / darwin-x64
 npm run dev
 ```
@@ -62,8 +63,9 @@ target flags are rejected because they could make electron-builder package a
 different project, extraResources set or architecture than the addon wrapper
 verified. Cross-architecture Mac builds are supported; cross-OS builds are
 rejected until the project has a real toolchain (`--win` runs on Windows and
-`--mac` on macOS). A local universal package also needs the pre-existing whisper/analyze
-engines for both Mac architectures; the release workflow prepares those before
+`--mac` on macOS). A local universal package also needs the pre-existing engines
+(`singz-analyze`, and `llama-server`/`crispasr` for lyrics) for both Mac
+architectures; the release workflow prepares those before
 calling the wrapper. The wrapper lipos both capture slices first and gives each
 temporary app the same addon and identity evidence; ad-hoc signing is deferred
 until electron-builder has merged the final universal bundle. A plain
@@ -120,7 +122,7 @@ complete checkout path, not its basename; two unrelated `foo` checkouts cannot
 reuse one CMake cache.
 
 Local clang builds pick up **ccache** automatically when it is installed
-(`brew install ccache`): `vendor-whisper.sh` and `npm run android` export
+(`brew install ccache`): `vendor-llama.sh`, `vendor-crispasr.sh` and `npm run android` export
 CMake's compiler-launcher env (the mechanism the Android CI uses), and the
 iOS Podfile turns on React Native's `ccache_enabled` wrappers at pod install.
 No setup step — the settings ride with the build, never with the machine.
@@ -139,7 +141,7 @@ and both are needed for Debug builds (`base_dir` alone was still 0%):
 | `compiler_check = content` | survives an Xcode/CLT update re-stamping clang (unrelated to worktrees, cheap) |
 
 They are passed **per build, never written to the machine's ccache config**:
-`vendor-whisper.sh` exports them, Android's all-project CMake prelude installs
+`vendor-llama.sh` and `vendor-crispasr.sh` export them, Android's all-project CMake prelude installs
 one env-carrying compiler launcher (`run-with-ccache.js` also puts the settings
 in the child env), and `mobile/scripts/ccache-xcode-conf.js` appends them to
 react-native's
@@ -350,7 +352,7 @@ cross-worktree settings ride with each build (see above). Build products
 ccache caches are what make the second worktree fast (pods ~30 s warm).
 
 `vendor/` is **mirrored, not linked**, and the distinction is the whole
-point. Third-party engine builds (whisper-cli, demucs-cli, the splitter
+point. Third-party engine builds (llama-server, crispasr, the splitter
 packs) come from `.engines-src/` and downloads, cost minutes, and no branch
 of ours changes them — those stay symlinks to main's copies. Our own engine
 builds (`singz-analyze` and `singz-capture.node`) come from the shared
@@ -584,28 +586,65 @@ Rules learned the hard way:
 | `SINGZ_GPU_PACK_URL` | pack download URL (point at a local http server) |
 | `SINGZ_FAKE_MIC=1` | Chromium fake audio input for mic-matching tests |
 | `SINGZ_MUTE=1` | mute the audio device (Chromium mute-audio) — every automated driver sets it; leave unset only for a human listening |
-| `SINGZ_DEMUCS` / `SINGZ_WHISPER` | override engine command |
-| `SINGZ_WHISPER_MODEL` | whisper size (tiny/base/small/…, default large-v3-turbo) |
-| `SINGZ_ASR=qwen` | transcribe a song with no online lyrics with Qwen3-ASR instead of whisper (see below) |
+| `SINGZ_DEMUCS` | override the splitter engine command |
 | `SINGZ_LLAMA_SERVER` | override the llama-server binary Qwen3-ASR runs through |
 | `SINGZ_CRISPASR` | override the crispasr binary the Qwen word aligner runs through |
+| `SINGZ_QWEN_OFFER=1` | let the once-only Qwen3-ASR launch offer appear in a hidden (`SINGZ_E2E_HIDDEN=1`) driver run, which otherwise suppresses it — for the driver that tests the offer |
 
-### The second recogniser (Qwen3-ASR)
+Full clean-OS check (as CI can't do): package with
+`npm run dist -- --mac --arm64 --dir`, then drive
+`dist/mac-arm64/SingZ.app/Contents/MacOS/SingZ` with
+`SINGZ_NO_SYSTEM_ENGINES=1` + fresh `SINGZ_MODELS_DIR`/`SINGZ_PACK_DIR` —
+the setup wizard must appear, download the pack for real, and a split must
+produce six stems (guitar/piano lanes hide on songs without them).
 
-Whisper stays the default. `SINGZ_ASR=qwen` switches both paths that listen to
-a song onto Qwen: transcribing a song LRCLIB has nothing for, and Check &
-align. Two engines and two models sit behind it —
-Qwen3-ASR 1.7B through llama.cpp's `llama-server` (`scripts/vendor-llama.sh`,
-model id `qwen-asr`) for the words, and Qwen3-ForcedAligner 0.6B through
-CrispASR (`scripts/vendor-crispasr.sh`, model id `qwen-aligner`) for their
-times. llama.cpp carries only the ASR model, which is why the aligner is a
-second runtime rather than another flag.
+### The lyrics engine (Qwen3-ASR)
 
-Check & align without whisper works like this: the recogniser is asked about
-each sung chunk, the answer says which lyric words belong to which chunk (the
-existing `globalAnchors` matcher), and the aligner then times each chunk's own
-words. Measured over the 19 catalog songs whose Precise timing is stored,
-against the whisper tier it replaces:
+Qwen3-ASR is the app's only lyrics engine; whisper is gone — binary, model,
+vendor script and env vars alike. Every path that listens to a song goes
+through it: transcribing a song LRCLIB has nothing for, Check & align, and the
+lyrics editor's align-draft. Two engines and one model tile sit behind it —
+Qwen3-ASR 1.7B through llama.cpp's `llama-server` (`scripts/vendor-llama.sh`)
+for the words, and Qwen3-ForcedAligner 0.6B through CrispASR
+(`scripts/vendor-crispasr.sh`) for their times. llama.cpp carries only the
+ASR model, which is why the aligner is a second runtime rather than another
+flag. Both binaries ship inside the app (`SINGZ_LLAMA_SERVER` /
+`SINGZ_CRISPASR` override them), so a missing one is a broken build, and the
+app says so: every Transcribe and Check & align answers "The lyrics engine is
+missing from this build" (`needsEngine`).
+
+The Precise tier is a different thing and did not change: MMS CTC forced
+alignment through the splitter pack (`align-mms.ts`) — it never was whisper. A
+transcription uses it too. Qwen hears the words, and Precise times them when
+it is installed (the timing the app treats as reference); Qwen's own aligner
+takes over when it is not, or when Precise places under a quarter of the
+words.
+
+Why Qwen, measured over the whole 23-song catalog on 2026-09-17 against
+whisper large-v3-turbo with the app's own flags:
+
+| | with lyrics | no lyrics | invented phrases |
+|---|---|---|---|
+| whisper turbo | WER 0.211 | WER 0.278 | 55 |
+| Qwen3-ASR 1.7B | WER 0.162 | WER 0.167 | 0 |
+
+The gap is widest exactly where transcription lives: whisper decided a song's
+language from its first 30 s, so an organ or drum intro sent three catalog
+songs into the wrong language entirely (0%, 50% and 67% of their words heard;
+one came back as Russian «Продолжение следует…»). Qwen heard 88-99% of the
+same three.
+
+And it is the FASTER engine where speed matters most: on the Windows field
+laptop (4-core Haswell) Qwen took 0.82x the song's length against whisper's
+1.91x — no GPU is involved on either engine there, because llama.cpp's Vulkan
+backend needs Vulkan 1.2 and that machine's GPUs top out at 1.1 (Kepler) or
+have no Windows Vulkan at all (Haswell).
+
+Check & align works like this: the recogniser is asked about each sung chunk,
+the answer says which lyric words belong to which chunk (the existing
+`globalAnchors` matcher), and the aligner then times each chunk's own words.
+Measured over the 19 catalog songs whose Precise timing is stored, against
+the whisper tier it replaced:
 
 | | Qwen ASR + Qwen aligner | whisper tier |
 |---|---|---|
@@ -622,25 +661,67 @@ times of its own. Lines the recogniser could not hear are dropped from the
 anchors and carried by the lyrics' own phrasing, which is the app's existing
 rule and what keeps those two songs from being timed against the wrong bars.
 
-Why, measured over the whole 23-song catalog on 2026-09-17 against whisper
-large-v3-turbo with the app's own flags:
+**The model is one tile.** `qwen-asr` in the model manager ("Speech model ·
+lyrics", 3,511 MB) is three files: `Qwen3-ASR-1.7B-Q8_0.gguf` (2,165 MB), its
+audio encoder `mmproj-Qwen3-ASR-1.7B-Q8_0.gguf` (356 MB) and
+`qwen3-forced-aligner-0.6b-q8_0.gguf` (990 MB). The recogniser hears words
+but tells no time, so a singer holding only one of the two could use neither —
+and the separate aligner tile this replaced invited exactly that. A download
+keeps any part that already arrived, so a multi-GB install that dies on its
+last file does not refetch the first two on retry; only Reinstall refetches
+everything. Q8_0 is what ggml-org publishes, and over the catalog it scored
+identically to bf16.
 
-| | with lyrics | no lyrics | invented phrases |
-|---|---|---|---|
-| whisper turbo | WER 0.211 | WER 0.278 | 55 |
-| Qwen3-ASR 1.7B | WER 0.162 | WER 0.167 | 0 |
+**Who is asked, and when.** A machine that has a whisper model (`ggml-*.bin`
+in the shared models folder) and no complete Qwen gets ONE offer at launch:
+the model manager opens with the Qwen tile highlighted and a line saying why,
+and nothing downloads until Get. It never lands on top of a required download
+— a launch that needs the splitter asks about that alone, and the offer waits
+for the next one. It is recorded as seen the moment it is shown
+(`qwenOfferDismissed` in settings.json) and never repeats. Everyone else is
+asked the ordinary way: the consent card on the first Transcribe or Check &
+align, quoting what is still missing of the three parts.
 
-The gap is widest exactly where this path lives: whisper decides a song's
-language from its first 30 s, so an organ or drum intro sent three catalog
-songs into the wrong language entirely (0%, 50% and 67% of their words heard;
-one came back as Russian «Продолжение следует…»). Qwen heard 88-99% of the
-same three.
+**The whisper model goes, but only once Qwen can replace it.** Every
+`ggml-*.bin` (and its `.part`) in the models folder is deleted once all three
+Qwen parts are on disk — at startup and after any Qwen install, whichever way
+it arrived (model manager or consent card). Never before: until then a singer
+who postponed the download has lost nothing. The pattern is safe because
+nothing else there is named that way any more (demucs.cpp's ggml model was
+already swept as obsolete), and it deliberately catches sizes the old
+downloader never fetched — a 3 GB large-v3 left behind by an old
+model-override run was found on a dev machine.
+
+**What Qwen heard is cached per song**, as `heard-words.json` in the song's
+cache dir (it replaced `whisper-words.json`). A re-align — switching the
+lyrics variant, aligning an edited draft — skips the listen and goes straight
+to the aligner, and the Precise tier uses its words as the text check that CTC
+scores cannot give on singing. It is keyed to the vocals file's size and mtime
+(2 ms tolerance, as in the sync ledger), because separating backing vocals
+REWRITES that file: a listen to the old combined vocal would check new lyrics
+against a voice that is no longer in it.
+
+**Stored lyrics still say `source: 'whisper'`** for anything transcribed on
+the device — the label means "transcribed here", lyrics.json, Drive and the
+phones all read it, and renaming it would strand installed phones (see
+`CLAUDE.md`). `engine: 'qwen3-asr-1.7b'` beside it says which recogniser it
+was, and `AlignMethod` keeps `'whisper'` only so older lyrics.json files read.
+
+**The release build must ship both engines, and says so without taking the
+splitter down.** `build.yml` vendors them LAST in the engine step and a
+failure there stays non-fatal (an `::error::` annotation), because that step
+also builds the splitter packs and the in-app pack URL is
+`releases/latest/download` — a job dying there would publish a release with
+no pack and 404 the splitter for the whole fleet, on every app version. The
+job's final step, "Lyrics engines shipped", runs after the packs are attached
+and fails the run if `llama-server` or `crispasr` is missing for any target.
 
 Four things are worth knowing before touching this code:
 
-- **It hears words but tells no time.** The path therefore refuses to run
-  unless the precise aligner is installed, and hands it Qwen's text to time.
-  Without the aligner it falls back to whisper, silently and by design.
+- **It hears words but tells no time.** Nothing it transcribes lands until an
+  aligner has timed it — Precise when installed, Qwen's own otherwise — since
+  provisional chunk timing is not karaoke. That is also why the recogniser and
+  its aligner are one download: there is no whisper left to fall back to.
 - **Everything goes through `vocal-chunks`.** llama.cpp returns an EMPTY
   transcription past ~2 minutes of audio in one call
   (ggml-org/llama.cpp#21847), and silence is where every recogniser invents
@@ -651,18 +732,6 @@ Four things are worth knowing before touching this code:
   "None" (no singing) is trusted, and the song's majority answer decides.
 - **A forced language loops on a chunk with nobody singing** ("oh, oh, oh…"),
   so a looping answer is discarded for the unforced one.
-
-On the Windows field laptop (4-core Haswell) it runs at 0.82x real time
-against whisper's 1.91x — no GPU is involved on either engine there, because
-llama.cpp's Vulkan backend needs Vulkan 1.2 and that machine's GPUs top out
-at 1.1 (Kepler) or have no Windows Vulkan at all (Haswell).
-
-Full clean-OS check (as CI can't do): package with
-`npm run dist -- --mac --arm64 --dir`, then drive
-`dist/mac-arm64/SingZ.app/Contents/MacOS/SingZ` with
-`SINGZ_NO_SYSTEM_ENGINES=1` + fresh `SINGZ_MODELS_DIR`/`SINGZ_PACK_DIR` —
-the setup wizard must appear, download the pack for real, and a split must
-produce six stems (guitar/piano lanes hide on songs without them).
 
 ## Releasing
 
@@ -729,7 +798,8 @@ a push that was stopped.
    tester gets a build, and the tag may sit on a feature branch (bump
    `package.json` to the full prerelease string).
 5. CI (`.github/workflows/build.yml`) builds mac arm64+x64 dmg, win x64 NSIS,
-   compiles whisper-cli and all three splitter packs, Developer ID-signs and
+   compiles the lyrics engines (llama-server, crispasr) and all three
+   splitter packs, Developer ID-signs and
    notarizes the mac bundles (falling back to `scripts/afterPack.cjs`'s ad-hoc
    signature only where the Apple secrets are absent, as in a fork), and
    attaches everything to the GitHub Release via `gh` (nullglob per-platform
@@ -828,4 +898,8 @@ Field laptops (QHD+ panel + weak iGPU) taught these; keep them:
 - DirectML adapter targeting for Optimus laptops (proven manually via Windows
   per-app Graphics preference; needs a device_id ladder in the pack shim).
 - A–B loop for phrase practice; export karaoke mix to file.
-- Whisper model picker in the model manager UI.
+- A smaller lyrics download: a Q5_K_M quantization of Qwen3-ASR measured the
+  same as the shipped Q8_0 to within noise at 1.83 GB, but nobody publishes
+  one — it would mean attaching our own to a pinned release, the way
+  `mms-fa.onnx` is (Q4_K_M is not a candidate: it collapses when the
+  language is not known).

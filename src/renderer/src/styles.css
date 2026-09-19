@@ -1669,6 +1669,20 @@ button.chip-status:hover {
   color: var(--danger);
 }
 
+/* The once-only launch offer: why the wizard opened, and the row it is about.
+   Static amber, the Split button's attention colour — no animation. */
+.wiz-notice {
+  font-size: 12px !important;
+  line-height: 1.5 !important;
+  color: #e2a53e !important;
+  margin: 10px 0 0 !important;
+}
+
+.wiz-row.attention {
+  border-left: 2px solid rgba(226, 165, 62, 0.7);
+  padding-left: 10px;
+}
+
 /* scrollbars */
 
 ::-webkit-scrollbar {

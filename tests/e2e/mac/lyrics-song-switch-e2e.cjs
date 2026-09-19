@@ -10,7 +10,7 @@
  * current BEAT_DETECT_VERSION stamp that stops it ever being re-derived.
  *
  * And cancelLyrics() does NOT cover it. `Transcriber.cancel()` aborts the
- * model download and kills the whisper/aligner child; the LRCLIB ladder runs
+ * model download and stops the recogniser and aligner; the LRCLIB ladder runs
  * under neither, and `busy` is false throughout it — so switching songs leaves
  * the old lookup running to completion with nothing to stop it. The renderer's
  * loadSeq guard is the only thing standing between that and the wrong song.
