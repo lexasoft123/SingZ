@@ -515,14 +515,31 @@ int main() {
 
   // ---- 10. not a FLAC, and the descriptor either way --------------------
   {
-    // A FRESH wav: compactStem deletes the one it compacted, which is what it
-    // is for (flac_io.h: "flac exists -> delete the wav if present"), so the
-    // fixture from the top of this file is long gone by here.
-    const std::string other = writeStereoWav(1000, rate);
+    // A WAV used to be the "other format" here. It streams now, through its
+    // own source (wav_streaming_source_tests.cpp), so the refusal is asked of
+    // something that is not audio at all — and of a WAV DECLARED as FLAC,
+    // which must be refused rather than read as what it really is.
+    const std::string other = tempPath(".bin");
+    {
+      std::FILE* f = std::fopen(other.c_str(), "wb");
+      std::fputs("neither FLAC nor RIFF, just bytes", f);
+      std::fclose(f);
+    }
     singz::DecodedAudioStatus status = singz::DecodedAudioStatus::Ok;
     auto none = singz::openStreamingAudioSource(openRead(other), {}, &status);
     check(none == nullptr && status == singz::DecodedAudioStatus::UnsupportedFormat,
-          "a WAV is refused as UnsupportedFormat, not as damaged FLAC");
+          "something that is not audio is refused as UnsupportedFormat, not as damaged FLAC");
+    {
+      // A FRESH wav: compactStem deletes the one it compacted (flac_io.h:
+      // "flac exists -> delete the wav if present").
+      const std::string wav = writeStereoWav(1000, rate);
+      singz::StreamingAudioOpenOptions asFlac{};
+      asFlac.sourceFormat = singz::DecodedAudioSourceFormat::Flac;
+      auto declared = singz::openStreamingAudioSource(openRead(wav), asFlac, &status);
+      check(declared == nullptr && status == singz::DecodedAudioStatus::UnsupportedFormat,
+            "a WAV declared as FLAC is refused as UnsupportedFormat");
+      std::remove(wav.c_str());
+    }
 
     // The descriptor must be closed on every refusal, or a song's worth of
     // lanes leaks one each time a format is guessed wrong.

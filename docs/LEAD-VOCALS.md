@@ -74,6 +74,17 @@ IEEE-float WAV preserves residual samples above 1 without clipping; those
 projects use the existing v1/mixed WAV+FLAC reader rather than quantizing the
 new vocal through the existing 16-bit FLAC encoder.
 
+Those two lanes cost more on disk — about 40 MB per minute of song for the
+pair — but they must not cost more in memory. Native playback streams a song
+only if EVERY lane can be streamed, and until the core had a WAV streaming
+source (`zcore/src/media/wav_streaming_source.cpp`) one float lane sent the
+whole song back to a full decode: 115 MB held against 20 MB on a phone for a
+40-second song, and a desktop open that decoded both vocal lanes in the
+renderer (2.9 s against 0.5 s for a five-minute song). The WAV source shares
+its header walk and sample conversion with `prepareDecodedAudio`, and
+`tests/native/wav_streaming_source_tests.cpp` holds the two to the same floats
+bit for bit.
+
 The saved `leadVocalSeparated` setting persists across Save and reopening.
 It keeps **Re-split** unavailable: restoring combined vocals alongside the saved
 backing lane would play the backing twice. There is no reset or recombine
@@ -89,6 +100,6 @@ not the semantic accuracy of every separated harmony.
 
 The [version-4 pitch gate](../eval/pitch-regression-gate.md) rechecks separation
 with the final offline detector on all 44 vocal inputs. Separation improves
-aggregate independent-model agreement; it is still optional, and lead-retention
-listening flags remain. Live microphone and offline song tracking have different
+aggregate independent-model agreement, which is why it runs on every split; the
+lead-retention listening flags remain. Live microphone and offline song tracking have different
 evidence requirements and do not share the experimental offline octave prior.

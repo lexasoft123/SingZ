@@ -41,12 +41,6 @@ constexpr char kPartialFfmpegCapabilityTag[] =
 constexpr char kProductFfmpegCapabilityTag[] =
     "singz-prepared-audio-fd-ffmpeg-full-matrix-v3";
 #endif
-constexpr std::array<unsigned char, 16> kExtensiblePcmGuid{
-    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
-    0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71};
-constexpr std::array<unsigned char, 16> kExtensibleFloatGuid{
-    0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
-    0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71};
 
 void closeDescriptor(int descriptor) noexcept {
   if (descriptor < 0) return;
@@ -125,18 +119,6 @@ bool declarationMatches(DecodedAudioSourceFormat declared,
   return declared == detected;
 }
 
-uint16_t little16(const unsigned char* value) noexcept {
-  return static_cast<uint16_t>(value[0]) |
-      static_cast<uint16_t>(static_cast<uint16_t>(value[1]) << 8);
-}
-
-uint32_t little32(const unsigned char* value) noexcept {
-  return static_cast<uint32_t>(value[0]) |
-      (static_cast<uint32_t>(value[1]) << 8) |
-      (static_cast<uint32_t>(value[2]) << 16) |
-      (static_cast<uint32_t>(value[3]) << 24);
-}
-
 bool validOptions(const DecodedAudioPrepareOptions& options) noexcept {
   return validSourceFormat(options.sourceFormat) &&
       options.maximumChannels != 0 &&
@@ -168,174 +150,78 @@ bool withinLimits(uint32_t channels, uint64_t frames,
       bytes <= options.maximumWorkingBytes;
 }
 
+// A positioned read over the decoder's FILE*, for the shared WAV header walk.
+// The decoder reads its file alone, so moving the FILE position is fine here.
+int64_t fileReadAt(void* context, uint64_t offset, unsigned char* buffer,
+                   size_t bytes) noexcept {
+  auto* file = static_cast<std::FILE*>(context);
+  if (offset > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+    return -1;
+  if (fseeko(file, static_cast<int64_t>(offset), SEEK_SET) != 0) return -1;
+  const size_t got = std::fread(buffer, 1, bytes, file);
+  if (got < bytes && std::ferror(file)) return -1;
+  return static_cast<int64_t>(got);
+}
+
+// The header walk and the sample conversion are shared with the streaming WAV
+// source (wav_streaming_source.cpp) — one answer to which WAVs are readable
+// and what their samples are. What stays here is what only a whole-file
+// decode has: the prepare limits, and reading every frame into memory.
 DecodedAudioStatus decodeWav(std::FILE* file,
                              const DecodedAudioPrepareOptions& options,
                              DecodeCancellation cancellation,
                              WorkingAudio* output) {
-  unsigned char riff[12]{};
-  if (std::fread(riff, 1, sizeof(riff), file) != sizeof(riff) ||
-      std::memcmp(riff, "RIFF", 4) != 0 ||
-      std::memcmp(riff + 8, "WAVE", 4) != 0)
-    return DecodedAudioStatus::MalformedData;
-  const uint32_t riffSize = little32(riff + 4);
-  if (riffSize == std::numeric_limits<uint32_t>::max())
-    return DecodedAudioStatus::UnsupportedFormat;
-  if (riffSize < 4) return DecodedAudioStatus::MalformedData;
-  const uint64_t containerEnd = uint64_t{8} + riffSize;
   if (fseeko(file, 0, SEEK_END) != 0) return DecodedAudioStatus::IoError;
   const auto physicalEnd = ftello(file);
-  if (physicalEnd < 0 || containerEnd > static_cast<uint64_t>(physicalEnd))
-    return DecodedAudioStatus::MalformedData;
-  if (fseeko(file, 12, SEEK_SET) != 0) return DecodedAudioStatus::IoError;
+  if (physicalEnd < 0) return DecodedAudioStatus::IoError;
+  const media_internal::WavByteSource source{
+      file, &fileReadAt, static_cast<uint64_t>(physicalEnd)};
+  media_internal::WavLayout layout;
+  const DecodedAudioStatus parsed =
+      media_internal::parseWavLayout(source, cancellation, &layout);
+  if (parsed != DecodedAudioStatus::Ok) return parsed;
+  const uint64_t frames = layout.frames;
+  const uint64_t bytesPerFrame = layout.bytesPerFrame;
+  if (!withinLimits(layout.channels, frames, options))
+    return DecodedAudioStatus::LimitExceeded;
 
-  bool haveFormat = false;
-  uint16_t format = 0;
-  uint16_t channels = 0;
-  uint16_t bitsPerSample = 0;
-  uint16_t blockAlign = 0;
-  uint32_t sampleRate = 0;
-  uint32_t byteRate = 0;
-  for (;;) {
+  WorkingAudio candidate;
+  candidate.sampleRate = layout.sampleRate;
+  candidate.frameCount = frames;
+  candidate.channels.resize(layout.channels);
+  for (auto& channel : candidate.channels)
+    channel.reserve(static_cast<size_t>(frames));
+  const uint64_t chunkFrames = std::min<uint64_t>(kDecodeChunkFrames,
+                                                   frames == 0 ? 1 : frames);
+  std::vector<unsigned char> bytes(
+      static_cast<size_t>(chunkFrames * bytesPerFrame));
+  std::vector<float*> planes(layout.channels, nullptr);
+  if (fseeko(file, static_cast<int64_t>(layout.dataOffset), SEEK_SET) != 0)
+    return DecodedAudioStatus::IoError;
+  uint64_t cursor = 0;
+  while (cursor < frames) {
     if (cancellation.isRequested()) return DecodedAudioStatus::Cancelled;
-    const auto chunkStartSigned = ftello(file);
-    if (chunkStartSigned < 0) return DecodedAudioStatus::IoError;
-    const uint64_t chunkStart = static_cast<uint64_t>(chunkStartSigned);
-    if (chunkStart > containerEnd || containerEnd - chunkStart < 8)
-      return DecodedAudioStatus::MalformedData;
-    unsigned char chunk[8]{};
-    if (std::fread(chunk, 1, sizeof(chunk), file) != sizeof(chunk))
-      return DecodedAudioStatus::MalformedData;
-    const uint32_t size = little32(chunk + 4);
-    const bool dataChunk = std::memcmp(chunk, "data", 4) == 0;
-    if (dataChunk && size == std::numeric_limits<uint32_t>::max())
-      return DecodedAudioStatus::UnsupportedFormat;
-    const uint64_t payloadStart = chunkStart + 8;
-    const uint64_t payloadEnd = payloadStart + size;
-    const uint64_t paddedEnd = payloadEnd + (size & 1u);
-    if (payloadEnd < payloadStart || paddedEnd < payloadEnd ||
-        paddedEnd > containerEnd)
-      return DecodedAudioStatus::MalformedData;
-    if (std::memcmp(chunk, "fmt ", 4) == 0) {
-      if (size < 16) return DecodedAudioStatus::MalformedData;
-      std::array<unsigned char, 40> fields{};
-      const size_t captured = std::min<size_t>(size, fields.size());
-      if (std::fread(fields.data(), 1, captured, file) != captured)
-        return DecodedAudioStatus::MalformedData;
-      if (fseeko(file, static_cast<int64_t>(paddedEnd), SEEK_SET) != 0)
-        return DecodedAudioStatus::IoError;
-      format = little16(fields.data());
-      channels = little16(fields.data() + 2);
-      sampleRate = little32(fields.data() + 4);
-      byteRate = little32(fields.data() + 8);
-      blockAlign = little16(fields.data() + 12);
-      bitsPerSample = little16(fields.data() + 14);
-      if (format == 0xfffe) {
-        if (size < 40) return DecodedAudioStatus::MalformedData;
-        const uint16_t extensionSize = little16(fields.data() + 16);
-        const uint16_t validBits = little16(fields.data() + 18);
-        if (extensionSize < 22 ||
-            static_cast<uint64_t>(18) + extensionSize > size)
-          return DecodedAudioStatus::MalformedData;
-        if (std::memcmp(fields.data() + 24, kExtensiblePcmGuid.data(),
-                        kExtensiblePcmGuid.size()) == 0) {
-          format = 1;
-        } else if (std::memcmp(fields.data() + 24,
-                               kExtensibleFloatGuid.data(),
-                               kExtensibleFloatGuid.size()) == 0) {
-          format = 3;
-        } else {
-          return DecodedAudioStatus::UnsupportedFormat;
-        }
-        // Reduced valid-bit containers are MSB-aligned and need a distinct
-        // conversion path. Accept only the canonical representation decoded
-        // identically to ordinary PCM/float.
-        if (validBits != bitsPerSample)
-          return DecodedAudioStatus::UnsupportedFormat;
-      }
-      haveFormat = true;
-      continue;
+    const uint64_t count = std::min<uint64_t>(chunkFrames, frames - cursor);
+    const size_t wanted = static_cast<size_t>(count * bytesPerFrame);
+    if (std::fread(bytes.data(), 1, wanted, file) != wanted)
+      return DecodedAudioStatus::IoError;
+    // Reserve above may spend time in the allocator, but initialization and
+    // sample conversion are capped at one kDecodeChunkFrames slice between
+    // cancellation polls. Partial channel growth stays local to candidate.
+    for (size_t channel = 0; channel < candidate.channels.size(); ++channel) {
+      candidate.channels[channel].resize(static_cast<size_t>(cursor + count));
+      planes[channel] = candidate.channels[channel].data();
     }
-    if (!dataChunk) {
-      if (fseeko(file, static_cast<int64_t>(paddedEnd), SEEK_SET) != 0)
-        return DecodedAudioStatus::IoError;
-      continue;
-    }
-    if (!haveFormat || channels == 0 ||
-        sampleRate < kMinimumSupportedSampleRate ||
-        sampleRate > kMaximumSupportedSampleRate)
-      return DecodedAudioStatus::MalformedData;
-    const bool floatingPoint = format == 3 && bitsPerSample == 32;
-    const bool integerPcm = format == 1 &&
-        (bitsPerSample == 16 || bitsPerSample == 24 || bitsPerSample == 32);
-    if (!floatingPoint && !integerPcm)
-      return DecodedAudioStatus::UnsupportedFormat;
-    const uint64_t bytesPerSample = bitsPerSample / 8;
-    const uint64_t bytesPerFrame = bytesPerSample * channels;
-    if (bytesPerFrame == 0 || bytesPerFrame > UINT16_MAX ||
-        blockAlign != bytesPerFrame ||
-        sampleRate > std::numeric_limits<uint32_t>::max() / bytesPerFrame ||
-        byteRate != sampleRate * bytesPerFrame ||
-        static_cast<uint64_t>(size) % bytesPerFrame != 0) {
-      return DecodedAudioStatus::MalformedData;
-    }
-    const uint64_t stated = size;
-    const uint64_t frames = stated / bytesPerFrame;
-    if (!withinLimits(channels, frames, options))
-      return DecodedAudioStatus::LimitExceeded;
-
-    WorkingAudio candidate;
-    candidate.sampleRate = sampleRate;
-    candidate.frameCount = frames;
-    candidate.channels.resize(channels);
-    for (auto& channel : candidate.channels)
-      channel.reserve(static_cast<size_t>(frames));
-    const uint64_t chunkFrames = std::min<uint64_t>(kDecodeChunkFrames,
-                                                     frames == 0 ? 1 : frames);
-    std::vector<unsigned char> bytes(
-        static_cast<size_t>(chunkFrames * bytesPerFrame));
-    uint64_t cursor = 0;
-    while (cursor < frames) {
-      if (cancellation.isRequested()) return DecodedAudioStatus::Cancelled;
-      const uint64_t count = std::min<uint64_t>(chunkFrames, frames - cursor);
-      const size_t wanted = static_cast<size_t>(count * bytesPerFrame);
-      if (std::fread(bytes.data(), 1, wanted, file) != wanted)
-        return DecodedAudioStatus::IoError;
-      // Reserve above may spend time in the allocator, but initialization and
-      // sample conversion are capped at one kDecodeChunkFrames slice between
-      // cancellation polls. Partial channel growth stays local to candidate.
-      for (auto& channel : candidate.channels)
-        channel.resize(static_cast<size_t>(cursor + count));
-      for (uint64_t frame = 0; frame < count; ++frame) {
-        for (uint32_t channel = 0; channel < channels; ++channel) {
-          const unsigned char* sample = bytes.data() + frame * bytesPerFrame +
-              static_cast<uint64_t>(channel) * bytesPerSample;
-          float value = 0.0f;
-          if (floatingPoint) {
-            std::memcpy(&value, sample, sizeof(value));
-            if (!std::isfinite(value))
-              return DecodedAudioStatus::MalformedData;
-          } else if (bitsPerSample == 16) {
-            value = static_cast<float>(static_cast<int16_t>(little16(sample)) /
-                                       32768.0);
-          } else if (bitsPerSample == 24) {
-            const int32_t integer = static_cast<int32_t>(
-                (static_cast<uint32_t>(sample[0]) << 8) |
-                (static_cast<uint32_t>(sample[1]) << 16) |
-                (static_cast<uint32_t>(sample[2]) << 24)) >> 8;
-            value = static_cast<float>(integer / 8388608.0);
-          } else {
-            value = static_cast<float>(static_cast<int32_t>(little32(sample)) /
-                                       2147483648.0);
-          }
-          candidate.channels[channel][static_cast<size_t>(cursor + frame)] = value;
-        }
-      }
-      cursor += count;
-    }
-    if (cancellation.isRequested()) return DecodedAudioStatus::Cancelled;
-    *output = std::move(candidate);
-    return DecodedAudioStatus::Ok;
+    uint64_t converted = 0;
+    const DecodedAudioStatus status = media_internal::convertWavFrames(
+        bytes.data(), count, layout, planes.data(), static_cast<size_t>(cursor),
+        &converted);
+    if (status != DecodedAudioStatus::Ok) return status;
+    cursor += count;
   }
+  if (cancellation.isRequested()) return DecodedAudioStatus::Cancelled;
+  *output = std::move(candidate);
+  return DecodedAudioStatus::Ok;
 }
 
 struct FlacDecodeContext {

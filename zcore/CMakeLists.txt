@@ -341,7 +341,8 @@ add_library(zcore_media STATIC
   src/media/ffmpeg_decoder.cpp
   src/media/flac_io.cpp
   src/media/flac_streaming_source.cpp
-  src/media/wav.cpp)
+  src/media/wav.cpp
+  src/media/wav_streaming_source.cpp)
 add_library(SingZ::zcore_media ALIAS zcore_media)
 singz_zcore_target(zcore_media)
 target_link_libraries(zcore_media

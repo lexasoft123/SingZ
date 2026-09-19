@@ -2280,7 +2280,7 @@ PODS:
     - ReactCommon/turbomodule/core
     - ReactNativeDependencies
     - Yoga
-  - SingzCore (0.3.16):
+  - SingzCore (0.3.17):
     - onnxruntime-c (~> 1.23.0)
     - React-Core
     - SingzDeviceCallback
@@ -2646,7 +2646,7 @@ SPEC CHECKSUMS:
   RNReanimated: 5aa9e73d0f8d3c40d5c9bec396d6a61098db31f0
   RNScreens: de068bbd7d91b820fedac25c597d4b14830de74b
   RNWorklets: 9052122d7f98de547d247e775ea2069839236d38
-  SingzCore: 4866edf96fde88605ee2761cfc1bdd7844daf230
+  SingzCore: 2cc5b4938fe26e130ff0d0e41e0c944cb136efbc
   SingzDeviceCallback: 34dbf61665b0e42edc7880f58f18fd01a7c6cc17
   SingzDspRuntime: edd3662e17eea69477fa9ee2dd2b3abcb54e8df8
   SingzPlaybackSession: 2920084e092dba3ef3db11a62e26fd40e412b8cf

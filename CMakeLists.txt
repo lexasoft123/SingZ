@@ -533,6 +533,15 @@ if(SINGZ_CORE_TESTS)
   target_link_libraries(flac_streaming_source_tests PRIVATE SingZ::zcore_media SingZ::native_flac Threads::Threads)
   add_test(NAME flac_streaming_source_tests COMMAND flac_streaming_source_tests)
 
+  # The WAV half of streaming: the float lead/backing lanes every split has
+  # carried since 0.23.0, compared bit for bit against prepareDecodedAudio.
+  add_executable(wav_streaming_source_tests
+    ${SINGZ_REPO_ROOT}/tests/native/wav_streaming_source_tests.cpp)
+  target_compile_features(wav_streaming_source_tests PRIVATE cxx_std_20)
+  set_target_properties(wav_streaming_source_tests PROPERTIES CXX_EXTENSIONS OFF)
+  target_link_libraries(wav_streaming_source_tests PRIVATE SingZ::zcore_media)
+  add_test(NAME wav_streaming_source_tests COMMAND wav_streaming_source_tests)
+
   add_executable(flac_streaming_benchmark
     ${SINGZ_REPO_ROOT}/tests/native/flac_streaming_benchmark.cpp)
   target_compile_features(flac_streaming_benchmark PRIVATE cxx_std_20)
