@@ -2,16 +2,19 @@
  * take Space and its gain sliders take the arrows. */
 export const DIALOG_SELECTOR = '[role="dialog"]'
 
+/** Input types that are pressed rather than typed into: on/off controls,
+ * buttons (image is a graphical submit), and the two that open a picker. */
+const PRESSED_INPUT_TYPES = ['checkbox', 'radio', 'button', 'submit', 'reset', 'color', 'file', 'image']
+
 /** Controls a singer types into — a space there is a space. Every input
- * that is not a slider or an on/off control is text-like here: the bpm
+ * that is not a slider or a pressed control is text-like here: the bpm
  * fields, the track-name field, search boxes. */
 export const TEXT_ENTRY_SELECTOR = [
   'textarea',
   'select',
   '[contenteditable=""]',
   '[contenteditable="true"]',
-  'input:not([type="range"]):not([type="checkbox"]):not([type="radio"])' +
-    ':not([type="button"]):not([type="submit"]):not([type="reset"])'
+  'input:not([type="range"])' + PRESSED_INPUT_TYPES.map((t) => `:not([type="${t}"])`).join('')
 ].join(',')
 
 /** Sliders move their value with the arrows, so a focused fader keeps them
@@ -23,9 +26,12 @@ export const SLIDER_SELECTOR = 'input[type="range"],[role="slider"]'
  * after a click. Space is play/pause there, as it was before 2026-08-28,
  * when one rule started handing every focused button its native Space and
  * pressing Space after Mute began un-muting instead of pausing. */
-export const ACTIVATABLE_SELECTOR =
-  'button,[role="button"],a[href],input[type="checkbox"],input[type="radio"],' +
-  'input[type="button"],input[type="submit"],input[type="reset"]'
+export const ACTIVATABLE_SELECTOR = [
+  'button',
+  '[role="button"]',
+  'a[href]',
+  ...PRESSED_INPUT_TYPES.map((t) => `input[type="${t}"]`)
+].join(',')
 
 type Closest = (selector: string) => unknown
 

@@ -68,6 +68,26 @@ describe('desktop transport shortcut ownership', () => {
     expect(activatableAncestor(null)).toBeNull()
   })
 
+  /** The decision table above cannot see CSS, so this pins the one part of
+   * the selectors that decides which side of the line a control lands on:
+   * an input that is PRESSED — a toggle, a button, or one that opens a
+   * picker — must count as activatable, never as text entry, or focusing
+   * it hands it every key and brings the 2026-08-28 bug back for it. And
+   * every clause must name what it matches: a bare `:not(...)` clause (the
+   * chain joined with ',' instead of '') matches <html>, so every element
+   * on the page would read as text entry and no shortcut would ever run. */
+  it('every pressed input type is activatable, never text entry', () => {
+    for (const type of ['checkbox', 'radio', 'button', 'submit', 'reset', 'color', 'file', 'image']) {
+      expect(ACTIVATABLE_SELECTOR).toContain(`input[type="${type}"]`)
+      expect(TEXT_ENTRY_SELECTOR).toContain(`:not([type="${type}"])`)
+    }
+    for (const clause of TEXT_ENTRY_SELECTOR.split(',')) expect(clause.trim()).not.toMatch(/^:/)
+    expect(TEXT_ENTRY_SELECTOR).toContain('input:not([type="range"]):not([type="checkbox"]):not([type="radio"])')
+    // and a slider is neither — it keeps its arrows through SLIDER_SELECTOR
+    expect(ACTIVATABLE_SELECTOR).not.toContain('range')
+    expect(TEXT_ENTRY_SELECTOR).toContain(':not([type="range"])')
+  })
+
   it('checks the Settings shortcut first, and takes Space away from the focused control', () => {
     const source = readFileSync('src/renderer/src/App.tsx', 'utf8')
     const settingsShortcut = source.indexOf("e.code === 'Comma'")
