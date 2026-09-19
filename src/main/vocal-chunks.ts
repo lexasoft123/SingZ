@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { flacToWav, parseWav } from './flac'
+import { flacToWav } from './flac'
 
 /**
  * Cutting the vocals stem into the pieces a recognizer is actually good at.
@@ -201,6 +201,75 @@ async function lowPass(x: Float32Array, cutoff: number): Promise<Float32Array> {
   return out
 }
 
+const WAVE_FORMAT_PCM = 1
+const WAVE_FORMAT_IEEE_FLOAT = 3
+const WAVE_FORMAT_EXTENSIBLE = 0xfffe
+
+/**
+ * Average a WAV's channels into mono floats — in [-1, 1] for 16-bit, and
+ * possibly past it for the float stem, whose residuals can exceed 1
+ * (chunkToWav clamps on the way to the engines).
+ *
+ * Two shapes reach this: the 16-bit PCM a split writes (and every FLAC stem
+ * decodes to), and the 32-bit float WAV the lead/backing vocal split saves
+ * over stems/vocals — that one is never converted to FLAC, so it stays float
+ * for good. flac.ts's parseWav reads 16-bit only, on purpose (wavToFlac relies
+ * on the refusal), and handing it the float stem threw "unsupported wav
+ * (format 3, 32 bit)": both Qwen tiers then fell back to whisper on every
+ * lead-separated song, the very input Qwen should do best on, and said
+ * nothing. Anything else is still refused by name rather than guessed at.
+ */
+export async function wavToMono(buf: Buffer): Promise<{ sampleRate: number; mono: Float32Array }> {
+  if (buf.toString('ascii', 0, 4) !== 'RIFF' || buf.toString('ascii', 8, 12) !== 'WAVE') {
+    throw new Error('not a RIFF/WAVE file')
+  }
+  let fmt: { format: number; channels: number; sampleRate: number; bits: number } | null = null
+  let data: Buffer | null = null
+  for (let off = 12; off + 8 <= buf.length; ) {
+    const id = buf.toString('ascii', off, off + 4)
+    const size = buf.readUInt32LE(off + 4)
+    if (id === 'fmt ') {
+      let format = buf.readUInt16LE(off + 8)
+      // WAVE_FORMAT_EXTENSIBLE carries the real format in its sub-format
+      // GUID, whose first two bytes are the ordinary format code
+      if (format === WAVE_FORMAT_EXTENSIBLE && size >= 26) format = buf.readUInt16LE(off + 8 + 24)
+      fmt = {
+        format,
+        channels: buf.readUInt16LE(off + 10),
+        sampleRate: buf.readUInt32LE(off + 12),
+        bits: buf.readUInt16LE(off + 22)
+      }
+    } else if (id === 'data') {
+      data = buf.subarray(off + 8, off + 8 + Math.min(size, buf.length - off - 8))
+    }
+    off += 8 + size + (size % 2)
+  }
+  if (!fmt || !data) throw new Error('missing fmt/data chunk')
+  const { format, channels, sampleRate, bits } = fmt
+  const float = format === WAVE_FORMAT_IEEE_FLOAT && bits === 32
+  if (!(float || (format === WAVE_FORMAT_PCM && bits === 16)) || channels < 1) {
+    throw new Error(`unsupported wav (format ${format}, ${bits} bit)`)
+  }
+  const bytes = bits / 8
+  const count = Math.floor(data.length / bytes)
+  // a typed view needs its offset aligned to the sample size; a chunk before
+  // `data` of an odd size can leave it unaligned, and then it is copied
+  const aligned = data.byteOffset % bytes === 0 ? data : Buffer.from(data)
+  const samples = float
+    ? new Float32Array(aligned.buffer, aligned.byteOffset, count)
+    : new Int16Array(aligned.buffer, aligned.byteOffset, count)
+  const scale = float ? 1 : 1 / 32768
+  const frames = Math.floor(count / channels)
+  const mono = new Float32Array(frames)
+  for (let f = 0; f < frames; f++) {
+    let acc = 0
+    for (let c = 0; c < channels; c++) acc += samples[f * channels + c]
+    mono[f] = (acc / channels) * scale
+    if ((f & (YIELD_EVERY - 1)) === YIELD_EVERY - 1) await breathe()
+  }
+  return { sampleRate, mono }
+}
+
 /** Decode a stem (FLAC or WAV) to 16 kHz mono float samples. */
 export async function decodeVocalsMono16k(path: string): Promise<Float32Array> {
   let wavPath = path
@@ -212,15 +281,7 @@ export async function decodeVocalsMono16k(path: string): Promise<Float32Array> {
       const res = await flacToWav(path, wavPath)
       if (!res.ok) throw new Error(res.error)
     }
-    const { sampleRate, channels, samples } = parseWav(await readFile(wavPath))
-    const frames = Math.floor(samples.length / channels)
-    const mono = new Float32Array(frames)
-    for (let f = 0; f < frames; f++) {
-      let acc = 0
-      for (let c = 0; c < channels; c++) acc += samples[f * channels + c]
-      mono[f] = acc / channels / 32768
-      if ((f & (YIELD_EVERY - 1)) === YIELD_EVERY - 1) await breathe()
-    }
+    const { sampleRate, mono } = await wavToMono(await readFile(wavPath))
     return await resampleMono(mono, sampleRate, ASR_RATE)
   } finally {
     if (scratch) await rm(scratch, { recursive: true, force: true })

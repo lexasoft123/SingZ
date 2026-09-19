@@ -14,7 +14,8 @@ import {
   chunkToWav,
   decodeVocalsMono16k,
   levelEnvelope,
-  planChunks
+  planChunks,
+  wavToMono
 } from '../../src/main/vocal-chunks'
 
 const FPS = 20 // envelope frames per second
@@ -186,6 +187,108 @@ describe('decodeVocalsMono16k', () => {
       const { env, p90 } = levelEnvelope(pcm)
       expect(env.length).toBeGreaterThan(30)
       expect(p90).toBeGreaterThan(0.3)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+/**
+ * A stereo WAV of a sine in either shape a vocals stem takes: 16-bit PCM
+ * (what a split writes, and what every FLAC stem decodes to) or 32-bit float
+ * (what the lead/backing vocal split saves over stems/vocals, never converted
+ * to FLAC). Optionally with a WAVE_FORMAT_EXTENSIBLE header, and with a
+ * two-byte chunk before `data` that leaves the samples off 4-byte alignment.
+ */
+function stereoWav(opts: {
+  float: boolean
+  rate?: number
+  seconds?: number
+  hz?: number
+  extensible?: boolean
+  misaligned?: boolean
+}): Buffer {
+  const { float, rate = 16000, seconds = 1, hz = 440, extensible = false, misaligned = false } = opts
+  const n = Math.floor(rate * seconds)
+  const bytes = float ? 4 : 2
+  const fmtSize = extensible ? 40 : 16
+  const dataLen = n * 2 * bytes
+  const buf = Buffer.alloc(12 + 8 + fmtSize + (misaligned ? 10 : 0) + 8 + dataLen)
+  buf.write('RIFF', 0)
+  buf.writeUInt32LE(buf.length - 8, 4)
+  buf.write('WAVE', 8)
+  let o = 12
+  buf.write('fmt ', o)
+  buf.writeUInt32LE(fmtSize, o + 4)
+  buf.writeUInt16LE(extensible ? 0xfffe : float ? 3 : 1, o + 8)
+  buf.writeUInt16LE(2, o + 10)
+  buf.writeUInt32LE(rate, o + 12)
+  buf.writeUInt32LE(rate * 2 * bytes, o + 16)
+  buf.writeUInt16LE(2 * bytes, o + 20)
+  buf.writeUInt16LE(bytes * 8, o + 22)
+  if (extensible) {
+    buf.writeUInt16LE(22, o + 24) // cbSize
+    buf.writeUInt16LE(bytes * 8, o + 26) // valid bits
+    buf.writeUInt32LE(3, o + 28) // channel mask: front left + right
+    buf.writeUInt16LE(float ? 3 : 1, o + 32) // the sub-format GUID's leading code
+  }
+  o += 8 + fmtSize
+  if (misaligned) {
+    buf.write('junk', o)
+    buf.writeUInt32LE(2, o + 4)
+    o += 10
+  }
+  buf.write('data', o)
+  buf.writeUInt32LE(dataLen, o + 4)
+  o += 8
+  for (let i = 0; i < n; i++) {
+    const v = Math.sin((2 * Math.PI * hz * i) / rate) * 0.8
+    for (let c = 0; c < 2; c++) {
+      const at = o + (i * 2 + c) * bytes
+      if (float) buf.writeFloatLE(v, at)
+      else buf.writeInt16LE(Math.round(v * 32767), at)
+    }
+  }
+  return buf
+}
+
+/**
+ * The lead/backing vocal split saves a 32-bit float WAV over stems/vocals,
+ * and a 16-bit-only reader threw on it — so both Qwen tiers fell back to
+ * whisper on every lead-separated song and said nothing.
+ */
+describe('wavToMono', () => {
+  it('reads the float stem a lead/backing split saves, the same as the 16-bit one', async () => {
+    const pcm = await wavToMono(stereoWav({ float: false }))
+    const flt = await wavToMono(stereoWav({ float: true }))
+    expect(flt.sampleRate).toBe(pcm.sampleRate)
+    expect(flt.mono.length).toBe(pcm.mono.length)
+    let worst = 0
+    for (let i = 0; i < pcm.mono.length; i++) worst = Math.max(worst, Math.abs(pcm.mono[i] - flt.mono[i]))
+    expect(worst).toBeLessThan(1e-4) // what 16-bit quantization costs, no more
+    expect(rms(flt.mono)).toBeGreaterThan(0.4)
+  })
+
+  it('reads an extensible header, and samples a stray chunk has pushed off alignment', async () => {
+    const plain = await wavToMono(stereoWav({ float: true }))
+    const awkward = await wavToMono(stereoWav({ float: true, extensible: true, misaligned: true }))
+    expect(awkward.mono).toEqual(plain.mono)
+  })
+
+  it('refuses a format it would have to guess at, by name', async () => {
+    const pcm24 = stereoWav({ float: false })
+    pcm24.writeUInt16LE(24, 34) // bits per sample
+    await expect(wavToMono(pcm24)).rejects.toThrow('unsupported wav (format 1, 24 bit)')
+  })
+
+  it('decodes the float stem end to end — the file both Qwen tiers read', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'singz-chunks-test-'))
+    try {
+      const path = join(dir, 'vocals.wav')
+      await writeFile(path, stereoWav({ float: true, rate: 48000, seconds: 1 }))
+      const pcm = await decodeVocalsMono16k(path)
+      expect(pcm.length).toBeCloseTo(ASR_RATE, -2)
+      expect(rms(pcm)).toBeGreaterThan(0.4)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
