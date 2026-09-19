@@ -36,15 +36,19 @@ require('../../shared/watchdog.cjs').arm('space-focus-e2e')
 
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
-const { readFileSync, writeFileSync, existsSync } = require('node:fs')
+const { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } = require('node:fs')
 const { join } = require('node:path')
-const { homedir } = require('node:os')
+const { homedir, tmpdir } = require('node:os')
 
 const ROOT =
   process.env.E2E_PROJECTS_ROOT ??
   join(homedir(), 'Library/Mobile Documents/com~apple~CloudDocs/SingZ')
 const SONG = process.env.E2E_SONG ?? 'Mein Teil'
 const SONG_PJ = join(ROOT, SONG, 'project.json')
+// A library named explicitly (a staged one, on the field laptop) is opened
+// through a throwaway profile whose settings name it — the harness's way —
+// since the app otherwise lists whatever library its own profile points at.
+const PROFILE = process.env.E2E_PROJECTS_ROOT ? join(tmpdir(), `space-focus-userdata-${process.pid}`) : null
 const APP = join(__dirname, '..', '..', '..', 'out', 'main', 'index.js')
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -79,6 +83,10 @@ async function spaceToggles(win) {
   const backup = readFileSync(SONG_PJ, 'utf8')
   const fail = []
   let inconclusive = null
+  if (PROFILE) {
+    mkdirSync(PROFILE, { recursive: true })
+    writeFileSync(join(PROFILE, 'settings.json'), JSON.stringify({ projectsRoot: ROOT }, null, 2))
+  }
   const app = await _electron.launch({
     executablePath: require('electron'),
     args: [APP],
@@ -89,7 +97,8 @@ async function spaceToggles(win) {
       SINGZ_MUTE: '1',
       SINGZ_E2E_HIDDEN: '1',
       SINGZ_NO_SYNC: '1',
-      SINGZ_E2E_HOOKS: '1'
+      SINGZ_E2E_HOOKS: '1',
+      ...(PROFILE ? { SINGZ_USERDATA_DIR: PROFILE } : {})
     }
   })
   await quietLaunch(app) // measurement runs must not steal the singer's focus
@@ -106,6 +115,10 @@ async function spaceToggles(win) {
     // the metronome's clicks bypass the master bus
     await val(win, '__test.setMetCfg(Object.assign({}, __test.met, { volume: 0 }))')
     if (await playing(win)) throw new Error('the song is already playing after the open')
+    // A dialog over the song screen owns every key by design, so every leg
+    // below would read as the bug — refuse rather than report it.
+    const dialog = await val(win, '(document.querySelector(\'[role="dialog"]\')?.getAttribute("aria-label")) ?? (document.querySelector(\'[role="dialog"]\') ? "unnamed" : null)')
+    if (dialog) throw new Error(`a dialog (${dialog}) is open over the song screen — close it first`)
 
     // ── 1. Mute, then Space ─────────────────────────────────────────────
     const mute = win.locator('button.chip.mute').first()
@@ -171,6 +184,16 @@ async function spaceToggles(win) {
   } finally {
     await app.close().catch(() => {})
     writeFileSync(SONG_PJ, backup)
+    // Chromium's children can still hold the fresh profile a moment after
+    // close (Defender scans new files too) — a cleanup failure must never
+    // decide the result
+    if (PROFILE) {
+      try {
+        rmSync(PROFILE, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+      } catch (e) {
+        console.log(`(left ${PROFILE}: ${e.message})`)
+      }
+    }
   }
 
   if (fail.length) {
