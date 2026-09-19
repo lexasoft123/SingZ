@@ -787,6 +787,8 @@ export default function App(): React.JSX.Element {
     models: import('../../shared/types').ModelInfo[]
     origin: 'auto' | 'manual'
     focusModel?: import('../../shared/types').ModelId
+    /** A line above the rows saying why the wizard opened by itself. */
+    notice?: string
   } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [playing, setPlaying] = useState(false)
@@ -1395,9 +1397,24 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     void window.singz.appVersion().then(setVer)
     void window.singz.checkEngine().then(setEngineStatus)
-    // First-run setup: open when something required is missing.
-    void window.singz.modelsStatus().then((models) => {
-      if (models.some((m) => m.required && !m.present)) setWizard({ models, origin: 'auto' })
+    // First-run setup: open when something required is missing. Otherwise,
+    // once, the Qwen3-ASR offer to a machine that transcribed with whisper —
+    // after a required download rather than on top of it, so a launch that
+    // needs the splitter asks about that alone and this waits for the next.
+    void window.singz.modelsStatus().then(async (models) => {
+      if (models.some((m) => m.required && !m.present)) {
+        setWizard({ models, origin: 'auto' })
+        return
+      }
+      if (!(await window.singz.qwenOffer())) return
+      setWizard({
+        models,
+        origin: 'manual',
+        focusModel: 'qwen-asr',
+        notice:
+          'Lyrics transcription and Check & align now use Qwen3-ASR, a speech model trained on singing — it hears sung words markedly better than the old one. Get it below when it suits you; the old model is removed once it is in.'
+      })
+      void window.singz.dismissQwenOffer()
     })
   }, [])
 
@@ -2456,20 +2473,20 @@ export default function App(): React.JSX.Element {
     setEditingLyrics(false)
   }, [song?.path])
 
-  const preferRef = useRef<'auto' | 'whisper' | 'align' | 'precise'>('auto')
+  const preferRef = useRef<'auto' | 'transcribe' | 'align' | 'precise'>('auto')
   const prepLyricsRef = useRef<
-    ((allowDownload?: boolean, prefer?: 'auto' | 'whisper' | 'align' | 'precise') => Promise<void>) | null
+    ((allowDownload?: boolean, prefer?: 'auto' | 'transcribe' | 'align' | 'precise') => Promise<void>) | null
   >(null)
 
   const prepLyrics = useCallback(
-    async (allowDownload = false, prefer?: 'auto' | 'whisper' | 'align' | 'precise') => {
+    async (allowDownload = false, prefer?: 'auto' | 'transcribe' | 'align' | 'precise') => {
       if (!song) return
       if (prefer) preferRef.current = prefer
       const cur = lyricsRef.current.status
       if (!allowDownload && !prefer && (cur === 'loading' || cur === 'ready' || cur === 'consent'))
         return
       // Which song these lyrics are being looked up for. The LRCLIB ladder is
-      // several network round-trips and whisper is minutes, so the singer can
+      // several network round-trips and a transcription is minutes, so the singer can
       // well be in another song by the time it answers — and lyrics that land
       // in the wrong song are not merely drawn there: linesRef feeds
       // detectBeats' lineStarts/words, and that grid is auto-saved into the
@@ -2477,7 +2494,7 @@ export default function App(): React.JSX.Element {
       const seq = loadSeq.current
       const revision = ++lyricsRequestRevisionRef.current
       const current = (): boolean => seq === loadSeq.current && revision === lyricsRequestRevisionRef.current
-      // Ladder: cache → LRCLIB synced lyrics → whisper (with model consent).
+      // Ladder: cache → LRCLIB synced lyrics → Qwen3-ASR (with model consent).
       lyricsRef.current = { status: 'loading', progress: null }
       setLyrics(lyricsRef.current)
       const unsub = window.singz.onLyricsProgress((p) => {
@@ -2789,7 +2806,7 @@ export default function App(): React.JSX.Element {
     const seq = loadSeq.current
     const path = stemPathsRef.current?.vocals ?? null
     void (async () => {
-      // The C++ core first (singz-analyze, spawned by main like whisper-cli).
+      // The C++ core first (singz-analyze, spawned by main like the lyrics engine).
       // It reads the stem FILE at the file's own rate — the same input
       // discipline melodyInput enforces below — and the parity gates hold it
       // bit-identical to the worker's TS, so which one ran is invisible in
@@ -4008,7 +4025,7 @@ export default function App(): React.JSX.Element {
                 onToggleGuide={() => handleMute('vocals', !vocalsMuted)}
                 onRetry={() => void prepLyrics()}
                 onDownloadModel={() => void prepLyrics(true)}
-                onUseWhisper={() => void prepLyrics(false, 'whisper')}
+                onTranscribe={() => void prepLyrics(false, 'transcribe')}
                 onRefineTiming={() => void prepLyrics(false, 'align')}
                 onPreciseAlign={preciseCap ? () => void prepLyrics(false, 'precise') : null}
                 onEdit={() => {
@@ -4107,7 +4124,13 @@ export default function App(): React.JSX.Element {
       )}
 
       {wizard && (
-        <SetupWizard models={wizard.models} origin={wizard.origin} focusModel={wizard.focusModel} onClose={closeWizard} />
+        <SetupWizard
+          models={wizard.models}
+          origin={wizard.origin}
+          focusModel={wizard.focusModel}
+          notice={wizard.notice}
+          onClose={closeWizard}
+        />
       )}
 
       {showLog && (

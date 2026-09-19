@@ -55,7 +55,7 @@ than the current one. `PACK_FORMAT_REQUIRED` (`src/main/models.ts`) is the same
 contract for pack contents.
 
 **A long job must not outlive the song it was started for.** Anything that resolves
-after seconds (pYIN, whisper, beats, downloads) and then writes must capture
+after seconds (pYIN, Qwen transcription, beats, downloads) and then writes must capture
 `loadSeq.current` when it starts and drop its result if that changed. A late result is
 not merely drawn in the wrong song — it is auto-saved into it. Two field projects were
 found carrying a neighbour's melody byte for byte.

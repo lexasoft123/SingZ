@@ -6,6 +6,8 @@ interface Props {
   models: ModelInfo[]
   origin: 'auto' | 'manual'
   focusModel?: ModelId
+  /** Why the wizard opened by itself, when it did — shown above the rows. */
+  notice?: string
   onClose: () => void
 }
 
@@ -21,7 +23,7 @@ export function setupWizardCloseAction(
  * (auto origin); optional packs have their own Get button. Everything lands
  * in the shared local cache with per-model progress.
  */
-export default function SetupWizard({ models: initial, origin, focusModel, onClose }: Props): React.JSX.Element {
+export default function SetupWizard({ models: initial, origin, focusModel, notice, onClose }: Props): React.JSX.Element {
   const focusRow = useRef<HTMLDivElement>(null)
   useEffect(() => { focusRow.current?.scrollIntoView({ block: 'nearest' }) }, [focusModel])
   const [models, setModels] = useState(initial)
@@ -84,14 +86,24 @@ export default function SetupWizard({ models: initial, origin, focusModel, onClo
           SingZ runs its AI locally. Models download once into a shared folder and are reused for
           every song.
         </p>
+        {notice && (
+          <p className="wiz-notice" role="status" data-testid="wiz-notice">
+            {notice}
+          </p>
+        )}
         <div className="wiz-rows">
           {models.map((m) => {
             const isRunning = running.has(m.id)
             const pct = progress[m.id] ?? 0
             const targets: ModelId[] = [m.id]
-            const downloadMb = m.sizeMb
+            const downloadMb = m.downloadMb
             return (
-              <div key={m.id} ref={m.id === focusModel ? focusRow : undefined} data-model-id={m.id} className={`wiz-row${m.present ? ' done' : ''}`}>
+              <div
+                key={m.id}
+                ref={m.id === focusModel ? focusRow : undefined}
+                data-model-id={m.id}
+                className={`wiz-row${m.present ? ' done' : ''}${notice && m.id === focusModel && !m.present ? ' attention' : ''}`}
+              >
                 <div className="wiz-head">
                   <span className="wiz-name">{m.label}</span>
                   {m.present && !isRunning ? (

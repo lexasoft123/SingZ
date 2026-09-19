@@ -214,8 +214,8 @@ The key is in **both** files on purpose. electron-builder hands
 `entitlements.mac.plist` to the main executable alone and the inherit file
 to every other Mach-O `@electron/osx-sign` finds under `Contents/` — the
 helper apps, the frameworks, and the vendored engines under
-`Resources/engines/` (`singz-analyze`, `whisper-cli`, `singz-capture.node`),
-each signed with the `runtime` flag. The training microphone is opened by a
+`Resources/engines/` (`singz-analyze`, the lyrics engines `llama-server` and
+`crispasr`, `singz-capture.node`), each signed with the `runtime` flag. The training microphone is opened by a
 child process (`singz-analyze live-input`, spawned by
 `src/main/audio-input.ts`), the pitch strip's `getUserMedia` by Chromium's
 audio service, and the Settings meter by the addon loaded into main. Which
@@ -286,18 +286,26 @@ as a Developer ID load unless it ran through the notarized packaged app.
 
 The subprocess risk this section used to flag did **not** materialize.
 `electron-builder` deep-signs the whole bundle including the vendored
-`whisper-cli` and `singz-analyze` under `extraResources`, and Apple's notary
-service accepted them without complaint on every proving run. The capture
-addon joins that signed bundle now, but unlike a spawned executable it must
-also pass the real-app load gate above. A notary rejection names the failing
+executables under `extraResources` — on every proving run those were
+`whisper-cli` (the lyrics engine then) and `singz-analyze` — and Apple's
+notary service accepted them without complaint. Whisper has since been
+replaced by `llama-server` and `crispasr`, signed the same way; no tagged
+release had carried them when this was written, so their first notarized
+release is the one to watch. The capture addon joins that signed bundle now,
+but unlike a spawned executable it must also pass the real-app load gate
+above. A notary rejection names the failing
 path under `engines/` ("not signed with a valid Developer ID certificate" /
 "missing a secure timestamp"), and electron-builder logs that output to the
 job log either way — still the first place to look.
 
 What DID bite on the way there is recorded above: the `CSC_LINK` keychain-
 password bug, and a dangling absolute symlink in the bundle when packaging
-from a git worktree (`vendor/darwin-<arch>/whisper-cli` is a link to the main
+from a git worktree (`vendor/darwin-<arch>/whisper-cli` was a link to the main
 checkout, and `codesign --strict` rejects it — see the note in `CLAUDE.md`).
+The trap outlived whisper: it applies to whichever third-party engines a
+worktree links from main, today `llama-server` and `crispasr`, and what
+defuses it is `scripts/afterPack.cjs` copying every linked engine into the
+bundle before signing (`materializeLinkedEngines`).
 
 The dmg itself is neither signed nor stapled, and that is expected:
 electron-builder notarizes and staples the `.app`, then builds the dmg around

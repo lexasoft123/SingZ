@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build llama.cpp's llama-server into vendor/<platform>-<arch>/ for bundling.
-# This is the Qwen3-ASR engine (audio in through mtmd); whisper-cli remains the
-# default recogniser and is built by vendor-whisper.sh.
+# This is the Qwen3-ASR engine (audio in through mtmd) — the app's only lyrics
+# recogniser; vendor-crispasr.sh builds its word aligner.
 # Usage: scripts/vendor-llama.sh [target]   e.g. darwin-arm64, darwin-x64, win32-x64
 set -euo pipefail
 

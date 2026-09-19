@@ -64,13 +64,12 @@ jobs:
         run: |
           # This job exercises capture packaging, not the unrelated downloaded
           # engines. Identical inert files satisfy extraResources without
-          # pretending whisper/analyze themselves were tested here.
+          # pretending the analyzer itself was tested here.
           for target in darwin-arm64 darwin-x64; do
             mkdir -p "vendor/$target"
-            printf '#!/bin/sh\nexit 1\n' > "vendor/$target/whisper-cli"
             printf '#!/bin/sh\nexit 1\n' > "vendor/$target/singz-analyze"
             printf 'capture-package-check\n' > "vendor/$target/singz-analyze.source-hash"
-            chmod +x "vendor/$target/whisper-cli" "vendor/$target/singz-analyze"
+            chmod +x "vendor/$target/singz-analyze"
           done
           npm run dist -- --mac --universal --dir
           ADDON=dist/mac-universal/SingZ.app/Contents/Resources/engines/singz-capture.node
@@ -119,7 +118,6 @@ jobs:
         shell: bash
         run: |
           mkdir -p vendor/win32-x64
-          printf 'inert capture-package check\n' > vendor/win32-x64/whisper-cli
           printf 'inert capture-package check\n' > vendor/win32-x64/singz-analyze
           printf 'capture-package-check\n' > vendor/win32-x64/singz-analyze.source-hash
           npm run dist -- --win --x64 --dir

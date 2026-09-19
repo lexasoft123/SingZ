@@ -193,6 +193,8 @@ export async function cleanupObsoleteModels(): Promise<void> {
       log('models', `removed obsolete ${name}`)
     }
   }
+  // Whisper's model, once Qwen has replaced it (see removeWhisperIfQwenReady).
+  await removeWhisperIfQwenReady()
   // The side-loaded onnxruntime is a directory, not a file.
   const runtime = join(modelsDir(), 'vocal-runtime-1.28.0')
   if (await exists(runtime)) {
@@ -249,8 +251,8 @@ export async function downloadFile(
     // just ends — so without this the half file is renamed over the model and
     // reads "installed" for ever after. Measured with a truncated encoder:
     // llama-server exits 1 on every run, the tile still says installed, and
-    // the singer is told nothing (today it silently falls back to whisper;
-    // once whisper is gone there is nothing to fall back to).
+    // the singer is told nothing — and there is no second lyrics engine to
+    // fall back to.
     if (declared && got !== declared) {
       throw new Error(
         `the download ${got < declared ? 'stopped short' : 'overran'} — ${(got / 1e6).toFixed(
@@ -306,8 +308,6 @@ interface RegistryEntry {
   parts?: { file: string; url: string; sizeMb: number }[]
   optional: boolean
   platforms?: string[]
-  /** Offered only when this says so — for a model whose engine is not reachable yet. */
-  gated?: () => boolean
 }
 
 /**
@@ -349,10 +349,6 @@ export function mmsModelUrl(): string {
 const QWEN_MODEL_FILE = 'Qwen3-ASR-1.7B-Q8_0.gguf'
 const QWEN_MMPROJ_FILE = 'mmproj-Qwen3-ASR-1.7B-Q8_0.gguf'
 const QWEN_BASE = 'https://huggingface.co/ggml-org/Qwen3-ASR-1.7B-GGUF/resolve/main'
-const QWEN_PARTS = [
-  { file: QWEN_MODEL_FILE, url: `${QWEN_BASE}/${QWEN_MODEL_FILE}`, sizeMb: 2165 },
-  { file: QWEN_MMPROJ_FILE, url: `${QWEN_BASE}/${QWEN_MMPROJ_FILE}`, sizeMb: 356 }
-]
 /**
  * Qwen3-ForcedAligner-0.6B, which gives Qwen's words their times. Q8_0: the
  * quantizations differ by at most one 80 ms alignment class, and q8 is the
@@ -360,6 +356,141 @@ const QWEN_PARTS = [
  */
 const QWEN_ALIGNER_FILE = 'qwen3-forced-aligner-0.6b-q8_0.gguf'
 const QWEN_ALIGNER_MB = 990
+/**
+ * The lyrics speech model, as the three files it is: the recogniser, its
+ * audio encoder, and the aligner that gives its words their times. ONE tile
+ * and one download, because the recogniser hears words but tells no time —
+ * a singer holding only one of the two could use neither, and two tiles
+ * invited exactly that.
+ */
+const QWEN_PARTS = [
+  { file: QWEN_MODEL_FILE, url: `${QWEN_BASE}/${QWEN_MODEL_FILE}`, sizeMb: 2165 },
+  { file: QWEN_MMPROJ_FILE, url: `${QWEN_BASE}/${QWEN_MMPROJ_FILE}`, sizeMb: 356 },
+  {
+    file: QWEN_ALIGNER_FILE,
+    url: `https://huggingface.co/cstr/qwen3-forced-aligner-0.6b-GGUF/resolve/main/${QWEN_ALIGNER_FILE}`,
+    sizeMb: QWEN_ALIGNER_MB
+  }
+]
+export function qwenModelMb(): number {
+  return QWEN_PARTS.reduce((s, p) => s + p.sizeMb, 0)
+}
+
+/**
+ * Whisper, which Qwen replaced as the lyrics engine. Every whisper.cpp model
+ * is a `ggml-<name>.bin` in this folder — the sizes the old downloader
+ * fetched, and any other a SINGZ_WHISPER_MODEL run left behind (a 3 GB
+ * large-v3 was found on a dev machine) — plus their partial files. Nothing
+ * else here is named that way any more: the one other ggml model, demucs.cpp's,
+ * was already swept as obsolete.
+ */
+const WHISPER_MODEL = /^ggml-.+\.bin(\.part)?$/
+
+async function whisperModelFiles(): Promise<string[]> {
+  try {
+    return (await readdir(modelsDir())).filter((name) => WHISPER_MODEL.test(name))
+  } catch {
+    return []
+  }
+}
+
+/** What is still to download of the lyrics speech model, in MB — what the consent card quotes. */
+export async function qwenMissingMb(): Promise<number> {
+  let mb = 0
+  for (const part of QWEN_PARTS) {
+    if (!(await exists(join(modelsDir(), part.file)))) mb += part.sizeMb
+  }
+  return mb
+}
+
+/** Every part of the lyrics speech model is on disk. */
+export async function qwenInstalled(): Promise<boolean> {
+  for (const part of QWEN_PARTS) {
+    if (!(await exists(join(modelsDir(), part.file)))) return false
+  }
+  return true
+}
+
+/** A whisper model is still on disk — this machine used on-device lyrics before. */
+export async function whisperModelOnDisk(): Promise<boolean> {
+  return (await whisperModelFiles()).some((name) => !name.endsWith('.part'))
+}
+
+/**
+ * Remove the whisper model once Qwen can do its job, and not before: until
+ * the Qwen download has landed a singer who postponed it has lost nothing,
+ * and the 1.6 GB is freed the moment it is no longer the only copy of
+ * anything they chose to download. Called at startup and after every
+ * install, so it happens whichever way Qwen arrived.
+ *
+ * Best-effort, and it never throws: one caller runs at startup before the
+ * window exists, and the others would report a Qwen install that landed as
+ * one that failed. On Windows an older SingZ sharing this folder can hold a
+ * whisper model open while it loads, and the unlink then fails with EBUSY —
+ * that file simply goes on a later launch.
+ */
+export async function removeWhisperIfQwenReady(): Promise<void> {
+  try {
+    if (!(await qwenInstalled())) return
+    for (const name of await whisperModelFiles()) {
+      try {
+        await rm(join(modelsDir(), name), { force: true })
+        log('models', `removed ${name} — lyrics use Qwen3-ASR now`)
+      } catch (err) {
+        log('models', `could not remove ${name} yet (${String(err)}) — trying again next launch`, 'warn')
+      }
+    }
+  } catch (err) {
+    log('models', `whisper cleanup skipped: ${String(err)}`, 'warn')
+  }
+}
+
+/**
+ * Download whatever parts of a multi-file model are missing, as one progress
+ * bar weighted by size. `keepExisting` keeps a part that already arrived — a
+ * multi-GB install that dies on its second file must not refetch the first on
+ * every retry — and is false only for a Reinstall, which must refetch.
+ */
+async function downloadParts(
+  parts: { file: string; url: string; sizeMb: number }[],
+  keepExisting: boolean,
+  onPct: (pct: number) => void,
+  signal: AbortSignal,
+  onPart?: (file: string) => void
+): Promise<void> {
+  const total = parts.reduce((s, p) => s + p.sizeMb, 0)
+  let done = 0
+  for (const part of parts) {
+    if (keepExisting && (await exists(join(modelsDir(), part.file)))) {
+      done += part.sizeMb
+      onPct((done / total) * 100)
+      continue
+    }
+    await downloadFile(
+      part.url,
+      join(modelsDir(), part.file),
+      part.sizeMb * 1e6,
+      (pct) => onPct(((done + (pct / 100) * part.sizeMb) / total) * 100),
+      signal
+    )
+    done += part.sizeMb
+    onPart?.(part.file)
+  }
+}
+
+/**
+ * Fetch the lyrics speech model from inside a lyrics job — the consent card's
+ * Download — rather than through the model manager. Only the missing parts
+ * move, and the whisper model goes once all of them are in.
+ */
+export async function downloadQwen(onPct: (pct: number) => void, signal: AbortSignal): Promise<void> {
+  await downloadParts(QWEN_PARTS, true, onPct, signal, (file) =>
+    log('models', `qwen-asr part installed (${file})`)
+  )
+  log('models', 'qwen-asr installed')
+  await removeWhisperIfQwenReady()
+}
+
 export function qwenAlignerPath(): string {
   return join(modelsDir(), QWEN_ALIGNER_FILE)
 }
@@ -395,31 +526,14 @@ const REGISTRY: RegistryEntry[] = [
     platforms: ['darwin-arm64', 'darwin-x64', 'win32-x64']
   },
   {
-    id: 'whisper',
+    id: 'qwen-asr',
     label: 'Speech model · lyrics',
     description:
-      'Hears the vocals: transcribes lyrics when none are online, and checks & aligns downloaded lyrics against what is actually sung.',
-    sizeMb: 1620,
-    kind: 'file',
-    file: 'ggml-large-v3-turbo.bin',
-    url: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin',
-    optional: true
-  },
-  {
-    id: 'qwen-asr',
-    label: 'Speech model · sung lyrics',
-    description:
-      'Hears sung words the speech model mishears, in 30 languages — trained on singing rather than speech. Needs the precise word aligner for timing.',
-    sizeMb: QWEN_PARTS.reduce((s, p) => s + p.sizeMb, 0),
+      'Hears the vocals: transcribes lyrics when none are online, and checks & aligns downloaded lyrics against what is actually sung. Trained on singing, in 30 languages, with its own word aligner.',
+    sizeMb: qwenModelMb(),
     kind: 'file',
     parts: QWEN_PARTS,
-    optional: true,
-    // The engine now ships in extraResources, but nothing in a shipped build
-    // SELECTS it: SINGZ_ASR=qwen is still the only switch, and no UI sets it.
-    // An offered tile would download 2.5 GB that can never be used, beside a
-    // near-identically named one that works — so it stays hidden until
-    // something other than an env var chooses the engine.
-    gated: () => process.env.SINGZ_ASR === 'qwen'
+    optional: true
   },
   {
     id: 'aligner',
@@ -432,18 +546,6 @@ const REGISTRY: RegistryEntry[] = [
     url: 'https://dl.fbaipublicfiles.com/mms/torchaudio/ctc_alignment_mling_uroman/model.pt',
     optional: true,
     platforms: ['darwin-arm64']
-  },
-  {
-    id: 'qwen-aligner',
-    label: 'Word timing · sung lyrics',
-    description:
-      'Gives every word of a sung lyric its moment, without the stem splitter. Pairs with the sung-lyrics speech model.',
-    sizeMb: QWEN_ALIGNER_MB,
-    kind: 'file',
-    file: QWEN_ALIGNER_FILE,
-    url: `https://huggingface.co/cstr/qwen3-forced-aligner-0.6b-GGUF/resolve/main/${QWEN_ALIGNER_FILE}`,
-    optional: true,
-    gated: () => process.env.SINGZ_ASR === 'qwen'
   },
   {
     id: 'aligner',
@@ -460,9 +562,7 @@ const REGISTRY: RegistryEntry[] = [
 ]
 
 function forThisPlatform(here = `${process.platform}-${process.arch}`): RegistryEntry[] {
-  return REGISTRY.filter(
-    (e) => (!e.platforms || e.platforms.includes(here)) && (!e.gated || e.gated())
-  )
+  return REGISTRY.filter((e) => !e.platforms || e.platforms.includes(here))
 }
 
 /**
@@ -615,12 +715,23 @@ export class ModelManager {
         label: entry.label,
         description: entry.description,
         sizeMb: entry.sizeMb,
+        downloadMb: await this.downloadMb(entry),
         present: await this.present(entry),
         optional: entry.optional,
         required: !entry.optional
       })
     }
     return out
+  }
+
+  /** What Get would fetch: the missing parts of a multi-part model, else all of it. */
+  private async downloadMb(entry: RegistryEntry): Promise<number> {
+    if (!entry.parts) return entry.sizeMb
+    let mb = 0
+    for (const part of entry.parts) {
+      if (!(await exists(join(modelsDir(), part.file)))) mb += part.sizeMb
+    }
+    return mb > 0 ? mb : entry.sizeMb
   }
 
   async downloadModels(
@@ -639,33 +750,15 @@ export class ModelManager {
         if (!entry) continue
         onProgress({ id: entry.id, percent: 0 })
         if (entry.kind === 'file' && entry.parts) {
-          // one bar across every part, weighted by size
-          const total = entry.parts.reduce((s, p) => s + p.sizeMb, 0)
-          let done = 0
-          for (const part of entry.parts) {
-            // A part that already arrived is kept: without this, a multi-GB
-            // install that dies on its second file re-downloads the first one
-            // on every retry, which on a metered connection never finishes.
-            // Reinstall is the one case that must refetch, and it is told
-            // apart by the entry's own state rather than by `ids` — the
-            // wizard sends an explicit id array for Get, Reinstall and the
-            // first-run pass alike, so `ids` distinguishes nothing. A tile
-            // only offers Reinstall once it reads installed, i.e. m.present.
-            if (!m.present && (await exists(join(modelsDir(), part.file)))) {
-              done += part.sizeMb
-              onProgress({ id: entry.id, percent: (done / total) * 100 })
-              continue
-            }
-            await downloadFile(
-              part.url,
-              join(modelsDir(), part.file),
-              part.sizeMb * 1e6,
-              (pct) => onProgress({ id: entry.id, percent: ((done + (pct / 100) * part.sizeMb) / total) * 100 }),
-              this.abort.signal
-            )
-            done += part.sizeMb
-            log('models', `${entry.id} part installed (${part.file})`)
-          }
+          // A tile only offers Reinstall once it reads installed, so a part
+          // already on disk is kept exactly when the tile is not present yet.
+          await downloadParts(
+            entry.parts,
+            !m.present,
+            (pct) => onProgress({ id: entry.id, percent: pct }),
+            this.abort.signal,
+            (file) => log('models', `${entry.id} part installed (${file})`)
+          )
           onProgress({ id: entry.id, percent: 100 })
         } else if (entry.kind === 'file') {
           await downloadFile(
@@ -703,6 +796,7 @@ export class ModelManager {
           onProgress({ id: entry.id, percent: 100 })
         }
       }
+      await removeWhisperIfQwenReady()
       return { ok: true }
     } catch (err) {
       const cancelled = this.abort?.signal.aborted ?? false

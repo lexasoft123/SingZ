@@ -42,7 +42,7 @@ interface Props {
   onToggleGuide: () => void
   onRetry: () => void
   onDownloadModel: () => void
-  onUseWhisper: () => void
+  onTranscribe: () => void
   onRefineTiming: () => void
   /** CTC forced alignment through the splitter pack (null = unavailable here). */
   onPreciseAlign: (() => void) | null
@@ -57,10 +57,11 @@ interface Props {
  * rest — the sweep runs through it so the fill never freezes mid-line. Longer
  * gaps are a real breath or a held note: the word stays lit instead of
  * crawling across the silence. (LRC word times are contiguous by
- * construction, so this only ever engages on whisper/CTC timings.)
+ * construction, so this only ever engages on aligner timings.)
  */
 const WORD_BRIDGE_S = 0.35
-/** Whisper -ml 1 can emit e <= s; never divide by zero or sweep backwards. */
+/** A word can arrive with e <= s (whisper -ml 1 wrote such words into older
+ *  lyrics.json files); never divide by zero or sweep backwards. */
 const MIN_WORD_S = 0.05
 
 /** Per word, the moment its sweep should reach the end of the glyphs. */
@@ -98,7 +99,7 @@ export default function LyricsPanel({
   onToggleGuide,
   onRetry,
   onDownloadModel,
-  onUseWhisper,
+  onTranscribe,
   onRefineTiming,
   onPreciseAlign,
   onEdit,
@@ -348,13 +349,13 @@ export default function LyricsPanel({
               <button
                 type="button"
                 className="chip"
-                title="Listen to the vocals with Whisper and transcribe the lyrics from the recording itself"
+                title="Listen to the vocals with Qwen3-ASR and transcribe the lyrics from the recording itself"
                 onClick={() => {
                   // Back to the lyrics view first: progress, the model-consent
                   // card and the result all live there — staying on the search
                   // list made this action look dead while it worked underneath.
                   setView('lyrics')
-                  onUseWhisper()
+                  onTranscribe()
                 }}
               >
                 ✦ AI transcription
@@ -406,9 +407,9 @@ export default function LyricsPanel({
                   </p>
                 ) : (
                   <p>
-                    SingZ listens to the vocals with <strong>Whisper</strong>, running entirely on
-                    your machine — to transcribe lyrics when none are online, and to check &amp;
-                    align the ones that are.
+                    SingZ listens to the vocals with <strong>Qwen3-ASR</strong>, a speech model
+                    trained on singing, running entirely on your machine — to transcribe lyrics when
+                    none are online, and to check &amp; align the ones that are.
                   </p>
                 )}
                 <p className="fine">

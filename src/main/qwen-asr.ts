@@ -13,17 +13,18 @@ import type { LyricLine } from '../shared/types'
 /**
  * Qwen3-ASR (1.7B, Apache-2.0) through llama.cpp's `llama-server`.
  *
- * Why a second engine at all — measured over the whole catalog on 2026-09-17,
- * against whisper large-v3-turbo with the app's own flags:
+ * Why it replaced whisper as the app's only lyrics engine — measured over the
+ * whole catalog on 2026-09-17, against whisper large-v3-turbo with the app's
+ * own flags:
  *
  *                     with lyrics        no lyrics       junk phrases
  *   whisper turbo     WER 0.211          WER 0.278       55
  *   Qwen3-ASR 1.7B    WER 0.162          WER 0.167        0
  *
- * and it is FASTER where it matters least on this Mac but most in the field:
- * on the Windows field laptop (4-core Haswell, no usable GPU — llama.cpp's
- * Vulkan build wants 1.2, that machine's driver caps at 1.1) Qwen runs at
- * 0.82x real time against whisper's 1.91x.
+ * and it is FASTER where it matters most, in the field: on the Windows field
+ * laptop (4-core Haswell, no usable GPU — llama.cpp's Vulkan build wants 1.2,
+ * that machine's driver caps at 1.1) Qwen took 0.82x the song's length
+ * against whisper's 1.91x.
  *
  * Three things about this port are load-bearing, all found by measurement:
  *
@@ -76,7 +77,7 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-/** Bundled-first, exactly like the whisper engine: resources → dev vendor → env. */
+/** Bundled-first: packaged resources → dev vendor dir → env override. */
 export async function resolveQwenServer(): Promise<string | null> {
   if (process.env.SINGZ_LLAMA_SERVER) return process.env.SINGZ_LLAMA_SERVER
   const target = `${process.platform}-${process.arch}`
@@ -154,9 +155,9 @@ export function majorityLanguage(chunks: QwenChunkText[]): string | null {
  * chunk it came from. Good enough to draw and to hand to a forced aligner,
  * which is what replaces these times with real ones.
  *
- * Lines break at sentence punctuation and at ten words, the same shape
- * `groupWords` gives whisper's output, so the two engines produce lyrics that
- * look alike on screen.
+ * Lines break at sentence punctuation and at ten words — the shape whisper's
+ * lines had before Qwen replaced it, so a song transcribed by either looks
+ * alike on screen.
  */
 export function linesFromChunks(chunks: QwenChunkText[]): LyricLine[] {
   const lines: LyricLine[] = []

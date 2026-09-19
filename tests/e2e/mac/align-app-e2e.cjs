@@ -3,7 +3,7 @@
  * then "Precise" through the actual UI, verifies verdicts + persisted cache.
  * Permanent harness used by the e2e-verifier agent.
  *
- * Prereqs: `npm run build` done; whisper model + MMS checkpoint + GPU pack
+ * Prereqs: `npm run build` done; the Qwen3-ASR speech model + MMS checkpoint + GPU pack
  * installed under ~/Library/Application Support/SingZ/; no other app
  * instance running (same userData identity).
  *
