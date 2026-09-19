@@ -586,6 +586,76 @@ Rules learned the hard way:
 | `SINGZ_MUTE=1` | mute the audio device (Chromium mute-audio) — every automated driver sets it; leave unset only for a human listening |
 | `SINGZ_DEMUCS` / `SINGZ_WHISPER` | override engine command |
 | `SINGZ_WHISPER_MODEL` | whisper size (tiny/base/small/…, default large-v3-turbo) |
+| `SINGZ_ASR=qwen` | transcribe a song with no online lyrics with Qwen3-ASR instead of whisper (see below) |
+| `SINGZ_LLAMA_SERVER` | override the llama-server binary Qwen3-ASR runs through |
+| `SINGZ_CRISPASR` | override the crispasr binary the Qwen word aligner runs through |
+
+### The second recogniser (Qwen3-ASR)
+
+Whisper stays the default. `SINGZ_ASR=qwen` switches both paths that listen to
+a song onto Qwen: transcribing a song LRCLIB has nothing for, and Check &
+align. Two engines and two models sit behind it —
+Qwen3-ASR 1.7B through llama.cpp's `llama-server` (`scripts/vendor-llama.sh`,
+model id `qwen-asr`) for the words, and Qwen3-ForcedAligner 0.6B through
+CrispASR (`scripts/vendor-crispasr.sh`, model id `qwen-aligner`) for their
+times. llama.cpp carries only the ASR model, which is why the aligner is a
+second runtime rather than another flag.
+
+Check & align without whisper works like this: the recogniser is asked about
+each sung chunk, the answer says which lyric words belong to which chunk (the
+existing `globalAnchors` matcher), and the aligner then times each chunk's own
+words. Measured over the 19 catalog songs whose Precise timing is stored,
+against the whisper tier it replaces:
+
+| | Qwen ASR + Qwen aligner | whisper tier |
+|---|---|---|
+| systematic offset | −0.04 s | +0.17 s late |
+| median error | 0.08 s | 0.19 s |
+| within 0.10 s | 55% | 30% |
+| within 0.50 s | 80% | 86% |
+| phrase onsets within 0.15 s | 65% | 45% |
+
+Better on 17 of the 19, and behind in the far tail on two: a recording every
+engine mishears, and one whose verses repeat so closely that a word can be
+matched to the wrong repetition — the price of a recogniser that reports no
+times of its own. Lines the recogniser could not hear are dropped from the
+anchors and carried by the lyrics' own phrasing, which is the app's existing
+rule and what keeps those two songs from being timed against the wrong bars.
+
+Why, measured over the whole 23-song catalog on 2026-09-17 against whisper
+large-v3-turbo with the app's own flags:
+
+| | with lyrics | no lyrics | invented phrases |
+|---|---|---|---|
+| whisper turbo | WER 0.211 | WER 0.278 | 55 |
+| Qwen3-ASR 1.7B | WER 0.162 | WER 0.167 | 0 |
+
+The gap is widest exactly where this path lives: whisper decides a song's
+language from its first 30 s, so an organ or drum intro sent three catalog
+songs into the wrong language entirely (0%, 50% and 67% of their words heard;
+one came back as Russian «Продолжение следует…»). Qwen heard 88-99% of the
+same three.
+
+Four things are worth knowing before touching this code:
+
+- **It hears words but tells no time.** The path therefore refuses to run
+  unless the precise aligner is installed, and hands it Qwen's text to time.
+  Without the aligner it falls back to whisper, silently and by design.
+- **Everything goes through `vocal-chunks`.** llama.cpp returns an EMPTY
+  transcription past ~2 minutes of audio in one call
+  (ggml-org/llama.cpp#21847), and silence is where every recogniser invents
+  things. 30 s pieces beat 60 s ones (WER 0.167 vs 0.202): a long piece let
+  the model skip a whole verse when a song switched language mid-piece.
+- **The model's own language label is unreliable** in this GGUF — German
+  singing comes back labelled "English" with correct German text — so only
+  "None" (no singing) is trusted, and the song's majority answer decides.
+- **A forced language loops on a chunk with nobody singing** ("oh, oh, oh…"),
+  so a looping answer is discarded for the unforced one.
+
+On the Windows field laptop (4-core Haswell) it runs at 0.82x real time
+against whisper's 1.91x — no GPU is involved on either engine there, because
+llama.cpp's Vulkan backend needs Vulkan 1.2 and that machine's GPUs top out
+at 1.1 (Kepler) or have no Windows Vulkan at all (Haswell).
 
 Full clean-OS check (as CI can't do): package with
 `npm run dist -- --mac --arm64 --dir`, then drive

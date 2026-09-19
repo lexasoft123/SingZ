@@ -1,5 +1,9 @@
-import { describe, expect, it } from 'vitest'
-import { registryEntryFor } from '../../src/main/models'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { ModelManager, registryEntryFor } from '../../src/main/models'
+import { net } from './electron-stub'
 
 // Registry ids repeat across platform flavors; resolving over the raw list
 // handed Windows the Apple-Silicon torch aligner (1.26 GB, unusable, and the
@@ -25,5 +29,159 @@ describe('registryEntryFor', () => {
 
   it('whisper is platform-neutral', () => {
     expect(registryEntryFor('whisper', 'win32-x64')?.file).toBe('ggml-large-v3-turbo.bin')
+  })
+
+  /**
+   * Two entries may share an id only when their platforms are disjoint (the
+   * torch and ONNX aligners are one tile on different machines). Two that
+   * both apply here means the wizard draws two identical tiles under one
+   * React key and `downloadModels` fetches the same file twice — which is
+   * exactly what a careless insert did to the qwen aligner.
+   */
+  it('never offers this platform two tiles with the same id', async () => {
+    const before = process.env.SINGZ_ASR
+    const dir = await mkdtemp(join(tmpdir(), 'singz-models-dup-'))
+    process.env.SINGZ_MODELS_DIR = dir
+    process.env.SINGZ_ASR = 'qwen'
+    try {
+      // status() is what the wizard renders, so it is where a duplicate shows
+      const rows = await new ModelManager().status()
+      const seen = new Map<string, number>()
+      for (const r of rows) seen.set(r.id, (seen.get(r.id) ?? 0) + 1)
+      for (const [id, n] of seen) expect(`${id} ×${n}`).toBe(`${id} ×1`)
+      expect(rows.some((r) => r.id === 'qwen-aligner')).toBe(true)
+    } finally {
+      delete process.env.SINGZ_MODELS_DIR
+      if (before === undefined) delete process.env.SINGZ_ASR
+      else process.env.SINGZ_ASR = before
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * The sung-lyrics model is 2.5 GB that no shipped build can use. The engine
+   * is packaged now, but SINGZ_ASR=qwen remains the only thing that selects
+   * it and no UI sets that. Offered anyway, the tile would sit beside the
+   * near-identically named whisper one and take a singer's download for
+   * nothing — so this gate is the whole safety of shipping the feature
+   * half-finished, and it is one line.
+   *
+   * Removing `gated` breaks this test, which is the point: whoever does it is
+   * reading this. When the gate goes, the four `|| echo "::warning::…"` lines
+   * in .github/workflows/build.yml must become fatal again. They are soft
+   * only because an unvendored engine currently means "no Qwen in this
+   * build"; once the feature is on by default it would mean "the feature is
+   * here and broken", with the singer told nothing.
+   */
+  it('offers the sung-lyrics model only where its engine can be selected', () => {
+    const before = process.env.SINGZ_ASR
+    try {
+      delete process.env.SINGZ_ASR
+      for (const here of ['win32-x64', 'darwin-arm64', 'darwin-x64']) {
+        expect(registryEntryFor('qwen-asr', here)).toBeUndefined()
+      }
+      process.env.SINGZ_ASR = 'qwen'
+      expect(registryEntryFor('qwen-asr', 'darwin-arm64')?.parts).toHaveLength(2)
+      // and the other tiles are unaffected either way
+      expect(registryEntryFor('whisper', 'darwin-arm64')?.id).toBe('whisper')
+    } finally {
+      if (before === undefined) delete process.env.SINGZ_ASR
+      else process.env.SINGZ_ASR = before
+    }
+  })
+})
+
+/**
+ * A model that is more than one file must resume. The first version of this
+ * keyed "is this a reinstall?" off the `ids` argument, which the wizard sends
+ * on every path — so the guard never ran and a 2.1 GB part was re-fetched
+ * after every failure on the 356 MB one.
+ */
+describe('multi-part model installs', () => {
+  let dir = ''
+  let asked: string[] = []
+  const DECLARED = 1000
+  let served = DECLARED
+  const fetched = (): string[] => asked.map((u) => u.split('/').pop() as string)
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'singz-models-test-'))
+    process.env.SINGZ_MODELS_DIR = dir
+    process.env.SINGZ_ASR = 'qwen'
+    asked = []
+    served = DECLARED
+    // A server that promises 1000 bytes has to hand over 1000 bytes: the old
+    // stub declared them and delivered none, which is precisely the failure
+    // downloadFile now refuses, so every test here rode on it.
+    vi.spyOn(net, 'fetch').mockImplementation((async (url: string) => {
+      asked.push(url)
+      let sent = false
+      return {
+        ok: true,
+        headers: { get: (): string => String(DECLARED) },
+        body: {
+          getReader: () => ({
+            read: async () => {
+              if (sent) return { done: true, value: undefined }
+              sent = true
+              return { done: false, value: new Uint8Array(served) }
+            }
+          })
+        }
+      }
+    }) as unknown as typeof net.fetch)
+  })
+
+  afterEach(async () => {
+    vi.restoreAllMocks()
+    delete process.env.SINGZ_MODELS_DIR
+    delete process.env.SINGZ_ASR
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('fetches every part of a fresh install', async () => {
+    const res = await new ModelManager().downloadModels(() => {}, ['qwen-asr'])
+    expect(res.ok).toBe(true)
+    expect(fetched()).toEqual(['Qwen3-ASR-1.7B-Q8_0.gguf', 'mmproj-Qwen3-ASR-1.7B-Q8_0.gguf'])
+  })
+
+  it('resumes: a part already on disk is not downloaded again', async () => {
+    await writeFile(join(dir, 'Qwen3-ASR-1.7B-Q8_0.gguf'), 'the 2.1 GB part that already arrived')
+    const res = await new ModelManager().downloadModels(() => {}, ['qwen-asr'])
+    expect(res.ok).toBe(true)
+    expect(fetched()).toEqual(['mmproj-Qwen3-ASR-1.7B-Q8_0.gguf'])
+  })
+
+  it('reinstall refetches everything, because the tile already read installed', async () => {
+    await writeFile(join(dir, 'Qwen3-ASR-1.7B-Q8_0.gguf'), 'weights')
+    await writeFile(join(dir, 'mmproj-Qwen3-ASR-1.7B-Q8_0.gguf'), 'encoder')
+    const res = await new ModelManager().downloadModels(() => {}, ['qwen-asr'])
+    expect(res.ok).toBe(true)
+    expect(fetched()).toEqual(['Qwen3-ASR-1.7B-Q8_0.gguf', 'mmproj-Qwen3-ASR-1.7B-Q8_0.gguf'])
+  })
+
+  /**
+   * A connection that drops mid-file ends the stream without an error, and
+   * the half file used to be renamed over the model: the tile read
+   * "installed", llama-server exited 1 on every run, and nothing said why.
+   * Measured against the real thing — a 2.5 GB model whose 356 MB encoder
+   * was truncated to 80% ran, failed, and fell back to whisper in silence.
+   */
+  it('refuses a body that stops early, and leaves no model behind', async () => {
+    served = 600
+    const res = await new ModelManager().downloadModels(() => {}, ['qwen-aligner'])
+    expect(res.ok).toBe(false)
+    expect(res.ok === false && res.error).toContain('stopped short')
+    // neither the model nor the .part it was written through
+    expect(await readdir(dir)).toEqual([])
+    const rows = await new ModelManager().status()
+    expect(rows.find((r) => r.id === 'qwen-aligner')?.present).toBe(false)
+  })
+
+  it('reports one bar that only goes forward across the parts', async () => {
+    const seen: number[] = []
+    await new ModelManager().downloadModels((p) => seen.push(p.percent), ['qwen-asr'])
+    expect(seen[seen.length - 1]).toBe(100)
+    for (let i = 1; i < seen.length; i++) expect(seen[i]).toBeGreaterThanOrEqual(seen[i - 1])
   })
 })

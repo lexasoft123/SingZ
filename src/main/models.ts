@@ -229,7 +229,8 @@ export async function downloadFile(
     log('models', `downloading ${url}`)
     const res = await net.fetch(url, { signal })
     if (!res.ok || !res.body) throw new Error(`download failed (HTTP ${res.status})`)
-    const total = Number(res.headers.get('content-length')) || approxBytes
+    const declared = Number(res.headers.get('content-length')) || 0
+    const total = declared || approxBytes
     const out = createWriteStream(part)
     const reader = res.body.getReader()
     let got = 0
@@ -244,6 +245,19 @@ export async function downloadFile(
       out.end(() => resolve())
       out.on('error', reject)
     })
+    // A body that stops early is not an error anywhere in fetch — the stream
+    // just ends — so without this the half file is renamed over the model and
+    // reads "installed" for ever after. Measured with a truncated encoder:
+    // llama-server exits 1 on every run, the tile still says installed, and
+    // the singer is told nothing (today it silently falls back to whisper;
+    // once whisper is gone there is nothing to fall back to).
+    if (declared && got !== declared) {
+      throw new Error(
+        `the download ${got < declared ? 'stopped short' : 'overran'} — ${(got / 1e6).toFixed(
+          1
+        )} MB of the ${(declared / 1e6).toFixed(1)} MB the server promised. Try again.`
+      )
+    }
     await rename(part, dest)
     log('models', `saved ${dest} (${(got / 1e6).toFixed(1)} MB)`)
     onPct(100)
@@ -283,8 +297,17 @@ interface RegistryEntry {
   kind: 'file' | 'archive'
   file?: string
   url?: string
+  /**
+   * A model that is more than one file (Qwen3-ASR is weights + audio
+   * encoder). One tile, one progress bar, and "installed" means every part
+   * is there — a half-installed model that reads as present is how a
+   * download fails silently forever.
+   */
+  parts?: { file: string; url: string; sizeMb: number }[]
   optional: boolean
   platforms?: string[]
+  /** Offered only when this says so — for a model whose engine is not reachable yet. */
+  gated?: () => boolean
 }
 
 /**
@@ -308,6 +331,43 @@ export function mmsModelUrl(): string {
   return isOnnxPack()
     ? 'https://github.com/lexasoft123/SingZ/releases/download/models-1/mms-fa.onnx'
     : 'https://dl.fbaipublicfiles.com/mms/torchaudio/ctc_alignment_mling_uroman/model.pt'
+}
+
+/**
+ * Qwen3-ASR 1.7B, the singing-trained recogniser (Apache-2.0), as ggml-org's
+ * GGUF pair: the model itself and `mmproj`, its audio encoder.
+ *
+ * Q8_0 is what ggml-org publishes and is measurably lossless here — over the
+ * catalog it scored identically to bf16 (recall 0.850, WER 0.162), so the
+ * 4 GB weights buy nothing. A Q5_K_M quantization measured the same to within
+ * noise at 1.83 GB total and would be the better download, but nobody
+ * publishes one: switching to it means attaching our own quantization to a
+ * pinned release the way mms-fa.onnx is, and these two constants then move.
+ * Q4_K_M is NOT a candidate — it holds up when the language is known and
+ * collapses when it is not (recall 0.804 against 0.846).
+ */
+const QWEN_MODEL_FILE = 'Qwen3-ASR-1.7B-Q8_0.gguf'
+const QWEN_MMPROJ_FILE = 'mmproj-Qwen3-ASR-1.7B-Q8_0.gguf'
+const QWEN_BASE = 'https://huggingface.co/ggml-org/Qwen3-ASR-1.7B-GGUF/resolve/main'
+const QWEN_PARTS = [
+  { file: QWEN_MODEL_FILE, url: `${QWEN_BASE}/${QWEN_MODEL_FILE}`, sizeMb: 2165 },
+  { file: QWEN_MMPROJ_FILE, url: `${QWEN_BASE}/${QWEN_MMPROJ_FILE}`, sizeMb: 356 }
+]
+/**
+ * Qwen3-ForcedAligner-0.6B, which gives Qwen's words their times. Q8_0: the
+ * quantizations differ by at most one 80 ms alignment class, and q8 is the
+ * one measured (median 0.09 s against the app's Precise timing).
+ */
+const QWEN_ALIGNER_FILE = 'qwen3-forced-aligner-0.6b-q8_0.gguf'
+const QWEN_ALIGNER_MB = 990
+export function qwenAlignerPath(): string {
+  return join(modelsDir(), QWEN_ALIGNER_FILE)
+}
+export function qwenModelPath(): string {
+  return join(modelsDir(), QWEN_MODEL_FILE)
+}
+export function qwenMmprojPath(): string {
+  return join(modelsDir(), QWEN_MMPROJ_FILE)
 }
 
 const REGISTRY: RegistryEntry[] = [
@@ -346,6 +406,22 @@ const REGISTRY: RegistryEntry[] = [
     optional: true
   },
   {
+    id: 'qwen-asr',
+    label: 'Speech model · sung lyrics',
+    description:
+      'Hears sung words the speech model mishears, in 30 languages — trained on singing rather than speech. Needs the precise word aligner for timing.',
+    sizeMb: QWEN_PARTS.reduce((s, p) => s + p.sizeMb, 0),
+    kind: 'file',
+    parts: QWEN_PARTS,
+    optional: true,
+    // The engine now ships in extraResources, but nothing in a shipped build
+    // SELECTS it: SINGZ_ASR=qwen is still the only switch, and no UI sets it.
+    // An offered tile would download 2.5 GB that can never be used, beside a
+    // near-identically named one that works — so it stays hidden until
+    // something other than an env var chooses the engine.
+    gated: () => process.env.SINGZ_ASR === 'qwen'
+  },
+  {
     id: 'aligner',
     label: 'Precise word aligner',
     description:
@@ -356,6 +432,18 @@ const REGISTRY: RegistryEntry[] = [
     url: 'https://dl.fbaipublicfiles.com/mms/torchaudio/ctc_alignment_mling_uroman/model.pt',
     optional: true,
     platforms: ['darwin-arm64']
+  },
+  {
+    id: 'qwen-aligner',
+    label: 'Word timing · sung lyrics',
+    description:
+      'Gives every word of a sung lyric its moment, without the stem splitter. Pairs with the sung-lyrics speech model.',
+    sizeMb: QWEN_ALIGNER_MB,
+    kind: 'file',
+    file: QWEN_ALIGNER_FILE,
+    url: `https://huggingface.co/cstr/qwen3-forced-aligner-0.6b-GGUF/resolve/main/${QWEN_ALIGNER_FILE}`,
+    optional: true,
+    gated: () => process.env.SINGZ_ASR === 'qwen'
   },
   {
     id: 'aligner',
@@ -372,7 +460,9 @@ const REGISTRY: RegistryEntry[] = [
 ]
 
 function forThisPlatform(here = `${process.platform}-${process.arch}`): RegistryEntry[] {
-  return REGISTRY.filter((e) => !e.platforms || e.platforms.includes(here))
+  return REGISTRY.filter(
+    (e) => (!e.platforms || e.platforms.includes(here)) && (!e.gated || e.gated())
+  )
 }
 
 /**
@@ -502,6 +592,12 @@ export class ModelManager {
 
   private async present(entry: RegistryEntry): Promise<boolean> {
     if (entry.kind === 'archive') return packComplete()
+    if (entry.parts) {
+      for (const part of entry.parts) {
+        if (!(await exists(join(modelsDir(), part.file)))) return false
+      }
+      return true
+    }
     return exists(join(modelsDir(), entry.file as string))
   }
 
@@ -542,7 +638,36 @@ export class ModelManager {
         const entry = registryEntryFor(m.id)
         if (!entry) continue
         onProgress({ id: entry.id, percent: 0 })
-        if (entry.kind === 'file') {
+        if (entry.kind === 'file' && entry.parts) {
+          // one bar across every part, weighted by size
+          const total = entry.parts.reduce((s, p) => s + p.sizeMb, 0)
+          let done = 0
+          for (const part of entry.parts) {
+            // A part that already arrived is kept: without this, a multi-GB
+            // install that dies on its second file re-downloads the first one
+            // on every retry, which on a metered connection never finishes.
+            // Reinstall is the one case that must refetch, and it is told
+            // apart by the entry's own state rather than by `ids` — the
+            // wizard sends an explicit id array for Get, Reinstall and the
+            // first-run pass alike, so `ids` distinguishes nothing. A tile
+            // only offers Reinstall once it reads installed, i.e. m.present.
+            if (!m.present && (await exists(join(modelsDir(), part.file)))) {
+              done += part.sizeMb
+              onProgress({ id: entry.id, percent: (done / total) * 100 })
+              continue
+            }
+            await downloadFile(
+              part.url,
+              join(modelsDir(), part.file),
+              part.sizeMb * 1e6,
+              (pct) => onProgress({ id: entry.id, percent: ((done + (pct / 100) * part.sizeMb) / total) * 100 }),
+              this.abort.signal
+            )
+            done += part.sizeMb
+            log('models', `${entry.id} part installed (${part.file})`)
+          }
+          onProgress({ id: entry.id, percent: 100 })
+        } else if (entry.kind === 'file') {
           await downloadFile(
             entry.url as string,
             join(modelsDir(), entry.file as string),
