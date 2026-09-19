@@ -5,9 +5,9 @@
 // one thread, so six lanes in realtime cost well under 1% of a core. Decoding
 // the WHOLE song is what costs ~1.3 s of every phone open and ~141 MB resident.
 //
-// NOT WIRED INTO THE GRAPH. This is the source plus its tests and a benchmark;
-// the realtime node that consumes it is the next step, and the interface
-// header says what that node may and may not do (never on the audio callback).
+// `openStreamingAudioSource` at the bottom of this file is the one door for
+// every format: it sniffs the content and hands a RIFF/WAVE file to the WAV
+// source (wav_streaming_source.cpp), everything else to this one.
 //
 // One thing libFLAC makes the caller's problem, and one it does NOT — the
 // second measured rather than assumed, because the first version of this file
@@ -31,6 +31,8 @@
 #include <zcore/media/streaming_audio_source.h>
 
 #include <zcore/base/file_compat.h>
+
+#include "decoded_audio_internal.h"
 
 #include <FLAC/stream_decoder.h>
 
@@ -56,7 +58,7 @@
 #endif
 
 namespace singz {
-namespace {
+namespace media_internal {
 
 // The same descriptor handover `decoded_audio.cpp` performs, and for the same
 // reason: the media layer never takes a path, and the descriptor must be
@@ -115,6 +117,15 @@ int64_t readAt(int fd, void* buffer, size_t bytes, int64_t offset) noexcept {
 #endif
 }
 
+void closeRawDescriptor(int fd) noexcept {
+  if (fd < 0) return;
+#if defined(_WIN32)
+  _close(fd);
+#else
+  ::close(fd);
+#endif
+}
+
 int64_t fileLength(int fd) noexcept {
   if (fd < 0) return -1;
 #if defined(_WIN32)
@@ -132,6 +143,14 @@ int64_t fileLength(int fd) noexcept {
   return static_cast<int64_t>(info.st_size);
 #endif
 }
+
+}  // namespace media_internal
+
+namespace {
+
+using media_internal::closeRawDescriptor;
+using media_internal::fileLength;
+using media_internal::readAt;
 
 // Cheap signature check before libFLAC is handed the file, so an input that is
 // simply another format is refused as such rather than coming back as damaged
@@ -189,26 +208,20 @@ struct Staging {
 
 class FlacStreamingSource final : public StreamingAudioSource {
  public:
-  FlacStreamingSource() = default;
+  // Owns `fd` from construction, so every refusal below closes it.
+  explicit FlacStreamingSource(int fd) noexcept : fd_(fd) {}
   ~FlacStreamingSource() override {
     if (decoder_ != nullptr) {
       FLAC__stream_decoder_finish(decoder_);
       FLAC__stream_decoder_delete(decoder_);
     }
-    if (fd_ >= 0) {
-#if defined(_WIN32)
-      _close(fd_);
-#else
-      ::close(fd_);
-#endif
-    }
+    closeRawDescriptor(fd_);
   }
 
   FlacStreamingSource(const FlacStreamingSource&) = delete;
   FlacStreamingSource& operator=(const FlacStreamingSource&) = delete;
 
-  [[nodiscard]] DecodedAudioStatus open(OwnedFileDescriptor descriptor,
-                                        const StreamingAudioOpenOptions& options) {
+  [[nodiscard]] DecodedAudioStatus open(const StreamingAudioOpenOptions& options) {
     // Resampling is NOT implemented here. The graph asks for the output
     // device's rate today, so a caller that needs one will have to resample
     // outside or this source will have to grow one — and it must be a refusal
@@ -219,9 +232,6 @@ class FlacStreamingSource final : public StreamingAudioSource {
         options.sourceFormat != DecodedAudioSourceFormat::Flac) {
       return DecodedAudioStatus::UnsupportedFormat;
     }
-    if (!descriptor.valid()) return DecodedAudioStatus::InvalidArgument;
-
-    fd_ = consumeAsDescriptor(&descriptor);
     if (fd_ < 0) return DecodedAudioStatus::IoError;
     if (!looksLikeFlac(fd_, &offset_)) return DecodedAudioStatus::UnsupportedFormat;
     length_ = fileLength(fd_);
@@ -521,8 +531,32 @@ std::unique_ptr<StreamingAudioSource> openStreamingAudioSource(
   auto set = [status](DecodedAudioStatus s) {
     if (status != nullptr) *status = s;
   };
-  auto source = std::make_unique<FlacStreamingSource>();
-  const DecodedAudioStatus opened = source->open(std::move(descriptor), options);
+  if (!descriptor.valid()) {
+    set(DecodedAudioStatus::InvalidArgument);
+    return nullptr;
+  }
+  const int fd = media_internal::consumeAsDescriptor(&descriptor);
+  if (fd < 0) {
+    set(DecodedAudioStatus::IoError);
+    return nullptr;
+  }
+  // By content, never by name (see the header): a FLAC called `.wav` has
+  // bitten this codebase before. A declared format that the content
+  // contradicts is refused rather than read as something else.
+  unsigned char head[4] = {0};
+  const bool riff = readAt(fd, head, sizeof(head), 0) == static_cast<int64_t>(sizeof(head)) &&
+                    std::memcmp(head, "RIFF", 4) == 0;
+  if (options.sourceFormat == DecodedAudioSourceFormat::Wav ||
+      (options.sourceFormat == DecodedAudioSourceFormat::Auto && riff)) {
+    if (!riff) {
+      closeRawDescriptor(fd);
+      set(DecodedAudioStatus::UnsupportedFormat);
+      return nullptr;
+    }
+    return media_internal::openWavStreamingSource(fd, options, status);
+  }
+  auto source = std::make_unique<FlacStreamingSource>(fd);
+  const DecodedAudioStatus opened = source->open(options);
   if (opened != DecodedAudioStatus::Ok) {
     set(opened);
     return nullptr;

@@ -126,7 +126,60 @@ std::string writeWav(uint32_t frames, uint32_t rate) {
   u16(16);
   std::fwrite("data", 1, 4, f);
   u32(dataBytes);
-  for (uint32_t i = 0; i < frames * 2; i++) u16(static_cast<uint16_t>(i * 37));
+  // The same silent stretch encodeFlac leaves, so compareLane's envelope check
+  // has a quiet stretch and a loud one to find in a WAV lane too.
+  const uint32_t quietFrom = frames / 3;
+  const uint32_t quietTo = frames / 3 + frames / 10;
+  for (uint32_t i = 0; i < frames * 2; i++) {
+    const uint32_t frame = i / 2;
+    u16(frame >= quietFrom && frame < quietTo ? 0 : static_cast<uint16_t>(i * 37));
+  }
+  std::fclose(f);
+  return path;
+}
+
+// The lead and backing lanes every split has written since 0.23.0: 32-bit
+// float, and peaks past full scale (lead = input − backing), which is why they
+// are float at all. Two channels that differ, so a swap cannot pass.
+std::string writeFloatWav(uint32_t frames, uint32_t rate) {
+  const std::string path = tempPath(".wav");
+  std::FILE* f = std::fopen(path.c_str(), "wb");
+  if (f == nullptr) return {};
+  const uint32_t dataBytes = frames * 2 * 4;
+  auto u32 = [&](uint32_t v) { std::fwrite(&v, 4, 1, f); };
+  auto u16 = [&](uint16_t v) { std::fwrite(&v, 2, 1, f); };
+  std::fwrite("RIFF", 1, 4, f);
+  u32(36 + dataBytes);
+  std::fwrite("WAVE", 1, 4, f);
+  std::fwrite("fmt ", 1, 4, f);
+  u32(16);
+  u16(3);
+  u16(2);
+  u32(rate);
+  u32(rate * 8);
+  u16(8);
+  u16(32);
+  std::fwrite("data", 1, 4, f);
+  u32(dataBytes);
+  const uint32_t quietFrom = frames / 3;
+  const uint32_t quietTo = frames / 3 + frames / 10;
+  for (uint32_t i = 0; i < frames; i++) {
+    const double t = static_cast<double>(i);
+    const bool quiet = i >= quietFrom && i < quietTo;
+    const float left = quiet ? 0.0F : static_cast<float>(1.6 * std::sin(t * 0.021));
+    const float right = quiet ? 0.0F : static_cast<float>(0.4 * std::sin(t * 0.0047 + 1.0));
+    std::fwrite(&left, 4, 1, f);
+    std::fwrite(&right, 4, 1, f);
+  }
+  std::fclose(f);
+  return path;
+}
+
+std::string writeNotAudio() {
+  const std::string path = tempPath(".wav");
+  std::FILE* f = std::fopen(path.c_str(), "wb");
+  if (f == nullptr) return {};
+  std::fputs("not audio, whatever the name says", f);
   std::fclose(f);
   return path;
 }
@@ -357,17 +410,37 @@ int main() {
     }
   }
 
-  // 6. What the source cannot open comes back refused with a status, so the
-  //    caller decodes that one lane the old way.
+  // 6. WAV lanes measure like FLAC ones — the float lead/backing pair above
+  //    all, which used to be refused here and decoded in the renderer instead
+  //    (2.9 s against 0.5 s to open a five-minute song). What the source still
+  //    cannot open comes back refused with a status, so the caller decodes that
+  //    one lane the old way.
   {
-    const std::string wav = writeWav(4000, 44100);
+    const std::string wav = writeWav(44100 * 2, 44100);
     check(!wav.empty(), "the WAV fixture writes");
     if (!wav.empty()) {
       const singz::LaneMeasure lane = singz::measureLane(request("other", wav), {});
-      check(!lane.ok, "a WAV is refused — the streaming source reads FLAC");
-      check(lane.status != singz::DecodedAudioStatus::Ok, "and says why");
-      check(lane.peaks.empty(), "a refused lane carries no peaks");
+      compareLane(lane, wav, 44100, 2, "16-bit WAV");
       std::remove(wav.c_str());
+    }
+    const std::string lead = writeFloatWav(44100 * 3 + 17, 44100);
+    check(!lead.empty(), "the float WAV fixture writes");
+    if (!lead.empty()) {
+      const singz::LaneMeasure lane = singz::measureLane(request("vocals", lead), {});
+      compareLane(lane, lead, 44100, 2, "float WAV lead");
+      float peak = 0.0F;
+      for (float p : lane.peaks) peak = std::max(peak, p);
+      check(peak > 1.0F, "a float lane's peaks past full scale are measured, not clipped");
+      std::remove(lead.c_str());
+    }
+    const std::string junk = writeNotAudio();
+    check(!junk.empty(), "the not-audio fixture writes");
+    if (!junk.empty()) {
+      const singz::LaneMeasure lane = singz::measureLane(request("other", junk), {});
+      check(!lane.ok, "a file that is not audio is refused");
+      check(lane.status == singz::DecodedAudioStatus::UnsupportedFormat, "and says why");
+      check(lane.peaks.empty(), "a refused lane carries no peaks");
+      std::remove(junk.c_str());
     }
     singz::LaneMeasureRequest missing;
     missing.id = "missing";
@@ -394,30 +467,34 @@ int main() {
   {
     const std::string a = encodeFlac(44100 * 5, 44100, 2);
     const std::string b = encodeFlac(48000 * 3, 48000, 2);
-    const std::string w = writeWav(3000, 44100);
+    const std::string w = writeFloatWav(44100 * 2, 44100);
     const std::string c = encodeFlac(44100 * 2, 44100, 1);
-    if (!a.empty() && !b.empty() && !w.empty() && !c.empty()) {
+    const std::string x = writeNotAudio();
+    if (!a.empty() && !b.empty() && !w.empty() && !c.empty() && !x.empty()) {
       std::vector<singz::LaneMeasureRequest> requests;
       requests.push_back(request("vocals", a));
       requests.push_back(request("drums", b));
-      requests.push_back(request("other", w));
+      requests.push_back(request("custom-backing-vocals", w));
+      requests.push_back(request("other", x));
       requests.push_back(request("bass", c));
       const std::vector<singz::LaneMeasure> lanes =
           singz::measureLanes(std::move(requests), {});
-      check(lanes.size() == 4, "every lane answers");
-      if (lanes.size() == 4) {
+      check(lanes.size() == 5, "every lane answers");
+      if (lanes.size() == 5) {
         check(lanes[0].id == "vocals" && lanes[1].id == "drums" &&
-                  lanes[2].id == "other" && lanes[3].id == "bass",
+                  lanes[2].id == "custom-backing-vocals" && lanes[3].id == "other" &&
+                  lanes[4].id == "bass",
               "results come back in request order");
         compareLane(lanes[0], a, 44100, 2, "parallel vocals");
         compareLane(lanes[1], b, 48000, 2, "parallel drums");
-        check(!lanes[2].ok, "the WAV is refused in the middle of the set");
-        compareLane(lanes[3], c, 44100, 1, "parallel bass");
+        compareLane(lanes[2], w, 44100, 2, "parallel float WAV backing");
+        check(!lanes[3].ok, "the file that is not audio is refused in the middle of the set");
+        compareLane(lanes[4], c, 44100, 1, "parallel bass");
       }
     } else {
       check(false, "the parallel fixtures encode");
     }
-    for (const std::string& p : {a, b, w, c})
+    for (const std::string& p : {a, b, w, c, x})
       if (!p.empty()) std::remove(p.c_str());
   }
 

@@ -9,11 +9,13 @@
 
 // A format-agnostic window onto an encoded audio file.
 //
-// INTERFACE ONLY — nothing implements this yet. It exists so the streaming
-// work (docs/FLAC-STREAMING-RESEARCH.md) is designed against a shape that MP3,
-// AAC and WAV can meet, rather than against FLAC's conveniences. Writing it
-// first is cheap; discovering after a FLAC implementation that the interface
-// assumed independently-decodable frames is not.
+// Implemented for FLAC (flac_streaming_source.cpp) and WAV — integer PCM at
+// 16/24/32 bits and 32-bit float, the float being what every lead and backing
+// vocal lane since 0.23.0 is (wav_streaming_source.cpp). It was designed
+// against a shape that MP3 and AAC can meet too, rather than against FLAC's
+// conveniences (docs/FLAC-STREAMING-RESEARCH.md): writing that first was
+// cheap; discovering after a FLAC implementation that the interface assumed
+// independently-decodable frames would not have been.
 //
 // The premise: today `DecodedBufferSource` reads a view over the WHOLE decoded
 // song, which costs ~1.3 s of every phone open and ~141 MB per song resident.

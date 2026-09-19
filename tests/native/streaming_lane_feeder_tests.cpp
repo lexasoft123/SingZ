@@ -71,6 +71,34 @@ singz::OwnedFileDescriptor openRead(const std::string& path) {
   return singz::OwnedFileDescriptor(fd);
 }
 
+// A 32-bit float stereo WAV with peaks past full scale — the shape of every
+// lead and backing lane since 0.23.0, which the feeder could not stream at all
+// until the WAV source existed (one such lane put the whole song back on a
+// full decode).
+std::string writeFloatWav(uint64_t frames, uint32_t rate) {
+  const std::string path = tempPath(".wav");
+  std::FILE* f = std::fopen(path.c_str(), "wb");
+  if (f == nullptr) return {};
+  const uint32_t dataBytes = static_cast<uint32_t>(frames * 2 * 4);
+  auto u32 = [&](uint32_t v) { std::fwrite(&v, 4, 1, f); };
+  auto u16 = [&](uint16_t v) { std::fwrite(&v, 2, 1, f); };
+  std::fwrite("RIFF", 1, 4, f);
+  u32(36 + dataBytes);
+  std::fwrite("WAVEfmt ", 1, 8, f);
+  u32(16); u16(3); u16(2); u32(rate); u32(rate * 8); u16(8); u16(32);
+  std::fwrite("data", 1, 4, f);
+  u32(dataBytes);
+  for (uint64_t i = 0; i < frames; i++) {
+    const double t = static_cast<double>(i);
+    const float left = static_cast<float>(1.6 * std::sin(t * 0.013));
+    const float right = static_cast<float>(0.7 * std::sin(t * 0.0029 + 0.5));
+    std::fwrite(&left, 4, 1, f);
+    std::fwrite(&right, 4, 1, f);
+  }
+  std::fclose(f);
+  return path;
+}
+
 std::string encodeFlac(uint64_t frames, uint32_t rate, unsigned channels) {
   const std::string path = tempPath(".flac");
   FLAC__StreamEncoder* e = FLAC__stream_encoder_new();
@@ -341,6 +369,65 @@ int main(int argc, char** argv) {
     (void)streamed.functions->destroy(streamed.state);
   }
 
+  // ---- 1b. a float WAV lane feeds exactly the same way --------------------
+  //
+  // The same linear pass, against a lane shaped like the separated lead: 32-bit
+  // float with peaks past full scale. It must match the full decode to the bit
+  // and never starve, and the peaks must arrive unclamped.
+  {
+    const std::string lead = writeFloatWav(kFrames, kRate);
+    check(!lead.empty(), "the float WAV fixture writes");
+    const singz::DecodedAudioResult leadReference = singz::prepareDecodedAudio(openRead(lead));
+    check(leadReference.ok(), "and decodes as a reference");
+    singz::StreamingLaneGroup group;
+    singz::StreamingLaneOptions options;
+    options.windowFrames = 65536;
+    options.targetAheadFrames = 32768;
+    options.safetyFrames = 8192;
+    options.primeFrames = 16384;
+    group.setOptions(options);
+    check(group.addLane(openRead(lead), openRead(lead), kRate) == singz::DecodedAudioStatus::Ok,
+          "a float WAV lane opens in the feeder");
+    check(group.prime(0) == singz::DecodedAudioStatus::Ok, "and primes at the start");
+    std::vector<uint8_t> storage(zdsp::streamingWindowSourceStateBytes() + 64);
+    uint8_t* aligned = storage.data() +
+                       ((64 - (reinterpret_cast<uintptr_t>(storage.data()) & 63u)) & 63u);
+    const zdsp::ProcessorHandle streamed = zdsp::createPositionedStreamingSource(
+        {{1}, group.window(0), 0, 0},
+        {aligned, static_cast<uint32_t>(zdsp::streamingWindowSourceStateBytes())});
+    check(streamed.state != nullptr && prepareSource(streamed, 2),
+          "the source node is created and prepared over it");
+    if (streamed.state != nullptr && leadReference.ok()) {
+      Output out(2);
+      bool matched = true;
+      float peak = 0.0F;
+      uint64_t compared = 0;
+      const uint64_t blocks = (kFrames - kBlock) / kBlock;
+      for (uint64_t block = 0; block < blocks; block++) {
+        const int64_t at = static_cast<int64_t>(block * kBlock);
+        for (int round = 0; round < 8; round++)
+          if (!group.serviceOnceForTesting()) break;
+        renderBlock(streamed, &out, at);
+        for (uint32_t c = 0; c < 2; c++)
+          for (uint32_t fr = 0; fr < kBlock; fr++) {
+            const float got = out.planes[c][fr];
+            if (got != leadReference.audio->channelData(c)[static_cast<uint64_t>(at) + fr])
+              matched = false;
+            peak = std::max(peak, std::fabs(got));
+            compared++;
+          }
+      }
+      check(compared > 700000, "the WAV pass actually compared the whole song");
+      check(matched, "every frame of a float WAV lane matches the full decode");
+      check(peak > 1.0F, "and its peaks past full scale arrive unclamped");
+      check(group.stats(0).starvedBlocks == 0, "and no block starved");
+      (void)streamed.functions->deactivate(streamed.state);
+      (void)streamed.functions->destroy(streamed.state);
+    }
+    group.stop();
+    std::remove(lead.c_str());
+  }
+
   // ---- 2. a scrub is chased, and what plays after it is the right audio --
   {
     singz::StreamingLaneGroup group;
@@ -565,6 +652,6 @@ int main(int argc, char** argv) {
   std::remove(flac.c_str());
   std::remove(wav.c_str());
   if (failures == 0)
-    std::printf("streaming lane feeder: the graph plays a FLAC without decoding it\n");
+    std::printf("streaming lane feeder: the graph plays a FLAC and a float WAV without decoding either\n");
   return failures == 0 ? 0 : 1;
 }
