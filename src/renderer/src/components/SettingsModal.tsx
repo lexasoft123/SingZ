@@ -105,6 +105,24 @@ export const MONITOR_DIAGNOSTIC_LABELS = [
   'Render failures'
 ] as const
 
+/** The microphone backend is independent of the native playback checkbox. */
+export function MicrophoneBackendStatus({ device, inventoryError, paused = false }: {
+  device: MicDevice | null
+  inventoryError: string | null
+  paused?: boolean
+}): React.JSX.Element | null {
+  if (paused) return null
+  if (device?.nativeFallbackReason) return <p className="settings-hint warn" role="status" data-testid="mic-backend-status">
+    Using browser microphone capture instead of native capture. {device.nativeFallbackReason}
+    {' '}Browser capture may expose fewer input channels. Active input: {device.label || 'microphone'}, channel {device.channelIndex + 1} of {device.channelCount}.
+  </p>
+  if (device?.captureBackend === 'native') return <p className="settings-hint" data-testid="mic-backend-status">Native microphone capture</p>
+  if (inventoryError) return <p className="settings-hint warn" role="status" data-testid="mic-backend-status">
+    Native microphone capture unavailable: {inventoryError} Browser capture may expose fewer input channels.
+  </p>
+  return null
+}
+
 export function inputChannelOptions(channelCount: number): number[] {
   return channelCount > 1 ? Array.from({ length: channelCount }, (_, index) => index) : []
 }
@@ -639,6 +657,7 @@ export default function SettingsModal({
   const [nativeInputs, setNativeInputs] = useState<DesktopAudioInputDevice[] | null>(null)
   const [hostInventory, setHostInventory] = useState<DesktopAudioHostInventoryResult | null>(null)
   const [playbackProviders, setPlaybackProviders] = useState<DesktopPlaybackProviderInfo[]>([])
+  const [nativeInputError, setNativeInputError] = useState<string | null>(null)
   const [playbackStatus, setPlaybackStatus] = useState<DesktopPlaybackStatus | null>(null)
   const [preview, setPreview] = useState<PreviewState>(INITIAL_PREVIEW)
   const [monitor, setMonitor] = useState<MonitorCoordinatorSnapshot>(() => monitorCoordinator.snapshot)
@@ -751,8 +770,16 @@ export default function SettingsModal({
       .then((result) => { if (mounted.current) setDevices(result) })
       .catch(() => { if (mounted.current) setDevices(null) })
     void window.singz.listDesktopAudioInputs()
-      .then((result) => { if (mounted.current) setNativeInputs(result.ok ? result.devices : null) })
-      .catch(() => { if (mounted.current) setNativeInputs(null) })
+      .then((result) => {
+        if (!mounted.current) return
+        setNativeInputs(result.ok ? result.devices : null)
+        setNativeInputError(result.ok ? null : result.error)
+      })
+      .catch((error) => {
+        if (!mounted.current) return
+        setNativeInputs(null)
+        setNativeInputError(error instanceof Error ? error.message : String(error))
+      })
     void window.singz.audioHostDevices()
       .then((result) => { if (mounted.current) setHostInventory(result) })
       .catch((error) => { if (mounted.current) setHostInventory({
@@ -879,7 +906,7 @@ export default function SettingsModal({
       const device = capture.device
       if (!device) return
       const status = level.signal ? 'live' : 'no-signal'
-      const signature = `${status}:${dbfs}:${heldPeak}:${device.id}:${device.channelIndex}:${device.channelCount}`
+      const signature = `${status}:${dbfs}:${heldPeak}:${device.id}:${device.channelIndex}:${device.channelCount}:${device.captureBackend}:${device.nativeFallbackReason}`
       if (signature !== lastSignature) {
         lastSignature = signature
         setPreview({ status, device, dbfs, peak: heldPeak })
@@ -1469,6 +1496,11 @@ export default function SettingsModal({
               <span className="mic-meter-tick tick-48">−48</span><span className="mic-meter-tick tick-24">−24</span><span className="mic-meter-tick tick-12">−12</span><span className="mic-meter-tick tick-0">0</span>
             </div>
             <p className={`mic-preview-status${preview.status === 'error' ? ' warn' : ''}`}>{routeCopy}</p>
+            <MicrophoneBackendStatus
+              device={preview.device}
+              inventoryError={nativeInputError}
+              paused={nativeMonitorOwnsMic || externalAudioLeaseBlocked || previewLeaseBlocked || monitorStopping}
+            />
             {preview.device?.fallback && <p className="settings-hint warn">The saved microphone is unavailable — previewing the system default.</p>}
             {preview.device?.channelFallback && <p className="settings-hint warn">That lane is unavailable — previewing channel {previewChannelIndex + 1}.</p>}
           </section>

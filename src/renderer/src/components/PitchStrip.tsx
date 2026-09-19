@@ -306,7 +306,7 @@ export default function PitchStrip({
           // Everything readable scales with the row height, so dragging the
           // strip taller genuinely enlarges the view (field report: "мелко").
           const kbFont = Math.round(Math.min(12, Math.max(8, rowH * 0.7)))
-          const segFont = Math.round(Math.min(13, Math.max(9, rowH * 0.75)))
+          const segFont = Math.round(Math.min(13, Math.max(noteBars ? 11 : 9, rowH * 0.75)))
           const dotR = Math.min(4.5, Math.max(2.5, rowH * 0.22))
 
           // ——— piano-roll row striping + keyboard on the left
@@ -412,19 +412,21 @@ export default function PitchStrip({
             ctx.beginPath()
             ctx.roundRect(sx, y - barH / 2, Math.max(2, ex - sx), barH, barH / 2)
             ctx.fill()
-            // Wide-range songs squeeze rows under the old 6 px gate at the
-            // default strip height — in bars mode the names are the point,
-            // so they hold on longer (Zeit spans 32 lanes and lost every
-            // label to the 6 px rule).
-            if (rowH >= (noteBars ? 4.5 : 6)) {
+            // A wide vocal range makes the lanes thin, but does not remove
+            // the room above a note. Keep names readable in bars mode;
+            // horizontal collisions decide which labels fit.
+            if (noteBars || rowH >= 6) {
               if (noteBars) {
                 // The bars are the score, so every one earns its name while
                 // there is room — collisions decide, not bar width. A name
                 // pushed off its own start must still sit over its bar.
                 const name = noteName(midi)
                 const tw = ctx.measureText(name).width
-                const shifted = sx + 3 < lastLabelEnd + 5
-                const lx = shifted ? lastLabelEnd + 5 : sx + 3
+                // A sustained note may begin outside the zoomed viewport.
+                // Anchor its name to the visible part of the bar.
+                const labelStart = Math.max(x0, sx) + 3
+                const shifted = labelStart < lastLabelEnd + 5
+                const lx = shifted ? lastLabelEnd + 5 : labelStart
                 if (!shifted || lx + tw <= ex) {
                   // top-lane names drop onto the bar instead of clipping
                   const ly = Math.max(y - barH / 2 - 2, segFont + 2)

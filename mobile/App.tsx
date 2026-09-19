@@ -764,12 +764,30 @@ export default function App(): React.JSX.Element {
         // alive: on Android that is NowPlayingService's media foreground
         // service, the one thing the park existed for want of. It parks the
         // moment it is paused from the notification instead.
-        if (nowPlaying()?.keepsPlayingInBackground) {
-          log('dsp', 'native graph kept playing in background · media session holds it')
+        const held = nowPlaying()?.keepsPlayingInBackground === true
+        if (held) {
+          // "kept playing in background" is load-bearing text, not prose:
+          // now-playing.cjs and focus-loss-android.cjs both read this line
+          // out of the app's own log to tell a held song from a parked one.
+          log('dsp', 'kept playing in background · the OS is holding this song')
         } else {
           void iosNativePlayback.parkForBackground('app backgrounded')
         }
-        void engine.suspendForBackground()
+        // The legacy engine is suspended on the way out — EXCEPT when it is
+        // the one the OS agreed to keep playing. That exception is why App
+        // Review rejected 0.22.0 (and 0.19.0) under 2.5.4: this suspend was
+        // unconditional, so the branch above kept the NATIVE graph alive
+        // while this line paused a legacy song two statements later, and the
+        // bundled sample — the only song a reviewer with no library can open,
+        // and the one the review notes name — always plays on legacy, because
+        // it decodes bundled assets rather than the files the native graph
+        // needs. Pressing Home stopped it every time, on every device.
+        // `engine.playing` is asked rather than the backend kind: it is true
+        // only when the legacy engine is the thing making the sound, so a
+        // native-held song still suspends the idle context exactly as before.
+        // Not suspending also leaves `backgrounded` false, which is what lets
+        // the Lock Screen's play command reach a legacy song at all.
+        if (!(held && engine.playing)) void engine.suspendForBackground()
       } else if (next === 'active') {
         // Let a held stream go as soon as the singer is back: the callback
         // is what consumes a metronome preview click, a seek, a resume, and

@@ -1,3 +1,8 @@
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import SetupWizard from '../../src/renderer/src/components/SetupWizard'
+import type { ModelInfo } from '../../src/shared/types'
+import { vi } from 'vitest'
 import { readFile } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
 import { setupWizardCloseAction } from '../../src/renderer/src/components/SetupWizard'
@@ -25,5 +30,27 @@ describe('setup wizard routing ownership', () => {
     )
     expect(wizardSource).toContain('<Modal onClose={onClose} cardClassName="wizard" persistent>')
     expect(wizardSource).toContain("setupWizardCloseAction(origin, busy) === 'cancel'")
+  })
+})
+
+
+const missingModels: ModelInfo[] = [
+  { id: 'gpu-splitter', label: 'Stem splitter', description: 'Runtime', present: false, optional: false, required: false, sizeMb: 272 },
+  { id: 'whisper', label: 'Lyrics model', description: 'Transcription', present: false, optional: true, required: false, sizeMb: 1624 }
+]
+describe('requested model downloads', () => {
+  // The vocal model used to be a second download that only worked once the
+  // splitter pack was there, so a Get button had to pull both and price
+  // both. It rides inside the pack now: every row is its own download again,
+  // and its own size.
+  it('gives missing models a download button priced at their own size', () => {
+    vi.stubGlobal('document', { body: { classList: { contains: () => false } } })
+    try {
+      const html = renderToStaticMarkup(createElement(SetupWizard, { models: missingModels, origin: 'manual', focusModel: 'gpu-splitter', onClose: () => {} }))
+      expect(html).toContain('Get · 272 MB')
+      expect(html).toContain('Get · 1624 MB')
+      expect(html).toContain('data-model-id="gpu-splitter"')
+      expect(html).not.toContain('backing-vocals')
+    } finally { vi.unstubAllGlobals() }
   })
 })

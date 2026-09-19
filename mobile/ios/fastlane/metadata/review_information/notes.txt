@@ -1,6 +1,6 @@
-SingZ is a rehearsal player for singers. A song is six separate instrument
-tracks rather than one recording, so any part can be muted and sung or played
-live instead.
+SingZ is a rehearsal player for singers. A song is separated into its parts —
+drums, bass, the other instruments and the vocals — rather than one recording,
+so any part can be muted and sung or played live instead.
 
 NOTHING IS NEEDED TO START REVIEWING
 
@@ -23,6 +23,25 @@ on a music stand while you sing. To see it:
 3. The Lock Screen and Control Center show the song (title, elapsed time and a
    scrub bar) with play, pause and 10-second skip back and forward. Pause and
    play from there; drag the scrub bar and the song moves with it.
+
+An earlier version (0.22.0) was rejected for exactly this, and it is fixed in
+this build.
+The sample song always plays through the older of the app's two audio engines:
+it is unpacked from inside the app rather than read from files, so it cannot
+use the newer one. Leaving the app silenced that engine whatever it was doing,
+so the sample stopped the moment you pressed Home — as did any other song
+playing on it, which includes any song at all with "Native playback" switched
+off in Settings, or in a format the newer engine cannot open. Songs on the
+newer engine kept playing, which is how this survived our own testing: we
+tested with songs we had added ourselves, and the notes above sent you to the
+one song it broke on.
+
+All three steps above now behave the same for the sample as for any other
+song: it keeps playing behind the Home Screen, and the Lock Screen's play,
+pause and scrub bar reach it while the app is in the background. We checked
+this from a fresh install on both an iPad and an iPhone (iOS 26 simulators),
+and it is now an automated test that performs exactly those steps, which we
+run whenever anything touches backgrounding or the audio engines.
 
 WHERE ELSE SONGS COME FROM
 

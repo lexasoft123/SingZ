@@ -45,7 +45,7 @@ describe('registryEntryFor', () => {
     process.env.SINGZ_ASR = 'qwen'
     try {
       // status() is what the wizard renders, so it is where a duplicate shows
-      const rows = await new ModelManager().status(true)
+      const rows = await new ModelManager().status()
       const seen = new Map<string, number>()
       for (const r of rows) seen.set(r.id, (seen.get(r.id) ?? 0) + 1)
       for (const [id, n] of seen) expect(`${id} ×${n}`).toBe(`${id} ×1`)
@@ -140,14 +140,14 @@ describe('multi-part model installs', () => {
   })
 
   it('fetches every part of a fresh install', async () => {
-    const res = await new ModelManager().downloadModels(true, () => {}, ['qwen-asr'])
+    const res = await new ModelManager().downloadModels(() => {}, ['qwen-asr'])
     expect(res.ok).toBe(true)
     expect(fetched()).toEqual(['Qwen3-ASR-1.7B-Q8_0.gguf', 'mmproj-Qwen3-ASR-1.7B-Q8_0.gguf'])
   })
 
   it('resumes: a part already on disk is not downloaded again', async () => {
     await writeFile(join(dir, 'Qwen3-ASR-1.7B-Q8_0.gguf'), 'the 2.1 GB part that already arrived')
-    const res = await new ModelManager().downloadModels(true, () => {}, ['qwen-asr'])
+    const res = await new ModelManager().downloadModels(() => {}, ['qwen-asr'])
     expect(res.ok).toBe(true)
     expect(fetched()).toEqual(['mmproj-Qwen3-ASR-1.7B-Q8_0.gguf'])
   })
@@ -155,7 +155,7 @@ describe('multi-part model installs', () => {
   it('reinstall refetches everything, because the tile already read installed', async () => {
     await writeFile(join(dir, 'Qwen3-ASR-1.7B-Q8_0.gguf'), 'weights')
     await writeFile(join(dir, 'mmproj-Qwen3-ASR-1.7B-Q8_0.gguf'), 'encoder')
-    const res = await new ModelManager().downloadModels(true, () => {}, ['qwen-asr'])
+    const res = await new ModelManager().downloadModels(() => {}, ['qwen-asr'])
     expect(res.ok).toBe(true)
     expect(fetched()).toEqual(['Qwen3-ASR-1.7B-Q8_0.gguf', 'mmproj-Qwen3-ASR-1.7B-Q8_0.gguf'])
   })
@@ -169,18 +169,18 @@ describe('multi-part model installs', () => {
    */
   it('refuses a body that stops early, and leaves no model behind', async () => {
     served = 600
-    const res = await new ModelManager().downloadModels(true, () => {}, ['qwen-aligner'])
+    const res = await new ModelManager().downloadModels(() => {}, ['qwen-aligner'])
     expect(res.ok).toBe(false)
     expect(res.ok === false && res.error).toContain('stopped short')
     // neither the model nor the .part it was written through
     expect(await readdir(dir)).toEqual([])
-    const rows = await new ModelManager().status(true)
+    const rows = await new ModelManager().status()
     expect(rows.find((r) => r.id === 'qwen-aligner')?.present).toBe(false)
   })
 
   it('reports one bar that only goes forward across the parts', async () => {
     const seen: number[] = []
-    await new ModelManager().downloadModels(true, (p) => seen.push(p.percent), ['qwen-asr'])
+    await new ModelManager().downloadModels((p) => seen.push(p.percent), ['qwen-asr'])
     expect(seen[seen.length - 1]).toBe(100)
     for (let i = 1; i < seen.length; i++) expect(seen[i]).toBeGreaterThanOrEqual(seen[i - 1])
   })

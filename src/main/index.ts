@@ -44,8 +44,9 @@ import { replaySyncLog, syncLog } from './sync-log'
 import { SyncScheduler } from './sync-scheduler'
 import { logHardwareInfo } from './hwinfo'
 import { installUpdate, startUpdater, updateState } from './updater'
-import { cleanupObsoleteModels, dmlFlagPath, modelsDir, packDir, trtrtxFlagPath } from './models'
+import { cleanupObsoleteModels, dmlFlagPath, modelsDir, packDir, restoreInterruptedPackSwap, trtrtxFlagPath } from './models'
 import { Separator } from './separation'
+import { registerVocalSeparation, vocalSeparator } from './vocal-separation'
 import { registerAnalyze } from './analyze'
 import { registerDesktopAudioInput } from './audio-input'
 import { askMicrophoneAccess } from './mic-access'
@@ -283,6 +284,7 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('separation:cancel', () => separator.cancel())
+  registerVocalSeparation()
 
   // ML beat/downbeat analysis (Beat This! runner inside the splitter pack)
   registerBeatsIpc()
@@ -360,7 +362,7 @@ function registerIpc(): void {
   ipcMain.handle('lyrics:cancel', () => transcriber.cancel())
 
   ipcMain.handle('models:status', async () =>
-    modelManager.status(await separator.hasFastSplitter())
+    modelManager.status()
   )
 
   ipcMain.handle('models:download', async (e, ids?: string[]) => {
@@ -368,7 +370,6 @@ function registerIpc(): void {
       if (!e.sender.isDestroyed()) e.sender.send('models:progress', p)
     }
     const result = await modelManager.downloadModels(
-      await separator.hasFastSplitter(),
       send,
       Array.isArray(ids) && ids.length > 0 ? (ids as ModelsProgress['id'][]) : undefined
     )
@@ -819,6 +820,9 @@ app.whenReady().then(async () => {
   // macOS keeps its menu (⌘-shortcuts live there); elsewhere it's just noise
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
   await migrateProjects()
+  // Before anything asks whether a splitter is installed: a kill during a
+  // pack update can leave the only good copy beside the slot it belongs in.
+  await restoreInterruptedPackSwap()
   await cleanupObsoleteModels()
   allowRoot(stemsRoot())
   allowRoot(projectsRoot())
@@ -848,6 +852,7 @@ app.on('before-quit', () => {
   captureOwner.stop()
   scheduler.stop()
   separator.cancel()
+  vocalSeparator.cancel()
   transcriber.cancel()
   cancelBeatsMl()
 })
@@ -855,6 +860,7 @@ app.on('before-quit', () => {
 app.on('window-all-closed', () => {
   captureOwner.stop()
   separator.cancel()
+  vocalSeparator.cancel()
   transcriber.cancel()
   cancelBeatsMl()
   if (process.platform !== 'darwin') app.quit()

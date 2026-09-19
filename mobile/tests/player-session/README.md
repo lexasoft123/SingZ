@@ -303,8 +303,9 @@ Three things a simulator never does, all handled, all learned the hard way:
   thread stops, so a CDP evaluate never returns and the driver hangs on the
   one step whose answer IS "it was suspended". Those reads are
   deadline-bounded and `AppState=suspended` counts as having gone to the
-  background. This is also a real backend difference, not noise: native keeps
-  rendering there by choice, legacy does not.
+  background. Which of the two backends is still rendering there is a product
+  question, not noise — and since the sample-background fix both of them can
+  be (see the note below).
 - **Suspending closes the inspector socket**, with no notice. Everything
   after it fails as "WebSocket is not open", which describes the driver and
   not the app. The device layer reattaches after foregrounding; the JS
@@ -329,11 +330,17 @@ so instead of quietly measuring a fresh process.
 On Android the pair is `input keyevent 3` and a LAUNCHER intent, and the
 same pid assertion applies.
 
-Note what backgrounding actually does to playback, because it is NOT the
-same on both backends and that difference is the whole reason the
-backgrounded phase is uncompared: `App.tsx` suspends the legacy engine on
-`background`, and legacy stops on both platforms. Native **keeps playing on
-both** when the song was left playing — on iOS by the `audio` background mode
+Note what backgrounding actually does to playback, because it decides
+whether the backgrounded phase is compared at all — the rule is "were the two
+backends doing the same thing", and the answer CHANGED. `App.tsx` suspends the
+legacy engine on `background` **unless the OS agreed to keep that very song
+playing**, which it does for any playing song with a card up: before that
+exception (added after App Review rejected 0.22.0 under 2.5.4 — the bundled
+sample plays on legacy, and Home stopped it) legacy stopped on both platforms
+and this phase was always UNCOMPARED. Now a song left playing keeps playing on
+EITHER backend, so the phase is compared like any other, and the
+`backgroundPlaying` predicate below only carves it out when the two genuinely
+disagree. Native **keeps playing on both** when the song was left playing — on iOS by the `audio` background mode
 (`parkForBackground` only logs and returns there), and on Android since 0.22.0
 under the media session's foreground service (`App.tsx` skips the park while
 `nowPlaying().keepsPlayingInBackground`). On Android a native song that was

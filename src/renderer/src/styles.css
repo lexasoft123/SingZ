@@ -280,6 +280,22 @@ button.chip-status:hover {
   box-shadow: 0 0 18px rgba(255, 160, 40, 0.15);
 }
 
+/* "This project still owes a backing-vocal split" — #e2a53e, the same amber
+   the grid version uses for act-on-me, so one colour means one thing across
+   the app. Deliberately static: an infinite pulse here would repaint the
+   transport every vsync on the weak-iGPU fleet, and this is already the only
+   coloured control in its row. */
+.pill.attention {
+  border: 1px solid rgba(226, 165, 62, 0.55);
+  background: rgba(226, 165, 62, 0.12);
+  color: #e2a53e;
+}
+
+.pill.attention:hover {
+  border-color: rgba(226, 165, 62, 0.8);
+  background: rgba(226, 165, 62, 0.18);
+}
+
 /* ————————————————————————————————— track stack ————— */
 
 .stack {
@@ -5318,3 +5334,15 @@ body.win .modal-card.lyed-card {
     transition: none;
   }
 }
+
+/* Split shares the transport's popover and progress styles. */
+.split-control { position: relative; }
+.train-pop.split-menu { width: min(320px, calc(100vw - 32px)); right: 0; left: auto; }
+.split-menu p { color: var(--dim); font-size: 13px; line-height: 1.5; margin: 0 0 14px; }
+.split-menu-option { display: flex; align-items: center; gap: 10px; font-size: 14px; cursor: pointer; }
+.split-menu-option input { accent-color: var(--accent); width: 17px; height: 17px; }
+.split-menu .split-menu-hint { margin: 8px 0 16px; font-size: 12px; }
+.split-menu-action { display: block; width: 100%; padding: 10px 8px; text-align: left; border-radius: 8px; font-size: 14px; }
+.split-menu-action:hover:not(:disabled) { background: var(--accent-soft); color: var(--accent); }
+.split-menu-action:disabled { opacity: 0.45; cursor: default; }
+.split-menu :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }

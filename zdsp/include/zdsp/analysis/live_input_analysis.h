@@ -16,7 +16,7 @@ struct LiveInputFrame {
 
 LiveInputFrame analyzeLiveInput(const float* mono, size_t frames,
                                 double sampleRate,
-                                double minFrequency = 70.0,
+                                double minFrequency = 55.0,
                                 double maxFrequency = 1050.0);
 
 }  // namespace zdsp::analysis
