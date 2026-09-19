@@ -54,60 +54,189 @@ const archive = join(headersRoot, `node-v${electronVersion}-headers.tar.gz`)
 const includeDir = join(headersRoot, 'node_headers', 'include', 'node')
 const nodeLibrary = join(headersRoot, 'win-x64', 'node.lib')
 
+// https.get has no timeout of any kind: a connection that stalls after
+// connecting never errors, and a build sat for over eighty minutes at zero CPU
+// holding the native build lock, printing nothing. Both phases are bounded:
+// waiting for the server to answer, and then for the next bytes of the body.
+const DOWNLOAD_RESPONSE_TIMEOUT_MS = 30_000
+const DOWNLOAD_IDLE_TIMEOUT_MS = 30_000
+const DOWNLOAD_ATTEMPTS = 3
+const DOWNLOAD_BACKOFF_MS = 2_000
+
+/** Marks a failure worth another attempt — a stall, a dropped connection, a
+ * network error, a 5xx. A 4xx or a redirect loop fails the same way every
+ * time, so it is not retried. */
+function transient(error) {
+  error.transient = true
+  return error
+}
+
 // Streams to a per-process partial and renames only on a complete body, so an
 // interrupted download can never leave a truncated file trusted by existence.
-function download(url, destination, redirects = 0) {
+// Every way an attempt can fail — a stall, a short body, a dropped connection,
+// a bad status — removes the partial before it rejects.
+function downloadOnce(url, destination, options, redirects = 0) {
+  const { get: fetchUrl, responseTimeoutMs, idleTimeoutMs } = options
   return new Promise((resolveDownload, reject) => {
     if (redirects > 5) {
       reject(new Error(`Too many redirects: ${url}`))
       return
     }
     const partial = `${destination}.part-${process.pid}`
-    const dropPartial = () => rmSync(partial, { force: true })
-    const request = get(url, (response) => {
-      if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
-        response.resume()
-        download(response.headers.location, destination, redirects + 1).then(
-          resolveDownload,
-          reject
-        )
-        return
-      }
-      if (response.statusCode !== 200) {
-        response.resume()
-        reject(new Error(`Download failed (${response.statusCode}): ${url}`))
-        return
-      }
-      const output = createWriteStream(partial)
-      response.pipe(output)
-      response.on('error', (error) => {
-        output.destroy()
-        dropPartial()
+    const started = Date.now()
+    let settled = false
+    let timer = null
+    let output = null
+    let received = 0
+    let request = null
+    const fail = (error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      request?.destroy()
+      const dropPartial = () => {
+        // Windows can hold a just-closed file for a moment
+        rmSync(partial, { force: true, maxRetries: 3, retryDelay: 100 })
         reject(error)
-      })
-      response.on('aborted', () => {
+      }
+      if (output && !output.closed) {
+        output.once('close', dropPartial)
         output.destroy()
+      } else {
         dropPartial()
-        reject(new Error(`Download interrupted: ${url}`))
+      }
+    }
+    const watch = (ms, what) => {
+      clearTimeout(timer)
+      timer = setTimeout(() => {
+        const waited = ((Date.now() - started) / 1000).toFixed(1)
+        fail(transient(new Error(
+          `Download stalled: ${what} from ${url} for ${ms / 1000} s ` +
+          `(${waited} s in all, ${received} bytes received)`
+        )))
+      }, ms)
+    }
+    request = fetchUrl(url, (response) => {
+      if (settled) {
+        response.resume()
+        return
+      }
+      const status = response.statusCode
+      if (status >= 300 && status < 400 && response.headers.location) {
+        response.resume()
+        settled = true
+        clearTimeout(timer)
+        const next = new URL(response.headers.location, url).href
+        downloadOnce(next, destination, options, redirects + 1).then(resolveDownload, reject)
+        return
+      }
+      if (status !== 200) {
+        response.resume()
+        const error = new Error(`Download failed (${status}): ${url}`)
+        fail(status >= 500 ? transient(error) : error)
+        return
+      }
+      output = createWriteStream(partial)
+      watch(idleTimeoutMs, 'no data')
+      response.on('data', (chunk) => {
+        received += chunk.length
+        watch(idleTimeoutMs, 'no data')
       })
+      response.on('error', (error) => fail(transient(error)))
+      response.on('aborted', () => fail(transient(new Error(`Download interrupted: ${url}`))))
+      output.on('error', fail)
       output.on('finish', () =>
         output.close(() => {
+          // A body that stops short of its content-length never gets here:
+          // node's parser raises 'aborted' and never ends the stream, and the
+          // test that drops the connection mid-body holds that.
+          if (settled) return
           try {
             replacePathPreserving(partial, destination)
-            resolveDownload()
           } catch (error) {
-            dropPartial()
-            reject(error)
+            fail(error)
+            return
           }
+          settled = true
+          clearTimeout(timer)
+          resolveDownload()
         })
       )
-      output.on('error', (error) => {
-        dropPartial()
-        reject(error)
-      })
+      response.pipe(output)
     })
-    request.on('error', reject)
+    request.on('error', (error) => fail(transient(error)))
+    watch(responseTimeoutMs, 'no response')
   })
+}
+
+/** Download with both timeouts and a few attempts, backing off between them.
+ * The options exist for the unit test (a plain-http getter, short timeouts);
+ * the build passes none. */
+async function download(url, destination, options = {}) {
+  const settings = {
+    get,
+    responseTimeoutMs: DOWNLOAD_RESPONSE_TIMEOUT_MS,
+    idleTimeoutMs: DOWNLOAD_IDLE_TIMEOUT_MS,
+    attempts: DOWNLOAD_ATTEMPTS,
+    backoffMs: DOWNLOAD_BACKOFF_MS,
+    log: console.log,
+    ...options
+  }
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await downloadOnce(url, destination, settings)
+      return
+    } catch (error) {
+      if (!error.transient || attempt >= settings.attempts) {
+        // a NEW error, never `error.message +=`: node renders a system
+        // error's stack (ECONNREFUSED, ENOTFOUND) as it creates it, and the
+        // build prints the stack, so appended text would never be seen
+        if (attempt > 1) throw new Error(`${error.message} (gave up after ${attempt} attempts)`, { cause: error })
+        throw error
+      }
+      const delay = settings.backoffMs * 2 ** (attempt - 1)
+      settings.log(`${error.message} — trying again in ${delay / 1000} s (attempt ${attempt + 1} of ${settings.attempts})`)
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, delay))
+    }
+  }
+}
+
+/** Fetch one of Electron's header files, saying what to do when it cannot be
+ * had: the files are the same for every checkout at this Electron version.
+ * `options` pass through to download(), for the unit test. */
+async function downloadHeaderFile(url, destination, options = {}) {
+  try {
+    await download(url, destination, options)
+  } catch (error) {
+    throw new Error(
+      `${error.message}\nElectron ${electronVersion}'s headers are fetched once per checkout. A checkout ` +
+        `that has already built the addon has them under .engines-src/electron-headers/${electronVersion} — ` +
+        'copying that folder into this checkout skips the download.',
+      { cause: error }
+    )
+  }
+}
+
+/** Extract the header tarball, and forget it if it will not extract: a
+ * damaged archive left in place would fail the same way on every build,
+ * because the download is skipped whenever the archive exists. What it had
+ * already written goes too — the build skips extraction once node_api.h is
+ * there, which is barely halfway through the tarball, so a half-extracted
+ * tree would otherwise be compiled against without v8.h. */
+function extractHeaders(archivePath, cwd, extract = run) {
+  try {
+    // Git Bash's tar parses an absolute D:\ path as a remote host. Extract
+    // inside the header directory with the colon-free archive basename.
+    extract('tar', ['-xzf', basename(archivePath)], cwd)
+  } catch (error) {
+    rmSync(archivePath, { force: true })
+    rmSync(join(cwd, 'node_headers'), { recursive: true, force: true })
+    throw new Error(
+      `${error.message} extracting ${basename(archivePath)} — removed it and what it had extracted, ` +
+        'so the next build downloads it again',
+      { cause: error }
+    )
+  }
 }
 
 // One fingerprint drives the immutable runtime path and the addon's compiled
@@ -551,18 +680,16 @@ async function main() {
     mkdirSync(headersRoot, { recursive: true })
     if (!existsSync(join(includeDir, 'node_api.h'))) {
       if (!existsSync(archive)) {
-        await download(
+        await downloadHeaderFile(
           `https://electronjs.org/headers/v${electronVersion}/node-v${electronVersion}-headers.tar.gz`,
           archive
         )
       }
-      // Git Bash's tar parses an absolute D:\ path as a remote host. Extract
-      // inside the header directory with the colon-free archive basename.
-      run('tar', ['-xzf', `node-v${electronVersion}-headers.tar.gz`], headersRoot)
+      extractHeaders(archive, headersRoot)
     }
     if (platform === 'win32' && !existsSync(nodeLibrary)) {
       mkdirSync(join(headersRoot, 'win-x64'), { recursive: true })
-      await download(`https://electronjs.org/headers/v${electronVersion}/win-x64/node.lib`, nodeLibrary)
+      await downloadHeaderFile(`https://electronjs.org/headers/v${electronVersion}/win-x64/node.lib`, nodeLibrary)
     }
 
     const buildDir = join(root, 'build', `capture-${target}`)
@@ -651,4 +778,4 @@ if (runningAsScript) {
   }
 }
 
-module.exports = { findAddon, sourceFingerprint }
+module.exports = { download, downloadHeaderFile, extractHeaders, findAddon, sourceFingerprint }
