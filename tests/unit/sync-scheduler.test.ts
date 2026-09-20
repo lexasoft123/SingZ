@@ -149,6 +149,87 @@ describe('what a run could not reach', () => {
     await vi.waitFor(() => expect(h.runs).toHaveLength(1))
     await vi.waitFor(() => expect([...h.marks].some((m) => m.startsWith('/Users'))).toBe(true))
   })
+
+  it('never arms a run for the mark it just put back — that is the loop', async () => {
+    // A real report: the desktop's log for this exact bug repeated a sync
+    // every ~6 seconds forever, because putting the unreachable project's
+    // mark BACK (correctly — its badge must never go green) was itself read
+    // as new work worth another run.
+    const h = harness({
+      run: async () => ({ ...ok(), outsideLibrary: ['/Users/singer/Desktop/Borrowed Song'] })
+    })
+    h.mark('inside')
+    h.clock.advance(DEBOUNCE_MS)
+    await vi.waitFor(() => expect(h.runs).toHaveLength(1))
+    await vi.waitFor(() => expect([...h.marks].some((m) => m.startsWith('/Users'))).toBe(true))
+
+    // Nothing else happened. Advance well past both the debounce and the
+    // max-wait cap — long enough that any timer the re-mark armed would have
+    // fired by now. A second run here IS the loop.
+    h.clock.advance(MAX_WAIT_MS + DEBOUNCE_MS + 1000)
+    expect(h.runs).toHaveLength(1)
+    expect(h.clock.pending()).toBe(0)
+
+    // A genuinely new mark — a reachable project this time — must still go
+    // through: the suppression is per-run and provisional, never a global
+    // "stop syncing".
+    h.mark('inside-again')
+    h.clock.advance(DEBOUNCE_MS)
+    await vi.waitFor(() => expect(h.runs).toHaveLength(2))
+  })
+
+  it('holds even when remark reenters notifyDirty synchronously, as it does in production', async () => {
+    // The shared harness()'s fake `remark` is an inert data mutation — real
+    // life is not. sync-dirty.ts's markProjectDirty ends by calling every
+    // onDirty listener synchronously, and index.ts wires exactly one:
+    // onDirty(() => scheduler.notifyDirty()). So the real dirty.remark()
+    // calls back into notifyDirty() itself, from inside syncNow's success
+    // branch, before the explicit `if (this.followUp) this.notifyDirty()`
+    // below it even runs. This harness mirrors that reentrancy directly, so
+    // it fails if the `remarking` guard is ever removed as "unused".
+    const clock = fakeClock()
+    const marks = new Set<string>()
+    let seq = 0
+    const runs: number[] = []
+    let scheduler: SyncScheduler | undefined
+    const deps: SchedulerDeps = {
+      run: async () => {
+        runs.push(clock.now())
+        return { ...ok(), outsideLibrary: ['/Users/singer/Desktop/Borrowed Song'] }
+      },
+      enabled: () => true,
+      dirty: {
+        seq: () => seq,
+        isDirty: () => marks.size > 0,
+        count: () => marks.size,
+        clear: (upTo) => {
+          for (const m of [...marks]) if (Number(m.split(':')[1]) <= upTo) marks.delete(m)
+        },
+        remark: (dirs) => {
+          for (const d of dirs) {
+            marks.add(`${d}:${++seq}`)
+            scheduler?.notifyDirty() // the real listener path, synchronously
+          }
+        }
+      },
+      lastSync: () => null,
+      now: clock.now,
+      timer: clock.timer,
+      onStatus: () => {},
+      onProgress: () => {}
+    }
+    scheduler = new SyncScheduler(deps)
+
+    marks.add(`inside:${++seq}`)
+    scheduler.notifyDirty()
+    clock.advance(DEBOUNCE_MS)
+    await vi.waitFor(() => expect(runs).toHaveLength(1))
+    await vi.waitFor(() => expect([...marks].some((m) => m.startsWith('/Users'))).toBe(true))
+
+    clock.advance(MAX_WAIT_MS + DEBOUNCE_MS + 1000)
+    expect(runs).toHaveLength(1)
+    expect(clock.pending()).toBe(0)
+  })
 })
 
 describe('the Sync now button', () => {
