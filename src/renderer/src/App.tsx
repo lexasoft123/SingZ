@@ -91,7 +91,8 @@ import gdriveIcon from './assets/gdrive.png'
 import DropScreen from './components/DropScreenRoute'
 import type LibraryImportComponent from './components/LibraryImport'
 import type LogPanelComponent from './components/LogPanel'
-import LyricsPanel, { type LyricsState } from './components/LyricsPanel'
+import LyricsPanel from './components/LyricsPanel'
+import { lyricsJobProgressed, lyricsJobSettled, lyricsJobStarted, type LyricsState } from './lyrics-state'
 import { createLazyDialogRoute } from './components/LazyDialogRoute'
 
 // The lyrics editor rides outside the boot bundle like VocalTraining does —
@@ -2432,28 +2433,11 @@ export default function App(): React.JSX.Element {
   const vocalsMuted = tracks.find((t) => t.id === 'vocals')?.muted ?? false
 
   const applyLyricsResult = useCallback((res: import('../../shared/types').LyricsResult) => {
-    if (!res.ok) {
-      setLyrics(
-        res.cancelled
-          ? { status: 'idle' }
-          : res.needsModel
-            ? { status: 'consent', sizeMb: res.needsModel.sizeMb, what: res.needsModel.what }
-            : { status: 'error', error: res.error }
-      )
-      return
-    }
-    setLyrics(
-      res.lines.length > 0
-        ? {
-            status: 'ready',
-            lines: res.lines,
-            source: res.source,
-            credit: res.credit,
-            aligned: res.aligned,
-            check: res.check
-          }
-        : { status: 'error', error: 'No words were detected in the vocals.' }
-    )
+    // Through the ref rather than the state so a result and the progress
+    // report before it cannot cross in one flush, as every other write to
+    // this state in this file does.
+    lyricsRef.current = lyricsJobSettled(lyricsRef.current, res)
+    setLyrics(lyricsRef.current)
   }, [])
 
   const [preciseCap, setPreciseCap] = useState(false)
@@ -2495,10 +2479,12 @@ export default function App(): React.JSX.Element {
       const revision = ++lyricsRequestRevisionRef.current
       const current = (): boolean => seq === loadSeq.current && revision === lyricsRequestRevisionRef.current
       // Ladder: cache → LRCLIB synced lyrics → Qwen3-ASR (with model consent).
-      lyricsRef.current = { status: 'loading', progress: null }
+      lyricsRef.current = lyricsJobStarted(lyricsRef.current)
       setLyrics(lyricsRef.current)
       const unsub = window.singz.onLyricsProgress((p) => {
-        if (current()) setLyrics({ status: 'loading', progress: p })
+        if (!current()) return
+        lyricsRef.current = lyricsJobProgressed(lyricsRef.current, p)
+        setLyrics(lyricsRef.current)
       })
       const pending = window.singz.getLyrics(
         song.path,
@@ -4033,6 +4019,10 @@ export default function App(): React.JSX.Element {
                   setEditingLyrics(true)
                 }}
                 onResult={applyLyricsResult}
+                beginRequest={() => {
+                  const seq = loadSeq.current
+                  return () => seq === loadSeq.current
+                }}
                 onCancel={() => void window.singz.cancelLyrics()}
               />
             )}

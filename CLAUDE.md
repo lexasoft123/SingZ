@@ -94,9 +94,14 @@ the E2E Windows workflow, which also runs `npm test`), the two capture-addon
 harnesses in `tests/e2e/` (`capture-addon-smoke.cjs`, the Electron ABI/load
 gate CI runs on both platforms; `capture-addon-hardware.cjs`, by-hand only —
 it opens the real microphone), and the mac drivers
-in `tests/e2e/mac/` (fifteen of them: align, lyrics editing (the editor's
+in `tests/e2e/mac/` (eighteen of them: align, lyrics editing (the editor's
 align-draft leg is a different code path from the panel's Check & align —
-both are covered), wizard/consent, audio settings,
+both are covered), CANCELLING one of those jobs
+(`lyrics-cancel-e2e.cjs` — a cancel is not a verdict on the lyrics: the
+panel owes the singer exactly the words it was showing when they started,
+and it used to empty itself instead, 36 lines to 0 until the song was
+reopened, with lyrics.json untouched the whole time so nothing on disk
+could see it), wizard/consent, audio settings,
 bar editing — TWO of those, because dragging a line and pressing Re-detect
 are different code paths and only the drag was covered — and the
 analysis-rule drivers: the two stem-rate ones, the two song-switch races,
