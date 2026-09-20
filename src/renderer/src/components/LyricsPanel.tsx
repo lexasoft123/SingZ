@@ -1,28 +1,13 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type {
-  AlignCheck,
   LyricLine,
   LyricsCandidate,
   LyricsProgress,
-  LyricsResult,
-  LyricsSource
+  LyricsResult
 } from '../../../shared/types'
 import type { MultitrackEngine } from '../audio/engine'
 import { fmtTime, modalCoversApp } from '../model'
-
-export type LyricsState =
-  | { status: 'idle' }
-  | { status: 'consent'; sizeMb: number; what?: 'speech' | 'aligner' }
-  | { status: 'loading'; progress: LyricsProgress | null }
-  | {
-      status: 'ready'
-      lines: LyricLine[]
-      source: LyricsSource
-      credit?: string
-      aligned?: boolean
-      check?: AlignCheck
-    }
-  | { status: 'error'; error: string }
+import type { LyricsState } from '../lyrics-state'
 
 const STAGE_LABEL: Record<LyricsProgress['stage'], string> = {
   preparing: 'Warming up',
@@ -49,6 +34,12 @@ interface Props {
   /** Open the lyrics editor (fix words, stamp and align timing by hand). */
   onEdit: () => void
   onResult: (res: LyricsResult) => void
+  /**
+   * Open a request against the song that is open now. The returned predicate
+   * answers "is that still the song?" when the request lands, from the
+   * owner's own load counter — so it survives this panel being unmounted.
+   */
+  beginRequest: () => () => boolean
   onCancel: () => void
 }
 
@@ -104,6 +95,7 @@ export default function LyricsPanel({
   onPreciseAlign,
   onEdit,
   onResult,
+  beginRequest,
   onCancel
 }: Props): React.JSX.Element {
   const [current, setCurrent] = useState(-1)
@@ -240,9 +232,19 @@ export default function LyricsPanel({
   }
 
   const applyCandidate = async (id: number): Promise<void> => {
+    // Picking a version is an LRCLIB fetch and a lyrics.json write, so the
+    // singer can be in another song by the time it answers, and `applyById`
+    // is not cancellable. Lyrics that land in the wrong song are not merely
+    // drawn there: `linesRef` feeds detectBeats' lineStarts/words and that
+    // grid is auto-saved. The predicate comes from the OWNER and is evaluated
+    // there, because a song switch turns karaoke off and unmounts this panel
+    // before the new song is set — anything this component remembers freezes
+    // at that moment, and would compare the old song against itself and agree.
+    const current = beginRequest()
     setBusy(true)
     const res = await window.singz.applyLyrics(songPath, id, engine.duration)
     setBusy(false)
+    if (!current()) return // a different song is open now
     onResult(res)
     if (res.ok) setView('lyrics')
   }
