@@ -13,9 +13,9 @@
  * The project's lyrics.json is backed up on entry and restored on exit, so
  * the library project comes out exactly as it went in.
  *
- * Prereqs: `npm run build` done; whisper model under
- * ~/Library/Application Support/SingZ/models (align falls back to a fresh
- * transcription when no words cache exists — give it time, not a retry).
+ * Prereqs: `npm run build` done; the Qwen3-ASR speech model under
+ * ~/Library/Application Support/SingZ/models (align listens afresh when no
+ * cached listen of these vocals exists — give it time, not a retry).
  *
  * Env: E2E_PROJECT (default "Nothing Else Matters"),
  *      E2E_PROJECTS_ROOT (default iCloud Drive/SingZ),

@@ -32,7 +32,7 @@ import {
   writeProjectGraph
 } from './projects'
 import { gdriveConfigured, gdriveSignedIn, gdriveSignIn, gdriveSignOut, gdriveSync } from './gdrive'
-import { readSettings } from './settings'
+import { readSettings, writeSettings } from './settings'
 import { loadTrainingProgress, recordTrainingCompletion, saveTrainingPreferences } from './training-progress'
 import { hashFile, writeInputWav } from './separation'
 import type { ModelsProgress, ProjectSettings } from '../shared/types'
@@ -44,7 +44,16 @@ import { replaySyncLog, syncLog } from './sync-log'
 import { SyncScheduler } from './sync-scheduler'
 import { logHardwareInfo } from './hwinfo'
 import { installUpdate, startUpdater, updateState } from './updater'
-import { cleanupObsoleteModels, dmlFlagPath, modelsDir, packDir, restoreInterruptedPackSwap, trtrtxFlagPath } from './models'
+import {
+  cleanupObsoleteModels,
+  dmlFlagPath,
+  modelsDir,
+  packDir,
+  qwenInstalled,
+  restoreInterruptedPackSwap,
+  trtrtxFlagPath,
+  whisperModelOnDisk
+} from './models'
 import { Separator } from './separation'
 import { registerVocalSeparation, vocalSeparator } from './vocal-separation'
 import { registerAnalyze } from './analyze'
@@ -303,7 +312,7 @@ function registerIpc(): void {
         full,
         Number(durationSec) || 0,
         Boolean(allowDownload),
-        prefer === 'whisper' || prefer === 'align' || prefer === 'precise' ? prefer : 'auto',
+        prefer === 'transcribe' || prefer === 'align' || prefer === 'precise' ? prefer : 'auto',
         send
       )
       // Aligning rewrites a project's lyrics.json outside the save flow —
@@ -364,6 +373,21 @@ function registerIpc(): void {
   ipcMain.handle('models:status', async () =>
     modelManager.status()
   )
+
+  // Qwen3-ASR replaced whisper. A machine that transcribed lyrics before has
+  // a whisper model and no Qwen: offer the new one ONCE, at launch, rather
+  // than letting the singer find out halfway through a Transcribe. Everyone
+  // else is asked the ordinary way, when a lyrics job needs the model.
+  ipcMain.handle('models:qwen-offer', async () => {
+    // Drivers run hidden, and a modal over the library is a red run on the
+    // first machine with a whisper model — the Windows field laptop, likely.
+    // SINGZ_QWEN_OFFER=1 is for the driver that tests the offer itself.
+    if (process.env.SINGZ_E2E_HIDDEN === '1' && process.env.SINGZ_QWEN_OFFER !== '1') return false
+    return !readSettings().qwenOfferDismissed && (await whisperModelOnDisk()) && !(await qwenInstalled())
+  })
+  ipcMain.handle('models:qwen-offer-dismiss', () => {
+    writeSettings({ qwenOfferDismissed: true })
+  })
 
   ipcMain.handle('models:download', async (e, ids?: string[]) => {
     const send = (p: ModelsProgress): void => {

@@ -113,7 +113,7 @@ mac:
   extraResources:
     - from: vendor/darwin-${arch}
       to: engines
-      filter: ['whisper-cli*', 'singz-analyze*', 'llama-server*', 'crispasr*']
+      filter: ['singz-analyze*', 'llama-server*', 'crispasr*']
     - from: build/capture-package/darwin-${arch}
       to: engines
       filter: ['singz-capture.node', 'singz-capture.node.source-hash', 'singz-capture.node.sha256', 'singz-capture.manifest.json', 'ffmpeg/**/*']
@@ -134,7 +134,7 @@ win:
   extraResources:
     - from: vendor/win32-x64
       to: engines
-      filter: ['whisper-cli*', 'singz-analyze*', 'llama-server*', 'crispasr*']
+      filter: ['singz-analyze*', 'llama-server*', 'crispasr*']
     - from: build/capture-package/win32-x64
       to: engines
       filter: ['singz-capture.node', 'singz-capture.node.source-hash', 'singz-capture.node.sha256', 'singz-capture.manifest.json', '*.dll']

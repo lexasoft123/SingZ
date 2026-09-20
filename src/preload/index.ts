@@ -203,6 +203,10 @@ const api: SingzApi = {
 
   cancelModels: () => ipcRenderer.invoke('models:cancel'),
 
+  qwenOffer: () => ipcRenderer.invoke('models:qwen-offer'),
+
+  dismissQwenOffer: () => ipcRenderer.invoke('models:qwen-offer-dismiss'),
+
   onModelsProgress: (cb) => {
     const listener = (_e: IpcRendererEvent, p: ModelsProgress): void => cb(p)
     ipcRenderer.on('models:progress', listener)

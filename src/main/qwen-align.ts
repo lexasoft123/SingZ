@@ -13,8 +13,9 @@ import { qwenAlignerPath } from './models'
 import { chunkToWav, type ChunkPlan } from './vocal-chunks'
 
 /**
- * Word timing without whisper: Qwen3-ForcedAligner-0.6B places lyrics we
- * already have against the audio, one sung chunk at a time.
+ * Word timing: Qwen3-ForcedAligner-0.6B places words we already have — the
+ * lyrics being checked, or Qwen3-ASR's own transcription — against the
+ * audio, one sung chunk at a time.
  *
  * Measured over the catalog on 2026-09-17, against the Precise/MMS times the
  * app stores, and against whisper's own tier-1 timing:
@@ -36,7 +37,8 @@ import { chunkToWav, type ChunkPlan } from './vocal-chunks'
  *     recogniser heard little (Sixteen Tons: 55% of words anchored) that
  *     assignment is often wrong. Feeding the placements through `retime` lets
  *     the lyrics' own phrasing carry the words the aligner could not support,
- *     which is exactly what whisper's tier does with its own sparse anchors.
+ *     which is what whisper's text-match tier did with its own sparse
+ *     anchors before this replaced it.
  */
 
 const EXE = process.platform === 'win32' ? 'crispasr.exe' : 'crispasr'

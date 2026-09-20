@@ -350,11 +350,12 @@ export function singMask(lineCount: number, hear: number, sing: number): boolean
  * rest — the karaoke sweep runs through it so the fill never freezes mid-line.
  * Longer gaps are a real breath or a held note: the word stays lit instead of
  * crawling across the silence. (LRC word times are contiguous by
- * construction, so this only ever engages on whisper/CTC timings.)
+ * construction, so this only ever engages on aligner timings.)
  * Desktop parity: src/renderer/src/components/LyricsPanel.tsx.
  */
 const WORD_BRIDGE_S = 0.35
-/** Whisper -ml 1 can emit e <= s; never divide by zero or sweep backwards. */
+/** A word can arrive with e <= s (whisper -ml 1 wrote such words into older
+ *  lyrics.json files); never divide by zero or sweep backwards. */
 const MIN_WORD_S = 0.05
 
 /** Per word, the moment its sweep should reach the end of the word. */

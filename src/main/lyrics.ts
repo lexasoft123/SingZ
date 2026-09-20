@@ -1,7 +1,5 @@
-import { app } from 'electron'
-import { spawn, type ChildProcess } from 'node:child_process'
-import { access, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { cpus } from 'node:os'
+import { type ChildProcess } from 'node:child_process'
+import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import type { AlignCheck, LyricLine, LyricWord, LyricsProgress, LyricsResult, LyricsSource } from '../shared/types'
 import {
@@ -15,14 +13,8 @@ import {
   type AlignOutcome
 } from './align'
 import { preciseCapable, runMmsAlign } from './align-mms'
-import {
-  linesFromChunks,
-  qwenAvailable,
-  qwenLanguageName,
-  QwenServer,
-  type QwenChunkText
-} from './qwen-asr'
-import { alignWordsInChunks, assignWordsToChunks, qwenAlignerAvailable } from './qwen-align'
+import { linesFromChunks, qwenLanguageName, QwenServer, resolveQwenServer, type QwenChunkText } from './qwen-asr'
+import { alignWordsInChunks, assignWordsToChunks, resolveQwenAligner } from './qwen-align'
 import { decodeVocalsMono16k, levelEnvelope, planChunks } from './vocal-chunks'
 import {
   fixTagEncoding,
@@ -35,39 +27,20 @@ import {
 import { stemsRoot } from './media'
 import { log } from './log'
 import { markFileDirty } from './sync-dirty'
-import { downloadFile, mmsModelMb, mmsModelPath, mmsModelUrl, modelsDir } from './models'
+import {
+  downloadFile,
+  downloadQwen,
+  mmsModelMb,
+  mmsModelPath,
+  mmsModelUrl,
+  qwenInstalled,
+  qwenMissingMb
+} from './models'
 import { projectLyricsPath } from './projects'
-import { hashFile, spawnEnv } from './separation'
-import { onChildSettled } from './child-exit'
-
-// Fallback transcription only runs when no online lyrics exist, so a bigger
-// one-time download is worth it — turbo is far stronger than `small` on singing.
-const MODEL = process.env.SINGZ_WHISPER_MODEL || 'large-v3-turbo'
-const MODEL_SIZES_MB: Record<string, number> = {
-  tiny: 75,
-  base: 142,
-  small: 466,
-  medium: 1530,
-  'large-v3-turbo': 1620
-}
-const modelUrl = (m: string): string =>
-  `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${m}.bin`
-
-const EXE = process.platform === 'win32' ? 'whisper-cli.exe' : 'whisper-cli'
+import { hashFile } from './separation'
 
 /** Recorded in lyrics.json so a re-listen can tell which engine wrote a line. */
 const QWEN_ENGINE_ID = 'qwen3-asr-1.7b'
-
-/**
- * Qwen3-ASR is opt-in while it is being proven in the field: it hears sung
- * words markedly better than whisper (measured over the whole catalog: WER
- * 0.167 against 0.278 on songs with no online lyrics, and no invented
- * subtitle phrases at all) but it is a second engine, a second download, and
- * llama.cpp still calls its audio input experimental.
- */
-function qwenPreferred(): boolean {
-  return process.env.SINGZ_ASR === 'qwen'
-}
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -78,74 +51,106 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-/** Bundled-first engine resolution: packaged resources → dev vendor dir → env override. */
-async function resolveEngine(): Promise<string[] | null> {
-  if (process.env.SINGZ_WHISPER) return process.env.SINGZ_WHISPER.split(' ').filter(Boolean)
-  const target = `${process.platform}-${process.arch}`
-  const candidates = [
-    join(process.resourcesPath ?? '', 'engines', EXE),
-    // dev: this module lives at <root>/out/main — vendor sits at the project root
-    join(import.meta.dirname, '..', '..', 'vendor', target, EXE),
-    join(app.getAppPath(), 'vendor', target, EXE)
-  ]
-  for (const c of candidates) {
-    if (c && (await exists(c))) return [c]
+/**
+ * What Qwen3-ASR heard in a song's vocals, kept in the song's cache folder.
+ * Two things read it. A re-align — switching the lyrics variant, or aligning
+ * a draft again after an edit — skips the listen and goes straight to the
+ * aligner, which is most of what made whisper's cached transcription worth
+ * having. And the Precise tier uses its words as the text check that CTC
+ * scores cannot give on singing.
+ *
+ * Keyed to the exact vocals file, size and mtime, because separating backing
+ * vocals REWRITES that file: a listen to the old combined vocal would check
+ * new lyrics against a voice that is no longer in it. mtimes compare with the
+ * same 2 ms tolerance as the sync ledger (iCloud rehydration truncates them).
+ */
+/**
+ * The listening pipeline's own stamp, the way the detectors carry theirs: bump
+ * it when QwenServer.transcribe changes what it answers for the same audio
+ * (the prompt, the loop guard, the forced-language retry, the chunk plan), or
+ * every cached listen keeps the old answer until its vocals file changes.
+ */
+const HEARD_VERSION = 1
+
+interface HeardCache {
+  version: number
+  engine: string
+  /** The language the listen was told, or null when it was left to decide. */
+  language: string | null
+  vocals: { size: number; mtimeMs: number }
+  chunks: QwenChunkText[]
+}
+const HEARD_FILE = 'heard-words.json'
+
+async function vocalsStamp(vocals: string): Promise<{ size: number; mtimeMs: number } | null> {
+  try {
+    const st = await stat(vocals)
+    return { size: st.size, mtimeMs: st.mtimeMs }
+  } catch {
+    return null
   }
-  return null
 }
 
-export function whisperModelPath(): string {
-  return join(modelsDir(), `ggml-${MODEL}.bin`)
-}
-
-/** Prefer the configured model, but use any already-downloaded one before asking. */
-async function bestAvailableModel(): Promise<string | null> {
-  for (const m of [MODEL, 'medium', 'small', 'base', 'tiny']) {
-    const p = join(modelsDir(), `ggml-${m}.bin`)
-    if (await exists(p)) return p
+/** A listen of THESE vocals, or null. `language` undefined accepts any. */
+export async function readHeard(
+  dir: string,
+  vocals: string,
+  language?: string | null
+): Promise<QwenChunkText[] | null> {
+  try {
+    const raw = JSON.parse(await readFile(join(dir, HEARD_FILE), 'utf8')) as Partial<HeardCache>
+    const stamp = await vocalsStamp(vocals)
+    if (
+      raw.version !== HEARD_VERSION ||
+      raw.engine !== QWEN_ENGINE_ID ||
+      !stamp ||
+      !raw.vocals ||
+      raw.vocals.size !== stamp.size ||
+      Math.abs(raw.vocals.mtimeMs - stamp.mtimeMs) > 2 ||
+      !Array.isArray(raw.chunks) ||
+      (language !== undefined && (raw.language ?? null) !== language)
+    )
+      return null
+    return raw.chunks
+  } catch {
+    return null
   }
-  return null
 }
 
-/** One-time migration from the old per-identity location (userData/models). */
-async function migrateOldModel(): Promise<void> {
-  const oldPath = join(app.getPath('userData'), 'models', `ggml-${MODEL}.bin`)
-  const newPath = whisperModelPath()
-  if (!(await exists(newPath)) && (await exists(oldPath))) {
-    try {
-      await mkdir(join(newPath, '..'), { recursive: true })
-      await rename(oldPath, newPath)
-    } catch {
-      // cross-volume or locked — the downloader will fetch a fresh copy
+export async function writeHeard(
+  dir: string,
+  vocals: string,
+  language: string | null,
+  chunks: QwenChunkText[]
+): Promise<void> {
+  const stamp = await vocalsStamp(vocals)
+  if (!stamp) return
+  const cache: HeardCache = { version: HEARD_VERSION, engine: QWEN_ENGINE_ID, language, vocals: stamp, chunks }
+  try {
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, HEARD_FILE), JSON.stringify(cache), 'utf8')
+  } catch {
+    // a listen that cannot be kept is only a slower re-align next time
+  }
+}
+
+/** The cached listen of these vocals as words — the Precise tier's text check. */
+async function heardWords(dir: string, vocals: string): Promise<LyricWord[]> {
+  const chunks = await readHeard(dir, vocals)
+  return chunks ? linesFromChunks(chunks).flatMap((l) => l.words) : []
+}
+
+/** Which chunk each word of `lines` sits in, by where its (provisional) start falls. */
+export function chunkOfEachWord(lines: LyricLine[], chunks: { start: number }[]): number[] {
+  const out: number[] = []
+  for (const line of lines) {
+    for (const word of line.words) {
+      let ci = 0
+      for (let i = 0; i < chunks.length; i++) if (chunks[i].start <= word.s + 1e-6) ci = i
+      out.push(ci)
     }
   }
-}
-
-export function whisperModelSizeMb(): number {
-  return MODEL_SIZES_MB[MODEL] ?? 500
-}
-
-/** Group whisper.cpp word-chunks into karaoke lines at pauses/punctuation. */
-function groupWords(words: LyricWord[]): LyricLine[] {
-  const lines: LyricLine[] = []
-  let cur: LyricWord[] = []
-  const flush = (): void => {
-    if (cur.length === 0) return
-    lines.push({
-      start: cur[0].s,
-      end: cur[cur.length - 1].e,
-      text: cur.map((w) => w.w).join(' '),
-      words: cur
-    })
-    cur = []
-  }
-  for (const w of words) {
-    const prev = cur[cur.length - 1]
-    if (prev && (w.s - prev.e > 0.7 || cur.length >= 10 || /[.!?]$/.test(prev.w))) flush()
-    cur.push(w)
-  }
-  flush()
-  return lines
+  return out
 }
 
 interface LyricsCache {
@@ -156,8 +161,9 @@ interface LyricsCache {
   /**
    * Which recogniser heard these words, when they were transcribed rather
    * than looked up. Additive and ignored by every older reader — `source`
-   * still says 'whisper' for any on-device transcription, because that is
-   * what the phones and the sync format mean by it.
+   * still says 'whisper' for any on-device transcription (whisper was the
+   * engine until Qwen3-ASR replaced it), because that is what the phones and
+   * the sync format mean by it.
    */
   engine?: string
   /**
@@ -189,7 +195,7 @@ interface LyricsCache {
  */
 export const LRCLIB_LADDER_VERSION = 3
 
-/** Whisper lyrics stay provisional until the CURRENT ladder has answered. */
+/** Transcribed lyrics stay provisional until the CURRENT ladder has answered. */
 export function shouldReaskLrclib(c: {
   source: LyricsSource
   lrclibPending?: boolean
@@ -308,7 +314,7 @@ export class Transcriber {
 
   /**
    * Every lyrics write goes through here — LRCLIB hits, the variant picker,
-   * whisper, both aligners. It is also where the project is marked for Drive:
+   * on-device transcription, every aligner. It is also where the project is marked for Drive:
    * four of these writers used to have no sync trigger at all, so a fresh
    * LRCLIB fetch or a transcription reached the phones only when some later
    * save happened to push it.
@@ -375,9 +381,9 @@ export class Transcriber {
 
   /**
    * Time a draft's words against the vocals WITHOUT touching lyrics.json —
-   * the editor previews the result and saves explicitly. 'align' matches the
-   * draft text to a whisper transcription (the cached one when present, so a
-   * song that was transcribed aligns instantly); 'precise' runs CTC forced
+   * the editor previews the result and saves explicitly. 'align' times the
+   * draft with Qwen3-ASR and its forced aligner (a cached listen of the same
+   * vocals skips straight to the aligner); 'precise' runs CTC forced
    * alignment through the splitter pack. On a mismatch verdict the draft
    * comes back untouched with the check attached — the editor tells the
    * singer instead of silently scrambling their timing.
@@ -402,7 +408,6 @@ export class Transcriber {
       }
     }
     const refCount = draft.reduce((s, l) => s + l.words.length, 0)
-    const wordsFile = join(dir, 'whisper-words.json')
 
     if (tier === 'precise') {
       // The same ladder as preciseAlign, minus the cache write.
@@ -447,18 +452,11 @@ export class Transcriber {
         const outcome = ctcOutcome(draft, ctcWords, durationSec)
         let { check } = outcome
         // CTC scores cannot tell wrong text from hard vocals on singing —
-        // when a whisper transcription is cached, its text check speaks.
-        try {
-          const raw = JSON.parse(await readFile(wordsFile, 'utf8')) as
-            | { words?: LyricWord[] }
-            | LyricWord[]
-          const words = Array.isArray(raw) ? raw : (raw.words ?? [])
-          if (words.length > 0 && transcriptionUsable(words, refCount) && check.verdict !== 'mismatch') {
-            const textCheck = alignToTranscription(draft, words, durationSec).check
-            check = { ...textCheck, method: 'ctc', medianShift: check.medianShift }
-          }
-        } catch {
-          // no transcription cached — the CTC-relative check stands alone
+        // when a listen of these vocals is cached, its text check speaks.
+        const words = await heardWords(dir, vocals)
+        if (words.length > 0 && transcriptionUsable(words, refCount) && check.verdict !== 'mismatch') {
+          const textCheck = alignToTranscription(draft, words, durationSec, 'qwen').check
+          check = { ...textCheck, method: 'ctc', medianShift: check.medianShift }
         }
         log(
           'lyrics',
@@ -482,77 +480,25 @@ export class Transcriber {
       }
     }
 
-    // Fast tier: whisper text alignment, reusing the cached transcription.
-    let words: LyricWord[] | null = null
-    try {
-      const raw = JSON.parse(await readFile(wordsFile, 'utf8')) as {
-        model?: string
-        words?: LyricWord[]
-      }
-      const cachedWords = raw.words ?? []
-      const available = await bestAvailableModel()
-      const fresher = available && raw.model && !available.includes(raw.model)
-      if (cachedWords.length > 0 && !fresher && transcriptionUsable(cachedWords, refCount)) {
-        log(
-          'lyrics',
-          `draft align: reusing cached transcription (${cachedWords.length} words, ${raw.model ?? '?'})`
-        )
-        words = cachedWords
-      }
-    } catch {
-      // no cache — listen afresh
-    }
-    if (!words) {
-      const prep = await this.ensureWhisper(allowDownload, onProgress)
-      if (!prep.ok) return prep.res
-      const tr = await this.transcribeVocals(
-        prep.engine,
-        prep.model,
-        vocals,
-        guessLanguage(draft) ?? 'auto',
-        dir,
-        durationSec,
-        refCount,
-        onProgress
-      )
-      if (!tr.ok) return tr.res
-      words = tr.words
-    }
-    if (!transcriptionUsable(words, refCount)) {
-      return {
-        ok: false,
-        error:
-          'Could not make out the vocals well enough to time the words. Precise alignment may still work.'
-      }
-    }
-    const { lines, check } = alignToTranscription(draft, words, durationSec)
+    // Fast tier: Qwen3-ASR hears the vocals (or a cached listen of these very
+    // vocals stands in), its forced aligner times the draft's words.
+    const ready = await this.ensureQwen(allowDownload, onProgress)
+    if (!ready.ok) return ready.res
+    const aligned = await this.alignWithQwen(vocals, dir, draft, durationSec, onProgress)
+    if (!aligned.ok) return aligned.res
+    const { lines, check } = aligned.outcome
     log(
       'lyrics',
       `draft align: ${check.verdict} — ${check.matchedPct}% words heard, median shift ${check.medianShift}s, ${check.badLines.length} off lines`
     )
-    const aligned = check.verdict !== 'mismatch'
+    const fits = check.verdict !== 'mismatch'
     return {
       ok: true,
       cached: false,
       source: 'edited',
-      aligned,
+      aligned: fits,
       check,
-      lines: aligned ? lines : draft
-    }
-  }
-
-  private async downloadModel(onProgress: (p: LyricsProgress) => void): Promise<void> {
-    this.abort = new AbortController()
-    try {
-      await downloadFile(
-        modelUrl(MODEL),
-        whisperModelPath(),
-        whisperModelSizeMb() * 1e6,
-        (pct) => onProgress({ stage: 'downloading-model', percent: pct }),
-        this.abort.signal
-      )
-    } finally {
-      this.abort = null
+      lines: fits ? lines : draft
     }
   }
 
@@ -560,7 +506,7 @@ export class Transcriber {
     songPath: string,
     durationSec: number,
     allowDownload: boolean,
-    prefer: 'auto' | 'whisper' | 'align' | 'precise',
+    prefer: 'auto' | 'transcribe' | 'align' | 'precise',
     onProgress: (p: LyricsProgress) => void
   ): Promise<LyricsResult> {
     if (this.busy) return { ok: false, error: 'A lyrics job is already running.' }
@@ -572,7 +518,7 @@ export class Transcriber {
     const cached = await this.readCache(lyricsPath)
     // Alignment refines existing online or hand-edited lyrics (re-running is
     // fine — the global aligner never reads the current timing); without
-    // them, auto. Whisper's own transcription is the one source with nothing
+    // them, auto. An on-device transcription is the one source with nothing
     // to align against: the timing IS the transcription.
     let alignBase: LyricsCache | null = null
     if (prefer === 'align' || prefer === 'precise') {
@@ -582,9 +528,9 @@ export class Transcriber {
     if (
       cached &&
       !alignBase &&
-      (prefer === 'auto' || (prefer === 'whisper' && cached.source === 'whisper'))
+      (prefer === 'auto' || (prefer === 'transcribe' && cached.source === 'whisper'))
     ) {
-      // Whisper lyrics are provisional while the verdict behind them is: an
+      // Transcribed lyrics are provisional while the verdict behind them is: an
       // LRCLIB outage, or a lookup ladder since taught to find more. Ask
       // again now, and either upgrade to synced lyrics or settle the matter.
       if (prefer === 'auto' && shouldReaskLrclib(cached)) {
@@ -667,100 +613,30 @@ export class Transcriber {
 
     // Precise tier: CTC forced alignment through the torch splitter pack.
     if (prefer === 'precise' && alignBase) {
-      return this.preciseAlign(
-        vocals,
-        alignBase,
-        lyricsPath,
-        join(dir, 'whisper-words.json'),
-        durationSec,
-        allowDownload,
-        onProgress
-      )
+      return this.preciseAlign(vocals, alignBase, lyricsPath, dir, durationSec, allowDownload, onProgress)
     }
 
-    // Under SINGZ_ASR=qwen this runs first and there is no cached-transcription
-    // shortcut behind it: switching the lyrics variant re-runs both engines
-    // rather than reusing a stored listen, which is a second or two per song
-    // on this Mac and considerably more on a field laptop.
-    if (alignBase && qwenPreferred()) {
-      const outcome = await this.alignWithQwen(vocals, alignBase.lines, durationSec, onProgress)
-      if (outcome) return this.finishOutcome(alignBase, outcome, lyricsPath)
-      if (this.cancelled) return { ok: false, cancelled: true, error: 'Cancelled.' }
+    // Everything else listens with Qwen3-ASR, which replaced whisper: it hears
+    // sung words markedly better (WER 0.167 against whisper's 0.278 on songs
+    // with no online lyrics, and none of the invented subtitle phrases), and
+    // its forced aligner times them more tightly (median error 0.08 s against
+    // 0.19 s over the catalog).
+    const ready = await this.ensureQwen(allowDownload, onProgress)
+    if (!ready.ok) return ready.res
+
+    if (alignBase) {
+      const aligned = await this.alignWithQwen(vocals, dir, alignBase.lines, durationSec, onProgress)
+      if (!aligned.ok) return aligned.res
+      return this.finishOutcome(alignBase, aligned.outcome, lyricsPath)
     }
 
-    // A cached transcription makes re-align (e.g. after switching the lyrics
-    // variant) instant — no second whisper run over the same song. The cache
-    // remembers its model: words from `small` are superseded once the
-    // stronger default model is available on disk.
-    const wordsFile = join(dir, 'whisper-words.json')
-    if (alignBase && (await exists(wordsFile))) {
-      try {
-        const raw = JSON.parse(await readFile(wordsFile, 'utf8')) as {
-          model?: string
-          words?: LyricWord[]
-        }
-        const words = raw.words ?? []
-        const available = await bestAvailableModel()
-        const fresher = available && raw.model && !available.includes(raw.model)
-        const refCount = alignBase.lines.reduce((s, l) => s + l.words.length, 0)
-        // a hallucinated cache (language-detect gone wrong) must not stick —
-        // fall through and listen again instead of "mismatching" forever
-        if (words.length > 0 && !fresher && transcriptionUsable(words, refCount)) {
-          log('lyrics', `align: reusing cached transcription (${words.length} words, ${raw.model ?? '?'})`)
-          return await this.finishAlign(alignBase, words, lyricsPath, durationSec)
-        }
-      } catch {
-        // corrupt cache — fall through to a fresh transcription
-      }
-    }
-
-    // A song with nothing online is where whisper is weakest — it decides the
-    // language from the first 30 s and invents lines over instrumentals — and
-    // where Qwen3-ASR is strongest. It hears words but tells no time, so this
-    // path only runs when the precise aligner can supply the timing.
-    if (!alignBase && qwenPreferred()) {
-      const qwen = await this.transcribeWithQwen(vocals, durationSec, onProgress)
-      if (qwen) {
-        try {
-          await this.writeCache(lyricsPath, {
-            source: 'whisper',
-            engine: QWEN_ENGINE_ID,
-            lines: qwen,
-            lrclibPending: lrclibDown,
-            lookup: LRCLIB_LADDER_VERSION
-          })
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-          log('lyrics', `transcription failed: ${msg}`, 'error')
-          return { ok: false, error: `Transcription failed: ${msg}` }
-        }
-        return { ok: true, cached: false, source: 'whisper', lines: qwen }
-      }
-      if (this.cancelled) return { ok: false, cancelled: true, error: 'Cancelled.' }
-    }
-
-    const prep = await this.ensureWhisper(allowDownload, onProgress)
-    if (!prep.ok) return prep.res
-    const { engine, model } = prep
-
-    const tr = await this.transcribeVocals(
-      engine,
-      model,
-      vocals,
-      // whisper's auto-detect reads the first 30s — organ intros make it
-      // hallucinate in a random language; the lyrics know better
-      (alignBase && guessLanguage(alignBase.lines)) ?? 'auto',
-      dir,
-      durationSec,
-      alignBase ? alignBase.lines.reduce((s, l) => s + l.words.length, 0) : 0,
-      onProgress
-    )
-    if (!tr.ok) return tr.res
-    if (alignBase) return this.finishAlign(alignBase, tr.words, lyricsPath, durationSec)
-    const lines = groupWords(tr.words)
+    const transcribed = await this.transcribeWithQwen(vocals, dir, durationSec, onProgress)
+    if (!transcribed.ok) return transcribed.res
+    const lines = transcribed.lines
     try {
       await this.writeCache(lyricsPath, {
         source: 'whisper',
+        engine: QWEN_ENGINE_ID,
         lines,
         // an outage is not a verdict — true makes a later open ask
         // LRCLIB again; false records that it really answered "miss"
@@ -778,7 +654,7 @@ export class Transcriber {
     return { ok: true, cached: false, source: 'whisper', lines }
   }
 
-  /** The vocals stem whisper and the aligners listen to (project-local
+  /** The vocals stem the recogniser and the aligners listen to (project-local
    *  stems first — v2 projects store FLAC — then the hash cache's WAVs). */
   private async findVocals(songPath: string, dir: string): Promise<string | null> {
     const isProject = (await projectLyricsPath(songPath)) !== null
@@ -795,199 +671,96 @@ export class Transcriber {
     return null
   }
 
-  /** Resolve the whisper binary and a model, downloading one when allowed. */
-  private async ensureWhisper(
+  /**
+   * The lyrics engine and its speech model, downloading the model when the
+   * singer has agreed. Both engines ship inside the app (llama-server hears,
+   * crispasr times), so a missing one is a broken build; the model is a
+   * one-time download of what is still missing of its three parts.
+   */
+  private async ensureQwen(
     allowDownload: boolean,
     onProgress: (p: LyricsProgress) => void
-  ): Promise<{ ok: true; engine: string[]; model: string } | { ok: false; res: LyricsResult }> {
-    const engine = await resolveEngine()
-    if (!engine) {
+  ): Promise<{ ok: true } | { ok: false; res: LyricsResult }> {
+    if (!(await resolveQwenServer()) || !(await resolveQwenAligner())) {
       return {
         ok: false,
         res: {
           ok: false,
           needsEngine: true,
-          error: 'The transcription engine (whisper-cli) is missing from this build.'
+          error: 'The lyrics engine is missing from this build.'
         }
       }
     }
-
-    await migrateOldModel()
-    let modelPath = await bestAvailableModel()
-    if (!modelPath) {
-      if (!allowDownload) {
-        return {
+    if (await qwenInstalled()) return { ok: true }
+    if (!allowDownload) {
+      return {
+        ok: false,
+        res: {
           ok: false,
-          res: {
-            ok: false,
-            needsModel: { sizeMb: whisperModelSizeMb(), what: 'speech' },
-            error: 'No online lyrics found — transcribing needs the speech model.'
-          }
+          needsModel: { sizeMb: await qwenMissingMb(), what: 'speech' },
+          error: 'Hearing the vocals needs the speech model.'
         }
-      }
-      this.cancelled = false
-      try {
-        await this.downloadModel(onProgress)
-        modelPath = whisperModelPath()
-      } catch (err) {
-        if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: 'Cancelled.' } }
-        const msg = err instanceof Error ? err.message : String(err)
-        return { ok: false, res: { ok: false, error: `Could not download the speech model: ${msg}` } }
       }
     }
-    return { ok: true, engine, model: modelPath }
-  }
-
-  /**
-   * Run whisper-cli over the vocals and parse per-word times. Writes the
-   * reusable transcription cache (whisper-words.json) beside the stems when
-   * the result is usable; the caller decides what the words become.
-   */
-  private transcribeVocals(
-    engine: string[],
-    model: string,
-    vocals: string,
-    lang: string,
-    dir: string,
-    durationSec: number,
-    refWordCount: number,
-    onProgress: (p: LyricsProgress) => void
-  ): Promise<{ ok: true; words: LyricWord[] } | { ok: false; res: LyricsResult }> {
-    const outDir = join(dir, 'whisper-out')
-    const wordsFile = join(dir, 'whisper-words.json')
     this.cancelled = false
-
-    return new Promise((done) => {
-      mkdir(outDir, { recursive: true }).catch((err: Error) => {
-        // a full/read-only disk must fail the job, not hang it forever
-        done({ ok: false, res: { ok: false, error: `Could not prepare the transcription folder: ${err.message}` } })
-        return null
-      }).then((made) => {
-        if (made === null) return
-        const threads = Math.min(8, Math.max(2, cpus().length - 2))
-        // Cross-attention DTW timestamps are noticeably tighter than the
-        // default segment-split times; the preset must match the model.
-        const dtwPreset = /large-v3-turbo/.test(model)
-          ? 'large.v3.turbo'
-          : /-(tiny|base|small|medium)\.bin$/.exec(model)?.[1]
-        const args = [
-          ...engine.slice(1),
-          '-m',
-          model,
-          '-f',
-          vocals,
-          '-l',
-          lang,
-          '-oj',
-          '-of',
-          join(outDir, 'vocals'),
-          '-ml',
-          '1',
-          // no text context between 30s windows: carried context turns one bad
-          // window into a whole-song hallucination loop on reverb-heavy vocals
-          // (Mr. Crowley's organ intro), and singing has no cross-window
-          // grammar worth keeping. Also makes decodes reproducible in practice.
-          '-mc',
-          '0',
-          '--split-on-word',
-          // DTW token timestamps need flash-attn off (silently disabled
-          // otherwise); the accuracy is worth the ~30% slower decode.
-          ...(dtwPreset ? ['-dtw', dtwPreset, '-nfa', '-ojf'] : []),
-          '-t',
-          String(threads)
-        ]
-        log('lyrics', `run: ${engine[0]} ${args.join(' ')}`)
-        const child = spawn(engine[0], args, { env: spawnEnv() })
-        this.child = child
-
-        let tail = ''
-        const consume = (chunk: Buffer): void => {
-          const text = chunk.toString('utf8')
-          tail = (tail + text).slice(-8000)
-          // live lines: "[00:00:07.480 --> 00:00:07.600]  word"
-          const m = [...text.matchAll(/-->\s+(\d+):(\d{2}):(\d{2})[.,]\d{1,3}\]/g)]
-          if (m.length > 0 && durationSec > 0) {
-            const last = m[m.length - 1]
-            const t = parseInt(last[1], 10) * 3600 + parseInt(last[2], 10) * 60 + parseInt(last[3], 10)
-            onProgress({ stage: 'transcribing', percent: Math.min(99, (t / durationSec) * 100) })
-          }
-        }
-        child.stdout?.on('data', consume)
-        child.stderr?.on('data', consume)
-
-        child.on('error', (err) => {
-          this.child = null
-          void rm(outDir, { recursive: true, force: true })
-          done({ ok: false, res: { ok: false, error: `Could not start whisper-cli: ${err.message}` } })
-        })
-
-        onChildSettled(child, 'lyrics', (code) => {
-          this.child = null
-          log('lyrics', `whisper-cli exited with code ${code}`)
-          if (this.cancelled) {
-            void rm(outDir, { recursive: true, force: true })
-            done({ ok: false, res: { ok: false, cancelled: true, error: 'Cancelled.' } })
-            return
-          }
-          void (async () => {
-            try {
-              if (code !== 0)
-                throw new Error(tail.split('\n').filter(Boolean).slice(-3).join(' — ').slice(0, 400))
-              const raw = JSON.parse(await readFile(join(outDir, 'vocals.json'), 'utf8')) as {
-                transcription?: {
-                  offsets?: { from?: number; to?: number }
-                  text?: string
-                  tokens?: { text?: string; t_dtw?: number }[]
-                }[]
-              }
-              const words: LyricWord[] = []
-              for (const seg of raw.transcription ?? []) {
-                const w = String(seg.text ?? '').trim()
-                if (!w || /^[[(♪]/.test(w)) continue
-                // Segment offsets at segment heads are interpolated guesses
-                // ("But I know So" all stamped alike); DTW token times track
-                // the audio — prefer them when present (t_dtw centiseconds).
-                const dtw = (seg.tokens ?? [])
-                  .filter((t) => !String(t.text ?? '').startsWith('[_'))
-                  .map((t) => t.t_dtw ?? -1)
-                  .filter((t) => t >= 0)
-                // DTW attention peaks mid-vowel — pull starts back ~100ms
-                // toward the true onset (legato songs otherwise trail).
-                const s = dtw.length > 0 ? Math.max(0, dtw[0] / 100 - 0.1) : (seg.offsets?.from ?? 0) / 1000
-                const eOff = (seg.offsets?.to ?? 0) / 1000
-                const e = dtw.length > 0 ? Math.max(dtw[dtw.length - 1] / 100 + 0.05, s + 0.1) : eOff
-                words.push({ w, s, e })
-              }
-              // keep the transcription — re-aligning another variant reuses it
-              // (unless it collapsed into hallucination: never cache those, or
-              // every later check would inherit the garbage instantly)
-              if (transcriptionUsable(words, refWordCount)) {
-                await writeFile(
-                  wordsFile,
-                  JSON.stringify({ model: basename(model, '.bin').replace(/^ggml-/, ''), words }),
-                  'utf8'
-                )
-              }
-              await rm(outDir, { recursive: true, force: true })
-              done({ ok: true, words })
-            } catch (err) {
-              await rm(outDir, { recursive: true, force: true })
-              const msg = err instanceof Error ? err.message : String(err)
-              log('lyrics', `transcription failed: ${msg}`, 'error')
-              done({ ok: false, res: { ok: false, error: `Transcription failed: ${msg || 'unknown error'}` } })
-            }
-          })()
-        })
-      })
-    })
+    this.abort = new AbortController()
+    try {
+      await downloadQwen((pct) => onProgress({ stage: 'downloading-model', percent: pct }), this.abort.signal)
+      return { ok: true }
+    } catch (err) {
+      if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: 'Cancelled.' } }
+      const msg = err instanceof Error ? err.message : String(err)
+      return { ok: false, res: { ok: false, error: `Could not download the speech model: ${msg}` } }
+    } finally {
+      this.abort = null
+    }
   }
 
   /**
-   * Check & align without whisper: Qwen3-ASR says what is sung, its forced
-   * aligner says when each lyric word is sung.
+   * What Qwen3-ASR hears in these vocals, chunk by chunk — from the cache when
+   * this exact vocals file was already heard in the same language, otherwise
+   * by listening (and keeping the answer for next time).
+   */
+  private async hear(
+    vocals: string,
+    dir: string,
+    pcm: Float32Array,
+    chunks: ReturnType<typeof planChunks>,
+    language: string | null,
+    onProgress: (pct: number) => void,
+    signal: AbortSignal
+  ): Promise<QwenChunkText[]> {
+    const cached = await readHeard(dir, vocals, language)
+    // The chunk plan is a pure function of the audio, so a cached listen of
+    // the same file lines up chunk for chunk — checked rather than assumed.
+    if (
+      cached &&
+      cached.length === chunks.length &&
+      cached.every((c, i) => Math.abs(c.start - chunks[i].start) < 1e-3)
+    ) {
+      log('lyrics', `qwen: reusing the cached listen of these vocals (${cached.length} chunks)`)
+      onProgress(100)
+      return cached
+    }
+    const server = new QwenServer()
+    this.qwen = server
+    try {
+      await server.start()
+      const texts = await server.transcribe(pcm, chunks, language, onProgress, signal)
+      await writeHeard(dir, vocals, language, texts)
+      return texts
+    } finally {
+      server.stop()
+      this.qwen = null
+    }
+  }
+
+  /**
+   * Check & align: Qwen3-ASR says what is sung, its forced aligner says when
+   * each lyric word is sung.
    *
    * Measured over the 19 songs whose Precise timing is stored, against the
-   * whisper tier this replaces: the systematic lateness is gone (−0.04 s
+   * whisper tier this replaced: the systematic lateness is gone (−0.04 s
    * against +0.17 s), the median error halves (0.08 s against 0.19 s), words
    * landing inside a tenth of a second nearly double (55% against 30%) and
    * phrase onsets land within 0.15 s of the voice 65% of the time against
@@ -995,53 +768,49 @@ export class Transcriber {
    * against 86%), which is two songs: one every engine mishears, and one
    * whose verses repeat so closely that a word can be matched to the wrong
    * repetition — the failure mode of having no times from the recogniser.
-   *
-   * Returns null whenever anything it needs is missing, so the whisper path
-   * still runs and a singer never loses the feature to a missing model.
    */
   private async alignWithQwen(
     vocals: string,
+    dir: string,
     ref: LyricLine[],
     durationSec: number,
     onProgress: (p: LyricsProgress) => void
-  ): Promise<AlignOutcome | null> {
-    if (!(await qwenAvailable()) || !(await qwenAlignerAvailable())) {
-      log('lyrics', 'qwen: engine, model or aligner not installed — using whisper')
-      return null
-    }
+  ): Promise<{ ok: true; outcome: AlignOutcome } | { ok: false; res: LyricsResult }> {
     this.cancelled = false
-    const server = new QwenServer()
-    this.qwen = server
     // The aligner runs one child per sung chunk, minutes on a slow machine.
     // Without a signal to carry Cancel into that loop the job runs to the end
     // and then WRITES the song's lyrics.json and marks it for Drive.
     this.abort = new AbortController()
+    const signal = this.abort.signal
     try {
       onProgress({ stage: 'preparing', percent: 0 })
       const pcm = await decodeVocalsMono16k(vocals)
       const { env, p90 } = levelEnvelope(pcm)
       const chunks = planChunks(env, p90)
-      if (chunks.length === 0) return null
-      const code = guessLanguage(ref)
-      await server.start()
-      let texts: QwenChunkText[]
-      try {
-        texts = await server.transcribe(pcm, chunks, qwenLanguageName(code), (pct) =>
-          onProgress({ stage: 'transcribing', percent: pct * 0.6 })
-        )
-      } finally {
-        server.stop()
+      if (chunks.length === 0) {
+        return { ok: false, res: { ok: false, error: 'No singing was found in the vocals track.' } }
       }
+      const code = guessLanguage(ref)
+      const texts = await this.hear(vocals, dir, pcm, chunks, qwenLanguageName(code), (pct) =>
+        onProgress({ stage: 'transcribing', percent: pct * 0.6 }), signal)
+      if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: 'Cancelled.' } }
 
-      // What was heard, as words — the same shape the whisper tier judges.
+      // What was heard, as words — the verdict is a text question.
       const heard = linesFromChunks(texts).flatMap((l) => l.words)
       if (!transcriptionUsable(heard, ref.reduce((s, l) => s + l.words.length, 0))) {
-        log('lyrics', 'qwen: could not make out the vocals — using whisper')
-        return null
+        // collapsed or hallucinated — evidence of nothing; a "mismatch" here
+        // would slander perfectly good lyrics
+        return {
+          ok: false,
+          res: {
+            ok: false,
+            error:
+              'Could not make out the vocals well enough to check the words. Precise alignment may still work.'
+          }
+        }
       }
-      // The verdict is a text question, so it is answered exactly as before.
       const judged = alignToTranscription(ref, heard, durationSec, 'qwen')
-      if (judged.check.verdict === 'mismatch') return judged
+      if (judged.check.verdict === 'mismatch') return { ok: true, outcome: judged }
 
       // Where each lyric word sits comes from where it was heard; the words
       // nobody heard ride with their neighbours.
@@ -1067,12 +836,11 @@ export class Transcriber {
         new Set(judged.check.badLines),
         code ?? 'en',
         (pct) => onProgress({ stage: 'transcribing', percent: 60 + pct * 0.4 }),
-        this.abort.signal
+        signal
       )
-      if (this.cancelled) return null
+      if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: 'Cancelled.' } }
       if (placed.length === 0) {
-        log('lyrics', 'qwen: the aligner placed nothing — using whisper')
-        return null
+        return { ok: false, res: { ok: false, error: 'Could not time the words against the vocals.' } }
       }
       const lines = retime(ref, placed, durationSec)
       // Only lines that carry a placement are evidence of a shift — the rest
@@ -1105,134 +873,113 @@ export class Transcriber {
         'lyrics',
         `qwen align: ${check.verdict} — ${check.matchedPct}% words heard, ${placed.length} placed, median shift ${check.medianShift}s`
       )
-      return { lines, check }
+      return { ok: true, outcome: { lines, check } }
     } catch (err) {
-      if (this.cancelled) return null
+      if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: 'Cancelled.' } }
       const msg = err instanceof Error ? err.message : String(err)
-      log('lyrics', `qwen align: ${msg} — using whisper`, 'warn')
-      return null
+      log('lyrics', `qwen align failed: ${msg}`, 'error')
+      return { ok: false, res: { ok: false, error: `Alignment failed: ${msg}` } }
     } finally {
-      server.stop()
-      this.qwen = null
       this.abort = null
     }
   }
 
   /**
-   * Transcribe a song nobody has lyrics for with Qwen3-ASR, and time the
-   * result with the precise aligner.
-   *
-   * Returns null — never an error — whenever anything it needs is missing or
-   * the song yields nothing: every one of those cases falls through to the
-   * whisper path that shipped before it, so enabling this can degrade to
-   * today's behaviour but never to no lyrics at all.
+   * Transcribe a song nobody has lyrics for: Qwen3-ASR hears the words, and
+   * they are timed by the Precise aligner when it is installed (the timing the
+   * app treats as reference) and by Qwen's own forced aligner otherwise — or
+   * when the Precise aligner cannot place them. Qwen hears words but tells no
+   * time, so a transcription only lands once one of the two has timed it:
+   * provisional chunk timing is not karaoke.
    */
   private async transcribeWithQwen(
     vocals: string,
+    dir: string,
     durationSec: number,
     onProgress: (p: LyricsProgress) => void
-  ): Promise<LyricLine[] | null> {
-    if (!(await qwenAvailable())) {
-      log('lyrics', 'qwen: engine or model not installed — using whisper')
-      return null
-    }
-    // Qwen hears words but tells no time; without an aligner there is nothing
-    // to time them with, and provisional chunk timing is not karaoke.
-    if (!(await preciseCapable()) || !(await exists(mmsModelPath()))) {
-      log('lyrics', 'qwen: the precise aligner is not installed — using whisper for timing')
-      return null
+  ): Promise<{ ok: true; lines: LyricLine[] } | { ok: false; res: LyricsResult }> {
+    const none: { ok: false; res: LyricsResult } = {
+      ok: false,
+      res: { ok: false, error: 'No words were detected in the vocals.' }
     }
     this.cancelled = false
-    const server = new QwenServer()
-    this.qwen = server
+    this.abort = new AbortController()
+    const signal = this.abort.signal
     try {
       onProgress({ stage: 'preparing', percent: 0 })
       const pcm = await decodeVocalsMono16k(vocals)
       const { env, p90 } = levelEnvelope(pcm)
       const chunks = planChunks(env, p90)
       if (chunks.length === 0) {
-        log('lyrics', 'qwen: no sung stretch found in the vocals — using whisper')
-        return null
+        log('lyrics', 'qwen: no sung stretch found in the vocals')
+        return none
       }
       const sung = chunks.reduce((s, c) => s + (c.end - c.start), 0)
-      log(
-        'lyrics',
-        `qwen: ${chunks.length} sung stretches, ${Math.round(sung)}s of ${Math.round(durationSec)}s`
-      )
-      await server.start()
-      let texts: QwenChunkText[]
-      try {
-        texts = await server.transcribe(pcm, chunks, null, (pct) =>
-          onProgress({ stage: 'transcribing', percent: pct * 0.7 })
-        )
-      } finally {
-        server.stop()
-      }
+      log('lyrics', `qwen: ${chunks.length} sung stretches, ${Math.round(sung)}s of ${Math.round(durationSec)}s`)
+      const texts = await this.hear(vocals, dir, pcm, chunks, null, (pct) =>
+        onProgress({ stage: 'transcribing', percent: pct * 0.7 }), signal)
+      if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: 'Cancelled.' } }
       const lines = linesFromChunks(texts)
       if (lines.length === 0) {
-        log('lyrics', 'qwen: heard no words — using whisper')
-        return null
+        log('lyrics', 'qwen: heard no words')
+        return none
       }
       const heard = lines.reduce((s, l) => s + l.words.length, 0)
-      log('lyrics', `qwen: ${heard} words in ${lines.length} lines — timing them precisely`)
+      log('lyrics', `qwen: ${heard} words in ${lines.length} lines — timing them`)
 
-      // the words are right but the times are a guess; the aligner fixes that
-      const run = await runMmsAlign(vocals, lines, (p) =>
-        onProgress({ stage: p.stage, percent: 70 + (p.percent ?? 0) * 0.3 })
-      )
-      this.child = run.child
-      const ctc = await run.done
-      const outcome = ctcOutcome(lines, ctc, durationSec)
-      log(
-        'lyrics',
-        `qwen: precise timing ${outcome.check.verdict} — ${outcome.check.matchedPct}% of the words placed`
-      )
-      // A mismatch means the aligner placed under a quarter of the words, so
-      // the only timing left is the even spread across each chunk that
-      // linesFromChunks guessed — up to tens of seconds out, with no `check`
-      // for the panel to warn with and no later pass to re-derive it (a
-      // 'whisper' source is never re-asked and Check & align refuses it).
-      // Whisper's own words come with real times, so hand the song to it.
-      if (outcome.check.verdict === 'mismatch') {
-        log('lyrics', 'qwen: the aligner could not place these words — using whisper', 'warn')
-        return null
+      // 1) The Precise aligner, when this machine has it. Anything short of a
+      //    usable timing — a mismatch (it placed under a quarter of the
+      //    words), or a run that dies (OOM, a signal, a python error) — hands
+      //    the words to Qwen's own aligner, which is certainly installed here:
+      //    a failure that repeats on every retry must not make a song
+      //    impossible to transcribe on a machine that can time it another way.
+      if ((await preciseCapable()) && (await exists(mmsModelPath()))) {
+        try {
+          const run = await runMmsAlign(vocals, lines, (p) =>
+            onProgress({ stage: p.stage, percent: 70 + (p.percent ?? 0) * 0.3 })
+          )
+          this.child = run.child
+          const ctc = await run.done
+          this.child = null
+          if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: 'Cancelled.' } }
+          const outcome = ctcOutcome(lines, ctc, durationSec)
+          log('lyrics', `qwen: precise timing ${outcome.check.verdict} — ${outcome.check.matchedPct}% of the words placed`)
+          if (outcome.check.verdict !== 'mismatch') return { ok: true, lines: outcome.lines }
+        } catch (err) {
+          this.child = null
+          if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: 'Cancelled.' } }
+          const msg = err instanceof Error ? err.message : String(err)
+          log('lyrics', `qwen: precise timing failed (${msg}) — timing with Qwen's aligner`, 'warn')
+        }
       }
-      return outcome.lines
+
+      // 2) Qwen's forced aligner. Each transcribed line came out of exactly one
+      //    chunk, so where every word belongs is known rather than matched.
+      const placed = await alignWordsInChunks(
+        pcm,
+        chunks,
+        lines,
+        chunkOfEachWord(lines, chunks),
+        new Set(),
+        guessLanguage(lines) ?? 'en',
+        (pct) => onProgress({ stage: 'transcribing', percent: 70 + pct * 0.3 }),
+        signal
+      )
+      if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: 'Cancelled.' } }
+      if (placed.length === 0) {
+        return { ok: false, res: { ok: false, error: 'Could not time the transcribed words against the vocals.' } }
+      }
+      log('lyrics', `qwen: ${placed.length} of ${heard} words placed by the aligner`)
+      return { ok: true, lines: retime(lines, placed, durationSec) }
     } catch (err) {
-      if (this.cancelled) return null
+      if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: 'Cancelled.' } }
       const msg = err instanceof Error ? err.message : String(err)
-      log('lyrics', `qwen: ${msg} — using whisper`, 'warn')
-      return null
+      log('lyrics', `transcription failed: ${msg}`, 'error')
+      return { ok: false, res: { ok: false, error: `Transcription failed: ${msg}` } }
     } finally {
-      server.stop()
-      this.qwen = null
       this.child = null
+      this.abort = null
     }
-  }
-
-  /** Shared tail of the whisper align path: judge the fit, retime, cache. */
-  private async finishAlign(
-    alignBase: LyricsCache,
-    words: LyricWord[],
-    lyricsPath: string,
-    durationSec: number
-  ): Promise<LyricsResult> {
-    const refCount = alignBase.lines.reduce((s, l) => s + l.words.length, 0)
-    if (!transcriptionUsable(words, refCount)) {
-      // hallucinated/collapsed transcription — evidence of nothing; a
-      // "mismatch" here would slander perfectly good lyrics
-      return {
-        ok: false,
-        error:
-          'Could not make out the vocals well enough to check the words. Precise alignment may still work.'
-      }
-    }
-    const outcome = alignToTranscription(alignBase.lines, words, durationSec)
-    log(
-      'lyrics',
-      `align: ${outcome.check.verdict} — ${outcome.check.matchedPct}% words heard, median shift ${outcome.check.medianShift}s, ${outcome.check.badLines.length} off lines`
-    )
-    return this.finishOutcome(alignBase, outcome, lyricsPath)
   }
 
   /** Keep the lyrics on a mismatch, otherwise save the retimed ones. Shared
@@ -1280,7 +1027,7 @@ export class Transcriber {
     vocals: string,
     alignBase: LyricsCache,
     lyricsPath: string,
-    wordsFile: string,
+    dir: string,
     durationSec: number,
     allowDownload: boolean,
     onProgress: (p: LyricsProgress) => void
@@ -1327,20 +1074,13 @@ export class Transcriber {
       const outcome = ctcOutcome(alignBase.lines, ctcWords, durationSec)
       let { check } = outcome
       const { lines } = outcome
-      // CTC scores cannot tell wrong text from hard vocals on singing — when
-      // a whisper transcription is cached, its text check is authoritative.
-      try {
-        const raw = JSON.parse(await readFile(wordsFile, 'utf8')) as
-          | { words?: LyricWord[] }
-          | LyricWord[]
-        const words = Array.isArray(raw) ? raw : (raw.words ?? [])
-        const refCount = alignBase.lines.reduce((s, l) => s + l.words.length, 0)
-        if (words.length > 0 && transcriptionUsable(words, refCount) && check.verdict !== 'mismatch') {
-          const textCheck = alignToTranscription(alignBase.lines, words, durationSec).check
-          check = { ...textCheck, method: 'ctc', medianShift: check.medianShift }
-        }
-      } catch {
-        // no transcription cached — the CTC-relative check stands alone
+      // CTC scores cannot tell wrong text from hard vocals on singing — when a
+      // listen of these vocals is cached, its text check is authoritative.
+      const words = await heardWords(dir, vocals)
+      const refCount = alignBase.lines.reduce((s, l) => s + l.words.length, 0)
+      if (words.length > 0 && transcriptionUsable(words, refCount) && check.verdict !== 'mismatch') {
+        const textCheck = alignToTranscription(alignBase.lines, words, durationSec, 'qwen').check
+        check = { ...textCheck, method: 'ctc', medianShift: check.medianShift }
       }
       log(
         'lyrics',

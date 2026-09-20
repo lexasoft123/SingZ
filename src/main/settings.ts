@@ -14,6 +14,8 @@ export interface AppSettings {
   gdriveLastSync?: number
   /** What has changed since Drive last saw it — see sync-dirty.ts. */
   gdriveDirty?: DirtyState
+  /** The once-only launch offer of the Qwen3-ASR speech model was seen. */
+  qwenOfferDismissed?: boolean
 }
 
 /**

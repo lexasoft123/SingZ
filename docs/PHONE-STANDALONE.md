@@ -21,7 +21,8 @@ first (the family fleet, $0 distribution); iOS is in scope with the same engine 
 - **Drive publish in scope, last phase**, including the desktop adoption pass.
 - **Weak devices are gated** with honest copy ("add this song on the desktop"), not
   allowed to die mid-split. Import + lyrics work everywhere.
-- **Whisper alignment stays desktop-only** (its models are 1.6 GB + 1.2 GB); phone
+- **Lyrics alignment stays desktop-only** (Qwen3-ASR and its forced aligner are
+  3.5 GB together, the Precise aligner another 1.2 GB); phone
   lyrics are LRCLIB lines + the ~12 chars/sec word estimate, exactly like an unaligned
   desktop song.
 
@@ -33,7 +34,7 @@ first (the family fleet, $0 distribution); iOS is in scope with the same engine 
 | Beat grid (homegrown v21) | Feasible, code-identical | `detectBeats` + courts are dependency-free TS that already run in plain Node (the eval harness esbuild-bundles them) |
 | Beat This! ML lattice | Feasible, parity with desktop ONNX packs | The packs already ship `beat_this.onnx` (82.5 MB) + `logmel.onnx` (4.5 MB); `scripts/beat_runner_onnx.py` (192 lines of numpy) is the port spec. `aux.ml` stays optional — a no-ml grid at the current stamp is a packless desktop, already legitimate |
 | Melody (pYIN) | Feasible, code-identical | Pure TS, ~1.8 GFLOP per 4-min song, runs on the vocals stem |
-| Lyrics | LRCLIB yes; whisper align no | LRCLIB is plain HTTPS TS; align model sizes are desktop-class |
+| Lyrics | LRCLIB yes; transcribe/align no | LRCLIB is plain HTTPS TS; the lyrics models (Qwen3-ASR + aligner, 3.5 GB) are desktop-class |
 | Publish to Drive | Feasible; **desktop must change first** | `drive.file` + the shared OAuth client already permit phone writes — but the desktop root reconcile trashes unknown SingZ-root folders (see below) |
 
 ## What the exploration established (the facts the design leans on)

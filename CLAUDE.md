@@ -1,7 +1,7 @@
 # SingZ — instructions for Claude Code
 
 Electron desktop app for singers: split songs into six stems (htdemucs_6s), karaoke with
-synced lyrics (LRCLIB + whisper.cpp), pitch matching, transpose, vocal training
+synced lyrics (LRCLIB + on-device Qwen3-ASR), pitch matching, transpose, vocal training
 (chosen stems drop out on a time or lyric-line schedule), projects.
 Deeper docs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
@@ -16,8 +16,8 @@ npm run gates        # the six TS-against-C++ parity gates (scripts/run-parity-g
 npm run build        # bundle into out/  — ALWAYS build before driving E2E
 npm run dist         # package installer for current platform
 npx electron .       # run the built app (out/) without packaging
-scripts/vendor-whisper.sh   # build whisper-cli into vendor/<platform>-<arch>/
-scripts/vendor-llama.sh     # build llama-server (the Qwen3-ASR engine) into vendor/ — opt-in, SINGZ_ASR=qwen
+scripts/vendor-llama.sh     # build llama-server (runs Qwen3-ASR, the lyrics recogniser) into vendor/<platform>-<arch>/
+scripts/vendor-crispasr.sh  # build crispasr (runs Qwen3-ForcedAligner, which times the words) into vendor/
 scripts/vendor-analyze.sh   # build singz-analyze into vendor/ (ships dark; cmake, one defn with the host scripts)
 scripts/build-gpu-pack.sh   # torch/MPS splitter pack (Apple Silicon)
 scripts/build-onnx-pack.sh  # demucs-onnx splitter pack (win32-x64 | darwin-x64)
@@ -551,8 +551,21 @@ was driven; the gotchas that follow from it are below.
   frames 41 -> 19) — measure on the phone, the sim's 60Hz hides this. Keeping
   every line's sweep mappers alive to remove the commit entirely is much worse
   (p95 19 -> 27 ms, dropped frames 4 -> 26). Don't chase it again.
-- **whisper.cpp `-ml 1` emits occasional backward word offsets** — sanitize
-  before aligning (see `alignLines`).
+- **whisper.cpp `-ml 1` emitted occasional backward word offsets, and older
+  lyrics.json files still carry them** — whisper is gone (Qwen3-ASR replaced
+  it), but every song it transcribed or aligned kept its word times,
+  zero-length and backward ones included. Keep the guards: `sanitizeHyp`
+  (`src/main/align.ts`) still cleans every hypothesis before a text match, and
+  `MIN_WORD_S` (LyricsPanel, and its phone twin in `mobile/src/model.ts`)
+  refuses to divide by a word whose e <= s. The files outlive the engine.
+- **`source: 'whisper'` in lyrics.json means "transcribed on this device",
+  not whisper** — the name predates Qwen3-ASR and stays on purpose: the
+  desktop branches on it (`shouldReaskLrclib`, the AI-transcribed note, which
+  align chips it offers), Drive carries lyrics.json verbatim, and the phones'
+  type names exactly `'lrclib' | 'whisper' | 'edited'` — a fourth value would
+  reach installed phones that have never heard of it. Which recogniser it was is the
+  additive `engine` field (`'qwen3-asr-1.7b'`); `AlignMethod` keeps `'whisper'`
+  only so older files still read. Do not rename either.
 - **LRC gives line starts only** — word timing is estimated at ~12 chars/sec,
   never stretched to the next timestamp (lag), unless AI-aligned.
 - **Splitting requires a downloaded pack** (no bundled engine since 0.3.0),
@@ -647,11 +660,13 @@ was driven; the gotchas that follow from it are below.
   when a real identity is available.
 - **Packaging from a WORKTREE embeds absolute symlinks into the bundle** —
   `scripts/worktree-setup.sh` deliberately links the third-party engines to
-  the main checkout rather than rebuilding whisper per worktree, so
-  `vendor/darwin-<arch>/whisper-cli` is a symlink; electron-builder copies
-  extraResources links verbatim and the .app ends up with
-  `Contents/Resources/engines/whisper-cli ->
-  /Users/…/SingZ/vendor/darwin-arm64/whisper-cli`. Nothing noticed this until
+  the main checkout rather than rebuilding them per worktree, so
+  `vendor/darwin-<arch>/llama-server` and `…/crispasr` are symlinks whenever
+  main has built them; electron-builder copies extraResources links verbatim
+  and the .app ends up with `Contents/Resources/engines/llama-server ->
+  /Users/…/SingZ/vendor/darwin-arm64/llama-server`. (When this bit, the link
+  was `whisper-cli`, the lyrics engine then; the trap follows whatever
+  third-party engine is linked from main.) Nothing noticed this until
   a REAL signing identity existed: `identity: null` runs no codesign at all,
   and even ad-hoc signing does not verify, so the dangling link rode along
   silently. With a Developer ID present, `@electron/osx-sign`'s strictVerify
@@ -659,9 +674,11 @@ was driven; the gotchas that follow from it are below.
   with `invalid destination for symbolic link in bundle`. This is a real
   packaging defect that signing merely surfaced — such a dmg would ship a
   link to a path no user has. Releases are unaffected (CI and the main
-  checkout hold real files); to package from a worktree, replace the links
-  with copies first. `vendor/darwin-x64/whisper-cli` is the same trap on the
-  x64 leg.
+  checkout hold real files), and `scripts/afterPack.cjs` now copies every
+  linked engine into the bundle before signing (`materializeLinkedEngines`,
+  guarded in `tests/unit/capture-addon-build.test.ts`) — keep that hook, since
+  it is all that stands between a worktree package and this error. The same
+  links under `vendor/darwin-x64/` are the same trap on the x64 leg.
 - **One log per platform, and it outlives the process** — everything goes
   through `log(source, line, level)`: `src/main/log.ts` on the desktop (shown
   in the existing Log dialog) and `mobile/src/log.ts` on the phone (the same
@@ -865,8 +882,8 @@ was driven; the gotchas that follow from it are below.
   `detectBeats`' `lineStarts`/`words` aux, so a foreign phrasing is baked into
   THIS song's beat grid and auto-saved under a current stamp that stops it
   being re-derived. `cancelLyrics()` does not cover the window either —
-  `Transcriber.cancel()` aborts the model download and kills the whisper/
-  aligner child, but the LRCLIB ladder runs under neither and `busy` is false
+  `Transcriber.cancel()` aborts the model download and stops the recogniser
+  and the aligner, but the LRCLIB ladder runs under neither and `busy` is false
   throughout it, so the lookup runs to completion with nothing to stop it.
   Guarded by `tests/e2e/mac/lyrics-song-switch-e2e.cjs`, which makes the race
   deterministic by wrapping main's `net.fetch` with a delay via
@@ -1064,8 +1081,8 @@ was driven; the gotchas that follow from it are below.
   a sibling worktree only hits when `base_dir` (this checkout) and
   `hash_dir=false` are passed, because CMake/Xcode compile with absolute
   paths and `-g` hashes the CWD; sharing the cache dir alone hits 0%.
-  vendor-whisper.sh and run-with-ccache.js export them; Xcode gets them via
-  mobile/scripts/ccache-xcode-conf.js (RN's wrapper replaces the machine
+  vendor-llama.sh, vendor-crispasr.sh and run-with-ccache.js export them;
+  Xcode gets them via mobile/scripts/ccache-xcode-conf.js (RN's wrapper replaces the machine
   config with its own, and GUI builds inherit no shell env).
 - IPC handlers return result objects (`{ ok: false, error }`), never throw
   (avoids the "Error invoking remote method" prefix in the renderer).

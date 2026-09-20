@@ -42,7 +42,7 @@ jobs:
       - name: Smoke E2E (built app)
         run: node tests/e2e/win-smoke.cjs
 
-      - name: Restore vendored engines (whisper-cli for packaging)
+      - name: Restore vendored engines (for packaging)
         id: engines-out
         uses: actions/cache/restore@v4
         with:
@@ -51,7 +51,7 @@ jobs:
             vendor/darwin-x64
             vendor/win32-x64
             vendor/packs
-          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-whisper.sh', 'scripts/vendor-analyze.sh', 'scripts/analyze-source-hash.sh', 'CMakeLists.txt', 'cmake/**', 'zcore/**', 'zdsp/**', 'third_party/native/**', 'tools/native/**', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh') }}
+          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-analyze.sh', 'scripts/vendor-llama.sh', 'scripts/vendor-crispasr.sh', 'scripts/assert-portable-binary.sh', 'scripts/analyze-source-hash.sh', 'CMakeLists.txt', 'cmake/**', 'zcore/**', 'zdsp/**', 'third_party/native/**', 'tools/native/**', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh') }}
 
       # Mirror build.yml's key EXACTLY (this step is restore-only — build.yml
       # is the sole saver, so a drifted string here becomes an orphan key that
@@ -59,7 +59,6 @@ jobs:
       - name: Build engines if cache missed
         if: steps.engines-out.outputs.cache-hit != 'true'
         run: |
-          bash scripts/vendor-whisper.sh win32-x64
           bash scripts/vendor-analyze.sh win32-x64
 
       - name: Package NSIS and prepare a local update feed

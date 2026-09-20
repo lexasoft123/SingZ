@@ -26,13 +26,20 @@ export type VocalSplitResult =
   | { ok: true; lead: string; backing: string }
   | { ok: false; error: string; cancelled?: boolean; needsModels?: ModelId[] }
 
-export type ModelId = 'gpu-splitter' | 'whisper' | 'aligner' | 'qwen-asr' | 'qwen-aligner'
+export type ModelId = 'gpu-splitter' | 'aligner' | 'qwen-asr'
 
 export interface ModelInfo {
   id: ModelId
   label: string
   description: string
   sizeMb: number
+  /**
+   * What Get would actually fetch, in MB. A multi-part model keeps the parts
+   * already on disk, so a half-installed one costs only what is missing —
+   * which is the state the Qwen launch offer appears in, and a tile quoting
+   * the whole 3.5 GB there would scare off a 990 MB download.
+   */
+  downloadMb: number
   present: boolean
   required: boolean
   optional: boolean
@@ -349,9 +356,20 @@ export interface LyricsProgress {
   percent: number
 }
 
+/**
+ * Where a song's lyrics came from. 'whisper' means TRANSCRIBED ON THE DEVICE,
+ * whichever engine did it — the name predates Qwen3-ASR, which replaced
+ * whisper, and it stays because lyrics.json, the Drive sync and the phones
+ * all read it; `engine` in the cache says which recogniser it was.
+ */
 export type LyricsSource = 'lrclib' | 'whisper' | 'edited'
 
-/** How word timing was produced: whisper transcription match or CTC forced alignment. */
+/**
+ * How word timing was produced: a text match against a transcription
+ * ('whisper', stored by older builds — kept so their lyrics.json still
+ * reads), Qwen3-ASR and its forced aligner ('qwen'), or CTC forced
+ * alignment ('ctc', the Precise tier).
+ */
 export type AlignMethod = 'whisper' | 'ctc' | 'qwen'
 
 /**
@@ -397,7 +415,7 @@ export type LyricsResult =
   | {
       ok: false
       cancelled?: boolean
-      /** The bundled whisper-cli binary is missing (broken build / dev without vendor). */
+      /** The bundled lyrics engine (llama-server / crispasr) is missing (broken build / dev without vendor). */
       needsEngine?: boolean
       /** A model download is needed first — ask the user (what tells which). */
       needsModel?: { sizeMb: number; what?: 'speech' | 'aligner' }
@@ -1276,14 +1294,14 @@ export interface SingzApi {
   onSeparationProgress(cb: (p: SeparationProgress) => void): () => void
   /**
    * Resolve word-timed lyrics (cached per song): LRCLIB synced lyrics first,
-   * then the bundled whisper-cli as fallback (allowDownload fetches weights,
-   * prefer:'whisper' forces a fresh AI transcription).
+   * then an on-device Qwen3-ASR transcription (allowDownload fetches the
+   * speech model, prefer:'transcribe' forces a fresh transcription).
    */
   getLyrics(
     songPath: string,
     durationSec: number,
     allowDownload?: boolean,
-    prefer?: 'auto' | 'whisper' | 'align' | 'precise'
+    prefer?: 'auto' | 'transcribe' | 'align' | 'precise'
   ): Promise<LyricsResult>
   /** Whether the precise (CTC forced-alignment) aligner can run on this machine. */
   alignCaps(): Promise<{ precise: boolean }>
@@ -1298,8 +1316,9 @@ export interface SingzApi {
   saveLyrics(songPath: string, lines: LyricLine[], credit?: string): Promise<LyricsResult>
   /**
    * Time a lyrics draft against the vocals without saving anything:
-   * 'align' matches the text to a whisper transcription (cached when one
-   * exists), 'precise' runs CTC forced alignment through the splitter pack.
+   * 'align' times the text with Qwen3-ASR and its forced aligner (reusing a
+   * cached listen of the same vocals), 'precise' runs CTC forced alignment
+   * through the splitter pack.
    */
   alignLyricsDraft(
     songPath: string,
@@ -1384,6 +1403,14 @@ export interface SingzApi {
     ids?: ModelId[]
   ): Promise<{ ok: true } | { ok: false; cancelled?: boolean; error: string }>
   cancelModels(): Promise<void>
+  /**
+   * Whether to offer the Qwen3-ASR speech model once at launch: a whisper
+   * model is on disk (this machine transcribed lyrics before Qwen replaced
+   * whisper), Qwen is not, and the offer has not been dismissed.
+   */
+  qwenOffer(): Promise<boolean>
+  /** The launch offer was seen — never make it again. */
+  dismissQwenOffer(): Promise<void>
   onModelsProgress(cb: (p: ModelsProgress) => void): () => void
   /** 44.1k stereo PCM of the current song for the bundled splitter. */
   provideSplitInput(songPath: string, ch0: Float32Array, ch1: Float32Array): Promise<void>
