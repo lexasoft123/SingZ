@@ -91,6 +91,14 @@ export class SyncScheduler {
   private lastErrorKind?: SyncErrorKind
   private stopped = false
   private sweeping = false
+  /** True only while a just-finished run is putting back the marks it knows
+   *  it could not reach (see the success branch of syncNow). dirty.remark
+   *  goes through the same markProjectDirty/onDirty wiring as any real
+   *  change, which — unguarded — wakes this very scheduler mid-cleanup and
+   *  arms the next run before syncNow even returns. That is the sync loop:
+   *  a project outside the library root can never be cleared, so it re-marks
+   *  itself dirty every run, and every re-mark rearmed another run. */
+  private remarking = false
 
   constructor(deps: SchedulerDeps) {
     this.deps = deps
@@ -131,7 +139,11 @@ export class SyncScheduler {
 
   /** A mark landed. */
   notifyDirty(): void {
-    if (this.stopped || !this.deps.enabled()) return
+    // Suppressed only while this scheduler's own remark() call is putting
+    // back a mark it just proved it cannot clear — see `remarking`. A real
+    // mark can never land in this window: this is a synchronous callstack
+    // with no await in it, so nothing else runs concurrently.
+    if (this.stopped || !this.deps.enabled() || this.remarking) return
     if (this.current) {
       this.followUp = true
       return
@@ -237,11 +249,27 @@ export class SyncScheduler {
       // ran keeps its mark and earns the follow-up below
       this.deps.dirty.clear(captured)
       // a project outside the library root is never walked, so clearing its
-      // mark would show a ✓ for something Drive has never seen
-      if (report.outsideLibrary?.length) this.deps.dirty.remark(report.outsideLibrary)
+      // mark would show a ✓ for something Drive has never seen. The re-mark
+      // itself must not be read as new work, though — this run already knows
+      // it cannot clear it, so it must never be what triggers the next run
+      // (that was the loop: an unreachable project re-marked itself dirty,
+      // and dirty.isDirty() below saw that and armed another run, forever).
+      if (report.outsideLibrary?.length) {
+        this.remarking = true
+        try {
+          this.deps.dirty.remark(report.outsideLibrary)
+        } finally {
+          this.remarking = false
+        }
+      }
       this.phase = 'idle'
       this.emit()
-      if (this.followUp || this.deps.dirty.isDirty()) this.notifyDirty()
+      // followUp alone, never dirty.isDirty(): a real change (mid-run mark,
+      // launch-time backlog, the sweep) always reaches the scheduler through
+      // notifyDirty() itself — either as followUp here, or as its own arm()
+      // when no run was in flight — so isDirty() had nothing left to add
+      // except the mark this run just put back on purpose.
+      if (this.followUp) this.notifyDirty()
       return report
     }
 

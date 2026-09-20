@@ -91,7 +91,8 @@ import gdriveIcon from './assets/gdrive.png'
 import DropScreen from './components/DropScreenRoute'
 import type LibraryImportComponent from './components/LibraryImport'
 import type LogPanelComponent from './components/LogPanel'
-import LyricsPanel, { type LyricsState } from './components/LyricsPanel'
+import LyricsPanel from './components/LyricsPanel'
+import { lyricsJobProgressed, lyricsJobSettled, lyricsJobStarted, type LyricsState } from './lyrics-state'
 import { createLazyDialogRoute } from './components/LazyDialogRoute'
 
 // The lyrics editor rides outside the boot bundle like VocalTraining does —
@@ -1012,14 +1013,6 @@ export default function App(): React.JSX.Element {
   const lyricsRequestRevisionRef = useRef(0)
   const lyricsRef = useRef(lyrics)
   lyricsRef.current = lyrics
-  /** The song open RIGHT NOW, for callbacks that settle long after the render
-   *  that created them — a closure over `song` answers for the song the
-   *  singer has already left. Both identities: the path is what main writes
-   *  under, the load token is what a save or a rename cannot move. */
-  const songPathRef = useRef<string | null>(null)
-  songPathRef.current = song?.path ?? null
-  const songTokenRef = useRef<string | null>(null)
-  songTokenRef.current = song?.preparationSourceId ?? null
   const melodyRef = useRef(melody)
   melodyRef.current = melody
   /** A saved project's stored pitch line, waiting for prepMelody to adopt it
@@ -2440,28 +2433,11 @@ export default function App(): React.JSX.Element {
   const vocalsMuted = tracks.find((t) => t.id === 'vocals')?.muted ?? false
 
   const applyLyricsResult = useCallback((res: import('../../shared/types').LyricsResult) => {
-    if (!res.ok) {
-      setLyrics(
-        res.cancelled
-          ? { status: 'idle' }
-          : res.needsModel
-            ? { status: 'consent', sizeMb: res.needsModel.sizeMb, what: res.needsModel.what }
-            : { status: 'error', error: res.error }
-      )
-      return
-    }
-    setLyrics(
-      res.lines.length > 0
-        ? {
-            status: 'ready',
-            lines: res.lines,
-            source: res.source,
-            credit: res.credit,
-            aligned: res.aligned,
-            check: res.check
-          }
-        : { status: 'error', error: 'No words were detected in the vocals.' }
-    )
+    // Through the ref rather than the state so a result and the progress
+    // report before it cannot cross in one flush, as every other write to
+    // this state in this file does.
+    lyricsRef.current = lyricsJobSettled(lyricsRef.current, res)
+    setLyrics(lyricsRef.current)
   }, [])
 
   const [preciseCap, setPreciseCap] = useState(false)
@@ -2503,10 +2479,12 @@ export default function App(): React.JSX.Element {
       const revision = ++lyricsRequestRevisionRef.current
       const current = (): boolean => seq === loadSeq.current && revision === lyricsRequestRevisionRef.current
       // Ladder: cache → LRCLIB synced lyrics → Qwen3-ASR (with model consent).
-      lyricsRef.current = { status: 'loading', progress: null }
+      lyricsRef.current = lyricsJobStarted(lyricsRef.current)
       setLyrics(lyricsRef.current)
       const unsub = window.singz.onLyricsProgress((p) => {
-        if (current()) setLyrics({ status: 'loading', progress: p })
+        if (!current()) return
+        lyricsRef.current = lyricsJobProgressed(lyricsRef.current, p)
+        setLyrics(lyricsRef.current)
       })
       const pending = window.singz.getLyrics(
         song.path,
@@ -4028,7 +4006,6 @@ export default function App(): React.JSX.Element {
                 lyrics={lyrics}
                 singMask={singMask}
                 songPath={song?.path ?? ''}
-                songId={song?.preparationSourceId ?? ''}
                 songName={cleanSongName(song?.name ?? '')}
                 guideOn={!vocalsMuted}
                 onToggleGuide={() => handleMute('vocals', !vocalsMuted)}
@@ -4041,24 +4018,10 @@ export default function App(): React.JSX.Element {
                   editorSeqRef.current = loadSeq.current
                   setEditingLyrics(true)
                 }}
-                onResult={(res, forSong) => {
-                  // Picking a variant from Change… is a network round-trip, so
-                  // the singer can be in another song by the time it answers.
-                  // Same rule as prepLyrics and the editor's save: lyrics that
-                  // land in the wrong song are not merely drawn there —
-                  // linesRef feeds detectBeats' lineStarts/words, and that grid
-                  // is auto-saved into the project. Main has already written
-                  // them into the song they were picked for.
-                  // Either identity is enough: the path covers leaving the
-                  // song and coming back to it while the pick is in flight,
-                  // the load token covers a Save or a rename re-anchoring the
-                  // path under a song nobody left.
-                  if (
-                    forSong.path !== songPathRef.current &&
-                    forSong.id !== songTokenRef.current
-                  )
-                    return
-                  applyLyricsResult(res)
+                onResult={applyLyricsResult}
+                beginRequest={() => {
+                  const seq = loadSeq.current
+                  return () => seq === loadSeq.current
                 }}
                 onCancel={() => void window.singz.cancelLyrics()}
               />

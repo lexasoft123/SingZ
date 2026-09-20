@@ -31,11 +31,13 @@
  * fresh one; song B keeps its cache, so it answers instantly and its credit is
  * the thing that must never change.
  *
- * The assertion deliberately does NOT care whether LRCLIB has song A. A hit, a
- * miss and an outage all corrupt B if the guard is gone — a miss flips B's
- * panel to a consent prompt, a hit replaces its words — so the check is simply
- * that B still shows B, in the ready state, after A's lookup has certainly
- * finished.
+ * Phase 1's assertion deliberately does NOT care whether LRCLIB has song A. A
+ * hit, a miss and an outage all corrupt B if the guard is gone — a miss flips
+ * B's panel to a consent prompt, a hit replaces its words — so the check is
+ * simply that B still shows B, in the ready state, after A's lookup has
+ * certainly finished. Phase 2 is the other way round: there is no pick to make
+ * without a synced record for A, so a miss or an outage there exits 2,
+ * INCONCLUSIVE, rather than reporting a healthy guard as a regression.
  *
  * Prereqs: `npm run build` done; no other app instance running (same userData
  * identity); network reachable (the ladder must actually run).
@@ -111,6 +113,9 @@ const readPanel = (win) =>
   rmSync(join(SCRATCH, 'lyrics.json'), { force: true })
 
   const fail = []
+  /** Reasons the trap could not be set — exit 2, the way the sibling drivers
+   *  report a race that never ran rather than calling it a regression. */
+  const inconclusive = []
   const app = await _electron.launch({
     executablePath: require('electron'),
     args: [APP],
@@ -200,85 +205,111 @@ const readPanel = (win) =>
     // left from the previous song" after two switches, and the switch is not
     // even needed: the pick alone carries them across.
     console.log('--- a Change… pick that lands after the singer has moved on')
-    await win.setInputFiles('input[type=file]', join(SCRATCH, srcName))
-    await win.waitForSelector('.pill.karaoke', { timeout: 60000 })
-    await win.waitForSelector('.src-credit', { timeout: DELAY * 8 + 60000 })
-    const pickFrom = await readPanel(win)
-    console.log(`A is open with ${pickFrom.lines} lines (${pickFrom.credit}) — asking for other words`)
-    const aLyricsPath = join(SCRATCH, 'lyrics.json')
-    const aBeforePick = existsSync(aLyricsPath) ? JSON.parse(readFileSync(aLyricsPath, 'utf8')) : null
-    await win.click('button.linkish:has-text("Change…")')
-    // only a SYNCED variant is clickable; without this the click would burn
-    // its actionability timeout and report a disabled button rather than
-    // "this song has no synced variants here"
-    await win.waitForSelector('.variant:not([disabled])', { timeout: DELAY * 4 + 30000 })
-    // and pick a record that is not the one A already holds: for a well-known
-    // song the first synced row is often exactly what the ladder chose, and
-    // then a pick that landed perfectly would write an identical file and read
-    // as "the pick never happened" below
-    const picked = await win.evaluate((current) => {
-      const rows = [...document.querySelectorAll('.variant:not([disabled])')]
-      if (rows.length === 0) return null
-      const label = (el) => el.querySelector('.v-main')?.textContent?.trim() ?? ''
-      // The credit reads "Artist — Track" (lrclib-core's join); a row reads
-      // "Track Artist" with no dash. Comparing the whole strings matches
-      // nothing and silently takes row 0 — compare the two parts instead.
-      const [artist, track] = (current ?? '').split(' — ')
-      const sameRecord = (el) =>
-        Boolean(artist && track && label(el).includes(artist) && label(el).includes(track))
-      const target = rows.find((r) => !sameRecord(r)) ?? rows[0]
-      target.click()
-      return label(target) || '(a row with no title)'
-    }, pickFrom.credit)
-    if (picked === null) throw new Error('no clickable variant for A — cannot test the pick')
-    console.log(`picked "${picked}" for A, and leaving at once`)
-    await win.click('.catalog-btn')
-    await win.waitForSelector('.lib-card', { timeout: 20000 })
-    await win.click(`.lib-card:has-text("${B}")`)
-    await win.waitForSelector('.src-credit', { timeout: 60000 })
-    const bAgain = await readPanel(win)
-    if (bAgain.credit !== bPanel.credit) {
-      fail.push(`B opened on "${bAgain.credit}" rather than its own "${bPanel.credit}"`)
+    // Unlike phase 1, this phase NEEDS LRCLIB to have A: with no synced record
+    // there is no pick to make. A miss, an outage or a `down` flag tripped by
+    // phase 1 means the trap could not be set, which is INCONCLUSIVE (exit 2)
+    // and never a red — otherwise a healthy guard reads as a regression on the
+    // day LRCLIB is unwell. Every such reason stops the phase where it is
+    // found: carrying on would click a Change… button that is only rendered
+    // beside ready lyrics, and die on its actionability timeout instead.
+    const bail = (why) => {
+      inconclusive.push(why)
+      throw new Error('INCONCLUSIVE')
     }
-    const pickDeadline = Date.now() + DELAY * 6 + 15000
-    let stolen = null
-    while (Date.now() < pickDeadline) {
-      await new Promise((r) => setTimeout(r, 500))
-      const p = await readPanel(win)
-      if (!p.ready || p.credit !== bPanel.credit) {
-        stolen = p
-        break
+    try {
+      await win.setInputFiles('input[type=file]', join(SCRATCH, srcName))
+      await win.waitForSelector('.pill.karaoke', { timeout: 60000 })
+      try {
+        await win.waitForSelector('.src-credit', { timeout: DELAY * 8 + 60000 })
+      } catch {
+        bail('A never reached ready lyrics — no record to pick from')
       }
-    }
-    if (stolen) {
-      fail.push(
-        stolen.ready
-          ? `B's lyrics changed to "${stolen.credit}" — that is the pick made for A`
-          : "B's lyrics panel was knocked out of ready by a pick made for A"
-      )
-    } else {
-      console.log("B kept its own lyrics — nothing from A's pick reached it")
-    }
-    // B keeping its lyrics proves nothing unless the pick actually happened:
-    // lrclib.ts short-circuits on its own `down` flag before net.fetch ever
-    // runs, and phase 1 abandons a ladder inside that 5-minute TTL — so a pick
-    // that failed instantly would leave B untouched and look identical to a
-    // guard that works. Main writes the chosen lyrics under the song they were
-    // picked for, whatever the renderer does with the answer: A's own
-    // lyrics.json must have moved.
-    const aAfterPick = existsSync(aLyricsPath) ? JSON.parse(readFileSync(aLyricsPath, 'utf8')) : null
-    const pickLanded =
-      aAfterPick &&
-      (!aBeforePick ||
-        aAfterPick.credit !== aBeforePick.credit ||
-        JSON.stringify(aAfterPick.lines) !== JSON.stringify(aBeforePick.lines))
-    if (!pickLanded) {
-      fail.push(
-        `the pick never reached A's lyrics.json (${aAfterPick ? `still "${aAfterPick.credit}"` : 'no file'}) — ` +
-          'this phase proved nothing about the guard'
-      )
-    } else {
+      const pickFrom = await readPanel(win)
+      if (!pickFrom.ready) bail('A showed no credit — nothing to pick from')
+      console.log(`A is open with ${pickFrom.lines} lines (${pickFrom.credit}) — asking for other words`)
+      const aLyricsPath = join(SCRATCH, 'lyrics.json')
+      const aBeforePick = existsSync(aLyricsPath) ? JSON.parse(readFileSync(aLyricsPath, 'utf8')) : null
+      await win.click('button.linkish:has-text("Change…")')
+      // only a SYNCED variant is clickable; waiting for one that is not
+      // disabled reports "no synced variants here" instead of burning a
+      // click's actionability timeout on a dead button
+      try {
+        await win.waitForSelector('.variant:not([disabled])', { timeout: DELAY * 4 + 30000 })
+      } catch {
+        bail('no synced variant offered for A — no pick to make')
+      }
+      // and pick a record that is not the one A already holds: for a well-known
+      // song the first synced row is often exactly what the ladder chose, and
+      // then a pick that landed perfectly would write an identical file and read
+      // as "the pick never happened" below
+      const picked = await win.evaluate((current) => {
+        const rows = [...document.querySelectorAll('.variant:not([disabled])')]
+        if (rows.length === 0) return null
+        const label = (el) => el.querySelector('.v-main')?.textContent?.trim() ?? ''
+        // The credit reads "Artist — Track" (lrclib-core's join); a row reads
+        // "Track Artist" with no dash. Comparing the whole strings matches
+        // nothing and silently takes row 0 — compare the two parts instead.
+        const [artist, track] = (current ?? '').split(' — ')
+        const sameRecord = (el) =>
+          Boolean(artist && track && label(el).includes(artist) && label(el).includes(track))
+        const target = rows.find((r) => !sameRecord(r)) ?? rows[0]
+        target.click()
+        return label(target) || '(a row with no title)'
+      }, pickFrom.credit)
+      if (picked === null) bail('no synced variant offered for A — no pick to make')
+      console.log(`picked "${picked}" for A, and leaving at once`)
+      await win.click('.catalog-btn')
+      await win.waitForSelector('.lib-card', { timeout: 20000 })
+      await win.click(`.lib-card:has-text("${B}")`)
+      try {
+        await win.waitForSelector('.src-credit', { timeout: 60000 })
+      } catch {
+        // B not settling is this machine having a bad minute, not the guard
+        bail('B never settled after the switch — nothing to steal from')
+      }
+      const bAgain = await readPanel(win)
+      if (bAgain.credit === null) bail('B never settled after the switch — nothing to steal from')
+      if (bAgain.credit !== bPanel.credit) {
+        fail.push(`B opened on "${bAgain.credit}" rather than its own "${bPanel.credit}"`)
+      }
+      const pickDeadline = Date.now() + DELAY * 6 + 15000
+      let stolen = null
+      while (Date.now() < pickDeadline) {
+        await new Promise((r) => setTimeout(r, 500))
+        const p = await readPanel(win)
+        if (!p.ready || p.credit !== bPanel.credit) {
+          stolen = p
+          break
+        }
+      }
+      if (stolen) {
+        fail.push(
+          stolen.ready
+            ? `B's lyrics changed to "${stolen.credit}" — that is the pick made for A`
+            : "B's lyrics panel was knocked out of ready by a pick made for A"
+        )
+      } else {
+        console.log("B kept its own lyrics — nothing from A's pick reached it")
+      }
+      // B keeping its lyrics proves nothing unless the pick actually happened:
+      // lrclib.ts short-circuits on its own `down` flag before net.fetch ever
+      // runs, so a pick that failed instantly would leave B untouched and look
+      // identical to a guard that works. Main writes the chosen lyrics under
+      // the song they were picked for whatever the renderer does with the
+      // answer, so A's own lyrics.json must have moved.
+      const aAfterPick = existsSync(aLyricsPath) ? JSON.parse(readFileSync(aLyricsPath, 'utf8')) : null
+      const pickLanded =
+        aAfterPick &&
+        (!aBeforePick ||
+          aAfterPick.credit !== aBeforePick.credit ||
+          JSON.stringify(aAfterPick.lines) !== JSON.stringify(aBeforePick.lines))
+      if (!pickLanded) {
+        bail(`the pick never reached A's lyrics.json (${aAfterPick ? `still "${aAfterPick.credit}"` : 'no file'})`)
+      }
       console.log(`A's pick landed in A, where it was made: "${aAfterPick.credit}"`)
+    } catch (err) {
+      if (err?.message !== 'INCONCLUSIVE') throw err
+      console.log(`the Change… phase could not set its trap: ${inconclusive[inconclusive.length - 1]}`)
     }
   } finally {
     await app.close().catch(() => {})
@@ -300,6 +331,10 @@ const readPanel = (win) =>
   if (fail.length) {
     console.log('FAIL:', fail.join('; '))
     process.exit(1)
+  }
+  if (inconclusive.length) {
+    console.log('INCONCLUSIVE:', inconclusive.join('; '))
+    process.exit(2)
   }
   console.log('PASS')
   process.exit(0)

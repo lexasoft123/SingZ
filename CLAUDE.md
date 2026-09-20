@@ -94,9 +94,14 @@ the E2E Windows workflow, which also runs `npm test`), the two capture-addon
 harnesses in `tests/e2e/` (`capture-addon-smoke.cjs`, the Electron ABI/load
 gate CI runs on both platforms; `capture-addon-hardware.cjs`, by-hand only —
 it opens the real microphone), and the mac drivers
-in `tests/e2e/mac/` (fifteen of them: align, lyrics editing (the editor's
+in `tests/e2e/mac/` (eighteen of them: align, lyrics editing (the editor's
 align-draft leg is a different code path from the panel's Check & align —
-both are covered), wizard/consent, audio settings,
+both are covered), CANCELLING one of those jobs
+(`lyrics-cancel-e2e.cjs` — a cancel is not a verdict on the lyrics: the
+panel owes the singer exactly the words it was showing when they started,
+and it used to empty itself instead, 36 lines to 0 until the song was
+reopened, with lyrics.json untouched the whole time so nothing on disk
+could see it), wizard/consent, audio settings,
 bar editing — TWO of those, because dragging a line and pressing Re-detect
 are different code paths and only the drag was covered — and the
 analysis-rule drivers: the two stem-rate ones, the two song-switch races,
@@ -894,15 +899,24 @@ was driven; the gotchas that follow from it are below.
   `LyricsPanel.applyCandidate` handed its answer back through `onResult` with
   no song attached at all, so the app drew it into whatever song was open by
   then. Reported from the field 2026-09-20 as Zeit playing with Wanted Dead Or
-  Alive's lyrics on screen, and reproduced with those two songs. The panel now
-  names the song it picked for and App compares that against
-  **`songPathRef.current`, not a closure over `song`**: the handler the click
-  captured belongs to the render where the OLD song was open, so
-  `forSong !== song?.path` compares two stale values and always agrees — the
-  first fix read as working and was not. Any callback that settles after a
-  network round-trip owes the same treatment: capture what it was for, compare
-  against a ref, never against a closed-over value. The same driver covers
-  this door, and turns karaoke ON rather than inheriting it from localStorage:
+  Alive's lyrics on screen, and reproduced with those two songs; the pick alone
+  carries them across, no second switch needed. `beginRequest()` closes it: the
+  panel opens a request against the song showing NOW, before its await, and the
+  predicate it hands back answers "is that still the song?" from the owner's
+  own load counter when the answer lands — so it keeps working after the panel
+  has been unmounted, which a song switch always does. The trap it sidesteps is
+  worth knowing, because the first fix attempted here fell into it: comparing
+  the song the pick was made for against a closure over `song` compares two
+  STALE values — the handler the click captured belongs to the render where the
+  old song was open — and always agrees, so the guard reads as working and is
+  not. Any callback that settles after a network round-trip owes the same
+  treatment: capture what it was for at call time, and answer through a ref or
+  a predicate, never a closed-over value. `tests/e2e/mac/lyrics-song-switch-e2e.cjs`
+  covers this second door — its phase refuses to pass unless the pick actually
+  reached the song it was made for, since lrclib short-circuits on its own
+  `down` flag before any request and a pick that failed instantly leaves the
+  other song untouched, which looks exactly like a working guard. The driver
+  also turns karaoke ON rather than inheriting it from localStorage:
   the LOOKUP runs either way (`prepLyrics` fires on every song load and knows
   nothing about karaoke, which is exactly why a late result can still reach
   `linesRef` and the saved grid with the panel closed) — but the PANEL is

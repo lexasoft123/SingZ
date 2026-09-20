@@ -151,6 +151,14 @@ function alignChunk(
     })
     onChildSettled(child, 'lyrics', (code) => {
       signal?.removeEventListener('abort', onAbort)
+      // We killed it. Its non-zero exit is this cancellation arriving back,
+      // not a failure of the aligner, and saying so twice (here and as the
+      // chunk's unplaced words below) reads in the log as a broken run.
+      if (signal?.aborted) {
+        log('lyrics', 'align: the word aligner stopped (cancelled)')
+        resolve(null)
+        return
+      }
       if (code !== 0) {
         const why = tail.split('\n').filter(Boolean).slice(-2).join(' — ')
         log('lyrics', `align: the word aligner exited ${code}${why ? `: ${why}` : ''}`, 'warn')
@@ -220,6 +228,9 @@ export async function alignWordsInChunks(
         out,
         signal
       )
+      // Before the unplaced-words warning: a cancelled chunk has no words to
+      // place, and the run is over either way.
+      if (signal?.aborted) throw new Error('Cancelled.')
       onProgress(((ci + 1) / chunks.length) * 100)
       if (!placed) {
         log('lyrics', `align: chunk ${ci} did not place its ${mine.length} words`, 'warn')
