@@ -29,7 +29,9 @@
  *
  * Env: E2E_PROJECT (default "Nothing Else Matters"),
  *      E2E_PROJECTS_ROOT (default iCloud Drive/SingZ),
- *      E2E_OUT (scratch + screenshot dir, default os.tmpdir()).
+ *      E2E_OUT (scratch + screenshot dir, default os.tmpdir()),
+ *      E2E_CANCEL_AT (warmup | align, default warmup — see the leg below),
+ *      E2E_ALIGN_WAIT_S (how long to wait for the aligner, default 900).
  */
 // Every E2E driver runs under a deadline: a hang prints where it was and
 // exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
@@ -49,6 +51,16 @@ const ROOT =
 const OUT = process.env.E2E_OUT ?? tmpdir()
 const SCRATCH = join(OUT, 'singz-e2e-lyrics-cancel')
 const APP = join(__dirname, '..', '..', '..', 'out', 'main', 'index.js')
+/** The listen is 0-60% of the job's progress; the word aligner is the rest. */
+const ALIGN_FROM_PCT = 60
+const AT_ALIGN = (process.env.E2E_CANCEL_AT ?? 'warmup') === 'align'
+const ALIGN_WAIT_S = (() => {
+  const raw = process.env.E2E_ALIGN_WAIT_S
+  if (raw === undefined || raw === '') return 900
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n <= 0) throw new Error(`E2E_ALIGN_WAIT_S must be a positive number of seconds, got "${raw}"`)
+  return n
+})()
 
 /**
  * Everything the panel is saying about its lyrics right now. The line TEXTS,
@@ -65,11 +77,30 @@ const readPanel = (win) =>
       /** Whatever the panel is saying in place of lyrics — a consent offer, a
        *  missing engine, a failure — so a refusal can quote it. */
       state: document.querySelector('.lp-state')?.textContent?.trim().slice(0, 200) ?? null,
+      /** Which phase the job is in. The listen runs 0-60%, the word aligner
+       *  60-100% — so the percent says whether a cancel here can reach the
+       *  aligner at all. */
+      pct: Number.parseInt(document.querySelector('.lp-pct')?.textContent ?? '', 10),
+      stage: document.querySelector('.lp-loading')?.textContent?.split('…')[0]?.trim() ?? null,
       badge: badge ? badge.className : null,
       credit: credit?.getAttribute('title') ?? credit?.textContent ?? null,
       lines: [...document.querySelectorAll('.lyr-line')].map((el) => el.textContent)
     }
   })
+
+/**
+ * A screenshot is evidence, never a gate. On a weak iGPU the emptied panel
+ * can take longer to paint than playwright's default, and a throw here lands
+ * BEFORE the run prints what it found — which is how a red once arrived as a
+ * TimeoutError with no verdict line at all.
+ */
+const shot = async (win, name) => {
+  try {
+    await win.screenshot({ path: join(OUT, name), timeout: 15000 })
+  } catch (err) {
+    console.log(`(screenshot ${name} did not paint in time: ${err?.message ?? err})`)
+  }
+}
 
 ;(async () => {
   if (!existsSync(join(ROOT, PROJECT))) throw new Error(`no such project: ${join(ROOT, PROJECT)}`)
@@ -77,7 +108,11 @@ const readPanel = (win) =>
     throw new Error(`${PROJECT} has no cached lyrics.json — the panel must open with words already on it`)
 
   if (existsSync(SCRATCH)) rmSync(SCRATCH, { recursive: true })
-  cpSync(join(ROOT, PROJECT), SCRATCH, { recursive: true })
+  // preserveTimestamps, because the listen cache is keyed on the vocals' size
+  // AND mtime: a copy with fresh mtimes always re-listens from cold, which
+  // silently pins this driver's Cancel to the warm-up phase and makes the
+  // align-warning check below structurally unable to fire.
+  cpSync(join(ROOT, PROJECT), SCRATCH, { recursive: true, preserveTimestamps: true })
 
   const fail = []
   let inconclusive = null
@@ -124,7 +159,7 @@ const readPanel = (win) =>
     const before = await readPanel(win)
     console.log(`before: ${before.lines.length} lines, badge "${before.badge}", credit ${before.credit}`)
     if (before.lines.length === 0) throw new Error('the panel opened with no lines — nothing to lose')
-    await win.screenshot({ path: join(OUT, 'lyrics-cancel-before.png') })
+    await shot(win, 'lyrics-cancel-before.png')
 
     // Start the job the singer's report names, and stop it the way they did.
     await win.click('.lp-source .linkish:has-text("Check & align")')
@@ -143,9 +178,66 @@ const readPanel = (win) =>
         (now.ready ? 'Nothing was cancelled.' : 'Fix that first: there is no job here to cancel.')
       throw new Error('INCONCLUSIVE')
     }
+    // Where to cancel. The reported bug is a singer changing their mind, which
+    // is usually seconds in — so the default stops the job wherever it has got
+    // to, and the run finishes in under a minute. The WORD ALIGNER, though,
+    // lives past 60%, and the two warnings this also guards are only emitted
+    // there: reaching it means sitting through the whole listen (6 min cold
+    // on a field laptop, seconds when the listen cache hits). E2E_CANCEL_AT=
+    // align opts into that and makes the log check below load-bearing.
+    // The last percent the job was SEEN at. `.lp-pct` is inside the loading
+    // block, so it is unmounted by the very transition the messages below
+    // report — read after the fact it is always NaN, which is exactly the
+    // number a reader would be trying to use.
+    let seenPct = null
+    if (AT_ALIGN) {
+      console.log('E2E_CANCEL_AT=align — waiting for the word aligner (past 60%) before cancelling')
+      const reached = await watchdog().run('the job reaches the word aligner', ALIGN_WAIT_S, async () => {
+        const deadline = Date.now() + ALIGN_WAIT_S * 1000
+        let said = 0
+        while (Date.now() < deadline) {
+          const p = await readPanel(win)
+          if (Number.isFinite(p.pct)) seenPct = p.pct
+          if (!p.loading) return false // it answered before the aligner was reached
+          if (Number.isFinite(p.pct) && p.pct >= ALIGN_FROM_PCT) return true
+          // The watchdog takes progress from this driver's own output, and its
+          // blanket idle deadline is SHORTER than this step's budget — a silent
+          // poll through a cold listen would be killed as a hang, past the
+          // finally that removes the scratch copy.
+          if (Date.now() - said > 30000) {
+            said = Date.now()
+            console.log(`  still listening: ${p.stage} ${Number.isFinite(p.pct) ? `${p.pct}%` : ''}`)
+          }
+          await new Promise((r) => setTimeout(r, 500))
+        }
+        throw new Error(`still at the listen after ${ALIGN_WAIT_S}s — raise E2E_ALIGN_WAIT_S`)
+      })
+      if (!reached) {
+        // Not a product failure: the trap was never set. Same verdict as the
+        // settle guard below, which is the same situation one window later.
+        const now = await readPanel(win)
+        inconclusive =
+          `the job answered at ${seenPct ?? '?'}%, before the word aligner — nothing was cancelled ` +
+          `inside it. The panel says: ${JSON.stringify(now.state ?? now.badge)}.`
+        throw new Error('INCONCLUSIVE')
+      }
+      await new Promise((r) => setTimeout(r, 4000)) // well inside a chunk, not on its seam
+    }
+
     const during = await readPanel(win)
-    console.log(`during: loading=${during.loading}, ${during.lines.length} lines on screen`)
-    await win.screenshot({ path: join(OUT, 'lyrics-cancel-during.png') })
+    console.log(
+      `during: loading=${during.loading}, ${during.lines.length} lines on screen, ` +
+        `stage "${during.stage}" ${Number.isFinite(during.pct) ? `${during.pct}%` : seenPct !== null ? `${seenPct}% (last seen)` : '(no percent yet)'}`
+    )
+    await shot(win, 'lyrics-cancel-during.png')
+    if (!during.loading) {
+      // 60% is the LISTEN's own terminal report, published before the words
+      // are judged — a mismatch verdict answers the job during the settle.
+      inconclusive =
+        `the job answered at ${seenPct ?? '?'}% during the settle, so there was no ` +
+        `longer a Cancel to press. The panel says: ${JSON.stringify(during.state)}.`
+      throw new Error('INCONCLUSIVE')
+    }
 
     await win.click(cancel)
     // The panel has to come back on its own. Nothing here reopens the song —
@@ -156,7 +248,7 @@ const readPanel = (win) =>
     await new Promise((r) => setTimeout(r, 1500)) // a late write would land in this window
     const after = await readPanel(win)
     console.log(`after:  ${after.lines.length} lines, badge "${after.badge}", credit ${after.credit}`)
-    await win.screenshot({ path: join(OUT, 'lyrics-cancel-after.png') })
+    await shot(win, 'lyrics-cancel-after.png')
 
     if (!after.ready) fail.push(`the panel is not showing lyrics after Cancel (${after.lines.length} lines)`)
     else {
@@ -168,24 +260,48 @@ const readPanel = (win) =>
       if (after.credit !== before.credit) fail.push(`credit changed: ${before.credit} -> ${after.credit}`)
     }
 
-    // A cancellation must read in the log as a cancellation. The aligner is
-    // killed by signal and its chunk then places no words, and both used to
-    // be logged as warnings — a run that stopped cleanly looking like a
-    // broken one. (Silent unless the cancel landed after the aligner had
-    // started; a fast cancel never reaches it, which is why this reports
-    // what it found rather than asserting a line is present.)
-    const warns = await win.evaluate(async () => {
-      const all = await window.singz.getLog()
-      return all
-        .filter((e) => e.source === 'lyrics' && e.level === 'warn' && /align:/.test(e.line))
-        .map((e) => e.line)
+    // A cancellation must read in the log as a cancellation. We kill the word
+    // aligner by signal, so its non-zero exit used to be logged as a failure
+    // and its chunk then reported the words it had not placed — a run that
+    // stopped cleanly reading as a broken one, twice.
+    //
+    // This can only fire if the cancel actually reached the aligner, so the
+    // run says which it was rather than letting a vacuous silence read as
+    // coverage. A zero here from a warm-up cancel means nothing at all.
+    const reached = Number.isFinite(during.pct) && during.pct >= ALIGN_FROM_PCT
+    const { warns, stopped } = await win.evaluate(async () => {
+      const all = (await window.singz.getLog()).filter((e) => e.source === 'lyrics')
+      return {
+        warns: all.filter((e) => e.level === 'warn' && /align:/.test(e.line)).map((e) => e.line),
+        // The line alignChunk logs when it finds its child killed by us: the
+        // proof that an aligner was actually running and actually stopped.
+        stopped: all.some((e) => /align: the word aligner stopped \(cancelled\)/.test(e.line))
+      }
     })
+    // On the align leg a silent log is only evidence if something was there
+    // to be noisy. A cancel that landed on a chunk seam killed no child, so
+    // it proves nothing — say so rather than bank it.
+    if (AT_ALIGN && !stopped && !warns.length && fail.length === 0) {
+      inconclusive =
+        `the cancel landed at ${during.pct}% but no aligner child was killed (no "stopped (cancelled)" ` +
+        `line), so it fell between chunks and the align-warning check proves nothing. Re-run.`
+      throw new Error('INCONCLUSIVE')
+    }
     if (warns.length) {
       console.log('align warnings during the cancelled run:')
       for (const w of warns) console.log(`  ${w}`)
       fail.push(`${warns.length} align warning(s) logged for a cancelled run`)
+    } else if (reached) {
+      console.log(
+        `no align warnings logged for a cancel taken at ${during.pct}% — inside the word aligner` +
+          (stopped ? ', which logged that it stopped (cancelled)' : '')
+      )
     } else {
-      console.log('no align warnings logged for the cancelled run')
+      console.log(
+        `align-warning check COVERS NOTHING this run: the cancel landed at ` +
+          `${Number.isFinite(during.pct) ? `${during.pct}%` : 'the warm-up'}, before the word aligner. ` +
+          `Run with E2E_CANCEL_AT=align to exercise it.`
+      )
     }
   } catch (err) {
     if (err?.message !== 'INCONCLUSIVE') throw err
