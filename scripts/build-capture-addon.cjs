@@ -404,9 +404,9 @@ function nativeBuildPolicy() {
   if (!Number.isInteger(requested) || requested < 1 || requested > 8)
     throw new Error(`SINGZ_NATIVE_JOBS must be an integer from 1 through 8 (got ${process.env.SINGZ_NATIVE_JOBS})`)
   const lookup = spawnSync(
-    process.platform === 'win32' ? 'where.exe' : 'command',
-    process.platform === 'win32' ? ['ccache.exe'] : ['-v', 'ccache'],
-    { encoding: 'utf8', shell: process.platform !== 'win32' }
+    process.platform === 'win32' ? 'where.exe' : 'which',
+    [process.platform === 'win32' ? 'ccache.exe' : 'ccache'],
+    { encoding: 'utf8' }
   )
   const ccache = lookup.status === 0 ? lookup.stdout.trim().split(/\r?\n/)[0] : ''
   // The user-visible safety limit is the number of process command lines
