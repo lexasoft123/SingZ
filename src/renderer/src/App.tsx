@@ -1012,6 +1012,14 @@ export default function App(): React.JSX.Element {
   const lyricsRequestRevisionRef = useRef(0)
   const lyricsRef = useRef(lyrics)
   lyricsRef.current = lyrics
+  /** The song open RIGHT NOW, for callbacks that settle long after the render
+   *  that created them — a closure over `song` answers for the song the
+   *  singer has already left. Both identities: the path is what main writes
+   *  under, the load token is what a save or a rename cannot move. */
+  const songPathRef = useRef<string | null>(null)
+  songPathRef.current = song?.path ?? null
+  const songTokenRef = useRef<string | null>(null)
+  songTokenRef.current = song?.preparationSourceId ?? null
   const melodyRef = useRef(melody)
   melodyRef.current = melody
   /** A saved project's stored pitch line, waiting for prepMelody to adopt it
@@ -4020,6 +4028,7 @@ export default function App(): React.JSX.Element {
                 lyrics={lyrics}
                 singMask={singMask}
                 songPath={song?.path ?? ''}
+                songId={song?.preparationSourceId ?? ''}
                 songName={cleanSongName(song?.name ?? '')}
                 guideOn={!vocalsMuted}
                 onToggleGuide={() => handleMute('vocals', !vocalsMuted)}
@@ -4032,7 +4041,25 @@ export default function App(): React.JSX.Element {
                   editorSeqRef.current = loadSeq.current
                   setEditingLyrics(true)
                 }}
-                onResult={applyLyricsResult}
+                onResult={(res, forSong) => {
+                  // Picking a variant from Change… is a network round-trip, so
+                  // the singer can be in another song by the time it answers.
+                  // Same rule as prepLyrics and the editor's save: lyrics that
+                  // land in the wrong song are not merely drawn there —
+                  // linesRef feeds detectBeats' lineStarts/words, and that grid
+                  // is auto-saved into the project. Main has already written
+                  // them into the song they were picked for.
+                  // Either identity is enough: the path covers leaving the
+                  // song and coming back to it while the pick is in flight,
+                  // the load token covers a Save or a rename re-anchoring the
+                  // path under a song nobody left.
+                  if (
+                    forSong.path !== songPathRef.current &&
+                    forSong.id !== songTokenRef.current
+                  )
+                    return
+                  applyLyricsResult(res)
+                }}
                 onCancel={() => void window.singz.cancelLyrics()}
               />
             )}

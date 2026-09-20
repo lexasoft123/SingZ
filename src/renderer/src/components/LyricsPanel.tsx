@@ -48,7 +48,13 @@ interface Props {
   onPreciseAlign: (() => void) | null
   /** Open the lyrics editor (fix words, stamp and align timing by hand). */
   onEdit: () => void
-  onResult: (res: LyricsResult) => void
+  /** The picked lyrics, and the song they were picked for — a pick is a
+   *  network round-trip, and the singer may be in another song by the time it
+   *  answers. Both identities travel: a save or a rename re-anchors `path`
+   *  under a song that never went anywhere, and `id` is what survives that. */
+  onResult: (res: LyricsResult, forSong: { path: string; id: string }) => void
+  /** This song's load token (`LoadedSongIdentity.preparationSourceId`). */
+  songId: string
   onCancel: () => void
 }
 
@@ -94,6 +100,7 @@ export default function LyricsPanel({
   lyrics,
   singMask,
   songPath,
+  songId,
   songName,
   guideOn,
   onToggleGuide,
@@ -241,9 +248,12 @@ export default function LyricsPanel({
 
   const applyCandidate = async (id: number): Promise<void> => {
     setBusy(true)
-    const res = await window.singz.applyLyrics(songPath, id, engine.duration)
+    // which song these lyrics were chosen for: the path main writes them to,
+    // and the load token that a save or a rename cannot move
+    const forSong = { path: songPath, id: songId }
+    const res = await window.singz.applyLyrics(forSong.path, id, engine.duration)
     setBusy(false)
-    onResult(res)
+    onResult(res, forSong)
     if (res.ok) setView('lyrics')
   }
 

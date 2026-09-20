@@ -3,6 +3,14 @@
  * is still in flight, and prove the answer never lands in the song opened
  * next. Permanent harness, the lyrics twin of melody-song-switch-e2e.cjs.
  *
+ * TWO doors, because the second one was open for a year: the automatic ladder
+ * (prepLyrics, guarded by loadSeq since the melody's twin landed) and the
+ * singer's own pick from Change…, which the panel used to hand back with no
+ * song attached at all. A pick is the same network round-trip as the ladder,
+ * so the same rule applies — and the field report that found it ("Zeit was
+ * playing with Wanted Dead Or Alive's lyrics on screen") came through that
+ * door, not this one.
+ *
  * Why this one needs guarding as much as the melody did: a late lyrics result
  * is not merely drawn in the wrong song. `linesRef` feeds detectBeats' aux as
  * `lineStarts`/`words`, and that beat grid is auto-saved into the project — so
@@ -133,6 +141,14 @@ const readPanel = (win) =>
     if (!srcName) throw new Error(`no song.* file in ${SCRATCH}`)
     await win.setInputFiles('input[type=file]', join(SCRATCH, srcName))
     await win.waitForSelector('.pill.karaoke', { timeout: 60000 })
+    // The lookup this driver races runs with or without karaoke — prepLyrics
+    // fires on every song load and never asks. What is karaoke-gated is the
+    // PANEL: with it off, `.src-credit` is never rendered, so the "A is still
+    // looking" assertion below reads an empty DOM and passes with no race to
+    // check. Turn it on rather than inheriting whatever localStorage holds.
+    if (!(await win.$eval('.pill.karaoke', (el) => el.classList.contains('active')))) {
+      await win.click('.pill.karaoke')
+    }
 
     // A's lookup must still be running, or there is no race to test.
     const aPanel = await readPanel(win)
@@ -174,6 +190,95 @@ const readPanel = (win) =>
       )
     } else {
       console.log(`B still shows its own lyrics after ${(watchMs / 1000).toFixed(0)}s`)
+    }
+
+    // ---------------------------------------------------------------------
+    // The same race through the OTHER door: Change… . Picking a variant is a
+    // network round-trip like the ladder, and its answer used to be applied
+    // with no song check at all — the panel handed it back and the app drew
+    // it, whichever song was open by then. Reported from the field as "lyrics
+    // left from the previous song" after two switches, and the switch is not
+    // even needed: the pick alone carries them across.
+    console.log('--- a Change… pick that lands after the singer has moved on')
+    await win.setInputFiles('input[type=file]', join(SCRATCH, srcName))
+    await win.waitForSelector('.pill.karaoke', { timeout: 60000 })
+    await win.waitForSelector('.src-credit', { timeout: DELAY * 8 + 60000 })
+    const pickFrom = await readPanel(win)
+    console.log(`A is open with ${pickFrom.lines} lines (${pickFrom.credit}) — asking for other words`)
+    const aLyricsPath = join(SCRATCH, 'lyrics.json')
+    const aBeforePick = existsSync(aLyricsPath) ? JSON.parse(readFileSync(aLyricsPath, 'utf8')) : null
+    await win.click('button.linkish:has-text("Change…")')
+    // only a SYNCED variant is clickable; without this the click would burn
+    // its actionability timeout and report a disabled button rather than
+    // "this song has no synced variants here"
+    await win.waitForSelector('.variant:not([disabled])', { timeout: DELAY * 4 + 30000 })
+    // and pick a record that is not the one A already holds: for a well-known
+    // song the first synced row is often exactly what the ladder chose, and
+    // then a pick that landed perfectly would write an identical file and read
+    // as "the pick never happened" below
+    const picked = await win.evaluate((current) => {
+      const rows = [...document.querySelectorAll('.variant:not([disabled])')]
+      if (rows.length === 0) return null
+      const label = (el) => el.querySelector('.v-main')?.textContent?.trim() ?? ''
+      // The credit reads "Artist — Track" (lrclib-core's join); a row reads
+      // "Track Artist" with no dash. Comparing the whole strings matches
+      // nothing and silently takes row 0 — compare the two parts instead.
+      const [artist, track] = (current ?? '').split(' — ')
+      const sameRecord = (el) =>
+        Boolean(artist && track && label(el).includes(artist) && label(el).includes(track))
+      const target = rows.find((r) => !sameRecord(r)) ?? rows[0]
+      target.click()
+      return label(target) || '(a row with no title)'
+    }, pickFrom.credit)
+    if (picked === null) throw new Error('no clickable variant for A — cannot test the pick')
+    console.log(`picked "${picked}" for A, and leaving at once`)
+    await win.click('.catalog-btn')
+    await win.waitForSelector('.lib-card', { timeout: 20000 })
+    await win.click(`.lib-card:has-text("${B}")`)
+    await win.waitForSelector('.src-credit', { timeout: 60000 })
+    const bAgain = await readPanel(win)
+    if (bAgain.credit !== bPanel.credit) {
+      fail.push(`B opened on "${bAgain.credit}" rather than its own "${bPanel.credit}"`)
+    }
+    const pickDeadline = Date.now() + DELAY * 6 + 15000
+    let stolen = null
+    while (Date.now() < pickDeadline) {
+      await new Promise((r) => setTimeout(r, 500))
+      const p = await readPanel(win)
+      if (!p.ready || p.credit !== bPanel.credit) {
+        stolen = p
+        break
+      }
+    }
+    if (stolen) {
+      fail.push(
+        stolen.ready
+          ? `B's lyrics changed to "${stolen.credit}" — that is the pick made for A`
+          : "B's lyrics panel was knocked out of ready by a pick made for A"
+      )
+    } else {
+      console.log("B kept its own lyrics — nothing from A's pick reached it")
+    }
+    // B keeping its lyrics proves nothing unless the pick actually happened:
+    // lrclib.ts short-circuits on its own `down` flag before net.fetch ever
+    // runs, and phase 1 abandons a ladder inside that 5-minute TTL — so a pick
+    // that failed instantly would leave B untouched and look identical to a
+    // guard that works. Main writes the chosen lyrics under the song they were
+    // picked for, whatever the renderer does with the answer: A's own
+    // lyrics.json must have moved.
+    const aAfterPick = existsSync(aLyricsPath) ? JSON.parse(readFileSync(aLyricsPath, 'utf8')) : null
+    const pickLanded =
+      aAfterPick &&
+      (!aBeforePick ||
+        aAfterPick.credit !== aBeforePick.credit ||
+        JSON.stringify(aAfterPick.lines) !== JSON.stringify(aBeforePick.lines))
+    if (!pickLanded) {
+      fail.push(
+        `the pick never reached A's lyrics.json (${aAfterPick ? `still "${aAfterPick.credit}"` : 'no file'}) — ` +
+          'this phase proved nothing about the guard'
+      )
+    } else {
+      console.log(`A's pick landed in A, where it was made: "${aAfterPick.credit}"`)
     }
   } finally {
     await app.close().catch(() => {})

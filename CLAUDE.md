@@ -889,6 +889,25 @@ was driven; the gotchas that follow from it are below.
   deterministic by wrapping main's `net.fetch` with a delay via
   `app.evaluate` — the ladder runs in MAIN, so no renderer-side route
   interception can see it.
+  **And the automatic ladder was only one of the two doors** — the singer's own
+  pick from **Change…** is the same network round-trip, and
+  `LyricsPanel.applyCandidate` handed its answer back through `onResult` with
+  no song attached at all, so the app drew it into whatever song was open by
+  then. Reported from the field 2026-09-20 as Zeit playing with Wanted Dead Or
+  Alive's lyrics on screen, and reproduced with those two songs. The panel now
+  names the song it picked for and App compares that against
+  **`songPathRef.current`, not a closure over `song`**: the handler the click
+  captured belongs to the render where the OLD song was open, so
+  `forSong !== song?.path` compares two stale values and always agrees — the
+  first fix read as working and was not. Any callback that settles after a
+  network round-trip owes the same treatment: capture what it was for, compare
+  against a ref, never against a closed-over value. The same driver covers
+  this door, and turns karaoke ON rather than inheriting it from localStorage:
+  the LOOKUP runs either way (`prepLyrics` fires on every song load and knows
+  nothing about karaoke, which is exactly why a late result can still reach
+  `linesRef` and the saved grid with the panel closed) — but the PANEL is
+  karaoke-gated, so with it off the driver read a `.src-credit` that had never
+  been rendered and its "A is still looking" assertion passed against nothing.
 - **Project format v2 = FLAC stems** (~4x smaller, lossless; splitter cache
   stays WAV). v1 WAV projects auto-upgrade on open (`migrateProjectToV2`);
   readers must keep accepting both (`stemFile()` prefers .flac). Encoding uses
