@@ -179,6 +179,34 @@ interface LyricsCache {
    */
   lookup?: number
   lines: LyricLine[]
+  /**
+   * The phrasing alignment started from — the LRC's own times, or the
+   * singer's edit. Written only alongside an aligned result, and only ever
+   * the ORIGINAL: aligning again re-uses the base it already had, never the
+   * last alignment's output.
+   *
+   * `retime` fills the gaps between anchors by scaling the reference's own
+   * phrasing into them, so for every line the aligner could not place, the
+   * reference IS the answer. Feeding it the previous alignment therefore
+   * copies that run's mistakes forward, and an unplaceable line can never be
+   * repaired: measured on Wanted Dead Or Alive, where Precise put "Dead or
+   * alive" 16 s late at 163.89 s and pressing Check & align again returned
+   * 163.82 s, and again, for ever — while the same align from the LRC's own
+   * times lands it at 147.55 s. The comment that used to sit over alignBase
+   * said re-running was fine because "the global aligner never reads the
+   * current timing"; that is true of the matcher and false of the retime.
+   *
+   * The cost, taken deliberately: the two tiers no longer compose. Check &
+   * align after a good Precise run re-derives from the base rather than
+   * refining Precise's timing, so a line the fast aligner cannot place falls
+   * back to the LRC instead of keeping what Precise measured. A tier that
+   * builds on the last one cannot tell a good run from the 16-second one
+   * above, and carrying a bad run forever is the worse failure.
+   *
+   * Additive: older readers (and both phones) ignore it, and a file without
+   * one is its own base, which is exactly right for lyrics never aligned.
+   */
+  base?: LyricLine[]
 }
 
 /**
@@ -194,6 +222,49 @@ interface LyricsCache {
  * "muzoi.net - X" missed the same way, for the same five minutes.
  */
 export const LRCLIB_LADDER_VERSION = 3
+
+/**
+ * A stored base, or undefined when it does not describe the lines beside it.
+ *
+ * The failure this refuses is silent rather than loud: an align saves
+ * retime(base), so a base left over from different words would replace the
+ * file's TEXT as well as its timing. retime walks the two in lockstep by flat
+ * word index, so the shape must match exactly — and the text with it, which is
+ * what catches an edit that happened to keep the shape.
+ */
+export function readBase(raw: { lines: LyricLine[]; base?: unknown }): LyricLine[] | undefined {
+  const base = raw.base
+  if (!Array.isArray(base) || base.length !== raw.lines.length) return undefined
+  const same = base.every(
+    (l: LyricLine, i) =>
+      l?.text === raw.lines[i].text && l?.words?.length === raw.lines[i].words.length
+  )
+  return same ? (base as LyricLine[]) : undefined
+}
+
+/**
+ * Say which lines kept their existing timing because the aligner had to force
+ * them. Both Precise call sites report it: a stretch dropped in silence is
+ * exactly the "Check & align moved nothing" a field report arrives as, and on
+ * a release build the log is the only evidence there will be.
+ */
+function logSlipped(what: string, outcome: AlignOutcome): void {
+  if (!outcome.slipped || outcome.slipped.length === 0) return
+  log(
+    'lyrics',
+    `${what}: ${outcome.slipped.length} line(s) the aligner had to force kept their ` +
+      `existing timing (${outcome.slipped.join(', ')})`
+  )
+}
+
+/**
+ * The phrasing an alignment must run against: the base this song was first
+ * aligned from, or its current lines when it has never been aligned. Never
+ * the output of the previous run — see LyricsCache.base.
+ */
+export function alignRef(cache: { lines: LyricLine[]; base?: LyricLine[] }): LyricLine[] {
+  return cache.base ?? cache.lines
+}
 
 /** Transcribed lyrics stay provisional until the CURRENT ladder has answered. */
 export function shouldReaskLrclib(c: {
@@ -305,7 +376,8 @@ export class Transcriber {
         engine: raw.engine,
         lrclibPending: raw.lrclibPending,
         lookup: raw.lookup,
-        lines: raw.lines
+        lines: raw.lines,
+        base: readBase({ lines: raw.lines, base: raw.base })
       }
     } catch {
       return null
@@ -450,6 +522,7 @@ export class Transcriber {
         this.child = run.child
         const ctcWords = await run.done
         const outcome = ctcOutcome(draft, ctcWords, durationSec)
+        logSlipped('draft precise align', outcome)
         let { check } = outcome
         // CTC scores cannot tell wrong text from hard vocals on singing —
         // when a listen of these vocals is cached, its text check speaks.
@@ -516,10 +589,12 @@ export class Transcriber {
     const lyricsPath = await this.lyricsFile(songPath)
 
     const cached = await this.readCache(lyricsPath)
-    // Alignment refines existing online or hand-edited lyrics (re-running is
-    // fine — the global aligner never reads the current timing); without
-    // them, auto. An on-device transcription is the one source with nothing
-    // to align against: the timing IS the transcription.
+    // Alignment refines existing online or hand-edited lyrics; without them,
+    // auto. An on-device transcription is the one source with nothing to
+    // align against: the timing IS the transcription. Re-running always
+    // starts from `base` — the phrasing this song was first aligned from —
+    // because retime carries the reference's own timing into every gap, so
+    // aligning the last alignment ratchets its mistakes in (LyricsCache.base).
     let alignBase: LyricsCache | null = null
     if (prefer === 'align' || prefer === 'precise') {
       if (cached && cached.source !== 'whisper') alignBase = cached
@@ -625,7 +700,7 @@ export class Transcriber {
     if (!ready.ok) return ready.res
 
     if (alignBase) {
-      const aligned = await this.alignWithQwen(vocals, dir, alignBase.lines, durationSec, onProgress)
+      const aligned = await this.alignWithQwen(vocals, dir, alignRef(alignBase), durationSec, onProgress)
       if (!aligned.ok) return aligned.res
       return this.finishOutcome(alignBase, aligned.outcome, lyricsPath)
     }
@@ -1008,6 +1083,7 @@ export class Transcriber {
       aligned: true,
       check,
       lines,
+      base: alignRef(alignBase),
       ...(check.method === 'qwen' ? { engine: QWEN_ENGINE_ID } : {})
     }
     await this.writeCache(lyricsPath, cache)
@@ -1068,18 +1144,20 @@ export class Transcriber {
     this.cancelled = false
     onProgress({ stage: 'transcribing', percent: 0 })
     try {
-      const run = await runMmsAlign(vocals, alignBase.lines, onProgress)
+      const ref = alignRef(alignBase)
+      const run = await runMmsAlign(vocals, ref, onProgress)
       this.child = run.child
       const ctcWords = await run.done
-      const outcome = ctcOutcome(alignBase.lines, ctcWords, durationSec)
+      const outcome = ctcOutcome(ref, ctcWords, durationSec)
       let { check } = outcome
       const { lines } = outcome
+      logSlipped('precise align', outcome)
       // CTC scores cannot tell wrong text from hard vocals on singing — when a
       // listen of these vocals is cached, its text check is authoritative.
       const words = await heardWords(dir, vocals)
-      const refCount = alignBase.lines.reduce((s, l) => s + l.words.length, 0)
+      const refCount = ref.reduce((s, l) => s + l.words.length, 0)
       if (words.length > 0 && transcriptionUsable(words, refCount) && check.verdict !== 'mismatch') {
-        const textCheck = alignToTranscription(alignBase.lines, words, durationSec, 'qwen').check
+        const textCheck = alignToTranscription(ref, words, durationSec, 'qwen').check
         check = { ...textCheck, method: 'ctc', medianShift: check.medianShift }
       }
       log(
@@ -1102,7 +1180,8 @@ export class Transcriber {
         credit: alignBase.credit,
         aligned: true,
         check,
-        lines
+        lines,
+        base: ref
       }
       await this.writeCache(lyricsPath, cache)
       return {

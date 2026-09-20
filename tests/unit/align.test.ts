@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   alignToTranscription,
   ctcOutcome,
+  forcedLines,
   globalAnchors,
   guessLanguage,
   romanize,
@@ -289,5 +290,151 @@ describe('ctcOutcome', () => {
     // voiced words with no flag still anchor (older pack output)
     const legacy = goodCtc()
     expect(ctcOutcome(ref, legacy, 60).lines[0].words[0].s).toBeCloseTo(ref[0].words[0].s + 2, 2)
+  })
+
+  /**
+   * A CTC trellis cannot skip audio, so when it loses the phrase it is on it
+   * slides the rest of the song along until the acoustics let it catch up.
+   * The slipped words sit in real singing, so the silence guard above waves
+   * them through — only their SCORES say anything, and those used to reach the
+   * verdict and nothing else.
+   *
+   * Measured on Wanted Dead Or Alive: "Dead or alive" placed at 163.7 s over
+   * the audio of the next phrase, while the singer sings it at 145.6-155.6 s.
+   * The app showed a 17-second count-in over a voice already singing.
+   */
+  it('a slipped stretch does not anchor, however loudly it is sung', () => {
+    const slipped = new Set([1, 2])
+    const ctc: CtcWord[] = ref.flatMap((l, li) =>
+      l.words.map((w, wi) =>
+        slipped.has(li)
+          ? // one phrase late, in audio that belongs to the next line, and
+            // scored the way a forced trellis scores: far under the median
+            { li, wi, s: w.s + 9, e: w.e + 9, score: 0.012, voiced: 0.8 }
+          : { li, wi, s: w.s + 2, e: w.e + 2, score: 0.8, voiced: 0.7 }
+      )
+    )
+    const { lines } = ctcOutcome(ref, ctc, 60)
+    for (const li of slipped) {
+      expect(lines[li].start).toBeCloseTo(ref[li].start + 2, 0)
+      expect(lines[li].start).toBeLessThan(ref[li].start + 5)
+    }
+    // and the lines the model was sure of still take their measured times
+    expect(lines[0].words[0].s).toBeCloseTo(ref[0].words[0].s + 2, 2)
+    expect(lines[3].words[0].s).toBeCloseTo(ref[3].words[0].s + 2, 2)
+  })
+
+})
+
+describe('forcedLines — the stretch the trellis had to force', () => {
+  // two verses, so a three-line slip stays the minority of the song that a
+  // localized slip is (see FORCED_RUN_MAX_SHARE)
+  const ref = refLines([...SONG, ...SONG])
+  const scored = (perLine: number[]): CtcWord[] =>
+    ref.flatMap((l, li) =>
+      l.words.map((w, wi) => ({ li, wi, s: w.s, e: w.e, score: perLine[li], voiced: 0.8 }))
+    )
+
+  it('swallows a line that clears the floor between two that do not', () => {
+    // On Wanted Dead Or Alive the line in the middle of the slip scored 0.036
+    // against a floor of 0.0349 and held the whole stretch 9 s late by
+    // itself. It is also two words long, so badLines — which needs three —
+    // could never have seen it either.
+    const scores = [0.8, 0.01, 0.05, 0.01, 0.8, 0.8, 0.8, 0.8]
+    expect([...forcedLines(ref, scored(scores), 0.02)].sort((a, b) => a - b)).toEqual([1, 2, 3])
+  })
+
+  it('leaves a confident line alone when nothing near it was forced', () => {
+    const forced = forcedLines(ref, scored([0.008, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8]), 0.02)
+    expect([...forced]).toEqual([0])
+  })
+
+  it('judges a line by its median word, not its luckiest', () => {
+    // one word the model happened to nail cannot vouch for the line
+    const ctc: CtcWord[] = ref.flatMap((l, li) =>
+      l.words.map((w, wi) => ({
+        li,
+        wi,
+        s: w.s,
+        e: w.e,
+        score: li === 1 && wi === 0 ? 0.9 : li === 1 ? 0.005 : 0.8,
+        voiced: 0.8
+      }))
+    )
+    expect(forcedLines(ref, ctc, 0.02).has(1)).toBe(true)
+  })
+
+  it('says nothing about a line the aligner never placed', () => {
+    // it must be the ABSENCE of scores that spares the line, not the absence
+    // of a line: give every other line a forced score, so a naive median over
+    // an empty list (undefined, or a negative index) would show up here
+    const all = ref.map(() => 0.005)
+    const ctc = scored(all).filter((c) => c.li !== 2)
+    expect(forcedLines(ref, ctc, 0.02).has(2)).toBe(false)
+    expect(forcedLines(ref, scored(all), 0.02).has(2)).toBe(false) // stood down
+    const one = ref.map((_, li) => (li < 2 ? 0.005 : 0.8))
+    expect(forcedLines(ref, scored(one).filter((c) => c.li !== 2), 0.02).has(2)).toBe(false)
+  })
+
+  it('does not chain bridges across a confident pair', () => {
+    const long = refLines([...SONG, ...SONG, ...SONG])
+    const every3 = long.map((_, li) => (li % 3 === 0 ? 0.005 : 0.8))
+    const ctc = long.flatMap((l, li) =>
+      l.words.map((w, wi) => ({ li, wi, s: w.s, e: w.e, score: every3[li], voiced: 0.8 }))
+    )
+    expect([...forcedLines(long, ctc, 0.02)].sort((a, b) => a - b)).toEqual(
+      long.map((_, li) => li).filter((li) => li % 3 === 0)
+    )
+  })
+
+  it('does not chain bridges across ALTERNATING confident lines either', () => {
+    // A chorus of lead lines alternating with short answers is exactly this
+    // shape. Bridging one line per GAP still fuses the whole stretch and takes
+    // every confident line in it; the budget is per RUN.
+    const long = refLines([...SONG, ...SONG, ...SONG, ...SONG, ...SONG])
+    const slip = new Set([6, 8, 10, 12, 14])
+    const ctc = long.flatMap((l, li) =>
+      l.words.map((w, wi) => ({
+        li,
+        wi,
+        s: w.s,
+        e: w.e,
+        score: slip.has(li) ? 0.005 : 0.8,
+        voiced: 0.8
+      }))
+    )
+    const got = forcedLines(long, ctc, 0.02)
+    expect(got.has(9)).toBe(false)
+    expect(got.has(13)).toBe(false)
+    expect(got.size).toBeLessThan(9)
+    for (const li of slip) expect(got.has(li)).toBe(true)
+  })
+
+  it('stands down when most of the song reads as forced', () => {
+    // Uniformly low scores are hard vocals, not a lost phrase — the case
+    // `uniformly low scores still retime` already covers. Dropping every
+    // anchor would hand the reference back untouched and still call it a
+    // verdict, so the guard has to recognise that it is not looking at a slip.
+    expect(forcedLines(ref, scored(ref.map(() => 0.005)), 0.02).size).toBe(0)
+    // and it still fires for a slip that is a minority of the song
+    const half = ref.map((_, li) => (li < 3 ? 0.005 : 0.8))
+    expect(forcedLines(ref, scored(half), 0.02).size).toBe(3)
+  })
+
+  it('judges an even-word line by its WORSE middle word', () => {
+    // a two-word line judged by its better word is judged by one lucky word,
+    // which is the opposite of the point — "Wanted (wanted)" is that line
+    const two = refLines(['hold on', 'and sing it out', 'one more time', 'all together now'])
+    const ctc = two.flatMap((l, li) =>
+      l.words.map((w, wi) => ({
+        li,
+        wi,
+        s: w.s,
+        e: w.e,
+        score: li === 0 ? (wi === 0 ? 0.005 : 0.9) : 0.8,
+        voiced: 0.8
+      }))
+    )
+    expect(forcedLines(two, ctc, 0.02).has(0)).toBe(true)
   })
 })

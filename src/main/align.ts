@@ -321,6 +321,13 @@ export function retime(ref: LyricLine[], anchors: Anchor[], durationSec: number)
 export interface AlignOutcome {
   lines: LyricLine[]
   check: AlignCheck
+  /**
+   * Lines whose anchors were dropped as a slipped stretch (ctcOutcome only).
+   * Not part of AlignCheck, which is persisted and read by both phones —
+   * this is for the desktop log, where "Check & align moved nothing" from
+   * the field otherwise arrives with no evidence of what was dropped.
+   */
+  slipped?: number[]
 }
 
 /**
@@ -408,6 +415,90 @@ export interface CtcWord {
 export const CTC_VOICED_MIN = 0.06
 
 /**
+ * How many confident lines a forced stretch may swallow IN TOTAL — not per
+ * gap, because bridges chain: at one per gap, forced lines every OTHER line
+ * still fuse into one run and take every confident line between them with
+ * them, which is the shape of a chorus of lead lines alternating with short
+ * answers ("Wanted (wanted)" is exactly that). One per run is what the
+ * measured case needs — the single line sitting inside a slipped stretch —
+ * and it cannot grow past it.
+ */
+const FORCED_BRIDGE = 1
+
+/**
+ * Past this share of the placed lines, a "slip" is the whole song, which
+ * means the scores are describing hard vocals rather than a lost phrase —
+ * the case `uniformly low scores still retime` already covers. Dropping
+ * every anchor would silently hand back the reference and still call it a
+ * verdict, so the guard stands down instead.
+ */
+const FORCED_RUN_MAX_SHARE = 0.5
+
+/**
+ * The lines the trellis had to FORCE, widened to contiguous stretches.
+ *
+ * A CTC aligner is monotonic, so it cannot skip audio — when it loses the
+ * phrase it is on, it does not stop, it slides the REST of the song along by
+ * one phrase until the acoustics let it catch up again. Measured on Wanted
+ * Dead Or Alive: between 141 s and 166 s the trellis ran one phrase late —
+ * "Dead or alive" was placed at 163.7 s over the audio of "Oh, I ride", while
+ * the singer sings it at 145.6-155.6 s. Those lines score 0.006-0.027 against
+ * the song's own median of 0.175; the healthy lines either side score 0.52 and
+ * 0.26. The model says plainly where it lost the plot.
+ *
+ * `badLines` already computes very nearly this set, and is used for the
+ * VERDICT only — the anchors went into `retime` regardless, which is how a
+ * line the model scored at 0.013 moved a singer's lyrics 16 seconds. The one
+ * guard that did apply, `voiced`, cannot see this at all: a slipped line sits
+ * in real singing, just somebody else's.
+ *
+ * It has to be the RUN, not the line. Dropping slipped lines one at a time
+ * leaves whichever of them happened to clear the floor still anchoring, and
+ * one surviving anchor drags its neighbours back onto the slip (measured: line
+ * 25 scored 0.036 against a floor of 0.0349 and held the whole stretch 9 s
+ * late). A stretch the model forced is not evidence at any granularity, so the
+ * whole stretch falls back to the reference phrasing — which is exactly what
+ * `retime` does for a gap between anchors.
+ */
+export function forcedLines(ref: LyricLine[], ctc: CtcWord[], floor: number): Set<number> {
+  const forced = new Set<number>()
+  ref.forEach((_, li) => {
+    const scores = ctc.filter((c) => c.li === li).map((c) => c.score).sort((a, b) => a - b)
+    // the line's median word, so one lucky word cannot vouch for the line —
+    // and the LOWER median on an even count, or a two-word line is judged by
+    // its better word, which is the opposite of the point. No `words >= 3`
+    // floor either: two-word lines are exactly the ones badLines cannot see,
+    // and "Wanted (wanted)" is the line that held Wanted Dead Or Alive's
+    // whole slipped stretch in place.
+    if (scores.length > 0 && scores[Math.floor((scores.length - 1) / 2)] < floor) forced.add(li)
+  })
+  // grow each stretch from its first forced line, bridging at most
+  // FORCED_BRIDGE confident lines across the whole stretch
+  const order = [...forced].sort((a, b) => a - b)
+  const run = new Set<number>()
+  for (let i = 0; i < order.length; ) {
+    let end = order[i]
+    let bridged = 0
+    let j = i + 1
+    while (j < order.length) {
+      const gap = order[j] - end - 1
+      if (gap > FORCED_BRIDGE || bridged + gap > FORCED_BRIDGE) break
+      bridged += gap
+      end = order[j]
+      j++
+    }
+    for (let m = order[i]; m <= end; m++) run.add(m)
+    i = j
+  }
+  // Uniformly forced is hard vocals, not a lost phrase. Both sides count only
+  // lines the aligner PLACED, or a bridged line it never placed would inflate
+  // the share and stand the guard down on a real slip.
+  const placed = new Set(ctc.map((c) => c.li))
+  const dropped = [...run].filter((li) => placed.has(li)).length
+  return placed.size > 0 && dropped > placed.size * FORCED_RUN_MAX_SHARE ? new Set() : run
+}
+
+/**
  * Judge + retime from CTC forced alignment. Absolute CTC scores on singing
  * run far lower than on speech and do not separate wrong text from hard
  * vocals — so scores are used RELATIVE to the song's own median (flagging
@@ -445,13 +536,21 @@ export function ctcOutcome(ref: LyricLine[], ctc: CtcWord[], durationSec: number
   // the acoustics. Silent words must not anchor: without them, retime rides
   // the surrounding anchors over the reference phrasing (the whisper-checked
   // or LRC times), which is exactly the right fallback.
+  //
+  // The same fallback carries a stretch the trellis SLIPPED (see forcedLines):
+  // that one sits in real singing and so clears the silence test.
+  const slipped = forcedLines(ref, ctc, floor)
   const anchors: Anchor[] = ctc
     .filter((c) => c.voiced === undefined || c.voiced >= CTC_VOICED_MIN)
+    .filter((c) => !slipped.has(c.li))
     .map((c) => ({ li: c.li, wi: c.wi, s: c.s, e: c.e, sim: c.score }))
   const lines = retime(ref, anchors, durationSec)
+  // Only a line that ANCHORED is evidence of a shift: a slipped stretch kept
+  // the reference times, and averaging those zeros in is how a median stops
+  // describing anything measured (the same rule the Qwen tier states).
   const shifts = lines
     .map((l, i) => l.start - ref[i].start)
-    .filter((_, i) => perLine[i].heard > 0)
+    .filter((_, i) => perLine[i].heard > 0 && !slipped.has(i))
     .sort((a, b) => a - b)
   const medianShift = shifts.length > 0 ? shifts[Math.floor(shifts.length / 2)] : 0
   const verdict =
@@ -460,6 +559,7 @@ export function ctcOutcome(ref: LyricLine[], ctc: CtcWord[], durationSec: number
       : 'retimed'
   return {
     lines,
+    slipped: [...slipped].sort((a, b) => a - b),
     check: {
       verdict,
       method: 'ctc',
