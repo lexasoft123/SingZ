@@ -243,17 +243,20 @@ export function readBase(raw: { lines: LyricLine[]; base?: unknown }): LyricLine
 }
 
 /**
- * Say which lines kept their existing timing because the aligner had to force
- * them. Both Precise call sites report it: a stretch dropped in silence is
- * exactly the "Check & align moved nothing" a field report arrives as, and on
- * a release build the log is the only evidence there will be.
+ * Say which lines did not anchor the retime because the aligner had to force
+ * them. They are not pinned — retime scales the reference phrasing between the
+ * anchors either side, so they move with their neighbours. Both Precise call
+ * sites report it: a stretch dropped in silence is exactly the "Check & align
+ * moved nothing" a field report arrives as, and on a release build the log is
+ * the only evidence there will be.
  */
 function logSlipped(what: string, outcome: AlignOutcome): void {
   if (!outcome.slipped || outcome.slipped.length === 0) return
   log(
     'lyrics',
-    `${what}: ${outcome.slipped.length} line(s) the aligner had to force kept their ` +
-      `existing timing (${outcome.slipped.join(', ')})`
+    `${what}: ${outcome.slipped.length} line(s) the aligner had to force did not anchor ` +
+      `the retime — they follow their neighbours over the reference phrasing ` +
+      `(${outcome.slipped.join(', ')})`
   )
 }
 

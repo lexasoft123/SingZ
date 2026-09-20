@@ -545,9 +545,10 @@ export function ctcOutcome(ref: LyricLine[], ctc: CtcWord[], durationSec: number
     .filter((c) => !slipped.has(c.li))
     .map((c) => ({ li: c.li, wi: c.wi, s: c.s, e: c.e, sim: c.score }))
   const lines = retime(ref, anchors, durationSec)
-  // Only a line that ANCHORED is evidence of a shift: a slipped stretch kept
-  // the reference times, and averaging those zeros in is how a median stops
-  // describing anything measured (the same rule the Qwen tier states).
+  // Only a line that ANCHORED is evidence of a shift. A slipped stretch was
+  // interpolated from its neighbours, so its shift is one of theirs read back
+  // — averaging derived numbers in is how a median stops describing anything
+  // measured (the same rule the Qwen tier states).
   const shifts = lines
     .map((l, i) => l.start - ref[i].start)
     .filter((_, i) => perLine[i].heard > 0 && !slipped.has(i))
