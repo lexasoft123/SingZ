@@ -255,11 +255,13 @@ if(SINGZ_BUILD_ELECTRON_CAPTURE)
     NAPI_VERSION=8 NODE_GYP_MODULE_NAME=singz_capture
     SINGZ_CAPTURE_ELECTRON="${SINGZ_CAPTURE_ELECTRON}"
     SINGZ_CAPTURE_SOURCE_STAMP="${SINGZ_CAPTURE_SOURCE_STAMP}")
+  # zcore_device and zdsp_host_adapter are omitted here: both already reach
+  # this target PUBLIC through native_playback_session (and zdsp_host_adapter
+  # again through monitor_callback), and Apple's linker warns on the repeated
+  # archive when they are also listed directly.
   target_link_libraries(singz_capture PRIVATE
     SingZ::native_build_options
-    SingZ::zcore_device
     SingZ::zdsp_analysis
-    SingZ::zdsp_host_adapter
     SingZ::monitor_callback
     SingZ::native_playback_session
     singz_native_audio_ownership)
