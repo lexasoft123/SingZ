@@ -3166,12 +3166,7 @@ export class IosNativePlaybackCoordinator {
           result.message,
         );
       }
-      log(
-        'dsp',
-        `${command} ramp queued · generation ${generation} · accepted in ${since(
-          issuedAt,
-        )}`,
-      );
+      noteRampAccepted(command, generation, Date.now() - issuedAt);
     });
   }
 
@@ -4227,6 +4222,8 @@ export class IosNativePlaybackCoordinator {
     retention: 'release' | 'park' = 'release',
   ): Promise<boolean> {
     const stopStartedAt = Date.now();
+    // The mixing that led here is written down before the stop that ends it.
+    flushRampBurst();
     handle.stopPolling();
     handle.clearStartWatch();
     // A stopped generation holds no stream. Left set, the mark outlived the
@@ -4308,6 +4305,8 @@ export class IosNativePlaybackCoordinator {
     reason: string,
   ): Promise<boolean> {
     const unloadStartedAt = Date.now();
+    // The mixing that led here is written down before the stop that ends it.
+    flushRampBurst();
     handle.stopPolling();
     handle.clearStartWatch();
     if (handle.generation === 0) return this.active !== handle;
@@ -6919,6 +6918,61 @@ export const rebuildIosNativePlaybackCues = rebuildNativePlaybackCues;
  */
 function since(startedAt: number): string {
   return fmtMs(Math.max(0, Date.now() - startedAt));
+}
+
+/**
+ * Accepted control ramps are logged one line per BURST, not one per command.
+ * A fader drag or a mute sends one ramp per lane per update — 7–9 per touch —
+ * and the phone keeps only the last 400 log lines: a field log (2026-09-23)
+ * was ~250 of ~390 lines of `lane-control ramp queued`, forty seconds of
+ * mixing away from evicting the add-song and split history that explained
+ * the report. A refusal still throws to its caller; only success is summed.
+ */
+const RAMP_BURST_QUIET_MS = 1500;
+let rampBurst: {
+  command: string;
+  generation: number;
+  count: number;
+  slowestMs: number;
+  startedAt: number;
+  lastAt: number;
+  timer: ReturnType<typeof setTimeout> | null;
+} | null = null;
+
+function flushRampBurst(): void {
+  const burst = rampBurst;
+  if (!burst) return;
+  rampBurst = null;
+  if (burst.timer) clearTimeout(burst.timer);
+  log(
+    'dsp',
+    `${burst.command} ramps queued · generation ${burst.generation} · ` +
+      `${burst.count} accepted over ${fmtMs(Math.max(0, burst.lastAt - burst.startedAt))} · ` +
+      `slowest ${fmtMs(burst.slowestMs)}`,
+  );
+}
+
+function noteRampAccepted(command: string, generation: number, tookMs: number): void {
+  if (
+    rampBurst &&
+    (rampBurst.command !== command || rampBurst.generation !== generation)
+  )
+    flushRampBurst();
+  if (!rampBurst)
+    rampBurst = {
+      command,
+      generation,
+      count: 0,
+      slowestMs: 0,
+      startedAt: Date.now() - Math.max(0, tookMs),
+      lastAt: 0,
+      timer: null,
+    };
+  rampBurst.count += 1;
+  rampBurst.lastAt = Date.now();
+  rampBurst.slowestMs = Math.max(rampBurst.slowestMs, Math.max(0, tookMs));
+  if (rampBurst.timer) clearTimeout(rampBurst.timer);
+  rampBurst.timer = setTimeout(flushRampBurst, RAMP_BURST_QUIET_MS);
 }
 
 // These lines are emitted from native command receipts and telemetry polls.
