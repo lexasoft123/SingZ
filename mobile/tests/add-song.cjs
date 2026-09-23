@@ -204,8 +204,24 @@ async function main() {
     sheetStep === 'meta' && sheetSecs > 0,
     `${String(sheetStep)} · ${sheetSecs}s`
   )
+  // And it closes again. The sheet is its own navigator route, so the catalog
+  // behind it is out of focus and publishes nothing while it is up: when this
+  // close did nothing, the sheet stayed on screen, every catalog hook stayed
+  // frozen, and the failure surfaced two checks later as a deleted project
+  // still "listed". Once the sheet has shown, addSheetShown goes false only
+  // when its route reports itself closed, so a close that misses is named here.
   await conn.evaluate('globalThis.__test.setAddOpen(false); true')
-  await sleep(800)
+  let closed = false
+  for (let i = 0; i < 20 && !closed; i++) {
+    await sleep(500)
+    closed =
+      (await conn.evaluate('globalThis.__test.addSheetShown === false'))?.result?.value === true
+  }
+  check(
+    'the sheet closed again',
+    shown && closed,
+    shown ? undefined : 'it never reached the screen, so its close proves nothing'
+  )
   await conn.evaluate(
     `globalThis.__delDone = null; globalThis.__test.deletePhoneProject(${JSON.stringify(dir)})` +
       `.then(() => { globalThis.__delDone = 'ok' }).catch(e => { globalThis.__delDone = String(e) }); true`

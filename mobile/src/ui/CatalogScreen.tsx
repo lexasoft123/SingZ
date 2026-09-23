@@ -301,6 +301,13 @@ export default function CatalogScreen({
    *  and silently refused the sheet, which then ran its whole flow invisibly.
    *  One presentation at a time makes that unrepresentable. */
   const [addOpen, setAddOpen] = useState(false)
+  /** `addOpen` as the driver hooks read it. Opening the sheet pushes its own
+   *  route, which takes focus away from the catalog, and the hook effect stops
+   *  republishing the moment focus goes (it says why it must). A hook that
+   *  closed over the state kept the value from BEFORE the sheet opened, so
+   *  `__test.setAddOpen(false)` closed nothing, the catalog never came back
+   *  into focus, and every hook it publishes stayed frozen behind the sheet. */
+  const addOpenRef = useRef(false)
   const refreshRef = useRef<(() => Promise<void>) | null>(null)
   const presentAddRef = useRef<(src: PickedFile) => void>(() => {})
   /** A pick is on screen: no sheet exists yet to hold that state. */
@@ -526,7 +533,11 @@ export default function CatalogScreen({
   refreshRef.current = () => refresh()
   const presentAdd = useCallback(
     (src: PickedFile): void => {
-      if (TEST) TEST.addSheetShown = false
+      addOpenRef.current = true
+      if (TEST) {
+        TEST.addOpen = true
+        TEST.addSheetShown = false
+      }
       setAddOpen(true)
       onOpenAddSong({
         src,
@@ -542,8 +553,12 @@ export default function CatalogScreen({
           }
         },
         onClose: addedDir => {
+          addOpenRef.current = false
           setAddOpen(false)
-          if (TEST) TEST.addSheetShown = false
+          if (TEST) {
+            TEST.addOpen = false
+            TEST.addSheetShown = false
+          }
           if (addedDir) void refreshRef.current?.()
         }
       })
@@ -1444,9 +1459,11 @@ export default function CatalogScreen({
     TEST.usage = usage
     TEST.offline = offline
     TEST.forget = forget
-    TEST.addOpen = addOpen
+    // Both read the ref, never `addOpen`: this effect publishes nothing while
+    // the sheet is up, so a value closed over here predates the sheet.
+    TEST.addOpen = addOpenRef.current
     TEST.setAddOpen = (open: boolean) => {
-      if (!open && addOpen) onCloseAddSong()
+      if (!open && addOpenRef.current) onCloseAddSong()
     }
     /** Open the real sheet on a seeded file — everything beginAdd does once
      *  the picker has answered (the picker itself needs a finger). Paired
