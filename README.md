@@ -63,9 +63,12 @@ built-in setup and keeps it updated automatically.
   is four requests and your media never re-uploads. The companion app in
   [mobile/](mobile) (React Native, iOS + Android) plays the synced library
   with the same karaoke lyrics, melody line and beat grid — songs cache on
-  the phone and keep playing offline. **iPhone:** join the open beta at
-  [testflight.apple.com/join/q6vVdkwt](https://testflight.apple.com/join/q6vVdkwt).
-  **Android:** the APK is attached to every release.
+  the phone and keep playing offline. **iPhone:** on the
+  [App Store](https://apps.apple.com/app/singz-sing-with-the-band/id6806430347);
+  early builds land first in the
+  [TestFlight beta](https://testflight.apple.com/join/q6vVdkwt).
+  **Android:** the APK is attached to every release (not yet on the Play
+  Store — it's still in closed testing there).
 - **Log window** — the **Log** button shows what the app is doing under the
   hood (engines, downloads, lyrics search) and saves to a file for bug
   reports.
