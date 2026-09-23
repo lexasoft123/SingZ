@@ -38,7 +38,7 @@ import { hashFile, writeInputWav } from './separation'
 import type { ModelsProgress, ProjectSettings } from '../shared/types'
 import { allowRoot, isAllowed, stemsRoot } from './media'
 import { registerSource, registerTrack } from './source'
-import { log, logEntries, saveLog } from './log'
+import { log, logEntries, logSessions, readLogSession, saveLog, startSessionLog } from './log'
 import { clearDirty, dirtyDirs, dirtySeq, dirtyState, isDirty, markProjectDirty, onDirty } from './sync-dirty'
 import { replaySyncLog, syncLog } from './sync-log'
 import { SyncScheduler } from './sync-scheduler'
@@ -822,12 +822,22 @@ function registerIpc(): void {
 
   ipcMain.handle('log:all', () => logEntries())
 
-  ipcMain.handle('log:save', (_e, path?: string) =>
-    saveLog(typeof path === 'string' && path ? path : undefined)
+  ipcMain.handle('log:save', (_e, path?: string, session?: string) =>
+    saveLog(
+      typeof path === 'string' && path ? path : undefined,
+      typeof session === 'string' && session ? session : undefined
+    )
+  )
+
+  ipcMain.handle('log:sessions', () => logSessions())
+
+  ipcMain.handle('log:session', (_e, name: unknown) =>
+    typeof name === 'string' ? readLogSession(name) : null
   )
 }
 
 app.whenReady().then(async () => {
+  startSessionLog()
   log(
     'app',
     `SingZ ${app.isPackaged ? app.getVersion() : 'dev'} on ${process.platform}-${process.arch}` +

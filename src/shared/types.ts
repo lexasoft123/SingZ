@@ -449,6 +449,15 @@ export type UpdateState =
 
 export type LogLevel = 'info' | 'warn' | 'error'
 
+/** One launch's log file on the desktop; the newest ten are kept. */
+export interface LogSession {
+  name: string
+  startedAt: number
+  bytes: number
+  /** The launch that is running now. */
+  current: boolean
+}
+
 export interface LogEntry {
   t: number
   level: LogLevel
@@ -1427,9 +1436,14 @@ export interface SingzApi {
   /** Diagnostic log: current buffer, live stream, save-to-file (dialog unless path given). */
   getLog(): Promise<LogEntry[]>
   saveLog(
-    path?: string
+    path?: string,
+    session?: string
   ): Promise<{ ok: true; path: string } | { ok: false; cancelled?: boolean; error: string }>
   onLogLine(cb: (e: LogEntry) => void): () => void
+  /** The kept launch logs, newest first (this launch included). */
+  logSessions(): Promise<LogSession[]>
+  /** One kept launch log's text; null when it is no longer kept. */
+  readLogSession(name: string): Promise<string | null>
   /** App version for the titlebar ("dev" outside packaged builds). */
   appVersion(): Promise<string>
   /** Main-owned app-level profile/history. Completion receipts never contain song paths or raw observations. */
