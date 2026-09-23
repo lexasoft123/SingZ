@@ -306,16 +306,27 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
   @objc func listProjects(
     _ resolve: @escaping RCTPromiseResolveBlock, reject: @escaping RCTPromiseRejectBlock
   ) {
-    let root = activateRoot().url
+    let active = activateRoot()
+    let root = active.url
     let fm = FileManager.default
     var out: [[String: Any]] = []
     do {
+      // In This iPhone's folder only this app and the singer (through Files)
+      // write, so a hidden folder holding a project.json is a song: one an
+      // older build named after a title that began with a dot ("...Baby One
+      // More Time"). List it, or it can never be opened, moved or deleted.
+      // A picked folder keeps skipping hidden entries: other writers (a
+      // desktop mid-sync, a sync tool) stage their work that way.
       let entries = try fm.contentsOfDirectory(
         at: root, includingPropertiesForKeys: [.isDirectoryKey],
-        options: [.skipsHiddenFiles]
+        options: active.kind == "documents" ? [] : [.skipsHiddenFiles]
       )
       NSLog("SingZ list: %d entries in %@", entries.count, root.path)
       for dir in entries {
+        // Files keeps this folder's Recently Deleted in .Trash, where a
+        // project.json deleted on its own lands at the top. Never a song:
+        // deleting it as one would empty Recently Deleted for good.
+        if dir.lastPathComponent == ".Trash" { continue }
         NSLog("SingZ list: entry %@ dir=%d pj=%d", dir.lastPathComponent,
           ((try? dir.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true) ? 1 : 0,
           present(dir, "project.json") ? 1 : 0)
@@ -733,31 +744,17 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
 
   private var fm: FileManager { FileManager.default }
 
-  /** A project's folder under the documents root, or nil on a bad name. */
+  /** A project's folder under the documents root, or nil on a bad name.
+   *  Rules live in ProjectPaths so a swiftc runner can hold them to the
+   *  shared table (tests/shared/project-name-cases.json). */
   private func docDirFor(_ project: String) -> URL? {
-    guard !project.isEmpty, !project.contains("/"), project != "..", project != "." else {
-      return nil
-    }
+    guard ProjectPaths.plainChild(project) else { return nil }
     return documentsURL().appendingPathComponent(project, isDirectory: true)
   }
 
-  /** Relative file path inside a project — subdirs fine, escapes are not. */
-  private func relOk(_ file: String) -> Bool {
-    guard !file.isEmpty, !file.hasPrefix("/") else { return false }
-    return file.split(separator: "/", omittingEmptySubsequences: false)
-      .allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
-  }
+  private func relOk(_ file: String) -> Bool { ProjectPaths.relOk(file) }
 
-  /** Desktop projects.ts safeName, mirrored: same strip, same fallback. */
-  private func safeName(_ name: String) -> String {
-    var s = name.replacingOccurrences(
-      of: "\\.(mp3|wav|flac|m4a|aac|ogg|oga|opus|aif|aiff)$",
-      with: "", options: [.regularExpression, .caseInsensitive])
-    s = s.replacingOccurrences(of: "[/\\\\:*?\"<>|]", with: " ", options: .regularExpression)
-    s = s.replacingOccurrences(of: "\\s{2,}", with: " ", options: .regularExpression)
-    s = s.trimmingCharacters(in: .whitespaces)
-    return s.isEmpty ? "Untitled song" : s
-  }
+  private func safeName(_ name: String) -> String { ProjectPaths.safeName(name) }
 
   /** Atomic install of tmp at out: replace when out exists (a kill mid-write
    *  must never leave the project without the file), plain move otherwise. */

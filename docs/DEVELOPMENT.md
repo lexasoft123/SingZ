@@ -462,6 +462,7 @@ question, not only a correctness one.
 | `cd mobile && npx jest` | the phone's Drive protocol, offline fallbacks, ✓ rule and log |
 | `cd mobile/android && ./gradlew :app:testDebugUnitTest` | Kotlin's half of the shared cache-currency table |
 | `mobile/scripts/test-swift-currency.sh` | Swift's half — swiftc only, no simulator, no Pods |
+| `mobile/scripts/test-swift-project-paths.sh` | Swift's half of `tests/shared/project-name-cases.json` — how a phone-added song's folder is named (no leading dot: iOS lists the library without hidden folders) and which project paths are refused; Kotlin runs it in `ProjectPathsTest`, vitest against the reference writer and the desktop's own `safeName` |
 | `bash mobile/scripts/test-native-playback-bridge-schema.sh` | the iOS bridge's request/result validators — one `clang++` call over the real `.mm` sources, no Xcode, no Pods, no simulator; run by the iOS native canary |
 | `bash zdsp/run-sanitizer-gates.sh` | the native gate, three presets (strict, asan/ubsan, tsan): the playback session and its two injected-failure runs, the bridge-contract test against `tests/shared/`, the graph and analysis suites, the realtime-source policies. What each preset runs is the `filter.include.name` regex in `CMakePresets.json` — a new `add_test` is NOT picked up until it is added there and to the build preset's `targets`, which is why `playback_cue_plan_tests` still runs only under the unfiltered Windows job |
 

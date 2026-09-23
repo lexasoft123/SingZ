@@ -24,6 +24,7 @@ scripts/build-onnx-pack.sh  # demucs-onnx splitter pack (win32-x64 | darwin-x64)
 cd mobile && npx jest                                  # phone-side Drive logic
 cd mobile/android && ./gradlew :app:testDebugUnitTest   # Kotlin cache-currency table
 mobile/scripts/test-swift-currency.sh                   # Swift cache-currency table
+mobile/scripts/test-swift-project-paths.sh              # Swift project name/path table
 bash mobile/scripts/test-native-playback-bridge-schema.sh  # iOS bridge validators (clang only, no Xcode)
 bash zdsp/run-sanitizer-gates.sh                        # the phase-4 native ctest gate (3 presets)
 ```

@@ -4,7 +4,9 @@
  * seed an audio file into the app container, run the headless add flow
  * (__test.addSongFrom — the same ../src/addflow.ts steps the sheet walks),
  * then prove the project lists, OPENS into the player with exactly its one
- * custom-original lane, and deletes again.
+ * custom-original lane, and deletes again — and that a title starting with a
+ * dot lists too, as does a song an older build already filed under the dots
+ * (both were hidden from the listing).
  *
  * CDP over Metro against the iOS Simulator, like the other tests here:
  *   SIM_UDID=… METRO_PORT=8082 node mobile/tests/add-song.cjs
@@ -22,7 +24,7 @@
 require('../../tests/shared/watchdog.cjs').arm('add-song', { totalMinutes: 120 })
 
 const { execFileSync } = require('node:child_process')
-const { copyFileSync } = require('node:fs')
+const { copyFileSync, existsSync, mkdirSync, renameSync, rmSync } = require('node:fs')
 const { join } = require('node:path')
 const WebSocket = require('ws')
 
@@ -166,6 +168,101 @@ async function main() {
 
   await conn.evaluate('globalThis.__test.back?.(); true')
   await sleep(1500)
+
+  // A title that starts with a dot. Its folder used to be named after it
+  // verbatim, and iOS listed the library with .skipsHiddenFiles: the add
+  // succeeded, the doc was written, and the song never appeared. The name
+  // rule and its rows live in tests/shared/project-name-cases.json; this is
+  // the check that asks the LISTING, which is where the song went missing.
+  const DOT_NAME = '...Baby One More Time.flac'
+  const dotSeed = join(container, 'Documents', DOT_NAME)
+  copyFileSync(join(__dirname, '..', 'assets', 'sample', 'stems', 'vocals.flac'), dotSeed)
+  await conn.evaluate(
+    `globalThis.__addResult = null; globalThis.__test.addSongFrom(${JSON.stringify(dotSeed)}, ${JSON.stringify(DOT_NAME)})` +
+      `.then(r => { globalThis.__addResult = r }).catch(e => { globalThis.__addResult = { error: String(e) } }); true`
+  )
+  const dotAdded = await pollGlobal(conn, '__addResult')
+  check('a leading-dot title adds', !dotAdded.error, JSON.stringify(dotAdded))
+  const dotDir = dotAdded.dir
+  check(
+    'its folder drops the leading dots',
+    typeof dotDir === 'string' && dotDir.startsWith('Baby One More Time'),
+    String(dotDir)
+  )
+  if (typeof dotDir === 'string') {
+    await sleep(1000)
+    const listed = JSON.parse(
+      (await conn.evaluate('JSON.stringify(globalThis.__test.projects)'))?.result?.value ?? '[]'
+    )
+    check('the leading-dot song is listed', listed.includes(dotDir), listed.join(','))
+
+    // Phones that met this still have songs an older build filed under the
+    // dots. This iPhone's listing shows hidden folders now, so they can be
+    // opened, moved or deleted: put this one back under its old name and ask.
+    const legacy = '...Baby One More Time'
+    const docs = join(container, 'Documents')
+    let asked = dotDir
+    if (dotDir !== legacy) {
+      rmSync(join(docs, legacy), { recursive: true, force: true })
+      renameSync(join(docs, dotDir), join(docs, legacy))
+      asked = legacy
+    }
+    // Files keeps Recently Deleted for this folder in Documents/.Trash, and a
+    // project.json the singer deleted on its own lands at its top. That is
+    // never a song: deleting it as one would empty Recently Deleted for good.
+    const trash = join(docs, '.Trash')
+    const trashDoc = join(trash, 'project.json')
+    const madeTrash = !existsSync(trash)
+    const plantedDoc = !existsSync(trashDoc)
+    let withLegacy = []
+    try {
+      if (plantedDoc) {
+        mkdirSync(trash, { recursive: true })
+        copyFileSync(join(docs, asked, 'project.json'), trashDoc)
+      }
+      await conn.evaluate(
+        "globalThis.__listed = null; globalThis.__test.refresh().then(() => { globalThis.__listed = 'ok' }); true"
+      )
+      await pollGlobal(conn, '__listed', 30000)
+      await sleep(1000)
+      withLegacy = JSON.parse(
+        (await conn.evaluate('JSON.stringify(globalThis.__test.projects)'))?.result?.value ?? '[]'
+      )
+    } finally {
+      // Recently Deleted back as it was, even when the listing threw: a doc
+      // left planted would pass for the singer's own on every later run
+      if (plantedDoc) rmSync(madeTrash ? trash : trashDoc, { recursive: true, force: true })
+    }
+    check('a song an older build filed under the dots is listed', withLegacy.includes(asked), withLegacy.join(','))
+    check("Files' Recently Deleted is not", !withLegacy.includes('.Trash'), withLegacy.join(','))
+    if (withLegacy.includes(asked)) {
+      await conn.evaluate(
+        `globalThis.__openDone = null; globalThis.__test.openProject(${JSON.stringify(asked)})` +
+          `.then(() => { globalThis.__openDone = 'ok' }).catch(e => { globalThis.__openDone = String(e) }); true`
+      )
+      const legacyOpened = await pollGlobal(conn, '__openDone', 60000)
+      await sleep(1200)
+      await conn.evaluate('globalThis.__test.engine.master.gain.value = 0; true')
+      const legacyLanes = JSON.parse(
+        (await conn.evaluate('JSON.stringify(globalThis.__test.lanes?.() ?? null)'))?.result?.value ??
+          'null'
+      )
+      check(
+        'and opens into the player',
+        legacyOpened === 'ok' && Array.isArray(legacyLanes) && legacyLanes.length === 1,
+        `${String(legacyOpened)} · ${JSON.stringify(legacyLanes)}`
+      )
+      await conn.evaluate('globalThis.__test.back?.(); true')
+      await sleep(1500)
+    }
+    // by the folder's name on disk, so a red run cleans up after itself too
+    await conn.evaluate(
+      `globalThis.__delDone = null; globalThis.__test.deletePhoneProject(${JSON.stringify(asked)})` +
+        `.then(() => { globalThis.__delDone = 'ok' }).catch(e => { globalThis.__delDone = String(e) }); true`
+    )
+    const dotDel = await pollGlobal(conn, '__delDone', 30000)
+    check('and deletes by that name', dotDel === 'ok' && !existsSync(join(docs, asked)), String(dotDel))
+  }
 
   // The sheet must reach the SCREEN. The headless flow above cannot say that:
   // when the sheet opened its own file picker, iOS refused to present the

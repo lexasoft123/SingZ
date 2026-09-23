@@ -117,6 +117,48 @@ describe('projects outside the library root stay put', () => {
   })
 })
 
+// The whole rule is tests/shared/project-name-cases.json; these are the doors
+// it guards, walked through for real.
+describe('a name that starts with a dot', () => {
+  it('saving a loose song gives it a folder Finder shows', async () => {
+    const root = await makeLibrary()
+    const song = join(await makeElsewhere(), '...Baby One More Time.mp3')
+    await writeFile(song, 'pretend-audio')
+
+    // source.ts names a loose song by its file name, extension off
+    const res = await saveProject(song, '...Baby One More Time', { transpose: 0, tracks: {} })
+    expect(res).toMatchObject({ ok: true, dir: join(root, 'Baby One More Time'), inLibrary: true })
+    expect(await readdir(root)).toEqual(['Baby One More Time'])
+    const meta = JSON.parse(await readFile(join(root, 'Baby One More Time', 'project.json'), 'utf8'))
+    expect(meta.name).toBe('Baby One More Time')
+  })
+
+  it('a song file called "...mp3" saves inside the library, not into the folder above it', async () => {
+    const parent = await makeElsewhere()
+    const root = join(parent, 'Library')
+    await mkdir(root)
+    writeSettings({ projectsRoot: root })
+    const song = join(await makeElsewhere(), '...mp3')
+    await writeFile(song, 'pretend-audio')
+
+    // what source.ts hands the renderer for that file: ".." — which, joined
+    // onto the library root, WAS the library's parent
+    const res = await saveProject(song, '..', { transpose: 0, tracks: {} })
+    expect(res).toMatchObject({ ok: true, dir: join(root, 'Untitled song'), inLibrary: true })
+    expect(await readdir(parent)).toEqual(['Library'])
+    expect(await readdir(root)).toEqual(['Untitled song'])
+  })
+
+  it('renaming to one keeps the folder visible', async () => {
+    const root = await makeLibrary()
+    const dir = await makeProject(root, 'Library Song')
+
+    const res = await renameProject(join(dir, 'song.mp3'), '.hack')
+    expect(res).toMatchObject({ ok: true, dir: join(root, 'hack') })
+    expect(await readdir(root)).toEqual(['hack'])
+  })
+})
+
 describe('deleteProject (the catalog ✕, with no undo behind it)', () => {
   it('erases a library project, folder and all', async () => {
     const root = await makeLibrary()
