@@ -17,6 +17,8 @@ export interface RemoteEntry {
   md5Checksum?: string
   size?: string
   parents?: string[]
+  /** App-private tags — phone publishing's state lives here. */
+  appProperties?: Record<string, string>
 }
 
 export interface LocalEntry {
@@ -162,4 +164,78 @@ export function isFresh(
   st: { size: number; mtimeMs: number }
 ): boolean {
   return !!prev && prev.size === st.size && Math.abs(prev.mtimeMs - st.mtimeMs) < MTIME_TOLERANCE_MS
+}
+
+/**
+ * Phone publishing (Phase 6, docs/PHONE-STANDALONE.md). A phone moves a song
+ * into the library by uploading it into a staging folder OUTSIDE the SingZ
+ * root, verifying every file, and only then moving the finished folder in —
+ * so the root never holds half a song. The folder carries two app-private
+ * tags (appProperties: one OAuth client serves every platform, so the
+ * phones' tags are the desktop's to read):
+ *
+ *   singzPublish  the phone's id for this move — how an interrupted move
+ *                 finds its own folder again, before and after adoption
+ *   singzState    'uploading' in staging, 'published' once in the root,
+ *                 'adopted' once a desktop has taken it into its library
+ *
+ * Only 'published' may be adopted, and only 'published' is spared by the
+ * reconcile. An 'adopted' folder with no local counterpart is a song the
+ * desktop deleted, and is trashed like any other — so deleting an adopted
+ * song on the computer can never bring it back from the phone's tag.
+ */
+export const PUBLISH_ID_KEY = 'singzPublish'
+export const PUBLISH_STATE_KEY = 'singzState'
+export const STATE_PUBLISHED = 'published'
+export const STATE_ADOPTED = 'adopted'
+
+/** What catalog.json advertises. Phones move songs only into a library whose
+ *  desktop says it adopts them: an older desktop would trash the folder as an
+ *  orphan on its next sync. The catalog stays format 2 — phones reject any
+ *  other number and would fall back to walking every folder. */
+export const CATALOG_CAPABILITIES = { adopt: 1 } as const
+
+export const isPublished = (f: { appProperties?: Record<string, string> }): boolean =>
+  f.appProperties?.[PUBLISH_STATE_KEY] === STATE_PUBLISHED
+
+/**
+ * The local folder name for an adopted song. The phone already cleaned it,
+ * but a Drive name is the phone's word, not a fact about this filesystem —
+ * and it must not collide, case-insensitively (APFS and NTFS both fold case),
+ * with a project here or another folder on Drive: the sync pairs local and
+ * remote folders BY NAME, so a collision would push the desktop's song into
+ * the phone's folder. A taken name gets " (phone)", then " (phone 2)"…
+ */
+export function adoptionName(remoteName: string, taken: Iterable<string>): string {
+  const base =
+    remoteName
+      .replace(/[\u0000-\u001f/\\:*?"<>|]/g, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim()
+      .replace(/^\.+/, '')
+      .trim() || 'Song from phone'
+  const used = new Set([...taken].map((n) => n.toLowerCase()))
+  if (!used.has(base.toLowerCase())) return base
+  for (let n = 1; ; n++) {
+    const candidate = n === 1 ? `${base} (phone)` : `${base} (phone ${n})`
+    if (!used.has(candidate.toLowerCase())) return candidate
+  }
+}
+
+/** A name a Drive listing may hand us that is safe as ONE path segment. */
+export const plainName = (name: string): boolean =>
+  !!name && name !== '.' && name !== '..' && !/[/\\\u0000]/.test(name)
+
+/** JSON with every object's keys sorted — for "is this the same content?"
+ *  about documents other writers produced. The stem hashes come back from a
+ *  directory walk in whatever order the filesystem lists them, so comparing
+ *  plain JSON.stringify output rewrote (and re-uploaded) any doc another
+ *  device had written, the first time this desktop synced it, for key order
+ *  alone. */
+export function stableJson(value: unknown): string {
+  return JSON.stringify(value, (_key, v: unknown) =>
+    v && typeof v === 'object' && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : v
+  )
 }

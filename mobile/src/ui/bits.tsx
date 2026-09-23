@@ -309,6 +309,41 @@ export function RedetectGlyph({ color }: { color: string }): React.JSX.Element {
   return <CircularArrowGlyph color={color} />
 }
 
+/** Move-to-Drive glyph — an arrow leaving a tray, drawn. */
+export function UploadGlyph({ color }: { color: string }): React.JSX.Element {
+  return (
+    <View style={{ width: 16, height: 16, alignItems: 'center' }}>
+      <View
+        style={{
+          position: 'absolute',
+          top: 2,
+          width: 7,
+          height: 7,
+          borderLeftWidth: 2,
+          borderTopWidth: 2,
+          borderColor: color,
+          transform: [{ rotate: '45deg' }]
+        }}
+      />
+      <View style={{ position: 'absolute', top: 2, width: 2, height: 9, borderRadius: 1, backgroundColor: color }} />
+      <View
+        style={{
+          position: 'absolute',
+          bottom: 0,
+          width: 14,
+          height: 5,
+          borderLeftWidth: 2,
+          borderRightWidth: 2,
+          borderBottomWidth: 2,
+          borderColor: color,
+          borderBottomLeftRadius: 2,
+          borderBottomRightRadius: 2
+        }}
+      />
+    </View>
+  )
+}
+
 /** Lyrics glyph — three text lines. */
 export function LyricsGlyph({ color }: { color: string }): React.JSX.Element {
   return (

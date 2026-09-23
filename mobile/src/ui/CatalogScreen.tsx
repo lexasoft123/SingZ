@@ -63,6 +63,7 @@ import {
   StemTile,
   STEM_TILE_COLORS,
   TrashGlyph,
+  UploadGlyph,
   white
 } from './bits'
 import { TEST } from './testhooks'
@@ -97,12 +98,14 @@ import { nativeMlGridAvailable } from '../analysis/native'
 import { planAnalysis } from '../analysis/pipeline'
 import {
   ANALYSIS_EVENT,
+  analysisPending,
   startAnalysis,
   subscribeAnalysis,
   type AnalysisDone,
   type AnalysisProgress
 } from '../analysis/run'
 import { SPLIT_STEMS } from '../split/adopt'
+import { abandonMove, MoveBlocked, MoveCancelled, moveSize, movesInProgress, moveToDrive } from '../publish'
 
 const BG = require('../../assets/bg/catalog.png')
 const GDRIVE_ICON = require('../../assets/gdrive.png')
@@ -267,6 +270,14 @@ export default function CatalogScreen({
     rows: []
   })
   const [error, setError] = useState<string | null>(null)
+  /** The song on its way to Google Drive, and what its card says meanwhile.
+   *  One at a time: each is tens of megabytes on the phone's uplink. */
+  const [moving, setMoving] = useState<{ dir: string; msg: string } | null>(null)
+  const movingRef = useRef<string | null>(null)
+  const moveStop = useRef(false)
+  /** Phone songs whose move started and did not finish (the app died, the
+   *  signal went): their cards say so, and the swipe finishes the job. */
+  const [unfinishedMoves, setUnfinishedMoves] = useState<Set<string>>(new Set())
   /** What the app was doing when it died last time, if it did.
    *
    *  Kept apart from `error` on purpose. That one slot was carrying six
@@ -1369,6 +1380,10 @@ export default function CatalogScreen({
         Alert.alert('Almost done splitting', 'This song is being finished — delete it in a moment.')
         return
       }
+      if (movingRef.current === p.dir) {
+        Alert.alert('Moving to Google Drive', 'Stop the move first — the ✕ on the song.')
+        return
+      }
       Alert.alert(
         'Delete this song?',
         `"${p.doc.name ?? p.dir}" and its files go away.`,
@@ -1404,6 +1419,9 @@ export default function CatalogScreen({
                       .then(() => setSplitUi(c => (c?.project === p.dir ? null : c)))
                   : Promise.resolve()
               void dropJob
+                // a half-finished move's upload goes with the song (never a
+                // song already in the Drive library — see abandonMove)
+                .then(() => abandonMove(p.dir).catch(() => {}))
                 .then(() => deleteProject(p.dir))
                 .then(() => refresh())
                 .catch(e => setError(String(e instanceof Error ? e.message : e)))
@@ -1415,6 +1433,125 @@ export default function CatalogScreen({
     },
     [refresh]
   )
+
+  /** Move one phone song into the Google Drive library (Phase 6 — publish.ts
+   *  holds the protocol). Resolves to the name it has there, or null when it
+   *  did not move; every outcome is told to the singer here. */
+  const runMove = useCallback(
+    async (p: ProjectEntry, announce = true): Promise<string | null> => {
+      const title = p.doc.name ?? p.dir
+      moveStop.current = false
+      movingRef.current = p.dir
+      // one line on the card: the percentage has to survive the ellipsis
+      setMoving({ dir: p.dir, msg: 'Moving to Drive…' })
+      try {
+        const res = await moveToDrive(p.dir, {
+          cancelled: () => moveStop.current,
+          onProgress: x =>
+            setMoving({
+              dir: p.dir,
+              msg:
+                x.stage === 'uploading'
+                  ? `Moving to Drive · ${Math.floor((x.done / Math.max(1, x.total)) * 100)}%`
+                  : x.stage === 'finishing'
+                  ? 'Moving to Drive · finishing'
+                  : 'Moving to Drive…'
+            })
+        })
+        log('library', `${p.dir} moved to Google Drive as "${res.name}" (${fmtBytes(res.bytes)})`)
+        if (announce) Alert.alert(
+          'Moved to Google Drive',
+          `"${title}" is in your Google Drive library now` +
+            (res.name !== p.dir ? `, as "${res.name}"` : '') +
+            ' — already downloaded, so it plays straight away. Your computer ' +
+            'adds it to its own library the next time it syncs.',
+          [
+            { text: 'OK', style: 'cancel' },
+            { text: 'Show me', onPress: () => selectMode('gdrive') }
+          ],
+          { cancelable: true }
+        )
+        return res.name
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (!announce) throw e // a driver reads the failure itself
+        if (e instanceof MoveCancelled) {
+          log('library', `${p.dir}: move to Google Drive stopped by the singer`)
+        } else if (e instanceof MoveBlocked && e.reason === 'signed-out') {
+          Alert.alert('Sign in to Google Drive first', msg, [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Open Drive', onPress: () => selectMode('gdrive') }
+          ])
+        } else if (e instanceof MoveBlocked) {
+          Alert.alert('This song cannot move yet', msg)
+        } else {
+          log('library', `${p.dir}: move to Google Drive stopped — ${msg}`, 'warn')
+          Alert.alert(
+            'The move stopped',
+            `${msg}\n\nThe song is still on this phone. Move it again to pick up where it stopped.`
+          )
+        }
+        return null
+      } finally {
+        movingRef.current = null
+        setMoving(null)
+        void refresh()
+      }
+    },
+    [refresh, selectMode]
+  )
+
+  /** The swipe's door into a move: refuse what cannot move now, then confirm
+   *  with the size, since this uses the singer's data and empties a folder. */
+  const confirmMove = useCallback(
+    (p: ProjectEntry, finishing: boolean) => {
+      const title = p.doc.name ?? p.dir
+      if (movingRef.current) {
+        Alert.alert('One song at a time', 'Another song is moving to Google Drive — this one can go next.')
+        return
+      }
+      if (splitUiRef.current?.project === p.dir) {
+        Alert.alert('Almost done splitting', 'This song is still being split — move it once that finishes.')
+        return
+      }
+      if (analysisPending(p.dir)) {
+        Alert.alert('Almost ready', 'This song is still being analysed — move it once that finishes.')
+        return
+      }
+      const here = Platform.OS === 'ios' ? 'this iPhone' : 'this phone'
+      // the listing's size counts the stems only; the song file goes too
+      void moveSize(p.dir)
+        .catch(() => p.bytes)
+        .then(bytes =>
+          Alert.alert(
+            finishing ? `Finish moving "${title}"?` : `Move "${title}" to Google Drive?`,
+            (finishing
+              ? 'It stopped part way — what already reached Drive is not sent again. '
+              : `It uploads ${fmtBytes(bytes)}. `) +
+              `Then it leaves ${here} and plays from your Google Drive library instead, ` +
+              'already downloaded. Your computer adds it to its own library the next time it syncs.',
+            /* cancel-first, like every confirm in this file (see confirmDelete) */
+            [
+              { text: 'Cancel', style: 'cancel' },
+              { text: finishing ? 'Finish' : 'Move', onPress: () => void runMove(p) }
+            ],
+            { cancelable: true }
+          )
+        )
+    },
+    [runMove]
+  )
+
+  useEffect(() => {
+    if (mode !== 'phone' || !active) return
+    let live = true
+    void movesInProgress()
+      .then(dirs => live && setUnfinishedMoves(new Set(dirs)))
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+  }, [mode, active, projects])
 
   useEffect(() => {
     /* The catalog stays mounted behind Player now. Its background job events
@@ -1487,6 +1624,16 @@ export default function CatalogScreen({
     TEST.beatModelsUi = beatModelsUi
     TEST.fetchBeatModels = () => void fetchBeatModels()
     TEST.dismissBeatModels = dismissBeatModels
+    // the swipe's own path (card progress, alerts), minus the confirm
+    TEST.moveToDrive = (dir: string) => {
+      const entry = (projects ?? []).find(p => p.dir === dir)
+      return entry ? runMove(entry, false) : Promise.reject(new Error(`no project ${dir}`))
+    }
+    TEST.stopMove = () => {
+      moveStop.current = true
+    }
+    TEST.moving = moving
+    TEST.unfinishedMoves = [...unfinishedMoves]
   })
 
   /** Open-row handles by card key: a row that starts LOADING is snapped
@@ -1497,6 +1644,9 @@ export default function CatalogScreen({
   useEffect(() => {
     if (loading?.dir != null) swipeRefs.current[loading.dir]?.close()
   }, [loading?.dir])
+  useEffect(() => {
+    if (moving?.dir != null) swipeRefs.current[moving.dir]?.close()
+  }, [moving?.dir])
 
   const card = (opts: {
     key: string
@@ -2019,6 +2169,8 @@ export default function CatalogScreen({
           {((): React.ReactNode => {
             const renderEntry = (p: ProjectEntry): React.JSX.Element => {
               const downloaded = isDownloaded(p, usage[p.dir])
+              // a Drive song can share the moving phone song's name
+              const movingHere = mode === 'phone' && moving?.dir === p.dir
               const added = addedTracks(p.doc?.settings).length
               const split = isSplit(p)
               const hue = Math.abs(p.dir.length * 7 + p.dir.charCodeAt(0)) % 3
@@ -2034,7 +2186,11 @@ export default function CatalogScreen({
                 keyLine: split ? keyTempoOf(p.doc) : null,
                 title: splitSongName(p.doc.name ?? p.dir).title,
                 artist: splitSongName(p.doc.name ?? p.dir).artist,
-                meta: (
+                meta: movingHere ? (
+                  <Text style={{ color: C.amber }}>{moving.msg}</Text>
+                ) : mode === 'phone' && unfinishedMoves.has(p.dir) ? (
+                  <Text style={{ color: C.amber }}>Move to Drive unfinished</Text>
+                ) : (
                   <>
                     {Object.keys(p.stems).length > 0
                       ? `${Object.keys(p.stems).length} stems`
@@ -2051,7 +2207,21 @@ export default function CatalogScreen({
                     ) : null}
                   </>
                 ),
-                right: (
+                right: movingHere ? (
+                  <Pressable
+                    hitSlop={10}
+                    onPress={() => {
+                      // checked between files: the one on the wire finishes
+                      moveStop.current = true
+                      setMoving(m => (m ? { ...m, msg: 'Stopping after this file…' } : m))
+                    }}
+                    style={s.cancelBtn}
+                    accessibilityRole="button"
+                    accessibilityLabel="Stop moving this song to Google Drive"
+                  >
+                    <Text style={{ color: white(0.75), fontSize: 13, fontWeight: '700' }}>✕</Text>
+                  </Pressable>
+                ) : (
                   <Text
                     style={[s.status, downloaded && s.statusHave]}
                     /* A bare glyph carrying the one fact the singer most needs
@@ -2105,7 +2275,9 @@ export default function CatalogScreen({
                       <Text style={s.splitChipText}>Split</Text>
                     </Pressable>
                   ) : null,
-                onPress: () => void openEntry(p),
+                // mid-move the song is on its way out of this list: opening it
+                // would start writers (analysis) under the upload
+                onPress: () => (movingHere ? undefined : void openEntry(p)),
                 /* Nothing to offer, nothing offered. A Drive or folder song with
                  nothing downloaded used to take a long-press and return at
                  `if (have <= 0) return` — a gesture with no feedback and no
@@ -2118,6 +2290,7 @@ export default function CatalogScreen({
                 swipeActions: ((): CardSwipeAction[] | null => {
                   const title = p.doc.name ?? p.dir
                   const acts: CardSwipeAction[] = []
+                  if (movingHere) return null // its ✕ is the one action now
                   if (mode === 'phone') {
                     if (split) {
                       acts.push({
@@ -2133,6 +2306,19 @@ export default function CatalogScreen({
                         label: `Find lyrics for ${title}`,
                         icon: <LyricsGlyph color={white(0.85)} />,
                         onPress: () => void findLyricsFor(p)
+                      })
+                    }
+                    /* Moving it to Drive sits next to the trash: it too takes the
+                       song off this phone, just not out of the singer's life. */
+                    if (split && driveAvailable()) {
+                      const finishing = unfinishedMoves.has(p.dir)
+                      acts.push({
+                        key: 'drive',
+                        label: finishing
+                          ? `Finish moving ${title} to Google Drive`
+                          : `Move ${title} to Google Drive`,
+                        icon: <UploadGlyph color={white(0.85)} />,
+                        onPress: () => confirmMove(p, finishing)
                       })
                     }
                     acts.push({

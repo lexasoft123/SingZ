@@ -110,6 +110,7 @@ export const driveSignOut = async (): Promise<void> => {
   await restoreOnce().catch(() => {})
   listCache = null
   catalogMd5 = ''
+  catalogDirs = []
   projectFiles.clear()
   await Prefs.setTextPref(CATALOG_KEY, '')
   // downloaded stems stay: signing back into the same account should not
@@ -388,11 +389,17 @@ interface StoredCatalog {
   files: Record<string, { byName: Record<string, DriveFile>; stemsByName: Record<string, DriveFile> }>
   /** md5 of the catalog.json these entries were built from — see level one. */
   md5?: string
+  /** The project folders that catalog named — see level one. */
+  dirs?: string[]
 }
 
 /** What the last adopted listing was built from, so an unchanged catalog.json
  *  is never downloaded again (the root listing already reports its md5). */
 let catalogMd5 = ''
+/** The folders the trusted catalog named. An unchanged catalog.json no longer
+ *  means an unchanged library: a phone that moves a song in adds a folder
+ *  without touching the catalog (only a desktop writes it). */
+let catalogDirs: string[] = []
 
 /** The one disk read of the stored catalog — shared by every caller. */
 let restore: Promise<void> | null = null
@@ -417,6 +424,7 @@ const restoreOnce = (): Promise<void> =>
       }
       listCache = { at: 0, entries: doc.entries }
       catalogMd5 = doc.md5 ?? ''
+      catalogDirs = doc.dirs ?? []
     } catch {
       // unreadable catalog — the network listing remains the only source
     }
@@ -451,7 +459,7 @@ async function persistCatalog(entries: ProjectEntry[]): Promise<void> {
     }
   }
   try {
-    await writeJson(CATALOG_KEY, { entries, files, md5: catalogMd5 } satisfies StoredCatalog)
+    await writeJson(CATALOG_KEY, { entries, files, md5: catalogMd5, dirs: catalogDirs } satisfies StoredCatalog)
   } catch {
     // a catalog we cannot persist is not worth failing a refresh over
   }
@@ -574,7 +582,12 @@ async function manifestEntries(
   // already reported this file's md5, so an unchanged catalog means an
   // unchanged library — nothing to download, nothing to compare per project.
   // A quiet refresh is then two requests however big the library.
-  if (file.md5Checksum && file.md5Checksum === catalogMd5 && listCache?.entries.length) {
+  // Level one is only as good as the folders it covered: a phone moving a
+  // song in adds a folder and leaves catalog.json alone, and the new song
+  // stayed invisible here until some desktop synced.
+  const sameFolders =
+    dirs.length === catalogDirs.length && dirs.every((d) => catalogDirs.includes(d.name))
+  if (file.md5Checksum && file.md5Checksum === catalogMd5 && listCache?.entries.length && sameFolders) {
     log('gdrive', `unchanged — ${listCache.entries.length} songs, nothing fetched`)
     return listCache.entries
   }
@@ -644,6 +657,7 @@ async function manifestEntries(
     for (const entry of batch) if (entry) out.push(entry)
   }
   catalogMd5 = file.md5Checksum ?? ''
+  catalogDirs = m.projects.map((p) => p.dir)
   log(
     'gdrive',
     `refreshed — ${out.length} songs, ${changed.length} re-read (${changed.map((c) => c.dir).join(', ') || 'none'})`
@@ -663,6 +677,7 @@ export async function driveListProjects(force = false): Promise<ProjectEntry[]> 
   // Walked, so no catalog stands behind these entries — the next refresh must
   // read whatever catalog.json is there rather than trusting its md5.
   catalogMd5 = ''
+  catalogDirs = []
   log('gdrive', `walked ${dirs.length} folders (no usable catalog.json)`)
 
   // No manifest (older desktop, or one the folder listing disowned): walk.
@@ -889,6 +904,151 @@ function utf8Bytes(value: string): number {
   }
   return bytes
 }
+
+// ---------------------------------------------------------------------------
+// Writing to Drive — the phone's half of moving a song into the library
+// (Phase 6). The flow and its reasons live in publish.ts; the tags are the
+// same strings the desktop reads in src/main/sync-plan.ts, and the roundtrip
+// suite runs both halves against one fake Drive so they cannot drift apart.
+
+export const PUBLISH_ID_KEY = 'singzPublish'
+export const PUBLISH_STATE_KEY = 'singzState'
+export const STATE_UPLOADING = 'uploading'
+export const STATE_PUBLISHED = 'published'
+export const STATE_ADOPTED = 'adopted'
+/** Where a move is assembled: OUTSIDE the SingZ root, so the library never
+ *  holds half a song — no desktop adopts it and no phone lists it. */
+export const STAGING_FOLDER = 'SingZ uploads'
+
+export interface DriveNode {
+  id: string
+  name: string
+  mimeType: string
+  size?: string
+  md5Checksum?: string
+  appProperties?: Record<string, string>
+}
+
+export const DRIVE_FOLDER = FOLDER
+
+async function send<T>(path: string, method: 'POST' | 'PATCH', body: unknown): Promise<T> {
+  const token = await accessToken()
+  const res = await fetch(`${API()}${path}`, {
+    method,
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  })
+  if (!res.ok) throw await driveError(res, path.split('?')[0])
+  return (await res.json()) as T
+}
+
+/** A folder's children, tags included. */
+export async function driveChildren(parentId: string): Promise<DriveNode[]> {
+  const out: DriveNode[] = []
+  let pageToken = ''
+  do {
+    const page = await api<{ files: DriveNode[]; nextPageToken?: string }>(
+      `/drive/v3/files?q=${q(`'${parentId}' in parents and trashed=false`)}` +
+        '&fields=nextPageToken,files(id,name,mimeType,size,md5Checksum,appProperties)&pageSize=1000' +
+        (pageToken ? `&pageToken=${pageToken}` : '')
+    )
+    out.push(...page.files)
+    pageToken = page.nextPageToken ?? ''
+  } while (pageToken)
+  return out
+}
+
+/** A folder this app made, by exact name (drive.file sees nothing else). */
+export async function driveFolderNamed(name: string): Promise<DriveNode | null> {
+  const res = await api<{ files: DriveNode[] }>(
+    `/drive/v3/files?q=${q(`name='${name}' and mimeType='${FOLDER}' and trashed=false`)}` +
+      '&fields=files(id,name,mimeType,appProperties)&pageSize=10'
+  )
+  return res.files[0] ?? null
+}
+
+export const driveCreateFolder = (
+  name: string,
+  parentId: string | null,
+  appProperties?: Record<string, string>
+): Promise<DriveNode> =>
+  send<DriveNode>('/drive/v3/files?fields=id,name,mimeType,appProperties', 'POST', {
+    name,
+    mimeType: FOLDER,
+    ...(parentId ? { parents: [parentId] } : {}),
+    ...(appProperties ? { appProperties } : {})
+  })
+
+/** One file's metadata — what Drive says it now holds, md5 included. */
+export const driveMeta = (id: string): Promise<DriveNode> =>
+  api<DriveNode>(`/drive/v3/files/${id}?fields=id,name,mimeType,size,md5Checksum,appProperties`)
+
+/** Rename, retag, and (with `move`) change folders — one request, so a move
+ *  into the library and the tag that says it is complete land together. */
+export const drivePatch = (
+  id: string,
+  body: { name?: string; appProperties?: Record<string, string | null>; trashed?: boolean },
+  move?: { add: string; remove: string }
+): Promise<DriveNode> =>
+  send<DriveNode>(
+    `/drive/v3/files/${id}?fields=id,name,mimeType,appProperties` +
+      (move ? `&addParents=${encodeURIComponent(move.add)}&removeParents=${encodeURIComponent(move.remove)}` : ''),
+    'PATCH',
+    body
+  )
+
+/** Open a resumable upload; the native then streams the file to the URL it
+ *  returns (a stem is far too big to cross the JS bridge). */
+export async function driveUploadSession(name: string, parentId: string, existingId?: string): Promise<string> {
+  const token = await accessToken()
+  const base = `${cfg?.uploadBase || API()}/upload/drive/v3/files`
+  const res = await fetch(existingId ? `${base}/${existingId}?uploadType=resumable` : `${base}?uploadType=resumable`, {
+    method: existingId ? 'PATCH' : 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(existingId ? {} : { name, parents: [parentId] })
+  })
+  if (!res.ok) throw await driveError(res, 'upload')
+  const session = res.headers.get('location')
+  if (!session) throw new Error(`Drive gave no upload session for ${name}`)
+  return session
+}
+
+/** The SingZ root — created when this Drive has none yet (a library that no
+ *  desktop has synced: the phone is the first to put a song there). */
+export async function driveEnsureRoot(): Promise<string> {
+  return (await driveFolderNamed('SingZ'))?.id ?? (await driveCreateFolder('SingZ', null)).id
+}
+
+/**
+ * May a phone move a song into this library? Only if no desktop syncs it, or
+ * the one that does says it adopts phone songs: an older desktop's reconcile
+ * trashes any folder it did not make, and by then the phone has let go of its
+ * own copy. No catalog is only safe when every folder there is a phone's own
+ * (a library no desktop has synced yet): a desktop too old to write a catalog,
+ * or one whose first sync died before writing it, leaves its own folders.
+ */
+export async function driveAdoptionReady(rootKids: DriveNode[]): Promise<boolean> {
+  const cat = rootKids.find((f) => f.name === 'catalog.json' && f.mimeType !== FOLDER)
+  if (!cat) {
+    return rootKids.every((f) => f.mimeType !== FOLDER || f.appProperties?.[PUBLISH_ID_KEY] !== undefined)
+  }
+  const token = await accessToken()
+  const res = await fetch(`${API()}/drive/v3/files/${cat.id}?alt=media`, {
+    headers: { Authorization: `Bearer ${token}` }
+  })
+  if (!res.ok) throw await driveError(res, 'catalog.json')
+  try {
+    const m = (await res.json()) as { capabilities?: { adopt?: unknown } }
+    return typeof m?.capabilities?.adopt === 'number' && m.capabilities.adopt >= 1
+  } catch {
+    return false // a catalog we cannot read says nothing about adoption
+  }
+}
+
+/** Seed the offline copy of a small file the phone itself just put on Drive,
+ *  so the moved song opens with no signal at its new address. */
+export const driveKeepText = (project: string, file: string, text: string): Promise<void> =>
+  keepText(`${project}/${file}`, text, md5Text(text))
 
 // The catalog restore starts at import: a cold start reads and parses the
 // stored listing while the bundle is still booting, not inside the first

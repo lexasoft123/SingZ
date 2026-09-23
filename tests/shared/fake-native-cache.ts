@@ -275,3 +275,77 @@ export function fakeNativeWriter(docsRoot: string): FakeNativeWriter {
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+
+export interface FakeNativeMover {
+  uploadFile(
+    project: string,
+    relPath: string,
+    url: string,
+    contentType: string
+  ): Promise<{ status: number; body: string }>
+  moveProjectToCache(project: string, cacheProject: string): Promise<boolean>
+  /** Every upload attempted, "project/relPath" — what a resume re-sent. */
+  uploads: string[]
+  /** Die after moving this many stems (a kill mid-way through the phone's
+   *  half); cleared once it fires. */
+  failMoveAfter?: number
+}
+
+/**
+ * The reference for moving a song to Drive (Phase 6): what the Kotlin and
+ * Swift uploadFile/moveProjectToCache do. The upload streams a file from the
+ * phone library to a URL — here through whatever fetch is installed, i.e. the
+ * fake Drive. The move hands stems to the Drive cache file by file, nothing
+ * cleared first so a retry cannot delete what an earlier attempt moved, and
+ * then deletes the phone folder.
+ */
+export function fakeNativeMover(docsRoot: string, cacheRoot: string): FakeNativeMover {
+  const uploads: string[] = []
+  const plainChild = (root: string, name: string): string | null =>
+    !name || name.includes('/') || name === '..' || name === '.' ? null : join(root, name)
+  const relOk = (file: string): boolean =>
+    !!file && !file.startsWith('/') && file.split('/').every((p) => p && p !== '.' && p !== '..')
+
+  const api: FakeNativeMover = {
+    uploads,
+
+    async uploadFile(project, relPath, url, contentType) {
+      const dir = plainChild(docsRoot, project)
+      if (!dir || !relOk(relPath)) throw new Error('Bad project, file or upload address')
+      const path = join(dir, relPath)
+      if (!existsSync(path)) throw new Error(`${relPath} is missing`)
+      uploads.push(`${project}/${relPath}`)
+      const res = await fetch(url, {
+        method: 'PUT',
+        headers: { 'Content-Type': contentType },
+        body: new Uint8Array(readFileSync(path))
+      })
+      return { status: res.status, body: await res.text() }
+    },
+
+    async moveProjectToCache(project, cacheProject) {
+      const dir = plainChild(docsRoot, project)
+      const dest = plainChild(cacheRoot, cacheProject)
+      if (!dir || !dest) throw new Error('Bad project or Drive song name')
+      mkdirSync(join(dest, 'stems'), { recursive: true })
+      const stems = join(dir, 'stems')
+      let moved = 0
+      for (const name of existsSync(stems) ? readdirSync(stems) : []) {
+        if (name.endsWith('.part')) continue
+        if (api.failMoveAfter !== undefined && moved >= api.failMoveAfter) {
+          api.failMoveAfter = undefined
+          throw new Error('killed mid-move')
+        }
+        const out = join(dest, 'stems', name)
+        rmSync(out, { force: true })
+        renameSync(join(stems, name), out)
+        moved++
+      }
+      rmSync(dir, { recursive: true, force: true })
+      return true
+    }
+  }
+  return api
+}

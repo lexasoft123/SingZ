@@ -75,6 +75,18 @@ RCT_EXTERN_METHOD(deleteProject : (NSString *)project
                   resolver : (RCTPromiseResolveBlock)resolve
                   rejecter : (RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(uploadFile : (NSString *)project
+                  relPath : (NSString *)relPath
+                  url : (NSString *)url
+                  contentType : (NSString *)contentType
+                  resolver : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(moveProjectToCache : (NSString *)project
+                  cacheProject : (NSString *)cacheProject
+                  resolver : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(readMediaTags : (NSString *)path
                   resolver : (RCTPromiseResolveBlock)resolve
                   rejecter : (RCTPromiseRejectBlock)reject)

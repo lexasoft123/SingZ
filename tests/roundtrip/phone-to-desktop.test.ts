@@ -4,8 +4,8 @@
  * it. Nothing hand-built — the folder is whatever mobile/src/writer.ts
  * actually produced over the reference native, and the desktop side is
  * detectProject itself, so a drift on either side fails here rather than
- * after an adoption on a real machine (Phase 6 grows this into the full
- * publish → adopt loop).
+ * after an adoption on a real machine. The full move → adopt loop (Phase 6)
+ * is tests/roundtrip/phone-publish.test.ts.
  */
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'

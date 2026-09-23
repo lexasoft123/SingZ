@@ -1,8 +1,11 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
-import { readdirSync } from 'node:fs'
-import { readFile, stat } from 'node:fs/promises'
+import { createWriteStream, readdirSync } from 'node:fs'
+import { mkdir, readFile, rename, rm, stat, unlink, utimes, writeFile } from 'node:fs/promises'
 import { extname, join, sep } from 'node:path'
+import { Readable, Transform } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
+import type { ReadableStream as WebReadableStream } from 'node:stream/web'
 import { shell } from 'electron'
 import gdriveConfig from './gdrive-config'
 import { log } from './log'
@@ -14,9 +17,17 @@ import {
   type StemHash
 } from './projects'
 import {
+  adoptionName,
+  CATALOG_CAPABILITIES,
   chunkParents,
+  isPublished,
   parentsQuery,
+  plainName,
   planProject,
+  PUBLISH_ID_KEY,
+  PUBLISH_STATE_KEY,
+  STATE_ADOPTED,
+  stableJson,
   type LocalEntry,
   type ProjectPlan
 } from './sync-plan'
@@ -206,6 +217,8 @@ interface RemoteFile {
   /** Only when the projection asks for it — what makes a batched listing
    *  groupable back to the folder each file came from. */
   parents?: string[]
+  /** App-private tags; phone publishing's state (sync-plan.ts). */
+  appProperties?: Record<string, string>
 }
 
 const FOLDER = 'application/vnd.google-apps.folder'
@@ -230,7 +243,7 @@ async function listChildren(parentId: string): Promise<RemoteFile[]> {
   do {
     const page = await api<{ files: RemoteFile[]; nextPageToken?: string }>(
       `/drive/v3/files?q=${encodeURIComponent(`'${parentId}' in parents and trashed=false`)}` +
-        '&fields=nextPageToken,files(id,name,mimeType,md5Checksum)&pageSize=1000' +
+        '&fields=nextPageToken,files(id,name,mimeType,md5Checksum,size,appProperties)&pageSize=1000' +
         (pageToken ? `&pageToken=${pageToken}` : '')
     )
     out.push(...page.files)
@@ -275,9 +288,12 @@ async function ensureFolder(name: string, parentId: string | null): Promise<stri
     ? `name='${qStr(name)}' and mimeType='${FOLDER}' and '${parentId}' in parents and trashed=false`
     : `name='${qStr(name)}' and mimeType='${FOLDER}' and trashed=false`
   const found = await api<{ files: RemoteFile[] }>(
-    `/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id)&pageSize=5`
+    `/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,appProperties)&pageSize=5`
   )
-  if (found.files[0]) return found.files[0].id
+  // A phone's song waiting to be taken in is never ours to sync into: the
+  // sync would trash its stems as orphans of whatever project we push.
+  const usable = found.files.find((f) => !isPublished(f))
+  if (usable) return usable.id
   const created = await api<{ id: string }>('/drive/v3/files?fields=id', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -326,6 +342,239 @@ const uploadFile = async (
   existingId: string | undefined,
   mime: string
 ): Promise<string> => uploadBytes(await readFile(localPath), name, parentId, existingId, mime)
+
+// ---------------------------------------------------------------------------
+// Phone publishing, the desktop half (Phase 6 — the protocol is described in
+// sync-plan.ts beside its constants).
+
+/** Written into an adopted song's folder between the download and the Drive
+ *  tag. A run killed in that window finds it and finishes the tag instead of
+ *  taking the song in twice. Never synced: only project.json, lyrics.json,
+ *  graph.json and stems/ ever reach Drive. */
+const ADOPT_MARKER = '.singz-adopt.json'
+/** Where an adoption downloads. No project.json appears in it until the very
+ *  end, so neither the sync nor the library can mistake it for a song. */
+const ADOPTING_PREFIX = '.singz-adopting-'
+
+/** Not a failure of the run — this one song is not ready to be taken in (half
+ *  arrived, or its doc disagrees with its files). It stays on Drive, spared by
+ *  the reconcile, and is tried again on the next sync. */
+class AdoptRefused extends Error {}
+
+/** Errors this disk raises about itself. Anything else — a socket reset
+ *  mid-download included — is the run's problem, not the song's. */
+const LOCAL_FS_ERRORS = new Set(['EPERM', 'EACCES', 'EBUSY', 'EEXIST', 'ENOTEMPTY', 'ENOSPC', 'EROFS', 'EXDEV', 'EMFILE'])
+
+/** Stream one Drive file to disk, checking what arrived against the listing. */
+async function downloadTo(file: RemoteFile, out: string): Promise<{ md5: string; size: number }> {
+  const token = await accessToken()
+  const res = await fetch(`${API()}/drive/v3/files/${file.id}?alt=media`, {
+    headers: { Authorization: `Bearer ${token}` }
+  })
+  if (!res.ok || !res.body) throw new Error(`Drive API ${res.status} downloading ${file.name}`)
+  const hash = createHash('md5')
+  let size = 0
+  await pipeline(
+    Readable.fromWeb(res.body as unknown as WebReadableStream<Uint8Array>),
+    new Transform({
+      transform(chunk: Buffer, _encoding, done) {
+        hash.update(chunk)
+        size += chunk.length
+        done(null, chunk)
+      }
+    }),
+    createWriteStream(out)
+  )
+  const md5 = hash.digest('hex')
+  if ((file.md5Checksum && md5 !== file.md5Checksum) || (file.size !== undefined && Number(file.size) !== size)) {
+    throw new AdoptRefused(`${file.name} arrived damaged`)
+  }
+  return { md5, size }
+}
+
+type Arrived = Map<string, { md5: string; size: number }>
+
+/** The desktop lists a project only if its song file is there, and a doc
+ *  naming bytes that did not arrive would be a song that cannot open. */
+function checkAdoptable(doc: SyncDoc & { songFile?: unknown }, got: Arrived): void {
+  if (!doc || typeof doc !== 'object') throw new AdoptRefused('its project.json is not a project')
+  const song = doc.songFile
+  if (typeof song !== 'string' || !plainName(song) || !got.has(song)) {
+    throw new AdoptRefused('its song file did not come with it')
+  }
+  const same = (rel: string, h: { md5: string; size: number } | undefined): boolean => {
+    const f = got.get(rel)
+    return !!f && !!h && f.md5 === h.md5 && f.size === h.size
+  }
+  for (const [name, h] of Object.entries(doc.stemHashes ?? {})) {
+    if (!same(`stems/${name}`, h)) throw new AdoptRefused(`stems/${name} does not match its project.json`)
+  }
+  if (doc.lyricsHash && !same('lyrics.json', doc.lyricsHash)) {
+    throw new AdoptRefused('lyrics.json does not match its project.json')
+  }
+  if (doc.graphHash && !same('graph.json', doc.graphHash)) {
+    throw new AdoptRefused('graph.json does not match its project.json')
+  }
+}
+
+/** Give each file the mtime its hash was recorded against. The doc's hashes
+ *  are then fresh on THIS disk, so the sync after adoption neither re-reads
+ *  every stem nor rewrites (and re-uploads) the doc it just downloaded. */
+async function stampMtimes(dir: string, doc: SyncDoc, got: Arrived): Promise<void> {
+  const stamp = async (rel: string, h: { md5: string; size: number; mtimeMs?: number } | undefined): Promise<void> => {
+    const f = got.get(rel)
+    if (!h || !f || f.md5 !== h.md5 || !Number.isFinite(h.mtimeMs) || (h.mtimeMs as number) <= 0) return
+    const when = (h.mtimeMs as number) / 1000
+    await utimes(join(dir, rel), when, when).catch(() => {})
+  }
+  for (const [name, h] of Object.entries(doc.stemHashes ?? {})) await stamp(`stems/${name}`, h)
+  await stamp('lyrics.json', doc.lyricsHash)
+  await stamp('graph.json', doc.graphHash)
+}
+
+/** Tag the folder as taken in; the marker that proved the download finished
+ *  can then go. */
+async function finishAdoption(f: RemoteFile, root: string, dir: string): Promise<void> {
+  await api(`/drive/v3/files/${f.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      ...(f.name !== dir ? { name: dir } : {}),
+      appProperties: { [PUBLISH_STATE_KEY]: STATE_ADOPTED }
+    })
+  })
+  f.name = dir
+  f.appProperties = { ...(f.appProperties ?? {}), [PUBLISH_STATE_KEY]: STATE_ADOPTED }
+  await unlink(join(root, dir, ADOPT_MARKER)).catch(() => {})
+}
+
+/**
+ * Take in every song a phone moved into the SingZ root: download it into the
+ * library, verified file by file, then tag the folder adopted. From then on
+ * the sync pairs it with the new local folder by name like any other project,
+ * and since every byte already matches, pushing it back costs nothing.
+ *
+ * Runs before the library is scanned, so an adopted song syncs, catalogs and
+ * survives the reconcile in the same run. `remoteTop` is updated in place
+ * (names and tags) for everything after it.
+ */
+async function adoptPublished(
+  root: string,
+  remoteTop: RemoteFile[],
+  localDirs: string[],
+  onProgress?: (msg: string, frac: number) => void
+): Promise<string[]> {
+  const adopted: string[] = []
+
+  // Half-finished first: the download landed and was renamed into place, the
+  // Drive tag did not. Finish the tag only — adopting again would make a copy.
+  const marked = new Map<string, string>()
+  for (const dir of localDirs) {
+    try {
+      const m = JSON.parse(await readFile(join(root, dir, ADOPT_MARKER), 'utf8')) as { folderId?: unknown }
+      if (typeof m.folderId === 'string') marked.set(m.folderId, dir)
+    } catch {
+      /* no marker — the common case */
+    }
+  }
+  for (const [folderId, dir] of marked) {
+    const f = remoteTop.find((r) => r.id === folderId && r.mimeType === FOLDER)
+    if (f && isPublished(f)) {
+      await finishAdoption(f, root, dir)
+      syncLog('adopt', `${dir}: finished taking it in from the phone`)
+    } else {
+      await unlink(join(root, dir, ADOPT_MARKER)).catch(() => {})
+    }
+  }
+
+  for (const f of remoteTop) {
+    if (f.mimeType !== FOLDER || !isPublished(f)) continue
+    const from = f.name
+    // A name this library or another Drive folder already uses is changed on
+    // Drive FIRST, before anything can fail: the sync pairs folders by name,
+    // and a desktop song of the same name would otherwise be pushed into the
+    // phone's folder, its stems trashed as orphans. The phone finds its
+    // folder by its id, never by name, so renaming it costs the phone nothing.
+    const taken = [
+      ...readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name),
+      ...remoteTop.filter((r) => r.mimeType === FOLDER && r.id !== f.id).map((r) => r.name)
+    ]
+    const dir = adoptionName(f.name, taken)
+    if (dir !== f.name) {
+      await api(`/drive/v3/files/${f.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: dir })
+      })
+      f.name = dir
+    }
+    onProgress?.(`Adding ${dir} from your phone…`, 0.02)
+    const tmp = join(root, `${ADOPTING_PREFIX}${f.id}`)
+    await rm(tmp, { recursive: true, force: true })
+    try {
+      const kids = await listChildren(f.id)
+      const docFile = kids.find((k) => k.name === 'project.json' && k.mimeType !== FOLDER)
+      if (!docFile) throw new AdoptRefused('it has no project.json')
+      const stemsDir = kids.find((k) => k.name === 'stems' && k.mimeType === FOLDER)
+      const stemKids = stemsDir ? (await listChildren(stemsDir.id)).filter((k) => k.mimeType !== FOLDER) : []
+      await mkdir(join(tmp, 'stems'), { recursive: true })
+      // The doc first — under another name until the folder is complete — and
+      // held against Drive's own listing before any stem is fetched: a folder
+      // whose doc and files disagree is refused for one small download rather
+      // than the whole song, and it is asked again on every sync.
+      await downloadTo(docFile, join(tmp, 'project.json.part'))
+      let doc: SyncDoc & { songFile?: unknown }
+      try {
+        doc = JSON.parse(await readFile(join(tmp, 'project.json.part'), 'utf8'))
+      } catch {
+        throw new AdoptRefused('its project.json is unreadable')
+      }
+      const listed: Arrived = new Map()
+      for (const k of kids) {
+        if (k.mimeType === FOLDER || k === docFile || !plainName(k.name)) continue
+        listed.set(k.name, { md5: k.md5Checksum ?? '', size: Number(k.size ?? -1) })
+      }
+      for (const k of stemKids) {
+        if (plainName(k.name)) listed.set(`stems/${k.name}`, { md5: k.md5Checksum ?? '', size: Number(k.size ?? -1) })
+      }
+      checkAdoptable(doc, listed)
+      const got: Arrived = new Map()
+      for (const k of kids) {
+        if (k.mimeType === FOLDER || k === docFile || !plainName(k.name)) continue
+        got.set(k.name, await downloadTo(k, join(tmp, k.name)))
+      }
+      for (const k of stemKids) {
+        if (plainName(k.name)) got.set(`stems/${k.name}`, await downloadTo(k, join(tmp, 'stems', k.name)))
+      }
+      // …and against the bytes that actually arrived
+      checkAdoptable(doc, got)
+      await stampMtimes(tmp, doc, got)
+      await writeFile(
+        join(tmp, ADOPT_MARKER),
+        JSON.stringify({ folderId: f.id, publishId: f.appProperties?.[PUBLISH_ID_KEY] ?? '', from })
+      )
+      await rename(join(tmp, 'project.json.part'), join(tmp, 'project.json'))
+      if (readdirSync(root).includes(dir)) throw new AdoptRefused(`a folder named ${dir} appeared here meanwhile`)
+      await rename(tmp, join(root, dir))
+    } catch (err) {
+      await rm(tmp, { recursive: true, force: true }).catch(() => {})
+      // One song's own trouble — refused, or this disk saying no (a folder a
+      // scanner holds at the rename, a full disk) — must not stop the rest of
+      // the library syncing: it stays on Drive, spared, for the next run. A
+      // network or auth failure still ends the run, so the scheduler backs off.
+      const code = (err as NodeJS.ErrnoException)?.code
+      const diskSaidNo = typeof code === 'string' && LOCAL_FS_ERRORS.has(code)
+      if (!(err instanceof AdoptRefused) && !diskSaidNo) throw err
+      const why = diskSaidNo ? `this computer could not write it (${code})` : (err as Error).message
+      syncLog('error', `${dir}: not taken in from the phone yet — ${why}; left on Drive for the next sync`)
+      continue
+    }
+    await finishAdoption(f, root, dir)
+    adopted.push(dir)
+    syncLog('adopt', `${dir}: taken in from the phone${dir !== from ? ` (it was "${from}" on Drive)` : ''}`)
+  }
+  return adopted
+}
 
 /**
  * catalog.json at the SingZ root: the whole library — docs, per-file sizes,
@@ -419,6 +668,8 @@ export interface SyncReport {
   /** Dirty projects outside the library root — this walks only the root, so
    *  they were never pushed and must not be marked clean. */
   outsideLibrary?: string[]
+  /** Songs taken in from a phone this run, by their folder name here. */
+  adopted?: string[]
 }
 
 let syncing = false
@@ -443,21 +694,43 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
     const root = opts.root ?? projectsRoot()
     // sorted so the manifest is byte-stable — readdir order is not, and a
     // reshuffled manifest would defeat its own md5 skip
-    const dirs = readdirSync(root, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => d.name)
-      .sort()
-    const projectDirs: string[] = []
-    for (const dir of dirs) {
-      try {
-        await stat(join(root, dir, 'project.json'))
-        projectDirs.push(dir)
-      } catch {
-        /* not a project */
+    const scanLibrary = async (): Promise<string[]> => {
+      const dirs = readdirSync(root, { withFileTypes: true })
+        .filter((d) => d.isDirectory() && !d.name.startsWith(ADOPTING_PREFIX))
+        .map((d) => d.name)
+        .sort()
+      const out: string[] = []
+      for (const dir of dirs) {
+        try {
+          await stat(join(root, dir, 'project.json'))
+          out.push(dir)
+        } catch {
+          /* not a project */
+        }
       }
+      return out
     }
+    let projectDirs = await scanLibrary()
     const singzId = await ensureFolder('SingZ', null)
     const remoteTop = await listChildren(singzId)
+
+    // Zero local projects and a populated Drive is far more likely to be a
+    // library that has not arrived (a cloud folder still syncing, an external
+    // volume, a root pointed somewhere new) than a deliberate "delete all".
+    // Refuse rather than empty someone's Drive on a launch sync. Decided
+    // BEFORE adoption: taking in one phone song would make the library look
+    // populated, and the reconcile would then trash every song that simply
+    // had not arrived yet.
+    const remoteProjectFolders = remoteTop.filter((f) => f.mimeType === FOLDER && !isPublished(f)).length
+    if (projectDirs.length === 0 && remoteProjectFolders > 0) {
+      syncLog(
+        'error',
+        `no projects found in ${root} — leaving ${remoteProjectFolders} folder(s) on Drive untouched`
+      )
+      return { ok: false, uploaded: 0, unchanged: 0, projects: 0, error: 'the library looks empty — nothing was synced' }
+    }
+    const adopted = await adoptPublished(root, remoteTop, projectDirs, onProgress)
+    if (adopted.length > 0) projectDirs = await scanLibrary()
 
     // What Drive actually holds, in two batched listings however big the
     // library: the children of every project folder, then the children of
@@ -467,7 +740,8 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
     const remoteDirs = new Map<string, RemoteFile>()
     const duplicateDirs: RemoteFile[] = []
     for (const f of remoteTop) {
-      if (f.mimeType !== FOLDER) continue
+      // a phone's song still waiting to be taken in is not a sync target
+      if (f.mimeType !== FOLDER || isPublished(f)) continue
       if (remoteDirs.has(f.name)) duplicateDirs.push(f)
       else remoteDirs.set(f.name, f)
     }
@@ -562,8 +836,8 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
               lyricsHash = syncDoc.lyricsHash
             }
             if (
-              JSON.stringify(syncDoc.stemHashes ?? null) !== JSON.stringify(hashes) ||
-              JSON.stringify(syncDoc.lyricsHash ?? null) !== JSON.stringify(lyricsHash ?? null)
+              stableJson(syncDoc.stemHashes ?? null) !== stableJson(hashes) ||
+              stableJson(syncDoc.lyricsHash ?? null) !== stableJson(lyricsHash ?? null)
             ) {
               syncDoc.stemHashes = hashes
               if (lyricsHash) syncDoc.lyricsHash = lyricsHash
@@ -690,23 +964,15 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
     // (phones would list both the old and the new name). Trash — never
     // hard-delete — remote project folders with no local counterpart;
     // drive.file scope means we only ever see folders this app created.
+    // (The empty-library refusal happens up top, before adoption.)
     const local = new Set(projectDirs)
-    // Zero local projects and a populated Drive is far more likely to be a
-    // library that has not arrived (a cloud folder still syncing, an external
-    // volume, a root pointed somewhere new) than a deliberate "delete all".
-    // Refuse rather than empty someone's Drive on a launch sync.
-    const remoteProjectFolders = remoteTop.filter((f) => f.mimeType === FOLDER).length
-    if (projectDirs.length === 0 && remoteProjectFolders > 0) {
-      syncLog(
-        'error',
-        `no projects found in ${root} — leaving ${remoteProjectFolders} folder(s) on Drive untouched`
-      )
-      return { ok: false, uploaded: 0, unchanged: 0, projects: 0, error: 'the library looks empty — nothing was synced' }
-    }
     // a second folder of the same name is never the one we sync into, and
     // phones would list the song twice
     for (const f of [...remoteTop, ...duplicateDirs]) {
       if (f.mimeType !== FOLDER || (local.has(f.name) && !duplicateDirs.includes(f))) continue
+      // A phone's song that could not be taken in yet is not an orphan: it is
+      // the only copy, and the phone may already have let go of its own.
+      if (isPublished(f)) continue
       onProgress?.(`Removing ${f.name} from Drive (renamed or deleted here)…`, 0.99)
       await api(`/drive/v3/files/${f.id}`, {
         method: 'PATCH',
@@ -720,7 +986,12 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
     // The manifest is written LAST — after every upload and the reconcile —
     // so it never names files that are not on Drive yet; md5-diffed like
     // everything else so a clean sync leaves it untouched.
-    const manifest = Buffer.from(JSON.stringify({ format: 2, projects: catalog }))
+    // `capabilities` is additive on purpose: phones check `format === 2`
+    // exactly, and bumping the number would push every phone already out
+    // there into walking the library folder by folder.
+    const manifest = Buffer.from(
+      JSON.stringify({ format: 2, capabilities: CATALOG_CAPABILITIES, projects: catalog })
+    )
     const manifestMd5 = createHash('md5').update(manifest).digest('hex')
     const catFile = remoteTop.find((f) => f.name === 'catalog.json' && f.mimeType !== FOLDER)
     if (catFile?.md5Checksum !== manifestMd5) {
@@ -738,12 +1009,13 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
     syncLog(
       'run',
       `done — ${projectDirs.length} songs, ${uploaded} uploaded, ${unchanged} unchanged` +
-        (trashed ? `, ${trashed} trashed` : '')
+        (trashed ? `, ${trashed} trashed` : '') +
+        (adopted.length ? `, ${adopted.length} taken in from a phone` : '')
     )
     const s = readSettings() as Record<string, unknown>
     s.gdriveLastSync = Date.now()
     writeSettings(s)
-    return { ok: true, uploaded, unchanged, projects: projectDirs.length, outsideLibrary: outside }
+    return { ok: true, uploaded, unchanged, projects: projectDirs.length, outsideLibrary: outside, adopted }
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err)
     syncLog('error', `sync failed: ${error}`)

@@ -26,6 +26,10 @@ export function startFakeDrive(port = 0, store: FakeDriveStore = newStore()): Pr
       for (const [k, v] of Object.entries(req.headers)) {
         if (typeof v === 'string') headers[k.toLowerCase()] = v
       }
+      // An upload session points back at the address THIS client used: the
+      // emulator reaches the Mac as 10.0.2.2, and a session URL naming
+      // 127.0.0.1 would send its PUT to the emulator itself.
+      if (headers.host) store.baseUrl = `http://${headers.host}`
       const out = serveRequest(store, req.method ?? 'GET', req.url ?? '/', Buffer.concat(chunks), headers)
       res.writeHead(out.status, out.headers)
       res.end(out.body)
