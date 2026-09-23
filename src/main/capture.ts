@@ -45,6 +45,9 @@ import {
   DESKTOP_PLAYBACK_CODEC_BASE_EXTENSIONS,
   DESKTOP_PLAYBACK_CODEC_BASE_MASK,
   DESKTOP_PLAYBACK_CODEC_BASE_TAG,
+  DESKTOP_PLAYBACK_CODEC_NATIVE_EXTENSIONS,
+  DESKTOP_PLAYBACK_CODEC_NATIVE_MASK,
+  DESKTOP_PLAYBACK_CODEC_NATIVE_TAG,
   DESKTOP_PLAYBACK_CODEC_FULL_EXTENSIONS,
   DESKTOP_PLAYBACK_CODEC_FULL_MASK,
   DESKTOP_PLAYBACK_CODEC_FULL_TAG,
@@ -1496,13 +1499,37 @@ export class CaptureOwner {
     })
     const binding = this.native()
     if (!binding) return unavailable()
+    let mediaCodecTag = ''
     try {
-      if (binding.playbackStatus().capability !== DESKTOP_PLAYBACK_CAPABILITY) return unavailable()
+      const status = binding.playbackStatus()
+      if (status.capability !== DESKTOP_PLAYBACK_CAPABILITY) return unavailable()
+      mediaCodecTag = typeof status.mediaCodecTag === 'string' ? status.mediaCodecTag : ''
     } catch {
       return unavailable()
     }
     const runtime = this.injectedCodecRuntime ?? codecRuntimeByBinding.get(binding)
     if (!isFullPlaybackCodecRuntime(runtime)) {
+      // No codec pack: what the addon decodes by itself. Every addon since
+      // zcore's native MP3 decoder says so in its status; one from before it
+      // says nothing, and stays WAV/FLAC — an MP3 lane advertised to an addon
+      // that cannot read it would fail the prepare instead of playing on Web
+      // Audio.
+      if (mediaCodecTag === DESKTOP_PLAYBACK_CODEC_NATIVE_TAG) {
+        return {
+          available: true,
+          playbackCapability: DESKTOP_PLAYBACK_CAPABILITY,
+          mediaCodec: {
+            abiVersion: 1,
+            formatMask: DESKTOP_PLAYBACK_CODEC_NATIVE_MASK,
+            dynamicallyLinkedFfmpeg: false,
+            runtimeVersion: '',
+            capabilityTag: DESKTOP_PLAYBACK_CODEC_NATIVE_TAG,
+            profile: '',
+            target: '',
+            extensions: [...DESKTOP_PLAYBACK_CODEC_NATIVE_EXTENSIONS]
+          }
+        }
+      }
       return { ...unavailable(), available: true }
     }
     const packBinding = runtime.packManifestSha256 ??

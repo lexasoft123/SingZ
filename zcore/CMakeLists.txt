@@ -341,10 +341,19 @@ add_library(zcore_media STATIC
   src/media/ffmpeg_decoder.cpp
   src/media/flac_io.cpp
   src/media/flac_streaming_source.cpp
+  src/media/media_format.cpp
+  src/media/media_io.cpp
+  src/media/mp3_streaming_source.cpp
+  src/media/streaming_audio_source.cpp
   src/media/wav.cpp
   src/media/wav_streaming_source.cpp)
 add_library(SingZ::zcore_media ALIAS zcore_media)
 singz_zcore_target(zcore_media)
+# dr_mp3 is upstream's code: SYSTEM, so the strict presets judge ours and not
+# its style (third_party/native/dr_mp3/README.md). mp3_streaming_source.cpp is the only
+# translation unit that includes it, and compiles it with every symbol static.
+target_include_directories(zcore_media SYSTEM PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/native/dr_mp3")
 target_link_libraries(zcore_media
   PUBLIC SingZ::zcore_base
   PRIVATE

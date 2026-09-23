@@ -22,6 +22,7 @@ import {
   DESKTOP_PLAYBACK_CODEC_BASE_EXTENSIONS,
   DESKTOP_PLAYBACK_CODEC_BASE_MASK,
   DESKTOP_PLAYBACK_CODEC_BASE_TAG,
+  DESKTOP_PLAYBACK_CODEC_NATIVE_TAG,
   DESKTOP_PLAYBACK_CODEC_FULL_EXTENSIONS,
   DESKTOP_PLAYBACK_CODEC_FULL_MASK,
   DESKTOP_PLAYBACK_CODEC_FULL_TAG,
@@ -280,7 +281,8 @@ const status = (generation: string, frame = '-960'): DesktopPlaybackStatus => ({
   error: '',
   format: result(generation).format,
   latency: result(generation).latency,
-  lanes: []
+  lanes: [],
+  mediaCodecTag: DESKTOP_PLAYBACK_CODEC_NATIVE_TAG
 })
 
 const asioRequest = () => ({

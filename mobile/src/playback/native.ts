@@ -1186,9 +1186,16 @@ const NATIVE_PLAYBACK_RUNTIME_BUILDS: Readonly<
 };
 
 const MEDIA_CODEC_ABI_VERSION = 1;
+// A binary from before zcore's native MP3 decoder: WAV and FLAC only. Still
+// accepted, so a stale binary under a newer bundle (Metro serves JS live over
+// an old install) reads as the WAV/FLAC build it is rather than as no native
+// playback at all — the per-extension bits below keep its MP3 lanes off it.
 const MEDIA_CODEC_BASE_MASK = 0x003;
-const MEDIA_CODEC_ALL_MASK = 0x1ff;
 const MEDIA_CODEC_BASE_TAG = 'singz-prepared-audio-fd-wav-flac-v1';
+// Every build since: WAV, FLAC and the native MP3 decoder, no FFmpeg.
+const MEDIA_CODEC_NATIVE_MASK = 0x007;
+const MEDIA_CODEC_NATIVE_TAG = 'singz-prepared-audio-fd-wav-flac-mp3-v2';
+const MEDIA_CODEC_ALL_MASK = 0x1ff;
 const MEDIA_CODEC_FFMPEG_FULL_MATRIX_TAG =
   'singz-prepared-audio-fd-ffmpeg-full-matrix-v3';
 
@@ -1196,11 +1203,14 @@ const nativeMediaCodecIsValid = (
   codec: NativePlaybackMediaCodecCapability,
 ): boolean => {
   if (codec.abiVersion !== MEDIA_CODEC_ABI_VERSION) return false;
+  const withoutFfmpeg =
+    !codec.dynamicallyLinkedFfmpeg && codec.runtimeVersion.length === 0;
   const baseOnly =
-    codec.formatMask === MEDIA_CODEC_BASE_MASK &&
-    !codec.dynamicallyLinkedFfmpeg &&
-    codec.capabilityTag === MEDIA_CODEC_BASE_TAG &&
-    codec.runtimeVersion.length === 0;
+    withoutFfmpeg &&
+    ((codec.formatMask === MEDIA_CODEC_BASE_MASK &&
+      codec.capabilityTag === MEDIA_CODEC_BASE_TAG) ||
+      (codec.formatMask === MEDIA_CODEC_NATIVE_MASK &&
+        codec.capabilityTag === MEDIA_CODEC_NATIVE_TAG));
   const fullMatrix =
     codec.formatMask === MEDIA_CODEC_ALL_MASK &&
     codec.dynamicallyLinkedFfmpeg &&

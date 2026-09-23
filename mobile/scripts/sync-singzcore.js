@@ -116,6 +116,16 @@ unlockTree(flacDst)
 rmSync(flacDst, { recursive: true, force: true })
 copyTree(flacSrc, flacDst, name => /\.(c|h)$/.test(name))
 
+// dr_mp3, the MP3 frame decoder under zcore's native MP3 support. Header only:
+// mp3_streaming_source.cpp compiles its implementation (every symbol static),
+// so nothing here is a source file — the podspec only puts it on a SYSTEM-ish
+// header search path, as CMake does.
+const drMp3Src = join(repoRoot, 'third_party', 'native', 'dr_mp3')
+const drMp3Dst = join(mobileRoot, 'ios', 'SingzCore', 'dr_mp3')
+unlockTree(drMp3Dst)
+rmSync(drMp3Dst, { recursive: true, force: true })
+copyTree(drMp3Src, drMp3Dst, name => name === 'dr_mp3.h')
+
 // These files must be inside the final IPA, not merely beside the source.
 // Materialize them under the pod root so CocoaPods' resource bundle owns the
 // exact notice/license/provenance records checked by the mobile verifier.
@@ -148,4 +158,4 @@ if (existsSync(selectionReceipt)) {
   chmodSync(target, 0o444)
   n++
 }
-console.log(`sync-singzcore: ${n} files → ios/SingzCore/{core,dsp,flac,compliance}/`)
+console.log(`sync-singzcore: ${n} files → ios/SingzCore/{core,dsp,flac,dr_mp3,compliance}/`)

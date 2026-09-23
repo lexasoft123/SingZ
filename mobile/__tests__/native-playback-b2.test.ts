@@ -4501,6 +4501,36 @@ describe('mobile native eligibility', () => {
         wavFlacOnly,
       ).reason,
     ).toMatch(/does not support \.mp3/i);
+    // Every binary since zcore's native MP3 decoder: no FFmpeg, and an MP3
+    // lane (an unsplit phone-added song, a custom track) plays natively.
+    const nativeMp3 = {
+      ...cap,
+      mediaCodec: {
+        abiVersion: 1 as const,
+        formatMask: 0x007,
+        dynamicallyLinkedFfmpeg: false,
+        runtimeVersion: '',
+        capabilityTag: 'singz-prepared-audio-fd-wav-flac-mp3-v2',
+      },
+    };
+    expect(
+      nativePlaybackEligibility(
+        entry({ custom }),
+        doc({ custom }),
+        true,
+        'ios',
+        nativeMp3,
+      ).eligible,
+    ).toBe(true);
+    expect(
+      nativePlaybackEligibility(
+        entry({ custom: [{ ...custom[0], file: 'stems/custom-x.m4a' }] }),
+        doc({ custom: [{ ...custom[0], file: 'stems/custom-x.m4a' }] }),
+        true,
+        'ios',
+        nativeMp3,
+      ).reason,
+    ).toMatch(/does not support \.m4a/i);
     expect(
       nativePlaybackEligibility(legacyOnlyEntry(), legacyOnlyEntry().doc, true, 'ios', cap)
         .eligible,

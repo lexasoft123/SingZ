@@ -231,6 +231,24 @@
       "supported": false
     },
     {
+      "name": "mp3 on a native-mp3 build",
+      "formatMask": 7,
+      "extension": "mp3",
+      "supported": true
+    },
+    {
+      "name": "flac on a native-mp3 build",
+      "formatMask": 7,
+      "extension": "flac",
+      "supported": true
+    },
+    {
+      "name": "m4a on a native-mp3 build",
+      "formatMask": 7,
+      "extension": "m4a",
+      "supported": false
+    },
+    {
       "name": "mp3 on a full-matrix build",
       "formatMask": 511,
       "extension": "mp3",

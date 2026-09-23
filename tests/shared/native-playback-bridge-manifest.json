@@ -17,6 +17,8 @@
       "baseMask": 3,
       "fullMask": 511,
       "baseTag": "singz-prepared-audio-fd-wav-flac-v1",
+      "nativeMask": 7,
+      "nativeTag": "singz-prepared-audio-fd-wav-flac-mp3-v2",
       "fullMatrixTag": "singz-prepared-audio-fd-ffmpeg-full-matrix-v3",
       "partialRuntimeTag": "singz-prepared-audio-fd-ffmpeg-partial-runtime-v2"
     }
@@ -509,7 +511,8 @@
         "format",
         "latency",
         "lanes",
-        "capability"
+        "capability",
+        "mediaCodecTag"
       ],
       "nested": {
         "format": [

@@ -58,7 +58,7 @@ export function desktopNativePlaybackPreferred(platform = detectedDesktopPlatfor
  *  Windows read was `_lseeki64` + `_read` on the shared file position, a
  *  race the two threads would have lost mid-song as malformed frames, and the
  *  reason the first cut of this preference defaulted win32 off. `readAt` is
- *  a positioned `ReadFile` there now (`zcore/src/media/flac_streaming_source.cpp`),
+ *  a positioned `ReadFile` there now (`zcore/src/media/media_io.cpp`),
  *  pinned by a concurrent two-reader ctest, and the field laptop ran the
  *  session harness with streaming on before and after: the streamed pass is
  *  lighter (800 MB against 920 MB playing, 0.3% against 4.7% CPU) with a

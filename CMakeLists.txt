@@ -523,6 +523,8 @@ if(SINGZ_CORE_TESTS)
     ${SINGZ_REPO_ROOT}/tests/native/lane_measure_tests.cpp)
   target_compile_features(lane_measure_tests PRIVATE cxx_std_20)
   set_target_properties(lane_measure_tests PROPERTIES CXX_EXTENSIONS OFF)
+  target_compile_definitions(lane_measure_tests PRIVATE
+    SINGZ_MP3_FIXTURE_DIR="${SINGZ_REPO_ROOT}/tests/fixtures/mp3/data")
   target_link_libraries(lane_measure_tests PRIVATE
     SingZ::native_playback_session SingZ::zcore_media SingZ::native_flac Threads::Threads)
   add_test(NAME lane_measure_tests COMMAND lane_measure_tests)
@@ -543,6 +545,18 @@ if(SINGZ_CORE_TESTS)
   set_target_properties(wav_streaming_source_tests PROPERTIES CXX_EXTENSIONS OFF)
   target_link_libraries(wav_streaming_source_tests PRIVATE SingZ::zcore_media)
   add_test(NAME wav_streaming_source_tests COMMAND wav_streaming_source_tests)
+
+  # Native MP3: the whole-file decode against committed FFmpeg references, and
+  # the streaming source against that decode bit for bit at every seek.
+  add_executable(mp3_decoder_tests
+    ${SINGZ_REPO_ROOT}/tests/native/mp3_decoder_tests.cpp)
+  target_compile_features(mp3_decoder_tests PRIVATE cxx_std_20)
+  set_target_properties(mp3_decoder_tests PROPERTIES CXX_EXTENSIONS OFF)
+  target_compile_definitions(mp3_decoder_tests PRIVATE
+    SINGZ_MP3_FIXTURE_DIR="${SINGZ_REPO_ROOT}/tests/fixtures/mp3/data"
+    SINGZ_CODEC_FIXTURE_DIR="${SINGZ_REPO_ROOT}/tests/fixtures/codecs/data")
+  target_link_libraries(mp3_decoder_tests PRIVATE SingZ::zcore_media)
+  add_test(NAME mp3_decoder_tests COMMAND mp3_decoder_tests)
 
   add_executable(flac_streaming_benchmark
     ${SINGZ_REPO_ROOT}/tests/native/flac_streaming_benchmark.cpp)
