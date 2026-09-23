@@ -534,7 +534,9 @@
           "totalFrames",
           "gain",
           "muted",
-          "solo"
+          "solo",
+          "streamed",
+          "starvedBlocks"
         ]
       },
       "underFormat": [

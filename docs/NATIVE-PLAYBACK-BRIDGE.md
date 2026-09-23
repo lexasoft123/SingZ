@@ -586,6 +586,16 @@ Health counters: `xruns`, `deadlineMisses`, `discontinuities`, `renderFailures`,
 deliberately **no** peak envelope: it never changes for a generation and this
 runs several times a second. `lanePeaks` publishes it once instead.
 
+The desktop's lanes carry two more, which the phones' do not emit yet:
+`streamed` (the lane plays out of the streaming feeder's window rather than a
+whole decode) and `starvedBlocks` (u64 string: render blocks this generation
+that wanted a frame the window did not hold, and played silence). One or two
+per seek is the design; one per block is a lane the feeder has stopped
+feeding — the song plays its metronome and none of its stems, and nothing else
+in status can tell that from a healthy song. Main watches the counter and logs
+`lanes starving` once a lane has starved for 3 s without a break
+(`judgeLaneStarvation`, src/main/capture.ts).
+
 ### Twelve keys read leniently
 
 `countInEventCount`, `countInBeatsPerBar`, `laneDecodeFallback`,
@@ -1021,6 +1031,15 @@ unnoticed, and each is a candidate for its own change — none should be
    `lanePeaks` after the song is already playing and hides nothing, so there
    is nothing for it to measure up front. Deliberate, and pinned as a
    desktop-only export rather than a method the phones forgot.
+14. **Only the desktop's lanes say whether they are starving.** `streamed`
+   and `starvedBlocks` (§5) are emitted by the desktop bridge alone and pinned
+   under `session.desktop.nested.lanes`; the phones' lane objects keep the six
+   common keys. The core fills both fields for every platform — the gap is the
+   two phone bridges, which would need a native rebuild to carry them — so a
+   phone lane the feeder stops feeding is still invisible to every phone
+   driver and to the phone's log. Deliberate for now: the desktop is where the
+   field report came from (0.23.3, "the metronome plays, but the stems
+   don't"), and main is where the warning is written.
 
 ## 12. Changing the contract
 

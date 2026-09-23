@@ -347,6 +347,113 @@ const CAPTURE_STABLE_STALE_MS = 7 * 24 * 60 * 60 * 1000
 const CAPTURE_STABLE_NAME = /^singz-capture-[0-9a-f]{32}$/
 /** How often an automatic re-anchor may write a line; see reanchorPlayback(). */
 const REANCHOR_LOG_INTERVAL_MS = 10_000
+/** How long a lane must have starved without a break before it is reported,
+ *  and how often a starving generation may write a line; see
+ *  judgeLaneStarvation(). */
+const STARVE_RUN_MS = 3_000
+const STARVE_LOG_INTERVAL_MS = 10_000
+
+/** One streamed lane between two status reads: its counter at the last one,
+ *  and — while it is starving — where its unbroken run of starving began. */
+interface LaneStarveRun {
+  starved: bigint
+  since: number | null
+  starvedSince: bigint
+  callbacksSince: bigint
+}
+
+/** What the last status read of a playing generation said, lane by lane. */
+export interface LaneStarveWatch {
+  generation: string
+  at: number
+  callbacks: bigint
+  lanes: ReadonlyMap<string, LaneStarveRun>
+}
+
+export interface LaneStarveReport {
+  lanes: Array<{ id: string; blocks: bigint }>
+  callbacks: bigint
+  spanMs: number
+}
+
+function counter(value: string): bigint | null {
+  return /^\d+$/.test(value) ? BigInt(value) : null
+}
+
+/**
+ * Streamed lanes that have stopped being fed. A streamed lane plays out of a
+ * window the core's feeder thread keeps ahead of it and renders SILENCE for
+ * any frame the window does not hold — which is what a scrub costs for a
+ * block or two, and what a lane the feeder has stopped chasing costs for
+ * every block after. The metronome is no lane, so a song in that state goes
+ * on clicking with none of its stems, and before this nothing in the log
+ * could tell it apart from a healthy song (a singer's 0.23.3 log: Play after
+ * the song ran out, then resume, pause, resume, pause).
+ *
+ * Between two reads a lane is STARVING when it starved in at least half the
+ * callbacks rendered in between, and it is reported once it has been
+ * starving, read after read, for STARVE_RUN_MS — so a scrub's block or two
+ * never is, and a run that begins mid-song is caught as soon as it is long
+ * enough rather than at some fixed window's edge. Anything but playing (a
+ * pause, a count-in, the end), a new generation or a counter that went
+ * backwards starts again. Pure, so the rule is tested without a device.
+ */
+export function judgeLaneStarvation(
+  previous: LaneStarveWatch | null,
+  status: Pick<DesktopPlaybackStatus, 'generation' | 'transportState' | 'callbacks' | 'lanes'>,
+  now: number
+): { watch: LaneStarveWatch | null; report: LaneStarveReport | null } {
+  const none = { watch: null, report: null }
+  if (status.transportState !== 'playing') return none
+  const callbacks = counter(status.callbacks)
+  if (callbacks === null) return none
+  const counts = new Map<string, bigint>()
+  for (const lane of status.lanes) {
+    if (!lane.streamed) continue
+    const blocks = counter(lane.starvedBlocks)
+    if (blocks === null) return none
+    counts.set(lane.id, blocks)
+  }
+  if (counts.size === 0) return none
+  const fed = (starved: bigint): LaneStarveRun => ({
+    starved, since: null, starvedSince: starved, callbacksSince: callbacks
+  })
+  if (
+    previous === null ||
+    previous.generation !== status.generation ||
+    callbacks < previous.callbacks
+  ) {
+    const lanes = new Map([...counts].map(([id, starved]) => [id, fed(starved)] as const))
+    return { watch: { generation: status.generation, at: now, callbacks, lanes }, report: null }
+  }
+  const rendered = callbacks - previous.callbacks
+  // Two reads inside one callback say nothing either way.
+  if (rendered === 0n) return { watch: previous, report: null }
+  const lanes = new Map<string, LaneStarveRun>()
+  const report: LaneStarveReport = { lanes: [], callbacks: 0n, spanMs: 0 }
+  for (const [id, starved] of counts) {
+    const before = previous.lanes.get(id)
+    if (before === undefined || starved < before.starved || (starved - before.starved) * 2n < rendered) {
+      lanes.set(id, fed(starved))
+      continue
+    }
+    const run: LaneStarveRun = before.since === null
+      ? { starved, since: previous.at, starvedSince: before.starved, callbacksSince: previous.callbacks }
+      : { ...before, starved }
+    lanes.set(id, run)
+    const since = run.since as number
+    if (now - since < STARVE_RUN_MS) continue
+    report.lanes.push({ id, blocks: starved - run.starvedSince })
+    if (now - since > report.spanMs) {
+      report.spanMs = now - since
+      report.callbacks = callbacks - run.callbacksSince
+    }
+  }
+  return {
+    watch: { generation: status.generation, at: now, callbacks, lanes },
+    report: report.lanes.length > 0 ? report : null
+  }
+}
 
 function processIsLive(pid: number): boolean {
   try {
@@ -1155,6 +1262,10 @@ export class CaptureOwner {
   private reanchorGeneration = ''
   private reanchorCount = 0
   private reanchorLoggedAt = 0
+  /** The streamed-lane starvation watch; see judgeLaneStarvation(). */
+  private starveWatch: LaneStarveWatch | null = null
+  private starveLoggedGeneration = ''
+  private starveLoggedAt = 0
   private playbackHighWater = 0n
   private cleanupRenderers = new Set<number>()
 
@@ -1870,12 +1981,49 @@ export class CaptureOwner {
   }
 
   playbackStatus(): DesktopPlaybackStatus | null {
+    let status: DesktopPlaybackStatus | null
     try {
-      const status = this.native()?.playbackStatus() ?? null
-      return status?.capability === DESKTOP_PLAYBACK_CAPABILITY ? status : null
+      status = this.native()?.playbackStatus() ?? null
     } catch {
       return null
     }
+    if (status?.capability !== DESKTOP_PLAYBACK_CAPABILITY) return null
+    try {
+      this.watchLaneStarvation(status)
+    } catch {
+      // A diagnostic never costs the renderer its status.
+    }
+    return status
+  }
+
+  /** Every status read is a look at the lanes, and the renderer polls at
+   *  5 Hz through the whole of playback — so this is where a stem the core
+   *  has stopped feeding gets written down, at most once per
+   *  STARVE_LOG_INTERVAL_MS a generation. */
+  private watchLaneStarvation(status: DesktopPlaybackStatus): void {
+    // A status from before the lane fields existed has no counters to judge.
+    if (!Array.isArray(status.lanes)) return
+    const now = Date.now()
+    const { watch, report } = judgeLaneStarvation(this.starveWatch, status, now)
+    this.starveWatch = watch
+    if (!report) return
+    if (
+      this.starveLoggedGeneration === status.generation &&
+      now - this.starveLoggedAt < STARVE_LOG_INTERVAL_MS
+    )
+      return
+    this.starveLoggedGeneration = status.generation
+    this.starveLoggedAt = now
+    // Blocks and callbacks are counted apart and read at slightly different
+    // instants (and a callback can render more than one block), so the two
+    // are reported side by side rather than as a fraction.
+    log(
+      'dsp',
+      `lanes starving · generation ${status.generation} · starved blocks ` +
+        report.lanes.map((lane) => `${lane.id} ${lane.blocks}`).join(', ') +
+        ` · ${report.callbacks} callbacks in ${(report.spanMs / 1000).toFixed(1)} s — the stems play silence`,
+      'warn'
+    )
   }
 
   /**

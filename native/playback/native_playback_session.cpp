@@ -8261,7 +8261,12 @@ NativePlaybackStatus NativePlaybackSession::status() const {
     result.rejectedBlocks = impl_->prepared->diagnostics.rejectedBlocks.load(
         std::memory_order_relaxed);
     result.lanes.reserve(impl_->prepared->lanes.size());
-    for (const PreparedPlaybackGraph::Lane &lane : impl_->prepared->lanes) {
+    // Streamed lanes are the group's lanes in the same order: prepare adds
+    // them one for one, and a set that is not streamed whole has no group.
+    const std::shared_ptr<StreamingLaneGroup> &streaming =
+        impl_->prepared->streaming;
+    for (size_t index = 0; index < impl_->prepared->lanes.size(); ++index) {
+      const PreparedPlaybackGraph::Lane &lane = impl_->prepared->lanes[index];
       NativePlaybackLaneStatus laneStatus;
       laneStatus.id = lane.id;
       laneStatus.cursorFrames =
@@ -8270,6 +8275,11 @@ NativePlaybackStatus NativePlaybackSession::status() const {
       laneStatus.gain = lane.gain;
       laneStatus.muted = lane.muted;
       laneStatus.solo = lane.solo;
+      if (lane.streamed() && streaming != nullptr &&
+          index < streaming->laneCount()) {
+        laneStatus.streamed = true;
+        laneStatus.starvedBlocks = streaming->stats(index).starvedBlocks;
+      }
       result.lanes.push_back(std::move(laneStatus));
     }
   }

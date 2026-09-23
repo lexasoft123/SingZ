@@ -989,6 +989,12 @@ export interface DesktopPlaybackLaneStatus {
   gain: number
   muted: boolean
   solo: boolean
+  /** The lane plays out of a window the streaming feeder keeps ahead. */
+  streamed: boolean
+  /** Render blocks this generation that wanted a frame the window did not
+   *  hold and played silence. A couple per seek is the design; one per block
+   *  is a lane that has stopped being fed (main logs `lanes starving`). */
+  starvedBlocks: string
 }
 
 export const DESKTOP_PLAYBACK_GRAPH_MAX_NODES = 128

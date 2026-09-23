@@ -2257,6 +2257,11 @@ napi_value playbackStatus(napi_env env, napi_callback_info) {
     setValue(env, lane, "gain", makeNumber(env, source.lanes[index].gain));
     setValue(env, lane, "muted", makeBool(env, source.lanes[index].muted));
     setValue(env, lane, "solo", makeBool(env, source.lanes[index].solo));
+    // Desktop-only for now (the phones' lane objects are pinned without
+    // them): main watches these for a streamed lane that has stopped being
+    // fed, and says so in the log.
+    setValue(env, lane, "streamed", makeBool(env, source.lanes[index].streamed));
+    setCounter(env, lane, "starvedBlocks", source.lanes[index].starvedBlocks);
     // No envelope here: it never changes for a generation. playbackLanePeaks
     // publishes it once instead.
     napi_set_element(env, lanes, index, lane);
