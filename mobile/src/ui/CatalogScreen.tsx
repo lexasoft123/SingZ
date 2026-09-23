@@ -72,13 +72,14 @@ import { deleteProject, pickAudioFile, writeLyrics, type PickedFile } from '../w
 import {
   cancelSplit,
   clearSplitJob,
+  failedJobHoldsEngine,
   splitAvailable,
   splitStatus,
   subscribeSplit,
   type SplitJobStatus
 } from '../split/service'
 import {
-  KEEPS_FAILING_COPY,
+  splitFailureCopy,
   finishSplit,
   recordFailure,
   splitGate,
@@ -1287,11 +1288,21 @@ export default function CatalogScreen({
       mode === 'phone' && splitAvailable() && Object.keys(p.stems).length === 0,
     [mode]
   )
-  /** Whether a split is running for anyone BUT this card: the running card
+  /** Whether a split is WORKING for anyone BUT this card: the running card
    *  shows no chip at all (see the card's `action`), so this is what dims
-   *  the others with a reason. */
+   *  the others with a reason. A FAILED job is not working — nothing runs,
+   *  and both natives start a fresh job over a failed one. It used to count,
+   *  and a song whose decode failed three times then locked every other
+   *  song's Split behind a Resume/Discard card at the top of the list, which
+   *  a singer on iPhone read as "the Split button does nothing" (field report,
+   *  2026-09-23). The offer below says what starting another split costs the
+   *  failed one. The exception is an iOS STALL, which is recorded as failed
+   *  while the wedged job still holds the engine (see failedJobHoldsEngine). */
   const splitBusyElsewhere = useCallback(
-    (dir: string): boolean => splitUi !== null && splitUi.project !== dir,
+    (dir: string): boolean =>
+      splitUi !== null &&
+      splitUi.project !== dir &&
+      (splitUi.phase !== 'failed' || failedJobHoldsEngine(splitUi.error, Platform.OS)),
     [splitUi]
   )
 
@@ -1299,17 +1310,29 @@ export default function CatalogScreen({
    *  menu both come here, so they cannot drift apart. */
   const offerSplit = useCallback(
     (p: ProjectEntry) => {
+      // One job slot on both platforms: starting this split replaces a failed
+      // one elsewhere, and its resume point goes with it. Say so, and discard
+      // it explicitly — a model download cancelled before the native start
+      // would otherwise leave the old job on disk to reappear on next visit.
+      const failed = splitUi?.phase === 'failed' && splitUi.project !== p.dir ? splitUi : null
       Alert.alert(
         'Split this song?',
         'The phone separates it into vocals, drums, bass and more — a few minutes of ' +
-          'work, and a one-time 136 MB download the first time.',
+          'work, and a one-time 136 MB download the first time.' +
+          (failed ? `\n\nThe failed split of "${nameOf(failed.project)}" will be discarded.` : ''),
         [
           { text: 'Cancel', style: 'cancel' },
-          { text: 'Split', onPress: () => void startSplitFor(p.dir, false) }
+          {
+            text: 'Split',
+            onPress: () =>
+              void (failed ? clearSplitJob().catch(() => {}) : Promise.resolve()).then(() =>
+                startSplitFor(p.dir, false)
+              )
+          }
         ]
       )
     },
-    [startSplitFor]
+    [startSplitFor, splitUi, nameOf]
   )
 
   const discardSplit = useCallback(() => {
@@ -1338,6 +1361,14 @@ export default function CatalogScreen({
    *  or a different deletion path over time. */
   const confirmDelete = useCallback(
     (p: ProjectEntry) => {
+      // Adoption moves the stems into this project and rewrites its
+      // project.json, and nothing can stop it halfway: deleting under it
+      // either fails the adopt into a card for a song that is gone or lets
+      // the doc write land after the delete and bring back half a project.
+      if (splitUiRef.current?.phase === 'adopting' && splitUiRef.current.project === p.dir) {
+        Alert.alert('Almost done splitting', 'This song is being finished — delete it in a moment.')
+        return
+      }
       Alert.alert(
         'Delete this song?',
         `"${p.doc.name ?? p.dir}" and its files go away.`,
@@ -1352,7 +1383,28 @@ export default function CatalogScreen({
             text: 'Delete',
             style: 'destructive',
             onPress: () => {
-              void deleteProject(p.dir)
+              // A job left for this song goes with it: a failed card naming a
+              // song that no longer exists offers a Resume nothing can honour,
+              // and job.json would bring it back on every visit. In the model
+              // phase no job exists yet — the download is what to stop, or
+              // the job starts on the deleted song the moment it lands. A
+              // running (or stalled) job is stopped the way Discard stops it.
+              const job = splitUiRef.current
+              const stopJob = (): Promise<unknown> =>
+                job?.phase === 'model'
+                  ? cancelModelDownload(SPLIT_MODEL.file)
+                  : job?.phase === 'failed' && !failedJobHoldsEngine(job.error, Platform.OS)
+                  ? clearSplitJob()
+                  : cancelSplit().then(() => clearSplitJob())
+              const dropJob =
+                job?.project === p.dir
+                  ? Promise.resolve()
+                      .then(stopJob)
+                      .catch(() => {})
+                      .then(() => setSplitUi(c => (c?.project === p.dir ? null : c)))
+                  : Promise.resolve()
+              void dropJob
+                .then(() => deleteProject(p.dir))
                 .then(() => refresh())
                 .catch(e => setError(String(e instanceof Error ? e.message : e)))
             }
@@ -1882,7 +1934,7 @@ export default function CatalogScreen({
               {splitUi.phase === 'adopting' && <Text style={s.splitText}>Finishing up…</Text>}
               {splitUi.phase === 'failed' && (
                 <Text style={s.splitText}>
-                  {splitUi.attempts >= 2 ? KEEPS_FAILING_COPY : splitUi.error}
+                  {splitFailureCopy(splitUi.error, splitUi.attempts)}
                 </Text>
               )}
               <View style={s.splitActions}>
@@ -2041,12 +2093,12 @@ export default function CatalogScreen({
                       accessibilityState={{
                         disabled: splitBusyElsewhere(p.dir)
                       }}
-                      /* Not "while another song is being split": splitUi also sits
-                     in its failed phase until Resume or Discard, when nothing
-                     is running at all. Word it against what has to happen. */
+                      /* A failed split elsewhere no longer disables this —
+                     only one still working does (an iOS stall counts: it
+                     holds the engine until SingZ restarts). */
                       accessibilityLabel={
                         splitBusyElsewhere(p.dir)
-                          ? 'Split — unavailable until the current split finishes or is discarded'
+                          ? 'Split — unavailable while another split is still working'
                           : `Split ${p.doc.name ?? p.dir} into stems`
                       }
                     >

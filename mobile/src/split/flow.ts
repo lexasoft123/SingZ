@@ -141,3 +141,31 @@ export function clearFailures(): void {
 
 export const KEEPS_FAILING_COPY =
   'This song keeps failing on this phone. Add it on your computer instead — it will sync over ready to sing.'
+
+/** The failures that are about the FILE, not the phone — the decode errors
+ *  both natives write into job.json (SingzSplitRunner.mm's
+ *  DecodeToRawF32Stereo, AudioDecode.kt). "Keeps failing on this phone" is
+ *  the wrong thing to tell a singer whose phone is fine and whose file is
+ *  not (a field MP3 read "Decode failed (unknown)" three times and was sent
+ *  to the computer), and a raw decoder message is no better. Resume re-reads
+ *  the same bytes, so saying so from the first failure costs nothing. */
+export function isFileProblem(error: string | null | undefined): boolean {
+  return (
+    !!error &&
+    // Not "This phone cannot decode <codec>": that is the phone's limit, and
+    // another copy in the same format would fail the same way — it keeps its
+    // own sentence and then KEEPS_FAILING_COPY's advice (the computer).
+    !/cannot decode/i.test(error) &&
+    /this file|Decode failed|No audio in/i.test(error)
+  )
+}
+
+export const FILE_FAILING_COPY =
+  "This phone couldn't read this song's file. Try another copy of it — " +
+  'or add it on your computer, and it will sync over ready to sing.'
+
+/** What the failed card says: the file's fault first, then the phone's. */
+export function splitFailureCopy(error: string, attempts: number): string {
+  if (isFileProblem(error)) return FILE_FAILING_COPY
+  return attempts >= 2 ? KEEPS_FAILING_COPY : error
+}

@@ -2005,6 +2005,32 @@ describe('iOS B2 backend selection and ownership', () => {
     await handle.stop('control rejection cleanup');
   });
 
+  it('logs a burst of accepted ramps as one line, not one per command', async () => {
+    // A fader drag sends one ramp per update; the phone keeps 400 log lines,
+    // and a field log was ~250 lines of `ramp queued` (2026-09-23).
+    const h = harness();
+    const project = await h.load();
+    const handle = project.nativePlayback!;
+    await handle.start();
+    const lines: string[] = [];
+    const unsubscribe = onLogLine(entry => {
+      if (entry.source === 'dsp' && /ramp/.test(entry.line)) lines.push(entry.line);
+    });
+    try {
+      for (let i = 0; i < 9; i++) await handle.setMasterGain(0.5 + i * 0.05);
+      expect(lines).toEqual([]);
+      // The burst closes after 1.5 s of quiet.
+      await new Promise(resolve => setTimeout(resolve, 1_700));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatch(
+        /^master-gain ramps queued · generation 1 · 9 accepted over (\d+ ms|[\d.]+ s) · slowest \d+ ms$/,
+      );
+    } finally {
+      unsubscribe();
+    }
+    await handle.stop('ramp burst cleanup');
+  });
+
   it('publishes truthful pre-roll time without inventing dots from a variable meter', async () => {
     const h = harness();
     const project = await h.load();
