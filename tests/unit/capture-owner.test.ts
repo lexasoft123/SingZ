@@ -209,7 +209,8 @@ const playbackStatus = (): DesktopPlaybackStatus => ({
   error: '',
   format: playbackResult().format,
   latency: playbackResult().latency,
-  lanes: []
+  lanes: [],
+  mediaCodecTag: 'singz-prepared-audio-fd-wav-flac-mp3-v2'
 })
 
 const playbackConfig = (): DesktopPlaybackPrepareConfig => ({
@@ -376,13 +377,41 @@ describe('CaptureOwner', () => {
       ...playbackLanes()[0], path: '/authorized/reference.m4a'
     }], 'darwin')).toMatchObject({ ok: true })
 
+    // No codec pack: the addon's own decoders. It reports the native MP3
+    // decoder, so WAV, FLAC and MP3 — and still no M4A.
     const baseOwner = new CaptureOwner(fakeBinding())
     expect(baseOwner.playbackCapability()).toMatchObject({
       available: true,
-      mediaCodec: { formatMask: 0x003, dynamicallyLinkedFfmpeg: false }
+      mediaCodec: {
+        formatMask: 0x007,
+        dynamicallyLinkedFfmpeg: false,
+        capabilityTag: 'singz-prepared-audio-fd-wav-flac-mp3-v2',
+        extensions: ['wav', 'flac', 'mp3']
+      }
     })
     expect(await baseOwner.preparePlayback(7, playbackConfig(), [{
+      ...playbackLanes()[0], path: '/authorized/reference.mp3'
+    }], 'darwin')).toMatchObject({ ok: true })
+    expect(await baseOwner.preparePlayback(7, playbackConfig(), [{
       ...playbackLanes()[0], path: '/authorized/reference.m4a'
+    }], 'darwin')).toMatchObject({ ok: false, errorCode: 'invalid-configuration' })
+
+    // An addon from before the native MP3 decoder says nothing about codecs:
+    // it stays WAV/FLAC, and an MP3 lane is refused rather than handed to a
+    // core that cannot read it.
+    const staleBinding = fakeBinding()
+    const staleStatus = staleBinding.playbackStatus
+    staleBinding.playbackStatus = () => {
+      const { mediaCodecTag: _dropped, ...older } = staleStatus()
+      return older as DesktopPlaybackStatus
+    }
+    const staleOwner = new CaptureOwner(staleBinding)
+    expect(staleOwner.playbackCapability()).toMatchObject({
+      available: true,
+      mediaCodec: { formatMask: 0x003, extensions: ['wav', 'flac'] }
+    })
+    expect(await staleOwner.preparePlayback(7, playbackConfig(), [{
+      ...playbackLanes()[0], path: '/authorized/reference.mp3'
     }], 'darwin')).toMatchObject({ ok: false, errorCode: 'invalid-configuration' })
   })
 

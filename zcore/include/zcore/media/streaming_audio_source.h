@@ -9,9 +9,12 @@
 
 // A format-agnostic window onto an encoded audio file.
 //
-// Implemented for FLAC (flac_streaming_source.cpp) and WAV — integer PCM at
+// Implemented for FLAC (flac_streaming_source.cpp), WAV — integer PCM at
 // 16/24/32 bits and 32-bit float, the float being what every lead and backing
-// vocal lane since 0.23.0 is (wav_streaming_source.cpp). It was designed
+// vocal lane since 0.23.0 is (wav_streaming_source.cpp) — and MP3
+// (mp3_streaming_source.cpp). `openStreamingAudioSource`
+// (streaming_audio_source.cpp) picks one with the same content detector
+// `prepareDecodedAudio` uses (media_format.cpp). It was designed
 // against a shape that MP3 and AAC can meet too, rather than against FLAC's
 // conveniences (docs/FLAC-STREAMING-RESEARCH.md): writing that first was
 // cheap; discovering after a FLAC implementation that the interface assumed

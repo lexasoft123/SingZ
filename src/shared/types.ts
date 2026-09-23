@@ -759,13 +759,19 @@ export const DESKTOP_PLAYBACK_CONTRACT_VERSION = 2 as const
 export const DESKTOP_PLAYBACK_CAPABILITY =
   'singz.native.playback-session.anchored-preview.v4' as const
 export const DESKTOP_PLAYBACK_CODEC_PROFILE = 'singz-playback-codecs-v1' as const
+/** An addon from before zcore's native MP3 decoder: WAV and FLAC. */
 export const DESKTOP_PLAYBACK_CODEC_BASE_TAG =
   'singz-prepared-audio-fd-wav-flac-v1' as const
+/** Every addon since: WAV, FLAC and the native MP3 decoder, no FFmpeg. */
+export const DESKTOP_PLAYBACK_CODEC_NATIVE_TAG =
+  'singz-prepared-audio-fd-wav-flac-mp3-v2' as const
 export const DESKTOP_PLAYBACK_CODEC_FULL_TAG =
   'singz-prepared-audio-fd-ffmpeg-full-matrix-v3' as const
 export const DESKTOP_PLAYBACK_CODEC_BASE_MASK = 0x003 as const
+export const DESKTOP_PLAYBACK_CODEC_NATIVE_MASK = 0x007 as const
 export const DESKTOP_PLAYBACK_CODEC_FULL_MASK = 0x1ff as const
 export const DESKTOP_PLAYBACK_CODEC_BASE_EXTENSIONS = ['wav', 'flac'] as const
+export const DESKTOP_PLAYBACK_CODEC_NATIVE_EXTENSIONS = ['wav', 'flac', 'mp3'] as const
 export const DESKTOP_PLAYBACK_CODEC_FULL_EXTENSIONS = [
   'wav', 'flac', 'mp3', 'm4a', 'aac', 'ogg', 'oga', 'opus', 'aif', 'aiff'
 ] as const
@@ -780,6 +786,7 @@ export interface DesktopPlaybackRuntimeCapability {
     runtimeVersion: string
     capabilityTag:
       | typeof DESKTOP_PLAYBACK_CODEC_BASE_TAG
+      | typeof DESKTOP_PLAYBACK_CODEC_NATIVE_TAG
       | typeof DESKTOP_PLAYBACK_CODEC_FULL_TAG
     profile: '' | typeof DESKTOP_PLAYBACK_CODEC_PROFILE
     target: string
@@ -1149,6 +1156,8 @@ export interface DesktopPlaybackStatus {
   format: DesktopPlaybackResult['format']
   latency: DesktopMonitorLatency
   lanes: DesktopPlaybackLaneStatus[]
+  /** The addon's own media layer (zcore's decodedAudioCapabilityTag). */
+  mediaCodecTag: string
 }
 
 export type DesktopAudioInputEvent =

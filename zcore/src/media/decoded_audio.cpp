@@ -33,8 +33,14 @@ using media_internal::kMinimumSupportedSampleRate;
 constexpr uint64_t kDecodeChunkFrames = 4096;
 constexpr uint32_t kMaximumReducedRateFactor = 4096;
 constexpr uint64_t kMaximumResampleOperationsPerPoll = 262144;
+// WAV, FLAC and the native MP3 decoder (mp3_streaming_source.cpp) — every build.
+// Superseded "singz-prepared-audio-fd-wav-flac-v1", which no build since the
+// native MP3 decoder can report: the parsers accept both, so a stale binary
+// still reads as the WAV/FLAC build it is.
 constexpr char kBaseCapabilityTag[] =
-    "singz-prepared-audio-fd-wav-flac-v1";
+    "singz-prepared-audio-fd-wav-flac-mp3-v2";
+constexpr uint32_t kNativeFormatMask = DecodedAudioCapabilityWav |
+    DecodedAudioCapabilityFlac | DecodedAudioCapabilityMp3;
 #if defined(SINGZ_ZCORE_FFMPEG)
 constexpr char kPartialFfmpegCapabilityTag[] =
     "singz-prepared-audio-fd-ffmpeg-partial-runtime-v2";
@@ -82,41 +88,6 @@ using media_internal::WorkingAudio;
 bool validSourceFormat(DecodedAudioSourceFormat format) noexcept {
   return format >= DecodedAudioSourceFormat::Auto &&
       format <= DecodedAudioSourceFormat::Aiff;
-}
-
-DecodedAudioSourceFormat detectSourceFormat(
-    const unsigned char* bytes, size_t size) noexcept {
-  // Preserve RIFF-family malformed-data classification: decodeWav validates
-  // the WAVE form and must distinguish a corrupt RIFF from an unknown format.
-  if (size >= 4 && std::memcmp(bytes, "RIFF", 4) == 0)
-    return DecodedAudioSourceFormat::Wav;
-  if (size >= 4 && std::memcmp(bytes, "fLaC", 4) == 0)
-    return DecodedAudioSourceFormat::Flac;
-  if (size >= 4 && std::memcmp(bytes, "OggS", 4) == 0)
-    return DecodedAudioSourceFormat::Ogg;
-  if (size >= 12 && std::memcmp(bytes, "FORM", 4) == 0 &&
-      (std::memcmp(bytes + 8, "AIFF", 4) == 0 ||
-       std::memcmp(bytes + 8, "AIFC", 4) == 0))
-    return DecodedAudioSourceFormat::Aiff;
-  if (size >= 12 && std::memcmp(bytes + 4, "ftyp", 4) == 0)
-    return DecodedAudioSourceFormat::M4a;
-  if (size >= 3 && std::memcmp(bytes, "ID3", 3) == 0)
-    return DecodedAudioSourceFormat::Mp3;
-  if (size >= 2 && bytes[0] == 0xff && (bytes[1] & 0xf6u) == 0xf0u)
-    return DecodedAudioSourceFormat::Aac;
-  if (size >= 2 && bytes[0] == 0xff && (bytes[1] & 0xe0u) == 0xe0u &&
-      (bytes[1] & 0x06u) != 0)
-    return DecodedAudioSourceFormat::Mp3;
-  return DecodedAudioSourceFormat::Auto;
-}
-
-bool declarationMatches(DecodedAudioSourceFormat declared,
-                        DecodedAudioSourceFormat detected) noexcept {
-  if (declared == DecodedAudioSourceFormat::Auto) return true;
-  if (detected == DecodedAudioSourceFormat::Ogg)
-    return declared == DecodedAudioSourceFormat::Ogg ||
-        declared == DecodedAudioSourceFormat::Opus;
-  return declared == detected;
 }
 
 bool validOptions(const DecodedAudioPrepareOptions& options) noexcept {
@@ -174,7 +145,7 @@ DecodedAudioStatus decodeWav(std::FILE* file,
   if (fseeko(file, 0, SEEK_END) != 0) return DecodedAudioStatus::IoError;
   const auto physicalEnd = ftello(file);
   if (physicalEnd < 0) return DecodedAudioStatus::IoError;
-  const media_internal::WavByteSource source{
+  const media_internal::MediaByteSource source{
       file, &fileReadAt, static_cast<uint64_t>(physicalEnd)};
   media_internal::WavLayout layout;
   const DecodedAudioStatus parsed =
@@ -218,6 +189,70 @@ DecodedAudioStatus decodeWav(std::FILE* file,
         &converted);
     if (status != DecodedAudioStatus::Ok) return status;
     cursor += count;
+  }
+  if (cancellation.isRequested()) return DecodedAudioStatus::Cancelled;
+  *output = std::move(candidate);
+  return DecodedAudioStatus::Ok;
+}
+
+// MP3 through the one frame index and frame decoder the streaming source uses
+// (mp3_streaming_source.cpp), so a lane decoded whole and the same lane streamed are
+// the same floats. What stays here is the prepare limits and the copy out.
+DecodedAudioStatus decodeMp3(std::FILE* file,
+                             const DecodedAudioPrepareOptions& options,
+                             DecodeCancellation cancellation,
+                             WorkingAudio* output) {
+  if (fseeko(file, 0, SEEK_END) != 0) return DecodedAudioStatus::IoError;
+  const auto physicalEnd = ftello(file);
+  if (physicalEnd < 0) return DecodedAudioStatus::IoError;
+  const media_internal::MediaByteSource source{
+      file, &fileReadAt, static_cast<uint64_t>(physicalEnd)};
+  media_internal::Mp3Layout layout;
+  const DecodedAudioStatus parsed =
+      media_internal::parseMp3Layout(source, cancellation, &layout);
+  if (parsed != DecodedAudioStatus::Ok) return parsed;
+  if (layout.sampleRate < kMinimumSupportedSampleRate ||
+      layout.sampleRate > kMaximumSupportedSampleRate)
+    return DecodedAudioStatus::UnsupportedFormat;
+  if (!withinLimits(layout.channels, layout.frameCount, options))
+    return DecodedAudioStatus::LimitExceeded;
+  // Working bytes are everything alive at once: the published planes AND the
+  // one decoded frame they are copied out of. (The planes are sized once, up
+  // front, so there is no reallocation overlap to count.)
+  const uint64_t spf = layout.samplesPerFrame;
+  const uint64_t liveSamples =
+      (layout.frameCount + spf) * static_cast<uint64_t>(layout.channels);
+  if (liveSamples > std::numeric_limits<size_t>::max() / sizeof(float) ||
+      liveSamples * sizeof(float) > options.maximumWorkingBytes)
+    return DecodedAudioStatus::LimitExceeded;
+
+  WorkingAudio candidate;
+  candidate.sampleRate = layout.sampleRate;
+  candidate.frameCount = layout.frameCount;
+  candidate.channels.assign(layout.channels,
+                            std::vector<float>(static_cast<size_t>(layout.frameCount)));
+  media_internal::Mp3FrameDecoder decoder(source);
+  std::vector<float> frame(static_cast<size_t>(spf) * layout.channels);
+  const uint64_t begin = layout.skipFront;
+  const uint64_t end = layout.skipFront + layout.frameCount;
+  // From the FIRST frame, not the one holding `begin`: an MPEG-2 file's
+  // 1105-sample delay spans whole 576-sample frames, and a frame the decoder
+  // never saw leaves the next one without its reservoir and overlap. Frames
+  // wholly inside the delay are decoded and dropped.
+  for (uint64_t index = 0; index * spf < end; ++index) {
+    // One frame is bounded work: 1152 samples.
+    if (cancellation.isRequested()) return DecodedAudioStatus::Cancelled;
+    const DecodedAudioStatus status = decoder.decode(
+        layout.frames[static_cast<size_t>(index)], layout, frame.data());
+    if (status != DecodedAudioStatus::Ok) return status;
+    const uint64_t first = std::max(begin, index * spf);
+    const uint64_t last = std::min(end, (index + 1) * spf);
+    for (uint64_t d = first; d < last; ++d) {
+      const size_t in = static_cast<size_t>((d - index * spf) * layout.channels);
+      const size_t out = static_cast<size_t>(d - begin);
+      for (uint32_t c = 0; c < layout.channels; ++c)
+        candidate.channels[c][out] = frame[in + c];
+    }
   }
   if (cancellation.isRequested()) return DecodedAudioStatus::Cancelled;
   *output = std::move(candidate);
@@ -751,25 +786,30 @@ DecodedAudioResult prepareDecodedAudio(
       result.status = DecodedAudioStatus::IoError;
       return result;
     }
-    std::array<unsigned char, 16> magic{};
-    const size_t magicBytes = std::fread(magic.data(), 1, magic.size(), owner.file);
-    if (magicBytes < 4) {
-      result.status = std::ferror(owner.file) != 0
-          ? DecodedAudioStatus::IoError
-          : DecodedAudioStatus::MalformedData;
+    if (physicalEnd < 4) {
+      result.status = DecodedAudioStatus::MalformedData;
+      return result;
+    }
+    // The detector the streaming sources use too (media_format.cpp): a file
+    // is one format to both paths or to neither.
+    DecodedAudioSourceFormat detected = DecodedAudioSourceFormat::Auto;
+    const DecodedAudioStatus detection = media_internal::detectMediaFormat(
+        media_internal::MediaByteSource{owner.file, &fileReadAt,
+                                        static_cast<uint64_t>(physicalEnd)},
+        &detected);
+    if (detection != DecodedAudioStatus::Ok) {
+      result.status = detection;
       return result;
     }
     if (fseeko(owner.file, 0, SEEK_SET) != 0) {
       result.status = DecodedAudioStatus::IoError;
       return result;
     }
-    const DecodedAudioSourceFormat detected =
-        detectSourceFormat(magic.data(), magicBytes);
     if (detected == DecodedAudioSourceFormat::Auto) {
       result.status = DecodedAudioStatus::UnsupportedFormat;
       return result;
     }
-    if (!declarationMatches(options.sourceFormat, detected)) {
+    if (!media_internal::declarationMatches(options.sourceFormat, detected)) {
       result.status = DecodedAudioStatus::MalformedData;
       return result;
     }
@@ -779,6 +819,10 @@ DecodedAudioResult prepareDecodedAudio(
       status = decodeWav(owner.file, options, cancellation, &decoded);
     else if (detected == DecodedAudioSourceFormat::Flac)
       status = decodeFlac(&owner, options, cancellation, &decoded);
+    // Natively on every build, FFmpeg or not (mp3_streaming_source.cpp): FFmpeg,
+    // where a build selects it, keeps the codecs zcore has no decoder for.
+    else if (detected == DecodedAudioSourceFormat::Mp3)
+      status = decodeMp3(owner.file, options, cancellation, &decoded);
 #if defined(SINGZ_ZCORE_FFMPEG)
     else
       status = media_internal::decodeFfmpeg(
@@ -817,8 +861,7 @@ DecodedAudioResult prepareDecodedAudio(
 const char* decodedAudioCapabilityTag() noexcept {
 #if defined(SINGZ_ZCORE_FFMPEG)
   const uint32_t extended = media_internal::ffmpegCodecCapabilityMask();
-  if ((DecodedAudioCapabilityWav | DecodedAudioCapabilityFlac | extended) ==
-      kDecodedAudioProductFormatMask)
+  if ((kNativeFormatMask | extended) == kDecodedAudioProductFormatMask)
     return kProductFfmpegCapabilityTag;
   if (extended != 0) return kPartialFfmpegCapabilityTag;
 #endif
@@ -857,13 +900,12 @@ DecodedAudioSourceFormat decodedAudioFormatForExtension(
 bool decodedAudioFormatSupported(DecodedAudioSourceFormat format) noexcept {
   if (format == DecodedAudioSourceFormat::Auto ||
       format == DecodedAudioSourceFormat::Wav ||
-      format == DecodedAudioSourceFormat::Flac)
+      format == DecodedAudioSourceFormat::Flac ||
+      format == DecodedAudioSourceFormat::Mp3)
     return true;
 #if defined(SINGZ_ZCORE_FFMPEG)
   const uint32_t mask = media_internal::ffmpegCodecCapabilityMask();
   switch (format) {
-    case DecodedAudioSourceFormat::Mp3:
-      return (mask & DecodedAudioCapabilityMp3) != 0;
     case DecodedAudioSourceFormat::M4a:
       return (mask & (DecodedAudioCapabilityM4aAac |
                       DecodedAudioCapabilityM4aAlac)) ==
@@ -888,8 +930,7 @@ bool decodedAudioFormatSupported(DecodedAudioSourceFormat format) noexcept {
 
 DecodedAudioCodecCapabilities decodedAudioCodecCapabilities() noexcept {
   DecodedAudioCodecCapabilities capabilities;
-  capabilities.formatMask =
-      DecodedAudioCapabilityWav | DecodedAudioCapabilityFlac;
+  capabilities.formatMask = kNativeFormatMask;
 #if defined(SINGZ_ZCORE_FFMPEG)
   const uint32_t extended = media_internal::ffmpegCodecCapabilityMask();
   capabilities.formatMask |= extended;

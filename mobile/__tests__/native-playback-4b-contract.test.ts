@@ -206,6 +206,24 @@ describe('iOS Phase 4B bridge contract', () => {
       false,
     );
 
+    // The two FFmpeg-free shapes: WAV/FLAC (a binary from before the native
+    // MP3 decoder) and WAV/FLAC/MP3 (every one since). A mask and a tag from
+    // different shapes is neither.
+    const noFfmpeg = (formatMask: number, capabilityTag: string) => {
+      const status = nativeStatus();
+      Object.assign(status.mediaCodec as Record<string, unknown>, {
+        formatMask,
+        capabilityTag,
+        dynamicallyLinkedFfmpeg: false,
+        runtimeVersion: '',
+      });
+      return parseNativePlaybackCapability(status, 'ios').available;
+    };
+    expect(noFfmpeg(0x003, 'singz-prepared-audio-fd-wav-flac-v1')).toBe(true);
+    expect(noFfmpeg(0x007, 'singz-prepared-audio-fd-wav-flac-mp3-v2')).toBe(true);
+    expect(noFfmpeg(0x007, 'singz-prepared-audio-fd-wav-flac-v1')).toBe(false);
+    expect(noFfmpeg(0x003, 'singz-prepared-audio-fd-wav-flac-mp3-v2')).toBe(false);
+
     const parsed = parseNativePlaybackCapability(nativeStatus(), 'ios');
     expect(parsed.mediaCodec).toEqual({
       abiVersion: 1,

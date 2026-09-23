@@ -14,6 +14,9 @@ import {
   DESKTOP_PLAYBACK_CODEC_BASE_EXTENSIONS,
   DESKTOP_PLAYBACK_CODEC_BASE_MASK,
   DESKTOP_PLAYBACK_CODEC_BASE_TAG,
+  DESKTOP_PLAYBACK_CODEC_NATIVE_EXTENSIONS,
+  DESKTOP_PLAYBACK_CODEC_NATIVE_MASK,
+  DESKTOP_PLAYBACK_CODEC_NATIVE_TAG,
   DESKTOP_PLAYBACK_CODEC_FULL_EXTENSIONS,
   DESKTOP_PLAYBACK_CODEC_FULL_MASK,
   DESKTOP_PLAYBACK_CODEC_FULL_TAG,
@@ -77,10 +80,15 @@ function validRuntime(runtime: DesktopPlaybackRuntimeCapability | null): boolean
   if (!runtime?.available || runtime.playbackCapability !== DESKTOP_PLAYBACK_CAPABILITY) return false
   const codec = runtime.mediaCodec
   if (codec.abiVersion !== 1) return false
-  const base = codec.formatMask === DESKTOP_PLAYBACK_CODEC_BASE_MASK &&
-    !codec.dynamicallyLinkedFfmpeg && codec.runtimeVersion === '' && codec.target === '' &&
-    codec.profile === '' && codec.capabilityTag === DESKTOP_PLAYBACK_CODEC_BASE_TAG &&
-    exactExtensions(codec.extensions, DESKTOP_PLAYBACK_CODEC_BASE_EXTENSIONS)
+  const noFfmpeg = !codec.dynamicallyLinkedFfmpeg && codec.runtimeVersion === '' &&
+    codec.target === '' && codec.profile === ''
+  // An addon from before the native MP3 decoder, and every addon since.
+  const base = noFfmpeg && ((codec.formatMask === DESKTOP_PLAYBACK_CODEC_BASE_MASK &&
+    codec.capabilityTag === DESKTOP_PLAYBACK_CODEC_BASE_TAG &&
+    exactExtensions(codec.extensions, DESKTOP_PLAYBACK_CODEC_BASE_EXTENSIONS)) ||
+    (codec.formatMask === DESKTOP_PLAYBACK_CODEC_NATIVE_MASK &&
+      codec.capabilityTag === DESKTOP_PLAYBACK_CODEC_NATIVE_TAG &&
+      exactExtensions(codec.extensions, DESKTOP_PLAYBACK_CODEC_NATIVE_EXTENSIONS)))
   const full = codec.formatMask === DESKTOP_PLAYBACK_CODEC_FULL_MASK &&
     codec.dynamicallyLinkedFfmpeg && codec.runtimeVersion.length > 0 && codec.target.length > 0 &&
     codec.profile === DESKTOP_PLAYBACK_CODEC_PROFILE &&

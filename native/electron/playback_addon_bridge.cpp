@@ -3,6 +3,7 @@
 #include "native_audio_ownership.h"
 
 #include <lane_measure.h>
+#include <zcore/media/decoded_audio.h>
 #include <native_playback_session.h>
 
 #include <algorithm>
@@ -2263,6 +2264,11 @@ napi_value playbackStatus(napi_env env, napi_callback_info) {
   setValue(env, result, "lanes", lanes);
   setValue(env, result, "capability",
            makeString(env, nativePlaybackSessionCapabilityTag()));
+  // What THIS addon's media layer decodes (decodedAudioCapabilityTag). Main
+  // advertises the native MP3 decoder only when the addon it loaded says it
+  // has one, so a stale addon keeps its MP3 lanes on Web Audio.
+  setValue(env, result, "mediaCodecTag",
+           makeString(env, decodedAudioCapabilityTag()));
   return result;
 }
 

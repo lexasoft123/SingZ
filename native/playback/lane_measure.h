@@ -28,7 +28,7 @@
 //
 // Nothing here is retained past the return: the samples go through a block
 // buffer and out. A lane the streaming source cannot open (today: anything
-// that is not FLAC) comes back `ok == false` with the status, and the caller
+// that is not FLAC, WAV or MP3) comes back `ok == false` with the status, and the caller
 // decodes that one lane the old way — a refusal degrades one lane, never the
 // song.
 
