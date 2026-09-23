@@ -479,7 +479,12 @@ describe('the desktop side of adoption', () => {
     const p = await phone()
     const named = [
       'Sixteen Tons', '...Baby One More Time', '. . . Ready For It', '. . .', ' . x', 'Tab\there',
-      'a/b', 'CON: x', '  spaced  out ', '.', '..', '', '.hidden'
+      'a/b', 'CON: x', '  spaced  out ', '.', '..', '', '.hidden',
+      // every character either side bans — the nine printable ones and all 32
+      // controls, each between letters so no whitespace step can hide it — so
+      // neither side can drop one alone
+      'a\\b/c:d*e?f"g<h>i|j',
+      Array.from({ length: 32 }, (_, i) => `${String.fromCharCode(i)}x`).join('')
     ]
     // and every short name over the characters that interact: dots, spaces,
     // a tab, a colon, a letter
