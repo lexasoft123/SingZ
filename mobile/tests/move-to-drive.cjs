@@ -13,6 +13,9 @@
  *   PLATFORM=ios SIM_UDID=<udid> METRO_PORT=8086 node mobile/tests/move-to-drive.cjs
  *   PLATFORM=android ANDROID_SERIAL=emulator-5560 METRO_PORT=8086 node mobile/tests/move-to-drive.cjs
  *
+ * Three variants, each owed after a change here: the default (the Drive tab
+ * opened mid-batch), STAY_ON_PHONE=1 and CUT_MID_BATCH=1 (below).
+ *
  * Needs a debug build carrying the Phase 6 natives, Metro on METRO_PORT from
  * THIS worktree, and nothing else talking to that Metro: the driver rewrites
  * the generated mobile/src/gdrive-config.ts to aim the app at the fake Drive,
@@ -36,6 +39,18 @@ const DRIVE_PORT = Number(process.env.DRIVE_PORT || 8799)
 const REPO = resolve(__dirname, '../..')
 const SAMPLE = join(__dirname, '..', 'assets', 'sample')
 const SONG = 'Move Me To Drive'
+/** A second song, so the offer moves a LIBRARY — "Add all local songs". Its
+ *  stems carry a few bytes of their own: two songs with the same audio are
+ *  one song, and the second would rightly stay behind. It is never opened. */
+const SONG2 = 'Also Move Me'
+/** STAY_ON_PHONE=1: the Drive tab is visited first (its listing cached),
+ *  the batch runs on the phone tab throughout, and only then does the Drive
+ *  tab open. Default: the tab changes to Drive mid-batch. */
+const STAY = process.env.STAY_ON_PHONE === '1'
+/** CUT_MID_BATCH=1: the signal goes the moment the first song has landed.
+ *  What went up must be listed — and open — with no signal, after a cold
+ *  start too; what did not stays on the phone for the next "Add all". */
+const CUT = process.env.CUT_MID_BATCH === '1'
 const CONFIG_TS = join(__dirname, '..', 'src', 'gdrive-config.ts')
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const md5 = (b) => createHash('md5').update(b).digest('hex')
@@ -125,13 +140,14 @@ module.exports = new Proxy(real, { get: (t, k) => (k in t ? t[k] : k === '__esMo
 // --------------------------------------------------------------- the seed --
 /** A split "This phone" song: the sample's six real stems, its lyrics, the
  *  original kept as song.flac, and a doc whose hashes state every file. */
-function buildSeed(dir) {
+function buildSeed(dir, name = SONG) {
   fs.rmSync(dir, { recursive: true, force: true })
   fs.mkdirSync(join(dir, 'stems'), { recursive: true })
   const stemHashes = {}
   for (const f of fs.readdirSync(join(SAMPLE, 'stems'))) {
     const to = join(dir, 'stems', f)
     fs.copyFileSync(join(SAMPLE, 'stems', f), to)
+    if (name !== SONG) fs.appendFileSync(to, `\n${name}`)
     const buf = fs.readFileSync(to)
     stemHashes[f] = { md5: md5(buf), size: buf.length, mtimeMs: fs.statSync(to).mtimeMs }
   }
@@ -139,7 +155,7 @@ function buildSeed(dir) {
   fs.copyFileSync(join(SAMPLE, 'lyrics.json'), join(dir, 'lyrics.json'))
   const lyr = fs.readFileSync(join(dir, 'lyrics.json'))
   const doc = JSON.parse(fs.readFileSync(join(SAMPLE, 'project.json'), 'utf8'))
-  doc.name = SONG
+  doc.name = name
   doc.songFile = 'song.flac'
   doc.version = 2
   doc.stemHashes = stemHashes
@@ -297,6 +313,53 @@ const evSafe = (ws, expression) =>
     }
   })
 
+/** Launched fresh: kill whatever runs, start it, wait for it to boot. */
+async function relaunch() {
+  if (PLATFORM === 'ios') {
+    execSync(`xcrun simctl terminate ${UDID} ${IOS_BUNDLE} 2>/dev/null || true`)
+    execFileSync('xcrun', ['simctl', 'launch', UDID, IOS_BUNDLE])
+  } else {
+    adb('shell', 'am', 'force-stop', android.PKG)
+    adb('shell', 'am', 'start', '-n', `${android.PKG}/com.singzplayer.MainActivity`)
+  }
+  await sleep(8000)
+}
+
+/** The catalog's hooks are up, and the app is silent. */
+async function ready(ev) {
+  for (let i = 0; i < 60 && !(await ev('!!(globalThis.__test && __test.selectMode && __test.moveAllToDrive && __test.driveSignOut)')); i++) {
+    await sleep(1000)
+  }
+  // automated runs are silent: songs are opened below
+  await ev('try { __test.engine.master.gain.value = 0 } catch (e) {}')
+}
+
+/** Open a song from the list on screen and wait for the player — with no
+ *  evaluation during the decode (Android: the Hermes-inspector SIGSEGV). */
+async function openSong(ev, dir) {
+  await ev(`void __test.openProject(${JSON.stringify(dir)})`)
+  await sleep(15_000)
+  let opened = false
+  for (let i = 0; i < 30 && !opened; i++) {
+    opened = (await ev("__test.screen === 'player'")) === true
+    if (!opened) await sleep(1000)
+  }
+  if (opened) await ev('try { __test.backend.setMasterGain(0) } catch (e) {}')
+  return opened
+}
+
+/** The Drive tab, and what it lists once `dir` shows (or it gives up). */
+async function driveTab(ev, dir) {
+  await ev("void __test.selectMode('gdrive')")
+  let l = []
+  for (let i = 0; i < 30; i++) {
+    await sleep(500)
+    l = JSON.parse((await ev('JSON.stringify([__test.libMode, __test.projects || [], !!__test.offline])')) || '[]')
+    if (l[0] === 'gdrive' && l[1].includes(dir)) break
+  }
+  return l
+}
+
 // ----------------------------------------------------------------- main --
 ;(async () => {
   const work = fs.mkdtempSync(join(os.tmpdir(), 'singz-move-e2e-'))
@@ -359,20 +422,32 @@ const evSafe = (ws, expression) =>
     // Seed the song into "This phone".
     const local = join(work, 'seed', SONG)
     const want = buildSeed(local)
+    const local2 = join(work, 'seed', SONG2)
+    const want2 = buildSeed(local2, SONG2)
+    const seeds = [
+      [SONG, local, want],
+      [SONG2, local2, want2]
+    ]
     if (PLATFORM === 'ios') {
       execSync(`xcrun simctl terminate ${UDID} ${IOS_BUNDLE} 2>/dev/null || true`)
       const data = execFileSync('xcrun', ['simctl', 'get_app_container', UDID, IOS_BUNDLE, 'data'], { encoding: 'utf8' }).trim()
-      const dest = join(data, 'Documents', SONG)
-      fs.rmSync(dest, { recursive: true, force: true })
-      fs.cpSync(local, dest, { recursive: true, preserveTimestamps: true })
+      for (const [name, from] of seeds) {
+        const dest = join(data, 'Documents', name)
+        fs.rmSync(dest, { recursive: true, force: true })
+        fs.cpSync(from, dest, { recursive: true, preserveTimestamps: true })
+      }
       execFileSync('xcrun', ['simctl', 'launch', UDID, IOS_BUNDLE])
     } else {
       adb('root')
       await sleep(1500)
       console.log(`      ${android.silenceDevice(adb)}`)
-      const dest = `${android.extFilesDir()}/SingZ projects/${SONG}`
-      adb('shell', `rm -rf ${JSON.stringify(dest)}; mkdir -p ${JSON.stringify(dest + '/stems')}`)
-      for (const rel of Object.keys(want)) execFileSync(ADB, ['-s', SERIAL, 'push', join(local, rel), `${dest}/${rel}`], { stdio: 'ignore' })
+      for (const [name, from, files] of seeds) {
+        const dest = `${android.extFilesDir()}/SingZ projects/${name}`
+        adb('shell', `rm -rf ${JSON.stringify(dest)}; mkdir -p ${JSON.stringify(dest + '/stems')}`)
+        for (const rel of Object.keys(files)) {
+          execFileSync(ADB, ['-s', SERIAL, 'push', join(from, rel), `${dest}/${rel}`], { stdio: 'ignore' })
+        }
+      }
       // the whole library folder, not just the song: `mkdir -p` above may
       // have created "SingZ projects" itself (a fresh install has not made it
       // yet), root-owned, and then the app cannot list its own library
@@ -382,102 +457,230 @@ const evSafe = (ws, expression) =>
     }
     await sleep(8000)
 
-    const cdp = await connect()
+    let cdp = await connect()
     ws = cdp.ws
-    const ev = cdp.ev
-    for (let i = 0; i < 60 && !(await ev('!!(globalThis.__test && __test.selectMode && __test.moveToDrive)')); i++) {
-      await sleep(1000)
-    }
-    // automated runs are silent: the song is opened below
-    await ev('try { __test.engine.master.gain.value = 0 } catch (e) {}')
+    let ev = cdp.ev
+    await ready(ev)
+    // A clean Drive slate: signing out drops the stored listing too, which
+    // otherwise describes the fake Drive a PREVIOUS run talked to — and the
+    // offer leaves out songs that listing already holds.
+    await cdp.settle('__test.driveSignOut()', 30_000)
+    await ev("__test.setPref('singz.publish', '')")
+    await ev("__test.setPref('singz.driveOffer.dismissed', '')")
     await ev(
       `__test.setPref('singz.gdrive.tokens', ${JSON.stringify(
         JSON.stringify({ access: 'phone', refresh: 'phone', expiresAt: Date.now() + 3600_000 })
       )})`
     )
+    if (STAY) {
+      // the Drive tab open a moment ago: its listing is cached, and fresh
+      await ev("void __test.selectMode('gdrive')")
+      for (let i = 0; i < 30; i++) {
+        await sleep(500)
+        const l = JSON.parse((await ev('JSON.stringify([__test.libMode, __test.projects || []])')) || '[]')
+        if (l[0] === 'gdrive' && l[1].includes('Song One')) break
+      }
+    }
     await ev("void __test.selectMode('phone')")
     let listed = false
     for (let i = 0; i < 40 && !listed; i++) {
       await ev('void __test.refresh()')
       await sleep(700)
-      listed = (await ev(`(__test.projects || []).includes(${JSON.stringify(SONG)})`)) === true
+      listed = (await ev(`[${JSON.stringify(SONG)}, ${JSON.stringify(SONG2)}].every(d => (__test.projects || []).includes(d))`)) === true
     }
-    check('the split song is in "This phone"', listed)
-
-    // ---- the move, through the swipe's own path (quiet: no final alert)
-    const t0 = Date.now()
-    const name = await cdp.settle(`__test.moveToDrive(${JSON.stringify(SONG)})`, 5 * 60_000)
-    check('the move resolves to its Drive name', name === SONG, String(name))
-    console.log(`      moved in ${Date.now() - t0} ms`)
-
-    const rootFolder = [...store.files.values()].find((f) => f.name === 'SingZ' && !f.trashed)
-    const folder = [...store.files.values()].find(
-      (f) => f.parents.includes(rootFolder.id) && f.name === SONG && f.mimeType === H.FOLDER && !f.trashed
-    )
-    check('it is in the Drive library, complete and tagged', folder?.appProperties?.singzState === 'published')
-    const tree = folder ? H.treeOf(store, folder.id) : new Map()
-    const sameBytes = Object.entries(want).every(([rel, m]) => tree.get(rel) && md5(tree.get(rel).bytes) === m)
+    check('both split songs are in "This phone"', listed)
+    let offer = null
+    for (let i = 0; i < 20 && !offer; i++) {
+      offer = JSON.parse((await ev('JSON.stringify(__test.driveOffer || null)')) || 'null')
+      if (!offer) await sleep(500)
+    }
     check(
-      'Drive holds exactly the phone\'s bytes, file for file',
-      sameBytes && tree.size === Object.keys(want).length,
-      `${tree.size} files`
-    )
-    const staging = [...store.files.values()].find((f) => f.name === 'SingZ uploads' && !f.trashed)
-    check(
-      'nothing is left in staging',
-      !!staging && ![...store.files.values()].some((f) => f.parents.includes(staging.id) && !f.trashed)
+      'the library offers to add all its songs to Google Drive',
+      !!offer && [SONG, SONG2].every((d) => offer.dirs.includes(d)),
+      JSON.stringify(offer)
     )
 
-    await ev('void __test.refresh()')
-    await sleep(1500)
-    check(
-      'it has left "This phone"',
-      (await ev(`(__test.projects || []).includes(${JSON.stringify(SONG)})`)) === false
-    )
-    await ev("void __test.selectMode('gdrive')")
-    let inDrive = false
-    for (let i = 0; i < 30 && !inDrive; i++) {
+    let folder = null
+    const songFolder = (name) => {
+      const rootFolder = [...store.files.values()].find((f) => f.name === 'SingZ' && !f.trashed)
+      return [...store.files.values()].find(
+        (f) => f.parents.includes(rootFolder.id) && f.name === name && f.mimeType === H.FOLDER && !f.trashed
+      )
+    }
+    if (CUT) {
+      // ---- the signal goes the moment the first song has landed: the second
+      // song's staging folder is its first write to Drive, and it never arrives
+      let stagings = 0
+      server.cutWhen = (method, _url, body) =>
+        method === 'POST' && body.toString().includes('"name":"upload-') && ++stagings === 2
+      const cut = await cdp.settle('__test.moveAllToDrive()', 5 * 60_000)
+      const gone = cut?.moved?.[0]?.dir
+      const kept = [SONG, SONG2].find((d) => d !== gone)
+      check(
+        'the first song went up before the signal went, and the second was passed over',
+        (cut?.moved || []).length === 1 && (cut?.skipped || []).length === 1 && cut.skipped[0].dir === kept,
+        JSON.stringify(cut)
+      )
+      await ev("void __test.selectMode('phone')")
       await sleep(1000)
-      inDrive = (await ev(`(__test.projects || []).includes(${JSON.stringify(SONG)})`)) === true
-    }
-    check('the Drive tab lists it', inDrive)
-    const usage = await ev(`JSON.stringify((__test.usage || {})[${JSON.stringify(SONG)}] || null)`)
-    const u = JSON.parse(usage || 'null')
-    const stemsHere = Object.keys(want).filter((r) => r.startsWith('stems/'))
-    check(
-      'and it is already downloaded — its stems became the Drive copy',
-      !!u && stemsHere.every((r) => u.sizes?.[r] > 0),
-      usage
-    )
+      await ev('void __test.refresh()')
+      await sleep(1500)
+      const here = JSON.parse((await ev('JSON.stringify(__test.projects || [])')) || '[]')
+      check(
+        'the one that went up has left "This phone"; the other is still here',
+        !!gone && !here.includes(gone) && here.includes(kept),
+        JSON.stringify(here)
+      )
+      let seen = await driveTab(ev, gone)
+      check(
+        'with no signal, the Drive tab lists the song that went up',
+        seen[0] === 'gdrive' && seen[1].includes(gone),
+        JSON.stringify(seen)
+      )
+      // ---- a cold start, still no signal: the listing was saved, not just held
+      ws.close()
+      await relaunch()
+      cdp = await connect()
+      ws = cdp.ws
+      ev = cdp.ev
+      await ready(ev)
+      seen = await driveTab(ev, gone)
+      check(
+        'after a cold start with no signal, it is still listed',
+        seen[0] === 'gdrive' && seen[1].includes(gone),
+        JSON.stringify(seen)
+      )
+      check('and it opens from its downloaded copy, with no signal', await openSong(ev, gone))
+      await ev('void (__test.back ? __test.back() : null)').catch(() => {})
+      await sleep(2000)
+      // ---- the signal is back: the next "Add all" takes the song that stayed
+      server.offline = false
+      server.cutWhen = undefined
+      await ev("void __test.selectMode('phone')")
+      let offered = false
+      for (let i = 0; i < 30 && !offered; i++) {
+        await ev('void __test.refresh()')
+        await sleep(700)
+        offered = (await ev(`((__test.driveOffer || {}).dirs || []).includes(${JSON.stringify(kept)})`)) === true
+      }
+      check('the song that stayed is offered again', offered)
+      const rest = await cdp.settle('__test.moveAllToDrive()', 5 * 60_000)
+      check(
+        'back online, the next "Add all" takes it',
+        JSON.stringify((rest?.moved || []).map((m) => m.dir)) === JSON.stringify([kept]) && !rest.stopped,
+        JSON.stringify(rest)
+      )
+      folder = songFolder(SONG)
+      const tree = folder ? H.treeOf(store, folder.id) : new Map()
+      check(
+        'both are in the Drive library, complete and tagged, byte for byte',
+        [SONG, SONG2].every((n) => songFolder(n)?.appProperties?.singzState === 'published') &&
+          Object.entries(want).every(([rel, m]) => tree.get(rel) && md5(tree.get(rel).bytes) === m)
+      )
+    } else {
+      // ---- the move, through the offer's own path (quiet: no closing dialog) —
+      // and the singer walks over to the Drive tab while it runs: every refresh
+      // the batch makes from here on must list DRIVE there, not the phone
+      const t0 = Date.now()
+      const running = cdp.settle('__test.moveAllToDrive()', 5 * 60_000)
+      await sleep(300)
+      // a second "Add all" while the first runs (a double tap) is refused, never
+      // run over the same songs
+      const second = await cdp.settle('__test.moveAllToDrive()', 60_000)
+      check(
+        'a second "Add all" mid-move is refused',
+        second?.stopped?.reason === 'blocked' && (second?.moved || []).length === 0,
+        JSON.stringify(second)
+      )
+      if (!STAY) await ev("void __test.selectMode('gdrive')")
+      const batch = await running
+      const names = (batch?.moved || []).map((m) => m.name).sort()
+      check(
+        'every offered song moved',
+        JSON.stringify(names) === JSON.stringify([SONG2, SONG].sort()) && !batch.stopped && batch.skipped.length === 0,
+        JSON.stringify(batch)
+      )
+      console.log(`      moved in ${Date.now() - t0} ms`)
 
-    // ---- open it from Drive: nothing may cross the network for the stems
-    const hitsBefore = store.hits.length
-    await ev(`void __test.openProject(${JSON.stringify(SONG)})`)
-    // no evaluation during the decode (Android: the Hermes-inspector SIGSEGV)
-    await sleep(15_000)
-    let opened = false
-    for (let i = 0; i < 30 && !opened; i++) {
-      opened = (await ev("__test.screen === 'player'")) === true
-      if (!opened) await sleep(1000)
+      folder = songFolder(SONG)
+      check('it is in the Drive library, complete and tagged', folder?.appProperties?.singzState === 'published')
+      const tree = folder ? H.treeOf(store, folder.id) : new Map()
+      const sameBytes = Object.entries(want).every(([rel, m]) => tree.get(rel) && md5(tree.get(rel).bytes) === m)
+      check(
+        'Drive holds exactly the phone\'s bytes, file for file',
+        sameBytes && tree.size === Object.keys(want).length,
+        `${tree.size} files`
+      )
+      const staging = [...store.files.values()].find((f) => f.name === 'SingZ uploads' && !f.trashed)
+      check(
+        'nothing is left in staging',
+        !!staging && ![...store.files.values()].some((f) => f.parents.includes(staging.id) && !f.trashed)
+      )
+
+      // STAY: now, after the fact — "Show me"
+      if (STAY) await ev("void __test.selectMode('gdrive')")
+      let driveList = []
+      for (let i = 0; i < 20; i++) {
+        await sleep(500)
+        driveList = JSON.parse((await ev('JSON.stringify([__test.libMode, __test.projects || []])')) || '[]')
+        if (driveList[0] === 'gdrive' && [SONG, SONG2, 'Song One'].every((d) => driveList[1].includes(d))) break
+      }
+      check(
+        STAY
+          ? 'the Drive tab, opened after the move, lists the moved songs — not its listing from before'
+          : 'the Drive tab, opened mid-move, lists the Drive library — not the phone',
+        driveList[0] === 'gdrive' && [SONG, SONG2, 'Song One'].every((d) => driveList[1].includes(d)),
+        JSON.stringify(driveList)
+      )
+      await ev("void __test.selectMode('phone')")
+      await sleep(1500)
+      await ev('void __test.refresh()')
+      await sleep(1500)
+      check(
+        'both have left "This phone" — a song is here or in Drive, never both',
+        (await ev(`[${JSON.stringify(SONG)}, ${JSON.stringify(SONG2)}].some(d => (__test.projects || []).includes(d))`)) === false
+      )
+      check('and nothing is left to offer', (await ev('__test.driveOffer == null')) === true)
+      await ev("void __test.selectMode('gdrive')")
+      let inDrive = false
+      for (let i = 0; i < 30 && !inDrive; i++) {
+        await sleep(1000)
+        inDrive = (await ev(`(__test.projects || []).includes(${JSON.stringify(SONG)})`)) === true
+      }
+      check('the Drive tab lists it', inDrive)
+      const usage = await ev(`JSON.stringify((__test.usage || {})[${JSON.stringify(SONG)}] || null)`)
+      const u = JSON.parse(usage || 'null')
+      const stemsHere = Object.keys(want).filter((r) => r.startsWith('stems/'))
+      check(
+        'and it is already downloaded — its stems became the Drive copy',
+        !!u && stemsHere.every((r) => u.sizes?.[r] > 0),
+        usage
+      )
+
+      // ---- open it from Drive: nothing may cross the network for the stems
+      const hitsBefore = store.hits.length
+      check('it opens from the Drive tab', await openSong(ev, SONG))
+      // by the ids of the moved song's own stems — the request paths carry ids,
+      // never names, so matching on "stems" would pass however much went over
+      const stemIds = [...tree.entries()].filter(([rel]) => rel.startsWith('stems/')).map(([, f]) => f.id)
+      const stemReads = store.hits
+        .slice(hitsBefore)
+        .filter((h) => h.includes('alt=media') && stemIds.some((id) => h.includes(`/files/${id}?`)))
+      check(
+        'with no stem downloaded again',
+        stemIds.length === 6 && stemReads.length === 0,
+        `${stemIds.length} stems on Drive, ${stemReads.length} of them downloaded`
+      )
+      await ev('void (__test.closeProject ? __test.closeProject() : null)').catch(() => {})
     }
-    check('it opens from the Drive tab', opened)
-    await ev('try { __test.backend.setMasterGain(0) } catch (e) {}')
-    // by the ids of the moved song's own stems — the request paths carry ids,
-    // never names, so matching on "stems" would pass however much went over
-    const stemIds = [...tree.entries()].filter(([rel]) => rel.startsWith('stems/')).map(([, f]) => f.id)
-    const stemReads = store.hits
-      .slice(hitsBefore)
-      .filter((h) => h.includes('alt=media') && stemIds.some((id) => h.includes(`/files/${id}?`)))
-    check(
-      'with no stem downloaded again',
-      stemIds.length === 6 && stemReads.length === 0,
-      `${stemIds.length} stems on Drive, ${stemReads.length} of them downloaded`
-    )
-    await ev('void (__test.closeProject ? __test.closeProject() : null)').catch(() => {})
 
     // ---- the desktop takes it in
     const adopt = await H.gdriveSync({ root })
-    check('the desktop takes it in', JSON.stringify(adopt.adopted) === JSON.stringify([SONG]), JSON.stringify(adopt))
+    check(
+      'the desktop takes both in',
+      JSON.stringify([...(adopt.adopted || [])].sort()) === JSON.stringify([SONG2, SONG].sort()),
+      JSON.stringify(adopt)
+    )
     const onDesktop = Object.entries(want).every(
       ([rel, m]) => fs.existsSync(join(root, SONG, rel)) && md5(fs.readFileSync(join(root, SONG, rel))) === m
     )

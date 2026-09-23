@@ -8,6 +8,7 @@ import {
   driveEnsureRoot,
   driveFolderNamed,
   driveKeepText,
+  driveListMovedIn,
   driveListProjects,
   driveMeta,
   drivePatch,
@@ -120,16 +121,24 @@ function mimeOf(rel: string): string {
   }
 }
 
-/** Did a move of this song start and not finish? (The swipe then says
- *  "Finish moving".) */
+/** One move job at a time. The look at launch and an "Add all" begun during
+ *  it would otherwise both finish the same cut-off song — two natives handing
+ *  the same stems to the cache, one failing on files the other already took,
+ *  and a song that left the phone reported as one that stayed. */
+let jobs: Promise<unknown> = Promise.resolve()
+function oneAtATime<T>(job: () => Promise<T>): Promise<T> {
+  const run = jobs.then(job, job)
+  jobs = run.catch(() => undefined)
+  return run
+}
+
+/** Did a move of this song start and not finish? Its record stands until the
+ *  phone has let go of the song — what "Add all" resumes, and what
+ *  finishCompletedMoves finishes. */
 export async function moveInProgress(dir: string): Promise<boolean> {
   return (await records())[dir] !== undefined
 }
 
-/** Every phone song whose move started and did not finish. */
-export async function movesInProgress(): Promise<string[]> {
-  return Object.keys(await records())
-}
 
 const sameHash = (
   h: { md5: string; size: number } | undefined,
@@ -315,33 +324,8 @@ export async function moveToDrive(dir: string, opts: MoveOptions = {}): Promise<
   }
   opts.onProgress?.({ stage: 'checking', done: 0, total: 0 })
 
-  // Already moved in by an earlier attempt (and perhaps renamed by a desktop
-  // since)? Then only the phone's half is left — and it may be half done, its
-  // stems partly in the Drive cache already, so nothing here may insist on
-  // reading the song's files again. Drive is not touched either.
-  const earlier = (await records())[dir]
-  if (earlier) {
-    const rootId = (await driveFolderNamed('SingZ'))?.id
-    const target = rootId
-      ? (await driveChildren(rootId)).find(
-          (f) => f.mimeType === DRIVE_FOLDER && f.appProperties?.[PUBLISH_ID_KEY] === earlier.id
-        )
-      : undefined
-    if (target && !(await sameSong(dir, target))) {
-      // The record outlived the song it was made for, and a new song took the
-      // name: letting go here would delete a song that never went up.
-      log('publish', `${dir}: an old move's record did not match this song — starting a fresh move`, 'warn')
-      await dropRecord(dir)
-    } else if (target) {
-      log('publish', `${dir}: already in the Drive library as "${target.name}" — finishing on the phone`)
-      opts.onProgress?.({ stage: 'finishing', done: 1, total: 1 })
-      for (const rel of ['project.json', 'lyrics.json', 'graph.json']) {
-        const text = await Folder.readText(dir, rel).catch(() => undefined)
-        if (text !== undefined) await driveKeepText(target.name, rel, text)
-      }
-      return finish(dir, target.name, 0)
-    }
-  }
+  const already = await finishIfMovedIn(dir)
+  if (already) return { name: already, bytes: 0 }
 
   const files = await manifestOf(dir)
   const total = files.reduce((n, f) => n + f.size, 0)
@@ -350,7 +334,7 @@ export async function moveToDrive(dir: string, opts: MoveOptions = {}): Promise<
     throw new MoveBlocked(
       'update-desktop',
       'Update SingZ on your computer first. The version syncing this Drive would ' +
-        'remove songs it did not make, and this one would be lost from Drive.'
+        'remove songs it did not make, and these would be lost from Drive.'
     )
   }
   const record = await recordFor(dir)
@@ -371,7 +355,243 @@ export async function moveToDrive(dir: string, opts: MoveOptions = {}): Promise<
   for (const f of files) {
     if (f.text !== undefined) await driveKeepText(target.name, f.rel, f.text)
   }
-  return finish(dir, target.name, total)
+  const doc = JSON.parse(files.find((f) => f.rel === 'project.json')!.text!) as ProjectDoc
+  return finish(dir, target, { doc, ...(await folderRows(target)) }, total)
+}
+
+/** A song folder's own Drive listing: its files, and its stems'. */
+async function folderRows(folder: DriveNode): Promise<{ top: DriveNode[]; stems: DriveNode[] }> {
+  const top = await driveChildren(folder.id)
+  const stemsDir = top.find((f) => f.name === 'stems' && f.mimeType === DRIVE_FOLDER)
+  return { top, stems: stemsDir ? await driveChildren(stemsDir.id) : [] }
+}
+
+/**
+ * The phone's half of a move whose Drive half is done — the folder this song
+ * went up into is in the library, published or already adopted. Resolves to
+ * its library name once the phone has let go; null when there is nothing to
+ * finish (no record, not moved in yet, or a record belonging to another song,
+ * which is dropped). The finish may itself have been cut short, the stems
+ * partly in the Drive cache already, so nothing here may insist on reading the
+ * song's files again — and Drive is never written: the folder may already be
+ * a desktop's.
+ */
+async function finishIfMovedIn(
+  dir: string,
+  rootKids?: DriveNode[],
+  dropStale = true,
+  busy?: (dir: string) => boolean
+): Promise<string | null> {
+  const earlier = (await records())[dir]
+  if (!earlier) return null
+  let kids = rootKids
+  if (!kids) {
+    const rootId = (await driveFolderNamed('SingZ'))?.id
+    kids = rootId ? await driveChildren(rootId) : []
+  }
+  const target = kids.find((f) => f.mimeType === DRIVE_FOLDER && f.appProperties?.[PUBLISH_ID_KEY] === earlier.id)
+  if (!target) return null
+  const same = await sameSong(dir, target)
+  if (!same) {
+    // The record outlived the song it was made for, and a new song took the
+    // name: letting go here would delete a song that never went up. Only a
+    // move the singer started drops it; a look on its own cannot be sure it
+    // read the right folder (see finishCompletedMoves).
+    if (dropStale) {
+      log('publish', `${dir}: an old move's record did not match this song — dropped`, 'warn')
+      await dropRecord(dir)
+    }
+    return null
+  }
+  log('publish', `${dir}: already in the Drive library as "${target.name}" — finishing on the phone`)
+  for (const rel of ['project.json', 'lyrics.json', 'graph.json']) {
+    const text = await Folder.readText(dir, rel).catch(() => undefined)
+    if (text !== undefined) await driveKeepText(target.name, rel, text)
+  }
+  // Asked last, just before the phone folder goes: a song opened in the
+  // player meanwhile (or being analysed) keeps its folder and its record,
+  // and the next look finishes it.
+  if (busy?.(dir)) {
+    log('publish', `${dir}: in use — it finishes moving once it is closed`)
+    return null
+  }
+  await finish(dir, target, same, 0)
+  return target.name
+}
+
+/**
+ * A song is on this phone OR in the Drive library, never both. A move stopped
+ * after its song reached the library but before the phone let go — the app
+ * killed in those few seconds — is finished here, with no upload at all.
+ * Called when the phone library is shown; best effort, and offline it simply
+ * waits for next time. A move stopped EARLIER needs nothing: its song never
+ * reached the library (staging is outside it), so it is still just a song on
+ * this phone, and moving it again resumes where it stopped.
+ */
+export function finishCompletedMoves(busy?: (dir: string) => boolean): Promise<string[]> {
+  return oneAtATime(() => finishCompletedMovesNow(busy))
+}
+
+async function finishCompletedMovesNow(busy?: (dir: string) => boolean): Promise<string[]> {
+  const pending = Object.keys(await records())
+  if (pending.length === 0 || !driveAvailable() || !(await driveSignedIn())) return []
+  const rootId = (await driveFolderNamed('SingZ'))?.id
+  if (!rootId) return []
+  const kids = await driveChildren(rootId)
+  const finished: string[] = []
+  for (const dir of pending) {
+    try {
+      // never drops a record: a doc it cannot read (a picked folder still the
+      // root at launch) says nothing about whether this song went up
+      if (await finishIfMovedIn(dir, kids, false, busy)) finished.push(dir)
+    } catch (e) {
+      log('publish', `${dir}: could not finish its move yet — ${String(e)}`, 'warn')
+    }
+  }
+  return finished
+}
+
+/** A song's identity by its audio: the md5s of every stem its doc names. A
+ *  phone copy of a Drive song — a folder copied in from a computer — has the
+ *  same, and moving it would only make a "(phone)" duplicate. */
+export function stemSignature(doc: ProjectDoc | null | undefined): string {
+  return Object.values(doc?.stemHashes ?? {})
+    .map((h) => h.md5)
+    .sort()
+    .join(',')
+}
+
+export interface BatchProgress {
+  /** Which song, from 0, of how many. */
+  index: number
+  count: number
+  dir: string
+  /** Bytes of the whole batch Drive holds so far, of the batch's size. */
+  done: number
+  total: number
+}
+
+export interface BatchResult {
+  moved: { dir: string; name: string }[]
+  /** Songs passed over, each with why — the batch went on without them. */
+  skipped: { dir: string; reason: string }[]
+  /** Why the batch ended before its last song, if it did. */
+  stopped?: { reason: 'cancelled' | 'blocked' | 'failed'; message: string }
+}
+
+/**
+ * Every song the singer asked to move, one after another ("Add all local
+ * songs to Google Drive"). Stops for what would stop every song — the singer
+ * pressing Stop, an older desktop, signed out, or two songs failing in a row
+ * (offline, most likely) — and passes over what belongs to one song alone: a
+ * song busy splitting or being analysed, one not split, one whose own move
+ * fails. Whatever does not move stays on the phone, where the offer finds it
+ * again.
+ */
+export interface BatchOptions {
+  onProgress?: (p: BatchProgress) => void
+  onMoved?: (dir: string, name: string) => void
+  cancelled?: () => boolean
+  busy?: (dir: string) => boolean
+}
+
+export function moveAllToDrive(dirs: string[], opts: BatchOptions = {}): Promise<BatchResult> {
+  return oneAtATime(() => moveAllNow(dirs, opts))
+}
+
+async function moveAllNow(dirs: string[], opts: BatchOptions): Promise<BatchResult> {
+  const sizes = await Promise.all(dirs.map((d) => moveSize(d).catch(() => 0)))
+  const total = sizes.reduce((n, b) => n + b, 0)
+  const out: BatchResult = { moved: [], skipped: [] }
+  // A song with a move record may have reached the library already — its OWN
+  // folder there then has its stems, and it must be finished, not taken for a
+  // copy (moveToDrive's resume decides).
+  const midMove = await records()
+  // What the library already holds, by audio: a copy of one of those is not
+  // sent up again. Offline this is simply empty — the uploads say so.
+  const inDrive = new Set<string>()
+  try {
+    for (const e of await driveListProjects()) {
+      const sig = stemSignature(e.doc)
+      if (sig) inDrive.add(sig)
+    }
+  } catch {
+    // no listing, no duplicates known
+  }
+  let base = 0
+  let shown = 0
+  let failedInARow = 0
+  for (let i = 0; i < dirs.length; i++) {
+    const dir = dirs[i]
+    if (opts.cancelled?.()) {
+      out.stopped = { reason: 'cancelled', message: 'Stopped — the rest are still on this phone.' }
+      break
+    }
+    // never backwards: a doc brought up to date mid-move can differ from the
+    // size measured before the batch began
+    const report = (done: number): void => {
+      shown = Math.max(shown, Math.min(total, base + done))
+      opts.onProgress?.({ index: i, count: dirs.length, dir, done: shown, total })
+    }
+    report(0)
+    let doc: ProjectDoc | null = null
+    try {
+      doc = JSON.parse(await Folder.readText(dir, 'project.json')) as ProjectDoc
+    } catch {
+      doc = null
+    }
+    const sig = stemSignature(doc)
+    if (!doc) {
+      // deleted while the batch was running: nothing to move, nothing wrong
+    } else if (opts.busy?.(dir)) {
+      out.skipped.push({ dir, reason: 'it was in use — open, splitting or being analysed' })
+    } else if (sig && inDrive.has(sig) && !midMove[dir]) {
+      out.skipped.push({ dir, reason: 'it is already in your Google Drive library' })
+    } else {
+      try {
+        const res = await moveToDrive(dir, {
+          cancelled: opts.cancelled,
+          onProgress: (p) => {
+            if (p.stage === 'uploading') report(p.done)
+          }
+        })
+        out.moved.push({ dir, name: res.name })
+        if (sig) inDrive.add(sig) // a second phone copy of it is a duplicate now
+        opts.onMoved?.(dir, res.name)
+        failedInARow = 0
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e)
+        if (e instanceof MoveCancelled) {
+          out.stopped = { reason: 'cancelled', message }
+          break
+        }
+        if (e instanceof MoveBlocked && e.reason !== 'not-split') {
+          out.stopped = { reason: 'blocked', message }
+          break
+        }
+        out.skipped.push({ dir, reason: inWords(message) })
+        log('publish', `${dir}: passed over — ${message}`, 'warn')
+        if (!(e instanceof MoveBlocked) && ++failedInARow >= 2) {
+          out.stopped = { reason: 'failed', message }
+          break
+        }
+      }
+    }
+    base += sizes[i]
+    report(0)
+  }
+  return out
+}
+
+/** Why a song was passed over, as the singer reads it: a dropped connection
+ *  in plain words (each platform's networking says it its own way), anything
+ *  else as the move said it. The Log keeps the original. */
+function inWords(message: string): string {
+  return /network request failed|timed out|timeout|offline|could not connect|failed to connect|unable to resolve host|connection (was )?(lost|reset|refused|abort)|stalled/i.test(
+    message
+  )
+    ? 'the connection dropped before it was up — it goes with the next "Add all"'
+    : message
 }
 
 /**
@@ -379,24 +599,28 @@ export async function moveToDrive(dir: string, opts: MoveOptions = {}): Promise<
  * the doc's own stem hashes against Drive's listing — never of the files, some
  * of which an interrupted finish may already have handed to the cache. A new
  * song under a reused name has other stems (or only its unsplit original,
- * which never goes to Drive), so it cannot match.
+ * which never goes to Drive), so it cannot match. Resolves to the doc and the
+ * folder's listing when it is the same song, null when not.
  */
-async function sameSong(dir: string, target: DriveNode): Promise<boolean> {
+async function sameSong(
+  dir: string,
+  target: DriveNode
+): Promise<{ doc: ProjectDoc; top: DriveNode[]; stems: DriveNode[] } | null> {
   let doc: ProjectDoc
   try {
     doc = JSON.parse(await Folder.readText(dir, 'project.json')) as ProjectDoc
   } catch {
-    return false
+    return null
   }
   const mine = Object.entries(doc.stemHashes ?? {})
-  if (mine.length === 0) return false
-  const stemsDir = (await driveChildren(target.id)).find((f) => f.name === 'stems' && f.mimeType === DRIVE_FOLDER)
-  if (!stemsDir) return false
-  const theirs = new Map((await driveChildren(stemsDir.id)).map((f) => [f.name, f]))
-  return mine.every(([name, h]) => {
+  if (mine.length === 0) return null
+  const { top, stems } = await folderRows(target)
+  const theirs = new Map(stems.map((f) => [f.name, f]))
+  const same = mine.every(([name, h]) => {
     const f = theirs.get(name)
     return !!f && f.md5Checksum === h.md5 && Number(f.size) === h.size
   })
+  return same ? { doc, top, stems } : null
 }
 
 /** What moving this song sends: every file the doc names, and the song file,
@@ -405,24 +629,31 @@ export async function moveSize(dir: string): Promise<number> {
   const doc = JSON.parse(await Folder.readText(dir, 'project.json')) as ProjectDoc
   let bytes = Object.values(doc.stemHashes ?? {}).reduce((n, h) => n + h.size, 0)
   bytes += (doc.lyricsHash?.size ?? 0) + (doc.graphHash?.size ?? 0)
-  try {
-    bytes += (await Folder.statFile(dir, doc.songFile)).size
-  } catch {
-    // an unreadable song file fails the move itself, with its own message
+  for (const rel of [doc.songFile, 'project.json']) {
+    try {
+      bytes += (await Folder.statFile(dir, rel)).size
+    } catch {
+      // an unreadable song file fails the move itself, with its own message
+    }
   }
   return bytes
 }
 
-/** The phone's half: its stems become the Drive song's downloaded copy and
- *  the "This phone" folder goes. Re-runnable — the native moves what is left. */
-async function finish(dir: string, name: string, bytes: number): Promise<{ name: string; bytes: number }> {
-  await Folder.moveProjectToCache(dir, name)
+/** The phone's half: the song joins the saved Drive listing FIRST (see
+ *  driveListMovedIn — offline, that is the only place it will be named),
+ *  then its stems become the Drive song's downloaded copy and the "This
+ *  phone" folder goes. Re-runnable — the native moves what is left. */
+async function finish(
+  dir: string,
+  target: DriveNode,
+  song: { doc: ProjectDoc; top: DriveNode[]; stems: DriveNode[] },
+  bytes: number
+): Promise<{ name: string; bytes: number }> {
+  await driveListMovedIn(target.name, song.doc, song.top, song.stems)
+  await Folder.moveProjectToCache(dir, target.name)
   await dropRecord(dir)
   log('publish', `${dir}: moved — it plays from the Drive library now, already downloaded`)
-  // The Drive tab lists it at once (walking: the desktop's catalog does not
-  // name it until it has taken the song in). Offline, the next refresh does.
-  void driveListProjects(true).catch(() => {})
-  return { name, bytes }
+  return { name: target.name, bytes }
 }
 
 /**

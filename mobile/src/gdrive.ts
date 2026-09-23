@@ -111,6 +111,8 @@ export const driveSignOut = async (): Promise<void> => {
   listCache = null
   catalogMd5 = ''
   catalogDirs = []
+  // a listing still in flight for the account that left must not land after
+  adoptedGen = ++listGen
   projectFiles.clear()
   await Prefs.setTextPref(CATALOG_KEY, '')
   // downloaded stems stay: signing back into the same account should not
@@ -379,6 +381,12 @@ const projectFiles = new Map<string, DriveProjectFiles>()
 const LIST_TTL_MS = 5 * 60_000
 let listCache: { at: number; entries: ProjectEntry[] } | null = null
 
+/** Listings run side by side — a tab's refresh, a pull, a song moving in —
+ *  and finish in any order. They are numbered as they BEGIN, and a listing
+ *  never replaces one begun after it: that one saw the library later. */
+let listGen = 0
+let adoptedGen = 0
+
 export function driveListIsFresh(): boolean {
   return listCache !== null && Date.now() - listCache.at < LIST_TTL_MS
 }
@@ -445,7 +453,7 @@ const restoreOnce = (): Promise<void> =>
 export const driveStoredProjects = (): Promise<ProjectEntry[] | null> =>
   restoreOnce().then(() => listCache?.entries ?? null)
 
-async function persistCatalog(entries: ProjectEntry[]): Promise<void> {
+function storedCatalog(entries: ProjectEntry[], md5: string, dirs: string[]): StoredCatalog {
   const files: StoredCatalog['files'] = {}
   for (const entry of entries) {
     const f = projectFiles.get(entry.dir)
@@ -458,8 +466,12 @@ async function persistCatalog(entries: ProjectEntry[]): Promise<void> {
       }
     }
   }
+  return { entries, files, md5, dirs }
+}
+
+async function persistCatalog(entries: ProjectEntry[]): Promise<void> {
   try {
-    await writeJson(CATALOG_KEY, { entries, files, md5: catalogMd5, dirs: catalogDirs } satisfies StoredCatalog)
+    await writeJson(CATALOG_KEY, storedCatalog(entries, catalogMd5, catalogDirs))
   } catch {
     // a catalog we cannot persist is not worth failing a refresh over
   }
@@ -513,12 +525,64 @@ function expectFromDoc(doc: ProjectDoc): Record<string, number> {
   return out
 }
 
-/** A finished listing becomes the one everybody sees, on screen and on disk. */
-async function adopt(entries: ProjectEntry[]): Promise<ProjectEntry[]> {
+/** What a listing was built from, beside its entries — the catalog.json md5
+ *  and folders level one compares against ('' and [] when it walked). */
+interface Listing {
+  entries: ProjectEntry[]
+  md5: string
+  dirs: string[]
+}
+
+const newestFirst = (entries: ProjectEntry[]): ProjectEntry[] =>
   entries.sort((a, b) => ((a.doc.savedAt ?? '') < (b.doc.savedAt ?? '') ? 1 : -1))
+
+/** A finished listing becomes the one everybody sees, on screen and on disk —
+ *  unless one begun after it already has (see listGen). Its caller gets its
+ *  entries either way. */
+async function adopt(l: Listing, gen: number): Promise<ProjectEntry[]> {
+  const entries = newestFirst(l.entries)
+  if (gen < adoptedGen) return entries
+  adoptedGen = gen
   listCache = { at: Date.now(), entries }
+  catalogMd5 = l.md5
+  catalogDirs = l.dirs
   await persistCatalog(entries)
   return entries
+}
+
+/**
+ * A song this phone moved into the library joins the listing it already has,
+ * on screen and on disk, BEFORE the phone lets go of its own copy: from then
+ * on, with no signal, this is the only place the song is named — a batch
+ * stopped by the signal dropping, or the app killed mid-batch, used to leave
+ * the songs that had already gone in neither tab. `top` and `stems` are the
+ * folder's own Drive listing, so the song opens from its downloaded copy.
+ * It counts as a listing begun now (one begun earlier cannot replace it) and
+ * is never fresh: the next look still goes to Drive.
+ */
+export async function driveListMovedIn(
+  name: string,
+  doc: ProjectDoc,
+  top: DriveFile[],
+  stems: DriveFile[]
+): Promise<void> {
+  await restoreOnce()
+  const entry = entryFromDoc(name, doc, new Map(top.map((f) => [f.name, f])), new Map(stems.map((f) => [f.name, f])))
+  if (!entry) throw new Error(`${name} has no stems to list`)
+  // claimed before the write, as adopt() does: an older listing landing while
+  // the write is on the bridge would otherwise save over it
+  const gen = ++listGen
+  adoptedGen = gen
+  const entries = newestFirst([entry, ...(listCache?.entries ?? []).filter((e) => e.dir !== name)])
+  // Saved strictly, unlike a listing: the phone deletes its copy next, and a
+  // record that never reached the disk names the song nowhere. Built on no
+  // catalog.json (md5 ''), so the next look reads the catalog rather than
+  // trusting it — a folder trashed on the web meanwhile must not live on here.
+  await writeJson(CATALOG_KEY, storedCatalog(entries, '', []))
+  if (gen < adoptedGen) return // a listing begun after this one landed first, and saw the song too
+  catalogMd5 = ''
+  catalogDirs = []
+  listCache = { at: 0, entries }
 }
 
 /** What the desktop writes into catalog.json (format 2): one row per
@@ -575,7 +639,7 @@ async function manifestEntries(
   kids: DriveFile[],
   dirs: DriveFile[],
   token: string
-): Promise<ProjectEntry[] | null> {
+): Promise<Listing | null> {
   const file = kids.find((f) => f.name === 'catalog.json' && f.mimeType !== FOLDER)
   if (!file) return null
   // Level one, and the same rule as every level below it: the root listing
@@ -589,7 +653,7 @@ async function manifestEntries(
     dirs.length === catalogDirs.length && dirs.every((d) => catalogDirs.includes(d.name))
   if (file.md5Checksum && file.md5Checksum === catalogMd5 && listCache?.entries.length && sameFolders) {
     log('gdrive', `unchanged — ${listCache.entries.length} songs, nothing fetched`)
-    return listCache.entries
+    return { entries: listCache.entries, md5: catalogMd5, dirs: catalogDirs }
   }
   const res = await fetch(`${API()}/drive/v3/files/${file.id}?alt=media`, {
     headers: { Authorization: `Bearer ${token}` }
@@ -656,28 +720,23 @@ async function manifestEntries(
     const batch = await Promise.all(changed.slice(i, i + POOL).map(one))
     for (const entry of batch) if (entry) out.push(entry)
   }
-  catalogMd5 = file.md5Checksum ?? ''
-  catalogDirs = m.projects.map((p) => p.dir)
   log(
     'gdrive',
     `refreshed — ${out.length} songs, ${changed.length} re-read (${changed.map((c) => c.dir).join(', ') || 'none'})`
   )
-  return out
+  return { entries: out, md5: file.md5Checksum ?? '', dirs: m.projects.map((p) => p.dir) }
 }
 
 export async function driveListProjects(force = false): Promise<ProjectEntry[]> {
   if (!force && driveListIsFresh() && listCache) return listCache.entries
+  const gen = ++listGen
   const rootId = await singzRootId()
   const token = await accessToken()
   const kids = await listChildren(rootId)
   const dirs = kids.filter((f) => f.mimeType === FOLDER)
 
   const fromManifest = await manifestEntries(kids, dirs, token)
-  if (fromManifest) return adopt(fromManifest)
-  // Walked, so no catalog stands behind these entries — the next refresh must
-  // read whatever catalog.json is there rather than trusting its md5.
-  catalogMd5 = ''
-  catalogDirs = []
+  if (fromManifest) return adopt(fromManifest, gen)
   log('gdrive', `walked ${dirs.length} folders (no usable catalog.json)`)
 
   // No manifest (older desktop, or one the folder listing disowned): walk.
@@ -719,7 +778,9 @@ export async function driveListProjects(force = false): Promise<ProjectEntry[]> 
     const batch = await Promise.all(dirs.slice(i, i + POOL).map(one))
     for (const entry of batch) if (entry) out.push(entry)
   }
-  return adopt(out)
+  // Walked, so no catalog stands behind these entries — the next refresh must
+  // read whatever catalog.json is there rather than trusting its md5.
+  return adopt({ entries: out, md5: '', dirs: [] }, gen)
 }
 
 /**

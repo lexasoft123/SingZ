@@ -2073,16 +2073,23 @@ The discipline stands: the one number in this section that was stated
 confidently without being measured is the one that turned out to be wrong.
 ## Phase 6 — as built: moving a song to Drive (2026-09-23)
 
-What the singer asked for was a button that **moves** a song from the phone's own
-library into Google Drive — not a publish that leaves a locked copy behind. So a
-"This phone" song that has been split gets a swipe action, "Move to Google Drive";
-it uploads, leaves the phone's list, and reappears under the Drive tab already
-downloaded (its stems become the Drive song's cached copy — no second download).
-The desktop takes it into its own library on its next sync. The code:
-`mobile/src/publish.ts` (the phone's protocol), the adoption pass in
-`src/main/gdrive.ts` (`adoptPublished`), the shared tags in `src/main/sync-plan.ts`,
-two natives on both platforms (`uploadFile`, `moveProjectToCache`), and the swipe,
-confirm, progress and resume states in `CatalogScreen`.
+What the singer asked for was to **move** songs from the phone's own library into
+Google Drive — not a publish that leaves a locked copy behind — and, after a first
+cut with a per-song swipe action, one decision for the whole library instead: a
+swipe per song is not a gesture a singer finds, and **a song lives on this phone
+OR in the Drive library, never both**. So the phone library offers it, below the
+songs like every offer: **"Add all local songs to Google Drive"** (with the count
+and the size; "Not now" holds until a new song arrives). Every split song goes up
+one after another under a progress card with Stop; each leaves "This phone" the
+moment it is safely in Drive and reappears under the Drive tab already downloaded
+(its stems become the Drive song's cached copy — no second download). Songs not
+split yet stay: the Drive tab lists songs by their stems, so one would vanish from
+both lists until a computer split it. The desktop takes each into its own library
+on its next sync. The code: `mobile/src/publish.ts` (the phone's protocol and the
+batch), the adoption pass in `src/main/gdrive.ts` (`adoptPublished`), the shared
+tags in `src/main/sync-plan.ts`, two natives on both platforms (`uploadFile`,
+`moveProjectToCache`), and the offer, confirm and progress card in
+`CatalogScreen`.
 
 ### The protocol
 
@@ -2125,6 +2132,48 @@ its own folder deleted without ever being uploaded; adding a song also clears an
 record under its name. Deleting a song mid-move trashes its staging folder, but
 never one that reached the library.
 
+**Never both** is kept without asking anyone: a move cut off after its song reached
+the library but before the phone let go (the app killed in those seconds) is
+finished on the first look at the phone library after the next launch
+(`finishCompletedMoves` — no upload, Drive untouched). The look runs whenever the
+phone library comes into view: offline, it tries again at the next, and a song
+the singer has open (or that is being analysed) keeps its folder and its record
+until a later look — asked just before the folder would go. "Add all" finishes
+such a song as well. A move cut
+off EARLIER needs nothing: its song never reached the library (staging is outside
+it), so it is still simply a song on this phone, and the next "Add all" resumes it
+where it stopped. The look at launch and a batch are **one job at a time**
+(`oneAtATime` in publish.ts): begun together they would both finish the same song,
+two natives handing the same stems to the cache, and a song that had left the
+phone was reported as one that "stayed: ENOENT". The batch itself stops for what would stop every song (Stop, an older
+desktop, signed out, two songs failing in a row — offline, most likely) and passes
+over what belongs to one song (open in the player, busy splitting or being
+analysed, being deleted, its own failure). A song whose stems the Drive library
+already holds — a folder copied onto the phone from a computer ("Files you copied
+onto this iPhone") — is left out of the offer and passed over: it is not the
+phone's to send, and moving it would only make a "(phone)" duplicate — except a
+song with a move record: the folder whose stems match is then its OWN, moved in
+before a cut, and the song is finished rather than passed over.
+
+The Drive listing is kept honest around a move in two ways. A song that moved
+in joins the phone's SAVED Drive listing — on screen and on disk, with its
+folder's own Drive ids, so it opens from its downloaded copy — BEFORE the phone
+lets go of its own (`driveListMovedIn`): from that moment, with no signal, the
+saved listing is the only place the song is named. A batch cut off by the
+signal dropping, or by the app being killed, used to leave the songs that had
+already gone in neither tab; one listing at the end of the batch would not have
+helped, since it too needs the signal. The record is saved strictly — a disk
+that refuses the write stops the move before the phone lets go, and a later look
+finishes it — and it is never fresh and trusts no catalog.json, so the next look
+asks Drive and reads the catalog (a moved folder trashed on the web meanwhile
+does not live on in the list). And listings are numbered as they begin (`listGen` in
+mobile/src/gdrive.ts): one never replaces a listing begun after it (the
+moved-in record counts as begun at its moment, and claims that place BEFORE its
+disk write — a listing landing during the write once saved over it), and one
+still in flight when
+the singer signs out never lands. Before that, whichever of two overlapping
+listings finished LAST was kept, on screen and on disk.
+
 ### Where it departs from the August design, and why
 
 - **The catalog stays format 2**, with an additive `capabilities: {adopt: 1}`.
@@ -2166,8 +2215,9 @@ never one that reached the library.
   synced: level one of `manifestEntries` assumed an unchanged catalog.json meant an
   unchanged library, which stopped being true the moment a phone could add a folder.
   It now also requires the root's folders to be exactly the ones the catalog named.
-  Found by the device run, not the suites — pinned now by "the Drive tab shows the
-  moved song at once".
+  Found by the device run, not the suites — pinned now by "a song another phone
+  moved in is listed at once" (a song this phone moved records itself, so its own
+  moves can no longer show the gap).
 - **Stem hashes were compared as ordered JSON**, so every doc written on another
   device was rewritten and re-uploaded once, for key order alone (`refreshStemHashes`
   rebuilds in directory order). `stableJson` compares content; found by asserting
@@ -2176,10 +2226,18 @@ never one that reached the library.
   have stalled every open, listing and ✓ for its duration. Uploads have their own.
 - **The Hermes inspector ignores `awaitPromise`** — it hands back the Promise — so
   the device driver settles promises into a global and polls it.
+- **What the reviews of the "Add all" design found**, each now a roundtrip case:
+  the batch took a cut-off song for a copy of itself (its own folder in the
+  library carries its stems) and would never have finished it; nothing saved a
+  Drive listing after a batch run from the phone tab, so offline the moved songs
+  were in neither tab — and a listing saved at the END of the batch still lost
+  them when the signal dropped, or the app died, partway; the launch look and a
+  batch begun during it finished one song twice; and the launch look would have
+  let go of a song the singer had open in the player.
 
 ### Verified
 
-- `tests/roundtrip/phone-publish.test.ts` — 25 cases of the REAL phone code moving
+- `tests/roundtrip/phone-publish.test.ts` — 51 cases of the REAL phone code moving
   songs through the fake Drive and the REAL desktop sync taking them in: the happy
   path byte for byte with a clean second sync; a phone-only Drive; an older desktop
   refusing; unsplit refused; killed mid-upload (resume sends only what is missing);
@@ -2190,17 +2248,43 @@ never one that reached the library.
   refusal; killed between the download and the tag; a move record outliving its
   song; the no-catalog gate both ways; a disk that refuses the new folder or a
   leftover it will not let go of; a leading-dot name; the phone's and the desktop's
-  naming held equal. **All 24 safeguards were mutation-tested — each one removed
-  fails at least one case.**
+  naming held equal; the whole-library batch (all go, an older desktop stops it,
+  one bad song passed over, two failures in a row stop it, Stop, busy and deleted
+  songs) with the size the confirm states equal to the bytes that go up; never
+  both, finished after a cut-off move-in and left alone before one, and a record
+  the launch look cannot check kept rather than dropped, a cut-off song finished by
+  "Add all" rather than taken for a copy, the launch look and a batch at once
+  finishing it once, and the look leaving a song the singer has open; a Drive
+  listing cached before a move never served after it, the saved listing naming
+  the moved songs offline — after a batch, mid-batch when the signal goes (the
+  song also opens from its downloaded copy), after a kill mid-batch, and a kill
+  WHILE the song is being recorded, or a disk that refuses the record, leaving it
+  on the phone; a moved folder trashed on the web not listed on — an older listing
+  never replacing a newer one, one begun before a move never replacing its
+  record — not even landing while the record is being written — one in flight
+  at sign-out never landing, and a song another phone
+  moved in listed at once; a phone copy of a Drive song, and a second identical
+  phone song, passed over; a dropped connection named in plain words. **All 48
+  safeguards were mutation-tested — each one removed fails at least one case.**
 - `mobile/tests/move-to-drive.cjs` on a fresh API 36 emulator and an iOS 26.1
-  simulator — the real natives against the fake Drive over HTTP, then the real
-  desktop sync against the same store: 18/18 on both. The 5.9 MB sample song (nine
-  files) moved in 2.6 s (Android) / 1.1 s (iOS), opened from the Drive tab with zero
-  stem downloads, and was adopted byte for byte with nothing uploaded back.
-- The swipe, confirm, progress (with stop), "unfinished" and resume states walked by
-  hand on the simulator against a slowed fake Drive. Two lines truncated on the
-  one-line card and were shortened ("Moving to Drive · 42%", "Move to Drive
-  unfinished").
+  simulator — the real natives against the fake Drive over HTTP, through the
+  offer's own path, then the real desktop sync against the same store: all checks
+  on both, in three variants — the Drive tab opened MID-batch (it must list Drive,
+  not the phone: a refresh captured on the phone tab once did exactly that); the
+  batch run entirely on the phone tab after a Drive listing was cached
+  (STAY_ON_PHONE=1: the Drive tab must then show the moved songs, not that
+  listing); and the signal cut the moment the first song landed (CUT_MID_BATCH=1:
+  the fake Drive drops every request from the second song's first write — the
+  song that went up is listed with no signal, still listed after a cold restart
+  of the app, and opens from its downloaded copy; the other stays on the phone,
+  is offered again, and goes up with the next "Add all" once the signal is back).
+  Each variant was shown to fail against the defect it guards. Two
+  sample songs (5.9 MB, nine files each) moved in a few seconds; the offer named
+  both and was gone after; a second "Add all" mid-batch was refused; the moved
+  song opened from the Drive tab with zero stem downloads; both were adopted byte
+  for byte with nothing uploaded back.
+- The offer, confirm, progress card (with Stop), closing dialog and the Drive tab
+  afterwards walked by hand on the simulator against a slowed fake Drive.
 
 ### Still owed
 

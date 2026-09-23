@@ -63,7 +63,6 @@ import {
   StemTile,
   STEM_TILE_COLORS,
   TrashGlyph,
-  UploadGlyph,
   white
 } from './bits'
 import { TEST } from './testhooks'
@@ -105,7 +104,15 @@ import {
   type AnalysisProgress
 } from '../analysis/run'
 import { SPLIT_STEMS } from '../split/adopt'
-import { abandonMove, MoveBlocked, MoveCancelled, moveSize, movesInProgress, moveToDrive } from '../publish'
+import { records as moveRecords } from '../publish-record'
+import {
+  abandonMove,
+  finishCompletedMoves,
+  moveAllToDrive,
+  moveSize,
+  stemSignature,
+  type BatchResult
+} from '../publish'
 
 const BG = require('../../assets/bg/catalog.png')
 const GDRIVE_ICON = require('../../assets/gdrive.png')
@@ -270,14 +277,39 @@ export default function CatalogScreen({
     rows: []
   })
   const [error, setError] = useState<string | null>(null)
-  /** The song on its way to Google Drive, and what its card says meanwhile.
-   *  One at a time: each is tens of megabytes on the phone's uplink. */
-  const [moving, setMoving] = useState<{ dir: string; msg: string } | null>(null)
+  /** "Add all local songs to Google Drive", while it runs: which song of how
+   *  many, and how far through the whole batch. The song on its way cannot be
+   *  opened or deleted mid-upload (movingRef answers that in callbacks). */
+  const [moveBatch, setMoveBatch] = useState<{
+    index: number
+    count: number
+    dir: string
+    pct: number
+    stopping: boolean
+  } | null>(null)
   const movingRef = useRef<string | null>(null)
   const moveStop = useRef(false)
-  /** Phone songs whose move started and did not finish (the app died, the
-   *  signal went): their cards say so, and the swipe finishes the job. */
-  const [unfinishedMoves, setUnfinishedMoves] = useState<Set<string>>(new Set())
+  /** Set before the first await and cleared in `finally`: two taps must never
+   *  run two batches over the same songs, nor open two confirms. */
+  const batchRunningRef = useRef(false)
+  const confirmOpenRef = useRef(false)
+  /** The phone song open in the player — busy for a move while the player
+   *  has it. Set on open, cleared whenever the catalog is back in focus: the
+   *  Add-song sheet, the Log and Settings unfocus it too. */
+  const openedPhoneDirRef = useRef<string | null>(null)
+  const isFocusedRef = useRef(true)
+  const loadingDirRef = useRef<string | null>(null)
+  /** A phone song whose delete is in flight: not the batch's to move. */
+  const deletingDirRef = useRef<string | null>(null)
+  /** The offer itself: the songs that can go now, what their stems weigh, and
+   *  how many are not split yet (those stay until they are). */
+  const [driveOffer, setDriveOffer] = useState<{
+    dirs: string[]
+    bytes: number
+    unsplit: number
+    /** Every song in the phone library, offered or not. */
+    total: number
+  } | null>(null)
   /** What the app was doing when it died last time, if it did.
    *
    *  Kept apart from `error` on purpose. That one slot was carrying six
@@ -312,7 +344,7 @@ export default function CatalogScreen({
    *  and silently refused the sheet, which then ran its whole flow invisibly.
    *  One presentation at a time makes that unrepresentable. */
   const [addOpen, setAddOpen] = useState(false)
-  const refreshRef = useRef<(() => Promise<void>) | null>(null)
+  const refreshRef = useRef<((force?: boolean) => Promise<void>) | null>(null)
   const presentAddRef = useRef<(src: PickedFile) => void>(() => {})
   /** A pick is on screen: no sheet exists yet to hold that state. */
   const picking = useRef(false)
@@ -534,7 +566,9 @@ export default function CatalogScreen({
     [mode, loadUsage]
   )
 
-  refreshRef.current = () => refresh()
+  refreshRef.current = (force?: boolean) => refresh(force)
+  isFocusedRef.current = isFocused
+  loadingDirRef.current = loading?.dir ?? null
   const presentAdd = useCallback(
     (src: PickedFile): void => {
       if (TEST) TEST.addSheetShown = false
@@ -610,6 +644,12 @@ export default function CatalogScreen({
 
   const selectMode = useCallback(
     (next: 'gdrive' | 'folder' | 'phone'): void => {
+      // Opening a picked folder moves the root the batch reads its songs'
+      // docs from; Drive and this phone leave it where it is.
+      if (next === 'folder' && batchRunningRef.current) {
+        Alert.alert('Adding songs to Google Drive', 'Stop it first, or let it finish — then the folder opens.')
+        return
+      }
       void (async () => {
         try {
           setError(null)
@@ -757,6 +797,9 @@ export default function CatalogScreen({
         await setCrumb('')
         stepLog.current.rows.push({ ms: Date.now() - stepLog.current.t0, frac: 1, msg: 'open' })
         setLoading(null)
+        // the player has it from here (while loading, loadingDirRef answers);
+        // a load that failed or was superseded never gets this far
+        if (mode === 'phone') openedPhoneDirRef.current = entry.dir
         onLoaded({ ...loaded, library: mode, metronomeRef })
         // A phone-library song missing its grid (or carrying an older
         // detector's) is analysed now, behind the player — the desktop's
@@ -1381,7 +1424,7 @@ export default function CatalogScreen({
         return
       }
       if (movingRef.current === p.dir) {
-        Alert.alert('Moving to Google Drive', 'Stop the move first — the ✕ on the song.')
+        Alert.alert('On its way to Google Drive', 'Stop the move first, or give it a moment.')
         return
       }
       Alert.alert(
@@ -1398,6 +1441,13 @@ export default function CatalogScreen({
             text: 'Delete',
             style: 'destructive',
             onPress: () => {
+              // re-asked at the press: a batch may have reached this song
+              // while the confirm sat open
+              if (movingRef.current === p.dir) {
+                Alert.alert('On its way to Google Drive', 'Stop the move first, or give it a moment.')
+                return
+              }
+              deletingDirRef.current = p.dir
               // A job left for this song goes with it: a failed card naming a
               // song that no longer exists offers a Resume nothing can honour,
               // and job.json would bring it back on every visit. In the model
@@ -1425,6 +1475,9 @@ export default function CatalogScreen({
                 .then(() => deleteProject(p.dir))
                 .then(() => refresh())
                 .catch(e => setError(String(e instanceof Error ? e.message : e)))
+                .finally(() => {
+                  if (deletingDirRef.current === p.dir) deletingDirRef.current = null
+                })
             }
           }
         ],
@@ -1434,124 +1487,268 @@ export default function CatalogScreen({
     [refresh]
   )
 
-  /** Move one phone song into the Google Drive library (Phase 6 — publish.ts
-   *  holds the protocol). Resolves to the name it has there, or null when it
-   *  did not move; every outcome is told to the singer here. */
-  const runMove = useCallback(
-    async (p: ProjectEntry, announce = true): Promise<string | null> => {
-      const title = p.doc.name ?? p.dir
-      moveStop.current = false
-      movingRef.current = p.dir
-      // one line on the card: the percentage has to survive the ellipsis
-      setMoving({ dir: p.dir, msg: 'Moving to Drive…' })
-      try {
-        const res = await moveToDrive(p.dir, {
-          cancelled: () => moveStop.current,
-          onProgress: x =>
-            setMoving({
-              dir: p.dir,
-              msg:
-                x.stage === 'uploading'
-                  ? `Moving to Drive · ${Math.floor((x.done / Math.max(1, x.total)) * 100)}%`
-                  : x.stage === 'finishing'
-                  ? 'Moving to Drive · finishing'
-                  : 'Moving to Drive…'
-            })
-        })
-        log('library', `${p.dir} moved to Google Drive as "${res.name}" (${fmtBytes(res.bytes)})`)
-        if (announce) Alert.alert(
-          'Moved to Google Drive',
-          `"${title}" is in your Google Drive library now` +
-            (res.name !== p.dir ? `, as "${res.name}"` : '') +
-            ' — already downloaded, so it plays straight away. Your computer ' +
-            'adds it to its own library the next time it syncs.',
-          [
-            { text: 'OK', style: 'cancel' },
-            { text: 'Show me', onPress: () => selectMode('gdrive') }
-          ],
-          { cancelable: true }
-        )
-        return res.name
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        if (!announce) throw e // a driver reads the failure itself
-        if (e instanceof MoveCancelled) {
-          log('library', `${p.dir}: move to Google Drive stopped by the singer`)
-        } else if (e instanceof MoveBlocked && e.reason === 'signed-out') {
-          Alert.alert('Sign in to Google Drive first', msg, [
-            { text: 'Cancel', style: 'cancel' },
-            { text: 'Open Drive', onPress: () => selectMode('gdrive') }
-          ])
-        } else if (e instanceof MoveBlocked) {
-          Alert.alert('This song cannot move yet', msg)
-        } else {
-          log('library', `${p.dir}: move to Google Drive stopped — ${msg}`, 'warn')
-          Alert.alert(
-            'The move stopped',
-            `${msg}\n\nThe song is still on this phone. Move it again to pick up where it stopped.`
-          )
-        }
-        return null
-      } finally {
-        movingRef.current = null
-        setMoving(null)
-        void refresh()
-      }
-    },
-    [refresh, selectMode]
-  )
-
-  /** The swipe's door into a move: refuse what cannot move now, then confirm
-   *  with the size, since this uses the singer's data and empties a folder. */
-  const confirmMove = useCallback(
-    (p: ProjectEntry, finishing: boolean) => {
-      const title = p.doc.name ?? p.dir
-      if (movingRef.current) {
-        Alert.alert('One song at a time', 'Another song is moving to Google Drive — this one can go next.')
-        return
-      }
-      if (splitUiRef.current?.project === p.dir) {
-        Alert.alert('Almost done splitting', 'This song is still being split — move it once that finishes.')
-        return
-      }
-      if (analysisPending(p.dir)) {
-        Alert.alert('Almost ready', 'This song is still being analysed — move it once that finishes.')
-        return
-      }
+  /** How a batch ended, told once, in the singer's terms. Stop needs no
+   *  dialog: the singer asked for it, and the offer below the list shows what
+   *  is still here. */
+  const announceMoveAll = useCallback(
+    (res: BatchResult) => {
       const here = Platform.OS === 'ios' ? 'this iPhone' : 'this phone'
-      // the listing's size counts the stems only; the song file goes too
-      void moveSize(p.dir)
-        .catch(() => p.bytes)
-        .then(bytes =>
-          Alert.alert(
-            finishing ? `Finish moving "${title}"?` : `Move "${title}" to Google Drive?`,
-            (finishing
-              ? 'It stopped part way — what already reached Drive is not sent again. '
-              : `It uploads ${fmtBytes(bytes)}. `) +
-              `Then it leaves ${here} and plays from your Google Drive library instead, ` +
-              'already downloaded. Your computer adds it to its own library the next time it syncs.',
-            /* cancel-first, like every confirm in this file (see confirmDelete) */
-            [
-              { text: 'Cancel', style: 'cancel' },
-              { text: finishing ? 'Finish' : 'Move', onPress: () => void runMove(p) }
-            ],
-            { cancelable: true }
-          )
+      const songs = (n: number): string => (n === 1 ? '1 song' : `${n} songs`)
+      const moved = res.moved.length
+      const showMe = { text: 'Show me', onPress: () => selectMode('gdrive') }
+      if (res.stopped?.reason === 'cancelled') return
+      if (res.stopped) {
+        const signedOut = /sign in/i.test(res.stopped.message)
+        const why =
+          res.stopped.reason === 'failed'
+            ? `Two songs in a row could not go up (${res.stopped.message.replace(/[.\s]+$/, '')}) — most ` +
+              'likely the connection dropped. Try again once you are back online.'
+            : res.stopped.message
+        Alert.alert(
+          moved > 0 ? 'Stopped part way' : 'Not added yet',
+          why +
+            (moved > 0
+              ? `\n\n${songs(moved)} went up before it stopped; the rest are still on ${here}.`
+              : `\n\nEverything is still on ${here}.`),
+          signedOut
+            ? [{ text: 'Cancel', style: 'cancel' }, { text: 'Open Drive', onPress: () => selectMode('gdrive') }]
+            : moved > 0
+            ? [{ text: 'OK', style: 'cancel' }, showMe]
+            : [{ text: 'OK', style: 'cancel' }]
         )
+        return
+      }
+      const skipped = res.skipped.length
+      if (moved === 0 && skipped === 0) {
+        // every song was gone by its turn: deleted, or finished moving by the
+        // look at launch — nothing went wrong and nothing is left to say
+        Alert.alert('Nothing left to add', `Those songs are no longer on ${here}.`, [{ text: 'OK' }])
+        return
+      }
+      // each reason once, two at most — the Log names every song's
+      const why = [...new Set(res.skipped.map(k => k.reason.replace(/[.\s]+$/, '')))]
+      Alert.alert(
+        moved > 0 ? 'Added to Google Drive' : 'Nothing went up',
+        (moved === 0
+          ? ''
+          : moved === 1
+          ? 'The song is in your Google Drive library now — already downloaded, so it plays straight away. '
+          : `${skipped > 0 ? `${moved} songs are` : moved === 2 ? 'Both songs are' : `All ${moved} songs are`} ` +
+            'in your Google Drive library now — ' +
+            'already downloaded, so they play straight away. ') +
+          (skipped > 0
+            ? `${songs(skipped)} stayed on ${here}: ${why.slice(0, 2).join('; ')}` +
+              (why.length > 2 ? ' — and more, listed in the Log. ' : '. ')
+            : '') +
+          (moved > 0
+            ? `Your computer adds ${moved === 1 ? 'it' : 'them'} to its own library the next time it syncs.`
+            : ''),
+        moved > 0 ? [{ text: 'OK', style: 'cancel' }, showMe] : [{ text: 'OK', style: 'cancel' }],
+        { cancelable: true }
+      )
     },
-    [runMove]
+    [selectMode]
   )
 
+  // back in focus, the player is gone — and leaving it unloaded the song. On
+  // the edge only: openEntry sets the ref a moment before the player takes
+  // focus.
   useEffect(() => {
-    if (mode !== 'phone' || !active) return
-    let live = true
-    void movesInProgress()
-      .then(dirs => live && setUnfinishedMoves(new Set(dirs)))
-      .catch(() => {})
-    return () => {
-      live = false
+    if (isFocused) openedPhoneDirRef.current = null
+  }, [isFocused])
+
+  /** A phone song a move must not take from under the singer: open in the
+   *  player, loading, being analysed, split or deleted. Refs only, so the
+   *  batch and the look at launch ask the live state, not a render's. */
+  const moveBusy = useCallback(
+    (d: string): boolean =>
+      analysisPending(d) ||
+      splitUiRef.current?.project === d ||
+      loadingDirRef.current === d ||
+      deletingDirRef.current === d ||
+      (openedPhoneDirRef.current === d && !isFocusedRef.current),
+    []
+  )
+
+  /** "Add all local songs to Google Drive" (Phase 6 — publish.ts holds the
+   *  protocol): every song that can go, one after another, each leaving the
+   *  list the moment it is safely in Drive. */
+  const runMoveAll = useCallback(
+    async (dirs: string[], announce = true): Promise<BatchResult> => {
+      if (batchRunningRef.current) {
+        return { moved: [], skipped: [], stopped: { reason: 'blocked', message: 'Already adding songs to Google Drive.' } }
+      }
+      batchRunningRef.current = true
+      moveStop.current = false
+      setMoveBatch({ index: 0, count: dirs.length, dir: dirs[0] ?? '', pct: 0, stopping: false })
+      let res: BatchResult
+      try {
+        res = await moveAllToDrive(dirs, {
+          cancelled: () => moveStop.current,
+          busy: moveBusy,
+          onProgress: x => {
+            movingRef.current = x.dir
+            setMoveBatch(b => ({
+              index: x.index,
+              count: x.count,
+              dir: x.dir,
+              pct: Math.floor((x.done / Math.max(1, x.total)) * 100),
+              stopping: b?.stopping ?? false
+            }))
+          },
+          // The LATEST refresh — the singer may be on another tab by now, and
+          // a refresh captured on this one would list the phone under Drive —
+          // and a FORCED one: the Drive listing it would otherwise reuse was
+          // made before this song arrived.
+          onMoved: () => void refreshRef.current?.(true)
+        })
+      } finally {
+        batchRunningRef.current = false
+        movingRef.current = null
+        setMoveBatch(null)
+        // not forced: every song that moved marked the Drive listing stale
+        // (and added itself to it), so the Drive tab asks Drive anyway, and a
+        // batch that moved nothing has nothing to re-list
+        void refreshRef.current?.()
+      }
+      log(
+        'library',
+        `moved ${res.moved.length} of ${dirs.length} song(s) to Google Drive` +
+          (res.skipped.length ? `, ${res.skipped.length} passed over` : '') +
+          (res.stopped ? ` — stopped: ${res.stopped.message}` : '')
+      )
+      if (announce) announceMoveAll(res)
+      return res
+    },
+    [announceMoveAll, moveBusy]
+  )
+
+  /** The offer's door: the exact size (the song files go too), then go. */
+  const confirmMoveAll = useCallback(() => {
+    const offer = driveOffer
+    if (!offer || batchRunningRef.current || confirmOpenRef.current) return
+    confirmOpenRef.current = true
+    const closed = (): void => {
+      confirmOpenRef.current = false
     }
-  }, [mode, active, projects])
+    const here = Platform.OS === 'ios' ? 'this iPhone' : 'this phone'
+    const n = offer.dirs.length
+    void Promise.all(offer.dirs.map(d => moveSize(d).catch(() => 0))).then(sizes =>
+      Alert.alert(
+        n === 1
+          ? 'Add this song to Google Drive?'
+          : n === 2
+          ? 'Add both songs to Google Drive?'
+          : `Add all ${n} songs to Google Drive?`,
+        `${fmtBytes(sizes.reduce((a, b) => a + b, 0))} goes up. Each song leaves ${here} once it is ` +
+          'safely in Drive and plays from the Drive tab instead, already downloaded. Stop at any ' +
+          'time — whatever has not gone up stays here.',
+        /* cancel-first, like every confirm in this file (see confirmDelete) */
+        [
+          { text: 'Cancel', style: 'cancel', onPress: closed },
+          {
+            text: n === 1 ? 'Add' : 'Add all',
+            onPress: () => {
+              closed()
+              void runMoveAll(offer.dirs)
+            }
+          }
+        ],
+        { cancelable: true, onDismiss: closed }
+      )
+    )
+  }, [driveOffer, runMoveAll])
+
+  /** "Not now" is for THESE songs: a song added later brings the offer back. */
+  const DRIVE_OFFER_DISMISSED = 'singz.driveOffer.dismissed'
+  const dismissDriveOffer = useCallback(() => {
+    if (driveOffer) void setStoredText(DRIVE_OFFER_DISMISSED, JSON.stringify(driveOffer.dirs))
+    setDriveOffer(null)
+  }, [driveOffer])
+
+  /* The offer is made, not assumed: the phone library, signed in to Drive,
+     songs that can go (split ones — an unsplit song would vanish from the
+     Drive tab, which lists songs by their stems), and not turned down for
+     exactly these songs. */
+  useEffect(() => {
+    if (!active || mode !== 'phone' || !driveAvailable()) {
+      setDriveOffer(null)
+      return
+    }
+    let alive = true
+    void (async () => {
+      const signedIn = await driveSignedIn().catch(() => false)
+      const all = projects ?? []
+      // a copy of a song the Drive library already has (a folder copied in
+      // from a computer) is not offered: it would only go up as "(phone)".
+      // The stored listing answers with no network; the batch asks again.
+      const stored = await driveStoredProjects().catch(() => null)
+      const inDrive = new Set((stored ?? []).map(e => stemSignature(e.doc)).filter(Boolean))
+      // …except a song mid-move: its OWN folder in the library matches it, and
+      // it is still here to be finished
+      const midMove = await moveRecords().catch(() => ({}) as Record<string, unknown>)
+      const movable = all.filter(
+        p =>
+          Object.keys(p.stems).length > 0 &&
+          (!inDrive.has(stemSignature(p.doc)) || p.dir in midMove)
+      )
+      if (!signedIn || movable.length === 0) {
+        if (alive) setDriveOffer(null)
+        return
+      }
+      let dismissed: string[] = []
+      try {
+        dismissed = JSON.parse((await getStoredText(DRIVE_OFFER_DISMISSED)) || '[]') as string[]
+      } catch {
+        dismissed = []
+      }
+      if (!alive) return
+      if (movable.every(p => dismissed.includes(p.dir))) {
+        setDriveOffer(null)
+        return
+      }
+      // what the docs say the stems weigh; the confirm adds the song files
+      const bytes = movable.reduce(
+        (n, p) => n + Object.values(p.doc.stemHashes ?? {}).reduce((m, h) => m + h.size, 0),
+        0
+      )
+      setDriveOffer({
+        dirs: movable.map(p => p.dir),
+        bytes,
+        // not the songs left out as copies: those are split, just not ours to send
+        unsplit: all.filter(p => Object.keys(p.stems).length === 0).length,
+        total: all.length
+      })
+    })()
+    return () => {
+      alive = false
+    }
+  }, [active, mode, projects])
+
+  /* A song is here OR in the Drive library, never both. A move cut off after
+     its song reached the library but before the phone let go is finished on
+     a look at this library — every time it comes into view, since offline or
+     with the song open the look leaves it for the next one (no upload
+     involved, and with no move pending a look is one pref read). */
+  const finishingMoves = useRef(false)
+  useEffect(() => {
+    if (!active || !isFocused || mode !== 'phone' || finishingMoves.current || batchRunningRef.current) return
+    finishingMoves.current = true
+    void (async () => {
+      // `mode` starts as 'phone' before the stored one is read, while a picked
+      // folder can still be the root — and the song docs are read from the
+      // root. Only the phone's own library can answer for its songs.
+      if ((await getRoot()).kind === 'picked') return
+      const dirs = await finishCompletedMoves(moveBusy)
+      if (dirs.length === 0) return
+      log('library', `finished moving ${dirs.join(', ')} to Google Drive (cut off last time)`)
+      void refreshRef.current?.()
+    })()
+      .catch(() => {})
+      .finally(() => {
+        finishingMoves.current = false
+      })
+  }, [active, isFocused, mode, moveBusy])
 
   useEffect(() => {
     /* The catalog stays mounted behind Player now. Its background job events
@@ -1624,16 +1821,17 @@ export default function CatalogScreen({
     TEST.beatModelsUi = beatModelsUi
     TEST.fetchBeatModels = () => void fetchBeatModels()
     TEST.dismissBeatModels = dismissBeatModels
-    // the swipe's own path (card progress, alerts), minus the confirm
-    TEST.moveToDrive = (dir: string) => {
-      const entry = (projects ?? []).find(p => p.dir === dir)
-      return entry ? runMove(entry, false) : Promise.reject(new Error(`no project ${dir}`))
-    }
+    // the offer's own path (progress card, list refresh), minus the confirm
+    // and the closing dialog; with no list, every song the offer names
+    TEST.moveAllToDrive = (dirs?: string[]) => runMoveAll(dirs ?? driveOffer?.dirs ?? [], false)
     TEST.stopMove = () => {
       moveStop.current = true
     }
-    TEST.moving = moving
-    TEST.unfinishedMoves = [...unfinishedMoves]
+    TEST.driveOffer = driveOffer
+    TEST.moveBatch = moveBatch
+    // a clean Drive slate for drivers: tokens AND the stored listing, which
+    // otherwise outlives the fake Drive a previous run talked to
+    TEST.driveSignOut = () => driveSignOut()
   })
 
   /** Open-row handles by card key: a row that starts LOADING is snapped
@@ -1645,8 +1843,8 @@ export default function CatalogScreen({
     if (loading?.dir != null) swipeRefs.current[loading.dir]?.close()
   }, [loading?.dir])
   useEffect(() => {
-    if (moving?.dir != null) swipeRefs.current[moving.dir]?.close()
-  }, [moving?.dir])
+    if (moveBatch?.dir) swipeRefs.current[moveBatch.dir]?.close()
+  }, [moveBatch?.dir])
 
   const card = (opts: {
     key: string
@@ -2134,6 +2332,37 @@ export default function CatalogScreen({
           {/* In-flight work stays at the top, next to the split and
               analysis cards — that is where progress belongs. The OFFER does
               not: see below the library. */}
+          {moveBatch && (
+            <View style={s.splitCard}>
+              <Text style={s.splitTitle} numberOfLines={1}>
+                Adding songs to Google Drive
+              </Text>
+              <Text style={s.splitText} numberOfLines={1}>
+                {moveBatch.stopping
+                  ? 'Stopping after this file…'
+                  : moveBatch.count === 1
+                  ? `${moveBatch.pct}%`
+                  : `Song ${moveBatch.index + 1} of ${moveBatch.count} · ${moveBatch.pct}%`}
+              </Text>
+              <View style={s.splitBarBed}>
+                <View style={[s.splitBar, { width: `${Math.min(100, moveBatch.pct)}%` }]} />
+              </View>
+              <View style={s.splitActions}>
+                <Pressable
+                  accessibilityRole="button"
+                  hitSlop={8}
+                  disabled={moveBatch.stopping}
+                  onPress={() => {
+                    // checked between files: the one on the wire finishes
+                    moveStop.current = true
+                    setMoveBatch(b => (b ? { ...b, stopping: true } : b))
+                  }}
+                >
+                  <Text style={[s.ctxLink, moveBatch.stopping && { color: C.dim }]}>Stop</Text>
+                </Pressable>
+              </View>
+            </View>
+          )}
           {beatModelsUi?.phase === 'downloading' && (
             <View style={s.splitCard}>
               <Text style={s.splitTitle} numberOfLines={1}>
@@ -2170,7 +2399,7 @@ export default function CatalogScreen({
             const renderEntry = (p: ProjectEntry): React.JSX.Element => {
               const downloaded = isDownloaded(p, usage[p.dir])
               // a Drive song can share the moving phone song's name
-              const movingHere = mode === 'phone' && moving?.dir === p.dir
+              const movingHere = mode === 'phone' && moveBatch?.dir === p.dir
               const added = addedTracks(p.doc?.settings).length
               const split = isSplit(p)
               const hue = Math.abs(p.dir.length * 7 + p.dir.charCodeAt(0)) % 3
@@ -2187,9 +2416,7 @@ export default function CatalogScreen({
                 title: splitSongName(p.doc.name ?? p.dir).title,
                 artist: splitSongName(p.doc.name ?? p.dir).artist,
                 meta: movingHere ? (
-                  <Text style={{ color: C.amber }}>{moving.msg}</Text>
-                ) : mode === 'phone' && unfinishedMoves.has(p.dir) ? (
-                  <Text style={{ color: C.amber }}>Move to Drive unfinished</Text>
+                  <Text style={{ color: C.amber }}>Moving to Google Drive…</Text>
                 ) : (
                   <>
                     {Object.keys(p.stems).length > 0
@@ -2207,21 +2434,7 @@ export default function CatalogScreen({
                     ) : null}
                   </>
                 ),
-                right: movingHere ? (
-                  <Pressable
-                    hitSlop={10}
-                    onPress={() => {
-                      // checked between files: the one on the wire finishes
-                      moveStop.current = true
-                      setMoving(m => (m ? { ...m, msg: 'Stopping after this file…' } : m))
-                    }}
-                    style={s.cancelBtn}
-                    accessibilityRole="button"
-                    accessibilityLabel="Stop moving this song to Google Drive"
-                  >
-                    <Text style={{ color: white(0.75), fontSize: 13, fontWeight: '700' }}>✕</Text>
-                  </Pressable>
-                ) : (
+                right: (
                   <Text
                     style={[s.status, downloaded && s.statusHave]}
                     /* A bare glyph carrying the one fact the singer most needs
@@ -2290,7 +2503,7 @@ export default function CatalogScreen({
                 swipeActions: ((): CardSwipeAction[] | null => {
                   const title = p.doc.name ?? p.dir
                   const acts: CardSwipeAction[] = []
-                  if (movingHere) return null // its ✕ is the one action now
+                  if (movingHere) return null // mid-upload: Stop is on the progress card
                   if (mode === 'phone') {
                     if (split) {
                       acts.push({
@@ -2306,19 +2519,6 @@ export default function CatalogScreen({
                         label: `Find lyrics for ${title}`,
                         icon: <LyricsGlyph color={white(0.85)} />,
                         onPress: () => void findLyricsFor(p)
-                      })
-                    }
-                    /* Moving it to Drive sits next to the trash: it too takes the
-                       song off this phone, just not out of the singer's life. */
-                    if (split && driveAvailable()) {
-                      const finishing = unfinishedMoves.has(p.dir)
-                      acts.push({
-                        key: 'drive',
-                        label: finishing
-                          ? `Finish moving ${title} to Google Drive`
-                          : `Move ${title} to Google Drive`,
-                        icon: <UploadGlyph color={white(0.85)} />,
-                        onPress: () => confirmMove(p, finishing)
                       })
                     }
                     acts.push({
@@ -2425,6 +2625,46 @@ export default function CatalogScreen({
               song, so it ranks under the songs that already exist. Copy cut to
               the two facts that decide it; the long version lives in the Song
               sheet, where someone is already asking about the beat. */}
+          {/* The one door into Drive for songs made here — a whole-library
+              move, not a per-song gesture: a song lives on this phone OR in
+              the Drive library, and this is where it changes sides. Below the
+              library, like every offer (see the next one's note). */}
+          {driveOffer && !moveBatch && (
+            <View style={[s.splitCard, { marginTop: 14 }]}>
+              <Text style={s.splitTitle} numberOfLines={1}>
+                Google Drive
+              </Text>
+              <Text style={s.splitText}>
+                {/* "All" only when it IS all: songs not split yet, and copies
+                    of songs Drive has, stay behind */}
+                {driveOffer.dirs.length < driveOffer.total
+                  ? `${driveOffer.dirs.length === 1 ? '1 song' : `${driveOffer.dirs.length} songs`} on this `
+                  : driveOffer.dirs.length === 1
+                  ? 'The song on this '
+                  : driveOffer.dirs.length === 2
+                  ? 'Both songs on this '
+                  : `All ${driveOffer.dirs.length} songs on this `}
+                {Platform.OS === 'ios' ? 'iPhone' : 'phone'}, about {fmtBytes(driveOffer.bytes)}.{' '}
+                {driveOffer.dirs.length === 1
+                  ? 'It moves into your Drive library and plays'
+                  : 'They move into your Drive library and play'}{' '}
+                from the Drive tab, already downloaded.
+                {driveOffer.unsplit > 0
+                  ? ` ${driveOffer.unsplit === 1 ? 'A song not split yet stays' : `${driveOffer.unsplit} songs not split yet stay`} here.`
+                  : ''}
+              </Text>
+              <View style={s.splitActions}>
+                <Pressable accessibilityRole="button" hitSlop={8} onPress={confirmMoveAll}>
+                  <Text style={s.ctxLink}>Add all local songs to Google Drive</Text>
+                </Pressable>
+              </View>
+              <View style={s.splitActions}>
+                <Pressable accessibilityRole="button" hitSlop={8} onPress={dismissDriveOffer}>
+                  <Text style={[s.ctxLink, { color: C.dim }]}>Not now</Text>
+                </Pressable>
+              </View>
+            </View>
+          )}
           {beatModelsUi?.phase === 'offer' && (
             <View style={[s.splitCard, { marginTop: 14 }]}>
               <Text style={s.splitTitle} numberOfLines={1}>

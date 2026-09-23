@@ -260,7 +260,8 @@ Mobile has its own permanent sim-driven tests in `mobile/tests/`
 `beats-native-ios.cjs`, `song-sheet-beat.cjs`, `player-session.cjs`,
 `focus-loss-android.cjs`, `play-from-anywhere.cjs`,
 `waveform-streamed.cjs`, `now-playing.cjs`, `sample-background.cjs`,
-`move-to-drive.cjs` — both platforms, `PLATFORM=ios|android`; it rewrites the
+`move-to-drive.cjs` — both platforms, `PLATFORM=ios|android`, in three variants
+(default, `STAY_ON_PHONE=1`, `CUT_MID_BATCH=1`); it rewrites the
 generated gdrive-config.ts to aim the app at a fake Drive and restores it): CDP over
 Metro against the iOS
 Simulator — run them
@@ -1067,7 +1068,15 @@ was driven; the gotchas that follow from it are below.
   without it means an older desktop that would trash the folder; no catalog is
   safe only while every root folder is phone-tagged). A phone adds
   root folders without touching catalog.json, so the phone's "catalog
-  unchanged" skip must also check the root's folder set.
+  unchanged" skip must also check the root's folder set. On the phone a song
+  is on "This phone" OR in the Drive library, never both: the one door is the
+  library's "Add all local songs to Google Drive" offer, and a move cut off
+  after its move-in is finished (`finishCompletedMoves`) on the next look.
+  A moved song joins the phone's SAVED Drive listing before the phone lets go
+  of its copy (`driveListMovedIn`) — offline, or after a kill mid-batch, it is
+  otherwise in neither tab. Move jobs run one at a time (`oneAtATime`), and
+  every Drive listing is numbered as it begins (`listGen`): an older one never
+  replaces a newer one on screen or on disk.
 
 ## Conventions
 
