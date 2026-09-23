@@ -294,6 +294,12 @@ class WasapiRouteLossContext final {
   bool publishRunning(uint64_t expectedGeneration) noexcept;
   void markError() noexcept;
   void markStopped() noexcept;
+  // The owner's stop() has joined the worker and drained the callback, so the
+  // stream is quiet whatever ended it. Unlike markStopped this overwrites a
+  // DeviceLost or Error verdict: the host contract is that a completed stop
+  // reads Stopped, and the playback session reads anything else as a stream
+  // that may still be rendering. lost() and the generation keep the loss.
+  void markQuiesced() noexcept;
 
  private:
   std::atomic<bool> lossClaimed_{false};

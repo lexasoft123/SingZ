@@ -1314,7 +1314,18 @@ class WasapiAudioHostBackend final : public AudioHostBackend {
     const bool hadSession = sessionOwned_ || workerThread_.joinable();
     runShutdownSequence();
     sessionOwned_ = false;
-    if (hadSession && routeContext_) routeContext_->markStopped();
+    // runShutdownSequence joined the worker and drained the callback, so a
+    // stream the route lost (sleep, an unplugged headset, a new default
+    // device) is as stopped as any other now. Leaving it reading DeviceLost
+    // told the playback session its callback might still run, and the
+    // session quarantined the song for good: every unload after that failed
+    // and nothing would play again until SingZ restarted. The session latches
+    // a loss from the status it reads before stopping; one that lands during
+    // this stop ends as a plain Stopped, and the next Play opens a fresh route
+    // either way. status() deliberately adds no terminal reason for a lost
+    // route: a quiesced host reports Stopped like every other backend, and
+    // open() starts the next song on a fresh route context.
+    if (hadSession && routeContext_) routeContext_->markQuiesced();
     else if (hadSession) state_.store(AudioHostState::Stopped,
                                      std::memory_order_release);
   }
