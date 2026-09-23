@@ -275,6 +275,26 @@ int main() {
   CHECK(errorDuringStart.lifecycleState() ==
         singz::detail::WasapiLifecycleState::Error);
 
+  // A completed stop() reads Stopped whatever ended the stream, or the
+  // playback session quarantines a song whose device went away while it was
+  // paused and refuses every unload until the app restarts. The loss itself
+  // stays on the record.
+  singz::detail::WasapiRouteLossContext lostThenStopped(300, nullptr);
+  CHECK(lostThenStopped.publishOpen(300));
+  lostThenStopped.markLost();
+  lostThenStopped.markStopped();
+  CHECK(lostThenStopped.lifecycleState() ==
+        singz::detail::WasapiLifecycleState::DeviceLost);
+  lostThenStopped.markQuiesced();
+  CHECK(lostThenStopped.lifecycleState() ==
+        singz::detail::WasapiLifecycleState::Stopped);
+  CHECK(lostThenStopped.lost());
+  CHECK(lostThenStopped.generation() == 301);
+  CHECK(!lostThenStopped.publishOpen(301));
+  errorDuringStart.markQuiesced();
+  CHECK(errorDuringStart.lifecycleState() ==
+        singz::detail::WasapiLifecycleState::Stopped);
+
   CaptureSetupTrace captureSetup;
   void* captureClient = nullptr;
   void* captureFormat = nullptr;
