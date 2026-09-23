@@ -1721,6 +1721,13 @@ button.chip-status:hover {
   margin-bottom: 0;
 }
 
+.settings-select.log-session {
+  width: auto;
+  align-self: center;
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
 .log-actions {
   margin-left: auto;
   display: flex;

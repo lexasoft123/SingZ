@@ -222,7 +222,11 @@ const api: SingzApi = {
 
   e2eHooks: process.env.SINGZ_E2E_HOOKS === '1',
 
-  saveLog: (path) => ipcRenderer.invoke('log:save', path),
+  saveLog: (path, session) => ipcRenderer.invoke('log:save', path, session),
+
+  logSessions: () => ipcRenderer.invoke('log:sessions'),
+
+  readLogSession: (name) => ipcRenderer.invoke('log:session', name),
 
   onLogLine: (cb) => {
     const listener = (_e: IpcRendererEvent, entry: LogEntry): void => cb(entry)
