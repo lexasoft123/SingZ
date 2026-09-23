@@ -61,6 +61,12 @@ jobs:
         if: runner.os == 'macOS'
         run: mobile/scripts/test-swift-currency.sh
 
+      # The Swift end of the shared project name/path table — the rule that
+      # keeps a phone-added song's folder visible to the iPhone's own listing.
+      - name: Project name/path conformance (Swift)
+        if: runner.os == 'macOS'
+        run: mobile/scripts/test-swift-project-paths.sh
+
       - name: Inject Google Drive OAuth client
         if: env.GDRIVE_CONFIG != ''
         shell: bash
