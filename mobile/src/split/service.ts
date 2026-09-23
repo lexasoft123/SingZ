@@ -84,13 +84,35 @@ export async function startSplit(opts: {
 }): Promise<void> {
   if (!splitAvailable()) throw new Error('Splitting is not on this phone yet')
   log('split', `start ${opts.resume ? 'resume' : 'fresh'} ${opts.srcPath}`)
-  await native().startSplit(
+  const started = await native().startSplit(
     opts.srcPath,
     opts.modelPath,
     opts.projectDir,
     !!opts.resume,
     opts.watchdogCapMs ?? 0
   )
+  // iOS answers a start it refuses (one job at a time — a stalled job keeps
+  // the engine until the app restarts) with `false` and a `busy` event that
+  // nothing handles; ignoring it left a card on "Starting…" until the
+  // liveness poll called it a split that never started. Android always
+  // resolves true — its refusal is the event alone, and its :split process
+  // dies with a stall, so it has nothing held to refuse over.
+  if (started === false) {
+    log('split', 'start refused — another split still holds the engine', 'warn')
+    throw new Error(SPLIT_ENGINE_HELD_COPY)
+  }
+}
+
+export const SPLIT_ENGINE_HELD_COPY =
+  'The last split is still stuck on this phone. Close SingZ completely and open it again, then split.'
+
+/** Whether a FAILED job still owns the split engine. On iOS a stall is
+ *  recorded as failed while the wedged ORT thread keeps the runner active
+ *  until the app restarts (SingzSplitRunner armWatchdog), so a new start is
+ *  refused — and discarding it would wipe the tail the restart resumes from.
+ *  Every other failure has already let go. */
+export function failedJobHoldsEngine(error: string, platform: string): boolean {
+  return platform === 'ios' && /^Splitting stalled/.test(error)
 }
 
 export async function cancelSplit(): Promise<void> {

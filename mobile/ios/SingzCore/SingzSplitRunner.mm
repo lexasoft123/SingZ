@@ -212,7 +212,8 @@ static void UpdateJobLocked(void (^mutate)(NSMutableDictionary *job)) {
 /// hand it honest interleaved f32 stereo. Mono duplicates; extra channels
 /// beyond the first two are ignored (the Android decoder's rule).
 static BOOL DecodeToRawF32Stereo(NSString *srcPath, NSString *outPath,
-                                 double *outSampleRate, NSString **outError,
+                                 double *outSampleRate, int64_t *outShortFrames,
+                                 NSString **outError,
                                  BOOL (^cancelled)(void),
                                  void (^progress)(double frac)) {
   NSError *err = nil;
@@ -252,6 +253,18 @@ static BOOL DecodeToRawF32Stereo(NSString *srcPath, NSString *outPath,
       break;
     }
     if (![file readIntoBuffer:buf error:&err]) {
+      // ...and file.length is not always the frame it throws at. An MP3 that
+      // ends in 0xFF padding (no tags, sync-shaped junk) threw 2900 frames
+      // short of it — only when `length` was asked BEFORE decoding, which
+      // this loop has to — with no error at all (measured on the Mac with the
+      // field file: 593 s, 26,171,136 stated, 26,168,236 readable, the lost
+      // 66 ms silent at peak 21/32767). "Decode failed (unknown)" three times
+      // over refused a whole song for that. A throw inside the last second
+      // is the end of the audio; one earlier is still a real failure.
+      if (doneFrames > 0 && totalFrames - doneFrames <= (int64_t)rate) {
+        *outShortFrames = totalFrames - doneFrames; // said in the log by the caller
+        break;
+      }
       *outError = [NSString stringWithFormat:@"Decode failed (%@)",
                                              err.localizedDescription ?: @"unknown"];
       ok = NO;
@@ -536,10 +549,11 @@ static const BOOL kUseContinuedTask = NO;
       [self armWatchdog:_firstCapMs];
       [self startHeartbeat];
       double rate = 0;
+      int64_t shortFrames = 0;
       NSString *decodeErr = nil;
       __block int64_t lastPumpMs = 0;
       const BOOL ok = DecodeToRawF32Stereo(
-          src, mixPath, &rate, &decodeErr,
+          src, mixPath, &rate, &shortFrames, &decodeErr,
           ^BOOL { return self->_cancelRequested.load(); },
           ^(double frac) {
             // each tick re-arms: total decode time is uncapped, a hang is not
@@ -559,6 +573,15 @@ static const BOOL kUseContinuedTask = NO;
           [self finishWithState:kStateFailed error:decodeErr keepDoc:YES];
         }
         return;
+      }
+      if (shortFrames > 0) {
+        // The only road from here to the app log is a progress stage; the
+        // reason rides after the colon, as the CoreML decline's does.
+        SingzVitals v = SampleVitals();
+        self->_progress([NSString stringWithFormat:@"decode:ended %lld frames short of the "
+                                                   @"stated length, taken as the end",
+                                                   (long long)shortFrames],
+                        1.0, 0, 0, v.footprintMb, v.headroomMb, v.cpuPct);
       }
       srcRate = (int)llround(rate);
       dispatch_sync(JobQueue(), ^{
