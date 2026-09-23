@@ -194,10 +194,30 @@ async function manifestOf(dir: string, refreshed = false): Promise<OutFile[]> {
   return out
 }
 
-/** The library name for the moved song: the phone's own folder name unless
- *  the library already uses it (case-insensitively — desktops fold case), or
- *  it would shadow one of the two folders SingZ itself finds by name. */
-function freeName(base: string, rootKids: DriveNode[]): string {
+/**
+ * The name a song can have in the library: the same cleanup the desktop's
+ * adoptionName applies (src/main/sync-plan.ts), so a desktop taking the song
+ * in finds nothing to rename. A rename there would leave this phone's
+ * downloaded copy filed under the old name — the Drive tab would call the song
+ * not downloaded, and the next open would fetch every stem again. The two are
+ * held equal by the roundtrip suite.
+ */
+export function libraryName(name: string): string {
+  return (
+    name
+      .replace(/[\u0000-\u001f/\\:*?"<>|]/g, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .replace(/^[\s.]+/, '')
+      .trim() || 'Song from phone'
+  )
+}
+
+/** The library name for the moved song: the phone's own folder name, cleaned
+ *  as above, unless the library already uses it (case-insensitively —
+ *  desktops fold case), or it would shadow one of the two folders SingZ
+ *  itself finds by name. */
+function freeName(dir: string, rootKids: DriveNode[]): string {
+  const base = libraryName(dir)
   const used = new Set(
     [...rootKids.filter((f) => f.mimeType === DRIVE_FOLDER).map((f) => f.name), 'SingZ', STAGING_FOLDER].map((n) =>
       n.toLowerCase()

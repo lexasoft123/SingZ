@@ -2091,8 +2091,10 @@ confirm, progress and resume states in `CatalogScreen`.
    against Drive's own md5 after it lands (`files.get` — a cut connection can still
    end in a plausible 200), stems first, `project.json` last.
 2. **Move in, in one request.** Only when every byte is there does the phone
-   re-list the root, pick a free name (the phone's folder name, or `… (phone)` when
-   the library already uses it — case-insensitively, since desktops fold case), and
+   re-list the root, pick a free name (the phone's folder name cleaned exactly as the
+   desktop's `adoptionName` cleans it — a rename on adoption would strand the
+   phone's downloaded copy under the old name — or `… (phone)` when the library
+   already uses it, case-insensitively, since desktops fold case), and
    `files.update` the folder into the root with its new name and the tag
    `singzState: published` together.
 3. **Let go.** The texts seed the offline cache under the Drive name, the stems move
@@ -2177,7 +2179,7 @@ never one that reached the library.
 
 ### Verified
 
-- `tests/roundtrip/phone-publish.test.ts` — 22 cases of the REAL phone code moving
+- `tests/roundtrip/phone-publish.test.ts` — 25 cases of the REAL phone code moving
   songs through the fake Drive and the REAL desktop sync taking them in: the happy
   path byte for byte with a clean second sync; a phone-only Drive; an older desktop
   refusing; unsplit refused; killed mid-upload (resume sends only what is missing);
@@ -2186,8 +2188,10 @@ never one that reached the library.
   files; name clashes on both sides; adopted-then-deleted is trashed for good; a doc
   that disagrees with its files is neither adopted nor trashed; the empty-library
   refusal; killed between the download and the tag; a move record outliving its
-  song; the no-catalog gate both ways; a disk that refuses the new folder. **All 22
-  safeguards were mutation-tested — each one removed fails at least one case.**
+  song; the no-catalog gate both ways; a disk that refuses the new folder or a
+  leftover it will not let go of; a leading-dot name; the phone's and the desktop's
+  naming held equal. **All 24 safeguards were mutation-tested — each one removed
+  fails at least one case.**
 - `mobile/tests/move-to-drive.cjs` on a fresh API 36 emulator and an iOS 26.1
   simulator — the real natives against the fake Drive over HTTP, then the real
   desktop sync against the same store: 18/18 on both. The 5.9 MB sample song (nine

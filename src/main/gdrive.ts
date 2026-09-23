@@ -510,8 +510,10 @@ async function adoptPublished(
     }
     onProgress?.(`Adding ${dir} from your phone…`, 0.02)
     const tmp = join(root, `${ADOPTING_PREFIX}${f.id}`)
-    await rm(tmp, { recursive: true, force: true })
     try {
+      // inside the try: a leftover a scanner still holds is this song's
+      // trouble, not the sync's (see the catch)
+      await rm(tmp, { recursive: true, force: true })
       const kids = await listChildren(f.id)
       const docFile = kids.find((k) => k.name === 'project.json' && k.mimeType !== FOLDER)
       if (!docFile) throw new AdoptRefused('it has no project.json')

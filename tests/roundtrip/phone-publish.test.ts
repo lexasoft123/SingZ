@@ -6,7 +6,7 @@
  * because each one is a moment when the song exists in fewer places than the
  * singer thinks.
  */
-import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -473,6 +473,65 @@ describe('the desktop side of adoption', () => {
     expect(md5(theirs.get('stems/vocals.flac')!.bytes!)).toBe(desktopBytes)
     expect(await desktopSync()).toMatchObject({ ok: true, uploaded: 0 })
   })
+
+  it('the phone names a song exactly as the desktop will — so adoption renames nothing', async () => {
+    const { adoptionName } = await import('../../src/main/sync-plan')
+    const p = await phone()
+    const named = [
+      'Sixteen Tons', '...Baby One More Time', '. . . Ready For It', '. . .', ' . x', 'Tab\there',
+      'a/b', 'CON: x', '  spaced  out ', '.', '..', '', '.hidden'
+    ]
+    // and every short name over the characters that interact: dots, spaces,
+    // a tab, a colon, a letter
+    const alphabet = ['.', ' ', '\t', ':', 'a']
+    let layer = ['']
+    for (let len = 1; len <= 5; len++) {
+      layer = layer.flatMap((prefix) => alphabet.map((c) => prefix + c))
+      named.push(...layer)
+    }
+    for (const name of named) {
+      const phoneName = p.publish.libraryName(name)
+      expect(phoneName).toBe(adoptionName(name, []))
+      // what adoption actually runs: the desktop's pass over the phone's name
+      expect(adoptionName(phoneName, [])).toBe(phoneName)
+      expect(phoneName.startsWith('.')).toBe(false)
+    }
+  })
+
+  it('a leading-dot name moves under its library name, and stays downloaded after adoption', async () => {
+    await desktopWithOneSong()
+    const p = await phone()
+    const dir = await splitSongOnPhone(p, '...Baby One More Time')
+    expect(dir).toBe('...Baby One More Time')
+    expect(await p.publish.moveToDrive(dir)).toMatchObject({ name: 'Baby One More Time' })
+    expect(await desktopSync()).toMatchObject({ ok: true, adopted: ['Baby One More Time'] })
+    const again = await phone()
+    const entry = (await again.gdrive.driveListProjects(true)).find((e) => e.dir === 'Baby One More Time')!
+    const { isDownloaded, cacheUsage } = await import('../../mobile/src/projects')
+    expect(isDownloaded(entry, (await cacheUsage()).find((u) => u.project === entry.dir))).toBe(true)
+  })
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'a leftover adoption folder the disk will not let go of skips that song, never the sync',
+    async () => {
+      await desktopWithOneSong()
+      const p = await phone()
+      await p.publish.moveToDrive(await splitSongOnPhone(p))
+      const folder = rootFolders().find((f) => f.name === 'Sixteen Tons')!
+      // a killed run's half download, which the disk now refuses to remove
+      const leftover = join(root, `.singz-adopting-${folder.id}`)
+      mkdirSync(join(leftover, 'stems'), { recursive: true })
+      writeFileSync(join(leftover, 'stems', 'vocals.flac'), 'half a stem')
+      chmodSync(root, 0o555)
+      try {
+        expect(await desktopSync()).toMatchObject({ ok: true, adopted: [] })
+      } finally {
+        chmodSync(root, 0o755)
+      }
+      expect(await desktopSync()).toMatchObject({ ok: true, adopted: ['Sixteen Tons'] })
+      expect(existsSync(leftover)).toBe(false)
+    }
+  )
 
   it('a phone song taken in and later deleted on the computer is trashed, never brought back', async () => {
     await desktopWithOneSong()

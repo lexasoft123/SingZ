@@ -207,12 +207,14 @@ export const isPublished = (f: { appProperties?: Record<string, string> }): bool
  * the phone's folder. A taken name gets " (phone)", then " (phone 2)"…
  */
 export function adoptionName(remoteName: string, taken: Iterable<string>): string {
+  // Leading dots AND spaces in one pass: stripping dots, then trimming, left
+  // ". . . x" at ". . x" — a second pass (the desktop's, over the phone's
+  // output) then renamed it, and ". . ." reached a folder called ".".
   const base =
     remoteName
       .replace(/[\u0000-\u001f/\\:*?"<>|]/g, ' ')
       .replace(/\s{2,}/g, ' ')
-      .trim()
-      .replace(/^\.+/, '')
+      .replace(/^[\s.]+/, '')
       .trim() || 'Song from phone'
   const used = new Set([...taken].map((n) => n.toLowerCase()))
   if (!used.has(base.toLowerCase())) return base
