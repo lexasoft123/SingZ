@@ -2151,9 +2151,11 @@ over what belongs to one song (open in the player, busy splitting or being
 analysed, being deleted, its own failure). A song whose stems the Drive library
 already holds — a folder copied onto the phone from a computer ("Files you copied
 onto this iPhone") — is left out of the offer and passed over: it is not the
-phone's to send, and moving it would only make a "(phone)" duplicate — except a
+phone's to send, and moving it would only make a "(phone)" duplicate. (Not a
 song with a move record: the folder whose stems match is then its OWN, moved in
-before a cut, and the song is finished rather than passed over.
+before a cut, and the song is finished rather than passed over.) A copy is the
+one way a song stays in both lists, so the screen says so: its card reads "Also
+in Google Drive", and the offer says such a song stays.
 
 The Drive listing is kept honest around a move in two ways. A song that moved
 in joins the phone's SAVED Drive listing — on screen and on disk, with its
@@ -2237,7 +2239,7 @@ listings finished LAST was kept, on screen and on disk.
 
 ### Verified
 
-- `tests/roundtrip/phone-publish.test.ts` — 51 cases of the REAL phone code moving
+- `tests/roundtrip/phone-publish.test.ts` — 52 cases of the REAL phone code moving
   songs through the fake Drive and the REAL desktop sync taking them in: the happy
   path byte for byte with a clean second sync; a phone-only Drive; an older desktop
   refusing; unsplit refused; killed mid-upload (resume sends only what is missing);
@@ -2261,10 +2263,11 @@ listings finished LAST was kept, on screen and on disk.
   WHILE the song is being recorded, or a disk that refuses the record, leaving it
   on the phone; a moved folder trashed on the web not listed on — an older listing
   never replacing a newer one, one begun before a move never replacing its
-  record — not even landing while the record is being written — one in flight
+  record — not even landing while the record is being written, while one begun
+  after the move and landing then is the one kept — one in flight
   at sign-out never landing, and a song another phone
   moved in listed at once; a phone copy of a Drive song, and a second identical
-  phone song, passed over; a dropped connection named in plain words. **All 48
+  phone song, passed over; a dropped connection named in plain words. **All 49
   safeguards were mutation-tested — each one removed fails at least one case.**
 - `mobile/tests/move-to-drive.cjs` on a fresh API 36 emulator and an iOS 26.1
   simulator — the real natives against the fake Drive over HTTP, through the

@@ -939,6 +939,24 @@ describe('the Drive library, as the phone sees it around a move', () => {
     net.setOffline(false)
   })
 
+  it('a listing begun after the move, landing while the song is being recorded, is the one kept', async () => {
+    await desktopWithOneSong()
+    const p = await phone()
+    const a = await splitSongOnPhone(p, 'First Song')
+    seedLibraryOnDisk(root, { projects: [song('Song Two')] })
+    expect(await desktopSync()).toMatchObject({ ok: true })
+    prefTrap = {
+      key: 'singz.gdrive.catalog',
+      mode: 'meanwhile',
+      reached: false,
+      // begun after the move-in, so it sees the song — and the rest of the library
+      meanwhile: async () => void (await p.gdrive.driveListProjects(true))
+    }
+    await p.publish.moveToDrive(a)
+    expect(await listed(p)).toEqual(['First Song', 'Song One', 'Song Two'])
+    expect(await listed(await phone())).toEqual(['First Song', 'Song One', 'Song Two'])
+  })
+
   it('a saved listing the disk refuses keeps the song on the phone, and a later look finishes it', async () => {
     await desktopWithOneSong()
     const p = await phone()

@@ -307,9 +307,14 @@ export default function CatalogScreen({
     dirs: string[]
     bytes: number
     unsplit: number
+    /** Songs whose audio the Drive library already has: they stay. */
+    copies: number
     /** Every song in the phone library, offered or not. */
     total: number
   } | null>(null)
+  /** Phone songs the Drive library already holds (same stems), marked on
+   *  their cards: in both lists, and the singer should see why. */
+  const [driveCopies, setDriveCopies] = useState<ReadonlySet<string>>(() => new Set())
   /** What the app was doing when it died last time, if it did.
    *
    *  Kept apart from `error` on purpose. That one slot was carrying six
@@ -1532,7 +1537,8 @@ export default function CatalogScreen({
         (moved === 0
           ? ''
           : moved === 1
-          ? 'The song is in your Google Drive library now — already downloaded, so it plays straight away. '
+          ? `${skipped > 0 ? '1 song is' : 'The song is'} in your Google Drive library now — already ` +
+            'downloaded, so it plays straight away. '
           : `${skipped > 0 ? `${moved} songs are` : moved === 2 ? 'Both songs are' : `All ${moved} songs are`} ` +
             'in your Google Drive library now — ' +
             'already downloaded, so they play straight away. ') +
@@ -1673,6 +1679,7 @@ export default function CatalogScreen({
   useEffect(() => {
     if (!active || mode !== 'phone' || !driveAvailable()) {
       setDriveOffer(null)
+      setDriveCopies(new Set())
       return
     }
     let alive = true
@@ -1692,6 +1699,10 @@ export default function CatalogScreen({
           Object.keys(p.stems).length > 0 &&
           (!inDrive.has(stemSignature(p.doc)) || p.dir in midMove)
       )
+      const copies = all.filter(
+        p => Object.keys(p.stems).length > 0 && inDrive.has(stemSignature(p.doc)) && !(p.dir in midMove)
+      )
+      if (alive) setDriveCopies(new Set(copies.map(p => p.dir)))
       if (!signedIn || movable.length === 0) {
         if (alive) setDriveOffer(null)
         return
@@ -1717,6 +1728,7 @@ export default function CatalogScreen({
         bytes,
         // not the songs left out as copies: those are split, just not ours to send
         unsplit: all.filter(p => Object.keys(p.stems).length === 0).length,
+        copies: copies.length,
         total: all.length
       })
     })()
@@ -2335,7 +2347,7 @@ export default function CatalogScreen({
           {moveBatch && (
             <View style={s.splitCard}>
               <Text style={s.splitTitle} numberOfLines={1}>
-                Adding songs to Google Drive
+                {moveBatch.count === 1 ? 'Adding a song to Google Drive' : 'Adding songs to Google Drive'}
               </Text>
               <Text style={s.splitText} numberOfLines={1}>
                 {moveBatch.stopping
@@ -2419,6 +2431,8 @@ export default function CatalogScreen({
                   <Text style={{ color: C.amber }}>Moving to Google Drive…</Text>
                 ) : (
                   <>
+                    {/* first, so a narrow card cuts the stem count, not this */}
+                    {mode === 'phone' && driveCopies.has(p.dir) ? 'Also in Google Drive · ' : ''}
                     {Object.keys(p.stems).length > 0
                       ? `${Object.keys(p.stems).length} stems`
                       : 'not split yet'}
@@ -2651,6 +2665,9 @@ export default function CatalogScreen({
                 from the Drive tab, already downloaded.
                 {driveOffer.unsplit > 0
                   ? ` ${driveOffer.unsplit === 1 ? 'A song not split yet stays' : `${driveOffer.unsplit} songs not split yet stay`} here.`
+                  : ''}
+                {driveOffer.copies > 0
+                  ? ` ${driveOffer.copies === 1 ? 'A song already in your Drive library stays' : `${driveOffer.copies} songs already in your Drive library stay`} here too.`
                   : ''}
               </Text>
               <View style={s.splitActions}>
