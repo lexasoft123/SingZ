@@ -14,7 +14,7 @@ import { log } from './log'
 
 export interface SyncLogEntry {
   at: number
-  kind: 'run' | 'upload' | 'trash' | 'error'
+  kind: 'run' | 'upload' | 'trash' | 'adopt' | 'error'
   msg: string
 }
 

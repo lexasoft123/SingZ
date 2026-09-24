@@ -2,6 +2,7 @@ import { NativeModules } from 'react-native'
 import type { LyricLine, ProjectDoc, ProjectSettings } from './model'
 import { log } from './log'
 import { mutateProjectDocument } from './project-document'
+import { forgetMove } from './publish-record'
 import {
   GRAPH_DOCUMENT_FORMAT,
   MAX_GRAPH_DOCUMENT_TEXT_BYTES,
@@ -88,6 +89,8 @@ export interface CreatedProject {
  */
 export async function createProject(input: CreateProjectInput): Promise<CreatedProject> {
   const { dir } = await Folder.ensureProjectDir(input.name)
+  // a move record left by an earlier song of this name is not this song's
+  await forgetMove(dir)
   const ext = extOf(input.fileName) || '.mp3'
   const songFile = `song${ext}`
   const laneFile = `stems/custom-original${ext}`

@@ -43,6 +43,20 @@ export function installFakeDrive(store: FakeDriveStore = newStore()): InstalledF
       headers: { get: (k: string) => lower.get(k.toLowerCase()) ?? null },
       json: async () => JSON.parse(text) as unknown,
       text: async () => text,
+      // a real web stream, as node's fetch hands the desktop: adoption
+      // streams downloads to disk through it rather than buffering a stem
+      get body() {
+        const b = Buffer.isBuffer(out.body) ? out.body : Buffer.from(out.body)
+        // node's global, typed loosely: this file also compiles under the
+        // React Native config, whose lib has no web streams
+        const Stream = (globalThis as unknown as { ReadableStream: new (src: object) => unknown }).ReadableStream
+        return new Stream({
+          start(c: { enqueue(chunk: Uint8Array): void; close(): void }) {
+            c.enqueue(new Uint8Array(b))
+            c.close()
+          }
+        })
+      },
       arrayBuffer: async () => {
         const b = Buffer.isBuffer(out.body) ? out.body : Buffer.from(out.body)
         return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength)

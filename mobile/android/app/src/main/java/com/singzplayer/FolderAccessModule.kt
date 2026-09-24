@@ -32,6 +32,19 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
   ReactContextBaseJavaModule(ctx), ActivityEventListener {
 
   private val exec = Executors.newSingleThreadExecutor()
+
+  /** Uploads get a thread of their own: a stem takes tens of seconds to send,
+   *  and on the shared one every open, listing and ✓ would wait behind it. */
+  private val uploadExec = Executors.newSingleThreadExecutor()
+
+  /** HttpURLConnection has no write timeout (AOSP builds its OkHttp with none),
+   *  so a link that stays up but stops taking bytes would hold a move for
+   *  TCP's own ~15 minutes, the stop button able only to say "after this
+   *  file". A stall this long ends the upload instead — the same idle bound
+   *  iOS gets from URLSession — and the move stops with the song still here,
+   *  ready to pick up where it was. */
+  private val uploadWatch = Executors.newSingleThreadScheduledExecutor()
+  private val uploadStallMs = 120_000L
   private var pickPromise: Promise? = null
   private var pickFilePromise: Promise? = null
 
@@ -807,6 +820,123 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
         promise.resolve(true)
       } catch (e: Exception) {
         promise.reject("delete", e.message ?: "Could not delete $relPath")
+      }
+    }
+  }
+
+  // ------------------------------------------- moving a song to Drive (P6) --
+
+  /**
+   * Stream one phone-project file to an upload URL (a Drive resumable
+   * session). Fixed-length streaming, or HttpURLConnection buffers the whole
+   * body in memory before sending — a stem at a time. Resolves the status and
+   * the response body whatever the status: JS decides what a refusal means.
+   */
+  @ReactMethod
+  fun uploadFile(project: String, relPath: String, url: String, contentType: String, promise: Promise) {
+    uploadExec.execute {
+      var conn: HttpURLConnection? = null
+      try {
+        val dir = docDirFor(project) ?: throw Exception("Bad project name")
+        if (!relOk(relPath)) throw Exception("Bad file name")
+        val f = File(dir, relPath)
+        if (!f.isFile) throw Exception("$relPath is missing")
+        val c = (URL(url).openConnection() as HttpURLConnection).apply {
+          requestMethod = "PUT"
+          doOutput = true
+          setFixedLengthStreamingMode(f.length())
+          setRequestProperty("Content-Type", contentType)
+          connectTimeout = 20000
+          readTimeout = 120000
+        }
+        conn = c
+        val lastWrite = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
+        val stalled = java.util.concurrent.atomic.AtomicBoolean(false)
+        val watch = uploadWatch.scheduleWithFixedDelay({
+          if (System.currentTimeMillis() - lastWrite.get() > uploadStallMs && stalled.compareAndSet(false, true)) {
+            c.disconnect() // unblocks the write below with an IOException
+          }
+        }, 5, 5, java.util.concurrent.TimeUnit.SECONDS)
+        try {
+          f.inputStream().use { input ->
+            c.outputStream.use { out ->
+              val buf = ByteArray(1 shl 16)
+              while (true) {
+                val n = input.read(buf)
+                if (n <= 0) break
+                out.write(buf, 0, n)
+                lastWrite.set(System.currentTimeMillis())
+              }
+            }
+          }
+        } catch (e: java.io.IOException) {
+          if (stalled.get()) throw Exception("The upload of $relPath stalled — nothing moved for two minutes")
+          throw e
+        } finally {
+          // the reply has readTimeout; the watch is for the bytes going out
+          watch.cancel(false)
+        }
+        val status = c.responseCode
+        val stream = if (status / 100 == 2) c.inputStream else c.errorStream
+        val body = stream?.bufferedReader()?.use { it.readText() } ?: ""
+        val m = Arguments.createMap()
+        m.putInt("status", status)
+        m.putString("body", body)
+        promise.resolve(m)
+      } catch (e: Exception) {
+        promise.reject("upload", e.message ?: "Cannot upload $relPath")
+      } finally {
+        conn?.disconnect()
+      }
+    }
+  }
+
+  /**
+   * A song moved to Drive keeps playing here with no second download: its
+   * stems become the Drive song's downloaded copy, under the name it has in
+   * the library, and the "This phone" folder goes. File by file and
+   * re-runnable — a retry after a kill moves what is left, and nothing is
+   * cleared first, because a file an earlier attempt moved must survive the
+   * retry. Rename where both roots share a filesystem; external files and
+   * filesDir usually do not, so copy-then-delete is the other half (keeping
+   * the mtime). The md5 memo travels with the bytes whenever its size+mtime
+   * stamp still holds, so the first open does not hash the song again.
+   */
+  @ReactMethod
+  fun moveProjectToCache(project: String, cacheProject: String, promise: Promise) {
+    exec.execute {
+      try {
+        val dir = docDirFor(project) ?: throw Exception("Bad project name")
+        val dest = cacheDirFor(cacheProject) ?: throw Exception("Bad Drive song name")
+        val outDir = File(dest, "stems").apply { mkdirs() }
+        val edit = hashPrefs.edit()
+        for (src in File(dir, "stems").listFiles().orEmpty()) {
+          if (!src.isFile || src.name.endsWith(".part")) continue
+          val out = File(outDir, src.name)
+          val memo = hashPrefs.getString(src.path, null)
+          val stamp = src.lastModified()
+          if (out.exists()) out.delete()
+          if (!src.renameTo(out)) {
+            val tmp = File(out.path + ".part")
+            src.inputStream().use { i -> tmp.outputStream().use { o -> i.copyTo(o, 1 shl 16) } }
+            tmp.setLastModified(stamp)
+            if (!tmp.renameTo(out)) throw Exception("Cannot move ${src.name}")
+            src.delete()
+          }
+          edit.remove(src.path)
+          if (memo != null && memo.startsWith("${out.length()}:${out.lastModified()}:")) {
+            edit.putString(out.path, memo)
+          }
+        }
+        edit.apply()
+        if (dir.exists() && !dir.deleteRecursively()) throw Exception("Could not remove the phone copy")
+        val prefix = dir.path + File.separator
+        val sweep = hashPrefs.edit()
+        for (path in hashPrefs.all.keys) if (path.startsWith(prefix)) sweep.remove(path)
+        sweep.apply()
+        promise.resolve(true)
+      } catch (e: Exception) {
+        promise.reject("move", e.message ?: "Could not move the song")
       }
     }
   }

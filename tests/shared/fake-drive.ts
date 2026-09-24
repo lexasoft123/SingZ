@@ -23,6 +23,9 @@ export interface FakeFile {
   parents: string[]
   bytes?: Buffer
   trashed?: boolean
+  /** Drive's app-private key/value tags. Phone publishing marks its folders
+   *  with them; Drive merges PATCHes key by key and a null removes one. */
+  appProperties?: Record<string, string>
   /** What the LISTING reports, when it must disagree with the bytes served —
    *  a stale index, a file rewritten between the listing and the download. */
   md5Override?: string
@@ -136,21 +139,48 @@ export function parseQuery(q: string): Query {
 function project(f: FakeFile, fields: string | null): Record<string, unknown> {
   const inner = /files\(([^)]*)\)/.exec(fields ?? '')
   const want = inner ? new Set(inner[1].split(',').map((s) => s.trim())) : null
+  return pick(f, want)
+}
+
+/** A files.get / files.update projection: `fields=id,md5Checksum,size`, no
+ *  files(...) wrapper. Absent fields means Drive's default id,name,mimeType. */
+function projectOne(f: FakeFile, fields: string | null): Record<string, unknown> {
+  const want = fields ? new Set(fields.split(',').map((s) => s.trim())) : null
+  return pick(f, want)
+}
+
+function pick(f: FakeFile, want: Set<string> | null): Record<string, unknown> {
   const full: Record<string, unknown> = {
     id: f.id,
     name: f.name,
     mimeType: f.mimeType,
     size: listedSize(f),
     md5Checksum: listedMd5(f),
-    parents: f.parents
+    parents: f.parents,
+    // Drive leaves the key out entirely when a file carries none
+    ...(f.appProperties && Object.keys(f.appProperties).length ? { appProperties: { ...f.appProperties } } : {})
   }
   if (!want) {
-    delete full.parents // Drive's default projection is id,name,mimeType only
-    return full
+    // Drive's default projection is id,name,mimeType only
+    return { id: full.id, name: full.name, mimeType: full.mimeType }
   }
   const out: Record<string, unknown> = {}
   for (const k of Object.keys(full)) if (want.has(k)) out[k] = full[k]
   return out
+}
+
+/** Drive's appProperties PATCH: merged key by key, a null value deletes. */
+function mergeProps(
+  have: Record<string, string> | undefined,
+  patch: Record<string, string | null> | undefined
+): Record<string, string> | undefined {
+  if (!patch) return have
+  const out = { ...(have ?? {}) }
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === null) delete out[k]
+    else out[k] = String(v)
+  }
+  return Object.keys(out).length ? out : undefined
 }
 
 const json = (status: number, data: unknown): FakeResponse => ({
@@ -230,10 +260,26 @@ export function serveRequest(
   if (one && method === 'PATCH') {
     const f = store.files.get(one[1])
     if (!f) return json(404, { error: 'not found' })
-    const meta = JSON.parse(body.toString() || '{}') as { trashed?: boolean; name?: string }
+    const meta = JSON.parse(body.toString() || '{}') as {
+      trashed?: boolean
+      name?: string
+      appProperties?: Record<string, string | null>
+    }
     if (typeof meta.trashed === 'boolean') f.trashed = meta.trashed
     if (typeof meta.name === 'string') f.name = meta.name
-    return json(200, { id: f.id })
+    f.appProperties = mergeProps(f.appProperties, meta.appProperties)
+    // files.update moves a file between folders with these two query params;
+    // the body cannot carry `parents` at all on the real API
+    const add = u.searchParams.get('addParents')
+    const remove = u.searchParams.get('removeParents')
+    if (remove) f.parents = f.parents.filter((p) => !remove.split(',').includes(p))
+    if (add) for (const p of add.split(',')) if (!f.parents.includes(p)) f.parents.push(p)
+    return json(200, u.searchParams.get('fields') ? projectOne(f, u.searchParams.get('fields')) : { id: f.id })
+  }
+  if (one && method === 'GET' && u.searchParams.get('alt') !== 'media') {
+    const f = store.files.get(one[1])
+    if (!f) return json(404, { error: 'not found' })
+    return json(200, projectOne(f, u.searchParams.get('fields')))
   }
   if (one && method === 'DELETE') {
     if (!store.files.has(one[1])) return json(404, { error: 'not found' })
@@ -255,13 +301,15 @@ export function serveRequest(
       name: string
       mimeType?: string
       parents?: string[]
+      appProperties?: Record<string, string | null>
     }
     const f = putFile(store, {
       name: meta.name,
       mimeType: meta.mimeType ?? 'application/octet-stream',
-      parents: meta.parents ?? []
+      parents: meta.parents ?? [],
+      appProperties: mergeProps(undefined, meta.appProperties)
     })
-    return json(200, { id: f.id })
+    return json(200, u.searchParams.get('fields') ? projectOne(f, u.searchParams.get('fields')) : { id: f.id })
   }
 
   const uploadNew = path === '/upload/drive/v3/files' && method === 'POST'
