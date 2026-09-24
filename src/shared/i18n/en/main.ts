@@ -200,5 +200,17 @@ export const main = {
   'main.error.micTookTooLongToStart': 'The microphone took too long to start.',
   'main.error.couldNotStartMicrophone': 'Could not start the microphone: {message}',
   'main.error.micDidNotConfirmStop': 'The native microphone did not confirm that it stopped.',
-  'main.error.invalidMicFallback': 'Invalid microphone fallback.'
+  'main.error.invalidMicFallback': 'Invalid microphone fallback.',
+
+  // ── Google Drive sync progress: taking a phone's song into the library (Phase 6) ──
+  // {dir} is the song's folder name; shown in the sync progress bar
+  'main.sync.addingFromPhone': 'Adding {dir} from your phone…',
+
+  // ── Drive sync progress (shown under the library while it runs) ──
+  'main.sync.syncing': 'Syncing {dir}…',
+  'main.sync.uploading': 'Uploading {file}…',
+  'main.sync.removing': 'Removing {file} from Drive…',
+  'main.sync.removingGone': 'Removing {name} from Drive (renamed or deleted here)…',
+  'main.sync.updatingCatalog': 'Updating the phone catalog…',
+  'main.sync.upToDate': 'Drive is up to date'
 }

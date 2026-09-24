@@ -194,5 +194,16 @@ export const main: Translation<typeof en> = {
   'main.error.micTookTooLongToStart': '麦克风启动耗时过长。',
   'main.error.couldNotStartMicrophone': '无法启动麦克风：{message}',
   'main.error.micDidNotConfirmStop': '原生麦克风未确认已停止。',
-  'main.error.invalidMicFallback': '麦克风回退方案无效。'
+  'main.error.invalidMicFallback': '麦克风回退方案无效。',
+
+  // ── Google Drive sync progress: taking a phone's song into the library (Phase 6) ──
+  'main.sync.addingFromPhone': '正在从手机添加“{dir}”…',
+
+  // ── Drive sync progress (shown under the library while it runs) ──
+  'main.sync.syncing': '正在同步“{dir}”…',
+  'main.sync.uploading': '正在上传 {file}…',
+  'main.sync.removing': '正在从 Drive 删除 {file}…',
+  'main.sync.removingGone': '正在从 Drive 删除 {name}（已在此处重命名或删除）…',
+  'main.sync.updatingCatalog': '正在更新手机目录…',
+  'main.sync.upToDate': 'Drive 已是最新'
 }

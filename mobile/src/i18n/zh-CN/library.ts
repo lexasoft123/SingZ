@@ -196,5 +196,91 @@ export const library: Translation<typeof en> = {
   'phone.library.closeMatches': '相近的结果：',
   'phone.library.searchAgain': '重新搜索',
   'phone.library.syncedSuffix': ' · 已同步',
-  'phone.library.textOnlySuffix': ' · 仅文本'
+  'phone.library.textOnlySuffix': ' · 仅文本',
+
+  // ── moving songs to Google Drive (Phase 6) ──
+  'phone.library.moveBusyTitle': '正在将歌曲添加到 Google Drive',
+  'phone.library.moveBusyBody': '请先停止，或等它完成——之后文件夹才会打开。',
+  'phone.library.onItsWayTitle': '正在发送到 Google Drive',
+  'phone.library.onItsWayBody': '请先停止迁移，或稍等片刻。',
+  'phone.library.addingASongToDrive': '正在将一首歌曲添加到 Google Drive',
+  'phone.library.addingSongsToDrive': '正在将歌曲添加到 Google Drive',
+  'phone.library.stoppingAfterFile': '完成此文件后停止…',
+  'phone.library.songOfCountPct': '第 {index}/{count} 首 · {pct}%',
+  'phone.library.stop': '停止',
+  'phone.library.movingToDrive': '正在迁移到 Google Drive…',
+  'phone.library.alsoInDriveSuffix': '也在 Google Drive 中 · ',
+
+  // ── moving songs to Google Drive: the offer ──
+  'phone.library.driveOfferTitle': 'Google Drive',
+  'phone.library.deviceIphone': 'iPhone',
+  'phone.library.devicePhone': '手机',
+  'phone.library.offerLeadPartialOne':
+    '此 {device} 上的 1 首歌曲，约 {bytes}。它将迁移到你的 Drive 曲库，从 Drive 标签页播放，且已下载好。',
+  'phone.library.offerLeadPartialOther':
+    '此 {device} 上的 {n} 首歌曲，约 {bytes}。它们将迁移到你的 Drive 曲库，从 Drive 标签页播放，且已下载好。',
+  'phone.library.offerLeadAllOne':
+    '此 {device} 上的这首歌曲，约 {bytes}。它将迁移到你的 Drive 曲库，从 Drive 标签页播放，且已下载好。',
+  'phone.library.offerLeadAllTwo':
+    '此 {device} 上的这两首歌曲，约 {bytes}。它们将迁移到你的 Drive 曲库，从 Drive 标签页播放，且已下载好。',
+  'phone.library.offerLeadAllOther':
+    '此 {device} 上的全部 {n} 首歌曲，约 {bytes}。它们将迁移到你的 Drive 曲库，从 Drive 标签页播放，且已下载好。',
+  'phone.library.offerUnsplit_one': ' 还有一首尚未分离的歌曲会留在这里。',
+  'phone.library.offerUnsplit_other': ' 还有 {n} 首尚未分离的歌曲会留在这里。',
+  'phone.library.offerCopies_one': ' 还有一首已在你 Drive 曲库中的歌曲也会留在这里。',
+  'phone.library.offerCopies_other': ' 还有 {n} 首已在你 Drive 曲库中的歌曲也会留在这里。',
+  'phone.library.addAllLocalSongs': '将全部本地歌曲添加到 Google Drive',
+
+  // ── moving songs to Google Drive: the confirm ──
+  'phone.library.addConfirmTitleOne': '将这首歌曲添加到 Google Drive？',
+  'phone.library.addConfirmTitleTwo': '将这两首歌曲添加到 Google Drive？',
+  'phone.library.addConfirmTitleOther_one': '将全部 {n} 首歌曲添加到 Google Drive？',
+  'phone.library.addConfirmTitleOther_other': '将全部 {n} 首歌曲添加到 Google Drive？',
+  'phone.library.addConfirmBodyOne':
+    '将上传 {bytes}。这首歌曲一旦安全存入 Drive 就会从 {here} 移除，并改由 Drive 标签页播放，且已下载好。随时可以停止——只要还没上传完，它就会留在这里。',
+  'phone.library.addConfirmBodyMany':
+    '将上传 {bytes}。每首歌曲一旦安全存入 Drive 就会从 {here} 移除，并改由 Drive 标签页播放，且已下载好。随时可以停止——尚未上传的都会留在这里。',
+  'phone.library.add': '添加',
+  'phone.library.addAll': '全部添加',
+  'phone.library.hereIphone': '此 iPhone',
+  'phone.library.herePhone': '此手机',
+
+  // ── moving songs to Google Drive: how a batch ended ──
+  'phone.library.songsCount_one': '{n} 首歌曲',
+  'phone.library.songsCount_other': '{n} 首歌曲',
+  'phone.library.showMe': '带我去看看',
+  'phone.library.openDrive': '打开 Drive',
+  'phone.library.ok': '好',
+  'phone.library.twoInARowFailed':
+    '接连两首歌曲上传失败（{message}）——很可能是网络断开了。等重新联网后再试一次。',
+  'phone.library.stoppedPartWay': '中途已停止',
+  'phone.library.notAddedYet': '还没有添加',
+  'phone.library.wentUpBeforeStopped': '\n\n{songs}在停止前已上传；其余的仍在{here}上。',
+  'phone.library.everythingStillOn': '\n\n一切都仍在{here}上。',
+  'phone.library.nothingLeftToAdd': '没有可添加的了',
+  'phone.library.thoseSongsGone': '这些歌曲已不在{here}上了。',
+  'phone.library.addedToGoogleDrive': '已添加到 Google Drive',
+  'phone.library.nothingWentUp': '没有任何内容上传',
+  'phone.library.movedOneWithSkip': '1 首歌曲现已在你的 Google Drive 曲库中——已下载好，可以立即播放。',
+  'phone.library.movedOneNoSkip': '这首歌曲现已在你的 Google Drive 曲库中——已下载好，可以立即播放。',
+  'phone.library.movedManyWithSkip_one': '{n} 首歌曲现已在你的 Google Drive 曲库中——已下载好，可以立即播放。',
+  'phone.library.movedManyWithSkip_other': '{n} 首歌曲现已在你的 Google Drive 曲库中——已下载好，可以立即播放。',
+  'phone.library.movedTwoNoSkip': '这两首歌曲现已在你的 Google Drive 曲库中——已下载好，可以立即播放。',
+  'phone.library.movedAllNoSkip_one': '全部 {n} 首歌曲现已在你的 Google Drive 曲库中——已下载好，可以立即播放。',
+  'phone.library.movedAllNoSkip_other': '全部 {n} 首歌曲现已在你的 Google Drive 曲库中——已下载好，可以立即播放。',
+  'phone.library.syncsNextTimeOne': '你的电脑会在下次同步时把它加入自己的曲库。',
+  'phone.library.syncsNextTimeMany': '你的电脑会在下次同步时把它们加入自己的曲库。',
+  'phone.library.stayedOnPhone': '{songs}留在了{here}上：{reasons}',
+  'phone.library.moreInLog': '——还有更多，详见日志。',
+
+  // ── moving songs to Google Drive: skip / stop reasons (also used by publish.ts) ──
+  'phone.library.skipInUse': '它正在使用中——已打开、正在分离或正在分析',
+  'phone.library.skipAlreadyInDrive': '它已经在你的 Google Drive 曲库中',
+  'phone.library.notSplitForMove': '请先将这首歌曲分离成分轨——之后才能迁移到 Google Drive。',
+  'phone.library.signInFirstForMove': '请先登录 Google Drive——打开上方的 Drive 标签页。',
+  'phone.library.updateDesktopForMove':
+    '请先在电脑上更新 SingZ。同步此 Drive 的旧版本会移除它没有创建的歌曲，这些歌曲将从 Drive 中丢失。',
+  'phone.library.stoppedSongStill': '已停止——这首歌曲仍在此手机上。',
+  'phone.library.stoppedRestStill': '已停止——其余的仍在此手机上。',
+  'phone.library.connectionDroppedSkip': '还没上传完网络就断开了——它会随下一次"全部添加"一起处理'
 }

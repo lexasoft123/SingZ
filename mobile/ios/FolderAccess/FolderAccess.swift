@@ -951,6 +951,97 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
     }
   }
 
+  // ------------------------------------------- moving a song to Drive (P6) --
+  // In the class body for the reason at the top of the writer section: an
+  // @objc method in a separate-file extension is dead-stripped from the
+  // static pod and resolves to undefined at runtime.
+
+  /**
+   * Stream one phone-project file to an upload URL (a Drive resumable
+   * session). uploadTask(fromFile:) reads from disk as it sends, so a stem
+   * never sits in memory. Resolves the status and the response body whatever
+   * the status: JS decides what a refusal means.
+   */
+  @objc func uploadFile(
+    _ project: String,
+    relPath: String,
+    url: String,
+    contentType: String,
+    resolver resolve: @escaping RCTPromiseResolveBlock,
+    rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    guard let dir = docDirFor(project), relOk(relPath), let remote = URL(string: url) else {
+      reject("upload", "Bad project, file or upload address", nil)
+      return
+    }
+    let file = dir.appendingPathComponent(relPath)
+    guard fm.fileExists(atPath: file.path) else {
+      reject("upload", "\(relPath) is missing", nil)
+      return
+    }
+    var req = URLRequest(url: remote)
+    req.httpMethod = "PUT"
+    req.setValue(contentType, forHTTPHeaderField: "Content-Type")
+    req.timeoutInterval = 120
+    URLSession.shared.uploadTask(with: req, fromFile: file) { data, response, error in
+      if let error {
+        reject("upload", "\(relPath): \(error.localizedDescription)", error)
+        return
+      }
+      let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+      resolve(["status": status, "body": String(data: data ?? Data(), encoding: .utf8) ?? ""])
+    }.resume()
+  }
+
+  /**
+   * A song moved to Drive keeps playing here with no second download: its
+   * stems become the Drive song's downloaded copy, under the name it has in
+   * the library, and the "This phone" folder goes. File by file and
+   * re-runnable — a retry after a kill moves what is left, and nothing is
+   * cleared first, because a file an earlier attempt moved must survive the
+   * retry. Documents and Application Support share a volume, so each move is
+   * a rename that keeps the mtime — and with it the md5 memo, re-keyed to the
+   * new path, so the first open does not hash the song again.
+   */
+  @objc func moveProjectToCache(
+    _ project: String,
+    cacheProject: String,
+    resolver resolve: @escaping RCTPromiseResolveBlock,
+    rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    DispatchQueue.global(qos: .utility).async {
+      guard let dir = self.docDirFor(project), let dest = self.cacheDirFor(cacheProject) else {
+        reject("move", "Bad project or Drive song name", nil)
+        return
+      }
+      let defaults = UserDefaults.standard
+      do {
+        let stems = dir.appendingPathComponent("stems", isDirectory: true)
+        let outDir = dest.appendingPathComponent("stems", isDirectory: true)
+        try self.fm.createDirectory(at: outDir, withIntermediateDirectories: true)
+        for name in (try? self.fm.contentsOfDirectory(atPath: stems.path)) ?? [] where !name.hasSuffix(".part") {
+          let src = stems.appendingPathComponent(name)
+          var isDir: ObjCBool = false
+          guard self.fm.fileExists(atPath: src.path, isDirectory: &isDir), !isDir.boolValue else { continue }
+          let out = outDir.appendingPathComponent(name)
+          let memo = defaults.string(forKey: "singz.hash.\(src.path)")
+          if self.fm.fileExists(atPath: out.path) { try self.fm.removeItem(at: out) }
+          try self.fm.moveItem(at: src, to: out)
+          defaults.removeObject(forKey: "singz.hash.\(src.path)")
+          if let memo { defaults.set(memo, forKey: "singz.hash.\(out.path)") }
+        }
+        if self.fm.fileExists(atPath: dir.path) { try self.fm.removeItem(at: dir) }
+        let prefix = "singz.hash.\(dir.path)/"
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(prefix) {
+          defaults.removeObject(forKey: key)
+        }
+        resolve(true)
+      } catch {
+        reject("move", "Could not move the song: \(error.localizedDescription)", error)
+      }
+    }
+  }
+
   /** Tags for the add-a-song card: artist/title/album/durationMs, best effort. */
   @objc func readMediaTags(
     _ path: NSString,

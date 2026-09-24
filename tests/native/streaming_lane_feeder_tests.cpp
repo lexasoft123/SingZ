@@ -144,14 +144,17 @@ struct Output {
   }
 };
 
-bool prepareSource(const zdsp::ProcessorHandle& handle, uint32_t channels) {
+// `rate` is the DEVICE's: a resampled lane's node runs at the rate it was
+// resampled into, never at the file's.
+bool prepareSource(const zdsp::ProcessorHandle& handle, uint32_t channels,
+                   uint32_t rate = kRate) {
   const zdsp::AudioBusDescriptor bus{channels,
                                      zdsp::SampleFormat::Float32Planar,
                                      zdsp::AudioChannelLayout::Stereo, nullptr};
   zdsp::PrepareSpec spec{};
   spec.interfaceVersion = zdsp::kProcessorInterfaceVersion;
   spec.structSize = zdsp::kPrepareSpecV1RequiredSize;
-  spec.sampleRate = {static_cast<double>(kRate)};
+  spec.sampleRate = {static_cast<double>(rate)};
   spec.maximumBlockFrames = {kBlock};
   spec.inputBusCount = 0;
   spec.outputBusCount = 1;
@@ -162,7 +165,7 @@ bool prepareSource(const zdsp::ProcessorHandle& handle, uint32_t channels) {
 }
 
 void renderBlock(const zdsp::ProcessorHandle& handle, Output* output,
-                 int64_t projectSamples) {
+                 int64_t projectSamples, uint32_t rate = kRate) {
   zdsp::TransportContext transport{};
   transport.validFields = zdsp::TransportValidProjectSamples;
   transport.stateFlags = zdsp::TransportStatePlaying;
@@ -172,7 +175,7 @@ void renderBlock(const zdsp::ProcessorHandle& handle, Output* output,
   context.interfaceVersion = zdsp::kProcessorInterfaceVersion;
   context.structSize = zdsp::kProcessContextV1RequiredSize;
   context.transport = &transport;
-  context.sampleRate = {static_cast<double>(kRate)};
+  context.sampleRate = {static_cast<double>(rate)};
   context.frames = {kBlock};
   handle.functions->process(handle.state, &context, nullptr, 0, &output->view,
                             1);
@@ -602,6 +605,100 @@ int main(int argc, char** argv) {
     }
     std::remove(wav441.c_str());
     std::remove(flac441.c_str());
+  }
+
+  // ---- 3c. a lane fed to its END still follows playback back --------------
+  //
+  // Play after the song ran out is a seek to the top and a resume on the SAME
+  // graph (the desktop's Play with the count-in off), and a scrub back out of
+  // the last few seconds is the same thing mid-song — so a feeder that has
+  // taken a lane to its end must chase the demand when it jumps back. It did
+  // not: `serviceLane` returned as soon as a lane had ENDED with its ring at
+  // the song's end, before it looked at the demand at all, and every lane then
+  // played silence while the metronome, which is no lane, went on clicking.
+  // A singer's report, on a 48 kHz WASAPI output where every stem is
+  // resampled — and a resampled lane is exactly the one that gets there: its
+  // decoder reaches the end of the file BEFORE the ring is full, because the
+  // filter's tail only comes out of the flush. The device-rate lane rides
+  // along so the unresampled path is held to the same promise.
+  for (const uint32_t deviceRate : {48000u, kRate}) {
+    const bool resampling = deviceRate != kRate;
+    singz::DecodedAudioPrepareOptions endOptions;
+    endOptions.sourceFormat = singz::DecodedAudioSourceFormat::Flac;
+    endOptions.requiredSampleRate = deviceRate;
+    const singz::DecodedAudioResult song =
+        singz::prepareDecodedAudio(openRead(flac), endOptions);
+    check(song.ok(), "the end-of-song reference decodes at the device rate");
+    if (!song.ok()) continue;
+
+    singz::StreamingLaneGroup group;
+    singz::StreamingLaneOptions options;
+    options.windowFrames = 65536;
+    options.targetAheadFrames = 32768;
+    options.safetyFrames = 8192;
+    options.primeFrames = 16384;
+    group.setOptions(options);
+    check(group.addLane(openRead(flac), singz::OwnedFileDescriptor(), deviceRate) ==
+              singz::DecodedAudioStatus::Ok,
+          "a lane opens for the end-of-song case");
+    check(group.prime(0) == singz::DecodedAudioStatus::Ok, "and primes");
+    std::vector<uint8_t> storage(zdsp::streamingWindowSourceStateBytes() + 64);
+    uint8_t* aligned = storage.data() +
+                       ((64 - (reinterpret_cast<uintptr_t>(storage.data()) & 63u)) & 63u);
+    const zdsp::ProcessorHandle streamed = zdsp::createPositionedStreamingSource(
+        {{1}, group.window(0), 0, 0},
+        {aligned, static_cast<uint32_t>(zdsp::streamingWindowSourceStateBytes())});
+    check(streamed.state != nullptr && prepareSource(streamed, 2, deviceRate),
+          "the node prepares at the device rate");
+    if (streamed.state == nullptr) continue;
+
+    // Play out the song's last blocks, the feeder serviced between them the
+    // way its thread would be.
+    Output out(2);
+    const uint64_t total = group.outputFrames(0);
+    for (uint64_t at = total - 16 * kBlock; at + kBlock <= total; at += kBlock) {
+      for (int round = 0; round < 64; round++)
+        if (!group.serviceOnceForTesting()) break;
+      renderBlock(streamed, &out, static_cast<int64_t>(at), deviceRate);
+    }
+    for (int round = 0; round < 64; round++)
+      if (!group.serviceOnceForTesting()) break;
+    uint64_t residentStart = 0;
+    uint64_t residentEnd = 0;
+    (void)zdsp::streamingWindowResident(group.window(0), &residentStart, &residentEnd);
+    check(residentEnd == total, "the ring reached the end of the song");
+    // Asserted so this case cannot quietly stop reaching the state it is for.
+    if (resampling)
+      check(group.stats(0).ended,
+            "and the resampled lane's decoder ENDED on the way, as a real song's does");
+
+    // Play again from the top. The first block may starve — that is the
+    // design; after the feeder's turn it must be the song, every block.
+    const uint64_t seeksBefore = group.stats(0).seeks;
+    renderBlock(streamed, &out, 0, deviceRate);
+    double worst = 0.0;
+    float loudest = 0.0F;
+    for (uint64_t block = 0; block < 16; block++) {
+      for (int round = 0; round < 64; round++)
+        if (!group.serviceOnceForTesting()) break;
+      const uint64_t at = block * kBlock;
+      renderBlock(streamed, &out, static_cast<int64_t>(at), deviceRate);
+      for (uint32_t c = 0; c < 2; c++)
+        for (uint32_t f = 0; f < kBlock; f++) {
+          const float got = out.planes[c][f];
+          loudest = std::max(loudest, std::fabs(got));
+          // Past the filter's start-up for the resampled lane, as 3b compares;
+          // to the bit for the device-rate one.
+          if (at + f >= (resampling ? 1000u : 0u))
+            worst = std::max(worst, std::fabs(static_cast<double>(got) -
+                                              song.audio->channelData(c)[at + f]));
+        }
+    }
+    check(group.stats(0).seeks > seeksBefore, "the jump back to the top cost the feeder a seek");
+    check(loudest > 0.05F, "and the top of the song plays again instead of silence");
+    check(resampling ? worst < 1e-4 : worst == 0.0, "and it is the song's own audio");
+    (void)streamed.functions->deactivate(streamed.state);
+    (void)streamed.functions->destroy(streamed.state);
   }
 
   // ---- 4. the background waveform pass ----------------------------------

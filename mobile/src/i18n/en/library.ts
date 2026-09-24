@@ -229,5 +229,116 @@ export const library = {
   'phone.library.searchAgain': 'Search again',
   // appended to a lyrics candidate's duration; keep the leading " · "
   'phone.library.syncedSuffix': ' · synced',
-  'phone.library.textOnlySuffix': ' · text only'
+  'phone.library.textOnlySuffix': ' · text only',
+
+  // ── moving songs to Google Drive (Phase 6) ──
+  'phone.library.moveBusyTitle': 'Adding songs to Google Drive',
+  'phone.library.moveBusyBody': 'Stop it first, or let it finish — then the folder opens.',
+  'phone.library.onItsWayTitle': 'On its way to Google Drive',
+  'phone.library.onItsWayBody': 'Stop the move first, or give it a moment.',
+  // progress card title while a batch runs
+  'phone.library.addingASongToDrive': 'Adding a song to Google Drive',
+  'phone.library.addingSongsToDrive': 'Adding songs to Google Drive',
+  'phone.library.stoppingAfterFile': 'Stopping after this file…',
+  // {index} and {count} are 1-based song numbers in the batch; {pct} is 0-100
+  'phone.library.songOfCountPct': 'Song {index} of {count} · {pct}%',
+  'phone.library.stop': 'Stop',
+  // shown on a song's card while it is mid-upload
+  'phone.library.movingToDrive': 'Moving to Google Drive…',
+  // prefixed onto a card also held by the Drive library; keep the trailing " · "
+  'phone.library.alsoInDriveSuffix': 'Also in Google Drive · ',
+
+  // ── moving songs to Google Drive: the offer ──
+  'phone.library.driveOfferTitle': 'Google Drive',
+  // bare device word inside "on this {device}" — not a title, lowercase
+  'phone.library.deviceIphone': 'iPhone',
+  'phone.library.devicePhone': 'phone',
+  // {device} = deviceIphone/devicePhone, {bytes} is an already-formatted size like "42 MB"
+  'phone.library.offerLeadPartialOne':
+    '1 song on this {device}, about {bytes}. It moves into your Drive library and plays from the Drive tab, already downloaded.',
+  // {n} is the song count (2+, when some songs stay behind so this is not "all")
+  'phone.library.offerLeadPartialOther':
+    '{n} songs on this {device}, about {bytes}. They move into your Drive library and play from the Drive tab, already downloaded.',
+  'phone.library.offerLeadAllOne':
+    'The song on this {device}, about {bytes}. It moves into your Drive library and plays from the Drive tab, already downloaded.',
+  'phone.library.offerLeadAllTwo':
+    'Both songs on this {device}, about {bytes}. They move into your Drive library and play from the Drive tab, already downloaded.',
+  // {n} is the song count (3+)
+  'phone.library.offerLeadAllOther':
+    'All {n} songs on this {device}, about {bytes}. They move into your Drive library and play from the Drive tab, already downloaded.',
+  // appended sentence when some songs are not split yet; keep the leading space
+  'phone.library.offerUnsplit_one': ' A song not split yet stays here.',
+  'phone.library.offerUnsplit_other': ' {n} songs not split yet stay here.',
+  // appended sentence when some songs are already in the Drive library; keep the leading space
+  'phone.library.offerCopies_one': ' A song already in your Drive library stays here too.',
+  'phone.library.offerCopies_other': ' {n} songs already in your Drive library stay here too.',
+  'phone.library.addAllLocalSongs': 'Add all local songs to Google Drive',
+
+  // ── moving songs to Google Drive: the confirm ──
+  'phone.library.addConfirmTitleOne': 'Add this song to Google Drive?',
+  'phone.library.addConfirmTitleTwo': 'Add both songs to Google Drive?',
+  // {n} is the song count (3+)
+  'phone.library.addConfirmTitleOther_one': 'Add all {n} songs to Google Drive?',
+  'phone.library.addConfirmTitleOther_other': 'Add all {n} songs to Google Drive?',
+  // {bytes} is an already-formatted size, {here} = hereIphone/herePhone
+  'phone.library.addConfirmBodyOne':
+    '{bytes} goes up. The song leaves {here} once it is safely in Drive and plays from the Drive tab instead, already downloaded. Stop at any time — until it has gone up, it stays here.',
+  'phone.library.addConfirmBodyMany':
+    '{bytes} goes up. Each song leaves {here} once it is safely in Drive and plays from the Drive tab instead, already downloaded. Stop at any time — whatever has not gone up stays here.',
+  'phone.library.add': 'Add',
+  'phone.library.addAll': 'Add all',
+  // lowercase "this iPhone" / "this phone" used mid-sentence
+  'phone.library.hereIphone': 'this iPhone',
+  'phone.library.herePhone': 'this phone',
+
+  // ── moving songs to Google Drive: how a batch ended ──
+  'phone.library.songsCount_one': '{n} song',
+  'phone.library.songsCount_other': '{n} songs',
+  'phone.library.showMe': 'Show me',
+  'phone.library.openDrive': 'Open Drive',
+  'phone.library.ok': 'OK',
+  // {message} is the raw reason two songs in a row failed for
+  'phone.library.twoInARowFailed':
+    'Two songs in a row could not go up ({message}) — most likely the connection dropped. Try again once you are back online.',
+  'phone.library.stoppedPartWay': 'Stopped part way',
+  'phone.library.notAddedYet': 'Not added yet',
+  // {songs} = songsCount, {here} = hereIphone/herePhone; keep the leading blank line
+  'phone.library.wentUpBeforeStopped': '\n\n{songs} went up before it stopped; the rest are still on {here}.',
+  'phone.library.everythingStillOn': '\n\nEverything is still on {here}.',
+  'phone.library.nothingLeftToAdd': 'Nothing left to add',
+  // {here} = hereIphone/herePhone
+  'phone.library.thoseSongsGone': 'Those songs are no longer on {here}.',
+  'phone.library.addedToGoogleDrive': 'Added to Google Drive',
+  'phone.library.nothingWentUp': 'Nothing went up',
+  // one moved song, and other songs were skipped
+  'phone.library.movedOneWithSkip':
+    '1 song is in your Google Drive library now — already downloaded, so it plays straight away. ',
+  // one moved song, and nothing was skipped
+  'phone.library.movedOneNoSkip':
+    'The song is in your Google Drive library now — already downloaded, so it plays straight away. ',
+  // several moved songs (any count), and other songs were skipped; {n} is the moved count
+  'phone.library.movedManyWithSkip_one': '{n} songs are in your Google Drive library now — already downloaded, so they play straight away. ',
+  'phone.library.movedManyWithSkip_other': '{n} songs are in your Google Drive library now — already downloaded, so they play straight away. ',
+  // exactly two moved songs, nothing skipped
+  'phone.library.movedTwoNoSkip':
+    'Both songs are in your Google Drive library now — already downloaded, so they play straight away. ',
+  // three or more moved songs, nothing skipped; {n} is the moved count
+  'phone.library.movedAllNoSkip_one': 'All {n} songs are in your Google Drive library now — already downloaded, so they play straight away. ',
+  'phone.library.movedAllNoSkip_other': 'All {n} songs are in your Google Drive library now — already downloaded, so they play straight away. ',
+  'phone.library.syncsNextTimeOne': 'Your computer adds it to its own library the next time it syncs. ',
+  'phone.library.syncsNextTimeMany': 'Your computer adds them to its own library the next time it syncs. ',
+  // {songs} = songsCount, {here} = hereIphone/herePhone, {reasons} = up to two skip reasons joined with "; "
+  'phone.library.stayedOnPhone': '{songs} stayed on {here}: {reasons}',
+  'phone.library.moreInLog': ' — and more, listed in the Log.',
+
+  // ── moving songs to Google Drive: skip / stop reasons (also used by publish.ts) ──
+  'phone.library.skipInUse': 'it was in use — open, splitting or being analysed',
+  'phone.library.skipAlreadyInDrive': 'it is already in your Google Drive library',
+  'phone.library.notSplitForMove': 'Split this song into stems first — then it can move to Google Drive.',
+  'phone.library.signInFirstForMove': 'Sign in to Google Drive first — open the Drive tab above.',
+  'phone.library.updateDesktopForMove':
+    'Update SingZ on your computer first. The version syncing this Drive would remove songs it did not make, and these would be lost from Drive.',
+  'phone.library.stoppedSongStill': 'Stopped — the song is still on this phone.',
+  'phone.library.stoppedRestStill': 'Stopped — the rest are still on this phone.',
+  'phone.library.connectionDroppedSkip': 'the connection dropped before it was up — it goes with the next "Add all"'
 }

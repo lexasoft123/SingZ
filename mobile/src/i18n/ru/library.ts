@@ -203,5 +203,106 @@ export const library: Translation<typeof en> = {
   'phone.library.closeMatches': 'Похожие варианты:',
   'phone.library.searchAgain': 'Искать снова',
   'phone.library.syncedSuffix': ' · синхронизировано',
-  'phone.library.textOnlySuffix': ' · только текст'
+  'phone.library.textOnlySuffix': ' · только текст',
+
+  // ── moving songs to Google Drive (Phase 6) ──
+  'phone.library.moveBusyTitle': 'Добавление песен в Google Drive',
+  'phone.library.moveBusyBody': 'Сначала остановите это или дайте закончить — потом папка откроется.',
+  'phone.library.onItsWayTitle': 'Отправляется в Google Drive',
+  'phone.library.onItsWayBody': 'Сначала остановите перенос или подождите немного.',
+  'phone.library.addingASongToDrive': 'Добавление песни в Google Drive',
+  'phone.library.addingSongsToDrive': 'Добавление песен в Google Drive',
+  'phone.library.stoppingAfterFile': 'Остановка после этого файла…',
+  'phone.library.songOfCountPct': 'Песня {index} из {count} · {pct}%',
+  'phone.library.stop': 'Стоп',
+  'phone.library.movingToDrive': 'Перенос в Google Drive…',
+  'phone.library.alsoInDriveSuffix': 'Также в Google Drive · ',
+
+  // ── moving songs to Google Drive: the offer ──
+  'phone.library.driveOfferTitle': 'Google Drive',
+  'phone.library.deviceIphone': 'iPhone',
+  'phone.library.devicePhone': 'телефоне',
+  'phone.library.offerLeadPartialOne':
+    '1 песня на этом {device}, примерно {bytes}. Она переместится в вашу библиотеку Drive и будет воспроизводиться из вкладки Drive, уже загруженной.',
+  'phone.library.offerLeadPartialOther':
+    '{n} песен на этом {device}, примерно {bytes}. Они переместятся в вашу библиотеку Drive и будут воспроизводиться из вкладки Drive, уже загруженными.',
+  'phone.library.offerLeadAllOne':
+    'Песня на этом {device}, примерно {bytes}. Она переместится в вашу библиотеку Drive и будет воспроизводиться из вкладки Drive, уже загруженной.',
+  'phone.library.offerLeadAllTwo':
+    'Обе песни на этом {device}, примерно {bytes}. Они переместятся в вашу библиотеку Drive и будут воспроизводиться из вкладки Drive, уже загруженными.',
+  'phone.library.offerLeadAllOther':
+    'Все {n} песен на этом {device}, примерно {bytes}. Они переместятся в вашу библиотеку Drive и будут воспроизводиться из вкладки Drive, уже загруженными.',
+  'phone.library.offerUnsplit_one': ' Песня, которая ещё не разделена, останется здесь.',
+  'phone.library.offerUnsplit_few': ' {n} песни, которые ещё не разделены, останутся здесь.',
+  'phone.library.offerUnsplit_many': ' {n} песен, которые ещё не разделены, останутся здесь.',
+  'phone.library.offerUnsplit_other': ' {n} песни, которые ещё не разделены, останутся здесь.',
+  'phone.library.offerCopies_one': ' Песня, уже есть в вашей библиотеке Drive, тоже останется здесь.',
+  'phone.library.offerCopies_few': ' {n} песни, уже есть в вашей библиотеке Drive, тоже останутся здесь.',
+  'phone.library.offerCopies_many': ' {n} песен, уже есть в вашей библиотеке Drive, тоже останутся здесь.',
+  'phone.library.offerCopies_other': ' {n} песни, уже есть в вашей библиотеке Drive, тоже останутся здесь.',
+  'phone.library.addAllLocalSongs': 'Добавить все местные песни в Google Drive',
+
+  // ── moving songs to Google Drive: the confirm ──
+  'phone.library.addConfirmTitleOne': 'Добавить эту песню в Google Drive?',
+  'phone.library.addConfirmTitleTwo': 'Добавить обе песни в Google Drive?',
+  'phone.library.addConfirmTitleOther_one': 'Добавить все {n} песню в Google Drive?',
+  'phone.library.addConfirmTitleOther_few': 'Добавить все {n} песни в Google Drive?',
+  'phone.library.addConfirmTitleOther_many': 'Добавить все {n} песен в Google Drive?',
+  'phone.library.addConfirmTitleOther_other': 'Добавить все {n} песни в Google Drive?',
+  'phone.library.addConfirmBodyOne':
+    '{bytes} будет отправлено. Песня покинет {here}, как только она надёжно окажется в Drive, и будет воспроизводиться из вкладки Drive, уже загруженная. Остановить можно в любой момент — пока она не загрузилась, она остаётся здесь.',
+  'phone.library.addConfirmBodyMany':
+    '{bytes} будет отправлено. Каждая песня покинет {here}, как только она надёжно окажется в Drive, и будет воспроизводиться из вкладки Drive, уже загруженная. Остановить можно в любой момент — всё, что не загрузилось, остаётся здесь.',
+  'phone.library.add': 'Добавить',
+  'phone.library.addAll': 'Добавить все',
+  'phone.library.hereIphone': 'этот iPhone',
+  'phone.library.herePhone': 'этот телефон',
+
+  // ── moving songs to Google Drive: how a batch ended ──
+  'phone.library.songsCount_one': '{n} песня',
+  'phone.library.songsCount_few': '{n} песни',
+  'phone.library.songsCount_many': '{n} песен',
+  'phone.library.songsCount_other': '{n} песни',
+  'phone.library.showMe': 'Показать',
+  'phone.library.openDrive': 'Открыть Drive',
+  'phone.library.ok': 'ОК',
+  'phone.library.twoInARowFailed':
+    'Две песни подряд не удалось отправить ({message}) — скорее всего, пропала связь. Попробуйте снова, когда снова будете онлайн.',
+  'phone.library.stoppedPartWay': 'Остановлено на середине',
+  'phone.library.notAddedYet': 'Пока не добавлено',
+  'phone.library.wentUpBeforeStopped': '\n\n{songs} загрузились до остановки; остальные остаются на {here}.',
+  'phone.library.everythingStillOn': '\n\nВсё остаётся на {here}.',
+  'phone.library.nothingLeftToAdd': 'Больше ничего добавлять',
+  'phone.library.thoseSongsGone': 'Этих песен больше нет на {here}.',
+  'phone.library.addedToGoogleDrive': 'Добавлено в Google Drive',
+  'phone.library.nothingWentUp': 'Ничего не загрузилось',
+  'phone.library.movedOneWithSkip':
+    '1 песня теперь в вашей библиотеке Google Drive — уже загружена, поэтому сразу заиграет. ',
+  'phone.library.movedOneNoSkip':
+    'Песня теперь в вашей библиотеке Google Drive — уже загружена, поэтому сразу заиграет. ',
+  'phone.library.movedManyWithSkip_one': '{n} песня теперь в вашей библиотеке Google Drive — уже загружена, поэтому сразу заиграет. ',
+  'phone.library.movedManyWithSkip_few': '{n} песни теперь в вашей библиотеке Google Drive — уже загружены, поэтому сразу заиграют. ',
+  'phone.library.movedManyWithSkip_many': '{n} песен теперь в вашей библиотеке Google Drive — уже загружены, поэтому сразу заиграют. ',
+  'phone.library.movedManyWithSkip_other': '{n} песни теперь в вашей библиотеке Google Drive — уже загружены, поэтому сразу заиграют. ',
+  'phone.library.movedTwoNoSkip':
+    'Обе песни теперь в вашей библиотеке Google Drive — уже загружены, поэтому сразу заиграют. ',
+  'phone.library.movedAllNoSkip_one': 'Все {n} песня теперь в вашей библиотеке Google Drive — уже загружена, поэтому сразу заиграет. ',
+  'phone.library.movedAllNoSkip_few': 'Все {n} песни теперь в вашей библиотеке Google Drive — уже загружены, поэтому сразу заиграют. ',
+  'phone.library.movedAllNoSkip_many': 'Все {n} песен теперь в вашей библиотеке Google Drive — уже загружены, поэтому сразу заиграют. ',
+  'phone.library.movedAllNoSkip_other': 'Все {n} песни теперь в вашей библиотеке Google Drive — уже загружены, поэтому сразу заиграют. ',
+  'phone.library.syncsNextTimeOne': 'Ваш компьютер добавит её в свою библиотеку при следующей синхронизации. ',
+  'phone.library.syncsNextTimeMany': 'Ваш компьютер добавит их в свою библиотеку при следующей синхронизации. ',
+  'phone.library.stayedOnPhone': '{songs} остались на {here}: {reasons}',
+  'phone.library.moreInLog': ' — и другие, список в журнале.',
+
+  // ── moving songs to Google Drive: skip / stop reasons (also used by publish.ts) ──
+  'phone.library.skipInUse': 'она была занята — открыта, разделяется или анализируется',
+  'phone.library.skipAlreadyInDrive': 'она уже в вашей библиотеке Google Drive',
+  'phone.library.notSplitForMove': 'Сначала разделите эту песню на дорожки — тогда она сможет переместиться в Google Drive.',
+  'phone.library.signInFirstForMove': 'Сначала войдите в Google Drive — откройте вкладку Drive выше.',
+  'phone.library.updateDesktopForMove':
+    'Сначала обновите SingZ на компьютере. Версия, синхронизирующая этот Drive, удалила бы песни, которые она не создавала, и они были бы потеряны из Drive.',
+  'phone.library.stoppedSongStill': 'Остановлено — песня всё ещё на этом телефоне.',
+  'phone.library.stoppedRestStill': 'Остановлено — остальные всё ещё на этом телефоне.',
+  'phone.library.connectionDroppedSkip': 'связь пропала, пока она загружалась — она попадёт в следующее «Добавить все»'
 }

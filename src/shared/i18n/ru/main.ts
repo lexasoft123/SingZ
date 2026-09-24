@@ -203,5 +203,16 @@ export const main: Translation<typeof en> = {
   'main.error.micTookTooLongToStart': 'Микрофон запускался слишком долго.',
   'main.error.couldNotStartMicrophone': 'Не удалось запустить микрофон: {message}',
   'main.error.micDidNotConfirmStop': 'Нативный микрофон не подтвердил остановку.',
-  'main.error.invalidMicFallback': 'Недействительный резервный вариант микрофона.'
+  'main.error.invalidMicFallback': 'Недействительный резервный вариант микрофона.',
+
+  // ── Google Drive sync progress: taking a phone's song into the library (Phase 6) ──
+  'main.sync.addingFromPhone': 'Добавление «{dir}» с телефона…',
+
+  // ── Drive sync progress (shown under the library while it runs) ──
+  'main.sync.syncing': 'Синхронизация «{dir}»…',
+  'main.sync.uploading': 'Загрузка {file}…',
+  'main.sync.removing': 'Удаление {file} из Drive…',
+  'main.sync.removingGone': 'Удаление {name} из Drive (переименовано или удалено здесь)…',
+  'main.sync.updatingCatalog': 'Обновление каталога для телефона…',
+  'main.sync.upToDate': 'Drive актуален'
 }

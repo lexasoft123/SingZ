@@ -95,7 +95,7 @@ the E2E Windows workflow, which also runs `npm test`), the two capture-addon
 harnesses in `tests/e2e/` (`capture-addon-smoke.cjs`, the Electron ABI/load
 gate CI runs on both platforms; `capture-addon-hardware.cjs`, by-hand only —
 it opens the real microphone), and the mac drivers
-in `tests/e2e/mac/` (eighteen of them: align, lyrics editing (the editor's
+in `tests/e2e/mac/` (nineteen of them: align, lyrics editing (the editor's
 align-draft leg is a different code path from the panel's Check & align —
 both are covered), CANCELLING one of those jobs
 (`lyrics-cancel-e2e.cjs` — a cancel is not a verdict on the lyrics: the
@@ -141,7 +141,7 @@ agree with a decode fetched back afterwards. Before it, every open decoded
 six lanes through Chromium for a duration and a drawing and released them
 after Play (2.7 s on this Mac, ~10x on the fleet); with it, 0.56 s. A lane
 the measure refuses decodes as before, so a green run here is also the
-promise that the fallback never got exercised for a healthy project; and `count-in-e2e.cjs`, the only desktop driver that turns the COUNT-IN on: it scrubs before the first Play, presses Pause INSIDE the count-in and Play after a Pause twice, and reads `engine.position` at 40 ms through every pre-roll — the two 0.21.1 field reports it guards were invisible to every driver before it because none of them counts in (every Play after a song's first was a bare resume, so the count-in sounded once per open; and the core's negative pre-roll frames were clamped to 0, so a mid-song count-in drew the bar at the top of the song and a Pause inside it parked it there — the bar HOLDS at the landing now, as the phones' does) — and it hammers Space, sampling the bar at 30 ms, because the core's audible projection is UNAVAILABLE for a latency after every transport edge and its field defaults to 0, which the facade read as a position (one poll at the top of the song on every playing→paused edge; the phones check the flag, the desktop does now, the render head standing in); and it plays a song with its beat grid TAKEN AWAY and the metronome left on, because a click track needs a grid and the facade raised that as a product error — the click is a saved setting of the SONG, the grid is a detection that can be absent, stale or still running, so the two disagree routinely, and a singer met "Playback could not start: Native metronome playback requires a beat grid" over a song Web Audio would have played with its clicks silent; the
+promise that the fallback never got exercised for a healthy project; and `count-in-e2e.cjs`, the only desktop driver that turns the COUNT-IN on: it scrubs before the first Play, presses Pause INSIDE the count-in and Play after a Pause twice, and reads `engine.position` at 40 ms through every pre-roll — the two 0.21.1 field reports it guards were invisible to every driver before it because none of them counts in (every Play after a song's first was a bare resume, so the count-in sounded once per open; and the core's negative pre-roll frames were clamped to 0, so a mid-song count-in drew the bar at the top of the song and a Pause inside it parked it there — the bar HOLDS at the landing now, as the phones' does) — and it hammers Space, sampling the bar at 30 ms, because the core's audible projection is UNAVAILABLE for a latency after every transport edge and its field defaults to 0, which the facade read as a position (one poll at the top of the song on every playing→paused edge; the phones check the flag, the desktop does now, the render head standing in); and it plays a song with its beat grid TAKEN AWAY and the metronome left on, because a click track needs a grid and the facade raised that as a product error — the click is a saved setting of the SONG, the grid is a detection that can be absent, stale or still running, so the two disagree routinely, and a singer met "Playback could not start: Native metronome playback requires a beat grid" over a song Web Audio would have played with its clicks silent; and `stems-after-end-e2e.cjs`, which plays a song out and presses Play again, and scrubs back out of its last seconds, and reads each lane's `starvedBlocks` from the core — a streamed lane the feeder had read to its END never chased the jump back, so every stem played silence under a metronome that clicked on ("the metronome plays, but the stems don't", a 0.23.3 field report from a 48 kHz WASAPI laptop), and every muted driver before it was blind to that, because the transport, the button and the bar all moved exactly as they should; the
 `e2e-verifier` agent in
 `.claude/agents/` holds the roster of record, and a new driver is not
 finished until it is listed there — launch one instance per platform in
@@ -260,7 +260,10 @@ Mobile has its own permanent sim-driven tests in `mobile/tests/`
 `ab-repeat.cjs`, `offline-cache.cjs`, `custom-track.cjs`,
 `beats-native-ios.cjs`, `song-sheet-beat.cjs`, `player-session.cjs`,
 `focus-loss-android.cjs`, `play-from-anywhere.cjs`,
-`waveform-streamed.cjs`, `now-playing.cjs`, `sample-background.cjs`): CDP over
+`waveform-streamed.cjs`, `now-playing.cjs`, `sample-background.cjs`,
+`move-to-drive.cjs` — both platforms, `PLATFORM=ios|android`, in three variants
+(default, `STAY_ON_PHONE=1`, `CUT_MID_BATCH=1`); it rewrites the
+generated gdrive-config.ts to aim the app at a fake Drive and restores it): CDP over
 Metro against the iOS
 Simulator — run them
 after engine or loading changes.
@@ -1048,6 +1051,33 @@ was driven; the gotchas that follow from it are below.
   Drive v3 used by
   gdrive-sync.test.ts AND the emulator streaming E2E (config apiBase →
   http://10.0.2.2:8765, tokens seeded via run-as into shared_prefs).
+- **Phones move songs INTO the Drive library, and the desktop adopts them**
+  (Phase 6, docs/PHONE-STANDALONE.md § "Phase 6 — as built"). The phone
+  assembles a song under a top-level `SingZ uploads` folder, verifies every
+  file against Drive's md5, then moves the finished folder into the SingZ root
+  tagged `appProperties.singzState: 'published'` in ONE `files.update`; the
+  desktop's `gdriveSync` adopts every published folder before it scans the
+  library, then tags it `'adopted'`. Each rule here keeps a song from being
+  lost: the reconcile never trashes a `published` folder and the by-name
+  pairing never syncs into one (`ensureFolder` skips them too); the
+  empty-library refusal is decided BEFORE adoption, or one phone song makes a
+  not-yet-arrived library look populated and the reconcile trashes the rest; a
+  name clash is renamed on Drive before anything downloads, because the sync
+  pairs folders by name and trashes stems it does not know; and the catalog
+  stays `format: 2` — phones check `=== 2` exactly — with `capabilities.adopt`
+  ADDED, which is what a phone reads before it will move a song (a catalog
+  without it means an older desktop that would trash the folder; no catalog is
+  safe only while every root folder is phone-tagged). A phone adds
+  root folders without touching catalog.json, so the phone's "catalog
+  unchanged" skip must also check the root's folder set. On the phone a song
+  is on "This phone" OR in the Drive library, never both: the one door is the
+  library's "Add all local songs to Google Drive" offer, and a move cut off
+  after its move-in is finished (`finishCompletedMoves`) on the next look.
+  A moved song joins the phone's SAVED Drive listing before the phone lets go
+  of its copy (`driveListMovedIn`) — offline, or after a kill mid-batch, it is
+  otherwise in neither tab. Move jobs run one at a time (`oneAtATime`), and
+  every Drive listing is numbered as it begins (`listGen`): an older one never
+  replaces a newer one on screen or on disk.
 
 ## Conventions
 
