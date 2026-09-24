@@ -86,7 +86,10 @@ custom protocol from a `file://` page** — audio bytes go over `media:read`.
 **Renderer perf (the fleet has weak iGPUs).** rAF loops change-gate on whole device
 pixels and skip under `body.modal-open`; canvases repaint on visible-state flips, not
 on the clock; every infinite CSS animation needs a modal-open pause rule and must not
-outlive the state that justifies it; `body.win` stays blur-free. React-managed
+outlive the state that justifies it; `body.win` stays blur-free unless `body.glass`
+(a GPU main vouched for, `src/main/glass.ts`) — every blur has a `body.win:not(.glass)`
+twin, or a plain `body.win` twin plus an exact `body.win.glass` restore, and
+`tests/unit/windows-no-blur.test.ts` enforces both. React-managed
 `className` wipes imperative classes — they are re-asserted per frame.
 
 **Automated runs are silent.** A new or changed driver or sim test mutes itself:

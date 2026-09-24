@@ -1,6 +1,7 @@
 import { app, screen } from 'electron'
 import { existsSync } from 'node:fs'
 import os from 'node:os'
+import { settleGlass } from './glass'
 import { log } from './log'
 import { trtrtxFlagPath } from './models'
 
@@ -36,28 +37,47 @@ export function logHardwareInfo(): void {
   if (process.platform === 'win32' && existsSync(trtrtxFlagPath())) {
     log('hw', 'GPU engine: disabled marker present — splits run on CPU')
   }
-  app
-    .getGPUInfo('complete')
-    .then((info) => {
-      const g = info as {
-        gpuDevice?: Array<{
-          vendorId?: number
-          deviceId?: number
-          driverVersion?: string
-          active?: boolean
-        }>
-      }
-      const devices = g.gpuDevice ?? []
-      if (devices.length === 0) log('hw', 'gpu: none reported')
-      for (const d of devices) {
-        const vendor = VENDORS[d.vendorId ?? 0] ?? `vendor 0x${(d.vendorId ?? 0).toString(16)}`
-        log(
-          'hw',
-          `gpu: ${vendor} device 0x${(d.deviceId ?? 0).toString(16)}` +
-            (d.driverVersion ? ` · driver ${d.driverVersion}` : '') +
-            (d.active ? ' · active' : '')
-        )
-      }
-    })
-    .catch(() => log('hw', 'gpu: info unavailable'))
+}
+
+let gpuRead = false
+
+/**
+ * The launch's one `getGPUInfo('complete')`, which index.ts starts a second
+ * after the window is on screen. A complete read has the GPU process collect
+ * driver information (Dawn, video capabilities) on the thread that also
+ * rasters, composites and presents — Chromium holds the same collection back
+ * until two minutes after its own startup for that reason — and at app-ready,
+ * where it used to be, it could stand in front of the first frames. Logs the
+ * adapters and hands the same answer to the glass verdict, which must not
+ * read again.
+ */
+export function readGpuOnce(): void {
+  if (gpuRead) return
+  gpuRead = true
+  app.getGPUInfo('complete').then(
+    (info) => {
+      logAdapters(info)
+      settleGlass(info)
+    },
+    () => {
+      log('hw', 'gpu: info unavailable')
+      settleGlass(null)
+    }
+  )
+}
+
+function logAdapters(info: unknown): void {
+  const devices =
+    (info as { gpuDevice?: Array<{ vendorId?: number; deviceId?: number; driverVersion?: string; active?: boolean }> })
+      .gpuDevice ?? []
+  if (devices.length === 0) log('hw', 'gpu: none reported')
+  for (const d of devices) {
+    const vendor = VENDORS[d.vendorId ?? 0] ?? `vendor 0x${(d.vendorId ?? 0).toString(16)}`
+    log(
+      'hw',
+      `gpu: ${vendor} device 0x${(d.deviceId ?? 0).toString(16)}` +
+        (d.driverVersion ? ` · driver ${d.driverVersion}` : '') +
+        (d.active ? ' · active' : '')
+    )
+  }
 }

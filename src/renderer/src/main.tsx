@@ -12,4 +12,16 @@ import App from './App'
 // render to decide whether to mount the window buttons.
 applyPlatformClasses()
 
+// Windows starts solid and turns to glass only when main vouches for the GPU
+// it composites on (src/main/glass.ts): a weak one never flickers, a strong
+// one gets its blur a moment after the window appears — and loses it again
+// if Chromium later falls to software compositing.
+if (document.body.classList.contains('win')) {
+  const apply = (v: { glass: boolean }): void => {
+    document.body.classList.toggle('glass', v.glass)
+  }
+  window.singz.onGlassVerdict(apply)
+  void window.singz.glassVerdict().then(apply, () => undefined)
+}
+
 createRoot(document.getElementById('root') as HTMLElement).render(<App />)
