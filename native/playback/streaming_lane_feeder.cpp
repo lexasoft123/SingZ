@@ -158,9 +158,15 @@ DecodedAudioStatus StreamingLaneGroup::prime(uint64_t startFrame) {
 // One refill for one lane. Returns true when it made progress, so the loop can
 // tell a busy round from an idle one and sleep instead of spinning.
 bool StreamingLaneGroup::serviceLane(Lane& lane) {
-  if (lane.ended.load(std::memory_order_relaxed) && lane.residentEnd >= lane.window.totalFrames)
-    return false;
-
+  // No "this lane has ended" shortcut up here: the DEMAND is asked first,
+  // always. A lane read to its end is exactly the one a singer sends back — a
+  // Play after the song ran out seeks to the top of the SAME graph, a scrub
+  // back out of the last seconds likewise — and a return before the seek
+  // below left every lane playing silence under a metronome that went on
+  // clicking. A resampled lane reaches that state on every song, because its
+  // decoder hits the end of the file before the filter's flushed tail fills
+  // the ring. Once the ring holds the end and nothing wants anything else,
+  // the `want` test below already makes this a no-op.
   uint64_t demand = lane.residentStart;
   if (!zdsp::streamingWindowDemand(&lane.window, &demand))
     demand = lane.residentStart;

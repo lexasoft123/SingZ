@@ -11,12 +11,13 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   CaptureAddonLoadError,
   CaptureOwner,
   captureAddonManifestPath,
   captureIntegrityMode,
+  judgeLaneStarvation,
   loadCaptureBindingWith,
   pruneStaleCaptureLoadDirs,
   resolveCaptureAddonPath,
@@ -24,12 +25,14 @@ import {
   type CaptureCodecRuntime,
   type NativeCaptureBinding
 } from '../../src/main/capture'
+import { logEntries } from '../../src/main/log'
 import type {
   CaptureAnalysisWindow,
   CaptureStartResult,
   DesktopMonitorResult,
   DesktopMonitorStatus,
   DesktopPlaybackLaneConfig,
+  DesktopPlaybackLaneStatus,
   DesktopPlaybackPrepareConfig,
   DesktopPlaybackResult,
   DesktopPlaybackStatus
@@ -1177,5 +1180,117 @@ describe('CaptureOwner', () => {
       ok: false,
       error: 'Native headphone monitoring returned an invalid stop response.'
     })
+  })
+})
+
+// A streamed lane the core has stopped feeding renders silence for every
+// block while the metronome, which is no lane, goes on clicking — a singer's
+// 0.23.3 report, with nothing in the log to say so. Main judges the lanes'
+// starved-block counters read by read while the song plays.
+describe('streamed-lane starvation', () => {
+  const lane = (id: string, starvedBlocks: number, streamed = true): DesktopPlaybackLaneStatus => ({
+    id, cursorFrames: '0', totalFrames: '0', gain: 1, muted: false, solo: false,
+    streamed, starvedBlocks: String(starvedBlocks)
+  })
+  const read = (
+    callbacks: number,
+    lanes: DesktopPlaybackLaneStatus[],
+    transportState: DesktopPlaybackStatus['transportState'] = 'playing',
+    generation = '8'
+  ): DesktopPlaybackStatus => ({
+    ...playbackStatus(), generation, transportState, callbacks: String(callbacks), lanes
+  })
+  /** Reads every 200 ms (the renderer's poll) at 20 callbacks each, with
+   *  `starving(ms)` saying how many of each read's callbacks each lane missed. */
+  const play = (
+    from: number,
+    to: number,
+    starving: (ms: number) => Record<string, number>,
+    start: ReturnType<typeof judgeLaneStarvation>['watch'] = null
+  ) => {
+    let watch = start
+    const totals: Record<string, number> = {}
+    const reports: Array<{ at: number; report: NonNullable<ReturnType<typeof judgeLaneStarvation>['report']> }> = []
+    for (let ms = from; ms <= to; ms += 200) {
+      for (const [id, missed] of Object.entries(starving(ms))) totals[id] = (totals[id] ?? 0) + missed
+      const status = read(ms / 10, Object.entries(totals).map(([id, n]) => lane(id, n)))
+      const judged = judgeLaneStarvation(watch, status, ms)
+      watch = judged.watch
+      if (judged.report) reports.push({ at: ms, report: judged.report })
+    }
+    return { watch, reports }
+  }
+
+  it('reports a lane once it has starved for three seconds without a break, and only that lane', () => {
+    // The drums starve every callback from 5 s on; the bass misses under half.
+    const { reports } = play(0, 9_000, (ms) => ({ drums: ms > 5_000 ? 20 : 0, bass: ms > 5_000 ? 9 : 0 }))
+    expect(reports[0].at).toBe(8_000)
+    expect(reports[0].report).toEqual({ lanes: [{ id: 'drums', blocks: 300n }], callbacks: 300n, spanMs: 3_000 })
+    // It stays reported while it goes on starving (main rate-limits the line).
+    expect(reports.map((r) => r.at)).toEqual([8_000, 8_200, 8_400, 8_600, 8_800, 9_000])
+  })
+
+  it('never reports a scrub: a few starved blocks at a jump is the design', () => {
+    const { reports } = play(0, 20_000, (ms) => ({ vocals: ms % 2_000 === 0 ? 3 : 0 }))
+    expect(reports).toEqual([])
+  })
+
+  it('needs the run unbroken: a lane fed again in between starts over', () => {
+    const { reports } = play(0, 9_000, (ms) => ({ drums: ms === 6_000 ? 0 : 20 }))
+    // A run starts at the read before its first starving stretch: from 0 it
+    // is reported at 3000 and on until the drums are fed at 6000; the run that
+    // starts again from there reaches three seconds at 9000.
+    const expected = []
+    for (let at = 3_000; at <= 5_800; at += 200) expected.push(at)
+    expect(reports.map((r) => r.at)).toEqual([...expected, 9_000])
+  })
+
+  it('starts again after a pause, a count-in, the end or another generation', () => {
+    const { watch } = play(0, 2_800, () => ({ drums: 20 }))
+    for (const state of ['paused', 'pre-roll', 'completed', 'stopped'] as const)
+      expect(judgeLaneStarvation(watch, read(290, [lane('drums', 290)], state), 2_900))
+        .toEqual({ watch: null, report: null })
+    const other = judgeLaneStarvation(watch, read(900, [lane('drums', 900)], 'playing', '9'), 9_000)
+    expect(other.report).toBeNull()
+    expect(other.watch?.generation).toBe('9')
+    expect(other.watch?.lanes.get('drums')?.since).toBeNull()
+  })
+
+  it('ignores decoded lanes and counters it cannot read', () => {
+    expect(judgeLaneStarvation(null, read(100, [lane('drums', 0, false)]), 0))
+      .toEqual({ watch: null, report: null })
+    expect(judgeLaneStarvation(null, { ...read(100, []), lanes: [{ ...lane('drums', 0), starvedBlocks: 'n/a' }] }, 0))
+      .toEqual({ watch: null, report: null })
+  })
+
+  it('writes one dsp warning per starving generation per ten seconds', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(1_000_000)
+      const binding = fakeBinding()
+      let current = read(0, [lane('drums', 0), lane('bass', 0)])
+      binding.playbackStatus = () => current
+      const owner = new CaptureOwner(binding)
+      const before = logEntries().length
+      const starving = () =>
+        logEntries().slice(before).filter((x) => x.source === 'dsp' && /^lanes starving/.test(x.line))
+      for (let ms = 0; ms <= 15_000; ms += 200) {
+        vi.setSystemTime(1_000_000 + ms)
+        current = read(ms / 10, [lane('drums', ms / 10), lane('bass', 0)])
+        expect(owner.playbackStatus()).toBe(current)
+        if (ms === 12_000) expect(starving()).toHaveLength(1)
+      }
+      const lines = starving()
+      expect(lines).toHaveLength(2)
+      expect(lines[0].level).toBe('warn')
+      expect(lines[0].line).toBe(
+        'lanes starving · generation 8 · starved blocks drums 300 · 300 callbacks in 3.0 s — the stems play silence'
+      )
+      expect(lines[1].line).toBe(
+        'lanes starving · generation 8 · starved blocks drums 1300 · 1300 callbacks in 13.0 s — the stems play silence'
+      )
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
