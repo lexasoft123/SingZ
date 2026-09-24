@@ -58,7 +58,8 @@ require('../../shared/watchdog.cjs').arm('lyrics-song-switch-e2e')
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
 const { assertOpenedProject, clickLibrarySong, libraryName, openedProjectDir } = require('./library-song.cjs')
-const { readFileSync, writeFileSync, cpSync, rmSync, existsSync, readdirSync } = require('node:fs')
+const { holdProjects } = require('./project-hold.cjs')
+const { readFileSync, cpSync, rmSync, existsSync, readdirSync } = require('node:fs')
 const { join } = require('node:path')
 const { homedir, tmpdir } = require('node:os')
 
@@ -92,28 +93,19 @@ const readPanel = (win) =>
   // driver does — a thrown assertion must not cost them a song. Every
   // precondition on B is checked BEFORE anything is created or copied, so a
   // refusal leaves no scratch folder behind.
-  const bPjPath = join(B_DIR, 'project.json')
-  const bBefore = readFileSync(bPjPath, 'utf8')
   const bName = libraryName(B_DIR)
-  // Any project that opened instead of B, as found — assertOpenedProject adds
-  // its project.json, and the finally puts it back.
-  const others = []
-  const bLyrics = existsSync(join(B_DIR, 'lyrics.json'))
-    ? readFileSync(join(B_DIR, 'lyrics.json'), 'utf8')
-    : null
-  if (!bLyrics) throw new Error(`${B} has no cached lyrics.json — it must answer instantly`)
-  // A v1 B would be upgraded to FLAC the moment it opens (project:upgrade runs
-  // unasked), and restoring the v1 doc afterwards would leave it describing
-  // WAVs that migrateProjectToV2 has already deleted — the exact rot that
-  // migration guards against, and a phone would then ask Drive for the
-  // missing files. Refuse rather than restore something untrue. The on-disk
-  // key is `version`; `formatVersion` is the renderer-facing name.
-  if ((JSON.parse(bBefore).version ?? 1) < 2) {
-    throw new Error(
-      `${B} is a v1 project — opening it migrates it to FLAC, and this driver's ` +
-        `restore would then describe deleted WAVs. Pick a v2 project as E2E_B.`
-    )
+  if (!existsSync(join(B_DIR, 'lyrics.json'))) {
+    throw new Error(`${B} has no cached lyrics.json — it must answer instantly`)
   }
+  // B's files as found, bytes AND times, and those of any project that opened
+  // instead of B (assertOpenedProject adds that one's): the finally puts them
+  // all back. The hold refuses a v1 B, which would be upgraded to FLAC the
+  // moment it opens (project:upgrade runs unasked), leaving the v1 doc put back
+  // afterwards describing WAVs that migrateProjectToV2 has already deleted —
+  // the exact rot that migration guards against, and a phone would then ask
+  // Drive for the missing files.
+  const others = []
+  const held = holdProjects([B_DIR], others)
 
   if (existsSync(SCRATCH)) rmSync(SCRATCH, { recursive: true })
   cpSync(join(ROOT, A), SCRATCH, { recursive: true })
@@ -341,28 +333,9 @@ const readPanel = (win) =>
     }
   } finally {
     await app.close().catch(() => {})
-    if (readFileSync(bPjPath, 'utf8') !== bBefore) {
-      console.log(`${B}'s project.json was rewritten during the run — restoring it`)
-      writeFileSync(bPjPath, bBefore) // put the singer's project back
-    }
-    // guarded read: an ENOENT thrown out of a finally would skip the restore it
-    // is in the middle of doing, and the SCRATCH cleanup below it
-    const bLyricsPath = join(B_DIR, 'lyrics.json')
-    const bLyricsNow = existsSync(bLyricsPath) ? readFileSync(bLyricsPath, 'utf8') : null
-    if (bLyricsNow !== bLyrics) {
-      console.log(`${B}'s lyrics.json was rewritten during the run — restoring it`)
-      writeFileSync(bLyricsPath, bLyrics)
-    }
-    for (const [path, text] of others) {
-      try {
-        if (readFileSync(path, 'utf8') !== text) {
-          console.log(`${path} was rewritten during the run — restoring it`)
-          writeFileSync(path, text)
-        }
-      } catch (e) {
-        fail.push(`${path} could not be checked and put back: ${e.message}`)
-      }
-    }
+    // put the singer's projects back; this never throws, so the SCRATCH
+    // cleanup below it always runs
+    for (const problem of held.putBack()) fail.push(`library not left as found: ${problem}`)
     rmSync(SCRATCH, { recursive: true, force: true })
   }
 

@@ -27,10 +27,10 @@
  * catch.
  *
  * Opens a project from the singer's own library (E2E_SONG, default Mein
- * Teil) and restores its project.json afterwards, since clicking Mute and a
- * fader are mixer edits the app is entitled to save. E2E_SONG is the
- * project's FOLDER under E2E_PROJECTS_ROOT; its card is picked by the exact
- * name the library shows for it, and the run refuses to measure if a
+ * Teil) and puts its files back afterwards, bytes and times, since clicking
+ * Mute and a fader are mixer edits the app is entitled to save. E2E_SONG is
+ * the project's FOLDER under E2E_PROJECTS_ROOT; its card is picked by the
+ * exact name the library shows for it, and the run refuses to measure if a
  * different project opened.
  */
 // Every E2E driver runs under a deadline: a hang prints where it was and
@@ -40,7 +40,8 @@ require('../../shared/watchdog.cjs').arm('space-focus-e2e')
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
 const { assertOpenedProject, clickLibrarySong, libraryName } = require('./library-song.cjs')
-const { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } = require('node:fs')
+const { holdProjects } = require('./project-hold.cjs')
+const { writeFileSync, existsSync, mkdirSync, rmSync } = require('node:fs')
 const { join } = require('node:path')
 const { homedir, tmpdir } = require('node:os')
 
@@ -85,9 +86,11 @@ async function spaceToggles(win) {
 
 ;(async () => {
   if (!existsSync(SONG_PJ)) throw new Error(`no project at ${SONG_PJ} — set E2E_SONG`)
-  // Every project.json this run may touch, as found: the song's own, and any
-  // project that opened instead of it (assertOpenedProject adds that one).
-  const backups = [[SONG_PJ, readFileSync(SONG_PJ, 'utf8')]]
+  // Every file this run may touch, as found — bytes AND times: the song's
+  // own, held before the app can write them, and any project that opened
+  // instead of it (assertOpenedProject adds that one's).
+  const backups = []
+  const held = holdProjects([SONG_DIR], backups)
   const songName = libraryName(SONG_DIR)
   const fail = []
   let inconclusive = null
@@ -196,12 +199,7 @@ async function spaceToggles(win) {
     await app.close().catch(() => {})
     // A project in the singer's own library: put back exactly what was found,
     // and leave an untouched file alone.
-    for (const [path, text] of backups) {
-      if (readFileSync(path, 'utf8') !== text) {
-        console.log(`${path} was rewritten during the run; restoring it`)
-        writeFileSync(path, text)
-      }
-    }
+    for (const problem of held.putBack()) fail.push(`library not left as found: ${problem}`)
     // Chromium's children can still hold the fresh profile a moment after
     // close (Defender scans new files too) — a cleanup failure must never
     // decide the result

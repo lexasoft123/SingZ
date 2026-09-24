@@ -34,7 +34,8 @@
  * E2E_SONG is the project's FOLDER under that root; its card is picked by the
  * exact name the library shows for it, and the run refuses to measure if a
  * different project opened.
- * Opens the project read-only and restores its project.json in a `finally`.
+ * Opens the project read-only, and puts its files back in a `finally`, bytes
+ * and times.
  *
  *   node tests/e2e/mac/open-native-e2e.cjs
  */
@@ -43,7 +44,8 @@ require('../../shared/watchdog.cjs').arm('open-native-e2e', { totalMinutes: 15 }
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
 const { assertOpenedProject, clickLibrarySong, libraryName } = require('./library-song.cjs')
-const { existsSync, readFileSync, writeFileSync } = require('node:fs')
+const { holdProjects } = require('./project-hold.cjs')
+const { existsSync } = require('node:fs')
 const { join } = require('node:path')
 const { homedir } = require('node:os')
 
@@ -66,9 +68,11 @@ const dspComplaints = (lines) =>
 
 ;(async () => {
   if (!existsSync(SONG_PJ)) throw new Error(`no project at ${SONG_PJ} — set E2E_SONG`)
-  // Every project.json this run may touch, as found: the song's own, and any
-  // project that opened instead of it (assertOpenedProject adds that one).
-  const backups = [[SONG_PJ, readFileSync(SONG_PJ, 'utf8')]]
+  // Every file this run may touch, as found — bytes AND times: the song's
+  // own, held before the app can write them, and any project that opened
+  // instead of it (assertOpenedProject adds that one's).
+  const backups = []
+  const held = holdProjects([SONG_DIR], backups)
   const songName = libraryName(SONG_DIR)
   const fail = []
   const app = await _electron.launch({
@@ -261,12 +265,7 @@ const dspComplaints = (lines) =>
     if (complaints.length) fail.push(`${complaints.length} dsp warning(s)/error(s): ${complaints[0]}`)
   } finally {
     await app.close().catch(() => {})
-    for (const [path, text] of backups) {
-      if (readFileSync(path, 'utf8') !== text) {
-        console.log(`${path} was rewritten during the run; restoring it`)
-        writeFileSync(path, text)
-      }
-    }
+    for (const problem of held.putBack()) fail.push(`library not left as found: ${problem}`)
   }
 
   if (fail.length) {
