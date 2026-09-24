@@ -44,7 +44,8 @@ import { log, logEntries, logSessions, readLogSession, saveLog, startSessionLog 
 import { clearDirty, dirtyDirs, dirtySeq, dirtyState, isDirty, markProjectDirty, onDirty } from './sync-dirty'
 import { replaySyncLog, syncLog } from './sync-log'
 import { SyncScheduler } from './sync-scheduler'
-import { logHardwareInfo } from './hwinfo'
+import { logHardwareInfo, readGpuOnce } from './hwinfo'
+import { glassVerdict } from './glass'
 import { installUpdate, startUpdater, updateState } from './updater'
 import {
   cleanupObsoleteModels,
@@ -185,13 +186,26 @@ function createWindow(): void {
   win.on('maximize', () => win.webContents.send('win:maximized', true))
   win.on('unmaximize', () => win.webContents.send('win:maximized', false))
   win.on('ready-to-show', () => {
+    // The launch's one GPU read (hwinfo.ts) waits until the window has been
+    // on screen for a moment: it collects driver information on the GPU
+    // thread that also presents, and `ready-to-show` is only the first
+    // non-empty LAYOUT — nothing is rastered or presented yet, and the show()
+    // and maximize() below still have their first frames to put up.
+    const readGpuSoon = (): void => {
+      setTimeout(readGpuOnce, 1000)
+    }
     // Drivers run while the singer works in something else. showInactive was
     // tried first and is NOT enough: it races the driver's patch, and even
     // when it wins it still puts a window OVER the singer's work, only
     // without focus. Under SINGZ_E2E_HIDDEN the window simply never appears —
     // deterministic, no race, nothing to cover anything (throttling is
-    // disabled above so the app runs at full rate regardless).
-    if (process.env.SINGZ_E2E_HIDDEN) return
+    // disabled above so the app runs at full rate regardless). A hidden window
+    // still needs its glass verdict, so its read starts from here.
+    if (process.env.SINGZ_E2E_HIDDEN) {
+      readGpuSoon()
+      return
+    }
+    win.once('show', readGpuSoon)
     if (st.maximized) win.maximize()
     win.show()
   })
@@ -540,6 +554,10 @@ function registerIpc(): void {
   registerLocale()
 
   ipcMain.handle('app:version', () => (app.isPackaged ? app.getVersion() : 'dev'))
+
+  // Asked at boot, answered once the launch's GPU read is judged — asking
+  // never reads the GPU itself (glass.ts, hwinfo.ts).
+  ipcMain.handle('gpu:glass', () => glassVerdict())
 
   ipcMain.handle('mic:ask', () => askMicrophoneAccess())
 

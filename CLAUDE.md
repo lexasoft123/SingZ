@@ -1171,11 +1171,19 @@ was driven; the gotchas that follow from it are below.
   clock (pitch strip keys on bars-passed; its now-line is a 1px DOM layer);
   every infinite CSS animation needs a modal-open pause rule and must not
   outlive the state that justifies it (a paused count-in pulse held 20% GPU
-  forever); `body.win` keeps solid, blur-free surfaces — every
-  `backdrop-filter`, in styles.css or the kit's sheet, has a `body.win` twin
-  with no blur and a fill of its own (any per-frame damage re-runs a backdrop
-  blur above it), and `tests/unit/windows-no-blur.test.ts` fails on one that
-  does not.
+  forever); Windows keeps solid, blur-free surfaces unless main vouched for
+  the GPU Chromium composites on (`body.glass`, `src/main/glass.ts`: the
+  ACTIVE adapter of the launch's one `getGPUInfo('complete')`, read a second
+  after the window is on screen and judged by name — RTX, GTX 1050-1660, a Radeon RX above
+  Polaris 12 or a four-digit Pro, Arc A/B; never a GT, an MX, an APU or an
+  older Arc iGPU — and taken back if Chromium falls to software compositing) —
+  every `backdrop-filter`, in styles.css or the kit's sheet, has a
+  `body.win:not(.glass)` twin with no blur and a fill of its own (any
+  per-frame damage re-runs a backdrop blur above it), a twin keyed on plain
+  `body.win` (the kit's scrim) needs a `body.win.glass` restore matching the
+  glass, and `tests/unit/windows-no-blur.test.ts` fails on either missing.
+  `SINGZ_GLASS=1|0` forces the verdict; the log's `hw` line says which it
+  was and why.
 
 ## Releasing
 

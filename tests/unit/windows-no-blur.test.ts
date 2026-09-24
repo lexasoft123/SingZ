@@ -1,10 +1,11 @@
 /*
- * The weak-iGPU rule, enforced: every surface that blurs what is behind it
- * has a `body.win` twin that does not.
+ * The weak-GPU rule, enforced: every surface that blurs what is behind it
+ * has a Windows twin that does not — unless main vouched for the machine's
+ * GPU (`body.glass`, src/main/glass.ts), which gets the glass back.
  *
  * A `backdrop-filter` re-runs over its whole box whenever anything under or
- * inside it is damaged, and the fleet's HD 4600 at a QHD+ panel paid 15-18
- * points of GPU for the transport's blur alone while a song played. Four
+ * inside it is damaged, and the fleet's QHD+ field laptop paid 15-18 points
+ * of GPU for the transport's blur alone while a song played. Four
  * blurs got a twin — two after a field report (.modal-scrim, .transport), two
  * written alongside their glass (.vt-cleanup-gate, the lyrics editor's card)
  * — and three never did: the drop overlay, as old as the app, and the vocal
@@ -12,14 +13,19 @@
  * CLAUDE.md, so nothing noticed. This reads every stylesheet the renderer
  * imports and fails on a blur with no twin.
  *
- * A twin is an unconditional rule with `body.win` added to the glass rule's
- * selector — as an ancestor, or joined onto a selector that already starts at
- * <body> (`body.modal-open .x` → `body.win.modal-open .x`) — that sets every
- * blurring property to `none`, `!important` where the glass is, and a fill of
- * its own: dropping the blur without replacing the fill leaves a see-through
- * surface over a sharp background, which is a different design rather than
- * the same one in solid. Either spelling outranks the glass whatever order the
- * two appear in. Textual on purpose, like the other CSS assertions here.
+ * A twin is an unconditional rule with `body.win:not(.glass)` added to the
+ * glass rule's selector — as an ancestor, or joined onto a selector that
+ * already starts at <body> (`body.modal-open .x` →
+ * `body.win:not(.glass).modal-open .x`) — that sets every blurring property
+ * to `none`, `!important` where the glass is, and a fill of its own: dropping
+ * the blur without replacing the fill leaves a see-through surface over a
+ * sharp background, which is a different design rather than the same one in
+ * solid. A twin keyed on plain `body.win` is solid on every Windows machine,
+ * so it needs a `body.win.glass` restore carrying the glass exactly — the
+ * kit's own .modal-scrim twin is one, which styles.css restores, and a kit
+ * that changed its glass would leave that restore behind. Every spelling
+ * outranks the glass whatever order the rules appear in. Textual on purpose,
+ * like the other CSS assertions here.
  */
 import { readdirSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -166,15 +172,30 @@ const blurring = (rule: Rule): string[] =>
   })
 const fill = (rule: Rule): string | undefined => (rule.decls.get('background') ?? rule.decls.get('background-color'))?.value
 
-/** The selector a twin is written as: `body.win` joined onto a selector that
- *  already starts at <body>, an ancestor of it otherwise. Null when it starts
- *  above <body>, where neither spelling names the same element. */
-const twinOf = (selector: string): string | null =>
+/** `body.win` + `state` (':not(.glass)', '' or '.glass') added to a glass
+ *  selector: joined onto one that already starts at <body>, prefixed as its
+ *  ancestor otherwise. Null when it starts above <body>, where no spelling
+ *  names the same element. */
+const spell = (selector: string, state: string): string | null =>
   /^body(?![\w-])/.test(selector)
-    ? `body.win${selector.slice(4)}`
+    ? `body.win${state}${selector.slice(4)}`
     : /^(?:html|:root)(?![\w-])/.test(selector)
       ? null
-      : `body.win ${selector}`
+      : `body.win${state} ${selector}`
+
+/** The unconditional rule written as `spelled` that sets every one of `props`
+ *  to what `want` says — `!important` wherever the glass is. */
+const ruleSetting = (spelled: string, glassRule: Rule, props: string[], want: (glass: Decl) => string): Rule | undefined =>
+  all.find(
+    (r) =>
+      !r.media &&
+      r.selectors.includes(spelled) &&
+      props.every((p) => {
+        const glassDecl = glassRule.decls.get(p)!
+        const d = r.decls.get(p)
+        return d?.value === want(glassDecl) && (d.important || !glassDecl.important)
+      })
+  )
 
 const sheets = rendererSheets()
 const bySheet = sheets.map((path) => ({ path, rules: parseSheet(readFileSync(path, 'utf8'), path) }))
@@ -203,30 +224,71 @@ describe('Windows gets every blur in solid', () => {
     )
   })
 
-  it('gives every blur an unconditional body.win twin with a fill of its own', () => {
+  it('gives every blur an unconditional Windows twin with a fill of its own', () => {
     const problems: string[] = []
     for (const { selector, rule } of glass) {
-      // Glass scoped to the mac never reaches Windows in the first place.
-      if (/^body\.mac(?![\w-])/.test(selector)) continue
-      const want = twinOf(selector)
-      if (!want) {
+      // Glass scoped to the mac never reaches Windows in the first place, and
+      // a body.win.glass rule IS the restore — the next check reads those.
+      if (/^body\.(?:mac|win\.glass)(?![\w-])/.test(selector)) continue
+      const yielding = spell(selector, ':not(.glass)')
+      const always = spell(selector, '')
+      if (!yielding || !always) {
         problems.push(`${selector}: starts above <body>, where no body.win twin can name it`)
         continue
       }
       const props = blurring(rule)
-      const twin = all.find(
-        (r) =>
-          !r.media &&
-          r.selectors.includes(want) &&
-          props.every((p) => r.decls.get(p)?.value === 'none' && (r.decls.get(p)?.important || !rule.decls.get(p)?.important))
-      )
+      const twin = ruleSetting(yielding, rule, props, () => 'none') ?? ruleSetting(always, rule, props, () => 'none')
       if (!twin) {
         const blur = props.map((p) => `${p}: ${rule.decls.get(p)?.value}${rule.decls.get(p)?.important ? ' !important' : ''}`)
-        problems.push(`${selector}: ${blur.join('; ')} has no \`${want}\` twin that sets it to none`)
+        problems.push(`${selector}: ${blur.join('; ')} has no \`${yielding}\` twin that sets it to none`)
         continue
       }
       const own = fill(twin)
-      if (!own || own === fill(rule)) problems.push(`${selector}: its body.win twin drops the blur but keeps the glass fill`)
+      if (!own || own === fill(rule)) problems.push(`${selector}: its Windows twin drops the blur but keeps the glass fill`)
+    }
+    expect(problems).toEqual([])
+  })
+
+  it('gives a GPU main vouched for the same glass as the Mac', () => {
+    const problems: string[] = []
+    const answered = new Set<string>()
+    for (const { selector, rule } of glass) {
+      if (/^body\.(?:mac|win\.glass)(?![\w-])/.test(selector)) continue
+      const always = spell(selector, '')
+      const restore = spell(selector, '.glass')
+      if (!always || !restore) continue // reported by the twin check
+      const props = blurring(rule)
+      // A twin keyed on body.win:not(.glass) steps aside by itself; one keyed
+      // on plain body.win (the kit's scrim) is solid on EVERY Windows machine
+      // until a body.win.glass rule puts the glass back — value for value, or a
+      // strong GPU gets a blur the Mac does not, and `!important` wherever the
+      // glass or that twin is, or the twin still wins.
+      const plain = ruleSetting(always, rule, props, () => 'none')
+      if (!plain) continue
+      answered.add(restore)
+      const back = all.find(
+        (r) =>
+          !r.media &&
+          r.selectors.includes(restore) &&
+          props.every((p) => {
+            const d = r.decls.get(p)
+            return d?.value === rule.decls.get(p)!.value && (d.important || !(rule.decls.get(p)!.important || plain.decls.get(p)!.important))
+          })
+      )
+      if (!back) problems.push(`${selector}: its twin is solid on every Windows GPU and no \`${restore}\` rule restores the glass`)
+      else if (fill(back) !== fill(rule)) {
+        problems.push(`${selector}: \`${restore}\` restores the blur with fill ${fill(back)}, the glass has ${fill(rule)}`)
+      }
+    }
+    // And no restore outlives the twin it answers: once a twin yields to
+    // body.glass by itself, a leftover restore would drift with nothing to
+    // check it against.
+    for (const r of all) {
+      for (const s of r.selectors) {
+        if (/^body\.win\.glass(?![\w-])/.test(s) && !answered.has(s)) {
+          problems.push(`${s}: restores a glass that no plain body.win twin takes away`)
+        }
+      }
     }
     expect(problems).toEqual([])
   })

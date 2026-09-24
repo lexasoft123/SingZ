@@ -202,9 +202,9 @@ describe('app-shell training cleanup lease', () => {
     expect(source).toContain('() => songLoadRequests.current.invalidate()')
   })
 
-  it('uses an opaque blur-free cleanup gate on Windows', () => {
+  it('uses an opaque blur-free cleanup gate on a Windows GPU main did not vouch for', () => {
     const css = readFileSync('src/renderer/src/styles.css', 'utf8')
-    const override = css.match(/body\.win \.vt-cleanup-gate\s*\{([^}]+)\}/s)?.[1] ?? ''
+    const override = css.match(/body\.win:not\(\.glass\) \.vt-cleanup-gate\s*\{([^}]+)\}/s)?.[1] ?? ''
     expect(override).toMatch(/background:\s*var\(--bg\)/)
     expect(override).toMatch(/backdrop-filter:\s*none/)
     expect(override).not.toContain('transparent')

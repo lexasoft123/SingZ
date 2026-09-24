@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
 import type {
+  GlassVerdict,
   LogEntry,
   LyricsProgress,
   ModelsProgress,
@@ -239,6 +240,16 @@ const api: SingzApi = {
   appVersion: () => ipcRenderer.invoke('app:version'),
   getLocale: () => ipcRenderer.invoke('i18n:get'),
   setLanguage: (language) => ipcRenderer.invoke('i18n:set', language),
+
+  glassVerdict: () => ipcRenderer.invoke('gpu:glass'),
+
+  onGlassVerdict: (cb) => {
+    const listener = (_e: IpcRendererEvent, verdict: GlassVerdict): void => cb(verdict)
+    ipcRenderer.on('gpu:glass', listener)
+    return () => {
+      ipcRenderer.removeListener('gpu:glass', listener)
+    }
+  },
 
   loadTrainingProgress: () => ipcRenderer.invoke('training-progress:load'),
   saveTrainingPreferences: (preferences) => ipcRenderer.invoke('training-preferences:save', preferences),

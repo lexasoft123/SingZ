@@ -960,7 +960,11 @@ Field laptops (QHD+ panel + weak iGPU) taught these; keep them:
   pixel change behind a modal re-rasters the whole blurred backdrop.
 - No infinite CSS animation without a `body.modal-open … animation-play-state:
   paused` rule (see the shimmer/pulse block in styles.css).
-- Windows uses a solid modal scrim (no backdrop-filter) — keep it that way.
+- Windows gets solid surfaces — modal scrim, drop overlay, transport, the
+  training head and dock — with no backdrop-filter, unless main judged the
+  GPU Chromium composites on strong enough for glass (`body.glass`,
+  `src/main/glass.ts`). Every blur needs its `body.win:not(.glass)` twin;
+  `tests/unit/windows-no-blur.test.ts` enforces it.
 - The pitch strip repaints only when position/view/size/transpose/melody/mic
   trail change; idle karaoke must stay at ~0% GPU.
 

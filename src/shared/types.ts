@@ -458,6 +458,12 @@ export interface LogSession {
   current: boolean
 }
 
+/** Glass or solid on Windows, and why — src/main/glass.ts. */
+export interface GlassVerdict {
+  glass: boolean
+  reason: string
+}
+
 export interface LogEntry {
   t: number
   level: LogLevel
@@ -1464,6 +1470,12 @@ export interface SingzApi {
   /** The UI language: what is saved, what it resolves to, and what `system` means here. */
   getLocale(): Promise<LocaleState>
   setLanguage(language: import('./i18n').Language): Promise<LocaleState>
+  /** Whether this machine's compositing GPU can afford backdrop blur (src/main/glass.ts) —
+   *  only Windows asks; its surfaces stay solid until this says glass. Settles once main
+   *  has read the GPU, a moment after the window is on screen. */
+  glassVerdict(): Promise<GlassVerdict>
+  /** A later verdict: glass taken back when Chromium falls to software compositing. */
+  onGlassVerdict(cb: (verdict: GlassVerdict) => void): () => void
   /** Main-owned app-level profile/history. Completion receipts never contain song paths or raw observations. */
   loadTrainingProgress(): Promise<{ok:true;progress:TrainingProgress}|{ok:false;error:string}>
   saveTrainingPreferences(preferences:TrainingPreferences):Promise<{ok:true;preferences:TrainingPreferences}|{ok:false;error:string}>
