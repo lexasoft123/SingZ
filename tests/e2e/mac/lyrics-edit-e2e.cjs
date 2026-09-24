@@ -17,7 +17,10 @@
  * ~/Library/Application Support/SingZ/models (align listens afresh when no
  * cached listen of these vocals exists — give it time, not a retry).
  *
- * Env: E2E_PROJECT (default "Nothing Else Matters"),
+ * Env: E2E_PROJECT (default "Nothing Else Matters" — the project's FOLDER
+ *      under E2E_PROJECTS_ROOT; its card is picked by the exact name the
+ *      library shows for it, and the run refuses to edit if a different
+ *      project opened),
  *      E2E_PROJECTS_ROOT (default iCloud Drive/SingZ),
  *      E2E_OUT (screenshot dir, default os.tmpdir()).
  */
@@ -27,7 +30,8 @@ require('../../shared/watchdog.cjs').arm('lyrics-edit-e2e')
 
 const { _electron } = require('playwright-core');
 const { quietLaunch } = require('./quiet-launch.cjs');
-const { readFileSync, copyFileSync, rmSync } = require('node:fs');
+const { assertOpenedProject, clickLibrarySong, libraryName } = require('./library-song.cjs');
+const { readFileSync, writeFileSync, copyFileSync, rmSync } = require('node:fs');
 const { join } = require('node:path');
 const { tmpdir, homedir } = require('node:os');
 
@@ -36,27 +40,34 @@ const ROOT =
   process.env.E2E_PROJECTS_ROOT ??
   join(homedir(), 'Library/Mobile Documents/com~apple~CloudDocs/SingZ');
 const OUT = process.env.E2E_OUT ?? tmpdir();
-const LYRICS = join(ROOT, PROJECT, 'lyrics.json');
+const PROJECT_DIR = join(ROOT, PROJECT);
+const LYRICS = join(PROJECT_DIR, 'lyrics.json');
 const BACKUP = join(tmpdir(), `lyed-e2e-backup-${Date.now()}.json`);
 const APP = join(__dirname, '..', '..', '..', 'out', 'main', 'index.js');
 const MARKER = 'edited by the harness tonight';
 
 (async () => {
+  const projectName = libraryName(PROJECT_DIR);
   copyFileSync(LYRICS, BACKUP);
+  // Any project that opened instead of this one, as found — assertOpenedProject
+  // adds its project.json, and the finally puts it back.
+  const backups = [];
   let app;
   try {
     app = await _electron.launch({
       executablePath: require('electron'),
       args: [APP],
-      env: { ...process.env, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1' }
+      // hooks: assertOpenedProject reads the opened lanes off __test
+      env: { ...process.env, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1', SINGZ_E2E_HOOKS: '1' }
     });
     await quietLaunch(app);
     const win = await app.firstWindow();
     await win.waitForLoadState('domcontentloaded');
     await win.waitForSelector('.lib-card', { timeout: 20000 });
-    await win.click(`.lib-card:has-text("${PROJECT}")`);
+    await clickLibrarySong(win, projectName);
     await win.waitForSelector('.pill.karaoke', { timeout: 60000 });
     await new Promise((r) => setTimeout(r, 2500)); // stems decoding settles
+    await assertOpenedProject(win, { dir: PROJECT_DIR, name: projectName, backups });
     const kOn = await win.$eval('.pill.karaoke', (el) => el.classList.contains('active'));
     if (!kOn) await win.click('.pill.karaoke');
     await win.waitForSelector('.lp-source', { timeout: 30000 });
@@ -228,9 +239,10 @@ const MARKER = 'edited by the harness tonight';
     // from cache — 'edited' is sticky, never re-asked of LRCLIB
     await win.click('.pill:has-text("Catalog")');
     await win.waitForSelector('.lib-card', { timeout: 20000 });
-    await win.click(`.lib-card:has-text("${PROJECT}")`);
+    await clickLibrarySong(win, projectName);
     await win.waitForSelector('.pill.karaoke', { timeout: 60000 });
     await new Promise((r) => setTimeout(r, 2000));
+    await assertOpenedProject(win, { dir: PROJECT_DIR, name: projectName, backups });
     const kOn2 = await win.$eval('.pill.karaoke', (el) => el.classList.contains('active'));
     if (!kOn2) await win.click('.pill.karaoke');
     await win.waitForSelector('.lp-source .src-badge.edited', { timeout: 30000 });
@@ -245,6 +257,12 @@ const MARKER = 'edited by the harness tonight';
     // the library project leaves exactly as it entered
     copyFileSync(BACKUP, LYRICS);
     rmSync(BACKUP, { force: true });
+    for (const [path, text] of backups) {
+      if (readFileSync(path, 'utf8') !== text) {
+        console.log(`${path} was rewritten during the run; restoring it`);
+        writeFileSync(path, text);
+      }
+    }
   }
   process.exit(0);
 })().catch((err) => {

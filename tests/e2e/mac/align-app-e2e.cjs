@@ -7,7 +7,9 @@
  * installed under ~/Library/Application Support/SingZ/; no other app
  * instance running (same userData identity).
  *
- * Env: E2E_PROJECT (default "Nothing Else Matters"),
+ * Env: E2E_PROJECT (default "Nothing Else Matters" — the project's FOLDER
+ *      under E2E_PROJECTS_ROOT; its card is picked by the exact name the
+ *      library shows for it),
  *      E2E_PROJECTS_ROOT (default iCloud Drive/SingZ),
  *      E2E_OUT (screenshot dir, default os.tmpdir()).
  */
@@ -17,6 +19,7 @@ require('../../shared/watchdog.cjs').arm('align-app-e2e')
 
 const { _electron } = require('playwright-core');
 const { quietLaunch } = require('./quiet-launch.cjs');
+const { clickLibrarySong, libraryName } = require('./library-song.cjs');
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const { tmpdir, homedir } = require('node:os');
@@ -30,6 +33,7 @@ const LYRICS = join(ROOT, PROJECT, 'lyrics.json');
 const APP = join(__dirname, '..', '..', '..', 'out', 'main', 'index.js');
 
 (async () => {
+  const projectName = libraryName(join(ROOT, PROJECT));
   const app = await _electron.launch({
     executablePath: require('electron'),
     args: [APP],
@@ -39,7 +43,7 @@ const APP = join(__dirname, '..', '..', '..', 'out', 'main', 'index.js');
   const win = await app.firstWindow();
   await win.waitForLoadState('domcontentloaded');
   await win.waitForSelector('.lib-card', { timeout: 20000 });
-  await win.click(`.lib-card:has-text("${PROJECT}")`);
+  await clickLibrarySong(win, projectName);
   await win.waitForSelector('.pill.karaoke', { timeout: 60000 });
   await new Promise((r) => setTimeout(r, 2500)); // stems decoding settles
   const kOn = await win.$eval('.pill.karaoke', (el) => el.classList.contains('active'));

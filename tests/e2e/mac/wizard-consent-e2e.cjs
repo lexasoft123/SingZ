@@ -5,7 +5,10 @@
  * panel. Hides the checkpoint for the test and always restores it.
  * Permanent harness used by the e2e-verifier agent.
  *
- * Env: E2E_PROJECT (default "Wanted Dead Or Alive"), E2E_OUT (screenshots).
+ * Env: E2E_PROJECT (default "Wanted Dead Or Alive" — the project's FOLDER
+ *      under E2E_PROJECTS_ROOT; its card is picked by the exact name the
+ *      library shows for it), E2E_PROJECTS_ROOT (default iCloud Drive/SingZ),
+ *      E2E_OUT (screenshots).
  */
 // Every E2E driver runs under a deadline: a hang prints where it was and
 // exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
@@ -13,11 +16,15 @@ require('../../shared/watchdog.cjs').arm('wizard-consent-e2e')
 
 const { _electron } = require('playwright-core');
 const { quietLaunch } = require('./quiet-launch.cjs');
+const { clickLibrarySong, libraryName } = require('./library-song.cjs');
 const { renameSync, existsSync } = require('node:fs');
 const { join } = require('node:path');
 const { tmpdir, homedir } = require('node:os');
 
 const PROJECT = process.env.E2E_PROJECT ?? 'Wanted Dead Or Alive';
+const ROOT =
+  process.env.E2E_PROJECTS_ROOT ??
+  join(homedir(), 'Library/Mobile Documents/com~apple~CloudDocs/SingZ');
 const OUT = process.env.E2E_OUT ?? tmpdir();
 const APP = join(__dirname, '..', '..', '..', 'out', 'main', 'index.js');
 const MMS = join(
@@ -26,6 +33,11 @@ const MMS = join(
 );
 
 (async () => {
+  // Named before the checkpoint is hidden, so a wrong E2E_PROJECT stops here.
+  if (!existsSync(join(ROOT, PROJECT, 'project.json'))) {
+    throw new Error(`no project at ${join(ROOT, PROJECT)} — set E2E_PROJECT`);
+  }
+  const projectName = libraryName(join(ROOT, PROJECT));
   if (!existsSync(MMS)) throw new Error('MMS checkpoint not installed — nothing to hide');
   renameSync(MMS, MMS + '.bak');
   try {
@@ -67,7 +79,7 @@ const MMS = join(
 
     // 2) Precise → aligner consent
     await win.waitForSelector('.lib-card', { timeout: 15000 });
-    await win.click(`.lib-card:has-text("${PROJECT}")`);
+    await clickLibrarySong(win, projectName);
     await win.waitForSelector('.pill.karaoke', { timeout: 60000 });
     await new Promise((r) => setTimeout(r, 2000));
     const kOn = await win.$eval('.pill.karaoke', (el) => el.classList.contains('active'));

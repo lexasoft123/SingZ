@@ -28,7 +28,10 @@
  *
  * Opens a project from the singer's own library (E2E_SONG, default Mein
  * Teil) and restores its project.json afterwards, since clicking Mute and a
- * fader are mixer edits the app is entitled to save.
+ * fader are mixer edits the app is entitled to save. E2E_SONG is the
+ * project's FOLDER under E2E_PROJECTS_ROOT; its card is picked by the exact
+ * name the library shows for it, and the run refuses to measure if a
+ * different project opened.
  */
 // Every E2E driver runs under a deadline: a hang prints where it was and
 // exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
@@ -36,6 +39,7 @@ require('../../shared/watchdog.cjs').arm('space-focus-e2e')
 
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
+const { assertOpenedProject, clickLibrarySong, libraryName } = require('./library-song.cjs')
 const { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } = require('node:fs')
 const { join } = require('node:path')
 const { homedir, tmpdir } = require('node:os')
@@ -44,7 +48,8 @@ const ROOT =
   process.env.E2E_PROJECTS_ROOT ??
   join(homedir(), 'Library/Mobile Documents/com~apple~CloudDocs/SingZ')
 const SONG = process.env.E2E_SONG ?? 'Mein Teil'
-const SONG_PJ = join(ROOT, SONG, 'project.json')
+const SONG_DIR = join(ROOT, SONG)
+const SONG_PJ = join(SONG_DIR, 'project.json')
 // A library named explicitly (a staged one, on the field laptop) is opened
 // through a throwaway profile whose settings name it — the harness's way —
 // since the app otherwise lists whatever library its own profile points at.
@@ -80,7 +85,10 @@ async function spaceToggles(win) {
 
 ;(async () => {
   if (!existsSync(SONG_PJ)) throw new Error(`no project at ${SONG_PJ} — set E2E_SONG`)
-  const backup = readFileSync(SONG_PJ, 'utf8')
+  // Every project.json this run may touch, as found: the song's own, and any
+  // project that opened instead of it (assertOpenedProject adds that one).
+  const backups = [[SONG_PJ, readFileSync(SONG_PJ, 'utf8')]]
+  const songName = libraryName(SONG_DIR)
   const fail = []
   let inconclusive = null
   if (PROFILE) {
@@ -108,9 +116,12 @@ async function spaceToggles(win) {
     await win.waitForLoadState('domcontentloaded')
     await win.waitForSelector('.lib-card', { timeout: 20000 })
     await win.waitForFunction(() => window.__test !== undefined, null, { timeout: 20000 })
-    await win.click(`.lib-card:has-text("${SONG}")`)
+    await clickLibrarySong(win, songName)
     await win.waitForSelector('button.chip.mute', { timeout: 60000 })
     await win.waitForFunction(() => __test?.engine?.duration > 0 && __test.phase === 'ready', null, { timeout: 60000 })
+    // Before the volumes below: the metronome's is one of the song's saved
+    // settings, so the next save writes it into whichever project is open.
+    await assertOpenedProject(win, { dir: SONG_DIR, name: songName, backups })
     await val(win, '__test.engine.setMasterVolume(0)')
     // the metronome's clicks bypass the master bus
     await val(win, '__test.setMetCfg(Object.assign({}, __test.met, { volume: 0 }))')
@@ -183,7 +194,14 @@ async function spaceToggles(win) {
     }
   } finally {
     await app.close().catch(() => {})
-    writeFileSync(SONG_PJ, backup)
+    // A project in the singer's own library: put back exactly what was found,
+    // and leave an untouched file alone.
+    for (const [path, text] of backups) {
+      if (readFileSync(path, 'utf8') !== text) {
+        console.log(`${path} was rewritten during the run; restoring it`)
+        writeFileSync(path, text)
+      }
+    }
     // Chromium's children can still hold the fresh profile a moment after
     // close (Defender scans new files too) — a cleanup failure must never
     // decide the result

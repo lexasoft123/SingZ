@@ -11,14 +11,21 @@
  *   node tests/e2e/mac/open-steps-e2e.cjs
  *   E2E_SONG="…" E2E_SONG_B="…" node tests/e2e/mac/open-steps-e2e.cjs
  *
- * Prereqs: `npm run build`; two projects in the singer's library.
+ * Prereqs: `npm run build`; two projects in the singer's library. Both songs
+ * are project FOLDERS under E2E_PROJECTS_ROOT (default iCloud Drive/SingZ);
+ * each card is picked by the exact name the library shows for it.
  */
 require('../../shared/watchdog.cjs').arm('open-steps-e2e', { totalMinutes: 20 })
 
 const { join } = require('node:path')
+const { homedir } = require('node:os')
 const ROOT = join(__dirname, '..', '..', '..')
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
+const { clickLibrarySong, libraryName } = require('./library-song.cjs')
+const PROJECTS =
+  process.env.E2E_PROJECTS_ROOT ??
+  join(homedir(), 'Library/Mobile Documents/com~apple~CloudDocs/SingZ')
 const A = process.env.E2E_SONG ?? 'Deutschland'
 const B = process.env.E2E_SONG_B ?? 'Mein Teil'
 const val = (win, e) => win.evaluate(`(${e})`)
@@ -52,6 +59,10 @@ function table(title, rows, marks) {
 }
 
 ;(async () => {
+  const opens = [
+    [`FIRST open`, A],
+    [`SECOND open (a song is already loaded)`, B]
+  ].map(([label, song]) => [label, song, libraryName(join(PROJECTS, song))])
   const app = await _electron.launch({
     executablePath: require('electron'),
     args: [join(ROOT, 'out', 'main', 'index.js')],
@@ -62,9 +73,9 @@ function table(title, rows, marks) {
   await win.waitForSelector('.lib-card', { timeout: 30000 })
   await win.waitForFunction(() => window.__test !== undefined, null, { timeout: 30000 })
 
-  for (const [label, song] of [[`FIRST open`, A], [`SECOND open (a song is already loaded)`, B]]) {
+  for (const [label, song, name] of opens) {
     const t0 = Date.now()
-    await win.click(`.lib-card:has-text("${song}")`)
+    await clickLibrarySong(win, name)
     // Wait for the load to START before waiting for it to finish: on the
     // second open the previous song already satisfies "ready", so the wait
     // returned instantly and the table came back empty.
