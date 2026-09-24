@@ -56,6 +56,9 @@ export default function TrackLane({
   // Explicit grid rows: the scrub overlay is definitely-placed and would
   // otherwise push auto-placed lanes into implicit rows below it.
   const row = index + 2
+  // --stem goes on BOTH cells: they are grid siblings with no lane element
+  // around them, and the kit's waveform halo reads it from inside .lane-wave —
+  // set on the controls alone, every lane's halo fell back to white.
   return (
     <>
       <div
@@ -144,7 +147,7 @@ export default function TrackLane({
       </div>
       <div
         className={`lane-wave${off ? ' is-off' : ''}${ducked ? ' is-ducked' : ''}`}
-        style={{ gridRow: row, ['--i' as string]: index }}
+        style={{ gridRow: row, ['--stem' as string]: track.color, ['--i' as string]: index }}
       >
         <Waveform
           peaks={track.peaks}
