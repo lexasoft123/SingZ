@@ -277,8 +277,13 @@ singz::LaneMeasureRequest request(const char* id, const std::string& path,
 }
 
 // Holds a measured lane against the two transcriptions and the header.
+// `quietStretch`: the fixtures this suite writes itself all carry a silent
+// stretch, which is what shows the envelope is not flat by accident. The
+// committed MP3 fixtures are continuous music; for them the envelope is held
+// to the decode bucket by bucket and that is the whole claim.
 void compareLane(const singz::LaneMeasure& lane, const std::string& path,
-                 uint32_t rate, uint32_t channels, const char* label) {
+                 uint32_t rate, uint32_t channels, const char* label,
+                 bool quietStretch = true) {
   const singz::DecodedAudioResult decoded = decodeAll(path);
   check(decoded.ok(), "the reference decode succeeds");
   if (!decoded.ok()) return;
@@ -326,7 +331,7 @@ void compareLane(const singz::LaneMeasure& lane, const std::string& path,
     lo = std::min(lo, v);
     hi = std::max(hi, v);
   }
-  check(lo < 0.01F && hi > 0.1F, what.c_str());
+  if (quietStretch) check(lo < 0.01F && hi > 0.1F, what.c_str());
 
   what = std::string(label) + ": the whole-lane RMS is the decode's to rounding";
   check(std::fabs(referenceRms(audio) - lane.rms) < 1e-6, what.c_str());
@@ -432,6 +437,15 @@ int main() {
       for (float p : lane.peaks) peak = std::max(peak, p);
       check(peak > 1.0F, "a float lane's peaks past full scale are measured, not clipped");
       std::remove(lead.c_str());
+    }
+    // MP3 through the native decoder: an unsplit phone song's song.mp3, or an
+    // MP3 custom track. One with a gapless LAME tag and one with no header at
+    // all and 0xFF on the end — the field file's shape — so the measured
+    // length is the trimmed one and the padding measures as nothing.
+    for (const char* name : {"vbr-xing-44k.mp3", "ff-padded-44k.mp3"}) {
+      const std::string mp3 = std::string(SINGZ_MP3_FIXTURE_DIR) + "/" + name;
+      const singz::LaneMeasure lane = singz::measureLane(request("song", mp3), {});
+      compareLane(lane, mp3, 44100, 2, name, false);
     }
     const std::string junk = writeNotAudio();
     check(!junk.empty(), "the not-audio fixture writes");

@@ -904,6 +904,16 @@ button.chip-status:hover {
   animation: fade 0.15s;
 }
 
+/* Windows: a full-window blur re-rasters every damaged pixel under it, and a
+   song keeps playing while a file is dragged in — 95% of the HD 4600's 3D
+   engine with the blur, 64% without (maximized, QHD+; 58% with no overlay).
+   Solid scrim instead, darker by the same +0.2 the kit gives .modal-scrim,
+   so the app still recedes. */
+body.win .drop-overlay {
+  backdrop-filter: none;
+  background: rgba(12, 9, 5, 0.75);
+}
+
 .drop-frame {
   position: absolute;
   inset: 16px;
@@ -1719,6 +1729,13 @@ button.chip-status:hover {
 
 .log-head h2 {
   margin-bottom: 0;
+}
+
+.settings-select.log-session {
+  width: auto;
+  align-self: center;
+  padding-top: 4px;
+  padding-bottom: 4px;
 }
 
 .log-actions {
@@ -2999,7 +3016,10 @@ body.modal-open .src-dot.busy {
 }
 
 /* Windows iGPUs pay full-window re-raster for backdrop blur (field: HD 4600
-   at a 3200x1800 panel) — a solid scrim composites for free there. */
+   at a 3200x1800 panel) — a solid scrim composites for free there. That
+   scrim's override moved into @singz/ui's kit.css along with .modal-scrim;
+   every blur in this file has its body.win twin beside it or below, and
+   tests/unit/windows-no-blur.test.ts fails on one that does not. */
 
 /* Same deal during playback: the playhead damages a frame region every
    step, and that re-runs the transport's blur(20px) over a full-width
@@ -4235,6 +4255,14 @@ body.win .vt-cleanup-gate {
   backdrop-filter: blur(24px) saturate(1.18);
 }
 
+/* Windows: the same pill in solid — the glass mixed over --bg, which is all
+   that sits behind it there (the kit paints body.win .app solid --bg), so it
+   renders what the blur would have. Weak-iGPU fleet rule, as .transport. */
+body.win .vt-session-head {
+  backdrop-filter: none;
+  background: color-mix(in srgb, var(--panel) 72%, var(--bg));
+}
+
 .vt-session-head .vt-back {
   margin: 0;
   justify-self: start;
@@ -4501,6 +4529,15 @@ body.win .vt-cleanup-gate {
   background: color-mix(in srgb, var(--panel) 76%, transparent);
   box-shadow: 0 12px 30px color-mix(in srgb, var(--bg) 34%, transparent);
   backdrop-filter: blur(24px) saturate(1.18);
+}
+
+/* Windows: solid, as the session head. The listening orb breathes inside this
+   dock for as long as a note is sung, and every one of its frames re-ran the
+   blur behind it: the listening screen took 48% of the HD 4600's 3D engine and
+   48% of a core with both blurs, 36% and 28% with neither. */
+body.win .vt-transport {
+  backdrop-filter: none;
+  background: color-mix(in srgb, var(--panel) 76%, var(--bg));
 }
 
 .vt-transport-action {

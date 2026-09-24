@@ -13,7 +13,7 @@ import {
   type MetronomeConfig
 } from '../audio/beat'
 import { analysisIsStale, BEAT_DETECT_VERSION } from '../audio/analysis-contract'
-import { fmtClock, fmtTime, modalCoversApp, TRACK_META, type TrainingConfig } from '../model'
+import { fmtClock, fmtTime, modalCoversApp, type TrainingConfig, type UITrack } from '../model'
 
 function TimeCode({ engine }: { engine: MultitrackEngine }): React.JSX.Element {
   const ref = useRef<HTMLSpanElement>(null)
@@ -97,7 +97,13 @@ interface Props {
   onTrainCfg: (cfg: TrainingConfig) => void
   ducking: boolean
   linesReady: boolean
-  stemIds: string[]
+  /**
+   * The lanes Carry the line can silence, each with the name its own lane
+   * shows. `TrainingConfig.stems` keeps the ids; the chips print the labels,
+   * because an added lane's id is a file slug (`custom-backing-vocals`) that
+   * TRACK_META has never heard of, and renaming the lane changes only its label.
+   */
+  lanes: Pick<UITrack, 'id' | 'label'>[]
   transpose: number
   onTranspose: (st: number) => void
   tempo: number
@@ -718,11 +724,11 @@ function MetPopover({
 }
 
 /** Carry-the-line setup: on/off, the alternation mode and who sings what. */
-function TrainPopover({
+export function TrainPopover({
   training,
   cfg,
   linesReady,
-  stemIds,
+  lanes,
   onToggle,
   onCfg,
   onClose
@@ -730,7 +736,7 @@ function TrainPopover({
   training: boolean
   cfg: TrainingConfig
   linesReady: boolean
-  stemIds: string[]
+  lanes: Props['lanes']
   onToggle: () => void
   onCfg: (cfg: TrainingConfig) => void
   onClose: () => void
@@ -856,14 +862,14 @@ function TrainPopover({
       <p className="fine tp-caption">{caption}</p>
       <div className="tp-stems" title="These tracks go silent during your turns — you perform them">
         <span className="tp-label">Muted while you sing:</span>
-        {stemIds.map((id) => (
+        {lanes.map(({ id, label }) => (
           <button
             type="button"
             key={id}
             className={`chip stem${cfg.stems.includes(id) ? ' active' : ''}`}
             onClick={() => toggleStem(id)}
           >
-            {TRACK_META[id]?.label ?? id}
+            {label}
           </button>
         ))}
       </div>
@@ -889,7 +895,7 @@ export default function Transport({
   onTrainCfg,
   ducking,
   linesReady,
-  stemIds,
+  lanes,
   transpose,
   onTranspose,
   tempo,
@@ -1038,7 +1044,7 @@ export default function Transport({
                 training={training}
                 cfg={trainCfg}
                 linesReady={linesReady}
-                stemIds={stemIds}
+                lanes={lanes}
                 onToggle={onToggleTraining}
                 onCfg={onTrainCfg}
                 onClose={() => setTrainOpen(false)}

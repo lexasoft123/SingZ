@@ -211,6 +211,11 @@ void WasapiRouteLossContext::markStopped() noexcept {
   }
 }
 
+void WasapiRouteLossContext::markQuiesced() noexcept {
+  lifecycleState_.store(static_cast<uint32_t>(WasapiLifecycleState::Stopped),
+                        std::memory_order_release);
+}
+
 WasapiStartupFailureDecision classifyWasapiStartupFailure(
     WasapiStartupStage stage, int32_t result) noexcept {
   (void)stage;

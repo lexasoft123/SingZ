@@ -449,6 +449,15 @@ export type UpdateState =
 
 export type LogLevel = 'info' | 'warn' | 'error'
 
+/** One launch's log file on the desktop; the newest ten are kept. */
+export interface LogSession {
+  name: string
+  startedAt: number
+  bytes: number
+  /** The launch that is running now. */
+  current: boolean
+}
+
 export interface LogEntry {
   t: number
   level: LogLevel
@@ -759,13 +768,19 @@ export const DESKTOP_PLAYBACK_CONTRACT_VERSION = 2 as const
 export const DESKTOP_PLAYBACK_CAPABILITY =
   'singz.native.playback-session.anchored-preview.v4' as const
 export const DESKTOP_PLAYBACK_CODEC_PROFILE = 'singz-playback-codecs-v1' as const
+/** An addon from before zcore's native MP3 decoder: WAV and FLAC. */
 export const DESKTOP_PLAYBACK_CODEC_BASE_TAG =
   'singz-prepared-audio-fd-wav-flac-v1' as const
+/** Every addon since: WAV, FLAC and the native MP3 decoder, no FFmpeg. */
+export const DESKTOP_PLAYBACK_CODEC_NATIVE_TAG =
+  'singz-prepared-audio-fd-wav-flac-mp3-v2' as const
 export const DESKTOP_PLAYBACK_CODEC_FULL_TAG =
   'singz-prepared-audio-fd-ffmpeg-full-matrix-v3' as const
 export const DESKTOP_PLAYBACK_CODEC_BASE_MASK = 0x003 as const
+export const DESKTOP_PLAYBACK_CODEC_NATIVE_MASK = 0x007 as const
 export const DESKTOP_PLAYBACK_CODEC_FULL_MASK = 0x1ff as const
 export const DESKTOP_PLAYBACK_CODEC_BASE_EXTENSIONS = ['wav', 'flac'] as const
+export const DESKTOP_PLAYBACK_CODEC_NATIVE_EXTENSIONS = ['wav', 'flac', 'mp3'] as const
 export const DESKTOP_PLAYBACK_CODEC_FULL_EXTENSIONS = [
   'wav', 'flac', 'mp3', 'm4a', 'aac', 'ogg', 'oga', 'opus', 'aif', 'aiff'
 ] as const
@@ -780,6 +795,7 @@ export interface DesktopPlaybackRuntimeCapability {
     runtimeVersion: string
     capabilityTag:
       | typeof DESKTOP_PLAYBACK_CODEC_BASE_TAG
+      | typeof DESKTOP_PLAYBACK_CODEC_NATIVE_TAG
       | typeof DESKTOP_PLAYBACK_CODEC_FULL_TAG
     profile: '' | typeof DESKTOP_PLAYBACK_CODEC_PROFILE
     target: string
@@ -1149,6 +1165,8 @@ export interface DesktopPlaybackStatus {
   format: DesktopPlaybackResult['format']
   latency: DesktopMonitorLatency
   lanes: DesktopPlaybackLaneStatus[]
+  /** The addon's own media layer (zcore's decodedAudioCapabilityTag). */
+  mediaCodecTag: string
 }
 
 export type DesktopAudioInputEvent =
@@ -1418,9 +1436,14 @@ export interface SingzApi {
   /** Diagnostic log: current buffer, live stream, save-to-file (dialog unless path given). */
   getLog(): Promise<LogEntry[]>
   saveLog(
-    path?: string
+    path?: string,
+    session?: string
   ): Promise<{ ok: true; path: string } | { ok: false; cancelled?: boolean; error: string }>
   onLogLine(cb: (e: LogEntry) => void): () => void
+  /** The kept launch logs, newest first (this launch included). */
+  logSessions(): Promise<LogSession[]>
+  /** One kept launch log's text; null when it is no longer kept. */
+  readLogSession(name: string): Promise<string | null>
   /** App version for the titlebar ("dev" outside packaged builds). */
   appVersion(): Promise<string>
   /** Main-owned app-level profile/history. Completion receipts never contain song paths or raw observations. */

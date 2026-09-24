@@ -8,8 +8,9 @@ import org.junit.Test
 
 /**
  * The Kotlin end of the writer's shared name/path table
- * (tests/shared/project-name-cases.json). The TS reference writer runs the
- * same rows behavior-level (tests/unit/project-name-rules.test.ts), so a
+ * (tests/shared/project-name-cases.json). The TS reference writer and the
+ * desktop's own safeName run the same rows (tests/unit/project-name-rules.test.ts),
+ * and Swift runs them in mobile/scripts/test-swift-project-paths.sh, so a
  * phone add cannot name or place a folder differently than the tests and
  * the desktop expect.
  */

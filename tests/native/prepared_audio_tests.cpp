@@ -880,7 +880,7 @@ void decodeTests() {
       ? "singz-prepared-audio-fd-ffmpeg-full-matrix-v3"
       : (codecCapabilities.dynamicallyLinkedFfmpeg
              ? "singz-prepared-audio-fd-ffmpeg-partial-runtime-v2"
-             : "singz-prepared-audio-fd-wav-flac-v1");
+             : "singz-prepared-audio-fd-wav-flac-mp3-v2");
   expect(std::strcmp(singz::decodedAudioCapabilityTag(),
                      expectedCapabilityTag) == 0,
          "prepared-audio capability tag is durable");
@@ -898,12 +898,17 @@ void decodeTests() {
              singz::decodedAudioFormatForExtension(".\\\\server") ==
                  singz::DecodedAudioSourceFormat::Auto,
          "extension mapping rejects paths, protocols and device spellings");
-  expect((codecCapabilities.formatMask &
-          (singz::DecodedAudioCapabilityWav |
-           singz::DecodedAudioCapabilityFlac)) ==
-             (singz::DecodedAudioCapabilityWav |
-              singz::DecodedAudioCapabilityFlac),
-         "always-built codec capabilities report WAV and FLAC");
+  // MP3 is native (zcore/src/media/mp3_streaming_source.cpp) and built everywhere, so
+  // a build without FFmpeg reports exactly these three and nothing else.
+  constexpr uint32_t native = singz::DecodedAudioCapabilityWav |
+      singz::DecodedAudioCapabilityFlac | singz::DecodedAudioCapabilityMp3;
+  expect((codecCapabilities.formatMask & native) == native &&
+             (codecCapabilities.dynamicallyLinkedFfmpeg ||
+              codecCapabilities.formatMask == native),
+         "always-built codec capabilities report WAV, FLAC and MP3");
+  expect(singz::decodedAudioFormatSupported(
+             singz::DecodedAudioSourceFormat::Mp3),
+         "MP3 is supported without FFmpeg");
 
   std::remove(wav.c_str());
   std::remove(extensible.c_str());

@@ -24,6 +24,7 @@ scripts/build-onnx-pack.sh  # demucs-onnx splitter pack (win32-x64 | darwin-x64)
 cd mobile && npx jest                                  # phone-side Drive logic
 cd mobile/android && ./gradlew :app:testDebugUnitTest   # Kotlin cache-currency table
 mobile/scripts/test-swift-currency.sh                   # Swift cache-currency table
+mobile/scripts/test-swift-project-paths.sh              # Swift project name/path table
 bash mobile/scripts/test-native-playback-bridge-schema.sh  # iOS bridge validators (clang only, no Xcode)
 bash zdsp/run-sanitizer-gates.sh                        # the phase-4 native ctest gate (3 presets)
 ```
@@ -1163,8 +1164,11 @@ was driven; the gotchas that follow from it are below.
   clock (pitch strip keys on bars-passed; its now-line is a 1px DOM layer);
   every infinite CSS animation needs a modal-open pause rule and must not
   outlive the state that justifies it (a paused count-in pulse held 20% GPU
-  forever); `body.win` keeps solid, blur-free surfaces — modal scrim AND
-  transport (any per-frame damage re-runs a backdrop blur above it).
+  forever); `body.win` keeps solid, blur-free surfaces — every
+  `backdrop-filter`, in styles.css or the kit's sheet, has a `body.win` twin
+  with no blur and a fill of its own (any per-frame damage re-runs a backdrop
+  blur above it), and `tests/unit/windows-no-blur.test.ts` fails on one that
+  does not.
 
 ## Releasing
 

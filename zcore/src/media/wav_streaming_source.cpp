@@ -55,24 +55,9 @@ uint32_t le32(const unsigned char* value) noexcept {
       (static_cast<uint32_t>(value[3]) << 24);
 }
 
-// Keeps reading until `bytes` arrived, the file ended, or it failed — a
-// positioned read may legally return short. Bytes read, or -1.
-int64_t readFully(const WavByteSource& source, uint64_t offset,
-                  unsigned char* buffer, size_t bytes) noexcept {
-  size_t got = 0;
-  while (got < bytes) {
-    const int64_t n = source.readAt(source.context, offset + got, buffer + got,
-                                    bytes - got);
-    if (n < 0) return -1;
-    if (n == 0) break;
-    got += static_cast<size_t>(n);
-  }
-  return static_cast<int64_t>(got);
-}
-
 }  // namespace
 
-DecodedAudioStatus parseWavLayout(const WavByteSource& source,
+DecodedAudioStatus parseWavLayout(const MediaByteSource& source,
                                   const DecodeCancellation& cancel,
                                   WavLayout* layout) noexcept {
   if (source.readAt == nullptr || layout == nullptr)
@@ -249,9 +234,8 @@ class WavStreamingSource final : public StreamingAudioSource {
     const int64_t length = fileLength(fd_);
     if (length < 0) return DecodedAudioStatus::IoError;
 
-    const WavByteSource bytes{this, &WavStreamingSource::readBytes,
-                              static_cast<uint64_t>(length)};
-    const DecodedAudioStatus parsed = parseWavLayout(bytes, DecodeCancellation{}, &layout_);
+    bytes_ = descriptorByteSource(&fd_, static_cast<uint64_t>(length));
+    const DecodedAudioStatus parsed = parseWavLayout(bytes_, DecodeCancellation{}, &layout_);
     if (parsed != DecodedAudioStatus::Ok) return parsed;
     if (layout_.channels > kMaximumSupportedChannels) return DecodedAudioStatus::LimitExceeded;
 
@@ -307,7 +291,7 @@ class WavStreamingSource final : public StreamingAudioSource {
            layout_.frames - position_});
       const size_t wanted = static_cast<size_t>(count * layout_.bytesPerFrame);
       const uint64_t offset = layout_.dataOffset + position_ * layout_.bytesPerFrame;
-      const int64_t got = readFullyAt(offset, wanted);
+      const int64_t got = readFully(bytes_, offset, staging_.data(), wanted);
       if (got < 0) {
         failure = DecodedAudioStatus::IoError;
         break;
@@ -350,28 +334,11 @@ class WavStreamingSource final : public StreamingAudioSource {
   }
 
  private:
-  static int64_t readBytes(void* context, uint64_t offset, unsigned char* buffer,
-                           size_t bytes) noexcept {
-    auto* self = static_cast<WavStreamingSource*>(context);
-    return readAt(self->fd_, buffer, bytes, static_cast<int64_t>(offset));
-  }
-
-  int64_t readFullyAt(uint64_t offset, size_t bytes) noexcept {
-    size_t got = 0;
-    while (got < bytes) {
-      const int64_t n = readAt(fd_, staging_.data() + got, bytes - got,
-                               static_cast<int64_t>(offset + got));
-      if (n < 0) return -1;
-      if (n == 0) break;
-      got += static_cast<size_t>(n);
-    }
-    return static_cast<int64_t>(got);
-  }
-
   // This source's own descriptor and its own offsets — positioned reads only,
-  // for the reason flac_streaming_source.cpp gives: playback and the waveform
-  // pass open the same file twice, and a shared cursor drags both about.
+  // for the reason media_io.cpp gives: playback and the waveform pass open the
+  // same file twice, and a shared cursor drags both about.
   int fd_ = -1;
+  MediaByteSource bytes_{};
   WavLayout layout_{};
   StreamingAudioInfo info_{};
   std::vector<unsigned char> staging_;

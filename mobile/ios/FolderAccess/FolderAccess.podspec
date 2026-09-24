@@ -30,6 +30,7 @@ Pod::Spec.new do |s|
                    'CacheCurrency.swift',
                    'DurablePreferenceWrite.swift',
                    'FolderAccess.swift',
+                   'ProjectPaths.swift',
                    '*.{m,mm}']
   proof_sources = codec_target_proof \
     ? ['CodecTargetProof/target_codec_proof.cpp'] \

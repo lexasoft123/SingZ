@@ -195,6 +195,7 @@ export function fakeNativeWriter(docsRoot: string): FakeNativeWriter {
       .replace(/\.(mp3|wav|flac|m4a|aac|ogg|oga|opus|aif|aiff)$/i, '')
       .replace(/[/\\:*?"<>|]/g, ' ')
       .replace(/\s{2,}/g, ' ')
+      .replace(/^[\s.]+/, '')
       .trim()
     return cleaned || 'Untitled song'
   }

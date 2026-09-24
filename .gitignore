@@ -54,6 +54,8 @@ mobile/ios/SingzCore/core/
 mobile/ios/SingzCore/dsp/
 # …and the vendored libFLAC, synced beside it by the same script
 mobile/ios/SingzCore/flac/
+# …and dr_mp3's header (zcore's native MP3), the same way
+mobile/ios/SingzCore/dr_mp3/
 
 # local-only tooling state: the logged-in Ultimate Guitar browser profile the
 # score-scout agent drives (contains a live session cookie — never commit it)

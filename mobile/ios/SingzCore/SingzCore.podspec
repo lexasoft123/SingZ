@@ -2,7 +2,7 @@ require 'json'
 
 Pod::Spec.new do |s|
   s.name         = 'SingzCore'
-  s.version      = '0.3.17'
+  s.version      = '0.3.18'
   s.summary      = 'SingZ shared C++ core: audio input, stem split, and beat inference'
   s.homepage     = 'https://github.com/lexasoft123/SingZ'
   s.license      = { :type => 'MIT' }
@@ -34,7 +34,7 @@ Pod::Spec.new do |s|
                    'dsp/src/analysis/live_input_analyzer.cpp',
                    'dsp/src/analysis/capture_adapter.cpp',
                    'flac/src/*.c'
-  s.preserve_paths = 'flac/**/*'
+  s.preserve_paths = 'flac/**/*', 'dr_mp3/**/*'
   s.resource_bundles = {
     'SingzCoreFfmpegNotices' => 'compliance/*'
   }
@@ -92,8 +92,9 @@ SCRIPT
     # onnxruntime-c ships its headers flat under Pods/onnxruntime-c/Headers
     # (not inside the xcframework), and dependents don't inherit a search
     # path for them. The flac paths serve <FLAC/…>, <config.h> and the
-    # private/ tree, in that order.
-    'HEADER_SEARCH_PATHS' => '"$(PODS_TARGET_SRCROOT)/core/include" "$(PODS_TARGET_SRCROOT)/dsp/include" "$(PODS_ROOT)/onnxruntime-c/Headers" "$(PODS_TARGET_SRCROOT)/flac/include" "$(PODS_TARGET_SRCROOT)/flac" "$(PODS_TARGET_SRCROOT)/flac/src/include" "$(PODS_TARGET_SRCROOT)/flac/src" "$(PODS_ROOT)/../../node_modules/react-native-audio-api/common/cpp/audioapi/external/include_ffmpeg"'
+    # private/ tree, in that order; dr_mp3 serves <dr_mp3.h>, which only
+    # zcore's mp3_streaming_source.cpp includes.
+    'HEADER_SEARCH_PATHS' => '"$(PODS_TARGET_SRCROOT)/core/include" "$(PODS_TARGET_SRCROOT)/dsp/include" "$(PODS_ROOT)/onnxruntime-c/Headers" "$(PODS_TARGET_SRCROOT)/flac/include" "$(PODS_TARGET_SRCROOT)/flac" "$(PODS_TARGET_SRCROOT)/flac/src/include" "$(PODS_TARGET_SRCROOT)/flac/src" "$(PODS_TARGET_SRCROOT)/dr_mp3" "$(PODS_ROOT)/../../node_modules/react-native-audio-api/common/cpp/audioapi/external/include_ffmpeg"'
   }
   s.frameworks   = 'AudioToolbox', 'AVFoundation', 'BackgroundTasks', 'UIKit'
   s.dependency 'React-Core'

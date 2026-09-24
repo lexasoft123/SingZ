@@ -6,7 +6,17 @@
  * because each one is a moment when the song exists in fewer places than the
  * singer thinks.
  */
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -556,11 +566,14 @@ describe('the desktop side of adoption', () => {
     }
   })
 
-  it('a leading-dot name moves under its library name, and stays downloaded after adoption', async () => {
+  it('a leading-dot folder moves under its library name, and stays downloaded after adoption', async () => {
     await desktopWithOneSong()
     const p = await phone()
-    const dir = await splitSongOnPhone(p, '...Baby One More Time')
-    expect(dir).toBe('...Baby One More Time')
+    const made = await splitSongOnPhone(p, '...Baby One More Time')
+    // this build names the folder without the dots; an older one kept them,
+    // and such a folder is still on phones
+    const dir = '...Baby One More Time'
+    renameSync(join(docs, made), join(docs, dir))
     expect(await p.publish.moveToDrive(dir)).toMatchObject({ name: 'Baby One More Time' })
     expect(await desktopSync()).toMatchObject({ ok: true, adopted: ['Baby One More Time'] })
     const again = await phone()

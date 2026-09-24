@@ -4045,7 +4045,7 @@ export default function App(): React.JSX.Element {
             onTrainCfg={handleTrainCfg}
             ducking={duckedIds.length > 0}
             linesReady={lines !== null && lines.length > 0}
-            stemIds={split ? tracks.map((t) => t.id) : []}
+            lanes={split ? tracks : []}
             transpose={transpose}
             onTranspose={handleTranspose}
             tempo={tempoRate}

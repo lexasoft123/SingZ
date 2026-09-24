@@ -5,9 +5,8 @@
 // one thread, so six lanes in realtime cost well under 1% of a core. Decoding
 // the WHOLE song is what costs ~1.3 s of every phone open and ~141 MB resident.
 //
-// `openStreamingAudioSource` at the bottom of this file is the one door for
-// every format: it sniffs the content and hands a RIFF/WAVE file to the WAV
-// source (wav_streaming_source.cpp), everything else to this one.
+// It is reached through `openStreamingAudioSource` (streaming_audio_source.cpp),
+// which detects the format and hands a FLAC file's descriptor here.
 //
 // One thing libFLAC makes the caller's problem, and one it does NOT — the
 // second measured rather than assumed, because the first version of this file
@@ -41,138 +40,23 @@
 #include <cstring>
 #include <vector>
 
-#if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-
-#include <fcntl.h>
-#include <io.h>
-#else
-#include <sys/stat.h>
-#include <unistd.h>
-#endif
-
-namespace singz {
-namespace media_internal {
-
-// The same descriptor handover `decoded_audio.cpp` performs, and for the same
-// reason: the media layer never takes a path, and the descriptor must be
-// closed on every failure path rather than leaked into a half-open decoder.
-//
-// Kept as a DESCRIPTOR with this source's own cursor, rather than as a FILE*
-// walking the descriptor's shared one. Two sources over one file is the
-// ordinary case here — playback seeks around a stem while the waveform pass
-// reads it straight through — and `dup` shares an open file description, so a
-// FILE* per source has them dragging each other's position about. Measured
-// before this changed: the second source could not even open, because the
-// first one's read had already carried the shared cursor past the signature.
-int consumeAsDescriptor(OwnedFileDescriptor* descriptor) noexcept {
-  if (descriptor == nullptr || !descriptor->valid()) return -1;
-  const int raw = descriptor->release();
-#if defined(_WIN32)
-  if (_setmode(raw, _O_BINARY) == -1) {
-    _close(raw);
-    return -1;
-  }
-#endif
-  return raw;
-}
-
-// One positioned read. Every read in this file goes through it, so the file
-// position the kernel holds is never consulted and never moved.
-//
-// Windows has no pread, and `_dup` shares a file position exactly as POSIX
-// dup does. The first version here seeked and then read — correct for ONE
-// source, and a race for the two the prepare actually opens per lane (the
-// feeder's and the waveform pass's, on two threads), each moving the other's
-// cursor between its seek and its read. `ReadFile` with an OVERLAPPED that
-// carries the offset is Windows' positioned read: on a synchronous handle it
-// reads at THAT offset regardless of the shared pointer (it also moves the
-// pointer afterwards, which nothing in this file ever reads). The CRT
-// descriptor's handle comes from `_get_osfhandle`; a dup'ed descriptor has a
-// duplicated handle onto the same file object, which is what makes the
-// offset-per-call the only position that matters. `ERROR_HANDLE_EOF` is a
-// read past the end, i.e. zero bytes, the same answer pread gives.
-int64_t readAt(int fd, void* buffer, size_t bytes, int64_t offset) noexcept {
-  if (fd < 0) return -1;
-#if defined(_WIN32)
-  const HANDLE handle = reinterpret_cast<HANDLE>(_get_osfhandle(fd));
-  if (handle == INVALID_HANDLE_VALUE) return -1;
-  OVERLAPPED at{};
-  at.Offset = static_cast<DWORD>(static_cast<uint64_t>(offset) & 0xFFFFFFFFULL);
-  at.OffsetHigh = static_cast<DWORD>(static_cast<uint64_t>(offset) >> 32);
-  DWORD got = 0;
-  const DWORD want = static_cast<DWORD>(std::min<size_t>(bytes, 0x7FFFFFFFU));
-  if (!ReadFile(handle, buffer, want, &got, &at)) {
-    return GetLastError() == ERROR_HANDLE_EOF ? 0 : -1;
-  }
-  return static_cast<int64_t>(got);
-#else
-  return ::pread(fd, buffer, bytes, static_cast<off_t>(offset));
-#endif
-}
-
-void closeRawDescriptor(int fd) noexcept {
-  if (fd < 0) return;
-#if defined(_WIN32)
-  _close(fd);
-#else
-  ::close(fd);
-#endif
-}
-
-int64_t fileLength(int fd) noexcept {
-  if (fd < 0) return -1;
-#if defined(_WIN32)
-  // Asked of the handle, not walked with the cursor: nothing reads the
-  // shared position any more, and the length of a file is no reason to move
-  // it under a concurrent reader either.
-  const HANDLE handle = reinterpret_cast<HANDLE>(_get_osfhandle(fd));
-  if (handle == INVALID_HANDLE_VALUE) return -1;
-  LARGE_INTEGER size{};
-  if (!GetFileSizeEx(handle, &size)) return -1;
-  return static_cast<int64_t>(size.QuadPart);
-#else
-  struct stat info {};
-  if (::fstat(fd, &info) != 0) return -1;
-  return static_cast<int64_t>(info.st_size);
-#endif
-}
-
-}  // namespace media_internal
+namespace singz::media_internal {
 
 namespace {
 
-using media_internal::closeRawDescriptor;
-using media_internal::fileLength;
-using media_internal::readAt;
-
-// Cheap signature check before libFLAC is handed the file, so an input that is
-// simply another format is refused as such rather than coming back as damaged
-// FLAC. The header promises the status says which, and a caller choosing
-// between adapters acts on that difference. An ID3 tag before the magic is
-// legal and common enough to skip.
-bool looksLikeFlac(int fd, int64_t* start) {
-  unsigned char head[10] = {0};
-  if (readAt(fd, head, sizeof(head), 0) != static_cast<int64_t>(sizeof(head))) return false;
-  int64_t at = 0;
-  if (std::memcmp(head, "ID3", 3) == 0) {
-    const int64_t tag = 10 + ((static_cast<int64_t>(head[6] & 0x7F) << 21) |
-                              (static_cast<int64_t>(head[7] & 0x7F) << 14) |
-                              (static_cast<int64_t>(head[8] & 0x7F) << 7) |
-                              static_cast<int64_t>(head[9] & 0x7F));
-    unsigned char magic[4] = {0};
-    if (readAt(fd, magic, 4, tag) != 4 || std::memcmp(magic, "fLaC", 4) != 0) return false;
-    at = tag;
-  } else if (std::memcmp(head, "fLaC", 4) != 0) {
+// Where the stream begins, and that it is FLAC. The detector already said so
+// before this source was chosen; checked again because this source must not
+// hand libFLAC something else whatever called it, and because libFLAC wants
+// to start AT the magic — an ID3v2 tag before it (the detector's rule, from
+// media_format.cpp) is legal and skipped.
+bool looksLikeFlac(int fd, int64_t length, int64_t* start) {
+  const MediaByteSource bytes = descriptorByteSource(&fd, static_cast<uint64_t>(length));
+  uint64_t at = 0;
+  if (!skipId3v2Tags(bytes, &at)) return false;
+  unsigned char magic[4] = {0};
+  if (readFully(bytes, at, magic, sizeof(magic)) != 4 || std::memcmp(magic, "fLaC", 4) != 0)
     return false;
-  }
-  if (start != nullptr) *start = at;
+  if (start != nullptr) *start = static_cast<int64_t>(at);
   return true;
 }
 
@@ -233,9 +117,9 @@ class FlacStreamingSource final : public StreamingAudioSource {
       return DecodedAudioStatus::UnsupportedFormat;
     }
     if (fd_ < 0) return DecodedAudioStatus::IoError;
-    if (!looksLikeFlac(fd_, &offset_)) return DecodedAudioStatus::UnsupportedFormat;
     length_ = fileLength(fd_);
     if (length_ < 0) return DecodedAudioStatus::IoError;
+    if (!looksLikeFlac(fd_, length_, &offset_)) return DecodedAudioStatus::UnsupportedFormat;
 
     decoder_ = FLAC__stream_decoder_new();
     if (decoder_ == nullptr) return DecodedAudioStatus::ResourceExhausted;
@@ -525,36 +409,12 @@ class FlacStreamingSource final : public StreamingAudioSource {
 
 }  // namespace
 
-std::unique_ptr<StreamingAudioSource> openStreamingAudioSource(
-    OwnedFileDescriptor descriptor, const StreamingAudioOpenOptions& options,
-    DecodedAudioStatus* status) {
+std::unique_ptr<StreamingAudioSource> openFlacStreamingSource(
+    int fd, const StreamingAudioOpenOptions& options, DecodedAudioStatus* status) {
   auto set = [status](DecodedAudioStatus s) {
     if (status != nullptr) *status = s;
   };
-  if (!descriptor.valid()) {
-    set(DecodedAudioStatus::InvalidArgument);
-    return nullptr;
-  }
-  const int fd = media_internal::consumeAsDescriptor(&descriptor);
-  if (fd < 0) {
-    set(DecodedAudioStatus::IoError);
-    return nullptr;
-  }
-  // By content, never by name (see the header): a FLAC called `.wav` has
-  // bitten this codebase before. A declared format that the content
-  // contradicts is refused rather than read as something else.
-  unsigned char head[4] = {0};
-  const bool riff = readAt(fd, head, sizeof(head), 0) == static_cast<int64_t>(sizeof(head)) &&
-                    std::memcmp(head, "RIFF", 4) == 0;
-  if (options.sourceFormat == DecodedAudioSourceFormat::Wav ||
-      (options.sourceFormat == DecodedAudioSourceFormat::Auto && riff)) {
-    if (!riff) {
-      closeRawDescriptor(fd);
-      set(DecodedAudioStatus::UnsupportedFormat);
-      return nullptr;
-    }
-    return media_internal::openWavStreamingSource(fd, options, status);
-  }
+  // Owns the descriptor from here: the destructor closes it on every refusal.
   auto source = std::make_unique<FlacStreamingSource>(fd);
   const DecodedAudioStatus opened = source->open(options);
   if (opened != DecodedAudioStatus::Ok) {
@@ -565,4 +425,4 @@ std::unique_ptr<StreamingAudioSource> openStreamingAudioSource(
   return source;
 }
 
-}  // namespace singz
+}  // namespace singz::media_internal

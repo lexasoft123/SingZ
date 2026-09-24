@@ -97,13 +97,29 @@ documentation that happens to travel on the wire.
 
 `mediaCodec` carries `{abiVersion, formatMask, dynamicallyLinkedFfmpeg,
 runtimeVersion, capabilityTag}`. `abiVersion` must be `1`, and
-`nativeMediaCodecIsValid` (`native.ts`) accepts exactly two shapes and nothing
-between them:
+`nativeMediaCodecIsValid` (`native.ts`) accepts exactly three shapes and
+nothing between them:
 
 | shape | mask | ffmpeg | tag | runtimeVersion |
 |---|---|---|---|---|
-| base | `0x003` | false | `singz-prepared-audio-fd-wav-flac-v1` | empty |
+| native | `0x007` | false | `singz-prepared-audio-fd-wav-flac-mp3-v2` | empty |
+| base (before native MP3) | `0x003` | false | `singz-prepared-audio-fd-wav-flac-v1` | empty |
 | full matrix | `0x1ff` | true | `singz-prepared-audio-fd-ffmpeg-full-matrix-v3` | non-empty |
+
+**native** is every build since zcore gained its own MP3 decoder
+(`zcore/src/media/mp3_streaming_source.cpp`, over the vendored MIT-0 dr_mp3 —
+`third_party/native/dr_mp3/README.md`): WAV, FLAC and MP3 with no FFmpeg at
+all, so an unsplit phone song's `song.mp3` or an MP3 custom track plays and
+streams on the native graph. MP3 is native on FFmpeg builds too; FFmpeg keeps
+the codecs zcore has no decoder for. **base** is no longer produced by any
+build; it stays accepted so a stale binary under a newer JS bundle (Metro over
+an old install) reads as the WAV/FLAC build it is, and its MP3 lanes stay on
+the legacy engine through the per-extension bits below.
+
+The desktop reaches the same tiers differently: its capability is assembled in
+main (`playbackCapability` in `src/main/capture.ts`), which offers **native**
+only when the loaded addon's `playbackStatus().mediaCodecTag` — the addon's own
+`decodedAudioCapabilityTag()` — says so, and **base** otherwise.
 
 A third tag exists in C++ and no TypeScript parser accepts it:
 `singz-prepared-audio-fd-ffmpeg-partial-runtime-v2`
