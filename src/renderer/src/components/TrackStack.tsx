@@ -10,9 +10,11 @@ import { t } from '../i18n'
 /** Ruler row height — the grid template and the beat overlay share it. */
 const RULER_H = 30
 
-/** How often, at most, the waveforms' played edge follows a rolling playhead
- *  (the line itself follows every device pixel) — see playhead-writes.ts. */
-const REVEAL_EVERY_MS = 250
+/** When the lanes' played layer catches up with a rolling playhead: once the
+ *  sliver the kit's edge layer draws behind the line is this many device
+ *  pixels wide, and at most every so often. The edge itself follows every
+ *  device pixel — see playhead-writes.ts. */
+const REVEAL = { revealLagPx: 64, revealEveryMs: 250 }
 
 interface Props {
   tracks: UITrack[]
@@ -164,7 +166,10 @@ export default function TrackStack({
   useEffect(() => {
     let raf = 0
     let live = true
-    const writes = createPlayheadWriter(REVEAL_EVERY_MS)
+    const writes = createPlayheadWriter(REVEAL)
+    // Every lane's edge layer, live as lanes come and go. Written one by one:
+    // a --p-edge on the stack would restyle every lane's subtree each step.
+    const edges = stackRef.current?.getElementsByClassName('wave-edge')
     let lastOff = ''
     let lastPos = -1
     let lastT = 0
@@ -209,19 +214,39 @@ export default function TrackStack({
           }
         }
         const pct = span > 0 ? ((pos - v.s) / span) * 100 : 0
-        // quantized to whole device pixels + change-gated: every --p change
-        // damages the frame, so step only when the playhead moves a real
-        // pixel — ~5 Hz across a full-length view instead of 60 Hz.
-        const stepPct = 100 / Math.max(1, el.clientWidth * (window.devicePixelRatio || 1))
+        // quantized to whole device pixels of the WINDOW, as a percentage of
+        // the lanes' column (which the line and the waveforms share) +
+        // change-gated: every --p change damages the frame, so step only when
+        // the playhead moves a real pixel — ~5 Hz across a full-length view
+        // instead of 60 Hz. A pixel boundary is also the one place the played
+        // layer's clip and its edge layer's can meet without both painting
+        // the column between them — a bright seam — and it has to be the
+        // WINDOW's pixel: at 125% scaling the lanes can start mid-pixel.
+        const lanes = overlayRef.current?.getBoundingClientRect()
+        const dpr = window.devicePixelRatio || 1
+        const x0 = (lanes?.left ?? 0) * dpr
+        const wd = Math.max(1, (lanes?.width ?? el.clientWidth) * dpr)
         const clamped = Math.max(0, Math.min(100, pct))
-        const next = `${(Math.round(clamped / stepPct) * stepPct).toFixed(4)}%`
-        // The line takes every step on its own --p; the played edge, which
-        // every lane inherits from the stack's, trails it on a clock while
-        // the song rolls and snaps to it on anything else — the line is two
-        // thin strips of damage, the edge is six filtered lanes re-clipped
-        // (see playhead-writes.ts).
-        const w = writes({ p: next, playing: engine.playing, seeked, viewKey: `${v.s}|${v.e}|${stepPct}`, now })
-        if (w.line !== null) head.style.setProperty('--p', w.line)
+        const snapped = ((Math.round(x0 + (clamped / 100) * wd) - x0) / wd) * 100
+        const next = `${Math.max(0, Math.min(100, snapped)).toFixed(4)}%`
+        // The line and the lanes' edge layers take every step; the played
+        // layer's clip, which every lane inherits from the stack's --p,
+        // catches up now and then while the song rolls and snaps to the line
+        // on anything else — a step re-clips only the sliver between the two,
+        // a catch-up re-clips six filtered lanes (see playhead-writes.ts).
+        const w = writes({
+          p: next,
+          playing: engine.playing,
+          seeked,
+          viewKey: `${v.s}|${v.e}|${x0}|${wd}`,
+          stepPct: 100 / wd,
+          edgeLayer: (edges?.length ?? 0) > 0,
+          now
+        })
+        if (w.line !== null) {
+          head.style.setProperty('--p', w.line)
+          if (edges) for (let i = 0; i < edges.length; i++) (edges[i] as HTMLElement).style.setProperty('--p-edge', w.line)
+        }
         if (w.reveal !== null) el.style.setProperty('--p', w.reveal)
         // Clamping --p keeps the played/unplayed reveal honest either side of
         // the view, but it would also pin the playhead itself to whichever
