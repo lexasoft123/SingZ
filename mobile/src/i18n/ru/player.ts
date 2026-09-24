@@ -52,6 +52,7 @@ export const player: Translation<typeof en> = {
 
   // ── lyric column (ui/SkiaLyrics.tsx + the tap-target overlay in PlayerScreen) ──
   'phone.player.lyrics.waitSeconds': '{sec} с',
+  'phone.player.lyrics.jumpHint': 'Перейти к строке',
   'phone.player.lyrics.empty': 'В проекте нет текста песни.',
   // {text} is the lyric line itself; said for a line the singer performs solo
   'phone.player.lyrics.lineTurn': '{text}. Ваш ход.',
@@ -82,7 +83,7 @@ export const player: Translation<typeof en> = {
   'phone.player.transport.backToStart': 'В начало',
   'phone.player.transport.back5': 'Назад 5 с',
   'phone.player.transport.forward5': 'Вперёд 5 с',
-  'phone.player.transport.practice': 'Занятие',
+  'phone.player.transport.practice': 'Практика',
   'phone.player.transport.play': 'Воспроизвести',
   'phone.player.transport.skipBackLabel': '−5 с',
   'phone.player.transport.skipForwardLabel': '+5 с',
@@ -192,10 +193,11 @@ export const player: Translation<typeof en> = {
   'phone.player.songSheet.gettingReady': 'Готовим…',
 
   // ── practice sheet: Key & speed ──
-  'phone.player.practice.title': 'Занятие',
+  'phone.player.practice.title': 'Практика',
   'phone.player.practice.keySpeed': 'Тон и темп',
   'phone.player.practice.reset': 'Сброс',
   'phone.player.practice.pitch': 'Тон',
+  'phone.player.practice.semitones': '{st} st',
   // {key} is a musical key name (untranslated), {quality} is minor/major short form
   'phone.player.practice.pitchSuffix': '→ {key} {quality}',
   'phone.player.practice.tempo': 'Темп',
@@ -226,7 +228,7 @@ export const player: Translation<typeof en> = {
 
   // ── practice sheet: Vocal training ──
   'phone.player.practice.vocalTraining': 'Тренировка',
-  'phone.player.practice.training': 'Занятие',
+  'phone.player.practice.training': 'Тренинг',
   'phone.player.practice.byTime': 'Время',
   'phone.player.practice.byLyricLines': 'Строки',
   'phone.player.practice.interval': 'Интервал',

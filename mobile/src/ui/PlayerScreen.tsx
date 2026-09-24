@@ -1848,7 +1848,7 @@ export default function PlayerScreen({
                     ? t('phone.player.lyrics.lineTurn', { text: lines[i].text })
                     : lines[i].text
                 }
-                accessibilityHint="Jump to this line"
+                accessibilityHint={t('phone.player.lyrics.jumpHint')}
                 style={{ position: 'absolute', left: LYR_PAD, right: LYR_PAD, top: b.y, height: b.height }}
               >
                 {mask?.[i] === true && (
@@ -2652,7 +2652,7 @@ export default function PlayerScreen({
                 </View>
                 <Stepper
                   label={t('phone.player.practice.pitch')}
-                  valueText={`${ktPitch > 0 ? '+' : ''}${ktPitch} st`}
+                  valueText={t('phone.player.practice.semitones', { st: `${ktPitch > 0 ? '+' : ''}${ktPitch}` })}
                   onStep={(d) => {
                     if (engine.capabilities.pitchTempo)
                       setKtPitch((v) => Math.max(-12, Math.min(12, v + d)))

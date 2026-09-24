@@ -45,7 +45,7 @@ export const training: Translation<typeof en> = {
   'phone.training.exerciseIntervalTitle': 'Интервалы',
   'phone.training.exerciseIntervalCopy': 'Спойте интервал вверх или вниз.',
   'phone.training.exerciseChordToneTitle': 'Тоны аккорда',
-  'phone.training.exerciseChordToneCopy': 'Найдите тон, терцию или квинту.',
+  'phone.training.exerciseChordToneCopy': 'Найдите приму, терцию и квинту.',
   'phone.training.exerciseArpeggioTitle': 'Арпеджио',
   'phone.training.exerciseArpeggioCopy': 'Пройдите аккорд по одной ноте.',
   'phone.training.exerciseScaleDegreeTitle': 'Ступени гаммы',

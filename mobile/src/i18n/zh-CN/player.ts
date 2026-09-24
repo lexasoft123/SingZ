@@ -54,6 +54,7 @@ export const player: Translation<typeof en> = {
   // drawn by Skia with the lyrics' face, which has no CJK glyphs on Android —
   // a Chinese character here would render as a box
   'phone.player.lyrics.waitSeconds': '{sec} s',
+  'phone.player.lyrics.jumpHint': '跳到这一行',
   'phone.player.lyrics.empty': '此项目暂无歌词。',
   // {text} is the lyric line itself; said for a line the singer performs solo
   'phone.player.lyrics.lineTurn': '{text}。轮到你了。',
@@ -196,6 +197,7 @@ export const player: Translation<typeof en> = {
   'phone.player.practice.keySpeed': '调与速度',
   'phone.player.practice.reset': '重置',
   'phone.player.practice.pitch': '音高',
+  'phone.player.practice.semitones': '{st} 半音',
   // {key} is a musical key name (untranslated), {quality} is minor/major short form
   'phone.player.practice.pitchSuffix': '→ {key} {quality}',
   'phone.player.practice.tempo': '速度',

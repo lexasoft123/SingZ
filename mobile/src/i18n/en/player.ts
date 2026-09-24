@@ -49,6 +49,7 @@ export const player = {
 
   // ── lyric column (ui/SkiaLyrics.tsx + the tap-target overlay in PlayerScreen) ──
   'phone.player.lyrics.waitSeconds': '{sec} s',
+  'phone.player.lyrics.jumpHint': 'Jump to this line',
   'phone.player.lyrics.empty': 'No lyrics in this project yet.',
   // {text} is the lyric line itself; said for a line the singer performs solo
   'phone.player.lyrics.lineTurn': '{text}. Your turn.',
@@ -191,6 +192,8 @@ export const player = {
   'phone.player.practice.keySpeed': 'Key & speed',
   'phone.player.practice.reset': 'Reset',
   'phone.player.practice.pitch': 'Pitch',
+  // transpose in semitones, e.g. "+2 st"
+  'phone.player.practice.semitones': '{st} st',
   // {key} is a musical key name (untranslated), {quality} is minor/major short form
   'phone.player.practice.pitchSuffix': '→ {key} {quality}',
   'phone.player.practice.tempo': 'Tempo',
