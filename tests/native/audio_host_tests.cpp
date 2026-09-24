@@ -10,7 +10,10 @@
 #include <limits>
 #include <memory>
 #include <new>
+#include <optional>
+#include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "tools/native/audio_host_cli.h"
@@ -73,6 +76,105 @@ class StopCountingBackend final : public singz::AudioHostBackend {
  private:
   uint32_t* stops_;
 };
+
+class InventoryBackend final : public singz::AudioHostBackend {
+ public:
+  explicit InventoryBackend(singz::AudioHostInventory inventory)
+      : inventory_(std::move(inventory)) {}
+  singz::AudioHostInventory enumerate() const override { return inventory_; }
+  singz::AudioHostResult open(const singz::AudioHostConfig&,
+                              singz::AudioHostRender, void*) override {
+    return {};
+  }
+  singz::AudioHostResult start() override { return {}; }
+  void stop() noexcept override {}
+  singz::AudioHostStatus status() const noexcept override { return {}; }
+
+ private:
+  singz::AudioHostInventory inventory_;
+};
+
+singz::AudioHostDeviceInfo endpoint(
+    const char* uid, singz::AudioHostEndpointDirection direction,
+    uint32_t inputs, uint32_t outputs, double rate) {
+  singz::AudioHostDeviceInfo device;
+  device.uid = uid;
+  device.direction = direction;
+  device.inputChannels = inputs;
+  device.outputChannels = outputs;
+  device.nominalSampleRate = rate;
+  return device;
+}
+
+bool sameRoute(const std::optional<singz::AudioHostDeviceInfo>& a,
+               const std::optional<singz::AudioHostDeviceInfo>& b) {
+  if (!a || !b) return !a && !b;
+  return a->uid == b->uid && a->direction == b->direction &&
+         a->inputChannels == b->inputChannels &&
+         a->outputChannels == b->outputChannels &&
+         a->nominalSampleRate == b->nominalSampleRate;
+}
+
+// The default is the route check as it always was: the first output or
+// duplex endpoint with the uid, in inventory order, and nothing for an
+// input-only one, however it shares a uid.
+void testDescribeOutputDeviceDefault() {
+  using Direction = singz::AudioHostEndpointDirection;
+  singz::AudioHostInventory inventory;
+  inventory.devices = {endpoint("mic", Direction::Input, 1, 0, 48000.0),
+                       endpoint("shared", Direction::Input, 2, 0, 48000.0),
+                       endpoint("shared", Direction::Output, 0, 2, 44100.0),
+                       endpoint("duplex", Direction::Duplex, 2, 4, 96000.0)};
+  singz::AudioHost host(std::make_unique<InventoryBackend>(inventory));
+  CHECK(!host.describeOutputDevice("mic"));
+  CHECK(sameRoute(host.describeOutputDevice("shared"), inventory.devices[2]));
+  CHECK(sameRoute(host.describeOutputDevice("duplex"), inventory.devices[3]));
+  CHECK(!host.describeOutputDevice("missing"));
+  CHECK(!host.describeOutputDevice(""));
+  singz::AudioHost none(nullptr);
+  CHECK(!none.describeOutputDevice("duplex"));
+}
+
+// Whatever a platform answers for one endpoint must be what its inventory
+// says about that endpoint, for every endpoint it lists: a backend that
+// asks one device (macOS, WASAPI) has to agree with the inventory the
+// check used to read. On a host with no audio devices this checks only the
+// two misses.
+void testDescribeOutputDeviceMatchesInventory() {
+  using Direction = singz::AudioHostEndpointDirection;
+  singz::AudioHost platform;
+  const auto inventory = platform.enumerate();
+  for (const auto& device : inventory.devices) {
+    std::optional<singz::AudioHostDeviceInfo> expected;
+    for (const auto& candidate : inventory.devices) {
+      if (candidate.uid == device.uid &&
+          (candidate.direction == Direction::Output ||
+           candidate.direction == Direction::Duplex)) {
+        expected = candidate;
+        break;
+      }
+    }
+    const auto described = platform.describeOutputDevice(device.uid);
+    if (!sameRoute(described, expected)) {
+      std::fprintf(stderr,
+                   "describeOutputDevice disagrees with enumerate for a %s "
+                   "device (%u in, %u out, %.0f Hz): %s\n",
+                   device.direction == Direction::Input    ? "input"
+                   : device.direction == Direction::Output ? "output"
+                                                           : "duplex",
+                   device.inputChannels, device.outputChannels,
+                   device.nominalSampleRate,
+                   described ? "answered differently" : "answered nothing");
+      CHECK(false);
+    }
+  }
+  CHECK(!platform.describeOutputDevice(""));
+  CHECK(!platform.describeOutputDevice("singz:no-such-endpoint"));
+  // Said out loud, so a run that compared nothing cannot pass for one that
+  // compared a real interface.
+  std::printf("describeOutputDevice matches the inventory on %zu endpoints\n",
+              inventory.devices.size());
+}
 
 bool observe(void* context, const singz::AudioHostRenderBlock& block) noexcept {
   auto* value = static_cast<Observation*>(context);
@@ -744,6 +846,8 @@ int main() {
   testQuiescentStop();
   testCallbackContainmentAndPolicy();
   testMoveAssignmentStopsDestination();
+  testDescribeOutputDeviceDefault();
+  testDescribeOutputDeviceMatchesInventory();
   testBoundaryHelpers();
   testPreparedCaptureFifo();
   testCaptureFifoSpscStress();
