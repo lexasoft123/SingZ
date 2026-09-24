@@ -904,12 +904,13 @@ button.chip-status:hover {
   animation: fade 0.15s;
 }
 
-/* Windows: a full-window blur re-rasters every damaged pixel under it, and a
-   song keeps playing while a file is dragged in — 95% of the HD 4600's 3D
-   engine with the blur, 64% without (maximized, QHD+; 58% with no overlay).
-   Solid scrim instead, darker by the same +0.2 the kit gives .modal-scrim,
-   so the app still recedes. */
-body.win .drop-overlay {
+/* Windows, unless main vouched for its GPU (body.glass, src/main/glass.ts): a
+   full-window blur re-rasters every damaged pixel under it, and a song keeps
+   playing while a file is dragged in — on the field laptop 95% of an engine
+   with the blur against 64% without (summed over its two GPUs; maximized,
+   QHD+; 58% with no overlay). Solid scrim instead, darker by the same +0.2
+   the kit gives .modal-scrim, so the app still recedes. */
+body.win:not(.glass) .drop-overlay {
   backdrop-filter: none;
   background: rgba(12, 9, 5, 0.75);
 }
@@ -3015,16 +3016,23 @@ body.modal-open .src-dot.busy {
   gap: 10px;
 }
 
-/* Windows iGPUs pay full-window re-raster for backdrop blur (field: HD 4600
-   at a 3200x1800 panel) — a solid scrim composites for free there. That
-   scrim's override moved into @singz/ui's kit.css along with .modal-scrim;
-   every blur in this file has its body.win twin beside it or below, and
-   tests/unit/windows-no-blur.test.ts fails on one that does not. */
+/* Windows GPUs mostly pay full-window re-raster for backdrop blur (field: a
+   3200x1800 laptop on an HD 4600 or a GT 750M) — a solid scrim composites
+   for free there. That scrim's override lives in @singz/ui's kit.css beside
+   .modal-scrim, keyed on body.win alone, so a GPU main vouched for
+   (body.glass, src/main/glass.ts) gets the kit's glass back here. Every blur
+   in this file has its body.win:not(.glass) twin beside it or below, and
+   tests/unit/windows-no-blur.test.ts fails on one that does not, and on a
+   restore that no longer matches the kit. */
+body.win.glass .modal-scrim {
+  backdrop-filter: blur(8px);
+  background: rgba(8, 6, 3, 0.62);
+}
 
 /* Same deal during playback: the playhead damages a frame region every
    step, and that re-runs the transport's blur(20px) over a full-width
-   strip (measured 15-18pp of GPU on the HD 4600). Solid mix instead. */
-body.win .transport {
+   strip (measured 15-18pp of GPU on the field laptop). Solid mix instead. */
+body.win:not(.glass) .transport {
   backdrop-filter: none;
   background: color-mix(in srgb, var(--panel) 72%, var(--bg));
 }
@@ -4009,9 +4017,9 @@ body.modal-open .persistent-monitor.active .persistent-monitor-dot {
   backdrop-filter: blur(12px);
 }
 
-/* A full-screen blur re-rasters every damaged pixel on weak Windows iGPUs.
+/* A full-screen blur re-rasters every damaged pixel on weak Windows GPUs.
    The cleanup gate is safety UI, so use an opaque, equally legible scrim. */
-body.win .vt-cleanup-gate {
+body.win:not(.glass) .vt-cleanup-gate {
   background: var(--bg);
   backdrop-filter: none;
 }
@@ -4255,10 +4263,10 @@ body.win .vt-cleanup-gate {
   backdrop-filter: blur(24px) saturate(1.18);
 }
 
-/* Windows: the same pill in solid — the glass mixed over --bg, which is all
-   that sits behind it there (the kit paints body.win .app solid --bg), so it
-   renders what the blur would have. Weak-iGPU fleet rule, as .transport. */
-body.win .vt-session-head {
+/* Windows, unless main vouched for its GPU: the same pill in solid — the
+   glass mixed over --bg, which is all that sits behind it there (the kit
+   paints body.win .app solid --bg), so it renders what the blur would have. */
+body.win:not(.glass) .vt-session-head {
   backdrop-filter: none;
   background: color-mix(in srgb, var(--panel) 72%, var(--bg));
 }
@@ -4531,11 +4539,12 @@ body.win .vt-session-head {
   backdrop-filter: blur(24px) saturate(1.18);
 }
 
-/* Windows: solid, as the session head. The listening orb breathes inside this
-   dock for as long as a note is sung, and every one of its frames re-ran the
-   blur behind it: the listening screen took 48% of the HD 4600's 3D engine and
-   48% of a core with both blurs, 36% and 28% with neither. */
-body.win .vt-transport {
+/* Windows, unless main vouched for its GPU: solid, as the session head. The
+   listening orb breathes inside this dock for as long as a note is sung, and
+   every one of its frames re-ran the blur behind it — on the field laptop the
+   listening screen took 48% of an engine (summed over its two GPUs) and 48%
+   of a core with both blurs, 36% and 28% with neither. */
+body.win:not(.glass) .vt-transport {
   backdrop-filter: none;
   background: color-mix(in srgb, var(--panel) 76%, var(--bg));
 }
@@ -4821,8 +4830,9 @@ body.win .vt-transport {
 
 /* One sheet of glass over the studio: the karaoke stays dimly visible
    through the card, the vocals' own voiceprints run down the left, and the
-   singer's words sit on top. Glass is macOS-only indulgence — body.win gets
-   the same card in solid (weak-iGPU fleet rule: no backdrop blur there). */
+   singer's words sit on top. Glass is for GPUs that can afford it — the Mac,
+   and a Windows GPU main vouched for (body.glass); the rest of Windows gets
+   the same card in solid (weak-GPU fleet rule: no backdrop blur there). */
 .modal-card.lyed-card {
   --lyed-print: color-mix(in srgb, var(--accent) 60%, transparent);
   width: min(880px, calc(100vw - 64px));
@@ -4861,7 +4871,7 @@ body.win .vt-transport {
   );
 }
 
-body.win .modal-card.lyed-card {
+body.win:not(.glass) .modal-card.lyed-card {
   backdrop-filter: none;
   background: color-mix(in srgb, var(--panel) 94%, var(--bg));
 }
