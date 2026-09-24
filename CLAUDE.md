@@ -1199,7 +1199,22 @@ was driven; the gotchas that follow from it are below.
   the edge a 4 Hz clock while the song rolls and an exact write on
   pause/seek/zoom. Measure paint VISIBLE, per adapter (an Optimus laptop
   renders on the dGPU and pays a copy to the display GPU every frame), and
-  read DWM's share as well as the app's.
+  read DWM's share as well as the app's. A view change (pan, zoom, resize)
+  redraws every lane, so its cost is paid per EVENT: pans and zooms land at
+  most once a frame (`view-frames.ts` — the first at once, later ones composed
+  at the next frame), and since @singz/ui v1.8.1 a redraw draws each lane's
+  envelope once for both layers, as flat columns faded by one fill. Any frame
+  loop that reads the view calls `settleView()` FIRST (TrackStack's playhead
+  tick, PitchStrip's): held steps land there, because a frame callback
+  requested from an input event runs after every loop that re-armed itself a
+  frame earlier — landing held steps in one made the playhead trail the lanes
+  for a whole drag. Before v1.8.1 and view-frames, one wheel notch on a
+  zoomed view reached the screen ~340 ms later on the field laptop (the GPU
+  process unpacked a gradient with each of ~37k column rectangles a pan) and
+  a drag ran at 4 fps. Time a redraw by when its frame is PRESENTED — in a
+  trace, the GPU's last raster after the event, then the next swap — never by
+  a rAF after the event: that read 183 ms while the GPU queue held the frame
+  for 340.
 
 ## Releasing
 
