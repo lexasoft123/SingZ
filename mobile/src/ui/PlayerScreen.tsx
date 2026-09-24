@@ -2153,7 +2153,7 @@ export default function PlayerScreen({
             }
             label={t('phone.player.transport.back5')}
           >
-            <Text style={s.skipText}>−5s</Text>
+            <Text style={s.skipText}>{t('phone.player.transport.skipBackLabel')}</Text>
           </RoundBtn>
           <Pressable
             onPress={() => finishPlaybackAction(engine.toggle())}
@@ -2169,7 +2169,7 @@ export default function PlayerScreen({
             }
             label={t('phone.player.transport.forward5')}
           >
-            <Text style={s.skipText}>+5s</Text>
+            <Text style={s.skipText}>{t('phone.player.transport.skipForwardLabel')}</Text>
           </RoundBtn>
           <RoundBtn onPress={() => setSheet('practice')} label={t('phone.player.transport.practice')}>
             <MicGlyph />

@@ -25,7 +25,7 @@ export const player: Translation<typeof en> = {
   'phone.player.stem.bass': 'Бас',
   'phone.player.stem.guitar': 'Гитара',
   'phone.player.stem.piano': 'Клавиши',
-  'phone.player.stem.other': 'Инструменты',
+  'phone.player.stem.other': 'Прочее',
 
   // ── count-in display (playback/count-in-display.ts) ──
   'phone.player.countIn.beatLabel': 'Отсчёт, доля {done} из {total}',
@@ -84,6 +84,8 @@ export const player: Translation<typeof en> = {
   'phone.player.transport.forward5': 'Вперёд 5 с',
   'phone.player.transport.practice': 'Занятие',
   'phone.player.transport.play': 'Воспроизвести',
+  'phone.player.transport.skipBackLabel': '−5 с',
+  'phone.player.transport.skipForwardLabel': '+5 с',
   'phone.player.transport.pause': 'Пауза',
 
   // ── mixer sheet ──
@@ -161,7 +163,7 @@ export const player: Translation<typeof en> = {
   'phone.player.songSheet.keyMajor': 'мажор',
 
   // ── song sheet: Melody row ──
-  'phone.player.songSheet.melody': 'Мотив',
+  'phone.player.songSheet.melody': 'Мелодия',
   'phone.player.songSheet.trackedFromVocals': 'Распознана по вокалу',
   'phone.player.songSheet.notTrackedYet': 'Не распознана',
   'phone.player.songSheet.melodyDetector': 'детектор v{ver} · кадр каждые {ms} мс',
@@ -170,13 +172,13 @@ export const player: Translation<typeof en> = {
 
   // ── song sheet: Lyrics row ──
   'phone.player.songSheet.lyrics': 'Текст',
-  'phone.player.songSheet.linesCount': '{n} строк',
+  'phone.player.songSheet.linesCount': 'Строк: {n}',
   'phone.player.songSheet.wordTimings': ' · тайминг слов',
   'phone.player.songSheet.lineTimingsOnly': ' · тайминг строк',
   'phone.player.songSheet.none': 'Нет',
 
   // ── song sheet: Stems + Project rows ──
-  'phone.player.songSheet.stems': 'Треки',
+  'phone.player.songSheet.stems': 'Дорожки',
   'phone.player.songSheet.project': 'Проект',
   // e.g. "Format v2 · FLAC stems"
   'phone.player.songSheet.formatVersion': 'Формат v{ver} · {format}',

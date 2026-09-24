@@ -152,7 +152,7 @@ export const library: Translation<typeof en> = {
   // ── list groups / empty states ──
   'phone.library.ready': 'Готово',
   'phone.library.notReadyYet': 'Ещё не готово',
-  'phone.library.bundledAlwaysAvailable': 'встроено · всегда доступно',
+  'phone.library.bundledAlwaysAvailable': 'встроено · всегда есть',
   'phone.library.loadingFromDrive': 'Загрузка библиотеки из Google Drive…',
   'phone.library.loadingEllipsis': 'Загрузка…',
   'phone.library.noSongCalled': 'Нет песни с названием «{query}».',
@@ -195,7 +195,7 @@ export const library: Translation<typeof en> = {
   'phone.library.useTheseLyrics': 'Взять текст',
   'phone.library.skip': 'Пропуск',
   'phone.library.editTitle': 'Изменить',
-  'phone.library.moreLines': '…{n} строк',
+  'phone.library.moreLines': '…всего строк: {n}',
   'phone.library.lyricsServiceDownStillAdds':
     'Сервис текстов не ответил — песня всё равно добавится, а текст можно будет найти позже с её карточки.',
   'phone.library.tryAgain': 'Ещё раз',

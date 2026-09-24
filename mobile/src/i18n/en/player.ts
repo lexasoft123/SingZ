@@ -81,6 +81,8 @@ export const player = {
   'phone.player.transport.forward5': 'Forward 5 seconds',
   'phone.player.transport.practice': 'Practice',
   'phone.player.transport.play': 'Play',
+  'phone.player.transport.skipBackLabel': '−5s',
+  'phone.player.transport.skipForwardLabel': '+5s',
   'phone.player.transport.pause': 'Pause',
 
   // ── mixer sheet ──

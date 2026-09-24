@@ -17,7 +17,7 @@ export const common: Translation<typeof en> = {
   'stem.bass': 'Бас',
   'stem.guitar': 'Гитара',
   'stem.piano': 'Клавиши',
-  'stem.other': 'Инструменты',
+  'stem.other': 'Прочее',
 
   'key.major': '{tonic} мажор',
   'key.minor': '{tonic} минор',

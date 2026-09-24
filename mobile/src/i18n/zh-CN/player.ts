@@ -86,6 +86,8 @@ export const player: Translation<typeof en> = {
   'phone.player.transport.forward5': '快进 5 秒',
   'phone.player.transport.practice': '练习',
   'phone.player.transport.play': '播放',
+  'phone.player.transport.skipBackLabel': '−5秒',
+  'phone.player.transport.skipForwardLabel': '+5秒',
   'phone.player.transport.pause': '暂停',
 
   // ── mixer sheet ──
