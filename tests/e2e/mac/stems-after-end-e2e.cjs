@@ -47,7 +47,10 @@
  * Prereqs: `npm run build` done; the capture addon built for this tree
  * (`npm run capture:addon`); no other app instance on the same userData.
  *
- * Env: E2E_SONG (library project, default "Mein Teil"),
+ * Env: E2E_SONG (library project, default "Mein Teil" — the project's
+ *               FOLDER under E2E_PROJECTS_ROOT; its card is picked by the
+ *               exact name the library shows for it, and the run refuses to
+ *               measure if a different project opened),
  *      E2E_PROJECTS_ROOT (default iCloud Drive/SingZ). On the field laptop:
  *      E2E_PROJECTS_ROOT=<ps-lib> E2E_SONG="Player Session E2E".
  */
@@ -57,6 +60,7 @@ const watchdog = require('../../shared/watchdog.cjs').arm('stems-after-end-e2e')
 
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
+const { assertOpenedProject, clickLibrarySong, libraryName } = require('./library-song.cjs')
 const { closeSync, existsSync, openSync, readFileSync, readSync, writeFileSync } = require('node:fs')
 const { join } = require('node:path')
 const { homedir } = require('node:os')
@@ -65,7 +69,8 @@ const ROOT =
   process.env.E2E_PROJECTS_ROOT ??
   join(homedir(), 'Library/Mobile Documents/com~apple~CloudDocs/SingZ')
 const SONG = process.env.E2E_SONG ?? 'Mein Teil'
-const SONG_PJ = join(ROOT, SONG, 'project.json')
+const SONG_DIR = join(ROOT, SONG)
+const SONG_PJ = join(SONG_DIR, 'project.json')
 const APP = join(__dirname, '..', '..', '..', 'out', 'main', 'index.js')
 // The judged stretch, how long after the jump it opens, and what a lane may
 // starve inside it. By the time it opens the feeder has long since answered
@@ -227,7 +232,10 @@ async function scrubBackFromEnd(win, duration, firstGeneration, jumpFrom, fail, 
 
 ;(async () => {
   if (!existsSync(SONG_PJ)) throw new Error(`no project at ${SONG_PJ} — set E2E_SONG`)
-  const backup = readFileSync(SONG_PJ, 'utf8')
+  // Every project.json this run may touch, as found: the song's own, and any
+  // project that opened instead of it (assertOpenedProject adds that one).
+  const backups = [[SONG_PJ, readFileSync(SONG_PJ, 'utf8')]]
+  const songName = libraryName(SONG_DIR)
   const fail = []
   const inconclusive = []
   const app = await _electron.launch({
@@ -265,9 +273,10 @@ async function scrubBackFromEnd(win, duration, firstGeneration, jumpFrom, fail, 
     const t0 = Date.now()
 
     await watchdog.run('open the song', 120, async () => {
-      await win.click(`.lib-card:has-text("${SONG}")`)
+      await clickLibrarySong(win, songName)
       await win.waitForSelector('.pill.karaoke', { timeout: 60000 })
       await win.waitForFunction(() => __test?.engine?.duration > 0 && __test.phase === 'ready', null, { timeout: 60000 })
+      await assertOpenedProject(win, { dir: SONG_DIR, name: songName, backups })
     })
     const duration = await val(win, '__test.engine.duration')
     if (!(duration > 40)) throw new Error(`"${SONG}" is ${duration.toFixed(1)} s — the legs want at least 40`)
@@ -355,7 +364,14 @@ async function scrubBackFromEnd(win, duration, firstGeneration, jumpFrom, fail, 
       }
     }
     await app.close().catch(() => {})
-    writeFileSync(SONG_PJ, backup)
+    // A project in the singer's own library: put back exactly what was found,
+    // and leave an untouched file alone.
+    for (const [path, text] of backups) {
+      if (readFileSync(path, 'utf8') !== text) {
+        console.log(`${path} was rewritten during the run; restoring it`)
+        writeFileSync(path, text)
+      }
+    }
   }
 
   if (fail.length) {
