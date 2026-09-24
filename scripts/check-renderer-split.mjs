@@ -144,7 +144,12 @@ for (const chunk of [
 // (+88 kB measured, ~92 kB with the strings merged in since). Russian and
 // Chinese load on demand (loadLocale) and must stay out of the entry: their
 // chunks are ~150 kB each.
-const ENTRY_RAW_BUDGET = 1_375_000
+// Measured 1_374_403 B at main 98ff34c4 (localization + #72/#75's redraw
+// batching) — 597 B of room, so every eager addition tripped the check by
+// accident. The budget now sits a deliberate ~1% above that measurement: a
+// real regression (a lazy chunk pulled into the entry is tens of kB) still
+// fails, and the next small addition is not a surprise at merge time.
+const ENTRY_RAW_BUDGET = 1_388_000
 const TRAINING_RAW_BUDGET = 80_000
 const entryBytes = (await stat(resolve(assetsRoot, entryFile))).size
 const trainingBytes = await Promise.all(trainingChunks.map(async (file) =>

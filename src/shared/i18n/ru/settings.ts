@@ -27,7 +27,7 @@ export const settings: Translation<typeof en> = {
   'settings.output.retryBlocked': 'Повтор маршрута вывода недоступен, пока не подтверждена очистка звука.',
 
   // ── SettingsModal: native DSP playback checkbox ──
-  'settings.playback.useNativeLabel': 'Нативный плейбэк DSP',
+  'settings.playback.useNativeLabel': 'Нативное воспроизведение DSP',
   'settings.playback.hint': 'Использует нативный провайдер, когда песня точно совпадает с нативным графом.',
 
   // ── SettingsModal: Windows audio provider ──
@@ -85,9 +85,9 @@ export const settings: Translation<typeof en> = {
   'settings.monitor.playbackLeft': 'Выход Л',
   'settings.monitor.playbackRight': 'Выход П',
   'settings.monitor.playbackGeneric': 'Выход',
-  'settings.monitor.playbackLeftChannel': 'Левый канал плейбэка',
-  'settings.monitor.playbackRightChannel': 'Правый канал плейбэка',
-  'settings.monitor.playbackChannelGeneric': 'Канал плейбэка',
+  'settings.monitor.playbackLeftChannel': 'Левый канал выхода',
+  'settings.monitor.playbackRightChannel': 'Правый канал выхода',
+  'settings.monitor.playbackChannelGeneric': 'Канал выхода',
   'settings.monitor.gainLabel': 'Усиление',
   'settings.monitor.headphonesConfirmLabel': 'Наушники подключены проводом к устройству',
   'settings.monitor.stopButton': 'Стоп монитор',

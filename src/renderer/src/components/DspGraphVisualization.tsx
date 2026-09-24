@@ -10,7 +10,7 @@ import {
   type DesktopPlaybackStatus
 } from '../../../shared/types'
 import type { MonitorCoordinatorSnapshot } from '../audio/monitoring'
-import { t } from '../i18n'
+import { t, type Key } from '../i18n'
 
 interface DspGraphVisualizationProps {
   phase: MonitorCoordinatorSnapshot['phase']
@@ -247,13 +247,13 @@ export default function DspGraphVisualization({
             {graph ? (
               <>
                 <span>{formatSampleRate(graph.sampleRate)}</span>
-                <span>{graph.maximumFrames} frames maximum</span>
-                <span>{graph.nodes.length} nodes · {graph.connections.length} links</span>
+                <span>{t('player.dspGraph.framesMaximum', { n: graph.maximumFrames })}</span>
+                <span>{t('player.dspGraph.nodesLinks', { nodes: graph.nodes.length, links: graph.connections.length })}</span>
               </>
             ) : <span>{t('player.dspGraph.structuredUnavailable')}</span>}
           </div>
           <output className="dsp-graph-state" aria-live="polite">
-            <i aria-hidden="true" />{playbackStatus.transportState}
+            <i aria-hidden="true" />{t(`player.dspGraph.transport.${playbackStatus.transportState}` as Key)}
           </output>
         </header>
         {graph ? (

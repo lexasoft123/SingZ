@@ -104,7 +104,7 @@ import {
   type AnalysisProgress
 } from '../analysis/run'
 import { SPLIT_STEMS } from '../split/adopt'
-import { t, tn } from '../i18n'
+import { getLocale, t, tn } from '../i18n'
 import { records as moveRecords } from '../publish-record'
 import {
   abandonMove,
@@ -198,7 +198,9 @@ function SwipeActions({
 }
 
 const fmtSize = (bytes: number): string =>
-  bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`
+  bytes >= 1e9
+    ? t('phone.library.sizeGb', { n: (bytes / 1e9).toFixed(1).replace('.', getLocale() === 'ru' ? ',' : '.') })
+    : t('phone.library.sizeMb', { n: Math.max(1, Math.round(bytes / 1e6)) })
 
 /** The card's key · tempo line — singers pick songs by key, and both numbers
  *  are already saved in project.json. Same spelling as the Song sheet's Key
@@ -1602,7 +1604,7 @@ export default function CatalogScreen({
   const runMoveAll = useCallback(
     async (dirs: string[], announce = true): Promise<BatchResult> => {
       if (batchRunningRef.current) {
-        return { moved: [], skipped: [], stopped: { reason: 'blocked', message: 'Already adding songs to Google Drive.' } }
+        return { moved: [], skipped: [], stopped: { reason: 'blocked', message: t('phone.library.alreadyAdding') } }
       }
       batchRunningRef.current = true
       moveStop.current = false
