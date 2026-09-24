@@ -1168,7 +1168,15 @@ was driven; the gotchas that follow from it are below.
   `backdrop-filter`, in styles.css or the kit's sheet, has a `body.win` twin
   with no blur and a fill of its own (any per-frame damage re-runs a backdrop
   blur above it), and `tests/unit/windows-no-blur.test.ts` fails on one that
-  does not.
+  does not. The playhead line and the waveforms' played edge write separate
+  `--p`s (`playhead-writes.ts`), because re-clipping a layer damages its whole
+  visible part — the six lanes re-clipped every device pixel re-composited the
+  whole PLAYED part of the stack on every step (DWM ~31% late in a song on the
+  field laptop, with every filter removed): the line takes every device pixel,
+  the edge a 4 Hz clock while the song rolls and an exact write on
+  pause/seek/zoom. Measure paint VISIBLE, per adapter (an Optimus laptop
+  renders on the dGPU and pays a copy to the display GPU every frame), and
+  read DWM's share as well as the app's.
 
 ## Releasing
 
