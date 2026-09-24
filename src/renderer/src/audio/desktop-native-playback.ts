@@ -510,14 +510,26 @@ export class DesktopNativePlaybackClient {
    *  belongs to a count-in that actually ran (a rebuild at a signed frame
    *  starts flat and has no tail). */
   private countInSeen = false
+  /** Where the bar stood when a Pause went out, held until a status says
+   *  where the core parked — the phones' pause hold. The intent flips when
+   *  the pause command returns, and the projection stops with it, while that
+   *  status is still a read-back away: the bar used to draw the LAST POLL,
+   *  unprojected, for the round trip — up to a steady 200 ms stale while a
+   *  song simply plays — and then jump forward to the park point. Measured on
+   *  the Windows field laptop: back by up to 131 ms in 4 of 28 Pauses. The
+   *  hold is the floor under the park point too, so a Pause never draws the
+   *  bar behind where the singer pressed it. Generation-bound, and let go by
+   *  a resume or a seek. */
+  private pauseHold: { generation: string; seconds: number; loopCount: string } | null = null
 
   /** Forget everything that described the generation being retired: the
-   *  seeks still owed a receipt, and the count-in landing the bar was holding
-   *  at. Every generation reset goes through here. */
+   *  seeks still owed a receipt, the count-in landing the bar was holding at,
+   *  and a pause hold. Every generation reset goes through here. */
   private forgetTransport(): void {
     this.clearPendingSeek()
     this.countInLandingSeconds = null
     this.countInSeen = false
+    this.pauseHold = null
   }
 
   /** The landing a prepare built from `request` counts in to, or null when
@@ -608,7 +620,27 @@ export class DesktopNativePlaybackClient {
       (this.transportIntent === 'paused' || state === 'completed')
   }
 
-  /** The audible position in seconds as the bar should show it: the last
+  /** The audible position in seconds as the bar should show it: the core's
+   * position (`statusSeconds`), under a Pause the singer has just pressed.
+   * Until a status shows the transport parked the bar stays where it was
+   * pressed; then it shows the park point — a presentation latency and a
+   * command's delivery past where the ear was — and never below the press. A loop
+   * that wrapped under the pause is the one exception: the park point is past
+   * the wrap, and holding the bar at the loop's end would draw a spot the
+   * transport has already left. Null while no status describes a
+   * transport. */
+  audibleSeconds(): number | null {
+    const seconds = this.statusSeconds()
+    const hold = this.pauseHold
+    const status = this.last
+    if (seconds === null || hold === null || status === null || hold.generation !== this.generation) {
+      return seconds
+    }
+    if (status.transportState === 'playing' || status.transportState === 'pre-roll') return hold.seconds
+    return status.loopCount === hold.loopCount ? Math.max(seconds, hold.seconds) : seconds
+  }
+
+  /** The core's position in seconds as the bar should show it: the last
    * status's audible frame, projected forward by the time since that read
    * while playing (bounded to one second, as the phones bound theirs — the
    * bound was sized when a seam's prepare held main, and with it the poll,
@@ -618,7 +650,7 @@ export class DesktopNativePlaybackClient {
    * pre-empted by
    * a seek target the core has accepted but not yet reported. Null while no
    * status describes a transport. */
-  audibleSeconds(): number | null {
+  private statusSeconds(): number | null {
     const status = this.last
     const sampleRate = status?.format.sampleRate
     if (!status || !sampleRate || !this.ownsOutput) return null
@@ -626,8 +658,10 @@ export class DesktopNativePlaybackClient {
       if (Date.now() - this.pendingSeekAtMs < PENDING_SEEK_MAX_MS)
         return Math.max(0, this.pendingSeekFrame / sampleRate)
       // Never acknowledged. Drop it rather than go on drawing a position the
-      // song never reached.
+      // song never reached — and a pause hold with it, which can only have
+      // been taken over this target, since a seek lets go of any hold.
       this.clearPendingSeek()
+      this.pauseHold = null
     }
     // The audible projection is published only once it has MATURED — a
     // latency's worth of callbacks after every transport edge (a start, a
@@ -1390,9 +1424,28 @@ export class DesktopNativePlaybackClient {
         if (this.ownsOutput) throw new Error('Native playback has no commandable generation.')
         return
       }
-      ensure(await window.singz.pauseDesktopPlayback(this.generation), 'Native pause failed')
+      // Hold the bar where the singer pressed, BEFORE the command crosses, as
+      // the phones freeze their clock and legacy takes its start offset on
+      // the line it stops (see pauseHold).
+      const previous = this.pauseHold
+      const shown = this.audibleSeconds()
+      const status = this.last
+      if (shown !== null && status !== null) {
+        this.pauseHold = { generation: this.generation, seconds: shown, loopCount: status.loopCount }
+      }
+      try {
+        ensure(await window.singz.pauseDesktopPlayback(this.generation), 'Native pause failed')
+      } catch (error) {
+        // Refused: the transport never stopped, so it is not this pause's to hold.
+        this.pauseHold = previous
+        throw error
+      }
       this.transportIntent = 'paused'
       await this.refreshCommandStatus(this.generation, this.request?.provider ?? 'coreaudio')
+      // The read-back often lands before the render thread has taken the
+      // pause, and the poll armed before it can be a steady 200 ms away: pull
+      // it forward, so the park point is drawn within a fast poll.
+      this.reschedulePoll()
     })
   }
 
@@ -1513,6 +1566,8 @@ export class DesktopNativePlaybackClient {
         if (state !== 'playing' && state !== 'pre-roll') ensure(result, 'Native resume failed')
       }
       this.transportIntent = 'playing'
+      // The core resumes from ITS park point; from here the bar reads the core.
+      this.pauseHold = null
       this.edgeAtMs = Date.now()
       await this.refreshCommandStatus(generation, provider)
       // The poll armed before the resume can be a steady 200 ms away, which
@@ -1533,8 +1588,11 @@ export class DesktopNativePlaybackClient {
       const before = this.last.seekCount
       const targetFrame = Math.round(seconds * this.last.format.sampleRate)
       // Shown the moment it is issued — the IPC round trip alone is 20-60 ms
-      // on a busy main — and withdrawn only if the core refuses it.
+      // on a busy main — and withdrawn only if the core refuses it. A pause
+      // hold is superseded: the core will sit at the target.
+      const held = this.pauseHold
       this.pendingSeekFrame = targetFrame
+      this.pauseHold = null
       // The base is read ONCE, at the first seek of a run; every seek after
       // it while the receipt is still owed adds to `issued` instead of moving
       // the base, so the target stands until the core has applied them all.
@@ -1555,6 +1613,7 @@ export class DesktopNativePlaybackClient {
         this.pendingSeekFrame = null
         this.pendingSeekIssued = Math.max(0, this.pendingSeekIssued - 1)
         if (this.pendingSeekIssued === 0) this.pendingSeekReceipt = null
+        this.pauseHold = held
         this.onStateChange(this.last)
         throw error
       }
