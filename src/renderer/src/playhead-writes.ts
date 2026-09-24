@@ -24,6 +24,15 @@
  * on: a pause (a stopped song has no sliver), a seek, a step backwards, and a
  * change of view (zoom, pan, a resize), which remaps every percentage.
  *
+ * The edge layers are also HIDDEN while the view moves. A view change redraws
+ * every lane, and each visible edge canvas is one more filtered layer the
+ * compositor must redo from scratch on every such frame — on the field
+ * laptop a follow-pan of a zoomed view went from ~30 to ~80 ms a frame with
+ * them showing, and back with them hidden. They have nothing to show then
+ * anyway: every view change snaps the played layer to the line. They come
+ * back once the view has held for a frame and the line has moved past the
+ * played layer again.
+ *
  * The sliver used to be empty and the reveal was the only edge, on a 4 Hz
  * clock: the brightness step then trailed the line by up to a quarter of a
  * second — a finger's width across a zoomed lane, and plainly seen.
@@ -54,6 +63,8 @@ export interface PlayheadWrites {
   line: string | null
   /** A new value for the stack's `--p` (the played layer's clip), or null to leave it. */
   reveal: string | null
+  /** Show (true) or hide (false) the lanes' edge layers, or null to leave them. */
+  edges: boolean | null
 }
 
 export interface PlayheadWriterOptions {
@@ -68,22 +79,41 @@ export function createPlayheadWriter(opts: PlayheadWriterOptions): (frame: Playh
   let reveal = ''
   let revealAt = Number.NEGATIVE_INFINITY
   let revealView = ''
+  let lastView = ''
+  let edgesShown = true
   return (f) => {
-    const out: PlayheadWrites = { line: null, reveal: null }
+    const out: PlayheadWrites = { line: null, reveal: null, edges: null }
+    const viewMoved = f.viewKey !== lastView
+    lastView = f.viewKey
     if (f.p !== line) {
       line = f.p
       out.line = f.p
     }
-    if (f.p === reveal) return out
-    const ahead = Number.parseFloat(f.p) - Number.parseFloat(reveal)
-    const rolling = f.playing && !f.seeked && f.viewKey === revealView && ahead > 0
-    const lagPx = f.edgeLayer ? opts.revealLagPx : 0
-    const due = ahead >= lagPx * f.stepPct && f.now - revealAt >= opts.revealEveryMs
-    if (!rolling || due) {
-      reveal = f.p
-      revealAt = f.now
+    if (f.p === reveal) {
+      // nothing to write — but a new view that left the line where it was is
+      // still the view the played layer now stands in
       revealView = f.viewKey
-      out.reveal = f.p
+    } else {
+      const ahead = Number.parseFloat(f.p) - Number.parseFloat(reveal)
+      const rolling = f.playing && !f.seeked && f.viewKey === revealView && ahead > 0
+      const lagPx = f.edgeLayer ? opts.revealLagPx : 0
+      const due = ahead >= lagPx * f.stepPct && f.now - revealAt >= opts.revealEveryMs
+      if (!rolling || due) {
+        reveal = f.p
+        revealAt = f.now
+        revealView = f.viewKey
+        out.reveal = f.p
+      }
+    }
+    // A frame whose view moved always ends with the played layer on the line
+    // (above), so a sliver — the one reason to show the edges — can only open
+    // on a frame after the view has held.
+    if (viewMoved && edgesShown) {
+      edgesShown = false
+      out.edges = false
+    } else if (!edgesShown && line !== reveal) {
+      edgesShown = true
+      out.edges = true
     }
     return out
   }

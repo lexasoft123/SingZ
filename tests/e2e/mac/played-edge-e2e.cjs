@@ -21,9 +21,13 @@
  *      sliver stays inside its bound, and the big re-clip happens about once
  *      per 64 px the line travels (the 4 Hz clock did it four times a second
  *      whether the line had moved a pixel or not);
- *   2. zoomed eight steps, playing: the same per-frame rules, and at most
- *      ~4 re-clips a second while the view holds still (a view change remaps
- *      every percentage and redraws every lane, so those frames snap freely);
+ *   2. zoomed eight steps, playing until the view has followed the line off
+ *      its right edge once (at most ~34 s, whatever the song's length): the same per-frame rules, at most ~4
+ *      re-clips a second while the view holds still (a view change remaps
+ *      every percentage and redraws every lane, so those frames snap freely),
+ *      and the edge layers HIDDEN mid-pan and back once a sliver opens (each
+ *      showing one is a filtered layer redone on every redrawn frame: a
+ *      follow-pan went ~30 -> ~80 ms a frame on the field laptop);
  *   3. Pause: the played clip lands exactly on the line;
  *   4. the seam, paused: with the played clip behind the line and the edge
  *      layer covering the gap, the lanes must render pixel-identical to no
@@ -85,6 +89,7 @@ const RECORD = `(() => {
       line: head.style.getPropertyValue('--p'),
       edges: [...document.querySelectorAll('.wave-edge')].map((e) => e.style.getPropertyValue('--p-edge')),
       clip: document.querySelector('.stack').style.getPropertyValue('--p'),
+      hidden: document.querySelector('.wave-edge')?.style.visibility === 'hidden',
       view: [...document.querySelectorAll('.ruler .tick')].slice(0, 2).map((t) => t.textContent + '@' + t.style.left).join(' '),
       wd: lanes.width * devicePixelRatio
     })
@@ -94,7 +99,7 @@ const RECORD = `(() => {
 })()`
 
 /** Judge a recorded leg. Returns the numbers the rules were made from. */
-function judge(label, rows) {
+function judge(label, rows, { pans: wantPans = false } = {}) {
   const playing = rows.filter((r) => r.playing && r.line)
   const offLine = playing.filter((r) => r.edges.length === 0 || r.edges.some((e) => e !== r.line))
   const pastLine = playing.filter((r) => Number.parseFloat(r.clip) > Number.parseFloat(r.line) + 1e-6)
@@ -126,6 +131,27 @@ function judge(label, rows) {
   // 4 Hz clock made two dozen in the same six seconds.
   const allowed = Math.min(Math.ceil(travel / LAG_PX), Math.ceil((seconds * 1000) / EVERY_MS)) + 2
   rule(moves <= allowed, `${label}: ${moves} big re-clips, at most ${allowed}`)
+  if (!wantPans) return
+  // A follow-pan redraws every lane every frame, and a showing edge layer is
+  // one more filtered layer to redo each time (~30 -> ~80 ms a frame on the
+  // field laptop): mid-pan the edges must be hidden, and back as soon as the
+  // view has settled and a sliver opens.
+  let pans = 0
+  let shownMidPan = 0
+  let neverBack = 0
+  for (let i = 2; i < playing.length; i++) {
+    const moving = playing[i].view !== playing[i - 1].view
+    if (moving && playing[i - 1].view !== playing[i - 2].view && !playing[i].hidden) shownMidPan++
+    if (!moving && playing[i - 1].view !== playing[i - 2].view) {
+      pans++
+      const open = playing.findIndex((r, j) => j >= i && r.line !== r.clip)
+      if (open >= 0 && playing[open].hidden && playing[open + 1]?.hidden !== false) neverBack++
+    }
+  }
+  console.log(`  ${label}: ${pans} follow-pan(s), ${shownMidPan} mid-pan frames with the edges showing`)
+  rule(pans >= 1, `${label}: the view followed the playhead at least once (${pans})`)
+  rule(shownMidPan === 0, `${label}: the edge layers hidden while the view moves (${shownMidPan} frames showing)`)
+  rule(neverBack === 0, `${label}: the edge layers back once the view holds and a sliver opens (${neverBack} pans without)`)
 }
 
 ;(async () => {
@@ -186,16 +212,30 @@ function judge(label, rows) {
       for (let i = 0; i < 100 && (await playing()) !== want; i++) await sleep(50)
       if ((await playing()) !== want) throw new Error(`the transport never went ${want ? 'playing' : 'paused'}`)
     }
-    const leg = async (label, seconds) => {
+    const leg = async (label, seconds, opts = {}) => {
       await win.evaluate(RECORD)
       await play(true)
       await sleep(seconds * 1000)
+      if (opts.pans) {
+        // ...and on until the view has followed the line once and held again,
+        // however long the song makes that (the first follow comes later the
+        // longer the song), within reason
+        const panned = () =>
+          win.evaluate(() => {
+            const r = window.__edgeRec
+            for (let i = 1; i < r.length - 30; i++) {
+              if (r[i].view !== r[i - 1].view && r.slice(i + 1, i + 31).every((x) => x.view === r[i + 1].view)) return true
+            }
+            return false
+          })
+        for (let waited = 0; waited < 30000 && !(await panned()); waited += 500) await sleep(500)
+      }
       const rows = await win.evaluate(() => {
         const r = window.__edgeRec
         window.__edgeRec = null
         return r
       })
-      judge(label, rows)
+      judge(label, rows, opts)
     }
 
     // 1. the whole song
@@ -221,9 +261,19 @@ function judge(label, rows) {
       await sleep(250)
     }
     await sleep(600)
-    await leg('zoomed', 4)
+    // until the line reaches the view's right edge and the view follows it:
+    // the pan is where the edge layers must get out of the way
+    await leg('zoomed', 4, { pans: true })
     await play(false)
-    await sleep(400)
+    // a follow glides for most of a second and Pause does not stop it: let
+    // the view hold still before reading where the line is
+    for (let i = 0, prev = ''; i < 40; i++) {
+      const now = await win.evaluate(() => [...document.querySelectorAll('.ruler .tick')].map((t) => t.style.left).join(' '))
+      if (now === prev) break
+      prev = now
+      await sleep(150)
+    }
+    await sleep(300)
 
     // 4. the seam, paused, at the machine's own pixel ratio
     const seam = await win.evaluate(() => {
@@ -236,11 +286,17 @@ function judge(label, rows) {
     const q = (n) => `${Math.max(0, Math.min(100, ((n - x0) / wd) * 100)).toFixed(4)}%`
     const nLine = Math.round(x0 + (Number.parseFloat(seam.line) / 100) * wd)
     const L = q(nLine)
+    // This leg is about how a sliver RENDERS, not about when the loop hides
+    // it: it shows the edge layers itself (a paused song has no sliver, so the
+    // loop leaves them however the last view change left them).
     const set = (clip, edge) =>
       win.evaluate(
         ([c, e]) => {
           document.querySelector('.stack').style.setProperty('--p', c)
-          for (const el of document.querySelectorAll('.wave-edge')) el.style.setProperty('--p-edge', e)
+          for (const el of document.querySelectorAll('.wave-edge')) {
+            el.style.setProperty('--p-edge', e)
+            el.style.visibility = ''
+          }
         },
         [clip, edge]
       )

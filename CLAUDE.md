@@ -1207,7 +1207,11 @@ was driven; the gotchas that follow from it are below.
   to its own `--p-edge`, written per step on those canvases (never on the
   stack — that restyles every lane), so a step damages only the sliver behind
   the line. The stack's `--p` catches up once the sliver is 64 device pixels
-  wide and at most 4 times a second, and snaps on pause/seek/zoom. (A 4 Hz
+  wide and at most 4 times a second, and snaps on pause/seek/zoom. The edge
+  layers are HIDDEN while the view moves: every lane redraws then, and each
+  showing edge is one more filtered layer to redo per frame (a zoomed
+  follow-pan went ~30 -> ~80 ms a frame on the field laptop with them up;
+  they have nothing to show anyway, the snap leaves no sliver). (A 4 Hz
   clock alone, the version before, left the brightness step visibly trailing
   the line in a zoomed view.) Both values land on whole WINDOW device pixels:
   off a pixel boundary the two clips both paint the column between them, a

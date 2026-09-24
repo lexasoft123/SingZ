@@ -48,7 +48,9 @@ function roll(
 describe('playhead writes', () => {
   it('writes the line and the played layer on the first frame', () => {
     const write = createPlayheadWriter(OPTS)
-    expect(write(frame(12, 0))).toEqual({ line: '12.0000%', reveal: '12.0000%' })
+    // ...and hides the edge layers: the first view is a view change too, and
+    // there is no sliver until the line moves
+    expect(write(frame(12, 0))).toEqual({ line: '12.0000%', reveal: '12.0000%', edges: false })
   })
 
   it('moves the line every step and the played layer only every so often in a deep zoom', () => {
@@ -105,7 +107,7 @@ describe('playhead writes', () => {
   it('writes nothing for a frame whose position has not changed', () => {
     const write = createPlayheadWriter(OPTS)
     write(frame(12, 0, { playing: false }))
-    expect(write(frame(12, 1000, { playing: false }))).toEqual({ line: null, reveal: null })
+    expect(write(frame(12, 1000, { playing: false }))).toEqual({ line: null, reveal: null, edges: null })
   })
 
   it('snaps the played layer to the line the moment the song stops', () => {
@@ -120,8 +122,8 @@ describe('playhead writes', () => {
   it('snaps the played layer on a seek, however recently it moved', () => {
     const write = createPlayheadWriter(OPTS)
     write(frame(10, 0))
-    expect(write(frame(55, FRAME, { seeked: true }))).toEqual({ line: '55.0000%', reveal: '55.0000%' })
-    expect(write(frame(20, 2 * FRAME, { seeked: true }))).toEqual({ line: '20.0000%', reveal: '20.0000%' })
+    expect(write(frame(55, FRAME, { seeked: true }))).toEqual({ line: '55.0000%', reveal: '55.0000%', edges: null })
+    expect(write(frame(20, 2 * FRAME, { seeked: true }))).toEqual({ line: '20.0000%', reveal: '20.0000%', edges: null })
   })
 
   it('snaps the played layer when the line goes behind it, seek or not', () => {
@@ -137,7 +139,45 @@ describe('playhead writes', () => {
     const write = createPlayheadWriter(OPTS)
     write(frame(10, 0, { viewKey: 'whole' }))
     expect(write(frame(40, FRAME, { viewKey: 'zoomed' })).reveal).toBe('40.0000%')
-    // and then goes back to catching up in the new view
-    expect(write(frame(40.01, 2 * FRAME, { viewKey: 'zoomed' }))).toEqual({ line: '40.0100%', reveal: null })
+    // and then goes back to catching up in the new view, the edge layers back
+    // with the first sliver
+    expect(write(frame(40.01, 2 * FRAME, { viewKey: 'zoomed' }))).toEqual({ line: '40.0100%', reveal: null, edges: true })
+  })
+
+  it('hides the edge layers while the view moves and shows them once it holds and the line moves on', () => {
+    // a follow-pan of a zoomed view: every frame a new view, every lane
+    // redrawn — and each showing edge layer one more filtered layer to redo
+    const write = createPlayheadWriter(OPTS)
+    write(frame(0, 0))
+    const r = roll(write, 10, { t: 0, p: 0 }, 1) // rolling: the edges are showing
+    let t = r.t
+    const pan = [80, 70, 60, 50].map((p, i) => write(frame(p, (t += FRAME), { viewKey: `pan${i}` })))
+    expect(pan.map((w) => w.edges)).toEqual([false, null, null, null])
+    expect(pan.every((w) => w.reveal !== null)).toBe(true) // the played layer snaps with every step
+    // the view holds: nothing to show until the line moves past the played layer
+    expect(write(frame(50, (t += FRAME), { viewKey: 'pan3' })).edges).toBe(null)
+    expect(write(frame(50.01, (t += FRAME), { viewKey: 'pan3' })).edges).toBe(true)
+    // and they stay shown while the song rolls on in that view, catch-ups and all
+    const rolled = Array.from({ length: 60 }, (_, i) => write(frame(50.01 + (i + 1) * 3 * STEP, (t += FRAME), { viewKey: 'pan3' })))
+    expect(rolled.some((w) => w.reveal !== null)).toBe(true)
+    expect(rolled.every((w) => w.edges === null)).toBe(true)
+  })
+
+  it('keeps the edge layers hidden after a view change while paused', () => {
+    const write = createPlayheadWriter(OPTS)
+    write(frame(10, 0, { playing: false }))
+    write(frame(10, FRAME, { playing: false })) // held, no sliver: still hidden
+    expect(write(frame(30, 2 * FRAME, { playing: false, viewKey: 'zoomed' })).edges).toBe(null)
+    expect(write(frame(30, 3 * FRAME, { playing: false, viewKey: 'zoomed' })).edges).toBe(null)
+  })
+
+  it('remembers a view change that left the line where it was', () => {
+    // a zoom anchored on the playhead keeps its percentage: nothing to write,
+    // but the played layer stands in the new view now, so the next step of a
+    // rolling song is a sliver to draw, not a view change to snap for
+    const write = createPlayheadWriter(OPTS)
+    write(frame(25, 0, { viewKey: 'whole' }))
+    expect(write(frame(25, FRAME, { viewKey: 'zoomed' })).reveal).toBe(null)
+    expect(write(frame(25.01, 2 * FRAME, { viewKey: 'zoomed' })).reveal).toBe(null)
   })
 })

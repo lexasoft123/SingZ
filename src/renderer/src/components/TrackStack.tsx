@@ -170,6 +170,12 @@ export default function TrackStack({
     // Every lane's edge layer, live as lanes come and go. Written one by one:
     // a --p-edge on the stack would restyle every lane's subtree each step.
     const edges = stackRef.current?.getElementsByClassName('wave-edge')
+    // What the edges were last given, for a lane that mounts later (a track
+    // added, backing vocals split off): it arrives with neither, and would
+    // otherwise show — and cost — through every pan until the next flip.
+    let edgeLine = ''
+    let edgeVisibility = ''
+    let edgeCount = edges?.length ?? 0
     let lastOff = ''
     let lastPos = -1
     let lastT = 0
@@ -245,9 +251,23 @@ export default function TrackStack({
         })
         if (w.line !== null) {
           head.style.setProperty('--p', w.line)
-          if (edges) for (let i = 0; i < edges.length; i++) (edges[i] as HTMLElement).style.setProperty('--p-edge', w.line)
+          edgeLine = w.line
         }
         if (w.reveal !== null) el.style.setProperty('--p', w.reveal)
+        // hidden while the view moves (every lane redraws then, and a showing
+        // edge is one more filtered layer to redo each frame); flips only
+        if (w.edges !== null) edgeVisibility = w.edges ? '' : 'hidden'
+        if (edges) {
+          const joined = edges.length !== edgeCount
+          edgeCount = edges.length
+          if (w.line !== null || w.edges !== null || joined) {
+            for (let i = 0; i < edges.length; i++) {
+              const s = (edges[i] as HTMLElement).style
+              if (w.line !== null || joined) s.setProperty('--p-edge', edgeLine)
+              if (w.edges !== null || joined) s.visibility = edgeVisibility
+            }
+          }
+        }
         // Clamping --p keeps the played/unplayed reveal honest either side of
         // the view, but it would also pin the playhead itself to whichever
         // edge it went past — a bright line claiming the singer is at 1:33
