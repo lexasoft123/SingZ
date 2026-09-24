@@ -1168,7 +1168,14 @@ was driven; the gotchas that follow from it are below.
   `backdrop-filter`, in styles.css or the kit's sheet, has a `body.win` twin
   with no blur and a fill of its own (any per-frame damage re-runs a backdrop
   blur above it), and `tests/unit/windows-no-blur.test.ts` fails on one that
-  does not. The playhead line and the waveforms' played edge write separate
+  does not. No layer the playhead crosses may carry a `filter` that moves
+  pixels (`drop-shadow`, `blur`): damage touching such a layer widens to the
+  WHOLE layer, and the playhead crosses every lane every device pixel. The
+  kit's 2px lane glow, written as a CSS drop-shadow, took the playing player
+  from 20% to 57% of the field laptop's GPU and added 34 points of DWM; since
+  @singz/ui v1.7.1 the glow is drawn into the canvas (colour filters move no
+  pixels and stay CSS), and `tests/unit/lanes-no-moving-filter.test.ts` fails
+  on one. The playhead line and the waveforms' played edge write separate
   `--p`s (`playhead-writes.ts`), because re-clipping a layer damages its whole
   visible part — the six lanes re-clipped every device pixel re-composited the
   whole PLAYED part of the stack on every step (DWM ~31% late in a song on the
