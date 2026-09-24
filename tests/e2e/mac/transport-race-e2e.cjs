@@ -72,6 +72,9 @@
  *      E2E_SONG_B (the song opened second — must be LONG, see below;
  *                  default "Deutschland"),
  *      E2E_PROJECTS_ROOT (default iCloud Drive/SingZ).
+ *      Both songs are project FOLDERS under the root; each card is picked by
+ *      the exact name the library shows for it, and the run refuses to
+ *      measure if a different project opened.
  */
 // Every E2E driver runs under a deadline: a hang prints where it was and
 // exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
@@ -79,6 +82,7 @@ require('../../shared/watchdog.cjs').arm('transport-race-e2e')
 
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
+const { assertOpenedProject, clickLibrarySong, libraryName } = require('./library-song.cjs')
 const { readFileSync, writeFileSync, existsSync } = require('node:fs')
 const { join } = require('node:path')
 const { homedir } = require('node:os')
@@ -95,8 +99,10 @@ const SONG = process.env.E2E_SONG ?? 'Mein Teil'
 // because the shorter load closes the window before the timer fires. A
 // different lane count is what makes the wasted build legible in the log.
 const SONG_B = process.env.E2E_SONG_B ?? 'Deutschland'
-const SONG_PJ = join(ROOT, SONG, 'project.json')
-const SONG_B_PJ = join(ROOT, SONG_B, 'project.json')
+const SONG_DIR = join(ROOT, SONG)
+const SONG_B_DIR = join(ROOT, SONG_B)
+const SONG_PJ = join(SONG_DIR, 'project.json')
+const SONG_B_PJ = join(SONG_B_DIR, 'project.json')
 const APP = join(__dirname, '..', '..', '..', 'out', 'main', 'index.js')
 
 const val = (win, expr) => win.evaluate(`(${expr})`)
@@ -118,7 +124,11 @@ const buildCount = (lines) => lines.filter((x) => /^preparing graph/.test(x.line
 ;(async () => {
   if (!existsSync(SONG_PJ)) throw new Error(`no project at ${SONG_PJ} — set E2E_SONG`)
   if (!existsSync(SONG_B_PJ)) throw new Error(`no project at ${SONG_B_PJ} — set E2E_SONG_B`)
+  // Every project.json this run may touch, as found: the two songs', and any
+  // project that opened instead of one of them (assertOpenedProject adds it).
   const backups = [SONG_PJ, SONG_B_PJ].map((p) => [p, readFileSync(p, 'utf8')])
+  const songName = libraryName(SONG_DIR)
+  const songBName = libraryName(SONG_B_DIR)
 
   const fail = []
   const app = await _electron.launch({
@@ -150,9 +160,12 @@ const buildCount = (lines) => lines.filter((x) => /^preparing graph/.test(x.line
     // just before that timer or during the build it starts — both are the
     // case the session harness never reaches.
     const t0 = Date.now()
-    await win.click(`.lib-card:has-text("${SONG}")`)
+    await clickLibrarySong(win, songName)
     await win.waitForSelector('.pill.karaoke', { timeout: 60000 })
     await win.waitForFunction(() => __test?.engine?.duration > 0, null, { timeout: 60000 })
+    // One read, well inside the prepare-ahead's 400 ms debounce the wait
+    // below exists for.
+    await assertOpenedProject(win, { dir: SONG_DIR, name: songName, backups })
     // Wait for the prepare-ahead to be UNDERWAY before pressing, and say so.
     // Without this the leg is a coin toss: a click that beats the engine's
     // 400 ms debounce races nothing at all, costs one build like any cold
@@ -271,11 +284,15 @@ const buildCount = (lines) => lines.filter((x) => /^preparing graph/.test(x.line
     const t2 = Date.now()
     await win.click('.catalog-btn')
     await win.waitForSelector('.lib-card', { timeout: 20000 })
-    await win.click(`.lib-card:has-text("${SONG_B}")`)
+    await clickLibrarySong(win, songBName)
     await win.waitForSelector('.pill.karaoke', { timeout: 60000 })
     await win.waitForFunction(() => __test?.engine?.duration > 0, null, { timeout: 60000 })
     await win.click('button.play')
     await win.waitForFunction(() => __test.engine.position > 0.5, null, { timeout: 40000 })
+    // Checked once it plays, not at the click: right after the switch the
+    // engine can still hold the song being LEFT — the very window this leg
+    // races — so an earlier read would blame the switch, not the pick.
+    await assertOpenedProject(win, { dir: SONG_B_DIR, name: songBName, backups })
     const switchLines = await logSince(win, t2)
     const switchBuilds = buildCount(switchLines)
     console.log(`switch into ${SONG_B}: ${switchBuilds} graph build(s)`)

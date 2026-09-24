@@ -58,7 +58,9 @@ PR, issue, commit or release note.
    `count-in-e2e.cjs`). Both bit the count-in driver on 2026-09-14: four legs "raced
    nothing" twice while the change itself behaved, then PASS 8/8 once the driver did both.
    For that driver use `E2E_SONG="Player Session E2E" E2E_MID=20` against the staged
-   `ps-lib` (its song is 82 s; the legs need 30 s of runway past the spot).
+   `ps-lib` (that song is 122.4 s; the legs need 45 s of runway past the spot). The
+   82 s once written here was "Player Session E2E second", which the driver's old
+   substring pick opened for the same name. It picks by exact name now.
 6. Report the mac and windows-field results side by side, per rule, with the control's
    column when one was needed.
 

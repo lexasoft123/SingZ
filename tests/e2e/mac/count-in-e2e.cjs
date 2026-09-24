@@ -90,7 +90,10 @@
  * driver says so rather than passing vacuously; no other app instance
  * running (same userData identity).
  *
- * Env: E2E_SONG (library project with a beat grid, default "Mein Teil"),
+ * Env: E2E_SONG (library project with a beat grid, default "Mein Teil" —
+ *               the project's FOLDER under E2E_PROJECTS_ROOT; its card is
+ *               picked by the exact name the library shows for it, and the
+ *               run refuses to measure if a different project opened),
  *      E2E_MID (the scrubbed spot in seconds, default 60 — past the song's
  *               first bar, with 45 s of song left after it: the first ten
  *               legs each carry the song a few seconds further, and legs 11
@@ -103,6 +106,7 @@ require('../../shared/watchdog.cjs').arm('count-in-e2e')
 
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
+const { assertOpenedProject, clickLibrarySong, libraryName } = require('./library-song.cjs')
 const { readFileSync, writeFileSync, existsSync } = require('node:fs')
 const { join } = require('node:path')
 const { homedir } = require('node:os')
@@ -112,7 +116,8 @@ const ROOT =
   join(homedir(), 'Library/Mobile Documents/com~apple~CloudDocs/SingZ')
 const SONG = process.env.E2E_SONG ?? 'Mein Teil'
 const MID = Number(process.env.E2E_MID ?? 60)
-const SONG_PJ = join(ROOT, SONG, 'project.json')
+const SONG_DIR = join(ROOT, SONG)
+const SONG_PJ = join(SONG_DIR, 'project.json')
 const APP = join(__dirname, '..', '..', '..', 'out', 'main', 'index.js')
 // How far the bar may sit from where the singer expects it: a status poll
 // (50 ms at the fast rate) plus the ear's latency, generously.
@@ -404,7 +409,10 @@ function judgeCountIn(label, rows, landing, fail, lastDotMs) {
 
 ;(async () => {
   if (!existsSync(SONG_PJ)) throw new Error(`no project at ${SONG_PJ} — set E2E_SONG`)
-  const backup = readFileSync(SONG_PJ, 'utf8')
+  // Every project.json this run may touch, as found: the song's own, and any
+  // project that opened instead of it (assertOpenedProject adds that one).
+  const backups = [[SONG_PJ, readFileSync(SONG_PJ, 'utf8')]]
+  const songName = libraryName(SONG_DIR)
   const fail = []
   const app = await _electron.launch({
     executablePath: require('electron'),
@@ -427,16 +435,18 @@ function judgeCountIn(label, rows, landing, fail, lastDotMs) {
     await win.waitForSelector('.lib-card', { timeout: 20000 })
     await win.waitForFunction(() => window.__test !== undefined, null, { timeout: 20000 })
     const t0 = Date.now()
-    await win.click(`.lib-card:has-text("${SONG}")`)
+    await clickLibrarySong(win, songName)
     await win.waitForSelector('.pill.karaoke', { timeout: 60000 })
     await win.waitForFunction(() => __test?.engine?.duration > 0 && __test.phase === 'ready', null, { timeout: 60000 })
+    await assertOpenedProject(win, { dir: SONG_DIR, name: songName, backups })
     const duration = await val(win, '__test.engine.duration')
     const beats = await val(win, '__test.engine.beats ? __test.engine.beats.beats.length : 0')
     if (!(beats > 1)) throw new Error(`"${SONG}" has no beat grid — a count-in needs one; set E2E_SONG`)
     // Ten legs each carry the song a few seconds further: the spot needs
     // three quarters of a minute of runway, or the last legs run into the
-    // end of the song (measured on the field laptop's 82 s library song,
-    // where this leaves E2E_MID at 37 or less — it runs at 20).
+    // end of the song. "Player Session E2E" is 122.4 s, which leaves E2E_MID
+    // at 77 or less. The 82 s once written here was "Player Session E2E
+    // second", which the old substring pick opened for the same name.
     if (!(MID > 2 && MID + 45 <= duration)) {
       throw new Error(`E2E_MID=${MID} leaves no runway in "${SONG}" (${duration.toFixed(1)} s) — the legs need 45 s past it`)
     }
@@ -770,9 +780,11 @@ function judgeCountIn(label, rows, landing, fail, lastDotMs) {
     // A project in the singer's own library. Opening one can re-derive and
     // auto-save an analysis, which is legitimate — but a driver must never
     // be the reason a song changed.
-    if (readFileSync(SONG_PJ, 'utf8') !== backup) {
-      console.log(`${SONG_PJ} was rewritten during the run; restoring it`)
-      writeFileSync(SONG_PJ, backup)
+    for (const [path, text] of backups) {
+      if (readFileSync(path, 'utf8') !== text) {
+        console.log(`${path} was rewritten during the run; restoring it`)
+        writeFileSync(path, text)
+      }
     }
   }
 
