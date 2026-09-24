@@ -36,6 +36,12 @@ interface Props {
   /** Scroll the view along the song by `dt` seconds. */
   onViewPan: (dt: number) => void
   /**
+   * Land the pans and zooms held for this frame (view-frames.ts). The
+   * playhead's frame loop calls it before it reads the view, so the line and
+   * the played edge are placed on the view the lanes draw in the same frame.
+   */
+  settleView: () => void
+  /**
    * Move the view because the playhead did — never a settings change.
    * `smooth` eases the page-turn under a playing song; a seek cuts.
    */
@@ -113,6 +119,7 @@ export default function TrackStack({
   onSelection,
   onZoom,
   onViewPan,
+  settleView,
   onFollow,
   onResetZoom,
   onMute,
@@ -147,17 +154,27 @@ export default function TrackStack({
   shiftRef.current = onViewPan
   const followShiftRef = useRef(onFollow)
   followShiftRef.current = onFollow
+  const settleRef = useRef(settleView)
+  settleRef.current = settleView
 
   // One rAF loop drives the playhead + the bright "played" waveform clip for
   // every lane via the --p custom property, and keeps the viewport following
   // the playhead while zoomed in.
   useEffect(() => {
     let raf = 0
+    let live = true
     const writes = createPlayheadWriter(REVEAL_EVERY_MS)
     let lastOff = ''
     let lastPos = -1
     let lastT = 0
     const tick = (): void => {
+      // First, before the view is read: a held pan renders here, and
+      // viewRef with it. That render also takes every other pending update
+      // along, and one of them can unmount the player — whose cleanup then
+      // cancels THIS frame, already running, and the line below would arm
+      // the next one for a loop nobody can stop.
+      settleRef.current()
+      if (!live) return
       const el = stackRef.current
       const head = playheadRef.current
       const v = viewRef.current
@@ -219,7 +236,10 @@ export default function TrackStack({
       raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
+    return () => {
+      live = false
+      cancelAnimationFrame(raf)
+    }
   }, [engine])
 
   useEffect(() => {

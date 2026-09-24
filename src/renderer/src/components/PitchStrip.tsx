@@ -49,6 +49,9 @@ interface Props {
   onZoom: (factor: number, center?: number) => void
   /** Scroll the view along the song by `dt` seconds. */
   onViewPan: (dt: number) => void
+  /** Land the pans and zooms held for this frame (view-frames.ts) — called
+   *  first thing in the strip's frame loop, before it reads the view. */
+  settleView: () => void
   info: { key: KeyGuess | null; bpm: number | null }
   /** Chosen microphone (settings) — absent = system default. */
   inputId?: string
@@ -77,6 +80,7 @@ export default function PitchStrip({
   view,
   onZoom,
   onViewPan,
+  settleView,
   info,
   inputId,
   inputChannel,
@@ -158,6 +162,8 @@ export default function PitchStrip({
   zoomRef.current = onZoom
   const shiftRef = useRef(onViewPan)
   shiftRef.current = onViewPan
+  const settleRef = useRef(settleView)
+  settleRef.current = settleView
   const onMicDeviceRef = useRef(onMicDevice)
   onMicDeviceRef.current = onMicDevice
 
@@ -232,6 +238,8 @@ export default function PitchStrip({
       }
       const canvas = canvasRef.current
       if (!canvas) return
+      // Before the view is read: a held pan renders here, stateRef with it.
+      settleRef.current()
       const { segments, segEnds, fitRange, fit, noteBars, transpose, melody, view } =
         stateRef.current
       const w = canvas.clientWidth
