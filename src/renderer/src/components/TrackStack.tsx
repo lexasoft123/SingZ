@@ -2,11 +2,16 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { BeatInfo } from '../audio/beat'
 import type { MultitrackEngine } from '../audio/engine'
 import { modalCoversApp, type TimeView, type UITrack } from '../model'
+import { createPlayheadWriter } from '../playhead-writes'
 import BeatGrid from './BeatGrid'
 import TrackLane from './TrackLane'
 
 /** Ruler row height — the grid template and the beat overlay share it. */
 const RULER_H = 30
+
+/** How often, at most, the waveforms' played edge follows a rolling playhead
+ *  (the line itself follows every device pixel) — see playhead-writes.ts. */
+const REVEAL_EVERY_MS = 250
 
 interface Props {
   tracks: UITrack[]
@@ -119,6 +124,7 @@ export default function TrackStack({
 }: Props): React.JSX.Element {
   const stackRef = useRef<HTMLDivElement>(null)
   const overlayRef = useRef<HTMLDivElement>(null)
+  const playheadRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{ mode: 'new' | 'resize'; anchor: number; x0: number; selecting: boolean } | null>(null)
   const [width, setWidth] = useState(0)
   const displayTracks = useMemo(() => {
@@ -143,18 +149,19 @@ export default function TrackStack({
   followShiftRef.current = onFollow
 
   // One rAF loop drives the playhead + the bright "played" waveform clip for
-  // every lane via the inherited --p custom property, and keeps the viewport
-  // following the playhead while zoomed in.
+  // every lane via the --p custom property, and keeps the viewport following
+  // the playhead while zoomed in.
   useEffect(() => {
     let raf = 0
-    let lastP = ''
+    const writes = createPlayheadWriter(REVEAL_EVERY_MS)
     let lastOff = ''
     let lastPos = -1
     let lastT = 0
     const tick = (): void => {
       const el = stackRef.current
+      const head = playheadRef.current
       const v = viewRef.current
-      if (el && engine.duration > 0 && !modalCoversApp()) {
+      if (el && head && engine.duration > 0 && !modalCoversApp()) {
         const span = v.e - v.s
         const pos = engine.position
         const now = performance.now()
@@ -185,16 +192,19 @@ export default function TrackStack({
         }
         const pct = span > 0 ? ((pos - v.s) / span) * 100 : 0
         // quantized to whole device pixels + change-gated: every --p change
-        // damages the frame (playhead strip, six reveal clips, any glass
-        // above them re-blurs), so step only when the playhead moves a real
+        // damages the frame, so step only when the playhead moves a real
         // pixel — ~5 Hz across a full-length view instead of 60 Hz.
         const stepPct = 100 / Math.max(1, el.clientWidth * (window.devicePixelRatio || 1))
         const clamped = Math.max(0, Math.min(100, pct))
         const next = `${(Math.round(clamped / stepPct) * stepPct).toFixed(4)}%`
-        if (next !== lastP) {
-          lastP = next
-          el.style.setProperty('--p', next)
-        }
+        // The line takes every step on its own --p; the played edge, which
+        // every lane inherits from the stack's, trails it on a clock while
+        // the song rolls and snaps to it on anything else — the line is two
+        // thin strips of damage, the edge is six filtered lanes re-clipped
+        // (see playhead-writes.ts).
+        const w = writes({ p: next, playing: engine.playing, seeked, viewKey: `${v.s}|${v.e}|${stepPct}`, now })
+        if (w.line !== null) head.style.setProperty('--p', w.line)
+        if (w.reveal !== null) el.style.setProperty('--p', w.reveal)
         // Clamping --p keeps the played/unplayed reveal honest either side of
         // the view, but it would also pin the playhead itself to whichever
         // edge it went past — a bright line claiming the singer is at 1:33
@@ -436,7 +446,7 @@ export default function TrackStack({
         {selection && view !== undefined && (
           <SelectionRange selection={selection} viewS={viewS} viewE={viewE} />
         )}
-        <div className="playhead">
+        <div className="playhead" ref={playheadRef}>
           <span className="playhead-cap" />
         </div>
       </div>
