@@ -191,12 +191,23 @@ function withProjectLock<T>(dir: string, fn: () => Promise<T>): Promise<T> {
   return run
 }
 
-function safeName(name: string): string {
+/**
+ * The folder name a project gets from its song's name. The phones mirror it
+ * exactly (ProjectPaths.kt, ProjectPaths.swift), and one table holds all of
+ * them: tests/shared/project-name-cases.json.
+ */
+export function safeName(name: string): string {
   const cleaned = name
     // strip only real audio extensions — "Mr. Crowley" must keep its second half
     .replace(/\.(mp3|wav|flac|m4a|aac|ogg|oga|opus|aif|aiff)$/i, '')
     .replace(/[/\\:*?"<>|]/g, ' ')
     .replace(/\s{2,}/g, ' ')
+    // No leading dot. Such a folder is hidden — from Finder here, and from the
+    // iPhone's listing of a shared library, which skips hidden entries — and a
+    // song file named "...mp3" arrives as "..", which as a folder name is not
+    // in the library at all: the save wrote into the library's PARENT. Dots
+    // and spaces go in one pass: dots-then-trim leaves ". . x" at ". x".
+    .replace(/^[\s.]+/, '')
     .trim()
   return cleaned || 'Untitled song'
 }

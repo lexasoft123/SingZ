@@ -13,6 +13,7 @@
     "tests/unit/audio-devices.test.ts",
     "tests/unit/desktop-native-playback.test.ts",
     "tests/unit/view-for-open.test.ts",
-    "tests/unit/training-audio.test.ts"
+    "tests/unit/training-audio.test.ts",
+    "tests/unit/train-popover.test.ts"
   ]
 }
