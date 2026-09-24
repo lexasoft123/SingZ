@@ -10,6 +10,7 @@ import {
   useState,
   type ComponentProps
 } from 'react'
+import { flushSync } from 'react-dom'
 import type {
   CustomTrack,
   EngineStatus,
@@ -112,6 +113,7 @@ import VocalTraining from './components/VocalTrainingRoute'
 import { TrainingProgressMutations } from './training-progress-persistence'
 import { activatableAncestor, blocksSongTransportShortcut } from './keyboard'
 import { playbackErrorToast } from './playback-error-toast'
+import { createViewFrames } from './view-frames'
 import {
   DEFAULT_TRAINING_REFERENCE_VOLUME,
   restoreDesktopTrainingPracticeSettings
@@ -832,6 +834,15 @@ export default function App(): React.JSX.Element {
   /** The rendered view, for the follow glide to start its easing from. */
   const viewLive = useRef<TimeView | null>(null)
   viewLive.current = view
+  /** Pans and zooms, at most one render a frame (view-frames.ts). Held steps
+   *  are rendered inside the frame's own callback: rendered in a later task,
+   *  they would land a frame late. Constant for the app's lifetime. */
+  const [viewSteps] = useState(() =>
+    createViewFrames<TimeView | null>((step, inFrame) => {
+      if (inFrame) flushSync(() => setView(step))
+      else setView(step)
+    })
+  )
   const [selection, setSelection] = useState<{ s: number; e: number } | null>(null)
   const [loopOn, setLoopOn] = useState(false)
   const [training, setTraining] = useState(false)
@@ -1583,6 +1594,8 @@ export default function App(): React.JSX.Element {
       setLoopOn(false)
       setTraining(false)
       trainingRef.current = false // openKaraoke may consult it before the render flushes
+      // A pan or zoom still waiting for its frame was asked of the song being left.
+      viewSteps.cancel()
       setView(null)
       setDirty(false)
       setSaveState('idle')
@@ -3534,7 +3547,7 @@ export default function App(): React.JSX.Element {
     (factor: number, center?: number) => {
       touchSettings()
       stopFollow()
-      setView((v) => {
+      viewSteps.push((v) => {
         const dur = engine.duration
         if (dur <= 0) return v
         const cur = v ?? { s: 0, e: dur }
@@ -3544,7 +3557,7 @@ export default function App(): React.JSX.Element {
         return clampView(c - span * ratio, c - span * ratio + span)
       })
     },
-    [engine, clampView, touchSettings, stopFollow]
+    [engine, clampView, touchSettings, stopFollow, viewSteps]
   )
 
   /**
@@ -3553,15 +3566,19 @@ export default function App(): React.JSX.Element {
    * and panning from the last *rendered* view meant every event that arrived
    * within a frame overwrote its predecessor instead of adding to it: ten
    * events back to back moved the view 2.2s where they had asked for 22s.
+   * Nor is every event rendered: pans and zooms land at most once a frame
+   * (view-frames.ts), because each one redraws every lane.
    */
   const panView = useCallback(
     (dt: number) => {
       touchSettings()
       stopFollow()
-      setView((v) => (v ? clampView(v.s + dt, v.e + dt) : v))
+      viewSteps.push((v) => (v ? clampView(v.s + dt, v.e + dt) : v))
     },
-    [clampView, touchSettings, stopFollow]
+    [clampView, touchSettings, stopFollow, viewSteps]
   )
+
+  useEffect(() => () => viewSteps.cancel(), [viewSteps])
 
   /**
    * The playhead pulls the view along, as a glide rather than a cut: landing
@@ -3582,6 +3599,10 @@ export default function App(): React.JSX.Element {
       // way there, repainting every lane at each stop.
       if (!smooth) {
         stopFollow()
+        // Straight to state, not through viewSteps: this is called from the
+        // playhead's own frame loop, which has just landed anything held, so
+        // nothing can be waiting ahead of it — and held, it would render
+        // later in this frame, after that loop had placed the playhead.
         setView(clampView(s, e))
         return
       }
@@ -3964,10 +3985,13 @@ export default function App(): React.JSX.Element {
                 onSelection={handleSelection}
                 onZoom={zoomBy}
                 onViewPan={panView}
+                settleView={viewSteps.flush}
                 onFollow={followView}
                 onResetZoom={() => {
                   touchSettings()
-                  setView(null)
+                  // A page-turn glide still under way would zoom straight back in.
+                  stopFollow()
+                  viewSteps.push(() => null)
                 }}
                 onMute={handleMute}
                 onSolo={handleSolo}
@@ -3986,6 +4010,7 @@ export default function App(): React.JSX.Element {
                   view={view}
                   onZoom={zoomBy}
                   onViewPan={panView}
+                  settleView={viewSteps.flush}
                   info={songInfo}
                   inputId={audioPrefs.inputId}
                   inputChannel={audioPrefs.inputChannel}

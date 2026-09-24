@@ -14,6 +14,7 @@
     "tests/unit/desktop-native-playback.test.ts",
     "tests/unit/view-for-open.test.ts",
     "tests/unit/training-audio.test.ts",
-    "tests/unit/train-popover.test.ts"
+    "tests/unit/train-popover.test.ts",
+    "tests/unit/view-frames.test.ts"
   ]
 }
