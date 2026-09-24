@@ -106,21 +106,35 @@ function judge(label, rows, { pans: wantPans = false } = {}) {
   let moves = 0
   let widest = 0
   let travel = 0 // device px the line moved while the view held still
+  let stillMs = 0 // ...and for how long
+  let longest = 0 // the longest frame while it held, ms
   for (let i = 1; i < playing.length; i++) {
     const a = playing[i - 1]
     const b = playing[i]
     const still = a.view === b.view
     const px = (pct) => (Number.parseFloat(pct) / 100) * b.wd
     if (still && b.clip !== a.clip) moves++
-    if (still) travel += Math.max(0, px(b.line) - px(a.line))
-    if (still) widest = Math.max(widest, px(b.line) - px(b.clip))
+    if (still) {
+      travel += Math.max(0, px(b.line) - px(a.line))
+      stillMs += b.t - a.t
+      longest = Math.max(longest, b.t - a.t)
+      widest = Math.max(widest, px(b.line) - px(b.clip))
+    }
   }
   const seconds = playing.length > 1 ? (playing[playing.length - 1].t - playing[0].t) / 1000 : 0
-  const speed = seconds > 0 ? travel / seconds : 0 // device px per second
-  const bound = Math.max(LAG_PX, (speed * EVERY_MS) / 1000) + 2 * Math.max(1, speed / 60)
+  // over the time the view held — a follow-pan's glide carries the line back,
+  // and counting its time would understate the speed the sliver grows at
+  const speed = stillMs > 0 ? (travel * 1000) / stillMs : 0 // device px per second
+  // The recorder runs after the app's tick, so every sliver it sees is from a
+  // frame whose catch-up was not yet due — at a steady speed never more than
+  // max(64 px, 250 ms of travel). What still pushes one past that is the
+  // position itself running ahead of the frame clock (~7 px at 261 px/s on
+  // the field laptop): allow one longest frame's worth of travel for it.
+  const bound = Math.max(LAG_PX, (speed * EVERY_MS) / 1000) + (speed * longest) / 1000 + 2
   console.log(
     `  ${label}: ${playing.length} frames over ${seconds.toFixed(1)} s, line ${speed.toFixed(0)} px/s, ` +
-      `widest sliver ${widest.toFixed(1)} px (bound ${bound.toFixed(1)}), ${moves} re-clips while the view held`
+      `longest frame ${longest.toFixed(0)} ms, widest sliver ${widest.toFixed(1)} px (bound ${bound.toFixed(1)}), ` +
+      `${moves} re-clips while the view held`
   )
   rule(playing.length >= 60, `${label}: the loop ran while playing (${playing.length} frames)`)
   rule(offLine.length === 0, `${label}: every lane's edge on the line on every frame (${offLine.length} frames off)`)
