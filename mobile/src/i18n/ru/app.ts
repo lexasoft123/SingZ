@@ -8,24 +8,24 @@ export const app: Translation<typeof en> = {
   'phone.app.tab.train': 'Тренировка',
 
   // ── root navigator (ui/RootNavigator.tsx) ──
-  'phone.app.metronomeNotSaved': 'Настройка метронома не сохранена',
+  'phone.app.metronomeNotSaved': 'Метроном не сохранён',
 
   // ── settings screen (ui/SettingsScreen.tsx) ──
   'phone.app.settings.title': 'Настройки',
-  'phone.app.settings.checking': 'Проверка нативного воспроизведения…',
-  'phone.app.settings.closeA11y': 'Закрыть настройки',
+  'phone.app.settings.checking': 'Проверяем нативный плеер…',
+  'phone.app.settings.closeA11y': 'Закрыть',
   'phone.app.settings.done': 'Готово',
   // section header, all caps by design
   'phone.app.settings.sectionAudio': 'АУДИО',
-  'phone.app.settings.nativePlaybackName': 'Нативное воспроизведение',
+  'phone.app.settings.nativePlaybackName': 'Нативное аудио',
   // small badge next to the feature name, all caps by design
-  'phone.app.settings.nativePlaybackBadge': 'ПО УМОЛЧАНИЮ',
+  'phone.app.settings.nativePlaybackBadge': 'ОСНОВНОЙ',
   'phone.app.settings.nativePlaybackDescription':
-    'Воспроизводит подходящие проекты с дорожками и добавленными треками через zcore + zdsp. Нативное воспроизведение включает управление воспроизведением, высоту тона, темп, петлю, метроном, отсчёт и тренировку; неподдерживаемые форматы файлов остаются на обычном плеере.',
-  'phone.app.settings.unsupportedPlatform': 'Нативное воспроизведение недоступно на этой платформе.',
-  'phone.app.settings.nativePlaybackA11y': 'Нативное воспроизведение',
+    'Воспроизводит подходящие проекты с дорожками и треками через zcore + zdsp: управление, высота тона, темп, петля, метроном, отсчёт и тренировка. Неподдерживаемые форматы — на обычном плеере.',
+  'phone.app.settings.unsupportedPlatform': 'Нативное воспроизведение недоступно здесь.',
+  'phone.app.settings.nativePlaybackA11y': 'Нативное аудио',
   'phone.app.settings.nativePlaybackNote':
-    'Подходящие песни используют обычные элементы управления плеера, но с нативной DSP-обработкой. Остальные песни полностью остаются на обычном плеере.',
+    'Подходящие песни используют обычные элементы плеера, но с нативной DSP-обработкой. Остальные — на обычном плеере.',
 
   // ── log panel chrome (ui/LogPanel.tsx) — log LINES themselves stay English ──
   'phone.app.log.title': 'Журнал',
@@ -34,75 +34,74 @@ export const app: Translation<typeof en> = {
   'phone.app.log.lines_many': '{n} строк',
   'phone.app.log.lines_other': '{n} строки',
   'phone.app.log.share': 'Поделиться',
-  'phone.app.log.shareA11y': 'Поделиться журналом',
+  'phone.app.log.shareA11y': 'Поделиться',
   'phone.app.log.clear': 'Очистить',
-  'phone.app.log.clearA11y': 'Очистить журнал',
+  'phone.app.log.clearA11y': 'Очистить',
   'phone.app.log.close': 'Закрыть',
-  'phone.app.log.closeA11y': 'Закрыть журнал',
-  'phone.app.log.confirmTitle': 'Очистить журнал?',
-  'phone.app.log.confirmBody': 'Это единственная запись того, что делало приложение.',
-  'phone.app.log.keepIt': 'Оставить',
-  'phone.app.log.empty': 'Пока ничего не записано.',
+  'phone.app.log.closeA11y': 'Закрыть',
+  'phone.app.log.confirmTitle': 'Очистить всё?',
+  'phone.app.log.confirmBody': 'Это единственная запись действий приложения.',
+  'phone.app.log.keepIt': 'Отмена',
+  'phone.app.log.empty': 'Пока пусто.',
 
   // ── training cue errors (engine.ts playTrainingCues) — read out by
   //    ui/TrainingScreen.tsx when a reference tone or training cue fails ──
   'phone.app.engine.pausedInBackground': 'Звук приостановлен, пока SingZ работает в фоне.',
-  'phone.app.engine.outputOwnedBySong': 'Воспроизведение песни сейчас занимает аудиовыход iPhone.',
-  'phone.app.engine.cueCancelled': 'Тренировочный сигнал отменён.',
+  'phone.app.engine.outputOwnedBySong': 'Воспроизведение песни занимает аудиовыход iPhone.',
+  'phone.app.engine.cueCancelled': 'Сигнал тренировки отменён.',
 
   // ── native playback status (playback/native.ts settingsStatus(), read by
   //    ui/SettingsScreen.tsx as the status line under the toggle) ──
-  'phone.app.native.status.unavailablePlatform': 'Нативное воспроизведение недоступно на этой платформе.',
+  'phone.app.native.status.unavailablePlatform': 'Нативное воспроизведение недоступно здесь.',
   'phone.app.native.status.noBridge': 'Эта сборка не содержит нативный мост воспроизведения.',
   'phone.app.native.status.missingCapability':
-    'В подключённой нативной среде выполнения отсутствует необходимая функция воспроизведения.',
+    'В нативной среде выполнения нет нужной функции воспроизведения.',
   // {message} is the caught error's own text
-  'phone.app.native.status.failed': 'Не удалось получить статус нативного воспроизведения: {message}',
+  'phone.app.native.status.failed': 'Ошибка статуса: {message}',
 
   // ── native playback load/prepare failures (playback/native.ts load()),
   //    surfaced by ui/CatalogScreen.tsx's error banner when opening a song ──
   'phone.app.native.cleanupBlockedLegacy':
-    'Не удалось точно завершить нативное воспроизведение. Обычное воспроизведение остаётся заблокированным.',
+    'Нативное закрытие неточно. Обычное — заблокировано.',
   'phone.app.native.cleanupNextNotOpened':
-    'Не удалось точно завершить нативное воспроизведение. Следующая песня не была открыта.',
+    'Нативное закрытие неточно. Следующая песня не открыта.',
   // {message} is the caught error's own text
-  'phone.app.native.prepareFailed': 'Не удалось подготовить нативное воспроизведение: {message}',
+  'phone.app.native.prepareFailed': 'Ошибка подготовки: {message}',
   // {message} is the native core's own refusal text
-  'phone.app.native.prepareRefused': 'Нативная подготовка отклонила песню: {message}',
+  'phone.app.native.prepareRefused': 'Подготовка отклонила песню: {message}',
   // {message} is the caught error's own text
-  'phone.app.native.prepareStatusFailed': 'Не удалось получить статус нативной подготовки: {message}',
-  'phone.app.native.prepareInconsistent': 'Нативная подготовка вернула несогласованный статус сессии.',
+  'phone.app.native.prepareStatusFailed': 'Ошибка статуса подготовки: {message}',
+  'phone.app.native.prepareInconsistent': 'Нативная подготовка вернула неверный статус сессии.',
   // internal state also compared with === elsewhere in native.ts; keep in
   // sync if this value's shape ever changes
   // {reason} is a short internal cause (e.g. "cancelled prepare")
   'phone.app.native.cleanupUncertain':
-    'Не удалось точно завершить нативное воспроизведение ({reason}). Переход на обычное воспроизведение заблокирован, чтобы избежать конфликта аудиовыходов.',
+    'Нативное воспроизведение не завершилось ({reason}). Переход на обычный плеер заблокирован — риск конфликта аудио.',
   // {detail} is the caught error's own text
   'phone.app.native.suspendLegacyFailed':
-    'Нативное воспроизведение не смогло приостановить обычный вывод звука перед захватом аудиосессии: {detail}',
+    'Нативное воспроизведение не остановило обычный звук перед захватом аудиосессии: {detail}',
   'phone.app.native.noOutput': 'Нативный аудиовыход недоступен.',
-  'phone.app.native.unavailable': 'Нативное воспроизведение недоступно.',
-  'phone.app.native.focusLost':
-    'Нативный звук остановился, потому что Android изменил фокус звука или маршрут вывода. Нажмите «Воспроизвести», чтобы повторить.',
+  'phone.app.native.unavailable': 'Нативный плеер недоступен.',
+  'phone.app.native.focusLost': 'Android сменил фокус или маршрут звука — звук остановлен. Нажмите «Воспроизвести».',
   // {reason} is a short internal cause reported by the native session
-  'phone.app.native.stoppedReasonRetry': 'Нативный звук остановился: {reason}. Нажмите «Воспроизвести», чтобы повторить.',
+  'phone.app.native.stoppedReasonRetry': 'Остановлен: {reason}. Нажмите «Воспроизвести».',
   // {reason} is a short internal cause; the sentence continues with a fixed tail
   'phone.app.native.outputDidNotOpen':
-    'Нативный выход не открылся: {reason}. Воспроизведение на нативном движке остаётся остановленным.',
+    'Нативный выход не открылся: {reason}. Воспроизведение на нативном движке остановлено.',
   'phone.app.native.unloadUncertainPublished':
-    'Не удалось точно выгрузить нативное воспроизведение: владение по-прежнему объявлено нативным.',
+    'Выгрузка неточна: владение остаётся нативным.',
   'phone.app.native.unloadUncertainNotStarted':
-    'Не удалось точно выгрузить нативное воспроизведение: другой движок воспроизведения не был запущен.',
+    'Выгрузка неточна: другой движок не запущен.',
   'phone.app.native.unloadUncertainBlocked':
-    'Не удалось точно выгрузить нативное воспроизведение: нативное владение остаётся заблокированным.',
+    'Выгрузка неточна: владение заблокировано.',
   'phone.app.native.outputStreamNotReleased':
     'Не удалось освободить нативный аудиопоток после перехода в фоновый режим.',
 
   // ── native playback loading progress (playback/native.ts materializeNativeProject,
   //    read by ui/CatalogScreen.tsx's loading banner while a song opens) ──
-  'phone.app.native.progress.releasingLastSong': 'Освобождаем предыдущую песню…',
-  'phone.app.native.progress.buildingGraph': 'Строим граф обработки звука…',
+  'phone.app.native.progress.releasingLastSong': 'Закрываем прошлую песню…',
+  'phone.app.native.progress.buildingGraph': 'Строим звуковой граф…',
   // {label} is a track/lane name (already resolved and translated elsewhere), {index}/{count} are 1-based
-  'phone.app.native.progress.fetchingTrack': 'Загружаем {label} · {index}/{count}',
-  'phone.app.native.progress.fetchingLyrics': 'Загружаем текст песни…'
+  'phone.app.native.progress.fetchingTrack': 'Грузим {label} · {index}/{count}',
+  'phone.app.native.progress.fetchingLyrics': 'Текст песни…'
 }

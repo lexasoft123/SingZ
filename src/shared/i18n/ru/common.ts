@@ -5,18 +5,18 @@ import type { Translation } from '../types'
 export const common: Translation<typeof en> = {
   'lang.en': 'Английский',
   'lang.ru': 'Русский',
-  'lang.zh-CN': 'Китайский (упрощённый)',
+  'lang.zh-CN': 'Упрощённый китайский',
   'lang.system': 'Системный',
   'lang.systemHint': 'Как в {os} · {name}',
   'lang.auto': 'авто',
   'lang.label': 'Язык',
 
-  'stem.original': 'Полный микс',
+  'stem.original': 'Оригинал',
   'stem.vocals': 'Вокал',
   'stem.drums': 'Барабаны',
   'stem.bass': 'Бас',
   'stem.guitar': 'Гитара',
-  'stem.piano': 'Клавишные',
+  'stem.piano': 'Клавиши',
   'stem.other': 'Инструменты',
 
   'key.major': '{tonic} мажор',
