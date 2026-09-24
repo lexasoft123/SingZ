@@ -619,11 +619,12 @@ function EngineChip({
     return (
       <button
         type="button"
-        className="chip-status"
+        className="chip-status engine-ok"
         title={t('app.engine.manageTitle', { command: status.command })}
+        aria-label={t('app.engine.ready')}
         onClick={onClick}
       >
-        <span className="dot ok" /> {t('app.engine.ready')}
+        <span className="dot ok" /> <span className="chip-label">{t('app.engine.ready')}</span>
       </button>
     )
   }

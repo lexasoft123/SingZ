@@ -97,7 +97,7 @@ import {
 import { playbackCountInDisplay } from '../playback/count-in-display'
 import { iosNativePlayback } from '../playback/native'
 import { nowPlaying } from '../playback/now-playing'
-import { t, tn, type Key } from '../i18n'
+import { getLocale, t, tn, type Key } from '../i18n'
 
 const SCRIM_TOP = require('../../assets/bg/scrim-top.png')
 const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
@@ -2932,7 +2932,9 @@ export default function PlayerScreen({
 /** Sizes for the Song sheet's record — down to kB, unlike the catalog's
  *  singer-facing formatter, because this sheet IS the fine print. */
 const fmtInfoSize = (bytes: number): string =>
-  bytes >= 1e6 ? `${(bytes / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1e3))} kB`
+  bytes >= 1e6
+    ? t('phone.player.songSheet.sizeMb', { n: (bytes / 1e6).toFixed(1).replace('.', getLocale() === 'ru' ? ',' : '.') })
+    : t('phone.player.songSheet.sizeKb', { n: Math.max(1, Math.round(bytes / 1e3)) })
 
 /** A lane's on-disk record, matched by stem name against the doc's
  *  stemHashes (keys are filenames — 'vocals.flac', 'custom-x.m4a'). */

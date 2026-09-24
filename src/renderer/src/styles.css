@@ -197,6 +197,21 @@ body::after {
   }
 }
 
+/* Near the 940 px minimum the row was full to the pixel in Russian on
+   Windows and the song name got ZERO width — not an ellipsis, just a pencil.
+   A healthy engine chip keeps only its green dot there (its tooltip and
+   aria-label still say it); checking/setup keep their words, since those ask
+   for something. */
+@media (max-width: 1000px) {
+  .chip-status.engine-ok {
+    gap: 0;
+  }
+
+  .chip-status.engine-ok .chip-label {
+    display: none;
+  }
+}
+
 /* the flag-only language switcher sits beside the gear; its menu hangs off
    the right edge so it never crosses the window buttons on Windows */
 .titlebar .lang {

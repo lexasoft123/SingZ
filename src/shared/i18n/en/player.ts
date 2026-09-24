@@ -232,5 +232,14 @@ export const player = {
   'player.dspGraph.stateBlocked': 'Route blocked',
 
   // ── model.ts: fallback label for an added track with no name left after cleanup ──
-  'player.track.untitled': 'Track'
+  'player.track.untitled': 'Track',
+
+  // ── DSP graph card: format line and the transport badge (Settings › Audio) ──
+  'player.dspGraph.framesMaximum': '{n} frames maximum',
+  'player.dspGraph.nodesLinks': '{nodes} nodes · {links} links',
+  'player.dspGraph.transport.stopped': 'stopped',
+  'player.dspGraph.transport.pre-roll': 'pre-roll',
+  'player.dspGraph.transport.playing': 'playing',
+  'player.dspGraph.transport.paused': 'paused',
+  'player.dspGraph.transport.completed': 'completed'
 }
