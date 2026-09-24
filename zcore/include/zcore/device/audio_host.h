@@ -2,7 +2,9 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <zcore/device/audio_host_render.h>
@@ -225,6 +227,27 @@ class AudioHostBackend {
  public:
   virtual ~AudioHostBackend() = default;
   virtual AudioHostInventory enumerate() const = 0;
+  // The route facts of ONE endpoint an output can open: its uid, channel
+  // counts, direction and nominal rate. Nullopt when no output or duplex
+  // endpoint has that uid. Every other field is unspecified (a backend that
+  // reads one device leaves them empty), so read only the route facts. The
+  // playback session asks this right before every open, and the whole
+  // inventory is the wrong price there: it reads every channel label of
+  // every device, ~40 ms of each first Play on a Mac with a multichannel
+  // interface. The default answers from enumerate(), exactly as that check
+  // always did, so a backend that does not override it behaves as before.
+  virtual std::optional<AudioHostDeviceInfo> describeOutputDevice(
+      const std::string& uid) const {
+    AudioHostInventory inventory = enumerate();
+    for (AudioHostDeviceInfo& device : inventory.devices) {
+      if (device.uid == uid &&
+          (device.direction == AudioHostEndpointDirection::Output ||
+           device.direction == AudioHostEndpointDirection::Duplex)) {
+        return std::move(device);
+      }
+    }
+    return std::nullopt;
+  }
   virtual AudioHostResult open(const AudioHostConfig& config,
                                AudioHostRender render,
                                void* renderContext) = 0;
@@ -267,6 +290,8 @@ class AudioHost final {
   AudioHost& operator=(const AudioHost&) = delete;
 
   AudioHostInventory enumerate() const;
+  std::optional<AudioHostDeviceInfo> describeOutputDevice(
+      const std::string& uid) const;
   AudioHostResult open(const AudioHostConfig& config, AudioHostRender render,
                        void* renderContext);
   AudioHostResult start();

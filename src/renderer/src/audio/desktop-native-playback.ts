@@ -41,6 +41,19 @@ import {
 export const POLL_FAST_MS = 50
 export const POLL_STEADY_MS = 200
 export const POLL_BURST_MS = 2000
+/** The cadence right after a start or a resume (see `edgeAtMs`), until a
+ *  status shows the transport running with a current audible frame. The
+ *  core publishes both from the render callback within a period or two of
+ *  the command: on the Mac the transport read `playing` 4-6 ms after the
+ *  start returned and the audible frame was current one 512-frame callback
+ *  later. At POLL_FAST_MS the first look came ~55 ms after the start, so the
+ *  bar stood still for ~40 ms of music on every Play, the whole gap between
+ *  native's Play → advancing and legacy's. */
+export const POLL_EDGE_MS = 10
+/** How long one start or resume may hold the poll at POLL_EDGE_MS. A
+ *  transport still parked this long after the command is not waiting for its
+ *  next callback, and the ordinary burst covers whatever it is doing. */
+export const POLL_EDGE_MAX_MS = 500
 /** How long the bar may show a seek's target while waiting for the core's
  *  receipt. Generous against the real wait (the callback applies a queued seek
  *  at its next period) and short enough that a core which never acknowledges
@@ -420,8 +433,9 @@ export class DesktopNativePlaybackClient {
   /** When the transport last did something worth watching closely: a command
    * was issued, or a status read showed a new transport state or boundary.
    * The poll runs at POLL_FAST_MS for POLL_BURST_MS after that (a seek's
-   * read-back, Play → advancing, a pause's stop, a seam landing are all
-   * measured against that cadence) and at POLL_STEADY_MS otherwise. Measured
+   * read-back, a pause's stop, a seam landing are all measured against that
+   * cadence; a start or resume first runs at POLL_EDGE_MS until it shows, see
+   * `edgeAtMs`) and at POLL_STEADY_MS otherwise. Measured
    * on the desktop (2026-09-06, quiet host): the 20 Hz status invoke alone —
    * IPC + structured clone of the status, not the UI it fed — cost the
    * renderer ~2 CPU points while a song played, more than the whole graph
@@ -429,6 +443,13 @@ export class DesktopNativePlaybackClient {
    * between reads is projected (audibleSeconds), so the bar does not move in
    * poll steps either way. */
   private activityAtMs = 0
+  /** When a start or a resume was last accepted. Until a status shows the
+   * transport running with a current audible frame (or POLL_EDGE_MAX_MS
+   * passes) the poll runs at POLL_EDGE_MS: the bar can only move once a
+   * status says the song moved, and the command's own read-back always
+   * arrives too early to say it, since the render thread has not taken a
+   * callback yet. */
+  private edgeAtMs = 0
   /** A seek the core has accepted but the status has not yet reflected: the
    * bar shows the target at once instead of one IPC round trip later. */
   private pendingSeekFrame: number | null = null
@@ -538,6 +559,9 @@ export class DesktopNativePlaybackClient {
   }
   private poller: ReturnType<typeof setTimeout> | null = null
   private pollingEpoch = 0
+  /** The running poller's scheduler, kept so a command can pull an armed poll
+   * forward (reschedulePoll). Null while polling is stopped. */
+  private schedulePoll: (() => void) | null = null
   /** Every status read, including command refreshes, runs in this one lane.
    * Polling therefore applies backpressure instead of accumulating IPC calls,
    * and a command refresh can never publish ahead of an older poll. */
@@ -1122,6 +1146,7 @@ export class DesktopNativePlaybackClient {
       started = true
       this.started = true
       this.transportIntent = initialTransport?.state === 'paused' ? 'paused' : 'playing'
+      this.edgeAtMs = Date.now()
       await this.refresh(generation)
       this.startPolling()
       return true
@@ -1488,7 +1513,11 @@ export class DesktopNativePlaybackClient {
         if (state !== 'playing' && state !== 'pre-roll') ensure(result, 'Native resume failed')
       }
       this.transportIntent = 'playing'
+      this.edgeAtMs = Date.now()
       await this.refreshCommandStatus(generation, provider)
+      // The poll armed before the resume can be a steady 200 ms away, which
+      // after a long pause is how far the bar trailed the music.
+      this.reschedulePoll()
     })
   }
 
@@ -1884,11 +1913,25 @@ export class DesktopNativePlaybackClient {
     this.onStateChange(this.last)
   }
 
-  /** The next poll's delay: fast inside the burst after activity, during a
-   * pre-roll (the landing is watched frame by frame) and while a seek's
+  /** Whether a start or resume is still waiting for the status that shows it:
+   * the transport running with a current audible frame. Bounded by
+   * POLL_EDGE_MAX_MS. */
+  private awaitingTransportEdge(now: number): boolean {
+    if (now - this.edgeAtMs >= POLL_EDGE_MAX_MS) return false
+    if (!this.started || this.transportIntent !== 'playing') return false
+    const status = this.last
+    if (!status) return true
+    const running = status.transportState === 'playing' || status.transportState === 'pre-roll'
+    return !running || status.audibleProjectionQuality !== 'current'
+  }
+
+  /** The next poll's delay: the edge cadence right after a start or resume
+   * until the status shows it, fast inside the burst after activity, during
+   * a pre-roll (the landing is watched frame by frame) and while a seek's
    * read-back is outstanding; steady otherwise. */
   private pollDelayMs(): number {
     const now = Date.now()
+    if (this.awaitingTransportEdge(now)) return POLL_EDGE_MS
     if (now - this.activityAtMs < POLL_BURST_MS) return POLL_FAST_MS
     if (this.pendingSeekFrame !== null) return POLL_FAST_MS
     const state = this.last?.transportState
@@ -1918,12 +1961,24 @@ export class DesktopNativePlaybackClient {
         })
       }, this.pollDelayMs())
     }
+    this.schedulePoll = schedule
     schedule()
+  }
+
+  /** Re-arm a poll that is waiting on its timer at the cadence that holds
+   * NOW. A read in flight arms the next poll itself when it settles, and a
+   * stopped poller stays stopped: this never starts polling. */
+  private reschedulePoll(): void {
+    if (this.poller === null || this.schedulePoll === null) return
+    clearTimeout(this.poller)
+    this.poller = null
+    this.schedulePoll()
   }
 
   private stopPolling(): void {
     this.pollingEpoch++
     if (this.poller !== null) clearTimeout(this.poller)
     this.poller = null
+    this.schedulePoll = null
   }
 }

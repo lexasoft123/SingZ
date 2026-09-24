@@ -1086,6 +1086,49 @@ AudioHostInventory enumerateOnSta() {
   return inventory;
 }
 
+// enumerateOnSta()'s answer for one render endpoint, without activating every
+// other endpoint on the machine: the same activation, client properties and
+// mix format, so the route facts cannot differ from the inventory's.
+std::optional<AudioHostDeviceInfo> describeRenderEndpointOnSta(
+    const std::string& uid) {
+  const std::wstring id = wide(uid);
+  if (id.empty()) return std::nullopt;
+  StaApartment apartment;
+  if (!apartment.ok()) return std::nullopt;
+  ComPtr<IMMDeviceEnumerator> enumerator;
+  if (FAILED(createEnumerator(enumerator))) return std::nullopt;
+  ComPtr<IMMDevice> device;
+  if (FAILED(enumerator->GetDevice(id.c_str(), device.put()))) return std::nullopt;
+  // The inventory lists active endpoints only, and names each by its own id.
+  DWORD state = 0;
+  if (FAILED(device->GetState(&state)) || state != DEVICE_STATE_ACTIVE ||
+      utf8(endpointId(device.get()).c_str()) != uid)
+    return std::nullopt;
+  ComPtr<IMMEndpoint> endpoint;
+  EDataFlow flow = eCapture;
+  if (FAILED(device->QueryInterface(__uuidof(IMMEndpoint),
+                                    reinterpret_cast<void**>(endpoint.put()))) ||
+      FAILED(endpoint->GetDataFlow(&flow)) || flow != eRender)
+    return std::nullopt;
+  ComPtr<IAudioClient> client;
+  std::string ignored;
+  if (FAILED(activateClient(device.get(), client)) ||
+      FAILED(setClientProperties(client.get(), false, &ignored)))
+    return std::nullopt;
+  WAVEFORMATEX* raw = nullptr;
+  if (FAILED(client->GetMixFormat(&raw)) || !raw) return std::nullopt;
+  WaveFormatPtr mix(raw);
+  if (!mix->nChannels || mix->nChannels > kAudioHostMaxChannels ||
+      !mix->nSamplesPerSec)
+    return std::nullopt;
+  AudioHostDeviceInfo info;
+  info.uid = uid;
+  info.outputChannels = mix->nChannels;
+  info.nominalSampleRate = mix->nSamplesPerSec;
+  info.direction = AudioHostEndpointDirection::Output;
+  return info;
+}
+
 class WasapiAudioHostBackend final : public AudioHostBackend {
  public:
   ~WasapiAudioHostBackend() override { stop(); }
@@ -1099,6 +1142,18 @@ class WasapiAudioHostBackend final : public AudioHostBackend {
       return {};
     }
     return inventory;
+  }
+
+  std::optional<AudioHostDeviceInfo> describeOutputDevice(
+      const std::string& uid) const override {
+    std::optional<AudioHostDeviceInfo> info;
+    try {
+      std::thread worker([&] { info = describeRenderEndpointOnSta(uid); });
+      worker.join();
+    } catch (...) {
+      return std::nullopt;
+    }
+    return info;
   }
 
   AudioHostResult open(const AudioHostConfig& config, AudioHostRender render,

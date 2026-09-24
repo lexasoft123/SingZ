@@ -576,7 +576,11 @@ implementations remain separate OS files rather than one preprocessor-heavy
 class.
 
 `AudioHost::enumerate()` is side-effect free: it never opens a stream, changes
-focus/category/route or activates a session. On Android, Oboe/AAudio do not
+focus/category/route or activates a session. So is
+`describeOutputDevice(uid)`, the one-endpoint form of the same question that
+the playback session asks before every open. Its default answers from
+`enumerate()`; macOS and WASAPI read the one device instead of listing every
+channel of every device. On Android, Oboe/AAudio do not
 provide complete device inventory or automatic routing; Java `AudioManager`
 and `AudioDeviceInfo` remain the inventory/route control plane, coordinated
 with paired native input/output streams.

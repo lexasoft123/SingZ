@@ -20,6 +20,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -247,6 +248,18 @@ struct CallbackCapture {
 
 class ManualOutputBackend final : public singz::AudioHostBackend {
 public:
+  // The open's route check. Unset, it answers from enumerate() through the
+  // base class, as a backend with no override of its own does; set, it
+  // stands in for a platform that asks the one endpoint.
+  std::function<std::optional<singz::AudioHostDeviceInfo>(const std::string &)>
+      describe;
+  std::optional<singz::AudioHostDeviceInfo>
+  describeOutputDevice(const std::string &uid) const override {
+    ++describes;
+    return describe ? describe(uid)
+                    : singz::AudioHostBackend::describeOutputDevice(uid);
+  }
+
   singz::AudioHostInventory enumerate() const override {
     ++enumerations;
     singz::AudioHostDeviceInfo device;
@@ -544,6 +557,7 @@ public:
   // is thread-safe — it is not.
   mutable std::atomic<uint32_t> statusCalls{0};
   mutable uint32_t enumerations{0};
+  mutable uint32_t describes{0};
   uint32_t opens{0};
   uint32_t starts{0};
   uint32_t suspends{0};
@@ -6297,6 +6311,63 @@ void bridgeMutationDeliveryCleanup() {
   std::remove(wav.c_str());
 }
 
+// The last gate before the handoff asks about the prepared endpoint and
+// nothing else. A platform that answers that one question itself is never
+// made to list its whole inventory (a Mac with a 16-channel interface paid
+// ~40 ms of every first Play for that list), and every refusal still names
+// the term that failed and opens nothing.
+void theOpenRouteCheckAsksOnlyThePreparedEndpoint() {
+  const std::string wav =
+      writeWav("route-check.wav", 1, std::vector<float>(64, 0.1F));
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::AudioHostDeviceInfo endpoint;
+  endpoint.uid = "manual:output";
+  endpoint.outputChannels = 2;
+  endpoint.nominalSampleRate = 48000.0;
+  endpoint.direction = singz::AudioHostEndpointDirection::Output;
+  std::optional<singz::AudioHostDeviceInfo> answer;
+  std::vector<std::string> asked;
+  fake->describe = [&](const std::string &uid) {
+    asked.push_back(uid);
+    return answer;
+  };
+  singz::NativePlaybackSession session(std::move(backend));
+  auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+  lanes.push_back(lane("a", wav));
+  CHECK(session.prepare(config(), std::move(lanes), 1).ok);
+
+  auto refuses = [&](std::optional<singz::AudioHostDeviceInfo> reported,
+                     const char *term) {
+    answer = std::move(reported);
+    const auto opened = session.openOutput(1);
+    CHECK(!opened.ok && opened.error == singz::NativePlaybackError::HostFailure &&
+          opened.state == singz::NativePlaybackState::Prepared &&
+          opened.message.find(term) != std::string::npos);
+  };
+  refuses(std::nullopt, "the endpoint is gone");
+  auto silent = endpoint;
+  silent.outputChannels = 0;
+  refuses(silent, "the endpoint has no output channels");
+  auto moved = endpoint;
+  moved.nominalSampleRate = 44100.0;
+  refuses(moved, "the endpoint rate changed");
+  auto narrowed = endpoint;
+  narrowed.outputChannels = 1;
+  refuses(narrowed, "the endpoint lost a prepared channel");
+  CHECK(fake->opens == 0);
+
+  answer = endpoint;
+  CHECK(session.openOutput(1).ok);
+  CHECK(fake->opens == 1 && fake->enumerations == 0 && fake->describes == 5);
+  CHECK(asked.size() == 5 &&
+        std::all_of(asked.begin(), asked.end(), [](const std::string &uid) {
+          return uid == "manual:output";
+        }));
+  CHECK(session.unload(1).ok);
+  std::remove(wav.c_str());
+}
+
 void preparedWithoutOpenDoesNotTouchStaleHost() {
   const std::string wav =
       writeWav("prepared-no-host.wav", 1, std::vector<float>(64, 0.1F));
@@ -7073,6 +7144,7 @@ int main() {
   publicationAndCancellation();
   callbackTerminalLatch();
   outputClampAndStartLinearization();
+  theOpenRouteCheckAsksOnlyThePreparedEndpoint();
   preparedGenerationResetsHostTelemetry();
   resourceAndAggregateBoundaries();
   admittedDescriptorFailureCleansUp();

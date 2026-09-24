@@ -440,6 +440,62 @@ above them — by design, and the comment in `TrackStack` says so. A project reo
 view it was saved in, so a singer who left one zoomed pays that on every open. Nobody had
 measured it.
 
+### Where native's 180 ms at Play went (2026-09-24)
+
+The desktop harness's "Play → position advancing" went red on main once Web Audio got
+fast (lanes measured instead of decoded, the graph prepared ahead). As reported, native
+read a flat 180–182 ms on the Mac and on the field laptop, against legacy's ~91 ms and
+91–122 ms. The 180 was not a floor. Timed step by step: renderer marks around every await, main's IPC
+handlers wrapped, main polling the core at 1 kHz, and `sample` on main.
+
+| first Play, prepared ahead | Mac (CoreAudio) | laptop (WASAPI) |
+|---|---|---|
+| Chromium's sink released | 1–11 ms | ~2 ms |
+| `playback-open`, one synchronous call in main | 66–80 ms | 86–106 ms |
+| `playback-start` | 11–14 ms | ≤ 1 ms |
+| the start's own status read-back | `stopped`, no callback yet | the same |
+| the next look | a whole POLL_FAST_MS later | the same |
+| position first moves | 135–188 ms | 154–187 ms |
+
+Two of those delays were ours to remove:
+
+- **The first look after a start came a whole fast poll later.** The core reported
+  `playing` 4–6 ms after the start returned, and a current audible frame one 512-frame
+  callback later. The facade's read-back always landed before the first callback, and
+  its next read was 50 ms away, so the bar stood still for ~40 ms of music on every Play.
+  Now the poll runs at POLL_EDGE_MS (10 ms) after a start or an accepted resume, until a
+  status shows the transport running with a current audible frame, capped at 500 ms.
+  That costs about three extra reads per Play. A resume also pulls forward a poll that
+  the steady cadence had put 200 ms away.
+- **The open's route check listed every device.** `NativePlaybackSession::openOutput`
+  re-checks the prepared endpoint before the handoff, and it did so with the full
+  inventory. On CoreAudio that reads every channel label of every device, one coreaudiod
+  round trip each: 36–48 ms for this Mac's 11 devices and 115 channels, ~60% of the open.
+  On WASAPI it activates an IAudioClient on every endpoint: 23–25 ms for the laptop's
+  two. The check now asks `AudioHost::describeOutputDevice(uid)`. macOS and WASAPI answer
+  for the one endpoint using the inventory's own rules, and every other backend answers
+  from `enumerate()` as before. A parity test holds the two answers equal on every
+  endpoint a machine reports (11 on the Mac, 2 on the laptop).
+
+What remains is opening a stream at Play, which Web Audio never pays because its output
+is already running. Creating the AUHAL unit is a coreaudiod round trip, most of the
+Mac's 21–37 ms open now; the laptop's open is 65–78 ms. The rule stays as it is. The
+harness A/B against main, alternated, two rounds per machine (Play → advancing, native
+vs legacy):
+
+| | control (main) | fix |
+|---|---|---|
+| Mac | 180 vs 91, 181 vs 91 — both FAIL | 91 vs 91, 90 vs 91 — both PASS |
+| laptop | 180 vs 121, 181 vs 91 — both FAIL | 91 vs 120, 122 vs 121 — both PASS |
+
+The Mac's control was main at the fix's base. The laptop's was main at `3ac58d18`, the
+tree the red was first reported on. Resume → advancing and end of song → Play restart
+did not move (60–62 ms). One visible side effect: the first read after a start now
+usually lands before the core's audible projection matures. The bar starts from the
+render head, at most one output latency ahead, and steps back once when it matures:
+7–9 ms on the Mac, at or just above the largest correction already seen during
+playback (2–7 ms).
+
 ## Why the legacy engine measures faster: an architecture comparison
 
 The legacy engine on the phones is Web Audio implemented by react-native-audio-api (the

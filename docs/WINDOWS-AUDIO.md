@@ -1,9 +1,10 @@
 # Windows native audio
 
-Phase 3B adds a standalone WASAPI provider behind `zcore::AudioHost`. It is a
-headless conformance path only: Electron playback still belongs to Web Audio,
-mobile playback still belongs to RNAudioAPI, and the hardware CLI always
-renders silence. No product screen or playback engine selects this provider.
+Phase 3B added a standalone WASAPI provider behind `zcore::AudioHost`, at first
+as a headless conformance path (the hardware CLI still renders only silence).
+Since Phase 4B the desktop's native playback renders through it on Windows,
+and that has been the default there since 2026-09-08 (`d1ba8253`). Web Audio
+stays as the fallback and behind the Settings toggle.
 
 ## Endpoint and format contract
 
@@ -13,6 +14,12 @@ friendly names are display text only. Defaults use the `eConsole` role.
 Inventory reports the current shared-engine profile from `GetMixFormat` and
 the shared period range from `IAudioClient3` when available. It does not call
 that profile a hardware maximum and does not infer exclusive capabilities.
+
+`AudioHost::describeOutputDevice(uid)` answers the inventory's question for
+ONE render endpoint: the same short-lived STA, activation, client properties
+and `GetMixFormat`, without activating every other endpoint. The playback
+session asks it right before every open, as its route check. The full
+inventory there cost ~24 ms of each first Play on a two-endpoint laptop.
 
 Opening requires explicit capture and render endpoint UIDs whose
 `PKEY_Device_ContainerId` values exist and match. It also requires equal

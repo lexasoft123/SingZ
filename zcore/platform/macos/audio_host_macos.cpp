@@ -309,6 +309,34 @@ class MacAudioHostBackend final : public AudioHostBackend {
     return inventory;
   }
 
+  // The same answer enumerate() gives for this one device, without the rest
+  // of the inventory. enumerate() reads every channel label of every device,
+  // each a round trip to coreaudiod (11 devices and 115 channels, 36-48 ms,
+  // on the Mac this was measured on). The membership and direction rules are
+  // enumerate()'s: a device is listed only with a UID and at least one
+  // channel, and it is an output endpoint only with output channels.
+  std::optional<AudioHostDeviceInfo> describeOutputDevice(
+      const std::string& uid) const override {
+    if (uid.empty()) return std::nullopt;
+    const AudioDeviceID device = findDevice(uid);
+    if (device == kAudioObjectUnknown) return std::nullopt;
+    AudioHostDeviceInfo info;
+    info.uid = uid;
+    info.inputChannels = channelCount(device, kAudioDevicePropertyScopeInput);
+    info.outputChannels = channelCount(device, kAudioDevicePropertyScopeOutput);
+    if (info.outputChannels == 0) return std::nullopt;
+    info.direction = info.inputChannels != 0
+                         ? AudioHostEndpointDirection::Duplex
+                         : AudioHostEndpointDirection::Output;
+    Float64 rate = 0.0;
+    if (readProperty(device, property(kAudioDevicePropertyNominalSampleRate,
+                                      kAudioObjectPropertyScopeGlobal),
+                     &rate) && std::isfinite(rate) && rate > 0.0) {
+      info.nominalSampleRate = rate;
+    }
+    return info;
+  }
+
   AudioHostResult open(const AudioHostConfig& config, AudioHostRender render,
                        void* renderContext) override {
     stop();
