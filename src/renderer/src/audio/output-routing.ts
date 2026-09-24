@@ -1,7 +1,9 @@
+import { t } from '../i18n'
+
 export type PlaybackOutputId = string | undefined
 
-export const PLAYBACK_OUTPUT_UNCONFIRMED_COPY =
-  'Playback route could not be confirmed — choose an output or retry'
+/** The status line while the playback route is unconfirmed, in the current language. */
+export const playbackOutputUnconfirmedCopy = (): string => t('settings.output.unconfirmedStatus')
 
 /** Settings may recover an unsafe boundary through the playback-output UI
  * only when the exact app-lifetime output-route owner is still retained and

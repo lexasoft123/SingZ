@@ -9,6 +9,7 @@ import React, {
   type Dispatch,
   type RefObject
 } from 'react'
+import { keyLabel } from '../../../shared/music-labels'
 import { keyName, midiNoteName } from '../../../shared/music-theory'
 import {
   summarizeTrainingProgress,
@@ -74,6 +75,7 @@ import {
   type DesktopTrainingPracticeSettings,
   type TrainingPitchLockState
 } from '../training-practice'
+import { t, tn, formatLocale } from '../i18n'
 
 interface VocalTrainingProps {
   readonly state: DesktopTrainingState
@@ -125,25 +127,54 @@ interface ActiveDesktopVocalRun {
   completed: boolean
 }
 
-const EXERCISES: readonly {
+function trainingExercises(): readonly {
   value: TrainingExerciseSelection
   label: string
   cue: string
   description: string
-}[] = [
-  { value: 'note', label: 'Match a note', cue: 'A4', description: 'Hear one note, then settle your voice onto it.' },
-  { value: 'scale-degree', label: 'Notes in a key', cue: '1–7', description: 'Hear how notes fit inside one key.' },
-  { value: 'interval', label: 'Intervals', cue: '2→5', description: 'Sing the distance between two notes, up or down.' },
-  { value: 'chord-tone', label: 'Chord tones', cue: 'R·3·5', description: 'Find the root, third, or fifth of a chord.' },
-  { value: 'arpeggio', label: 'Arpeggios', cue: '1·3·5', description: 'Trace a chord one note at a time.' },
-  { value: 'mixed', label: 'Mixed practice', cue: '∞', description: 'Rotate through every exercise in a short rehearsal.' }
-]
+}[] {
+  return [
+    { value: 'note', label: t('training.exercise.note.label'), cue: 'A4', description: t('training.exercise.note.description') },
+    { value: 'scale-degree', label: t('training.exercise.scaleDegree.label'), cue: '1–7', description: t('training.exercise.scaleDegree.description') },
+    { value: 'interval', label: t('training.exercise.interval.label'), cue: '2→5', description: t('training.exercise.interval.description') },
+    { value: 'chord-tone', label: t('training.exercise.chordTone.label'), cue: 'R·3·5', description: t('training.exercise.chordTone.description') },
+    { value: 'arpeggio', label: t('training.exercise.arpeggio.label'), cue: '1·3·5', description: t('training.exercise.arpeggio.description') },
+    { value: 'mixed', label: t('training.exercise.mixed.label'), cue: '∞', description: t('training.exercise.mixed.description') }
+  ]
+}
 
 const KEY_NAMES = ['C', 'D♭', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A', 'B♭', 'B']
-const INTERVAL_LABELS = ['Unison', 'Second', 'Third', 'Fourth', 'Fifth', 'Sixth', 'Seventh', 'Octave']
+const INTERVAL_WORD_KEYS = [
+  'training.word.unison',
+  'training.word.second',
+  'training.word.third',
+  'training.word.fourth',
+  'training.word.fifth',
+  'training.word.sixth',
+  'training.word.seventh',
+  'training.word.octave'
+] as const
+
+/** Capitalized, e.g. "Third" — matches the historical INTERVAL_LABELS casing. */
+function intervalLabel(intervalNumber: number): string {
+  const key = INTERVAL_WORD_KEYS[intervalNumber - 1]
+  return capitalize(key ? t(key) : t('training.word.intervalGeneric', { n: intervalNumber }))
+}
+
+function capitalize(value: string): string {
+  return value.replace(/^./, (letter) => letter.toUpperCase())
+}
+
+function tendencyWord(tendency: 'sharp' | 'flat'): string {
+  return tendency === 'sharp' ? t('training.word.sharp') : t('training.word.flat')
+}
+
 let trainingSeedSequence = 0
-export const TRAINING_AUDIO_LEASE_COPY =
-  audioSafetyBlockedCopy('Training audio')
+/** Evaluated at call time so a live language switch is reflected — never
+ * cache this in a module-level constant. */
+export function trainingAudioLeaseCopy(): string {
+  return audioSafetyBlockedCopy(t('settings.subject.trainingAudio'))
+}
 
 export function runTrainingAudioAction(
   blocked: boolean,
@@ -198,7 +229,7 @@ export default function VocalTraining({
   onMicDevice,
   settingsOwnsMic = false,
   audioLeaseBlocked = false,
-  audioLeaseCopy = TRAINING_AUDIO_LEASE_COPY,
+  audioLeaseCopy = trainingAudioLeaseCopy(),
   onSetupChange,
   referenceVolume,
   onReferenceVolumeChange,
@@ -219,7 +250,7 @@ export default function VocalTraining({
     pitchWindowCents
   }), [pitchWindowCents, referenceVolume])
   const [testingReference, setTestingReference] = useState(false)
-  const [coarseGuidance, setCoarseGuidance] = useState('Listening for your voice.')
+  const [coarseGuidance, setCoarseGuidance] = useState(() => t('training.session.guidance.listeningDefault'))
   const [identifySubmitting, setIdentifySubmitting] = useState(false)
   const [beginBusy, setBeginBusy] = useState(false)
   const generation = useRef(0)
@@ -266,7 +297,7 @@ export default function VocalTraining({
         setLive(null)
         setPitchLock(EMPTY_TRAINING_PITCH_LOCK)
         setCountdown(null)
-        setCoarseGuidance('Listening for your voice.')
+        setCoarseGuidance(t('training.session.guidance.listeningDefault'))
         setTestingReference(false)
       }
     },
@@ -324,7 +355,7 @@ export default function VocalTraining({
 
   const rejectBlockedAudioAction = useCallback(() => {
     stopRuntime()
-    dispatch({ type: 'set-error', error: TRAINING_AUDIO_LEASE_COPY })
+    dispatch({ type: 'set-error', error: trainingAudioLeaseCopy() })
   }, [dispatch, stopRuntime])
 
   const runAudioAction = useCallback((action: () => void): boolean =>
@@ -342,7 +373,7 @@ export default function VocalTraining({
     }
     try {
       const session = stateRef.current.session
-      if (!session) throw new Error('This training session is no longer active.')
+      if (!session) throw new Error(t('training.session.error.sessionInactive'))
       releasePromptMicrophoneIfFinal(session, run.prompt, mic, () => onMicDevice(null))
       dispatch({
         type: 'record-result',
@@ -421,7 +452,7 @@ export default function VocalTraining({
     frame.current = null
     try {
       const session = stateRef.current.session
-      if (!session) throw new Error('This training session is no longer active.')
+      if (!session) throw new Error(t('training.session.error.sessionInactive'))
       releasePromptMicrophoneIfFinal(session, run.prompt, mic, () => onMicDevice(null))
       dispatch({ type: 'record-result', result: skippedTrainingResult(run.prompt) })
       vocalRun.current = null
@@ -444,7 +475,7 @@ export default function VocalTraining({
       guidanceSignature.current = ''
       setLive(null)
       setPitchLock(EMPTY_TRAINING_PITCH_LOCK)
-      setCoarseGuidance('Listening for your voice.')
+      setCoarseGuidance(t('training.session.guidance.listeningDefault'))
       try {
         if (!runAudioAction(() => undefined)) return
         if (!trainingOwnsForeground()) {
@@ -510,7 +541,7 @@ export default function VocalTraining({
         if (prompt.taskMode !== 'identify' && !hasMicrophoneApi()) {
           dispatch({
             type: 'set-error',
-            error: 'No microphone is available. Use Listen and choose for ear-only practice.'
+            error: t('training.session.error.noMicUseListen')
           })
           return
         }
@@ -526,7 +557,7 @@ export default function VocalTraining({
                 onEnded: () => {
                   dispatch({
                     type: 'set-error',
-                    error: 'The microphone disconnected. Reconnect it, then start this exercise again.'
+                    error: t('training.session.error.micDisconnected')
                   })
                   stopRuntime()
                 }
@@ -796,16 +827,16 @@ function TrainingHome({
       {songPreparation && (
         <section className="vt-song-prep" aria-labelledby="vt-song-prep-title">
           <div>
-            <p className="vt-eyebrow">Loaded song</p>
-            <h2 id="vt-song-prep-title">Prepare for “{songPreparation.songName}”</h2>
+            <p className="vt-eyebrow">{t('training.home.songPrep.eyebrow')}</p>
+            <h2 id="vt-song-prep-title">{t('training.home.songPrep.title', { name: songPreparation.songName })}</h2>
             {songPreparation.key ? (
-              <p><strong>{keyName(songPreparation.key)}</strong>{songPreparation.transpose === 0 ? '' : ` · transposed ${songPreparation.transpose > 0 ? '+' : ''}${songPreparation.transpose}`}</p>
+              <p><strong>{keyLabel(keyName(songPreparation.key))}</strong>{songPreparation.transpose === 0 ? '' : t('training.home.songPrep.transposedSuffix', { sign: songPreparation.transpose > 0 ? '+' : '', amount: songPreparation.transpose })}</p>
             ) : (
-              <p><strong>Confirm the song key first</strong></p>
+              <p><strong>{t('training.home.songPrep.confirmKeyFirst')}</strong></p>
             )}
-            <p>Practise its notes, intervals and chords.</p>
+            <p>{t('training.home.songPrep.tagline')}</p>
           </div>
-          <div className="vt-song-prep-actions" aria-label={`Prepare for ${songPreparation.songName}`}>
+          <div className="vt-song-prep-actions" aria-label={t('training.home.songPrep.ariaPrepareFor', { name: songPreparation.songName })}>
             {(['notes', 'intervals', 'chords', 'mixed'] as const).map((choice) => (
               <button
                 type="button"
@@ -813,20 +844,20 @@ function TrainingHome({
                 disabled={audioBlocked && Boolean(songPreparation.key)}
                 onClick={() => onPrepare(choice)}
               >
-                {choice === 'mixed' ? 'Mixed warm-up' : choice[0].toUpperCase() + choice.slice(1)}
+                {t(`training.home.songPrep.choice.${choice}` as Parameters<typeof t>[0])}
               </button>
             ))}
           </div>
-          {!songPreparation.key && <p className="vt-help">Choose any preparation focus to open setup, then confirm or change the key manually.</p>}
+          {!songPreparation.key && <p className="vt-help">{t('training.home.songPrep.chooseFocusHelp')}</p>}
         </section>
       )}
       <div className="vt-home-head">
-        <p className="vt-eyebrow">A focused pitch rehearsal</p>
-        <h1 ref={headingRef} tabIndex={-1}>What do you want to hear more clearly?</h1>
-        <p>Choose one skill. SingZ will keep the session inside your comfortable range.</p>
+        <p className="vt-eyebrow">{t('training.home.eyebrow')}</p>
+        <h1 ref={headingRef} tabIndex={-1}>{t('training.home.heading')}</h1>
+        <p>{t('training.home.subheading')}</p>
       </div>
-      <div className="vt-score" aria-label="Training exercises">
-        {EXERCISES.map((exercise) => (
+      <div className="vt-score" aria-label={t('training.home.exercisesAriaLabel')}>
+        {trainingExercises().map((exercise) => (
           <button
             type="button"
             className="vt-exercise"
@@ -843,10 +874,10 @@ function TrainingHome({
         ))}
       </div>
       <button type="button" className="vt-progress-entry" onClick={onProgress}>
-        <span><strong>Progress</strong><small>{snapshot.sessions === 0 ? 'Your practice history will appear here.' : `${snapshot.sessions} completed ${snapshot.sessions === 1 ? 'session' : 'sessions'} · ${snapshot.landedRate === null ? '—' : `${Math.round(snapshot.landedRate * 100)}%`} landed`}</small></span>
+        <span><strong>{t('training.home.progressEntry.label')}</strong><small>{snapshot.sessions === 0 ? t('training.home.progressEntry.empty') : tn('training.home.progressEntry.summary', snapshot.sessions, { percent: snapshot.landedRate === null ? '—' : `${Math.round(snapshot.landedRate * 100)}%` })}</small></span>
         <span aria-hidden>→</span>
       </button>
-      <p className="vt-home-note">Microphone audio is analysed live and is never saved.</p>
+      <p className="vt-home-note">{t('training.home.micNote')}</p>
     </main>
   )
 }
@@ -854,28 +885,28 @@ function TrainingHome({
 function TrainingProgressScreen({ progress, onBack }: { progress: TrainingProgress; onBack: () => void }): React.JSX.Element {
   const headingRef = useRouteHeadingFocus()
   const snapshot = summarizeTrainingProgress(progress)
-  const tendency = snapshot.tendency === 'not-enough-pitch' ? 'Not enough pitch data yet' : snapshot.tendency === 'centered' ? 'In tune overall' : `Usually ${snapshot.tendency}`
+  const tendency = snapshot.tendency === 'not-enough-pitch' ? t('training.tendency.notEnough') : snapshot.tendency === 'centered' ? t('training.tendency.centered') : t('training.tendency.usually', { word: tendencyWord(snapshot.tendency) })
   return (
     <main className="vt-screen vt-summary vt-progress-screen">
       <header className="vt-page-head">
-        <button type="button" className="vt-back" onClick={onBack}>← Training</button>
-        <p className="vt-eyebrow">Practice history</p>
-        <h1 ref={headingRef} tabIndex={-1}>Progress</h1>
-        <p>Completed sessions only. Your microphone audio is never stored.</p>
+        <button type="button" className="vt-back" onClick={onBack}>{t('training.nav.backToTraining')}</button>
+        <p className="vt-eyebrow">{t('training.progress.eyebrow')}</p>
+        <h1 ref={headingRef} tabIndex={-1}>{t('training.progress.heading')}</h1>
+        <p>{t('training.progress.subheading')}</p>
       </header>
       {snapshot.sessions === 0 ? (
-        <section className="vt-progress-empty"><h2>No completed sessions yet</h2><p>Complete an exercise to build your first snapshot.</p><button type="button" className="pill primary" onClick={onBack}>Choose an exercise</button></section>
+        <section className="vt-progress-empty"><h2>{t('training.progress.empty.heading')}</h2><p>{t('training.progress.empty.body')}</p><button type="button" className="pill primary" onClick={onBack}>{t('training.progress.empty.cta')}</button></section>
       ) : (
         <>
-          <div className="vt-summary-strip" aria-label="Training progress statistics">
-            <SummaryMetric label="Completed sessions" value={`${snapshot.sessions}`} />
-            <SummaryMetric label="On target or close" value={snapshot.landedRate === null ? '—' : `${Math.round(snapshot.landedRate * 100)}%`} />
-            <SummaryMetric label="Pitch tendency" value={tendency} />
-            <SummaryMetric label="Voice detected" value={formatRatio(snapshot.voicedRatio)} />
-            <SummaryMetric label="Pitch held steady" value={formatRatio(snapshot.stableRatio)} />
+          <div className="vt-summary-strip" aria-label={t('training.progress.ariaStatistics')}>
+            <SummaryMetric label={t('training.progress.metric.completedSessions')} value={`${snapshot.sessions}`} />
+            <SummaryMetric label={t('training.progress.metric.onTargetOrClose')} value={snapshot.landedRate === null ? '—' : `${Math.round(snapshot.landedRate * 100)}%`} />
+            <SummaryMetric label={t('training.progress.metric.pitchTendency')} value={tendency} />
+            <SummaryMetric label={t('training.metric.voiceDetected')} value={formatRatio(snapshot.voicedRatio)} />
+            <SummaryMetric label={t('training.metric.pitchHeldSteady')} value={formatRatio(snapshot.stableRatio)} />
           </div>
-          <section className="vt-weaknesses" aria-labelledby="vt-focus-next"><h2 id="vt-focus-next">Useful next focus</h2><ProgressWeakness label="Exercise types" values={snapshot.weakerExercises.map(readableWeakness)} /><ProgressWeakness label="Scale degrees" values={snapshot.weakerScaleDegrees.map((degree) => `Degree ${degree}`)} /><ProgressWeakness label="Intervals" values={snapshot.weakerIntervals.map(readableIntervalWeakness)} /><ProgressWeakness label="Chord roles" values={snapshot.weakerChordRoles.map(readableWeakness)} /></section>
-          <section className="vt-recent" aria-labelledby="vt-recent-title"><h2 id="vt-recent-title">Recent sessions</h2><ol>{progress.recent.map((item) => <li key={item.sessionId}><span>{new Date(item.completedAt).toLocaleDateString()}</span><strong>{keyName(item.key)} · {readableWeakness(item.exercise)}</strong><em>{item.onTarget + item.close} of {item.attempts} landed</em></li>)}</ol></section>
+          <section className="vt-weaknesses" aria-labelledby="vt-focus-next"><h2 id="vt-focus-next">{t('training.progress.focus.heading')}</h2><ProgressWeakness label={t('training.progress.focus.exerciseTypes')} values={snapshot.weakerExercises.map(readableWeakness)} /><ProgressWeakness label={t('training.progress.focus.scaleDegrees')} values={snapshot.weakerScaleDegrees.map((degree) => t('training.progress.focus.degree', { n: degree }))} /><ProgressWeakness label={t('training.exercise.interval.label')} values={snapshot.weakerIntervals.map(readableIntervalWeakness)} /><ProgressWeakness label={t('training.progress.focus.chordRoles')} values={snapshot.weakerChordRoles.map(readableWeakness)} /></section>
+          <section className="vt-recent" aria-labelledby="vt-recent-title"><h2 id="vt-recent-title">{t('training.progress.recent.heading')}</h2><ol>{progress.recent.map((item) => <li key={item.sessionId}><span>{new Date(item.completedAt).toLocaleDateString(formatLocale())}</span><strong>{keyLabel(keyName(item.key))} · {readableWeakness(item.exercise)}</strong><em>{t('training.progress.recent.landed', { landed: item.onTarget + item.close, attempts: item.attempts })}</em></li>)}</ol></section>
         </>
       )}
     </main>
@@ -883,7 +914,7 @@ function TrainingProgressScreen({ progress, onBack }: { progress: TrainingProgre
 }
 
 function ProgressWeakness({ label, values }: { label: string; values: readonly string[] }): React.JSX.Element {
-  return <div><span>{label}</span><strong>{values.length === 0 ? 'More sessions needed' : values.join(', ')}</strong></div>
+  return <div><span>{label}</span><strong>{values.length === 0 ? t('training.progress.weakness.needMore') : values.join(', ')}</strong></div>
 }
 
 function TrainingSetup({
@@ -916,7 +947,7 @@ function TrainingSetup({
   useEffect(() => {
     if (!micAvailable && setup.taskMode !== 'identify') onChange({ taskMode: 'identify' })
   }, [micAvailable, onChange, setup.taskMode])
-  const exercise = EXERCISES.find((item) => item.value === setup.exercise)!
+  const exercise = trainingExercises().find((item) => item.value === setup.exercise)!
   const key = { tonicPc: setup.tonicPc, mode: setup.keyMode } as const
   const { intervalsRequired, chordsRequired, directionUsed } = trainingSetupRequirements(setup)
   const invalidSelection =
@@ -928,28 +959,28 @@ function TrainingSetup({
     <main className="vt-screen vt-setup">
       {audioBlocked && <TrainingAudioLeaseNotice copy={audioBlockedCopy} />}
       <header className="vt-page-head">
-        <button type="button" className="vt-back" onClick={onBack}>← Training</button>
-        <p className="vt-eyebrow">Session setup</p>
+        <button type="button" className="vt-back" onClick={onBack}>{t('training.nav.backToTraining')}</button>
+        <p className="vt-eyebrow">{t('training.setup.eyebrow')}</p>
         <h1>{exercise.label}</h1>
       </header>
       <div className="vt-setup-grid">
         <fieldset className="vt-fieldset">
-          <legend>Musical context</legend>
+          <legend>{t('training.setup.legend.musicalContext')}</legend>
           <div className="vt-form-row">
-            <label htmlFor="vt-key">Key</label>
+            <label htmlFor="vt-key">{t('training.setup.label.key')}</label>
             <div className="vt-inline-fields">
               <select id="vt-key" value={setup.tonicPc} onChange={(event) => onChange({ tonicPc: Number(event.target.value) })}>
                 {KEY_NAMES.map((name, pitchClass) => <option value={pitchClass} key={name}>{name}</option>)}
               </select>
-              <select aria-label="Key mode" value={setup.keyMode} onChange={(event) => onChange({ keyMode: event.target.value as 'major' | 'minor' })}>
-                <option value="major">Major</option>
-                <option value="minor">Minor</option>
+              <select aria-label={t('training.setup.ariaLabel.keyMode')} value={setup.keyMode} onChange={(event) => onChange({ keyMode: event.target.value as 'major' | 'minor' })}>
+                <option value="major">{t('training.setup.option.major')}</option>
+                <option value="minor">{t('training.setup.option.minor')}</option>
               </select>
             </div>
           </div>
           <div className="vt-form-row">
-            <span className="vt-label">Task</span>
-            <div className="vt-segment" role="group" aria-label="Task mode">
+            <span className="vt-label">{t('training.setup.label.task')}</span>
+            <div className="vt-segment" role="group" aria-label={t('training.setup.ariaLabel.taskMode')}>
               {(['imitate', 'find', 'identify'] as const).map((mode) => (
                 <button
                   type="button"
@@ -959,26 +990,26 @@ function TrainingSetup({
                   disabled={!micAvailable && mode !== 'identify'}
                   onClick={() => onChange({ taskMode: mode })}
                 >
-                  {mode === 'imitate' ? 'Imitate' : mode === 'find' ? 'Find the note yourself' : 'Listen and choose'}
+                  {mode === 'imitate' ? t('training.setup.task.imitate') : mode === 'find' ? t('training.setup.task.find') : t('training.setup.task.identify')}
                 </button>
               ))}
             </div>
             <p className="vt-help">
               {setup.taskMode === 'imitate'
-                ? 'Hear the complete answer, then sing it back.'
+                ? t('training.setup.taskHelp.imitate')
                 : setup.taskMode === 'find'
-                  ? 'Hear the key or starting note, then find the answer yourself.'
-                  : 'Hear the question and choose an answer. The microphone stays off.'}
+                  ? t('training.setup.taskHelp.find')
+                  : t('training.setup.taskHelp.identify')}
             </p>
-            {!micAvailable && <p className="vt-inline-error">No microphone is available. Listen and choose still works as ear-only practice.</p>}
+            {!micAvailable && <p className="vt-inline-error">{t('training.setup.error.noMic')}</p>}
           </div>
           {directionUsed && (
             <div className="vt-form-row">
-              <span className="vt-label">Direction</span>
-              <div className="vt-segment" role="group" aria-label="Direction">
+              <span className="vt-label">{t('training.setup.label.direction')}</span>
+              <div className="vt-segment" role="group" aria-label={t('training.setup.ariaLabel.direction')}>
                 {(['ascending', 'descending', 'both'] as const).map((direction) => (
                   <button type="button" key={direction} className={setup.direction === direction ? 'active' : ''} aria-pressed={setup.direction === direction} onClick={() => onChange({ direction })}>
-                    {direction[0].toUpperCase() + direction.slice(1)}
+                    {capitalize(t(`training.word.${direction}`))}
                   </button>
                 ))}
               </div>
@@ -987,24 +1018,24 @@ function TrainingSetup({
         </fieldset>
 
         <fieldset className="vt-fieldset">
-          <legend>Your singing range</legend>
-          <p className="vt-help">Use today’s easy working notes, not your maximum range.</p>
+          <legend>{t('training.setup.legend.range')}</legend>
+          <p className="vt-help">{t('training.setup.rangeHelp')}</p>
           <label className="vt-range-label" htmlFor="vt-low">
-            <span>Lowest note</span><output>{midiNoteName(setup.lowMidi, key)}</output>
+            <span>{t('training.setup.label.lowestNote')}</span><output>{midiNoteName(setup.lowMidi, key)}</output>
           </label>
           <input id="vt-low" type="range" min="36" max={setup.highMidi - 1} value={setup.lowMidi} onChange={(event) => onChange({ lowMidi: Number(event.target.value) })} />
           <label className="vt-range-label" htmlFor="vt-high">
-            <span>Highest note</span><output>{midiNoteName(setup.highMidi, key)}</output>
+            <span>{t('training.setup.label.highestNote')}</span><output>{midiNoteName(setup.highMidi, key)}</output>
           </label>
           <input id="vt-high" type="range" min={setup.lowMidi + 1} max="84" value={setup.highMidi} onChange={(event) => onChange({ highMidi: Number(event.target.value) })} />
         </fieldset>
 
         {intervalsRequired && (
           <fieldset className="vt-fieldset vt-wide">
-            <legend>Intervals</legend>
+            <legend>{t('training.exercise.interval.label')}</legend>
             <div className="vt-check-row">
               {[2, 3, 4, 5, 6, 7, 8].map((size) => (
-                <ToggleCheck key={size} checked={setup.intervalSizes.includes(size)} label={INTERVAL_LABELS[size - 1]} short={`${size}`} onChange={() => onChange({ intervalSizes: toggleNumber(setup.intervalSizes, size) })} />
+                <ToggleCheck key={size} checked={setup.intervalSizes.includes(size)} label={intervalLabel(size)} short={`${size}`} onChange={() => onChange({ intervalSizes: toggleNumber(setup.intervalSizes, size) })} />
               ))}
             </div>
           </fieldset>
@@ -1012,28 +1043,28 @@ function TrainingSetup({
 
         {chordsRequired && (
           <fieldset className="vt-fieldset vt-wide">
-            <legend>Chord degrees</legend>
+            <legend>{t('training.setup.legend.chordDegrees')}</legend>
             <div className="vt-check-row">
               {[1, 2, 3, 4, 5, 6, 7].map((degree) => (
-                <ToggleCheck key={degree} checked={setup.chordDegrees.includes(degree)} label={`Scale degree ${degree}`} short={`${degree}`} onChange={() => onChange({ chordDegrees: toggleNumber(setup.chordDegrees, degree) })} />
+                <ToggleCheck key={degree} checked={setup.chordDegrees.includes(degree)} label={t('training.setup.chordDegreeLabel', { n: degree })} short={`${degree}`} onChange={() => onChange({ chordDegrees: toggleNumber(setup.chordDegrees, degree) })} />
               ))}
             </div>
           </fieldset>
         )}
 
         <fieldset className="vt-fieldset vt-wide vt-practice-settings">
-          <legend>Common practice settings</legend>
+          <legend>{t('training.setup.legend.practiceSettings')}</legend>
           <div className="vt-setting-block">
             <div className="vt-setting-head">
-              <div><span>Note playback volume</span><strong>{referencePercent}%</strong></div>
+              <div><span>{t('training.setup.label.notePlaybackVolume')}</span><strong>{referencePercent}%</strong></div>
               <button type="button" className="pill primary vt-test-note" disabled={audioBlocked} aria-busy={testingReference} onClick={onTestReference}>
-                {testingReference ? 'Playing C4…' : '▶ Test C4'}
+                {testingReference ? t('training.setup.testNote.playing') : t('training.setup.testNote.idle')}
               </button>
             </div>
             <div className="vt-volume-control">
-              <button type="button" aria-label="Lower reference volume" onClick={() => onPracticeSettingsChange({ referenceVolume: practiceSettings.referenceVolume - 0.1 })}>−</button>
+              <button type="button" aria-label={t('training.setup.ariaLabel.lowerVolume')} onClick={() => onPracticeSettingsChange({ referenceVolume: practiceSettings.referenceVolume - 0.1 })}>−</button>
               <input
-                aria-label="Note playback volume"
+                aria-label={t('training.setup.ariaLabel.notePlaybackVolume')}
                 type="range"
                 min={TRAINING_REFERENCE_VOLUME_MIN}
                 max={TRAINING_REFERENCE_VOLUME_MAX}
@@ -1041,13 +1072,13 @@ function TrainingSetup({
                 value={practiceSettings.referenceVolume}
                 onChange={(event) => onPracticeSettingsChange({ referenceVolume: Number(event.target.value) })}
               />
-              <button type="button" aria-label="Raise reference volume" onClick={() => onPracticeSettingsChange({ referenceVolume: practiceSettings.referenceVolume + 0.1 })}>+</button>
+              <button type="button" aria-label={t('training.setup.ariaLabel.raiseVolume')} onClick={() => onPracticeSettingsChange({ referenceVolume: practiceSettings.referenceVolume + 0.1 })}>+</button>
             </div>
-            <p className="vt-help">20–200% · saved for every exercise</p>
+            <p className="vt-help">{t('training.setup.help.volumeRange')}</p>
           </div>
           <div className="vt-setting-block">
-            <div className="vt-setting-head"><div><span>Pitch tolerance</span><strong>±{practiceSettings.pitchWindowCents}¢</strong></div></div>
-            <div className="vt-pitch-options" role="group" aria-label="Pitch tolerance">
+            <div className="vt-setting-head"><div><span>{t('training.setup.label.pitchTolerance')}</span><strong>±{practiceSettings.pitchWindowCents}¢</strong></div></div>
+            <div className="vt-pitch-options" role="group" aria-label={t('training.setup.ariaLabel.pitchTolerance')}>
               {TRAINING_PITCH_WINDOW_OPTIONS.map((cents) => (
                 <button
                   type="button"
@@ -1058,21 +1089,21 @@ function TrainingSetup({
                 >±{cents}¢</button>
               ))}
             </div>
-            <p className="vt-help">Stay inside this tolerance for {TRAINING_HOLD_MS / 1_000} seconds to advance.</p>
+            <p className="vt-help">{t('training.setup.help.pitchTolerance', { seconds: TRAINING_HOLD_MS / 1_000 })}</p>
           </div>
         </fieldset>
       </div>
-      {(error || invalidSelection) && <p className="vt-error" role="alert">{error ?? 'Choose at least one item for this session.'}</p>}
+      {(error || invalidSelection) && <p className="vt-error" role="alert">{error ?? t('training.setup.error.chooseOne')}</p>}
       <footer className="vt-setup-footer">
         <label className="vt-length">
-          <span>Exercises</span>
+          <span>{t('training.setup.label.exercises')}</span>
           <select value={setup.length} onChange={(event) => onChange({ length: Number(event.target.value) })}>
             {lengthOptions.map((length) => (
               <option key={length} value={length} aria-label={trainingLengthOptionLabel(length)}>{length}</option>
             ))}
           </select>
         </label>
-        <button type="button" className="pill primary" disabled={invalidSelection || audioBlocked} onClick={onStart}>Start practice</button>
+        <button type="button" className="pill primary" disabled={invalidSelection || audioBlocked} onClick={onStart}>{t('training.setup.startPractice')}</button>
       </footer>
     </main>
   )
@@ -1162,22 +1193,22 @@ function TrainingSession({
         <button
           type="button"
           className="vt-back vt-session-back"
-          aria-label={preparation ? 'Back to song' : 'End session'}
+          aria-label={preparation ? t('training.session.aria.backToSong') : t('training.session.aria.endSession')}
           onClick={preparation ? onBackToSong : onExit}
         >
           <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24">
             <path d="m15 18-6-6 6-6" />
           </svg>
         </button>
-        <div className="vt-progress-copy" aria-label={`Exercise ${selected.displayNumber} of ${session.prompts.length}`}>
+        <div className="vt-progress-copy" aria-label={t('training.session.aria.exerciseProgress', { current: selected.displayNumber, total: session.prompts.length })}>
           <span aria-hidden="true">{selected.displayNumber} / {session.prompts.length}</span>
         </div>
       </header>
       <section className="vt-stage">
         <div className="vt-target-stage">
-          <p className="vt-eyebrow">{keyName(session.config.key)} · {trainingPromptKindLabel(prompt, revealAnswer)}</p>
+          <p className="vt-eyebrow">{keyLabel(keyName(session.config.key))} · {trainingPromptKindLabel(prompt, revealAnswer)}</p>
           {prompt.targets.length > 1 && (
-            <div className="vt-target-sequence" aria-label="Target notes">
+            <div className="vt-target-sequence" aria-label={t('training.session.aria.targetNotes')}>
               {prompt.targets.map((item, index) => <span key={`${item.midi}-${index}`} className={index === activeTargetIndex ? 'active' : ''}>{showTargetNotes ? item.noteName : '?'}</span>)}
             </div>
           )}
@@ -1185,8 +1216,8 @@ function TrainingSession({
         </div>
         {state.exercisePhase === 'ready' && (
           <div className="vt-ready">
-            <p>{state.error ?? (state.interrupted ? 'Practice paused. Continue when you are ready.' : 'Preparing your exercise…')}</p>
-            {(state.error || state.interrupted) && <button ref={readyButtonRef} data-training-focus="ready-action" type="button" className="pill primary vt-main-action" disabled={beginBusy || audioBlocked} aria-busy={beginBusy} onClick={onBegin}>Continue practice</button>}
+            <p>{state.error ?? (state.interrupted ? t('training.session.ready.paused') : t('training.session.ready.preparing'))}</p>
+            {(state.error || state.interrupted) && <button ref={readyButtonRef} data-training-focus="ready-action" type="button" className="pill primary vt-main-action" disabled={beginBusy || audioBlocked} aria-busy={beginBusy} onClick={onBegin}>{t('training.session.readyAction.continue')}</button>}
           </div>
         )}
         {acknowledgementResult && acknowledgementPrompt && (
@@ -1203,24 +1234,24 @@ function TrainingSession({
         {state.error && <p className="vt-error" role="alert">{state.error}</p>}
       </section>
       {state.exercisePhase === 'respond' && prompt.taskMode !== 'identify' && (
-        <div className="vt-transport" role="group" aria-label="Practice controls">
-          <button className="vt-transport-action" type="button" aria-label="Replay target note" disabled={audioBlocked} onClick={onReplay}>
+        <div className="vt-transport" role="group" aria-label={t('training.transport.ariaControls')}>
+          <button className="vt-transport-action" type="button" aria-label={t('training.transport.aria.replay')} disabled={audioBlocked} onClick={onReplay}>
             <span className="vt-transport-icon" aria-hidden>
               <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 1-2.34-5.66L20 7.68" /><path d="M20 3v4.68h-4.68" /></svg>
             </span>
-            <span className="vt-transport-label">Replay</span>
+            <span className="vt-transport-label">{t('training.transport.label.replay')}</span>
           </button>
-          <div className="vt-transport-status" role="status" aria-label="Microphone listening">
+          <div className="vt-transport-status" role="status" aria-label={t('training.transport.aria.listeningStatus')}>
             <span className="vt-listening-orb" aria-hidden>
               <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M6 11a6 6 0 0 0 12 0M12 17v4M9 21h6" /></svg>
             </span>
-            <strong>Listening</strong>
+            <strong>{t('training.transport.listening')}</strong>
           </div>
-          <button className="vt-transport-action" type="button" aria-label="Skip this note" onClick={onSkip}>
+          <button className="vt-transport-action" type="button" aria-label={t('training.transport.aria.skip')} onClick={onSkip}>
             <span className="vt-transport-icon" aria-hidden>
               <svg viewBox="0 0 24 24"><path d="m9 6 6 6-6 6" /></svg>
             </span>
-            <span className="vt-transport-label">Skip</span>
+            <span className="vt-transport-label">{t('training.transport.label.skip')}</span>
           </button>
         </div>
       )}
@@ -1230,10 +1261,10 @@ function TrainingSession({
 
 function CueListening({ prompt, countdown }: { prompt: TrainingPrompt; countdown: number | null }): React.JSX.Element {
   const instruction = prompt.taskMode === 'identify'
-    ? 'Get ready. Listen and choose when the countdown ends.'
+    ? t('training.cue.identify')
     : prompt.taskMode === 'imitate'
-      ? 'Get ready. Listen now, then sing when the countdown ends.'
-      : 'Get ready. Remember the starting note, then sing when the countdown ends.'
+      ? t('training.cue.imitate')
+      : t('training.cue.find')
   return (
     <div className="vt-cue-state">
       <strong className="vt-countdown" aria-hidden>{countdown ?? '•'}</strong>
@@ -1247,22 +1278,22 @@ function PitchRunway({ live, pitchLock, pitchWindowCents, coarseGuidance }: { li
   const zoneWidth = Math.max(5, pitchWindowCents / 2)
   const style = { '--runway-position': `${position}%`, '--runway-zone-width': `${zoneWidth}%` } as CSSProperties
   const pitchCopy = live?.cents === null || live === null
-    ? `Sing the note. Hold within ±${pitchWindowCents}¢ for ${TRAINING_HOLD_MS / 1_000} seconds.`
+    ? t('training.session.runway.holdInstruction', { cents: pitchWindowCents, seconds: TRAINING_HOLD_MS / 1_000 })
     : Math.abs(live.cents) <= pitchWindowCents
-      ? 'In tune — keep holding'
-      : live.cents > 0 ? 'A little lower' : 'A little higher'
+      ? t('training.session.runway.inTune')
+      : live.cents > 0 ? t('training.session.runway.lower') : t('training.session.runway.higher')
   return (
     <div className="vt-runway-wrap">
-      <div className="vt-runway-labels"><span>Flat</span><strong>±{pitchWindowCents}¢</strong><span>Sharp</span></div>
+      <div className="vt-runway-labels"><span>{t('training.session.pitch.flat')}</span><strong>±{pitchWindowCents}¢</strong><span>{t('training.session.pitch.sharp')}</span></div>
       <div className="vt-runway" style={style}>
         <i className="vt-runway-line" aria-hidden />
         {shouldShowTrainingPitchMarker(live) && <i className="vt-runway-marker" aria-hidden />}
       </div>
       <div className="vt-live-readout">
-        <div><span>You are singing</span><strong>{live?.detectedName ?? '—'}</strong></div>
-        <div><strong>{live?.cents === null || live === null ? '' : `${Math.abs(Math.round(live.cents))}¢ ${live.guidance.toLowerCase()}`}</strong></div>
+        <div><span>{t('training.session.runway.youAreSinging')}</span><strong>{live?.detectedName ?? '—'}</strong></div>
+        <div><strong>{live?.cents === null || live === null ? '' : `${Math.abs(Math.round(live.cents))}¢ ${pitchGuidanceLabel(live.guidance).toLowerCase()}`}</strong></div>
       </div>
-      <div className="vt-hold-progress" role="progressbar" aria-label="Hold progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pitchLock.progress * 100)}>
+      <div className="vt-hold-progress" role="progressbar" aria-label={t('training.session.runway.ariaHoldProgress')} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pitchLock.progress * 100)}>
         <span style={{ width: `${pitchLock.progress * 100}%` }} />
       </div>
       <strong className="vt-pitch-guidance">{pitchCopy}</strong>
@@ -1275,7 +1306,7 @@ function IdentifyAnswers({ prompt, disabled, firstAnswerRef, onAnswer }: { promp
   const answers = identifyAnswerOptions(prompt)
   return (
     <fieldset className="vt-answer-set" data-training-focus="identify-answer-set">
-      <legend>What did you hear?</legend>
+      <legend>{t('training.session.identify.legend')}</legend>
       <div className="vt-answer-grid">
         {answers.map(({ label, detail, answer }, index) => (
           <button ref={index === 0 ? firstAnswerRef : undefined} data-training-focus={index === 0 ? 'identify-answer' : undefined} type="button" key={`${label}-${index}`} disabled={disabled} aria-disabled={disabled} onClick={() => onAnswer(answer)}>
@@ -1317,21 +1348,21 @@ function TrainingSummary({ session, preparation, audioBlocked, audioBlockedCopy,
     <main className="vt-screen vt-summary">
       {audioBlocked && <TrainingAudioLeaseNotice copy={audioBlockedCopy} />}
       <header className="vt-page-head">
-        <p className="vt-eyebrow">Session complete</p>
+        <p className="vt-eyebrow">{t('training.summary.eyebrow')}</p>
         <h1 ref={headingRef} tabIndex={-1} aria-describedby="vt-summary-description">
-          {summary.correct + summary.close} of {summary.attempts} landed{finalCopy ? ` · ${finalCopy.heading}` : ''}
+          {t('training.summary.headingTemplate', { landed: summary.correct + summary.close, attempts: summary.attempts })}{finalCopy ? ` · ${finalCopy.heading}` : ''}
         </h1>
         <p id="vt-summary-description">
           {trainingSummaryPitchCopy(session, summary)}{finalCopy ? ` ${finalCopy.detail}` : ''}{finalAnswer ? ` ${finalAnswer}` : ''}
         </p>
       </header>
       {finalResult && finalPrompt && <ResultAcknowledgement result={finalResult} prompt={finalPrompt} announce={false} />}
-      <div className="vt-summary-strip" aria-label="Session metrics">
-        <SummaryMetric label="On target" value={`${summary.correct}`} />
-        <SummaryMetric label="Close" value={`${summary.close}`} />
-        <SummaryMetric label="Average error · on target or close" value={formatCents(summary.averageAbsoluteCents)} />
-        <SummaryMetric label="Voice detected" value={formatRatio(summary.voicedRatio)} />
-        <SummaryMetric label="Pitch held steady" value={formatRatio(summary.stableRatio)} />
+      <div className="vt-summary-strip" aria-label={t('training.summary.ariaMetrics')}>
+        <SummaryMetric label={t('training.session.pitch.onTarget')} value={`${summary.correct}`} />
+        <SummaryMetric label={t('training.metric.close')} value={`${summary.close}`} />
+        <SummaryMetric label={t('training.metric.averageError')} value={formatCents(summary.averageAbsoluteCents)} />
+        <SummaryMetric label={t('training.metric.voiceDetected')} value={formatRatio(summary.voicedRatio)} />
+        <SummaryMetric label={t('training.metric.pitchHeldSteady')} value={formatRatio(summary.stableRatio)} />
       </div>
       <ol className="vt-outcomes">
         {summary.outcomes.map((outcome, index) => (
@@ -1339,9 +1370,9 @@ function TrainingSummary({ session, preparation, audioBlocked, audioBlockedCopy,
         ))}
       </ol>
       <div className="vt-summary-actions">
-        <button type="button" className="pill primary" disabled={audioBlocked} onClick={onRestart}>Restart</button>
-        <button type="button" className="pill ghost" onClick={onBack}>Back to training</button>
-        {preparation && <button type="button" className="pill ghost" onClick={onBackToSong}>Back to song</button>}
+        <button type="button" className="pill primary" disabled={audioBlocked} onClick={onRestart}>{t('training.summary.restart')}</button>
+        <button type="button" className="pill ghost" onClick={onBack}>{t('training.summary.backToTraining')}</button>
+        {preparation && <button type="button" className="pill ghost" onClick={onBackToSong}>{t('training.summary.backToSong')}</button>}
       </div>
     </main>
   )
@@ -1356,7 +1387,22 @@ function TrainingAudioLeaseNotice({ copy }: { readonly copy: string }): React.JS
 }
 
 function TrainingEmpty({ onExit }: { onExit: () => void }): React.JSX.Element {
-  return <main className="vt-screen vt-empty"><h1>No exercise is ready</h1><p>Choose a training focus and a comfortable range first.</p><button type="button" className="pill primary" onClick={onExit}>Back to training</button></main>
+  return <main className="vt-screen vt-empty"><h1>{t('training.empty.heading')}</h1><p>{t('training.empty.body')}</p><button type="button" className="pill primary" onClick={onExit}>{t('training.summary.backToTraining')}</button></main>
+}
+
+/** {@link LivePitch.guidance} is kept as a stable English value for comparison
+ * (see accessiblePitchGuidance); translate only at display. */
+function pitchGuidanceLabel(guidance: LivePitch['guidance']): string {
+  switch (guidance) {
+    case 'On target':
+      return t('training.session.pitch.onTarget')
+    case 'Sharp':
+      return t('training.session.pitch.sharp')
+    case 'Flat':
+      return t('training.session.pitch.flat')
+    case 'Listening':
+      return t('training.session.pitch.listening')
+  }
 }
 
 function livePitchFromLock(lock: TrainingPitchLockState, targetIndex: number, setup: DesktopTrainingSetup, pitchWindowCents: number): LivePitch {
@@ -1378,9 +1424,9 @@ function livePitchSignature(live: LivePitch): string {
 }
 
 function accessiblePitchGuidance(live: LivePitch, targetName: string): string {
-  if (live.midi === null) return `Listening for ${targetName}. No voice detected yet.`
-  if (live.stability !== 'Steady') return `Voice detected for ${targetName}. Hold the pitch steady.`
-  return `${live.guidance} for ${targetName}. Pitch steady.`
+  if (live.midi === null) return t('training.session.accessible.listeningFor', { target: targetName })
+  if (live.stability !== 'Steady') return t('training.session.accessible.voiceDetected', { target: targetName })
+  return t('training.session.accessible.pitchSteady', { guidance: pitchGuidanceLabel(live.guidance), target: targetName })
 }
 
 function toggleNumber(values: readonly number[], value: number): number[] {
@@ -1398,13 +1444,15 @@ function trainingOwnsForeground(): boolean {
 function microphoneErrorCopy(error: unknown): string {
   const named = error as { name?: string; message?: string }
   if (named.name === 'NotAllowedError' || named.name === 'SecurityError')
-    return 'Microphone access is blocked. Allow SingZ in system privacy settings, then try again.'
+    return t('training.error.mic.blocked')
   if (named.name === 'NotFoundError' || named.name === 'DevicesNotFoundError')
-    return 'No microphone was found. Connect one or use Listen and choose for ear-only practice.'
+    return t('training.error.mic.notFound')
   if (named.name === 'NotReadableError' || named.name === 'TrackStartError')
-    return 'The microphone is busy in another app. Close that app, then try again.'
+    return t('training.error.mic.busy')
   const message = named.message?.trim()
-  return message ? `Training audio could not start: ${message}` : 'Training audio could not start. Check your audio devices and try again.'
+  return message
+    ? t('training.error.audio.startFailedWithMessage', { message })
+    : t('training.error.audio.startFailedGeneric')
 }
 
 function formatCents(value: number | null): string {
@@ -1428,13 +1476,27 @@ function useRouteHeadingFocus(): RefObject<HTMLHeadingElement | null> {
   return ref
 }
 
+const WEAKNESS_KEY_BY_VALUE: Readonly<Record<string, Parameters<typeof t>[0]>> = Object.freeze({
+  note: 'training.kind.note',
+  'scale-degree': 'training.kind.scaleDegree',
+  interval: 'training.kind.interval',
+  'chord-tone': 'training.kind.chordTone',
+  arpeggio: 'training.kind.arpeggio',
+  root: 'training.word.root',
+  third: 'training.word.third',
+  fifth: 'training.word.fifth'
+})
+
+/** `value` is a {@link TrainingExerciseKind} or {@link ChordToneRole}. */
 function readableWeakness(value: string): string {
-  return value.replaceAll('-', ' ').replace(/^./, (letter) => letter.toUpperCase())
+  const key = WEAKNESS_KEY_BY_VALUE[value]
+  return key ? capitalize(t(key)) : value.replaceAll('-', ' ').replace(/^./, (letter) => letter.toUpperCase())
 }
 
 function readableIntervalWeakness(value: string): string {
   const [number, direction] = value.split('-')
-  return `${INTERVAL_LABELS[Number(number) - 1] ?? `Interval ${number}`} ${direction ?? ''}`.trim()
+  const directionWord = direction === 'ascending' || direction === 'descending' ? t(`training.word.${direction}`) : (direction ?? '')
+  return `${intervalLabel(Number(number))} ${directionWord}`.trim()
 }
 
 function newTrainingSessionSeed(prefix: string): string {

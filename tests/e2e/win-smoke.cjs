@@ -28,14 +28,16 @@ const check = (cond, msg) => {
 const packaged = process.env.E2E_PACKAGED ? path.resolve(process.env.E2E_PACKAGED) : null
 const feed = process.env.E2E_FEED_URL ?? null
 
+// SINGZ_LANG: this leg finds buttons by their English text, and a machine
+// set to Russian or Chinese would otherwise launch the app in that language.
 const launch = (env = {}) =>
   _electron.launch(
     packaged
-      ? { executablePath: packaged, args: [], env: { ...process.env, SINGZ_MUTE: '1', ...env } }
+      ? { executablePath: packaged, args: [], env: { ...process.env, SINGZ_MUTE: '1', SINGZ_LANG: 'en', ...env } }
       : {
           args: [path.resolve('out/main/index.js')],
           executablePath: require('electron'),
-          env: { ...process.env, SINGZ_MUTE: '1', ...env }
+          env: { ...process.env, SINGZ_MUTE: '1', SINGZ_LANG: 'en', ...env }
         }
   )
 
@@ -186,10 +188,10 @@ const dismissSetup = async (page) => {
   // ---- settings: audio device pickers (fake capture devices) ----
   app = await launch({ SINGZ_FAKE_MIC: '1' })
   page = await app.firstWindow()
-  await page.waitForSelector('.pill.gear', { timeout: 60000 })
+  await page.waitForSelector('.pill.gear:not(.lang-trigger)', { timeout: 60000 })
   await dismissSetup(page)
   await page.evaluate(() => localStorage.removeItem('singz.audio'))
-  await page.click('.pill.gear')
+  await page.click('.pill.gear:not(.lang-trigger)')
   await page.waitForSelector('.settings-card', { timeout: 20000 })
   // the pickers fill asynchronously — done when the loading hint clears
   await page.waitForFunction(

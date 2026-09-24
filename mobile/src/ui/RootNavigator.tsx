@@ -5,6 +5,7 @@ import type { MultitrackEngine } from '../engine'
 import type { RouteLatency } from '../latency'
 import { log } from '../log'
 import type { ProjectDoc } from '../model'
+import { t } from '../i18n'
 import {
   flushMetronomeForLifecycle,
   MetronomeBackgroundFailureDelivery
@@ -178,7 +179,7 @@ function PlayerRemovalFence({
     () => () => {
       void flushMetronomeForLifecycle('player back', {
         onFailure: failure => {
-          if (rootMounted.current) Alert.alert('Metronome setting was not saved', failure)
+          if (rootMounted.current) Alert.alert(t('phone.app.metronomeNotSaved'), failure)
         }
       })
     },
@@ -215,7 +216,7 @@ export default function RootNavigator({
   const backgroundFailureDelivery = useRef<MetronomeBackgroundFailureDelivery | null>(null)
   if (backgroundFailureDelivery.current === null)
     backgroundFailureDelivery.current = new MetronomeBackgroundFailureDelivery(
-      failure => Alert.alert('Metronome setting was not saved', failure),
+      failure => Alert.alert(t('phone.app.metronomeNotSaved'), failure),
       undefined,
       AppState.currentState === 'active'
     )

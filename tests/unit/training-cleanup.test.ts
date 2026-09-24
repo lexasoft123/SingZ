@@ -4,9 +4,9 @@ import {
   awaitTrainingCleanupExit,
   confirmTrainingAudioStopped,
   queueTrainingSectionExit,
-  TRAINING_CLEANUP_AUDIO_BLOCKED_COPY,
-  TRAINING_CLEANUP_SETTINGS_BLOCKED_COPY,
-  TRAINING_CLEANUP_SONG_BLOCKED_COPY,
+  trainingCleanupAudioBlockedCopy,
+  trainingCleanupSettingsBlockedCopy,
+  trainingCleanupSongBlockedCopy,
   TrainingCleanupCoordinator
 } from '../../src/renderer/src/audio/training-cleanup'
 import { SongLoadRequestEpoch } from '../../src/renderer/src/training-ui-state'
@@ -305,9 +305,9 @@ describe('app-shell training cleanup lease', () => {
 
   it('keeps training cleanup guidance distinct from monitor/output recovery', () => {
     for (const copy of [
-      TRAINING_CLEANUP_SONG_BLOCKED_COPY,
-      TRAINING_CLEANUP_SETTINGS_BLOCKED_COPY,
-      TRAINING_CLEANUP_AUDIO_BLOCKED_COPY
+      trainingCleanupSongBlockedCopy(),
+      trainingCleanupSettingsBlockedCopy(),
+      trainingCleanupAudioBlockedCopy()
     ]) {
       expect(copy).toContain('Vocal training')
       expect(copy).not.toContain('output route')

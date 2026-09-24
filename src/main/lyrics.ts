@@ -27,6 +27,7 @@ import {
 import { stemsRoot } from './media'
 import { log } from './log'
 import { markFileDirty } from './sync-dirty'
+import { t } from '../shared/i18n'
 import {
   downloadFile,
   downloadQwen,
@@ -423,7 +424,7 @@ export class Transcriber {
   /** Apply a manually chosen LRCLIB record and cache it for this song. */
   async applyById(songPath: string, id: number, durationSec: number): Promise<LyricsResult> {
     const hit = await lyricsById(id, durationSec)
-    if (!hit) return { ok: false, error: 'That entry has no usable synced lyrics.' }
+    if (!hit) return { ok: false, error: t('main.error.entryNoUsableSyncedLyrics') }
     await this.writeCache(await this.lyricsFile(songPath), {
       source: 'lrclib',
       credit: hit.credit,
@@ -440,7 +441,7 @@ export class Transcriber {
    * phones pick the correction up like any other lyrics change.
    */
   async saveEdited(songPath: string, lines: LyricLine[], credit?: string): Promise<LyricsResult> {
-    if (lines.length === 0) return { ok: false, error: 'There are no lines to save.' }
+    if (lines.length === 0) return { ok: false, error: t('main.error.noLinesToSave') }
     try {
       await this.writeCache(await this.lyricsFile(songPath), {
         source: 'edited',
@@ -449,7 +450,7 @@ export class Transcriber {
       })
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      return { ok: false, error: `Could not save the lyrics: ${msg}` }
+      return { ok: false, error: t('main.error.couldNotSaveLyrics', { message: msg }) }
     }
     return { ok: true, cached: false, source: 'edited', credit, lines }
   }
@@ -471,15 +472,15 @@ export class Transcriber {
     allowDownload: boolean,
     onProgress: (p: LyricsProgress) => void
   ): Promise<LyricsResult> {
-    if (this.busy) return { ok: false, error: 'A lyrics job is already running.' }
-    if (draft.length === 0) return { ok: false, error: 'There are no lines to align.' }
+    if (this.busy) return { ok: false, error: t('main.error.lyricsJobAlreadyRunning') }
+    if (draft.length === 0) return { ok: false, error: t('main.error.noLinesToAlign') }
     onProgress({ stage: 'preparing', percent: 0 })
     const dir = await this.cacheDir(songPath)
     const vocals = await this.findVocals(songPath, dir)
     if (!vocals) {
       return {
         ok: false,
-        error: 'Split the song into stems first — alignment listens to the vocals track.'
+        error: t('main.error.splitFirstAlign')
       }
     }
     const refCount = draft.reduce((s, l) => s + l.words.length, 0)
@@ -489,7 +490,7 @@ export class Transcriber {
       if (!(await preciseCapable())) {
         return {
           ok: false,
-          error: 'Precise alignment runs through the splitter pack — install it in the model manager first.'
+          error: t('main.error.preciseNeedsPack')
         }
       }
       if (!(await exists(mmsModelPath()))) {
@@ -497,7 +498,7 @@ export class Transcriber {
           return {
             ok: false,
             needsModel: { sizeMb: mmsModelMb(), what: 'aligner' },
-            error: 'Precise alignment needs the multilingual aligner model.'
+            error: t('main.error.preciseNeedsAlignerModel')
           }
         }
         this.cancelled = false
@@ -511,9 +512,9 @@ export class Transcriber {
             this.abort.signal
           )
         } catch (err) {
-          if (this.cancelled) return { ok: false, cancelled: true, error: 'Cancelled.' }
+          if (this.cancelled) return { ok: false, cancelled: true, error: t('main.error.cancelled') }
           const msg = err instanceof Error ? err.message : String(err)
-          return { ok: false, error: `Could not download the aligner model: ${msg}` }
+          return { ok: false, error: t('main.error.couldNotDownloadAlignerModel', { message: msg }) }
         } finally {
           this.abort = null
         }
@@ -548,9 +549,9 @@ export class Transcriber {
           lines: aligned ? outcome.lines : draft
         }
       } catch (err) {
-        if (this.cancelled) return { ok: false, cancelled: true, error: 'Cancelled.' }
+        if (this.cancelled) return { ok: false, cancelled: true, error: t('main.error.cancelled') }
         const msg = err instanceof Error ? err.message : String(err)
-        return { ok: false, error: `Precise alignment failed: ${msg}` }
+        return { ok: false, error: t('main.error.preciseAlignmentFailed', { message: msg }) }
       } finally {
         this.child = null
       }
@@ -585,7 +586,7 @@ export class Transcriber {
     prefer: 'auto' | 'transcribe' | 'align' | 'precise',
     onProgress: (p: LyricsProgress) => void
   ): Promise<LyricsResult> {
-    if (this.busy) return { ok: false, error: 'A lyrics job is already running.' }
+    if (this.busy) return { ok: false, error: t('main.error.lyricsJobAlreadyRunning') }
 
     onProgress({ stage: 'preparing', percent: 0 })
     const dir = await this.cacheDir(songPath)
@@ -686,7 +687,7 @@ export class Transcriber {
     // 2) Fallback: on-device transcription of the vocals stem
     const vocals = await this.findVocals(songPath, dir)
     if (!vocals) {
-      return { ok: false, error: 'Split the song into stems first — lyrics are read from the vocals track.' }
+      return { ok: false, error: t('main.error.splitFirstLyrics') }
     }
 
     // Precise tier: CTC forced alignment through the torch splitter pack.
@@ -727,7 +728,7 @@ export class Transcriber {
       // IPC handlers return { ok: false }, they never throw
       const msg = err instanceof Error ? err.message : String(err)
       log('lyrics', `transcription failed: ${msg}`, 'error')
-      return { ok: false, error: `Transcription failed: ${msg}` }
+      return { ok: false, error: t('main.error.transcriptionFailed', { message: msg }) }
     }
     return { ok: true, cached: false, source: 'whisper', lines }
   }
@@ -765,7 +766,7 @@ export class Transcriber {
         res: {
           ok: false,
           needsEngine: true,
-          error: 'The lyrics engine is missing from this build.'
+          error: t('main.error.lyricsEngineMissing')
         }
       }
     }
@@ -776,7 +777,7 @@ export class Transcriber {
         res: {
           ok: false,
           needsModel: { sizeMb: await qwenMissingMb(), what: 'speech' },
-          error: 'Hearing the vocals needs the speech model.'
+          error: t('main.error.hearingNeedsSpeechModel')
         }
       }
     }
@@ -786,9 +787,9 @@ export class Transcriber {
       await downloadQwen((pct) => onProgress({ stage: 'downloading-model', percent: pct }), this.abort.signal)
       return { ok: true }
     } catch (err) {
-      if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: 'Cancelled.' } }
+      if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: t('main.error.cancelled') } }
       const msg = err instanceof Error ? err.message : String(err)
-      return { ok: false, res: { ok: false, error: `Could not download the speech model: ${msg}` } }
+      return { ok: false, res: { ok: false, error: t('main.error.couldNotDownloadSpeechModel', { message: msg }) } }
     } finally {
       this.abort = null
     }
@@ -866,12 +867,12 @@ export class Transcriber {
       const { env, p90 } = levelEnvelope(pcm)
       const chunks = planChunks(env, p90)
       if (chunks.length === 0) {
-        return { ok: false, res: { ok: false, error: 'No singing was found in the vocals track.' } }
+        return { ok: false, res: { ok: false, error: t('main.error.noSingingFound') } }
       }
       const code = guessLanguage(ref)
       const texts = await this.hear(vocals, dir, pcm, chunks, qwenLanguageName(code), (pct) =>
         onProgress({ stage: 'transcribing', percent: pct * 0.6 }), signal)
-      if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: 'Cancelled.' } }
+      if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: t('main.error.cancelled') } }
 
       // What was heard, as words — the verdict is a text question.
       const heard = linesFromChunks(texts).flatMap((l) => l.words)
@@ -882,8 +883,7 @@ export class Transcriber {
           ok: false,
           res: {
             ok: false,
-            error:
-              'Could not make out the vocals well enough to check the words. Precise alignment may still work.'
+            error: t('main.error.couldNotMakeOutVocals')
           }
         }
       }
@@ -916,9 +916,9 @@ export class Transcriber {
         (pct) => onProgress({ stage: 'transcribing', percent: 60 + pct * 0.4 }),
         signal
       )
-      if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: 'Cancelled.' } }
+      if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: t('main.error.cancelled') } }
       if (placed.length === 0) {
-        return { ok: false, res: { ok: false, error: 'Could not time the words against the vocals.' } }
+        return { ok: false, res: { ok: false, error: t('main.error.couldNotTimeWords') } }
       }
       const lines = retime(ref, placed, durationSec)
       // Only lines that carry a placement are evidence of a shift — the rest
@@ -953,10 +953,10 @@ export class Transcriber {
       )
       return { ok: true, outcome: { lines, check } }
     } catch (err) {
-      if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: 'Cancelled.' } }
+      if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: t('main.error.cancelled') } }
       const msg = err instanceof Error ? err.message : String(err)
       log('lyrics', `qwen align failed: ${msg}`, 'error')
-      return { ok: false, res: { ok: false, error: `Alignment failed: ${msg}` } }
+      return { ok: false, res: { ok: false, error: t('main.error.alignmentFailed', { message: msg }) } }
     } finally {
       this.abort = null
     }
@@ -978,7 +978,7 @@ export class Transcriber {
   ): Promise<{ ok: true; lines: LyricLine[] } | { ok: false; res: LyricsResult }> {
     const none: { ok: false; res: LyricsResult } = {
       ok: false,
-      res: { ok: false, error: 'No words were detected in the vocals.' }
+      res: { ok: false, error: t('main.error.noWordsDetected') }
     }
     this.cancelled = false
     this.abort = new AbortController()
@@ -996,7 +996,7 @@ export class Transcriber {
       log('lyrics', `qwen: ${chunks.length} sung stretches, ${Math.round(sung)}s of ${Math.round(durationSec)}s`)
       const texts = await this.hear(vocals, dir, pcm, chunks, null, (pct) =>
         onProgress({ stage: 'transcribing', percent: pct * 0.7 }), signal)
-      if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: 'Cancelled.' } }
+      if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: t('main.error.cancelled') } }
       const lines = linesFromChunks(texts)
       if (lines.length === 0) {
         log('lyrics', 'qwen: heard no words')
@@ -1019,13 +1019,13 @@ export class Transcriber {
           this.child = run.child
           const ctc = await run.done
           this.child = null
-          if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: 'Cancelled.' } }
+          if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: t('main.error.cancelled') } }
           const outcome = ctcOutcome(lines, ctc, durationSec)
           log('lyrics', `qwen: precise timing ${outcome.check.verdict} — ${outcome.check.matchedPct}% of the words placed`)
           if (outcome.check.verdict !== 'mismatch') return { ok: true, lines: outcome.lines }
         } catch (err) {
           this.child = null
-          if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: 'Cancelled.' } }
+          if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: t('main.error.cancelled') } }
           const msg = err instanceof Error ? err.message : String(err)
           log('lyrics', `qwen: precise timing failed (${msg}) — timing with Qwen's aligner`, 'warn')
         }
@@ -1043,17 +1043,17 @@ export class Transcriber {
         (pct) => onProgress({ stage: 'transcribing', percent: 70 + pct * 0.3 }),
         signal
       )
-      if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: 'Cancelled.' } }
+      if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: t('main.error.cancelled') } }
       if (placed.length === 0) {
-        return { ok: false, res: { ok: false, error: 'Could not time the transcribed words against the vocals.' } }
+        return { ok: false, res: { ok: false, error: t('main.error.couldNotTimeTranscribedWords') } }
       }
       log('lyrics', `qwen: ${placed.length} of ${heard} words placed by the aligner`)
       return { ok: true, lines: retime(lines, placed, durationSec) }
     } catch (err) {
-      if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: 'Cancelled.' } }
+      if (this.cancelled) return { ok: false, res: { ok: false, cancelled: true, error: t('main.error.cancelled') } }
       const msg = err instanceof Error ? err.message : String(err)
       log('lyrics', `transcription failed: ${msg}`, 'error')
-      return { ok: false, res: { ok: false, error: `Transcription failed: ${msg}` } }
+      return { ok: false, res: { ok: false, error: t('main.error.transcriptionFailed', { message: msg }) } }
     } finally {
       this.child = null
       this.abort = null
@@ -1114,7 +1114,7 @@ export class Transcriber {
     if (!(await preciseCapable())) {
       return {
         ok: false,
-        error: 'Precise alignment runs through the splitter pack — install it in the model manager first.'
+        error: t('main.error.preciseNeedsPack')
       }
     }
     if (!(await exists(mmsModelPath()))) {
@@ -1122,7 +1122,7 @@ export class Transcriber {
         return {
           ok: false,
           needsModel: { sizeMb: mmsModelMb(), what: 'aligner' },
-          error: 'Precise alignment needs the multilingual aligner model.'
+          error: t('main.error.preciseNeedsAlignerModel')
         }
       }
       this.cancelled = false
@@ -1136,9 +1136,9 @@ export class Transcriber {
           this.abort.signal
         )
       } catch (err) {
-        if (this.cancelled) return { ok: false, cancelled: true, error: 'Cancelled.' }
+        if (this.cancelled) return { ok: false, cancelled: true, error: t('main.error.cancelled') }
         const msg = err instanceof Error ? err.message : String(err)
-        return { ok: false, error: `Could not download the aligner model: ${msg}` }
+        return { ok: false, error: t('main.error.couldNotDownloadAlignerModel', { message: msg }) }
       } finally {
         this.abort = null
       }
@@ -1197,9 +1197,9 @@ export class Transcriber {
         lines
       }
     } catch (err) {
-      if (this.cancelled) return { ok: false, cancelled: true, error: 'Cancelled.' }
+      if (this.cancelled) return { ok: false, cancelled: true, error: t('main.error.cancelled') }
       const msg = err instanceof Error ? err.message : String(err)
-      return { ok: false, error: `Precise alignment failed: ${msg}` }
+      return { ok: false, error: t('main.error.preciseAlignmentFailed', { message: msg }) }
     } finally {
       this.child = null
     }

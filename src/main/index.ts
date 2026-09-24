@@ -33,10 +33,12 @@ import {
 } from './projects'
 import { gdriveConfigured, gdriveSignedIn, gdriveSignIn, gdriveSignOut, gdriveSync } from './gdrive'
 import { readSettings, writeSettings } from './settings'
+import { registerLocale } from './locale'
 import { loadTrainingProgress, recordTrainingCompletion, saveTrainingPreferences } from './training-progress'
 import { hashFile, writeInputWav } from './separation'
 import type { ModelsProgress, ProjectSettings } from '../shared/types'
 import { allowRoot, isAllowed, stemsRoot } from './media'
+import { t } from '../shared/i18n'
 import { registerSource, registerTrack } from './source'
 import { log, logEntries, logSessions, readLogSession, saveLog, startSessionLog } from './log'
 import { clearDirty, dirtyDirs, dirtySeq, dirtyState, isDirty, markProjectDirty, onDirty } from './sync-dirty'
@@ -299,7 +301,7 @@ function registerIpc(): void {
 
   ipcMain.handle('separation:start', async (e, raw: string) => {
     const full = resolve(String(raw))
-    if (!isAllowed(full)) return { ok: false, error: 'File is not registered.' }
+    if (!isAllowed(full)) return { ok: false, error: t('main.error.fileNotRegistered') }
     const send = (p: SeparationProgress): void => {
       if (!e.sender.isDestroyed()) e.sender.send('separation:progress', p)
     }
@@ -318,7 +320,7 @@ function registerIpc(): void {
     'lyrics:get',
     async (e, raw: string, durationSec: number, allowDownload: boolean, prefer: string) => {
       const full = resolve(String(raw))
-      if (!isAllowed(full)) return { ok: false, error: 'File is not registered.' }
+      if (!isAllowed(full)) return { ok: false, error: t('main.error.fileNotRegistered') }
       const send = (p: LyricsProgress): void => {
         if (!e.sender.isDestroyed()) e.sender.send('lyrics:progress', p)
       }
@@ -353,13 +355,13 @@ function registerIpc(): void {
 
   ipcMain.handle('lyrics:apply', (_e, raw: string, id: number, durationSec: number) => {
     const full = resolve(String(raw))
-    if (!isAllowed(full)) return { ok: false, error: 'File is not registered.' }
+    if (!isAllowed(full)) return { ok: false, error: t('main.error.fileNotRegistered') }
     return transcriber.applyById(full, Number(id), Number(durationSec) || 0)
   })
 
   ipcMain.handle('lyrics:save-edited', (_e, raw: string, lines: unknown, credit?: string) => {
     const full = resolve(String(raw))
-    if (!isAllowed(full)) return { ok: false, error: 'File is not registered.' }
+    if (!isAllowed(full)) return { ok: false, error: t('main.error.fileNotRegistered') }
     return transcriber.saveEdited(full, sanitizeLines(lines), credit ? String(credit) : undefined)
   })
 
@@ -367,7 +369,7 @@ function registerIpc(): void {
     'lyrics:align-draft',
     (e, raw: string, durationSec: number, lines: unknown, tier: string, allowDownload: boolean) => {
       const full = resolve(String(raw))
-      if (!isAllowed(full)) return { ok: false, error: 'File is not registered.' }
+      if (!isAllowed(full)) return { ok: false, error: t('main.error.fileNotRegistered') }
       const send = (p: LyricsProgress): void => {
         if (!e.sender.isDestroyed()) e.sender.send('lyrics:progress', p)
       }
@@ -429,7 +431,7 @@ function registerIpc(): void {
 
   ipcMain.handle('project:save', async (_e, raw: string, name: string, settings: ProjectSettings) => {
     const full = resolve(String(raw))
-    if (!isAllowed(full)) return { ok: false, error: 'File is not registered.' }
+    if (!isAllowed(full)) return { ok: false, error: t('main.error.fileNotRegistered') }
     const res = await saveProject(full, String(name), settings)
     // signed-in Drive users get their library pushed after every save
     // A quiet skip here cost a real debugging session: the save "worked" but
@@ -449,7 +451,7 @@ function registerIpc(): void {
     async (_e, raw: string, envelopes: Record<string, number[]>) => {
       const full = resolve(String(raw))
       if (!isAllowed(full)) {
-        return { ok: false, code: 'not-project', error: 'File is not registered.' }
+        return { ok: false, code: 'not-project', error: t('main.error.fileNotRegistered') }
       }
       try {
         return await saveProjectWaveforms(dirname(full), envelopes ?? {})
@@ -464,7 +466,7 @@ function registerIpc(): void {
   ipcMain.handle('project:graph-read', async (_e, raw: string) => {
     const full = resolve(String(raw))
     if (!isAllowed(full)) {
-      return { ok: false, code: 'not-project', error: 'File is not registered.' }
+      return { ok: false, code: 'not-project', error: t('main.error.fileNotRegistered') }
     }
     return readProjectGraph(full)
   })
@@ -472,7 +474,7 @@ function registerIpc(): void {
   ipcMain.handle('project:graph-write', async (_e, raw: string, text: string) => {
     const full = resolve(String(raw))
     if (!isAllowed(full)) {
-      return { ok: false, code: 'not-project', error: 'File is not registered.' }
+      return { ok: false, code: 'not-project', error: t('main.error.fileNotRegistered') }
     }
     return writeProjectGraph(full, String(text))
   })
@@ -506,13 +508,13 @@ function registerIpc(): void {
 
   ipcMain.handle('project:rename', async (_e, raw: string, newName: string) => {
     const full = resolve(String(raw))
-    if (!isAllowed(full)) return { ok: false, error: 'File is not registered.' }
+    if (!isAllowed(full)) return { ok: false, error: t('main.error.fileNotRegistered') }
     return renameProject(full, String(newName))
   })
 
   ipcMain.handle('project:import', async (_e, raw: string, mode: string) => {
     const full = resolve(String(raw))
-    if (!isAllowed(full)) return { ok: false, error: 'File is not registered.' }
+    if (!isAllowed(full)) return { ok: false, error: t('main.error.fileNotRegistered') }
     return importProject(full, mode === 'move' ? 'move' : 'copy')
   })
 
@@ -525,7 +527,7 @@ function registerIpc(): void {
 
   ipcMain.handle('project:upgrade', async (_e, raw: string) => {
     const dir = resolve(String(raw))
-    if (!isAllowed(dir)) return { ok: false, error: 'Folder is not registered.' }
+    if (!isAllowed(dir)) return { ok: false, error: t('main.error.folderNotRegistered') }
     return migrateProjectToV2(dir)
   })
 
@@ -540,7 +542,7 @@ function registerIpc(): void {
   ipcMain.handle('projects:choose-root', async (e) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     const picked = await dialog.showOpenDialog(win ?? BrowserWindow.getAllWindows()[0], {
-      title: 'Choose where SingZ keeps your projects',
+      title: t('main.dialog.chooseProjectsRoot'),
       properties: ['openDirectory', 'createDirectory']
     })
     if (picked.canceled || picked.filePaths.length === 0) return { ok: false, cancelled: true }
@@ -548,6 +550,8 @@ function registerIpc(): void {
     if (res.ok) allowRoot(res.root)
     return res
   })
+
+  registerLocale()
 
   ipcMain.handle('app:version', () => (app.isPackaged ? app.getVersion() : 'dev'))
 
@@ -666,7 +670,7 @@ function registerIpc(): void {
         return {
           ok: false,
           errorCode: 'invalid-configuration',
-          error: 'Native playback requires a bounded project and lane list.',
+          error: t('main.error.playbackInvalidConfig'),
           generation: '0',
           state: 'unloaded',
           format: { sampleRate: 0, maximumFrames: 0, nominalBufferFrames: 0, inputChannels: 0, outputChannels: 0 },
@@ -691,7 +695,7 @@ function registerIpc(): void {
         return {
           ok: false,
           errorCode: 'invalid-configuration',
-          error: 'Native playback lanes failed strict schema validation.',
+          error: t('main.error.playbackLaneSchema'),
           generation: '0',
           state: 'unloaded',
           format: { sampleRate: 0, maximumFrames: 0, nominalBufferFrames: 0, inputChannels: 0, outputChannels: 0 },
@@ -715,7 +719,7 @@ function registerIpc(): void {
         return {
           ok: false,
           errorCode: 'unauthorized-path',
-          error: 'Every native playback lane must be authorized and supported by the proven decoder runtime.',
+          error: t('main.error.playbackLaneUnauthorized'),
           generation: '0',
           state: 'unloaded',
           format: { sampleRate: 0, maximumFrames: 0, nominalBufferFrames: 0, inputChannels: 0, outputChannels: 0 },

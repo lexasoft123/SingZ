@@ -59,7 +59,7 @@ asar: true
 # Windows uses locales/en-US.pak. The loop walks the FILES on disk and tests
 # each against this list, so a name that matches nothing on a given platform
 # simply never fires — the cross-platform union is the safe form.
-electronLanguages: ['en', 'en-US', 'en_GB', 'ru']
+electronLanguages: ['en', 'en-US', 'en_GB', 'ru', 'zh_CN', 'zh-CN']
 npmRebuild: false
 afterPack: scripts/afterPack.cjs
 artifactName: ${productName}-${version}-${os}-${arch}.${ext}

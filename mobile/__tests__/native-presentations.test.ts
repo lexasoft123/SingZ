@@ -50,7 +50,7 @@ test('every app-owned modal is a native-stack presentation', () => {
 
   const add = read('src/ui/AddSongSheet.tsx')
   expect(add).toMatch(
-    /<Sheet[\s\S]*title="Add a song"[\s\S]*actionLabel="Cancel"[\s\S]*fitContent=\{NATIVE_SHEET_FIT_SUPPORTED\}/
+    /<Sheet[\s\S]*title=\{t\('phone\.library\.addASong'\)\}[\s\S]*actionLabel=\{t\('phone\.library\.cancel'\)\}[\s\S]*fitContent=\{NATIVE_SHEET_FIT_SUPPORTED\}/
   )
   expect(add).toMatch(/<SheetScrollView/)
 

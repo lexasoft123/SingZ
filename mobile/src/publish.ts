@@ -21,6 +21,7 @@ import {
   STATE_UPLOADING,
   type DriveNode
 } from './gdrive'
+import { t } from './i18n'
 import { fmtBytes, log } from './log'
 import { STEM_ORDER_ALL, type ProjectDoc } from './model'
 import { mutateProjectDocument } from './project-document'
@@ -159,7 +160,7 @@ async function manifestOf(dir: string, refreshed = false): Promise<OutFile[]> {
   const stemNames = Object.keys(doc.stemHashes ?? {}).sort()
   const split = STEM_ORDER_ALL.some((id) => doc.stemHashes?.[`${id}.flac`] || doc.stemHashes?.[`${id}.wav`])
   if (!split) {
-    throw new MoveBlocked('not-split', 'Split this song into stems first — then it can move to Google Drive.')
+    throw new MoveBlocked('not-split', t('phone.library.notSplitForMove'))
   }
   const stat = (rel: string): ReturnType<MoveNative['statFile']> => Folder.statFile(dir, rel)
   const stems = await Promise.all(stemNames.map(async (name) => ({ name, st: await stat(`stems/${name}`) })))
@@ -274,7 +275,7 @@ async function stage(
 
   let done = 0
   for (const f of files) {
-    if (opts.cancelled?.()) throw new MoveCancelled('Stopped — the song is still on this phone.')
+    if (opts.cancelled?.()) throw new MoveCancelled(t('phone.library.stoppedSongStill'))
     const inStems = f.rel.startsWith('stems/')
     const name = inStems ? f.rel.slice('stems/'.length) : f.rel
     const there = (inStems ? stems : top).find((r) => r.name === name && r.mimeType !== DRIVE_FOLDER)
@@ -320,7 +321,7 @@ export interface MoveOptions {
 export async function moveToDrive(dir: string, opts: MoveOptions = {}): Promise<{ name: string; bytes: number }> {
   if (!driveAvailable()) throw new MoveBlocked('unconfigured', 'Google Drive is not set up in this build.')
   if (!(await driveSignedIn())) {
-    throw new MoveBlocked('signed-out', 'Sign in to Google Drive first — open the Drive tab above.')
+    throw new MoveBlocked('signed-out', t('phone.library.signInFirstForMove'))
   }
   opts.onProgress?.({ stage: 'checking', done: 0, total: 0 })
 
@@ -331,17 +332,13 @@ export async function moveToDrive(dir: string, opts: MoveOptions = {}): Promise<
   const total = files.reduce((n, f) => n + f.size, 0)
   const rootId = await driveEnsureRoot()
   if (!(await driveAdoptionReady(await driveChildren(rootId)))) {
-    throw new MoveBlocked(
-      'update-desktop',
-      'Update SingZ on your computer first. The version syncing this Drive would ' +
-        'remove songs it did not make, and these would be lost from Drive.'
-    )
+    throw new MoveBlocked('update-desktop', t('phone.library.updateDesktopForMove'))
   }
   const record = await recordFor(dir)
   const started = Date.now()
   log('publish', `${dir}: moving ${files.length} files (${fmtBytes(total)}) to Google Drive`)
   const { folder, staging } = await stage(dir, record, files, opts)
-  if (opts.cancelled?.()) throw new MoveCancelled('Stopped — the song is still on this phone.')
+  if (opts.cancelled?.()) throw new MoveCancelled(t('phone.library.stoppedSongStill'))
   // Re-listed: another phone or a desktop may have used the name meanwhile.
   const name = freeName(dir, await driveChildren(rootId))
   const target = await drivePatch(
@@ -475,8 +472,11 @@ export interface BatchResult {
   moved: { dir: string; name: string }[]
   /** Songs passed over, each with why — the batch went on without them. */
   skipped: { dir: string; reason: string }[]
-  /** Why the batch ended before its last song, if it did. */
-  stopped?: { reason: 'cancelled' | 'blocked' | 'failed'; message: string }
+  /** Why the batch ended before its last song, if it did. `blockReason` is
+   *  the stable MoveBlocked reason behind a 'blocked' stop (never present
+   *  otherwise) — the display side reads THIS to tell "signed out" apart
+   *  from "update the desktop", never the (translated) message text. */
+  stopped?: { reason: 'cancelled' | 'blocked' | 'failed'; message: string; blockReason?: MoveBlockReason }
 }
 
 /**
@@ -524,7 +524,7 @@ async function moveAllNow(dirs: string[], opts: BatchOptions): Promise<BatchResu
   for (let i = 0; i < dirs.length; i++) {
     const dir = dirs[i]
     if (opts.cancelled?.()) {
-      out.stopped = { reason: 'cancelled', message: 'Stopped — the rest are still on this phone.' }
+      out.stopped = { reason: 'cancelled', message: t('phone.library.stoppedRestStill') }
       break
     }
     // never backwards: a doc brought up to date mid-move can differ from the
@@ -544,9 +544,9 @@ async function moveAllNow(dirs: string[], opts: BatchOptions): Promise<BatchResu
     if (!doc) {
       // deleted while the batch was running: nothing to move, nothing wrong
     } else if (opts.busy?.(dir)) {
-      out.skipped.push({ dir, reason: 'it was in use — open, splitting or being analysed' })
+      out.skipped.push({ dir, reason: t('phone.library.skipInUse') })
     } else if (sig && inDrive.has(sig) && !midMove[dir]) {
-      out.skipped.push({ dir, reason: 'it is already in your Google Drive library' })
+      out.skipped.push({ dir, reason: t('phone.library.skipAlreadyInDrive') })
     } else {
       try {
         const res = await moveToDrive(dir, {
@@ -566,7 +566,7 @@ async function moveAllNow(dirs: string[], opts: BatchOptions): Promise<BatchResu
           break
         }
         if (e instanceof MoveBlocked && e.reason !== 'not-split') {
-          out.stopped = { reason: 'blocked', message }
+          out.stopped = { reason: 'blocked', message, blockReason: e.reason }
           break
         }
         out.skipped.push({ dir, reason: inWords(message) })
@@ -590,7 +590,7 @@ function inWords(message: string): string {
   return /network request failed|timed out|timeout|offline|could not connect|failed to connect|unable to resolve host|connection (was )?(lost|reset|refused|abort)|stalled/i.test(
     message
   )
-    ? 'the connection dropped before it was up — it goes with the next "Add all"'
+    ? t('phone.library.connectionDroppedSkip')
     : message
 }
 

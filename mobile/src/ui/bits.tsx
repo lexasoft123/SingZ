@@ -17,6 +17,7 @@ import {
   type ViewStyle
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
+import { t } from '../i18n'
 
 /** react-native-screens implements native fit-to-contents sheets on iOS 16+.
  * Android supports them through its own form-sheet implementation. */
@@ -627,11 +628,11 @@ export function Stepper({
         hitSlop={6}
         onPress={() => onStep(-1)}
         accessibilityRole="button"
-        accessibilityLabel={`Decrease ${label}`}
+        accessibilityLabel={t('phone.player.bits.decrease', { label })}
       >
         <Text style={b.stepBtnText}>−</Text>
       </Pressable>
-      <Text style={b.stepValue} accessibilityLabel={`${label}, ${valueText}`}>
+      <Text style={b.stepValue} accessibilityLabel={t('phone.player.bits.labelValue', { label, value: valueText })}>
         {valueText}
       </Text>
       <Pressable
@@ -639,7 +640,7 @@ export function Stepper({
         hitSlop={6}
         onPress={() => onStep(1)}
         accessibilityRole="button"
-        accessibilityLabel={`Increase ${label}`}
+        accessibilityLabel={t('phone.player.bits.increase', { label })}
       >
         <Text style={b.stepBtnText}>+</Text>
       </Pressable>
@@ -843,7 +844,7 @@ export function Bar({
         min: 0,
         max: 100,
         now: Math.round(pct * 100),
-        text: valueText ? valueText(pct) : `${Math.round(pct * 100)} percent`
+        text: valueText ? valueText(pct) : t('phone.player.bits.percentValue', { percent: Math.round(pct * 100) })
       }}
       /* 'activate' is declared so it is HANDLED, not because it does anything:
          `accessible` makes the bar a double-tap target, and with nothing
@@ -857,8 +858,8 @@ export function Bar({
          the raw action names aloud. */
       onAccessibilityTap={() => {}}
       accessibilityActions={[
-        { name: 'increment', label: 'Increase' },
-        { name: 'decrement', label: 'Decrease' },
+        { name: 'increment', label: t('phone.player.bits.increaseAction') },
+        { name: 'decrement', label: t('phone.player.bits.decreaseAction') },
         // Android only: it exists to put ACTION_CLICK in the map so the click
         // is SWALLOWED rather than falling through as a centre tap. iOS has
         // onAccessibilityTap for that, and turns every entry here into a

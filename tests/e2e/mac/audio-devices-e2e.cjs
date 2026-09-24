@@ -225,10 +225,10 @@ const coreProvenance = async (win) => {
 
   let app = await launch()
   let win = await app.firstWindow()
-  await win.waitForSelector('.pill.gear', { timeout: 60000 })
+  await win.waitForSelector('.pill.gear:not(.lang-trigger)', { timeout: 60000 })
 
   // ---- pickers: never the pseudo-devices; adapt to the machine's list ----
-  await win.click('.pill.gear')
+  await win.click('.pill.gear:not(.lang-trigger)')
   await win.waitForSelector('.settings-card', { timeout: 20000 })
   // the pickers fill asynchronously — done when the loading hint clears
   await win.waitForFunction(
@@ -485,7 +485,7 @@ const coreProvenance = async (win) => {
   // the practice transport; interrupted = the paused card and its Continue
   // button (`exercisePhase` is internal state, never text on screen).
   await win.waitForSelector('.vt-transport-status', { timeout: 20000 })
-  await win.click('.pill.gear')
+  await win.click('.pill.gear:not(.lang-trigger)')
   await win.waitForSelector('.settings-card', { timeout: 10000 })
   await win.waitForFunction(
     () => document.querySelector('.vt-ready')?.textContent?.includes('Practice paused') === true,
@@ -526,7 +526,7 @@ const coreProvenance = async (win) => {
   )
 
   // ---- settings owns a live analyser preview; flipping restarts runtime + preview ----
-  await win.click('.pill.gear')
+  await win.click('.pill.gear:not(.lang-trigger)')
   try {
     await win.waitForFunction(
       () => {
@@ -637,7 +637,7 @@ const coreProvenance = async (win) => {
   // ---- relaunch: saved devices re-apply on boot ----
   app = await launch()
   win = await app.firstWindow()
-  await win.waitForSelector('.pill.gear', { timeout: 60000 })
+  await win.waitForSelector('.pill.gear:not(.lang-trigger)', { timeout: 60000 })
   const prefs = await win.evaluate(() => JSON.parse(localStorage.getItem('singz.audio') ?? '{}'))
   if (prefs[inputPrefKey] !== expectInput) throw new Error(`${inputPrefKey} pref lost across relaunch`)
   if (prefs.inputChannel !== expectedInputChannel) throw new Error(`input channel lost across relaunch: ${prefs.inputChannel}`)

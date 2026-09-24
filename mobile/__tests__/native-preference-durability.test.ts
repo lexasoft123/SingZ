@@ -55,7 +55,7 @@ describe('native preference durability bridge', () => {
       /\.save\(ref, next\)[\s\S]{0,100}\.then\(\(\) => \{[\s\S]{0,160}acceptedMetRef\.current = next[\s\S]{0,100}setMet\(next\)/,
     );
     expect(changeHandler).toMatch(
-      /\.catch\(error => \{[\s\S]{0,220}desiredMetRef\.current = acceptedMetRef\.current[\s\S]{0,220}Metronome setting was not saved/,
+      /\.catch\(error => \{[\s\S]{0,220}desiredMetRef\.current = acceptedMetRef\.current[\s\S]{0,220}t\('phone\.player\.metronomeSaveFailed\.title'\)/,
     );
   });
 });

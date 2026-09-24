@@ -5,6 +5,7 @@ import {
   type ModuleAttempts,
   type ModuleLoader
 } from './RecoverableModule'
+import { t } from '../i18n'
 
 export type LazyDialogModuleLoader<Props> = ModuleLoader<Props>
 export type LazyDialogModuleAttempts<Props> = ModuleAttempts<Props>
@@ -117,7 +118,7 @@ export function LazyDialogFallback({
       <p role="status" aria-live="polite" aria-busy="true">{labels.opening}</p>
       <div className="modal-actions">
         <button type="button" className="pill ghost" disabled={!canClose} onClick={onClose}>
-          Close
+          {t('settings.action.close')}
         </button>
       </div>
     </Modal>
@@ -141,14 +142,14 @@ export function LazyDialogFailure({
       <p role="alert">{labels.failureMessage}</p>
       <div className="modal-actions">
         {onRetry ? (
-          <button type="button" className="pill primary" onClick={onRetry}>Retry</button>
+          <button type="button" className="pill primary" onClick={onRetry}>{t('settings.dialogRoute.retryButton')}</button>
         ) : (
           <p className="fine warn" role="status">
-            The recovery copy also could not be loaded. Restart SingZ before trying again.
+            {t('settings.dialogRoute.recoveryFailed')}
           </p>
         )}
         <button type="button" className="pill ghost" disabled={!canClose} onClick={onClose}>
-          Close
+          {t('settings.action.close')}
         </button>
       </div>
     </Modal>
@@ -164,18 +165,19 @@ export function DialogRuntimeFailure({
   readonly canClose: boolean
   readonly onClose: () => void
 }): React.JSX.Element {
+  const stoppedTitle = t('settings.dialogRoute.stoppedTitle', { name: labels.name })
   return (
-    <Modal onClose={onClose} busy={!canClose} cardClassName="dialog-route-state" aria-label={`${labels.name} stopped`}>
-      <h2>{labels.name} stopped</h2>
+    <Modal onClose={onClose} busy={!canClose} cardClassName="dialog-route-state" aria-label={stoppedTitle}>
+      <h2>{stoppedTitle}</h2>
       <p role="alert">
-        This view encountered a problem. Any work it already started may still be running.
+        {t('settings.dialogRoute.runtimeProblem')}
       </p>
       {!canClose && (
-        <p className="fine warn" role="status">Keep SingZ open while the current operation finishes.</p>
+        <p className="fine warn" role="status">{t('settings.dialogRoute.keepOpenHint')}</p>
       )}
       <div className="modal-actions">
         <button type="button" className="pill ghost" disabled={!canClose} onClick={onClose}>
-          Close
+          {t('settings.action.close')}
         </button>
       </div>
     </Modal>

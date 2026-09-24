@@ -7,6 +7,7 @@ import './styles.css'
 import { applyPlatformClasses } from '@singz/ui'
 import { createRoot } from 'react-dom/client'
 import App from './App'
+import { loadLocale, setLocale, subscribeLocale, getLocale } from '../../shared/i18n'
 
 // Before the first render, deliberately: App reads these classes DURING
 // render to decide whether to mount the window buttons.
@@ -24,4 +25,20 @@ if (document.body.classList.contains('win')) {
   void window.singz.glassVerdict().then(apply, () => undefined)
 }
 
-createRoot(document.getElementById('root') as HTMLElement).render(<App />)
+// The language comes from main (settings.json + the machine's languages)
+// before the first render, so the window never flashes English first.
+const syncLang = (): void => {
+  document.documentElement.lang = getLocale()
+}
+subscribeLocale(syncLang)
+void window.singz
+  .getLocale()
+  .then(async (s) => {
+    await loadLocale(s.locale)
+    setLocale(s.locale)
+  })
+  .catch(() => {})
+  .finally(() => {
+    syncLang()
+    createRoot(document.getElementById('root') as HTMLElement).render(<App />)
+  })

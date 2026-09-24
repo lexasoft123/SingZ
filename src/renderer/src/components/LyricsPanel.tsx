@@ -8,12 +8,21 @@ import type {
 import type { MultitrackEngine } from '../audio/engine'
 import { fmtTime, modalCoversApp } from '../model'
 import type { LyricsState } from '../lyrics-state'
+import { t, tn, T } from '../i18n'
 
-const STAGE_LABEL: Record<LyricsProgress['stage'], string> = {
-  preparing: 'Warming up',
-  searching: 'Searching online lyrics',
-  'downloading-model': 'Downloading speech model',
-  transcribing: 'Listening to the vocals'
+// Evaluated at call time (never a frozen module-level table) so a language
+// switch is reflected the next time a stage is shown.
+function stageLabel(stage: LyricsProgress['stage']): string {
+  switch (stage) {
+    case 'preparing':
+      return t('lyrics.panel.stage.preparing')
+    case 'searching':
+      return t('lyrics.panel.stage.searching')
+    case 'downloading-model':
+      return t('lyrics.panel.stage.downloadingModel')
+    case 'transcribing':
+      return t('lyrics.panel.stage.transcribing')
+  }
 }
 
 interface Props {
@@ -252,14 +261,14 @@ export default function LyricsPanel({
   return (
     <aside className="lyrics-panel">
       <header className="lp-header">
-        <span className="lp-title">Lyrics</span>
+        <span className="lp-title">{t('lyrics.panel.title')}</span>
         <button
           type="button"
           className={`chip guide${guideOn ? ' active' : ''}`}
-          title={guideOn ? 'Mute the original vocals' : 'Play the original vocals as a guide'}
+          title={guideOn ? t('lyrics.panel.guide.titleOn') : t('lyrics.panel.guide.titleOff')}
           onClick={onToggleGuide}
         >
-          Guide vocals
+          {t('lyrics.panel.guide.label')}
         </button>
       </header>
 
@@ -267,46 +276,46 @@ export default function LyricsPanel({
         <div className="lp-source">
           <span className={`src-badge ${lyrics.source}`}>
             {lyrics.source === 'lrclib'
-              ? 'Synced'
+              ? t('lyrics.panel.source.synced')
               : lyrics.source === 'edited'
-                ? 'Edited'
-                : 'AI transcribed'}
+                ? t('lyrics.panel.source.edited')
+                : t('lyrics.panel.source.aiTranscribed')}
           </span>
           <span className="src-credit" title={lyrics.credit}>
             {lyrics.source === 'lrclib'
               ? (lyrics.credit ?? 'LRCLIB')
               : lyrics.source === 'edited'
-                ? (lyrics.credit ?? 'your own words')
-                : 'from the vocals stem'}
-            {lyrics.aligned ? ' · AI-aligned' : ''}
+                ? (lyrics.credit ?? t('lyrics.panel.credit.own'))
+                : t('lyrics.panel.credit.vocals')}
+            {lyrics.aligned ? t('lyrics.panel.credit.aiAligned') : ''}
           </span>
           {lyrics.source !== 'whisper' && (
             <button
               type="button"
               className="linkish"
-              title="Listen to the vocals and check these lyrics against what is actually sung, snapping every word's timing to the recording"
+              title={t('lyrics.panel.checkAlign.title')}
               onClick={onRefineTiming}
             >
-              Check &amp; align
+              {t('lyrics.panel.checkAlign.label')}
             </button>
           )}
           {lyrics.source !== 'whisper' && onPreciseAlign && (
             <button
               type="button"
               className="linkish"
-              title="Word-by-word forced alignment with the multilingual speech model (sharpest timing; one-time 1.2 GB download)"
+              title={t('lyrics.panel.precise.title')}
               onClick={onPreciseAlign}
             >
-              Precise
+              {t('lyrics.panel.precise.label')}
             </button>
           )}
           <button
             type="button"
             className="linkish"
-            title="Fix the words, stamp line times while the song plays, and re-align — your edits stick"
+            title={t('lyrics.panel.edit.title')}
             onClick={onEdit}
           >
-            Edit
+            {t('lyrics.panel.edit.label')}
           </button>
           <button
             type="button"
@@ -316,7 +325,7 @@ export default function LyricsPanel({
               if (!results) void search()
             }}
           >
-            Change…
+            {t('lyrics.panel.change.label')}
           </button>
         </div>
       )}
@@ -324,20 +333,21 @@ export default function LyricsPanel({
       {lyrics.status === 'ready' && view === 'lyrics' && lyrics.check && (
         <div className={`lp-check${lyrics.check.verdict === 'mismatch' ? ' warn' : ''}`}>
           {lyrics.check.verdict === 'mismatch'
-            ? `These lyrics don't seem to match this recording — only ${lyrics.check.matchedPct}% of the words were heard. Try Change… or AI transcription.`
+            ? t('lyrics.panel.check.mismatch', { pct: lyrics.check.matchedPct })
             : lyrics.check.verdict === 'match'
-              ? `Words match the recording · ${lyrics.check.matchedPct}% heard${lyrics.check.method === 'ctc' ? ' · precise' : ''}`
-              : `Re-timed to the recording · ${lyrics.check.matchedPct}% of words heard` +
+              ? t('lyrics.panel.check.match', { pct: lyrics.check.matchedPct }) +
+                (lyrics.check.method === 'ctc' ? t('lyrics.check.preciseSuffix') : '')
+              : t('lyrics.panel.check.retimed', { pct: lyrics.check.matchedPct }) +
                 (Math.abs(lyrics.check.medianShift) >= 0.8
-                  ? ` · timing was ${Math.abs(lyrics.check.medianShift).toFixed(1)}s off`
+                  ? t('lyrics.panel.check.timingOff', { sec: Math.abs(lyrics.check.medianShift).toFixed(1) })
                   : '') +
                 (lyrics.check.badLines.length > 0
-                  ? ` · ${lyrics.check.badLines.length} ${lyrics.check.badLines.length === 1 ? 'line differs' : 'lines differ'} from what's sung`
+                  ? tn('lyrics.panel.check.lineDiffers', lyrics.check.badLines.length)
                   : '') +
                 (lyrics.check.extraSung && lyrics.check.badLines.length === 0
-                  ? ' · the singer has parts these lyrics are missing'
+                  ? t('lyrics.panel.check.missingWords')
                   : '') +
-                (lyrics.check.method === 'ctc' ? ' · precise' : '')}
+                (lyrics.check.method === 'ctc' ? t('lyrics.check.preciseSuffix') : '')}
         </div>
       )}
 
@@ -346,12 +356,12 @@ export default function LyricsPanel({
           <div className="lp-variants">
             <div className="lp-variants-top">
               <button type="button" className="chip" onClick={() => setView('lyrics')}>
-                ‹ Back
+                {t('lyrics.panel.variants.back')}
               </button>
               <button
                 type="button"
                 className="chip"
-                title="Listen to the vocals with Qwen3-ASR and transcribe the lyrics from the recording itself"
+                title={t('lyrics.panel.variants.aiTranscribeTitle')}
                 onClick={() => {
                   // Back to the lyrics view first: progress, the model-consent
                   // card and the result all live there — staying on the search
@@ -360,7 +370,7 @@ export default function LyricsPanel({
                   onTranscribe()
                 }}
               >
-                ✦ AI transcription
+                {t('lyrics.panel.variants.aiTranscribeLabel')}
               </button>
             </div>
             <div className="lp-search">
@@ -370,14 +380,14 @@ export default function LyricsPanel({
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') void search()
                 }}
-                placeholder="artist or song title…"
+                placeholder={t('lyrics.panel.variants.searchPlaceholder')}
                 spellCheck={false}
               />
               <button type="button" className="pill ghost small" disabled={busy} onClick={() => void search()}>
-                {busy ? '…' : 'Search'}
+                {busy ? '…' : t('lyrics.panel.variants.searchLabel')}
               </button>
             </div>
-            {results?.length === 0 && <p className="fine">Nothing found — try other words.</p>}
+            {results?.length === 0 && <p className="fine">{t('lyrics.panel.variants.nothingFound')}</p>}
             {results?.map((c) => (
               <button
                 type="button"
@@ -391,8 +401,8 @@ export default function LyricsPanel({
                 </span>
                 <span className="v-meta">
                   {fmtTime(c.duration)}
-                  {Math.abs(c.duration - engine.duration) <= 3 ? ' · matches' : ''}
-                  {c.synced ? ' · synced' : ' · text only'}
+                  {Math.abs(c.duration - engine.duration) <= 3 ? t('lyrics.panel.variants.matches') : ''}
+                  {c.synced ? t('lyrics.panel.variants.synced') : t('lyrics.panel.variants.textOnly')}
                 </span>
               </button>
             ))}
@@ -403,23 +413,18 @@ export default function LyricsPanel({
               <div className="lp-state">
                 {lyrics.what === 'aligner' ? (
                   <p>
-                    Precise alignment listens with a <strong>multilingual word aligner</strong> (Meta
-                    MMS) and pins every word to the exact moment it is sung — entirely on your
-                    machine, through the stem splitter.
+                    <T k="lyrics.panel.consent.alignerText" />
                   </p>
                 ) : (
                   <p>
-                    SingZ listens to the vocals with <strong>Qwen3-ASR</strong>, a speech model
-                    trained on singing, running entirely on your machine — to transcribe lyrics when
-                    none are online, and to check &amp; align the ones that are.
+                    <T k="lyrics.panel.consent.qwenText" />
                   </p>
                 )}
-                <p className="fine">
-                  One-time download of about {lyrics.sizeMb} MB, stored locally and reused for
-                  every song. Also available later in the model manager.
-                </p>
+                <p className="fine">{t('lyrics.panel.consent.fineprint', { mb: lyrics.sizeMb })}</p>
                 <button type="button" className="pill primary" onClick={onDownloadModel}>
-                  {lyrics.what === 'aligner' ? 'Download & align precisely' : 'Download model & continue'}
+                  {lyrics.what === 'aligner'
+                    ? t('lyrics.panel.consent.downloadAlignLabel')
+                    : t('lyrics.panel.consent.downloadContinueLabel')}
                 </button>
                 <button
                   type="button"
@@ -429,7 +434,7 @@ export default function LyricsPanel({
                     if (!results) void search()
                   }}
                 >
-                  Or search the lyrics database manually
+                  {t('lyrics.panel.consent.searchManually')}
                 </button>
               </div>
             )}
@@ -437,7 +442,7 @@ export default function LyricsPanel({
             {lyrics.status === 'loading' && (
               <div className="lp-state">
                 <p className="lp-loading">
-                  {lyrics.progress ? STAGE_LABEL[lyrics.progress.stage] : 'Starting'}…{' '}
+                  {lyrics.progress ? stageLabel(lyrics.progress.stage) : t('lyrics.panel.stage.starting')}…{' '}
                   <span className="lp-pct">
                     {lyrics.progress && lyrics.progress.stage !== 'searching'
                       ? `${Math.round(lyrics.progress.percent)}%`
@@ -448,7 +453,7 @@ export default function LyricsPanel({
                   <div style={{ width: `${lyrics.progress?.percent ?? 0}%` }} />
                 </div>
                 <button type="button" className="pill ghost small" onClick={onCancel}>
-                  Cancel
+                  {t('lyrics.panel.loading.cancel')}
                 </button>
               </div>
             )}
@@ -457,7 +462,7 @@ export default function LyricsPanel({
               <div className="lp-state">
                 <p className="fine warn">{lyrics.error}</p>
                 <button type="button" className="pill ghost" onClick={onRetry}>
-                  Try again
+                  {t('lyrics.panel.error.tryAgain')}
                 </button>
                 <button
                   type="button"
@@ -467,10 +472,10 @@ export default function LyricsPanel({
                     if (!results) void search()
                   }}
                 >
-                  Search the lyrics database manually
+                  {t('lyrics.panel.error.searchManually')}
                 </button>
                 <button type="button" className="linkish" onClick={onEdit}>
-                  Or write the lyrics yourself
+                  {t('lyrics.panel.error.writeYourself')}
                 </button>
               </div>
             )}
@@ -485,7 +490,7 @@ export default function LyricsPanel({
                     }}
                     className={`lyr-line${i === current ? ' current' : i < current ? ' past' : ''}${singMask?.[i] ? ' sing' : ''}`}
                     onClick={() => engine.seek(l.start)}
-                    title="Jump here"
+                    title={t('lyrics.panel.lines.jumpHere')}
                   >
                     {/* the space rides outside the span: inside it, the sweep
                         would only finish a word past its last glyph */}
@@ -498,9 +503,9 @@ export default function LyricsPanel({
                 ))}
                 {lyrics.status === 'ready' && lyrics.source === 'whisper' && (
                   <p className="fine lp-note">
-                    AI-transcribed from the vocals — not always perfect.{' '}
+                    {t('lyrics.panel.whisperNote.text')}{' '}
                     <button type="button" className="linkish" onClick={onEdit}>
-                      Fix the words
+                      {t('lyrics.panel.whisperNote.fix')}
                     </button>
                   </p>
                 )}

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Modal } from '@singz/ui'
+import { t, T } from '../i18n'
 
 interface Props {
   /** Where the project lives now — outside the library root. */
@@ -23,43 +24,38 @@ export default function LibraryImport({ dir, busy, onImport, onClose }: Props): 
   return (
     <Modal onClose={onClose}>
         <div className="picker-head">
-          <h2>Add to your library</h2>
+          <h2>{t('library.libraryImport.heading')}</h2>
           <div className="log-actions">
             <button type="button" className="pill ghost small" disabled={busy} onClick={onClose}>
-              Close
+              {t('library.common.close')}
             </button>
           </div>
         </div>
         <p>
-          This project lives in <strong className="path">{dir}</strong>, outside your library. It
-          plays and saves perfectly well there — adding it puts it in{' '}
-          <strong className="path">{root}</strong>, where the Open screen lists it and Drive sync
-          picks it up.
+          <T k="library.libraryImport.body" vars={{ dir, root }} strongClass="path" />
         </p>
         <div className="storage-actions">
           <button
             type="button"
             className="pill ghost small"
             disabled={busy}
-            title="Duplicate the folder into your library — the original stays where it is"
+            title={t('library.libraryImport.copyInTitle')}
             onClick={() => onImport('copy')}
           >
-            Copy it in
+            {t('library.libraryImport.copyIn')}
           </button>
           <button
             type="button"
             className="pill ghost small"
             disabled={busy}
-            title="Relocate the folder into your library — nothing is left behind"
+            title={t('library.libraryImport.moveInTitle')}
             onClick={() => onImport('move')}
           >
-            Move it in
+            {t('library.libraryImport.moveIn')}
           </button>
         </div>
         <p className="fine" style={{ marginTop: 14 }}>
-          {busy
-            ? 'Working — a project with stems is a few hundred MB, so give it a moment…'
-            : 'Copying leaves the original alone, which is what you want for a folder someone else also uses. Moving takes it with you, stems and all.'}
+          {busy ? t('library.libraryImport.workingHint') : t('library.libraryImport.copyMoveHint')}
         </p>
     </Modal>
   )

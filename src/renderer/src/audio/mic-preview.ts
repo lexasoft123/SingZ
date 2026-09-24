@@ -1,5 +1,6 @@
 import { MicPitch, type MicDevice, type MicLevel } from './mic'
 import { NativeTrainingMicSource } from './training-mic'
+import { t } from '../i18n'
 
 export type MicPreviewErrorKind = 'permission' | 'busy' | 'unavailable' | 'unknown'
 
@@ -150,7 +151,7 @@ export class MicrophonePreview {
 
 export class MicPreviewError extends Error {
   constructor(readonly kind: MicPreviewErrorKind) {
-    super(kind === 'permission' ? 'Microphone access is blocked.' : 'Microphone preview failed.')
+    super(kind === 'permission' ? t('settings.micPreview.accessBlockedShort') : t('settings.micPreview.failed'))
   }
 }
 
@@ -164,8 +165,8 @@ export function micPreviewErrorKind(error: unknown): MicPreviewErrorKind {
 }
 
 export function micPreviewErrorCopy(kind: MicPreviewErrorKind): string {
-  if (kind === 'permission') return 'Microphone access is blocked. Allow SingZ in system privacy settings.'
-  if (kind === 'busy') return 'The microphone is busy in another app. Close that app, then choose the input again.'
-  if (kind === 'unavailable') return 'That microphone is not available. Reconnect it or choose another input.'
-  return 'The microphone could not start. Check the device connection and try again.'
+  if (kind === 'permission') return t('settings.micPreview.accessBlocked')
+  if (kind === 'busy') return t('settings.micPreview.busy')
+  if (kind === 'unavailable') return t('settings.micPreview.unavailable')
+  return t('settings.micPreview.unknown')
 }

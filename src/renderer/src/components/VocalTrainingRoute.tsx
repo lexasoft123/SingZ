@@ -6,6 +6,7 @@ import {
   type ModuleAttempts,
   type ModuleLoader
 } from './RecoverableModule'
+import { t } from '../i18n'
 
 export type VocalTrainingComponentProps = ComponentProps<typeof VocalTrainingComponent>
 export type VocalTrainingRouteProps = VocalTrainingComponentProps & {
@@ -135,11 +136,11 @@ export function VocalTrainingRouteFallback(): React.JSX.Element {
   return (
     <>
       <main className="vt-screen vt-empty" aria-busy="true">
-        <p className="vt-eyebrow">Vocal training</p>
-        <h1>Opening practice…</h1>
+        <p className="vt-eyebrow">{t('training.route.eyebrow')}</p>
+        <h1>{t('training.route.opening')}</h1>
       </main>
       <p className="vt-sr-only" role="status" aria-live="polite">
-        Opening vocal training.
+        {t('training.route.openingStatus')}
       </p>
     </>
   )
@@ -154,17 +155,17 @@ export function VocalTrainingRouteFailure({
 }): React.JSX.Element {
   return (
     <main className="vt-screen vt-empty">
-      <p className="vt-eyebrow">Vocal training</p>
-      <h1>Practice didn’t open</h1>
-      <p role="alert">The practice screen could not be loaded. Song playback remains paused.</p>
+      <p className="vt-eyebrow">{t('training.route.eyebrow')}</p>
+      <h1>{t('training.route.failure.heading')}</h1>
+      <p role="alert">{t('training.route.failure.body')}</p>
       {onRetry ? (
-        <button type="button" className="pill primary" onClick={onRetry}>Retry</button>
+        <button type="button" className="pill primary" onClick={onRetry}>{t('training.route.retry')}</button>
       ) : (
         <p className="fine warn" role="status">
-          The recovery copy also could not be loaded. Restart SingZ before trying again.
+          {t('training.route.failure.recoveryFailed')}
         </p>
       )}
-      <button type="button" className="pill ghost" onClick={onBackToSongs}>Return to Songs</button>
+      <button type="button" className="pill ghost" onClick={onBackToSongs}>{t('training.route.returnToSongs')}</button>
     </main>
   )
 }
@@ -181,24 +182,24 @@ export function VocalTrainingRuntimeFailure({
   const safe = cleanup === 'safe'
   return (
     <main className="vt-screen vt-empty">
-      <p className="vt-eyebrow">Vocal training</p>
-      <h1>Practice stopped</h1>
+      <p className="vt-eyebrow">{t('training.route.eyebrow')}</p>
+      <h1>{t('training.route.runtimeFailure.heading')}</h1>
       {cleanup === 'stopping' ? (
         <p role="status" aria-live="assertive" aria-busy="true">
-          Stopping exercise audio and confirming microphone release…
+          {t('training.route.runtimeFailure.stopping')}
         </p>
       ) : cleanup === 'unsafe' ? (
         <p role="alert">
-          Exercise audio or microphone cleanup could not be confirmed. Retry cleanup and keep SingZ open before leaving practice.
+          {t('training.route.runtimeFailure.unsafe')}
         </p>
       ) : (
         <p role="status">
-          Exercise audio and microphone capture were stopped, and song playback was paused.
+          {t('training.route.runtimeFailure.safe')}
         </p>
       )}
       {cleanup === 'unsafe' && (
         <button type="button" className="pill primary" onClick={onRetryCleanup}>
-          Retry cleanup
+          {t('training.route.retryCleanup')}
         </button>
       )}
       <button
@@ -209,7 +210,7 @@ export function VocalTrainingRuntimeFailure({
           if (safe) onBackToSongs()
         }}
       >
-        Return to Songs
+        {t('training.route.returnToSongs')}
       </button>
     </main>
   )
@@ -225,16 +226,16 @@ export function VocalTrainingCleanupGate({
   return (
     <div className="vt-cleanup-gate" role={phase === 'unsafe' ? 'alert' : 'status'}>
       <div className="vt-cleanup-card">
-        <p className="vt-eyebrow">Vocal training</p>
-        <h1>{phase === 'stopping' ? 'Finishing audio cleanup…' : 'Audio cleanup needs attention'}</h1>
+        <p className="vt-eyebrow">{t('training.route.eyebrow')}</p>
+        <h1>{phase === 'stopping' ? t('training.route.cleanupGate.stoppingHeading') : t('training.route.cleanupGate.attentionHeading')}</h1>
         {phase === 'stopping' ? (
           <p aria-live="assertive" aria-busy="true">
-            Confirming that exercise audio and the microphone stopped before leaving practice.
+            {t('training.route.cleanupGate.stoppingBody')}
           </p>
         ) : (
           <>
-            <p>The microphone or exercise audio did not confirm cleanup. Stay in Vocal training and retry before opening another audio path.</p>
-            <button type="button" className="pill primary" onClick={() => void onRetryCleanup()}>Retry cleanup</button>
+            <p>{t('training.route.cleanupGate.attentionBody')}</p>
+            <button type="button" className="pill primary" onClick={() => void onRetryCleanup()}>{t('training.route.retryCleanup')}</button>
           </>
         )}
       </div>

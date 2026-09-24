@@ -15,6 +15,7 @@ import {
   type TrainingSessionData,
   type TrainingTaskMode
 } from '../gen/training-lib'
+import { t } from '../i18n'
 
 export type TrainingRoute = 'home' | 'setup' | 'session' | 'summary' | 'progress'
 export type TrainingPhase = 'ready' | 'cue' | 'respond' | 'feedback'
@@ -161,7 +162,7 @@ export function mobileTrainingReducer(
             action.choice
           ),
           preparation,
-          error: 'Choose the song key, then tap Start.'
+          error: t('phone.training.chooseSongKey')
         }
       }
       return createSessionState(
@@ -174,7 +175,7 @@ export function mobileTrainingReducer(
       )
     }
     case 'activate':
-      if (!state.session) return { ...state, error: 'Set up a session first.' }
+      if (!state.session) return { ...state, error: t('phone.training.setupSessionFirst') }
       return { ...state, session: startTrainingSession(state.session), phase: 'cue', error: null }
     case 'cue-complete':
       return state.session?.status === 'active' ? { ...state, phase: 'respond' } : state

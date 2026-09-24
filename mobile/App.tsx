@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { DarkTheme, NavigationContainer, useIsFocused, useNavigationContainerRef } from '@react-navigation/native'
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs'
 import { AppState, NativeModules, StatusBar } from 'react-native'
+import { applySystemLocale, getLocale, systemTags, t, useLocale } from './src/i18n'
 import { GestureHandlerRootView } from 'react-native-gesture-handler'
 import { AudioManager } from 'react-native-audio-api'
 import { SafeAreaProvider } from 'react-native-safe-area-context'
@@ -712,7 +713,13 @@ function TrainingTabScene(
   return <TrainingScreen {...screenProps} active={useIsFocused() && ownershipReady} />
 }
 
+// The system's language, before the first render (see src/i18n: no in-app
+// picker — the OS's per-app language setting is the control).
+applySystemLocale()
+
 export default function App(): React.JSX.Element {
+  // Re-render every screen when the language changes underneath us.
+  useLocale()
   const [tab, setTab] = useState<RootTab>('songs')
   const [trainingOwnershipReady, setTrainingOwnershipReady] = useState(false)
   const tabRef = useRef<RootTab>(tab)
@@ -745,6 +752,7 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     // First line of the session, before anything can go wrong underneath it.
     void logStartup()
+    log('app', `language: ${getLocale()} (system ${systemTags().join(', ')})`)
     // If the last split was killed, its native trail outlived the process —
     // put it in the log where the singer (and a bug report) can see it.
     void replaySplitTrail()
@@ -755,6 +763,13 @@ export default function App(): React.JSX.Element {
     AudioManager.observeAudioInterruptions(true)
     void AudioManager.setAudioSessionActivity(true)
     const appState = AppState.addEventListener('change', next => {
+      // Android applies a per-app language from Settings to a running app;
+      // pick it up the moment the singer comes back.
+      if (next === 'active') {
+        const was = getLocale()
+        const now = applySystemLocale()
+        if (now !== was) log('app', `language: ${was} → ${now}`)
+      }
       if (next === 'background') {
         // Park the native graph; never stop it. Stopping released the
         // decoded lanes, so returning to a song cost a full six-stem decode
@@ -985,7 +1000,10 @@ export default function App(): React.JSX.Element {
             }}
             tabBar={BottomTabs}
           >
-            <Tabs.Screen name="songs" options={{ title: 'Songs', tabBarAccessibilityLabel: 'Songs' }}>
+            <Tabs.Screen
+              name="songs"
+              options={{ title: t('phone.app.tab.songs'), tabBarAccessibilityLabel: t('phone.app.tab.songs') }}
+            >
               {() => (
                 <SongsTabScene
                   engine={engine}
@@ -1000,7 +1018,7 @@ export default function App(): React.JSX.Element {
             </Tabs.Screen>
             <Tabs.Screen
               name="training"
-              options={{ title: 'Train', tabBarAccessibilityLabel: 'Train' }}
+              options={{ title: t('phone.app.tab.train'), tabBarAccessibilityLabel: t('phone.app.tab.train') }}
               listeners={{
                 tabPress: event => {
                   if (tabRef.current === 'training') return

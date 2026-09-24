@@ -17,6 +17,7 @@ import { stemsRoot } from './media'
 import { log, logChunk } from './log'
 import { isOnnxPack, packDir, packOnnxModel, packPython, packRtxEpPath, trtrtxFlagPath } from './models'
 import { onChildSettled } from './child-exit'
+import { t } from '../shared/i18n'
 
 const MODEL = 'htdemucs_6s'
 const PROBE_TIMEOUT_MS = 45_000
@@ -151,30 +152,30 @@ export function friendlyError(tail: string): string {
   // looks clean because log() strips NULs for display. Match what's meant.
   tail = tail.replace(/\u0000/g, '')
   if (/8007000E|Not enough memory resources/i.test(tail))
-    return 'The graphics card ran out of memory for this model.'
+    return t('main.error.gpuOutOfMemory')
   // Before the generic DML check: DmlExecutionProvider appears in these
   // stacks too (as a C++ source path), but hung-and-reset is its own story.
   if (/887A0006|887A0007|DEVICE_HUNG|DEVICE_RESET/i.test(tail))
-    return 'The graphics driver stopped responding while running this model (Windows reset the GPU).'
+    return t('main.error.gpuDriverHung')
   if (/887A0005|DXGI_ERROR_DEVICE_REMOVED|device.{0,10}removed|DmlExecutionProvider/i.test(tail))
-    return 'The graphics driver could not run this model (GPU device removed).'
+    return t('main.error.gpuDeviceRemoved')
   if (/HF_HUB_OFFLINE|LocalEntryNotFound|Cannot find the requested files/i.test(tail))
-    return 'The splitter is missing its model — open the model manager (splitter chip) and download it again.'
+    return t('main.error.splitterMissingModel')
   // Before the generic module check: this error arrives chained from
   // "No module named 'torchcodec'" (torchaudio >=2.9 without torchcodec).
   if (/TorchCodec is required|No module named 'torchcodec'/i.test(tail))
-    return 'This demucs install cannot read audio any more (torchaudio now needs TorchCodec). Update it (pipx upgrade demucs) or install ffmpeg (brew install ffmpeg).'
+    return t('main.error.demucsNeedsTorchCodec')
   if (/ModuleNotFoundError|No module named/i.test(tail))
-    return 'The demucs install looks broken (missing Python module). Try: pipx reinstall demucs && pipx inject demucs numpy'
+    return t('main.error.demucsBrokenInstall')
   if (/ffmpeg|torchaudio.*backend|Could not load|soundfile/i.test(tail))
-    return 'Could not read the audio file. Make sure ffmpeg is installed (brew install ffmpeg) and the file plays normally.'
+    return t('main.error.couldNotReadAudioFile')
   if (/out of memory|MemoryError|bad_alloc/i.test(tail))
-    return 'The splitter ran out of memory. Close other apps and try again.'
+    return t('main.error.splitterOutOfMemory')
   const lines = tail
     .split('\n')
     .map((l) => l.trim())
     .filter(Boolean)
-  return `Separation failed: ${lines.slice(-3).join(' — ').slice(0, 400) || 'unknown error'}`
+  return t('main.error.separationFailed', { tail: lines.slice(-3).join(' — ').slice(0, 400) || t('main.error.unknownError') })
 }
 
 
@@ -263,21 +264,21 @@ export class Separator {
     return {
       ok: false,
       needsModels: true,
-      message: 'The stem splitter has not been downloaded yet.'
+      message: t('main.error.splitterNotDownloaded')
     }
   }
 
   private describe(e: ResolvedEngine): string {
     if (e.kind === 'onnx') {
-      if (process.platform !== 'win32') return 'splitter pack (ONNX)'
+      if (process.platform !== 'win32') return t('main.engine.onnxPack')
       // The marker flips the actual provider — a label still claiming a GPU
       // engine misled every field log read after a failure. An old pack that
       // never had the engine is its own story (a field log claimed "switched
       // off" on a machine that had simply not updated yet).
       if (!existsSync(packRtxEpPath()))
-        return 'splitter pack (CPU — this pack has no GPU engine, update it in the model manager)'
-      if (!existsSync(trtrtxFlagPath())) return 'splitter pack (TensorRT RTX)'
-      return 'splitter pack (CPU — the GPU engine is switched off here)'
+        return t('main.engine.cpuPackNoGpu')
+      if (!existsSync(trtrtxFlagPath())) return t('main.engine.trtrtxPack')
+      return t('main.engine.cpuPackGpuOff')
     }
     return e.cmd.join(' ')
   }
@@ -293,7 +294,7 @@ export class Separator {
   }
 
   async separate(input: string, onProgress: (p: SeparationProgress) => void): Promise<SeparateResult> {
-    if (this.child) return { ok: false, error: 'A separation is already running.' }
+    if (this.child) return { ok: false, error: t('main.error.separationAlreadyRunning') }
 
     onProgress({ stage: 'preparing', percent: 0 })
     const hash = await hashFile(input)
@@ -337,7 +338,7 @@ export class Separator {
     } else if (!DIRECT_INPUT_EXT.has(extname(input).toLowerCase())) {
       return {
         ok: false,
-        error: `The splitter reads WAV/MP3/FLAC/OGG — convert ${extname(input)} first.`
+        error: t('main.error.splitterUnsupportedFormat', { ext: extname(input) })
       }
     }
     const result = await this.runOnnx(engine, fileInput, outDir, stems, onProgress)
@@ -395,7 +396,7 @@ export class Separator {
       child.on('error', (err) => {
         this.child = null
         void rm(outDir, { recursive: true, force: true })
-        resolve({ ok: false, error: `Could not start demucs: ${err.message}` })
+        resolve({ ok: false, error: t('main.error.couldNotStartDemucs', { message: err.message }) })
       })
 
       onChildSettled(child, 'splitter', (code) => {
@@ -403,7 +404,7 @@ export class Separator {
         log('splitter', `demucs exited with code ${code}`)
         if (this.cancelled) {
           void rm(outDir, { recursive: true, force: true })
-          resolve({ ok: false, cancelled: true, error: 'Cancelled.' })
+          resolve({ ok: false, cancelled: true, error: t('main.error.cancelled') })
           return
         }
         void (async () => {
@@ -447,7 +448,7 @@ export class Separator {
         )
       attempts = [...(rtxShipped && !rtxOff ? [{ provider: 'trtrtx' }] : []), { provider: 'cpu' }]
     }
-    let last: SeparateResult = { ok: false, error: 'not started' }
+    let last: SeparateResult = { ok: false, error: t('main.error.notStarted') }
     for (const attempt of attempts) {
       log('splitter', `trying ONNX provider: ${attempt.provider}`)
       last = await this.spawnOnnx(engine, attempt, input, outDir, stems, onProgress)
@@ -587,7 +588,7 @@ export class Separator {
           child.on('error', (err) => {
             clearInterval(heartbeat)
             this.child = null
-            resolve({ ok: false, error: `Could not start the GPU pack: ${err.message}` })
+            resolve({ ok: false, error: t('main.error.couldNotStartGpuPack', { message: err.message }) })
           })
 
           onChildSettled(child, 'splitter', (code) => {
@@ -596,11 +597,11 @@ export class Separator {
             log('splitter', `ONNX splitter exited with code ${code}`)
             if (this.cancelled) {
               void rm(outDir, { recursive: true, force: true })
-              resolve({ ok: false, cancelled: true, error: 'Cancelled.' })
+              resolve({ ok: false, cancelled: true, error: t('main.error.cancelled') })
               return
             }
             if (timedOut) {
-              resolve({ ok: false, error: 'The GPU engine ran too slowly on this machine.' })
+              resolve({ ok: false, error: t('main.error.gpuEngineTooSlow') })
               return
             }
             void (async () => {
@@ -609,7 +610,7 @@ export class Separator {
                 await mkdir(join(outDir, MODEL), { recursive: true })
                 for (const stem of STEMS_6) {
                   const src = join(tmpOut, `${stem}.wav`)
-                  if (!(await exists(src))) throw new Error(`GPU pack produced no ${stem} file`)
+                  if (!(await exists(src))) throw new Error(t('main.error.gpuPackNoStemFile', { stem }))
                   await rename(src, stems[stem] as string)
                 }
                 await rm(tmpOut, { recursive: true, force: true })

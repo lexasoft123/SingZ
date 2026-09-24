@@ -3,6 +3,7 @@ import type {
   MonitorShellSnapshot,
   MonitorStopOutcome
 } from '../audio/monitoring'
+import { t } from '../i18n'
 
 interface Props {
   snapshot: MonitorShellSnapshot
@@ -18,13 +19,13 @@ export function persistentMonitorLabel(
   if (
     snapshot.hasRouteTransitionLease && !snapshot.hasNativeOwnership &&
     !snapshot.hasUnresolvedPreviewLease
-  ) return routeUnconfirmed ? 'Audio route needs attention' : 'Changing audio route…'
+  ) return routeUnconfirmed ? t('settings.persistentMonitor.routeNeedsAttention') : t('settings.persistentMonitor.changingRoute')
   if (snapshot.hasUnresolvedPreviewLease && !snapshot.hasNativeOwnership)
-    return 'Microphone cleanup needed'
-  if (snapshot.phase === 'preparing' || snapshot.phase === 'starting') return 'Starting monitor'
-  if (snapshot.phase === 'stopping') return 'Stopping monitor'
-  if (snapshot.phase === 'error') return 'Monitor needs attention'
-  return 'Mic monitoring'
+    return t('settings.persistentMonitor.cleanupNeeded')
+  if (snapshot.phase === 'preparing' || snapshot.phase === 'starting') return t('settings.persistentMonitor.starting')
+  if (snapshot.phase === 'stopping') return t('settings.persistentMonitor.stopping')
+  if (snapshot.phase === 'error') return t('settings.persistentMonitor.needsAttention')
+  return t('settings.persistentMonitor.micMonitoring')
 }
 
 /** App-shell ownership stays visible after Settings closes. Both controls are
@@ -53,15 +54,15 @@ export default function PersistentMonitorControl({
     <div
       className={`persistent-monitor ${snapshot.phase}${routeUnconfirmed ? ' route-unconfirmed' : ''}`}
       role="group"
-      aria-label="Headphone monitoring controls"
+      aria-label={t('settings.persistentMonitor.groupAriaLabel')}
     >
       <button
         type="button"
         className="persistent-monitor-status"
         title={previewCleanupOnly
-          ? 'Open audio cleanup settings'
-          : routeOnly ? 'Open audio route settings' : 'Open headphone monitoring settings'}
-        aria-label={`${label}. New song and training audio starts are blocked. Open audio settings.`}
+          ? t('settings.persistentMonitor.openCleanupSettings')
+          : routeOnly ? t('settings.persistentMonitor.openRouteSettings') : t('settings.persistentMonitor.openMonitoringSettings')}
+        aria-label={t('settings.persistentMonitor.ariaLabel', { label })}
         onClick={onOpenSettings}
       >
         <span className="persistent-monitor-dot" aria-hidden="true" />
@@ -72,12 +73,12 @@ export default function PersistentMonitorControl({
           type="button"
           className="persistent-monitor-stop"
           aria-label={previewCleanupOnly
-            ? 'Retry microphone cleanup and release audio'
-            : 'Stop monitoring and release microphone audio'}
+            ? t('settings.persistentMonitor.retryCleanupAria')
+            : t('settings.persistentMonitor.stopAria')}
           disabled={stopping}
           onClick={() => void onStop()}
         >
-          Stop
+          {t('settings.persistentMonitor.stopButton')}
         </button>
       )}
     </div>

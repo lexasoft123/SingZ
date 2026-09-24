@@ -97,10 +97,33 @@ import {
 import { playbackCountInDisplay } from '../playback/count-in-display'
 import { iosNativePlayback } from '../playback/native'
 import { nowPlaying } from '../playback/now-playing'
+import { t, tn, type Key } from '../i18n'
 
 const SCRIM_TOP = require('../../assets/bg/scrim-top.png')
 const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
 const isBackingVocalLane = (id: string): boolean => /^custom-backing-vocals(?:-\d+)?$/.test(id)
+
+/** The kit's STEM_META labels (TRACK_META) are English constants — translate
+ *  them at display sites only, for the fixed stem ids. A custom track's own
+ *  label (from the doc, or the native lane) is never one of these ids. */
+const STEM_LABEL_IDS = ['original', 'vocals', 'drums', 'bass', 'guitar', 'piano', 'other'] as const
+const stemLabel = (id: string): string | undefined =>
+  (STEM_LABEL_IDS as readonly string[]).includes(id)
+    ? t(`phone.player.stem.${id}` as Key)
+    : undefined
+
+/** Names a PlaybackOperation for the "not available yet" alert. */
+const OPERATION_KEYS: Record<PlaybackOperation, Key> = {
+  pause: 'phone.player.operation.pause',
+  seek: 'phone.player.operation.seek',
+  'loop-region': 'phone.player.operation.loopRegion',
+  metronome: 'phone.player.operation.metronome',
+  mixer: 'phone.player.operation.mixer',
+  'pitch-tempo': 'phone.player.operation.pitchTempo',
+  training: 'phone.player.operation.training',
+  'preview-click': 'phone.player.operation.previewClick'
+}
+const operationLabel = (operation: PlaybackOperation): string => t(OPERATION_KEYS[operation])
 
 type PlayerStackParamList = {
   Stage: undefined
@@ -287,8 +310,8 @@ export default function PlayerScreen({
       // arriving on its own, would raise it with no user action at all.
       if (engine.reconfiguring) return
       Alert.alert(
-        'Not available in native playback yet',
-        `${operation.replace('-', ' ')} stays disabled until its native DSP control is connected.`
+        t('phone.player.unsupported.title'),
+        t('phone.player.unsupported.message', { operation: operationLabel(operation) })
       )
     },
     [engine]
@@ -300,7 +323,10 @@ export default function PlayerScreen({
           if (outcome.kind === 'fallback') onFallback?.(outcome.project)
         })
         .catch(error =>
-          Alert.alert('Playback stopped', error instanceof Error ? error.message : String(error))
+          Alert.alert(
+            t('phone.player.playbackStopped.title'),
+            error instanceof Error ? error.message : String(error)
+          )
         )
     },
     [onFallback]
@@ -524,7 +550,7 @@ export default function PlayerScreen({
             desiredMetRef.current = acceptedMetRef.current
           if (metScreenMounted.current)
             Alert.alert(
-              'Metronome setting was not saved',
+              t('phone.player.metronomeSaveFailed.title'),
               error instanceof Error ? error.message : String(error)
             )
         })
@@ -754,12 +780,12 @@ export default function PlayerScreen({
     for (const st of project.stems) {
       const meta = TRACK_META[st.id]
       map[st.id] = {
-        label: st.label ?? meta?.label ?? st.id,
+        label: st.label ?? stemLabel(st.id) ?? meta?.label ?? st.id,
         color: st.color ?? meta?.color ?? C.dim
       }
     }
     for (const lane of project.nativePlayback?.lanes ?? [])
-      map[lane.id] = { label: lane.label, color: lane.color }
+      map[lane.id] = { label: stemLabel(lane.id) ?? lane.label, color: lane.color }
     return map
   }, [project])
   /**
@@ -1238,7 +1264,7 @@ export default function PlayerScreen({
   const keyText = ((): string | null => {
     const k = settings?.key
     if (!k) return null
-    return `${KEY_NAMES[k.pc % 12]} ${k.minor ? 'minor' : 'major'}`
+    return `${KEY_NAMES[k.pc % 12]} ${k.minor ? t('phone.player.songSheet.keyMinor') : t('phone.player.songSheet.keyMajor')}`
   })()
   /* The Key row had the Beat row's bug exactly: the detector stores a "the
    * harmonic bed is silent, there is no key here" verdict, and the row read
@@ -1272,7 +1298,7 @@ export default function PlayerScreen({
     // singer is pressing this. Hand-placed bar lines survive; analyzeProject
     // folds them back onto the fresh grid.
     startAnalysis(project.dir, stemFiles, project.lyrics, true)
-    setAnalysisAt({ text: 'Getting ready…', stage: 'start' })
+    setAnalysisAt({ text: t('phone.player.songSheet.gettingReady'), stage: 'start' })
   }, [project.dir, project.lyrics, stemFiles])
 
   const fetchModels = useCallback(async () => {
@@ -1818,9 +1844,11 @@ export default function PlayerScreen({
                   // The explicit label replaces the composed one, so the 🎤
                   // marker rendered inside this same Pressable has to be said
                   // here or it is lost.
-                  mask?.[i] === true ? `${lines[i].text}. Your turn.` : lines[i].text
+                  mask?.[i] === true
+                    ? t('phone.player.lyrics.lineTurn', { text: lines[i].text })
+                    : lines[i].text
                 }
-                accessibilityHint="Jump to this line"
+                accessibilityHint={t('phone.player.lyrics.jumpHint')}
                 style={{ position: 'absolute', left: LYR_PAD, right: LYR_PAD, top: b.y, height: b.height }}
               >
                 {mask?.[i] === true && (
@@ -1855,7 +1883,7 @@ export default function PlayerScreen({
             lead={LEAD_S}
           />
         )}
-        {lines.length === 0 && <Text style={s.noLyrics}>No lyrics in this project yet.</Text>}
+        {lines.length === 0 && <Text style={s.noLyrics}>{t('phone.player.lyrics.empty')}</Text>}
       </View>
 
       {/* header: a dark glass pill floating on the room (the references'
@@ -1871,7 +1899,7 @@ export default function PlayerScreen({
       </View>
       <View pointerEvents="none" style={s.hdrGlass} />
       <View style={s.hdr} pointerEvents="box-none">
-        <Pressable onPress={onBack} hitSlop={12} accessibilityRole="button" accessibilityLabel="Back to library">
+        <Pressable onPress={onBack} hitSlop={12} accessibilityRole="button" accessibilityLabel={t('phone.player.header.back')}>
           <Text style={s.back}>‹</Text>
         </Pressable>
         <StemTile hue={tileHue} size={46} />
@@ -1886,11 +1914,15 @@ export default function PlayerScreen({
             {splitSongName(project.name).artist != null
               ? `${splitSongName(project.name).artist} · `
               : ''}
-            {originalOnly ? 'Not split yet' : `${stemIds.length - addedCount} stems`}
-            {addedCount > 0 ? ` · ${addedCount} added` : ''}
-            {beatInfo ? ` · ${Math.round(beatInfo.bpm)} bpm` : ''}
+            {originalOnly
+              ? t('phone.player.header.notSplit')
+              : t('phone.player.header.stemsCount', { n: stemIds.length - addedCount })}
+            {addedCount > 0 ? ` · ${t('phone.player.header.added', { n: addedCount })}` : ''}
+            {beatInfo ? ` · ${t('phone.player.header.bpm', { bpm: Math.round(beatInfo.bpm) })}` : ''}
             {settings?.key != null
-              ? ` · ${KEY_NAMES[settings.key.pc % 12]} ${settings.key.minor ? 'min' : 'maj'}`
+              ? ` · ${KEY_NAMES[settings.key.pc % 12]} ${
+                  settings.key.minor ? t('phone.player.header.keyMinor') : t('phone.player.header.keyMajor')
+                }`
               : ''}
           </Text>
         </View>
@@ -1906,7 +1938,7 @@ export default function PlayerScreen({
                 marks the lines you sing, and this badge exists to announce
                 exactly those. Matching the drawn transport glyph here would
                 break the only thing it is for. */}
-            <Text style={s.youChipText}>YOU SING 🎤</Text>
+            <Text style={s.youChipText}>{t('phone.player.header.youSing')}</Text>
           </View>
         )}
         {/* Song sheet. Three dots rather than a gear: a gear glyph has no
@@ -1917,7 +1949,7 @@ export default function PlayerScreen({
           hitSlop={12}
           style={s.songBtn}
           accessibilityRole="button"
-          accessibilityLabel="About this song"
+          accessibilityLabel={t('phone.player.header.about')}
         >
           <Text style={s.songBtnText}>•••</Text>
         </Pressable>
@@ -2002,7 +2034,7 @@ export default function PlayerScreen({
             }}
             color="rgba(255,255,255,0.85)"
             height={40}
-            label="Position"
+            label={t('phone.player.transport.position')}
             valueText={(v) => fmtTime(v * engine.duration)}
             rail={(pct) => (
               <View
@@ -2082,14 +2114,16 @@ export default function PlayerScreen({
             accessibilityRole="button"
             accessibilityLabel={
               loopA === null
-                ? 'Loop a section. Marks the start here.'
+                ? t('phone.player.loop.markStart')
                 : loopB === null
-                  ? `Loop start marked at ${fmtTime(loopA)}. Marks the end here.`
-                  : `Looping ${fmtTime(loopA)} to ${fmtTime(loopB)}. Clears the loop.`
+                  ? t('phone.player.loop.startMarked', { time: fmtTime(loopA) })
+                  : t('phone.player.loop.looping', { a: fmtTime(loopA), b: fmtTime(loopB) })
             }
           >
             <Text style={[s.loopBtnText, loopA !== null && s.loopBtnTextOn]}>
-              {loopA !== null && loopB === null ? 'A' : 'A–B'}
+              {loopA !== null && loopB === null
+                ? t('phone.player.loop.buttonA')
+                : t('phone.player.loop.buttonAB')}
             </Text>
           </Pressable>
           <Text style={[s.tm, { textAlign: 'right' }]}>{fmtTime(engine.duration)}</Text>
@@ -2099,7 +2133,7 @@ export default function PlayerScreen({
             onPress={() =>
               engine.capabilities.mixer ? setSheet('mixer') : unsupported('mixer')
             }
-            label="Mixer"
+            label={t('phone.player.transport.mixer')}
           >
             <MixGlyph />
           </RoundBtn>
@@ -2107,7 +2141,7 @@ export default function PlayerScreen({
             onPress={() =>
               engine.capabilities.seek ? engine.seek(0) : unsupported('seek')
             }
-            label="Back to start"
+            label={t('phone.player.transport.backToStart')}
           >
             {/* Drawn, like MicGlyph — Android faces render text glyphs at
                 whatever weight they please. */}
@@ -2117,15 +2151,15 @@ export default function PlayerScreen({
             onPress={() =>
               engine.capabilities.seek ? engine.seekBy(-5) : unsupported('seek')
             }
-            label="Back 5 seconds"
+            label={t('phone.player.transport.back5')}
           >
-            <Text style={s.skipText}>−5s</Text>
+            <Text style={s.skipText}>{t('phone.player.transport.skipBackLabel')}</Text>
           </RoundBtn>
           <Pressable
             onPress={() => finishPlaybackAction(engine.toggle())}
             style={s.play}
             accessibilityRole="button"
-            accessibilityLabel={playing ? 'Pause' : 'Play'}
+            accessibilityLabel={playing ? t('phone.player.transport.pause') : t('phone.player.transport.play')}
           >
             <PlayPauseGlyph playing={playing} color="#17110a" />
           </Pressable>
@@ -2133,11 +2167,11 @@ export default function PlayerScreen({
             onPress={() =>
               engine.capabilities.seek ? engine.seekBy(5) : unsupported('seek')
             }
-            label="Forward 5 seconds"
+            label={t('phone.player.transport.forward5')}
           >
-            <Text style={s.skipText}>+5s</Text>
+            <Text style={s.skipText}>{t('phone.player.transport.skipForwardLabel')}</Text>
           </RoundBtn>
-          <RoundBtn onPress={() => setSheet('practice')} label="Practice">
+          <RoundBtn onPress={() => setSheet('practice')} label={t('phone.player.transport.practice')}>
             <MicGlyph />
           </RoundBtn>
         </View>
@@ -2156,7 +2190,7 @@ export default function PlayerScreen({
         {() => (
           <PlayerSheetRoute onDismiss={sheetDismissed}>
             <Sheet
-              title="Mixer"
+              title={t('phone.player.mixer.title')}
               onClose={() => setSheet('none')}
               fitContent={NATIVE_SHEET_FIT_SUPPORTED}
               pad={sheetPad}
@@ -2171,14 +2205,14 @@ export default function PlayerScreen({
                 mute. */}
             {hasVocals && (
               <View style={[b.segs, { marginBottom: 6 }]}>
-                <Chip label="Full mix" active={mixPreset === 'full'} onPress={() => applyMixPreset('full')} />
+                <Chip label={t('phone.player.mixer.fullMix')} active={mixPreset === 'full'} onPress={() => applyMixPreset('full')} />
                 <Chip
-                  label="No vocals"
+                  label={t('phone.player.mixer.noVocals')}
                   active={mixPreset === 'novocals'}
                   onPress={() => applyMixPreset('novocals')}
                 />
                 <Chip
-                  label="Vocals only"
+                  label={t('phone.player.mixer.vocalsOnly')}
                   active={mixPreset === 'vocalsonly'}
                   onPress={() => applyMixPreset('vocalsonly')}
                 />
@@ -2187,22 +2221,23 @@ export default function PlayerScreen({
             {/* The lane rows had no scroll container at all, so past roughly a
                 dozen lanes they clipped with no way to reach them — and the
                 44 pt fader targets below bring that cliff closer. */}
-            {tracks.map((t, i) => {
-              const meta = laneMeta[t.id] ?? TRACK_META[t.id] ?? { label: t.id, color: C.dim }
-              const isDucked = ducked.includes(t.id)
+            {tracks.map((track, i) => {
+              const meta = laneMeta[track.id] ??
+                (TRACK_META[track.id] ? { label: stemLabel(track.id) ?? TRACK_META[track.id].label, color: TRACK_META[track.id].color } : { label: track.id, color: C.dim })
+              const isDucked = ducked.includes(track.id)
               /* Generated backing belongs beside vocals, without an Added
                  header dividing the song's stems. The header marks the
                  singer's own extra lanes. The
                  pre-split original lane is the app's, not the singer's —
                  the same exemption addedCount makes — or an unsplit song
                  would render an "Added" header over its own audio. */
-              const isCustom = !(t.id in TRACK_META) && t.id !== ORIGINAL_LANE_ID && !isBackingVocalLane(t.id)
+              const isCustom = !(track.id in TRACK_META) && track.id !== ORIGINAL_LANE_ID && !isBackingVocalLane(track.id)
               const firstCustom = isCustom && (i === 0 || tracks[i - 1].id in TRACK_META || isBackingVocalLane(tracks[i - 1].id))
               return (
-                <React.Fragment key={t.id}>
+                <React.Fragment key={track.id}>
                   {firstCustom && (
                     <View style={s.addedRule}>
-                      <Text style={s.addedLab}>Added</Text>
+                      <Text style={s.addedLab}>{t('phone.player.mixer.added')}</Text>
                     </View>
                   )}
                   <View style={s.mixRow}>
@@ -2212,26 +2247,26 @@ export default function PlayerScreen({
                   </Text>
                   {isDucked && (
                     <View style={[s.youPill, { backgroundColor: meta.color }]}>
-                      <Text style={s.youPillText}>your turn</Text>
+                      <Text style={s.youPillText}>{t('phone.player.mixer.yourTurn')}</Text>
                     </View>
                   )}
                   <View style={{ flex: 1 }}>
                     <Bar
-                      value={t.volume}
+                      value={track.volume}
                       onChange={(v) => {
                         if (engine.capabilities.mixer) {
-                          engine.setVolume(t.id, v)
-                          setDragVol({ id: t.id, v })
+                          engine.setVolume(track.id, v)
+                          setDragVol({ id: track.id, v })
                         }
                       }}
                       onCommit={() => setDragVol(null)}
                       color={meta.color}
                       height={22}
                       track="rgba(255,255,255,0.14)"
-                      label={`${meta.label} volume`}
+                      label={t('phone.player.mixer.volumeLabel', { label: meta.label })}
                     />
                     {/* The value while a finger drags; at rest, nothing. */}
-                    {dragVol?.id === t.id && (
+                    {dragVol?.id === track.id && (
                       <View pointerEvents="none" style={[s.volWrap, { left: `${dragVol.v * 100}%` }]}>
                         <View style={s.volBubble}>
                           <Text style={s.volBubbleText}>{Math.round(dragVol.v * 100)}%</Text>
@@ -2244,32 +2279,32 @@ export default function PlayerScreen({
                     hitSlop={4}
                     onPress={() =>
                       engine.capabilities.mixer
-                        ? engine.setMuted(t.id, !t.muted)
+                        ? engine.setMuted(track.id, !track.muted)
                         : unsupported('mixer')
                     }
                     accessibilityRole="button"
-                    accessibilityLabel={`Mute ${meta.label}`}
-                    accessibilityState={{ selected: t.muted }}
-                    style={[s.msBtn, t.muted && { backgroundColor: C.red, borderColor: C.red }]}
+                    accessibilityLabel={t('phone.player.mixer.mute', { label: meta.label })}
+                    accessibilityState={{ selected: track.muted }}
+                    style={[s.msBtn, track.muted && { backgroundColor: C.red, borderColor: C.red }]}
                   >
                     {/* Drawn, not "M" — mixing-desk initials say nothing to a
                         singer; a crossed speaker says what happened to the
                         sound. */}
-                    <SpeakerGlyph color={t.muted ? '#1d0f0d' : white(0.55)} slashed={t.muted} />
+                    <SpeakerGlyph color={track.muted ? '#1d0f0d' : white(0.55)} slashed={track.muted} />
                   </Pressable>
                   <Pressable
                     hitSlop={4}
                     onPress={() =>
                       engine.capabilities.mixer
-                        ? engine.setSolo(t.id, !t.solo)
+                        ? engine.setSolo(track.id, !track.solo)
                         : unsupported('mixer')
                     }
                     accessibilityRole="button"
-                    accessibilityLabel={`Solo ${meta.label}`}
-                    accessibilityState={{ selected: t.solo }}
-                    style={[s.msBtn, t.solo && { backgroundColor: C.amber, borderColor: C.amber }]}
+                    accessibilityLabel={t('phone.player.mixer.solo', { label: meta.label })}
+                    accessibilityState={{ selected: track.solo }}
+                    style={[s.msBtn, track.solo && { backgroundColor: C.amber, borderColor: C.amber }]}
                   >
-                    <HeadphonesGlyph color={t.solo ? C.amberInk : white(0.55)} />
+                    <HeadphonesGlyph color={track.solo ? C.amberInk : white(0.55)} />
                   </Pressable>
                   </View>
                 </React.Fragment>
@@ -2300,45 +2335,46 @@ export default function PlayerScreen({
               showsVerticalScrollIndicator={false}
             >
               <View style={[b.sec, b.secFirst]}>
-                <Text style={b.secLab}>Beat</Text>
+                <Text style={b.secLab}>{t('phone.player.songSheet.beat')}</Text>
                 <Text style={s.songVal}>
                   {beatRow === 'progress'
                     ? stepAt('beat')
                     : beatRow === 'grid' && beatInfo
-                      ? `${Math.round(beatInfo.bpm)} bpm · ${meterName(beatInfo.beatsPerBar)} · ` +
-                        `${beatInfo.downbeats?.length ?? 0} bars`
+                      ? t('phone.player.songSheet.bpmMeterBars', {
+                          bpm: Math.round(beatInfo.bpm),
+                          meter: meterName(beatInfo.beatsPerBar),
+                          bars: beatInfo.downbeats?.length ?? 0
+                        })
                       : beatRow === 'verdict'
-                        ? 'No beat in these drums'
+                        ? t('phone.player.songSheet.noBeatVerdict')
                         : beatRow === 'busy'
-                          ? 'Reading the song…'
-                          : 'Not detected yet'}
+                          ? t('phone.player.songSheet.readingSong')
+                          : t('phone.player.songSheet.notDetectedYet')}
                 </Text>
                 {/* The record behind the row: which detector wrote this grid,
                     and what rides on it. Dim — it is provenance, not news. */}
                 {beatRow === 'grid' && settings?.beat != null && (
                   <Text style={s.songMeta}>
                     {settings.beat.source === 'manual'
-                      ? 'hand-made on the computer'
-                      : `detector v${settings.beat.detVersion ?? '?'}`}
+                      ? t('phone.player.songSheet.handMade')
+                      : t('phone.player.songSheet.detectorVersion', { ver: settings.beat.detVersion ?? '?' })}
                     {settings.beat.userBars?.length
-                      ? ` · ${settings.beat.userBars.length} hand-set bar${settings.beat.userBars.length > 1 ? 's' : ''}`
+                      ? tn('phone.player.songSheet.handSetBars', settings.beat.userBars.length)
                       : ''}
                   </Text>
                 )}
                 <Text style={b.hint}>
                   {beatRow === 'progress'
-                    ? 'Listening now — the click and the count-in pick the beat up the moment it is found.'
+                    ? t('phone.player.songSheet.beatHintProgress')
                     : beatRow === 'grid'
                       ? (beatManual
-                          ? 'Hand-tuned on the computer — nothing here will re-detect over it. '
+                          ? t('phone.player.songSheet.beatHintHandTuned')
                           : settings?.beat?.userBars?.length
-                            ? 'Your own bar lines are on this grid and stay on it. '
+                            ? t('phone.player.songSheet.beatHintUserBars')
                             : '') +
-                        'The click, the count-in and the bar lines all follow this.'
+                        t('phone.player.songSheet.beatHintFollow')
                       : beatRow === 'verdict'
-                        ? 'The detector listened and found no steady beat it would put a click on — ' +
-                          'a free-time or drumless song. That answer is remembered, so opening the song ' +
-                          'again does not read the stems for nothing.' +
+                        ? t('phone.player.songSheet.beatHintVerdict') +
                           // Nothing positive can be said here. This state needs
                           // stepAt('beat') to be null, so the stage is 'start', 'key' or
                           // 'melody' — and on the two paths that actually reach it the
@@ -2348,12 +2384,11 @@ export default function PlayerScreen({
                           // plan.beat false outright. Only drop the invitation, which is
                           // all that was wrong: the chip beside this already says
                           // "Detecting…".
-                          (busyHere ? '' : ' Detect again to ask once more.')
+                          (busyHere ? '' : t('phone.player.songSheet.beatHintDetectAgain'))
                         : beatRow === 'busy'
-                          ? 'Being read right now — the grid is written after the key is ' +
-                            'read, so this row fills in a moment after the beat itself is found.'
+                          ? t('phone.player.songSheet.beatHintBusy')
                           : canAnalyse
-                            ? 'Nothing has read the stems yet.'
+                            ? t('phone.player.songSheet.beatHintNothingRead')
                             : // Whether the song is SPLIT is a fact about its
                               // lanes, which is what the header says two lines
                               // up ("6 stems"). This asked stemFiles instead —
@@ -2364,8 +2399,8 @@ export default function PlayerScreen({
                               // lanes and its six-lane mixer. originalOnly is
                               // the signal the header already trusts.
                               originalOnly
-                              ? 'Not split yet — the beat is read from the drums, so it waits for the split.'
-                              : 'Songs from the computer arrive with their beat already in them.'}
+                              ? t('phone.player.songSheet.beatHintNotSplit')
+                              : t('phone.player.songSheet.beatHintFromComputer')}
                 </Text>
                 {canAnalyse && !busyHere && (
                   <Text style={b.hint}>
@@ -2390,19 +2425,17 @@ export default function PlayerScreen({
                         shipping build is (JS and native ship together) — the Metro
                         pairing deps.ts keeps its worklet path for, measured at 178.1 s. */}
                     {mlPossible
-                      ? 'The beat, the key and the melody together take about ten seconds ' +
-                        'for every minute of song' +
+                      ? t('phone.player.songSheet.timeEstimateWithMl') +
                         (nativeMlGridAvailable()
-                          ? ' — about fifteen with the better-beats model listening.'
-                          : '.')
-                      : 'This song\'s stems are FLAC and this build reads them in JavaScript — ' +
-                        'minutes rather than seconds.'}
+                          ? t('phone.player.songSheet.timeEstimateMlSuffix')
+                          : t('phone.player.songSheet.timeEstimateNoMlSuffix'))
+                      : t('phone.player.songSheet.timeEstimateFlacJs')}
                   </Text>
                 )}
                 {canAnalyse && (
                   <View style={[b.segs, { marginTop: 12 }]}>
                     <Chip
-                      label={busyHere ? 'Detecting…' : 'Detect again'}
+                      label={busyHere ? t('phone.player.songSheet.detecting') : t('phone.player.songSheet.detectAgain')}
                       active={busyHere}
                       onPress={() => {
                         if (!busyHere) detectAgain()
@@ -2414,27 +2447,26 @@ export default function PlayerScreen({
 
               {canAnalyse && mlPossible && nativeMlGridAvailable() && (
                 <View style={b.sec}>
-                  <Text style={b.secLab}>Better beats</Text>
+                  <Text style={b.secLab}>{t('phone.player.songSheet.betterBeats')}</Text>
                   <Text style={s.songVal}>
                     {modelsGot
-                      ? `Downloading — ${modelsGot.mb} of ${modelsGot.totalMb} MB`
+                      ? t('phone.player.songSheet.downloading', { mb: modelsGot.mb, total: modelsGot.totalMb })
                       : modelsHave === true
-                        ? 'On this phone'
+                        ? t('phone.player.songSheet.onThisPhone')
                         : modelsHave === false
-                          ? `Not downloaded — ${BEAT_MODELS_MB} MB`
-                          : 'Checking…'}
+                          ? t('phone.player.songSheet.notDownloaded', { mb: BEAT_MODELS_MB })
+                          : t('phone.player.songSheet.checking')}
                   </Text>
                   <Text style={b.hint}>
-                    A neural model that hears the beat through drumless intros and rubato the
-                    drums-first reader loses. Downloaded once, used by every song afterwards.
-                    {modelsHave === true ? ' Detect again to use it on this one.' : ''}
+                    {t('phone.player.songSheet.betterBeatsHint')}
+                    {modelsHave === true ? t('phone.player.songSheet.betterBeatsHintDetectAgain') : ''}
                   </Text>
                   <View style={[b.segs, { marginTop: 12 }]}>
                     {modelsGot ? (
-                      <Chip label="Cancel" active={false} onPress={() => void cancelBeatModels()} />
+                      <Chip label={t('phone.player.songSheet.cancel')} active={false} onPress={() => void cancelBeatModels()} />
                     ) : modelsHave === false ? (
                       <Chip
-                        label={`Download ${BEAT_MODELS_MB} MB`}
+                        label={t('phone.player.songSheet.downloadMb', { mb: BEAT_MODELS_MB })}
                         active={false}
                         onPress={() => void fetchModels()}
                       />
@@ -2444,60 +2476,55 @@ export default function PlayerScreen({
               )}
 
               <View style={b.sec}>
-                <Text style={b.secLab}>Key</Text>
+                <Text style={b.secLab}>{t('phone.player.songSheet.key')}</Text>
                 <Text style={s.songVal}>
                   {keyRow === 'progress'
                     ? stepAt('key')
                     : keyRow === 'grid'
                       ? keyText
                       : keyRow === 'verdict'
-                        ? 'No key in these stems'
+                        ? t('phone.player.songSheet.noKeyVerdict')
                         : keyRow === 'busy'
-                          ? 'Reading the song…'
-                          : 'Not detected yet'}
+                          ? t('phone.player.songSheet.readingSong')
+                          : t('phone.player.songSheet.notDetectedYet')}
                 </Text>
                 {keyRow === 'grid' && settings?.key != null && (
-                  <Text style={s.songMeta}>detector v{settings.key.detVersion}</Text>
+                  <Text style={s.songMeta}>{t('phone.player.songSheet.detectorVersion', { ver: settings.key.detVersion })}</Text>
                 )}
                 {keyRow === 'verdict' && (
-                  <Text style={b.hint}>
-                    The harmony the key is read from — the guitar, piano and bass lanes —
-                    is silent here, so there is nothing to read it off. That answer is
-                    remembered rather than re-read on every open.
-                  </Text>
+                  <Text style={b.hint}>{t('phone.player.songSheet.keyVerdictHint')}</Text>
                 )}
               </View>
               <View style={b.sec}>
-                <Text style={b.secLab}>Melody</Text>
+                <Text style={b.secLab}>{t('phone.player.songSheet.melody')}</Text>
                 <Text style={s.songVal}>
                   {melodyRow === 'progress'
                     ? stepAt('melody')
                     : melodyRow === 'grid'
-                      ? 'Tracked from the vocals'
+                      ? t('phone.player.songSheet.trackedFromVocals')
                       : melodyRow === 'busy'
-                        ? 'Reading the song…'
-                        : 'Not tracked yet'}
+                        ? t('phone.player.songSheet.readingSong')
+                        : t('phone.player.songSheet.notTrackedYet')}
                 </Text>
                 {melodyRow === 'grid' && settings?.melody != null && (
                   <Text style={s.songMeta}>
-                    detector v{settings.melody.detVersion} · one frame every{' '}
-                    {(settings.melody.hopSec * 1000).toFixed(1)} ms
+                    {t('phone.player.songSheet.melodyDetector', {
+                      ver: settings.melody.detVersion,
+                      ms: (settings.melody.hopSec * 1000).toFixed(1)
+                    })}
                   </Text>
                 )}
-                <Text style={b.hint}>
-                  The sung line, saved with the song. The phone does not draw it — the
-                  computer's pitch strip does.
-                </Text>
+                <Text style={b.hint}>{t('phone.player.songSheet.melodyHint')}</Text>
               </View>
               <View style={b.sec}>
-                <Text style={b.secLab}>Lyrics</Text>
+                <Text style={b.secLab}>{t('phone.player.songSheet.lyrics')}</Text>
                 <Text style={s.songVal}>
                   {project.lyrics?.lines?.length
-                    ? `${project.lyrics.lines.length} lines` +
+                    ? t('phone.player.songSheet.linesCount', { n: project.lyrics.lines.length }) +
                       (project.lyrics.lines.some((l) => (l.words?.length ?? 0) > 0)
-                        ? ' · word timings'
-                        : ' · line timings only')
-                    : 'None'}
+                        ? t('phone.player.songSheet.wordTimings')
+                        : t('phone.player.songSheet.lineTimingsOnly'))
+                    : t('phone.player.songSheet.none')}
                 </Text>
                 {project.doc.lyricsHash != null && (
                   <Text style={s.songMeta}>{fmtInfoSize(project.doc.lyricsHash.size)}</Text>
@@ -2506,9 +2533,9 @@ export default function PlayerScreen({
 
               {/* ---------- The full record: every lane, every byte -------- */}
               <View style={b.sec}>
-                <Text style={b.secLab}>Stems</Text>
+                <Text style={b.secLab}>{t('phone.player.songSheet.stems')}</Text>
                 {tracks.map((track) => {
-                  const meta = laneMeta[track.id] ?? { label: track.id, color: C.dim }
+                  const meta = laneMeta[track.id] ?? { label: stemLabel(track.id) ?? track.id, color: C.dim }
                   const file = stemFileInfo(project.doc, track.id)
                   return (
                     <View key={track.id} style={s.stemRow}>
@@ -2536,8 +2563,8 @@ export default function PlayerScreen({
                        confusion the v22/v2 detector bumps were about. */
                     const sr = project.stems[0]?.buffer.sampleRate
                     const parts: string[] = []
-                    if (total > 0) parts.push(`${fmtInfoSize(total)} on disk`)
-                    if (sr != null) parts.push(`plays at ${(sr / 1000).toFixed(1)} kHz`)
+                    if (total > 0) parts.push(t('phone.player.songSheet.onDisk', { size: fmtInfoSize(total) }))
+                    if (sr != null) parts.push(t('phone.player.songSheet.playsAtKhz', { khz: (sr / 1000).toFixed(1) }))
                     parts.push(fmtTime(engine.duration))
                     return parts.join(' · ')
                   })()}
@@ -2545,26 +2572,31 @@ export default function PlayerScreen({
               </View>
 
               <View style={b.sec}>
-                <Text style={b.secLab}>Project</Text>
+                <Text style={b.secLab}>{t('phone.player.songSheet.project')}</Text>
                 <Text style={s.songVal}>
                   {/* From the FILES the doc names, not from the version: a
                       v2 project keeps a float WAV lead lane when its vocals
                       were separated, and saying "FLAC stems" over it tells
                       the singer something untrue about the song on screen. */}
-                  {`Format v${project.doc.version} · ${stemFormatLine(project.doc)}`}
+                  {t('phone.player.songSheet.formatVersion', {
+                    ver: project.doc.version,
+                    format: stemFormatLine(project.doc)
+                  })}
                 </Text>
                 <Text style={s.songMeta}>
                   {[
                     project.doc.savedAt
-                      ? `saved ${new Date(project.doc.savedAt).toLocaleDateString()}`
+                      ? t('phone.player.songSheet.savedOn', {
+                          date: new Date(project.doc.savedAt).toLocaleDateString()
+                        })
                       : null,
                     project.library === 'gdrive'
-                      ? 'from Google Drive'
+                      ? t('phone.player.songSheet.fromGoogleDrive')
                       : project.library === 'folder'
-                        ? 'from a folder'
+                        ? t('phone.player.songSheet.fromFolder')
                         : project.library === 'phone'
-                          ? 'on this phone'
-                          : 'bundled sample'
+                          ? t('phone.player.songSheet.onThisPhoneSource')
+                          : t('phone.player.songSheet.bundledSample')
                   ]
                     .filter((x) => x != null)
                     .join(' · ')}
@@ -2584,7 +2616,7 @@ export default function PlayerScreen({
         {() => (
           <PlayerSheetRoute onDismiss={sheetDismissed}>
             <Sheet
-              title="Practice"
+              title={t('phone.player.practice.title')}
               onClose={() => setSheet('none')}
               fitContent={NATIVE_SHEET_FIT_SUPPORTED}
               pad={sheetPad}
@@ -2602,10 +2634,10 @@ export default function PlayerScreen({
                     with it: the suffixes below say what pitch and tempo DO
                     better than a sentence did. */}
                 <View style={s.secHead}>
-                  <Text style={[b.secLab, s.secHeadLab]}>Key & speed</Text>
+                  <Text style={[b.secLab, s.secHeadLab]}>{t('phone.player.practice.keySpeed')}</Text>
                   {(ktPitch !== 0 || ktTempo !== 100) && (
                     <Chip
-                      label="Reset"
+                      label={t('phone.player.practice.reset')}
                       active={false}
                       onPress={() => {
                         if (!engine.capabilities.pitchTempo) {
@@ -2619,8 +2651,8 @@ export default function PlayerScreen({
                   )}
                 </View>
                 <Stepper
-                  label="Pitch"
-                  valueText={`${ktPitch > 0 ? '+' : ''}${ktPitch} st`}
+                  label={t('phone.player.practice.pitch')}
+                  valueText={t('phone.player.practice.semitones', { st: `${ktPitch > 0 ? '+' : ''}${ktPitch}` })}
                   onStep={(d) => {
                     if (engine.capabilities.pitchTempo)
                       setKtPitch((v) => Math.max(-12, Math.min(12, v + d)))
@@ -2630,12 +2662,17 @@ export default function PlayerScreen({
                      actually sing in. Unknown key or no shift, no suffix. */
                   suffix={
                     settings?.key != null && ktPitch !== 0
-                      ? `→ ${KEY_NAMES[(settings.key.pc + ((ktPitch % 12) + 12)) % 12]} ${settings.key.minor ? 'min' : 'maj'}`
+                      ? t('phone.player.practice.pitchSuffix', {
+                          key: KEY_NAMES[(settings.key.pc + ((ktPitch % 12) + 12)) % 12],
+                          quality: settings.key.minor
+                            ? t('phone.player.header.keyMinor')
+                            : t('phone.player.header.keyMajor')
+                        })
                       : undefined
                   }
                 />
                 <Stepper
-                  label="Tempo"
+                  label={t('phone.player.practice.tempo')}
                   valueText={`${ktTempo}%`}
                   onStep={(d) => {
                     if (engine.capabilities.pitchTempo)
@@ -2644,7 +2681,7 @@ export default function PlayerScreen({
                   }}
                   suffix={
                     beatInfo != null && ktTempo !== 100
-                      ? `→ ${Math.round((beatInfo.bpm * ktTempo) / 100)} bpm`
+                      ? t('phone.player.practice.tempoSuffix', { bpm: Math.round((beatInfo.bpm * ktTempo) / 100) })
                       : undefined
                   }
                 />
@@ -2652,11 +2689,11 @@ export default function PlayerScreen({
 
               <View style={b.sec}>
                 <View style={s.secHead}>
-                  <Text style={[b.secLab, s.secHeadLab]}>Metronome</Text>
+                  <Text style={[b.secLab, s.secHeadLab]}>{t('phone.player.practice.metronome')}</Text>
                   {/* The fact the old hint led with, in five words on the
                       header row instead of a sentence under the controls. */}
                   {beatInfo != null && (
-                    <Text style={s.secFact}>{Math.round(beatInfo.bpm)} bpm, from the song</Text>
+                    <Text style={s.secFact}>{t('phone.player.practice.bpmFromSong', { bpm: Math.round(beatInfo.bpm) })}</Text>
                   )}
                 </View>
                 {/* Three different control semantics used to share one wrapping
@@ -2673,9 +2710,9 @@ export default function PlayerScreen({
                     same question. Lit means on, everywhere on this sheet. */}
                 <Seg
                   segments={[
-                    { key: '0', label: 'No count-in' },
-                    { key: '1', label: beatInfo ? '1 bar' : '3 s' },
-                    { key: '2', label: beatInfo ? '2 bars' : '6 s' }
+                    { key: '0', label: t('phone.player.practice.noCountIn') },
+                    { key: '1', label: beatInfo ? t('phone.player.practice.oneBar') : t('phone.player.practice.threeSec') },
+                    { key: '2', label: beatInfo ? t('phone.player.practice.twoBars') : t('phone.player.practice.sixSec') }
                   ]}
                   active={String(met.countInBars)}
                   onSelect={(k) => changeMet((m) => ({ ...m, countInBars: Number(k) }))}
@@ -2683,19 +2720,19 @@ export default function PlayerScreen({
                 <View style={[b.segs, { marginTop: 10 }]}>
                   {beatInfo != null && (
                     <Chip
-                      label="Click"
+                      label={t('phone.player.practice.click')}
                       active={met.click}
                       onPress={() => changeMet((m) => ({ ...m, click: !m.click }))}
                     />
                   )}
                   <Chip
-                    label="Accent"
+                    label={t('phone.player.practice.accent')}
                     active={met.accent}
                     onPress={() => changeMet((m) => ({ ...m, accent: !m.accent }))}
                   />
                 </View>
                 <Stepper
-                  label="Loudness"
+                  label={t('phone.player.practice.loudness')}
                   valueText={`${Math.round(met.volume * 100)}%`}
                   onStep={(d) => {
                     changeMet((m) => ({
@@ -2707,26 +2744,20 @@ export default function PlayerScreen({
                   }}
                 />
                 {metronomeReadOnly && (
-                  <Text style={b.hint}>
-                    Metronome settings are read-only because this project was opened without a
-                    verified library location. Reopen it from the library to save changes.
-                  </Text>
+                  <Text style={b.hint}>{t('phone.player.practice.readOnlyHint')}</Text>
                 )}
                 {beatInfo == null && (
                 <Text style={b.hint}>
-                  {stepAt('beat')
-                      ? `${stepAt('beat')} — the click and the count-in pick the beat up ` +
-                        'the moment it is found.'
+                  {(() => {
+                    const step = stepAt('beat')
+                    return step
+                      ? t('phone.player.practice.beatHintStep', { step })
                       : busyHere
-                        ? 'The song is being read now — the click and the count-in pick the ' +
-                          'beat up the moment it lands.'
+                        ? t('phone.player.practice.beatHintBusy')
                         : project.library === 'phone'
-                          ? 'No beat track — the count-in ticks once a second before playback ' +
-                            'starts. If the song has a steady beat, opening it here reads one ' +
-                            'from the drums once it is split.'
-                          : 'No beat track — the count-in ticks once a second before playback ' +
-                            'starts. If the song has a steady beat, opening it on desktop reads ' +
-                            'one from the drums.'}
+                          ? t('phone.player.practice.beatHintPhoneNoTrack')
+                          : t('phone.player.practice.beatHintDesktopNoTrack')
+                  })()}
                 </Text>
                 )}
               </View>
@@ -2739,20 +2770,20 @@ export default function PlayerScreen({
                     toggle and stands alone, on the header row; the mode is a
                     picker. */}
                 <View style={s.secHead}>
-                  <Text style={[b.secLab, s.secHeadLab]}>Vocal training</Text>
-                  <Chip label="Training" active={training} onPress={armTraining} />
+                  <Text style={[b.secLab, s.secHeadLab]}>{t('phone.player.practice.vocalTraining')}</Text>
+                  <Chip label={t('phone.player.practice.training')} active={training} onPress={armTraining} />
                 </View>
                 <Seg
                   segments={[
-                    { key: 'time', label: 'By time' },
-                    { key: 'lines', label: 'By lyric lines' }
+                    { key: 'time', label: t('phone.player.practice.byTime') },
+                    { key: 'lines', label: t('phone.player.practice.byLyricLines') }
                   ]}
                   active={trainCfg.mode}
                   onSelect={(k) => setTrainCfg((c) => ({ ...c, mode: k as 'time' | 'lines' }))}
                 />
                 {trainCfg.mode === 'time' ? (
                   <Stepper
-                    label="Interval"
+                    label={t('phone.player.practice.interval')}
                     valueText={`${trainCfg.periodSec} s`}
                     onStep={(d) =>
                       setTrainCfg((c) => ({
@@ -2766,17 +2797,17 @@ export default function PlayerScreen({
                      sheet gets a row back without a single target shrinking
                      below its shipped 33pt. */
                   <View style={s.hearSingRow}>
-                    <Text style={s.hearSingLab}>Hear</Text>
+                    <Text style={s.hearSingLab}>{t('phone.player.practice.hear')}</Text>
                     <Pressable
                       style={b.stepBtn}
                       hitSlop={6}
                       onPress={() => setTrainCfg((c) => ({ ...c, hear: Math.max(1, c.hear - 1) }))}
                       accessibilityRole="button"
-                      accessibilityLabel="Decrease Hear"
+                      accessibilityLabel={t('phone.player.practice.decreaseHear')}
                     >
                       <Text style={b.stepBtnText}>−</Text>
                     </Pressable>
-                    <Text style={s.hearSingVal} accessibilityLabel={`Hear, ${trainCfg.hear}`}>
+                    <Text style={s.hearSingVal} accessibilityLabel={t('phone.player.practice.hearValue', { n: trainCfg.hear })}>
                       {trainCfg.hear}
                     </Text>
                     <Pressable
@@ -2784,22 +2815,22 @@ export default function PlayerScreen({
                       hitSlop={6}
                       onPress={() => setTrainCfg((c) => ({ ...c, hear: Math.min(8, c.hear + 1) }))}
                       accessibilityRole="button"
-                      accessibilityLabel="Increase Hear"
+                      accessibilityLabel={t('phone.player.practice.increaseHear')}
                     >
                       <Text style={b.stepBtnText}>+</Text>
                     </Pressable>
                     <View style={{ width: 8 }} />
-                    <Text style={s.hearSingLab}>Sing</Text>
+                    <Text style={s.hearSingLab}>{t('phone.player.practice.sing')}</Text>
                     <Pressable
                       style={b.stepBtn}
                       hitSlop={6}
                       onPress={() => setTrainCfg((c) => ({ ...c, sing: Math.max(1, c.sing - 1) }))}
                       accessibilityRole="button"
-                      accessibilityLabel="Decrease Sing"
+                      accessibilityLabel={t('phone.player.practice.decreaseSing')}
                     >
                       <Text style={b.stepBtnText}>−</Text>
                     </Pressable>
-                    <Text style={s.hearSingVal} accessibilityLabel={`Sing, ${trainCfg.sing}`}>
+                    <Text style={s.hearSingVal} accessibilityLabel={t('phone.player.practice.singValue', { n: trainCfg.sing })}>
                       {trainCfg.sing}
                     </Text>
                     <Pressable
@@ -2807,7 +2838,7 @@ export default function PlayerScreen({
                       hitSlop={6}
                       onPress={() => setTrainCfg((c) => ({ ...c, sing: Math.min(8, c.sing + 1) }))}
                       accessibilityRole="button"
-                      accessibilityLabel="Increase Sing"
+                      accessibilityLabel={t('phone.player.practice.increaseSing')}
                     >
                       <Text style={b.stepBtnText}>+</Text>
                     </Pressable>
@@ -2822,8 +2853,8 @@ export default function PlayerScreen({
                   accessible
                   accessibilityLabel={
                     trainCfg.mode === 'time'
-                      ? `With the singer ${trainCfg.periodSec} seconds, then your turn ${trainCfg.periodSec} seconds, repeating`
-                      : `Hear ${trainCfg.hear} line${trainCfg.hear > 1 ? 's' : ''} with the singer, then sing ${trainCfg.sing} on your own, repeating — marked 🎤 in the lyrics`
+                      ? t('phone.player.practice.scheduleTime', { sec: trainCfg.periodSec })
+                      : tn('phone.player.practice.scheduleLines', trainCfg.hear, { sing: trainCfg.sing })
                   }
                 >
                   {(trainCfg.mode === 'time'
@@ -2840,9 +2871,9 @@ export default function PlayerScreen({
                   ))}
                 </View>
                 <View style={s.schedCaps}>
-                  <Text style={s.schedCapDim}>with the singer</Text>
+                  <Text style={s.schedCapDim}>{t('phone.player.practice.withTheSinger')}</Text>
                   <Text style={s.schedCapYou}>
-                    {trainCfg.mode === 'lines' ? 'your turn 🎤' : 'your turn'}
+                    {trainCfg.mode === 'lines' ? t('phone.player.practice.yourTurnMic') : t('phone.player.practice.yourTurn')}
                   </Text>
                 </View>
                 {/* These decide WHICH lanes drop out when it is your turn, and
@@ -2850,13 +2881,13 @@ export default function PlayerScreen({
                     under a hint about line counts, which reads as decoration.
                     Multi-select toggles, so they stay pills. */}
                 <Text style={[b.hint, { marginTop: 14, marginBottom: 2 }]}>
-                  Lanes that drop out when you sing:
+                  {t('phone.player.practice.dropOutHint')}
                 </Text>
                 <View style={[b.segs, { marginTop: 6 }]}>
                   {stemIds.map((id) => (
                     <Chip
                       key={id}
-                      label={laneMeta[id]?.label ?? TRACK_META[id]?.label ?? id}
+                      label={laneMeta[id]?.label ?? stemLabel(id) ?? TRACK_META[id]?.label ?? id}
                       active={trainCfg.stems.includes(id)}
                       onPress={() => toggleTrainStem(id)}
                     />
@@ -2866,21 +2897,26 @@ export default function PlayerScreen({
 
               <View style={b.sec}>
                 <Text style={b.secLab}>
-                  Lyric timing{route ? ` · ${route.label}, auto ${Math.round(route.autoSec * 1000)} ms` : ''}
+                  {t('phone.player.practice.lyricTiming')}
+                  {route
+                    ? t('phone.player.practice.lyricTimingRoute', {
+                        label: route.label,
+                        ms: Math.round(route.autoSec * 1000)
+                      })
+                    : ''}
                 </Text>
                 <Stepper
-                  label="Trim"
+                  label={t('phone.player.practice.trim')}
                   valueText={String(trimMs)}
                   suffix="ms"
                   onStep={(d) => onTrim(trimMs + d * 25)}
                 />
                 <Text style={b.hint}>
-                  Highlights are shifted {Math.round(engine.displayLatency * 1000)} ms to match what
-                  you hear. If words light up before you hear them (car audio, Bluetooth), add more.
+                  {t('phone.player.practice.highlightsShifted', { ms: Math.round(engine.displayLatency * 1000) })}
                 </Text>
                 {trimMs !== 0 && (
                   <View style={[b.segs, { marginTop: 10 }]}>
-                    <Chip label="Reset" active={false} onPress={() => onTrim(0)} />
+                    <Chip label={t('phone.player.practice.reset')} active={false} onPress={() => onTrim(0)} />
                   </View>
                 )}
               </View>

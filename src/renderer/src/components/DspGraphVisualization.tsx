@@ -10,6 +10,7 @@ import {
   type DesktopPlaybackStatus
 } from '../../../shared/types'
 import type { MonitorCoordinatorSnapshot } from '../audio/monitoring'
+import { t } from '../i18n'
 
 interface DspGraphVisualizationProps {
   phase: MonitorCoordinatorSnapshot['phase']
@@ -49,7 +50,7 @@ const meterWidth = (db: number): number => clamp(((db + 72) / 72) * 100, 0, 100)
 const formatDb = (db: number): string => db <= -72 ? '−∞ dBFS' : `${Math.round(db)} dBFS`
 
 const formatSampleRate = (sampleRate: number | undefined): string => {
-  if (!sampleRate) return 'Float32 native path'
+  if (!sampleRate) return t('player.dspGraph.floatNativePath')
   const khz = sampleRate / 1000
   return `${Number.isInteger(khz) ? khz : khz.toFixed(1)} kHz`
 }
@@ -201,13 +202,13 @@ function graphState(
   routeReady: boolean,
   configured: boolean
 ): { className: string; label: string } {
-  if (phase === 'active') return { className: 'running', label: 'Running' }
+  if (phase === 'active') return { className: 'running', label: t('player.dspGraph.stateRunning') }
   if (phase === 'preparing' || phase === 'starting' || phase === 'stopping') {
-    return { className: 'changing', label: 'Changing route' }
+    return { className: 'changing', label: t('player.dspGraph.stateChangingRoute') }
   }
-  if (phase === 'error') return { className: 'fault', label: 'Stopped with an error' }
-  if (routeReady && configured) return { className: 'ready', label: 'Ready' }
-  return { className: 'blocked', label: 'Route blocked' }
+  if (phase === 'error') return { className: 'fault', label: t('player.dspGraph.stateFault') }
+  if (routeReady && configured) return { className: 'ready', label: t('player.dspGraph.stateReady') }
+  return { className: 'blocked', label: t('player.dspGraph.stateBlocked') }
 }
 
 export default function DspGraphVisualization({
@@ -239,8 +240,8 @@ export default function DspGraphVisualization({
       <section className={`dsp-graph dsp-graph--playback dsp-graph--${stateClass}`} aria-labelledby="dsp-graph-heading">
         <header className="dsp-graph-header">
           <div>
-            <span>Runtime graph</span>
-            <h4 id="dsp-graph-heading">Native song and reference graph</h4>
+            <span>{t('player.dspGraph.runtimeGraph')}</span>
+            <h4 id="dsp-graph-heading">{t('player.dspGraph.songAndReference')}</h4>
           </div>
           <div className="dsp-graph-format">
             {graph ? (
@@ -249,14 +250,14 @@ export default function DspGraphVisualization({
                 <span>{graph.maximumFrames} frames maximum</span>
                 <span>{graph.nodes.length} nodes · {graph.connections.length} links</span>
               </>
-            ) : <span>Structured graph unavailable</span>}
+            ) : <span>{t('player.dspGraph.structuredUnavailable')}</span>}
           </div>
           <output className="dsp-graph-state" aria-live="polite">
             <i aria-hidden="true" />{playbackStatus.transportState}
           </output>
         </header>
         {graph ? (
-          <div className="dsp-graph-viewport" role="region" aria-label="Active song DSP graph modules and connections" tabIndex={0}>
+          <div className="dsp-graph-viewport" role="region" aria-label={t('player.dspGraph.activeModulesAriaLabel')} tabIndex={0}>
             <ol
               className="dsp-graph-flow"
               style={{ gridTemplateColumns: `repeat(${graph.nodes.length}, minmax(104px, 1fr))`, minWidth: `${graph.nodes.length * 114}px` }}
@@ -275,7 +276,7 @@ export default function DspGraphVisualization({
                 </li>
               ))}
             </ol>
-            <div className="monitor-diagnostics" aria-label="Active song DSP graph connections">
+            <div className="monitor-diagnostics" aria-label={t('player.dspGraph.activeConnectionsAriaLabel')}>
               {graph.connections.map((connection, index) => (
                 <div
                   className="monitor-diagnostic-row"
@@ -297,7 +298,7 @@ export default function DspGraphVisualization({
           </div>
         ) : (
           <p className="monitor-route-status warn" role="status">
-            Graph details are unavailable because native playback did not provide a valid bounded composition snapshot.
+            {t('player.dspGraph.unavailableExplain')}
           </p>
         )}
       </section>
@@ -320,12 +321,12 @@ export default function DspGraphVisualization({
     <section className={`dsp-graph dsp-graph--${state.className}`} aria-labelledby="dsp-graph-heading">
       <header className="dsp-graph-header">
         <div>
-          <span>Runtime graph</span>
-          <h4 id="dsp-graph-heading">Native monitor chain</h4>
+          <span>{t('player.dspGraph.runtimeGraph')}</span>
+          <h4 id="dsp-graph-heading">{t('player.dspGraph.monitorChain')}</h4>
         </div>
         <div className="dsp-graph-format">
           <span>{formatSampleRate(sampleRate)}</span>
-          {bufferFrames ? <span>{bufferFrames} frames</span> : <span>Buffer pending</span>}
+          {bufferFrames ? <span>{bufferFrames} frames</span> : <span>{t('player.dspGraph.bufferPending')}</span>}
           <span>32-bit float</span>
         </div>
         <output className="dsp-graph-state" aria-live="polite">
@@ -333,67 +334,67 @@ export default function DspGraphVisualization({
         </output>
       </header>
 
-      <div className="dsp-graph-viewport" role="region" aria-label="DSP graph modules" tabIndex={0}>
+      <div className="dsp-graph-viewport" role="region" aria-label={t('player.dspGraph.modulesAriaLabel')} tabIndex={0}>
         <ol className="dsp-graph-flow">
           <GraphNode
-            kind="Device"
-            name="Input"
+            kind={t('player.dspGraph.deviceKind')}
+            name={t('player.dspGraph.input')}
             value={inputValue}
-            detail={inputChannelLabel ?? inputLabel ?? 'Choose an input'}
+            detail={inputChannelLabel ?? inputLabel ?? t('player.dspGraph.chooseInput')}
             configured={Boolean(inputLabel)}
             live={live}
           />
           <GraphNode
-            kind="Analyzer"
-            name="Pre meter"
-            faceName="Pre"
+            kind={t('player.dspGraph.analyzerKind')}
+            name={t('player.dspGraph.preMeter')}
+            faceName={t('player.dspGraph.preFace')}
             value="RMS"
-            detail="Before processing"
+            detail={t('player.dspGraph.beforeProcessing')}
             configured={configured}
             live={live}
-            meter={{ label: 'DSP graph pre-processing level', db: preDb }}
+            meter={{ label: t('player.dspGraph.preLevelLabel'), db: preDb }}
           />
           <GraphNode
-            kind="Processor"
-            name="Gain"
+            kind={t('player.dspGraph.processorKind')}
+            name={t('player.dspGraph.gain')}
             value={`${gainDb}`}
             detail="dB · ramped"
             configured={configured}
             live={live}
           />
           <GraphNode
-            kind="Router"
-            name="Channel map"
-            faceName="Map"
+            kind={t('player.dspGraph.routerKind')}
+            name={t('player.dspGraph.channelMap')}
+            faceName={t('player.dspGraph.mapFace')}
             value={mapValue}
             detail={`${inputChannelLabel ?? inputValue} to ${outputChannelLabels.join(' · ') || outputValue}`}
             configured={configured}
             live={live}
           />
           <GraphNode
-            kind="Processor"
-            name="Limiter"
-            faceName="Limit"
+            kind={t('player.dspGraph.processorKind')}
+            name={t('player.dspGraph.limiter')}
+            faceName={t('player.dspGraph.limitFace')}
             value="−1 dB"
             detail="Output ceiling · dBFS"
             configured={configured}
             live={live}
           />
           <GraphNode
-            kind="Analyzer"
-            name="Post meter"
-            faceName="Post"
+            kind={t('player.dspGraph.analyzerKind')}
+            name={t('player.dspGraph.postMeter')}
+            faceName={t('player.dspGraph.postFace')}
             value="RMS"
-            detail="After limiter"
+            detail={t('player.dspGraph.afterLimiter')}
             configured={configured}
             live={live}
-            meter={{ label: 'DSP graph post-limiter level', db: postDb }}
+            meter={{ label: t('player.dspGraph.postLevelLabel'), db: postDb }}
           />
           <GraphNode
-            kind="Device"
-            name="Output"
+            kind={t('player.dspGraph.deviceKind')}
+            name={t('player.dspGraph.output')}
             value={outputValue}
-            detail={outputChannelLabels.join(' · ') || outputLabel || 'Choose an output'}
+            detail={outputChannelLabels.join(' · ') || outputLabel || t('player.dspGraph.chooseOutput')}
             configured={Boolean(outputLabel)}
             live={live}
           />

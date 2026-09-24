@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { readFile } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
 import SplitMenu from '../../src/renderer/src/components/SplitMenu'
+import { withEnglish } from './i18n-source'
 
 const render = (props: Partial<Parameters<typeof SplitMenu>[0]>): string =>
   renderToStaticMarkup(createElement(SplitMenu, {
@@ -39,9 +40,9 @@ describe('SplitMenu', () => {
     // The dialog only renders once opened, and there is no DOM here to open
     // it in — so this is read at the source, which is also where a checkbox
     // would come back.
-    const source = await readFile(
+    const source = withEnglish(await readFile(
       new URL('../../src/renderer/src/components/SplitMenu.tsx', import.meta.url), 'utf8'
-    )
+    ))
     expect(source).toContain("start('stems-and-vocals')")
     expect(source).not.toContain('type="checkbox"')
     // 'stems' survives only as re-split, which a separated project cannot do.

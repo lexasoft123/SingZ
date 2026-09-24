@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { accentIndex, barNumber, beatIndexAtOrAfter, nearestBeat, type BeatInfo } from '../audio/beat'
+import { t } from '../i18n'
 
 /** Beats closer together than this are dropped — only bar lines survive. */
 const MIN_BEAT_PX = 5
@@ -249,7 +250,7 @@ export default function BeatGrid({
           onPointerMove={onMove}
           onPointerUp={onUp}
           onPointerCancel={onUp}
-          title="Drag a bar line onto the beat where the bar really starts. Alt-click one you moved to hand it back to the detector."
+          title={t('player.beatGrid.dragTitle')}
         />
       ) : null}
     </>

@@ -13,7 +13,8 @@ import {
   type MetronomeConfig
 } from '../audio/beat'
 import { analysisIsStale, BEAT_DETECT_VERSION } from '../audio/analysis-contract'
-import { fmtClock, fmtTime, modalCoversApp, type TrainingConfig, type UITrack } from '../model'
+import { fmtClock, fmtTime, laneLabel, modalCoversApp, type TrainingConfig, type UITrack } from '../model'
+import { t, tn } from '../i18n'
 
 function TimeCode({ engine }: { engine: MultitrackEngine }): React.JSX.Element {
   const ref = useRef<HTMLSpanElement>(null)
@@ -103,7 +104,7 @@ interface Props {
    * because an added lane's id is a file slug (`custom-backing-vocals`) that
    * TRACK_META has never heard of, and renaming the lane changes only its label.
    */
-  lanes: Pick<UITrack, 'id' | 'label'>[]
+  lanes: Pick<UITrack, 'id' | 'label' | 'custom'>[]
   transpose: number
   onTranspose: (st: number) => void
   tempo: number
@@ -180,7 +181,7 @@ function BpmEntry({
         </button>
         <label
           className="bpm-entry disabled"
-          title="Beats per minute — detected once the song is split and analyzed"
+          title={t('player.bpm.detectHint')}
         >
           <input type="text" value="—" disabled readOnly />
           <span className="tr-unit">bpm</span>
@@ -196,7 +197,7 @@ function BpmEntry({
       <button type="button" className="chip" onClick={() => stepBpm(-1)}>
         −
       </button>
-      <label className="bpm-entry" title="Set the playback tempo in beats per minute">
+      <label className="bpm-entry" title={t('player.bpm.setTitle')}>
         <input
           type="text"
           inputMode="numeric"
@@ -289,14 +290,14 @@ function VolumePopover({
   return (
     <div className="train-pop vol-pop" ref={ref}>
       <div className="tp-head">
-        <span className="tp-title">Volume</span>
+        <span className="tp-title">{t('player.volume.title')}</span>
         <span className="tp-num">{Math.round(volume * 100)}%</span>
       </div>
       <div className="tp-row">
         <button
           type="button"
           className="round-ghost vol-mute"
-          title={volume > 0 ? 'Mute everything' : 'Back to the last level'}
+          title={volume > 0 ? t('player.volume.muteAll') : t('player.volume.unmute')}
           aria-pressed={volume === 0}
           onClick={() => onVolume(volume > 0 ? 0 : preMute.current)}
         >
@@ -311,7 +312,7 @@ function VolumePopover({
           value={volume}
           autoFocus
           style={{ '--stem': 'var(--accent)' } as React.CSSProperties}
-          title="How loud the whole mix plays — the metronome follows it too"
+          title={t('player.volume.sliderTitle')}
           onChange={(e) => onVolume(Number(e.target.value))}
           // Arrows belong to the focused slider here; the app-level handler
           // would otherwise seek the song out from under it.
@@ -320,10 +321,7 @@ function VolumePopover({
           }}
         />
       </div>
-      <p className="fine tp-caption">
-        Sets the app's own output — your stem faders and the system volume stay
-        where they are.
-      </p>
+      <p className="fine tp-caption">{t('player.volume.caption')}</p>
     </div>
   )
 }
@@ -400,41 +398,40 @@ function MetPopover({
   const bpmShown = bpmDraft ?? (grid ? String(Math.round(grid.bpm * 10) / 10) : '—')
   const caption = !grid
     ? tapCount > 0 && tapCount < 3
-      ? 'Keep tapping — three steady taps set the tempo.'
+      ? t('player.metronome.tapHint')
       : canDetect
-        ? 'No steady beat found in the drums — the count-in ticks once a second instead. Tap the tempo yourself, or try Re-detect.'
-        : 'No tempo yet — the count-in ticks once a second instead. Tap one, or split the song and it is read from the drums.'
-    : `${Math.round(grid.bpm * 10) / 10} bpm · ${
-        grid.source === 'auto'
-          ? 'following the drums, drift and all'
-          : 'set by hand'
-      } — tap along during playback to re-anchor.`
+        ? t('player.metronome.noBeatCanDetect')
+        : t('player.metronome.noBeatCannotDetect')
+    : t('player.metronome.gridCaption', {
+        bpm: Math.round(grid.bpm * 10) / 10,
+        source: t(grid.source === 'auto' ? 'player.metronome.sourceAuto' : 'player.metronome.sourceManual')
+      })
 
   return (
     <div className="train-pop met-pop" ref={ref}>
       <div className="tp-head">
-        <span className="tp-title">Metronome</span>
+        <span className="tp-title">{t('player.metronome.title')}</span>
         <div className="mode-seg">
           <button
             type="button"
             className={met.click ? '' : 'on'}
             onClick={met.click ? () => onMet({ ...met, click: false }) : undefined}
           >
-            Off
+            {t('player.toggle.off')}
           </button>
           <button
             type="button"
             className={met.click ? 'on' : ''}
             disabled={!grid}
-            title={grid ? 'Click on every beat during playback' : 'Needs a tempo first'}
+            title={grid ? t('player.metronome.clickTitle') : t('player.metronome.needsTempo')}
             onClick={met.click || !grid ? undefined : () => onMet({ ...met, click: true })}
           >
-            On
+            {t('player.toggle.on')}
           </button>
         </div>
       </div>
       <div className="tp-row">
-        <span className="tp-label">Loudness</span>
+        <span className="tp-label">{t('player.metronome.loudness')}</span>
         <input
           type="range"
           className="vol"
@@ -443,60 +440,56 @@ function MetPopover({
           step={0.01}
           value={met.volume}
           style={{ '--stem': 'var(--accent)' } as React.CSSProperties}
-          title="How loud the click is — release to hear it"
+          title={t('player.metronome.loudnessTitle')}
           onChange={(e) => onMet({ ...met, volume: Number(e.target.value) })}
           onPointerUp={() => engine.previewClick(met.accent)}
         />
       </div>
       <div className="tp-row">
-        <span className="tp-label">Accent</span>
+        <span className="tp-label">{t('player.metronome.accent')}</span>
         <div className="mode-seg">
           <button
             type="button"
             className={met.accent ? 'on' : ''}
-            title="The first beat of every bar rings brighter"
+            title={t('player.metronome.accentOnTitle')}
             onClick={() => onMet({ ...met, accent: true })}
           >
-            On the 1
+            {t('player.metronome.accentOn')}
           </button>
           <button
             type="button"
             className={met.accent ? '' : 'on'}
-            title="Every click identical — nothing marks the bar"
+            title={t('player.metronome.accentOffTitle')}
             onClick={() => onMet({ ...met, accent: false })}
           >
-            Off
+            {t('player.toggle.off')}
           </button>
         </div>
       </div>
       <div className="tp-row">
-        <span className="tp-label">Grid view</span>
+        <span className="tp-label">{t('player.metronome.gridView')}</span>
         <div className="mode-seg">
           <button
             type="button"
             className={met.grid ? '' : 'on'}
             onClick={met.grid ? () => onMet({ ...met, grid: false }) : undefined}
           >
-            Off
+            {t('player.toggle.off')}
           </button>
           <button
             type="button"
             className={met.grid ? 'on' : ''}
             disabled={!grid}
-            title={
-              grid
-                ? 'Rule the waveforms with the beat: a line per beat, bars in orange — so you can see whether the beats sit on the song'
-                : 'Needs a tempo first'
-            }
+            title={grid ? t('player.metronome.gridViewOnTitle') : t('player.metronome.needsTempo')}
             onClick={met.grid || !grid ? undefined : () => onMet({ ...met, grid: true })}
           >
-            Show
+            {t('player.metronome.gridViewShow')}
           </button>
         </div>
       </div>
       {grid ? (
         <div className="tp-row tp-gridver">
-          <span className="tp-label">Grid data</span>
+          <span className="tp-label">{t('player.metronome.gridData')}</span>
           {/* Which detector wrote this song's grid, against what this build
               would write. A whole morning was lost to an older build
               silently re-detecting v19 grids down to v17 — the mismatch was
@@ -521,21 +514,30 @@ function MetPopover({
             }
             title={
               grid.source !== 'auto'
-                ? 'This grid was placed or corrected by hand — re-detection leaves it alone'
+                ? t('player.metronome.handTunedTitle')
                 : analysisIsStale(grid.detVersion, BEAT_DETECT_VERSION)
-                  ? `Saved with detector v${grid.detVersion ?? '?'}; this build has v${BEAT_DETECT_VERSION} and will re-derive on next open`
+                  ? t('player.metronome.staleTitle', {
+                      saved: grid.detVersion ?? '?',
+                      current: BEAT_DETECT_VERSION
+                    })
                   : (grid.detVersion ?? 0) === BEAT_DETECT_VERSION
-                    ? "The saved grid matches this build's detector"
-                    : `Saved by a newer detector (v${grid.detVersion}); this build has v${BEAT_DETECT_VERSION} and leaves it alone. Re-detect would replace it with this build's older grid.`
+                    ? t('player.metronome.currentTitle')
+                    : t('player.metronome.newerTitle', {
+                        saved: grid.detVersion ?? '',
+                        current: BEAT_DETECT_VERSION
+                      })
             }
           >
             {grid.source !== 'auto'
-              ? `hand-tuned (v${grid.detVersion ?? '—'})`
+              ? t('player.metronome.handTuned', { ver: grid.detVersion ?? '—' })
               : analysisIsStale(grid.detVersion, BEAT_DETECT_VERSION)
-                ? `v${grid.detVersion ?? '?'} → v${BEAT_DETECT_VERSION} available`
+                ? t('player.metronome.staleLabel', {
+                    saved: grid.detVersion ?? '?',
+                    current: BEAT_DETECT_VERSION
+                  })
                 : (grid.detVersion ?? 0) === BEAT_DETECT_VERSION
-                  ? `v${grid.detVersion} — current`
-                  : `v${grid.detVersion} — newer than this build`}
+                  ? t('player.metronome.currentLabel', { ver: grid.detVersion ?? '' })
+                  : t('player.metronome.newerLabel', { ver: grid.detVersion ?? '' })}
           </span>
           {/* The singer's own bar lines, counted where the provenance is —
               the phone's Song sheet says exactly this beside the detector
@@ -544,52 +546,52 @@ function MetPopover({
           {grid.userBars && grid.userBars.length > 0 ? (
             <span
               className="tp-gridver-bars"
-              title="Bar lines you moved by hand. Re-detection re-folds them onto the new grid — they are not lost."
+              title={t('player.metronome.userBarsTitle')}
             >
-              {`· ${grid.userBars.length} hand-set bar${grid.userBars.length > 1 ? 's' : ''}`}
+              {tn('player.metronome.userBars', grid.userBars.length)}
             </span>
           ) : null}
         </div>
       ) : null}
       <div className="tp-row">
-        <span className="tp-label">Count-in</span>
+        <span className="tp-label">{t('player.metronome.countIn')}</span>
         <div className="mode-seg">
           <button
             type="button"
             className={met.countInBars === 0 ? 'on' : ''}
             onClick={() => onMet({ ...met, countInBars: 0 })}
           >
-            Off
+            {t('player.toggle.off')}
           </button>
           <button
             type="button"
             className={met.countInBars === 1 ? 'on' : ''}
             title={
               grid
-                ? 'One bar of clicks before playback starts'
-                : 'Three ticks, one per second, before playback starts'
+                ? t('player.metronome.countInBarTitle')
+                : t('player.metronome.countInSecTitle')
             }
             onClick={() => onMet({ ...met, countInBars: 1 })}
           >
-            {grid ? '1 bar' : '3 s'}
+            {grid ? t('player.metronome.oneBar') : t('player.metronome.threeSec')}
           </button>
           <button
             type="button"
             className={met.countInBars === 2 ? 'on' : ''}
             title={
               grid
-                ? 'Two bars of clicks before playback starts'
-                : 'Six ticks, one per second, before playback starts'
+                ? t('player.metronome.countIn2BarTitle')
+                : t('player.metronome.countIn2SecTitle')
             }
             onClick={() => onMet({ ...met, countInBars: 2 })}
           >
-            {grid ? '2 bars' : '6 s'}
+            {grid ? t('player.metronome.twoBars') : t('player.metronome.sixSec')}
           </button>
         </div>
       </div>
       <div className="tp-row">
-        <span className="tp-label">Tempo</span>
-        <label className="bpm-entry met-bpm" title="The song's own tempo (playback speed stays put)">
+        <span className="tp-label">{t('player.metronome.tempo')}</span>
+        <label className="bpm-entry met-bpm" title={t('player.metronome.tempoTitle')}>
           <input
             type="text"
             inputMode="decimal"
@@ -607,14 +609,14 @@ function MetPopover({
           />
           <span className="tr-unit">bpm</span>
         </label>
-        <button type="button" className="pill ghost small" title="Tap the beat to set the tempo (and lock the phase while playing)" onClick={tap}>
-          Tap
+        <button type="button" className="pill ghost small" title={t('player.metronome.tapTitle')} onClick={tap}>
+          {t('player.metronome.tap')}
         </button>
         <button
           type="button"
           className="chip"
           disabled={!grid || grid.bpm / 2 < 30}
-          title="Half time"
+          title={t('player.metronome.halfTime')}
           onClick={() => grid && onGrid(halveTempo(grid))}
         >
           ½
@@ -623,14 +625,14 @@ function MetPopover({
           type="button"
           className="chip"
           disabled={!grid || grid.bpm * 2 > 300}
-          title="Double time"
+          title={t('player.metronome.doubleTime')}
           onClick={() => grid && onGrid(doubleTempo(grid))}
         >
           ×2
         </button>
       </div>
       <div className="tp-row">
-        <span className="tp-label">Beats per bar</span>
+        <span className="tp-label">{t('player.metronome.beatsPerBar')}</span>
         <div className="mode-seg">
           {BEATS_PER_BAR_CHOICES.map((n) => (
             <button
@@ -660,12 +662,12 @@ function MetPopover({
         </div>
       </div>
       <div className="tp-row">
-        <span className="tp-label">Align</span>
+        <span className="tp-label">{t('player.metronome.align')}</span>
         <button
           type="button"
           className="chip nudge"
           disabled={!grid}
-          title="Clicks 10 ms earlier"
+          title={t('player.metronome.nudgeEarlierTitle')}
           onClick={() => grid && onGrid(shiftBeats(grid, -0.01))}
         >
           −10
@@ -674,7 +676,7 @@ function MetPopover({
           type="button"
           className="chip nudge"
           disabled={!grid}
-          title="Clicks 10 ms later"
+          title={t('player.metronome.nudgeLaterTitle')}
           onClick={() => grid && onGrid(shiftBeats(grid, 0.01))}
         >
           +10
@@ -683,7 +685,7 @@ function MetPopover({
           type="button"
           className="chip nudge"
           disabled={!grid}
-          title="Move the accent to the next beat (when the “1” lands wrong)"
+          title={t('player.metronome.rotateAccentTitle')}
           onClick={() => {
             if (!grid) return
             // Rotating the "1" by hand overrides any detected bar map too —
@@ -709,12 +711,12 @@ function MetPopover({
             // it without a word.
             title={
               (grid?.userBars?.length ?? 0) > 0
-                ? 'Read the tempo and beat from the drums again — your hand-placed bar lines are kept'
-                : 'Read the tempo and beat from the drums again'
+                ? t('player.metronome.redetectKeepBarsTitle')
+                : t('player.metronome.redetectTitle')
             }
             onClick={onRedetect}
           >
-            Re-detect
+            {t('player.metronome.redetect')}
           </button>
         )}
       </div>
@@ -769,21 +771,21 @@ export function TrainPopover({
 
   const caption =
     cfg.mode === 'time'
-      ? `Guide plays ${cfg.periodSec} s, then you take the next ${cfg.periodSec} s.`
+      ? t('player.training.captionTime', { sec: cfg.periodSec })
       : linesReady
-        ? `Hear ${cfg.hear} line${cfg.hear > 1 ? 's' : ''}, then sing ${cfg.sing} on your own.`
-        : 'No synced lyrics yet — alternating by time until they load.'
+        ? tn('player.training.captionLines', cfg.hear, { sing: cfg.sing })
+        : t('player.training.captionNoLyrics')
 
   return (
     <div className="train-pop" ref={ref}>
       <div className="tp-head">
-        <span className="tp-title">Carry the line</span>
+        <span className="tp-title">{t('player.training.title')}</span>
         <div className="mode-seg">
           <button type="button" className={training ? '' : 'on'} onClick={training ? onToggle : undefined}>
-            Off
+            {t('player.toggle.off')}
           </button>
           <button type="button" className={training ? 'on' : ''} onClick={training ? undefined : onToggle}>
-            On
+            {t('player.toggle.on')}
           </button>
         </div>
       </div>
@@ -793,20 +795,20 @@ export function TrainPopover({
           className={cfg.mode === 'time' ? 'on' : ''}
           onClick={() => onCfg({ ...cfg, mode: 'time' })}
         >
-          By time
+          {t('player.training.byTime')}
         </button>
         <button
           type="button"
           className={cfg.mode === 'lines' ? 'on' : ''}
-          title="Alternate by karaoke lyric lines"
+          title={t('player.training.byLinesTitle')}
           onClick={() => onCfg({ ...cfg, mode: 'lines' })}
         >
-          By lyric lines
+          {t('player.training.byLines')}
         </button>
       </div>
       {cfg.mode === 'time' ? (
         <div className="tp-row">
-          <span className="tp-label">Switch every</span>
+          <span className="tp-label">{t('player.training.switchEvery')}</span>
           <button
             type="button"
             className="chip"
@@ -825,7 +827,7 @@ export function TrainPopover({
         </div>
       ) : (
         <div className="tp-row">
-          <span className="tp-label">Hear</span>
+          <span className="tp-label">{t('player.training.hear')}</span>
           <button
             type="button"
             className="chip"
@@ -841,7 +843,7 @@ export function TrainPopover({
           >
             +
           </button>
-          <span className="tp-label">sing</span>
+          <span className="tp-label">{t('player.training.sing')}</span>
           <button
             type="button"
             className="chip"
@@ -860,16 +862,16 @@ export function TrainPopover({
         </div>
       )}
       <p className="fine tp-caption">{caption}</p>
-      <div className="tp-stems" title="These tracks go silent during your turns — you perform them">
-        <span className="tp-label">Muted while you sing:</span>
-        {lanes.map(({ id, label }) => (
+      <div className="tp-stems" title={t('player.training.mutedWhileSingingTitle')}>
+        <span className="tp-label">{t('player.training.mutedWhileSinging')}</span>
+        {lanes.map((lane) => (
           <button
             type="button"
-            key={id}
-            className={`chip stem${cfg.stems.includes(id) ? ' active' : ''}`}
-            onClick={() => toggleStem(id)}
+            key={lane.id}
+            className={`chip stem${cfg.stems.includes(lane.id) ? ' active' : ''}`}
+            onClick={() => toggleStem(lane.id)}
           >
-            {label}
+            {laneLabel(lane)}
           </button>
         ))}
       </div>
@@ -933,7 +935,7 @@ export default function Transport({
         <button
           type="button"
           className="round-ghost"
-          title="Back to start"
+          title={t('player.transport.backToStart')}
           onClick={() => engine.seek(0)}
         >
           <svg width="13" height="13" viewBox="0 0 13 13" fill="currentColor" aria-hidden>
@@ -944,7 +946,7 @@ export default function Transport({
         <button
           type="button"
           className={`play${playing ? ' is-playing' : ''}`}
-          title={playing ? 'Pause (space)' : 'Play (space)'}
+          title={playing ? t('player.transport.pause') : t('player.transport.play')}
           onClick={onTogglePlay}
         >
           {playing ? (
@@ -966,7 +968,7 @@ export default function Transport({
         <button
           type="button"
           className={`round-ghost loop${loopOn ? ' active' : ''}`}
-          title={hasSelection ? 'Loop the selection' : 'Loop the whole song (drag on the waveforms to loop a section)'}
+          title={hasSelection ? t('player.transport.loopSelection') : t('player.transport.loopSong')}
           disabled={engine.duration === 0}
           onClick={onToggleLoop}
         >
@@ -981,8 +983,8 @@ export default function Transport({
             aria-pressed={volOpen}
             title={
               volume === 0
-                ? 'Sound is muted — click for the volume slider'
-                : `Volume ${Math.round(volume * 100)}% — click for the slider`
+                ? t('player.transport.muted')
+                : t('player.transport.volumeAt', { percent: Math.round(volume * 100) })
             }
             onClick={() => setVolOpen((o) => !o)}
           >
@@ -1001,7 +1003,7 @@ export default function Transport({
             type="button"
             className={`round-ghost met${met.click || met.grid ? ' active' : ''}`}
             aria-pressed={met.click || met.grid}
-            title="Metronome — click on the beat, a grid to watch, count-in before play"
+            title={t('player.transport.metronomeTitle')}
             disabled={engine.duration === 0}
             onClick={() => setMetOpen((o) => !o)}
           >
@@ -1030,8 +1032,8 @@ export default function Transport({
               type="button"
               className={`round-ghost train${training ? ' active' : ''}${ducking ? ' ducking' : ''}`}
               aria-pressed={training}
-              aria-label="Carry the line"
-              title="Carry the line — guide stems drop out on a schedule while you carry the song"
+              aria-label={t('player.transport.carryLine')}
+              title={t('player.transport.carryLineTitle')}
               onClick={() => setTrainOpen((o) => !o)}
             >
               <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden>
@@ -1056,14 +1058,14 @@ export default function Transport({
 
       <div className="transport-right">
         {engine.duration > 0 && (
-          <div className="transpose-ctl" title="Transpose the whole song (pitch only, tempo unchanged)">
+          <div className="transpose-ctl" title={t('player.transport.transposeTitle')}>
             <button type="button" className="chip" onClick={() => onTranspose(transpose - 1)}>
               −
             </button>
             <button
               type="button"
               className={`tr-badge${transpose !== 0 ? ' active' : ''}`}
-              title="Reset transpose"
+              title={t('player.transport.resetTranspose')}
               onClick={() => onTranspose(0)}
             >
               {transpose > 0 ? `+${transpose}` : transpose}
@@ -1075,14 +1077,14 @@ export default function Transport({
           </div>
         )}
         {engine.duration > 0 && (
-          <div className="transpose-ctl" title="Playback speed (pitch stays put)">
+          <div className="transpose-ctl" title={t('player.transport.speedTitle')}>
             <button type="button" className="chip" onClick={() => onTempo(tempo - 0.05)}>
               −
             </button>
             <button
               type="button"
               className={`tr-badge${Math.abs(tempo - 1) > 0.001 ? ' active' : ''}`}
-              title="Reset speed"
+              title={t('player.transport.resetSpeed')}
               onClick={() => onTempo(1)}
             >
               {Math.round(tempo * 100)}
@@ -1101,7 +1103,7 @@ export default function Transport({
               {`${Math.round(sep.percent)}%`}
             </span>
             {sep.cancellable && (
-              <button type="button" className="sep-cancel" title="Cancel" aria-label="Cancel splitting" onClick={onCancelSplit}>
+              <button type="button" className="sep-cancel" title={t('player.transport.cancel')} aria-label={t('player.transport.cancelSplit')} onClick={onCancelSplit}>
                 ×
               </button>
             )}
@@ -1112,14 +1114,14 @@ export default function Transport({
               type="button"
               className={`pill karaoke${karaokeOn ? ' active' : ''}`}
               aria-pressed={karaokeOn}
-              title="Karaoke view: lyrics, melody line and mic matching (Esc to close)"
+              title={t('player.transport.karaokeTitle')}
               onClick={onToggleKaraoke}
             >
               <svg width="13" height="13" viewBox="0 0 14 14" fill="currentColor" aria-hidden>
                 <path d="M7 1a2.6 2.6 0 0 0-2.6 2.6v3a2.6 2.6 0 1 0 5.2 0v-3A2.6 2.6 0 0 0 7 1Z" />
                 <path d="M2.7 6.4a.65.65 0 0 1 1.3.13v.07a3 3 0 0 0 6 0v-.07a.65.65 0 0 1 1.3-.13v.2a4.3 4.3 0 0 1-3.65 4.25v1.3h1.7a.65.65 0 1 1 0 1.3H4.65a.65.65 0 1 1 0-1.3h1.7v-1.3A4.3 4.3 0 0 1 2.7 6.6v-.2Z" />
               </svg>
-              Karaoke
+              {t('player.transport.karaoke')}
             </button>
             <SplitMenu split disabled={splitDisabled} canResplit={canResplit}
               canSplitBacking={canSplitBacking} onSplit={onSplit} />
@@ -1127,10 +1129,10 @@ export default function Transport({
               <button
                 type="button"
                 className="pill ghost"
-                title="Show the stem files in your file manager"
+                title={t('player.transport.stemFilesTitle')}
                 onClick={onReveal}
               >
-                Stem files
+                {t('player.transport.stemFiles')}
               </button>
             )}
           </>

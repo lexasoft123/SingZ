@@ -1,13 +1,20 @@
+import { t } from '../i18n'
+
 export type TrainingCleanupPhase = 'idle' | 'stopping' | 'unsafe'
 
-export const TRAINING_CLEANUP_SONG_BLOCKED_COPY =
-  'Song playback is unavailable until Vocal training confirms that its microphone and exercise audio stopped. Retry cleanup in Vocal training.'
+/** Evaluated at call time so a live language switch is reflected — never
+ * cache these in module-level constants. */
+export function trainingCleanupSongBlockedCopy(): string {
+  return t('training.cleanup.songBlocked')
+}
 
-export const TRAINING_CLEANUP_SETTINGS_BLOCKED_COPY =
-  'Audio settings are unavailable until Vocal training confirms that its microphone and exercise audio stopped. Retry cleanup in Vocal training.'
+export function trainingCleanupSettingsBlockedCopy(): string {
+  return t('training.cleanup.settingsBlocked')
+}
 
-export const TRAINING_CLEANUP_AUDIO_BLOCKED_COPY =
-  'Vocal training audio is unavailable while its previous microphone and exercise audio cleanup is unresolved. Retry cleanup before continuing.'
+export function trainingCleanupAudioBlockedCopy(): string {
+  return t('training.cleanup.audioBlocked')
+}
 
 export type TrainingExitAction = () => void | Promise<void>
 
@@ -39,7 +46,7 @@ export async function confirmTrainingAudioStopped(owners: {
   if (firstError) {
     throw firstError instanceof Error
       ? firstError
-      : new Error('Training audio cleanup could not be confirmed.')
+      : new Error(t('training.cleanup.couldNotConfirm'))
   }
 }
 

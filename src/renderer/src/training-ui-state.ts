@@ -5,6 +5,8 @@ import {
   startTrainingSession
 } from '../../shared/training-session'
 import { diatonicTriads, spellPitchClass } from '../../shared/music-theory'
+import { t } from './i18n'
+import { intervalLabel } from '../../shared/music-labels'
 import {
   effectiveSongPreparationKey,
   songPreparationMatches,
@@ -53,7 +55,7 @@ export function continueAfterSourceRegistration(
   onValid:()=>void,
   onError:(error:string)=>void
 ):boolean{
-  if(!result.ok){onError(result.error??'Could not open that file.');return false}
+  if(!result.ok){onError(result.error??t('training.error.couldNotOpenFile'));return false}
   onValid();return true
 }
 
@@ -229,7 +231,7 @@ export function desktopTrainingReducer(
         ),
         preparation: { sourceSongId: action.sourceSongId, songName: action.songName, choice: action.choice },
         acknowledgementPromptId: null,
-        error: 'Confirm or change the song key, then review the preparation session.'
+        error: t('training.session.error.confirmKeyThenReview')
       }
     case 'show-progress':
       return { ...state, route: 'progress', acknowledgementPromptId: null, error: null }
@@ -260,7 +262,7 @@ export function desktopTrainingReducer(
         error: null
       }
     case 'activate-session':
-      if (!state.session) return { ...state, error: 'Set up a session before starting.' }
+      if (!state.session) return { ...state, error: t('training.session.error.setUpSessionFirst') }
       return {
         ...state,
         session: startTrainingSession(state.session),
@@ -273,7 +275,7 @@ export function desktopTrainingReducer(
       if (!state.session || state.session.status !== 'active') return state
       return { ...state, exercisePhase: 'respond', acknowledgementPromptId: null, interrupted: false }
     case 'record-result': {
-      if (!state.session) return { ...state, error: 'This exercise is no longer active.' }
+      if (!state.session) return { ...state, error: t('training.session.error.exerciseNoLongerActive') }
       // Event activation can race a React commit. A repeated answer for the
       // prompt already recorded is a no-op, never an error against the next.
       if (state.session.results.some((result) => result.promptId === action.result.promptId)) return state
@@ -402,16 +404,16 @@ export function summarizeTrainingSession(session: TrainingSessionData): DesktopT
     if (result.response === 'skipped') {
       return {
         promptId: result.promptId,
-        label: prompt?.instruction ?? `Exercise ${index + 1}`,
-        result: 'Skipped'
+        label: prompt?.instruction ?? t('training.outcome.exerciseFallback', { n: index + 1 }),
+        result: t('training.outcome.skipped')
       }
     }
     if (result.response === 'identify') {
       if (result.correct) correct++
       return {
         promptId: result.promptId,
-        label: prompt?.instruction ?? `Exercise ${index + 1}`,
-        result: result.correct ? 'Correct' : 'Try again next time'
+        label: prompt?.instruction ?? t('training.outcome.exerciseFallback', { n: index + 1 }),
+        result: result.correct ? t('training.outcome.correct') : t('training.outcome.tryAgain')
       }
     }
 
@@ -436,7 +438,7 @@ export function summarizeTrainingSession(session: TrainingSessionData): DesktopT
     }
     return {
       promptId: result.promptId,
-      label: prompt?.instruction ?? `Exercise ${index + 1}`,
+      label: prompt?.instruction ?? t('training.outcome.exerciseFallback', { n: index + 1 }),
       result: readableOutcome(classes)
     }
   })
@@ -510,26 +512,26 @@ export function identifyAnswerOptions(prompt: TrainingPrompt): IdentifyAnswerOpt
     case 'scale-degree':
       return Array.from({ length: 7 }, (_, index) => ({
         label: `${index + 1}`,
-        detail: `Scale degree ${index + 1}`,
+        detail: t('training.identify.scaleDegreeDetail', { n: index + 1 }),
         answer: { kind: 'scale-degree' as const, scaleDegree: index + 1 }
       }))
     case 'interval':
       return [2, 3, 4, 5, 6, 7, 8].flatMap((intervalNumber) =>
         (['ascending', 'descending'] as const).map((direction) => ({
           label: intervalNumberName(intervalNumber),
-          detail: direction,
+          detail: directionWord(direction),
           answer: { kind: 'interval' as const, intervalNumber, direction }
         }))
       )
     case 'chord-tone':
       return (['root', 'third', 'fifth'] as const).map((role) => ({
-        label: titleCase(role),
+        label: titleCase(chordRoleWord(role)),
         answer: { kind: 'chord-tone' as const, role }
       }))
     case 'arpeggio':
       return diatonicTriads(prompt.key, 'harmonic-dominant').map((chord) => ({
-        label: `Degree ${chord.scaleDegree}`,
-        detail: chord.quality,
+        label: t('training.identify.degreeLabel', { n: chord.scaleDegree }),
+        detail: chordQualityWord(chord.quality),
         answer: {
           kind: 'arpeggio' as const,
           scaleDegree: chord.scaleDegree,
@@ -544,30 +546,30 @@ export function trainingPromptKindLabel(prompt: TrainingPrompt, revealAnswer: bo
   if (prompt.taskMode === 'identify' && !revealAnswer) {
     switch (prompt.kind) {
       case 'note':
-        return 'Listen and choose a note'
+        return t('training.kindLabel.identifyNote')
       case 'scale-degree':
-        return 'Listen and choose a number'
+        return t('training.kindLabel.identifyNumber')
       case 'interval':
-        return 'Listen and choose an interval'
+        return t('training.kindLabel.identifyInterval')
       case 'chord-tone':
-        return 'Listen and choose a chord note'
+        return t('training.kindLabel.identifyChordNote')
       case 'arpeggio':
-        return 'Listen and choose a chord'
+        return t('training.kindLabel.identifyChord')
     }
   }
   switch (prompt.kind) {
     case 'note':
-      return 'Match a note'
+      return t('training.exercise.note.label')
     case 'scale-degree':
-      return 'Notes in a key'
+      return t('training.exercise.scaleDegree.label')
     case 'interval':
       return prompt.taskMode === 'identify'
-        ? `${intervalNumberName(prompt.intervalNumber)} ${prompt.direction}`
-        : prompt.intervalName
+        ? `${intervalNumberName(prompt.intervalNumber)} ${directionWord(prompt.direction)}`
+        : intervalLabel(prompt.intervalName)
     case 'chord-tone':
-      return `${prompt.chord.rootName} ${prompt.chord.quality}`
+      return chordNameText(prompt.chord)
     case 'arpeggio':
-      return `${prompt.chord.rootName} ${prompt.chord.quality} arpeggio`
+      return t('training.label.arpeggioOf', { chord: chordNameText(prompt.chord) })
   }
 }
 
@@ -575,15 +577,24 @@ export function identifyAnswerReveal(prompt: TrainingPrompt): string | null {
   if (prompt.taskMode !== 'identify') return null
   switch (prompt.kind) {
     case 'note':
-      return `Answer: ${prompt.targets[0].noteName.replace(/-?\d+$/, '')}`
+      return t('training.identify.answerNote', { note: prompt.targets[0].noteName.replace(/-?\d+$/, '') })
     case 'scale-degree':
-      return `Answer: scale degree ${prompt.scaleDegree}`
+      return t('training.identify.answerScaleDegree', { n: prompt.scaleDegree })
     case 'interval':
-      return `Answer: ${intervalNumberName(prompt.intervalNumber).toLowerCase()} ${prompt.direction}`
+      return t('training.identify.answerInterval', {
+        interval: intervalNumberName(prompt.intervalNumber).toLowerCase(),
+        direction: directionWord(prompt.direction)
+      })
     case 'chord-tone':
-      return `Answer: ${prompt.role} of ${prompt.chord.rootName} ${prompt.chord.quality}`
+      return t('training.identify.answerChordTone', {
+        role: chordRoleWord(prompt.role),
+        chord: chordNameText(prompt.chord)
+      })
     case 'arpeggio':
-      return `Answer: degree ${prompt.chord.scaleDegree} — ${prompt.chord.rootName} ${prompt.chord.quality}`
+      return t('training.identify.answerArpeggio', {
+        degree: prompt.chord.scaleDegree,
+        chord: chordNameText(prompt.chord)
+      })
   }
 }
 
@@ -595,29 +606,29 @@ export interface FeedbackCopy {
 
 export function trainingFeedbackCopy(result: TrainingAttemptResult): FeedbackCopy {
   if (result.response === 'skipped')
-    return { heading: 'Skipped', detail: 'This exercise was not scored.', good: false }
+    return { heading: t('training.outcome.skipped'), detail: t('training.feedback.skipped.detail'), good: false }
   if (result.response === 'identify') {
     return result.correct
-      ? { heading: 'Correct', detail: 'Keep that sound in mind before the next question.', good: true }
+      ? { heading: t('training.outcome.correct'), detail: t('training.feedback.identifyCorrect.detail'), good: true }
       : {
-          heading: 'Not this time',
-          detail: 'Listen for the key and compare the notes again.',
+          heading: t('training.feedback.identifyWrong.heading'),
+          detail: t('training.feedback.identifyWrong.detail'),
           good: false
         }
   }
   const classes = result.targets.map((target) => target.classification)
   if (classes.every((classification) => classification === 'on-target'))
-    return { heading: 'On target', detail: 'The pitch settled clearly in the center.', good: true }
+    return { heading: t('training.session.pitch.onTarget'), detail: t('training.feedback.onTarget.detail'), good: true }
   if (classes.every((classification) => classification === 'on-target' || classification === 'close'))
     return {
-      heading: 'Very close',
-      detail: 'The right notes are there; give them a little more center.',
+      heading: t('training.feedback.close.heading'),
+      detail: t('training.feedback.close.detail'),
       good: true
     }
   const classification = classes.find((item) => item !== 'on-target') ?? 'wrong-note'
   return {
-    heading: TRAINING_CLASSIFICATION_COPY[classification],
-    detail: 'Release the note, reset, and listen for the next cue.',
+    heading: trainingClassificationCopy(classification),
+    detail: t('training.feedback.wrong.detail'),
     good: false
   }
 }
@@ -634,18 +645,29 @@ export function skippedTrainingResult(
   }
 }
 
-export const TRAINING_CLASSIFICATION_COPY: Readonly<Record<TrainingResultClassification, string>> =
-  Object.freeze({
-    'on-target': 'On target',
-    close: 'Close — one more pass will settle it',
-    'wrong-note': 'A different note landed',
-    'wrong-octave': 'Right note name, different octave',
-    'other-chord-tone': 'Another chord tone landed',
-    'non-chord-tone': 'The note landed outside the chord',
-    unstable: 'The pitch did not settle yet',
-    unvoiced: 'No steady voice was detected',
-    'out-of-range': 'The detected note was outside your chosen range'
-  })
+/** Evaluated at call time (not frozen at module load) so it follows the current language. */
+export function trainingClassificationCopy(classification: TrainingResultClassification): string {
+  switch (classification) {
+    case 'on-target':
+      return t('training.session.pitch.onTarget')
+    case 'close':
+      return t('training.classification.close')
+    case 'wrong-note':
+      return t('training.classification.wrongNote')
+    case 'wrong-octave':
+      return t('training.classification.wrongOctave')
+    case 'other-chord-tone':
+      return t('training.classification.otherChordTone')
+    case 'non-chord-tone':
+      return t('training.classification.nonChordTone')
+    case 'unstable':
+      return t('training.classification.unstable')
+    case 'unvoiced':
+      return t('training.classification.unvoiced')
+    case 'out-of-range':
+      return t('training.classification.outOfRange')
+  }
+}
 
 export interface TrainingSubmissionLock {
   current: string | null
@@ -808,11 +830,11 @@ export function trainingSummaryPitchCopy(
 ): string {
   if (summary.tendency === 'not-enough-pitch')
     return session.config.taskMode === 'identify'
-      ? 'This ear-only session did not use pitch metrics.'
-      : 'No steady in-tune notes were detected in this session.'
+      ? t('training.summary.noPitchMetrics')
+      : t('training.summary.noSteadyNotes')
   return summary.tendency === 'centered'
-    ? 'Your average pitch stayed in tune.'
-    : `Your average pitch tended ${summary.tendency}.`
+    ? t('training.summary.stayedInTune')
+    : t('training.summary.tended', { word: tendencyWord(summary.tendency) })
 }
 
 /** Build ordered capture windows from the same audio clock that scheduled the cues. */
@@ -855,13 +877,25 @@ function createSessionState(state: DesktopTrainingState, seed: string | number):
   }
 }
 
+const OUTCOME_KEY_BY_CLASSIFICATION: Readonly<Record<string, string>> = Object.freeze({
+  'wrong-note': 'training.outcome.wrongNote',
+  'wrong-octave': 'training.outcome.wrongOctave',
+  'other-chord-tone': 'training.outcome.otherChordTone',
+  'non-chord-tone': 'training.outcome.nonChordTone',
+  unstable: 'training.outcome.unstable',
+  unvoiced: 'training.outcome.unvoiced',
+  'out-of-range': 'training.outcome.outOfRange'
+})
+
 function readableOutcome(classifications: readonly string[]): string {
-  if (classifications.length === 0) return 'No result'
-  if (classifications.every((classification) => classification === 'on-target')) return 'On target'
+  if (classifications.length === 0) return t('training.outcome.none')
+  if (classifications.every((classification) => classification === 'on-target'))
+    return t('training.session.pitch.onTarget')
   if (classifications.every((classification) => ['on-target', 'close'].includes(classification)))
-    return 'Close'
+    return t('training.metric.close')
   const first = classifications.find((classification) => classification !== 'on-target')!
-  return first.replaceAll('-', ' ').replace(/^./, (letter) => letter.toUpperCase())
+  const key = OUTCOME_KEY_BY_CLASSIFICATION[first]
+  return key ? t(key as Parameters<typeof t>[0]) : first.replaceAll('-', ' ').replace(/^./, (letter) => letter.toUpperCase())
 }
 
 function average(values: readonly number[]): number | null {
@@ -869,9 +903,51 @@ function average(values: readonly number[]): number | null {
   return values.reduce((sum, value) => sum + value, 0) / values.length
 }
 
+const INTERVAL_WORD_KEYS = [
+  'training.word.unison',
+  'training.word.second',
+  'training.word.third',
+  'training.word.fourth',
+  'training.word.fifth',
+  'training.word.sixth',
+  'training.word.seventh',
+  'training.word.octave'
+] as const
+
+/** Capitalized, e.g. "Third"; callers lowercase it where the sentence needs that. */
 function intervalNumberName(intervalNumber: number): string {
-  const names = ['Unison', 'Second', 'Third', 'Fourth', 'Fifth', 'Sixth', 'Seventh', 'Octave']
-  return names[intervalNumber - 1] ?? `Interval ${intervalNumber}`
+  const key = INTERVAL_WORD_KEYS[intervalNumber - 1]
+  return titleCase(key ? t(key) : t('training.word.intervalGeneric', { n: intervalNumber }))
+}
+
+function directionWord(direction: 'ascending' | 'descending'): string {
+  return direction === 'ascending' ? t('training.word.ascending') : t('training.word.descending')
+}
+
+function chordRoleWord(role: 'root' | 'third' | 'fifth'): string {
+  return role === 'root' ? t('training.word.root') : role === 'third' ? t('training.word.third') : t('training.word.fifth')
+}
+
+function chordQualityWord(quality: 'major' | 'minor' | 'diminished' | 'augmented'): string {
+  switch (quality) {
+    case 'major':
+      return t('training.word.major')
+    case 'minor':
+      return t('training.word.minor')
+    case 'diminished':
+      return t('training.word.diminished')
+    case 'augmented':
+      return t('training.word.augmented')
+  }
+}
+
+/** "{root} {quality}" — the root name is a proper note name and stays untranslated. */
+function chordNameText(chord: { readonly rootName: string; readonly quality: 'major' | 'minor' | 'diminished' | 'augmented' }): string {
+  return `${chord.rootName} ${chordQualityWord(chord.quality)}`
+}
+
+function tendencyWord(tendency: 'sharp' | 'flat'): string {
+  return tendency === 'sharp' ? t('training.word.sharp') : t('training.word.flat')
 }
 
 function titleCase(value: string): string {

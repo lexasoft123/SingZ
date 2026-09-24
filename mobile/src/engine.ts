@@ -10,6 +10,7 @@ import {
 import { accentIndex, barLengthAt, beatIndexAtOrAfter, beatTime } from './beat'
 import { describeOutput } from './latency'
 import { fmtMs, log } from './log'
+import { t } from './i18n'
 // fmtTime here is the song-position one (M:SS); log.ts exports a same-named
 // wall-clock formatter, which is not what a play/pause line wants.
 import { fmtTime, MET_DEFAULTS, type BeatInfo, type MetronomeConfig } from './model'
@@ -210,23 +211,23 @@ export class MultitrackEngine {
       if (this.backgrounded)
         return {
           ok: false,
-          error: 'Audio is paused while SingZ is in the background.'
+          error: t('phone.app.engine.pausedInBackground')
         }
       if (this.nativeOutputHandoff)
         return {
           ok: false,
-          error: 'Song playback currently owns the iPhone audio output.'
+          error: t('phone.app.engine.outputOwnedBySong')
         }
       this.pause()
       this.cancelTrainingCues()
       const generation = ++this.trainingCueGeneration
       if (this.ctx.state === 'suspended') await this.ctx.resume()
       if (this.backgrounded || generation !== this.trainingCueGeneration)
-        return { ok: false, error: 'Training cue was cancelled.' }
+        return { ok: false, error: t('phone.app.engine.cueCancelled') }
       const plan = planTrainingCues(cues, this.ctx.currentTime + START_DELAY)
       for (const voice of plan.voices) {
         if (generation !== this.trainingCueGeneration)
-          return { ok: false, error: 'Training cue was cancelled.' }
+          return { ok: false, error: t('phone.app.engine.cueCancelled') }
         const { start, end } = voice
         const fundamental = 440 * 2 ** ((voice.midi - 69) / 12)
         const concurrentVoices = plan.voices.filter(

@@ -39,6 +39,11 @@ export * from './shared/training-scoring'
 export * from './shared/training-progress'
 export * from './shared/training-preparation'
 export { yinPitchInfo } from './renderer/src/audio/pitch'
+// The phone's i18n runs on THIS bundle's copy of the core: the training code
+// above calls it, so a second copy in the app would be a second locale.
+export { lookup as i18nLookup, lookupPlural as i18nLookupPlural, setLocale as i18nSetLocale, getLocale as i18nGetLocale, subscribeLocale as i18nSubscribe, register as i18nRegister } from './shared/i18n/core'
+export { resolveLocale as i18nResolveLocale } from './shared/i18n/rules'
+export { intervalLabel, keyLabel } from './shared/music-labels'
 `,
     resolveDir: join(repoRoot, 'src'),
     loader: 'ts'
@@ -62,6 +67,9 @@ export * from '../../../src/shared/training-scoring'
 export * from '../../../src/shared/training-progress'
 export * from '../../../src/shared/training-preparation'
 export { yinPitchInfo, type PitchFrame } from '../../../src/renderer/src/audio/pitch'
+export { lookup as i18nLookup, lookupPlural as i18nLookupPlural, setLocale as i18nSetLocale, getLocale as i18nGetLocale, subscribeLocale as i18nSubscribe, register as i18nRegister } from '../../../src/shared/i18n/core'
+export { resolveLocale as i18nResolveLocale } from '../../../src/shared/i18n/rules'
+export { intervalLabel, keyLabel } from '../../../src/shared/music-labels'
 `
 )
 

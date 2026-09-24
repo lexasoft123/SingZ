@@ -3,6 +3,7 @@ import { barLengthAt, beatIndexAtOrAfter, beatTime } from '../beat';
 import type { MultitrackEngine } from '../engine';
 import { driveLocalFile, driveReadText } from '../gdrive';
 import { fmtBytes, fmtMs, log } from '../log';
+import { t } from '../i18n';
 import {
   customTracks,
   MET_DEFAULTS,
@@ -107,6 +108,10 @@ export type NativePlaybackControl =
     }
   | { readonly masterGain: number }
   | { readonly trainingEnabled: boolean };
+
+// A sentinel, compared with === below — so it is never translated (a
+// language change between the throw and the compare would break the match).
+const PREPARE_CANCELLED = 'Native preparation was cancelled.';
 
 export class NativePlaybackCommandError extends Error {
   readonly code = 'NATIVE_PLAYBACK_COMMAND_FAILED' as const;
@@ -1932,14 +1937,14 @@ export class IosNativePlaybackCoordinator {
       return {
         enabled: preference.enabled,
         supported: false,
-        detail: 'Native playback is unavailable on this platform.',
+        detail: t('phone.app.native.status.unavailablePlatform'),
         capability: null,
       };
     if (!this.deps.native)
       return {
         enabled: preference.enabled,
         supported: false,
-        detail: 'This build does not contain the native playback bridge.',
+        detail: t('phone.app.native.status.noBridge'),
         capability: null,
       };
     try {
@@ -1953,14 +1958,14 @@ export class IosNativePlaybackCoordinator {
         supported,
         detail: supported
           ? `${capability.buildId} · ${capability.playbackBuild} · ${capability.ownership} · ${capability.session.state}`
-          : 'The linked native runtime is missing a required playback capability.',
+          : t('phone.app.native.status.missingCapability'),
         capability,
       };
     } catch (error) {
       return {
         enabled: preference.enabled,
         supported: false,
-        detail: `Native status failed: ${message(error)}`,
+        detail: t('phone.app.native.status.failed', { message: message(error) }),
         capability: null,
       };
     }
@@ -2011,9 +2016,7 @@ export class IosNativePlaybackCoordinator {
         if (!options.isCurrent()) throw new Error('Song load was superseded.');
         const safe = await this.retireActiveLocked('legacy project selected');
         if (!safe)
-          throw new Error(
-            'Native playback cleanup is uncertain. Legacy playback remains blocked.',
-          );
+          throw new Error(t('phone.app.native.cleanupBlockedLegacy'));
         if (!options.isCurrent()) throw new Error('Song load was superseded.');
         this.allowLegacyIfLeased(options.engine);
         log(
@@ -2041,14 +2044,12 @@ export class IosNativePlaybackCoordinator {
       // Everything from here is where the seconds actually go, and none of it
       // said so. Retiring the last song's graph can take a moment of its own;
       // the core's build takes most of it.
-      options.onStep('Releasing the last song…', MATERIALIZE_SHARE + 0.02);
+      options.onStep(t('phone.app.native.progress.releasingLastSong'), MATERIALIZE_SHARE + 0.02);
       const retired = await this.retireActiveLocked(
         'new native project selected',
       );
       if (!retired)
-        throw new Error(
-          'Native playback cleanup is uncertain. The next song was not opened.',
-        );
+        throw new Error(t('phone.app.native.cleanupNextNotOpened'));
       if (!options.isCurrent()) throw new Error('Song load was superseded.');
       const handle = new IosNativePlaybackHandle(this, materialized, options);
       // Publish ownership before the synchronous native claim. Training,
@@ -2061,7 +2062,7 @@ export class IosNativePlaybackCoordinator {
       // until the song is really open — see `creepingProgress`.
       const building = creepingProgress(
         options.onStep,
-        'Building the audio graph…',
+        t('phone.app.native.progress.buildingGraph'),
         MATERIALIZE_SHARE + 0.05,
         0.97,
         1200,
@@ -2089,7 +2090,7 @@ export class IosNativePlaybackCoordinator {
             'error',
           );
           throw new Error(
-            `Native playback could not suspend legacy output before claiming the audio session: ${detail}`,
+            t('phone.app.native.suspendLegacyFailed', { detail }),
           );
         }
         throw error;
@@ -2101,7 +2102,7 @@ export class IosNativePlaybackCoordinator {
       }
       if (
         !prepared.ok &&
-        prepared.error === 'Native preparation was cancelled.' &&
+        prepared.error === PREPARE_CANCELLED &&
         this.rollbackPreclaimHandle(handle)
       ) {
         throw new Error(
@@ -2355,8 +2356,7 @@ export class IosNativePlaybackCoordinator {
         nativeErrorCode(result.error),
         'resume-output',
         generation,
-        result.message ||
-          'The native output stream could not be released after the background park.',
+        result.message || t('phone.app.native.outputStreamNotReleased'),
       );
     handle.streamHeldGeneration = 0;
     // The poll was at the held rate; an interval re-arms itself only on its
@@ -2556,9 +2556,7 @@ export class IosNativePlaybackCoordinator {
       this.retireActiveLocked(reason),
     );
     if (!safe)
-      throw new Error(
-        'Native unload is uncertain; native ownership remains published.',
-      );
+      throw new Error(t('phone.app.native.unloadUncertainPublished'));
   }
 
   isActive(handle: IosNativePlaybackHandle): boolean {
@@ -2839,20 +2837,20 @@ export class IosNativePlaybackCoordinator {
     overrides?: NativePlaybackPrepareOverrides,
   ): Promise<{ ok: true } | { ok: false; error: string }> {
     const native = this.deps.native;
-    if (!native) return { ok: false, error: 'Native playback is unavailable.' };
+    if (!native) return { ok: false, error: t('phone.app.native.unavailable') };
     const status = capability ?? (await native.status());
     if (!continuing())
-      return { ok: false, error: 'Native preparation was cancelled.' };
+      return { ok: false, error: PREPARE_CANCELLED };
     const output = chooseOutput(status.outputs);
     if (!output)
-      return { ok: false, error: 'No native audio output is available.' };
+      return { ok: false, error: t('phone.app.native.noOutput') };
     if (this.fallbackLease !== null) {
       // A fallback lease is a bearer capability. Legacy output must be fully
       // quiescent before the synchronous prepare claim consumes it.
       handle.options.engine.unload();
       await handle.options.engine.suspendOutputForNativePlayback();
       if (!continuing())
-        return { ok: false, error: 'Native preparation was cancelled.' };
+        return { ok: false, error: PREPARE_CANCELLED };
     }
     const generation = this.claimGeneration();
     // One notification for the phase and the position together: the screen
@@ -2893,13 +2891,13 @@ export class IosNativePlaybackCoordinator {
       );
       const cleanup = await this.cleanupGeneration(handle, generation);
       return cleanup
-        ? { ok: false, error: `Native prepare failed: ${message(error)}` }
+        ? { ok: false, error: t('phone.app.native.prepareFailed', { message: message(error) }) }
         : { ok: false, error: cleanupUncertain(error) };
     }
     if (!continuing()) {
       const cleanup = await this.cleanupGeneration(handle, generation);
       return cleanup
-        ? { ok: false, error: 'Native preparation was cancelled.' }
+        ? { ok: false, error: PREPARE_CANCELLED }
         : { ok: false, error: cleanupUncertain('cancelled prepare') };
     }
     if (!result.ok) {
@@ -2914,9 +2912,9 @@ export class IosNativePlaybackCoordinator {
       return cleanup
         ? {
             ok: false,
-            error: `Native prepare refused the song: ${
-              result.message || result.error
-            }`,
+            error: t('phone.app.native.prepareRefused', {
+              message: result.message || result.error,
+            }),
           }
         : {
             ok: false,
@@ -2931,14 +2929,14 @@ export class IosNativePlaybackCoordinator {
       return cleanup
         ? {
             ok: false,
-            error: `Native prepare status failed: ${message(error)}`,
+            error: t('phone.app.native.prepareStatusFailed', { message: message(error) }),
           }
         : { ok: false, error: cleanupUncertain(error) };
     }
     if (!continuing()) {
       const cleanup = await this.cleanupGeneration(handle, generation);
       return cleanup
-        ? { ok: false, error: 'Native preparation was cancelled.' }
+        ? { ok: false, error: PREPARE_CANCELLED }
         : { ok: false, error: cleanupUncertain('cancelled prepare status') };
     }
     if (
@@ -2949,7 +2947,7 @@ export class IosNativePlaybackCoordinator {
       return cleanup
         ? {
             ok: false,
-            error: 'Native prepare returned inconsistent session status.',
+            error: t('phone.app.native.prepareInconsistent'),
           }
         : { ok: false, error: cleanupUncertain('inconsistent prepare status') };
     }
@@ -3854,7 +3852,7 @@ export class IosNativePlaybackCoordinator {
       if (!this.startIsCurrent(handle, operation.token)) {
         if (
           !prepared.ok &&
-          prepared.error === 'Native preparation was cancelled.' &&
+          prepared.error === PREPARE_CANCELLED &&
           this.rollbackPreclaimHandle(handle) !== null
         )
           return { kind: 'failed', error: prepared.error };
@@ -4152,9 +4150,7 @@ export class IosNativePlaybackCoordinator {
       if (this.startIsCurrent(handle, operationToken)) handle.fail(error);
       return { kind: 'failed', error };
     }
-    const error =
-      `Native output did not open: ${reason}. ` +
-      'Playback remains stopped on the native backend.';
+    const error = t('phone.app.native.outputDidNotOpen', { reason });
     if (this.startIsCurrent(handle, operationToken))
       handle.update({
         phase: 'stopped',
@@ -4330,9 +4326,7 @@ export class IosNativePlaybackCoordinator {
     }
     const safe = await this.cleanupGeneration(handle, generation);
     if (!safe) {
-      handle.fail(
-        'Native unload is uncertain; another playback backend was not started.',
-      );
+      handle.fail(t('phone.app.native.unloadUncertainNotStarted'));
       return false;
     }
     handle.update({
@@ -4451,8 +4445,7 @@ export class IosNativePlaybackCoordinator {
         );
         handle.update({
           phase: 'stopped',
-          error:
-            'Native audio stopped because Android changed audio focus or the output route. Tap Play to retry.',
+          error: t('phone.app.native.focusLost'),
         });
         return;
       }
@@ -4476,14 +4469,13 @@ export class IosNativePlaybackCoordinator {
           `terminal ${session.terminalReason}`,
           true,
         );
-        const detail = `Native audio stopped: ${session.terminalReason}.`;
         // Route/interruption recovery is always explicit. Exact cleanup keeps
         // the project intent and issues the next bearer lease; tapping Play
         // prepares a fresh graph against the new route and rebuilds cue
         // latency, while automatic resume is forbidden on both platforms.
         handle.update({
           phase: 'stopped',
-          error: `${detail} Tap Play to retry.`,
+          error: t('phone.app.native.stoppedReasonRetry', { reason: session.terminalReason }),
         });
         return;
       }
@@ -6780,9 +6772,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   async unload(reason = 'player closed'): Promise<void> {
     const safe = await this.coordinator.unloadHandle(this, reason);
     if (!safe)
-      throw new Error(
-        'Native unload is uncertain; native ownership remains blocked.',
-      );
+      throw new Error(t('phone.app.native.unloadUncertainBlocked'));
   }
 
   startPolling(): void {
@@ -7380,7 +7370,11 @@ async function materializeNativeProject(
     const source = sources[index];
     const wanted = doc.stemHashes?.[source.hashName];
     onStep(
-      `Fetching ${source.label} · ${index + 1}/${sources.length}`,
+      t('phone.app.native.progress.fetchingTrack', {
+        label: source.label,
+        index: index + 1,
+        count: sources.length,
+      }),
       MATERIALIZE_SHARE * (index / sources.length),
     );
     await crumb?.(`fetching ${source.id}`);
@@ -7407,7 +7401,7 @@ async function materializeNativeProject(
   }
   let lyrics: LyricsDoc | null = null;
   if (entry.hasLyrics && isCurrent()) {
-    onStep('Fetching lyrics…', MATERIALIZE_SHARE * 0.9);
+    onStep(t('phone.app.native.progress.fetchingLyrics'), MATERIALIZE_SHARE * 0.9);
     try {
       const text =
         entry.source === 'gdrive'
@@ -7482,9 +7476,7 @@ function message(error: unknown): string {
 }
 
 function cleanupUncertain(reason: unknown): string {
-  return `Native playback cleanup is uncertain (${message(
-    reason,
-  )}). Legacy fallback was blocked to prevent overlapping audio owners.`;
+  return t('phone.app.native.cleanupUncertain', { reason: message(reason) });
 }
 
 export { IosNativePlaybackCoordinator as NativePlaybackCoordinator };

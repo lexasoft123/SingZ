@@ -4,6 +4,8 @@
  * active stream — the one residual gate is macOS mic access (TCC), which
  * blanks audioinput labels until granted.
  */
+import type { DesktopAudioInputDevice } from '../../../shared/types'
+import { t } from '../i18n'
 
 export interface AudioDeviceInfo {
   id: string
@@ -73,8 +75,8 @@ export function shapeDevices(
       hidden: rows.some((d) => !d.label)
     }
   }
-  const ins = pick('audioinput', 'Microphone')
-  const outs = pick('audiooutput', 'Speakers')
+  const ins = pick('audioinput', t('settings.devices.microphone'))
+  const outs = pick('audiooutput', t('settings.devices.speakers'))
   return { inputs: ins.devs, outputs: outs.devs, inputLabelsHidden: ins.hidden }
 }
 
@@ -97,4 +99,3 @@ export async function getAudioDevices(options: { requestAccess?: boolean } = {})
   }
   return shapeDevices(list)
 }
-import type { DesktopAudioInputDevice } from '../../../shared/types'

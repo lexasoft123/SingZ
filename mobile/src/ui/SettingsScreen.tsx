@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { nativePlayback } from '../playback/native';
+import { t, useLocale } from '../i18n';
 import { C } from './bits';
 
 export default function SettingsScreen({
@@ -19,10 +20,11 @@ export default function SettingsScreen({
   onClose: () => void;
 }): React.JSX.Element {
   const insets = useSafeAreaInsets();
+  useLocale();
   const [loading, setLoading] = useState(true);
   const [enabled, setEnabled] = useState(false);
   const [supported, setSupported] = useState(false);
-  const [detail, setDetail] = useState('Checking native playback…');
+  const [detail, setDetail] = useState(() => t('phone.app.settings.checking'));
   const [saving, setSaving] = useState(false);
 
   const refresh = useCallback(async (): Promise<void> => {
@@ -58,29 +60,29 @@ export default function SettingsScreen({
   return (
     <View style={[s.root, { paddingTop: insets.top + 8 }]}>
       <View style={s.header}>
-        <Text style={s.title}>Settings</Text>
+        <Text style={s.title}>{t('phone.app.settings.title')}</Text>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Close Settings"
+          accessibilityLabel={t('phone.app.settings.closeA11y')}
           onPress={onClose}
           hitSlop={12}
         >
-          <Text style={s.close}>Done</Text>
+          <Text style={s.close}>{t('phone.app.settings.done')}</Text>
         </Pressable>
       </View>
       <ScrollView contentContainerStyle={s.content}>
-        <Text style={s.section}>AUDIO</Text>
+        <Text style={s.section}>{t('phone.app.settings.sectionAudio')}</Text>
         <View style={s.card}>
           <View style={s.row}>
             <View style={s.copy}>
               <View style={s.experimentalRow}>
-                <Text style={s.name}>Native playback</Text>
-                <Text style={s.badge}>DEFAULT</Text>
+                <Text style={s.name}>{t('phone.app.settings.nativePlaybackName')}</Text>
+                <Text style={s.badge}>{t('phone.app.settings.nativePlaybackBadge')}</Text>
               </View>
               <Text style={s.description}>
                 {Platform.OS === 'ios' || Platform.OS === 'android'
-                  ? 'Play eligible stem and added-track projects through zcore + zdsp. Native playback includes transport, pitch, tempo, loop, metronome, count-in and training; unsupported file formats stay on the regular player.'
-                  : 'Native playback is unavailable on this platform.'}
+                  ? t('phone.app.settings.nativePlaybackDescription')
+                  : t('phone.app.settings.unsupportedPlatform')}
               </Text>
             </View>
             {loading ? (
@@ -92,7 +94,7 @@ export default function SettingsScreen({
                 onValueChange={next => void toggle(next)}
                 trackColor={{ false: '#4a4339', true: '#7c511d' }}
                 thumbColor={enabled ? C.amber : '#b5aa98'}
-                accessibilityLabel="Native playback"
+                accessibilityLabel={t('phone.app.settings.nativePlaybackA11y')}
               />
             )}
           </View>
@@ -102,8 +104,7 @@ export default function SettingsScreen({
           </Text>
           {enabled && supported && (
             <Text style={s.note}>
-              Eligible songs use the ordinary player controls with native DSP
-              underneath. Other songs remain entirely on the regular player.
+              {t('phone.app.settings.nativePlaybackNote')}
             </Text>
           )}
         </View>

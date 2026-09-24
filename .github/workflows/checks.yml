@@ -173,6 +173,13 @@ jobs:
       - name: Generate the mobile copy of the graph document
         run: node mobile/scripts/sync-graph-document.js
 
+      # Same class, second file: the phone's i18n runs on gen/training-lib's
+      # copy of the core, and the roundtrip suite imports mobile sources that
+      # translate (publish.ts). The bundler falls back to the ROOT's esbuild
+      # when mobile/node_modules is absent, so this too needs no mobile install.
+      - name: Generate the mobile training bundle
+        run: node mobile/scripts/build-training.mjs
+
       - name: Typecheck
         run: npm run typecheck
 

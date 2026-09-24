@@ -4,6 +4,7 @@ import type {
   DesktopMonitorStatus,
   SingzApi
 } from '../../../shared/types'
+import { t } from '../i18n'
 
 export type MonitorCoordinatorPhase =
   | 'idle'
@@ -39,17 +40,21 @@ export type AudioSafetyLeaseKind =
   | 'settings-preview'
   | 'unknown'
 
-export const AUDIO_ROUTE_SETTINGS_GUIDANCE =
-  'Open Settings to review the audio owner or retry the output route.'
-
 /** Copy shared by callers that only need a truthful action. It deliberately
  * does not promise a top-bar Stop button: route-only handoffs expose no Stop,
- * while a healthy Settings preview is controlled inside Settings itself. */
+ * while a healthy Settings preview is controlled inside Settings itself.
+ *
+ * `subject` is a translated word/phrase the caller resolves at call time
+ * (e.g. `t('settings.subject.microphone')`), not a raw English literal. */
 export function audioSafetyBlockedCopy(subject: string): string {
-  return `${subject} is unavailable while another audio owner or route change is active. ${AUDIO_ROUTE_SETTINGS_GUIDANCE}`
+  return t('settings.monitor.audioSafetyBlocked', { subject })
 }
 
-export const SONG_TRANSPORT_AUDIO_LEASE_COPY = audioSafetyBlockedCopy('Song playback')
+/** Evaluated at call time so a live language switch is reflected — never
+ * cache this in a module-level constant. */
+export function songTransportAudioLeaseCopy(): string {
+  return audioSafetyBlockedCopy(t('settings.subject.songPlayback'))
+}
 
 /** Preserves the provenance needed by recovery copy. `app-shell-stop` is the
  * exact set of states for which PersistentMonitorControl renders Stop. */
@@ -539,13 +544,13 @@ export class DesktopMonitorCoordinator {
   private nextPreviewStopId = 1
   private snapshotValue: MonitorCoordinatorSnapshot = {
     phase: 'idle',
-    message: 'Monitoring is off.',
+    message: t('settings.monitorCoordinator.idle'),
     result: null,
     status: null
   }
   private shellSnapshotValue: MonitorShellSnapshot = {
     phase: 'idle',
-    message: 'Monitoring is off.',
+    message: t('settings.monitorCoordinator.idle'),
     hasNativeOwnership: false,
     hasAudioSafetyLease: false,
     hasRouteTransitionLease: false,
@@ -739,7 +744,7 @@ export class DesktopMonitorCoordinator {
     config: DesktopMonitorConfig,
     gainDb: number
   ): Promise<MonitorStartOutcome> {
-    this.publish({ phase: 'preparing', message: 'Releasing the microphone and song output…', result: null })
+    this.publish({ phase: 'preparing', message: t('settings.monitorCoordinator.releasing'), result: null })
     try {
       // This order is the product safety contract. The preview stop resolves
       // only after its native capture child confirms termination.
@@ -753,7 +758,7 @@ export class DesktopMonitorCoordinator {
       this.publishShellIfChanged()
       if (!this.current(epoch)) return { active: false, cancelled: true }
 
-      this.publish({ phase: 'starting', message: 'Starting the native DSP path…' })
+      this.publish({ phase: 'starting', message: t('settings.monitorCoordinator.startingNative') })
       const result = await this.dependencies.api.beginMonitor(config)
       this.publish({ result })
       if (result.ok) this.ownershipGeneration = result.ownershipGeneration
@@ -789,7 +794,7 @@ export class DesktopMonitorCoordinator {
       if (!enabled) return { active: false, cancelled: true }
       this.publish({
         phase: 'active',
-        message: 'Native DSP monitoring is active.',
+        message: t('settings.monitorCoordinator.active'),
         result: gainResult,
         status: enabled
       })
@@ -826,19 +831,19 @@ export class DesktopMonitorCoordinator {
       const status = await this.dependencies.api.monitorStatus()
       if (!this.current(epoch)) return null
       if (status.ownershipGeneration !== this.ownershipGeneration) {
-        throw new MonitorTransitionError('The native monitor generation changed before it became ready.')
+        throw new MonitorTransitionError(t('settings.monitorCoordinator.generationChanged'))
       }
       this.publish({ status })
       if (status.deviceLost || status.state === 'device-lost') {
-        throw new MonitorTransitionError('The monitoring device disconnected. Reconnect it and start again.')
+        throw new MonitorTransitionError(t('settings.monitorCoordinator.deviceDisconnected'))
       }
       if (status.state === 'error' || status.state === 'unsupported') {
-        throw new MonitorTransitionError(status.error || 'The native monitoring host stopped.')
+        throw new MonitorTransitionError(status.error || t('settings.monitorCoordinator.hostStopped'))
       }
       if (accept(status)) return status
       await this.sleep(this.pollMs)
     }
-    throw new MonitorTransitionError('The native DSP path did not confirm an audio callback in time.')
+    throw new MonitorTransitionError(t('settings.monitorCoordinator.callbackTimeout'))
   }
 
   /** Polls scalar telemetry. A terminal route is stopped before Web Audio is
@@ -868,7 +873,7 @@ export class DesktopMonitorCoordinator {
         status.state === 'device-lost' || status.state === 'error' ||
         status.state === 'unsupported'
       ) {
-        const message = status.error || 'The native monitoring route stopped.'
+        const message = status.error || t('settings.monitorCoordinator.routeStopped')
         const stopped = await this.stopForTerminal()
         if (stopped.ok) this.publish({ phase: 'error', message, status })
         return
@@ -953,7 +958,7 @@ export class DesktopMonitorCoordinator {
 
   private async stopNow(epoch: number): Promise<MonitorStopOutcome> {
     const hadOwnership = this.hasAudioSafetyLease
-    if (hadOwnership) this.publish({ phase: 'stopping', message: 'Stopping native monitoring…' })
+    if (hadOwnership) this.publish({ phase: 'stopping', message: t('settings.monitorCoordinator.stopping') })
     // Stopping the app session also closes every registered legacy preview.
     // When a start is in flight, startNow observes the epoch and performs the
     // native rollback.
@@ -969,7 +974,7 @@ export class DesktopMonitorCoordinator {
     }
     const ended = await this.endCurrentGeneration()
     if (!ended) {
-      const error = 'Native monitoring did not confirm shutdown. Song output remains released for safety.'
+      const error = t('settings.monitorCoordinator.shutdownUnconfirmed')
       if (this.current(epoch)) {
         this.publish({ phase: 'error', message: error })
       }
@@ -988,7 +993,9 @@ export class DesktopMonitorCoordinator {
       if (this.legacyOutputReleased) this.dependencies.beforeRestoreLegacyOutput?.()
       await this.restoreLegacyOutput()
     } catch (error) {
-      const message = `Song output could not be restored: ${error instanceof Error ? error.message : String(error)}`
+      const message = t('settings.monitorCoordinator.outputRestoreFailed', {
+        error: error instanceof Error ? error.message : String(error)
+      })
       if (this.current(epoch)) {
         this.publish({ phase: 'error', message })
       }
@@ -997,7 +1004,7 @@ export class DesktopMonitorCoordinator {
     if (this.current(epoch)) {
       this.publish({
         phase: 'idle',
-        message: 'Monitoring is off.',
+        message: t('settings.monitorCoordinator.idle'),
         result: null,
         status: null
       })
@@ -1069,14 +1076,14 @@ class MonitorTransitionError extends Error {}
 
 export function monitorErrorCopy(result: Pick<DesktopMonitorResult, 'errorCode' | 'error'>): string {
   if (result.errorCode === 'platform-not-ready')
-    return 'Headphone monitoring is not available on Windows yet. Native output stayed off.'
+    return t('settings.monitorCoordinator.error.platformNotReady')
   if (result.errorCode === 'unsupported-route')
-    return 'That route is not approved for low-latency monitoring. Choose a wired audio device.'
+    return t('settings.monitorCoordinator.error.unsupportedRoute')
   if (result.errorCode === 'native-audio-busy')
-    return 'The microphone is still in use. Stop the preview or exercise, then try again.'
+    return t('settings.monitorCoordinator.error.micBusy')
   if (result.errorCode === 'queue-full')
-    return 'The DSP control queue is busy. Wait a moment, then try again.'
-  return result.error || 'Native headphone monitoring could not start.'
+    return t('settings.monitorCoordinator.error.queueFull')
+  return result.error || t('settings.monitorCoordinator.error.couldNotStart')
 }
 
 export function linearToDbfs(value: number): number {

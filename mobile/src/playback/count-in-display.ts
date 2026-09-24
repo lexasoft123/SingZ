@@ -1,4 +1,5 @@
 import type { PlaybackCountInStatus } from '../projects'
+import { t } from '../i18n'
 
 export interface PlaybackCountInDisplay {
   readonly accessibilityLabel: string
@@ -19,7 +20,7 @@ export function playbackCountInDisplay(
       return parts
     }, []).join('')
     return {
-      accessibilityLabel: `Count-in, beat ${status.done} of ${status.total}`,
+      accessibilityLabel: t('phone.player.countIn.beatLabel', { done: status.done, total: status.total }),
       text,
       beatDots: true
     }
@@ -30,8 +31,8 @@ export function playbackCountInDisplay(
     ? String(Math.ceil(remaining))
     : Math.max(0.1, Math.ceil(remaining * 10) / 10).toFixed(1)
   return {
-    accessibilityLabel: `Count-in, ${seconds} seconds remaining`,
-    text: `${seconds}s`,
+    accessibilityLabel: t('phone.player.countIn.secondsLabel', { seconds }),
+    text: t('phone.player.countIn.secondsText', { seconds }),
     beatDots: false
   }
 }

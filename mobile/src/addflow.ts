@@ -14,6 +14,7 @@ import { releaseStems } from './projects'
 import { createProject, readMediaTags, type CreatedProject } from './writer'
 import type { LyricLine } from './model'
 import { log } from './log'
+import { t } from './i18n'
 
 /**
  * The add-a-song pipeline (Phase 1, docs/PHONE-STANDALONE.md), UI-free: the
@@ -56,7 +57,7 @@ export async function readSongFacts(
     new Promise<never>((_, rejectLate) => {
       deadline = setTimeout(() => {
         decodePromise.then((b) => releaseStems([{ buffer: b }])).catch(() => {})
-        rejectLate(new Error('it did not open within 90 seconds'))
+        rejectLate(new Error(t('phone.library.decodeTimeout')))
       }, 90_000)
     })
   ])

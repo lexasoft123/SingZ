@@ -22,6 +22,7 @@ import {
   type IosAudioInputLease
 } from '../ios-audio-input-session'
 import { log } from '../log'
+import { t } from '../i18n'
 
 const MAX_OBSERVATIONS = 512
 /** Essentially digital silence — far below any room, let alone any voice. A
@@ -329,7 +330,7 @@ export class TrainingMicrophone {
       return this.startAndroidCore(generation, clockNowMs, onError)
     if (this.deps.iosCore)
       return this.startIosCore(generation, clockNowMs, onError)
-    const error = 'Native audio input is unavailable on this device.'
+    const error = t('phone.training.micUnavailable')
     log('mic', `could not start · ${error}`, 'error')
     return { ok: false, kind: 'unavailable', error }
   }
@@ -371,7 +372,7 @@ export class TrainingMicrophone {
         if (generation !== this.generation || state.generation !== lease.generation) return
         if (state.state !== 'error') return
         log('mic', `stopped by the system · ${state.error ?? 'no reason given'}`, 'error')
-        onError(state.error || 'The microphone stopped. Tap Start to try again.')
+        onError(state.error || t('phone.training.micStopped'))
         void this.stop()
       })
       this.resetSignal()
@@ -398,7 +399,7 @@ export class TrainingMicrophone {
         ok: false,
         kind: /permission/i.test(message) ? 'permission-denied' : 'unavailable',
         error: /permission/i.test(message)
-          ? 'Microphone access is off. Allow it in Settings, then tap Start again.'
+          ? t('phone.training.micPermissionOff')
           : message
       }
     } finally {
@@ -448,7 +449,7 @@ export class TrainingMicrophone {
       }
       if (state.generation !== leaseGeneration) return
       log('mic', `stopped by the system · ${state.error ?? 'no reason given'}`, 'error')
-      onError(state.error || 'The microphone stopped. Tap Start to try again.')
+      onError(state.error || t('phone.training.micStopped'))
       void this.stop()
     }
     try {
@@ -512,7 +513,7 @@ export class TrainingMicrophone {
         ok: false,
         kind: /permission/i.test(startError) ? 'permission-denied' : 'unavailable',
         error: /permission/i.test(startError)
-          ? 'Microphone access is off. Allow it in Settings, then tap Start again.'
+          ? t('phone.training.micPermissionOff')
           : startError
       }
     } finally {
@@ -645,10 +646,10 @@ export class TrainingMicrophone {
 }
 
 function cancelled(): TrainingMicResult {
-  return { ok: false, kind: 'interrupted', error: 'Microphone start was cancelled.' }
+  return { ok: false, kind: 'interrupted', error: t('phone.training.micStartCancelled') }
 }
 
 function cleanupMessage(error: unknown): string {
   const detail = error instanceof Error ? error.message : String(error)
-  return `The previous microphone session could not close cleanly: ${detail}. Tap Start to retry.`
+  return t('phone.training.micCleanupFailed', { detail })
 }

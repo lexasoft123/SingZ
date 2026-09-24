@@ -23,6 +23,8 @@
  * OLD grid until the new one lands. Both are right; they are different
  * questions. It is therefore not covered by this module's tests.
  */
+import { t } from '../i18n'
+
 export type SheetRowState =
   /** This detector is running right now, and the line is about IT. */
   | 'progress'
@@ -79,11 +81,11 @@ export function stemFormatLine(doc: {
   stemHashes?: Record<string, unknown>
 }): string {
   const names = Object.keys(doc.stemHashes ?? {})
-  if (names.length === 0) return doc.version >= 2 ? 'FLAC stems' : 'WAV stems'
+  if (names.length === 0) return doc.version >= 2 ? t('phone.player.songSheet.formatFlac') : t('phone.player.songSheet.formatWav')
   const flac = names.some((n) => n.endsWith('.flac'))
   const wav = names.some((n) => n.endsWith('.wav'))
-  if (flac && wav) return 'FLAC + WAV stems'
-  if (flac) return 'FLAC stems'
-  if (wav) return 'WAV stems'
-  return 'no stems'
+  if (flac && wav) return t('phone.player.songSheet.formatFlacWav')
+  if (flac) return t('phone.player.songSheet.formatFlac')
+  if (wav) return t('phone.player.songSheet.formatWav')
+  return t('phone.player.songSheet.formatNone')
 }

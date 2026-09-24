@@ -9,6 +9,7 @@ import type { ReadableStream as WebReadableStream } from 'node:stream/web'
 import { shell } from 'electron'
 import gdriveConfig from './gdrive-config'
 import { log } from './log'
+import { t } from '../shared/i18n'
 import {
   projectsRoot,
   refreshFileHash,
@@ -112,7 +113,7 @@ export const gdriveSignOut = (): void => writeTokens(null)
 
 /** Browser + loopback sign-in; resolves once Google redirects back. */
 export async function gdriveSignIn(): Promise<{ ok: true } | { ok: false; error: string }> {
-  if (!cfg) return { ok: false, error: 'Google Drive is not configured in this build' }
+  if (!cfg) return { ok: false, error: t('main.error.driveNotConfigured') }
   try {
     const verifier = randomBytes(32).toString('base64url')
     const challenge = createHash('sha256').update(verifier).digest('base64url')
@@ -122,16 +123,17 @@ export async function gdriveSignIn(): Promise<{ ok: true } | { ok: false; error:
         const server = createServer((req, res) => {
           const url = new URL(req.url ?? '/', 'http://127.0.0.1')
           const c = url.searchParams.get('code')
-          res.writeHead(200, { 'Content-Type': 'text/html' })
+          // charset: the page is translated now, and Firefox/Safari do not assume UTF-8
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
           res.end(
-            '<html><body style="font-family:sans-serif;padding:40px"><h3>SingZ is signed in</h3>' +
-              'You can close this tab and go back to the app.</body></html>'
+            `<html><head><meta charset="utf-8"></head><body style="font-family:sans-serif;padding:40px"><h3>${t('main.drive.signedInPageTitle')}</h3>` +
+              `${t('main.drive.signedInPageBody')}</body></html>`
           )
           const addr = server.address()
           const port = typeof addr === 'object' && addr ? addr.port : 0
           server.close()
           if (c) resolve({ code: c, redirect: `http://127.0.0.1:${port}` })
-          else reject(new Error('Google sign-in was cancelled'))
+          else reject(new Error(t('main.error.googleSignInCancelled')))
         })
         server.listen(0, '127.0.0.1', () => {
           const addr = server.address()
@@ -145,7 +147,7 @@ export async function gdriveSignIn(): Promise<{ ok: true } | { ok: false; error:
           void shell.openExternal(authUrl)
           setTimeout(() => {
             server.close()
-            reject(new Error('Google sign-in timed out'))
+            reject(new Error(t('main.error.googleSignInTimedOut')))
           }, 300000).unref()
         })
         server.on('error', reject)
@@ -168,7 +170,7 @@ export async function gdriveSignIn(): Promise<{ ok: true } | { ok: false; error:
       error_description?: string
     }
     if (!tok.access_token || !tok.refresh_token) {
-      return { ok: false, error: tok.error_description ?? 'Google did not issue tokens' }
+      return { ok: false, error: tok.error_description ?? t('main.error.googleNoTokens') }
     }
     writeTokens({
       access: tok.access_token,
@@ -508,7 +510,7 @@ async function adoptPublished(
       })
       f.name = dir
     }
-    onProgress?.(`Adding ${dir} from your phone…`, 0.02)
+    onProgress?.(t('main.sync.addingFromPhone', { dir }), 0.02)
     const tmp = join(root, `${ADOPTING_PREFIX}${f.id}`)
     try {
       // inside the try: a leftover a scanner still holds is this song's
@@ -912,7 +914,7 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
         continue
       }
 
-      onProgress?.(`Syncing ${dir}…`, i / projectDirs.length)
+      onProgress?.(t('main.sync.syncing', { dir }), i / projectDirs.length)
       const projId = folderId ?? (await ensureFolder(dir, singzId))
       const stemsParent =
         stemsId ?? (plan.upload.some((u) => u.where === 'stems') ? await ensureFolder('stems', projId) : undefined)
@@ -928,7 +930,7 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
           step.where === 'stems' ? 0 : step.name === 'project.json' ? 2 : 1
         const ordered = [...plan.upload].sort((a, b) => rank(a) - rank(b))
         for (const step of ordered) {
-          onProgress?.(`Uploading ${dir}/${step.name}…`, (i + 0.5) / projectDirs.length)
+          onProgress?.(t('main.sync.uploading', { file: `${dir}/${step.name}` }), (i + 0.5) / projectDirs.length)
           const parent = step.where === 'top' ? projId : (stemsParent as string)
           freshIds.set(step.name, await uploadFile(step.path, step.name, parent, step.existingId, step.mime))
           uploaded++
@@ -939,7 +941,7 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
         // hard-deleted: drive.file scope means these are all files this app
         // created, and Drive's trash keeps them recoverable for 30 days.
         for (const gone of plan.trash) {
-          onProgress?.(`Removing ${dir}/${gone.entry.name} from Drive…`, (i + 0.75) / projectDirs.length)
+          onProgress?.(t('main.sync.removing', { file: `${dir}/${gone.entry.name}` }), (i + 0.75) / projectDirs.length)
           await api(`/drive/v3/files/${gone.entry.id}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
@@ -975,7 +977,7 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
       // A phone's song that could not be taken in yet is not an orphan: it is
       // the only copy, and the phone may already have let go of its own.
       if (isPublished(f)) continue
-      onProgress?.(`Removing ${f.name} from Drive (renamed or deleted here)…`, 0.99)
+      onProgress?.(t('main.sync.removingGone', { name: f.name }), 0.99)
       await api(`/drive/v3/files/${f.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -997,7 +999,7 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
     const manifestMd5 = createHash('md5').update(manifest).digest('hex')
     const catFile = remoteTop.find((f) => f.name === 'catalog.json' && f.mimeType !== FOLDER)
     if (catFile?.md5Checksum !== manifestMd5) {
-      onProgress?.('Updating the phone catalog…', 0.995)
+      onProgress?.(t('main.sync.updatingCatalog'), 0.995)
       await uploadBytes(manifest, 'catalog.json', singzId, catFile?.id, 'application/json')
     }
 
@@ -1007,7 +1009,7 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
     if (outside.length) {
       syncLog('error', `${outside.length} project(s) outside ${root} were not synced: ${outside.join(', ')}`)
     }
-    onProgress?.('Drive is up to date', 1)
+    onProgress?.(t('main.sync.upToDate'), 1)
     syncLog(
       'run',
       `done — ${projectDirs.length} songs, ${uploaded} uploaded, ${unchanged} unchanged` +

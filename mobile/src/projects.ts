@@ -6,6 +6,7 @@ import { driveLocalFile, driveReadText } from './gdrive'
 import type { LyricsDoc, ProjectDoc } from './model'
 import { isCurrent } from './current'
 import { fmtBytes, fmtMs, log } from './log'
+import { t } from './i18n'
 import { customTracks, STEM_ORDER_ALL } from './model'
 import { mobileMetronomePersistence } from './playback/metronome-persistence'
 import type { MetronomeProjectRef } from './playback/metronome-persistence'
@@ -535,17 +536,16 @@ export async function loadProject(
     releaseStems(stems)
     stems.length = 0
     throw new Error(
-      `This song needs about ${(bytes / 1e9).toFixed(1)} GB of memory to play — too long ` +
-        'for this phone. Try a shorter song, or split it up on the computer.'
+      t('phone.library.songTooBigToPlay', { gb: (bytes / 1e9).toFixed(1) })
     )
   }
   for (let i = 0; i < ids.length; i++) {
     const id = ids[i]
-    onStep(`Fetching ${id} · ${i + 1}/${total}`, i / total)
+    onStep(t('phone.library.fetchingStep', { id, i: i + 1, n: total }), i / total)
     await crumb?.(`fetching ${id}`)
     const want = doc?.stemHashes?.[`${id}.${entry.stems[id]}`]
     const path = await fetchFile(`stems/${id}.${entry.stems[id]}`, want?.md5, want?.size)
-    onStep(`Decoding ${id} · ${i + 1}/${total}`, (i + 0.5) / total)
+    onStep(t('phone.library.decodingStep', { id, i: i + 1, n: total }), (i + 0.5) / total)
     await crumb?.(`decoding ${id}`)
     // file:// matters: audio-api's Android RELEASE builds treat bare strings
     // as APK asset names ("Could not read asset bytes"); the scheme routes
@@ -589,32 +589,29 @@ export async function loadProject(
   // silently skipping one makes the mixer claim that it is playing the saved
   // arrangement while audio is missing. Loading is therefore all-or-fail.
   for (let i = 0; i < added.length; i++) {
-    const t = added[i]
+    const track = added[i]
     const at = ids.length + i
-    onStep(`Fetching ${t.label} · ${at + 1}/${total}`, at / total)
-    await crumb?.(`fetching ${t.id}`)
+    onStep(t('phone.library.fetchingStep', { id: track.label, i: at + 1, n: total }), at / total)
+    await crumb?.(`fetching ${track.id}`)
     try {
-      const wantTrack = doc?.stemHashes?.[t.file.slice('stems/'.length)]
-      const path = await fetchFile(t.file, wantTrack?.md5, wantTrack?.size)
-      onStep(`Decoding ${t.label} · ${at + 1}/${total}`, (at + 0.5) / total)
-      await crumb?.(`decoding ${t.id}`)
+      const wantTrack = doc?.stemHashes?.[track.file.slice('stems/'.length)]
+      const path = await fetchFile(track.file, wantTrack?.md5, wantTrack?.size)
+      onStep(t('phone.library.decodingStep', { id: track.label, i: at + 1, n: total }), (at + 0.5) / total)
+      await crumb?.(`decoding ${track.id}`)
       const buffer = await decodeAudioData(`file://${path}`, sampleRate)
       stems.push({
-        id: t.id,
+        id: track.id,
         buffer,
-        label: t.label,
-        color: t.color,
+        label: track.label,
+        color: track.color,
         custom: true
       })
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err)
-      log('song', `could not load added track "${t.label}" — ${detail}`, 'error')
+      log('song', `could not load added track "${track.label}" — ${detail}`, 'error')
       releaseStems(stems)
       stems.length = 0
-      throw new Error(
-        `Could not load the added track "${t.label}". The song was not opened because ` +
-          `every saved lane must be available. ${detail}`
-      )
+      throw new Error(t('phone.library.addedTrackLoadFailed', { label: track.label, detail }))
     }
     if (decodedBytes(stems) > MAX_DECODED_BYTES) tooBig(decodedBytes(stems))
   }
@@ -624,11 +621,11 @@ export async function loadProject(
       `${fmtMs(Date.now() - openedAt)} · ${fmtBytes(decodedBytes(stems))} decoded · ` +
       `decode ${spent.join(', ')}`
   )
-  onStep('Lyrics…', 0.98)
+  onStep(t('phone.library.lyricsStep'), 0.98)
   await crumb?.('lyrics')
   let lyrics: LyricsDoc | null = null
   if (entry.hasLyrics) {
-    onStep('Fetching lyrics…', 0.99)
+    onStep(t('phone.library.fetchingLyricsStep'), 0.99)
     try {
       lyrics = JSON.parse(await readText('lyrics.json', doc?.lyricsHash?.md5)) as LyricsDoc
     } catch {

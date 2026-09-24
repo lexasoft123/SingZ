@@ -1,5 +1,6 @@
 import { NativeModules } from 'react-native';
 import type { ProjectDoc } from './model';
+import { t } from './i18n';
 
 /** The narrow file surface needed by the shared project.json transaction. */
 export interface ProjectDocumentApi {
@@ -57,7 +58,7 @@ export function mutateProjectDocument(
         'project.json',
         JSON.stringify(next, null, 2),
       );
-      if (!written) throw new Error('Project document was not written.');
+      if (!written) throw new Error(t('phone.library.projectDocumentNotWritten'));
       return next;
     });
   const tail = operation.then(

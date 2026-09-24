@@ -113,7 +113,7 @@ class SplitService : Service() {
           // no cleanup. The flag alone suffices then (re-asserted from the
           // listener once the engine runs).
           if (SingzCore.isLoaded()) SingzCore.cancelSplit()
-          postNotification("Cancelling…", 0, 0, indeterminate = true)
+          postNotification(getString(R.string.split_cancelling), 0, 0, indeterminate = true)
         } else {
           stopSelf() // a stray cancel must not leave a started service idling
         }
@@ -195,7 +195,7 @@ class SplitService : Service() {
           JobStore.STATE_DECODING, src, projectDir, model,
           0, 0, 0, null, System.currentTimeMillis()))
         armWatchdog(firstCapMs)
-        postNotification("Reading the song…", 0, 0, indeterminate = true)
+        postNotification(getString(R.string.split_reading), 0, 0, indeterminate = true)
         sendProgress("decode", 0f, 0, 0)
         var lastNotified = -1f
         val decoded = AudioDecode.decodeToRawF32Stereo(src, mixFile, { cancelRequested }) { frac ->
@@ -207,7 +207,7 @@ class SplitService : Service() {
           sendProgress("decode", frac, 0, 0)
           if (frac - lastNotified >= 0.05f) {
             lastNotified = frac
-            postNotification("Reading the song…", (frac * 100).toInt(), 100, indeterminate = false)
+            postNotification(getString(R.string.split_reading), (frac * 100).toInt(), 100, indeterminate = false)
           }
         }
         srcRate = decoded.sampleRate
@@ -228,7 +228,7 @@ class SplitService : Service() {
           if (frac >= 1f || now - lastStageSentAt > 250) {
             lastStageSentAt = now
             sendProgress(stage, frac, 0, 0)
-            if (stage == "load-model") postNotification("Warming up…", 0, 0, indeterminate = true)
+            if (stage == "load-model") postNotification(getString(R.string.split_warming), 0, 0, indeterminate = true)
           }
         }
         override fun onChunk(done: Long, total: Long) {
@@ -443,10 +443,10 @@ class SplitService : Service() {
   private fun startInForeground() {
     val nm = getSystemService(NotificationManager::class.java)
     nm.createNotificationChannel(
-      NotificationChannel(CHANNEL_ID, "Splitting", NotificationManager.IMPORTANCE_LOW).apply {
-        description = "Progress while a song is split into stems"
+      NotificationChannel(CHANNEL_ID, getString(R.string.split_channel_name), NotificationManager.IMPORTANCE_LOW).apply {
+        description = getString(R.string.split_channel_desc)
       })
-    val notif = buildNotification("Getting ready…", 0, 0, indeterminate = true)
+    val notif = buildNotification(getString(R.string.split_getting_ready), 0, 0, indeterminate = true)
     when {
       Build.VERSION.SDK_INT >= 35 ->
         startForeground(NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING)
@@ -462,12 +462,12 @@ class SplitService : Service() {
       val median = chunkDurations.sorted()[chunkDurations.size / 2]
       val secs = (median * (total - done)) / 1000
       eta = when {
-        secs >= 90 -> " · about ${(secs + 30) / 60} min left"
-        secs >= 5 -> " · about $secs sec left"
+        secs >= 90 -> getString(R.string.split_eta_min, ((secs + 30) / 60).toInt())
+        secs >= 5 -> getString(R.string.split_eta_sec, secs.toInt())
         else -> ""
       }
     }
-    return "Chunk $done of $total$eta"
+    return getString(R.string.split_chunk, done.toInt(), total.toInt(), eta)
   }
 
   private fun postNotification(text: String, done: Int, total: Int, indeterminate: Boolean) {
@@ -486,12 +486,12 @@ class SplitService : Service() {
       this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
     return Notification.Builder(this, CHANNEL_ID)
       .setSmallIcon(R.drawable.ic_stat_split)
-      .setContentTitle("Splitting into stems")
+      .setContentTitle(getString(R.string.split_title))
       .setContentText(text)
       .setOngoing(true)
       .setOnlyAlertOnce(true)
       .setContentIntent(contentIntent)
-      .addAction(Notification.Action.Builder(null, "Cancel", cancelIntent).build())
+      .addAction(Notification.Action.Builder(null, getString(R.string.split_cancel), cancelIntent).build())
       .apply {
         if (total > 0) setProgress(total, done, false)
         else if (indeterminate) setProgress(0, 0, true)

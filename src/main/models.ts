@@ -5,6 +5,7 @@ import { access, mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/prom
 import { join } from 'node:path'
 import type { ModelId, ModelInfo, ModelsProgress } from '../shared/types'
 import { log } from './log'
+import { t } from '../shared/i18n'
 import { onChildSettled } from './child-exit'
 import { VOCAL_MODEL_FILE } from './vocal-model'
 
@@ -230,7 +231,7 @@ export async function downloadFile(
   try {
     log('models', `downloading ${url}`)
     const res = await net.fetch(url, { signal })
-    if (!res.ok || !res.body) throw new Error(`download failed (HTTP ${res.status})`)
+    if (!res.ok || !res.body) throw new Error(t('main.error.downloadFailedHttp', { status: res.status }))
     const declared = Number(res.headers.get('content-length')) || 0
     const total = declared || approxBytes
     const out = createWriteStream(part)
@@ -255,9 +256,9 @@ export async function downloadFile(
     // fall back to.
     if (declared && got !== declared) {
       throw new Error(
-        `the download ${got < declared ? 'stopped short' : 'overran'} — ${(got / 1e6).toFixed(
-          1
-        )} MB of the ${(declared / 1e6).toFixed(1)} MB the server promised. Try again.`
+        got < declared
+          ? t('main.error.downloadStoppedShort', { got: (got / 1e6).toFixed(1), total: (declared / 1e6).toFixed(1) })
+          : t('main.error.downloadOverran', { got: (got / 1e6).toFixed(1), total: (declared / 1e6).toFixed(1) })
       )
     }
     await rename(part, dest)
@@ -293,8 +294,8 @@ function untar(archive: string, destDir: string): Promise<void> {
 
 interface RegistryEntry {
   id: ModelId
-  label: string
-  description: string
+  label: () => string
+  description: () => string
   sizeMb: number
   kind: 'file' | 'archive'
   file?: string
@@ -504,13 +505,13 @@ export function qwenMmprojPath(): string {
 const REGISTRY: RegistryEntry[] = [
   {
     id: 'gpu-splitter',
-    label: 'Stem splitter · AI',
-    description:
+    label: () => t('main.model.splitter.label'),
+    description: () =>
       process.platform === 'win32'
-        ? 'Splits songs into seven tracks — lead and backing vocals, drums, bass, guitar, piano and the rest — on your GPU when it can (GeForce RTX 30xx or newer; CPU otherwise).'
+        ? t('main.model.splitter.descriptionWin')
         : process.arch === 'arm64'
-          ? 'Splits songs into seven tracks — lead and backing vocals, drums, bass, guitar, piano and the rest — in seconds on the Apple Silicon GPU.'
-          : 'Splits songs into seven tracks — lead and backing vocals, drums, bass, guitar, piano and the rest.',
+          ? t('main.model.splitter.descriptionAppleSilicon')
+          : t('main.model.splitter.descriptionGeneric'),
     // Measured on the tarballs CI actually built (run 35390756585, the first
     // build carrying the vocal model): 344/336/273 MiB → the decimal MB this
     // field is in. Was 296/272/259 before the model moved inside the pack.
@@ -527,9 +528,8 @@ const REGISTRY: RegistryEntry[] = [
   },
   {
     id: 'qwen-asr',
-    label: 'Speech model · lyrics',
-    description:
-      'Hears the vocals: transcribes lyrics when none are online, and checks & aligns downloaded lyrics against what is actually sung. Trained on singing, in 30 languages, with its own word aligner.',
+    label: () => t('main.model.qwenAsr.label'),
+    description: () => t('main.model.qwenAsr.description'),
     sizeMb: qwenModelMb(),
     kind: 'file',
     parts: QWEN_PARTS,
@@ -537,9 +537,8 @@ const REGISTRY: RegistryEntry[] = [
   },
   {
     id: 'aligner',
-    label: 'Precise word aligner',
-    description:
-      'Snaps every lyric word to the exact moment it is sung — the sharpest karaoke timing, in 1,100+ languages. Runs through the stem splitter.',
+    label: () => t('main.model.aligner.label'),
+    description: () => t('main.model.aligner.description'),
     sizeMb: 1200,
     kind: 'file',
     file: join('torch-home', 'hub', 'checkpoints', 'model.pt'),
@@ -549,9 +548,8 @@ const REGISTRY: RegistryEntry[] = [
   },
   {
     id: 'aligner',
-    label: 'Precise word aligner',
-    description:
-      'Snaps every lyric word to the exact moment it is sung — the sharpest karaoke timing, in 1,100+ languages. Runs through the stem splitter.',
+    label: () => t('main.model.aligner.label'),
+    description: () => t('main.model.aligner.description'),
     sizeMb: 1263,
     kind: 'file',
     file: 'mms-fa.onnx',
@@ -605,9 +603,7 @@ export async function swapInVerifiedPack(
     if (!(await verify(incoming))) {
       // Retrying fetches the same pack, so do not ask for that. The reason —
       // truncated, or older than this build requires — is in the log.
-      throw new Error(
-        'The downloaded stem splitter is not one this version can use. Your installed splitter was left alone.'
-      )
+      throw new Error(t('main.error.splitterPackIncompatible'))
     }
     // Two renames on one filesystem: the window in which neither copy is in
     // place is as short as it can be made, and it is recoverable.
@@ -712,8 +708,8 @@ export class ModelManager {
     for (const entry of forThisPlatform()) {
       out.push({
         id: entry.id,
-        label: entry.label,
-        description: entry.description,
+        label: entry.label(),
+        description: entry.description(),
         sizeMb: entry.sizeMb,
         downloadMb: await this.downloadMb(entry),
         present: await this.present(entry),
@@ -738,7 +734,7 @@ export class ModelManager {
     onProgress: (p: ModelsProgress) => void,
     ids?: ModelId[]
   ): Promise<{ ok: true } | { ok: false; cancelled?: boolean; error: string }> {
-    if (this.abort) return { ok: false, error: 'A model download is already running.' }
+    if (this.abort) return { ok: false, error: t('main.error.modelDownloadAlreadyRunning') }
     this.abort = new AbortController()
     try {
       const all = await this.status()
@@ -803,7 +799,7 @@ export class ModelManager {
       const msg = err instanceof Error ? err.message : String(err)
       if (!cancelled) log('models', `install failed: ${msg}`, 'error')
       return cancelled
-        ? { ok: false, cancelled: true, error: 'Cancelled.' }
+        ? { ok: false, cancelled: true, error: t('main.error.cancelled') }
         : { ok: false, error: msg }
     } finally {
       this.abort = null

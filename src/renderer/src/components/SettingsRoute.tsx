@@ -6,6 +6,7 @@ import {
 } from '../audio/monitoring'
 import type { SettingsModalProps } from './SettingsModal'
 import type { ModuleLoader } from './RecoverableModule'
+import { t } from '../i18n'
 
 export type SettingsModuleLoader = ModuleLoader<SettingsModalProps>
 
@@ -242,10 +243,10 @@ export function createSettingsRoute(
 export function SettingsRouteFallback({ onClose }: { readonly onClose: () => void }): React.JSX.Element {
   return (
     <Modal onClose={onClose} cardClassName="settings-card settings-route-state">
-      <h2>Settings</h2>
-      <p role="status" aria-live="polite" aria-busy="true">Opening audio settings…</p>
+      <h2>{t('settings.title')}</h2>
+      <p role="status" aria-live="polite" aria-busy="true">{t('settings.route.opening')}</p>
       <div className="modal-actions">
-        <button type="button" className="pill ghost" onClick={onClose}>Close</button>
+        <button type="button" className="pill ghost" onClick={onClose}>{t('settings.action.close')}</button>
       </div>
     </Modal>
   )
@@ -261,13 +262,13 @@ export function SettingsRouteFailure({
   const safetyCopy = settingsLoadFailureSafetyCopy(safetyKind)
   return (
     <Modal onClose={onClose} cardClassName="settings-card settings-route-state">
-      <h2>Settings didn’t open</h2>
+      <h2>{t('settings.route.failedTitle')}</h2>
       <p role="alert">{safetyCopy}</p>
       <div className="modal-actions">
         <p className="fine warn" role="status">
-          Restart SingZ before trying to open Settings again.
+          {t('settings.route.restartHint')}
         </p>
-        <button type="button" className="pill ghost" onClick={onClose}>Close</button>
+        <button type="button" className="pill ghost" onClick={onClose}>{t('settings.action.close')}</button>
       </div>
     </Modal>
   )
@@ -276,15 +277,15 @@ export function SettingsRouteFailure({
 export function settingsLoadFailureSafetyCopy(safetyKind: AudioSafetyLeaseKind): string {
   switch (safetyKind) {
     case 'none':
-      return 'Audio settings could not be loaded. No Settings preview was started.'
+      return t('settings.route.failure.none')
     case 'app-shell-stop':
-      return 'Audio settings could not be loaded. Microphone or headphone audio is still owned; use the top-bar Stop control to release it.'
+      return t('settings.route.failure.appShellStop')
     case 'route-only':
-      return 'Audio settings could not be loaded. The output route still needs attention; after restarting SingZ, open Settings to finish or retry the route before starting audio.'
+      return t('settings.route.failure.routeOnly')
     case 'settings-preview':
-      return 'Audio settings could not be loaded. A Settings microphone preview still owns the device; restart SingZ before reopening Settings.'
+      return t('settings.route.failure.settingsPreview')
     case 'unknown':
-      return 'Audio settings could not be loaded while another audio owner is unresolved. Restart SingZ before reopening Settings.'
+      return t('settings.route.failure.unknown')
   }
 }
 
@@ -306,36 +307,36 @@ export function SettingsRuntimeFailure({
   const closeEnabled = safe || routePending
   return (
     <Modal onClose={closeEnabled ? onClose : () => undefined} cardClassName="settings-card settings-route-state">
-      <h2>{routePending || routeUnconfirmed ? 'Audio settings unavailable' : 'Audio settings stopped'}</h2>
+      <h2>{routePending || routeUnconfirmed ? t('settings.route.unavailableTitle') : t('settings.route.stoppedTitle')}</h2>
       {shutdown === 'stopping' ? (
         <p role="status" aria-live="assertive" aria-busy="true">
-          Confirming that native headphone monitoring has stopped…
+          {t('settings.route.confirmingStopped')}
         </p>
       ) : shutdown === 'unsafe' ? (
         <p role="alert">
-          Microphone or native monitoring cleanup is still unconfirmed. Retry audio stop to release its exact owner. If cleanup still cannot be confirmed, quit SingZ before disconnecting devices.
+          {t('settings.route.unsafeCleanup')}
         </p>
       ) : routePending ? (
         <p role="status" aria-live="polite">
-          An audio route change is still in progress. It cannot be cancelled safely here; wait for it to finish before reopening Settings.
+          {t('settings.route.pendingMessage')}
         </p>
       ) : routeUnconfirmed ? (
         <p role="alert">
-          The physical playback route is still unconfirmed. Retry settings to choose or confirm the output. Audio starts stay blocked until that route is repaired.
+          {t('settings.route.unconfirmedMessage')}
         </p>
       ) : (
         <p role="status" aria-live="polite">
-          Native headphone monitoring is off. You can retry audio settings or close this window.
+          {t('settings.route.offMessage')}
         </p>
       )}
       <div className="modal-actions">
         {shutdown === 'unsafe' && (
-          <button type="button" className="pill primary" onClick={onRetryStop}>Retry audio stop</button>
+          <button type="button" className="pill primary" onClick={onRetryStop}>{t('settings.route.retryStopButton')}</button>
         )}
         {!routePending && (
-          <button type="button" className="pill primary" onClick={onRetry} disabled={!retrySettingsEnabled}>Retry settings</button>
+          <button type="button" className="pill primary" onClick={onRetry} disabled={!retrySettingsEnabled}>{t('settings.route.retrySettingsButton')}</button>
         )}
-        <button type="button" className="pill ghost" onClick={onClose} disabled={!closeEnabled}>Close</button>
+        <button type="button" className="pill ghost" onClick={onClose} disabled={!closeEnabled}>{t('settings.action.close')}</button>
       </div>
     </Modal>
   )

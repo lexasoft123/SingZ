@@ -3,6 +3,7 @@ import { basename, extname, resolve } from 'node:path'
 import type { RegisterResult } from '../shared/types'
 import { allowFile, allowRoot } from './media'
 import { detectProject } from './projects'
+import { t } from '../shared/i18n'
 
 export const AUDIO_EXT = new Set([
   '.mp3',
@@ -31,10 +32,10 @@ export async function registerSource(raw: string): Promise<RegisterResult> {
     const full = resolve(String(raw))
     const ext = extname(full).toLowerCase()
     if (!AUDIO_EXT.has(ext)) {
-      return { ok: false, error: `Can't use ${ext || 'that file'} — drop an MP3, WAV, FLAC or M4A.` }
+      return { ok: false, error: t('main.error.cantUseFileDrop', { ext: ext || t('main.error.thatFile') }) }
     }
     const info = await stat(full)
-    if (!info.isFile()) return { ok: false, error: 'That is not a file.' }
+    if (!info.isFile()) return { ok: false, error: t('main.error.notAFile') }
     allowFile(full)
     const project = await detectProject(full)
     if (project) allowRoot(project.dir)
@@ -46,7 +47,7 @@ export async function registerSource(raw: string): Promise<RegisterResult> {
       project: project ?? undefined
     }
   } catch {
-    return { ok: false, error: 'Could not read that file.' }
+    return { ok: false, error: t('main.error.couldNotReadFile') }
   }
 }
 
@@ -63,13 +64,13 @@ export async function registerTrack(
     const full = resolve(String(raw))
     const ext = extname(full).toLowerCase()
     if (!AUDIO_EXT.has(ext)) {
-      return { ok: false, error: `Can't use ${ext || 'that file'} — pick an MP3, WAV, FLAC or M4A.` }
+      return { ok: false, error: t('main.error.cantUseFilePick', { ext: ext || t('main.error.thatFile') }) }
     }
     const info = await stat(full)
-    if (!info.isFile()) return { ok: false, error: 'That is not a file.' }
+    if (!info.isFile()) return { ok: false, error: t('main.error.notAFile') }
     allowFile(full)
     return { ok: true, path: full, name: basename(full, ext), size: info.size }
   } catch {
-    return { ok: false, error: 'Could not read that file.' }
+    return { ok: false, error: t('main.error.couldNotReadFile') }
   }
 }

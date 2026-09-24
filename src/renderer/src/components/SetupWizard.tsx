@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import type { ModelId, ModelInfo } from '../../../shared/types'
 import { Modal } from '@singz/ui'
+import { t } from '../i18n'
 
 interface Props {
   models: ModelInfo[]
@@ -81,10 +82,9 @@ export default function SetupWizard({ models: initial, origin, focusModel, notic
 
   return (
     <Modal onClose={onClose} cardClassName="wizard" persistent>
-        <h2>{origin === 'auto' ? 'Setting up SingZ' : 'AI models'}</h2>
+        <h2>{origin === 'auto' ? t('settings.wizard.settingUpTitle') : t('settings.wizard.aiModelsTitle')}</h2>
         <p>
-          SingZ runs its AI locally. Models download once into a shared folder and are reused for
-          every song.
+          {t('settings.wizard.intro')}
         </p>
         {notice && (
           <p className="wiz-notice" role="status" data-testid="wiz-notice">
@@ -108,15 +108,15 @@ export default function SetupWizard({ models: initial, origin, focusModel, notic
                   <span className="wiz-name">{m.label}</span>
                   {m.present && !isRunning ? (
                     <span className="wiz-installed">
-                      <span className="wiz-size ok">installed ✓</span>
+                      <span className="wiz-size ok">{t('settings.wizard.installedBadge')}</span>
                       <button
                         type="button"
                         className="pill ghost small"
-                        title="Download and install this again — fixes an install that exists but won't run"
+                        title={t('settings.wizard.reinstallTitle')}
                         disabled={busy}
                         onClick={() => void download(targets)}
                       >
-                        Reinstall
+                        {t('settings.wizard.reinstallButton')}
                       </button>
                     </span>
                   ) : isRunning ? (
@@ -128,7 +128,7 @@ export default function SetupWizard({ models: initial, origin, focusModel, notic
                       disabled={busy}
                       onClick={() => void download(targets)}
                     >
-                      Get · {downloadMb} MB
+                      {t('settings.wizard.getButton', { mb: downloadMb })}
                     </button>
                   ) : (
                     <span className="wiz-size">{m.sizeMb} MB</span>
@@ -147,12 +147,12 @@ export default function SetupWizard({ models: initial, origin, focusModel, notic
         {isWin && engineMode && (
           <div className="wiz-engine">
             <div className="wiz-head">
-              <span className="wiz-name">Splitting engine</span>
+              <span className="wiz-name">{t('settings.wizard.engineLabel')}</span>
               <span className="mode-seg">
                 <button
                   type="button"
                   className={engineMode.mode === 'auto' ? 'on' : ''}
-                  title="Try the graphics card first, fall back to the processor if it misbehaves"
+                  title={t('settings.wizard.gpuTitle')}
                   onClick={() => void chooseMode('auto')}
                 >
                   GPU
@@ -160,7 +160,7 @@ export default function SetupWizard({ models: initial, origin, focusModel, notic
                 <button
                   type="button"
                   className={engineMode.mode === 'cpu' ? 'on' : ''}
-                  title="Split on the processor only"
+                  title={t('settings.wizard.cpuTitle')}
                   onClick={() => void chooseMode('cpu')}
                 >
                   CPU
@@ -170,9 +170,9 @@ export default function SetupWizard({ models: initial, origin, focusModel, notic
             <p className="wiz-desc">
               {engineMode.mode === 'cpu'
                 ? engineMode.reason && engineMode.reason !== 'chosen in the model manager'
-                  ? `The graphics card was turned off automatically (${engineMode.reason}) — pick GPU to try it again.`
-                  : 'Splits use the processor only.'
-                : 'Splits try the graphics card first and fall back to the processor if it misbehaves.'}
+                  ? t('settings.wizard.gpuAutoOff', { reason: engineMode.reason })
+                  : t('settings.wizard.cpuOnly')
+                : t('settings.wizard.autoDescription')}
             </p>
           </div>
         )}
@@ -180,7 +180,7 @@ export default function SetupWizard({ models: initial, origin, focusModel, notic
         <div className="modal-actions">
           {error && (
             <button type="button" className="pill primary" onClick={() => void download()}>
-              Try again
+              {t('settings.wizard.tryAgainButton')}
             </button>
           )}
           <button
@@ -197,7 +197,7 @@ export default function SetupWizard({ models: initial, origin, focusModel, notic
               onClose()
             }}
           >
-            {origin === 'auto' && !requiredDone ? 'Skip for now' : 'Close'}
+            {origin === 'auto' && !requiredDone ? t('settings.wizard.skipButton') : t('settings.action.close')}
           </button>
         </div>
     </Modal>

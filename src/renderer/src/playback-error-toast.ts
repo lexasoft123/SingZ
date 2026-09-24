@@ -1,4 +1,5 @@
 import type { EnginePlaybackError } from './audio/engine'
+import { t } from './i18n'
 
 export interface PlaybackErrorToast {
   source: 'engine-playback'
@@ -9,6 +10,6 @@ export interface PlaybackErrorToast {
  * can clear precisely this toast without touching an unrelated app error. */
 export function playbackErrorToast(error: EnginePlaybackError | null): PlaybackErrorToast | null {
   return error
-    ? { source: 'engine-playback', message: `Playback could not start: ${error.message}` }
+    ? { source: 'engine-playback', message: t('library.playbackErrorToast.couldNotStart', { message: error.message }) }
     : null
 }
