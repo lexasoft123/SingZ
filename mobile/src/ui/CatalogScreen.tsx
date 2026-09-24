@@ -1683,27 +1683,31 @@ export default function CatalogScreen({
       setDriveCopies(new Set())
       return
     }
+    // The phone library's own rows only: switching from Drive or a picked
+    // folder leaves that list on screen until the phone's lands with its root.
+    if (root?.kind !== 'documents') return
     let alive = true
     void (async () => {
       const signedIn = await driveSignedIn().catch(() => false)
-      // phone rows only: switching from Drive leaves its rows on screen a moment
-      const all = (projects ?? []).filter(p => p.source !== 'gdrive')
+      const all = projects ?? []
+      const split = (p: ProjectEntry): boolean => Object.keys(p.stems).length > 0
       // a song mid-move is never a copy: its OWN folder in the library
       // matches it, and it is still here to be finished
       const midMove = await moveRecords().catch(() => ({}) as Record<string, unknown>)
-      let dismissed: string[] = []
-      try {
-        dismissed = JSON.parse((await getStoredText(DRIVE_OFFER_DISMISSED)) || '[]') as string[]
-      } catch {
-        dismissed = []
+      const readDismissed = async (): Promise<string[]> => {
+        try {
+          return JSON.parse((await getStoredText(DRIVE_OFFER_DISMISSED)) || '[]') as string[]
+        } catch {
+          return []
+        }
       }
+      let dismissed = await readDismissed()
       /* A copy of a song the Drive library already has (a folder copied in
          from a computer) is not offered — it would only go up as "(phone)" —
          and its card says why it is in both lists. */
       const decide = (listing: ProjectEntry[] | null): void => {
         if (!alive) return
         const inDrive = new Set((listing ?? []).map(e => stemSignature(e.doc)).filter(Boolean))
-        const split = (p: ProjectEntry): boolean => Object.keys(p.stems).length > 0
         const copy = (p: ProjectEntry): boolean =>
           split(p) && inDrive.has(stemSignature(p.doc)) && !(p.dir in midMove)
         const movable = all.filter(p => split(p) && !copy(p))
@@ -1725,22 +1729,26 @@ export default function CatalogScreen({
           total: all.length
         })
       }
-      // what the phone already knows, at once and with no network...
-      decide(await driveStoredProjects().catch(() => null))
+      // What the phone already knows, at once and with no network — nothing
+      // when signed out (a session that expired keeps its saved listing, and
+      // there is no library to be "also in")...
+      decide(signedIn ? await driveStoredProjects().catch(() => null) : null)
       // ...then what Drive says now. "Also in Google Drive" is a claim about
       // the library, and nothing else lists it from this tab: a song deleted
       // there must not keep a badge that invites deleting the last copy here.
-      // The listing is time-bound (a look within minutes costs nothing), a
-      // running batch keeps its own, and offline the saved one stands.
-      if (signedIn && !batchRunningRef.current) {
+      // Asked only when a song here could carry that badge; time-bound (a look
+      // within minutes costs nothing); a running batch keeps its own; offline
+      // the saved one stands.
+      if (alive && signedIn && !batchRunningRef.current && all.some(split)) {
         const fresh = await driveListProjects().catch(() => null)
+        dismissed = await readDismissed() // "Not now" may have come meanwhile
         if (fresh) decide(fresh)
       }
     })()
     return () => {
       alive = false
     }
-  }, [active, mode, projects])
+  }, [active, mode, projects, root])
 
   /* A song is here OR in the Drive library, never both. A move cut off after
      its song reached the library but before the phone let go is finished on

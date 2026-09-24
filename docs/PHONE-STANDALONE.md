@@ -2286,9 +2286,9 @@ listings finished LAST was kept, on screen and on disk.
   of the app, and opens from its downloaded copy; the other stays on the phone,
   is offered again, and goes up with the next "Add all" once the signal is back).
   Every variant also seeds a phone copy of the desktop's own song: left out of the
-  offer and marked "Also in Google Drive" before the batch (in the default
-  variant only the phone library's own look at Drive can know it), still there
-  and marked after, and taken off the device at the end.
+  offer and marked "Also in Google Drive" before the batch (in the default and
+  cut variants only the phone library's own look at Drive can know it), still
+  there and marked after, and taken off the device at the end.
   Each variant was shown to fail against the defect it guards. Two
   sample songs (5.9 MB, nine files each) moved in a few seconds; the offer named
   both and was gone after; a second "Add all" mid-batch was refused; the moved

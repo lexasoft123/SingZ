@@ -600,10 +600,21 @@ async function driveTab(ev, dir) {
       check('the song that stayed is offered again', offered)
       const rest = await cdp.settle('__test.moveAllToDrive()', 5 * 60_000)
       check(
-        'back online, the next "Add all" takes it',
-        JSON.stringify((rest?.moved || []).map((m) => m.dir)) === JSON.stringify([kept]) && !rest.stopped,
+        'back online, the next "Add all" takes it — and only it',
+        JSON.stringify((rest?.moved || []).map((m) => m.dir)) === JSON.stringify([kept]) &&
+          !rest.stopped &&
+          (rest?.skipped || []).length === 0,
         JSON.stringify(rest)
       )
+      let still = false
+      for (let i = 0; i < 20 && !still; i++) {
+        await sleep(500)
+        still =
+          (await ev(
+            `(__test.projects || []).includes(${JSON.stringify(COPY)}) && (__test.driveCopies || []).includes(${JSON.stringify(COPY)})`
+          )) === true
+      }
+      check('the copy stays, still marked "Also in Google Drive"', still)
       folder = songFolder(SONG)
       const tree = folder ? H.treeOf(store, folder.id) : new Map()
       check(
