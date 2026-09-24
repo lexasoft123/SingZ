@@ -169,5 +169,17 @@ export const training: Translation<typeof en> = {
   'phone.training.kindInterval': '音程',
   'phone.training.kindChordTone': '和弦音',
   'phone.training.kindScaleDegree': '音级',
-  'phone.training.roleOfChord': '{chord} 的{role}'
+  'phone.training.roleOfChord': '{chord} 的{role}',
+
+  // ── words drawn by the kit's ReferenceControls / PitchMeter (labels prop) ──
+  'phone.training.kit.referenceSound': '参考音',
+  'phone.training.kit.pitchWindow': '音准范围',
+  'phone.training.kit.referenceVolume': '参考音音量',
+  'phone.training.kit.percent': '{percent}%',
+  'phone.training.kit.decreaseVolume': '降低参考音音量',
+  'phone.training.kit.increaseVolume': '提高参考音音量',
+  'phone.training.kit.flat': '偏低',
+  'phone.training.kit.sharp': '偏高',
+  'phone.training.kit.youAreSinging': '你正在唱',
+  'phone.training.kit.holdProgress': '{instruction}。已完成 {percent}%。'
 }

@@ -185,5 +185,18 @@ export const training = {
   'phone.training.kindChordTone': 'chord tone',
   'phone.training.kindScaleDegree': 'scale degree',
   // a prompt label: {role} is root/third/fifth, {chord} e.g. "C major"
-  'phone.training.roleOfChord': '{role} of {chord}'
+  'phone.training.roleOfChord': '{role} of {chord}',
+
+  // ── words drawn by the kit's ReferenceControls / PitchMeter (labels prop) ──
+  // title, pitchWindow, flat, sharp and youAreSinging are shown upper-cased
+  'phone.training.kit.referenceSound': 'Reference sound',
+  'phone.training.kit.pitchWindow': 'Pitch window',
+  'phone.training.kit.referenceVolume': 'Reference sound volume',
+  'phone.training.kit.percent': '{percent} percent',
+  'phone.training.kit.decreaseVolume': 'Decrease reference volume',
+  'phone.training.kit.increaseVolume': 'Increase reference volume',
+  'phone.training.kit.flat': 'Flat',
+  'phone.training.kit.sharp': 'Sharp',
+  'phone.training.kit.youAreSinging': 'You are singing',
+  'phone.training.kit.holdProgress': '{instruction}. {percent} percent complete.'
 }

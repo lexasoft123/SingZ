@@ -175,5 +175,17 @@ export const training: Translation<typeof en> = {
   'phone.training.kindInterval': 'интервал',
   'phone.training.kindChordTone': 'аккорд-тон',
   'phone.training.kindScaleDegree': 'ступень',
-  'phone.training.roleOfChord': '{role} {chord}'
+  'phone.training.roleOfChord': '{role} {chord}',
+
+  // ── words drawn by the kit's ReferenceControls / PitchMeter (labels prop) ──
+  'phone.training.kit.referenceSound': 'Эталон',
+  'phone.training.kit.pitchWindow': 'Допуск',
+  'phone.training.kit.referenceVolume': 'Громкость эталона',
+  'phone.training.kit.percent': '{percent}%',
+  'phone.training.kit.decreaseVolume': 'Сделать эталон тише',
+  'phone.training.kit.increaseVolume': 'Сделать эталон громче',
+  'phone.training.kit.flat': 'Ниже',
+  'phone.training.kit.sharp': 'Выше',
+  'phone.training.kit.youAreSinging': 'Вы поёте',
+  'phone.training.kit.holdProgress': '{instruction}. Готово на {percent}%.'
 }

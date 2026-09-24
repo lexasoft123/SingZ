@@ -947,6 +947,14 @@ export function ReferenceSoundPanel({
     onReferenceVolumeChange(clampTrainingReferenceVolume(Math.round((volume + delta) * 100) / 100))
   }
   return <ReferenceControls
+    labels={{
+      title: t('phone.training.kit.referenceSound'),
+      pitchWindow: t('phone.training.kit.pitchWindow'),
+      volume: t('phone.training.kit.referenceVolume'),
+      volumeValue: (percent) => t('phone.training.kit.percent', { percent }),
+      decrease: t('phone.training.kit.decreaseVolume'),
+      increase: t('phone.training.kit.increaseVolume')
+    }}
     volumePercent={percentage}
     volumePosition={position}
     volumeMinPercent={TRAINING_REFERENCE_VOLUME_MIN * 100}
@@ -1207,6 +1215,12 @@ function SingleNotePitchMeter({ prompt, activeTarget, liveMidi, micHearing, lock
     ? `${instruction}. ${silent.reading}.`
     : `${t('phone.training.youAreSinging', { note: detected })} ${centsReading}. ${t('phone.training.holdProgress', { percent: Math.round(lock.progress * 100) })}`
   return <PitchMeter
+    labels={{
+      flat: t('phone.training.kit.flat'),
+      sharp: t('phone.training.kit.sharp'),
+      youAreSinging: t('phone.training.kit.youAreSinging'),
+      progress: (instruction, percent) => t('phone.training.kit.holdProgress', { instruction, percent })
+    }}
     cents={cents}
     pitchWindowCents={pitchWindowCents}
     detectedNote={detected}
