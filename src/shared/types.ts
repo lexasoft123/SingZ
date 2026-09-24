@@ -1193,6 +1193,15 @@ export type DesktopAudioInputStartResult =
       error: string
     }
 
+export interface LocaleState {
+  /** The saved preference (or a forced one — SINGZ_LANG, E2E runs). */
+  language: import('./i18n').Language
+  /** What the app speaks now. */
+  locale: import('./i18n').Locale
+  /** What `system` resolves to on this machine. */
+  systemLocale: import('./i18n').Locale
+}
+
 export interface SingzApi {
   /** True only when main was launched with SINGZ_E2E_HOOKS=1: the renderer
    * then publishes `window.__test` (engine, transport, metronome, training,
@@ -1446,6 +1455,9 @@ export interface SingzApi {
   readLogSession(name: string): Promise<string | null>
   /** App version for the titlebar ("dev" outside packaged builds). */
   appVersion(): Promise<string>
+  /** The UI language: what is saved, what it resolves to, and what `system` means here. */
+  getLocale(): Promise<LocaleState>
+  setLanguage(language: import('./i18n').Language): Promise<LocaleState>
   /** Main-owned app-level profile/history. Completion receipts never contain song paths or raw observations. */
   loadTrainingProgress(): Promise<{ok:true;progress:TrainingProgress}|{ok:false;error:string}>
   saveTrainingPreferences(preferences:TrainingPreferences):Promise<{ok:true;preferences:TrainingPreferences}|{ok:false;error:string}>

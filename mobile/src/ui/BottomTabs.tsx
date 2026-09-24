@@ -3,6 +3,7 @@ import type { BottomTabBarProps } from '@react-navigation/bottom-tabs'
 import { StyleSheet, View } from 'react-native'
 import { C, MicGlyph } from './bits'
 import { GlassTab, GlassTabBar } from '@singz/ui/native'
+import { t } from '../i18n'
 
 export type RootTab = 'songs' | 'training'
 export type RootTabParamList = {
@@ -10,10 +11,12 @@ export type RootTabParamList = {
   training: undefined
 }
 
-const tabMeta: Record<RootTab, { label: string; icon: 'songs' | 'train' }> = {
-  songs: { label: 'Songs', icon: 'songs' },
-  training: { label: 'Train', icon: 'train' }
-}
+// A function, not a module-level constant: `t()` must read the CURRENT
+// language, and the singer can switch it live without reloading the app.
+const tabMeta = (): Record<RootTab, { label: string; icon: 'songs' | 'train' }> => ({
+  songs: { label: t('phone.app.tab.songs'), icon: 'songs' },
+  training: { label: t('phone.app.tab.train'), icon: 'train' }
+})
 
 function isRootTab(name: string): name is RootTab {
   return name === 'songs' || name === 'training'
@@ -33,7 +36,7 @@ export default function BottomTabs({
           const tab = route.name
           const selected = state.index === index
           const options = descriptors[route.key].options
-          const fallback = tabMeta[tab]
+          const fallback = tabMeta()[tab]
           const label = typeof options.tabBarLabel === 'string' ? options.tabBarLabel : options.title ?? fallback.label
           return (
             <GlassTab

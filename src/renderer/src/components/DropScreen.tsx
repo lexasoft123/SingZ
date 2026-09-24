@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Modal } from '@singz/ui'
 import type { ProjectListItem, SyncStatus } from '../../../shared/types'
 import { TRACK_META } from '../model'
+import { t, tn, formatLocale } from '../i18n'
 
 const BAR_COLORS = [
   TRACK_META.vocals.color,
@@ -26,7 +27,7 @@ const TILE_HUES = [
 function fmtDate(iso: string): string {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return ''
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+  return d.toLocaleDateString(formatLocale(), { month: 'short', day: 'numeric' })
 }
 
 function fmtSize(bytes: number): string {
@@ -37,9 +38,9 @@ function fmtSize(bytes: number): string {
 
 /** Which cloud the library folder itself lives in (said once, not per card). */
 function folderCloud(root: string): string {
-  if (root.includes('Mobile Documents')) return 'Syncs across your devices via iCloud'
-  if (root.includes('OneDrive')) return 'Syncs across your devices via OneDrive'
-  return 'On this computer only'
+  if (root.includes('Mobile Documents')) return t('library.dropScreen.cloudIcloud')
+  if (root.includes('OneDrive')) return t('library.dropScreen.cloudOnedrive')
+  return t('library.dropScreen.cloudLocal')
 }
 
 interface Props {
@@ -129,17 +130,17 @@ export default function DropScreen({
 
   const onDrive = useCallback(async () => {
     if (!gdrive.signedIn) {
-      setDriveMsg('Finish signing in to Google in your browser…')
+      setDriveMsg(t('library.common.finishGoogleSignIn'))
       const res = await window.singz.gdriveSignIn()
       if (!res.ok) {
-        setDriveMsg(`Sign-in failed: ${res.error}`)
+        setDriveMsg(t('library.dropScreen.signInFailed', { error: res.error }))
         return
       }
       setDriveMsg(null)
     }
     setDriveMsg(null)
     const rep = await window.singz.gdriveSync()
-    setDriveMsg(rep.ok ? null : `Sync failed: ${rep.error ?? 'unknown error'}`)
+    setDriveMsg(rep.ok ? null : t('library.common.syncFailed', { error: rep.error ?? t('library.common.unknownError') }))
     refresh()
   }, [gdrive.signedIn, refresh])
 
@@ -170,7 +171,7 @@ export default function DropScreen({
     setDeleting(false)
     setDoomed(null)
     if (!res.ok) {
-      setDriveMsg(`Could not delete it: ${res.error}`)
+      setDriveMsg(t('library.dropScreen.deleteFailed', { error: res.error }))
       return
     }
     // the song is gone from this machine; whoever owns the open song decides
@@ -187,10 +188,10 @@ export default function DropScreen({
   const lastSyncLabel = useMemo(() => {
     if (!gdrive.lastSync) return null
     const mins = Math.round((Date.now() - gdrive.lastSync) / 60000)
-    if (mins < 1) return 'just now'
-    if (mins < 60) return `${mins} min ago`
+    if (mins < 1) return t('library.dropScreen.justNow')
+    if (mins < 60) return t('library.dropScreen.minAgo', { mins })
     const h = Math.round(mins / 60)
-    return h < 24 ? `${h} h ago` : fmtDate(new Date(gdrive.lastSync).toISOString())
+    return h < 24 ? t('library.dropScreen.hAgo', { h }) : fmtDate(new Date(gdrive.lastSync).toISOString())
   }, [gdrive.lastSync])
 
   /**
@@ -203,7 +204,7 @@ export default function DropScreen({
     if (!gdrive.configured) return null
     if (syncingDir && p.dir.startsWith(syncingDir)) {
       return (
-        <span className="lib-badge" title="Uploading to Google Drive">
+        <span className="lib-badge" title={t('library.dropScreen.uploadingTitle')}>
           <img src={gdriveIcon} alt="" /> ↑
         </span>
       )
@@ -216,18 +217,23 @@ export default function DropScreen({
     const waiting = !everSynced || gdrive.dirtyDirs?.includes(p.dir) || gdrive.sync?.dirty === -1
     if (!waiting) {
       return (
-        <span className="lib-badge" title="On Google Drive — up to date">
+        <span className="lib-badge" title={t('library.dropScreen.upToDateTitle')}>
           <img src={gdriveIcon} alt="" /> ✓
         </span>
       )
     }
     const stuck = gdrive.sync?.phase === 'blocked' || gdrive.sync?.lastErrorKind === 'fatal'
     return stuck ? (
-      <span className="lib-badge dim" title={`Not on Google Drive yet — ${gdrive.sync?.lastError ?? 'sync failed'}`}>
+      <span
+        className="lib-badge dim"
+        title={t('library.dropScreen.notOnDriveTitle', {
+          reason: gdrive.sync?.lastError ?? t('library.dropScreen.syncFailedFallback')
+        })}
+      >
         <img src={gdriveIcon} alt="" /> !
       </span>
     ) : (
-      <span className="lib-badge dim" title="Waiting to reach Google Drive">
+      <span className="lib-badge dim" title={t('library.dropScreen.waitingTitle')}>
         <img src={gdriveIcon} alt="" /> …
       </span>
     )
@@ -255,13 +261,13 @@ export default function DropScreen({
                 go on a small line instead of a five-row 52px heading */}
             {!songName || songName.length > 28 ? (
               <>
-                <h1>Reading…</h1>
+                <h1>{t('library.dropScreen.reading')}</h1>
                 {songName && <p className="drop-file">“{songName}”</p>}
               </>
             ) : (
-              <h1>Reading “{songName}”…</h1>
+              <h1>{t('library.dropScreen.readingSong', { song: songName })}</h1>
             )}
-            <p>{progress?.msg ?? 'Decoding audio and drawing the timeline.'}</p>
+            <p>{progress?.msg ?? t('library.dropScreen.decodingAudio')}</p>
             {progress && (
               <div className="open-rail" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress.frac * 100)}>
                 <div className="open-fill" style={{ width: `${Math.round(progress.frac * 100)}%` }} />
@@ -270,38 +276,32 @@ export default function DropScreen({
           </>
         ) : openName ? (
           <>
-            <h1>Your catalog.</h1>
-            <p>
-              Pick a project below, or drop another song anywhere in this window — “{openName}”
-              stays loaded until you do.
-            </p>
+            <h1>{t('library.dropScreen.yourCatalog')}</h1>
+            <p>{t('library.dropScreen.catalogHint', { song: openName })}</p>
             <button type="button" className="pill ghost browse" onClick={onBrowse}>
-              Browse files…
+              {t('library.common.browseFiles')}
             </button>
-            <span className="drop-hint">or press Esc to go back to your song</span>
+            <span className="drop-hint">{t('library.dropScreen.escHint')}</span>
           </>
         ) : (
           <>
-            <h1>Drop a song.</h1>
-            <p>
-              MP3, WAV, FLAC or M4A — SingZ splits it into vocals, drums, bass &amp; instruments
-              you can mute while you sing.
-            </p>
+            <h1>{t('library.dropScreen.dropASong')}</h1>
+            <p>{t('library.dropScreen.dropHintDesc')}</p>
             <button type="button" className="pill ghost browse" onClick={onBrowse}>
-              Browse files…
+              {t('library.common.browseFiles')}
             </button>
-            <span className="drop-hint">or drag it anywhere into this window</span>
+            <span className="drop-hint">{t('library.dropScreen.dragHint')}</span>
           </>
         )}
       </div>
       {!loading && projects.length > 0 && (
         <div className="lib">
           <div className="lib-head">
-            <span className="drop-projects-title">Your projects</span>
+            <span className="drop-projects-title">{t('library.common.yourProjects')}</span>
             {projects.length > 6 && (
               <input
                 className="lib-search"
-                placeholder="Search projects…"
+                placeholder={t('library.dropScreen.searchPlaceholder')}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
               />
@@ -317,11 +317,11 @@ export default function DropScreen({
                     : root.split('/').slice(-2).join(' › ')}
                 </span>
                 <span className="src-card-sub">
-                  Your library lives here · {folderCloud(root)}
+                  {t('library.dropScreen.libraryLivesHere', { cloud: folderCloud(root) })}
                 </span>
               </div>
               <button type="button" className="src-link" onClick={onManageStorage}>
-                Change…
+                {t('library.dropScreen.change')}
               </button>
             </div>
             {gdrive.configured && (
@@ -334,28 +334,30 @@ export default function DropScreen({
                   ) : syncProg ? (
                     <span className="src-card-value">
                       <img className="src-ic" src={gdriveIcon} alt="" />
-                      Copying to your Google Drive… {syncProg.msg}{' '}
-                      {Math.round(syncProg.frac * 100)}%
+                      {t('library.dropScreen.copyingToDrive', {
+                        msg: syncProg.msg,
+                        percent: Math.round(syncProg.frac * 100)
+                      })}
                     </span>
                   ) : gdrive.signedIn ? (
                     <span className="src-card-value">
                       <img className="src-ic" src={gdriveIcon} alt="" />
-                      A copy also lives in your Google Drive
+                      {t('library.dropScreen.driveCopyLives')}
                       <span className="src-dot ok" />
                       <span className="src-dim2">
-                        up to date{lastSyncLabel ? ` · ${lastSyncLabel}` : ''}
+                        {t('library.dropScreen.upToDate')}{lastSyncLabel ? ` · ${lastSyncLabel}` : ''}
                       </span>
                     </span>
                   ) : (
                     <span className="src-card-value dim">
                       <img className="src-ic" src={gdriveIcon} alt="" />
-                      Keep a copy in your Google Drive, so phones can stream it
+                      {t('library.dropScreen.keepCopyHint')}
                     </span>
                   )}
                 </div>
                 {gdrive.signedIn && (
                   <button type="button" className="src-link" onClick={onShowLog}>
-                    Sync log
+                    {t('library.dropScreen.syncLog')}
                   </button>
                 )}
                 <button
@@ -364,7 +366,7 @@ export default function DropScreen({
                   disabled={syncProg !== null}
                   onClick={() => void onDrive()}
                 >
-                  {gdrive.signedIn ? 'Sync now' : 'Connect…'}
+                  {gdrive.signedIn ? t('library.dropScreen.syncNow') : t('library.dropScreen.connect')}
                 </button>
               </div>
             )}
@@ -387,8 +389,10 @@ export default function DropScreen({
                   <span className="lib-body">
                     <span className="lib-name">{p.name}</span>
                     <span className="lib-meta">
-                      {p.stemCount > 0 ? `${p.stemCount} stems` : 'no stems'}
-                      {p.hasLyrics ? ' · lyrics' : ''}
+                      {p.stemCount > 0
+                        ? tn('library.dropScreen.stemsCount', p.stemCount)
+                        : t('library.dropScreen.noStems')}
+                      {p.hasLyrics ? ` · ${t('library.dropScreen.lyricsBadge')}` : ''}
                       {p.savedAt ? ` · ${fmtDate(p.savedAt)}` : ''}
                     </span>
                   </span>
@@ -397,8 +401,8 @@ export default function DropScreen({
                 <button
                   type="button"
                   className="lib-del"
-                  title={`Delete “${p.name}” from your library`}
-                  aria-label={`Delete ${p.name}`}
+                  title={t('library.dropScreen.deleteTitle', { name: p.name })}
+                  aria-label={t('library.dropScreen.deleteAria', { name: p.name })}
                   onClick={() => setDoomed(p)}
                 >
                   ✕
@@ -406,7 +410,7 @@ export default function DropScreen({
               </div>
             ))}
             {filtered.length === 0 && (
-              <p className="fine">Nothing matches “{query}”.</p>
+              <p className="fine">{t('library.dropScreen.noMatches', { query })}</p>
             )}
           </div>
         </div>
@@ -417,24 +421,23 @@ export default function DropScreen({
           onClose={() => setDoomed(null)}
           cardClassName="confirm-card"
           busy={deleting}
-          aria-label={`Delete ${doomed.name}?`}
+          aria-label={t('library.dropScreen.deleteHeading', { name: doomed.name })}
         >
-            <h2>Delete “{doomed.name}”?</h2>
+            <h2>{t('library.dropScreen.deleteHeading', { name: doomed.name })}</h2>
             <p>
-              This erases the whole project folder — {doomed.stemCount > 0
-                ? `${doomed.stemCount} stems`
-                : 'the song'}
-              {doomed.hasLyrics ? ', its lyrics' : ''}, your mix, transpose and Carry the line settings,{' '}
-              {fmtSize(doomed.bytes)} in all. It does not go to the Trash and it cannot be undone
-              here.
+              {t('library.dropScreen.eraseBody', {
+                stems: doomed.stemCount > 0
+                  ? tn('library.dropScreen.stemsCount', doomed.stemCount)
+                  : t('library.dropScreen.eraseStemsFallback'),
+                lyrics: doomed.hasLyrics ? t('library.dropScreen.eraseLyricsSuffix') : '',
+                size: fmtSize(doomed.bytes)
+              })}
             </p>
             <p className="fine">
-              {openName === doomed.name
-                ? 'This is the song you have open — it keeps playing until you load another one, but there is nothing left to save it into. '
-                : ''}
+              {openName === doomed.name ? t('library.dropScreen.openSongNote') : ''}
               {gdrive.signedIn
-                ? 'The copy in Google Drive moves to Drive’s trash on the next sync, where it is recoverable for 30 days — your phones stop listing it.'
-                : 'Splitting it again later means another run of the splitter.'}
+                ? t('library.dropScreen.driveTrashNote')
+                : t('library.dropScreen.resplitNote')}
             </p>
             <div className="storage-actions confirm-actions">
               <button
@@ -444,7 +447,7 @@ export default function DropScreen({
                 disabled={deleting}
                 onClick={() => setDoomed(null)}
               >
-                Keep it
+                {t('library.dropScreen.keepIt')}
               </button>
               <button
                 type="button"
@@ -452,7 +455,7 @@ export default function DropScreen({
                 disabled={deleting}
                 onClick={() => void confirmDelete()}
               >
-                {deleting ? 'Deleting…' : `Delete ${fmtSize(doomed.bytes)}`}
+                {deleting ? t('library.dropScreen.deleting') : t('library.dropScreen.deleteSize', { size: fmtSize(doomed.bytes) })}
               </button>
             </div>
         </Modal>

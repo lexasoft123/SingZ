@@ -4,6 +4,7 @@ import {
   RecoverableModule,
   type ModuleAttempts
 } from './RecoverableModule'
+import { t } from '../i18n'
 
 export type DropScreenRouteProps = ComponentProps<typeof DropScreenComponent>
 export type DropScreenModuleAttempts = ModuleAttempts<DropScreenRouteProps>
@@ -77,9 +78,9 @@ export function DropScreenRouteFallback(): React.JSX.Element {
   return (
     <main className="library-screen" aria-busy="true">
       <div className="library-empty">
-        <p className="eyebrow">Song library</p>
-        <h1>Opening your songs…</h1>
-        <p role="status" aria-live="polite">Loading the song library.</p>
+        <p className="eyebrow">{t('library.route.eyebrow')}</p>
+        <h1>{t('library.route.opening')}</h1>
+        <p role="status" aria-live="polite">{t('library.route.loadingStatus')}</p>
       </div>
     </main>
   )
@@ -95,17 +96,17 @@ export function DropScreenRouteFailure({
   return (
     <main className="library-screen">
       <div className="library-empty">
-        <p className="eyebrow">Song library</p>
-        <h1>Your song library didn’t open</h1>
-        <p role="alert">The library screen could not be loaded. Any open song and audio session remain unchanged.</p>
+        <p className="eyebrow">{t('library.route.eyebrow')}</p>
+        <h1>{t('library.route.didntOpenHeading')}</h1>
+        <p role="alert">{t('library.route.didntOpenBody')}</p>
         {onRetry ? (
-          <button type="button" className="pill primary" onClick={onRetry}>Retry</button>
+          <button type="button" className="pill primary" onClick={onRetry}>{t('library.route.retry')}</button>
         ) : (
           <p className="fine warn" role="status">
-            The recovery copy also could not be loaded. Restart SingZ before trying again.
+            {t('library.route.recoveryFailed')}
           </p>
         )}
-        <button type="button" className="pill ghost" onClick={onBrowse}>Open a song file</button>
+        <button type="button" className="pill ghost" onClick={onBrowse}>{t('library.route.openSongFile')}</button>
       </div>
     </main>
   )
@@ -121,13 +122,13 @@ export function DropScreenRuntimeFailure({
   return (
     <main className="library-screen">
       <div className="library-empty">
-        <p className="eyebrow">Song library</p>
-        <h1>Your song library stopped</h1>
+        <p className="eyebrow">{t('library.route.eyebrow')}</p>
+        <h1>{t('library.route.stoppedHeading')}</h1>
         <p role="alert">
-          The loaded library view encountered a problem. Restart SingZ before reopening it; any sync or delete already started may still be finishing.
+          {t('library.route.stoppedBody')}
         </p>
-        <button type="button" className="pill primary" onClick={onBrowse}>Open a song file</button>
-        <button type="button" className="pill ghost" onClick={onShowLog}>Open Log</button>
+        <button type="button" className="pill primary" onClick={onBrowse}>{t('library.route.openSongFile')}</button>
+        <button type="button" className="pill ghost" onClick={onShowLog}>{t('library.route.openLog')}</button>
       </div>
     </main>
   )

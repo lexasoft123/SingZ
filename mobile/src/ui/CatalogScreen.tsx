@@ -103,6 +103,7 @@ import {
   type AnalysisProgress
 } from '../analysis/run'
 import { SPLIT_STEMS } from '../split/adopt'
+import { t, tn } from '../i18n'
 
 const BG = require('../../assets/bg/catalog.png')
 const GDRIVE_ICON = require('../../assets/gdrive.png')
@@ -197,7 +198,7 @@ const keyTempoOf = (doc: ProjectDoc): string | null => {
   const k = doc.settings?.key
   const bpm = doc.settings?.beat?.bpm
   const parts: string[] = []
-  if (k) parts.push(`${KEY_NAMES[k.pc % 12]} ${k.minor ? 'min' : 'maj'}`)
+  if (k) parts.push(`${KEY_NAMES[k.pc % 12]} ${t(k.minor ? 'phone.player.header.keyMinor' : 'phone.player.header.keyMajor')}`)
   if (typeof bpm === 'number' && bpm > 0) parts.push(`${Math.round(bpm)} bpm`)
   return parts.length > 0 ? parts.join(' · ') : null
 }
@@ -400,7 +401,7 @@ export default function CatalogScreen({
   /** The bundled sample is a song in this list like any other, so it answers
    *  to the search too — left unfiltered it sat under two matches looking
    *  like a third. */
-  const sampleTitle = `Sample — ${SAMPLE_PROJECT.name}`
+  const sampleTitle = t('phone.library.sampleTitle', { name: SAMPLE_PROJECT.name })
   const sampleShown = !q || sampleTitle.toLowerCase().includes(q)
 
   /** A project's name for the cards that only know its directory. The split
@@ -444,7 +445,7 @@ export default function CatalogScreen({
       // ignoring the tap.
       const msg = String(e instanceof Error ? e.message : e)
       log('song', `add-song: the picker failed — ${msg}`, 'error')
-      setError(`That file couldn't be opened (${msg})`)
+      setError(t('phone.library.pickFailed', { msg }))
       return
     } finally {
       picking.current = false
@@ -668,12 +669,11 @@ export default function CatalogScreen({
       if (have <= 0) return
       Alert.alert(
         entry.doc.name ?? entry.dir,
-        `Remove ${fmtSize(have)} from this phone? The song stays in your library — ` +
-          'opening it again downloads it back.',
+        t('phone.library.forgetBody', { size: fmtSize(have) }),
         [
-          { text: 'Keep it', style: 'cancel' },
+          { text: t('phone.library.keepIt'), style: 'cancel' },
           {
-            text: 'Remove',
+            text: t('phone.library.remove'),
             style: 'destructive',
             onPress: () => void forget(entry.dir)
           }
@@ -686,13 +686,12 @@ export default function CatalogScreen({
   const confirmForgetAll = useCallback(
     (total: number) => {
       Alert.alert(
-        'Free up space',
-        `Delete ${fmtSize(total)} of downloaded songs? They stay in your library — ` +
-          'you can download them again whenever you have signal.',
+        t('phone.library.freeUpSpace'),
+        t('phone.library.freeUpSpaceBody', { size: fmtSize(total) }),
         [
-          { text: 'Keep them', style: 'cancel' },
+          { text: t('phone.library.keepThem'), style: 'cancel' },
           {
-            text: 'Delete',
+            text: t('phone.library.delete'),
             style: 'destructive',
             onPress: () => void forget('')
           }
@@ -707,12 +706,12 @@ export default function CatalogScreen({
       const tok = ++token.current
       setError(null)
       stepLog.current = { t0: Date.now(), rows: [] }
-      setLoading({ dir: entry.dir, msg: 'Opening…', frac: 0 })
+      setLoading({ dir: entry.dir, msg: t('phone.library.opening'), frac: 0 })
       try {
         const pickedRoot =
           mode === 'folder' ? (root?.kind === 'picked' ? root : await getRoot()) : null
         if (mode === 'folder' && pickedRoot?.kind !== 'picked')
-          throw new Error('The picked folder is no longer active. Reopen it and try again.')
+          throw new Error(t('phone.library.folderInactive'))
         const metronomeRef =
           mode === 'gdrive'
             ? ({ source: 'gdrive', dir: entry.dir } as const)
@@ -724,7 +723,7 @@ export default function CatalogScreen({
                 } as const)
               : ({ source: 'phone', dir: entry.dir } as const)
         if (metronomeRef.source === 'picked' && !metronomeRef.root)
-          throw new Error('The picked folder identity is unavailable. Reopen the folder and try again.')
+          throw new Error(t('phone.library.folderIdentityUnavailable'))
         const entryForLoad: ProjectEntry = { ...entry, metronomeRef }
         const loaded = await nativePlayback.load({
           entry: entryForLoad,
@@ -800,7 +799,7 @@ export default function CatalogScreen({
         if (tok !== token.current) return releaseStems(stems)
         setLoading({
           dir: SAMPLE_DIR,
-          msg: `Decoding ${ids[i]} · ${i + 1}/${ids.length}`,
+          msg: t('phone.library.decoding', { id: ids[i], i: i + 1, n: ids.length }),
           frac: i / ids.length
         })
         const t0 = Date.now()
@@ -841,7 +840,7 @@ export default function CatalogScreen({
         setTimeout(() => void refresh(), 1500)
       }
     } catch (e) {
-      setError(`Folder picker: ${String(e instanceof Error ? e.message : e)}`)
+      setError(t('phone.library.folderPickerError', { error: String(e instanceof Error ? e.message : e) }))
     }
   }, [refresh])
 
@@ -849,7 +848,7 @@ export default function CatalogScreen({
   const findLyricsFor = useCallback(
     async (p: ProjectEntry) => {
       try {
-        setLoading({ dir: p.dir, msg: 'Looking for lyrics…', frac: 0.5 })
+        setLoading({ dir: p.dir, msg: t('phone.library.lookingForLyrics'), frac: 0.5 })
         const docJson = await readProjectText(p.dir, 'project.json')
         const doc = JSON.parse(docJson) as ProjectDoc
         // real duration (LRCLIB match tolerance) + the file's own artist tag;
@@ -871,10 +870,8 @@ export default function CatalogScreen({
         } else {
           setLoading(null)
           Alert.alert(
-            'No lyrics yet',
-            outcome === 'down'
-              ? "The lyrics service didn't answer — try again later."
-              : 'Nothing matched this title. Lyrics can also be added on the computer.'
+            t('phone.library.noLyricsYet'),
+            outcome === 'down' ? t('phone.library.lyricsServiceDown') : t('phone.library.lyricsNoMatch')
           )
         }
       } catch (e) {
@@ -1021,7 +1018,7 @@ export default function CatalogScreen({
     } catch (e) {
       setBeatModelsUi({ phase: 'offer' })
       const msg = String(e instanceof Error ? e.message : e)
-      if (!msg.includes('cancelled')) Alert.alert('Could not download the beat models', msg)
+      if (!msg.includes('cancelled')) Alert.alert(t('phone.library.couldNotDownloadBeatModels'), msg)
     }
   }, [projects, kickAnalysis])
   /** 87 MB started from a bare text link, while deleting one song took a
@@ -1029,11 +1026,11 @@ export default function CatalogScreen({
    *  ran opposite to the consequence. This is the cheaper half to put right. */
   const confirmBeatModels = useCallback(() => {
     Alert.alert(
-      'Download the beat models?',
-      `${BEAT_MODELS_MB} MB, once. Every song analysed afterwards uses them.`,
+      t('phone.library.downloadBeatModelsTitle'),
+      t('phone.library.downloadBeatModelsBody', { mb: BEAT_MODELS_MB }),
       [
-        { text: 'Not now', style: 'cancel' },
-        { text: 'Download', onPress: () => void fetchBeatModels() }
+        { text: t('phone.library.notNow'), style: 'cancel' },
+        { text: t('phone.library.download'), onPress: () => void fetchBeatModels() }
       ]
     )
   }, [fetchBeatModels])
@@ -1095,7 +1092,7 @@ export default function CatalogScreen({
             return {
               phase: 'run',
               project,
-              text: 'Reading the song…',
+              text: t('phone.library.readingTheSong'),
               frac: p.frac * 0.05,
               started: true
             }
@@ -1104,7 +1101,7 @@ export default function CatalogScreen({
             return {
               phase: 'run',
               project,
-              text: 'Warming up…',
+              text: t('phone.library.warmingUp'),
               frac: 0.06,
               started: true
             }
@@ -1113,7 +1110,7 @@ export default function CatalogScreen({
             return {
               phase: 'run',
               project,
-              text: `Splitting into stems — chunk ${p.done} of ${p.total}`,
+              text: t('phone.library.splittingChunk', { done: p.done, total: p.total }),
               frac: 0.08 + 0.92 * (p.done / p.total),
               started: true
             }
@@ -1126,7 +1123,7 @@ export default function CatalogScreen({
           void splitStatus().then(status => {
             if (!status) return
             if (status.state === 'done') void adoptDone(status)
-            else if (status.state === 'failed') void showFailed(status, 'The split failed')
+            else if (status.state === 'failed') void showFailed(status, t('phone.library.splitFailed'))
           })
         } else if (st.state === 'cancelled') {
           setSplitUi(null)
@@ -1168,7 +1165,7 @@ export default function CatalogScreen({
               ? {
                   phase: 'failed',
                   project: c.project,
-                  error: 'The split never started — try again',
+                  error: t('phone.library.splitNeverStarted'),
                   attempts: 0
                 }
               : c
@@ -1176,9 +1173,9 @@ export default function CatalogScreen({
           return
         }
         if (status.state === 'done') void adoptDone(status)
-        else if (status.state === 'failed') void showFailed(status, 'The split failed')
+        else if (status.state === 'failed') void showFailed(status, t('phone.library.splitFailed'))
         else if (Date.now() - status.updatedAtMs > 90_000) {
-          void showFailed(status, 'The split was interrupted')
+          void showFailed(status, t('phone.library.splitInterrupted'))
         } else {
           // A live record is the job's existence, whether or not its events
           // reached us — a later vanished file is then a cancel, not a
@@ -1198,7 +1195,7 @@ export default function CatalogScreen({
       if (status.state === 'done') {
         void adoptDone(status)
       } else if (status.state === 'failed') {
-        void showFailed(status, 'The split failed')
+        void showFailed(status, t('phone.library.splitFailed'))
       } else if (status.state === 'decoding' || status.state === 'splitting') {
         const fresh = Date.now() - status.updatedAtMs < 90_000
         if (fresh) {
@@ -1207,8 +1204,8 @@ export default function CatalogScreen({
             project: status.projectDir,
             text:
               status.totalChunks > 0
-                ? `Splitting into stems — chunk ${status.chunksDone} of ${status.totalChunks}`
-                : 'Splitting into stems…',
+                ? t('phone.library.splittingChunk', { done: status.chunksDone, total: status.totalChunks })
+                : t('phone.library.splittingEllipsis'),
             frac:
               status.totalChunks > 0 ? 0.08 + 0.92 * (status.chunksDone / status.totalChunks) : 0,
             started: true
@@ -1216,7 +1213,7 @@ export default function CatalogScreen({
         } else {
           // The service died without a verdict (battery pull, lmkd) — the
           // tail makes Resume safe.
-          void showFailed(status, 'The split was interrupted')
+          void showFailed(status, t('phone.library.splitInterrupted'))
         }
       }
     })
@@ -1235,7 +1232,7 @@ export default function CatalogScreen({
         if (!gate.ok) {
           // Not "needs a bigger phone": the device is not the singer's fault and
           // they cannot act on it. Say what cannot happen and why.
-          Alert.alert('This song is too big to split here', gate.reason)
+          Alert.alert(t('phone.library.tooBigToSplitTitle'), gate.reason)
           return
         }
         setCancelPending(false)
@@ -1260,7 +1257,7 @@ export default function CatalogScreen({
         setSplitUi({
           phase: 'run',
           project: dir,
-          text: 'Starting…',
+          text: t('phone.library.starting'),
           frac: 0,
           started: false
         })
@@ -1268,7 +1265,7 @@ export default function CatalogScreen({
         setSplitUi(null)
         const msg = String(e instanceof Error ? e.message : e)
         if (!msg.includes('cancelled')) {
-          Alert.alert('Could not start the split', msg)
+          Alert.alert(t('phone.library.couldNotStartSplitTitle'), msg)
         }
       }
     },
@@ -1316,14 +1313,13 @@ export default function CatalogScreen({
       // would otherwise leave the old job on disk to reappear on next visit.
       const failed = splitUi?.phase === 'failed' && splitUi.project !== p.dir ? splitUi : null
       Alert.alert(
-        'Split this song?',
-        'The phone separates it into vocals, drums, bass and more — a few minutes of ' +
-          'work, and a one-time 136 MB download the first time.' +
-          (failed ? `\n\nThe failed split of "${nameOf(failed.project)}" will be discarded.` : ''),
+        t('phone.library.splitThisSongTitle'),
+        t('phone.library.splitThisSongBody') +
+          (failed ? t('phone.library.failedSplitDiscarded', { name: nameOf(failed.project) }) : ''),
         [
-          { text: 'Cancel', style: 'cancel' },
+          { text: t('phone.library.cancel'), style: 'cancel' },
           {
-            text: 'Split',
+            text: t('phone.library.splitButton'),
             onPress: () =>
               void (failed ? clearSplitJob().catch(() => {}) : Promise.resolve()).then(() =>
                 startSplitFor(p.dir, false)
@@ -1366,21 +1362,21 @@ export default function CatalogScreen({
       // either fails the adopt into a card for a song that is gone or lets
       // the doc write land after the delete and bring back half a project.
       if (splitUiRef.current?.phase === 'adopting' && splitUiRef.current.project === p.dir) {
-        Alert.alert('Almost done splitting', 'This song is being finished — delete it in a moment.')
+        Alert.alert(t('phone.library.almostDoneSplittingTitle'), t('phone.library.almostDoneSplittingBody'))
         return
       }
       Alert.alert(
-        'Delete this song?',
-        `"${p.doc.name ?? p.dir}" and its files go away.`,
+        t('phone.library.deleteThisSongTitle'),
+        t('phone.library.deleteThisSongBody', { name: p.doc.name ?? p.dir }),
         /* cancel-first, like every other confirm in this file
            (confirmForgetAll, offerSplit, confirmBeatModels). iOS renders
            either order the same, but Android maps a two-button confirm by
            position, and mirroring just this one would put Cancel where the
            others put the action. */
         [
-          { text: 'Cancel', style: 'cancel' },
+          { text: t('phone.library.cancel'), style: 'cancel' },
           {
-            text: 'Delete',
+            text: t('phone.library.delete'),
             style: 'destructive',
             onPress: () => {
               // A job left for this song goes with it: a failed card naming a
@@ -1539,7 +1535,7 @@ export default function CatalogScreen({
            accessibility element for the whole card, and an explicit label
            REPLACES the string RN composes from the children — title, meta and
            the ✓/☁ status would all vanish behind the title alone. */
-        accessibilityHint="Opens the song."
+        accessibilityHint={t('phone.library.opensTheSong')}
         /* The swipe's actions, spoken: a screen reader cannot discover a
            swipe-reveal, so every optional action is also a rotor action on
            the card itself. */
@@ -1584,7 +1580,7 @@ export default function CatalogScreen({
             onPress={cancelLoad}
             style={s.cancelBtn}
             accessibilityRole="button"
-            accessibilityLabel="Stop opening this song"
+            accessibilityLabel={t('phone.library.stopOpeningSong')}
           >
             <Text style={{ color: white(0.75), fontSize: 13, fontWeight: '700' }}>✕</Text>
           </Pressable>
@@ -1662,9 +1658,9 @@ export default function CatalogScreen({
             style={{ marginLeft: 'auto' }}
             onPress={onOpenSettings}
             accessibilityRole="button"
-            accessibilityLabel="Open Settings"
+            accessibilityLabel={t('phone.library.openSettings')}
           >
-            <Text style={s.ctxLink}>Settings</Text>
+            <Text style={s.ctxLink}>{t('phone.library.settings')}</Text>
           </Pressable>
           {/* where the desktop keeps it: in the header, always reachable —
               a log you can only open when things are going well is no use */}
@@ -1673,26 +1669,26 @@ export default function CatalogScreen({
             style={{ marginLeft: 18 }}
             onPress={onOpenLog}
             accessibilityRole="button"
-            accessibilityLabel="Open the log"
+            accessibilityLabel={t('phone.library.openLog')}
           >
-            <Text style={s.ctxLink}>Log</Text>
+            <Text style={s.ctxLink}>{t('phone.library.log')}</Text>
           </Pressable>
         </View>
         <Seg
           segments={[
-            ...(driveAvailable() ? [{ key: 'gdrive', label: 'Drive', icon: GDRIVE_ICON }] : []),
+            ...(driveAvailable() ? [{ key: 'gdrive', label: t('phone.library.driveTab'), icon: GDRIVE_ICON }] : []),
             /* Drawn glyphs, not emoji — the app has already refused emoji
                icons twice (MicGlyph, the ••• gear) for the same reason: an
                emoji in a row of tabs is a colour sticker in a row of icons.
                The Drive mark stays an image: it is a logo, not an emoji. */
             {
               key: 'folder',
-              label: 'Folder',
+              label: t('phone.library.folderTab'),
               glyph: (c: string) => <FolderGlyph color={c} />
             },
             {
               key: 'phone',
-              label: Platform.OS === 'ios' ? 'This iPhone' : 'This phone',
+              label: Platform.OS === 'ios' ? t('phone.library.thisIphone') : t('phone.library.thisPhone'),
               glyph: (c: string) => <PhoneGlyph color={c} />
             }
           ]}
@@ -1712,13 +1708,13 @@ export default function CatalogScreen({
         {((): React.JSX.Element => {
           const srcTitle =
             mode === 'gdrive' && !driveOn
-              ? 'Your desktop’s library, synced through Drive'
+              ? t('phone.library.driveSrcTitle')
               : mode === 'folder' && root?.kind !== 'picked'
-              ? 'A shared folder this phone can read'
+              ? t('phone.library.folderSrcTitle')
               : mode === 'phone' && projects !== null && projects.length === 0
               ? Platform.OS === 'ios'
-                ? 'Songs added on this iPhone'
-                : 'Songs added on this phone'
+                ? t('phone.library.songsAddedIphone')
+                : t('phone.library.songsAddedPhone')
               : null
           const inner = (
             <>
@@ -1727,8 +1723,8 @@ export default function CatalogScreen({
                   <>
                     <Text style={s.ctxWho} numberOfLines={1}>
                       {offline
-                        ? 'No signal — showing your last sync'
-                        : driveEmail ?? 'Signed in to Google Drive'}
+                        ? t('phone.library.noSignalLastSync')
+                        : driveEmail ?? t('phone.library.signedInToDrive')}
                     </Text>
                     <Text style={s.ctxDot}>·</Text>
                     <Pressable
@@ -1742,7 +1738,7 @@ export default function CatalogScreen({
                         })
                       }}
                     >
-                      <Text style={s.ctxLink}>Sign out</Text>
+                      <Text style={s.ctxLink}>{t('phone.library.signOut')}</Text>
                     </Pressable>
                   </>
                 ) : (
@@ -1751,7 +1747,7 @@ export default function CatalogScreen({
                       {/* The line renders under the srcCard title whenever Drive
                       is signed out, so it says the next step, not the title's
                       message again. */}
-                      Sign in to see it
+                      {t('phone.library.signInToSeeIt')}
                     </Text>
                     <Text style={s.ctxDot}>·</Text>
                     <Pressable
@@ -1759,14 +1755,14 @@ export default function CatalogScreen({
                       hitSlop={8}
                       onPress={() => void driveSignInFlow()}
                     >
-                      <Text style={s.ctxLink}>Sign in</Text>
+                      <Text style={s.ctxLink}>{t('phone.library.signIn')}</Text>
                     </Pressable>
                   </>
                 ))}
               {mode === 'folder' && (
                 <>
                   <Text style={s.ctxWho} numberOfLines={1}>
-                    {root?.kind === 'picked' ? root.name : 'No folder picked yet'}
+                    {root?.kind === 'picked' ? root.name : t('phone.library.noFolderPicked')}
                   </Text>
                   <Text style={s.ctxDot}>·</Text>
                   <Pressable
@@ -1774,7 +1770,7 @@ export default function CatalogScreen({
                     hitSlop={8}
                     onPress={() => void changeFolder()}
                   >
-                    <Text style={s.ctxLink}>Change…</Text>
+                    <Text style={s.ctxLink}>{t('phone.library.change')}</Text>
                   </Pressable>
                 </>
               )}
@@ -1782,12 +1778,12 @@ export default function CatalogScreen({
                 <>
                   <Text style={s.ctxWho} numberOfLines={1}>
                     {Platform.OS === 'ios'
-                      ? 'Files you copied onto this iPhone'
-                      : 'Files you copied onto this phone'}
+                      ? t('phone.library.filesCopiedIphone')
+                      : t('phone.library.filesCopiedPhone')}
                   </Text>
                   <Text style={s.ctxDot}>·</Text>
                   <Pressable accessibilityRole="button" hitSlop={8} onPress={() => void beginAdd()}>
-                    <Text style={s.ctxLink}>Add a song</Text>
+                    <Text style={s.ctxLink}>{t('phone.library.addASong')}</Text>
                   </Pressable>
                 </>
               )}
@@ -1811,21 +1807,21 @@ export default function CatalogScreen({
             opens. */}
         {crashNote && (
           <View style={[s.errBox, s.noteBox]}>
-            <Text style={[s.err, { color: C.text }]}>The last open crashed while {crashNote}.</Text>
+            <Text style={[s.err, { color: C.text }]}>{t('phone.library.lastOpenCrashed', { note: crashNote })}</Text>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Open the log to report this"
+              accessibilityLabel={t('phone.library.openLogToReport')}
               hitSlop={8}
               onPress={() => {
                 onOpenLog()
                 setCrashNote(null)
               }}
             >
-              <Text style={s.ctxLink}>Report</Text>
+              <Text style={s.ctxLink}>{t('phone.library.report')}</Text>
             </Pressable>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Dismiss the crash notice"
+              accessibilityLabel={t('phone.library.dismissCrashNotice')}
               hitSlop={4}
               onPress={() => setCrashNote(null)}
             >
@@ -1844,7 +1840,7 @@ export default function CatalogScreen({
             onPress={() => setError(null)}
             hitSlop={6}
             accessibilityRole="button"
-            accessibilityLabel={`${error}. Tap to dismiss.`}
+            accessibilityLabel={t('phone.library.tapToDismiss', { error })}
           >
             <Text style={s.err}>{error}</Text>
             <Text style={s.errX}>✕</Text>
@@ -1905,8 +1901,11 @@ export default function CatalogScreen({
                         a bar at 0 that never moves is how a wait reads as a
                         hang. Say which it is. */}
                     {splitUi.gotMB === 0 && beatModelsUi?.phase === 'downloading'
-                      ? `Waiting for the beat models to finish — then the splitter (${splitUi.totalMB} MB, once)`
-                      : `Downloading the splitter — ${splitUi.gotMB} of ${splitUi.totalMB} MB, once`}
+                      ? t('phone.library.waitingThenSplitter', { mb: splitUi.totalMB })
+                      : t('phone.library.downloadingSplitter', {
+                          got: splitUi.gotMB,
+                          total: splitUi.totalMB
+                        })}
                   </Text>
                   <View style={s.splitBarBed}>
                     <View
@@ -1931,7 +1930,7 @@ export default function CatalogScreen({
                   </View>
                 </>
               )}
-              {splitUi.phase === 'adopting' && <Text style={s.splitText}>Finishing up…</Text>}
+              {splitUi.phase === 'adopting' && <Text style={s.splitText}>{t('phone.library.finishingUp')}</Text>}
               {splitUi.phase === 'failed' && (
                 <Text style={s.splitText}>
                   {splitFailureCopy(splitUi.error, splitUi.attempts)}
@@ -1950,7 +1949,7 @@ export default function CatalogScreen({
                         : (setCancelPending(true), void cancelSplit())
                     }
                   >
-                    <Text style={s.ctxLink}>{cancelPending ? 'Stopping…' : 'Cancel'}</Text>
+                    <Text style={s.ctxLink}>{cancelPending ? t('phone.library.stopping') : t('phone.library.cancel')}</Text>
                   </Pressable>
                 )}
                 {splitUi.phase === 'failed' && (
@@ -1960,10 +1959,10 @@ export default function CatalogScreen({
                       hitSlop={8}
                       onPress={() => void resumeSplit(splitUi.project)}
                     >
-                      <Text style={s.ctxLink}>Resume</Text>
+                      <Text style={s.ctxLink}>{t('phone.library.resume')}</Text>
                     </Pressable>
                     <Pressable accessibilityRole="button" hitSlop={8} onPress={discardSplit}>
-                      <Text style={[s.ctxLink, { color: C.dim }]}>Discard</Text>
+                      <Text style={[s.ctxLink, { color: C.dim }]}>{t('phone.library.discard')}</Text>
                     </Pressable>
                   </>
                 )}
@@ -1987,10 +1986,13 @@ export default function CatalogScreen({
           {beatModelsUi?.phase === 'downloading' && (
             <View style={s.splitCard}>
               <Text style={s.splitTitle} numberOfLines={1}>
-                Better beats
+                {t('phone.library.betterBeats')}
               </Text>
               <Text style={s.splitText}>
-                Downloading the beat models — {beatModelsUi.gotMB} of {beatModelsUi.totalMB} MB
+                {t('phone.library.downloadingBeatModels', {
+                  got: beatModelsUi.gotMB,
+                  total: beatModelsUi.totalMB
+                })}
               </Text>
               <View style={s.splitBarBed}>
                 <View
@@ -2011,7 +2013,7 @@ export default function CatalogScreen({
                   hitSlop={8}
                   onPress={() => void cancelBeatModels()}
                 >
-                  <Text style={s.ctxLink}>Cancel</Text>
+                  <Text style={s.ctxLink}>{t('phone.library.cancel')}</Text>
                 </Pressable>
               </View>
             </View>
@@ -2037,17 +2039,17 @@ export default function CatalogScreen({
                 meta: (
                   <>
                     {Object.keys(p.stems).length > 0
-                      ? `${Object.keys(p.stems).length} stems`
-                      : 'not split yet'}
-                    {added > 0 ? ` · ${added} added` : ''}
-                    {p.hasLyrics ? ' · lyrics' : ''}
+                      ? tn('phone.library.stemsCount', Object.keys(p.stems).length)
+                      : t('phone.library.notSplitYet')}
+                    {added > 0 ? t('phone.library.addedSuffix', { n: added }) : ''}
+                    {p.hasLyrics ? t('phone.library.lyricsSuffix') : ''}
                     {/* The badge means "this is an old WAV project the desktop
                       can shrink". A song this phone split is also WAV — the
                       phone cannot write FLAC yet — and telling the singer to
                       redo it on a computer is the worst possible reward for a
                       five-minute split, so phone-made projects are exempt. */}
                     {mode !== 'phone' && Object.values(p.stems).some(f => f === 'wav') ? (
-                      <Text style={{ color: C.amber }}> · update on desktop</Text>
+                      <Text style={{ color: C.amber }}>{t('phone.library.updateOnDesktop')}</Text>
                     ) : null}
                   </>
                 ),
@@ -2058,10 +2060,10 @@ export default function CatalogScreen({
                      offline: is this song actually on the phone. */
                     accessibilityLabel={
                       downloaded
-                        ? 'On this phone'
+                        ? t('phone.library.onThisPhone')
                         : p.bytes > 0
-                        ? `Not downloaded, ${fmtSize(p.bytes)}`
-                        : 'Not downloaded'
+                        ? t('phone.library.notDownloadedSize', { size: fmtSize(p.bytes) })
+                        : t('phone.library.notDownloaded')
                     }
                   >
                     {downloaded ? '✓' : p.bytes > 0 ? `☁ ${fmtSize(p.bytes)}` : '☁'}
@@ -2098,11 +2100,11 @@ export default function CatalogScreen({
                      holds the engine until SingZ restarts). */
                       accessibilityLabel={
                         splitBusyElsewhere(p.dir)
-                          ? 'Split — unavailable while another split is still working'
-                          : `Split ${p.doc.name ?? p.dir} into stems`
+                          ? t('phone.library.splitUnavailableBusy')
+                          : t('phone.library.splitInto', { name: p.doc.name ?? p.dir })
                       }
                     >
-                      <Text style={s.splitChipText}>Split</Text>
+                      <Text style={s.splitChipText}>{t('phone.library.splitButton')}</Text>
                     </Pressable>
                   ) : null,
                 onPress: () => void openEntry(p),
@@ -2122,7 +2124,7 @@ export default function CatalogScreen({
                     if (split) {
                       acts.push({
                         key: 'redetect',
-                        label: `Detect the beat again for ${title}`,
+                        label: t('phone.library.detectBeatAgainFor', { title }),
                         icon: <RedetectGlyph color={white(0.85)} />,
                         onPress: () => void kickAnalysis(p.dir, p.stems, true)
                       })
@@ -2130,14 +2132,14 @@ export default function CatalogScreen({
                     if (!p.hasLyrics) {
                       acts.push({
                         key: 'lyrics',
-                        label: `Find lyrics for ${title}`,
+                        label: t('phone.library.findLyricsFor', { title }),
                         icon: <LyricsGlyph color={white(0.85)} />,
                         onPress: () => void findLyricsFor(p)
                       })
                     }
                     acts.push({
                       key: 'delete',
-                      label: `Delete ${title} from this phone`,
+                      label: t('phone.library.deleteFromPhone', { title }),
                       danger: true,
                       icon: <TrashGlyph color="#1d0f0d" />,
                       onPress: () => confirmDelete(p)
@@ -2145,7 +2147,7 @@ export default function CatalogScreen({
                   } else if ((usage[p.dir]?.bytes ?? 0) > 0) {
                     acts.push({
                       key: 'forget',
-                      label: `Remove ${title}'s downloaded files`,
+                      label: t('phone.library.removeDownloadedFiles', { title }),
                       danger: true,
                       icon: <TrashGlyph color="#1d0f0d" />,
                       onPress: () => confirmForget(p)
@@ -2161,7 +2163,7 @@ export default function CatalogScreen({
             const grouped = pendingShown.length > 0 && (readyShown.length > 0 || sampleShown)
             return (
               <>
-                {grouped && <Text style={s.grp}>Ready</Text>}
+                {grouped && <Text style={s.grp}>{t('phone.library.ready')}</Text>}
                 {readyShown.map(renderEntry)}
                 {sampleShown &&
                   card({
@@ -2172,12 +2174,12 @@ export default function CatalogScreen({
                     /* NOT split: "Sample — Sing with me" would grow a fake
                        artist called Sample. */
                     title: sampleTitle,
-                    meta: 'bundled · always available',
+                    meta: t('phone.library.bundledAlwaysAvailable'),
                     right: <Text style={s.status}>✓</Text>,
                     sample: true,
                     onPress: () => void openSample()
                   })}
-                {grouped && <Text style={s.grp}>Not ready yet</Text>}
+                {grouped && <Text style={s.grp}>{t('phone.library.notReadyYet')}</Text>}
                 {pendingShown.map(renderEntry)}
               </>
             )
@@ -2186,12 +2188,12 @@ export default function CatalogScreen({
             <View style={{ alignItems: 'center', paddingVertical: 36 }}>
               <ActivityIndicator color={C.amber} />
               <Text style={[s.empty, { marginTop: 12 }]}>
-                {mode === 'gdrive' ? 'Loading your library from Google Drive…' : 'Loading…'}
+                {mode === 'gdrive' ? t('phone.library.loadingFromDrive') : t('phone.library.loadingEllipsis')}
               </Text>
             </View>
           )}
           {projects !== null && shown.length === 0 && !sampleShown && (
-            <Text style={s.empty}>No song here is called “{query.trim()}”.</Text>
+            <Text style={s.empty}>{t('phone.library.noSongCalled', { query: query.trim() })}</Text>
           )}
           {projects !== null && projects.length === 0 && q === '' && (
             // Whichever library is open has its OWN next step — and phone mode
@@ -2201,15 +2203,15 @@ export default function CatalogScreen({
             <Text style={s.empty}>
               {mode === 'phone'
                 ? Platform.OS === 'ios'
-                  ? 'No songs on this iPhone yet. Add one above — it plays straight away, and can be split into stems here.'
-                  : 'No songs on this phone yet. Add one above — it plays straight away, and can be split into stems here.'
+                  ? t('phone.library.noSongsIphone')
+                  : t('phone.library.noSongsPhone')
                 : mode === 'gdrive'
                 ? driveOn
-                  ? 'Nothing in your Google Drive library yet. Save a song on your computer and it syncs over.'
-                  : 'Sign in above to see the songs your computer put in Google Drive.'
+                  ? t('phone.library.driveEmptySignedIn')
+                  : t('phone.library.driveEmptySignedOut')
                 : Platform.OS === 'ios'
-                ? 'No projects in this folder. Save one on your computer into the shared folder (iCloud Drive/SingZ), or pick a different folder above.'
-                : 'No projects in this folder. Copy project folders from your computer onto this phone, or pick a synced folder above.'}
+                ? t('phone.library.folderEmptyIos')
+                : t('phone.library.folderEmptyAndroid')}
             </Text>
           )}
           {(() => {
@@ -2219,15 +2221,14 @@ export default function CatalogScreen({
             return (
               <View style={s.storage}>
                 <Text style={s.storageText}>
-                  {dirs.length} song{dirs.length > 1 ? 's' : ''} on this phone · {fmtSize(total)} —
-                  playable without internet
+                  {tn('phone.library.storage', dirs.length, { size: fmtSize(total) })}
                 </Text>
                 <Pressable
                   accessibilityRole="button"
                   hitSlop={8}
                   onPress={() => confirmForgetAll(total)}
                 >
-                  <Text style={s.ctxLink}>Free up space</Text>
+                  <Text style={s.ctxLink}>{t('phone.library.freeUpSpace')}</Text>
                 </Pressable>
               </View>
             )
@@ -2242,18 +2243,17 @@ export default function CatalogScreen({
           {beatModelsUi?.phase === 'offer' && (
             <View style={[s.splitCard, { marginTop: 14 }]}>
               <Text style={s.splitTitle} numberOfLines={1}>
-                Better beats
+                {t('phone.library.betterBeats')}
               </Text>
               <Text style={s.splitText}>
-                An {BEAT_MODELS_MB} MB download, once, that hears the beat through quiet intros and
-                rubato the drums alone lose. Songs that already have a grid keep it.
+                {t('phone.library.betterBeatsOfferBody', { mb: BEAT_MODELS_MB })}
               </Text>
               <View style={s.splitActions}>
                 <Pressable accessibilityRole="button" hitSlop={8} onPress={confirmBeatModels}>
-                  <Text style={s.ctxLink}>Download</Text>
+                  <Text style={s.ctxLink}>{t('phone.library.download')}</Text>
                 </Pressable>
                 <Pressable accessibilityRole="button" hitSlop={8} onPress={dismissBeatModels}>
-                  <Text style={[s.ctxLink, { color: C.dim }]}>Not now</Text>
+                  <Text style={[s.ctxLink, { color: C.dim }]}>{t('phone.library.notNow')}</Text>
                 </Pressable>
               </View>
             </View>
@@ -2274,13 +2274,13 @@ export default function CatalogScreen({
               style={s.searchInput}
               value={query}
               onChangeText={setQuery}
-              placeholder="Find a song"
+              placeholder={t('phone.library.findASong')}
               placeholderTextColor={C.dim}
               autoCorrect={false}
               autoCapitalize="none"
               returnKeyType="search"
               clearButtonMode="while-editing"
-              accessibilityLabel="Find a song by name"
+              accessibilityLabel={t('phone.library.findASongLabel')}
             />
             {/* iOS draws its own clear button inside the field; Android has
                 none, and a query with no way out strands the library. */}
@@ -2289,7 +2289,7 @@ export default function CatalogScreen({
                 hitSlop={10}
                 onPress={() => setQuery('')}
                 accessibilityRole="button"
-                accessibilityLabel="Clear the search"
+                accessibilityLabel={t('phone.library.clearSearch')}
               >
                 <Text style={s.searchX}>✕</Text>
               </Pressable>

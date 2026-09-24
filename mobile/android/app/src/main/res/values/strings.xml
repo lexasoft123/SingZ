@@ -1,3 +1,22 @@
 <resources>
     <string name="app_name">SingZ</string>
+    <!-- Notification text, translated in values-ru and values-zh-rCN. -->
+    <string name="np_channel_name">Now playing</string>
+    <string name="np_channel_desc">The song that is playing, with play, pause and skip</string>
+    <string name="np_back">Back %1$s</string>
+    <string name="np_forward">Forward %1$s</string>
+    <string name="np_pause">Pause</string>
+    <string name="np_play">Play</string>
+    <string name="np_seconds">%1$d s</string>
+    <string name="split_channel_name">Splitting</string>
+    <string name="split_channel_desc">Progress while a song is split into stems</string>
+    <string name="split_title">Splitting into stems</string>
+    <string name="split_cancel">Cancel</string>
+    <string name="split_getting_ready">Getting ready…</string>
+    <string name="split_cancelling">Cancelling…</string>
+    <string name="split_reading">Reading the song…</string>
+    <string name="split_warming">Warming up…</string>
+    <string name="split_chunk">Chunk %1$d of %2$d%3$s</string>
+    <string name="split_eta_min"> · about %1$d min left</string>
+    <string name="split_eta_sec"> · about %1$d sec left</string>
 </resources>

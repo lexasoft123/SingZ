@@ -1,3 +1,4 @@
+import { readSourceWithEnglish } from './i18n-source'
 import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -69,9 +70,9 @@ const eligible = {
 
 describe('desktop native playback selection', () => {
   it('renders the persisted Windows provider choice and unavailable ASIO reason in Settings', () => {
-    const source = readFileSync('src/renderer/src/components/SettingsModal.tsx', 'utf8')
+    const source = readSourceWithEnglish('src/renderer/src/components/SettingsModal.tsx')
     expect(source).toContain('System audio (WASAPI)')
-    expect(source).toContain('ASIO unavailable: {asioProviderInfo.detail}')
+    expect(source).toContain('ASIO unavailable: {detail} */, { detail: asioProviderInfo.detail })')
     expect(source).toContain('onChangeNativeAudioProvider?.(')
     expect(source).toContain(
       'disabled={!playbackProviderCanChange(playbackStatus, nativePlaybackLeaseBlocked)}'

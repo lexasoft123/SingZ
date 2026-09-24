@@ -1,4 +1,5 @@
 import { app } from 'electron'
+import { t } from '../shared/i18n'
 import { createHash } from 'node:crypto'
 import { existsSync, readdirSync } from 'node:fs'
 import { access, cp, copyFile, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
@@ -477,10 +478,10 @@ export async function migrateProjectToV2(
     // mid-conversion
     return await withProjectLock(dir, async () => {
       const meta = await readMeta(dir)
-      if (!meta) return { ok: false as const, error: 'not a project folder' }
+      if (!meta) return { ok: false as const, error: t('main.error.notProjectFolder') }
       if (meta.version >= 2) return { ok: true as const, converted: false, compacted: [] }
       const { compact, compacted } = await convertStemsToFlac(dir)
-      if (!compact) return { ok: false as const, error: 'some stems could not be converted' }
+      if (!compact) return { ok: false as const, error: t('main.error.stemsNotConverted') }
       meta.version = 2
       // the WAVs it just deleted are still what stemHashes names — leave that in
       // and project.json describes files that no longer exist (and a phone
@@ -534,7 +535,7 @@ export function withProjectDocumentTransaction<T>(
 ): Promise<T> {
   return withProjectLock(dir, async () => {
     const meta = await readMeta(dir)
-    if (!meta) throw new Error(`${dir} is not a readable project folder.`)
+    if (!meta) throw new Error(t('main.error.notReadableProjectFolder', { dir }))
     return run(meta, (next) => writeMetaAtomic(dir, next))
   })
 }
@@ -617,24 +618,24 @@ async function readProjectGraphUnlocked(
 ): Promise<ProjectGraphReadResult> {
   if (meta.graphHash === undefined) return { ok: true, graph: null }
   if (!validGraphHash(meta.graphHash)) {
-    return { ok: false, code: 'invalid-reference', error: 'project.json has an invalid graphHash.' }
+    return { ok: false, code: 'invalid-reference', error: t('main.error.invalidGraphHash') }
   }
   const expected = meta.graphHash
   if (expected.format > GRAPH_DOCUMENT_FORMAT) {
     return {
       ok: false,
       code: 'unsupported',
-      error: `This project uses graph format ${expected.format}; this build supports format ${GRAPH_DOCUMENT_FORMAT}.`
+      error: t('main.error.graphFormatUnsupported', { have: expected.format, supported: GRAPH_DOCUMENT_FORMAT })
     }
   }
   if (expected.format !== GRAPH_DOCUMENT_FORMAT || expected.size > MAX_GRAPH_DOCUMENT_TEXT_BYTES) {
-    return { ok: false, code: 'invalid-reference', error: 'project.json names an invalid graph format or size.' }
+    return { ok: false, code: 'invalid-reference', error: t('main.error.invalidGraphFormatOrSize') }
   }
   let text: string
   try {
     text = await readFile(join(dir, 'graph.json'), 'utf8')
   } catch {
-    return { ok: false, code: 'missing', error: 'graph.json is missing.' }
+    return { ok: false, code: 'missing', error: t('main.error.graphMissing') }
   }
   const bytes = Buffer.from(text)
   const md5 = createHash('md5').update(bytes).digest('hex')
@@ -642,19 +643,19 @@ async function readProjectGraphUnlocked(
     return {
       ok: false,
       code: 'mismatch',
-      error: 'graph.json does not match the size and md5 recorded by project.json.'
+      error: t('main.error.graphMismatch')
     }
   }
   try {
     const parsed = parseGraphDocument(text)
     if (parsed.kind !== 'known' || parsed.format !== expected.format) {
-      return { ok: false, code: 'unsupported', error: 'graph.json uses an unsupported format.' }
+      return { ok: false, code: 'unsupported', error: t('main.error.graphUnsupportedFormat') }
     }
   } catch (error) {
     return {
       ok: false,
       code: 'invalid',
-      error: `graph.json is invalid: ${error instanceof Error ? error.message : String(error)}`
+      error: t('main.error.graphInvalid', { message: error instanceof Error ? error.message : String(error) })
     }
   }
   return { ok: true, graph: { hash: { ...expected }, text } }
@@ -668,7 +669,7 @@ export async function readProjectGraph(songPath: string): Promise<ProjectGraphRe
     const meta = await readMeta(dir)
     return meta
       ? readProjectGraphUnlocked(dir, meta)
-      : { ok: false, code: 'not-project', error: 'This is not a saved project.' }
+      : { ok: false, code: 'not-project', error: t('main.error.notSavedProject') }
   })
 }
 
@@ -682,7 +683,7 @@ export async function writeProjectGraph(
   const dir = dirname(songPath)
   return withProjectLock(dir, async () => {
     const meta = await readMeta(dir)
-    if (!meta) return { ok: false, code: 'not-project', error: 'This is not a saved project.' }
+    if (!meta) return { ok: false, code: 'not-project', error: t('main.error.notSavedProject') }
     let canonical: string
     try {
       const parsed = parseGraphDocument(source)
@@ -690,7 +691,7 @@ export async function writeProjectGraph(
         return {
           ok: false,
           code: 'unsupported',
-          error: `This build cannot write graph format ${parsed.format}.`
+          error: t('main.error.cannotWriteGraphFormat', { format: parsed.format })
         }
       }
       canonical = serializeGraphDocument(parsed)
@@ -706,7 +707,7 @@ export async function writeProjectGraph(
         const graphPath = join(dir, 'graph.json')
         await writeTextAtomic(graphPath, canonical)
         const hash = await refreshFileHash(graphPath, undefined)
-        if (!hash) throw new Error('graph.json disappeared before it could be published.')
+        if (!hash) throw new Error(t('main.error.graphDisappeared'))
         const graphHash: ProjectGraphHash = { format: GRAPH_DOCUMENT_FORMAT, ...hash }
         meta.graphHash = graphHash
         await writeMetaAtomic(dir, meta)
@@ -879,7 +880,7 @@ export async function saveProject(
       if (!(await exists(songPath))) {
         return {
           ok: false as const,
-          error: 'That song is no longer where it was — reopen it and save again.'
+          error: t('main.error.songMoved')
         }
       }
       // A song already inside a project folder saves in place, wherever that
@@ -915,7 +916,7 @@ export async function saveProject(
         // Explicit pending vocal replacement: publish the new WAV atomically,
         // then remove the old preferred FLAC. Never leave a stale FLAC winning.
         if (settings.pendingLeadVocal) {
-          if (!isIssuedLead(settings.pendingLeadVocal)) throw new Error('The replacement vocal was not produced by this session. Separate it again.')
+          if (!isIssuedLead(settings.pendingLeadVocal)) throw new Error(t('main.error.leadVocalNotIssued'))
           const vocal = join(dir, 'stems', 'vocals.wav')
           await copyFile(settings.pendingLeadVocal, vocal + '.part')
           await rename(vocal + '.part', vocal)
@@ -1025,13 +1026,13 @@ export async function renameProject(
     // out from under it — see withProjectLock
     return await withProjectLock(oldDir, async () => {
       const meta = await readMeta(oldDir)
-      if (!meta) return { ok: false as const, error: 'This song is not a saved project yet.' }
+      if (!meta) return { ok: false as const, error: t('main.error.songNotSavedYet') }
       const name = safeName(newName)
       // rename where the project lives (for a library project that is the root
       // itself) — renaming must never double as a move out of a shared folder
       const newDir = join(dirname(oldDir), name)
       if (newDir !== oldDir && (await exists(newDir))) {
-        return { ok: false as const, error: `A project called “${name}” already exists.` }
+        return { ok: false as const, error: t('main.error.projectNameExists', { name }) }
       }
       if (newDir !== oldDir) await rename(oldDir, newDir)
       // the folder just moved — outside the library that lands on an unregistered
@@ -1082,12 +1083,12 @@ export async function deleteProject(
   try {
     const target = resolve(dir)
     if (!inLibrary(target) || target === projectsRoot()) {
-      return { ok: false, error: 'That folder is not a project in your library.' }
+      return { ok: false, error: t('main.error.folderNotInLibrary') }
     }
     return await withProjectLock(target, async () => {
       // read the name before the folder goes: the caller says what it deleted
       const meta = await readMeta(target)
-      if (!meta) return { ok: false as const, error: 'That folder is not a saved project.' }
+      if (!meta) return { ok: false as const, error: t('main.error.folderNotSavedProject') }
       const name = meta.name ?? basename(target)
       await rm(target, { recursive: true, force: true })
       // Drive is still carrying it — the reconcile trashes remote folders the
@@ -1116,13 +1117,13 @@ export async function importProject(
     // half-written project into the library — take a number
     return await withProjectLock(src, async () => {
       const meta = await readMeta(src)
-      if (!meta) return { ok: false as const, error: 'This song is not a saved project yet.' }
-      if (inLibrary(src)) return { ok: false as const, error: 'This project is already in your library.' }
+      if (!meta) return { ok: false as const, error: t('main.error.songNotSavedYet') }
+      if (inLibrary(src)) return { ok: false as const, error: t('main.error.projectAlreadyInLibrary') }
 
       const name = safeName(meta.name ?? basename(src))
       const dst = join(projectsRoot(), name)
       if (await exists(dst)) {
-        return { ok: false as const, error: `A project called “${name}” is already in your library.` }
+        return { ok: false as const, error: t('main.error.projectNameAlreadyInLibrary', { name }) }
       }
       await mkdir(projectsRoot(), { recursive: true })
 

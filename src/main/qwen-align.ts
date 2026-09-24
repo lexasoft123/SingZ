@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import type { LyricLine } from '../shared/types'
 import { type Anchor } from './align'
 import { log } from './log'
+import { t } from '../shared/i18n'
 import { onChildSettled } from './child-exit'
 import { spawnEnv } from './separation'
 import { qwenAlignerPath } from './models'
@@ -204,16 +205,16 @@ export async function alignWordsInChunks(
   signal?: AbortSignal
 ): Promise<Anchor[]> {
   const exe = await resolveQwenAligner()
-  if (!exe) throw new Error('The word aligner is missing from this build.')
+  if (!exe) throw new Error(t('main.error.wordAlignerMissing'))
   const model = qwenAlignerPath()
-  if (!(await exists(model))) throw new Error('The word aligner model is not installed.')
+  if (!(await exists(model))) throw new Error(t('main.error.wordAlignerModelNotInstalled'))
 
   const flat = ref.flatMap((l, li) => l.words.map((w, wi) => ({ li, wi, w: w.w })))
   const scratch = await mkdtemp(join(tmpdir(), 'singz-align-'))
   const anchors: Anchor[] = []
   try {
     for (let ci = 0; ci < chunks.length; ci++) {
-      if (signal?.aborted) throw new Error('Cancelled.')
+      if (signal?.aborted) throw new Error(t('main.error.cancelled'))
       const mine = flat.filter((_, k) => chunkOfWord[k] === ci)
       if (mine.length === 0) continue
       const wav = join(scratch, `c${ci}.wav`)
@@ -230,7 +231,7 @@ export async function alignWordsInChunks(
       )
       // Before the unplaced-words warning: a cancelled chunk has no words to
       // place, and the run is over either way.
-      if (signal?.aborted) throw new Error('Cancelled.')
+      if (signal?.aborted) throw new Error(t('main.error.cancelled'))
       onProgress(((ci + 1) / chunks.length) * 100)
       if (!placed) {
         log('lyrics', `align: chunk ${ci} did not place its ${mine.length} words`, 'warn')

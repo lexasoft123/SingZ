@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Alert, Pressable, ScrollView, Share, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { clearLog, fmtTime, formatLog, logEntries, onLogLine, type LogEntry } from '../log'
+import { t, tn, useLocale } from '../i18n'
 import { C } from './bits'
 
 /**
@@ -15,6 +16,7 @@ export default function LogPanel({
   onClose: () => void
 }): React.JSX.Element {
   const insets = useSafeAreaInsets()
+  useLocale()
   const [entries, setEntries] = useState<LogEntry[]>([])
   const body = useRef<ScrollView>(null)
   /** Follow new lines unless the reader scrolled up to look at something. */
@@ -39,10 +41,10 @@ export default function LogPanel({
   /* On a release build there is no inspector and no run-as: this log is the
      whole record of what happened. One unconfirmed tap used to wipe it. */
   const confirmClear = useCallback(() => {
-    Alert.alert('Clear the log?', 'This is the only record of what the app has done.', [
-      { text: 'Keep it', style: 'cancel' },
+    Alert.alert(t('phone.app.log.confirmTitle'), t('phone.app.log.confirmBody'), [
+      { text: t('phone.app.log.keepIt'), style: 'cancel' },
       {
-        text: 'Clear',
+        text: t('phone.app.log.clear'),
         style: 'destructive',
         onPress: () => void clearLog().then(() => setEntries([]))
       }
@@ -52,22 +54,22 @@ export default function LogPanel({
   return (
     <View style={[s.sheet, { paddingTop: insets.top + 14, paddingBottom: insets.bottom + 10 }]}>
       <View style={s.head}>
-        <Text style={s.title}>Log</Text>
-        <Text style={s.count}>{entries.length} lines</Text>
+        <Text style={s.title}>{t('phone.app.log.title')}</Text>
+        <Text style={s.count}>{tn('phone.app.log.lines', entries.length)}</Text>
         <View style={s.actions}>
-          <Pressable hitSlop={8} onPress={share} accessibilityRole="button" accessibilityLabel="Share the log">
-            <Text style={s.link}>Share</Text>
+          <Pressable hitSlop={8} onPress={share} accessibilityRole="button" accessibilityLabel={t('phone.app.log.shareA11y')}>
+            <Text style={s.link}>{t('phone.app.log.share')}</Text>
           </Pressable>
           <Pressable
             hitSlop={8}
             onPress={confirmClear}
             accessibilityRole="button"
-            accessibilityLabel="Clear the log"
+            accessibilityLabel={t('phone.app.log.clearA11y')}
           >
-            <Text style={s.link}>Clear</Text>
+            <Text style={s.link}>{t('phone.app.log.clear')}</Text>
           </Pressable>
-          <Pressable hitSlop={8} onPress={onClose} accessibilityRole="button" accessibilityLabel="Close the log">
-            <Text style={s.link}>Close</Text>
+          <Pressable hitSlop={8} onPress={onClose} accessibilityRole="button" accessibilityLabel={t('phone.app.log.closeA11y')}>
+            <Text style={s.link}>{t('phone.app.log.close')}</Text>
           </Pressable>
         </View>
       </View>
@@ -82,7 +84,7 @@ export default function LogPanel({
           if (stick.current) body.current?.scrollToEnd({ animated: false })
         }}
       >
-        {entries.length === 0 && <Text style={s.empty}>Nothing logged yet.</Text>}
+        {entries.length === 0 && <Text style={s.empty}>{t('phone.app.log.empty')}</Text>}
         {entries.map((e, i) => (
           <View key={`${e.t}-${i}`} style={s.row}>
             <Text style={s.time}>{fmtTime(e.t)}</Text>

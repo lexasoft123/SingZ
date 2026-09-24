@@ -1,5 +1,6 @@
 import { STEM_META, CUSTOM_COLORS as KIT_CUSTOM_COLORS } from '@singz/ui/stems'
 import type { DesktopPlaybackProvider, StemName } from '../../shared/types'
+import { t, type Key } from './i18n'
 
 export interface UITrack {
   id: string
@@ -259,10 +260,26 @@ export const TRACK_META: Record<string, { label: string; color: string }> = STEM
  */
 export const CUSTOM_COLORS = KIT_CUSTOM_COLORS
 
+/** A stem's name in the current language — the kit's table holds English only. */
+export function stemLabel(id: string): string | undefined {
+  return id in TRACK_META ? t(`stem.${id}` as Key) : undefined
+}
+
+/** The name the backing-vocal split gives its lane. Saved into project.json
+ *  (and synced), so it stays English; laneLabel translates it on screen. */
+export const BACKING_VOCALS_LABEL = 'Backing vocals'
+
+/** What a lane is called on screen: a stem by its translated name, the
+ *  singer's own track by the name it was given. */
+export function laneLabel(track: Pick<UITrack, 'id' | 'label' | 'custom'>): string {
+  if (track.custom) return track.label === BACKING_VOCALS_LABEL ? t('app.split.backingVocalsLabel') : track.label
+  return stemLabel(track.id) || track.label
+}
+
 /** "harmony take 2.wav" → "Harmony take 2" (the lane's name). */
 export function trackLabel(name: string): string {
   const clean = name.replace(/[_-]+/g, ' ').replace(/\s{2,}/g, ' ').trim()
-  if (!clean) return 'Track'
+  if (!clean) return t('player.track.untitled')
   return clean[0].toUpperCase() + clean.slice(1)
 }
 

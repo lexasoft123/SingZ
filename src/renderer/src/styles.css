@@ -23,8 +23,11 @@
      Assigning a parallel --font-display instead left kit rules (`button`)
      resolving --sz-font-display to the kit's system-ui fallback, which
      silently reset the typeface of every button in the app. */
-  --sz-font-display: 'Bricolage Grotesque Variable', system-ui, sans-serif;
-  --sz-font-mono: 'Martian Mono Variable', ui-monospace, 'SF Mono', monospace;
+  /* Bricolage carries no Cyrillic or CJK: Russian falls through to system-ui
+     (SF Pro / Segoe UI), and Chinese to the named Simplified faces — Segoe
+     UI has none, and Chromium's own pick on Windows is not always YaHei. */
+  --sz-font-display: 'Bricolage Grotesque Variable', system-ui, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --sz-font-mono: 'Martian Mono Variable', ui-monospace, 'SF Mono', 'PingFang SC', 'Microsoft YaHei', monospace;
   --font-display: var(--sz-font-display);
   --font-mono: var(--sz-font-mono);
   /* NOT a kit token: read as a JS number in PitchStrip to map x <-> time.
@@ -143,11 +146,14 @@ body::after {
 /* One rule, not two: this was declared here AND again ~1740 lines down, where
    the second copy added the flex row. Both are folded in — same computed
    result, but there is no longer a second place to edit and miss. */
+/* In the flow, not absolutely centred: it takes the space between the left
+   group and the chips and ellipsizes inside it, so no language's longer chip
+   labels can land on top of it (Russian did, at 1240 px). The strip itself
+   stays a window-drag area; only the name, pencil and input take clicks. */
 .song-title {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
-  max-width: 42%;
+  flex: 1 1 0;
+  min-width: 0;
+  justify-content: center;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -164,6 +170,37 @@ body::after {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+/* one line per control, in every language: at the 940 px minimum window a
+   Russian label would otherwise wrap and double the pill's height — the song
+   title is the part that gives way (it ellipsizes) */
+.titlebar button,
+.titlebar .chip-status {
+  white-space: nowrap;
+}
+
+/* Below 1100 px the chips no longer fit at full size — on Windows the bar
+   also gives 150 px to the window buttons, and a Russian row is the longest.
+   Tighter gaps, and Catalog keeps its icon (its tooltip says the rest). */
+@media (max-width: 1100px) {
+  .titlebar {
+    gap: 8px;
+  }
+
+  .header-right {
+    gap: 6px;
+  }
+
+  .catalog-btn .catalog-label {
+    display: none;
+  }
+}
+
+/* the flag-only language switcher sits beside the gear; its menu hangs off
+   the right edge so it never crosses the window buttons on Windows */
+.titlebar .lang {
+  flex: none;
 }
 
 .persistent-monitor {
@@ -748,6 +785,14 @@ button.chip-status:hover {
   font-size: 11px;
   color: var(--faint);
   letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+/* a translated label (Russian runs longest) must not break one of the bar's
+   own pills onto two lines — only the bar's: the popovers' fixed-width rows
+   still need theirs to wrap */
+.transport-right > .pill {
+  white-space: nowrap;
 }
 
 .transport-right {
@@ -1800,7 +1845,12 @@ button.chip-status:hover {
   letter-spacing: 0.04em;
 }
 
+.song-title > * {
+  -webkit-app-region: no-drag;
+}
+
 .song-title-text {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

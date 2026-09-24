@@ -1,3 +1,4 @@
+import { readSourceWithEnglish } from './i18n-source'
 import { Children, createElement, type ReactElement } from 'react'
 import { readFileSync } from 'node:fs'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -7,13 +8,13 @@ import {
   applyAfterMonitorStops,
   DesktopMonitorCoordinator,
   runSongTransportToggle,
-  SONG_TRANSPORT_AUDIO_LEASE_COPY,
+  songTransportAudioLeaseCopy,
   SettingsRouteApplicationQueue
 } from '../../src/renderer/src/audio/monitoring'
 import {
   applyPlaybackOutputSelection,
   canRetrySettingsAfterPlaybackRouteFailure,
-  PLAYBACK_OUTPUT_UNCONFIRMED_COPY,
+  playbackOutputUnconfirmedCopy,
   PlaybackOutputArbiter,
   PlaybackOutputRouteSafety,
   PlaybackOutputSelectionError,
@@ -37,11 +38,11 @@ import { pitchMicrophoneUnavailableCopy } from '../../src/renderer/src/component
 import VocalTraining, {
   scheduleTrainingFeedbackAdvance,
   shouldAutoStartTrainingPrompt,
-  TRAINING_AUDIO_LEASE_COPY,
+  trainingAudioLeaseCopy,
   runTrainingAudioAction
 } from '../../src/renderer/src/components/VocalTraining'
 import { emptyTrainingProgress } from '../../src/shared/training-progress'
-import { TRAINING_CLEANUP_AUDIO_BLOCKED_COPY } from '../../src/renderer/src/audio/training-cleanup'
+import { trainingCleanupAudioBlockedCopy } from '../../src/renderer/src/audio/training-cleanup'
 import {
   desktopTrainingReducer,
   INITIAL_DESKTOP_TRAINING_STATE
@@ -397,7 +398,7 @@ describe('playback output latest-intent arbitration', () => {
             routeStatus = null
           }
         } catch (repairError) {
-          routeStatus = PLAYBACK_OUTPUT_UNCONFIRMED_COPY
+          routeStatus = playbackOutputUnconfirmedCopy()
           throw repairError
         }
       }
@@ -417,7 +418,7 @@ describe('playback output latest-intent arbitration', () => {
     await expect(selectB).resolves.toBe(false)
     await expect(selectC).rejects.toThrow('A handoff failed')
     expect(setOutput.mock.calls.map(([sink]) => sink)).toEqual(['B', 'C', 'A', 'A'])
-    expect(routeStatus).toBe(PLAYBACK_OUTPUT_UNCONFIRMED_COPY)
+    expect(routeStatus).toBe(playbackOutputUnconfirmedCopy())
     expect(routeStatus).not.toContain('system default')
     expect(routeSafety.unconfirmed).toBe(true)
     expect(coordinator.hasRouteTransitionLease).toBe(true)
@@ -614,7 +615,7 @@ describe('playback output latest-intent arbitration', () => {
       unconfirmed: true,
       busy: queue.busySnapshot(),
       state: 'idle',
-      status: PLAYBACK_OUTPUT_UNCONFIRMED_COPY,
+      status: playbackOutputUnconfirmedCopy(),
       onRetry: vi.fn()
     }))
     expect(pendingHtml).toMatch(/<button[^>]+disabled=""/)
@@ -634,7 +635,7 @@ describe('playback output latest-intent arbitration', () => {
       unconfirmed: true,
       busy: queue.busySnapshot(),
       state: 'idle',
-      status: PLAYBACK_OUTPUT_UNCONFIRMED_COPY,
+      status: playbackOutputUnconfirmedCopy(),
       onRetry: vi.fn()
     }))
     expect(settledHtml).toContain('Retry output route')
@@ -677,7 +678,7 @@ describe('playback output latest-intent arbitration', () => {
       commit: vi.fn()
     })
     routeSafety.retainUnconfirmed()
-    let status: string | null = PLAYBACK_OUTPUT_UNCONFIRMED_COPY
+    let status: string | null = playbackOutputUnconfirmedCopy()
 
     try {
       await arbiter.select('B')
@@ -699,7 +700,7 @@ describe('playback output latest-intent arbitration', () => {
     expect(unconfirmedChanges).toEqual([true, false])
     expect(release).toHaveBeenCalledOnce()
 
-    const appSource = readFileSync('src/renderer/src/App.tsx', 'utf8')
+    const appSource = readSourceWithEnglish('src/renderer/src/App.tsx')
     expect(appSource).toMatch(
       /err instanceof PlaybackOutputSelectionError && !err\.repairRequired\)[\s\S]*outputRouteSafety\.confirmCurrentRoute\(\)[\s\S]*still on the previous one/
     )
@@ -1001,14 +1002,14 @@ describe('persistent app-shell monitoring ownership', () => {
   })
 
   it('makes the pitch microphone visibly unavailable during Settings or an audio lease', () => {
-    const source = readFileSync('src/renderer/src/components/PitchStrip.tsx', 'utf8')
+    const source = readSourceWithEnglish('src/renderer/src/components/PitchStrip.tsx')
     const appSource = readFileSync('src/renderer/src/App.tsx', 'utf8')
     expect(source).toContain('audioLeaseBlocked?: boolean')
     expect(source).toContain("mic === 'starting' || micUnavailableCopy !== null")
     expect(source).toContain('title={micUnavailableCopy ??')
     expect(source).toContain('aria-label={micUnavailableCopy ??')
     expect(source).toContain('Microphone unavailable while Settings is open')
-    expect(source).toContain("audioSafetyBlockedCopy('Microphone')")
+    expect(source).toContain("audioSafetyBlockedCopy(t('settings.subject.microphone'")
     expect(source).toContain('setSuspended(settingsOwnsMic || audioLeaseBlocked)')
     expect(appSource).toContain('settingsOwnsMic={showSettings}')
     expect(appSource).toContain(
@@ -1625,9 +1626,9 @@ describe('persistent app-shell monitoring ownership', () => {
     expect(html).not.toContain('persistent-monitor-stop')
 
     const copies = [
-      SONG_TRANSPORT_AUDIO_LEASE_COPY,
+      songTransportAudioLeaseCopy(),
       pitchMicrophoneUnavailableCopy(false, true),
-      TRAINING_AUDIO_LEASE_COPY
+      trainingAudioLeaseCopy()
     ]
     expect(audioSafetyLeaseKind(coordinator.shellSnapshot)).toBe('route-only')
     for (const copy of copies) {
@@ -1637,8 +1638,8 @@ describe('persistent app-shell monitoring ownership', () => {
     }
 
     const appSource = readFileSync('src/renderer/src/App.tsx', 'utf8')
-    expect(appSource).toContain('? TRAINING_CLEANUP_SONG_BLOCKED_COPY')
-    expect(appSource).toContain(': SONG_TRANSPORT_AUDIO_LEASE_COPY')
+    expect(appSource).toContain('? trainingCleanupSongBlockedCopy()')
+    expect(appSource).toContain(': songTransportAudioLeaseCopy()')
 
     lease.release()
     expect(coordinator.shellSnapshot.hasRouteTransitionLease).toBe(false)
@@ -2553,7 +2554,7 @@ describe('vocal-training audio lease guard', () => {
       onBackToSong: vi.fn()
     }))
 
-    expect(html).toContain(TRAINING_AUDIO_LEASE_COPY)
+    expect(html).toContain(trainingAudioLeaseCopy())
     expect(html).toContain('Open Settings to review the audio owner or retry the output route')
     expect(html).not.toContain('Stop headphone monitoring')
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>.*Test C4/s)
@@ -2572,7 +2573,7 @@ describe('vocal-training audio lease guard', () => {
       mic: {} as never,
       onMicDevice: vi.fn(),
       audioLeaseBlocked: true,
-      audioLeaseCopy: TRAINING_CLEANUP_AUDIO_BLOCKED_COPY,
+      audioLeaseCopy: trainingCleanupAudioBlockedCopy(),
       onSetupChange: vi.fn(),
       referenceVolume: 1,
       onReferenceVolumeChange: vi.fn(),
@@ -2581,14 +2582,14 @@ describe('vocal-training audio lease guard', () => {
       onBackToSong: vi.fn()
     }))
 
-    expect(html).toContain(TRAINING_CLEANUP_AUDIO_BLOCKED_COPY)
+    expect(html).toContain(trainingCleanupAudioBlockedCopy())
     expect(html).not.toContain('Open Settings to review the audio owner')
     expect(html).not.toContain('headphone monitoring')
     expect(pitchMicrophoneUnavailableCopy(
       false,
       true,
-      TRAINING_CLEANUP_AUDIO_BLOCKED_COPY
-    )).toBe(TRAINING_CLEANUP_AUDIO_BLOCKED_COPY)
+      trainingCleanupAudioBlockedCopy()
+    )).toBe(trainingCleanupAudioBlockedCopy())
   })
 
   it('blocks audio preparation, continue, and replay entry points but leaves key setup available', () => {

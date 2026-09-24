@@ -50,7 +50,7 @@ import {
 import { MultitrackEngine } from './audio/engine'
 import {
   canRetrySettingsAfterPlaybackRouteFailure,
-  PLAYBACK_OUTPUT_UNCONFIRMED_COPY,
+  playbackOutputUnconfirmedCopy,
   PlaybackOutputArbiter,
   PlaybackOutputRouteSafety,
   PlaybackOutputSelectionError
@@ -58,7 +58,7 @@ import {
 import {
   DesktopMonitorCoordinator,
   runSongTransportToggle,
-  SONG_TRANSPORT_AUDIO_LEASE_COPY,
+  songTransportAudioLeaseCopy,
   SettingsRouteApplicationQueue,
   type MonitorShellSnapshot
 } from './audio/monitoring'
@@ -66,9 +66,9 @@ import { DesktopTrainingMicCapture } from './audio/training-mic'
 import {
   awaitTrainingCleanupExit,
   confirmTrainingAudioStopped,
-  TRAINING_CLEANUP_AUDIO_BLOCKED_COPY,
-  TRAINING_CLEANUP_SETTINGS_BLOCKED_COPY,
-  TRAINING_CLEANUP_SONG_BLOCKED_COPY,
+  trainingCleanupAudioBlockedCopy,
+  trainingCleanupSettingsBlockedCopy,
+  trainingCleanupSongBlockedCopy,
   queueTrainingSectionExit,
   TrainingCleanupCoordinator,
   type TrainingCleanupPhase
@@ -94,6 +94,8 @@ import type LogPanelComponent from './components/LogPanel'
 import LyricsPanel from './components/LyricsPanel'
 import { lyricsJobProgressed, lyricsJobSettled, lyricsJobStarted, type LyricsState } from './lyrics-state'
 import { createLazyDialogRoute } from './components/LazyDialogRoute'
+import { getLocale, t, tn, useLocale } from './i18n'
+import { Language } from './components/Language'
 
 // The lyrics editor rides outside the boot bundle like VocalTraining does —
 // it exists only behind an explicit click, and the renderer entry has a
@@ -132,7 +134,7 @@ import {
   type AudioPrefs,
   type TimeView,
   type TrainingConfig,
-  type UITrack
+  type UITrack, stemLabel, BACKING_VOCALS_LABEL
 } from './model'
 import {
   createLoadedSongIdentity,
@@ -168,10 +170,13 @@ const RecoverableLibraryImport = createLazyDialogRoute<
     () => import('./components/LibraryImport?dialog-route=recovery')
   ],
   {
-    name: 'Add to your library',
-    opening: 'Opening library options…',
-    failureTitle: 'Library options didn’t open',
-    failureMessage: 'The library options could not be loaded. The project stays where it is.'
+    // Read at every render, not once at module load — the module-level
+    // route objects below are created ONCE at import time, so a plain
+    // string here would freeze in whatever language was current then.
+    get name() { return t('app.dialog.libraryImport.name') },
+    get opening() { return t('app.dialog.libraryImport.opening') },
+    get failureTitle() { return t('app.dialog.libraryImport.failureTitle') },
+    get failureMessage() { return t('app.dialog.libraryImport.failureMessage') }
   },
   (props) => !props.busy
 )
@@ -181,10 +186,10 @@ const RecoverableLogPanel = createLazyDialogRoute<ComponentProps<typeof LogPanel
   // @ts-expect-error See the primary attempt above.
   () => import('./components/LogPanel?dialog-route=recovery')
 ], {
-  name: 'Log',
-  opening: 'Opening the log…',
-  failureTitle: 'Log didn’t open',
-  failureMessage: 'The log viewer could not be loaded. SingZ is still running.'
+  get name() { return t('app.dialog.logPanel.name') },
+  get opening() { return t('app.dialog.logPanel.opening') },
+  get failureTitle() { return t('app.dialog.logPanel.failureTitle') },
+  get failureMessage() { return t('app.dialog.logPanel.failureMessage') }
 })
 const RecoverableProjectPicker = createLazyDialogRoute<
   ComponentProps<typeof ProjectPickerComponent>
@@ -194,10 +199,10 @@ const RecoverableProjectPicker = createLazyDialogRoute<
   // @ts-expect-error See the primary attempt above.
   () => import('./components/ProjectPicker?dialog-route=recovery')
 ], {
-  name: 'Projects',
-  opening: 'Opening your projects…',
-  failureTitle: 'Projects didn’t open',
-  failureMessage: 'Your project library could not be loaded. No projects were changed.'
+  get name() { return t('app.dialog.projectPicker.name') },
+  get opening() { return t('app.dialog.projectPicker.opening') },
+  get failureTitle() { return t('app.dialog.projectPicker.failureTitle') },
+  get failureMessage() { return t('app.dialog.projectPicker.failureMessage') }
 })
 const RecoverableSetupModal = createLazyDialogRoute<ComponentProps<typeof SetupModalComponent>>([
   // @ts-expect-error Vite/Rollup treats the query as a distinct module id.
@@ -205,10 +210,10 @@ const RecoverableSetupModal = createLazyDialogRoute<ComponentProps<typeof SetupM
   // @ts-expect-error See the primary attempt above.
   () => import('./components/SetupModal?dialog-route=recovery')
 ], {
-  name: 'Stem splitting setup',
-  opening: 'Opening stem splitting setup…',
-  failureTitle: 'Setup didn’t open',
-  failureMessage: 'Stem splitting setup could not be loaded. The player is still available.'
+  get name() { return t('app.dialog.setupModal.name') },
+  get opening() { return t('app.dialog.setupModal.opening') },
+  get failureTitle() { return t('app.dialog.setupModal.failureTitle') },
+  get failureMessage() { return t('app.dialog.setupModal.failureMessage') }
 })
 type Phase = 'empty' | 'loading' | 'ready'
 
@@ -604,7 +609,7 @@ function EngineChip({
   if (!status) {
     return (
       <span className="chip-status">
-        <span className="dot idle" /> checking splitter…
+        <span className="dot idle" /> {t('app.engine.checking')}
       </span>
     )
   }
@@ -613,21 +618,24 @@ function EngineChip({
       <button
         type="button"
         className="chip-status"
-        title={`${status.command} — click to manage AI models`}
+        title={t('app.engine.manageTitle', { command: status.command })}
         onClick={onClick}
       >
-        <span className="dot ok" /> splitter ready
+        <span className="dot ok" /> {t('app.engine.ready')}
       </button>
     )
   }
   return (
     <button type="button" className="chip-status warn" onClick={onClick}>
-      <span className="dot warn" /> splitter setup
+      <span className="dot warn" /> {t('app.engine.setup')}
     </button>
   )
 }
 
 export default function App(): React.JSX.Element {
+  // Re-render on a language switch; every child App renders follows. Nothing
+  // remounts, so a song keeps playing through it.
+  useLocale()
   const [engine] = useState(() => {
     const e = new MultitrackEngine()
     ;(window as unknown as { __engine: MultitrackEngine }).__engine = e
@@ -822,9 +830,9 @@ export default function App(): React.JSX.Element {
   )
   const analysisNote =
     melody.status === 'computing'
-      ? { label: 'Reading the melody', p: melody.p }
+      ? { label: t('app.analysis.readingMelody'), p: melody.p }
       : beatProg !== null
-        ? { label: 'Finding the beat', p: beatProg }
+        ? { label: t('app.analysis.findingBeat'), p: beatProg }
         : null
   const [transpose, setTranspose] = useState(0)
   const [tempoRate, setTempoRate] = useState(1)
@@ -1126,8 +1134,8 @@ export default function App(): React.JSX.Element {
       outputRouteSafety.retainUnconfirmed()
       setOutputStatus(
         err instanceof DOMException && err.name === 'NotAllowedError'
-          ? "SingZ wasn't allowed to confirm the playback route — choose an output or retry"
-          : PLAYBACK_OUTPUT_UNCONFIRMED_COPY
+          ? t('app.output.confirmDenied')
+          : playbackOutputUnconfirmedCopy()
       )
       if (retry) throw err
       return { kind: 'unconfirmed', error: err } as const
@@ -1138,7 +1146,7 @@ export default function App(): React.JSX.Element {
     }
     outputRouteSafety.confirmCurrentRoute()
     setOutputStatus(result.kind === 'missing'
-      ? 'Saved playback device not connected — using the system default'
+      ? t('app.output.missingDefault')
       : null)
     return result
   }, [outputArbiter, outputRouteSafety])
@@ -1170,8 +1178,8 @@ export default function App(): React.JSX.Element {
         if (err instanceof PlaybackOutputSelectionError && !err.repairRequired) {
           outputRouteSafety.confirmCurrentRoute()
           setOutputStatus(name === 'NotAllowedError'
-            ? "SingZ wasn't allowed to switch playback devices — still on the previous one"
-            : 'Could not switch to that device — still on the previous one')
+            ? t('app.output.switchDenied')
+            : t('app.output.switchFailed'))
           return
         }
         // Keep the Settings route lease until the double-failure repair has
@@ -1180,7 +1188,7 @@ export default function App(): React.JSX.Element {
         // preview or a newer user route.
         if (err instanceof PlaybackOutputSelectionError && err.repairRequired) {
           outputRouteSafety.retainUnconfirmed()
-          setOutputStatus(PLAYBACK_OUTPUT_UNCONFIRMED_COPY)
+          setOutputStatus(playbackOutputUnconfirmedCopy())
           const repair = await reconcileOutput(err)
           if (repair?.kind === 'unconfirmed') throw repair.error
         }
@@ -1267,7 +1275,7 @@ export default function App(): React.JSX.Element {
   useEffect(() => monitorCoordinator.subscribeShell((snapshot) => {
     setMonitorShell(snapshot)
     if (snapshot.phase === 'error' && !snapshot.hasAudioSafetyLease) {
-      setNotice(`Headphone monitoring stopped: ${snapshot.message}`)
+      setNotice(t('app.monitor.stopped', { message: snapshot.message }))
     }
   }), [monitorCoordinator])
 
@@ -1304,7 +1312,7 @@ export default function App(): React.JSX.Element {
       beatInfoRef.current = accepted
       setBeatInfo(accepted)
       setSongInfo((current) => ({ ...current, bpm: accepted?.bpm ?? null }))
-      setNotice(`The native beat-grid update was not applied: ${String(error)}`)
+      setNotice(t('app.native.beatNotApplied', { error: String(error) }))
     })
   }, [engine, beatInfo])
 
@@ -1315,7 +1323,7 @@ export default function App(): React.JSX.Element {
     void engine.setMetronome(metCfg).catch((error) => {
       if (mutation !== metronomeMutationSeq.current || songVersion !== loadSeq.current || songEpoch !== engine.songEpoch) return
       setMetCfg(engine.metronome)
-      setNotice(`The native metronome update was not applied: ${String(error)}`)
+      setNotice(t('app.native.metronomeNotApplied', { error: String(error) }))
     })
   }, [engine, metCfg])
 
@@ -1412,8 +1420,7 @@ export default function App(): React.JSX.Element {
         models,
         origin: 'manual',
         focusModel: 'qwen-asr',
-        notice:
-          'Lyrics transcription and Check & align now use Qwen3-ASR, a speech model trained on singing — it hears sung words markedly better than the old one. Get it below when it suits you; the old model is removed once it is in.'
+        notice: t('app.wizard.qwenNotice')
       })
       void window.singz.dismissQwenOffer()
     })
@@ -1449,7 +1456,7 @@ export default function App(): React.JSX.Element {
 
   const openAudioSettings = useCallback((): boolean => {
     if (trainingCleanupCoordinator.blocksAudio) {
-      setNotice(TRAINING_CLEANUP_SETTINGS_BLOCKED_COPY)
+      setNotice(trainingCleanupSettingsBlockedCopy())
       return false
     }
     setShowSettings(true)
@@ -1600,7 +1607,7 @@ export default function App(): React.JSX.Element {
         })
         setLoadProgress({ msg, frac })
       }
-      mark('Opening…', 0)
+      mark(t('app.load.opening'), 0)
       setSong(createLoadedSongIdentity(reg.path,reg.name,`song-load-${seq}`))
       setIsProject(Boolean(reg.project))
       setLeadVocalSeparated(reg.project?.settings.leadVocalSeparated === true)
@@ -1627,7 +1634,7 @@ export default function App(): React.JSX.Element {
         for (const c of defs) {
           const read = reads.get(c.id)
           if (!read) {
-            setNotice(`“${c.label}” could not be read — that lane is missing from the mix.`)
+            setNotice(t('app.load.laneMissing', { label: c.label }))
             continue
           }
           if (read.buffer) fresh.set(c.id, read.buffer)
@@ -1687,7 +1694,7 @@ export default function App(): React.JSX.Element {
              what "Reading the stems" used to spend its seconds decoding. A
              stem that can be neither measured nor decoded sinks the open,
              exactly as a stem that would not decode always has. */
-          const reading = creepUntil(mark, 'Reading the stems…', 0.05, 0.58, 1400)
+          const reading = creepUntil(mark, t('app.load.readingStems'), 0.05, 0.58, 1400)
           let reads: Map<string, LaneRead>
           // Decided ONCE over every lane the song will have — stems and the
           // singer's added tracks alike — because Play asks the same gate
@@ -1715,12 +1722,20 @@ export default function App(): React.JSX.Element {
             reading.stop()
           }
           if (seq !== loadSeq.current) return
-          mark('Drawing the waveforms…', 0.62)
+          mark(t('app.load.drawingWaveforms'), 0.62)
           const order = audibleStems(rawOrder, reads)
       const hidden = rawOrder.filter((st) => !order.includes(st))
       if (hidden.length > 0) {
         setNotice(
-          `Split into six stems — ${hidden.join(' and ')} ${hidden.length > 1 ? 'are' : 'is'} silent in this song, so ${hidden.length > 1 ? 'their lanes are' : 'its lane is'} hidden.`
+          tn('app.load.silentStems', hidden.length, {
+            // English keeps its old wording ("guitar and piano"); other
+            // languages get the stems' own names, joined their way
+            list: getLocale() === 'en'
+              ? hidden.join(' and ')
+              : new Intl.ListFormat(getLocale(), { type: 'conjunction' }).format(
+                  hidden.map((id) => (stemLabel(id) ?? id).toLocaleLowerCase(getLocale()))
+                )
+          })
         )
       }
           // Tracks the singer added themselves are read after the stems and
@@ -1738,7 +1753,7 @@ export default function App(): React.JSX.Element {
             ...(await decodeCustom(proj.settings.custom, fresh, host))
           ]
           if (seq !== loadSeq.current) return
-          mark('Starting playback…', 0.9)
+          mark(t('app.load.startingPlayback'), 0.9)
           engine.load(
             lanes.map((t) => ({ id: t.id, buffer: fresh.get(t.id) ?? null, duration: t.duration, path: t.sourcePath })),
             { graphDocument }
@@ -1754,10 +1769,10 @@ export default function App(): React.JSX.Element {
           // Restore training BEFORE karaoke may reopen: its auto-mute must
           // know training governs the vocals (the ref is set synchronously —
           // state alone would land a render too late).
-          const tn = proj.settings.training
-          if (tn) {
-            setTrainCfg(sanitizeTraining(tn))
-            if (tn.on === true) {
+          const savedTraining = proj.settings.training
+          if (savedTraining) {
+            setTrainCfg(sanitizeTraining(savedTraining))
+            if (savedTraining.on === true) {
               setTraining(true)
               trainingRef.current = true
             }
@@ -1907,8 +1922,8 @@ export default function App(): React.JSX.Element {
         setError(
           projectGraphModule !== null &&
           err instanceof projectGraphModule.DesktopProjectGraphLoadError
-            ? `Could not load this project’s DSP graph. ${err.message}`
-            : 'Could not decode that audio file.'
+            ? t('app.load.graphError', { message: err.message })
+            : t('app.load.decodeFailed')
         )
       }
     },
@@ -1919,7 +1934,7 @@ export default function App(): React.JSX.Element {
     async (file: File) => {
       const path = window.singz.pathForFile(file)
       if (!path) {
-        setError('Could not resolve that file on disk.')
+        setError(t('app.file.resolveFailed'))
         return
       }
       await loadPath(path)
@@ -2032,7 +2047,7 @@ export default function App(): React.JSX.Element {
         } catch (err) {
           if (!current()) return false
           console.error('split: could not re-read the song for PCM hand-off:', err)
-          setError('That song could not be re-read for splitting. Try opening it again.')
+          setError(t('app.split.rereadFailed'))
           return false
         }
       }
@@ -2160,7 +2175,7 @@ export default function App(): React.JSX.Element {
         }
       }
       if (!current()) return false
-      throw error instanceof SplitCancelled ? error : new Error('Separation finished, but loading the stem files failed.')
+      throw error instanceof SplitCancelled ? error : new Error(t('app.split.loadStemsFailed'))
     }
   }, [song, engine, loadLanes, splitIsCurrent, showSplitProgress])
 
@@ -2210,12 +2225,16 @@ export default function App(): React.JSX.Element {
           pendingCoreAnalysisRef.current = null
           keyCarriedBySeqRef.current = null
           const taken = new Set(tracksRef.current.map(t => t.id))
+          // customTrackId's argument seeds the generated file/lane id — kept in
+          // English on purpose (see rule 6: not translated, unlike the label below)
           const id = customTrackId('Backing vocals', taken)
           const original = tracksRef.current.find(t => t.id === 'vocals')
           const guide = makeTrack('vocals', laneReadFromBuffer(lead), { sourcePath: result.lead })
           if (original) { guide.muted = original.muted; guide.solo = original.solo; guide.volume = original.volume }
           const harmony = makeTrack(id, laneReadFromBuffer(backing), {
-            label: 'Backing vocals', color: CUSTOM_COLORS[0],
+            // English on purpose: the label is saved into project.json and
+            // synced — laneLabel() translates it on screen
+            label: BACKING_VOCALS_LABEL, color: CUSTOM_COLORS[0],
             custom: { file: result.backing }, sourcePath: result.backing
           })
           loadLanes([...tracksRef.current.map(t => t.id === 'vocals' ? guide : t), harmony],
@@ -2231,7 +2250,7 @@ export default function App(): React.JSX.Element {
           setMelody({ status: 'none' }); melodyRef.current = { status: 'none' }
           setMelodyInfo(null); storedMelodyRef.current = null
           setAnalysisAutoSave(false)
-          setNotice('Lead and backing vocals are ready. The melody now follows the lead. Save the project to keep both lanes; overlapping harmonies may still remain.')
+          setNotice(t('app.split.backingReady'))
           retryLyrics()
           prepMelodyRef.current?.()
         },
@@ -2349,7 +2368,7 @@ export default function App(): React.JSX.Element {
       for (const file of files) {
         const path = window.singz.pathForFile(file)
         if (!path) {
-          setError('Could not resolve that file on disk.')
+          setError(t('app.file.resolveFailed'))
           continue
         }
         const reg = await window.singz.registerTrack(path)
@@ -2373,7 +2392,7 @@ export default function App(): React.JSX.Element {
             })
           )
         } catch {
-          setError(`Could not decode ${reg.name} — try an MP3, WAV, FLAC or M4A.`)
+          setError(t('app.tracks.decodeFailed', { name: reg.name }))
         }
       }
       if (added.length === 0) return
@@ -2383,8 +2402,8 @@ export default function App(): React.JSX.Element {
       const longest = Math.max(...added.map((t) => t.duration))
       setNotice(
         longest > before + 0.05
-          ? `Added ${names} — it starts at 0:00 and runs past the song, so the timeline now ends at ${fmtTime(longest)}. Save the project to keep it.`
-          : `Added ${names} — it starts at 0:00, alongside the stems. Save the project to keep it.`
+          ? t('app.tracks.addedExtends', { names, end: fmtTime(longest) })
+          : t('app.tracks.addedAligned', { names })
       )
     },
     [engine, loadLanes, touchSettings]
@@ -3039,10 +3058,10 @@ export default function App(): React.JSX.Element {
       const lost = settings.custom.filter((c) => !kept.has(c.id)).map((c) => c.label)
       setNotice(
         lost.length > 0
-          ? `Saved to ${res.dir} — but ${lost.join(', ')} could not be copied in (the file is no longer where you added it from).`
+          ? t('app.project.savedMissingFile', { dir: res.dir, names: lost.join(', ') })
           : res.driveSignedOut
-            ? `Saved to ${res.dir} — Google Drive is signed out on this computer, so your phones won't see this until you sign in (Open… screen).`
-            : `Saved to ${res.dir}`
+            ? t('app.project.savedDriveSignedOut', { dir: res.dir })
+            : t('app.project.saved', { dir: res.dir })
       )
       // The seek bar's envelope, measured from stems this app has ALREADY
       // decoded and written beside the hashes the save just refreshed. It buys
@@ -3065,7 +3084,7 @@ export default function App(): React.JSX.Element {
       setTimeout(() => setSaveState('idle'), 2500)
     } else {
       setSaveState('idle')
-      setError(`Could not save the project: ${res.error}`)
+      setError(t('app.project.saveFailed', { error: res.error }))
     }
   }, [song, saveState, transpose, tempoRate, view, selection, loopOn, training, trainCfg, beatInfo, melodyInfo, keyInfo, metCfg, tracks, reanchorCustom, pendingLeadVocal, leadVocalSeparated])
 
@@ -3110,8 +3129,8 @@ export default function App(): React.JSX.Element {
       setShowImport(false)
       setNotice(
         res.moved
-          ? `Moved into your library — the project now lives in ${res.dir}`
-          : `Copied into your library — ${res.dir}. The original folder is untouched.`
+          ? t('app.project.moved', { dir: res.dir })
+          : t('app.project.copied', { dir: res.dir })
       )
     },
     [song, importing, reanchorCustom]
@@ -3137,7 +3156,7 @@ export default function App(): React.JSX.Element {
         }
         reanchorCustom(res.custom)
         setProjectDir(res.dir)
-        setNotice(`Renamed — the project folder is now ${res.dir}`)
+        setNotice(t('app.project.renamed', { dir: res.dir }))
       } else {
         setSong(reanchorLoadedSongIdentity(song,{name}))
         setSaveState('idle')
@@ -3158,7 +3177,7 @@ export default function App(): React.JSX.Element {
       // to 0 and the badge must not keep promising a shift that isn't heard.
       void engine.setTranspose(clamped).catch((error) => {
         if (mutation === pitchTempoMutationSeq.current && songVersion === loadSeq.current && songEpoch === engine.songEpoch) {
-          setNotice(`The native transpose update was not applied: ${String(error)}`)
+          setNotice(t('app.native.transposeNotApplied', { error: String(error) }))
         }
       }).finally(() => {
         if (mutation !== pitchTempoMutationSeq.current || songVersion !== loadSeq.current || songEpoch !== engine.songEpoch) return
@@ -3188,7 +3207,7 @@ export default function App(): React.JSX.Element {
       const accepted = acceptedRegionUiRef.current
       setSelection(accepted.selection)
       setLoopOn(accepted.loopOn)
-      setNotice(`The native loop update was not applied: ${String(error)}`)
+      setNotice(t('app.native.loopNotApplied', { error: String(error) }))
     })
   }, [engine, loopOn, selection, tracks])
 
@@ -3208,8 +3227,8 @@ export default function App(): React.JSX.Element {
       engine.playing,
       monitorCoordinator.hasAudioSafetyLease || trainingCleanupBlocked,
       () => setNotice(trainingCleanupBlocked
-        ? TRAINING_CLEANUP_SONG_BLOCKED_COPY
-        : SONG_TRANSPORT_AUDIO_LEASE_COPY),
+        ? trainingCleanupSongBlockedCopy()
+        : songTransportAudioLeaseCopy()),
       () => {
         if (!engine.playing) {
           const sel = selectionRef.current
@@ -3408,7 +3427,7 @@ export default function App(): React.JSX.Element {
           setBeatInfo((prev) => gridFromDetection(det, prev))
           setSongInfo((s) => ({ ...s, bpm: det.bpm }))
         } else {
-          setNotice('No steady beat found — tap the tempo instead.')
+          setNotice(t('app.beat.notFound'))
         }
       } finally {
         setBeatProg(null)
@@ -3426,7 +3445,7 @@ export default function App(): React.JSX.Element {
       setTempoRate(clamped)
       void engine.setTempo(clamped).catch((error) => {
         if (mutation === pitchTempoMutationSeq.current && songVersion === loadSeq.current && songEpoch === engine.songEpoch) {
-          setNotice(`The native tempo update was not applied: ${String(error)}`)
+          setNotice(t('app.native.tempoNotApplied', { error: String(error) }))
         }
       }).finally(() => {
         if (mutation !== pitchTempoMutationSeq.current || songVersion !== loadSeq.current || songEpoch !== engine.songEpoch) return
@@ -3490,7 +3509,7 @@ export default function App(): React.JSX.Element {
       trainingRef.current = accepted.enabled
       setTraining(accepted.enabled)
       setTrainCfg(accepted.config)
-      setNotice(`The native training update was not applied: ${String(error)}`)
+      setNotice(t('app.native.trainingNotApplied', { error: String(error) }))
     })
   }, [engine, training, split, trainCfg, lines])
 
@@ -3715,14 +3734,14 @@ export default function App(): React.JSX.Element {
           Sing<span>Z</span>
           {ver && <em className="ver">{ver}</em>}
         </div>
-        <nav className="app-sections no-drag" aria-label="SingZ sections">
+        <nav className="app-sections no-drag" aria-label={t('app.titlebar.sections')}>
           <button
             type="button"
             className={appSection === 'songs' ? 'active' : ''}
             aria-current={appSection === 'songs' ? 'page' : undefined}
             onClick={() => switchSection('songs')}
           >
-            Songs
+            {t('app.titlebar.songs')}
           </button>
           <button
             type="button"
@@ -3730,7 +3749,7 @@ export default function App(): React.JSX.Element {
             aria-current={appSection === 'training' ? 'page' : undefined}
             onClick={() => switchSection('training')}
           >
-            Vocal training
+            {t('app.titlebar.training')}
           </button>
         </nav>
         {appSection === 'songs' && phase === 'ready' && (
@@ -3739,8 +3758,8 @@ export default function App(): React.JSX.Element {
             className={`pill ghost small catalog-btn${showCatalog ? ' active' : ''}`}
             title={
               showCatalog
-                ? 'Back to your song (Esc)'
-                : 'Browse your project library — this song stays loaded'
+                ? t('app.titlebar.catalogBack')
+                : t('app.titlebar.catalogBrowse')
             }
             aria-pressed={showCatalog}
             onClick={toggleCatalog}
@@ -3751,43 +3770,43 @@ export default function App(): React.JSX.Element {
               <rect x="1.5" y="9.1" width="5.4" height="5.4" rx="1.3" />
               <rect x="9.1" y="9.1" width="5.4" height="5.4" rx="1.3" />
             </svg>
-            Catalog
+            <span className="catalog-label">{t('app.titlebar.catalog')}</span>
           </button>
         )}
         {update.state === 'ready' && (
           <button
             type="button"
             className="pill primary small no-drag update-chip"
-            title="The update is downloaded — restarting installs it"
+            title={t('app.update.restartTitle')}
             onClick={() => window.singz.installUpdate()}
           >
-            Restart to update
+            {t('app.update.restart')}
           </button>
         )}
         {update.state === 'available' && (
           <button
             type="button"
             className="pill ghost small no-drag update-chip"
-            title="A newer version is out — opens the download page"
+            title={t('app.update.availableTitle')}
             onClick={() => void window.singz.openExternal(update.url)}
           >
-            Get v{update.version}
+            {t('app.update.get', { version: update.version })}
           </button>
         )}
         {update.state === 'downloading' && (
-          <span className="chip-status no-drag update-chip" title="Downloading the update in the background">
-            <span className="dot idle" /> update {update.percent}%
+          <span className="chip-status no-drag update-chip" title={t('app.update.downloadingTitle')}>
+            <span className="dot idle" /> {t('app.update.downloading', { percent: update.percent })}
           </span>
         )}
         {appSection === 'songs' && song && phase === 'ready' && (
-          <div className="song-title no-drag">
+          <div className="song-title">
             {editName === null ? (
               <>
                 <span className="song-title-text">{song.name}</span>
                 <button
                   type="button"
                   className="pencil"
-                  title={isProject ? 'Rename song and project folder' : 'Rename song'}
+                  title={isProject ? t('app.titlebar.renameProject') : t('app.titlebar.renameSong')}
                   onClick={() => setEditName(song.name)}
                 >
                   ✎
@@ -3822,20 +3841,20 @@ export default function App(): React.JSX.Element {
               className="pill ghost small"
               title={
                 isProject
-                  ? 'Save stems, lyrics and settings into this project folder'
-                  : 'Save song, stems, lyrics and settings into your project library'
+                  ? t('app.save.tooltipProject')
+                  : t('app.save.tooltipLibrary')
               }
               disabled={saveState === 'saving' || sep !== null}
               onClick={() => void handleSaveProject()}
             >
               {saveState === 'saved' ? (
-                'Saved ✓'
+                t('app.save.saved')
               ) : saveState === 'saving' ? (
-                'Saving…'
+                t('app.save.saving')
               ) : (
                 <>
-                  Save project
-                  {isProject && dirty && <span className="dirty-dot" title="Unsaved changes" />}
+                  {t('app.save.save')}
+                  {isProject && dirty && <span className="dirty-dot" title={t('app.save.unsavedTitle')} />}
                 </>
               )}
             </button>
@@ -3844,25 +3863,25 @@ export default function App(): React.JSX.Element {
             <button
               type="button"
               className="pill ghost small"
-              title="This project sits outside your library — copy or move it in"
+              title={t('app.library.addTooltip')}
               onClick={() => setShowImport(true)}
             >
-              Add to library…
+              {t('app.library.add')}
             </button>
           )}
           {/* the catalog page already lists the library — no second door to it */}
           {appSection === 'songs' && phase === 'ready' && !showCatalog && (
             <button type="button" className="pill ghost small" onClick={() => setShowProjects(true)}>
-              Open…
+              {t('app.library.open')}
             </button>
           )}
           <button
             type="button"
             className="pill ghost small"
-            title="What the app is doing under the hood — copy or save it when reporting a problem"
+            title={t('app.titlebar.logTooltip')}
             onClick={() => setShowLog(true)}
           >
-            Log
+            {t('app.titlebar.log')}
           </button>
           <EngineChip
             status={engineStatus}
@@ -3874,11 +3893,14 @@ export default function App(): React.JSX.Element {
               }
             }}
           />
+          {/* The flag alone, beside the gear: the one control someone who
+              cannot read the window needs to find, on every screen. */}
+          <Language compact />
           <button
             type="button"
             className="pill ghost small gear"
-            title="Settings"
-            aria-label="Settings"
+            title={t('app.titlebar.settings')}
+            aria-label={t('app.titlebar.settings')}
             onClick={openAudioSettings}
           >
             <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
@@ -3890,11 +3912,11 @@ export default function App(): React.JSX.Element {
 
       {appSection === 'training' && !trainingProgressLoaded ? (
         <main className="vt-screen vt-empty" aria-busy={!trainingLoadError}>
-          <p className="vt-eyebrow">Vocal training</p>
-          <h1>{trainingLoadError ? 'Practice profile unavailable' : 'Loading your practice profile…'}</h1>
+          <p className="vt-eyebrow">{t('app.titlebar.training')}</p>
+          <h1>{trainingLoadError ? t('app.training.unavailable') : t('app.training.loading')}</h1>
           {trainingLoadError && (
             <>
-              <p>Your saved training data was not changed. Retry when storage is available.</p>
+              <p>{t('app.training.unavailableBody')}</p>
               <button
                 type="button"
                 className="pill primary"
@@ -3903,7 +3925,7 @@ export default function App(): React.JSX.Element {
                   setTrainingLoadAttempt((attempt) => attempt + 1)
                 }}
               >
-                Retry
+                {t('app.retry')}
               </button>
             </>
           )}
@@ -3924,7 +3946,7 @@ export default function App(): React.JSX.Element {
             monitorShell.hasAudioSafetyLease || trainingCleanupPhase !== 'idle'
           }
           audioLeaseCopy={trainingCleanupPhase !== 'idle'
-            ? TRAINING_CLEANUP_AUDIO_BLOCKED_COPY
+            ? trainingCleanupAudioBlockedCopy()
             : undefined}
           onSetupChange={changeDesktopTrainingSetup}
           referenceVolume={audioPrefs.referenceVolume ?? DEFAULT_TRAINING_REFERENCE_VOLUME}
@@ -3995,7 +4017,7 @@ export default function App(): React.JSX.Element {
                     monitorShell.hasAudioSafetyLease || trainingCleanupPhase !== 'idle'
                   }
                   audioLeaseCopy={trainingCleanupPhase !== 'idle'
-                    ? TRAINING_CLEANUP_AUDIO_BLOCKED_COPY
+                    ? trainingCleanupAudioBlockedCopy()
                     : undefined}
                 />
               )}
@@ -4086,7 +4108,7 @@ export default function App(): React.JSX.Element {
 
       {dragDepth > 0 && (
         <div className="drop-overlay">
-          <div className="drop-frame">Release to load</div>
+          <div className="drop-frame">{t('app.drop.release')}</div>
         </div>
       )}
 
@@ -4100,8 +4122,8 @@ export default function App(): React.JSX.Element {
 
       {trainingSaveError && (
         <div className="toast training-save-warning" role="alert">
-          <span>Training profile or session history was not saved: {trainingSaveError}</span>
-          <button type="button" onClick={() => trainingProgressMutations.retry()}>Retry</button>
+          <span>{t('app.training.saveError', { error: trainingSaveError ?? '' })}</span>
+          <button type="button" onClick={() => trainingProgressMutations.retry()}>{t('app.retry')}</button>
         </div>
       )}
 
@@ -4161,7 +4183,7 @@ export default function App(): React.JSX.Element {
           nativePlaybackLeaseBlocked={nativePlaybackLeaseBlocked}
           monitorCoordinator={monitorCoordinator}
           externalAudioLeaseBlocked={trainingCleanupPhase !== 'idle'}
-          externalAudioLeaseCopy={TRAINING_CLEANUP_SETTINGS_BLOCKED_COPY}
+          externalAudioLeaseCopy={trainingCleanupSettingsBlockedCopy()}
           routeApplicationQueue={settingsRouteApplicationQueue}
           emergencyStopMonitoring={() => monitorCoordinator.stop()}
           hasMonitorSafetyLease={() => monitorCoordinator.hasAudioSafetyLease}

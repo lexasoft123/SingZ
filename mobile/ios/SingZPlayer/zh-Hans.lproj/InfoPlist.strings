@@ -1,0 +1,2 @@
+/* The microphone prompt, per language. English also lives in Info.plist. */
+"NSMicrophoneUsageDescription" = "SingZ 会在你练习时聆听，以显示每个音是否唱准。";

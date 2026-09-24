@@ -5,6 +5,7 @@ import type {
   LyricsResult,
   LyricsSource
 } from '../../shared/types'
+import { t } from './i18n'
 
 /** Lyrics on screen: the words, where they came from, and how they were timed. */
 export type LyricsReady = {
@@ -80,7 +81,7 @@ export function lyricsJobSettled(cur: LyricsState, res: LyricsResult): LyricsSta
       }
     return { status: 'error', error: res.error }
   }
-  if (res.lines.length === 0) return { status: 'error', error: 'No words were detected in the vocals.' }
+  if (res.lines.length === 0) return { status: 'error', error: t('lyrics.state.noWordsDetected') }
   return {
     status: 'ready',
     lines: res.lines,

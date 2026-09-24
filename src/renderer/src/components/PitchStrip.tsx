@@ -7,6 +7,7 @@ import { CONTROLS_W, fmtTime, sanitizePitchHeight, type TimeView } from '../mode
 import { modalCoversApp } from '../model'
 import { midiOfHz, segmentMelodyNotes, toNoteSegments } from '../audio/notes'
 import { audioSafetyBlockedCopy } from '../audio/monitoring'
+import { t } from '../i18n'
 
 export type MelodyState =
   | { status: 'none' }
@@ -27,8 +28,8 @@ export function pitchMicrophoneUnavailableCopy(
   audioLeaseBlocked: boolean,
   audioLeaseCopy?: string
 ): string | null {
-  if (settingsOwnsMic) return 'Microphone unavailable while Settings is open'
-  if (audioLeaseBlocked) return audioLeaseCopy ?? audioSafetyBlockedCopy('Microphone')
+  if (settingsOwnsMic) return t('player.pitch.micUnavailableSettings')
+  if (audioLeaseBlocked) return audioLeaseCopy ?? audioSafetyBlockedCopy(t('settings.subject.microphone'))
   return null
 }
 
@@ -171,7 +172,7 @@ export default function PitchStrip({
         if (!capture) trailRef.current = []
         if (state === 'on') {
           scoreAcc.current = { hit: 0, total: 0 }
-          if (scoreRef.current) scoreRef.current.textContent = 'sing!'
+          if (scoreRef.current) scoreRef.current.textContent = t('player.pitch.sing')
         }
         setMic(state)
       },
@@ -464,7 +465,9 @@ export default function PitchStrip({
               if (hit) scoreAcc.current.hit++
               const { hit: hh, total } = scoreAcc.current
               if (scoreRef.current && total > 30 && total % 12 === 0) {
-                scoreRef.current.textContent = `${Math.round((hh / total) * 100)}% match`
+                scoreRef.current.textContent = t('player.pitch.matchPercent', {
+                  percent: Math.round((hh / total) * 100)
+                })
               }
             }
             if (sungMidi > 0) {
@@ -509,7 +512,7 @@ export default function PitchStrip({
     <div className="pitch-strip" ref={stripRef} style={{ height: stripH }}>
       <div
         className="ps-resize"
-        title="Drag to resize the pitch view"
+        title={t('player.pitch.resizeTitle')}
         onPointerDown={(e) => {
           e.preventDefault()
           const startY = e.clientY
@@ -533,20 +536,20 @@ export default function PitchStrip({
       <div className="ps-now" ref={nowRef} />
       <div className="ps-info">
         <div className="psi-row">
-          <span className="psi-label">key</span>
+          <span className="psi-label">{t('player.pitch.keyLabel')}</span>
           <span className="psi-value psi-key">
             {info.key ? keyName(info.key, transpose) : '—'}
           </span>
           {info.key && transpose !== 0 && (
-            <span className="psi-sub">from {keyName(info.key, 0)}</span>
+            <span className="psi-sub">{t('player.pitch.fromKey', { key: keyName(info.key, 0) })}</span>
           )}
         </div>
         <div className="psi-row">
-          <span className="psi-label">tempo</span>
+          <span className="psi-label">{t('player.pitch.tempoLabel')}</span>
           <span className="psi-value">{info.bpm ? `${Math.round(info.bpm * tempo)} bpm` : '—'}</span>
         </div>
         <div className="psi-row">
-          <span className="psi-label">range</span>
+          <span className="psi-label">{t('player.pitch.rangeLabel')}</span>
           <span className="psi-value">
             {vocalRange
               ? `${noteName(vocalRange[0] + transpose)}–${noteName(vocalRange[1] + transpose)}`
@@ -554,14 +557,14 @@ export default function PitchStrip({
           </span>
         </div>
         <div className="psi-row">
-          <span className="psi-label">length</span>
+          <span className="psi-label">{t('player.pitch.lengthLabel')}</span>
           <span className="psi-value">{fmtTime(engine.duration)}</span>
         </div>
       </div>
       <div className="ps-hud">
         {melody.status === 'computing' && (
           <span className="ps-note">
-            reading melody… {Math.round(melody.p * 100)}%
+            {t('player.pitch.readingMelody', { percent: Math.round(melody.p * 100) })}
             <i className="ps-bar">
               <i style={{ width: `${Math.round(melody.p * 100)}%` }} />
             </i>
@@ -569,7 +572,7 @@ export default function PitchStrip({
         )}
         {beatProg != null && melody.status !== 'computing' && (
           <span className="ps-note">
-            finding the beat… {Math.round(beatProg * 100)}%
+            {t('player.pitch.findingBeat', { percent: Math.round(beatProg * 100) })}
             <i className="ps-bar">
               <i style={{ width: `${Math.round(beatProg * 100)}%` }} />
             </i>
@@ -579,33 +582,40 @@ export default function PitchStrip({
           type="button"
           className={`chip zoom${noteBars ? ' active' : ''}`}
           disabled={melody.status !== 'ready'}
-          title="One steady bar per sung note — the faint line underneath keeps the real pitch"
+          title={t('player.pitch.noteBarsTitle')}
           onClick={() => setNoteBars((v) => !v)}
         >
-          Note bars
+          {t('player.pitch.noteBars')}
         </button>
         <button
           type="button"
           className={`chip zoom${fit ? ' active' : ''}`}
-          title="Fit the pitch range to this song's melody"
+          title={t('player.pitch.fitTitle')}
           onClick={() => setFit((f) => !f)}
         >
-          Fit
+          {t('player.pitch.fit')}
         </button>
         {mic === 'on' && <span className="score" ref={scoreRef} />}
         <button
           type="button"
           className={`pill ghost small mic-toggle${mic === 'on' ? ' active' : ''}`}
           disabled={mic === 'starting' || micUnavailableCopy !== null}
-          title={micUnavailableCopy ?? 'Hear and score your pitch against the song melody'}
-          aria-label={micUnavailableCopy ?? 'Match my singing with the song melody'}
+          title={micUnavailableCopy ?? t('player.pitch.micHint')}
+          aria-label={micUnavailableCopy ?? t('player.pitch.micAriaLabel')}
           onClick={() => micOwnerRef.current?.toggle()}
         >
           <svg width="12" height="12" viewBox="0 0 14 14" fill="currentColor" aria-hidden>
             <path d="M7 1a2.6 2.6 0 0 0-2.6 2.6v3a2.6 2.6 0 1 0 5.2 0v-3A2.6 2.6 0 0 0 7 1Z" />
             <path d="M2.7 6.4a.65.65 0 0 1 1.3.13v.07a3 3 0 0 0 6 0v-.07a.65.65 0 0 1 1.3-.13v.2a4.3 4.3 0 0 1-3.65 4.25v1.3h1.7a.65.65 0 1 1 0 1.3H4.65a.65.65 0 1 1 0-1.3h1.7v-1.3A4.3 4.3 0 0 1 2.7 6.6v-.2Z" />
           </svg>
-          {micUnavailableCopy ?? (mic === 'on' ? 'Mic on' : mic === 'starting' ? 'Starting…' : mic === 'denied' ? 'Mic blocked — check System Settings' : 'Match my singing')}
+          {micUnavailableCopy ??
+            (mic === 'on'
+              ? t('player.pitch.micOn')
+              : mic === 'starting'
+                ? t('player.pitch.micStarting')
+                : mic === 'denied'
+                  ? t('player.pitch.micBlocked')
+                  : t('player.pitch.micMatch'))}
         </button>
       </div>
     </div>

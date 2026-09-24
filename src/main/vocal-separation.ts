@@ -11,6 +11,7 @@ import { packPython, packVocalModel } from './models'
 import { VOCAL_MODEL_SHA256 } from './vocal-model'
 import { hashFile, spawnEnv } from './separation'
 import { log } from './log'
+import { t } from '../shared/i18n'
 import type { VocalSplitResult } from '../shared/types'
 
 const issuedLeads = new Set<string>()
@@ -33,7 +34,7 @@ class VocalSeparator {
   cancel(): void { this.cancelled = true; this.child?.kill('SIGKILL') }
 
   async split(path: string, progress: (p: number) => void): Promise<VocalSplitResult> {
-    if (this.busy) return { ok: false, error: 'Backing vocal separation is already running.' }
+    if (this.busy) return { ok: false, error: t('main.error.backingVocalSeparationAlreadyRunning') }
     this.busy = true
     this.cancelled = false
     let pending: string | null = null
@@ -49,23 +50,23 @@ class VocalSeparator {
         } catch { return false }
       }
       if (await complete()) {
-        if (this.cancelled) throw new Error('Cancelled')
+        if (this.cancelled) throw new Error(t('main.error.cancelledNoDot'))
         allowRoot(dest); issuedLeads.add(resolve(lead)); progress(100)
         return { ok: true, lead, backing }
       }
       // The model rides inside the pack, so one missing thing means one
       // missing download rather than two that can disagree.
       try { await stat(packPython()); await stat(packVocalModel()) } catch {
-        return { ok: false, error: 'Download the stem splitter to separate vocals.', needsModels: ['gpu-splitter'] }
+        return { ok: false, error: t('main.error.downloadSplitterToSeparateVocals'), needsModels: ['gpu-splitter'] }
       }
-      if (this.cancelled) throw new Error('Cancelled')
+      if (this.cancelled) throw new Error(t('main.error.cancelledNoDot'))
       await mkdir(root, { recursive: true })
       pending = `${dest}.part-${process.pid}`
       await rm(pending, { recursive: true, force: true })
       await mkdir(pending, { recursive: true })
       const runner = join(pending, 'runner.py')
       await writeFile(runner, RUNNER)
-      if (this.cancelled) throw new Error('Cancelled')
+      if (this.cancelled) throw new Error(t('main.error.cancelledNoDot'))
       log('vocal-split', `Separating lead/backing vocals: ${path}`)
       progress(0)
       await new Promise<void>((done, reject) => {
@@ -87,13 +88,13 @@ class VocalSeparator {
           else reject(new Error(tail.trim().split('\n').pop() || 'Backing vocal separation stopped.'))
         })
       })
-      if (this.cancelled) throw new Error('Cancelled')
-      if (await hashFile(path) !== sourceHash) throw new Error('The vocal file changed during separation. Please try again.')
+      if (this.cancelled) throw new Error(t('main.error.cancelledNoDot'))
+      if (await hashFile(path) !== sourceHash) throw new Error(t('main.error.vocalFileChangedDuringSeparation'))
       await writeFile(join(pending, 'complete.json'), JSON.stringify({
         lead: await digest(join(pending, 'lead.wav')), backing: await digest(join(pending, 'backing.wav'))
       }))
       await rm(join(pending, 'runner.py'), { force: true })
-      if (this.cancelled) throw new Error('Cancelled')
+      if (this.cancelled) throw new Error(t('main.error.cancelledNoDot'))
       await rm(dest, { recursive: true, force: true })
       await rename(pending, dest); pending = null
       allowRoot(dest); issuedLeads.add(resolve(lead)); progress(100)
@@ -113,7 +114,7 @@ export const vocalSeparator = new VocalSeparator()
 export function registerVocalSeparation(): void {
   ipcMain.handle('vocals:split', (e, raw: string) => {
     const path = resolve(String(raw))
-    if (!isAllowed(path)) return { ok: false, error: 'That vocal file is not registered.' }
+    if (!isAllowed(path)) return { ok: false, error: t('main.error.vocalFileNotRegistered') }
     return vocalSeparator.split(path, p => { if (!e.sender.isDestroyed()) e.sender.send('vocals:progress', p) })
   })
   ipcMain.handle('vocals:cancel', () => vocalSeparator.cancel())

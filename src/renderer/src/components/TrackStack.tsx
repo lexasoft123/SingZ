@@ -4,6 +4,7 @@ import type { MultitrackEngine } from '../audio/engine'
 import { modalCoversApp, type TimeView, type UITrack } from '../model'
 import BeatGrid from './BeatGrid'
 import TrackLane from './TrackLane'
+import { t } from '../i18n'
 
 /** Ruler row height — the grid template and the beat overlay share it. */
 const RULER_H = 30
@@ -286,26 +287,26 @@ export default function TrackStack({
           type="button"
           className="add-track no-drag"
           data-testid="add-track"
-          title="Add an audio file as an extra lane — a backing track, a harmony you recorded, a click. It plays from 0:00 and is copied into the project when you save."
+          title={t('player.stack.addTrackTitle')}
           onClick={(e) => {
             e.currentTarget.blur()
             onAddTrack()
           }}
         >
-          + Add track…
+          {t('player.stack.addTrack')}
         </button>
       </div>
       <div className="ruler" style={{ gridRow: 1 }}>
-        {ticks.map((t) => (
-          <span key={t.time} className="tick" style={{ left: `${t.left}%` }}>
-            {t.label}
+        {ticks.map((tick) => (
+          <span key={tick.time} className="tick" style={{ left: `${tick.left}%` }}>
+            {tick.label}
           </span>
         ))}
         <div className="zoom-cluster no-drag">
           <div className="zoom-seg">
             <button
               type="button"
-              title="Zoom out (scroll wheel works too)"
+              title={t('player.stack.zoomOutTitle')}
               onClick={(e) => {
                 e.currentTarget.blur()
                 onZoom(1.4)
@@ -315,7 +316,7 @@ export default function TrackStack({
             </button>
             <button
               type="button"
-              title="Zoom in around the playhead"
+              title={t('player.stack.zoomInTitle')}
               onClick={(e) => {
                 e.currentTarget.blur()
                 onZoom(0.65)
@@ -325,14 +326,14 @@ export default function TrackStack({
             </button>
             <button
               type="button"
-              title="Show the whole song"
+              title={t('player.stack.showWholeSongTitle')}
               disabled={!view}
               onClick={(e) => {
                 e.currentTarget.blur()
                 onResetZoom()
               }}
             >
-              Full
+              {t('player.stack.full')}
             </button>
           </div>
         </div>

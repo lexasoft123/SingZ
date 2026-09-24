@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { EngineStatus } from '../../../shared/types'
 import { Modal } from '@singz/ui'
+import { t } from '../i18n'
 
 const INSTALL_CMD = 'pipx install demucs && pipx inject demucs numpy'
 
@@ -30,35 +31,33 @@ export default function SetupModal({ status, onClose, onStatus }: Props): React.
 
   return (
     <Modal onClose={onClose}>
-        <h2>Stem splitting needs Demucs</h2>
+        <h2>{t('settings.demucs.title')}</h2>
         <p>
-          SingZ uses <strong>Demucs</strong> — a free, open-source AI model that runs entirely on
-          your machine — to split songs into stems. One-time setup, in Terminal:
+          {t('settings.demucs.introBefore')} <strong>Demucs</strong> {t('settings.demucs.introAfter')}
         </p>
         <div className="cmd">
           <code>{INSTALL_CMD}</code>
           <button type="button" className="pill ghost small" onClick={copy}>
-            {copied ? 'Copied ✓' : 'Copy'}
+            {copied ? t('settings.demucs.copiedBadge') : t('settings.demucs.copyButton')}
           </button>
         </div>
         <p className="fine">
-          Needs Python 3.10–3.13 and pipx (<code>brew install pipx</code>). The first split
-          downloads the model (~80 MB); a typical song takes a few minutes of CPU time.
+          {t('settings.demucs.pipxBefore')}<code>brew install pipx</code>{t('settings.demucs.pipxAfter')}
         </p>
         {status && !status.ok && <p className="fine warn">{status.message}</p>}
         <div className="modal-actions">
           <button type="button" className="pill primary" disabled={checking} onClick={recheck}>
-            {checking ? 'Checking…' : 'Re-check'}
+            {checking ? t('settings.demucs.checkingButton') : t('settings.demucs.recheckButton')}
           </button>
           <button
             type="button"
             className="pill ghost"
             onClick={() => void window.singz.openExternal('https://github.com/adefossez/demucs')}
           >
-            Demucs on GitHub ↗
+            {t('settings.demucs.githubLink')}
           </button>
           <button type="button" className="pill ghost" onClick={onClose}>
-            Close
+            {t('settings.action.close')}
           </button>
         </div>
     </Modal>

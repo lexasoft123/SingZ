@@ -6,6 +6,7 @@ import { extname, join, sep } from 'node:path'
 import { shell } from 'electron'
 import gdriveConfig from './gdrive-config'
 import { log } from './log'
+import { t } from '../shared/i18n'
 import {
   projectsRoot,
   refreshFileHash,
@@ -101,7 +102,7 @@ export const gdriveSignOut = (): void => writeTokens(null)
 
 /** Browser + loopback sign-in; resolves once Google redirects back. */
 export async function gdriveSignIn(): Promise<{ ok: true } | { ok: false; error: string }> {
-  if (!cfg) return { ok: false, error: 'Google Drive is not configured in this build' }
+  if (!cfg) return { ok: false, error: t('main.error.driveNotConfigured') }
   try {
     const verifier = randomBytes(32).toString('base64url')
     const challenge = createHash('sha256').update(verifier).digest('base64url')
@@ -111,16 +112,17 @@ export async function gdriveSignIn(): Promise<{ ok: true } | { ok: false; error:
         const server = createServer((req, res) => {
           const url = new URL(req.url ?? '/', 'http://127.0.0.1')
           const c = url.searchParams.get('code')
-          res.writeHead(200, { 'Content-Type': 'text/html' })
+          // charset: the page is translated now, and Firefox/Safari do not assume UTF-8
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
           res.end(
-            '<html><body style="font-family:sans-serif;padding:40px"><h3>SingZ is signed in</h3>' +
-              'You can close this tab and go back to the app.</body></html>'
+            `<html><head><meta charset="utf-8"></head><body style="font-family:sans-serif;padding:40px"><h3>${t('main.drive.signedInPageTitle')}</h3>` +
+              `${t('main.drive.signedInPageBody')}</body></html>`
           )
           const addr = server.address()
           const port = typeof addr === 'object' && addr ? addr.port : 0
           server.close()
           if (c) resolve({ code: c, redirect: `http://127.0.0.1:${port}` })
-          else reject(new Error('Google sign-in was cancelled'))
+          else reject(new Error(t('main.error.googleSignInCancelled')))
         })
         server.listen(0, '127.0.0.1', () => {
           const addr = server.address()
@@ -134,7 +136,7 @@ export async function gdriveSignIn(): Promise<{ ok: true } | { ok: false; error:
           void shell.openExternal(authUrl)
           setTimeout(() => {
             server.close()
-            reject(new Error('Google sign-in timed out'))
+            reject(new Error(t('main.error.googleSignInTimedOut')))
           }, 300000).unref()
         })
         server.on('error', reject)
@@ -157,7 +159,7 @@ export async function gdriveSignIn(): Promise<{ ok: true } | { ok: false; error:
       error_description?: string
     }
     if (!tok.access_token || !tok.refresh_token) {
-      return { ok: false, error: tok.error_description ?? 'Google did not issue tokens' }
+      return { ok: false, error: tok.error_description ?? t('main.error.googleNoTokens') }
     }
     writeTokens({
       access: tok.access_token,

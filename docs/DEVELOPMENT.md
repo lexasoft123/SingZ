@@ -589,6 +589,7 @@ Rules learned the hard way:
 | `SINGZ_DEMUCS` | override the splitter engine command |
 | `SINGZ_LLAMA_SERVER` | override the llama-server binary Qwen3-ASR runs through |
 | `SINGZ_CRISPASR` | override the crispasr binary the Qwen word aligner runs through |
+| `SINGZ_LANG` | `en` / `ru` / `zh-CN` / `system`: the UI language for this run, over the saved choice. Unset, a `SINGZ_E2E_HIDDEN=1` run is English — drivers find controls by their English text, and the Windows field laptop is a Russian-locale machine. A pick from the title-bar flag during the run still wins |
 | `SINGZ_QWEN_OFFER=1` | let the once-only Qwen3-ASR launch offer appear in a hidden (`SINGZ_E2E_HIDDEN=1`) driver run, which otherwise suppresses it — for the driver that tests the offer |
 
 Full clean-OS check (as CI can't do): package with
@@ -869,6 +870,85 @@ not the `APPLE_ID`/app-specific-password trio.
 
 **Windows is still genuinely unsigned.** Options if that changes: Azure
 Trusted Signing (`win.azureSignOptions`) or SignPath's OSS tier.
+
+## Localization
+
+The desktop speaks English, Russian and Simplified Chinese. The title bar's
+flag (the kit's `LanguageSwitcher`, `compact`) picks one, or `System`, which
+follows the machine's preferred languages (`app.getPreferredSystemLanguages()`;
+Traditional Chinese is deliberately not handed Simplified). The choice lives in
+`settings.json` as `language`; switching is live — nothing remounts, a playing
+song keeps playing.
+
+- **Every user-visible string goes through `t('ns.key')`** (or `tn` for a
+  count, `<T k=…/>` for `**bold**`) from `src/renderer/src/i18n.tsx` /
+  `src/shared/i18n`. Log lines, ids, persisted values and anything compared in
+  code stay English. Whole sentences with `{placeholders}` — never glue
+  translated fragments, Russian and Chinese order words differently.
+- **English is the source**: `src/shared/i18n/en/<namespace>.ts`, one file per
+  area (app, player, lyrics, training, settings, library, main, common).
+  `ru/` and `zh-CN/` mirror it, typed `Translation<typeof en>`, so a key added
+  in English without its translations fails `npm run typecheck`, and
+  `tests/unit/i18n.test.ts` checks every key, every placeholder, the `**`
+  markers and Russian's `_few`/`_many` plural forms.
+- **Nothing frozen at module load**: a string in a module-level constant is
+  English forever. Make it a function (`playbackOutputUnconfirmedCopy()`).
+- **Main translates what it originates** (dialog titles, errors a toast shows)
+  with the same module; `src/main/locale.ts` resolves and applies the locale.
+  Errors the renderer or `sync-scheduler.ts` pattern-match stay English.
+- **Stem names** come from the kit's `STEM_META` in English; show them with
+  `laneLabel(track)` / `stemLabel(id)` (model.ts). Music-theory names are data
+  too (`intervalName` is stored and compared) — display them through
+  `src/shared/music-labels.ts`.
+- **Bundles**: the renderer entry carries English only (it is every
+  fallback); `loadLocale()` fetches Russian/Chinese on demand. The phone
+  bundles src/shared's training code, which therefore imports
+  `i18n/training` (core + English training strings), never the index.
+- Suites that read component SOURCE use `tests/unit/i18n-source.ts`
+  (`readSourceWithEnglish`), which writes each key's English beside its call.
+- New strings: write the English, then translate — a Sonnet/Haiku agent given
+  the English namespace file and the glossary does it well; keep terms
+  consistent with the existing `ru/` and `zh-CN/` files.
+
+### The phone
+
+The phone speaks the same three languages but has **no picker**: it follows
+the system, and the singer changes it per app in the OS — iOS Settings ›
+SingZ › Language, Android 13+ Settings › Apps › SingZ › Language.
+
+- The OS offers that row because the native projects declare the languages:
+  iOS `CFBundleLocalizations` + `knownRegions` + `ios/SingZPlayer/<lang>.lproj/
+  InfoPlist.strings` (which also localizes the microphone prompt); Android
+  `res/xml/locales_config.xml` + `android:localeConfig`. Add a language in
+  all of them and in `mobile/src/i18n`.
+- `mobile/src/i18n` reads the choice (iOS: the app's `AppleLanguages`, via
+  SettingsManager; Android: the configuration locale via I18nManager), applies
+  it before the first render and again on every return to the foreground —
+  Android applies a per-app change to the RUNNING process (measured: same
+  pid, switched within seconds), iOS relaunches the app.
+- Phone strings are `t('phone.<area>.<name>')` over `mobile/src/i18n/en/*.ts`,
+  typed and tested like the desktop's (`mobile/__tests__/i18n.test.ts`).
+- The lookup runs on **gen/training-lib's copy of the core** — that bundle
+  carries one for the shared training code, and a second copy in the app
+  would be a second locale. `build-training.mjs` exports it; the phone also
+  registers the desktop's training and `common` (key/interval names)
+  dictionaries into it.
+- Android notification text (Now playing, the split service) lives in
+  `res/values*/strings.xml`. Errors the split service persists to its job file
+  and JS matches by prefix stay English.
+- Test a switch: iOS `xcrun simctl spawn <udid> defaults write io.s-dev.singz
+  AppleLanguages -array ru` then relaunch; Android `adb shell cmd locale
+  set-app-locales com.lexasoft.singz --locales ru` (live). Jest always runs
+  English.
+- **Device drivers assume an English app.** Log phrases stay English, but
+  some drivers also check screen copy (`split-refused-android.cjs`'s
+  `/never started/`, `song-sheet-beat.cjs`'s Beat row). A simulator or
+  emulator set to another language fails them for no reason in the code —
+  pin the app first: `defaults write io.s-dev.singz AppleLanguages -array en`
+  (sim) or `cmd locale set-app-locales <pkg> --locales en` (Android).
+- **Skia text has no CJK fallback on Android.** Anything `SkiaLyrics.tsx` draws
+  through the lyrics' face renders Chinese as boxes, so its own copy stays
+  Latin in zh-CN (the count-in `{sec} s`).
 
 ## Renderer performance rules
 

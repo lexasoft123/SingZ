@@ -41,6 +41,7 @@ import {
   type SkFont
 } from '@shopify/react-native-skia'
 import { useDerivedValue, type SharedValue } from 'react-native-reanimated'
+import { t } from '../i18n'
 
 /**
  * Type scale for the lyrics. Everything is multiplied by the reader's text-size
@@ -444,7 +445,13 @@ export default function SkiaLyrics({
           </Group>
         )}
         {cueBox && cue.wait > 0 && (
-          <SkText x={left} y={cueBox.y - scrollTop - 8} text={`${cue.wait} s`} font={small} color={CUE} />
+          <SkText
+            x={left}
+            y={cueBox.y - scrollTop - 8}
+            text={t('phone.player.lyrics.waitSeconds', { sec: cue.wait })}
+            font={small}
+            color={CUE}
+          />
         )}
       </Group>
     </Canvas>

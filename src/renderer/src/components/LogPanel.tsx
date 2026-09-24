@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { LogEntry, LogSession } from '../../../shared/types'
 import { Modal } from '@singz/ui'
+import { t, formatLocale } from '../i18n'
 
 const MAX_ROWS = 4000
 
@@ -28,7 +29,7 @@ function parseSession(text: string): LogEntry[] {
 
 function sessionLabel(s: LogSession): string {
   const d = new Date(s.startedAt)
-  const when = d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+  const when = d.toLocaleString(formatLocale(), { dateStyle: 'medium', timeStyle: 'short' })
   const kb = Math.max(1, Math.round(s.bytes / 1024))
   return `${when} · ${kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${kb} KB`}`
 }
@@ -110,11 +111,11 @@ export default function LogPanel({ onClose }: { onClose: () => void }): React.JS
   return (
     <Modal onClose={onClose} cardClassName="log-card">
         <div className="log-head">
-          <h2>Log</h2>
+          <h2>{t('library.logPanel.title')}</h2>
           {past.length > 0 && (
             <select
               className="settings-select log-session"
-              aria-label="Which launch's log"
+              aria-label={t('library.logPanel.whichLaunch')}
               value={shown}
               onChange={(e) => {
                 stickRef.current = true
@@ -124,7 +125,7 @@ export default function LogPanel({ onClose }: { onClose: () => void }): React.JS
                 setShown(e.target.value)
               }}
             >
-              <option value="">This session</option>
+              <option value="">{t('library.logPanel.thisSession')}</option>
               {past.map((p) => (
                 <option key={p.name} value={p.name}>
                   {sessionLabel(p)}
@@ -134,24 +135,24 @@ export default function LogPanel({ onClose }: { onClose: () => void }): React.JS
           )}
           <span className="fine">
             {pastEntries && pastTotal > rows.length
-              ? `last ${rows.length} of ${pastTotal} lines — Save to file has them all`
-              : `${rows.length} lines`}
+              ? t('library.logPanel.linesTail', { shown: rows.length, total: pastTotal })
+              : t('library.logPanel.linesCount', { n: rows.length })}
           </span>
           <div className="log-actions">
             <button type="button" className="pill ghost small" onClick={copy}>
-              {copied ? 'Copied ✓' : 'Copy'}
+              {copied ? t('library.logPanel.copied') : t('library.logPanel.copy')}
             </button>
             <button type="button" className="pill ghost small" onClick={() => void save()}>
-              Save to file…
+              {t('library.logPanel.saveToFile')}
             </button>
             <button type="button" className="pill ghost small" onClick={onClose}>
-              Close
+              {t('library.common.close')}
             </button>
           </div>
         </div>
         <div className="log-body" ref={bodyRef} onScroll={onScroll}>
           {rows.length === 0 && (
-            <div className="log-empty">{shown ? 'Loading…' : 'Nothing logged yet.'}</div>
+            <div className="log-empty">{shown ? t('library.logPanel.loading') : t('library.logPanel.nothingLogged')}</div>
           )}
           {rows.map((e, i) => (
             <div key={i} className={`log-line ${e.level}`}>
@@ -161,7 +162,7 @@ export default function LogPanel({ onClose }: { onClose: () => void }): React.JS
             </div>
           ))}
         </div>
-        {savedTo && <p className="fine log-saved">Saved to {savedTo}</p>}
+        {savedTo && <p className="fine log-saved">{t('library.logPanel.savedTo', { path: savedTo })}</p>}
     </Modal>
   )
 }

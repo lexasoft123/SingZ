@@ -5,6 +5,7 @@ import { onChildSettled } from './child-exit'
 import { resolveAnalyze } from './analyze'
 import { askMicrophoneAccess } from './mic-access'
 import { log, logChunk } from './log'
+import { t } from '../shared/i18n'
 import type {
   DesktopAudioInputDevice,
   DesktopAudioInputEvent,
@@ -74,10 +75,10 @@ export function parseDesktopAudioInputDevices(stdout: string): DesktopAudioInput
     .split('\n')
     .map((part) => part.trim())
     .findLast((part) => part.startsWith('{'))
-  if (!line) throw new Error('audio-input inventory returned no result')
+  if (!line) throw new Error(t('main.error.audioInputNoResult'))
   const parsed = JSON.parse(line) as CliDeviceList
   if (parsed.version !== 1 || !Array.isArray(parsed.devices))
-    throw new Error('audio-input inventory has an unsupported format')
+    throw new Error(t('main.error.audioInputUnsupportedFormat'))
   if (parsed.error) throw new Error(parsed.error)
   return parsed.devices.map((raw, index) => {
     const item = raw as Record<string, unknown>
@@ -92,7 +93,7 @@ export function parseDesktopAudioInputDevices(stdout: string): DesktopAudioInput
       !Array.isArray(item.channelLabels) ||
       !(item.channelLabels as unknown[]).every((label) => typeof label === 'string')
     )
-      throw new Error(`audio-input inventory device ${index + 1} is malformed`)
+      throw new Error(t('main.error.audioInputDeviceMalformed', { index: index + 1 }))
     return {
       uid: item.uid,
       label: item.label,
@@ -183,7 +184,7 @@ export class DesktopAudioInput {
   async list(): Promise<{ ok: true; devices: DesktopAudioInputDevice[] } | { ok: false; error: string }> {
     try {
       const bin = await resolveAnalyze()
-      if (!bin) return { ok: false, error: 'The native audio-input core is not in this build.' }
+      if (!bin) return { ok: false, error: t('main.error.audioInputCoreMissing') }
       return { ok: true, devices: await runInventory(bin) }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
@@ -193,14 +194,14 @@ export class DesktopAudioInput {
   async start(sender: WebContents, raw: unknown): Promise<DesktopAudioInputStartResult> {
     return this.startGate.run(
       () => this.startClaimed(sender, raw),
-      () => ({ ok: false, kind: 'busy', error: 'Another training microphone is starting.' })
+      () => ({ ok: false, kind: 'busy', error: t('main.error.anotherTrainingMicStarting') })
     )
   }
 
   private async startClaimed(sender: WebContents, raw: unknown): Promise<DesktopAudioInputStartResult> {
     const previous = this.active
     if (previous?.stopping) await waitForStopped(previous, 2500)
-    if (this.active) return { ok: false, kind: 'busy', error: 'Another training microphone is active.' }
+    if (this.active) return { ok: false, kind: 'busy', error: t('main.error.anotherTrainingMicActive') }
     // Ask BEFORE the child opens the device: `live-input` opens the HAL
     // AudioUnit itself and cannot ask, and a refused unit delivers silence
     // that reads as a singer who is not singing. On a Mac this is where the
@@ -210,14 +211,14 @@ export class DesktopAudioInput {
       return {
         ok: false,
         kind: 'denied',
-        error: 'Microphone access is blocked. Allow SingZ in System Settings › Privacy & Security › Microphone, then try again.'
+        error: t('main.error.micAccessBlocked')
       }
     const bin = await resolveAnalyze()
     if (!bin)
       return {
         ok: false,
         kind: 'unavailable-core',
-        error: 'The native audio-input core is not in this build.'
+        error: t('main.error.audioInputCoreMissing')
       }
     let devices: DesktopAudioInputDevice[]
     try {
@@ -236,7 +237,7 @@ export class DesktopAudioInput {
       requestedDevice ??
       devices.find((candidate) => candidate.isDefault) ??
       devices[0]
-    if (!device) return { ok: false, kind: 'unavailable', error: 'No microphone is available.' }
+    if (!device) return { ok: false, kind: 'unavailable', error: t('main.error.noMicrophoneAvailable') }
     const requestedChannel =
       typeof options.channel === 'number' && Number.isInteger(options.channel) && options.channel >= 0
         ? options.channel
@@ -271,7 +272,7 @@ export class DesktopAudioInput {
       const timer = setTimeout(() => {
         active.stopping = true
         child.kill('SIGKILL')
-        settle({ ok: false, kind: 'unavailable', error: 'The microphone took too long to start.' })
+        settle({ ok: false, kind: 'unavailable', error: t('main.error.micTookTooLongToStart') })
       }, CONTROL_TIMEOUT_MS)
       const settle = (result: DesktopAudioInputStartResult): void => {
         if (startSettled) return
@@ -318,7 +319,7 @@ export class DesktopAudioInput {
       child.on('error', (error) => {
         if (this.active === active) this.active = null
         active.resolveStopped()
-        settle({ ok: false, kind: 'unavailable', error: `Could not start the microphone: ${error.message}` })
+        settle({ ok: false, kind: 'unavailable', error: t('main.error.couldNotStartMicrophone', { message: error.message }) })
       })
       const onSenderDestroyed = (): void => {
         if (this.active === active) void this.stop(token)
@@ -351,7 +352,7 @@ export class DesktopAudioInput {
       if (await waitForStopped(active, 1000)) return { ok: true }
       active.child.kill('SIGKILL')
       if (await waitForStopped(active, 1000)) return { ok: true }
-      return { ok: false, error: 'The native microphone did not confirm that it stopped.' }
+      return { ok: false, error: t('main.error.micDidNotConfirmStop') }
     } catch (error) {
       log('audio-input', `stop failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
@@ -361,7 +362,7 @@ export class DesktopAudioInput {
 
 /** Record the actual capture transition, once per start, in the existing app log. */
 export function reportDesktopAudioInputFallback(raw: unknown): { ok: boolean; error?: string } {
-  if (!raw || typeof raw !== 'object') return { ok: false, error: 'Invalid microphone fallback.' }
+  if (!raw || typeof raw !== 'object') return { ok: false, error: t('main.error.invalidMicFallback') }
   const detail = raw as Record<string, unknown>
   const { reason, deviceLabel, channelIndex, channelCount, requestedChannel } = detail
   if (
@@ -370,7 +371,7 @@ export function reportDesktopAudioInputFallback(raw: unknown): { ok: boolean; er
     typeof channelCount !== 'number' || !Number.isInteger(channelCount) || channelCount < 1 || channelCount > 4096 ||
     typeof channelIndex !== 'number' || !Number.isInteger(channelIndex) || channelIndex < 0 || channelIndex >= channelCount ||
     typeof requestedChannel !== 'number' || !Number.isInteger(requestedChannel) || requestedChannel < 0 || requestedChannel > 4095
-  ) return { ok: false, error: 'Invalid microphone fallback.' }
+  ) return { ok: false, error: t('main.error.invalidMicFallback') }
   const singleLine = (value: string): string => value.replace(/[\r\n]/g, ' ')
   log('audio-input', `Native microphone fallback to browser capture: ${singleLine(reason)} · ` +
     `${singleLine(deviceLabel) || 'microphone'} · channel ${channelIndex + 1} of ${channelCount}` +

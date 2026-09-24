@@ -1,5 +1,6 @@
 import { DeviceEventEmitter, NativeModules } from 'react-native'
 import { log } from '../log'
+import { t } from '../i18n'
 
 /**
  * The production split-job surface (docs/PHONE-STANDALONE.md). Android runs
@@ -82,7 +83,7 @@ export async function startSplit(opts: {
   /** Test seam: shrink the watchdog's first-chunk cap. 0 = the real 5 min. */
   watchdogCapMs?: number
 }): Promise<void> {
-  if (!splitAvailable()) throw new Error('Splitting is not on this phone yet')
+  if (!splitAvailable()) throw new Error(t('phone.library.splittingNotAvailable'))
   log('split', `start ${opts.resume ? 'resume' : 'fresh'} ${opts.srcPath}`)
   const started = await native().startSplit(
     opts.srcPath,
@@ -99,12 +100,13 @@ export async function startSplit(opts: {
   // dies with a stall, so it has nothing held to refuse over.
   if (started === false) {
     log('split', 'start refused — another split still holds the engine', 'warn')
-    throw new Error(SPLIT_ENGINE_HELD_COPY)
+    throw new Error(t('phone.library.splitEngineHeldCopy'))
   }
 }
 
-export const SPLIT_ENGINE_HELD_COPY =
-  'The last split is still stuck on this phone. Close SingZ completely and open it again, then split.'
+// Frozen at import time; kept exported in case other code compares by
+// reference, but the throw site above re-reads the live language directly.
+export const SPLIT_ENGINE_HELD_COPY = t('phone.library.splitEngineHeldCopy')
 
 /** Whether a FAILED job still owns the split engine. On iOS a stall is
  *  recorded as failed while the wedged ORT thread keeps the runner active

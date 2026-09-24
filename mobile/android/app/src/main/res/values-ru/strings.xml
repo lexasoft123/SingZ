@@ -1,0 +1,20 @@
+<resources>
+    <string name="np_channel_name">Сейчас играет</string>
+    <string name="np_channel_desc">Песня, которая играет, с кнопками воспроизведения, паузы и перемотки</string>
+    <string name="np_back">Назад %1$s</string>
+    <string name="np_forward">Вперёд %1$s</string>
+    <string name="np_pause">Пауза</string>
+    <string name="np_play">Воспроизвести</string>
+    <string name="np_seconds">%1$d с</string>
+    <string name="split_channel_name">Разделение</string>
+    <string name="split_channel_desc">Ход разделения песни на дорожки</string>
+    <string name="split_title">Разделение на дорожки</string>
+    <string name="split_cancel">Отмена</string>
+    <string name="split_getting_ready">Подготовка…</string>
+    <string name="split_cancelling">Отмена…</string>
+    <string name="split_reading">Чтение песни…</string>
+    <string name="split_warming">Подготовка…</string>
+    <string name="split_chunk">Фрагмент %1$d из %2$d%3$s</string>
+    <string name="split_eta_min"> · осталось около %1$d мин</string>
+    <string name="split_eta_sec"> · осталось около %1$d с</string>
+</resources>

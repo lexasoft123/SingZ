@@ -1,4 +1,5 @@
 import type { AlignCheck, LyricLine, LyricWord } from '../../shared/types'
+import { t, tn } from './i18n'
 
 /**
  * Pure logic behind the lyrics editor: draft rows, their conversion to and
@@ -329,33 +330,32 @@ export function describeCheck(
   check: AlignCheck,
   canPrecise: boolean
 ): { text: string; warn: boolean } {
-  const precise = check.method === 'ctc' ? ' · precise' : ''
+  const precise = check.method === 'ctc' ? t('lyrics.check.preciseSuffix') : ''
   if (check.verdict === 'mismatch') {
     return {
       warn: true,
-      text:
-        `Only ${check.matchedPct}% of these words were heard in the vocals — ` +
-        (canPrecise ? 'check the text, or try Precise.' : "check the text against what's sung.")
+      text: canPrecise
+        ? t('lyrics.check.mismatchPrecise', { pct: check.matchedPct })
+        : t('lyrics.check.mismatchNoPrecise', { pct: check.matchedPct })
     }
   }
   const bad = check.badLines.length
+  const heard = t('lyrics.check.wordsHeard', { pct: check.matchedPct })
   if (bad > 0) {
     return {
       warn: false,
-      text:
-        `${check.matchedPct}% of words heard · ${bad} ${bad === 1 ? 'line' : 'lines'} couldn't be ` +
-        `made out and kept estimated timing${precise}`
+      text: `${heard} · ${tn('lyrics.check.badLines', bad)}${precise}`
     }
   }
   if (check.extraSung) {
     return {
       warn: false,
-      text: `${check.matchedPct}% of words heard · every line snapped — though the singer has parts these lyrics don't cover${precise}`
+      text: `${heard} · ${t('lyrics.check.extraSungNote')}${precise}`
     }
   }
   return {
     warn: false,
-    text: `${check.matchedPct}% of words heard · every line snapped to the singing${precise}`
+    text: `${heard} · ${t('lyrics.check.everySnapped')}${precise}`
   }
 }
 

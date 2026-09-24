@@ -237,6 +237,8 @@ const api: SingzApi = {
   },
 
   appVersion: () => ipcRenderer.invoke('app:version'),
+  getLocale: () => ipcRenderer.invoke('i18n:get'),
+  setLanguage: (language) => ipcRenderer.invoke('i18n:set', language),
 
   loadTrainingProgress: () => ipcRenderer.invoke('training-progress:load'),
   saveTrainingPreferences: (preferences) => ipcRenderer.invoke('training-preferences:save', preferences),

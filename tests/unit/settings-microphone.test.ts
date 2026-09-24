@@ -1,3 +1,4 @@
+import { readSourceWithEnglish } from './i18n-source'
 import { Children, createElement, type ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { readFileSync } from 'node:fs'
@@ -7,10 +8,10 @@ import {
   SettingsRouteApplicationQueue
 } from '../../src/renderer/src/audio/monitoring'
 import SettingsModal, {
-  INPUT_CHANNEL_ROUTE_PENDING_COPY,
   MicrophoneBackendStatus,
-  MONITOR_DIAGNOSTIC_LABELS,
-  OUTPUT_CHANNEL_ROUTE_PENDING_COPY,
+  inputChannelRoutePendingCopy,
+  monitorDiagnosticLabels,
+  outputChannelRoutePendingCopy,
   OutputRouteRecovery,
   SettingsPreviewStartOwner,
   audioChannelLabel,
@@ -32,7 +33,7 @@ import SettingsModal, {
   settingsPreviewCanStart
 } from '../../src/renderer/src/components/SettingsModal'
 import type { MicDevice } from '../../src/renderer/src/audio/mic'
-import { TRAINING_CLEANUP_SETTINGS_BLOCKED_COPY } from '../../src/renderer/src/audio/training-cleanup'
+import { trainingCleanupSettingsBlockedCopy } from '../../src/renderer/src/audio/training-cleanup'
 import type { DesktopAudioHostDevice, DesktopAudioHostInventoryResult } from '../../src/shared/types'
 
 const settingsProps = () => ({
@@ -126,7 +127,7 @@ describe('settings microphone input strip', () => {
     expect(html).toContain('Mono input · channel 1')
     expect(html).not.toContain('id="settings-input-channel"')
     expect(html).toContain('role="meter"')
-    expect(html).toContain('aria-label="Selected microphone channel level"')
+    expect(html).toContain('Selected microphone channel level')
     expect(html).toContain('Starting microphone preview…')
   })
 
@@ -146,10 +147,10 @@ describe('settings microphone input strip', () => {
     const html = renderToStaticMarkup(createElement(SettingsModal, {
       ...settingsProps(),
       externalAudioLeaseBlocked: true,
-      externalAudioLeaseCopy: TRAINING_CLEANUP_SETTINGS_BLOCKED_COPY
+      externalAudioLeaseCopy: trainingCleanupSettingsBlockedCopy()
     }))
 
-    expect(html).toContain(TRAINING_CLEANUP_SETTINGS_BLOCKED_COPY)
+    expect(html).toContain(trainingCleanupSettingsBlockedCopy())
     expect(html).toContain('Unavailable while Vocal training audio cleanup is unresolved.')
     expect(html).not.toContain('Open Settings to review the audio owner')
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Start monitoring<\/button>/)
@@ -191,7 +192,7 @@ describe('settings microphone input strip', () => {
     expect(schedule).toHaveBeenCalledOnce()
     expect(retry).toHaveBeenCalledOnce()
 
-    const source = readFileSync('src/renderer/src/components/SettingsModal.tsx', 'utf8')
+    const source = readSourceWithEnglish('src/renderer/src/components/SettingsModal.tsx')
     expect(source).toMatch(
       /onClick=\{onRetry\}[\s\S]*Retry output route[\s\S]*runOutputRouteRetry\([\s\S]*afterMonitorStops\(apply\)[\s\S]*onRetryOutputRoute/
     )
@@ -615,9 +616,9 @@ describe('settings microphone input strip', () => {
     )
     const pendingSelect = pendingControl?.[1] ?? ''
     expect(pendingSelect).toContain('disabled=""')
-    expect(pendingSelect).toContain(`title="${INPUT_CHANNEL_ROUTE_PENDING_COPY}`)
+    expect(pendingSelect).toContain(`title="${inputChannelRoutePendingCopy()}`)
     expect(pendingSelect).toContain(
-      `aria-label="Input channel. ${INPUT_CHANNEL_ROUTE_PENDING_COPY}`
+      `aria-label="Input channel. ${inputChannelRoutePendingCopy()}`
     )
     expect(pendingControl?.[2].match(/<option/g)).toHaveLength(8)
 
@@ -838,8 +839,8 @@ describe('native monitoring route policy', () => {
     expect(source).toContain('id="monitor-output-route-pending"')
     expect(source).toContain('role="status"')
     expect(source).toContain('aria-describedby={monitorOutputPropsAcknowledged')
-    expect(source).toContain('OUTPUT_CHANNEL_ROUTE_PENDING_COPY')
-    expect(OUTPUT_CHANNEL_ROUTE_PENDING_COPY).toContain('selected playback device')
+    expect(source).toContain('outputChannelRoutePendingCopy')
+    expect(outputChannelRoutePendingCopy()).toContain('selected playback device')
   })
 
   it('retains the invocation-order draft for rapid lanes on one acknowledged device', () => {
@@ -879,11 +880,11 @@ describe('native monitoring route policy', () => {
   })
 
   it('names independent latency components and host health without claiming round trip', () => {
-    expect(MONITOR_DIAGNOSTIC_LABELS).toEqual([
+    expect(monitorDiagnosticLabels()).toEqual([
       'Input device', 'Buffer', 'Output device', 'External route',
       'Xruns', 'Deadline misses', 'Render failures'
     ])
-    expect(MONITOR_DIAGNOSTIC_LABELS.join(' ')).not.toMatch(/round.?trip/i)
+    expect(monitorDiagnosticLabels().join(' ')).not.toMatch(/round.?trip/i)
   })
 })
 

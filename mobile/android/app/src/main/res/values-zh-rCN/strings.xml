@@ -1,0 +1,20 @@
+<resources>
+    <string name="np_channel_name">正在播放</string>
+    <string name="np_channel_desc">正在播放的歌曲，可播放、暂停和跳转</string>
+    <string name="np_back">后退 %1$s</string>
+    <string name="np_forward">前进 %1$s</string>
+    <string name="np_pause">暂停</string>
+    <string name="np_play">播放</string>
+    <string name="np_seconds">%1$d 秒</string>
+    <string name="split_channel_name">分离</string>
+    <string name="split_channel_desc">歌曲分离为分轨时的进度</string>
+    <string name="split_title">正在分离分轨</string>
+    <string name="split_cancel">取消</string>
+    <string name="split_getting_ready">正在准备…</string>
+    <string name="split_cancelling">正在取消…</string>
+    <string name="split_reading">正在读取歌曲…</string>
+    <string name="split_warming">正在预热…</string>
+    <string name="split_chunk">第 %1$d/%2$d 段%3$s</string>
+    <string name="split_eta_min">，约剩 %1$d 分钟</string>
+    <string name="split_eta_sec">，约剩 %1$d 秒</string>
+</resources>

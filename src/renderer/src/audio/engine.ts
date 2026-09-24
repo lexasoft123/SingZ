@@ -17,6 +17,7 @@ import type { DesktopNativePlaybackEngineRequest } from './desktop-native-playba
 import { desktopNativePlaybackPreferred } from './native-playback-preference'
 import type { DesktopPlaybackProvider, DesktopPlaybackStatus } from '../../../shared/types'
 import type { ParsedGraphDocument } from '../../../shared/graph-document'
+import { t } from '../i18n'
 
 export interface EngineTrackInput {
   id: string
@@ -1638,7 +1639,7 @@ export class MultitrackEngine {
     // take. If a lane cannot be restored at all, say so rather than start a
     // partial mix.
     if (!(await this.ensureLaneBuffers())) {
-      throw new Error('This song could not be re-read from disk, so playback has nothing to play.')
+      throw new Error(t('library.engine.songUnreadable'))
     }
     if (requestGeneration !== this.generation) return
 

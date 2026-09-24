@@ -1126,6 +1126,13 @@ was driven; the gotchas that follow from it are below.
   are cancellable; caches key on the 16-hex sha1 of the source file.
 - `--controls-w` in styles.css must equal `CONTROLS_W` in model.ts.
 - User-visible copy is sentence-case, friendly, and states sizes/time costs.
+- **The desktop is localized (English, Russian, Simplified Chinese)** — every
+  user-visible string is `t('ns.key')` over `src/shared/i18n/en/*.ts`, with
+  `ru/` and `zh-CN/` typed against it, so a string added without its two
+  translations fails typecheck. Nothing user-visible in a module-level
+  constant. The phone does the same over `mobile/src/i18n` (`phone.*` keys)
+  and has no picker — it follows the OS's per-app language setting.
+  Details: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) § Localization.
 - Renderer perf rules (weak-iGPU fleet): rAF loops are change-gated to whole
   device pixels (value-identity gating still damages every vsync — sub-pixel
   `--p` steps kept the QHD+ Dell at 60%+ GPU) and skip under

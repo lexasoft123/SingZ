@@ -9,6 +9,8 @@ import {
   scaleForKey,
   scaleSteps
 } from './music-theory'
+import { t } from './i18n/training'
+import { intervalLabel } from './music-labels'
 import type {
   ArpeggioPrompt,
   ChordTonePrompt,
@@ -83,7 +85,7 @@ export function generateTrainingPrompts(config: TrainingSessionConfig): Training
   for (const kind of kinds) candidates.set(kind, buildCandidates(safeConfig, kind))
   const availableKinds = kinds.filter((kind) => (candidates.get(kind)?.length ?? 0) > 0)
   if (availableKinds.length === 0)
-    throw new RangeError('No requested exercises fit the comfortable working range.')
+    throw new RangeError(t('training.session.error.rangeTooNarrow'))
 
   const prompts: TrainingPrompt[] = []
   const mixedOffset = safeConfig.exercise === 'mixed' ? Math.floor(rng() * availableKinds.length) : 0
@@ -218,7 +220,10 @@ function noteCandidates(config: TrainingSessionConfig): NotePrompt[] {
         kind: 'note',
         taskMode: config.taskMode,
         key: { ...config.key },
-        instruction: config.taskMode === 'identify' ? 'Identify the note.' : `Match ${target.noteName}.`,
+        instruction:
+          config.taskMode === 'identify'
+            ? t('training.session.instruction.identifyNote')
+            : t('training.session.instruction.matchNote', { note: target.noteName }),
         cues: singleNoteCues(config, midi),
         targets: [target]
       }
@@ -239,8 +244,8 @@ function scaleDegreeCandidates(config: TrainingSessionConfig): ScaleDegreePrompt
         key: { ...config.key },
         instruction:
           config.taskMode === 'identify'
-            ? 'Identify the scale degree.'
-            : `Sing scale degree ${note.degree} — ${target.noteName}.`,
+            ? t('training.session.instruction.identifyScaleDegree')
+            : t('training.session.instruction.singScaleDegree', { degree: note.degree, note: target.noteName }),
         cues: singleNoteCues(config, midi),
         targets: [target],
         scaleDegree: note.degree
@@ -282,8 +287,13 @@ function intervalCandidates(config: TrainingSessionConfig): IntervalPrompt[] {
           key: { ...config.key },
           instruction:
             config.taskMode === 'identify'
-              ? 'Identify the interval.'
-              : `Sing ${interval.name} ${direction} — ${targets[0].noteName} to ${targets[1].noteName}.`,
+              ? t('training.session.instruction.identifyInterval')
+              : t('training.session.instruction.singInterval', {
+                  interval: intervalLabel(interval.name),
+                  direction: directionWord(direction),
+                  from: targets[0].noteName,
+                  to: targets[1].noteName
+                }),
           cues: intervalCues(config, fitted),
           targets,
           fromDegree,
@@ -313,8 +323,12 @@ function chordToneCandidates(config: TrainingSessionConfig): ChordTonePrompt[] {
         key: { ...config.key },
         instruction:
           config.taskMode === 'identify'
-            ? 'Identify the chord tone.'
-            : `Sing the ${role} of ${chord.rootName} ${chord.quality} — ${target.noteName}.`,
+            ? t('training.session.instruction.identifyChordTone')
+            : t('training.session.instruction.singChordTone', {
+                role: chordRoleWord(role),
+                chord: chordNameText(chord),
+                note: target.noteName
+              }),
         cues: chordToneCues(config, chord, target),
         targets: [{ ...target }],
         chord: cloneChord(chord),
@@ -343,8 +357,11 @@ function arpeggioCandidates(config: TrainingSessionConfig): ArpeggioPrompt[] {
         key: { ...config.key },
         instruction:
           config.taskMode === 'identify'
-            ? 'Identify the arpeggiated chord.'
-            : `Arpeggiate ${chord.rootName} ${chord.quality} ${direction}.`,
+            ? t('training.session.instruction.identifyArpeggio')
+            : t('training.session.instruction.arpeggiate', {
+                chord: chordNameText(chord),
+                direction: directionWord(direction)
+              }),
         cues: arpeggioCues(config, chord, targets),
         targets,
         chord: cloneChord(chord),
@@ -1376,4 +1393,45 @@ function deepFreeze<T>(value: T): T {
 
 function assertNever(value: never): never {
   throw new RangeError(`Unsupported value: ${String(value)}.`)
+}
+
+/** {@link TrainingDirection} interpolated lowercase into an instruction sentence. */
+/** Translated words for prompt labels — exported for the phone, which builds its own. */
+export function directionWord(direction: TrainingDirection): string {
+  return direction === 'ascending' ? t('training.word.ascending') : t('training.word.descending')
+}
+
+/** {@link ChordToneRole} interpolated lowercase into an instruction sentence. */
+export function chordRoleWord(role: ChordToneRole): string {
+  switch (role) {
+    case 'root':
+      return t('training.word.root')
+    case 'third':
+      return t('training.word.third')
+    case 'fifth':
+      return t('training.word.fifth')
+    default:
+      return assertNever(role)
+  }
+}
+
+/** {@link TriadQuality} interpolated lowercase into an instruction sentence. */
+export function chordQualityWord(quality: TrainingChord['quality']): string {
+  switch (quality) {
+    case 'major':
+      return t('training.word.major')
+    case 'minor':
+      return t('training.word.minor')
+    case 'diminished':
+      return t('training.word.diminished')
+    case 'augmented':
+      return t('training.word.augmented')
+    default:
+      return assertNever(quality)
+  }
+}
+
+/** "{root} {quality}" — the root name is a proper note name and stays untranslated. */
+export function chordNameText(chord: TrainingChord): string {
+  return `${chord.rootName} ${chordQualityWord(chord.quality)}`
 }

@@ -22,6 +22,11 @@ import {
   keyName,
   midiNoteName,
   midiToFrequency,
+  chordNameText,
+  chordRoleWord,
+  directionWord,
+  intervalLabel,
+  keyLabel,
   scoreVocalTrainingAttempt,
   summarizeTrainingProgress,
   trainingSetupRequirements,
@@ -62,6 +67,7 @@ import {
   trainingMustStopForAppState,
   type SingleNoteLockState
 } from '../training/runtime'
+import { t, tn } from '../i18n'
 import { C, CircularArrowGlyph, MicGlyph, PlayPauseGlyph, white } from './bits'
 import { TEST } from './testhooks'
 import {
@@ -180,7 +186,7 @@ export default function TrainingScreen({
       singleNoteTracker.current.setPitchWindowCents(loaded.pitchWindowCents)
       engine.setTrainingCueVolume(loaded.referenceVolume)
       dispatch({ type: 'apply-preferences', preferences: loaded.progress.profile })
-      if (!loaded.ok) dispatch({ type: 'error', error: `Could not load training progress: ${loaded.error}` })
+      if (!loaded.ok) dispatch({ type: 'error', error: t('phone.training.loadError', { detail: loaded.error }) })
     })
     return () => { mounted = false }
   }, [engine])
@@ -212,7 +218,7 @@ export default function TrainingScreen({
     const interruption = AudioManager.addSystemEventListener('interruption', ({ type }) => {
       if (type !== 'began' || !activeRef.current) return
       stopRuntime()
-      dispatch({ type: 'error', error: 'Audio was interrupted. Tap Start when you are ready.' })
+      dispatch({ type: 'error', error: t('phone.training.interrupted') })
       dispatch({ type: 'interrupt' })
     })
     return () => {
@@ -349,7 +355,7 @@ export default function TrainingScreen({
       dispatch({ type: 'record', result })
       dispatch({ type: 'next' })
     })
-    AccessibilityInfo.announceForAccessibility(reason === 'locked' ? 'Note locked' : 'Note skipped')
+    AccessibilityInfo.announceForAccessibility(reason === 'locked' ? t('phone.training.noteLocked') : t('phone.training.noteSkipped'))
   }, [engine, mic])
 
   const completeVocalTarget = useCallback((run: ActiveVocalRun) => {
@@ -382,7 +388,7 @@ export default function TrainingScreen({
     setSingleNoteLock(EMPTY_SINGLE_NOTE_LOCK)
     setLiveMidi(null)
     setActiveTarget(run.activeTarget)
-    AccessibilityInfo.announceForAccessibility(`Next note ${run.prompt.targets[run.activeTarget].noteName}`)
+    AccessibilityInfo.announceForAccessibility(t('phone.training.nextNote', { note: run.prompt.targets[run.activeTarget].noteName }))
   }, [finishVocalPrompt, mic])
 
   const beginPrompt = useCallback(async () => {
@@ -712,24 +718,25 @@ function TrainingHome({ progress, song, effectiveKey, onChoose, onPrepare, onPro
 }): React.JSX.Element {
   const snapshot = summarizeTrainingProgress(progress)
   const cards: { exercise: MobileTrainingSetup['exercise']; title: string; copy: string; mark: string }[] = [
-    { exercise: 'note', title: 'Single notes', copy: 'Hear it, then place it cleanly.', mark: '●' },
-    { exercise: 'interval', title: 'Intervals', copy: 'Build reliable distance between notes.', mark: '↗' },
-    { exercise: 'chord-tone', title: 'Notes in a chord', copy: 'Find roots, thirds, and fifths.', mark: '△' },
-    { exercise: 'arpeggio', title: 'Carry the line', copy: 'Connect chord tones without a break.', mark: '⌁' }
+    { exercise: 'note', title: t('phone.training.exerciseNoteTitle'), copy: t('phone.training.exerciseNoteCopy'), mark: '●' },
+    { exercise: 'interval', title: t('phone.training.exerciseIntervalTitle'), copy: t('phone.training.exerciseIntervalCopy'), mark: '↗' },
+    { exercise: 'chord-tone', title: t('phone.training.exerciseChordToneTitle'), copy: t('phone.training.exerciseChordToneCopy'), mark: '△' },
+    { exercise: 'arpeggio', title: t('phone.training.exerciseArpeggioTitle'), copy: t('phone.training.exerciseArpeggioCopy'), mark: '⌁' }
   ]
+  const landed = snapshot.landedRate === null ? '—' : t('phone.training.landedPercent', { pct: Math.round(snapshot.landedRate * 100) })
   return (
     <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
       <View style={styles.hero}>
-        <Text style={styles.eyebrow}>VOCAL TRAINING</Text>
-        <Text style={styles.title}>Tune the ear.{`\n`}Steady the voice.</Text>
-        <Text style={styles.lede}>Short exercises built around the notes you actually sing.</Text>
+        <Text style={styles.eyebrow}>{t('phone.training.heroEyebrow')}</Text>
+        <Text style={styles.title}>{t('phone.training.heroTitle')}</Text>
+        <Text style={styles.lede}>{t('phone.training.heroLede')}</Text>
       </View>
       {song && (
         <GlassSurface radius={26} style={styles.songCardContent}>
-          <Text style={styles.eyebrow}>LOADED SONG</Text>
-          <Text style={styles.cardTitle}>Prepare for “{song.songName}”</Text>
-          <Text style={styles.cardCopy}>{effectiveKey ? `${keyName(effectiveKey)} · live transpose included` : 'No current key — choose it in setup.'}</Text>
-          <View style={styles.wrap}>{(['notes', 'intervals', 'chords', 'mixed'] as const).map((choice) => <Chip key={choice} label={choice[0].toUpperCase() + choice.slice(1)} onPress={() => onPrepare(choice)} />)}</View>
+          <Text style={styles.eyebrow}>{t('phone.training.loadedSongEyebrow')}</Text>
+          <Text style={styles.cardTitle}>{t('phone.training.prepareFor', { song: song.songName })}</Text>
+          <Text style={styles.cardCopy}>{effectiveKey ? t('phone.training.keyWithTranspose', { key: keyLabel(keyName(effectiveKey)) }) : t('phone.training.noCurrentKey')}</Text>
+          <View style={styles.wrap}>{(['notes', 'intervals', 'chords', 'mixed'] as const).map((choice) => <Chip key={choice} label={songPreparationChoiceLabel(choice)} onPress={() => onPrepare(choice)} />)}</View>
         </GlassSurface>
       )}
       <View style={styles.cardGrid}>{cards.map((card) => (
@@ -742,12 +749,19 @@ function TrainingHome({ progress, song, effectiveKey, onChoose, onPrepare, onPro
         />
       ))}</View>
       <ListEntry
-        title="Progress"
-        detail={snapshot.sessions ? `${snapshot.sessions} sessions · ${snapshot.landedRate === null ? '—' : Math.round(snapshot.landedRate * 100) + '%'} landed` : 'Your completed sessions will appear here.'}
+        title={t('phone.training.progressEntryTitle')}
+        detail={snapshot.sessions ? tn('phone.training.progressSummary', snapshot.sessions, { landed }) : t('phone.training.progressEmpty')}
         onPress={onProgress}
       />
     </ScrollView>
   )
+}
+
+function songPreparationChoiceLabel(choice: SongPreparationChoice): string {
+  if (choice === 'notes') return t('phone.training.prepChoiceNotes')
+  if (choice === 'intervals') return t('phone.training.prepChoiceIntervals')
+  if (choice === 'chords') return t('phone.training.prepChoiceChords')
+  return t('phone.training.prepChoiceMixed')
 }
 
 interface ReferenceSoundSettingsProps {
@@ -818,7 +832,7 @@ export function SingleNoteSetup({
   const lengths = [10, 20, 30, 50]
   const secondsPerExercise = setup.exercise === 'arpeggio' ? 18 : setup.exercise === 'interval' ? 13 : 8
   const estimatedMinutes = Math.max(1, Math.round(setup.length * secondsPerExercise / 60))
-  const unit = setup.exercise === 'note' ? 'notes' : 'exercises'
+  const unit = setup.exercise === 'note' ? tn('phone.training.unitNotes', setup.length) : tn('phone.training.unitExercises', setup.length)
   return (
     <View style={styles.singleSetupFrame}>
       <ScrollView contentContainerStyle={[styles.scroll, styles.singleSetupScroll]} showsVerticalScrollIndicator={false}>
@@ -826,68 +840,68 @@ export function SingleNoteSetup({
         {error && <Text accessibilityLiveRegion="polite" style={styles.error}>{error}</Text>}
         <SettingsCard>
         <CompactSetupRow
-          label="Key"
-          value={keyName(key)}
+          label={t('phone.training.setupKey')}
+          value={keyLabel(keyName(key))}
           expanded={editor === 'key'}
           onPress={() => setEditor(editor === 'key' ? null : 'key')}
         />
         {editor === 'key' && (
           <View style={styles.compactEditor}>
             <View style={styles.wrap}>{['C','C♯','D','E♭','E','F','F♯','G','A♭','A','B♭','B'].map((name, tonicPc) => <Chip key={name} label={name} selected={setup.tonicPc === tonicPc} onPress={() => onChange({ tonicPc })} />)}</View>
-            <View style={styles.wrap}><Chip label="Major" selected={setup.keyMode === 'major'} onPress={() => onChange({ keyMode: 'major' })} /><Chip label="Minor" selected={setup.keyMode === 'minor'} onPress={() => onChange({ keyMode: 'minor' })} /></View>
+            <View style={styles.wrap}><Chip label={t('phone.training.setupMajor')} selected={setup.keyMode === 'major'} onPress={() => onChange({ keyMode: 'major' })} /><Chip label={t('phone.training.setupMinor')} selected={setup.keyMode === 'minor'} onPress={() => onChange({ keyMode: 'minor' })} /></View>
           </View>
         )}
         <Hairline />
         {setup.exercise !== 'note' && (
           <>
             <CompactSetupRow
-              label="Practice"
-              value={setup.taskMode === 'identify' ? 'Identify' : 'Imitate'}
+              label={t('phone.training.setupPractice')}
+              value={setup.taskMode === 'identify' ? t('phone.training.setupIdentify') : t('phone.training.setupImitate')}
               expanded={editor === 'mode'}
               onPress={() => setEditor(editor === 'mode' ? null : 'mode')}
             />
             {editor === 'mode' && (
-              <View style={styles.compactEditor}><View style={styles.wrap}><Chip label="Imitate" selected={setup.taskMode !== 'identify'} onPress={() => onChange({ taskMode: 'imitate' })} /><Chip label="Identify" selected={setup.taskMode === 'identify'} onPress={() => onChange({ taskMode: 'identify' })} /></View></View>
+              <View style={styles.compactEditor}><View style={styles.wrap}><Chip label={t('phone.training.setupImitate')} selected={setup.taskMode !== 'identify'} onPress={() => onChange({ taskMode: 'imitate' })} /><Chip label={t('phone.training.setupIdentify')} selected={setup.taskMode === 'identify'} onPress={() => onChange({ taskMode: 'identify' })} /></View></View>
             )}
             <Hairline />
           </>
         )}
         <CompactSetupRow
-          label="Voice range"
+          label={t('phone.training.setupVoiceRange')}
           value={`${low} — ${high}`}
           expanded={editor === 'range'}
           onPress={() => setEditor(editor === 'range' ? null : 'range')}
         />
         {editor === 'range' && (
           <View style={styles.compactEditor}>
-            <Stepper label="Low" value={setup.lowMidi} displayValue={low} onDown={() => onChange({ lowMidi: Math.max(36, Math.min(setup.lowMidi - 1, setup.highMidi)) })} onUp={() => onChange({ lowMidi: Math.min(setup.highMidi, setup.lowMidi + 1) })} />
-            <Stepper label="High" value={setup.highMidi} displayValue={high} onDown={() => onChange({ highMidi: Math.max(setup.lowMidi, setup.highMidi - 1) })} onUp={() => onChange({ highMidi: Math.min(84, setup.highMidi + 1) })} />
+            <Stepper label={t('phone.training.setupLow')} value={setup.lowMidi} displayValue={low} onDown={() => onChange({ lowMidi: Math.max(36, Math.min(setup.lowMidi - 1, setup.highMidi)) })} onUp={() => onChange({ lowMidi: Math.min(setup.highMidi, setup.lowMidi + 1) })} />
+            <Stepper label={t('phone.training.setupHigh')} value={setup.highMidi} displayValue={high} onDown={() => onChange({ highMidi: Math.max(setup.lowMidi, setup.highMidi - 1) })} onUp={() => onChange({ highMidi: Math.min(84, setup.highMidi + 1) })} />
           </View>
         )}
         <Hairline />
         {requirements.directionUsed && (
           <>
-            <CompactSetupRow label="Direction" value={capitalize(setup.direction)} expanded={editor === 'direction'} onPress={() => setEditor(editor === 'direction' ? null : 'direction')} />
-            {editor === 'direction' && <View style={styles.compactEditor}><View style={styles.wrap}>{(['ascending','descending','both'] as const).map((direction) => <Chip key={direction} label={direction} selected={setup.direction === direction} onPress={() => onChange({ direction })} />)}</View></View>}
+            <CompactSetupRow label={t('phone.training.setupDirection')} value={capitalize(directionLabel(setup.direction))} expanded={editor === 'direction'} onPress={() => setEditor(editor === 'direction' ? null : 'direction')} />
+            {editor === 'direction' && <View style={styles.compactEditor}><View style={styles.wrap}>{(['ascending','descending','both'] as const).map((direction) => <Chip key={direction} label={directionLabel(direction)} selected={setup.direction === direction} onPress={() => onChange({ direction })} />)}</View></View>}
             <Hairline />
           </>
         )}
         {requirements.intervalsRequired && (
           <>
-            <CompactSetupRow label="Intervals" value={setup.intervalSizes.join(', ')} expanded={editor === 'intervals'} onPress={() => setEditor(editor === 'intervals' ? null : 'intervals')} />
+            <CompactSetupRow label={t('phone.training.exerciseIntervalTitle')} value={setup.intervalSizes.join(', ')} expanded={editor === 'intervals'} onPress={() => setEditor(editor === 'intervals' ? null : 'intervals')} />
             {editor === 'intervals' && <View style={styles.compactEditor}><View style={styles.wrap}>{[2,3,4,5,6,7,8].map((size) => <Chip key={size} label={String(size)} selected={setup.intervalSizes.includes(size)} onPress={() => onChange({ intervalSizes: toggle(setup.intervalSizes, size) })} />)}</View></View>}
             <Hairline />
           </>
         )}
         {requirements.chordsRequired && (
           <>
-            <CompactSetupRow label="Chord degrees" value={setup.chordDegrees.join(', ')} expanded={editor === 'chords'} onPress={() => setEditor(editor === 'chords' ? null : 'chords')} />
+            <CompactSetupRow label={t('phone.training.setupChordDegrees')} value={setup.chordDegrees.join(', ')} expanded={editor === 'chords'} onPress={() => setEditor(editor === 'chords' ? null : 'chords')} />
             {editor === 'chords' && <View style={styles.compactEditor}><View style={styles.wrap}>{[1,2,3,4,5,6,7].map((degree) => <Chip key={degree} label={String(degree)} selected={setup.chordDegrees.includes(degree)} onPress={() => onChange({ chordDegrees: toggle(setup.chordDegrees, degree) })} />)}</View></View>}
             <Hairline />
           </>
         )}
         <View style={styles.sessionLengthRow}>
-          <View><Text style={styles.compactLabel}>Session</Text><Text style={styles.compactValue}>{setup.length} {unit} · ≈ {estimatedMinutes} min</Text></View>
+          <View><Text style={styles.compactLabel}>{t('phone.training.setupSession')}</Text><Text style={styles.compactValue}>{unit} · {t('phone.training.approxMinutes', { minutes: estimatedMinutes })}</Text></View>
           <View style={styles.compactLengths}>{lengths.map((length) => <Chip key={length} label={String(length)} selected={setup.length === length} onPress={() => onChange({ length })} />)}</View>
         </View>
         </SettingsCard>
@@ -902,10 +916,16 @@ export function SingleNoteSetup({
         />
       </ScrollView>
       <StickyActionFooter>
-        <Primary label="Start practice" onPress={onStart} />
+        <Primary label={t('phone.training.startPractice')} onPress={onStart} />
       </StickyActionFooter>
     </View>
   )
+}
+
+function directionLabel(direction: MobileTrainingSetup['direction']): string {
+  if (direction === 'ascending') return t('phone.training.directionAscending')
+  if (direction === 'descending') return t('phone.training.directionDescending')
+  return t('phone.training.directionBoth')
 }
 
 export function ReferenceSoundPanel({
@@ -931,7 +951,7 @@ export function ReferenceSoundPanel({
     volumePosition={position}
     volumeMinPercent={TRAINING_REFERENCE_VOLUME_MIN * 100}
     volumeMaxPercent={TRAINING_REFERENCE_VOLUME_MAX * 100}
-    testLabel={`Test ${testNote}`}
+    testLabel={t('phone.training.testNote', { note: testNote })}
     testing={testingReferenceTone}
     testIcon={<PlayPauseGlyph playing={testingReferenceTone} color={C.amberInk} />}
     onTest={() => onTestReferenceTone(testMidi)}
@@ -939,7 +959,7 @@ export function ReferenceSoundPanel({
     onIncrease={() => adjust(0.1)}
     decreaseDisabled={volume <= TRAINING_REFERENCE_VOLUME_MIN}
     increaseDisabled={volume >= TRAINING_REFERENCE_VOLUME_MAX}
-    hint="20–200% · saved for every exercise"
+    hint={t('phone.training.referenceVolumeHint')}
     pitchWindow={setup.taskMode === 'identify' ? undefined : {
       value: pitchWindowCents,
       options: SINGLE_NOTE_PITCH_WINDOW_OPTIONS,
@@ -962,7 +982,7 @@ export function TrainingSessionView({ state, liveMidi, micHearing = 'starting', 
     <View style={styles.session}>
       <GlassHeader
         title=""
-        backLabel={onBackToSong ? 'Back to song' : 'End session'}
+        backLabel={onBackToSong ? t('phone.training.backToSong') : t('phone.training.endSession')}
         onBack={onBackToSong ?? onExit}
         trailing={<Text pointerEvents="none" style={styles.counter}>{index + 1} / {session.prompts.length}</Text>}
       />
@@ -984,14 +1004,14 @@ export function TrainingSessionView({ state, liveMidi, micHearing = 'starting', 
       ) : (
         <>
           <View style={styles.promptBlock}>
-            <Text style={styles.eyebrow}>{keyName(session.config.key).toUpperCase()}</Text>
+            <Text style={styles.eyebrow}>{keyLabel(keyName(session.config.key)).toUpperCase()}</Text>
             <Text style={styles.prompt}>{prompt.instruction}</Text>
           </View>
-          {state.phase === 'ready' && <View style={styles.center}><Text style={styles.cardCopy}>{prompt.taskMode === 'identify' ? 'Listen, then choose what you heard.' : 'The microphone starts only when you tap below.'}</Text><Primary label="Start exercise" onPress={onBegin} /></View>}
-          {state.phase === 'cue' && <View accessibilityLabel={`Listen, ${singleNoteCountdown ?? 1}`} style={styles.center}><Pulse mark={String(singleNoteCountdown ?? 1)} /><Text accessibilityLiveRegion="polite" style={styles.phaseText}>Listen</Text></View>}
+          {state.phase === 'ready' && <View style={styles.center}><Text style={styles.cardCopy}>{prompt.taskMode === 'identify' ? t('phone.training.readyIdentifyCopy') : t('phone.training.readyImitateCopy')}</Text><Primary label={t('phone.training.startExercise')} onPress={onBegin} /></View>}
+          {state.phase === 'cue' && <View accessibilityLabel={`${t('phone.training.listen')}, ${singleNoteCountdown ?? 1}`} style={styles.center}><Pulse mark={String(singleNoteCountdown ?? 1)} /><Text accessibilityLiveRegion="polite" style={styles.phaseText}>{t('phone.training.listen')}</Text></View>}
           {state.phase === 'respond' && prompt.taskMode === 'identify' && <IdentifyChoices prompt={prompt} onChoose={onIdentify} />}
           {state.phase === 'respond' && prompt.taskMode !== 'identify' && <PitchRunway prompt={prompt} liveMidi={liveMidi} activeTarget={activeTarget} />}
-          {state.phase === 'feedback' && result && <View style={styles.center}><Text accessibilityLiveRegion="assertive" style={styles.feedback}>{trainingFeedback(result)}</Text><Primary label={session.status === 'completed' ? 'See summary' : 'Next exercise'} onPress={onNext} /></View>}
+          {state.phase === 'feedback' && result && <View style={styles.center}><Text accessibilityLiveRegion="assertive" style={styles.feedback}>{trainingFeedback(result)}</Text><Primary label={session.status === 'completed' ? t('phone.training.seeSummary') : t('phone.training.nextExercise')} onPress={onNext} /></View>}
         </>
       )}
       {state.error && <Text accessibilityLiveRegion="assertive" style={styles.error}>{state.error}</Text>}
@@ -1027,16 +1047,16 @@ function SingleNoteSessionBody({ phase, prompt, result, liveMidi, micHearing, lo
         <PitchTarget
           testID="single-note-target-area"
           noteName={target.noteName}
-          eyebrow={`${keyName(prompt.key).toUpperCase()} · ${promptPracticeLabel(prompt).toUpperCase()}`}
+          eyebrow={`${keyLabel(keyName(prompt.key)).toUpperCase()} · ${promptPracticeLabel(prompt).toUpperCase()}`}
           sequence={sequence}
         />
         {phase === 'ready' && (
           <View style={styles.singleAction}>
-            {!error && <Text accessibilityLiveRegion="polite" style={styles.singleInstruction}>Preparing next note…</Text>}
+            {!error && <Text accessibilityLiveRegion="polite" style={styles.singleInstruction}>{t('phone.training.preparingNextNoteEllipsis')}</Text>}
           </View>
         )}
         {phase === 'cue' && (
-          <Countdown value={countdown ?? 1} hint="Listen to the reference note" />
+          <Countdown value={countdown ?? 1} hint={t('phone.training.listenToReferenceNote')} />
         )}
         {phase === 'respond' && <SingleNotePitchMeter prompt={prompt} activeTarget={targetIndex} liveMidi={liveMidi} micHearing={micHearing} lock={lock} pitchWindowCents={pitchWindowCents} />}
         {phase === 'feedback' && result && (
@@ -1086,14 +1106,14 @@ function SingleNoteTransport({ phase, error, onBegin, onSkip }: {
   const restartRequired = phase === 'ready' && error !== null
   const replayAvailable = phase === 'respond'
   const swipeHint = restartRequired
-    ? 'Tap Start when you are ready'
+    ? t('phone.training.tapStartWhenReady')
     : phase === 'ready'
-      ? 'The next note starts automatically'
+      ? t('phone.training.nextNoteAutomatic')
     : phase === 'respond'
-      ? 'Swipe right to replay · left to skip'
+      ? t('phone.training.swipeHint')
       : phase === 'feedback'
-        ? 'Loading next note'
-        : 'Listen now · sing when the countdown ends'
+        ? t('phone.training.loadingNextNote')
+        : t('phone.training.listenNowHint')
   const centerIcon = phase === 'respond'
     ? <MicGlyph color={C.amberInk} />
     : phase === 'feedback'
@@ -1101,26 +1121,26 @@ function SingleNoteTransport({ phase, error, onBegin, onSkip }: {
       : <PlayPauseGlyph playing={phase === 'cue'} color={C.amberInk} />
   const dock = <TransportDock
     left={replayAvailable ? {
-      accessibilityLabel: 'Hear again',
-      caption: 'Replay',
+      accessibilityLabel: t('phone.training.hearAgain'),
+      caption: t('phone.training.replay'),
       icon: <CircularArrowGlyph color={C.text} size={22} />,
       onPress: onBegin
     } : undefined}
     center={{
-      accessibilityLabel: restartRequired ? 'Start' : phase === 'ready' ? 'Preparing next note' : phase === 'cue' ? 'Playing target note' : phase === 'respond' ? 'Microphone listening' : 'Loading next note',
-      caption: restartRequired ? 'Start' : phase === 'ready' ? 'Preparing' : phase === 'cue' ? 'Playing' : phase === 'respond' ? 'Listening' : 'Next note',
+      accessibilityLabel: restartRequired ? t('phone.training.start') : phase === 'ready' ? t('phone.training.preparingNextNoteAria') : phase === 'cue' ? t('phone.training.playingTargetNoteAria') : phase === 'respond' ? t('phone.training.micListeningAria') : t('phone.training.loadingNextNote'),
+      caption: restartRequired ? t('phone.training.start') : phase === 'ready' ? t('phone.training.preparing') : phase === 'cue' ? t('phone.training.playing') : phase === 'respond' ? t('phone.training.listening') : t('phone.training.nextNoteCaption'),
       icon: centerIcon
     }}
     right={phase === 'respond' ? {
-      accessibilityLabel: 'Skip',
-      caption: 'Skip',
+      accessibilityLabel: t('phone.training.skip'),
+      caption: t('phone.training.skip'),
       icon: <Text style={styles.transportSkip}>›</Text>,
       onPress: onSkip
     } : undefined}
     hint={swipeHint}
   />
   return restartRequired
-    ? <Pressable accessibilityRole="button" accessibilityLabel="Start" onPress={onBegin}>{dock}</Pressable>
+    ? <Pressable accessibilityRole="button" accessibilityLabel={t('phone.training.start')} onPress={onBegin}>{dock}</Pressable>
     : dock
 }
 
@@ -1137,44 +1157,55 @@ function SingleNoteTransport({ phase, error, onBegin, onSkip }: {
  * the two it is running, so the screen asks it rather than guessing. */
 export type MicHearing = 'starting' | 'no-audio' | 'silent' | 'too-quiet' | 'hearing'
 
-const SILENT_COPY = {
-  // Permission refusal has its own error path, so reaching here means capture
-  // started and then delivered nothing — an AAudio stream that reported
-  // STARTED and never called back. Restarting capture is what clears it, and
-  // Replay is the button that does exactly that.
-  'no-audio': { reading: 'No sound from the mic', instruction: 'Tap Replay to restart the microphone' },
-  // Blocks are arriving and they are empty: the stream is running on a
-  // microphone something else has muted.
-  silent: { reading: 'The mic is delivering silence', instruction: 'Check microphone access in Settings' },
-  'too-quiet': { reading: 'Too quiet to hear', instruction: 'Sing a little louder, or move closer' },
-  starting: { reading: 'Waiting for your voice', instruction: 'Sing the note' },
-  hearing: { reading: 'Waiting for your voice', instruction: 'Sing the note' }
-} as const
+// Evaluated at call time (not a module-level constant) so a live language
+// switch is reflected the next time the mic status changes.
+function silentCopy(kind: MicHearing): { reading: string; instruction: string } {
+  switch (kind) {
+    // Permission refusal has its own error path, so reaching here means capture
+    // started and then delivered nothing — an AAudio stream that reported
+    // STARTED and never called back. Restarting capture is what clears it, and
+    // Replay is the button that does exactly that.
+    case 'no-audio':
+      return { reading: t('phone.training.noSoundReading'), instruction: t('phone.training.noSoundInstruction') }
+    // Blocks are arriving and they are empty: the stream is running on a
+    // microphone something else has muted.
+    case 'silent':
+      return { reading: t('phone.training.silentReading'), instruction: t('phone.training.silentInstruction') }
+    case 'too-quiet':
+      return { reading: t('phone.training.tooQuietReading'), instruction: t('phone.training.tooQuietInstruction') }
+    case 'starting':
+    case 'hearing':
+    default:
+      return { reading: t('phone.training.waitingReading'), instruction: t('phone.training.singTheNote') }
+  }
+}
 
 function SingleNotePitchMeter({ prompt, activeTarget, liveMidi, micHearing, lock, pitchWindowCents }: { prompt: TrainingPrompt; activeTarget: number; liveMidi: number | null; micHearing: MicHearing; lock: SingleNoteLockState; pitchWindowCents: number }): React.JSX.Element {
   const target = prompt.targets[Math.min(activeTarget, prompt.targets.length - 1)]
   const cents = liveMidi === null ? null : lock.medianCents ?? (liveMidi - target.midi) * 100
   const detected = liveMidi === null ? null : midiNoteName(Math.round(liveMidi), prompt.key)
-  const silent = SILENT_COPY[micHearing]
+  const silent = silentCopy(micHearing)
   const centsReading = cents === null
     ? silent.reading
     : Math.abs(cents) < 1
-      ? 'Centered'
-      : `${Math.round(Math.abs(cents))}¢ ${cents < 0 ? 'flat' : 'sharp'}`
+      ? t('phone.training.centered')
+      : cents < 0
+        ? t('phone.training.centsFlat', { cents: Math.round(Math.abs(cents)) })
+        : t('phone.training.centsSharp', { cents: Math.round(Math.abs(cents)) })
   const instruction = lock.status === 'locked'
-    ? 'Locked'
+    ? t('phone.training.locked')
     : lock.status === 'holding'
-      ? 'Hold it…'
+      ? t('phone.training.holdIt')
       : cents === null
         ? silent.instruction
         : cents < -pitchWindowCents
-          ? 'A little higher'
+          ? t('phone.training.aLittleHigher')
           : cents > pitchWindowCents
-            ? 'A little lower'
-            : 'Steady the note'
+            ? t('phone.training.aLittleLower')
+            : t('phone.training.steadyTheNote')
   const reading = detected === null
     ? `${instruction}. ${silent.reading}.`
-    : `You are singing ${detected}. ${centsReading}. Hold progress ${Math.round(lock.progress * 100)} percent.`
+    : `${t('phone.training.youAreSinging', { note: detected })} ${centsReading}. ${t('phone.training.holdProgress', { percent: Math.round(lock.progress * 100) })}`
   return <PitchMeter
     cents={cents}
     pitchWindowCents={pitchWindowCents}
@@ -1184,7 +1215,7 @@ function SingleNotePitchMeter({ prompt, activeTarget, liveMidi, micHearing, lock
     instruction={instruction}
     reading={centsReading}
     accessibilityReading={reading}
-    hint={`Center within ±${pitchWindowCents}¢ and hold for 1.5 seconds.`}
+    hint={t('phone.training.centerWithinHint', { cents: pitchWindowCents })}
   />
 }
 
@@ -1192,7 +1223,7 @@ function PitchRunway({ prompt, liveMidi, activeTarget }: { prompt: TrainingPromp
   const target = prompt.targets[Math.min(activeTarget, prompt.targets.length - 1)]
   const cents = liveMidi === null ? null : (liveMidi - target.midi) * 100
   const x = cents === null ? 50 : Math.max(7, Math.min(93, 50 + cents / 6))
-  return <View style={styles.runwayWrap}><Text style={styles.targetName}>{target.noteName}</Text><View style={styles.runway}><View style={styles.runwayCenter} /><View style={[styles.pitchComet, { left: `${x}%` }]} /></View><Text style={styles.cardCopy}>{cents === null ? 'Sing when ready' : Math.abs(cents) < 8 ? 'Centered' : cents < 0 ? `${Math.round(Math.abs(cents))}¢ flat` : `${Math.round(cents)}¢ sharp`}</Text></View>
+  return <View style={styles.runwayWrap}><Text style={styles.targetName}>{target.noteName}</Text><View style={styles.runway}><View style={styles.runwayCenter} /><View style={[styles.pitchComet, { left: `${x}%` }]} /></View><Text style={styles.cardCopy}>{cents === null ? t('phone.training.singWhenReady') : Math.abs(cents) < 8 ? t('phone.training.centered') : cents < 0 ? t('phone.training.centsFlat', { cents: Math.round(Math.abs(cents)) }) : t('phone.training.centsSharp', { cents: Math.round(cents) })}</Text></View>
 }
 
 function IdentifyChoices({ prompt, onChoose }: { prompt: TrainingPrompt; onChoose: (answer: TrainingIdentifyAnswer) => void }): React.JSX.Element {
@@ -1203,12 +1234,12 @@ function IdentifyChoices({ prompt, onChoose }: { prompt: TrainingPrompt; onChoos
 function TrainingSummary({ session, onHome, onBackToSong }: { session: NonNullable<ReturnType<typeof initialTrainingState>['session']>; onHome: () => void; onBackToSong: (() => void) | null }): React.JSX.Element {
   const receipt = createTrainingCompletionReceipt(session)
   const a = receipt.aggregate
-  return <ScrollView contentContainerStyle={styles.scroll}><TrainingHeader title="Session complete" onBack={onHome} /><View style={styles.summaryScore}><Text style={styles.summaryNumber}>{a.onTarget + a.close}/{a.attempts}</Text><Text style={styles.cardCopy}>landed on or near the target</Text></View><View style={styles.summaryRow}><Metric label="On target" value={a.onTarget} /><Metric label="Close" value={a.close} /><Metric label="Sessions" value={1} /></View>{onBackToSong && <Primary label="Back to song" onPress={onBackToSong} />}<Chip label="Train something else" onPress={onHome} /></ScrollView>
+  return <ScrollView contentContainerStyle={styles.scroll}><TrainingHeader title={t('phone.training.sessionComplete')} onBack={onHome} /><View style={styles.summaryScore}><Text style={styles.summaryNumber}>{a.onTarget + a.close}/{a.attempts}</Text><Text style={styles.cardCopy}>{t('phone.training.landedOnOrNear')}</Text></View><View style={styles.summaryRow}><Metric label={t('phone.training.metricOnTarget')} value={a.onTarget} /><Metric label={t('phone.training.metricClose')} value={a.close} /><Metric label={t('phone.training.metricSessions')} value={1} /></View>{onBackToSong && <Primary label={t('phone.training.backToSong')} onPress={onBackToSong} />}<Chip label={t('phone.training.trainSomethingElse')} onPress={onHome} /></ScrollView>
 }
 
 function TrainingProgressView({ progress, onBack }: { progress: TrainingProgress; onBack: () => void }): React.JSX.Element {
   const snapshot = summarizeTrainingProgress(progress)
-  return <ScrollView contentContainerStyle={styles.scroll}><TrainingHeader title="Progress" onBack={onBack} /><View style={styles.summaryScore}><Text style={styles.summaryNumber}>{snapshot.sessions}</Text><Text style={styles.cardCopy}>completed sessions</Text></View><View style={styles.summaryRow}><Metric label="Attempts" value={snapshot.attempts} /><Metric label="Landed" value={snapshot.landedRate === null ? '—' : `${Math.round(snapshot.landedRate * 100)}%`} /><Metric label="Tendency" value={snapshot.tendency} /></View>{snapshot.weakerExercises.length > 0 && <Section label="Useful next focus"><Text style={styles.cardCopy}>{snapshot.weakerExercises.join(' · ')}</Text></Section>}<Section label="Recent">{progress.recent.length === 0 ? <Text style={styles.cardCopy}>Complete a session to start your history.</Text> : progress.recent.slice(0, 8).map((item) => <View key={item.sessionId} style={styles.recentRow}><Text style={styles.recentTitle}>{keyName(item.key)} · {readableExercise(item.exercise)}</Text><Text style={styles.cardCopy}>{item.onTarget + item.close}/{item.attempts} landed</Text></View>)}</Section></ScrollView>
+  return <ScrollView contentContainerStyle={styles.scroll}><TrainingHeader title={t('phone.training.progressEntryTitle')} onBack={onBack} /><View style={styles.summaryScore}><Text style={styles.summaryNumber}>{snapshot.sessions}</Text><Text style={styles.cardCopy}>{t('phone.training.completedSessions')}</Text></View><View style={styles.summaryRow}><Metric label={t('phone.training.metricAttempts')} value={snapshot.attempts} /><Metric label={t('phone.training.metricLanded')} value={snapshot.landedRate === null ? '—' : `${Math.round(snapshot.landedRate * 100)}%`} /><Metric label={t('phone.training.metricTendency')} value={snapshot.tendency} /></View>{snapshot.weakerExercises.length > 0 && <Section label={t('phone.training.usefulNextFocus')}><Text style={styles.cardCopy}>{snapshot.weakerExercises.join(' · ')}</Text></Section>}<Section label={t('phone.training.recent')}>{progress.recent.length === 0 ? <Text style={styles.cardCopy}>{t('phone.training.completeSessionToStart')}</Text> : progress.recent.slice(0, 8).map((item) => <View key={item.sessionId} style={styles.recentRow}><Text style={styles.recentTitle}>{keyLabel(keyName(item.key))} · {readableExercise(item.exercise)}</Text><Text style={styles.cardCopy}>{t('phone.training.landedOfAttempts', { landed: item.onTarget + item.close, attempts: item.attempts })}</Text></View>)}</Section></ScrollView>
 }
 
 export function TrainingHeader({ title, onBack }: { title: string; onBack: () => void }): React.JSX.Element { return <GlassHeader title={title} onBack={onBack} /> }
@@ -1230,35 +1261,63 @@ function identifyChoices(prompt: TrainingPrompt): { label: string; answer: Train
   if (prompt.kind === 'note') return Array.from({ length: 12 }, (_, pitchClass) => ({ label: ['C','C♯','D','E♭','E','F','F♯','G','A♭','A','B♭','B'][pitchClass], answer: { kind: 'note', pitchClass } }))
   if (prompt.kind === 'scale-degree') return [1,2,3,4,5,6,7].map((scaleDegree) => ({ label: String(scaleDegree), answer: { kind: 'scale-degree', scaleDegree } }))
   if (prompt.kind === 'interval') return [2,3,4,5,6,7,8].map((intervalNumber) => ({ label: String(intervalNumber), answer: { kind: 'interval', intervalNumber, direction: prompt.direction } }))
-  if (prompt.kind === 'chord-tone') return (['root','third','fifth'] as const).map((role) => ({ label: role, answer: { kind: 'chord-tone', role } }))
-  return [1,2,3,4,5,6,7].map((scaleDegree) => ({ label: `Degree ${scaleDegree}`, answer: { kind: 'arpeggio', scaleDegree, quality: prompt.chord.quality } }))
+  if (prompt.kind === 'chord-tone') return (['root','third','fifth'] as const).map((role) => ({ label: chordToneRoleLabel(role), answer: { kind: 'chord-tone', role } }))
+  return [1,2,3,4,5,6,7].map((scaleDegree) => ({ label: t('phone.training.degreeN', { n: scaleDegree }), answer: { kind: 'arpeggio', scaleDegree, quality: prompt.chord.quality } }))
+}
+
+function chordToneRoleLabel(role: 'root' | 'third' | 'fifth'): string {
+  if (role === 'root') return t('phone.training.roleRoot')
+  if (role === 'third') return t('phone.training.roleThird')
+  return t('phone.training.roleFifth')
 }
 
 function toggle(values: readonly number[], value: number): number[] { return values.includes(value) ? values.filter((item) => item !== value) : [...values, value].sort((a,b) => a-b) }
 function trainingFeedback(result: TrainingAttemptResult): string {
-  if (result.response === 'skipped') return 'Skipped'
-  if (result.response === 'identify') return result.correct ? 'Correct' : 'Keep listening'
+  if (result.response === 'skipped') return t('phone.training.skipped')
+  if (result.response === 'identify') return result.correct ? t('phone.training.correct') : t('phone.training.keepListening')
   return result.targets.every((target) => target.classification === 'on-target')
-    ? 'On target'
+    ? t('phone.training.onTargetFeedback')
     : result.targets.map((target) => readableResult(target.classification)).join(' · ')
 }
-function readableResult(value: string): string { return value.replaceAll('-', ' ') }
-function readableExercise(value: string): string { return value === 'arpeggio' ? 'Carry the line' : value.replaceAll('-', ' ') }
+function readableResult(value: string): string {
+  switch (value) {
+    case 'on-target': return t('phone.training.classificationOnTarget')
+    case 'close': return t('phone.training.classificationClose')
+    case 'wrong-note': return t('phone.training.classificationWrongNote')
+    case 'wrong-octave': return t('phone.training.classificationWrongOctave')
+    case 'other-chord-tone': return t('phone.training.classificationOtherChordTone')
+    case 'non-chord-tone': return t('phone.training.classificationNonChordTone')
+    case 'unstable': return t('phone.training.classificationUnstable')
+    case 'unvoiced': return t('phone.training.classificationUnvoiced')
+    case 'out-of-range': return t('phone.training.classificationOutOfRange')
+    default: return value.replaceAll('-', ' ')
+  }
+}
+function readableExercise(value: string): string {
+  switch (value) {
+    case 'arpeggio': return t('phone.training.exerciseArpeggioTitle')
+    case 'note': return t('phone.training.kindNote')
+    case 'interval': return t('phone.training.kindInterval')
+    case 'chord-tone': return t('phone.training.kindChordTone')
+    case 'scale-degree': return t('phone.training.kindScaleDegree')
+    default: return value.replaceAll('-', ' ')
+  }
+}
 function capitalize(value: string): string { return value.charAt(0).toUpperCase() + value.slice(1) }
 function trainingExerciseTitle(value: MobileTrainingSetup['exercise']): string {
-  if (value === 'note') return 'Single notes'
-  if (value === 'interval') return 'Intervals'
-  if (value === 'chord-tone') return 'Notes in a chord'
-  if (value === 'arpeggio') return 'Carry the line'
-  if (value === 'scale-degree') return 'Scale degrees'
-  return 'Mixed practice'
+  if (value === 'note') return t('phone.training.exerciseNoteTitle')
+  if (value === 'interval') return t('phone.training.exerciseIntervalTitle')
+  if (value === 'chord-tone') return t('phone.training.exerciseChordToneTitle')
+  if (value === 'arpeggio') return t('phone.training.exerciseArpeggioTitle')
+  if (value === 'scale-degree') return t('phone.training.exerciseScaleDegreeTitle')
+  return t('phone.training.exerciseMixedTitle')
 }
 function promptPracticeLabel(prompt: TrainingPrompt): string {
-  if (prompt.kind === 'note') return 'Single note'
-  if (prompt.kind === 'scale-degree') return `Degree ${prompt.scaleDegree}`
-  if (prompt.kind === 'interval') return `${prompt.intervalName} ${prompt.direction}`
-  if (prompt.kind === 'chord-tone') return `${prompt.role} of ${prompt.chord.rootName} ${prompt.chord.quality}`
-  return `${prompt.chord.rootName} ${prompt.chord.quality} ${prompt.direction}`
+  if (prompt.kind === 'note') return t('phone.training.singleNotePracticeLabel')
+  if (prompt.kind === 'scale-degree') return t('phone.training.degreeN', { n: prompt.scaleDegree })
+  if (prompt.kind === 'interval') return `${intervalLabel(prompt.intervalName)} ${directionWord(prompt.direction)}`
+  if (prompt.kind === 'chord-tone') return t('phone.training.roleOfChord', { role: chordRoleWord(prompt.role), chord: chordNameText(prompt.chord) })
+  return `${chordNameText(prompt.chord)} ${directionWord(prompt.direction)}`
 }
 
 const glassSurface = nativeGlassStyle(nightStudioNativeTheme, 'surface')

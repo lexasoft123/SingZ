@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { CloudRoot, ProjectListItem } from '../../../shared/types'
 import { Modal } from '@singz/ui'
+import { t, tn, T, formatLocale } from '../i18n'
 
 function fmtDate(iso: string): string {
   if (!iso) return ''
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return ''
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+  return d.toLocaleDateString(formatLocale(), { month: 'short', day: 'numeric' })
 }
 
 interface Props {
@@ -52,20 +53,20 @@ export default function ProjectPicker({ gdriveIcon, onOpen, onBrowse, onClose }:
 
   const onDrive = useCallback(async () => {
     if (!gdrive.signedIn) {
-      setGdriveMsg('Finish signing in to Google in your browser…')
+      setGdriveMsg(t('library.common.finishGoogleSignIn'))
       const res = await window.singz.gdriveSignIn()
       if (!res.ok) {
-        setGdriveMsg(`Google sign-in failed: ${res.error}`)
+        setGdriveMsg(t('library.projectPicker.googleSignInFailed', { error: res.error }))
         return
       }
       setGdrive({ configured: true, signedIn: true })
     }
-    setGdriveMsg('Syncing your projects to Drive…')
+    setGdriveMsg(t('library.projectPicker.syncingToDrive'))
     const rep = await window.singz.gdriveSync()
     setGdriveMsg(
       rep.ok
-        ? `Drive is up to date — ${rep.uploaded} uploaded, ${rep.unchanged} unchanged. Your phones see them under Google Drive.`
-        : `Sync failed: ${rep.error ?? 'unknown error'}`
+        ? t('library.projectPicker.driveUpToDate', { uploaded: rep.uploaded, unchanged: rep.unchanged })
+        : t('library.common.syncFailed', { error: rep.error ?? t('library.common.unknownError') })
     )
   }, [gdrive.signedIn])
 
@@ -78,12 +79,12 @@ export default function ProjectPicker({ gdriveIcon, onOpen, onBrowse, onClose }:
       if (res.ok) {
         setStorageMsg(
           res.copied
-            ? `Moved in — ${res.copied} project${res.copied > 1 ? 's' : ''} copied over.`
+            ? tn('library.projectPicker.movedIn', res.copied)
             : null
         )
         refresh()
       } else if (!res.cancelled) {
-        setStorageMsg(`Could not switch: ${res.error ?? 'unknown error'}`)
+        setStorageMsg(t('library.projectPicker.switchFailed', { error: res.error ?? t('library.common.unknownError') }))
       }
     },
     [refresh]
@@ -96,22 +97,21 @@ export default function ProjectPicker({ gdriveIcon, onOpen, onBrowse, onClose }:
   return (
     <Modal onClose={onClose} cardClassName="picker-card">
         <div className="picker-head">
-          <h2>Your projects</h2>
+          <h2>{t('library.common.yourProjects')}</h2>
           <div className="log-actions">
             <button type="button" className="pill ghost small" onClick={onBrowse}>
-              Browse files…
+              {t('library.common.browseFiles')}
             </button>
             <button type="button" className="pill ghost small" onClick={onClose}>
-              Close
+              {t('library.common.close')}
             </button>
           </div>
         </div>
         {projects === null ? (
-          <p>Looking in {root || 'your project folder'}…</p>
+          <p>{t('library.projectPicker.looking', { root: root || t('library.projectPicker.defaultFolder') })}</p>
         ) : projects.length === 0 ? (
           <p>
-            Nothing saved yet. Load a song and press <strong>Save project</strong> — it lands in{' '}
-            <strong>{root}</strong> with its stems, lyrics and settings.
+            <T k="library.projectPicker.emptyHint" vars={{ root }} />
           </p>
         ) : (
           <div className="picker-rows">
@@ -124,8 +124,8 @@ export default function ProjectPicker({ gdriveIcon, onOpen, onBrowse, onClose }:
               >
                 <span className="picker-name">{p.name}</span>
                 <span className="picker-meta">
-                  {p.hasStems && <span className="badge">stems</span>}
-                  {p.hasLyrics && <span className="badge">lyrics</span>}
+                  {p.hasStems && <span className="badge">{t('library.projectPicker.stemsBadge')}</span>}
+                  {p.hasLyrics && <span className="badge">{t('library.projectPicker.lyricsBadge')}</span>}
                   <span className="picker-date">{fmtDate(p.savedAt)}</span>
                 </span>
               </button>
@@ -134,7 +134,7 @@ export default function ProjectPicker({ gdriveIcon, onOpen, onBrowse, onClose }:
         )}
         <div className="picker-storage">
           <p className="fine picker-root" title={root}>
-            Stored in {root}
+            {t('library.projectPicker.storedIn', { root })}
           </p>
           <div className="storage-actions">
             {cloud.map((c) => (
@@ -143,10 +143,12 @@ export default function ProjectPicker({ gdriveIcon, onOpen, onBrowse, onClose }:
                 key={c.path}
                 className="pill ghost small"
                 disabled={moving || root === c.path}
-                title={`${c.path} — syncs to your other devices, including the phone app`}
+                title={t('library.projectPicker.cloudTitle', { path: c.path })}
                 onClick={() => onCloud(c)}
               >
-                {root === c.path ? `In ${c.label} ✓` : `Use ${c.label}`}
+                {root === c.path
+                  ? t('library.projectPicker.inCloud', { label: c.label })
+                  : t('library.projectPicker.useCloud', { label: c.label })}
               </button>
             ))}
             {gdrive.configured && (
@@ -154,7 +156,7 @@ export default function ProjectPicker({ gdriveIcon, onOpen, onBrowse, onClose }:
                 type="button"
                 className="pill ghost small"
                 disabled={moving}
-                title="Push your projects to a SingZ folder in Google Drive — phones stream them from there, no Drive app needed"
+                title={t('library.projectPicker.gdriveConnectTitle')}
                 onClick={() => void onDrive()}
               >
                 <img
@@ -162,7 +164,7 @@ export default function ProjectPicker({ gdriveIcon, onOpen, onBrowse, onClose }:
                   alt=""
                   style={{ width: 13, height: 13, marginRight: 6, verticalAlign: '-2px' }}
                 />
-                {gdrive.signedIn ? 'Sync to Google Drive' : 'Connect Google Drive…'}
+                {gdrive.signedIn ? t('library.projectPicker.syncToDrive') : t('library.projectPicker.connectDrive')}
               </button>
             )}
             {gdrive.configured && gdrive.signedIn && (
@@ -173,11 +175,11 @@ export default function ProjectPicker({ gdriveIcon, onOpen, onBrowse, onClose }:
                 onClick={() => {
                   void window.singz.gdriveSignOut().then(() => {
                     setGdrive({ configured: true, signedIn: false })
-                    setGdriveMsg('Signed out of Google Drive.')
+                    setGdriveMsg(t('library.projectPicker.signedOut'))
                   })
                 }}
               >
-                Sign out
+                {t('library.projectPicker.signOut')}
               </button>
             )}
             <button
@@ -186,7 +188,7 @@ export default function ProjectPicker({ gdriveIcon, onOpen, onBrowse, onClose }:
               disabled={moving}
               onClick={() => void applyRoot(() => window.singz.chooseProjectsRoot())}
             >
-              Choose folder…
+              {t('library.projectPicker.chooseFolder')}
             </button>
             {!isDefault && (
               <button
@@ -195,11 +197,11 @@ export default function ProjectPicker({ gdriveIcon, onOpen, onBrowse, onClose }:
                 disabled={moving}
                 onClick={() => void applyRoot(() => window.singz.setProjectsRoot(null))}
               >
-                Back to Documents
+                {t('library.projectPicker.backToDocuments')}
               </button>
             )}
           </div>
-          {moving && <p className="fine">Copying your projects over — existing files stay put…</p>}
+          {moving && <p className="fine">{t('library.projectPicker.moving')}</p>}
           {storageMsg && <p className="fine">{storageMsg}</p>}
           {gdriveMsg && <p className="fine">{gdriveMsg}</p>}
         </div>

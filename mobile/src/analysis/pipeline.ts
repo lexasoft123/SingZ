@@ -58,6 +58,7 @@ import {
 import type { MlGrid, StoredBeatInfo } from '../gen/analysis-lib'
 import type { BeatInfo, KeyInfo, LyricLine, MelodyInfo, ProjectDoc } from '../model'
 import { log } from '../log'
+import { t as tr } from '../i18n'
 import { mutateProjectDocument } from '../project-document'
 import type { MonoStem } from './host'
 
@@ -421,7 +422,7 @@ export async function analyzeProject(
     // files join the stamp because the grid that comes out depends on them.
     let ml: MlGrid | null = null
     if (plan.beat && mlNow) {
-      step('Listening for the beat…', 0.01, 'beat')
+      step(tr('phone.player.analysis.listeningForBeat'), 0.01, 'beat')
       const t = Date.now()
       ml = await host.mlGrid(project, mixIds.map(rel))
       ms.ml = Date.now() - t
@@ -478,7 +479,7 @@ export async function analyzeProject(
       // wording exists for.
       const beatsFast =
         beatStems.every((id) => coreExt(rel(id))) && deps.host.beatsAreNative?.() !== false
-      step(beatsFast ? 'Finding the beat…' : 'Reading the stems…', 0.3, 'beat')
+      step(beatsFast ? tr('phone.player.analysis.findingBeat') : tr('phone.player.analysis.readingStems'), 0.3, 'beat')
       const t = Date.now()
       const lines = opts.lyrics?.lines ?? null
       const det = await host.detectBeats(project, {
@@ -526,7 +527,7 @@ export async function analyzeProject(
     // in the finally below is what still guarantees it.
 
     if (plan.key && (keyInst.length > 0 || stems.bass)) {
-      step('Reading the key…', 0.45, 'key')
+      step(tr('phone.player.analysis.readingKey'), 0.45, 'key')
       const t = Date.now()
       const k = await host.estimateKeyFromStems(
         project,
@@ -549,10 +550,10 @@ export async function analyzeProject(
     }
 
     if (plan.melody && stems.vocals) {
-      step('Tracking the melody…', 0.5, 'melody')
+      step(tr('phone.player.analysis.trackingMelody'), 0.5, 'melody')
       const t = Date.now()
       const m = await host.trackMelody(project, rel('vocals'), (p) =>
-        step(`Tracking the melody · ${Math.round(p * 100)}%`, 0.5 + 0.5 * p, 'melody')
+        step(tr('phone.player.analysis.trackingMelodyPercent', { percent: Math.round(p * 100) }), 0.5 + 0.5 * p, 'melody')
       )
       ms.melody = Date.now() - t
       // Tracked from THIS project's vocals, so it fits by construction — the

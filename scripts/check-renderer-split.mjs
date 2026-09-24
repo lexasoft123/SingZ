@@ -139,7 +139,11 @@ for (const chunk of [
 // seam while its provider/schema implementation is held in the checked lazy
 // chunk above. Keep the allowance bounded rather than pulling the native DTO
 // and control client into the ordinary Web Audio entry.
-const ENTRY_RAW_BUDGET = 1_278_000
+// Localization then moved every English string out of the components into
+// src/shared/i18n/en — keyed, and eager because English is every fallback
+// (+88 kB measured). Russian and Chinese load on demand (loadLocale) and must
+// stay out of the entry: their chunks are ~150 kB each.
+const ENTRY_RAW_BUDGET = 1_370_000
 const TRAINING_RAW_BUDGET = 80_000
 const entryBytes = (await stat(resolve(assetsRoot, entryFile))).size
 const trainingBytes = await Promise.all(trainingChunks.map(async (file) =>

@@ -1,4 +1,5 @@
 import { effectiveTrainingKey } from './music-theory'
+import { tn } from './i18n/training'
 import type { TrainingExerciseKind, TrainingExerciseSelection } from './training-types'
 
 export type SongPreparationChoice = 'notes' | 'intervals' | 'chords' | 'mixed'
@@ -94,7 +95,7 @@ export function trainingLengthOptions(currentLength: number): number[] {
 }
 
 export function trainingLengthOptionLabel(length: number): string {
-  return `${length} ${length === 1 ? 'exercise' : 'exercises'}`
+  return tn('training.exerciseCount', length)
 }
 
 export function songPreparationMatches(

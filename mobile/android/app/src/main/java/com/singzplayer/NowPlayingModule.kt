@@ -299,7 +299,7 @@ class NowPlayingModule(private val ctx: ReactApplicationContext) :
       actions = actions or PlaybackState.ACTION_SEEK_TO or PlaybackState.ACTION_FAST_FORWARD or
         PlaybackState.ACTION_REWIND
     }
-    val skip = skipLabel(info.skipSeconds)
+    val skip = ctx.getString(R.string.np_seconds, info.skipSeconds.toInt())
     return PlaybackState.Builder()
       .setActions(actions)
       .setState(
@@ -311,10 +311,10 @@ class NowPlayingModule(private val ctx: ReactApplicationContext) :
       .apply {
         if (info.canSeek) {
           addCustomAction(
-            PlaybackState.CustomAction.Builder(ACTION_SKIP_BACKWARD, "Back $skip", android.R.drawable.ic_media_rew).build()
+            PlaybackState.CustomAction.Builder(ACTION_SKIP_BACKWARD, ctx.getString(R.string.np_back, skip), android.R.drawable.ic_media_rew).build()
           )
           addCustomAction(
-            PlaybackState.CustomAction.Builder(ACTION_SKIP_FORWARD, "Forward $skip", android.R.drawable.ic_media_ff).build()
+            PlaybackState.CustomAction.Builder(ACTION_SKIP_FORWARD, ctx.getString(R.string.np_forward, skip), android.R.drawable.ic_media_ff).build()
           )
         }
       }
@@ -324,17 +324,17 @@ class NowPlayingModule(private val ctx: ReactApplicationContext) :
   private fun buildNotification(info: Shown, s: MediaSession): Notification {
     val nm = ctx.getSystemService(NotificationManager::class.java)
     nm.createNotificationChannel(
-      NotificationChannel(CHANNEL_ID, "Now playing", NotificationManager.IMPORTANCE_LOW).apply {
-        description = "The song that is playing, with play, pause and skip"
+      NotificationChannel(CHANNEL_ID, ctx.getString(R.string.np_channel_name), NotificationManager.IMPORTANCE_LOW).apply {
+        description = ctx.getString(R.string.np_channel_desc)
         setShowBadge(false)
       }
     )
-    val skip = skipLabel(info.skipSeconds)
+    val skip = ctx.getString(R.string.np_seconds, info.skipSeconds.toInt())
     val buttons = mutableListOf<Notification.Action>()
-    if (info.canSeek) buttons += action(android.R.drawable.ic_media_rew, "Back $skip", NowPlayingService.ACTION_SKIP_BACKWARD)
-    buttons += if (info.playing) action(android.R.drawable.ic_media_pause, "Pause", NowPlayingService.ACTION_PAUSE)
-    else action(android.R.drawable.ic_media_play, "Play", NowPlayingService.ACTION_PLAY)
-    if (info.canSeek) buttons += action(android.R.drawable.ic_media_ff, "Forward $skip", NowPlayingService.ACTION_SKIP_FORWARD)
+    if (info.canSeek) buttons += action(android.R.drawable.ic_media_rew, ctx.getString(R.string.np_back, skip), NowPlayingService.ACTION_SKIP_BACKWARD)
+    buttons += if (info.playing) action(android.R.drawable.ic_media_pause, ctx.getString(R.string.np_pause), NowPlayingService.ACTION_PAUSE)
+    else action(android.R.drawable.ic_media_play, ctx.getString(R.string.np_play), NowPlayingService.ACTION_PLAY)
+    if (info.canSeek) buttons += action(android.R.drawable.ic_media_ff, ctx.getString(R.string.np_forward, skip), NowPlayingService.ACTION_SKIP_FORWARD)
     val compact = IntArray(buttons.size) { it }
     return Notification.Builder(ctx, CHANNEL_ID)
       .setSmallIcon(R.drawable.ic_stat_now_playing)
@@ -454,7 +454,6 @@ class NowPlayingModule(private val ctx: ReactApplicationContext) :
       return true
     }
 
-    private fun skipLabel(seconds: Double): String = "${seconds.toInt()} s"
 
     private fun ReadableMap.stringOr(key: String, fallback: String): String =
       if (hasKey(key) && !isNull(key)) getString(key) ?: fallback else fallback

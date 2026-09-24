@@ -5,6 +5,7 @@ import { customTracks, STEM_ORDER_ALL } from './model'
 import type { ProjectDoc } from './model'
 import type { ProjectEntry } from './projects'
 import { md5Text } from './md5'
+import { t } from './i18n'
 
 /**
  * Google Drive as a project library — no Drive app needed on the phone. The
@@ -119,7 +120,7 @@ export const driveSignOut = async (): Promise<void> => {
 
 /** Sign in with the system browser + loopback redirect. Resolves when done. */
 export async function driveSignIn(): Promise<void> {
-  if (!cfg) throw new Error('Google Drive is not configured in this build')
+  if (!cfg) throw new Error(t('phone.library.driveNotConfigured'))
   const port = await Native.oauthStart()
   const redirect = `http://127.0.0.1:${port}`
   // Hermes has no WebCrypto, so the pair is made natively: SecureRandom /
@@ -245,26 +246,26 @@ export const driveAccountEmail = async (): Promise<string | null> => {
 }
 
 async function accessToken(): Promise<string> {
-  if (!cfg) throw new Error('Google Drive is not configured in this build')
-  const t = await readTokens()
-  if (!t) throw new Error('Not signed in to Google Drive')
-  if (Date.now() < t.expiresAt) return t.access
+  if (!cfg) throw new Error(t('phone.library.driveNotConfigured'))
+  const tokens = await readTokens()
+  if (!tokens) throw new Error(t('phone.library.driveNotSignedIn'))
+  if (Date.now() < tokens.expiresAt) return tokens.access
   const res = await fetchRetry(TOKEN(), {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body:
-      `refresh_token=${encodeURIComponent(t.refresh)}` +
+      `refresh_token=${encodeURIComponent(tokens.refresh)}` +
       `&client_id=${encodeURIComponent(cfg.clientId)}` +
       `&client_secret=${encodeURIComponent(cfg.clientSecret)}&grant_type=refresh_token`
   })
   const tok = (await res.json()) as { access_token?: string; expires_in?: number }
   if (!tok.access_token) {
     await writeTokens(null)
-    throw new Error('Google Drive session expired — sign in again')
+    throw new Error(t('phone.library.driveSessionExpired'))
   }
   const next: Tokens = {
     access: tok.access_token,
-    refresh: t.refresh,
+    refresh: tokens.refresh,
     expiresAt: Date.now() + (tok.expires_in ?? 3600) * 1000 - 60000
   }
   await writeTokens(next)
@@ -360,7 +361,7 @@ async function singzRootId(): Promise<string> {
   )
   const id = res.files[0]?.id
   if (!id) {
-    throw new Error('No SingZ folder in this Google Drive yet — sync a project from the desktop first')
+    throw new Error(t('phone.library.driveNoSingzFolder'))
   }
   return id
 }

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { SplitMode } from '../split-workflow'
+import { t } from '../i18n'
 
 export default function SplitMenu({ split, disabled, canResplit, canSplitBacking, onSplit }: {
   split: boolean
@@ -41,26 +42,23 @@ export default function SplitMenu({ split, disabled, canResplit, canSplitBacking
   return <div className="split-control" ref={ref}>
     <button ref={button} type="button"
       className={`pill ${owesBacking ? 'attention' : split ? 'ghost' : 'primary'}`}
-      title={owesBacking ? 'Click to split for backing vocals' : undefined}
+      title={owesBacking ? t('player.split.backingHint') : undefined}
       disabled={disabled} aria-haspopup="dialog" aria-expanded={open}
       onClick={() => setOpen(v => !v)}>
-      Split <span aria-hidden>▾</span>
+      {t('player.split.button')} <span aria-hidden>▾</span>
     </button>
-    {open && <div className="train-pop split-menu" role="dialog" aria-label="Split song">
-      <div className="tp-head"><span className="tp-title">{split ? 'Split options' : 'Split song'}</span></div>
+    {open && <div className="train-pop split-menu" role="dialog" aria-label={t('player.split.title')}>
+      <div className="tp-head"><span className="tp-title">{split ? t('player.split.optionsTitle') : t('player.split.title')}</span></div>
       {split ? <>
         <button type="button" className="split-menu-action" disabled={!canSplitBacking}
-          onClick={() => start('vocals')}>Separate backing vocals</button>
+          onClick={() => start('vocals')}>{t('player.split.separateBacking')}</button>
         <button type="button" className="split-menu-action" disabled={!canResplit}
-          onClick={() => start('stems')}>Re-split instrument stems</button>
-        {!canSplitBacking && !canResplit && <p>These vocals are already separated.</p>}
+          onClick={() => start('stems')}>{t('player.split.resplitStems')}</button>
+        {!canSplitBacking && !canResplit && <p>{t('player.split.alreadySeparated')}</p>}
       </> : <>
-        <p>Create vocals, drums, bass, guitar, piano and instruments, then split
-          the vocals into lead and backing.</p>
-        <p className="split-menu-hint">Two steps, a few minutes each. Models are downloaded
-          once. The lead and backing lanes are saved uncompressed — about 40 MB a minute
-          of song, so they stay exact.</p>
-        <button type="button" className="pill primary" onClick={() => start('stems-and-vocals')}>Split</button>
+        <p>{t('player.split.explain')}</p>
+        <p className="split-menu-hint">{t('player.split.hint')}</p>
+        <button type="button" className="pill primary" onClick={() => start('stems-and-vocals')}>{t('player.split.button')}</button>
       </>}
     </div>}
   </div>

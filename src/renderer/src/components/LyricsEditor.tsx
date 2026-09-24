@@ -26,6 +26,7 @@ import {
   type DraftRow,
   type VocalEnvelope
 } from '../lyrics-edit'
+import { t, tn } from '../i18n'
 
 interface Props {
   engine: MultitrackEngine
@@ -61,52 +62,60 @@ function helpSections(isWin: boolean): { title: string; rows: HelpRow[] }[] {
   const mod = isWin ? 'Ctrl' : '⌘'
   return [
     {
-      title: 'Lines',
+      title: t('lyrics.editor.help.sectionLines'),
       rows: [
-        { keys: ['Enter'], d: 'New line — splits the text at the cursor' },
-        { label: '+', d: 'Add an empty line after this one — for a whole missing section' },
-        { keys: ['Backspace'], d: "At a line's start, merges into the line above" },
-        { keys: [mod, 'Backspace'], d: "Remove the line you're in" },
-        { keys: ['↑', '↓'], d: 'Move between lines' },
-        { label: 'Paste', d: 'Several lines of text become rows' }
+        { keys: ['Enter'], d: t('lyrics.editor.help.lineNew') },
+        { label: '+', d: t('lyrics.editor.help.lineAdd') },
+        { keys: ['Backspace'], d: t('lyrics.editor.help.lineMerge') },
+        { keys: [mod, 'Backspace'], d: t('lyrics.editor.help.lineRemove') },
+        { keys: ['↑', '↓'], d: t('lyrics.editor.help.lineMove') },
+        { label: t('lyrics.editor.help.labelPaste'), d: t('lyrics.editor.help.linePaste') }
       ]
     },
     {
-      title: 'Timing',
+      title: t('lyrics.editor.help.sectionTiming'),
       rows: [
-        { keys: [mod, 'Enter'], d: "Stamp the playhead time on the line you're typing in" },
-        { label: 'Time chip', d: 'Play from that line — or stamp it, while it has no time' },
-        { label: '✦ Align', d: 'Time every line and word against the singing at once' }
+        { keys: [mod, 'Enter'], d: t('lyrics.editor.help.timingStamp') },
+        { label: t('lyrics.editor.help.labelTimeChip'), d: t('lyrics.editor.help.timingChip') },
+        { label: t('lyrics.editor.help.labelAlign'), d: t('lyrics.editor.help.timingAlign') }
       ]
     },
     {
-      title: 'Words',
+      title: t('lyrics.editor.help.sectionWords'),
       rows: [
         {
-          label: 'Voiceprint',
-          d: `Click a line's voiceprint (or press ${mod} E in it) for word-by-word timing`
+          label: t('lyrics.editor.help.labelVoiceprint'),
+          d: t('lyrics.editor.help.wordsVoiceprint', { mod })
         },
-        { label: 'Drag', d: 'Move a word — its neighbours fence it in' },
-        { label: 'Double-click', d: 'Set a word exactly at the playhead' },
-        { keys: ['←', '→'], d: 'Nudge a focused word by 50 ms' }
+        { label: t('lyrics.editor.help.labelDrag'), d: t('lyrics.editor.help.wordsDrag') },
+        { label: t('lyrics.editor.help.labelDoubleClick'), d: t('lyrics.editor.help.wordsDoubleClick') },
+        { keys: ['←', '→'], d: t('lyrics.editor.help.wordsNudge') }
       ]
     },
     {
-      title: 'Everything else',
+      title: t('lyrics.editor.help.sectionOther'),
       rows: [
-        { keys: [mod, 'Z'], d: `Undo — add Shift to redo` },
-        { label: 'Replace all…', d: 'Paste the whole song; kept lines keep their timing' },
-        { keys: ['Esc'], d: 'Close the editor (asks first about unsaved edits)' }
+        { keys: [mod, 'Z'], d: t('lyrics.editor.help.otherUndo') },
+        { label: t('lyrics.editor.replaceAll'), d: t('lyrics.editor.help.otherReplace') },
+        { keys: ['Esc'], d: t('lyrics.editor.help.otherClose') }
       ]
     }
   ]
 }
 
-const STAGE_LABEL: Record<LyricsProgress['stage'], string> = {
-  preparing: 'Warming up',
-  searching: 'Searching',
-  'downloading-model': 'Downloading model',
-  transcribing: 'Listening to the vocals'
+// Evaluated at call time, never a frozen module-level table, so a language
+// switch is reflected the next time a stage is shown.
+function stageLabel(stage: LyricsProgress['stage']): string {
+  switch (stage) {
+    case 'preparing':
+      return t('lyrics.editor.stage.preparing')
+    case 'searching':
+      return t('lyrics.editor.stage.searching')
+    case 'downloading-model':
+      return t('lyrics.editor.stage.downloadingModel')
+    case 'transcribing':
+      return t('lyrics.editor.stage.transcribing')
+  }
 }
 
 /**
@@ -263,7 +272,7 @@ function WordStrip({
             left: `${((w.s - win.t0) / span) * 100}%`,
             width: `${Math.max(1.2, ((w.e - w.s) / span) * 100)}%`
           }}
-          title="Drag to move this word · double-click sets it at the playhead · ←/→ nudge 50 ms"
+          title={t('lyrics.editor.wordstrip.title')}
           onPointerDown={(e) => {
             e.preventDefault()
             e.stopPropagation()
@@ -828,11 +837,11 @@ export default function LyricsEditor({
   const modEnter = isWin ? 'Ctrl+Enter' : '⌘Enter'
 
   return (
-    <Modal onClose={requestClose} busy={saving} cardClassName="lyed-card" aria-label="Edit lyrics">
+    <Modal onClose={requestClose} busy={saving} cardClassName="lyed-card" aria-label={t('lyrics.editor.title')}>
       <header className="lyed-head">
         <div className="lyed-title">
-          <h2>Edit lyrics</h2>
-          {dirty && <span className="lyed-dirty-dot" title="Unsaved changes" />}
+          <h2>{t('lyrics.editor.title')}</h2>
+          {dirty && <span className="lyed-dirty-dot" title={t('lyrics.editor.unsavedChanges')} />}
           <span className="lyed-song" title={songName}>
             {songName}
           </span>
@@ -841,8 +850,8 @@ export default function LyricsEditor({
           <button
             type="button"
             className="pill ghost small lyed-play"
-            title={playing ? 'Pause' : 'Play'}
-            aria-label={playing ? 'Pause' : 'Play'}
+            title={playing ? t('lyrics.editor.pause') : t('lyrics.editor.play')}
+            aria-label={playing ? t('lyrics.editor.pause') : t('lyrics.editor.play')}
             onClick={() => (playing ? engine.pause() : void engine.play({ countIn: false }))}
           >
             {playing ? '❚❚' : '▶'}
@@ -853,7 +862,7 @@ export default function LyricsEditor({
           <button
             type="button"
             className="chip lyed-help-btn"
-            title="How to use the editor"
+            title={t('lyrics.editor.helpTitle')}
             onClick={() => setHelpOpen(true)}
           >
             ?
@@ -866,27 +875,27 @@ export default function LyricsEditor({
           type="button"
           className="chip"
           disabled={busy !== null || saving}
-          title="Match the words to the recording and snap lines and words to when they are sung — instant when a transcription is already on disk, otherwise the song is listened to first"
+          title={t('lyrics.editor.tools.alignTitle')}
           onClick={() => void runAlign('align')}
         >
-          ✦ Align to the singing
+          {t('lyrics.editor.tools.alignLabel')}
         </button>
         {preciseCap && (
           <button
             type="button"
             className="chip"
             disabled={busy !== null || saving}
-            title="Pin every word to the exact moment it is sung, with the multilingual word aligner (a one-time model download)"
+            title={t('lyrics.editor.tools.preciseTitle')}
             onClick={() => void runAlign('precise')}
           >
-            Precise
+            {t('lyrics.editor.tools.preciseLabel')}
           </button>
         )}
         <button
           type="button"
           className="chip"
           disabled={busy !== null || saving}
-          title="Swap in the full lyrics from your clipboard or notes — lines that stay keep their timing"
+          title={t('lyrics.editor.tools.replaceTitle')}
           onClick={() => {
             setReplaceText(
               rows
@@ -897,17 +906,17 @@ export default function LyricsEditor({
             setReplaceOpen(true)
           }}
         >
-          Replace all…
+          {t('lyrics.editor.replaceAll')}
         </button>
         {silent.size > 0 && (
           <button
             type="button"
             className="chip lyed-ghost-chip"
             disabled={busy !== null || saving}
-            title="These lines sit over parts of the song where nobody sings — almost always transcription artifacts"
+            title={t('lyrics.editor.tools.silentTitle')}
             onClick={dropSilent}
           >
-            ⌫ {silent.size} {silent.size === 1 ? 'line' : 'lines'} with no singing
+            {tn('lyrics.editor.tools.silentLines', silent.size)}
           </button>
         )}
         <span className="lyed-spacer" />
@@ -917,7 +926,7 @@ export default function LyricsEditor({
           disabled={undoRef.current.length === 0}
           onClick={undo}
         >
-          Undo
+          {t('lyrics.editor.undo')}
         </button>
       </div>
 
@@ -926,13 +935,13 @@ export default function LyricsEditor({
           <textarea
             value={replaceText}
             onChange={(e) => setReplaceText(e.target.value)}
-            placeholder={'One line per row —\npaste the whole song here'}
+            placeholder={t('lyrics.editor.replace.placeholder')}
             spellCheck={false}
             autoFocus
           />
           <div className="lyed-replace-actions">
             <button type="button" className="pill ghost small" onClick={() => setReplaceOpen(false)}>
-              Cancel
+              {t('lyrics.editor.cancel')}
             </button>
             <button
               type="button"
@@ -942,7 +951,7 @@ export default function LyricsEditor({
                 setReplaceOpen(false)
               }}
             >
-              Use these lyrics
+              {t('lyrics.editor.replace.use')}
             </button>
           </div>
         </div>
@@ -958,8 +967,8 @@ export default function LyricsEditor({
                 className="lyed-stamp"
                 title={
                   r.start === null
-                    ? `Not timed yet — press to stamp the playhead time here (${modEnter} while typing)`
-                    : 'Play from this line'
+                    ? t('lyrics.editor.row.stampTitleUntimed', { mod: modEnter })
+                    : t('lyrics.editor.row.stampTitleTimed')
                 }
                 onClick={() => (r.start === null ? stampRow(r.id) : playFromRow(r))}
               >
@@ -971,8 +980,8 @@ export default function LyricsEditor({
                 tabIndex={-1}
                 title={
                   r.start === null
-                    ? 'Time this line first (stamp it or Align), then fine-tune each word'
-                    : "Fine-tune each word's timing"
+                    ? t('lyrics.editor.row.printTitleUntimed')
+                    : t('lyrics.editor.row.printTitleTimed')
                 }
                 onClick={() => toggleStrip(r)}
               >
@@ -989,7 +998,7 @@ export default function LyricsEditor({
                 }}
                 value={r.text}
                 spellCheck={false}
-                placeholder={rows.length === 1 ? 'Type or paste the lyrics…' : ''}
+                placeholder={rows.length === 1 ? t('lyrics.editor.row.placeholder') : ''}
                 onFocus={() => {
                   focusedRowRef.current = r.id
                 }}
@@ -1029,7 +1038,7 @@ export default function LyricsEditor({
               <button
                 type="button"
                 className="lyed-add"
-                title="Add a new line after this one"
+                title={t('lyrics.editor.row.addTitle')}
                 tabIndex={-1}
                 onClick={() => addRowAfter(r.id)}
               >
@@ -1038,7 +1047,7 @@ export default function LyricsEditor({
               <button
                 type="button"
                 className="lyed-x"
-                title="Remove this line"
+                title={t('lyrics.editor.row.removeTitle')}
                 tabIndex={-1}
                 onClick={() => deleteRow(r.id)}
               >
@@ -1073,7 +1082,7 @@ export default function LyricsEditor({
         <div className="lyed-status-slot" role="status" aria-live="polite">
           {busy ? (
             <span className="lyed-status busy">
-              {STAGE_LABEL[busy.progress?.stage ?? 'preparing']}…
+              {stageLabel(busy.progress?.stage ?? 'preparing')}…
               {busy.progress && busy.progress.stage !== 'searching' ? (
                 <span className="lyed-busy-bar" aria-hidden="true">
                   <span style={{ width: `${Math.round(busy.progress.percent)}%` }} />
@@ -1087,23 +1096,23 @@ export default function LyricsEditor({
                 className="linkish"
                 onClick={() => void window.singz.cancelLyrics()}
               >
-                Cancel
+                {t('lyrics.editor.cancel')}
               </button>
             </span>
           ) : consent ? (
             <span className="lyed-status">
               {consent.what === 'aligner'
-                ? `Precise alignment needs the word-aligner model — a one-time ${consent.sizeMb} MB download.`
-                : `Timing the words needs the speech model — a one-time ${consent.sizeMb} MB download.`}
+                ? t('lyrics.editor.consent.aligner', { mb: consent.sizeMb })
+                : t('lyrics.editor.consent.speech', { mb: consent.sizeMb })}
               <button
                 type="button"
                 className="pill primary small"
                 onClick={() => void runAlign(consent.tier, true)}
               >
-                Download &amp; align
+                {t('lyrics.editor.consent.download')}
               </button>
               <button type="button" className="linkish" onClick={() => setConsent(null)}>
-                Not now
+                {t('lyrics.editor.consent.notNow')}
               </button>
             </span>
           ) : error ? (
@@ -1117,28 +1126,27 @@ export default function LyricsEditor({
             })()
           ) : (
             <span className="lyed-hint">
-              Enter splits a line · {modEnter} stamps the playhead time on the line you're typing
-              in
+              {t('lyrics.editor.hint.base', { mod: modEnter })}
               {untimed > 0
-                ? ` · ${untimed} ${untimed === 1 ? 'line has' : 'lines have'} no time yet — Align does them all at once`
-                : " · a line's voiceprint opens word-by-word timing"}
+                ? tn('lyrics.editor.hint.untimed', untimed)
+                : t('lyrics.editor.hint.voiceprint')}
             </span>
           )}
         </div>
         <span className="lyed-spacer" />
         {confirmDiscard ? (
           <>
-            <span className="lyed-status">Discard your edits?</span>
+            <span className="lyed-status">{t('lyrics.editor.discard.question')}</span>
             <button
               type="button"
               className="pill ghost small"
               autoFocus
               onClick={() => setConfirmDiscard(false)}
             >
-              Keep editing
+              {t('lyrics.editor.discard.keep')}
             </button>
             <button type="button" className="pill small lyed-discard" onClick={onClose}>
-              Discard
+              {t('lyrics.editor.discard.discard')}
             </button>
           </>
         ) : (
@@ -1147,10 +1155,10 @@ export default function LyricsEditor({
               type="button"
               className="pill ghost small"
               disabled={busy !== null}
-              title={busy ? 'An alignment is running — cancel it first' : undefined}
+              title={busy ? t('lyrics.editor.footer.cancelBusyTitle') : undefined}
               onClick={requestClose}
             >
-              Cancel
+              {t('lyrics.editor.cancel')}
             </button>
             <button
               type="button"
@@ -1158,7 +1166,7 @@ export default function LyricsEditor({
               disabled={saving || busy !== null || rows.every((r) => r.text.trim() === '')}
               onClick={() => void save()}
             >
-              {saving ? 'Saving…' : 'Save lyrics'}
+              {saving ? t('lyrics.editor.save.saving') : t('lyrics.editor.save.label')}
             </button>
           </>
         )}
@@ -1169,10 +1177,10 @@ export default function LyricsEditor({
           <div
             className="lyed-help-card"
             role="dialog"
-            aria-label="How to use the editor"
+            aria-label={t('lyrics.editor.helpTitle')}
             onClick={(e) => e.stopPropagation()}
           >
-            <h3>How to use the editor</h3>
+            <h3>{t('lyrics.editor.helpTitle')}</h3>
             <div className="lyed-help-cols">
               {helpSections(isWin).map((sec) => (
                 <section key={sec.title}>
@@ -1197,7 +1205,7 @@ export default function LyricsEditor({
                 autoFocus
                 onClick={() => setHelpOpen(false)}
               >
-                Got it
+                {t('lyrics.editor.help.gotIt')}
               </button>
             </div>
           </div>

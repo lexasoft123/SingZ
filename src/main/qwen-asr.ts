@@ -4,6 +4,7 @@ import { createServer } from 'node:net'
 import { access } from 'node:fs/promises'
 import { join } from 'node:path'
 import { log } from './log'
+import { t } from '../shared/i18n'
 import { onChildSettled } from './child-exit'
 import { spawnEnv } from './separation'
 import { qwenMmprojPath, qwenModelPath } from './models'
@@ -211,11 +212,11 @@ export class QwenServer {
 
   async start(): Promise<void> {
     const exe = await resolveQwenServer()
-    if (!exe) throw new Error('The transcription engine (llama-server) is missing from this build.')
+    if (!exe) throw new Error(t('main.error.llamaServerMissing'))
     const model = qwenModelPath()
     const mmproj = qwenMmprojPath()
     if (!(await exists(model)) || !(await exists(mmproj))) {
-      throw new Error('The Qwen speech model is not installed.')
+      throw new Error(t('main.error.qwenModelNotInstalled'))
     }
     this.port = await freePort()
     const args = [
@@ -251,10 +252,10 @@ export class QwenServer {
   private async waitHealthy(): Promise<void> {
     const deadline = Date.now() + START_TIMEOUT_MS
     for (;;) {
-      if (this.stopped) throw new Error('Cancelled.')
+      if (this.stopped) throw new Error(t('main.error.cancelled'))
       if (!this.child) {
         const why = this.tail.split('\n').filter(Boolean).slice(-2).join(' — ')
-        throw new Error(`llama-server stopped before it was ready${why ? `: ${why}` : ''}`)
+        throw new Error(why ? t('main.error.llamaServerStoppedWithReason', { why }) : t('main.error.llamaServerStopped'))
       }
       try {
         const res = await fetch(`http://127.0.0.1:${this.port}/health`)
@@ -262,7 +263,7 @@ export class QwenServer {
       } catch {
         // not listening yet
       }
-      if (Date.now() > deadline) throw new Error('llama-server did not become ready in time.')
+      if (Date.now() > deadline) throw new Error(t('main.error.llamaServerNotReadyInTime'))
       await new Promise((r) => setTimeout(r, HEALTH_POLL_MS))
     }
   }
@@ -299,7 +300,7 @@ export class QwenServer {
       }),
       signal
     })
-    if (!res.ok) throw new Error(`llama-server answered HTTP ${res.status}`)
+    if (!res.ok) throw new Error(t('main.error.llamaServerHttpError', { status: res.status }))
     const body = (await res.json()) as {
       choices?: { message?: { content?: string }; finish_reason?: string }[]
     }
@@ -332,7 +333,7 @@ export class QwenServer {
   ): Promise<QwenChunkText[]> {
     const out: QwenChunkText[] = []
     for (const [i, chunk] of chunks.entries()) {
-      if (signal?.aborted) throw new Error('Cancelled.')
+      if (signal?.aborted) throw new Error(t('main.error.cancelled'))
       const auto = await this.ask(chunkToWav(pcm, chunk), chunk.end - chunk.start, null, signal)
       out.push({
         start: chunk.start,
@@ -352,7 +353,7 @@ export class QwenServer {
       log('lyrics', `qwen: re-asking ${retry.length} of ${chunks.length} chunks as ${want}`)
     }
     for (const [n, { c, i }] of retry.entries()) {
-      if (signal?.aborted) throw new Error('Cancelled.')
+      if (signal?.aborted) throw new Error(t('main.error.cancelled'))
       const forced = await this.ask(chunkToWav(pcm, chunks[i]), c.end - c.start, want, signal)
       if (!looksLooped(forced.text, forced.finish)) out[i] = { ...c, text: forced.text }
       onProgress(50 + ((n + 1) / retry.length) * 50)

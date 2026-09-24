@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import type { UITrack } from '../model'
+import { laneLabel, type UITrack } from '../model'
 import Waveform from './Waveform'
+import { t } from '../i18n'
 
 interface Props {
   track: UITrack
@@ -51,7 +52,7 @@ export default function TrackLane({
     const name = (draft ?? '').trim()
     setDraft(null)
     // An emptied name means "never mind" — a nameless lane helps nobody.
-    if (name && name !== track.label) onRename?.(track.id, name)
+    if (name && name !== laneLabel(track)) onRename?.(track.id, name)
   }
   // Explicit grid rows: the scrub overlay is definitely-placed and would
   // otherwise push auto-placed lanes into implicit rows below it.
@@ -70,7 +71,7 @@ export default function TrackLane({
               className="lane-name-input"
               value={draft}
               spellCheck={false}
-              aria-label={`Name of the ${track.label} track`}
+              aria-label={t('player.lane.nameOf', { track: laneLabel(track) })}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') commit()
@@ -81,19 +82,19 @@ export default function TrackLane({
           ) : (
             <span
               className={`lane-name${onRename ? ' renamable' : ''}`}
-              title={onRename ? 'Double-click to rename this track' : undefined}
-              onDoubleClick={onRename ? () => setDraft(track.label) : undefined}
+              title={onRename ? t('player.lane.renameTitle') : undefined}
+              onDoubleClick={onRename ? () => setDraft(laneLabel(track)) : undefined}
             >
-              {track.label}
+              {laneLabel(track)}
             </span>
           )}
-          {ducked && !editing && <span className="lane-you">your turn</span>}
+          {ducked && !editing && <span className="lane-you">{t('player.lane.yourTurn')}</span>}
           {onRename && !editing && (
             <button
               type="button"
               className="lane-edit"
-              title={`Rename ${track.label}`}
-              onClick={() => setDraft(track.label)}
+              title={t('player.lane.rename', { track: laneLabel(track) })}
+              onClick={() => setDraft(laneLabel(track))}
             >
               ✎
             </button>
@@ -102,7 +103,7 @@ export default function TrackLane({
             <button
               type="button"
               className="lane-remove"
-              title={`Remove ${track.label} from this project (the file you added it from stays where it is)`}
+              title={t('player.lane.remove', { track: laneLabel(track) })}
               onClick={() => onRemove(track.id)}
             >
               ✕
@@ -114,7 +115,7 @@ export default function TrackLane({
             type="button"
             className={`chip mute${track.muted ? ' active' : ''}`}
             aria-pressed={track.muted}
-            title={track.muted ? 'Unmute' : 'Mute'}
+            title={track.muted ? t('player.lane.unmute') : t('player.lane.mute')}
             onClick={() => onMute(track.id, !track.muted)}
           >
             M
@@ -124,7 +125,7 @@ export default function TrackLane({
               type="button"
               className={`chip solo${track.solo ? ' active' : ''}`}
               aria-pressed={track.solo}
-              title={track.solo ? 'Unsolo' : 'Solo'}
+              title={track.solo ? t('player.lane.unsolo') : t('player.lane.solo')}
               onClick={() => onSolo(track.id, !track.solo)}
             >
               S
@@ -137,7 +138,7 @@ export default function TrackLane({
             max={1}
             step={0.01}
             value={track.volume}
-            title="Volume"
+            title={t('player.lane.volume')}
             onChange={(e) => onVolume(track.id, Number(e.target.value))}
           />
         </div>

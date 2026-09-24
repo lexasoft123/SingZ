@@ -6,6 +6,7 @@ import { localProjectFile, readProjectText } from '../projects'
 import { ensureSplitModel, splitCapability } from '../analysis/models'
 import { splitVitals, startSplit } from './service'
 import { adoptSplit } from './adopt'
+import { t } from '../i18n'
 
 /**
  * The split flow around the :split service, shared by the catalog card and
@@ -139,8 +140,10 @@ export function clearFailures(): void {
   void setStoredText(ATTEMPTS_KEY, '')
 }
 
-export const KEEPS_FAILING_COPY =
-  'This song keeps failing on this phone. Add it on your computer instead — it will sync over ready to sing.'
+// Frozen at import time for tests that compare against this export directly;
+// splitFailureCopy() below re-reads the live language on every call instead,
+// so a language switch mid-session still shows the right copy on screen.
+export const KEEPS_FAILING_COPY = t('phone.library.keepsFailingCopy')
 
 /** The failures that are about the FILE, not the phone — the decode errors
  *  both natives write into job.json (SingzSplitRunner.mm's
@@ -160,12 +163,10 @@ export function isFileProblem(error: string | null | undefined): boolean {
   )
 }
 
-export const FILE_FAILING_COPY =
-  "This phone couldn't read this song's file. Try another copy of it — " +
-  'or add it on your computer, and it will sync over ready to sing.'
+export const FILE_FAILING_COPY = t('phone.library.fileFailingCopy')
 
 /** What the failed card says: the file's fault first, then the phone's. */
 export function splitFailureCopy(error: string, attempts: number): string {
-  if (isFileProblem(error)) return FILE_FAILING_COPY
-  return attempts >= 2 ? KEEPS_FAILING_COPY : error
+  if (isFileProblem(error)) return t('phone.library.fileFailingCopy')
+  return attempts >= 2 ? t('phone.library.keepsFailingCopy') : error
 }

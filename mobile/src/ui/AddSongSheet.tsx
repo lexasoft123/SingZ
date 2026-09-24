@@ -23,6 +23,7 @@ import type { LyricLine } from '../model'
 import { clearCache } from '../projects'
 import type { PickedFile } from '../writer'
 import { C, NATIVE_SHEET_FIT_SUPPORTED, Sheet, SheetScrollView, white } from './bits'
+import { t } from '../i18n'
 
 /**
  * The add-a-song flow (Phase 1): pick → read the file → confirm title/artist
@@ -178,7 +179,7 @@ export default function AddSongSheet({
         // Resource does not exist (-7)") were being handed to the singer.
         // They go in the log, which is one line above and is where a report
         // comes from; the card says what it means for the song.
-        setError("This file can't be played on this phone — it may be a format SingZ doesn't read. The Log has the details.")
+        setError(t('phone.library.unreadableFile'))
         setTitle('')
         setArtist('')
         setStep({ k: 'meta', facts: { durationSec: 0, title: '' } })
@@ -265,7 +266,7 @@ export default function AddSongSheet({
         return (
           <View style={s.center}>
             <ActivityIndicator color={C.amber} />
-            <Text style={s.dimText}>Reading the song…</Text>
+            <Text style={s.dimText}>{t('phone.library.readingTheSong')}</Text>
           </View>
         )
       case 'creating':
@@ -277,9 +278,9 @@ export default function AddSongSheet({
                 A locked screen therefore has to say what it is doing and
                 roughly how long — a bare spinner over a full-size file copy
                 reads as a freeze. */}
-            <Text style={s.dimText}>Adding it to this phone…</Text>
+            <Text style={s.dimText}>{t('phone.library.addingToPhone')}</Text>
             <Text style={[s.dimText, { marginTop: 2 }]}>
-              Copying the file — a few seconds for a normal song.
+              {t('phone.library.copyingFile')}
             </Text>
           </View>
         )
@@ -303,36 +304,38 @@ export default function AddSongSheet({
                   again, and promising a picker this button does not open is
                   the kind of small lie that erodes the rest. */}
               <Pressable accessibilityRole="button" style={[s.btn, s.btnPrimary]} onPress={() => abandon('unreadable')}>
-                <Text style={s.btnPrimaryText}>Close</Text>
+                <Text style={s.btnPrimaryText}>{t('phone.library.close')}</Text>
               </Pressable>
             </View>
           )
         }
         return (
           <View>
-            <Text style={s.label}>Title</Text>
+            <Text style={s.label}>{t('phone.library.titleLabel')}</Text>
             <TextInput
               style={s.input}
               value={title}
               onChangeText={setTitle}
-              placeholder="Song title"
+              placeholder={t('phone.library.songTitlePlaceholder')}
               placeholderTextColor={C.dim}
               editable={!busy}
             />
-            <Text style={s.label}>Artist</Text>
+            <Text style={s.label}>{t('phone.library.artistLabel')}</Text>
             <TextInput
               style={s.input}
               value={artist}
               onChangeText={setArtist}
-              placeholder="Helps find the right lyrics"
+              placeholder={t('phone.library.artistPlaceholder')}
               placeholderTextColor={C.dim}
               editable={!busy}
             />
             {step.facts.durationSec > 0 && (
               <Text style={s.dimText}>
-                {Math.floor(step.facts.durationSec / 60)}:
-                {String(Math.round(step.facts.durationSec % 60)).padStart(2, '0')} —{' '}
-                {src?.name ?? ''}
+                {t('phone.library.addSongDuration', {
+                  mins: Math.floor(step.facts.durationSec / 60),
+                  secs: String(Math.round(step.facts.durationSec % 60)).padStart(2, '0'),
+                  name: src?.name ?? ''
+                })}
               </Text>
             )}
             <View style={s.row}>
@@ -348,7 +351,7 @@ export default function AddSongSheet({
                 {busy ? (
                   <ActivityIndicator color={C.amberInk} />
                 ) : (
-                  <Text style={s.btnPrimaryText}>Find lyrics</Text>
+                  <Text style={s.btnPrimaryText}>{t('phone.library.findLyricsButton')}</Text>
                 )}
               </Pressable>
               <Pressable
@@ -357,7 +360,7 @@ export default function AddSongSheet({
                 disabled={busy}
                 onPress={() => void create(step.facts, null)}
               >
-                <Text style={s.btnText}>Add without lyrics</Text>
+                <Text style={s.btnText}>{t('phone.library.addWithoutLyrics')}</Text>
               </Pressable>
             </View>
           </View>
@@ -368,28 +371,30 @@ export default function AddSongSheet({
         if (hit) {
           return (
             <View>
-              <Text style={s.credit}>{hit.credit ?? 'Synced lyrics found'}</Text>
+              <Text style={s.credit}>{hit.credit ?? t('phone.library.syncedLyricsFound')}</Text>
               <ScrollView style={s.preview}>
                 {hit.lines.slice(0, 6).map((l, i) => (
                   <Text key={i} style={s.previewLine}>
                     {l.text}
                   </Text>
                 ))}
-                {hit.lines.length > 6 && <Text style={s.dimText}>…{hit.lines.length} lines</Text>}
+                {hit.lines.length > 6 && (
+                  <Text style={s.dimText}>{t('phone.library.moreLines', { n: hit.lines.length })}</Text>
+                )}
               </ScrollView>
               <View style={s.row}>
                 <Pressable accessibilityRole="button" style={[s.btn, s.btnPrimary]} onPress={() => void create(facts, hit)}>
-                  <Text style={s.btnPrimaryText}>Use these lyrics</Text>
+                  <Text style={s.btnPrimaryText}>{t('phone.library.useTheseLyrics')}</Text>
                 </Pressable>
                 <Pressable accessibilityRole="button" style={s.btn} onPress={() => void create(facts, null)}>
-                  <Text style={s.btnText}>Skip</Text>
+                  <Text style={s.btnText}>{t('phone.library.skip')}</Text>
                 </Pressable>
               <Pressable
                 accessibilityRole="button"
                 style={s.btn}
                 onPress={() => setStep({ k: 'meta', facts })}
               >
-                <Text style={s.btnText}>Edit title</Text>
+                <Text style={s.btnText}>{t('phone.library.editTitle')}</Text>
               </Pressable>
               </View>
             </View>
@@ -398,23 +403,20 @@ export default function AddSongSheet({
         if (down) {
           return (
             <View>
-              <Text style={s.dimText}>
-                The lyrics service didn't answer — the song still adds fine, and lyrics can be
-                found later from its card.
-              </Text>
+              <Text style={s.dimText}>{t('phone.library.lyricsServiceDownStillAdds')}</Text>
               <View style={s.row}>
                 <Pressable accessibilityRole="button" style={[s.btn, s.btnPrimary]} onPress={() => void create(facts, null)}>
-                  <Text style={s.btnPrimaryText}>Add without lyrics</Text>
+                  <Text style={s.btnPrimaryText}>{t('phone.library.addWithoutLyrics')}</Text>
                 </Pressable>
                 <Pressable accessibilityRole="button" style={s.btn} onPress={() => void search(facts)}>
-                  <Text style={s.btnText}>Try again</Text>
+                  <Text style={s.btnText}>{t('phone.library.tryAgain')}</Text>
                 </Pressable>
               <Pressable
                 accessibilityRole="button"
                 style={s.btn}
                 onPress={() => setStep({ k: 'meta', facts })}
               >
-                <Text style={s.btnText}>Edit title</Text>
+                <Text style={s.btnText}>{t('phone.library.editTitle')}</Text>
               </Pressable>
               </View>
             </View>
@@ -423,7 +425,8 @@ export default function AddSongSheet({
         return (
           <View>
             <Text style={s.dimText}>
-              No exact match. {candidates && candidates.length > 0 ? 'Close matches:' : ''}
+              {t('phone.library.noExactMatch')}{' '}
+              {candidates && candidates.length > 0 ? t('phone.library.closeMatches') : ''}
             </Text>
             {candidates && candidates.length > 0 && (
               <ScrollView style={s.preview}>
@@ -435,7 +438,7 @@ export default function AddSongSheet({
                     </Text>
                     <Text style={s.candMeta}>
                       {Math.floor(c.duration / 60)}:{String(Math.round(c.duration % 60)).padStart(2, '0')}
-                      {c.synced ? ' · synced' : ' · text only'}
+                      {c.synced ? t('phone.library.syncedSuffix') : t('phone.library.textOnlySuffix')}
                     </Text>
                   </Pressable>
                 ))}
@@ -443,17 +446,17 @@ export default function AddSongSheet({
             )}
             <View style={s.row}>
               <Pressable accessibilityRole="button" style={[s.btn, s.btnPrimary]} onPress={() => void create(facts, null)}>
-                <Text style={s.btnPrimaryText}>Add without lyrics</Text>
+                <Text style={s.btnPrimaryText}>{t('phone.library.addWithoutLyrics')}</Text>
               </Pressable>
               <Pressable accessibilityRole="button" style={s.btn} onPress={() => void search(facts)}>
-                <Text style={s.btnText}>Search again</Text>
+                <Text style={s.btnText}>{t('phone.library.searchAgain')}</Text>
               </Pressable>
               <Pressable
                 accessibilityRole="button"
                 style={s.btn}
                 onPress={() => setStep({ k: 'meta', facts })}
               >
-                <Text style={s.btnText}>Edit title</Text>
+                <Text style={s.btnText}>{t('phone.library.editTitle')}</Text>
               </Pressable>
             </View>
           </View>
@@ -464,10 +467,10 @@ export default function AddSongSheet({
 
   return (
     <Sheet
-      title="Add a song"
-      actionLabel="Cancel"
+      title={t('phone.library.addASong')}
+      actionLabel={t('phone.library.cancel')}
       actionHidden={step.k === 'creating'}
-      actionAccessibilityLabel="Cancel adding this song"
+      actionAccessibilityLabel={t('phone.library.addSongCancelA11y')}
       fitContent={NATIVE_SHEET_FIT_SUPPORTED}
       onClose={() => abandon('closed')}
     >

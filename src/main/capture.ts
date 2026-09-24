@@ -17,6 +17,7 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { log } from './log'
+import { t } from '../shared/i18n'
 import type {
   DesktopAudioHostDevice,
   DesktopAudioHostInventoryResult,
@@ -923,7 +924,7 @@ function failedMonitor(
   return {
     ok: false,
     errorCode,
-    error: error || 'Native headphone monitoring failed.',
+    error: error || t('main.error.monitorFailedGeneric'),
     ownershipGeneration: /^(0|[1-9]\d{0,19})$/.test(ownershipGeneration)
       ? ownershipGeneration
       : '0',
@@ -1190,7 +1191,7 @@ export class CaptureOwner {
       // filename; retrying would return the same object and falsely imply a
       // rebuild can hot-replace it without restarting Electron.
       this.loadRetryable = error instanceof CaptureAddonLoadError && error.retryable
-      this.loadError = `Native microphone support is unavailable: ${String(error)}`
+      this.loadError = t('main.error.nativeMicSupportUnavailable', { message: String(error) })
       // The addon carries native playback as well as the microphone, so this
       // one failure silently sends playback back to Web Audio. Only the
       // Settings panel's red line said so before, and it names the microphone.
@@ -1208,7 +1209,7 @@ export class CaptureOwner {
 
   devices(): { ok: true; devices: CaptureInputDevice[] } | { ok: false; devices: []; error: string } {
     const binding = this.native()
-    if (!binding) return { ok: false, devices: [], error: this.loadError ?? 'Native capture unavailable' }
+    if (!binding) return { ok: false, devices: [], error: this.loadError ?? t('main.error.nativeCaptureUnavailable') }
     return binding.inputDevices()
   }
 
@@ -1231,7 +1232,7 @@ export class CaptureOwner {
         defaultInputUid: '',
         defaultOutputUid: '',
         devices: [],
-        error: 'The requested native audio provider is not available on this platform.'
+        error: t('main.error.audioProviderNotAvailable')
       }
     }
     const binding = this.native()
@@ -1243,7 +1244,7 @@ export class CaptureOwner {
         defaultInputUid: '',
         defaultOutputUid: '',
         devices: [],
-        error: this.loadError ?? 'Native audio host unavailable'
+        error: this.loadError ?? t('main.error.nativeAudioHostUnavailable')
       }
     }
     try {
@@ -1269,7 +1270,7 @@ export class CaptureOwner {
           devices: [],
           error: typeof raw.error === 'string'
             ? raw.error
-            : 'Native audio host returned an invalid device inventory.'
+            : t('main.error.nativeAudioHostInvalidInventory')
         }
       }
       return {
@@ -1288,7 +1289,7 @@ export class CaptureOwner {
         defaultInputUid: '',
         defaultOutputUid: '',
         devices: [],
-        error: `Native audio host inventory failed: ${String(error)}`
+        error: t('main.error.nativeAudioHostInventoryFailed', { message: String(error) })
       }
     }
   }
@@ -1296,17 +1297,17 @@ export class CaptureOwner {
   beginMonitor(rendererId: number, config: DesktopMonitorConfig): DesktopMonitorResult {
     if (this.monitorGeneration) {
       return failedMonitor(
-        'End the active headphone monitor before starting another.',
+        t('main.error.monitorEndActiveFirst'),
         'already-running',
         this.monitorGeneration
       )
     }
     if (this.monitorHighWater >= 0xffffffffffffffffn) {
-      return failedMonitor('The native monitor generation range is exhausted.', 'invalid-generation')
+      return failedMonitor(t('main.error.monitorGenerationExhausted'), 'invalid-generation')
     }
     const binding = this.native()
     if (!binding) {
-      return failedMonitor(this.loadError ?? 'Native audio host unavailable', 'host-failure')
+      return failedMonitor(this.loadError ?? t('main.error.nativeAudioHostUnavailable'), 'host-failure')
     }
     const generation = ++this.monitorHighWater
     const rawGeneration = generation.toString()
@@ -1317,13 +1318,13 @@ export class CaptureOwner {
       if (!this.monitorRollbackSucceeded(binding, generation)) {
         this.retainMonitor(rendererId, rawGeneration)
       }
-      return failedMonitor(`Native headphone monitoring failed to start: ${String(error)}`, 'host-failure', rawGeneration)
+      return failedMonitor(t('main.error.monitorFailedToStart', { message: String(error) }), 'host-failure', rawGeneration)
     }
     if (!validMonitorResult(rawResult, 'begin', rawGeneration)) {
       if (!this.monitorRollbackSucceeded(binding, generation)) {
         this.retainMonitor(rendererId, rawGeneration)
       }
-      return failedMonitor('Native headphone monitoring returned an invalid response.', 'host-failure', rawGeneration)
+      return failedMonitor(t('main.error.monitorInvalidResponse'), 'host-failure', rawGeneration)
     }
     const result = rawResult
     if (result.ok) {
@@ -1381,16 +1382,16 @@ export class CaptureOwner {
     if (
       !generation || this.monitorRendererId !== rendererId ||
       this.monitorGeneration !== rawGeneration
-    ) return failedMonitor('The headphone monitor generation is no longer active.', 'invalid-generation', rawGeneration)
+    ) return failedMonitor(t('main.error.monitorGenerationInactive'), 'invalid-generation', rawGeneration)
     const binding = this.native()
-    if (!binding) return failedMonitor(this.loadError ?? 'Native audio host unavailable', 'host-failure', rawGeneration)
+    if (!binding) return failedMonitor(this.loadError ?? t('main.error.nativeAudioHostUnavailable'), 'host-failure', rawGeneration)
     try {
       const result = binding.setMonitorGain(generation, gainDb, enabled)
       return validMonitorResult(result, 'gain', rawGeneration)
         ? result
-        : failedMonitor('Native headphone gain returned an invalid response.', 'host-failure', rawGeneration)
+        : failedMonitor(t('main.error.monitorGainInvalidResponse'), 'host-failure', rawGeneration)
     } catch (error) {
-      return failedMonitor(`Native headphone gain failed: ${String(error)}`, 'host-failure', rawGeneration)
+      return failedMonitor(t('main.error.monitorGainFailed', { message: String(error) }), 'host-failure', rawGeneration)
     }
   }
 
@@ -1417,13 +1418,13 @@ export class CaptureOwner {
     if (
       !generation || this.monitorRendererId !== rendererId ||
       this.monitorGeneration !== rawGeneration
-    ) return failedMonitor('The headphone monitor generation is no longer active.', 'invalid-generation', rawGeneration)
+    ) return failedMonitor(t('main.error.monitorGenerationInactive'), 'invalid-generation', rawGeneration)
     const binding = this.native()
-    if (!binding) return failedMonitor(this.loadError ?? 'Native audio host unavailable', 'host-failure', rawGeneration)
+    if (!binding) return failedMonitor(this.loadError ?? t('main.error.nativeAudioHostUnavailable'), 'host-failure', rawGeneration)
     try {
       const result = binding.endMonitor(generation)
       if (!validMonitorResult(result, 'end', rawGeneration)) {
-        return failedMonitor('Native headphone monitoring returned an invalid stop response.', 'host-failure', rawGeneration)
+        return failedMonitor(t('main.error.monitorInvalidStopResponse'), 'host-failure', rawGeneration)
       }
       if (result.ok) {
         this.monitorGeneration = ''
@@ -1431,7 +1432,7 @@ export class CaptureOwner {
       }
       return result
     } catch (error) {
-      return failedMonitor(`Native headphone monitoring failed to stop: ${String(error)}`, 'host-failure', rawGeneration)
+      return failedMonitor(t('main.error.monitorFailedToStop', { message: String(error) }), 'host-failure', rawGeneration)
     }
   }
 
@@ -1889,7 +1890,7 @@ export class CaptureOwner {
   ): Promise<DesktopPlaybackLaneMeasureResult> {
     const binding = this.native()
     if (!binding) {
-      return { ok: false, error: this.loadError ?? 'Native playback unavailable', lanes: [] }
+      return { ok: false, error: this.loadError ?? t('main.error.nativePlaybackUnavailable'), lanes: [] }
     }
     const startedAt = Date.now()
     let result: DesktopPlaybackLaneMeasureResult
@@ -1962,7 +1963,7 @@ export class CaptureOwner {
       return {
         ok: false,
         state: 'unsupported',
-        error: this.loadError ?? 'Native capture unavailable',
+        error: this.loadError ?? t('main.error.nativeCaptureUnavailable'),
         sampleRate: 0,
         inputChannel: config.inputChannel,
         deviceUid: config.deviceUid ?? '',
@@ -2036,12 +2037,12 @@ export class CaptureOwner {
 
   cancel(rendererId: number, rawGeneration: string): { ok: true; cancelled: boolean } | { ok: false; error: string } {
     const generation = parseGeneration(rawGeneration)
-    if (!generation) return { ok: false, error: 'Invalid microphone ownership generation.' }
+    if (!generation) return { ok: false, error: t('main.error.invalidMicOwnershipGeneration') }
     if (this.rendererId !== rendererId || this.generation !== rawGeneration) {
       return { ok: true, cancelled: false }
     }
     const binding = this.native()
-    if (!binding) return { ok: false, error: this.loadError ?? 'Native capture unavailable' }
+    if (!binding) return { ok: false, error: this.loadError ?? t('main.error.nativeCaptureUnavailable') }
     const result = binding.cancelCapture(generation)
     if (result.cancelled) {
       this.generation = ''
