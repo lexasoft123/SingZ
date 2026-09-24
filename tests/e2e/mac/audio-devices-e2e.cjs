@@ -4,7 +4,10 @@
  * sinkId move + boot-time re-apply. Permanent harness for the e2e-verifier.
  *
  * Runs against an isolated scratch profile (SINGZ_USERDATA_DIR) with a
- * pre-seeded stems cache, so no library and no splitter engine are needed.
+ * pre-seeded stems cache, so no library is needed and demucs never runs. The
+ * splitter pack still is: the song is split through the Split menu, as a
+ * singer splits one, which refuses to start without the pack, and whose
+ * second stage separates lead from backing vocals with the pack's own model.
  * SINGZ_FAKE_MIC grants capture without touching hardware. A renderer-only,
  * driver-installed stereo fixture then supplies silence on channel 1 and a
  * tone on channel 2. Device enumeration stays real, so the hardware picker
@@ -27,8 +30,10 @@
  * the Web Audio half is then the honest fork.
  *
  * Prereqs: `npm run build` done; `scripts/vendor-analyze.sh` run so the
- * vendored core matches this tree; the dev Electron binary has mac microphone
- * permission (TCC) so getUserMedia can open.
+ * vendored core matches this tree; the splitter pack installed (the shared
+ * one under Application Support/SingZ serves the scratch profile too); the
+ * dev Electron binary has mac microphone permission (TCC) so getUserMedia
+ * can open.
  *
  * Env: E2E_OUT (screenshot + profile dir, default os.tmpdir()). Set
  * SINGZ_ANALYZE to a freshly built core binary to exercise native UID/channel
@@ -217,7 +222,7 @@ const coreProvenance = async (win) => {
   const wav = join(OUT, 'e2e-tone.wav')
   makeWav(wav)
   // Seed the splitter cache: six copies of the tone under the song's hash,
-  // so "Split into stems" returns instantly with no engine installed.
+  // so the split's first stage returns instantly without running demucs.
   rmSync(PROFILE, { recursive: true, force: true })
   const stemDir = join(PROFILE, 'stems', await hashFile(wav), 'htdemucs_6s')
   mkdirSync(stemDir, { recursive: true })
@@ -510,11 +515,48 @@ const coreProvenance = async (win) => {
     throw new Error('paused practice offers no way back in')
   await win.click('.app-sections button:has-text("Songs")')
 
-  // ---- load the tone, split from cache, karaoke + mic on ----
+  // ---- load the tone, split it through the Split menu, karaoke + mic on ----
+  // A singer splits with the transport's "Split ▾" and then the popover's own
+  // Split, which runs BOTH stages: the six stems (the seeded cache answers at
+  // once) and then lead/backing vocals, the pack's vocal model run on the
+  // tone's vocal stem. The karaoke pill replaces the split's progress pill
+  // only once both stages have settled, so it is the "split finished" signal.
+  // The menu will not start without the splitter pack — it opens the models
+  // wizard instead — so that outcome is named rather than left to time out.
   await win.setInputFiles('input[type="file"]:not([data-testid])', wav)
-  await win.waitForSelector('.pill.primary:has-text("Split into stems")', { timeout: 30000 })
-  await win.click('.pill.primary:has-text("Split into stems")')
-  await win.waitForSelector('.pill.karaoke', { timeout: 60000 })
+  const splitTrigger = '.split-control > button[aria-haspopup="dialog"]'
+  await win.waitForSelector(`${splitTrigger}:not(:disabled)`, { timeout: 30000 })
+  await win.click(splitTrigger)
+  // The popover's one primary button, found by structure rather than copy.
+  await win.click('.split-menu[role="dialog"] .pill.primary')
+  const splitStarted = Date.now()
+  const splitOutcome = await win
+    .waitForFunction(
+      () => {
+        if (document.querySelector('.wiz-rows')) return 'wizard'
+        if (document.querySelector('.sep-pill')) return false
+        if (document.querySelector('.pill.karaoke')) return 'split'
+        return document.querySelector('.toast[role="alert"]')?.textContent || false
+      },
+      null,
+      // both stages took 6-27 s across runs on an Apple Silicon dev Mac, for
+      // 2 s of audio; the rest of the budget is room for slower machines
+      { timeout: 180000, polling: 250 }
+    )
+    .then((handle) => handle.jsonValue())
+  if (splitOutcome === 'wizard')
+    throw new Error('Split opened the models wizard: this driver needs the splitter pack installed')
+  if (splitOutcome !== 'split') throw new Error(`the split failed: ${splitOutcome}`)
+  // A second stage that failed leaves the stems loaded and the Split button
+  // amber ('attention', offering backing vocals again); one that landed turns
+  // it ghost. Either way the karaoke pill is up, so ask the button.
+  const splitClass = await win.$eval(splitTrigger, (el) => el.className)
+  if (!/\bghost\b/.test(splitClass)) {
+    const alert = await win.$eval('.toast[role="alert"]', (el) => el.textContent).catch(() => null)
+    throw new Error(`lead/backing vocals did not land (Split button "${splitClass}"): ${alert ?? 'no error shown'}`)
+  }
+  const splitSeconds = ((Date.now() - splitStarted) / 1000).toFixed(1)
+  console.log(`split: six stems from the seeded cache, then lead/backing vocals (${splitSeconds} s)`)
   const kOn = await win.$eval('.pill.karaoke', (el) => el.classList.contains('active'))
   if (!kOn) await win.click('.pill.karaoke')
   await win.waitForSelector('.mic-toggle', { timeout: 20000 })

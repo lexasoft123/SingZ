@@ -18,6 +18,12 @@ AudioHostInventory AudioHost::enumerate() const {
   return backend_ != nullptr ? backend_->enumerate() : AudioHostInventory{};
 }
 
+std::optional<AudioHostDeviceInfo> AudioHost::describeOutputDevice(
+    const std::string& uid) const {
+  if (backend_ == nullptr) return std::nullopt;
+  return backend_->describeOutputDevice(uid);
+}
+
 AudioHostResult AudioHost::open(const AudioHostConfig& config,
                                 AudioHostRender render, void* renderContext) {
   if (backend_ == nullptr) {

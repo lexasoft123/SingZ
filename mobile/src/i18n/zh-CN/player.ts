@@ -145,6 +145,8 @@ export const player: Translation<typeof en> = {
   // ── song sheet: Better beats row ──
   'phone.player.songSheet.betterBeats': '更精准节拍',
   'phone.player.songSheet.downloading': '正在下载——{mb}/{total} MB',
+  'phone.player.songSheet.sizeMb': '{n} MB',
+  'phone.player.songSheet.sizeKb': '{n} kB',
   'phone.player.songSheet.onThisPhone': '已在此手机上',
   'phone.player.songSheet.notDownloaded': '尚未下载——{mb} MB',
   'phone.player.songSheet.checking': '正在检查…',

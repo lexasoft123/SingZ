@@ -8,6 +8,10 @@ import {
   DesktopNativePlaybackClient,
   DesktopNativeProviderError,
   PENDING_SEEK_MAX_MS,
+  POLL_BURST_MS,
+  POLL_EDGE_MAX_MS,
+  POLL_EDGE_MS,
+  POLL_FAST_MS,
   selectDesktopPlaybackBackend
 } from '../../src/renderer/src/audio/desktop-native-playback'
 import { playbackProviderCanChange } from '../../src/renderer/src/components/SettingsModal'
@@ -1536,6 +1540,113 @@ describe('desktop native playback facade', () => {
     const afterCommand = reads()
     await vi.advanceTimersByTimeAsync(1000)
     expect(reads() - afterCommand).toBeGreaterThanOrEqual(18)
+    ;(client as unknown as { stopPolling: () => void }).stopPolling()
+  })
+
+  it('looks at a fresh start every edge period until it runs with a current audible frame', async () => {
+    // The render thread publishes the start from its first callbacks, and the
+    // start's own read-back always lands before them: 'stopped', nothing
+    // rendered. Waiting a whole fast poll for the next look is what kept the
+    // bar still for ~40 ms of music on every Play (measured on the Mac:
+    // 'playing' 4-6 ms after the start returned, a current audible frame one
+    // callback later, the first look 55 ms after).
+    let reads = 0
+    const api = asioPollingApi(
+      async () => {
+        reads++
+        if (reads <= 2) {
+          return { ...status('1', '0'), transportState: 'stopped', audibleProjectionQuality: 'unavailable', callbacks: '0' }
+        }
+        const frame = String(512 * (reads - 2))
+        return {
+          ...status('1', frame),
+          transportState: 'playing',
+          remainingPreRollFrames: '0',
+          audibleProjectionQuality: reads === 3 ? 'unavailable' : 'current'
+        }
+      },
+      async (generation) => result(generation, 'unloaded', true)
+    )
+    vi.stubGlobal('window', { singz: api })
+    const client = new DesktopNativePlaybackClient(
+      { releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined },
+      () => undefined
+    )
+    await client.prepareAndStart(asioRequest())
+    expect(reads).toBe(1)
+    expect(client.transportActive).toBe(false)
+    await vi.advanceTimersByTimeAsync(POLL_EDGE_MS)
+    expect(reads).toBe(2)
+    await vi.advanceTimersByTimeAsync(POLL_EDGE_MS)
+    expect(reads).toBe(3)
+    expect(client.transportActive).toBe(true)
+    // Running, but the audible frame is not current yet: one more look.
+    await vi.advanceTimersByTimeAsync(POLL_EDGE_MS)
+    expect(reads).toBe(4)
+    // Shown. Back to the burst cadence.
+    await vi.advanceTimersByTimeAsync(POLL_FAST_MS - 1)
+    expect(reads).toBe(4)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(reads).toBe(5)
+    ;(client as unknown as { stopPolling: () => void }).stopPolling()
+  })
+
+  it('holds the edge cadence for at most POLL_EDGE_MAX_MS when the start never shows', async () => {
+    const api = asioPollingApi(
+      async () => ({ ...status('1', '0'), transportState: 'stopped', audibleProjectionQuality: 'unavailable' }),
+      async (generation) => result(generation, 'unloaded', true)
+    )
+    vi.stubGlobal('window', { singz: api })
+    const client = new DesktopNativePlaybackClient(
+      { releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined },
+      () => undefined
+    )
+    await client.prepareAndStart(asioRequest())
+    const reads = () => vi.mocked(api.desktopPlaybackStatus).mock.calls.length
+    const afterStart = reads()
+    await vi.advanceTimersByTimeAsync(POLL_EDGE_MAX_MS)
+    const edgeReads = reads() - afterStart
+    expect(edgeReads).toBeGreaterThanOrEqual(POLL_EDGE_MAX_MS / POLL_EDGE_MS - 2)
+    expect(edgeReads).toBeLessThanOrEqual(POLL_EDGE_MAX_MS / POLL_EDGE_MS)
+    // Past the bound it is the ordinary burst: 20 Hz, not 100.
+    const afterEdge = reads()
+    await vi.advanceTimersByTimeAsync(10 * POLL_FAST_MS)
+    expect(reads() - afterEdge).toBeGreaterThanOrEqual(9)
+    expect(reads() - afterEdge).toBeLessThanOrEqual(11)
+    ;(client as unknown as { stopPolling: () => void }).stopPolling()
+  })
+
+  it('pulls the next look forward when a long pause is resumed', async () => {
+    // A paused song past the burst polls at 5 Hz, so the poll armed before a
+    // resume could be 200 ms away, and so could the bar's first step.
+    let transportState: DesktopPlaybackStatus['transportState'] = 'playing'
+    let frame = 0
+    const api = asioPollingApi(
+      async () => ({
+        ...status('1', String(frame += 480)),
+        transportState,
+        remainingPreRollFrames: '0',
+        audibleProjectionQuality: 'current'
+      }),
+      async (generation) => result(generation, 'unloaded', true)
+    )
+    vi.stubGlobal('window', { singz: api })
+    const client = new DesktopNativePlaybackClient(
+      { releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined },
+      () => undefined
+    )
+    await client.prepareAndStart(asioRequest())
+    transportState = 'paused'
+    await client.pause()
+    await vi.advanceTimersByTimeAsync(POLL_BURST_MS + 1010)
+    // The core accepts the resume; its render thread has not taken it yet.
+    await client.resume()
+    expect(client.transportActive).toBe(false)
+    const afterResume = vi.mocked(api.desktopPlaybackStatus).mock.calls.length
+    transportState = 'playing'
+    await vi.advanceTimersByTimeAsync(POLL_EDGE_MS)
+    expect(vi.mocked(api.desktopPlaybackStatus).mock.calls.length).toBe(afterResume + 1)
+    expect(client.transportActive).toBe(true)
     ;(client as unknown as { stopPolling: () => void }).stopPolling()
   })
 

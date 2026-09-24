@@ -223,6 +223,7 @@ describe('every E2E driver arms the watchdog', () => {
   // one in a subdirectory of its own, which a non-recursive walk missed while
   // this very rule was being written.
   const helpers = new Set([
+    'tests/e2e/mac/library-song.cjs',
     'tests/e2e/mac/quiet-launch.cjs',
     'mobile/tests/android-lib.cjs',
     'mobile/tests/mic-android-lifecycle.cjs',

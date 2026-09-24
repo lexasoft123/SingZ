@@ -6811,20 +6811,18 @@ NativePlaybackResult NativePlaybackSession::openOutput(
   }
 
   const NativePlaybackPrepareConfig &config = impl_->preparedConfig;
-  const AudioHostInventory inventory = impl_->host.enumerate();
-  const auto output = std::find_if(
-      inventory.devices.begin(), inventory.devices.end(),
-      [&](const AudioHostDeviceInfo &device) {
-        return device.uid == config.outputDeviceUid &&
-               (device.direction == AudioHostEndpointDirection::Output ||
-                device.direction == AudioHostEndpointDirection::Duplex);
-      });
+  // One endpoint, not the inventory: this runs on every first Play, count-in
+  // restart and rebuild, and the full inventory reads every channel label of
+  // every device (~40 ms of a 75 ms open on a Mac with a 16-channel
+  // interface).
+  const std::optional<AudioHostDeviceInfo> output =
+      impl_->host.describeOutputDevice(config.outputDeviceUid);
   // Name the term that failed. This is the last gate before the handoff and
   // it can refuse for four unrelated reasons; one undifferentiated sentence
   // (which also said "iOS" on Android) is what turned a platform never
   // publishing a nominal rate into hours of route archaeology.
   const char *routeFault = nullptr;
-  if (output == inventory.devices.end())
+  if (!output)
     routeFault = "the endpoint is gone";
   else if (output->outputChannels == 0)
     routeFault = "the endpoint has no output channels";

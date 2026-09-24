@@ -230,5 +230,14 @@ export const player: Translation<typeof en> = {
   'player.dspGraph.stateBlocked': '路径受阻',
 
   // ── model.ts: fallback label for an added track with no name left after cleanup ──
-  'player.track.untitled': '音轨'
+  'player.track.untitled': '音轨',
+
+  // ── DSP graph card: format line and the transport badge (Settings › Audio) ──
+  'player.dspGraph.framesMaximum': '最多 {n} 帧',
+  'player.dspGraph.nodesLinks': '{nodes} 个节点 · {links} 条连接',
+  'player.dspGraph.transport.stopped': '已停止',
+  'player.dspGraph.transport.pre-roll': '预备拍',
+  'player.dspGraph.transport.playing': '播放中',
+  'player.dspGraph.transport.paused': '已暂停',
+  'player.dspGraph.transport.completed': '已结束'
 }

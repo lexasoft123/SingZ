@@ -140,6 +140,8 @@ export const player = {
   // ── song sheet: Better beats row ──
   'phone.player.songSheet.betterBeats': 'Better beats',
   'phone.player.songSheet.downloading': 'Downloading — {mb} of {total} MB',
+  'phone.player.songSheet.sizeMb': '{n} MB',
+  'phone.player.songSheet.sizeKb': '{n} kB',
   'phone.player.songSheet.onThisPhone': 'On this phone',
   'phone.player.songSheet.notDownloaded': 'Not downloaded — {mb} MB',
   'phone.player.songSheet.checking': 'Checking…',

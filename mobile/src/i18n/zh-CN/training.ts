@@ -178,6 +178,8 @@ export const training: Translation<typeof en> = {
   'phone.training.kit.percent': '{percent}%',
   'phone.training.kit.decreaseVolume': '降低参考音音量',
   'phone.training.kit.increaseVolume': '提高参考音音量',
+  'phone.training.kit.playing': '正在播放…',
+  'phone.training.kit.back': '返回',
   'phone.training.kit.flat': '偏低',
   'phone.training.kit.sharp': '偏高',
   'phone.training.kit.youAreSinging': '你正在唱',
