@@ -1534,7 +1534,7 @@ export default function CatalogScreen({
       const why = [...new Set(res.skipped.map(k => k.reason.replace(/[.\s]+$/, '')))]
       Alert.alert(
         moved > 0 ? 'Added to Google Drive' : 'Nothing went up',
-        (moved === 0
+        ((moved === 0
           ? ''
           : moved === 1
           ? `${skipped > 0 ? '1 song is' : 'The song is'} in your Google Drive library now — already ` +
@@ -1542,13 +1542,14 @@ export default function CatalogScreen({
           : `${skipped > 0 ? `${moved} songs are` : moved === 2 ? 'Both songs are' : `All ${moved} songs are`} ` +
             'in your Google Drive library now — ' +
             'already downloaded, so they play straight away. ') +
+          (moved > 0
+            ? `Your computer adds ${moved === 1 ? 'it' : 'them'} to its own library the next time it syncs. `
+            : '') +
           (skipped > 0
             ? `${songs(skipped)} stayed on ${here}: ${why.slice(0, 2).join('; ')}` +
-              (why.length > 2 ? ' — and more, listed in the Log. ' : '. ')
-            : '') +
-          (moved > 0
-            ? `Your computer adds ${moved === 1 ? 'it' : 'them'} to its own library the next time it syncs.`
-            : ''),
+              (why.length > 2 ? ' — and more, listed in the Log.' : '.')
+            : '')
+        ).trim(),
         moved > 0 ? [{ text: 'OK', style: 'cancel' }, showMe] : [{ text: 'OK', style: 'cancel' }],
         { cancelable: true }
       )
@@ -1646,9 +1647,9 @@ export default function CatalogScreen({
           : n === 2
           ? 'Add both songs to Google Drive?'
           : `Add all ${n} songs to Google Drive?`,
-        `${fmtBytes(sizes.reduce((a, b) => a + b, 0))} goes up. Each song leaves ${here} once it is ` +
-          'safely in Drive and plays from the Drive tab instead, already downloaded. Stop at any ' +
-          'time — whatever has not gone up stays here.',
+        `${fmtBytes(sizes.reduce((a, b) => a + b, 0))} goes up. ${n === 1 ? 'The song' : 'Each song'} ` +
+          `leaves ${here} once it is safely in Drive and plays from the Drive tab instead, already ` +
+          `downloaded. Stop at any time — ${n === 1 ? 'until it has gone up, it stays' : 'whatever has not gone up stays'} here.`,
         /* cancel-first, like every confirm in this file (see confirmDelete) */
         [
           { text: 'Cancel', style: 'cancel', onPress: closed },
@@ -1685,52 +1686,56 @@ export default function CatalogScreen({
     let alive = true
     void (async () => {
       const signedIn = await driveSignedIn().catch(() => false)
-      const all = projects ?? []
-      // a copy of a song the Drive library already has (a folder copied in
-      // from a computer) is not offered: it would only go up as "(phone)".
-      // The stored listing answers with no network; the batch asks again.
-      const stored = await driveStoredProjects().catch(() => null)
-      const inDrive = new Set((stored ?? []).map(e => stemSignature(e.doc)).filter(Boolean))
-      // …except a song mid-move: its OWN folder in the library matches it, and
-      // it is still here to be finished
+      // phone rows only: switching from Drive leaves its rows on screen a moment
+      const all = (projects ?? []).filter(p => p.source !== 'gdrive')
+      // a song mid-move is never a copy: its OWN folder in the library
+      // matches it, and it is still here to be finished
       const midMove = await moveRecords().catch(() => ({}) as Record<string, unknown>)
-      const movable = all.filter(
-        p =>
-          Object.keys(p.stems).length > 0 &&
-          (!inDrive.has(stemSignature(p.doc)) || p.dir in midMove)
-      )
-      const copies = all.filter(
-        p => Object.keys(p.stems).length > 0 && inDrive.has(stemSignature(p.doc)) && !(p.dir in midMove)
-      )
-      if (alive) setDriveCopies(new Set(copies.map(p => p.dir)))
-      if (!signedIn || movable.length === 0) {
-        if (alive) setDriveOffer(null)
-        return
-      }
       let dismissed: string[] = []
       try {
         dismissed = JSON.parse((await getStoredText(DRIVE_OFFER_DISMISSED)) || '[]') as string[]
       } catch {
         dismissed = []
       }
-      if (!alive) return
-      if (movable.every(p => dismissed.includes(p.dir))) {
-        setDriveOffer(null)
-        return
+      /* A copy of a song the Drive library already has (a folder copied in
+         from a computer) is not offered — it would only go up as "(phone)" —
+         and its card says why it is in both lists. */
+      const decide = (listing: ProjectEntry[] | null): void => {
+        if (!alive) return
+        const inDrive = new Set((listing ?? []).map(e => stemSignature(e.doc)).filter(Boolean))
+        const split = (p: ProjectEntry): boolean => Object.keys(p.stems).length > 0
+        const copy = (p: ProjectEntry): boolean =>
+          split(p) && inDrive.has(stemSignature(p.doc)) && !(p.dir in midMove)
+        const movable = all.filter(p => split(p) && !copy(p))
+        const copies = all.filter(copy)
+        setDriveCopies(new Set(copies.map(p => p.dir)))
+        if (!signedIn || movable.length === 0 || movable.every(p => dismissed.includes(p.dir))) {
+          setDriveOffer(null)
+          return
+        }
+        setDriveOffer({
+          dirs: movable.map(p => p.dir),
+          // what the docs say the stems weigh; the confirm adds the song files
+          bytes: movable.reduce(
+            (n, p) => n + Object.values(p.doc.stemHashes ?? {}).reduce((m, h) => m + h.size, 0),
+            0
+          ),
+          unsplit: all.filter(p => !split(p)).length,
+          copies: copies.length,
+          total: all.length
+        })
       }
-      // what the docs say the stems weigh; the confirm adds the song files
-      const bytes = movable.reduce(
-        (n, p) => n + Object.values(p.doc.stemHashes ?? {}).reduce((m, h) => m + h.size, 0),
-        0
-      )
-      setDriveOffer({
-        dirs: movable.map(p => p.dir),
-        bytes,
-        // not the songs left out as copies: those are split, just not ours to send
-        unsplit: all.filter(p => Object.keys(p.stems).length === 0).length,
-        copies: copies.length,
-        total: all.length
-      })
+      // what the phone already knows, at once and with no network...
+      decide(await driveStoredProjects().catch(() => null))
+      // ...then what Drive says now. "Also in Google Drive" is a claim about
+      // the library, and nothing else lists it from this tab: a song deleted
+      // there must not keep a badge that invites deleting the last copy here.
+      // The listing is time-bound (a look within minutes costs nothing), a
+      // running batch keeps its own, and offline the saved one stands.
+      if (signedIn && !batchRunningRef.current) {
+        const fresh = await driveListProjects().catch(() => null)
+        if (fresh) decide(fresh)
+      }
     })()
     return () => {
       alive = false
@@ -1840,6 +1845,7 @@ export default function CatalogScreen({
       moveStop.current = true
     }
     TEST.driveOffer = driveOffer
+    TEST.driveCopies = [...driveCopies]
     TEST.moveBatch = moveBatch
     // a clean Drive slate for drivers: tokens AND the stored listing, which
     // otherwise outlives the fake Drive a previous run talked to

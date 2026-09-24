@@ -43,6 +43,10 @@ const SONG = 'Move Me To Drive'
  *  stems carry a few bytes of their own: two songs with the same audio are
  *  one song, and the second would rightly stay behind. It is never opened. */
 const SONG2 = 'Also Move Me'
+/** The desktop's own song, copied onto the phone as it is (Files, Finder):
+ *  the Drive library already has its audio, so it is not offered, it stays,
+ *  and its card says it is "Also in Google Drive". Removed after the run. */
+const COPY = 'Song One'
 /** STAY_ON_PHONE=1: the Drive tab is visited first (its listing cached),
  *  the batch runs on the phone tab throughout, and only then does the Drive
  *  tab open. Default: the tab changes to Drive mid-batch. */
@@ -166,6 +170,17 @@ function buildSeed(dir, name = SONG) {
     files[rel] = md5(fs.readFileSync(join(dir, rel)))
   }
   return files
+}
+
+/** Every file under `dir`, project-relative → md5 (what the Android seed pushes). */
+function filesUnder(dir, rel = '') {
+  const out = {}
+  for (const d of fs.readdirSync(join(dir, rel), { withFileTypes: true })) {
+    const r = rel ? `${rel}/${d.name}` : d.name
+    if (d.isDirectory()) Object.assign(out, filesUnder(dir, r))
+    else out[r] = md5(fs.readFileSync(join(dir, r)))
+  }
+  return out
 }
 
 // ------------------------------------------------------------------ CDP --
@@ -426,7 +441,9 @@ async function driveTab(ev, dir) {
     const want2 = buildSeed(local2, SONG2)
     const seeds = [
       [SONG, local, want],
-      [SONG2, local2, want2]
+      [SONG2, local2, want2],
+      // the desktop's folder as the sync left it (its doc now states its stems)
+      [COPY, join(root, COPY), filesUnder(join(root, COPY))]
     ]
     if (PLATFORM === 'ios') {
       execSync(`xcrun simctl terminate ${UDID} ${IOS_BUNDLE} 2>/dev/null || true`)
@@ -498,6 +515,23 @@ async function driveTab(ev, dir) {
       'the library offers to add all its songs to Google Drive',
       !!offer && [SONG, SONG2].every((d) => offer.dirs.includes(d)),
       JSON.stringify(offer)
+    )
+
+    // the copy: once the phone has heard from Drive, it is left out of the
+    // offer and marked on its card
+    let marked = null
+    for (let i = 0; i < 40; i++) {
+      marked = JSON.parse(
+        (await ev('JSON.stringify([__test.driveOffer || null, __test.driveCopies || []])')) || '[null,[]]'
+      )
+      if (marked[0]?.copies === 1 && marked[1].includes(COPY)) break
+      await sleep(500)
+    }
+    check(
+      'a copy of a song the Drive library already has is left out of the offer, and marked',
+      marked?.[0]?.copies === 1 && marked[1].includes(COPY) && !marked[0].dirs.includes(COPY) &&
+        [SONG, SONG2].every((d) => marked[0].dirs.includes(d)),
+      JSON.stringify(marked)
     )
 
     let folder = null
@@ -641,6 +675,12 @@ async function driveTab(ev, dir) {
         (await ev(`[${JSON.stringify(SONG)}, ${JSON.stringify(SONG2)}].some(d => (__test.projects || []).includes(d))`)) === false
       )
       check('and nothing is left to offer', (await ev('__test.driveOffer == null')) === true)
+      check(
+        'the copy stays, still marked "Also in Google Drive"',
+        (await ev(
+          `(__test.projects || []).includes(${JSON.stringify(COPY)}) && (__test.driveCopies || []).includes(${JSON.stringify(COPY)})`
+        )) === true
+      )
       await ev("void __test.selectMode('gdrive')")
       let inDrive = false
       for (let i = 0; i < 30 && !inDrive; i++) {
@@ -703,6 +743,16 @@ async function driveTab(ev, dir) {
     try {
       if (PLATFORM === 'ios') execSync(`xcrun simctl terminate ${UDID} ${IOS_BUNDLE} 2>/dev/null || true`)
       else adb('shell', 'am', 'force-stop', android.PKG)
+    } catch {}
+    // the copy never moves: take it back off the phone, or every later suite
+    // on this device finds a stray song in its library
+    try {
+      if (PLATFORM === 'ios') {
+        const data = execFileSync('xcrun', ['simctl', 'get_app_container', UDID, IOS_BUNDLE, 'data'], { encoding: 'utf8' }).trim()
+        fs.rmSync(join(data, 'Documents', COPY), { recursive: true, force: true })
+      } else {
+        adb('shell', `rm -rf ${JSON.stringify(`${android.extFilesDir()}/SingZ projects/${COPY}`)}`)
+      }
     } catch {}
     fs.writeFileSync(CONFIG_TS, originalConfig)
     if (server) await server.close()

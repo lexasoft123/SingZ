@@ -2155,7 +2155,11 @@ phone's to send, and moving it would only make a "(phone)" duplicate. (Not a
 song with a move record: the folder whose stems match is then its OWN, moved in
 before a cut, and the song is finished rather than passed over.) A copy is the
 one way a song stays in both lists, so the screen says so: its card reads "Also
-in Google Drive", and the offer says such a song stays.
+in Google Drive", and the offer says such a song stays. That is a claim about
+the library, so the phone library checks it against Drive whenever it comes into
+view (a look within minutes costs nothing; offline, the saved listing stands): a
+song deleted from Drive must not keep a badge that invites deleting the last copy
+here.
 
 The Drive listing is kept honest around a move in two ways. A song that moved
 in joins the phone's SAVED Drive listing — on screen and on disk, with its
@@ -2281,6 +2285,10 @@ listings finished LAST was kept, on screen and on disk.
   song that went up is listed with no signal, still listed after a cold restart
   of the app, and opens from its downloaded copy; the other stays on the phone,
   is offered again, and goes up with the next "Add all" once the signal is back).
+  Every variant also seeds a phone copy of the desktop's own song: left out of the
+  offer and marked "Also in Google Drive" before the batch (in the default
+  variant only the phone library's own look at Drive can know it), still there
+  and marked after, and taken off the device at the end.
   Each variant was shown to fail against the defect it guards. Two
   sample songs (5.9 MB, nine files each) moved in a few seconds; the offer named
   both and was gone after; a second "Add all" mid-batch was refused; the moved
