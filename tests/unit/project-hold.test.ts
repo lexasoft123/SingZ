@@ -1,11 +1,13 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   utimesSync,
   writeFileSync
 } from 'node:fs'
@@ -142,6 +144,10 @@ describe('holdProjects / putBack', () => {
     writeFileSync(song, Buffer.alloc(9 * 1024 * 1024, 1))
     const held = holdProjects([dir])
     writeFileSync(song, Buffer.alloc(9 * 1024 * 1024, 2))
+    // Same size, so only the time can tell. Set it rather than trust the file
+    // clock to move between two writes: NTFS stamps writes from a clock that
+    // ticks every ~15.6 ms, and a coarse Linux clock every few.
+    utimesSync(song, 1600000000, 1600000000)
     vi.spyOn(console, 'log').mockImplementation(() => {})
     expect(held.putBack().join('\n')).toMatch(/song\.mp3: it changed during the run, and it was too big to have been kept/)
   })
@@ -232,5 +238,36 @@ describe('scratchClone', () => {
       const drift = stat(join(dst, rel)).mtimeNs - stat(join(src, rel)).mtimeNs
       expect(drift < 0n ? -drift : drift).toBeLessThanOrEqual(process.platform === 'darwin' ? 0n : 1000000n)
     }
+  })
+
+  // Both branches: this platform's own, and cpSync's, which macOS takes only
+  // when the volume refuses a clone (forced here by claiming to be linux).
+  // Windows wants a privilege for a file link, and this is about the copy.
+  describe.skipIf(process.platform === 'win32')('through links', () => {
+    it.each(['this platform', 'cpSync'])('copies through them (%s), so no edit reaches a linked project', (branch) => {
+      const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
+      if (branch === 'cpSync') Object.defineProperty(process, 'platform', { value: 'linux' })
+      try {
+        const src = project()
+        const outside = join(root, 'outside-lyrics.json')
+        writeFileSync(outside, 'the lyrics as they are')
+        rmSync(join(src, 'lyrics.json'))
+        symlinkSync(outside, join(src, 'lyrics.json'))
+        const link = join(root, 'linked')
+        symlinkSync(src, link)
+        const dst = join(root, 'clone')
+        scratchClone(link, dst)
+        expect(lstatSync(dst).isSymbolicLink()).toBe(false)
+        expect(lstatSync(join(dst, 'lyrics.json')).isSymbolicLink()).toBe(false)
+        writeFileSync(join(dst, 'lyrics.json'), 'edited in the clone')
+        writeFileSync(join(dst, 'project.json'), 'edited in the clone')
+        expect(readFileSync(outside, 'utf8')).toBe('the lyrics as they are')
+        expect(readFileSync(join(src, 'project.json'), 'utf8')).toBe(JSON.stringify({ version: 2, name: 'Song' }))
+        rmSync(dst, { recursive: true, force: true })
+        expect(existsSync(join(src, 'project.json'))).toBe(true)
+      } finally {
+        Object.defineProperty(process, 'platform', platform)
+      }
+    })
   })
 })

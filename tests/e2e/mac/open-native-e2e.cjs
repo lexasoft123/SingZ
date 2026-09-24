@@ -115,8 +115,9 @@ const dspComplaints = (lines) =>
     )
 
     // ── The open ─────────────────────────────────────────────────────────
-    const t0 = Date.now()
-    await clickLibrarySong(win, songName)
+    // Timed from the click itself: the helper reads the library's files just
+    // before it clicks, and that is the harness's time, not the app's.
+    const t0 = await clickLibrarySong(win, songName)
     // A NODE poll, not waitForFunction: that helper polls on requestAnimationFrame,
     // which fires about once a second in the never-shown SINGZ_E2E_HIDDEN
     // window on the field laptop, so a 'loading' phase a few hundred

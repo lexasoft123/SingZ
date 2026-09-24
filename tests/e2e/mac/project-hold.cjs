@@ -32,8 +32,8 @@
  *
  * `putBack()` never throws — a finally that throws skips the restores still
  * owed — and runs once. When a run ends without reaching it (the watchdog's
- * deadline, a kill, an error nothing caught) an exit hook takes down the app
- * the run started and runs it then.
+ * deadline, a kill, an error nothing caught) an exit hook runs it, after
+ * taking down the app the run started where it can (see onExit).
  *
  * A helper, not a driver: it runs inside the driver that required it, under
  * that driver's watchdog.
@@ -316,11 +316,13 @@ function holdProjects(dirs, backups = []) {
     return problems
   }
   // The fallback, for a run that ends without reaching putBack: the
-  // watchdog's deadline or a signal (both kill the app first), or an error
-  // nothing caught, which leaves the app running. A put-back under a live app
-  // can be saved over, so the app this run started goes first — its direct
-  // children, the way the watchdog takes them. 'exit' listeners run
-  // synchronously, and so does all of this; it writes straight to stderr,
+  // watchdog's deadline, a signal, or an error nothing caught. A put-back
+  // under a live app can be saved over, so the app this run started goes
+  // first — its direct children, the way the watchdog takes them. That holds
+  // on macOS and Linux. Windows has no pkill: there the app goes down in
+  // Playwright's own exit handler, which launch registered after this one, so
+  // a save landing in between is unlikely but not ruled out. 'exit' listeners
+  // run synchronously, and so does all of this; it writes straight to stderr,
   // because a piped stdout may not flush.
   const onExit = () => {
     try {
@@ -346,21 +348,48 @@ function holdProjects(dirs, backups = []) {
  * whatever the driver has made of the project by then, put back afterwards or
  * not. On macOS an APFS clone (`cp -c`: instant, no space) with every time
  * kept to the nanosecond; elsewhere, or where the volume refuses a clone, a
- * copy that keeps them to well inside a millisecond. Either way the listen
- * cache, keyed on the vocals' size and mtime within 2 ms, still hits.
+ * copy that keeps them to the millisecond. Either way the listen cache, keyed
+ * on the vocals' size and mtime within 2 ms, still hits.
  */
 function scratchClone(src, dst) {
+  // The project itself, never a link to it: a linked folder copied as the link
+  // would put every edit back into the library. -L does the same for a link
+  // inside it, and so does cpSync's `dereference`, but only with a `filter`:
+  // without one Node copies the tree natively and remakes every link below the
+  // top as a link again.
+  const real = realpathSync(src)
   rmSync(dst, { recursive: true, force: true })
+  let copied = false
   if (process.platform === 'darwin') {
     try {
-      execFileSync('/bin/cp', ['-c', '-R', '-p', src, dst], { stdio: 'pipe' })
-      return dst
+      execFileSync('/bin/cp', ['-c', '-R', '-L', '-p', real, dst], { stdio: 'pipe' })
+      copied = true
     } catch {
       rmSync(dst, { recursive: true, force: true })
     }
   }
-  cpSync(src, dst, { recursive: true, preserveTimestamps: true })
+  if (!copied) {
+    cpSync(real, dst, { recursive: true, preserveTimestamps: true, dereference: true, filter: () => true })
+  }
+  // Whichever way it was copied, a link left in the clone is a way back into
+  // the library, so a clone holding one is never handed back.
+  const links = linksUnder(dst)
+  if (links.length) {
+    rmSync(dst, { recursive: true, force: true })
+    throw new Error(`the copy of ${src} kept a link (${links[0]}), and a write through it would reach the library`)
+  }
   return dst
+}
+
+/** Every link at or below `dir`. */
+function linksUnder(dir) {
+  const out = []
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name)
+    if (entry.isSymbolicLink()) out.push(path)
+    else if (entry.isDirectory()) out.push(...linksUnder(path))
+  }
+  return out
 }
 
 module.exports = { holdProjects, scratchClone, SLACK_NS }

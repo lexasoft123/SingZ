@@ -86,8 +86,9 @@ function table(title, rows, marks) {
     await win.waitForFunction(() => window.__test !== undefined, null, { timeout: 30000 })
 
     for (const [label, song, name] of opens) {
-      const t0 = Date.now()
-      await clickLibrarySong(win, name)
+      // from the click itself: the helper reads the library's files just
+      // before it clicks, and that is the harness's time, not the app's
+      const t0 = await clickLibrarySong(win, name)
       // Wait for the load to START before waiting for it to finish: on the
       // second open the previous song already satisfies "ready", so the wait
       // returned instantly and the table came back empty.
