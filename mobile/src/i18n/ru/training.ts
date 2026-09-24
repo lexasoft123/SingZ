@@ -184,6 +184,8 @@ export const training: Translation<typeof en> = {
   'phone.training.kit.percent': '{percent}%',
   'phone.training.kit.decreaseVolume': 'Сделать эталон тише',
   'phone.training.kit.increaseVolume': 'Сделать эталон громче',
+  'phone.training.kit.playing': 'Играет…',
+  'phone.training.kit.back': 'Назад',
   'phone.training.kit.flat': 'Ниже',
   'phone.training.kit.sharp': 'Выше',
   'phone.training.kit.youAreSinging': 'Вы поёте',

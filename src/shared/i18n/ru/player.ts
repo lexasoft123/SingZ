@@ -233,5 +233,14 @@ export const player: Translation<typeof en> = {
   'player.dspGraph.stateBlocked': 'Путь закрыт',
 
   // ── model.ts: fallback label for an added track with no name left after cleanup ──
-  'player.track.untitled': 'Трек'
+  'player.track.untitled': 'Трек',
+
+  // ── DSP graph card: format line and the transport badge (Settings › Audio) ──
+  'player.dspGraph.framesMaximum': 'макс. кадров: {n}',
+  'player.dspGraph.nodesLinks': 'узлов: {nodes} · связей: {links}',
+  'player.dspGraph.transport.stopped': 'остановлен',
+  'player.dspGraph.transport.pre-roll': 'отсчёт',
+  'player.dspGraph.transport.playing': 'играет',
+  'player.dspGraph.transport.paused': 'пауза',
+  'player.dspGraph.transport.completed': 'завершён'
 }

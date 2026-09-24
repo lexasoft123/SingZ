@@ -195,6 +195,8 @@ export const training = {
   'phone.training.kit.percent': '{percent} percent',
   'phone.training.kit.decreaseVolume': 'Decrease reference volume',
   'phone.training.kit.increaseVolume': 'Increase reference volume',
+  'phone.training.kit.playing': 'Playing…',
+  'phone.training.kit.back': 'Back',
   'phone.training.kit.flat': 'Flat',
   'phone.training.kit.sharp': 'Sharp',
   'phone.training.kit.youAreSinging': 'You are singing',
