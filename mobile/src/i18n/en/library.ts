@@ -302,6 +302,9 @@ export const library = {
     'Two songs in a row could not go up ({message}) — most likely the connection dropped. Try again once you are back online.',
   'phone.library.stoppedPartWay': 'Stopped part way',
   'phone.library.notAddedYet': 'Not added yet',
+  'phone.library.alreadyAdding': 'Already adding songs to Google Drive.',
+  'phone.library.sizeMb': '{n} MB',
+  'phone.library.sizeGb': '{n} GB',
   // {songs} = songsCount, {here} = hereIphone/herePhone; keep the leading blank line
   'phone.library.wentUpBeforeStopped': '\n\n{songs} went up before it stopped; the rest are still on {here}.',
   'phone.library.everythingStillOn': '\n\nEverything is still on {here}.',
