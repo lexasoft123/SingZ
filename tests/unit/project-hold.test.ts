@@ -12,7 +12,7 @@ import {
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 type Hold = { putBack(): string[] }
@@ -123,7 +123,11 @@ describe('holdProjects / putBack', () => {
     const moved = /extra\.json — added during the run, moved to (.+?extra\.json)/.exec(line)
     expect(moved).not.toBeNull()
     expect(readFileSync(moved![1], 'utf8')).toBe('made by the run')
-    rmSync(moved![1], { force: true })
+    // the put-back's own folder under the temp dir: <stamp>/<project>/<file>,
+    // and never wider, whatever that layout becomes
+    const stampDir = dirname(dirname(moved![1]))
+    expect(dirname(stampDir)).toBe(join(tmpdir(), 'singz-e2e-put-aside'))
+    rmSync(stampDir, { recursive: true, force: true })
   })
 
   it('names what it cannot put back — a stem, and a folder the run added — and leaves them', () => {
