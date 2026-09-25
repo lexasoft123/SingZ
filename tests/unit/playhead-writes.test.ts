@@ -2,83 +2,182 @@ import { describe, expect, it } from 'vitest'
 import { createPlayheadWriter, type PlayheadFrame } from '../../src/renderer/src/playhead-writes'
 
 /**
- * The player's playhead loop, frame by frame, without a DOM: the line must
- * follow every step, the played edge (the stack's --p, which re-clips six
- * filtered lanes) must follow a rolling song only on its clock — and must
- * never be left behind by anything the clock does not explain.
+ * The player's playhead loop, frame by frame, without a DOM: the line (and
+ * the lanes' edge layers, which take the same value) must follow every step;
+ * the played layer's clip (the stack's --p, which re-clips six filtered
+ * lanes) must catch up with a rolling song only once the sliver behind the
+ * line is wide enough AND enough time has passed — and must never be left
+ * behind by anything that is not the song simply rolling on.
  */
-const EVERY = 250
+const OPTS = { revealLagPx: 64, revealEveryMs: 250 }
 const FRAME = 1000 / 60
+const STEP = 0.01 // one device pixel, as a percentage of the lanes
 
+function frame(p: number, t: number, extra: Partial<PlayheadFrame> = {}): PlayheadFrame {
+  return { p: `${p.toFixed(4)}%`, playing: true, seeked: false, viewKey: 'v', stepPct: STEP, edgeLayer: true, now: t, ...extra }
+}
+
+/** Roll a song on: `px` device pixels every `every` frames, for `frames` frames. */
 function roll(
   write: ReturnType<typeof createPlayheadWriter>,
   frames: number,
   start: { t: number; p: number },
+  px: number,
+  every = 1,
   extra: Partial<PlayheadFrame> = {}
-): { lines: number; reveals: string[]; t: number; p: number } {
+): { lines: number; reveals: number[]; widest: number; t: number; p: number } {
   let { t, p } = start
   let lines = 0
-  const reveals: string[] = []
-  for (let i = 0; i < frames; i++) {
+  const reveals: number[] = []
+  let reveal = p
+  let widest = 0
+  for (let i = 1; i <= frames; i++) {
     t += FRAME
-    p += 0.01 // a new device pixel every frame: the deep-zoom worst case
-    const w = write({ p: `${p.toFixed(4)}%`, playing: true, seeked: false, viewKey: 'v', now: t, ...extra })
+    if (i % every === 0) p += px * STEP
+    const w = write(frame(p, t, extra))
     if (w.line !== null) lines++
-    if (w.reveal !== null) reveals.push(w.reveal)
+    if (w.reveal !== null) {
+      reveal = Number.parseFloat(w.reveal)
+      reveals.push(reveal)
+    }
+    widest = Math.max(widest, p - reveal)
   }
-  return { lines, reveals, t, p }
+  return { lines, reveals, widest, t, p }
 }
 
 describe('playhead writes', () => {
-  it('moves the line every step and the played edge at most every interval while a song rolls', () => {
-    const write = createPlayheadWriter(EVERY)
-    write({ p: '0.0000%', playing: true, seeked: false, viewKey: 'v', now: 0 })
-    const r = roll(write, 120, { t: 0, p: 0 }) // two seconds at 60 fps
+  it('writes the line and the played layer on the first frame', () => {
+    const write = createPlayheadWriter(OPTS)
+    // ...and hides the edge layers: the first view is a view change too, and
+    // there is no sliver until the line moves
+    expect(write(frame(12, 0))).toEqual({ line: '12.0000%', reveal: '12.0000%', edges: false })
+  })
+
+  it('moves the line every step and the played layer only every so often in a deep zoom', () => {
+    const write = createPlayheadWriter(OPTS)
+    write(frame(0, 0))
+    // eight device pixels a frame: the sliver is 64 px wide after eight
+    // frames, so the interval is what holds the played layer back
+    const r = roll(write, 120, { t: 0, p: 0 }, 8) // two seconds at 60 fps
     expect(r.lines).toBe(120)
-    // 2000 ms / 250 ms: eight edge moves, not 120
+    // 2000 ms / 250 ms: eight catch-ups, not 120
     expect(r.reveals.length).toBeGreaterThanOrEqual(7)
     expect(r.reveals.length).toBeLessThanOrEqual(8)
   })
 
+  it('leaves the played layer alone while a slow song moves a pixel at a time', () => {
+    const write = createPlayheadWriter(OPTS)
+    write(frame(0, 0))
+    // the whole-song view: a device pixel every six frames (10 px/s). The old
+    // clock re-clipped every lane four times a second for one pixel each time.
+    const r = roll(write, 600, { t: 0, p: 0 }, 1, 6) // ten seconds
+    expect(r.lines).toBe(100)
+    // 100 px in ten seconds: one catch-up, at the 64th pixel
+    expect(r.reveals.length).toBe(1)
+    expect(r.reveals[0]).toBeCloseTo(64 * STEP, 6)
+  })
+
+  it('falls back to catching up on the interval alone when the lanes have no edge layer', () => {
+    // a kit before 1.9.0 draws no sliver, so nothing may be left for it: the
+    // slow song that got one catch-up in ten seconds above gets the old clock
+    const write = createPlayheadWriter(OPTS)
+    write(frame(0, 0, { edgeLayer: false }))
+    const r = roll(write, 600, { t: 0, p: 0 }, 1, 6, { edgeLayer: false })
+    expect(r.reveals.length).toBeGreaterThanOrEqual(33) // one per changed pixel, no closer than 250 ms
+    expect(r.widest).toBeLessThanOrEqual((Math.ceil(OPTS.revealEveryMs / FRAME / 6) + 1) * STEP + 1e-9)
+  })
+
+  it('never lets the sliver outgrow the lag or one interval of travel, whichever is wider', () => {
+    for (const [px, every] of [
+      [1, 6],
+      [1, 1],
+      [3, 1],
+      [8, 1],
+      [20, 1]
+    ] as const) {
+      const write = createPlayheadWriter(OPTS)
+      write(frame(0, 0))
+      const r = roll(write, 600, { t: 0, p: 0 }, px, every)
+      const perInterval = Math.ceil(OPTS.revealEveryMs / FRAME / every) * px
+      const bound = (Math.max(OPTS.revealLagPx, perInterval) + px) * STEP
+      expect(r.widest, `${px} px every ${every} frame(s)`).toBeLessThanOrEqual(bound + 1e-9)
+    }
+  })
+
   it('writes nothing for a frame whose position has not changed', () => {
-    const write = createPlayheadWriter(EVERY)
-    write({ p: '12.0000%', playing: false, seeked: false, viewKey: 'v', now: 0 })
-    const w = write({ p: '12.0000%', playing: false, seeked: false, viewKey: 'v', now: 1000 })
-    expect(w).toEqual({ line: null, reveal: null })
+    const write = createPlayheadWriter(OPTS)
+    write(frame(12, 0, { playing: false }))
+    expect(write(frame(12, 1000, { playing: false }))).toEqual({ line: null, reveal: null, edges: null })
   })
 
-  it('snaps the played edge to the line the moment the song stops', () => {
-    const write = createPlayheadWriter(EVERY)
-    write({ p: '0.0000%', playing: true, seeked: false, viewKey: 'v', now: 0 })
-    const r = roll(write, 10, { t: 0, p: 0 }) // inside one interval: the edge trails
-    const stopped = write({ p: '0.1000%', playing: false, seeked: false, viewKey: 'v', now: r.t + FRAME })
-    expect(stopped.reveal).toBe('0.1000%')
+  it('snaps the played layer to the line the moment the song stops', () => {
+    const write = createPlayheadWriter(OPTS)
+    write(frame(0, 0))
+    const r = roll(write, 10, { t: 0, p: 0 }, 1) // a sliver of ten pixels
+    expect(r.reveals).toEqual([])
+    const stopped = write(frame(r.p, r.t + FRAME, { playing: false }))
+    expect(stopped.reveal).toBe(`${r.p.toFixed(4)}%`)
   })
 
-  it('snaps the played edge on a seek, however recently it moved', () => {
-    const write = createPlayheadWriter(EVERY)
-    write({ p: '10.0000%', playing: true, seeked: false, viewKey: 'v', now: 0 })
-    const w = write({ p: '55.0000%', playing: true, seeked: true, viewKey: 'v', now: FRAME })
-    expect(w).toEqual({ line: '55.0000%', reveal: '55.0000%' })
+  it('snaps the played layer on a seek, however recently it moved', () => {
+    const write = createPlayheadWriter(OPTS)
+    write(frame(10, 0))
+    expect(write(frame(55, FRAME, { seeked: true }))).toEqual({ line: '55.0000%', reveal: '55.0000%', edges: null })
+    expect(write(frame(20, 2 * FRAME, { seeked: true }))).toEqual({ line: '20.0000%', reveal: '20.0000%', edges: null })
   })
 
-  it('snaps the played edge when the view is remapped (zoom, pan, resize)', () => {
-    const write = createPlayheadWriter(EVERY)
-    write({ p: '10.0000%', playing: true, seeked: false, viewKey: 'whole', now: 0 })
-    const w = write({ p: '40.0000%', playing: true, seeked: false, viewKey: 'zoomed', now: FRAME })
-    expect(w.reveal).toBe('40.0000%')
-    // and then settles back onto its clock in the new view
-    const next = write({ p: '40.0100%', playing: true, seeked: false, viewKey: 'zoomed', now: 2 * FRAME })
-    expect(next).toEqual({ line: '40.0100%', reveal: null })
+  it('snaps the played layer when the line goes behind it, seek or not', () => {
+    // a loop's wrap or a clamp at the view's edge: the edge layer shows
+    // nothing where the line is behind the clip, so the played layer itself
+    // must come back, or it would show played audio ahead of the playhead
+    const write = createPlayheadWriter(OPTS)
+    write(frame(30, 0))
+    expect(write(frame(29.5, FRAME)).reveal).toBe('29.5000%')
   })
 
-  it('never lets the edge trail a rolling line by more than one interval', () => {
-    const write = createPlayheadWriter(EVERY)
-    write({ p: '0.0000%', playing: true, seeked: false, viewKey: 'v', now: 0 })
-    const r = roll(write, 60, { t: 0, p: 0 })
-    // the last edge written is never more than one interval behind the line
-    const last = r.reveals[r.reveals.length - 1]
-    const behind = r.p - Number.parseFloat(last)
-    expect(behind).toBeLessThanOrEqual((EVERY / FRAME) * 0.01 + 1e-9)
+  it('snaps the played layer when the view is remapped (zoom, pan, resize)', () => {
+    const write = createPlayheadWriter(OPTS)
+    write(frame(10, 0, { viewKey: 'whole' }))
+    expect(write(frame(40, FRAME, { viewKey: 'zoomed' })).reveal).toBe('40.0000%')
+    // and then goes back to catching up in the new view, the edge layers back
+    // with the first sliver
+    expect(write(frame(40.01, 2 * FRAME, { viewKey: 'zoomed' }))).toEqual({ line: '40.0100%', reveal: null, edges: true })
+  })
+
+  it('hides the edge layers while the view moves and shows them once it holds and the line moves on', () => {
+    // a follow-pan of a zoomed view: every frame a new view, every lane
+    // redrawn — and each showing edge layer one more filtered layer to redo
+    const write = createPlayheadWriter(OPTS)
+    write(frame(0, 0))
+    const r = roll(write, 10, { t: 0, p: 0 }, 1) // rolling: the edges are showing
+    let t = r.t
+    const pan = [80, 70, 60, 50].map((p, i) => write(frame(p, (t += FRAME), { viewKey: `pan${i}` })))
+    expect(pan.map((w) => w.edges)).toEqual([false, null, null, null])
+    expect(pan.every((w) => w.reveal !== null)).toBe(true) // the played layer snaps with every step
+    // the view holds: nothing to show until the line moves past the played layer
+    expect(write(frame(50, (t += FRAME), { viewKey: 'pan3' })).edges).toBe(null)
+    expect(write(frame(50.01, (t += FRAME), { viewKey: 'pan3' })).edges).toBe(true)
+    // and they stay shown while the song rolls on in that view, catch-ups and all
+    const rolled = Array.from({ length: 60 }, (_, i) => write(frame(50.01 + (i + 1) * 3 * STEP, (t += FRAME), { viewKey: 'pan3' })))
+    expect(rolled.some((w) => w.reveal !== null)).toBe(true)
+    expect(rolled.every((w) => w.edges === null)).toBe(true)
+  })
+
+  it('keeps the edge layers hidden after a view change while paused', () => {
+    const write = createPlayheadWriter(OPTS)
+    write(frame(10, 0, { playing: false }))
+    write(frame(10, FRAME, { playing: false })) // held, no sliver: still hidden
+    expect(write(frame(30, 2 * FRAME, { playing: false, viewKey: 'zoomed' })).edges).toBe(null)
+    expect(write(frame(30, 3 * FRAME, { playing: false, viewKey: 'zoomed' })).edges).toBe(null)
+  })
+
+  it('remembers a view change that left the line where it was', () => {
+    // a zoom anchored on the playhead keeps its percentage: nothing to write,
+    // but the played layer stands in the new view now, so the next step of a
+    // rolling song is a sliver to draw, not a view change to snap for
+    const write = createPlayheadWriter(OPTS)
+    write(frame(25, 0, { viewKey: 'whole' }))
+    expect(write(frame(25, FRAME, { viewKey: 'zoomed' })).reveal).toBe(null)
+    expect(write(frame(25.01, 2 * FRAME, { viewKey: 'zoomed' })).reveal).toBe(null)
   })
 })

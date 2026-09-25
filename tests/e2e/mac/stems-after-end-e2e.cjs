@@ -61,7 +61,8 @@ const watchdog = require('../../shared/watchdog.cjs').arm('stems-after-end-e2e')
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
 const { assertOpenedProject, clickLibrarySong, libraryName } = require('./library-song.cjs')
-const { closeSync, existsSync, openSync, readFileSync, readSync, writeFileSync } = require('node:fs')
+const { holdProjects } = require('./project-hold.cjs')
+const { closeSync, existsSync, openSync, readSync } = require('node:fs')
 const { join } = require('node:path')
 const { homedir } = require('node:os')
 
@@ -232,9 +233,11 @@ async function scrubBackFromEnd(win, duration, firstGeneration, jumpFrom, fail, 
 
 ;(async () => {
   if (!existsSync(SONG_PJ)) throw new Error(`no project at ${SONG_PJ} — set E2E_SONG`)
-  // Every project.json this run may touch, as found: the song's own, and any
-  // project that opened instead of it (assertOpenedProject adds that one).
-  const backups = [[SONG_PJ, readFileSync(SONG_PJ, 'utf8')]]
+  // Every file this run may touch, as found — bytes AND times: the song's
+  // own, held before the app can write them, and any project that opened
+  // instead of it (assertOpenedProject adds that one's).
+  const backups = []
+  const held = holdProjects([SONG_DIR], backups)
   const songName = libraryName(SONG_DIR)
   const fail = []
   const inconclusive = []
@@ -366,12 +369,7 @@ async function scrubBackFromEnd(win, duration, firstGeneration, jumpFrom, fail, 
     await app.close().catch(() => {})
     // A project in the singer's own library: put back exactly what was found,
     // and leave an untouched file alone.
-    for (const [path, text] of backups) {
-      if (readFileSync(path, 'utf8') !== text) {
-        console.log(`${path} was rewritten during the run; restoring it`)
-        writeFileSync(path, text)
-      }
-    }
+    for (const problem of held.putBack()) fail.push(`library not left as found: ${problem}`)
   }
 
   if (fail.length) {
