@@ -2419,11 +2419,16 @@ describe('desktop native playback facade', () => {
    *  facade's. Commands take effect the moment they are sent (a seek
    *  `seekDelayMs` later, when set); the core's own edges (a count-in's
    *  landing, a loop's wrap) at the times queued in `dues`; and a seam lands
-   *  at the first read of the generation it prepared. */
-  const continuousCore = (latency: number, rate = 1) => {
+   *  at the first read of the generation it prepared. With `quantum` set, the
+   *  core publishes its status once a callback of that many output frames, as
+   *  the real one does, and a read between two callbacks sees the last one. */
+  const continuousCore = (latency: number, rate = 1, quantum = 0) => {
     type State = DesktopPlaybackStatus['transportState']
     const perMs = 48 * rate
     const lag = Math.round(latency * rate)
+    const born = Date.now()
+    const publishedAt = (): number =>
+      quantum > 0 ? born + (Math.floor(((Date.now() - born) * 48) / quantum) * quantum) / 48 : Date.now()
     const core = {
       state: 'stopped' as State,
       frame: 0,
@@ -2435,16 +2440,16 @@ describe('desktop native playback facade', () => {
       dues: [] as Array<{ at: number; state: State; frame: number; lap: boolean; seek?: boolean }>
     }
     const moving = (): boolean => core.state === 'playing' || core.state === 'pre-roll'
-    const head = (): number => core.frame + (moving() ? (Date.now() - core.at) * perMs : 0)
+    const head = (at = Date.now()): number => core.frame + (moving() ? Math.max(0, at - core.at) * perMs : 0)
     const edge = (state: State, frame: number, at = Date.now()): void => {
       core.state = state
       core.frame = frame
       core.at = at
     }
     // The core's own edges happen in the core's time, read or not.
-    const settle = (): void => {
+    const settle = (now = Date.now()): void => {
       core.dues.sort((a, b) => a.at - b.at)
-      while (core.dues.length > 0 && core.dues[0].at <= Date.now()) {
+      while (core.dues.length > 0 && core.dues[0].at <= now) {
         const due = core.dues.shift()!
         if (due.seek) core.seekCount++
         edge(due.state, due.frame, due.at)
@@ -2453,16 +2458,18 @@ describe('desktop native playback facade', () => {
     }
     let transportGeneration = '1'
     const h = seamHarness((generation) => {
-      settle()
-      // A seam hands the clock across mid-song: the head carries on, and the
-      // projection starts over from the landing.
+      const now = publishedAt()
+      settle(now)
+      // A seam hands the clock across mid-song, at a callback: the head
+      // carries on, and the projection starts over from the landing.
       if (generation !== transportGeneration) {
         transportGeneration = generation
-        edge(core.state, head())
+        const at = Math.max(now, core.at)
+        edge(core.state, head(at), at)
       }
-      const rendered = head()
+      const rendered = Math.round(head(now))
       // A latency of OUTPUT frames after the edge, whatever the rate.
-      const matured = (Date.now() - core.at) * 48 >= latency
+      const matured = Math.round((now - core.at) * 48) >= latency
       return playing(generation, {
         transportState: core.state,
         renderedProjectFrame: String(rendered),
@@ -2661,6 +2668,191 @@ describe('desktop native playback facade', () => {
     await c.h.client.unload()
   })
 
+  it('a status up to a callback stale never folds the bar back into a loop lap it has shown, nor past the lap its run began in', async () => {
+    // The core publishes its status once a callback, so a read between two
+    // callbacks is up to a callback stale, and each status the bar switches
+    // to can move it by up to a callback either way. Right after a wrap the
+    // projection has not matured and the head less the latency stands in for
+    // the ear. When the status before had already wrapped the bar with the
+    // ear, a staler stand-in landed a hair short of the loop's start and was
+    // folded into the lap the head had left: the loop's start, its tail, then
+    // its start again, two whole-loop jumps. Measured on the Mac's plain
+    // route in 6 of ~190 wraps of a short loop. And a loop shorter than the
+    // latency (the app allows 0.05 s) folded the stand-in back past the lap
+    // the run began in, so after Play the bar ran through the loop before the
+    // first note had reached the ear.
+    // 512-frame callbacks (the Mac's route) and a read every 47 ms, which
+    // lines up with neither the callbacks nor the loop, so the laps meet every
+    // phase of both. The bar is sampled every millisecond: never ahead of the
+    // ear and never more than a callback behind it, one wrap for each of the
+    // ear's, and no step back of more than a callback in between.
+    const quantum = 512
+    const A = 70 * 48_000
+    const route = async (label: string, latency: number, span: number, laps: number): Promise<void> => {
+      vi.setSystemTime(new Date('2026-09-25T12:00:00Z'))
+      const c = continuousCore(latency, 1, quantum)
+      const B = A + span
+      const from = A + span / 2
+      c.core.frame = from
+      c.core.loop = { start: A, end: B }
+      expect(await c.h.client.prepareAndStart({ ...countInRequest(from / 48_000), countIn: false })).toBe(true)
+      c.stopPolling()
+      const played = Date.now()
+      // The head reaches B half a lap after Play, then wraps every lap.
+      const lapMs = span / 48
+      for (let k = 0; k < laps; k++) {
+        c.core.dues.push({ at: played + lapMs / 2 + k * lapMs, state: 'playing', frame: A, lap: true })
+      }
+      const ear = (t: number): number => {
+        const frame = from + (t - played) * 48 - latency
+        if (frame < from) return from
+        return frame >= B ? A + ((frame - A) % span) : frame
+      }
+      const refresh = () => (c.h.client as unknown as { refresh: (g: string) => Promise<void> }).refresh(c.h.generationNow())
+      const misses: string[] = []
+      let before: number | null = null
+      let heardBefore: number | null = null
+      let wraps = 0
+      let earWraps = 0
+      // Reads whose stand-in, folded as it used to be, lands in a lap before
+      // one the bar has shown: the reads this is about, counted so that a
+      // sweep that never meets one fails rather than passes.
+      let crossings = 0
+      for (let t = 0; t <= laps * lapMs; t++) {
+        if (t % 47 === 0) {
+          await refresh()
+          const status = c.h.client.status!
+          const standIn = Number(status.renderedProjectFrame) - latency
+          if (status.audibleProjectionQuality !== 'current' && standIn < A &&
+              Number(status.loopCount) - Math.ceil((A - standIn) / span) < wraps) crossings++
+        }
+        const bar = c.h.client.audibleSeconds()! * 48_000
+        const heard = ear(Date.now())
+        let behind = heard - bar
+        if (behind < -span / 2) behind += span
+        if (behind > span / 2) behind -= span
+        if (behind < -1e-6 || behind > quantum + 1e-6 || bar < A - 1e-6 || bar >= B) {
+          misses.push(`${label}, ${t} ms after Play: the bar ${(bar - A).toFixed(0)} frames into the loop, the ear ${(heard - A).toFixed(0)}`)
+        }
+        if (before !== null) {
+          const step = bar - before
+          if (step > span / 2) {
+            misses.push(`${label}, ${t} ms after Play: a whole loop forward, ${(before - A).toFixed(0)} to ${(bar - A).toFixed(0)} frames into it`)
+          } else if (step < -span / 2) {
+            wraps++
+          } else if (step < -quantum - 1e-6) {
+            misses.push(`${label}, ${t} ms after Play: ${(-step).toFixed(0)} frames back`)
+          }
+        }
+        if (heardBefore !== null && heard - heardBefore < -span / 2) earWraps++
+        before = bar
+        heardBefore = heard
+        vi.advanceTimersByTime(1)
+      }
+      expect(misses.slice(0, 6), `${label}: ${misses.length} samples wrong`).toEqual([])
+      expect(wraps, `${label}: the bar wrapped ${wraps} times for the ear's ${earWraps}`).toBe(earWraps)
+      expect(crossings, `${label}: no read crossed back into a lap the bar had shown`).toBeGreaterThan(0)
+      await c.h.client.unload()
+    }
+    await route('a plain route', 540, 12_960, 60)
+    await route('a transposed song', 7_260, 12_960, 60)
+    await route('a loop shorter than the latency', 9_600, 7_200, 60)
+  })
+
+  it('a seam that lands a callback after a loop wrap keeps the lap the bar has shown', async () => {
+    // The core hands the clock and the lap count across a seam, so the laps
+    // the bar has shown go across with the run. Forgotten, a seam landing at
+    // the callback after a wrap drew the loop's tail again: its first status
+    // stands in for the ear from a head read before the ear wrapped.
+    vi.setSystemTime(new Date('2026-09-25T12:00:00Z'))
+    const c = continuousCore(540, 1, 512)
+    const A = 70 * 48_000
+    const span = 12_960
+    const B = A + span
+    const from = A + span / 2
+    c.core.frame = from
+    c.core.loop = { start: A, end: B }
+    expect(await c.h.client.prepareAndStart({ ...countInRequest(from / 48_000), countIn: false })).toBe(true)
+    c.stopPolling()
+    const played = Date.now()
+    // Callbacks every 10.67 ms from Play; the head wraps at 135 ms, between
+    // the ones at 128 and 138.67, and the ear 11.25 ms later, at 146.25.
+    c.core.dues.push({ at: played + 135, state: 'playing', frame: A, lap: true })
+    const refresh = () => (c.h.client as unknown as { refresh: (g: string) => Promise<void> }).refresh(c.h.generationNow())
+    const ear = (t: number): number => {
+      const frame = from + (t - played) * 48 - 540
+      return frame >= B ? A + (frame - B) : Math.max(from, frame)
+    }
+    const misses: string[] = []
+    let before: number | null = null
+    const look = (): number => {
+      const bar = c.h.client.audibleSeconds()! * 48_000
+      let behind = ear(Date.now()) - bar
+      if (behind < -span / 2) behind += span
+      if (behind < -1e-6 || behind > 512 + 1e-6) misses.push(`${Date.now() - played} ms after Play: the bar ${(bar - A).toFixed(0)} frames into the loop`)
+      if (before !== null && bar - before > span / 2) misses.push(`${Date.now() - played} ms after Play: a whole loop forward`)
+      before = bar
+      return bar
+    }
+    // A matured status read at the callback, 128 ms after Play: its
+    // projection wraps the bar with the ear.
+    vi.advanceTimersByTime(128)
+    await refresh()
+    expect(c.h.client.status?.audibleProjectionQuality).toBe('current')
+    let bar = 0
+    while (Date.now() - played < 147) {
+      bar = look()
+      vi.advanceTimersByTime(1)
+    }
+    bar = look()
+    expect(bar).toBeGreaterThanOrEqual(A)
+    expect(bar).toBeLessThan(A + 512)
+    // The seam lands at the callback of 138.67 ms, with the head 176 frames
+    // into the new lap and the ear 364 short of it by that callback's clock.
+    await c.h.client.reconfigure({ metronome: { ...countInRequest(60).metronome, click: true } })
+    expect(c.h.client.status?.transportGeneration).toBe('2')
+    for (let t = 0; t < 60; t++) {
+      if (t % 10 === 0) await refresh()
+      look()
+      vi.advanceTimersByTime(1)
+    }
+    expect(misses.slice(0, 6), `${misses.length} samples wrong`).toEqual([])
+    await c.h.client.unload()
+  })
+
+  it('in a loop shorter than the latency a seek holds the bar on its target until the ear gets there, even when the head wraps before the bar is next drawn', async () => {
+    // The head of a 0.15 s loop on a 200 ms route is more than a lap ahead of
+    // the ear. Taken 1 ms short of the loop's end, the seek has the head wrap
+    // before the bar is drawn again, and the stand-in, two laps back from the
+    // head's, belongs to a lap before the run's own, where no floor holds:
+    // the bar showed a spot the ear had not reached.
+    vi.setSystemTime(new Date('2026-09-25T12:00:00Z'))
+    const c = continuousCore(9600)
+    const A = 70 * 48_000
+    const span = 7_200
+    const B = A + span
+    c.core.frame = A + 3_600
+    c.core.loop = { start: A, end: B }
+    expect(await c.h.client.prepareAndStart({ ...countInRequest((A + 3_600) / 48_000), countIn: false })).toBe(true)
+    c.stopPolling()
+    vi.advanceTimersByTime(30)
+    const target = B - 48
+    await c.h.client.seek(target / 48_000)
+    const seeked = Date.now()
+    for (let k = 0; k < 4; k++) c.core.dues.push({ at: seeked + 1 + k * 150, state: 'playing', frame: A, lap: true })
+    vi.advanceTimersByTime(5)
+    await (c.h.client as unknown as { refresh: (g: string) => Promise<void> }).refresh(c.h.generationNow())
+    expect(c.h.client.status?.loopCount).toBe('1')
+    expect(c.h.client.audibleSeconds()).toBe(target / 48_000)
+    const ear = (dt: number): number => {
+      const frame = target + (dt + 5) * 48 - 9600
+      return frame < target ? target : frame >= B ? A + ((frame - A) % span) : frame
+    }
+    await c.follow('the seek and the laps after it', 400, ear)
+    c.verdict()
+    await c.h.client.unload()
+  })
+
   it('a seek right after a wrap the facade never read takes the lap the core took it in', async () => {
     // A song looping between two polls wraps with no status to say so, and
     // `seek()` used to take the run's lap from the last poll: a whole wrap
@@ -2747,6 +2939,44 @@ describe('desktop native playback facade', () => {
     await c.follow('a seek the core never took, then a lap', 1900 - (seeked - started),
       () => (Date.now() - seeked < PENDING_SEEK_MAX_MS ? target : lap(Date.now())))
     c.verdict()
+    await c.h.client.unload()
+  })
+
+  it('a seek while the song plays is watched every edge period until its receipt, so the bar leaves the target with the ear instead of a steady poll later', async () => {
+    // seek() read one status back and left the next look to the poll already
+    // armed: a steady 200 ms one while a song simply plays. The read-back
+    // lands before the callback takes the seek, so the bar held the target
+    // until that poll while the song played on from it, then jumped forward:
+    // holds of 30-185 ms and forward steps of 50-170 ms, measured on the Mac.
+    // The poller runs here, as it does in the app; the core takes the seek
+    // at its next callback, 4 ms after it arrives.
+    vi.setSystemTime(new Date('2026-09-25T12:00:00Z'))
+    const c = continuousCore(540)
+    c.core.frame = 60 * 48_000
+    expect(await c.h.client.prepareAndStart({ ...countInRequest(60), countIn: false })).toBe(true)
+    const reads = (): number => (c.h.api.desktopPlaybackStatus as unknown as ReturnType<typeof vi.fn>).mock.calls.length
+    // Past the burst, into the steady cadence, and 20 ms after a steady poll.
+    await vi.advanceTimersByTimeAsync(POLL_BURST_MS + 600)
+    const steady = reads()
+    while (reads() === steady) await vi.advanceTimersByTimeAsync(1)
+    await vi.advanceTimersByTimeAsync(20)
+    c.core.seekDelayMs = 4
+    const target = 70 * 48_000
+    await c.h.client.seek(70)
+    const seeked = Date.now()
+    const atSeek = reads()
+    const misses: string[] = []
+    for (let t = 0; t <= 300; t++) {
+      const bar = c.h.client.audibleSeconds()!
+      const ear = Math.max(target, target + (Date.now() - seeked - 4) * 48 - 540) / 48_000
+      if (Math.abs(bar - ear) > 1e-9) misses.push(`${t} ms after the seek: the bar at ${bar.toFixed(6)} s, the ear at ${ear.toFixed(6)} s`)
+      await vi.advanceTimersByTimeAsync(1)
+    }
+    expect(misses.slice(0, 6), `${misses.length} of 301 samples away from the ear`).toEqual([])
+    // And the edge cadence ends with the projection's maturity: two edge
+    // looks, then the burst, not 10 ms reads for the whole POLL_EDGE_MAX_MS.
+    expect(reads() - atSeek).toBeLessThanOrEqual(10)
+    ;(c.h.client as unknown as { stopPolling: () => void }).stopPolling()
     await c.h.client.unload()
   })
 
