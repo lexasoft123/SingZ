@@ -39,7 +39,13 @@
  *      4-decimal percentage rounds a hair either way depending on the column,
  *      so a single position is a coin flip. The OLD behaviour, the clip
  *      behind and nothing covering it, must differ, so the leg can see an
- *      edge at all.
+ *      edge at all;
+ *   5. the shadow, paused: the same pixels rendered all played and all
+ *      unplayed must differ by a real step. The kit's own is ~16%, and it
+ *      read as no shadow at all once the edge sat on the line — the band the
+ *      lag left behind the playhead had been the only place anyone saw it
+ *      ("stem shadows missing at all", 2026-09-25) — so styles.css takes the
+ *      resting layer down to 65%, and this holds it under 75%.
  *
  * Hidden window by default (rAF runs at full rate here). On the Windows field
  * laptop a hidden window paints about once a second, which starves legs 1-3,
@@ -55,7 +61,8 @@ require('../../shared/watchdog.cjs').arm('played-edge-e2e')
 
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
-const { cpSync, existsSync, readdirSync, rmSync, constants } = require('node:fs')
+const { existsSync, readdirSync, rmSync } = require('node:fs')
+const { scratchClone } = require('./project-hold.cjs')
 const { join } = require('node:path')
 const { homedir, tmpdir } = require('node:os')
 
@@ -174,10 +181,10 @@ function judge(label, rows, { pans: wantPans = false } = {}) {
     console.log(`INCONCLUSIVE: no project "${SONG}" under ${ROOT} — set E2E_SONG`)
     process.exit(2)
   }
-  rmSync(SCRATCH, { recursive: true, force: true })
-  // a clone where the filesystem can make one (APFS), a copy elsewhere: the
-  // open auto-saves analysis into the project, and the singer's is not ours
-  cpSync(src, SCRATCH, { recursive: true, mode: constants.COPYFILE_FICLONE })
+  // a clone where the filesystem can make one (APFS), a copy elsewhere, with
+  // every time kept and links followed: the open auto-saves analysis into the
+  // project, and the singer's is not ours
+  scratchClone(src, SCRATCH)
   const songFile = readdirSync(SCRATCH).find((f) => /^song\.(mp3|flac|wav|m4a|ogg|opus)$/i.test(f))
   if (!songFile) throw new Error(`no song.* in the copy of ${SONG}`)
 
@@ -356,6 +363,34 @@ function judge(label, rows, { pans: wantPans = false } = {}) {
     await sleep(300)
     const lagging = maxDiff(reference, await capture())
     rule(lagging >= 16, `the old lagging edge is visible to this check (${lagging}/255)`)
+
+    // 5. the shadow: what the playhead has not reached sits visibly darker
+    // than what it has passed. The same pixels, all played and then all
+    // unplayed, so no difference in the audio either side of a line can pass
+    // for a shadow or hide one. Channel sums, so the bitmap's byte order does
+    // not matter; a pixel counts where the played render lights it well
+    // above the ground.
+    await set('100%', '100%')
+    await sleep(300)
+    const allPlayed = Buffer.from(await capture(), 'base64')
+    await set('0%', '0%')
+    await sleep(300)
+    const allUnplayed = Buffer.from(await capture(), 'base64')
+    let lit = 0
+    let sumPlayed = 0
+    let sumUnplayed = 0
+    for (let i = 0; i + 3 < allPlayed.length && allPlayed.length === allUnplayed.length; i += 4) {
+      const p = allPlayed[i] + allPlayed[i + 1] + allPlayed[i + 2]
+      if (p < 180) continue
+      lit++
+      sumPlayed += p
+      sumUnplayed += allUnplayed[i] + allUnplayed[i + 1] + allUnplayed[i + 2]
+    }
+    const shade = lit ? sumUnplayed / sumPlayed : 1
+    rule(
+      lit >= 1000 && shade <= 0.75,
+      `what is not yet played sits in shadow (${shade.toFixed(2)} of the played brightness over ${lit} lit pixels; the kit's own step alone measures 0.84)`
+    )
     await set(L, L)
   } finally {
     await app.close().catch(() => {})

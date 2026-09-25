@@ -34,13 +34,14 @@
  *    with no exit).
  *
  * On expiry it says WHICH deadline went, how long the run had been going and
- * what the last line was, kills its own direct children, and exits 1. The
- * children matter: an Electron launched by a driver does NOT die with
- * `process.exit`, and a hidden one sitting on the singer's Mac for an hour is
- * how a killed run keeps costing something (one was found at 66 minutes the
- * day this was written). Only direct children, so nothing outside the run is
- * touched. A driver with more to close than that passes `onTimeout`; the
- * callback gets five seconds before the exit happens anyway.
+ * what the last line was, kills its own direct children (on Windows, each
+ * with its tree), and exits 1. The children matter: an Electron launched by
+ * a driver does NOT die with `process.exit`, and a hidden one sitting on the
+ * singer's Mac for an hour is how a killed run keeps costing something (one
+ * was found at 66 minutes the day this was written). Only what the run
+ * started, so nothing outside the run is touched (kill-children.cjs says how
+ * Windows tells the two apart). A driver with more to close than that passes
+ * `onTimeout`; the callback gets five seconds before the exit happens anyway.
  *
  * Killing a run by hand prints the same diagnosis, which is the cheapest way
  * to learn where a driver was stuck.
@@ -53,18 +54,13 @@
 const DEFAULT_TOTAL_MINUTES = 60
 const DEFAULT_IDLE_MINUTES = 10
 
-/** The apps this run started, and nothing else: `pkill -P` takes only direct
- *  children. Best effort — no device, no platform and no permission is
- *  assumed, and a failure here must never mask the timeout being reported. */
+/** The apps this run started, and nothing else: its direct children
+ *  (kill-children.cjs — pkill on macOS and Linux; CIM on Windows, and taskkill
+ *  with each child's tree). Best effort — no device, no platform and no
+ *  permission is assumed, and a failure here must never mask the timeout
+ *  being reported. */
 function defaultKillChildren() {
-  try {
-    require('node:child_process').execFileSync('pkill', ['-9', '-P', String(process.pid)], {
-      stdio: 'ignore',
-      timeout: 5000
-    })
-  } catch {
-    // No children, no pkill, or it refused: the exit below still happens.
-  }
+  require('./kill-children.cjs').killChildren(process.pid)
 }
 
 /** A positive multiplier from the environment, else 1. */

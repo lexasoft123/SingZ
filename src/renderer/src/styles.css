@@ -632,6 +632,22 @@ button.chip-status:hover {
   }
 }
 
+/* What the playhead has not reached yet sits in shadow, and it lifts as the
+   line passes: that step is how a singer sees where they are across six
+   lanes at a glance. The kit keeps its resting layer at full colour and lets
+   the played one be a touch brighter — about a 16% step once the two stack —
+   which read as a shadow only while the played edge trailed the line and
+   left a band of it showing behind the playhead. With the edge on the line
+   the same step read as no shadow at all ("stem shadows missing at all",
+   2026-09-25), so the resting layer goes down to 65% here. It repeats the
+   kit's own filter first, because a declaration replaces the whole list
+   (lanes-no-moving-filter.test.ts holds the two together). A colour filter
+   moves no pixels, and the layer already carries one, so this costs the
+   compositor nothing. */
+.lane-wave .wave-base {
+  filter: saturate(1.15) brightness(0.65);
+}
+
 .lane-wave.is-off .wave-base {
   opacity: 0.1;
 }

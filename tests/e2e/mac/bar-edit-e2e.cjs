@@ -31,12 +31,13 @@
 require('../../shared/watchdog.cjs').arm('bar-edit-e2e')
 const { current: watchdog } = require('../../shared/watchdog.cjs')
 
-const { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } = require('node:fs')
+const { mkdirSync, readFileSync, rmSync, writeFileSync } = require('node:fs')
 const { homedir, tmpdir } = require('node:os')
 const { join } = require('node:path')
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
 const { clickLibrarySong, libraryName } = require('./library-song.cjs')
+const { scratchClone } = require('./project-hold.cjs')
 
 const REPO = join(__dirname, '..', '..', '..')
 const APP = join(REPO, 'out', 'main', 'index.js')
@@ -53,7 +54,9 @@ const PJ = join(LIB, PROJECT, 'project.json')
 rmSync(WORK, { recursive: true, force: true })
 mkdirSync(LIB, { recursive: true })
 mkdirSync(PROFILE, { recursive: true })
-cpSync(join(SRC_ROOT, PROJECT), join(LIB, PROJECT), { recursive: true })
+// a clone that keeps every time and follows links, so nothing written into
+// the copy can reach the singer's library through one
+scratchClone(join(SRC_ROOT, PROJECT), join(LIB, PROJECT))
 // the library root is a setting, not an env var
 writeFileSync(join(PROFILE, 'settings.json'), JSON.stringify({ projectsRoot: LIB }, null, 2))
 

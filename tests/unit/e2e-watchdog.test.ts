@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join, sep } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -197,6 +198,56 @@ describe('the E2E watchdog', () => {
     runtime.advance(2 * MINUTE)
     expect(killed).toBe(1)
     expect(runtime.exited).toBe(1)
+  })
+
+  it('takes a real app down at a real deadline, on this platform', async () => {
+    // The armed watchdog's own default kill, end to end: a run that starts an
+    // app and then goes past its budget. Windows had no way to do this until
+    // kill-children.cjs, and the app there outlived the report. Detached,
+    // because libuv puts every other child on Windows in a job that dies
+    // with the run, which would pass this with no kill at all. It ends itself
+    // in a minute, so nothing here signals a pid it saw die.
+    const script = [
+      `require(${JSON.stringify(join(process.cwd(), 'tests/shared/watchdog.cjs'))}).arm('app-left-running')`,
+      "const app = require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' })",
+      "require('node:fs').writeSync(1, String(app.pid))"
+    ].join('\n')
+    const run = spawnSync(process.execPath, ['-e', script], {
+      encoding: 'utf8',
+      timeout: 60000,
+      env: { ...process.env, E2E_WATCHDOG_MINUTES: '0.005', E2E_WATCHDOG_IDLE_MINUTES: '' }
+    })
+    // No pid means the run died before it started the app, and proved nothing.
+    // Never signal it unchecked: pid 0 is this whole process group, test
+    // runner and all.
+    const appPid = Number(run.stdout)
+    const alive = () => {
+      if (!(appPid > 0)) return false
+      try {
+        process.kill(appPid, 0)
+        return true
+      } catch {
+        return false
+      }
+    }
+    try {
+      expect(appPid).toBeGreaterThan(0)
+      expect(run.status).toBe(1)
+      expect(run.stderr).toMatch(/E2E WATCHDOG · app-left-running · over its 0\.005 min budget/)
+      // killed before the exit; reaped a moment later
+      for (let i = 0; i < 50 && alive(); i++) await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(alive()).toBe(false)
+    } finally {
+      // only while it is seen alive: a pid that has gone can be someone
+      // else's by now
+      if (alive()) {
+        try {
+          process.kill(appPid, 'SIGKILL')
+        } catch {
+          // went in between
+        }
+      }
+    }
   })
 
   it('disarms, so a finished run cannot be killed on its way out', () => {

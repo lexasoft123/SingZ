@@ -82,7 +82,8 @@ them. Behind the step are the two blanket ones: no output for ten minutes, or
 sixty minutes in total (the long drivers say so at their arming;
 `E2E_WATCHDOG_MINUTES` / `E2E_WATCHDOG_IDLE_MINUTES` override, `0` disarms). On expiry it names the
 deadline, how long the run had been going and the last line printed, kills its
-own DIRECT children — an Electron does not die with `process.exit`, and one
+own DIRECT children (on Windows each with its tree, `tests/shared/kill-children.cjs`)
+— an Electron does not die with `process.exit`, and one
 was found hidden at 66 minutes — and exits 1; killing a run by hand prints the
 same diagnosis. Progress is taken from the driver's own output (the arming
 patches `console.log`), so a new driver needs no watchdog calls, only the
@@ -100,7 +101,9 @@ in `tests/e2e/mac/` (twenty of them: the lanes' PLAYED EDGE
 on every frame while a song plays, whole and zoomed, and a sliver between
 the played layer and its edge layer must render exactly like none: a user
 saw the step trailing a zoomed line by eye while every driver was green,
-because none of them looked at the lanes while a song rolled), align,
+because none of them looked at the lanes while a song rolled — and the
+unplayed part must sit visibly in SHADOW, because the kit's own ~16% step
+read as none at all once the edge sat on the line), align,
 lyrics editing (the editor's
 align-draft leg is a different code path from the panel's Check & align —
 both are covered), CANCELLING one of those jobs
