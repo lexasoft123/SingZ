@@ -480,12 +480,14 @@ export class DesktopNativePlaybackClient {
    *  deadline instead of as a stall. */
   private pendingSeekAtMs = 0
 
-  /** Forget every seek still owed a receipt. Called when the generation is
-   *  unloaded or rebuilt, and the new one counts its seeks from zero — a base
-   *  read off the old one would then wait for a count the new one may never
-   *  reach, and the bar would hold a target for the whole 1 s expiry. Not at a
-   *  seam: the core carries the count across one, and seam() keeps the seeks
-   *  owed a receipt. */
+  /** Forget every seek still owed a receipt: once the receipt retires the
+   *  target (readStatus), once the target expires unanswered (statusSeconds),
+   *  and in forgetTransport, when the generation is unloaded or rebuilt and
+   *  the new one counts its seeks from zero — a base read off the old one
+   *  would then wait for a count the new one may never reach, and the bar
+   *  would hold a target for the whole 1 s expiry. A seam goes through
+   *  forgetTransport too, and seam() puts back what it clears: the core
+   *  carries the count across a seam. */
   private clearPendingSeek(): void {
     this.pendingSeekFrame = null
     this.pendingSeekReceipt = null
