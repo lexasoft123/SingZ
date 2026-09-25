@@ -43,7 +43,10 @@
  * identity); network reachable (the ladder must actually run).
  *
  * Env: E2E_A (song whose lookup is raced, default "Nothing Else Matters"),
- *      E2E_B (song opened next, default "Wild World"),
+ *      E2E_B (song opened next, default "Wild World" — the project's FOLDER
+ *             under E2E_PROJECTS_ROOT; its card is picked by the exact name
+ *             the library shows for it, and the run refuses to judge it if a
+ *             different project opened),
  *      E2E_PROJECTS_ROOT (default iCloud Drive/SingZ),
  *      E2E_OUT (scratch dir for the copy, default os.tmpdir()),
  *      E2E_FETCH_DELAY_MS (per-request delay injected into main, default 4000).
@@ -54,7 +57,9 @@ require('../../shared/watchdog.cjs').arm('lyrics-song-switch-e2e')
 
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
-const { readFileSync, writeFileSync, cpSync, rmSync, existsSync, readdirSync } = require('node:fs')
+const { assertOpenedProject, clickLibrarySong, libraryName, openedProjectDir } = require('./library-song.cjs')
+const { holdProjects } = require('./project-hold.cjs')
+const { readFileSync, cpSync, rmSync, existsSync, readdirSync } = require('node:fs')
 const { join } = require('node:path')
 const { homedir, tmpdir } = require('node:os')
 
@@ -88,24 +93,19 @@ const readPanel = (win) =>
   // driver does — a thrown assertion must not cost them a song. Every
   // precondition on B is checked BEFORE anything is created or copied, so a
   // refusal leaves no scratch folder behind.
-  const bPjPath = join(B_DIR, 'project.json')
-  const bBefore = readFileSync(bPjPath, 'utf8')
-  const bLyrics = existsSync(join(B_DIR, 'lyrics.json'))
-    ? readFileSync(join(B_DIR, 'lyrics.json'), 'utf8')
-    : null
-  if (!bLyrics) throw new Error(`${B} has no cached lyrics.json — it must answer instantly`)
-  // A v1 B would be upgraded to FLAC the moment it opens (project:upgrade runs
-  // unasked), and restoring the v1 doc afterwards would leave it describing
-  // WAVs that migrateProjectToV2 has already deleted — the exact rot that
-  // migration guards against, and a phone would then ask Drive for the
-  // missing files. Refuse rather than restore something untrue. The on-disk
-  // key is `version`; `formatVersion` is the renderer-facing name.
-  if ((JSON.parse(bBefore).version ?? 1) < 2) {
-    throw new Error(
-      `${B} is a v1 project — opening it migrates it to FLAC, and this driver's ` +
-        `restore would then describe deleted WAVs. Pick a v2 project as E2E_B.`
-    )
+  const bName = libraryName(B_DIR)
+  if (!existsSync(join(B_DIR, 'lyrics.json'))) {
+    throw new Error(`${B} has no cached lyrics.json — it must answer instantly`)
   }
+  // B's files as found, bytes AND times, and those of any project that opened
+  // instead of B (assertOpenedProject adds that one's): the finally puts them
+  // all back. The hold refuses a v1 B, which would be upgraded to FLAC the
+  // moment it opens (project:upgrade runs unasked), leaving the v1 doc put back
+  // afterwards describing WAVs that migrateProjectToV2 has already deleted —
+  // the exact rot that migration guards against, and a phone would then ask
+  // Drive for the missing files.
+  const others = []
+  const held = holdProjects([B_DIR], others)
 
   if (existsSync(SCRATCH)) rmSync(SCRATCH, { recursive: true })
   cpSync(join(ROOT, A), SCRATCH, { recursive: true })
@@ -119,7 +119,9 @@ const readPanel = (win) =>
   const app = await _electron.launch({
     executablePath: require('electron'),
     args: [APP],
-    env: { ...process.env, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1' } // silent, and never touch the real Drive
+    // silent, never touching the real Drive; hooks, because
+    // assertOpenedProject reads the opened lanes off __test
+    env: { ...process.env, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1', SINGZ_E2E_HOOKS: '1' }
   })
   await quietLaunch(app) // measurement runs must not steal the singer's focus
   app.process().stderr?.on('data', (d) => process.stderr.write(`[app] ${d}`))
@@ -164,9 +166,13 @@ const readPanel = (win) =>
 
     await win.click('.catalog-btn')
     await win.waitForSelector('.lib-card', { timeout: 20000 })
-    await win.click(`.lib-card:has-text("${B}")`)
+    await clickLibrarySong(win, bName)
     await win.waitForSelector('.pill.karaoke', { timeout: 60000 })
     await win.waitForSelector('.src-credit', { timeout: 60000 })
+    // Checked once B shows its credit, not at the click: right after the
+    // switch the engine can still hold A (and the karaoke pill can be A's), and
+    // a credit only follows B's own load. A's is still in flight here.
+    await assertOpenedProject(win, { dir: B_DIR, name: bName, backups: others })
 
     const bPanel = await readPanel(win)
     console.log(`B settled on: ${bPanel.credit} (${bPanel.lines} lines)`)
@@ -260,13 +266,27 @@ const readPanel = (win) =>
       console.log(`picked "${picked}" for A, and leaving at once`)
       await win.click('.catalog-btn')
       await win.waitForSelector('.lib-card', { timeout: 20000 })
-      await win.click(`.lib-card:has-text("${B}")`)
+      // A has a credit this time, and its song screen can flash back for a
+      // moment after B's card is clicked (the card clears the catalog before
+      // the load marks itself loading) with A's lanes still in the engine. So
+      // B's credit is only waited for once the engine has let go of A.
+      const leaving = await openedProjectDir(win)
+      await clickLibrarySong(win, bName)
+      const leftBy = Date.now() + 60000
+      for (;;) {
+        const holding = await openedProjectDir(win)
+        if (holding !== null && holding !== leaving) break
+        if (Date.now() > leftBy) bail('B never settled after the switch — nothing to steal from')
+        await new Promise((r) => setTimeout(r, 50))
+      }
       try {
         await win.waitForSelector('.src-credit', { timeout: 60000 })
       } catch {
         // B not settling is this machine having a bad minute, not the guard
         bail('B never settled after the switch — nothing to steal from')
       }
+      // Once B's credit is up and A is gone from the engine — never at the click.
+      await assertOpenedProject(win, { dir: B_DIR, name: bName, backups: others })
       const bAgain = await readPanel(win)
       if (bAgain.credit === null) bail('B never settled after the switch — nothing to steal from')
       if (bAgain.credit !== bPanel.credit) {
@@ -313,18 +333,9 @@ const readPanel = (win) =>
     }
   } finally {
     await app.close().catch(() => {})
-    if (readFileSync(bPjPath, 'utf8') !== bBefore) {
-      console.log(`${B}'s project.json was rewritten during the run — restoring it`)
-      writeFileSync(bPjPath, bBefore) // put the singer's project back
-    }
-    // guarded read: an ENOENT thrown out of a finally would skip the restore it
-    // is in the middle of doing, and the SCRATCH cleanup below it
-    const bLyricsPath = join(B_DIR, 'lyrics.json')
-    const bLyricsNow = existsSync(bLyricsPath) ? readFileSync(bLyricsPath, 'utf8') : null
-    if (bLyricsNow !== bLyrics) {
-      console.log(`${B}'s lyrics.json was rewritten during the run — restoring it`)
-      writeFileSync(bLyricsPath, bLyrics)
-    }
+    // put the singer's projects back; this never throws, so the SCRATCH
+    // cleanup below it always runs
+    for (const problem of held.putBack()) fail.push(`library not left as found: ${problem}`)
     rmSync(SCRATCH, { recursive: true, force: true })
   }
 

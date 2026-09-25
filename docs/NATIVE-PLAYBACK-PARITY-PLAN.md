@@ -496,6 +496,34 @@ render head, at most one output latency ahead, and steps back once when it matur
 7–9 ms on the Mac, at or just above the largest correction already seen during
 playback (2–7 ms).
 
+That side effect has since been fixed (2026-09-25). The step is exactly the
+presentation latency, so it scales with the route: a 150–250 ms Bluetooth route would
+step the bar back a fifth of a second on every Play. It scales with the graph as well.
+Transposed, the time-pitch processor adds 6720 frames, so the latency on the Mac's
+built-in route is 7260 frames (151 ms), and every resume of a transposed song stepped
+the bar back 150.6–151.6 ms (3 of 3). Play was not the only edge that showed it. A seek
+while playing, a count-in's landing, a seam and every loop wrap re-anchor the
+projection too, and showed the step whenever a poll landed inside the window. A
+transposed A-B loop wrapped the bar 1345–1357 ms back on a 1500 ms loop, a latency
+early, and then stepped it back another 148–160 ms.
+While the projection is unmatured, the facade now stands in for the ear with the
+render head less the latency (scaled by the playback rate, as the core scales it),
+floored where the run began: the prepared start or landing, the spot the bar showed
+when a resume went out, or a seek's target. An ear still in the lap a wrap has left
+is folded back into that lap. Measured on the Mac with count-in-e2e's leg 14. On the
+plain route, three Plays per build: the step at the first matured status was 9.58–11.58
+ms back on the control and between 0.33 ms back and 0.67 ms forward on the fix.
+Transposed: two Plays stepped back 151.58 ms on the control and at most 0.33 ms on the
+fix, a seek while playing 148.92 ms against a step 3.33 ms forward, and the loop wrapped
+by the whole 1500 ms span on the fix, when the ear did. The Windows field laptop
+(WASAPI; 22 ms plain, 162 ms transposed) agrees: on the control, plain Plays stepped
+back 13–23 ms, transposed ones 153–162 ms, and the loop wrapped 162 ms early; on the
+fix, no edge stepped back more than 1 ms and the loop wrapped by the span. The steps
+between two matured statuses, 6–8 ms on the Mac's 512-frame route, are callback
+quantization of the between-poll projection, not an edge, and the fix leaves them as
+they were. That quantization can land on any switch, so on the plain route, where the
+latency is barely more than one callback, the leg judges its five edges by majority.
+
 ## Why the legacy engine measures faster: an architecture comparison
 
 The legacy engine on the phones is Web Audio implemented by react-native-audio-api (the

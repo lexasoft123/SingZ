@@ -31,7 +31,11 @@
  * Prereqs: `npm run build`; the capture addon built for this tree
  * (`npm run capture:addon`); a six-lane project in the singer's library
  * (E2E_SONG, default "Deutschland"; E2E_PROJECTS_ROOT overrides the root).
- * Opens the project read-only and restores its project.json in a `finally`.
+ * E2E_SONG is the project's FOLDER under that root; its card is picked by the
+ * exact name the library shows for it, and the run refuses to measure if a
+ * different project opened.
+ * Opens the project read-only, and puts its files back in a `finally`, bytes
+ * and times.
  *
  *   node tests/e2e/mac/open-native-e2e.cjs
  */
@@ -39,7 +43,9 @@ require('../../shared/watchdog.cjs').arm('open-native-e2e', { totalMinutes: 15 }
 
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
-const { existsSync, readFileSync, writeFileSync } = require('node:fs')
+const { assertOpenedProject, clickLibrarySong, libraryName } = require('./library-song.cjs')
+const { holdProjects } = require('./project-hold.cjs')
+const { existsSync } = require('node:fs')
 const { join } = require('node:path')
 const { homedir } = require('node:os')
 
@@ -47,7 +53,8 @@ const ROOT =
   process.env.E2E_PROJECTS_ROOT ??
   join(homedir(), 'Library/Mobile Documents/com~apple~CloudDocs/SingZ')
 const SONG = process.env.E2E_SONG ?? 'Deutschland'
-const SONG_PJ = join(ROOT, SONG, 'project.json')
+const SONG_DIR = join(ROOT, SONG)
+const SONG_PJ = join(SONG_DIR, 'project.json')
 const APP = join(__dirname, '..', '..', '..', 'out', 'main', 'index.js')
 const val = (win, expr) => win.evaluate(`(${expr})`)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -61,7 +68,12 @@ const dspComplaints = (lines) =>
 
 ;(async () => {
   if (!existsSync(SONG_PJ)) throw new Error(`no project at ${SONG_PJ} — set E2E_SONG`)
-  const backup = readFileSync(SONG_PJ, 'utf8')
+  // Every file this run may touch, as found — bytes AND times: the song's
+  // own, held before the app can write them, and any project that opened
+  // instead of it (assertOpenedProject adds that one's).
+  const backups = []
+  const held = holdProjects([SONG_DIR], backups)
+  const songName = libraryName(SONG_DIR)
   const fail = []
   const app = await _electron.launch({
     executablePath: require('electron'),
@@ -103,8 +115,9 @@ const dspComplaints = (lines) =>
     )
 
     // ── The open ─────────────────────────────────────────────────────────
-    const t0 = Date.now()
-    await win.click(`.lib-card:has-text("${SONG}")`)
+    // Timed from the click itself: the helper reads the library's files just
+    // before it clicks, and that is the harness's time, not the app's.
+    const t0 = await clickLibrarySong(win, songName)
     // A NODE poll, not waitForFunction: that helper polls on requestAnimationFrame,
     // which fires about once a second in the never-shown SINGZ_E2E_HIDDEN
     // window on the field laptop, so a 'loading' phase a few hundred
@@ -117,6 +130,8 @@ const dspComplaints = (lines) =>
       await sleep(50)
     }
     const ready = Date.now() - t0
+    // After the open is timed, before a word of it is judged or printed.
+    await assertOpenedProject(win, { dir: SONG_DIR, name: songName, backups })
     const steps = await val(win, 'JSON.stringify(__test.loadSteps())').then(JSON.parse)
     const total = steps.length ? steps[steps.length - 1].ms : 0
     console.log(`open: click → ready ${ready} ms · steps total ${total} ms`)
@@ -251,10 +266,7 @@ const dspComplaints = (lines) =>
     if (complaints.length) fail.push(`${complaints.length} dsp warning(s)/error(s): ${complaints[0]}`)
   } finally {
     await app.close().catch(() => {})
-    if (readFileSync(SONG_PJ, 'utf8') !== backup) {
-      console.log(`${SONG_PJ} was rewritten during the run; restoring it`)
-      writeFileSync(SONG_PJ, backup)
-    }
+    for (const problem of held.putBack()) fail.push(`library not left as found: ${problem}`)
   }
 
   if (fail.length) {

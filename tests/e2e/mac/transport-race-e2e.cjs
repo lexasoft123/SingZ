@@ -83,7 +83,8 @@ require('../../shared/watchdog.cjs').arm('transport-race-e2e')
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
 const { assertOpenedProject, clickLibrarySong, libraryName } = require('./library-song.cjs')
-const { readFileSync, writeFileSync, existsSync } = require('node:fs')
+const { holdProjects } = require('./project-hold.cjs')
+const { existsSync } = require('node:fs')
 const { join } = require('node:path')
 const { homedir } = require('node:os')
 
@@ -124,9 +125,11 @@ const buildCount = (lines) => lines.filter((x) => /^preparing graph/.test(x.line
 ;(async () => {
   if (!existsSync(SONG_PJ)) throw new Error(`no project at ${SONG_PJ} — set E2E_SONG`)
   if (!existsSync(SONG_B_PJ)) throw new Error(`no project at ${SONG_B_PJ} — set E2E_SONG_B`)
-  // Every project.json this run may touch, as found: the two songs', and any
-  // project that opened instead of one of them (assertOpenedProject adds it).
-  const backups = [SONG_PJ, SONG_B_PJ].map((p) => [p, readFileSync(p, 'utf8')])
+  // Every file this run may touch, as found — bytes AND times: the two
+  // songs', held before the app can write them, and any project that opened
+  // instead of one of them (assertOpenedProject adds that one's).
+  const backups = []
+  const held = holdProjects([SONG_DIR, SONG_B_DIR], backups)
   const songName = libraryName(SONG_DIR)
   const songBName = libraryName(SONG_B_DIR)
 
@@ -504,12 +507,7 @@ const buildCount = (lines) => lines.filter((x) => /^preparing graph/.test(x.line
     // These are projects in the singer's own library. Opening one can
     // re-derive and auto-save an analysis, which is legitimate — but a driver
     // must never be the reason a song changed.
-    for (const [path, text] of backups) {
-      if (readFileSync(path, 'utf8') !== text) {
-        console.log(`${path} was rewritten during the run; restoring it`)
-        writeFileSync(path, text)
-      }
-    }
+    for (const problem of held.putBack()) fail.push(`library not left as found: ${problem}`)
   }
 
   if (fail.length) {
