@@ -8,7 +8,6 @@ static_assert(singz::kStreamingWaveformBuckets ==
               singz::kNativePlaybackLaneSummaryBuckets);
 
 #include "native_playback_callback.h"
-#include "native_playback_projection.h"
 #include "signalsmith_time_pitch.h"
 
 #include <algorithm>
@@ -8189,12 +8188,20 @@ NativePlaybackStatus NativePlaybackSession::status() const {
       int64_t projected = result.renderedProjectFrame;
       if (telemetry.state == NativePlaybackTransportState::Playing ||
           telemetry.state == NativePlaybackTransportState::PreRoll) {
+        /* Never folded into an active loop. A matured projection spans no
+           wrap: the anchor starts over at every one, as at every seek,
+           landing and seam, and the projection matures only a latency later,
+           so the ear and the render head are on one unbroken run of the song.
+           A frame below the loop's start is audio from BEFORE the loop — one
+           armed ahead of the playhead, which the transport plays on into and
+           wraps only at its end — or a count-in's pre-roll. Folding it put
+           the ear in the loop's tail the moment such a loop was armed: the
+           desktop's seek bar jumped from 63.44 s to 64.79 s on a loop that
+           starts at 63.76 s. It also turned the unrepresentable sentinel
+           below into a frame inside the loop, published as current. */
         projected = latencyAdjustedProjectFrame(
             result.renderedProjectFrame, telemetry.projectFractionQ32,
             latency, transport.playbackRateQ32);
-        projected = playback_internal::loopAdjustedProjectFrame(
-            projected, telemetry.loopEnabled, telemetry.loopStart,
-            telemetry.loopEnd);
       }
       if (projected != std::numeric_limits<int64_t>::min()) {
         result.audibleProjectFrame = projected;
