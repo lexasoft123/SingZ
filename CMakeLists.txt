@@ -148,7 +148,6 @@ add_library(singz_native_playback_session STATIC EXCLUDE_FROM_ALL
   native/playback/native_playback_graph_document.h
   native/playback/playback_cue_plan.cpp
   native/playback/playback_cue_plan.h
-  native/playback/native_playback_projection.h
   native/playback/native_playback_session.cpp
   native/playback/native_playback_session.h
   native/playback/streaming_lane_feeder.cpp
