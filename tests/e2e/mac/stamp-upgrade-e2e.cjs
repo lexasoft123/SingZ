@@ -31,7 +31,8 @@
 require('../../shared/watchdog.cjs').arm('stamp-upgrade-e2e')
 
 const { _electron } = require('playwright-core')
-const { readFileSync, writeFileSync, cpSync, rmSync, existsSync, readdirSync, statSync } = require('node:fs')
+const { readFileSync, writeFileSync, rmSync, existsSync, readdirSync, statSync } = require('node:fs')
+const { scratchClone } = require('./project-hold.cjs')
 const { join } = require('node:path')
 const { homedir, tmpdir } = require('node:os')
 const { quietLaunch } = require('./quiet-launch.cjs')
@@ -53,8 +54,9 @@ const songFile = (dir) => {
 /** One leg: seed every stamp to `stampTo`, open, wait, read what landed. */
 async function leg(label, stampTo, settleMs) {
   const dir = join(OUT, `singz-e2e-stamp-${label}`)
-  rmSync(dir, { recursive: true, force: true })
-  cpSync(join(ROOT, NAME), dir, { recursive: true })
+  // a clone of the song that keeps every time and follows links, so nothing
+  // written into the copy can reach the singer's library through one
+  scratchClone(join(ROOT, NAME), dir)
   const doc = JSON.parse(readFileSync(join(dir, 'project.json'), 'utf8'))
   const s = doc.settings ?? {}
   if (!s.beat) throw new Error(`${NAME} has no stored beat grid — pick a song that does`)

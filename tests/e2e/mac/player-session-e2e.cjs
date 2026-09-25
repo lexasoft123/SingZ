@@ -46,7 +46,8 @@ require('../../shared/watchdog.cjs').arm('player-session-e2e', { totalMinutes: 1
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
 const { execFileSync } = require('node:child_process')
-const { mkdirSync, rmSync, cpSync, writeFileSync, existsSync } = require('node:fs')
+const { mkdirSync, rmSync, writeFileSync, existsSync } = require('node:fs')
+const { scratchClone } = require('./project-hold.cjs')
 const { join } = require('node:path')
 const { tmpdir } = require('node:os')
 const { stageSongs } = require('../../../mobile/tests/player-session/seed.cjs')
@@ -595,7 +596,8 @@ function judge(legacy, native) {
   }
   for (const s of songs) {
     if (process.env.PS_LIB) break
-    cpSync(s.dir, join(LIB, s.name), { recursive: true })
+    // a clone that keeps every time and follows links
+    scratchClone(s.dir, join(LIB, s.name))
     // The desktop lists a project only when the song file its doc names is
     // present; the phones never need it, so the seed stages none. The stems
     // are what plays, so one second of silence stands in (ffmpeg is already a

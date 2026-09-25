@@ -43,7 +43,8 @@ require('../../shared/watchdog.cjs').arm('melody-stem-rate-e2e')
 
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
-const { readFileSync, writeFileSync, cpSync, rmSync, existsSync, renameSync } = require('node:fs')
+const { readFileSync, writeFileSync, rmSync, existsSync, renameSync } = require('node:fs')
+const { scratchClone } = require('./project-hold.cjs')
 const { execFileSync } = require('node:child_process')
 const { join } = require('node:path')
 const { homedir, tmpdir } = require('node:os')
@@ -95,8 +96,9 @@ function resampleStem(file, rate) {
   let app = null
   const fail = []
   try {
-    if (existsSync(SCRATCH)) rmSync(SCRATCH, { recursive: true })
-    cpSync(join(ROOT, NAME), SCRATCH, { recursive: true })
+    // a clone of the song that keeps every time and follows links, so nothing
+    // written into the copy can reach the singer's library through one
+    scratchClone(join(ROOT, NAME), SCRATCH)
     const doc = JSON.parse(readFileSync(join(SCRATCH, 'project.json'), 'utf8'))
     delete doc.settings.melody // always a fresh run, whatever the stamp is today
     // The key too: this driver asserts the key came from the CORE, and a

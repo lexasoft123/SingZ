@@ -33,7 +33,7 @@
  * `putBack()` never throws — a finally that throws skips the restores still
  * owed — and runs once. When a run ends without reaching it (the watchdog's
  * deadline, a kill, an error nothing caught) an exit hook runs it, after
- * taking down the app the run started where it can (see onExit).
+ * taking down the app the run started.
  *
  * A helper, not a driver: it runs inside the driver that required it, under
  * that driver's watchdog.
@@ -57,6 +57,7 @@ const {
 } = require('node:fs')
 const { basename, dirname, join } = require('node:path')
 const { tmpdir } = require('node:os')
+const { killChildren } = require('../../shared/kill-children.cjs')
 
 /** A file larger than this is held by its size and times only. The app never
  *  writes one (the biggest is the song itself), and reading an iCloud copy
@@ -318,18 +319,13 @@ function holdProjects(dirs, backups = []) {
   // The fallback, for a run that ends without reaching putBack: the
   // watchdog's deadline, a signal, or an error nothing caught. A put-back
   // under a live app can be saved over, so the app this run started goes
-  // first — its direct children, the way the watchdog takes them. That holds
-  // on macOS and Linux. Windows has no pkill: there the app goes down in
-  // Playwright's own exit handler, which launch registered after this one, so
-  // a save landing in between is unlikely but not ruled out. 'exit' listeners
-  // run synchronously, and so does all of this; it writes straight to stderr,
-  // because a piped stdout may not flush.
+  // first, the way the watchdog takes it (kill-children.cjs: the direct
+  // children, on Windows too, where Playwright's own exit handler would
+  // otherwise take it down only after this one). 'exit'
+  // listeners run synchronously, and so does all of this; it writes straight
+  // to stderr, because a piped stdout may not flush.
   const onExit = () => {
-    try {
-      execFileSync('pkill', ['-9', '-P', String(process.pid)], { stdio: 'ignore', timeout: 5000 })
-    } catch {
-      // no children left, or no pkill: nothing to take down
-    }
+    killChildren(process.pid)
     run((line) => writeSync(2, `${line}\n`))
   }
   process.on('exit', onExit)

@@ -40,7 +40,8 @@
 require('../../shared/watchdog.cjs').arm('beat-stem-rate-e2e')
 
 const { _electron } = require('playwright-core')
-const { readFileSync, writeFileSync, cpSync, rmSync, existsSync } = require('node:fs')
+const { readFileSync, writeFileSync, rmSync, existsSync } = require('node:fs')
+const { scratchClone } = require('./project-hold.cjs')
 const { join } = require('node:path')
 const { homedir, tmpdir } = require('node:os')
 const { quietLaunch } = require('./quiet-launch.cjs')
@@ -62,8 +63,9 @@ const GT = JSON.parse(
     const gt = GT[NAME]?.bpmNear
     if (!gt) throw new Error(`${NAME} has no bpmNear ground truth — pick a song that does`)
 
-    if (existsSync(SCRATCH)) rmSync(SCRATCH, { recursive: true })
-    cpSync(join(ROOT, NAME), SCRATCH, { recursive: true })
+    // a clone of the song that keeps every time and follows links, so nothing
+    // written into the copy can reach the singer's library through one
+    scratchClone(join(ROOT, NAME), SCRATCH)
     const doc = JSON.parse(readFileSync(join(SCRATCH, 'project.json'), 'utf8'))
     delete doc.settings.beat // always a fresh detection, whatever the stamp is today
     writeFileSync(join(SCRATCH, 'project.json'), JSON.stringify(doc, null, 2))

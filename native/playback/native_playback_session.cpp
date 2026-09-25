@@ -990,10 +990,11 @@ struct PreparedPlaybackTransport {
     increment(&callbackDiscontinuities);
     callbackLastBoundary = emitted.reason;
     callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
-    // These are counts of emitted typed reset boundaries, not control
-    // commands or physical wraps hidden by a higher-priority host boundary.
-    if (emitted.reason == zdsp::DiscontinuityReason::SourceSeek)
-      increment(&callbackSeekCount);
+    // A count of emitted typed reset boundaries, not of physical wraps hidden
+    // by a higher-priority host boundary. Seeks are counted where they are
+    // APPLIED instead (applyCommands): seekCount is the receipt every caller
+    // waits on, and a seek's boundary is outranked whenever it shares its
+    // callback with a seam, a re-anchor, a host flag or another seek.
     if (emitted.reason == zdsp::DiscontinuityReason::SourceLoop)
       increment(&callbackLoopCount);
     return emitted;
@@ -1074,6 +1075,16 @@ struct PreparedPlaybackTransport {
         queueDiscontinuity({zdsp::DiscontinuityReason::SourceSeek,
                             zdsp::DiscontinuityFlagResetState |
                                 zdsp::DiscontinuityFlagTimeValid});
+        // The receipt. Every caller draws a seek's target until seekCount
+        // moves past what it read when it issued the seek (positionNow's
+        // contract), so the count moves once for every seek applied here —
+        // whatever boundary the emitted one ends up naming. Counting the
+        // emitted SourceSeek boundaries instead lost the receipt whenever the
+        // seek shared its callback with one that outranks it: a seam landing,
+        // a re-anchor, a host clock reset, or simply a second seek drained in
+        // the same callback. The desktop then held the target on the bar for
+        // its whole one-second expiry while the song played on from it.
+        increment(&callbackSeekCount);
         break;
       }
       case PlaybackTransportCommandKind::SetLoop:

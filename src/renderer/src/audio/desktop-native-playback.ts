@@ -41,8 +41,9 @@ import {
 export const POLL_FAST_MS = 50
 export const POLL_STEADY_MS = 200
 export const POLL_BURST_MS = 2000
-/** The cadence right after a start or a resume (see `edgeAtMs`), until a
- *  status shows the transport running with a current audible frame. The
+/** The cadence right after a start, a resume or a seek while the song plays
+ *  (see `edgeAtMs`), until a status shows the transport running with a
+ *  current audible frame, and for a seek its receipt as well. The
  *  core publishes both from the render callback within a period or two of
  *  the command: on the Mac the transport read `playing` 4-6 ms after the
  *  start returned and the audible frame was current one 512-frame callback
@@ -50,10 +51,17 @@ export const POLL_BURST_MS = 2000
  *  bar stood still for ~40 ms of music on every Play, the whole gap between
  *  native's Play → advancing and legacy's. */
 export const POLL_EDGE_MS = 10
-/** How long one start or resume may hold the poll at POLL_EDGE_MS. A
+/** How long one start, resume or seek may hold the poll at POLL_EDGE_MS. A
  *  transport still parked this long after the command is not waiting for its
  *  next callback, and the ordinary burst covers whatever it is doing. */
 export const POLL_EDGE_MAX_MS = 500
+/** How long a structural change waits for the previous one's seam to land
+ *  (see reconfigure) — the phones' SWAP_LANDING_DEADLINE_MS. A seam lands one
+ *  to three blocks after it is armed, or once its Stretch prime's budget has
+ *  run, which the core caps at 0.75 s (kSwapLandingBudgetCapSeconds); so this
+ *  is past any healthy landing, and only a stream that delivers no blocks
+ *  runs it out. */
+export const SEAM_LANDING_WAIT_MS = 1000
 /** How long the bar may show a seek's target while waiting for the core's
  *  receipt. Generous against the real wait (the callback applies a queued seek
  *  at its next period) and short enough that a core which never acknowledges
@@ -434,8 +442,9 @@ export class DesktopNativePlaybackClient {
    * was issued, or a status read showed a new transport state or boundary.
    * The poll runs at POLL_FAST_MS for POLL_BURST_MS after that (a seek's
    * read-back, a pause's stop, a seam landing are all measured against that
-   * cadence; a start or resume first runs at POLL_EDGE_MS until it shows, see
-   * `edgeAtMs`) and at POLL_STEADY_MS otherwise. Measured
+   * cadence; a start, a resume or a seek while playing first runs at
+   * POLL_EDGE_MS until it shows, see `edgeAtMs`) and at POLL_STEADY_MS
+   * otherwise. Measured
    * on the desktop (2026-09-06, quiet host): the 20 Hz status invoke alone —
    * IPC + structured clone of the status, not the UI it fed — cost the
    * renderer ~2 CPU points while a song played, more than the whole graph
@@ -443,12 +452,13 @@ export class DesktopNativePlaybackClient {
    * between reads is projected (audibleSeconds), so the bar does not move in
    * poll steps either way. */
   private activityAtMs = 0
-  /** When a start or a resume was last accepted. Until a status shows the
-   * transport running with a current audible frame (or POLL_EDGE_MAX_MS
+  /** When a start, a resume or a seek was last accepted. Until a status shows
+   * the transport running with a current audible frame (or POLL_EDGE_MAX_MS
    * passes) the poll runs at POLL_EDGE_MS: the bar can only move once a
    * status says the song moved, and the command's own read-back always
    * arrives too early to say it, since the render thread has not taken a
-   * callback yet. */
+   * callback yet. A seek while the song plays counts too, until its receipt
+   * lands and then until the projection it re-anchored matures. */
   private edgeAtMs = 0
   /** A seek the core has accepted but the status has not yet reflected: the
    * bar shows the target at once instead of one IPC round trip later. */
@@ -466,8 +476,8 @@ export class DesktopNativePlaybackClient {
    *  lurching after the finger has stopped. */
   private pendingSeekReceipt: string | null = null
   /** How many seeks have been issued since `pendingSeekReceipt` was read.
-   *  A scrub is several seeks in flight, and the core applies them one per
-   *  callback block; retiring the target the moment `seekCount` MOVED
+   *  A scrub is several seeks in flight, and the core may apply them a
+   *  callback block apart; retiring the target the moment `seekCount` MOVED
    *  retired the second seek's target on the first seek's receipt, so the
    *  bar showed the first spot for a poll and then jumped to the second — the
    *  same lurch, one block wide. The target now stands until the receipt
@@ -480,11 +490,14 @@ export class DesktopNativePlaybackClient {
    *  deadline instead of as a stall. */
   private pendingSeekAtMs = 0
 
-  /** Forget every seek still owed a receipt. Called when the receipt can no
-   *  longer arrive: the generation is unloaded, or a seam replaced it and the
-   *  new generation counts its seeks from zero — a base read off the old one
+  /** Forget every seek still owed a receipt: once the receipt retires the
+   *  target (readStatus), once the target expires unanswered (statusSeconds),
+   *  and in forgetTransport, when the generation is unloaded or rebuilt and
+   *  the new one counts its seeks from zero — a base read off the old one
    *  would then wait for a count the new one may never reach, and the bar
-   *  would hold a target for the whole 1 s expiry. */
+   *  would hold a target for the whole 1 s expiry. A seam goes through
+   *  forgetTransport too, and seam() puts back what it clears: the core
+   *  carries the count across a seam. */
   private clearPendingSeek(): void {
     this.pendingSeekFrame = null
     this.pendingSeekReceipt = null
@@ -545,6 +558,20 @@ export class DesktopNativePlaybackClient {
    *  simply began near the loop's start. Generation-bound, and carried across
    *  a seam, which hands the clock and the lap count to the new generation. */
   private run: { generation: string; floor: number | null; lap: string } | null = null
+  /** The loop lap of the position the bar last showed while the song moved in
+   *  a loop, and the run it was shown under. The core publishes its status
+   *  once a callback, so a status is up to a callback stale when it is read,
+   *  and any two can disagree by that much. Right after a wrap, the status
+   *  before it may already have wrapped the bar with the ear while the
+   *  stand-in after it lands a hair short of the loop's start. Folded into
+   *  the lap the head had left, that drew the loop's tail until the stand-in
+   *  reached the start: the start, the tail, the start again, two whole-loop
+   *  jumps, in 6 of ~190 wraps of a short loop on the Mac's plain route. A
+   *  fold never goes back past a lap shown here (see statusSeconds). Bound to
+   *  the run object, which every Play, resume, seek and matured status
+   *  replaces (a matured status places the ear itself), and carried across a
+   *  seam with the run. */
+  private shownLap: { run: object; lap: number } | null = null
 
   /** Forget everything that described the generation being retired: the
    *  seeks still owed a receipt, the count-in landing the bar was holding at,
@@ -555,6 +582,7 @@ export class DesktopNativePlaybackClient {
     this.countInSeen = false
     this.pauseHold = null
     this.run = null
+    this.shownLap = null
   }
 
   /** The landing a prepare built from `request` counts in to, or null when
@@ -610,8 +638,15 @@ export class DesktopNativePlaybackClient {
    * route/stream/clock boundary, or a rising adapter render-failure count
    * while the transport is advancing, means the callback is refusing every
    * block until the transport is re-anchored — and with the time/pitch
-   * processor in the graph the session never re-anchors on its own. */
-  private transportBoundary: { generation: string; key: string; failures: number } | null = null
+   * processor in the graph the session never re-anchors on its own. The
+   * transport generation rides along because a seam changes it without
+   * changing the generation polled (see observeTransportBoundary). */
+  private transportBoundary: {
+    generation: string
+    transportGeneration: string
+    key: string
+    failures: number
+  } | null = null
   private reanchorPending = false
   /** An accepted re-anchor is answered by the core with its own
    * ClockReanchored discontinuity (one per accepted command); that echo is a
@@ -742,6 +777,9 @@ export class DesktopNativePlaybackClient {
       const latency = status.audibleProjectionQuality === 'current'
         ? null
         : DesktopNativePlaybackClient.latencyProjectFrames(status)
+      const run = this.run !== null && this.run.generation === status.generation ? this.run : null
+      // The loop lap of the position shown below (see shownLap).
+      let shown = Number(status.loopCount)
       if (latency !== null) {
         // The head stands in for a projection that has not matured, and the
         // ear is a whole latency behind it. Projected first and floored
@@ -749,26 +787,39 @@ export class DesktopNativePlaybackClient {
         // and then moves with the ear, meeting the core's own projection when
         // it matures instead of stepping back to it.
         seconds -= latency / sampleRate
-        const run = this.run !== null && this.run.generation === status.generation ? this.run : null
         const lap = Number(status.loopCount)
         // The head has wrapped since the ear's lap was known, and the wrap
         // re-anchored the projection while the ear is still in the lap the
         // head has left. Fold it back into that lap, as the core folds its
         // own projection, so the bar wraps when the ear does and not a latency
         // early. With no lap to go by, a wrap cannot be told from a run that
-        // simply sits before the loop's start, and nothing is folded.
+        // simply sits before the loop's start, and nothing is folded. Never
+        // back past the latest lap the bar has shown in the run (see
+        // shownLap), or before it has shown one, the lap the run began in. A
+        // loop shorter than the latency puts the head laps ahead, and an ear
+        // folded back past the run's lap has not reached the run's start,
+        // where the floor below holds it; in a lap the bar has shown since,
+        // the ear is inside it, and the bar holds the loop's start until the
+        // stand-in gets there.
         let lapsBack = 0
         if (looping && run !== null && seconds < start && lap > Number(run.lap)) {
-          lapsBack = Math.ceil((start - seconds) / (end - start))
+          const seen = this.shownLap !== null && this.shownLap.run === run ? this.shownLap.lap : Number(run.lap)
+          lapsBack = Math.max(0, Math.min(Math.ceil((start - seconds) / (end - start)), lap - seen))
           seconds += lapsBack * (end - start)
+          if (seconds < start && lap - lapsBack > Number(run.lap)) seconds = start
         }
+        shown = lap - lapsBack
         // The floor holds only in the lap the run began in: an ear that has
         // wrapped as well is already past it.
         if (run !== null && run.floor !== null && lap - lapsBack === Number(run.lap)) {
           seconds = Math.max(seconds, run.floor)
         }
       }
-      if (looping && seconds >= end) seconds = start + ((seconds - end) % (end - start))
+      if (looping && seconds >= end) {
+        shown += 1 + Math.floor((seconds - end) / (end - start))
+        seconds = start + ((seconds - end) % (end - start))
+      }
+      if (looping && run !== null) this.shownLap = { run, lap: shown }
     }
     return Math.max(0, seconds)
   }
@@ -1346,16 +1397,46 @@ export class DesktopNativePlaybackClient {
         return
       }
       const oldGeneration = this.generation
-      const status = await this.requireCommandStatus(
+      let status = await this.requireCommandStatus(
         oldGeneration,
         request.provider,
         'Native structural rebuild could not read the current transport.'
       )
+      // A SEAM STILL LANDING. seam() stops reading after 40 statuses and
+      // returns with the seam armed — a transposed song's landing waits out
+      // its Stretch prime — and until it lands every status names the new
+      // generation over the OUTGOING transport's telemetry. The next change
+      // read that as untrustworthy and refused it outright ("no trustworthy
+      // signed transport position"): a loop set right after a transpose was
+      // not applied. It waits for the landing now, bounded as the phones bound
+      // theirs, and then seams from the landed generation like any change.
+      const landingSince = Date.now()
+      while (status.swapPendingGeneration !== '0' &&
+          Date.now() - landingSince < SEAM_LANDING_WAIT_MS) {
+        await new Promise((resolve) => setTimeout(resolve, POLL_EDGE_MS))
+        status = await this.requireCommandStatus(
+          oldGeneration,
+          request.provider,
+          'Native structural rebuild could not read the current transport.'
+        )
+      }
+      if (status.swapPendingGeneration !== '0') {
+        console.warn(
+          `Native seam ${status.swapPendingGeneration} → ${oldGeneration} did not land in ` +
+            `${SEAM_LANDING_WAIT_MS} ms; the change rebuilds from where the song is.`
+        )
+      }
       // A status-poll failure is allowed to quarantine the generation while
       // the rebuild is queued behind that read. Revalidate immediately before
       // the first destructive command so rebuild can never escape quarantine.
       this.assertCommandableGeneration()
-      if (status.generation !== oldGeneration || status.transportGeneration !== oldGeneration ||
+      // The transport is this generation's once its seam has landed. One that
+      // never landed leaves the OUTGOING transport rendering, and that is
+      // still where the song is: the change goes on from its frame — as the
+      // rebuild, since the core takes no second swap while one is armed, and
+      // stopping the armed generation retires both graphs.
+      const rendering = status.swapPendingGeneration !== '0' ? status.swapPendingGeneration : oldGeneration
+      if (status.generation !== oldGeneration || status.transportGeneration !== rendering ||
           status.transportTelemetryQuality === 'unavailable') {
         throw new Error('Native rebuild has no trustworthy signed transport position.')
       }
@@ -1380,6 +1461,9 @@ export class DesktopNativePlaybackClient {
       // A count-in at the TOP is left to the seam while PLAYING, as before:
       // its landing is the entry, so the carried clock lands in the right
       // place with nothing added, and the seam keeps the count-in's timing.
+      // When no seam takes it — a route change, a refusal, a seam before it
+      // that never landed — it is rebuilt anchored at the landing like any
+      // other, for the reason that follows.
       // PAUSED inside one it is the rebuild too, because the rebuild would
       // otherwise carry the negative frame as its signed start, and the
       // core refuses a start below the NEW plan's own pre-roll — the
@@ -1391,19 +1475,42 @@ export class DesktopNativePlaybackClient {
       const state = this.transportIntent === 'playing' && status.transportState !== 'completed'
         ? 'playing'
         : 'paused'
-      const landing = this.countInLandingSeconds
-      const insideCountIn = renderedFrame < 0 && landing !== null &&
-        (landing > 0 || state !== 'playing')
-      const rebuilt: DesktopNativePlaybackPrepare = insideCountIn
-        ? { ...request, positionSeconds: landing }
-        : request
-      const preparedStartProjectFrame = insideCountIn ? undefined : renderedFrame
       const loop = request.loop
         ? {
             startProjectFrame: Math.round(request.loop.start * this.route.sampleRate),
             endProjectFrame: Math.round(request.loop.end * this.route.sampleRate)
           }
         : undefined
+      // A SEEK STILL OWED ITS RECEIPT (the read above retires one that has
+      // landed) is where the transport is going, not the frame the core last
+      // reported. A rebuild started at that frame, and the seek went away with
+      // the old generation: paused with the playhead past a selection, the Loop
+      // button seeks to the selection's start and then arms the loop — a
+      // rebuild while paused — and the next Play started from the old spot,
+      // wrapped into the loop. The rebuild starts at the seek's target now,
+      // folded into the loop the way the core folds a seek past its end (no lap
+      // counted). A seam needs none of this: it keeps the owed seek, and the
+      // core applies it on one side of the hand-over or the other. Inside a
+      // count-in an owed seek is the singer moving — the core cancels the
+      // landing when it applies the seek — so the change is no count-in change.
+      const owedSeek = this.pendingSeekFrame !== null &&
+        Date.now() - this.pendingSeekAtMs < PENDING_SEEK_MAX_MS
+        ? this.pendingSeekFrame
+        : null
+      const owedStart = owedSeek === null
+        ? null
+        : loop && owedSeek >= loop.endProjectFrame
+          ? loop.startProjectFrame +
+            ((owedSeek - loop.startProjectFrame) % (loop.endProjectFrame - loop.startProjectFrame))
+          : owedSeek
+      const landing = this.countInLandingSeconds
+      const countingIn = owedStart === null && renderedFrame < 0 && landing !== null
+      // Every count-in but the one a seam may keep (PLAYING toward the top).
+      const insideCountIn = countingIn && (landing > 0 || state !== 'playing')
+      const rebuilt: DesktopNativePlaybackPrepare = countingIn
+        ? { ...request, positionSeconds: landing }
+        : request
+      const preparedStartProjectFrame = countingIn ? undefined : (owedStart ?? renderedFrame)
       const initialTransport: DesktopPlaybackInitialTransportConfig = {
         state,
         ...(loop ? { loop } : {})
@@ -1426,7 +1533,7 @@ export class DesktopNativePlaybackClient {
       const seamable = !insideCountIn && !options.force && this.started && state === 'playing' &&
         (status.transportState === 'playing' || status.transportState === 'pre-roll') &&
         status.swapPendingGeneration === '0' && status.retiringSwapGeneration === '0'
-      if (seamable && await this.seam(rebuilt, oldGeneration, renderedFrame, initialTransport)) return
+      if (seamable && await this.seam(request, oldGeneration, renderedFrame, initialTransport, owedSeek !== null)) return
       this.stopPolling()
       if (this.started) {
         try { await window.singz.stopDesktopPlayback(oldGeneration) } catch { /* unload is authoritative */ }
@@ -1454,7 +1561,9 @@ export class DesktopNativePlaybackClient {
     request: DesktopNativePlaybackPrepare,
     oldGeneration: string,
     preparedStartProjectFrame: number,
-    initialTransport: DesktopPlaybackInitialTransportConfig
+    initialTransport: DesktopPlaybackInitialTransportConfig,
+    /** A seek is still owed its receipt (reconfigure's reading, expiry and all). */
+    seekOwed: boolean
   ): Promise<boolean> {
     const config: DesktopPlaybackPrepareConfig = {
       // The clock is carried across by the core; the frame only primes the
@@ -1481,22 +1590,48 @@ export class DesktopNativePlaybackClient {
     const generation = prepared.generation
     this.generation = generation
     this.request = request
-    // A seam's generation counts its seeks from zero: a receipt base read off
-    // the old one is meaningless now — and it was prepared at a signed frame,
-    // so it has no count-in landing to hold at either. Except the one seam
-    // that is still inside a count-in: at the top of the song (a landing
-    // past the top is a rebuild, above), where the core carries the
-    // pre-roll clock across — the landing stays 0 so the dots go on
-    // counting the clicks that are still to come rather than vanishing.
-    const carriesCountIn = preparedStartProjectFrame < 0 && this.countInLandingSeconds !== null
+    // The replacement was prepared at a signed frame, so it has no count-in
+    // landing to hold at. Except the one seam that is still inside a
+    // count-in: at the top of the song (a landing past the top is a rebuild,
+    // above, unless a seek is owed), where the core carries the pre-roll clock
+    // across — the landing stays 0 so the dots go on counting the clicks that
+    // are still to come rather than vanishing. A seek still owed ends the
+    // count-in when the core applies it, on one side of the hand-over or the
+    // other, so then there is nothing of it to carry.
+    const carriesCountIn = preparedStartProjectFrame < 0 && this.countInLandingSeconds !== null &&
+      !seekOwed
     // The run goes across, though: the core hands the clock and its lap count
-    // to the new generation, so the ear is on the same run. Forgotten, a seam
-    // inside a run's first latency (Loop turned on seeks to the selection and
-    // then seams) dropped the bar below the spot the run began on.
+    // to the new generation, so the ear is on the same run, and the bar has
+    // shown the same laps of it. Forgotten, a seam inside a run's first
+    // latency (Loop turned on seeks to the selection and then seams) dropped
+    // the bar below the spot the run began on.
+    //
+    // And so does a seek still owed its receipt. The core carries the seek
+    // count across a seam too (the replacement takes the old transport's
+    // count over at the landing, and every status before it is the old
+    // transport's), so the base read when the seek went out stays good and
+    // the receipt still arrives. Forgotten here, it cost two things: the bar
+    // drew the last status again — the spot the singer had just left — until
+    // a read showed the seek applied; and the run crossed with the lap
+    // `seek()` read off the last poll, which only the receipt corrects, so
+    // after a wrap no status had shown the floor was dropped and the bar drew
+    // below the target for a whole latency.
     const run = this.run
+    const shownLap = this.shownLap
+    const owed = {
+      frame: this.pendingSeekFrame,
+      receipt: this.pendingSeekReceipt,
+      issued: this.pendingSeekIssued
+    }
     this.forgetTransport()
     if (carriesCountIn) this.countInLandingSeconds = 0
-    if (run !== null) this.run = { ...run, generation }
+    if (run !== null) {
+      this.run = { ...run, generation }
+      if (shownLap !== null && shownLap.run === run) this.shownLap = { run: this.run, lap: shownLap.lap }
+    }
+    this.pendingSeekFrame = owed.frame
+    this.pendingSeekReceipt = owed.receipt
+    this.pendingSeekIssued = owed.issued
     // The landing: the transport telemetry names the old generation until
     // the render thread hands the clock across at a block boundary, then the
     // new one. Bounded by reads, not by a timer; a seam that has not landed
@@ -1728,6 +1863,9 @@ export class DesktopNativePlaybackClient {
         this.onStateChange(this.last)
         throw error
       }
+      // A seek re-anchors the transport as a start does, so while the song
+      // plays it is watched the same way (see edgeAtMs).
+      this.edgeAtMs = Date.now()
       // One status read to keep the base fresh, and then done.
       //
       // What used to follow was a loop of up to 24 more, spinning until the
@@ -1738,9 +1876,17 @@ export class DesktopNativePlaybackClient {
       // them). The wait was never load-bearing, and its own comment said so:
       // resume() resolves either way and the callback ends the song from its
       // own frame. The bar goes on showing the target through
-      // `pendingSeekFrame` until the receipt lands on the ordinary poll, so
-      // nothing is drawn early and nothing lurches afterwards.
+      // `pendingSeekFrame` until the receipt lands, so nothing is drawn early.
       await this.refreshCommandStatus(generation, provider)
+      // That read-back usually lands before the callback has taken the seek,
+      // and the poll armed before it could be a steady 200 ms away. The bar
+      // held the target for all of that while the song played on from it,
+      // then jumped forward to where the song had got to: holds of 30-185 ms
+      // and forward steps of 50-170 ms, measured on the Mac. Pulled forward
+      // now, the receipt lands within an edge period of the core taking the
+      // seek, and the run floor holds the bar on the target only until the
+      // ear gets there.
+      this.reschedulePoll()
     })
   }
 
@@ -1926,12 +2072,43 @@ export class DesktopNativePlaybackClient {
     const key = `${status.routeGeneration}:${status.streamGeneration}:${status.transportDiscontinuities}`
     const failures = status.adapterRenderFailures
     const previous = this.transportBoundary
-    this.transportBoundary = { generation, key, failures }
+    this.transportBoundary = { generation, transportGeneration: status.transportGeneration, key, failures }
     if (!previous || previous.generation !== generation) {
       this.reanchorEchoPending = false
       return
     }
     if (key === previous.key && failures === previous.failures) return
+    // A seam landed between the two reads: the telemetry comes from the
+    // replacement now, which took the old transport's clock and counters over
+    // and announced the hand-over with a ClockReanchored of its own. That is
+    // the seam's receipt, not a host boundary — a seam never moves the
+    // source, so no Stretch anchor is owed — and re-anchoring for it cost a
+    // processor reset after EVERY seam (a "reanchor · generation N" line in
+    // the log after each one) and put a command in the mailbox just ahead of
+    // the singer's next one: measured on the Mac, a seek clicked right after
+    // an A-B loop was armed drained in the same callback as that re-anchor
+    // in 11 seams of 12, and the core's count of seek boundaries lost its
+    // receipt to it — the bar held the seek's target for the whole second
+    // (PENDING_SEEK_MAX_MS) while the song played on from it. A route or
+    // stream change in the same window is still a boundary, and render
+    // failures still re-anchor below.
+    //
+    // No echo is owed after a landing either. Nothing is re-anchored while
+    // the seam is armed (below), and one the core took before it was armed
+    // belongs to the old generation, forgotten at the seam's first read; any
+    // re-anchor still pending here was drained into the landing callback and
+    // coalesced into its one boundary, so its echo will never arrive on its
+    // own — left pending, it would swallow the next genuine boundary as the
+    // echo and keep a wedged callback from ever being re-anchored.
+    if (previous.transportGeneration !== status.transportGeneration &&
+        failures <= previous.failures) {
+      const [route, stream] = key.split(':')
+      const [previousRoute, previousStream] = previous.key.split(':')
+      if (route === previousRoute && stream === previousStream) {
+        this.reanchorEchoPending = false
+        return
+      }
+    }
     if (this.reanchorEchoPending) {
       // The echo of our own re-anchor: the discontinuity counter moves by one
       // under the clock-reanchored name and nothing else does. Re-baseline
@@ -1954,6 +2131,17 @@ export class DesktopNativePlaybackClient {
       status.lastTransportBoundary !== 'source-seek' && status.lastTransportBoundary !== 'source-loop'
     const failing = failures > previous.failures && advancing
     if (!boundary && !failing) return
+    // Nothing is re-anchored while a seam is armed. The command would name
+    // the new generation, and the core queues it on the replacement, which
+    // has taken no clock yet: it is anchored at the frame the replacement was
+    // PREPARED at and applied right after the hand-over, so a song with a
+    // time/pitch stage jumped back there. The landing resets the
+    // replacement's graph anyway, with its own ClockReanchored; a host
+    // boundary on the outgoing stream no longer wedges the graph that is
+    // rendering it; and a callback refusing blocks once the replacement has
+    // landed shows as rising failures on a later read, and is re-anchored
+    // then.
+    if (status.swapPendingGeneration !== '0') return
     if (this.reanchorPending || !this.started || status.state !== 'running') return
     this.reanchorPending = true
     void this.serialize(async (): Promise<'ok' | 'refused' | 'skipped'> => {
@@ -2112,22 +2300,24 @@ export class DesktopNativePlaybackClient {
     this.onStateChange(this.last)
   }
 
-  /** Whether a start or resume is still waiting for the status that shows it:
-   * the transport running with a current audible frame. Bounded by
-   * POLL_EDGE_MAX_MS. */
+  /** Whether a start, a resume or a seek while playing is still waiting for
+   * the status that shows it: the seek's receipt, then the transport running
+   * with a current audible frame. Bounded by POLL_EDGE_MAX_MS. */
   private awaitingTransportEdge(now: number): boolean {
     if (now - this.edgeAtMs >= POLL_EDGE_MAX_MS) return false
     if (!this.started || this.transportIntent !== 'playing') return false
+    // A seek while the song plays: its receipt is the status that says so.
+    if (this.pendingSeekFrame !== null) return true
     const status = this.last
     if (!status) return true
     const running = status.transportState === 'playing' || status.transportState === 'pre-roll'
     return !running || status.audibleProjectionQuality !== 'current'
   }
 
-  /** The next poll's delay: the edge cadence right after a start or resume
-   * until the status shows it, fast inside the burst after activity, during
-   * a pre-roll (the landing is watched frame by frame) and while a seek's
-   * read-back is outstanding; steady otherwise. */
+  /** The next poll's delay: the edge cadence right after a start, a resume or
+   * a seek while playing until a status shows it, fast inside the burst after
+   * activity, during a pre-roll (the landing is watched frame by frame) and
+   * while a seek's read-back is outstanding; steady otherwise. */
   private pollDelayMs(): number {
     const now = Date.now()
     if (this.awaitingTransportEdge(now)) return POLL_EDGE_MS

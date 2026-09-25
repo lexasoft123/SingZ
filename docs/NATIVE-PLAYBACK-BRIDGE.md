@@ -331,7 +331,15 @@ to 0 and the song comes in at the top (measured on both phones, training on
 and the click alike, before they learned it; the desktop's `reconfigure` does
 the same). The count-in starts over to the same spot, playing or paused as it
 was — and when the change turned the count-in OFF, the song starts flat at
-the landing instead, since an anchor on a plan with no pre-roll starts at 0. A
+the landing instead, since an anchor on a plan with no pre-roll starts at 0.
+At the TOP of the song the landing is the entry, so a seam while playing
+carries the pre-roll clock across correctly and is allowed. A REBUILD there (a
+refused seam, a route change, a seam before it that never landed) is anchored
+at the landing on the desktop like every other count-in rebuild, and never
+starts at the negative frame: a plan started at a signed pre-roll frame has no
+anchor, so the dots went out, and a new plan with a shorter pre-roll is
+refused after the old generation is gone. The phones start that rebuild at
+the song's first frame instead (divergence 15). A
 seam anywhere else continues the run: its position floor and its landing
 carry across, and so does the count-in's tail still sounding past it unless
 the seam changed the count-in itself (its bars, or the grid it clicks on). And **the bar holds at the landing while the core is at
@@ -474,7 +482,8 @@ adds `inputChannels`.
 | `durationFrames` | uint frames | poll |
 | `remainingPreRollFrames` | uint frames | poll |
 | `renderedFrames`, `audibleFrames` | uint frames | log |
-| `transportDiscontinuities`, `seekCount` | uint counters | log |
+| `transportDiscontinuities` | uint counter | poll on the desktop (its re-anchor watch and poll cadence); log on the phones |
+| `seekCount` | uint counter | poll — the seek receipt: one per seek command the callback applied, whatever boundary its callback emitted; a seam carries it across |
 | `cueEventsCompleted`, `nextCueEventIndex` | uint | log — parsed strictly, read by nothing |
 | `preparedStartProjectFrame` | **signed** project frames | proof — where this generation was prepared to start |
 
@@ -533,7 +542,18 @@ training or pitch change while the song renders (one prepare naming the
 running generation, no stop, no unload, the landing awaited on
 `transportGeneration`) and rebuilds when the core refuses the seam, when the
 song is paused, or on the forced route-change rebuild, where the stream a seam
-would keep is the one that went away.
+would keep is the one that went away. That wait is bounded by reads (40
+statuses), so a seam can still be ARMED when it returns: a transposed song's
+landing waits out its Stretch prime. The next change waits for the landing
+too, for at most a second (`SEAM_LANDING_WAIT_MS`, the phones'
+`SWAP_LANDING_DEADLINE_MS`; the core caps a landing's budget at 0.75 s), then
+seams from the landed generation. Before that wait, a change reading the
+armed status saw the new generation over the old transport and refused itself
+("no trustworthy signed transport position"), and a loop set right after a
+transpose was lost. A seam that never lands in that time leaves the outgoing
+transport rendering, and that transport still holds the song's position: the
+change is rebuilt from its frame, and stopping the armed generation retires
+both graphs.
 
 **A prepared graph names ONE output device, and a phone's route does not hold
 still.** The uid, the channels and the sample rate go into the prepare, and
@@ -1040,6 +1060,17 @@ unnoticed, and each is a candidate for its own change — none should be
    driver and to the phone's log. Deliberate for now: the desktop is where the
    field report came from (0.23.3, "the metronome plays, but the stems
    don't"), and main is where the warning is written.
+15. **A rebuild inside a count-in at the top of the song starts the count-in
+   over on the desktop and skips it on the phones.** The desktop anchors it
+   at the landing, as it does every count-in rebuild (`reconfigure`,
+   `countingIn`), so after the gap the singer hears a whole count-in. The
+   phones prepare it at the song's first frame (`preparedStartProjectFrame`
+   in `mobile/src/playback/native.ts`, the `: 0` arm), so the song comes in
+   at once. Only a rebuild reaches this: a refused seam, a route change, or
+   a seam before it that never landed. An ordinary change seams on every
+   platform and carries the count-in across. Pinned on the desktop by the
+   facade test "PLAYING inside a count-in at the top, a change no seam
+   takes…".
 
 ## 12. Changing the contract
 

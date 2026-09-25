@@ -40,7 +40,8 @@ const { current: watchdog } = require('../../shared/watchdog.cjs')
 
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
-const { readFileSync, existsSync, cpSync, rmSync, readdirSync } = require('node:fs')
+const { readFileSync, existsSync, rmSync, readdirSync } = require('node:fs')
+const { scratchClone } = require('./project-hold.cjs')
 const { join } = require('node:path')
 const { homedir, tmpdir } = require('node:os')
 
@@ -107,12 +108,12 @@ const shot = async (win, name) => {
   if (!existsSync(join(ROOT, PROJECT, 'lyrics.json')))
     throw new Error(`${PROJECT} has no cached lyrics.json — the panel must open with words already on it`)
 
-  if (existsSync(SCRATCH)) rmSync(SCRATCH, { recursive: true })
-  // preserveTimestamps, because the listen cache is keyed on the vocals' size
-  // AND mtime: a copy with fresh mtimes always re-listens from cold, which
-  // silently pins this driver's Cancel to the warm-up phase and makes the
-  // align-warning check below structurally unable to fire.
-  cpSync(join(ROOT, PROJECT), SCRATCH, { recursive: true, preserveTimestamps: true })
+  // A clone that keeps every time, because the listen cache is keyed on the
+  // vocals' size AND mtime: a copy with fresh mtimes always re-listens from
+  // cold, which silently pins this driver's Cancel to the warm-up phase and
+  // makes the align-warning check below structurally unable to fire. It
+  // follows links too, so nothing written into it can reach the library.
+  scratchClone(join(ROOT, PROJECT), SCRATCH)
 
   const fail = []
   let inconclusive = null

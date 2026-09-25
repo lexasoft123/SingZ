@@ -20,6 +20,8 @@
     "tests/unit/sync-log.test.ts",
     "tests/unit/gdrive-sync.test.ts",
     "tests/unit/electron-stub.ts",
+    "tests/unit/electron-stub.test.ts",
+    "tests/unit/global-setup.ts",
     "src/main/**/*",
     "src/preload/**/*",
     "src/shared/**/*"

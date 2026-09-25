@@ -614,6 +614,11 @@ struct NativePlaybackStatus {
   int64_t loopStartFrame{0};
   int64_t loopEndFrame{0};
   uint64_t loopCount{0};
+  /* One per seek command the callback has applied: the receipt every caller
+     draws a seek's target until (see NativePlaybackPositionNow). Counted where
+     the seek is applied, never per emitted SourceSeek boundary — a seek often
+     shares its callback with a boundary that outranks it (a seam landing, a
+     re-anchor, a host flag, a second seek). A seam carries it across. */
   uint64_t seekCount{0};
   uint64_t transportDiscontinuities{0};
   uint64_t presentationLatencyFrames{0};

@@ -225,6 +225,59 @@ describe('holdProjects / putBack', () => {
     expect(run.stderr).toMatch(/library files put back: Song — lyrics\.json — bytes and times put back/)
     expectAsFound(lyrics, was)
   })
+
+  it('takes the app the run started down BEFORE its exit hook puts the project back', async () => {
+    const dir = project()
+    const lyrics = join(dir, 'lyrics.json')
+    const was = found(lyrics)
+    // The app: a child of the run, still saving into the project when the
+    // run ends without reaching putBack. Left alive past the put-back, its
+    // next save would land on top of it within milliseconds. Detached,
+    // because libuv puts every other child on Windows in a job that dies with
+    // the run, a few milliseconds after the put-back, which only sometimes
+    // beats the next save. It stops itself after 20 s.
+    const app = [
+      `setInterval(() => require('node:fs').writeFileSync(${JSON.stringify(lyrics)}, 'saved by the app'), 5)`,
+      'setTimeout(() => process.exit(0), 20000)'
+    ].join('\n')
+    const script = [
+      `const { holdProjects } = require(${JSON.stringify(HELPER)})`,
+      `holdProjects([${JSON.stringify(dir)}])`,
+      `const app = require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(app)}], { detached: true, stdio: 'ignore' })`,
+      "require('node:fs').writeSync(1, String(app.pid))",
+      'setTimeout(() => process.exit(1), 500)'
+    ].join('\n')
+    const run = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', timeout: 60000 })
+    // No pid means the run died before it started the app, and proved nothing.
+    // Never kill it unchecked: pid 0 is this whole process group, test runner
+    // and all.
+    const appPid = Number(run.stdout)
+    const alive = () => {
+      if (!(appPid > 0)) return false
+      try {
+        process.kill(appPid, 0)
+        return true
+      } catch {
+        return false
+      }
+    }
+    try {
+      expect(appPid).toBeGreaterThan(0)
+      expect(run.status).toBe(1)
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      expectAsFound(lyrics, was)
+    } finally {
+      // only while it is seen alive: a pid that has gone can be someone
+      // else's by now
+      if (alive()) {
+        try {
+          process.kill(appPid, 'SIGKILL')
+        } catch {
+          // went in between
+        }
+      }
+    }
+  })
 })
 
 describe('scratchClone', () => {

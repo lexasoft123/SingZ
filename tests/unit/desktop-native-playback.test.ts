@@ -8,6 +8,7 @@ import {
   DesktopNativePlaybackClient,
   DesktopNativeProviderError,
   PENDING_SEEK_MAX_MS,
+  SEAM_LANDING_WAIT_MS,
   POLL_BURST_MS,
   POLL_EDGE_MAX_MS,
   POLL_EDGE_MS,
@@ -657,6 +658,7 @@ describe('desktop native playback facade', () => {
       pauseDesktopPlayback: vi.fn(async (value: string) => { calls.push(`pause:${value}`); return result(value, 'running') }),
       resumeDesktopPlayback: vi.fn(async (value: string) => { calls.push(`resume:${value}`); return result(value, 'running') }),
       seekDesktopPlayback: vi.fn(async (value: string) => { calls.push(`seek:${value}`); return result(value, 'running') }),
+      reanchorDesktopPlayback: vi.fn(async (value: string) => { calls.push(`reanchor:${value}`); return result(value, 'running') }),
       desktopPlaybackStatus: vi.fn(async () => nextStatus(generation, ++reads)),
       unloadDesktopPlayback: vi.fn(async (value: string) => { calls.push(`unload:${value}`); return result(value, 'unloaded', true) }),
       setDesktopPlaybackLane: vi.fn(async (value: string) => result(value, 'running')),
@@ -768,6 +770,318 @@ describe('desktop native playback facade', () => {
     await h.client.unload()
   })
 
+  it('a seam landing is the core handing the clock over, not a host boundary: no re-anchor for it — a route change at the landing or after it still gets one', async () => {
+    // The replacement takes the old transport's clock and counters over and
+    // announces the hand-over with ONE ClockReanchored of its own, so the
+    // discontinuity count moves under a name the facade re-anchors for.
+    // Measured on the Mac (CoreAudio, a real song): every seam was followed
+    // by a "reanchor · generation N" — a processor reset nobody needed — and
+    // a seek clicked right after an A-B loop was armed drained in the same
+    // callback as that re-anchor in 11 seams of 12.
+    let swapping: { from: string; to: string; landAfterRead: number; routeChange: boolean } | null = null
+    let route = '1'
+    let discontinuities = 3
+    let boundary = 'stream-generation-changed'
+    const h = seamHarness((generation, reads) => {
+      if (swapping && swapping.to === generation && reads >= swapping.landAfterRead) {
+        // The landing callback: the replacement emits its hand-over boundary,
+        // outranked by a route change that lands in the same callback.
+        discontinuities += 1
+        boundary = swapping.routeChange ? 'route-generation-changed' : 'clock-reanchored'
+        if (swapping.routeChange) route = String(Number(route) + 1)
+        swapping = null
+      }
+      const armed = swapping !== null && swapping.to === generation
+      return playing(generation, {
+        transportGeneration: armed ? swapping!.from : generation,
+        swapPendingGeneration: armed ? swapping!.from : '0',
+        routeGeneration: route,
+        transportDiscontinuities: String(discontinuities),
+        lastTransportBoundary: boundary
+      })
+    })
+    // The core answers an accepted re-anchor with its own ClockReanchored.
+    ;(h.api.reanchorDesktopPlayback as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (value: string) => {
+      h.calls.push(`reanchor:${value}`)
+      discontinuities += 1
+      boundary = 'clock-reanchored'
+      return result(value, 'running')
+    })
+    const readsSoFar = () => (h.api.desktopPlaybackStatus as unknown as ReturnType<typeof vi.fn>).mock.calls.length
+    expect(await h.start()).toBe(true)
+    await vi.advanceTimersByTimeAsync(120)
+
+    // A plain seam, landing a few reads after it is armed: nothing else is sent.
+    h.calls.length = 0
+    swapping = { from: '1', to: '2', landAfterRead: readsSoFar() + 3, routeChange: false }
+    await h.client.reconfigure({ loop: { start: 2, end: 3.5 } })
+    await vi.advanceTimersByTimeAsync(400)
+    expect(h.client.status).toMatchObject({
+      generation: '2', transportGeneration: '2', lastTransportBoundary: 'clock-reanchored'
+    })
+    expect(h.calls).toEqual(['prepare:2:swap-from-1'])
+
+    // Headphones plugged in afterwards: a host boundary on the landed
+    // generation, re-anchored exactly once, its echo consumed.
+    route = '2'
+    discontinuities += 1
+    boundary = 'route-generation-changed'
+    await vi.advanceTimersByTimeAsync(400)
+    expect(h.calls).toEqual(['prepare:2:swap-from-1', 'reanchor:2'])
+
+    // A seam whose landing callback also carries a route change: the host's
+    // boundary outranks the seam's, and it is re-anchored.
+    h.calls.length = 0
+    swapping = { from: '2', to: '3', landAfterRead: readsSoFar() + 3, routeChange: true }
+    await h.client.reconfigure({ loop: null })
+    await vi.advanceTimersByTimeAsync(400)
+    expect(h.calls).toEqual(['prepare:3:swap-from-2', 'reanchor:3'])
+    await h.client.unload()
+  })
+
+  const armedSeamHarness = () => {
+    const state = {
+      landed: false,
+      discontinuities: 3,
+      boundary: 'stream-generation-changed',
+      failures: 0
+    }
+    const h = seamHarness((generation) => {
+      const armed = generation === '2' && !state.landed
+      return playing(generation, {
+        transportGeneration: armed ? '1' : generation,
+        swapPendingGeneration: armed ? '1' : '0',
+        transportDiscontinuities: String(state.discontinuities),
+        lastTransportBoundary: state.boundary,
+        adapterRenderFailures: state.failures
+      })
+    })
+    /** One boundary on the transport being read: its count and its name. */
+    const boundary = (name: string): void => {
+      state.discontinuities += 1
+      state.boundary = name
+    }
+    return { h, state, boundary }
+  }
+
+  it('a host boundary read while a seam is armed is not re-anchored — the replacement would take the command at the frame it was prepared at — and a wedge after the landing still is', async () => {
+    // While a seam is armed a re-anchor names the NEW generation, and the
+    // core queues it on the replacement, which has taken no clock yet: it is
+    // anchored at the frame the replacement was prepared at and applied
+    // right after the hand-over, so a song with a time/pitch stage jumped
+    // back there (a core probe: the landing block rendered frame 75, against
+    // 1521 without the re-anchor). The landing resets the replacement's graph
+    // anyway, with its own ClockReanchored.
+    const { h, state, boundary } = armedSeamHarness()
+    ;(h.api.reanchorDesktopPlayback as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (value: string) => {
+      h.calls.push(`reanchor:${value}`)
+      boundary('clock-reanchored')
+      return result(value, 'running')
+    })
+    expect(await h.start()).toBe(true)
+    await vi.advanceTimersByTimeAsync(120)
+    h.calls.length = 0
+    // Armed, and not landed by the time reconfigure stops reading — a
+    // transposed song's landing waits out its Stretch prime.
+    await h.client.reconfigure({ loop: { start: 2, end: 3.5 } })
+    await vi.advanceTimersByTimeAsync(250)
+    // An XRun on the outgoing transport, read while the seam is armed.
+    boundary('sequence-gap')
+    await vi.advanceTimersByTimeAsync(250)
+    expect(h.calls).toEqual(['prepare:2:swap-from-1'])
+    // The landing: the seam's own boundary, not re-anchored either.
+    state.landed = true
+    boundary('clock-reanchored')
+    await vi.advanceTimersByTimeAsync(250)
+    expect(h.calls).toEqual(['prepare:2:swap-from-1'])
+    // The landed callback refuses every block: failures rise, no boundary.
+    state.failures += 1
+    await vi.advanceTimersByTimeAsync(250)
+    expect(h.calls).toEqual(['prepare:2:swap-from-1', 'reanchor:2'])
+    await h.client.unload()
+  })
+
+  it('a re-anchor the core took just before a seam armed: its echo, read while the seam is armed, is not re-anchored — and a wedge on the landed generation still is', async () => {
+    // The facade re-anchors generation 1 for a host clock flag, and the core
+    // takes the command; before the outgoing transport has emitted its echo
+    // a structural change arms a seam. The echo then arrives on the outgoing
+    // transport while the seam is armed — after the seam's first read has
+    // already started the new generation's bookkeeping, so it reads as a new
+    // clock boundary. Re-anchoring for it would hand the replacement a
+    // command at the frame it was prepared at. And nothing may be left owed
+    // across the landing: a stale echo would swallow what came next, here a
+    // callback refusing every block after the landing, never re-anchored.
+    const { h, state, boundary } = armedSeamHarness()
+    let echoOwed = false
+    ;(h.api.reanchorDesktopPlayback as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (value: string) => {
+      h.calls.push(`reanchor:${value}`)
+      // Taken, echoed later: the outgoing transport applies it at its next
+      // callback. The landed generation's echo comes at once.
+      if (value === '1') echoOwed = true
+      else boundary('clock-reanchored')
+      return result(value, 'running')
+    })
+    expect(await h.start()).toBe(true)
+    await vi.advanceTimersByTimeAsync(120)
+    // A clock flag from the host on generation 1: re-anchored.
+    boundary('clock-reanchored')
+    await vi.advanceTimersByTimeAsync(120)
+    expect(h.calls).toContain('reanchor:1')
+    expect(echoOwed).toBe(true)
+    h.calls.length = 0
+    // A seam armed right behind it, not landed while reconfigure reads.
+    await h.client.reconfigure({ loop: { start: 2, end: 3.5 } })
+    // The echo arrives now, on the outgoing transport, with the seam armed.
+    boundary('clock-reanchored')
+    await vi.advanceTimersByTimeAsync(250)
+    expect(h.calls).toEqual(['prepare:2:swap-from-1'])
+    // The landing, and nothing owed across it.
+    state.landed = true
+    boundary('clock-reanchored')
+    await vi.advanceTimersByTimeAsync(250)
+    expect(h.calls).toEqual(['prepare:2:swap-from-1'])
+    state.failures += 1
+    await vi.advanceTimersByTimeAsync(250)
+    expect(h.calls).toEqual(['prepare:2:swap-from-1', 'reanchor:2'])
+    await h.client.unload()
+  })
+
+  it('a structural change while the previous seam is still landing waits for the landing and seams from it — and one after a seam that never lands is rebuilt from where the song is, never refused', async () => {
+    // seam() stops reading after 40 statuses and returns with the seam still
+    // armed: a transposed song's landing waits out its Stretch prime. The
+    // next change read a status naming the new generation over the OUTGOING
+    // transport's telemetry and refused it — "Native rebuild has no
+    // trustworthy signed transport position" — so a loop set right after a
+    // transpose was not applied at all (seen ~75 ms after the transpose).
+    // The candidate `as`, armed over `from`'s transport until read `until`.
+    let seam: { as: string; from: string; until: number } | null = null
+    const h = seamHarness((generation, reads) => {
+      const armed = seam !== null && seam.as === generation && reads < seam.until
+      return playing(generation, {
+        transportGeneration: armed ? seam!.from : generation,
+        swapPendingGeneration: armed ? seam!.from : '0'
+      })
+    })
+    const readsSoFar = () => (h.api.desktopPlaybackStatus as unknown as ReturnType<typeof vi.fn>).mock.calls.length
+    expect(await h.start()).toBe(true)
+    // A transpose: a seam still armed when reconfigure stops reading.
+    seam = { as: '2', from: '1', until: readsSoFar() + 60 }
+    await h.client.reconfigure({ transpose: 2 })
+    expect(h.client.status).toMatchObject({ generation: '2', transportGeneration: '1', swapPendingGeneration: '1' })
+    // A loop right behind it waits the landing out, then seams from the
+    // generation that landed.
+    h.calls.length = 0
+    const loop = h.client.reconfigure({ loop: { start: 2, end: 3.5 } })
+    await vi.advanceTimersByTimeAsync(SEAM_LANDING_WAIT_MS)
+    await loop
+    expect(h.calls).toEqual(['prepare:3:swap-from-2'])
+    expect(h.client.status).toMatchObject({ generation: '3', transportGeneration: '3' })
+    // A seam that never lands: the change after it goes on from where the
+    // song is — the outgoing transport, still the one rendering — as a
+    // rebuild, whose stop retires both graphs.
+    seam = { as: '4', from: '3', until: Infinity }
+    await h.client.reconfigure({ transpose: 3 })
+    expect(h.client.status).toMatchObject({ generation: '4', transportGeneration: '3' })
+    h.calls.length = 0
+    const next = h.client.reconfigure({ loop: null })
+    await vi.advanceTimersByTimeAsync(SEAM_LANDING_WAIT_MS + 100)
+    await next
+    expect(h.calls).toEqual(['stop:4', 'unload:4', 'prepare:5', 'open:5', 'start:5'])
+    expect(h.prepared[h.prepared.length - 1]).toMatchObject({
+      preparedStartProjectFrame: 48_000,
+      initialTransport: { state: 'playing' }
+    })
+    await h.client.unload()
+  })
+
+  it('a rebuild starts where a seek still owed its receipt is taking the song, not where the core last reported', async () => {
+    // Paused with the playhead past a selection, the Loop button seeks to the
+    // selection's start and then arms the loop, and while paused a
+    // structural change is a REBUILD. It prepared the new generation at the
+    // frame the core last reported, so a seek the callback had not applied
+    // yet went away with the old generation and the next Play started from
+    // the old spot, wrapped into the loop (a probe on the facade: prepared
+    // at 80.05 s, not at 70 s).
+    let current: Partial<DesktopPlaybackStatus> = {
+      transportState: 'playing', renderedProjectFrame: '386400', audibleProjectFrame: '386272', seekCount: '0'
+    }
+    const h = seamHarness((generation) => playing(generation, current))
+    expect(await h.start()).toBe(true)
+    current = { ...current, transportState: 'paused', audibleProjectFrame: '386400' }
+    await h.client.pause()
+    // The core has not taken the seek: every read still says 8.05 s, seekCount 0.
+    await h.client.seek(2)
+    h.calls.length = 0
+    await h.client.reconfigure({ loop: { start: 2, end: 3.5 } })
+    expect(h.calls).toEqual(['stop:1', 'unload:1', 'prepare:2', 'open:2', 'start:2'])
+    expect(h.prepared[1]).toMatchObject({
+      preparedStartProjectFrame: 96_000,
+      initialTransport: { state: 'paused', loop: { startProjectFrame: 96_000, endProjectFrame: 168_000 } }
+    })
+    // A seek past the loop's end starts where the core would have put it:
+    // folded into the loop with no lap, as its resolvedSeekFrame folds it.
+    await h.client.seek(4)
+    await h.client.reconfigure({ playbackRate: 1.1 })
+    expect(h.prepared[2]).toMatchObject({ preparedStartProjectFrame: 120_000 })
+    // A seek the core HAS taken is owed nothing: the rebuild starts at the
+    // frame the core reports, as before — here a frame that is not the seek's
+    // target (144000), so the leg can tell which one the rebuild used.
+    await h.client.seek(3)
+    current = { ...current, renderedProjectFrame: '146400', audibleProjectFrame: '146400', seekCount: '1' }
+    await h.client.reconfigure({ playbackRate: 1.2 })
+    expect(h.prepared[3]).toMatchObject({ preparedStartProjectFrame: 146_400 })
+    // A seek never acknowledged within PENDING_SEEK_MAX_MS is no longer owed
+    // — the bar has given it up by then — so the rebuild starts at the frame
+    // the core reports, not at that target (120000).
+    await h.client.seek(2.5)
+    vi.advanceTimersByTime(PENDING_SEEK_MAX_MS + 1)
+    await h.client.reconfigure({ playbackRate: 1.3 })
+    expect(h.prepared[4]).toMatchObject({ preparedStartProjectFrame: 146_400 })
+    await h.client.unload()
+  })
+
+  it('a seek still owed its receipt inside a count-in is the singer moving: the rebuild starts there, flat, not anchored at the old landing', async () => {
+    // The core cancels a count-in's landing when it applies a seek, and the
+    // song plays on from the seek's target. A structural change inside the
+    // count-in is otherwise a rebuild anchored at the landing — which, with a
+    // seek still owed, would count in again to the spot the singer left.
+    let current: Partial<DesktopPlaybackStatus> = {
+      transportState: 'pre-roll', renderedProjectFrame: '-96000', audibleProjectFrame: '-96128', seekCount: '0'
+    }
+    const h = seamHarness((generation) => playing(generation, current))
+    expect(await h.client.prepareAndStart(countInRequest(3))).toBe(true)
+    current = { ...current, transportState: 'paused', renderedProjectFrame: '-48000', audibleProjectFrame: '-48000' }
+    await h.client.pause()
+    await h.client.seek(1)
+    h.calls.length = 0
+    await h.client.reconfigure({ playbackRate: 1.1 })
+    expect(h.calls).toEqual(['stop:1', 'unload:1', 'prepare:2', 'open:2', 'start:2'])
+    expect(h.prepared[1]).toMatchObject({ preparedStartProjectFrame: 48_000, initialTransport: { state: 'paused' } })
+    expect(h.prepared[1].playback.transport).not.toHaveProperty('countInAnchorSeconds')
+    await h.client.unload()
+  })
+
+  it('PLAYING inside a mid-song count-in, a change with a seek still owed is a seam that carries none of the count-in', async () => {
+    // Otherwise such a change is a rebuild anchored at the landing: with a
+    // seek owed that counted in again to the spot the singer had left. It is
+    // a seam now — the outgoing transport applies the seek before the
+    // hand-over, or the replacement right after it, and either way the
+    // count-in is over — so no landing is held and no dots are counted.
+    let current: Partial<DesktopPlaybackStatus> = {
+      transportState: 'pre-roll', renderedProjectFrame: '-96000', audibleProjectFrame: '-96128', seekCount: '0'
+    }
+    const h = seamHarness((generation) => playing(generation, current))
+    expect(await h.client.prepareAndStart(countInRequest(3))).toBe(true)
+    expect(h.client.countInHeard()).not.toBeNull()
+    await h.client.seek(1)
+    h.calls.length = 0
+    await h.client.reconfigure({ metronome: { ...countInRequest(3).metronome, click: true } })
+    expect(h.calls).toEqual(['prepare:2:swap-from-1'])
+    expect(h.client.countInHeard()).toBeNull()
+    expect(h.client.audibleSeconds()).toBe(1)
+    await h.client.unload()
+  })
+
   it('transportParked follows the intent, not a snapshot that still says stopped', async () => {
     // Every status reads 'stopped' — what a generation reports for ~80 ms
     // after its start is acknowledged. A pause issued then used to be
@@ -833,8 +1147,10 @@ describe('desktop native playback facade', () => {
   })
 
   it('two seeks in flight keep the LAST target until the core has applied both', async () => {
-    // A scrub is several seeks in flight, and the core applies them one per
-    // callback block. Retiring the target the moment `seekCount` MOVED
+    // A scrub is several seeks in flight, and the core may apply them a
+    // callback block apart (it drains its whole mailbox every block, and
+    // counts every seek it applies, so two drained together move the count
+    // by two at once). Retiring the target the moment `seekCount` MOVED
     // retired the second seek's target on the first seek's receipt: the bar
     // showed the first spot for a poll, then jumped to the second — the same
     // lurch this file's seek path was just cured of, one block wide. The
@@ -2419,11 +2735,16 @@ describe('desktop native playback facade', () => {
    *  facade's. Commands take effect the moment they are sent (a seek
    *  `seekDelayMs` later, when set); the core's own edges (a count-in's
    *  landing, a loop's wrap) at the times queued in `dues`; and a seam lands
-   *  at the first read of the generation it prepared. */
-  const continuousCore = (latency: number, rate = 1) => {
+   *  at the first read of the generation it prepared. With `quantum` set, the
+   *  core publishes its status once a callback of that many output frames, as
+   *  the real one does, and a read between two callbacks sees the last one. */
+  const continuousCore = (latency: number, rate = 1, quantum = 0) => {
     type State = DesktopPlaybackStatus['transportState']
     const perMs = 48 * rate
     const lag = Math.round(latency * rate)
+    const born = Date.now()
+    const publishedAt = (): number =>
+      quantum > 0 ? born + (Math.floor(((Date.now() - born) * 48) / quantum) * quantum) / 48 : Date.now()
     const core = {
       state: 'stopped' as State,
       frame: 0,
@@ -2435,16 +2756,16 @@ describe('desktop native playback facade', () => {
       dues: [] as Array<{ at: number; state: State; frame: number; lap: boolean; seek?: boolean }>
     }
     const moving = (): boolean => core.state === 'playing' || core.state === 'pre-roll'
-    const head = (): number => core.frame + (moving() ? (Date.now() - core.at) * perMs : 0)
+    const head = (at = Date.now()): number => core.frame + (moving() ? Math.max(0, at - core.at) * perMs : 0)
     const edge = (state: State, frame: number, at = Date.now()): void => {
       core.state = state
       core.frame = frame
       core.at = at
     }
     // The core's own edges happen in the core's time, read or not.
-    const settle = (): void => {
+    const settle = (now = Date.now()): void => {
       core.dues.sort((a, b) => a.at - b.at)
-      while (core.dues.length > 0 && core.dues[0].at <= Date.now()) {
+      while (core.dues.length > 0 && core.dues[0].at <= now) {
         const due = core.dues.shift()!
         if (due.seek) core.seekCount++
         edge(due.state, due.frame, due.at)
@@ -2453,16 +2774,18 @@ describe('desktop native playback facade', () => {
     }
     let transportGeneration = '1'
     const h = seamHarness((generation) => {
-      settle()
-      // A seam hands the clock across mid-song: the head carries on, and the
-      // projection starts over from the landing.
+      const now = publishedAt()
+      settle(now)
+      // A seam hands the clock across mid-song, at a callback: the head
+      // carries on, and the projection starts over from the landing.
       if (generation !== transportGeneration) {
         transportGeneration = generation
-        edge(core.state, head())
+        const at = Math.max(now, core.at)
+        edge(core.state, head(at), at)
       }
-      const rendered = head()
+      const rendered = Math.round(head(now))
       // A latency of OUTPUT frames after the edge, whatever the rate.
-      const matured = (Date.now() - core.at) * 48 >= latency
+      const matured = Math.round((now - core.at) * 48) >= latency
       return playing(generation, {
         transportState: core.state,
         renderedProjectFrame: String(rendered),
@@ -2661,6 +2984,191 @@ describe('desktop native playback facade', () => {
     await c.h.client.unload()
   })
 
+  it('a status up to a callback stale never folds the bar back into a loop lap it has shown, nor past the lap its run began in', async () => {
+    // The core publishes its status once a callback, so a read between two
+    // callbacks is up to a callback stale, and each status the bar switches
+    // to can move it by up to a callback either way. Right after a wrap the
+    // projection has not matured and the head less the latency stands in for
+    // the ear. When the status before had already wrapped the bar with the
+    // ear, a staler stand-in landed a hair short of the loop's start and was
+    // folded into the lap the head had left: the loop's start, its tail, then
+    // its start again, two whole-loop jumps. Measured on the Mac's plain
+    // route in 6 of ~190 wraps of a short loop. And a loop shorter than the
+    // latency (the app allows 0.05 s) folded the stand-in back past the lap
+    // the run began in, so after Play the bar ran through the loop before the
+    // first note had reached the ear.
+    // 512-frame callbacks (the Mac's route) and a read every 47 ms, which
+    // lines up with neither the callbacks nor the loop, so the laps meet every
+    // phase of both. The bar is sampled every millisecond: never ahead of the
+    // ear and never more than a callback behind it, one wrap for each of the
+    // ear's, and no step back of more than a callback in between.
+    const quantum = 512
+    const A = 70 * 48_000
+    const route = async (label: string, latency: number, span: number, laps: number): Promise<void> => {
+      vi.setSystemTime(new Date('2026-09-25T12:00:00Z'))
+      const c = continuousCore(latency, 1, quantum)
+      const B = A + span
+      const from = A + span / 2
+      c.core.frame = from
+      c.core.loop = { start: A, end: B }
+      expect(await c.h.client.prepareAndStart({ ...countInRequest(from / 48_000), countIn: false })).toBe(true)
+      c.stopPolling()
+      const played = Date.now()
+      // The head reaches B half a lap after Play, then wraps every lap.
+      const lapMs = span / 48
+      for (let k = 0; k < laps; k++) {
+        c.core.dues.push({ at: played + lapMs / 2 + k * lapMs, state: 'playing', frame: A, lap: true })
+      }
+      const ear = (t: number): number => {
+        const frame = from + (t - played) * 48 - latency
+        if (frame < from) return from
+        return frame >= B ? A + ((frame - A) % span) : frame
+      }
+      const refresh = () => (c.h.client as unknown as { refresh: (g: string) => Promise<void> }).refresh(c.h.generationNow())
+      const misses: string[] = []
+      let before: number | null = null
+      let heardBefore: number | null = null
+      let wraps = 0
+      let earWraps = 0
+      // Reads whose stand-in, folded as it used to be, lands in a lap before
+      // one the bar has shown: the reads this is about, counted so that a
+      // sweep that never meets one fails rather than passes.
+      let crossings = 0
+      for (let t = 0; t <= laps * lapMs; t++) {
+        if (t % 47 === 0) {
+          await refresh()
+          const status = c.h.client.status!
+          const standIn = Number(status.renderedProjectFrame) - latency
+          if (status.audibleProjectionQuality !== 'current' && standIn < A &&
+              Number(status.loopCount) - Math.ceil((A - standIn) / span) < wraps) crossings++
+        }
+        const bar = c.h.client.audibleSeconds()! * 48_000
+        const heard = ear(Date.now())
+        let behind = heard - bar
+        if (behind < -span / 2) behind += span
+        if (behind > span / 2) behind -= span
+        if (behind < -1e-6 || behind > quantum + 1e-6 || bar < A - 1e-6 || bar >= B) {
+          misses.push(`${label}, ${t} ms after Play: the bar ${(bar - A).toFixed(0)} frames into the loop, the ear ${(heard - A).toFixed(0)}`)
+        }
+        if (before !== null) {
+          const step = bar - before
+          if (step > span / 2) {
+            misses.push(`${label}, ${t} ms after Play: a whole loop forward, ${(before - A).toFixed(0)} to ${(bar - A).toFixed(0)} frames into it`)
+          } else if (step < -span / 2) {
+            wraps++
+          } else if (step < -quantum - 1e-6) {
+            misses.push(`${label}, ${t} ms after Play: ${(-step).toFixed(0)} frames back`)
+          }
+        }
+        if (heardBefore !== null && heard - heardBefore < -span / 2) earWraps++
+        before = bar
+        heardBefore = heard
+        vi.advanceTimersByTime(1)
+      }
+      expect(misses.slice(0, 6), `${label}: ${misses.length} samples wrong`).toEqual([])
+      expect(wraps, `${label}: the bar wrapped ${wraps} times for the ear's ${earWraps}`).toBe(earWraps)
+      expect(crossings, `${label}: no read crossed back into a lap the bar had shown`).toBeGreaterThan(0)
+      await c.h.client.unload()
+    }
+    await route('a plain route', 540, 12_960, 60)
+    await route('a transposed song', 7_260, 12_960, 60)
+    await route('a loop shorter than the latency', 9_600, 7_200, 60)
+  })
+
+  it('a seam that lands a callback after a loop wrap keeps the lap the bar has shown', async () => {
+    // The core hands the clock and the lap count across a seam, so the laps
+    // the bar has shown go across with the run. Forgotten, a seam landing at
+    // the callback after a wrap drew the loop's tail again: its first status
+    // stands in for the ear from a head read before the ear wrapped.
+    vi.setSystemTime(new Date('2026-09-25T12:00:00Z'))
+    const c = continuousCore(540, 1, 512)
+    const A = 70 * 48_000
+    const span = 12_960
+    const B = A + span
+    const from = A + span / 2
+    c.core.frame = from
+    c.core.loop = { start: A, end: B }
+    expect(await c.h.client.prepareAndStart({ ...countInRequest(from / 48_000), countIn: false })).toBe(true)
+    c.stopPolling()
+    const played = Date.now()
+    // Callbacks every 10.67 ms from Play; the head wraps at 135 ms, between
+    // the ones at 128 and 138.67, and the ear 11.25 ms later, at 146.25.
+    c.core.dues.push({ at: played + 135, state: 'playing', frame: A, lap: true })
+    const refresh = () => (c.h.client as unknown as { refresh: (g: string) => Promise<void> }).refresh(c.h.generationNow())
+    const ear = (t: number): number => {
+      const frame = from + (t - played) * 48 - 540
+      return frame >= B ? A + (frame - B) : Math.max(from, frame)
+    }
+    const misses: string[] = []
+    let before: number | null = null
+    const look = (): number => {
+      const bar = c.h.client.audibleSeconds()! * 48_000
+      let behind = ear(Date.now()) - bar
+      if (behind < -span / 2) behind += span
+      if (behind < -1e-6 || behind > 512 + 1e-6) misses.push(`${Date.now() - played} ms after Play: the bar ${(bar - A).toFixed(0)} frames into the loop`)
+      if (before !== null && bar - before > span / 2) misses.push(`${Date.now() - played} ms after Play: a whole loop forward`)
+      before = bar
+      return bar
+    }
+    // A matured status read at the callback, 128 ms after Play: its
+    // projection wraps the bar with the ear.
+    vi.advanceTimersByTime(128)
+    await refresh()
+    expect(c.h.client.status?.audibleProjectionQuality).toBe('current')
+    let bar = 0
+    while (Date.now() - played < 147) {
+      bar = look()
+      vi.advanceTimersByTime(1)
+    }
+    bar = look()
+    expect(bar).toBeGreaterThanOrEqual(A)
+    expect(bar).toBeLessThan(A + 512)
+    // The seam lands at the callback of 138.67 ms, with the head 176 frames
+    // into the new lap and the ear 364 short of it by that callback's clock.
+    await c.h.client.reconfigure({ metronome: { ...countInRequest(60).metronome, click: true } })
+    expect(c.h.client.status?.transportGeneration).toBe('2')
+    for (let t = 0; t < 60; t++) {
+      if (t % 10 === 0) await refresh()
+      look()
+      vi.advanceTimersByTime(1)
+    }
+    expect(misses.slice(0, 6), `${misses.length} samples wrong`).toEqual([])
+    await c.h.client.unload()
+  })
+
+  it('in a loop shorter than the latency a seek holds the bar on its target until the ear gets there, even when the head wraps before the bar is next drawn', async () => {
+    // The head of a 0.15 s loop on a 200 ms route is more than a lap ahead of
+    // the ear. Taken 1 ms short of the loop's end, the seek has the head wrap
+    // before the bar is drawn again, and the stand-in, two laps back from the
+    // head's, belongs to a lap before the run's own, where no floor holds:
+    // the bar showed a spot the ear had not reached.
+    vi.setSystemTime(new Date('2026-09-25T12:00:00Z'))
+    const c = continuousCore(9600)
+    const A = 70 * 48_000
+    const span = 7_200
+    const B = A + span
+    c.core.frame = A + 3_600
+    c.core.loop = { start: A, end: B }
+    expect(await c.h.client.prepareAndStart({ ...countInRequest((A + 3_600) / 48_000), countIn: false })).toBe(true)
+    c.stopPolling()
+    vi.advanceTimersByTime(30)
+    const target = B - 48
+    await c.h.client.seek(target / 48_000)
+    const seeked = Date.now()
+    for (let k = 0; k < 4; k++) c.core.dues.push({ at: seeked + 1 + k * 150, state: 'playing', frame: A, lap: true })
+    vi.advanceTimersByTime(5)
+    await (c.h.client as unknown as { refresh: (g: string) => Promise<void> }).refresh(c.h.generationNow())
+    expect(c.h.client.status?.loopCount).toBe('1')
+    expect(c.h.client.audibleSeconds()).toBe(target / 48_000)
+    const ear = (dt: number): number => {
+      const frame = target + (dt + 5) * 48 - 9600
+      return frame < target ? target : frame >= B ? A + ((frame - A) % span) : frame
+    }
+    await c.follow('the seek and the laps after it', 400, ear)
+    c.verdict()
+    await c.h.client.unload()
+  })
+
   it('a seek right after a wrap the facade never read takes the lap the core took it in', async () => {
     // A song looping between two polls wraps with no status to say so, and
     // `seek()` used to take the run's lap from the last poll: a whole wrap
@@ -2717,6 +3225,51 @@ describe('desktop native playback facade', () => {
     await c.h.client.unload()
   })
 
+  it('a seek still owed its receipt when a seam arms keeps its target across it: the bar neither goes back to where it was nor drops below the target', async () => {
+    // The core carries the seek count across a seam (the replacement takes
+    // the old transport's count over at the landing; every status before it
+    // is the old transport's), so the receipt still arrives — and until it
+    // does, only the seek knows where the song is going. Forgotten at the
+    // seam, it cost two things. The bar drew the last status again: the spot
+    // the singer had just left, until a read showed the seek applied (the
+    // Loop button with the playhead past the selection seeks to its start,
+    // then arms the loop, a seam). And the run crossed the seam with the lap
+    // `seek()` read off the last poll, which only the receipt corrects: after
+    // a wrap no status had shown, that lap was one behind, the floor was
+    // dropped, and the bar drew BELOW the target for a whole latency — on a
+    // 200 ms route, 71.807 s after a seek to 72 s.
+    vi.setSystemTime(new Date('2026-09-25T12:00:00Z'))
+    const c = continuousCore(9600)
+    const A = 70 * 48_000
+    const B = A + 4 * 48_000
+    c.core.frame = 80 * 48_000
+    expect(await c.h.client.prepareAndStart({ ...countInRequest(80), countIn: false })).toBe(true)
+    c.stopPolling()
+    await c.follow('Play at 80 s', 250, heard(80 * 48_000, c.perMs, c.lag))
+
+    // The Loop button, playing past the selection: a seek back to its start
+    // that the core takes 5 ms after it is sent, and the loop armed behind it.
+    c.core.seekDelayMs = 5
+    await c.h.client.seek(A / 48_000)
+    const back = Date.now()
+    await c.h.client.reconfigure({ loop: { start: 70, end: 74 } })
+    c.core.loop = { start: A, end: B }
+    await c.follow('the loop armed right behind a seek back to its start', 250,
+      () => heard(A, c.perMs, c.lag)(Date.now() - back - 5))
+
+    // A wrap nobody read, then a mid-loop seek and a seam before its receipt.
+    c.core.dues.push({ at: back + 5 + 4000, state: 'playing', frame: A, lap: true })
+    vi.advanceTimersByTime(back + 5 + 4020 - Date.now())
+    const mid = A + 2 * 48_000
+    await c.h.client.seek(mid / 48_000)
+    const seeked = Date.now()
+    await c.h.client.reconfigure({ metronome: { ...countInRequest(60).metronome, click: true } })
+    await c.follow('a mid-loop seek after an unread wrap, a seam before its receipt', 250,
+      () => heard(mid, c.perMs, c.lag)(Date.now() - seeked - 5))
+    c.verdict()
+    await c.h.client.unload()
+  })
+
   it('a seek the core never acknowledges gives the bar back to the core\'s clock, loop laps and all', async () => {
     // The target is dropped after PENDING_SEEK_MAX_MS, and the run with it,
     // which also loses the lap the ear was known to be in. The next matured
@@ -2747,6 +3300,44 @@ describe('desktop native playback facade', () => {
     await c.follow('a seek the core never took, then a lap', 1900 - (seeked - started),
       () => (Date.now() - seeked < PENDING_SEEK_MAX_MS ? target : lap(Date.now())))
     c.verdict()
+    await c.h.client.unload()
+  })
+
+  it('a seek while the song plays is watched every edge period until its receipt, so the bar leaves the target with the ear instead of a steady poll later', async () => {
+    // seek() read one status back and left the next look to the poll already
+    // armed: a steady 200 ms one while a song simply plays. The read-back
+    // lands before the callback takes the seek, so the bar held the target
+    // until that poll while the song played on from it, then jumped forward:
+    // holds of 30-185 ms and forward steps of 50-170 ms, measured on the Mac.
+    // The poller runs here, as it does in the app; the core takes the seek
+    // at its next callback, 4 ms after it arrives.
+    vi.setSystemTime(new Date('2026-09-25T12:00:00Z'))
+    const c = continuousCore(540)
+    c.core.frame = 60 * 48_000
+    expect(await c.h.client.prepareAndStart({ ...countInRequest(60), countIn: false })).toBe(true)
+    const reads = (): number => (c.h.api.desktopPlaybackStatus as unknown as ReturnType<typeof vi.fn>).mock.calls.length
+    // Past the burst, into the steady cadence, and 20 ms after a steady poll.
+    await vi.advanceTimersByTimeAsync(POLL_BURST_MS + 600)
+    const steady = reads()
+    while (reads() === steady) await vi.advanceTimersByTimeAsync(1)
+    await vi.advanceTimersByTimeAsync(20)
+    c.core.seekDelayMs = 4
+    const target = 70 * 48_000
+    await c.h.client.seek(70)
+    const seeked = Date.now()
+    const atSeek = reads()
+    const misses: string[] = []
+    for (let t = 0; t <= 300; t++) {
+      const bar = c.h.client.audibleSeconds()!
+      const ear = Math.max(target, target + (Date.now() - seeked - 4) * 48 - 540) / 48_000
+      if (Math.abs(bar - ear) > 1e-9) misses.push(`${t} ms after the seek: the bar at ${bar.toFixed(6)} s, the ear at ${ear.toFixed(6)} s`)
+      await vi.advanceTimersByTimeAsync(1)
+    }
+    expect(misses.slice(0, 6), `${misses.length} of 301 samples away from the ear`).toEqual([])
+    // And the edge cadence ends with the projection's maturity: two edge
+    // looks, then the burst, not 10 ms reads for the whole POLL_EDGE_MAX_MS.
+    expect(reads() - atSeek).toBeLessThanOrEqual(10)
+    ;(c.h.client as unknown as { stopPolling: () => void }).stopPolling()
     await c.h.client.unload()
   })
 
@@ -3008,6 +3599,49 @@ describe('desktop native playback facade', () => {
       landingSeconds: 0, secondsToLanding: -(24_000 + 128) / 48_000, total: 4
     })
     expect(h.client.audibleSeconds()).toBe(0)
+    await h.client.unload()
+  })
+
+  it('PLAYING inside a count-in at the top, a change no seam takes — a route change, or one behind a seam that never landed — is rebuilt anchored at the landing, never at the negative frame', async () => {
+    // Only the seam may carry a pre-roll clock across. A rebuild handed the
+    // negative frame as its signed start gets no anchor — the dots vanished —
+    // and the core refuses a start below a NEW plan's shorter pre-roll after
+    // the old generation is gone.
+    // The candidate `as`, armed over `from`'s transport for good.
+    let seam: { as: string; from: string } | null = null
+    const current: Partial<DesktopPlaybackStatus> = {
+      transportState: 'pre-roll', renderedProjectFrame: '-48000', audibleProjectFrame: '-48128',
+      presentationLatencyFrames: '128', preRollFrames: '96000', countInEventCount: 4, countInBeatsPerBar: 4
+    }
+    const h = seamHarness((generation) => {
+      const armed = seam !== null && seam.as === generation
+      return playing(generation, {
+        ...current,
+        transportGeneration: armed ? seam!.from : generation,
+        swapPendingGeneration: armed ? seam!.from : '0'
+      })
+    })
+    expect(await h.client.prepareAndStart(countInRequest(0))).toBe(true)
+    // A route change: the forced rebuild.
+    h.calls.length = 0
+    await h.client.reconfigure({}, { force: true })
+    expect(h.calls).toEqual(['stop:1', 'unload:1', 'prepare:2', 'open:2', 'start:2'])
+    expect(h.prepared[1]).not.toHaveProperty('preparedStartProjectFrame')
+    expect(h.prepared[1].initialTransport).toEqual({ state: 'playing' })
+    expect(h.client.countInHeard()).toMatchObject({ landingSeconds: 0, total: 4 })
+    // The click turned on is a seam that never lands; the change behind it
+    // is the rebuild, and the same shape.
+    seam = { as: '3', from: '2' }
+    await h.client.reconfigure({ metronome: { ...countInRequest(0).metronome, click: true } })
+    expect(h.client.status).toMatchObject({ generation: '3', transportGeneration: '2' })
+    h.calls.length = 0
+    const next = h.client.reconfigure({ playbackRate: 1.1 })
+    await vi.advanceTimersByTimeAsync(SEAM_LANDING_WAIT_MS + 100)
+    await next
+    expect(h.calls).toEqual(['stop:3', 'unload:3', 'prepare:4', 'open:4', 'start:4'])
+    expect(h.prepared[3]).not.toHaveProperty('preparedStartProjectFrame')
+    expect(h.prepared[3].initialTransport).toEqual({ state: 'playing' })
+    expect(h.client.countInHeard()).toMatchObject({ landingSeconds: 0, total: 4 })
     await h.client.unload()
   })
 })
