@@ -29,6 +29,7 @@
 // Every E2E driver runs under a deadline: a hang prints where it was and
 // exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
 require('../../shared/watchdog.cjs').arm('bar-edit-e2e')
+const { current: watchdog } = require('../../shared/watchdog.cjs')
 
 const { mkdirSync, readFileSync, rmSync, writeFileSync } = require('node:fs')
 const { homedir, tmpdir } = require('node:os')
@@ -61,6 +62,105 @@ writeFileSync(join(PROFILE, 'settings.json'), JSON.stringify({ projectsRoot: LIB
 
 const env = { ...process.env, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1', SINGZ_USERDATA_DIR: PROFILE }
 const beat = () => JSON.parse(readFileSync(PJ, 'utf8')).settings.beat
+
+/** Seconds the reopened app gets to re-derive a stale grid and save it. A
+ *  loaded Mac took 13 s from the reopen; the slowest fleet machine runs about
+ *  ten times slower, and the pack's beat model alone is allowed 180 s there
+ *  (beats-ml.ts). E2E_STEP_SCALE multiplies it for anything slower still. */
+const HEAL_BUDGET_S = 300
+
+/** How long saving must have been quiet (since the detection was first seen,
+ *  and since the newest save started or ended) before the grid counts as on
+ *  disk. A save queued behind another starts milliseconds after it ends (8 ms
+ *  measured on a Mac); this is room for a slow machine. */
+const SAVE_SETTLE_MS = 2000
+
+/** What the reopened app has done about its stale grid, read through the
+ *  page: whether a beat detection has run in this window (every in-app
+ *  detection publishes `__beatDbg`; the automatic one says 'auto'), the page's
+ *  clock (the same wall clock main's log uses), and from main's log when each
+ *  save of the project started, finished and succeeded. The log is read FIRST,
+ *  so a save listed while no detection had been published is older than the
+ *  detection and cannot hold its grid. */
+const healState = (win) =>
+  win.evaluate(async () => {
+    const log = await window.singz.getLog()
+    const at = (re) => log.filter((x) => re.test(x.line)).map((x) => x.t)
+    const d = window.__beatDbg
+    return {
+      why: d ? d.why : null,
+      now: Date.now(),
+      started: at(/^marked dirty: .* \(save\)$/),
+      finished: at(/^marked dirty: .* \(save \(finished\)\)$/),
+      saved: at(/^project saved: /)
+    }
+  })
+
+/**
+ * Wait until the reopened app has re-derived the stale grid AND saved it: the
+ * checks read the file, and closing before the save lands loses it. A fixed
+ * 8 s sleep stood here and went red on a loaded Mac, where the save landed
+ * 8-9 s after the reopen settled.
+ *
+ * The first save to end after the detection is not necessarily the grid's: a
+ * reopen that also owes a melody and a key saves the key a beat pass earlier,
+ * so that save starts just BEFORE the detection, ends after it still carrying
+ * the stale grid, and the grid's own save is queued behind it. So the wait
+ * also wants no save running and none started or ended for SAVE_SETTLE_MS.
+ *
+ * Polled from NODE, never with waitForFunction: that polls on
+ * requestAnimationFrame, which the hidden window on the Windows field laptop
+ * services about once a second, and handed an async page function it does
+ * not poll at all. And polled through the PAGE, never by reading project.json
+ * while the app runs: the app replaces that file by rename, and on Windows a
+ * rename cannot replace a file another process holds open, so a poll of the
+ * file could fail the very save it is waiting for.
+ *
+ * Soft on the deadline: it says what it saw and returns, and the checks that
+ * follow report what reached disk.
+ */
+async function waitForHeal(win) {
+  const t0 = Date.now()
+  let olderSaves = -Infinity // main's time of the newest save logged before the detection
+  let firstSeen = null // when the page first showed the detection
+  let seen = { why: null, now: 0, started: [], finished: [], saved: [] }
+  const running = () => seen.started.length > seen.finished.length
+  const saw = () => `detector ${seen.why ?? 'not run'}, ${seen.saved.length} save(s)${running() ? ', one running' : ''}`
+  let said = t0
+  let over = false
+  try {
+    await watchdog().run(
+      'the stale grid is re-derived and saved',
+      HEAL_BUDGET_S,
+      async () => {
+        while (!over) {
+          seen = await healState(win)
+          if (seen.why !== 'auto') olderSaves = Math.max(olderSaves, ...seen.saved)
+          else {
+            firstSeen ??= seen.now
+            const quiet = seen.now - Math.max(firstSeen, ...seen.started, ...seen.finished)
+            if (!running() && quiet >= SAVE_SETTLE_MS && seen.saved.some((t) => t > olderSaves)) return
+          }
+          // The watchdog's idle deadline is shorter than this budget once
+          // E2E_STEP_SCALE stretches it, and a silent wait reads as a hang.
+          if (Date.now() - said >= 30000) {
+            said = Date.now()
+            console.log(`  still waiting after ${Math.round((said - t0) / 1000)} s: ${saw()}`)
+          }
+          await new Promise((r) => setTimeout(r, 250))
+        }
+      },
+      { soft: true }
+    )
+    const last = (Math.max(...seen.saved) - t0) / 1000
+    console.log(`re-detected and saved: ${saw()}, the last ${last.toFixed(1)} s after the reopen settled`)
+  } catch (e) {
+    if (e.name !== 'StepTimeout') throw e
+    console.log(`${e.message}: ${saw()}`)
+  } finally {
+    over = true
+  }
+}
 
 async function open() {
   const app = await _electron.launch({ executablePath: require('electron'), args: [APP], env })
@@ -137,7 +237,7 @@ async function showGrid(win) {
   doc.settings.beat.detVersion = 1
   writeFileSync(PJ, JSON.stringify(doc, null, 2))
   ;({ app, win } = await open())
-  await new Promise((r) => setTimeout(r, 8000))
+  await waitForHeal(win)
   await app.close()
 
   const healed = beat()
