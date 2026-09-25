@@ -54,6 +54,13 @@ export const POLL_EDGE_MS = 10
  *  transport still parked this long after the command is not waiting for its
  *  next callback, and the ordinary burst covers whatever it is doing. */
 export const POLL_EDGE_MAX_MS = 500
+/** How long a structural change waits for the previous one's seam to land
+ *  (see reconfigure) — the phones' SWAP_LANDING_DEADLINE_MS. A seam lands one
+ *  to three blocks after it is armed, or once its Stretch prime's budget has
+ *  run, which the core caps at 0.75 s (kSwapLandingBudgetCapSeconds); so this
+ *  is past any healthy landing, and only a stream that delivers no blocks
+ *  runs it out. */
+export const SEAM_LANDING_WAIT_MS = 1000
 /** How long the bar may show a seek's target while waiting for the core's
  *  receipt. Generous against the real wait (the callback applies a queued seek
  *  at its next period) and short enough that a core which never acknowledges
@@ -1356,16 +1363,46 @@ export class DesktopNativePlaybackClient {
         return
       }
       const oldGeneration = this.generation
-      const status = await this.requireCommandStatus(
+      let status = await this.requireCommandStatus(
         oldGeneration,
         request.provider,
         'Native structural rebuild could not read the current transport.'
       )
+      // A SEAM STILL LANDING. seam() stops reading after 40 statuses and
+      // returns with the seam armed — a transposed song's landing waits out
+      // its Stretch prime — and until it lands every status names the new
+      // generation over the OUTGOING transport's telemetry. The next change
+      // read that as untrustworthy and refused it outright ("no trustworthy
+      // signed transport position"): a loop set right after a transpose was
+      // not applied. It waits for the landing now, bounded as the phones bound
+      // theirs, and then seams from the landed generation like any change.
+      const landingSince = Date.now()
+      while (status.swapPendingGeneration !== '0' &&
+          Date.now() - landingSince < SEAM_LANDING_WAIT_MS) {
+        await new Promise((resolve) => setTimeout(resolve, POLL_EDGE_MS))
+        status = await this.requireCommandStatus(
+          oldGeneration,
+          request.provider,
+          'Native structural rebuild could not read the current transport.'
+        )
+      }
+      if (status.swapPendingGeneration !== '0') {
+        console.warn(
+          `Native seam ${status.swapPendingGeneration} → ${oldGeneration} did not land in ` +
+            `${SEAM_LANDING_WAIT_MS} ms; the change rebuilds from where the song is.`
+        )
+      }
       // A status-poll failure is allowed to quarantine the generation while
       // the rebuild is queued behind that read. Revalidate immediately before
       // the first destructive command so rebuild can never escape quarantine.
       this.assertCommandableGeneration()
-      if (status.generation !== oldGeneration || status.transportGeneration !== oldGeneration ||
+      // The transport is this generation's once its seam has landed. One that
+      // never landed leaves the OUTGOING transport rendering, and that is
+      // still where the song is: the change goes on from its frame — as the
+      // rebuild, since the core takes no second swap while one is armed, and
+      // stopping the armed generation retires both graphs.
+      const rendering = status.swapPendingGeneration !== '0' ? status.swapPendingGeneration : oldGeneration
+      if (status.generation !== oldGeneration || status.transportGeneration !== rendering ||
           status.transportTelemetryQuality === 'unavailable') {
         throw new Error('Native rebuild has no trustworthy signed transport position.')
       }
@@ -1390,6 +1427,9 @@ export class DesktopNativePlaybackClient {
       // A count-in at the TOP is left to the seam while PLAYING, as before:
       // its landing is the entry, so the carried clock lands in the right
       // place with nothing added, and the seam keeps the count-in's timing.
+      // When no seam takes it — a route change, a refusal, a seam before it
+      // that never landed — it is rebuilt anchored at the landing like any
+      // other, for the reason that follows.
       // PAUSED inside one it is the rebuild too, because the rebuild would
       // otherwise carry the negative frame as its signed start, and the
       // core refuses a start below the NEW plan's own pre-roll — the
@@ -1430,12 +1470,13 @@ export class DesktopNativePlaybackClient {
             ((owedSeek - loop.startProjectFrame) % (loop.endProjectFrame - loop.startProjectFrame))
           : owedSeek
       const landing = this.countInLandingSeconds
-      const insideCountIn = owedStart === null && renderedFrame < 0 && landing !== null &&
-        (landing > 0 || state !== 'playing')
-      const rebuilt: DesktopNativePlaybackPrepare = insideCountIn
+      const countingIn = owedStart === null && renderedFrame < 0 && landing !== null
+      // Every count-in but the one a seam may keep (PLAYING toward the top).
+      const insideCountIn = countingIn && (landing > 0 || state !== 'playing')
+      const rebuilt: DesktopNativePlaybackPrepare = countingIn
         ? { ...request, positionSeconds: landing }
         : request
-      const preparedStartProjectFrame = insideCountIn ? undefined : (owedStart ?? renderedFrame)
+      const preparedStartProjectFrame = countingIn ? undefined : (owedStart ?? renderedFrame)
       const initialTransport: DesktopPlaybackInitialTransportConfig = {
         state,
         ...(loop ? { loop } : {})
@@ -1458,7 +1499,7 @@ export class DesktopNativePlaybackClient {
       const seamable = !insideCountIn && !options.force && this.started && state === 'playing' &&
         (status.transportState === 'playing' || status.transportState === 'pre-roll') &&
         status.swapPendingGeneration === '0' && status.retiringSwapGeneration === '0'
-      if (seamable && await this.seam(rebuilt, oldGeneration, renderedFrame, initialTransport, owedSeek !== null)) return
+      if (seamable && await this.seam(request, oldGeneration, renderedFrame, initialTransport, owedSeek !== null)) return
       this.stopPolling()
       if (this.started) {
         try { await window.singz.stopDesktopPlayback(oldGeneration) } catch { /* unload is authoritative */ }
