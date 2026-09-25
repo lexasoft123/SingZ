@@ -36,7 +36,11 @@ export default defineConfig({
     include: ['tests/unit/**/*.test.{ts,tsx}', 'tests/roundtrip/**/*.test.{ts,tsx}'],
     environment: 'node',
     testTimeout: 30000,
-    // every file shares the one stubbed userData, so they take turns with
+    // A fresh stubbed userData for each run (see the file), never one per
+    // machine: a fixed one under tmpdir() let two runs at once — two
+    // worktrees, two sessions — fail each other.
+    globalSetup: ['tests/unit/global-setup.ts'],
+    // every file in a run shares that one userData, so they take turns with
     // settings.json (which is where the projects root is switched)
     fileParallelism: false
   }

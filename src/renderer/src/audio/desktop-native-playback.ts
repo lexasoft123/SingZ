@@ -41,8 +41,9 @@ import {
 export const POLL_FAST_MS = 50
 export const POLL_STEADY_MS = 200
 export const POLL_BURST_MS = 2000
-/** The cadence right after a start or a resume (see `edgeAtMs`), until a
- *  status shows the transport running with a current audible frame. The
+/** The cadence right after a start, a resume or a seek while the song plays
+ *  (see `edgeAtMs`), until a status shows the transport running with a
+ *  current audible frame, and for a seek its receipt as well. The
  *  core publishes both from the render callback within a period or two of
  *  the command: on the Mac the transport read `playing` 4-6 ms after the
  *  start returned and the audible frame was current one 512-frame callback
@@ -50,7 +51,7 @@ export const POLL_BURST_MS = 2000
  *  bar stood still for ~40 ms of music on every Play, the whole gap between
  *  native's Play → advancing and legacy's. */
 export const POLL_EDGE_MS = 10
-/** How long one start or resume may hold the poll at POLL_EDGE_MS. A
+/** How long one start, resume or seek may hold the poll at POLL_EDGE_MS. A
  *  transport still parked this long after the command is not waiting for its
  *  next callback, and the ordinary burst covers whatever it is doing. */
 export const POLL_EDGE_MAX_MS = 500
@@ -441,8 +442,9 @@ export class DesktopNativePlaybackClient {
    * was issued, or a status read showed a new transport state or boundary.
    * The poll runs at POLL_FAST_MS for POLL_BURST_MS after that (a seek's
    * read-back, a pause's stop, a seam landing are all measured against that
-   * cadence; a start or resume first runs at POLL_EDGE_MS until it shows, see
-   * `edgeAtMs`) and at POLL_STEADY_MS otherwise. Measured
+   * cadence; a start, a resume or a seek while playing first runs at
+   * POLL_EDGE_MS until it shows, see `edgeAtMs`) and at POLL_STEADY_MS
+   * otherwise. Measured
    * on the desktop (2026-09-06, quiet host): the 20 Hz status invoke alone —
    * IPC + structured clone of the status, not the UI it fed — cost the
    * renderer ~2 CPU points while a song played, more than the whole graph
@@ -450,12 +452,13 @@ export class DesktopNativePlaybackClient {
    * between reads is projected (audibleSeconds), so the bar does not move in
    * poll steps either way. */
   private activityAtMs = 0
-  /** When a start or a resume was last accepted. Until a status shows the
-   * transport running with a current audible frame (or POLL_EDGE_MAX_MS
+  /** When a start, a resume or a seek was last accepted. Until a status shows
+   * the transport running with a current audible frame (or POLL_EDGE_MAX_MS
    * passes) the poll runs at POLL_EDGE_MS: the bar can only move once a
    * status says the song moved, and the command's own read-back always
    * arrives too early to say it, since the render thread has not taken a
-   * callback yet. */
+   * callback yet. A seek while the song plays counts too, until its receipt
+   * lands and then until the projection it re-anchored matures. */
   private edgeAtMs = 0
   /** A seek the core has accepted but the status has not yet reflected: the
    * bar shows the target at once instead of one IPC round trip later. */
@@ -555,6 +558,20 @@ export class DesktopNativePlaybackClient {
    *  simply began near the loop's start. Generation-bound, and carried across
    *  a seam, which hands the clock and the lap count to the new generation. */
   private run: { generation: string; floor: number | null; lap: string } | null = null
+  /** The loop lap of the position the bar last showed while the song moved in
+   *  a loop, and the run it was shown under. The core publishes its status
+   *  once a callback, so a status is up to a callback stale when it is read,
+   *  and any two can disagree by that much. Right after a wrap, the status
+   *  before it may already have wrapped the bar with the ear while the
+   *  stand-in after it lands a hair short of the loop's start. Folded into
+   *  the lap the head had left, that drew the loop's tail until the stand-in
+   *  reached the start: the start, the tail, the start again, two whole-loop
+   *  jumps, in 6 of ~190 wraps of a short loop on the Mac's plain route. A
+   *  fold never goes back past a lap shown here (see statusSeconds). Bound to
+   *  the run object, which every Play, resume, seek and matured status
+   *  replaces (a matured status places the ear itself), and carried across a
+   *  seam with the run. */
+  private shownLap: { run: object; lap: number } | null = null
 
   /** Forget everything that described the generation being retired: the
    *  seeks still owed a receipt, the count-in landing the bar was holding at,
@@ -565,6 +582,7 @@ export class DesktopNativePlaybackClient {
     this.countInSeen = false
     this.pauseHold = null
     this.run = null
+    this.shownLap = null
   }
 
   /** The landing a prepare built from `request` counts in to, or null when
@@ -759,6 +777,9 @@ export class DesktopNativePlaybackClient {
       const latency = status.audibleProjectionQuality === 'current'
         ? null
         : DesktopNativePlaybackClient.latencyProjectFrames(status)
+      const run = this.run !== null && this.run.generation === status.generation ? this.run : null
+      // The loop lap of the position shown below (see shownLap).
+      let shown = Number(status.loopCount)
       if (latency !== null) {
         // The head stands in for a projection that has not matured, and the
         // ear is a whole latency behind it. Projected first and floored
@@ -766,26 +787,39 @@ export class DesktopNativePlaybackClient {
         // and then moves with the ear, meeting the core's own projection when
         // it matures instead of stepping back to it.
         seconds -= latency / sampleRate
-        const run = this.run !== null && this.run.generation === status.generation ? this.run : null
         const lap = Number(status.loopCount)
         // The head has wrapped since the ear's lap was known, and the wrap
         // re-anchored the projection while the ear is still in the lap the
         // head has left. Fold it back into that lap, as the core folds its
         // own projection, so the bar wraps when the ear does and not a latency
         // early. With no lap to go by, a wrap cannot be told from a run that
-        // simply sits before the loop's start, and nothing is folded.
+        // simply sits before the loop's start, and nothing is folded. Never
+        // back past the latest lap the bar has shown in the run (see
+        // shownLap), or before it has shown one, the lap the run began in. A
+        // loop shorter than the latency puts the head laps ahead, and an ear
+        // folded back past the run's lap has not reached the run's start,
+        // where the floor below holds it; in a lap the bar has shown since,
+        // the ear is inside it, and the bar holds the loop's start until the
+        // stand-in gets there.
         let lapsBack = 0
         if (looping && run !== null && seconds < start && lap > Number(run.lap)) {
-          lapsBack = Math.ceil((start - seconds) / (end - start))
+          const seen = this.shownLap !== null && this.shownLap.run === run ? this.shownLap.lap : Number(run.lap)
+          lapsBack = Math.max(0, Math.min(Math.ceil((start - seconds) / (end - start)), lap - seen))
           seconds += lapsBack * (end - start)
+          if (seconds < start && lap - lapsBack > Number(run.lap)) seconds = start
         }
+        shown = lap - lapsBack
         // The floor holds only in the lap the run began in: an ear that has
         // wrapped as well is already past it.
         if (run !== null && run.floor !== null && lap - lapsBack === Number(run.lap)) {
           seconds = Math.max(seconds, run.floor)
         }
       }
-      if (looping && seconds >= end) seconds = start + ((seconds - end) % (end - start))
+      if (looping && seconds >= end) {
+        shown += 1 + Math.floor((seconds - end) / (end - start))
+        seconds = start + ((seconds - end) % (end - start))
+      }
+      if (looping && run !== null) this.shownLap = { run, lap: shown }
     }
     return Math.max(0, seconds)
   }
@@ -1567,9 +1601,10 @@ export class DesktopNativePlaybackClient {
     const carriesCountIn = preparedStartProjectFrame < 0 && this.countInLandingSeconds !== null &&
       !seekOwed
     // The run goes across, though: the core hands the clock and its lap count
-    // to the new generation, so the ear is on the same run. Forgotten, a seam
-    // inside a run's first latency (Loop turned on seeks to the selection and
-    // then seams) dropped the bar below the spot the run began on.
+    // to the new generation, so the ear is on the same run, and the bar has
+    // shown the same laps of it. Forgotten, a seam inside a run's first
+    // latency (Loop turned on seeks to the selection and then seams) dropped
+    // the bar below the spot the run began on.
     //
     // And so does a seek still owed its receipt. The core carries the seek
     // count across a seam too (the replacement takes the old transport's
@@ -1582,6 +1617,7 @@ export class DesktopNativePlaybackClient {
     // after a wrap no status had shown the floor was dropped and the bar drew
     // below the target for a whole latency.
     const run = this.run
+    const shownLap = this.shownLap
     const owed = {
       frame: this.pendingSeekFrame,
       receipt: this.pendingSeekReceipt,
@@ -1589,7 +1625,10 @@ export class DesktopNativePlaybackClient {
     }
     this.forgetTransport()
     if (carriesCountIn) this.countInLandingSeconds = 0
-    if (run !== null) this.run = { ...run, generation }
+    if (run !== null) {
+      this.run = { ...run, generation }
+      if (shownLap !== null && shownLap.run === run) this.shownLap = { run: this.run, lap: shownLap.lap }
+    }
     this.pendingSeekFrame = owed.frame
     this.pendingSeekReceipt = owed.receipt
     this.pendingSeekIssued = owed.issued
@@ -1824,6 +1863,9 @@ export class DesktopNativePlaybackClient {
         this.onStateChange(this.last)
         throw error
       }
+      // A seek re-anchors the transport as a start does, so while the song
+      // plays it is watched the same way (see edgeAtMs).
+      this.edgeAtMs = Date.now()
       // One status read to keep the base fresh, and then done.
       //
       // What used to follow was a loop of up to 24 more, spinning until the
@@ -1834,9 +1876,17 @@ export class DesktopNativePlaybackClient {
       // them). The wait was never load-bearing, and its own comment said so:
       // resume() resolves either way and the callback ends the song from its
       // own frame. The bar goes on showing the target through
-      // `pendingSeekFrame` until the receipt lands on the ordinary poll, so
-      // nothing is drawn early and nothing lurches afterwards.
+      // `pendingSeekFrame` until the receipt lands, so nothing is drawn early.
       await this.refreshCommandStatus(generation, provider)
+      // That read-back usually lands before the callback has taken the seek,
+      // and the poll armed before it could be a steady 200 ms away. The bar
+      // held the target for all of that while the song played on from it,
+      // then jumped forward to where the song had got to: holds of 30-185 ms
+      // and forward steps of 50-170 ms, measured on the Mac. Pulled forward
+      // now, the receipt lands within an edge period of the core taking the
+      // seek, and the run floor holds the bar on the target only until the
+      // ear gets there.
+      this.reschedulePoll()
     })
   }
 
@@ -2250,22 +2300,24 @@ export class DesktopNativePlaybackClient {
     this.onStateChange(this.last)
   }
 
-  /** Whether a start or resume is still waiting for the status that shows it:
-   * the transport running with a current audible frame. Bounded by
-   * POLL_EDGE_MAX_MS. */
+  /** Whether a start, a resume or a seek while playing is still waiting for
+   * the status that shows it: the seek's receipt, then the transport running
+   * with a current audible frame. Bounded by POLL_EDGE_MAX_MS. */
   private awaitingTransportEdge(now: number): boolean {
     if (now - this.edgeAtMs >= POLL_EDGE_MAX_MS) return false
     if (!this.started || this.transportIntent !== 'playing') return false
+    // A seek while the song plays: its receipt is the status that says so.
+    if (this.pendingSeekFrame !== null) return true
     const status = this.last
     if (!status) return true
     const running = status.transportState === 'playing' || status.transportState === 'pre-roll'
     return !running || status.audibleProjectionQuality !== 'current'
   }
 
-  /** The next poll's delay: the edge cadence right after a start or resume
-   * until the status shows it, fast inside the burst after activity, during
-   * a pre-roll (the landing is watched frame by frame) and while a seek's
-   * read-back is outstanding; steady otherwise. */
+  /** The next poll's delay: the edge cadence right after a start, a resume or
+   * a seek while playing until a status shows it, fast inside the burst after
+   * activity, during a pre-roll (the landing is watched frame by frame) and
+   * while a seek's read-back is outstanding; steady otherwise. */
   private pollDelayMs(): number {
     const now = Date.now()
     if (this.awaitingTransportEdge(now)) return POLL_EDGE_MS
