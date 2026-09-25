@@ -95,7 +95,13 @@ the E2E Windows workflow, which also runs `npm test`), the two capture-addon
 harnesses in `tests/e2e/` (`capture-addon-smoke.cjs`, the Electron ABI/load
 gate CI runs on both platforms; `capture-addon-hardware.cjs`, by-hand only —
 it opens the real microphone), and the mac drivers
-in `tests/e2e/mac/` (nineteen of them: align, lyrics editing (the editor's
+in `tests/e2e/mac/` (twenty of them: the lanes' PLAYED EDGE
+(`played-edge-e2e.cjs` — the brightness step must sit on the playhead line
+on every frame while a song plays, whole and zoomed, and a sliver between
+the played layer and its edge layer must render exactly like none: a user
+saw the step trailing a zoomed line by eye while every driver was green,
+because none of them looked at the lanes while a song rolled), align,
+lyrics editing (the editor's
 align-draft leg is a different code path from the panel's Check & align —
 both are covered), CANCELLING one of those jobs
 (`lyrics-cancel-e2e.cjs` — a cancel is not a verdict on the lyrics: the
@@ -1191,13 +1197,25 @@ was driven; the gotchas that follow from it are below.
   20% to 57% of the field laptop's GPU and added 34 points of DWM; since
   @singz/ui v1.7.1 the glow is drawn into the canvas (colour filters move no
   pixels and stay CSS), and `tests/unit/lanes-no-moving-filter.test.ts` fails
-  on one. The playhead line and the waveforms' played edge write separate
+  on one. The playhead line and the waveforms' played layer write separate
   `--p`s (`playhead-writes.ts`), because re-clipping a layer damages its whole
   visible part — the six lanes re-clipped every device pixel re-composited the
   whole PLAYED part of the stack on every step (DWM ~31% late in a song on the
-  field laptop, with every filter removed): the line takes every device pixel,
-  the edge a 4 Hz clock while the song rolls and an exact write on
-  pause/seek/zoom. Measure paint VISIBLE, per adapter (an Optimus laptop
+  field laptop, with every filter removed). The line takes every device pixel,
+  and so does the played EDGE: since @singz/ui v1.9.0 each lane carries
+  `.wave-edge`, a copy of the played layer shown only from the stack's `--p`
+  to its own `--p-edge`, written per step on those canvases (never on the
+  stack — that restyles every lane), so a step damages only the sliver behind
+  the line. The stack's `--p` catches up once the sliver is 64 device pixels
+  wide and at most 4 times a second, and snaps on pause/seek/zoom. The edge
+  layers are HIDDEN while the view moves: every lane redraws then, and each
+  showing edge is one more filtered layer to redo per frame (a zoomed
+  follow-pan went ~30 -> ~80 ms a frame on the field laptop with them up;
+  they have nothing to show anyway, the snap leaves no sliver). (A 4 Hz
+  clock alone, the version before, left the brightness step visibly trailing
+  the line in a zoomed view.) Both values land on whole WINDOW device pixels:
+  off a pixel boundary the two clips both paint the column between them, a
+  one-pixel bright seam. Measure paint VISIBLE, per adapter (an Optimus laptop
   renders on the dGPU and pays a copy to the display GPU every frame), and
   read DWM's share as well as the app's. A view change (pan, zoom, resize)
   redraws every lane, so its cost is paid per EVENT: pans and zooms land at
