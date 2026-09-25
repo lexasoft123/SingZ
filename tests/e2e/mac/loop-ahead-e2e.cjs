@@ -13,8 +13,9 @@
  * included (the core's own test is `aLoopArmedAheadOfTheEarIsNotHeardYet`).
  * Every driver was green throughout, because none of them sets a loop ahead of
  * the playhead — count-in-e2e's leg 14 sets one BEHIND it. Measured before the
- * fix: the bar inside the loop 50-300 ms after the arm in 10 of 10 tries on the
- * Mac and 6 of 6 on the Windows field laptop.
+ * fix, by a scratch probe and then by this driver: the bar inside the loop
+ * 50-360 ms after the arm in every loop-ahead try, on the Mac and on the
+ * Windows field laptop.
  *
  * Three scenarios, each from a steady status at E2E_MID, played on the plain
  * graph and again transposed +2. Transposed, the time-pitch processor puts the
