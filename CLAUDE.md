@@ -95,7 +95,13 @@ the E2E Windows workflow, which also runs `npm test`), the two capture-addon
 harnesses in `tests/e2e/` (`capture-addon-smoke.cjs`, the Electron ABI/load
 gate CI runs on both platforms; `capture-addon-hardware.cjs`, by-hand only —
 it opens the real microphone), and the mac drivers
-in `tests/e2e/mac/` (nineteen of them: align, lyrics editing (the editor's
+in `tests/e2e/mac/` (twenty of them: the lanes' PLAYED EDGE
+(`played-edge-e2e.cjs` — the brightness step must sit on the playhead line
+on every frame while a song plays, whole and zoomed, and a sliver between
+the played layer and its edge layer must render exactly like none: a user
+saw the step trailing a zoomed line by eye while every driver was green,
+because none of them looked at the lanes while a song rolled), align,
+lyrics editing (the editor's
 align-draft leg is a different code path from the panel's Check & align —
 both are covered), CANCELLING one of those jobs
 (`lyrics-cancel-e2e.cjs` — a cancel is not a verdict on the lyrics: the
@@ -141,7 +147,7 @@ agree with a decode fetched back afterwards. Before it, every open decoded
 six lanes through Chromium for a duration and a drawing and released them
 after Play (2.7 s on this Mac, ~10x on the fleet); with it, 0.56 s. A lane
 the measure refuses decodes as before, so a green run here is also the
-promise that the fallback never got exercised for a healthy project; and `count-in-e2e.cjs`, the only desktop driver that turns the COUNT-IN on: it scrubs before the first Play, presses Pause INSIDE the count-in and Play after a Pause twice, and reads `engine.position` at 40 ms through every pre-roll — the two 0.21.1 field reports it guards were invisible to every driver before it because none of them counts in (every Play after a song's first was a bare resume, so the count-in sounded once per open; and the core's negative pre-roll frames were clamped to 0, so a mid-song count-in drew the bar at the top of the song and a Pause inside it parked it there — the bar HOLDS at the landing now, as the phones' does) — and it hammers Space, sampling the bar at 30 ms, because the core's audible projection is UNAVAILABLE for a latency after every transport edge and its field defaults to 0, which the facade read as a position (one poll at the top of the song on every playing→paused edge; the phones check the flag, the desktop does now, the render head standing in); and it plays a song with its beat grid TAKEN AWAY and the metronome left on, because a click track needs a grid and the facade raised that as a product error — the click is a saved setting of the SONG, the grid is a detection that can be absent, stale or still running, so the two disagree routinely, and a singer met "Playback could not start: Native metronome playback requires a beat grid" over a song Web Audio would have played with its clicks silent; and `stems-after-end-e2e.cjs`, which plays a song out and presses Play again, and scrubs back out of its last seconds, and reads each lane's `starvedBlocks` from the core — a streamed lane the feeder had read to its END never chased the jump back, so every stem played silence under a metronome that clicked on ("the metronome plays, but the stems don't", a 0.23.3 field report from a 48 kHz WASAPI laptop), and every muted driver before it was blind to that, because the transport, the button and the bar all moved exactly as they should; the
+promise that the fallback never got exercised for a healthy project; and `count-in-e2e.cjs`, the only desktop driver that turns the COUNT-IN on: it scrubs before the first Play, presses Pause INSIDE the count-in and Play after a Pause twice, and reads `engine.position` at 40 ms through every pre-roll — the two 0.21.1 field reports it guards were invisible to every driver before it because none of them counts in (every Play after a song's first was a bare resume, so the count-in sounded once per open; and the core's negative pre-roll frames were clamped to 0, so a mid-song count-in drew the bar at the top of the song and a Pause inside it parked it there — the bar HOLDS at the landing now, as the phones' does) — and it hammers Space, sampling the bar at 30 ms, because the core's audible projection is UNAVAILABLE for a latency after every transport edge and its field defaults to 0, which the facade read as a position (one poll at the top of the song on every playing→paused edge; the phones check the flag, the desktop does now, the render head standing in); and it plays a song with its beat grid TAKEN AWAY and the metronome left on, because a click track needs a grid and the facade raised that as a product error — the click is a saved setting of the SONG, the grid is a detection that can be absent, stale or still running, so the two disagree routinely, and a singer met "Playback could not start: Native metronome playback requires a beat grid" over a song Web Audio would have played with its clicks silent; and it presses a plain Pause a set time after a steady 200 ms status poll and samples the bar well under a millisecond apart until the pause settles, because the facade stopped projecting the clock the moment the pause command returned and drew the last poll UNPROJECTED for the read-back's round trip — the bar stepped back by up to 131 ms in 4 of 28 Pauses on the field laptop, then jumped forward to where the core parked; it is held where Pause was pressed now until the park point lands (the phones' pause hold), and the driver forbids any backward step; and `stems-after-end-e2e.cjs`, which plays a song out and presses Play again, and scrubs back out of its last seconds, and reads each lane's `starvedBlocks` from the core — a streamed lane the feeder had read to its END never chased the jump back, so every stem played silence under a metronome that clicked on ("the metronome plays, but the stems don't", a 0.23.3 field report from a 48 kHz WASAPI laptop), and every muted driver before it was blind to that, because the transport, the button and the bar all moved exactly as they should; the
 `e2e-verifier` agent in
 `.claude/agents/` holds the roster of record, and a new driver is not
 finished until it is listed there — launch one instance per platform in
@@ -1191,13 +1197,25 @@ was driven; the gotchas that follow from it are below.
   20% to 57% of the field laptop's GPU and added 34 points of DWM; since
   @singz/ui v1.7.1 the glow is drawn into the canvas (colour filters move no
   pixels and stay CSS), and `tests/unit/lanes-no-moving-filter.test.ts` fails
-  on one. The playhead line and the waveforms' played edge write separate
+  on one. The playhead line and the waveforms' played layer write separate
   `--p`s (`playhead-writes.ts`), because re-clipping a layer damages its whole
   visible part — the six lanes re-clipped every device pixel re-composited the
   whole PLAYED part of the stack on every step (DWM ~31% late in a song on the
-  field laptop, with every filter removed): the line takes every device pixel,
-  the edge a 4 Hz clock while the song rolls and an exact write on
-  pause/seek/zoom. Measure paint VISIBLE, per adapter (an Optimus laptop
+  field laptop, with every filter removed). The line takes every device pixel,
+  and so does the played EDGE: since @singz/ui v1.9.0 each lane carries
+  `.wave-edge`, a copy of the played layer shown only from the stack's `--p`
+  to its own `--p-edge`, written per step on those canvases (never on the
+  stack — that restyles every lane), so a step damages only the sliver behind
+  the line. The stack's `--p` catches up once the sliver is 64 device pixels
+  wide and at most 4 times a second, and snaps on pause/seek/zoom. The edge
+  layers are HIDDEN while the view moves: every lane redraws then, and each
+  showing edge is one more filtered layer to redo per frame (a zoomed
+  follow-pan went ~30 -> ~80 ms a frame on the field laptop with them up;
+  they have nothing to show anyway, the snap leaves no sliver). (A 4 Hz
+  clock alone, the version before, left the brightness step visibly trailing
+  the line in a zoomed view.) Both values land on whole WINDOW device pixels:
+  off a pixel boundary the two clips both paint the column between them, a
+  one-pixel bright seam. Measure paint VISIBLE, per adapter (an Optimus laptop
   renders on the dGPU and pays a copy to the display GPU every frame), and
   read DWM's share as well as the app's. A view change (pan, zoom, resize)
   redraws every lane, so its cost is paid per EVENT: pans and zooms land at

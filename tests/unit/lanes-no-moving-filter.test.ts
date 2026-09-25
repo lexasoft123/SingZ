@@ -18,7 +18,7 @@ import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 /** The lane stack and everything drawn inside it that the playhead crosses. */
-const LANE_LAYERS = /\.(stack|ruler|lane-wave|wave|wave-base|wave-bright|beat-lines|scrub-overlay|playhead|playhead-cap)(?![\w-])/
+const LANE_LAYERS = /\.(stack|ruler|lane-wave|wave|wave-base|wave-bright|wave-edge|beat-lines|scrub-overlay|playhead|playhead-cap)(?![\w-])/
 const FILTER_PROPS = ['filter', '-webkit-filter']
 const MOVES_PIXELS = /\b(drop-shadow|blur)\s*\(/
 

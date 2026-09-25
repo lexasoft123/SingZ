@@ -33,12 +33,18 @@
  * measure and this says so rather than passing vacuously; no other instance
  * running. Use a LONG six-lane project: a 40-second song's lanes are noise.
  *
- * Env: E2E_SONG (default "Deutschland"), E2E_PROJECTS_ROOT.
+ * Env: E2E_SONG (default "Deutschland" — the project's FOLDER under
+ *      E2E_PROJECTS_ROOT; its card is picked by the exact name the library
+ *      shows for it, and the run refuses to measure if a different project
+ *      opened), E2E_PROJECTS_ROOT. The song's files are put back afterwards,
+ *      bytes and times.
  */
 require('../../shared/watchdog.cjs').arm('lane-residency-probe', { totalMinutes: 20 })
 
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
+const { assertOpenedProject, clickLibrarySong, libraryName } = require('./library-song.cjs')
+const { holdProjects } = require('./project-hold.cjs')
 const { execFileSync } = require('node:child_process')
 const { existsSync } = require('node:fs')
 const { join } = require('node:path')
@@ -48,7 +54,8 @@ const ROOT =
   process.env.E2E_PROJECTS_ROOT ??
   join(homedir(), 'Library/Mobile Documents/com~apple~CloudDocs/SingZ')
 const SONG = process.env.E2E_SONG ?? 'Deutschland'
-const SONG_PJ = join(ROOT, SONG, 'project.json')
+const SONG_DIR = join(ROOT, SONG)
+const SONG_PJ = join(SONG_DIR, 'project.json')
 const APP = join(__dirname, '..', '..', '..', 'out', 'main', 'index.js')
 
 const val = (win, expr) => win.evaluate(`(${expr})`)
@@ -127,6 +134,13 @@ const diffCategories = (before, after) => {
 
 ;(async () => {
   if (!existsSync(SONG_PJ)) throw new Error(`no project at ${SONG_PJ} — set E2E_SONG`)
+  const songName = libraryName(SONG_DIR)
+  // The song's files as found, bytes AND times, and those of any project that
+  // opened instead of it (assertOpenedProject adds that one's): an open can
+  // re-derive and auto-save an analysis, and a probe must never be the reason
+  // a song changed. Put back in the finally, once the app is closed.
+  const backups = []
+  const held = holdProjects([SONG_DIR], backups)
 
   const app = await _electron.launch({
     executablePath: require('electron'),
@@ -188,9 +202,10 @@ const diffCategories = (before, after) => {
       )
     }
 
-    await win.click(`.lib-card:has-text("${SONG}")`)
+    await clickLibrarySong(win, songName)
     await win.waitForSelector('.pill.karaoke', { timeout: 120000 })
     await win.waitForFunction(() => __test?.engine?.duration > 0, null, { timeout: 120000 })
+    await assertOpenedProject(win, { dir: SONG_DIR, name: songName, backups })
     const seconds = await val(win, '__test.engine.duration')
     const lanes = (await val(win, '__test.engine.getTrackStates().map(t => t.id)')).length
     // Let the open settle: the analyses decode stems of their own, and a
@@ -300,7 +315,8 @@ const diffCategories = (before, after) => {
       }
     }
   } finally {
-    await app.close()
+    await app.close().catch(() => {})
+    for (const problem of held.putBack()) fail.push(`library not left as found: ${problem}`)
   }
 
   if (fail.length) {

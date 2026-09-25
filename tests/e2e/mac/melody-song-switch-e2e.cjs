@@ -11,18 +11,21 @@
  *
  * Song A is a scratch copy of a long project with settings.melody stripped, so
  * opening it always starts a real tracking run; song B is a library project of
- * a different length, so a foreign line is unmistakable. B's project.json and
- * lyrics.json are restored afterwards whatever happens — a regression WILL
- * rewrite the first — and B must be a v2 (FLAC) project, or opening it would
- * migrate it and the restore would describe deleted WAVs. Song lengths are
- * read off each project's vocal stem, found as the app finds it (.flac, else
- * .wav), and A opens through the song file its project.json names.
+ * a different length, so a foreign line is unmistakable. B's files are put
+ * back afterwards whatever happens, bytes and times — a regression WILL
+ * rewrite its project.json — and B must be a v2 (FLAC) project, or opening it
+ * would migrate it and the doc put back would describe deleted WAVs. Song
+ * lengths are read off each project's vocal stem, found as the app finds it
+ * (.flac, else .wav), and A opens through the song file its project.json names.
  *
  * Prereqs: `npm run build` done; no other app instance running (same userData
  * identity); ffprobe on PATH.
  *
  * Env: E2E_A (long project, default "Nothing Else Matters"),
- *      E2E_B (project opened next, default "Wild World"),
+ *      E2E_B (project opened next, default "Wild World" — the project's
+ *             FOLDER under E2E_PROJECTS_ROOT; its card is picked by the exact
+ *             name the library shows for it, and the run refuses to judge it
+ *             if a different project opened),
  *      E2E_PROJECTS_ROOT (default iCloud Drive/SingZ),
  *      E2E_OUT (scratch dir for the copy, default os.tmpdir()).
  */
@@ -32,6 +35,8 @@ require('../../shared/watchdog.cjs').arm('melody-song-switch-e2e')
 
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
+const { assertOpenedProject, clickLibrarySong, libraryName } = require('./library-song.cjs')
+const { holdProjects } = require('./project-hold.cjs')
 const { readFileSync, writeFileSync, cpSync, rmSync, existsSync } = require('node:fs')
 const { execFileSync } = require('node:child_process')
 const { join } = require('node:path')
@@ -44,10 +49,10 @@ const A = process.env.E2E_A ?? 'Nothing Else Matters'
 const B = process.env.E2E_B ?? 'Wild World'
 const SCRATCH = join(process.env.E2E_OUT ?? tmpdir(), 'singz-e2e-melody-song-a')
 const B_DIR = join(ROOT, B)
-const B_DOCS = ['project.json', 'lyrics.json']
+const B_DOC = join(B_DIR, 'project.json')
 const APP = join(__dirname, '..', '..', '..', 'out', 'main', 'index.js')
 // Module scope so the outer catch can print it: when the run throws, the
-// finally's findings (a foreign line in B, a restore that failed) land here
+// finally's findings (a foreign line in B, a put-back that failed) land here
 // after the error, and would otherwise never be seen.
 const fail = []
 
@@ -84,17 +89,17 @@ const duration = (dir) =>
 const readIfPresent = (path) => (existsSync(path) ? readFileSync(path, 'utf8') : null)
 
 ;(async () => {
-  // Every precondition is checked before anything is copied or launched. A v1
-  // B is migrated to FLAC the moment it opens, and restoring its v1 doc
-  // afterwards would describe WAVs the migration has deleted — refuse one.
-  const bBefore = new Map(B_DOCS.map((file) => [file, readIfPresent(join(B_DIR, file))]))
-  if (bBefore.get('project.json') === null) throw new Error(`${B} has no project.json under ${ROOT}`)
-  if ((JSON.parse(bBefore.get('project.json')).version ?? 1) < 2) {
-    throw new Error(
-      `${B} is a v1 project — opening it migrates it to FLAC, and this driver's ` +
-        `restore would then describe deleted WAVs. Pick a v2 project as E2E_B.`
-    )
-  }
+  // Every precondition is checked before anything is copied or launched.
+  const bDocBefore = readIfPresent(B_DOC)
+  if (bDocBefore === null) throw new Error(`${B} has no project.json under ${ROOT}`)
+  const bName = libraryName(B_DIR)
+  // B's files as found, bytes AND times, and those of any project that opened
+  // instead of B (assertOpenedProject adds that one's): the finally puts them
+  // all back. The hold refuses a v1 B, which is migrated to FLAC the moment it
+  // opens, and its v1 doc put back afterwards would describe WAVs the
+  // migration has deleted.
+  const others = []
+  const held = holdProjects([B_DIR], others)
   const durA = duration(join(ROOT, A))
   const durB = duration(B_DIR)
   if (durA < durB + 30) throw new Error(`${A} must be well longer than ${B} for the lengths to tell them apart`)
@@ -112,7 +117,9 @@ const readIfPresent = (path) => (existsSync(path) ? readFileSync(path, 'utf8') :
   const app = await _electron.launch({
     executablePath: require('electron'),
     args: [APP],
-    env: { ...process.env, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1' } // silent, and never touch the real Drive
+    // silent, never touching the real Drive; hooks, because
+    // assertOpenedProject reads the opened lanes off __test
+    env: { ...process.env, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1', SINGZ_E2E_HOOKS: '1' }
   })
   await quietLaunch(app) // measurement runs must not steal the singer's focus
   app.process().stderr?.on('data', (d) => process.stderr.write(`[app] ${d}`))
@@ -136,9 +143,13 @@ const readIfPresent = (path) => (existsSync(path) ? readFileSync(path, 'utf8') :
     }
     await win.click('.catalog-btn')
     await win.waitForSelector('.lib-card', { timeout: 20000 })
-    await win.click(`.lib-card:has-text("${B}")`)
+    await clickLibrarySong(win, bName)
     await win.waitForSelector('.pill.karaoke', { timeout: 60000 })
     await win.waitForFunction(() => window.__melody && window.__melody.f0, null, { timeout: 180000 })
+    // Checked once a line is drawn, not at the click: right after the switch
+    // the engine can still hold A (and the karaoke pill can be A's), and B's
+    // own line is published only after B's lanes are loaded.
+    await assertOpenedProject(win, { dir: B_DIR, name: bName, backups: others })
 
     // Watch long enough for A's tracker to have finished and tried to speak.
     let worst = null
@@ -153,43 +164,33 @@ const readIfPresent = (path) => (existsSync(path) ? readFileSync(path, 'utf8') :
     if (Math.abs(worst - durB) > 2) fail.push(`B drew a ${worst}s line — that is A's`)
   } finally {
     await app.close().catch(() => {})
-    // Nothing may throw out of this loop: that would skip the restores still
-    // owed and the SCRATCH cleanup below it.
-    for (const [file, before] of bBefore) {
-      const path = join(B_DIR, file)
-      try {
-        const after = readIfPresent(path)
-        if (after === before) continue
-        if (file === 'project.json' && after === null) {
-          fail.push(`B's project.json disappeared during the run`)
-        } else if (file === 'project.json') {
-          // Its own try: an unreadable rewrite is the one that most needs the
-          // restore below.
-          try {
-            const saved = JSON.parse(after).settings?.melody
-            if (saved) {
-              const cov = coverage(saved)
-              console.log(`B's project.json was rewritten; its saved line covers ${cov.toFixed(1)}s`)
-              if (Math.abs(cov - durB) > 2) fail.push(`B saved a ${cov.toFixed(1)}s line — that is A's`)
-            } else {
-              console.log(`B's project.json was rewritten with no melody line in it`)
-            }
-          } catch (e) {
-            fail.push(`B's project.json was rewritten into something unreadable: ${e.message}`)
+    // What B's doc says NOW is evidence: a line saved there that covers A's
+    // length is the bug. Read before the put-back below takes it away, and
+    // nothing may throw out of here: that would skip the put-back still owed
+    // and the SCRATCH cleanup below it.
+    try {
+      const after = readIfPresent(B_DOC)
+      if (after === null) {
+        fail.push(`B's project.json disappeared during the run`)
+      } else if (after !== bDocBefore) {
+        try {
+          const saved = JSON.parse(after).settings?.melody
+          if (saved) {
+            const cov = coverage(saved)
+            console.log(`B's project.json was rewritten; its saved line covers ${cov.toFixed(1)}s`)
+            if (Math.abs(cov - durB) > 2) fail.push(`B saved a ${cov.toFixed(1)}s line — that is A's`)
+          } else {
+            console.log(`B's project.json was rewritten with no melody line in it`)
           }
+        } catch (e) {
+          fail.push(`B's project.json was rewritten into something unreadable: ${e.message}`)
         }
-        if (before === null) {
-          // Nothing to put back, and a driver deletes nothing from a library.
-          console.log(`B gained a ${file} during the run — left in place`)
-          continue
-        }
-        console.log(`B's ${file} was rewritten during the run — restoring it`)
-        writeFileSync(path, before) // put the singer's project back
-        if (readIfPresent(path) !== before) throw new Error('it reads back different')
-      } catch (e) {
-        fail.push(`B's ${file} could not be checked and put back: ${e.message}`)
       }
+    } catch (e) {
+      fail.push(`B's project.json could not be checked: ${e.message}`)
     }
+    // put the singer's projects back; this never throws
+    for (const problem of held.putBack()) fail.push(`library not left as found: ${problem}`)
     rmSync(SCRATCH, { recursive: true, force: true })
   }
 

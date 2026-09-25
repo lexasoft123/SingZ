@@ -36,6 +36,7 @@ const { homedir, tmpdir } = require('node:os')
 const { join } = require('node:path')
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
+const { clickLibrarySong, libraryName } = require('./library-song.cjs')
 
 const REPO = join(__dirname, '..', '..', '..')
 const APP = join(REPO, 'out', 'main', 'index.js')
@@ -164,7 +165,7 @@ async function open() {
   const win = await app.firstWindow()
   await win.waitForLoadState('domcontentloaded')
   await win.waitForSelector('.lib-card', { timeout: 30000 })
-  await win.click(`.lib-card:has-text("${PROJECT}")`)
+  await clickLibrarySong(win, libraryName(join(LIB, PROJECT)))
   await win.waitForSelector('.pill.karaoke', { timeout: 90000 })
   await new Promise((r) => setTimeout(r, 3500))
   return { app, win }
