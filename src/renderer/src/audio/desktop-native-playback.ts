@@ -521,15 +521,40 @@ export class DesktopNativePlaybackClient {
    *  bar behind where the singer pressed it. Generation-bound, and let go by
    *  a resume or a seek. */
   private pauseHold: { generation: string; seconds: number; loopCount: string } | null = null
+  /** The run the transport is on, for the ear the bar stands in with while
+   *  the core's audible projection matures (see statusSeconds). `floor` is
+   *  where the run began, in song seconds: the spot a Play starts from (the
+   *  prepared start, a count-in's landing, a rebuild's signed frame), the
+   *  spot the bar showed when a resume went out, or a seek's target,
+   *  whichever came last. `lap` is the loop lap the ear is known to be in:
+   *  the run's own at first, then the lap of the last matured status.
+   *
+   *  After every transport edge the core publishes the ear only a latency's
+   *  worth of callbacks later. The render head stood in for it until then,
+   *  and the head is a whole presentation latency AHEAD of the ear: the bar
+   *  ran ahead of the music on every Play and stepped back by that latency
+   *  when the projection matured. Measured on the Mac's built-in route:
+   *  9.6-11.6 ms back in 6 of 6 Plays, 22-75 ms after the press. A Bluetooth
+   *  route makes it the whole 150-250 ms, and a seek while playing and every
+   *  loop wrap did the same. The ear is the render head less the latency
+   *  now, floored here as the phones floor theirs at the run start and legacy
+   *  floors its clock at the start offset: until the run's first sample
+   *  reaches the ear, the bar stays where the singer started. The floor goes
+   *  once a matured status shows the core's own projection at or past it
+   *  (see followRun). The lap stays, to tell a loop's wrap from a run that
+   *  simply began near the loop's start. Generation-bound, and carried across
+   *  a seam, which hands the clock and the lap count to the new generation. */
+  private run: { generation: string; floor: number | null; lap: string } | null = null
 
   /** Forget everything that described the generation being retired: the
    *  seeks still owed a receipt, the count-in landing the bar was holding at,
-   *  and a pause hold. Every generation reset goes through here. */
+   *  a pause hold and the run. Every generation reset goes through here. */
   private forgetTransport(): void {
     this.clearPendingSeek()
     this.countInLandingSeconds = null
     this.countInSeen = false
     this.pauseHold = null
+    this.run = null
   }
 
   /** The landing a prepare built from `request` counts in to, or null when
@@ -648,8 +673,10 @@ export class DesktopNativePlaybackClient {
    * worker now, so the span is an ordinary poll interval and the bound is
    * headroom rather than the common case), folded at the loop end, and
    * pre-empted by
-   * a seek target the core has accepted but not yet reported. Null while no
-   * status describes a transport. */
+   * a seek target the core has accepted but not yet reported. Until the
+   * projection has matured after a transport edge, the render head less the
+   * latency stands in, floored at the run's start (see run). Null while
+   * no status describes a transport. */
   private statusSeconds(): number | null {
     const status = this.last
     const sampleRate = status?.format.sampleRate
@@ -658,21 +685,24 @@ export class DesktopNativePlaybackClient {
       if (Date.now() - this.pendingSeekAtMs < PENDING_SEEK_MAX_MS)
         return Math.max(0, this.pendingSeekFrame / sampleRate)
       // Never acknowledged. Drop it rather than go on drawing a position the
-      // song never reached — and a pause hold with it, which can only have
-      // been taken over this target, since a seek lets go of any hold.
+      // song never reached — and a pause hold and the run with it, which can
+      // only have been taken over this target, since a seek lets go of any
+      // hold and starts the run at its target.
       this.clearPendingSeek()
       this.pauseHold = null
+      this.run = null
     }
     // The audible projection is published only once it has MATURED — a
     // latency's worth of callbacks after every transport edge (a start, a
-    // pause, a seek, a count-in's landing) — and until then the field sits
-    // at its default, 0, with `audibleProjectionQuality: 'unavailable'`. Read
-    // as a position, that 0 is the top of the song: a burst of Space presses
-    // drew the bar at 0.00 for one poll on every playing→paused edge, with
-    // the count-in off as much as on. The phones keep their last position
-    // until the projection is current; here the render head stands in — at
-    // most one latency ahead while playing, and the exact park point once
-    // paused.
+    // pause, a seek, a count-in's landing, a loop's wrap) — and until then
+    // the field sits at its default, 0, with `audibleProjectionQuality:
+    // 'unavailable'`. Read as a position, that 0 is the top of the song: a
+    // burst of Space presses drew the bar at 0.00 for one poll on every
+    // playing→paused edge, with the count-in off as much as on. The phones
+    // keep their last position until the projection is current; here the
+    // render head stands in: the exact park point once paused, and while the
+    // song moves, the render head less the latency, which is where the ear is
+    // (below).
     const frame = status.audibleProjectionQuality === 'current'
       ? Number(status.audibleProjectFrame)
       : Number(status.renderedProjectFrame)
@@ -706,13 +736,69 @@ export class DesktopNativePlaybackClient {
         (status.transportState === 'playing' || status.transportState === 'pre-roll')) {
       const elapsed = Math.max(0, Math.min(1, (Date.now() - this.lastAtMs) / 1000))
       seconds += elapsed * (Number.isFinite(status.playbackRate) && status.playbackRate > 0 ? status.playbackRate : 1)
-      if (status.loopEnabled) {
-        const start = Number(status.loopStartFrame) / sampleRate
-        const end = Number(status.loopEndFrame) / sampleRate
-        if (end > start && seconds >= end) seconds = start + ((seconds - end) % (end - start))
+      const start = Number(status.loopStartFrame) / sampleRate
+      const end = Number(status.loopEndFrame) / sampleRate
+      const looping = status.loopEnabled && end > start
+      const latency = status.audibleProjectionQuality === 'current'
+        ? null
+        : DesktopNativePlaybackClient.latencyProjectFrames(status)
+      if (latency !== null) {
+        // The head stands in for a projection that has not matured, and the
+        // ear is a whole latency behind it. Projected first and floored
+        // after, so the bar holds on the run's start until the ear reaches it
+        // and then moves with the ear, meeting the core's own projection when
+        // it matures instead of stepping back to it.
+        seconds -= latency / sampleRate
+        const run = this.run !== null && this.run.generation === status.generation ? this.run : null
+        const lap = Number(status.loopCount)
+        // The head has wrapped since the ear's lap was known, and the wrap
+        // re-anchored the projection while the ear is still in the lap the
+        // head has left. Fold it back into that lap, as the core folds its
+        // own projection, so the bar wraps when the ear does and not a latency
+        // early. With no lap to go by, a wrap cannot be told from a run that
+        // simply sits before the loop's start, and nothing is folded.
+        let lapsBack = 0
+        if (looping && run !== null && seconds < start && lap > Number(run.lap)) {
+          lapsBack = Math.ceil((start - seconds) / (end - start))
+          seconds += lapsBack * (end - start)
+        }
+        // The floor holds only in the lap the run began in: an ear that has
+        // wrapped as well is already past it.
+        if (run !== null && run.floor !== null && lap - lapsBack === Number(run.lap)) {
+          seconds = Math.max(seconds, run.floor)
+        }
       }
+      if (looping && seconds >= end) seconds = start + ((seconds - end) % (end - start))
     }
     return Math.max(0, seconds)
+  }
+
+  /** Keep the run true to what the core says (see run). A playing status
+   *  whose projection has MATURED places the ear itself: the floor goes, since
+   *  the core's projection is at or past it from there on and a floor left
+   *  standing would clamp the ear at a later edge, and its lap becomes the
+   *  ear's. A status that shows the transport PARKED while the intent is to
+   *  play says where the run is about to begin, and raises the floor to it: a
+   *  Play pressed within a callback of a Pause reaches the core after the
+   *  park, past the spot the bar showed at the press. Neither while a seek is
+   *  owed a receipt, because the status then describes the transport before
+   *  it. */
+  private followRun(status: DesktopPlaybackStatus): void {
+    if (this.pendingSeekFrame !== null) return
+    if (status.transportState === 'playing' && status.audibleProjectionQuality === 'current') {
+      this.run = { generation: status.generation, floor: null, lap: status.loopCount }
+      return
+    }
+    const parked = status.transportState === 'paused' || status.transportState === 'stopped'
+    const rendered = Number(status.renderedProjectFrame)
+    const sampleRate = status.format.sampleRate
+    if (!parked || !this.started || this.transportIntent !== 'playing' ||
+        !Number.isSafeInteger(rendered) || !sampleRate) return
+    const seconds = Math.max(0, rendered / sampleRate)
+    const run = this.run !== null && this.run.generation === status.generation ? this.run : null
+    if (run === null || run.floor === null || seconds > run.floor) {
+      this.run = { generation: status.generation, floor: seconds, lap: status.loopCount }
+    }
   }
 
   /** The count-in the EAR is inside, for the transport dots: how far the
@@ -1176,6 +1262,12 @@ export class DesktopNativePlaybackClient {
         ensure(prepared, 'Native graph prepare failed')
       }
       ensure(await window.singz.openDesktopPlayback(generation), 'Native output open failed')
+      // The run starts where the prepare put it: a signed frame, or the
+      // singer's spot, which is also where a count-in lands. The core counts
+      // loop laps from zero for every opened generation.
+      const startFrame = preparedStartProjectFrame ??
+        Math.round(Math.max(0, request.positionSeconds) * route.sampleRate)
+      this.run = { generation, floor: Math.max(0, startFrame) / route.sampleRate, lap: '0' }
       ensure(await window.singz.startDesktopPlayback(generation), 'Native playback start failed')
       started = true
       this.started = true
@@ -1397,8 +1489,14 @@ export class DesktopNativePlaybackClient {
     // pre-roll clock across — the landing stays 0 so the dots go on
     // counting the clicks that are still to come rather than vanishing.
     const carriesCountIn = preparedStartProjectFrame < 0 && this.countInLandingSeconds !== null
+    // The run goes across, though: the core hands the clock and its lap count
+    // to the new generation, so the ear is on the same run. Forgotten, a seam
+    // inside a run's first latency (Loop turned on seeks to the selection and
+    // then seams) dropped the bar below the spot the run began on.
+    const run = this.run
     this.forgetTransport()
     if (carriesCountIn) this.countInLandingSeconds = 0
+    if (run !== null) this.run = { ...run, generation }
     // The landing: the transport telemetry names the old generation until
     // the render thread hands the clock across at a block boundary, then the
     // new one. Bounded by reads, not by a timer; a seam that has not landed
@@ -1555,6 +1653,11 @@ export class DesktopNativePlaybackClient {
       if (this.transportIntent === 'playing' && (already === 'playing' || already === 'pre-roll')) {
         return
       }
+      // Where the bar stands as Play goes out, for the run floor: the park
+      // point, a pause hold or a seek's target. The core resumes from its
+      // park point, so the ear reaches nothing new before that.
+      const shown = this.audibleSeconds()
+      const lap = this.last?.loopCount
       const result = await window.singz.resumeDesktopPlayback(generation)
       if (!result.ok) {
         // Only this one refusal is survivable, and only against a FRESH
@@ -1566,8 +1669,10 @@ export class DesktopNativePlaybackClient {
         if (state !== 'playing' && state !== 'pre-roll') ensure(result, 'Native resume failed')
       }
       this.transportIntent = 'playing'
-      // The core resumes from ITS park point; from here the bar reads the core.
+      // The core resumes from ITS park point; from here the bar reads the core,
+      // floored where it stood until the ear catches up.
       this.pauseHold = null
+      this.run = shown !== null && lap !== undefined ? { generation, floor: shown, lap } : null
       this.edgeAtMs = Date.now()
       await this.refreshCommandStatus(generation, provider)
       // The poll armed before the resume can be a steady 200 ms away, which
@@ -1589,10 +1694,15 @@ export class DesktopNativePlaybackClient {
       const targetFrame = Math.round(seconds * this.last.format.sampleRate)
       // Shown the moment it is issued — the IPC round trip alone is 20-60 ms
       // on a busy main — and withdrawn only if the core refuses it. A pause
-      // hold is superseded: the core will sit at the target.
+      // hold is superseded: the core will sit at the target. So is the run: a
+      // new one begins at the target, which the ear reaches a latency after
+      // the core has taken the seek. Its lap is provisional until the
+      // receipt (see readStatus).
       const held = this.pauseHold
+      const run = this.run
       this.pendingSeekFrame = targetFrame
       this.pauseHold = null
+      this.run = { generation, floor: targetFrame / this.last.format.sampleRate, lap: this.last.loopCount }
       // The base is read ONCE, at the first seek of a run; every seek after
       // it while the receipt is still owed adds to `issued` instead of moving
       // the base, so the target stands until the core has applied them all.
@@ -1614,6 +1724,7 @@ export class DesktopNativePlaybackClient {
         this.pendingSeekIssued = Math.max(0, this.pendingSeekIssued - 1)
         if (this.pendingSeekIssued === 0) this.pendingSeekReceipt = null
         this.pauseHold = held
+        this.run = run
         this.onStateChange(this.last)
         throw error
       }
@@ -1898,9 +2009,38 @@ export class DesktopNativePlaybackClient {
         if (this.pendingSeekReceipt !== null &&
             Number(status.seekCount) >= Number(this.pendingSeekReceipt) + this.pendingSeekIssued) {
           this.clearPendingSeek()
+          // And the run the seek started takes its lap from this status. The
+          // lap `seek()` read off the last poll can be a whole wrap behind (a
+          // song looping between two polls wraps with no status to say so),
+          // and a stale lap folds the ear into the lap before or drops the
+          // floor. This status carries the lap the core took the seek in,
+          // unless the head has wrapped past the target since: one lap back.
+          // The target is where the CORE put it: at or past the loop's end it
+          // is folded back into the loop, with no lap counted (the core's
+          // `resolvedSeekFrame`), so it is folded the same way here, both to
+          // ask whether the head has wrapped past it and to be the floor.
+          const run = this.run
+          const rendered = Number(status.renderedProjectFrame)
+          const sampleRate = status.format.sampleRate
+          if (run !== null && run.generation === status.generation && run.floor !== null &&
+              Number.isSafeInteger(rendered) && sampleRate) {
+            const start = Number(status.loopStartFrame)
+            const end = Number(status.loopEndFrame)
+            const asked = Math.round(run.floor * sampleRate)
+            const target = status.loopEnabled && end > start && asked >= end
+              ? start + ((asked - start) % (end - start))
+              : asked
+            const wrapped = status.loopEnabled && rendered < target
+            this.run = {
+              ...run,
+              floor: target / sampleRate,
+              lap: String(Math.max(0, Number(status.loopCount) - (wrapped ? 1 : 0)))
+            }
+          }
         }
         this.last = status
         this.lastAtMs = Date.now()
+        this.followRun(status)
         this.observeTransportBoundary(expectedGeneration, status)
         this.onStateChange(status)
         if (status.state === 'terminal' || status.state === 'quarantined') this.stopPolling()
