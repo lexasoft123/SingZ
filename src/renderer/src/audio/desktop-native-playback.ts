@@ -1401,19 +1401,41 @@ export class DesktopNativePlaybackClient {
       const state = this.transportIntent === 'playing' && status.transportState !== 'completed'
         ? 'playing'
         : 'paused'
-      const landing = this.countInLandingSeconds
-      const insideCountIn = renderedFrame < 0 && landing !== null &&
-        (landing > 0 || state !== 'playing')
-      const rebuilt: DesktopNativePlaybackPrepare = insideCountIn
-        ? { ...request, positionSeconds: landing }
-        : request
-      const preparedStartProjectFrame = insideCountIn ? undefined : renderedFrame
       const loop = request.loop
         ? {
             startProjectFrame: Math.round(request.loop.start * this.route.sampleRate),
             endProjectFrame: Math.round(request.loop.end * this.route.sampleRate)
           }
         : undefined
+      // A SEEK STILL OWED ITS RECEIPT (the read above retires one that has
+      // landed) is where the transport is going, not the frame the core last
+      // reported. A rebuild started at that frame, and the seek went away with
+      // the old generation: paused with the playhead past a selection, the Loop
+      // button seeks to the selection's start and then arms the loop — a
+      // rebuild while paused — and the next Play started from the old spot,
+      // wrapped into the loop. The rebuild starts at the seek's target now,
+      // folded into the loop the way the core folds a seek past its end (no lap
+      // counted). A seam needs none of this: it keeps the owed seek, and the
+      // core applies it on one side of the hand-over or the other. Inside a
+      // count-in an owed seek is the singer moving — the core cancels the
+      // landing when it applies the seek — so the change is no count-in change.
+      const owedSeek = this.pendingSeekFrame !== null &&
+        Date.now() - this.pendingSeekAtMs < PENDING_SEEK_MAX_MS
+        ? this.pendingSeekFrame
+        : null
+      const owedStart = owedSeek === null
+        ? null
+        : loop && owedSeek >= loop.endProjectFrame
+          ? loop.startProjectFrame +
+            ((owedSeek - loop.startProjectFrame) % (loop.endProjectFrame - loop.startProjectFrame))
+          : owedSeek
+      const landing = this.countInLandingSeconds
+      const insideCountIn = owedStart === null && renderedFrame < 0 && landing !== null &&
+        (landing > 0 || state !== 'playing')
+      const rebuilt: DesktopNativePlaybackPrepare = insideCountIn
+        ? { ...request, positionSeconds: landing }
+        : request
+      const preparedStartProjectFrame = insideCountIn ? undefined : (owedStart ?? renderedFrame)
       const initialTransport: DesktopPlaybackInitialTransportConfig = {
         state,
         ...(loop ? { loop } : {})
@@ -1436,7 +1458,7 @@ export class DesktopNativePlaybackClient {
       const seamable = !insideCountIn && !options.force && this.started && state === 'playing' &&
         (status.transportState === 'playing' || status.transportState === 'pre-roll') &&
         status.swapPendingGeneration === '0' && status.retiringSwapGeneration === '0'
-      if (seamable && await this.seam(rebuilt, oldGeneration, renderedFrame, initialTransport)) return
+      if (seamable && await this.seam(rebuilt, oldGeneration, renderedFrame, initialTransport, owedSeek !== null)) return
       this.stopPolling()
       if (this.started) {
         try { await window.singz.stopDesktopPlayback(oldGeneration) } catch { /* unload is authoritative */ }
@@ -1464,7 +1486,9 @@ export class DesktopNativePlaybackClient {
     request: DesktopNativePlaybackPrepare,
     oldGeneration: string,
     preparedStartProjectFrame: number,
-    initialTransport: DesktopPlaybackInitialTransportConfig
+    initialTransport: DesktopPlaybackInitialTransportConfig,
+    /** A seek is still owed its receipt (reconfigure's reading, expiry and all). */
+    seekOwed: boolean
   ): Promise<boolean> {
     const config: DesktopPlaybackPrepareConfig = {
       // The clock is carried across by the core; the frame only primes the
@@ -1494,10 +1518,13 @@ export class DesktopNativePlaybackClient {
     // The replacement was prepared at a signed frame, so it has no count-in
     // landing to hold at. Except the one seam that is still inside a
     // count-in: at the top of the song (a landing past the top is a rebuild,
-    // above), where the core carries the pre-roll clock across — the landing
-    // stays 0 so the dots go on counting the clicks that are still to come
-    // rather than vanishing.
-    const carriesCountIn = preparedStartProjectFrame < 0 && this.countInLandingSeconds !== null
+    // above, unless a seek is owed), where the core carries the pre-roll clock
+    // across — the landing stays 0 so the dots go on counting the clicks that
+    // are still to come rather than vanishing. A seek still owed ends the
+    // count-in when the core applies it, on one side of the hand-over or the
+    // other, so then there is nothing of it to carry.
+    const carriesCountIn = preparedStartProjectFrame < 0 && this.countInLandingSeconds !== null &&
+      !seekOwed
     // The run goes across, though: the core hands the clock and its lap count
     // to the new generation, so the ear is on the same run. Forgotten, a seam
     // inside a run's first latency (Loop turned on seeks to the selection and
@@ -1975,13 +2002,13 @@ export class DesktopNativePlaybackClient {
     // stream change in the same window is still a boundary, and render
     // failures still re-anchor below.
     //
-    // No echo is owed after a landing either: a re-anchor accepted while the
-    // seam was armed went into the REPLACEMENT's mailbox and was drained in
-    // the landing callback, coalesced into that one boundary, so its echo
-    // will never arrive on its own — left pending, it would swallow the next
-    // genuine boundary as the echo and keep a wedged callback from ever being
-    // re-anchored. (One accepted after the landing costs at most one extra
-    // re-anchor.)
+    // No echo is owed after a landing either. Nothing is re-anchored while
+    // the seam is armed (below), and one the core took before it was armed
+    // belongs to the old generation, forgotten at the seam's first read; any
+    // re-anchor still pending here was drained into the landing callback and
+    // coalesced into its one boundary, so its echo will never arrive on its
+    // own — left pending, it would swallow the next genuine boundary as the
+    // echo and keep a wedged callback from ever being re-anchored.
     if (previous.transportGeneration !== status.transportGeneration &&
         failures <= previous.failures) {
       const [route, stream] = key.split(':')
@@ -2013,6 +2040,17 @@ export class DesktopNativePlaybackClient {
       status.lastTransportBoundary !== 'source-seek' && status.lastTransportBoundary !== 'source-loop'
     const failing = failures > previous.failures && advancing
     if (!boundary && !failing) return
+    // Nothing is re-anchored while a seam is armed. The command would name
+    // the new generation, and the core queues it on the replacement, which
+    // has taken no clock yet: it is anchored at the frame the replacement was
+    // PREPARED at and applied right after the hand-over, so a song with a
+    // time/pitch stage jumped back there. The landing resets the
+    // replacement's graph anyway, with its own ClockReanchored; a host
+    // boundary on the outgoing stream no longer wedges the graph that is
+    // rendering it; and a callback refusing blocks once the replacement has
+    // landed shows as rising failures on a later read, and is re-anchored
+    // then.
+    if (status.swapPendingGeneration !== '0') return
     if (this.reanchorPending || !this.started || status.state !== 'running') return
     this.reanchorPending = true
     void this.serialize(async (): Promise<'ok' | 'refused' | 'skipped'> => {
