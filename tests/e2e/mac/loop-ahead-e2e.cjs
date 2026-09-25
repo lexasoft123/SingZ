@@ -127,10 +127,13 @@ async function press(win) {
 
 /** Native playback owns the song, which is playing with a matured projection
  * and no loop, and the bar moves with it: a steady run the next arm can be
- * timed against. After a seek while parked and a Play, the facade can hold the
- * bar on the seek's target for 0.6-0.8 s and then step it forward (measured on
- * the Mac 2026-09-25), and an arm timed from a held bar would read that step as
- * the song. A held bar reads the target EXACTLY, so the bar must be past the
+ * timed against. After a seek while parked and a Play, the facade held the bar
+ * on the seek's target for 0.6-0.8 s and then stepped it forward (measured on
+ * the Mac 2026-09-25): the rebuilt stream's start shared the seek's callback,
+ * the seek was applied but never receipted, and the target stood until its
+ * one-second expiry. The core receipts every applied seek now, and this guard
+ * stays, because an arm timed from a held bar would read that step as the
+ * song. A held bar reads the target EXACTLY, so the bar must be past the
  * run's start `from` by more than any rounding, as well as not behind the
  * core's own projection: a first matured status can sit only a few
  * milliseconds past the start, too close for that check alone. */
@@ -144,11 +147,11 @@ const STEADY = (from) =>
 /** The song parked, on a transport the facade's current generation owns, with
  * no swap in flight — the state every structural change below is made in, but
  * the arm itself, which is the seam under test. Made while the song plays, a
- * structural change is a seam, and one made
- * before a time-pitch seam has landed is refused outright ("Native rebuild has
- * no trustworthy signed transport position" — a transpose's seam took ~75 ms
- * to land on the Mac, measured 2026-09-25). That is not what this driver is
- * for, so it never races it. */
+ * structural change is a seam, and one made behind a time-pitch seam still
+ * landing (~75 ms on the Mac) was refused outright ("Native rebuild has no
+ * trustworthy signed transport position", found while writing this driver,
+ * 2026-09-25) until the facade learned to wait for the landing. That is not
+ * what this driver is for, so it never races it either way. */
 const PARKED =
   '(function(){ const np = __test.engine.nativePlayback; const s = np && np.status;' +
   ' return !!(np && np.active && s && s.transportState === "paused" && s.transportGeneration === s.generation' +
