@@ -469,8 +469,8 @@ export class DesktopNativePlaybackClient {
    *  lurching after the finger has stopped. */
   private pendingSeekReceipt: string | null = null
   /** How many seeks have been issued since `pendingSeekReceipt` was read.
-   *  A scrub is several seeks in flight, and the core applies them one per
-   *  callback block; retiring the target the moment `seekCount` MOVED
+   *  A scrub is several seeks in flight, and the core may apply them a
+   *  callback block apart; retiring the target the moment `seekCount` MOVED
    *  retired the second seek's target on the first seek's receipt, so the
    *  bar showed the first spot for a poll and then jumped to the second — the
    *  same lurch, one block wide. The target now stands until the receipt
@@ -483,11 +483,14 @@ export class DesktopNativePlaybackClient {
    *  deadline instead of as a stall. */
   private pendingSeekAtMs = 0
 
-  /** Forget every seek still owed a receipt. Called when the receipt can no
-   *  longer arrive: the generation is unloaded, or a seam replaced it and the
-   *  new generation counts its seeks from zero — a base read off the old one
+  /** Forget every seek still owed a receipt: once the receipt retires the
+   *  target (readStatus), once the target expires unanswered (statusSeconds),
+   *  and in forgetTransport, when the generation is unloaded or rebuilt and
+   *  the new one counts its seeks from zero — a base read off the old one
    *  would then wait for a count the new one may never reach, and the bar
-   *  would hold a target for the whole 1 s expiry. */
+   *  would hold a target for the whole 1 s expiry. A seam goes through
+   *  forgetTransport too, and seam() puts back what it clears: the core
+   *  carries the count across a seam. */
   private clearPendingSeek(): void {
     this.pendingSeekFrame = null
     this.pendingSeekReceipt = null
@@ -628,8 +631,15 @@ export class DesktopNativePlaybackClient {
    * route/stream/clock boundary, or a rising adapter render-failure count
    * while the transport is advancing, means the callback is refusing every
    * block until the transport is re-anchored — and with the time/pitch
-   * processor in the graph the session never re-anchors on its own. */
-  private transportBoundary: { generation: string; key: string; failures: number } | null = null
+   * processor in the graph the session never re-anchors on its own. The
+   * transport generation rides along because a seam changes it without
+   * changing the generation polled (see observeTransportBoundary). */
+  private transportBoundary: {
+    generation: string
+    transportGeneration: string
+    key: string
+    failures: number
+  } | null = null
   private reanchorPending = false
   /** An accepted re-anchor is answered by the core with its own
    * ClockReanchored discontinuity (one per accepted command); that echo is a
@@ -1515,27 +1525,45 @@ export class DesktopNativePlaybackClient {
     const generation = prepared.generation
     this.generation = generation
     this.request = request
-    // A seam's generation counts its seeks from zero: a receipt base read off
-    // the old one is meaningless now — and it was prepared at a signed frame,
-    // so it has no count-in landing to hold at either. Except the one seam
-    // that is still inside a count-in: at the top of the song (a landing
-    // past the top is a rebuild, above), where the core carries the
-    // pre-roll clock across — the landing stays 0 so the dots go on
-    // counting the clicks that are still to come rather than vanishing.
+    // The replacement was prepared at a signed frame, so it has no count-in
+    // landing to hold at. Except the one seam that is still inside a
+    // count-in: at the top of the song (a landing past the top is a rebuild,
+    // above), where the core carries the pre-roll clock across — the landing
+    // stays 0 so the dots go on counting the clicks that are still to come
+    // rather than vanishing.
     const carriesCountIn = preparedStartProjectFrame < 0 && this.countInLandingSeconds !== null
     // The run goes across, though: the core hands the clock and its lap count
     // to the new generation, so the ear is on the same run, and the bar has
     // shown the same laps of it. Forgotten, a seam inside a run's first
     // latency (Loop turned on seeks to the selection and then seams) dropped
     // the bar below the spot the run began on.
+    //
+    // And so does a seek still owed its receipt. The core carries the seek
+    // count across a seam too (the replacement takes the old transport's
+    // count over at the landing, and every status before it is the old
+    // transport's), so the base read when the seek went out stays good and
+    // the receipt still arrives. Forgotten here, it cost two things: the bar
+    // drew the last status again — the spot the singer had just left — until
+    // a read showed the seek applied; and the run crossed with the lap
+    // `seek()` read off the last poll, which only the receipt corrects, so
+    // after a wrap no status had shown the floor was dropped and the bar drew
+    // below the target for a whole latency.
     const run = this.run
     const shownLap = this.shownLap
+    const owed = {
+      frame: this.pendingSeekFrame,
+      receipt: this.pendingSeekReceipt,
+      issued: this.pendingSeekIssued
+    }
     this.forgetTransport()
     if (carriesCountIn) this.countInLandingSeconds = 0
     if (run !== null) {
       this.run = { ...run, generation }
       if (shownLap !== null && shownLap.run === run) this.shownLap = { run: this.run, lap: shownLap.lap }
     }
+    this.pendingSeekFrame = owed.frame
+    this.pendingSeekReceipt = owed.receipt
+    this.pendingSeekIssued = owed.issued
     // The landing: the transport telemetry names the old generation until
     // the render thread hands the clock across at a block boundary, then the
     // new one. Bounded by reads, not by a timer; a seam that has not landed
@@ -1976,12 +2004,43 @@ export class DesktopNativePlaybackClient {
     const key = `${status.routeGeneration}:${status.streamGeneration}:${status.transportDiscontinuities}`
     const failures = status.adapterRenderFailures
     const previous = this.transportBoundary
-    this.transportBoundary = { generation, key, failures }
+    this.transportBoundary = { generation, transportGeneration: status.transportGeneration, key, failures }
     if (!previous || previous.generation !== generation) {
       this.reanchorEchoPending = false
       return
     }
     if (key === previous.key && failures === previous.failures) return
+    // A seam landed between the two reads: the telemetry comes from the
+    // replacement now, which took the old transport's clock and counters over
+    // and announced the hand-over with a ClockReanchored of its own. That is
+    // the seam's receipt, not a host boundary — a seam never moves the
+    // source, so no Stretch anchor is owed — and re-anchoring for it cost a
+    // processor reset after EVERY seam (a "reanchor · generation N" line in
+    // the log after each one) and put a command in the mailbox just ahead of
+    // the singer's next one: measured on the Mac, a seek clicked right after
+    // an A-B loop was armed drained in the same callback as that re-anchor
+    // in 11 seams of 12, and the core's count of seek boundaries lost its
+    // receipt to it — the bar held the seek's target for the whole second
+    // (PENDING_SEEK_MAX_MS) while the song played on from it. A route or
+    // stream change in the same window is still a boundary, and render
+    // failures still re-anchor below.
+    //
+    // No echo is owed after a landing either: a re-anchor accepted while the
+    // seam was armed went into the REPLACEMENT's mailbox and was drained in
+    // the landing callback, coalesced into that one boundary, so its echo
+    // will never arrive on its own — left pending, it would swallow the next
+    // genuine boundary as the echo and keep a wedged callback from ever being
+    // re-anchored. (One accepted after the landing costs at most one extra
+    // re-anchor.)
+    if (previous.transportGeneration !== status.transportGeneration &&
+        failures <= previous.failures) {
+      const [route, stream] = key.split(':')
+      const [previousRoute, previousStream] = previous.key.split(':')
+      if (route === previousRoute && stream === previousStream) {
+        this.reanchorEchoPending = false
+        return
+      }
+    }
     if (this.reanchorEchoPending) {
       // The echo of our own re-anchor: the discontinuity counter moves by one
       // under the clock-reanchored name and nothing else does. Re-baseline
