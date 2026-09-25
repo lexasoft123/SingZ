@@ -13,7 +13,9 @@
  *
  * Prereqs: `npm run build`; two projects in the singer's library. Both songs
  * are project FOLDERS under E2E_PROJECTS_ROOT (default iCloud Drive/SingZ);
- * each card is picked by the exact name the library shows for it.
+ * each card is picked by the exact name the library shows for it, the run
+ * refuses to go on if a different project opened, and both songs' files are
+ * put back afterwards, bytes and times.
  */
 require('../../shared/watchdog.cjs').arm('open-steps-e2e', { totalMinutes: 20 })
 
@@ -22,7 +24,8 @@ const { homedir } = require('node:os')
 const ROOT = join(__dirname, '..', '..', '..')
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
-const { clickLibrarySong, libraryName } = require('./library-song.cjs')
+const { assertOpenedProject, clickLibrarySong, libraryName } = require('./library-song.cjs')
+const { holdProjects } = require('./project-hold.cjs')
 const PROJECTS =
   process.env.E2E_PROJECTS_ROOT ??
   join(homedir(), 'Library/Mobile Documents/com~apple~CloudDocs/SingZ')
@@ -63,56 +66,74 @@ function table(title, rows, marks) {
     [`FIRST open`, A],
     [`SECOND open (a song is already loaded)`, B]
   ].map(([label, song]) => [label, song, libraryName(join(PROJECTS, song))])
-  const app = await _electron.launch({
-    executablePath: require('electron'),
-    args: [join(ROOT, 'out', 'main', 'index.js')],
-    env: { ...process.env, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1', SINGZ_E2E_HOOKS: '1' }
-  })
-  await quietLaunch(app)
-  const win = await app.firstWindow()
-  await win.waitForSelector('.lib-card', { timeout: 30000 })
-  await win.waitForFunction(() => window.__test !== undefined, null, { timeout: 30000 })
+  // Both songs' files as found, bytes AND times, and those of any project that
+  // opened instead of one (assertOpenedProject adds that one's): an open can
+  // re-derive and auto-save an analysis, and a measurement must never be the
+  // reason a song changed. Put back in the finally, once the app is closed.
+  const backups = []
+  const held = holdProjects(opens.map(([, song]) => join(PROJECTS, song)), backups)
+  let problems = []
+  let app
+  try {
+    app = await _electron.launch({
+      executablePath: require('electron'),
+      args: [join(ROOT, 'out', 'main', 'index.js')],
+      env: { ...process.env, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1', SINGZ_E2E_HOOKS: '1' }
+    })
+    await quietLaunch(app)
+    const win = await app.firstWindow()
+    await win.waitForSelector('.lib-card', { timeout: 30000 })
+    await win.waitForFunction(() => window.__test !== undefined, null, { timeout: 30000 })
 
-  for (const [label, song, name] of opens) {
-    const t0 = Date.now()
-    await clickLibrarySong(win, name)
-    // Wait for the load to START before waiting for it to finish: on the
-    // second open the previous song already satisfies "ready", so the wait
-    // returned instantly and the table came back empty.
-    await win.waitForFunction(() => __test?.phase === 'loading', null, { timeout: 30000 })
-    await win.waitForFunction(() => __test?.phase === 'ready' && __test?.engine?.duration > 0, null, { timeout: 180000 })
-    const ready = Date.now() - t0
-    const rows = JSON.parse(await val(win, 'JSON.stringify(__test.loadSteps())'))
-    const dur = await val(win, '__test.engine.duration')
-    /* The native graph is NOT built during a desktop open — it is prepared
-       ahead of Play, 400 ms after the controls stop moving, which is after the
-       song is already on screen. That is why no build step appears in the
-       table above, and it is the whole difference in shape from the phones,
-       which build theirs inside the open and make the singer wait for it.
-       Read it out of main's own log so the comparison is a number. */
-    let graph = 'no graph prepared within 30 s'
-    for (let i = 0; i < 300; i++) {
-      const lines = await val(win, 'window.singz.getLog()')
-      const started = lines.find((l) => /^preparing graph/.test(l.line) && l.t >= t0)
-      const done = lines.find((l) => /^graph ready · generation/.test(l.line) && l.t >= t0)
-      if (started && done) {
-        const ms = /· (\d+) ms/.exec(done.line)
-        graph = `graph prepared AFTER the open: started ${started.t - t0} ms after the click, took ${ms ? ms[1] : '?'} ms`
-        break
+    for (const [label, song, name] of opens) {
+      // from the click itself: the helper reads the library's files just
+      // before it clicks, and that is the harness's time, not the app's
+      const t0 = await clickLibrarySong(win, name)
+      // Wait for the load to START before waiting for it to finish: on the
+      // second open the previous song already satisfies "ready", so the wait
+      // returned instantly and the table came back empty.
+      await win.waitForFunction(() => __test?.phase === 'loading', null, { timeout: 30000 })
+      await win.waitForFunction(() => __test?.phase === 'ready' && __test?.engine?.duration > 0, null, { timeout: 180000 })
+      const ready = Date.now() - t0
+      await assertOpenedProject(win, { dir: join(PROJECTS, song), name, backups })
+      const rows = JSON.parse(await val(win, 'JSON.stringify(__test.loadSteps())'))
+      const dur = await val(win, '__test.engine.duration')
+      /* The native graph is NOT built during a desktop open — it is prepared
+         ahead of Play, 400 ms after the controls stop moving, which is after the
+         song is already on screen. That is why no build step appears in the
+         table above, and it is the whole difference in shape from the phones,
+         which build theirs inside the open and make the singer wait for it.
+         Read it out of main's own log so the comparison is a number. */
+      let graph = 'no graph prepared within 30 s'
+      for (let i = 0; i < 300; i++) {
+        const lines = await val(win, 'window.singz.getLog()')
+        const started = lines.find((l) => /^preparing graph/.test(l.line) && l.t >= t0)
+        const done = lines.find((l) => /^graph ready · generation/.test(l.line) && l.t >= t0)
+        if (started && done) {
+          const ms = /· (\d+) ms/.exec(done.line)
+          graph = `graph prepared AFTER the open: started ${started.t - t0} ms after the click, took ${ms ? ms[1] : '?'} ms`
+          break
+        }
+        await sleep(100)
       }
-      await sleep(100)
+      table(`${label} — "${song}" (${dur.toFixed(0)} s)`, rows, `click → phase ready: ${ready} ms\n  ${graph}`)
+      // Let the prepare-ahead settle so the second open pays for retiring it.
+      await sleep(6000)
+      if (label === 'FIRST open') {
+        await win.click('button.play')
+        await win.waitForFunction(() => __test?.engine?.playing === true, null, { timeout: 60000 })
+        await sleep(2500)
+        await val(win, '__test.engine.pause()')
+        await val(win, 'void __test.setShowCatalog(true)')
+        await win.waitForSelector('.lib-card', { timeout: 30000 })
+      }
     }
-    table(`${label} — "${song}" (${dur.toFixed(0)} s)`, rows, `click → phase ready: ${ready} ms\n  ${graph}`)
-    // Let the prepare-ahead settle so the second open pays for retiring it.
-    await sleep(6000)
-    if (label === 'FIRST open') {
-      await win.click('button.play')
-      await win.waitForFunction(() => __test?.engine?.playing === true, null, { timeout: 60000 })
-      await sleep(2500)
-      await val(win, '__test.engine.pause()')
-      await val(win, 'void __test.setShowCatalog(true)')
-      await win.waitForSelector('.lib-card', { timeout: 30000 })
-    }
+  } finally {
+    if (app) await app.close().catch(() => {})
+    problems = held.putBack()
   }
-  await app.close()
+  if (problems.length) {
+    console.log(`FAIL: library not left as found: ${problems.join('; ')}`)
+    process.exit(1)
+  }
 })().catch((e) => { console.error(e); process.exit(1) })

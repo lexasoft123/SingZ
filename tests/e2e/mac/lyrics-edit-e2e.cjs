@@ -1,26 +1,31 @@
 /*
- * Lyrics editor E2E (macOS): opens a real project, edits lyrics through the
- * actual editor UI — text edit, playhead stamp, align-draft, per-word drag
- * in the expanded word strip, save — and verifies the persisted lyrics.json
- * (source 'edited', the corrected text, monotonic times down to the word)
- * plus that a reopen serves the edit back untouched.
+ * Lyrics editor E2E (macOS): opens a copy of a real project, edits lyrics
+ * through the actual editor UI — text edit, playhead stamp, align-draft,
+ * per-word drag in the expanded word strip, save — and verifies the persisted
+ * lyrics.json (source 'edited', the corrected text, monotonic times down to
+ * the word) plus that a reopen serves the edit back untouched.
  * Permanent harness used by the e2e-verifier agent.
  *
  * The editor's "Align to the singing" is a DIFFERENT code path from the
  * panel's Check & align (lyrics:align-draft vs lyrics:get prefer:'align') —
  * align-app-e2e.cjs covers the panel; this driver covers the editor.
  *
- * The project's lyrics.json is backed up on entry and restored on exit, so
- * the library project comes out exactly as it went in.
+ * It edits an APFS clone of the project, never the singer's own. Opened
+ * through the hidden file input (the drag-drop path), the clone IS that
+ * project in place, so nothing in the library is written at all. Putting the
+ * library's lyrics.json back afterwards was not enough: a signed-in desktop
+ * that syncs the library sweeps it every half hour, and one sweep landing
+ * mid-run uploads the harness's edit to Drive, and on to the phones, before
+ * any restore runs. The clone keeps every time, so the listen cache — keyed on
+ * the vocals' size and mtime — still hits.
  *
  * Prereqs: `npm run build` done; the Qwen3-ASR speech model under
  * ~/Library/Application Support/SingZ/models (align listens afresh when no
  * cached listen of these vocals exists — give it time, not a retry).
  *
  * Env: E2E_PROJECT (default "Nothing Else Matters" — the project's FOLDER
- *      under E2E_PROJECTS_ROOT; its card is picked by the exact name the
- *      library shows for it, and the run refuses to edit if a different
- *      project opened),
+ *      under E2E_PROJECTS_ROOT, cloned for the run; it refuses to edit if a
+ *      different project opened),
  *      E2E_PROJECTS_ROOT (default iCloud Drive/SingZ),
  *      E2E_OUT (screenshot dir, default os.tmpdir()).
  */
@@ -30,8 +35,9 @@ require('../../shared/watchdog.cjs').arm('lyrics-edit-e2e')
 
 const { _electron } = require('playwright-core');
 const { quietLaunch } = require('./quiet-launch.cjs');
-const { assertOpenedProject, clickLibrarySong, libraryName } = require('./library-song.cjs');
-const { readFileSync, writeFileSync, copyFileSync, rmSync } = require('node:fs');
+const { assertOpenedProject, libraryName } = require('./library-song.cjs');
+const { holdProjects, scratchClone } = require('./project-hold.cjs');
+const { readFileSync, rmSync } = require('node:fs');
 const { join } = require('node:path');
 const { tmpdir, homedir } = require('node:os');
 
@@ -40,18 +46,24 @@ const ROOT =
   process.env.E2E_PROJECTS_ROOT ??
   join(homedir(), 'Library/Mobile Documents/com~apple~CloudDocs/SingZ');
 const OUT = process.env.E2E_OUT ?? tmpdir();
-const PROJECT_DIR = join(ROOT, PROJECT);
+// The copy this run edits — never the project in the library.
+const PROJECT_DIR = join(tmpdir(), 'singz-e2e-lyrics-edit');
 const LYRICS = join(PROJECT_DIR, 'lyrics.json');
-const BACKUP = join(tmpdir(), `lyed-e2e-backup-${Date.now()}.json`);
 const APP = join(__dirname, '..', '..', '..', 'out', 'main', 'index.js');
 const MARKER = 'edited by the harness tonight';
 
 (async () => {
+  scratchClone(join(ROOT, PROJECT), PROJECT_DIR);
   const projectName = libraryName(PROJECT_DIR);
-  copyFileSync(LYRICS, BACKUP);
-  // Any project that opened instead of this one, as found — assertOpenedProject
-  // adds its project.json, and the finally puts it back.
+  // opened through the song file its project.json names, as the library does
+  const { songFile } = JSON.parse(readFileSync(join(PROJECT_DIR, 'project.json'), 'utf8'));
+  if (typeof songFile !== 'string') throw new Error(`${PROJECT}'s project.json names no songFile`);
+  const openClone = (win) => win.setInputFiles('input[type=file]', join(PROJECT_DIR, songFile));
+  // Any project that opened instead of the clone, as assertOpenedProject found
+  // it: put back in the finally, bytes and times.
   const backups = [];
+  const held = holdProjects([], backups);
+  let problems = [];
   let app;
   try {
     app = await _electron.launch({
@@ -64,7 +76,7 @@ const MARKER = 'edited by the harness tonight';
     const win = await app.firstWindow();
     await win.waitForLoadState('domcontentloaded');
     await win.waitForSelector('.lib-card', { timeout: 20000 });
-    await clickLibrarySong(win, projectName);
+    await openClone(win);
     await win.waitForSelector('.pill.karaoke', { timeout: 60000 });
     await new Promise((r) => setTimeout(r, 2500)); // stems decoding settles
     await assertOpenedProject(win, { dir: PROJECT_DIR, name: projectName, backups });
@@ -159,8 +171,12 @@ const MARKER = 'edited by the harness tonight';
 
     // ——— align the draft (editor path: lyrics:align-draft, never a write)
     await win.click('.lyed-tools .chip:has-text("Align to the singing")');
+    // The options are the THIRD argument. Passed second they were the page
+    // function's arg, and the wait had Playwright's 30 s rather than its five
+    // minutes — ~9 s here with the listen cached, over 30 s on a busy Mac.
     await win.waitForFunction(
       () => /heard|Could not|check the text/.test(document.querySelector('.lyed-status')?.textContent ?? ''),
+      null,
       { timeout: 300000 }
     );
     const verdict = await win.$eval('.lyed-status', (el) => el.textContent);
@@ -239,7 +255,7 @@ const MARKER = 'edited by the harness tonight';
     // from cache — 'edited' is sticky, never re-asked of LRCLIB
     await win.click('.pill:has-text("Catalog")');
     await win.waitForSelector('.lib-card', { timeout: 20000 });
-    await clickLibrarySong(win, projectName);
+    await openClone(win);
     await win.waitForSelector('.pill.karaoke', { timeout: 60000 });
     await new Promise((r) => setTimeout(r, 2000));
     await assertOpenedProject(win, { dir: PROJECT_DIR, name: projectName, backups });
@@ -249,21 +265,17 @@ const MARKER = 'edited by the harness tonight';
     const shown = await win.$eval('.lyr-lines', (el) => el.textContent);
     if (!shown?.includes(MARKER)) throw new Error('reopen did not serve the edited lyrics');
     console.log('reopen: edited lyrics served from cache');
-
-    console.log('PASS');
   } finally {
-    // close first — a straggling write must not land after the restore
+    // close first — a straggling write must not land after the put-back
     if (app) await app.close().catch(() => {});
-    // the library project leaves exactly as it entered
-    copyFileSync(BACKUP, LYRICS);
-    rmSync(BACKUP, { force: true });
-    for (const [path, text] of backups) {
-      if (readFileSync(path, 'utf8') !== text) {
-        console.log(`${path} was rewritten during the run; restoring it`);
-        writeFileSync(path, text);
-      }
-    }
+    problems = held.putBack();
+    rmSync(PROJECT_DIR, { recursive: true, force: true });
   }
+  if (problems.length) {
+    console.log(`FAIL: library not left as found: ${problems.join('; ')}`);
+    process.exit(1);
+  }
+  console.log('PASS');
   process.exit(0);
 })().catch((err) => {
   console.error('FAIL:', err);

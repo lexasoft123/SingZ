@@ -554,6 +554,14 @@ await win.setInputFiles('input[type=file]', song)   // same path as drag-drop
 Rules learned the hard way:
 
 - `npm run build` before driving — drivers run `out/`, not `src/`.
+- `npm run build` and `npm run dev` never install, so after a pull that moved
+  `package-lock.json` (a new `@singz/ui` pin, most often) run `npm ci` first.
+  Both refuse to start on a `node_modules` that is not the lockfile's
+  (`scripts/check-installed-deps.cjs`: every installed `package.json` must
+  carry the version the lockfile records, and npm's install record must agree
+  on the source where it describes those same files);
+  `SINGZ_ALLOW_STALE_DEPS=1` builds anyway, for a package put there by hand at
+  another version on purpose (a locally built kit, tried before its tag).
 - Driver runs get userData **"Electron"**, dev runs **"singz"**, packaged
   **"SingZ"**: their stem caches are separate. Shared models are not.
 - After clicking something that triggers an async re-render, wait for the
