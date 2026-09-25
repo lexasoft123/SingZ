@@ -1,10 +1,11 @@
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import {
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -16,9 +17,10 @@ import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 type Hold = { putBack(): string[] }
+type Settle = { quietMs: number; maxMs: number }
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { holdProjects, scratchClone, SLACK_NS } = require('../e2e/mac/project-hold.cjs') as {
-  holdProjects(dirs: string[], backups?: unknown[]): Hold
+  holdProjects(dirs: string[], backups?: unknown[], options?: { settle?: Settle }): Hold
   scratchClone(src: string, dst: string): string
   SLACK_NS: bigint
 }
@@ -71,6 +73,67 @@ function expectAsFound(path: string, was: { bytes: Buffer; mtimeNs: bigint }) {
   const now = stat(path).mtimeNs
   expect(near(now, was.mtimeNs), `mtime ${now} against ${was.mtimeNs}`).toBe(true)
 }
+function expectFolderTime(dir: string, was: bigint) {
+  const now = stat(dir).mtimeNs
+  expect(near(now, was), `folder mtime ${now} against ${was}`).toBe(true)
+}
+
+/** How the app saves project.json: a `.part` renamed over it, which moves
+ *  the project folder's time. */
+function saveByRename(dir: string, text = JSON.stringify({ version: 2, name: 'Song', saved: true })) {
+  const doc = join(dir, 'project.json')
+  writeFileSync(`${doc}.part`, text)
+  renameSync(`${doc}.part`, doc)
+}
+
+/** What iCloud does 2-4 s after anything in a project changes: set the
+ *  folder's time to a whole second of its own. */
+function stamp(dir: string) {
+  utimesSync(dir, new Date(), new Date(Math.floor(Date.now() / 1000) * 1000 + 1000))
+}
+
+/** Someone else acting on the library while the put-back runs — iCloud, the
+ *  singer's other device — played by another process, since putBack blocks
+ *  this one. It waits to see `watch`'s time move away from `was`, says so,
+ *  then waits for the put-back to set it back, and only then runs `act` (with
+ *  `fs` and `watch` in scope). `heard` waits for a line it printed; `exited`
+ *  resolves with its exit code, 3 if it never saw the put-back. */
+function peer(watch: string, was: bigint, act: string[]) {
+  const source = [
+    "const fs = require('node:fs')",
+    `const watch = ${JSON.stringify(watch)}`,
+    `const was = ${was}n`,
+    `const slack = ${SLACK_NS}n`,
+    'let moved = false',
+    'const start = Date.now()',
+    "console.log('ready')",
+    'const tick = setInterval(() => {',
+    '  const d = fs.statSync(watch, { bigint: true }).mtimeNs - was',
+    '  const back = (d < 0n ? -d : d) <= slack',
+    '  if (!moved && !back) {',
+    '    moved = true',
+    "    console.log('saw it move')",
+    '  } else if (moved && back) {',
+    '    clearInterval(tick)',
+    ...act.map((line) => `    ${line}`),
+    '  }',
+    '  if (Date.now() - start > 12000) process.exit(3)',
+    '}, 20)'
+  ].join('\n')
+  const child = spawn(process.execPath, ['-e', source], { stdio: ['ignore', 'pipe', 'ignore'] })
+  let said = ''
+  const waiting: (() => void)[] = []
+  child.stdout!.on('data', (chunk) => {
+    said += String(chunk)
+    for (const wake of waiting.splice(0)) wake()
+  })
+  return {
+    heard: async (line: string) => {
+      while (!said.includes(line)) await new Promise<void>((resolve) => waiting.push(resolve))
+    },
+    exited: new Promise<number | null>((resolve) => child.on('exit', (code) => resolve(code)))
+  }
+}
 
 describe('holdProjects / putBack', () => {
   it('puts back the bytes AND the mtime of a file the run rewrote, and touches nothing else', () => {
@@ -106,18 +169,26 @@ describe('holdProjects / putBack', () => {
     const dir = project()
     const lyrics = join(dir, 'lyrics.json')
     const was = found(lyrics)
+    setOldTimes(dir)
+    const folderWas = stat(dir).mtimeNs
     const held = holdProjects([dir])
     rmSync(lyrics)
+    vi.spyOn(console, 'log').mockImplementation(() => {})
     expect(held.putBack()).toEqual([])
     expectAsFound(lyrics, was)
+    // recreating it moved the folder's time again, so that goes back last
+    expectFolderTime(dir, folderWas)
   })
 
   it('moves a file the run added out of the project, without destroying it', () => {
     const dir = project()
+    setOldTimes(dir)
+    const folderWas = stat(dir).mtimeNs
     const held = holdProjects([dir])
     writeFileSync(join(dir, 'extra.json'), 'made by the run')
     const log = vi.spyOn(console, 'log').mockImplementation(() => {})
     expect(held.putBack()).toEqual([])
+    expectFolderTime(dir, folderWas)
     expect(existsSync(join(dir, 'extra.json'))).toBe(false)
     const line = log.mock.calls.flat().join('\n')
     const moved = /extra\.json — added during the run, moved to (.+?extra\.json)/.exec(line)
@@ -277,6 +348,146 @@ describe('holdProjects / putBack', () => {
         }
       }
     }
+  })
+
+  it("puts a project folder's mtime back after a save by rename inside it", () => {
+    const dir = project()
+    setOldTimes(dir)
+    const was = stat(dir).mtimeNs
+    const held = holdProjects([dir])
+    saveByRename(dir)
+    expect(stat(dir).mtimeNs).not.toBe(was)
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    expect(held.putBack()).toEqual([])
+    expectFolderTime(dir, was)
+    if (process.platform === 'darwin') expect(stat(dir).mtimeNs).toBe(OLD_MTIME)
+    expect(log.mock.calls.flat().join('\n')).toMatch(/library folder times put back: Song\b/)
+  })
+
+  it("puts the library root's mtime back when the run is all that moved it", () => {
+    const dir = project()
+    project('Other')
+    // Pinned old, so the save below moves it on any clock: NTFS stamps a
+    // folder from a timer that can tick every 15.6 ms, and the save lands
+    // within one tick of the files project() just wrote.
+    setOldTimes(dir)
+    setOldTimes(root)
+    const was = stat(root).mtimeNs
+    const held = holdProjects([dir])
+    saveByRename(dir)
+    stamp(root)
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    expect(held.putBack()).toEqual([])
+    expectFolderTime(root, was)
+    expect(log.mock.calls.flat().join('\n')).toMatch(/library folder times put back: Song, project-hold-/)
+  })
+
+  it("leaves the root's mtime as it is when something else in it changed during the run", () => {
+    const dir = project()
+    const other = project('Other')
+    setOldTimes(other) // so the change below moves it on a coarse clock too
+    setOldTimes(root)
+    const held = holdProjects([dir])
+    // the singer changes another song meanwhile, and the root is stamped for it
+    writeFileSync(join(other, 'notes.json'), 'written on another device')
+    stamp(root)
+    const stamped = stat(root).mtimeNs
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    expect(held.putBack()).toEqual([])
+    expect(stat(root).mtimeNs).toBe(stamped)
+    expect(log.mock.calls.flat().join('\n')).toMatch(/library folder time left as it is: project-hold-\w+ — Other changed during the run too/)
+  })
+
+  // Windows wants a privilege for a link, and this is about the folder's time.
+  it.skipIf(process.platform === 'win32')("holds a linked project's time from its folder, never from the link", () => {
+    const dir = project()
+    setOldTimes(dir)
+    const was = stat(dir).mtimeNs
+    const link = join(root, 'Linked')
+    symlinkSync(dir, link)
+    // a run that changes nothing: the put-back must not either
+    const held = holdProjects([link])
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    expect(held.putBack()).toEqual([])
+    expectFolderTime(dir, was)
+    if (process.platform === 'darwin') expect(stat(dir).mtimeNs).toBe(OLD_MTIME)
+  })
+
+  it("keeps a folder's new time when its files could not all be put back", () => {
+    const dir = project()
+    setOldTimes(dir)
+    const held = holdProjects([dir])
+    mkdirSync(join(dir, 'made')) // a folder the run added: named, and left in place
+    const moved = stat(dir).mtimeNs
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    expect(held.putBack().join('\n')).toMatch(/made: a folder added during the run — left in place/)
+    expect(stat(dir).mtimeNs).toBe(moved)
+    expect(log.mock.calls.flat().join('\n')).toMatch(/library folder time left as it is: Song — its files are not all as found/)
+  })
+
+  it('puts a folder time back again when a sync client stamps it after the put-back', async () => {
+    const dir = project()
+    setOldTimes(dir)
+    const was = stat(dir).mtimeNs
+    const held = holdProjects([dir], [], { settle: { quietMs: 1500, maxMs: 15000 } })
+    // iCloud: once the put-back has set the folder's time back, it stamps it,
+    // as the put-back's own writes make it do seconds later
+    const icloud = peer(dir, was, ['fs.utimesSync(watch, new Date(), new Date(Math.floor(Date.now() / 1000) * 1000 + 1000))'])
+    await icloud.heard('ready')
+    saveByRename(dir)
+    await icloud.heard('saw it move')
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    expect(held.putBack()).toEqual([])
+    // judged once the stamp is certainly in, so a put-back that returned
+    // before it cannot pass
+    expect(await icloud.exited).toBe(0)
+    expectFolderTime(dir, was)
+    expect(log.mock.calls.flat().join('\n')).toMatch(/library folder times put back: Song \(again after 1 later stamp\)/)
+  })
+
+  it('stops putting the root back once another song changes while it waits', async () => {
+    const dir = project()
+    const other = project('Other')
+    setOldTimes(dir)
+    setOldTimes(other)
+    setOldTimes(root)
+    const was = stat(root).mtimeNs
+    const held = holdProjects([dir], [], { settle: { quietMs: 1500, maxMs: 15000 } })
+    // the singer's other device, once the put-back has set the root back:
+    // another song changes, and iCloud stamps the root for it
+    const device = peer(root, was, [
+      `fs.writeFileSync(${JSON.stringify(join(other, 'notes.json'))}, 'written on another device')`,
+      'fs.utimesSync(watch, new Date(), new Date(Math.floor(Date.now() / 1000) * 1000 + 2000))'
+    ])
+    await device.heard('ready')
+    saveByRename(dir)
+    stamp(root)
+    await device.heard('saw it move')
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    expect(held.putBack()).toEqual([])
+    expect(await device.exited).toBe(0)
+    // the root keeps the time the singer's change gave it: never put back over it
+    expect(near(stat(root).mtimeNs, was)).toBe(false)
+    expect(log.mock.calls.flat().join('\n')).toMatch(/library folder time left as it is: project-hold-\w+ — Other changed during the run too/)
+  })
+
+  it('puts the folder time back from the exit hook too', () => {
+    const dir = project()
+    setOldTimes(dir)
+    const was = stat(dir).mtimeNs
+    const doc = join(dir, 'project.json')
+    const script = [
+      `const { holdProjects } = require(${JSON.stringify(HELPER)})`,
+      "const fs = require('node:fs')",
+      `holdProjects([${JSON.stringify(dir)}])`,
+      `fs.writeFileSync(${JSON.stringify(`${doc}.part`)}, 'saved by a run that timed out')`,
+      `fs.renameSync(${JSON.stringify(`${doc}.part`)}, ${JSON.stringify(doc)})`,
+      'process.exit(1)'
+    ].join('\n')
+    const run = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' })
+    expect(run.status).toBe(1)
+    expect(run.stderr).toMatch(/library folder times put back: Song\b/)
+    expectFolderTime(dir, was)
   })
 })
 
