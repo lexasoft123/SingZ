@@ -100,7 +100,9 @@ in `tests/e2e/mac/` (twenty of them: the lanes' PLAYED EDGE
 on every frame while a song plays, whole and zoomed, and a sliver between
 the played layer and its edge layer must render exactly like none: a user
 saw the step trailing a zoomed line by eye while every driver was green,
-because none of them looked at the lanes while a song rolled), align,
+because none of them looked at the lanes while a song rolled — and the
+unplayed part must sit visibly in SHADOW, because the kit's own ~16% step
+read as none at all once the edge sat on the line), align,
 lyrics editing (the editor's
 align-draft leg is a different code path from the panel's Check & align —
 both are covered), CANCELLING one of those jobs
