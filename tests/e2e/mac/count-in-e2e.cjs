@@ -114,6 +114,30 @@
  *      the plain route by a majority of its five edges, since one callback
  *      of quantization reaches that far there.
  *
+ *  10. A SEEK WHILE THE SONG PLAYS HELD THE BAR ON ITS TARGET until the next
+ *      status poll, then jumped it forward to where the song had got to:
+ *      holds of 30-185 ms and forward steps of 50-170 ms, measured on the Mac.
+ *      seek() read one status back, which lands before the callback takes the
+ *      seek, and left the receipt to the poll already armed, a steady 200 ms
+ *      one while a song simply plays. It watches every edge period now, as
+ *      after a Play. Leg 15 seeks from the page a set time after a steady poll
+ *      lands, samples the bar well under a millisecond apart, and bounds how
+ *      long the bar holds the target (the ear reaches it a latency after the
+ *      core takes the seek) and how far it may jump forward.
+ *
+ *  11. A SHORT LOOP DREW ITS TAIL AGAIN RIGHT AFTER A WRAP: the loop's start,
+ *      then its tail, then its start again, in 6 of ~190 wraps of a 0.25 s
+ *      loop on the Mac. The core publishes its status once a callback, so a
+ *      status is up to a callback stale when it is read, and right after a
+ *      wrap the head less the latency stands in for the ear. When the status
+ *      before had already wrapped the bar with the ear, a staler stand-in fell
+ *      a hair short of the loop's start and was folded into the lap the head
+ *      had left. A fold never goes back past a lap the bar has shown now. It
+ *      takes a read within a few milliseconds of the ear's wrap, so leg 16
+ *      plays ~80 laps at the fast status cadence every wrap re-arms, across
+ *      ten seams, samples the bar well under a millisecond apart, and forbids
+ *      any step forward of more than half the loop.
+ *
  * Reads three opinions where the transport-race driver taught us to:
  * `__test.playing` (the button), `engine.playing`, and the core's own
  * `transportState`. The whole run is also judged on the log: ANY dsp warning
@@ -132,7 +156,9 @@
  *               first bar, with 45 s of song left after it: the first ten
  *               legs each carry the song a few seconds further, legs 11
  *               and 12 seek back to it, leg 13 plays ~11 s from 10 s past
- *               it, and leg 14 ~9 s from 25 s past it),
+ *               it, leg 14 ~9 s from 25 s past it, leg 15 ~6 s
+ *               from 34 s past it, and leg 16 loops a quarter of a second
+ *               in place 42 s past it),
  *      E2E_PROJECTS_ROOT (default iCloud Drive/SingZ).
  */
 // Every E2E driver runs under a deadline: a hang prints where it was and
@@ -499,8 +525,10 @@ const EDGE = (action, ms, armed = 'true') => `(async function(){
  * way, 6-8 ms on the Mac's 512-frame route, on every status the song plays
  * through — and is no edge's doing. `mustSee` requires the unmatured window
  * to have been observed: after a Play the facade polls every 10 ms until
- * the projection matures, so it always is; a seek's read-back is a 50 ms
- * poll and steps right over an 11 ms window, never over a 151 ms one.
+ * the projection matures, so it always is. A seek while playing is polled
+ * every 10 ms too, but its unmatured window is one latency long, 11 ms on the
+ * Mac's plain route, barely more than that period, so a read can still step
+ * over it; a 151 ms window it can never miss.
  * `loopSpanMs` names an A-B loop the window plays through: a step back of
  * one whole span, give or take the limit, is the bar wrapping WITH the ear
  * and not judged; a wrap a latency early is span less the latency, and is.
@@ -552,6 +580,177 @@ function judgeEdge(label, r, floor, fail, { mustSee = false, loopSpanMs = null, 
   return `latency ${latencyMs.toFixed(2)} ms, ${matured ? `matured ${matured.t.toFixed(1)} ms after the edge (step ${((matured.after - matured.before) * 1000).toFixed(2)} ms)` : 'unmatured window not observed'}, ` +
     `worst step back at an unmatured status ${worst.ms.toFixed(2)} ms (limit ${limitMs.toFixed(2)}), ${loopSpanMs !== null ? `${wraps} wrap(s) of the span, ` : ''}lowest ${r.lowest.toFixed(4)} s from ${floor.toFixed(4)} s, ` +
     `${r.switches.length} statuses, ${r.samples} samples${other.length ? `, quantization steps between matured statuses: ${other.join(', ')} ms` : ''}`
+}
+
+/** Seek from the page to `target` while the song plays, `phaseMs` after a
+ * STEADY status poll lands (two polls at least 150 ms apart, which the facade
+ * reaches two seconds after the last command), then sample the bar on a
+ * MessageChannel loop, well under a millisecond apart, for 600 ms. Records
+ * when the bar first shows the target, when the core's receipt arrives, when
+ * the bar first leaves the target, and the largest step forward it takes
+ * from there, the jump that used to land a steady poll after the seek. */
+const STEADY_SEEK = (target, phaseMs) => `(async function(){
+  const e = __test.engine
+  const np = e.nativePlayback
+  if (!np || !np.status) return { error: 'no native status to time the seek against' }
+  const snap = (t) => { const s = np.status; return { t, pos: e.position, core: s ? s.transportState : 'none',
+    seeks: s ? s.seekCount : null, button: __test.playing, engine: e.playing } }
+  const changes = []
+  let status = np.status
+  const t0 = performance.now()
+  const press = await new Promise((resolve) => {
+    const id = setInterval(() => {
+      const now = performance.now()
+      if (np.status !== status) { status = np.status; changes.push(now) }
+      const n = changes.length
+      if (n >= 2 && changes[n - 1] - changes[n - 2] >= 150 && now - changes[n - 1] >= ${phaseMs}) {
+        clearInterval(id)
+        const at = snap(now)
+        void e.seek(${target})
+        resolve({ at, staleMs: now - changes[n - 1], gapMs: changes[n - 1] - changes[n - 2] })
+      } else if (now - t0 > 8000) {
+        clearInterval(id)
+        resolve(null)
+      }
+    }, 1)
+  })
+  if (!press) return { error: 'the status never settled into its steady cadence within 8 s' }
+  let shown = null
+  let left = null
+  let receipt = null
+  let forward = { step: 0, t: 0 }
+  let last = null
+  let samples = 0
+  const channel = new MessageChannel()
+  return await new Promise((resolve) => {
+    channel.port1.onmessage = () => {
+      const now = performance.now()
+      const row = snap(now)
+      samples++
+      const since = now - press.at.t
+      if (receipt === null && row.seeks !== press.at.seeks) receipt = since
+      if (shown === null && Math.abs(row.pos - ${target}) < 0.0005) shown = since
+      if (shown !== null && left === null && row.pos > ${target} + 0.0005) left = since
+      if (left !== null && last !== null && row.pos - last.pos > forward.step) forward = { step: row.pos - last.pos, t: since }
+      last = row
+      if (since >= 600) {
+        channel.port1.close()
+        const s = np.status
+        resolve({ ...press, shown, left, receipt, forward, samples, final: row,
+          latency: s ? Number(s.presentationLatencyFrames) : 0, sampleRate: s ? s.format.sampleRate : 0 })
+        return
+      }
+      channel.port2.postMessage(0)
+    }
+    channel.port2.postMessage(0)
+  })
+})()`
+
+/** Judge one seek while the song plays: the bar may hold the target only
+ * until the ear gets there (a latency after the core takes the seek, which
+ * is its next callback) with 40 ms to spare, and may jump forward no more
+ * than 25 ms: one callback of quantization and room besides, never the
+ * 50-170 ms a steady poll's worth of song used to add at once. */
+function judgeSteadySeek(label, r, fail) {
+  if (r.error) {
+    fail.push(`${label}: ${r.error}`)
+    return r.error
+  }
+  const latencyMs = r.sampleRate ? (r.latency / r.sampleRate) * 1000 : NaN
+  const holdLimit = latencyMs + 40
+  const hold = r.shown !== null && r.left !== null ? r.left - r.shown : null
+  const forwardMs = r.forward.step * 1000
+  if (r.at.core !== 'playing') fail.push(`${label}: the song was not playing at the seek (core ${r.at.core}) — this leg raced nothing`)
+  if (r.receipt === null) fail.push(`${label}: no status carried the seek's receipt within 600 ms`)
+  if (r.shown === null) fail.push(`${label}: the bar never showed the target`)
+  else if (r.left === null) fail.push(`${label}: the bar never left the target within 600 ms`)
+  else if (hold > holdLimit) {
+    fail.push(`${label}: the bar held the target ${hold.toFixed(1)} ms (limit ${holdLimit.toFixed(1)}: the route's latency plus 40 ms)`)
+  }
+  if (forwardMs > 25) fail.push(`${label}: the bar jumped FORWARD ${forwardMs.toFixed(1)} ms, ${r.forward.t.toFixed(1)} ms after the seek`)
+  if (r.final.core !== 'playing' || !r.final.button || !r.final.engine) {
+    fail.push(`${label}: at the end the core is ${r.final.core}, the button ${r.final.button ? 'Pause' : 'Play'}, the engine ${r.final.engine ? 'playing' : 'stopped'} — the three disagree`)
+  }
+  const at = (ms) => (ms === null ? '-' : `${ms.toFixed(1)} ms`)
+  return `sought ${r.staleMs.toFixed(0)} ms after a poll (polls ${r.gapMs.toFixed(0)} ms apart); the target on the bar after ${at(r.shown)}, ` +
+    `the receipt after ${at(r.receipt)}, the bar off the target after ${at(r.left)} (held ${at(hold)}, latency ${latencyMs.toFixed(2)} ms), ` +
+    `largest step forward ${forwardMs.toFixed(1)} ms, ${r.samples} samples`
+}
+
+/** Watch the bar play an A-B loop from `a` to `b` for `ms`, sampled on a
+ * MessageChannel loop well under a millisecond apart. Counts the wraps (a
+ * step back of more than half the loop) and the status reads, and records
+ * every step FORWARD of more than half the loop (the bar drawing the loop's
+ * tail again right after it had wrapped), every sample outside the loop, and
+ * the largest step back inside a lap. */
+const LOOP_WRAPS = (a, b, ms) => `(async function(){
+  const e = __test.engine
+  const np = e.nativePlayback
+  if (!np || !np.status) return { error: 'no native status to watch the loop with' }
+  const span = ${b} - ${a}
+  const t0 = performance.now()
+  let status = np.status
+  let last = null
+  let reads = 0
+  let samples = 0
+  let wraps = 0
+  const forward = []
+  const outside = []
+  let back = { step: 0, t: 0 }
+  const channel = new MessageChannel()
+  return await new Promise((resolve) => {
+    channel.port1.onmessage = () => {
+      const now = performance.now()
+      const pos = e.position
+      samples++
+      if (np.status !== status) { status = np.status; reads++ }
+      if ((pos < ${a} - 0.0005 || pos > ${b} + 0.0005) && outside.length < 8) outside.push({ pos, t: now - t0 })
+      if (last !== null) {
+        const step = pos - last
+        if (step > span / 2) {
+          if (forward.length < 8) forward.push({ from: last, to: pos, t: now - t0, q: status ? status.audibleProjectionQuality : 'none' })
+        } else if (step < -span / 2) {
+          wraps++
+        } else if (-step > back.step) {
+          back = { step: -step, t: now - t0 }
+        }
+      }
+      last = pos
+      if (now - t0 >= ${ms}) {
+        channel.port1.close()
+        const s = np.status
+        resolve({ samples, reads, wraps, forward, outside, back, ms: now - t0,
+          core: s ? s.transportState : 'none', button: __test.playing, engine: e.playing })
+        return
+      }
+      channel.port2.postMessage(0)
+    }
+    channel.port2.postMessage(0)
+  })
+})()`
+
+/** Judge one LOOP_WRAPS window of a loop `spanMs` long: no step forward of
+ * more than half the loop at all, the bar inside the loop throughout, one
+ * wrap a lap (a window catches one more or one fewer by its phase), and no
+ * step back inside a lap of more than 25 ms, two callbacks of quantization
+ * and room besides. */
+function judgeLoopWraps(label, r, spanMs, fail) {
+  if (r.error) {
+    fail.push(`${label}: ${r.error}`)
+    return r.error
+  }
+  for (const f of r.forward) {
+    fail.push(`${label}: the bar jumped a whole loop FORWARD, ${f.from.toFixed(4)} → ${f.to.toFixed(4)} s, ${f.t.toFixed(1)} ms in (status ${f.q})`)
+  }
+  for (const o of r.outside) fail.push(`${label}: the bar at ${o.pos.toFixed(4)} s, outside the loop, ${o.t.toFixed(1)} ms in`)
+  const laps = r.ms / spanMs
+  if (Math.abs(r.wraps - laps) > 1) fail.push(`${label}: the bar wrapped ${r.wraps} times in ${laps.toFixed(1)} laps`)
+  if (r.back.step * 1000 > 25) fail.push(`${label}: the bar stepped back ${(r.back.step * 1000).toFixed(1)} ms inside a lap, ${r.back.t.toFixed(1)} ms in`)
+  if (r.core !== 'playing' || !r.button || !r.engine) {
+    fail.push(`${label}: at the end the core is ${r.core}, the button ${r.button ? 'Pause' : 'Play'}, the engine ${r.engine ? 'playing' : 'stopped'} — the three disagree`)
+  }
+  return `${r.wraps} wraps in ${laps.toFixed(1)} laps, ${r.reads} status reads, ${r.forward.length} whole-loop step(s) forward, ` +
+    `largest step back inside a lap ${(r.back.step * 1000).toFixed(1)} ms, ${r.samples} samples`
 }
 
 /** The callback size the route renders, from the core's continuous frame
@@ -1075,9 +1274,9 @@ function judgeCountIn(label, rows, landing, fail, lastDotMs) {
     // Every Play of a transposed song stepped the bar back that far, the
     // way a Bluetooth route would, and every lap of an A-B loop wrapped the
     // bar that much EARLY and then stepped it back again. The window is long
-    // enough that a seek's 50 ms read-back lands inside it every time, so
-    // the seek is held to it here, and a loop around the playhead has to
-    // wrap by the whole span, as the ear does.
+    // enough that a seek's 10 ms edge reads always land inside it, so the
+    // seek is held to it here, and a loop around the playhead has to wrap by
+    // the whole span, as the ear does.
     const transposedTo = async (st) => {
       await val(win, `__test.setTranspose(${st})`)
       if (!(await waitFor(win, `(function(){ const s = __test.engine.nativePlayback && __test.engine.nativePlayback.status; return !!s && s.transposeSemitones === ${st} && (s.transportState === 'paused' || s.transportState === 'playing') })()`, 20000))) {
@@ -1111,6 +1310,69 @@ function judgeCountIn(label, rows, landing, fail, lastDotMs) {
     await val(win, '__test.engine.setRegion(null, false)')
     await pauseAndWait(win)
     await transposedTo(0)
+
+    // ── 15. A seek while the song simply plays ──────────────────────────
+    //
+    // Count-in off, as in 13 and 14. Each seek is pressed a set time after a
+    // steady 200 ms poll, so the poll armed before it is still a long way
+    // off: the bar used to hold the target until that poll, while the song
+    // played on from it, and then jump forward by all the song it had missed.
+    // Forward and back, at two phases of the poll. ~6 s of song from MID + 34.
+    await val(win, `__test.engine.seek(${MID + 34})`)
+    await sleep(900)
+    await press(win)
+    if (!(await waitFor(win, '__test.playing === true', 5000))) throw new Error('Play never reached the button within 5 s')
+    for (const [target, phase] of [[MID + 38, 40], [MID + 36, 120]]) {
+      const label = `seek to ${target} s ${phase} ms after a steady poll`
+      const r = await val(win, STEADY_SEEK(target, phase))
+      console.log(`15. ${label}: ${judgeSteadySeek(label, r, fail)}`)
+    }
+    await pauseAndWait(win)
+
+    // ── 16. A short A-B loop, lap after lap ─────────────────────────────
+    //
+    // Count-in off. The core publishes its status once a callback, so a
+    // status is up to a callback stale when it is read, and right after a
+    // wrap the head less the latency stands in for the ear. The status before
+    // could wrap the bar with the ear and the stand-in after it fall a hair
+    // short of the loop's start, folded back into the lap the head had left:
+    // the loop's start, its tail, then its start again, in 6 of ~190 wraps of
+    // a 0.25 s loop on the Mac. It takes a read within a few milliseconds of
+    // the ear's wrap, so ~80 laps are sampled well under a millisecond apart,
+    // at the 50 ms status cadence every wrap re-arms. The click is turned on
+    // and off before each two-second window, a seam each time, so the loop is
+    // also carried across ten structural changes while it plays: each seam
+    // restarts the projection, one more unmatured stretch, and a seam that
+    // lost the loop would take the bar out of it. The loop plays in place
+    // around MID + 42.
+    await val(win, `__test.engine.seek(${MID + 42})`)
+    await sleep(900)
+    await press(win)
+    if (!(await waitFor(win, '__test.playing === true', 5000))) throw new Error('Play never reached the button within 5 s')
+    await sleep(600)
+    // Around the playhead, so the song never plays outside the loop once it
+    // is set.
+    const loopStart = +(JSON.parse(await val(win, SNAP)).pos - 0.1).toFixed(3)
+    const loopEnd = +(loopStart + 0.25).toFixed(3)
+    await val(win, `__test.engine.setRegion({ start: ${loopStart}, end: ${loopEnd} }, true)`)
+    await sleep(400)
+    const loopTally = { wraps: 0, forward: 0 }
+    for (let k = 1; k <= 10; k++) {
+      const toggled = await val(win, `__test.engine.setMetronome(Object.assign({}, __test.engine.metronome, { click: ${k % 2 === 1} })).then(() => "", (e) => String(e && e.message || e))`)
+      if (toggled) {
+        fail.push(`loop: turning the click ${k % 2 === 1 ? 'on' : 'off'} was refused — ${toggled}`)
+        break
+      }
+      const label = `0.25 s loop [${loopStart.toFixed(3)}, ${loopEnd.toFixed(3)}] s, window ${k}`
+      const r = await val(win, LOOP_WRAPS(loopStart, loopEnd, 2000))
+      console.log(`16. ${label}: ${judgeLoopWraps(label, r, 250, fail)}`)
+      loopTally.wraps += r.wraps ?? 0
+      loopTally.forward += r.forward?.length ?? 0
+    }
+    console.log(`16. ${loopTally.wraps} wraps sampled, ${loopTally.forward} whole-loop step(s) forward`)
+    await val(win, '__test.engine.setMetronome(Object.assign({}, __test.engine.metronome, { click: false }))')
+    await val(win, '__test.engine.setRegion(null, false)')
+    await pauseAndWait(win)
 
     // ── The log has the last word ───────────────────────────────────────
     const all = await logSince(win, t0)

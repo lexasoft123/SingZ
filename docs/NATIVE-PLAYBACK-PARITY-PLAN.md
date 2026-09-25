@@ -466,7 +466,13 @@ Two of those delays were ours to remove:
   Now the poll runs at POLL_EDGE_MS (10 ms) after a start or an accepted resume, until a
   status shows the transport running with a current audible frame, capped at 500 ms.
   That costs about three extra reads per Play. A resume also pulls forward a poll that
-  the steady cadence had put 200 ms away.
+  the steady cadence had put 200 ms away. A seek while the song plays got the same
+  treatment later (2026-09-25). It pulled nothing forward, so its receipt waited for
+  the poll already armed, a steady 200 ms one while a song simply plays. The bar held
+  the target for all of that while the song played on from it, then jumped forward:
+  holds of 30–185 ms and forward steps of 50–170 ms on the Mac. It now polls at
+  POLL_EDGE_MS until the receipt and the projection the seek re-anchored have both
+  landed.
 - **The open's route check listed every device.** `NativePlaybackSession::openOutput`
   re-checks the prepared endpoint before the handoff, and it did so with the full
   inventory. On CoreAudio that reads every channel label of every device, one coreaudiod
@@ -523,6 +529,31 @@ between two matured statuses, 6–8 ms on the Mac's 512-frame route, are callbac
 quantization of the between-poll projection, not an edge, and the fix leaves them as
 they were. That quantization can land on any switch, so on the plain route, where the
 latency is barely more than one callback, the leg judges its five edges by majority.
+
+The same quantization then showed up as a flicker at a short loop's wraps (2026-09-25).
+The core publishes its status once a callback, so a status is up to a callback stale
+when it is read. Right after a wrap the projection is unmatured and the stand-in takes
+over. When the status before the wrap was read fresh, its projection wrapped the bar with
+the ear. When the stand-in after it was read staler, it landed a hair short of the loop's
+start and was folded back into the lap the head had left. The bar drew the loop's start,
+then its tail, then its start again: two whole-loop jumps within a callback or two, in 6
+of ~190 wraps of a 0.25 s loop on the Mac. The facade now remembers the lap the bar last
+showed in the run, and a fold never goes back past it. The bar holds the loop's start
+until the stand-in gets there, a correction of at most a callback. The same bound keeps a
+fold from going back past the lap the run began in. In a loop shorter than the latency
+(the app allows 0.05 s; transposed, the Mac's route is 151 ms, and a Bluetooth one is
+150–250 ms), the head is laps ahead of the ear. The fold could then put the ear in a lap
+before the run's own, where no floor held it, and after a Play or a seek the bar ran
+through the loop before the first note reached the ear. A unit sweep over a model of the
+core that publishes once a callback checks 60 laps per route. On the old code it finds
+2 whole-loop jumps on the plain route and 3 transposed, and the short loop's bar 35 ms
+ahead of the ear after Play; on the fix, none. count-in-e2e's leg 16 plays a 0.25 s loop
+for ~80 laps at the 50 ms status cadence and samples the bar well under a millisecond
+apart. On the Mac the control jumped a whole loop forward 5 times in 85 wraps and the fix
+0 times in 80. On the Windows field laptop the fix held as well, 0 in 80, but the control
+did not jump in its 80 either, so that run could not tell the two apart. Its steps back
+inside a lap, the same quantization, were 2–6 ms against the Mac's 8 ms, which suggests
+its statuses are read less stale and leave the flicker a narrower window.
 
 ## Why the legacy engine measures faster: an architecture comparison
 
