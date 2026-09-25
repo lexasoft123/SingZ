@@ -260,8 +260,12 @@ function putBackFolders(folders, settle, say, problems) {
       pause(100)
       for (const folder of live) {
         if (folder.done) continue
-        // Something else changed in it while this waited: its time is no
-        // longer only the run's, so it stays as that change left it.
+        // For the root, something else changed in it while this waited: its
+        // time is no longer only the run's, so it stays as that change left
+        // it. A project folder's blocker was settled before the wait and
+        // cannot change here, so a held song edited elsewhere within these
+        // few seconds still gets the put-back's time, a folder time nothing
+        // reads.
         const why = folder.blocker()
         if (why) {
           folder.done = true
