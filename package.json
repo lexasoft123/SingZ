@@ -43,7 +43,9 @@
   },
   "allowScripts": {
     "esbuild@0.25.12": true,
-    "esbuild@0.28.1": true
+    "esbuild@0.28.1": true,
+    "electron-winstaller": false,
+    "fsevents@2.3.3": true
   },
   "dependencies": {
     "electron-updater": "^6.8.9",
