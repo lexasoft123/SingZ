@@ -115,3 +115,28 @@ describe('the lanes carry no pixel-moving filter', () => {
     expect(hit).toHaveLength(1)
   })
 })
+
+/*
+ * The colour filter the app adds to the resting layer: what the playhead has
+ * not reached yet sits in shadow (styles.css darkens it). The kit's own
+ * step read as no shadow at all once the played edge sat on the line. A
+ * `filter` declaration replaces the whole list, so the app's rule has to
+ * carry the kit's resting filter first and add only the shade: a kit that
+ * changes its own is matched here on purpose, never silently dropped.
+ */
+describe('the part of a lane not yet played sits in shadow', () => {
+  const filterOf = (css: string, selector: string): string | undefined =>
+    rules(css).find((r) => r.selector === selector)?.decls.get('filter')
+
+  it('keeps the kit\'s resting filter and adds a brightness well below 1', () => {
+    const [kit, app] = sheets()
+    const own = filterOf(kit.css, '.wave-base')
+    const shaded = filterOf(app.css, '.lane-wave .wave-base')
+    expect(own, 'the kit\'s .wave-base filter').toBeDefined()
+    expect(shaded, 'styles.css .lane-wave .wave-base filter').toBeDefined()
+    expect(shaded!.startsWith(own!), `"${shaded}" starts with the kit's "${own}"`).toBe(true)
+    const shade = /\bbrightness\(\s*([\d.]+)\s*\)$/.exec(shaded!.slice(own!.length).trim())
+    expect(shade, `"${shaded}" ends in a brightness()`).not.toBeNull()
+    expect(Number(shade![1])).toBeLessThanOrEqual(0.7)
+  })
+})
