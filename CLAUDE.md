@@ -96,7 +96,12 @@ the E2E Windows workflow, which also runs `npm test`), the two capture-addon
 harnesses in `tests/e2e/` (`capture-addon-smoke.cjs`, the Electron ABI/load
 gate CI runs on both platforms; `capture-addon-hardware.cjs`, by-hand only —
 it opens the real microphone), and the mac drivers
-in `tests/e2e/mac/` (twenty of them: the lanes' PLAYED EDGE
+in `tests/e2e/mac/` (twenty-one of them: an A-B LOOP set AHEAD of the playhead
+(`loop-ahead-e2e.cjs` — the bar must wait for the song to reach A; setting
+such a loop drew it in the loop's TAIL at once, because the core folded every
+matured audible projection into the loop, the frames before A included, while
+every driver stayed green: none of them had set a loop anywhere but around
+the playhead), the lanes' PLAYED EDGE
 (`played-edge-e2e.cjs` — the brightness step must sit on the playhead line
 on every frame while a song plays, whole and zoomed, and a sliver between
 the played layer and its edge layer must render exactly like none: a user
