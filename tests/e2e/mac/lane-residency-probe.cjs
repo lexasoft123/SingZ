@@ -33,12 +33,15 @@
  * measure and this says so rather than passing vacuously; no other instance
  * running. Use a LONG six-lane project: a 40-second song's lanes are noise.
  *
- * Env: E2E_SONG (default "Deutschland"), E2E_PROJECTS_ROOT.
+ * Env: E2E_SONG (default "Deutschland" — the project's FOLDER under
+ *      E2E_PROJECTS_ROOT; its card is picked by the exact name the library
+ *      shows for it), E2E_PROJECTS_ROOT.
  */
 require('../../shared/watchdog.cjs').arm('lane-residency-probe', { totalMinutes: 20 })
 
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
+const { clickLibrarySong, libraryName } = require('./library-song.cjs')
 const { execFileSync } = require('node:child_process')
 const { existsSync } = require('node:fs')
 const { join } = require('node:path')
@@ -127,6 +130,7 @@ const diffCategories = (before, after) => {
 
 ;(async () => {
   if (!existsSync(SONG_PJ)) throw new Error(`no project at ${SONG_PJ} — set E2E_SONG`)
+  const songName = libraryName(join(ROOT, SONG))
 
   const app = await _electron.launch({
     executablePath: require('electron'),
@@ -188,7 +192,7 @@ const diffCategories = (before, after) => {
       )
     }
 
-    await win.click(`.lib-card:has-text("${SONG}")`)
+    await clickLibrarySong(win, songName)
     await win.waitForSelector('.pill.karaoke', { timeout: 120000 })
     await win.waitForFunction(() => __test?.engine?.duration > 0, null, { timeout: 120000 })
     const seconds = await val(win, '__test.engine.duration')

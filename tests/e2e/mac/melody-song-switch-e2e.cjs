@@ -22,7 +22,10 @@
  * identity); ffprobe on PATH.
  *
  * Env: E2E_A (long project, default "Nothing Else Matters"),
- *      E2E_B (project opened next, default "Wild World"),
+ *      E2E_B (project opened next, default "Wild World" — the project's
+ *             FOLDER under E2E_PROJECTS_ROOT; its card is picked by the exact
+ *             name the library shows for it, and the run refuses to judge it
+ *             if a different project opened),
  *      E2E_PROJECTS_ROOT (default iCloud Drive/SingZ),
  *      E2E_OUT (scratch dir for the copy, default os.tmpdir()).
  */
@@ -32,6 +35,7 @@ require('../../shared/watchdog.cjs').arm('melody-song-switch-e2e')
 
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
+const { assertOpenedProject, clickLibrarySong, libraryName } = require('./library-song.cjs')
 const { readFileSync, writeFileSync, cpSync, rmSync, existsSync } = require('node:fs')
 const { execFileSync } = require('node:child_process')
 const { join } = require('node:path')
@@ -95,6 +99,10 @@ const readIfPresent = (path) => (existsSync(path) ? readFileSync(path, 'utf8') :
         `restore would then describe deleted WAVs. Pick a v2 project as E2E_B.`
     )
   }
+  const bName = libraryName(B_DIR)
+  // Any project that opened instead of B, as found — assertOpenedProject adds
+  // its project.json, and the finally puts it back.
+  const others = []
   const durA = duration(join(ROOT, A))
   const durB = duration(B_DIR)
   if (durA < durB + 30) throw new Error(`${A} must be well longer than ${B} for the lengths to tell them apart`)
@@ -112,7 +120,9 @@ const readIfPresent = (path) => (existsSync(path) ? readFileSync(path, 'utf8') :
   const app = await _electron.launch({
     executablePath: require('electron'),
     args: [APP],
-    env: { ...process.env, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1' } // silent, and never touch the real Drive
+    // silent, never touching the real Drive; hooks, because
+    // assertOpenedProject reads the opened lanes off __test
+    env: { ...process.env, SINGZ_MUTE: '1', SINGZ_E2E_HIDDEN: '1', SINGZ_NO_SYNC: '1', SINGZ_E2E_HOOKS: '1' }
   })
   await quietLaunch(app) // measurement runs must not steal the singer's focus
   app.process().stderr?.on('data', (d) => process.stderr.write(`[app] ${d}`))
@@ -136,9 +146,13 @@ const readIfPresent = (path) => (existsSync(path) ? readFileSync(path, 'utf8') :
     }
     await win.click('.catalog-btn')
     await win.waitForSelector('.lib-card', { timeout: 20000 })
-    await win.click(`.lib-card:has-text("${B}")`)
+    await clickLibrarySong(win, bName)
     await win.waitForSelector('.pill.karaoke', { timeout: 60000 })
     await win.waitForFunction(() => window.__melody && window.__melody.f0, null, { timeout: 180000 })
+    // Checked once a line is drawn, not at the click: right after the switch
+    // the engine can still hold A (and the karaoke pill can be A's), and B's
+    // own line is published only after B's lanes are loaded.
+    await assertOpenedProject(win, { dir: B_DIR, name: bName, backups: others })
 
     // Watch long enough for A's tracker to have finished and tried to speak.
     let worst = null
@@ -188,6 +202,16 @@ const readIfPresent = (path) => (existsSync(path) ? readFileSync(path, 'utf8') :
         if (readIfPresent(path) !== before) throw new Error('it reads back different')
       } catch (e) {
         fail.push(`B's ${file} could not be checked and put back: ${e.message}`)
+      }
+    }
+    for (const [path, text] of others) {
+      try {
+        if (readFileSync(path, 'utf8') !== text) {
+          console.log(`${path} was rewritten during the run — restoring it`)
+          writeFileSync(path, text)
+        }
+      } catch (e) {
+        fail.push(`${path} could not be checked and put back: ${e.message}`)
       }
     }
     rmSync(SCRATCH, { recursive: true, force: true })
