@@ -55,7 +55,8 @@ require('../../shared/watchdog.cjs').arm('played-edge-e2e')
 
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
-const { cpSync, existsSync, readdirSync, rmSync, constants } = require('node:fs')
+const { existsSync, readdirSync, rmSync } = require('node:fs')
+const { scratchClone } = require('./project-hold.cjs')
 const { join } = require('node:path')
 const { homedir, tmpdir } = require('node:os')
 
@@ -174,10 +175,10 @@ function judge(label, rows, { pans: wantPans = false } = {}) {
     console.log(`INCONCLUSIVE: no project "${SONG}" under ${ROOT} — set E2E_SONG`)
     process.exit(2)
   }
-  rmSync(SCRATCH, { recursive: true, force: true })
-  // a clone where the filesystem can make one (APFS), a copy elsewhere: the
-  // open auto-saves analysis into the project, and the singer's is not ours
-  cpSync(src, SCRATCH, { recursive: true, mode: constants.COPYFILE_FICLONE })
+  // a clone where the filesystem can make one (APFS), a copy elsewhere, with
+  // every time kept and links followed: the open auto-saves analysis into the
+  // project, and the singer's is not ours
+  scratchClone(src, SCRATCH)
   const songFile = readdirSync(SCRATCH).find((f) => /^song\.(mp3|flac|wav|m4a|ogg|opus)$/i.test(f))
   if (!songFile) throw new Error(`no song.* in the copy of ${SONG}`)
 

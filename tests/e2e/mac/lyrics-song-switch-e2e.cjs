@@ -58,8 +58,8 @@ require('../../shared/watchdog.cjs').arm('lyrics-song-switch-e2e')
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
 const { assertOpenedProject, clickLibrarySong, libraryName, openedProjectDir } = require('./library-song.cjs')
-const { holdProjects } = require('./project-hold.cjs')
-const { readFileSync, cpSync, rmSync, existsSync, readdirSync } = require('node:fs')
+const { holdProjects, scratchClone } = require('./project-hold.cjs')
+const { readFileSync, rmSync, existsSync, readdirSync } = require('node:fs')
 const { join } = require('node:path')
 const { homedir, tmpdir } = require('node:os')
 
@@ -107,8 +107,9 @@ const readPanel = (win) =>
   const others = []
   const held = holdProjects([B_DIR], others)
 
-  if (existsSync(SCRATCH)) rmSync(SCRATCH, { recursive: true })
-  cpSync(join(ROOT, A), SCRATCH, { recursive: true })
+  // a clone of the song that keeps every time and follows links, so nothing
+  // written into the copy can reach the singer's library through one
+  scratchClone(join(ROOT, A), SCRATCH)
   // no cached lyrics => opening A always starts a real lookup
   rmSync(join(SCRATCH, 'lyrics.json'), { force: true })
 

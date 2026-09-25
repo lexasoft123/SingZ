@@ -36,8 +36,8 @@ require('../../shared/watchdog.cjs').arm('melody-song-switch-e2e')
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
 const { assertOpenedProject, clickLibrarySong, libraryName } = require('./library-song.cjs')
-const { holdProjects } = require('./project-hold.cjs')
-const { readFileSync, writeFileSync, cpSync, rmSync, existsSync } = require('node:fs')
+const { holdProjects, scratchClone } = require('./project-hold.cjs')
+const { readFileSync, writeFileSync, rmSync, existsSync } = require('node:fs')
 const { execFileSync } = require('node:child_process')
 const { join } = require('node:path')
 const { homedir, tmpdir } = require('node:os')
@@ -109,8 +109,9 @@ const readIfPresent = (path) => (existsSync(path) ? readFileSync(path, 'utf8') :
   if (typeof aDoc.songFile !== 'string') throw new Error(`${A}'s project.json names no songFile`)
   console.log(`A=${A} ${durA.toFixed(1)}s (tracked fresh)   B=${B} ${durB.toFixed(1)}s`)
 
-  if (existsSync(SCRATCH)) rmSync(SCRATCH, { recursive: true })
-  cpSync(join(ROOT, A), SCRATCH, { recursive: true })
+  // a clone of the song that keeps every time and follows links, so nothing
+  // written into the copy can reach the singer's library through one
+  scratchClone(join(ROOT, A), SCRATCH)
   delete aDoc.settings.melody
   writeFileSync(join(SCRATCH, 'project.json'), JSON.stringify(aDoc, null, 2))
 
