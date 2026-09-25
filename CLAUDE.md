@@ -82,7 +82,8 @@ them. Behind the step are the two blanket ones: no output for ten minutes, or
 sixty minutes in total (the long drivers say so at their arming;
 `E2E_WATCHDOG_MINUTES` / `E2E_WATCHDOG_IDLE_MINUTES` override, `0` disarms). On expiry it names the
 deadline, how long the run had been going and the last line printed, kills its
-own DIRECT children — an Electron does not die with `process.exit`, and one
+own DIRECT children (on Windows each with its tree, `tests/shared/kill-children.cjs`)
+— an Electron does not die with `process.exit`, and one
 was found hidden at 66 minutes — and exits 1; killing a run by hand prints the
 same diagnosis. Progress is taken from the driver's own output (the arming
 patches `console.log`), so a new driver needs no watchdog calls, only the
