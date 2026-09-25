@@ -8,6 +8,7 @@ import {
   DesktopNativePlaybackClient,
   DesktopNativeProviderError,
   PENDING_SEEK_MAX_MS,
+  SEAM_LANDING_WAIT_MS,
   POLL_BURST_MS,
   POLL_EDGE_MAX_MS,
   POLL_EDGE_MS,
@@ -838,42 +839,43 @@ describe('desktop native playback facade', () => {
     await h.client.unload()
   })
 
-  it('a re-anchor drained into a seam landing leaves no echo owed: a wedge on the landed generation still re-anchors', async () => {
-    // A host boundary read while a seam is armed (an XRun on the outgoing
-    // transport) is re-anchored, and the core puts that command in the
-    // REPLACEMENT's mailbox: it is drained in the landing callback and
-    // coalesced into the seam's one ClockReanchored, so its echo never
-    // arrives on its own. Left pending, the echo guard would swallow what
-    // came next — here a callback refusing every block after the landing
-    // (render failures rising, no new boundary), never re-anchored.
-    //
-    // The re-anchor sent while armed is this test's SETUP, not behaviour it
-    // endorses: on a song with a time/pitch stage the candidate applies it at
-    // the frame it was prepared at, and the song jumps back — a known defect,
-    // tracked separately. What is held here is the echo bookkeeping, whatever
-    // puts a re-anchor in a candidate's mailbox.
-    let landed = false
-    let discontinuities = 3
-    let boundary = 'stream-generation-changed'
-    let failures = 0
+  const armedSeamHarness = () => {
+    const state = {
+      landed: false,
+      discontinuities: 3,
+      boundary: 'stream-generation-changed',
+      failures: 0
+    }
     const h = seamHarness((generation) => {
-      const armed = generation === '2' && !landed
+      const armed = generation === '2' && !state.landed
       return playing(generation, {
         transportGeneration: armed ? '1' : generation,
         swapPendingGeneration: armed ? '1' : '0',
-        transportDiscontinuities: String(discontinuities),
-        lastTransportBoundary: boundary,
-        adapterRenderFailures: failures
+        transportDiscontinuities: String(state.discontinuities),
+        lastTransportBoundary: state.boundary,
+        adapterRenderFailures: state.failures
       })
     })
+    /** One boundary on the transport being read: its count and its name. */
+    const boundary = (name: string): void => {
+      state.discontinuities += 1
+      state.boundary = name
+    }
+    return { h, state, boundary }
+  }
+
+  it('a host boundary read while a seam is armed is not re-anchored — the replacement would take the command at the frame it was prepared at — and a wedge after the landing still is', async () => {
+    // While a seam is armed a re-anchor names the NEW generation, and the
+    // core queues it on the replacement, which has taken no clock yet: it is
+    // anchored at the frame the replacement was prepared at and applied
+    // right after the hand-over, so a song with a time/pitch stage jumped
+    // back there (a core probe: the landing block rendered frame 75, against
+    // 1521 without the re-anchor). The landing resets the replacement's graph
+    // anyway, with its own ClockReanchored.
+    const { h, state, boundary } = armedSeamHarness()
     ;(h.api.reanchorDesktopPlayback as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (value: string) => {
       h.calls.push(`reanchor:${value}`)
-      // Before the landing the command waits in the candidate's mailbox and
-      // is coalesced into the landing's boundary; after it, the core echoes.
-      if (landed) {
-        discontinuities += 1
-        boundary = 'clock-reanchored'
-      }
+      boundary('clock-reanchored')
       return result(value, 'running')
     })
     expect(await h.start()).toBe(true)
@@ -884,20 +886,199 @@ describe('desktop native playback facade', () => {
     await h.client.reconfigure({ loop: { start: 2, end: 3.5 } })
     await vi.advanceTimersByTimeAsync(250)
     // An XRun on the outgoing transport, read while the seam is armed.
-    discontinuities += 1
-    boundary = 'sequence-gap'
+    boundary('sequence-gap')
     await vi.advanceTimersByTimeAsync(250)
-    expect(h.calls).toEqual(['prepare:2:swap-from-1', 'reanchor:2'])
-    // The landing: ONE boundary for the seam and the re-anchor together.
-    landed = true
-    discontinuities += 1
-    boundary = 'clock-reanchored'
+    expect(h.calls).toEqual(['prepare:2:swap-from-1'])
+    // The landing: the seam's own boundary, not re-anchored either.
+    state.landed = true
+    boundary('clock-reanchored')
     await vi.advanceTimersByTimeAsync(250)
-    expect(h.calls).toEqual(['prepare:2:swap-from-1', 'reanchor:2'])
+    expect(h.calls).toEqual(['prepare:2:swap-from-1'])
     // The landed callback refuses every block: failures rise, no boundary.
-    failures += 1
+    state.failures += 1
     await vi.advanceTimersByTimeAsync(250)
-    expect(h.calls).toEqual(['prepare:2:swap-from-1', 'reanchor:2', 'reanchor:2'])
+    expect(h.calls).toEqual(['prepare:2:swap-from-1', 'reanchor:2'])
+    await h.client.unload()
+  })
+
+  it('a re-anchor the core took just before a seam armed: its echo, read while the seam is armed, is not re-anchored — and a wedge on the landed generation still is', async () => {
+    // The facade re-anchors generation 1 for a host clock flag, and the core
+    // takes the command; before the outgoing transport has emitted its echo
+    // a structural change arms a seam. The echo then arrives on the outgoing
+    // transport while the seam is armed — after the seam's first read has
+    // already started the new generation's bookkeeping, so it reads as a new
+    // clock boundary. Re-anchoring for it would hand the replacement a
+    // command at the frame it was prepared at. And nothing may be left owed
+    // across the landing: a stale echo would swallow what came next, here a
+    // callback refusing every block after the landing, never re-anchored.
+    const { h, state, boundary } = armedSeamHarness()
+    let echoOwed = false
+    ;(h.api.reanchorDesktopPlayback as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (value: string) => {
+      h.calls.push(`reanchor:${value}`)
+      // Taken, echoed later: the outgoing transport applies it at its next
+      // callback. The landed generation's echo comes at once.
+      if (value === '1') echoOwed = true
+      else boundary('clock-reanchored')
+      return result(value, 'running')
+    })
+    expect(await h.start()).toBe(true)
+    await vi.advanceTimersByTimeAsync(120)
+    // A clock flag from the host on generation 1: re-anchored.
+    boundary('clock-reanchored')
+    await vi.advanceTimersByTimeAsync(120)
+    expect(h.calls).toContain('reanchor:1')
+    expect(echoOwed).toBe(true)
+    h.calls.length = 0
+    // A seam armed right behind it, not landed while reconfigure reads.
+    await h.client.reconfigure({ loop: { start: 2, end: 3.5 } })
+    // The echo arrives now, on the outgoing transport, with the seam armed.
+    boundary('clock-reanchored')
+    await vi.advanceTimersByTimeAsync(250)
+    expect(h.calls).toEqual(['prepare:2:swap-from-1'])
+    // The landing, and nothing owed across it.
+    state.landed = true
+    boundary('clock-reanchored')
+    await vi.advanceTimersByTimeAsync(250)
+    expect(h.calls).toEqual(['prepare:2:swap-from-1'])
+    state.failures += 1
+    await vi.advanceTimersByTimeAsync(250)
+    expect(h.calls).toEqual(['prepare:2:swap-from-1', 'reanchor:2'])
+    await h.client.unload()
+  })
+
+  it('a structural change while the previous seam is still landing waits for the landing and seams from it — and one after a seam that never lands is rebuilt from where the song is, never refused', async () => {
+    // seam() stops reading after 40 statuses and returns with the seam still
+    // armed: a transposed song's landing waits out its Stretch prime. The
+    // next change read a status naming the new generation over the OUTGOING
+    // transport's telemetry and refused it — "Native rebuild has no
+    // trustworthy signed transport position" — so a loop set right after a
+    // transpose was not applied at all (seen ~75 ms after the transpose).
+    // The candidate `as`, armed over `from`'s transport until read `until`.
+    let seam: { as: string; from: string; until: number } | null = null
+    const h = seamHarness((generation, reads) => {
+      const armed = seam !== null && seam.as === generation && reads < seam.until
+      return playing(generation, {
+        transportGeneration: armed ? seam!.from : generation,
+        swapPendingGeneration: armed ? seam!.from : '0'
+      })
+    })
+    const readsSoFar = () => (h.api.desktopPlaybackStatus as unknown as ReturnType<typeof vi.fn>).mock.calls.length
+    expect(await h.start()).toBe(true)
+    // A transpose: a seam still armed when reconfigure stops reading.
+    seam = { as: '2', from: '1', until: readsSoFar() + 60 }
+    await h.client.reconfigure({ transpose: 2 })
+    expect(h.client.status).toMatchObject({ generation: '2', transportGeneration: '1', swapPendingGeneration: '1' })
+    // A loop right behind it waits the landing out, then seams from the
+    // generation that landed.
+    h.calls.length = 0
+    const loop = h.client.reconfigure({ loop: { start: 2, end: 3.5 } })
+    await vi.advanceTimersByTimeAsync(SEAM_LANDING_WAIT_MS)
+    await loop
+    expect(h.calls).toEqual(['prepare:3:swap-from-2'])
+    expect(h.client.status).toMatchObject({ generation: '3', transportGeneration: '3' })
+    // A seam that never lands: the change after it goes on from where the
+    // song is — the outgoing transport, still the one rendering — as a
+    // rebuild, whose stop retires both graphs.
+    seam = { as: '4', from: '3', until: Infinity }
+    await h.client.reconfigure({ transpose: 3 })
+    expect(h.client.status).toMatchObject({ generation: '4', transportGeneration: '3' })
+    h.calls.length = 0
+    const next = h.client.reconfigure({ loop: null })
+    await vi.advanceTimersByTimeAsync(SEAM_LANDING_WAIT_MS + 100)
+    await next
+    expect(h.calls).toEqual(['stop:4', 'unload:4', 'prepare:5', 'open:5', 'start:5'])
+    expect(h.prepared[h.prepared.length - 1]).toMatchObject({
+      preparedStartProjectFrame: 48_000,
+      initialTransport: { state: 'playing' }
+    })
+    await h.client.unload()
+  })
+
+  it('a rebuild starts where a seek still owed its receipt is taking the song, not where the core last reported', async () => {
+    // Paused with the playhead past a selection, the Loop button seeks to the
+    // selection's start and then arms the loop, and while paused a
+    // structural change is a REBUILD. It prepared the new generation at the
+    // frame the core last reported, so a seek the callback had not applied
+    // yet went away with the old generation and the next Play started from
+    // the old spot, wrapped into the loop (a probe on the facade: prepared
+    // at 80.05 s, not at 70 s).
+    let current: Partial<DesktopPlaybackStatus> = {
+      transportState: 'playing', renderedProjectFrame: '386400', audibleProjectFrame: '386272', seekCount: '0'
+    }
+    const h = seamHarness((generation) => playing(generation, current))
+    expect(await h.start()).toBe(true)
+    current = { ...current, transportState: 'paused', audibleProjectFrame: '386400' }
+    await h.client.pause()
+    // The core has not taken the seek: every read still says 8.05 s, seekCount 0.
+    await h.client.seek(2)
+    h.calls.length = 0
+    await h.client.reconfigure({ loop: { start: 2, end: 3.5 } })
+    expect(h.calls).toEqual(['stop:1', 'unload:1', 'prepare:2', 'open:2', 'start:2'])
+    expect(h.prepared[1]).toMatchObject({
+      preparedStartProjectFrame: 96_000,
+      initialTransport: { state: 'paused', loop: { startProjectFrame: 96_000, endProjectFrame: 168_000 } }
+    })
+    // A seek past the loop's end starts where the core would have put it:
+    // folded into the loop with no lap, as its resolvedSeekFrame folds it.
+    await h.client.seek(4)
+    await h.client.reconfigure({ playbackRate: 1.1 })
+    expect(h.prepared[2]).toMatchObject({ preparedStartProjectFrame: 120_000 })
+    // A seek the core HAS taken is owed nothing: the rebuild starts at the
+    // frame the core reports, as before — here a frame that is not the seek's
+    // target (144000), so the leg can tell which one the rebuild used.
+    await h.client.seek(3)
+    current = { ...current, renderedProjectFrame: '146400', audibleProjectFrame: '146400', seekCount: '1' }
+    await h.client.reconfigure({ playbackRate: 1.2 })
+    expect(h.prepared[3]).toMatchObject({ preparedStartProjectFrame: 146_400 })
+    // A seek never acknowledged within PENDING_SEEK_MAX_MS is no longer owed
+    // — the bar has given it up by then — so the rebuild starts at the frame
+    // the core reports, not at that target (120000).
+    await h.client.seek(2.5)
+    vi.advanceTimersByTime(PENDING_SEEK_MAX_MS + 1)
+    await h.client.reconfigure({ playbackRate: 1.3 })
+    expect(h.prepared[4]).toMatchObject({ preparedStartProjectFrame: 146_400 })
+    await h.client.unload()
+  })
+
+  it('a seek still owed its receipt inside a count-in is the singer moving: the rebuild starts there, flat, not anchored at the old landing', async () => {
+    // The core cancels a count-in's landing when it applies a seek, and the
+    // song plays on from the seek's target. A structural change inside the
+    // count-in is otherwise a rebuild anchored at the landing — which, with a
+    // seek still owed, would count in again to the spot the singer left.
+    let current: Partial<DesktopPlaybackStatus> = {
+      transportState: 'pre-roll', renderedProjectFrame: '-96000', audibleProjectFrame: '-96128', seekCount: '0'
+    }
+    const h = seamHarness((generation) => playing(generation, current))
+    expect(await h.client.prepareAndStart(countInRequest(3))).toBe(true)
+    current = { ...current, transportState: 'paused', renderedProjectFrame: '-48000', audibleProjectFrame: '-48000' }
+    await h.client.pause()
+    await h.client.seek(1)
+    h.calls.length = 0
+    await h.client.reconfigure({ playbackRate: 1.1 })
+    expect(h.calls).toEqual(['stop:1', 'unload:1', 'prepare:2', 'open:2', 'start:2'])
+    expect(h.prepared[1]).toMatchObject({ preparedStartProjectFrame: 48_000, initialTransport: { state: 'paused' } })
+    expect(h.prepared[1].playback.transport).not.toHaveProperty('countInAnchorSeconds')
+    await h.client.unload()
+  })
+
+  it('PLAYING inside a mid-song count-in, a change with a seek still owed is a seam that carries none of the count-in', async () => {
+    // Otherwise such a change is a rebuild anchored at the landing: with a
+    // seek owed that counted in again to the spot the singer had left. It is
+    // a seam now — the outgoing transport applies the seek before the
+    // hand-over, or the replacement right after it, and either way the
+    // count-in is over — so no landing is held and no dots are counted.
+    let current: Partial<DesktopPlaybackStatus> = {
+      transportState: 'pre-roll', renderedProjectFrame: '-96000', audibleProjectFrame: '-96128', seekCount: '0'
+    }
+    const h = seamHarness((generation) => playing(generation, current))
+    expect(await h.client.prepareAndStart(countInRequest(3))).toBe(true)
+    expect(h.client.countInHeard()).not.toBeNull()
+    await h.client.seek(1)
+    h.calls.length = 0
+    await h.client.reconfigure({ metronome: { ...countInRequest(3).metronome, click: true } })
+    expect(h.calls).toEqual(['prepare:2:swap-from-1'])
+    expect(h.client.countInHeard()).toBeNull()
+    expect(h.client.audibleSeconds()).toBe(1)
     await h.client.unload()
   })
 
@@ -3418,6 +3599,49 @@ describe('desktop native playback facade', () => {
       landingSeconds: 0, secondsToLanding: -(24_000 + 128) / 48_000, total: 4
     })
     expect(h.client.audibleSeconds()).toBe(0)
+    await h.client.unload()
+  })
+
+  it('PLAYING inside a count-in at the top, a change no seam takes — a route change, or one behind a seam that never landed — is rebuilt anchored at the landing, never at the negative frame', async () => {
+    // Only the seam may carry a pre-roll clock across. A rebuild handed the
+    // negative frame as its signed start gets no anchor — the dots vanished —
+    // and the core refuses a start below a NEW plan's shorter pre-roll after
+    // the old generation is gone.
+    // The candidate `as`, armed over `from`'s transport for good.
+    let seam: { as: string; from: string } | null = null
+    const current: Partial<DesktopPlaybackStatus> = {
+      transportState: 'pre-roll', renderedProjectFrame: '-48000', audibleProjectFrame: '-48128',
+      presentationLatencyFrames: '128', preRollFrames: '96000', countInEventCount: 4, countInBeatsPerBar: 4
+    }
+    const h = seamHarness((generation) => {
+      const armed = seam !== null && seam.as === generation
+      return playing(generation, {
+        ...current,
+        transportGeneration: armed ? seam!.from : generation,
+        swapPendingGeneration: armed ? seam!.from : '0'
+      })
+    })
+    expect(await h.client.prepareAndStart(countInRequest(0))).toBe(true)
+    // A route change: the forced rebuild.
+    h.calls.length = 0
+    await h.client.reconfigure({}, { force: true })
+    expect(h.calls).toEqual(['stop:1', 'unload:1', 'prepare:2', 'open:2', 'start:2'])
+    expect(h.prepared[1]).not.toHaveProperty('preparedStartProjectFrame')
+    expect(h.prepared[1].initialTransport).toEqual({ state: 'playing' })
+    expect(h.client.countInHeard()).toMatchObject({ landingSeconds: 0, total: 4 })
+    // The click turned on is a seam that never lands; the change behind it
+    // is the rebuild, and the same shape.
+    seam = { as: '3', from: '2' }
+    await h.client.reconfigure({ metronome: { ...countInRequest(0).metronome, click: true } })
+    expect(h.client.status).toMatchObject({ generation: '3', transportGeneration: '2' })
+    h.calls.length = 0
+    const next = h.client.reconfigure({ playbackRate: 1.1 })
+    await vi.advanceTimersByTimeAsync(SEAM_LANDING_WAIT_MS + 100)
+    await next
+    expect(h.calls).toEqual(['stop:3', 'unload:3', 'prepare:4', 'open:4', 'start:4'])
+    expect(h.prepared[3]).not.toHaveProperty('preparedStartProjectFrame')
+    expect(h.prepared[3].initialTransport).toEqual({ state: 'playing' })
+    expect(h.client.countInHeard()).toMatchObject({ landingSeconds: 0, total: 4 })
     await h.client.unload()
   })
 })
