@@ -41,8 +41,9 @@ import {
 export const POLL_FAST_MS = 50
 export const POLL_STEADY_MS = 200
 export const POLL_BURST_MS = 2000
-/** The cadence right after a start or a resume (see `edgeAtMs`), until a
- *  status shows the transport running with a current audible frame. The
+/** The cadence right after a start, a resume or a seek while the song plays
+ *  (see `edgeAtMs`), until a status shows the transport running with a
+ *  current audible frame, and for a seek its receipt as well. The
  *  core publishes both from the render callback within a period or two of
  *  the command: on the Mac the transport read `playing` 4-6 ms after the
  *  start returned and the audible frame was current one 512-frame callback
@@ -50,7 +51,7 @@ export const POLL_BURST_MS = 2000
  *  bar stood still for ~40 ms of music on every Play, the whole gap between
  *  native's Play → advancing and legacy's. */
 export const POLL_EDGE_MS = 10
-/** How long one start or resume may hold the poll at POLL_EDGE_MS. A
+/** How long one start, resume or seek may hold the poll at POLL_EDGE_MS. A
  *  transport still parked this long after the command is not waiting for its
  *  next callback, and the ordinary burst covers whatever it is doing. */
 export const POLL_EDGE_MAX_MS = 500
@@ -443,12 +444,13 @@ export class DesktopNativePlaybackClient {
    * between reads is projected (audibleSeconds), so the bar does not move in
    * poll steps either way. */
   private activityAtMs = 0
-  /** When a start or a resume was last accepted. Until a status shows the
-   * transport running with a current audible frame (or POLL_EDGE_MAX_MS
+  /** When a start, a resume or a seek was last accepted. Until a status shows
+   * the transport running with a current audible frame (or POLL_EDGE_MAX_MS
    * passes) the poll runs at POLL_EDGE_MS: the bar can only move once a
    * status says the song moved, and the command's own read-back always
    * arrives too early to say it, since the render thread has not taken a
-   * callback yet. */
+   * callback yet. A seek while the song plays counts too, until its receipt
+   * lands and then until the projection it re-anchored matures. */
   private edgeAtMs = 0
   /** A seek the core has accepted but the status has not yet reflected: the
    * bar shows the target at once instead of one IPC round trip later. */
@@ -1728,6 +1730,9 @@ export class DesktopNativePlaybackClient {
         this.onStateChange(this.last)
         throw error
       }
+      // A seek re-anchors the transport as a start does, so while the song
+      // plays it is watched the same way (see edgeAtMs).
+      this.edgeAtMs = Date.now()
       // One status read to keep the base fresh, and then done.
       //
       // What used to follow was a loop of up to 24 more, spinning until the
@@ -1738,9 +1743,17 @@ export class DesktopNativePlaybackClient {
       // them). The wait was never load-bearing, and its own comment said so:
       // resume() resolves either way and the callback ends the song from its
       // own frame. The bar goes on showing the target through
-      // `pendingSeekFrame` until the receipt lands on the ordinary poll, so
-      // nothing is drawn early and nothing lurches afterwards.
+      // `pendingSeekFrame` until the receipt lands, so nothing is drawn early.
       await this.refreshCommandStatus(generation, provider)
+      // That read-back usually lands before the callback has taken the seek,
+      // and the poll armed before it could be a steady 200 ms away. The bar
+      // held the target for all of that while the song played on from it,
+      // then jumped forward to where the song had got to: holds of 30-185 ms
+      // and forward steps of 50-170 ms, measured on the Mac. Pulled forward
+      // now, the receipt lands within an edge period of the core taking the
+      // seek, and the run floor holds the bar on the target only until the
+      // ear gets there.
+      this.reschedulePoll()
     })
   }
 
@@ -2118,16 +2131,18 @@ export class DesktopNativePlaybackClient {
   private awaitingTransportEdge(now: number): boolean {
     if (now - this.edgeAtMs >= POLL_EDGE_MAX_MS) return false
     if (!this.started || this.transportIntent !== 'playing') return false
+    // A seek while the song plays: its receipt is the status that says so.
+    if (this.pendingSeekFrame !== null) return true
     const status = this.last
     if (!status) return true
     const running = status.transportState === 'playing' || status.transportState === 'pre-roll'
     return !running || status.audibleProjectionQuality !== 'current'
   }
 
-  /** The next poll's delay: the edge cadence right after a start or resume
-   * until the status shows it, fast inside the burst after activity, during
-   * a pre-roll (the landing is watched frame by frame) and while a seek's
-   * read-back is outstanding; steady otherwise. */
+  /** The next poll's delay: the edge cadence right after a start, a resume or
+   * a seek while playing until a status shows it, fast inside the burst after
+   * activity, during a pre-roll (the landing is watched frame by frame) and
+   * while a seek's read-back is outstanding; steady otherwise. */
   private pollDelayMs(): number {
     const now = Date.now()
     if (this.awaitingTransportEdge(now)) return POLL_EDGE_MS

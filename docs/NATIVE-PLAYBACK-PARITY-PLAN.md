@@ -466,7 +466,13 @@ Two of those delays were ours to remove:
   Now the poll runs at POLL_EDGE_MS (10 ms) after a start or an accepted resume, until a
   status shows the transport running with a current audible frame, capped at 500 ms.
   That costs about three extra reads per Play. A resume also pulls forward a poll that
-  the steady cadence had put 200 ms away.
+  the steady cadence had put 200 ms away. A seek while the song plays got the same
+  treatment later (2026-09-25). It pulled nothing forward, so its receipt waited for
+  the poll already armed, a steady 200 ms one while a song simply plays. The bar held
+  the target for all of that while the song played on from it, then jumped forward:
+  holds of 30–185 ms and forward steps of 50–170 ms on the Mac. It now polls at
+  POLL_EDGE_MS until the receipt and the projection the seek re-anchored have both
+  landed.
 - **The open's route check listed every device.** `NativePlaybackSession::openOutput`
   re-checks the prepared endpoint before the handoff, and it did so with the full
   inventory. On CoreAudio that reads every channel label of every device, one coreaudiod

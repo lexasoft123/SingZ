@@ -2750,6 +2750,44 @@ describe('desktop native playback facade', () => {
     await c.h.client.unload()
   })
 
+  it('a seek while the song plays is watched every edge period until its receipt, so the bar leaves the target with the ear instead of a steady poll later', async () => {
+    // seek() read one status back and left the next look to the poll already
+    // armed: a steady 200 ms one while a song simply plays. The read-back
+    // lands before the callback takes the seek, so the bar held the target
+    // until that poll while the song played on from it, then jumped forward:
+    // holds of 30-185 ms and forward steps of 50-170 ms, measured on the Mac.
+    // The poller runs here, as it does in the app; the core takes the seek
+    // at its next callback, 4 ms after it arrives.
+    vi.setSystemTime(new Date('2026-09-25T12:00:00Z'))
+    const c = continuousCore(540)
+    c.core.frame = 60 * 48_000
+    expect(await c.h.client.prepareAndStart({ ...countInRequest(60), countIn: false })).toBe(true)
+    const reads = (): number => (c.h.api.desktopPlaybackStatus as unknown as ReturnType<typeof vi.fn>).mock.calls.length
+    // Past the burst, into the steady cadence, and 20 ms after a steady poll.
+    await vi.advanceTimersByTimeAsync(POLL_BURST_MS + 600)
+    const steady = reads()
+    while (reads() === steady) await vi.advanceTimersByTimeAsync(1)
+    await vi.advanceTimersByTimeAsync(20)
+    c.core.seekDelayMs = 4
+    const target = 70 * 48_000
+    await c.h.client.seek(70)
+    const seeked = Date.now()
+    const atSeek = reads()
+    const misses: string[] = []
+    for (let t = 0; t <= 300; t++) {
+      const bar = c.h.client.audibleSeconds()!
+      const ear = Math.max(target, target + (Date.now() - seeked - 4) * 48 - 540) / 48_000
+      if (Math.abs(bar - ear) > 1e-9) misses.push(`${t} ms after the seek: the bar at ${bar.toFixed(6)} s, the ear at ${ear.toFixed(6)} s`)
+      await vi.advanceTimersByTimeAsync(1)
+    }
+    expect(misses.slice(0, 6), `${misses.length} of 301 samples away from the ear`).toEqual([])
+    // And the edge cadence ends with the projection's maturity: two edge
+    // looks, then the burst, not 10 ms reads for the whole POLL_EDGE_MAX_MS.
+    expect(reads() - atSeek).toBeLessThanOrEqual(10)
+    ;(c.h.client as unknown as { stopPolling: () => void }).stopPolling()
+    await c.h.client.unload()
+  })
+
   it('a seam inside a run\'s first latency keeps the run: the bar holds on its start until the ear gets there', async () => {
     // Turning Loop on seeks to the selection and then seams. On a long route
     // the seam lands well inside the seek's first latency, and forgetting the
