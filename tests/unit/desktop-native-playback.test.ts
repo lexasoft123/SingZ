@@ -846,6 +846,12 @@ describe('desktop native playback facade', () => {
     // arrives on its own. Left pending, the echo guard would swallow what
     // came next — here a callback refusing every block after the landing
     // (render failures rising, no new boundary), never re-anchored.
+    //
+    // The re-anchor sent while armed is this test's SETUP, not behaviour it
+    // endorses: on a song with a time/pitch stage the candidate applies it at
+    // the frame it was prepared at, and the song jumps back — a known defect,
+    // tracked separately. What is held here is the echo bookkeeping, whatever
+    // puts a re-anchor in a candidate's mailbox.
     let landed = false
     let discontinuities = 3
     let boundary = 'stream-generation-changed'
