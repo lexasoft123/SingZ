@@ -142,7 +142,8 @@ require('../../shared/watchdog.cjs').arm('count-in-e2e')
 const { _electron } = require('playwright-core')
 const { quietLaunch } = require('./quiet-launch.cjs')
 const { assertOpenedProject, clickLibrarySong, libraryName } = require('./library-song.cjs')
-const { readFileSync, writeFileSync, existsSync } = require('node:fs')
+const { holdProjects } = require('./project-hold.cjs')
+const { existsSync } = require('node:fs')
 const { join } = require('node:path')
 const { homedir } = require('node:os')
 
@@ -289,7 +290,7 @@ async function burst(win, label, schedule, tailMs, floor, fail) {
   // The sampler runs beside the presses, so its rejection (the app dying
   // mid-burst, the page going away) has no handler until it is awaited
   // below — an unhandled rejection would end the process BEFORE the
-  // driver's `finally` restored the singer's project.json. Caught at
+  // driver's `finally` put the singer's files back. Caught at
   // creation, rethrown once the presses are done.
   let samplerError = null
   const sampler = (async () => {
@@ -649,9 +650,11 @@ function judgeCountIn(label, rows, landing, fail, lastDotMs) {
 
 ;(async () => {
   if (!existsSync(SONG_PJ)) throw new Error(`no project at ${SONG_PJ} — set E2E_SONG`)
-  // Every project.json this run may touch, as found: the song's own, and any
-  // project that opened instead of it (assertOpenedProject adds that one).
-  const backups = [[SONG_PJ, readFileSync(SONG_PJ, 'utf8')]]
+  // Every file this run may touch, as found — bytes AND times: the song's
+  // own, held before the app can write them, and any project that opened
+  // instead of it (assertOpenedProject adds that one's).
+  const backups = []
+  const held = holdProjects([SONG_DIR], backups)
   const songName = libraryName(SONG_DIR)
   const fail = []
   const app = await _electron.launch({
@@ -1124,12 +1127,7 @@ function judgeCountIn(label, rows, landing, fail, lastDotMs) {
     // A project in the singer's own library. Opening one can re-derive and
     // auto-save an analysis, which is legitimate — but a driver must never
     // be the reason a song changed.
-    for (const [path, text] of backups) {
-      if (readFileSync(path, 'utf8') !== text) {
-        console.log(`${path} was rewritten during the run; restoring it`)
-        writeFileSync(path, text)
-      }
-    }
+    for (const problem of held.putBack()) fail.push(`library not left as found: ${problem}`)
   }
 
   if (fail.length) {
