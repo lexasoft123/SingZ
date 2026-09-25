@@ -1650,6 +1650,42 @@ describe('desktop native playback facade', () => {
     ;(client as unknown as { stopPolling: () => void }).stopPolling()
   })
 
+  it('pulls the next look forward after a Pause, so the park point is drawn within a fast poll', async () => {
+    // The pause's read-back often lands before the render thread has taken
+    // it, and the bar is held where it was pressed until a status says where
+    // the core parked: that status must not wait for a steady poll 200 ms out.
+    let transportState: DesktopPlaybackStatus['transportState'] = 'playing'
+    let frame = 0
+    const api = asioPollingApi(
+      async () => ({
+        ...status('1', String(frame += 480)),
+        transportState,
+        remainingPreRollFrames: '0',
+        audibleProjectionQuality: 'current'
+      }),
+      async (generation) => result(generation, 'unloaded', true)
+    )
+    vi.stubGlobal('window', { singz: api })
+    const client = new DesktopNativePlaybackClient(
+      { releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined },
+      () => undefined
+    )
+    await client.prepareAndStart(asioRequest())
+    const reads = () => vi.mocked(api.desktopPlaybackStatus).mock.calls.length
+    // Past the burst, and pressed just after a steady poll, whose successor
+    // is armed 200 ms out.
+    await vi.advanceTimersByTimeAsync(POLL_BURST_MS + 1000)
+    const steady = reads()
+    while (reads() === steady) await vi.advanceTimersByTimeAsync(1)
+    await client.pause()
+    const afterPause = reads()
+    transportState = 'paused'
+    await vi.advanceTimersByTimeAsync(POLL_FAST_MS)
+    expect(reads()).toBe(afterPause + 1)
+    expect(client.status?.transportState).toBe('paused')
+    ;(client as unknown as { stopPolling: () => void }).stopPolling()
+  })
+
   it('makes a current polling rejection observable and cleanup-only', async () => {
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     let reads = 0
@@ -2246,6 +2282,130 @@ describe('desktop native playback facade', () => {
     await h.client.setMasterGain(0.5)
     expect(h.client.audibleSeconds()).toBeCloseTo(2881024 / 48_000, 3)
     await h.client.unload()
+  })
+
+  it('a Pause after a stale steady poll never draws the bar behind where it was pressed, and lands on the park point', async () => {
+    // Measured on the Windows field laptop, per frame: in 4 of 28 Pauses the
+    // bar stepped BACK by up to 131 ms between two frames that still read
+    // playing, then jumped 20-150 ms forward. The intent flipped to paused
+    // when the command returned and the projection stopped with it, so for
+    // the read-back's round trip the bar drew the last poll unprojected — up
+    // to a steady 200 ms old while a song simply plays.
+    vi.setSystemTime(new Date('2026-09-25T00:00:00Z'))
+    const current: Partial<DesktopPlaybackStatus> = {
+      transportState: 'playing', renderedProjectFrame: '2880512', audibleProjectFrame: '2880000',
+      audibleProjectionQuality: 'current'
+    }
+    const h = seamHarness((generation) => playing(generation, current))
+    expect(await h.client.prepareAndStart({ ...countInRequest(60), countIn: false })).toBe(true)
+    ;(h.client as unknown as { stopPolling: () => void }).stopPolling()
+    // The last poll is 180 ms old and the bar is projected past it.
+    vi.advanceTimersByTime(180)
+    const pressed = h.client.audibleSeconds()!
+    expect(pressed).toBeCloseTo(60.18, 6)
+    // Everything the bar reads while the pause crosses and its read-back comes
+    // back — which lands before the render thread has taken the pause, so it
+    // still says playing, a little further on.
+    const seen: number[] = []
+    const pauseMock = h.api.pauseDesktopPlayback as unknown as ReturnType<typeof vi.fn>
+    pauseMock.mockImplementationOnce(async (value: string) => {
+      vi.advanceTimersByTime(20)
+      seen.push(h.client.audibleSeconds()!)
+      return result(value, 'running')
+    })
+    const statusMock = h.api.desktopPlaybackStatus as unknown as ReturnType<typeof vi.fn>
+    statusMock.mockImplementationOnce(async () => {
+      vi.advanceTimersByTime(20)
+      seen.push(h.client.audibleSeconds()!)
+      return playing(h.generationNow(), { ...current, renderedProjectFrame: '2891072', audibleProjectFrame: '2890560' })
+    })
+    await h.client.pause()
+    seen.push(h.client.audibleSeconds()!)
+    // Never behind the press — and held there until the core says it parked.
+    expect(Math.min(...seen)).toBeGreaterThanOrEqual(pressed)
+    expect(seen).toEqual([pressed, pressed, pressed])
+    // The park point lands on the next poll, the render head a latency and a
+    // delivery past the ear: the bar moves FORWARD to it.
+    current.transportState = 'paused'
+    current.renderedProjectFrame = '2891264'
+    current.audibleProjectFrame = '0'
+    current.audibleProjectionQuality = 'unavailable'
+    await (h.client as unknown as { refresh: (g: string) => Promise<void> }).refresh(h.generationNow())
+    expect(h.client.audibleSeconds()).toBeCloseTo(2891264 / 48_000, 6)
+    expect(h.client.transportParked).toBe(true)
+    await h.client.unload()
+  })
+
+  it('the pause hold is a floor under the park point, is never left behind by a refused Pause, and gives way to a seek, to Play, to a seek target that never lands, and to a loop that wrapped under it', async () => {
+    vi.setSystemTime(new Date('2026-09-25T00:00:00Z'))
+    // Pressed right after a start, where the render head stands in for an
+    // audible frame the core has not matured yet: the park point can land a
+    // hair behind the projected head, and the bar must not step back to it.
+    let current: Partial<DesktopPlaybackStatus> = {
+      transportState: 'playing', renderedProjectFrame: '480000', audibleProjectFrame: '0',
+      audibleProjectionQuality: 'unavailable'
+    }
+    const h = seamHarness((generation) => playing(generation, current))
+    expect(await h.client.prepareAndStart({ ...countInRequest(10), countIn: false })).toBe(true)
+    ;(h.client as unknown as { stopPolling: () => void }).stopPolling()
+    vi.advanceTimersByTime(30)
+    // A Pause the core refuses stopped nothing: the song plays on, and so
+    // must the bar — a hold left behind would freeze it over the music.
+    const pauseMock = h.api.pauseDesktopPlayback as unknown as ReturnType<typeof vi.fn>
+    pauseMock.mockImplementationOnce(async () => ({
+      ...result('1', 'running'), ok: false, errorCode: 'host-failure', error: 'the output went away'
+    }))
+    await expect(h.client.pause()).rejects.toThrow(/the output went away/)
+    vi.advanceTimersByTime(20)
+    expect(h.client.audibleSeconds()).toBeCloseTo(10.05, 6)
+    current = { transportState: 'paused', renderedProjectFrame: '481000', audibleProjectFrame: '0', audibleProjectionQuality: 'unavailable' }
+    await h.client.pause()
+    expect(h.client.audibleSeconds()).toBeCloseTo(10.05, 6)
+    // A refused seek moved nothing, so the hold is still the floor.
+    const seekMock = h.api.seekDesktopPlayback as unknown as ReturnType<typeof vi.fn>
+    seekMock.mockImplementationOnce(async () => ({
+      ...result('1', 'running'), ok: false, errorCode: 'invalid-configuration', error: 'The absolute playback seek is invalid'
+    }))
+    await expect(h.client.seek(5)).rejects.toThrow()
+    expect(h.client.audibleSeconds()).toBeCloseTo(10.05, 6)
+    // Play reads the core again, from its park point on: a hold that
+    // outlived the resume would freeze the bar while the song plays.
+    current = { transportState: 'playing', renderedProjectFrame: '481512', audibleProjectFrame: '0', audibleProjectionQuality: 'unavailable' }
+    await h.client.resume()
+    vi.advanceTimersByTime(100)
+    expect(h.client.audibleSeconds()).toBeCloseTo(481_512 / 48_000 + 0.1, 6)
+    // A seek takes the bar back, however far past the target a Pause held it.
+    await h.client.pause()
+    await h.client.seek(5)
+    current = { transportState: 'paused', renderedProjectFrame: '240000', audibleProjectFrame: '240000', audibleProjectionQuality: 'current', seekCount: '1' }
+    await (h.client as unknown as { refresh: (g: string) => Promise<void> }).refresh('1')
+    expect(h.client.audibleSeconds()).toBe(5)
+    // Pressed while a seek is still owed a receipt, the hold is that target;
+    // a core that never acknowledges it must not leave it on the bar through
+    // the hold once the target itself has expired.
+    await h.client.seek(8)
+    await h.client.pause()
+    expect(h.client.audibleSeconds()).toBe(8)
+    vi.advanceTimersByTime(PENDING_SEEK_MAX_MS + 1)
+    expect(h.client.audibleSeconds()).toBe(5)
+    await h.client.unload()
+
+    // Pressed a hair before a loop's end, with the last poll read just short
+    // of the wrap: the render head wraps before the pause reaches the core,
+    // and the core parks past the wrap. That is where the song is.
+    current = {
+      transportState: 'playing', renderedProjectFrame: '479128', audibleProjectFrame: '479000',
+      audibleProjectionQuality: 'current', loopEnabled: true, loopStartFrame: '0', loopEndFrame: '480000', loopCount: '3'
+    }
+    const looped = seamHarness((generation) => playing(generation, current))
+    expect(await looped.client.prepareAndStart({ ...countInRequest(9), countIn: false })).toBe(true)
+    ;(looped.client as unknown as { stopPolling: () => void }).stopPolling()
+    vi.advanceTimersByTime(10)
+    expect(looped.client.audibleSeconds()).toBeCloseTo(479_480 / 48_000, 6)
+    current = { ...current, transportState: 'paused', renderedProjectFrame: '1024', audibleProjectFrame: '0', audibleProjectionQuality: 'unavailable', loopCount: '4' }
+    await looped.client.pause()
+    expect(looped.client.audibleSeconds()).toBeCloseTo(1024 / 48_000, 6)
+    await looped.client.unload()
   })
 
   it('countInHeard scales the output latency by the playback rate, as the core projects it', async () => {

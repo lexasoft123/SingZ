@@ -80,6 +80,21 @@
  *      second past a beat. The dots project between polls now, and leg 12
  *      aims the last click 20 and 35 ms before the landing.
  *
+ *   8. A PLAIN PAUSE STEPPED THE BAR BACK, measured per frame on the Windows
+ *      field laptop: in 4 of 28 Pauses the bar went back by up to 131 ms
+ *      between two frames that still read playing, then jumped forward to
+ *      where the song stopped. The facade stopped projecting the clock the
+ *      moment the pause command returned, while the status saying where the
+ *      core parked was still a read-back away, so for that round trip the bar
+ *      drew the last poll unprojected — up to a steady 200 ms old while a
+ *      song simply plays. Leg 9 could not see it: its presses sit inside the
+ *      fast-poll burst after a Play, and it forgives 0.3 s. The bar is held
+ *      where Pause was pressed now, until the park point lands. Leg 13 presses
+ *      Pause from the page a set time after a steady poll lands, samples the
+ *      bar well under a millisecond apart until the pause settles (the Mac's
+ *      window is one IPC round trip, a few milliseconds), and forbids ANY
+ *      backward step.
+ *
  * Reads three opinions where the transport-race driver taught us to:
  * `__test.playing` (the button), `engine.playing`, and the core's own
  * `transportState`. The whole run is also judged on the log: ANY dsp warning
@@ -96,8 +111,9 @@
  *               run refuses to measure if a different project opened),
  *      E2E_MID (the scrubbed spot in seconds, default 60 — past the song's
  *               first bar, with 45 s of song left after it: the first ten
- *               legs each carry the song a few seconds further, and legs 11
- *               and 12 seek back to it),
+ *               legs each carry the song a few seconds further, legs 11
+ *               and 12 seek back to it, and leg 13 plays ~11 s from 10 s
+ *               past it),
  *      E2E_PROJECTS_ROOT (default iCloud Drive/SingZ).
  */
 // Every E2E driver runs under a deadline: a hang prints where it was and
@@ -312,6 +328,92 @@ async function readAcross(win, landingFrame) {
 
 /** The rows of the generation the press created: the last one read. */
 const ownGeneration = (rows) => rows.filter((r) => r.gen === rows[rows.length - 1].gen)
+
+/** Press Pause from the page `phaseMs` after a STEADY status poll lands — two
+ * polls at least 150 ms apart, which the facade reaches two seconds after the
+ * last command — and sample the bar until the pause has settled: the core
+ * parked, the button on Play, 700 ms gone. The wait samples on a 1 ms timer;
+ * from the press on the samples come from a MessageChannel loop, well under a
+ * millisecond apart, because the window this exists for is one IPC round
+ * trip on the Mac. Only the samples where something changed are kept. */
+const STEADY_PAUSE = (phaseMs) => `(async function(){
+  const e = __test.engine
+  const np = e.nativePlayback
+  const button = document.querySelector('button.play')
+  if (!np || !np.status) return { error: 'no native status to time the press against' }
+  if (!button || button.disabled) return { error: 'the transport button is ' + (button ? 'disabled' : 'missing') }
+  const snap = (t) => { const s = np.status; return { t, pos: e.position, core: s ? s.transportState : 'none',
+    rendered: s ? Number(s.renderedProjectFrame) : null, button: __test.playing, engine: e.playing } }
+  const changes = []
+  let status = np.status
+  const t0 = performance.now()
+  const press = await new Promise((resolve) => {
+    const id = setInterval(() => {
+      const now = performance.now()
+      if (np.status !== status) { status = np.status; changes.push(now) }
+      const n = changes.length
+      if (n >= 2 && changes[n - 1] - changes[n - 2] >= 150 && now - changes[n - 1] >= ${phaseMs}) {
+        clearInterval(id)
+        const at = snap(now)
+        button.click()
+        resolve({ at, staleMs: now - changes[n - 1], gapMs: changes[n - 1] - changes[n - 2] })
+      } else if (now - t0 > 8000) {
+        clearInterval(id)
+        resolve(null)
+      }
+    }, 1)
+  })
+  if (!press) return { error: 'the status never settled into its steady cadence within 8 s' }
+  const after = []
+  let samples = 0
+  let parkedAfterMs = null
+  const channel = new MessageChannel()
+  return await new Promise((resolve) => {
+    channel.port1.onmessage = () => {
+      const now = performance.now()
+      const row = snap(now)
+      samples++
+      const last = after.length ? after[after.length - 1] : press.at
+      if (row.pos !== last.pos || row.core !== last.core || row.button !== last.button ||
+          row.engine !== last.engine || row.rendered !== last.rendered) after.push(row)
+      if (parkedAfterMs === null && row.core === 'paused') parkedAfterMs = now - press.at.t
+      const settled = row.core === 'paused' && row.button === false && row.engine === false
+      if ((settled && now - press.at.t >= 700) || now - press.at.t > 5000) {
+        channel.port1.close()
+        resolve({ ...press, after, samples, parkedAfterMs, final: row, settled,
+          sampleRate: np.status ? np.status.format.sampleRate : 0 })
+        return
+      }
+      channel.port2.postMessage(0)
+    }
+    channel.port2.postMessage(0)
+  })
+})()`
+
+/** Judge one steady-playback Pause: the bar must never step back from where
+ * it was pressed, must settle on the frame the core parked at, and the core,
+ * the button and the engine must all say paused. */
+function judgeSteadyPause(label, r, fail) {
+  const rows = [r.at, ...r.after]
+  let back = null
+  for (let i = 1; i < rows.length; i++) {
+    const step = rows[i].pos - rows[i - 1].pos
+    if (step < -0.0005 && (back === null || step < back.step)) back = { step, from: rows[i - 1], to: rows[i] }
+  }
+  const lowest = Math.min(...rows.map((x) => x.pos))
+  const parked = r.sampleRate ? r.final.rendered / r.sampleRate : NaN
+  if (r.at.core !== 'playing') fail.push(`${label}: the song was not playing at the press (core ${r.at.core}) — this leg raced nothing`)
+  if (back) {
+    fail.push(`${label}: the bar stepped BACK ${(-back.step * 1000).toFixed(1)} ms, ${back.from.pos.toFixed(3)} → ${back.to.pos.toFixed(3)} s ` +
+      `${(back.to.t - r.at.t).toFixed(1)} ms after the press (core ${back.from.core}→${back.to.core}, button ${back.to.button ? 'Pause' : 'Play'})`)
+  }
+  if (!r.settled) fail.push(`${label}: the Pause never settled within 5 s (core ${r.final.core}, button ${r.final.button ? 'Pause' : 'Play'}, engine ${r.final.engine ? 'playing' : 'stopped'})`)
+  else if (!(Math.abs(r.final.pos - parked) <= 0.002)) fail.push(`${label}: the bar settled at ${r.final.pos.toFixed(3)} s, not where the core parked (${parked.toFixed(3)} s)`)
+  return `pressed ${r.staleMs.toFixed(0)} ms after a poll (polls ${r.gapMs.toFixed(0)} ms apart) at ${r.at.pos.toFixed(3)} s, ` +
+    `lowest ${lowest.toFixed(3)} s, parked status after ${r.parkedAfterMs === null ? '-' : `${r.parkedAfterMs.toFixed(0)} ms`}, ` +
+    `settled at ${r.final.pos.toFixed(3)} s (${((r.final.pos - r.at.pos) * 1000).toFixed(0)} ms past the press), ` +
+    `${r.samples} samples, ${r.after.length} change(s)`
+}
 
 /** The callback size the route renders, from the core's continuous frame
  * between reads: the greatest common divisor of its steps, which is the
@@ -763,6 +865,31 @@ function judgeCountIn(label, rows, landing, fail, lastDotMs) {
       const rows = await trace(win, 12000, (r) => r.core === 'playing' && r.pos > spot + 0.6)
       console.log(`12. last click ${margin} ms before the landing at ${spot.toFixed(3)} s: ${judgeCountIn(`last click ${margin} ms before the landing`, rows, spot, fail, await lastDotWindowMs(win, spot))}`)
       await pauseAndWait(win)
+    }
+
+    // ── 13. A plain Pause while the song simply plays ───────────────────
+    //
+    // Count-in off, so Play is a bare resume, and each Pause pressed a set
+    // time after a steady 200 ms poll: the bar used to step back by about
+    // that much plus a round trip, for the round trip the pause's read-back
+    // took, and then jump forward to where the core parked. Three phases of
+    // the poll, so the stale span at the press runs from short to nearly a
+    // whole steady interval. Each cycle is ~3.5 s of song from MID + 10.
+    await val(win, '__test.setMetCfg(Object.assign({}, __test.met, { countInBars: 0 }))')
+    await win.waitForFunction(() => __test.met.countInBars === 0, null, { timeout: 5000 })
+    await val(win, `__test.engine.seek(${MID + 10})`)
+    await sleep(900)
+    for (const phase of [40, 120, 180]) {
+      await press(win)
+      if (!(await waitFor(win, '__test.playing === true', 5000))) throw new Error('Play never reached the button within 5 s')
+      const label = `plain Pause ${phase} ms after a steady poll`
+      const r = await val(win, STEADY_PAUSE(phase))
+      if (r.error) {
+        fail.push(`${label}: ${r.error}`)
+        if (await val(win, '__test.playing === true')) await pauseAndWait(win)
+        continue
+      }
+      console.log(`13. ${label}: ${judgeSteadyPause(label, r, fail)}`)
     }
 
     // ── The log has the last word ───────────────────────────────────────
