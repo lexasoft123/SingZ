@@ -52,7 +52,6 @@ const nativePlaybackSessionFiles = [
   'playback/native_playback_graph_document.h',
   'playback/playback_cue_plan.cpp',
   'playback/playback_cue_plan.h',
-  'playback/native_playback_projection.h',
   'playback/native_playback_session.cpp',
   'playback/native_playback_session.h',
   'playback/streaming_lane_feeder.cpp',

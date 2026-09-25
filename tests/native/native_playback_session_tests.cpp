@@ -1,5 +1,4 @@
 #include <native/playback/native_playback_callback.h>
-#include <native/playback/native_playback_projection.h>
 #include <native/playback/native_playback_session.h>
 #include <native/playback/signalsmith_time_pitch.h>
 #include <zcore/media/flac_io.h>
@@ -46,11 +45,6 @@
   } while (false)
 
 namespace {
-
-static_assert(singz::playback_internal::loopAdjustedProjectFrame(
-                  std::numeric_limits<int64_t>::min(), true, 4, 11) == 6);
-static_assert(singz::playback_internal::loopAdjustedProjectFrame(
-                  std::numeric_limits<int64_t>::max(), true, 4, 11) == 7);
 
 int processId() noexcept {
 #if defined(_WIN32)
@@ -5074,6 +5068,178 @@ void audibleProjectionWaitsForLatencyHistory() {
   std::remove(wav.c_str());
 }
 
+/* A loop armed AHEAD of the playhead is not heard yet. The transport plays on
+   into it and wraps only at its end, as legacy does, and the desktop arms one
+   wherever the singer drags it. But the audible projection folded EVERY frame
+   outside the loop into it, below the start as well as past the end, so the
+   moment such a loop was armed the status put the ear in the loop's tail: a
+   playhead 0.75 s before A read 0.75 s before B, and one 5 s before it read
+   somewhere inside a loop the song had not reached. Measured on the Mac under
+   native playback (a +2 transpose, 151 ms of presentation latency): the seek
+   bar jumped from 63.44 s to 64.79 s 260-280 ms after [63.76, 65.26) was
+   armed, on a matured status, in 4 of 4 tries, and to 69.29 s for a loop 5 s
+   ahead; with no transpose (11 ms) the jump came 52 ms after the arm.
+
+   No matured projection needs a fold. The anchor starts over at every wrap,
+   as at every seek, landing and seam, and the projection matures only a
+   latency later, so the frames between the ear and the render head are one
+   unbroken run of the song. What sits below the loop's start is audio from
+   before the loop. Four ways in: a live SetLoop ahead of the playhead; the
+   render head crossing the loop's start a latency before the ear does (the
+   head is INSIDE the loop there, so "fold only when the head is in the loop"
+   would still have put the ear at B); a seam that lands with the loop on,
+   which is how the desktop arms one; and a count-in into a loop, whose ear is
+   in the pre-roll, not in the loop. */
+void aLoopArmedAheadOfTheEarIsNotHeardYet() {
+  using Quality = singz::NativePlaybackAudibleProjectionQuality;
+  const std::string wav =
+      writeWav("loop-ahead.wav", 1, std::vector<float>(50000, 0.1F));
+  const auto driver = [](ManualOutputBackend *fake) {
+    return [fake](uint64_t frames) {
+      while (frames != 0) {
+        const uint32_t block =
+            static_cast<uint32_t>(std::min<uint64_t>(frames, 512));
+        CHECK(fake->drive(block));
+        frames -= block;
+      }
+    };
+  };
+
+  {
+    auto backend = std::make_unique<ManualOutputBackend>();
+    ManualOutputBackend *fake = backend.get();
+    singz::NativePlaybackSession session(std::move(backend));
+    const auto driveFrames = driver(fake);
+    singz::NativePlaybackPrepareConfig request = config();
+    request.preparedStartProjectFrame = 1000;
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    lanes.push_back(lane("song", wav));
+    CHECK(session.prepare(std::move(request), std::move(lanes), 91).ok);
+    CHECK(session.openOutput(91).ok);
+    fake->setPresentationLatency(7, 11, 13);
+    CHECK(session.start(91).ok &&
+          fake->drive(64, singz::AudioHostDiscontinuityStart));
+    auto status = session.status();
+    const auto latency = static_cast<int64_t>(status.presentationLatencyFrames);
+    CHECK(latency == 31 && status.renderedProjectFrame == 1064 &&
+          status.audibleProjectionQuality == Quality::Current &&
+          status.audibleProjectFrame == 1064 - latency);
+
+    // Armed ahead of the playhead: the ear plays on toward it. Folded, this
+    // read 2097, the loop's tail.
+    CHECK(session.setLoop(91, 2000, 3000).ok && fake->drive(64));
+    status = session.status();
+    CHECK(status.loopEnabled && status.loopStartFrame == 2000 &&
+          status.loopEndFrame == 3000 && status.loopCount == 0 &&
+          status.renderedProjectFrame == 1128 &&
+          status.audibleProjectionQuality == Quality::Current &&
+          status.audibleProjectFrame == 1128 - latency);
+
+    // The render head is inside the loop, the ear still a latency short of
+    // it. Folded, this read 2989: the bar at B while the song reached A.
+    driveFrames(2020 - 1128);
+    status = session.status();
+    CHECK(status.renderedProjectFrame == 2020 && status.loopCount == 0 &&
+          status.audibleProjectionQuality == Quality::Current &&
+          status.audibleProjectFrame == 2020 - latency);
+
+    // Through the loop's end: the wrap starts the projection over, and a
+    // latency later the ear is at A, with nothing to fold.
+    driveFrames(1000);
+    status = session.status();
+    CHECK(status.loopCount == 1 && status.renderedProjectFrame == 2020 &&
+          status.audibleProjectionQuality == Quality::Unavailable);
+    driveFrames(latency - 20);
+    status = session.status();
+    CHECK(status.loopCount == 1 &&
+          status.renderedProjectFrame == 2000 + latency &&
+          status.audibleProjectionQuality == Quality::Current &&
+          status.audibleProjectFrame == 2000);
+    CHECK(session.unload(91).ok);
+  }
+
+  {
+    // The desktop's way in: the loop arrives on a seam's replacement, which
+    // lands with the loop on and the playhead where the old graph left it.
+    auto backend = std::make_unique<ManualOutputBackend>();
+    ManualOutputBackend *fake = backend.get();
+    singz::NativePlaybackSession session(std::move(backend));
+    const auto driveFrames = driver(fake);
+    singz::NativePlaybackPrepareConfig original = config();
+    original.preparedStartProjectFrame = 1000;
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    lanes.push_back(keyedLane("song", wav));
+    CHECK(session.prepare(std::move(original), std::move(lanes), 92).ok);
+    CHECK(session.openOutput(92).ok);
+    fake->setPresentationLatency(7, 11, 13);
+    CHECK(session.start(92).ok &&
+          fake->drive(64, singz::AudioHostDiscontinuityStart));
+    auto status = session.status();
+    const auto latency = static_cast<int64_t>(status.presentationLatencyFrames);
+    CHECK(status.renderedProjectFrame == 1064 &&
+          status.audibleProjectionQuality == Quality::Current);
+    singz::NativePlaybackPrepareConfig replacement = config();
+    replacement.swapFromGeneration = 92;
+    replacement.preparedStartProjectFrame = 1064;
+    replacement.initialTransport.loop =
+        singz::NativePlaybackInitialLoop{2000, 3000};
+    auto replacementLanes = std::vector<singz::NativePlaybackLaneSource>{};
+    replacementLanes.push_back(keyedLane("song", wav));
+    CHECK(session.prepare(std::move(replacement), std::move(replacementLanes),
+                          93)
+              .ok);
+    CHECK(fake->drive(8));
+    status = session.status();
+    CHECK(status.transportGeneration == 93 && status.swapLandings == 1 &&
+          status.loopEnabled && status.loopStartFrame == 2000 &&
+          status.loopEndFrame == 3000 && status.renderedProjectFrame == 1072 &&
+          status.audibleProjectionQuality == Quality::Unavailable);
+    // Folded, this read 2105.
+    driveFrames(64);
+    status = session.status();
+    CHECK(status.renderedProjectFrame == 1136 && status.loopCount == 0 &&
+          status.audibleProjectionQuality == Quality::Current &&
+          status.audibleProjectFrame == 1136 - latency);
+    CHECK(session.unload(93).ok);
+  }
+  std::remove(wav.c_str());
+
+  {
+    // Counting in to a loop's start: the ear is in the pre-roll, a negative
+    // frame, and stays there until the count-in is heard out.
+    constexpr int64_t landing = 19200; // 0.4 s: one two-beat bar of pre-roll
+    const std::string song =
+        writeWav("loop-count-in.wav", 1, std::vector<float>(40000, 0.1F));
+    auto backend = std::make_unique<ManualOutputBackend>();
+    ManualOutputBackend *fake = backend.get();
+    singz::NativePlaybackSession session(std::move(backend));
+    singz::NativePlaybackPrepareConfig request = config();
+    request.cuePlan = cueRequest(true, 1, 0.0);
+    request.cuePlan->entrySeconds = 0.0;
+    request.cuePlan->countInAnchorSeconds = 0.4;
+    request.initialTransport.loop =
+        singz::NativePlaybackInitialLoop{landing, landing + 4800};
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    lanes.push_back(lane("song", song));
+    CHECK(session.prepare(std::move(request), std::move(lanes), 94).ok);
+    CHECK(session.openOutput(94).ok);
+    fake->setPresentationLatency(7, 11, 13);
+    CHECK(session.start(94).ok &&
+          fake->drive(512, singz::AudioHostDiscontinuityStart));
+    const auto status = session.status();
+    const auto latency = static_cast<int64_t>(status.presentationLatencyFrames);
+    // Folded, this read 19681: inside the loop, a count-in early.
+    CHECK(status.transportState ==
+              singz::NativePlaybackTransportState::PreRoll &&
+          status.loopEnabled && status.loopStartFrame == landing &&
+          status.renderedProjectFrame == 512 - landing &&
+          status.audibleProjectionQuality == Quality::Current &&
+          status.audibleProjectFrame == 512 - landing - latency);
+    CHECK(session.unload(94).ok);
+    std::remove(song.c_str());
+  }
+}
+
 /* The host raises boundaries nobody asked for, and a time/pitch graph has to
    survive all of them. There is exactly ONE reanchor slot per open — the
    protocol admits a single pending plan, and nextSlice spends it on the first
@@ -7137,6 +7303,7 @@ int main() {
   aSlowStretchPrimeStretchesTheLandingBudget();
   aSeamLandsExactlyOnceHoweverManyBlocksFollow();
   audibleProjectionWaitsForLatencyHistory();
+  aLoopArmedAheadOfTheEarIsNotHeardYet();
   hostBoundariesWithoutSourceMovementKeepRendering();
   telemetryCollisionPublishesCoherentGeneration();
   preparedStartOverridePreservesRebuildPosition();
