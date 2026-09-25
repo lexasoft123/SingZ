@@ -2568,6 +2568,11 @@ void countInLandsOnAnchorMidSong() {
         played.renderedProjectFrame == static_cast<int64_t>(landing + after) &&
         played.remainingPreRollFrames == 0 &&
         played.lanes[0].cursorFrames == landing + after);
+  // The landing moves the source the way a seek does, but nobody issued a
+  // seek: seekCount is the receipt for seek COMMANDS, and a landing counted
+  // there would retire a seek the singer issued just after it before the core
+  // had applied it.
+  CHECK(played.seekCount == 0);
   const auto unloaded = session.unloadWithCleanup(1);
   CHECK(unloaded.playback.ok && unloaded.cleanup.globallyComplete());
   // Consume the fallback lease with an ordinary unload, so the tests after
@@ -3401,7 +3406,9 @@ void transportControlKernelAndTelemetry() {
 
     // Multiple same-callback control facts become one emitted reset boundary.
     // Reanchor outranks the two overwritten seek reasons, while the final seek
-    // position is still the actual rendered source position.
+    // position is still the actual rendered source position. Both seeks were
+    // applied, so both count: seekCount is the receipt for seek commands, not
+    // a count of SourceSeek boundaries (aSeekIsCountedWhateverItSharesItsCallbackWith).
     const uint64_t beforeCoalesced = status.transportDiscontinuities;
     const uint64_t seeksBeforeCoalesced = status.seekCount;
     CHECK(session.seek(41, 11).ok && session.seek(41, 13).ok &&
@@ -3410,12 +3417,13 @@ void transportControlKernelAndTelemetry() {
     status = session.status();
     CHECK(status.renderedProjectFrame == 14 &&
           status.transportDiscontinuities == beforeCoalesced + 1 &&
-          status.seekCount == seeksBeforeCoalesced &&
+          status.seekCount == seeksBeforeCoalesced + 2 &&
           status.lastTransportBoundary ==
               singz::NativePlaybackTransportBoundaryReason::ClockReanchored);
 
     // A hardware clock reset owns a simultaneous seek boundary; one reset is
-    // emitted and counted, but the absolute seek still takes effect.
+    // emitted and counted, but the absolute seek still takes effect — and is
+    // still receipted.
     const uint64_t beforeHostSeek = status.transportDiscontinuities;
     const uint64_t seeksBeforeHostSeek = status.seekCount;
     CHECK(session.seek(41, 20).ok);
@@ -3423,7 +3431,7 @@ void transportControlKernelAndTelemetry() {
     status = session.status();
     CHECK(status.renderedProjectFrame == 21 &&
           status.transportDiscontinuities == beforeHostSeek + 1 &&
-          status.seekCount == seeksBeforeHostSeek &&
+          status.seekCount == seeksBeforeHostSeek + 1 &&
           status.lastTransportBoundary ==
               singz::NativePlaybackTransportBoundaryReason::ClockReanchored);
 
@@ -4834,6 +4842,110 @@ void aSeamLandsExactlyOnceHoweverManyBlocksFollow() {
   status = session.status();
   CHECK(status.swapLandings == 1 && status.renderedProjectFrame == 192 * 201);
   CHECK(session.unload(161).ok);
+  std::remove(wav.c_str());
+}
+
+// `seekCount` is a RECEIPT: the desktop facade and both phones draw a seek's
+// target until it moves (positionNow's contract), so it must move once for
+// every seek command the callback applies — never once per SourceSeek
+// boundary the callback emits. A seek shares its callback with a boundary
+// that outranks it whenever a seam lands, a re-anchor is drained beside it,
+// the host flags a clock reset, or another seek drains with it; the one
+// emitted boundary then names the other reason, and a count of boundaries
+// lost the receipt. Measured on the desktop: an A-B loop armed while playing
+// is a seam, the facade re-anchored after it, a seek clicked right after
+// drained in the same callback as that re-anchor, and the bar held the seek's
+// target for its whole one-second expiry while the song played on from it —
+// 11 times in 12.
+void aSeekIsCountedWhateverItSharesItsCallbackWith() {
+  const std::vector<float> ramp = swapRamp(4096);
+  const std::string wav = writeWav("seek-receipt.wav", 1, ramp);
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+  auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+  lanes.push_back(keyedLane("song", wav));
+  CHECK(session.prepare(config(), std::move(lanes), 170).ok);
+  CHECK(session.openOutput(170).ok && session.start(170).ok);
+  CHECK(fake->drive(8, singz::AudioHostDiscontinuityStart));
+
+  // Every case below compares with the count just before it, so each one
+  // fails on its own and names the receipt it lost.
+  // Alone in its callback: one boundary, one receipt.
+  auto status = session.status();
+  uint64_t seeks = status.seekCount;
+  CHECK(session.seek(170, 100).ok && fake->drive(4));
+  status = session.status();
+  CHECK(status.renderedProjectFrame == 104 && status.seekCount == seeks + 1 &&
+        status.lastTransportBoundary ==
+            singz::NativePlaybackTransportBoundaryReason::SourceSeek);
+
+  // Two seeks drained by one callback: one boundary, both applied — two.
+  seeks = status.seekCount;
+  const uint64_t boundariesBeforePair = status.transportDiscontinuities;
+  CHECK(session.seek(170, 200).ok && session.seek(170, 300).ok &&
+        fake->drive(4));
+  status = session.status();
+  CHECK(status.renderedProjectFrame == 304 && status.seekCount == seeks + 2 &&
+        status.transportDiscontinuities == boundariesBeforePair + 1);
+
+  // A re-anchor and a seek in one callback, the facade's own order after a
+  // seam: the re-anchor's ClockReanchored outranks the seek's boundary, and
+  // the seek still takes effect and still counts.
+  seeks = status.seekCount;
+  const uint64_t boundariesBeforeReanchor = status.transportDiscontinuities;
+  CHECK(session.reanchorTransport(170).ok && session.seek(170, 400).ok &&
+        fake->drive(4));
+  status = session.status();
+  CHECK(status.renderedProjectFrame == 404 && status.seekCount == seeks + 1 &&
+        status.transportDiscontinuities == boundariesBeforeReanchor + 1 &&
+        status.lastTransportBoundary ==
+            singz::NativePlaybackTransportBoundaryReason::ClockReanchored);
+
+  // A seek beside a clock reset the host flagged on the same callback.
+  seeks = status.seekCount;
+  CHECK(session.seek(170, 500).ok &&
+        fake->drive(4, singz::AudioHostDiscontinuityClockReanchored));
+  status = session.status();
+  CHECK(status.renderedProjectFrame == 504 && status.seekCount == seeks + 1 &&
+        status.lastTransportBoundary ==
+            singz::NativePlaybackTransportBoundaryReason::ClockReanchored);
+
+  // A seek sent to a seam's candidate before the seam lands. Nothing applies
+  // it until the landing callback, where it drains beside the seam's own
+  // ClockReanchored — and it counts on top of the count the candidate took
+  // over from the transport it replaced, which is the count every read before
+  // the landing showed.
+  seeks = status.seekCount;
+  singz::NativePlaybackPrepareConfig replacement = config();
+  replacement.swapFromGeneration = 170;
+  replacement.preparedStartProjectFrame = 504;
+  auto replacementLanes = std::vector<singz::NativePlaybackLaneSource>{};
+  replacementLanes.push_back(keyedLane("song", wav));
+  CHECK(session.prepare(std::move(replacement), std::move(replacementLanes),
+                        171)
+            .ok);
+  CHECK(session.seek(171, 600).ok);
+  status = session.status();
+  CHECK(status.generation == 171 && status.transportGeneration == 170 &&
+        status.seekCount == seeks);
+  CHECK(fake->drive(4));
+  status = session.status();
+  CHECK(status.transportGeneration == 171 && status.swapLandings == 1 &&
+        status.renderedProjectFrame == 604 && status.seekCount == seeks + 1 &&
+        status.lastTransportBoundary ==
+            singz::NativePlaybackTransportBoundaryReason::ClockReanchored);
+  auto now = session.positionNow();
+  CHECK(now.available && now.generation == 171 &&
+        now.seekCount == seeks + 1 && now.renderedProjectFrame == 604);
+
+  // And on the landed generation a seek alone counts as it always did.
+  seeks = status.seekCount;
+  CHECK(session.seek(171, 700).ok && fake->drive(4));
+  status = session.status();
+  CHECK(status.renderedProjectFrame == 704 && status.seekCount == seeks + 1);
+  CHECK(session.pause(171).ok && fake->drive(1));
+  CHECK(session.unload(171).ok);
   std::remove(wav.c_str());
 }
 
@@ -7136,6 +7248,7 @@ int main() {
   aSwapArmedTooLateLandsUnanchoredAndSaysSo();
   aSlowStretchPrimeStretchesTheLandingBudget();
   aSeamLandsExactlyOnceHoweverManyBlocksFollow();
+  aSeekIsCountedWhateverItSharesItsCallbackWith();
   audibleProjectionWaitsForLatencyHistory();
   hostBoundariesWithoutSourceMovementKeepRendering();
   telemetryCollisionPublishesCoherentGeneration();

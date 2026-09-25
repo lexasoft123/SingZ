@@ -474,7 +474,8 @@ adds `inputChannels`.
 | `durationFrames` | uint frames | poll |
 | `remainingPreRollFrames` | uint frames | poll |
 | `renderedFrames`, `audibleFrames` | uint frames | log |
-| `transportDiscontinuities`, `seekCount` | uint counters | log |
+| `transportDiscontinuities` | uint counter | log |
+| `seekCount` | uint counter | poll — the seek receipt: one per seek command the callback applied, whatever boundary its callback emitted; a seam carries it across |
 | `cueEventsCompleted`, `nextCueEventIndex` | uint | log — parsed strictly, read by nothing |
 | `preparedStartProjectFrame` | **signed** project frames | proof — where this generation was prepared to start |
 

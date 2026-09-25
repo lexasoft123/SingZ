@@ -657,6 +657,7 @@ describe('desktop native playback facade', () => {
       pauseDesktopPlayback: vi.fn(async (value: string) => { calls.push(`pause:${value}`); return result(value, 'running') }),
       resumeDesktopPlayback: vi.fn(async (value: string) => { calls.push(`resume:${value}`); return result(value, 'running') }),
       seekDesktopPlayback: vi.fn(async (value: string) => { calls.push(`seek:${value}`); return result(value, 'running') }),
+      reanchorDesktopPlayback: vi.fn(async (value: string) => { calls.push(`reanchor:${value}`); return result(value, 'running') }),
       desktopPlaybackStatus: vi.fn(async () => nextStatus(generation, ++reads)),
       unloadDesktopPlayback: vi.fn(async (value: string) => { calls.push(`unload:${value}`); return result(value, 'unloaded', true) }),
       setDesktopPlaybackLane: vi.fn(async (value: string) => result(value, 'running')),
@@ -768,6 +769,132 @@ describe('desktop native playback facade', () => {
     await h.client.unload()
   })
 
+  it('a seam landing is the core handing the clock over, not a host boundary: no re-anchor for it — a route change at the landing or after it still gets one', async () => {
+    // The replacement takes the old transport's clock and counters over and
+    // announces the hand-over with ONE ClockReanchored of its own, so the
+    // discontinuity count moves under a name the facade re-anchors for.
+    // Measured on the Mac (CoreAudio, a real song): every seam was followed
+    // by a "reanchor · generation N" — a processor reset nobody needed — and
+    // a seek clicked right after an A-B loop was armed drained in the same
+    // callback as that re-anchor in 11 seams of 12.
+    let swapping: { from: string; to: string; landAfterRead: number; routeChange: boolean } | null = null
+    let route = '1'
+    let discontinuities = 3
+    let boundary = 'stream-generation-changed'
+    const h = seamHarness((generation, reads) => {
+      if (swapping && swapping.to === generation && reads >= swapping.landAfterRead) {
+        // The landing callback: the replacement emits its hand-over boundary,
+        // outranked by a route change that lands in the same callback.
+        discontinuities += 1
+        boundary = swapping.routeChange ? 'route-generation-changed' : 'clock-reanchored'
+        if (swapping.routeChange) route = String(Number(route) + 1)
+        swapping = null
+      }
+      const armed = swapping !== null && swapping.to === generation
+      return playing(generation, {
+        transportGeneration: armed ? swapping!.from : generation,
+        swapPendingGeneration: armed ? swapping!.from : '0',
+        routeGeneration: route,
+        transportDiscontinuities: String(discontinuities),
+        lastTransportBoundary: boundary
+      })
+    })
+    // The core answers an accepted re-anchor with its own ClockReanchored.
+    ;(h.api.reanchorDesktopPlayback as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (value: string) => {
+      h.calls.push(`reanchor:${value}`)
+      discontinuities += 1
+      boundary = 'clock-reanchored'
+      return result(value, 'running')
+    })
+    const readsSoFar = () => (h.api.desktopPlaybackStatus as unknown as ReturnType<typeof vi.fn>).mock.calls.length
+    expect(await h.start()).toBe(true)
+    await vi.advanceTimersByTimeAsync(120)
+
+    // A plain seam, landing a few reads after it is armed: nothing else is sent.
+    h.calls.length = 0
+    swapping = { from: '1', to: '2', landAfterRead: readsSoFar() + 3, routeChange: false }
+    await h.client.reconfigure({ loop: { start: 2, end: 3.5 } })
+    await vi.advanceTimersByTimeAsync(400)
+    expect(h.client.status).toMatchObject({
+      generation: '2', transportGeneration: '2', lastTransportBoundary: 'clock-reanchored'
+    })
+    expect(h.calls).toEqual(['prepare:2:swap-from-1'])
+
+    // Headphones plugged in afterwards: a host boundary on the landed
+    // generation, re-anchored exactly once, its echo consumed.
+    route = '2'
+    discontinuities += 1
+    boundary = 'route-generation-changed'
+    await vi.advanceTimersByTimeAsync(400)
+    expect(h.calls).toEqual(['prepare:2:swap-from-1', 'reanchor:2'])
+
+    // A seam whose landing callback also carries a route change: the host's
+    // boundary outranks the seam's, and it is re-anchored.
+    h.calls.length = 0
+    swapping = { from: '2', to: '3', landAfterRead: readsSoFar() + 3, routeChange: true }
+    await h.client.reconfigure({ loop: null })
+    await vi.advanceTimersByTimeAsync(400)
+    expect(h.calls).toEqual(['prepare:3:swap-from-2', 'reanchor:3'])
+    await h.client.unload()
+  })
+
+  it('a re-anchor drained into a seam landing leaves no echo owed: a wedge on the landed generation still re-anchors', async () => {
+    // A host boundary read while a seam is armed (an XRun on the outgoing
+    // transport) is re-anchored, and the core puts that command in the
+    // REPLACEMENT's mailbox: it is drained in the landing callback and
+    // coalesced into the seam's one ClockReanchored, so its echo never
+    // arrives on its own. Left pending, the echo guard would swallow what
+    // came next — here a callback refusing every block after the landing
+    // (render failures rising, no new boundary), never re-anchored.
+    let landed = false
+    let discontinuities = 3
+    let boundary = 'stream-generation-changed'
+    let failures = 0
+    const h = seamHarness((generation) => {
+      const armed = generation === '2' && !landed
+      return playing(generation, {
+        transportGeneration: armed ? '1' : generation,
+        swapPendingGeneration: armed ? '1' : '0',
+        transportDiscontinuities: String(discontinuities),
+        lastTransportBoundary: boundary,
+        adapterRenderFailures: failures
+      })
+    })
+    ;(h.api.reanchorDesktopPlayback as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (value: string) => {
+      h.calls.push(`reanchor:${value}`)
+      // Before the landing the command waits in the candidate's mailbox and
+      // is coalesced into the landing's boundary; after it, the core echoes.
+      if (landed) {
+        discontinuities += 1
+        boundary = 'clock-reanchored'
+      }
+      return result(value, 'running')
+    })
+    expect(await h.start()).toBe(true)
+    await vi.advanceTimersByTimeAsync(120)
+    h.calls.length = 0
+    // Armed, and not landed by the time reconfigure stops reading — a
+    // transposed song's landing waits out its Stretch prime.
+    await h.client.reconfigure({ loop: { start: 2, end: 3.5 } })
+    await vi.advanceTimersByTimeAsync(250)
+    // An XRun on the outgoing transport, read while the seam is armed.
+    discontinuities += 1
+    boundary = 'sequence-gap'
+    await vi.advanceTimersByTimeAsync(250)
+    expect(h.calls).toEqual(['prepare:2:swap-from-1', 'reanchor:2'])
+    // The landing: ONE boundary for the seam and the re-anchor together.
+    landed = true
+    discontinuities += 1
+    boundary = 'clock-reanchored'
+    await vi.advanceTimersByTimeAsync(250)
+    expect(h.calls).toEqual(['prepare:2:swap-from-1', 'reanchor:2'])
+    // The landed callback refuses every block: failures rise, no boundary.
+    failures += 1
+    await vi.advanceTimersByTimeAsync(250)
+    expect(h.calls).toEqual(['prepare:2:swap-from-1', 'reanchor:2', 'reanchor:2'])
+    await h.client.unload()
+  })
+
   it('transportParked follows the intent, not a snapshot that still says stopped', async () => {
     // Every status reads 'stopped' — what a generation reports for ~80 ms
     // after its start is acknowledged. A pause issued then used to be
@@ -833,8 +960,10 @@ describe('desktop native playback facade', () => {
   })
 
   it('two seeks in flight keep the LAST target until the core has applied both', async () => {
-    // A scrub is several seeks in flight, and the core applies them one per
-    // callback block. Retiring the target the moment `seekCount` MOVED
+    // A scrub is several seeks in flight, and the core may apply them a
+    // callback block apart (it drains its whole mailbox every block, and
+    // counts every seek it applies, so two drained together move the count
+    // by two at once). Retiring the target the moment `seekCount` MOVED
     // retired the second seek's target on the first seek's receipt: the bar
     // showed the first spot for a poll, then jumped to the second — the same
     // lurch this file's seek path was just cured of, one block wide. The
