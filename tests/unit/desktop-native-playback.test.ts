@@ -2852,6 +2852,51 @@ describe('desktop native playback facade', () => {
     await c.h.client.unload()
   })
 
+  it('a seek still owed its receipt when a seam arms keeps its target across it: the bar neither goes back to where it was nor drops below the target', async () => {
+    // The core carries the seek count across a seam (the replacement takes
+    // the old transport's count over at the landing; every status before it
+    // is the old transport's), so the receipt still arrives — and until it
+    // does, only the seek knows where the song is going. Forgotten at the
+    // seam, it cost two things. The bar drew the last status again: the spot
+    // the singer had just left, until a read showed the seek applied (the
+    // Loop button with the playhead past the selection seeks to its start,
+    // then arms the loop, a seam). And the run crossed the seam with the lap
+    // `seek()` read off the last poll, which only the receipt corrects: after
+    // a wrap no status had shown, that lap was one behind, the floor was
+    // dropped, and the bar drew BELOW the target for a whole latency — on a
+    // 200 ms route, 71.807 s after a seek to 72 s.
+    vi.setSystemTime(new Date('2026-09-25T12:00:00Z'))
+    const c = continuousCore(9600)
+    const A = 70 * 48_000
+    const B = A + 4 * 48_000
+    c.core.frame = 80 * 48_000
+    expect(await c.h.client.prepareAndStart({ ...countInRequest(80), countIn: false })).toBe(true)
+    c.stopPolling()
+    await c.follow('Play at 80 s', 250, heard(80 * 48_000, c.perMs, c.lag))
+
+    // The Loop button, playing past the selection: a seek back to its start
+    // that the core takes 5 ms after it is sent, and the loop armed behind it.
+    c.core.seekDelayMs = 5
+    await c.h.client.seek(A / 48_000)
+    const back = Date.now()
+    await c.h.client.reconfigure({ loop: { start: 70, end: 74 } })
+    c.core.loop = { start: A, end: B }
+    await c.follow('the loop armed right behind a seek back to its start', 250,
+      () => heard(A, c.perMs, c.lag)(Date.now() - back - 5))
+
+    // A wrap nobody read, then a mid-loop seek and a seam before its receipt.
+    c.core.dues.push({ at: back + 5 + 4000, state: 'playing', frame: A, lap: true })
+    vi.advanceTimersByTime(back + 5 + 4020 - Date.now())
+    const mid = A + 2 * 48_000
+    await c.h.client.seek(mid / 48_000)
+    const seeked = Date.now()
+    await c.h.client.reconfigure({ metronome: { ...countInRequest(60).metronome, click: true } })
+    await c.follow('a mid-loop seek after an unread wrap, a seam before its receipt', 250,
+      () => heard(mid, c.perMs, c.lag)(Date.now() - seeked - 5))
+    c.verdict()
+    await c.h.client.unload()
+  })
+
   it('a seek the core never acknowledges gives the bar back to the core\'s clock, loop laps and all', async () => {
     // The target is dropped after PENDING_SEEK_MAX_MS, and the run with it,
     // which also loses the lap the ear was known to be in. The next matured
