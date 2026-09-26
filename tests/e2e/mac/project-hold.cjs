@@ -30,6 +30,20 @@
  * of the value rather than on it, which is what the other platforms get: still
  * far inside the doc's 2 ms.
  *
+ * Folder times go back too, last, once every file is back. The project
+ * folder's goes back when its files and entries all did; the time of the
+ * folder holding it (the library root) goes back when nothing else in it
+ * changed during the run. Two things move them. The app saves project.json as
+ * a `.part` renamed over it, which moves the project folder's time. And iCloud
+ * Drive, 2-4 s after anything in a project changes (the put-back's own writes
+ * included), stamps that project folder AND the library root with a whole
+ * second of its own. That stamp is the only thing that moves the root: watched
+ * on 2026-09-25, no entry in it was created or removed. Setting a folder's time
+ * does not draw another stamp. So in a synced folder the put-back waits for the
+ * stamp its own writes draw, puts the time back after it, and returns once
+ * nothing has moved for 6 s. Nothing in SingZ reads a folder's time; this is
+ * only about leaving the library as found.
+ *
  * `putBack()` never throws — a finally that throws skips the restores still
  * owed — and runs once. When a run ends without reaching it (the watchdog's
  * deadline, a kill, an error nothing caught) an exit hook runs it, after
@@ -66,6 +80,17 @@ const KEEP_BYTES = 8n * 1024n * 1024n
 
 /** How far a put-back time may land from the held one: nowhere on macOS. */
 const SLACK_NS = process.platform === 'darwin' ? 0n : 1000n
+
+/** How long a synced folder must keep its put-back time before the put-back
+ *  trusts it, and the most it waits: the stamp comes 2-4 s after a write. */
+const SYNC_SETTLE = { quietMs: 6000, maxMs: 30000 }
+
+/** A folder a sync client stamps: iCloud Drive, or another File Provider. */
+const syncedFolder = (real) =>
+  process.platform === 'darwin' && /\/Library\/(Mobile Documents|CloudStorage)\//.test(`${real}/`)
+
+/** Blocks, as an 'exit' listener has to: nothing asynchronous runs there. */
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 
 const canonical = (path) => {
   try {
@@ -111,6 +136,15 @@ function setTimes(path, atimeNs, mtimeNs) {
   }
 }
 
+/** A folder's mtime alone: its atime moves whenever anything lists it. */
+function setMtime(path, mtimeNs) {
+  if (process.platform === 'darwin') {
+    execFileSync('/usr/bin/touch', ['-m', '-d', isoNs(mtimeNs), path], { stdio: 'pipe' })
+  } else {
+    utimesSync(path, seconds(statNs(path).atimeNs), seconds(mtimeNs))
+  }
+}
+
 /** What stems/ holds, by size and mtime. Stems are too big to keep, so a
  *  change there is reported and never put back. */
 function listStems(dir) {
@@ -127,6 +161,9 @@ function listStems(dir) {
  *  deletes the WAVs, which nothing can put back, and the old project.json put
  *  back over it would then describe files that are gone. */
 function holdProject(dir) {
+  // The folder's own time, never a link's: it goes back onto `real`.
+  const real = canonical(dir)
+  const folderMtimeNs = statNs(real).mtimeNs
   const files = new Map()
   const others = new Map()
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -143,12 +180,121 @@ function holdProject(dir) {
   }
   return {
     dir,
-    real: canonical(dir),
+    real,
     label: basename(dir),
+    folderMtimeNs,
     files,
     others,
     stems: others.get('stems') === 'folder' ? listStems(join(dir, 'stems')) : null
   }
+}
+
+/** What sits in a folder, by name, leaving out `skip`: each entry's kind and
+ *  mtime, and a file's size. The folder's own time goes back only while this
+ *  still reads the same, since anything else that changed in it moved that
+ *  time too, and the change was not the run's to undo. */
+function listAround(dir, skip) {
+  const out = new Map()
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (skip.has(entry.name)) continue
+    const stat = statNs(join(dir, entry.name))
+    out.set(entry.name, `${entry.isFile() ? `file of ${stat.size} bytes` : `a ${kind(entry)}`}, mtime ${stat.mtimeNs} ns`)
+  }
+  return out
+}
+
+/** Why `around` no longer describes the folder it was taken from, or null. */
+function changedAround(dir, around, skip) {
+  let now
+  try {
+    now = listAround(dir, skip)
+  } catch (error) {
+    return error.message
+  }
+  for (const [name, was] of around) {
+    if (!now.has(name)) return `${name} went away during the run`
+    if (now.get(name) !== was) return `${name} changed during the run too`
+  }
+  for (const name of now.keys()) if (!around.has(name)) return `${name} appeared during the run`
+  return null
+}
+
+/**
+ * Put each folder's mtime back, once its contents are: `folders` are
+ * `{ path, label, mtimeNs, blocker }`, where `blocker()` says why a folder's
+ * time must stay as it is now, or null. In a synced folder (or with `settle`
+ * given) it keeps watching until nothing has moved for `settle.quietMs`, at
+ * most `settle.maxMs`, and puts back again whatever is stamped meanwhile.
+ */
+function putBackFolders(folders, settle, say, problems) {
+  const left = []
+  const live = []
+  for (const folder of folders) {
+    const why = folder.blocker()
+    if (why) left.push(`${folder.label} — ${why}`)
+    else live.push({ ...folder, puts: 0, done: false })
+  }
+  const restore = (folder) => {
+    try {
+      if (sameTime(statNs(folder.path).mtimeNs, folder.mtimeNs)) return false
+      setMtime(folder.path, folder.mtimeNs)
+      folder.puts++
+      return true
+    } catch (error) {
+      folder.done = true
+      problems.push(`${folder.label} (folder): its mtime could not be put back (${error.message})`)
+      return false
+    }
+  }
+  for (const folder of live) restore(folder)
+  const wait = settle ?? (live.some((folder) => syncedFolder(folder.path)) ? SYNC_SETTLE : null)
+  if (wait) {
+    // Said first: this blocks, and not even Ctrl-C cuts it short.
+    say(
+      `library folder times: waiting for the sync's own stamp, until nothing has moved for ` +
+        `${wait.quietMs / 1000} s (${wait.maxMs / 1000} s at most)`
+    )
+    const start = Date.now()
+    let still = Date.now()
+    while (Date.now() - start < wait.maxMs && Date.now() - still < wait.quietMs) {
+      pause(100)
+      for (const folder of live) {
+        if (folder.done) continue
+        // For the root, something else changed in it while this waited: its
+        // time is no longer only the run's, so it stays as that change left
+        // it. A project folder's blocker was settled before the wait and
+        // cannot change here, so a held song edited elsewhere within these
+        // few seconds still gets the put-back's time, a folder time nothing
+        // reads.
+        const why = folder.blocker()
+        if (why) {
+          folder.done = true
+          left.push(`${folder.label} — ${why}`)
+        } else if (restore(folder)) {
+          still = Date.now()
+        }
+      }
+    }
+    if (Date.now() - still < wait.quietMs) {
+      say(`library folder times: still being stamped when the ${wait.maxMs / 1000} s wait ran out, so a later stamp can move them again`)
+    }
+  }
+  const back = []
+  const asFound = []
+  for (const folder of live) {
+    if (folder.done) continue
+    if (!sameTime(statNs(folder.path).mtimeNs, folder.mtimeNs)) {
+      problems.push(`${folder.label} (folder): its mtime did not stay put back`)
+    } else if (folder.puts === 0) {
+      asFound.push(folder.label)
+    } else {
+      const again = folder.puts - 1
+      back.push(again ? `${folder.label} (again after ${again} later stamp${again > 1 ? 's' : ''})` : folder.label)
+    }
+  }
+  if (back.length) say(`library folder times put back: ${back.join(', ')}`)
+  if (asFound.length) say(`library folder times as found: ${asFound.join(', ')}`)
+  for (const line of left) say(`library folder time left as it is: ${line}`)
 }
 
 /** Out of the library, into `into`, without destroying it. */
@@ -200,7 +346,9 @@ function putBackFile(path, want) {
   return null
 }
 
+/** Put one project's files back, and say whether all of them went back. */
 function putBackProject(project, into, say, problems) {
+  const before = problems.length
   const done = []
   const fail = (what, error) => problems.push(`${project.label}/${what}: ${error.message}`)
   for (const [name, held] of project.files) {
@@ -253,6 +401,7 @@ function putBackProject(project, into, say, problems) {
       ? `library files put back: ${project.label} — ${done.join('; ')}`
       : `library files as found: ${project.label} (${project.files.size} top-level files)`
   )
+  return problems.length === before
 }
 
 /**
@@ -261,9 +410,9 @@ function putBackProject(project, into, say, problems) {
  * back with them. Call before the app launches. Returns `{ putBack }`: call it
  * after the app has closed, and fail the run on what it returns — the
  * problems, each also printed as it is found; empty when every file was left
- * as found.
+ * as found. `settle` is for tests: the wait a synced folder gets, forced on.
  */
-function holdProjects(dirs, backups = []) {
+function holdProjects(dirs, backups = [], { settle } = {}) {
   const seen = new Set()
   const projects = []
   for (const dir of dirs) {
@@ -271,6 +420,19 @@ function holdProjects(dirs, backups = []) {
     if (seen.has(real)) continue
     seen.add(real)
     projects.push(holdProject(dir))
+  }
+  // The folder each project sits in, usually the library root: its time, and
+  // everything in it but the held projects, so the time goes back only when
+  // the run is all that moved it.
+  const parents = new Map()
+  for (const project of projects) {
+    const path = dirname(project.real)
+    if (!parents.has(path)) parents.set(path, { path, label: basename(path), skip: new Set() })
+    parents.get(path).skip.add(basename(project.real))
+  }
+  for (const parent of parents.values()) {
+    parent.mtimeNs = statNs(parent.path).mtimeNs
+    parent.around = listAround(parent.path, parent.skip)
   }
   let ran = false
   const run = (say) => {
@@ -284,7 +446,7 @@ function holdProjects(dirs, backups = []) {
     )
     for (const project of projects) {
       try {
-        putBackProject(project, into, say, problems)
+        project.whole = putBackProject(project, into, say, problems)
       } catch (error) {
         problems.push(`${project.label}: ${error.message}`)
       }
@@ -310,6 +472,31 @@ function holdProjects(dirs, backups = []) {
       } catch (error) {
         problems.push(`${path}: ${error.message}`)
       }
+    }
+    // Folder times last: putting files back moves them again, and in a synced
+    // folder it is what draws the stamp that the wait puts back after.
+    try {
+      putBackFolders(
+        [
+          ...projects.map((project) => ({
+            path: project.real,
+            label: project.label,
+            mtimeNs: project.folderMtimeNs,
+            blocker: () => (project.whole ? null : 'its files are not all as found')
+          })),
+          ...[...parents.values()].map((parent) => ({
+            path: parent.path,
+            label: parent.label,
+            mtimeNs: parent.mtimeNs,
+            blocker: () => changedAround(parent.path, parent.around, parent.skip)
+          }))
+        ],
+        settle,
+        say,
+        problems
+      )
+    } catch (error) {
+      problems.push(`folder times: ${error.message}`)
     }
     // Said here as well as returned: a driver whose run threw reaches its
     // outer catch with the error, not with this list.
