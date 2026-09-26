@@ -11,10 +11,11 @@
  * Open a ~2 min six-lane song, Play, touch the metronome three times, scrub
  * four times, ride three faders, transpose +2, turn training on, pause and
  * resume, run the song out and Play again, back to the catalog, open the
- * second song, quit, relaunch, reopen the first. Every timing is sampled IN
- * THE RENDERER by a setInterval (the host's CDP round trip never lands inside
- * a number). Both passes run in one invocation, legacy first, native second,
- * on the same scratch profile with the toggle flipped between them.
+ * second song, quit, relaunch, reopen the first. The timings are the
+ * RENDERER's: sampled there by a setInterval, or for the opens polled from
+ * node against the page's own clock — only back → catalog and app restart are
+ * node-side spans. Both passes run in one invocation, legacy first, native
+ * second, on the same scratch profile with the toggle flipped between them.
  *
  * Silent: SINGZ_MUTE mutes Chromium's output — which the NATIVE graph does
  * not go through (CoreAudio, straight from the core) — so every open also
@@ -303,23 +304,87 @@ async function runPass(kind, songs) {
   const mute = async (win) => {
     await val(win, '__test.engine.setMasterVolume(0)')
   }
+  /**
+   * Open a library song, timed from the click the APP receives.
+   *
+   * The click is dispatched from the page, with the clock read in the same
+   * evaluate just before it. A Playwright click first waits for the card to
+   * hold still across two animation frames, and the never-shown window on the
+   * Windows field laptop runs about one a second: timed from before
+   * `locator.click()`, every open there read about 2000 or 4000 ms on both
+   * backends and on trees that differed, while the app's own cold open was
+   * 0.65 s native and 1.6 s legacy with the player screen up 21-63 ms after the
+   * click (measured 2026-09-26), and three compared rows went red for nothing.
+   *
+   * What that wait also checked is checked here, loudly: exactly one card by
+   * that name (exact, not a substring: song B's name contains song A's),
+   * enabled, and the one the pointer would hit, so a scrim over the library
+   * stops the run rather than being clicked through. The phases are polled
+   * from node, never with waitForFunction (it polls on requestAnimationFrame
+   * too), and each poll reads the page's clock, so a reply's way back to node
+   * is not in the number either.
+   */
   const open = async (win, name) => {
-    const t0 = Date.now()
-    // Exact, not a substring: song B's name contains song A's.
-    await win.locator('.lib-card').filter({ has: win.locator(`text="${name}"`) }).first().click()
+    const clicked = await val(win, `(function () {
+      const norm = (s) => String(s).replace(/\\s+/g, ' ').trim()
+      const want = norm(${JSON.stringify(name)})
+      const cards = [...document.querySelectorAll('.lib-card')].filter((c) => norm(c.querySelector('.lib-name')?.textContent ?? '') === want)
+      if (cards.length !== 1) return { error: cards.length + ' library cards are named exactly "' + want + '"' }
+      const card = cards[0]
+      if (card.disabled) return { error: 'its card is disabled' }
+      card.scrollIntoView({ block: 'nearest' })
+      const r = card.getBoundingClientRect()
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+      if (!hit || !card.contains(hit)) return { error: 'its card would not take the click: ' + (hit ? hit.outerHTML.slice(0, 120) : 'nothing') + ' is where it is' }
+      window.__psOpenAt = performance.now()
+      card.click()
+      return { ok: true }
+    })()`)
+    if (!clicked.ok) throw new Error(`cannot open "${name}": ${clicked.error}`)
     let player = null
+    let loading = false
     let ready = null
-    const deadline = t0 + 120000
+    const deadline = Date.now() + 120000
     while (Date.now() < deadline) {
-      const s = await val(win, 'JSON.stringify({ phase: __test.phase, cat: __test.showCatalog, n: __test.tracks.length })')
+      const s = await val(win, 'JSON.stringify({ phase: __test.phase, cat: __test.showCatalog, n: __test.tracks.length, ms: Math.round(performance.now() - window.__psOpenAt) })')
       const st = JSON.parse(s)
-      if (player === null && !st.cat && st.phase !== 'empty') player = Date.now() - t0
-      if (st.phase === 'ready' && st.n > 0 && !st.cat) { ready = Date.now() - t0; break }
+      if (player === null && !st.cat && st.phase !== 'empty') player = st.ms
+      // 'ready' counts only after THIS open's 'loading' has been seen. The
+      // song being left is 'ready' too, and on every switch the app shows it
+      // with the catalog closed for the loader's first IPC round trips: 1-5 ms
+      // on the Mac, 3-13 ms on the field laptop, where a 20 ms poll landed in
+      // it 5 times in 12 and timed the old song.
+      if (st.phase === 'loading') loading = true
+      if (loading && st.phase === 'ready' && st.n > 0 && !st.cat) { ready = st.ms; break }
       await sleep(20)
     }
-    if (ready === null) throw new Error(`"${name}" never became ready`)
+    if (ready === null) throw new Error(`"${name}" never became ready${loading ? '' : ' (its loading phase was never seen)'}`)
     await mute(win)
     return { player: player ?? ready, ready }
+  }
+  /**
+   * A singer's pause before open A, the one open whose "player screen" row is
+   * judged. The app warms the native addon 800 ms after the library mounts;
+   * an open that beats it loads the addon itself, synchronously in main, and
+   * the polls reach the page through main, so none lands until that load is
+   * done. The player screen, up within 35 ms of the click on both backends by
+   * the page's own clock, read 101 ms native against 26 ms legacy on the Mac,
+   * a red, and on the field laptop a native poll trailed the page by up to
+   * 400 ms (measured 2026-09-27). open-native-e2e waits for the same line.
+   * The REOPEN deliberately does not wait: it is the one judged row that still
+   * pays the addon's first load after a launch, which this harness once caught
+   * at +1 s when every launch staged a fresh copy of the addon. A build whose
+   * addon cannot load logs that instead, and a wait that sees neither stops
+   * after 6 s and says so.
+   */
+  const afterAddonWarmup = async (win) => {
+    const t0 = Date.now()
+    while (Date.now() - t0 < 6000) {
+      const line = (await val(win, 'window.singz.getLog()')).find((x) => /^native (capture addon loaded|addon did not load)/.test(x.line))
+      if (line) return `clicked ${Date.now() - t0} ms after the library, once the addon had ${/^native capture/.test(line.line) ? 'loaded' : 'failed to load'}`
+      await sleep(50)
+    }
+    return 'clicked 6 s after the library with no addon warm-up logged: this open may pay the load'
   }
   const backendCheck = async (win, when) => {
     const native = await val(win, '__test.engine.nativeActive')
@@ -352,6 +417,7 @@ async function runPass(kind, songs) {
   const passStart = Date.now()
 
   // ---- open A ---------------------------------------------------------------
+  const pauseA = await afterAddonWarmup(win)
   const o1 = await open(win, A)
   pass.ms.openPlayer = o1.player
   pass.ms.openReady = o1.ready
@@ -370,7 +436,7 @@ async function runPass(kind, songs) {
   }
   pass.cpu['idle-in-player'] = sampleCpu(pid)
   const duration = await val(win, '__test.engine.duration')
-  log(`  [${kind}] open A: player ${o1.player} ms · ready ${o1.ready} ms · duration ${duration.toFixed(1)} s`)
+  log(`  [${kind}] open A: player ${o1.player} ms · ready ${o1.ready} ms · duration ${duration.toFixed(1)} s · ${pauseA}`)
 
   // ---- Play → advancing -----------------------------------------------------
   let r = await watch(win, { ms: 15000, action: 'e.play({ countIn: false })', cond: 'out.length > 1 && s.playing && s.pos > out[0].pos + ' + ADVANCE })
@@ -501,6 +567,8 @@ async function runPass(kind, songs) {
   liveWin = win
   liveApp = app
   pass.ms.coldRestart = relaunched.ms
+  // No warm-up wait here (see afterAddonWarmup): the reopen clicks the moment
+  // the library is back, so a slower first load of the addon shows in its row.
   const o3 = await open(win, A)
   pass.ms.reopen = o3.ready
   await val(win, '__test.engine.pause()')
