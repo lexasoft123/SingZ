@@ -1554,7 +1554,13 @@ export default function App(): React.JSX.Element {
       }),setError)
       appSectionRef.current = 'songs'
       setAppSection('songs')
-      setShowCatalog(false)
+      // The catalog stays up until the loading screen replaces it (below,
+      // beside setPhase('loading')). Closing it here, three IPC round trips
+      // earlier, mounted the whole player of the song being LEFT while the
+      // phase was still its 'ready': on the Windows field laptop, visible,
+      // every catalog switch spent ~50 ms of the renderer on that throwaway
+      // mount and painted it to the screen for a frame or two before the
+      // loading screen took over.
       const seq = ++loadSeq.current
       if (splitRunRef.current) splitRunRef.current.cancelled = true
       splitRunRef.current = null
@@ -1629,6 +1635,9 @@ export default function App(): React.JSX.Element {
       setProjectDir(reg.project?.dir ?? null)
       setEditName(null)
       setShowProjects(false)
+      // In the same synchronous block as setPhase('loading'), so the catalog
+      // gives way to the loading screen in one render — never to the player
+      // of the song being left.
       setShowCatalog(false)
       /** The project's added tracks as lanes, read like the stems (measured
        *  where the core can, decoded where it cannot); a missing one is skipped. */

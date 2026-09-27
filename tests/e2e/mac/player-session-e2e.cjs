@@ -350,10 +350,11 @@ async function runPass(kind, songs) {
       const st = JSON.parse(s)
       if (player === null && !st.cat && st.phase !== 'empty') player = st.ms
       // 'ready' counts only after THIS open's 'loading' has been seen. The
-      // song being left is 'ready' too, and on every switch the app shows it
-      // with the catalog closed for the loader's first IPC round trips: 1-5 ms
-      // on the Mac, 3-13 ms on the field laptop, where a 20 ms poll landed in
-      // it 5 times in 12 and timed the old song.
+      // song being left is 'ready' too, and the app used to show it with the
+      // catalog closed for the loader's first IPC round trips (1-5 ms on the
+      // Mac, 3-13 ms on the field laptop, where a 20 ms poll landed in it 5
+      // times in 12 and timed the old song). It no longer closes the catalog
+      // that early; this is the condition that could not be fooled by it.
       if (st.phase === 'loading') loading = true
       if (loading && st.phase === 'ready' && st.n > 0 && !st.cat) { ready = st.ms; break }
       await sleep(20)
