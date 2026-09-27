@@ -85,6 +85,7 @@ import {
   splitGate,
   startProjectSplit
 } from '../split/flow'
+import { pullFromDrive } from '../split/pull-from-drive'
 import {
   BEAT_MODELS_MB,
   SPLIT_MODEL,
@@ -964,6 +965,13 @@ export default function CatalogScreen({
    */
   type SplitUi =
     | null
+    // Bringing a Drive-only song home before splitting it — no job.json
+    // exists yet, so this phase is never reconstructed after a relaunch the
+    // way the ones below are; a killed pull is simply started again, safely
+    // (pullFromDrive resumes on its own). project is the ORIGINAL Drive
+    // name throughout, so the card matches the entry the singer is looking
+    // at even though the song is about to move to a different tab.
+    | { phase: 'pulling'; project: string }
     | { phase: 'model'; project: string; gotMB: number; totalMB: number }
     | {
         phase: 'run'
@@ -1311,8 +1319,20 @@ export default function CatalogScreen({
           return
         }
         setCancelPending(false)
-        setSplitUi({ phase: 'model', project: dir, gotMB: 0, totalMB: 136 })
-        await startProjectSplit(dir, {
+        // A fresh split on a song still living in Drive brings it home
+        // first — see pull-from-drive.ts. A RESUME never takes this branch:
+        // by the time a resume is possible, an earlier fresh attempt has
+        // already pulled the song (or it would have nothing to resume), so
+        // mode is 'phone' by then, the tab having followed the song home.
+        let project = dir
+        if (!resume && mode === 'gdrive') {
+          setSplitUi({ phase: 'pulling', project: dir })
+          const pulled = await pullFromDrive(dir)
+          project = pulled.dir
+          await refresh()
+        }
+        setSplitUi({ phase: 'model', project, gotMB: 0, totalMB: 136 })
+        await startProjectSplit(project, {
           resume,
           watchdogCapMs,
           onModelProgress: (got, total) =>
@@ -1320,7 +1340,7 @@ export default function CatalogScreen({
               cur?.phase === 'model'
                 ? {
                     phase: 'model',
-                    project: dir,
+                    project,
                     gotMB: Math.round(got / 1e6),
                     totalMB: Math.round(total / 1e6)
                   }
@@ -1331,7 +1351,7 @@ export default function CatalogScreen({
         // flips on the first event or file — see the liveness poll.
         setSplitUi({
           phase: 'run',
-          project: dir,
+          project,
           text: t('phone.library.starting'),
           frac: 0,
           started: false
@@ -1344,20 +1364,26 @@ export default function CatalogScreen({
         }
       }
     },
-    []
+    [mode, refresh]
   )
 
-  /** Can this song be split right now? PHONE LIBRARY ONLY — the adoption
-   *  writes through docDirFor, which is the app's own documents root on both
-   *  platforms, so splitting a picked-folder song would leave the folder song
-   *  untouched and drop a duplicate half-project into This-phone. The offer
-   *  used to be confined by living in the phone-only long-press menu; now
-   *  that a card renders it, the confinement has to be stated.
+  /** Can this song be split right now? PHONE LIBRARY, or a song still on
+   *  Google Drive — both bring the song's audio through docDirFor, the app's
+   *  own documents root, before splitting touches it: a fresh phone song is
+   *  already there, and a Drive one is pulled home first (pull-from-drive.ts)
+   *  and its Drive copy retired once that pull is verified, so nothing is
+   *  left half-done on either side. PICKED FOLDER stays excluded — that is
+   *  the untouched case the adoption itself would corrupt: writing through
+   *  docDirFor would drop a duplicate half-project into This-phone while
+   *  leaving the folder song untouched, and nothing pulls a folder song home
+   *  the way this now does for Drive. The offer used to be confined by
+   *  living in the phone-only long-press menu; now that a card renders it,
+   *  the confinement has to be stated.
    *  Six stems means it already is split; a job in flight owns the engine; a
    *  build without the natives never offers. */
   const canSplit = useCallback(
     (p: ProjectEntry): boolean =>
-      mode === 'phone' && splitAvailable() && Object.keys(p.stems).length === 0,
+      (mode === 'phone' || mode === 'gdrive') && splitAvailable() && Object.keys(p.stems).length === 0,
     [mode]
   )
   /** Whether a split is WORKING for anyone BUT this card: the running card
@@ -1438,6 +1464,16 @@ export default function CatalogScreen({
       // the doc write land after the delete and bring back half a project.
       if (splitUiRef.current?.phase === 'adopting' && splitUiRef.current.project === p.dir) {
         Alert.alert(t('phone.library.almostDoneSplittingTitle'), t('phone.library.almostDoneSplittingBody'))
+        return
+      }
+      // A song mid-pull from Drive has the SAME shape of danger: once
+      // project.json exists locally, pullFromDrive is on its way to
+      // retiring the Drive copy with nothing left to check it against but
+      // the file this delete is about to remove. Refusing here is the
+      // primary defence; pullFromDrive re-checks right before it trashes
+      // Drive too, in case a delete ever reaches this song some other way.
+      if (splitUiRef.current?.phase === 'pulling' && splitUiRef.current.project === p.dir) {
+        Alert.alert(t('phone.library.almostHereTitle'), t('phone.library.almostHereBody'))
         return
       }
       if (movingRef.current === p.dir) {
@@ -2296,6 +2332,9 @@ export default function CatalogScreen({
               <Text style={s.splitTitle} numberOfLines={1}>
                 {nameOf(splitUi.project)}
               </Text>
+              {splitUi.phase === 'pulling' && (
+                <Text style={s.splitText}>{t('phone.library.bringingHome')}</Text>
+              )}
               {splitUi.phase === 'model' && (
                 <>
                   <Text style={s.splitText}>
