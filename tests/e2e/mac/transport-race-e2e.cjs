@@ -63,6 +63,12 @@
  * incomplete, so there is no such thing as a benign one during a clean
  * session.
  *
+ * Legs 1 and 2 race windows of tens of milliseconds, so their presses come
+ * from the page, aimed and measured: a Play that landed after the build it
+ * was meant to race, or two presses too far apart to share a status poll,
+ * makes the run INCONCLUSIVE (exit 2) — it never passes a race it did not
+ * reach.
+ *
  * Prereqs: `npm run build` done; the capture addon built for this tree
  * (`npm run capture:addon`) — without it there is no native graph to race and
  * the driver says so rather than passing vacuously; no other app instance
@@ -122,6 +128,91 @@ const dspComplaints = (lines) =>
 /** How many native graphs main was asked to build since `fromMs`. */
 const buildCount = (lines) => lines.filter((x) => /^preparing graph/.test(x.line)).length
 
+/*
+ * The presses that race something are dispatched FROM THE PAGE. A Playwright
+ * click first waits for the button to hold still across two animation frames,
+ * and the never-shown window on the Windows field laptop runs about one and a
+ * half frames a second: there both presses of leg 2 landed a second or more
+ * apart, and leg 1's Play arrived long after the ~35 ms build it was meant to
+ * race —
+ * two legs that raced nothing and passed (count-in-e2e's `press()` is the
+ * same fix for the same reason).
+ */
+
+/** Wait for `expr` (evaluated in the page) to be truthy, polled from node
+ * every 25 ms — never `waitForFunction`, which polls on requestAnimationFrame
+ * too. Resolves whether it was seen. */
+async function waitFor(win, expr, ms) {
+  const t0 = Date.now()
+  while (Date.now() - t0 < ms) {
+    if (await val(win, expr)) return true
+    await sleep(25)
+  }
+  return false
+}
+
+/** Press the transport button from the page; a missing or disabled button is
+ * an error, never a press silently lost. */
+async function press(win) {
+  const state = await val(win, '(function(){ const b = document.querySelector("button.play"); if (!b) return "missing"; if (b.disabled) return "disabled"; b.click(); return "pressed" })()')
+  if (state !== 'pressed') throw new Error(`the transport button is ${state}`)
+}
+
+/** How long after `at` (the page's Date.now() at a press) `expr` first held,
+ * by the page's own clock, polled from node within `ms`; null if it never did. */
+async function sincePress(win, expr, at, ms) {
+  const t0 = Date.now()
+  while (Date.now() - t0 < ms) {
+    const r = await val(win, `(function(){ return { ok: !!(${expr}), ms: Date.now() - ${at} } })()`)
+    if (r.ok) return r.ms
+    await sleep(20)
+  }
+  return null
+}
+
+/** Leg 1's press: in the page, wait for the song to be up, then read main's
+ * log back to back and press Play the moment it says the graph prepared ahead
+ * of Play has started building. The build runs off main's thread, so each
+ * read answers in about a millisecond, well inside a build of ten or fifty.
+ * Returns the page's clock at the press and the generation being built. */
+const AHEAD_PRESS = (sinceMs) => `(async function(){
+  const opened = performance.now() + 60000
+  while (!(window.__test && __test.phase === 'ready' && __test.engine && __test.engine.duration > 0)) {
+    if (performance.now() > opened) return { error: 'the song never became ready within 60 s' }
+    await new Promise((r) => setTimeout(r, 1))
+  }
+  const deadline = performance.now() + 20000
+  for (;;) {
+    const line = (await window.singz.getLog()).find((x) => x.t >= ${sinceMs} && /^preparing graph/.test(x.line))
+    if (line) {
+      const b = document.querySelector('button.play')
+      if (!b || b.disabled) return { error: 'the transport button is ' + (b ? 'disabled' : 'missing') }
+      const at = Date.now()
+      b.click()
+      const m = /generation (\\d+)/.exec(line.line)
+      return { at, preparingAt: line.t, generation: m ? m[1] : null }
+    }
+    if (performance.now() > deadline) return { error: 'no graph was prepared ahead of Play within 20 s of the song being ready' }
+  }
+})()`
+
+/** Leg 2's presses: two, back to back in one evaluate, so the second comes
+ * while the first Play is still in flight. That is the window the race lives
+ * in, and on the Mac it is only a few milliseconds: the engine reports playing
+ * as soon as a status saying so lands, and 25 ms after the first press it
+ * already did, which made the second an ordinary Pause. Returns the measured
+ * gap and what the engine said at the second: not playing yet means the
+ * second press asked for Play again, from a stale "paused" — the race. */
+const DOUBLE_PRESS = `(function(){
+  const hit = () => { const b = document.querySelector('button.play'); if (!b || b.disabled) return null; b.click(); return performance.now() }
+  const first = hit()
+  if (first === null) return { error: 'the transport button is missing or disabled for the first press' }
+  const engineAtSecond = !!__test.engine.playing
+  const second = hit()
+  if (second === null) return { error: 'the transport button is missing or disabled for the second press' }
+  return { gapMs: Math.round((second - first) * 10) / 10, engineAtSecond }
+})()`
+
 ;(async () => {
   if (!existsSync(SONG_PJ)) throw new Error(`no project at ${SONG_PJ} — set E2E_SONG`)
   if (!existsSync(SONG_B_PJ)) throw new Error(`no project at ${SONG_B_PJ} — set E2E_SONG_B`)
@@ -134,6 +225,9 @@ const buildCount = (lines) => lines.filter((x) => /^preparing graph/.test(x.line
   const songBName = libraryName(SONG_B_DIR)
 
   const fail = []
+  // A leg that did not reach its race says so here: the run is then
+  // INCONCLUSIVE (exit 2), never a pass it did not earn.
+  const inconclusive = []
   const app = await _electron.launch({
     executablePath: require('electron'),
     args: [APP],
@@ -157,69 +251,63 @@ const buildCount = (lines) => lines.filter((x) => /^preparing graph/.test(x.line
 
     // ── 1. Play while the graph is still being prepared ──────────────────
     //
-    // No settle: the click goes in as soon as the transport exists, which is
-    // where the singer's hand is. The engine schedules its prepare-ahead 400
-    // ms after the song's controls stop moving, so this Play lands either
-    // just before that timer or during the build it starts — both are the
-    // case the session harness never reaches.
+    // The engine prepares the graph 400 ms after the song's controls stop
+    // moving, and the build now takes tens of milliseconds, not the seconds
+    // it did when this leg was written — so a press has to be AIMED at it.
+    // The page presses Play the moment main logs that the build has started
+    // (AHEAD_PRESS), and the leg then checks against main's "graph ready"
+    // that the press really landed while it ran. Before, the press went in
+    // once a node loop had SEEN the build start, and the check was only that
+    // one had started: a Play that arrived after the build had finished
+    // costs one build like any cold Play, and passed while testing the
+    // opposite of what the header claims.
     const t0 = Date.now()
     await clickLibrarySong(win, songName)
+    // Armed at once and awaited below: the build can start while node is
+    // still checking which song opened.
+    const aheadPress = val(win, AHEAD_PRESS(t0))
+    aheadPress.catch(() => {})
     await win.waitForSelector('.pill.karaoke', { timeout: 60000 })
-    await win.waitForFunction(() => __test?.engine?.duration > 0, null, { timeout: 60000 })
-    // One read, well inside the prepare-ahead's 400 ms debounce the wait
-    // below exists for.
+    if (!(await waitFor(win, '__test?.engine?.duration > 0', 60000))) throw new Error('the song never got a duration')
     await assertOpenedProject(win, { dir: SONG_DIR, name: songName, backups })
-    // Wait for the prepare-ahead to be UNDERWAY before pressing, and say so.
-    // Without this the leg is a coin toss: a click that beats the engine's
-    // 400 ms debounce races nothing at all, costs one build like any cold
-    // Play, and passes while testing the opposite of what the header claims.
-    // The press still lands mid-build — the build takes seconds and this
-    // returns the moment it starts.
-    //
-    // A NODE loop, not waitForFunction: the value comes over IPC, so the page
-    // function has to be async, and with an async function that helper does
-    // not poll at all — it calls once and resolves with the Promise, which is
-    // truthy. This guard was written that way first and was vacuous.
-    let aheadStarted = false
-    for (let i = 0; i < 200 && !aheadStarted; i++) {
-      aheadStarted = buildCount(await logSince(win, t0)) > 0
-      if (!aheadStarted) await sleep(50)
-    }
-    const pressedAt = Date.now()
-    await win.click('button.play')
+    const ahead = await aheadPress
+    // No build to race is a failure, as it always was: the prepare-ahead
+    // never ran, or never reached main.
+    if (ahead.error) throw new Error(`${ahead.error} — this leg raced nothing`)
 
     // Sound first, then the button: the two are separate values and the
     // second is the one the singer looks at.
     // The core reaching 'playing' and the SONG being audible are different
     // moments — a count-in stands between them — so both are reported. Only
     // the first is a measure of the press; the second is the singer's wait.
-    await win.waitForFunction(
-      () => { const s = __test.engine.nativePlayback?.status; return s?.transportState === 'playing' },
-      null,
-      { timeout: 30000 }
-    ).catch(() => {})
-    const started = Date.now() - pressedAt
-    await win.waitForFunction(() => __test.engine.position > 0.2, null, { timeout: 30000 })
-    const advancing = Date.now() - pressedAt
-    await win.waitForFunction(() => __test.playing === true, null, { timeout: 5000 })
-      .catch(() => { fail.push('the transport button never turned to Pause though the song was advancing') })
+    const started = await sincePress(win, "__test.engine.nativePlayback?.status?.transportState === 'playing'", ahead.at, 30000)
+    const advancing = await sincePress(win, '__test.engine.position > 0.2', ahead.at, 30000)
+    if (advancing === null) throw new Error('the song never advanced within 30 s of the press')
+    if ((await sincePress(win, '__test.playing === true', ahead.at, 5000)) === null) {
+      fail.push('the transport button never turned to Pause though the song was advancing')
+    }
 
     const openLines = await logSince(win, t0)
     const builds = buildCount(openLines)
     const native = await val(win, '!!__test.engine.nativeActive')
     console.log(
-      `open+Play: transport running ${started} ms after the press, position advancing ${advancing} ms · ` +
+      `open+Play: transport running ${started ?? 'never'} ms after the press, position advancing ${advancing} ms · ` +
         `${builds} graph build(s) · native=${native}`
     )
     for (const line of openLines.filter((x) => x.source === 'dsp')) {
       console.log(`  ${new Date(line.t).toISOString().slice(11, 23)} [${line.level}] ${line.line.slice(0, 140)}`)
     }
-    // Vacuity guards, both halves. On Web Audio there is no graph to race;
-    // and with no prepare-ahead in flight, "one build" is what a cold Play
-    // costs anyway and proves nothing about adoption.
+    // Vacuity guards. On Web Audio there is no graph to race; and a press
+    // that landed after the build finished is a cold Play adopting an idle
+    // graph, where "one build" proves nothing about adoption mid-build.
     if (!native) throw new Error('native playback never took the song — build the capture addon for this tree')
-    if (!aheadStarted) {
-      throw new Error('no graph was being prepared when Play was pressed — this leg raced nothing')
+    const aheadReady = openLines.find((x) => ahead.generation !== null && x.line.startsWith(`graph ready · generation ${ahead.generation} ·`))
+    if (!aheadReady) {
+      inconclusive.push(`leg 1: no "graph ready" for the generation prepared ahead (${ahead.generation}), so nothing says whether Play landed during its build`)
+    } else if (aheadReady.t <= ahead.at) {
+      inconclusive.push(`leg 1: Play landed ${ahead.at - aheadReady.t} ms AFTER the graph prepared ahead was ready — it raced nothing`)
+    } else {
+      console.log(`  Play landed ${ahead.at - ahead.preparingAt} ms into the build of generation ${ahead.generation}, ${aheadReady.t - ahead.at} ms before it was ready`)
     }
     // One Play, one graph. Two means the prepared graph was thrown away and
     // rebuilt, which is the freeze this driver exists for.
@@ -229,11 +317,33 @@ const buildCount = (lines) => lines.filter((x) => /^preparing graph/.test(x.line
     //
     // Pause, then two presses inside the 5 Hz status window. The second one
     // is the one that used to be refused, leaving the button behind forever.
+    // It reaches that path only while the first is still settling: the
+    // engine reports playing once a status saying so has landed, and until
+    // then the second press asks for Play again, from a stale "paused".
     const t1 = Date.now()
-    await win.click('button.play')
-    await win.waitForFunction(() => __test.engine.playing === false, null, { timeout: 10000 })
-    await win.click('button.play')
-    await win.click('button.play')
+    // With a count-in saved on the song, both presses take the count-in
+    // restart and never reach resume(): the leg would pass on the engine it
+    // exists to catch. Off for this leg, as leg 5 does for its own.
+    await val(win, '__test.setMetCfg(Object.assign({}, __test.met, { countInBars: 0 }))')
+    if (!(await waitFor(win, '__test.engine.metronome.countInBars === 0', 5000))) {
+      inconclusive.push('leg 2: the song\'s count-in would not turn off, so both presses would take the count-in restart and never reach resume()')
+    }
+    await press(win)
+    // The Pause settles first — the core parked, the button on Play — the way
+    // a singer's hand takes a moment to come back. A Play inside the Pause's
+    // own buffer period is a different race; the Playwright clicks this used
+    // to make happened to leave that gap, and a press from the page does not.
+    const parked = "__test.playing === false && __test.engine.playing === false && __test.engine.nativePlayback?.status?.transportState === 'paused'"
+    if (!(await waitFor(win, parked, 10000))) throw new Error('the Pause before the double Play never settled')
+    await sleep(300)
+    const pair = await val(win, DOUBLE_PRESS)
+    if (pair.error) throw new Error(pair.error)
+    console.log(`double Play: the two presses ${pair.gapMs} ms apart · the engine said ${pair.engineAtSecond ? 'playing' : 'not playing yet'} at the second`)
+    if (!(pair.gapMs < 200)) {
+      inconclusive.push(`leg 2: the two presses landed ${pair.gapMs} ms apart, not inside one 5 Hz status poll — the race was not reached`)
+    } else if (pair.engineAtSecond) {
+      inconclusive.push(`leg 2: the engine already reported playing at the second press (${pair.gapMs} ms after the first), so it was a plain Pause — the race was not reached`)
+    }
     await sleep(1500)
     const state = await val(
       win,
@@ -512,7 +622,12 @@ const buildCount = (lines) => lines.filter((x) => /^preparing graph/.test(x.line
 
   if (fail.length) {
     console.log('FAIL:', fail.join('; '))
+    if (inconclusive.length) console.log('(and INCONCLUSIVE:', inconclusive.join('; ') + ')')
     process.exit(1)
+  }
+  if (inconclusive.length) {
+    console.log('INCONCLUSIVE:', inconclusive.join('; '))
+    process.exit(2)
   }
   console.log('PASS')
   process.exit(0)

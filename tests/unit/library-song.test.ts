@@ -14,6 +14,7 @@ const g = globalThis as Record<string, unknown>
 const FILES = ['project.json', 'lyrics.json']
 const SAVED = '{"version":2,"saved":"by the open"}'
 const PAST_S = 1_700_000_000
+const CLICK_DELAY_MS = 80 // stands in for Playwright's own actionability wait, in the fake
 let root: string
 
 // Two v2 projects, one's name inside the other's — the library the substring
@@ -40,14 +41,27 @@ function save(dir: string) {
 }
 
 /** Just enough of a Playwright page: every card matches, and a click opens
- *  `opens` — its lanes reach the engine and `onOpen` saves into it. */
-function fakeWindow(opens: string, onOpen: (dir: string) => void = save) {
+ *  `opens` — its lanes reach the engine and `onOpen` saves into it. The click
+ *  itself waits `CLICK_DELAY_MS` (standing in for Playwright's own
+ *  actionability wait) and then dispatches a fake DOM event to whatever
+ *  capture-phase listeners the helper installed on `window` — `reaches:
+ *  false` stands in for a click Playwright sends that never lands on
+ *  anything, so no event arrives at all. */
+function fakeWindow(opens: string, onOpen: (dir: string) => void = save, reaches = true) {
+  const listeners = new Map<string, Set<(e: unknown) => void>>()
   g.window = {
     singz: {
       listProjects: async () => ({
         root,
         projects: ['Song', 'Song second'].map((name) => ({ dir: join(root, name), name }))
       })
+    },
+    addEventListener: (type: string, fn: (e: unknown) => void) => {
+      if (!listeners.has(type)) listeners.set(type, new Set())
+      listeners.get(type)?.add(fn)
+    },
+    removeEventListener: (type: string, fn: (e: unknown) => void) => {
+      listeners.get(type)?.delete(fn)
     }
   }
   const engine = { tracks: [] as { path: string }[] }
@@ -55,6 +69,11 @@ function fakeWindow(opens: string, onOpen: (dir: string) => void = save) {
   const cards = {
     count: async () => 1,
     click: async () => {
+      await new Promise((resolve) => setTimeout(resolve, CLICK_DELAY_MS)) // the actionability wait
+      if (reaches) {
+        const event = { target: { closest: (sel: string) => (sel === '.lib-card' ? {} : null) } }
+        for (const fn of listeners.get('click') ?? []) fn(event)
+      }
       engine.tracks = [{ path: join(opens, 'stems', 'vocals.flac') }]
       onOpen(opens)
     }
@@ -180,7 +199,7 @@ describe('library-song: a wrong open is put back as it was before the click', ()
     expect(backups).toEqual([])
   })
 
-  it('resolves to the moment the click was sent, after the copies were taken', async () => {
+  it('resolves to the moment the click reached the page, after the copies and the actionability wait', async () => {
     const win = fakeWindow(asked())
     const singz = (g.window as { singz: { listProjects: () => Promise<unknown> } }).singz
     const list = singz.listProjects
@@ -190,7 +209,12 @@ describe('library-song: a wrong open is put back as it was before the click', ()
     }
     const t0 = Date.now()
     const clickedAt = await clickLibrarySong(win, 'Song')
-    expect(clickedAt - t0).toBeGreaterThanOrEqual(50)
+    expect(clickedAt - t0).toBeGreaterThanOrEqual(60 + CLICK_DELAY_MS - 10)
     expect(clickedAt).toBeLessThanOrEqual(Date.now())
+  })
+
+  it('throws when the click never reaches the page', async () => {
+    const win = fakeWindow(asked(), save, false)
+    await expect(clickLibrarySong(win, 'Song')).rejects.toThrow(/the click on "Song" never reached the page/)
   })
 })

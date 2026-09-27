@@ -86,14 +86,23 @@ function table(title, rows, marks) {
     await win.waitForFunction(() => window.__test !== undefined, null, { timeout: 30000 })
 
     for (const [label, song, name] of opens) {
-      // from the click itself: the helper reads the library's files just
-      // before it clicks, and that is the harness's time, not the app's
+      // From the click as it reached the page, not from before Playwright's
+      // own wait for the card to hold still (clickLibrarySong).
       const t0 = await clickLibrarySong(win, name)
-      // Wait for the load to START before waiting for it to finish: on the
-      // second open the previous song already satisfies "ready", so the wait
-      // returned instantly and the table came back empty.
-      await win.waitForFunction(() => __test?.phase === 'loading', null, { timeout: 30000 })
-      await win.waitForFunction(() => __test?.phase === 'ready' && __test?.engine?.duration > 0, null, { timeout: 180000 })
+      // Polled from NODE: waitForFunction polls on requestAnimationFrame,
+      // about once a second in the hidden window on the field laptop, where
+      // it answers late and can miss a short 'loading' outright. And the load
+      // must be seen to START before 'ready' counts: on the second open the
+      // previous song already satisfies "ready", so the wait returned
+      // instantly and the table came back empty.
+      let loadingSeen = false
+      for (;;) {
+        const state = await val(win, '({ phase: __test?.phase, duration: __test?.engine?.duration ?? 0 })')
+        if (state.phase === 'loading') loadingSeen = true
+        if (loadingSeen && state.phase === 'ready' && state.duration > 0) break
+        if (Date.now() - t0 > 180000) throw new Error(`"${song}" never became ready (phase ${state.phase})`)
+        await sleep(20)
+      }
       const ready = Date.now() - t0
       await assertOpenedProject(win, { dir: join(PROJECTS, song), name, backups })
       const rows = JSON.parse(await val(win, 'JSON.stringify(__test.loadSteps())'))
