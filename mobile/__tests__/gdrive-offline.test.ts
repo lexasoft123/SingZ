@@ -198,6 +198,63 @@ beforeEach(() => {
   fetchToCache.mockClear()
 })
 
+describe('a song with no stems at all', () => {
+  // Not every song a desktop saves has been split — a loose import can sit in
+  // the library before the singer ever presses Split. Its only audio is the
+  // source track itself, so it has to travel to Drive and back the same as
+  // any other song, and it has to OPEN: a listing with nothing to play would
+  // be worse than not listing it at all.
+  const stemless = (): DriveState => {
+    const drive: DriveState = {
+      children: {
+        ROOT: [{ id: 'D2', name: 'Loose Song', mimeType: FOLDER }],
+        D2: [
+          { id: 'M2', name: 'project.json', mimeType: 'application/json' },
+          { id: 'W1', name: 'song.mp3', mimeType: 'audio/mpeg', size: '400', md5Checksum: 'song-1' }
+        ]
+      },
+      media: {
+        M2: JSON.stringify({
+          name: 'Loose Song',
+          savedAt: '2026-01-01T00:00:00.000Z',
+          songFile: 'song.mp3',
+          songHash: { md5: 'song-1', size: 400, mtimeMs: 1 }
+        })
+      },
+      offline: false
+    }
+    stampText(drive, 'M2')
+    return drive
+  }
+
+  it('is listed, with the source track as what it costs to download', async () => {
+    const drive = stemless()
+    install(drive)
+    signIn()
+    const entries = await (require('../src/gdrive') as typeof import('../src/gdrive')).driveListProjects()
+    expect(entries).toHaveLength(1)
+    expect(entries[0].dir).toBe('Loose Song')
+    expect(entries[0].stems).toEqual({})
+    expect(entries[0].expect).toEqual({ 'song.mp3': 400 })
+    expect(entries[0].bytes).toBe(400)
+  })
+
+  it('opens to one playable lane built from the source track, not a silent empty player', async () => {
+    const drive = stemless()
+    install(drive)
+    signIn()
+    const g = require('../src/gdrive') as typeof import('../src/gdrive')
+    const entries = await g.driveListProjects()
+    const { loadProject } = require('../src/projects') as typeof import('../src/projects')
+    const { ORIGINAL_LANE_ID } = require('../src/model') as typeof import('../src/model')
+    const loaded = await loadProject(entries[0], 48000, () => {})
+    expect(loaded.stems).toHaveLength(1)
+    expect(loaded.stems[0]).toMatchObject({ id: ORIGINAL_LANE_ID, label: 'Original', custom: true })
+    expect(loaded.stems[0].buffer).toBeTruthy()
+    expect(downloads).toContain('Loose Song/song.mp3')
+  })
+})
+
 describe('catalog without internet', () => {
   it('serves the last listing on a cold start with no signal', async () => {
     const drive = newDrive()

@@ -111,7 +111,7 @@ import {
   finishCompletedMoves,
   moveAllToDrive,
   moveSize,
-  stemSignature,
+  audioSignature,
   type BatchResult
 } from '../publish'
 
@@ -304,12 +304,11 @@ export default function CatalogScreen({
   const loadingDirRef = useRef<string | null>(null)
   /** A phone song whose delete is in flight: not the batch's to move. */
   const deletingDirRef = useRef<string | null>(null)
-  /** The offer itself: the songs that can go now, what their stems weigh, and
-   *  how many are not split yet (those stay until they are). */
+  /** The offer itself: every movable song on this phone and what it costs to
+   *  send — its stems, or its source track for a song with none. */
   const [driveOffer, setDriveOffer] = useState<{
     dirs: string[]
     bytes: number
-    unsplit: number
     /** Songs whose audio the Drive library already has: they stay. */
     copies: number
     /** Every song in the phone library, offered or not. */
@@ -1696,9 +1695,9 @@ export default function CatalogScreen({
   }, [driveOffer])
 
   /* The offer is made, not assumed: the phone library, signed in to Drive,
-     songs that can go (split ones — an unsplit song would vanish from the
-     Drive tab, which lists songs by their stems), and not turned down for
-     exactly these songs. */
+     every song not already a copy of one Drive holds, and not turned down for
+     exactly these songs. A song with no stems goes too — it is played from
+     its source track, and that is what travels. */
   useEffect(() => {
     if (!active || mode !== 'phone' || !driveAvailable()) {
       setDriveOffer(null)
@@ -1712,7 +1711,6 @@ export default function CatalogScreen({
     void (async () => {
       const signedIn = await driveSignedIn().catch(() => false)
       const all = projects ?? []
-      const split = (p: ProjectEntry): boolean => Object.keys(p.stems).length > 0
       // a song mid-move is never a copy: its OWN folder in the library
       // matches it, and it is still here to be finished
       const midMove = await moveRecords().catch(() => ({}) as Record<string, unknown>)
@@ -1729,10 +1727,13 @@ export default function CatalogScreen({
          and its card says why it is in both lists. */
       const decide = (listing: ProjectEntry[] | null): void => {
         if (!alive) return
-        const inDrive = new Set((listing ?? []).map(e => stemSignature(e.doc)).filter(Boolean))
+        const inDrive = new Set((listing ?? []).map(e => audioSignature(e.doc)).filter(Boolean))
         const copy = (p: ProjectEntry): boolean =>
-          split(p) && inDrive.has(stemSignature(p.doc)) && !(p.dir in midMove)
-        const movable = all.filter(p => split(p) && !copy(p))
+          inDrive.has(audioSignature(p.doc)) && !(p.dir in midMove)
+        // Every song on this phone, split or not. A song with no stems is
+        // played from its source track — a vocal exercise is meant to be sung
+        // over whole — so it belongs in the library like any other.
+        const movable = all.filter(p => !copy(p))
         const copies = all.filter(copy)
         setDriveCopies(new Set(copies.map(p => p.dir)))
         if (!signedIn || movable.length === 0 || movable.every(p => dismissed.includes(p.dir))) {
@@ -1741,12 +1742,12 @@ export default function CatalogScreen({
         }
         setDriveOffer({
           dirs: movable.map(p => p.dir),
-          // what the docs say the stems weigh; the confirm adds the song files
-          bytes: movable.reduce(
-            (n, p) => n + Object.values(p.doc.stemHashes ?? {}).reduce((m, h) => m + h.size, 0),
-            0
-          ),
-          unsplit: all.filter(p => !split(p)).length,
+          // What the docs say the audio weighs — the stems, or the source
+          // track for a song that has none, the same rule filesOfProject uses.
+          bytes: movable.reduce((n, p) => {
+            const stems = Object.values(p.doc.stemHashes ?? {}).reduce((m, h) => m + h.size, 0)
+            return n + (stems > 0 ? stems : (p.doc.songHash?.size ?? 0))
+          }, 0),
           copies: copies.length,
           total: all.length
         })
@@ -1761,7 +1762,7 @@ export default function CatalogScreen({
       // Asked only when a song here could carry that badge; time-bound (a look
       // within minutes costs nothing); a running batch keeps its own; offline
       // the saved one stands.
-      if (alive && signedIn && !batchRunningRef.current && all.some(split)) {
+      if (alive && signedIn && !batchRunningRef.current && all.length > 0) {
         const fresh = await driveListProjects().catch(() => null)
         dismissed = await readDismissed() // "Not now" may have come meanwhile
         if (fresh) decide(fresh)
@@ -2687,8 +2688,8 @@ export default function CatalogScreen({
               the Drive library, and this is where it changes sides. Below the
               library, like every offer (see the next one's note). */}
           {driveOffer && !moveBatch && ((): React.ReactNode => {
-            // "All" only when it IS all: songs not split yet, and copies of
-            // songs Drive has, stay behind
+            // "All" only when it IS all: copies of songs Drive already has
+            // are the one thing that stays behind
             const device = Platform.OS === 'ios' ? t('phone.library.deviceIphone') : t('phone.library.devicePhone')
             const bytes = fmtBytes(driveOffer.bytes)
             const lead =
@@ -2701,7 +2702,6 @@ export default function CatalogScreen({
                 : driveOffer.dirs.length === 2
                 ? t('phone.library.offerLeadAllTwo', { device, bytes })
                 : t('phone.library.offerLeadAllOther', { n: driveOffer.dirs.length, device, bytes })
-            const unsplit = driveOffer.unsplit > 0 ? tn('phone.library.offerUnsplit', driveOffer.unsplit) : ''
             const copies = driveOffer.copies > 0 ? tn('phone.library.offerCopies', driveOffer.copies) : ''
             return (
               <View style={[s.splitCard, { marginTop: 14 }]}>
@@ -2710,7 +2710,6 @@ export default function CatalogScreen({
                 </Text>
                 <Text style={s.splitText}>
                   {lead}
-                  {unsplit}
                   {copies}
                 </Text>
                 <View style={s.splitActions}>

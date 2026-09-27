@@ -225,8 +225,6 @@ export const library: Translation<typeof en> = {
     '此 {device} 上的这两首歌曲，约 {bytes}。它们将迁移到你的 Drive 曲库，从 Drive 标签页播放，且已下载好。',
   'phone.library.offerLeadAllOther':
     '此 {device} 上的全部 {n} 首歌曲，约 {bytes}。它们将迁移到你的 Drive 曲库，从 Drive 标签页播放，且已下载好。',
-  'phone.library.offerUnsplit_one': ' 还有一首尚未分离的歌曲会留在这里。',
-  'phone.library.offerUnsplit_other': ' 还有 {n} 首尚未分离的歌曲会留在这里。',
   'phone.library.offerCopies_one': ' 还有一首已在你 Drive 曲库中的歌曲也会留在这里。',
   'phone.library.offerCopies_other': ' 还有 {n} 首已在你 Drive 曲库中的歌曲也会留在这里。',
   'phone.library.addAllLocalSongs': '将全部本地歌曲添加到 Google Drive',
@@ -279,7 +277,6 @@ export const library: Translation<typeof en> = {
   // ── moving songs to Google Drive: skip / stop reasons (also used by publish.ts) ──
   'phone.library.skipInUse': '它正在使用中——已打开、正在分离或正在分析',
   'phone.library.skipAlreadyInDrive': '它已经在你的 Google Drive 曲库中',
-  'phone.library.notSplitForMove': '请先将这首歌曲分离成分轨——之后才能迁移到 Google Drive。',
   'phone.library.signInFirstForMove': '请先登录 Google Drive——打开上方的 Drive 标签页。',
   'phone.library.updateDesktopForMove':
     '请先在电脑上更新 SingZ。同步此 Drive 的旧版本会移除它没有创建的歌曲，这些歌曲将从 Drive 中丢失。',

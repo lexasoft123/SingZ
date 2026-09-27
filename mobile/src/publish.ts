@@ -74,7 +74,7 @@ export interface MoveProgress {
   file?: string
 }
 
-export type MoveBlockReason = 'unconfigured' | 'signed-out' | 'update-desktop' | 'not-split'
+export type MoveBlockReason = 'unconfigured' | 'signed-out' | 'update-desktop'
 
 /** A move that cannot start, for a reason the singer can do something about. */
 export class MoveBlocked extends Error {
@@ -158,17 +158,19 @@ async function manifestOf(dir: string, refreshed = false): Promise<OutFile[]> {
   const docText = await Folder.readText(dir, 'project.json')
   const doc = JSON.parse(docText) as ProjectDoc
   const stemNames = Object.keys(doc.stemHashes ?? {}).sort()
-  const split = STEM_ORDER_ALL.some((id) => doc.stemHashes?.[`${id}.flac`] || doc.stemHashes?.[`${id}.wav`])
-  if (!split) {
-    throw new MoveBlocked('not-split', t('phone.library.notSplitForMove'))
-  }
   const stat = (rel: string): ReturnType<MoveNative['statFile']> => Folder.statFile(dir, rel)
   const stems = await Promise.all(stemNames.map(async (name) => ({ name, st: await stat(`stems/${name}`) })))
   const song = await stat(doc.songFile)
   const lyrics = doc.lyricsHash ? await stat('lyrics.json') : undefined
   const graph = doc.graphHash ? await stat('graph.json') : undefined
+  // The source track has always been uploaded and never stated, so a doc that
+  // has never carried songHash counts as drifted and picks it up here. That is
+  // what a stemless song is verified by on the other side; for a split song it
+  // simply makes the doc true to its own promise to name every file.
   const drifted =
     stems.some(({ name, st }) => !sameHash(doc.stemHashes?.[name], st)) ||
+    doc.songHash === undefined ||
+    !sameHash(doc.songHash, song) ||
     (doc.lyricsHash !== undefined && !sameHash(doc.lyricsHash, lyrics)) ||
     (doc.graphHash !== undefined && !sameHash(doc.graphHash, graph))
   if (drifted) {
@@ -178,6 +180,7 @@ async function manifestOf(dir: string, refreshed = false): Promise<OutFile[]> {
       const hashes: NonNullable<ProjectDoc['stemHashes']> = {}
       for (const name of Object.keys(current.stemHashes ?? {})) hashes[name] = await stat(`stems/${name}`)
       next.stemHashes = hashes
+      next.songHash = await stat(current.songFile)
       if (current.lyricsHash) next.lyricsHash = await stat('lyrics.json')
       if (current.graphHash) next.graphHash = { format: current.graphHash.format, ...(await stat('graph.json')) }
       return next
@@ -448,14 +451,22 @@ async function finishCompletedMovesNow(busy?: (dir: string) => boolean): Promise
   return finished
 }
 
-/** A song's identity by its audio: the md5s of every stem its doc names. A
- *  phone copy of a Drive song — a folder copied in from a computer — has the
- *  same, and moving it would only make a "(phone)" duplicate. */
-export function stemSignature(doc: ProjectDoc | null | undefined): string {
-  return Object.values(doc?.stemHashes ?? {})
+/** A song's identity by its audio: the md5s of every stem its doc names, or —
+ *  for a song with no stems, which is played from its source track — that
+ *  file's md5. A phone copy of a Drive song, a folder copied in from a
+ *  computer, has the same, and moving it would only make a "(phone)"
+ *  duplicate.
+ *
+ *  The two shapes cannot collide: a stem list is bare md5s, a source track is
+ *  prefixed. An empty string still means "cannot say", and every caller
+ *  already treats that as "no duplicate known". */
+export function audioSignature(doc: ProjectDoc | null | undefined): string {
+  const stems = Object.values(doc?.stemHashes ?? {})
     .map((h) => h.md5)
     .sort()
-    .join(',')
+  if (stems.length > 0) return stems.join(',')
+  const song = doc?.songHash?.md5
+  return song ? `song:${song}` : ''
 }
 
 export interface BatchProgress {
@@ -484,9 +495,8 @@ export interface BatchResult {
  * songs to Google Drive"). Stops for what would stop every song — the singer
  * pressing Stop, an older desktop, signed out, or two songs failing in a row
  * (offline, most likely) — and passes over what belongs to one song alone: a
- * song busy splitting or being analysed, one not split, one whose own move
- * fails. Whatever does not move stays on the phone, where the offer finds it
- * again.
+ * song busy splitting or being analysed, one whose own move fails. Whatever
+ * does not move stays on the phone, where the offer finds it again.
  */
 export interface BatchOptions {
   onProgress?: (p: BatchProgress) => void
@@ -512,7 +522,7 @@ async function moveAllNow(dirs: string[], opts: BatchOptions): Promise<BatchResu
   const inDrive = new Set<string>()
   try {
     for (const e of await driveListProjects()) {
-      const sig = stemSignature(e.doc)
+      const sig = audioSignature(e.doc)
       if (sig) inDrive.add(sig)
     }
   } catch {
@@ -540,7 +550,7 @@ async function moveAllNow(dirs: string[], opts: BatchOptions): Promise<BatchResu
     } catch {
       doc = null
     }
-    const sig = stemSignature(doc)
+    const sig = audioSignature(doc)
     if (!doc) {
       // deleted while the batch was running: nothing to move, nothing wrong
     } else if (opts.busy?.(dir)) {
@@ -565,7 +575,7 @@ async function moveAllNow(dirs: string[], opts: BatchOptions): Promise<BatchResu
           out.stopped = { reason: 'cancelled', message }
           break
         }
-        if (e instanceof MoveBlocked && e.reason !== 'not-split') {
+        if (e instanceof MoveBlocked) {
           out.stopped = { reason: 'blocked', message, blockReason: e.reason }
           break
         }
@@ -597,10 +607,14 @@ function inWords(message: string): string {
 /**
  * Is the song in this phone folder the one that moved into `target`? Asked of
  * the doc's own stem hashes against Drive's listing — never of the files, some
- * of which an interrupted finish may already have handed to the cache. A new
- * song under a reused name has other stems (or only its unsplit original,
- * which never goes to Drive), so it cannot match. Resolves to the doc and the
- * folder's listing when it is the same song, null when not.
+ * of which an interrupted finish may already have handed to the cache. A song
+ * with no stems (never split, source track only) is compared by its source
+ * track's hash against the folder's own top-level listing instead: it still
+ * has to be recognisable, or an interrupted move on exactly that kind of song
+ * re-uploads a duplicate on the retry, or never finishes at all. A new song
+ * under a reused name has other stems, or a different source track, so it
+ * cannot match either way. Resolves to the doc and the folder's listing when
+ * it is the same song, null when not.
  */
 async function sameSong(
   dir: string,
@@ -613,8 +627,14 @@ async function sameSong(
     return null
   }
   const mine = Object.entries(doc.stemHashes ?? {})
-  if (mine.length === 0) return null
   const { top, stems } = await folderRows(target)
+  if (mine.length === 0) {
+    const h = doc.songHash
+    if (!h || !doc.songFile) return null
+    const f = top.find((x) => x.name === doc.songFile)
+    const same = !!f && f.md5Checksum === h.md5 && Number(f.size) === h.size
+    return same ? { doc, top, stems } : null
+  }
   const theirs = new Map(stems.map((f) => [f.name, f]))
   const same = mine.every(([name, h]) => {
     const f = theirs.get(name)
@@ -623,8 +643,8 @@ async function sameSong(
   return same ? { doc, top, stems } : null
 }
 
-/** What moving this song sends: every file the doc names, and the song file,
- *  which the doc has no hash for — the confirm states the real cost. */
+/** What moving this song sends: every file the doc names, songHash included —
+ *  the confirm reads this BEFORE the upload backfills a doc that had none. */
 export async function moveSize(dir: string): Promise<number> {
   const doc = JSON.parse(await Folder.readText(dir, 'project.json')) as ProjectDoc
   let bytes = Object.values(doc.stemHashes ?? {}).reduce((n, h) => n + h.size, 0)

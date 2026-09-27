@@ -7,7 +7,7 @@ import type { LyricsDoc, ProjectDoc } from './model'
 import { isCurrent } from './current'
 import { fmtBytes, fmtMs, log } from './log'
 import { t } from './i18n'
-import { customTracks, STEM_ORDER_ALL } from './model'
+import { customTracks, ORIGINAL_LANE_ID, STEM_ORDER_ALL } from './model'
 import { mobileMetronomePersistence } from './playback/metronome-persistence'
 import type { MetronomeProjectRef } from './playback/metronome-persistence'
 import {
@@ -512,7 +512,15 @@ export async function loadProject(
 
   const ids = STEM_ORDER_ALL.filter(s => entry.stems[s])
   const added = customTracks(doc?.settings)
-  const total = ids.length + added.length
+  // A track meant to be sung over whole — a vocal exercise, any backing track
+  // nobody would separate — has no stem and no declared custom lane, only the
+  // source `songFile` names. Without this branch such a song opened to a
+  // silent, laneless player: not an error, just nothing to hear. One
+  // synthetic lane under ORIGINAL_LANE_ID — the same id and treatment a
+  // phone-added, never-split song already gets — so the mixer already knows
+  // not to offer rename/remove on it.
+  const wholeSong = ids.length === 0 && added.length === 0 && !!doc?.songFile
+  const total = wholeSong ? 1 : ids.length + added.length
   const stems: LoadedLane[] = []
   const source = gdrive ? 'Drive' : 'the folder'
   // Written BEFORE the work, so a song that never finishes still says which
@@ -538,6 +546,28 @@ export async function loadProject(
     throw new Error(
       t('phone.library.songTooBigToPlay', { gb: (bytes / 1e9).toFixed(1) })
     )
+  }
+  if (wholeSong && doc?.songFile) {
+    // Matches writer.ts's own never-split lane exactly — same id, same raw
+    // (untranslated) label a singer can rename, same colour — so the two
+    // paths that both mean "one whole track" read identically in the mixer.
+    const label = 'Original'
+    onStep(t('phone.library.fetchingStep', { id: label, i: 1, n: total }), 0)
+    await crumb?.('fetching the source track')
+    const want = doc.songHash
+    const path = await fetchFile(doc.songFile, want?.md5, want?.size)
+    onStep(t('phone.library.decodingStep', { id: label, i: 1, n: total }), 0.5)
+    await crumb?.('decoding the source track')
+    const t0 = Date.now()
+    stems.push({
+      id: ORIGINAL_LANE_ID,
+      buffer: await decodeAudioData(`file://${path}`, sampleRate),
+      label,
+      color: '#d08f2c',
+      custom: true
+    })
+    spent.push(`${ORIGINAL_LANE_ID} ${fmtMs(Date.now() - t0)}`)
+    if (decodedBytes(stems) > MAX_DECODED_BYTES) tooBig(decodedBytes(stems))
   }
   for (let i = 0; i < ids.length; i++) {
     const id = ids[i]

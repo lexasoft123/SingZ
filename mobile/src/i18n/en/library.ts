@@ -266,9 +266,6 @@ export const library = {
   // {n} is the song count (3+)
   'phone.library.offerLeadAllOther':
     'All {n} songs on this {device}, about {bytes}. They move into your Drive library and play from the Drive tab, already downloaded.',
-  // appended sentence when some songs are not split yet; keep the leading space
-  'phone.library.offerUnsplit_one': ' A song not split yet stays here.',
-  'phone.library.offerUnsplit_other': ' {n} songs not split yet stay here.',
   // appended sentence when some songs are already in the Drive library; keep the leading space
   'phone.library.offerCopies_one': ' A song already in your Drive library stays here too.',
   'phone.library.offerCopies_other': ' {n} songs already in your Drive library stay here too.',
@@ -337,7 +334,6 @@ export const library = {
   // ── moving songs to Google Drive: skip / stop reasons (also used by publish.ts) ──
   'phone.library.skipInUse': 'it was in use — open, splitting or being analysed',
   'phone.library.skipAlreadyInDrive': 'it is already in your Google Drive library',
-  'phone.library.notSplitForMove': 'Split this song into stems first — then it can move to Google Drive.',
   'phone.library.signInFirstForMove': 'Sign in to Google Drive first — open the Drive tab above.',
   'phone.library.updateDesktopForMove':
     'Update SingZ on your computer first. The version syncing this Drive would remove songs it did not make, and these would be lost from Drive.',

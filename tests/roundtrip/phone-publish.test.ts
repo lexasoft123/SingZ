@@ -307,12 +307,47 @@ describe('when the move is refused or interrupted', () => {
     expect(await p.publish.moveInProgress(dir)).toBe(false)
   })
 
-  it('an unsplit song is not offered to Drive', async () => {
+  it('a song never split is no longer refused — it moves like any other, and stays visible', async () => {
+    // Some tracks are meant to be sung over whole: a vocal exercise is not a
+    // song to separate. "Add a song" already writes a playable lane
+    // (stems/custom-original) beside the source, so such a song has audio to
+    // travel — it was refused only because the check asked for the SIX stems.
     const p = await phone()
     const src = join(imports, 'raw.mp3')
     writeFileSync(src, 'ID3 raw')
     const { dir } = await p.writer.createProject({ srcPath: src, fileName: 'raw.mp3', name: 'Raw', durationSec: 10 })
-    await expect(p.publish.moveToDrive(dir)).rejects.toMatchObject({ reason: 'not-split' })
+    await expect(p.publish.moveToDrive(dir)).resolves.toMatchObject({ name: 'Raw' })
+    // and it leaves the phone, like any other moved song
+    expect(existsSync(join(docs, dir))).toBe(false)
+    // the desktop takes it in on its next sync — not silently dropped for
+    // having no stems to adopt
+    expect(await desktopSync()).toMatchObject({ ok: true, adopted: ['Raw'] })
+    // and it is still there for a phone to find and download, not a folder
+    // that went up and then vanished from every listing
+    const again = await phone()
+    const listed = (await again.gdrive.driveListProjects(true)).find((e) => e.dir === 'Raw')
+    expect(listed).toMatchObject({ stems: {}, expect: { 'stems/custom-original.mp3': expect.any(Number) } })
+    expect(listed!.bytes).toBeGreaterThan(0)
+  })
+
+  it('killed right after it moved in: the retry recognises its own unsplit folder', async () => {
+    // Mirrors "killed after the move-in" above, but for a song with no stems
+    // — the case sameSong's fallback exists for. Before it, a doc with empty
+    // stemHashes made sameSong return null unconditionally, so the retry
+    // could not tell this folder was its own move: it would have dropped the
+    // record and uploaded a second copy under "Raw (phone)".
+    const p = await phone()
+    const src = join(imports, 'raw.mp3')
+    writeFileSync(src, 'ID3 raw')
+    const { dir } = await p.writer.createProject({ srcPath: src, fileName: 'raw.mp3', name: 'Raw', durationSec: 10 })
+    mover.failMoveAfter = 0 // killed as the phone began to let go: its one lane still here
+    await expect(p.publish.moveToDrive(dir)).rejects.toThrow('killed mid-move')
+    const retry = await phone()
+    await retry.publish.moveToDrive(dir)
+    // no duplicate under a "(phone)" name, and the phone let go cleanly
+    expect(rootFolders().map((f) => f.name)).toEqual(['Raw'])
+    expect(existsSync(join(docs, dir))).toBe(false)
+    expect(await retry.publish.moveInProgress(dir)).toBe(false)
   })
 
   it('killed mid-upload: the song stays on the phone, and the retry sends only what is missing', async () => {

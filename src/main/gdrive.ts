@@ -432,6 +432,10 @@ async function stampMtimes(dir: string, doc: SyncDoc, got: Arrived): Promise<voi
   for (const [name, h] of Object.entries(doc.stemHashes ?? {})) await stamp(`stems/${name}`, h)
   await stamp('lyrics.json', doc.lyricsHash)
   await stamp('graph.json', doc.graphHash)
+  // The source track too, or the next sync re-hashes it, finds the mtime this
+  // machine gave the download rather than the one the doc states, and rewrites
+  // and re-uploads the very doc that was just taken in.
+  if (typeof doc.songFile === 'string') await stamp(doc.songFile, doc.songHash)
 }
 
 /** Tag the folder as taken in; the marker that proved the download finished
@@ -613,8 +617,10 @@ interface SyncDoc {
   name?: unknown
   savedAt?: unknown
   settings?: { custom?: unknown }
+  songFile?: unknown
   stemHashes?: Record<string, StemHash>
   lyricsHash?: StemHash
+  songHash?: StemHash
   graphHash?: ProjectGraphHash
 }
 
@@ -798,14 +804,14 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
       let hashes: Record<string, StemHash> = {}
       let stemsReadable = true
       const top: LocalEntry[] = []
-      const captureTop = async (name: string): Promise<void> => {
+      const captureTop = async (name: string, mime = 'application/json'): Promise<void> => {
         const path = join(projectDir, name)
         try {
           const bytes = await readFile(path)
           top.push({
             name,
             path,
-            mime: 'application/json',
+            mime,
             md5: createHash('md5').update(bytes).digest('hex'),
             size: bytes.length
           })
@@ -839,17 +845,41 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
             } catch {
               lyricsHash = syncDoc.lyricsHash
             }
+            // The source track, stated for every project so the doc keeps its
+            // promise to name every file it is made of. A phone only ever
+            // WANTS it when there are no stems, but a doc that states it
+            // everywhere is one rule rather than two.
+            const songName = typeof syncDoc.songFile === 'string' ? syncDoc.songFile : ''
+            let songHash: StemHash | undefined
+            if (songName) {
+              try {
+                songHash = await refreshFileHash(join(projectDir, songName), syncDoc.songHash)
+              } catch {
+                songHash = syncDoc.songHash
+              }
+            }
             if (
               stableJson(syncDoc.stemHashes ?? null) !== stableJson(hashes) ||
-              stableJson(syncDoc.lyricsHash ?? null) !== stableJson(lyricsHash ?? null)
+              stableJson(syncDoc.lyricsHash ?? null) !== stableJson(lyricsHash ?? null) ||
+              stableJson(syncDoc.songHash ?? null) !== stableJson(songHash ?? null)
             ) {
               syncDoc.stemHashes = hashes
               if (lyricsHash) syncDoc.lyricsHash = lyricsHash
               else delete syncDoc.lyricsHash
+              if (songHash) syncDoc.songHash = songHash
+              else delete syncDoc.songHash
               await replace(current)
             }
             await captureTop('project.json')
             await captureTop('lyrics.json')
+            // A song with NO stems is played from its source track, so that
+            // file is its audio and has to travel or the song arrives mute.
+            // A split song's source stays home: the phone plays stems, and
+            // pushing every original would cost the singer a second copy of
+            // their whole library for nothing.
+            if (songName && Object.keys(hashes).length === 0) {
+              await captureTop(songName, audioMime(songName))
+            }
             if (graph) top.push(graph)
             return syncDoc
           })
