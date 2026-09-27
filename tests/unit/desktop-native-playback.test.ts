@@ -2397,6 +2397,107 @@ describe('desktop native playback facade', () => {
     await expect(h.client.resume()).resolves.toBeUndefined()
   })
 
+  it('does not ask again when a second Play comes before the core has published the first', async () => {
+    // transport-race-e2e's double Play, both presses back to back: the core
+    // took the first resume, but it publishes transportState from its render
+    // callback, so for a buffer period it still read 'paused'. The second
+    // resume asked anyway, the core refused it ("Native playback is not
+    // paused") and main logged the refusal as a warning; the re-read, still
+    // inside the same buffer period, still said 'paused', so the refusal
+    // threw, which could leave the button on Play while the song played. The
+    // refusal came 4 of 4 on the Mac and 2 of 2 on the Windows field laptop;
+    // the button stuck in 3 and 1 of those.
+    let intent: 'playing' | 'paused' = 'playing'
+    let published: DesktopPlaybackStatus['transportState'] = 'playing'
+    let lastRead = 0
+    let publishAt = 0
+    const h = seamHarness((generation, reads) => {
+      lastRead = reads
+      if (intent === 'playing' && reads >= publishAt) published = 'playing'
+      return playing(generation, { transportState: published })
+    })
+    expect(await h.start()).toBe(true)
+    type Command = (value: string) => Promise<DesktopPlaybackResult>
+    const pause = h.api.pauseDesktopPlayback as unknown as ReturnType<typeof vi.fn>
+    const originalPause = pause.getMockImplementation() as Command
+    pause.mockImplementation(async (value: string) => {
+      intent = 'paused'
+      published = 'paused'
+      return originalPause(value)
+    })
+    const resume = h.api.resumeDesktopPlayback as unknown as ReturnType<typeof vi.fn>
+    const originalResume = resume.getMockImplementation() as Command
+    resume.mockImplementation(async (value: string) => {
+      const answer = await originalResume(value)
+      if (intent === 'playing') {
+        return { ...answer, ok: false, errorCode: 'invalid-state' as const, error: 'Native playback is not paused' }
+      }
+      intent = 'playing'
+      // The callback publishes it only after a few more reads: past the
+      // command's own read-back and past the re-read a refusal makes.
+      publishAt = lastRead + 4
+      return answer
+    })
+    await h.client.pause()
+    const before = h.calls.filter((c) => c.startsWith('resume:')).length
+    const both = Promise.all([h.client.resume(), h.client.resume()])
+    both.catch(() => undefined)
+    await vi.advanceTimersByTimeAsync(100)
+    await expect(both).resolves.toEqual([undefined, undefined])
+    expect(h.calls.filter((c) => c.startsWith('resume:')).length).toBe(before + 1)
+    expect(published).toBe('playing')
+  })
+
+  it('waits the same way for a START the core has not published yet', async () => {
+    // A song's first Play is a start, and a generation reads 'stopped' until
+    // its first callback: a second Play inside that window asked for a resume
+    // just the same.
+    let lastRead = 0
+    let publishAt = Infinity
+    const h = seamHarness((generation, reads) => {
+      lastRead = reads
+      return playing(generation, { transportState: reads >= publishAt ? 'playing' : 'stopped' })
+    })
+    expect(await h.start()).toBe(true)
+    publishAt = lastRead + 3
+    const before = h.calls.filter((c) => c.startsWith('resume:')).length
+    const second = h.client.resume()
+    second.catch(() => undefined)
+    await vi.advanceTimersByTimeAsync(100)
+    await expect(second).resolves.toBeUndefined()
+    expect(h.calls.filter((c) => c.startsWith('resume:')).length).toBe(before)
+  })
+
+  it('stops waiting at the edge bound when the core never shows the resume', async () => {
+    // A stream that never publishes must not hold the serialized lane: every
+    // later pause, seek and unload queues behind it. Past POLL_EDGE_MAX_MS the
+    // resume goes out as it always did, and a refusal still throws.
+    type Command = (value: string) => Promise<DesktopPlaybackResult>
+    const h = seamHarness((generation) => playing(generation, { transportState: 'paused' }))
+    expect(await h.start()).toBe(true)
+    await h.client.pause()
+    const resume = h.api.resumeDesktopPlayback as unknown as ReturnType<typeof vi.fn>
+    const originalResume = resume.getMockImplementation() as Command
+    let accepted = false
+    resume.mockImplementation(async (value: string) => {
+      const answer = await originalResume(value)
+      if (!accepted) {
+        accepted = true
+        return answer
+      }
+      return { ...answer, ok: false, errorCode: 'invalid-state' as const, error: 'Native playback is not paused' }
+    })
+    await h.client.resume()
+    const before = h.calls.filter((c) => c.startsWith('resume:')).length
+    const second = h.client.resume()
+    second.catch(() => undefined)
+    await vi.advanceTimersByTimeAsync(POLL_EDGE_MAX_MS - 100)
+    expect(h.calls.filter((c) => c.startsWith('resume:')).length).toBe(before)
+    await vi.advanceTimersByTimeAsync(200)
+    await expect(second).rejects.toThrow(/Native resume failed/)
+    expect(h.calls.filter((c) => c.startsWith('resume:')).length).toBe(before + 1)
+  })
+
   it('rethrows a resume the core refuses for any other reason', async () => {
     const h = seamHarness((generation) => playing(generation, { transportState: 'paused' }))
     expect(await h.start()).toBe(true)
