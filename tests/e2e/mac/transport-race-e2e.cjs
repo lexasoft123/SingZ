@@ -66,8 +66,13 @@
  * Legs 1 and 2 race windows of tens of milliseconds, so their presses come
  * from the page, aimed and measured: a Play that landed after the build it
  * was meant to race, or two presses too far apart to share a status poll,
- * makes the run INCONCLUSIVE (exit 2) — it never passes a race it did not
- * reach.
+ * makes the run INCONCLUSIVE (exit 2) rather than a pass. What leg 2 cannot
+ * see is whether the core had already published the first Play when the
+ * second read the status. That window is one render callback wide, and it is
+ * song-dependent: on the Windows field laptop, a build without the resume()
+ * fix passed the default pair and failed the Player Session pair (see the
+ * e2e-verifier roster). The deterministic guard is
+ * tests/unit/desktop-native-playback.test.ts.
  *
  * Prereqs: `npm run build` done; the capture addon built for this tree
  * (`npm run capture:addon`) — without it there is no native graph to race and
