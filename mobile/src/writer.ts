@@ -140,6 +140,11 @@ export async function createProject(input: CreateProjectInput): Promise<CreatedP
     savedAt: new Date().toISOString(),
     settings,
     stemHashes,
+    // Stated at birth, as the desktop states it on save, so the doc names
+    // every file from the start. Backfilling it during a move instead would
+    // rewrite project.json mid-upload and make the confirm's byte total — read
+    // off the doc BEFORE the move — smaller than what actually goes up.
+    songHash: await Folder.statFile(dir, songFile),
     ...(lyricsHash ? { lyricsHash } : {})
   }
   await Folder.writeText(dir, 'project.json', JSON.stringify(doc, null, 2))

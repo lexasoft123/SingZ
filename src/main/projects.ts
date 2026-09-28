@@ -228,6 +228,12 @@ export interface ProjectFile {
   /** The same for lyrics.json, so this doc states every file the project is
    *  made of and the catalog needs one checksum per project, not three. */
   lyricsHash?: StemHash
+  /** The same for the source track `songFile` names. It has always been
+   *  uploaded by a phone's move and never stated, which is invisible while
+   *  stems exist to carry the verification — and fatal for a song that has
+   *  none, whose source track IS its audio. A phone claims it only when there
+   *  are no stems; see filesOfProject. */
+  songHash?: StemHash
   /** Fixed member graph.json. Its version is independent of project.version. */
   graphHash?: ProjectGraphHash
   /** The seek bar's envelope per lane, 96 buckets of RMS over every channel,
@@ -987,6 +993,7 @@ export async function saveProject(
           // portable; the renderer gets absolute paths back below.
           settings: storedSettings,
           stemHashes: await refreshStemHashes(dir, prevMeta?.stemHashes),
+          songHash: await refreshFileHash(join(dir, songFile), prevMeta?.songHash),
           lyricsHash: await refreshFileHash(join(dir, 'lyrics.json'), prevMeta?.lyricsHash)
         }
         await writeMetaAtomic(dir, meta)

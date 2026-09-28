@@ -15,6 +15,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -98,6 +99,7 @@ interface Phone {
   publish: typeof import('../../mobile/src/publish')
   gdrive: typeof import('../../mobile/src/gdrive')
   writer: typeof import('../../mobile/src/writer')
+  pull: typeof import('../../mobile/src/split/pull-from-drive')
 }
 
 /** The phone as a cold start: fresh modules over the same prefs and files. */
@@ -131,7 +133,8 @@ async function phone(): Promise<Phone> {
   return {
     publish: await import('../../mobile/src/publish'),
     gdrive: await import('../../mobile/src/gdrive'),
-    writer: await import('../../mobile/src/writer')
+    writer: await import('../../mobile/src/writer'),
+    pull: await import('../../mobile/src/split/pull-from-drive')
   }
 }
 
@@ -307,12 +310,47 @@ describe('when the move is refused or interrupted', () => {
     expect(await p.publish.moveInProgress(dir)).toBe(false)
   })
 
-  it('an unsplit song is not offered to Drive', async () => {
+  it('a song never split is no longer refused — it moves like any other, and stays visible', async () => {
+    // Some tracks are meant to be sung over whole: a vocal exercise is not a
+    // song to separate. "Add a song" already writes a playable lane
+    // (stems/custom-original) beside the source, so such a song has audio to
+    // travel — it was refused only because the check asked for the SIX stems.
     const p = await phone()
     const src = join(imports, 'raw.mp3')
     writeFileSync(src, 'ID3 raw')
     const { dir } = await p.writer.createProject({ srcPath: src, fileName: 'raw.mp3', name: 'Raw', durationSec: 10 })
-    await expect(p.publish.moveToDrive(dir)).rejects.toMatchObject({ reason: 'not-split' })
+    await expect(p.publish.moveToDrive(dir)).resolves.toMatchObject({ name: 'Raw' })
+    // and it leaves the phone, like any other moved song
+    expect(existsSync(join(docs, dir))).toBe(false)
+    // the desktop takes it in on its next sync — not silently dropped for
+    // having no stems to adopt
+    expect(await desktopSync()).toMatchObject({ ok: true, adopted: ['Raw'] })
+    // and it is still there for a phone to find and download, not a folder
+    // that went up and then vanished from every listing
+    const again = await phone()
+    const listed = (await again.gdrive.driveListProjects(true)).find((e) => e.dir === 'Raw')
+    expect(listed).toMatchObject({ stems: {}, expect: { 'stems/custom-original.mp3': expect.any(Number) } })
+    expect(listed!.bytes).toBeGreaterThan(0)
+  })
+
+  it('killed right after it moved in: the retry recognises its own unsplit folder', async () => {
+    // Mirrors "killed after the move-in" above, but for a song with no stems
+    // — the case sameSong's fallback exists for. Before it, a doc with empty
+    // stemHashes made sameSong return null unconditionally, so the retry
+    // could not tell this folder was its own move: it would have dropped the
+    // record and uploaded a second copy under "Raw (phone)".
+    const p = await phone()
+    const src = join(imports, 'raw.mp3')
+    writeFileSync(src, 'ID3 raw')
+    const { dir } = await p.writer.createProject({ srcPath: src, fileName: 'raw.mp3', name: 'Raw', durationSec: 10 })
+    mover.failMoveAfter = 0 // killed as the phone began to let go: its one lane still here
+    await expect(p.publish.moveToDrive(dir)).rejects.toThrow('killed mid-move')
+    const retry = await phone()
+    await retry.publish.moveToDrive(dir)
+    // no duplicate under a "(phone)" name, and the phone let go cleanly
+    expect(rootFolders().map((f) => f.name)).toEqual(['Raw'])
+    expect(existsSync(join(docs, dir))).toBe(false)
+    expect(await retry.publish.moveInProgress(dir)).toBe(false)
   })
 
   it('killed mid-upload: the song stays on the phone, and the retry sends only what is missing', async () => {
@@ -1171,5 +1209,176 @@ describe('a song is on the phone or in Drive — never both', () => {
     expect(existsSync(join(docs, dir, 'project.json'))).toBe(true)
     expect(rootFolders().map((f) => f.name)).toEqual(['Song One'])
     expect(await again.publish.moveInProgress(dir)).toBe(true)
+  })
+})
+
+describe('splitting a song still on Drive', () => {
+  /** A never-split song already on Drive — created on the phone, moved up,
+   *  the way it would really get there. */
+  async function unsplitOnDrive(name = 'Raw'): Promise<{ dir: string }> {
+    const p = await phone()
+    const src = join(imports, `${name.toLowerCase()}.mp3`)
+    writeFileSync(src, `ID3 ${name}`)
+    const { dir } = await p.writer.createProject({ srcPath: src, fileName: `${name.toLowerCase()}.mp3`, name, durationSec: 10 })
+    await p.publish.moveToDrive(dir)
+    expect(existsSync(join(docs, dir))).toBe(false)
+    return { dir }
+  }
+
+  it('comes home, verified, and its Drive copy is retired', async () => {
+    const { dir } = await unsplitOnDrive()
+    const p = await phone()
+    const { dir: localDir } = await p.pull.pullFromDrive(dir)
+    expect(localDir).toBe(dir)
+    expect(existsSync(join(docs, dir, 'project.json'))).toBe(true)
+    expect(existsSync(join(docs, dir, 'stems', 'custom-original.mp3'))).toBe(true)
+    const localDoc = JSON.parse(readFileSync(join(docs, dir, 'project.json'), 'utf8'))
+    // createProject states songHash for every phone song, split or not — but
+    // this song's PLAYABLE audio is its custom-original lane, which is what
+    // filesOfProject (and so this pull) actually goes by.
+    expect(Object.keys(localDoc.stemHashes)).toEqual(['custom-original.mp3'])
+    // gone from the library, and genuinely trashed rather than merely missing
+    expect(rootFolders().map((f) => f.name)).toEqual([])
+    const onDrive = [...store.files.values()].find((f) => f.name === dir && f.mimeType === FOLDER)
+    expect(onDrive?.trashed).toBe(true)
+    // and it is an ORDINARY local song from here — the existing offer and
+    // upload path need nothing new to send it back once it is split, since
+    // this design's whole point is that no second door exists
+    await expect(p.publish.moveToDrive(dir)).resolves.toMatchObject({ name: dir })
+  })
+
+  it('a custom-original song also lands its source track — what the split reads it from', async () => {
+    // filesOfProject rightly leaves song.mp3 out of "what this song's audio
+    // is" for a custom-original doc — nothing downloads it to PLAY the
+    // song. But startProjectSplit reads the source to split from
+    // doc.songFile UNCONDITIONALLY, the same field every doc names, so a
+    // pull that only fetched the lane would hand the split pipeline a
+    // project.json naming a file nothing ever brought home.
+    const { dir } = await unsplitOnDrive()
+    const p = await phone()
+    await p.pull.pullFromDrive(dir)
+    expect(existsSync(join(docs, dir, 'stems', 'custom-original.mp3'))).toBe(true)
+    expect(existsSync(join(docs, dir, 'song.mp3'))).toBe(true)
+    const localDoc = JSON.parse(readFileSync(join(docs, dir, 'project.json'), 'utf8'))
+    expect(localDoc.songFile).toBe('song.mp3')
+  })
+
+  it('a delete that slips past the UI guard stops the Drive copy from being retired', async () => {
+    // confirmDelete refusing while phase is 'pulling' is the primary
+    // defence (CatalogScreen.tsx) and is not exercised from this harness —
+    // this proves the SECOND one, inside pullFromDrive itself, for a delete
+    // that reaches the song by some path that guard does not know about.
+    //
+    // There is no NETWORK call between materialize() finishing and the
+    // re-check right before the trash — Folder.statFile is purely local —
+    // so timing this off a fetch interceptor cannot reach the window that
+    // matters. Patched directly instead: the first two calls (materialize's
+    // own verification of the audio, then of songFile — see the previous
+    // test) go through for real, and the NEXT one — the pull's own
+    // re-check — answers as if the file had just been deleted out from
+    // under it.
+    const { dir } = await unsplitOnDrive()
+    const p = await phone()
+    const rn = await import('../shared/react-native-stub')
+    const Folder = rn.NativeModules.FolderAccess as { statFile: (...a: unknown[]) => Promise<unknown> }
+    const realStatFile = Folder.statFile.bind(Folder)
+    let calls = 0
+    Folder.statFile = (...args: unknown[]) => {
+      calls++
+      return calls <= 2 ? realStatFile(...args) : Promise.reject(new Error('ENOENT'))
+    }
+    await expect(p.pull.pullFromDrive(dir)).rejects.toThrow(/no longer on this phone/)
+    Folder.statFile = realStatFile
+    // Drive kept its copy — the one remaining one, since the phone lost its
+    expect(rootFolders().map((f) => f.name)).toEqual([dir])
+    const onDrive = [...store.files.values()].find((f) => f.name === dir && f.mimeType === FOLDER)
+    expect(onDrive?.trashed).toBeFalsy()
+  })
+
+  it('refuses a song that already has its six stems', async () => {
+    await desktopWithOneSong()
+    const p = await phone()
+    const dir = await splitSongOnPhone(p)
+    await p.publish.moveToDrive(dir)
+    await expect(p.pull.pullFromDrive('Sixteen Tons')).rejects.toThrow(/already has its six stems/)
+  })
+
+  it('killed after landing locally: the retry only has the Drive copy left to retire', async () => {
+    const { dir } = await unsplitOnDrive()
+    const p = await phone()
+    const realFetch = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? 'GET') === 'PATCH') throw new TypeError('Network request failed')
+      return realFetch(input, init)
+    }) as typeof fetch
+    await expect(p.pull.pullFromDrive(dir)).rejects.toThrow()
+    globalThis.fetch = realFetch
+    // the song is genuinely on the phone already — not a half-write
+    expect(existsSync(join(docs, dir, 'project.json'))).toBe(true)
+    expect(existsSync(join(docs, dir, 'stems', 'custom-original.mp3'))).toBe(true)
+    // and Drive still shows it too: interrupted, not lost, and not yet retired
+    expect(rootFolders().map((f) => f.name)).toEqual([dir])
+
+    const retry = await phone()
+    const { dir: localDir } = await retry.pull.pullFromDrive(dir)
+    // the resume recognised its own local copy rather than fetching again —
+    // proven by the file that was already there being untouched, not by a
+    // request count
+    const stat = statSync(join(docs, dir, 'stems', 'custom-original.mp3'))
+    expect(stat.size).toBeGreaterThan(0)
+    expect(localDir).toBe(dir)
+    expect(rootFolders().map((f) => f.name)).toEqual([])
+  })
+
+  it('killed before it landed: the Drive copy is untouched, and the retry finishes it', async () => {
+    const { dir } = await unsplitOnDrive()
+    // moveToDrive's own upload already left this phone's Drive-download
+    // cache holding the file it just sent up (the native contract: a song's
+    // own upload does not have to come back down again). Evict it, so this
+    // test is a genuine network fetch rather than a cache hit that happens
+    // to make the interception below a no-op.
+    rmSync(join(cache, dir, 'stems', 'custom-original.mp3'), { force: true })
+    const p = await phone()
+    const realFetch = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (url.includes('alt=media')) throw new TypeError('Network request failed')
+      return realFetch(input, init)
+    }) as typeof fetch
+    await expect(p.pull.pullFromDrive(dir)).rejects.toThrow()
+    globalThis.fetch = realFetch
+    // nothing landed, and nothing on Drive was touched — never both, never neither
+    expect(existsSync(join(docs, dir, 'project.json'))).toBe(false)
+    const onDrive = [...store.files.values()].find((f) => f.name === dir && f.mimeType === FOLDER)
+    expect(onDrive?.trashed).toBeFalsy()
+    expect(rootFolders().map((f) => f.name)).toEqual([dir])
+
+    const retry = await phone()
+    const { dir: localDir } = await retry.pull.pullFromDrive(dir)
+    expect(localDir).toBe(dir)
+    expect(existsSync(join(docs, dir, 'stems', 'custom-original.mp3'))).toBe(true)
+    expect(rootFolders().map((f) => f.name)).toEqual([])
+  })
+
+  it('a name already taken locally by an unrelated song is not overwritten — the pull lands beside it', async () => {
+    const { dir } = await unsplitOnDrive()
+    // an unrelated local song already sits under the exact same name
+    const p = await phone()
+    const collidingSrc = join(imports, 'other.mp3')
+    writeFileSync(collidingSrc, 'ID3 unrelated')
+    await p.writer.createProject({ srcPath: collidingSrc, fileName: 'other.mp3', name: dir, durationSec: 5 })
+    expect(existsSync(join(docs, dir, 'project.json'))).toBe(true)
+    const before = JSON.parse(readFileSync(join(docs, dir, 'project.json'), 'utf8'))
+
+    const { dir: localDir } = await p.pull.pullFromDrive(dir)
+    expect(localDir).not.toBe(dir) // disambiguated
+    // the unrelated song is untouched
+    const after = JSON.parse(readFileSync(join(docs, dir, 'project.json'), 'utf8'))
+    expect(after).toEqual(before)
+    // and the pulled song is really there, under its own name
+    expect(existsSync(join(docs, localDir, 'stems', 'custom-original.mp3'))).toBe(true)
+    // trashed under the DRIVE name, not the disambiguated local one
+    const onDrive = [...store.files.values()].find((f) => f.name === dir && f.mimeType === FOLDER)
+    expect(onDrive?.trashed).toBe(true)
   })
 })

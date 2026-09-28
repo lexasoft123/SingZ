@@ -77,7 +77,10 @@ export const library: Translation<typeof en> = {
   'phone.library.splitButton': 'Разбить',
   'phone.library.almostDoneSplittingTitle': 'Разделение почти готово',
   'phone.library.almostDoneSplittingBody': 'Эта песня почти готова — удалите её через момент.',
+  'phone.library.almostHereTitle': 'Почти на телефоне из Google Drive',
+  'phone.library.almostHereBody': 'Эта песня ещё переносится из Drive — удалите её через момент.',
   'phone.library.finishingUp': 'Завершение…',
+  'phone.library.bringingHome': 'Переносим песню на телефон…',
   'phone.library.stopping': 'Остановка…',
   'phone.library.resume': 'Дальше',
   'phone.library.discard': 'Сброс',
@@ -232,10 +235,6 @@ export const library: Translation<typeof en> = {
     'Обе песни на {device}, примерно {bytes}. Они перейдут в библиотеку Drive и будут играть из вкладки Drive, уже загруженными.',
   'phone.library.offerLeadAllOther':
     'Все {n} песен на {device}, примерно {bytes}. Они перейдут в библиотеку Drive и будут играть из вкладки Drive, уже загруженными.',
-  'phone.library.offerUnsplit_one': ' Неразделённая песня — тут.',
-  'phone.library.offerUnsplit_few': ' Неразделённые {n} песни — тут.',
-  'phone.library.offerUnsplit_many': ' Неразделённых {n} песен — тут.',
-  'phone.library.offerUnsplit_other': ' Неразделённые {n} песни — тут.',
   'phone.library.offerCopies_one': ' Песня, уже в библиотеке Drive, останется здесь.',
   'phone.library.offerCopies_few': ' {n} песни, уже в библиотеке Drive, останутся здесь.',
   'phone.library.offerCopies_many': ' {n} песен, уже в библиотеке Drive, останутся здесь.',
@@ -301,7 +300,6 @@ export const library: Translation<typeof en> = {
   // ── moving songs to Google Drive: skip / stop reasons (also used by publish.ts) ──
   'phone.library.skipInUse': 'она занята — открыта, делится или анализируется',
   'phone.library.skipAlreadyInDrive': 'она уже в вашей библиотеке Google Drive',
-  'phone.library.notSplitForMove': 'Разделите песню на дорожки — тогда она переместится в Google Drive.',
   'phone.library.signInFirstForMove': 'Войдите в Google Drive — откройте вкладку Drive выше.',
   'phone.library.updateDesktopForMove':
     'Обновите SingZ на компьютере. Версия, синхронизирующая этот Drive, удалит песни, которые не создавала, — и они будут потеряны.',

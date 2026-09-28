@@ -41,11 +41,23 @@ export function isCurrent(have: FileFacts | null | undefined, want: { size: numb
  * the singer's own tracks, and lyrics.json when the doc carries its hash.
  * Audio only by default — the ✓ and byte total describe playable media.
  * Lyrics and graph documents ride in the small-text cache and are opt-in.
+ *
+ * A song with NO stems names its source track instead, because that file IS
+ * its audio — a vocal exercise or any track meant to be sung over whole is
+ * played unsplit, and on Drive it would otherwise have nothing to verify and
+ * read as never-downloaded for ever. A SPLIT song does not name it even though
+ * the doc states its hash: the stems are what playing needs, and claiming the
+ * source as well would tell every phone that every song it already holds is
+ * incomplete.
  */
 export function filesOfProject(doc: ProjectDoc | undefined, opts?: { lyrics?: boolean; graph?: boolean }): FileWant[] {
   const out: FileWant[] = []
   for (const [name, h] of Object.entries(doc?.stemHashes ?? {})) {
     out.push({ path: `stems/${name}`, size: Number(h?.size ?? 0), md5: String(h?.md5 ?? '') })
+  }
+  const song = doc?.songHash
+  if (out.length === 0 && song && doc?.songFile) {
+    out.push({ path: doc.songFile, size: Number(song.size ?? 0), md5: String(song.md5 ?? '') })
   }
   const lyrics = doc?.lyricsHash
   if (opts?.lyrics && lyrics) {

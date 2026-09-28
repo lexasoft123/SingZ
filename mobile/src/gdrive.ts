@@ -501,7 +501,16 @@ function buildEntry(
     const f = stemsByName.get(t.file.slice('stems/'.length))
     if (f) expect[t.file] = Number(f.size ?? 0)
   }
-  if (Object.keys(stems).length === 0) return null
+  // A song with no stems is played unsplit — a vocal exercise, or any track
+  // meant to be sung over whole — so its SOURCE track is its audio and the
+  // entry stands on that file instead of the six. Returning null here is what
+  // used to make such a song invisible on Drive, which is why moving one was
+  // refused rather than left to produce a song nobody could see.
+  if (Object.keys(expect).length === 0) {
+    const song = doc?.songFile ? byName.get(doc.songFile) : undefined
+    if (!song) return null
+    expect[doc.songFile] = Number(song.size ?? 0)
+  }
   projectFiles.set(dir, { byName, stemsByName })
   return {
     dir,
@@ -569,7 +578,7 @@ export async function driveListMovedIn(
 ): Promise<void> {
   await restoreOnce()
   const entry = entryFromDoc(name, doc, new Map(top.map((f) => [f.name, f])), new Map(stems.map((f) => [f.name, f])))
-  if (!entry) throw new Error(`${name} has no stems to list`)
+  if (!entry) throw new Error(`${name} has nothing to list`)
   // claimed before the write, as adopt() does: an older listing landing while
   // the write is on the bridge would otherwise save over it
   const gen = ++listGen
@@ -612,7 +621,9 @@ function entryFromDoc(
     else if (hashes[`${id}.wav`]) stems[id] = 'wav'
   }
   Object.assign(expect, expectFromDoc(doc))
-  if (Object.keys(stems).length === 0) return null
+  // Stems, or the source track a stemless song is played from — filesOfProject
+  // names one or the other. Nothing at all still means nothing to show.
+  if (Object.keys(expect).length === 0) return null
   projectFiles.set(dir, { byName, stemsByName })
   return {
     dir,

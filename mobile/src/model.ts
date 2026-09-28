@@ -168,6 +168,21 @@ export interface ProjectDoc {
   /** The same, for lyrics.json: the doc states every file the project is made
    *  of, so one checksum per project in catalog.json covers the lot. */
   lyricsHash?: { md5: string; size: number; mtimeMs: number }
+  /** The same, for the source track `songFile` names.
+   *
+   *  It is stated for every project, because the doc is supposed to name every
+   *  file the project is made of and this one was the exception: the move to
+   *  Drive has always uploaded it, and nothing has ever verified it. For a
+   *  split song that is invisible — the stems carry the verification and the
+   *  source is not needed to play. For a song with NO stems it is the only
+   *  audio there is, so without this a stemless song on Drive has nothing to
+   *  check and reads as never-downloaded for ever.
+   *
+   *  `filesOfProject` therefore claims it only when there are no stems. Adding
+   *  it to every project's wanted set would tell every phone that every song it
+   *  already holds is incomplete, and send the whole library back to Drive for
+   *  source tracks it does not need. */
+  songHash?: { md5: string; size: number; mtimeMs: number }
   /** The seek bar's envelope, per lane, cached in the project.
    *
    *  Computing it means reading every sample of every stem — which is exactly

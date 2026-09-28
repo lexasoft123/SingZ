@@ -85,6 +85,7 @@ import {
   splitGate,
   startProjectSplit
 } from '../split/flow'
+import { pullFromDrive } from '../split/pull-from-drive'
 import {
   BEAT_MODELS_MB,
   SPLIT_MODEL,
@@ -111,7 +112,7 @@ import {
   finishCompletedMoves,
   moveAllToDrive,
   moveSize,
-  stemSignature,
+  audioSignature,
   type BatchResult
 } from '../publish'
 
@@ -304,12 +305,11 @@ export default function CatalogScreen({
   const loadingDirRef = useRef<string | null>(null)
   /** A phone song whose delete is in flight: not the batch's to move. */
   const deletingDirRef = useRef<string | null>(null)
-  /** The offer itself: the songs that can go now, what their stems weigh, and
-   *  how many are not split yet (those stay until they are). */
+  /** The offer itself: every movable song on this phone and what it costs to
+   *  send — its stems, or its source track for a song with none. */
   const [driveOffer, setDriveOffer] = useState<{
     dirs: string[]
     bytes: number
-    unsplit: number
     /** Songs whose audio the Drive library already has: they stay. */
     copies: number
     /** Every song in the phone library, offered or not. */
@@ -965,6 +965,13 @@ export default function CatalogScreen({
    */
   type SplitUi =
     | null
+    // Bringing a Drive-only song home before splitting it — no job.json
+    // exists yet, so this phase is never reconstructed after a relaunch the
+    // way the ones below are; a killed pull is simply started again, safely
+    // (pullFromDrive resumes on its own). project is the ORIGINAL Drive
+    // name throughout, so the card matches the entry the singer is looking
+    // at even though the song is about to move to a different tab.
+    | { phase: 'pulling'; project: string }
     | { phase: 'model'; project: string; gotMB: number; totalMB: number }
     | {
         phase: 'run'
@@ -1312,8 +1319,20 @@ export default function CatalogScreen({
           return
         }
         setCancelPending(false)
-        setSplitUi({ phase: 'model', project: dir, gotMB: 0, totalMB: 136 })
-        await startProjectSplit(dir, {
+        // A fresh split on a song still living in Drive brings it home
+        // first — see pull-from-drive.ts. A RESUME never takes this branch:
+        // by the time a resume is possible, an earlier fresh attempt has
+        // already pulled the song (or it would have nothing to resume), so
+        // mode is 'phone' by then, the tab having followed the song home.
+        let project = dir
+        if (!resume && mode === 'gdrive') {
+          setSplitUi({ phase: 'pulling', project: dir })
+          const pulled = await pullFromDrive(dir)
+          project = pulled.dir
+          await refresh()
+        }
+        setSplitUi({ phase: 'model', project, gotMB: 0, totalMB: 136 })
+        await startProjectSplit(project, {
           resume,
           watchdogCapMs,
           onModelProgress: (got, total) =>
@@ -1321,7 +1340,7 @@ export default function CatalogScreen({
               cur?.phase === 'model'
                 ? {
                     phase: 'model',
-                    project: dir,
+                    project,
                     gotMB: Math.round(got / 1e6),
                     totalMB: Math.round(total / 1e6)
                   }
@@ -1332,7 +1351,7 @@ export default function CatalogScreen({
         // flips on the first event or file — see the liveness poll.
         setSplitUi({
           phase: 'run',
-          project: dir,
+          project,
           text: t('phone.library.starting'),
           frac: 0,
           started: false
@@ -1345,20 +1364,26 @@ export default function CatalogScreen({
         }
       }
     },
-    []
+    [mode, refresh]
   )
 
-  /** Can this song be split right now? PHONE LIBRARY ONLY — the adoption
-   *  writes through docDirFor, which is the app's own documents root on both
-   *  platforms, so splitting a picked-folder song would leave the folder song
-   *  untouched and drop a duplicate half-project into This-phone. The offer
-   *  used to be confined by living in the phone-only long-press menu; now
-   *  that a card renders it, the confinement has to be stated.
+  /** Can this song be split right now? PHONE LIBRARY, or a song still on
+   *  Google Drive — both bring the song's audio through docDirFor, the app's
+   *  own documents root, before splitting touches it: a fresh phone song is
+   *  already there, and a Drive one is pulled home first (pull-from-drive.ts)
+   *  and its Drive copy retired once that pull is verified, so nothing is
+   *  left half-done on either side. PICKED FOLDER stays excluded — that is
+   *  the untouched case the adoption itself would corrupt: writing through
+   *  docDirFor would drop a duplicate half-project into This-phone while
+   *  leaving the folder song untouched, and nothing pulls a folder song home
+   *  the way this now does for Drive. The offer used to be confined by
+   *  living in the phone-only long-press menu; now that a card renders it,
+   *  the confinement has to be stated.
    *  Six stems means it already is split; a job in flight owns the engine; a
    *  build without the natives never offers. */
   const canSplit = useCallback(
     (p: ProjectEntry): boolean =>
-      mode === 'phone' && splitAvailable() && Object.keys(p.stems).length === 0,
+      (mode === 'phone' || mode === 'gdrive') && splitAvailable() && Object.keys(p.stems).length === 0,
     [mode]
   )
   /** Whether a split is WORKING for anyone BUT this card: the running card
@@ -1439,6 +1464,16 @@ export default function CatalogScreen({
       // the doc write land after the delete and bring back half a project.
       if (splitUiRef.current?.phase === 'adopting' && splitUiRef.current.project === p.dir) {
         Alert.alert(t('phone.library.almostDoneSplittingTitle'), t('phone.library.almostDoneSplittingBody'))
+        return
+      }
+      // A song mid-pull from Drive has the SAME shape of danger: once
+      // project.json exists locally, pullFromDrive is on its way to
+      // retiring the Drive copy with nothing left to check it against but
+      // the file this delete is about to remove. Refusing here is the
+      // primary defence; pullFromDrive re-checks right before it trashes
+      // Drive too, in case a delete ever reaches this song some other way.
+      if (splitUiRef.current?.phase === 'pulling' && splitUiRef.current.project === p.dir) {
+        Alert.alert(t('phone.library.almostHereTitle'), t('phone.library.almostHereBody'))
         return
       }
       if (movingRef.current === p.dir) {
@@ -1696,9 +1731,9 @@ export default function CatalogScreen({
   }, [driveOffer])
 
   /* The offer is made, not assumed: the phone library, signed in to Drive,
-     songs that can go (split ones — an unsplit song would vanish from the
-     Drive tab, which lists songs by their stems), and not turned down for
-     exactly these songs. */
+     every song not already a copy of one Drive holds, and not turned down for
+     exactly these songs. A song with no stems goes too — it is played from
+     its source track, and that is what travels. */
   useEffect(() => {
     if (!active || mode !== 'phone' || !driveAvailable()) {
       setDriveOffer(null)
@@ -1712,7 +1747,6 @@ export default function CatalogScreen({
     void (async () => {
       const signedIn = await driveSignedIn().catch(() => false)
       const all = projects ?? []
-      const split = (p: ProjectEntry): boolean => Object.keys(p.stems).length > 0
       // a song mid-move is never a copy: its OWN folder in the library
       // matches it, and it is still here to be finished
       const midMove = await moveRecords().catch(() => ({}) as Record<string, unknown>)
@@ -1729,10 +1763,13 @@ export default function CatalogScreen({
          and its card says why it is in both lists. */
       const decide = (listing: ProjectEntry[] | null): void => {
         if (!alive) return
-        const inDrive = new Set((listing ?? []).map(e => stemSignature(e.doc)).filter(Boolean))
+        const inDrive = new Set((listing ?? []).map(e => audioSignature(e.doc)).filter(Boolean))
         const copy = (p: ProjectEntry): boolean =>
-          split(p) && inDrive.has(stemSignature(p.doc)) && !(p.dir in midMove)
-        const movable = all.filter(p => split(p) && !copy(p))
+          inDrive.has(audioSignature(p.doc)) && !(p.dir in midMove)
+        // Every song on this phone, split or not. A song with no stems is
+        // played from its source track — a vocal exercise is meant to be sung
+        // over whole — so it belongs in the library like any other.
+        const movable = all.filter(p => !copy(p))
         const copies = all.filter(copy)
         setDriveCopies(new Set(copies.map(p => p.dir)))
         if (!signedIn || movable.length === 0 || movable.every(p => dismissed.includes(p.dir))) {
@@ -1741,12 +1778,12 @@ export default function CatalogScreen({
         }
         setDriveOffer({
           dirs: movable.map(p => p.dir),
-          // what the docs say the stems weigh; the confirm adds the song files
-          bytes: movable.reduce(
-            (n, p) => n + Object.values(p.doc.stemHashes ?? {}).reduce((m, h) => m + h.size, 0),
-            0
-          ),
-          unsplit: all.filter(p => !split(p)).length,
+          // What the docs say the audio weighs — the stems, or the source
+          // track for a song that has none, the same rule filesOfProject uses.
+          bytes: movable.reduce((n, p) => {
+            const stems = Object.values(p.doc.stemHashes ?? {}).reduce((m, h) => m + h.size, 0)
+            return n + (stems > 0 ? stems : (p.doc.songHash?.size ?? 0))
+          }, 0),
           copies: copies.length,
           total: all.length
         })
@@ -1761,7 +1798,7 @@ export default function CatalogScreen({
       // Asked only when a song here could carry that badge; time-bound (a look
       // within minutes costs nothing); a running batch keeps its own; offline
       // the saved one stands.
-      if (alive && signedIn && !batchRunningRef.current && all.some(split)) {
+      if (alive && signedIn && !batchRunningRef.current && all.length > 0) {
         const fresh = await driveListProjects().catch(() => null)
         dismissed = await readDismissed() // "Not now" may have come meanwhile
         if (fresh) decide(fresh)
@@ -2295,6 +2332,9 @@ export default function CatalogScreen({
               <Text style={s.splitTitle} numberOfLines={1}>
                 {nameOf(splitUi.project)}
               </Text>
+              {splitUi.phase === 'pulling' && (
+                <Text style={s.splitText}>{t('phone.library.bringingHome')}</Text>
+              )}
               {splitUi.phase === 'model' && (
                 <>
                   <Text style={s.splitText}>
@@ -2687,8 +2727,8 @@ export default function CatalogScreen({
               the Drive library, and this is where it changes sides. Below the
               library, like every offer (see the next one's note). */}
           {driveOffer && !moveBatch && ((): React.ReactNode => {
-            // "All" only when it IS all: songs not split yet, and copies of
-            // songs Drive has, stay behind
+            // "All" only when it IS all: copies of songs Drive already has
+            // are the one thing that stays behind
             const device = Platform.OS === 'ios' ? t('phone.library.deviceIphone') : t('phone.library.devicePhone')
             const bytes = fmtBytes(driveOffer.bytes)
             const lead =
@@ -2701,7 +2741,6 @@ export default function CatalogScreen({
                 : driveOffer.dirs.length === 2
                 ? t('phone.library.offerLeadAllTwo', { device, bytes })
                 : t('phone.library.offerLeadAllOther', { n: driveOffer.dirs.length, device, bytes })
-            const unsplit = driveOffer.unsplit > 0 ? tn('phone.library.offerUnsplit', driveOffer.unsplit) : ''
             const copies = driveOffer.copies > 0 ? tn('phone.library.offerCopies', driveOffer.copies) : ''
             return (
               <View style={[s.splitCard, { marginTop: 14 }]}>
@@ -2710,7 +2749,6 @@ export default function CatalogScreen({
                 </Text>
                 <Text style={s.splitText}>
                   {lead}
-                  {unsplit}
                   {copies}
                 </Text>
                 <View style={s.splitActions}>
