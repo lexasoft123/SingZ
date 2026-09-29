@@ -1784,6 +1784,20 @@ export class DesktopNativePlaybackClient {
         provider,
         'Native playback could not be asked whether it is already playing.'
       )
+      // The same lag the other way up: a start or resume THIS facade had
+      // accepted moments ago reads 'stopped' or 'paused' until the render
+      // callback publishes it. A second Play inside that buffer period asked
+      // again, the core refused it (main logs that as a warning), and the
+      // re-read below, still inside the same period, made the refusal throw,
+      // which could leave the button on Play while the song played. With the
+      // two presses back to back (transport-race-e2e) the refusal came 4 times
+      // in 4 on the Mac and 2 in 2 on the Windows field laptop, and the button
+      // stuck in 3 and 1 of them. Let the core's picture catch up with the
+      // command first, at the edge poll's cadence and within its bound.
+      while (this.ownResumeUnpublished(Date.now())) {
+        await new Promise((resolve) => setTimeout(resolve, POLL_EDGE_MS))
+        await this.refreshCommandStatus(generation, provider)
+      }
       const already = this.last?.transportState
       if (this.transportIntent === 'playing' && (already === 'playing' || already === 'pre-roll')) {
         return
@@ -2298,6 +2312,18 @@ export class DesktopNativePlaybackClient {
     }
     console.error('Native playback status refresh failed:', error)
     this.onStateChange(this.last)
+  }
+
+  /** Whether a start or resume this facade had accepted is still missing from
+   * the published status: the intent is playing, the command went out less
+   * than POLL_EDGE_MAX_MS ago, and the transport still reads parked. A
+   * 'completed' song is not waited on — that is the core's own park, and a
+   * Play there must still restart it. */
+  private ownResumeUnpublished(now: number): boolean {
+    if (!this.started || this.transportIntent !== 'playing') return false
+    if (now - this.edgeAtMs >= POLL_EDGE_MAX_MS) return false
+    const state = this.last?.transportState
+    return state === 'paused' || state === 'stopped'
   }
 
   /** Whether a start, a resume or a seek while playing is still waiting for

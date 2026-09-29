@@ -240,7 +240,28 @@ const shot = async (win, name) => {
       throw new Error('INCONCLUSIVE')
     }
 
-    await win.click(cancel)
+    // Cancel from the page, in the same turn as the check that the job is
+    // still running. A Playwright click first waits for the button to hold
+    // still across two animation frames — a second or more in the hidden
+    // window on the Windows field laptop — and a job that answered inside
+    // that wait left nothing to cancel, while `during` above still said it
+    // was running. The percent is read at the press, not before it.
+    const pressed = await win.evaluate(() => {
+      const loading = document.querySelector('.lp-loading')
+      const button = [...document.querySelectorAll('.lp-state button')].find((b) => /cancel/i.test(b.textContent ?? ''))
+      if (!loading || !button || button.disabled) return null
+      const pct = Number.parseInt(document.querySelector('.lp-pct')?.textContent ?? '', 10)
+      button.click()
+      return { pct }
+    })
+    if (!pressed) {
+      const now = await readPanel(win)
+      inconclusive =
+        `the job answered before Cancel could be pressed, so there was no running job to cancel. ` +
+        `The panel says: ${JSON.stringify(now.state ?? now.badge)}.`
+      throw new Error('INCONCLUSIVE')
+    }
+    console.log(`cancelled at ${Number.isFinite(pressed.pct) ? `${pressed.pct}%` : 'the warm-up (no percent yet)'}`)
     // The panel has to come back on its own. Nothing here reopens the song —
     // a reopen is exactly what the singer had to do, and what this forbids.
     await watchdog().run('the panel comes back after Cancel', 60, () =>
@@ -269,7 +290,7 @@ const shot = async (win, name) => {
     // This can only fire if the cancel actually reached the aligner, so the
     // run says which it was rather than letting a vacuous silence read as
     // coverage. A zero here from a warm-up cancel means nothing at all.
-    const reached = Number.isFinite(during.pct) && during.pct >= ALIGN_FROM_PCT
+    const reached = Number.isFinite(pressed.pct) && pressed.pct >= ALIGN_FROM_PCT
     const { warns, stopped } = await win.evaluate(async () => {
       const all = (await window.singz.getLog()).filter((e) => e.source === 'lyrics')
       return {
@@ -284,7 +305,7 @@ const shot = async (win, name) => {
     // it proves nothing — say so rather than bank it.
     if (AT_ALIGN && !stopped && !warns.length && fail.length === 0) {
       inconclusive =
-        `the cancel landed at ${during.pct}% but no aligner child was killed (no "stopped (cancelled)" ` +
+        `the cancel landed at ${pressed.pct}% but no aligner child was killed (no "stopped (cancelled)" ` +
         `line), so it fell between chunks and the align-warning check proves nothing. Re-run.`
       throw new Error('INCONCLUSIVE')
     }
@@ -294,13 +315,13 @@ const shot = async (win, name) => {
       fail.push(`${warns.length} align warning(s) logged for a cancelled run`)
     } else if (reached) {
       console.log(
-        `no align warnings logged for a cancel taken at ${during.pct}% — inside the word aligner` +
+        `no align warnings logged for a cancel taken at ${pressed.pct}% — inside the word aligner` +
           (stopped ? ', which logged that it stopped (cancelled)' : '')
       )
     } else {
       console.log(
         `align-warning check COVERS NOTHING this run: the cancel landed at ` +
-          `${Number.isFinite(during.pct) ? `${during.pct}%` : 'the warm-up'}, before the word aligner. ` +
+          `${Number.isFinite(pressed.pct) ? `${pressed.pct}%` : 'the warm-up'}, before the word aligner. ` +
           `Run with E2E_CANCEL_AT=align to exercise it.`
       )
     }

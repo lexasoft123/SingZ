@@ -80,9 +80,13 @@ async function libraryFiles(win) {
 
 /** Click the ONE library card named exactly `name`. A name no card carries,
  *  or one that several projects share, throws: either way the click could not
- *  say which project it meant. Resolves to the moment the click was sent
- *  (Date.now()), for a driver that times the open — the copies taken before
- *  it are this helper's cost, not the app's. */
+ *  say which project it meant. Resolves to the moment the click REACHED the
+ *  page (the page's Date.now(), comparable with node's and with main's log),
+ *  for a driver that times the open. The click stays a real one — space-focus
+ *  depends on that — but Playwright first waits two animation frames for the
+ *  card to hold still, and in the hidden window on the Windows field laptop
+ *  that is a second or more; the copies taken before it are this helper's
+ *  cost too. A click that never reaches the page throws. */
 async function clickLibrarySong(win, name) {
   // The exact form player-session-e2e uses, quoted so a name with a quote in
   // it stays one selector.
@@ -96,8 +100,23 @@ async function clickLibrarySong(win, name) {
   // As late as it can be taken: whichever project this click opens, these are
   // its files before the open could save anything into them.
   beforeClick.set(win, await libraryFiles(win))
-  const clickedAt = Date.now()
+  // A capture listener on window hears the click before the app does, and
+  // removes itself when it has.
+  await win.evaluate(() => {
+    window.__libCardClickedAt = undefined
+    const onClick = (e) => {
+      if (typeof e.target?.closest === 'function' && e.target.closest('.lib-card')) {
+        window.__libCardClickedAt = Date.now()
+        window.removeEventListener('click', onClick, true)
+      }
+    }
+    window.addEventListener('click', onClick, true)
+  })
   await cards.click()
+  const clickedAt = await win.evaluate(() => window.__libCardClickedAt)
+  if (typeof clickedAt !== 'number') {
+    throw new Error(`the click on "${name}" never reached the page`)
+  }
   return clickedAt
 }
 

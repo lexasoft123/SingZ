@@ -171,8 +171,9 @@ const readPanel = (win) =>
     await win.waitForSelector('.pill.karaoke', { timeout: 60000 })
     await win.waitForSelector('.src-credit', { timeout: 60000 })
     // Checked once B shows its credit, not at the click: right after the
-    // switch the engine can still hold A (and the karaoke pill can be A's), and
-    // a credit only follows B's own load. A's is still in flight here.
+    // switch the engine can still hold A (and before the loader stopped
+    // closing the catalog early, the karaoke pill could be A's), and a credit
+    // only follows B's own load. A's is still in flight here.
     await assertOpenedProject(win, { dir: B_DIR, name: bName, backups: others })
 
     const bPanel = await readPanel(win)
