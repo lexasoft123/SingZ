@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   downloadQwen,
+  gpuSplitterPackUrl,
   ModelManager,
   qwenInstalled,
   qwenMissingMb,
@@ -18,6 +19,15 @@ import { net } from './electron-stub'
 // handed Windows the Apple-Silicon torch aligner (1.26 GB, unusable, and the
 // tile stayed "not installed"). Installs must resolve per-platform.
 describe('registryEntryFor', () => {
+  it('pins splitter packs to the app release instead of GitHub latest', () => {
+    expect(gpuSplitterPackUrl('0.23.3', 'win32', 'x64')).toBe(
+      'https://github.com/lexasoft123/SingZ/releases/download/v0.23.3/gpu-splitter-win32-x64.tar.gz'
+    )
+    expect(gpuSplitterPackUrl('0.24.0-test1', 'darwin', 'arm64')).toBe(
+      'https://github.com/lexasoft123/SingZ/releases/download/v0.24.0-test1/gpu-splitter-darwin-arm64.tar.gz'
+    )
+  })
+
   it('gives Windows and Intel Macs the ONNX aligner', () => {
     expect(registryEntryFor('aligner', 'win32-x64')?.url).toContain('mms-fa.onnx')
     expect(registryEntryFor('aligner', 'darwin-x64')?.url).toContain('mms-fa.onnx')
