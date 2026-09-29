@@ -502,6 +502,20 @@ export function qwenMmprojPath(): string {
   return join(modelsDir(), QWEN_MMPROJ_FILE)
 }
 
+/**
+ * A release consumes the splitter pack built for that same release. Never
+ * resolve this through GitHub's `latest` alias: Android can publish a release
+ * before the desktop workflow has attached its packs, which would make every
+ * older desktop version start requesting nonexistent assets from the new tag.
+ */
+export function gpuSplitterPackUrl(
+  version = app.getVersion(),
+  platform = process.platform,
+  arch = process.arch
+): string {
+  return `https://github.com/lexasoft123/SingZ/releases/download/v${version}/gpu-splitter-${platform}-${arch}.tar.gz`
+}
+
 const REGISTRY: RegistryEntry[] = [
   {
     id: 'gpu-splitter',
@@ -519,10 +533,7 @@ const REGISTRY: RegistryEntry[] = [
     kind: 'archive',
     url:
       process.env.SINGZ_GPU_PACK_URL ??
-      // Prerelease test builds are invisible to `latest` — they fetch the
-      // pack attached to their own tagged release, so a test build can
-      // require a new pack format without touching the fleet.
-      `https://github.com/lexasoft123/SingZ/releases/${app.getVersion().includes('-') ? `download/v${app.getVersion()}` : 'latest/download'}/gpu-splitter-${process.platform}-${process.arch}.tar.gz`,
+      gpuSplitterPackUrl(),
     optional: false,
     platforms: ['darwin-arm64', 'darwin-x64', 'win32-x64']
   },
