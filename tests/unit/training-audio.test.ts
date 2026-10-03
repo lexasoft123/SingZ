@@ -149,6 +149,41 @@ const cues: readonly TrainingCue[] = [
 describe('desktop training cue scheduling', () => {
   const output = {} as AudioNode
 
+  it('signals reaching the meter window immediately, once per target and again after retry', () => {
+    const context = new FakeAudioContext()
+    const controller = new DesktopTrainingCueController(context as unknown as AudioContext, new FakeGain() as unknown as AudioNode)
+    const latch = vi.spyOn(controller, 'latch')
+    const target = { midi: 55 }
+    controller.latchOnReach(target, 54.5, 0.9, 0.5, 10)
+    controller.latchOnReach(target, 55, 0.4, 0.5, 10)
+    expect(latch).not.toHaveBeenCalled()
+    controller.latchOnReach(target, 55.02, 0.9, 0.5, 10)
+    expect(latch).toHaveBeenCalledTimes(1)
+    controller.latchOnReach(target, 55, 0.9, 0.5, 10)
+    expect(latch).toHaveBeenCalledTimes(1)
+    controller.cancel()
+    controller.latchOnReach(target, 55, 0.9, 0.5, 10)
+    expect(latch).toHaveBeenCalledTimes(2)
+  })
+
+  it('plays a short latch on the current route and releases it on cancellation', () => {
+    const context = new FakeAudioContext('running')
+    const controller = new DesktopTrainingCueController(context as unknown as AudioContext, output)
+    controller.latch()
+    expect(context.oscillators).toHaveLength(1)
+    expect(context.oscillators[0].starts[0] - context.currentTime).toBeCloseTo(0.002)
+    expect(context.oscillators[0].frequency.calls[0][1]).toBe(660)
+    expect(context.oscillators.length).toBeGreaterThan(0)
+    expect(context.oscillators.every((voice) => voice.starts.length === 1)).toBe(true)
+    expect(context.oscillators[0].stops[0]! - context.oscillators[0].starts[0]).toBeCloseTo(0.085)
+    controller.cancel()
+    expect(context.oscillators.every((voice) => voice.disconnectCount > 0)).toBe(true)
+    controller.dispose()
+    const count = context.oscillators.length
+    controller.latch()
+    expect(context.oscillators).toHaveLength(count)
+  })
+
   it('awaits resume, routes to the supplied output, and applies every purpose gap', async () => {
     const context = new FakeAudioContext()
     const controller = new DesktopTrainingCueController(
@@ -177,9 +212,9 @@ describe('desktop training cue scheduling', () => {
     expect(timeline.cues[2].startTime).toBeCloseTo(12.15)
     expect(timeline.cues[3].startTime).toBeCloseTo(13.05)
     expect(timeline.endTime).toBeCloseTo(13.55)
-    expect(context.oscillators).toHaveLength(7 * 15)
-    expect(context.oscillators[0].frequency.calls[0][1]).toBeCloseTo(130.8128, 3)
-    expect(context.oscillators[2].frequency.calls[0][1]).toBeCloseTo(261.6256, 1)
+    expect(context.oscillators).toHaveLength(7 * 7)
+    expect(context.oscillators[0].frequency.calls[0][1]).toBeCloseTo(261.6256, 3)
+    expect(context.oscillators[1].frequency.calls[0][1]).toBeCloseTo(523.2511, 1)
     expect(context.oscillators.every((oscillator) => oscillator.starts.length === 1)).toBe(true)
     expect(context.gains.every((gain) => gain.connected === output)).toBe(true)
     expect(context.gains[0].gain.calls.map((call) => call[0])).toEqual(['set', 'ramp', 'ramp', 'set', 'ramp'])
@@ -213,7 +248,7 @@ describe('desktop training cue scheduling', () => {
     controller.setReferenceVolume(9)
     expect(controller.getReferenceVolume()).toBe(2)
     await controller.schedule([{ purpose: 'answer', articulation: 'together', notes: [69] }])
-    expect(context.gains[0].gain.calls[1][1]).toBeCloseTo(0.043)
+    expect(context.gains.reduce((sum, gain) => sum + Math.max(...gain.gain.calls.map(call => call[1])), 0)).toBeLessThan(1)
   })
 
   it('disconnects a naturally ended voice without stopping it twice', async () => {

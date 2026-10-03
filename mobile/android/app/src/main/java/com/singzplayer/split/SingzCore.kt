@@ -62,7 +62,9 @@ object SingzCore {
       clarity: Double,
       peak: Double,
       rms: Double,
-      dbfs: Double
+      dbfs: Double,
+      inferenceMs: Double,
+      harmonicCorrected: Boolean
     )
   }
 
@@ -213,10 +215,13 @@ object SingzCore {
     deviceUid: String,
     channel: Int,
     ownershipGeneration: Long,
-    listener: AudioInputListener
+    listener: AudioInputListener,
+    modelPath: String
   ): Array<String>
 
   /** Synchronously tears down capture; true means the native owner is gone. */
+  external fun armTrainingRecording(filename: String): String
+  external fun finishTrainingRecording(directory: String): Array<String>
   external fun stopAudioInput(): Boolean
   external fun audioInputState(): String
   external fun audioInputLastError(): String

@@ -4035,6 +4035,7 @@ export default function App(): React.JSX.Element {
                   onViewPan={panView}
                   settleView={viewSteps.flush}
                   info={songInfo}
+                  nativeInputUid={audioPrefs.nativeInputUid}
                   inputId={audioPrefs.inputId}
                   inputChannel={audioPrefs.inputChannel}
                   onMicDevice={setMicDevice}

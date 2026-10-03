@@ -1,4 +1,6 @@
 #include <zdsp/analysis/capture_adapter.h>
+#include <zdsp/analysis/pitch_analysis_module.h>
+#include <zdsp/graph_runner.h>
 
 #include <zcore/legacy/live_input_analysis.h>
 
@@ -91,6 +93,92 @@ std::vector<float> tone(size_t frames, double sampleRate,
 }  // namespace
 
 int main() {
+  // Exercise the production compiled capture graph, not a direct detector call.
+  int graphCalls = 0;
+  zdsp::analysis::PitchAnalysisConfig graphConfig;
+  graphConfig.detector = zdsp::analysis::PitchDetectorKind::Custom;
+  graphConfig.generation = 8;
+  graphConfig.analyzer = [&](const float*, size_t n, double rate) {
+    CHECK("graph inference outside callback", !zdsp::inGraphRenderCallback());
+    CHECK("graph detector framing", n == 1024 && rate == 16000);
+    ++graphCalls;
+    zdsp::analysis::LiveInputFrame frame{}; frame.frequency = 196; frame.clarity = .9;
+    return frame;
+  };
+  zdsp::analysis::PitchAnalysisModule graphModule(graphConfig);
+  std::vector<zdsp::analysis::AnalysisWindow> graphWindows;
+  for (int i = 0; i < 30; ++i) {
+    auto samples = tone(480, 48000, i*480);
+    CHECK("compiled capture graph renders", graphModule.push(block(samples, i+1, i*480),
+      [&](const auto& window) { graphWindows.push_back(window); }));
+  }
+  CHECK("graph detector emits", graphCalls > 8 && graphWindows.size() == static_cast<size_t>(graphCalls));
+  for (const auto& window : graphWindows) {
+    CHECK("graph keeps capture identity", window.start.clockDomain.value == 42 && window.start.streamGeneration.value == 7);
+    CHECK("graph keeps hardware timestamp", window.start.quality == zdsp::CaptureTimestampQuality::Hardware);
+    CHECK("graph keeps ownership", window.ownershipGeneration == 8);
+    CHECK("graph keeps capture flags", (window.start.flags & zdsp::CaptureTimeTimestampQualityValid) != 0);
+  }
+  CHECK("graph has no drops", graphModule.droppedBlocks() == 0);
+  // A standalone graph plug-in feeds the same queue. Saturation cannot run ML
+  // or retain caller PCM. Consumer recovery discards stale blocks.
+  const auto plugin = graphModule.graphProcessor();
+  zdsp::ProcessContext pluginContext{};
+  pluginContext.structSize = sizeof(pluginContext); pluginContext.interfaceVersion = 1;
+  pluginContext.sampleRate = {48000}; pluginContext.frames = {480};
+  auto inputSamples = tone(480, 48000, 14400);
+  float copied[480]{}; const float* inputChannels[]{inputSamples.data()}; float* outputChannels[]{copied};
+  auto queued = block(inputSamples, 31, 14400);
+  zdsp::CaptureTime capture{}; CHECK("plug-in capture maps", zdsp::analysis::mapCaptureMetadata(queued, capture));
+  zdsp::ConstAudioBusView inputBus{inputChannels, 1, {480}, {480}, &capture};
+  zdsp::MutableAudioBusView outputBus{outputChannels, 1, {480}, {480}};
+  const int beforeQueue = graphCalls;
+  for (int i = 0; i < 12; ++i) {
+    capture.sequence = 31+i; capture.sourceFrame = {static_cast<uint64_t>(14400+i*480)};
+    capture.sampleHostTime = {1000000000ull + capture.sourceFrame.value*1000000000ull/48000};
+    plugin.functions->process(plugin.state, &pluginContext, &inputBus, 1, &outputBus, 1);
+  }
+  CHECK("tap does not infer", graphCalls == beforeQueue);
+  CHECK("tap passes through PCM", std::equal(inputSamples.begin(), inputSamples.end(), copied));
+  CHECK("tap overflow bounded", graphModule.droppedBlocks() == 4);
+  graphModule.drain([&](const auto& window) { graphWindows.push_back(window); });
+  CHECK("consumer discards stale queue", graphModule.droppedBlocks() == 10);
+
+  graphModule.cancel(8);
+  const auto cancelledCount = graphWindows.size();
+  graphModule.push(block(inputSamples, 50, 24000), [&](const auto& window) { graphWindows.push_back(window); });
+  CHECK("module cancellation suppresses results", graphWindows.size() == cancelledCount);
+  // A neural consumer has its own sample rate/window but shares provenance,
+  // reset and cancellation handling with the unchanged legacy consumer.
+  int neuralCalls = 0;
+  zdsp::analysis::LiveInputAnalysisAdapter neural(8,
+      [&](const float*, size_t frames, double rate) {
+        CHECK("neural framing", frames == 1024 && rate == 16000);
+        ++neuralCalls;
+        zdsp::analysis::LiveInputFrame result{};
+        result.frequency = 196;
+        result.clarity = .9;
+        return result;
+      }, 16000, 1024, 320);
+  std::vector<zdsp::analysis::AnalysisWindow> neuralWindows;
+  for (int i=0;i<30;++i) {
+    auto samples = tone(480,48000,i*480);
+    CHECK("neural push", neural.push(block(samples,i+1,i*480),
+        [&](const auto& window) { neuralWindows.push_back(window); }));
+  }
+  CHECK("neural stream emits", neuralCalls > 8);
+  for (size_t i=1;i<neuralWindows.size();++i) {
+    CHECK("neural timestamps preserve 20 ms step",
+      neuralWindows[i].start.sampleHostTime.value - neuralWindows[i-1].start.sampleHostTime.value == 20000000);
+    CHECK("neural timestamp declares 64 ms window",
+      neuralWindows[i].end.sampleHostTime.value - neuralWindows[i].start.sampleHostTime.value == 64000000);
+    CHECK("neural capture level retained", neuralWindows[i].analysis.rms > .1);
+  }
+  auto resetSamples = tone(480,48000,14400);
+  neural.push(block(resetSamples,40,14400), [&](const auto&) {});
+  CHECK("neural gap resets partial audio", neural.resets() == 1 && neural.bufferedFrames() < 1024);
+  neural.cancel(8);
+  CHECK("neural cancel stops delivery", !neural.push(block(resetSamples,41,14880), [&](const auto&) {}));
   std::vector<float> sine(2048);
   for (size_t index = 0; index < sine.size(); ++index)
     sine[index] = static_cast<float>(

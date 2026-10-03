@@ -34,6 +34,8 @@ await esbuild.build({
     contents: `
 export * from './shared/music-theory'
 export * from './shared/training-types'
+export * from './shared/training-tone'
+export * from './shared/training-pitch-continuity'
 export * from './shared/training-session'
 export * from './shared/training-scoring'
 export * from './shared/training-progress'
@@ -62,6 +64,8 @@ writeFileSync(
   `${banner}
 export * from '../../../src/shared/music-theory'
 export * from '../../../src/shared/training-types'
+export * from '../../../src/shared/training-tone'
+export * from '../../../src/shared/training-pitch-continuity'
 export * from '../../../src/shared/training-session'
 export * from '../../../src/shared/training-scoring'
 export * from '../../../src/shared/training-progress'

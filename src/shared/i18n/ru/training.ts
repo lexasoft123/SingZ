@@ -325,6 +325,8 @@ export const training: Translation<typeof en> = {
   'training.session.instruction.arpeggiate': 'Арпеджио {chord} {direction}.',
 
   // ── session generator validation error reachable from normal setup ──
+  'training.range.omitted': 'Эти варианты не входят в ваш диапазон и будут пропущены: {items}. Расширьте диапазон, чтобы включить их.',
+  'training.range.chordDegrees': '{exercise}: ступени аккордов {degrees}',
   'training.session.error.rangeTooNarrow': 'Ни одно упражнение не вписывается в рабочий диапазон.',
   'training.session.error.confirmKeyThenReview': 'Подтвердите или измените тональность, затем просмотрите подготовку.',
   'training.session.error.setUpSessionFirst': 'Настройте сессию перед началом.',

@@ -48,10 +48,10 @@ describe('desktop holder-friendly training practice', () => {
     expect(restoreDesktopTrainingPracticeSettings('broken')).toEqual({ referenceVolume: 0.65, pitchWindowCents: 10 })
   })
 
-  it('uses the same restrained Hammond registration as mobile', () => {
+  it('uses the same warm flute-organ registration as mobile', () => {
     const oscillators = trainingOrganOscillators()
-    expect(oscillators).toHaveLength(15)
-    expect(oscillators.reduce((sum, oscillator) => sum + oscillator.level, 0)).toBeCloseTo(0.99)
+    expect(oscillators).toHaveLength(7)
+    expect(oscillators.reduce((sum, oscillator) => sum + oscillator.level, 0)).toBeCloseTo(0.482)
   })
 
   it('locks only a stable note in the actual target octave', () => {

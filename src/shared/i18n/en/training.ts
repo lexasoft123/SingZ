@@ -326,6 +326,8 @@ export const training = {
   'training.session.instruction.arpeggiate': 'Arpeggiate {chord} {direction}.',
 
   // ── session generator validation error reachable from normal setup ──
+  'training.range.omitted': 'These selections do not fit your range and will be left out: {items}. Widen the range to include them.',
+  'training.range.chordDegrees': '{exercise}: chord degrees {degrees}',
   'training.session.error.rangeTooNarrow': 'No requested exercises fit the comfortable working range.',
   'training.session.error.confirmKeyThenReview': 'Confirm or change the song key, then review the preparation session.',
   'training.session.error.setUpSessionFirst': 'Set up a session before starting.',

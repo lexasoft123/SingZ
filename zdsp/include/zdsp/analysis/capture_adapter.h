@@ -42,7 +42,10 @@ class LiveInputAnalysisAdapter {
  public:
   using Sink = std::function<void(const AnalysisWindow&)>;
 
-  explicit LiveInputAnalysisAdapter(uint64_t ownershipGeneration = 1);
+  using Analyzer = std::function<LiveInputFrame(const float*, size_t, double)>;
+  explicit LiveInputAnalysisAdapter(uint64_t ownershipGeneration = 1,
+      Analyzer analyzer = {}, int analysisRate = 0,
+      size_t windowFrames = 2048, size_t stepFrames = 512);
   ~LiveInputAnalysisAdapter();
   LiveInputAnalysisAdapter(const LiveInputAnalysisAdapter&) = delete;
   LiveInputAnalysisAdapter& operator=(const LiveInputAnalysisAdapter&) = delete;
@@ -96,6 +99,10 @@ class LiveInputAnalysisAdapter {
   static constexpr size_t kCapacity = 2048;
   static constexpr uint32_t kMaximumInputFrames = 16384;
   static constexpr size_t kMaximumConvertedFrames = 65536;
+  Analyzer analyzer_;
+  int requestedRate_ = 0;
+  size_t windowFrames_ = 2048;
+  size_t stepFrames_ = 512;
   struct Storage;
   // The fixed analysis ring is allocated once on the ordinary control thread.
   // Keeping it out of the facade prevents a few stack-allocated adapters from

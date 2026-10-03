@@ -32,9 +32,9 @@ string(REGEX MATCHALL
   "Java_com_singzplayer_split_SingzCore_[A-Za-z0-9_]+"
   _jni_exports "${_dynamic_symbols}")
 list(LENGTH _jni_exports _jni_export_count)
-if(NOT _jni_export_count EQUAL 18)
+if(NOT _jni_export_count EQUAL 20)
   message(FATAL_ERROR
-    "libsingzcore must preserve exactly 18 JNI product exports; found "
+    "libsingzcore must preserve exactly 20 JNI product exports; found "
     "${_jni_export_count}")
 endif()
 if(NOT _dynamic_symbols MATCHES
@@ -47,3 +47,9 @@ if(NOT _dynamic_symbols MATCHES
   message(FATAL_ERROR
     "libsingzcore is missing the dormant Android AudioHost inventory bridge")
 endif()
+
+foreach(_recording_entry IN ITEMS armTrainingRecording finishTrainingRecording)
+  if(NOT _dynamic_symbols MATCHES "Java_com_singzplayer_split_SingzCore_${_recording_entry}")
+    message(FATAL_ERROR "libsingzcore is missing the training recording bridge: ${_recording_entry}")
+  endif()
+endforeach()

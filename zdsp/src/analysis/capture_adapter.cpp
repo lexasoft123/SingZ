@@ -8,6 +8,7 @@
 #include <cmath>
 #include <limits>
 #include <type_traits>
+#include <stdexcept>
 
 namespace zdsp::analysis {
 
@@ -135,9 +136,16 @@ constexpr uint32_t kAnchorValidityMask =
     CaptureTimeTimestampQualityValid | CaptureTimeStaleAnchor;
 }  // namespace
 
-LiveInputAnalysisAdapter::LiveInputAnalysisAdapter(uint64_t generation)
-    : storage_(std::make_unique<Storage>()),
+LiveInputAnalysisAdapter::LiveInputAnalysisAdapter(uint64_t generation,
+    Analyzer analyzer, int analysisRate, size_t windowFrames, size_t stepFrames)
+    : analyzer_(std::move(analyzer)), requestedRate_(analysisRate),
+      windowFrames_(windowFrames), stepFrames_(stepFrames),
+      storage_(std::make_unique<Storage>()),
       ownershipGeneration_(generation ? generation : 1) {
+  if (windowFrames_ == 0 || windowFrames_ > kCapacity || stepFrames_ == 0 ||
+      stepFrames_ > windowFrames_ || (requestedRate_ != 0 && requestedRate_ != 16000) ||
+      (!analyzer_ && (windowFrames_ != 2048 || stepFrames_ != 512 || requestedRate_ != 0)))
+    throw std::invalid_argument("Invalid live analysis framing");
   converted_.reserve(kMaximumConvertedFrames);
 }
 
@@ -193,8 +201,9 @@ bool LiveInputAnalysisAdapter::configure(const CaptureTime& capture,
   // designs a real lowpass. A flat min(rate, 48000) put 88.2 kHz on the
   // 24-tap near-unity branch at an actual 1.84:1 — aliases folded in at
   // −8 dB (the "new consumer at a new ratio" trap resample.cpp records).
-  analysisRate_ = sourceRate_ % 44100 == 0 ? std::min(sourceRate_, 44100)
-                                           : std::min(sourceRate_, 48000);
+  analysisRate_ = requestedRate_ ? requestedRate_
+      : (sourceRate_ % 44100 == 0 ? std::min(sourceRate_, 44100)
+                                  : std::min(sourceRate_, 48000));
   if (sourceRate_ != analysisRate_) {
     resampler_ = std::make_unique<singz::Resampler>(sourceRate_, analysisRate_, 1);
     latencyToDrop_ = resampler_->latencyOutFrames();
@@ -277,12 +286,20 @@ uint64_t LiveInputAnalysisAdapter::sourceFrameForOutputFrame(
 LiveInputFrame LiveInputAnalysisAdapter::analyzeWindow() {
   float peak = 0.0f;
   double sumSquares = 0.0;
-  for (const float sample : storage_->contiguous) {
+  for (size_t i = 0; i < windowFrames_; ++i) {
+    const float sample = storage_->contiguous[i];
     peak = std::max(peak, std::fabs(sample));
     sumSquares += static_cast<double>(sample) * sample;
   }
   const double rawRms =
-      std::sqrt(sumSquares / static_cast<double>(kCapacity));
+      std::sqrt(sumSquares / static_cast<double>(windowFrames_));
+  if (analyzer_) {
+    auto result = analyzer_(storage_->contiguous.data(), windowFrames_, analysisRate_);
+    result.peak = peak;
+    result.rms = rawRms;
+    result.dbfs = rawRms > 0 ? std::max(-120.0, 20 * std::log10(rawRms)) : -120;
+    return result;
+  }
   peakFollower_ = std::max(peak, peakFollower_ * kPeakDecay);
 
   if (voicing_) {
@@ -344,7 +361,7 @@ LiveInputFrame LiveInputAnalysisAdapter::analyzeWindow() {
 void LiveInputAnalysisAdapter::append(float sample, const CaptureTime& capture,
                                       uint64_t callbackHostTimeNs,
                                       const Sink& sink) {
-  if (size_ >= kCapacity) return;
+  if (size_ >= windowFrames_) return;
   const size_t write = (read_ + size_) % kCapacity;
   storage_->samples[write] = std::isfinite(sample) ? sample : 0.0f;
   storage_->captures[write] = capture;
@@ -352,20 +369,20 @@ void LiveInputAnalysisAdapter::append(float sample, const CaptureTime& capture,
   if (size_ == 0) firstOutputFrame_ = nextOutputFrame_;
   ++size_;
   ++nextOutputFrame_;
-  while (size_ == kCapacity) {
-    for (size_t i = 0; i < kCapacity; ++i)
+  while (size_ == windowFrames_) {
+    for (size_t i = 0; i < windowFrames_; ++i)
       storage_->contiguous[i] = storage_->samples[(read_ + i) % kCapacity];
     AnalysisWindow window;
     window.start = storage_->captures[read_];
-    window.end = storage_->captures[(read_ + kCapacity - 1) % kCapacity];
+    window.end = storage_->captures[(read_ + windowFrames_ - 1) % kCapacity];
     window.start.sampleHostTime = {hostTimeForOutputFrame(firstOutputFrame_)};
     window.end.sampleHostTime = {
-        hostTimeForOutputFrame(firstOutputFrame_ + kCapacity)};
+        hostTimeForOutputFrame(firstOutputFrame_ + windowFrames_)};
     window.start.sourceFrame = {sourceFrameForOutputFrame(firstOutputFrame_)};
     window.end.sourceFrame = {
-        sourceFrameForOutputFrame(firstOutputFrame_ + kCapacity)};
+        sourceFrameForOutputFrame(firstOutputFrame_ + windowFrames_)};
     window.deliveredAt = {
-        storage_->callbackTimes[(read_ + kCapacity - 1) % kCapacity]};
+        storage_->callbackTimes[(read_ + windowFrames_ - 1) % kCapacity]};
     window.sampleRate = {static_cast<double>(analysisRate_)};
     window.ownershipGeneration = ownershipGeneration_;
     window.resetCount = resets_;
@@ -373,9 +390,9 @@ void LiveInputAnalysisAdapter::append(float sample, const CaptureTime& capture,
     window.analysis = analyzeWindow();
     if (!cancelled_.load(std::memory_order_acquire)) sink(window);
     ++emitted_;
-    read_ = (read_ + hopFrames()) % kCapacity;
-    size_ -= hopFrames();
-    firstOutputFrame_ += hopFrames();
+    read_ = (read_ + stepFrames_) % kCapacity;
+    size_ -= stepFrames_;
+    firstOutputFrame_ += stepFrames_;
   }
 }
 

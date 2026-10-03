@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { KeyGuess } from '../audio/analysis'
 import type { MultitrackEngine } from '../audio/engine'
-import { type MicPitch, type MicDevice } from '../audio/mic'
+import { type MicDevice } from '../audio/mic'
+import type { TrainingMicSource } from '../audio/training-mic'
 import { PitchStripMicOwner } from '../audio/pitch-strip-mic'
 import { CONTROLS_W, fmtTime, sanitizePitchHeight, type TimeView } from '../model'
 import { modalCoversApp } from '../model'
@@ -55,6 +56,7 @@ interface Props {
   settleView: () => void
   info: { key: KeyGuess | null; bpm: number | null }
   /** Chosen microphone (settings) — absent = system default. */
+  nativeInputUid?: string
   inputId?: string
   /** Zero-based hardware channel selected in Settings. */
   inputChannel?: number
@@ -83,6 +85,7 @@ export default function PitchStrip({
   onViewPan,
   settleView,
   info,
+  nativeInputUid,
   inputId,
   inputChannel,
   onMicDevice,
@@ -94,7 +97,7 @@ export default function PitchStrip({
   const nowRef = useRef<HTMLDivElement>(null)
   const stripRef = useRef<HTMLDivElement>(null)
   const scoreRef = useRef<HTMLSpanElement>(null)
-  const micRef = useRef<MicPitch | null>(null)
+  const micRef = useRef<(TrainingMicSource & { read(): number }) | null>(null)
   const trailRef = useRef<Trail[]>([])
   const scoreAcc = useRef({ hit: 0, total: 0 })
   const [mic, setMic] = useState<'off' | 'starting' | 'on' | 'denied'>('off')
@@ -183,7 +186,7 @@ export default function PitchStrip({
         setMic(state)
       },
       onDevice: (device) => onMicDeviceRef.current?.(device)
-    }, { deviceId: inputId, channelIndex: inputChannel })
+    }, { nativeDeviceUid: nativeInputUid, deviceId: inputId, channelIndex: inputChannel })
   }
 
   useEffect(() => {
@@ -506,8 +509,8 @@ export default function PitchStrip({
   }, [engine])
 
   useEffect(() => {
-    micOwnerRef.current?.setRoute({ deviceId: inputId, channelIndex: inputChannel })
-  }, [inputChannel, inputId])
+    micOwnerRef.current?.setRoute({ nativeDeviceUid: nativeInputUid, deviceId: inputId, channelIndex: inputChannel })
+  }, [nativeInputUid, inputChannel, inputId])
 
   // Layout phase releases exclusive-mode interfaces before Settings' passive
   // preview effect requests them, and restores the latest selected route when

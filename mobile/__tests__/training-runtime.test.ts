@@ -78,7 +78,8 @@ describe('mobile training runtime rules', () => {
       lock = tracker.update(atMs, 60.4, 0.95, 60)
     }
     expect(lock.medianCents).toBeGreaterThan(0)
-    expect(lock.medianCents).toBeLessThan(40)
+    expect(lock.medianCents).toBeCloseTo(40)
+    expect((lock.displayMidi! - 60) * 100).toBeLessThan(40)
   })
 
   test('pauses for a brief pitch loss and drains sustained off-target singing', () => {
@@ -115,4 +116,25 @@ describe('mobile training runtime rules', () => {
     expect(first).toBe(first)
     expect(ids.next()).toBe('mobile-load-2-42')
   })
+})
+
+
+test('a two-semitone monitoring change settles within half a second, not two seconds', () => {
+  const tracker = new SingleNoteLockTracker()
+  for (let at = 0; at < 800; at += 80) tracker.update(at, 50, 0.95, 50)
+  let reading = tracker.update(800, 52, 0.95, 50)
+  for (let at = 880; at <= 1280; at += 80) reading = tracker.update(at, 52, 0.95, 50)
+  expect(reading.displayMidi).toBeGreaterThan(51.95)
+  expect(reading.medianCents).toBeCloseTo(200)
+  expect(reading.centered).toBe(false)
+})
+
+test('the smoothed display cannot prolong on-target scoring after a measured change', () => {
+  const tracker = new SingleNoteLockTracker()
+  for (let at = 0; at < 800; at += 80) tracker.update(at, 50.3, 0.95, 50)
+  let reading = tracker.update(800, 50, 0.95, 50)
+  for (let at = 880; at <= 1120; at += 80) reading = tracker.update(at, 50, 0.95, 50)
+  expect(reading.medianCents).toBeCloseTo(0)
+  expect(reading.centered).toBe(true)
+  expect(reading.progressMs).toBeGreaterThan(0)
 })

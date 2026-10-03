@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Alert, Pressable, ScrollView, Share, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { clearLog, fmtTime, formatLog, logEntries, onLogLine, type LogEntry } from '../log'
-import { t, tn, useLocale } from '../i18n'
+import { clearLog, fmtTime, formatLog, logEntries, logSessions, logSessionEntries, onLogLine, LOG_MAX_ENTRIES, type LogEntry, type LogSession } from '../log'
+import { t, tn, getLocale, useLocale } from '../i18n'
 import { C } from './bits'
 
 /**
@@ -17,6 +17,9 @@ export default function LogPanel({
 }): React.JSX.Element {
   const insets = useSafeAreaInsets()
   useLocale()
+  const [shown, setShown] = useState<string | null>(null)
+  const [sessions, setSessions] = useState<LogSession[]>([])
+  const [pickerOpen, setPickerOpen] = useState(false)
   const [entries, setEntries] = useState<LogEntry[]>([])
   const body = useRef<ScrollView>(null)
   /** Follow new lines unless the reader scrolled up to look at something. */
@@ -24,15 +27,28 @@ export default function LogPanel({
 
   useEffect(() => {
     let alive = true
-    void logEntries().then((all) => {
+    void (shown === null ? logEntries() : logSessionEntries(shown)).then((all) => {
       if (alive) setEntries(all)
     })
-    const off = onLogLine((e) => setEntries((prev) => [...prev, e]))
+    const off = shown === null
+      ? onLogLine((e) => setEntries((prev) => [...prev, e].slice(-LOG_MAX_ENTRIES)))
+      : () => undefined
     return () => {
       alive = false
       off()
     }
+  }, [shown])
+
+  useEffect(() => {
+    let alive = true
+    void logSessions().then(all => { if (alive) setSessions(all) })
+    return () => { alive = false }
   }, [])
+
+  const sessionLabel = (session: LogSession): string => session.current
+    ? t('phone.app.log.thisSession')
+    : new Date(session.startedAt).toLocaleString(getLocale(), { dateStyle: 'medium', timeStyle: 'short' })
+  const selectedSession = sessions.find(session => session.id === shown)
 
   const share = useCallback(() => {
     void Share.share({ message: formatLog(entries) })
@@ -46,7 +62,7 @@ export default function LogPanel({
       {
         text: t('phone.app.log.clear'),
         style: 'destructive',
-        onPress: () => void clearLog().then(() => setEntries([]))
+        onPress: () => void clearLog().then(logEntries).then(setEntries)
       }
     ])
   }, [])
@@ -60,19 +76,47 @@ export default function LogPanel({
           <Pressable hitSlop={8} onPress={share} accessibilityRole="button" accessibilityLabel={t('phone.app.log.shareA11y')}>
             <Text style={s.link}>{t('phone.app.log.share')}</Text>
           </Pressable>
-          <Pressable
+          {shown === null && <Pressable
             hitSlop={8}
             onPress={confirmClear}
             accessibilityRole="button"
             accessibilityLabel={t('phone.app.log.clearA11y')}
           >
             <Text style={s.link}>{t('phone.app.log.clear')}</Text>
-          </Pressable>
+          </Pressable>}
           <Pressable hitSlop={8} onPress={onClose} accessibilityRole="button" accessibilityLabel={t('phone.app.log.closeA11y')}>
             <Text style={s.link}>{t('phone.app.log.close')}</Text>
           </Pressable>
         </View>
       </View>
+      <Pressable
+        style={s.selector}
+        accessibilityRole="button"
+        accessibilityLabel={t('phone.app.log.whichSession')}
+        accessibilityState={{ expanded: pickerOpen }}
+        onPress={() => setPickerOpen(open => !open)}
+      >
+        <Text style={s.link}>{selectedSession ? sessionLabel(selectedSession) : t('phone.app.log.thisSession')}</Text>
+        <Text style={s.link}>{pickerOpen ? '▴' : '▾'}</Text>
+      </Pressable>
+      {pickerOpen && <ScrollView style={s.sessionList}>
+        {sessions.map(session => <Pressable
+          key={session.id}
+          style={s.sessionOption}
+          accessibilityRole="button"
+          accessibilityState={{ selected: session.current ? shown === null : shown === session.id }}
+          onPress={() => {
+            stick.current = true
+            const next = session.current ? null : session.id
+            if (next !== shown) setEntries([])
+            setShown(next)
+            setPickerOpen(false)
+          }}
+        >
+          <Text style={s.link}>{sessionLabel(session)}</Text>
+          <Text style={s.count}>{session.current ? '' : tn('phone.app.log.lines', session.lines)}</Text>
+        </Pressable>)}
+      </ScrollView>}
       <ScrollView
         ref={body}
         onScroll={(e) => {
@@ -104,6 +148,9 @@ const s = StyleSheet.create({
   count: { color: C.dim, fontSize: 12 },
   actions: { flexDirection: 'row', gap: 16, marginLeft: 'auto' },
   link: { color: C.amber, fontSize: 14, fontWeight: '600' },
+  selector: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 12, marginBottom: 8, borderBottomWidth: 1, borderColor: C.dim },
+  sessionList: { maxHeight: 240, marginBottom: 10 },
+  sessionOption: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 13, gap: 12 },
   row: { flexDirection: 'row', gap: 8, paddingVertical: 3, alignItems: 'flex-start' },
   time: { color: C.dim, fontSize: 11, fontVariant: ['tabular-nums'], width: 58 },
   src: { color: C.dim, fontSize: 11, width: 54 },

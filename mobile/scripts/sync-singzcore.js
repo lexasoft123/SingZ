@@ -97,6 +97,11 @@ const dspAllowlist = [
   'include/zdsp/analysis/capture_adapter.h',
   'src/analysis/live_input_analyzer.cpp',
   'src/analysis/capture_adapter.cpp',
+  'include/zdsp/analysis/pitch_analysis_module.h',
+  'src/analysis/pitch_analysis_module.cpp',
+  'include/zdsp/analysis/crepe_tiny.h',
+  'include/zdsp/analysis/pitch_harmonics.h',
+  'src/analysis/crepe_tiny.cpp',
 ]
 for (const relative of dspAllowlist) {
   const target = join(dspDst, relative)
@@ -159,3 +164,11 @@ if (existsSync(selectionReceipt)) {
   n++
 }
 console.log(`sync-singzcore: ${n} files → ios/SingzCore/{core,dsp,flac,dr_mp3,compliance}/`)
+
+// One authoritative model artifact for both native mobile packages.
+for (const destination of [join(repoRoot, 'mobile/ios/FolderAccess/Models'), join(repoRoot, 'mobile/android/app/src/main/assets/pitch')]) {
+  mkdirSync(destination, { recursive: true })
+  copyFileSync(join(repoRoot, 'assets/pitch/crepe-tiny.bin'), join(destination, 'crepe-tiny.bin'))
+  copyFileSync(join(repoRoot, 'assets/pitch/torchcrepe-LICENSE.txt'), join(destination, 'torchcrepe-LICENSE.txt'))
+  copyFileSync(join(repoRoot, 'assets/pitch/README.md'), join(destination, 'README.txt'))
+}

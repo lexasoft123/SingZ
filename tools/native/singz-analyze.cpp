@@ -1,3 +1,7 @@
+#include <zdsp/analysis/pitch_analysis_module.h>
+#include <zcore/audio/capture_recording.h>
+#include <filesystem>
+#include <fstream>
 // singz-analyze — the core's detectors as a command-line tool: the desktop's
 // way in (spawned by main like whisper-cli; docs/PHONE-STANDALONE.md, Phase
 // 4c) and the parity harness's oracle (tests compare its output with the TS
@@ -1004,6 +1008,7 @@ static int liveInputCommand(int argc, char** argv) {
   bool haveAnalysisFrames = false;
   bool measureLatency = false;
   double durationSeconds = 0;
+  std::string crepePath,controlFile,recordDirectory;
   for (int i = 2; i < argc; ++i) {
     const std::string argument = argv[i];
     if (argument == "--help") {
@@ -1011,12 +1016,15 @@ static int liveInputCommand(int argc, char** argv) {
       return 0;
     }
     if ((argument == "--device-uid" || argument == "--channel" ||
-         argument == "--frames" || argument == "--duration") &&
+         argument == "--frames" || argument == "--duration" || argument == "--crepe-model" || argument == "--control-file" || argument == "--record-dir") &&
         i + 1 >= argc) {
       std::fprintf(stderr, "live-input: %s needs a value\n", argument.c_str());
       return 2;
     }
-    if (argument == "--device-uid") {
+    if(argument=="--crepe-model") {crepePath=argv[++i];}
+    else if(argument=="--control-file") {controlFile=argv[++i];}
+    else if(argument=="--record-dir") {recordDirectory=argv[++i];}
+    else if (argument == "--device-uid") {
       config.deviceUid = argv[++i];
       haveUid = true;
     } else if (argument == "--channel") {
@@ -1063,6 +1071,12 @@ static int liveInputCommand(int argc, char** argv) {
   std::signal(SIGINT, stopLiveInput);
   std::signal(SIGTERM, stopLiveInput);
   NdjsonWriter writer;
+  std::unique_ptr<zdsp::analysis::PitchAnalysisModule> pitchModule;
+  try { if(!crepePath.empty()) pitchModule=std::make_unique<zdsp::analysis::PitchAnalysisModule>(
+      zdsp::analysis::PitchAnalysisConfig{zdsp::analysis::PitchDetectorKind::CrepeTiny, crepePath, 1}); }
+  catch(const std::exception& e){std::fprintf(stderr,"CREPE: %s\n",e.what());return 1;}
+  std::shared_ptr<singz::CaptureRecording> recording;
+  std::string lastControl;
   std::atomic<bool> ready{false};
   std::vector<float> pending;
   std::unique_ptr<LiveInputAnalysisStream> analysisStream;
@@ -1081,6 +1095,7 @@ static int liveInputCommand(int argc, char** argv) {
   const singz::AudioInputResult started = input.start(
       config, [&](const singz::AudioInputBlockView& block) {
         if (!ready.load(std::memory_order_acquire)) return;
+        if(auto take=std::atomic_load(&recording))take->append(block);
 #if defined(__APPLE__) || defined(_WIN32)
         if (measureLatency) {
           const uint64_t deliveredAt = monotonicHostTimeNs();
@@ -1120,6 +1135,22 @@ static int liveInputCommand(int argc, char** argv) {
               static_cast<unsigned long long>(block.sampleHostTimeNs)));
         }
         if (writer.stopRequested()) return;
+        if (pitchModule) {
+          (void)pitchModule->push(block, [&](const zdsp::analysis::AnalysisWindow& window) {
+            const auto& analysis = window.analysis;
+            writer.enqueue(jsonLine(
+                "{\"version\":1,\"type\":\"frame\",\"sequence\":%llu,"
+                "\"hostTimeNs\":%llu,\"frequency\":%.9g,\"clarity\":%.9g,"
+                "\"rms\":%.9g,\"dbfs\":%.9g,\"detector\":\"crepe-tiny\",\"inferenceMs\":%.3f,"
+                "\"harmonicCorrected\":%s,\"analysisGraph\":\"pitch-tap-v1\",\"droppedBlocks\":%u}",
+                static_cast<unsigned long long>(frameSequence++),
+                static_cast<unsigned long long>(window.start.sampleHostTime.value),
+                analysis.frequency, analysis.clarity, analysis.rms, analysis.dbfs,
+                pitchModule->inferenceMs(), pitchModule->harmonicCorrected() ? "true" : "false",
+                pitchModule->droppedBlocks()));
+          });
+          return;
+        }
         const bool pendingWasEmpty = pending.empty();
         const size_t appended =
             analysisStream ? analysisStream->append(block.mono, block.frames, pending) : 0;
@@ -1138,10 +1169,10 @@ static int liveInputCommand(int argc, char** argv) {
           if (!writer.enqueue(jsonLine(
                   "{\"version\":1,\"type\":\"frame\",\"sequence\":%llu,"
                   "\"hostTimeNs\":%llu,\"frequency\":%.9g,\"clarity\":%.9g,"
-                  "\"rms\":%.9g,\"dbfs\":%.9g}",
+                  "\"rms\":%.9g,\"dbfs\":%.9g,\"detector\":%s,\"inferenceMs\":%.3f}",
                   static_cast<unsigned long long>(frameSequence++),
                   static_cast<unsigned long long>(pendingHostTime), frequency,
-                  clarity, rms, dbfs)))
+                  clarity, rms, dbfs,jsonString("yin").c_str(),0.0)))
             return;
           pending.erase(pending.begin(),
                         pending.begin() + analysisPlan.hopFrames);
@@ -1173,6 +1204,8 @@ static int liveInputCommand(int argc, char** argv) {
         jsonString(planError).c_str())});
     return 2;
   }
+  if(pitchModule){analysisPlan.frames=1024;analysisPlan.hopFrames=320;analysisPlan.analysisSampleRate=16000;analysisPlan.minFrequencyHz=55;
+    analysisPlan.resamplerLatencyFrames=activeRate==16000?0:singz::Resampler(static_cast<int>(activeRate),16000,1).latencyOutFrames();}
   pending.reserve(analysisPlan.frames + 16384u);
   analysisStream = std::make_unique<LiveInputAnalysisStream>(analysisPlan);
   if (!writer.enqueue(liveInputReadyLine(activeRate, started.channel,
@@ -1191,6 +1224,31 @@ static int liveInputCommand(int argc, char** argv) {
                                 std::chrono::duration<double>(durationSeconds)
                           : std::chrono::steady_clock::time_point::max();
   while (!liveInputStop && !writer.stopRequested()) {
+    if(!controlFile.empty()) {
+      std::ifstream commands(std::filesystem::path(std::u8string(controlFile.begin(),controlFile.end())));
+      std::string command;std::getline(commands,command);commands.close();
+      if(!command.empty()&&command!=lastControl){
+        lastControl=command; const auto separator=command.find(' ');
+        const auto action=separator==std::string::npos?std::string{}:command.substr(separator+1);
+        try {
+          if(action=="stop") { liveInputStop=1; }
+          else if(action.starts_with("record ")){
+            const auto filename=action.substr(7);
+            if(!singz::CaptureRecording::validName(filename)||recordDirectory.empty()||std::atomic_load(&recording))throw std::runtime_error("Invalid or overlapping recording");
+            auto take=std::make_shared<singz::CaptureRecording>();take->filename=filename;std::atomic_store(&recording,take);
+            writer.enqueue(jsonLine("{\"version\":1,\"type\":\"recording\",\"state\":\"started\"}"));
+          }else if(action=="finish"){
+            auto take=std::atomic_exchange(&recording,std::shared_ptr<singz::CaptureRecording>{});
+            if(!take)throw std::runtime_error("No recording is active");
+            const auto utf8Path=(std::filesystem::path(std::u8string(recordDirectory.begin(),recordDirectory.end()))/take->filename).u8string();
+            const std::string path(utf8Path.begin(),utf8Path.end());
+            const auto seconds=take->save(path);
+            writer.enqueue(jsonLine("{\"version\":1,\"type\":\"recording\",\"state\":\"saved\",\"filename\":%s,\"path\":%s,\"seconds\":%.6f,\"sampleRate\":%.0f}",jsonString(take->filename).c_str(),jsonString(path).c_str(),seconds,take->rate));
+          }
+        }catch(const std::exception& e){writer.enqueue(jsonLine("{\"version\":1,\"type\":\"recording\",\"state\":\"error\",\"error\":%s}",jsonString(e.what()).c_str()));}
+      }
+    }
+
 #if defined(__APPLE__)
     pollfd descriptor{STDIN_FILENO, POLLIN | POLLHUP, 0};
     const int polled = poll(&descriptor, 1, 100);
@@ -1222,6 +1280,13 @@ static int liveInputCommand(int argc, char** argv) {
   input.stop();
   const singz::AudioInputStats stats = input.stats();
   std::vector<std::string> terminalLines;
+  if(auto take=std::atomic_exchange(&recording,std::shared_ptr<singz::CaptureRecording>{})){
+    try{const auto utf8Path=(std::filesystem::path(std::u8string(recordDirectory.begin(),recordDirectory.end()))/take->filename).u8string();
+            const std::string path(utf8Path.begin(),utf8Path.end());
+      const auto seconds=take->save(path);
+      terminalLines.push_back(jsonLine("{\"version\":1,\"type\":\"recording\",\"state\":\"saved\",\"filename\":%s,\"path\":%s,\"seconds\":%.6f,\"sampleRate\":%.0f}",jsonString(take->filename).c_str(),jsonString(path).c_str(),seconds,take->rate));
+    }catch(const std::exception& e){terminalLines.push_back(jsonLine("{\"version\":1,\"type\":\"recording\",\"state\":\"error\",\"error\":%s}",jsonString(e.what()).c_str()));}
+  }
   if (!runtimeError.empty()) {
     terminalLines.push_back(jsonLine(
         "{\"version\":1,\"type\":\"error\",\"state\":\"error\",\"message\":%s}",

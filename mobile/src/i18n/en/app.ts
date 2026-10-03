@@ -26,6 +26,8 @@ export const app = {
     'Eligible songs use the ordinary player controls with native DSP underneath. Other songs remain entirely on the regular player.',
 
   // ── log panel chrome (ui/LogPanel.tsx) — log LINES themselves stay English ──
+  'phone.app.log.thisSession': 'Current session',
+  'phone.app.log.whichSession': 'Choose a log session',
   'phone.app.log.title': 'Log',
   'phone.app.log.lines_one': '{n} line',
   'phone.app.log.lines_other': '{n} lines',
@@ -36,7 +38,7 @@ export const app = {
   'phone.app.log.close': 'Close',
   'phone.app.log.closeA11y': 'Close the log',
   'phone.app.log.confirmTitle': 'Clear the log?',
-  'phone.app.log.confirmBody': 'This is the only record of what the app has done.',
+  'phone.app.log.confirmBody': 'Only the current session will be cleared. Stored session logs will be kept.',
   'phone.app.log.keepIt': 'Keep it',
   'phone.app.log.empty': 'Nothing logged yet.',
 

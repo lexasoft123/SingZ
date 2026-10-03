@@ -95,6 +95,7 @@ test('the production Skip path completes a session without scoring audio or rece
     outputDisplayLatency: 0,
     pause: jest.fn(),
     cancelTrainingCues: jest.fn(),
+    playTrainingLatch: jest.fn(async () => ({ ok: true as const, endsAt: 0 })),
     setTrainingCueVolume: jest.fn(),
     playTrainingCues: jest.fn(async () => ({ ok: true as const, endsAt: 1 }))
   } as unknown as MultitrackEngine
@@ -133,8 +134,11 @@ test('the production Skip path completes a session without scoring audio or rece
     })
   }
 
-  const mic = (globalThis as unknown as { trainingMic: { snapshot: jest.Mock } }).trainingMic
+  const mic = (globalThis as unknown as { trainingMic: { snapshot: jest.Mock; start: jest.Mock; stop: jest.Mock } }).trainingMic
   expect(mic.snapshot).not.toHaveBeenCalled()
+  // Ten successive notes share one capture lease; only completion tears it down.
+  expect(mic.start).toHaveBeenCalledTimes(1)
+  expect(mic.stop).toHaveBeenCalled()
   const persistence = (globalThis as unknown as {
     trainingPersistence: { recordCompletion: jest.Mock }
   }).trainingPersistence
@@ -166,6 +170,7 @@ test('recorder error mid-cue cancels the run and no late cue completion records 
     outputDisplayLatency: 0,
     pause: jest.fn(),
     cancelTrainingCues: jest.fn(),
+    playTrainingLatch: jest.fn(async () => ({ ok: true as const, endsAt: 0 })),
     setTrainingCueVolume: jest.fn(),
     playTrainingCues: jest.fn(() => cue)
   } as unknown as MultitrackEngine
@@ -212,6 +217,7 @@ test('a call interruption exposes an intentional Start control and never reopens
     outputDisplayLatency: 0,
     pause: jest.fn(),
     cancelTrainingCues: jest.fn(),
+    playTrainingLatch: jest.fn(async () => ({ ok: true as const, endsAt: 0 })),
     setTrainingCueVolume: jest.fn(),
     playTrainingCues: jest.fn(async () => ({ ok: true as const, endsAt: 1 }))
   } as unknown as MultitrackEngine
@@ -281,6 +287,7 @@ test('inactive retained training ignores interruptions and only flushes on backg
     outputDisplayLatency: 0,
     pause: jest.fn(),
     cancelTrainingCues: jest.fn(),
+    playTrainingLatch: jest.fn(async () => ({ ok: true as const, endsAt: 0 })),
     setTrainingCueVolume: jest.fn(),
     playTrainingCues: jest.fn()
   } as unknown as MultitrackEngine
@@ -323,6 +330,7 @@ test('an inactive render cannot adopt a deferred microphone start before passive
     outputDisplayLatency: 0,
     pause: jest.fn(),
     cancelTrainingCues: jest.fn(),
+    playTrainingLatch: jest.fn(async () => ({ ok: true as const, endsAt: 0 })),
     setTrainingCueVolume: jest.fn(),
     playTrainingCues: jest.fn(async () => ({ ok: true as const, endsAt: 1 }))
   } as unknown as MultitrackEngine
@@ -365,6 +373,7 @@ test('an inactive render cannot adopt a deferred cue completion before passive c
     outputDisplayLatency: 0,
     pause: jest.fn(),
     cancelTrainingCues: jest.fn(),
+    playTrainingLatch: jest.fn(async () => ({ ok: true as const, endsAt: 0 })),
     setTrainingCueVolume: jest.fn(),
     playTrainingCues: jest.fn(() => cue)
   } as unknown as MultitrackEngine
@@ -396,4 +405,43 @@ test('an inactive render cannot adopt a deferred cue completion before passive c
   expect(persistence.recordCompletion).not.toHaveBeenCalled()
   await ReactTestRenderer.act(() => tree.unmount())
   appListener.mockRestore()
+})
+
+test('live microphone readings update the meter without rebuilding the target or navigator', async () => {
+  jest.useFakeTimers()
+  const appListener = jest.spyOn(AppState, 'addEventListener').mockReturnValue({ remove: jest.fn() })
+  const engine = {
+    trainingCurrentTime: 1, outputDisplayLatency: 0,
+    pause: jest.fn(), cancelTrainingCues: jest.fn(),
+    playTrainingLatch: jest.fn(async () => ({ ok: true as const, endsAt: 0 })), setTrainingCueVolume: jest.fn(),
+    playTrainingCues: jest.fn(async () => ({ ok: true as const, endsAt: 1 }))
+  } as unknown as MultitrackEngine
+  let tree!: ReactTestRenderer.ReactTestRenderer
+  await ReactTestRenderer.act(async () => {
+    tree = ReactTestRenderer.create(<TrainingTestScreen active engine={engine} song={null} onBackToSong={jest.fn()} />)
+    await Promise.resolve()
+  })
+  await openSingleNotePrompt(tree)
+  await ReactTestRenderer.act(async () => {
+    ;(globalThis as unknown as { trainingMic: { signal: { windows: number; peakDbfs: number } } }).trainingMic.signal = { windows: 100, peakDbfs: -20 }
+    jest.advanceTimersByTime(3_000)
+    await Promise.resolve()
+  })
+  const target = tree.root.findAll(node => node.props.testID === 'single-note-target-area')[0]
+  const targetProps = target.props
+  const mic = (globalThis as unknown as { trainingMic: { signal: { windows: number; peakDbfs: number }; live: { midi: number; confidence: number; timestampMs: number } } }).trainingMic
+  mic.signal = { windows: 100, peakDbfs: -20 }
+  // A raw crossing cannot chime before the filtered meter has a reading.
+  mic.live = { midi: 60, confidence: 0.95, timestampMs: 1000 }
+  await ReactTestRenderer.act(() => { jest.advanceTimersByTime(20) })
+  expect(engine.playTrainingLatch).not.toHaveBeenCalled()
+  for (let frame = 0; frame < 5; frame++) {
+    mic.live = { midi: 60 + frame / 10, confidence: 0.95, timestampMs: 1000 + frame * 80 }
+    await ReactTestRenderer.act(() => { jest.advanceTimersByTime(80) })
+  }
+  expect(target.props).toBe(targetProps)
+  expect(allText(tree)).not.toContain('No sound from the mic')
+  await ReactTestRenderer.act(() => tree.unmount())
+  appListener.mockRestore()
+  jest.useRealTimers()
 })

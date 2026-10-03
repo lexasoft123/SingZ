@@ -22,6 +22,10 @@ import {
   type IosAudioInputLease
 } from '../ios-audio-input-session'
 import { log } from '../log'
+import { describeOutput, getRouteLatency } from '../latency'
+import { PitchDiagnosticWindow } from './diagnostics'
+import { TrainingPitchContinuity } from './pitch-continuity'
+import { SINGLE_NOTE_MIN_CONFIDENCE } from './runtime'
 import { t } from '../i18n'
 
 const MAX_OBSERVATIONS = 512
@@ -154,12 +158,23 @@ export class TrainingMicrophone {
   private noAudioReported = false
   private gapReported = false
   private quality = { hardware: 0, 'callback-estimate': 0, unknown: 0 }
+  private pitchContinuity = new TrainingPitchContinuity()
+  private rejectedPitchFrames = 0
+  private pitchDiagnostics = new PitchDiagnosticWindow()
+  private lastDiagnosticLogMs = 0
+  private diagnosticFrame: (AndroidAudioInputFrame | IosAudioInputFrame) | null = null
+  private diagnosticArrivalMs: number | null = null
   private watchdog: ReturnType<typeof setInterval> | null = null
 
   constructor(private readonly deps: TrainingMicDependencies = nativeDependencies) {}
 
-  get live(): { readonly midi: number | null; readonly confidence: number; readonly timestampMs: number | null } {
-    return { midi: this.latestMidi, confidence: this.latestConfidence, timestampMs: this.latestTimestampMs }
+  /** Raw native evidence for route/pitch debugging; never used for scoring. */
+  get diagnostics() {
+    return { frame: this.diagnosticFrame, arrivalMs: this.diagnosticArrivalMs }
+  }
+
+  get live(): { readonly midi: number | null; readonly confidence: number; readonly timestampMs: number | null; readonly minConfidence: number } {
+    return { midi: this.latestMidi, confidence: this.latestConfidence, timestampMs: this.latestTimestampMs, minConfidence: this.diagnosticFrame && 'detector' in this.diagnosticFrame && this.diagnosticFrame.detector === 'crepe-tiny' ? 0.5 : SINGLE_NOTE_MIN_CONFIDENCE }
   }
 
   /** What the microphone is actually delivering. Without this the screen has
@@ -194,6 +209,7 @@ export class TrainingMicrophone {
 
   resetObservations(): void {
     this.observations = []
+    this.pitchContinuity.reset()
     this.latestMidi = null
     this.latestConfidence = 0
     this.latestTimestampMs = null
@@ -206,6 +222,12 @@ export class TrainingMicrophone {
   }
 
   private resetSignal(): void {
+    this.pitchContinuity.reset()
+    this.rejectedPitchFrames = 0
+    this.pitchDiagnostics = new PitchDiagnosticWindow()
+    this.lastDiagnosticLogMs = Date.now()
+    this.diagnosticFrame = null
+    this.diagnosticArrivalMs = null
     this.windows = 0
     this.voiced = 0
     this.peakDbfs = null
@@ -390,6 +412,7 @@ export class TrainingMicrophone {
           `${lease.negotiated.performanceMode} · ${lease.negotiated.inputPreset}`
       )
       this.startWatchdog()
+      void this.reportRoute(generation)
       return { ok: true }
     } catch (error) {
       await this.stopAndroidCore().catch(() => undefined)
@@ -488,6 +511,7 @@ export class TrainingMicrophone {
       pendingFrame = null
       log('mic', 'listening · iOS native core · zcore capture → zdsp analysis')
       this.startWatchdog()
+      void this.reportRoute(generation)
       return { ok: true }
     } catch (error) {
       const startError = error instanceof Error ? error.message : String(error)
@@ -537,6 +561,12 @@ export class TrainingMicrophone {
     log('mic', `inputs · ${inventory}`)
   }
 
+  private async reportRoute(generation: number): Promise<void> {
+    const [output, route] = await Promise.all([describeOutput(), getRouteLatency()]).catch(() => [])
+    if (generation !== this.generation || !output || !route) return
+    log('mic', `training route · ${output.text} · reported output + buffer ${(route.autoSec * 1000).toFixed(1)} ms`)
+  }
+
   private consumeNativeFrame(
     frame: AndroidAudioInputFrame | IosAudioInputFrame,
     clockNowMs: () => number
@@ -553,21 +583,40 @@ export class TrainingMicrophone {
     }
     const timestampMs =
       this.nativeClockAnchorMs + Number(midpoint - this.nativeHostAnchorNs) / 1_000_000
-    const frequencyHz = frame.frequency > 0 ? frame.frequency : 0
+    const now = Date.now()
+    this.pitchDiagnostics.add(frame, now)
+    if (now - this.lastDiagnosticLogMs >= 1000) {
+      this.lastDiagnosticLogMs = now
+      const report = this.pitchDiagnostics.flush()
+      if (report) log('mic-pitch', `${report} · ${this.rejectedPitchFrames} rejected by continuity` +
+        (frame && 'detector' in frame ? ` · ${frame.detector} · inference ${frame.inferenceMs?.toFixed(1) ?? 'unknown'} ms` : ''))
+      this.rejectedPitchFrames = 0
+    }
+    const prior = this.diagnosticFrame
+    if (!prior && 'detector' in frame)
+      log('mic', `pitch detector · ${frame.detector} · ${frame.detector === 'crepe-tiny' ? '64 ms window · 20 ms hop · confidence floor 0.50' : 'legacy YIN confidence floor 0.75'}`)
+    if (prior && (prior.streamGeneration !== frame.streamGeneration || prior.resetCount !== frame.resetCount))
+      this.pitchContinuity.reset()
+    this.diagnosticFrame = frame
+    this.diagnosticArrivalMs = clockNowMs()
+    const minConfidence = 'detector' in frame && frame.detector === 'crepe-tiny' ? 0.5 : SINGLE_NOTE_MIN_CONFIDENCE
+    const filteredHz = this.pitchContinuity.update(timestampMs, frame.frequency, frame.clarity, minConfidence)
+    if (filteredHz === null && frame.frequency > 0 && frame.clarity >= minConfidence) this.rejectedPitchFrames++
+    const frequencyHz = filteredHz ?? 0
     const midi = frequencyToFractionalMidi(frequencyHz)
     // The core re-anchors its analysis window whenever this flips, discarding
     // whatever it had buffered — so a high flip rate is a way for a healthy
     // stream to starve the detector. The tally is how a field log shows it.
     if (frame.timestampQuality in this.quality) this.quality[frame.timestampQuality]++
-    this.recordLevel(frame.rms, frequencyHz > 0)
+    this.recordLevel(frame.rms, frame.frequency > 0)
     const observation: TrainingPitchObservation = {
       timestampMs,
       frequencyHz,
       midi,
-      confidence: frame.clarity
+      confidence: filteredHz === null ? 0 : frame.clarity
     }
     this.latestMidi = midi
-    this.latestConfidence = frame.clarity
+    this.latestConfidence = observation.confidence
     this.latestTimestampMs = timestampMs
     this.observations.push(observation)
     if (this.observations.length > MAX_OBSERVATIONS)
@@ -618,6 +667,10 @@ export class TrainingMicrophone {
     this.stopWatchdog()
     if (this.captureStartedMs === null) return
     this.captureStartedMs = null
+    const report = this.pitchDiagnostics.flush()
+    const frame = this.diagnosticFrame
+    if (report) log('mic-pitch', `${report} · ${this.rejectedPitchFrames} rejected by continuity` +
+        (frame && 'detector' in frame ? ` · ${frame.detector} · inference ${frame.inferenceMs?.toFixed(1) ?? 'unknown'} ms` : ''))
     const stats = await this.deps.androidCore?.stats?.().catch(() => null)
     const transport = stats
       ? ` · transport ${stats.deliveredBlocks} callbacks/${stats.deliveredFrames} frames, ` +

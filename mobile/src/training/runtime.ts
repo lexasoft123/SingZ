@@ -12,8 +12,7 @@ const SINGLE_NOTE_DRIFT_GRACE_MS = 420
 const SINGLE_NOTE_PROGRESS_DRAIN_RATE = 0.25
 const SINGLE_NOTE_MAX_TICK_MS = 160
 const SINGLE_NOTE_DISPLAY_HOLD_MS = 280
-const SINGLE_NOTE_DISPLAY_TIME_CONSTANT_MS = 260
-const SINGLE_NOTE_DISPLAY_MAX_STEP_CENTS = 6
+const SINGLE_NOTE_DISPLAY_TIME_CONSTANT_MS = 80
 const SINGLE_NOTE_INSTANTANEOUS_MARGIN_CENTS = 7
 
 export type SingleNoteLockStatus = 'waiting' | 'adjust' | 'holding' | 'locked'
@@ -80,14 +79,15 @@ export class SingleNoteLockTracker {
     nowMs: number,
     midi: number | null,
     confidence: number,
-    targetMidi: number
+    targetMidi: number,
+    minConfidence = SINGLE_NOTE_MIN_CONFIDENCE
   ): SingleNoteLockState {
     const elapsedMs = this.lastUpdateMs === null
       ? 0
       : Math.max(0, Math.min(SINGLE_NOTE_MAX_TICK_MS, nowMs - this.lastUpdateMs))
     this.lastUpdateMs = nowMs
 
-    const voiced = midi !== null && Number.isFinite(midi) && confidence >= SINGLE_NOTE_MIN_CONFIDENCE
+    const voiced = midi !== null && Number.isFinite(midi) && confidence >= minConfidence
     const correctedMidi = voiced ? midi : null
     const currentCents = correctedMidi !== null ? (correctedMidi - targetMidi) * 100 : null
     if (currentCents !== null) this.lastVoicedAtMs = nowMs
@@ -103,18 +103,16 @@ export class SingleNoteLockTracker {
       } else {
         const smoothingElapsedMs = elapsedMs || 80
         const alpha = 1 - Math.exp(-smoothingElapsedMs / SINGLE_NOTE_DISPLAY_TIME_CONSTANT_MS)
-        const step = clamp(
-          (rawMedianCents - this.displayCents) * alpha,
-          -SINGLE_NOTE_DISPLAY_MAX_STEP_CENTS,
-          SINGLE_NOTE_DISPLAY_MAX_STEP_CENTS
-        )
-        this.displayCents += step
+        // An exponential response has a bounded settling time independent
+        // of the distance moved. The old 6-cent cap took >1.3 s per semitone.
+        this.displayCents += (rawMedianCents - this.displayCents) * alpha
       }
     }
-    const medianCents = this.displayCents
-    const displayMidi = medianCents !== null && this.lastVoicedAtMs !== null &&
+    // Scoring follows measurements, never the animated indicator's lag.
+    const medianCents = rawMedianCents
+    const displayMidi = this.displayCents !== null && this.lastVoicedAtMs !== null &&
       nowMs - this.lastVoicedAtMs <= SINGLE_NOTE_DISPLAY_HOLD_MS
-      ? targetMidi + medianCents / 100
+      ? targetMidi + this.displayCents / 100
       : null
     const centered = currentCents !== null &&
       medianCents !== null &&
@@ -184,8 +182,4 @@ function median(values: readonly number[]): number {
   return sorted.length % 2 === 0
     ? (sorted[middle - 1] + sorted[middle]) / 2
     : sorted[middle]
-}
-
-function clamp(value: number, low: number, high: number): number {
-  return Math.max(low, Math.min(high, value))
 }

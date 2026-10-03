@@ -4,7 +4,7 @@
 #include "native_audio_ownership.h"
 #include "playback_addon_bridge.h"
 
-#include <zdsp/analysis/capture_adapter.h>
+#include <zdsp/analysis/pitch_analysis_module.h>
 #include <zcore/device/audio_input.h>
 #include <zcore/device/audio_host.h>
 
@@ -44,7 +44,7 @@ struct EventBridge {
 struct CaptureOwner {
   std::mutex mutex;
   std::unique_ptr<singz::AudioInput> input;
-  std::unique_ptr<zdsp::analysis::LiveInputAnalysisAdapter> analyzer;
+  std::unique_ptr<zdsp::analysis::PitchAnalysisModule> analyzer;
   EventBridge* bridge = nullptr;
   uint64_t generation = 0;
   uint64_t lastDroppedEvents = 0;
@@ -502,7 +502,8 @@ napi_value begin(napi_env env, napi_callback_info info) {
   owner.generation = generation;
   owner.lastDroppedEvents = 0;
   owner.lastOverwrittenWindows = 0;
-  owner.analyzer = std::make_unique<zdsp::analysis::LiveInputAnalysisAdapter>(generation);
+  owner.analyzer = std::make_unique<zdsp::analysis::PitchAnalysisModule>(
+      zdsp::analysis::PitchAnalysisConfig{zdsp::analysis::PitchDetectorKind::Yin, {}, generation});
   owner.input = std::make_unique<singz::AudioInput>();
   const auto inventory = singz::enumerateAudioInputDevices();
   const singz::AudioInputDevice* selectedDevice = nullptr;

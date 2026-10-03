@@ -150,7 +150,8 @@ for (const chunk of [
 // real regression (a lazy chunk pulled into the entry is tens of kB) still
 // fails, and the next small addition is not a surprise at merge time.
 const ENTRY_RAW_BUDGET = 1_388_000
-const TRAINING_RAW_BUDGET = 80_000
+// Immediate target-entry feedback adds a small call site; retain a bounded 1 kB allowance.
+const TRAINING_RAW_BUDGET = 81_000
 const entryBytes = (await stat(resolve(assetsRoot, entryFile))).size
 const trainingBytes = await Promise.all(trainingChunks.map(async (file) =>
   (await stat(resolve(assetsRoot, file))).size

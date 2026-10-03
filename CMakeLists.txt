@@ -831,3 +831,13 @@ if(SINGZ_CORE_TESTS)
       PASS_REGULAR_EXPRESSION "\\{\"version\":1,\"devices\":\\[")
   endif()
 endif()
+
+if(SINGZ_CORE_TESTS AND SINGZ_BUILD_HOST_TOOLS)
+  add_executable(singz-crepe-tests tests/native/crepe-tiny.cpp)
+  target_compile_features(singz-crepe-tests PRIVATE cxx_std_20)
+  target_link_libraries(singz-crepe-tests PRIVATE SingZ::zdsp_analysis)
+  add_test(NAME crepe_tiny_parity COMMAND singz-crepe-tests
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets/pitch/crepe-tiny.bin"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/pitch/crepe-tiny-parity.f32"
+    "${CMAKE_CURRENT_BINARY_DIR}/crepe-recording-test.wav")
+endif()
