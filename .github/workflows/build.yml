@@ -50,6 +50,10 @@ jobs:
       - name: Generate the mobile copy of the graph document
         run: node mobile/scripts/sync-graph-document.js
 
+      # Roundtrip tests import the generated phone training/i18n bundle too.
+      - name: Generate the mobile training bundle
+        run: node mobile/scripts/build-training.mjs
+
       - run: npm run typecheck
 
       - run: npm test
