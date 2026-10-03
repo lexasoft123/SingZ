@@ -1448,9 +1448,6 @@ export default function SettingsModal({
             {windowsProviderInfo && <p className={`settings-hint${windowsProviderInfo.available ? '' : ' warn'}`}>
               {windowsProviderInfo.detail}
             </p>}
-            {asioProviderInfo && !asioProviderInfo.available && windowsProvider !== 'asio' && (
-              <p className="settings-hint warn">{t('settings.windows.asioUnavailable', { detail: asioProviderInfo.detail })}</p>
-            )}
           </>}
 
           <section className="mic-input-strip" aria-labelledby="mic-input-heading">

@@ -75,10 +75,10 @@ const eligible = {
 }
 
 describe('desktop native playback selection', () => {
-  it('renders the persisted Windows provider choice and unavailable ASIO reason in Settings', () => {
+  it('renders the persisted Windows provider choice without an unrelated ASIO warning', () => {
     const source = readSourceWithEnglish('src/renderer/src/components/SettingsModal.tsx')
     expect(source).toContain('System audio (WASAPI)')
-    expect(source).toContain('ASIO unavailable: {detail} */, { detail: asioProviderInfo.detail })')
+    expect(source).not.toContain('settings.windows.asioUnavailable')
     expect(source).toContain('onChangeNativeAudioProvider?.(')
     expect(source).toContain(
       'disabled={!playbackProviderCanChange(playbackStatus, nativePlaybackLeaseBlocked)}'
