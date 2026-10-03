@@ -11,10 +11,12 @@ const defaults = getDefaultConfig(__dirname);
 
 /** FLAC stems from desktop-prepared projects ship as bundled assets. */
 const config = {
-  // The portable metadata parser is shared directly with desktop. Expose only
+  // Portable policies and metadata are shared directly with desktop. Expose only
   // this dependency-free source directory, not the repo's second React install.
   watchFolders: [resolve(__dirname, '../src/shared')],
   resolver: {
+    // Shared TS may use Babel helpers; resolve those from the phone's runtime.
+    nodeModulesPaths: [resolve(__dirname, 'node_modules')],
     assetExts: [...defaults.resolver.assetExts, 'flac'],
   },
 };

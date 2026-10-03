@@ -413,6 +413,18 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
     event or job.json), and no file + `started === false` (+ no Cancel
     pressed) becomes "The split never started — try again", which covers a
     service that is never even created (the HyperOS empty shell below).
+    Android jobs also persist the split process PID, the start time of this
+    attempt, and the last native stage before loading the engine. On API 30+
+    the Android adapter supplies `ApplicationExitInfo` records and common TS
+    (`src/shared/split-job-policy.ts`) matches the exact process and attempt, so a native crash or system kill becomes a failed card with
+    the recorded reason, status and memory samples without waiting for the
+    90-second heartbeat timeout. Old records, missing OEM exit history and
+    older Android retain the heartbeat fallback; the player only derives the
+    verdict and never writes over the service's record or resume tail. Stage
+    changes bypass common TS percentage throttling; both native adapters forward
+    every stage (a 44.1 kHz input otherwise jumped
+    from resample to model loading inside 250 ms and hid the latter). Failure
+    reasons are included in the existing shareable app log.
     Guarded by `mobile/tests/split-refused-android.cjs`, which reproduces
     both on stock Android without a phone: "Restricted" battery + an idle
     uid make the system drop the start silently (`Background start not
@@ -2343,3 +2355,13 @@ the user's iPhone; ORT AAR header/prefab wiring + 16 KB-page compliance;
 subtleties beyond segment/normalize/overlap-add (the port is written against its
 site-packages source; the stem-correlation fixture is the gate); WKWebView host
 memory behavior with six decoded stems.
+
+
+**iOS restart recovery:** each new or resumed split persists the app process's
+UUID session in `job.json`. The native status adapter adds the current session;
+`src/shared/split-job-policy.ts` immediately derives an interrupted verdict for
+an unfinished job owned by a different session. It leaves the file and resume
+tail intact. Background suspension keeps the same session, terminal verdicts
+are preserved, and older records without an owner retain the heartbeat fallback.
+This proves interruption, not whether the OS killed the app for memory or another
+reason; the native vitals trail supplies the available diagnostics.

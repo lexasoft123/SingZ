@@ -28,7 +28,10 @@ object JobStore {
     val chunksDone: Long,
     val totalChunks: Long,
     val error: String?,
-    val updatedAtMs: Long
+    val updatedAtMs: Long,
+    val processPid: Int = 0,
+    val runStartedAtMs: Long = 0,
+    val stage: String = ""
   )
 
   fun file(dir: File): File = File(dir, "job.json")
@@ -46,7 +49,10 @@ object JobStore {
         chunksDone = o.optLong("chunksDone", 0),
         totalChunks = o.optLong("totalChunks", 0),
         error = if (o.has("error")) o.optString("error") else null,
-        updatedAtMs = o.optLong("updatedAtMs", 0)
+        updatedAtMs = o.optLong("updatedAtMs", 0),
+        processPid = o.optInt("processPid", 0),
+        runStartedAtMs = o.optLong("runStartedAtMs", 0),
+        stage = o.optString("stage", "")
       )
     } catch (_: Exception) {
       null
@@ -64,6 +70,19 @@ object JobStore {
       write(dir, cur.copy(updatedAtMs = System.currentTimeMillis()))
     } catch (_: Exception) {
       // a missed pulse only delays the app's verdict, never corrupts it
+    }
+  }
+
+  /** Stage evidence survives a missing Messenger event or a native crash. */
+  @Synchronized
+  fun setStage(dir: File, stage: String) {
+    val cur = read(dir) ?: return
+    if (cur.state != STATE_DECODING && cur.state != STATE_SPLITTING) return
+    if (cur.stage == stage) return
+    try {
+      write(dir, cur.copy(stage = stage, updatedAtMs = System.currentTimeMillis()))
+    } catch (_: Exception) {
+      // Diagnostics must not stop an otherwise healthy split.
     }
   }
 
@@ -85,6 +104,9 @@ object JobStore {
       o.put("totalChunks", job.totalChunks)
       if (job.error != null) o.put("error", job.error)
       o.put("updatedAtMs", job.updatedAtMs)
+      o.put("processPid", job.processPid)
+      o.put("runStartedAtMs", job.runStartedAtMs)
+      o.put("stage", job.stage)
       out.write(o.toString().toByteArray())
       out.fd.sync()
     }

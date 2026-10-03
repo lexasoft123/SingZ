@@ -1,6 +1,7 @@
 import { DeviceEventEmitter, NativeModules } from 'react-native'
 import { log } from '../log'
 import { t } from '../i18n'
+import { recoverSplitJob, SplitProgressGate, type SplitJobEvidence } from '../../../src/shared/split-job-policy'
 
 /**
  * The production split-job surface (docs/PHONE-STANDALONE.md). Android runs
@@ -31,7 +32,7 @@ export interface SplitState {
   error?: string
 }
 
-export interface SplitJobStatus {
+export interface SplitJobStatus extends SplitJobEvidence {
   state: 'decoding' | 'splitting' | 'done' | 'cancelled' | 'failed'
   srcPath: string
   projectDir: string
@@ -158,9 +159,10 @@ export async function replaySplitTrail(): Promise<void> {
 }
 
 /** The job record, or null when there is none (or no split surface yet). */
-export function splitStatus(): Promise<SplitJobStatus | null> {
-  if (!splitAvailable()) return Promise.resolve(null)
-  return native().splitStatus()
+export async function splitStatus(): Promise<SplitJobStatus | null> {
+  if (!splitAvailable()) return null
+  const status = await native().splitStatus()
+  return status ? recoverSplitJob(status) : null
 }
 
 /** Discard the job dir. Cancel first when the job is live. */
@@ -188,12 +190,14 @@ export function subscribeSplit(
   // screen's life, so leaving these latched would give only the session's
   // FIRST split the dense decode/load-model window — and the second song a
   // 15 s gap exactly where the first one died.
+  const progressGate = new SplitProgressGate()
   let lastStage = ''
   let lastVitalsAt = 0
   let chunksStarted = false
   const prog = DeviceEventEmitter.addListener('singzSplitProgress', (v) => {
     const p = v as SplitProgress
     const now = Date.now()
+    if (!progressGate.shouldSend(p.stage, p.frac, now)) return
     if (p.stage === 'chunk') chunksStarted = true
     // decode/resample/load-model only ever lead a JOB, so their arrival means
     // a new one started and the dense window reopens. 'split' is NOT one of
