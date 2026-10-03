@@ -882,6 +882,7 @@ export function Bar({
       onResponderGrant={grant}
       onResponderMove={move}
       onResponderRelease={commit}
+      onResponderTerminationRequest={() => !engaged.current}
       onResponderTerminate={terminate}
     >
       {rail != null ? (

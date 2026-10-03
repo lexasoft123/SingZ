@@ -984,6 +984,47 @@ void streamedLanesPlayTheSameAudioAsDecodedOnes() {
   std::remove(toneFlac.c_str());
 }
 
+// A fader can emit hundreds of updates before Play or while the host is held.
+// No audio callback exists to drain those updates in either state.
+void mixerEditsWithoutCallbacksKeepTheLatestValues() {
+  const std::string wav = writeWav("idle-mixer.wav", 1,
+                                  std::vector<float>(4096, 0.1F));
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+  std::vector<singz::NativePlaybackLaneSource> lanes;
+  for (uint32_t index = 0; index < 6; ++index)
+    lanes.push_back(lane(std::to_string(index).c_str(), wav));
+  CHECK(session.prepare(config(), std::move(lanes), 98).ok);
+  const auto edit = [&] {
+    for (uint32_t index = 0; index < 2000; ++index) {
+      CHECK(session.setLaneControl(98, "0", (index % 100) / 100.0F,
+                                   false, false).ok);
+      CHECK(session.setMasterGain(98, (index % 100) / 100.0F).ok);
+    }
+    CHECK(session.setLaneControl(98, "0", 0.5F, false, true).ok);
+    CHECK(session.setLaneControl(98, "1", 1.0F, true, false).ok);
+    CHECK(session.setMasterGain(98, 0.5F).ok);
+    const auto status = session.status();
+    CHECK(status.lanes[0].gain == 0.5F && status.lanes[0].solo &&
+          status.lanes[1].muted && status.masterGain == 0.5F);
+  };
+  edit();
+  CHECK(fake->starts == 0);
+  CHECK(session.openOutput(98).ok);
+  edit();
+  CHECK(session.start(98).ok && fake->drive(256));
+  CHECK(near(fake->left[255], pcm16(0.1F) * 0.25F, 0.001F));
+  CHECK(session.pause(98).ok && fake->drive(1));
+  CHECK(session.suspendOutput(98).ok);
+  edit();
+  CHECK(session.resumeOutput(98).ok && session.resume(98).ok);
+  CHECK(fake->drive(256));
+  CHECK(near(fake->left[255], pcm16(0.1F) * 0.25F, 0.001F));
+  CHECK(session.unload(98).ok);
+  std::remove(wav.c_str());
+}
+
 void compositionAndLifetime() {
   std::vector<float> a(256, 0.1F);
   std::vector<float> b(384, 0.2F);
@@ -7383,6 +7424,7 @@ int main() {
     std::puts("native playback quarantined swap tests: ok");
     return 0;
   }
+  mixerEditsWithoutCallbacksKeepTheLatestValues();
   compositionAndLifetime();
   streamedLanesPlayTheSameAudioAsDecodedOnes();
   laneWaveformSummaryAndCountInMeter();

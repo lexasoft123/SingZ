@@ -3944,6 +3944,28 @@ struct PreparedPlaybackGraph {
     return zdsp::okStatus();
   }
 
+  // Only called with the session mutex held and callback quiescence proved.
+  // Idle fader edits are latest-value intent, not a history to replay on Play.
+  void compactIdleParameters() noexcept {
+    if (parameters.snapshotAvailable() < zdsp::kRuntimeEventQueueCapacity / 2)
+      return;
+    std::array<zdsp::ParameterEvent, zdsp::kRuntimeEventQueueCapacity> latest{};
+    uint32_t count = 0;
+    zdsp::ParameterEvent event{};
+    while (parameters.pop(&event)) {
+      uint32_t index = 0;
+      for (; index < count; ++index)
+        if (latest[index].node.value == event.node.value &&
+            latest[index].parameter.value == event.parameter.value &&
+            latest[index].sampleOffset.value == event.sampleOffset.value)
+          break;
+      latest[index] = event;
+      if (index == count) ++count;
+    }
+    // At most the old queue's size remains, so this cannot overflow.
+    (void)parameters.pushBatch(latest.data(), count);
+  }
+
   bool enqueueGain(zdsp::NodeId node, float value) noexcept {
     return zdsp::enqueueParameter(&parameters,
                                   {node,
@@ -5418,6 +5440,18 @@ struct NativePlaybackSession::Impl {
     }
     lastError.clear();
     return failureWithoutMessage(error, requested, state);
+  }
+
+  void compactIdleParameters() noexcept {
+    // Prepared has no admitted host. Do not sample a prior generation's host.
+    // Open has not started; Suspended has completed the host's callback hold.
+    // A merely paused transport still has a running callback and must keep
+    // the queue's single-consumer ownership on the render thread.
+    if (state == NativePlaybackState::Prepared ||
+        state == NativePlaybackState::OutputOpen ||
+        (state == NativePlaybackState::Running &&
+         host.status().state == AudioHostState::Suspended))
+      prepared->compactIdleParameters();
   }
 
   bool stopHost(bool force = false,
@@ -7915,6 +7949,7 @@ NativePlaybackSession::setLaneControl(uint64_t generation,
   lane->gain = gain;
   lane->muted = muted;
   lane->solo = solo;
+  impl_->compactIdleParameters();
   if (!impl_->prepared->applyLaneGains()) {
     lane->gain = previousGain;
     lane->muted = previousMuted;
@@ -7945,6 +7980,7 @@ NativePlaybackResult NativePlaybackSession::setMasterGain(uint64_t generation,
     return failure(NativePlaybackError::InvalidConfiguration, generation,
                    impl_->state, "The master gain is invalid");
   }
+  impl_->compactIdleParameters();
   if (!impl_->prepared->enqueueMaster(gain)) {
     return failure(NativePlaybackError::QueueFull, generation, impl_->state,
                    "The bounded playback parameter queue is full");
@@ -7976,6 +8012,7 @@ NativePlaybackSession::setTrainingEnabled(uint64_t generation, bool enabled) {
   }
   if (impl_->prepared->trainingEnabled == enabled)
     return impl_->success(generation);
+  impl_->compactIdleParameters();
   if (!impl_->prepared->enqueueTrainingEnabled(enabled)) {
     return failure(NativePlaybackError::QueueFull, generation, impl_->state,
                    "The bounded playback parameter queue is full");
