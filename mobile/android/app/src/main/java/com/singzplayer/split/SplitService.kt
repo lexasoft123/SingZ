@@ -219,18 +219,19 @@ class SplitService : Service() {
 
       armWatchdog(firstCapMs)
       lastChunkAt = SystemClock.elapsedRealtime()
-      val progressGate = SplitProgressGate()
+      var lastPersistedStage = ""
       val listener = object : SingzCore.SplitListener {
         override fun onStage(stage: String, frac: Float) {
           // A cancel could land between the post-load check and runSplit's
           // entry reset of the engine flag — re-assert it from here.
           if (cancelRequested) SingzCore.cancelSplit()
-          val now = SystemClock.elapsedRealtime()
-          if (progressGate.shouldSend(stage, frac, now)) {
+          if (stage != lastPersistedStage) {
+            lastPersistedStage = stage
             JobStore.setStage(dir, stage)
-            sendProgress(stage, frac, 0, 0)
             if (stage == "load-model") postNotification(getString(R.string.split_warming), 0, 0, indeterminate = true)
           }
+          // Both platforms deliver every stage; common TS paces repeat updates.
+          sendProgress(stage, frac, 0, 0)
         }
         override fun onChunk(done: Long, total: Long) {
           if (cancelRequested) SingzCore.cancelSplit()

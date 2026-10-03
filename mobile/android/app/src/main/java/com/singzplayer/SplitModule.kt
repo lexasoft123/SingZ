@@ -142,8 +142,7 @@ class SplitModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx
   @ReactMethod
   fun splitStatus(promise: Promise) {
     try {
-      val stored = JobStore.read(SplitService.jobDir(reactApplicationContext))
-      val job = stored?.let { SplitProcessExit.recover(reactApplicationContext, it) }
+      val job = JobStore.read(SplitService.jobDir(reactApplicationContext))
       if (job == null) {
         promise.resolve(null)
         return
@@ -157,6 +156,25 @@ class SplitModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx
       m.putDouble("totalChunks", job.totalChunks.toDouble())
       job.error?.let { m.putString("error", it) }
       m.putDouble("updatedAtMs", job.updatedAtMs.toDouble())
+      m.putInt("processPid", job.processPid)
+      m.putDouble("runStartedAtMs", job.runStartedAtMs.toDouble())
+      m.putString("stage", job.stage)
+      m.putString("processName", "${reactApplicationContext.packageName}:split")
+      m.putString("exitPlatform", "Android")
+      val exits = Arguments.createArray()
+      for (exit in SplitProcessExit.read(reactApplicationContext, job.processPid)) {
+        exits.pushMap(Arguments.createMap().apply {
+          putInt("pid", exit.pid)
+          putString("processName", exit.processName)
+          putDouble("timestampMs", exit.timestampMs.toDouble())
+          putString("reason", exit.reason)
+          putInt("status", exit.status)
+          putString("description", exit.description)
+          putDouble("pssKb", exit.pssKb.toDouble())
+          putDouble("rssKb", exit.rssKb.toDouble())
+        })
+      }
+      m.putArray("processExits", exits)
       // Where the finished stems live — the adoption moves them out of here.
       m.putString("jobDir", SplitService.jobDir(reactApplicationContext).absolutePath)
       promise.resolve(m)

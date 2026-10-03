@@ -18,35 +18,18 @@ object SplitProcessExit {
     val rssKb: Long
   )
 
-  fun recover(job: JobStore.Job, processName: String, exits: List<Exit>): JobStore.Job {
-    if (job.state != JobStore.STATE_DECODING && job.state != JobStore.STATE_SPLITTING) return job
-    // Old records have no process identity: never attribute another run's death.
-    if (job.processPid <= 0 || job.runStartedAtMs <= 0) return job
-    val exit = exits.filter {
-      it.pid == job.processPid && it.processName == processName &&
-        it.timestampMs >= maxOf(job.runStartedAtMs, job.updatedAtMs)
-    }.maxByOrNull { it.timestampMs } ?: return job
-    val stage = job.stage.ifEmpty { job.state }
-    val detail = exit.description?.takeIf { it.isNotBlank() }?.let { " — $it" } ?: ""
-    val error = "Android stopped the split during $stage: ${exit.reason} " +
-      "(status ${exit.status}, PSS ${exit.pssKb / 1024} MB, RSS ${exit.rssKb / 1024} MB)$detail"
-    // A view of the durable record, not a write from the player process: the
-    // service remains the only writer, and a racing Resume cannot be overwritten.
-    return job.copy(state = JobStore.STATE_FAILED, error = error)
-  }
-
-  fun recover(context: Context, job: JobStore.Job): JobStore.Job {
-    if (Build.VERSION.SDK_INT < 30 || job.processPid <= 0 ||
-      (job.state != JobStore.STATE_DECODING && job.state != JobStore.STATE_SPLITTING)) return job
+  /** OS access and Android reason-code translation only; common TS owns
+   *  attempt matching, terminal-state policy and failure formatting. */
+  fun read(context: Context, pid: Int): List<Exit> {
+    if (Build.VERSION.SDK_INT < 30 || pid <= 0) return emptyList()
     return try {
       val manager = context.getSystemService(ActivityManager::class.java)
-      val exits = manager.getHistoricalProcessExitReasons(context.packageName, job.processPid, 16)
+      manager.getHistoricalProcessExitReasons(context.packageName, pid, 16)
         .map { Exit(it.pid, it.processName, it.timestamp, reasonName(it.reason),
           it.status, it.description, it.pss, it.rss) }
-      recover(job, "${context.packageName}:split", exits)
     } catch (_: Exception) {
-      // Some OEMs omit exit history; retain the ordinary heartbeat fallback.
-      job
+      // Some OEMs omit exit history; common TS retains the heartbeat fallback.
+      emptyList()
     }
   }
 
