@@ -1152,7 +1152,7 @@ export default function CatalogScreen({
   )
 
   const showFailed = useCallback(async (status: SplitJobStatus, fallbackError: string) => {
-    const attempts = await recordFailure(status.srcPath, status.updatedAtMs)
+    const attempts = await recordFailure(status.srcPath, status.updatedAtMs, status.error ?? fallbackError)
     setSplitUi({
       phase: 'failed',
       project: status.projectDir,

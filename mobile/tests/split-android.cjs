@@ -11,8 +11,8 @@
  *      reopen shows 6 lanes (persisted-log oracle);
  *      a double attachSplitEvents mid-run pins the register dedupe.
  *   2. kill -9 the :split process AND the app mid-split -> relaunch -> the
- *      card reconstructs from job.json alone and flips to interrupted (the
- *      clock pulse froze) -> Resume -> completes from the tail -> adoption.
+ *      card identifies the dead run through Android exit history (API 30+),
+ *      or the frozen heartbeat on older Android -> Resume -> adoption.
  *   3. cancel during decode -> job dir discarded, no card.
  *   4. watchdog seam (1.5 s cap) -> honest "stalled", :split dead, app alive.
  *   5. app dies right before DONE -> relaunch -> the mount effect adopts.
@@ -198,14 +198,20 @@ async function rideSplit(conn, { until = 'adopted', midRun = null, timeoutMs = 3
 
 // --- WAV maths for the fixture-free reconstruction gate --------------------
 
-function pcm16(buf) {
-  if (buf.length < 1000) {
-    throw new Error(`not a WAV (${buf.length} bytes): ${buf.toString('utf8', 0, 120)}`)
-  }
-  const i = buf.indexOf(Buffer.from('data'))
-  const n = buf.readUInt32LE(i + 4)
-  const out = new Int16Array(n / 2)
-  for (let j = 0; j < out.length; j++) out[j] = buf.readInt16LE(i + 8 + j * 2)
+function stemFile(doc, stem) {
+  return ['flac', 'wav'].map(ext => `${stem}.${ext}`)
+    .find(file => Object.hasOwn(doc.stemHashes ?? {}, file))
+}
+const hasSixStems = doc => STEMS.every(stem => stemFile(doc, stem))
+
+// Decode both v1 WAV and v2 FLAC: post-split analysis now compacts the stems
+// before the later parity/reconstruction checks can read them.
+function pullPcm(path) {
+  const bytes = execFileSync('ffmpeg', [
+    '-v', 'error', '-i', 'pipe:0', '-ac', '2', '-ar', '44100', '-f', 's16le', 'pipe:1'
+  ], { input: pullWav(path), maxBuffer: 64 * 1024 * 1024 })
+  const out = new Int16Array(bytes.length / 2)
+  for (let i = 0; i < out.length; i++) out[i] = bytes.readInt16LE(i * 2)
   return out
 }
 
@@ -217,8 +223,13 @@ function pullWav(devicePath) {
 }
 
 function reconstructionCorr(project) {
-  const mix = pcm16(pullWav(`${DOCS}/${project}/song.wav`))
-  const stems = STEMS.map((s) => pcm16(pullWav(`${DOCS}/${project}/stems/${s}.wav`)))
+  const doc = JSON.parse(shell(`cat "${DOCS}/${project}/project.json"`))
+  const mix = pullPcm(`${DOCS}/${project}/${doc.songFile}`)
+  const stems = STEMS.map(stem => {
+    const file = stemFile(doc, stem)
+    if (!file) throw new Error(`project has no ${stem} stem`)
+    return pullPcm(`${DOCS}/${project}/stems/${file}`)
+  })
   const n = Math.min(mix.length, ...stems.map((s) => s.length))
   let sx = 0, sy = 0, sxy = 0, sxx = 0, syy = 0, m = 0
   for (let i = 0; i < n; i += 3) {
@@ -299,6 +310,7 @@ async function main() {
 
   // --- 1. the product loop ------------------------------------------------
   await addSong(conn, P.one, seedName)
+  const modelLoadsBefore = (prefXml().match(/load-model 0%/g) ?? []).length
   await conn.evaluate(`globalThis.__test.splitProject(${JSON.stringify(P.one)}); true`)
   await rideSplit(conn, {
     until: 'adopted',
@@ -309,9 +321,11 @@ async function main() {
       await conn.evaluate('globalThis.__test.attachSplitEvents(); true')
     }
   })
+  check('model-loading stage reached the persisted log',
+    (prefXml().match(/load-model 0%/g) ?? []).length > modelLoadsBefore)
   const doc1 = JSON.parse(shell(`cat "${DOCS}/${P.one}/project.json"`))
   const rows1 = Object.keys(doc1.stemHashes ?? {}).sort()
-  check('adoption: six stem rows', STEMS.every((s) => rows1.includes(`${s}.wav`)))
+  check('adoption: six stem rows', hasSixStems(doc1))
 
   // Phase 4c: the melody in project.json came from the CORE's tracker
   // (zcore/src/legacy/melody.cpp via JNI), and on this device it agrees with the
@@ -351,14 +365,25 @@ async function main() {
     console.log('SKIP  reconstruction gate (flac seed — song.wav absent without ffmpeg)')
   }
 
-  const openedBefore = (prefXml().match(new RegExp(`opened ${P.one}`, 'g')) ?? []).length
+  const beforeOpen = prefXml()
+  const openedBefore = (beforeOpen.match(new RegExp(`opened ${P.one}`, 'g')) ?? []).length
+  const materializedBefore = (beforeOpen.match(new RegExp(`materialized ${P.one}`, 'g')) ?? []).length
+  const attachedBefore = (beforeOpen.match(/project attached · generation/g) ?? []).length
   await conn.evaluate(`globalThis.__test.openProject(${JSON.stringify(P.one)}); true`)
   {
     const t0 = Date.now()
     let lanes = null
+    let nativeGraph = false
     for (;;) {
       await sleep(2000) // app-process decode in flight — log polls only
       const xml = prefXml()
+      if ((xml.match(new RegExp(`materialized ${P.one}`, 'g')) ?? []).length > materializedBefore &&
+          (xml.match(/project attached · generation/g) ?? []).length > attachedBefore) {
+        const matches = [...xml.matchAll(new RegExp(`materialized ${P.one}[^&<]*?(\\d+) lanes`, 'g'))]
+        lanes = matches.at(-1)?.[1] ?? '?'
+        nativeGraph = true
+        break
+      }
       if ((xml.match(new RegExp(`opened ${P.one}`, 'g')) ?? []).length > openedBefore) {
         const m = new RegExp(`opened ${P.one}[^&<]*?(\\d+) lanes`).exec(xml)
         lanes = m ? m[1] : '?'
@@ -371,14 +396,21 @@ async function main() {
     // ported): fewer than six lanes AND the hidden-lane log lines present.
     const xml = prefXml()
     const hidden = (xml.match(/lane is silent — hidden/g) ?? []).length
-    check('reopen hides the silent lanes (audibleStems)',
-      lanes !== null && Number(lanes) >= 3 && Number(lanes) < 6 && hidden >= 1,
-      `lanes=${lanes} hiddenLogs=${hidden}`)
+    if (nativeGraph) {
+      // The native graph materializes all six sources rather than running
+      // RNAudioAPI's decoded-buffer silence filter.
+      check('reopen attaches the native graph with six stems', Number(lanes) === 6, `lanes=${lanes}`)
+    } else {
+      check('reopen hides the silent lanes (audibleStems)',
+        lanes !== null && Number(lanes) >= 3 && Number(lanes) < 6 && hidden >= 1,
+        `lanes=${lanes} hiddenLogs=${hidden}`)
+    }
   }
   conn = await relaunch() // back to the catalog for the next cases
 
   // --- 2. kill both processes mid-split, resume from the file -------------
   await addSong(conn, P.two, seedName)
+  const exitsBefore = (prefXml().match(/Android stopped the split during /g) ?? []).length
   await conn.evaluate(`globalThis.__test.splitProject(${JSON.stringify(P.two)}); true`)
   await rideSplit(conn, {
     until: 'done-file',
@@ -391,6 +423,8 @@ async function main() {
   }).catch((e) => { if (e.message !== '__killed__') throw e })
   const jobAfterKill = readJob()
   check('kill left a truthful active job.json', jobAfterKill?.state === 'splitting', JSON.stringify(jobAfterKill?.state))
+  check('job identifies its native process and stage',
+    jobAfterKill?.processPid > 0 && jobAfterKill?.runStartedAtMs > 0 && !!jobAfterKill?.stage)
   conn = await relaunch()
   {
     let ui = null
@@ -401,13 +435,20 @@ async function main() {
       if (ui?.phase === 'failed') break
       if (Date.now() - t0 > 180000) break
     }
-    check('relaunch shows the interrupted card (clock pulse froze)', ui?.phase === 'failed', JSON.stringify(ui))
+    check('relaunch shows the interrupted card', ui?.phase === 'failed', JSON.stringify(ui))
+    if (Number(adb('shell', 'getprop', 'ro.build.version.sdk')) >= 30) {
+      check('Android exit history identifies the dead split before the 90s timeout',
+        ui?.phase === 'failed' && ui.error?.startsWith('Android stopped the split during ') &&
+          Date.now() - t0 < 45000, JSON.stringify(ui))
+      check('exit reason is in the shareable app log',
+        (prefXml().match(/Android stopped the split during /g) ?? []).length > exitsBefore)
+    }
   }
   await conn.evaluate(`globalThis.__test.resumeSplit(${JSON.stringify(P.two)}); true`)
   await rideSplit(conn, { until: 'adopted' })
   const doc2 = JSON.parse(shell(`cat "${DOCS}/${P.two}/project.json"`))
   check('resumed adoption: six rows, lane gone',
-    STEMS.every((s) => Object.keys(doc2.stemHashes ?? {}).includes(`${s}.wav`)) && !doc2.settings.custom)
+    hasSixStems(doc2) && !doc2.settings.custom)
 
   // --- 3. cancel during decode --------------------------------------------
   await addSong(conn, P.three, seedName)
@@ -477,7 +518,7 @@ async function main() {
       const doc = (() => {
         try { return JSON.parse(shell(`cat "${DOCS}/${P.three}/project.json"`)) } catch { return null }
       })()
-      if (doc && STEMS.every((s) => Object.keys(doc.stemHashes ?? {}).includes(`${s}.wav`)) && readJob() === null) {
+      if (doc && hasSixStems(doc) && readJob() === null) {
         ok = true
         break
       }

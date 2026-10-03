@@ -107,6 +107,9 @@ interface Attempts {
   /** job.json's updatedAtMs when last counted — one failure counts once,
    *  however many times the card re-renders or the app relaunches into it. */
   lastMs: number
+  /** Exit history may arrive after the heartbeat fallback; log new evidence
+   *  once without counting the same failed run again. */
+  lastError?: string
 }
 
 async function readAttempts(): Promise<Attempts | null> {
@@ -123,16 +126,17 @@ export async function failureCount(srcPath: string): Promise<number> {
   return v && v.src === srcPath ? v.n : 0
 }
 
-export async function recordFailure(srcPath: string, atMs: number): Promise<number> {
+export async function recordFailure(srcPath: string, atMs: number, error?: string): Promise<number> {
   const prev = await readAttempts()
-  if (prev && prev.src === srcPath && prev.lastMs === atMs) return prev.n
-  const n = (prev && prev.src === srcPath ? prev.n : 0) + 1
+  const sameFailure = prev?.src === srcPath && prev.lastMs === atMs
+  if (sameFailure && (!error || prev.lastError === error)) return prev.n
+  const n = sameFailure ? prev.n : (prev && prev.src === srcPath ? prev.n : 0) + 1
   try {
-    await setStoredText(ATTEMPTS_KEY, JSON.stringify({ src: srcPath, n, lastMs: atMs }))
+    await setStoredText(ATTEMPTS_KEY, JSON.stringify({ src: srcPath, n, lastMs: atMs, lastError: error }))
   } catch {
     // an uncounted failure only softens copy, never blocks
   }
-  log('split', `failure ${n} for ${srcPath}`)
+  log('split', `failure ${n} for ${srcPath}${error ? ` — ${error}` : ''}`)
   return n
 }
 

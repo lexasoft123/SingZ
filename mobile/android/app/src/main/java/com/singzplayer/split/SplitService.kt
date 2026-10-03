@@ -153,12 +153,30 @@ class SplitService : Service() {
   private fun runJob(src: String, model: String, projectDir: String, wantResume: Boolean) {
     val dir = jobDir(this)
     try {
+      val prev = JobStore.read(dir)
+      val mixFile = File(dir, "mix.raw")
+      // A resume needs the decoded mix and a rate on record; anything else is
+      // a fresh start. The engine re-validates against tail.bin either way.
+      val canResume = wantResume && prev != null && prev.srcPath == src &&
+        prev.srcRate > 0 && mixFile.length() > 0 &&
+        (prev.state == JobStore.STATE_SPLITTING || prev.state == JobStore.STATE_FAILED)
+
+      val startedAt = System.currentTimeMillis()
+      val pid = android.os.Process.myPid()
+      if (!canResume) dir.deleteRecursively()
+      val initial = if (canResume) prev!!.copy(
+        state = JobStore.STATE_SPLITTING, error = null, modelPath = model, projectDir = projectDir,
+        updatedAtMs = startedAt, processPid = pid, runStartedAtMs = startedAt, stage = "load-engine"
+      ) else JobStore.Job(
+        JobStore.STATE_DECODING, src, projectDir, model, 0, 0, 0, null, startedAt,
+        processPid = pid, runStartedAtMs = startedAt, stage = "load-engine")
+      // Native library initialization may itself crash: leave the run identity
+      // before entering it, so Android's exit history can explain this attempt.
+      JobStore.write(dir, initial)
+      armWatchdog(firstCapMs)
       val loadErr = SingzCore.ensureLoaded()
       if (loadErr != null) {
-        // No record exists yet on a fresh start, and finishJob only updates
-        // one — write it, or the app hears "failed" with no file to show.
         val msg = "Splitting is unavailable on this phone ($loadErr)"
-        writeStartFailure(dir, src, model, projectDir, wantResume, msg)
         finishJob(dir, JobStore.STATE_FAILED, msg)
         return
       }
@@ -170,30 +188,13 @@ class SplitService : Service() {
         return
       }
 
-      val prev = JobStore.read(dir)
-      val mixFile = File(dir, "mix.raw")
-      // A resume needs the decoded mix and a rate on record; anything else is
-      // a fresh start. The engine re-validates against tail.bin either way.
-      val canResume = wantResume && prev != null && prev.srcPath == src &&
-        prev.srcRate > 0 && mixFile.length() > 0 &&
-        (prev.state == JobStore.STATE_SPLITTING || prev.state == JobStore.STATE_FAILED)
-
       val srcRate: Int
       var resumeHint = 0L
       if (canResume) {
         srcRate = prev!!.srcRate
         resumeHint = prev.chunksDone
-        // The intent is the truth of THIS run — the doc must name the model
-        // and target that actually produce the stems, not last time's.
-        JobStore.write(dir, prev.copy(
-          state = JobStore.STATE_SPLITTING, error = null,
-          modelPath = model, projectDir = projectDir,
-          updatedAtMs = System.currentTimeMillis()))
       } else {
-        dir.deleteRecursively()
-        JobStore.write(dir, JobStore.Job(
-          JobStore.STATE_DECODING, src, projectDir, model,
-          0, 0, 0, null, System.currentTimeMillis()))
+        JobStore.setStage(dir, "decode")
         armWatchdog(firstCapMs)
         postNotification(getString(R.string.split_reading), 0, 0, indeterminate = true)
         sendProgress("decode", 0f, 0, 0)
@@ -218,15 +219,15 @@ class SplitService : Service() {
 
       armWatchdog(firstCapMs)
       lastChunkAt = SystemClock.elapsedRealtime()
-      var lastStageSentAt = 0L
+      val progressGate = SplitProgressGate()
       val listener = object : SingzCore.SplitListener {
         override fun onStage(stage: String, frac: Float) {
           // A cancel could land between the post-load check and runSplit's
           // entry reset of the engine flag — re-assert it from here.
           if (cancelRequested) SingzCore.cancelSplit()
           val now = SystemClock.elapsedRealtime()
-          if (frac >= 1f || now - lastStageSentAt > 250) {
-            lastStageSentAt = now
+          if (progressGate.shouldSend(stage, frac, now)) {
+            JobStore.setStage(dir, stage)
             sendProgress(stage, frac, 0, 0)
             if (stage == "load-model") postNotification(getString(R.string.split_warming), 0, 0, indeterminate = true)
           }
@@ -237,7 +238,7 @@ class SplitService : Service() {
           val cur = JobStore.read(dir)
           if (cur != null) {
             JobStore.write(dir, cur.copy(
-              chunksDone = done, totalChunks = total,
+              chunksDone = done, totalChunks = total, stage = "chunk",
               updatedAtMs = System.currentTimeMillis()))
           }
           sendProgress("chunk", if (total > 0) done.toFloat() / total else 0f, done, total)

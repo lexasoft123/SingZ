@@ -21,6 +21,7 @@ import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.singzplayer.split.JobStore
 import com.singzplayer.split.SingzCore
 import com.singzplayer.split.SplitService
+import com.singzplayer.split.SplitProcessExit
 import kotlin.concurrent.thread
 import org.json.JSONObject
 
@@ -141,7 +142,8 @@ class SplitModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx
   @ReactMethod
   fun splitStatus(promise: Promise) {
     try {
-      val job = JobStore.read(SplitService.jobDir(reactApplicationContext))
+      val stored = JobStore.read(SplitService.jobDir(reactApplicationContext))
+      val job = stored?.let { SplitProcessExit.recover(reactApplicationContext, it) }
       if (job == null) {
         promise.resolve(null)
         return
