@@ -2276,7 +2276,6 @@ export default function PlayerScreen({
                     )}
                   </View>
                   <Pressable
-                    hitSlop={4}
                     onPress={() =>
                       engine.capabilities.mixer
                         ? engine.setMuted(track.id, !track.muted)
@@ -2293,7 +2292,6 @@ export default function PlayerScreen({
                     <SpeakerGlyph color={track.muted ? '#1d0f0d' : white(0.55)} slashed={track.muted} />
                   </Pressable>
                   <Pressable
-                    hitSlop={4}
                     onPress={() =>
                       engine.capabilities.mixer
                         ? engine.setSolo(track.id, !track.solo)
@@ -3219,9 +3217,9 @@ const s = StyleSheet.create({
   dot: { width: 11, height: 11, borderRadius: 6 },
   mixName: { color: C.text, fontSize: 14.5, fontWeight: '600', width: 96 },
   msBtn: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     borderWidth: 1.5,
     borderColor: white(0.18),
     alignItems: 'center',
