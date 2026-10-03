@@ -66,3 +66,29 @@ describe('common split exit recovery', () => {
     expect(recoverSplitJob(job)).toBe(job)
   })
 })
+
+
+describe('common in-process split recovery', () => {
+  const job = { state: 'splitting', updatedAtMs: Date.now(), sessionId: 'old', currentSessionId: 'new', chunksDone: 3 }
+  it('immediately recovers a previous session without mutating the resume record', () => {
+    expect(recoverSplitJob(job)).toEqual({ ...job, state: 'failed', error: 'Splitting interrupted — resume to try again' })
+    expect(job.state).toBe('splitting')
+    expect(recoverSplitJob({ ...job, state: 'decoding' }).state).toBe('failed')
+  })
+  it('preserves a live or suspended job in the same process and old documents', () => {
+    for (const change of [{ currentSessionId: 'old' }, { sessionId: undefined }, { currentSessionId: undefined }]) {
+      const record = { ...job, ...change }
+      expect(recoverSplitJob(record)).toBe(record)
+    }
+  })
+  it('preserves terminal verdicts after restart', () => {
+    for (const state of ['done', 'cancelled', 'failed']) {
+      const record = { ...job, state, error: 'existing verdict' }
+      expect(recoverSplitJob(record)).toBe(record)
+    }
+  })
+  it('keeps a resumed attempt alive after ownership moves to the new session', () => {
+    const record = { ...job, sessionId: 'new' }
+    expect(recoverSplitJob(record)).toBe(record)
+  })
+})

@@ -2355,3 +2355,13 @@ the user's iPhone; ORT AAR header/prefab wiring + 16 KB-page compliance;
 subtleties beyond segment/normalize/overlap-add (the port is written against its
 site-packages source; the stem-correlation fixture is the gate); WKWebView host
 memory behavior with six decoded stems.
+
+
+**iOS restart recovery:** each new or resumed split persists the app process's
+UUID session in `job.json`. The native status adapter adds the current session;
+`src/shared/split-job-policy.ts` immediately derives an interrupted verdict for
+an unfinished job owned by a different session. It leaves the file and resume
+tail intact. Background suspension keeps the same session, terminal verdicts
+are preserved, and older records without an owner retain the heartbeat fallback.
+This proves interruption, not whether the OS killed the app for memory or another
+reason; the native vitals trail supplies the available diagnostics.

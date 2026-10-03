@@ -26,6 +26,9 @@ export interface SplitJobEvidence {
   state: string
   error?: string
   updatedAtMs: number
+  /** In-process adapters persist the owner session and supply the current one. */
+  sessionId?: string
+  currentSessionId?: string
   processPid?: number
   runStartedAtMs?: number
   stage?: string
@@ -37,6 +40,9 @@ export interface SplitJobEvidence {
 /** Derive a verdict without writing over the native worker's resume record. */
 export function recoverSplitJob<T extends SplitJobEvidence>(job: T): T {
   if (job.state !== 'decoding' && job.state !== 'splitting') return job
+  if (job.sessionId && job.currentSessionId && job.sessionId !== job.currentSessionId) {
+    return { ...job, state: 'failed', error: 'Splitting interrupted — resume to try again' }
+  }
   // Old documents and adapters without process evidence keep their heartbeat fallback.
   if (!job.processName || (job.processPid ?? 0) <= 0 || (job.runStartedAtMs ?? 0) <= 0) return job
   const since = Math.max(job.runStartedAtMs!, job.updatedAtMs)

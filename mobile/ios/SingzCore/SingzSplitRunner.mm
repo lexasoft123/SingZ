@@ -118,6 +118,14 @@ static SingzVitals SampleVitals(void) {
 // in Info.plist's BGTaskSchedulerPermittedIdentifiers.
 static NSString *const kBgTaskId = @"io.s-dev.singz.split";
 
+// One identity for the lifetime of the app process, independent of PID reuse.
+static NSString *CurrentSessionId(void) {
+  static NSString *sessionId;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{ sessionId = NSUUID.UUID.UUIDString; });
+  return sessionId;
+}
+
 #pragma mark - job.json (the Android JobStore contract, mirrored)
 
 static NSString *JobDirPath(void) {
@@ -352,6 +360,7 @@ static BOOL DecodeToRawF32Stereo(NSString *srcPath, NSString *outPath,
     if (job) {
       NSMutableDictionary *m = [job mutableCopy];
       m[@"jobDir"] = JobDirPath();
+      m[@"currentSessionId"] = CurrentSessionId();
       out = m;
     }
   });
@@ -525,6 +534,7 @@ static const BOOL kUseContinuedTask = NO;
       dispatch_sync(JobQueue(), ^{
         UpdateJobLocked(^(NSMutableDictionary *job) {
           job[@"state"] = kStateSplitting;
+          job[@"sessionId"] = CurrentSessionId();
           [job removeObjectForKey:@"error"];
           // the intent of THIS run names what produces the stems
           job[@"modelPath"] = model;
@@ -536,6 +546,7 @@ static const BOOL kUseContinuedTask = NO;
       dispatch_sync(JobQueue(), ^{
         WriteJobLocked(@{
           @"version" : @1,
+          @"sessionId" : CurrentSessionId(),
           @"state" : kStateDecoding,
           @"srcPath" : src,
           @"projectDir" : projectDir,

@@ -73,6 +73,8 @@ const check = (label, cond, detail) => {
   if (!cond) failures++
 }
 const simctl = (...a) => execFileSync('xcrun', ['simctl', ...a], { encoding: 'utf8' }).trim()
+const deviceName = Object.values(JSON.parse(simctl('list', 'devices', '--json')).devices).flat().find(d => d.udid === UDID)?.name
+if (!deviceName) throw new Error('unknown SIM_UDID: ' + UDID)
 const terminate = () => { try { simctl('terminate', UDID, BUNDLE) } catch { /* not running */ } }
 const container = () => simctl('get_app_container', UDID, BUNDLE, 'data')
 const jobJson = () => join(container(), 'Library', 'Application Support', 'split-job', 'job.json')
@@ -118,7 +120,7 @@ async function liveTarget(patienceMs = 150000) {
   for (;;) {
     try {
       const targets = (await (await fetch(`http://localhost:${PORT}/json`)).json()).filter(
-        (t) => t.webSocketDebuggerUrl && /iphone|ipad/i.test(t.deviceName || '')
+        (t) => t.webSocketDebuggerUrl && t.deviceName === deviceName
       )
       for (const t of targets.reverse()) {
         try {
@@ -424,9 +426,11 @@ async function main() {
       await sleep(3000)
       ui = await splitUi(conn)
       if (ui?.phase === 'failed') break
-      if (Date.now() - t1 > 180000) break
+      if (Date.now() - t1 > 30_000) break
     }
-    check('relaunch shows the interrupted card (frozen pulse)', ui?.phase === 'failed',
+    check('relaunch immediately recovers the previous app session',
+      ui?.phase === 'failed' && Date.now() - t1 < 30_000 &&
+        Date.now() - readJob().updatedAtMs < 90_000 && !!readJob().sessionId,
       JSON.stringify(ui))
   }
   await conn.evaluate(`globalThis.__test.resumeSplit(${JSON.stringify(P.two)}); true`)
