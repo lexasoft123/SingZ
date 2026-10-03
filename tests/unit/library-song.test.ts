@@ -19,7 +19,8 @@ let root: string
 // Two v2 projects, one's name inside the other's — the library the substring
 // click went wrong on.
 beforeEach(() => {
-  root = realpathSync(mkdtempSync(join(tmpdir(), 'library-song-')))
+  // Match the driver: native realpath expands Windows short TEMP paths too.
+  root = realpathSync.native(mkdtempSync(join(tmpdir(), 'library-song-')))
   for (const name of ['Song', 'Song second']) {
     mkdirSync(join(root, name, 'stems'), { recursive: true })
     writeFileSync(join(root, name, 'project.json'), JSON.stringify({ version: 2, name, settings: {} }))

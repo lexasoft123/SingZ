@@ -34,6 +34,10 @@ jobs:
       - name: Generate the mobile copy of the graph document
         run: node mobile/scripts/sync-graph-document.js
 
+      # Roundtrip tests also import the phone i18n training bundle.
+      - name: Generate the mobile training bundle
+        run: node mobile/scripts/build-training.mjs
+
       - name: Unit tests (FLAC roundtrip, v1->v2 migration)
         run: npm test
 

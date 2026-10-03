@@ -1167,8 +1167,19 @@ export default function App(): React.JSX.Element {
     void reconcileOutput(null)
     const onChange = (): void => void reconcileOutput(null)
     navigator.mediaDevices.addEventListener('devicechange', onChange)
-    return () => navigator.mediaDevices.removeEventListener('devicechange', onChange)
-  }, [reconcileOutput])
+    // A default-device change need not change Chromium's endpoint inventory.
+    // Recheck the native route too, using the same serialized intent owner.
+    let probing = false
+    const timer = setInterval(() => {
+      if (!engine.nativeActive || probing) return
+      probing = true
+      void reconcileOutput(null).finally(() => { probing = false })
+    }, 2000)
+    return () => {
+      clearInterval(timer)
+      navigator.mediaDevices.removeEventListener('devicechange', onChange)
+    }
+  }, [engine, reconcileOutput])
 
   // Apply-then-commit: a pick that fails never lands in the prefs, so the
   // dropdown (valued from them) snaps back by itself.
