@@ -116,8 +116,11 @@ struct PitchAnalysisModule::Impl {
       case DiscontinuityReason::ClockReanchored: block.capture.discontinuity = singz::AudioInputDiscontinuityReason::ClockReanchored; break;
       case DiscontinuityReason::DeviceLost: block.capture.discontinuity = singz::AudioInputDiscontinuityReason::DeviceLost; break;
       case DiscontinuityReason::SourceFrameOverflow: block.capture.discontinuity = singz::AudioInputDiscontinuityReason::SourceFrameOverflow; break;
-      default: if (capture.discontinuity.reason != DiscontinuityReason::None)
-        block.capture.discontinuity = singz::AudioInputDiscontinuityReason::ClockReanchored; break;
+      default:
+        if (capture.discontinuity.reason != DiscontinuityReason::None) {
+          block.capture.discontinuity = singz::AudioInputDiscontinuityReason::ClockReanchored;
+        }
+        break;
     }
     if (block.capture.discontinuity != singz::AudioInputDiscontinuityReason::None)
       block.capture.flags |= singz::AudioInputDiscontinuous;
