@@ -2,6 +2,7 @@
 Run with a Python containing numpy; optional --model exercises real silence.
 """
 import unittest
+from unittest.mock import patch
 import numpy as np
 import vocal_split_runner as runner
 
@@ -12,6 +13,18 @@ class IdentitySession:
         return [inputs['input']]
 
 class VocalSplitTests(unittest.TestCase):
+    def test_intel_and_rosetta_never_select_coreml(self):
+        available = ['CoreMLExecutionProvider', 'CPUExecutionProvider']
+        with patch.object(runner.sys, 'platform', 'darwin'):
+            for arch in ('x86_64', 'i386'):
+                with patch.object(runner.platform, 'machine', return_value=arch):
+                    self.assertEqual(runner.execution_providers(False, available), ['CPUExecutionProvider'])
+            with patch.object(runner.platform, 'machine', return_value='arm64'):
+                self.assertEqual(runner.execution_providers(False, available)[0][0], 'CoreMLExecutionProvider')
+                self.assertEqual(runner.execution_providers(True, available), ['CPUExecutionProvider'])
+                self.assertEqual(runner.execution_providers(False, ['CPUExecutionProvider']), ['CPUExecutionProvider'])
+
+
     def test_roundtrip_bandlimited_stereo(self):
         t = np.arange(runner.CHUNK) / 44100
         audio = np.stack((.3*np.sin(2*np.pi*220*t), .2*np.cos(2*np.pi*440*t))).astype('float32')

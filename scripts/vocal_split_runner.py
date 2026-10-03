@@ -13,6 +13,7 @@ import hashlib
 import json
 from pathlib import Path
 import os
+import platform
 import struct
 import sys
 import numpy as np
@@ -75,6 +76,18 @@ def split(audio, session, progress=lambda _: None):
     return audio - backing, backing
 
 
+def execution_providers(cpu_only, available):
+    # Intel/Rosetta packs use CPU. Keep their older x86 ORT build out of the
+    # CoreML path; acceleration is reserved for the Apple Silicon runtime.
+    providers = ['CPUExecutionProvider']
+    if (not cpu_only and sys.platform == 'darwin' and platform.machine() == 'arm64'
+            and 'CoreMLExecutionProvider' in available):
+        providers.insert(0, ('CoreMLExecutionProvider', {
+            'ModelFormat': 'MLProgram', 'MLComputeUnits': 'ALL', 'RequireStaticInputShapes': '1'
+        }))
+    return providers
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', required=True)
@@ -115,11 +128,7 @@ def main():
     # Freezing the exported batch dimension lets CoreML compile this graph.
     # Leaving it symbolic sends the whole graph to CPU with static-shapes=1.
     opts.add_free_dimension_override_by_name('batch_size', 1)
-    providers = ['CPUExecutionProvider']
-    if not args.cpu and sys.platform == 'darwin' and 'CoreMLExecutionProvider' in ort.get_available_providers():
-        providers.insert(0, ('CoreMLExecutionProvider', {
-            'ModelFormat': 'MLProgram', 'MLComputeUnits': 'ALL', 'RequireStaticInputShapes': '1'
-        }))
+    providers = execution_providers(args.cpu, ort.get_available_providers())
     try:
         session = ort.InferenceSession(args.model, sess_options=opts, providers=providers)
     except Exception:
@@ -127,6 +136,7 @@ def main():
             raise
         print('CoreML could not load this model; using CPU.', file=sys.stderr, flush=True)
         session = ort.InferenceSession(args.model, sess_options=opts, providers=['CPUExecutionProvider'])
+    print('Vocal inference: ' + ', '.join(session.get_providers()), file=sys.stderr, flush=True)
     report = lambda p: print(json.dumps({'percent': round(p * 95)}), flush=True)
     try:
         lead, backing = split(audio.T, session, report)
