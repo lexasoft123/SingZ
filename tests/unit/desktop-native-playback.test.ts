@@ -712,6 +712,21 @@ describe('desktop native playback facade', () => {
         }]
       }))
     }
+    it('does not open an old prepared endpoint after the system output changes before Play', async () => {
+      const h = seamHarness(generation => playing(generation))
+      const change = routes(h)
+      ;(h.api.desktopPlaybackProviders as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([{ id: provider, available: true }])
+      const request = { provider, lanes: [{ id: 'vocals', path: '/allowed/vocals.mp3', gain: 1, muted: false, solo: false }],
+        beat: null, metronome: h.metronome, countIn: false, positionSeconds: 3, durationSeconds: 10,
+        sampleRate: 48_000, masterGain: 0, playbackRate: 1, transpose: 0, training: null, loop: null }
+      expect(await h.client.prepareAhead(request)).toBe(true)
+      change()
+      h.calls.length = 0
+      expect(await h.client.prepareAndStart(request)).toBe(true)
+      expect(h.calls).toEqual(['unload:1', 'prepare:2', 'open:2', 'start:2'])
+      expect(h.prepared.at(-1)).toMatchObject({ outputDeviceUid: 'new-output', sampleRate: 44_100, preparedStartProjectFrame: 132300 })
+      await h.client.unload()
+    })
     it('moves the default endpoint without jumping in time or keeping its old sample rate', async () => {
       const h = seamHarness(generation => playing(generation, { renderedProjectFrame: '240000' }))
       const change = routes(h)

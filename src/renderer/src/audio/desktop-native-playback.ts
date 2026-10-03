@@ -1054,8 +1054,11 @@ export class DesktopNativePlaybackClient {
           // of the process. Unload first, then let the error be the error.
           let same = false
           try {
+            // The system route can change without a Chromium devicechange.
+            // Never open a prepared endpoint until its current route matches.
+            const currentRoute = await this.resolveRoute(request)
             same = !recovering &&
-              JSON.stringify(this.configFor(request, ahead.route)) === ahead.signature &&
+              JSON.stringify(this.configFor(request, currentRoute)) === ahead.signature &&
               request.positionSeconds === ahead.positionSeconds
           } catch (error) {
             try { await window.singz.unloadDesktopPlayback(ahead.generation) } catch { /* nothing plays on it */ }
