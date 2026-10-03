@@ -4,38 +4,7 @@ export interface VocalTrainingCue {
   readonly durationSeconds?: number
 }
 
-export interface TrainingOrganOscillator {
-  readonly frequencyRatio: number
-  readonly level: number
-}
-
-/** A restrained Hammond-style registration. The 8' fundamental stays
- * dominant for pitch learning; quieter drawbars add the woody organ body
- * that a three-sine test tone cannot provide. */
-export const TRAINING_ORGAN_DRAWBARS = [
-  { ratio: 0.5, level: 0.025, chorus: false }, // 16'
-  { ratio: 1, level: 0.42, chorus: true },     // 8'
-  { ratio: 1.5, level: 0.055, chorus: false }, // 5 1/3'
-  { ratio: 2, level: 0.23, chorus: true },     // 4'
-  { ratio: 3, level: 0.12, chorus: true },     // 2 2/3'
-  { ratio: 4, level: 0.075, chorus: false },   // 2'
-  { ratio: 5, level: 0.035, chorus: false },   // 1 3/5'
-  { ratio: 6, level: 0.02, chorus: false },    // 1 1/3'
-  { ratio: 8, level: 0.01, chorus: false }     // 1'
-] as const
-
-const ORGAN_CHORUS_CENTS = 4.5
-
-export function trainingOrganOscillators(): readonly TrainingOrganOscillator[] {
-  return TRAINING_ORGAN_DRAWBARS.flatMap((drawbar) => {
-    if (!drawbar.chorus) return [{ frequencyRatio: drawbar.ratio, level: drawbar.level }]
-    return [
-      { frequencyRatio: drawbar.ratio * 2 ** (-ORGAN_CHORUS_CENTS / 1_200), level: drawbar.level * 0.12 },
-      { frequencyRatio: drawbar.ratio, level: drawbar.level * 0.76 },
-      { frequencyRatio: drawbar.ratio * 2 ** (ORGAN_CHORUS_CENTS / 1_200), level: drawbar.level * 0.12 }
-    ]
-  })
-}
+export { TRAINING_REACHED_TONE, TRAINING_ORGAN_DRAWBARS, trainingOrganOscillators, type TrainingOrganOscillator } from '../gen/training-lib'
 
 export const TRAINING_REFERENCE_VOLUME_MIN = 0.2
 export const TRAINING_REFERENCE_VOLUME_MAX = 2

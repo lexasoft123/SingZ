@@ -50,5 +50,8 @@
         android:name=".NowPlayingService"
         android:exported="false"
         android:foregroundServiceType="mediaPlayback" />
-    </application>
+    <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.training-recordings" android:exported="false" android:grantUriPermissions="true">
+      <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/training_recording_paths" />
+    </provider>
+  </application>
 </manifest>

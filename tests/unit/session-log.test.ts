@@ -1,5 +1,5 @@
 /**
- * The desktop keeps each launch's log on disk, newest ten, because the
+ * The desktop keeps each launch's log on disk, current launch and ten previous, because the
  * in-memory log dies with the process — and restarting is exactly what a
  * singer does when playback stops working, taking the evidence with it.
  */
@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest'
 import { log, logSessions, readLogSession, startSessionLog } from '../../src/main/log'
 
 describe('the desktop session logs', () => {
-  it('writes this launch, keeps the newest ten and reads a past one back', () => {
+  it('writes this launch, keeps the current launch and ten previous and reads a past one back', () => {
     const dir = mkdtempSync(join(tmpdir(), 'singz-session-logs-'))
     // twelve earlier launches, a stray file that is not ours, and one
     // older-than-all name to prove the order is by stamp, not by chance
@@ -23,15 +23,15 @@ describe('the desktop session logs', () => {
     }
     writeFileSync(join(dir, 'notes.txt'), 'not a log')
     log('app', 'logged before the file existed')
-    startSessionLog(dir, 10)
+    startSessionLog(dir)
     log('dsp', 'unload failed · generation 3 · teardown-uncertain', 'warn')
 
     const kept = readdirSync(dir).filter((n) => n.startsWith('session-'))
-    expect(kept).toHaveLength(10)
+    expect(kept).toHaveLength(11)
     expect(readdirSync(dir)).toContain('notes.txt')
-    // the three oldest went: launches 0, 1 and 2
+    // The two oldest went: launches 0 and 1.
     expect(kept.some((n) => n.includes('2026-09-01T'))).toBe(false)
-    expect(kept.some((n) => n.includes('2026-09-03T'))).toBe(false)
+    expect(kept.some((n) => n.includes('2026-09-03T'))).toBe(true)
     expect(kept.some((n) => n.includes('2026-09-04T'))).toBe(true)
 
     const sessions = logSessions(dir)

@@ -26,6 +26,8 @@ export const app: Translation<typeof en> = {
     '符合条件的歌曲使用普通播放器控件，底层由原生 DSP 驱动。其他歌曲仍完全使用普通播放器。',
 
   // ── log panel chrome (ui/LogPanel.tsx) — log LINES themselves stay English ──
+  'phone.app.log.thisSession': '当前会话',
+  'phone.app.log.whichSession': '选择日志会话',
   'phone.app.log.title': '日志',
   'phone.app.log.lines_one': '{n} 行',
   'phone.app.log.lines_other': '{n} 行',
@@ -36,7 +38,7 @@ export const app: Translation<typeof en> = {
   'phone.app.log.close': '关闭',
   'phone.app.log.closeA11y': '关闭日志',
   'phone.app.log.confirmTitle': '要清除日志吗？',
-  'phone.app.log.confirmBody': '这是应用所做操作的唯一记录。',
+  'phone.app.log.confirmBody': '仅清除当前会话。已保存的会话日志将保留。',
   'phone.app.log.keepIt': '保留',
   'phone.app.log.empty': '目前还没有日志。',
 

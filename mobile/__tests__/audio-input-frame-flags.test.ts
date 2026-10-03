@@ -63,7 +63,7 @@ describe('native scalar flag bridge sources', () => {
       ),
       'utf8'
     )
-    expect(jni).toContain('"(JJJJJJJJJJIIIIJDDDDDD)V"')
+    expect(jni).toContain('"(JJJJJJJJJJIIIIJDDDDDDDZ)V"')
     expect(jni).toContain('static_cast<jint>(window.start.flags)')
     expect(jni).toContain('static_cast<jint>(window.end.flags)')
     expect(kotlin).toContain(

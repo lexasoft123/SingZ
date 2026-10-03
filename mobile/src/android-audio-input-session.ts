@@ -56,6 +56,9 @@ export interface AndroidAudioInputFrame {
   peak: number
   rms: number
   dbfs: number
+  detector?: 'crepe-tiny' | 'yin'
+  inferenceMs?: number
+  harmonicCorrected?: boolean
 }
 
 const isUint32 = (value: unknown): value is number =>

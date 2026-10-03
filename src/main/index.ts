@@ -42,7 +42,7 @@ import { t } from '../shared/i18n'
 import { registerSource, registerTrack } from './source'
 import { log, logEntries, logSessions, readLogSession, saveLog, startSessionLog } from './log'
 import { clearDirty, dirtyDirs, dirtySeq, dirtyState, isDirty, markProjectDirty, onDirty } from './sync-dirty'
-import { replaySyncLog, syncLog } from './sync-log'
+import { syncLog } from './sync-log'
 import { SyncScheduler } from './sync-scheduler'
 import { logHardwareInfo, readGpuOnce } from './hwinfo'
 import { glassVerdict } from './glass'
@@ -892,8 +892,6 @@ app.whenReady().then(async () => {
   // periodic sweep for anything no writer thought to mark.
   // SINGZ_NO_SYNC keeps E2E runs off a dev machine's real Drive entirely;
   // SINGZ_NO_LAUNCH_SYNC is the older, narrower opt-out.
-  // what previous sessions pushed, in the same dialog as everything else
-  replaySyncLog()
   if (!process.env.SINGZ_NO_SYNC && !process.env.SINGZ_NO_LAUNCH_SYNC) scheduler.start()
   // Back from sleep: whatever backoff is armed was sized for a network that is
   // probably now fine, and waiting 30 minutes to find out is the wrong answer.

@@ -14,28 +14,10 @@ const DRIFT_GRACE_MS = 420
 const PROGRESS_DRAIN_RATE = 0.25
 const MAX_TICK_MS = 160
 const DISPLAY_HOLD_MS = 280
-const DISPLAY_TIME_CONSTANT_MS = 260
-const DISPLAY_MAX_STEP_CENTS = 6
+const DISPLAY_TIME_CONSTANT_MS = 80
 const INSTANTANEOUS_MARGIN_CENTS = 7
 
-export const TRAINING_ORGAN_DRAWBARS = [
-  { ratio: 0.5, level: 0.025, chorus: false },
-  { ratio: 1, level: 0.42, chorus: true },
-  { ratio: 1.5, level: 0.055, chorus: false },
-  { ratio: 2, level: 0.23, chorus: true },
-  { ratio: 3, level: 0.12, chorus: true },
-  { ratio: 4, level: 0.075, chorus: false },
-  { ratio: 5, level: 0.035, chorus: false },
-  { ratio: 6, level: 0.02, chorus: false },
-  { ratio: 8, level: 0.01, chorus: false }
-] as const
-
-const ORGAN_CHORUS_CENTS = 4.5
-
-export interface TrainingOrganOscillator {
-  readonly frequencyRatio: number
-  readonly level: number
-}
+export { TRAINING_ORGAN_DRAWBARS, trainingOrganOscillators, type TrainingOrganOscillator } from '../../shared/training-tone'
 
 export interface DesktopTrainingPracticeSettings {
   readonly referenceVolume: number
@@ -127,18 +109,6 @@ export function desktopTrainingCueDurationSeconds(cues: readonly TrainingCue[]):
   return events === 1 ? 2.75 : MULTI_NOTE_DURATION_SECONDS
 }
 
-export function trainingOrganOscillators(): readonly TrainingOrganOscillator[] {
-  return TRAINING_ORGAN_DRAWBARS.flatMap((drawbar) => {
-    if (!drawbar.chorus) return [{ frequencyRatio: drawbar.ratio, level: drawbar.level }]
-    return [
-      { frequencyRatio: drawbar.ratio * 2 ** (-ORGAN_CHORUS_CENTS / 1_200), level: drawbar.level * 0.12 },
-      { frequencyRatio: drawbar.ratio, level: drawbar.level * 0.76 },
-      { frequencyRatio: drawbar.ratio * 2 ** (ORGAN_CHORUS_CENTS / 1_200), level: drawbar.level * 0.12 }
-    ]
-  })
-}
-
-
 export class TrainingPitchLockTracker {
   private readings: { readonly atMs: number; readonly cents: number }[] = []
   private lastUpdateMs: number | null = null
@@ -165,12 +135,12 @@ export class TrainingPitchLockTracker {
     this.lastVoicedAtMs = null
   }
 
-  update(nowMs: number, midi: number | null, confidence: number, targetMidi: number): TrainingPitchLockState {
+  update(nowMs: number, midi: number | null, confidence: number, targetMidi: number, minConfidence = TRAINING_MIN_CONFIDENCE): TrainingPitchLockState {
     const elapsedMs = this.lastUpdateMs === null
       ? 0
       : Math.max(0, Math.min(MAX_TICK_MS, nowMs - this.lastUpdateMs))
     this.lastUpdateMs = nowMs
-    const voiced = midi !== null && Number.isFinite(midi) && confidence >= TRAINING_MIN_CONFIDENCE
+    const voiced = midi !== null && Number.isFinite(midi) && confidence >= minConfidence
     const correctedMidi = voiced ? midi : null
     const currentCents = correctedMidi !== null ? (correctedMidi - targetMidi) * 100 : null
     if (currentCents !== null) this.lastVoicedAtMs = nowMs
@@ -184,17 +154,13 @@ export class TrainingPitchLockTracker {
       if (this.displayCents === null || Math.abs(rawMedian - this.displayCents) >= 700) this.displayCents = rawMedian
       else {
         const alpha = 1 - Math.exp(-(elapsedMs || 80) / DISPLAY_TIME_CONSTANT_MS)
-        this.displayCents += clamp(
-          (rawMedian - this.displayCents) * alpha,
-          -DISPLAY_MAX_STEP_CENTS,
-          DISPLAY_MAX_STEP_CENTS
-        )
+        this.displayCents += (rawMedian - this.displayCents) * alpha
       }
     }
-    const medianCents = this.displayCents
+    const medianCents = rawMedian
     const displayMidi = medianCents !== null && this.lastVoicedAtMs !== null &&
       nowMs - this.lastVoicedAtMs <= DISPLAY_HOLD_MS
-      ? targetMidi + medianCents / 100
+      ? targetMidi + this.displayCents! / 100
       : null
     const centered = currentCents !== null && medianCents !== null &&
       Math.abs(currentCents) <= this.pitchWindowCents + INSTANTANEOUS_MARGIN_CENTS &&
@@ -225,8 +191,4 @@ function median(values: readonly number[]): number {
   const sorted = [...values].sort((a, b) => a - b)
   const middle = Math.floor(sorted.length / 2)
   return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle]
-}
-
-function clamp(value: number, low: number, high: number): number {
-  return Math.max(low, Math.min(high, value))
 }

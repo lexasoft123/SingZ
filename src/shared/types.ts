@@ -1182,7 +1182,7 @@ export interface DesktopPlaybackStatus {
 }
 
 export type DesktopAudioInputEvent =
-  | { type: 'frame'; frequency: number; clarity: number; rms: number; dbfs: number }
+  | { type: 'frame'; frequency: number; clarity: number; rms: number; dbfs: number; detector?: 'crepe-tiny' | 'yin'; inferenceMs?: number }
   | { type: 'overrun'; count: number }
   | { type: 'discontinuity' }
   | { type: 'error'; error: string }
@@ -1264,6 +1264,8 @@ export interface SingzApi {
     channel?: number
   }): Promise<DesktopAudioInputStartResult>
   reportDesktopAudioInputFallback(detail: DesktopAudioInputFallback): Promise<{ ok: boolean; error?: string }>
+  trainingRecording(action: 'record' | 'finish'): Promise<{ok:boolean;error?:string;filename?:string;path?:string;seconds?:number;sampleRate?:number}>
+  saveTrainingRecording(path: string): Promise<{ok:boolean;error?:string;canceled?:boolean}>
   stopDesktopAudioInput(token: string): Promise<{ ok: boolean; error?: string }>
   onDesktopAudioInputEvent(
     cb: (token: string, event: DesktopAudioInputEvent) => void

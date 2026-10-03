@@ -40,7 +40,11 @@ describe('the phone sync log', () => {
     await first.logEntries() // let the write settle
 
     const second = install()
-    expect((await second.logEntries())[0].line).toContain('Mr Crowley')
+    expect(await second.logEntries()).toEqual([])
+    const sessions = await second.logSessions()
+    expect(sessions).toHaveLength(2)
+    expect(sessions[0].current).toBe(true)
+    expect((await second.logSessionEntries(sessions[1].id))[0].line).toContain('Mr Crowley')
   })
 
   it('stays small — a phone log must not grow forever', async () => {
@@ -79,4 +83,112 @@ describe('the phone sync log', () => {
     expect(l.fmtMs(3200)).toBe('3.2 s')
     expect(l.fmtMs(8)).toBe('8 ms')
   })
+})
+
+
+it('retains the previous ten launches in addition to the current launch', async () => {
+  for (let session = 0; session < 13; session++) {
+    const l = install()
+    l.log('app', `launch ${session}`)
+    await l.logEntries()
+  }
+  const l = install()
+  l.log('app', 'current launch')
+  const sessions = await l.logSessions()
+  expect(sessions).toHaveLength(11)
+  expect((await l.logSessionEntries(sessions[0].id))[0].line).toBe('current launch')
+  expect((await l.logSessionEntries(sessions[1].id))[0].line).toBe('launch 12')
+  expect((await l.logSessionEntries(sessions[10].id))[0].line).toBe('launch 3')
+})
+
+it('clears only the current launch and preserves new lines logged during the write', async () => {
+  const old = install()
+  old.log('app', 'previous launch')
+  await old.logEntries()
+  const l = install()
+  l.log('app', 'current launch')
+  const sessions = await l.logSessions()
+  const clearing = l.clearLog()
+  l.log('mic', 'after clear')
+  await clearing
+  expect((await l.logEntries()).map(e => e.line)).toEqual(['after clear'])
+  expect((await l.logSessionEntries(sessions[1].id))[0].line).toBe('previous launch')
+})
+
+it('migrates the mixed rolling log by launch without replaying it into current', async () => {
+  const entry = (t: number, line: string) => ({ t, source: 'app', level: 'info', line })
+  prefs['singz.log'] = JSON.stringify([
+    entry(1000, 'language: en'), entry(1001, 'SingZ 0.24.0 (72)'), entry(1100, 'old event'),
+    entry(2000, 'language: en'), entry(2001, 'SingZ 0.24.0 (73)'), entry(2100, 'new event')
+  ])
+  const l = install()
+  expect(await l.logEntries()).toEqual([])
+  const sessions = await l.logSessions()
+  expect(sessions).toHaveLength(3)
+  expect((await l.logSessionEntries(sessions[1].id)).map(e => e.line)).toEqual([
+    'language: en', 'SingZ 0.24.0 (73)', 'new event'
+  ])
+  expect((await l.logSessionEntries(sessions[2].id)).map(e => e.line)).toContain('old event')
+})
+
+it('keeps incoming startup lines while historical preferences are still loading', async () => {
+  const l = install()
+  const { NativeModules } = require('react-native')
+  let resolveRead!: (raw: string | null) => void
+  NativeModules.AudioRouteInfo.getTextPref = (key: string) => key === 'singz.log.current.v1'
+    ? new Promise(resolve => { resolveRead = resolve }) : Promise.resolve(null)
+  l.log('app', 'first new line')
+  await Promise.resolve()
+  l.log('mic', 'second new line')
+  resolveRead(JSON.stringify({ id: 'old', startedAt: 1, entries: [{ t: 1, level: 'info', source: 'app', line: 'old' }] }))
+  expect((await l.logEntries()).map(e => e.line)).toEqual(['first new line', 'second new line'])
+  expect((await l.logSessions()).filter(s => !s.current)).toHaveLength(1)
+})
+
+it('does not duplicate the prior launch after a kill between history and current writes', async () => {
+  const original = { id: 'old', startedAt: 1, entries: [{ t: 1, level: 'info', source: 'app', line: 'old' }] }
+  prefs['singz.log.current.v1'] = JSON.stringify(original)
+  prefs['singz.log.history.v1'] = JSON.stringify([original])
+  const l = install()
+  expect((await l.logSessions()).filter(s => !s.current)).toHaveLength(1)
+  expect(await l.logSessionEntries('missing')).toEqual([])
+})
+
+it('does not overwrite the previous launch when archiving it fails', async () => {
+  const original = { id: 'old', startedAt: 1, entries: [{ t: 1, level: 'info', source: 'app', line: 'old' }] }
+  prefs['singz.log.current.v1'] = JSON.stringify(original)
+  const l = install()
+  const { NativeModules } = require('react-native')
+  let rejectArchive = true
+  NativeModules.AudioRouteInfo.setTextPref = async (key: string, value: string) => {
+    if (key === 'singz.log.history.v1' && rejectArchive) throw new Error('full')
+    prefs[key] = value
+  }
+  l.log('app', 'new')
+  await l.logEntries()
+  expect(JSON.parse(prefs['singz.log.current.v1']).id).toBe('old')
+  rejectArchive = false
+  l.log('app', 'retry')
+  await l.logEntries()
+  expect(JSON.parse(prefs['singz.log.history.v1'])[0].id).toBe('old')
+  expect(JSON.parse(prefs['singz.log.current.v1']).entries.map((e: { line: string }) => e.line)).toEqual(['new', 'retry'])
+})
+
+it('does not replace unreadable saved sessions with an empty archive', async () => {
+  const original = { id: 'old', startedAt: 1, entries: [{ t: 1, level: 'info', source: 'app', line: 'old' }] }
+  prefs['singz.log.current.v1'] = JSON.stringify(original)
+  const l = install()
+  const { NativeModules } = require('react-native')
+  let rejectRead = true
+  NativeModules.AudioRouteInfo.getTextPref = async (key: string) => {
+    if (rejectRead) throw new Error('temporarily unavailable')
+    return prefs[key] ?? null
+  }
+  l.log('app', 'new')
+  await l.logEntries()
+  expect(JSON.parse(prefs['singz.log.current.v1']).id).toBe('old')
+  rejectRead = false
+  l.log('app', 'retry')
+  await l.logEntries()
+  expect(JSON.parse(prefs['singz.log.history.v1'])[0].id).toBe('old')
 })

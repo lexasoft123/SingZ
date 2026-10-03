@@ -3,7 +3,6 @@ import {
   diatonicInterval,
   diatonicTriad,
   fitMidiSequenceToRange,
-  fitPitchClassToRange,
   midiNoteNameForSpelling,
   midiToPitchClass,
   scaleForKey,
@@ -65,13 +64,8 @@ const RESULT_CLASSIFICATIONS: readonly TrainingResultClassification[] = [
 
 type Rng = () => number
 const trustedSessions = new WeakSet<object>()
-/**
- * This version identifies the reproducible config/prompt graph, not durable
- * attempt storage. Apps persist only normalized completion receipts; session
- * snapshots are transient. The additive `skipped` result discriminant is
- * therefore accepted alongside older version-3 results without changing IDs.
- */
-export const TRAINING_SESSION_FORMAT_VERSION = 3
+/** Identifies the reproducible prompt graph; completion receipts have their own format. */
+export const TRAINING_SESSION_FORMAT_VERSION = 5
 
 export function generateTrainingPrompts(config: TrainingSessionConfig): TrainingPrompt[] {
   validateConfig(config)
@@ -89,6 +83,7 @@ export function generateTrainingPrompts(config: TrainingSessionConfig): Training
 
   const prompts: TrainingPrompt[] = []
   const mixedOffset = safeConfig.exercise === 'mixed' ? Math.floor(rng() * availableKinds.length) : 0
+  const rounds = new Map<TrainingExerciseKind, TrainingPrompt[]>()
   let previousSignature = ''
   for (let index = 0; index < safeConfig.length; index++) {
     const kind =
@@ -96,15 +91,72 @@ export function generateTrainingPrompts(config: TrainingSessionConfig): Training
         ? availableKinds[(index + mixedOffset) % availableKinds.length]
         : availableKinds[0]
     const pool = candidates.get(kind)!
-    let prompt = pick(pool, rng)
-    if (pool.length > 1) {
-      for (let tries = 0; tries < 4 && promptSignature(prompt) === previousSignature; tries++)
-        prompt = pick(pool, rng)
+    let round = rounds.get(kind)
+    if (!round?.length) {
+      round = balancedRound(pool, rng)
+      if (round.length > 1 && promptSignature(round[round.length - 1]) === previousSignature) {
+        const categories = new Set(pool.map(promptCategory)).size
+        const first = round[round.length - 1]
+        const roundLength = round.length
+        const j = round.findIndex((candidate, index) =>
+          promptSignature(candidate) !== previousSignature &&
+          (promptCategory(candidate) === promptCategory(first) || index >= roundLength - categories))
+        if (j >= 0) [round[j], round[round.length - 1]] = [round[round.length - 1], round[j]]
+      }
+      rounds.set(kind, round)
     }
+    const prompt = round.pop()!
     prompts.push(clonePrompt(prompt, `exercise-${index + 1}`))
     previousSignature = promptSignature(prompt)
   }
   return prompts
+}
+
+/** Explain partial range filtering before the singer starts a session. */
+export function trainingRangeNotice(setup: {
+  tonicPc: number; keyMode: TrainingSessionConfig['key']['mode']; lowMidi: number; highMidi: number
+  exercise: TrainingSessionConfig['exercise']; direction?: TrainingDirectionChoice
+  intervalSizes: readonly number[]; chordDegrees: readonly number[]; mixedKinds?: readonly TrainingExerciseKind[]
+}): string | null {
+  try {
+    const config: TrainingSessionConfig = {
+      key: { tonicPc: setup.tonicPc, mode: setup.keyMode },
+      range: { lowMidi: setup.lowMidi, highMidi: setup.highMidi },
+      exercise: setup.exercise, direction: setup.direction,
+      intervalSizes: [...setup.intervalSizes], chordDegrees: [...setup.chordDegrees],
+      mixedKinds: setup.mixedKinds ? [...setup.mixedKinds] : undefined,
+      taskMode: 'imitate', length: 1, seed: 0
+    }
+    assertTrainingRange(config.range)
+    const kinds = config.exercise === 'mixed' ? config.mixedKinds ?? DEFAULT_MIXED_KINDS : [config.exercise]
+    const labels: Record<TrainingExerciseKind, Parameters<typeof t>[0]> = {
+      note: 'training.exercise.note.label', 'scale-degree': 'training.exercise.scaleDegree.label',
+      interval: 'training.exercise.interval.label', 'chord-tone': 'training.exercise.chordTone.label',
+      arpeggio: 'training.exercise.arpeggio.label'
+    }
+    const missing: string[] = []
+    for (const kind of kinds) {
+      const pool = buildCandidates(config, kind)
+      if (!pool.length) { missing.push(t(labels[kind])); continue }
+      if (kind === 'interval') {
+        const omitted: string[] = []
+        const directions = selectedDirections(config.direction)
+        for (const size of config.intervalSizes!) {
+          const absent = directions.filter((direction) => !pool.some((prompt) =>
+            prompt.kind === 'interval' && prompt.intervalNumber === size && prompt.direction === direction))
+          if (absent.length === directions.length) omitted.push(String(size))
+          else for (const direction of absent) omitted.push(`${size} (${directionWord(direction)})`)
+        }
+        if (omitted.length) missing.push(`${t(labels[kind])}: ${omitted.join(', ')}`)
+      }
+      if (kind === 'chord-tone' || kind === 'arpeggio') {
+        const absent = config.chordDegrees!.filter((degree) => !pool.some((prompt) =>
+          (prompt.kind === 'chord-tone' || prompt.kind === 'arpeggio') && prompt.chord.scaleDegree === degree))
+        if (absent.length) missing.push(t('training.range.chordDegrees', { exercise: t(labels[kind]), degrees: absent.join(', ') }))
+      }
+    }
+    return missing.length ? t('training.range.omitted', { items: missing.join('; ') }) : null
+  } catch { return null } // Invalid setup is reported by the existing start-session validation.
 }
 
 export function createTrainingSession(config: TrainingSessionConfig): TrainingSessionData {
@@ -211,11 +263,9 @@ function buildCandidates(config: TrainingSessionConfig, kind: TrainingExerciseKi
 
 function noteCandidates(config: TrainingSessionConfig): NotePrompt[] {
   return scaleForKey(config.key, scaleForm(config)).flatMap((note) => {
-    const midi = fitPitchClassToRange(note.pitchClass, config.range)
-    if (midi === null) return []
-    const target = makeTarget(midi, note.degree, note.name)
-    return [
-      {
+    return pitchClassMidis(note.pitchClass, config.range).map((midi) => {
+      const target = makeTarget(midi, note.degree, note.name)
+      return {
         id: '',
         kind: 'note',
         taskMode: config.taskMode,
@@ -227,17 +277,15 @@ function noteCandidates(config: TrainingSessionConfig): NotePrompt[] {
         cues: singleNoteCues(config, midi),
         targets: [target]
       }
-    ]
+    })
   })
 }
 
 function scaleDegreeCandidates(config: TrainingSessionConfig): ScaleDegreePrompt[] {
   return scaleForKey(config.key, scaleForm(config)).flatMap((note) => {
-    const midi = fitPitchClassToRange(note.pitchClass, config.range)
-    if (midi === null) return []
-    const target = makeTarget(midi, note.degree, note.name)
-    return [
-      {
+    return pitchClassMidis(note.pitchClass, config.range).map((midi) => {
+      const target = makeTarget(midi, note.degree, note.name)
+      return {
         id: '',
         kind: 'scale-degree',
         taskMode: config.taskMode,
@@ -250,8 +298,16 @@ function scaleDegreeCandidates(config: TrainingSessionConfig): ScaleDegreePrompt
         targets: [target],
         scaleDegree: note.degree
       }
-    ]
+    })
   })
+}
+
+function pitchClassMidis(pitchClass: number, range: TrainingSessionConfig['range']): number[] {
+  const notes: number[] = []
+  for (let midi = range.lowMidi; midi <= range.highMidi; midi++) {
+    if (midiToPitchClass(midi) === pitchClass) notes.push(midi)
+  }
+  return notes
 }
 
 function intervalCandidates(config: TrainingSessionConfig): IntervalPrompt[] {
@@ -271,11 +327,7 @@ function intervalCandidates(config: TrainingSessionConfig): IntervalPrompt[] {
           scaleForm(config)
         )
         const firstOffset = config.key.tonicPc + steps[fromDegree - 1]
-        const fitted = fitMidiSequenceToRange(
-          [firstOffset, firstOffset + interval.semitones],
-          config.range
-        )
-        if (!fitted) continue
+        for (const fitted of sequencePlacements([firstOffset, firstOffset + interval.semitones], config.range)) {
         const targets = [
           makeTarget(fitted[0], fromDegree, scale[fromDegree - 1].name),
           makeTarget(fitted[1], interval.toDegree, scale[interval.toDegree - 1].name)
@@ -302,6 +354,7 @@ function intervalCandidates(config: TrainingSessionConfig): IntervalPrompt[] {
           intervalName: interval.name,
           direction
         })
+        }
       }
     }
   }
@@ -311,8 +364,7 @@ function intervalCandidates(config: TrainingSessionConfig): IntervalPrompt[] {
 function chordToneCandidates(config: TrainingSessionConfig): ChordTonePrompt[] {
   const candidates: ChordTonePrompt[] = []
   for (const degree of config.chordDegrees ?? DEFAULT_DEGREES) {
-    const chord = buildTrainingChord(config, degree)
-    if (!chord) continue
+    for (const chord of buildTrainingChords(config, degree)) {
     for (let index = 0; index < CHORD_ROLES.length; index++) {
       const role = CHORD_ROLES[index]
       const target = chord.tones[index]
@@ -336,6 +388,7 @@ function chordToneCandidates(config: TrainingSessionConfig): ChordTonePrompt[] {
       })
     }
   }
+  }
   return candidates
 }
 
@@ -343,8 +396,7 @@ function arpeggioCandidates(config: TrainingSessionConfig): ArpeggioPrompt[] {
   const directions = selectedDirections(config.direction)
   const candidates: ArpeggioPrompt[] = []
   for (const degree of config.chordDegrees ?? DEFAULT_DEGREES) {
-    const chord = buildTrainingChord(config, degree)
-    if (!chord) continue
+    for (const chord of buildTrainingChords(config, degree)) {
     for (const direction of directions) {
       const targets =
         direction === 'ascending'
@@ -369,10 +421,11 @@ function arpeggioCandidates(config: TrainingSessionConfig): ArpeggioPrompt[] {
       })
     }
   }
+  }
   return candidates
 }
 
-function buildTrainingChord(config: TrainingSessionConfig, degree: number): TrainingChord | null {
+function buildTrainingChords(config: TrainingSessionConfig, degree: number): TrainingChord[] {
   const minorHarmony = harmony(config)
   const harmonicDominant =
     minorHarmony === 'harmonic-dominant' && config.key.mode === 'minor' && degree === 5
@@ -383,16 +436,56 @@ function buildTrainingChord(config: TrainingSessionConfig, degree: number): Trai
     const index = rootIndex + thirds
     return config.key.tonicPc + steps[index % 7] + Math.floor(index / 7) * 12
   })
-  const fitted = fitMidiSequenceToRange(offsets, config.range)
-  if (!fitted) return null
-  return {
+  return sequencePlacements(offsets, config.range).map((fitted) => ({
     scaleDegree: degree,
     rootName: triad.rootName,
     quality: triad.quality,
     tones: fitted.map((midi, index) =>
       makeTarget(midi, ((rootIndex + index * 2) % 7) + 1, triad.noteNames[index])
     )
+  }))
+}
+
+function sequencePlacements(offsets: readonly number[], range: TrainingSessionConfig['range']): number[][] {
+  const first = Math.ceil((range.lowMidi - Math.min(...offsets)) / 12) * 12
+  const last = Math.floor((range.highMidi - Math.max(...offsets)) / 12) * 12
+  const placements: number[][] = []
+  for (let root = first; root <= last; root += 12) placements.push(offsets.map((offset) => root + offset))
+  return placements
+}
+
+function shuffled<T>(items: readonly T[], rng: Rng): T[] {
+  const result = [...items]
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1))
+    ;[result[i], result[j]] = [result[j], result[i]]
   }
+  return result
+}
+
+function promptCategory(prompt: TrainingPrompt): string {
+  return prompt.kind === 'interval' ? `${prompt.intervalNumber}:${prompt.direction}`
+      : prompt.kind === 'chord-tone' ? prompt.role
+      : prompt.kind === 'arpeggio' ? `${prompt.chord.scaleDegree}:${prompt.direction}`
+      : 'notes'
+}
+
+/** Cover all concrete candidates once, interleaving musical categories so
+ * short sessions also cover roles, directions and interval sizes. */
+function balancedRound(pool: readonly TrainingPrompt[], rng: Rng): TrainingPrompt[] {
+  const groups = new Map<string, TrainingPrompt[]>()
+  for (const prompt of pool) {
+    const category = promptCategory(prompt)
+    const group = groups.get(category) ?? []
+    group.push(prompt)
+    groups.set(category, group)
+  }
+  const queues = [...groups.values()].map((group) => shuffled(group, rng))
+  const round: TrainingPrompt[] = []
+  while (queues.some((queue) => queue.length)) {
+    for (const queue of shuffled(queues.filter((queue) => queue.length), rng)) round.push(queue.pop()!)
+  }
+  return round.reverse()
 }
 
 function makeTarget(midi: number, scaleDegree: number, spelling: string): TrainingTarget {
@@ -1128,10 +1221,6 @@ function assertExactKeys(value: object, allowed: readonly string[], label: strin
   const allowedSet = new Set(allowed)
   const unknown = Object.keys(value).find((key) => !allowedSet.has(key))
   if (unknown !== undefined) throw new RangeError(`${label} contains unknown field “${unknown}”.`)
-}
-
-function pick<T>(items: readonly T[], rng: Rng): T {
-  return items[Math.floor(rng() * items.length)]
 }
 
 function promptSignature(prompt: TrainingPrompt): string {

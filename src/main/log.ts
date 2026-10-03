@@ -48,14 +48,14 @@ function formatLog(): string {
 }
 
 /*
- * Every launch also writes its log to its own file, and the newest ten are
- * kept. The ring buffer above dies with the process, and the process is
+ * Every launch also writes its log to its own file. The current launch and
+ * ten previous sessions are kept. The ring buffer above dies with the process, and the process is
  * exactly what a singer restarts when something stops working — which is how
  * the evidence for a Windows playback wedge nearly went: it survived only
  * because the app had been left running for a day. Written as it goes, not at
  * quit, because a crash or a force-quit never reaches quit.
  */
-const SESSION_KEEP = 10
+const SESSION_KEEP = 11
 const SESSION_MAX_BYTES = 8 * 1024 * 1024
 const SESSION_NAME = /^session-[0-9TZ-]+-\d+\.log$/
 const FLUSH_MS = 500

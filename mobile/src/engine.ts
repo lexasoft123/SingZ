@@ -15,6 +15,7 @@ import { t } from './i18n'
 // wall-clock formatter, which is not what a play/pause line wants.
 import { fmtTime, MET_DEFAULTS, type BeatInfo, type MetronomeConfig } from './model'
 import {
+  TRAINING_REACHED_TONE,
   DEFAULT_TRAINING_REFERENCE_VOLUME,
   clampTrainingReferenceVolume,
   planTrainingCues,
@@ -206,7 +207,7 @@ export class MultitrackEngine {
    * playback is paused first, making cue and karaoke ownership exclusive. */
   async playTrainingCues(
     cues: readonly VocalTrainingCue[]
-  ): Promise<{ ok: true; endsAt: number } | { ok: false; error: string }> {
+  ): Promise<{ ok: true; startsAt: number; endsAt: number } | { ok: false; error: string }> {
     try {
       if (this.backgrounded)
         return {
@@ -234,12 +235,9 @@ export class MultitrackEngine {
           candidate => candidate.start < end && candidate.end > start
         ).length
         const voiceScale = 1 / Math.max(1, concurrentVoices)
-        // Hammond-like drawbars turn the reference into a small instrument:
-        // a dominant fundamental, woody upper harmonics and restrained
-        // chorus on the three strongest drawbars.
-        // Overlapping chord voices share unity gain so even the remembered
-        // 100% setting retains a small amount of digital peak headroom.
-        for (const partial of trainingOrganOscillators()) {
+        // Shared exact-pitch flute registration, with speaker rolloff and
+        // peak headroom even at the maximum reference-volume setting.
+        for (const partial of trainingOrganOscillators(fundamental)) {
           const oscillator = this.ctx.createOscillator()
           const gain = this.ctx.createGain()
           oscillator.type = 'sine'
@@ -247,9 +245,9 @@ export class MultitrackEngine {
           gain.gain.setValueAtTime(0.0001, start)
           const level = partial.level * voiceScale
           const duration = end - start
-          const attackEnd = start + Math.min(0.032, duration * 0.18)
+          const attackEnd = start + Math.min(0.055, duration * 0.2)
           const bloomEnd = start + Math.min(0.18, duration * 0.55)
-          const releaseStart = Math.max(bloomEnd, end - Math.min(0.22, duration * 0.36))
+          const releaseStart = Math.max(bloomEnd, end - Math.min(0.28, duration * 0.4))
           gain.gain.exponentialRampToValueAtTime(level * 0.86, attackEnd)
           gain.gain.linearRampToValueAtTime(level, bloomEnd)
           gain.gain.setValueAtTime(level, releaseStart)
@@ -261,13 +259,39 @@ export class MultitrackEngine {
           this.trainingNodes.push({ oscillator, gain })
         }
       }
-      return { ok: true, endsAt: plan.endsAt }
+      return { ok: true, startsAt: plan.voices[0]?.start ?? plan.endsAt, endsAt: plan.endsAt }
     } catch (error) {
       this.cancelTrainingCues()
       return {
         ok: false,
         error: error instanceof Error ? error.message : String(error)
       }
+    }
+  }
+
+  /** Fast feedback on the active route, without restarting reference playback. */
+  async playTrainingLatch(): Promise<{ ok: true; startsAt: number; endsAt: number } | { ok: false; error: string }> {
+    if (this.backgrounded || this.nativeOutputHandoff || this.ctx.state !== 'running')
+      return { ok: false, error: t('phone.app.engine.cueCancelled') }
+    try {
+      const tone = TRAINING_REACHED_TONE
+      const startsAt = this.ctx.currentTime + tone.startDelaySeconds
+      const endsAt = startsAt + tone.durationSeconds
+      const oscillator = this.ctx.createOscillator()
+      const gain = this.ctx.createGain()
+      oscillator.type = 'sine'
+      oscillator.frequency.value = tone.frequency
+      gain.gain.setValueAtTime(0, startsAt)
+      gain.gain.linearRampToValueAtTime(tone.peakGain, startsAt + tone.attackSeconds)
+      gain.gain.linearRampToValueAtTime(0, endsAt)
+      oscillator.connect(gain)
+      gain.connect(this.trainingGain)
+      this.trainingNodes.push({ oscillator, gain })
+      oscillator.start(startsAt)
+      oscillator.stop(endsAt)
+      return { ok: true, startsAt, endsAt }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
   }
 

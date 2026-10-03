@@ -37,10 +37,11 @@ Pod::Spec.new do |s|
     : []
   s.source_files = production_sources + proof_sources
   s.exclude_files = 'Tests/**/*'
+  s.resource_bundles = { 'SingzPitchModels' => ['Models/*.bin', 'Models/*LICENSE*', 'Models/README.txt'] }
   if codec_target_proof
-    s.resource_bundles = {
+    s.resource_bundles.merge!({
       'SingzCodecTargetFixtures' => 'CodecTargetProof/fixtures/*'
-    }
+    })
   end
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
@@ -51,11 +52,12 @@ Pod::Spec.new do |s|
     # document, which includes <zdsp/graph.h> from the strict runtime pod;
     # CocoaPods flattens only the pod's own public headers, so the bridge
     # needs the runtime's include roots exactly as that pod declares them.
-    'HEADER_SEARCH_PATHS' => '"$(PODS_ROOT)/../SingzCore/core/include" "$(PODS_ROOT)/../SingzCore/dsp/include" "$(PODS_ROOT)/../SingzDspRuntime/zdsp/include" "$(PODS_ROOT)/../SingzDspRuntime/zcore/include" "$(PODS_ROOT)/../../node_modules/react-native-audio-api/common/cpp/audioapi/external/include_ffmpeg"',
+    'HEADER_SEARCH_PATHS' => '"$(PODS_ROOT)/onnxruntime-c/Headers" "$(PODS_ROOT)/../SingzCore/core/include" "$(PODS_ROOT)/../SingzCore/dsp/include" "$(PODS_ROOT)/../SingzDspRuntime/zdsp/include" "$(PODS_ROOT)/../SingzDspRuntime/zcore/include" "$(PODS_ROOT)/../../node_modules/react-native-audio-api/common/cpp/audioapi/external/include_ffmpeg"',
     'GCC_PREPROCESSOR_DEFINITIONS' => codec_target_proof \
       ? "$(inherited) SINGZ_CODEC_TARGET_PROOF=1 SINGZ_ZCORE_FFMPEG=1 SINGZ_CODEC_TARGET_PROOF_SOURCE_STAMP=\\\"#{proof_source_stamp}\\\" SINGZ_CODEC_TARGET_PROOF_PLATFORM_STAMP=\\\"#{proof_platform_stamp}\\\" SINGZ_CODEC_TARGET_PROOF_BUILD_STAMP=\\\"#{proof_build_stamp}\\\"" \
       : '$(inherited)'
   }
+  s.dependency 'onnxruntime-c', '~> 1.23.0'
   s.dependency 'React-Core'
   s.dependency 'SingzCore'
   s.dependency 'SingzDspRuntime'

@@ -1,8 +1,11 @@
-import { MicPitch, type MicDevice } from './mic'
+import { type MicDevice } from './mic'
+import { NativeTrainingMicSource, type TrainingMicSource } from './training-mic'
+type PitchStripSource = TrainingMicSource & { read(): number }
 
 export type PitchStripMicState = 'off' | 'starting' | 'on' | 'denied'
 
 export interface PitchStripMicRoute {
+  readonly nativeDeviceUid?: string
   readonly deviceId?: string
   readonly channelIndex?: number
 }
@@ -10,24 +13,24 @@ export interface PitchStripMicRoute {
 interface PitchStripMicOwnerOptions {
   readonly context: AudioContext
   readonly askAccess: () => Promise<boolean>
-  readonly makeMic?: () => MicPitch
-  readonly onChange: (state: PitchStripMicState, mic: MicPitch | null) => void
+  readonly makeMic?: () => PitchStripSource
+  readonly onChange: (state: PitchStripMicState, mic: PitchStripSource | null) => void
   readonly onDevice: (device: MicDevice | null) => void
 }
 
 /**
  * Owns the pitch strip's async capture operations. Every requested route gets
  * a generation; a late permission prompt or getUserMedia result can therefore
- * only stop its own MicPitch, never replace the newest route.
+ * only stop its own PitchStripSource, never replace the newest route.
  */
 export class PitchStripMicOwner {
   private readonly context: AudioContext
   private readonly askAccess: () => Promise<boolean>
-  private readonly makeMic: () => MicPitch
+  private readonly makeMic: () => PitchStripSource
   private readonly onChange: PitchStripMicOwnerOptions['onChange']
   private readonly onDevice: PitchStripMicOwnerOptions['onDevice']
   private route: PitchStripMicRoute
-  private mic: MicPitch | null = null
+  private mic: PitchStripSource | null = null
   private state: PitchStripMicState = 'off'
   private generation = 0
   private desired = false
@@ -35,18 +38,23 @@ export class PitchStripMicOwner {
   private permissionGranted = false
   private permissionPending = false
   private disposed = false
+  private releasePending: Promise<void> = Promise.resolve()
 
   constructor(options: PitchStripMicOwnerOptions, route: PitchStripMicRoute) {
     this.context = options.context
     this.askAccess = options.askAccess
-    this.makeMic = options.makeMic ?? (() => new MicPitch())
+    this.makeMic = options.makeMic ?? (() => new NativeTrainingMicSource())
     this.onChange = options.onChange
     this.onDevice = options.onDevice
     this.route = route
   }
 
-  get current(): MicPitch | null { return this.mic }
-  get status(): PitchStripMicState { return this.state }
+  get current(): PitchStripSource | null {
+    return this.mic
+  }
+  get status(): PitchStripMicState {
+    return this.state
+  }
 
   toggle(): void {
     if (this.disposed || this.suspended) return
@@ -105,7 +113,9 @@ export class PitchStripMicOwner {
   }
 
   /** Background capture is not resumed implicitly: the singer opts in again. */
-  suspend(): void { this.stop() }
+  suspend(): void {
+    this.stop()
+  }
 
   stop(): void {
     this.desired = false
@@ -148,12 +158,14 @@ export class PitchStripMicOwner {
     route: PitchStripMicRoute,
     failureState: 'off' | 'denied'
   ): Promise<void> {
-    let mic: MicPitch | null = null
+    let mic: PitchStripSource | null = null
     try {
+      await this.releasePending
       if (!this.owns(generation, route)) return
       mic = this.makeMic()
       await mic.start(this.context, {
         deviceId: route.deviceId,
+        nativeDeviceUid: route.nativeDeviceUid,
         channelIndex: route.channelIndex,
         onEnded: () => {
           if (!this.owns(generation, route) || this.mic !== mic) return
@@ -180,16 +192,27 @@ export class PitchStripMicOwner {
   }
 
   private owns(generation: number, route: PitchStripMicRoute): boolean {
-    return !this.disposed && !this.suspended && this.desired && generation === this.generation && sameRoute(route, this.route)
+    return (
+      !this.disposed &&
+      !this.suspended &&
+      this.desired &&
+      generation === this.generation &&
+      sameRoute(route, this.route)
+    )
   }
 
   private stopOwnedMic(): void {
-    this.mic?.stop()
+    const mic = this.mic
     this.mic = null
+    if (mic)
+      this.releasePending = Promise.resolve(mic.stop()).then(
+        () => {},
+        () => {}
+      )
     this.onDevice(null)
   }
 
-  private publish(state: PitchStripMicState, mic: MicPitch | null): void {
+  private publish(state: PitchStripMicState, mic: PitchStripSource | null): void {
     this.state = state
     this.onChange(state, mic)
     if (!mic) this.onDevice(null)
@@ -197,5 +220,9 @@ export class PitchStripMicOwner {
 }
 
 function sameRoute(a: PitchStripMicRoute, b: PitchStripMicRoute): boolean {
-  return a.deviceId === b.deviceId && (a.channelIndex ?? 0) === (b.channelIndex ?? 0)
+  return (
+    a.nativeDeviceUid === b.nativeDeviceUid &&
+    a.deviceId === b.deviceId &&
+    (a.channelIndex ?? 0) === (b.channelIndex ?? 0)
+  )
 }

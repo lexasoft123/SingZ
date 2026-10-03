@@ -1,3 +1,4 @@
+import { TRAINING_REACHED_TONE } from '../../../shared/training-tone'
 import type { TrainingCue, TrainingCuePurpose } from '../../../shared/training-types'
 import {
   DEFAULT_TRAINING_REFERENCE_VOLUME,
@@ -25,8 +26,8 @@ export const DEFAULT_TRAINING_CUE_TIMING: Readonly<TrainingCueTimingOptions> = O
   contextGapSec: 0.35,
   questionGapSec: 0.45,
   answerGapSec: 0.25,
-  attackSec: 0.012,
-  releaseSec: 0.05,
+  attackSec: 0.045,
+  releaseSec: 0.12,
   peakGain: 1
 })
 
@@ -117,8 +118,40 @@ export class DesktopTrainingCueController {
     return { startTime, endTime, cues: scheduledCues }
   }
 
+  /** Signal entry into the displayed target window, before the completion hold. */
+  private reachedTargets = new WeakSet<object>()
+
+  latchOnReach(target: { readonly midi: number }, displayMidi: number | null, confidence: number, minimumConfidence: number, windowCents: number): void {
+    if (this.reachedTargets.has(target) || displayMidi === null || confidence < minimumConfidence || Math.abs(displayMidi - target.midi) * 100 > windowCents) return
+    this.reachedTargets.add(target)
+    this.latch()
+  }
+
+  /** Confirmation on the current route; cue lifecycle owns and releases these voices. */
+  latch(): void {
+    if (this.disposed || this.context.state !== 'running') return
+    const tone = TRAINING_REACHED_TONE
+    const start = this.context.currentTime + tone.startDelaySeconds
+    const end = start + tone.durationSeconds
+    const oscillator = this.context.createOscillator()
+    const gain = this.context.createGain()
+    const voice = { oscillator, gain }
+    oscillator.type = 'sine'
+    oscillator.frequency.setValueAtTime(tone.frequency, start)
+    gain.gain.setValueAtTime(0, start)
+    gain.gain.linearRampToValueAtTime(tone.peakGain * Math.min(1, this.referenceVolume), start + tone.attackSeconds)
+    gain.gain.linearRampToValueAtTime(0, end)
+    oscillator.connect(gain)
+    gain.connect(this.output)
+    oscillator.onended = () => this.releaseVoice(voice, false)
+    this.voices.add(voice)
+    oscillator.start(start)
+    oscillator.stop(end)
+  }
+
   /** Stop both future and currently sounding controller-owned voices. */
   cancel(): void {
+    this.reachedTargets = new WeakSet<object>()
     this.generation++
     this.clearVoices()
   }
@@ -150,7 +183,7 @@ export class DesktopTrainingCueController {
     concurrentScale: number
   ): void {
     const fundamental = 440 * 2 ** ((midi - 69) / 12)
-    for (const partial of trainingOrganOscillators()) {
+    for (const partial of trainingOrganOscillators(fundamental)) {
       const oscillator = this.context.createOscillator()
       const gain = this.context.createGain()
       const voice = { oscillator, gain }

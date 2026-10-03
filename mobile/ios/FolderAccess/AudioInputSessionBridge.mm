@@ -2,10 +2,13 @@
 #import <React/RCTEventEmitter.h>
 
 #include "audio_input_ios_session.h"
+#include <zcore/audio/capture_recording.h>
 
-#include <zdsp/analysis/capture_adapter.h>
+#include <zdsp/analysis/pitch_analysis_module.h>
 #include <zcore/device/audio_input.h>
 
+#include <array>
+#include <stdexcept>
 #include <atomic>
 #include <cerrno>
 #include <cmath>
@@ -16,8 +19,12 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
+#include <algorithm>
 
 namespace {
+
+using CarSample = singz::CaptureRecording;
 
 enum class CaptureOwnerPhase : uint8_t { Running, Stopping, FullyStopped };
 
@@ -42,6 +49,7 @@ struct CaptureOwnerState {
   std::unique_ptr<singz::AudioInput> _captureInput;
   std::shared_ptr<void> _captureContext;
   dispatch_source_t _captureMonitor;
+  std::shared_ptr<CarSample> _carSample;
  @public
   std::atomic<bool> _hasListeners;
 }
@@ -117,14 +125,18 @@ struct IosCaptureBridge {
   __weak AudioInputSession* owner = nil;
   uint64_t generation = 0;
   std::atomic<bool> active{true};
-  zdsp::analysis::LiveInputAnalysisAdapter adapter;
+  std::shared_ptr<CarSample> sample;
+  zdsp::analysis::PitchAnalysisModule adapter;
 
-  IosCaptureBridge(AudioInputSession* inputOwner, uint64_t inputGeneration)
-      : owner(inputOwner), generation(inputGeneration), adapter(inputGeneration) {}
+  IosCaptureBridge(AudioInputSession* inputOwner, uint64_t inputGeneration,
+                   zdsp::analysis::PitchAnalysisConfig config)
+      : owner(inputOwner), generation(inputGeneration), adapter(std::move(config)) {}
 
   void accept(const singz::AudioInputBlockView& block)
   {
     if (!active.load(std::memory_order_acquire)) return;
+    if (auto recording = std::atomic_load_explicit(&sample, std::memory_order_acquire)) recording->append(block);
+    try {
     (void)adapter.push(block, [this](const zdsp::analysis::AnalysisWindow& window) {
       // AudioInput delivery is a native std::thread with no ambient Cocoa
       // autorelease pool. Keep analysis outside and bound every temporary
@@ -150,6 +162,9 @@ struct IosCaptureBridge {
           @"discontinuityReason": discontinuityReason(window.resetReason),
           @"resetCount": [NSString stringWithFormat:@"%llu", window.resetCount],
           @"sampleRate": @(window.sampleRate.value),
+          @"detector": [NSString stringWithUTF8String:adapter.detectorName()],
+          @"inferenceMs": @(adapter.inferenceMs()),
+          @"harmonicCorrected": @(adapter.harmonicCorrected()),
           @"frequency": @(window.analysis.frequency),
           @"clarity": @(window.analysis.clarity),
           @"peak": @(window.analysis.peak),
@@ -159,6 +174,14 @@ struct IosCaptureBridge {
         [strongOwner sendEventWithName:@"singzAudioInputFrame" body:payload];
       }
     });
+    } catch (const std::exception& error) {
+      active.store(false, std::memory_order_release);
+      @autoreleasepool {
+        AudioInputSession* strongOwner = owner;
+        if (strongOwner) [strongOwner sendEventWithName:@"singzAudioInputState" body:
+          @{@"generation": @(generation), @"state": @"error", @"error": [NSString stringWithUTF8String:error.what()]}];
+      }
+    }
   }
 };
 
@@ -271,6 +294,59 @@ RCT_EXPORT_MODULE(AudioInputSession)
     if (strongSelf) [strongSelf pollCaptureState];
   });
   dispatch_resume(_captureMonitor);
+}
+
+#if DEBUG
+// Tests the packaged model through the compiled pitch graph, silently.
+RCT_EXPORT_METHOD(crepeTinyProof:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject)
+{
+  NSString* resource = [[NSBundle mainBundle] pathForResource:@"SingzPitchModels" ofType:@"bundle"];
+  NSString* path = resource ? [[NSBundle bundleWithPath:resource] pathForResource:@"crepe-tiny" ofType:@"bin"] : nil;
+  try {
+    if (!path) throw std::runtime_error("CREPE-tiny resource missing");
+    NSMutableArray* rows = [NSMutableArray array];
+    for (double frequency : {0.,146.832,195.998,220.,440.}) {
+      zdsp::analysis::PitchAnalysisModule module({zdsp::analysis::PitchDetectorKind::CrepeTiny, path.UTF8String, 1});
+      zdsp::analysis::LiveInputFrame frame{};
+      int emitted = 0;
+      for (uint32_t blockIndex = 0; blockIndex < 20; ++blockIndex) {
+        std::array<float,320> pcm{};
+        for (size_t i = 0; i < pcm.size(); ++i) {
+          const double sample = blockIndex*320+i;
+          pcm[i] = frequency ? float(.08*std::sin(2*M_PI*frequency*sample/16000.) + .04*std::sin(4*M_PI*frequency*sample/16000.)) : 0;
+        }
+        singz::AudioInputBlockView block{};
+        block.mono = pcm.data(); block.frames = 320; block.sampleRate = 16000;
+        block.capture.clockDomainId = 1; block.capture.streamGeneration = 1;
+        block.capture.sequence = blockIndex+1; block.capture.sourceFrame = blockIndex*320;
+        block.capture.sampleHostTimeNs = 1000000000ull + blockIndex*20000000ull;
+        block.capture.flags = singz::AudioInputSourceFrameValid | singz::AudioInputSampleHostTimeValid | singz::AudioInputTimestampQualityValid;
+        block.capture.timestampQuality = singz::AudioInputTimestampQuality::Hardware;
+        if (!module.push(block, [&](const auto& window) { frame = window.analysis; ++emitted; }))
+          throw std::runtime_error("Pitch graph failed to render");
+      }
+      if (!emitted) throw std::runtime_error("Pitch graph emitted no analysis windows");
+      [rows addObject:@{@"target": @(frequency), @"frequency": @(frame.frequency), @"confidence": @(frame.clarity), @"inferenceMs": @(module.inferenceMs()), @"analysisGraph": @"pitch-tap-v1"}];
+    }
+    resolve(rows);
+  } catch (const std::exception& error) { reject(@"E_CREPE_PROOF",[NSString stringWithUTF8String:error.what()],nil); }
+}
+#endif
+
+RCT_EXPORT_METHOD(getPitchDetector:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject)
+{
+  resolve([[NSUserDefaults standardUserDefaults] stringForKey:@"singz.pitch.detector"] ?: @"crepe-tiny");
+}
+
+RCT_EXPORT_METHOD(setPitchDetector:(NSString*)detector resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject)
+{
+  std::lock_guard<std::mutex> lock(_captureMutex);
+  if (_captureInput || !([detector isEqualToString:@"crepe-tiny"] || [detector isEqualToString:@"yin"])) {
+    reject(@"E_PITCH_DETECTOR", @"Stop the microphone before changing detector", nil);
+    return;
+  }
+  [[NSUserDefaults standardUserDefaults] setObject:detector forKey:@"singz.pitch.detector"];
+  resolve(detector);
 }
 
 RCT_REMAP_METHOD(
@@ -457,7 +533,25 @@ RCT_REMAP_METHOD(
     reject(@"E_AUDIO_INPUT_CAPTURE", @"Another iOS capture owner is active", nil);
     return;
   }
-  auto context = std::make_shared<IosCaptureBridge>(self, generation);
+  zdsp::analysis::PitchAnalysisConfig pitchConfig;
+  pitchConfig.generation = generation;
+  NSString* detector = [[NSUserDefaults standardUserDefaults] stringForKey:@"singz.pitch.detector"] ?: @"crepe-tiny";
+  pitchConfig.detector = [detector isEqualToString:@"crepe-tiny"]
+      ? zdsp::analysis::PitchDetectorKind::CrepeTiny : zdsp::analysis::PitchDetectorKind::Yin;
+  std::shared_ptr<IosCaptureBridge> context;
+  try {
+    if (pitchConfig.detector == zdsp::analysis::PitchDetectorKind::CrepeTiny) {
+      NSString* resource = [[NSBundle mainBundle] pathForResource:@"SingzPitchModels" ofType:@"bundle"];
+      NSString* path = resource ? [[NSBundle bundleWithPath:resource] pathForResource:@"crepe-tiny" ofType:@"bin"] : nil;
+      if (!path) throw std::runtime_error("CREPE-tiny model is missing from the app");
+      pitchConfig.modelPath = path.UTF8String;
+    }
+    context = std::make_shared<IosCaptureBridge>(self, generation, std::move(pitchConfig));
+  } catch (const std::exception& error) {
+    reject(@"E_PITCH_MODEL", [NSString stringWithUTF8String:error.what()], nil);
+    return;
+  }
+  std::atomic_store_explicit(&context->sample, _carSample, std::memory_order_release);
   auto input = std::make_unique<singz::AudioInput>();
   singz::AudioInputConfig config;
   config.deviceUid = deviceUid.UTF8String;
@@ -483,7 +577,7 @@ RCT_REMAP_METHOD(
   resolve(@{@"ok": @YES,
             @"sampleRate": @(started.sampleRate),
             @"analysisBuild": [NSString stringWithUTF8String:
-                zdsp::analysis::analysisBuildId()]});
+                [detector isEqualToString:@"crepe-tiny"] ? "crepe-tiny-zdsp-graph-v2" : zdsp::analysis::analysisBuildId()]});
 }
 
 RCT_REMAP_METHOD(
@@ -568,6 +662,50 @@ RCT_REMAP_METHOD(
                        body:@{@"generation": ownershipGeneration,
                               @"state": @"stopped"}];
   resolve(nil);
+}
+
+RCT_REMAP_METHOD(armCarSample, armCarSampleWithName:(NSString*)filename resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject)
+{
+  std::lock_guard<std::mutex> lock(_captureMutex);
+  if (_carSample) { reject(@"E_SAMPLE", @"Finish the current recording first", nil); return; }
+  NSCharacterSet* permitted = [NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."];
+  if (![filename isKindOfClass:[NSString class]] || filename.length > 180 ||
+      ![filename hasPrefix:@"SingZ-microphone-"] || ![filename hasSuffix:@".wav"] ||
+      [filename rangeOfCharacterFromSet:permitted.invertedSet].location != NSNotFound) {
+    reject(@"E_SAMPLE", @"Invalid microphone recording filename", nil); return;
+  }
+  _carSample = std::make_shared<CarSample>();
+  _carSample->filename = filename.UTF8String;
+  if (_captureContext) {
+    auto context = std::static_pointer_cast<IosCaptureBridge>(_captureContext);
+    std::atomic_store_explicit(&context->sample, _carSample, std::memory_order_release);
+  }
+  resolve(nil);
+}
+
+RCT_REMAP_METHOD(finishCarSample, finishCarSampleWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject)
+{
+  std::shared_ptr<CarSample> sample;
+  { std::lock_guard<std::mutex> lock(_captureMutex);
+    sample = std::move(_carSample);
+    if (_captureContext) std::atomic_store_explicit(&std::static_pointer_cast<IosCaptureBridge>(_captureContext)->sample, std::shared_ptr<CarSample>{}, std::memory_order_release);
+  }
+  if (!sample) { reject(@"E_SAMPLE", @"No recording was started", nil); return; }
+  std::lock_guard<std::mutex> lock(sample->mutex);
+  sample->finished = true;
+  if (sample->pcm.empty()) { reject(@"E_SAMPLE", @"No microphone audio was recorded", nil); return; }
+  NSMutableData* wav = [NSMutableData data];
+  auto bytes = [&](const void* p, size_t n) { [wav appendBytes:p length:n]; };
+  auto u16 = [&](uint16_t n) { uint8_t b[] = {uint8_t(n), uint8_t(n >> 8)}; bytes(b,2); };
+  auto u32 = [&](uint32_t n) { uint8_t b[] = {uint8_t(n), uint8_t(n >> 8), uint8_t(n >> 16), uint8_t(n >> 24)}; bytes(b,4); };
+  const uint32_t size = static_cast<uint32_t>(sample->pcm.size() * 2), rate = static_cast<uint32_t>(sample->rate);
+  bytes("RIFF",4); u32(36+size); bytes("WAVEfmt ",8); u32(16); u16(1); u16(1);
+  u32(rate); u32(rate*2); u16(2); u16(16); bytes("data",4); u32(size);
+  bytes(sample->pcm.data(),size);
+  NSString* path = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithUTF8String:sample->filename.c_str()]];
+  NSError* error = nil;
+  if (![wav writeToFile:path options:NSDataWritingAtomic error:&error]) { reject(@"E_SAMPLE", error.localizedDescription, error); return; }
+  resolve(@{@"filename": path.lastPathComponent, @"url": [NSURL fileURLWithPath:path].absoluteString, @"seconds": @(sample->pcm.size()/sample->rate), @"sampleRate": @(rate)});
 }
 
 @end

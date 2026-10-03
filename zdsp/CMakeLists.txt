@@ -9,16 +9,22 @@ target_link_libraries(zdsp_api INTERFACE SingZ::zcore_base)
 # that may link both packages; zcore_audio retains no zdsp dependency. It is
 # intentionally separate from the callback-reachable runtime target.
 add_library(zdsp_analysis STATIC
+  src/analysis/pitch_analysis_module.cpp
+  src/analysis/crepe_tiny.cpp
   src/analysis/capture_adapter.cpp
   src/analysis/live_input_analyzer.cpp)
 add_library(SingZ::zdsp_analysis ALIAS zdsp_analysis)
+if(APPLE)
+  target_link_libraries(zdsp_analysis PRIVATE "-framework Accelerate")
+endif()
 target_compile_features(zdsp_analysis PUBLIC cxx_std_20)
 target_include_directories(zdsp_analysis PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(zdsp_analysis PUBLIC
   SingZ::zdsp_api
   SingZ::zcore_audio
-  SingZ::zcore_live_analysis_compat)
+  SingZ::zcore_live_analysis_compat
+  SingZ::zdsp_runtime)
 target_sources(zdsp_analysis PRIVATE
   include/zdsp/analysis/capture_adapter.h
   include/zdsp/analysis/live_input_analysis.h)

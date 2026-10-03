@@ -40,68 +40,178 @@ export async function appInfo(): Promise<AppInfo | null> {
   }
 }
 
-const KEY = 'singz.log'
-const MAX = 400
+const LEGACY_KEY = 'singz.log'
+const CURRENT_KEY = 'singz.log.current.v1'
+const HISTORY_KEY = 'singz.log.history.v1'
+export const LOG_MAX_ENTRIES = 400
+const PREVIOUS_SESSIONS = 10
 
 export type LogLevel = 'info' | 'warn' | 'error'
 
 export interface LogEntry {
-  /** ms since epoch, like the desktop's. */
   t: number
   level: LogLevel
-  /** Who wrote it: 'gdrive', 'song', 'engine', 'app'. */
   source: string
   line: string
 }
 
-let buf: LogEntry[] | null = null
+interface StoredSession {
+  id: string
+  startedAt: number
+  entries: LogEntry[]
+}
+
+export interface LogSession {
+  id: string
+  startedAt: number
+  lines: number
+  current: boolean
+}
+
+// A session is one JS/app launch, not a foreground/background transition.
+// Capture its identity before asynchronous startup probes or preference reads.
+const current: StoredSession = {
+  id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  startedAt: Date.now(),
+  entries: []
+}
+/** Stable identity shared by saved recordings and this launch's log. */
+export function currentLogSessionId(): string { return current.id }
+
+let past: StoredSession[] = []
+let initialized: Promise<void> | null = null
+let historyLoaded = false
+let historySaved = false
 let writing: Promise<void> = Promise.resolve()
 const listeners = new Set<(e: LogEntry) => void>()
 
-async function load(): Promise<LogEntry[]> {
-  if (buf) return buf
-  try {
-    const raw = await Prefs.getTextPref(KEY)
-    buf = raw ? (JSON.parse(raw) as LogEntry[]) : []
-  } catch {
-    buf = []
-  }
-  return buf
+function parseEntries(value: unknown): LogEntry[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((e): e is LogEntry => e && Number.isFinite(e.t) &&
+    ['info', 'warn', 'error'].includes(e.level) && typeof e.source === 'string' &&
+    typeof e.line === 'string').slice(-LOG_MAX_ENTRIES).map(e => ({
+      t: e.t, level: e.level, source: e.source.slice(0, 64), line: e.line.slice(0, 2000)
+    }))
 }
 
-/** Fire-and-forget: a log line must never delay a load or fail an open. */
+function parseSession(value: unknown): StoredSession | null {
+  if (!value || typeof value !== 'object') return null
+  const s = value as Partial<StoredSession>
+  if (typeof s.id !== 'string' || !Number.isFinite(s.startedAt) || !Array.isArray(s.entries)) return null
+  return { id: s.id, startedAt: s.startedAt!, entries: parseEntries(s.entries) }
+}
+
+function parseJson(raw: string | null | undefined): unknown {
+  try { return raw ? JSON.parse(raw) : null } catch { return null }
+}
+
+/** Preserve older rolling logs as dated launches; never replay them into this one. */
+function legacySessions(value: unknown): StoredSession[] {
+  const sessions: StoredSession[] = []
+  for (const entry of parseEntries(value)) {
+    const isLaunch = entry.source === 'app' && entry.line.startsWith('SingZ ')
+    if (isLaunch) {
+      const last = sessions.at(-1)
+      const prefix = last?.entries.at(-1)
+      const startupLanguage = prefix?.source === 'app' && prefix.line.startsWith('language:') && !prefix.line.includes('→')
+      const leading = startupLanguage ? [last!.entries.pop()!] : []
+      if (last && !last.entries.length) sessions.pop()
+      sessions.push({ id: `legacy-${entry.t}-${sessions.length}`, startedAt: leading[0]?.t ?? entry.t, entries: leading })
+    } else if (!sessions.length) {
+      sessions.push({ id: `legacy-${entry.t}-0`, startedAt: entry.t, entries: [] })
+    }
+    sessions[sessions.length - 1].entries.push(entry)
+  }
+  return sessions.reverse()
+}
+
+function initialize(): Promise<void> {
+  if (!initialized) initialized = (async () => {
+    const [savedCurrent, savedHistory] = await Promise.all([
+      Prefs.getTextPref(CURRENT_KEY),
+      Prefs.getTextPref(HISTORY_KEY)
+    ])
+    const previous = parseSession(parseJson(savedCurrent))
+    const history = parseJson(savedHistory)
+    past = Array.isArray(history)
+      ? history.map(parseSession).filter((s): s is StoredSession => s !== null)
+      : []
+    if (previous) past.unshift(previous)
+    if (!savedCurrent && !savedHistory)
+      past = legacySessions(parseJson(await Prefs.getTextPref(LEGACY_KEY).catch(() => null)))
+    // A kill between the two preference writes may leave the prior current
+    // in history already. Identity deduplication makes rotation idempotent.
+    const seen = new Set<string>()
+    past = past.filter(s => {
+      if (!s.entries.length || seen.has(s.id) || s.id === current.id) return false
+      seen.add(s.id)
+      return true
+    }).slice(0, PREVIOUS_SESSIONS)
+    historyLoaded = true
+    // Archive first: a kill during rotation must not destroy the prior launch.
+    // History is written only at launch, not on every incoming training line.
+    try {
+      await Prefs.setTextPref(HISTORY_KEY, JSON.stringify(past))
+      historySaved = true
+      await Prefs.setTextPref(CURRENT_KEY, JSON.stringify(current))
+    } catch { /* Never replace the old current before its archive is durable. */ }
+  })().catch(() => { initialized = null })
+  return initialized
+}
+
+function persistCurrent(): void {
+  writing = writing.then(async () => {
+    await initialize()
+    if (!historyLoaded) return
+    if (!historySaved) {
+      await Prefs.setTextPref(HISTORY_KEY, JSON.stringify(past))
+      historySaved = true
+    }
+    await Prefs.setTextPref(CURRENT_KEY, JSON.stringify(current))
+  }).catch(() => undefined)
+}
+
+/** In-memory append is immediate; persistence cannot delay or fail a caller. */
 export function log(source: string, line: string, level: LogLevel = 'info'): void {
   const entry: LogEntry = { t: Date.now(), level, source, line: line.slice(0, 2000) }
-  for (const fn of listeners) fn(entry)
-  writing = writing
-    .then(async () => {
-      const entries = await load()
-      entries.push(entry)
-      if (entries.length > MAX) entries.splice(0, entries.length - MAX)
-      await Prefs.setTextPref(KEY, JSON.stringify(entries))
-    })
-    .catch(() => {})
+  current.entries.push(entry)
+  if (current.entries.length > LOG_MAX_ENTRIES) current.entries.splice(0, current.entries.length - LOG_MAX_ENTRIES)
+  for (const fn of listeners) { try { fn(entry) } catch { /* A viewer cannot break logging. */ } }
+  persistCurrent()
 }
 
-/** Live lines, for a panel that is open while something is happening. */
 export function onLogLine(fn: (e: LogEntry) => void): () => void {
   listeners.add(fn)
   return () => listeners.delete(fn)
 }
 
-/** Oldest first, like the desktop's panel — you read a log downwards. */
+/** Current launch only, oldest first. */
 export async function logEntries(): Promise<LogEntry[]> {
   await writing
-  return [...(await load())]
+  await initialize()
+  return [...current.entries]
 }
 
+/** Current launch followed by the previous ten, newest first. */
+export async function logSessions(): Promise<LogSession[]> {
+  await writing
+  await initialize()
+  return [current, ...past].map(s => ({
+    id: s.id, startedAt: s.startedAt, lines: s.entries.length, current: s === current
+  }))
+}
+
+export async function logSessionEntries(id: string): Promise<LogEntry[]> {
+  await writing
+  await initialize()
+  const session = id === current.id ? current : past.find(s => s.id === id)
+  return session ? [...session.entries] : []
+}
+
+/** Clear only this launch; archived launches remain available. */
 export async function clearLog(): Promise<void> {
-  writing = writing
-    .then(async () => {
-      buf = []
-      await Prefs.setTextPref(KEY, '[]')
-    })
-    .catch(() => {})
+  current.entries = []
+  persistCurrent()
   await writing
 }
 

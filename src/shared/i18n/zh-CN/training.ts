@@ -321,6 +321,8 @@ export const training: Translation<typeof en> = {
   'training.session.instruction.arpeggiate': '以{direction}方式琶奏 {chord}。',
 
   // ── session generator validation error reachable from normal setup ──
+  'training.range.omitted': '以下选项不适合您的音域，将被省略：{items}。扩大音域即可包含它们。',
+  'training.range.chordDegrees': '{exercise}：和弦级数 {degrees}',
   'training.session.error.rangeTooNarrow': '在这个舒适音域内没有合适的练习。',
   'training.session.error.confirmKeyThenReview': '确认或更改歌曲的调式，然后查看准备会话。',
   'training.session.error.setUpSessionFirst': '请先设置一个训练会话，然后再开始。',

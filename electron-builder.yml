@@ -26,6 +26,8 @@ files:
   # CI ships. CI only escapes because its desktop job never pod-installs, so
   # this was a landmine rather than a current break.
   - '!mobile/*'
+  # Shared pitch weights are copied to resources/pitch below.
+  - '!assets/pitch/*'
   # Output of the iOS pipeline (fastlane's export dir): .ipa plus a ~38 MB
   # dSYM zip, for the same reason.
   - '!build-ios/*'
@@ -111,6 +113,8 @@ mac:
   extendInfo:
     NSMicrophoneUsageDescription: SingZ listens to your singing to show how well you match the melody.
   extraResources:
+    - from: assets/pitch
+      to: pitch
     - from: vendor/darwin-${arch}
       to: engines
       filter: ['singz-analyze*', 'llama-server*', 'crispasr*']
@@ -132,6 +136,8 @@ dmg:
   title: ${productName}
 win:
   extraResources:
+    - from: assets/pitch
+      to: pitch
     - from: vendor/win32-x64
       to: engines
       filter: ['singz-analyze*', 'llama-server*', 'crispasr*']

@@ -1,6 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import React, { createContext, useContext, useSyncExternalStore, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import {
   AccessibilityInfo,
+  Animated,
+  Easing,
   AppState,
   Image,
   PanResponder,
@@ -30,6 +32,7 @@ import {
   scoreVocalTrainingAttempt,
   summarizeTrainingProgress,
   trainingSetupRequirements,
+  trainingRangeNotice,
   type SongPreparationChoice,
   type TrainingAttemptInput,
   type TrainingIdentifyAnswer,
@@ -68,8 +71,12 @@ import {
   type SingleNoteLockState
 } from '../training/runtime'
 import { t, tn } from '../i18n'
+import { log } from '../log'
 import { C, CircularArrowGlyph, MicGlyph, PlayPauseGlyph, white } from './bits'
 import { TEST } from './testhooks'
+import { useTrainingSampleRecording } from '../training/use-sample-recording'
+import { SmoothPitchMeter } from './SmoothPitchMeter'
+import { AudioDiagnosticsScreen } from './AudioDiagnosticsScreen'
 import {
   ChoiceChip,
   Countdown,
@@ -78,7 +85,6 @@ import {
   GlassSurface,
   Hairline,
   ListEntry,
-  PitchMeter,
   PitchTarget,
   PrimaryAction,
   ReferenceControls,
@@ -109,18 +115,41 @@ interface ActiveVocalRun {
   targetStartEngineMs: number
   lastObservationTimestampMs: number | null
   completed: boolean
+  reachedSoundPlayed: boolean
 }
 
 const persistence = new MobileTrainingPersistence()
 const SCRIM_TOP = require('../../assets/bg/scrim-top.png')
 const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
-type TrainingStackParamList = { Home: undefined; Exercise: undefined; Progress: undefined }
+type TrainingStackParamList = { Home: undefined; Exercise: undefined; Progress: undefined; Diagnostics: undefined }
 const TrainingStack = createNativeStackNavigator<TrainingStackParamList>()
 /** Polls (80 ms each) a fresh capture gets before the screen is allowed to
  * report what it is hearing — about a second, which is long enough for both
  * capture paths to have delivered blocks and short enough to still answer the
  * singer standing there wondering. */
 const MIC_DIAGNOSIS_POLLS = 12
+
+interface LiveTrainingReading {
+  liveMidi: number | null
+  micHearing: MicHearing
+  singleNoteLock: SingleNoteLockState
+}
+function createLiveTrainingReadings() {
+  let snapshot: LiveTrainingReading = { liveMidi: null, micHearing: 'starting', singleNoteLock: EMPTY_SINGLE_NOTE_LOCK }
+  const listeners = new Set<() => void>()
+  return {
+    getSnapshot: () => snapshot,
+    subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
+    update: (patch: Partial<LiveTrainingReading>) => {
+      if (Object.entries(patch).every(([key, value]) => snapshot[key as keyof LiveTrainingReading] === value)) return
+      snapshot = { ...snapshot, ...patch }
+      listeners.forEach(listener => listener())
+    }
+  }
+}
+type LiveTrainingReadings = ReturnType<typeof createLiveTrainingReadings>
+const LiveTrainingContext = createContext<LiveTrainingReadings | null>(null)
+const emptyLiveReadings = createLiveTrainingReadings()
 
 export default function TrainingScreen({
   active,
@@ -143,15 +172,19 @@ export default function TrainingScreen({
   const micRef = useRef<TrainingMicrophone | null>(null)
   if (!micRef.current) micRef.current = new TrainingMicrophone()
   const mic = micRef.current
+  const microphoneOwned = useRef(false)
   const runGeneration = useRef(0)
   const referenceTestGeneration = useRef(0)
   const timers = useRef<ReturnType<typeof setTimeout>[]>([])
   const recorded = useRef(new Set<string>())
-  const [liveMidi, setLiveMidi] = useState<number | null>(null)
-  const [micHearing, setMicHearing] = useState<MicHearing>('starting')
+  // Microphone samples must not re-render the navigator, background canvas,
+  // reference controls or target layout. Only the live meter subscribes.
+  const [liveReadings] = useState(createLiveTrainingReadings)
+  const setLiveMidi = useCallback((liveMidi: number | null) => liveReadings.update({ liveMidi }), [liveReadings])
+  const setMicHearing = useCallback((micHearing: MicHearing) => liveReadings.update({ micHearing }), [liveReadings])
+  const setSingleNoteLock = useCallback((singleNoteLock: SingleNoteLockState) => liveReadings.update({ singleNoteLock }), [liveReadings])
   const micReports = useRef(true)
   const [activeTarget, setActiveTarget] = useState(0)
-  const [singleNoteLock, setSingleNoteLock] = useState<SingleNoteLockState>(EMPTY_SINGLE_NOTE_LOCK)
   const [singleNoteCountdown, setSingleNoteCountdown] = useState<number | null>(null)
   const [referenceVolume, setReferenceVolume] = useState(DEFAULT_TRAINING_REFERENCE_VOLUME)
   const [pitchWindowCents, setPitchWindowCents] = useState(DEFAULT_SINGLE_NOTE_PITCH_WINDOW_CENTS)
@@ -159,6 +192,7 @@ export default function TrainingScreen({
   const singleNoteTracker = useRef(new SingleNoteLockTracker())
   const vocalRun = useRef<ActiveVocalRun | null>(null)
   const autoStartedPrompt = useRef<string | null>(null)
+  const sampleControls = useTrainingSampleRecording(active && !state.error && state.route === 'session' && state.session?.status !== 'completed')
   const window = useWindowDimensions()
 
   const stopRuntime = useCallback(() => {
@@ -169,6 +203,7 @@ export default function TrainingScreen({
     autoStartedPrompt.current = null
     singleNoteTracker.current.reset()
     engine.cancelTrainingCues()
+    microphoneOwned.current = false
     void mic.stop()
     setLiveMidi(null)
     setSingleNoteLock(EMPTY_SINGLE_NOTE_LOCK)
@@ -232,13 +267,14 @@ export default function TrainingScreen({
   useEffect(() => {
     const session = state.session
     if (session?.status !== 'completed' || recorded.current.has(session.id)) return
+    stopRuntime()
     recorded.current.add(session.id)
     persistence.recordCompletion(createTrainingCompletionReceipt(session))
     void persistence.flush().then(() => {
       setProgress(persistence.progress)
       if (persistence.error) dispatch({ type: 'error', error: persistence.error })
     })
-  }, [state.session])
+  }, [state.session, stopRuntime])
 
   const saveSetupPreferences = useCallback((setup: MobileTrainingSetup) => {
     persistence.savePreferences({
@@ -341,17 +377,26 @@ export default function TrainingScreen({
         prompt: run.prompt,
         targetWindows: windows,
         observations,
+        options: { minimumConfidence: fake ? SINGLE_NOTE_MIN_CONFIDENCE : (mic.live.minConfidence ?? SINGLE_NOTE_MIN_CONFIDENCE) },
         range: session.config.range,
         completedAt
       })
     }
 
+    log('training', `prompt ${run.prompt.id} · ${reason} · ${Date.now() - run.responseStartWallMs} ms response · ${JSON.stringify(result)}`)
     vocalRun.current = null
     engine.cancelTrainingCues()
-    const stopMicrophone = mic.stop().catch(() => undefined)
+    // Keep capture ownership across the next reference/prompt. Toggling
+    // playback → capture between every note posts delayed CarPlay route
+    // notifications into the next freshly acquired lease.
+    const lastPrompt = session.currentIndex >= session.prompts.length - 1
+    if (lastPrompt) microphoneOwned.current = false
+    const stopMicrophone = lastPrompt ? mic.stop().catch(() => undefined) : Promise.resolve()
+    if (!lastPrompt) log('training', 'microphone retained for the next prompt')
     setLiveMidi(null)
     setSingleNoteCountdown(null)
     void stopMicrophone.then(() => {
+      if (run.generation !== runGeneration.current || !activeRef.current) return
       dispatch({ type: 'record', result })
       dispatch({ type: 'next' })
     })
@@ -372,6 +417,7 @@ export default function TrainingScreen({
       run.targetStartEngineMs + 1,
       captured.at(-1)?.timestampMs ?? run.responseStartEngineMs + elapsedWallMs
     )
+    log('training', `prompt ${run.prompt.id} · target ${run.activeTarget + 1} locked · MIDI ${run.prompt.targets[run.activeTarget].midi}`)
     run.targetWindows.push({
       targetIndex: run.activeTarget,
       startMs: Math.max(run.targetStartEngineMs, endMs - SINGLE_NOTE_HOLD_MS),
@@ -382,14 +428,16 @@ export default function TrainingScreen({
       return
     }
     run.activeTarget++
-    run.targetStartEngineMs = endMs
+    run.reachedSoundPlayed = false
+    // Keep the transition out of the next target window.
+    run.targetStartEngineMs = endMs + 350 + engine.outputDisplayLatency * 1000
     run.lastObservationTimestampMs = null
     singleNoteTracker.current.reset()
     setSingleNoteLock(EMPTY_SINGLE_NOTE_LOCK)
     setLiveMidi(null)
     setActiveTarget(run.activeTarget)
     AccessibilityInfo.announceForAccessibility(t('phone.training.nextNote', { note: run.prompt.targets[run.activeTarget].noteName }))
-  }, [finishVocalPrompt, mic])
+  }, [engine, finishVocalPrompt, mic])
 
   const beginPrompt = useCallback(async () => {
     const current = stateRef.current
@@ -400,6 +448,7 @@ export default function TrainingScreen({
     // resolves. Stamp the prompt first so the ready/no-error auto-start effect
     // cannot enqueue a second acquisition in that window.
     autoStartedPrompt.current = `${session.id}:${session.currentIndex}`
+    log('training', `prompt ${prompt.id} · ${prompt.kind}/${prompt.taskMode} · targets ${prompt.targets.map(target => `${target.noteName} MIDI ${target.midi}`).join(', ')} · pitch window ±${pitchWindowCents} cents · reference volume ${engine.trainingReferenceVolume}`)
     const generation = ++runGeneration.current
     for (const timer of timers.current.splice(0)) clearTimeout(timer)
     vocalRun.current = null
@@ -420,7 +469,7 @@ export default function TrainingScreen({
       micReports.current = !fake
       if (!fake) {
         if (!activeRef.current) return
-        const result = await mic.start(() => engine.trainingCurrentTime * 1000, (error) => {
+        const result = microphoneOwned.current ? { ok: true as const } : await mic.start(() => engine.trainingCurrentTime * 1000, (error) => {
           stopRuntime()
           dispatch({ type: 'error', error })
           dispatch({ type: 'interrupt' })
@@ -429,6 +478,7 @@ export default function TrainingScreen({
           if (result.kind !== 'interrupted') dispatch({ type: 'error', error: result.error })
           return
         }
+        if (generation === runGeneration.current && activeRef.current) microphoneOwned.current = true
       }
     }
     if (generation !== runGeneration.current || !activeRef.current) {
@@ -446,6 +496,7 @@ export default function TrainingScreen({
     }
     if (!cueResult.ok) {
       setSingleNoteCountdown(null)
+      microphoneOwned.current = false
       await mic.stop()
       dispatch({ type: 'error', error: cueResult.error })
       dispatch({ type: 'interrupt' })
@@ -466,6 +517,7 @@ export default function TrainingScreen({
       dispatch({ type: 'cue-complete' })
       if (prompt.taskMode === 'identify') return
       setActiveTarget(0)
+      log('training', `prompt ${prompt.id} · response started · output compensation ${(engine.outputDisplayLatency * 1000).toFixed(1)} ms`)
       const responseStartEngineMs = engine.trainingCurrentTime * 1000
       const run: ActiveVocalRun = {
         generation,
@@ -476,7 +528,8 @@ export default function TrainingScreen({
         activeTarget: 0,
         targetStartEngineMs: responseStartEngineMs + engine.outputDisplayLatency * 1000,
         lastObservationTimestampMs: null,
-        completed: false
+        completed: false,
+        reachedSoundPlayed: false
       }
       singleNoteTracker.current.reset()
       vocalRun.current = run
@@ -486,7 +539,7 @@ export default function TrainingScreen({
         })
       }
     }, cueDelay))
-  }, [completeVocalTarget, engine, mic, stopRuntime])
+  }, [completeVocalTarget, engine, mic, stopRuntime, pitchWindowCents])
 
   useEffect(() => {
     const session = state.session
@@ -510,11 +563,16 @@ export default function TrainingScreen({
     // Capture needs a moment to deliver its first blocks; diagnosing before
     // then would flash "no sound from the mic" at every healthy start.
     let polls = 0
+    let lastLockLogMs = 0
+    let lastUiMs = 0
     const timer = setInterval(() => {
       const reading = mic.live
       const signal = mic.signal
-      polls++
-      setMicHearing(
+      const updateUi = Date.now() - lastUiMs >= 80
+      if (updateUi) {
+        lastUiMs = Date.now()
+        polls++
+        setMicHearing(
         polls < MIC_DIAGNOSIS_POLLS || !micReports.current
           ? 'starting'
           : signal.windows === 0
@@ -524,26 +582,42 @@ export default function TrainingScreen({
               : mic.tooQuiet
                 ? 'too-quiet'
                 : 'hearing'
-      )
+        )
+      }
       const run = vocalRun.current
       if (!run) {
-        setLiveMidi(reading.confidence >= SINGLE_NOTE_MIN_CONFIDENCE ? reading.midi : null)
+        if (updateUi) setLiveMidi(reading.confidence >= (reading.minConfidence ?? SINGLE_NOTE_MIN_CONFIDENCE) ? reading.midi : null)
         return
       }
-      if (reading.timestampMs === null || reading.timestampMs === run.lastObservationTimestampMs) return
+      if (reading.timestampMs === null || reading.timestampMs < run.targetStartEngineMs || reading.timestampMs === run.lastObservationTimestampMs) return
       run.lastObservationTimestampMs = reading.timestampMs
       const next = singleNoteTracker.current.update(
         reading.timestampMs,
         reading.midi,
         reading.confidence,
-        run.prompt.targets[run.activeTarget].midi
+        run.prompt.targets[run.activeTarget].midi,
+        reading.minConfidence ?? SINGLE_NOTE_MIN_CONFIDENCE
       )
-      setLiveMidi(next.displayMidi)
-      setSingleNoteLock(next)
+      if (Date.now() - lastLockLogMs >= 1000 || next.locked) {
+        lastLockLogMs = Date.now()
+        log('training', `prompt ${run.prompt.id} · target ${run.activeTarget + 1} MIDI ${run.prompt.targets[run.activeTarget].midi} · heard MIDI ${reading.midi?.toFixed(2) ?? 'none'} · confidence ${reading.confidence.toFixed(3)} · ${next.status} · median ${next.medianCents?.toFixed(1) ?? 'none'} cents · hold ${next.progressMs.toFixed(0)}/${SINGLE_NOTE_HOLD_MS} ms`)
+      }
+      const reached = !run.reachedSoundPlayed && reading.midi !== null && next.displayMidi !== null &&
+          reading.confidence >= (reading.minConfidence ?? SINGLE_NOTE_MIN_CONFIDENCE) &&
+          Math.abs(next.displayMidi - run.prompt.targets[run.activeTarget].midi) * 100 <= pitchWindowCents
+      if (reached) {
+        run.reachedSoundPlayed = true
+        log('training', `prompt ${run.prompt.id} · target ${run.activeTarget + 1} reached · latch sound`)
+        void engine.playTrainingLatch()
+      }
+      if (updateUi || next.locked || reached) {
+        setLiveMidi(next.displayMidi)
+        setSingleNoteLock(next)
+      }
       if (next.locked) completeVocalTarget(run)
-    }, 80)
+    }, 20)
     return () => clearInterval(timer)
-  }, [active, completeVocalTarget, mic, state.phase, state.session?.config.taskMode])
+  }, [active, completeVocalTarget, engine, mic, pitchWindowCents, state.phase, state.session?.config.taskMode])
 
   const submitIdentify = useCallback((answer: TrainingIdentifyAnswer) => {
     const session = stateRef.current.session
@@ -555,6 +629,48 @@ export default function TrainingScreen({
       if (activeRef.current && stateRef.current.phase === 'feedback') dispatch({ type: 'next' })
     }, 700))
   }, [engine])
+
+  useEffect(() => {
+    if (!active || state.route !== 'session') return
+    let previous: number | null = null
+    let frames = 0
+    let duplicateCallbacks = 0
+    let longGaps = 0
+    let maxGap = 0
+    let frameId = 0
+    let retry: ReturnType<typeof setTimeout> | null = null
+    let stopped = false
+    const sample = () => {
+      if (stopped) return
+      const now = performance.now()
+      const gap = previous === null ? 0 : now - previous
+      // Count advancing frame callbacks only. A stalled/duplicate timer must
+      // not spin the probe or masquerade as thousands of display frames.
+      if (previous !== null && gap < 1) {
+        duplicateCallbacks++
+        retry = setTimeout(() => { if (!stopped) frameId = requestAnimationFrame(sample) }, 16)
+        return
+      }
+      previous = now
+      frames++
+      maxGap = Math.max(maxGap, gap)
+      if (gap > 34) longGaps++
+      frameId = requestAnimationFrame(sample)
+    }
+    frameId = requestAnimationFrame(sample)
+    const deadline = setTimeout(() => {
+      stopped = true
+      cancelAnimationFrame(frameId)
+      if (retry !== null) clearTimeout(retry)
+      log('training-ui', `prompt ${(state.session?.currentIndex ?? 0) + 1} · ${state.phase} · JS frame callbacks ${frames} · duplicate callbacks ${duplicateCallbacks} · gaps >34 ms ${longGaps} · max gap ${Math.round(maxGap)} ms`)
+    }, 700)
+    return () => {
+      stopped = true
+      cancelAnimationFrame(frameId)
+      clearTimeout(deadline)
+      if (retry !== null) clearTimeout(retry)
+    }
+  }, [active, state.route, state.phase, state.session?.currentIndex])
 
   const effectiveKey = useMemo(
     () => song ? effectiveSongPreparationKey(song.keyInfo, song.transpose, song.keyDetectVersion) : null,
@@ -602,6 +718,7 @@ export default function TrainingScreen({
                 dispatch({ type: 'prepare-song', sourceSongId: song.sourceSongId, songName: song.songName, choice, key: effectiveKey, seed: `${song.sourceSongId}:${choice}:${Date.now()}` })
                 navigation.navigate('Exercise')
               }}
+              onDiagnostics={() => { stopRuntime(); navigation.navigate('Diagnostics') }}
               onProgress={() => {
                 dispatch({ type: 'progress' })
                 navigation.navigate('Progress')
@@ -646,9 +763,9 @@ export default function TrainingScreen({
               )
             }
             if (state.route === 'summary' && state.session) {
-              return <TrainingSummary session={state.session} onHome={close} onBackToSong={backToSong} />
+              return <View style={{ flex: 1 }}><TrainingSummary session={state.session} onHome={close} onBackToSong={backToSong} />{sampleControls}</View>
             }
-            return <TrainingSessionView state={state} liveMidi={liveMidi} micHearing={micHearing} singleNoteLock={singleNoteLock} singleNoteCountdown={singleNoteCountdown} pitchWindowCents={pitchWindowCents} activeTarget={activeTarget} onBegin={beginPrompt} onSkipSingleNote={() => { const run = vocalRun.current; if (run) finishVocalPrompt(run, 'skip') }} onIdentify={submitIdentify} onNext={() => dispatch({ type: 'next' })} onExit={close} onBackToSong={backToSong} />
+            return <LiveTrainingContext.Provider value={liveReadings}><TrainingSessionView sampleControls={sampleControls} state={state} liveMidi={null} singleNoteCountdown={singleNoteCountdown} pitchWindowCents={pitchWindowCents} activeTarget={activeTarget} onBegin={beginPrompt} onSkipSingleNote={() => { const run = vocalRun.current; if (run) finishVocalPrompt(run, 'skip') }} onIdentify={submitIdentify} onNext={() => dispatch({ type: 'next' })} onExit={close} onBackToSong={backToSong} /></LiveTrainingContext.Provider>
           }}
         </TrainingStack.Screen>
         <TrainingStack.Screen
@@ -661,12 +778,15 @@ export default function TrainingScreen({
         >
           {({ navigation }) => <TrainingProgressView progress={progress} onBack={() => navigation.goBack()} />}
         </TrainingStack.Screen>
+        <TrainingStack.Screen name="Diagnostics" listeners={{ beforeRemove: stopRuntime }}>
+          {({ navigation }) => <AudioDiagnosticsScreen engine={engine} active={active} onBack={() => navigation.goBack()} />}
+        </TrainingStack.Screen>
       </TrainingStack.Navigator>
     </View>
   )
 }
 
-function TrainingBackdrop({ width, height }: { width: number; height: number }): React.JSX.Element {
+const TrainingBackdrop = React.memo(function TrainingBackdrop({ width, height }: { width: number; height: number }): React.JSX.Element {
   return (
     <>
       <Canvas pointerEvents="none" style={StyleSheet.absoluteFill}>
@@ -706,15 +826,16 @@ function TrainingBackdrop({ width, height }: { width: number; height: number }):
       <View pointerEvents="none" style={styles.bottomScrim}><Image source={SCRIM_BOTTOM} resizeMode="stretch" style={styles.scrimImage} /></View>
     </>
   )
-}
+})
 
-function TrainingHome({ progress, song, effectiveKey, onChoose, onPrepare, onProgress }: {
+function TrainingHome({ progress, song, effectiveKey, onChoose, onPrepare, onProgress, onDiagnostics }: {
   progress: TrainingProgress
   song: MobileSongTrainingFacts | null
   effectiveKey: { tonicPc: number; mode: 'major' | 'minor' } | null
   onChoose: (exercise: MobileTrainingSetup['exercise']) => void
   onPrepare: (choice: SongPreparationChoice) => void
   onProgress: () => void
+  onDiagnostics: () => void
 }): React.JSX.Element {
   const snapshot = summarizeTrainingProgress(progress)
   const cards: { exercise: MobileTrainingSetup['exercise']; title: string; copy: string; mark: string }[] = [
@@ -753,6 +874,7 @@ function TrainingHome({ progress, song, effectiveKey, onChoose, onPrepare, onPro
         detail={snapshot.sessions ? tn('phone.training.progressSummary', snapshot.sessions, { landed }) : t('phone.training.progressEmpty')}
         onPress={onProgress}
       />
+      <ListEntry title="Audio diagnostics" detail="CarPlay latency and live microphone pitch" onPress={onDiagnostics} />
     </ScrollView>
   )
 }
@@ -826,6 +948,7 @@ export function SingleNoteSetup({
 }: TrainingSetupProps): React.JSX.Element {
   const [editor, setEditor] = useState<'key' | 'mode' | 'range' | 'direction' | 'intervals' | 'chords' | null>(null)
   const requirements = trainingSetupRequirements(setup)
+  const rangeNotice = trainingRangeNotice(setup)
   const key = { tonicPc: setup.tonicPc, mode: setup.keyMode }
   const low = midiNoteName(setup.lowMidi, key)
   const high = midiNoteName(setup.highMidi, key)
@@ -838,6 +961,7 @@ export function SingleNoteSetup({
       <ScrollView contentContainerStyle={[styles.scroll, styles.singleSetupScroll]} showsVerticalScrollIndicator={false}>
         <TrainingHeader title={trainingExerciseTitle(setup.exercise)} onBack={onBack} />
         {error && <Text accessibilityLiveRegion="polite" style={styles.error}>{error}</Text>}
+        {rangeNotice && <Text accessibilityLiveRegion="polite" style={styles.singleInstruction}>{rangeNotice}</Text>}
         <SettingsCard>
         <CompactSetupRow
           label={t('phone.training.setupKey')}
@@ -981,7 +1105,7 @@ function CompactSetupRow({ label, value, expanded, onPress }: { label: string; v
   return <SettingsRow label={label} value={value} expanded={expanded} onPress={onPress} />
 }
 
-export function TrainingSessionView({ state, liveMidi, micHearing = 'starting', singleNoteLock = EMPTY_SINGLE_NOTE_LOCK, singleNoteCountdown = null, pitchWindowCents = DEFAULT_SINGLE_NOTE_PITCH_WINDOW_CENTS, activeTarget, onBegin, onSkipSingleNote = () => undefined, onIdentify, onNext, onExit, onBackToSong }: { state: ReturnType<typeof initialTrainingState>; liveMidi: number | null; micHearing?: MicHearing; singleNoteLock?: SingleNoteLockState; singleNoteCountdown?: number | null; pitchWindowCents?: number; activeTarget: number; onBegin: () => void; onSkipSingleNote?: () => void; onIdentify: (answer: TrainingIdentifyAnswer) => void; onNext: () => void; onExit: () => void; onBackToSong: (() => void) | null }): React.JSX.Element {
+export function TrainingSessionView({ sampleControls, state, liveMidi, micHearing = 'starting', singleNoteLock = EMPTY_SINGLE_NOTE_LOCK, singleNoteCountdown = null, pitchWindowCents = DEFAULT_SINGLE_NOTE_PITCH_WINDOW_CENTS, activeTarget, onBegin, onSkipSingleNote = () => undefined, onIdentify, onNext, onExit, onBackToSong }: { sampleControls?: React.ReactNode; state: ReturnType<typeof initialTrainingState>; liveMidi: number | null; micHearing?: MicHearing; singleNoteLock?: SingleNoteLockState; singleNoteCountdown?: number | null; pitchWindowCents?: number; activeTarget: number; onBegin: () => void; onSkipSingleNote?: () => void; onIdentify: (answer: TrainingIdentifyAnswer) => void; onNext: () => void; onExit: () => void; onBackToSong: (() => void) | null }): React.JSX.Element {
   const session = state.session
   const attempt = mobileTrainingAttemptView(state)
   if (!session || !attempt) return <View />
@@ -995,6 +1119,7 @@ export function TrainingSessionView({ state, liveMidi, micHearing = 'starting', 
         onBack={onBackToSong ?? onExit}
         trailing={<Text pointerEvents="none" style={styles.counter}>{index + 1} / {session.prompts.length}</Text>}
       />
+      {sampleControls}
       {guidedVocal ? (
         <SingleNoteSessionBody
           phase={state.phase}
@@ -1028,6 +1153,25 @@ export function TrainingSessionView({ state, liveMidi, micHearing = 'starting', 
   )
 }
 
+function TrainingTransition({ transitionKey, style, children }: {
+  transitionKey: string; style?: React.ComponentProps<typeof View>['style']; children: React.ReactNode
+}): React.JSX.Element {
+  const opacity = useRef(new Animated.Value(1)).current
+  const previous = useRef(transitionKey)
+  useEffect(() => {
+    if (previous.current === transitionKey) return
+    previous.current = transitionKey
+    opacity.setValue(0)
+    const animation = Animated.timing(opacity, {
+      toValue: 1, duration: 120, easing: Easing.out(Easing.quad),
+      useNativeDriver: true, isInteraction: false
+    })
+    animation.start()
+    return () => animation.stop()
+  }, [opacity, transitionKey])
+  return <Animated.View style={[style, { opacity }]}>{children}</Animated.View>
+}
+
 function SingleNoteSessionBody({ phase, prompt, result, liveMidi, micHearing, lock, countdown, pitchWindowCents, activeTarget, error, onBegin, onSkip }: {
   phase: ReturnType<typeof initialTrainingState>['phase']
   prompt: TrainingPrompt
@@ -1053,12 +1197,15 @@ function SingleNoteSessionBody({ phase, prompt, result, liveMidi, micHearing, lo
   return (
     <PracticeSwipeSurface onSwipeLeft={swipeLeft} onSwipeRight={swipeRight}>
       <View style={styles.singleStage}>
+        <TrainingTransition transitionKey={`${prompt.id}:${targetIndex}`} style={{ width: '100%' }}>
         <PitchTarget
           testID="single-note-target-area"
           noteName={target.noteName}
           eyebrow={`${keyLabel(keyName(prompt.key)).toUpperCase()} · ${promptPracticeLabel(prompt).toUpperCase()}`}
           sequence={sequence}
         />
+        </TrainingTransition>
+        <TrainingTransition transitionKey={`${prompt.id}:${phase}`} style={{ flex: 1, width: '100%' }}>
         {phase === 'ready' && (
           <View style={styles.singleAction}>
             {!error && <Text accessibilityLiveRegion="polite" style={styles.singleInstruction}>{t('phone.training.preparingNextNoteEllipsis')}</Text>}
@@ -1073,6 +1220,7 @@ function SingleNoteSessionBody({ phase, prompt, result, liveMidi, micHearing, lo
             <Text accessibilityLiveRegion="assertive" style={styles.feedback}>{trainingFeedback(result)}</Text>
           </View>
         )}
+        </TrainingTransition>
         <SingleNoteTransport phase={phase} error={error} onBegin={onBegin} onSkip={onSkip} />
       </View>
     </PracticeSwipeSurface>
@@ -1190,6 +1338,14 @@ function silentCopy(kind: MicHearing): { reading: string; instruction: string } 
 }
 
 function SingleNotePitchMeter({ prompt, activeTarget, liveMidi, micHearing, lock, pitchWindowCents }: { prompt: TrainingPrompt; activeTarget: number; liveMidi: number | null; micHearing: MicHearing; lock: SingleNoteLockState; pitchWindowCents: number }): React.JSX.Element {
+  const readings = useContext(LiveTrainingContext)
+  const snapshot = useSyncExternalStore((readings ?? emptyLiveReadings).subscribe, (readings ?? emptyLiveReadings).getSnapshot)
+  if (readings) {
+    liveMidi = snapshot.liveMidi
+    micHearing = snapshot.micHearing
+    lock = snapshot.singleNoteLock
+  }
+
   const target = prompt.targets[Math.min(activeTarget, prompt.targets.length - 1)]
   const cents = liveMidi === null ? null : lock.medianCents ?? (liveMidi - target.midi) * 100
   const detected = liveMidi === null ? null : midiNoteName(Math.round(liveMidi), prompt.key)
@@ -1215,14 +1371,14 @@ function SingleNotePitchMeter({ prompt, activeTarget, liveMidi, micHearing, lock
   const reading = detected === null
     ? `${instruction}. ${silent.reading}.`
     : `${t('phone.training.youAreSinging', { note: detected })} ${centsReading}. ${t('phone.training.holdProgress', { percent: Math.round(lock.progress * 100) })}`
-  return <PitchMeter
+  return <SmoothPitchMeter
     labels={{
       flat: t('phone.training.kit.flat'),
       sharp: t('phone.training.kit.sharp'),
       youAreSinging: t('phone.training.kit.youAreSinging'),
       progress: (instruction, percent) => t('phone.training.kit.holdProgress', { instruction, percent })
     }}
-    cents={cents}
+    cents={liveMidi === null ? null : (liveMidi - target.midi) * 100}
     pitchWindowCents={pitchWindowCents}
     detectedNote={detected}
     progress={lock.progress}

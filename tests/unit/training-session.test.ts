@@ -3,6 +3,7 @@ import {
   abandonTrainingSession,
   createTrainingSession,
   generateTrainingPrompts,
+  trainingRangeNotice,
   recordTrainingResult,
   restoreTrainingSession,
   stableHash128,
@@ -43,6 +44,74 @@ describe('seeded training generation', () => {
       expect(generateTrainingPrompts(config)).toEqual(generateTrainingPrompts(config))
       expect(createTrainingSession(config)).toEqual(createTrainingSession(config))
     }
+  })
+
+  it('covers every in-range scale note in shuffled rounds, including both endpoints', () => {
+    const eligible = [48, 50, 52, 53, 55, 57, 59, 60, 62, 64, 65, 67, 69, 71, 72]
+    for (const exercise of ['note', 'scale-degree'] as const) {
+      for (let seed = 0; seed < 50; seed++) {
+        const prompts = generateTrainingPrompts({ ...base(exercise, seed),
+          key: { tonicPc: 0, mode: 'major' }, length: 45 })
+        const notes = prompts.map((prompt) => prompt.targets[0].midi)
+        for (let start = 0; start < notes.length; start += eligible.length)
+          expect(notes.slice(start, start + eligible.length).sort((a, b) => a - b)).toEqual(eligible)
+        expect(notes.every((note, index) => index === 0 || note !== notes[index - 1])).toBe(true)
+      }
+    }
+  })
+
+  it('keeps independent note rounds in mixed exercises and uses the selected minor form', () => {
+    const prompts = generateTrainingPrompts({ ...base('mixed'),
+      key: { tonicPc: 9, mode: 'minor' }, minorScaleForm: 'harmonic',
+      range: { lowMidi: 57, highMidi: 69 }, mixedKinds: ['note', 'scale-degree'], length: 32 })
+    const eligible = [57, 59, 60, 62, 64, 65, 68, 69]
+    for (const kind of ['note', 'scale-degree']) {
+      const notes = prompts.filter((prompt) => prompt.kind === kind).map((prompt) => prompt.targets[0].midi)
+      expect(notes.slice(0, 8).sort((a, b) => a - b)).toEqual(eligible)
+      expect(notes.slice(8).sort((a, b) => a - b)).toEqual(eligible)
+    }
+  })
+
+  it('supports one eligible note without losing prompts or exceeding the range', () => {
+    const prompts = generateTrainingPrompts({ ...base('note'),
+      key: { tonicPc: 0, mode: 'major' }, range: { lowMidi: 60, highMidi: 61 }, length: 10 })
+    expect(prompts.map((prompt) => prompt.targets[0].midi)).toEqual(Array(10).fill(60))
+  })
+
+  it('covers every legal C-major tonic triad placement and balances chord roles', () => {
+    for (let seed = 0; seed < 30; seed++) {
+      const config = { ...base('chord-tone', seed), key: { tonicPc: 0, mode: 'major' as const },
+        range: { lowMidi: 48, highMidi: 79 }, chordDegrees: [1], length: 18 }
+      const prompts = generateTrainingPrompts(config)
+      expect(new Set(prompts.slice(0, 9).map((p) => p.targets[0].midi))).toEqual(new Set([48, 52, 55, 60, 64, 67, 72, 76, 79]))
+      for (let i = 0; i < 18; i += 3)
+        expect(new Set(prompts.slice(i, i + 3).map((p) => p.kind === 'chord-tone' && p.role))).toEqual(new Set(['root', 'third', 'fifth']))
+      const arpeggios = generateTrainingPrompts({ ...config, exercise: 'arpeggio', length: 6 })
+      expect(new Set(arpeggios.map((p) => p.targets.map((t) => t.midi).join(',')))).toEqual(new Set([
+        '48,52,55', '55,52,48', '60,64,67', '67,64,60', '72,76,79', '79,76,72'
+      ]))
+    }
+  })
+
+  it('covers every ascending octave placement and balances interval categories', () => {
+    const config = { ...base('interval'), key: { tonicPc: 0, mode: 'major' as const },
+      intervalSizes: [8], direction: 'ascending' as const, length: 8 }
+    const prompts = generateTrainingPrompts(config)
+    expect(new Set(prompts.map((p) => p.targets.map((t) => t.midi).join(',')))).toEqual(new Set([
+      '48,60', '50,62', '52,64', '53,65', '55,67', '57,69', '59,71', '60,72'
+    ]))
+    const balanced = generateTrainingPrompts({ ...config, intervalSizes: [2, 3, 8], direction: 'both', length: 6 })
+    expect(new Set(balanced.map((p) => p.kind === 'interval' && `${p.intervalNumber}:${p.direction}`)).size).toBe(6)
+  })
+
+  it('explains exercise types and interval sizes omitted by the selected range', () => {
+    const setup = { tonicPc: 0, keyMode: 'major' as const, lowMidi: 50, highMidi: 57,
+      exercise: 'mixed' as const, intervalSizes: [2, 8], chordDegrees: [1, 5], direction: 'both' as const }
+    const notice = trainingRangeNotice(setup)
+    expect(notice).toContain('Arpeggios')
+    expect(notice).toContain('Chord tones')
+    expect(notice).toContain('Intervals: 8')
+    expect(trainingRangeNotice({ ...setup, lowMidi: 48, highMidi: 72 })).toBeNull()
   })
 
   it('uses different seeds to vary a session without relying on Math.random', () => {
@@ -438,7 +507,7 @@ describe('serializable session state', () => {
       promptId: legacyPrompt.id,
       targets: [{ targetIndex: 0, classification: 'on-target', metrics: {} }]
     })
-    expect(legacyCompleted.formatVersion).toBe(3)
+    expect(legacyCompleted.formatVersion).toBe(TRAINING_SESSION_FORMAT_VERSION)
     expect(restoreTrainingSession(JSON.parse(JSON.stringify(legacyCompleted)))).toEqual(legacyCompleted)
     expect(() => recordTrainingResult(active, {
       response: 'skipped',
@@ -526,7 +595,7 @@ describe('serializable session state', () => {
       JSON.parse(
         JSON.stringify(createTrainingSession({ ...base('note'), length }))
       ) as TrainingSessionData
-    expect(plain().formatVersion).toBe(3)
+    expect(plain().formatVersion).toBe(TRAINING_SESSION_FORMAT_VERSION)
 
     const wrongVersion = plain()
     ;(wrongVersion as { formatVersion: number }).formatVersion = TRAINING_SESSION_FORMAT_VERSION + 1

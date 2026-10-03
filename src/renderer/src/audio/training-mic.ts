@@ -1,3 +1,4 @@
+import { TrainingPitchContinuity } from '../../../shared/training-pitch-continuity'
 import {
   frequencyToFractionalMidi,
   type TrainingPitchObservation
@@ -18,6 +19,7 @@ export interface TrainingMicSource {
   readonly active: boolean
   readonly device: MicDevice | null
   start(context: AudioContext, options?: TrainingMicStartOptions): Promise<void>
+  readonly minConfidence?: number
   readInfo(): PitchFrame
   stop(): void | Promise<void>
 }
@@ -27,6 +29,8 @@ export interface TrainingMicSource {
  * crosses IPC. Web Audio is retained solely for dev builds carrying an older
  * singz-analyze binary. */
 export class NativeTrainingMicSource implements TrainingMicSource {
+  readonly continuity = new TrainingPitchContinuity()
+  minConfidence = 0.75
   private readonly fallback: TrainingMicSource
   private token: string | null = null
   private unsubscribe: (() => void) | null = null
@@ -69,6 +73,8 @@ export class NativeTrainingMicSource implements TrainingMicSource {
       await this.startFallback(context, options, 'The saved microphone selection has not been matched to a native input. Reselect the microphone in Settings.')
       return
     }
+    this.continuity.reset()
+    this.minConfidence = 0.75
     this.ended = options.onEnded
     this.unsubscribe = api.onDesktopAudioInputEvent((token, event) => this.onEvent(token, event))
     const started = await api.startDesktopAudioInput({
@@ -123,6 +129,8 @@ export class NativeTrainingMicSource implements TrainingMicSource {
       }).catch(() => undefined)
     }
   }
+
+  read(): number { return this.readInfo().f0 }
 
   readInfo(): PitchFrame {
     return this.usingFallback ? this.fallback.readInfo() : this.frame
@@ -181,10 +189,13 @@ export class NativeTrainingMicSource implements TrainingMicSource {
   private onEvent(token: string, event: DesktopAudioInputEvent): void {
     if (!this.token || token !== this.token) return
     if (event.type === 'frame') {
-      this.frame = { f0: event.frequency, clarity: event.clarity, rms: event.rms }
+      this.minConfidence = event.detector === 'crepe-tiny' ? 0.5 : 0.75
+      const hz = event.detector === 'crepe-tiny' ? this.continuity.update(performance.now(), event.frequency, event.clarity, this.minConfidence) : event.frequency
+      this.frame = { f0: hz ?? 0, clarity: hz === null ? 0 : event.clarity, rms: event.rms }
       this.dbfs = event.dbfs
       return
     }
+    if (event.type === 'discontinuity') this.continuity.reset()
     if (event.type === 'error' || event.type === 'ended') {
       const ended = this.ended
       void this.stop().catch(() => {
@@ -313,6 +324,8 @@ export class DesktopTrainingMicCapture {
   get device(): MicDevice | null {
     return this.source.device
   }
+
+  get minConfidence(): number { return this.source.minConfidence ?? 0.75 }
 
   read(): TrainingPitchObservation {
     const frame = this.source.readInfo()

@@ -17,11 +17,15 @@ test('training reference volume has a loud but bounded remembered range', () => 
   expect(clampTrainingReferenceVolume(Number.NaN)).toBe(DEFAULT_TRAINING_REFERENCE_VOLUME)
 })
 
-test('reference tone uses a pitch-safe Hammond-style drawbar voice', () => {
+test('reference tone uses a warm pitch-safe flute-organ drawbar voice', () => {
   const oscillators = trainingOrganOscillators()
-  expect(TRAINING_ORGAN_DRAWBARS.map(({ ratio }) => ratio)).toEqual([0.5, 1, 1.5, 2, 3, 4, 5, 6, 8])
-  expect(oscillators).toHaveLength(15)
-  expect(oscillators.reduce((sum, partial) => sum + partial.level, 0)).toBeCloseTo(0.99)
+  expect(TRAINING_ORGAN_DRAWBARS.map(({ ratio }) => ratio)).toEqual([1, 2, 3, 4, 5, 6, 8])
+  expect(oscillators).toHaveLength(7)
+  expect(oscillators.reduce((sum, partial) => sum + partial.level, 0)).toBeCloseTo(0.482)
+  expect(oscillators.every(partial => Number.isInteger(partial.frequencyRatio))).toBe(true)
+  expect(2 * oscillators.reduce((sum, partial) => sum + partial.level, 0)).toBeLessThan(1)
+  const highNote = trainingOrganOscillators(880)
+  expect(highNote[6].level / oscillators[6].level).toBeLessThan(0.1)
   const loudest = oscillators.reduce((best, partial) => partial.level > best.level ? partial : best)
   expect(loudest.frequencyRatio).toBe(1)
 })

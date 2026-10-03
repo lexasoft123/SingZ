@@ -18,6 +18,8 @@
 #include <zcore/legacy/analysis.h>
 #include <zcore/device/audio_input.h>
 #include <zdsp/analysis/capture_adapter.h>
+#include <zdsp/analysis/pitch_analysis_module.h>
+#include <zcore/audio/capture_recording.h>
 #include <zcore/device/audio_input_android_registry.h>
 #include <zcore/platform/android/audio_host_android_registry.h>
 #include <zcore/platform/android/audio_host_android_provider.h>
@@ -71,16 +73,18 @@ singz::Progress gProgress;
 
 std::mutex gAudioInputMutex;
 std::unique_ptr<singz::AudioInput> gAudioInput;
+std::shared_ptr<singz::CaptureRecording> gRecording;
 
 struct AudioInputListenerBridge {
   JavaVM* vm = nullptr;
   jobject listener = nullptr;
   jmethodID onFrame = nullptr;
   std::atomic<bool> active{true};
-  explicit AudioInputListenerBridge(uint64_t generation)
-      : analysisAdapter(generation) {}
+  std::shared_ptr<singz::CaptureRecording> sample;
+  explicit AudioInputListenerBridge(uint64_t generation, const std::string& path)
+      : analysisAdapter({zdsp::analysis::PitchDetectorKind::CrepeTiny, path, generation}) {}
 
-  zdsp::analysis::LiveInputAnalysisAdapter analysisAdapter;
+  zdsp::analysis::PitchAnalysisModule analysisAdapter;
   // Largest lift the adapter has applied, ×100. Reported through stats so a
   // field log can prove the normalization is IN this binary and doing work —
   // a .cpp change that never made it into the APK otherwise reads as green.
@@ -101,6 +105,7 @@ struct AudioInputListenerBridge {
 
   void emit(const singz::AudioInputBlockView& block) {
     if (!active.load(std::memory_order_acquire) || !vm || !listener || !onFrame) return;
+    if(auto recording=std::atomic_load(&sample))recording->append(block);
     (void)analysisAdapter.push(block, [&](const zdsp::analysis::AnalysisWindow& window) {
       if (!active.load(std::memory_order_acquire)) return;
       JNIEnv* env = nullptr;
@@ -137,7 +142,9 @@ struct AudioInputListenerBridge {
                           static_cast<jdouble>(window.analysis.clarity),
                           static_cast<jdouble>(window.analysis.peak),
                           static_cast<jdouble>(window.analysis.rms),
-                          static_cast<jdouble>(window.analysis.dbfs));
+                          static_cast<jdouble>(window.analysis.dbfs),
+                          static_cast<jdouble>(analysisAdapter.inferenceMs()),
+                          static_cast<jboolean>(analysisAdapter.harmonicCorrected()));
       if (env->ExceptionCheck()) env->ExceptionClear();
       if (attached) vm->DetachCurrentThread();
       // Per WINDOW, not once per push: one maximum-size callback emits 29
@@ -343,20 +350,22 @@ Java_com_singzplayer_split_SingzCore_hasAndroidAudioHostProvider(
 extern "C" JNIEXPORT jobjectArray JNICALL
 Java_com_singzplayer_split_SingzCore_startAudioInput(
     JNIEnv* env, jobject /*thiz*/, jstring juid, jint channel,
-    jlong ownershipGeneration, jobject listener) {
+    jlong ownershipGeneration, jobject listener, jstring modelPath) {
   if (channel < 0 || ownershipGeneration <= 0 || !listener)
     return stringArray(env, {"Android audio input arguments are invalid"});
   std::lock_guard<std::mutex> lock(gAudioInputMutex);
   if (gAudioInput)
     return stringArray(env, {"Another Android audio input owner is active"});
 
-  auto bridge = std::make_shared<AudioInputListenerBridge>(
-      static_cast<uint64_t>(ownershipGeneration));
+  std::shared_ptr<AudioInputListenerBridge> bridge;
+  try { bridge = std::make_shared<AudioInputListenerBridge>(
+      static_cast<uint64_t>(ownershipGeneration),toStd(env,modelPath)); }
+  catch(const std::exception& e){return stringArray(env,{e.what()});}
   env->GetJavaVM(&bridge->vm);
   bridge->listener = env->NewGlobalRef(listener);
   jclass listenerClass = env->GetObjectClass(listener);
   bridge->onFrame = env->GetMethodID(
-      listenerClass, "onFrame", "(JJJJJJJJJJIIIIJDDDDDD)V");
+      listenerClass, "onFrame", "(JJJJJJJJJJIIIIJDDDDDDDZ)V");
   env->DeleteLocalRef(listenerClass);
   if (!bridge->vm || !bridge->listener || !bridge->onFrame) {
     if (env->ExceptionCheck()) env->ExceptionClear();
@@ -381,7 +390,7 @@ Java_com_singzplayer_split_SingzCore_startAudioInput(
             std::to_string(result.deviceChannels), std::to_string(result.channel),
             result.sampleFormat, result.sharingMode, result.performanceMode,
             result.inputPreset, result.timestampSource,
-            zdsp::analysis::analysisBuildId()});
+            "crepe-tiny-zdsp-graph-v2"});
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -892,4 +901,24 @@ Java_com_singzplayer_split_SingzCore_mlGridFromStems(JNIEnv* env, jobject /*thiz
   const singz::MlGrid grid = singz::beatThisFromStems(paths, tapped, nullptr);
   if (!grid.ok) return mlGridFailJson(env, grid.error);
   return env->NewStringUTF(singz::mlGridJson(grid).c_str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_singzplayer_split_SingzCore_armTrainingRecording(JNIEnv* env,jobject,jstring name){
+ std::lock_guard<std::mutex> lock(gAudioInputMutex);
+ const auto filename=toStd(env,name);
+ if(!gAudioInputListener||!singz::CaptureRecording::validName(filename))return env->NewStringUTF("Microphone unavailable or invalid recording name");
+ if(gRecording)return env->NewStringUTF("A recording is already active");
+ gRecording=std::make_shared<singz::CaptureRecording>();gRecording->filename=filename;
+ std::atomic_store(&gAudioInputListener->sample,gRecording);return env->NewStringUTF("");
+}
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_singzplayer_split_SingzCore_finishTrainingRecording(JNIEnv* env,jobject,jstring directory){
+ std::shared_ptr<singz::CaptureRecording> sample;
+ {std::lock_guard<std::mutex> lock(gAudioInputMutex);sample=std::move(gRecording);
+ if(gAudioInputListener)std::atomic_store(&gAudioInputListener->sample,std::shared_ptr<singz::CaptureRecording>{});}
+ if(!sample)return stringArray(env,{"No recording is active"});
+ try{const auto path=toStd(env,directory)+"/"+sample->filename;double seconds=sample->save(path);
+ return stringArray(env,{"",sample->filename,path,std::to_string(seconds),std::to_string(sample->rate)});}
+ catch(const std::exception& e){return stringArray(env,{e.what()});}
 }

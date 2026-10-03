@@ -28,6 +28,8 @@ export const app: Translation<typeof en> = {
     'Подходящие песни используют обычные элементы плеера, но с нативной DSP-обработкой. Остальные — на обычном плеере.',
 
   // ── log panel chrome (ui/LogPanel.tsx) — log LINES themselves stay English ──
+  'phone.app.log.thisSession': 'Текущий сеанс',
+  'phone.app.log.whichSession': 'Выбрать сеанс журнала',
   'phone.app.log.title': 'Журнал',
   'phone.app.log.lines_one': '{n} строка',
   'phone.app.log.lines_few': '{n} строки',
@@ -40,7 +42,7 @@ export const app: Translation<typeof en> = {
   'phone.app.log.close': 'Закрыть',
   'phone.app.log.closeA11y': 'Закрыть',
   'phone.app.log.confirmTitle': 'Очистить всё?',
-  'phone.app.log.confirmBody': 'Это единственная запись действий приложения.',
+  'phone.app.log.confirmBody': 'Будет очищен только текущий сеанс. Журналы прошлых сеансов сохранятся.',
   'phone.app.log.keepIt': 'Отмена',
   'phone.app.log.empty': 'Пока пусто.',
 

@@ -230,7 +230,9 @@ class AudioInputModule(private val ctx: ReactApplicationContext) :
             clarity: Double,
             peak: Double,
             rms: Double,
-            dbfs: Double
+            dbfs: Double,
+            inferenceMs: Double,
+            harmonicCorrected: Boolean
           ) {
             if (ownershipGeneration != held.generation ||
               !ownership.isCurrent(held)) return
@@ -276,6 +278,9 @@ class AudioInputModule(private val ctx: ReactApplicationContext) :
             frame.putDouble("peak", peak)
             frame.putDouble("rms", rms)
             frame.putDouble("dbfs", dbfs)
+            frame.putString("detector", "crepe-tiny")
+            frame.putDouble("inferenceMs", inferenceMs)
+            frame.putBoolean("harmonicCorrected", harmonicCorrected)
             emit("singzAudioInputFrame", frame)
           }
         }
@@ -285,8 +290,14 @@ class AudioInputModule(private val ctx: ReactApplicationContext) :
         // call is attempted, every exceptional exit must therefore stop the
         // native owner, even if Kotlin never observed a successful result.
         nativeStartAttempted = true
+        val model = java.io.File(ctx.filesDir, "crepe-tiny-zdsp-v1.bin")
+        if (!model.exists()) ctx.assets.open("pitch/crepe-tiny.bin").use { input ->
+          val part = java.io.File(ctx.filesDir, "crepe-tiny-zdsp-v1.bin.part")
+          part.outputStream().use { input.copyTo(it) }
+          check(part.renameTo(model)) { "Could not prepare CREPE model" }
+        }
         val nativeResult = SingzCore.startAudioInput(
-          device.uid, selectedChannel, held.generation, listener)
+          device.uid, selectedChannel, held.generation, listener, model.absolutePath)
         val error = nativeResult.getOrElse(0) { "Android native audio input returned no result" }
         if (error.isNotEmpty()) {
           bestEffortStopNative()
@@ -567,4 +578,48 @@ class AudioInputModule(private val ctx: ReactApplicationContext) :
       if (settled.compareAndSet(false, true)) promise.reject(code, message)
     }
   }
+  @ReactMethod
+  fun armCarSample(filename: String, promise: Promise) {
+    if (!postControl {
+    try {
+      val error = SingzCore.armTrainingRecording(filename)
+      if (error.isNotEmpty()) promise.reject("E_SAMPLE", error) else promise.resolve(null)
+    } catch (e: Exception) { promise.reject("E_SAMPLE", e) }
+    }) promise.reject("E_SAMPLE", "Audio input is shutting down")
+  }
+  @ReactMethod
+  fun finishCarSample(promise: Promise) {
+    if (!postControl {
+    try {
+      val data = SingzCore.finishTrainingRecording(ctx.cacheDir.absolutePath)
+      if (data[0].isNotEmpty()) { promise.reject("E_SAMPLE", data[0]); return@postControl }
+      val result = Arguments.createMap()
+      result.putString("filename", data[1])
+      result.putString("url", android.net.Uri.fromFile(java.io.File(data[2])).toString())
+      result.putDouble("seconds", data[3].toDouble())
+      result.putDouble("sampleRate", data[4].toDouble())
+      promise.resolve(result)
+    } catch (e: Exception) { promise.reject("E_SAMPLE", e) }
+    }) promise.reject("E_SAMPLE", "Audio input is shutting down")
+  }
+
+  @ReactMethod
+  fun shareCarSample(url: String, promise: Promise) {
+    try {
+      val file = java.io.File(android.net.Uri.parse(url).path ?: "")
+      check(file.canonicalFile.parentFile == ctx.cacheDir.canonicalFile && file.name.startsWith("SingZ-microphone-") && file.extension == "wav")
+      val uri = androidx.core.content.FileProvider.getUriForFile(ctx, ctx.packageName + ".training-recordings", file)
+      val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+        type = "audio/wav"
+        putExtra(android.content.Intent.EXTRA_STREAM, uri)
+        addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+      }
+      val activity = ctx.currentActivity ?: throw IllegalStateException("No active screen")
+      activity.runOnUiThread {
+        try { activity.startActivity(android.content.Intent.createChooser(intent, "Share training WAV")); promise.resolve(null) }
+        catch (e: Exception) { promise.reject("E_SAMPLE", e) }
+      }
+    } catch (e: Exception) { promise.reject("E_SAMPLE", e) }
+  }
+
 }
