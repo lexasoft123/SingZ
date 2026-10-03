@@ -6,6 +6,7 @@ import {
   COUNT_IN_PROJECTION_MAX_MS,
   DESKTOP_PLAYBACK_CAPABILITY,
   DesktopNativePlaybackClient,
+  type DesktopNativePlaybackPrepare,
   DesktopNativeProviderError,
   PENDING_SEEK_MAX_MS,
   SEAM_LANDING_WAIT_MS,
@@ -670,7 +671,7 @@ describe('desktop native playback facade', () => {
       () => undefined
     )
     const metronome = { click: false, countInBars: 0, volume: 0, accent: true, grid: false }
-    const start = () => client.prepareAndStart({
+    const start = (patch: Partial<DesktopNativePlaybackPrepare> = {}) => client.prepareAndStart({
       provider: 'coreaudio',
       lanes: [{ id: 'vocals', path: '/allowed/vocals.mp3', gain: 1, muted: false, solo: false }],
       beat: { beats: [0, 0.5, 1, 1.5], bpm: 120, beatsPerBar: 4, downbeat: 0, downbeats: [0], source: 'auto' },
@@ -684,7 +685,8 @@ describe('desktop native playback facade', () => {
       transpose: 0,
       training: null,
       loop: null,
-      graphDocument: undefined
+      graphDocument: undefined,
+      ...patch
     })
     return { api, client, prepared, calls, metronome, start, generationNow: () => generation }
   }
@@ -695,6 +697,85 @@ describe('desktop native playback facade', () => {
     // The fixture's default rate is 0.8; the clock tests read in real seconds.
     playbackRate: 1,
     ...patch
+  })
+
+  describe.each(['coreaudio', 'wasapi'] as const)('%s output routing', provider => {
+    const routes = (h: ReturnType<typeof seamHarness>, sampleRate = 44_100) => {
+      const inventory = h.api.audioHostDevices as unknown as ReturnType<typeof vi.fn>
+      inventory.mockImplementationOnce(async () => ({
+        ...(await (inventory.getMockImplementation() as typeof h.api.audioHostDevices)(provider)), provider
+      }))
+      return () => inventory.mockImplementation(async () => ({
+        ok: true, provider, defaultOutputUid: 'new-output', error: '', devices: [{
+          uid: 'new-output', label: 'New output', outputChannels: 2, direction: 'output',
+          nominalSampleRate: sampleRate, bufferFrames: { preferredFrames: 128 }
+        }]
+      }))
+    }
+    it('moves the default endpoint without jumping in time or keeping its old sample rate', async () => {
+      const h = seamHarness(generation => playing(generation, { renderedProjectFrame: '240000' }))
+      const change = routes(h)
+      ;(h.api.desktopPlaybackProviders as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([{ id: provider, available: true }])
+      await h.start({ provider, countIn: false })
+      change()
+      await h.client.reconfigure({}, { refreshRoute: true })
+      expect(h.prepared.at(-1)).toMatchObject({ outputDeviceUid: 'new-output', sampleRate: 44_100,
+        preparedStartProjectFrame: 220500, initialTransport: { state: 'playing' } })
+      expect(h.prepared.at(-1)).not.toHaveProperty('swapFromGeneration')
+      expect(h.calls).toContain('unload:1')
+      await h.client.unload()
+    })
+    it('preserves a paused position and loop when output rate changes', async () => {
+      const h = seamHarness(generation => playing(generation, { renderedProjectFrame: '240000' }))
+      const change = routes(h)
+      ;(h.api.desktopPlaybackProviders as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([{ id: provider, available: true }])
+      await h.start({ provider, countIn: false, loop: { start: 2, end: 8 } })
+      await h.client.pause()
+      change()
+      await h.client.reconfigure({}, { refreshRoute: true })
+      expect(h.prepared.at(-1)).toMatchObject({ preparedStartProjectFrame: 220500,
+        initialTransport: { state: 'paused', loop: { startProjectFrame: 88200, endProjectFrame: 352800 } } })
+      await h.client.unload()
+    })
+    it('applies an explicit browser output to the native provider instead of its default', async () => {
+      const h = seamHarness(generation => playing(generation))
+      const change = routes(h)
+      ;(h.api.desktopPlaybackProviders as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([{ id: provider, available: true }])
+      await h.start({ provider })
+      change()
+      vi.stubGlobal('navigator', { mediaDevices: { enumerateDevices: async () => [{ kind: 'audiooutput', deviceId: 'origin-scoped-id', label: 'New output' }] } })
+      await h.client.reconfigure({ browserOutputId: 'origin-scoped-id' }, { refreshRoute: true })
+      expect(h.prepared.at(-1)).toMatchObject({ outputDeviceUid: 'new-output' })
+      await h.client.unload()
+    })
+    it('keeps the old native graph when an explicit output cannot be identified', async () => {
+      const h = seamHarness(generation => playing(generation))
+      routes(h)
+      ;(h.api.desktopPlaybackProviders as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([{ id: provider, available: true }])
+      await h.start({ provider })
+      const inventory = h.api.audioHostDevices as unknown as ReturnType<typeof vi.fn>
+      const old = await (inventory.getMockImplementation() as typeof h.api.audioHostDevices)(provider)
+      inventory.mockResolvedValue({ ...old, provider, devices: [old.devices[0], { ...old.devices[0], uid: 'duplicate' }] })
+      vi.stubGlobal('navigator', { mediaDevices: { enumerateDevices: async () => [{ kind: 'audiooutput', deviceId: 'origin-scoped-id', label: 'Speaker' }] } })
+      await expect(h.client.reconfigure({ browserOutputId: 'origin-scoped-id' }, { refreshRoute: true })).rejects.toThrow('uniquely')
+      expect(h.prepared).toHaveLength(1)
+      expect(h.calls).not.toContain('stop:1')
+      await h.client.unload()
+    })
+    it('does not interrupt playback when endpoint and format are unchanged', async () => {
+      const h = seamHarness(generation => playing(generation))
+      routes(h)
+      ;(h.api.desktopPlaybackProviders as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([{ id: provider, available: true }])
+      await h.start({ provider })
+      // The continuing inventory must retain the provider identity too.
+      const inventory = h.api.audioHostDevices as unknown as ReturnType<typeof vi.fn>
+      const old = await (inventory.getMockImplementation() as typeof h.api.audioHostDevices)(provider)
+      inventory.mockResolvedValue({ ...old, provider })
+      await h.client.reconfigure({}, { refreshRoute: true })
+      expect(h.prepared).toHaveLength(1)
+      expect(h.calls).not.toContain('stop:1')
+      await h.client.unload()
+    })
   })
 
   it('a cue change while playing is a SEAM: one prepare naming the old generation, no stop, no unload, and the transport lands on the new one', async () => {

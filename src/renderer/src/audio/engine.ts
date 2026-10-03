@@ -260,6 +260,7 @@ export class MultitrackEngine {
     positionSeconds = this.startOffset
   ): DesktopNativePlaybackEngineRequest {
     return {
+      browserOutputId: this.desiredOutputId,
       lanes: this.tracks,
       beat: this.beatsInfo,
       metronome: this.met,
@@ -580,10 +581,23 @@ export class MultitrackEngine {
     if (!('setSinkId' in this.ctx)) throw new Error('Changing outputs is not supported here.')
     this.desiredOutputId = deviceId
     this.outputRouteVersion++
+    // Native playback owns its own endpoint, independently of Chromium's sink.
+    if (this.nativePlayback?.active) {
+      try {
+        await this.nativePlayback.reconfigure({ browserOutputId: deviceId }, { refreshRoute: true })
+        this.confirmedOutputId = deviceId
+      } catch (error) {
+        this.desiredOutputId = this.confirmedOutputId
+        throw error
+      }
+      return
+    }
+    await this.discardNativeAhead()
     // A native monitor owns the physical output. Remember route changes for
     // restoration, but never let Chromium reacquire a device underneath it.
     if (this.nativeMonitorLease) return
     await this.applyDesiredOutputRoute()
+    if (this._playing && this.ctx.state !== 'running') await this.ctx.resume()
   }
 
   /** Applies the newest desired Chromium route. A slower stale setSinkId can

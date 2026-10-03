@@ -1,3 +1,4 @@
+import { nativeOutputForBrowserLabel } from '../../../shared/output-device-policy'
 import type {
   DesktopAudioHostDevice,
   DesktopPlaybackLaneConfig,
@@ -175,6 +176,7 @@ export interface DesktopNativePlaybackPrepare {
   transpose: number
   training: DesktopNativeTrainingIntent | null
   loop: { start: number; end: number } | null
+  browserOutputId?: string
   preferredOutputUid?: string
   preferredOutputChannels?: number[]
   graphDocument?: ParsedGraphDocument
@@ -186,6 +188,7 @@ export interface DesktopNativePlaybackLease {
 }
 
 export interface DesktopNativePlaybackStructuralPatch {
+  browserOutputId?: string
   beat?: BeatInfo | null
   metronome?: MetronomeConfig
   countIn?: boolean
@@ -202,6 +205,7 @@ export interface DesktopNativeLaneControl {
 }
 
 export interface DesktopNativePlaybackEngineRequest {
+  browserOutputId?: string
   lanes: Array<{
     id: string
     path?: string
@@ -265,6 +269,7 @@ export async function decideDesktopNativePlayback(
   if (decision.backend !== 'native') return null
   return {
     provider: decision.provider,
+    browserOutputId: request.browserOutputId,
     lanes: request.lanes.map((lane) => ({
       id: lane.id,
       path: lane.path!,
@@ -1107,7 +1112,13 @@ export class DesktopNativePlaybackClient {
     if (inventory.provider !== request.provider) {
       throw new Error('Native output inventory belongs to a different provider.')
     }
-    const output = outputFor(inventory.devices, inventory.defaultOutputUid, request.preferredOutputUid)
+    let output = outputFor(inventory.devices, inventory.defaultOutputUid, request.preferredOutputUid)
+    if (request.browserOutputId && request.browserOutputId !== 'default') {
+      const browserOutputs = await navigator.mediaDevices.enumerateDevices()
+      const selected = browserOutputs.find(device => device.kind === 'audiooutput' && device.deviceId === request.browserOutputId)
+      if (!selected) throw new Error('The selected output is no longer connected.')
+      output = nativeOutputForBrowserLabel(selected.label, inventory.devices)
+    }
     if (!output) throw new Error('No native output endpoint is available.')
     const outputChannels = request.preferredOutputChannels?.length
       ? [...request.preferredOutputChannels]
@@ -1376,7 +1387,7 @@ export class DesktopNativePlaybackClient {
 
   async reconfigure(
     patch: DesktopNativePlaybackStructuralPatch,
-    options: { force?: boolean } = {}
+    options: { force?: boolean; refreshRoute?: boolean } = {}
   ): Promise<void> {
     return this.serialize(async () => {
       this.assertCommandableGeneration()
@@ -1385,8 +1396,11 @@ export class DesktopNativePlaybackClient {
         return
       }
       const request: DesktopNativePlaybackPrepare = { ...this.request, ...patch }
+      const previousRoute = this.route
+      const route = options.refreshRoute || options.force ? await this.resolveRoute(request) : previousRoute
+      const routeChanged = JSON.stringify(route) !== JSON.stringify(previousRoute)
       // Reject an invalid desired graph before changing ownership.
-      const desired = this.configFor(request, this.route)
+      const desired = this.configFor(request, route)
       // An unchanged desired graph is not a rebuild. A rebuild is stop →
       // unload → re-decode every lane → prepare → start, an audible gap each,
       // and a selection drag or the loader's control resets arrive here many
@@ -1477,8 +1491,8 @@ export class DesktopNativePlaybackClient {
         : 'paused'
       const loop = request.loop
         ? {
-            startProjectFrame: Math.round(request.loop.start * this.route.sampleRate),
-            endProjectFrame: Math.round(request.loop.end * this.route.sampleRate)
+            startProjectFrame: Math.round(request.loop.start * route.sampleRate),
+            endProjectFrame: Math.round(request.loop.end * route.sampleRate)
           }
         : undefined
       // A SEEK STILL OWED ITS RECEIPT (the read above retires one that has
@@ -1497,11 +1511,15 @@ export class DesktopNativePlaybackClient {
         Date.now() - this.pendingSeekAtMs < PENDING_SEEK_MAX_MS
         ? this.pendingSeekFrame
         : null
+      const oldLoop = request.loop ? {
+        startProjectFrame: Math.round(request.loop.start * previousRoute.sampleRate),
+        endProjectFrame: Math.round(request.loop.end * previousRoute.sampleRate)
+      } : undefined
       const owedStart = owedSeek === null
         ? null
-        : loop && owedSeek >= loop.endProjectFrame
-          ? loop.startProjectFrame +
-            ((owedSeek - loop.startProjectFrame) % (loop.endProjectFrame - loop.startProjectFrame))
+        : oldLoop && owedSeek >= oldLoop.endProjectFrame
+          ? oldLoop.startProjectFrame +
+            ((owedSeek - oldLoop.startProjectFrame) % (oldLoop.endProjectFrame - oldLoop.startProjectFrame))
           : owedSeek
       const landing = this.countInLandingSeconds
       const countingIn = owedStart === null && renderedFrame < 0 && landing !== null
@@ -1510,14 +1528,15 @@ export class DesktopNativePlaybackClient {
       const rebuilt: DesktopNativePlaybackPrepare = countingIn
         ? { ...request, positionSeconds: landing }
         : request
-      const preparedStartProjectFrame = countingIn ? undefined : (owedStart ?? renderedFrame)
+      const preparedStartProjectFrame = countingIn ? undefined :
+        Math.round((owedStart ?? renderedFrame) * route.sampleRate / previousRoute.sampleRate)
       const initialTransport: DesktopPlaybackInitialTransportConfig = {
         state,
         ...(loop ? { loop } : {})
       }
       // Validate the signed restore request as well. Once the old rendered
       // generation is retired, failure is fail-closed and never wakes WebAudio.
-      this.configFor(rebuilt, this.route, preparedStartProjectFrame, initialTransport)
+      this.configFor(rebuilt, route, preparedStartProjectFrame, initialTransport)
       this.assertCommandableGeneration()
       // A SEAM first, as the phones do: while the song is rendering, the
       // candidate is prepared on the running stream (`swapFromGeneration`),
@@ -1530,7 +1549,7 @@ export class DesktopNativePlaybackClient {
       // the fallback then, exactly as before.
       // Never for a forced rebuild: that is the route-change path, where the
       // stream the seam would keep is the one that just went away.
-      const seamable = !insideCountIn && !options.force && this.started && state === 'playing' &&
+      const seamable = !routeChanged && !insideCountIn && !options.force && this.started && state === 'playing' &&
         (status.transportState === 'playing' || status.transportState === 'pre-roll') &&
         status.swapPendingGeneration === '0' && status.retiringSwapGeneration === '0'
       if (seamable && await this.seam(request, oldGeneration, renderedFrame, initialTransport, owedSeek !== null)) return
@@ -1548,7 +1567,8 @@ export class DesktopNativePlaybackClient {
       this.started = false
       this.last = null
       this.forgetTransport()
-      await this.activate(rebuilt, this.route, false, preparedStartProjectFrame, initialTransport)
+      await this.activate(rebuilt, route, false, preparedStartProjectFrame, initialTransport)
+      this.route = route
       this.request = rebuilt
     })
   }
