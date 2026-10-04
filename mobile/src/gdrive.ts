@@ -60,7 +60,8 @@ interface FolderNative {
   /** In-app consent: iOS auth sheet / Android Custom Tab — both self-close. */
   oauthPresent?(url: string): Promise<void>
   /** Serves the copy on disk when it IS this file (size, then md5), else
-   *  downloads. The native decides — JS states what it wants, not what to do. */
+   *  downloads. An empty URL probes only the cache and rejects with
+   *  cacheMiss if a download is needed, without contacting any server. */
   fetchToCache(
     project: string,
     file: string,
@@ -815,25 +816,20 @@ export async function driveLocalFile(
   const entry = file.startsWith('stems/') ? files.stemsByName.get(name) : files.byName.get(name)
   if (!entry) throw new Error(`${file} is missing from Drive`)
 
-  // A file already on the phone is served before the URL is ever used, so a
-  // downloaded song opens with no signal — which means not insisting on a
-  // token first. An expired one cannot be refreshed offline; if the native
-  // then turns out to need the network, that failure is the one worth
-  // reporting, so the token error is held and rethrown in its place.
-  let auth = ''
-  let tokenError: unknown = null
-  try {
-    auth = `Bearer ${await accessToken()}`
-  } catch (e) {
-    tokenError = e
-  }
-  // The doc first, the listing only as a fallback. The ✓ compares against the
-  // doc's size; if the download compared against the listing's, the two could
-  // disagree and the song would re-download on every open while showing a tick
-  // — the exact shape of the bug this rewrite exists to remove.
+  // An empty URL asks the native for a verified local copy only. Token
+  // renewal can hang on poor internet; it belongs after a cache miss.
   const size = expectedBytes ?? Number(entry.size ?? 0)
+  const digest = expectedMd5 || entry.md5Checksum || ''
+  try {
+    const local = await Native.fetchToCache(project, file, '', '', digest, size)
+    log('gdrive', `${project}/${file} · ${fmtBytes(size)} · already here`)
+    return local.path
+  } catch (e) {
+    if ((e as { code?: string }).code !== 'cacheMiss') throw e
+  }
   const started = Date.now()
   try {
+    const auth = `Bearer ${await accessToken()}`
     const res = await Native.fetchToCache(
       project,
       file,
@@ -854,11 +850,8 @@ export async function driveLocalFile(
     )
     return res.path
   } catch (e) {
-    // the token error only explains a failure that needed the network; a
-    // "cannot cache" or "arrived damaged" must be reported as itself
-    const reported = tokenError && String(e).includes('Drive download failed') ? tokenError : e
-    log('gdrive', `${project}/${file} — ${String(reported)}`, 'error')
-    throw reported
+    log('gdrive', `${project}/${file} — ${String(e)}`, 'error')
+    throw e
   }
 }
 

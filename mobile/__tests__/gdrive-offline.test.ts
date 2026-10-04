@@ -43,6 +43,7 @@ const fetchToCache = jest.fn(
     // the ladder is a fourth copy that can drift from the three real ones
     const { isCurrent } = require('../src/current') as typeof import('../src/current')
     const downloaded = !isCurrent(onDisk[key], { size: expectedBytes, md5: expectedMd5 })
+    if (downloaded && !_url) throw Object.assign(new Error("Drive cache miss"), { code: "cacheMiss" })
     if (downloaded) {
       downloads.push(key)
       onDisk[key] = { md5: expectedMd5 || 'downloaded', size: expectedBytes || 1 }
@@ -339,6 +340,26 @@ describe('catalog without internet', () => {
     expect(downloads).toEqual([])
   })
 
+  it('opens a cached stem while token renewal and catalog refresh never answer', async () => {
+    const drive = newDrive()
+    install(drive)
+    signIn()
+    const g = require('../src/gdrive') as typeof import('../src/gdrive')
+    await g.driveListProjects()
+    await g.driveLocalFile('Song One', 'stems/vocals.flac')
+    signIn(-1000)
+    const network = jest.fn(() => new Promise<Response>(() => {}))
+    global.fetch = network as typeof fetch
+    void g.driveListProjects(true)
+    // Let the background refresh reach its pending token request.
+    for (let i = 0; i < 20 && network.mock.calls.length === 0; i++) await Promise.resolve()
+    expect(network).toHaveBeenCalledTimes(1)
+    const callsBeforeOpen = network.mock.calls.length
+    const path = await g.driveLocalFile('Song One', 'stems/vocals.flac')
+    expect(path).toBe('/cache/Song One/stems/vocals.flac')
+    expect(network).toHaveBeenCalledTimes(callsBeforeOpen)
+  })
+
   it('keeps lyrics for a downloaded song', async () => {
     const drive = newDrive()
     install(drive)
@@ -521,7 +542,7 @@ describe('the desktop-written manifest', () => {
 
     // the ids stream; the md5 arrives from project.json's stemHashes
     await g2.driveLocalFile('Song One', 'stems/vocals.flac', 'v-1')
-    expect(fetchToCache.mock.calls[0][2]).toContain('/drive/v3/files/V1')
+    expect(fetchToCache.mock.calls.at(-1)?.[2]).toContain('/drive/v3/files/V1')
     expect(fetchToCache.mock.calls[0][4]).toBe('v-1') // what it must be
     expect(fetchToCache.mock.calls[0][5]).toBe(100) // ...and how big
     expect(downloads).toHaveLength(1) // never fetched before
