@@ -17,7 +17,67 @@ import UniformTypeIdentifiers
  * dataless items, so evicted stems download on demand.
  */
 @objc(FolderAccess)
-class FolderAccess: NSObject, UIDocumentPickerDelegate {
+class FolderAccess: NSObject, UIDocumentPickerDelegate, AVSpeechSynthesizerDelegate {
+  private var trainingSpeech: AVSpeechSynthesizer?
+  private var trainingUtterance: AVSpeechUtterance?
+  private var trainingSpeechResolve: RCTPromiseResolveBlock?
+
+  @objc(speakTrainingInterval:language:resolver:rejecter:)
+  func speakTrainingInterval(_ text: String, language: String,
+                             resolver resolve: @escaping RCTPromiseResolveBlock,
+                             rejecter reject: @escaping RCTPromiseRejectBlock) {
+    DispatchQueue.main.async {
+      self.finishTrainingSpeech()
+      guard !text.isEmpty, text.count <= 200 else { resolve(false); return }
+      if self.trainingSpeech == nil {
+        let synthesizer = AVSpeechSynthesizer()
+        // Preserve the input/output route already acquired by training.
+        synthesizer.usesApplicationAudioSession = true
+        synthesizer.delegate = self
+        self.trainingSpeech = synthesizer
+      }
+      let utterance = AVSpeechUtterance(string: text)
+      utterance.voice = AVSpeechSynthesisVoice(language: language)
+      utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 0.9
+      self.trainingUtterance = utterance
+      self.trainingSpeechResolve = resolve
+      self.trainingSpeech?.speak(utterance)
+      // A missing system voice must never strand the lesson on its introduction.
+      DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self, weak utterance] in
+        guard let self, let utterance, self.trainingUtterance === utterance else { return }
+        self.finishTrainingSpeech()
+      }
+    }
+  }
+
+  @objc func cancelTrainingSpeech() {
+    DispatchQueue.main.async { self.finishTrainingSpeech() }
+  }
+
+  private func finishTrainingSpeech() {
+    let resolve = trainingSpeechResolve
+    trainingSpeechResolve = nil
+    trainingUtterance = nil
+    trainingSpeech?.stopSpeaking(at: .immediate)
+    resolve?(true)
+  }
+
+  func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+    guard trainingUtterance === utterance else { return }
+    let resolve = trainingSpeechResolve
+    trainingSpeechResolve = nil
+    trainingUtterance = nil
+    resolve?(true)
+  }
+
+  func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+    guard trainingUtterance === utterance else { return }
+    let resolve = trainingSpeechResolve
+    trainingSpeechResolve = nil
+    trainingUtterance = nil
+    resolve?(false)
+  }
+
   private static let bookmarkKey = "singz.rootBookmark"
   private var pickResolve: RCTPromiseResolveBlock?
   private var pickFileResolve: RCTPromiseResolveBlock?

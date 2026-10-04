@@ -218,3 +218,19 @@ JSI_HOST_FUNCTION_IMPL(AudioBufferHostObject, release) {
   'release impl'
 );
 console.log(p4 > 0 ? `audio-api patch 4: applied ${p4} insertion(s)` : 'audio-api patch 4: already applied');
+
+/* Patch 5: secondary-audio hints are not AVAudioSession interruptions.
+ * SingZ's reference tones, music and microphone are primary app audio.
+ * The upstream handler marks the session inactive and emits an interruption
+ * for an advisory notification about another app's primary audio, cancelling
+ * pending capture. Real interruption notifications retain their handler.
+ * https://developer.apple.com/documentation/avfaudio/avaudiosession/silencesecondaryaudiohintnotification
+ */
+const notificationFile = path.join(__dirname, '../node_modules/react-native-audio-api/ios/audioapi/ios/system/SystemNotificationManager.mm');
+const notificationSource = fs.readFileSync(notificationFile, 'utf8');
+const { patchSecondaryAudioNotifications } = require('./secondary-audio-policy.cjs');
+const patchedNotifications = patchSecondaryAudioNotifications(notificationSource);
+if (patchedNotifications !== notificationSource) {
+  fs.writeFileSync(notificationFile, patchedNotifications);
+  console.log('audio-api patch 5: secondary audio no longer interrupts primary audio');
+} else console.log('audio-api patch 5: already applied');

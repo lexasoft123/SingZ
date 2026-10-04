@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { TrainingPrompt } from '../../src/shared/training-types'
+import { createTrainingSession } from '../../src/shared/training-session'
 import {
   TrainingPitchLockTracker,
   desktopTrainingCountdownSeconds,
@@ -33,12 +34,18 @@ function intervalPrompt(taskMode: 'imitate' | 'find' | 'identify'): TrainingProm
 }
 
 describe('desktop holder-friendly training practice', () => {
-  it('plays only the ordered interval and gives every note two countdown seconds', () => {
+  it('presents the first interval target for four seconds before singing', () => {
     const cues = desktopTrainingCues(intervalPrompt('imitate'))
-    expect(cues).toEqual([{ purpose: 'answer', articulation: 'sequence', notes: [60, 67] }])
+    expect(cues).toEqual([{ purpose: 'answer', articulation: 'sequence', notes: [60], durationSeconds: 4 }])
     expect(desktopTrainingCountdownSeconds(cues)).toBe(4)
-    expect(desktopTrainingCueDurationSeconds(cues)).toBe(1.82)
+    expect(desktopTrainingCueDurationSeconds(cues)).toBe(4)
     expect(desktopTrainingCues(intervalPrompt('find'))[0].notes).toEqual([60])
+  })
+
+  it('guided scales present only the current note; phrases present all eight', () => {
+    const prompt = createTrainingSession({ exercise: 'scale', taskMode: 'imitate', key: { tonicPc: 0, mode: 'major' }, range: { lowMidi: 60, highMidi: 72 }, length: 1, seed: 1 }).prompts[0]
+    expect(desktopTrainingCues(prompt, 'guided').flatMap(cue => cue.notes)).toEqual([prompt.targets[0].midi])
+    expect(desktopTrainingCues(prompt, 'phrase').flatMap(cue => cue.notes)).toEqual(prompt.targets.map(target => target.midi))
   })
 
   it('restores bounded common reference and tuner settings', () => {

@@ -168,3 +168,14 @@ describe('mobile training persistence', () => {
     expect(api.writes).toEqual([])
   })
 })
+
+test('remembers full-scale presentation through a restart', async () => {
+  const api = memoryApi()
+  const first = new MobileTrainingPersistence(api)
+  await first.load()
+  first.savePreferences({ ...defaultTrainingPreferences(), exercise: 'scale', scalePresentation: 'phrase' })
+  await first.flush()
+  const restored = new MobileTrainingPersistence(api)
+  await restored.load()
+  expect(restored.progress.profile.scalePresentation).toBe('phrase')
+})

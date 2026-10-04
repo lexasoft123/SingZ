@@ -59,7 +59,8 @@ describe('mobile training state', () => {
 
   test.each(['interval', 'chord-tone', 'arpeggio'] as const)('%s also opens with a holder-friendly session length', (exercise) => {
     const state = mobileTrainingReducer(initialTrainingState(profile), { type: 'choose-exercise', exercise })
-    expect(state.setup.length).toBeGreaterThanOrEqual(20)
+    if (exercise === 'interval') expect(state.setup.length).toBe(6)
+    else expect(state.setup.length).toBeGreaterThanOrEqual(20)
   })
 
   test('uses only current stamped keys and applies live transpose', () => {
@@ -175,4 +176,24 @@ describe('mobile training state', () => {
     expect(state.route).toBe('summary')
     expect(state.phase).toBe('ready')
   })
+})
+
+test('six interval sets contain eighteen attempts with three repeats per set', () => {
+  let state = mobileTrainingReducer(initialTrainingState(profile), { type: 'change-setup', patch: { exercise: 'interval', taskMode: 'imitate', length: 6 } })
+  state = mobileTrainingReducer(state, { type: 'start', seed: 'six-interval-sets' })
+  expect(state.error).toBeNull()
+  expect(state.setup.length).toBe(6)
+  expect(state.session!.prompts).toHaveLength(18)
+  const groups = []
+  for (let index = 0; index < 18; index += 3) {
+    const signatures = state.session!.prompts.slice(index, index + 3).map(prompt => prompt.targets.map(target => target.midi).join(','))
+    expect(new Set(signatures).size).toBe(1)
+    groups.push(signatures[0])
+  }
+  expect(new Set(groups).size).toBe(6)
+})
+test('interval identification does not add vocal repetitions', () => {
+  let state = mobileTrainingReducer(initialTrainingState(profile), { type: 'change-setup', patch: { exercise: 'interval', taskMode: 'identify', length: 6 } })
+  state = mobileTrainingReducer(state, { type: 'start', seed: 'six-questions' })
+  expect(state.session!.prompts).toHaveLength(6)
 })

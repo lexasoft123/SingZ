@@ -12,11 +12,11 @@ import React, {
 } from 'react'
 import { keyLabel } from '../../../shared/music-labels'
 import { keyName, midiNoteName } from '../../../shared/music-theory'
-import { summarizeTrainingProgress, type TrainingProgress } from '../../../shared/training-progress'
-import {
-  scoreVocalTrainingAttempt,
-  type TrainingPitchObservation
-} from '../../../shared/training-scoring'
+import { summarizeTrainingProgress, type TrainingProgress, type TrainingCompletionReceipt } from '../../../shared/training-progress'
+import { programLessonSetup, restoreTrainingProgram, selectTrainingProgramLevel, trainingProgramProgress, trainingPracticeStreak, type TrainingProgram, type ProgramLesson, type TrainingLevel } from '../training-ui-state'
+import { intervalLabel as musicalIntervalLabel } from '../../../shared/music-labels'
+import type { TrainingPitchObservation } from '../../../shared/training-scoring'
+import { scoreCompletedTrainingTarget } from '../training-practice'
 import type {
   TrainingAttemptResult,
   TrainingExerciseSelection,
@@ -72,6 +72,8 @@ import {
   desktopTrainingCountdownSeconds,
   desktopTrainingCueDurationSeconds,
   desktopTrainingCues,
+  trainingTargetReference,
+  needsTrainingTargetReference,
   restoreDesktopTrainingPracticeSettings,
   type DesktopTrainingPracticeSettings,
   type TrainingPitchLockState
@@ -99,6 +101,7 @@ interface VocalTrainingProps {
   readonly referenceVolume: number
   readonly onReferenceVolumeChange: (volume: number) => void
   readonly progress: TrainingProgress
+  readonly receipts?: readonly TrainingCompletionReceipt[]
   readonly songPreparation: {
     readonly sourceSongId: string
     readonly songName: string
@@ -124,6 +127,7 @@ interface ActiveDesktopVocalRun {
   readonly generation: number
   readonly prompt: TrainingPrompt
   readonly observations: TrainingPitchObservation[]
+  readonly targetResults: ReturnType<typeof scoreCompletedTrainingTarget>[]
   readonly windows: { targetIndex: number; startMs: number; endMs: number }[]
   readonly tracker: TrainingPitchLockTracker
   activeTarget: number
@@ -168,6 +172,7 @@ function trainingExercises(): readonly {
       cue: '1·3·5',
       description: t('training.exercise.arpeggio.description')
     },
+    { value: 'scale', label: t('training.program.scaleLabel'), cue: '1–8', description: t('training.program.scaleDescription') },
     {
       value: 'mixed',
       label: t('training.exercise.mixed.label'),
@@ -271,9 +276,14 @@ export default function VocalTraining({
   referenceVolume,
   onReferenceVolumeChange,
   progress,
+  receipts = [],
   songPreparation,
   onBackToSong
 }: VocalTrainingProps): React.JSX.Element {
+  const [program, setProgram] = useState<TrainingProgram | null>(() => {
+    try { return restoreTrainingProgram(JSON.parse(localStorage.getItem('singz.training.program') ?? 'null')) }
+    catch { return null }
+  })
   const [live, setLive] = useState<LivePitch | null>(null)
   const [pitchLock, setPitchLock] = useState<TrainingPitchLockState>(EMPTY_TRAINING_PITCH_LOCK)
   const [countdown, setCountdown] = useState<number | null>(null)
@@ -432,13 +442,12 @@ export default function VocalTraining({
         releasePromptMicrophoneIfFinal(session, run.prompt, mic, () => onMicDevice(null))
         dispatch({
           type: 'record-result',
-          result: scoreVocalTrainingAttempt({
-            prompt: run.prompt,
-            targetWindows: run.windows,
-            observations: run.observations,
-            range: trainingScoringRange(stateRef.current)!,
+          result: {
+            response: 'vocal',
+            promptId: run.prompt.id,
+            targets: run.targetResults,
             completedAt: Date.now()
-          })
+          }
         })
         vocalRun.current = null
       } catch (error) {
@@ -454,6 +463,7 @@ export default function VocalTraining({
         generation: runId,
         prompt,
         observations: [],
+        targetResults: [],
         windows: [],
         tracker: new TrainingPitchLockTracker(practiceSettings.pitchWindowCents),
         activeTarget: 0,
@@ -470,12 +480,15 @@ export default function VocalTraining({
         }
         const observation = mic.read()
         if (observation.timestampMs < run.targetStartedAtMs) {
+          if (Number.isFinite(run.targetStartedAtMs)) setCountdown(Math.max(1, Math.ceil((run.targetStartedAtMs - observation.timestampMs) / 1000)))
           frame.current = requestAnimationFrame(tick)
           return
         }
+        setCountdown(null)
         const target = prompt.targets[run.activeTarget]
         // The detector resolves harmonics from PCM; scoring keeps the sung octave.
         run.observations.push(observation)
+        if (run.observations.length > 512) run.observations.shift()
         const lock = run.tracker.update(
           observation.timestampMs,
           observation.midi,
@@ -508,6 +521,11 @@ export default function VocalTraining({
             startMs: run.targetStartedAtMs,
             endMs
           })
+          run.targetResults.push(mic.scoreCompletedTarget({
+            prompt, targetWindows: run.windows, observations: run.observations,
+            range: trainingScoringRange(stateRef.current)!,
+            options: { minimumConfidence: mic.minConfidence }
+          }, TRAINING_HOLD_MS))
           if (run.activeTarget === prompt.targets.length - 1) {
             finishVocalPrompt(run)
             return
@@ -524,12 +542,23 @@ export default function VocalTraining({
               practiceSettings.pitchWindowCents
             )
           )
+          if (needsTrainingTargetReference(prompt.kind, prompt.taskMode, stateRef.current.session?.config.scalePresentation)) {
+            const cue = trainingTargetReference(prompt.kind, prompt.targets[run.activeTarget].midi)
+            run.targetStartedAtMs = Infinity
+            setCountdown(Math.ceil(cue.durationSeconds))
+            void cues.schedule([cue], { noteDurationSec: cue.durationSeconds, attackSec: 0.032, releaseSec: 0.22 }).then(timeline => {
+              if (generation.current !== runId || vocalRun.current !== run) return
+              run.targetStartedAtMs = audibleCueEndTimeSec(timeline.endTime, engine.context) * 1000 + 150
+            }).catch(error => {
+              if (generation.current === runId && vocalRun.current === run) reportError(error)
+            })
+          }
         }
         frame.current = requestAnimationFrame(tick)
       }
       frame.current = requestAnimationFrame(tick)
     },
-    [cues, finishVocalPrompt, interruptRuntime, mic, practiceSettings.pitchWindowCents, state.setup]
+    [cues, engine.context, finishVocalPrompt, interruptRuntime, mic, practiceSettings.pitchWindowCents, reportError, state.setup]
   )
 
   const skipVocalPrompt = useCallback(
@@ -575,7 +604,7 @@ export default function VocalTraining({
           interruptRuntime()
           return
         }
-        const promptCues = desktopTrainingCues(prompt)
+        const promptCues = desktopTrainingCues(prompt, stateRef.current.session?.config.scalePresentation)
         const countdownSeconds = desktopTrainingCountdownSeconds(promptCues)
         const noteDurationSec = desktopTrainingCueDurationSeconds(promptCues)
         setCountdown(countdownSeconds)
@@ -826,9 +855,24 @@ export default function VocalTraining({
     return scheduleTrainingFeedbackAdvance(audioLeaseBlocked, state, nextPrompt)
   }, [audioLeaseBlocked, nextPrompt, state.exercisePhase, state.route, state.session?.status])
 
+  const programCard = <TrainingProgramCard program={program} receipts={receipts}
+    onLevel={level => {
+      const next = selectTrainingProgramLevel(program, level)
+      try {
+        localStorage.setItem('singz.training.program', JSON.stringify(next))
+        setProgram(next)
+      } catch (error) { dispatch({ type: 'set-error', error: error instanceof Error ? error.message : String(error) }) }
+    }}
+    onLesson={(lesson, day) => {
+      stopRuntime()
+      onSetupChange(programLessonSetup(lesson, day, stateRef.current.setup))
+      dispatch({ type: 'choose-program-lesson', lesson, day })
+    }} />
+
   if (state.route === 'home') {
     return (
       <TrainingHome
+        programCard={programCard}
         progress={progress}
         songPreparation={songPreparation}
         audioBlocked={audioLeaseBlocked}
@@ -872,7 +916,7 @@ export default function VocalTraining({
   }
   if (state.route === 'progress') {
     return (
-      <TrainingProgressScreen progress={progress} onBack={() => dispatch({ type: 'back-home' })} />
+      <TrainingProgressScreen progress={progress} programCard={programCard} onBack={() => dispatch({ type: 'back-home' })} />
     )
   }
   if (state.route === 'setup') {
@@ -952,6 +996,7 @@ export function shouldShowTrainingPitchMarker(
 }
 
 function TrainingHome({
+  programCard,
   progress,
   songPreparation,
   audioBlocked,
@@ -960,6 +1005,7 @@ function TrainingHome({
   onPrepare,
   onProgress
 }: {
+  programCard: React.ReactNode
   progress: TrainingProgress
   songPreparation: VocalTrainingProps['songPreparation']
   audioBlocked: boolean
@@ -1021,58 +1067,67 @@ function TrainingHome({
           )}
         </section>
       )}
-      <div className="vt-home-head">
-        <p className="vt-eyebrow">{t('training.home.eyebrow')}</p>
-        <h1 ref={headingRef} tabIndex={-1}>
-          {t('training.home.heading')}
-        </h1>
-        <p>{t('training.home.subheading')}</p>
-      </div>
-      <div className="vt-score" aria-label={t('training.home.exercisesAriaLabel')}>
-        {trainingExercises().map((exercise) => (
-          <button
-            type="button"
-            className="vt-exercise"
-            key={exercise.value}
-            onClick={() => onChoose(exercise.value)}
-          >
-            <span className="vt-exercise-cue" aria-hidden>
-              {exercise.cue}
+      <div className="vt-home-columns">
+        <aside className="vt-home-program">
+          {programCard}
+          <button type="button" className="vt-progress-entry" onClick={onProgress}>
+            <span>
+              <strong>{t('training.home.progressEntry.label')}</strong>
+              <small>
+                {snapshot.sessions === 0
+                  ? t('training.home.progressEntry.empty')
+                  : tn('training.home.progressEntry.summary', snapshot.sessions, {
+                      percent:
+                        snapshot.landedRate === null ? '—' : `${Math.round(snapshot.landedRate * 100)}%`
+                    })}
+              </small>
             </span>
-            <span className="vt-exercise-copy">
-              <strong>{exercise.label}</strong>
-              <span>{exercise.description}</span>
-            </span>
-            <span className="vt-exercise-arrow" aria-hidden>
-              →
-            </span>
+            <span aria-hidden>→</span>
           </button>
-        ))}
+        </aside>
+        <section className="vt-home-practice">
+          <div className="vt-home-head">
+            <p className="vt-eyebrow">{t('training.home.eyebrow')}</p>
+            <h1 ref={headingRef} tabIndex={-1}>
+              {t('training.home.heading')}
+            </h1>
+            <p>{t('training.home.subheading')}</p>
+          </div>
+          <div className="vt-score" aria-label={t('training.home.exercisesAriaLabel')}>
+            {trainingExercises().map((exercise) => (
+              <button
+                type="button"
+                className="vt-exercise"
+                key={exercise.value}
+                onClick={() => onChoose(exercise.value)}
+              >
+                <span className="vt-exercise-cue" aria-hidden>
+                  {exercise.cue}
+                </span>
+                <span className="vt-exercise-copy">
+                  <strong>{exercise.label}</strong>
+                  <span>{exercise.description}</span>
+                </span>
+                <span className="vt-exercise-arrow" aria-hidden>
+                  →
+                </span>
+              </button>
+            ))}
+          </div>
+          <p className="vt-home-note">{t('training.home.micNote')}</p>
+        </section>
       </div>
-      <button type="button" className="vt-progress-entry" onClick={onProgress}>
-        <span>
-          <strong>{t('training.home.progressEntry.label')}</strong>
-          <small>
-            {snapshot.sessions === 0
-              ? t('training.home.progressEntry.empty')
-              : tn('training.home.progressEntry.summary', snapshot.sessions, {
-                  percent:
-                    snapshot.landedRate === null ? '—' : `${Math.round(snapshot.landedRate * 100)}%`
-                })}
-          </small>
-        </span>
-        <span aria-hidden>→</span>
-      </button>
-      <p className="vt-home-note">{t('training.home.micNote')}</p>
     </main>
   )
 }
 
 function TrainingProgressScreen({
   progress,
+  programCard,
   onBack
 }: {
   progress: TrainingProgress
+  programCard: React.ReactNode
   onBack: () => void
 }): React.JSX.Element {
   const headingRef = useRouteHeadingFocus()
@@ -1097,6 +1152,7 @@ function TrainingProgressScreen({
         </h1>
         <p>{t('training.progress.subheading')}</p>
       </header>
+      {programCard}
       {snapshot.sessions === 0 ? (
         <section className="vt-progress-empty">
           <h2>{t('training.progress.empty.heading')}</h2>
@@ -1219,8 +1275,8 @@ function TrainingSetup({
   onBack: () => void
 }): React.JSX.Element {
   useEffect(() => {
-    if (!micAvailable && setup.taskMode !== 'identify') onChange({ taskMode: 'identify' })
-  }, [micAvailable, onChange, setup.taskMode])
+    if (!micAvailable && setup.exercise !== 'scale' && setup.taskMode !== 'identify') onChange({ taskMode: 'identify' })
+  }, [micAvailable, onChange, setup.taskMode, setup.exercise])
   const rangeNotice = trainingRangeNotice(setup)
   const exercise = trainingExercises().find((item) => item.value === setup.exercise)!
   const key = { tonicPc: setup.tonicPc, mode: setup.keyMode } as const
@@ -1283,7 +1339,7 @@ function TrainingSetup({
                   key={mode}
                   className={setup.taskMode === mode ? 'active' : ''}
                   aria-pressed={setup.taskMode === mode}
-                  disabled={!micAvailable && mode !== 'identify'}
+                  disabled={setup.exercise === 'scale' ? mode !== 'imitate' || !micAvailable : !micAvailable && mode !== 'identify'}
                   onClick={() => onChange({ taskMode: mode })}
                 >
                   {mode === 'imitate'
@@ -1359,7 +1415,17 @@ function TrainingSetup({
         {intervalsRequired && (
           <fieldset className="vt-fieldset vt-wide">
             <legend>{t('training.exercise.interval.label')}</legend>
-            <div className="vt-check-row">
+            {setup.exercise === 'interval' && <label className="vt-form-row">
+              <span>{t('training.program.intervalFocus')}</span>
+              <select value={setup.intervalSemitones ?? ''} onChange={event => onChange({
+                intervalSemitones: event.target.value === '' ? undefined : Number(event.target.value),
+                ...(event.target.value === '' ? {} : { intervalSizes: [2, 3, 4, 5, 6, 7, 8] })
+              })}>
+                <option value="">{t('training.program.growing')}</option>
+                {Array.from({ length: 12 }, (_, index) => <option key={index} value={index + 1}>{programLessonLabel({ exercise: 'interval', mode: setup.taskMode, semitones: index + 1 })}</option>)}
+              </select>
+            </label>}
+            {(setup.exercise !== 'interval' || setup.intervalSemitones === undefined) && <div className="vt-check-row">
               {[2, 3, 4, 5, 6, 7, 8].map((size) => (
                 <ToggleCheck
                   key={size}
@@ -1373,7 +1439,7 @@ function TrainingSetup({
                   }
                 />
               ))}
-            </div>
+            </div>}
           </fieldset>
         )}
 
@@ -1496,7 +1562,7 @@ function TrainingSetup({
       )}
       <footer className="vt-setup-footer">
         <label className="vt-length">
-          <span>{t('training.setup.label.exercises')}</span>
+          <span>{t(setup.exercise === 'interval' && setup.taskMode === 'imitate' ? 'training.program.sets' : 'training.setup.label.exercises')}</span>
           <select
             value={setup.length}
             onChange={(event) => onChange({ length: Number(event.target.value) })}
@@ -1511,7 +1577,7 @@ function TrainingSetup({
         <button
           type="button"
           className="pill primary"
-          disabled={invalidSelection || audioBlocked}
+          disabled={invalidSelection || audioBlocked || (setup.exercise === 'scale' && !micAvailable)}
           onClick={onStart}
         >
           {t('training.setup.startPractice')}
@@ -1598,6 +1664,9 @@ function TrainingSession({
   const session = state.session
   if (!session || !selected) return <TrainingEmpty onExit={onExit} />
   const { prompt } = selected
+  const intervalSets = session.config.exercise === 'interval' && session.config.taskMode === 'imitate'
+  const displayNumber = intervalSets ? Math.floor((selected.displayNumber - 1) / 3) + 1 : selected.displayNumber
+  const displayTotal = intervalSets ? Math.ceil(session.prompts.length / 3) : session.prompts.length
   const activeTargetIndex = live?.targetIndex ?? 0
   const target = prompt.targets[Math.min(activeTargetIndex, prompt.targets.length - 1)]
   const revealAnswer = state.exercisePhase === 'feedback'
@@ -1639,12 +1708,12 @@ function TrainingSession({
         <div
           className="vt-progress-copy"
           aria-label={t('training.session.aria.exerciseProgress', {
-            current: selected.displayNumber,
-            total: session.prompts.length
+            current: displayNumber,
+            total: displayTotal
           })}
         >
           <span aria-hidden="true">
-            {selected.displayNumber} / {session.prompts.length}
+            {displayNumber} / {displayTotal}{intervalSets && ` · ${t('training.program.repetition', { attempt: (selected.displayNumber - 1) % 3 + 1 })}`}
           </span>
         </div>
       </header>
@@ -1701,7 +1770,7 @@ function TrainingSession({
             announce={state.exercisePhase === 'feedback'}
           />
         )}
-        {state.exercisePhase === 'cue' && <CueListening prompt={prompt} countdown={countdown} />}
+        {(state.exercisePhase === 'cue' || state.exercisePhase === 'respond' && countdown !== null) && <CueListening prompt={prompt} countdown={countdown} />}
         {state.exercisePhase === 'respond' && prompt.taskMode === 'identify' && (
           <IdentifyAnswers
             prompt={prompt}
@@ -1710,7 +1779,7 @@ function TrainingSession({
             onAnswer={onAnswer}
           />
         )}
-        {state.exercisePhase === 'respond' && prompt.taskMode !== 'identify' && target && (
+        {state.exercisePhase === 'respond' && countdown === null && prompt.taskMode !== 'identify' && target && (
           <PitchRunway
             live={live}
             pitchLock={pitchLock}
@@ -1724,7 +1793,7 @@ function TrainingSession({
           </p>
         )}
       </section>
-      {state.exercisePhase === 'respond' && prompt.taskMode !== 'identify' && (
+      {state.exercisePhase === 'respond' && countdown === null && prompt.taskMode !== 'identify' && (
         <div
           className="vt-transport"
           role="group"
@@ -2290,4 +2359,39 @@ function TrainingRecording({ active }: { active: boolean }): React.JSX.Element {
       {message && <p role="status">{message}</p>}
     </div>
   )
+}
+
+function programLessonLabel(lesson: ProgramLesson): string {
+  const names = ['unison', 'minor second', 'major second', 'minor third', 'major third', 'perfect fourth', 'diminished fifth', 'perfect fifth', 'minor sixth', 'major sixth', 'minor seventh', 'major seventh', 'perfect octave']
+  if (lesson.semitones !== undefined) return musicalIntervalLabel(names[lesson.semitones])
+  const keys = { note: 'training.exercise.note.label', interval: 'training.exercise.interval.label', 'scale-degree': 'training.exercise.scaleDegree.label', 'chord-tone': 'training.exercise.chordTone.label', arpeggio: 'training.exercise.arpeggio.label', mixed: 'training.exercise.mixed.label', scale: 'training.program.scaleLabel' } as const
+  return t(keys[lesson.exercise])
+}
+
+function TrainingProgramCard({ program, receipts, onLevel, onLesson }: {
+  program: TrainingProgram | null
+  receipts: readonly TrainingCompletionReceipt[]
+  onLevel: (level: TrainingLevel) => void
+  onLesson: (lesson: ProgramLesson, day: number) => void
+}): React.JSX.Element {
+  const stages = program ? trainingProgramProgress(program, receipts) : []
+  const next = stages.find(stage => !stage.done)
+  const streak = trainingPracticeStreak(receipts)
+  return <section className="vt-program" aria-label={t('training.program.heading')}>
+    <h2>{t('training.program.heading')}</h2>
+    <div className="vt-program-levels">
+      {(['foundation', 'developing', 'advanced'] as const).map(level => <button type="button" key={level} className="pill" aria-pressed={program?.level === level} onClick={() => onLevel(level)}>{t(`training.program.${level}`)}</button>)}
+    </div>
+    {!program && <p>{t('training.program.choose')}</p>}
+    {program && !next && <p>{t('training.program.finished')}</p>}
+    {next && <>
+      <p className="vt-eyebrow">{t(next.practicedToday ? 'training.program.complete' : 'training.program.day', { day: next.dayIndex + 1 })}</p>
+      <h3>{programLessonLabel(next.lesson)}</h3>
+      <div className="vt-program-week" aria-label={t('training.program.days', { days: next.days })}>{Array.from({ length: 7 }, (_, index) => <span key={index} className={index < next.days ? 'done' : ''}>{index < next.days ? '✓' : index + 1}</span>)}</div>
+      <p>{t('training.program.days', { days: next.days })}{streak > 0 && ` · ${t('training.program.streak', { days: streak })}`}</p>
+      {next.lesson.exercise === 'interval' && <p>{t('training.program.intervalSession')}</p>}
+      <button type="button" className="pill primary" onClick={() => onLesson(next.lesson, next.dayIndex)}>{t(next.practicedToday ? 'training.program.again' : 'training.program.start')}</button>
+    </>}
+    {program && <details><summary>{t('training.program.path')}</summary><ol className="vt-program-path">{stages.map(stage => <li key={stage.index}><button type="button" onClick={() => onLesson(stage.lesson, stage.dayIndex)}><strong>{programLessonLabel(stage.lesson)}</strong><span>{t('training.program.days', { days: stage.days })}</span></button></li>)}</ol></details>}
+  </section>
 }

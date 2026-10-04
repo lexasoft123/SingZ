@@ -102,6 +102,7 @@ export class MultitrackEngine {
   private trainingLimiter: WaveShaperNode = this.ctx.createWaveShaper()
   private trainingCueVolume = DEFAULT_TRAINING_REFERENCE_VOLUME
   private trainingCueMuted = false
+  private trainingLatchNodes: { oscillator: OscillatorNode; gain: GainNode }[] = []
   private trainingNodes: { oscillator: OscillatorNode; gain: GainNode }[] = []
   private trainingCueGeneration = 0
   private tracks: EngineTrack[] = []
@@ -185,6 +186,8 @@ export class MultitrackEngine {
     return this.displayLag
   }
 
+  get trainingMuted(): boolean { return this.trainingCueMuted }
+
   setTrainingCueMuted(muted: boolean): void {
     this.trainingCueMuted = muted
     this.applyTrainingCueVolume()
@@ -220,7 +223,7 @@ export class MultitrackEngine {
           error: t('phone.app.engine.outputOwnedBySong')
         }
       this.pause()
-      this.cancelTrainingCues()
+      this.cancelTrainingCues(true)
       const generation = ++this.trainingCueGeneration
       if (this.ctx.state === 'suspended') await this.ctx.resume()
       if (this.backgrounded || generation !== this.trainingCueGeneration)
@@ -261,7 +264,7 @@ export class MultitrackEngine {
       }
       return { ok: true, startsAt: plan.voices[0]?.start ?? plan.endsAt, endsAt: plan.endsAt }
     } catch (error) {
-      this.cancelTrainingCues()
+      this.cancelTrainingCues(true)
       return {
         ok: false,
         error: error instanceof Error ? error.message : String(error)
@@ -276,17 +279,26 @@ export class MultitrackEngine {
     try {
       const tone = TRAINING_REACHED_TONE
       const startsAt = this.ctx.currentTime + tone.startDelaySeconds
-      const endsAt = startsAt + tone.durationSeconds
+      const endsAt = startsAt + 0.45
       const oscillator = this.ctx.createOscillator()
       const gain = this.ctx.createGain()
       oscillator.type = 'sine'
       oscillator.frequency.value = tone.frequency
       gain.gain.setValueAtTime(0, startsAt)
       gain.gain.linearRampToValueAtTime(tone.peakGain, startsAt + tone.attackSeconds)
+      gain.gain.setValueAtTime(tone.peakGain, startsAt + 0.25)
       gain.gain.linearRampToValueAtTime(0, endsAt)
       oscillator.connect(gain)
       gain.connect(this.trainingGain)
-      this.trainingNodes.push({ oscillator, gain })
+      const node = { oscillator, gain }
+      this.trainingLatchNodes.push(node)
+      setTimeout(() => {
+        const index = this.trainingLatchNodes.indexOf(node)
+        if (index < 0) return
+        this.trainingLatchNodes.splice(index, 1)
+        oscillator.disconnect()
+        gain.disconnect()
+      }, Math.max(0, (endsAt - this.ctx.currentTime) * 1000) + 100)
       oscillator.start(startsAt)
       oscillator.stop(endsAt)
       return { ok: true, startsAt, endsAt }
@@ -295,10 +307,10 @@ export class MultitrackEngine {
     }
   }
 
-  cancelTrainingCues(): void {
+  cancelTrainingCues(preserveLatch = false): void {
     this.trainingCueGeneration++
     const now = this.ctx.currentTime
-    for (const { oscillator, gain } of this.trainingNodes.splice(0)) {
+    for (const { oscillator, gain } of [...this.trainingNodes.splice(0), ...(preserveLatch ? [] : this.trainingLatchNodes.splice(0))]) {
       try {
         oscillator.stop(now)
       } catch {

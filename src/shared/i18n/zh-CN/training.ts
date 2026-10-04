@@ -3,6 +3,28 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  'training.program.intervalFocus': "练习音程",
+  'training.program.growing': "逐步增加音程",
+  'training.program.sets': "音程组",
+  'training.program.repetition': "第 {attempt} 次，共 3 次",
+
+  'training.program.heading': "你的训练计划",
+  'training.program.foundation': "基础",
+  'training.program.developing': "进阶",
+  'training.program.advanced': "高级",
+  'training.program.choose': "选择等级，每节课需要练习七天。",
+  'training.program.day': "第 {day} 天，共 7 天",
+  'training.program.days': "已练习 {days} / 7 天",
+  'training.program.start': "开始今天的课程",
+  'training.program.again': "再次练习",
+  'training.program.complete': "今天的课程已完成",
+  'training.program.finished': "训练计划已完成",
+  'training.program.streak': "连续练习 {days} 天",
+  'training.program.intervalSession': "六组音程 · 每组三次",
+  'training.program.path': "完整课程",
+  'training.program.scaleLabel': "完整音阶",
+  'training.program.scaleDescription': "聆听并逐音唱出完整音阶。",
+
   // ── exercise picker (home) ──
   'training.exercise.note.label': '听音配唱',
   'training.exercise.note.description': '先听一个音，再让你的声音落在它上面。',

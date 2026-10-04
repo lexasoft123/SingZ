@@ -25,7 +25,8 @@ import {
   emptyTrainingProgress,
   restoreTrainingProgress,
   updateTrainingPreferences,
-  type TrainingProgress
+  type TrainingProgress,
+  type TrainingCompletionReceipt
 } from '../../shared/training-progress'
 import {
   analysisIsStale,
@@ -662,6 +663,7 @@ export default function App(): React.JSX.Element {
   const desktopTrainingRef = useRef(desktopTraining)
   desktopTrainingRef.current = desktopTraining
   const [trainingProgress, setTrainingProgress] = useState<TrainingProgress>(() => emptyTrainingProgress())
+  const [trainingReceipts, setTrainingReceipts] = useState<TrainingCompletionReceipt[]>([])
   const trainingProgressRef = useRef(trainingProgress)
   trainingProgressRef.current = trainingProgress
   const [trainingProgressLoaded, setTrainingProgressLoaded] = useState(false)
@@ -673,7 +675,7 @@ export default function App(): React.JSX.Element {
       savePreferences: (preferences) => window.singz.saveTrainingPreferences(preferences),
       recordCompletion: (receipt) => window.singz.recordTrainingCompletion(receipt)
     },
-    (progress) => { trainingProgressRef.current = progress; setTrainingProgress(progress) },
+    (progress, receipts) => { trainingProgressRef.current = progress; setTrainingProgress(progress); if (receipts) setTrainingReceipts(receipts) },
     (profile) => {
       const progress = { ...trainingProgressRef.current, profile }
       trainingProgressRef.current = progress
@@ -899,6 +901,7 @@ export default function App(): React.JSX.Element {
       trainingProgressRef.current = restored
       trainingProgressMutations.markLoaded(restored)
       setTrainingProgress(restored)
+      setTrainingReceipts(result.receipts ?? [])
       if (desktopTrainingRef.current.route === 'home' && !desktopTrainingRef.current.session)
         dispatchDesktopTraining({
           type: 'update-setup',
@@ -3717,6 +3720,10 @@ export default function App(): React.JSX.Element {
     if (!window.singz.e2eHooks) return
     ;(window as { __test?: unknown }).__test = {
       engine,
+      desktopTraining,
+      trainingMic,
+      trainingCues,
+      dispatchDesktopTraining,
       // The transport BUTTON's own state, which is not `engine.playing`: it is
       // React state fed from the engine, and the two diverging is a bug a
       // driver reading the engine alone cannot see. The phones learned this
@@ -3757,7 +3764,7 @@ export default function App(): React.JSX.Element {
         return buffer ? computePeaks(buffer) : null
       }
     }
-  }, [engine, playing, phase, showCatalog, tracks, metCfg, training, trainCfg, transpose, loadPath, selection])
+  }, [engine, desktopTraining, trainingMic, trainingCues, playing, phase, showCatalog, tracks, metCfg, training, trainCfg, transpose, loadPath, selection])
 
   return (
     <div className="app">
@@ -3985,6 +3992,7 @@ export default function App(): React.JSX.Element {
           referenceVolume={audioPrefs.referenceVolume ?? DEFAULT_TRAINING_REFERENCE_VOLUME}
           onReferenceVolumeChange={changeTrainingReferenceVolume}
           progress={trainingProgress}
+          receipts={trainingReceipts}
           songPreparation={
             song
               ? {

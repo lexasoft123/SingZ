@@ -84,7 +84,7 @@ export function trainingSetupRequirements(setup: {
   return {
     intervalsRequired: kinds.includes('interval'),
     chordsRequired: kinds.includes('chord-tone') || kinds.includes('arpeggio'),
-    directionUsed: kinds.includes('interval') || kinds.includes('arpeggio')
+    directionUsed: kinds.includes('interval') || kinds.includes('arpeggio') || kinds.includes('scale')
   }
 }
 

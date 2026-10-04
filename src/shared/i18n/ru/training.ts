@@ -3,6 +3,28 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  'training.program.intervalFocus': "Интервал для практики",
+  'training.program.growing': "От простых к сложным",
+  'training.program.sets': "Наборы интервалов",
+  'training.program.repetition': "Попытка {attempt} из 3",
+
+  'training.program.heading': "Ваша программа тренировок",
+  'training.program.foundation': "Базовый",
+  'training.program.developing': "Средний",
+  'training.program.advanced': "Продвинутый",
+  'training.program.choose': "Выберите уровень. Каждый урок рассчитан на семь дней практики.",
+  'training.program.day': "День {day} из 7",
+  'training.program.days': "Практика: {days} / 7 дней",
+  'training.program.start': "Начать урок на сегодня",
+  'training.program.again': "Повторить практику",
+  'training.program.complete': "Сегодняшний урок завершён",
+  'training.program.finished': "Программа завершена",
+  'training.program.streak': "Серия: {days} дней",
+  'training.program.intervalSession': "Шесть интервалов · по три попытки",
+  'training.program.path': "Вся программа",
+  'training.program.scaleLabel': "Гаммы целиком",
+  'training.program.scaleDescription': "Слушайте и пойте все ноты тональности по очереди.",
+
   // ── exercise picker (home) ──
   'training.exercise.note.label': 'Спойте ноту',
   'training.exercise.note.description': 'Услышьте ноту и попадите в неё голосом.',

@@ -1090,3 +1090,46 @@ function reverseRecordKeys(value: unknown): unknown {
       .map(([key, child]) => [key, reverseRecordKeys(child)])
   )
 }
+
+
+describe('systematic interval imitation', () => {
+  it('repeats exact notes three times, then visits different ordered starting pitches', () => {
+    const prompts = generateTrainingPrompts({ ...base('interval'), taskMode: 'imitate', intervalSemitones: 4, direction: 'ascending', length: 18 })
+    const starts: number[] = []
+    for (let index = 0; index < prompts.length; index += 3) {
+      const block = prompts.slice(index, index + 3)
+      expect(new Set(block.map(prompt => prompt.targets.map(target => target.midi).join(','))).size).toBe(1)
+      expect(block.every(prompt => prompt.targets[1].midi - prompt.targets[0].midi === 4)).toBe(true)
+      starts.push(block[0].targets[0].midi)
+    }
+    expect(new Set(starts).size).toBe(starts.length)
+    expect(starts).toEqual([...starts].sort((a, b) => a - b))
+  })
+
+  it('grows interval distances and keeps each direction in a practice block', () => {
+    const prompts = generateTrainingPrompts({ ...base('interval'), taskMode: 'imitate', length: 36 })
+    const distances = prompts.map(prompt => Math.abs(prompt.targets[1].midi - prompt.targets[0].midi))
+    expect(distances).toEqual([...distances].sort((a, b) => a - b))
+    for (let index = 0; index < prompts.length; index += 3)
+      expect(new Set(prompts.slice(index, index + 3).map(prompt => prompt.kind === 'interval' ? prompt.direction : '')).size).toBe(1)
+  })
+
+  it('rejects impossible focused intervals and invalid distances', () => {
+    expect(() => generateTrainingPrompts({ ...base('interval'), intervalSemitones: 13 })).toThrow()
+    expect(() => generateTrainingPrompts({ ...base('interval'), intervalSemitones: 12, range: { lowMidi: 60, highMidi: 65 } })).toThrow()
+  })
+})
+
+it('growing sessions cover the available distance range within each offered length', () => {
+  for (const length of [10, 20, 30, 50]) {
+    const config = { ...base('interval'), taskMode: 'imitate' as const, length }
+    const prompts = generateTrainingPrompts(config)
+    const distances = prompts.map(prompt => Math.abs(prompt.targets[1].midi - prompt.targets[0].midi))
+    expect(distances).toEqual([...distances].sort((a,b) => a-b))
+    expect(Math.max(...distances)).toBe(12)
+    expect(new Set(distances).size).toBe(Math.min(Math.ceil(length / 3), 12))
+    for (let index = 0; index < length; index += 3)
+      expect(new Set(prompts.slice(index,index+3).map(prompt => prompt.targets.map(target => target.midi).join(','))).size).toBe(1)
+    expect(generateTrainingPrompts({ ...config, seed: 'other-positions' })).not.toEqual(prompts)
+  }
+})

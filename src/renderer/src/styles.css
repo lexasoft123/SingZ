@@ -3572,10 +3572,47 @@ body.modal-open .persistent-monitor.active .persistent-monitor-dot {
 }
 
 .vt-home {
-  width: min(1040px, 100%);
+  width: min(1240px, 100%);
   margin: 0 auto;
-  padding: clamp(38px, 7vh, 76px) 48px 36px;
+  padding: clamp(28px, 4vh, 48px) 32px 36px;
 }
+
+.vt-home-columns {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.85fr) minmax(0, 1.15fr);
+  gap: 32px;
+  align-items: start;
+}
+.vt-home-program, .vt-home-practice { min-width: 0; }
+.vt-home-program .vt-program { margin-bottom: 16px; }
+.vt-home-program .vt-progress-entry { width: 100%; }
+.vt-home-program .vt-program-week { gap: 6px; }
+.vt-home-program .vt-program-week span { flex: 1; min-width: 0; max-width: 40px; width: auto; }
+.vt-home-practice .vt-home-head { margin-bottom: 24px; }
+.vt-home-practice .vt-home-head h1 { font-size: clamp(30px, 3vw, 40px); line-height: 1.1; }
+.vt-home-practice .vt-score { grid-template-columns: 1fr; gap: 10px; }
+.vt-home-practice .vt-exercise { grid-template-columns: 48px minmax(0, 1fr) 20px; min-height: 78px; padding: 12px 16px; gap: 14px; }
+.vt-home-practice .vt-exercise-cue { width: 48px; height: 48px; min-width: 48px; font-size: 15px; }
+.vt-home-practice .vt-exercise-copy strong { font-size: 16px; }
+@media (max-width: 880px) {
+  .vt-home-columns { grid-template-columns: 1fr; gap: 28px; }
+}
+
+/* Program rules are shared; this layout uses the desktop training tokens. */
+.vt-program { padding: 24px; border: 1px solid var(--line); border-radius: 20px; background: var(--panel); margin-bottom: 24px; }
+.vt-program h2 { margin: 0 0 16px; font-size: 24px; }
+.vt-program h3 { margin: 8px 0 16px; font-size: 30px; }
+.vt-program p { color: var(--dim); margin: 12px 0; }
+.vt-program-levels { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
+.vt-program-levels [aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.vt-program-week { display: flex; gap: 8px; }
+.vt-program-week span { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 12px; background: var(--bg); color: var(--dim); font-weight: 700; }
+.vt-program-week .done { color: var(--accent); background: var(--accent-soft); }
+.vt-program details { margin-top: 20px; }
+.vt-program summary { cursor: pointer; font-weight: 700; }
+.vt-program-path { padding-left: 24px; }
+.vt-program-path button { display: flex; justify-content: space-between; gap: 20px; width: 100%; text-align: left; padding: 12px; background: transparent; border: 0; border-bottom: 1px solid var(--line); color: var(--text); cursor: pointer; }
+.vt-program-path span { color: var(--dim); }
 
 .vt-home-head {
   width: min(690px, 100%);
