@@ -62,18 +62,29 @@ export async function startProjectSplit(
     resume?: boolean
     onModelProgress?: (gotBytes: number, totalBytes: number) => void
     watchdogCapMs?: number
+    /** The UI invalidates preparation on cancellation or replacement. */
+    isCurrent?: () => boolean
   }
 ): Promise<void> {
+  const checkCurrent = (): void => {
+    if (opts?.isCurrent && !opts.isCurrent()) throw new Error('cancelled')
+  }
+  checkCurrent()
   // Ahead of the model fetch so the dialog lands on the tap that caused it,
   // rather than interrupting a 136 MB download minutes later.
   await askToShowProgress()
+  checkCurrent()
   const doc = JSON.parse(await readProjectText(project, 'project.json')) as ProjectDoc
+  checkCurrent()
   const srcPath = await localProjectFile(project, doc.songFile)
+  checkCurrent()
   const modelPath = await ensureSplitModel(opts?.onModelProgress)
+  checkCurrent()
   // The budget this phone is working inside, recorded before a single sample
   // is decoded: a split that is killed leaves no note, so its allowance has to
   // be in the log already.
   const vitals = await splitVitals()
+  checkCurrent()
   if (vitals) {
     log(
       'split',
