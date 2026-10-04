@@ -2393,7 +2393,14 @@ split suite, including six-stem adoption, reconstruction, recovery, and
 watchdog ownership. Three real invalid-model failures retained their native
 ORT cause on attempts one, two, and three.
 
-These results demonstrate reduced Android memory demand and retained audio
-output. They do not establish the latest Samsung failure’s exact cause; its
-current Journal trace is still needed. v0.25.0 predates this follow-up and does
-not contain the Android session-profile change.
+The Samsung SM-S906E Journal from v0.25.0 (Android 15/API 35, 7221 MB RAM,
+3008 MB free at launch) confirms three consecutive system low-memory kills
+during `load-model`, on attempts at 13:27:53, 13:28:20, and 13:28:45. Android
+reported zero PSS/RSS in those exit records, so they identify the termination
+reason without measuring its peak. An earlier fresh kick produced no job.json
+within twenty seconds; that attempt has no equivalent exit evidence.
+
+The emulator results demonstrate reduced Android memory demand with retained
+audio output. The changed profile still needs confirmation on this Samsung.
+v0.25.0 predates this follow-up and does not contain the Android session-profile
+change.
