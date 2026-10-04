@@ -873,6 +873,8 @@ private_lane :submit_build do |options|
   upload_to_app_store(
     api_key: options[:api_key],
     skip_binary_upload: true,
+    # The submit lane has no new IPA from which deliver can infer the version.
+    app_version: options[:version],
     build_number: options[:build_number].to_s,
     submit_for_review: true,
     # Goes live BY ITSELF the moment Apple approves — no second visit to
