@@ -593,6 +593,10 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
           promise.resolve(result(out, false))
           return@execute
         }
+        if (url.isEmpty()) {
+          promise.reject("cacheMiss", "Drive cache miss for $file")
+          return@execute
+        }
         val conn = URL(url).openConnection() as HttpURLConnection
         conn.setRequestProperty("Authorization", auth)
         conn.connectTimeout = 20000

@@ -684,15 +684,19 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate {
     resolver resolve: @escaping RCTPromiseResolveBlock,
     rejecter reject: @escaping RCTPromiseRejectBlock
   ) {
-    guard let remote = URL(string: url) else {
-      reject("fetch", "Bad download URL for \(file)", nil)
-      return
-    }
     let out = cacheRootURL().appendingPathComponent(project, isDirectory: true)
       .appendingPathComponent(file)
     let fm = FileManager.default
     if isCurrent(out, expectedMd5, expectedBytes.int64Value) {
       resolve(["path": out.path, "downloaded": false])
+      return
+    }
+    guard !url.isEmpty else {
+      reject("cacheMiss", "Drive cache miss for \(file)", nil)
+      return
+    }
+    guard let remote = URL(string: url) else {
+      reject("fetch", "Bad download URL for \(file)", nil)
       return
     }
     var req = URLRequest(url: remote)

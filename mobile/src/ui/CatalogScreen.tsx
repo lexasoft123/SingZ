@@ -535,6 +535,8 @@ export default function CatalogScreen({
           const cached = await driveStoredProjects()
           if (my !== listSeq.current) return
           setProjects(cached?.length ? cached : null)
+          // Local availability must never wait for Drive or token renewal.
+          void loadUsage(my)
           const signed = await driveSignedIn()
           /* Guarded like the setProjects around it, and for a sharper reason
              since the shelf cache existed: these are cache WRITERS now, so an

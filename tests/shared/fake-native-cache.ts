@@ -95,6 +95,7 @@ export function fakeNativeCache(root: string): FakeNativeCache {
       if (isCurrent(have, { size: expectedBytes, md5: expectedMd5 })) {
         return { path: out, downloaded: false }
       }
+      if (!url) throw Object.assign(new Error(`Drive cache miss for ${file}`), { code: 'cacheMiss' })
       const res = await fetch(url, auth ? { headers: { Authorization: auth } } : undefined)
       if (!res.ok) throw new Error(`Drive download failed (${res.status}) for ${file}`)
       const bytes = Buffer.from(await res.arrayBuffer())
