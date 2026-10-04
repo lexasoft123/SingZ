@@ -1,3 +1,4 @@
+import { scoreCompletedTrainingTarget } from '../../../shared/training-completed-target'
 import { TrainingPitchContinuity } from '../../../shared/training-pitch-continuity'
 import {
   frequencyToFractionalMidi,
@@ -326,6 +327,10 @@ export class DesktopTrainingMicCapture {
   }
 
   get minConfidence(): number { return this.source.minConfidence ?? 0.75 }
+
+  scoreCompletedTarget(input: Parameters<typeof scoreCompletedTrainingTarget>[0], successfulHoldMs: number): ReturnType<typeof scoreCompletedTrainingTarget> {
+    return scoreCompletedTrainingTarget(input, successfulHoldMs)
+  }
 
   read(): TrainingPitchObservation {
     const frame = this.source.readInfo()

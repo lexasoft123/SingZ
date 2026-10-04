@@ -149,9 +149,11 @@ for (const chunk of [
 // accident. The budget now sits a deliberate ~1% above that measurement: a
 // real regression (a lazy chunk pulled into the entry is tens of kB) still
 // fails, and the next small addition is not a surprise at merge time.
-const ENTRY_RAW_BUDGET = 1_388_000
-// Immediate target-entry feedback adds a small call site; retain a bounded 1 kB allowance.
-const TRAINING_RAW_BUDGET = 81_000
+// Shared curriculum/hold scoring stays in the eager shell so primary/recovery
+// training routes retain disjoint lazy dependency graphs (~9 kB additional).
+const ENTRY_RAW_BUDGET = 1_405_000
+// Desktop programs, their seven-day path, and explicit interval-set controls.
+const TRAINING_RAW_BUDGET = 94_000
 const entryBytes = (await stat(resolve(assetsRoot, entryFile))).size
 const trainingBytes = await Promise.all(trainingChunks.map(async (file) =>
   (await stat(resolve(assetsRoot, file))).size

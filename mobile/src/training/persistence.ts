@@ -1,3 +1,5 @@
+import { restoreTrainingProgram, trainingProgramProgress, trainingPracticeStreak, type TrainingProgram } from './program'
+import { restoreIntervalPlan, intervalPlanDays, type IntervalPlan } from './interval-plan'
 import { getStoredText, setStoredText } from '../latency'
 import { MobileAudioPreferences } from '../audio/preferences'
 import {
@@ -16,6 +18,8 @@ import {
   clampSingleNotePitchWindow
 } from './runtime'
 
+const PROGRAM_KEY = 'singz.training.program'
+const INTERVAL_PLAN_KEY = 'singz.training.interval-plan'
 const PROFILE_KEY = 'singz.training.profile'
 const RECEIPTS_KEY = 'singz.training.receipts'
 const PITCH_WINDOW_KEY = 'singz.training.pitch-window'
@@ -37,6 +41,12 @@ export type TrainingPersistenceLoad =
  * preferences are delegated to MobileAudioPreferences instead of being
  * embedded in the training document. */
 export class MobileTrainingPersistence {
+  private _program: TrainingProgram | null = null
+  private desiredProgram: { value: TrainingProgram | null } | null = null
+  private programPump: Promise<void> | null = null
+  private _intervalPlan: IntervalPlan | null = null
+  private desiredIntervalPlan: { value: IntervalPlan | null } | null = null
+  private intervalPlanPump: Promise<void> | null = null
   private profile = defaultTrainingPreferences()
   private receipts: TrainingCompletionReceipt[] = []
   private ids = new Set<string>()
@@ -55,11 +65,13 @@ export class MobileTrainingPersistence {
   }
 
   async load(): Promise<TrainingPersistenceLoad> {
-    const [profileRaw, receiptsRaw, audioLoaded, pitchWindowRaw] = await Promise.all([
+    const [profileRaw, receiptsRaw, audioLoaded, pitchWindowRaw, intervalPlanRaw, programRaw] = await Promise.all([
       this.api.get(PROFILE_KEY),
       this.api.get(RECEIPTS_KEY),
       this.audioPreferences.load(),
-      this.api.get(PITCH_WINDOW_KEY)
+      this.api.get(PITCH_WINDOW_KEY),
+      this.api.get(INTERVAL_PLAN_KEY),
+      this.api.get(PROGRAM_KEY)
     ])
     const errors: string[] = []
     try {
@@ -86,10 +98,69 @@ export class MobileTrainingPersistence {
       this.pitchWindowCents = DEFAULT_SINGLE_NOTE_PITCH_WINDOW_CENTS
       errors.push(`Pitch window: ${message(error)}`)
     }
+    try { this._intervalPlan = restoreIntervalPlan(intervalPlanRaw === null ? null : JSON.parse(intervalPlanRaw)) }
+    catch (error) { this._intervalPlan = null; errors.push(`Interval plan: ${message(error)}`) }
+    try { this._program = restoreTrainingProgram(programRaw === null ? null : JSON.parse(programRaw)) }
+    catch (error) { this._program = null; errors.push(`Program: ${message(error)}`) }
     this.ids = new Set(this.receipts.map((receipt) => receipt.sessionId))
     const loaded = { progress: this.progress, referenceVolume: audioLoaded.preferences.referenceVolume, pitchWindowCents: this.pitchWindowCents }
     if (errors.length) return { ok: false, error: errors.join(' '), ...loaded }
     return { ok: true, ...loaded }
+  }
+
+  get program(): TrainingProgram | null { return this.desiredProgram ? this.desiredProgram.value : this._program }
+  get practiceStreak(): number { return trainingPracticeStreak(this.receipts) }
+
+  get programProgress() { return this.program ? trainingProgramProgress(this.program, this.receipts) : [] }
+
+  saveProgram(value: TrainingProgram | null): void {
+    this._program = restoreTrainingProgram(value)
+    this.desiredProgram = { value: this._program }
+    if (!this.programPump) this.programPump = this.pumpProgram()
+  }
+
+  private async pumpProgram(): Promise<void> {
+    while (this.desiredProgram) {
+      const desired = this.desiredProgram
+      this.desiredProgram = null
+      try {
+        await this.api.set(PROGRAM_KEY, JSON.stringify(desired.value))
+        this._program = desired.value
+        this._error = null
+      } catch (error) {
+        if (!this.desiredProgram) this.desiredProgram = desired
+        this._error = message(error)
+        break
+      }
+    }
+    this.programPump = null
+  }
+
+  get intervalPlan(): IntervalPlan | null { return this.desiredIntervalPlan ? this.desiredIntervalPlan.value : this._intervalPlan }
+
+  get intervalDays() { return this.intervalPlan ? intervalPlanDays(this.intervalPlan, this.receipts) : [] }
+
+  saveIntervalPlan(value: IntervalPlan | null): void {
+    this._intervalPlan = restoreIntervalPlan(value)
+    this.desiredIntervalPlan = { value: this._intervalPlan }
+    if (!this.intervalPlanPump) this.intervalPlanPump = this.pumpIntervalPlan()
+  }
+
+  private async pumpIntervalPlan(): Promise<void> {
+    while (this.desiredIntervalPlan) {
+      const desired = this.desiredIntervalPlan
+      this.desiredIntervalPlan = null
+      try {
+        await this.api.set(INTERVAL_PLAN_KEY, JSON.stringify(desired.value))
+        this._intervalPlan = desired.value
+        this._error = null
+      } catch (error) {
+        if (!this.desiredIntervalPlan) this.desiredIntervalPlan = desired
+        this._error = message(error)
+        break
+      }
+    }
+    this.intervalPlanPump = null
   }
 
   get progress(): TrainingProgress {
@@ -130,13 +201,15 @@ export class MobileTrainingPersistence {
 
   async flush(): Promise<void> {
     this.retry()
-    while (this.profilePump || this.completionPump || this.pitchWindowPump) {
-      await Promise.all([this.profilePump, this.completionPump, this.pitchWindowPump].filter(Boolean))
+    while (this.profilePump || this.completionPump || this.pitchWindowPump || this.intervalPlanPump || this.programPump) {
+      await Promise.all([this.profilePump, this.completionPump, this.pitchWindowPump, this.intervalPlanPump, this.programPump].filter(Boolean))
     }
     await this.audioPreferences.flush()
   }
 
   retry(): void {
+    if (this.desiredProgram && !this.programPump) this.programPump = this.pumpProgram()
+    if (this.desiredIntervalPlan && !this.intervalPlanPump) this.intervalPlanPump = this.pumpIntervalPlan()
     if (this.desiredProfile && !this.profilePump) this.profilePump = this.pumpProfile()
     if (this.completionQueue.length && !this.completionPump) this.completionPump = this.pumpCompletions()
     this.audioPreferences.retry()

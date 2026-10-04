@@ -8,6 +8,28 @@
  * needed (button labels), so translate them as the bare word.
  */
 export const training = {
+  'training.program.intervalFocus': "Interval focus",
+  'training.program.growing': "Growing intervals",
+  'training.program.sets': "Interval sets",
+  'training.program.repetition': "Attempt {attempt} of 3",
+
+  'training.program.heading': "Your training program",
+  'training.program.foundation': "Foundation",
+  'training.program.developing': "Developing",
+  'training.program.advanced': "Advanced",
+  'training.program.choose': "Choose a program level. Each lesson takes seven practice days.",
+  'training.program.day': "Day {day} of 7",
+  'training.program.days': "{days} / 7 days practiced",
+  'training.program.start': "Start today’s lesson",
+  'training.program.again': "Practice again",
+  'training.program.complete': "Today’s lesson complete",
+  'training.program.finished': "Program complete",
+  'training.program.streak': "{days}-day streak",
+  'training.program.intervalSession': "Six interval sets · three attempts per set",
+  'training.program.path': "Full path",
+  'training.program.scaleLabel': "Whole scales",
+  'training.program.scaleDescription': "Hear and sing the whole key, one note at a time.",
+
   // ── exercise picker (home) ──
   'training.exercise.note.label': 'Match a note',
   'training.exercise.note.description': 'Hear one note, then settle your voice onto it.',

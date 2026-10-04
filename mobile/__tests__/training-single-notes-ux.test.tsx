@@ -105,7 +105,8 @@ test.each([
   expect(text).toContain(title)
   expect(text).toContain('PracticeImitate')
   expect(text).toContain(option)
-  expect(text).toContain('20 exercises')
+  expect(text).toContain(exercise === 'interval' ? '6 intervals' : '20 exercises')
+  if (exercise === 'interval') expect(text).toContain('18 attempts total')
   expect(text).toContain('REFERENCE SOUND')
   expect(text).toContain('80%')
   expect(text).toContain('PITCH WINDOW')
@@ -115,7 +116,7 @@ test.each([
   expect(tree.root.findByProps({ accessibilityLabel: 'Reference sound volume' })).toBeTruthy()
 })
 
-test.each(['interval', 'chord-tone', 'arpeggio'] as const)('%s vocal practice uses the large guided tuner and swipe deck', async (exercise) => {
+test.each(['interval', 'chord-tone', 'arpeggio', 'scale'] as const)('%s vocal practice uses the large guided tuner and swipe deck', async (exercise) => {
   let state = initialTrainingState(defaultTrainingPreferences())
   state = mobileTrainingReducer(state, { type: 'change-setup', patch: { exercise, taskMode: 'imitate', length: 2 } })
   state = mobileTrainingReducer(state, { type: 'start', seed: `guided-${exercise}` })
@@ -126,10 +127,10 @@ test.each(['interval', 'chord-tone', 'arpeggio'] as const)('%s vocal practice us
       <TrainingSessionView state={state} liveMidi={null} activeTarget={0} onBegin={jest.fn()} onIdentify={jest.fn()} onNext={jest.fn()} onExit={jest.fn()} onBackToSong={null} />
     )
   })
-  expect(tree.root.findByProps({ testID: 'single-note-target-area' })).toBeTruthy()
-  expect(tree.root.findByProps({ accessibilityLabel: `Target note ${prompt.targets[0].noteName}` })).toBeTruthy()
+  expect(tree.root.findByProps({ testID: 'training-lesson-overview' })).toBeTruthy()
+  expect(nodeText(tree.root)).toContain(prompt.targets[0].noteName)
   expect(tree.root.findByProps({ testID: 'training-swipe-surface' })).toBeTruthy()
-  if (prompt.targets.length > 1) expect(tree.root.findByProps({ accessibilityLabel: `Note 1 of ${prompt.targets.length}` })).toBeTruthy()
+  if (prompt.targets.length > 1) expect(tree.root.findAllByProps({ testID: 'training-current-note' }).filter(node => node.type === View)).toHaveLength(1)
 
   state = mobileTrainingReducer(state, { type: 'activate' })
   state = mobileTrainingReducer(state, { type: 'cue-complete' })
@@ -140,7 +141,7 @@ test.each(['interval', 'chord-tone', 'arpeggio'] as const)('%s vocal practice us
     )
   })
   expect(nodeText(tree.root)).toContain('FLAT±10¢SHARP')
-  expect(tree.root.findByProps({ accessibilityLabel: `Target note ${prompt.targets[nextTarget].noteName}` })).toBeTruthy()
+  expect(nodeText(tree.root)).toContain(prompt.targets[nextTarget].noteName)
   expect(tree.root.findByProps({ accessibilityLabel: 'Hear again' })).toBeTruthy()
   expect(tree.root.findByProps({ accessibilityLabel: 'Skip' })).toBeTruthy()
 })
@@ -156,16 +157,13 @@ test('single-note practice makes the target dominant and exposes a full tuner re
       <TrainingSessionView state={state} liveMidi={null} activeTarget={0} onBegin={jest.fn()} onIdentify={jest.fn()} onNext={jest.fn()} onExit={jest.fn()} onBackToSong={null} />
     )
   })
-  expect(nodeText(tree.root)).toContain('Preparing next note')
+  expect(nodeText(tree.root)).toContain('Preparing')
   expect(nodeText(tree.root)).not.toContain('Hear note')
   expect(nodeText(tree.root)).not.toContain(`Match ${target.noteName}`)
   const targetArea = tree.root.findAllByProps({ testID: 'single-note-target-area' }).find((node) => node.type === View)
   const targetAreaStyle = StyleSheet.flatten(targetArea?.props.style)
-  expect(targetAreaStyle).toEqual(expect.objectContaining({ height: 222, paddingTop: 18 }))
-  const targetLockup = tree.root.findByProps({ accessibilityLabel: `Target note ${target.noteName}` })
-  expect(targetLockup).toBeTruthy()
-  expect(StyleSheet.flatten(targetLockup.findAllByType('Text' as never)[0].props.style)).toEqual(expect.objectContaining({ textAlign: 'center', left: 0, right: 0 }))
-  expect(targetLockup.findAllByType('Text' as never)[1].props.style).toEqual(expect.arrayContaining([expect.objectContaining({ position: 'absolute', left: '50%' })]))
+  expect(nodeText(tree.root)).toContain(`Sing ${target.noteName}.`)
+  expect(tree.root.findByProps({ testID: 'training-lesson-overview' })).toBeTruthy()
 
   state = mobileTrainingReducer(state, { type: 'activate' })
   await ReactTestRenderer.act(() => {
@@ -173,8 +171,8 @@ test('single-note practice makes the target dominant and exposes a full tuner re
       <TrainingSessionView state={state} liveMidi={null} singleNoteCountdown={3} activeTarget={0} onBegin={jest.fn()} onIdentify={jest.fn()} onNext={jest.fn()} onExit={jest.fn()} onBackToSong={null} />
     )
   })
-  expect(nodeText(tree.root)).toContain('SING IN3Listen to the reference note')
-  expect(tree.root.findByProps({ accessibilityLabel: 'Sing in 3' })).toBeTruthy()
+  expect(nodeText(tree.root)).toContain(`Hear ${target.noteName}`)
+  expect(nodeText(tree.root)).toContain('FLAT±10¢SHARP')
   expect(StyleSheet.flatten(tree.root.findAllByProps({ testID: 'single-note-target-area' }).find((node) => node.type === View)?.props.style)).toEqual(targetAreaStyle)
 
   state = mobileTrainingReducer(state, { type: 'cue-complete' })
@@ -257,4 +255,39 @@ test('the meter names which way the microphone is failing instead of waiting for
   expect(tooQuiet).toContain('Too quiet to hear')
   expect(tooQuiet).toContain('Sing a little louder')
   expect(tooQuiet).not.toContain('Waiting for your voice')
+})
+
+test.each([0, 1, 2, 3, 17])('interval counter counts sets independently of repeats (attempt %i)', async index => {
+  let state = mobileTrainingReducer(initialTrainingState(defaultTrainingPreferences()), { type: 'change-setup', patch: { exercise: 'interval', taskMode: 'imitate', length: 6 } })
+  state = mobileTrainingReducer(state, { type: 'start', seed: 'interval-counter' })
+  state = { ...state, session: { ...state.session!, currentIndex: index } }
+  let tree!: ReactTestRenderer.ReactTestRenderer
+  await ReactTestRenderer.act(() => {
+    tree = ReactTestRenderer.create(<TrainingSessionView state={state} liveMidi={null} activeTarget={0} onBegin={jest.fn()} onIdentify={jest.fn()} onNext={jest.fn()} onExit={jest.fn()} onBackToSong={null} />)
+  })
+  expect(nodeText(tree.root)).toContain(`${Math.floor(index / 3) + 1} / 6`)
+  expect(nodeText(tree.root)).toMatch(new RegExp(`Repeat ${index % 3 + 1} Of 3`, 'i'))
+  await ReactTestRenderer.act(() => tree.unmount())
+})
+
+test('interval plan uses a compact selector and closes after choosing a focused interval', async () => {
+  const initial = mobileTrainingReducer(initialTrainingState(defaultTrainingPreferences()), { type: 'choose-exercise', exercise: 'interval' }).setup
+  let current = initial
+  const onChange = jest.fn((patch) => { current = { ...current, ...patch }; tree.update(render()) })
+  const render = () => <TrainingSetup setup={current} error={null} referenceVolume={0.65} pitchWindowCents={15} testingReferenceTone={false} onReferenceVolumeChange={jest.fn()} onPitchWindowChange={jest.fn()} onTestReferenceTone={jest.fn()} onChange={onChange} onStart={jest.fn()} onBack={jest.fn()} />
+  let tree!: ReactTestRenderer.ReactTestRenderer
+  await ReactTestRenderer.act(() => { tree = ReactTestRenderer.create(render()) })
+  expect(nodeText(tree.root)).toContain('Small to large, with different starting notes.')
+  expect(nodeText(tree.root)).not.toContain('Perfect octave')
+  await ReactTestRenderer.act(() => button(tree, 'One interval').props.onPress())
+  expect(current.intervalSemitones).toBe(4)
+  await ReactTestRenderer.act(() => tree.root.findAll(node => node.props.accessibilityRole === 'button' && node.props.accessibilityLabel?.startsWith('This week’s interval:'))[0].props.onPress())
+  expect(nodeText(tree.root)).toContain('Perfect octave')
+  await ReactTestRenderer.act(() => button(tree, 'Perfect fifth').props.onPress())
+  expect(current.intervalSemitones).toBe(7)
+  expect(nodeText(tree.root)).not.toContain('Perfect octave')
+  expect(nodeText(tree.root)).toContain('Daily accuracy is saved in Progress.')
+  await ReactTestRenderer.act(() => button(tree, 'Growing').props.onPress())
+  expect(current.intervalSemitones).toBeUndefined()
+  await ReactTestRenderer.act(() => tree.unmount())
 })

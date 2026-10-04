@@ -1036,7 +1036,9 @@ describe('desktop vocal-training orchestration', () => {
     expect(html).toContain('Arpeggios')
     expect(html).toContain('Mixed practice')
     expect(html).toContain('Microphone audio is analysed live and is never saved.')
-    expect((html.match(/<button/g) ?? [])).toHaveLength(7)
+    expect(html).toContain('Whole scales')
+    expect(html).toContain('Your training program')
+    expect(html).toContain('Foundation')
   })
 
   it('abandons active training and clears song identity before a new song load', () => {

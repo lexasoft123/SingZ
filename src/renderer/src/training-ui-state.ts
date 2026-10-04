@@ -1,3 +1,9 @@
+export {
+  programLessonSetup, restoreTrainingProgram, selectTrainingProgramLevel,
+  trainingProgramProgress, trainingPracticeStreak,
+  type TrainingProgram, type ProgramLesson, type TrainingLevel
+} from '../../shared/training-program'
+import { programLessonSetup, type ProgramLesson } from '../../shared/training-program'
 import {
   abandonTrainingSession,
   createTrainingSession,
@@ -115,6 +121,8 @@ export interface DesktopTrainingSetup {
   readonly length: number
   readonly lowMidi: number
   readonly highMidi: number
+  readonly intervalSemitones?: number
+  readonly scalePresentation?: 'guided' | 'phrase'
   readonly intervalSizes: readonly number[]
   readonly chordDegrees: readonly number[]
   readonly mixedKinds?: readonly TrainingExerciseKind[]
@@ -159,6 +167,7 @@ export const INITIAL_DESKTOP_TRAINING_STATE: Readonly<DesktopTrainingState> = Ob
 
 export type DesktopTrainingAction =
   | { readonly type: 'choose-exercise'; readonly exercise: TrainingExerciseSelection }
+  | { readonly type: 'choose-program-lesson'; readonly lesson: ProgramLesson; readonly day: number }
   | { readonly type: 'update-setup'; readonly patch: Partial<DesktopTrainingSetup> }
   | { readonly type: 'start-session'; readonly seed: string | number }
   | {
@@ -193,6 +202,13 @@ export function desktopTrainingReducer(
   action: DesktopTrainingAction
 ): DesktopTrainingState {
   switch (action.type) {
+    case 'choose-program-lesson':
+      return {
+        ...state, route: 'setup',
+        setup: { ...state.setup, ...programLessonSetup(action.lesson, action.day, state.setup) },
+        session: null, error: null, preparation: null,
+        exercisePhase: 'ready', acknowledgementPromptId: null, interrupted: false
+      }
     case 'choose-exercise':
       return {
         ...state,
@@ -200,7 +216,7 @@ export function desktopTrainingReducer(
         setup: {
           ...state.setup,
           exercise: action.exercise,
-          taskMode: action.exercise === 'note' ? 'imitate' : state.setup.taskMode,
+          taskMode: action.exercise === 'note' || action.exercise === 'scale' ? 'imitate' : state.setup.taskMode,
           mixedKinds: undefined
         },
         error: null,
@@ -350,7 +366,9 @@ export function trainingConfigFromSetup(
     range: { lowMidi: setup.lowMidi, highMidi: setup.highMidi },
     exercise: setup.exercise,
     taskMode: setup.taskMode,
-    length: setup.length,
+    length: setup.length * (setup.exercise === 'interval' && setup.taskMode === 'imitate' ? 3 : 1),
+    intervalSemitones: setup.exercise === 'interval' ? setup.intervalSemitones : undefined,
+    scalePresentation: setup.scalePresentation,
     seed,
     direction: setup.direction,
     intervalSizes: setup.intervalSizes,
@@ -528,6 +546,8 @@ export function identifyAnswerOptions(prompt: TrainingPrompt): IdentifyAnswerOpt
         label: titleCase(chordRoleWord(role)),
         answer: { kind: 'chord-tone' as const, role }
       }))
+    case 'scale':
+      return []
     case 'arpeggio':
       return diatonicTriads(prompt.key, 'harmonic-dominant').map((chord) => ({
         label: t('training.identify.degreeLabel', { n: chord.scaleDegree }),
@@ -568,6 +588,8 @@ export function trainingPromptKindLabel(prompt: TrainingPrompt, revealAnswer: bo
         : intervalLabel(prompt.intervalName)
     case 'chord-tone':
       return chordNameText(prompt.chord)
+    case 'scale':
+      return t('training.exercise.scaleDegree.label')
     case 'arpeggio':
       return t('training.label.arpeggioOf', { chord: chordNameText(prompt.chord) })
   }
@@ -590,6 +612,8 @@ export function identifyAnswerReveal(prompt: TrainingPrompt): string | null {
         role: chordRoleWord(prompt.role),
         chord: chordNameText(prompt.chord)
       })
+    case 'scale':
+      return null
     case 'arpeggio':
       return t('training.identify.answerArpeggio', {
         degree: prompt.chord.scaleDegree,

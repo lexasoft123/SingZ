@@ -1,5 +1,6 @@
 import { NativeEventEmitter, NativeModules } from 'react-native'
 import { AudioManager } from 'react-native-audio-api'
+import { log } from './log'
 
 type Permission = 'Undetermined' | 'Denied' | 'Granted'
 
@@ -224,6 +225,7 @@ export class IosAudioInputSessionCoordinator {
         throw new Error('The iOS audio input channel must be a non-negative integer')
       const minimumChannels = channel + 1
 
+      log('mic', 'iOS acquisition · checking recording permission')
       let permission = await this.owner.checkRecordingPermissions()
       if (permission === 'Undetermined' && options.requestPermission)
         permission = await this.owner.requestRecordingPermissions()
@@ -247,9 +249,13 @@ export class IosAudioInputSessionCoordinator {
         // RNAudioAPI applies changed options with error:nil when its cached
         // session is active. Deactivate first so reactivation reports failure.
         transitionStarted = true
+        log('mic', 'iOS acquisition · deactivating playback')
         await this.owner.setAudioSessionActivity(false)
+        log('mic', 'iOS acquisition · configuring capture')
         this.owner.setAudioSessionOptions(captureSession)
+        log('mic', 'iOS acquisition · activating capture')
         await this.owner.setAudioSessionActivity(true)
+        log('mic', 'iOS acquisition · selecting input')
 
         const devices = await this.owner.getDevicesInfo()
         context.previousInput = devices.currentInputs[0]?.id
@@ -260,6 +266,7 @@ export class IosAudioInputSessionCoordinator {
           await this.owner.setInputDevice(context.selectedInput)
 
         const portableUid = portableDeviceUid(context.selectedInput)
+        log('mic', `iOS acquisition · preparing ${portableUid}`)
         const prepared = await this.native.prepareCapturePreferences(
           portableUid,
           minimumChannels,
@@ -278,8 +285,10 @@ export class IosAudioInputSessionCoordinator {
           minimumChannels
         )
         context.captureStopped = false
+        log('mic', `iOS acquisition · capture started generation ${context.captureGeneration}`)
         this.state = { kind: 'active', context }
       } catch (acquisitionError) {
+        log('mic', `iOS acquisition failed · ${errorMessage(acquisitionError)}`, 'error')
         if (!transitionStarted) throw acquisitionError
         try {
           await this.restore(context)

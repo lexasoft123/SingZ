@@ -5,8 +5,8 @@ import { basename, dirname, join } from 'node:path'
 import { defaultTrainingPreferences, deriveTrainingProgress, restoreTrainingCompletionReceipt, restoreTrainingPreferences, TRAINING_RECEIPT_MAX_BYTES, type TrainingCompletionReceipt, type TrainingPreferences, type TrainingProgress } from '../shared/training-progress'
 import { fsyncDirectorySync, writeAllSync } from './atomic-file'
 
-export type TrainingLoadResult={ok:true;progress:TrainingProgress}|{ok:false;error:string}
-export type TrainingRecordResult={ok:true;progress:TrainingProgress;alreadyRecorded:boolean}|{ok:false;error:string}
+export type TrainingLoadResult={ok:true;progress:TrainingProgress;receipts:TrainingCompletionReceipt[]}|{ok:false;error:string}
+export type TrainingRecordResult={ok:true;progress:TrainingProgress;receipts:TrainingCompletionReceipt[];alreadyRecorded:boolean}|{ok:false;error:string}
 export type TrainingPreferenceSaveResult={ok:true;preferences:TrainingPreferences}|{ok:false;error:string}
 export interface ReceiptStoreOps { mkdirSync:typeof mkdirSync; opendirSync:typeof opendirSync; statSync:typeof statSync; readFileSync:typeof readFileSync; openSync:typeof openSync; writeSync:typeof writeSync; fsyncSync:typeof fsyncSync; closeSync:typeof closeSync; linkSync:typeof linkSync; unlinkSync:typeof unlinkSync }
 const OPS:ReceiptStoreOps={mkdirSync,opendirSync,statSync,readFileSync,openSync,writeSync,fsyncSync,closeSync,linkSync,unlinkSync}
@@ -25,7 +25,7 @@ function preferencesFile():string{return join(app.getPath('userData'),'training-
 function receiptsDir():string{return join(app.getPath('userData'),'training-receipts')}
 export function loadTrainingProgress():TrainingLoadResult{
   const stored=readTrainingPreferencesFile(preferencesFile());if(!stored.ok)return{ok:false,error:`Could not read training preferences: ${stored.error}`}
-  try{return{ok:true,progress:loadTrainingProgressFrom(receiptsDir(),stored.preferences)}}
+  try{const receipts=loadTrainingReceiptsFrom(receiptsDir());return{ok:true,progress:deriveTrainingProgress(stored.preferences,receipts),receipts}}
   catch(error){return{ok:false,error:message(error)}}
 }
 export function saveTrainingPreferences(raw:unknown):TrainingPreferenceSaveResult{
@@ -36,7 +36,7 @@ export function recordTrainingCompletion(raw:unknown):TrainingRecordResult{
     const receipt=restoreTrainingCompletionReceipt(raw)
     const alreadyRecorded=recordTrainingReceipt(receiptsDir(),receipt)
     const loaded=loadTrainingProgress();if(!loaded.ok)return loaded
-    return{ok:true,progress:loaded.progress,alreadyRecorded}
+    return{ok:true,progress:loaded.progress,receipts:loaded.receipts,alreadyRecorded}
   }catch(error){return{ok:false,error:message(error)}}
 }
 
@@ -107,6 +107,10 @@ function escapeRegex(value:string):string{return value.replace(/[.*+?^${}()|[\]\
 
 export function loadTrainingProgressFrom(dir:string,preferences:TrainingPreferences,ops:ReceiptStoreOps=OPS):TrainingProgress{
   const profile=restoreTrainingPreferences(preferences)
+  return deriveTrainingProgress(profile,loadTrainingReceiptsFrom(dir,ops))
+}
+
+export function loadTrainingReceiptsFrom(dir:string,ops:ReceiptStoreOps=OPS):TrainingCompletionReceipt[]{
   try{ops.mkdirSync(dir,{recursive:true})}catch(error){throw new Error(`Could not open training history: ${message(error)}`)}
   sweepDeadTemps(dir,ops)
   function* receipts():Generator<TrainingCompletionReceipt>{
@@ -123,7 +127,7 @@ export function loadTrainingProgressFrom(dir:string,preferences:TrainingPreferen
       yield receipt
     }}finally{directory.closeSync()}
   }
-  return deriveTrainingProgress(profile,receipts())
+  return [...receipts()]
 }
 
 /** Writes and fsyncs a private temp, then hard-links it to the exclusive final

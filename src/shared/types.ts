@@ -1479,10 +1479,10 @@ export interface SingzApi {
   /** A later verdict: glass taken back when Chromium falls to software compositing. */
   onGlassVerdict(cb: (verdict: GlassVerdict) => void): () => void
   /** Main-owned app-level profile/history. Completion receipts never contain song paths or raw observations. */
-  loadTrainingProgress(): Promise<{ok:true;progress:TrainingProgress}|{ok:false;error:string}>
+  loadTrainingProgress(): Promise<{ok:true;progress:TrainingProgress;receipts?:TrainingCompletionReceipt[]}|{ok:false;error:string}>
   saveTrainingPreferences(preferences:TrainingPreferences):Promise<{ok:true;preferences:TrainingPreferences}|{ok:false;error:string}>
   saveTrainingPreferencesSync(preferences:TrainingPreferences):{ok:true;preferences:TrainingPreferences}|{ok:false;error:string}
-  recordTrainingCompletion(receipt:TrainingCompletionReceipt):Promise<{ok:true;progress:TrainingProgress;alreadyRecorded:boolean}|{ok:false;error:string}>
+  recordTrainingCompletion(receipt:TrainingCompletionReceipt):Promise<{ok:true;progress:TrainingProgress;receipts?:TrainingCompletionReceipt[];alreadyRecorded:boolean}|{ok:false;error:string}>
   /**
    * Save the current song + stems + lyrics + settings. A loose song lands in a
    * new folder under the library root; a song already inside a project folder

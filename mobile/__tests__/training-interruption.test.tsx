@@ -31,6 +31,12 @@ jest.mock('../src/training/persistence', () => {
     MobileTrainingPersistence: class {
       progress = emptyTrainingProgress()
       error = null
+      program = null
+      programProgress = []
+      intervalPlan = null
+      intervalDays = []
+      saveProgram = jest.fn()
+      saveIntervalPlan = jest.fn()
       load = jest.fn(async () => ({ ok: true as const, progress: this.progress, referenceVolume: 0.65, pitchWindowCents: 10 }))
       savePreferences = jest.fn()
       saveReferenceVolume = jest.fn()
@@ -97,7 +103,7 @@ test('the production Skip path completes a session without scoring audio or rece
     cancelTrainingCues: jest.fn(),
     playTrainingLatch: jest.fn(async () => ({ ok: true as const, endsAt: 0 })),
     setTrainingCueVolume: jest.fn(),
-    playTrainingCues: jest.fn(async () => ({ ok: true as const, endsAt: 1 }))
+    playTrainingCues: jest.fn(async () => ({ ok: true as const, startsAt: 1, endsAt: 1 }))
   } as unknown as MultitrackEngine
   let tree!: ReactTestRenderer.ReactTestRenderer
   await ReactTestRenderer.act(async () => {
@@ -163,8 +169,8 @@ test('the production Skip path completes a session without scoring audio or rece
 })
 
 test('recorder error mid-cue cancels the run and no late cue completion records a result', async () => {
-  let finishCue!: (value: { ok: true; endsAt: number }) => void
-  const cue = new Promise<{ ok: true; endsAt: number }>((done) => { finishCue = done })
+  let finishCue!: (value: { ok: true; startsAt: number; endsAt: number }) => void
+  const cue = new Promise<{ ok: true; startsAt: number; endsAt: number }>((done) => { finishCue = done })
   const engine = {
     trainingCurrentTime: 1,
     outputDisplayLatency: 0,
@@ -184,7 +190,7 @@ test('recorder error mid-cue cancels the run and no late cue completion records 
 
   await openSingleNotePrompt(tree)
   await ReactTestRenderer.act(async () => { await Promise.resolve(); await Promise.resolve() })
-  expect(allText(tree)).toContain('SING IN')
+  expect(allText(tree)).toContain('Listen now')
 
   const onError = (globalThis as unknown as { trainingMicError: (error: string) => void }).trainingMicError
   ReactTestRenderer.act(() => onError('Input route disappeared.'))
@@ -195,7 +201,7 @@ test('recorder error mid-cue cancels the run and no late cue completion records 
   expect(button(tree, 'Start')).toBeTruthy()
   expect(allText(tree)).not.toContain('Preparing')
 
-  finishCue({ ok: true, endsAt: 1 })
+  finishCue({ ok: true, startsAt: 1, endsAt: 1 })
   await ReactTestRenderer.act(async () => { await cue; await Promise.resolve() })
   expect(allText(tree)).not.toContain('Correct')
   expect(allText(tree)).not.toContain('Next note')
@@ -219,7 +225,7 @@ test('a call interruption exposes an intentional Start control and never reopens
     cancelTrainingCues: jest.fn(),
     playTrainingLatch: jest.fn(async () => ({ ok: true as const, endsAt: 0 })),
     setTrainingCueVolume: jest.fn(),
-    playTrainingCues: jest.fn(async () => ({ ok: true as const, endsAt: 1 }))
+    playTrainingCues: jest.fn(async () => ({ ok: true as const, startsAt: 1, endsAt: 1 }))
   } as unknown as MultitrackEngine
   let tree!: ReactTestRenderer.ReactTestRenderer
   await ReactTestRenderer.act(async () => {
@@ -332,7 +338,7 @@ test('an inactive render cannot adopt a deferred microphone start before passive
     cancelTrainingCues: jest.fn(),
     playTrainingLatch: jest.fn(async () => ({ ok: true as const, endsAt: 0 })),
     setTrainingCueVolume: jest.fn(),
-    playTrainingCues: jest.fn(async () => ({ ok: true as const, endsAt: 1 }))
+    playTrainingCues: jest.fn(async () => ({ ok: true as const, startsAt: 1, endsAt: 1 }))
   } as unknown as MultitrackEngine
   const onBackToSong = jest.fn()
   let tree!: ReactTestRenderer.ReactTestRenderer
@@ -366,8 +372,8 @@ test('an inactive render cannot adopt a deferred microphone start before passive
 
 test('an inactive render cannot adopt a deferred cue completion before passive cleanup', async () => {
   const appListener = jest.spyOn(AppState, 'addEventListener').mockReturnValue({ remove: jest.fn() })
-  let finishCue!: (value: { ok: true; endsAt: number }) => void
-  const cue = new Promise<{ ok: true; endsAt: number }>((done) => { finishCue = done })
+  let finishCue!: (value: { ok: true; startsAt: number; endsAt: number }) => void
+  const cue = new Promise<{ ok: true; startsAt: number; endsAt: number }>((done) => { finishCue = done })
   const engine = {
     trainingCurrentTime: 1,
     outputDisplayLatency: 0,
@@ -387,7 +393,7 @@ test('an inactive render cannot adopt a deferred cue completion before passive c
   })
   await openSingleNotePrompt(tree)
   await ReactTestRenderer.act(async () => { await Promise.resolve(); await Promise.resolve() })
-  expect(allText(tree)).toContain('SING IN')
+  expect(allText(tree)).toContain('Listen now')
 
   ReactTestRenderer.act(() => {
     flushRender(tree, () => {
@@ -395,7 +401,7 @@ test('an inactive render cannot adopt a deferred cue completion before passive c
     })
   })
   await ReactTestRenderer.act(async () => {
-    finishCue({ ok: true, endsAt: 1 })
+    finishCue({ ok: true, startsAt: 1, endsAt: 1 })
     await cue
     await Promise.resolve()
   })
@@ -414,7 +420,7 @@ test('live microphone readings update the meter without rebuilding the target or
     trainingCurrentTime: 1, outputDisplayLatency: 0,
     pause: jest.fn(), cancelTrainingCues: jest.fn(),
     playTrainingLatch: jest.fn(async () => ({ ok: true as const, endsAt: 0 })), setTrainingCueVolume: jest.fn(),
-    playTrainingCues: jest.fn(async () => ({ ok: true as const, endsAt: 1 }))
+    playTrainingCues: jest.fn(async () => ({ ok: true as const, startsAt: 1, endsAt: 1 }))
   } as unknown as MultitrackEngine
   let tree!: ReactTestRenderer.ReactTestRenderer
   await ReactTestRenderer.act(async () => {

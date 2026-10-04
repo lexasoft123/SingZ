@@ -1,6 +1,6 @@
 import type { TrainingCompletionReceipt, TrainingPreferences, TrainingProgress } from '../../shared/training-progress'
 
-type CompletionResult={ok:true;progress:TrainingProgress;alreadyRecorded?:boolean}|{ok:false;error:string}
+type CompletionResult={ok:true;progress:TrainingProgress;receipts?:TrainingCompletionReceipt[];alreadyRecorded?:boolean}|{ok:false;error:string}
 type PreferenceResult={ok:true;preferences:TrainingPreferences}|{ok:false;error:string}
 
 /** Completions have an independent high-priority lane: a failed/slow preference
@@ -16,7 +16,7 @@ export class TrainingProgressMutations {
   private latestPreference:TrainingPreferences|null=null
   private preferenceError:string|null=null
   private completionError:string|null=null
-  constructor(private readonly api:{savePreferences:(value:TrainingPreferences)=>Promise<PreferenceResult>;recordCompletion:(value:TrainingCompletionReceipt)=>Promise<CompletionResult>},private readonly onProgress:(progress:TrainingProgress)=>void,private readonly onPreferences:(preferences:TrainingPreferences)=>void,private readonly onError:(error:string|null)=>void){}
+  constructor(private readonly api:{savePreferences:(value:TrainingPreferences)=>Promise<PreferenceResult>;recordCompletion:(value:TrainingCompletionReceipt)=>Promise<CompletionResult>},private readonly onProgress:(progress:TrainingProgress,receipts?:TrainingCompletionReceipt[])=>void,private readonly onPreferences:(preferences:TrainingPreferences)=>void,private readonly onError:(error:string|null)=>void){}
 
   markLoaded(progress:TrainingProgress):void{this.savedPreferenceFingerprint=JSON.stringify(progress.profile)}
   savePreferences(value:TrainingPreferences):void{
@@ -57,7 +57,7 @@ export class TrainingProgressMutations {
       while(this.completions.length){
         const receipt=this.completions[0],result=await safe(()=>this.api.recordCompletion(receipt))
         if(!result.ok){this.completionError=result.error;this.emitError();return}
-        this.completions.shift();this.completionKeys.delete(receipt.sessionId);this.completionError=null;this.onProgress(result.progress);this.emitError()
+        this.completions.shift();this.completionKeys.delete(receipt.sessionId);this.completionError=null;this.onProgress(result.progress,result.receipts);this.emitError()
       }
     }finally{this.completionRunning=false}
   }

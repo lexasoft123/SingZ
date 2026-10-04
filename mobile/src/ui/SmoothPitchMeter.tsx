@@ -48,25 +48,24 @@ export const SmoothPitchMeter = React.memo(function SmoothPitchMeter(props: Pitc
       </GlassSurface>
       <View style={s.livePitchRow}><View><Text style={[s.livePitchLabel, { color: theme.dim }]}>{L.youAreSinging.toLocaleUpperCase()}</Text><Text accessibilityLiveRegion="polite" style={[s.livePitchNote, { color: theme.text }]}>{props.detectedNote ?? '—'}</Text></View><Text style={[s.meterReading, { color: theme.text }]}>{props.reading}</Text></View>
       <View accessibilityLabel={L.progress(props.instruction, Math.round(props.progress * 100))} style={[s.progressTrack, { backgroundColor: theme.line }]}><Animated.View style={[s.progressFill, { width: '100%', transform: [{ translateX: fillTranslation }, { scaleX: progress }], backgroundColor: theme.accent }]} /></View>
-      <Text accessibilityLiveRegion="polite" style={[s.meterInstruction, { color: props.centered ? theme.accent : theme.dim }]}>{props.instruction}</Text>
       <Text style={[s.meterHint, { color: theme.dim }]}>{props.hint}</Text>
     </View>
   )
 })
 
 const s = StyleSheet.create({
-  meterWrap: { flex: 1, width: '100%', justifyContent: 'center', gap: 7, paddingBottom: 4 },
+  meterWrap: { flex: 1, width: '100%', justifyContent: 'center', gap: 5, paddingBottom: 4 },
   meterLabels: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 8 },
-  meterEdge: { fontSize: 10, fontWeight: '900', letterSpacing: 1.2 },
-  meterCenterLabel: { fontSize: 10, fontWeight: '900', letterSpacing: 1.2 },
-  meter: { width: '100%', height: 112, overflow: 'hidden' },
+  meterEdge: { fontSize: 12, fontWeight: '900', letterSpacing: 1.2 },
+  meterCenterLabel: { fontSize: 12, fontWeight: '900', letterSpacing: 1.2 },
+  meter: { width: '100%', height: 96, overflow: 'hidden' },
   targetZone: { position: 'absolute', top: 0, bottom: 0 },
   meterCenter: { position: 'absolute', left: '50%', top: 0, bottom: 0, width: 2 },
-  pitchMarker: { position: 'absolute', top: 41, width: 44, height: 44, marginLeft: -22, borderRadius: 22, borderWidth: 4, shadowOpacity: 0.75, shadowRadius: 14 },
-  livePitchRow: { minHeight: 58, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 10 },
-  livePitchLabel: { fontSize: 9, lineHeight: 12, fontWeight: '900', letterSpacing: 1.4 },
+  pitchMarker: { position: 'absolute', top: 26, width: 44, height: 44, marginLeft: -22, borderRadius: 22, borderWidth: 4, shadowOpacity: 0.75, shadowRadius: 14 },
+  livePitchRow: { minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 10 },
+  livePitchLabel: { fontSize: 11, lineHeight: 14, fontWeight: '900', letterSpacing: 1.4 },
   livePitchNote: { fontSize: 38, lineHeight: 42, fontWeight: '900', letterSpacing: -1 },
-  meterReading: { flex: 1, fontSize: 17, lineHeight: 24, fontWeight: '900', textAlign: 'right', marginLeft: 16 },
+  meterReading: { flex: 1, fontSize: 16, lineHeight: 21, fontWeight: '900', textAlign: 'right', marginLeft: 16 },
   progressTrack: { width: '100%', height: 8, borderRadius: 4, overflow: 'hidden' },
   progressFill: { height: '100%', borderRadius: 4 },
   meterInstruction: { fontSize: 18, lineHeight: 24, fontWeight: '900', textAlign: 'center', paddingHorizontal: 12 },
