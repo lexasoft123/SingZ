@@ -27,6 +27,13 @@ test('shared cache keys survive checkout paths and JS edits, but invalidate nati
     assert.notEqual(nativeInputs(first, cache, 'SDK one'), nativeInputs(first, cache, 'SDK two'), 'toolchain changes invalidate')
     const original = fingerprint(first)
     assert.equal(fingerprint(second), original, 'separate checkouts reuse the same native archive')
+    for (const directory of ['build', 'DerivedData', '.build']) {
+      write(first, `mobile/ios/${directory}/generated/Fake.h`, 'generated code one')
+      assert.equal(fingerprint(first), original, 'generated build artifacts are not native source inputs')
+      write(first, `mobile/ios/${directory}/generated/Fake.h`, 'generated code two')
+      assert.equal(fingerprint(first), original, 'archive outputs cannot invalidate the archive cache')
+    }
+    assert.equal(fingerprint(second), original, 'checkout without build outputs shares the native key')
     for (const [file, content] of [
       ['mobile/ios/SingzCore/compliance/NOTICE-FFMPEG.md', 'license notice'],
       ['mobile/ios/SingzCore/compliance/FFMPEG-SHA256SUMS', 'checksums'],

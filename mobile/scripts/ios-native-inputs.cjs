@@ -30,6 +30,7 @@ function nativeInputs(repo, cacheRoot = process.env.SINGZ_IOS_NATIVE_CACHE || pa
       const real = fs.realpathSync(file)
       if (visited.has(real)) return
       visited.add(real)
+      if (['mobile/ios/build', 'mobile/ios/DerivedData', 'mobile/ios/.build'].includes(relative)) return
       if (relative === 'mobile/ios/fastlane' || /(?:^|\/)\.cache(?:\/|$)/.test(relative)) return
       for (const entry of fs.readdirSync(file).sort()) walk(relative + '/' + entry)
     } else if (extensions.test(relative) || /\.framework\//.test(relative) ||
@@ -39,7 +40,7 @@ function nativeInputs(repo, cacheRoot = process.env.SINGZ_IOS_NATIVE_CACHE || pa
   for (const file of ['package.json', 'package-lock.json', 'mobile/package.json', 'mobile/package-lock.json', 'mobile/react-native.config.js', 'mobile/ios/Podfile', 'mobile/ios/Podfile.lock', 'mobile/ios/.xcode.env', 'mobile/ios/.xcode.env.local']) {
     if (fs.existsSync(path.join(repo, file))) files.push(file)
   }
-  const hash = crypto.createHash('sha256').update('singz-native-archive-v3\n').update(toolchain).update('\n')
+  const hash = crypto.createHash('sha256').update('singz-native-archive-v4\n').update(toolchain).update('\n')
   for (const relative of [...new Set(files)].sort()) {
     const file = path.join(repo, relative)
     const stat = fs.lstatSync(file)
