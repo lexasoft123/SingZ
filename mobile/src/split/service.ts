@@ -114,7 +114,12 @@ export const SPLIT_ENGINE_HELD_COPY = t('phone.library.splitEngineHeldCopy')
  *  until the app restarts (SingzSplitRunner armWatchdog), so a new start is
  *  refused — and discarding it would wipe the tail the restart resumes from.
  *  Every other failure has already let go. */
-export function failedJobHoldsEngine(error: string, platform: string): boolean {
+export function failedJobHoldsEngine(
+  error: string,
+  platform: string,
+  owner?: Pick<SplitJobEvidence, 'sessionId' | 'currentSessionId'>
+): boolean {
+  if (owner?.sessionId && owner.currentSessionId && owner.sessionId !== owner.currentSessionId) return false
   return platform === 'ios' && /^Splitting stalled/.test(error)
 }
 

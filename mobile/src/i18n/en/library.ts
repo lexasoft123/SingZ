@@ -100,9 +100,6 @@ export const library = {
   // {name} is the song's title
   'phone.library.splitInto': 'Split {name} into stems',
   'phone.library.notSplitYet': 'not split yet',
-  // shown on a failed-split card whose song has failed twice on this phone
-  'phone.library.keepsFailingCopy':
-    'This song keeps failing on this phone. Add it on your computer instead — it will sync over ready to sing.',
   // shown when the failure looks like a bad file rather than a phone limit
   'phone.library.fileFailingCopy':
     "This phone couldn't read this song's file. Try another copy of it — or add it on your computer, and it will sync over ready to sing.",

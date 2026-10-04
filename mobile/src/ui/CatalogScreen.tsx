@@ -985,7 +985,7 @@ export default function CatalogScreen({
         started: boolean
       }
     | { phase: 'adopting'; project: string }
-    | { phase: 'failed'; project: string; error: string; attempts: number }
+    | { phase: 'failed'; project: string; error: string; attempts: number; sessionId?: string; currentSessionId?: string }
   const [splitUi, setSplitUi] = useState<SplitUi>(null)
   // The latest card, for the liveness poll: its timer closes over the render
   // that armed it, and `started` flips inside a run without re-arming.
@@ -1157,6 +1157,8 @@ export default function CatalogScreen({
       phase: 'failed',
       project: status.projectDir,
       error: status.error ?? fallbackError,
+      sessionId: status.sessionId,
+      currentSessionId: status.currentSessionId,
       attempts
     })
   }, [])
@@ -1394,20 +1396,45 @@ export default function CatalogScreen({
    *  song's Split behind a Resume/Discard card at the top of the list, which
    *  a singer on iPhone read as "the Split button does nothing" (field report,
    *  2026-09-23). The offer below says what starting another split costs the
-   *  failed one. The exception is an iOS STALL, which is recorded as failed
-   *  while the wedged job still holds the engine (see failedJobHoldsEngine). */
+   *  failed one. An iOS stall also leaves the button available; the offer
+   *  explains the held engine before touching its job files. */
   const splitBusyElsewhere = useCallback(
     (dir: string): boolean =>
       splitUi !== null &&
       splitUi.project !== dir &&
-      (splitUi.phase !== 'failed' || failedJobHoldsEngine(splitUi.error, Platform.OS)),
+      splitUi.phase !== 'failed',
     [splitUi]
+  )
+
+  // Resume must first ask the file what actually failed: a job that reached
+  // DONE and then died during ADOPTION only needs the adoption re-run —
+  // handing it back to the service would wipe six finished stems and split
+  // from scratch.
+  const resumeSplit = useCallback(
+    async (project: string): Promise<void> => {
+      const status = await splitStatus()
+      if (status?.state === 'done') void adoptDone(status)
+      else void startSplitFor(project, true)
+    },
+    [adoptDone, startSplitFor]
   )
 
   /** The one place the offer is worded. The card button and the long-press
    *  menu both come here, so they cannot drift apart. */
   const offerSplit = useCallback(
     (p: ProjectEntry) => {
+      if (splitUi?.phase === 'failed') {
+        // A stalled iOS worker still owns its files. Keep retry available,
+        // but explain the restart before clearing or replacing its job.
+        if (failedJobHoldsEngine(splitUi.error, Platform.OS, splitUi)) {
+          Alert.alert(t('phone.library.couldNotStartSplitTitle'), t('phone.library.splitEngineHeldCopy'))
+          return
+        }
+        if (splitUi.project === p.dir) {
+          void resumeSplit(p.dir)
+          return
+        }
+      }
       // One job slot on both platforms: starting this split replaces a failed
       // one elsewhere, and its resume point goes with it. Say so, and discard
       // it explicitly — a model download cancelled before the native start
@@ -1429,7 +1456,7 @@ export default function CatalogScreen({
         ]
       )
     },
-    [startSplitFor, splitUi, nameOf]
+    [startSplitFor, resumeSplit, splitUi, nameOf]
   )
 
   const discardSplit = useCallback(() => {
@@ -1438,19 +1465,6 @@ export default function CatalogScreen({
       .then(() => setSplitUi(null))
       .catch(() => setSplitUi(null))
   }, [])
-
-  // Resume must first ask the file what actually failed: a job that reached
-  // DONE and then died during ADOPTION only needs the adoption re-run —
-  // handing it back to the service would wipe six finished stems and split
-  // from scratch.
-  const resumeSplit = useCallback(
-    async (project: string): Promise<void> => {
-      const status = await splitStatus()
-      if (status?.state === 'done') void adoptDone(status)
-      else void startSplitFor(project, true)
-    },
-    [adoptDone, startSplitFor]
-  )
 
   /** Phone-library long-press: this phone owns these projects. */
   /** The delete confirm, shared by the ••• menu and the card's swipe —
@@ -1511,7 +1525,7 @@ export default function CatalogScreen({
               const stopJob = (): Promise<unknown> =>
                 job?.phase === 'model'
                   ? cancelModelDownload(SPLIT_MODEL.file)
-                  : job?.phase === 'failed' && !failedJobHoldsEngine(job.error, Platform.OS)
+                  : job?.phase === 'failed' && !failedJobHoldsEngine(job.error, Platform.OS, job)
                   ? clearSplitJob()
                   : cancelSplit().then(() => clearSplitJob())
               const dropJob =
@@ -2561,7 +2575,7 @@ export default function CatalogScreen({
                  job at 70% ends up reading "Starting…" at zero. The progress
                  card above it is already saying everything there is to say. */
                 action:
-                  canSplit(p) && splitUi?.project !== p.dir ? (
+                  canSplit(p) && (splitUi?.project !== p.dir || splitUi.phase === 'failed') ? (
                     <Pressable
                       hitSlop={10}
                       disabled={splitBusyElsewhere(p.dir)}
@@ -2575,8 +2589,8 @@ export default function CatalogScreen({
                         disabled: splitBusyElsewhere(p.dir)
                       }}
                       /* A failed split elsewhere no longer disables this —
-                     only one still working does (an iOS stall counts: it
-                     holds the engine until SingZ restarts). */
+                     only one still working does. A stalled iOS worker
+                     explains the required restart when tapped. */
                       accessibilityLabel={
                         splitBusyElsewhere(p.dir)
                           ? t('phone.library.splitUnavailableBusy')

@@ -331,12 +331,14 @@ CDP-eval during decode** (the Hermes-inspector segfault rule).
     and the job dir clear — and every step tolerates a crashed earlier
     attempt (a stem already moved counts as moved; the whole thing
     converges). `flow.ts` wraps gate → model → service kick and the
-    two-dead-resumes rule (failure counter keyed by src + job updatedAtMs so
+    diagnostic failure counter (keyed by src + job updatedAtMs so
     one failure counts once). The catalog card is a viewer over job.json +
     the event stream: model download with MB progress, Reading/Warming/
     chunk-of-N with a bar, Cancel, Finishing up, and a failed card with
-    Resume/Discard that switches to the honest add-it-on-the-desktop copy at
-    two failures. `audibleStems` is ported into loadProject (sampled RMS <
+    Resume/Discard that preserves the native failure reason after repeated
+    failures. The song’s Split button remains available after a failure;
+    tapping it retries the checkpoint or finished adoption. An iOS stalled
+    worker explains the required restart before its files can be replaced. `audibleStems` is ported into loadProject (sampled RMS <
     0.004 hides guitar/piano, dropped buffers released on the spot — the
     GC-is-too-late rule). Machine-verified end to end on the emulator
     (full-flow driver, all through the SAME code path the card drives): add
@@ -2365,3 +2367,33 @@ tail intact. Background suspension keeps the same session, terminal verdicts
 are preserved, and older records without an owner retain the heartbeat fallback.
 This proves interruption, not whether the OS killed the app for memory or another
 reason; the native vitals trail supplies the available diagnostics.
+
+### Mobile split memory follow-up (2026-10-04)
+
+Both phone runners now use the shared C++ session defaults: CPU arena and
+memory patterns disabled, graph optimizations disabled. iOS already used this
+profile; Android previously used ORT’s default allocation and optimization
+settings. This is a combined-profile measurement, not an attribution to one
+individual setting.
+
+On the same dedicated Android emulator, a four-minute stereo MP3 (48 kHz,
+7.68 MB, 42 chunks) completed with both freshly built native profiles:
+
+| Measurement | Previous Android profile | Shared mobile profile |
+| --- | ---: | ---: |
+| Sampled peak resident memory | 4.468 GiB | 0.815 GiB |
+| Native completion | 284.0 s | 300.1 s |
+| Project adopted | 286.1 s | 302.2 s |
+
+Peak memory fell 81.8%, with 5.7% more processing time. All six stems contained
+10,584,044 frames; differences from the baseline were at most one PCM16 LSB
+(RMS 0.0116–0.0265 LSB). The sum reconstructed the canonical native input with
+correlation 0.999289. A freshly rebuilt iOS simulator also passed the permanent
+split suite, including six-stem adoption, reconstruction, recovery, and
+watchdog ownership. Three real invalid-model failures retained their native
+ORT cause on attempts one, two, and three.
+
+These results demonstrate reduced Android memory demand and retained audio
+output. They do not establish the latest Samsung failure’s exact cause; its
+current Journal trace is still needed. v0.25.0 predates this follow-up and does
+not contain the Android session-profile change.

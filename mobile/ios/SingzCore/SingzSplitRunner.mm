@@ -626,10 +626,8 @@ static const BOOL kUseContinuedTask = NO;
     // Threads deliberately left at the ORT default: halving them was measured
     // on a 5-minute song and moved the peak from 3059 MB to 3213 MB — noise,
     // for half the cores. The activations, not the thread count, are the cost.
-    // iOS only, while the device crash is open — Android splits fine with
-    // the rewrites on (the POCO ran a whole album's worth).
-    config.disableGraphOpt = true;
-    config.leanAllocator = true;
+    // Session memory and graph settings come from the shared SplitJobConfig
+    // defaults, so Android uses the same conservative profile as this runner.
     // OFF: measured on a real iPhone 2026-08-15. ORT's CoreML EP spent 58
     // SECONDS compiling with one core pegged, then declined the graph and fell
     // back to CPU — a minute of the singer's time for nothing. The path stays

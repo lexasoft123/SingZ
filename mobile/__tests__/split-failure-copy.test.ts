@@ -1,6 +1,5 @@
 import {
   FILE_FAILING_COPY,
-  KEEPS_FAILING_COPY,
   isFileProblem,
   splitFailureCopy,
 } from '../src/split/flow'
@@ -16,7 +15,7 @@ const FILE_ERRORS = [
   'The decoder mislabeled its output for this file',
   'The decoder stalled on this file',
 ]
-// The phone's failures: these are the ones "keeps failing on this phone" is for.
+// Phone failures must keep their cause visible even after repeated retries.
 const PHONE_ERRORS = [
   // a codec this phone lacks: another copy of the file would fail the same way
   'This phone cannot decode mpeg (no codec)',
@@ -25,6 +24,8 @@ const PHONE_ERRORS = [
   'The split was interrupted',
   'Ran out of space writing the decoded audio',
   'Could not write the decoded audio',
+  'The split stopped during load-model — native crash (signal 11)',
+  'The split stopped during chunk — low memory (RSS 1400 MB)',
 ]
 
 describe('split failure copy', () => {
@@ -38,7 +39,8 @@ describe('split failure copy', () => {
     expect(isFileProblem(error)).toBe(false)
     expect(splitFailureCopy(error, 0)).toBe(error)
     expect(splitFailureCopy(error, 1)).toBe(error)
-    expect(splitFailureCopy(error, 2)).toBe(KEEPS_FAILING_COPY)
+    expect(splitFailureCopy(error, 2)).toBe(error)
+    expect(splitFailureCopy(error, 8)).toBe(error)
   })
 })
 
@@ -48,6 +50,11 @@ describe('a failed job that still holds the engine', () => {
   const { failedJobHoldsEngine } = require('../src/split/service')
   test('an iOS stall keeps other songs waiting', () => {
     expect(failedJobHoldsEngine('Splitting stalled — resume to try again', 'ios')).toBe(true)
+  })
+  test('restarting releases a persisted iOS stall while a current-session stall stays held', () => {
+    const error = 'Splitting stalled — resume to try again'
+    expect(failedJobHoldsEngine(error, 'ios', { sessionId: 'old', currentSessionId: 'new' })).toBe(false)
+    expect(failedJobHoldsEngine(error, 'ios', { sessionId: 'current', currentSessionId: 'current' })).toBe(true)
   })
   test('an Android stall and every other failure let go', () => {
     expect(failedJobHoldsEngine('Splitting stalled — resume to try again', 'android')).toBe(false)

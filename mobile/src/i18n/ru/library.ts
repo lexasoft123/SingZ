@@ -87,8 +87,6 @@ export const library: Translation<typeof en> = {
   'phone.library.splitUnavailableBusy': 'Разделить — недоступно, пока идёт другое разделение',
   'phone.library.splitInto': 'Разбить {name}',
   'phone.library.notSplitYet': 'не разделена',
-  'phone.library.keepsFailingCopy':
-    'Эта песня всё время не разделяется на телефоне. Добавьте её на компьютере — придёт уже готовой к пению.',
   'phone.library.fileFailingCopy':
     'Телефон не смог прочитать файл песни. Попробуйте другую копию — или добавьте её на компьютере, и она придёт уже готовой к пению.',
   'phone.library.stemsCount_one': '{n} дорожка',
