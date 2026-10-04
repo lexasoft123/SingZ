@@ -105,9 +105,6 @@ SCRIPT
   s.frameworks   = 'Accelerate', 'AudioToolbox', 'AVFoundation', 'BackgroundTasks', 'UIKit'
   s.dependency 'React-Core'
   s.dependency 'SingzDeviceCallback'
-  # Same 1.23.x minor the desktop packs and the Android AAR pin (trunk's
-  # closest pod to their 1.23.2 is 1.23.0 — a patch-level skew the Phase-2
-  # stem-correlation fixture guards; a plain '~> 1.23' would silently
-  # resolve 1.28).
-  s.dependency 'onnxruntime-c', '~> 1.23.0'
+  # Pin the same stable runtime as Android; upgrade only with native split checks.
+  s.dependency 'onnxruntime-c', '1.30.0'
 end

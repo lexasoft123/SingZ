@@ -54,7 +54,7 @@ describe('the vocal model ships in the pack', () => {
     // The torch pack carried no ORT at all: without this pin the model would
     // be staged into a pack whose Python cannot import onnxruntime.
     const source = await read('scripts/build-gpu-pack.sh')
-    expect(source).toContain('ORT_PIN="onnxruntime==1.28.0"')
+    expect(source).toContain('ORT_PIN="onnxruntime==1.30.0"')
     expect(source).toContain('"$NUMPY_PIN" "$ORT_PIN"')
     expect(source).toContain('import demucs, torch, onnxruntime')
   })

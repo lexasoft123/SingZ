@@ -62,18 +62,29 @@ export async function startProjectSplit(
     resume?: boolean
     onModelProgress?: (gotBytes: number, totalBytes: number) => void
     watchdogCapMs?: number
+    /** The UI invalidates preparation on cancellation or replacement. */
+    isCurrent?: () => boolean
   }
 ): Promise<void> {
+  const checkCurrent = (): void => {
+    if (opts?.isCurrent && !opts.isCurrent()) throw new Error('cancelled')
+  }
+  checkCurrent()
   // Ahead of the model fetch so the dialog lands on the tap that caused it,
   // rather than interrupting a 136 MB download minutes later.
   await askToShowProgress()
+  checkCurrent()
   const doc = JSON.parse(await readProjectText(project, 'project.json')) as ProjectDoc
+  checkCurrent()
   const srcPath = await localProjectFile(project, doc.songFile)
+  checkCurrent()
   const modelPath = await ensureSplitModel(opts?.onModelProgress)
+  checkCurrent()
   // The budget this phone is working inside, recorded before a single sample
   // is decoded: a split that is killed leaves no note, so its allowance has to
   // be in the log already.
   const vitals = await splitVitals()
+  checkCurrent()
   if (vitals) {
     log(
       'split',
@@ -95,9 +106,9 @@ export async function finishSplit(project: string, jobDir: string): Promise<void
   clearFailures()
 }
 
-// --- the two-dead-resumes rule -------------------------------------------
-// A song that keeps dying gets the same honest copy as a gated phone. The
-// counter is per source path, persisted so a relaunch cannot reset it.
+// --- failure diagnostics --------------------------------------------------
+// The counter is per source path and survives relaunches. It is telemetry,
+// not evidence that the phone cannot split this song.
 
 const ATTEMPTS_KEY = 'singz.split.attempts'
 
@@ -144,11 +155,6 @@ export function clearFailures(): void {
   void setStoredText(ATTEMPTS_KEY, '')
 }
 
-// Frozen at import time for tests that compare against this export directly;
-// splitFailureCopy() below re-reads the live language on every call instead,
-// so a language switch mid-session still shows the right copy on screen.
-export const KEEPS_FAILING_COPY = t('phone.library.keepsFailingCopy')
-
 /** The failures that are about the FILE, not the phone — the decode errors
  *  both natives write into job.json (SingzSplitRunner.mm's
  *  DecodeToRawF32Stereo, AudioDecode.kt). "Keeps failing on this phone" is
@@ -160,8 +166,7 @@ export function isFileProblem(error: string | null | undefined): boolean {
   return (
     !!error &&
     // Not "This phone cannot decode <codec>": that is the phone's limit, and
-    // another copy in the same format would fail the same way — it keeps its
-    // own sentence and then KEEPS_FAILING_COPY's advice (the computer).
+    // another copy in the same format would fail the same way.
     !/cannot decode/i.test(error) &&
     /this file|Decode failed|No audio in/i.test(error)
   )
@@ -169,8 +174,9 @@ export function isFileProblem(error: string | null | undefined): boolean {
 
 export const FILE_FAILING_COPY = t('phone.library.fileFailingCopy')
 
-/** What the failed card says: the file's fault first, then the phone's. */
-export function splitFailureCopy(error: string, attempts: number): string {
+/** Repeated failure does not diagnose a phone limit. Keep the actual cause
+ * visible after every retry, including native exit evidence. */
+export function splitFailureCopy(error: string, _attempts: number): string {
   if (isFileProblem(error)) return t('phone.library.fileFailingCopy')
-  return attempts >= 2 ? t('phone.library.keepsFailingCopy') : error
+  return error
 }

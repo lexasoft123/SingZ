@@ -985,7 +985,7 @@ export default function CatalogScreen({
         started: boolean
       }
     | { phase: 'adopting'; project: string }
-    | { phase: 'failed'; project: string; error: string; attempts: number }
+    | { phase: 'failed'; project: string; error: string; attempts: number; sessionId?: string; currentSessionId?: string }
   const [splitUi, setSplitUi] = useState<SplitUi>(null)
   // The latest card, for the liveness poll: its timer closes over the render
   // that armed it, and `started` flips inside a run without re-arming.
@@ -994,6 +994,9 @@ export default function CatalogScreen({
     splitUiRef.current = splitUi
   }, [splitUi])
   const adoptingRef = useRef(false)
+  const splitStartSeq = useRef(0)
+  const splitStopRef = useRef<Promise<void> | null>(null)
+  useEffect(() => () => { splitStartSeq.current += 1 }, [])
 
   /* Beat / key / melody for a phone-library project (Phase 4). One queue
    * app-wide (analysis/run.ts); the card below is a viewer over its progress. */
@@ -1157,6 +1160,8 @@ export default function CatalogScreen({
       phase: 'failed',
       project: status.projectDir,
       error: status.error ?? fallbackError,
+      sessionId: status.sessionId,
+      currentSessionId: status.currentSessionId,
       attempts
     })
   }, [])
@@ -1310,8 +1315,13 @@ export default function CatalogScreen({
       resume: boolean,
       watchdogCapMs = 0 // test seam, threaded through to the service
     ): Promise<void> => {
+      const seq = ++splitStartSeq.current
+      const isCurrent = (): boolean => seq === splitStartSeq.current
       try {
+        await splitStopRef.current
+        if (!isCurrent()) return
         const gate = await splitGate()
+        if (!isCurrent()) return
         if (!gate.ok) {
           // Not "needs a bigger phone": the device is not the singer's fault and
           // they cannot act on it. Say what cannot happen and why.
@@ -1330,14 +1340,16 @@ export default function CatalogScreen({
           const pulled = await pullFromDrive(dir)
           project = pulled.dir
           await refresh()
+          if (!isCurrent()) return
         }
         setSplitUi({ phase: 'model', project, gotMB: 0, totalMB: 136 })
         await startProjectSplit(project, {
           resume,
           watchdogCapMs,
+          isCurrent,
           onModelProgress: (got, total) =>
             setSplitUi(cur =>
-              cur?.phase === 'model'
+              isCurrent() && cur?.phase === 'model'
                 ? {
                     phase: 'model',
                     project,
@@ -1347,6 +1359,7 @@ export default function CatalogScreen({
                 : cur
             )
         })
+        if (!isCurrent()) return
         // The service has the intent; nothing has come back yet. `started`
         // flips on the first event or file — see the liveness poll.
         setSplitUi({
@@ -1357,6 +1370,7 @@ export default function CatalogScreen({
           started: false
         })
       } catch (e) {
+        if (!isCurrent()) return
         setSplitUi(null)
         const msg = String(e instanceof Error ? e.message : e)
         if (!msg.includes('cancelled')) {
@@ -1394,20 +1408,47 @@ export default function CatalogScreen({
    *  song's Split behind a Resume/Discard card at the top of the list, which
    *  a singer on iPhone read as "the Split button does nothing" (field report,
    *  2026-09-23). The offer below says what starting another split costs the
-   *  failed one. The exception is an iOS STALL, which is recorded as failed
-   *  while the wedged job still holds the engine (see failedJobHoldsEngine). */
+   *  failed one. An iOS stall also leaves the button available; the offer
+   *  explains the held engine before touching its job files. */
   const splitBusyElsewhere = useCallback(
     (dir: string): boolean =>
       splitUi !== null &&
       splitUi.project !== dir &&
-      (splitUi.phase !== 'failed' || failedJobHoldsEngine(splitUi.error, Platform.OS)),
+      splitUi.phase !== 'failed',
     [splitUi]
+  )
+
+  // Resume must first ask the file what actually failed: a job that reached
+  // DONE and then died during ADOPTION only needs the adoption re-run —
+  // handing it back to the service would wipe six finished stems and split
+  // from scratch.
+  const resumeSplit = useCallback(
+    async (project: string): Promise<void> => {
+      const seq = splitStartSeq.current
+      const status = await splitStatus()
+      if (seq !== splitStartSeq.current) return
+      if (status?.state === 'done') void adoptDone(status)
+      else void startSplitFor(project, true)
+    },
+    [adoptDone, startSplitFor]
   )
 
   /** The one place the offer is worded. The card button and the long-press
    *  menu both come here, so they cannot drift apart. */
   const offerSplit = useCallback(
     (p: ProjectEntry) => {
+      if (splitUi?.phase === 'failed') {
+        // A stalled iOS worker still owns its files. Keep retry available,
+        // but explain the restart before clearing or replacing its job.
+        if (failedJobHoldsEngine(splitUi.error, Platform.OS, splitUi)) {
+          Alert.alert(t('phone.library.couldNotStartSplitTitle'), t('phone.library.splitEngineHeldCopy'))
+          return
+        }
+        if (splitUi.project === p.dir) {
+          void resumeSplit(p.dir)
+          return
+        }
+      }
       // One job slot on both platforms: starting this split replaces a failed
       // one elsewhere, and its resume point goes with it. Say so, and discard
       // it explicitly — a model download cancelled before the native start
@@ -1429,28 +1470,28 @@ export default function CatalogScreen({
         ]
       )
     },
-    [startSplitFor, splitUi, nameOf]
+    [startSplitFor, resumeSplit, splitUi, nameOf]
   )
 
-  const discardSplit = useCallback(() => {
-    void cancelSplit()
-      .then(() => clearSplitJob())
-      .then(() => setSplitUi(null))
-      .catch(() => setSplitUi(null))
+  const stopSplitPreparation = useCallback((discard: boolean) => {
+    const seq = ++splitStartSeq.current
+    // Serialize cleanup with the next start: an old discard must never clear
+    // the new job or restore its card after that start has taken ownership.
+    const previous = splitStopRef.current
+    const stop = (async () => {
+      await previous
+      await cancelModelDownload(SPLIT_MODEL.file).catch(() => {})
+      await cancelSplit()
+      if (discard) await clearSplitJob()
+    })().catch(() => {})
+    splitStopRef.current = stop
+    void stop.then(() => {
+      if (splitStopRef.current === stop) splitStopRef.current = null
+      if (seq === splitStartSeq.current) setSplitUi(null)
+    })
   }, [])
 
-  // Resume must first ask the file what actually failed: a job that reached
-  // DONE and then died during ADOPTION only needs the adoption re-run —
-  // handing it back to the service would wipe six finished stems and split
-  // from scratch.
-  const resumeSplit = useCallback(
-    async (project: string): Promise<void> => {
-      const status = await splitStatus()
-      if (status?.state === 'done') void adoptDone(status)
-      else void startSplitFor(project, true)
-    },
-    [adoptDone, startSplitFor]
-  )
+  const discardSplit = useCallback(() => stopSplitPreparation(true), [stopSplitPreparation])
 
   /** Phone-library long-press: this phone owns these projects. */
   /** The delete confirm, shared by the ••• menu and the card's swipe —
@@ -1508,10 +1549,11 @@ export default function CatalogScreen({
               // the job starts on the deleted song the moment it lands. A
               // running (or stalled) job is stopped the way Discard stops it.
               const job = splitUiRef.current
+              if (job?.project === p.dir) splitStartSeq.current += 1
               const stopJob = (): Promise<unknown> =>
                 job?.phase === 'model'
                   ? cancelModelDownload(SPLIT_MODEL.file)
-                  : job?.phase === 'failed' && !failedJobHoldsEngine(job.error, Platform.OS)
+                  : job?.phase === 'failed' && !failedJobHoldsEngine(job.error, Platform.OS, job)
                   ? clearSplitJob()
                   : cancelSplit().then(() => clearSplitJob())
               const dropJob =
@@ -2387,8 +2429,8 @@ export default function CatalogScreen({
                       // No job exists yet in the model phase — the download
                       // is the thing to stop (its reject resets the card).
                       splitUi.phase === 'model'
-                        ? void cancelModelDownload(SPLIT_MODEL.file)
-                        : (setCancelPending(true), void cancelSplit())
+                        ? stopSplitPreparation(false)
+                        : (splitStartSeq.current += 1, setCancelPending(true), void cancelSplit())
                     }
                   >
                     <Text style={s.ctxLink}>{cancelPending ? t('phone.library.stopping') : t('phone.library.cancel')}</Text>
@@ -2561,7 +2603,7 @@ export default function CatalogScreen({
                  job at 70% ends up reading "Starting…" at zero. The progress
                  card above it is already saying everything there is to say. */
                 action:
-                  canSplit(p) && splitUi?.project !== p.dir ? (
+                  canSplit(p) && (splitUi?.project !== p.dir || splitUi.phase === 'failed') ? (
                     <Pressable
                       hitSlop={10}
                       disabled={splitBusyElsewhere(p.dir)}
@@ -2575,8 +2617,8 @@ export default function CatalogScreen({
                         disabled: splitBusyElsewhere(p.dir)
                       }}
                       /* A failed split elsewhere no longer disables this —
-                     only one still working does (an iOS stall counts: it
-                     holds the engine until SingZ restarts). */
+                     only one still working does. A stalled iOS worker
+                     explains the required restart when tapped. */
                       accessibilityLabel={
                         splitBusyElsewhere(p.dir)
                           ? t('phone.library.splitUnavailableBusy')

@@ -266,7 +266,7 @@ SplitResult runSplit(const SplitJobConfig& config, Progress& progress,
     // The arena never hands memory back and the memory pattern pre-reserves
     // the union of every activation. Dropping both trades malloc traffic for
     // a lower peak — measured on iOS, where the device now runs at 700-900 MB
-    // steady. NOT on by default: Android's numbers were taken with the arena.
+    // steady. Both phone adapters inherit this profile from SplitJobConfig.
     if (config.leanAllocator) {
       opts.DisableCpuMemArena();
       opts.DisableMemPattern();

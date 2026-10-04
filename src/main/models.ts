@@ -106,7 +106,9 @@ export async function packOnnxModel(
 // replacing the original+sibling pair), ONE onnxruntime (mainline in
 // site-packages — the DirectML wheel and rtx/ort side-load are gone),
 // pdb/tcl pruned, fp16 beat model.
-export const PACK_FORMAT_REQUIRED = process.platform === 'win32' ? 9 : 5
+// v10 ONNX / v6 torch update ORT to 1.30.0 on supported architectures.
+// Intel macOS keeps its last published ORT wheel (1.23.2).
+export const PACK_FORMAT_REQUIRED = process.platform === 'win32' ? 10 : 6
 
 /** The UVR vocal model, inside the pack since format 5 (torch) / 9 (onnx). */
 export function packVocalModel(root = packDir()): string {

@@ -10,6 +10,9 @@ import android.os.Looper
 import android.os.Message
 import android.os.Messenger
 import android.os.RemoteException
+import android.os.ResultReceiver
+import android.os.Bundle
+import android.util.Log
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -22,6 +25,7 @@ import com.singzplayer.split.JobStore
 import com.singzplayer.split.SingzCore
 import com.singzplayer.split.SplitService
 import com.singzplayer.split.SplitProcessExit
+import com.singzplayer.split.SplitStartDelivery
 import kotlin.concurrent.thread
 import org.json.JSONObject
 
@@ -40,6 +44,54 @@ class SplitModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx
   // terminal state) and invalidate — @Synchronized methods below are the
   // lock, @Volatile covers the bare reads.
   @Volatile private var bound = false
+  private val startHandler = Handler(Looper.getMainLooper())
+  private val startDelivery = SplitStartDelivery()
+  private var startRetry: Runnable? = null
+
+  @Synchronized
+  private fun cancelStartDelivery() {
+    startDelivery.cancel()
+    startRetry?.let { startHandler.removeCallbacks(it) }
+    startRetry = null
+  }
+
+  @Synchronized
+  private fun deliverStart(intent: Intent) {
+    cancelStartDelivery()
+    val request = startDelivery.begin()
+    val acknowledged = object : ResultReceiver(startHandler) {
+      override fun onReceiveResult(resultCode: Int, resultData: Bundle?) {
+        startDelivery.acknowledge(request)
+      }
+    }
+    val delivery = Intent(intent).putExtra(SplitService.EXTRA_START_ACK, acknowledged)
+    try {
+      reactApplicationContext.startForegroundService(delivery)
+      bindEvents()
+      // Some phones spawn :split but leave the first service start pending.
+      // Receipt is acknowledged before loading the engine. A repeated START
+      // is single-flight in SplitService, even if the first arrives late.
+      val retry = Runnable { retryStart(request, delivery) }
+      startRetry = retry
+      startHandler.postDelayed(retry, 5_000)
+    } catch (t: Throwable) {
+      cancelStartDelivery()
+      throw t
+    }
+  }
+
+  @Synchronized
+  private fun retryStart(request: Long, delivery: Intent) {
+    if (!startDelivery.takeRetry(request)) return
+    startRetry = null
+    try {
+      Log.w("SingzSplit", "start not acknowledged — redelivering once")
+      reactApplicationContext.startForegroundService(Intent(delivery))
+      bindEvents()
+    } catch (e: Exception) {
+      Log.w("SingzSplit", "split start redelivery refused", e)
+    }
+  }
   private val clientMessenger = Messenger(Handler(Looper.getMainLooper()) { msg ->
     onServiceMessage(msg)
     true
@@ -106,6 +158,7 @@ class SplitModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx
   }
 
   override fun invalidate() {
+    cancelStartDelivery()
     unbindEvents()
     super.invalidate()
   }
@@ -129,8 +182,7 @@ class SplitModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx
         .putExtra(SplitService.EXTRA_PROJECT_DIR, projectDir)
         .putExtra(SplitService.EXTRA_RESUME, resume)
         .putExtra(SplitService.EXTRA_WATCHDOG_CAP_MS, watchdogCapMs.toLong())
-      ctx.startForegroundService(i)
-      bindEvents()
+      deliverStart(i)
       promise.resolve(true)
     } catch (t: Throwable) {
       promise.reject("split", t)
@@ -198,6 +250,7 @@ class SplitModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx
    *  the job is live — a running service would just recreate the doc. */
   @ReactMethod
   fun clearJob(promise: Promise) {
+    cancelStartDelivery()
     try {
       SplitService.jobDir(reactApplicationContext).deleteRecursively()
       promise.resolve(true)
@@ -208,6 +261,7 @@ class SplitModule(ctx: ReactApplicationContext) : ReactContextBaseJavaModule(ctx
 
   @ReactMethod
   fun cancelSplit(promise: Promise) {
+    cancelStartDelivery()
     try {
       // The service's engine lives in the :split process — the intent is
       // the production cancel. The local flag only exists for the

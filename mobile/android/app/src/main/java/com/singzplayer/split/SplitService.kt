@@ -42,6 +42,7 @@ class SplitService : Service() {
   companion object {
     const val ACTION_START = "com.singzplayer.split.START"
     const val ACTION_CANCEL = "com.singzplayer.split.CANCEL"
+    const val EXTRA_START_ACK = "startAck"
     const val EXTRA_SRC = "src"
     const val EXTRA_MODEL = "model"
     const val EXTRA_PROJECT_DIR = "projectDir"
@@ -119,6 +120,9 @@ class SplitService : Service() {
         }
       }
       ACTION_START -> {
+        @Suppress("DEPRECATION")
+        val acknowledgement = intent.getParcelableExtra<android.os.ResultReceiver>(EXTRA_START_ACK)
+        acknowledgement?.send(0, null)
         if (jobActive) {
           // One job at a time; the app checks splitStatus before starting.
           sendState("busy", null)

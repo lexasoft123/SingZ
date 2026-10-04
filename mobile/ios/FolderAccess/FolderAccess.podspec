@@ -57,7 +57,7 @@ Pod::Spec.new do |s|
       ? "$(inherited) SINGZ_CODEC_TARGET_PROOF=1 SINGZ_ZCORE_FFMPEG=1 SINGZ_CODEC_TARGET_PROOF_SOURCE_STAMP=\\\"#{proof_source_stamp}\\\" SINGZ_CODEC_TARGET_PROOF_PLATFORM_STAMP=\\\"#{proof_platform_stamp}\\\" SINGZ_CODEC_TARGET_PROOF_BUILD_STAMP=\\\"#{proof_build_stamp}\\\"" \
       : '$(inherited)'
   }
-  s.dependency 'onnxruntime-c', '~> 1.23.0'
+  s.dependency 'onnxruntime-c', '1.30.0'
   s.dependency 'React-Core'
   s.dependency 'SingzCore'
   s.dependency 'SingzDspRuntime'

@@ -34,7 +34,7 @@ BEAT_CKPT_URL="https://cloud.cp.jku.at/public.php/dav/files/7ik4RrBKTS273gp/fina
 # split, so the model cannot be a second optional download. It is an ONNX
 # graph, so this torch pack needs a mainline onnxruntime too (the ONNX packs
 # already carry one). Keep the sha in step with src/main/vocal-model.ts.
-ORT_PIN="onnxruntime==1.28.0"
+ORT_PIN="onnxruntime==1.30.0"
 UVR_MODEL_FILE="UVR_MDXNET_KARA_2.onnx"
 UVR_MODEL_SHA256="bf32e15105a09c0f7dddd2b67346146334d6f3ecb399ed7638eba2ab07cbf5f4"
 UVR_MODEL_URL="https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/${UVR_MODEL_FILE}"
@@ -235,7 +235,7 @@ find "$WORK/python" -name '__pycache__' -type d -prune -exec rm -rf {} +
 # part of every split now — keep in sync with PACK_FORMAT_REQUIRED in
 # src/main/models.ts)
 cat > "$WORK/python/pack.json" << EOF
-{ "formatVersion": 5, "target": "darwin-arm64", "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)" }
+{ "formatVersion": 6, "target": "darwin-arm64", "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)" }
 EOF
 
 tar -C "$WORK" -czf "$OUT/gpu-splitter-darwin-arm64.tar.gz" python

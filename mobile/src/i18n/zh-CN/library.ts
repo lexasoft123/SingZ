@@ -84,8 +84,6 @@ export const library: Translation<typeof en> = {
   'phone.library.splitUnavailableBusy': '分离 — 另一项分离正在进行，暂不可用',
   'phone.library.splitInto': '将 {name} 分离成分轨',
   'phone.library.notSplitYet': '尚未分离',
-  'phone.library.keepsFailingCopy':
-    '这首歌在此手机上一直分离失败。请改在电脑上添加它——它会同步过来，随时可以演唱。',
   'phone.library.fileFailingCopy':
     '这台手机无法读取这首歌的文件。请换一份文件试试——或在电脑上添加它，它会同步过来，随时可以演唱。',
   'phone.library.stemsCount_one': '{n} 条分轨',
