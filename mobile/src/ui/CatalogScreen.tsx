@@ -333,6 +333,8 @@ export default function CatalogScreen({
      session the last mode IS the mode; the pref read below still runs and
      still wins, it just usually agrees. */
   const [mode, setMode] = useState<'gdrive' | 'folder' | 'phone'>(lastShelf?.mode ?? 'phone')
+  const [modeReady, setModeReady] = useState(lastShelf != null)
+  const [shelfReady, setShelfReady] = useState(lastShelf != null)
   /* Seeded with the rows, because they are read TOGETHER: a signed-in Drive
      library remounting with driveOn false renders its own "Sign in to see
      it" banner over the songs for a frame (photographed on the phone). */
@@ -517,6 +519,7 @@ export default function CatalogScreen({
 
   const refresh = useCallback(
     async (force = false) => {
+      if (!modeReady) return
       const my = ++listSeq.current
       modeOfList.current = mode
       try {
@@ -529,28 +532,19 @@ export default function CatalogScreen({
           // library re-downloading), then the network replaces it quietly.
           // The full-screen spinner is ONLY for an empty screen — on
           // pull-to-refresh the pull indicator is already spinning.
-          // The catalog goes up BEFORE the sign-in probes: those are pref
-          // reads too, and holding a ready catalog behind three bridge hops
-          // is a visible "loading from Google Drive" flash on a cold start.
-          const cached = await driveStoredProjects()
-          if (my !== listSeq.current) return
-          setProjects(cached?.length ? cached : null)
-          // Local availability must never wait for Drive or token renewal.
-          void loadUsage(my)
-          const signed = await driveSignedIn()
-          /* Guarded like the setProjects around it, and for a sharper reason
-             since the shelf cache existed: these are cache WRITERS now, so an
-             overtaken refresh landing one of them would file the library it
-             was listing under the name of the library that overtook it. */
+          // Publish one local snapshot: a catalog without its account and
+          // file status changes header height and remounts rows moments later.
+          // These reads touch only preferences and disk, never the network.
+          const [cached, signed, email, rows] = await Promise.all([
+            driveStoredProjects(), driveSignedIn(), driveAccountEmail(), cacheUsage()
+          ])
           if (my !== listSeq.current) return
           setDriveOn(signed)
-          if (!signed) {
-            setProjects([])
-            return
-          }
-          const email = await driveAccountEmail()
-          if (my !== listSeq.current) return
           setDriveEmail(email)
+          setUsage(Object.fromEntries(rows.map(r => [r.project, r])))
+          setProjects(signed ? (cached?.length ? cached : null) : [])
+          setShelfReady(true)
+          if (!signed) return
           try {
             const fresh = await driveListProjects(force)
             if (my === listSeq.current) {
@@ -578,9 +572,11 @@ export default function CatalogScreen({
           setError(String(e instanceof Error ? e.message : e))
           setProjects([])
         }
+      } finally {
+        if (my === listSeq.current) setShelfReady(true)
       }
     },
-    [mode, loadUsage]
+    [mode, modeReady, loadUsage]
   )
 
   refreshRef.current = (force?: boolean) => refresh(force)
@@ -651,14 +647,21 @@ export default function CatalogScreen({
   }, [projects, usage, driveOn, driveEmail])
 
   useEffect(() => {
-    void getStoredText('singz.libMode').then(m => {
-      if (m === 'gdrive' && driveAvailable()) setMode('gdrive')
-      else if (m === 'folder') setMode('folder')
-      else {
-        // no stored choice: land on the folder root if one was picked
-        void getRoot().then(r => setMode(r.kind === 'picked' ? 'folder' : 'phone'))
+    void (async () => {
+      try {
+        const m = await getStoredText('singz.libMode')
+        if (m === 'gdrive' && driveAvailable()) setMode('gdrive')
+        else if (m === 'folder') setMode('folder')
+        else {
+          const r = await getRoot()
+          setMode(r.kind === 'picked' ? 'folder' : 'phone')
+        }
+      } catch (e) {
+        log('catalog', `Could not read library preference: ${String(e)}`)
+      } finally {
+        setModeReady(true)
       }
-    })
+    })()
     void getCrumb().then(c => {
       if (c) {
         setCrashNote(c)
@@ -2032,7 +2035,8 @@ export default function CatalogScreen({
           /* A swiped card slides over the action behind it, so its face must
              be OPAQUE — the usual white-alpha fill would show the red
              through. The literal is white(0.045) composited over C.bg. */
-          acts.length > 0 && { backgroundColor: '#1f1b17', marginBottom: 0 },
+          { marginBottom: 0 },
+          acts.length > 0 && { backgroundColor: '#1f1b17' },
           isLoading && s.cardLoading,
           pressed && { transform: [{ scale: 0.98 }] }
         ]}
@@ -2090,7 +2094,7 @@ export default function CatalogScreen({
         )}
       </Pressable>
     )
-    if (acts.length === 0) return body
+    // Keep the row host stable when availability adds or removes actions.
     return (
       <Swipeable
         key={opts.key}
@@ -2101,7 +2105,7 @@ export default function CatalogScreen({
            the cancel ✕ (photographed on the user's phone mid-decode), and
            deleting a song while its stems decode is not a state anyone
            meant. */
-        enabled={!isLoading}
+        enabled={!isLoading && acts.length > 0}
         /* Default activation is 10px — inside a real finger's tap jitter, so
            on the phone a plain TAP could fling the row open (the simulator's
            mouse taps are pixel-perfect, which is why it never showed there).
@@ -2127,6 +2131,13 @@ export default function CatalogScreen({
       </Swipeable>
     )
   }
+
+  if (!shelfReady) return (
+    <View style={{ flex: 1, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center' }}>
+      <Image source={BG} style={StyleSheet.absoluteFill} resizeMode="cover" />
+      <ActivityIndicator color={C.amber} />
+    </View>
+  )
 
   return (
     <View style={{ flex: 1, backgroundColor: C.bg }}>
