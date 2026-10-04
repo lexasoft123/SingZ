@@ -2376,7 +2376,8 @@ profile; Android previously used ORT’s default allocation and optimization
 settings. This is a combined-profile measurement, not an attribution to one
 individual setting.
 
-On the same dedicated Android emulator, a four-minute stereo MP3 (48 kHz,
+Before the runtime upgrade, with ORT 1.23.2 on the same dedicated Android
+emulator, a four-minute stereo MP3 (48 kHz,
 7.68 MB, 42 chunks) completed with both freshly built native profiles:
 
 | Measurement | Previous Android profile | Shared mobile profile |
@@ -2404,3 +2405,18 @@ The emulator results demonstrate reduced Android memory demand with retained
 audio output. The changed profile still needs confirmation on this Samsung.
 v0.25.0 predates this follow-up and does not contain the Android session-profile
 change.
+
+### ONNX Runtime dependency refresh (2026-10-04)
+
+Android's implementation and extracted SDK AAR both pin 1.30.0. Both iOS
+pods pin the same exact version, recorded in Podfile.lock. The Windows
+ONNX pack and Apple Silicon torch pack also pin 1.30.0; Intel macOS keeps
+1.23.2, the last published compatible wheel. ONNX pack format 10 and torch
+pack format 6 distinguish rebuilt packs, and reused Python environments
+must match the selected runtime pin before stamping a new pack.
+
+The actual desktop UVR runner passed an authored twelve-second vocal fixture
+with ORT 1.30.0 on CPU and automatic CoreML/CPU selection. Both lead/backing
+outputs retained the source frame count and reconstructed it with maximum
+absolute error 2.98e-8; automatic versus CPU backing RMS difference was
+9.80e-8. This is runner-level validation, not a newly published pack.

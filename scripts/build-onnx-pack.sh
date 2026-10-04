@@ -66,7 +66,12 @@ UVR_MODEL_URL="https://github.com/TRvlvr/model_repo/releases/download/all_public
 TRTRTX_EP_TAG="v0.4.0"
 TRTRTX_EP_ZIP="TensorRT-RTX-EP-ABI-${TRTRTX_EP_TAG}-cu12.zip"
 TRTRTX_EP_URL="https://github.com/NVIDIA/TensorRT-RTX-EP-ABI/releases/download/${TRTRTX_EP_TAG}/${TRTRTX_EP_ZIP}"
-ORT_MAINLINE_PIN="onnxruntime==1.28.0"
+# Intel macOS wheels stopped at 1.23.2; keep its latest supported release.
+if [ "$WIN_PACK" = 1 ]; then
+  ORT_MAINLINE_PIN="onnxruntime==1.30.0"
+else
+  ORT_MAINLINE_PIN="onnxruntime==1.23.2"
+fi
 # The EP dll hard-depends on cudart64_12.dll, which drivers never install
 # (nvml comes with the driver; cudart is the app's to ship) — proven on the
 # bench Dell. The wheel carries nvidia/cuda_runtime/bin/cudart64_12.dll.
@@ -103,18 +108,15 @@ if [ ! -f "$WORK/$PBS_PY" ]; then
 fi
 
 PY="$WORK/$PYBIN"
-if ! "$PY" -c "import demucs_onnx, onnxruntime" >/dev/null 2>&1; then
+if ! "$PY" -c "import demucs_onnx, onnxruntime; assert onnxruntime.__version__ == '${ORT_MAINLINE_PIN#*==}'" >/dev/null 2>&1; then
   rm -rf "$WORK/python"
   tar -C "$WORK" -xzf "$WORK/$PBS_PY"
   "$PY" -m pip install --no-cache-dir --upgrade pip >/dev/null
   "$PY" -m pip install --no-cache-dir demucs-onnx
-  if [ "$WIN_PACK" = 1 ]; then
-    # ONE onnxruntime: mainline, pinned — it hosts the TensorRT-RTX plugin
-    # EP (needs >=1.23) and runs the cpu provider and the beat runner. The
-    # frozen onnxruntime-directml wheel left with DirectML itself.
-    "$PY" -m pip uninstall -y onnxruntime >/dev/null
-    "$PY" -m pip install --no-cache-dir "$ORT_MAINLINE_PIN"
-  fi
+  # One pinned runtime hosts the Windows plugin EP and the CPU runners.
+  # Intel macOS keeps the last compatible wheel.
+  "$PY" -m pip uninstall -y onnxruntime >/dev/null
+  "$PY" -m pip install --no-cache-dir "$ORT_MAINLINE_PIN"
 fi
 
 # only the current model ships — drop caches from earlier pack generations
@@ -526,7 +528,7 @@ fi
 # backing vocals are part of every split now — keep in sync with
 # PACK_FORMAT_REQUIRED in src/main/models.ts)
 cat > "$WORK/python/pack.json" << EOF
-{ "formatVersion": 9, "target": "$TARGET", "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)" }
+{ "formatVersion": 10, "target": "$TARGET", "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)" }
 EOF
 
 tar -C "$WORK" -czf "$OUTFILE" python

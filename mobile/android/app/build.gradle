@@ -350,8 +350,8 @@ dependencies {
     // combination our hand-rolled AAudio ladder used to try first.
     implementation("com.google.oboe:oboe:1.9.3")
     // ONNX Runtime for the C++ core (same version the desktop packs pin)
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.23.2")
-    ortAar("com.microsoft.onnxruntime:onnxruntime-android:1.23.2")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.30.0")
+    ortAar("com.microsoft.onnxruntime:onnxruntime-android:1.30.0")
     // SAF folder trees (picked project roots, incl. Google Drive)
     implementation("androidx.documentfile:documentfile:1.0.1")
     // Custom Tabs: Google consent inside the app's own task (self-closing)

@@ -1,7 +1,7 @@
 PODS:
   - FBLazyVector (0.86.0)
   - FolderAccess (1.0.5):
-    - onnxruntime-c (~> 1.23.0)
+    - onnxruntime-c (= 1.30.0)
     - React-Core
     - SingzCore
     - SingzDspRuntime
@@ -9,7 +9,7 @@ PODS:
   - hermes-engine (250829098.0.14):
     - hermes-engine/Pre-built (= 250829098.0.14)
   - hermes-engine/Pre-built (250829098.0.14)
-  - onnxruntime-c (1.23.0)
+  - onnxruntime-c (1.30.0)
   - RCTDeprecation (0.86.0)
   - RCTRequired (0.86.0)
   - RCTSwiftUI (0.86.0)
@@ -2282,7 +2282,7 @@ PODS:
     - ReactNativeDependencies
     - Yoga
   - SingzCore (0.3.20):
-    - onnxruntime-c (~> 1.23.0)
+    - onnxruntime-c (= 1.30.0)
     - React-Core
     - SingzDeviceCallback
     - SingzDspRuntime
@@ -2566,9 +2566,9 @@ EXTERNAL SOURCES:
 
 SPEC CHECKSUMS:
   FBLazyVector: b3e7ad108f0d882e30445c5527d774e3fd432f3d
-  FolderAccess: 320fcb00fc1f4950e1b3b755b1c365312446d63d
+  FolderAccess: c0ce03e1bdb310b865f6b63fea2115aa67777faa
   hermes-engine: 2df917d6b667bd908500d073862544faffd2ee15
-  onnxruntime-c: 3174c63a963d9abbc2bf9627e3d622819c0ed5f7
+  onnxruntime-c: 36ca0f2cdbc89c6b330ec5287c3faf5ca6ed394d
   RCTDeprecation: 2a74a2c57675e64419bd89078efde81f7c1de90b
   RCTRequired: 30451112e6fef4e6f31b4e7eee0845156e35e4b0
   RCTSwiftUI: 5aaf0b07e747ba749dc6acc94d8bd41eea4b570f
@@ -2648,7 +2648,7 @@ SPEC CHECKSUMS:
   RNReanimated: 5aa9e73d0f8d3c40d5c9bec396d6a61098db31f0
   RNScreens: de068bbd7d91b820fedac25c597d4b14830de74b
   RNWorklets: 9052122d7f98de547d247e775ea2069839236d38
-  SingzCore: 77c8672cd222ca51978a770ff277bc2050ea8995
+  SingzCore: 866426ab85db8e88dda8b9ce476d096b36a3c30c
   SingzDeviceCallback: 34dbf61665b0e42edc7880f58f18fd01a7c6cc17
   SingzDspRuntime: edd3662e17eea69477fa9ee2dd2b3abcb54e8df8
   SingzPlaybackSession: 2920084e092dba3ef3db11a62e26fd40e412b8cf
