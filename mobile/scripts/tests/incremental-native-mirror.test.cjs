@@ -1,0 +1,31 @@
+const { test } = require('node:test')
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const os = require('node:os')
+const path = require('node:path')
+const { createMirror } = require('../incremental-native-mirror.cjs')
+
+test('unchanged files retain identity and timestamp; changed and removed files reconcile', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'singz-mirror-'))
+  try {
+    const source = path.join(dir, 'source.h')
+    const root = path.join(dir, 'mirror')
+    const destination = path.join(root, 'nested', 'file.h')
+    fs.writeFileSync(source, 'first')
+    const run = () => { const mirror = createMirror(root); mirror.copy(source, destination); mirror.finish() }
+    run()
+    fs.utimesSync(destination, 1000, 1000)
+    const before = fs.statSync(destination)
+    run()
+    assert.equal(fs.statSync(destination).mtimeMs, before.mtimeMs)
+    assert.equal(fs.statSync(destination).ino, before.ino)
+    assert.equal(fs.statSync(destination).mode & 0o777, 0o444)
+    fs.writeFileSync(source, 'second')
+    run()
+    assert.equal(fs.readFileSync(destination, 'utf8'), 'second')
+    assert.equal(fs.statSync(destination).mode & 0o777, 0o444)
+    createMirror(root).finish()
+    assert.equal(fs.existsSync(destination), false)
+    assert.equal(fs.existsSync(path.dirname(destination)), false)
+  } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+})

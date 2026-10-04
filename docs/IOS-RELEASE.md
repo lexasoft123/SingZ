@@ -149,10 +149,10 @@ Three things about that, all measured here rather than reasoned about:
 
 - **`build_app` has no `build_number` option.** Passing one fails the lane
   before compiling anything ("Could not find option 'build_number'"). The
-  build number is `CURRENT_PROJECT_VERSION` in the same `xcargs` string;
-  `Info.plist`'s `CFBundleVersion` is already `$(CURRENT_PROJECT_VERSION)`,
+  build number is stamped temporarily into the app project only;
+  `Info.plist`'s `CFBundleVersion` uses `$(CURRENT_PROJECT_VERSION)`,
   so it flows through. (`increment_build_number` is the other route, and it
-  rewrites `project.pbxproj` — which is what we are avoiding.)
+  rewrites `project.pbxproj`; this lane restores the original after the archive.)
 - **xcodebuild command-line overrides cannot express conditional settings.**
   `CODE_SIGN_IDENTITY[sdk=iphoneos*]=Apple Distribution` is split on the
   first `=`, so the name becomes `CODE_SIGN_IDENTITY[sdk` and the value
@@ -523,3 +523,34 @@ submission, before anything is built, uploaded or changed. Fix the problem,
 then resubmit or cancel the open submission in App Store Connect
 (Distribution ▸ App Review). Only after that can `submit build:<n>` (or
 `release`, when the fix needs a new binary) send a new one.
+
+### Incremental local archives
+
+Native source mirrors preserve identical files and their timestamps; obsolete files
+are still removed. Recreating unchanged headers invalidates every dependent object,
+so the shipping preflight must not delete and recreate these mirrors.
+
+The archive lane stamps `CURRENT_PROJECT_VERSION` into the app project for the
+archive and restores the original file after success or failure. It never passes
+a changing release number as a workspace-wide setting: those overrides enter
+every CocoaPod's script environment and invalidate dependency tasks. JS bundling,
+signing, and IPA export still run on each release.
+
+JS-only shipping uses an immutable native archive under
+`~/Library/Caches/SingZ/ios-native-archives/<native-input-hash>/SingZ.xcarchive`.
+This cache survives output cleanup, worktrees, and separate checkouts. Override
+its location with `SINGZ_IOS_NATIVE_CACHE`. Native sources, generated pod inputs,
+installed dependency code, lockfiles, models, icons, Xcode/SDK versions, and project settings determine
+the key; checkout paths and app build numbers are normalized. Native, dependency, or toolchain
+changes select a new key and perform a full archive.
+
+Each cache hit copies the archive into this checkout’s `build-ios/`, regenerates
+the production Metro/Hermes bundle and its assets, stamps the requested build
+number, signs, and exports using the current match profile. The shared snapshot
+stays unchanged, so concurrent checkouts never overwrite each other's JS bundle.
+Snapshots are published by directory rename after a complete native archive;
+signature and executable hash verification reject a damaged snapshot. Missing or
+invalid caches fall back to the normal native archive. Tests:
+`node --test mobile/scripts/tests/{incremental-native-mirror,ios-native-inputs}.test.cjs`
+and `ruby mobile/ios/fastlane/tests/app-build-number-test.rb`. Cached JS exports
+retain Metro’s content-keyed transforms; they do not force a cache reset.

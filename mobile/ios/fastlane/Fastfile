@@ -1,3 +1,6 @@
+require_relative "app-build-number"
+require_relative "incremental-archive"
+
 # App Store Connect uploads.
 #
 # The app record itself CANNOT come through here — Apple's API is explicit
@@ -816,7 +819,6 @@ private_lane :archive do |options|
   # CODE_SIGN_IDENTITY[sdk=iphoneos*] is "iPhone Developer", so a
   # distribution profile sitting right there does not match what it asks for.
   signing_args = [
-    "CURRENT_PROJECT_VERSION=#{options[:build_number]}",
     "CODE_SIGN_STYLE=Manual",
     %(PROVISIONING_PROFILE_SPECIFIER="#{profile_name}"),
     %(CODE_SIGN_IDENTITY="Apple Distribution")
@@ -828,25 +830,50 @@ private_lane :archive do |options|
   ]
   signing_args << "DEVELOPMENT_TEAM=#{team_id}" unless team_id.to_s.empty?
 
-  build_app(
-    workspace: WORKSPACE,
-    scheme: SCHEME,
-    configuration: "Release",
-    export_method: export_method,
-    # The build number rides along in the same setting overrides. It is NOT a
-    # build_app option (there is no such option — the alternative is
-    # `increment_build_number`, which rewrites project.pbxproj); overriding it
-    # keeps CI's working tree clean, so nothing is left half-written into the
-    # project by a failed job. Info.plist's CFBundleVersion is already
-    # $(CURRENT_PROJECT_VERSION), so this flows straight into the built app.
-    xcargs: signing_args.join(" "),
-    export_options: {
-      signingStyle: "manual",
-      provisioningProfiles: { BUNDLE_ID => profile_name }
-    },
-    output_directory: File.join(REPO_ROOT, "build-ios"),
-    output_name: "SingZ.ipa"
-  )
+  archive_path = File.join(REPO_ROOT, "build-ios/SingZ-native.xcarchive")
+  native_inputs = nil
+  begin
+    native_inputs = SingzIncrementalArchive.fingerprint(REPO_ROOT)
+  rescue => error
+    UI.important("Native cache unavailable; using full archive: #{error.message}")
+  end
+  build_options = {
+    workspace: WORKSPACE, scheme: SCHEME, configuration: "Release",
+    export_method: export_method, xcargs: signing_args.join(" "),
+    archive_path: archive_path,
+    export_options: { signingStyle: "manual", provisioningProfiles: { BUNDLE_ID => profile_name } },
+    output_directory: File.join(REPO_ROOT, "build-ios"), output_name: "SingZ.ipa"
+  }
+  reused = false
+  cached_archive = native_inputs && SingzIncrementalArchive.cached_archive(native_inputs)
+  if cached_archive && SingzIncrementalArchive.valid?(cached_archive, native_inputs)
+    begin
+      UI.message("Native inputs unchanged: rebundling JavaScript and exporting cached archive")
+      FileUtils.rm_rf(archive_path)
+      FileUtils.mkdir_p(File.dirname(archive_path))
+      FileUtils.cp_r(cached_archive, archive_path)
+      SingzIncrementalArchive.refresh(REPO_ROOT, archive_path, options[:build_number],
+        ENV["sigh_#{BUNDLE_ID}_#{type}_certificate-name"] || "Apple Distribution")
+      build_app(**build_options.merge(skip_build_archive: true))
+      reused = true
+    rescue => error
+      UI.important("Cached export failed; rebuilding: #{error.message}")
+      FileUtils.rm_f(SingzIncrementalArchive.receipt(archive_path))
+    end
+  end
+  unless reused
+    SingzAppBuildNumber.with_number(
+      File.join(IOS_DIR, "SingZPlayer.xcodeproj/project.pbxproj"), options[:build_number]
+    ) { build_app(**build_options) }
+    if native_inputs
+      begin
+        after = SingzIncrementalArchive.fingerprint(REPO_ROOT)
+        SingzIncrementalArchive.publish(archive_path, after) if after == native_inputs
+      rescue => error
+        UI.important("Native archive built successfully but could not be cached: #{error.message}")
+      end
+    end
+  end
 end
 
 

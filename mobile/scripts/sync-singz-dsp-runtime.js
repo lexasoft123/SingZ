@@ -6,15 +6,12 @@
  * read-only and ignored. Run with --check to fail on a stale/missing copy.
  */
 const {
-  chmodSync,
-  copyFileSync,
   existsSync,
-  mkdirSync,
   readFileSync,
   readdirSync,
-  rmSync,
 } = require('node:fs')
-const { dirname, join } = require('node:path')
+const { join } = require('node:path')
+const { createMirror } = require('./incremental-native-mirror.cjs')
 const { execFileSync } = require('node:child_process')
 const {
   iosAudioHostCallbackFiles,
@@ -79,16 +76,6 @@ const totalFiles = files.length + zcoreFiles.length + callbackFiles.length +
 execFileSync(process.execPath, [
   join(__dirname, 'check-native-component-sources.js'),
 ], { stdio: 'inherit' })
-
-const unlockTree = (dir) => {
-  if (!existsSync(dir)) return
-  chmodSync(dir, 0o755)
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const path = join(dir, entry.name)
-    if (entry.isDirectory()) unlockTree(path)
-    else chmodSync(path, 0o644)
-  }
-}
 
 const walk = (dir, actualFiles, relative = '') => {
   if (!existsSync(dir)) return
@@ -162,14 +149,9 @@ if (check) {
 }
 
 const materialize = (from, to, expectedFiles) => {
-  unlockTree(to)
-  rmSync(to, { recursive: true, force: true })
-  for (const relative of expectedFiles) {
-    const destination = join(to, relative)
-    mkdirSync(dirname(destination), { recursive: true })
-    copyFileSync(join(from, relative), destination)
-    chmodSync(destination, 0o444)
-  }
+  const mirror = createMirror(to)
+  for (const relative of expectedFiles) mirror.copy(join(from, relative), join(to, relative))
+  mirror.finish()
 }
 materialize(sourceRoot, destinationRoot, files)
 materialize(zcoreSourceRoot, zcoreDestinationRoot, zcoreFiles)

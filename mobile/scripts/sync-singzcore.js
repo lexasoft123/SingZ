@@ -11,9 +11,10 @@
  * this + `pod install` (with a SingzCore.podspec version bump so the glob
  * re-evaluates) or Xcode keeps building the stale copy.
  */
-const { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync } = require('node:fs')
+const { existsSync, mkdirSync, readdirSync } = require('node:fs')
+const { copyFileIfChanged, createMirror } = require('./incremental-native-mirror.cjs')
 const { execFileSync } = require('node:child_process')
-const { dirname, join } = require('node:path')
+const { dirname, join, sep } = require('node:path')
 const {
   iosAudioHostCallbackFiles,
   zcoreDeviceCallbackFiles,
@@ -34,20 +35,16 @@ execFileSync(process.execPath, [
   join(__dirname, 'check-native-component-sources.js'),
 ], { stdio: 'inherit' })
 
-// The previous materialization is intentionally read-only. Some Node/macOS
-// combinations refuse recursive removal of those files even though the parent
-// directory is writable, so explicitly unlock only this generated tree.
-const unlockTree = (dir) => {
-  if (!existsSync(dir)) return
-  chmodSync(dir, 0o755)
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const path = join(dir, entry.name)
-    if (entry.isDirectory()) unlockTree(path)
-    else chmodSync(path, 0o644)
+// Track the exact allowlisted files without deleting identical native inputs.
+const mirrors = new Map()
+const mirror = root => { const value = createMirror(root); mirrors.set(root, value); return value }
+mirror(dst)
+const copyNativeFile = (from, to) => {
+  for (const [root, value] of mirrors) {
+    if (to.startsWith(root + sep)) return value.copy(from, to)
   }
+  return copyFileIfChanged(from, to, false)
 }
-unlockTree(dst)
-rmSync(dst, { recursive: true, force: true })
 let n = 0
 const copyTree = (from, to, accept, relative = '') => {
   mkdirSync(to, { recursive: true })
@@ -56,8 +53,7 @@ const copyTree = (from, to, accept, relative = '') => {
     if (e.isDirectory()) {
       copyTree(join(from, e.name), join(to, e.name), accept, entryRelative)
     } else if (accept(e.name, entryRelative)) {
-      copyFileSync(join(from, e.name), join(to, e.name))
-      chmodSync(join(to, e.name), 0o444)
+      copyNativeFile(join(from, e.name), join(to, e.name))
       n++
     }
   }
@@ -83,8 +79,7 @@ copyTree(join(src, 'platform', 'ios'), join(dst, 'platform', 'ios'),
 // Phase 2 capture analysis only. The callback-safe runtime and decoded source
 // now belong to the isolated SingzDspRuntime component; this compatibility pod
 // must not compile a second copy of their symbols.
-unlockTree(dspDst)
-rmSync(dspDst, { recursive: true, force: true })
+mirror(dspDst)
 const dspAllowlist = [
   'include/zdsp/types.h',
   'include/zdsp/events.h',
@@ -106,8 +101,7 @@ const dspAllowlist = [
 for (const relative of dspAllowlist) {
   const target = join(dspDst, relative)
   mkdirSync(dirname(target), { recursive: true })
-  copyFileSync(join(dspSrc, relative), target)
-  chmodSync(target, 0o444)
+  copyNativeFile(join(dspSrc, relative), target)
   n++
 }
 
@@ -117,8 +111,7 @@ for (const relative of dspAllowlist) {
 // compile, and the include/ tree is what <FLAC/…> resolves against.
 const flacSrc = join(repoRoot, 'third_party', 'native', 'flac')
 const flacDst = join(mobileRoot, 'ios', 'SingzCore', 'flac')
-unlockTree(flacDst)
-rmSync(flacDst, { recursive: true, force: true })
+mirror(flacDst)
 copyTree(flacSrc, flacDst, name => /\.(c|h)$/.test(name))
 
 // dr_mp3, the MP3 frame decoder under zcore's native MP3 support. Header only:
@@ -127,15 +120,13 @@ copyTree(flacSrc, flacDst, name => /\.(c|h)$/.test(name))
 // header search path, as CMake does.
 const drMp3Src = join(repoRoot, 'third_party', 'native', 'dr_mp3')
 const drMp3Dst = join(mobileRoot, 'ios', 'SingzCore', 'dr_mp3')
-unlockTree(drMp3Dst)
-rmSync(drMp3Dst, { recursive: true, force: true })
+mirror(drMp3Dst)
 copyTree(drMp3Src, drMp3Dst, name => name === 'dr_mp3.h')
 
 // These files must be inside the final IPA, not merely beside the source.
 // Materialize them under the pod root so CocoaPods' resource bundle owns the
 // exact notice/license/provenance records checked by the mobile verifier.
-unlockTree(complianceDst)
-rmSync(complianceDst, { recursive: true, force: true })
+mirror(complianceDst)
 mkdirSync(complianceDst, { recursive: true })
 for (const name of [
   'NOTICE-FFMPEG.md',
@@ -143,14 +134,12 @@ for (const name of [
   'FFMPEG-SHA256SUMS',
 ]) {
   const target = join(complianceDst, name)
-  copyFileSync(join(repoRoot, 'third_party', name), target)
-  chmodSync(target, 0o444)
+  copyNativeFile(join(repoRoot, 'third_party', name), target)
   n++
 }
 {
   const target = join(complianceDst, 'profile.json')
-  copyFileSync(join(repoRoot, 'third_party', 'ffmpeg-codec', 'profile.json'), target)
-  chmodSync(target, 0o444)
+  copyNativeFile(join(repoRoot, 'third_party', 'ffmpeg-codec', 'profile.json'), target)
   n++
 }
 const selectionReceipt = join(
@@ -159,16 +148,16 @@ const selectionReceipt = join(
 )
 if (existsSync(selectionReceipt)) {
   const target = join(complianceDst, 'singz-ffmpeg-selection.json')
-  copyFileSync(selectionReceipt, target)
-  chmodSync(target, 0o444)
+  copyNativeFile(selectionReceipt, target)
   n++
 }
+for (const value of mirrors.values()) value.finish()
 console.log(`sync-singzcore: ${n} files → ios/SingzCore/{core,dsp,flac,dr_mp3,compliance}/`)
 
 // One authoritative model artifact for both native mobile packages.
 for (const destination of [join(repoRoot, 'mobile/ios/FolderAccess/Models'), join(repoRoot, 'mobile/android/app/src/main/assets/pitch')]) {
   mkdirSync(destination, { recursive: true })
-  copyFileSync(join(repoRoot, 'assets/pitch/crepe-tiny.bin'), join(destination, 'crepe-tiny.bin'))
-  copyFileSync(join(repoRoot, 'assets/pitch/torchcrepe-LICENSE.txt'), join(destination, 'torchcrepe-LICENSE.txt'))
-  copyFileSync(join(repoRoot, 'assets/pitch/README.md'), join(destination, 'README.txt'))
+  copyNativeFile(join(repoRoot, 'assets/pitch/crepe-tiny.bin'), join(destination, 'crepe-tiny.bin'))
+  copyNativeFile(join(repoRoot, 'assets/pitch/torchcrepe-LICENSE.txt'), join(destination, 'torchcrepe-LICENSE.txt'))
+  copyNativeFile(join(repoRoot, 'assets/pitch/README.md'), join(destination, 'README.txt'))
 }
