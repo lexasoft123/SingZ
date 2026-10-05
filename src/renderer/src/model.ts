@@ -1,3 +1,4 @@
+import { restoreTrainingSound, type TrainingSound } from '../../shared/training-sound'
 import { STEM_META, CUSTOM_COLORS as KIT_CUSTOM_COLORS } from '@singz/ui/stems'
 import type { DesktopPlaybackProvider, StemName } from '../../shared/types'
 import { t, type Key } from './i18n'
@@ -160,6 +161,7 @@ export interface AudioPrefs {
   master?: number
   /** Reference-tone gain shared by every exercise, stored with app audio prefs. */
   referenceVolume?: number
+  trainingSound?: TrainingSound
 }
 
 /** Clamp stored audio prefs — ids are opaque non-empty strings, and the
@@ -214,7 +216,8 @@ export function sanitizeAudioPrefs(raw: unknown): AudioPrefs {
     ...(r.nativePlayback === true ? { nativePlayback: true } : {}),
     ...(nativeAudioProvider ? { nativeAudioProvider } : {}),
     ...(master === undefined ? {} : { master }),
-    ...(referenceVolume === undefined ? {} : { referenceVolume })
+    ...(referenceVolume === undefined ? {} : { referenceVolume }),
+    ...(r.trainingSound === undefined ? {} : { trainingSound: restoreTrainingSound(r.trainingSound) })
   }
 }
 

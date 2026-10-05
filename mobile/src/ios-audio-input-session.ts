@@ -27,6 +27,8 @@ export interface IosAudioSessionOwner {
 type OwnedSessionOptions = Parameters<IosAudioSessionOwner['setAudioSessionOptions']>[0]
 
 export interface IosAudioInputLeaseNative {
+  selectBuiltInRoute?(): Promise<string>
+  selectCarPlayRoute?(): Promise<string>
   prepareCapturePreferences(
     deviceUid: string,
     minimumChannels: number,
@@ -51,6 +53,7 @@ export interface IosAudioInputLeaseNative {
 export interface IosAudioInputLease {
   /** Ownership generation stamped onto every zcore/zdsp frame. */
   readonly generation: number
+  readonly routeKind?: 'system' | 'built-in' | 'carplay'
   release(): Promise<void>
 }
 
@@ -106,6 +109,10 @@ export interface IosAudioInputState {
 export interface AcquireIosAudioInputOptions {
   /** Portable `ios:<AVAudioSession port UID>` selected by the user. */
   deviceUid?: string
+  fallbackToBuiltIn?: boolean
+  preferBuiltIn?: boolean
+  preferCarPlay?: boolean
+  shouldContinue?: () => boolean
   /** Zero-based input lane; channel 2 requests at least three hardware lanes. */
   channel?: number
   /** True only from the user gesture that is allowed to present the prompt. */
@@ -155,6 +162,8 @@ const acquisitionAndRestorationError = (
   ;(combined as Error & { cause?: unknown }).cause = acquisitionError
   return combined
 }
+
+class RecoverableIosRouteError extends Error {}
 
 class IosAudioSessionRestoreError extends Error {
   constructor(
@@ -215,7 +224,18 @@ export class IosAudioInputSessionCoordinator {
     private readonly native: IosAudioInputLeaseNative
   ) {}
 
-  acquire(options: AcquireIosAudioInputOptions = {}): Promise<IosAudioInputLease> {
+  async acquire(options: AcquireIosAudioInputOptions = {}): Promise<IosAudioInputLease> {
+    try {
+      return await this.acquireOnce(options)
+    } catch (error) {
+      if (options.shouldContinue?.() === false || !options.fallbackToBuiltIn || options.preferBuiltIn ||
+          !(error instanceof RecoverableIosRouteError)) throw error
+      log('mic', 'audio route unavailable · switching to built-in microphone and speaker')
+      return this.acquireOnce({ ...options, deviceUid: undefined, preferBuiltIn: true, preferCarPlay: false })
+    }
+  }
+
+  private acquireOnce(options: AcquireIosAudioInputOptions): Promise<IosAudioInputLease> {
     return this.exclusive(async () => {
       if (this.state?.kind === 'recovery')
         throw new Error('The previous iOS audio session restoration must be retried')
@@ -249,6 +269,7 @@ export class IosAudioInputSessionCoordinator {
         // RNAudioAPI applies changed options with error:nil when its cached
         // session is active. Deactivate first so reactivation reports failure.
         transitionStarted = true
+        if (options.shouldContinue?.() === false) throw new Error('iOS audio acquisition cancelled')
         log('mic', 'iOS acquisition · deactivating playback')
         await this.owner.setAudioSessionActivity(false)
         log('mic', 'iOS acquisition · configuring capture')
@@ -259,10 +280,18 @@ export class IosAudioInputSessionCoordinator {
 
         const devices = await this.owner.getDevicesInfo()
         context.previousInput = devices.currentInputs[0]?.id
-        context.selectedInput = rawDeviceUid(options.deviceUid) ?? context.previousInput
+        if (options.preferBuiltIn && !this.native.selectBuiltInRoute)
+          throw new Error('This iOS build does not support built-in audio fallback')
+        if (options.preferCarPlay && !this.native.selectCarPlayRoute)
+          throw new Error('This iOS build does not support CarPlay audio return')
+        context.selectedInput = options.preferCarPlay
+          ? rawDeviceUid(await this.native.selectCarPlayRoute?.())
+          : options.preferBuiltIn
+          ? rawDeviceUid(await this.native.selectBuiltInRoute?.())
+          : rawDeviceUid(options.deviceUid) ?? context.previousInput
         if (!context.selectedInput)
           throw new Error('iOS did not activate an input route')
-        if (context.selectedInput !== context.previousInput)
+        if (!options.preferBuiltIn && !options.preferCarPlay && context.selectedInput !== context.previousInput)
           await this.owner.setInputDevice(context.selectedInput)
 
         const portableUid = portableDeviceUid(context.selectedInput)
@@ -277,6 +306,7 @@ export class IosAudioInputSessionCoordinator {
         if (!prepared.ok)
           throw new Error(prepared.error ?? 'Could not prepare iOS capture preferences')
         await this.native.verifyCaptureSession(portableUid, minimumChannels)
+        if (options.shouldContinue?.() === false) throw new Error('iOS audio acquisition cancelled')
         context.captureGeneration = this.nextCaptureGeneration++
         await this.startCaptureWithRouteRetry(
           context,
@@ -299,12 +329,17 @@ export class IosAudioInputSessionCoordinator {
             : null
           throw acquisitionAndRestorationError(acquisitionError, restorationError)
         }
+        // Only a fully restored route failure may fall back. Cleanup failures,
+        // permission denial and calls must never open another capture owner.
+        if (/iOS.*(?:route|device|(?:input|microphone).*unavailable)/i.test(errorMessage(acquisitionError)))
+          throw new RecoverableIosRouteError(errorMessage(acquisitionError))
         throw acquisitionError
       }
 
       let released = false
       return {
         generation: context.captureGeneration,
+        routeKind: options.preferCarPlay ? 'carplay' : options.preferBuiltIn ? 'built-in' : 'system',
         release: async (): Promise<void> => {
           if (released) return
           await this.exclusive(async () => {

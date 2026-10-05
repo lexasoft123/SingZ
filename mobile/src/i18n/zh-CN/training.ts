@@ -1,8 +1,36 @@
 /* 简体中文 — the `training` strings, typed against English. */
-import type { training as en } from '../en/training'
+import type {
+ training as en } from '../en/training'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const training: Translation<typeof en> = {
+  'phone.training.soundSettingsSaved': '声音和音量设置适用于所有训练练习。',
+  'phone.training.soundLabBack': '返回',
+  'phone.training.soundLabTitle': '乐器试听',
+  'phone.training.soundLabHelp': '比较不同音高的乐器。本测试不计入练习进度。',
+  'phone.training.soundLabPitch': '音高',
+  'phone.training.soundLabLoading': '加载中…',
+  'phone.training.soundLabPlay': '播放音符',
+  'phone.training.soundLabPhrase': '播放三个音符',
+  'phone.training.soundLabStop': '停止',
+
+  'phone.training.soundSettings': '声音设置',
+  'phone.training.soundSettingsHint': '声音和音量 · 适用于所有训练',
+  'phone.training.soundType': '乐器',
+  'phone.training.sound.piano': '钢琴',
+  'phone.training.sound.electric': '电钢琴',
+  'phone.training.sound.guitar': '尼龙弦吉他',
+  'phone.training.sound.organ': '管风琴',
+  'phone.training.dailyRecommendation': '建议每天进行 1–2 轮短练习，中间休息。重复练习会换调，额外轮次可自由选择。',
+  'phone.training.dailyActivityHelp': '同一天的多次练习只计为一个练习日。',
+  'phone.training.dailyActivityTotals': '{sessions} 次练习 · {exercises} 个练习题',
+  'phone.training.dailyActivityTitle': '按日期查看练习',
+  'phone.training.matchedExercisesHelp': '练习中的每个音都达到保持要求后，才算完成。跳过的练习单独显示。',
+  'phone.training.matchedExercises': '已完成的练习',
+  'phone.training.metricMatched': '已完成',
+  'phone.training.metricSkipped': '已跳过',
+  'phone.training.pause': '暂停',
+  'phone.training.paused': '已暂停',
   'phone.training.repeatN': '第 {n} / 3 次',
   'phone.training.intervalFindHelp': '听第一个音，再唱出两个音。',
   'phone.training.recordingTools': '录音工具',
@@ -75,6 +103,9 @@ export const training: Translation<typeof en> = {
   // ── errors ──
   'phone.training.loadError': '无法加载训练进度：{detail}',
   'phone.training.interrupted': '音频被中断了。准备好后点按“开始”。',
+  'phone.training.routeReturning': 'CarPlay 已恢复。正在重新连接…',
+  'phone.training.routeReconnecting': '麦克风线路已更改。正在重新连接…',
+  'phone.training.routeChanged': '麦克风线路已更改。点按“开始”重试。',
   'phone.training.micStopped': '麦克风已停止。点按“开始”重试。',
   'phone.training.micUnavailable': '此设备上无法使用原生音频输入。',
   'phone.training.micPermissionOff': '麦克风访问已关闭。请在设置中允许，然后再次点按“开始”。',

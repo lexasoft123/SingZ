@@ -29,6 +29,10 @@ export const SmoothPitchMeter = React.memo(function SmoothPitchMeter(props: Pitc
     return () => animation?.stop()
   }, [position, x, props.cents === null])
   useEffect(() => {
+    if (props.progress >= 1 || props.progress <= 0) {
+      progress.setValue(Math.max(0, Math.min(1, props.progress)))
+      return
+    }
     const animation = Animated.timing(progress, {
       toValue: Math.max(0, Math.min(1, props.progress)), duration: 80,
       easing: Easing.linear, useNativeDriver: true, isInteraction: false

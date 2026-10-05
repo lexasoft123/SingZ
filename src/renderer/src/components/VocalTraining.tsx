@@ -1,5 +1,9 @@
+import type { IconName, IconProps } from '@singz/ui/icons'
+import { TRAINING_SOUNDS, type TrainingSound } from '../../../shared/training-sound'
 import { trainingRangeNotice } from '../../../shared/training-session'
 import React, {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -13,7 +17,7 @@ import React, {
 import { keyLabel } from '../../../shared/music-labels'
 import { keyName, midiNoteName } from '../../../shared/music-theory'
 import { summarizeTrainingProgress, type TrainingProgress, type TrainingCompletionReceipt } from '../../../shared/training-progress'
-import { programLessonSetup, restoreTrainingProgram, selectTrainingProgramLevel, trainingProgramProgress, trainingPracticeStreak, type TrainingProgram, type ProgramLesson, type TrainingLevel } from '../training-ui-state'
+import { programLessonSetup, restoreTrainingProgram, selectTrainingProgramLevel, trainingProgramProgress, trainingProgramPracticeStreak, type TrainingProgram, type ProgramLesson, type TrainingLevel } from '../training-ui-state'
 import { intervalLabel as musicalIntervalLabel } from '../../../shared/music-labels'
 import type { TrainingPitchObservation } from '../../../shared/training-scoring'
 import { scoreCompletedTrainingTarget } from '../training-practice'
@@ -98,6 +102,8 @@ interface VocalTrainingProps {
   /** Provenance-specific guidance for the app-level lease, when known. */
   readonly audioLeaseCopy?: string
   readonly onSetupChange: (patch: Partial<DesktopTrainingSetup>) => void
+  readonly trainingSound: TrainingSound
+  readonly onTrainingSoundChange: (sound: TrainingSound) => void
   readonly referenceVolume: number
   readonly onReferenceVolumeChange: (volume: number) => void
   readonly progress: TrainingProgress
@@ -133,6 +139,14 @@ interface ActiveDesktopVocalRun {
   activeTarget: number
   targetStartedAtMs: number
   completed: boolean
+}
+
+const LazyIcon = lazy(() => import('@singz/ui/icons').then(module => ({ default: module.Icon })))
+function TrainingIcon(props: IconProps): React.JSX.Element {
+  return <Suspense fallback={null}><LazyIcon {...props} /></Suspense>
+}
+function exerciseIcon(exercise: TrainingExerciseSelection): IconName {
+  return exercise === 'note' ? 'note' : exercise === 'interval' ? 'interval' : exercise === 'chord-tone' ? 'chord' : exercise === 'mixed' ? 'settings' : exercise === 'arpeggio' ? 'arpeggio' : 'scale'
 }
 
 function trainingExercises(): readonly {
@@ -273,6 +287,8 @@ export default function VocalTraining({
   audioLeaseBlocked = false,
   audioLeaseCopy = trainingAudioLeaseCopy(),
   onSetupChange,
+  trainingSound,
+  onTrainingSoundChange,
   referenceVolume,
   onReferenceVolumeChange,
   progress,
@@ -363,8 +379,9 @@ export default function VocalTraining({
   useEffect(() => () => stopRuntime(true, false), [stopRuntime])
 
   useEffect(() => {
+    cues.setSound(trainingSound)
     cues.setReferenceVolume(practiceSettings.referenceVolume)
-  }, [cues, practiceSettings.referenceVolume])
+  }, [cues, practiceSettings.referenceVolume, trainingSound])
 
   useEffect(() => {
     if (typeof localStorage !== 'undefined')
@@ -865,8 +882,9 @@ export default function VocalTraining({
     }}
     onLesson={(lesson, day) => {
       stopRuntime()
-      onSetupChange(programLessonSetup(lesson, day, stateRef.current.setup))
-      dispatch({ type: 'choose-program-lesson', lesson, day })
+      const patch = programLessonSetup(lesson, day, stateRef.current.setup, receipts)
+      onSetupChange(patch)
+      dispatch({ type: 'choose-program-lesson', lesson, day, patch })
     }} />
 
   if (state.route === 'home') {
@@ -923,6 +941,14 @@ export default function VocalTraining({
     return (
       <TrainingSetup
         setup={state.setup}
+        trainingSound={trainingSound}
+        onTrainingSoundChange={sound => {
+          referenceTestGeneration.current++
+          cues.cancel()
+          cues.setSound(sound)
+          setTestingReference(false)
+          onTrainingSoundChange(sound)
+        }}
         practiceSettings={practiceSettings}
         error={state.error}
         micAvailable={hasMicrophoneApi()}
@@ -1072,7 +1098,7 @@ function TrainingHome({
           {programCard}
           <button type="button" className="vt-progress-entry" onClick={onProgress}>
             <span>
-              <strong>{t('training.home.progressEntry.label')}</strong>
+              <strong><TrainingIcon name="progress" size={22} /> {t('training.home.progressEntry.label')}</strong>
               <small>
                 {snapshot.sessions === 0
                   ? t('training.home.progressEntry.empty')
@@ -1102,7 +1128,7 @@ function TrainingHome({
                 onClick={() => onChoose(exercise.value)}
               >
                 <span className="vt-exercise-cue" aria-hidden>
-                  {exercise.cue}
+                  <TrainingIcon name={exerciseIcon(exercise.value)} size={30} />
                 </span>
                 <span className="vt-exercise-copy">
                   <strong>{exercise.label}</strong>
@@ -1248,6 +1274,8 @@ function ProgressWeakness({
 }
 
 function TrainingSetup({
+  trainingSound,
+  onTrainingSoundChange,
   setup,
   practiceSettings,
   error,
@@ -1262,6 +1290,8 @@ function TrainingSetup({
   onBack
 }: {
   setup: DesktopTrainingSetup
+  trainingSound: TrainingSound
+  onTrainingSoundChange: (sound: TrainingSound) => void
   practiceSettings: DesktopTrainingPracticeSettings
   error: string | null
   micAvailable: boolean
@@ -1466,10 +1496,16 @@ function TrainingSetup({
 
         <fieldset className="vt-fieldset vt-wide vt-practice-settings">
           <legend>{t('training.setup.legend.practiceSettings')}</legend>
+          <div className="vt-form-row">
+            <label htmlFor="vt-sound"><TrainingIcon name={trainingSound === 'electric' ? 'piano' : trainingSound} size={20} /> {t('training.setup.soundType')}</label>
+            <select id="vt-sound" value={trainingSound} onChange={event => onTrainingSoundChange(event.target.value as TrainingSound)}>
+              {TRAINING_SOUNDS.map(sound => <option key={sound} value={sound}>{t(`training.sound.${sound}`)}</option>)}
+            </select>
+          </div>
           <div className="vt-setting-block">
             <div className="vt-setting-head">
               <div>
-                <span>{t('training.setup.label.notePlaybackVolume')}</span>
+                <span><TrainingIcon name="speaker" size={18} /> {t('training.setup.label.notePlaybackVolume')}</span>
                 <strong>{referencePercent}%</strong>
               </div>
               <button
@@ -1807,10 +1843,7 @@ function TrainingSession({
             onClick={onReplay}
           >
             <span className="vt-transport-icon" aria-hidden>
-              <svg viewBox="0 0 24 24">
-                <path d="M20 11a8 8 0 1 1-2.34-5.66L20 7.68" />
-                <path d="M20 3v4.68h-4.68" />
-              </svg>
+              <TrainingIcon name="replay" size={24} />
             </span>
             <span className="vt-transport-label">{t('training.transport.label.replay')}</span>
           </button>
@@ -1834,9 +1867,7 @@ function TrainingSession({
             onClick={onSkip}
           >
             <span className="vt-transport-icon" aria-hidden>
-              <svg viewBox="0 0 24 24">
-                <path d="m9 6 6 6-6 6" />
-              </svg>
+              <TrainingIcon name="skip" size={24} />
             </span>
             <span className="vt-transport-label">{t('training.transport.label.skip')}</span>
           </button>
@@ -2376,7 +2407,7 @@ function TrainingProgramCard({ program, receipts, onLevel, onLesson }: {
 }): React.JSX.Element {
   const stages = program ? trainingProgramProgress(program, receipts) : []
   const next = stages.find(stage => !stage.done)
-  const streak = trainingPracticeStreak(receipts)
+  const streak = trainingProgramPracticeStreak(program, receipts)
   return <section className="vt-program" aria-label={t('training.program.heading')}>
     <h2>{t('training.program.heading')}</h2>
     <div className="vt-program-levels">

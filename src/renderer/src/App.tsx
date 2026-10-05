@@ -1,3 +1,4 @@
+import type { TrainingSound } from '../../shared/training-sound'
 import {
   Suspense,
   lazy,
@@ -745,6 +746,9 @@ export default function App(): React.JSX.Element {
       return withNative({ referenceVolume: DEFAULT_TRAINING_REFERENCE_VOLUME })
     }
   })
+  const changeTrainingSound = useCallback((trainingSound: TrainingSound) => {
+    setAudioPrefs(current => sanitizeAudioPrefs({ ...current, trainingSound }))
+  }, [])
   const changeTrainingReferenceVolume = useCallback((referenceVolume: number) => {
     setAudioPrefs((current) => sanitizeAudioPrefs({ ...current, referenceVolume }))
   }, [])
@@ -3989,6 +3993,8 @@ export default function App(): React.JSX.Element {
             ? trainingCleanupAudioBlockedCopy()
             : undefined}
           onSetupChange={changeDesktopTrainingSetup}
+          trainingSound={audioPrefs.trainingSound ?? 'piano'}
+          onTrainingSoundChange={changeTrainingSound}
           referenceVolume={audioPrefs.referenceVolume ?? DEFAULT_TRAINING_REFERENCE_VOLUME}
           onReferenceVolumeChange={changeTrainingReferenceVolume}
           progress={trainingProgress}

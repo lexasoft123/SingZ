@@ -1,8 +1,36 @@
 /* Русский — the `phone.training` strings, typed against English. */
-import type { training as en } from '../en/training'
+import type {
+ training as en } from '../en/training'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const training: Translation<typeof en> = {
+  'phone.training.soundSettingsSaved': 'Звук и громкость сохраняются для всех упражнений.',
+  'phone.training.soundLabBack': 'Назад',
+  'phone.training.soundLabTitle': 'Проверка инструментов',
+  'phone.training.soundLabHelp': 'Сравните инструменты на любой высоте. Проверка не учитывается в прогрессе практики.',
+  'phone.training.soundLabPitch': 'Высота',
+  'phone.training.soundLabLoading': 'Загрузка…',
+  'phone.training.soundLabPlay': 'Послушать ноту',
+  'phone.training.soundLabPhrase': 'Три ноты',
+  'phone.training.soundLabStop': 'Стоп',
+
+  'phone.training.soundSettings': 'Настройки звука',
+  'phone.training.soundSettingsHint': 'Звук и громкость · для всех тренировок',
+  'phone.training.soundType': 'Инструмент',
+  'phone.training.sound.piano': 'Фортепиано',
+  'phone.training.sound.electric': 'Электропиано',
+  'phone.training.sound.guitar': 'Нейлоновая гитара',
+  'phone.training.sound.organ': 'Орган',
+  'phone.training.dailyRecommendation': 'На день: 1–2 коротких занятия с перерывом. Повтор — в другой тональности; дополнительные занятия по желанию.',
+  'phone.training.dailyActivityHelp': 'Все занятия в одну дату считаются одним днём практики.',
+  'phone.training.dailyActivityTotals': 'Занятий: {sessions} · упражнений: {exercises}',
+  'phone.training.dailyActivityTitle': 'Практика по датам',
+  'phone.training.matchedExercisesHelp': 'Упражнение выполнено, когда все его ноты удержаны в целевом диапазоне. Пропущенные показаны отдельно.',
+  'phone.training.matchedExercises': 'Упражнений выполнено',
+  'phone.training.metricMatched': 'Выполнено',
+  'phone.training.metricSkipped': 'Пропущено',
+  'phone.training.pause': 'Пауза',
+  'phone.training.paused': 'На паузе',
   'phone.training.repeatN': 'Повтор {n} из 3',
   'phone.training.intervalFindHelp': 'Слушайте первую ноту. Спойте обе ноты.',
   'phone.training.recordingTools': 'Запись для диагностики',
@@ -75,6 +103,9 @@ export const training: Translation<typeof en> = {
   // ── errors ──
   'phone.training.loadError': 'Ошибка загрузки прогресса: {detail}',
   'phone.training.interrupted': 'Звук прервался. Нажмите «Начать», когда готовы.',
+  'phone.training.routeReturning': 'CarPlay снова доступен. Подключаемся…',
+  'phone.training.routeReconnecting': 'Микрофон переключился. Подключаемся снова…',
+  'phone.training.routeChanged': 'Микрофон переключился. Нажмите «Начать», чтобы повторить.',
   'phone.training.micStopped': 'Микрофон остановился. Нажмите «Начать» снова.',
   'phone.training.micUnavailable': 'Аудиовход недоступен на этом устройстве.',
   'phone.training.micPermissionOff': 'Микрофон выключен. Разрешите в настройках и нажмите «Начать» снова.',

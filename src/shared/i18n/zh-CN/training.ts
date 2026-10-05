@@ -3,6 +3,12 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  'training.setup.soundType': '乐器',
+  'training.sound.piano': '钢琴',
+  'training.sound.electric': '电钢琴',
+  'training.sound.guitar': '尼龙弦吉他',
+  'training.sound.organ': '管风琴',
+
   'training.program.intervalFocus': "练习音程",
   'training.program.growing': "逐步增加音程",
   'training.program.sets': "音程组",

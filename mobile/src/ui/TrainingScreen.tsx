@@ -1,4 +1,6 @@
-import { TrainingDashboard, PracticeWeek, programLessonLabel } from './TrainingDashboard'
+import { Icon } from '@singz/ui/native/icons'
+import { isTrainingInputRouteChange } from '../training/route-recovery'
+import { TrainingDashboard, DailyTrainingActivity, PracticeWeek, programLessonLabel } from './TrainingDashboard'
 import { scoreCompletedTrainingTarget } from '../training/completed-target'
 import { selectTrainingProgramLevel, programLessonSetup, qualifiesTrainingPracticeDay, type ProgramLesson } from '../training/program'
 import { TrainingLessonOverview } from './TrainingLessonOverview'
@@ -18,6 +20,7 @@ import {
   View,
   useWindowDimensions
 } from 'react-native'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { AudioManager } from 'react-native-audio-api'
 import { createNativeStackNavigator } from '@react-navigation/native-stack'
 import { Canvas, LinearGradient as SkLinearGradient, RadialGradient, Rect, vec } from '@shopify/react-native-skia'
@@ -78,10 +81,12 @@ import {
 } from '../training/runtime'
 import { t, tn } from '../i18n'
 import { log } from '../log'
-import { C, CircularArrowGlyph, MicGlyph, PlayPauseGlyph, white } from './bits'
+import { Bar, C, MicGlyph, PlayPauseGlyph, white } from './bits'
 import { TEST } from './testhooks'
 import { useTrainingSampleRecording } from '../training/use-sample-recording'
 import { SmoothPitchMeter } from './SmoothPitchMeter'
+import { TRAINING_SOUNDS, type TrainingSound } from '../training/sample-levels'
+import { TrainingSoundLab } from './TrainingSoundLab'
 import { AudioDiagnosticsScreen } from './AudioDiagnosticsScreen'
 import {
   ChoiceChip,
@@ -91,7 +96,8 @@ import {
   Hairline,
   ListEntry,
   PrimaryAction,
-  ReferenceControls,
+  RoundAction,
+  useNativeTheme,
   SettingsCard,
   SettingsRow,
   StickyActionFooter,
@@ -109,6 +115,8 @@ export interface MobileSongTrainingFacts {
 }
 
 interface ActiveVocalRun {
+  completionPending?: boolean
+  lockedAtTimestampMs?: number
   readonly generation: number
   readonly prompt: TrainingPrompt
   readonly responseStartEngineMs: number
@@ -125,7 +133,7 @@ interface ActiveVocalRun {
 const persistence = new MobileTrainingPersistence()
 const SCRIM_TOP = require('../../assets/bg/scrim-top.png')
 const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
-type TrainingStackParamList = { Home: undefined; Exercise: undefined; Progress: undefined; Diagnostics: undefined }
+type TrainingStackParamList = { Home: undefined; Exercise: undefined; Progress: undefined; Diagnostics: undefined; SoundSettings: undefined; SoundLab: undefined }
 const TrainingStack = createNativeStackNavigator<TrainingStackParamList>()
 /** Polls (80 ms each) a fresh capture gets before the screen is allowed to
  * report what it is hearing — about a second, which is long enough for both
@@ -190,12 +198,20 @@ export default function TrainingScreen({
   const micReports = useRef(true)
   const [activeTarget, setActiveTarget] = useState(0)
   const [singleNoteCountdown, setSingleNoteCountdown] = useState<number | null>(null)
+  const [trainingSound, setTrainingSound] = useState<TrainingSound>('piano')
   const [referenceVolume, setReferenceVolume] = useState(DEFAULT_TRAINING_REFERENCE_VOLUME)
   const [pitchWindowCents, setPitchWindowCents] = useState(DEFAULT_SINGLE_NOTE_PITCH_WINDOW_CENTS)
   const [testingReferenceTone, setTestingReferenceTone] = useState(false)
   const singleNoteTracker = useRef(new SingleNoteLockTracker())
   const vocalRun = useRef<ActiveVocalRun | null>(null)
   const autoStartedPrompt = useRef<string | null>(null)
+  const paused = useRef(false)
+  const [isPaused, setIsPaused] = useState(false)
+  const useBuiltInRoute = useRef(false)
+  const useCarPlayRoute = useRef(false)
+  const automaticRouteReturnAllowed = useRef(true)
+  const routeRecoveryAttempt = useRef<string | null>(null)
+  const pendingRouteRecovery = useRef<{ promptKey: string; generation: number } | null>(null)
   const sampleControls = useTrainingSampleRecording(active && !state.error && state.route === 'session' && state.session?.status !== 'completed')
   const window = useWindowDimensions()
 
@@ -205,6 +221,7 @@ export default function TrainingScreen({
     for (const timer of timers.current.splice(0)) clearTimeout(timer)
     vocalRun.current = null
     autoStartedPrompt.current = null
+    pendingRouteRecovery.current = null
     singleNoteTracker.current.reset()
     engine.cancelTrainingCues()
     cancelTrainingSpeech()
@@ -216,11 +233,36 @@ export default function TrainingScreen({
     setTestingReferenceTone(false)
   }, [engine, mic])
 
+  const recoverAudioRoute = useCallback((error: string, playbackFailure = false) => {
+    const current = stateRef.current
+    const session = current.session
+    const prompt = session?.prompts[session.currentIndex]
+    const promptKey = `${session?.id}:${session?.currentIndex}`
+    const excluded = [t('phone.app.engine.pausedInBackground'), t('phone.app.engine.outputOwnedBySong'), t('phone.app.engine.cueCancelled')]
+    const routeFailure = Platform.OS === 'ios' &&
+      (isTrainingInputRouteChange(error) || playbackFailure && !excluded.includes(error))
+    stopRuntime()
+    const recover = routeFailure && !!prompt && activeRef.current && !paused.current &&
+      prompt.taskMode !== 'identify' && routeRecoveryAttempt.current !== promptKey && !useBuiltInRoute.current
+    if (recover) {
+      useBuiltInRoute.current = true
+      useCarPlayRoute.current = false
+      routeRecoveryAttempt.current = promptKey
+      pendingRouteRecovery.current = { promptKey, generation: runGeneration.current }
+      log('training', `audio route failed · switching to built-in audio · prompt ${prompt.id} · ${error}`)
+    }
+    dispatch({ type: 'error', error: routeFailure
+      ? t(recover ? 'phone.training.routeReconnecting' : 'phone.training.routeChanged') : error })
+    dispatch({ type: 'interrupt' })
+  }, [stopRuntime])
+
   useEffect(() => {
     let mounted = true
     void persistence.load().then((loaded) => {
       if (!mounted) return
       setProgress(loaded.progress)
+      setTrainingSound(loaded.trainingSound)
+      engine.setTrainingSound(loaded.trainingSound)
       setReferenceVolume(loaded.referenceVolume)
       setPitchWindowCents(loaded.pitchWindowCents)
       singleNoteTracker.current.setPitchWindowCents(loaded.pitchWindowCents)
@@ -236,6 +278,9 @@ export default function TrainingScreen({
     const previous = wasActive.current
     wasActive.current = active
     if (previous && !active) {
+      automaticRouteReturnAllowed.current = false
+      paused.current = true
+      setIsPaused(true)
       stopRuntime()
       dispatch({ type: 'interrupt' })
     }
@@ -252,6 +297,9 @@ export default function TrainingScreen({
         activeRef.current &&
         trainingMustStopForAppState(next, mic.isRequestingPermission())
       ) {
+        automaticRouteReturnAllowed.current = false
+        paused.current = true
+        setIsPaused(true)
         stopRuntime()
         dispatch({ type: 'interrupt' })
       }
@@ -259,6 +307,7 @@ export default function TrainingScreen({
     const interruption = AudioManager.addSystemEventListener('interruption', ({ type, shouldResume }) => {
       log('training', `audio interruption ${type} · resume ${shouldResume} · ${stateRef.current.route}/${stateRef.current.phase} · mic owned ${microphoneOwned.current} · generation ${runGeneration.current}`)
       if (type !== 'began' || !activeRef.current) return
+      automaticRouteReturnAllowed.current = false
       stopRuntime()
       dispatch({ type: 'error', error: t('phone.training.interrupted') })
       dispatch({ type: 'interrupt' })
@@ -270,6 +319,36 @@ export default function TrainingScreen({
       void persistence.flush()
     }
   }, [mic, stopRuntime])
+
+  useEffect(() => {
+    if (Platform.OS !== 'ios') return
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let cancelled = false
+    let revision = 0
+    const eligible = () => !cancelled && activeRef.current && !paused.current &&
+      automaticRouteReturnAllowed.current && AppState.currentState === 'active' && useBuiltInRoute.current &&
+      stateRef.current.route === 'session' && stateRef.current.session?.status !== 'completed'
+    const listener = AudioManager.addSystemEventListener('routeChange', ({ reason }) => {
+      if (reason !== 'NewDeviceAvailable' || !eligible()) return
+      const ticket = ++revision
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        void AudioManager.getDevicesInfo().then(devices => {
+          if (ticket !== revision || !eligible() || !devices.availableInputs?.some(input => input.category === 'CarAudio')) return
+          const session = stateRef.current.session!
+          stopRuntime()
+          useBuiltInRoute.current = false
+          useCarPlayRoute.current = true
+          routeRecoveryAttempt.current = null
+          pendingRouteRecovery.current = { promptKey: `${session.id}:${session.currentIndex}`, generation: runGeneration.current }
+          log('training', 'CarPlay available again · returning audio to CarPlay')
+          dispatch({ type: 'error', error: t('phone.training.routeReturning') })
+          dispatch({ type: 'interrupt' })
+        }).catch(error => log('training', `CarPlay route check failed · ${String(error)}`, 'warn'))
+      }, 700)
+    })
+    return () => { cancelled = true; revision++; if (timer) clearTimeout(timer); listener?.remove() }
+  }, [stopRuntime])
 
   useEffect(() => {
     const session = state.session
@@ -312,6 +391,15 @@ export default function TrainingScreen({
     }
   }, [saveSetupPreferences])
 
+  const changeTrainingSound = useCallback((sound: TrainingSound) => {
+    referenceTestGeneration.current++
+    engine.cancelTrainingCues()
+    setTestingReferenceTone(false)
+    setTrainingSound(sound)
+    engine.setTrainingSound(sound)
+    persistence.saveTrainingSound(sound)
+  }, [engine])
+
   const changeReferenceVolume = useCallback((raw: number) => {
     const volume = clampTrainingReferenceVolume(raw)
     setReferenceVolume(volume)
@@ -351,6 +439,11 @@ export default function TrainingScreen({
   }, [engine])
 
   const startTraining = useCallback(() => {
+    paused.current = false
+    setIsPaused(false)
+    useBuiltInRoute.current = false
+    useCarPlayRoute.current = false
+    automaticRouteReturnAllowed.current = true
     referenceTestGeneration.current++
     engine.cancelTrainingCues()
     setTestingReferenceTone(false)
@@ -409,7 +502,7 @@ export default function TrainingScreen({
     const elapsedWallMs = Math.max(1, Date.now() - run.responseStartWallMs)
     const endMs = Math.max(
       run.targetStartEngineMs + 1,
-      captured.at(-1)?.timestampMs ?? run.responseStartEngineMs + elapsedWallMs
+      run.lockedAtTimestampMs ?? captured.at(-1)?.timestampMs ?? run.responseStartEngineMs + elapsedWallMs
     )
     log('training', `prompt ${run.prompt.id} · target ${run.activeTarget + 1} locked · MIDI ${run.prompt.targets[run.activeTarget].midi}`)
     run.targetWindows.push({
@@ -430,6 +523,8 @@ export default function TrainingScreen({
       finishVocalPrompt(run, 'locked')
       return
     }
+    run.completionPending = false
+    run.lockedAtTimestampMs = undefined
     run.activeTarget++
     run.reachedSoundPlayed = false
     // Keep the transition out of the next target window.
@@ -441,9 +536,7 @@ export default function TrainingScreen({
       void engine.playTrainingCues([cue]).then(result => {
         if (vocalRun.current !== run || run.generation !== runGeneration.current || !activeRef.current) return
         if (!result.ok) {
-          stopRuntime()
-          dispatch({ type: 'error', error: result.error })
-          dispatch({ type: 'interrupt' })
+          recoverAudioRoute(result.error, true)
           return
         }
         const endsAt = result.endsAt + engine.outputDisplayLatency + 0.15
@@ -459,13 +552,22 @@ export default function TrainingScreen({
     setLiveMidi(null)
     setActiveTarget(run.activeTarget)
     AccessibilityInfo.announceForAccessibility(t('phone.training.nextNote', { note: run.prompt.targets[run.activeTarget].noteName }))
-  }, [engine, finishVocalPrompt, mic, stopRuntime])
+  }, [engine, finishVocalPrompt, mic, recoverAudioRoute])
 
   const beginPrompt = useCallback(async () => {
     const current = stateRef.current
     const session = current.session
     const prompt = session?.prompts[session.currentIndex]
     if (!prompt || !activeRef.current) return
+    if (useBuiltInRoute.current && (paused.current || !automaticRouteReturnAllowed.current)) {
+      // A connection notification received while paused must not resume audio.
+      // On the user's Start gesture, try CarPlay again before built-in fallback.
+      useBuiltInRoute.current = false
+      useCarPlayRoute.current = true
+    }
+    paused.current = false
+    setIsPaused(false)
+    automaticRouteReturnAllowed.current = true
     // Manual recovery clears state.error before native microphone acquisition
     // resolves. Stamp the prompt first so the ready/no-error auto-start effect
     // cannot enqueue a second acquisition in that window.
@@ -492,15 +594,20 @@ export default function TrainingScreen({
       if (!fake) {
         if (!activeRef.current) return
         const result = microphoneOwned.current ? { ok: true as const } : await mic.start(() => engine.trainingCurrentTime * 1000, (error) => {
-          stopRuntime()
-          dispatch({ type: 'error', error })
-          dispatch({ type: 'interrupt' })
-        })
+          recoverAudioRoute(error)
+        }, useBuiltInRoute.current, useCarPlayRoute.current)
         if (!result.ok) {
-          if (result.kind !== 'interrupted') dispatch({ type: 'error', error: result.error })
+          if (result.kind !== 'interrupted') dispatch({ type: 'error', error: isTrainingInputRouteChange(result.error)
+            ? t('phone.training.routeChanged') : result.error })
           return
         }
-        if (generation === runGeneration.current && activeRef.current) microphoneOwned.current = true
+        if (generation === runGeneration.current && activeRef.current) {
+          microphoneOwned.current = true
+          if (mic.iosAudioRoute === 'built-in') {
+            useBuiltInRoute.current = true
+            useCarPlayRoute.current = false
+          }
+        }
       }
     }
     if (generation !== runGeneration.current || !activeRef.current) {
@@ -522,11 +629,7 @@ export default function TrainingScreen({
       return
     }
     if (!cueResult.ok) {
-      setSingleNoteCountdown(null)
-      microphoneOwned.current = false
-      await mic.stop()
-      dispatch({ type: 'error', error: cueResult.error })
-      dispatch({ type: 'interrupt' })
+      recoverAudioRoute(cueResult.error, true)
       return
     }
     // Highlight each target on its audible onset, including the final target
@@ -577,7 +680,22 @@ export default function TrainingScreen({
         })
       }
     }, cueDelay))
-  }, [completeVocalTarget, engine, mic, stopRuntime, pitchWindowCents])
+  }, [completeVocalTarget, engine, mic, stopRuntime, recoverAudioRoute, pitchWindowCents])
+
+  useEffect(() => {
+    const recovery = pendingRouteRecovery.current
+    if (!recovery || !active || state.route !== 'session' || state.phase !== 'ready') return
+    const timer = setTimeout(() => {
+      if (pendingRouteRecovery.current !== recovery) return
+      pendingRouteRecovery.current = null
+      const current = stateRef.current
+      if (!activeRef.current || AppState.currentState !== 'active' ||
+          runGeneration.current !== recovery.generation || current.route !== 'session' ||
+          `${current.session?.id}:${current.session?.currentIndex}` !== recovery.promptKey) return
+      void beginPrompt()
+    }, 350)
+    return () => clearTimeout(timer)
+  }, [active, beginPrompt, state.error, state.phase, state.route])
 
   useEffect(() => {
     const session = state.session
@@ -587,6 +705,8 @@ export default function TrainingScreen({
       state.route !== 'session' ||
       state.phase !== 'ready' ||
       state.error !== null ||
+      paused.current ||
+      !automaticRouteReturnAllowed.current ||
       !session ||
       !prompt
     ) return
@@ -623,6 +743,7 @@ export default function TrainingScreen({
         )
       }
       const run = vocalRun.current
+      if (run?.completionPending) return
       if (!run) {
         if (updateUi) setLiveMidi(reading.confidence >= (reading.minConfidence ?? SINGLE_NOTE_MIN_CONFIDENCE) ? reading.midi : null)
         return
@@ -652,7 +773,12 @@ export default function TrainingScreen({
         setLiveMidi(next.displayMidi)
         setSingleNoteLock(next)
       }
-      if (next.locked) completeVocalTarget(run)
+      if (next.locked) {
+        // Let the completed meter render before replacing its target.
+        run.completionPending = true
+        run.lockedAtTimestampMs = reading.timestampMs
+        timers.current.push(setTimeout(() => completeVocalTarget(run), 250))
+      }
     }, 20)
     return () => clearInterval(timer)
   }, [active, completeVocalTarget, engine, mic, pitchWindowCents, state.phase, state.session?.config.taskMode])
@@ -712,11 +838,12 @@ export default function TrainingScreen({
 
   useEffect(() => {
     if (!TEST) return
-    TEST.trainingState = { route: state.route, phase: state.phase, setup: state.setup, activeTarget, countdown: singleNoteCountdown, session: state.session, error: state.error, program: persistence.program, programProgress: persistence.programProgress }
+    TEST.trainingState = { route: state.route, phase: state.phase, trainingSound, setup: state.setup, activeTarget, countdown: singleNoteCountdown, session: state.session, error: state.error, program: persistence.program, programProgress: persistence.programProgress }
+    TEST.trainingChangeSound = changeTrainingSound
     TEST.trainingStart = startTraining
     TEST.trainingReplay = beginPrompt
     TEST.trainingHome = () => { stopRuntime(); dispatch({ type: 'home' }) }
-  }, [state, progress, activeTarget, singleNoteCountdown, startTraining, beginPrompt, stopRuntime])
+  }, [state, progress, trainingSound, changeTrainingSound, activeTarget, singleNoteCountdown, startTraining, beginPrompt, stopRuntime])
 
   const effectiveKey = useMemo(
     () => song ? effectiveSongPreparationKey(song.keyInfo, song.transpose, song.keyDetectVersion) : null,
@@ -746,6 +873,8 @@ export default function TrainingScreen({
       >
         <TrainingStack.Screen name="Home" options={{ gestureEnabled: false }}>
           {({ navigation }) => {
+            if (TEST) TEST.trainingSoundLab = () => { stopRuntime(); navigation.navigate('SoundLab') }
+            if (TEST) TEST.trainingSoundSettings = () => { stopRuntime(); navigation.navigate('SoundSettings') }
             if (TEST) TEST.trainingConfigure = (patch: Partial<MobileTrainingSetup>) => {
               dispatch({ type: 'choose-exercise', exercise: patch.exercise ?? stateRef.current.setup.exercise })
               changeSetup(patch)
@@ -755,7 +884,7 @@ export default function TrainingScreen({
               progress={progress}
               onProgramLesson={(lesson, day) => {
                 const setup = { ...stateRef.current.setup, tonicPc: progress.profile.tonicPc }
-                changeSetup(programLessonSetup(lesson, day, setup))
+                changeSetup(programLessonSetup(lesson, day, setup, persistence.completionReceipts))
                 dispatch({ type: 'choose-exercise', exercise: lesson.exercise })
                 navigation.navigate('Exercise')
               }}
@@ -776,6 +905,7 @@ export default function TrainingScreen({
                 dispatch({ type: 'prepare-song', sourceSongId: song.sourceSongId, songName: song.songName, choice, key: effectiveKey, seed: `${song.sourceSongId}:${choice}:${Date.now()}` })
                 navigation.navigate('Exercise')
               }}
+              onSoundSettings={() => { stopRuntime(); navigation.navigate('SoundSettings') }}
               onDiagnostics={() => { stopRuntime(); navigation.navigate('Diagnostics') }}
               onProgress={() => {
                 dispatch({ type: 'progress' })
@@ -808,7 +938,9 @@ export default function TrainingScreen({
                 <TrainingSetup
                   setup={state.setup}
                   error={state.error}
-                  referenceVolume={referenceVolume}
+                  trainingSound={trainingSound}
+      onTrainingSoundChange={changeTrainingSound}
+      referenceVolume={referenceVolume}
                   pitchWindowCents={pitchWindowCents}
                   testingReferenceTone={testingReferenceTone}
                   onReferenceVolumeChange={changeReferenceVolume}
@@ -823,7 +955,12 @@ export default function TrainingScreen({
             if (state.route === 'summary' && state.session) {
               return <View style={{ flex: 1 }}><TrainingSummary session={state.session} onHome={close} onBackToSong={backToSong} />{sampleControls}</View>
             }
-            return <LiveTrainingContext.Provider value={liveReadings}><TrainingSessionView sampleControls={sampleControls} state={state} liveMidi={null} singleNoteCountdown={singleNoteCountdown} pitchWindowCents={pitchWindowCents} activeTarget={activeTarget} onBegin={beginPrompt} onSkipSingleNote={() => { const run = vocalRun.current; if (run) finishVocalPrompt(run, 'skip') }} onIdentify={submitIdentify} onNext={() => dispatch({ type: 'next' })} onExit={close} onBackToSong={backToSong} /></LiveTrainingContext.Provider>
+            return <LiveTrainingContext.Provider value={liveReadings}><TrainingSessionView sampleControls={sampleControls} state={state} liveMidi={null} singleNoteCountdown={singleNoteCountdown} pitchWindowCents={pitchWindowCents} activeTarget={activeTarget} paused={isPaused} onPause={() => {
+              paused.current = true
+              setIsPaused(true)
+              stopRuntime()
+              dispatch({ type: 'interrupt' })
+            }} onBegin={beginPrompt} onSkipSingleNote={() => { const run = vocalRun.current; if (run) finishVocalPrompt(run, 'skip') }} onIdentify={submitIdentify} onNext={() => dispatch({ type: 'next' })} onExit={close} onBackToSong={backToSong} /></LiveTrainingContext.Provider>
           }}
         </TrainingStack.Screen>
         <TrainingStack.Screen
@@ -837,7 +974,14 @@ export default function TrainingScreen({
           {({ navigation }) => <TrainingProgressView progress={progress} onBack={() => navigation.goBack()} />}
         </TrainingStack.Screen>
         <TrainingStack.Screen name="Diagnostics" listeners={{ beforeRemove: stopRuntime }}>
-          {({ navigation }) => <AudioDiagnosticsScreen engine={engine} active={active} onBack={() => navigation.goBack()} />}
+          {({ navigation }) => <AudioDiagnosticsScreen engine={engine} active={active} onBack={() => navigation.goBack()} onSoundLab={() => navigation.navigate('SoundLab')} />}
+        </TrainingStack.Screen>
+        <TrainingStack.Screen name="SoundLab" listeners={{ beforeRemove: stopRuntime }}>
+          {({ navigation }) => <TrainingSoundLab engine={engine} active={active} onBack={() => navigation.goBack()} />}
+        </TrainingStack.Screen>
+        <TrainingStack.Screen name="SoundSettings" listeners={{ beforeRemove: stopRuntime }}>
+          {({ navigation }) => <TrainingSoundSettingsView onBack={() => navigation.goBack()} setup={state.setup} trainingSound={trainingSound} onTrainingSoundChange={changeTrainingSound} referenceVolume={referenceVolume} pitchWindowCents={pitchWindowCents} testingReferenceTone={testingReferenceTone} onReferenceVolumeChange={changeReferenceVolume} onPitchWindowChange={changePitchWindow} onTestReferenceTone={testReferenceTone} />}
+
         </TrainingStack.Screen>
       </TrainingStack.Navigator>
     </View>
@@ -886,7 +1030,7 @@ const TrainingBackdrop = React.memo(function TrainingBackdrop({ width, height }:
   )
 })
 
-function TrainingHome({ progress, onProgramLesson, song, effectiveKey, onChoose, onPrepare, onProgress, onDiagnostics }: {
+function TrainingHome({ progress, onProgramLesson, song, effectiveKey, onChoose, onPrepare, onProgress, onDiagnostics, onSoundSettings }: {
   progress: TrainingProgress
   onProgramLesson: (lesson: ProgramLesson, day: number) => void
   song: MobileSongTrainingFacts | null
@@ -895,6 +1039,7 @@ function TrainingHome({ progress, onProgramLesson, song, effectiveKey, onChoose,
   onPrepare: (choice: SongPreparationChoice) => void
   onProgress: () => void
   onDiagnostics: () => void
+  onSoundSettings: () => void
 }): React.JSX.Element {
   const snapshot = summarizeTrainingProgress(progress)
   const landed = snapshot.landedRate === null ? '—' : t('phone.training.landedPercent', { pct: Math.round(snapshot.landedRate * 100) })
@@ -927,6 +1072,8 @@ function songPreparationChoiceLabel(choice: SongPreparationChoice): string {
 }
 
 interface ReferenceSoundSettingsProps {
+  readonly trainingSound?: TrainingSound
+  readonly onTrainingSoundChange?: (sound: TrainingSound) => void
   readonly referenceVolume: number
   readonly pitchWindowCents: number
   readonly testingReferenceTone: boolean
@@ -946,6 +1093,8 @@ interface TrainingSetupProps extends ReferenceSoundSettingsProps {
 export function TrainingSetup({
   setup,
   error,
+  trainingSound = 'piano',
+  onTrainingSoundChange,
   referenceVolume,
   pitchWindowCents,
   testingReferenceTone,
@@ -960,6 +1109,8 @@ export function TrainingSetup({
     <SingleNoteSetup
       setup={setup}
       error={error}
+      trainingSound={trainingSound}
+      onTrainingSoundChange={onTrainingSoundChange}
       referenceVolume={referenceVolume}
       pitchWindowCents={pitchWindowCents}
       testingReferenceTone={testingReferenceTone}
@@ -976,6 +1127,8 @@ export function TrainingSetup({
 export function SingleNoteSetup({
   setup,
   error,
+  trainingSound = 'piano',
+  onTrainingSoundChange,
   referenceVolume,
   pitchWindowCents,
   testingReferenceTone,
@@ -986,7 +1139,8 @@ export function SingleNoteSetup({
   onStart,
   onBack
 }: TrainingSetupProps): React.JSX.Element {
-  const [editor, setEditor] = useState<'key' | 'mode' | 'range' | 'direction' | 'intervals' | 'chords' | 'focus-interval' | null>(null)
+  const insets = useSafeAreaInsets()
+  const [editor, setEditor] = useState<'key' | 'mode' | 'range' | 'direction' | 'intervals' | 'chords' | 'focus-interval' | 'length' | null>(null)
   const requirements = trainingSetupRequirements(setup)
   const rangeNotice = trainingRangeNotice(setup)
   const key = { tonicPc: setup.tonicPc, mode: setup.keyMode }
@@ -999,7 +1153,7 @@ export function SingleNoteSetup({
   const unit = setup.exercise === 'interval' ? tn('phone.training.unitIntervals', setup.length) : setup.exercise === 'note' ? tn('phone.training.unitNotes', setup.length) : tn('phone.training.unitExercises', setup.length)
   return (
     <View style={styles.singleSetupFrame}>
-      <ScrollView contentContainerStyle={[styles.scroll, styles.singleSetupScroll]} showsVerticalScrollIndicator={false}>
+      <ScrollView contentContainerStyle={[styles.scroll, styles.singleSetupScroll, { paddingTop: insets.top + 8 }]} showsVerticalScrollIndicator={false}>
         <TrainingHeader title={trainingExerciseTitle(setup.exercise)} onBack={onBack} />
         {error && <Text accessibilityLiveRegion="polite" style={styles.error}>{error}</Text>}
         {rangeNotice && <Text accessibilityLiveRegion="polite" style={styles.singleInstruction}>{rangeNotice}</Text>}
@@ -1093,13 +1247,14 @@ export function SingleNoteSetup({
             <Hairline />
           </>
         )}
-        <View style={styles.sessionLengthRow}>
-          <View><Text style={styles.compactLabel}>{t('phone.training.setupSession')}</Text><Text style={styles.compactValue}>{unit} · {t('phone.training.approxMinutes', { minutes: estimatedMinutes })}</Text>{intervalSets && <Text style={styles.cardCopy}>{t('phone.training.intervalRepeatTotal', { n: setup.length * 3 })}</Text>}</View>
-          <View style={styles.compactLengths}>{lengths.map((length) => <Chip key={length} label={String(length)} selected={setup.length === length} onPress={() => onChange({ length })} />)}</View>
-        </View>
+        <SettingsRow label={t('phone.training.setupSession')} value={unit} expanded={editor === 'length'} onPress={() => setEditor(editor === 'length' ? null : 'length')} />
+        {editor === 'length' && <View style={styles.compactEditor}><View style={styles.compactLengths}>{lengths.map(length => <Chip key={length} label={String(length)} selected={setup.length === length} onPress={() => { onChange({ length }); setEditor(null) }} />)}</View></View>}
+        <Text style={[styles.cardCopy, { marginBottom: 16 }]}>{t('phone.training.approxMinutes', { minutes: estimatedMinutes })}{intervalSets ? ` · ${t('phone.training.intervalRepeatTotal', { n: setup.length * 3 })}` : ''}</Text>
         </SettingsCard>
         <ReferenceSoundPanel
           setup={setup}
+          trainingSound={trainingSound}
+          onTrainingSoundChange={onTrainingSoundChange}
           referenceVolume={referenceVolume}
           pitchWindowCents={pitchWindowCents}
           testingReferenceTone={testingReferenceTone}
@@ -1107,6 +1262,7 @@ export function SingleNoteSetup({
           onPitchWindowChange={onPitchWindowChange}
           onTestReferenceTone={onTestReferenceTone}
         />
+
       </ScrollView>
       <StickyActionFooter>
         <Primary label={t('phone.training.startPractice')} onPress={onStart} />
@@ -1121,8 +1277,19 @@ function directionLabel(direction: MobileTrainingSetup['direction']): string {
   return t('phone.training.directionBoth')
 }
 
+function TrainingSoundSettingsView({ onBack, ...props }: ReferenceSoundSettingsProps & { readonly setup: MobileTrainingSetup; readonly onBack: () => void }): React.JSX.Element {
+  const insets = useSafeAreaInsets()
+  return <ScrollView contentContainerStyle={[styles.scroll, { paddingTop: insets.top + 8 }]} showsVerticalScrollIndicator={false}>
+    <TrainingHeader title={t('phone.training.soundSettings')} onBack={onBack} />
+    <Text style={styles.cardCopy}>{t('phone.training.soundSettingsSaved')}</Text>
+    <ReferenceSoundPanel {...props} />
+  </ScrollView>
+}
+
 export function ReferenceSoundPanel({
   setup,
+  trainingSound = 'piano',
+  onTrainingSoundChange,
   referenceVolume,
   pitchWindowCents,
   testingReferenceTone,
@@ -1130,51 +1297,46 @@ export function ReferenceSoundPanel({
   onPitchWindowChange,
   onTestReferenceTone
 }: ReferenceSoundSettingsProps & { readonly setup: MobileTrainingSetup }): React.JSX.Element {
+  const theme = useNativeTheme()
   const volume = clampTrainingReferenceVolume(referenceVolume)
-  const percentage = Math.round(volume * 100)
-  const position = (volume - TRAINING_REFERENCE_VOLUME_MIN) /
-    (TRAINING_REFERENCE_VOLUME_MAX - TRAINING_REFERENCE_VOLUME_MIN)
+  const position = (volume - TRAINING_REFERENCE_VOLUME_MIN) / (TRAINING_REFERENCE_VOLUME_MAX - TRAINING_REFERENCE_VOLUME_MIN)
   const testMidi = Math.round((setup.lowMidi + setup.highMidi) / 2)
   const testNote = midiNoteName(testMidi, { tonicPc: setup.tonicPc, mode: setup.keyMode })
-  const adjust = (delta: number): void => {
-    onReferenceVolumeChange(clampTrainingReferenceVolume(Math.round((volume + delta) * 100) / 100))
-  }
-  return <ReferenceControls
-    labels={{
-      title: t('phone.training.kit.referenceSound'),
-      pitchWindow: t('phone.training.kit.pitchWindow'),
-      volume: t('phone.training.kit.referenceVolume'),
-      volumeValue: (percent) => t('phone.training.kit.percent', { percent }),
-      decrease: t('phone.training.kit.decreaseVolume'),
-      increase: t('phone.training.kit.increaseVolume'),
-      playing: t('phone.training.kit.playing')
-    }}
-    volumePercent={percentage}
-    volumePosition={position}
-    volumeMinPercent={TRAINING_REFERENCE_VOLUME_MIN * 100}
-    volumeMaxPercent={TRAINING_REFERENCE_VOLUME_MAX * 100}
-    testLabel={t('phone.training.testNote', { note: testNote })}
-    testing={testingReferenceTone}
-    testIcon={<PlayPauseGlyph playing={testingReferenceTone} color={C.amberInk} />}
-    onTest={() => onTestReferenceTone(testMidi)}
-    onDecrease={() => adjust(-0.1)}
-    onIncrease={() => adjust(0.1)}
-    decreaseDisabled={volume <= TRAINING_REFERENCE_VOLUME_MIN}
-    increaseDisabled={volume >= TRAINING_REFERENCE_VOLUME_MAX}
-    hint={t('phone.training.referenceVolumeHint')}
-    pitchWindow={setup.taskMode === 'identify' ? undefined : {
-      value: pitchWindowCents,
-      options: SINGLE_NOTE_PITCH_WINDOW_OPTIONS,
-      onChange: onPitchWindowChange
-    }}
-  />
+  const [editor, setEditor] = useState<'sound' | 'pitch' | null>(null)
+  return <SettingsCard>
+    <SettingsRow icon={<Icon name={trainingSound === 'electric' ? 'piano' : trainingSound} size={20} color={theme.accent} />} label={t('phone.training.soundType')} value={t(`phone.training.sound.${trainingSound}`)} expanded={editor === 'sound'} onPress={() => setEditor(editor === 'sound' ? null : 'sound')} />
+    {editor === 'sound' && <View accessibilityRole="radiogroup" style={{ paddingBottom: 12 }}>
+      {TRAINING_SOUNDS.map(sound => <Pressable key={sound} accessibilityRole="radio" accessibilityState={{ checked: trainingSound === sound }} onPress={() => { onTrainingSoundChange?.(sound); setEditor(null) }} style={{ minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}><Icon name={sound === 'electric' ? 'piano' : sound} color={trainingSound === sound ? theme.accent : theme.dim} /><Text style={{ color: trainingSound === sound ? theme.accent : theme.text, fontSize: 16, fontWeight: '600' }}>{t(`phone.training.sound.${sound}`)}</Text></View>
+        {trainingSound === sound && <Text style={{ color: theme.accent, fontSize: 20 }}>✓</Text>}
+      </Pressable>)}
+    </View>}
+    <Hairline />
+    <View style={{ paddingVertical: 18, gap: 16 }}>
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}><Icon name="speaker" size={20} color={theme.accent} /><Text style={styles.compactLabel}>{t('phone.training.kit.referenceVolume')}</Text></View>
+        <Text style={styles.compactValue}>{Math.round(volume * 100)}%</Text>
+      </View>
+      <Bar value={position} color={theme.accent} label={t('phone.training.kit.referenceVolume')} valueText={value => `${Math.round((TRAINING_REFERENCE_VOLUME_MIN + value * (TRAINING_REFERENCE_VOLUME_MAX - TRAINING_REFERENCE_VOLUME_MIN)) * 100)}%`} onChange={value => onReferenceVolumeChange(clampTrainingReferenceVolume(TRAINING_REFERENCE_VOLUME_MIN + value * (TRAINING_REFERENCE_VOLUME_MAX - TRAINING_REFERENCE_VOLUME_MIN)))} />
+    </View>
+    <Hairline />
+    <Pressable accessibilityRole="button" onPress={() => onTestReferenceTone(testMidi)} style={{ minHeight: 58, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+      <Text style={{ color: theme.accent, fontSize: 16, fontWeight: '700' }}>{testingReferenceTone ? t('phone.training.kit.playing') : t('phone.training.testNote', { note: testNote })}</Text>
+      <Icon name={testingReferenceTone ? 'pause' : 'play'} color={theme.accent} />
+    </Pressable>
+    {setup.taskMode !== 'identify' && <>
+      <Hairline />
+      <SettingsRow icon={<Icon name="pitch" size={20} color={theme.accent} />} label={t('phone.training.kit.pitchWindow')} value={`±${pitchWindowCents}¢`} expanded={editor === 'pitch'} onPress={() => setEditor(editor === 'pitch' ? null : 'pitch')} />
+      {editor === 'pitch' && <View style={{ flexDirection: 'row', gap: 8, paddingBottom: 12 }}>{SINGLE_NOTE_PITCH_WINDOW_OPTIONS.map(cents => <ChoiceChip key={cents} label={`±${cents}¢`} selected={pitchWindowCents === cents} style={{ flex: 1 }} onPress={() => { onPitchWindowChange(cents); setEditor(null) }} />)}</View>}
+    </>}
+  </SettingsCard>
 }
 
 function CompactSetupRow({ label, value, expanded, onPress }: { label: string; value: string; expanded: boolean; onPress: () => void }): React.JSX.Element {
   return <SettingsRow label={label} value={value} expanded={expanded} onPress={onPress} />
 }
 
-export function TrainingSessionView({ sampleControls, state, liveMidi, micHearing = 'starting', singleNoteLock = EMPTY_SINGLE_NOTE_LOCK, singleNoteCountdown = null, pitchWindowCents = DEFAULT_SINGLE_NOTE_PITCH_WINDOW_CENTS, activeTarget, onBegin, onSkipSingleNote = () => undefined, onIdentify, onNext, onExit, onBackToSong }: { sampleControls?: React.ReactNode; state: ReturnType<typeof initialTrainingState>; liveMidi: number | null; micHearing?: MicHearing; singleNoteLock?: SingleNoteLockState; singleNoteCountdown?: number | null; pitchWindowCents?: number; activeTarget: number; onBegin: () => void; onSkipSingleNote?: () => void; onIdentify: (answer: TrainingIdentifyAnswer) => void; onNext: () => void; onExit: () => void; onBackToSong: (() => void) | null }): React.JSX.Element {
+export function TrainingSessionView({ paused = false, onPause = () => undefined, sampleControls, state, liveMidi, micHearing = 'starting', singleNoteLock = EMPTY_SINGLE_NOTE_LOCK, singleNoteCountdown = null, pitchWindowCents = DEFAULT_SINGLE_NOTE_PITCH_WINDOW_CENTS, activeTarget, onBegin, onSkipSingleNote = () => undefined, onIdentify, onNext, onExit, onBackToSong }: { paused?: boolean; onPause?: () => void; sampleControls?: React.ReactNode; state: ReturnType<typeof initialTrainingState>; liveMidi: number | null; micHearing?: MicHearing; singleNoteLock?: SingleNoteLockState; singleNoteCountdown?: number | null; pitchWindowCents?: number; activeTarget: number; onBegin: () => void; onSkipSingleNote?: () => void; onIdentify: (answer: TrainingIdentifyAnswer) => void; onNext: () => void; onExit: () => void; onBackToSong: (() => void) | null }): React.JSX.Element {
   const [showSampleTools, setShowSampleTools] = useState(false)
   const session = state.session
   const attempt = mobileTrainingAttemptView(state)
@@ -1209,6 +1371,8 @@ export function TrainingSessionView({ sampleControls, state, liveMidi, micHearin
           error={state.error}
           onBegin={onBegin}
           onSkip={onSkipSingleNote}
+          paused={paused}
+          onPause={onPause}
         />
       ) : (
         <>
@@ -1232,7 +1396,9 @@ function chordPracticeInstruction(prompt: Extract<TrainingPrompt, { kind: 'chord
   return t('phone.training.chordInstruction', { chord: chordNameText(prompt.chord), notes: prompt.chord.tones.map(tone => tone.noteName.replace(/-?\d+$/, '')).join('–'), note: prompt.targets[0].noteName, role: chordRoleWord(prompt.role) })
 }
 
-function SingleNoteSessionBody({ repetition, phrase, phase, prompt, result, liveMidi, micHearing, lock, countdown, pitchWindowCents, activeTarget, error, onBegin, onSkip }: {
+function SingleNoteSessionBody({ paused, onPause, repetition, phrase, phase, prompt, result, liveMidi, micHearing, lock, countdown, pitchWindowCents, activeTarget, error, onBegin, onSkip }: {
+  paused: boolean
+  onPause: () => void
   repetition?: number
   phrase: boolean
   phase: ReturnType<typeof initialTrainingState>['phase']
@@ -1257,11 +1423,11 @@ function SingleNoteSessionBody({ repetition, phrase, phase, prompt, result, live
       <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.singleStage} showsVerticalScrollIndicator={false}>
         <TrainingLessonOverview prompt={prompt} activeTarget={targetIndex} phrase={phrase} repetition={repetition} />
         <View style={styles.practiceDetector}>
-          <Text accessibilityLiveRegion="polite" style={styles.practicePhase}>{phase === 'cue' || countdown !== null ? t('phone.training.hearNamedNote', { note: target.noteName }) : phase === 'respond' ? t('phone.training.yourTurn') : error ? t('phone.training.tapStartWhenReady') : t('phone.training.preparing')}</Text>
+          <Text accessibilityLiveRegion="polite" style={styles.practicePhase}>{phase === 'cue' || countdown !== null ? t('phone.training.hearNamedNote', { note: target.noteName }) : phase === 'respond' ? t('phone.training.yourTurn') : paused ? t('phone.training.paused') : error ? t('phone.training.tapStartWhenReady') : t('phone.training.preparing')}</Text>
           <SingleNotePitchMeter prompt={prompt} activeTarget={targetIndex} liveMidi={liveMidi} micHearing={micHearing} lock={lock} pitchWindowCents={pitchWindowCents} listening={phase !== 'respond' || countdown !== null} />
           {phase === 'feedback' && result && <Text style={styles.feedback}>{trainingFeedback(result)}</Text>}
         </View>
-        <SingleNoteTransport phase={phase === 'respond' && countdown !== null ? 'cue' : phase} error={error} onBegin={onBegin} onSkip={onSkip} />
+        <SingleNoteTransport paused={paused} onPause={onPause} phase={phase === 'respond' && countdown !== null ? 'cue' : phase} error={error} onBegin={onBegin} onSkip={onSkip} />
       </ScrollView>
     </PracticeSwipeSurface>
   )
@@ -1294,13 +1460,15 @@ function PracticeSwipeSurface({ onSwipeLeft, onSwipeRight, children }: {
   return <View testID="training-swipe-surface" style={styles.swipeSurface} {...responder.panHandlers}>{children}</View>
 }
 
-function SingleNoteTransport({ phase, error, onBegin, onSkip }: {
+function SingleNoteTransport({ paused, onPause, phase, error, onBegin, onSkip }: {
+  paused: boolean
+  onPause: () => void
   phase: ReturnType<typeof initialTrainingState>['phase']
   error: string | null
   onBegin: () => void
   onSkip: () => void
 }): React.JSX.Element {
-  const restartRequired = phase === 'ready' && error !== null
+  const restartRequired = phase === 'ready' && (error !== null || paused)
   const replayAvailable = phase === 'respond'
   const swipeHint = restartRequired
     ? t('phone.training.tapStartWhenReady')
@@ -1320,25 +1488,25 @@ function SingleNoteTransport({ phase, error, onBegin, onSkip }: {
     left={replayAvailable ? {
       accessibilityLabel: t('phone.training.hearAgain'),
       caption: t('phone.training.replay'),
-      icon: <CircularArrowGlyph color={C.text} size={22} />,
+      icon: <Icon name="replay" color={C.text} size={24} />,
       onPress: onBegin
     } : undefined}
     center={{
-      accessibilityLabel: restartRequired ? t('phone.training.start') : phase === 'ready' ? t('phone.training.preparingNextNoteAria') : phase === 'cue' ? t('phone.training.playingTargetNoteAria') : phase === 'respond' ? t('phone.training.micListeningAria') : t('phone.training.loadingNextNote'),
+      accessibilityLabel: phase === 'cue' || phase === 'respond' ? t('phone.training.pause') : restartRequired ? t('phone.training.start') : phase === 'ready' ? t('phone.training.preparingNextNoteAria') : t('phone.training.loadingNextNote'),
       caption: restartRequired ? t('phone.training.start') : phase === 'ready' ? t('phone.training.preparing') : phase === 'cue' ? t('phone.training.playing') : phase === 'respond' ? t('phone.training.listening') : t('phone.training.nextNoteCaption'),
-      icon: centerIcon
+      icon: restartRequired || phase === 'cue' || phase === 'respond'
+        ? <Pressable accessibilityRole="button" accessibilityLabel={restartRequired ? t('phone.training.start') : t('phone.training.pause')} onPress={restartRequired ? onBegin : onPause} style={{ width: '100%', height: '100%', alignItems: 'center', justifyContent: 'center' }}>{centerIcon}</Pressable>
+        : centerIcon
     }}
     right={phase === 'respond' ? {
       accessibilityLabel: t('phone.training.skip'),
       caption: t('phone.training.skip'),
-      icon: <Text style={styles.transportSkip}>›</Text>,
+      icon: <Icon name="skip" color={C.text} size={24} />,
       onPress: onSkip
     } : undefined}
     hint={swipeHint}
   />
-  return restartRequired
-    ? <Pressable accessibilityRole="button" accessibilityLabel={t('phone.training.start')} onPress={onBegin}>{dock}</Pressable>
-    : dock
+  return dock
 }
 
 /** What the microphone is doing, in the states a singer can act on
@@ -1450,7 +1618,7 @@ function TrainingSummary({ session, onHome, onBackToSong }: { session: NonNullab
   const milestone = program && receipt.completedAt >= program.startedAt && qualifiesTrainingPracticeDay(receipt)
     ? persistence.programProgress.find(stage => stage.lesson.exercise === receipt.exercise && stage.lesson.mode === receipt.taskMode && stage.lesson.semitones === receipt.intervalSemitones && stage.practicedToday)
     : undefined
-  return <ScrollView contentContainerStyle={styles.scroll}><TrainingHeader title={t('phone.training.sessionComplete')} onBack={onHome} /><View style={styles.summaryScore}><Text style={styles.summaryNumber}>{a.onTarget + a.close}/{a.attempts}</Text><Text style={styles.cardCopy}>{t('phone.training.landedOnOrNear')}</Text></View><View style={styles.summaryRow}><Metric label={t('phone.training.metricOnTarget')} value={a.onTarget} /><Metric label={t('phone.training.metricClose')} value={a.close} /><Metric label={t('phone.training.metricSessions')} value={1} /></View>{milestone && <Section label={t('phone.training.dashboardPracticeComplete')}><Text style={styles.cardTitle}>{programLessonLabel(milestone.lesson)}</Text><PracticeWeek days={milestone.days} /><Text style={styles.cardCopy}>{t('phone.training.intervalDaysDone', { days: milestone.days })} · {t('phone.training.dashboardStreak', { days: persistence.practiceStreak })}</Text><Text style={styles.cardCopy}>{t(milestone.done ? 'phone.training.dashboardMilestoneComplete' : 'phone.training.dashboardTomorrow', { day: Math.min(7, milestone.days + 1) })}</Text></Section>}{onBackToSong && <Primary label={t('phone.training.backToSong')} onPress={onBackToSong} />}<Chip label={t('phone.training.trainSomethingElse')} onPress={onHome} /></ScrollView>
+  return <ScrollView contentContainerStyle={styles.scroll}><TrainingHeader title={t('phone.training.sessionComplete')} onBack={onHome} /><View style={styles.summaryScore}><Text style={styles.summaryNumber}>{a.onTarget + a.close}/{session.prompts.length}</Text><Text style={styles.cardCopy}>{t('phone.training.matchedExercises')}</Text><Text style={styles.cardCopy}>{t('phone.training.matchedExercisesHelp')}</Text></View><View style={styles.summaryRow}><Metric label={t('phone.training.metricMatched')} value={a.onTarget + a.close} /><Metric label={t('phone.training.metricSkipped')} value={session.results.filter(result => result.response === 'skipped').length} /><Metric label={t('phone.training.metricSessions')} value={1} /></View>{milestone && <Section label={t('phone.training.dashboardPracticeComplete')}><Text style={styles.cardTitle}>{programLessonLabel(milestone.lesson)}</Text><PracticeWeek days={milestone.days} /><Text style={styles.cardCopy}>{t('phone.training.intervalDaysDone', { days: milestone.days })} · {t('phone.training.dashboardStreak', { days: persistence.programPracticeStreak })}</Text><Text style={styles.cardCopy}>{t(milestone.done ? 'phone.training.dashboardMilestoneComplete' : 'phone.training.dashboardTomorrow', { day: Math.min(7, milestone.days + 1) })}</Text></Section>}{onBackToSong && <Primary label={t('phone.training.backToSong')} onPress={onBackToSong} />}<Chip label={t('phone.training.trainSomethingElse')} onPress={onHome} /></ScrollView>
 }
 
 function programLessonTitle(lesson: ProgramLesson): string {
@@ -1503,7 +1671,7 @@ function IntervalWeekProgress(): React.JSX.Element | null {
 
 function TrainingProgressView({ progress, onBack }: { progress: TrainingProgress; onBack: () => void }): React.JSX.Element {
   const snapshot = summarizeTrainingProgress(progress)
-  return <ScrollView contentContainerStyle={styles.scroll}><TrainingHeader title={t('phone.training.progressEntryTitle')} onBack={onBack} /><View style={styles.summaryScore}><Text style={styles.summaryNumber}>{snapshot.sessions}</Text><Text style={styles.cardCopy}>{t('phone.training.completedSessions')}</Text></View><View style={styles.summaryRow}><Metric label={t('phone.training.metricAttempts')} value={snapshot.attempts} /><Metric label={t('phone.training.metricLanded')} value={snapshot.landedRate === null ? '—' : `${Math.round(snapshot.landedRate * 100)}%`} /><Metric label={t('phone.training.metricTendency')} value={snapshot.tendency} /></View>{snapshot.weakerExercises.length > 0 && <Section label={t('phone.training.usefulNextFocus')}><Text style={styles.cardCopy}>{snapshot.weakerExercises.join(' · ')}</Text></Section>}<TrainingProgramPanel /><IntervalWeekProgress /><Section label={t('phone.training.recent')}>{progress.recent.length === 0 ? <Text style={styles.cardCopy}>{t('phone.training.completeSessionToStart')}</Text> : progress.recent.slice(0, 8).map((item) => <View key={item.sessionId} style={styles.recentRow}><Text style={styles.recentTitle}>{keyLabel(keyName(item.key))} · {readableExercise(item.exercise)}</Text><Text style={styles.cardCopy}>{t('phone.training.landedOfAttempts', { landed: item.onTarget + item.close, attempts: item.attempts })}</Text></View>)}</Section></ScrollView>
+  return <ScrollView contentContainerStyle={styles.scroll}><TrainingHeader title={t('phone.training.progressEntryTitle')} onBack={onBack} /><View style={styles.summaryScore}><Text style={styles.summaryNumber}>{snapshot.sessions}</Text><Text style={styles.cardCopy}>{t('phone.training.completedSessions')}</Text></View><View style={styles.summaryRow}><Metric label={t('phone.training.metricAttempts')} value={snapshot.attempts} /><Metric label={t('phone.training.metricLanded')} value={snapshot.landedRate === null ? '—' : `${Math.round(snapshot.landedRate * 100)}%`} /><Metric label={t('phone.training.metricTendency')} value={snapshot.tendency} /></View>{snapshot.weakerExercises.length > 0 && <Section label={t('phone.training.usefulNextFocus')}><Text style={styles.cardCopy}>{snapshot.weakerExercises.join(' · ')}</Text></Section>}<Section label={t('phone.training.dailyActivityTitle')}><DailyTrainingActivity days={persistence.practiceDays} /></Section><TrainingProgramPanel /><IntervalWeekProgress /><Section label={t('phone.training.recent')}>{progress.recent.length === 0 ? <Text style={styles.cardCopy}>{t('phone.training.completeSessionToStart')}</Text> : progress.recent.slice(0, 8).map((item) => <View key={item.sessionId} style={styles.recentRow}><Text style={styles.recentTitle}>{keyLabel(keyName(item.key))} · {readableExercise(item.exercise)}</Text><Text style={styles.cardCopy}>{t('phone.training.landedOfAttempts', { landed: item.onTarget + item.close, attempts: item.attempts })}</Text></View>)}</Section></ScrollView>
 }
 
 export function TrainingHeader({ title, onBack }: { title: string; onBack: () => void }): React.JSX.Element { return <GlassHeader title={title} onBack={onBack} backLabel={t('phone.training.kit.back')} /> }

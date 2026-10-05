@@ -9,8 +9,8 @@ import { trainingMustStopForAppState } from '../training/runtime'
 import { nextMicrophoneSampleName, microphoneSampleName } from '../training/sample-name'
 import { C } from './bits'
 
-export function AudioDiagnosticsScreen({ engine, active, onBack }: {
-  engine: MultitrackEngine; active: boolean; onBack: () => void
+export function AudioDiagnosticsScreen({ engine, active, onBack, onSoundLab }: {
+  engine: MultitrackEngine; active: boolean; onBack: () => void; onSoundLab?: () => void
 }): React.JSX.Element {
   const mic = useRef(new TrainingMicrophone()).current
   const recording = useRef(false)
@@ -160,8 +160,9 @@ export function AudioDiagnosticsScreen({ engine, active, onBack }: {
   return <ScrollView contentContainerStyle={styles.content}>
     <Pressable onPress={onBack}><Text style={styles.button}>Back</Text></Pressable>
     <Text style={styles.title}>Audio diagnostics</Text>
+    {!running && onSoundLab && <Pressable onPress={onSoundLab}><Text style={styles.button}>Instrument sound lab</Text></Pressable>}
     <Text style={styles.text}>Connect CarPlay while parked. Keep the phone microphone near a speaker and stay quiet during the tone test. Use moderate volume.</Text>
-    <Text style={styles.text}>This measures speaker → microphone → pitch detection, including analysis and screen delivery. It is not isolated hardware latency. Reference tones use the same organ sound as training. Microphone audio is never played back. Record sample explicitly saves up to 30 seconds of microphone audio; sharing is manual.</Text>
+    <Text style={styles.text}>This measures speaker → microphone → pitch detection, including analysis and screen delivery. It is not isolated hardware latency. Reference tones use the selected instrument as training. Microphone audio is never played back. Record sample explicitly saves up to 30 seconds of microphone audio; sharing is manual.</Text>
     <Text style={styles.text}>{route}</Text>
     <Text style={styles.text}>{status}</Text>
     <Text selectable style={styles.reading}>{reading}</Text>
