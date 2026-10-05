@@ -20,7 +20,7 @@ export const training = {
 
   'phone.training.dailyRecommendation': 'Suggested daily practice: 1–2 short rounds with a break. Repeat in another key; extra rounds are optional.',
   'phone.training.dailyActivityHelp': 'Sessions on the same date count as one practice day.',
-  'phone.training.dailyActivityTotals': '{sessions} sessions · {exercises} exercises',
+  'phone.training.dailyActivityTotals': 'Sessions: {sessions} · exercises: {exercises}',
   'phone.training.dailyActivityTitle': 'Practice by date',
   'phone.training.matchedExercisesHelp': 'Matched means every note in the exercise passed the hold requirement. Skipped exercises are shown separately.',
   'phone.training.matchedExercises': 'Exercises matched',
