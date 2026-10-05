@@ -24,5 +24,9 @@ export function scoreCompletedTrainingTarget(input: Parameters<typeof scoreVocal
     windows.push({ targetIndex: windows.length, startMs: nextMs, endMs: nextMs + 1 })
     nextMs += 2
   }
-  return scoreVocalTrainingAttempt({ ...input, targetWindows: windows }).targets[completed.targetIndex]
+  const result = scoreVocalTrainingAttempt({ ...input, targetWindows: windows }).targets[completed.targetIndex]
+  // A successful live hold already passed the configured pitch/confidence
+  // window. Keep diagnostic metrics, but do not contradict that completion
+  // with the offline scorer's different default tolerance.
+  return successfulHoldMs === undefined ? result : { ...result, classification: 'on-target' as const }
 }

@@ -47,6 +47,7 @@ jest.mock('../src/engine', () => ({
     unload = jest.fn()
     setDisplayLatency = jest.fn((seconds: number) => { this.outputDisplayLatency = seconds })
     setTrainingCueMuted = jest.fn()
+    setTrainingSound = jest.fn()
     setTrainingCueVolume = jest.fn()
     constructor() {
       ;(globalThis as Record<string, unknown>).shellEngine = this

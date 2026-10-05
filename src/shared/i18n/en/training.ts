@@ -8,6 +8,12 @@
  * needed (button labels), so translate them as the bare word.
  */
 export const training = {
+  'training.setup.soundType': 'Instrument',
+  'training.sound.piano': 'Piano',
+  'training.sound.electric': 'Electric piano',
+  'training.sound.guitar': 'Nylon guitar',
+  'training.sound.organ': 'Organ',
+
   'training.program.intervalFocus': "Interval focus",
   'training.program.growing': "Growing intervals",
   'training.program.sets': "Interval sets",

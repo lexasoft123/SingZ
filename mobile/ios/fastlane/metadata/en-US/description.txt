@@ -1,7 +1,7 @@
 SingZ turns a song you already own into a rehearsal room.
 
-Instead of one flat recording, a SingZ song is six separate tracks — lead vocal,
-backing vocals, drums, bass, guitar and piano. Mute the lead vocal and the band
+Instead of one flat recording, a SingZ song has separate tracks for vocals,
+drums, bass, guitar, piano and the rest. Mute the lead vocal and the band
 plays on without you. Keep it in and sing along. Drop the drums to hear whether
 you are actually holding time. It is your song, taken apart, with every part on
 its own fader.
@@ -39,11 +39,18 @@ of the whole song being loaded into memory first.
 
 TRAIN YOUR EAR AND YOUR VOICE
 
-The Train tab plays you a note and listens: single notes, intervals, notes in a
-chord, carrying a line — in a key you pick, or the key of the song you just had
-open. It waits until you hold the note in tune for a moment before moving on.
-Not in the mood to sing? Switch to Identify and name what you heard instead.
-The microphone is only for listening; nothing is recorded or stored.
+Choose a guided program for foundation, developing or advanced ear skills.
+Practise one lesson over seven practice days, or choose single notes, ordered
+intervals, chord tones, whole scales and arpeggios. Hear each note, sing it, and
+watch the live pitch meter and hold progress. Intervals repeat from different
+starting notes so you learn the distance, not just one pair of pitches.
+
+See sessions and exercises for each date, with consecutive practice days counted
+once per day. Repeat a lesson and SingZ offers another key within your range.
+Choose piano, electric piano, nylon guitar or organ; your sound and volume
+settings stay saved across exercises. You can replay a cue, skip a note or pause.
+Prefer listening? Identify exercises let you name what you heard. Practice stays
+on your device; recording a practice sample is optional.
 
 PRACTICE THAT PUSHES BACK
 

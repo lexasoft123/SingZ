@@ -84,7 +84,8 @@ describe('mobile training persistence', () => {
     await store.flush()
     expect(JSON.parse(api.values.get('singz.audio.preferences')!)).toEqual({
       formatVersion: 1,
-      referenceVolume: 0.9
+      referenceVolume: 0.9,
+      trainingSound: 'piano'
     })
 
     const restored = await new MobileTrainingPersistence(api).load()
@@ -99,7 +100,8 @@ describe('mobile training persistence', () => {
     expect(loaded.referenceVolume).toBe(1.2)
     expect(JSON.parse(api.values.get('singz.audio.preferences')!)).toEqual({
       formatVersion: 1,
-      referenceVolume: 1.2
+      referenceVolume: 1.2,
+      trainingSound: 'piano'
     })
   })
 
@@ -178,4 +180,16 @@ test('remembers full-scale presentation through a restart', async () => {
   const restored = new MobileTrainingPersistence(api)
   await restored.load()
   expect(restored.progress.profile.scalePresentation).toBe('phrase')
+})
+
+test('keeps the global sound and volume when saved together, and restores the sound', async () => {
+  const api = memoryApi({ 'singz.audio.preferences': JSON.stringify({ formatVersion: 1, referenceVolume: 1.2 }) })
+  const store = new MobileTrainingPersistence(api)
+  expect((await store.load()).trainingSound).toBe('piano')
+  store.saveReferenceVolume(0.9)
+  store.saveTrainingSound('guitar')
+  await store.flush()
+  const loaded = await new MobileTrainingPersistence(api).load()
+  expect(loaded.referenceVolume).toBe(0.9)
+  expect(loaded.trainingSound).toBe('guitar')
 })

@@ -95,7 +95,7 @@ export interface TrainingMicDependencies {
     listInputs?(): Promise<AndroidAudioInputDevice[]>
   }
   readonly iosCore?: {
-    acquire(): Promise<IosAudioInputLease>
+    acquire(preferBuiltIn?: boolean, shouldContinue?: () => boolean, preferCarPlay?: boolean): Promise<IosAudioInputLease>
     subscribeFrames(callback: (frame: IosAudioInputFrame) => void): () => void
     subscribeState(
       callback: (state: { generation: number; state: 'running' | 'stopped' | 'error'; error?: string }) => void
@@ -121,7 +121,7 @@ const nativeDependencies: TrainingMicDependencies = {
   iosCore:
     Platform.OS === 'ios'
       ? {
-          acquire: () => acquireIosAudioInputSession({ requestPermission: true }),
+          acquire: (preferBuiltIn, shouldContinue, preferCarPlay) => acquireIosAudioInputSession({ requestPermission: true, fallbackToBuiltIn: true, preferBuiltIn, shouldContinue, preferCarPlay }),
           subscribeFrames: subscribeIosAudioInputFrames,
           subscribeState: subscribeIosAudioInputState
         }
@@ -308,13 +308,17 @@ export class TrainingMicrophone {
     log('mic', `no pitch found yet · ${describeTrainingMicSignal(this.signal)}`, 'warn')
   }
 
+  get iosAudioRoute(): IosAudioInputLease['routeKind'] {
+    return this.iosLease?.routeKind
+  }
+
   isRequestingPermission(): boolean {
     return this.permissionPromptActive
   }
 
-  start(clockNowMs: () => number, onError: (message: string) => void): Promise<TrainingMicResult> {
+  start(clockNowMs: () => number, onError: (message: string) => void, preferBuiltIn = false, preferCarPlay = false): Promise<TrainingMicResult> {
     const generation = ++this.generation
-    return this.enqueue(() => this.startGeneration(generation, clockNowMs, onError))
+    return this.enqueue(() => this.startGeneration(generation, clockNowMs, onError, preferBuiltIn, preferCarPlay))
   }
 
   stop(): Promise<void> {
@@ -339,7 +343,9 @@ export class TrainingMicrophone {
   private async startGeneration(
     generation: number,
     clockNowMs: () => number,
-    onError: (message: string) => void
+    onError: (message: string) => void,
+    preferBuiltIn: boolean,
+    preferCarPlay: boolean
   ): Promise<TrainingMicResult> {
     try {
       await this.stopCapture()
@@ -351,7 +357,7 @@ export class TrainingMicrophone {
     if (this.deps.androidCore)
       return this.startAndroidCore(generation, clockNowMs, onError)
     if (this.deps.iosCore)
-      return this.startIosCore(generation, clockNowMs, onError)
+      return this.startIosCore(generation, clockNowMs, onError, preferBuiltIn, preferCarPlay)
     const error = t('phone.training.micUnavailable')
     log('mic', `could not start · ${error}`, 'error')
     return { ok: false, kind: 'unavailable', error }
@@ -433,7 +439,9 @@ export class TrainingMicrophone {
   private async startIosCore(
     generation: number,
     clockNowMs: () => number,
-    onError: (message: string) => void
+    onError: (message: string) => void,
+    preferBuiltIn: boolean,
+    preferCarPlay: boolean
   ): Promise<TrainingMicResult> {
     const core = this.deps.iosCore
     if (!core) return cancelled()
@@ -480,7 +488,7 @@ export class TrainingMicrophone {
       // Subscribe before acquire(), because acquire itself starts capture.
       this.unsubscribeIosFrames = core.subscribeFrames(consumeFrame)
       this.unsubscribeIosState = core.subscribeState(consumeState)
-      const lease = await core.acquire()
+      const lease = await core.acquire(preferBuiltIn, () => generation === this.generation, preferCarPlay)
       // The coordinator has already started zcore capture and the zdsp
       // analysis adapter. Retain the lease before any cancellation check so
       // a failed native stop remains latched and retryable.

@@ -1,12 +1,14 @@
 import React from 'react'
 import ReactTestRenderer from 'react-test-renderer'
-import { AppState } from 'react-native'
+import { AppState, Platform } from 'react-native'
 import { AudioManager } from 'react-native-audio-api'
 import { NavigationContainer } from '@react-navigation/native'
 
 jest.mock('../src/training/mic', () => ({
   TrainingMicrophone: class {
     live = { midi: null, confidence: 0, timestampMs: null }
+    signal = { windows: 1, peakDbfs: -20 }
+    tooQuiet = false
     isRequestingPermission = jest.fn(() => false)
     snapshot = jest.fn(() => [])
     resetObservations = jest.fn()
@@ -102,7 +104,7 @@ test('the production Skip path completes a session without scoring audio or rece
     pause: jest.fn(),
     cancelTrainingCues: jest.fn(),
     playTrainingLatch: jest.fn(async () => ({ ok: true as const, endsAt: 0 })),
-    setTrainingCueVolume: jest.fn(),
+    setTrainingSound: jest.fn(), setTrainingCueVolume: jest.fn(),
     playTrainingCues: jest.fn(async () => ({ ok: true as const, startsAt: 1, endsAt: 1 }))
   } as unknown as MultitrackEngine
   let tree!: ReactTestRenderer.ReactTestRenderer
@@ -114,6 +116,7 @@ test('the production Skip path completes a session without scoring audio or rece
   })
 
   await ReactTestRenderer.act(() => button(tree, 'Single notes').props.onPress())
+  await ReactTestRenderer.act(() => button(tree, 'Session').props.onPress())
   const tenNotes = tree.root.findAll((node) =>
     node.props.accessibilityRole === 'button' &&
     typeof node.props.onPress === 'function' &&
@@ -177,7 +180,7 @@ test('recorder error mid-cue cancels the run and no late cue completion records 
     pause: jest.fn(),
     cancelTrainingCues: jest.fn(),
     playTrainingLatch: jest.fn(async () => ({ ok: true as const, endsAt: 0 })),
-    setTrainingCueVolume: jest.fn(),
+    setTrainingSound: jest.fn(), setTrainingCueVolume: jest.fn(),
     playTrainingCues: jest.fn(() => cue)
   } as unknown as MultitrackEngine
   let tree!: ReactTestRenderer.ReactTestRenderer
@@ -214,7 +217,7 @@ test('a call interruption exposes an intentional Start control and never reopens
   let audioInterruption!: (event: { type: string }) => void
   ;(AudioManager.addSystemEventListener as jest.Mock).mockImplementation(
     (_type: string, listener: (event: { type: string }) => void) => {
-      audioInterruption = listener
+      if (_type === 'interruption') audioInterruption = listener
       return { remove: jest.fn() }
     }
   )
@@ -224,7 +227,7 @@ test('a call interruption exposes an intentional Start control and never reopens
     pause: jest.fn(),
     cancelTrainingCues: jest.fn(),
     playTrainingLatch: jest.fn(async () => ({ ok: true as const, endsAt: 0 })),
-    setTrainingCueVolume: jest.fn(),
+    setTrainingSound: jest.fn(), setTrainingCueVolume: jest.fn(),
     playTrainingCues: jest.fn(async () => ({ ok: true as const, startsAt: 1, endsAt: 1 }))
   } as unknown as MultitrackEngine
   let tree!: ReactTestRenderer.ReactTestRenderer
@@ -285,7 +288,7 @@ test('inactive retained training ignores interruptions and only flushes on backg
     return { remove: jest.fn() }
   }) as typeof AppState.addEventListener)
   ;(AudioManager.addSystemEventListener as jest.Mock).mockImplementation((_type: string, listener: (event: { type: string }) => void) => {
-    audioInterruption = listener
+    if (_type === 'interruption') audioInterruption = listener
     return { remove: jest.fn() }
   })
   const engine = {
@@ -294,7 +297,7 @@ test('inactive retained training ignores interruptions and only flushes on backg
     pause: jest.fn(),
     cancelTrainingCues: jest.fn(),
     playTrainingLatch: jest.fn(async () => ({ ok: true as const, endsAt: 0 })),
-    setTrainingCueVolume: jest.fn(),
+    setTrainingSound: jest.fn(), setTrainingCueVolume: jest.fn(),
     playTrainingCues: jest.fn()
   } as unknown as MultitrackEngine
   let tree!: ReactTestRenderer.ReactTestRenderer
@@ -337,7 +340,7 @@ test('an inactive render cannot adopt a deferred microphone start before passive
     pause: jest.fn(),
     cancelTrainingCues: jest.fn(),
     playTrainingLatch: jest.fn(async () => ({ ok: true as const, endsAt: 0 })),
-    setTrainingCueVolume: jest.fn(),
+    setTrainingSound: jest.fn(), setTrainingCueVolume: jest.fn(),
     playTrainingCues: jest.fn(async () => ({ ok: true as const, startsAt: 1, endsAt: 1 }))
   } as unknown as MultitrackEngine
   const onBackToSong = jest.fn()
@@ -380,7 +383,7 @@ test('an inactive render cannot adopt a deferred cue completion before passive c
     pause: jest.fn(),
     cancelTrainingCues: jest.fn(),
     playTrainingLatch: jest.fn(async () => ({ ok: true as const, endsAt: 0 })),
-    setTrainingCueVolume: jest.fn(),
+    setTrainingSound: jest.fn(), setTrainingCueVolume: jest.fn(),
     playTrainingCues: jest.fn(() => cue)
   } as unknown as MultitrackEngine
   const onBackToSong = jest.fn()
@@ -419,7 +422,7 @@ test('live microphone readings update the meter without rebuilding the target or
   const engine = {
     trainingCurrentTime: 1, outputDisplayLatency: 0,
     pause: jest.fn(), cancelTrainingCues: jest.fn(),
-    playTrainingLatch: jest.fn(async () => ({ ok: true as const, endsAt: 0 })), setTrainingCueVolume: jest.fn(),
+    playTrainingLatch: jest.fn(async () => ({ ok: true as const, endsAt: 0 })), setTrainingSound: jest.fn(), setTrainingCueVolume: jest.fn(),
     playTrainingCues: jest.fn(async () => ({ ok: true as const, startsAt: 1, endsAt: 1 }))
   } as unknown as MultitrackEngine
   let tree!: ReactTestRenderer.ReactTestRenderer
@@ -450,4 +453,208 @@ test('live microphone readings update the meter without rebuilding the target or
   await ReactTestRenderer.act(() => tree.unmount())
   appListener.mockRestore()
   jest.useRealTimers()
+})
+
+
+test.each(['recover', 'interruption', 'playback'])('iOS route recovery is bounded and cancels on %s', async (scenario) => {
+  jest.useFakeTimers()
+  const platform = jest.replaceProperty(Platform, 'OS', 'ios')
+  ;(AppState.addEventListener as jest.Mock).mockImplementation(() => ({ remove: jest.fn() }))
+  const previousAppState = Object.getOwnPropertyDescriptor(AppState, 'currentState')
+  Object.defineProperty(AppState, 'currentState', { configurable: true, value: 'active' })
+  let interruption!: (event: { type: string }) => void
+  ;(AudioManager.addSystemEventListener as jest.Mock).mockImplementation((_type, listener) => {
+    if (_type === 'interruption') interruption = listener
+    return { remove: jest.fn() }
+  })
+  const engine = {
+    trainingCurrentTime: 1, outputDisplayLatency: 0,
+    pause: jest.fn(), cancelTrainingCues: jest.fn(),
+    playTrainingLatch: jest.fn(async () => ({ ok: true, endsAt: 0 })),
+    setTrainingSound: jest.fn(), setTrainingCueVolume: jest.fn(),
+    playTrainingCues: jest.fn(async () => ({ ok: true, startsAt: 1, endsAt: 1 }))
+  } as unknown as MultitrackEngine
+  if (scenario === 'playback') (engine.playTrainingCues as jest.Mock).mockResolvedValueOnce({ ok: false, error: 'Audio output route is unavailable' })
+  let tree!: ReactTestRenderer.ReactTestRenderer
+  try {
+    await ReactTestRenderer.act(async () => {
+      tree = ReactTestRenderer.create(<TrainingTestScreen active engine={engine} song={null} onBackToSong={jest.fn()} />)
+      await Promise.resolve()
+    })
+    await openSingleNotePrompt(tree)
+    const globals = globalThis as unknown as {
+      trainingMic: { start: jest.Mock; stop: jest.Mock }
+      trainingMicError: (error: string) => void
+      trainingPersistence: { recordCompletion: jest.Mock }
+    }
+    const failure = 'iOS active input route does not match the selected device'
+    if (scenario !== 'playback') ReactTestRenderer.act(() => globals.trainingMicError(failure))
+    expect(allText(tree)).toContain('Reconnecting')
+    if (scenario === 'interruption') ReactTestRenderer.act(() => interruption({ type: 'began' }))
+    await ReactTestRenderer.act(async () => {
+      jest.advanceTimersByTime(350)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(globals.trainingMic.start).toHaveBeenCalledTimes(scenario !== 'interruption' ? 2 : 1)
+    if (scenario !== 'interruption') {
+      expect(globals.trainingMic.start.mock.calls[1][2]).toBe(true)
+      expect((engine.playTrainingCues as jest.Mock).mock.calls[1][0]).toEqual((engine.playTrainingCues as jest.Mock).mock.calls[0][0])
+      ReactTestRenderer.act(() => globals.trainingMicError(failure))
+      await ReactTestRenderer.act(async () => { jest.advanceTimersByTime(1000); await Promise.resolve() })
+      expect(globals.trainingMic.start).toHaveBeenCalledTimes(2)
+      expect(allText(tree)).toContain('The microphone route changed. Tap Start to try again.')
+    }
+    expect(globals.trainingPersistence.recordCompletion).not.toHaveBeenCalled()
+  } finally {
+    if (tree) await ReactTestRenderer.act(() => tree.unmount())
+    platform.restore()
+    if (previousAppState) Object.defineProperty(AppState, 'currentState', previousAppState)
+    else delete (AppState as unknown as Record<string, unknown>).currentState
+    jest.useRealTimers()
+  }
+})
+
+
+test.each(['cue', 'respond'])('Pause stops %s until Start without recording an attempt', async (phase) => {
+  jest.useFakeTimers()
+  ;(AppState.addEventListener as jest.Mock).mockReturnValue({ remove: jest.fn() })
+  const engine = {
+    trainingCurrentTime: 1, outputDisplayLatency: 0,
+    pause: jest.fn(), cancelTrainingCues: jest.fn(),
+    playTrainingLatch: jest.fn(async () => ({ ok: true, endsAt: 0 })),
+    setTrainingSound: jest.fn(), setTrainingCueVolume: jest.fn(),
+    playTrainingCues: jest.fn(async () => ({ ok: true, startsAt: 1, endsAt: 1 }))
+  } as unknown as MultitrackEngine
+  let tree!: ReactTestRenderer.ReactTestRenderer
+  try {
+    await ReactTestRenderer.act(async () => {
+      tree = ReactTestRenderer.create(<TrainingTestScreen active engine={engine} song={null} onBackToSong={jest.fn()} />)
+      await Promise.resolve()
+    })
+    await openSingleNotePrompt(tree)
+    if (phase === 'respond') await ReactTestRenderer.act(async () => { jest.advanceTimersByTime(10000); await Promise.resolve() })
+    const globals = globalThis as unknown as {
+      trainingMic: { start: jest.Mock; stop: jest.Mock }
+      trainingPersistence: { recordCompletion: jest.Mock }
+    }
+    await ReactTestRenderer.act(async () => { button(tree, 'Pause').props.onPress(); await Promise.resolve() })
+    expect(allText(tree)).toContain('Paused')
+    expect(globals.trainingMic.stop).toHaveBeenCalled()
+    await ReactTestRenderer.act(async () => { jest.advanceTimersByTime(20000); await Promise.resolve() })
+    expect(globals.trainingMic.start).toHaveBeenCalledTimes(1)
+    expect(engine.playTrainingCues).toHaveBeenCalledTimes(1)
+    expect(globals.trainingPersistence.recordCompletion).not.toHaveBeenCalled()
+    await ReactTestRenderer.act(async () => { button(tree, 'Start').props.onPress(); await Promise.resolve(); await Promise.resolve() })
+    expect(globals.trainingMic.start).toHaveBeenCalledTimes(2)
+    expect((engine.playTrainingCues as jest.Mock).mock.calls[1][0]).toEqual((engine.playTrainingCues as jest.Mock).mock.calls[0][0])
+  } finally {
+    if (tree) await ReactTestRenderer.act(() => tree.unmount())
+    jest.useRealTimers()
+  }
+})
+
+
+test.each(['advance', 'pause'])('a locked note displays full progress before %s', async (scenario) => {
+  jest.useFakeTimers()
+  ;(AppState.addEventListener as jest.Mock).mockReturnValue({ remove: jest.fn() })
+  const engine = {
+    trainingCurrentTime: 1, outputDisplayLatency: 0,
+    pause: jest.fn(), cancelTrainingCues: jest.fn(),
+    playTrainingLatch: jest.fn(async () => ({ ok: true, endsAt: 0 })),
+    setTrainingSound: jest.fn(), setTrainingCueVolume: jest.fn(),
+    playTrainingCues: jest.fn(async () => ({ ok: true, startsAt: 1, endsAt: 1 }))
+  } as unknown as MultitrackEngine
+  let tree!: ReactTestRenderer.ReactTestRenderer
+  try {
+    await ReactTestRenderer.act(async () => {
+      tree = ReactTestRenderer.create(<TrainingTestScreen active engine={engine} song={null} onBackToSong={jest.fn()} />)
+      await Promise.resolve()
+    })
+    await openSingleNotePrompt(tree)
+    await ReactTestRenderer.act(async () => { jest.advanceTimersByTime(3000); await Promise.resolve() })
+    const midi = (engine.playTrainingCues as jest.Mock).mock.calls[0][0][0].notes[0]
+    const mic = (globalThis as unknown as { trainingMic: { live: { midi: number; confidence: number; timestampMs: number } } }).trainingMic
+    let full = false
+    for (let frame = 0; frame < 150 && !full; frame++) {
+      mic.live = { midi, confidence: 0.95, timestampMs: 1000 + frame * 20 }
+      await ReactTestRenderer.act(() => { jest.advanceTimersByTime(20) })
+      full = tree.root.findAll(node => node.props.progress === 1).length > 0
+    }
+    expect(full).toBe(true)
+    expect(engine.playTrainingCues).toHaveBeenCalledTimes(1)
+    await ReactTestRenderer.act(() => { jest.advanceTimersByTime(249) })
+    expect(tree.root.findAll(node => node.props.progress === 1).length).toBeGreaterThan(0)
+    expect(engine.playTrainingCues).toHaveBeenCalledTimes(1)
+    if (scenario === 'pause') {
+      await ReactTestRenderer.act(async () => { button(tree, 'Pause').props.onPress(); await Promise.resolve() })
+      await ReactTestRenderer.act(async () => { jest.advanceTimersByTime(1000); await Promise.resolve() })
+      expect(engine.playTrainingCues).toHaveBeenCalledTimes(1)
+      expect(allText(tree)).toContain('Paused')
+    } else {
+      await ReactTestRenderer.act(async () => { jest.advanceTimersByTime(1); await Promise.resolve(); await Promise.resolve() })
+      expect(engine.playTrainingCues).toHaveBeenCalledTimes(2)
+    }
+  } finally {
+    if (tree) await ReactTestRenderer.act(() => tree.unmount())
+    jest.useRealTimers()
+  }
+})
+
+
+test.each(['return', 'paused', 'interrupted', 'unavailable', 'background'])('CarPlay reconnect respects %s', async (scenario) => {
+  jest.useFakeTimers()
+  const platform = jest.replaceProperty(Platform, 'OS', 'ios')
+  const previousState = Object.getOwnPropertyDescriptor(AppState, 'currentState')
+  Object.defineProperty(AppState, 'currentState', { configurable: true, value: 'active' })
+  const appStateListeners: Array<(state: string) => void> = []
+  ;(AppState.addEventListener as jest.Mock).mockImplementation((_type, listener) => { appStateListeners.push(listener); return { remove: jest.fn() } })
+  const listeners: Record<string, (event: any) => void> = {}
+  ;(AudioManager.addSystemEventListener as jest.Mock).mockImplementation((type, listener) => { listeners[type] = listener; return { remove: jest.fn() } })
+  const previousDevices = AudioManager.getDevicesInfo
+  AudioManager.getDevicesInfo = jest.fn().mockResolvedValue({
+    availableInputs: scenario === 'unavailable' ? [] : [{ id: 'car', category: 'CarAudio', name: 'CarPlay' }],
+    currentInputs: [], availableOutputs: [], currentOutputs: []
+  })
+  const engine = {
+    trainingCurrentTime: 1, outputDisplayLatency: 0,
+    pause: jest.fn(), cancelTrainingCues: jest.fn(),
+    playTrainingLatch: jest.fn(async () => ({ ok: true, endsAt: 0 })),
+    setTrainingSound: jest.fn(), setTrainingCueVolume: jest.fn(),
+    playTrainingCues: jest.fn(async () => ({ ok: true, startsAt: 1, endsAt: 1 }))
+  } as unknown as MultitrackEngine
+  let tree!: ReactTestRenderer.ReactTestRenderer
+  try {
+    await ReactTestRenderer.act(async () => {
+      tree = ReactTestRenderer.create(<TrainingTestScreen active engine={engine} song={null} onBackToSong={jest.fn()} />)
+      await Promise.resolve()
+    })
+    await openSingleNotePrompt(tree)
+    const globals = globalThis as unknown as { trainingMic: { start: jest.Mock }; trainingMicError: (error: string) => void; trainingPersistence: { recordCompletion: jest.Mock } }
+    ReactTestRenderer.act(() => globals.trainingMicError('iOS active input route does not match the selected device'))
+    await ReactTestRenderer.act(async () => { jest.advanceTimersByTime(350); await Promise.resolve(); await Promise.resolve() })
+    expect(globals.trainingMic.start).toHaveBeenCalledTimes(2)
+    if (scenario === 'paused') await ReactTestRenderer.act(async () => { button(tree, 'Pause').props.onPress(); await Promise.resolve() })
+    if (scenario === 'background') ReactTestRenderer.act(() => appStateListeners.forEach(listener => listener('background')))
+    if (scenario === 'interrupted') ReactTestRenderer.act(() => listeners.interruption({ type: 'began' }))
+    ReactTestRenderer.act(() => listeners.routeChange({ reason: 'NewDeviceAvailable' }))
+    await ReactTestRenderer.act(async () => { jest.advanceTimersByTime(700); await Promise.resolve(); await Promise.resolve() })
+    await ReactTestRenderer.act(async () => { jest.advanceTimersByTime(350); await Promise.resolve(); await Promise.resolve() })
+    expect(globals.trainingMic.start).toHaveBeenCalledTimes(scenario === 'return' ? 3 : 2)
+    if (scenario === 'return') {
+      expect(globals.trainingMic.start.mock.calls[2][2]).toBe(false)
+      expect(globals.trainingMic.start.mock.calls[2][3]).toBe(true)
+      expect((engine.playTrainingCues as jest.Mock).mock.calls[2][0]).toEqual((engine.playTrainingCues as jest.Mock).mock.calls[0][0])
+    }
+    if (scenario === 'paused') {
+      await ReactTestRenderer.act(async () => { button(tree, 'Start').props.onPress(); await Promise.resolve(); await Promise.resolve() })
+      expect(globals.trainingMic.start.mock.calls[2][3]).toBe(true)
+    }
+    expect(globals.trainingPersistence.recordCompletion).not.toHaveBeenCalled()
+  } finally {
+    if (tree) await ReactTestRenderer.act(() => tree.unmount())
+    platform.restore(); AudioManager.getDevicesInfo = previousDevices
+    if (previousState) Object.defineProperty(AppState, 'currentState', previousState)
+    jest.useRealTimers()
+  }
 })

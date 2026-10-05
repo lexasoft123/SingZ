@@ -1,4 +1,5 @@
-import { restoreTrainingProgram, trainingProgramProgress, trainingPracticeStreak, type TrainingProgram } from './program'
+import type { TrainingSound } from '../gen/training-lib'
+import { restoreTrainingProgram, trainingProgramProgress, trainingPracticeStreak, trainingPracticeDays, trainingProgramPracticeStreak, type TrainingProgram } from './program'
 import { restoreIntervalPlan, intervalPlanDays, type IntervalPlan } from './interval-plan'
 import { getStoredText, setStoredText } from '../latency'
 import { MobileAudioPreferences } from '../audio/preferences'
@@ -34,8 +35,8 @@ export interface TrainingPersistenceApi {
 const nativeApi: TrainingPersistenceApi = { get: getStoredText, set: setStoredText }
 
 export type TrainingPersistenceLoad =
-  | { readonly ok: true; readonly progress: TrainingProgress; readonly referenceVolume: number; readonly pitchWindowCents: number }
-  | { readonly ok: false; readonly error: string; readonly progress: TrainingProgress; readonly referenceVolume: number; readonly pitchWindowCents: number }
+  | { readonly ok: true; readonly progress: TrainingProgress; readonly referenceVolume: number; readonly trainingSound: TrainingSound; readonly pitchWindowCents: number }
+  | { readonly ok: false; readonly error: string; readonly progress: TrainingProgress; readonly referenceVolume: number; readonly trainingSound: TrainingSound; readonly pitchWindowCents: number }
 
 /** Dedicated mobile training profile/history persistence. App-wide sound
  * preferences are delegated to MobileAudioPreferences instead of being
@@ -103,13 +104,19 @@ export class MobileTrainingPersistence {
     try { this._program = restoreTrainingProgram(programRaw === null ? null : JSON.parse(programRaw)) }
     catch (error) { this._program = null; errors.push(`Program: ${message(error)}`) }
     this.ids = new Set(this.receipts.map((receipt) => receipt.sessionId))
-    const loaded = { progress: this.progress, referenceVolume: audioLoaded.preferences.referenceVolume, pitchWindowCents: this.pitchWindowCents }
+    const loaded = { trainingSound: audioLoaded.preferences.trainingSound, progress: this.progress, referenceVolume: audioLoaded.preferences.referenceVolume, pitchWindowCents: this.pitchWindowCents }
     if (errors.length) return { ok: false, error: errors.join(' '), ...loaded }
     return { ok: true, ...loaded }
   }
 
   get program(): TrainingProgram | null { return this.desiredProgram ? this.desiredProgram.value : this._program }
   get practiceStreak(): number { return trainingPracticeStreak(this.receipts) }
+
+  get completionReceipts() { return this.receipts as readonly TrainingCompletionReceipt[] }
+  get practiceDays() { return trainingPracticeDays(this.receipts) }
+  get programPracticeDays() { return trainingPracticeDays(this.programReceipts) }
+  get programPracticeStreak() { return trainingProgramPracticeStreak(this.program, this.receipts) }
+  private get programReceipts() { return this.program ? this.receipts.filter(receipt => receipt.completedAt >= this.program!.startedAt) : this.receipts }
 
   get programProgress() { return this.program ? trainingProgramProgress(this.program, this.receipts) : [] }
 
@@ -174,6 +181,10 @@ export class MobileTrainingPersistence {
   savePreferences(raw: TrainingPreferences): void {
     this.desiredProfile = restoreTrainingPreferences(raw)
     if (!this.profilePump) this.profilePump = this.pumpProfile()
+  }
+
+  saveTrainingSound(sound: TrainingSound): void {
+    this.audioPreferences.saveTrainingSound(sound)
   }
 
   saveReferenceVolume(raw: number): void {

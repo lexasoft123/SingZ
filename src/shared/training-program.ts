@@ -80,7 +80,7 @@ export function trainingProgramProgress(program: TrainingProgram, receipts: read
   })
 }
 
-export function programLessonSetup(lesson: ProgramLesson, day: number, setup: TrainingProgramSetup): Partial<TrainingProgramSetup> {
+export function programLessonSetup(lesson: ProgramLesson, day: number, setup: TrainingProgramSetup, receipts: readonly TrainingCompletionReceipt[] = [], now = Date.now()): Partial<TrainingProgramSetup> {
   const patch: Partial<TrainingProgramSetup> = {
     exercise: lesson.exercise, taskMode: lesson.mode,
     intervalSemitones: lesson.semitones, intervalSizes: [2,3,4,5,6,7,8],
@@ -92,7 +92,10 @@ export function programLessonSetup(lesson: ProgramLesson, day: number, setup: Tr
   }
   // Prefer the day's key, but use another playable key rather than expanding
   // the singer's chosen range. Repeat a key when the range allows few tonics.
-  const preferred = patch.tonicPc!
+  const date = new Date(now)
+  const todayStart = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
+  const last = receipts.filter(receipt => receipt.completedAt >= todayStart && receipt.completedAt <= now && receipt.exercise === lesson.exercise && receipt.taskMode === lesson.mode && receipt.intervalSemitones === lesson.semitones && receipt.aggregate.attempts > 0).sort((a, b) => b.completedAt - a.completedAt)[0]
+  const preferred = last ? (last.key.tonicPc + 1) % 12 : patch.tonicPc!
   for (let offset = 0; offset < 12; offset++) {
     const tonicPc = (preferred + offset) % 12
     const candidate = { ...setup, ...patch, tonicPc }
@@ -133,4 +136,28 @@ export function trainingPracticeStreak(receipts: readonly TrainingCompletionRece
   let streak = 0
   while (days.has(cursor)) { streak++; cursor-- }
   return streak
+}
+
+
+/** Dated activity, separate from the consecutive-day streak and lesson milestones. */
+export function trainingPracticeDays(receipts: readonly TrainingCompletionReceipt[], now = Date.now()) {
+  const dates = new Map<number, { date: number; sessions: number; exercises: number; matched: number }>()
+  const seen = new Set<string>()
+  for (const receipt of receipts) {
+    if (receipt.completedAt > now || receipt.aggregate.attempts === 0 || seen.has(receipt.sessionId)) continue
+    seen.add(receipt.sessionId)
+    const value = new Date(receipt.completedAt)
+    const date = new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime()
+    const entry = dates.get(date) ?? { date, sessions: 0, exercises: 0, matched: 0 }
+    entry.sessions++
+    entry.exercises += receipt.aggregate.attempts
+    entry.matched += receipt.aggregate.onTarget + receipt.aggregate.close
+    dates.set(date, entry)
+  }
+  return [...dates.values()].sort((a, b) => b.date - a.date)
+}
+
+
+export function trainingProgramPracticeStreak(program: TrainingProgram | null, receipts: readonly TrainingCompletionReceipt[], now = Date.now()): number {
+  return trainingPracticeStreak(program ? receipts.filter(receipt => receipt.completedAt >= program.startedAt) : receipts, now)
 }

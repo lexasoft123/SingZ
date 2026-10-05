@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import { Icon } from '@singz/ui/native/icons'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { ChoiceChip, GlassSurface, PrimaryAction, useNativeTheme } from '@singz/ui/native'
 import { intervalLabel, type TrainingExerciseSelection } from '../gen/training-lib'
@@ -21,9 +22,21 @@ export function PracticeWeek({ days, current }: { days: number; current?: number
   const theme = useNativeTheme()
   return <View style={s.week}>{Array.from({ length: 7 }, (_, index) => <View key={index} style={s.day}>
     <View accessibilityLabel={t(index < days ? 'phone.training.dashboardDayComplete' : 'phone.training.intervalDay', { day: index + 1 })} style={[s.dayMark, { backgroundColor: index < days ? theme.accentSoft : index === current ? theme.accent : theme.panelDeep }]}>
-      <Text style={[s.dayNumber, { color: index === current && index >= days ? theme.accentInk : index < days ? theme.accent : theme.dim }]}>{index < days ? '✓' : index + 1}</Text>
-    </View><Text style={[s.dayCaption, { color: theme.dim }]}>{index + 1}</Text>
+      <Text style={[s.dayNumber, { color: index === current && index >= days ? theme.accentInk : index < days ? theme.accent : theme.dim }]}>{index + 1}</Text>
+      {index < days && <Text style={[s.dayCheck, { color: theme.accent }]}>✓</Text>}
+    </View>
   </View>)}</View>
+}
+
+export function DailyTrainingActivity({ days }: { days: readonly { date: number; sessions: number; exercises: number }[] }): React.JSX.Element {
+  const theme = useNativeTheme()
+  return <View style={{ gap: 8 }}>
+    <Text style={[s.small, { color: theme.dim }]}>{t('phone.training.dailyActivityHelp')}</Text>
+    {days.slice(0, 7).map(day => <View key={day.date} style={s.between}>
+      <Text style={[s.small, { color: theme.text }]}>{new Date(day.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</Text>
+      <Text style={[s.small, { color: theme.dim }]}>{t('phone.training.dailyActivityTotals', { sessions: day.sessions, exercises: day.exercises })}</Text>
+    </View>)}
+  </View>
 }
 
 export function TrainingDashboard({ store, onLesson, onProgress, onChoose }: {
@@ -55,9 +68,9 @@ export function TrainingDashboard({ store, onLesson, onProgress, onChoose }: {
   return <View style={s.dashboard}>
     <GlassSurface radius={28} elevation="none" style={s.header}>
       <Text style={[s.headerTitle, { color: theme.text }]}>{t('phone.training.dashboardTrain')}</Text>
-      <Pressable accessibilityRole="button" onPress={onProgress} style={s.linkHit}><Text style={[s.link, { color: theme.accent }]}>{t('phone.training.progressEntryTitle')}</Text></Pressable>
+      <Pressable accessibilityRole="button" accessibilityLabel={t('phone.training.progressEntryTitle')} onPress={onProgress} style={[s.linkHit, { minWidth: 44, alignItems: 'center' }]}><Icon name="progress" size={26} color={theme.accent} /></Pressable>
     </GlassSurface>
-    <View style={s.between}><Text style={[s.caption, { color: theme.dim }]}>{t('phone.training.dashboardDaily')}</Text>{store.practiceStreak > 0 && <Text style={[s.streak, { color: theme.accent }]}>{t('phone.training.dashboardStreak', { days: store.practiceStreak })}</Text>}</View>
+    <View style={s.between}><Text style={[s.caption, { color: theme.dim }]}>{t('phone.training.dashboardDaily')}</Text>{store.programPracticeStreak > 0 && <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}><Icon name="flame" size={18} color={theme.accent} /><Text style={[s.streak, { color: theme.accent }]}>{t('phone.training.dashboardStreak', { days: store.programPracticeStreak })}</Text></View>}</View>
     {!program ? <GlassSurface radius={26} style={s.focus}>
       <Text style={[s.title, { color: theme.text }]}>{t('phone.training.dashboardChoose')}</Text>
       <Text style={[s.copy, { color: theme.dim }]}>{t('phone.training.dashboardChooseHelp')}</Text>
@@ -68,7 +81,9 @@ export function TrainingDashboard({ store, onLesson, onProgress, onChoose }: {
       <Text style={[s.copy, { color: theme.dim }]}>{t(next.lesson.mode === 'find' ? 'phone.training.dashboardFindHelp' : next.lesson.exercise === 'interval' ? 'phone.training.dashboardIntervalHelp' : next.lesson.exercise === 'note' ? 'phone.training.exerciseNoteCopy' : next.lesson.exercise === 'scale' ? 'phone.training.scaleGuidedHelp' : next.lesson.exercise === 'chord-tone' ? 'phone.training.exerciseChordToneCopy' : 'phone.training.exerciseArpeggioCopy')}</Text>
       <Text style={[s.meta, { color: theme.dim }]}>{t(next.lesson.exercise === 'interval' ? 'phone.training.dashboardIntervalSession' : next.lesson.exercise === 'scale' ? 'phone.training.dashboardScaleSession' : 'phone.training.dashboardNoteSession', { minutes: next.lesson.exercise === 'arpeggio' ? 5 : 2 })}</Text>
       <PracticeWeek days={next.days} current={next.practicedToday ? undefined : next.dayIndex} />
-      <Text style={[s.small, { color: theme.dim }]}>{t('phone.training.intervalDaysDone', { days: next.days })}</Text>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}><Icon name="calendar" size={18} color={theme.dim} /><Text style={[s.small, { color: theme.dim }]}>{t('phone.training.intervalDaysDone', { days: next.days })}</Text></View>
+      <DailyTrainingActivity days={(store.programPracticeDays ?? []).slice(0, 2)} />
+      <Text style={[s.small, { color: theme.dim }]}>{t('phone.training.dailyRecommendation')}</Text>
       <PrimaryAction label={t(next.practicedToday ? 'phone.training.dashboardPracticeAgain' : 'phone.training.dashboardStart')} icon={<MicGlyph color={C.amberInk} />} onPress={() => onLesson(next.lesson, next.dayIndex)} />
     </GlassSurface> : <GlassSurface radius={26} style={s.focus}><Text style={[s.title, { color: theme.text }]}>{t('phone.training.dashboardProgramComplete')}</Text><Text style={[s.copy, { color: theme.dim }]}>{t('phone.training.programComplete')}</Text><PrimaryAction label={t('phone.training.progressEntryTitle')} onPress={onProgress} /></GlassSurface>}
     {program && <>
@@ -87,7 +102,7 @@ export function TrainingDashboard({ store, onLesson, onProgress, onChoose }: {
       </GlassSurface>}
     </>}
     <View style={s.between}><Text style={[s.programTitle, { color: theme.text }]}>{t('phone.training.dashboardFree')}</Text><Pressable accessibilityRole="button" onPress={() => setAll(value => !value)} style={s.linkHit}><Text style={[s.link, { color: theme.accent }]}>{t(all ? 'phone.training.dashboardLess' : 'phone.training.dashboardAll')}</Text></Pressable></View>
-    <View style={s.quick}>{items.slice(0, all ? items.length : 3).map(item => <Pressable key={item.exercise} accessibilityRole="button" onPress={() => onChoose(item.exercise)} style={s.quickHit}><GlassSurface radius={18} elevation="none" style={s.quickContent}><Text style={[s.quickMark, { color: theme.accent }]}>{item.mark}</Text><Text style={[s.quickLabel, { color: theme.text }]}>{t(`phone.training.${item.key}`)}</Text></GlassSurface></Pressable>)}</View>
+    <View style={s.quick}>{items.slice(0, all ? items.length : 3).map(item => <Pressable key={item.exercise} accessibilityRole="button" onPress={() => onChoose(item.exercise)} style={s.quickHit}><GlassSurface radius={18} elevation="none" style={s.quickContent}><Icon name={item.exercise === 'note' ? 'note' : item.exercise === 'interval' ? 'interval' : item.exercise === 'chord-tone' ? 'chord' : item.exercise === 'arpeggio' ? 'arpeggio' : 'scale'} size={26} color={theme.accent} /><Text style={[s.quickLabel, { color: theme.text }]}>{t(`phone.training.${item.key}`)}</Text></GlassSurface></Pressable>)}</View>
   </View>
 }
 
@@ -107,7 +122,7 @@ const s = StyleSheet.create({
   day: { flex: 1, alignItems: 'center', gap: 6 },
   dayMark: { minHeight: 34, width: '100%', borderRadius: 11, alignItems: 'center', justifyContent: 'center' },
   dayNumber: { fontSize: 15, fontWeight: '800' },
-  dayCaption: { fontSize: 11 },
+  dayCheck: { position: 'absolute', right: 3, top: 1, fontSize: 9, fontWeight: '900' },
   program: { padding: 16 },
   programHit: { gap: 7 },
   programTitle: { fontSize: 18, fontWeight: '800' },

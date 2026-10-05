@@ -64,7 +64,7 @@ jest.mock('./src/engine', () => ({
     suspendForBackground: jest.fn(() => Promise.resolve()),
     allowForegroundAudio: jest.fn(),
     setTrainingCueMuted: jest.fn(),
-    setTrainingCueVolume: jest.fn(),
+    setTrainingSound: jest.fn(), setTrainingCueVolume: jest.fn(),
     playTrainingCues: jest.fn(() => Promise.resolve({ ok: true, endsAt: 0 })),
     setRegion: jest.fn(),
   })),

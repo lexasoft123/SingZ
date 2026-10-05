@@ -1,9 +1,9 @@
+import { type TrainingSound } from '../../../shared/training-sound'
 import { TRAINING_REACHED_TONE } from '../../../shared/training-tone'
 import type { TrainingCue, TrainingCuePurpose } from '../../../shared/training-types'
 import {
   DEFAULT_TRAINING_REFERENCE_VOLUME,
-  clampTrainingReferenceVolume,
-  trainingOrganOscillators
+  clampTrainingReferenceVolume
 } from '../training-practice'
 
 export interface TrainingCueTimingOptions {
@@ -54,7 +54,7 @@ export interface TrainingCueTimeline {
 }
 
 interface OwnedVoice {
-  readonly oscillator: OscillatorNode
+  readonly oscillator: OscillatorNode | AudioBufferSourceNode
   readonly gain: GainNode
 }
 
@@ -67,6 +67,14 @@ export class DesktopTrainingCueController {
   private readonly voices = new Set<OwnedVoice>()
   private generation = 0
   private disposed = false
+  private createVoices: typeof import('./training-voices').createTrainingVoices | null = null
+  private organCurve: (() => Float32Array<ArrayBuffer>) | null = null
+  private instrumentGain: (sound: TrainingSound, midi: number) => number = () => 1
+  private organOutput: WaveShaperNode | null = null
+  private sound: TrainingSound = 'piano'
+  private readonly samples = new Map<string, AudioBuffer>()
+  setSound(sound: TrainingSound): void { this.sound = sound }
+
   private referenceVolume = DEFAULT_TRAINING_REFERENCE_VOLUME
 
   constructor(
@@ -90,6 +98,20 @@ export class DesktopTrainingCueController {
     this.assertCurrent(generation)
     if (this.context.state !== 'running') throw new Error('Training audio context is not running.')
 
+    const [{ sampleAuditionGain, trainingOrganCurve }, { createTrainingVoices }] = await Promise.all([
+      import('../../../shared/training-sound-levels'), import('./training-voices')
+    ])
+    this.createVoices = createTrainingVoices
+    this.organCurve = trainingOrganCurve
+    this.assertCurrent(generation)
+    this.instrumentGain = sampleAuditionGain
+    const sound = this.sound
+    if (sound !== 'organ') {
+      const { loadTrainingSamples } = await import('./training-samples')
+      this.assertCurrent(generation)
+      await loadTrainingSamples(this.context, this.samples, sound, cues, () => this.assertCurrent(generation))
+    }
+    this.assertCurrent(generation)
     const startTime = this.context.currentTime + timing.startDelaySec
     let cursor = startTime
     const scheduledCues: ScheduledTrainingCue[] = []
@@ -103,7 +125,7 @@ export class DesktopTrainingCueController {
               ? cursor
               : cursor + noteIndex * (timing.noteDurationSec + timing.sequenceGapSec)
           const noteEnd = noteStart + timing.noteDurationSec
-          this.scheduleVoice(midi, noteStart, noteEnd, timing, concurrentScale)
+          this.scheduleVoice(midi, noteStart, noteEnd, timing, concurrentScale, sound)
           return { midi, startTime: noteStart, endTime: noteEnd }
         })
         const cueEnd = notes.reduce((latest, note) => Math.max(latest, note.endTime), cursor)
@@ -172,6 +194,9 @@ export class DesktopTrainingCueController {
     if (this.disposed) return
     this.generation++
     this.clearVoices()
+    this.organOutput?.disconnect()
+    this.organOutput = null
+    this.samples.clear()
     this.disposed = true
   }
 
@@ -180,27 +205,18 @@ export class DesktopTrainingCueController {
     startTime: number,
     endTime: number,
     timing: TrainingCueTimingOptions,
-    concurrentScale: number
+    concurrentScale: number,
+    sound: TrainingSound
   ): void {
-    const fundamental = 440 * 2 ** ((midi - 69) / 12)
-    for (const partial of trainingOrganOscillators(fundamental)) {
-      const oscillator = this.context.createOscillator()
-      const gain = this.context.createGain()
-      const voice = { oscillator, gain }
-      const level = partial.level * this.referenceVolume * timing.peakGain * concurrentScale
-      oscillator.type = 'sine'
-      oscillator.frequency.setValueAtTime(fundamental * partial.frequencyRatio, startTime)
-      gain.gain.setValueAtTime(0, startTime)
-      gain.gain.linearRampToValueAtTime(level * 0.86, startTime + timing.attackSec)
-      gain.gain.linearRampToValueAtTime(level, startTime + Math.min(0.18, (endTime - startTime) * 0.55))
-      gain.gain.setValueAtTime(level, endTime - timing.releaseSec)
-      gain.gain.linearRampToValueAtTime(0, endTime)
-      oscillator.connect(gain)
-      gain.connect(this.output)
-      oscillator.onended = () => this.releaseVoice(voice, false)
+    if (sound === 'organ' && !this.organOutput) {
+      this.organOutput = this.context.createWaveShaper()
+      this.organOutput.curve = this.organCurve!()
+      this.organOutput.oversample = '2x'
+      this.organOutput.connect(this.output)
+    }
+    for (const voice of this.createVoices!(this.context, this.output, this.organOutput, this.samples, this.instrumentGain, midi, startTime, endTime, timing, concurrentScale, this.referenceVolume, sound)) {
+      voice.oscillator.onended = () => this.releaseVoice(voice, false)
       this.voices.add(voice)
-      oscillator.start(startTime)
-      oscillator.stop(endTime)
     }
   }
 
@@ -214,6 +230,7 @@ export class DesktopTrainingCueController {
         // The oscillator may have ended between cancellation and cleanup.
       }
     }
+    if ('buffer' in voice.oscillator) voice.oscillator.buffer = null
     voice.oscillator.disconnect()
     voice.gain.disconnect()
   }

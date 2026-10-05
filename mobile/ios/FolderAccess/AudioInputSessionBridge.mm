@@ -1,3 +1,4 @@
+#import <AVFoundation/AVFoundation.h>
 #import <React/RCTBridgeModule.h>
 #import <React/RCTEventEmitter.h>
 
@@ -420,6 +421,63 @@ RCT_REMAP_METHOD(
     return;
   }
   resolve(nil);
+}
+
+// Called only after the previous capture lease has been fully retired.
+RCT_REMAP_METHOD(
+    selectBuiltInRoute,
+    selectBuiltInRouteWithResolver : (RCTPromiseResolveBlock)resolve
+        rejecter : (RCTPromiseRejectBlock)reject)
+{
+  dispatch_async(dispatch_get_main_queue(), ^{
+    AVAudioSession* session = AVAudioSession.sharedInstance;
+    AVAudioSessionPortDescription* microphone = nil;
+    for (AVAudioSessionPortDescription* port in session.availableInputs) {
+      if ([port.portType isEqualToString:AVAudioSessionPortBuiltInMic]) {
+        microphone = port;
+        break;
+      }
+    }
+    if (!microphone) {
+      reject(@"E_AUDIO_ROUTE", @"iOS built-in microphone is unavailable", nil);
+      return;
+    }
+    NSError* error = nil;
+    if (![session setPreferredInput:microphone error:&error] ||
+        ![session overrideOutputAudioPort:AVAudioSessionPortOverrideSpeaker error:&error]) {
+      reject(@"E_AUDIO_ROUTE", error.localizedDescription ?: @"iOS built-in audio route is unavailable", error);
+      return;
+    }
+    resolve([@"ios:" stringByAppendingString:microphone.UID]);
+  });
+}
+
+RCT_REMAP_METHOD(
+    selectCarPlayRoute,
+    selectCarPlayRouteWithResolver : (RCTPromiseResolveBlock)resolve
+        rejecter : (RCTPromiseRejectBlock)reject)
+{
+  dispatch_async(dispatch_get_main_queue(), ^{
+    AVAudioSession* session = AVAudioSession.sharedInstance;
+    AVAudioSessionPortDescription* carInput = nil;
+    for (AVAudioSessionPortDescription* port in session.availableInputs) {
+      if ([port.portType isEqualToString:AVAudioSessionPortCarAudio]) {
+        carInput = port;
+        break;
+      }
+    }
+    if (!carInput) {
+      reject(@"E_AUDIO_ROUTE", @"iOS CarPlay carInput is unavailable", nil);
+      return;
+    }
+    NSError* error = nil;
+    if (![session setPreferredInput:carInput error:&error] ||
+        ![session overrideOutputAudioPort:AVAudioSessionPortOverrideNone error:&error]) {
+      reject(@"E_AUDIO_ROUTE", error.localizedDescription ?: @"iOS CarPlay audio route is unavailable", error);
+      return;
+    }
+    resolve([@"ios:" stringByAppendingString:carInput.UID]);
+  });
 }
 
 RCT_REMAP_METHOD(

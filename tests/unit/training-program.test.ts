@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { PROGRAM_LESSONS, programLessonSetup, trainingProgramProgress, trainingPracticeStreak } from '../../src/shared/training-program'
+import { PROGRAM_LESSONS, programLessonSetup, trainingProgramProgress, trainingPracticeStreak, trainingPracticeDays, trainingProgramPracticeStreak } from '../../src/shared/training-program'
 import { createTrainingSession, startTrainingSession, recordTrainingResult } from '../../src/shared/training-session'
 import { createTrainingCompletionReceipt } from '../../src/shared/training-progress'
 import { scoreCompletedTrainingTarget } from '../../src/shared/training-completed-target'
 import { midiToFrequency } from '../../src/shared/music-theory'
-import { DEFAULT_DESKTOP_TRAINING_SETUP, trainingConfigFromSetup } from '../../src/renderer/src/training-ui-state'
+import { DEFAULT_DESKTOP_TRAINING_SETUP, INITIAL_DESKTOP_TRAINING_STATE, desktopTrainingReducer, trainingConfigFromSetup } from '../../src/renderer/src/training-ui-state'
 import { SingleNoteLockTracker } from '../../src/shared/training-pitch-lock'
 
 describe('shared training rules on desktop', () => {
@@ -59,4 +59,54 @@ describe('shared training rules on desktop', () => {
     expect(scoreCompletedTrainingTarget(input).classification).toBe('wrong-note')
     expect(scoreCompletedTrainingTarget(input, 1500).classification).toBe('on-target')
   })
+})
+
+
+function completedReceipt(seed: number, completedAt: number) {
+  let session = startTrainingSession(createTrainingSession(trainingConfigFromSetup({ ...DEFAULT_DESKTOP_TRAINING_SETUP, length: 6 }, seed)))
+  for (const prompt of session.prompts) session = recordTrainingResult(session, { response: 'vocal', promptId: prompt.id, targets: prompt.targets.map((_, targetIndex) => ({ targetIndex, classification: 'on-target' as const, metrics: { voicedCoverage: 1 } })) })
+  return createTrainingCompletionReceipt(session, completedAt)
+}
+
+it('two sessions in one local calendar day count as one day and show both session totals', () => {
+  const morning = new Date(2026, 9, 5, 9).getTime()
+  const evening = new Date(2026, 9, 5, 23).getTime()
+  const receipts = [completedReceipt(31, morning), completedReceipt(32, evening)]
+  expect(trainingPracticeStreak(receipts, evening)).toBe(1)
+  expect(trainingPracticeDays(receipts, evening)).toEqual([{ date: new Date(2026, 9, 5).getTime(), sessions: 2, exercises: 12, matched: 12 }])
+  expect(trainingPracticeDays([...receipts, receipts[0]], evening)).toHaveLength(1)
+  expect(trainingPracticeDays([...receipts, receipts[0]], evening)[0].sessions).toBe(2)
+})
+
+it('program streak excludes practice before the program while preserving dated history', () => {
+  const today = new Date(2026, 9, 5, 12).getTime()
+  const yesterday = new Date(2026, 9, 4, 12).getTime()
+  const receipts = [completedReceipt(33, yesterday), completedReceipt(34, today)]
+  expect(trainingPracticeStreak(receipts, today)).toBe(2)
+  expect(trainingProgramPracticeStreak({ level: 'foundation', startedAt: today - 1000 }, receipts, today)).toBe(1)
+  expect(trainingPracticeDays(receipts, today)).toHaveLength(2)
+})
+
+it('a successful hold is matched even when its configured window differs from offline scoring', () => {
+  const prompt = createTrainingSession(trainingConfigFromSetup({ ...DEFAULT_DESKTOP_TRAINING_SETUP, length: 1 }, 35)).prompts[0]
+  const observations = Array.from({ length: 100 }, (_, index) => ({ timestampMs: index * 20, midi: prompt.targets[0].midi + 0.6, confidence: 1, frequencyHz: midiToFrequency(prompt.targets[0].midi + 0.6) }))
+  const input = { prompt, observations, targetWindows: [{ targetIndex: 0, startMs: 0, endMs: 1980 }] }
+  expect(scoreCompletedTrainingTarget(input).classification).toBe('close')
+  const result = scoreCompletedTrainingTarget(input, 1500)
+  expect(result.classification).toBe('on-target')
+  expect(result.metrics.medianCentsError).toBeCloseTo(60)
+})
+
+it('same-day program repeats choose a different playable key without changing range', () => {
+  const now = new Date(2026, 9, 5, 12).getTime()
+  const lesson = { exercise: 'note' as const, mode: 'imitate' as const }
+  const receipt = completedReceipt(90, now - 1000)
+  const repeat = programLessonSetup(lesson, 0, DEFAULT_DESKTOP_TRAINING_SETUP, [receipt], now)
+  expect(repeat.tonicPc).not.toBe(receipt.key.tonicPc)
+  const state = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, { type: 'choose-program-lesson', lesson, day: 0, patch: repeat })
+  expect(state.setup.tonicPc).toBe(repeat.tonicPc)
+  expect(state.route).toBe('setup')
+  expect(repeat.lowMidi).toBeUndefined()
+  expect(repeat.highMidi).toBeUndefined()
+  expect(programLessonSetup(lesson, 0, DEFAULT_DESKTOP_TRAINING_SETUP, [receipt], now + 86400000).tonicPc).toBe(0)
 })

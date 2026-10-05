@@ -3,7 +3,8 @@
 A practice app for singers. Drop a song, see its timeline, split it into six
 stems (vocals / drums / bass / guitar / piano / instruments) with AI, and mute
 any track while it plays — kill the vocals and it's your karaoke machine, kill
-the guitar and it's your backing band.
+the guitar and it's your backing band. Build your ear and pitch with guided
+vocal lessons, seven-day practice goals and a live pitch meter.
 
 ![SingZ playing a song split into six stems — vocals, drums, bass, guitar, piano and instruments — karaoke mode on](docs/screenshot.png)
 
@@ -13,6 +14,8 @@ accounts (an optional Google Drive sync puts your library on your own Drive
 so the companion phone app can play it). A fresh OS install needs nothing
 pre-installed: the app downloads its AI splitter pack once through the
 built-in setup and keeps it updated automatically.
+
+Download for Mac, Windows and Android from [GitHub Releases](https://github.com/lexasoft123/SingZ/releases/latest), or get [SingZ for iPhone](https://apps.apple.com/app/singz-sing-with-the-band/id6806430347).
 
 ## What it does
 
@@ -69,6 +72,16 @@ built-in setup and keeps it updated automatically.
   [TestFlight beta](https://testflight.apple.com/join/q6vVdkwt).
   **Android:** the APK is attached to every release (not yet on the Play
   Store — it's still in closed testing there).
+- **Vocal training** — guided programs for foundation, developing and advanced
+  ear skills, plus single notes, intervals, chord tones, scales and arpeggios.
+  Hear a note, sing it, and watch your pitch and hold progress. Intervals grow
+  in order and repeat from different starting notes. Track practice by date;
+  repeating a lesson on the same day uses another playable key. Choose piano
+  (the default), electric piano, nylon guitar or organ, with sound and volume
+  settings remembered across exercises.
+
+![SingZ vocal training programs and exercises](docs/training.png)
+
 - **Log window** — the **Log** button shows what the app is doing under the
   hood (engines, downloads, lyrics search) and saves to a file for bug
   reports.
@@ -84,7 +97,7 @@ per platform, downloaded by the first-run setup (htdemucs_6s model embedded
 | Platform | Engine | Size |
 |---|---|---|
 | macOS Apple Silicon | demucs on PyTorch/**MPS** (GPU — a song splits in seconds) | 208 MB |
-| Windows x64 | demucs-onnx on **DirectML** (NVIDIA/AMD/Intel), automatic CPU fallback | 201 MB |
+| Windows x64 | demucs-onnx with **TensorRT-RTX** on supported NVIDIA GPUs, CPU fallback | See release assets |
 | macOS Intel | demucs-onnx on CPU | 177 MB |
 
 Packs are versioned: when an update ships, the app notices and re-downloads

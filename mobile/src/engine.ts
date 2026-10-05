@@ -1,3 +1,6 @@
+import { trainingOrganCurve } from './gen/training-lib'
+import { TRAINING_SAMPLES } from './training/samples'
+import { sampleAuditionGain, trainingSampleIndex, type TrainingSound } from './training/sample-levels'
 import {
   AudioContext,
   decodeAudioData,
@@ -68,16 +71,6 @@ const CLICK_TICK_MS = 60
 const SEC_COUNT_TICKS = 3
 const SEC_COUNT_PERIOD = 1
 
-function trainingLimiterCurve(size = 2_049, drive = 1.55): Float32Array {
-  const curve = new Float32Array(size)
-  const normalization = Math.tanh(drive)
-  for (let index = 0; index < size; index++) {
-    const input = (index * 2) / (size - 1) - 1
-    curve[index] = Math.tanh(input * drive) / normalization
-  }
-  return curve
-}
-
 /** SingzStretchNode host object (patch 3 in scripts/patch-audio-api.js). */
 interface StretchHost {
   setSemitones(semitones: number): void
@@ -99,11 +92,16 @@ export class MultitrackEngine {
   /** Cues bypass the song master/stretch chain: transposing or slowing a song
    * must never change the reference pitch the exercise core requested. */
   private trainingGain = this.ctx.createGain()
+  private trainingSampleGain = this.ctx.createGain()
   private trainingLimiter: WaveShaperNode = this.ctx.createWaveShaper()
+  private trainingSound: TrainingSound = 'piano'
+  private readonly trainingSamples = new Map<number, AudioBuffer>()
+  setTrainingSound(sound: TrainingSound): void { this.trainingSound = sound }
+
   private trainingCueVolume = DEFAULT_TRAINING_REFERENCE_VOLUME
   private trainingCueMuted = false
   private trainingLatchNodes: { oscillator: OscillatorNode; gain: GainNode }[] = []
-  private trainingNodes: { oscillator: OscillatorNode; gain: GainNode }[] = []
+  private trainingNodes: { oscillator: OscillatorNode | AudioBufferSourceNode; gain: GainNode }[] = []
   private trainingCueGeneration = 0
   private tracks: EngineTrack[] = []
   private sources: AudioBufferSourceNode[] = []
@@ -170,8 +168,10 @@ export class MultitrackEngine {
     } else {
       this.master.connect(this.ctx.destination)
     }
+    this.trainingSampleGain.gain.value = this.trainingCueVolume
+    this.trainingSampleGain.connect(this.ctx.destination)
     this.trainingGain.gain.value = this.trainingCueVolume
-    this.trainingLimiter.curve = trainingLimiterCurve()
+    this.trainingLimiter.curve = trainingOrganCurve()
     this.trainingLimiter.oversample = '2x'
     this.trainingGain.connect(this.trainingLimiter)
     this.trainingLimiter.connect(this.ctx.destination)
@@ -204,12 +204,15 @@ export class MultitrackEngine {
 
   private applyTrainingCueVolume(): void {
     this.trainingGain.gain.value = this.trainingCueMuted ? 0 : this.trainingCueVolume
+    this.trainingSampleGain.gain.value = this.trainingCueMuted ? 0 : this.trainingCueVolume
   }
 
   /** Schedule a compact warm reference phrase on the engine clock. Song
    * playback is paused first, making cue and karaoke ownership exclusive. */
   async playTrainingCues(
-    cues: readonly VocalTrainingCue[]
+    cues: readonly VocalTrainingCue[],
+    auditionLevels: readonly number[] = [],
+    instrument: TrainingSound = this.trainingSound
   ): Promise<{ ok: true; startsAt: number; endsAt: number } | { ok: false; error: string }> {
     try {
       if (this.backgrounded)
@@ -228,8 +231,17 @@ export class MultitrackEngine {
       if (this.ctx.state === 'suspended') await this.ctx.resume()
       if (this.backgrounded || generation !== this.trainingCueGeneration)
         return { ok: false, error: t('phone.app.engine.cueCancelled') }
+      const sound = instrument
+      if (sound !== 'organ') {
+        for (const cue of cues) for (const midi of cue.notes) {
+          const asset = TRAINING_SAMPLES[sound][trainingSampleIndex(midi)]
+          if (!this.trainingSamples.has(asset)) this.trainingSamples.set(asset, await this.decode(asset))
+          if (this.backgrounded || generation !== this.trainingCueGeneration)
+            return { ok: false, error: t('phone.app.engine.cueCancelled') }
+        }
+      }
       const plan = planTrainingCues(cues, this.ctx.currentTime + START_DELAY)
-      for (const voice of plan.voices) {
+      for (const [voiceIndex, voice] of plan.voices.entries()) {
         if (generation !== this.trainingCueGeneration)
           return { ok: false, error: t('phone.app.engine.cueCancelled') }
         const { start, end } = voice
@@ -237,7 +249,13 @@ export class MultitrackEngine {
         const concurrentVoices = plan.voices.filter(
           candidate => candidate.start < end && candidate.end > start
         ).length
-        const voiceScale = 1 / Math.max(1, concurrentVoices)
+        const voiceScale = (auditionLevels[voiceIndex] ?? sampleAuditionGain(sound, voice.midi)) / Math.max(1, concurrentVoices)
+        if (sound !== 'organ') {
+          const index = trainingSampleIndex(voice.midi)
+          const buffer = this.trainingSamples.get(TRAINING_SAMPLES[sound][index])!
+          this.scheduleTrainingSample(buffer, 36 + index * 12, voice.midi, voiceScale, start, end)
+          continue
+        }
         // Shared exact-pitch flute registration, with speaker rolloff and
         // peak headroom even at the maximum reference-volume setting.
         for (const partial of trainingOrganOscillators(fundamental)) {
@@ -270,6 +288,32 @@ export class MultitrackEngine {
         error: error instanceof Error ? error.message : String(error)
       }
     }
+  }
+
+  private scheduleTrainingSample(buffer: AudioBuffer, sampleMidi: number, midi: number, adjustment: number, start: number, end: number): void {
+    const source = this.ctx.createBufferSource()
+    const gain = this.ctx.createGain()
+    gain.gain.value = 0
+    const rate = 2 ** ((midi - sampleMidi) / 12)
+    const duration = Math.min(end - start, buffer.duration / rate)
+    source.buffer = buffer
+    source.playbackRate.value = rate
+    const level = 0.6 * adjustment
+    gain.gain.setValueAtTime(0, start)
+    gain.gain.linearRampToValueAtTime(level, start + Math.min(0.008, duration / 4))
+    gain.gain.setValueAtTime(level, start + Math.max(duration / 2, duration - 0.15))
+    gain.gain.linearRampToValueAtTime(0, start + duration)
+    source.connect(gain)
+    gain.connect(this.trainingSampleGain)
+    const node = { oscillator: source, gain }
+    this.trainingNodes.push(node)
+    source.onEnded = () => {
+      const index = this.trainingNodes.indexOf(node)
+      if (index >= 0) this.trainingNodes.splice(index, 1)
+      source.buffer = null; source.disconnect(); gain.disconnect(); source.onEnded = null
+    }
+    source.start(start)
+    source.stop(start + duration)
   }
 
   /** Fast feedback on the active route, without restarting reference playback. */
@@ -316,6 +360,7 @@ export class MultitrackEngine {
       } catch {
         /* already ended */
       }
+      if ('buffer' in oscillator) { oscillator.onEnded = null; oscillator.buffer = null }
       try {
         oscillator.disconnect()
       } catch {

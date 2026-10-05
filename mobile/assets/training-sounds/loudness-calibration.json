@@ -1,0 +1,1844 @@
+{
+  "targetLufs": -17,
+  "referenceVolume": 1,
+  "sampleVoiceGain": 0.6,
+  "maximumReferenceVolume": 2,
+  "sampleMaxLoudnessErrorDb": 0.33999999999999986,
+  "sampleMaximumTruePeakDbAtMaxVolume": -0.569400087,
+  "organMaxModeledLoudnessErrorDb": 0.07000000000000028,
+  "sampleHashes": {
+    "guitar-C6.mp3": "15a9c608ff172d6bd9ce51c85ab6a91f574d79febd077c9c87f369177503eb4b",
+    "guitar-C4.mp3": "0105443ba40ecd75129a09036b8bae7ad0bfab0419d6d9ed4beca17b556d149c",
+    "guitar-C5.mp3": "6d26c1f98e2477b016c7931cbfbe9a9dc498fffa05dae688b4ec770a71da60ba",
+    "guitar-C2.mp3": "69d7cc2475ac48c07d5142937e8f89b950c65087a6e0c269d253950c84772f15",
+    "guitar-C3.mp3": "0703655257689c5ff2574383e10a4eb1e5ee0b2af8eef539ac6e8f35f2ab2e37",
+    "piano-C4.mp3": "d88710656df7e6e46fcecca7c302dd685c54e84db62389a8951b2278596fb8dd",
+    "electric-C6.mp3": "f4666ab919a330d0989bba0657013902870c8e9e7f9053c4b27204ead79b7863",
+    "piano-C5.mp3": "de5a5aea282fa7328bebdf1d36b778e2de1cfa50cc207786af81982fcbdbe7ce",
+    "electric-C4.mp3": "91a28b68919177642d6a01f3d2ed01c8c2068359b65c1e3faf8b088c2cfc79e6",
+    "electric-C5.mp3": "96d168f4abc4f18743c481dbc17b6123e46901d6d5bfe7dfb6dee3606a179da3",
+    "piano-C6.mp3": "6e4ea63442552df40e8298334c634c51512ed170d27c884020788d56dc21e34e",
+    "piano-C2.mp3": "306c9bcc0038fe0209d4911575eb8f8ea348b199f6c6068142954bb780dcec87",
+    "piano-C3.mp3": "4ca839971871411063f843fe203d98c1833aa4d68104c5e596912b75dce21ffa",
+    "electric-C2.mp3": "96d08c612d48ae6db1675531a166fe1dda5bd85f09acf6d05d560b4c857c4d5e",
+    "electric-C3.mp3": "3de54e2e1f1f140d7b7f3e05ee928e6dbaff4afe34eb5da0ca27688632651b81"
+  },
+  "measuredSamples": [
+    {
+      "instrument": "piano",
+      "midi": 36,
+      "lufs": -17.0,
+      "peak": -9.62,
+      "rms": -19.694549
+    },
+    {
+      "instrument": "piano",
+      "midi": 37,
+      "lufs": -17.0,
+      "peak": -9.59,
+      "rms": -19.803071
+    },
+    {
+      "instrument": "piano",
+      "midi": 38,
+      "lufs": -17.01,
+      "peak": -9.53,
+      "rms": -19.895785
+    },
+    {
+      "instrument": "piano",
+      "midi": 39,
+      "lufs": -17.02,
+      "peak": -9.47,
+      "rms": -19.995047
+    },
+    {
+      "instrument": "piano",
+      "midi": 40,
+      "lufs": -17.01,
+      "peak": -9.39,
+      "rms": -20.071066
+    },
+    {
+      "instrument": "piano",
+      "midi": 41,
+      "lufs": -17.0,
+      "peak": -9.31,
+      "rms": -20.146999
+    },
+    {
+      "instrument": "piano",
+      "midi": 42,
+      "lufs": -17.01,
+      "peak": -9.98,
+      "rms": -19.243959
+    },
+    {
+      "instrument": "piano",
+      "midi": 43,
+      "lufs": -17.01,
+      "peak": -9.98,
+      "rms": -19.312203
+    },
+    {
+      "instrument": "piano",
+      "midi": 44,
+      "lufs": -17.0,
+      "peak": -9.97,
+      "rms": -19.37895
+    },
+    {
+      "instrument": "piano",
+      "midi": 45,
+      "lufs": -16.99,
+      "peak": -9.93,
+      "rms": -19.44279
+    },
+    {
+      "instrument": "piano",
+      "midi": 46,
+      "lufs": -17.0,
+      "peak": -9.87,
+      "rms": -19.513064
+    },
+    {
+      "instrument": "piano",
+      "midi": 47,
+      "lufs": -16.97,
+      "peak": -9.77,
+      "rms": -19.545928
+    },
+    {
+      "instrument": "piano",
+      "midi": 48,
+      "lufs": -17.01,
+      "peak": -9.72,
+      "rms": -19.639291
+    },
+    {
+      "instrument": "piano",
+      "midi": 49,
+      "lufs": -16.99,
+      "peak": -9.59,
+      "rms": -19.65947
+    },
+    {
+      "instrument": "piano",
+      "midi": 50,
+      "lufs": -17.01,
+      "peak": -9.49,
+      "rms": -19.706668
+    },
+    {
+      "instrument": "piano",
+      "midi": 51,
+      "lufs": -17.0,
+      "peak": -9.33,
+      "rms": -19.725732
+    },
+    {
+      "instrument": "piano",
+      "midi": 52,
+      "lufs": -16.99,
+      "peak": -9.2,
+      "rms": -19.765628
+    },
+    {
+      "instrument": "piano",
+      "midi": 53,
+      "lufs": -17.0,
+      "peak": -9.04,
+      "rms": -19.809756
+    },
+    {
+      "instrument": "piano",
+      "midi": 54,
+      "lufs": -17.01,
+      "peak": -10.62,
+      "rms": -19.44869
+    },
+    {
+      "instrument": "piano",
+      "midi": 55,
+      "lufs": -17.01,
+      "peak": -10.5,
+      "rms": -19.488278
+    },
+    {
+      "instrument": "piano",
+      "midi": 56,
+      "lufs": -16.98,
+      "peak": -10.36,
+      "rms": -19.522464
+    },
+    {
+      "instrument": "piano",
+      "midi": 57,
+      "lufs": -16.99,
+      "peak": -10.22,
+      "rms": -19.560054
+    },
+    {
+      "instrument": "piano",
+      "midi": 58,
+      "lufs": -17.02,
+      "peak": -10.08,
+      "rms": -19.599345
+    },
+    {
+      "instrument": "piano",
+      "midi": 59,
+      "lufs": -16.97,
+      "peak": -9.89,
+      "rms": -19.592185
+    },
+    {
+      "instrument": "piano",
+      "midi": 60,
+      "lufs": -17.0,
+      "peak": -9.73,
+      "rms": -19.623182
+    },
+    {
+      "instrument": "piano",
+      "midi": 61,
+      "lufs": -16.98,
+      "peak": -9.56,
+      "rms": -19.657226
+    },
+    {
+      "instrument": "piano",
+      "midi": 62,
+      "lufs": -17.01,
+      "peak": -9.36,
+      "rms": -19.675027
+    },
+    {
+      "instrument": "piano",
+      "midi": 63,
+      "lufs": -17.01,
+      "peak": -9.15,
+      "rms": -19.694007
+    },
+    {
+      "instrument": "piano",
+      "midi": 64,
+      "lufs": -17.0,
+      "peak": -9.15,
+      "rms": -19.930578
+    },
+    {
+      "instrument": "piano",
+      "midi": 65,
+      "lufs": -17.0,
+      "peak": -9.13,
+      "rms": -20.151666
+    },
+    {
+      "instrument": "piano",
+      "midi": 66,
+      "lufs": -17.02,
+      "peak": -11.0,
+      "rms": -19.831541
+    },
+    {
+      "instrument": "piano",
+      "midi": 67,
+      "lufs": -17.0,
+      "peak": -10.84,
+      "rms": -19.874972
+    },
+    {
+      "instrument": "piano",
+      "midi": 68,
+      "lufs": -17.01,
+      "peak": -10.68,
+      "rms": -19.93422
+    },
+    {
+      "instrument": "piano",
+      "midi": 69,
+      "lufs": -16.99,
+      "peak": -10.5,
+      "rms": -19.963419
+    },
+    {
+      "instrument": "piano",
+      "midi": 70,
+      "lufs": -17.0,
+      "peak": -10.33,
+      "rms": -19.984623
+    },
+    {
+      "instrument": "piano",
+      "midi": 71,
+      "lufs": -17.0,
+      "peak": -10.19,
+      "rms": -20.02886
+    },
+    {
+      "instrument": "piano",
+      "midi": 72,
+      "lufs": -17.02,
+      "peak": -10.06,
+      "rms": -20.084931
+    },
+    {
+      "instrument": "piano",
+      "midi": 73,
+      "lufs": -17.02,
+      "peak": -9.92,
+      "rms": -20.142393
+    },
+    {
+      "instrument": "piano",
+      "midi": 74,
+      "lufs": -17.0,
+      "peak": -9.75,
+      "rms": -20.180155
+    },
+    {
+      "instrument": "piano",
+      "midi": 75,
+      "lufs": -17.0,
+      "peak": -9.56,
+      "rms": -20.226458
+    },
+    {
+      "instrument": "piano",
+      "midi": 76,
+      "lufs": -17.02,
+      "peak": -9.6,
+      "rms": -20.487999
+    },
+    {
+      "instrument": "piano",
+      "midi": 77,
+      "lufs": -16.78,
+      "peak": -9.19,
+      "rms": -20.287749
+    },
+    {
+      "instrument": "piano",
+      "midi": 78,
+      "lufs": -16.99,
+      "peak": -10.42,
+      "rms": -20.395793
+    },
+    {
+      "instrument": "piano",
+      "midi": 79,
+      "lufs": -17.0,
+      "peak": -10.29,
+      "rms": -20.47783
+    },
+    {
+      "instrument": "piano",
+      "midi": 80,
+      "lufs": -17.0,
+      "peak": -10.17,
+      "rms": -20.56118
+    },
+    {
+      "instrument": "piano",
+      "midi": 81,
+      "lufs": -16.98,
+      "peak": -10.01,
+      "rms": -20.62695
+    },
+    {
+      "instrument": "piano",
+      "midi": 82,
+      "lufs": -17.0,
+      "peak": -9.9,
+      "rms": -20.735462
+    },
+    {
+      "instrument": "piano",
+      "midi": 83,
+      "lufs": -17.0,
+      "peak": -9.76,
+      "rms": -20.815215
+    },
+    {
+      "instrument": "piano",
+      "midi": 84,
+      "lufs": -17.01,
+      "peak": -9.85,
+      "rms": -21.127558
+    },
+    {
+      "instrument": "electric",
+      "midi": 36,
+      "lufs": -17.01,
+      "peak": -8.27,
+      "rms": -18.778054
+    },
+    {
+      "instrument": "electric",
+      "midi": 37,
+      "lufs": -17.01,
+      "peak": -8.4,
+      "rms": -18.8302
+    },
+    {
+      "instrument": "electric",
+      "midi": 38,
+      "lufs": -17.01,
+      "peak": -8.53,
+      "rms": -18.879691
+    },
+    {
+      "instrument": "electric",
+      "midi": 39,
+      "lufs": -17.0,
+      "peak": -8.65,
+      "rms": -18.919602
+    },
+    {
+      "instrument": "electric",
+      "midi": 40,
+      "lufs": -17.0,
+      "peak": -8.78,
+      "rms": -18.961836
+    },
+    {
+      "instrument": "electric",
+      "midi": 41,
+      "lufs": -17.0,
+      "peak": -8.89,
+      "rms": -18.9801
+    },
+    {
+      "instrument": "electric",
+      "midi": 42,
+      "lufs": -17.0,
+      "peak": -9.66,
+      "rms": -18.8635
+    },
+    {
+      "instrument": "electric",
+      "midi": 43,
+      "lufs": -16.99,
+      "peak": -9.69,
+      "rms": -18.898615
+    },
+    {
+      "instrument": "electric",
+      "midi": 44,
+      "lufs": -17.01,
+      "peak": -9.75,
+      "rms": -18.964363
+    },
+    {
+      "instrument": "electric",
+      "midi": 45,
+      "lufs": -17.0,
+      "peak": -9.77,
+      "rms": -18.990507
+    },
+    {
+      "instrument": "electric",
+      "midi": 46,
+      "lufs": -17.03,
+      "peak": -9.81,
+      "rms": -19.036539
+    },
+    {
+      "instrument": "electric",
+      "midi": 47,
+      "lufs": -16.99,
+      "peak": -9.82,
+      "rms": -19.051194
+    },
+    {
+      "instrument": "electric",
+      "midi": 48,
+      "lufs": -16.99,
+      "peak": -9.85,
+      "rms": -19.085514
+    },
+    {
+      "instrument": "electric",
+      "midi": 49,
+      "lufs": -17.0,
+      "peak": -9.88,
+      "rms": -19.119734
+    },
+    {
+      "instrument": "electric",
+      "midi": 50,
+      "lufs": -17.0,
+      "peak": -9.9,
+      "rms": -19.143585
+    },
+    {
+      "instrument": "electric",
+      "midi": 51,
+      "lufs": -17.01,
+      "peak": -9.94,
+      "rms": -19.188704
+    },
+    {
+      "instrument": "electric",
+      "midi": 52,
+      "lufs": -16.98,
+      "peak": -9.94,
+      "rms": -19.194924
+    },
+    {
+      "instrument": "electric",
+      "midi": 53,
+      "lufs": -17.0,
+      "peak": -9.97,
+      "rms": -19.231923
+    },
+    {
+      "instrument": "electric",
+      "midi": 54,
+      "lufs": -17.0,
+      "peak": -10.35,
+      "rms": -19.183715
+    },
+    {
+      "instrument": "electric",
+      "midi": 55,
+      "lufs": -17.0,
+      "peak": -10.37,
+      "rms": -19.217983
+    },
+    {
+      "instrument": "electric",
+      "midi": 56,
+      "lufs": -16.99,
+      "peak": -10.38,
+      "rms": -19.250045
+    },
+    {
+      "instrument": "electric",
+      "midi": 57,
+      "lufs": -17.0,
+      "peak": -10.38,
+      "rms": -19.27993
+    },
+    {
+      "instrument": "electric",
+      "midi": 58,
+      "lufs": -16.97,
+      "peak": -10.35,
+      "rms": -19.291093
+    },
+    {
+      "instrument": "electric",
+      "midi": 59,
+      "lufs": -17.01,
+      "peak": -10.35,
+      "rms": -19.342138
+    },
+    {
+      "instrument": "electric",
+      "midi": 60,
+      "lufs": -16.99,
+      "peak": -10.3,
+      "rms": -19.357981
+    },
+    {
+      "instrument": "electric",
+      "midi": 61,
+      "lufs": -16.98,
+      "peak": -10.53,
+      "rms": -19.368631
+    },
+    {
+      "instrument": "electric",
+      "midi": 62,
+      "lufs": -17.0,
+      "peak": -10.97,
+      "rms": -19.404692
+    },
+    {
+      "instrument": "electric",
+      "midi": 63,
+      "lufs": -17.01,
+      "peak": -11.39,
+      "rms": -19.428817
+    },
+    {
+      "instrument": "electric",
+      "midi": 64,
+      "lufs": -17.0,
+      "peak": -11.77,
+      "rms": -19.44299
+    },
+    {
+      "instrument": "electric",
+      "midi": 65,
+      "lufs": -17.0,
+      "peak": -12.14,
+      "rms": -19.464267
+    },
+    {
+      "instrument": "electric",
+      "midi": 66,
+      "lufs": -17.01,
+      "peak": -10.94,
+      "rms": -19.400463
+    },
+    {
+      "instrument": "electric",
+      "midi": 67,
+      "lufs": -16.98,
+      "peak": -10.74,
+      "rms": -19.383492
+    },
+    {
+      "instrument": "electric",
+      "midi": 68,
+      "lufs": -16.98,
+      "peak": -10.54,
+      "rms": -19.382405
+    },
+    {
+      "instrument": "electric",
+      "midi": 69,
+      "lufs": -16.98,
+      "peak": -10.33,
+      "rms": -19.383514
+    },
+    {
+      "instrument": "electric",
+      "midi": 70,
+      "lufs": -17.0,
+      "peak": -10.11,
+      "rms": -19.381801
+    },
+    {
+      "instrument": "electric",
+      "midi": 71,
+      "lufs": -17.0,
+      "peak": -9.88,
+      "rms": -19.375131
+    },
+    {
+      "instrument": "electric",
+      "midi": 72,
+      "lufs": -17.0,
+      "peak": -9.86,
+      "rms": -19.583183
+    },
+    {
+      "instrument": "electric",
+      "midi": 73,
+      "lufs": -17.0,
+      "peak": -9.81,
+      "rms": -19.575297
+    },
+    {
+      "instrument": "electric",
+      "midi": 74,
+      "lufs": -17.0,
+      "peak": -10.03,
+      "rms": -19.780866
+    },
+    {
+      "instrument": "electric",
+      "midi": 75,
+      "lufs": -16.99,
+      "peak": -10.27,
+      "rms": -19.77995
+    },
+    {
+      "instrument": "electric",
+      "midi": 76,
+      "lufs": -16.99,
+      "peak": -10.77,
+      "rms": -20.021631
+    },
+    {
+      "instrument": "electric",
+      "midi": 77,
+      "lufs": -16.99,
+      "peak": -11.29,
+      "rms": -20.285553
+    },
+    {
+      "instrument": "electric",
+      "midi": 78,
+      "lufs": -17.0,
+      "peak": -10.58,
+      "rms": -19.78911
+    },
+    {
+      "instrument": "electric",
+      "midi": 79,
+      "lufs": -17.0,
+      "peak": -10.39,
+      "rms": -19.834231
+    },
+    {
+      "instrument": "electric",
+      "midi": 80,
+      "lufs": -17.01,
+      "peak": -10.42,
+      "rms": -20.103689
+    },
+    {
+      "instrument": "electric",
+      "midi": 81,
+      "lufs": -17.0,
+      "peak": -10.48,
+      "rms": -20.406757
+    },
+    {
+      "instrument": "electric",
+      "midi": 82,
+      "lufs": -17.02,
+      "peak": -10.56,
+      "rms": -20.732125
+    },
+    {
+      "instrument": "electric",
+      "midi": 83,
+      "lufs": -17.0,
+      "peak": -10.38,
+      "rms": -20.799514
+    },
+    {
+      "instrument": "electric",
+      "midi": 84,
+      "lufs": -17.02,
+      "peak": -10.88,
+      "rms": -21.178514
+    },
+    {
+      "instrument": "guitar",
+      "midi": 36,
+      "lufs": -16.98,
+      "peak": -9.8,
+      "rms": -18.863072
+    },
+    {
+      "instrument": "guitar",
+      "midi": 37,
+      "lufs": -17.0,
+      "peak": -9.83,
+      "rms": -18.918647
+    },
+    {
+      "instrument": "guitar",
+      "midi": 38,
+      "lufs": -17.0,
+      "peak": -9.87,
+      "rms": -18.9895
+    },
+    {
+      "instrument": "guitar",
+      "midi": 39,
+      "lufs": -17.0,
+      "peak": -9.89,
+      "rms": -19.045956
+    },
+    {
+      "instrument": "guitar",
+      "midi": 40,
+      "lufs": -16.99,
+      "peak": -9.89,
+      "rms": -19.090586
+    },
+    {
+      "instrument": "guitar",
+      "midi": 41,
+      "lufs": -17.0,
+      "peak": -9.88,
+      "rms": -19.138324
+    },
+    {
+      "instrument": "guitar",
+      "midi": 42,
+      "lufs": -17.0,
+      "peak": -8.72,
+      "rms": -18.772645
+    },
+    {
+      "instrument": "guitar",
+      "midi": 43,
+      "lufs": -16.99,
+      "peak": -8.55,
+      "rms": -18.775903
+    },
+    {
+      "instrument": "guitar",
+      "midi": 44,
+      "lufs": -17.0,
+      "peak": -8.38,
+      "rms": -18.783676
+    },
+    {
+      "instrument": "guitar",
+      "midi": 45,
+      "lufs": -16.99,
+      "peak": -8.19,
+      "rms": -18.777951
+    },
+    {
+      "instrument": "guitar",
+      "midi": 46,
+      "lufs": -17.01,
+      "peak": -8.01,
+      "rms": -18.790093
+    },
+    {
+      "instrument": "guitar",
+      "midi": 47,
+      "lufs": -17.01,
+      "peak": -7.81,
+      "rms": -18.790634
+    },
+    {
+      "instrument": "guitar",
+      "midi": 48,
+      "lufs": -17.0,
+      "peak": -7.58,
+      "rms": -18.768054
+    },
+    {
+      "instrument": "guitar",
+      "midi": 49,
+      "lufs": -16.96,
+      "peak": -7.34,
+      "rms": -18.74122
+    },
+    {
+      "instrument": "guitar",
+      "midi": 50,
+      "lufs": -16.99,
+      "peak": -7.1,
+      "rms": -18.718661
+    },
+    {
+      "instrument": "guitar",
+      "midi": 51,
+      "lufs": -17.0,
+      "peak": -6.88,
+      "rms": -18.719895
+    },
+    {
+      "instrument": "guitar",
+      "midi": 52,
+      "lufs": -17.01,
+      "peak": -6.63,
+      "rms": -18.694982
+    },
+    {
+      "instrument": "guitar",
+      "midi": 53,
+      "lufs": -17.01,
+      "peak": -6.59,
+      "rms": -18.883537
+    },
+    {
+      "instrument": "guitar",
+      "midi": 54,
+      "lufs": -16.98,
+      "peak": -8.58,
+      "rms": -19.890247
+    },
+    {
+      "instrument": "guitar",
+      "midi": 55,
+      "lufs": -17.01,
+      "peak": -8.64,
+      "rms": -20.180295
+    },
+    {
+      "instrument": "guitar",
+      "midi": 56,
+      "lufs": -17.28,
+      "peak": -8.68,
+      "rms": -20.460322
+    },
+    {
+      "instrument": "guitar",
+      "midi": 57,
+      "lufs": -17.0,
+      "peak": -8.44,
+      "rms": -20.47047
+    },
+    {
+      "instrument": "guitar",
+      "midi": 58,
+      "lufs": -16.98,
+      "peak": -8.5,
+      "rms": -20.760515
+    },
+    {
+      "instrument": "guitar",
+      "midi": 59,
+      "lufs": -17.34,
+      "peak": -8.6,
+      "rms": -21.110797
+    },
+    {
+      "instrument": "guitar",
+      "midi": 60,
+      "lufs": -17.01,
+      "peak": -8.37,
+      "rms": -21.111166
+    },
+    {
+      "instrument": "guitar",
+      "midi": 61,
+      "lufs": -17.0,
+      "peak": -8.46,
+      "rms": -21.451589
+    },
+    {
+      "instrument": "guitar",
+      "midi": 62,
+      "lufs": -17.01,
+      "peak": -8.23,
+      "rms": -21.462531
+    },
+    {
+      "instrument": "guitar",
+      "midi": 63,
+      "lufs": -17.03,
+      "peak": -8.4,
+      "rms": -21.863622
+    },
+    {
+      "instrument": "guitar",
+      "midi": 64,
+      "lufs": -17.01,
+      "peak": -8.13,
+      "rms": -21.845249
+    },
+    {
+      "instrument": "guitar",
+      "midi": 65,
+      "lufs": -16.99,
+      "peak": -7.89,
+      "rms": -21.847157
+    },
+    {
+      "instrument": "guitar",
+      "midi": 66,
+      "lufs": -17.01,
+      "peak": -7.96,
+      "rms": -19.415907
+    },
+    {
+      "instrument": "guitar",
+      "midi": 67,
+      "lufs": -16.99,
+      "peak": -7.81,
+      "rms": -19.433344
+    },
+    {
+      "instrument": "guitar",
+      "midi": 68,
+      "lufs": -16.99,
+      "peak": -7.65,
+      "rms": -19.446171
+    },
+    {
+      "instrument": "guitar",
+      "midi": 69,
+      "lufs": -16.98,
+      "peak": -7.51,
+      "rms": -19.485643
+    },
+    {
+      "instrument": "guitar",
+      "midi": 70,
+      "lufs": -16.99,
+      "peak": -7.38,
+      "rms": -19.541118
+    },
+    {
+      "instrument": "guitar",
+      "midi": 71,
+      "lufs": -17.01,
+      "peak": -7.25,
+      "rms": -19.600939
+    },
+    {
+      "instrument": "guitar",
+      "midi": 72,
+      "lufs": -17.0,
+      "peak": -7.12,
+      "rms": -19.666539
+    },
+    {
+      "instrument": "guitar",
+      "midi": 73,
+      "lufs": -16.99,
+      "peak": -7.0,
+      "rms": -19.747823
+    },
+    {
+      "instrument": "guitar",
+      "midi": 74,
+      "lufs": -17.02,
+      "peak": -6.9,
+      "rms": -19.854828
+    },
+    {
+      "instrument": "guitar",
+      "midi": 75,
+      "lufs": -17.01,
+      "peak": -6.79,
+      "rms": -19.956346
+    },
+    {
+      "instrument": "guitar",
+      "midi": 76,
+      "lufs": -17.01,
+      "peak": -6.7,
+      "rms": -20.082904
+    },
+    {
+      "instrument": "guitar",
+      "midi": 77,
+      "lufs": -17.0,
+      "peak": -6.62,
+      "rms": -20.223333
+    },
+    {
+      "instrument": "guitar",
+      "midi": 78,
+      "lufs": -17.01,
+      "peak": -7.17,
+      "rms": -22.048321
+    },
+    {
+      "instrument": "guitar",
+      "midi": 79,
+      "lufs": -17.01,
+      "peak": -7.01,
+      "rms": -22.145939
+    },
+    {
+      "instrument": "guitar",
+      "midi": 80,
+      "lufs": -16.99,
+      "peak": -7.16,
+      "rms": -22.544237
+    },
+    {
+      "instrument": "guitar",
+      "midi": 81,
+      "lufs": -16.98,
+      "peak": -6.99,
+      "rms": -22.623403
+    },
+    {
+      "instrument": "guitar",
+      "midi": 82,
+      "lufs": -17.0,
+      "peak": -7.18,
+      "rms": -23.053115
+    },
+    {
+      "instrument": "guitar",
+      "midi": 83,
+      "lufs": -17.01,
+      "peak": -6.98,
+      "rms": -23.113404
+    },
+    {
+      "instrument": "guitar",
+      "midi": 84,
+      "lufs": -17.02,
+      "peak": -7.19,
+      "rms": -23.564017
+    }
+  ],
+  "modeledOrgan": [
+    {
+      "midi": 36,
+      "gain": 0.4786300923226383,
+      "before": -11.15,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -11.15,
+        "rms": -8.419582,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -14.291451,
+        "peak": -10.42
+      }
+    },
+    {
+      "midi": 37,
+      "gain": 0.465586093522959,
+      "before": -10.9,
+      "after": -17.0,
+      "beforeMetrics": {
+        "lufs": -10.9,
+        "rms": -8.417609,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -17.0,
+        "rms": -14.520439,
+        "peak": -10.65
+      }
+    },
+    {
+      "midi": 38,
+      "gain": 0.4539416166502032,
+      "before": -10.68,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -10.68,
+        "rms": -8.418358,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -14.733319,
+        "peak": -10.86
+      }
+    },
+    {
+      "midi": 39,
+      "gain": 0.4436086439314326,
+      "before": -10.48,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -10.48,
+        "rms": -8.418946,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -14.92707,
+        "peak": -11.05
+      }
+    },
+    {
+      "midi": 40,
+      "gain": 0.4350107606306971,
+      "before": -10.31,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -10.31,
+        "rms": -8.41943,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -15.091871,
+        "peak": -11.21
+      }
+    },
+    {
+      "midi": 41,
+      "gain": 0.4275628861515861,
+      "before": -10.18,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -10.18,
+        "rms": -8.418244,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -15.236007,
+        "peak": -11.36
+      }
+    },
+    {
+      "midi": 42,
+      "gain": 0.4192759966846055,
+      "before": -9.99,
+      "after": -16.99,
+      "beforeMetrics": {
+        "lufs": -9.99,
+        "rms": -8.418618,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -16.99,
+        "rms": -15.401183,
+        "peak": -11.52
+      }
+    },
+    {
+      "midi": 43,
+      "gain": 0.4130475019901614,
+      "before": -9.88,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -9.88,
+        "rms": -8.419228,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -15.527875,
+        "peak": -11.64
+      }
+    },
+    {
+      "midi": 44,
+      "gain": 0.4069115338091964,
+      "before": -9.78,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -9.78,
+        "rms": -8.418626,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -15.653537,
+        "peak": -11.77
+      }
+    },
+    {
+      "midi": 45,
+      "gain": 0.3999447497610975,
+      "before": -9.68,
+      "after": -17.06,
+      "beforeMetrics": {
+        "lufs": -9.68,
+        "rms": -8.418551,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -17.06,
+        "rms": -15.799267,
+        "peak": -11.91
+      }
+    },
+    {
+      "midi": 46,
+      "gain": 0.39719154946944035,
+      "before": -9.57,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -9.57,
+        "rms": -8.419202,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -15.858262,
+        "peak": -11.97
+      }
+    },
+    {
+      "midi": 47,
+      "gain": 0.3935500754557775,
+      "before": -9.48,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -9.48,
+        "rms": -8.418512,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -15.935413,
+        "peak": -12.05
+      }
+    },
+    {
+      "midi": 48,
+      "gain": 0.39039118250766014,
+      "before": -9.39,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -9.39,
+        "rms": -8.418655,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -16.003708,
+        "peak": -12.12
+      }
+    },
+    {
+      "midi": 49,
+      "gain": 0.3854783576657718,
+      "before": -9.34,
+      "after": -17.01,
+      "beforeMetrics": {
+        "lufs": -9.34,
+        "rms": -8.419002,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -17.01,
+        "rms": -16.111178,
+        "peak": -12.22
+      }
+    },
+    {
+      "midi": 50,
+      "gain": 0.38238425365811257,
+      "before": -9.27,
+      "after": -17.01,
+      "beforeMetrics": {
+        "lufs": -9.27,
+        "rms": -8.418803,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -17.01,
+        "rms": -16.179211,
+        "peak": -12.29
+      }
+    },
+    {
+      "midi": 51,
+      "gain": 0.38150479427943834,
+      "before": -9.18,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -9.18,
+        "rms": -8.419252,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -16.199139,
+        "peak": -12.31
+      }
+    },
+    {
+      "midi": 52,
+      "gain": 0.37757219092541605,
+      "before": -9.17,
+      "after": -16.99,
+      "beforeMetrics": {
+        "lufs": -9.17,
+        "rms": -8.419054,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -16.99,
+        "rms": -16.286709,
+        "peak": -12.4
+      }
+    },
+    {
+      "midi": 53,
+      "gain": 0.3771377450113975,
+      "before": -9.09,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -9.09,
+        "rms": -8.419292,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -16.296679,
+        "peak": -12.4
+      }
+    },
+    {
+      "midi": 54,
+      "gain": 0.37325015779572057,
+      "before": -9.08,
+      "after": -17.07,
+      "beforeMetrics": {
+        "lufs": -9.08,
+        "rms": -8.419176,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -17.07,
+        "rms": -16.384365,
+        "peak": -12.49
+      }
+    },
+    {
+      "midi": 55,
+      "gain": 0.3723917062545685,
+      "before": -9.03,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -9.03,
+        "rms": -8.419354,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -16.404053,
+        "peak": -12.51
+      }
+    },
+    {
+      "midi": 56,
+      "gain": 0.37239170625456847,
+      "before": -8.98,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -8.98,
+        "rms": -8.419773,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -16.404468,
+        "peak": -12.51
+      }
+    },
+    {
+      "midi": 57,
+      "gain": 0.36897759857015033,
+      "before": -8.98,
+      "after": -17.07,
+      "beforeMetrics": {
+        "lufs": -8.98,
+        "rms": -8.419827,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -17.07,
+        "rms": -16.482607,
+        "peak": -12.59
+      }
+    },
+    {
+      "midi": 58,
+      "gain": 0.3685530418524794,
+      "before": -8.97,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -8.97,
+        "rms": -8.420112,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -16.492641,
+        "peak": -12.6
+      }
+    },
+    {
+      "midi": 59,
+      "gain": 0.3689775985701503,
+      "before": -8.89,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -8.89,
+        "rms": -8.42059,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -16.48334,
+        "peak": -12.59
+      }
+    },
+    {
+      "midi": 60,
+      "gain": 0.3672823004980848,
+      "before": -8.88,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -8.88,
+        "rms": -8.42105,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -16.52285,
+        "peak": -12.63
+      }
+    },
+    {
+      "midi": 61,
+      "gain": 0.3647539469256078,
+      "before": -8.88,
+      "after": -17.07,
+      "beforeMetrics": {
+        "lufs": -8.88,
+        "rms": -8.42151,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -17.07,
+        "rms": -16.581897,
+        "peak": -12.68
+      }
+    },
+    {
+      "midi": 62,
+      "gain": 0.3643342500684968,
+      "before": -8.87,
+      "after": -17.0,
+      "beforeMetrics": {
+        "lufs": -8.87,
+        "rms": -8.422201,
+        "peak": -4.72
+      },
+      "afterMetrics": {
+        "lufs": -17.0,
+        "rms": -16.592345,
+        "peak": -12.69
+      }
+    },
+    {
+      "midi": 63,
+      "gain": 0.3643342500684968,
+      "before": -8.87,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -8.87,
+        "rms": -8.423107,
+        "peak": -4.72
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -16.593244,
+        "peak": -12.69
+      }
+    },
+    {
+      "midi": 64,
+      "gain": 0.36475394692560775,
+      "before": -8.79,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -8.79,
+        "rms": -8.424185,
+        "peak": -4.72
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -16.584548,
+        "peak": -12.68
+      }
+    },
+    {
+      "midi": 65,
+      "gain": 0.36433425006849673,
+      "before": -8.78,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -8.78,
+        "rms": -8.425564,
+        "peak": -4.72
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -16.595704,
+        "peak": -12.69
+      }
+    },
+    {
+      "midi": 66,
+      "gain": 0.3614098626396132,
+      "before": -8.78,
+      "after": -16.99,
+      "beforeMetrics": {
+        "lufs": -8.78,
+        "rms": -8.427272,
+        "peak": -4.72
+      },
+      "afterMetrics": {
+        "lufs": -16.99,
+        "rms": -16.66583,
+        "peak": -12.76
+      }
+    },
+    {
+      "midi": 67,
+      "gain": 0.3609940135864165,
+      "before": -8.78,
+      "after": -16.99,
+      "beforeMetrics": {
+        "lufs": -8.78,
+        "rms": -8.429342,
+        "peak": -4.72
+      },
+      "afterMetrics": {
+        "lufs": -16.99,
+        "rms": -16.67772,
+        "peak": -12.76
+      }
+    },
+    {
+      "midi": 68,
+      "gain": 0.3601637503947275,
+      "before": -8.77,
+      "after": -17.02,
+      "beforeMetrics": {
+        "lufs": -8.77,
+        "rms": -8.431805,
+        "peak": -4.72
+      },
+      "afterMetrics": {
+        "lufs": -17.02,
+        "rms": -16.69982,
+        "peak": -12.78
+      }
+    },
+    {
+      "midi": 69,
+      "gain": 0.3601637503947275,
+      "before": -8.77,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -8.77,
+        "rms": -8.434895,
+        "peak": -4.72
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -16.703057,
+        "peak": -12.78
+      }
+    },
+    {
+      "midi": 70,
+      "gain": 0.36016375039472764,
+      "before": -8.71,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -8.71,
+        "rms": -8.438708,
+        "peak": -4.72
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -16.7071,
+        "peak": -12.78
+      }
+    },
+    {
+      "midi": 71,
+      "gain": 0.36016375039472753,
+      "before": -8.69,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -8.69,
+        "rms": -8.443293,
+        "peak": -4.71
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -16.71203,
+        "peak": -12.78
+      }
+    },
+    {
+      "midi": 72,
+      "gain": 0.3568617492834812,
+      "before": -8.68,
+      "after": -17.07,
+      "beforeMetrics": {
+        "lufs": -8.68,
+        "rms": -8.44891,
+        "peak": -4.71
+      },
+      "afterMetrics": {
+        "lufs": -17.07,
+        "rms": -16.796358,
+        "peak": -12.85
+      }
+    },
+    {
+      "midi": 73,
+      "gain": 0.3564511334262442,
+      "before": -8.68,
+      "after": -17.0,
+      "beforeMetrics": {
+        "lufs": -8.68,
+        "rms": -8.455754,
+        "peak": -4.72
+      },
+      "afterMetrics": {
+        "lufs": -17.0,
+        "rms": -16.81369,
+        "peak": -12.87
+      }
+    },
+    {
+      "midi": 74,
+      "gain": 0.3560409900359572,
+      "before": -8.67,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -8.67,
+        "rms": -8.463978,
+        "peak": -4.72
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -16.832678,
+        "peak": -12.88
+      }
+    },
+    {
+      "midi": 75,
+      "gain": 0.3564511334262442,
+      "before": -8.59,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -8.59,
+        "rms": -8.473939,
+        "peak": -4.73
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -16.834189,
+        "peak": -12.88
+      }
+    },
+    {
+      "midi": 76,
+      "gain": 0.352776786618874,
+      "before": -8.58,
+      "after": -17.07,
+      "beforeMetrics": {
+        "lufs": -8.58,
+        "rms": -8.485974,
+        "peak": -4.74
+      },
+      "afterMetrics": {
+        "lufs": -17.07,
+        "rms": -16.936033,
+        "peak": -12.98
+      }
+    },
+    {
+      "midi": 77,
+      "gain": 0.3519654225247658,
+      "before": -8.57,
+      "after": -16.99,
+      "beforeMetrics": {
+        "lufs": -8.57,
+        "rms": -8.500486,
+        "peak": -4.75
+      },
+      "afterMetrics": {
+        "lufs": -16.99,
+        "rms": -16.972427,
+        "peak": -13.01
+      }
+    },
+    {
+      "midi": 78,
+      "gain": 0.35237087104248715,
+      "before": -8.49,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -8.49,
+        "rms": -8.517914,
+        "peak": -4.77
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -16.983023,
+        "peak": -13.02
+      }
+    },
+    {
+      "midi": 79,
+      "gain": 0.3483373150360118,
+      "before": -8.48,
+      "after": -17.07,
+      "beforeMetrics": {
+        "lufs": -8.48,
+        "rms": -8.538861,
+        "peak": -4.79
+      },
+      "afterMetrics": {
+        "lufs": -17.07,
+        "rms": -17.105587,
+        "peak": -13.15
+      }
+    },
+    {
+      "midi": 80,
+      "gain": 0.34833731503601173,
+      "before": -8.39,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -8.39,
+        "rms": -8.564,
+        "peak": -4.82
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -17.135324,
+        "peak": -13.19
+      }
+    },
+    {
+      "midi": 81,
+      "gain": 0.3447466065731493,
+      "before": -8.38,
+      "after": -16.99,
+      "beforeMetrics": {
+        "lufs": -8.38,
+        "rms": -8.594131,
+        "peak": -4.86
+      },
+      "afterMetrics": {
+        "lufs": -16.99,
+        "rms": -17.259219,
+        "peak": -13.32
+      }
+    },
+    {
+      "midi": 82,
+      "gain": 0.3443499307633384,
+      "before": -8.29,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -8.29,
+        "rms": -8.630197,
+        "peak": -4.9
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -17.311769,
+        "peak": -13.38
+      }
+    },
+    {
+      "midi": 83,
+      "gain": 0.340016505804071,
+      "before": -8.27,
+      "after": -17.07,
+      "beforeMetrics": {
+        "lufs": -8.27,
+        "rms": -8.673395,
+        "peak": -4.96
+      },
+      "afterMetrics": {
+        "lufs": -17.07,
+        "rms": -17.470721,
+        "peak": -13.56
+      }
+    },
+    {
+      "midi": 84,
+      "gain": 0.3392344895414432,
+      "before": -8.17,
+      "after": -16.98,
+      "beforeMetrics": {
+        "lufs": -8.17,
+        "rms": -8.72513,
+        "peak": -5.02
+      },
+      "afterMetrics": {
+        "lufs": -16.98,
+        "rms": -17.551253,
+        "peak": -13.66
+      }
+    }
+  ],
+  "rmsMeasurement": "Unweighted RMS dBFS over rendered note; LUFS uses EBU R128 frequency weighting. Reference volume 1."
+}

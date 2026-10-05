@@ -1,3 +1,4 @@
+import { restoreTrainingSound, type TrainingSound } from '../gen/training-lib'
 import { getStoredText, setStoredText } from '../latency'
 import {
   DEFAULT_TRAINING_REFERENCE_VOLUME,
@@ -17,6 +18,7 @@ export interface AudioPreferencesApi {
 export interface AppAudioPreferences {
   readonly formatVersion: 1
   readonly referenceVolume: number
+  readonly trainingSound: TrainingSound
 }
 
 export type AudioPreferencesLoad =
@@ -30,6 +32,7 @@ const nativeApi: AudioPreferencesApi = { get: getStoredText, set: setStoredText 
 export class MobileAudioPreferences {
   private preferences = defaults()
   private desired: AppAudioPreferences | null = null
+  private writing: AppAudioPreferences | null = null
   private pump: Promise<void> | null = null
   private _error: string | null = null
 
@@ -45,7 +48,8 @@ export class MobileAudioPreferences {
       else if (legacyRaw !== null) {
         this.preferences = {
           formatVersion: 1,
-          referenceVolume: restoreLegacyReferenceVolume(legacyRaw)
+          referenceVolume: restoreLegacyReferenceVolume(legacyRaw),
+          trainingSound: 'piano'
         }
         await this.api.set(APP_AUDIO_PREFERENCES_KEY, JSON.stringify(this.preferences))
       } else this.preferences = defaults()
@@ -67,7 +71,12 @@ export class MobileAudioPreferences {
   }
 
   saveReferenceVolume(raw: number): void {
-    this.desired = { formatVersion: 1, referenceVolume: clampTrainingReferenceVolume(raw) }
+    this.desired = { ...(this.desired ?? this.writing ?? this.preferences), referenceVolume: clampTrainingReferenceVolume(raw) }
+    if (!this.pump) this.pump = this.persist()
+  }
+
+  saveTrainingSound(sound: TrainingSound): void {
+    this.desired = { ...(this.desired ?? this.writing ?? this.preferences), trainingSound: restoreTrainingSound(sound) }
     if (!this.pump) this.pump = this.persist()
   }
 
@@ -84,6 +93,7 @@ export class MobileAudioPreferences {
     while (this.desired) {
       const next = this.desired
       this.desired = null
+      this.writing = next
       try {
         await this.api.set(APP_AUDIO_PREFERENCES_KEY, JSON.stringify(next))
         this.preferences = next
@@ -94,12 +104,13 @@ export class MobileAudioPreferences {
         break
       }
     }
+    this.writing = null
     this.pump = null
   }
 }
 
 function defaults(): AppAudioPreferences {
-  return { formatVersion: 1, referenceVolume: DEFAULT_TRAINING_REFERENCE_VOLUME }
+  return { formatVersion: 1, referenceVolume: DEFAULT_TRAINING_REFERENCE_VOLUME, trainingSound: 'piano' }
 }
 
 function restoreDocument(text: string): AppAudioPreferences {
@@ -108,11 +119,12 @@ function restoreDocument(text: string): AppAudioPreferences {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw))
     throw new RangeError('Audio preferences are invalid.')
   const value = raw as Record<string, unknown>
-  if (Object.keys(value).length !== 2 || value.formatVersion !== 1 || typeof value.referenceVolume !== 'number')
+  if (Object.keys(value).some(key => !['formatVersion', 'referenceVolume', 'trainingSound'].includes(key)) || value.formatVersion !== 1 || typeof value.referenceVolume !== 'number')
     throw new RangeError('Unsupported audio preference document.')
   return {
     formatVersion: 1,
-    referenceVolume: boundedReferenceVolume(value.referenceVolume)
+    referenceVolume: boundedReferenceVolume(value.referenceVolume),
+    trainingSound: restoreTrainingSound(value.trainingSound)
   }
 }
 

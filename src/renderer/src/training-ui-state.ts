@@ -1,6 +1,6 @@
 export {
   programLessonSetup, restoreTrainingProgram, selectTrainingProgramLevel,
-  trainingProgramProgress, trainingPracticeStreak,
+  trainingProgramProgress, trainingPracticeStreak, trainingProgramPracticeStreak,
   type TrainingProgram, type ProgramLesson, type TrainingLevel
 } from '../../shared/training-program'
 import { programLessonSetup, type ProgramLesson } from '../../shared/training-program'
@@ -167,7 +167,7 @@ export const INITIAL_DESKTOP_TRAINING_STATE: Readonly<DesktopTrainingState> = Ob
 
 export type DesktopTrainingAction =
   | { readonly type: 'choose-exercise'; readonly exercise: TrainingExerciseSelection }
-  | { readonly type: 'choose-program-lesson'; readonly lesson: ProgramLesson; readonly day: number }
+  | { readonly type: 'choose-program-lesson'; readonly lesson: ProgramLesson; readonly day: number; readonly patch?: Partial<DesktopTrainingSetup> }
   | { readonly type: 'update-setup'; readonly patch: Partial<DesktopTrainingSetup> }
   | { readonly type: 'start-session'; readonly seed: string | number }
   | {
@@ -205,7 +205,7 @@ export function desktopTrainingReducer(
     case 'choose-program-lesson':
       return {
         ...state, route: 'setup',
-        setup: { ...state.setup, ...programLessonSetup(action.lesson, action.day, state.setup) },
+        setup: { ...state.setup, ...(action.patch ?? programLessonSetup(action.lesson, action.day, state.setup)) },
         session: null, error: null, preparation: null,
         exercisePhase: 'ready', acknowledgementPromptId: null, interrupted: false
       }

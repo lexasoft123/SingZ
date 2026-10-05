@@ -806,3 +806,58 @@ describe('iOS audio input session lease', () => {
     await second.release()
   })
 })
+
+test('a failed external route is fully retired before built-in microphone and speaker fallback', async () => {
+  const h = harness()
+  const prepare = h.native.prepareCapturePreferences
+  h.native.prepareCapturePreferences = async (...args) => args[0] === 'ios:usb'
+    ? { ok: false, error: 'iOS active input route does not match the selected device' }
+    : prepare(...args)
+  h.native.selectBuiltInRoute = jest.fn(async () => {
+    h.calls.push('route:built-in-speaker')
+    await h.owner.setInputDevice('built-in')
+    return 'ios:built-in'
+  })
+  const coordinator = new IosAudioInputSessionCoordinator(h.owner, h.native)
+  const lease = await coordinator.acquire({ deviceUid: 'ios:usb', fallbackToBuiltIn: true })
+  expect(h.native.selectBuiltInRoute).toHaveBeenCalledTimes(1)
+  expect(h.calls.indexOf('verify:playback')).toBeLessThan(h.calls.indexOf('route:built-in-speaker'))
+  expect(h.calls).toContain('lease:acquire:ios:built-in:1')
+  await lease.release()
+})
+
+test('fallback does not switch devices when microphone permission is denied', async () => {
+  const h = harness('Denied')
+  h.native.selectBuiltInRoute = jest.fn(async () => 'ios:built-in')
+  await expect(new IosAudioInputSessionCoordinator(h.owner, h.native).acquire({ fallbackToBuiltIn: true })).rejects.toThrow('permission is denied')
+  expect(h.native.selectBuiltInRoute).not.toHaveBeenCalled()
+})
+
+test('fallback never overlaps a route whose restoration failed', async () => {
+  const h = harness()
+  h.native.prepareCapturePreferences = async () => ({ ok: false, token: '11', error: 'iOS audio route changed before capture started' })
+  h.native.restoreCapturePreferences = async () => { throw new Error('restore failed') }
+  h.native.selectBuiltInRoute = jest.fn(async () => 'ios:built-in')
+  await expect(new IosAudioInputSessionCoordinator(h.owner, h.native).acquire({ fallbackToBuiltIn: true })).rejects.toThrow('cleaning up')
+  expect(h.native.selectBuiltInRoute).not.toHaveBeenCalled()
+})
+
+test('returning to CarPlay explicitly selects its input and validates a fresh lease', async () => {
+  const h = harness()
+  h.native.selectCarPlayRoute = jest.fn(async () => { await h.owner.setInputDevice('car'); return 'ios:car' })
+  const lease = await new IosAudioInputSessionCoordinator(h.owner, h.native).acquire({ preferCarPlay: true, fallbackToBuiltIn: true })
+  expect(lease.routeKind).toBe('carplay')
+  expect(h.calls).toContain('verify:capture:ios:car:1')
+  expect(h.calls).toContain('lease:acquire:ios:car:1')
+  await lease.release()
+})
+
+test('a CarPlay route that disappears during return falls back to built-in audio', async () => {
+  const h = harness()
+  h.native.selectCarPlayRoute = jest.fn(async () => { throw new Error('iOS CarPlay microphone is unavailable') })
+  h.native.selectBuiltInRoute = jest.fn(async () => 'ios:built-in')
+  const lease = await new IosAudioInputSessionCoordinator(h.owner, h.native).acquire({ preferCarPlay: true, fallbackToBuiltIn: true })
+  expect(lease.routeKind).toBe('built-in')
+  expect(h.native.selectBuiltInRoute).toHaveBeenCalledTimes(1)
+  await lease.release()
+})
