@@ -1,3 +1,5 @@
+import { useMobileLayout } from './uiKit'
+import { trainingBodyLayout } from './layout'
 import { Icon } from '@singz/ui/native/icons'
 import { isTrainingInputRouteChange } from '../training/route-recovery'
 import { TrainingDashboard, DailyTrainingActivity, PracticeWeek, programLessonLabel } from './TrainingDashboard'
@@ -1041,10 +1043,11 @@ function TrainingHome({ progress, onProgramLesson, song, effectiveKey, onChoose,
   onDiagnostics: () => void
   onSoundSettings: () => void
 }): React.JSX.Element {
+  const layout = useMobileLayout()
   const snapshot = summarizeTrainingProgress(progress)
   const landed = snapshot.landedRate === null ? '—' : t('phone.training.landedPercent', { pct: Math.round(snapshot.landedRate * 100) })
   return (
-    <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+    <ScrollView contentContainerStyle={[styles.scroll, { paddingTop: layout.top, width: '100%', maxWidth: 1160, alignSelf: 'center' }]} showsVerticalScrollIndicator={false}>
       <TrainingDashboard store={persistence} onLesson={onProgramLesson} onProgress={onProgress} onChoose={onChoose} />
       {song && (
         <GlassSurface radius={26} style={styles.songCardContent}>
@@ -1139,7 +1142,7 @@ export function SingleNoteSetup({
   onStart,
   onBack
 }: TrainingSetupProps): React.JSX.Element {
-  const insets = useSafeAreaInsets()
+  const layout = useMobileLayout()
   const [editor, setEditor] = useState<'key' | 'mode' | 'range' | 'direction' | 'intervals' | 'chords' | 'focus-interval' | 'length' | null>(null)
   const requirements = trainingSetupRequirements(setup)
   const rangeNotice = trainingRangeNotice(setup)
@@ -1153,10 +1156,12 @@ export function SingleNoteSetup({
   const unit = setup.exercise === 'interval' ? tn('phone.training.unitIntervals', setup.length) : setup.exercise === 'note' ? tn('phone.training.unitNotes', setup.length) : tn('phone.training.unitExercises', setup.length)
   return (
     <View style={styles.singleSetupFrame}>
-      <ScrollView contentContainerStyle={[styles.scroll, styles.singleSetupScroll, { paddingTop: insets.top + 8 }]} showsVerticalScrollIndicator={false}>
+      <ScrollView contentContainerStyle={[styles.scroll, styles.singleSetupScroll, { paddingTop: layout.top, width: '100%', maxWidth: 1160, alignSelf: 'center' }]} showsVerticalScrollIndicator={false}>
         <TrainingHeader title={trainingExerciseTitle(setup.exercise)} onBack={onBack} />
         {error && <Text accessibilityLiveRegion="polite" style={styles.error}>{error}</Text>}
         {rangeNotice && <Text accessibilityLiveRegion="polite" style={styles.singleInstruction}>{rangeNotice}</Text>}
+        <View style={[styles.setupColumns, layout.wide && styles.setupColumnsWide]}>
+        <View style={[styles.setupColumn, layout.wide && styles.setupColumnWide]}>
         <SettingsCard>
         <CompactSetupRow
           label={t('phone.training.setupKey')}
@@ -1251,6 +1256,8 @@ export function SingleNoteSetup({
         {editor === 'length' && <View style={styles.compactEditor}><View style={styles.compactLengths}>{lengths.map(length => <Chip key={length} label={String(length)} selected={setup.length === length} onPress={() => { onChange({ length }); setEditor(null) }} />)}</View></View>}
         <Text style={[styles.cardCopy, { marginBottom: 16 }]}>{t('phone.training.approxMinutes', { minutes: estimatedMinutes })}{intervalSets ? ` · ${t('phone.training.intervalRepeatTotal', { n: setup.length * 3 })}` : ''}</Text>
         </SettingsCard>
+        </View>
+        <View style={[styles.setupColumn, layout.wide && styles.setupColumnWide]}>
         <ReferenceSoundPanel
           setup={setup}
           trainingSound={trainingSound}
@@ -1262,10 +1269,13 @@ export function SingleNoteSetup({
           onPitchWindowChange={onPitchWindowChange}
           onTestReferenceTone={onTestReferenceTone}
         />
-
+        </View>
+        </View>
       </ScrollView>
-      <StickyActionFooter>
+      <StickyActionFooter style={{ paddingHorizontal: 20, alignItems: 'center' }}>
+        <View style={{ width: '100%', maxWidth: 560 }}>
         <Primary label={t('phone.training.startPractice')} onPress={onStart} />
+      </View>
       </StickyActionFooter>
     </View>
   )
@@ -1337,6 +1347,7 @@ function CompactSetupRow({ label, value, expanded, onPress }: { label: string; v
 }
 
 export function TrainingSessionView({ paused = false, onPause = () => undefined, sampleControls, state, liveMidi, micHearing = 'starting', singleNoteLock = EMPTY_SINGLE_NOTE_LOCK, singleNoteCountdown = null, pitchWindowCents = DEFAULT_SINGLE_NOTE_PITCH_WINDOW_CENTS, activeTarget, onBegin, onSkipSingleNote = () => undefined, onIdentify, onNext, onExit, onBackToSong }: { paused?: boolean; onPause?: () => void; sampleControls?: React.ReactNode; state: ReturnType<typeof initialTrainingState>; liveMidi: number | null; micHearing?: MicHearing; singleNoteLock?: SingleNoteLockState; singleNoteCountdown?: number | null; pitchWindowCents?: number; activeTarget: number; onBegin: () => void; onSkipSingleNote?: () => void; onIdentify: (answer: TrainingIdentifyAnswer) => void; onNext: () => void; onExit: () => void; onBackToSong: (() => void) | null }): React.JSX.Element {
+  const layout = useMobileLayout()
   const [showSampleTools, setShowSampleTools] = useState(false)
   const session = state.session
   const attempt = mobileTrainingAttemptView(state)
@@ -1347,7 +1358,7 @@ export function TrainingSessionView({ paused = false, onPause = () => undefined,
   const displayTotal = intervalSets ? Math.ceil(session.prompts.length / 3) : session.prompts.length
   const guidedVocal = prompt.taskMode !== 'identify'
   return (
-    <View style={styles.session}>
+    <View style={[styles.session, { paddingTop: layout.top, width: '100%', maxWidth: 1160, alignSelf: 'center' }]}>
       <GlassHeader
         title={trainingExerciseTitle(prompt.kind)}
         backLabel={onBackToSong ? t('phone.training.backToSong') : t('phone.training.endSession')}
@@ -1414,21 +1425,32 @@ function SingleNoteSessionBody({ paused, onPause, repetition, phrase, phase, pro
   onBegin: () => void
   onSkip: () => void
 }): React.JSX.Element {
+  const layout = useMobileLayout()
+  const { fontScale } = useWindowDimensions()
+  const [bodyHeight, setBodyHeight] = useState(0)
+  // Compact until the route has measured its usable space, not the screen.
+  const compact = trainingBodyLayout(bodyHeight, layout.wide, fontScale).compact
   const targetIndex = Math.min(activeTarget, prompt.targets.length - 1)
   const target = prompt.targets[targetIndex]
   const swipeLeft = phase === 'respond' && countdown === null ? onSkip : undefined
   const swipeRight = phase === 'respond' && countdown === null ? onBegin : undefined
   return (
     <PracticeSwipeSurface onSwipeLeft={swipeLeft} onSwipeRight={swipeRight}>
-      <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.singleStage} showsVerticalScrollIndicator={false}>
-        <TrainingLessonOverview prompt={prompt} activeTarget={targetIndex} phrase={phrase} repetition={repetition} />
-        <View style={styles.practiceDetector}>
-          <Text accessibilityLiveRegion="polite" style={styles.practicePhase}>{phase === 'cue' || countdown !== null ? t('phone.training.hearNamedNote', { note: target.noteName }) : phase === 'respond' ? t('phone.training.yourTurn') : paused ? t('phone.training.paused') : error ? t('phone.training.tapStartWhenReady') : t('phone.training.preparing')}</Text>
-          <SingleNotePitchMeter prompt={prompt} activeTarget={targetIndex} liveMidi={liveMidi} micHearing={micHearing} lock={lock} pitchWindowCents={pitchWindowCents} listening={phase !== 'respond' || countdown !== null} />
+      <View testID="training-practice-body" onLayout={event => setBodyHeight(event.nativeEvent.layout.height)} style={[styles.practiceColumns, layout.wide && styles.practiceColumnsWide]}>
+      <ScrollView style={styles.lessonColumn} contentContainerStyle={styles.singleStage} showsVerticalScrollIndicator={false}>
+        <TrainingLessonOverview prompt={prompt} activeTarget={targetIndex} phrase={phrase} repetition={repetition} compact={compact} topAligned={layout.wide} />
+      </ScrollView>
+      <View style={[styles.performanceColumn, !layout.wide && styles.performanceColumnNarrow]}>
+      <ScrollView style={layout.wide ? { flex: 1 } : { flexGrow: 0, flexShrink: 0 }} contentContainerStyle={styles.detectorScroll} showsVerticalScrollIndicator={false}>
+        <View style={[styles.practiceDetector, compact && styles.practiceDetectorCompact]}>
+          <Text accessibilityLiveRegion="polite" style={[styles.practicePhase, compact && styles.practicePhaseCompact]}>{phase === 'cue' || countdown !== null ? t('phone.training.hearNamedNote', { note: target.noteName }) : phase === 'respond' ? t('phone.training.yourTurn') : paused ? t('phone.training.paused') : error ? t('phone.training.tapStartWhenReady') : t('phone.training.preparing')}</Text>
+          <SingleNotePitchMeter compact={compact} prompt={prompt} activeTarget={targetIndex} liveMidi={liveMidi} micHearing={micHearing} lock={lock} pitchWindowCents={pitchWindowCents} listening={phase !== 'respond' || countdown !== null} />
           {phase === 'feedback' && result && <Text style={styles.feedback}>{trainingFeedback(result)}</Text>}
         </View>
-        <SingleNoteTransport paused={paused} onPause={onPause} phase={phase === 'respond' && countdown !== null ? 'cue' : phase} error={error} onBegin={onBegin} onSkip={onSkip} />
       </ScrollView>
+        <SingleNoteTransport paused={paused} onPause={onPause} phase={phase === 'respond' && countdown !== null ? 'cue' : phase} error={error} onBegin={onBegin} onSkip={onSkip} />
+      </View>
+      </View>
     </PracticeSwipeSurface>
   )
 }
@@ -1545,7 +1567,7 @@ function silentCopy(kind: MicHearing): { reading: string; instruction: string } 
   }
 }
 
-function SingleNotePitchMeter({ prompt, activeTarget, liveMidi, micHearing, lock, pitchWindowCents, listening = false }: { prompt: TrainingPrompt; activeTarget: number; liveMidi: number | null; micHearing: MicHearing; lock: SingleNoteLockState; pitchWindowCents: number; listening?: boolean }): React.JSX.Element {
+function SingleNotePitchMeter({ compact = false, prompt, activeTarget, liveMidi, micHearing, lock, pitchWindowCents, listening = false }: { compact?: boolean; prompt: TrainingPrompt; activeTarget: number; liveMidi: number | null; micHearing: MicHearing; lock: SingleNoteLockState; pitchWindowCents: number; listening?: boolean }): React.JSX.Element {
   const readings = useContext(LiveTrainingContext)
   const snapshot = useSyncExternalStore((readings ?? emptyLiveReadings).subscribe, (readings ?? emptyLiveReadings).getSnapshot)
   if (readings) {
@@ -1581,6 +1603,7 @@ function SingleNotePitchMeter({ prompt, activeTarget, liveMidi, micHearing, lock
     ? `${instruction}. ${silent.reading}.`
     : `${t('phone.training.youAreSinging', { note: detected })} ${centsReading}. ${t('phone.training.holdProgress', { percent: Math.round(lock.progress * 100) })}`
   return <SmoothPitchMeter
+    compact={compact}
     labels={{
       flat: t('phone.training.kit.flat'),
       sharp: t('phone.training.kit.sharp'),
@@ -1782,7 +1805,19 @@ const styles = StyleSheet.create({
   sectionContent: { padding: 16, gap: 11 },
   sectionLabel: { color: C.text, fontSize: 15, fontWeight: '800' },
   singleSetupFrame: { flex: 1 },
-  singleSetupScroll: { paddingBottom: 132, gap: 16 },
+  singleSetupScroll: { paddingBottom: 100, gap: 16 },
+  setupColumns: { gap: 16 },
+  setupColumnsWide: { flexDirection: 'row', alignItems: 'flex-start' },
+  setupColumn: { minWidth: 0 },
+  setupColumnWide: { flex: 1 },
+  practiceColumns: { flex: 1, gap: 12 },
+  practiceColumnsWide: { flexDirection: 'row' },
+  lessonColumn: { flex: 1, minWidth: 0 },
+  performanceColumn: { flex: 1.6, minWidth: 0 },
+  performanceColumnNarrow: { flex: 0, flexShrink: 0 },
+  detectorScroll: { flexGrow: 1, justifyContent: 'center' },
+  practiceDetectorCompact: { minHeight: 0, paddingTop: 6 },
+  practicePhaseCompact: { fontSize: 22, lineHeight: 26 },
   compactLabel: { color: C.dim, fontSize: 13, fontWeight: '700' },
   compactValue: { color: C.text, fontSize: 16, fontWeight: '900' },
   intervalPlan: { paddingVertical: 20, gap: 12 },
