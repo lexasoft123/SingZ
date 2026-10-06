@@ -5,7 +5,7 @@ import { AppState, NativeModules, StatusBar } from 'react-native'
 import { applySystemLocale, getLocale, systemTags, t, useLocale } from './src/i18n'
 import { GestureHandlerRootView } from 'react-native-gesture-handler'
 import { AudioManager } from 'react-native-audio-api'
-import { SafeAreaProvider } from 'react-native-safe-area-context'
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context'
 import { MultitrackEngine } from './src/engine'
 import { log, logStartup } from './src/log'
 import type { LoadedProject } from './src/projects'
@@ -979,8 +979,9 @@ export default function App(): React.JSX.Element {
       {/* Swipeable rows (the library's swipe-to-remove) need the gesture
           handler root; without it every gesture silently falls through to
           the plain responder system and the swipe never begins. */}
-      <GestureHandlerRootView style={{ flex: 1 }}>
+      <GestureHandlerRootView style={{ flex: 1, backgroundColor: C.bg }}>
         <StatusBar barStyle="light-content" />
+        <SafeAreaView edges={['left', 'right']} style={{ flex: 1 }}>
         <NavigationContainer
           ref={navigationRef}
           theme={navigationTheme}
@@ -1041,6 +1042,7 @@ export default function App(): React.JSX.Element {
             </Tabs.Screen>
           </Tabs.Navigator>
         </NavigationContainer>
+        </SafeAreaView>
       </GestureHandlerRootView>
     </SafeAreaProvider>
   )

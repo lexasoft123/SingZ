@@ -1,3 +1,4 @@
+import { useMobileLayout } from './uiKit'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { laneSliverLevels, LANE_LEVEL_CHUNK, LANE_LEVEL_SLIVERS, LANE_LEVEL_WINDOW } from '../playback/lane-levels'
 import { Alert, AppState, DeviceEventEmitter, Image, PixelRatio, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
@@ -173,8 +174,6 @@ const LEAD_S = 0.15
 
 /** Lyric column inset, and the runway above it the current line scrolls to. */
 const LYR_PAD = 26
-const LYR_TOP = 250
-const LYR_BOTTOM = 300
 
 /**
  * Count-in dots above the scrubber. Circles, not a run of ●/○ glyphs: one
@@ -400,6 +399,10 @@ export default function PlayerScreen({
     return out
   }, [project.doc.stemHashes])
   const insets = useSafeAreaInsets()
+  const layout = useMobileLayout()
+  const [dockHeight, setDockHeight] = useState(180)
+  const lyricTop = layout.compact ? 48 : 250
+  const lyricBottom = layout.compact ? 80 : 300
   /* Android 15 draws edge-to-edge: keep controls clear of the system bar.
    * iOS keeps its hand-tuned paddings. */
   const sheetPad = Platform.OS === 'android' ? { paddingBottom: Math.max(34, insets.bottom + 18) } : null
@@ -1393,7 +1396,7 @@ export default function PlayerScreen({
     () =>
       lyrW > 0 && fonts
         ? layoutColumn(wordSpecs, fonts.line, lyrW, {
-            top: LYR_TOP,
+            top: lyricTop,
             /* micW alone put the first glyph ON the mic's right edge — an
                emoji's ink fills its whole advance, and the sweep's edge
                bloom blurs a further few px LEFT of the first glyph, so on
@@ -1403,7 +1406,7 @@ export default function PlayerScreen({
             indents: mask ? mask.map((m) => (m ? micW + 10 : 0)) : undefined
           })
         : { boxes: [], height: 0 },
-    [wordSpecs, lyrW, micW, mask, fonts]
+    [wordSpecs, lyrW, micW, mask, fonts, lyricTop]
   )
 
   /**
@@ -1444,13 +1447,13 @@ export default function PlayerScreen({
   useEffect(() => {
     const b = column.boxes[currentLine]
     if (currentLine >= 0 && b) {
-      const to = Math.max(0, b.y - LYR_TOP)
+      const to = Math.max(0, b.y - lyricTop)
       runOnUI(() => {
         'worklet'
         scrollTo(scrollRef, 0, to, true)
       })()
     }
-  }, [currentLine, column, scrollRef])
+  }, [currentLine, column, scrollRef, lyricTop])
 
   const toggleTrainStem = (id: string): void => {
     setTrainCfg((c) => {
@@ -1814,7 +1817,7 @@ export default function PlayerScreen({
           phones will allocate. What actually scrolls is a spacer carrying the
           tap targets, so the sweep costs no views at all. */}
       <View
-        style={{ flex: 1 }}
+        style={layout.compact ? { position: 'absolute', top: layout.top + 74, left: 0, right: 0, bottom: dockHeight + Math.max(12, insets.bottom + 2) + 8 } : { flex: 1 }}
         onLayout={(e) => {
           const { width, height } = e.nativeEvent.layout
           if (width !== view.w || height !== view.h)
@@ -1826,7 +1829,7 @@ export default function PlayerScreen({
           scrollEventThrottle={16}
           onScroll={(e) => setScrollTop(e.nativeEvent.contentOffset.y)}
         >
-          <View style={{ height: column.height + LYR_BOTTOM }}>
+          <View style={{ height: column.height + lyricBottom }}>
             {column.boxes.map((b, i) => (
               <Pressable
                 key={i}
@@ -1897,8 +1900,8 @@ export default function PlayerScreen({
       >
         <Image source={SCRIM_TOP} style={{ width: '100%', height: '100%' }} resizeMode="stretch" />
       </View>
-      <View pointerEvents="none" style={s.hdrGlass} />
-      <View style={s.hdr} pointerEvents="box-none">
+      <View pointerEvents="none" style={[s.hdrGlass, { top: layout.top }]} />
+      <View style={[s.hdr, { paddingTop: layout.top + 9 }]} pointerEvents="box-none">
         <Pressable onPress={onBack} hitSlop={12} accessibilityRole="button" accessibilityLabel={t('phone.player.header.back')}>
           <Text style={s.back}>‹</Text>
         </Pressable>
@@ -1964,11 +1967,14 @@ export default function PlayerScreen({
           of quieting them before they reach the glass. */}
       <View
         pointerEvents="none"
-        style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 340 }}
+        style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: layout.compact ? dockHeight + 24 : 340 }}
       >
         <Image source={SCRIM_BOTTOM} style={{ width: '100%', height: '100%' }} resizeMode="stretch" />
       </View>
-      <View style={[s.foot, { bottom: Math.max(12, insets.bottom + 2) }]}>
+      <View
+        onLayout={event => setDockHeight(Math.round(event.nativeEvent.layout.height))}
+        style={[s.foot, { bottom: Math.max(12, insets.bottom + 2) }, layout.compact && { width: layout.playerDockWidth, alignSelf: 'center', left: undefined, right: undefined, paddingTop: 8, paddingBottom: 8 }]}
+      >
         {countInDisplay &&
           (countInDisplay.beatDots && countInSt?.kind === 'beats' ? (
             (() => {
@@ -2157,7 +2163,7 @@ export default function PlayerScreen({
           </RoundBtn>
           <Pressable
             onPress={() => finishPlaybackAction(engine.toggle())}
-            style={s.play}
+            style={[s.play, layout.compact && { width: 48, height: 48, borderRadius: 24 }]}
             accessibilityRole="button"
             accessibilityLabel={playing ? t('phone.player.transport.pause') : t('phone.player.transport.play')}
           >

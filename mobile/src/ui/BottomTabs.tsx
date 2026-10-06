@@ -1,3 +1,4 @@
+import { useMobileLayout } from './uiKit'
 import React from 'react'
 import type { BottomTabBarProps } from '@react-navigation/bottom-tabs'
 import { StyleSheet, View } from 'react-native'
@@ -22,15 +23,21 @@ function isRootTab(name: string): name is RootTab {
   return name === 'songs' || name === 'training'
 }
 
-export default function BottomTabs({
+export default function BottomTabs(props: BottomTabBarProps): React.JSX.Element {
+  // React Navigation calls tabBar as a render callback, outside a hook scope.
+  return <ResponsiveBottomTabs {...props} />
+}
+
+function ResponsiveBottomTabs({
   state,
   descriptors,
   navigation,
   insets
 }: BottomTabBarProps): React.JSX.Element {
+  const layout = useMobileLayout()
   return (
     <View style={[styles.ground, { paddingBottom: Math.max(6, insets.bottom) }]}>
-      <GlassTabBar>
+      <GlassTabBar style={{ width: '100%', maxWidth: layout.compact ? 680 : undefined, alignSelf: 'center' }}>
         {state.routes.map((route, index) => {
           if (!isRootTab(route.name)) return null
           const tab = route.name

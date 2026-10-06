@@ -5,8 +5,8 @@ import { chordNameText, chordRoleWord, directionWord, intervalLabel, keyLabel, k
 import { t } from '../i18n'
 
 /** The lesson stays visible during both reference playback and singing. */
-export function TrainingLessonOverview({ prompt, activeTarget, phrase, repetition }: {
-  prompt: TrainingPrompt; activeTarget: number; phrase: boolean; repetition?: number
+export function TrainingLessonOverview({ prompt, activeTarget, phrase, repetition, compact = false, topAligned = false }: {
+  prompt: TrainingPrompt; activeTarget: number; phrase: boolean; repetition?: number; compact?: boolean; topAligned?: boolean
 }): React.JSX.Element {
   const theme = useNativeTheme()
   const index = Math.max(0, Math.min(activeTarget, prompt.targets.length - 1))
@@ -23,22 +23,30 @@ export function TrainingLessonOverview({ prompt, activeTarget, phrase, repetitio
     : prompt.kind === 'arpeggio' ? t('phone.training.arpeggioStepHelp') : t('phone.training.singNamedNote', { note: target.noteName })
   const pitch = target.noteName.replace(/-?\d+$/, '')
   const octave = target.noteName.slice(pitch.length)
-  return <View testID="training-lesson-overview" style={[s.overview, prompt.kind === 'scale' && s.scaleOverview]}>
-    <View accessibilityLabel={`Target note ${target.noteName}`} style={s.heading}><Text style={[s.title, { color: theme.text }]}>{title}</Text>{'direction' in prompt && <Text style={[s.direction, { color: theme.dim }]}>{directionWord(prompt.direction)}</Text>}</View>
-    <Text style={[s.description, prompt.kind === 'scale' && s.scaleDescription, { color: theme.text }]}>{description}</Text>
-    {repetition !== undefined && <Text style={[s.direction, { color: theme.dim }]}>{t('phone.training.repeatN', { n: repetition })}</Text>}
+  return <View testID="training-lesson-overview" style={[s.overview, prompt.kind === 'scale' && s.scaleOverview, compact && s.compactOverview, topAligned && s.topAligned]}>
+    <View accessibilityLabel={`Target note ${target.noteName}`} style={s.heading}><Text style={[s.title, compact && s.compactTitle, { color: theme.text }]}>{title}</Text>{'direction' in prompt && <Text style={[s.direction, compact && s.compactDirection, { color: theme.dim }]}>{directionWord(prompt.direction)}</Text>}</View>
+    <Text style={[s.description, prompt.kind === 'scale' && s.scaleDescription, compact && s.compactDescription, { color: theme.text }]}>{description}</Text>
+    {repetition !== undefined && <Text style={[s.direction, compact && s.compactDirection, { color: theme.dim }]}>{t('phone.training.repeatN', { n: repetition })}</Text>}
     {notes.length > 1 && <View style={s.notes}>{notes.map((note, position) => {
       const selected = prompt.kind === 'chord-tone' ? note.pitchClass === target.pitchClass : position === index
       const done = (prompt.kind === 'note' || prompt.kind === 'scale-degree' || prompt.kind === 'scale') && position < index
-      return <View key={`${note.noteName}:${position}`} testID={selected ? 'training-current-note' : undefined} accessibilityLabel={`${note.noteName}${selected ? `, ${t('phone.training.currentTarget')}` : ''}`} style={[s.note, notes.length > 4 && s.scaleNote, { backgroundColor: selected ? theme.accentSoft : done ? theme.line : theme.panelDeep, borderColor: selected ? theme.accent : done ? theme.lineStrong : theme.controlLine }]}>
-        <Text style={[s.notePitch, notes.length > 4 && s.scalePitch, { color: theme.text }]}>{note.noteName.replace(/-?\d+$/, '')}<Text style={[s.octave, { color: theme.accent }]}>{note.noteName.match(/-?\d+$/)?.[0]}</Text></Text>
+      return <View key={`${note.noteName}:${position}`} testID={selected ? 'training-current-note' : undefined} accessibilityLabel={`${note.noteName}${selected ? `, ${t('phone.training.currentTarget')}` : ''}`} style={[s.note, notes.length > 4 && s.scaleNote, compact && notes.length <= 4 && s.compactNote, { backgroundColor: selected ? theme.accentSoft : done ? theme.line : theme.panelDeep, borderColor: selected ? theme.accent : done ? theme.lineStrong : theme.controlLine }]}>
+        <Text style={[s.notePitch, notes.length > 4 && s.scalePitch, compact && notes.length <= 4 && s.compactPitch, { color: theme.text }]}>{note.noteName.replace(/-?\d+$/, '')}<Text style={[s.octave, { color: theme.accent }]}>{note.noteName.match(/-?\d+$/)?.[0]}</Text></Text>
         <Text style={[s.role, { color: selected ? theme.accent : theme.dim }]}>{prompt.kind === 'chord-tone' || prompt.kind === 'arpeggio' ? roles[prompt.kind === 'arpeggio' && prompt.direction === 'descending' ? 2 - position : position] : prompt.kind === 'scale' ? ['Do', 'Di', 'Re', 'Me', 'Mi', 'Fa', 'Fi', 'Sol', 'Le', 'La', 'Te', 'Ti'][(note.pitchClass - prompt.key.tonicPc + 12) % 12] : t('phone.training.degreeN', { n: note.scaleDegree })}</Text>
       </View>
     })}</View>}
-    {(prompt.kind === 'note' || prompt.kind === 'scale-degree' || prompt.kind === 'scale') && <View testID="single-note-target-area" style={s.target}><Text style={[s.targetPitch, prompt.kind === 'scale' && s.scaleTarget, { color: theme.text }]}>{pitch}<Text style={[s.targetOctave, { color: theme.accent }]}>{octave}</Text></Text><Text style={[s.targetDetail, { color: theme.dim }]}>{t('phone.training.noteOfTotal', { note: index + 1, total: notes.length })}</Text></View>}
+    {(prompt.kind === 'note' || prompt.kind === 'scale-degree' || prompt.kind === 'scale') && <View testID="single-note-target-area" style={s.target}><Text style={[s.targetPitch, prompt.kind === 'scale' && s.scaleTarget, compact && s.compactTarget, { color: theme.text }]}>{pitch}<Text style={[s.targetOctave, { color: theme.accent }]}>{octave}</Text></Text><Text style={[s.targetDetail, { color: theme.dim }]}>{t('phone.training.noteOfTotal', { note: index + 1, total: notes.length })}</Text></View>}
   </View>
 }
 const s = StyleSheet.create({
+  topAligned: { justifyContent: 'flex-start' },
+  compactOverview: { minHeight: 0, gap: 4, paddingVertical: 4 },
+  compactTitle: { fontSize: 22, lineHeight: 26 },
+  compactDirection: { fontSize: 12, lineHeight: 16 },
+  compactDescription: { fontSize: 15, lineHeight: 19 },
+  compactNote: { minHeight: 60, gap: 2 },
+  compactPitch: { fontSize: 32, lineHeight: 36 },
+  compactTarget: { fontSize: 40, lineHeight: 44 },
   overview: { width: '100%', flex: 1, justifyContent: 'center', gap: 8, paddingVertical: 8, minHeight: 200 },
   scaleOverview: { minHeight: 226, gap: 6, paddingVertical: 4 },
   scaleDescription: { fontSize: 16, lineHeight: 21 },
