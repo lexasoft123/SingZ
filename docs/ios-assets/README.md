@@ -33,4 +33,9 @@ description and promotional text for en-US, ru and zh-Hans on the pending
 0.26.1 version. Fastlane was updated to 2.240.1. Its client and Apple's
 22 September 2026 public OpenAPI schema do not contain creative Asset Library
 endpoints; artwork upload must use App Store Connect until that API is published.
-Preparing these files does not mean they have been uploaded or approved.
+All six creative PNGs were uploaded through App Store Connect on 6 October 2026
+and submitted together. Apple confirmed “6 Items Submitted”; all six assets are
+Waiting for Review in submission `8a1af88d-29a8-448b-97b0-536d9e93c392`.
+They are not yet approved or assigned to localized header/search placements:
+the pending 0.26.1 version's creative selector is disabled while Waiting for
+Review. Complete placement assignment when Apple makes that control available.
