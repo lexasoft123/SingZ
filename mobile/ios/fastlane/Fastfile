@@ -422,11 +422,14 @@ platform :ios do
   end
 
   desc "Build and upload to TestFlight — widens to external testers (Beta App Review) when a group is configured"
-  lane :beta do
+  lane :beta do |options|
     version = verify_marketing_version
     build_number = ci_build_number
     key = api_key
     groups = testflight_groups
+    submit_review = options[:submit_review] == true
+    contact = submit_review ? review_contact : nil
+    refuse_if_review_in_progress if submit_review
     # Fetched BEFORE the archive, like `release`'s contact and for the same
     # reason: an incomplete review contact is the difference between "widened"
     # and "uploaded and not widened", and discovering it after the archive and
@@ -448,10 +451,10 @@ platform :ios do
       upload_to_testflight(
         api_key: key,
         ipa: ipa,
-        # Apple's own processing can run 15-60 min with nothing this job can
-        # do about it. With nothing to distribute afterwards, waiting here
-        # would just burn a runner slot for that whole window.
-        skip_waiting_for_build_processing: true,
+        # A tag's ship lane must wait even without external tester groups:
+        # App Store review cannot attach an unprocessed build. Manual beta
+        # uploads without review can still return immediately.
+        skip_waiting_for_build_processing: !submit_review,
         distribute_external: false
       )
       UI.success("SingZ #{version} (#{build_number}) uploaded to TestFlight (internal only).")
@@ -498,9 +501,18 @@ platform :ios do
       )
       UI.success("SingZ #{version} (#{build_number}) sent to Beta App Review for: #{groups.join(", ")}")
     end
+
+    if submit_review
+      submit_build(version: version, build_number: build_number, api_key: key, contact: contact)
+    end
   end
 
-  desc "Build, then submit to the App Store for review — GOES LIVE BY ITSELF on approval"
+  desc "Upload to TestFlight, wait for processing, then submit the same build for App Store review"
+  lane :ship do
+    beta(submit_review: true)
+  end
+
+  desc "Build, then submit to the App Store for review — held for manual release after approval"
   lane :release do
     version = verify_marketing_version
     build_number = ci_build_number
@@ -534,7 +546,7 @@ platform :ios do
     submit_build(version: version, build_number: build_number, api_key: key, contact: contact)
   end
 
-  desc "Submit an ALREADY-UPLOADED build for App Store review — no rebuild. GOES LIVE BY ITSELF on approval"
+  desc "Submit an ALREADY-UPLOADED build for App Store review — no rebuild. Held for manual release after approval"
   # The manual counterpart to a tag: the tag's own run built and uploaded the
   # binary, and this sends THAT build to review without producing a second
   # one. `release` archives afresh, which on a dispatch aimed at an existing
@@ -904,11 +916,8 @@ private_lane :submit_build do |options|
     app_version: options[:version],
     build_number: options[:build_number].to_s,
     submit_for_review: true,
-    # Goes live BY ITSELF the moment Apple approves — no second visit to
-    # the console. The trade is that there is no pause between "approved"
-    # and "on the store": if a release should be held for a date or a
-    # channel post, set this false for that run.
-    automatic_release: true,
+    # Submission authorizes review; publishing remains a separate decision.
+    automatic_release: false,
     # The binary lane must not rewrite the shopfront's screenshots/graphics
     # by accident — that is the `metadata` lane's job, run on purpose. Text
     # (name/subtitle/description/keywords/release notes) still goes up:
@@ -934,5 +943,5 @@ private_lane :submit_build do |options|
     # scripts/with-apple-secrets.sh; only notes.txt is tracked.
     app_review_information: options[:contact]
   )
-  UI.success("SingZ #{options[:version]} (#{options[:build_number]}) submitted for App Store review — it will go LIVE automatically once approved.")
+  UI.success("SingZ #{options[:version]} (#{options[:build_number]}) submitted for App Store review — held for manual release after approval.")
 end

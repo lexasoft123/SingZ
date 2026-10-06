@@ -343,7 +343,9 @@ touch the others.
   `TESTFLIGHT_GROUPS` repo variable names a group — sends the build to
   **Beta App Review** for that group, so the people on the public TestFlight
   link actually receive what the release notes just promised them. Same
-  "tagging is the ship decision" reasoning as Android's closed track.
+  The `ship` lane then submits the same processed build for **App Store
+  review**, even if no external group is configured. Approval holds the
+  version for manual release; it does not publish automatically.
 
   `TESTFLIGHT_GROUPS` is a **variable, not a secret** (a group name is not
   sensitive, and an unset secret is indistinguishable from an empty one at
@@ -364,7 +366,8 @@ touch the others.
     nothing. It does **not** touch the four `SINGZ_REVIEW_*` secrets: only
     the submitting lanes read those, so a green `validate` does not prove a
     submission will not stop on a missing contact.
-  - `beta` — what the tag runs.
+  - `ship` — what the tag runs: TestFlight upload, processing, App Store review.
+  - `beta` — TestFlight only, without App Store submission.
   - `beta_external` — widen an **already-uploaded** build to the external
     group without rebuilding. Pass its number in the `build` input.
   - `submit` — send an **already-uploaded** build to App Store review. This
@@ -376,11 +379,11 @@ touch the others.
     version; prefer `submit` there.
   - `metadata` — pushes the store listing text only, no binary.
 
-  `submit` and `release` both submit with `automatic_release: true`, so an
-  approved build goes **live on the store by itself** — there is no second
-  confirmation, and dispatching either is therefore the decision to publish.
-  Beta App Review, which the tag path now triggers, is *not* this: it gates a
-  testing build, and a rejection costs a resubmission rather than a release.
+  `ship`, `submit` and `release` submit with `automatic_release: false`.
+  After approval, publish from App Store Connect when ready. If review
+  submission fails after upload, retry `submit` with the existing build
+  number rather than rebuilding. Beta App Review is separate from App
+  Store review and only controls external testing.
 
   The lanes are `beta`/`release` rather than the more obvious
   `testflight`/`appstore` because those two are the names of fastlane

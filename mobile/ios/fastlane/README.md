@@ -71,13 +71,21 @@ Distribute an already-uploaded build to EXTERNAL TestFlight testers (Beta App Re
 
 Build and upload to TestFlight — widens to external testers (Beta App Review) when a group is configured
 
+### ios ship
+
+```sh
+[bundle exec] fastlane ios ship
+```
+
+Upload to TestFlight, wait for processing, then submit the same build for App Store review
+
 ### ios release
 
 ```sh
 [bundle exec] fastlane ios release
 ```
 
-Build, then submit to the App Store for review — GOES LIVE BY ITSELF on approval
+Build, then submit to the App Store for review — held for manual release after approval
 
 ### ios submit
 
@@ -85,7 +93,7 @@ Build, then submit to the App Store for review — GOES LIVE BY ITSELF on approv
 [bundle exec] fastlane ios submit
 ```
 
-Submit an ALREADY-UPLOADED build for App Store review — no rebuild. GOES LIVE BY ITSELF on approval
+Submit an ALREADY-UPLOADED build for App Store review — no rebuild. Held for manual release after approval
 
 ### ios review_status
 

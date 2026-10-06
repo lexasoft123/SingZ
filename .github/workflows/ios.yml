@@ -1,40 +1,12 @@
 name: iOS
 
-# A v* tag ships to TestFlight automatically — same reasoning as Android's
-# closed track: that is the point of tagging, and testers should not wait on
-# someone remembering to press a button. That now includes EXTERNAL testers:
-# with the TESTFLIGHT_GROUPS repo variable set, the tag's build is sent to
-# Beta App Review for that group, so the people on the public TestFlight link
-# get the build the release notes just promised them. Before this, a tag
-# uploaded internally only and the public link kept serving the previous
-# build until somebody widened it by hand.
+# A release tag uploads to TestFlight, waits for Apple's processing, then
+# submits that same build for App Store review. Configured external groups
+# also receive Beta App Review. App Store approval leaves the version held
+# for manual release; tagging does not automatically publish it.
 #
-# It is one `upload_to_testflight` call rather than `beta` followed by
-# `beta_external` because one call means one wait and one place the group is
-# named — NOT because a chained widen would race Apple. It would not:
-# fastlane's upload_to_testflight action waits for processing on the
-# distribute-only path too (upload_to_testflight.rb:31 in the pinned 2.238.0).
-#
-# Beta App Review is Apple review, but it is not App Store review: it gates a
-# testing build, and a rejection costs a resubmission rather than a release.
-# Submitting for APP STORE review stays manual — it is a bigger one-way
-# action (once Apple starts reviewing, pulling it back is a support-contact
-# affair, not an API call) and "git tag" is too easy to type. Reaching the
-# App Store means dispatching this workflow and choosing it, mirroring
-# Android's `publish` job, where only workflow_dispatch may pick
-# `production`.
-#
-# Two lanes reach the store, and the difference matters when aiming at a tag
-# that has already been built:
-#   submit  — sends an ALREADY-UPLOADED build (pass its number in `build`).
-#             This is the one to use after a tag run; no second binary.
-#   release — archives a fresh binary and submits that. A dispatch draws its
-#             own run_number, so against an existing tag this produces a
-#             SECOND build number for the same version.
-#
-# And `release` sets automatic_release: TRUE — an approved build goes LIVE on
-# the store by itself, with no second confirmation from anyone. That is the
-# deliberate setting, but it means the dispatch IS the decision to publish.
+# Manual beta uploads remain TestFlight-only. Use submit with an existing
+# build number to retry review without rebuilding or uploading another IPA.
 #
 # The very first build for this app cannot come through here at all — the app
 # record is one-time, by-hand setup in App Store Connect, and the signing
@@ -47,10 +19,10 @@ on:
   workflow_dispatch:
     inputs:
       lane:
-        description: 'fastlane lane — "validate" ships nothing; "beta" = TestFlight; "submit" = send an already-uploaded build to App Store review; "release" = build AND submit'
+        description: 'fastlane lane — "validate" ships nothing; "ship" = upload and submit for review; "beta" = TestFlight only; "submit" = send an already-uploaded build to App Store review; "release" = build AND submit'
         type: choice
         default: validate
-        options: [validate, beta, beta_external, submit, release, metadata]
+        options: [validate, ship, beta, beta_external, submit, release, metadata]
       build:
         description: 'Build number to act on (submit / beta_external). Blank = this run number, which is NOT the tag run''s — pass the tag build''s number explicitly.'
         type: string
@@ -178,6 +150,11 @@ jobs:
           bundler-cache: true
           working-directory: mobile/ios
 
+      - name: Verify iOS review pipeline
+        run: |
+          ruby mobile/ios/fastlane/tests/app-build-number-test.rb
+          ruby mobile/ios/fastlane/tests/review-pipeline-test.rb
+
       # On the EVENT, not the ref shape. A dispatch aimed at a tag is the
       # normal way to use `submit`/`beta_external` — they act on the build
       # that tag's own run uploaded — and a ref-shape test silently rewrote
@@ -192,7 +169,7 @@ jobs:
         id: lane
         run: |
           if [ "$GITHUB_EVENT_NAME" = "push" ]; then
-            echo "lane=beta" >> "$GITHUB_OUTPUT"
+            echo "lane=ship" >> "$GITHUB_OUTPUT"
           else
             echo "lane=${{ inputs.lane }}" >> "$GITHUB_OUTPUT"
           fi
@@ -228,7 +205,7 @@ jobs:
           # uploaded, and this run's number is not that build's — every
           # workflow_dispatch draws a fresh one. The `build` input overrides
           # it; blank falls through to the run number, which is right for
-          # `beta`/`release`, the lanes that archive their own binary.
+          # `ship`/`beta`/`release`, the lanes that archive their own binary.
           SINGZ_IOS_BUILD_NUMBER: ${{ inputs.build || github.run_number }}
           # The external TestFlight group(s), comma-separated — a VARIABLE,
           # not a secret: a group name is not sensitive, and a missing secret
@@ -252,7 +229,7 @@ jobs:
       # in exactly that case — a failed fastlane step fails the job, and a
       # plain `if:` inherits an implicit success() that never fires.
       - uses: actions/upload-artifact@v4
-        if: always() && (steps.lane.outputs.lane == 'beta' || steps.lane.outputs.lane == 'release')
+        if: always() && (steps.lane.outputs.lane == 'ship' || steps.lane.outputs.lane == 'beta' || steps.lane.outputs.lane == 'release')
         with:
           name: SingZ-ios
           path: build-ios/SingZ.ipa
