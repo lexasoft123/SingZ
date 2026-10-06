@@ -116,7 +116,13 @@ class SingZRootViewController: UIViewController {
       right: max(0, view.safeAreaInsets.right - current.right)
     )
     let safeFrame = view.bounds.inset(by: base)
+    // Xcode 27.1 ships this API with Swift 6.4. Runtime availability alone
+    // cannot hide unknown SDK members from older compilers used by CI.
+#if compiler(>=6.4)
     var frames = view.reservedRegions(kind: .occlusion).map(\.frame)
+#else
+    var frames: [CGRect] = []
+#endif
     if let statusFrame = scene.statusBarManager?.statusBarFrame, !statusFrame.isEmpty {
       frames.append(view.convert(statusFrame, from: scene.coordinateSpace))
     }
