@@ -8,16 +8,21 @@
 #include <fcntl.h>
 #ifdef _WIN32
 #include <io.h>
-#define open _open
 #else
 #include <unistd.h>
 #endif
 using namespace singz;
 static void check(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
-static OwnedFileDescriptor input(const std::filesystem::path& path) { return OwnedFileDescriptor(open(path.string().c_str(), O_RDONLY)); }
+static OwnedFileDescriptor input(const std::filesystem::path& path) {
+#ifdef _WIN32
+  return OwnedFileDescriptor(_open(path.string().c_str(), O_RDONLY | O_BINARY));
+#else
+  return OwnedFileDescriptor(open(path.string().c_str(), O_RDONLY));
+#endif
+}
 static OwnedFileDescriptor output(const std::filesystem::path& path) {
 #ifdef _WIN32
-  return OwnedFileDescriptor(open(path.string().c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0600));
+  return OwnedFileDescriptor(_open(path.string().c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0600));
 #else
   return OwnedFileDescriptor(open(path.string().c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600));
 #endif
