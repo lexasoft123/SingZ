@@ -5564,3 +5564,21 @@ body.win:not(.glass) .modal-card.lyed-card {
 .stem-export-selection label { display: flex; align-items: center; gap: 10px; }
 .stem-export-selection input { flex-shrink: 0; accent-color: var(--accent, #ffa51e); }
 .stem-export-note { font-size: 13px; }
+
+/* Update news is a bounded, scrollable dialog on small desktop windows. */
+.whats-new-dialog { width: min(580px, calc(100vw - 32px)); max-height: 85vh; display: flex; flex-direction: column; gap: 18px; }
+.whats-new-heading { display: flex; align-items: center; justify-content: space-between; font-weight: 800; }
+.whats-new-heading small { color: var(--sz-dim); margin-left: 10px; font-weight: 500; }
+.whats-new-dialog h2 { margin: 0; font-size: 32px; }
+.whats-new-telegram { display: flex; align-items: center; gap: 14px; padding: 16px; border: 1px solid #279bd344; border-radius: 16px; background: #279bd30c; color: inherit; text-align: left; cursor: pointer; flex-shrink: 0; }
+.whats-new-telegram img { flex-shrink: 0; }
+.whats-new-telegram > span:first-of-type { flex: 1; }
+.whats-new-telegram small { display: block; color: var(--sz-dim); margin-top: 5px; }
+.whats-new-content { overflow-y: auto; min-height: 0; }
+.whats-new-highlight { display: flex; gap: 16px; padding: 16px 0; }
+.whats-new-highlight + .whats-new-highlight { border-top: 1px solid #8882; }
+.whats-new-icon { color: var(--sz-accent); background: #ffa02812; padding: 10px; border-radius: 12px; align-self: flex-start; }
+.whats-new-highlight h3 { margin: 0 0 6px; font-size: 18px; }
+.whats-new-highlight p { margin: 0; color: var(--sz-dim); line-height: 1.5; }
+.whats-new-dialog .modal-actions { flex-shrink: 0; }
+.whats-new-link { cursor: pointer; background: none; border: none; color: inherit; font: inherit; }

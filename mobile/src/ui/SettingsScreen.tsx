@@ -13,12 +13,16 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { nativePlayback } from '../playback/native';
 import { t, useLocale } from '../i18n';
 import { C } from './bits';
+import { TEST } from './testhooks';
 
 export default function SettingsScreen({
   onClose,
+  onWhatsNew,
 }: {
   onClose: () => void;
+  onWhatsNew: () => void;
 }): React.JSX.Element {
+  useEffect(() => { if (TEST) TEST.openWhatsNew = onWhatsNew }, [onWhatsNew]);
   const insets = useSafeAreaInsets();
   useLocale();
   const [loading, setLoading] = useState(true);
@@ -108,6 +112,7 @@ export default function SettingsScreen({
             </Text>
           )}
         </View>
+      <Pressable accessibilityRole="button" onPress={onWhatsNew} style={[s.card, { marginTop: 18 }]}><Text style={s.name}>{t('phone.app.whatsNew.title')}</Text></Pressable>
       </ScrollView>
     </View>
   );

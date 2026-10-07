@@ -34,6 +34,7 @@ import {
 import { gdriveConfigured, gdriveSignedIn, gdriveSignIn, gdriveSignOut, gdriveSync } from './gdrive'
 import { readSettings, writeSettings } from './settings'
 import { registerLocale } from './locale'
+import { registerWhatsNew } from './whats-new'
 import { loadTrainingProgress, recordTrainingCompletion, saveTrainingPreferences } from './training-progress'
 import { hashFile, writeInputWav } from './separation'
 import type { ModelsProgress, ProjectSettings } from '../shared/types'
@@ -867,6 +868,7 @@ app.whenReady().then(async () => {
     `SingZ ${app.isPackaged ? app.getVersion() : 'dev'} on ${process.platform}-${process.arch}` +
       ` — electron ${process.versions.electron}`
   )
+  registerWhatsNew()
   log('app', `userData: ${app.getPath('userData')}`)
   log('app', `models: ${modelsDir()} · pack: ${packDir()}`)
   logHardwareInfo()

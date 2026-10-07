@@ -1,5 +1,14 @@
 /* English phone strings for the `phone.app` namespace — see ../index.ts. */
 export const app = {
+  'phone.app.whatsNew.title': "What’s new",
+  'phone.app.whatsNew.fullNotes': "Full release notes",
+  'phone.app.whatsNew.done': "Got it",
+  'phone.app.whatsNew.opening': "Opening release notes…",
+  'phone.app.whatsNew.failure': "Release notes could not be loaded. You can close this window and try again from the version number.",
+  'phone.app.whatsNew.subscribe': "Subscribe to our Telegram channel",
+  'phone.app.whatsNew.telegramDescription': "News, updates and singing tips",
+  'phone.app.whatsNew.desktop': "Also new on desktop",
+
   // ── bottom tabs (App.tsx tab screens + ui/BottomTabs.tsx fallback labels) ──
   'phone.app.tab.songs': 'Songs',
   'phone.app.tab.train': 'Train',

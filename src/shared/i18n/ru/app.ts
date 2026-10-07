@@ -3,6 +3,15 @@ import type { app as en } from '../en/app'
 import type { Translation } from '../types'
 
 export const app: Translation<typeof en> = {
+  'app.whatsNew.title': "Что нового",
+  'app.whatsNew.fullNotes': "Все изменения",
+  'app.whatsNew.done': "Понятно",
+  'app.whatsNew.opening': "Открываем список изменений…",
+  'app.whatsNew.failure': "Не удалось загрузить список изменений. Закройте окно и попробуйте ещё раз, нажав на номер версии.",
+  'app.whatsNew.subscribe': "Подписаться на Telegram-канал",
+  'app.whatsNew.telegramDescription': "Новости, обновления и советы для пения",
+  'app.whatsNew.desktop': "Также на компьютере",
+
   // ── lazy dialog route copy (LibraryImport / LogPanel / ProjectPicker / SetupModal) ──
   // read through getters on the route object, so they translate at every
   // render rather than freezing at module load — see App.tsx's route setup.

@@ -1,6 +1,9 @@
 import type { TrainingCompletionReceipt, TrainingPreferences, TrainingProgress } from './training-progress'
 import type { NativeGraphDocumentProjection } from './graph-document'
 
+import type { ReleaseNotes } from './release-highlights'
+export type { ReleaseNotes } from './release-highlights'
+
 export const STEMS = ['vocals', 'drums', 'bass', 'other'] as const
 export type StemName = (typeof STEMS)[number]
 
@@ -1471,6 +1474,8 @@ export interface SingzApi {
   /** One kept launch log's text; null when it is no longer kept. */
   readLogSession(name: string): Promise<string | null>
   /** App version for the titlebar ("dev" outside packaged builds). */
+  whatsNew(automatic?: boolean): Promise<{ ok: boolean; notes?: ReleaseNotes | null; error?: string }>
+  dismissWhatsNew(version: string): Promise<{ ok: boolean; error?: string }>
   appVersion(): Promise<string>
   /** The UI language: what is saved, what it resolves to, and what `system` means here. */
   getLocale(): Promise<LocaleState>

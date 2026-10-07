@@ -16,6 +16,11 @@ import CatalogScreen from './CatalogScreen'
 import LogPanel from './LogPanel'
 import PlayerScreen from './PlayerScreen'
 import SettingsScreen from './SettingsScreen'
+import WhatsNewScreen, { NEWS_SEEN_KEY } from './WhatsNewScreen'
+import { RELEASE_VERSION, releaseHighlights } from '../../../src/shared/release-highlights'
+import { getStoredText } from '../latency'
+import { getLocale } from '../i18n'
+import { Platform } from 'react-native'
 import { C, NATIVE_SHEET_FIT_SUPPORTED } from './bits'
 import { TEST } from './testhooks'
 
@@ -25,6 +30,7 @@ type RootStackParamList = {
   AddSong: undefined
   Log: undefined
   Settings: undefined
+  WhatsNew: undefined
 }
 
 const Stack = createNativeStackNavigator<RootStackParamList>()
@@ -210,6 +216,13 @@ export default function RootNavigator({
     transpose: number
   }) => void
 }): React.JSX.Element {
+  const [newsPrevious, setNewsPrevious] = useState<string | undefined>(undefined)
+  const [newsReady, setNewsReady] = useState<boolean | null>(null)
+  useEffect(() => {
+    void getStoredText(NEWS_SEEN_KEY).then(previous => { setNewsPrevious(previous ?? undefined); setNewsReady(!!releaseHighlights(
+      RELEASE_VERSION, previous ?? undefined, getLocale(), Platform.OS === 'ios' ? 'ios' : 'android'
+    )) }).catch(error => { log('whats-new', String(error), 'error'); setNewsReady(false) })
+  }, [])
   const [project, setProject] = useState<LoadedProject | null>(null)
   const [addSong, setAddSong] = useState<AddSongRequest | null>(null)
   const mounted = useRef(true)
@@ -256,10 +269,11 @@ export default function RootNavigator({
     setAddSong(current => (current === request ? null : current))
   }, [])
 
+  if (newsReady === null) return <View style={styles.root} />
   return (
     <View style={styles.root}>
       <Stack.Navigator
-        initialRouteName="Catalog"
+        initialRouteName={newsReady ? "WhatsNew" : "Catalog"}
         screenOptions={{
           headerShown: false,
           contentStyle: styles.root
@@ -365,7 +379,10 @@ export default function RootNavigator({
             contentStyle: styles.root
           }}
         >
-          {({ navigation }) => <SettingsScreen onClose={() => navigation.goBack()} />}
+          {({ navigation }) => <SettingsScreen onClose={() => navigation.goBack()} onWhatsNew={() => navigation.navigate("WhatsNew")} />}
+        </Stack.Screen>
+        <Stack.Screen name="WhatsNew" options={{ presentation: 'fullScreenModal', contentStyle: styles.root }}>
+          {({ navigation }) => <WhatsNewScreen previous={navigation.canGoBack() ? undefined : newsPrevious} onClose={() => navigation.canGoBack() ? navigation.goBack() : navigation.replace('Catalog')} />}
         </Stack.Screen>
       </Stack.Navigator>
     </View>

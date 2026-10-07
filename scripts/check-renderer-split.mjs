@@ -21,7 +21,7 @@ if (dropScreenChunks.length !== 2) {
   throw new Error(`Renderer split check: expected primary/recovery DropScreen chunks, found ${dropScreenChunks.length}.`)
 }
 
-const recoverableDialogs = ['LibraryImport', 'LogPanel', 'ProjectPicker', 'SetupModal']
+const recoverableDialogs = ['LibraryImport', 'LogPanel', 'ProjectPicker', 'SetupModal', 'WhatsNew']
 const dialogChunks = new Map(recoverableDialogs.map((name) => [
   name,
   files.filter((file) => new RegExp(`^${name}-[\\w-]+\\.js$`).test(file))
@@ -152,7 +152,8 @@ for (const chunk of [
 // Shared curriculum/hold scoring stays in the eager shell so primary/recovery
 // training routes retain disjoint lazy dependency graphs (~9 kB additional).
 // Track export entry, translations and bulk mixer controls; encoder stays native.
-const ENTRY_RAW_BUDGET = 1_408_000
+// The update-dialog route and English launch copy add ~2.1 KB; the content and artwork stay lazy.
+const ENTRY_RAW_BUDGET = 1_411_000
 // Desktop programs, their seven-day path, and explicit interval-set controls.
 const TRAINING_RAW_BUDGET = 94_000
 const entryBytes = (await stat(resolve(assetsRoot, entryFile))).size

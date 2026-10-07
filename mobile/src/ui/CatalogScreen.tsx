@@ -1889,6 +1889,7 @@ export default function CatalogScreen({
        tab can hide the entire Songs navigator while this route remains
        focused, so `active` is the second half of visible ownership. */
     if (!TEST || !isFocused || !active) return
+    TEST.openSettings = onOpenSettings
     TEST.refresh = refresh
     TEST.openSample = openSample
     TEST.openProject = (dir: string) => {

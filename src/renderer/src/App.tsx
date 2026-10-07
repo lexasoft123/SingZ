@@ -108,6 +108,8 @@ import PitchStrip, { type MelodyState } from './components/PitchStrip'
 import PersistentMonitorControl from './components/PersistentMonitorControl'
 import type ProjectPickerComponent from './components/ProjectPicker'
 import SettingsModal from './components/SettingsRoute'
+import type WhatsNewComponent from './components/WhatsNew'
+import type { ReleaseNotes } from '../../shared/types'
 import type SetupModalComponent from './components/SetupModal'
 import SetupWizard from './components/SetupWizard'
 import TrackStack from './components/TrackStack'
@@ -164,6 +166,18 @@ const loadAnalysisRuntime = (): Promise<typeof import('./audio/analysis')> =>
 // rejected ES-module URL cannot be retried in Chromium. SetupWizard stays
 // eager below: its persistent surface owns model-download progress/cancel
 // semantics and must never be replaced by generic loading or recovery UI.
+const RecoverableWhatsNew = createLazyDialogRoute<ComponentProps<typeof WhatsNewComponent>>([
+  // @ts-expect-error Vite/Rollup treats the query as a distinct module id.
+  () => import('./components/WhatsNew?dialog-route=primary'),
+  // @ts-expect-error See the primary attempt above.
+  () => import('./components/WhatsNew?dialog-route=recovery')
+], {
+  get name() { return t('app.whatsNew.title') },
+  get opening() { return t('app.whatsNew.opening') },
+  get failureTitle() { return t('app.whatsNew.title') },
+  get failureMessage() { return t('app.whatsNew.failure') }
+})
+
 const RecoverableLibraryImport = createLazyDialogRoute<
   ComponentProps<typeof LibraryImportComponent>
 >(
@@ -793,6 +807,7 @@ export default function App(): React.JSX.Element {
   )
   const [notice, setNotice] = useState<string | null>(null)
   const [ver, setVer] = useState('')
+  const [whatsNew, setWhatsNew] = useState<ReleaseNotes | null>(null)
   const [update, setUpdate] = useState<import('../../shared/types').UpdateState>({ state: 'none' })
   const [isProject, setIsProject] = useState(false)
   /** A project folder opened from outside the library can be brought into it. */
@@ -1453,8 +1468,18 @@ export default function App(): React.JSX.Element {
         notice: t('app.wizard.qwenNotice')
       })
       void window.singz.dismissQwenOffer()
+    }).finally(() => {
+      void window.singz.whatsNew().then(result => { if (result.ok && result.notes) setWhatsNew(result.notes) })
     })
   }, [])
+
+  const closeWhatsNew = (): void => {
+    if (whatsNew) void window.singz.dismissWhatsNew(whatsNew.version)
+    setWhatsNew(null)
+  }
+  const openWhatsNew = (): void => {
+    void window.singz.whatsNew(false).then(result => { if (result.ok && result.notes) setWhatsNew(result.notes) })
+  }
 
   const openWizard = useCallback(async (origin: 'auto' | 'manual') => {
     const models = await window.singz.modelsStatus()
@@ -3776,7 +3801,7 @@ export default function App(): React.JSX.Element {
         {document.body.classList.contains('win') && <WindowButtons />}
         <div className="logo">
           Sing<span>Z</span>
-          {ver && <em className="ver">{ver}</em>}
+          {ver && <button type="button" className="ver whats-new-link no-drag" title={t('app.whatsNew.title')} aria-label={t('app.whatsNew.title')} onClick={openWhatsNew}>{ver}</button>}
         </div>
         <nav className="app-sections no-drag" aria-label={t('app.titlebar.sections')}>
           <button
@@ -4188,6 +4213,9 @@ export default function App(): React.JSX.Element {
         />
       )}
 
+      {whatsNew && !wizard && !showSetup && !showLog && !showProjects && !showSettings && !showImport && (
+        <RecoverableWhatsNew notes={whatsNew} onClose={closeWhatsNew} />
+      )}
       {wizard && (
         <SetupWizard
           models={wizard.models}
