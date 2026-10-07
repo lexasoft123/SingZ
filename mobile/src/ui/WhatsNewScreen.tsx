@@ -29,7 +29,7 @@ export default function WhatsNewScreen({ onClose, previous }: { onClose: () => v
     <View style={s.heading}><Text style={s.brand}>SingZ <Text style={s.version}>v{RELEASE_VERSION}</Text></Text><Pressable accessibilityRole="button" accessibilityLabel={t('phone.app.whatsNew.done')} onPress={onClose} hitSlop={12}><Text style={s.close}>×</Text></Pressable></View>
     <Text style={s.title}>{t('phone.app.whatsNew.title')}</Text>
     <Pressable accessibilityRole="link" onPress={() => open('https://t.me/SingZapp')} style={s.telegram}>
-      <Image source={require('../../../src/shared/telegram-logo.png')} style={{ width: 42, height: 42 }} /><View style={{ flex: 1 }}><Text style={s.subtitle}>{t('phone.app.whatsNew.subscribe')}</Text><Text style={s.description}>{t('phone.app.whatsNew.telegramDescription')}</Text></View><Text style={s.close}>↗</Text>
+      <Image source={require('../../assets/telegram-logo.png')} style={{ width: 42, height: 42 }} /><View style={{ flex: 1 }}><Text style={s.subtitle}>{t('phone.app.whatsNew.subscribe')}</Text><Text style={s.description}>{t('phone.app.whatsNew.telegramDescription')}</Text></View><Text style={s.close}>↗</Text>
     </Pressable>
     <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 12 }}>
       {notes?.entries.map(entry => <View key={entry.version}>{entry.highlights.map((item, index) => <View key={item.id} style={s.highlight}>

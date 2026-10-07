@@ -1,6 +1,6 @@
 import { Modal } from '@singz/ui'
 import type { ReleaseNotes, HighlightIcon } from '../../../shared/release-highlights'
-const telegram = new URL('../../../shared/telegram-logo.png', import.meta.url).href
+const telegram = new URL('../../../../mobile/assets/telegram-logo.png', import.meta.url).href
 import { t } from '../i18n'
 function HighlightIconView({ icon }: { icon: HighlightIcon }): React.JSX.Element {
   const paths = { news: 'M4 4h16v16H4z M8 8h8 M8 12h8 M8 16h4', export: 'M12 3v12 M7 10l5 5 5-5 M4 16v5h16v-5', mic: 'M9 4a3 3 0 0 1 6 0v7a3 3 0 0 1-6 0z M5 10v1a7 7 0 0 0 14 0v-1 M12 18v4 M8 22h8', controls: 'M4 7h16 M4 17h16 M8 4v6 M16 14v6' }
