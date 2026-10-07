@@ -33,9 +33,26 @@ description and promotional text for en-US, ru and zh-Hans on the pending
 0.26.1 version. Fastlane was updated to 2.240.1. Its client and Apple's
 22 September 2026 public OpenAPI schema do not contain creative Asset Library
 endpoints; artwork upload must use App Store Connect until that API is published.
-All six creative PNGs were uploaded through App Store Connect on 6 October 2026
-and submitted together. Apple confirmed “6 Items Submitted”; all six assets are
-Waiting for Review in submission `8a1af88d-29a8-448b-97b0-536d9e93c392`.
-They are not yet approved or assigned to localized header/search placements:
-the pending 0.26.1 version's creative selector is disabled while Waiting for
-Review. Complete placement assignment when Apple makes that control available.
+All six original creative PNGs were assigned to their localized header/search
+placements and resubmitted with 0.26.1 (30) on 6 October 2026 at 11:44 Moscow.
+The app submission is `37f4c5a1-a4d5-4ce4-b8de-73145f31efa3`; the app and
+six creatives showed Waiting for Review.
+
+The original submission was withdrawn and all six revised creatives were uploaded
+and assigned to en-US, ru and zh-Hans. The replacements use larger, equally wide
+upper-screen phone crops with a fade at the bottom, and keep the headline inside
+the visible center. App Store Connect's product and search previews were checked
+on iPhone, iPhone Duo (outer/inner display) and iPad, including available portrait
+and landscape views. Russian and Chinese header/search artwork was also checked.
+
+The replacements and 0.26.1 (30) were resubmitted on 6 October 2026 at 12:48
+Moscow. Submission `a0669c39-8490-48ce-844d-36e159ccec19` and all six replacement
+creatives showed **Waiting for Review**. The old creatives remain unassigned in
+the Asset Library. The renderer also writes conservative portrait and landscape
+crop checks to `/private/tmp/singz-header-*-crop.png`; those are estimates, not
+Apple's official device renderer.
+
+The App Store Connect header thumbnail was measured at 478×205 pixels, displayed
+at 560×240 CSS pixels, while the uploaded source was 3840×1646. The thumbnail
+explains the visible softness in the administration page; it does not establish
+the quality of the eventual live App Store rendering.
