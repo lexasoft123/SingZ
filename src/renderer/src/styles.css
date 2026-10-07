@@ -4779,7 +4779,8 @@ body.win:not(.glass) .vt-transport {
   width: min(720px, 100%);
   min-height: 56px;
   display: grid;
-  grid-template-columns: 32px auto minmax(0, 1fr);
+  grid-template-columns: 32px auto minmax(0, max-content);
+  justify-content: center;
   align-items: center;
   gap: 4px 12px;
   margin: 0 auto 8px;
@@ -4787,7 +4788,7 @@ body.win:not(.glass) .vt-transport {
   border: 1px solid var(--line-strong);
   border-radius: 14px;
   background: color-mix(in srgb, var(--accent-soft) 52%, var(--panel));
-  text-align: left;
+  text-align: center;
 }
 
 .vt-result-ack > span {
@@ -4852,12 +4853,19 @@ body.win:not(.glass) .vt-transport {
   }
 
   .vt-result-ack {
-    grid-template-columns: 32px minmax(0, 1fr);
+    grid-template-columns: 32px auto;
   }
 
-  .vt-result-ack h2,
-  .vt-result-ack small {
+  .vt-result-ack > span {
+    grid-row: 1;
+  }
+
+  .vt-result-ack h2 {
     grid-column: 2;
+  }
+
+  .vt-result-ack small {
+    grid-column: 1 / -1;
   }
 }
 
