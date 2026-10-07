@@ -88,7 +88,10 @@ describe('Android native DSP runtime packaging', () => {
     );
     expect(module).toContain('ledger.claimed(generation, parsed.swapFromGeneration)');
     expect(module).toMatch(
-      /fun unload\(generationValue: Double, promise: Promise\)[\s\S]*?if \(ledger\.unloaded\(generation, songRemains\(result\)\)\) \{\s*audioManager\.abandonAudioFocusRequest\(focusRequest\)/,
+      /fun unload\(generationValue: Double, promise: Promise\)[\s\S]*?if \(ledger\.unloaded\(generation, songRemains\(result\)\)\) \{\s*returnLegacyFocus\(\)/,
+    );
+    expect(module).toMatch(
+      /private fun returnLegacyFocus\(\) \{\s*if \(trainingFocusOwned \|\| ledger\.focusOwned \|\| invalidated\.get\(\)\) return\s*audioManager\.abandonAudioFocusRequest\(focusRequest\)\s*MediaSessionManager\.requestAudioFocus\(AudioManager\.AUDIOFOCUS_GAIN\)/,
     );
     expect(module).toMatch(
       /fun configureOutputSession\(generationValue: Double, promise: Promise\)[\s\S]*?ledger\.focusGranted\(generation\)/,
