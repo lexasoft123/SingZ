@@ -1,4 +1,4 @@
-import data from './release-highlights.json'
+import data from './release-content.json'
 import type { Locale } from './i18n/rules'
 export type ReleasePlatform = 'desktop' | 'ios' | 'android'
 export type HighlightIcon = 'news' | 'export' | 'mic' | 'controls'

@@ -1,7 +1,7 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const root = path.resolve(__dirname, '..')
-const data = JSON.parse(fs.readFileSync(path.join(root, 'src/shared/release-highlights.json'), 'utf8'))
+const data = JSON.parse(fs.readFileSync(path.join(root, 'src/shared/release-content.json'), 'utf8'))
 const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version
 const assert = (condition, message) => { if (!condition) throw new Error(`release-highlights: ${message}`) }
 assert(data.version === version, 'content version must match package.json')
