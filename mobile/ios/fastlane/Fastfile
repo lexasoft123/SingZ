@@ -212,11 +212,15 @@ end
 # text and build, and in `release` after an archive and up to an hour of
 # processing. So ask first, before anything is built, uploaded or changed.
 # Needs the API key token already set (call api_key first).
-def refuse_if_review_in_progress
+def in_progress_review_submission
   app = Spaceship::ConnectAPI::App.find(BUNDLE_ID) or UI.user_error!("No App Store Connect app for #{BUNDLE_ID}")
-  open = app.get_in_progress_review_submission(
+  app.get_in_progress_review_submission(
     platform: Spaceship::ConnectAPI::Platform::IOS, includes: "appStoreVersionForReview"
   )
+end
+
+def refuse_if_review_in_progress
+  open = in_progress_review_submission
   return if open.nil?
 
   UI.user_error!(
@@ -507,9 +511,18 @@ platform :ios do
     end
   end
 
-  desc "Upload to TestFlight, wait for processing, then submit the same build for App Store review"
+  desc "Upload to TestFlight; submit to the App Store when no review is already open"
   lane :ship do
-    beta(submit_review: true)
+    api_key
+    open = in_progress_review_submission
+    if open
+      UI.important(
+        "App Store review for #{open.app_store_version_for_review&.version_string || '?'} " \
+        "is #{open.state}. Uploading to TestFlight; leaving that submission unchanged. " \
+        "Submit this build later with fastlane ios submit build:#{ci_build_number}."
+      )
+    end
+    beta(submit_review: open.nil?)
   end
 
   desc "Build, then submit to the App Store for review — held for manual release after approval"

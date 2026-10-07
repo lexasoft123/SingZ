@@ -8,7 +8,7 @@ class ReviewPipelineHarness
     def self.success(*) = nil
   end
 
-  attr_accessor :groups, :upload_failure, :contact_failure
+  attr_accessor :groups, :upload_failure, :contact_failure, :open_review
   attr_reader :events
 
   def initialize
@@ -39,7 +39,11 @@ class ReviewPipelineHarness
     events << :contact_checked
     { first_name: 'Test' }
   end
-  def refuse_if_review_in_progress = events << :review_checked
+  def in_progress_review_submission = open_review
+  def refuse_if_review_in_progress
+    events << :review_checked
+    raise 'Review already open' if open_review
+  end
   def beta_review_info = {}
   def install_signing(**) = events << :signing
   def archive(**) = (events << :archive; 'test.ipa')
@@ -81,6 +85,35 @@ class ReviewPipelineTest < Minitest::Test
     assert_equal ['External Testers'], uploads.first[1][:groups]
     assert_equal 1, submissions.size
     assert_equal 1, @pipeline.events.count(:archive)
+  end
+
+
+  def test_tag_ship_uploads_during_app_store_review_without_touching_submission
+    @pipeline.open_review = Struct.new(:state, :app_store_version_for_review).new('WAITING_FOR_REVIEW', nil)
+    @pipeline.groups = ['External Testers']
+    @pipeline.contact_failure = true
+    @pipeline.ship
+    assert_equal 1, uploads.size
+    assert_equal false, uploads.first[1][:skip_waiting_for_build_processing]
+    assert_equal true, uploads.first[1][:distribute_external]
+    assert_empty submissions
+    refute_includes @pipeline.events, :review_checked
+    refute_includes @pipeline.events, :contact_checked
+  end
+
+  def test_tag_ship_uploads_internal_build_during_review
+    @pipeline.open_review = Struct.new(:state, :app_store_version_for_review).new('IN_REVIEW', nil)
+    @pipeline.ship
+    assert_equal 1, uploads.size
+    assert_equal false, uploads.first[1][:distribute_external]
+    assert_empty submissions
+  end
+
+  def test_manual_store_submission_still_refuses_an_open_review
+    @pipeline.open_review = Object.new
+    assert_raises(RuntimeError) { @pipeline.submit(build: 30) }
+    assert_empty submissions
+    assert_empty uploads
   end
 
   def test_manual_beta_remains_upload_only
