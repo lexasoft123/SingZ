@@ -158,19 +158,20 @@ class MacAudioInputBackend final : public AudioInputBackend {
     context_ = context;
 
     AudioDeviceID selected = kAudioObjectUnknown;
-    std::string enumerationError;
-    for (const AudioDeviceID device : allDeviceIds(&enumerationError)) {
-      const std::string uid = stringProperty(
-          device, address(kAudioDevicePropertyDeviceUID, kAudioObjectPropertyScopeGlobal));
-      if (uid == config.deviceUid) {
-        selected = device;
-        break;
-      }
+    CFStringRef uid = CFStringCreateWithCString(nullptr, config.deviceUid.c_str(),
+                                               kCFStringEncodingUTF8);
+    if (uid) {
+      UInt32 size = sizeof(selected);
+      const auto property = address(kAudioHardwarePropertyTranslateUIDToDevice,
+                                    kAudioObjectPropertyScopeGlobal);
+      if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &property, sizeof(uid),
+          &uid, &size, &selected) != noErr) selected = kAudioObjectUnknown;
+      CFRelease(uid);
     }
     if (selected == kAudioObjectUnknown)
       return AudioInputResult::failure(
           AudioInputState::Error,
-          enumerationError.empty() ? "audio input device disappeared" : enumerationError,
+          "audio input device disappeared",
           config.channel);
     const uint32_t channels = inputChannelCount(selected);
     if (config.channel >= channels)
@@ -302,6 +303,13 @@ class MacAudioInputBackend final : public AudioInputBackend {
     if (status != noErr) return fail("start AUHAL", status, channel_);
     started_ = true;
     return AudioInputResult::success(AudioInputState::Running, sampleRate_, channel_);
+  }
+
+  bool suspendPrepared() override {
+    if (!unit_ || !initialized_) return false;
+    if (started_ && AudioOutputUnitStop(unit_) != noErr) return false;
+    started_ = false;
+    return true;
   }
 
   void stop() override {

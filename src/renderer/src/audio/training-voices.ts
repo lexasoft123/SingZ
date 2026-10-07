@@ -2,7 +2,7 @@ import { trainingOrganOscillators } from '../training-practice'
 import { trainingSampleIndex, type TrainingSound } from '../../../shared/training-sound'
 import type { TrainingCueTimingOptions } from './training-audio'
 export interface TrainingVoice { readonly oscillator: OscillatorNode | AudioBufferSourceNode; readonly gain: GainNode }
-export function createTrainingVoices(context: AudioContext, output: AudioNode, organOutput: AudioNode | null, samples: ReadonlyMap<string, AudioBuffer>, instrumentGain: (sound: TrainingSound, midi: number) => number, midi: number, startTime: number, endTime: number, timing: TrainingCueTimingOptions, concurrentScale: number, referenceVolume: number, sound: TrainingSound): TrainingVoice[] {
+export function createTrainingVoices(context: BaseAudioContext, output: AudioNode, organOutput: AudioNode | null, samples: ReadonlyMap<string, AudioBuffer>, instrumentGain: (sound: TrainingSound, midi: number) => number, midi: number, startTime: number, endTime: number, timing: TrainingCueTimingOptions, concurrentScale: number, referenceVolume: number, sound: TrainingSound): TrainingVoice[] {
   const voices: TrainingVoice[] = []
   try {
     if (sound !== 'organ') {

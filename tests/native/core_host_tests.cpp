@@ -49,6 +49,9 @@ static std::atomic<bool> fakeNoSleep{false};
 static std::atomic<bool> fakeStartFails{false};
 static std::atomic<bool> fakeInvalidRate{false};
 static std::atomic<bool> fakeSuppressCallbacks{false};
+static std::atomic<bool> fakePreparedReuse{false};
+static std::atomic<bool> fakeRouteChanged{false};
+static std::atomic<unsigned> fakeOpens{0};
 
 class FakeAudioInputBackend final : public singz::AudioInputBackend {
  public:
@@ -56,6 +59,7 @@ class FakeAudioInputBackend final : public singz::AudioInputBackend {
 
   singz::AudioInputResult open(const singz::AudioInputConfig& config,
                                singz::AudioInputPush push, void* context) override {
+    fakeOpens.fetch_add(1);
     channel_ = config.channel;
     push_ = push;
     context_ = context;
@@ -103,8 +107,12 @@ class FakeAudioInputBackend final : public singz::AudioInputBackend {
     if (producer_.joinable() && producer_.get_id() != std::this_thread::get_id()) producer_.join();
   }
 
+  bool suspendPrepared() override {
+    if (!fakePreparedReuse.load()) return false;
+    stop(); return true;
+  }
   bool takeFailure(std::string& error) override {
-    if (!failed_.exchange(false)) return false;
+    if (!failed_.exchange(false) && !fakeRouteChanged.exchange(false)) return false;
     error = "simulated input device disconnected";
     return true;
   }
@@ -1522,6 +1530,44 @@ static void audioInputTests() {
     singz::AudioInputConfig config;
     config.deviceUid = fake.uid;
     config.channel = 2;
+
+    {
+      fakePreparedReuse.store(true);
+      singz::AudioInput prepared;
+      std::atomic<unsigned> calls{0}; std::atomic<uint64_t> firstGeneration{0};
+      const std::vector<singz::AudioInputDevice> inventory{fake};
+      auto sink = [&](const singz::AudioInputBlockView& block) {
+        if (!calls.fetch_add(1)) firstGeneration.store(block.capture.streamGeneration);
+      };
+      CHECK("prepared input: first start succeeds",prepared.start(config,sink,&inventory).ok);
+      for(unsigned wait=0;!calls.load() && wait<100;++wait) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      const auto oldGeneration = firstGeneration.load();
+      prepared.stop(true);
+      const auto stoppedCalls = calls.load(); const auto opens = fakeOpens.load();
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      CHECK("prepared input: idle hardware capture is stopped",calls.load()==stoppedCalls);
+      calls.store(0); firstGeneration.store(0);
+      CHECK("prepared input: warm restart succeeds",prepared.start(config,sink,&inventory).ok);
+      for(unsigned wait=0;!calls.load() && wait<100;++wait) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      CHECK("prepared input: unchanged route does not reopen",fakeOpens.load()==opens);
+      CHECK("prepared input: fresh provenance generation",oldGeneration && firstGeneration.load() && firstGeneration.load()!=oldGeneration);
+      prepared.stop(true);
+      auto otherChannel=config; otherChannel.channel=3;
+      CHECK("prepared input: changed channel starts",prepared.start(otherChannel,sink,&inventory).ok);
+      CHECK("prepared input: changed channel rebuilds",fakeOpens.load()==opens+1);
+      prepared.stop(true); fakeRouteChanged.store(true);
+      CHECK("prepared input: route event starts after rebuild",prepared.start(otherChannel,sink,&inventory).ok);
+      CHECK("prepared input: route event invalidates retained unit",fakeOpens.load()==opens+2);
+      prepared.stop();
+      singz::AudioInput retainedSelfStop;
+      std::atomic<unsigned> selfCalls{0};
+      CHECK("prepared input: sink retained stop starts",retainedSelfStop.start(config,[&](const auto&) {
+        if(!selfCalls.fetch_add(1)) retainedSelfStop.stop(true);
+      },&inventory).ok);
+      CHECK("prepared input: sink retained stop completes",waitForState(retainedSelfStop,singz::AudioInputState::Stopped));
+      CHECK("prepared input: sink retained restart joins old thread",retainedSelfStop.start(config,sink,&inventory).ok);
+      retainedSelfStop.stop(); fakePreparedReuse.store(false);
+    }
 
     singz::AudioInput selfStopping;
     std::atomic<int> selfCalls{0};

@@ -169,6 +169,7 @@ struct SINGZ_ZCORE_IMPL_LOCAL AudioInput::Impl {
   std::mutex backendControl;
   std::atomic<AudioInputState> state{AudioInputState::Idle};
   std::atomic<bool> quit{false};
+  std::atomic<bool> retainPrepared{false};
   std::atomic<bool> deliveryArmed{false};
   std::atomic<uint64_t> deliveredBlocks{0};
   std::atomic<uint64_t> deliveredFrames{0};
@@ -197,7 +198,11 @@ struct SINGZ_ZCORE_IMPL_LOCAL AudioInput::Impl {
 
   void stopBackend() {
     std::lock_guard<std::mutex> lock(backendControl);
-    if (backend) backend->stop();
+    if (backend) {
+      if (retainPrepared.load(std::memory_order_acquire) && backend->suspendPrepared()) return;
+      retainPrepared.store(false,std::memory_order_release);
+      backend->stop();
+    }
   }
 
   bool backendFailure(std::string& error) {
@@ -206,6 +211,7 @@ struct SINGZ_ZCORE_IMPL_LOCAL AudioInput::Impl {
   }
 
   void fail(std::string error) {
+    retainPrepared.store(false,std::memory_order_release);
     {
       std::lock_guard<std::mutex> lock(control);
       if (failure.empty()) failure = std::move(error);
@@ -216,6 +222,23 @@ struct SINGZ_ZCORE_IMPL_LOCAL AudioInput::Impl {
     stopBackend();
   }
 
+  AudioInputResult activatePrepared() {
+    quit.store(false,std::memory_order_release);
+    AudioInputResult result;
+    {
+      std::lock_guard<std::mutex> lock(backendControl);
+      result = backend->start();
+    }
+    if (!result.ok) {
+      fail(result.error.empty() ? "audio input could not start" : result.error);
+      return result;
+    }
+    state.store(AudioInputState::Running,std::memory_order_release);
+    result.state = AudioInputState::Running;
+    // Thread entry waits until member assignment has completed.
+    deliveryArmed.store(false,std::memory_order_relaxed);
+    return result;
+  }
   void deliver() {
     deliveringImpl = this;
     AudioInputBlockView block;
@@ -286,12 +309,53 @@ AudioInput::~AudioInput() {
   if (fromDelivery && impl_->delivery.joinable()) impl_->delivery.detach();
 }
 
-AudioInputResult AudioInput::start(const AudioInputConfig& config, AudioInputSink sink) {
+AudioInputResult AudioInput::start(const AudioInputConfig& config, AudioInputSink sink,
+                                  const std::vector<AudioInputDevice>* inventory) {
   if (Impl::deliveringImpl == impl_.get()) {
     return AudioInputResult::failure(
         state(), "audio input cannot be restarted from its sink", config.channel);
   }
   std::lock_guard<std::mutex> lifecycle(impl_->lifecycle);
+  const bool samePrepared = impl_->retainPrepared.load(std::memory_order_acquire) && impl_->backend &&
+      impl_->config.deviceUid == config.deviceUid && impl_->config.channel == config.channel &&
+      impl_->config.ringBlocks == config.ringBlocks && impl_->state.load(std::memory_order_acquire) == AudioInputState::Stopped;
+  // A retained sink-triggered stop cannot self-join; reap that finished
+  // delivery object before assigning the next thread (even if it has exited).
+  if (samePrepared && impl_->delivery.joinable()) impl_->delivery.join();
+  std::string changedError;
+  if (samePrepared && !impl_->backendFailure(changedError)) {
+    std::string validationError;
+    if (!inventory || validateAudioInputConfig(config,*inventory,validationError)) {
+      uint64_t generation = nextStreamGeneration.fetch_add(1,std::memory_order_relaxed);
+      if (!generation) generation = nextStreamGeneration.fetch_add(1,std::memory_order_relaxed);
+      impl_->callback.clear();
+      impl_->ring = std::make_unique<AudioInputRing>(config.ringBlocks,kMaxCallbackFrames,captureClockDomain(config.deviceUid),generation);
+      impl_->callback.prepare(impl_->ring->producer(),Impl::notifyDelivery,impl_.get());
+      impl_->sink = std::move(sink);
+      impl_->failure.clear();
+      impl_->deliveredBlocks.store(0,std::memory_order_relaxed);
+      impl_->deliveredFrames.store(0,std::memory_order_relaxed);
+      impl_->lastOverruns.store(0,std::memory_order_relaxed);
+      impl_->deliveryWakeups.store(0,std::memory_order_relaxed);
+      impl_->resetDeliveryWake();
+      impl_->retainPrepared.store(false,std::memory_order_release);
+      const auto started = impl_->activatePrepared();
+      if (!started.ok) return started;
+      try {
+        std::shared_ptr<Impl> keepAlive = impl_;
+        impl_->delivery = std::thread([keepAlive] {
+          while (!keepAlive->deliveryArmed.load(std::memory_order_acquire)) std::this_thread::yield();
+          keepAlive->deliver();
+        });
+        impl_->deliveryArmed.store(true,std::memory_order_release);
+      } catch (...) {
+        impl_->fail("could not create audio input delivery thread");
+        return AudioInputResult::failure(AudioInputState::Error,impl_->failure,config.channel);
+      }
+      return started;
+    }
+  }
+  impl_->retainPrepared.store(false,std::memory_order_release);
   // Retire any prior self-stopped or failed delivery before replacing state.
   {
     std::lock_guard<std::mutex> control(impl_->control);
@@ -326,7 +390,8 @@ AudioInputResult AudioInput::start(const AudioInputConfig& config, AudioInputSin
         config.channel);
   }
   std::string enumerateError;
-  const std::vector<AudioInputDevice> devices = enumerateAudioInputDevices(&enumerateError);
+  const std::vector<AudioInputDevice> devices = inventory
+      ? *inventory : enumerateAudioInputDevices(&enumerateError);
   std::string validationError;
   if (!validateAudioInputConfig(config, devices, validationError)) {
     impl_->state.store(AudioInputState::Error, std::memory_order_release);
@@ -417,9 +482,10 @@ AudioInputResult AudioInput::start(const AudioInputConfig& config, AudioInputSin
   return result;
 }
 
-void AudioInput::stop() {
+void AudioInput::stop(bool retainPrepared) {
   if (!impl_) return;
   const bool fromDelivery = Impl::deliveringImpl == impl_.get();
+  impl_->retainPrepared.store(retainPrepared,std::memory_order_release);
   if (fromDelivery) {
     std::lock_guard<std::mutex> control(impl_->control);
     if (impl_->state.load(std::memory_order_relaxed) != AudioInputState::Error)
@@ -445,9 +511,11 @@ void AudioInput::stop() {
     std::lock_guard<std::mutex> control(impl_->control);
     if (impl_->ring)
       impl_->lastOverruns.store(impl_->ring->overruns(), std::memory_order_relaxed);
-    impl_->backend.reset();
-    impl_->callback.clear();
-    impl_->ring.reset();
+    if (!impl_->retainPrepared.load(std::memory_order_acquire)) {
+      impl_->backend.reset();
+      impl_->callback.clear();
+      impl_->ring.reset();
+    }
     impl_->sink = nullptr;
     impl_->state.store(AudioInputState::Stopped, std::memory_order_release);
   }

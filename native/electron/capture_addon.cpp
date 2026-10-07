@@ -4,6 +4,10 @@
 #include "audio_monitor_session.h"
 #include "native_audio_ownership.h"
 #include "playback_addon_bridge.h"
+#include "../playback/shared_audio_service.h"
+#include "training_audio_session.h"
+#include <zcore/audio/capture_recording.h>
+#include <filesystem>
 
 #include <zdsp/analysis/pitch_analysis_module.h>
 #include <zcore/device/audio_input.h>
@@ -23,6 +27,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <unordered_map>
 
 #if defined(__APPLE__)
 #include <mach/mach_time.h>
@@ -34,9 +39,16 @@ namespace {
 
 using zdsp::analysis::AnalysisWindow;
 
+struct CaptureEvent {
+  AnalysisWindow window;
+  std::string detector;
+  double inferenceMs = 0;
+  bool harmonicCorrected = false;
+};
+
 struct EventBridge {
   napi_threadsafe_function events = nullptr;
-  std::atomic<AnalysisWindow*> latest{nullptr};
+  std::atomic<CaptureEvent*> latest{nullptr};
   std::atomic<bool> queued{false};
   std::atomic<uint64_t> dropped{0};
   std::atomic<uint64_t> overwritten{0};
@@ -47,6 +59,7 @@ struct CaptureOwner {
   std::unique_ptr<singz::AudioInput> input;
   std::unique_ptr<zdsp::analysis::PitchAnalysisModule> analyzer;
   EventBridge* bridge = nullptr;
+  std::shared_ptr<singz::CaptureRecording> recording;
   uint64_t generation = 0;
   uint64_t lastDroppedEvents = 0;
   uint64_t lastOverwrittenWindows = 0;
@@ -57,7 +70,7 @@ struct CaptureOwner {
 
 CaptureOwner owner;
 singz::AudioMonitorSession monitor;
-singz::NativeAudioOwnership nativeAudioOwnership;
+singz::NativeAudioOwnership nativeAudioOwnership{true};
 
 uint64_t hostTimeNowNs() noexcept {
 #if defined(__APPLE__)
@@ -188,8 +201,9 @@ void scheduleBridge(EventBridge* bridge) {
   bridge->dropped.fetch_add(1, std::memory_order_relaxed);
 }
 
-void publishLatest(EventBridge* bridge, const AnalysisWindow& source) {
-  auto* copy = new AnalysisWindow(source);
+void publishLatest(EventBridge* bridge, const AnalysisWindow& source,
+                   const zdsp::analysis::PitchAnalysisModule& analyzer) {
+  auto* copy = new CaptureEvent{source, analyzer.detectorName(), analyzer.inferenceMs(), analyzer.harmonicCorrected()};
   if (auto* replaced = bridge->latest.exchange(copy, std::memory_order_acq_rel)) {
     delete replaced;
     bridge->overwritten.fetch_add(1, std::memory_order_relaxed);
@@ -199,10 +213,11 @@ void publishLatest(EventBridge* bridge, const AnalysisWindow& source) {
 
 void callJs(napi_env env, napi_value callback, void* context, void*) {
   auto* bridge = static_cast<EventBridge*>(context);
-  std::unique_ptr<AnalysisWindow> window(
+  std::unique_ptr<CaptureEvent> captured(
       bridge ? bridge->latest.exchange(nullptr, std::memory_order_acq_rel) : nullptr);
   if (bridge) bridge->queued.store(false, std::memory_order_release);
-  if (!env || !callback || !window) return;
+  if (!env || !callback || !captured) return;
+  const auto* window = &captured->window;
   napi_value event;
   napi_create_object(env, &event);
   setU64(env, event, "ownershipGeneration", window->ownershipGeneration);
@@ -218,6 +233,9 @@ void callJs(napi_env env, napi_value callback, void* context, void*) {
           ? static_cast<double>(bridgedAt - window->deliveredAt.value) / 1000000.0
           : -1.0));
   set(env, event, "sampleRate", numberValue(env, window->sampleRate.value));
+  set(env, event, "detector", stringValue(env, captured->detector));
+  set(env, event, "inferenceMs", numberValue(env, captured->inferenceMs));
+  set(env, event, "harmonicCorrected", boolValue(env, captured->harmonicCorrected));
   set(env, event, "frequency", numberValue(env, window->analysis.frequency));
   set(env, event, "clarity", numberValue(env, window->analysis.clarity));
   set(env, event, "peak", numberValue(env, window->analysis.peak));
@@ -388,7 +406,7 @@ void stopLocked(uint64_t generation, bool force) {
   const uint64_t releasedGeneration = owner.generation;
   if (owner.analyzer) owner.analyzer->cancel(owner.generation);
   if (owner.input) {
-    owner.input->stop();
+    owner.input->stop(!force);
     owner.lastStats = owner.input->stats();
     owner.lastState = owner.input->state();
     owner.lastError = owner.input->lastError();
@@ -397,8 +415,9 @@ void stopLocked(uint64_t generation, bool force) {
     owner.lastDroppedEvents = owner.bridge->dropped.load(std::memory_order_relaxed);
     owner.lastOverwrittenWindows = owner.bridge->overwritten.load(std::memory_order_relaxed);
   }
+  std::atomic_store(&owner.recording, std::shared_ptr<singz::CaptureRecording>{});
   owner.analyzer.reset();
-  owner.input.reset();
+  if (force) owner.input.reset();
   if (owner.bridge) {
     napi_release_threadsafe_function(owner.bridge->events, napi_tsfn_abort);
     owner.bridge = nullptr;
@@ -424,7 +443,7 @@ napi_value captureBusyResult(napi_env env, uint64_t generation) {
 
 napi_value devices(napi_env env, napi_callback_info) {
   std::string error;
-  const auto rows = singz::enumerateAudioInputDevices(&error);
+  const auto rows = singz::sharedAudioService().inputDevices();
   napi_value result;
   napi_create_object(env, &result);
   set(env, result, "ok", boolValue(env, error.empty()));
@@ -450,7 +469,7 @@ napi_value devices(napi_env env, napi_callback_info) {
   return result;
 }
 
-napi_value begin(napi_env env, napi_callback_info info) {
+napi_value beginImpl(napi_env env, napi_callback_info info) {
   size_t argc = 3;
   napi_value argv[3];
   napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
@@ -503,10 +522,24 @@ napi_value begin(napi_env env, napi_callback_info info) {
   owner.generation = generation;
   owner.lastDroppedEvents = 0;
   owner.lastOverwrittenWindows = 0;
-  owner.analyzer = std::make_unique<zdsp::analysis::PitchAnalysisModule>(
-      zdsp::analysis::PitchAnalysisConfig{zdsp::analysis::PitchDetectorKind::Yin, {}, generation});
-  owner.input = std::make_unique<singz::AudioInput>();
-  const auto inventory = singz::enumerateAudioInputDevices();
+  const auto modelPath = getString(env, argv[0], "crepeModelPath");
+  try {
+    owner.analyzer = std::make_unique<zdsp::analysis::PitchAnalysisModule>(
+        zdsp::analysis::PitchAnalysisConfig{
+            modelPath.empty() ? zdsp::analysis::PitchDetectorKind::Yin
+                              : zdsp::analysis::PitchDetectorKind::CrepeTiny,
+            modelPath, generation});
+  } catch (const std::exception& exception) {
+    const std::string message = exception.what();
+    stopLocked(generation, true);
+    napi_value failed;
+    napi_create_object(env, &failed);
+    set(env, failed, "ok", boolValue(env, false));
+    set(env, failed, "error", stringValue(env, message));
+    return failed;
+  }
+  if (!owner.input) owner.input = std::make_unique<singz::AudioInput>();
+  const auto inventory = singz::sharedAudioService().inputDevices();
   const singz::AudioInputDevice* selectedDevice = nullptr;
   for (const auto& device : inventory) {
     if (device.uid == config.deviceUid) {
@@ -517,10 +550,11 @@ napi_value begin(napi_env env, napi_callback_info info) {
   const auto result = owner.input->start(config, [](const singz::AudioInputBlockView& block) {
     auto* analyzer = owner.analyzer.get();
     if (!analyzer || !owner.bridge) return;
-    analyzer->push(block, [](const AnalysisWindow& window) {
-      if (owner.bridge) publishLatest(owner.bridge, window);
+    if (auto recording = std::atomic_load(&owner.recording)) recording->append(block);
+    analyzer->push(block, [analyzer](const AnalysisWindow& window) {
+      if (owner.bridge) publishLatest(owner.bridge, window, *analyzer);
     });
-  });
+  }, &inventory);
   owner.lastState = result.state;
   owner.lastError = result.error;
   if (!result.ok) stopLocked(generation, true);
@@ -556,6 +590,26 @@ napi_value begin(napi_env env, napi_callback_info info) {
       result.timestampSource.empty() ? "hardware-or-callback-estimate"
                                      : result.timestampSource));
   return response;
+}
+
+napi_value begin(napi_env env, napi_callback_info info) {
+  try { return beginImpl(env, info); }
+  catch (const std::exception& exception) {
+    size_t argc = 3; napi_value args[3]{};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    uint64_t generation = 0;
+    if (argc > 1) (void)getExactU64(env, args[1], &generation);
+    {
+      std::lock_guard<std::mutex> lock(owner.mutex);
+      if (generation && owner.generation == generation) stopLocked(generation, true);
+      else if (generation) (void)nativeAudioOwnership.release(singz::NativeAudioOwnerKind::Capture, generation);
+    }
+    napi_value result;
+    napi_create_object(env, &result);
+    set(env, result, "ok", boolValue(env, false));
+    set(env, result, "error", stringValue(env, exception.what()));
+    return result;
+  }
 }
 
 napi_value cancel(napi_env env, napi_callback_info info) {
@@ -800,7 +854,19 @@ napi_value audioHostDevices(napi_env env, napi_callback_info info) {
   std::string provider;
   singz::AudioHostInventory inventory;
   bool providerScoped = !requestedProvider.empty();
-  if (providerScoped) {
+  if (providerScoped && requestedProvider == singz::sharedAudioService().providerId()) {
+    provider = requestedProvider;
+    inventory = singz::sharedAudioService().inventory();
+  } else if (providerScoped) {
+    // Alternate provider inventories are revalidated after the shared service
+    // publishes a reconfiguration revision, rather than on each Settings read.
+    static std::unordered_map<std::string,std::pair<uint64_t,singz::AudioHostInventory>> alternate;
+    const uint64_t revision = singz::sharedAudioService().inventoryRevision();
+    const auto cached = alternate.find(requestedProvider);
+    if (cached != alternate.end() && cached->second.first == revision) {
+      inventory = cached->second.second;
+      provider = requestedProvider;
+    } else {
     std::string unavailableReason;
     std::unique_ptr<singz::AudioHostBackend> backend =
         playbackBackend(requestedProvider, &unavailableReason);
@@ -820,8 +886,10 @@ napi_value audioHostDevices(napi_env env, napi_callback_info info) {
     singz::AudioHost host(std::move(backend));
     inventory = host.enumerate();
     provider = requestedProvider;
+    alternate[provider] = {revision,inventory};
+    }
   } else {
-    inventory = monitor.enumerate();
+    inventory = singz::sharedAudioService().inventory();
 #if defined(_WIN32)
     provider = "wasapi";
 #elif defined(__APPLE__)
@@ -960,6 +1028,13 @@ napi_value beginMonitor(napi_env env, napi_callback_info info) {
                   ? "Another native microphone owner is already active"
                   : "Monitor generation is invalid"});
   }
+  {
+    std::lock_guard<std::mutex> lock(owner.mutex);
+    // An idle prepared capture holds no ownership lease, but exclusive
+    // monitoring must retire even its stopped platform unit before opening.
+    if (owner.input) { owner.input->stop(); owner.input.reset(); }
+  }
+  singz::sharedAudioService().parkOutput();
   singz::AudioMonitorResult result = monitor.begin(config, generation);
   if (!result.ok) {
     const singz::AudioMonitorStatus status = monitor.status();
@@ -1077,7 +1152,57 @@ napi_value endMonitor(napi_env env, napi_callback_info info) {
   return monitorResultValue(env, result);
 }
 
+napi_value captureRecording(napi_env env, napi_callback_info info) {
+  size_t argc = 3;
+  napi_value argv[3]{};
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  uint64_t generation = 0;
+  napi_value result;
+  napi_create_object(env, &result);
+  std::lock_guard<std::mutex> lock(owner.mutex);
+  if (argc != 3 || !getExactU64(env, argv[2], &generation) || generation != owner.generation) {
+    set(env, result, "ok", boolValue(env, false));
+    set(env, result, "error", stringValue(env, "The microphone session is no longer active"));
+    return result;
+  }
+  const std::string action = getStringValue(env, argv[0]);
+  try {
+    if (action == "record" && argc == 3) {
+      size_t pathSize = 0;
+      napi_get_value_string_utf8(env, argv[1], nullptr, 0, &pathSize);
+      std::string path(pathSize + 1, '\0');
+      napi_get_value_string_utf8(env, argv[1], path.data(), path.size(), &pathSize);
+      path.resize(pathSize);
+      if (!singz::CaptureRecording::validName(std::filesystem::path(path).filename().string()))
+        throw std::runtime_error("Invalid microphone recording filename");
+      if (std::atomic_load(&owner.recording))
+        throw std::runtime_error("A microphone recording is already active");
+      auto recording = std::make_shared<singz::CaptureRecording>();
+      recording->filename = path;
+      std::atomic_store(&owner.recording, recording);
+      set(env, result, "state", stringValue(env, "recording"));
+    } else if (action == "finish") {
+      auto recording = std::atomic_exchange(&owner.recording, std::shared_ptr<singz::CaptureRecording>{});
+      if (!recording) throw std::runtime_error("No microphone recording is active");
+      const double duration = recording->save(recording->filename);
+      set(env, result, "state", stringValue(env, "finished"));
+      set(env, result, "path", stringValue(env, recording->filename));
+      set(env, result, "durationSeconds", numberValue(env, duration));
+      set(env, result, "seconds", numberValue(env, duration));
+      set(env, result, "sampleRate", numberValue(env, recording->rate));
+      set(env, result, "filename", stringValue(env, std::filesystem::path(recording->filename).filename().string()));
+    } else throw std::runtime_error("Invalid microphone recording command");
+    set(env, result, "ok", boolValue(env, true));
+  } catch (const std::exception& exception) {
+    set(env, result, "ok", boolValue(env, false));
+    set(env, result, "state", stringValue(env, "error"));
+    set(env, result, "error", stringValue(env, exception.what()));
+  }
+  return result;
+}
+
 void cleanup(void*) {
+  singz::cleanupTrainingAudio();
   singz::cleanupPlaybackBridge();
   std::lock_guard<std::mutex> lock(owner.mutex);
   stopLocked(owner.generation, true);
@@ -1088,16 +1213,19 @@ void cleanup(void*) {
     (void)singz::releaseMonitorLeaseAfterEnd(
         &nativeAudioOwnership, status.ownershipGeneration, ended.ok);
   }
+  singz::sharedAudioService().shutdown();
 }
 
 napi_value init(napi_env env, napi_value exports) {
   singz::defineAudioExport(env, exports);
+  singz::defineTrainingAudioExports(env, exports, &nativeAudioOwnership, playbackBackend);
   napi_add_env_cleanup_hook(env, cleanup, nullptr);
   napi_property_descriptor properties[] = {
       {"inputDevices", nullptr, devices, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"beginCapture", nullptr, begin, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"cancelCapture", nullptr, cancel, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"captureState", nullptr, state, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"captureRecording", nullptr, captureRecording, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"captureStats", nullptr, stats, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"audioHostProviders", nullptr, audioHostProviders, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"audioHostDevices", nullptr, audioHostDevices, nullptr, nullptr, nullptr, napi_default, nullptr},

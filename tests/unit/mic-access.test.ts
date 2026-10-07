@@ -34,6 +34,12 @@ describe('askMicrophoneAccess', () => {
     expect(p.asked).toBe(0)
   })
 
+  it('uses the current grant without requesting permission again', async () => {
+    const p = prompter('granted', 'granted', new Error('must not be asked'))
+    expect(await askMicrophoneAccess(p, 'darwin')).toBe(true)
+    expect(p.asked).toBe(0)
+  })
+
   it('records a first grant as the status moving to granted', async () => {
     const seen = micLines().length
     const p = prompter('not-determined', 'granted', true)

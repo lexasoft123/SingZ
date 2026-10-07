@@ -60,7 +60,7 @@ describe('native playback bridge arity', () => {
     // from both bridges AND the manifest in one change would pass all of them;
     // this is what notices the surface shrinking. Sixteen since the background
     // park's suspendOutput/resumeOutput joined the fourteen.
-    expect(bridgeManifest.methods.phone).toHaveLength(16);
+    expect(bridgeManifest.methods.phone).toHaveLength(20);
   });
 
   // A method present on one platform only is allowed, but it has to be

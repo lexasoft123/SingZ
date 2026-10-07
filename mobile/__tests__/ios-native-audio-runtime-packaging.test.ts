@@ -364,9 +364,9 @@ describe('iOS native DSP runtime packaging', () => {
     // promise pair each.
     expect(
       support.match(/runBridgeBoundary\((?:reject|asyncReject)/g)
-    ).toHaveLength(18)
+    ).toHaveLength(19)
     expect(support.match(/SingzPlaybackBridgeBoundary\(\[&\]/g)).toHaveLength(10)
-    expect(support.match(/dispatch_async\(/g)).toHaveLength(13)
+    expect(support.match(/dispatch_async\(/g)).toHaveLength(18)
     expect(
       support.match(/RCTPromiseResolveBlock asyncResolve = \[resolve copy\];/g)
     ).toHaveLength(13)

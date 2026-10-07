@@ -14,7 +14,9 @@ Pod::Spec.new do |s|
   s.source_files = 'native/playback/*.{h,cpp}'
   s.public_header_files = 'native/playback/native_playback_session.h',
                           'native/playback/native_playback_graph_document.h',
-                          'native/playback/playback_cue_plan.h'
+                          'native/playback/playback_cue_plan.h',
+                          'native/playback/shared_audio_service.h',
+                          'native/playback/training_pcm_mixer.h'
   s.header_mappings_dir = 'native/playback'
   s.preserve_paths = 'signalsmith/**/*'
   s.resource_bundles = {

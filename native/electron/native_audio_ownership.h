@@ -25,10 +25,13 @@ struct NativeAudioOwnershipSnapshot {
 
 // Addon-wide control-domain arbitration. Capture analysis, full-duplex
 // monitoring and native song playback must never open competing platform
-// streams. Playback is output-only today, but it still owns the same physical
+// streams. The shared-service bridge can opt into independent capture and
+// playback leases; monitoring remains exclusive. Playback owns the physical
 // device/output lease that Chromium and monitoring coordinate around.
 class NativeAudioOwnership final {
  public:
+  explicit NativeAudioOwnership(bool sharedCapturePlayback = false)
+      : sharedCapturePlayback_(sharedCapturePlayback) {}
   NativeAudioAcquireResult acquire(NativeAudioOwnerKind kind,
                                    uint64_t generation);
   bool release(NativeAudioOwnerKind kind, uint64_t generation);
@@ -42,6 +45,8 @@ class NativeAudioOwnership final {
   mutable std::mutex mutex_;
   NativeAudioOwnerKind kind_{NativeAudioOwnerKind::None};
   uint64_t generation_{0};
+  bool sharedCapturePlayback_{false};
+  uint64_t captureGeneration_{0};
 };
 
 // A failed monitor begin may still retain its prepared graph and generation

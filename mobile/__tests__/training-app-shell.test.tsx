@@ -415,6 +415,7 @@ describe('mobile training app shell', () => {
     test('still suspends the idle legacy context while the NATIVE graph is the one held', async () => {
       const { tree, restore } = await background(true, false)
       expect(shellEngine().suspendForBackground).toHaveBeenCalledTimes(1)
+      expect(shellEngine().suspendForBackground).toHaveBeenCalledWith(true)
       expect(mockParkForBackground).not.toHaveBeenCalled()
       await ReactTestRenderer.act(() => tree.unmount())
       restore()

@@ -446,7 +446,7 @@ export default function VocalTraining({
       if (run.completed || vocalRun.current !== run || generation.current !== run.generation) return
       run.completed = true
       frame.current = null
-      const nowMs = engine.context.currentTime * 1000
+      const nowMs = cues.currentTime * 1000
       while (run.windows.length < run.prompt.targets.length) {
         const targetIndex = run.windows.length
         run.windows.push({
@@ -526,7 +526,7 @@ export default function VocalTraining({
             setCountdown(Math.ceil(cue.durationSeconds))
             void cues.schedule([cue], { noteDurationSec: cue.durationSeconds, attackSec: 0.032, releaseSec: 0.22 }).then(timeline => {
               if (generation.current !== runId || vocalRun.current !== run) return
-              run.targetStartedAtMs = audibleCueEndTimeSec(timeline.endTime, engine.context) * 1000 + 150
+              run.targetStartedAtMs = audibleCueEndTimeSec(timeline.endTime, cues) * 1000 + 150
             }).catch(error => {
               if (generation.current === runId && vocalRun.current === run) reportError(error)
             })
@@ -650,8 +650,8 @@ export default function VocalTraining({
           releaseSec: Math.min(0.22, noteDurationSec * 0.36)
         })
         if (generation.current !== run) return
-        const audibleEndTime = audibleCueEndTimeSec(timeline.endTime, engine.context)
-        const audioRemainingMs = Math.max(0, (audibleEndTime - engine.context.currentTime) * 1000)
+        const audibleEndTime = audibleCueEndTimeSec(timeline.endTime, cues)
+        const audioRemainingMs = Math.max(0, (audibleEndTime - cues.currentTime) * 1000)
         const countdownDurationMs = countdownSeconds * 1_000
         const waitMs = Math.max(audioRemainingMs, countdownDurationMs)
         const countdownDeadline = performance.now() + waitMs
@@ -672,7 +672,7 @@ export default function VocalTraining({
         if (prompt.taskMode === 'identify') {
           return
         }
-        capturePrompt(prompt, engine.context.currentTime * 1_000, run)
+        capturePrompt(prompt, cues.currentTime * 1_000, run)
       } catch (error) {
         if (generation.current === run && !isTrainingStartCancellation(error)) reportError(error)
       }
@@ -822,7 +822,7 @@ export default function VocalTraining({
         .then((timeline) => {
           const remainingMs = Math.max(
             0,
-            (audibleCueEndTimeSec(timeline.endTime, engine.context) - engine.context.currentTime) *
+            (audibleCueEndTimeSec(timeline.endTime, cues) - cues.currentTime) *
               1_000
           )
           window.setTimeout(() => {

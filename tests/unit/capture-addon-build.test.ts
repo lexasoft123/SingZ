@@ -203,7 +203,9 @@ describe('Electron capture addon build', () => {
 
   it('keeps only the latest scalar window instead of a deep TSFN FIFO', () => {
     const addon = read('native/electron/capture_addon.cpp')
-    expect(addon).toContain('std::atomic<AnalysisWindow*> latest')
+    expect(addon).toContain('std::atomic<CaptureEvent*> latest')
+    expect(addon).toContain('AnalysisWindow window;')
+    expect(addon).toContain('new CaptureEvent{source, analyzer.detectorName(), analyzer.inferenceMs(), analyzer.harmonicCorrected()}')
     expect(addon).toContain('name, 1, 1,')
     expect(addon).toContain('overwrittenWindows')
     expect(addon).not.toContain('name, 64, 1,')

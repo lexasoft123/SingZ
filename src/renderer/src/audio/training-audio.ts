@@ -8,7 +8,7 @@ import {
 } from '../training-practice'
 
 export interface TrainingCueTimingOptions {
-  /** Scheduling headroom from AudioContext.currentTime. */
+  /** Scheduling headroom on the native render clock. */
   readonly startDelaySec: number
   readonly noteDurationSec: number
   readonly sequenceGapSec: number
@@ -46,7 +46,7 @@ export interface ScheduledTrainingCue {
   readonly notes: readonly ScheduledTrainingNote[]
 }
 
-/** All times use the AudioContext clock, so UI/capture can align without rAF timing. */
+/** Times use the renderer monotonic clock, aligned to native cue scheduling. */
 export interface TrainingCueTimeline {
   readonly startTime: number
   /** End of the final sounding note; no trailing purpose gap is included. */
@@ -54,101 +54,60 @@ export interface TrainingCueTimeline {
   readonly cues: readonly ScheduledTrainingCue[]
 }
 
-interface OwnedVoice {
-  readonly oscillator: OscillatorNode | AudioBufferSourceNode
-  readonly gain: GainNode
-}
+let nextNativeCueGeneration = 0
 
-/**
- * Schedules prompt cues directly on an existing app AudioContext. The caller
- * owns that context; this controller owns and always disconnects only its
- * oscillator/gain nodes.
- */
+/** Reference voices are prepared off the live output; zcore alone renders
+ * the resulting PCM on the persistent host shared with the loaded song. */
 export class DesktopTrainingCueController {
-  private readonly voices = new Set<OwnedVoice>()
   private generation = 0
+  private nativeGeneration = String(++nextNativeCueGeneration)
   private disposed = false
-  private createVoices: typeof import('./training-voices').createTrainingVoices | null = null
-  private organCurve: (() => Float32Array<ArrayBuffer>) | null = null
-  private instrumentGain: (sound: TrainingSound, midi: number) => number = () => 1
-  private organOutput: WaveShaperNode | null = null
   private sound: TrainingSound = 'piano'
+  private outputGain = 1
+  private referenceVolume = DEFAULT_TRAINING_REFERENCE_VOLUME
   private readonly samples = new Map<string, AudioBuffer>()
+  private reachedTargets = new WeakSet<object>()
+  private latencySeconds = 0
+
+  constructor(private readonly context: AudioContext, _output: AudioNode,
+    private readonly beforeSchedule?: () => void | Promise<void>) {}
+
+  get currentTime(): number { return performance.now() / 1000 }
+  get outputLatency(): number { return this.latencySeconds }
+  get baseLatency(): number { return this.latencySeconds }
   setSound(sound: TrainingSound): void { this.sound = sound }
 
-  private referenceVolume = DEFAULT_TRAINING_REFERENCE_VOLUME
-
-  constructor(
-    private readonly context: AudioContext,
-    private readonly output: AudioNode,
-    private readonly beforeSchedule?: () => void | Promise<void>
-  ) {}
-
-  async schedule(
-    cues: readonly TrainingCue[],
-    overrides?: Partial<TrainingCueTimingOptions>
-  ): Promise<TrainingCueTimeline> {
+  async schedule(cues: readonly TrainingCue[], overrides?: Partial<TrainingCueTimingOptions>): Promise<TrainingCueTimeline> {
     if (this.disposed) throw new Error('Training cue controller is disposed.')
     const timing = cueTiming(overrides)
-    if (this.context.state === 'closed') throw new Error('Training audio context is closed.')
     const generation = ++this.generation
-    this.clearVoices()
-    const setupAt = performance.now()
+    await window.singz.cancelDesktopTrainingCues(this.nativeGeneration)
     await this.beforeSchedule?.()
-    reportTrainingTiming(`cue setup · output handoff · ${(performance.now() - setupAt).toFixed(1)} ms`)
     this.assertCurrent(generation)
-    if (this.context.state === 'suspended') await this.context.resume()
+    const setupAt = performance.now()
+    const { renderTrainingPhrase } = await import('./training-render')
     this.assertCurrent(generation)
-    if (this.context.state !== 'running') throw new Error('Training audio context is not running.')
-
-    const [{ sampleAuditionGain, trainingOrganCurve }, { createTrainingVoices }] = await Promise.all([
-      import('../../../shared/training-sound-levels'), import('./training-voices')
-    ])
-    this.createVoices = createTrainingVoices
-    this.organCurve = trainingOrganCurve
+    const { rendered, planned, durationSec: cursor } = await renderTrainingPhrase(
+      this.context, this.samples, this.sound, cues, timing, () => this.assertCurrent(generation))
     this.assertCurrent(generation)
-    this.instrumentGain = sampleAuditionGain
-    const sound = this.sound
-    const samplesAt = performance.now()
-    const cachedSamples = this.samples.size
-    if (sound !== 'organ') {
-      const { loadTrainingSamples } = await import('./training-samples')
-      this.assertCurrent(generation)
-      await loadTrainingSamples(this.context, this.samples, sound, cues, () => this.assertCurrent(generation))
-    }
+    const sentAt = this.currentTime
+    const result = await window.singz.scheduleDesktopTrainingCue({
+      channels: [rendered.getChannelData(0), rendered.getChannelData(1)], sampleRate: rendered.sampleRate,
+      startDelayMs: timing.startDelaySec * 1000, gain: this.outputGain * this.referenceVolume, generation: this.nativeGeneration
+    })
     this.assertCurrent(generation)
-    reportTrainingTiming(`cue setup · ${sound} samples · ${(performance.now() - samplesAt).toFixed(1)} ms · ${this.samples.size - cachedSamples} decoded`)
-    const startTime = this.context.currentTime + timing.startDelaySec
-    let cursor = startTime
-    const scheduledCues: ScheduledTrainingCue[] = []
-    try {
-      for (let cueIndex = 0; cueIndex < cues.length; cueIndex++) {
-        const cue = cues[cueIndex]
-        const concurrentScale = cue.articulation === 'together' ? 1 / Math.max(1, cue.notes.length) : 1
-        const notes = cue.notes.map((midi, noteIndex) => {
-          const noteStart =
-            cue.articulation === 'together'
-              ? cursor
-              : cursor + noteIndex * (timing.noteDurationSec + timing.sequenceGapSec)
-          const noteEnd = noteStart + timing.noteDurationSec
-          this.scheduleVoice(midi, noteStart, noteEnd, timing, concurrentScale, sound)
-          return { midi, startTime: noteStart, endTime: noteEnd }
-        })
-        const cueEnd = notes.reduce((latest, note) => Math.max(latest, note.endTime), cursor)
-        scheduledCues.push({ cueIndex, purpose: cue.purpose, startTime: cursor, endTime: cueEnd, notes })
-        cursor = cueEnd + (cueIndex === cues.length - 1 ? 0 : purposeGap(cue.purpose, timing))
-      }
-    } catch (error) {
-      this.clearVoices()
-      throw error
-    }
-    const endTime = scheduledCues.at(-1)?.endTime ?? startTime
-    reportTrainingTiming(`cue setup · scheduled · ${(performance.now() - setupAt).toFixed(1)} ms total · ${Math.round((startTime - this.context.currentTime) * 1000)} ms until sound`)
-    return { startTime, endTime, cues: scheduledCues }
+    if (!result.ok) throw new Error(result.error)
+    this.latencySeconds = result.outputLatencyMs / 1000
+    const receivedAt = this.currentTime
+    // PCM preparation in main is already excluded from its remaining delay.
+    // Estimate only IPC transit, so an expensive schedule cannot lead the sound.
+    const transit = Math.max(0, receivedAt - sentAt - result.processingMs / 1000) / 2
+    const startTime = receivedAt + result.startsAfterMs / 1000 - transit
+    reportTrainingTiming(`cue setup · shared native host · ${(performance.now() - setupAt).toFixed(1)} ms`)
+    return { startTime, endTime: startTime + cursor, cues: planned.map(cue => ({ ...cue,
+      startTime: cue.startTime + startTime, endTime: cue.endTime + startTime,
+      notes: cue.notes.map(note => ({ ...note, startTime: note.startTime + startTime, endTime: note.endTime + startTime })) })) }
   }
-
-  /** Signal entry into the displayed target window, before the completion hold. */
-  private reachedTargets = new WeakSet<object>()
 
   latchOnReach(target: { readonly midi: number }, displayMidi: number | null, confidence: number, minimumConfidence: number, windowCents: number): void {
     if (this.reachedTargets.has(target) || displayMidi === null || confidence < minimumConfidence || Math.abs(displayMidi - target.midi) * 100 > windowCents) return
@@ -156,99 +115,37 @@ export class DesktopTrainingCueController {
     this.latch()
   }
 
-  /** Confirmation on the current route; cue lifecycle owns and releases these voices. */
   latch(): void {
-    if (this.disposed || this.context.state !== 'running') return
+    if (this.disposed) return
     const tone = TRAINING_REACHED_TONE
-    const start = this.context.currentTime + tone.startDelaySeconds
-    const end = start + tone.durationSeconds
-    const oscillator = this.context.createOscillator()
-    const gain = this.context.createGain()
-    const voice = { oscillator, gain }
-    oscillator.type = 'sine'
-    oscillator.frequency.setValueAtTime(tone.frequency, start)
-    gain.gain.setValueAtTime(0, start)
-    gain.gain.linearRampToValueAtTime(tone.peakGain * Math.min(1, this.referenceVolume), start + tone.attackSeconds)
-    gain.gain.linearRampToValueAtTime(0, end)
-    oscillator.connect(gain)
-    gain.connect(this.output)
-    oscillator.onended = () => this.releaseVoice(voice, false)
-    this.voices.add(voice)
-    oscillator.start(start)
-    oscillator.stop(end)
+    const sampleRate = 48000
+    const samples = new Float32Array(Math.ceil(tone.durationSeconds * sampleRate))
+    for (let index = 0; index < samples.length; index++) {
+      const at = index / sampleRate
+      const envelope = at < tone.attackSeconds ? at / tone.attackSeconds : (tone.durationSeconds - at) / (tone.durationSeconds - tone.attackSeconds)
+      samples[index] = Math.sin(2 * Math.PI * tone.frequency * at) * envelope * tone.peakGain
+    }
+    void window.singz.scheduleDesktopTrainingCue({ channels: [samples], sampleRate,
+      startDelayMs: tone.startDelaySeconds * 1000, gain: this.outputGain * Math.min(1, this.referenceVolume), generation: this.nativeGeneration }).then(result => {
+      if (!result.ok) reportTrainingTiming(`latch failed · ${result.error}`)
+    }).catch(error => reportTrainingTiming(`latch failed · ${String(error)}`))
   }
-
-  /** Stop both future and currently sounding controller-owned voices. */
   cancel(): void {
     this.reachedTargets = new WeakSet<object>()
     this.generation++
-    this.clearVoices()
+    void window.singz.cancelDesktopTrainingCues(this.nativeGeneration).catch(error => reportTrainingTiming(`cue cancellation failed · ${String(error)}`))
   }
-
-  stop(): void {
-    this.cancel()
+  stop(): void { this.cancel() }
+  setReferenceVolume(volume: number): void { this.referenceVolume = clampTrainingReferenceVolume(volume); this.applyGain() }
+  setOutputGain(gain: number): void { this.outputGain = Math.max(0, Math.min(1, gain)); this.applyGain() }
+  private applyGain(): void {
+    void window.singz.setDesktopTrainingCueGain(this.nativeGeneration, this.outputGain * this.referenceVolume)
+      .catch(error => reportTrainingTiming(`cue gain failed · ${String(error)}`))
   }
-
-  setReferenceVolume(volume: number): void {
-    this.referenceVolume = clampTrainingReferenceVolume(volume)
-  }
-
-  getReferenceVolume(): number {
-    return this.referenceVolume
-  }
-
-  dispose(): void {
-    if (this.disposed) return
-    this.generation++
-    this.clearVoices()
-    this.organOutput?.disconnect()
-    this.organOutput = null
-    this.samples.clear()
-    this.disposed = true
-  }
-
-  private scheduleVoice(
-    midi: number,
-    startTime: number,
-    endTime: number,
-    timing: TrainingCueTimingOptions,
-    concurrentScale: number,
-    sound: TrainingSound
-  ): void {
-    if (sound === 'organ' && !this.organOutput) {
-      this.organOutput = this.context.createWaveShaper()
-      this.organOutput.curve = this.organCurve!()
-      this.organOutput.oversample = '2x'
-      this.organOutput.connect(this.output)
-    }
-    for (const voice of this.createVoices!(this.context, this.output, this.organOutput, this.samples, this.instrumentGain, midi, startTime, endTime, timing, concurrentScale, this.referenceVolume, sound)) {
-      voice.oscillator.onended = () => this.releaseVoice(voice, false)
-      this.voices.add(voice)
-    }
-  }
-
-  private releaseVoice(voice: OwnedVoice, stop: boolean): void {
-    if (!this.voices.delete(voice)) return
-    voice.oscillator.onended = null
-    if (stop) {
-      try {
-        voice.oscillator.stop()
-      } catch {
-        // The oscillator may have ended between cancellation and cleanup.
-      }
-    }
-    if ('buffer' in voice.oscillator) voice.oscillator.buffer = null
-    voice.oscillator.disconnect()
-    voice.gain.disconnect()
-  }
-
-  private clearVoices(): void {
-    for (const voice of [...this.voices]) this.releaseVoice(voice, true)
-  }
-
+  getReferenceVolume(): number { return this.referenceVolume }
+  dispose(): void { if (!this.disposed) { this.cancel(); this.samples.clear(); this.disposed = true } }
   private assertCurrent(generation: number): void {
-    if (this.disposed || this.generation !== generation)
-      throw new Error('Training cue scheduling was cancelled.')
+    if (this.disposed || this.generation !== generation) throw new Error('Training cue scheduling was cancelled.')
   }
 }
 
@@ -262,15 +159,4 @@ function cueTiming(overrides: Partial<TrainingCueTimingOptions> | undefined): Tr
     throw new RangeError('The cue envelope must fit inside the note duration.')
   if (timing.peakGain > 1) throw new RangeError('peakGain must be at most one.')
   return timing
-}
-
-function purposeGap(purpose: TrainingCuePurpose, timing: TrainingCueTimingOptions): number {
-  switch (purpose) {
-    case 'context':
-      return timing.contextGapSec
-    case 'question':
-      return timing.questionGapSec
-    case 'answer':
-      return timing.answerGapSec
-  }
 }

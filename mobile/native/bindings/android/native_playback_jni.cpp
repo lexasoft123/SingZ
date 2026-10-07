@@ -19,6 +19,9 @@
 #include <unistd.h>
 
 #include <native_playback_session.h>
+#include <shared_audio_service.h>
+#include <training_pcm_mixer.h>
+#include <time.h>
 #include <zcore/media/decoded_audio.h>
 
 namespace {
@@ -30,7 +33,8 @@ constexpr uint32_t kPlaybackContractVersion = 2;
 
 struct AndroidPlaybackOwner {
   std::mutex commandMutex;
-  singz::NativePlaybackSession session;
+  singz::NativePlaybackSession session{singz::sharedPlaybackBackend(singz::createPlatformAudioHostBackend(), "oboe")};
+  singz::TrainingPcmMixer training;
   std::atomic<uint64_t> latestClaimedGeneration{0};
   std::atomic<uint64_t> cancelledThrough{0};
 };
@@ -1008,6 +1012,41 @@ singz::NativePlaybackResult configuredResult(AndroidPlaybackOwner &bridge,
 
 } // namespace
 
+static void nativeParkSharedOutput(JNIEnv*, jobject) {
+  auto& bridge = owner(); std::lock_guard<std::mutex> lock(bridge.commandMutex);
+  auto& service = singz::sharedAudioService(); service.clearTrainingRenderer(); bridge.training.clearQuiesced(); service.parkOutput();
+}
+static void nativeRefreshSharedAudioInventory(JNIEnv*, jobject) { singz::sharedAudioService().refreshInventory(); }
+static jstring nativeScheduleTrainingPcm(JNIEnv* env, jobject, jfloatArray samples, jdouble rate, jlong generation, jdouble gain) {
+  auto& bridge = owner(); std::lock_guard<std::mutex> lock(bridge.commandMutex);
+  try {
+    if (!samples || rate != 48000 || generation < 1 || !std::isfinite(gain) || gain < 0 || gain > 8)
+      return javaJson(env, "{\"ok\":false,\"message\":\"Invalid training PCM\"}");
+    const jsize count = env->GetArrayLength(samples);
+    if (count < 1 || count > 48000 * 120 || !bridge.training.canSchedule(count, 1))
+      return javaJson(env, "{\"ok\":false,\"message\":\"Training voice limit reached\"}");
+    std::vector<std::vector<float>> planes(1, std::vector<float>(count));
+    env->GetFloatArrayRegion(samples, 0, count, planes[0].data());
+    auto& service = singz::sharedAudioService();
+    service.setTrainingRenderer([](void* ctx, const singz::AudioHostRenderBlock& block) noexcept {
+      return static_cast<singz::TrainingPcmMixer*>(ctx)->render(block);
+    }, &bridge.training);
+    const auto output = service.ensureOutput();
+    if (!output.ok) return javaJson(env, "{\"ok\":false,\"message\":\"Shared output unavailable\"}");
+    timespec now{}; clock_gettime(CLOCK_MONOTONIC, &now);
+    const uint64_t start = uint64_t(now.tv_sec) * 1000000000 + now.tv_nsec + 50000000;
+    const bool ok = bridge.training.schedule(std::move(planes), generation, rate, start, gain);
+    if (!ok) return javaJson(env, "{\"ok\":false,\"message\":\"Invalid training PCM\"}");
+    timespec replied{}; clock_gettime(CLOCK_MONOTONIC, &replied);
+    const uint64_t repliedNs = uint64_t(replied.tv_sec) * 1000000000 + replied.tv_nsec;
+    const auto status = service.status();
+    const double latency = status.format.sampleRate > 0 ? (status.latency.outputDeviceFrames + status.latency.bufferFrames + status.latency.externalRouteFrames) / status.format.sampleRate : 0;
+    return javaJson(env, "{\"ok\":true,\"delaySeconds\":" + std::to_string(std::max(0.0, (double(start) - repliedNs) / 1e9)) + ",\"outputLatencySeconds\":" + std::to_string(latency) + "}");
+  } catch (...) { return javaJson(env, "{\"ok\":false,\"message\":\"Training output failed\"}"); }
+}
+static void nativeCancelTrainingPcm(JNIEnv*, jobject, jlong generation) { owner().training.cancel(generation); }
+static void nativeSetTrainingPcmGain(JNIEnv*, jobject, jlong generation, jdouble gain) { owner().training.setGain(generation, gain); }
+
 static jstring nativePlaybackStatus(JNIEnv *env, jobject) {
   auto &bridge = owner();
   std::lock_guard<std::mutex> lock(bridge.commandMutex);
@@ -1616,6 +1655,11 @@ namespace {
 // gate owns the existing symbol-based methods; Phase 4 playback methods are
 // registered as one atomic table when libsingzcore is loaded.
 static const JNINativeMethod kNativePlaybackMethods[] = {
+    {const_cast<char*>("nativeParkSharedOutput"), const_cast<char*>("()V"), reinterpret_cast<void*>(nativeParkSharedOutput)},
+    {const_cast<char*>("nativeRefreshSharedAudioInventory"), const_cast<char*>("()V"), reinterpret_cast<void*>(nativeRefreshSharedAudioInventory)},
+    {const_cast<char*>("nativeScheduleTrainingPcm"), const_cast<char*>("([FDJD)Ljava/lang/String;"), reinterpret_cast<void*>(nativeScheduleTrainingPcm)},
+    {const_cast<char*>("nativeCancelTrainingPcm"), const_cast<char*>("(J)V"), reinterpret_cast<void*>(nativeCancelTrainingPcm)},
+    {const_cast<char*>("nativeSetTrainingPcmGain"), const_cast<char*>("(JD)V"), reinterpret_cast<void*>(nativeSetTrainingPcmGain)},
     {const_cast<char *>("nativePlaybackStatus"),
      const_cast<char *>("()Ljava/lang/String;"),
      reinterpret_cast<void *>(nativePlaybackStatus)},

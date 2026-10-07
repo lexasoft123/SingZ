@@ -802,7 +802,7 @@ export default function App(): React.JSX.Element {
         // native-held song still suspends the idle context exactly as before.
         // Not suspending also leaves `backgrounded` false, which is what lets
         // the Lock Screen's play command reach a legacy song at all.
-        if (!(held && engine.playing)) void engine.suspendForBackground()
+        if (!(held && engine.playing)) void engine.suspendForBackground(held)
       } else if (next === 'active') {
         // Let a held stream go as soon as the singer is back: the callback
         // is what consumes a metronome preview click, a seek, a resume, and

@@ -20,6 +20,7 @@ import { log } from './log'
 import { t } from '../shared/i18n'
 import type {
   DesktopAudioHostDevice,
+  DesktopTrainingAudioStatus,
   DesktopAudioHostInventoryResult,
   DesktopMonitorConfig,
   DesktopMonitorFormat,
@@ -58,13 +59,21 @@ import {
 import { machCanonicalSha256 } from './mach-canonical'
 
 export interface NativeCaptureBinding {
+  initializeSharedAudio(config?: { outputDeviceUid: string; provider?: DesktopPlaybackProvider }): { ok: boolean; error?: string }
+  refreshSharedAudioInventory(): { ok: boolean; error?: string }
+  scheduleTrainingCue(config: { channels: Float32Array[]; sampleRate: number; startDelayMs: number; gain: number }, generation: bigint): { ok: boolean; error?: string; startHostTimeNs: string; durationMs: number }
+  setTrainingCueGain(generation: bigint, gain: number): { ok: boolean; error?: string }
+  cancelTrainingCues(generation: bigint): { ok: boolean; error?: string }
+  trainingCueStatus(): DesktopTrainingAudioStatus
+  captureRecording(action: 'record' | 'finish', path: string, generation: bigint): Record<string, unknown>
+
   exportAudio?(sourceFd: number | number[], destinationFd: number, format: 'wav' | 'flac' | 'mp3', job: string): Promise<{ ok: boolean; error?: string }>
   cancelAudioExport?(job: string): void
   inputDevices():
     | { ok: true; devices: CaptureInputDevice[] }
     | { ok: false; devices: []; error: string }
   beginCapture(
-    config: { deviceUid?: string; inputChannel: number; ringBlocks?: number },
+    config: { deviceUid?: string; inputChannel: number; ringBlocks?: number; crepeModelPath?: string },
     generation: bigint,
     sink: (window: CaptureAnalysisWindow) => void
   ): CaptureStartResult
@@ -763,6 +772,7 @@ export function validateCaptureBindingIdentity(
     )
   }
   for (const name of [
+    'initializeSharedAudio', 'refreshSharedAudioInventory', 'scheduleTrainingCue', 'cancelTrainingCues', 'setTrainingCueGain', 'trainingCueStatus', 'captureRecording',
     'inputDevices', 'beginCapture', 'cancelCapture', 'captureState', 'captureStats',
     'audioHostProviders', 'audioHostDevices', 'beginMonitor', 'setMonitorGain', 'monitorStatus', 'endMonitor'
     , 'preparePlayback', 'openPlaybackOutput', 'startPlayback', 'pausePlayback',
@@ -968,10 +978,27 @@ export function captureAddonPath(): string {
   return captureBindingLoadRuntime().addonPath
 }
 
+/** A native module loaded from a private staging path owns process-wide
+ * state. All product adapters must share its successful binding, and a
+ * module that initialized incompatibly requires restart rather than another
+ * private copy. Only failures before initialization can be retried. */
+export function sharedCaptureBindingLoader(loader: () => NativeCaptureBinding): () => NativeCaptureBinding {
+  let binding: NativeCaptureBinding | null = null
+  let restartRequired: CaptureAddonLoadError | null = null
+  return () => {
+    if (binding) return binding
+    if (restartRequired) throw restartRequired
+    try { return binding = loader() }
+    catch (error) {
+      if (error instanceof CaptureAddonLoadError && !error.retryable) restartRequired = error
+      throw error
+    }
+  }
+}
+const processCaptureBinding = sharedCaptureBindingLoader(() => loadCaptureBindingWith(captureBindingLoadRuntime()))
 export function loadCaptureBinding(): NativeCaptureBinding {
-  try {
-    return loadCaptureBindingWith(captureBindingLoadRuntime())
-  } catch (error) {
+  try { return processCaptureBinding() }
+  catch (error) {
     if (error instanceof CaptureAddonLoadError) throw error
     throw new CaptureAddonLoadError(
       `Capture addon metadata is not available (${String(error)}). Rebuild with npm run capture:addon and retry.`,
@@ -2100,7 +2127,7 @@ export class CaptureOwner {
 
   begin(
     rendererId: number,
-    config: { deviceUid?: string; inputChannel: number; ringBlocks?: number },
+    config: { deviceUid?: string; inputChannel: number; ringBlocks?: number; crepeModelPath?: string },
     rawGeneration: string,
     emit: (window: CaptureAnalysisWindow) => void
   ): CaptureStartResult {

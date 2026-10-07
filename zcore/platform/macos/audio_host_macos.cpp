@@ -152,13 +152,16 @@ std::vector<AudioDeviceID> devices() {
 }
 
 AudioDeviceID findDevice(const std::string& uid) {
-  for (AudioDeviceID device : devices()) {
-    if (readString(device, property(kAudioDevicePropertyDeviceUID,
-                                    kAudioObjectPropertyScopeGlobal)) == uid) {
-      return device;
-    }
-  }
-  return kAudioObjectUnknown;
+  CFStringRef value = CFStringCreateWithCString(nullptr, uid.c_str(), kCFStringEncodingUTF8);
+  if (!value) return kAudioObjectUnknown;
+  AudioDeviceID device = kAudioObjectUnknown;
+  UInt32 size = sizeof(device);
+  const auto address = property(kAudioHardwarePropertyTranslateUIDToDevice,
+                                kAudioObjectPropertyScopeGlobal);
+  const auto result = AudioObjectGetPropertyData(kAudioObjectSystemObject,
+      &address, sizeof(value), &value, &size, &device);
+  CFRelease(value);
+  return result == noErr ? device : kAudioObjectUnknown;
 }
 
 bool validMap(const std::vector<uint32_t>& channels, uint32_t available) {

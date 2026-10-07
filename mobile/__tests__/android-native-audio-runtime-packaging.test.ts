@@ -64,10 +64,8 @@ describe('Android native DSP runtime packaging', () => {
     // that the module actually routes through them, on every path.
     expect(ledger).toContain('class NativePlaybackGenerationLedger');
     expect(module).toContain('private val ledger = NativePlaybackGenerationLedger()');
-    expect(module).not.toMatch(/AtomicLong|focusGeneration|focusOwned/);
-    expect(module).toMatch(
-      /OnAudioFocusChangeListener \{ change ->\s*if \(change == AudioManager\.AUDIOFOCUS_GAIN \|\| invalidated\.get\(\)\) return@OnAudioFocusChangeListener\s*(?:\/\/[^\n]*\n\s*)*failClosed\(\)\s*\}/,
-    );
+    expect(module).not.toMatch(/AtomicLong|private var focusGeneration|private var focusOwned/);
+    expect(module).toMatch(/OnAudioFocusChangeListener[\s\S]*?trainingGenerations\.forEach[\s\S]*?failClosed\(\)/);
     expect(module).toMatch(/private fun routeChanged\(\) \{\s*(?:\/\/[^\n]*\n\s*)*failClosed \{/);
     // The one door a driver has onto the focus listener, and only in debug
     // builds: focus-loss-android.cjs delivers AUDIOFOCUS_LOSS through it on

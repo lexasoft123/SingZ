@@ -15,6 +15,9 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableMap
+import android.util.Base64
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import com.facebook.react.bridge.WritableArray
 import com.facebook.react.bridge.WritableMap
 import com.singzplayer.audio.AudioInputPolicy
@@ -53,11 +56,18 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
    *  ledger says why a fail-closed event has to retire BOTH of them. */
   private val ledger = NativePlaybackGenerationLedger()
   private var callbackRegistered = false
+  private val trainingGenerations = mutableSetOf<Long>()
+  private var trainingFocusOwned = false
 
   private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
     if (change == AudioManager.AUDIOFOCUS_GAIN || invalidated.get()) return@OnAudioFocusChangeListener
     // Every loss/duck is fail-closed. GAIN never restarts automatically: the
     // product must observe Unloaded and explicitly prepare/open/start again.
+    post {
+      trainingGenerations.forEach { SingzCore.nativeCancelTrainingPcm(it) }
+      trainingGenerations.clear(); trainingFocusOwned = false
+      SingzCore.nativeParkSharedOutput()
+    }
     failClosed()
   }
 
@@ -101,6 +111,11 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
     try {
       control.execute {
         try {
+          trainingGenerations.forEach { SingzCore.nativeCancelTrainingPcm(it) }
+          trainingGenerations.clear()
+          if (trainingFocusOwned && !verdict.releaseFocus) audioManager.abandonAudioFocusRequest(focusRequest)
+          trainingFocusOwned = false
+          SingzCore.nativeParkSharedOutput()
           for (generation in verdict.targets) {
             runCatching { SingzCore.nativePlaybackUnload(generation) }
           }
@@ -117,15 +132,51 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
     super.invalidate()
   }
 
-  override fun onHostResume() = Unit
+  override fun onHostResume() { post { runCatching { refreshHostInventory() } } }
   override fun onHostPause() = Unit
   override fun onHostDestroy() = invalidate()
+
+  @ReactMethod
+  fun parkSharedOutput(promise: Promise) { if (!post { SingzCore.nativeParkSharedOutput(); promise.resolve(true) }) rejectUnavailable(promise) }
+
+  @ReactMethod
+  fun scheduleTrainingPcm(payload: String, rate: Double, generation: Double, gain: Double, promise: Promise) {
+    if (!postResult(promise) {
+      requireCore()
+      require(payload.length <= 30720000 && generation >= 1 && generation.isFinite() && generation == kotlin.math.floor(generation) && rate == 48000.0 && gain.isFinite() && gain in 0.0..8.0)
+      val bytes = Base64.decode(payload, Base64.NO_WRAP)
+      require(bytes.isNotEmpty() && bytes.size % 4 == 0 && bytes.size <= 23040000)
+      val floats = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
+      val samples = FloatArray(floats.remaining()); floats.get(samples)
+      val granted = trainingFocusOwned || audioManager.requestAudioFocus(focusRequest) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+      if (!granted) "{\"ok\":false,\"message\":\"Audio focus denied\"}"
+      else {
+        trainingFocusOwned = true
+        val result = SingzCore.nativeScheduleTrainingPcm(samples, rate, generation.toLong(), gain)
+        if (parseJson(result).optBoolean("ok")) trainingGenerations.add(generation.toLong())
+        result
+      }
+    }) rejectUnavailable(promise)
+  }
+  @ReactMethod
+  fun cancelTrainingPcm(generation: Double, promise: Promise) { if (!post {
+    SingzCore.nativeCancelTrainingPcm(generation.toLong()); trainingGenerations.remove(generation.toLong())
+    if (trainingGenerations.isEmpty() && trainingFocusOwned) {
+      // Song focus is a separate owner; cancelling a reference must not revoke it.
+      if (!ledger.focusOwned) audioManager.abandonAudioFocusRequest(focusRequest)
+      trainingFocusOwned = false
+    }
+    promise.resolve(true)
+  }) rejectUnavailable(promise) }
+  @ReactMethod
+  fun setTrainingPcmGain(generation: Double, gain: Double, promise: Promise) {
+    if (!post { SingzCore.nativeSetTrainingPcmGain(generation.toLong(), gain); promise.resolve(true) }) rejectUnavailable(promise)
+  }
 
   @ReactMethod
   fun status(promise: Promise) {
     if (!postResult(promise) {
       requireCore()
-      refreshHostInventory()
       SingzCore.nativePlaybackStatus()
     }) rejectUnavailable(promise)
   }
@@ -654,6 +705,7 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
         devices.map { it.isSink }.toBooleanArray()
       )
     )
+    SingzCore.nativeRefreshSharedAudioInventory()
   }
 
   private fun authorizedRoots(): List<String> = NativePlaybackPathPolicy.canonicalRoots(

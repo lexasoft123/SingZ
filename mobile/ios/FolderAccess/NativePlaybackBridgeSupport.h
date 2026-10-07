@@ -74,3 +74,11 @@ void SingzNativePlaybackTransport(NSNumber* generation,
 void SingzNativePlaybackPreviewClick(NSNumber* generation, NSNumber* sound,
                                      RCTPromiseResolveBlock resolve,
                                      RCTPromiseRejectBlock reject);
+
+void SingzScheduleTrainingPcm(NSString* pcm, NSNumber* rate, NSNumber* generation, NSNumber* gain, RCTPromiseResolveBlock resolve, RCTPromiseRejectBlock reject);
+void SingzCancelTrainingPcm(NSNumber* generation);
+void SingzSetTrainingPcmGain(NSNumber* generation, NSNumber* gain);
+
+void SingzRefreshSharedAudioInventory(void);
+
+void SingzParkSharedOutput(void);

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   DESKTOP_PLAYBACK_CAPABILITY,
   DesktopNativeProviderError,
@@ -148,231 +148,106 @@ const cues: readonly TrainingCue[] = [
   { purpose: 'question', articulation: 'sequence', notes: [60, 64] }
 ]
 
-describe('sampled training instruments', () => {
+class FakeOfflineAudioContext extends FakeAudioContext {
+  static lastOffline: FakeOfflineAudioContext | null = null
+  constructor(private channelCount: number, private length: number, rate: number) {
+    super('running'); this.sampleRate = rate; FakeOfflineAudioContext.lastOffline = this
+  }
+  async startRendering(): Promise<AudioBuffer> {
+    return { sampleRate: this.sampleRate, getChannelData: () => new Float32Array(this.length) } as unknown as AudioBuffer
+  }
+}
+const nativeSchedule = vi.fn(async (_config: unknown) => ({ ok: true, startsAfterMs: 50, durationMs: 550, outputLatencyMs: 175, processingMs: 0 }))
+const nativeCancel = vi.fn(async () => ({ ok: true }))
+beforeEach(() => {
+  nativeSchedule.mockClear(); nativeCancel.mockClear()
+  vi.stubGlobal('OfflineAudioContext', FakeOfflineAudioContext)
+  vi.stubGlobal('navigator', { mediaDevices: { enumerateDevices: async () => ['route-a', 'route-b', 'confirmed-output'].map(id => ({ kind: 'audiooutput', deviceId: id, label: id })) } })
+  vi.stubGlobal('window', { singz: { scheduleDesktopTrainingCue: nativeSchedule, cancelDesktopTrainingCues: nativeCancel, setDesktopTrainingCueGain: vi.fn(async () => ({ ok: true })), configureDesktopTrainingOutput: vi.fn(async () => ({ ok: true })), audioHostDevices: async () => ({ ok: true, devices: ['route-a', 'route-b', 'confirmed-output'].map(uid => ({ uid, label: uid, outputChannels: 2 })) }) } })
+})
+
+describe('shared native training cues', () => {
   afterEach(() => vi.unstubAllGlobals())
-  it('defaults to piano, uses each note’s closest sample and releases sources', async () => {
+  it('prepares sampled notes offline and schedules only PCM on the native output', async () => {
     const fetcher = vi.fn(async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(1) }))
     vi.stubGlobal('fetch', fetcher)
-    const context = new FakeAudioContext('running')
+    const context = new FakeAudioContext('suspended')
     const controller = new DesktopTrainingCueController(context as unknown as AudioContext, {} as AudioNode)
     const phrase = [{ purpose: 'question', articulation: 'sequence', notes: [40, 44, 40] }] as const
     const timeline = await controller.schedule(phrase)
     expect(fetcher).toHaveBeenCalledTimes(2)
-    expect(context.bufferSources.map(source => source.playbackRate.value)).toEqual([2 ** (4 / 12), 2 ** (-4 / 12), 2 ** (4 / 12)])
+    expect(FakeOfflineAudioContext.lastOffline!.bufferSources.map(source => source.playbackRate.value)).toEqual([2 ** (4 / 12), 2 ** (-4 / 12), 2 ** (4 / 12)])
+    expect(context.bufferSources).toHaveLength(0)
+    expect(context.resumeCount).toBe(0)
+    expect(nativeSchedule).toHaveBeenCalledOnce()
+    expect(nativeSchedule.mock.calls[0][0]).toMatchObject({ sampleRate: 48000, startDelayMs: 50 })
     expect(timeline.cues[0].notes[1].startTime).toBeGreaterThan(timeline.cues[0].notes[0].endTime)
-    controller.cancel()
-    expect(context.bufferSources.every(source => source.buffer === null && source.disconnectCount === 1)).toBe(true)
-    await controller.schedule(phrase)
-    expect(fetcher).toHaveBeenCalledTimes(2)
+    // The native timeline uses the render clock, so physical output latency
+    // is applied once by the training countdown.
+    expect(controller.outputLatency).toBe(.175)
     controller.dispose()
   })
-  it('does not play after cancellation during sample decoding', async () => {
+  it('excludes native scheduling work from the IPC clock estimate', async () => {
+    let now = 1000
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now)
+    nativeSchedule.mockImplementationOnce(async () => {
+      now = 1400
+      return { ok: true, startsAfterMs: 50, durationMs: 550, outputLatencyMs: 175, processingMs: 400 }
+    })
+    const controller = new DesktopTrainingCueController(new FakeAudioContext() as unknown as AudioContext, {} as AudioNode)
+    controller.setSound('organ')
+    try {
+      const timeline = await controller.schedule(cues)
+      expect(timeline.startTime).toBeCloseTo(1.45)
+    } finally { controller.dispose(); clock.mockRestore() }
+  })
+  it('does not publish native audio after cancellation during sample decoding', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(1) })))
     const context = new FakeAudioContext('running')
     const gate = deferred()
     vi.spyOn(context, 'decodeAudioData').mockImplementation(async () => { await gate.promise; return { duration: 4 } as AudioBuffer })
     const controller = new DesktopTrainingCueController(context as unknown as AudioContext, {} as AudioNode)
     const request = controller.schedule(cues)
-    await flushPlaybackRequest()
+    await vi.waitFor(() => expect(context.decodeAudioData).toHaveBeenCalled())
     controller.cancel(); gate.resolve()
     await expect(request).rejects.toThrow('cancelled')
-    expect(context.bufferSources).toHaveLength(0)
+    expect(nativeSchedule).not.toHaveBeenCalled()
   })
-})
-
-describe('desktop training cue scheduling', () => {
-  const output = {} as AudioNode
-
-  it('signals reaching the meter window immediately, once per target and again after retry', () => {
-    const context = new FakeAudioContext()
-    const controller = new DesktopTrainingCueController(context as unknown as AudioContext, new FakeGain() as unknown as AudioNode)
-    const latch = vi.spyOn(controller, 'latch')
-    const target = { midi: 55 }
-    controller.latchOnReach(target, 54.5, 0.9, 0.5, 10)
-    controller.latchOnReach(target, 55, 0.4, 0.5, 10)
-    expect(latch).not.toHaveBeenCalled()
-    controller.latchOnReach(target, 55.02, 0.9, 0.5, 10)
-    expect(latch).toHaveBeenCalledTimes(1)
-    controller.latchOnReach(target, 55, 0.9, 0.5, 10)
-    expect(latch).toHaveBeenCalledTimes(1)
+  it('queues native latch once for each target and again after retry', () => {
+    const controller = new DesktopTrainingCueController(new FakeAudioContext() as unknown as AudioContext, {} as AudioNode)
+    const target = { midi: 60 }
+    controller.latchOnReach(target, 60, .9, .75, 15)
+    controller.latchOnReach(target, 60, .9, .75, 15)
+    expect(nativeSchedule).toHaveBeenCalledOnce()
     controller.cancel()
-    controller.latchOnReach(target, 55, 0.9, 0.5, 10)
-    expect(latch).toHaveBeenCalledTimes(2)
-  })
-
-  it('plays a short latch on the current route and releases it on cancellation', () => {
-    const context = new FakeAudioContext('running')
-    const controller = new DesktopTrainingCueController(context as unknown as AudioContext, output)
-    controller.latch()
-    expect(context.oscillators).toHaveLength(1)
-    expect(context.oscillators[0].starts[0] - context.currentTime).toBeCloseTo(0.002)
-    expect(context.oscillators[0].frequency.calls[0][1]).toBe(660)
-    expect(context.oscillators.length).toBeGreaterThan(0)
-    expect(context.oscillators.every((voice) => voice.starts.length === 1)).toBe(true)
-    expect(context.oscillators[0].stops[0]! - context.oscillators[0].starts[0]).toBeCloseTo(0.085)
-    controller.cancel()
-    expect(context.oscillators.every((voice) => voice.disconnectCount > 0)).toBe(true)
+    controller.latchOnReach(target, 60, .9, .75, 15)
+    expect(nativeSchedule).toHaveBeenCalledTimes(2)
     controller.dispose()
-    const count = context.oscillators.length
-    controller.latch()
-    expect(context.oscillators).toHaveLength(count)
   })
-
-  it('awaits resume, routes to the supplied output, and applies every purpose gap', async () => {
-    const context = new FakeAudioContext()
-    const controller = new DesktopTrainingCueController(
-      context as unknown as AudioContext,
-      output
-    )
-    controller.setSound('organ')
-    const timeline = await controller.schedule(
-      [
-        ...cues,
-        { purpose: 'answer', articulation: 'together', notes: [69] },
-        { purpose: 'context', articulation: 'together', notes: [60] }
-      ],
-      {
-        startDelaySec: 0.05,
-        noteDurationSec: 0.5,
-        sequenceGapSec: 0.1,
-        contextGapSec: 0.2,
-        questionGapSec: 0.3,
-        answerGapSec: 0.4
-      }
-    )
-
-    expect(timeline.startTime).toBeCloseTo(10.05)
-    expect(timeline.cues[0].notes.map((note) => note.startTime)).toEqual([10.05, 10.05, 10.05])
-    expect(timeline.cues[1].notes.map((note) => note.startTime)).toEqual([10.75, 11.35])
-    expect(timeline.cues[2].startTime).toBeCloseTo(12.15)
-    expect(timeline.cues[3].startTime).toBeCloseTo(13.05)
-    expect(timeline.endTime).toBeCloseTo(13.55)
-    expect(context.oscillators).toHaveLength(7 * 7)
-    expect(context.oscillators[0].frequency.calls[0][1]).toBeCloseTo(261.6256, 3)
-    expect(context.oscillators[1].frequency.calls[0][1]).toBeCloseTo(523.2511, 1)
-    expect(context.oscillators.every((oscillator) => oscillator.starts.length === 1)).toBe(true)
-    expect(context.gains.filter(gain => gain.connected === output)).toHaveLength(1)
-    expect(context.gains[1].gain.calls.map((call) => call[0])).toEqual(['set', 'ramp', 'ramp', 'set', 'ramp'])
-    expect(context.resumeCount).toBe(1)
-  })
-
-  it('cancels controller-owned overlap and releases every node idempotently', async () => {
-    const context = new FakeAudioContext('running')
-    const controller = new DesktopTrainingCueController(context as unknown as AudioContext, output)
-    controller.setSound('organ')
-    await controller.schedule(cues)
-    const firstVoices = [...context.oscillators]
-    controller.setSound('organ')
-    await controller.schedule([{ purpose: 'answer', articulation: 'together', notes: [69] }])
-
-    expect(firstVoices.every((oscillator) => oscillator.stops.length === 2)).toBe(true)
-    expect(firstVoices.every((oscillator) => oscillator.disconnectCount === 1)).toBe(true)
-    expect(context.gains.slice(1, firstVoices.length + 1).every((gain) => gain.disconnectCount === 1)).toBe(
-      true
-    )
-
-    controller.dispose()
-    const final = context.oscillators.at(-1)!
-    expect(final.stops).toHaveLength(2)
-    controller.dispose()
-    expect(final.stops).toHaveLength(2)
-    await expect(controller.schedule(cues)).rejects.toThrow('disposed')
-  })
-
-  it('remembers a bounded reference volume with headroom', async () => {
-    const context = new FakeAudioContext('running')
-    const controller = new DesktopTrainingCueController(context as unknown as AudioContext, output)
-    controller.setReferenceVolume(9)
-    expect(controller.getReferenceVolume()).toBe(2)
-    controller.setSound('organ')
-    await controller.schedule([{ purpose: 'answer', articulation: 'together', notes: [69] }])
-    expect(context.gains.reduce((sum, gain) => sum + Math.max(...gain.gain.calls.map(call => call[1])), 0)).toBeLessThan(1)
-  })
-
-  it('disconnects a naturally ended voice without stopping it twice', async () => {
-    const context = new FakeAudioContext('running')
-    const controller = new DesktopTrainingCueController(context as unknown as AudioContext, output)
-    controller.setSound('organ')
-    await controller.schedule([{ purpose: 'answer', articulation: 'together', notes: [69] }])
-    const oscillator = context.oscillators[0]
-    oscillator.onended?.()
-    expect(oscillator.stops).toHaveLength(1)
-    expect(oscillator.disconnectCount).toBe(1)
-    controller.cancel()
-    expect(oscillator.disconnectCount).toBe(1)
-  })
-
-  it('rejects resume failure and a closed context without scheduling nodes', async () => {
-    const suspended = new FakeAudioContext()
-    suspended.resumeError = new Error('device unavailable')
-    const controller = new DesktopTrainingCueController(
-      suspended as unknown as AudioContext,
-      output
-    )
-    await expect(controller.schedule(cues)).rejects.toThrow('device unavailable')
-    expect(suspended.oscillators).toHaveLength(0)
-
-    const closed = new FakeAudioContext('closed')
-    const closedController = new DesktopTrainingCueController(
-      closed as unknown as AudioContext,
-      output
-    )
-    await expect(closedController.schedule(cues)).rejects.toThrow('closed')
-    expect(closed.resumeCount).toBe(0)
-    expect(closed.oscillators).toHaveLength(0)
-  })
-
-  it('does not schedule after cancellation while resume is pending', async () => {
-    const gate = deferred()
-    const context = new FakeAudioContext()
-    context.resumeGate = gate.promise
-    const controller = new DesktopTrainingCueController(context as unknown as AudioContext, output)
-    const scheduling = controller.schedule(cues)
-    await Promise.resolve()
-    await Promise.resolve()
-    expect(context.resumeCount).toBe(1)
-    controller.cancel()
-    gate.resolve()
-    await expect(scheduling).rejects.toThrow('cancelled')
-    expect(context.oscillators).toHaveLength(0)
+  it('does not schedule when song pause fails', async () => {
+    const controller = new DesktopTrainingCueController(new FakeAudioContext() as unknown as AudioContext, {} as AudioNode, async () => { throw new Error('pause failed') })
+    await expect(controller.schedule(cues)).rejects.toThrow('pause failed')
+    expect(nativeSchedule).not.toHaveBeenCalled()
   })
 })
 
 describe('engine-owned training audio', () => {
-  it('waits for a paused native song to release output before scheduling training notes', async () => {
+  it('keeps a paused native song graph and its output lease for training cues', async () => {
     vi.stubGlobal('AudioContext', FakeAudioContext)
     const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
     const engine = new MultitrackEngine()
-    const context = FakeAudioContext.last!
     engine.setNativeAheadAllowed(false)
     engine.load([{ id: 'vocals', buffer: { duration: 30 } as AudioBuffer, duration: 30 }])
-    await engine.releaseOutputForNativeMonitor()
-    const cleanup = deferred()
-    let active = true
-    const client = {
-      get active(): boolean { return active },
-      transportParked: true,
-      audibleSeconds: () => 12,
-      unload: vi.fn(async () => {
-        await cleanup.promise
-        active = false
-        await engine.restoreOutputAfterNativeMonitor()
-      })
-    }
+    const client = { active: true, transportParked: true, audibleSeconds: () => 12, unload: vi.fn(), pause: vi.fn() }
     ;(engine as unknown as { nativePlayback: typeof client }).nativePlayback = client
-    const cues = engine.createTrainingCueController()
-    cues.setSound('organ')
-    const scheduled = cues.schedule([{ purpose: 'answer', articulation: 'sequence', notes: [60] }])
-    await vi.waitFor(() => expect(client.unload).toHaveBeenCalledOnce())
-    expect(context.oscillators).toHaveLength(0)
-    expect(context.sinkId).toBe('none')
-    cleanup.resolve()
-    await scheduled
-    expect(context.sinkId).toBe('')
-    expect(context.oscillators.length).toBeGreaterThan(0)
+    const controller = engine.createTrainingCueController()
+    controller.setSound('organ')
+    await controller.schedule([{ purpose: 'answer', articulation: 'sequence', notes: [60] }])
+    expect(client.unload).not.toHaveBeenCalled()
+    expect(nativeSchedule).toHaveBeenCalledOnce()
     expect(engine.position).toBe(12)
     expect(engine.playing).toBe(false)
-    cues.dispose()
+    controller.dispose()
   })
 
   afterEach(() => vi.unstubAllGlobals())
@@ -1281,41 +1156,20 @@ describe('engine-owned training audio', () => {
     expect(engine.nativeMonitorOwnsOutput).toBe(false)
   })
 
-  it('follows master volume and makes song playback mutually exclusive with cues', async () => {
+  it('cancels native cues when song playback starts and pauses the song before cues', async () => {
     vi.stubGlobal('AudioContext', FakeAudioContext)
     const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
     const engine = new MultitrackEngine()
-    const context = FakeAudioContext.last!
-    const trainingBus = context.gains[2]
+    engine.setNativeAheadAllowed(false)
     const controller = engine.createTrainingCueController()
     controller.setSound('organ')
-
     await controller.schedule([{ purpose: 'answer', articulation: 'together', notes: [69] }])
-    expect((context.gains.at(-1)!.connected as FakeGain).connected).toBe(trainingBus)
-    engine.setMasterVolume(0.4)
-    expect(trainingBus.gain.calls.at(-1)).toEqual(['target', 0.4, 10])
-
-    const cueVoice = context.oscillators[0]
     engine.load([{ id: 'vocals', buffer: { duration: 2 } as AudioBuffer, duration: 2 }])
+    const before = nativeCancel.mock.calls.length
     await engine.play({ countIn: false })
-    expect(engine.playing).toBe(true)
-    expect(cueVoice.stops).toHaveLength(2)
-
-    const songSource = context.bufferSources[0]
+    expect(nativeCancel.mock.calls.length).toBeGreaterThan(before)
     await controller.schedule([{ purpose: 'question', articulation: 'together', notes: [60] }])
     expect(engine.playing).toBe(false)
-    expect(songSource.stops).toHaveLength(1)
-    expect((context.gains.at(-1)!.connected as FakeGain).connected).toBe(trainingBus)
-
-    const resume = deferred()
-    context.state = 'suspended'
-    context.resumeGate = resume.promise
-    const pendingPlay = engine.play({ countIn: false })
-    const pendingCue = controller.schedule([
-      { purpose: 'answer', articulation: 'together', notes: [64] }
-    ])
-    resume.resolve()
-    await Promise.all([pendingPlay, pendingCue])
-    expect(engine.playing).toBe(false)
+    controller.dispose()
   })
 })

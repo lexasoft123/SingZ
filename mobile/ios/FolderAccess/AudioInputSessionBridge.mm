@@ -615,10 +615,15 @@ RCT_REMAP_METHOD(
   config.deviceUid = deviceUid.UTF8String;
   config.channel = selectedChannel;
   config.ringBlocks = 32;
+  // The capture coordinator already validated and leased this exact route.
+  // Opening uses that snapshot, not a second availableInputs enumeration.
+  const std::vector<singz::AudioInputDevice> inventory{{
+      session.currentDeviceUid, session.currentDeviceUid, true,
+      session.sampleRate, session.channels, {}}};
   const singz::AudioInputResult started = input->start(
       config, [context](const singz::AudioInputBlockView& block) {
         context->accept(block);
-      });
+      }, &inventory);
   if (!started.ok) {
     context->active.store(false, std::memory_order_release);
     reject(@"E_AUDIO_INPUT_CAPTURE",

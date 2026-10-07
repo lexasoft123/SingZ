@@ -1,3 +1,4 @@
+import { trainingOutput, nativeTrainingClock, renderTrainingPcm, encodeTrainingPcm } from './training/native-cues'
 import { trainingOrganCurve } from './gen/training-lib'
 import { TRAINING_SAMPLES } from './training/samples'
 import { sampleAuditionGain, trainingSampleIndex, type TrainingSound } from './training/sample-levels'
@@ -103,6 +104,7 @@ export class MultitrackEngine {
   private trainingLatchNodes: { oscillator: OscillatorNode; gain: GainNode }[] = []
   private trainingNodes: { oscillator: OscillatorNode | AudioBufferSourceNode; gain: GainNode }[] = []
   private trainingCueGeneration = 0
+  private nativeLatchGeneration = 1000000000
   private tracks: EngineTrack[] = []
   private sources: AudioBufferSourceNode[] = []
   private generation = 0
@@ -178,7 +180,7 @@ export class MultitrackEngine {
   }
 
   get trainingCurrentTime(): number {
-    return this.ctx.currentTime
+    return trainingOutput?.scheduleTrainingPcm ? nativeTrainingClock() : this.ctx.currentTime
   }
 
   /** Route latency used when mapping recorder timestamps to what was heard. */
@@ -203,6 +205,8 @@ export class MultitrackEngine {
   }
 
   private applyTrainingCueVolume(): void {
+    trainingOutput?.setTrainingPcmGain?.(this.nativeLatchGeneration, this.trainingCueMuted ? 0 : this.trainingCueVolume)
+    trainingOutput?.setTrainingPcmGain?.(this.trainingCueGeneration, this.trainingCueMuted ? 0 : this.trainingCueVolume)
     this.trainingGain.gain.value = this.trainingCueMuted ? 0 : this.trainingCueVolume
     this.trainingSampleGain.gain.value = this.trainingCueMuted ? 0 : this.trainingCueVolume
   }
@@ -220,7 +224,7 @@ export class MultitrackEngine {
           ok: false,
           error: t('phone.app.engine.pausedInBackground')
         }
-      if (this.nativeOutputHandoff)
+      if (this.nativeOutputHandoff && !trainingOutput?.scheduleTrainingPcm)
         return {
           ok: false,
           error: t('phone.app.engine.outputOwnedBySong')
@@ -228,7 +232,7 @@ export class MultitrackEngine {
       this.pause()
       this.cancelTrainingCues(true)
       const generation = ++this.trainingCueGeneration
-      if (this.ctx.state === 'suspended') await this.ctx.resume()
+      if (!trainingOutput?.scheduleTrainingPcm && this.ctx.state === 'suspended') await this.ctx.resume()
       if (this.backgrounded || generation !== this.trainingCueGeneration)
         return { ok: false, error: t('phone.app.engine.cueCancelled') }
       const sound = instrument
@@ -239,6 +243,21 @@ export class MultitrackEngine {
           if (this.backgrounded || generation !== this.trainingCueGeneration)
             return { ok: false, error: t('phone.app.engine.cueCancelled') }
         }
+      }
+      if (trainingOutput?.scheduleTrainingPcm) {
+        if (this.ctx.state === 'running') await this.ctx.suspend()
+        const planes = await renderTrainingPcm(cues, sound, midi => this.trainingSamples.get(TRAINING_SAMPLES[sound as Exclude<TrainingSound, 'organ'>][trainingSampleIndex(midi)])!, auditionLevels)
+        if (this.backgrounded || generation !== this.trainingCueGeneration)
+          return { ok: false, error: t('phone.app.engine.cueCancelled') }
+        const result = await trainingOutput.scheduleTrainingPcm(planes, 48000, generation, this.trainingCueMuted ? 0 : this.trainingCueVolume)
+        if (this.backgrounded || generation !== this.trainingCueGeneration) {
+          trainingOutput.cancelTrainingPcm(generation)
+          return { ok: false, error: t('phone.app.engine.cueCancelled') }
+        }
+        if (!result.ok) throw new Error(result.message ?? 'Shared training output unavailable')
+        if (typeof result.outputLatencySeconds === 'number') this.setDisplayLatency(result.outputLatencySeconds)
+        const startsAt = nativeTrainingClock() + result.delaySeconds
+        return { ok: true, startsAt, endsAt: startsAt + planTrainingCues(cues, 0).endsAt }
       }
       const plan = planTrainingCues(cues, this.ctx.currentTime + START_DELAY)
       for (const [voiceIndex, voice] of plan.voices.entries()) {
@@ -318,6 +337,28 @@ export class MultitrackEngine {
 
   /** Fast feedback on the active route, without restarting reference playback. */
   async playTrainingLatch(): Promise<{ ok: true; startsAt: number; endsAt: number } | { ok: false; error: string }> {
+    if (trainingOutput?.scheduleTrainingPcm && !this.backgrounded) {
+      const tone = TRAINING_REACHED_TONE, rate = 48000, duration = .45
+      const pcm = new Float32Array(Math.ceil(duration * rate))
+      for (let frame = 0; frame < pcm.length; frame++) {
+        const at = frame / rate
+        const envelope = at < tone.attackSeconds ? at / tone.attackSeconds : at < .25 ? 1 : (duration - at) / (duration - .25)
+        pcm[frame] = Math.sin(2 * Math.PI * tone.frequency * at) * tone.peakGain * envelope
+      }
+      const cueGeneration = this.trainingCueGeneration
+      trainingOutput.cancelTrainingPcm(this.nativeLatchGeneration)
+      const generation = ++this.nativeLatchGeneration
+      try {
+        const result = await trainingOutput.scheduleTrainingPcm(encodeTrainingPcm(pcm), rate, generation, this.trainingCueMuted ? 0 : this.trainingCueVolume)
+        if (this.backgrounded || generation !== this.nativeLatchGeneration || cueGeneration !== this.trainingCueGeneration) {
+          trainingOutput.cancelTrainingPcm(generation)
+          return { ok: false, error: t('phone.app.engine.cueCancelled') }
+        }
+        if (!result.ok) return { ok: false, error: result.message ?? 'Shared output unavailable' }
+        const startsAt = nativeTrainingClock() + result.delaySeconds
+        return { ok: true, startsAt, endsAt: startsAt + duration }
+      } catch (error) { return { ok: false, error: String(error) } }
+    }
     if (this.backgrounded || this.nativeOutputHandoff || this.ctx.state !== 'running')
       return { ok: false, error: t('phone.app.engine.cueCancelled') }
     try {
@@ -352,6 +393,8 @@ export class MultitrackEngine {
   }
 
   cancelTrainingCues(preserveLatch = false): void {
+    if (!preserveLatch) trainingOutput?.cancelTrainingPcm?.(this.nativeLatchGeneration)
+    trainingOutput?.cancelTrainingPcm?.(this.trainingCueGeneration)
     this.trainingCueGeneration++
     const now = this.ctx.currentTime
     for (const { oscillator, gain } of [...this.trainingNodes.splice(0), ...(preserveLatch ? [] : this.trainingLatchNodes.splice(0))]) {
@@ -378,10 +421,11 @@ export class MultitrackEngine {
    * running WebAudio graph across that transition can leave Android rendering
    * stale oscillator/source buffers as distorted fragments. Foregrounding only
    * re-arms user actions; it never resumes sound by itself. */
-  async suspendForBackground(): Promise<void> {
+  async suspendForBackground(preserveNativeOutput = false): Promise<void> {
     this.backgrounded = true
     this.pause()
     this.cancelTrainingCues()
+    if (!preserveNativeOutput) trainingOutput?.parkSharedOutput()
     this.cancelPendingClicks()
     if (this.ctx.state !== 'running') return
     try {

@@ -7484,3 +7484,21 @@ export { IosNativePlaybackCoordinator as NativePlaybackCoordinator };
 export const nativePlayback = new IosNativePlaybackCoordinator();
 /** Compatibility name for callers using the original experiment export. */
 export const iosNativePlayback = nativePlayback;
+
+/** Training PCM and song rendering share one native host. Additive methods
+ * are optional so older installed binaries retain their legacy cue path. */
+export function nativeTrainingOutput(): {
+  scheduleTrainingPcm(pcm: string, rate: number, generation: number, gain: number): Promise<{ ok: boolean; delaySeconds: number; outputLatencySeconds?: number; message?: string }>;
+  parkSharedOutput(): void;
+  cancelTrainingPcm(generation: number): void;
+  setTrainingPcmGain(generation: number, gain: number): void;
+} | undefined {
+  const bridge = NativeModules.NativeAudioRuntime;
+  if (['scheduleTrainingPcm', 'cancelTrainingPcm', 'setTrainingPcmGain', 'parkSharedOutput'].some(name => typeof bridge?.[name] !== 'function')) return undefined;
+  return {
+    scheduleTrainingPcm: (pcm, rate, generation, gain) => bridge.scheduleTrainingPcm(pcm, rate, generation, gain),
+    parkSharedOutput: () => { void bridge.parkSharedOutput().catch(() => {}); },
+    cancelTrainingPcm: generation => { void bridge.cancelTrainingPcm(generation).catch(() => {}); },
+    setTrainingPcmGain: (generation, gain) => { void bridge.setTrainingPcmGain(generation, gain).catch(() => {}); },
+  };
+}

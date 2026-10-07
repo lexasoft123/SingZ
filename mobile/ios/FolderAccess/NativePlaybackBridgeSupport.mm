@@ -8,6 +8,12 @@
 #import <SingzDspRuntime/SingzDspRuntimeCapability.h>
 #import <SingzPlaybackSession/native_playback_session.h>
 #include <zcore/media/decoded_audio.h>
+#import <SingzPlaybackSession/shared_audio_service.h>
+#import <SingzPlaybackSession/training_pcm_mixer.h>
+#import <AVFAudio/AVFAudio.h>
+#include <mach/mach_time.h>
+#include <cstring>
+#include <cmath>
 
 #include <cstdint>
 #include <cstdlib>
@@ -21,13 +27,14 @@ namespace {
 
 struct PlaybackBridgeOwner {
   PlaybackBridgeOwner()
-      : session(std::make_unique<singz::NativePlaybackSession>()),
+      : session(std::make_unique<singz::NativePlaybackSession>(singz::sharedPlaybackBackend(singz::createPlatformAudioHostBackend(), "coreaudio"))),
         queue(
             dispatch_queue_create("com.lexasoft.singz.native-playback-control",
                                   DISPATCH_QUEUE_SERIAL)) {}
 
   std::unique_ptr<singz::NativePlaybackSession> session;
   dispatch_queue_t queue;
+  singz::TrainingPcmMixer training;
   std::atomic<uint64_t> latestClaimedGeneration{0};
   std::atomic<uint64_t> cancelledThrough{0};
   SingzPlaybackAudioSessionIntent preparedAudioSessionIntent;
@@ -1214,5 +1221,60 @@ void SingzNativePlaybackPreviewClick(NSNumber *generationValue,
             resultDictionary(bridge.session->previewClick(generation, sound)));
       });
     });
+  });
+}
+
+void SingzScheduleTrainingPcm(NSString* payload, NSNumber* rate, NSNumber* generation, NSNumber* gain, RCTPromiseResolveBlock resolve, RCTPromiseRejectBlock reject) {
+  auto& bridge = owner();
+  dispatch_async(bridge.queue, ^{
+    runBridgeBoundary(reject, [&] {
+      if (![payload isKindOfClass:NSString.class] || payload.length > 48000 * 120 * 4 * 4 / 3 ||
+          rate.doubleValue != 48000 || !std::isfinite(generation.doubleValue) || generation.doubleValue < 1 ||
+          generation.doubleValue != std::floor(generation.doubleValue) ||
+          !std::isfinite(gain.doubleValue) || gain.doubleValue < 0 || gain.doubleValue > 8) {
+        resolve(@{@"ok": @NO, @"message": @"Invalid training PCM"}); return;
+      }
+      NSData* bytes = [[NSData alloc] initWithBase64EncodedString:payload options:0];
+      if (!bytes || bytes.length == 0 || bytes.length % sizeof(float) != 0 || bytes.length > 48000 * 120 * sizeof(float) ||
+          !bridge.training.canSchedule(bytes.length / sizeof(float), 1)) {
+        resolve(@{@"ok": @NO, @"message": @"Invalid training PCM size"}); return;
+      }
+      std::vector<std::vector<float>> pcm(1, std::vector<float>(bytes.length / sizeof(float)));
+      std::memcpy(pcm[0].data(), bytes.bytes, bytes.length);
+      NSError* error = nil;
+      if (![AVAudioSession.sharedInstance setActive:YES error:&error]) {
+        resolve(@{@"ok": @NO, @"message": error.localizedDescription ?: @"Audio session unavailable"}); return;
+      }
+      auto& service = singz::sharedAudioService();
+      service.setTrainingRenderer([](void* context, const singz::AudioHostRenderBlock& block) noexcept {
+        return static_cast<singz::TrainingPcmMixer*>(context)->render(block);
+      }, &bridge.training);
+      const auto output = service.ensureOutput();
+      if (!output.ok) { resolve(@{@"ok": @NO, @"message": [NSString stringWithUTF8String:output.message.c_str()]}); return; }
+      mach_timebase_info_data_t timebase; mach_timebase_info(&timebase);
+      const uint64_t now = static_cast<uint64_t>(static_cast<long double>(mach_absolute_time()) * timebase.numer / timebase.denom);
+      const bool ok = bridge.training.schedule(std::move(pcm), generation.unsignedLongLongValue, rate.doubleValue, now + 50000000, gain.floatValue);
+      const uint64_t repliedAt = static_cast<uint64_t>(static_cast<long double>(mach_absolute_time()) * timebase.numer / timebase.denom);
+      const auto status = service.status();
+      const double latency = status.format.sampleRate > 0 ? (status.latency.outputDeviceFrames + status.latency.bufferFrames + status.latency.externalRouteFrames) / status.format.sampleRate : 0;
+      resolve(@{@"ok": @(ok), @"delaySeconds": @(std::max(0.0, (static_cast<double>(now + 50000000) - repliedAt) / 1e9)), @"outputLatencySeconds": @(latency), @"message": ok ? @"" : @"Training voice limit reached"});
+    });
+  });
+}
+void SingzCancelTrainingPcm(NSNumber* generation) {
+  auto& bridge = owner(); dispatch_async(bridge.queue, ^{ bridge.training.cancel(generation.unsignedLongLongValue); });
+}
+void SingzSetTrainingPcmGain(NSNumber* generation, NSNumber* gain) {
+  auto& bridge = owner(); dispatch_async(bridge.queue, ^{ bridge.training.setGain(generation.unsignedLongLongValue, gain.floatValue); });
+}
+
+void SingzRefreshSharedAudioInventory(void) {
+  auto& bridge = owner(); dispatch_async(bridge.queue, ^{ singz::sharedAudioService().refreshInventory(); });
+}
+
+void SingzParkSharedOutput(void) {
+  auto& bridge = owner(); dispatch_async(bridge.queue, ^{
+    auto& service = singz::sharedAudioService();
+    service.clearTrainingRenderer(); bridge.training.clearQuiesced(); service.parkOutput();
   });
 }

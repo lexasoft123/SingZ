@@ -79,5 +79,17 @@ int main() {
   CHECK(ownership.snapshot().kind == Kind::None);
   CHECK(ownership.acquire(Kind::None, 1) == Result::InvalidGeneration);
   CHECK(ownership.acquire(Kind::Capture, 0) == Result::InvalidGeneration);
+  singz::NativeAudioOwnership shared(true);
+  CHECK(shared.acquire(Kind::Capture, 1) == Result::Acquired);
+  CHECK(shared.acquire(Kind::Playback, 2) == Result::Acquired);
+  CHECK(shared.acquire(Kind::Monitor, 3) == Result::Busy);
+  CHECK(!shared.release(Kind::Capture, 4));
+  CHECK(shared.rekey(Kind::Capture, 1, 4));
+  CHECK(shared.release(Kind::Playback, 2));
+  CHECK(shared.snapshot().kind == Kind::Capture);
+  CHECK(shared.acquire(Kind::Monitor, 3) == Result::Busy);
+  CHECK(shared.release(Kind::Capture, 4));
+  CHECK(shared.acquire(Kind::Monitor, 3) == Result::Acquired);
+  CHECK(shared.acquire(Kind::Capture, 5) == Result::Busy);
   return 0;
 }

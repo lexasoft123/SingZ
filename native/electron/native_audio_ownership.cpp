@@ -7,6 +7,14 @@ NativeAudioAcquireResult NativeAudioOwnership::acquire(
   if (kind == NativeAudioOwnerKind::None || generation == 0)
     return NativeAudioAcquireResult::InvalidGeneration;
   std::lock_guard<std::mutex> lock(mutex_);
+  if (sharedCapturePlayback_ && kind == NativeAudioOwnerKind::Capture) {
+    if (captureGeneration_ != 0 || kind_ == NativeAudioOwnerKind::Monitor)
+      return NativeAudioAcquireResult::Busy;
+    captureGeneration_ = generation;
+    return NativeAudioAcquireResult::Acquired;
+  }
+  if (kind == NativeAudioOwnerKind::Monitor && captureGeneration_ != 0)
+    return NativeAudioAcquireResult::Busy;
   if (kind_ != NativeAudioOwnerKind::None)
     return NativeAudioAcquireResult::Busy;
   kind_ = kind;
@@ -17,6 +25,11 @@ NativeAudioAcquireResult NativeAudioOwnership::acquire(
 bool NativeAudioOwnership::release(NativeAudioOwnerKind kind,
                                    uint64_t generation) {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (sharedCapturePlayback_ && kind == NativeAudioOwnerKind::Capture) {
+    if (generation == 0 || captureGeneration_ != generation) return false;
+    captureGeneration_ = 0;
+    return true;
+  }
   if (kind == NativeAudioOwnerKind::None || kind_ != kind ||
       generation == 0 || generation_ != generation)
     return false;
@@ -28,6 +41,12 @@ bool NativeAudioOwnership::release(NativeAudioOwnerKind kind,
 bool NativeAudioOwnership::rekey(NativeAudioOwnerKind kind, uint64_t from,
                                  uint64_t to) {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (sharedCapturePlayback_ && kind == NativeAudioOwnerKind::Capture) {
+    if (from == 0 || to == 0 || from == to || captureGeneration_ != from)
+      return false;
+    captureGeneration_ = to;
+    return true;
+  }
   if (kind == NativeAudioOwnerKind::None || kind_ != kind || from == 0 ||
       to == 0 || from == to || generation_ != from)
     return false;
@@ -37,7 +56,9 @@ bool NativeAudioOwnership::rekey(NativeAudioOwnerKind kind, uint64_t from,
 
 NativeAudioOwnershipSnapshot NativeAudioOwnership::snapshot() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  return {kind_, generation_};
+  return kind_ == NativeAudioOwnerKind::None && captureGeneration_ != 0
+      ? NativeAudioOwnershipSnapshot{NativeAudioOwnerKind::Capture, captureGeneration_}
+      : NativeAudioOwnershipSnapshot{kind_, generation_};
 }
 
 bool releaseUnretainedMonitorBeginLease(

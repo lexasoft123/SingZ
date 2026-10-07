@@ -1,6 +1,7 @@
 #include "playback_addon_bridge.h"
 
 #include "native_audio_ownership.h"
+#include "../playback/shared_audio_service.h"
 
 #include <lane_measure.h>
 #include <zcore/media/decoded_audio.h>
@@ -1562,6 +1563,7 @@ napi_value preparePlayback(napi_env env, napi_callback_info info) {
                     ? "The requested native audio provider or device identity is unavailable"
                     : unavailableReason),
             "platform-not-ready"));
+  backend = sharedPlaybackBackend(std::move(backend), provider);
   if (!playback.session.replaceAudioHostBackend(std::move(backend)))
     return settledPromise(
         env,

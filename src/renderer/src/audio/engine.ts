@@ -1,3 +1,4 @@
+import { nativeOutputForBrowserLabel } from '../../../shared/output-device-policy'
 import SignalsmithStretch, { type StretchNode } from 'signalsmith-stretch'
 import {
   accentIndex,
@@ -14,7 +15,7 @@ import type {
   DesktopNativeRecoveryErrorCode
 } from './desktop-native-playback'
 import type { DesktopNativePlaybackEngineRequest } from './desktop-native-playback'
-import { desktopNativePlaybackPreferred } from './native-playback-preference'
+import { desktopNativePlaybackPreferred, detectedDesktopPlatform } from './native-playback-preference'
 import type { DesktopPlaybackProvider, DesktopPlaybackStatus } from '../../../shared/types'
 import type { ParsedGraphDocument } from '../../../shared/graph-document'
 import { t } from '../i18n'
@@ -100,6 +101,7 @@ const SEC_COUNT_PERIOD = 1
 export class MultitrackEngine {
   private ctx = new AudioContext({ latencyHint: 'interactive' })
   private desiredOutputId = ''
+  private trainingConfiguredOutputId: string | null = null
   private confirmedOutputId = ''
   private outputRouteVersion = 0
   private outputRouteApplyPending: Promise<void> | null = null
@@ -555,6 +557,7 @@ export class MultitrackEngine {
    * silently diverge after restore. */
   setNativeAudioProvider(provider: Extract<DesktopPlaybackProvider, 'wasapi' | 'asio'>): void {
     this.nativeAudioProvider = provider === 'asio' ? 'asio' : 'wasapi'
+    this.trainingConfiguredOutputId = null
   }
 
   /** Create the one active cue controller; replacing it cleans up the previous owner's nodes. */
@@ -562,14 +565,32 @@ export class MultitrackEngine {
     if (this.teardownStarted) throw new Error('Audio engine is disposed.')
     this.trainingCues?.dispose()
     this.trainingCues = new DesktopTrainingCueController(this.ctx, this.trainingGain, async () => {
+      if (this.nativePlayback?.active && !this.nativePlayback.transportParked)
+        await this.nativePlayback.pause()
       this.pause()
-      // Paused native song playback still owns the physical output and leaves
-      // Chromium on its silent sink. Retire that graph before scheduling cues;
-      // its unload restores the saved route without discarding the loaded song.
-      const unload = this.beginNativePlaybackUnload()
-      if (unload) await unload
+      await this.configureTrainingOutput()
     })
+    this.trainingCues.setOutputGain(this.masterVol)
     return this.trainingCues
+  }
+
+  private async configureTrainingOutput(): Promise<void> {
+    const provider: DesktopPlaybackProvider = detectedDesktopPlatform() === 'win32' ? this.nativeAudioProvider : 'coreaudio'
+    const routeKey = `${provider}:${this.desiredOutputId}`
+    if (this.nativePlayback?.active || this.trainingConfiguredOutputId === routeKey) return
+    const requested = this.desiredOutputId
+    let uid = ''
+    if (requested && requested !== 'default') {
+      const inventory = await window.singz.audioHostDevices(provider)
+      if (!inventory.ok) throw new Error(inventory.error)
+      const outputs = await navigator.mediaDevices.enumerateDevices()
+      const selected = outputs.find(device => device.kind === 'audiooutput' && device.deviceId === requested)
+      if (!selected) throw new Error('The selected output is no longer connected.')
+      uid = nativeOutputForBrowserLabel(selected.label, inventory.devices).uid
+    }
+    const result = await window.singz.configureDesktopTrainingOutput(uid, provider)
+    if (!result.ok) throw new Error(result.error || 'The training output could not open.')
+    if (requested === this.desiredOutputId) this.trainingConfiguredOutputId = routeKey
   }
 
   /** Current output device id ('' = system default). */
@@ -602,6 +623,7 @@ export class MultitrackEngine {
     // restoration, but never let Chromium reacquire a device underneath it.
     if (this.nativeMonitorLease) return
     await this.applyDesiredOutputRoute()
+    await this.configureTrainingOutput()
     if (this._playing && this.ctx.state !== 'running') await this.ctx.resume()
   }
 
@@ -819,6 +841,7 @@ export class MultitrackEngine {
     if (this.nativePlayback?.active) {
       void this.nativePlayback.setMasterGain(target).then(() => {
         this.masterVol = target
+        this.trainingCues?.setOutputGain(target)
         this.master.gain.setTargetAtTime(target, this.ctx.currentTime, 0.02)
         this.clickGain.gain.setTargetAtTime(this.met.volume * target, this.ctx.currentTime, 0.02)
         this.trainingGain.gain.setTargetAtTime(target, this.ctx.currentTime, 0.02)
@@ -827,6 +850,7 @@ export class MultitrackEngine {
       return
     }
     this.masterVol = target
+    this.trainingCues?.setOutputGain(target)
     this.master.gain.setTargetAtTime(this.masterVol, this.ctx.currentTime, 0.02)
     this.clickGain.gain.setTargetAtTime(this.met.volume * this.masterVol, this.ctx.currentTime, 0.02)
     this.trainingGain.gain.setTargetAtTime(this.masterVol, this.ctx.currentTime, 0.02)

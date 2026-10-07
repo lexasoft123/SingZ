@@ -32,6 +32,9 @@ export async function askMicrophoneAccess(
 ): Promise<boolean> {
   if (platform !== 'darwin') return true
   const before = prompter.getMediaAccessStatus('microphone')
+  // Read TCC on every activation so revocation is observed, but asking again
+  // after a grant needlessly schedules another permission round trip.
+  if (before === 'granted') return true
   let allowed = false
   try {
     allowed = await prompter.askForMediaAccess('microphone')

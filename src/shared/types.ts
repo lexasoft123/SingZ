@@ -532,6 +532,8 @@ export interface CaptureTimeValue {
 
 /** Copied scalar evidence only. PCM and native storage never cross IPC. */
 export interface CaptureAnalysisWindow {
+  detector?: 'crepe-tiny' | 'yin'
+  inferenceMs?: number
   ownershipGeneration: string
   resetCount: string
   resetReason: CaptureDiscontinuity
@@ -1184,6 +1186,27 @@ export interface DesktopPlaybackStatus {
   mediaCodecTag: string
 }
 
+export interface DesktopTrainingAudioStatus {
+  hostTimeNs: string
+  outputLatencyMs: number
+  renderedFrames?: string
+  callbacks?: string
+  sampleRate?: number
+  streamGeneration?: number
+  enumerationCount?: number
+}
+
+export interface DesktopTrainingPcmCue {
+  channels: Float32Array[]
+  sampleRate: number
+  startDelayMs: number
+  gain: number
+  generation: string
+}
+export type DesktopTrainingPcmResult =
+  | { ok: true; startsAfterMs: number; durationMs: number; outputLatencyMs: number; processingMs: number }
+  | { ok: false; error: string }
+
 export type DesktopAudioInputEvent =
   | { type: 'frame'; frequency: number; clarity: number; rms: number; dbfs: number; detector?: 'crepe-tiny' | 'yin'; inferenceMs?: number }
   | { type: 'overrun'; count: number }
@@ -1269,6 +1292,11 @@ export interface SingzApi {
     deviceUid?: string
     channel?: number
   }): Promise<DesktopAudioInputStartResult>
+  configureDesktopTrainingOutput(outputDeviceUid: string, provider: DesktopPlaybackProvider): Promise<{ ok: boolean; error?: string }>
+  desktopTrainingAudioStatus(): Promise<DesktopTrainingAudioStatus | null>
+  scheduleDesktopTrainingCue(config: DesktopTrainingPcmCue): Promise<DesktopTrainingPcmResult>
+  setDesktopTrainingCueGain(generation: string, gain: number): Promise<{ ok: boolean; error?: string }>
+  cancelDesktopTrainingCues(generation: string): Promise<{ ok: boolean; error?: string }>
   reportTrainingTiming(line: string): void
   reportDesktopAudioInputFallback(detail: DesktopAudioInputFallback): Promise<{ ok: boolean; error?: string }>
   trainingRecording(action: 'record' | 'finish'): Promise<{ok:boolean;error?:string;filename?:string;path?:string;seconds?:number;sampleRate?:number}>

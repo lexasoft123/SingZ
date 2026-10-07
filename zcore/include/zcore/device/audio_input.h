@@ -105,8 +105,14 @@ class AudioInput {
   AudioInput(const AudioInput&) = delete;
   AudioInput& operator=(const AudioInput&) = delete;
 
-  AudioInputResult start(const AudioInputConfig& config, AudioInputSink sink);
-  void stop();
+  // A process-lifetime device service may supply its current inventory. The
+  // provider still validates the exact UID/channel at open; no second full
+  // inventory is read during activation in that case.
+  AudioInputResult start(const AudioInputConfig& config, AudioInputSink sink,
+                        const std::vector<AudioInputDevice>* inventory = nullptr);
+  // Retention is opt-in and never leaves hardware capture running. Reuse is
+  // permitted only for an unchanged device/channel/configuration.
+  void stop(bool retainPrepared = false);
   AudioInputState state() const;
   AudioInputStats stats() const;
   std::string lastError() const;

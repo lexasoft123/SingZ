@@ -144,6 +144,9 @@ add_dependencies(singz_native_playback_callback
   singz_check_playback_realtime)
 
 add_library(singz_native_playback_session STATIC EXCLUDE_FROM_ALL
+  native/playback/shared_audio_service.cpp
+  native/playback/shared_audio_service.h
+  native/playback/training_pcm_mixer.h
   native/playback/native_playback_graph_document.cpp
   native/playback/native_playback_graph_document.h
   native/playback/playback_cue_plan.cpp
@@ -242,6 +245,8 @@ if(SINGZ_BUILD_ELECTRON_CAPTURE)
     native/electron/audio_monitor_session.h
     native/electron/playback_addon_bridge.cpp
     native/electron/playback_addon_bridge.h
+    native/electron/training_audio_session.cpp
+    native/electron/training_audio_session.h
     native/electron/native_audio_ownership.h)
   target_compile_features(singz_capture PRIVATE cxx_std_20)
   target_include_directories(singz_capture PRIVATE "${SINGZ_NODE_INCLUDE_DIR}")
@@ -602,6 +607,14 @@ if(SINGZ_CORE_TESTS)
     singz_native_audio_ownership Threads::Threads)
   add_test(NAME native_audio_ownership_tests COMMAND native_audio_ownership_tests)
 
+  add_executable(shared_audio_service_tests
+    native/playback/shared_audio_service.cpp
+    tests/native/shared_audio_service_tests.cpp)
+  target_compile_features(shared_audio_service_tests PRIVATE cxx_std_20)
+  target_include_directories(shared_audio_service_tests PRIVATE "${SINGZ_REPO_ROOT}")
+  target_link_libraries(shared_audio_service_tests PRIVATE SingZ::zcore_device Threads::Threads)
+  add_test(NAME shared_audio_service_tests COMMAND shared_audio_service_tests)
+
   add_executable(native_playback_session_tests
     ${SINGZ_REPO_ROOT}/tests/native/native_playback_session_tests.cpp
     ${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.cpp
@@ -848,4 +861,11 @@ if(SINGZ_CORE_TESTS AND SINGZ_BUILD_HOST_TOOLS)
     "${CMAKE_CURRENT_SOURCE_DIR}/assets/pitch/crepe-tiny.bin"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/pitch/crepe-tiny-parity.f32"
     "${CMAKE_CURRENT_BINARY_DIR}/crepe-recording-test.wav")
+endif()
+
+if(BUILD_TESTING)
+  add_executable(training_pcm_mixer_tests native/playback/training_pcm_mixer_tests.cpp)
+  target_compile_features(training_pcm_mixer_tests PRIVATE cxx_std_20)
+  target_link_libraries(training_pcm_mixer_tests PRIVATE SingZ::zcore_device)
+  add_test(NAME training_pcm_mixer_tests COMMAND training_pcm_mixer_tests)
 endif()

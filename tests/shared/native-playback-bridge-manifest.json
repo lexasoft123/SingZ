@@ -104,6 +104,26 @@
         "name": "unloadRetainingLanes",
         "arity": 1,
         "synchronous": false
+      },
+      {
+        "name": "scheduleTrainingPcm",
+        "arity": 4,
+        "synchronous": false
+      },
+      {
+        "name": "cancelTrainingPcm",
+        "arity": 1,
+        "synchronous": false
+      },
+      {
+        "name": "setTrainingPcmGain",
+        "arity": 2,
+        "synchronous": false
+      },
+      {
+        "name": "parkSharedOutput",
+        "arity": 0,
+        "synchronous": false
       }
     ],
     "iosOnly": [

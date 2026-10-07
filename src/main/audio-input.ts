@@ -1,33 +1,21 @@
 import { app, dialog, shell } from 'electron'
-import { writeFileSync, mkdirSync, copyFileSync, unlinkSync, renameSync } from 'node:fs'
+import { mkdirSync, copyFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { ipcMain, type WebContents } from 'electron'
-import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { onChildSettled } from './child-exit'
-import { resolveAnalyze } from './analyze'
+import { loadCaptureBinding, type NativeCaptureBinding } from './capture'
 import { askMicrophoneAccess } from './mic-access'
-import { log, logChunk } from './log'
+import { log } from './log'
 import { t } from '../shared/i18n'
 import type {
   DesktopAudioInputDevice,
   DesktopAudioInputEvent,
-  DesktopAudioInputStartResult
+  DesktopAudioInputStartResult,
+  DesktopTrainingPcmCue,
+  DesktopTrainingPcmResult,
+  DesktopTrainingAudioStatus,
+  DesktopPlaybackProvider
 } from '../shared/types'
-
-function writeControl(path: string, command: string): void {
-  const temporary = `${path}.part`
-  try {
-    writeFileSync(temporary, command)
-    renameSync(temporary, path)
-  } finally {
-    try {
-      unlinkSync(temporary)
-    } catch {}
-  }
-}
-
-const CONTROL_TIMEOUT_MS = 10_000
 
 interface CliDeviceList {
   version: number
@@ -37,15 +25,14 @@ interface CliDeviceList {
 
 interface ActiveInput {
   token: string
-  child: ChildProcess
+  generation: bigint
   sender: WebContents
-  controlPath: string
-  commandSequence: number
-  recordingReply?: (value: Record<string, unknown>) => void
   ready: boolean
+  recording: boolean
   stopping: boolean
-  stopped: Promise<void>
-  resolveStopped: () => void
+  removeDestroyed: () => void
+  watchdog: ReturnType<typeof setInterval>
+  stopPending?: Promise<{ ok: boolean; error?: string }>
 }
 
 /** Inventory and process spawn are asynchronous, so checking `active` alone
@@ -68,25 +55,6 @@ export class AudioInputStartGate {
 
 const finite = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value)
-
-const missingAudioInputCommand = (error: unknown): boolean =>
-  /unknown command\s+input-devices|input-devices.*unknown command/i.test(
-    error instanceof Error ? error.message : String(error)
-  )
-
-function waitForStopped(active: ActiveInput, timeoutMs: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    let settled = false
-    const finish = (stopped: boolean): void => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      resolve(stopped)
-    }
-    const timer = setTimeout(() => finish(false), timeoutMs)
-    active.stopped.then(() => finish(true))
-  })
-}
 
 export function parseDesktopAudioInputDevices(stdout: string): DesktopAudioInputDevice[] {
   const line = stdout
@@ -159,364 +127,212 @@ export function parseDesktopAudioInputEvent(line: string): DesktopAudioInputEven
   return null
 }
 
-function runInventory(bin: string): Promise<DesktopAudioInputDevice[]> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(bin, ['input-devices'])
-    const chunks: Buffer[] = []
-    let errTail = ''
-    let settled = false
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL')
-      finish(new Error('Microphone inventory timed out.'))
-    }, CONTROL_TIMEOUT_MS)
-    const finish = (error?: Error): void => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      if (error) reject(error)
-      else {
-        try {
-          resolve(parseDesktopAudioInputDevices(Buffer.concat(chunks).toString('utf8')))
-        } catch (parseError) {
-          reject(parseError)
-        }
-      }
-    }
-    child.stdout?.on('data', (chunk: Buffer) => chunks.push(chunk))
-    child.stderr?.on('data', (chunk: Buffer) => {
-      errTail = (errTail + chunk.toString('utf8')).slice(-2000)
-    })
-    child.on('error', (error) => finish(error))
-    onChildSettled(child, 'audio-input-inventory', (code) => {
-      if (code === 0) finish()
-      else
-        finish(
-          new Error(errTail.trim().split('\n').pop() || `Microphone inventory exited with ${code}.`)
-        )
-    })
-  })
-}
-
 export class DesktopAudioInput {
   private active: ActiveInput | null = null
   private readonly startGate = new AudioInputStartGate()
-  private readonly askAccess: () => Promise<boolean>
+  private binding: NativeCaptureBinding | null = null
+  private nextGeneration = 0n
+  private recordingTake = 0
+  private shuttingDown = false
 
-  constructor(askAccess: () => Promise<boolean> = askMicrophoneAccess) {
-    this.askAccess = askAccess
+  constructor(
+    private readonly askAccess: () => Promise<boolean> = askMicrophoneAccess,
+    private readonly bindingLoader: () => NativeCaptureBinding = loadCaptureBinding
+  ) {}
+
+  private native(): NativeCaptureBinding {
+    return this.binding ??= this.bindingLoader()
   }
 
-  async list(): Promise<
-    { ok: true; devices: DesktopAudioInputDevice[] } | { ok: false; error: string }
-  > {
+  async initialize(): Promise<void> {
+    const startedAt = performance.now()
+    const result = this.native().initializeSharedAudio()
+    if (!result.ok) throw new Error(result.error || 'The shared audio host could not start.')
+    log('dsp', `shared audio host ready · ${(performance.now() - startedAt).toFixed(1)} ms · microphone inactive`)
+  }
+
+  async list(): Promise<{ ok: true; devices: DesktopAudioInputDevice[] } | { ok: false; error: string }> {
     try {
-      const bin = await resolveAnalyze()
-      if (!bin) return { ok: false, error: t('main.error.audioInputCoreMissing') }
-      return { ok: true, devices: await runInventory(bin) }
+      const result = this.native().inputDevices()
+      if (!result.ok) return result
+      return { ok: true, devices: result.devices }
     } catch (error) {
-      return {
-        ok: false,
-        error: error instanceof Error ? error.message : String(error)
-      }
+      return { ok: false, error: String(error) }
     }
   }
 
   async start(sender: WebContents, raw: unknown): Promise<DesktopAudioInputStartResult> {
-    return this.startGate.run(
-      () => this.startClaimed(sender, raw),
-      () => ({
-        ok: false,
-        kind: 'busy',
-        error: t('main.error.anotherTrainingMicStarting')
-      })
-    )
+    return this.startGate.run(() => this.startClaimed(sender, raw), () => ({
+      ok: false, kind: 'busy', error: t('main.error.anotherTrainingMicStarting')
+    }))
   }
 
-  private async startClaimed(
-    sender: WebContents,
-    raw: unknown
-  ): Promise<DesktopAudioInputStartResult> {
+  private async startClaimed(sender: WebContents, raw: unknown): Promise<DesktopAudioInputStartResult> {
     const startupAt = performance.now()
-    let phaseAt = startupAt
-    const startupPhase = (phase: string): void => {
-      const now = performance.now()
-      log('mic', `startup · ${phase} · ${(now - phaseAt).toFixed(1)} ms phase · ${(now - startupAt).toFixed(1)} ms total`)
-      phaseAt = now
-    }
-    startupPhase('requested')
-    const previous = this.active
-    if (previous?.stopping) await waitForStopped(previous, 2500)
-    if (this.active)
-      return {
-        ok: false,
-        kind: 'busy',
-        error: t('main.error.anotherTrainingMicActive')
-      }
-    // Ask BEFORE the child opens the device: `live-input` opens the HAL
-    // AudioUnit itself and cannot ask, and a refused unit delivers silence
-    // that reads as a singer who is not singing. On a Mac this is where the
-    // permission prompt appears for a singer who trains before they ever
-    // touch the pitch strip; elsewhere it answers true.
-    if (!(await this.askAccess()))
-      return {
-        ok: false,
-        kind: 'denied',
-        error: t('main.error.micAccessBlocked')
-      }
-    startupPhase('permission granted')
-    const bin = await resolveAnalyze()
-    startupPhase('analyzer resolved')
-    if (!bin)
-      return {
-        ok: false,
-        kind: 'unavailable-core',
-        error: t('main.error.audioInputCoreMissing')
-      }
+    if (this.active) return { ok: false, kind: 'busy', error: t('main.error.anotherTrainingMicActive') }
+    if (!(await this.askAccess())) return { ok: false, kind: 'denied', error: t('main.error.micAccessBlocked') }
+    if (this.shuttingDown || sender.isDestroyed()) return { ok: false, kind: 'unavailable', error: 'The training window closed.' }
+    let binding: NativeCaptureBinding
     let devices: DesktopAudioInputDevice[]
     try {
-      devices = await runInventory(bin)
-      startupPhase(`device inventory (${devices.length} inputs)`)
+      binding = this.native()
+      const inventory = binding.inputDevices()
+      if (!inventory.ok) throw new Error(inventory.error)
+      devices = inventory.devices
     } catch (error) {
-      return {
-        ok: false,
-        kind: missingAudioInputCommand(error) ? 'unavailable-core' : 'unavailable',
-        error: error instanceof Error ? error.message : String(error)
-      }
+      // A stale native binary is a real failure; browser capture must not hide it.
+      return { ok: false, kind: 'unavailable', error: String(error) }
     }
     const options = (raw ?? {}) as { deviceUid?: unknown; channel?: unknown }
     const requestedUid = typeof options.deviceUid === 'string' ? options.deviceUid : ''
-    const requestedDevice = devices.find((candidate) => candidate.uid === requestedUid)
-    const device = requestedDevice ?? devices.find((candidate) => candidate.isDefault) ?? devices[0]
-    if (!device)
-      return {
-        ok: false,
-        kind: 'unavailable',
-        error: t('main.error.noMicrophoneAvailable')
-      }
-    const requestedChannel =
-      typeof options.channel === 'number' &&
-      Number.isInteger(options.channel) &&
-      options.channel >= 0
-        ? options.channel
-        : 0
-    const channel = Math.min(requestedChannel, device.channels - 1)
+    const requestedDevice = devices.find(device => device.uid === requestedUid)
+    let device = requestedDevice ?? devices.find(device => device.isDefault) ?? devices[0]
+    if (!device) return { ok: false, kind: 'unavailable', error: t('main.error.noMicrophoneAvailable') }
+    const requestedChannel = typeof options.channel === 'number' && Number.isInteger(options.channel) && options.channel >= 0 ? options.channel : 0
+    let channel = Math.min(requestedChannel, device.channels - 1)
+    const generation = ++this.nextGeneration
     const token = randomUUID()
-    const controlPath = join(app.getPath('temp'), `singz-input-${token}.command`)
-    const recordingDirectory = join(app.getPath('userData'), 'training-recordings')
-    const modelPath = app.isPackaged
-      ? join(process.resourcesPath, 'pitch', 'crepe-tiny.bin')
-      : join(app.getAppPath(), 'assets', 'pitch', 'crepe-tiny.bin')
-    const child = spawn(bin, [
-      'live-input',
-      '--device-uid',
-      device.uid,
-      '--channel',
-      String(channel),
-      '--crepe-model',
-      modelPath,
-      '--control-file',
-      controlPath,
-      '--record-dir',
-      recordingDirectory
-    ])
-    startupPhase('capture process spawned')
+    const modelPath = app.isPackaged ? join(process.resourcesPath, 'pitch', 'crepe-tiny.bin') : join(app.getAppPath(), 'assets', 'pitch', 'crepe-tiny.bin')
     let firstFrame = true
-    let resolveStopped!: () => void
-    const stopped = new Promise<void>((resolve) => {
-      resolveStopped = resolve
-    })
-    const active: ActiveInput = {
-      token,
-      controlPath,
-      commandSequence: 0,
-      child,
-      sender,
-      ready: false,
-      stopping: false,
-      stopped,
-      resolveStopped
+    const send = (event: DesktopAudioInputEvent): void => {
+      if (this.active?.token === token && !sender.isDestroyed()) sender.send('audio-input:event', token, event)
     }
-    this.active = active
-    let stdout = ''
-    let errTail = ''
-    let startSettled = false
-    return await new Promise<DesktopAudioInputStartResult>((resolve) => {
-      const timer = setTimeout(() => {
-        active.stopping = true
-        child.kill('SIGKILL')
-        settle({
-          ok: false,
-          kind: 'unavailable',
-          error: t('main.error.micTookTooLongToStart')
-        })
-      }, CONTROL_TIMEOUT_MS)
-      const settle = (result: DesktopAudioInputStartResult): void => {
-        if (startSettled) return
-        startSettled = true
-        clearTimeout(timer)
-        resolve(result)
+    try {
+      const receiveFrame = (frame: import('../shared/types').CaptureAnalysisWindow): void => {
+        if (firstFrame) {
+          firstFrame = false
+          log('mic', `startup · first analysed frame · ${(performance.now() - startupAt).toFixed(1)} ms total`)
+        }
+        send({ type: 'frame', frequency: frame.frequency, clarity: frame.clarity, rms: frame.rms, dbfs: frame.dbfs, detector: frame.detector, inferenceMs: frame.inferenceMs })
       }
-      const send = (event: DesktopAudioInputEvent): void => {
-        if (!sender.isDestroyed()) sender.send('audio-input:event', token, event)
-      }
-      child.stdout?.on('data', (chunk: Buffer) => {
-        stdout += chunk.toString('utf8')
-        let newline: number
-        while ((newline = stdout.indexOf('\n')) >= 0) {
-          const line = stdout.slice(0, newline).trim()
-          stdout = stdout.slice(newline + 1)
-          if (!line.startsWith('{')) continue
-          let rawEvent: Record<string, unknown>
-          try {
-            rawEvent = JSON.parse(line) as Record<string, unknown>
-          } catch {
-            continue
-          }
-          if (rawEvent.version === 1 && rawEvent.type === 'recording') {
-            if (rawEvent.state === 'saved')
-              log(
-                'training-recording',
-                `saved · ${rawEvent.filename} · ${Number(rawEvent.seconds).toFixed(1)} s · ${
-                  rawEvent.sampleRate
-                } Hz · mono PCM16`
-              )
-            active.recordingReply?.(rawEvent)
-            continue
-          }
-          if (rawEvent.version === 1 && rawEvent.type === 'ready') {
-            active.ready = true
-            startupPhase('capture ready')
-            log(
-              'mic',
-              'pitch detector · crepe-tiny · zdsp CPU · 64 ms window · 20 ms hop · confidence floor 0.50'
-            )
-            settle({
-              ok: true,
-              token,
-              device,
-              channel,
-              fallback: Boolean(requestedUid) && !requestedDevice
-            })
-            continue
-          }
-          const event = parseDesktopAudioInputEvent(line)
-          if (event) {
-            if (firstFrame && rawEvent.type === 'frame') {
-              firstFrame = false
-              startupPhase('first analysed frame')
+      let result = binding.beginCapture({ deviceUid: device.uid, inputChannel: channel, crepeModelPath: modelPath }, generation, receiveFrame)
+      // Only a vanished endpoint/channel permits one refreshed fallback. A
+      // permission, model or driver error must retain its original evidence.
+      if (!result.ok && /audio input (?:device|channel).*(?:disappeared|not alive|not found)/i.test(result.error ?? '')) {
+        const refreshed = binding.refreshSharedAudioInventory()
+        if (refreshed.ok) {
+          const inventory = binding.inputDevices()
+          if (inventory.ok) {
+            const fallback = inventory.devices.find(candidate => candidate.uid === requestedUid) ?? inventory.devices.find(candidate => candidate.isDefault) ?? inventory.devices[0]
+            if (fallback) {
+              device = fallback
+              channel = Math.min(requestedChannel, device.channels - 1)
+              result = binding.beginCapture({ deviceUid: device.uid, inputChannel: channel, crepeModelPath: modelPath }, generation, receiveFrame)
             }
-            send(event)
           }
         }
-      })
-      child.stderr?.on('data', (chunk: Buffer) => {
-        const text = chunk.toString('utf8')
-        errTail = (errTail + text).slice(-4000)
-        logChunk('audio-input', text)
-      })
-      child.on('error', (error) => {
-        try {
-          unlinkSync(active.controlPath)
-        } catch {}
-        active.recordingReply?.({
-          state: 'error',
-          error: 'The microphone stopped.'
-        })
-        if (this.active === active) this.active = null
-        active.resolveStopped()
-        settle({
-          ok: false,
-          kind: 'unavailable',
-          error: t('main.error.couldNotStartMicrophone', {
-            message: error.message
-          })
-        })
-      })
-      const onSenderDestroyed = (): void => {
-        if (this.active === active) void this.stop(token)
       }
-      sender.once('destroyed', onSenderDestroyed)
-      onChildSettled(child, 'audio-input', (code, signal) => {
-        sender.removeListener('destroyed', onSenderDestroyed)
-        try {
-          unlinkSync(active.controlPath)
-        } catch {}
-        active.recordingReply?.({
-          state: 'error',
-          error: 'The microphone stopped.'
-        })
-        if (this.active === active) this.active = null
-        active.resolveStopped()
-        const error = errTail.trim().split('\n').pop()
-        if (!startSettled)
-          settle({
-            ok: false,
-            kind: 'unavailable',
-            error:
-              error || `The microphone exited before it was ready (${signal ?? code ?? 'unknown'}).`
-          })
-        else if (!active.stopping) send(error ? { type: 'error', error } : { type: 'ended' })
-      })
-    })
+      if (!result.ok) return { ok: false, kind: 'unavailable', error: result.error || 'The microphone could not start.' }
+      if (this.shuttingDown || sender.isDestroyed()) {
+        binding.cancelCapture(generation)
+        return { ok: false, kind: 'unavailable', error: 'The training window closed.' }
+      }
+      const destroyed = (): void => { void this.stop(token) }
+      sender.once('destroyed', destroyed)
+      const watchdog = setInterval(() => {
+        if (this.active?.token !== token || this.active.stopping) return
+        let status: ReturnType<NativeCaptureBinding['captureState']>
+        try { status = binding.captureState() }
+        catch (error) { send({ type: 'error', error: String(error) }); void this.stop(token); return }
+        if (status.state === 'running') return
+        send(status.error ? { type: 'error', error: status.error } : { type: 'ended' })
+        void this.stop(token)
+      }, 250)
+      watchdog.unref()
+      this.active = { token, generation, sender, ready: true, recording: false, stopping: false, watchdog, removeDestroyed: () => sender.removeListener('destroyed', destroyed) }
+      log('mic', `startup · capture ready · ${(performance.now() - startupAt).toFixed(1)} ms total · shared native host · crepe-tiny`)
+      return { ok: true, token, device, channel, fallback: Boolean(requestedUid) && device.uid !== requestedUid }
+    } catch (error) {
+      try { binding.cancelCapture(generation) } catch { /* start rollback */ }
+      return { ok: false, kind: 'unavailable', error: String(error) }
+    }
   }
 
   async recording(action: 'record' | 'finish'): Promise<Record<string, unknown>> {
     const active = this.active
-    if (!active || !active.ready || active.recordingReply)
-      return { ok: false, error: 'The microphone is unavailable or busy.' }
-    const filename = `SingZ-microphone-${new Date().toISOString().replace(/[-:.]/g, '')}-session-${
-      process.pid
-    }-${active.token}-take-${active.commandSequence + 1}.wav`
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        active.recordingReply = undefined
-        resolve({ ok: false, error: 'The recording command timed out.' })
-      }, 5000)
-      active.recordingReply = (value) => {
-        clearTimeout(timer)
-        active.recordingReply = undefined
-        resolve({ ...value, ok: value.state !== 'error' })
-      }
-      try {
-        if (action === 'record') mkdirSync(join(app.getPath('userData'), 'training-recordings'), { recursive: true })
-        writeControl(
-          active.controlPath,
-          `${++active.commandSequence} ${action === 'record' ? 'record ' + filename : 'finish'}\n`
-        )
-        if (action === 'record')
-          log(
-            'training-recording',
-            `started · ${filename} · maximum 30 s · microphone before pitch analysis`
-          )
-      } catch (error) {
-        active.recordingReply({ state: 'error', error: String(error) })
-      }
-    })
+    if (!active || !active.ready || (active.stopping && action === 'record')) return { ok: false, error: 'The microphone is unavailable.' }
+    const directory = join(app.getPath('userData'), 'training-recordings')
+    mkdirSync(directory, { recursive: true })
+    const filename = `SingZ-microphone-${new Date().toISOString().replace(/[-:.]/g, '')}-${active.token}-take-${++this.recordingTake}.wav`
+    const result = this.native().captureRecording(action, join(directory, filename), active.generation)
+    if (result.ok) {
+      if (action === 'record') { active.recording = true; log('training-recording', `started · ${filename} · maximum 30 s · raw native microphone`); return { ...result, filename } }
+      active.recording = false
+      log('training-recording', `saved · ${result.filename} · ${Number(result.seconds).toFixed(1)} s · ${result.sampleRate} Hz · mono PCM16`)
+    }
+    return result
   }
+
+  configureOutput(uid: unknown, provider: unknown): { ok: boolean; error?: string } {
+    if (typeof uid !== 'string' || uid.length > 4096 || (provider !== 'coreaudio' && provider !== 'wasapi' && provider !== 'asio')) return { ok: false, error: 'Invalid output device.' }
+    try { return this.native().initializeSharedAudio({ outputDeviceUid: uid, provider: provider as DesktopPlaybackProvider }) }
+    catch (error) { return { ok: false, error: String(error) } }
+  }
+
+  status(): DesktopTrainingAudioStatus | null {
+    try { return this.native().trainingCueStatus() } catch { return null }
+  }
+
+  cue(config: DesktopTrainingPcmCue): DesktopTrainingPcmResult {
+    const processingAt = performance.now()
+    try {
+      if (!config || typeof config.generation !== 'string' || config.generation.length > 20 || !/^\d+$/.test(config.generation) || BigInt(config.generation) < 1n || BigInt(config.generation) > 0xffffffffffffffffn ||
+          !Array.isArray(config.channels) || config.channels.length < 1 || config.channels.length > 2 ||
+          !config.channels.every(channel => channel instanceof Float32Array) ||
+          config.channels.some(channel => channel.length !== config.channels[0].length) ||
+          !Number.isFinite(config.sampleRate) || config.sampleRate < 8000 || config.sampleRate > 192000 ||
+          config.channels[0].length > config.sampleRate * 120 || config.channels.reduce((bytes, plane) => bytes + plane.byteLength, 0) > 48 * 1024 * 1024 ||
+          !Number.isFinite(config.startDelayMs) || config.startDelayMs < 0 || config.startDelayMs > 1000 ||
+          !Number.isFinite(config.gain) || config.gain < 0 || config.gain > 4)
+        return { ok: false, error: 'Invalid training audio.' }
+      const binding = this.native()
+      const result = binding.scheduleTrainingCue({ ...config, gain: process.env.SINGZ_MUTE === '1' ? 0 : config.gain }, BigInt(config.generation))
+      if (!result.ok) return { ok: false, error: result.error || 'Training audio could not start.' }
+      const status = binding.trainingCueStatus()
+      return { ok: true, startsAfterMs: Number(BigInt(result.startHostTimeNs) - BigInt(status.hostTimeNs)) / 1e6,
+        durationMs: result.durationMs, outputLatencyMs: status.outputLatencyMs, processingMs: performance.now() - processingAt }
+    } catch (error) { return { ok: false, error: String(error) } }
+  }
+
+  cancelCues(generation: unknown): { ok: boolean; error?: string } {
+    if (typeof generation !== 'string' || generation.length > 20 || !/^\d+$/.test(generation) || BigInt(generation) < 1n || BigInt(generation) > 0xffffffffffffffffn) return { ok: false, error: 'Invalid training generation.' }
+    try { return this.native().cancelTrainingCues(BigInt(generation)) }
+    catch (error) { return { ok: false, error: String(error) } }
+  }
+
+  setCueGain(generation: unknown, gain: unknown): { ok: boolean; error?: string } {
+    if (typeof generation !== 'string' || generation.length > 20 || !/^\d+$/.test(generation) || BigInt(generation) < 1n || BigInt(generation) > 0xffffffffffffffffn || typeof gain !== 'number' || !Number.isFinite(gain) || gain < 0 || gain > 4)
+      return { ok: false, error: 'Invalid training gain.' }
+    try { return this.native().setTrainingCueGain(BigInt(generation), process.env.SINGZ_MUTE === '1' ? 0 : gain) }
+    catch (error) { return { ok: false, error: String(error) } }
+  }
+
+  stopActive(): Promise<{ ok: boolean; error?: string }> { this.shuttingDown = true; return this.stop(this.active?.token) }
 
   async stop(token: unknown): Promise<{ ok: boolean; error?: string }> {
     const active = this.active
-    if (!active || typeof token !== 'string' || active.token !== token) return { ok: true }
+    if (!active || active.token !== token) return { ok: true }
+    if (active.stopPending) return active.stopPending
     active.stopping = true
-    try {
-      if (process.platform === 'darwin') active.child.stdin?.end()
-      else writeControl(active.controlPath, `${++active.commandSequence} stop\n`)
-      if (await waitForStopped(active, 1000)) return { ok: true }
-      active.child.kill('SIGKILL')
-      if (await waitForStopped(active, 1000)) return { ok: true }
-      return { ok: false, error: t('main.error.micDidNotConfirmStop') }
-    } catch (error) {
-      log(
-        'audio-input',
-        `stop failed: ${error instanceof Error ? error.message : String(error)}`,
-        'error'
-      )
-      return {
-        ok: false,
-        error: error instanceof Error ? error.message : String(error)
+    const stopping = (async (): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        if (active.recording) await this.recording('finish')
+        const result = this.native().cancelCapture(active.generation)
+        if (!result.cancelled) return { ok: false, error: t('main.error.micDidNotConfirmStop') }
+        clearInterval(active.watchdog)
+        active.removeDestroyed()
+        if (this.active === active) this.active = null
+        return { ok: true }
+      } catch (error) {
+        return { ok: false, error: String(error) }
       }
-    }
+    })()
+    active.stopPending = stopping
+    const result = await stopping
+    if (!result.ok) { active.stopPending = undefined; active.stopping = false }
+    return result
   }
+
 }
 
 /** Record the actual capture transition, once per start, in the existing app log. */
@@ -564,6 +380,13 @@ export function reportDesktopAudioInputFallback(raw: unknown): {
 const desktopAudioInput = new DesktopAudioInput()
 
 export function registerDesktopAudioInput(): void {
+  void desktopAudioInput.initialize().catch(error => log('dsp', `shared audio startup failed: ${String(error)}`, 'error'))
+  app.on('before-quit', () => { if (desktopAudioInput) void desktopAudioInput.stopActive() })
+  ipcMain.handle('training:output-route', (_event, uid: unknown, provider: unknown) => desktopAudioInput.configureOutput(uid, provider))
+  ipcMain.handle('training:audio-status', () => desktopAudioInput.status())
+  ipcMain.handle('training:cue', (_event, config: DesktopTrainingPcmCue) => desktopAudioInput.cue(config))
+  ipcMain.handle('training:cue-gain', (_event, generation: unknown, gain: unknown) => desktopAudioInput.setCueGain(generation, gain))
+  ipcMain.handle('training:cue-cancel', (_event, generation: unknown) => desktopAudioInput.cancelCues(generation))
   ipcMain.handle('audio-input:recording', (_event, action: unknown) =>
     action === 'record' || action === 'finish'
       ? desktopAudioInput.recording(action)

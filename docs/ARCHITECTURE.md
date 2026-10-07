@@ -18,8 +18,30 @@ LogPanel (diagnostics)                            log.ts       ring-buffer app l
 App.tsx (orchestration)                           projects.ts  ~/Documents/SingZ projects
 ```
 
-The current playback and capture paths are intentionally still separate. The
-phased proposal for a shared native input/output graph, built-in processors,
+Desktop song playback and training now attach to a process-lifetime native audio
+service. Its output host remains prepared when individual clients stop; capture
+is activated only on demand. On macOS, stopping capture retains a prepared
+audio unit while stopping hardware recording; the next matching device/channel
+activation creates fresh delivery state and restarts that unit. Device discovery is cached and refreshed by native
+configuration notifications rather than by each microphone activation. The
+service can own independent input and output transports when the selected
+macOS endpoints cannot form a single duplex stream.
+
+Training reference phrases keep their existing sample levels and envelopes.
+Their PCM is prepared off the audio callback and scheduled through the native
+output host, alongside the retained song renderer. CREPE analysis stays on the
+capture delivery worker. Render-client removal closes callback admission and
+drains in-flight callbacks before freeing client state.
+
+The mobile song and training bridges use the same service and portable PCM
+mixer. Device inventory warms at module initialization and changes on route
+notifications; input startup reuses the native device snapshot or the validated
+iOS route lease. Mobile opens the shared output on its first native song or cue,
+after suspending the legacy React Native output context. This remains necessary
+while the legacy playback fallback exists. Background suspension parks idle
+output, while an authorized native song can keep playing.
+
+The phased proposal for a shared native input/output graph, built-in processors,
 analyzer taps and desktop plug-in hosting is in
 [DSP-GRAPH-PLAN.md](DSP-GRAPH-PLAN.md). Its platform, DAW/effects-engine,
 real-time scheduling, zero-copy and acceleration research is recorded in

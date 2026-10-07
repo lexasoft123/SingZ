@@ -1,4 +1,5 @@
 #import <React/RCTBridgeModule.h>
+#import <AVFAudio/AVFAudio.h>
 
 #import "NativePlaybackBridgeSupport.h"
 #import "NativeCodecTargetProof.h"
@@ -12,11 +13,38 @@
 @implementation NativeAudioRuntime
 
 RCT_EXPORT_MODULE(NativeAudioRuntime)
+- (instancetype)init {
+  if ((self = [super init])) {
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(sharedRouteChanged:) name:AVAudioSessionRouteChangeNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(sharedRouteChanged:) name:AVAudioSessionMediaServicesWereResetNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(sharedInterrupted:) name:AVAudioSessionInterruptionNotification object:nil];
+    SingzRefreshSharedAudioInventory();
+  }
+  return self;
+}
+- (void)sharedRouteChanged:(NSNotification*)notification {
+  if ([notification.name isEqualToString:AVAudioSessionMediaServicesWereResetNotification]) SingzParkSharedOutput();
+  SingzRefreshSharedAudioInventory();
+}
+- (void)sharedInterrupted:(NSNotification*)notification {
+  if ([notification.userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue] == AVAudioSessionInterruptionTypeBegan) SingzParkSharedOutput();
+}
+- (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self]; }
+
 
 + (BOOL)requiresMainQueueSetup
 {
   return NO;
 }
+
+RCT_EXPORT_METHOD(parkSharedOutput:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject)
+{ SingzParkSharedOutput(); resolve(@YES); }
+RCT_EXPORT_METHOD(scheduleTrainingPcm:(NSString*)pcm rate:(NSNumber*)rate generation:(NSNumber*)generation gain:(NSNumber*)gain resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject)
+{ SingzScheduleTrainingPcm(pcm, rate, generation, gain, resolve, reject); }
+RCT_EXPORT_METHOD(cancelTrainingPcm:(NSNumber*)generation resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject)
+{ SingzCancelTrainingPcm(generation); resolve(@YES); }
+RCT_EXPORT_METHOD(setTrainingPcmGain:(NSNumber*)generation gain:(NSNumber*)gain resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject)
+{ SingzSetTrainingPcmGain(generation, gain); resolve(@YES); }
 
 RCT_EXPORT_METHOD(status:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)

@@ -189,6 +189,11 @@ const api: SingzApi = {
 
   listDesktopAudioInputs: () => ipcRenderer.invoke('audio-input:list'),
   startDesktopAudioInput: (options) => ipcRenderer.invoke('audio-input:start', options),
+  configureDesktopTrainingOutput: (uid, provider) => ipcRenderer.invoke('training:output-route', uid, provider),
+  desktopTrainingAudioStatus: () => ipcRenderer.invoke('training:audio-status'),
+  scheduleDesktopTrainingCue: config => ipcRenderer.invoke('training:cue', config),
+  setDesktopTrainingCueGain: (generation, gain) => ipcRenderer.invoke('training:cue-gain', generation, gain),
+  cancelDesktopTrainingCues: generation => ipcRenderer.invoke('training:cue-cancel', generation),
   reportTrainingTiming: line => ipcRenderer.send('training:timing', line),
   reportDesktopAudioInputFallback: (detail) => ipcRenderer.invoke('audio-input:fallback', detail),
   trainingRecording: action => ipcRenderer.invoke('audio-input:recording', action),

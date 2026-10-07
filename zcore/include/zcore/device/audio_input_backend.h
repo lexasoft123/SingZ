@@ -21,6 +21,9 @@ class AudioInputBackend {
                                 void* context) = 0;
   virtual AudioInputResult start() = 0;
   virtual void stop() = 0;
+  // Stops hardware callbacks while retaining prepared device resources. A
+  // false result requests ordinary teardown; other platforms keep that default.
+  virtual bool suspendPrepared() { return false; }
   // Lock-free backend flags are rendered into a message here, off RT.
   virtual bool takeFailure(std::string& error) = 0;
 };

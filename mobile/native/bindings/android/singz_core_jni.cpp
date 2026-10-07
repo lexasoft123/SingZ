@@ -17,6 +17,7 @@
 
 #include <zcore/legacy/analysis.h>
 #include <zcore/device/audio_input.h>
+#include <shared_audio_service.h>
 #include <zdsp/analysis/capture_adapter.h>
 #include <zdsp/analysis/pitch_analysis_module.h>
 #include <zcore/audio/capture_recording.h>
@@ -377,8 +378,9 @@ Java_com_singzplayer_split_SingzCore_startAudioInput(
   config.deviceUid = toStd(env, juid);
   config.channel = static_cast<uint32_t>(channel);
   config.ringBlocks = 32;
+  const auto inventory = singz::sharedAudioService().inputDevices();
   const singz::AudioInputResult result = input->start(
-      config, [bridge](const singz::AudioInputBlockView& block) { bridge->emit(block); });
+      config, [bridge](const singz::AudioInputBlockView& block) { bridge->emit(block); }, &inventory);
   if (!result.ok) {
     bridge->active.store(false, std::memory_order_release);
     return stringArray(env, {result.error});

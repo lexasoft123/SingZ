@@ -23,6 +23,7 @@ import {
   resolveCaptureAddonPath,
   stageArtifactForLoad,
   type CaptureCodecRuntime,
+  sharedCaptureBindingLoader,
   type NativeCaptureBinding
 } from '../../src/main/capture'
 import { logEntries } from '../../src/main/log'
@@ -252,6 +253,13 @@ function fakeBinding(): NativeCaptureBinding & {
     cancelled: [],
     endedMonitors: [],
     buildInfo: { electronVersion: 'test', sourceStamp: 'test' },
+    initializeSharedAudio: () => ({ ok: true }),
+    refreshSharedAudioInventory: () => ({ ok: true }),
+    scheduleTrainingCue: () => ({ ok: true, startHostTimeNs: '1000000000', durationMs: 550 }),
+    cancelTrainingCues: () => ({ ok: true }),
+    setTrainingCueGain: () => ({ ok: true }),
+    trainingCueStatus: () => ({ hostTimeNs: '950000000', outputLatencyMs: 10 }),
+    captureRecording: () => ({ ok: true }),
     inputDevices: () => ({
       ok: true,
       devices: [{
@@ -1292,5 +1300,34 @@ describe('streamed-lane starvation', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+
+describe('one process-wide native capture binding', () => {
+  it('shares one successful staged module between independent audio adapters', () => {
+    const native = fakeBinding()
+    const load = vi.fn(() => native)
+    const shared = sharedCaptureBindingLoader(load)
+    const songOwner = new CaptureOwner(undefined, shared)
+    const micOwner = new CaptureOwner(undefined, shared)
+    expect(songOwner.devices().ok).toBe(true)
+    expect(micOwner.devices().ok).toBe(true)
+    expect(shared()).toBe(native)
+    expect(load).toHaveBeenCalledOnce()
+  })
+  it('retries failures before initialization but never loads another incompatible module', () => {
+    const native = fakeBinding()
+    const retry = vi.fn().mockImplementationOnce(() => { throw new CaptureAddonLoadError('not built', true) }).mockReturnValue(native)
+    const shared = sharedCaptureBindingLoader(retry)
+    expect(shared).toThrow('not built')
+    expect(shared()).toBe(native)
+    expect(shared()).toBe(native)
+    expect(retry).toHaveBeenCalledTimes(2)
+    const fatal = vi.fn(() => { throw new CaptureAddonLoadError('wrong exports', false) })
+    const invalid = sharedCaptureBindingLoader(fatal)
+    expect(invalid).toThrow('wrong exports')
+    expect(invalid).toThrow('wrong exports')
+    expect(fatal).toHaveBeenCalledOnce()
   })
 })
