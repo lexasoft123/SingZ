@@ -557,3 +557,13 @@ invalid caches fall back to the normal native archive. Tests:
 `node --test mobile/scripts/tests/{incremental-native-mirror,ios-native-inputs}.test.cjs`
 and `ruby mobile/ios/fastlane/tests/app-build-number-test.rb`. Cached JS exports
 retain Metro’s content-keyed transforms; they do not force a cache reset.
+
+### TestFlight during an open App Store review
+
+Release tags still upload to TestFlight and distribute to the configured external
+tester groups while another version is awaiting App Store review. The `ship` lane
+reports that store submission is deferred and leaves the existing review unchanged.
+After that review closes, dispatch `submit` on the release tag with the uploaded
+build number to submit the same binary without rebuilding. Manual `beta` dispatches
+are always TestFlight-only. Explicit `submit` and `release` still refuse an open
+App Store submission.
