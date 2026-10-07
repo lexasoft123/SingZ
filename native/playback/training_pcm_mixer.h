@@ -21,6 +21,7 @@ struct Voice {
   uint64_t generation = 0, startNs = 0;
   double rate = 0;
   std::atomic<float> gain{1};
+  float maximumGain = 8;
   uint32_t cancellationFrames = 0;
   double sourceCursor = 0;
   bool cursorStarted = false;
@@ -51,9 +52,13 @@ struct Voice {
     if (!generation || !startNs || !std::isfinite(rate) || rate < 8000 || rate > 192000 ||
         !std::isfinite(gain) || gain < 0 || gain > 8 || planes.empty() || planes.size() > 2 || planes.front().empty() || planes.front().size() > rate * 120) return false;
     const size_t frames = planes.front().size();
+    float peak = 0;
     for (const auto& plane : planes) {
       if (plane.size() != frames) return false;
-      for (float sample : plane) if (!std::isfinite(sample)) return false;
+      for (float sample : plane) {
+        if (!std::isfinite(sample)) return false;
+        peak = std::max(peak, std::abs(sample));
+      }
     }
     std::lock_guard<std::mutex> lock(mutex_);
     if (!canScheduleLocked(frames, planes.size())) return false;
@@ -63,7 +68,10 @@ struct Voice {
       if (!voice.state.compare_exchange_strong(expected, Voice::Writing, std::memory_order_acq_rel)) continue;
       voice.planes = std::move(planes);
       voice.generation = generation; voice.rate = rate; voice.startNs = startNs;
-      voice.gain.store(gain, std::memory_order_relaxed);
+      // Whole-phrase gain cap: no compression, clipping or envelope changes.
+      // Leave 1 dB for reconstruction/interpolation peaks.
+      voice.maximumGain = peak > 0 ? std::min(8.0F, 0.89125094F / peak) : 8.0F;
+      voice.gain.store(std::min(gain, voice.maximumGain), std::memory_order_relaxed);
       voice.cancellationFrames = 0;
       voice.sourceCursor = 0; voice.cursorStarted = false;
       voice.cancelled.store(false, std::memory_order_relaxed);
@@ -81,7 +89,7 @@ struct Voice {
     if (!std::isfinite(gain) || gain < 0 || gain > 8) return;
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto& voice : voices_) if (voice.state.load(std::memory_order_acquire) != Voice::Finished && voice.generation == generation)
-      voice.gain.store(gain, std::memory_order_relaxed);
+      voice.gain.store(std::min(gain, voice.maximumGain), std::memory_order_relaxed);
   }
   void clearQuiesced() {
     std::lock_guard<std::mutex> lock(mutex_);

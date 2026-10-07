@@ -1,5 +1,4 @@
 {
-  "targetLufs": -17,
   "referenceVolume": 1,
   "sampleVoiceGain": 0.6,
   "maximumReferenceVolume": 2,
@@ -1840,5 +1839,10 @@
       }
     }
   ],
-  "rmsMeasurement": "Unweighted RMS dBFS over rendered note; LUFS uses EBU R128 frequency weighting. Reference volume 1."
+  "rmsMeasurement": "Unweighted RMS dBFS over rendered note; LUFS uses EBU R128 frequency weighting. Reference volume 1.",
+  "baselineTargetLufs": -17,
+  "playbackBoostDb": 5.5,
+  "nominalPlaybackTargetLufs": -11.5,
+  "nativeCuePeakCeilingDbfs": -1,
+  "measurementStage": "Metrics below describe baseline PCM before the linear playback boost. Native cue gain is capped uniformly to preserve headroom without compression."
 }

@@ -1,11 +1,16 @@
 /** Training gain calibration for the bundled FluidR3 samples, MIDI 36–84.
  * Measured over the audible 2.2 s note with the 8 ms onset/150 ms release,
  * native playback-speed mapping, and 0.6 voice gain. EBU R128 integrated
- * loudness target: -17 LUFS at reference volume 1; max volume 2 retains
- * true-peak headroom. Organ values also account for its waveshaper.
+ * baseline loudness target: -17 LUFS at reference volume 1. Playback adds
+ * the linear boost below after rendering, targeting about -11.5 LUFS. Organ values also account for its waveshaper.
  * Apply gain only, preserving the instrument envelope. Recalibrate whenever
  * samples, voice timing or the organ registration/processing changes.
  */
+/** Common linear boost preserves relative levels, attacks and sustain.
+ * The loudest calibrated sample retains about 1 dB of peak headroom at unity. */
+export const TRAINING_INSTRUMENT_BOOST_DB = 5.5
+export const TRAINING_INSTRUMENT_BOOST = 10 ** (TRAINING_INSTRUMENT_BOOST_DB / 20)
+
 export type SampleInstrument = 'piano' | 'electric' | 'guitar'
 export type AuditionInstrument = SampleInstrument | 'organ'
 const LEVELS: Record<AuditionInstrument, readonly number[]> = {

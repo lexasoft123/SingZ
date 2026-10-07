@@ -1,4 +1,4 @@
-import { sampleAuditionGain, trainingOrganCurve } from '../../../shared/training-sound-levels'
+import { sampleAuditionGain, trainingOrganCurve, TRAINING_INSTRUMENT_BOOST } from '../../../shared/training-sound-levels'
 import type { TrainingSound } from '../../../shared/training-sound'
 import type { TrainingCue, TrainingCuePurpose } from '../../../shared/training-types'
 import { createTrainingVoices } from './training-voices'
@@ -33,6 +33,10 @@ export async function renderTrainingPhrase(context: AudioContext, samples: Map<s
         cues[cue.cueIndex].articulation === 'together' ? 1 / Math.max(1, cue.notes.length) : 1,
         1, sound)
     const rendered = await offline.startRendering()
+    for (let channel = 0; channel < rendered.numberOfChannels; channel++) {
+      const pcm = rendered.getChannelData(channel)
+      for (let index = 0; index < pcm.length; index++) pcm[index] *= TRAINING_INSTRUMENT_BOOST
+    }
     return { rendered, planned, durationSec: cursor }
 }
 

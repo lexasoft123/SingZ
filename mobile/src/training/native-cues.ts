@@ -1,4 +1,4 @@
-import { trainingOrganCurve } from '../gen/training-lib'
+import { trainingOrganCurve, TRAINING_INSTRUMENT_BOOST } from '../gen/training-lib'
 import { nativeTrainingOutput } from '../playback/native'
 import { OfflineAudioContext, type AudioBuffer } from 'react-native-audio-api'
 import { planTrainingCues, trainingOrganOscillators, type VocalTrainingCue } from './cues'
@@ -52,7 +52,9 @@ export async function renderTrainingPcm(cues: readonly VocalTrainingCue[], sound
   let buffer: AudioBuffer | undefined
   try {
     buffer = await ctx.startRendering()
-    return encodeTrainingPcm(buffer.getChannelData(0))
+    const pcm = buffer.getChannelData(0)
+    for (let index = 0; index < pcm.length; index++) pcm[index] *= TRAINING_INSTRUMENT_BOOST
+    return encodeTrainingPcm(pcm)
   } finally {
     for (const { source, gain } of nodes) {
       if ('buffer' in source) source.buffer = null
