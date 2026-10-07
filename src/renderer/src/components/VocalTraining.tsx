@@ -1,3 +1,4 @@
+import { reportTrainingTiming } from '../audio/training-timing'
 import type { IconName, IconProps } from '@singz/ui/icons'
 import { TRAINING_SOUNDS, type TrainingSound } from '../../../shared/training-sound'
 import { trainingRangeNotice } from '../../../shared/training-session'
@@ -685,6 +686,8 @@ export default function VocalTraining({
       const beginRun = claimTrainingBegin(beginLock.current)
       if (beginRun === null) return
       setBeginBusy(true)
+      const preparationAt = performance.now()
+      reportTrainingTiming(`prompt ${prompt.id} · preparing · ${mic.active ? 'microphone retained' : 'microphone starting'}`)
       void (async () => {
         dispatch({ type: 'set-error', error: null })
         if (!trainingOwnsForeground()) {
@@ -719,6 +722,7 @@ export default function VocalTraining({
             () => isTrainingBeginCurrent(beginLock.current, beginRun)
           )
           if (status === 'cancelled') return
+          reportTrainingTiming(`prompt ${prompt.id} · microphone ready · ${(performance.now() - preparationAt).toFixed(1)} ms preparation`)
           if (prompt.taskMode !== 'identify') onMicDevice(mic.device)
         } catch (error) {
           reportError(error)
@@ -729,6 +733,7 @@ export default function VocalTraining({
           interruptRuntime()
           return
         }
+        reportTrainingTiming(`prompt ${prompt.id} · preparation complete · ${(performance.now() - preparationAt).toFixed(1)} ms`)
         dispatch({ type: transition })
         if (!isTrainingBeginCurrent(beginLock.current, beginRun)) return
         await playPrompt(prompt)

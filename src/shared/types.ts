@@ -1269,6 +1269,7 @@ export interface SingzApi {
     deviceUid?: string
     channel?: number
   }): Promise<DesktopAudioInputStartResult>
+  reportTrainingTiming(line: string): void
   reportDesktopAudioInputFallback(detail: DesktopAudioInputFallback): Promise<{ ok: boolean; error?: string }>
   trainingRecording(action: 'record' | 'finish'): Promise<{ok:boolean;error?:string;filename?:string;path?:string;seconds?:number;sampleRate?:number}>
   saveTrainingRecording(path: string): Promise<{ok:boolean;error?:string;canceled?:boolean}>

@@ -1070,11 +1070,22 @@ static int liveInputCommand(int argc, char** argv) {
   liveInputStop = 0;
   std::signal(SIGINT, stopLiveInput);
   std::signal(SIGTERM, stopLiveInput);
+  const auto startupAt = std::chrono::steady_clock::now();
+  auto phaseAt = startupAt;
+  const auto startupPhase = [&](const char* phase) {
+    const auto now = std::chrono::steady_clock::now();
+    std::fprintf(stderr, "startup: %s · %.1f ms phase · %.1f ms total\n", phase,
+        std::chrono::duration<double, std::milli>(now - phaseAt).count(),
+        std::chrono::duration<double, std::milli>(now - startupAt).count());
+    std::fflush(stderr);
+    phaseAt = now;
+  };
   NdjsonWriter writer;
   std::unique_ptr<zdsp::analysis::PitchAnalysisModule> pitchModule;
   try { if(!crepePath.empty()) pitchModule=std::make_unique<zdsp::analysis::PitchAnalysisModule>(
       zdsp::analysis::PitchAnalysisConfig{zdsp::analysis::PitchDetectorKind::CrepeTiny, crepePath, 1}); }
   catch(const std::exception& e){std::fprintf(stderr,"CREPE: %s\n",e.what());return 1;}
+  startupPhase("pitch model initialized");
   std::shared_ptr<singz::CaptureRecording> recording;
   std::string lastControl;
   std::atomic<bool> ready{false};
@@ -1181,6 +1192,7 @@ static int liveInputCommand(int argc, char** argv) {
               analysisPlan.analysisSampleRate);
         }
       });
+  startupPhase("audio input open/start returned");
   if (!started.ok) {
     std::fprintf(stderr, "live-input: %s\n", started.error.c_str());
     const std::string errorLine = jsonLine(
@@ -1215,6 +1227,7 @@ static int liveInputCommand(int argc, char** argv) {
     writer.close();
     return 1;
   }
+  startupPhase("analysis stream ready");
   ready.store(true, std::memory_order_release);
 
   uint64_t reportedOverruns = 0;
