@@ -1,3 +1,35 @@
+# Portable LAME encoder; called only by ordinary export workers.
+add_library(singz_native_lame STATIC EXCLUDE_FROM_ALL
+  lame/libmp3lame/VbrTag.c
+  lame/libmp3lame/bitstream.c
+  lame/libmp3lame/encoder.c
+  lame/libmp3lame/fft.c
+  lame/libmp3lame/gain_analysis.c
+  lame/libmp3lame/id3tag.c
+  lame/libmp3lame/lame.c
+  lame/libmp3lame/newmdct.c
+  lame/libmp3lame/presets.c
+  lame/libmp3lame/psymodel.c
+  lame/libmp3lame/quantize.c
+  lame/libmp3lame/quantize_pvt.c
+  lame/libmp3lame/reservoir.c
+  lame/libmp3lame/set_get.c
+  lame/libmp3lame/tables.c
+  lame/libmp3lame/takehiro.c
+  lame/libmp3lame/util.c
+  lame/libmp3lame/vbrquantize.c
+  lame/libmp3lame/version.c
+  lame/libmp3lame/mpglib_interface.c)
+add_library(SingZ::native_lame ALIAS singz_native_lame)
+target_link_libraries(singz_native_lame PRIVATE SingZ::native_build_options)
+target_compile_definitions(singz_native_lame PRIVATE HAVE_CONFIG_H=1)
+set_target_properties(singz_native_lame PROPERTIES C_STANDARD 99 POSITION_INDEPENDENT_CODE YES)
+target_include_directories(singz_native_lame SYSTEM PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/lame/include"
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/lame")
+if(UNIX)
+  target_link_libraries(singz_native_lame PUBLIC m)
+endif()
+
 add_library(singz_native_flac STATIC
   flac/src/bitmath.c
   flac/src/bitreader.c

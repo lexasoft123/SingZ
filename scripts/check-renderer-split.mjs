@@ -151,7 +151,8 @@ for (const chunk of [
 // fails, and the next small addition is not a surprise at merge time.
 // Shared curriculum/hold scoring stays in the eager shell so primary/recovery
 // training routes retain disjoint lazy dependency graphs (~9 kB additional).
-const ENTRY_RAW_BUDGET = 1_405_000
+// Track export entry, translations and bulk mixer controls; encoder stays native.
+const ENTRY_RAW_BUDGET = 1_408_000
 // Desktop programs, their seven-day path, and explicit interval-set controls.
 const TRAINING_RAW_BUDGET = 94_000
 const entryBytes = (await stat(resolve(assetsRoot, entryFile))).size

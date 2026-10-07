@@ -89,6 +89,7 @@ interface Props {
   loopOn: boolean
   onToggleLoop: () => void
   hasSelection: boolean
+  selection: { s: number; e: number } | null
   /** Master output level 0..1. */
   volume: number
   onVolume: (v: number) => void
@@ -889,6 +890,7 @@ export default function Transport({
   loopOn,
   onToggleLoop,
   hasSelection,
+  selection,
   volume,
   onVolume,
   training,
@@ -918,6 +920,8 @@ export default function Transport({
   onCancelSplit,
   onReveal
 }: Props): React.JSX.Element {
+  const startAtSong = useRef(false)
+  useEffect(() => { startAtSong.current = false }, [selection, engine, playing])
   const [trainOpen, setTrainOpen] = useState(false)
   const [metOpen, setMetOpen] = useState(false)
   const [volOpen, setVolOpen] = useState(false)
@@ -935,8 +939,12 @@ export default function Transport({
         <button
           type="button"
           className="round-ghost"
-          title={t('player.transport.backToStart')}
-          onClick={() => engine.seek(0)}
+          title={t(selection ? 'player.transport.backToSelection' : 'player.transport.backToStart')}
+          onClick={() => {
+            const target = selection && !startAtSong.current ? selection.s : 0
+            startAtSong.current = Boolean(selection) && !startAtSong.current
+            engine.seek(target)
+          }}
         >
           <svg width="13" height="13" viewBox="0 0 13 13" fill="currentColor" aria-hidden>
             <rect x="1" y="1.5" width="2" height="10" rx="0.75" />

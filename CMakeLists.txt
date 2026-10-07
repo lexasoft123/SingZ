@@ -236,6 +236,8 @@ if(SINGZ_BUILD_ELECTRON_CAPTURE)
   endif()
   add_library(singz_capture MODULE
     native/electron/capture_addon.cpp
+    native/electron/audio_export_bridge.cpp
+    native/electron/audio_export_bridge.h
     native/electron/audio_monitor_session.cpp
     native/electron/audio_monitor_session.h
     native/electron/playback_addon_bridge.cpp
@@ -261,6 +263,7 @@ if(SINGZ_BUILD_ELECTRON_CAPTURE)
   target_link_libraries(singz_capture PRIVATE
     SingZ::native_build_options
     SingZ::zdsp_analysis
+    SingZ::zcore_audio_export
     SingZ::monitor_callback
     SingZ::native_playback_session
     singz_native_audio_ownership)
@@ -538,6 +541,11 @@ if(SINGZ_CORE_TESTS)
 
   # The WAV half of streaming: the float lead/backing lanes every split has
   # carried since 0.23.0, compared bit for bit against prepareDecodedAudio.
+  add_executable(audio_export_tests ${SINGZ_REPO_ROOT}/tests/native/audio_export_tests.cpp)
+  target_compile_features(audio_export_tests PRIVATE cxx_std_20)
+  target_link_libraries(audio_export_tests PRIVATE SingZ::zcore_audio_export)
+  add_test(NAME audio_export_tests COMMAND audio_export_tests)
+
   add_executable(wav_streaming_source_tests
     ${SINGZ_REPO_ROOT}/tests/native/wav_streaming_source_tests.cpp)
   target_compile_features(wav_streaming_source_tests PRIVATE cxx_std_20)

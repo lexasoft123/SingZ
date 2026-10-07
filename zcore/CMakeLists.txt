@@ -411,3 +411,11 @@ if(SINGZ_BUILD_ML)
     target_compile_definitions(zcore_ml PRIVATE _FILE_OFFSET_BITS=64)
   endif()
 endif()
+
+# Encoding is an ordinary-thread component, selected by desktop export only.
+# Base playback/mobile media do not acquire an encoder dependency.
+add_library(zcore_audio_export STATIC EXCLUDE_FROM_ALL src/media/audio_export.cpp)
+add_library(SingZ::zcore_audio_export ALIAS zcore_audio_export)
+singz_zcore_target(zcore_audio_export)
+target_link_libraries(zcore_audio_export PUBLIC SingZ::zcore_media
+  PRIVATE SingZ::native_flac SingZ::native_lame)

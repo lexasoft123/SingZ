@@ -1235,6 +1235,9 @@ export interface SingzApi {
   pathForFile(file: File): string
   /** Read a registered audio file's bytes (source song or produced stem). */
   readAudio(path: string): Promise<ArrayBuffer>
+  beginStemExport(): Promise<{ ok: boolean; token?: string; error?: string }>
+  writeStemExport(token: string, name: string, format: 'wav' | 'flac' | 'mp3', sourcePath: string | string[]): Promise<{ ok: boolean; error?: string }>
+  endStemExport(token: string): Promise<void>
   registerSource(path: string): Promise<RegisterResult>
   /**
    * Make an audio file readable as an extra lane. Unlike registerSource this

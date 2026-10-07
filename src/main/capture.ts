@@ -58,6 +58,8 @@ import {
 import { machCanonicalSha256 } from './mach-canonical'
 
 export interface NativeCaptureBinding {
+  exportAudio?(sourceFd: number | number[], destinationFd: number, format: 'wav' | 'flac' | 'mp3', job: string): Promise<{ ok: boolean; error?: string }>
+  cancelAudioExport?(job: string): void
   inputDevices():
     | { ok: true; devices: CaptureInputDevice[] }
     | { ok: false; devices: []; error: string }

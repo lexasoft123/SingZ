@@ -5531,3 +5531,36 @@ body.win:not(.glass) .modal-card.lyed-card {
 .vt-recording { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: center; padding: 8px 16px; }
 .vt-recording p { flex-basis: 100%; margin: 0; font-size: 12px; overflow-wrap: anywhere; }
 @media (prefers-reduced-motion: reduce) { .vt-stage { animation: none; } }
+
+.ruler-spacer { gap: 5px; }
+.ruler-spacer .reset-track, .ruler-spacer .export-track { padding: 0 7px; }
+.ruler-spacer button:disabled { opacity: 0.35; }
+.stem-export-dialog {
+  max-height: 85vh;
+  overflow-y: auto;
+  margin: auto;
+  width: min(460px, 90vw);
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--bg);
+  color: var(--text);
+}
+.stem-export-dialog h2 { margin-top: 0; }
+.stem-export-dialog p { line-height: 1.5; overflow-wrap: anywhere; }
+.stem-export-dialog select, .stem-export-actions button {
+  padding: 8px 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.stem-export-actions button:first-child { background: var(--accent); color: #20180b; }
+.stem-export-actions button:disabled { opacity: 0.45; }
+.stem-export-actions { display: flex; gap: 12px; }
+
+.stem-export-selection { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 20px; margin-top: 18px; border: 0; padding: 0; }
+.stem-export-selection legend { margin-bottom: 12px; }
+.stem-export-selection label { display: flex; align-items: center; gap: 10px; }
+.stem-export-selection input { flex-shrink: 0; accent-color: var(--accent, #ffa51e); }
+.stem-export-note { font-size: 13px; }

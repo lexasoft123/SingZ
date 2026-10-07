@@ -4111,6 +4111,7 @@ export default function App(): React.JSX.Element {
             loopOn={loopOn}
             onToggleLoop={toggleLoop}
             hasSelection={selection !== null}
+            selection={selection}
             volume={masterVol}
             onVolume={changeMasterVol}
             training={training}
