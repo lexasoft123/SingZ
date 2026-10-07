@@ -446,13 +446,13 @@ describe('desktop vocal-training orchestration', () => {
     const detail = trainingFeedbackCopy(state.session!.results[0]).detail
     const feedbackHtml = renderTraining(state)
     expect(feedbackHtml).toContain(detail)
-    expect(feedbackHtml).toMatch(/class="vt-result-ack"[^>]*role="status"[^>]*aria-live="polite"/)
+    expect(feedbackHtml).toMatch(/role="status"[^>]*aria-live="polite"[^>]*class="[^"]*vt-result-ack"/)
 
     state = desktopTrainingReducer(state, { type: 'next-prompt' })
     const cueHtml = renderTraining(state)
     expect(cueHtml).toContain(detail)
     expect(cueHtml).toContain('Get ready. Listen now, then sing when the countdown ends.')
-    expect(cueHtml.match(/class="vt-result-ack"/g)).toHaveLength(1)
+    expect(cueHtml.match(/class="[^"]*vt-result-ack"/g)).toHaveLength(1)
     expect(cueHtml.match(/role="status"/g)).toHaveLength(1)
 
     state = desktopTrainingReducer(state, { type: 'cue-complete' })
@@ -933,7 +933,7 @@ describe('desktop vocal-training orchestration', () => {
     expect(summaryHtml).toContain(`id="vt-summary-description">Your average pitch stayed in tune. ${finalCopy.detail}</p>`)
     expect(summaryHtml).not.toContain('role="status"')
     expect(summaryHtml).not.toContain('aria-live=')
-    expect(summaryHtml).toMatch(/class="vt-result-ack"[^>]*aria-hidden="true"/)
+    expect(summaryHtml).toMatch(/aria-hidden="true"[^>]*class="[^"]*vt-result-ack"/)
     expect(summaryHtml).toContain('Voice detected')
     expect(summaryHtml).toContain('Pitch held steady')
     expect(summaryHtml).not.toMatch(/>Voiced<|>Stable</)

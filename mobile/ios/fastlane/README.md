@@ -77,7 +77,7 @@ Build and upload to TestFlight — widens to external testers (Beta App Review) 
 [bundle exec] fastlane ios ship
 ```
 
-Upload to TestFlight, wait for processing, then submit the same build for App Store review
+Upload to TestFlight; submit to the App Store when no review is already open
 
 ### ios release
 

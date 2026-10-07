@@ -1,3 +1,4 @@
+import { Banner } from '@singz/ui/banner'
 import { reportTrainingTiming } from '../audio/training-timing'
 import type { IconName, IconProps } from '@singz/ui/icons'
 import { TRAINING_SOUNDS, type TrainingSound } from '../../../shared/training-sound'
@@ -1346,7 +1347,7 @@ function TrainingSetup({
         <p className="vt-eyebrow">{t('training.setup.eyebrow')}</p>
         <h1>{exercise.label}</h1>
       </header>
-      {rangeNotice && <p role="status">{rangeNotice}</p>}
+      {rangeNotice && <Banner className="vt-notice">{rangeNotice}</Banner>}
       <div className="vt-setup-grid">
         <fieldset className="vt-fieldset">
           <legend>{t('training.setup.legend.musicalContext')}</legend>
@@ -1610,9 +1611,9 @@ function TrainingSetup({
         </fieldset>
       </div>
       {(error || invalidSelection) && (
-        <p className="vt-error" role="alert">
+        <Banner className="vt-error" tone="danger">
           {error ?? t('training.setup.error.chooseOne')}
-        </p>
+        </Banner>
       )}
       <footer className="vt-setup-footer">
         <label className="vt-length">
@@ -1836,9 +1837,9 @@ function TrainingSession({
           />
         )}
         {state.error && (
-          <p className="vt-error" role="alert">
+          <Banner className="vt-error" tone="danger">
             {state.error}
-          </p>
+          </Banner>
         )}
       </section>
       {state.exercisePhase === 'respond' && countdown === null && prompt.taskMode !== 'identify' && (
@@ -2034,18 +2035,18 @@ function ResultAcknowledgement({
   const copy = trainingFeedbackCopy(result)
   const answer = identifyAnswerReveal(prompt)
   return (
-    <div
+    <Banner
       className="vt-result-ack"
+      icon={feedbackMark(result, copy.good)}
+      heading={copy.heading}
+      footer={answer}
       role={announce ? 'status' : undefined}
       aria-live={announce ? 'polite' : undefined}
       aria-atomic={announce ? 'true' : undefined}
       aria-hidden={announce ? undefined : true}
     >
-      <span aria-hidden>{feedbackMark(result, copy.good)}</span>
-      <h2>{copy.heading}</h2>
-      <small>{copy.detail}</small>
-      {answer && <small>{answer}</small>}
-    </div>
+      {copy.detail}
+    </Banner>
   )
 }
 
@@ -2152,9 +2153,9 @@ function SummaryMetric({ label, value }: { label: string; value: string }): Reac
 
 function TrainingAudioLeaseNotice({ copy }: { readonly copy: string }): React.JSX.Element {
   return (
-    <p className="vt-audio-lease" role="status">
+    <Banner className="vt-audio-lease">
       {copy}
-    </p>
+    </Banner>
   )
 }
 

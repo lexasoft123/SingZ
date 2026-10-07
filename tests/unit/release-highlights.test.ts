@@ -17,8 +17,8 @@ describe('bundled update highlights', () => {
   })
   it.each(['en', 'ru', 'zh-CN'] as const)('keeps desktop capabilities labeled on phones in %s', locale => {
     const phone = releaseHighlights(RELEASE_VERSION, undefined, locale, 'ios')!
-    expect(phone.entries[0].highlights.find(item => item.id === 'export')?.desktopOnly).toBe(true)
-    expect(phone.entries[0].highlights.find(item => item.id === 'news')?.desktopOnly).toBe(false)
+    expect(phone.entries[0].highlights.find(item => item.id === 'desktop-training')?.desktopOnly).toBe(true)
+    expect(phone.entries[0].highlights.find(item => item.id === 'reference-sounds')?.desktopOnly).toBe(false)
     expect(phone.entries[0].highlights.every(item => item.title && item.description)).toBe(true)
     expect(phone.url).toBe(`https://github.com/lexasoft123/SingZ/releases/tag/v${RELEASE_VERSION}`)
   })

@@ -1,6 +1,76 @@
 {
-  "version": "0.26.2",
+  "version": "0.26.3",
   "releases": [
+    {
+      "version": "0.26.3",
+      "highlights": [
+        {
+          "id": "reference-sounds",
+          "icon": "mic",
+          "platforms": [
+            "desktop",
+            "ios",
+            "android"
+          ],
+          "text": {
+            "en": {
+              "title": "Hear your reference notes clearly",
+              "description": "Piano, guitar and organ notes are louder while keeping their natural attack and sustain. Higher volume settings stay within clean peak headroom."
+            },
+            "ru": {
+              "title": "Эталонные ноты слышны яснее",
+              "description": "Фортепиано, гитара и орган звучат громче, сохраняя естественную атаку и затухание. При высокой громкости усиление ограничивается запасом до перегрузки."
+            },
+            "zh-CN": {
+              "title": "更清晰地听到参考音",
+              "description": "钢琴、吉他和管风琴参考音更响亮，同时保留自然的起音和延音。较高音量设置会限制增益，避免削波失真。"
+            }
+          }
+        },
+        {
+          "id": "desktop-training",
+          "icon": "controls",
+          "platforms": [
+            "desktop"
+          ],
+          "text": {
+            "en": {
+              "title": "Stay in your practice session",
+              "description": "Reference notes play with a song open, Back returns to training, and completed notes fill the progress bar before advancing. Microphone preparation is faster, with centered feedback banners."
+            },
+            "ru": {
+              "title": "Оставайтесь в тренировке",
+              "description": "Эталонные ноты звучат и при открытой песне. «Назад» возвращает к тренировкам, а шкала доходит до конца перед следующей нотой. Микрофон готовится быстрее, сообщения выровнены по центру."
+            },
+            "zh-CN": {
+              "title": "专注于练习",
+              "description": "打开歌曲时也能播放参考音。返回键回到练习页面，完成音符后进度条先填满再进入下一音符。麦克风准备更快，反馈提示居中显示。"
+            }
+          }
+        },
+        {
+          "id": "android-cues",
+          "icon": "mic",
+          "platforms": [
+            "android"
+          ],
+          "text": {
+            "en": {
+              "title": "Keep listening after the cue",
+              "description": "Starting or replaying a reference note no longer interrupts the training microphone. Genuine audio interruptions still stop the session safely."
+            },
+            "ru": {
+              "title": "Микрофон не прерывается после ноты",
+              "description": "Запуск или повтор эталонной ноты больше не прерывает микрофон тренировки. Настоящие прерывания звука по-прежнему безопасно останавливают занятие."
+            },
+            "zh-CN": {
+              "title": "参考音结束后继续聆听",
+              "description": "开始或重播参考音不再中断练习麦克风。真正的音频中断仍会安全地停止练习。"
+            }
+          }
+        }
+      ]
+    },
     {
       "version": "0.26.2",
       "highlights": [

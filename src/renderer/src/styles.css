@@ -3862,26 +3862,9 @@ body.modal-open .persistent-monitor.active .persistent-monitor-dot {
   margin-top: 7px;
 }
 
-.vt-error {
-  color: var(--danger);
-  font-size: 12px;
-  line-height: 1.5;
-  margin-top: 16px;
-  padding: 10px 12px;
-  border-left: 3px solid var(--danger);
-  background: color-mix(in srgb, var(--danger) 10%, transparent);
-}
-
-.vt-audio-lease {
-  margin: 0 0 18px;
-  padding: 10px 12px;
-  color: var(--accent);
-  font-size: 12px;
-  line-height: 1.5;
-  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line));
-  border-radius: 8px;
-  background: var(--accent-soft);
-}
+.vt-error { margin: 16px auto 0; }
+.vt-audio-lease,
+.vt-notice { margin: 0 auto 18px; }
 
 .vt-range-label {
   display: flex;
@@ -4775,43 +4758,7 @@ body.win:not(.glass) .vt-transport {
   50% { opacity: 0.9; transform: scale(1.04); }
 }
 
-.vt-result-ack {
-  width: min(720px, 100%);
-  min-height: 56px;
-  display: grid;
-  grid-template-columns: 32px auto minmax(0, max-content);
-  justify-content: center;
-  align-items: center;
-  gap: 4px 12px;
-  margin: 0 auto 8px;
-  padding: 10px 14px;
-  border: 1px solid var(--line-strong);
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--accent-soft) 52%, var(--panel));
-  text-align: center;
-}
-
-.vt-result-ack > span {
-  grid-column: 1;
-  grid-row: 1 / span 2;
-  color: var(--accent);
-  font-size: 22px;
-  text-align: center;
-}
-
-.vt-result-ack h2 {
-  grid-column: 2;
-  margin: 0;
-  font-size: 18px;
-  white-space: nowrap;
-}
-
-.vt-result-ack small {
-  grid-column: 3;
-  color: var(--dim);
-  font-size: 14px;
-  line-height: 1.35;
-}
+.vt-result-ack { margin: 0 auto 8px; }
 
 .vt-eyebrow {
   color: var(--accent);
@@ -4852,21 +4799,7 @@ body.win:not(.glass) .vt-transport {
     padding-inline: 4px;
   }
 
-  .vt-result-ack {
-    grid-template-columns: 32px auto;
-  }
 
-  .vt-result-ack > span {
-    grid-row: 1;
-  }
-
-  .vt-result-ack h2 {
-    grid-column: 2;
-  }
-
-  .vt-result-ack small {
-    grid-column: 1 / -1;
-  }
 }
 
 @media (max-height: 680px) {
@@ -4930,7 +4863,7 @@ body.win:not(.glass) .vt-transport {
     padding: 6px 12px;
   }
 
-  .vt-result-ack h2 {
+  .vt-result-ack .sz-banner__heading {
     font-size: 16px;
   }
 

@@ -1,0 +1,1 @@
+Piano, guitar and organ reference notes are louder while keeping their natural sound. Training shares the native audio output with song playback. On Android, starting or replaying a reference note no longer interrupts the microphone. Clearer feedback helps you keep practicing.
