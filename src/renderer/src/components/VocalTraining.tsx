@@ -138,6 +138,7 @@ interface ActiveDesktopVocalRun {
   readonly tracker: TrainingPitchLockTracker
   activeTarget: number
   targetStartedAtMs: number
+  completionAtMs?: number
   completed: boolean
 }
 
@@ -495,6 +496,43 @@ export default function VocalTraining({
           interruptRuntime()
           return
         }
+        if (run.completionAtMs !== undefined) {
+          if (performance.now() < run.completionAtMs) {
+            frame.current = requestAnimationFrame(tick)
+            return
+          }
+          run.completionAtMs = undefined
+          const endMs = run.windows.at(-1)!.endMs
+          if (run.activeTarget === prompt.targets.length - 1) {
+            finishVocalPrompt(run)
+            return
+          }
+          run.activeTarget++
+          run.targetStartedAtMs = endMs + 350
+          run.tracker.reset()
+          setPitchLock(EMPTY_TRAINING_PITCH_LOCK)
+          setLive(
+            livePitchFromLock(
+              EMPTY_TRAINING_PITCH_LOCK,
+              run.activeTarget,
+              state.setup,
+              practiceSettings.pitchWindowCents
+            )
+          )
+          if (needsTrainingTargetReference(prompt.kind, prompt.taskMode, stateRef.current.session?.config.scalePresentation)) {
+            const cue = trainingTargetReference(prompt.kind, prompt.targets[run.activeTarget].midi)
+            run.targetStartedAtMs = Infinity
+            setCountdown(Math.ceil(cue.durationSeconds))
+            void cues.schedule([cue], { noteDurationSec: cue.durationSeconds, attackSec: 0.032, releaseSec: 0.22 }).then(timeline => {
+              if (generation.current !== runId || vocalRun.current !== run) return
+              run.targetStartedAtMs = audibleCueEndTimeSec(timeline.endTime, engine.context) * 1000 + 150
+            }).catch(error => {
+              if (generation.current === runId && vocalRun.current === run) reportError(error)
+            })
+          }
+          frame.current = requestAnimationFrame(tick)
+          return
+        }
         const observation = mic.read()
         if (observation.timestampMs < run.targetStartedAtMs) {
           if (Number.isFinite(run.targetStartedAtMs)) setCountdown(Math.max(1, Math.ceil((run.targetStartedAtMs - observation.timestampMs) / 1000)))
@@ -543,33 +581,9 @@ export default function VocalTraining({
             range: trainingScoringRange(stateRef.current)!,
             options: { minimumConfidence: mic.minConfidence }
           }, TRAINING_HOLD_MS))
-          if (run.activeTarget === prompt.targets.length - 1) {
-            finishVocalPrompt(run)
-            return
-          }
-          run.activeTarget++
-          run.targetStartedAtMs = endMs + 350
-          run.tracker.reset()
-          setPitchLock(EMPTY_TRAINING_PITCH_LOCK)
-          setLive(
-            livePitchFromLock(
-              EMPTY_TRAINING_PITCH_LOCK,
-              run.activeTarget,
-              state.setup,
-              practiceSettings.pitchWindowCents
-            )
-          )
-          if (needsTrainingTargetReference(prompt.kind, prompt.taskMode, stateRef.current.session?.config.scalePresentation)) {
-            const cue = trainingTargetReference(prompt.kind, prompt.targets[run.activeTarget].midi)
-            run.targetStartedAtMs = Infinity
-            setCountdown(Math.ceil(cue.durationSeconds))
-            void cues.schedule([cue], { noteDurationSec: cue.durationSeconds, attackSec: 0.032, releaseSec: 0.22 }).then(timeline => {
-              if (generation.current !== runId || vocalRun.current !== run) return
-              run.targetStartedAtMs = audibleCueEndTimeSec(timeline.endTime, engine.context) * 1000 + 150
-            }).catch(error => {
-              if (generation.current === runId && vocalRun.current === run) reportError(error)
-            })
-          }
+          // Hold the locked state long enough for React to paint and the
+          // 120 ms meter transition to reach 100% before replacing the note.
+          run.completionAtMs = performance.now() + 250
         }
         frame.current = requestAnimationFrame(tick)
       }
