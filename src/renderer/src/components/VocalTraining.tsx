@@ -1010,7 +1010,6 @@ export default function VocalTraining({
       onSkip={skipPrompt}
       onExit={backHome}
       preparation={state.preparation}
-      onBackToSong={backToSong}
     />
   )
 }
@@ -1660,8 +1659,7 @@ function TrainingSession({
   onReplay,
   onSkip,
   onExit,
-  preparation,
-  onBackToSong
+  preparation
 }: {
   state: DesktopTrainingState
   selected: SelectedTrainingExercise | null
@@ -1680,7 +1678,6 @@ function TrainingSession({
   onSkip: () => void
   onExit: () => void
   preparation: DesktopTrainingState['preparation']
-  onBackToSong: () => void
 }): React.JSX.Element {
   const readyButtonRef = useRef<HTMLButtonElement>(null)
   const firstAnswerRef = useRef<HTMLButtonElement>(null)
@@ -1730,12 +1727,8 @@ function TrainingSession({
         <button
           type="button"
           className="vt-back vt-session-back"
-          aria-label={
-            preparation
-              ? t('training.session.aria.backToSong')
-              : t('training.session.aria.endSession')
-          }
-          onClick={preparation ? onBackToSong : onExit}
+          aria-label={t('training.session.aria.endSession')}
+          onClick={onExit}
         >
           <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24">
             <path d="m15 18-6-6 6-6" />

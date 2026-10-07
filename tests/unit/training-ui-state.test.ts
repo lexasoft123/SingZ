@@ -997,6 +997,18 @@ describe('desktop vocal-training orchestration', () => {
     expect(html).not.toContain('aria-label="Session progress"')
   })
 
+  it('keeps the session exit in training when the lesson came from a song', () => {
+    let state = desktopTrainingReducer(INITIAL_DESKTOP_TRAINING_STATE, {
+      type: 'start-song-preparation', sourceSongId: '/songs/a', songName: 'Song A',
+      choice: 'notes', key: { tonicPc: 0, mode: 'major' }, seed: 'training-exit'
+    })
+    state = desktopTrainingReducer(state, { type: 'activate-session' })
+    expect(renderTraining(state)).toContain('aria-label="End session"')
+    expect(renderTraining(state)).not.toContain('aria-label="Back to song"')
+    state = desktopTrainingReducer(state, { type: 'back-home' })
+    expect(state.route).toBe('home')
+  })
+
   it('rejects stale specialist copy and the repeated setup key/range footer', () => {
     const source = readFileSync('src/renderer/src/components/VocalTraining.tsx', 'utf8')
     for (const stale of ['Accuracy and close', 'Voiced', 'Stable', 'tonal home', 'Diatonic interval', 'Diatonic chord identification'])
