@@ -3,6 +3,15 @@ import type { app as en } from '../en/app'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const app: Translation<typeof en> = {
+  'phone.app.whatsNew.title': "Что нового",
+  'phone.app.whatsNew.fullNotes': "Все изменения",
+  'phone.app.whatsNew.done': "Понятно",
+  'phone.app.whatsNew.opening': "Открываем список изменений…",
+  'phone.app.whatsNew.failure': "Не удалось загрузить список изменений. Закройте окно и попробуйте ещё раз, нажав на номер версии.",
+  'phone.app.whatsNew.subscribe': "Подписаться на Telegram-канал",
+  'phone.app.whatsNew.telegramDescription': "Новости, обновления и советы для пения",
+  'phone.app.whatsNew.desktop': "Также на компьютере",
+
   // ── bottom tabs (App.tsx tab screens + ui/BottomTabs.tsx fallback labels) ──
   'phone.app.tab.songs': 'Песни',
   'phone.app.tab.train': 'Тренировка',

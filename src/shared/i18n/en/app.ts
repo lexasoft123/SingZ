@@ -1,5 +1,14 @@
 /* English strings for the `app` namespace — see ../index.ts. */
 export const app = {
+  'app.whatsNew.title': "What’s new",
+  'app.whatsNew.fullNotes': "Full release notes",
+  'app.whatsNew.done': "Got it",
+  'app.whatsNew.opening': "Opening release notes…",
+  'app.whatsNew.failure': "Release notes could not be loaded. You can close this window and try again from the version number.",
+  'app.whatsNew.subscribe': "Subscribe to our Telegram channel",
+  'app.whatsNew.telegramDescription': "News, updates and singing tips",
+  'app.whatsNew.desktop': "Also new on desktop",
+
   // ── lazy dialog route copy (LibraryImport / LogPanel / ProjectPicker / SetupModal) ──
   // read through getters on the route object, so they translate at every
   // render rather than freezing at module load — see App.tsx's route setup.

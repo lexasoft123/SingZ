@@ -1,0 +1,95 @@
+{
+  "version": "0.26.2",
+  "releases": [
+    {
+      "version": "0.26.2",
+      "highlights": [
+        {
+          "id": "news",
+          "icon": "news",
+          "platforms": [
+            "ios",
+            "android"
+          ],
+          "text": {
+            "en": {
+              "title": "Your updates, in one place",
+              "description": "See what changed after each update. Follow SingZ on Telegram for news and tips."
+            },
+            "ru": {
+              "title": "Новости приложения — в одном окне",
+              "description": "После обновления увидите, что изменилось. Подпишитесь на SingZ в Telegram: там новости и советы."
+            },
+            "zh-CN": {
+              "title": "更新内容，一目了然",
+              "description": "每次更新后查看新变化。关注 SingZ Telegram 频道，获取新闻和使用技巧。"
+            }
+          }
+        },
+        {
+          "id": "export",
+          "icon": "export",
+          "platforms": [
+            "desktop"
+          ],
+          "text": {
+            "en": {
+              "title": "Your tracks, ready for the studio",
+              "description": "Choose the tracks and a folder, then export WAV, FLAC or MP3 for your next session."
+            },
+            "ru": {
+              "title": "Дорожки готовы к работе в студии",
+              "description": "Выберите дорожки и папку, затем экспортируйте WAV, FLAC или MP3 для дальнейшей работы."
+            },
+            "zh-CN": {
+              "title": "音轨准备就绪，带入工作室",
+              "description": "选择音轨和文件夹，然后导出 WAV、FLAC 或 MP3，用于后续制作。"
+            }
+          }
+        },
+        {
+          "id": "karaoke",
+          "icon": "mic",
+          "platforms": [
+            "desktop"
+          ],
+          "text": {
+            "en": {
+              "title": "Make your own karaoke track",
+              "description": "Export instruments and separated backing vocals together, without the lead vocal. Without a backing-vocal track, the mix contains instruments only."
+            },
+            "ru": {
+              "title": "Соберите свою караоке-дорожку",
+              "description": "Экспортируйте инструменты и выделенный бэк-вокал вместе, без основного голоса. Если бэк-вокал не выделен, в миксе будут только инструменты."
+            },
+            "zh-CN": {
+              "title": "制作自己的卡拉 OK 音轨",
+              "description": "将伴奏与已分离的和声合并导出，不含主唱。若没有和声音轨，混音仅包含伴奏。"
+            }
+          }
+        },
+        {
+          "id": "controls",
+          "icon": "controls",
+          "platforms": [
+            "desktop"
+          ],
+          "text": {
+            "en": {
+              "title": "Less clicking, more singing",
+              "description": "M unmutes every track; S clears every solo. Go to start jumps to your selection first, then to the beginning of the song."
+            },
+            "ru": {
+              "title": "Меньше кликов — больше пения",
+              "description": "M включает все дорожки, S снимает все соло. «В начало» сначала переходит к началу выделения, а повторное нажатие — к началу песни."
+            },
+            "zh-CN": {
+              "title": "少点几下，多唱几句",
+              "description": "M 取消所有音轨静音，S 清除所有独奏。“回到开头”首次跳到选区起点，再次点击跳到歌曲开头。"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

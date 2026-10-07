@@ -6,6 +6,8 @@ import { join } from 'node:path'
  *  Declared rather than cast at every call site: everything below is already
  *  stored here, and the casts hid which fields were real. */
 export interface AppSettings {
+  /** Most recent installed release whose update notes were dismissed. */
+  releaseNotesSeen?: string
   /** Overridden project-library location (e.g. an iCloud Drive folder). */
   projectsRoot?: string
   /** Google Drive OAuth, refreshed in place. */

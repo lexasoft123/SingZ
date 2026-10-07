@@ -242,6 +242,8 @@ const api: SingzApi = {
     }
   },
 
+  whatsNew: (automatic = true) => ipcRenderer.invoke('app:whats-new', automatic),
+  dismissWhatsNew: version => ipcRenderer.invoke('app:whats-new-seen', version),
   appVersion: () => ipcRenderer.invoke('app:version'),
   getLocale: () => ipcRenderer.invoke('i18n:get'),
   setLanguage: (language) => ipcRenderer.invoke('i18n:set', language),
