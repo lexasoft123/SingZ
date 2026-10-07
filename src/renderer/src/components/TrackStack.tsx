@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import type { BeatInfo } from '../audio/beat'
 import type { MultitrackEngine } from '../audio/engine'
 import { modalCoversApp, type TimeView, type UITrack } from '../model'
 import { createPlayheadWriter } from '../playhead-writes'
 import BeatGrid from './BeatGrid'
 import TrackLane from './TrackLane'
+const StemExport = lazy(() => import('./StemExport'))
 import { t } from '../i18n'
 
 /** Ruler row height — the grid template and the beat overlay share it. */
@@ -132,6 +133,7 @@ export default function TrackStack({
   onRemoveTrack,
   onRenameTrack
 }: Props): React.JSX.Element {
+  const [exportOpen, setExportOpen] = useState(false)
   const stackRef = useRef<HTMLDivElement>(null)
   const overlayRef = useRef<HTMLDivElement>(null)
   const playheadRef = useRef<HTMLDivElement>(null)
@@ -370,6 +372,10 @@ export default function TrackStack({
         >
           {t('player.stack.addTrack')}
         </button>
+        <button type="button" className="add-track reset-track" title={t('player.stack.unmuteAll')} aria-label={t('player.stack.unmuteAll')} disabled={!tracks.some(t => t.muted)} onClick={() => tracks.filter(t => t.muted).forEach(t => onMute(t.id, false))}>M</button>
+        <button type="button" className="add-track reset-track" title={t('player.stack.unsoloAll')} aria-label={t('player.stack.unsoloAll')} disabled={!anySolo} onClick={() => tracks.filter(t => t.solo).forEach(t => onSolo(t.id, false))}>S</button>
+        <button type="button" className="add-track export-track" title={t('player.stack.export')} aria-label={t('player.stack.export')} onClick={() => setExportOpen(true)}>↓</button>
+        {exportOpen && <Suspense fallback={null}><StemExport tracks={tracks} onClose={() => setExportOpen(false)} /></Suspense>}
       </div>
       <div className="ruler" style={{ gridRow: 1 }}>
         {ticks.map((tick) => (

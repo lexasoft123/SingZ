@@ -60,6 +60,7 @@ import {
 import { Separator } from './separation'
 import { registerVocalSeparation, vocalSeparator } from './vocal-separation'
 import { registerAnalyze } from './analyze'
+import { registerStemExport } from './stem-export'
 import { registerDesktopAudioInput } from './audio-input'
 import { askMicrophoneAccess } from './mic-access'
 import { cancelBeatsMl, registerBeatsIpc } from './beats-ml'
@@ -238,6 +239,7 @@ function createWindow(): void {
 }
 
 function registerIpc(): void {
+  registerStemExport()
   ipcMain.on('win:minimize', (e) => BrowserWindow.fromWebContents(e.sender)?.minimize())
   ipcMain.on('win:maximize-toggle', (e) => {
     const w = BrowserWindow.fromWebContents(e.sender)

@@ -1,3 +1,4 @@
+#include "audio_export_bridge.h"
 #include <node_api.h>
 
 #include "audio_monitor_session.h"
@@ -1090,6 +1091,7 @@ void cleanup(void*) {
 }
 
 napi_value init(napi_env env, napi_value exports) {
+  singz::defineAudioExport(env, exports);
   napi_add_env_cleanup_hook(env, cleanup, nullptr);
   napi_property_descriptor properties[] = {
       {"inputDevices", nullptr, devices, nullptr, nullptr, nullptr, napi_default, nullptr},

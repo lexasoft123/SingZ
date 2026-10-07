@@ -38,6 +38,9 @@ const api: SingzApi = {
   },
 
   readAudio: (path) => ipcRenderer.invoke('media:read', path),
+  beginStemExport: () => ipcRenderer.invoke('stems:export-begin'),
+  writeStemExport: (token, name, format, sourcePath) => ipcRenderer.invoke('stems:export-write', token, name, format, sourcePath),
+  endStemExport: (token) => ipcRenderer.invoke('stems:export-end', token),
 
   registerSource: (path) => ipcRenderer.invoke('source:register', path),
 

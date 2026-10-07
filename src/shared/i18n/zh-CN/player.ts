@@ -4,6 +4,7 @@ import type { Translation } from '../types'
 
 export const player: Translation<typeof en> = {
   // ── transport ──
+  'player.transport.backToSelection': '转到选区开头；再次点击转到歌曲开头',
   'player.transport.backToStart': '回到开头',
   'player.transport.pause': '暂停（空格）',
   'player.transport.play': '播放（空格）',
@@ -138,6 +139,20 @@ export const player: Translation<typeof en> = {
     '共两步，每步几分钟。模型只需下载一次。主唱和和声音轨以无压缩格式保存——每分钟歌曲约 40 MB，以保证精确。',
 
   // ── track stack (ruler, zoom controls, add-track) ──
+  'player.stack.unmuteAll': '取消所有音轨静音',
+  'player.stack.unsoloAll': '取消所有独奏',
+  'player.stack.export': '导出音轨',
+  'player.stack.exportTitle': '导出音轨',
+  'player.stack.exportSelect': '选择音轨',
+  'player.stack.exportKaraoke': '伴奏',
+  'player.stack.exportKaraokeHint': '伴奏合并乐器和和声，不含主唱。仅在必要时降低音量以避免削波。',
+  'player.stack.exportKaraokeNoBacking': '伴奏仅导出乐器。请先分离和声以将其包含在内。',
+  'player.stack.exportHint': '原始音轨，不应用混音设置。WAV / FLAC：16 位；MP3：立体声 320 kbps / 单声道 160 kbps。',
+  'player.stack.exportChoose': '选择文件夹并导出',
+  'player.stack.exportCancel': '取消',
+  'player.stack.exportDone': '音轨已导出',
+  'player.stack.exportProgress': '正在导出',
+  'player.stack.exportError': '无法导出音轨',
   'player.stack.addTrack': '+ 添加音轨…',
   'player.stack.addTrackTitle':
     '添加一个音频文件作为额外音轨——伴奏、你录制的和声，或节拍声。它从 0:00 开始播放，保存项目时会被复制进项目中。',

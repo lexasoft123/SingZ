@@ -71,6 +71,8 @@ copyTree(join(src, 'include'), join(dst, 'include'), name => /\.(h|hpp)$/.test(n
 // units; they are not exported by the pod but quoted includes must resolve.
 copyTree(join(src, 'src'), join(dst, 'src'), (name, relative) =>
   /\.(cpp|mm|h|hpp)$/.test(name) &&
+  // Desktop selects the separate zcore_audio_export target; this pod carries playback.
+  relative !== 'media/audio_export.cpp' &&
   !callbackDefinitions.has(`src/${relative}`))
 copyTree(join(src, 'platform', 'ios'), join(dst, 'platform', 'ios'),
   (name, relative) => /\.(cpp|mm|h|hpp)$/.test(name) &&

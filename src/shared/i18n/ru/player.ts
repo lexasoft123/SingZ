@@ -4,6 +4,7 @@ import type { Translation } from '../types'
 
 export const player: Translation<typeof en> = {
   // ── transport ──
+  'player.transport.backToSelection': 'В начало выделения; повторно — в начало трека',
   'player.transport.backToStart': 'В начало',
   'player.transport.pause': 'Пауза (пробел)',
   'player.transport.play': 'Пуск (пробел)',
@@ -140,6 +141,20 @@ export const player: Translation<typeof en> = {
     'Два шага, по несколько минут. Модели загружаются один раз. Лид- и бэк-вокал сохраняются без сжатия — 40 МБ на минуту песни, для точности.',
 
   // ── track stack (ruler, zoom controls, add-track) ──
+  'player.stack.unmuteAll': 'Размьютить все дорожки',
+  'player.stack.unsoloAll': 'Снять соло со всех дорожек',
+  'player.stack.export': 'Экспорт дорожек',
+  'player.stack.exportTitle': 'Экспорт дорожек',
+  'player.stack.exportSelect': 'Выберите дорожки',
+  'player.stack.exportKaraoke': 'Караоке',
+  'player.stack.exportKaraokeHint': 'Караоке объединяет инструменты и бэк-вокал без основного вокала. Уровень снижается только при перегрузке.',
+  'player.stack.exportKaraokeNoBacking': 'Караоке выгрузит только инструменты. Сначала отделите бэк-вокал, чтобы включить его.',
+  'player.stack.exportHint': 'Исходные дорожки без настроек микшера. WAV / FLAC: 16 бит; MP3: 320 кбит/с стерео / 160 кбит/с моно.',
+  'player.stack.exportChoose': 'Выбрать папку и выгрузить',
+  'player.stack.exportCancel': 'Отмена',
+  'player.stack.exportDone': 'Дорожки выгружены',
+  'player.stack.exportProgress': 'Выгрузка',
+  'player.stack.exportError': 'Не удалось выгрузить дорожки',
   'player.stack.addTrack': '+ Дорожка…',
   'player.stack.addTrackTitle':
     'Добавить аудиофайл как отдельную дорожку — бэк-трек, записанную вами партию, клик. Она играет с 0:00 и копируется в проект при сохранении.',

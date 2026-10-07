@@ -1,6 +1,7 @@
 /* English strings for the `player` namespace — see ../index.ts. */
 export const player = {
   // ── transport ──
+  'player.transport.backToSelection': 'Selection start; press again for song start',
   'player.transport.backToStart': 'Back to start',
   'player.transport.pause': 'Pause (space)',
   'player.transport.play': 'Play (space)',
@@ -139,6 +140,20 @@ export const player = {
     'Two steps, a few minutes each. Models are downloaded once. The lead and backing lanes are saved uncompressed — about 40 MB a minute of song, so they stay exact.',
 
   // ── track stack (ruler, zoom controls, add-track) ──
+  'player.stack.unmuteAll': 'Unmute all tracks',
+  'player.stack.unsoloAll': 'Clear all solos',
+  'player.stack.export': 'Export tracks',
+  'player.stack.exportTitle': 'Export tracks',
+  'player.stack.exportSelect': 'Choose tracks',
+  'player.stack.exportKaraoke': 'Karaoke',
+  'player.stack.exportKaraokeHint': 'Karaoke combines instruments and backing vocals, without the main vocal. Peaks are reduced only if needed to prevent clipping.',
+  'player.stack.exportKaraokeNoBacking': 'Karaoke exports instruments only. Separate backing vocals first to include them.',
+  'player.stack.exportHint': 'Original tracks, without mixer settings. WAV / FLAC: 16-bit; MP3: 320 kbps stereo / 160 kbps mono.',
+  'player.stack.exportChoose': 'Choose folder and export',
+  'player.stack.exportCancel': 'Cancel',
+  'player.stack.exportDone': 'Tracks exported',
+  'player.stack.exportProgress': 'Exporting',
+  'player.stack.exportError': 'Could not export tracks',
   'player.stack.addTrack': '+ Add track…',
   'player.stack.addTrackTitle':
     'Add an audio file as an extra lane — a backing track, a harmony you recorded, a click. It plays from 0:00 and is copied into the project when you save.',
