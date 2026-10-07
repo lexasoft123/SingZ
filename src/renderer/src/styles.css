@@ -5546,9 +5546,16 @@ body.win:not(.glass) .modal-card.lyed-card {
   background: var(--bg);
   color: var(--text);
 }
-.stem-export-dialog h2 { margin-top: 0; }
-.stem-export-dialog p { line-height: 1.5; overflow-wrap: anywhere; }
-.stem-export-dialog select, .stem-export-actions button {
+.stem-export-dialog h2 { margin: 0; }
+.stem-export-dialog { display: flex; flex-direction: column; gap: 20px; }
+.stem-export-dialog p { margin: 0; line-height: 1.5; overflow-wrap: anywhere; }
+.stem-export-description, .stem-export-note { color: var(--muted); }
+.stem-export-control { display: flex; flex-direction: column; gap: 8px; }
+.stem-export-control > span { font-weight: 600; font-size: 13px; }
+.stem-export-control .mode-seg { align-self: stretch; width: 100%; }
+.stem-export-control .mode-seg button { flex: 1; }
+.stem-export-status:empty { display: none; }
+.stem-export-actions button {
   padding: 8px 12px;
   color: var(--text);
   background: var(--bg);
@@ -5559,7 +5566,7 @@ body.win:not(.glass) .modal-card.lyed-card {
 .stem-export-actions button:disabled { opacity: 0.45; }
 .stem-export-actions { display: flex; gap: 12px; }
 
-.stem-export-selection { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 20px; margin-top: 18px; border: 0; padding: 0; }
+.stem-export-selection { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 20px; margin: 0; min-width: 0; border: 0; padding: 0; }
 .stem-export-selection legend { margin-bottom: 12px; }
 .stem-export-selection label { display: flex; align-items: center; gap: 10px; }
 .stem-export-selection input { flex-shrink: 0; accent-color: var(--accent, #ffa51e); }
