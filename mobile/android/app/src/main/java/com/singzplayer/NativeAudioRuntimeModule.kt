@@ -20,6 +20,9 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import com.facebook.react.bridge.WritableArray
 import com.facebook.react.bridge.WritableMap
+import com.swmansion.audioapi.AudioAPIModule
+import com.swmansion.audioapi.system.AudioEvent
+import com.swmansion.audioapi.system.MediaSessionManager
 import com.singzplayer.audio.AudioInputPolicy
 import com.singzplayer.playback.NativePlaybackBridgeSchema
 import com.singzplayer.playback.NativePlaybackGenerationLedger
@@ -61,6 +64,11 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
 
   private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
     if (change == AudioManager.AUDIOFOCUS_GAIN || invalidated.get()) return@OnAudioFocusChangeListener
+    // Relay genuine native-owner losses through the existing app interruption
+    // stream. The legacy owner was explicitly abandoned before our acquisition.
+    ctx.getNativeModule(AudioAPIModule::class.java)?.invokeHandlerWithEventNameAndEventBody(
+      AudioEvent.INTERRUPTION.ordinal, mapOf("type" to "began", "shouldResume" to false)
+    )
     // Every loss/duck is fail-closed. GAIN never restarts automatically: the
     // product must observe Unloaded and explicitly prepare/open/start again.
     post {
@@ -82,6 +90,22 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
     .setWillPauseWhenDucked(true)
     .setOnAudioFocusChangeListener(focusListener, handler)
     .build()
+
+  /** A quiet handoff: asking for a second focus client without abandoning
+   * audio-api first makes Android interrupt our own TrainingScreen listener. */
+  private fun acquireSharedFocus(): Boolean {
+    if (trainingFocusOwned || ledger.focusOwned) return true
+    MediaSessionManager.abandonAudioFocus()
+    return audioManager.requestAudioFocus(focusRequest) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+  }
+
+  /** Ordinary user-driven teardown returns ownership to the fallback player.
+   * Genuine focus loss never calls this: it must not steal focus back. */
+  private fun returnLegacyFocus() {
+    if (trainingFocusOwned || ledger.focusOwned || invalidated.get()) return
+    audioManager.abandonAudioFocusRequest(focusRequest)
+    MediaSessionManager.requestAudioFocus(AudioManager.AUDIOFOCUS_GAIN)
+  }
 
   private val deviceCallback = object : AudioDeviceCallback() {
     override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) = routeChanged()
@@ -148,7 +172,7 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
       require(bytes.isNotEmpty() && bytes.size % 4 == 0 && bytes.size <= 23040000)
       val floats = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
       val samples = FloatArray(floats.remaining()); floats.get(samples)
-      val granted = trainingFocusOwned || audioManager.requestAudioFocus(focusRequest) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+      val granted = acquireSharedFocus()
       if (!granted) "{\"ok\":false,\"message\":\"Audio focus denied\"}"
       else {
         trainingFocusOwned = true
@@ -163,8 +187,8 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
     SingzCore.nativeCancelTrainingPcm(generation.toLong()); trainingGenerations.remove(generation.toLong())
     if (trainingGenerations.isEmpty() && trainingFocusOwned) {
       // Song focus is a separate owner; cancelling a reference must not revoke it.
-      if (!ledger.focusOwned) audioManager.abandonAudioFocusRequest(focusRequest)
       trainingFocusOwned = false
+      returnLegacyFocus()
     }
     promise.resolve(true)
   }) rejectUnavailable(promise) }
@@ -368,8 +392,7 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
     command(generationValue, promise) { generation ->
       val ready = parseJson(requiredJson(SingzCore.nativePlaybackConfigured(generation)))
       if (!ready.getBoolean("ok")) return@command ready.toString()
-      val granted = audioManager.requestAudioFocus(focusRequest) ==
-        AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+      val granted = acquireSharedFocus()
       if (!granted) {
         return@command failureResult(
           generation,
@@ -406,7 +429,7 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
     SingzCore.nativePlaybackRequestCancellation(generation)
     if (!postResult(promise) {
       val result = requiredJson(SingzCore.nativePlaybackStop(generation))
-      if (ledger.releaseFocus(generation)) audioManager.abandonAudioFocusRequest(focusRequest)
+      if (ledger.releaseFocus(generation)) returnLegacyFocus()
       result
     }) rejectUnavailable(promise)
   }
@@ -434,7 +457,7 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
       // core answers that unload as an acknowledgement, and the ledger
       // learns the song's number changed.
       if (ledger.unloaded(generation, songRemains(result))) {
-        audioManager.abandonAudioFocusRequest(focusRequest)
+        returnLegacyFocus()
       }
       result
     }) rejectUnavailable(promise)
@@ -453,7 +476,7 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
     SingzCore.nativePlaybackRequestCancellation(generation)
     if (!postResult(promise) {
       val result = requiredJson(SingzCore.nativePlaybackUnloadRetainingLanes(generation))
-      if (ledger.releaseFocus(generation)) audioManager.abandonAudioFocusRequest(focusRequest)
+      if (ledger.releaseFocus(generation)) returnLegacyFocus()
       // DELIBERATELY leaves the generation in the ledger, unlike unload above. Every
       // lifecycle path here — invalidate/onHostDestroy, audio-focus loss and
       // route change — reads it and no-ops at zero. For a plain unload that is
