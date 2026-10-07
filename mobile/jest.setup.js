@@ -1,3 +1,7 @@
+// Native safe-area measurements are unavailable in the renderer test host.
+jest.mock('react-native-safe-area-context', () =>
+  require('react-native-safe-area-context/jest/mock').default);
+
 /* Gesture-handler ships its own jest mock — without it the module
  * import throws for the missing native TurboModule, the same failure
  * mode the audio-api mock below exists for. */
@@ -83,6 +87,7 @@ jest.mock('react-native-reanimated', () => {
     __esModule: true,
     default: { View },
     useSharedValue: (v) => ({ value: v }),
+    useAnimatedRef: () => require('react').useRef(null),
     useAnimatedStyle: (fn) => fn(),
     useDerivedValue: (fn) => ({ value: fn() }),
     useFrameCallback: () => ({ setActive: () => {} }),

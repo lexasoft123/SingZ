@@ -63,6 +63,7 @@ jest.mock('react-native-safe-area-context', () => {
   const SafeAreaInsetsContext = ReactModule.createContext(metrics.insets)
   const SafeAreaFrameContext = ReactModule.createContext(metrics.frame)
   return {
+    SafeAreaView: require('react-native').View,
     SafeAreaInsetsContext,
     SafeAreaFrameContext,
     SafeAreaInsetsConsumer: SafeAreaInsetsContext.Consumer,
@@ -242,6 +243,7 @@ describe('mobile training app shell', () => {
     })
     expect(shellProps().training.active).toBe(true)
     expect(shellProps().catalog.active).toBe(false)
+    await ReactTestRenderer.act(() => tree.unmount())
   })
 
   test('keeps Train inactive when native output cleanup is uncertain', async () => {
@@ -264,6 +266,7 @@ describe('mobile training app shell', () => {
 
     expect(shellProps().training.active).toBe(false)
     expect(shellProps().catalog.active).toBe(true)
+    await ReactTestRenderer.act(() => tree.unmount())
   })
 
   test('retains scenes across tabs and accepts a deferred successful load exactly once', async () => {
