@@ -27,6 +27,27 @@
           }
         },
         {
+          "id": "duo",
+          "icon": "controls",
+          "platforms": [
+            "ios"
+          ],
+          "text": {
+            "en": {
+              "title": "More room for your voice",
+              "description": "Training and playback adapt to iPhone Duo’s wide and folded displays. Keep the lesson and controls in view as you change the window size."
+            },
+            "ru": {
+              "title": "Больше места для вашего голоса",
+              "description": "Тренировки и плеер подстраиваются под широкий и сложенный экраны iPhone Duo. Урок и элементы управления остаются на виду при изменении размера окна."
+            },
+            "zh-CN": {
+              "title": "为您的声音留出更多空间",
+              "description": "练习和播放界面适配 iPhone Duo 的宽屏及折叠屏。改变窗口大小时，课程与控制按钮仍清晰可见。"
+            }
+          }
+        },
+        {
           "id": "export",
           "icon": "export",
           "platforms": [
