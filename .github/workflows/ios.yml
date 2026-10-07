@@ -1,7 +1,9 @@
 name: iOS
 
 # A release tag uploads to TestFlight, waits for Apple's processing, then
-# submits that same build for App Store review. Configured external groups
+# submits that same build for App Store review when no review is already open.
+# An open App Store review defers store submission without blocking TestFlight.
+# Configured external groups
 # also receive Beta App Review. App Store approval leaves the version held
 # for manual release; tagging does not automatically publish it.
 #
@@ -19,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       lane:
-        description: 'fastlane lane — "validate" ships nothing; "ship" = upload and submit for review; "beta" = TestFlight only; "submit" = send an already-uploaded build to App Store review; "release" = build AND submit'
+        description: 'fastlane lane — "validate" ships nothing; "ship" = TestFlight plus store review when available; "beta" = TestFlight only; "submit" = send an already-uploaded build to App Store review; "release" = build AND submit'
         type: choice
         default: validate
         options: [validate, ship, beta, beta_external, submit, release, metadata]
