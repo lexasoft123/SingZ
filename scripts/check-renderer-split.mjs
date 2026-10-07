@@ -153,7 +153,8 @@ for (const chunk of [
 // training routes retain disjoint lazy dependency graphs (~9 kB additional).
 // Track export entry, translations and bulk mixer controls; encoder stays native.
 // The update-dialog route and English launch copy add ~2.1 KB; the content and artwork stay lazy.
-const ENTRY_RAW_BUDGET = 1_411_000
+// Release launch copy and platform-specific bundler output need a small margin.
+const ENTRY_RAW_BUDGET = 1_413_000
 // Desktop programs, their seven-day path, and explicit interval-set controls.
 const TRAINING_RAW_BUDGET = 94_000
 const entryBytes = (await stat(resolve(assetsRoot, entryFile))).size
