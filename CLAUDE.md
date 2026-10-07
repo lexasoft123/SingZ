@@ -1137,9 +1137,9 @@ was driven; the gotchas that follow from it are below.
   and they answer different halves: `scripts/worktree-setup.sh` now MIRRORS
   `vendor/` (third-party engines stay symlinks to main; `singz-analyze` and
   `singz-capture.node` get per-worktree slots, the setup script builds the
-  analyzer, and `npm run capture:addon` builds the addon when needed — an
-  empty slot degrades or reports the missing transport, where a link runs
-  another branch's engine), and
+  analyzer and verifies its embedded fingerprint before setup can succeed;
+  `npm run capture:addon` builds the addon when needed — an empty addon slot
+  reports the missing transport, where a link runs another branch's engine), and
   `scripts/analyze-source-hash.sh` is the ONE definition of the fingerprint —
   written to the `.source-hash` sidecar, compiled into the binary
   (`singz-analyze build-info`), and recomputed at the first `resolveAnalyze()`
@@ -1147,11 +1147,21 @@ was driven; the gotchas that follow from it are below.
   builds have no tree to compare against and only record what ran — the log is
   the only evidence a user machine will have. Details:
   [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) § Which core am I running?
+- **Every worktree must have its correct analyzer before running the app or tests** —
+  `scripts/worktree-setup.sh` builds a worktree-local `vendor/<host>/singz-analyze`
+  and verifies its embedded `build-info.sourceHash` against
+  `scripts/analyze-source-hash.sh`. Missing, stale, or failed builds are fatal to
+  setup; a sidecar alone is not proof. Never share analyzer binaries by symlink
+  or run a sibling checkout's analyzer. After pulling, rebasing, or editing native
+  analysis sources, rerun setup (or `scripts/vendor-analyze.sh` and verify
+  `build-info` against the current fingerprint) before testing or shipping.
+  A runtime provenance warning means stop and rebuild, even when detector version
+  numbers match. Third-party engines may remain shared.
 - **Parallel feature work happens in git worktrees** (one per feature, e.g.
   under `.claude/worktrees/<feature>`), never as concurrent edits to the same
   checkout — two sessions on one tree fight over builds, caches and
   half-staged files. Bootstrap every fresh worktree with
-  `scripts/worktree-setup.sh` (`--desktop-only` skips mobile): links vendor/,
+  `scripts/worktree-setup.sh` (`--desktop-only` skips mobile): mirrors vendor/,
   gdrive.config.json and local.properties from the main checkout, npm-ci's
   both roots, restores a cache-skipped electron binary, and pod-installs with
   the UTF-8 LANG CocoaPods needs in non-interactive shells (details:
