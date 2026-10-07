@@ -98,12 +98,19 @@ describe('desktop training microphone capture', () => {
     expect(capture.read().timestampMs).toBe(300)
   })
 
-  it('uses AudioContext time by default so observations align with cue timelines', async () => {
+  it('uses the native cue clock even when the legacy audio clock is suspended', async () => {
+    let now = 4250
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now)
     const source = new FakeMicSource()
-    const context = { currentTime: 4.25 } as AudioContext
+    const pausedContext = { currentTime: 1, state: 'suspended' } as AudioContext
     const capture = new DesktopTrainingMicCapture({ source })
-    await capture.start(context)
-    expect(capture.read().timestampMs).toBe(4250)
+    try {
+      await capture.start(pausedContext)
+      expect(capture.read().timestampMs).toBe(4250)
+      now = 9000
+      expect(capture.read().timestampMs).toBe(9000)
+      expect(pausedContext.currentTime).toBe(1)
+    } finally { capture.dispose(); clock.mockRestore() }
   })
 
   it('stops and disposes microphone resources without a hidden poller', async () => {
@@ -167,7 +174,7 @@ describe('desktop training microphone capture', () => {
 
   it('single-flights one context and rejects a different context while starting', async () => {
     const source = new DeferredMicSource()
-    const capture = new DesktopTrainingMicCapture({ source })
+    const capture = new DesktopTrainingMicCapture({ source, nowMs: () => 3000 })
     const firstContext = context(3)
     const first = capture.start(firstContext)
     const concurrent = capture.start(firstContext)
@@ -184,7 +191,7 @@ describe('desktop training microphone capture', () => {
     ['a different context', true]
   ])('drains an explicitly stopped pending start before restarting on %s', async (_label, changeContext) => {
     const source = new SequencedDeferredMicSource()
-    const capture = new DesktopTrainingMicCapture({ source })
+    const capture = new DesktopTrainingMicCapture({ source, nowMs: () => 7000 })
     const firstContext = context(5)
     const replacementContext = changeContext ? context(8) : firstContext
     const first = capture.start(firstContext)
@@ -205,7 +212,7 @@ describe('desktop training microphone capture', () => {
     await Promise.all([replacement, duplicateReplacement])
     expect(source.starts).toBe(2)
     expect(source.active).toBe(true)
-    expect(capture.read().timestampMs).toBe(changeContext ? 8000 : 5000)
+    expect(capture.read().timestampMs).toBe(7000)
     expect(source.stops).toBe(2)
   })
 

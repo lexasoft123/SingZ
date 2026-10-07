@@ -335,8 +335,9 @@ export class DesktopTrainingMicCapture {
   read(): TrainingPitchObservation {
     const frame = this.source.readInfo()
     return {
-      // The cue timeline uses this same context clock (in seconds).
-      timestampMs: this.injectedNowMs?.() ?? (this.context?.currentTime ?? 0) * 1000,
+      // Native cue timelines use the monotonic performance clock. The legacy
+      // AudioContext may be suspended or have a different time origin.
+      timestampMs: this.injectedNowMs?.() ?? (this.context ? performance.now() : 0),
       frequencyHz: frame.f0,
       midi: frequencyToFractionalMidi(frame.f0),
       confidence: frame.clarity
