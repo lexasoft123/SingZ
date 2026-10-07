@@ -561,8 +561,13 @@ export class MultitrackEngine {
   createTrainingCueController(): DesktopTrainingCueController {
     if (this.teardownStarted) throw new Error('Audio engine is disposed.')
     this.trainingCues?.dispose()
-    this.trainingCues = new DesktopTrainingCueController(this.ctx, this.trainingGain, () => {
+    this.trainingCues = new DesktopTrainingCueController(this.ctx, this.trainingGain, async () => {
       this.pause()
+      // Paused native song playback still owns the physical output and leaves
+      // Chromium on its silent sink. Retire that graph before scheduling cues;
+      // its unload restores the saved route without discarding the loaded song.
+      const unload = this.beginNativePlaybackUnload()
+      if (unload) await unload
     })
     return this.trainingCues
   }

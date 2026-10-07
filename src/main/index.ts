@@ -845,6 +845,9 @@ function registerIpc(): void {
     if (url.protocol === 'https:') void shell.openExternal(url.toString())
   })
 
+  ipcMain.on('training:timing', (_event, line: unknown) => {
+    if (typeof line === 'string') log('training', line.slice(0, 1000))
+  })
   ipcMain.handle('log:all', () => logEntries())
 
   ipcMain.handle('log:save', (_e, path?: string, session?: string) =>

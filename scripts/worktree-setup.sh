@@ -114,6 +114,10 @@ mirror_vendor() {
     # An engine target dir (darwin-arm64, win32-x64, ...) is the mixed one:
     # go in and link per file. Everything else at this level is third-party.
     if [ -d "$entry" ] && [ "$name" != "packs" ]; then
+      if [ -L "$WT/vendor/$name" ]; then
+        rm "$WT/vendor/$name"
+        echo "  replaced shared vendor/$name directory with a local mirror"
+      fi
       mkdir -p "$WT/vendor/$name"
       for inner in "$entry"/*; do
         [ -e "$inner" ] || continue
@@ -307,20 +311,56 @@ if [ "$MODE" != "--desktop-only" ]; then
   fi
 fi
 
-# This worktree's OWN singz-analyze — one of the slots mirror_vendor
-# deliberately left empty. Without it the desktop finds no core and silently
-# falls back to the TS detectors, which is a quieter wrong answer than the
-# shared binary was. singz-capture.node is built explicitly when the current
-# Electron/platform addon is needed; an empty slot is the correct default.
-# Non-fatal: a machine with no cmake still gets a working checkout, and
-# analyze-provenance.ts says so at launch either way.
-if command -v cmake >/dev/null 2>&1; then
-  echo "This worktree's singz-analyze (ccache makes a sibling's build cheap):"
-  if ! "$WT/scripts/vendor-analyze.sh"; then
-    echo "  singz-analyze did not build — run scripts/vendor-analyze.sh when you need the core" >&2
-  fi
-else
-  echo "No cmake: run scripts/vendor-analyze.sh once you have one, or the core stays absent."
+# A ready worktree must have a local analyzer matching its current sources.
+# Check the executable itself: a stale binary can have a misleading sidecar.
+TARGET=$(node -p 'process.platform + "-" + process.arch')
+EXT=""
+case "$TARGET" in win32-*) EXT=".exe" ;; esac
+if [ -L "$WT/vendor/$TARGET" ]; then
+  rm "$WT/vendor/$TARGET"
 fi
+mkdir -p "$WT/vendor/$TARGET"
+ANALYZER="$WT/vendor/$TARGET/singz-analyze$EXT"
+STAMP="$ANALYZER.source-hash"
+EXPECTED_HASH=$("$WT/scripts/analyze-source-hash.sh" "$WT")
+
+# Migrate individual analyzer links left by older provisioning too. Never
+# write through them into another checkout's artifact or stamp.
+for artifact in "$ANALYZER" "$STAMP"; do
+  if [ -L "$artifact" ]; then
+    rm "$artifact"
+    echo "  detached shared $(basename "$artifact")"
+  fi
+done
+
+analyzer_matches_sources() {
+  local info
+  [ -f "$ANALYZER" ] || return 1
+  info=$("$ANALYZER" build-info 2>/dev/null) || return 1
+  printf '%s' "$info" | node -e '
+    let text = "";
+    process.stdin.on("data", chunk => text += chunk);
+    process.stdin.on("end", () => {
+      try { process.exit(JSON.parse(text).sourceHash === process.argv[1] ? 0 : 1); }
+      catch { process.exit(1); }
+    });
+  ' "$EXPECTED_HASH"
+}
+
+if ! analyzer_matches_sources; then
+  # Force the producer past its sidecar cache when the executable disagrees.
+  rm -f "$STAMP"
+fi
+
+echo "This worktree's singz-analyze (ccache makes a sibling's build cheap):"
+if ! "$WT/scripts/vendor-analyze.sh" "$TARGET"; then
+  echo "FATAL: analyzer build failed. Install CMake and a C++ toolchain, then rerun scripts/worktree-setup.sh." >&2
+  exit 1
+fi
+if ! analyzer_matches_sources; then
+  echo "FATAL: $ANALYZER does not match this checkout ($EXPECTED_HASH). Worktree setup is incomplete." >&2
+  exit 1
+fi
+echo "  analyzer verified: $EXPECTED_HASH"
 
 echo "Worktree ready: npm run dev / typecheck / test all work here."

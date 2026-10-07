@@ -3985,9 +3985,19 @@ body.modal-open .persistent-monitor.active .persistent-monitor-dot {
   line-height: 1.55;
 }
 
-.vt-main-action {
+.vt-main-action.pill.primary {
   min-width: 180px;
-  min-height: 38px;
+  min-height: 44px;
+  justify-content: center;
+  padding: 10px 20px;
+  border-radius: 14px;
+  background: var(--accent);
+  box-shadow: none;
+}
+
+.vt-main-action.pill.primary:hover:not(:disabled) {
+  background: var(--sz-accent-lift);
+  box-shadow: none;
 }
 
 .vt-cue-state > span {

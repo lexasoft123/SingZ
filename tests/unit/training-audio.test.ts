@@ -339,6 +339,42 @@ describe('desktop training cue scheduling', () => {
 })
 
 describe('engine-owned training audio', () => {
+  it('waits for a paused native song to release output before scheduling training notes', async () => {
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
+    const engine = new MultitrackEngine()
+    const context = FakeAudioContext.last!
+    engine.setNativeAheadAllowed(false)
+    engine.load([{ id: 'vocals', buffer: { duration: 30 } as AudioBuffer, duration: 30 }])
+    await engine.releaseOutputForNativeMonitor()
+    const cleanup = deferred()
+    let active = true
+    const client = {
+      get active(): boolean { return active },
+      transportParked: true,
+      audibleSeconds: () => 12,
+      unload: vi.fn(async () => {
+        await cleanup.promise
+        active = false
+        await engine.restoreOutputAfterNativeMonitor()
+      })
+    }
+    ;(engine as unknown as { nativePlayback: typeof client }).nativePlayback = client
+    const cues = engine.createTrainingCueController()
+    cues.setSound('organ')
+    const scheduled = cues.schedule([{ purpose: 'answer', articulation: 'sequence', notes: [60] }])
+    await vi.waitFor(() => expect(client.unload).toHaveBeenCalledOnce())
+    expect(context.oscillators).toHaveLength(0)
+    expect(context.sinkId).toBe('none')
+    cleanup.resolve()
+    await scheduled
+    expect(context.sinkId).toBe('')
+    expect(context.oscillators.length).toBeGreaterThan(0)
+    expect(engine.position).toBe(12)
+    expect(engine.playing).toBe(false)
+    cues.dispose()
+  })
+
   afterEach(() => vi.unstubAllGlobals())
 
   it('lets a section pause revoke song play while AudioContext.resume is pending', async () => {

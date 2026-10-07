@@ -236,6 +236,14 @@ export class DesktopAudioInput {
     sender: WebContents,
     raw: unknown
   ): Promise<DesktopAudioInputStartResult> {
+    const startupAt = performance.now()
+    let phaseAt = startupAt
+    const startupPhase = (phase: string): void => {
+      const now = performance.now()
+      log('mic', `startup · ${phase} · ${(now - phaseAt).toFixed(1)} ms phase · ${(now - startupAt).toFixed(1)} ms total`)
+      phaseAt = now
+    }
+    startupPhase('requested')
     const previous = this.active
     if (previous?.stopping) await waitForStopped(previous, 2500)
     if (this.active)
@@ -255,7 +263,9 @@ export class DesktopAudioInput {
         kind: 'denied',
         error: t('main.error.micAccessBlocked')
       }
+    startupPhase('permission granted')
     const bin = await resolveAnalyze()
+    startupPhase('analyzer resolved')
     if (!bin)
       return {
         ok: false,
@@ -265,6 +275,7 @@ export class DesktopAudioInput {
     let devices: DesktopAudioInputDevice[]
     try {
       devices = await runInventory(bin)
+      startupPhase(`device inventory (${devices.length} inputs)`)
     } catch (error) {
       return {
         ok: false,
@@ -308,6 +319,8 @@ export class DesktopAudioInput {
       '--record-dir',
       recordingDirectory
     ])
+    startupPhase('capture process spawned')
+    let firstFrame = true
     let resolveStopped!: () => void
     const stopped = new Promise<void>((resolve) => {
       resolveStopped = resolve
@@ -372,6 +385,7 @@ export class DesktopAudioInput {
           }
           if (rawEvent.version === 1 && rawEvent.type === 'ready') {
             active.ready = true
+            startupPhase('capture ready')
             log(
               'mic',
               'pitch detector · crepe-tiny · zdsp CPU · 64 ms window · 20 ms hop · confidence floor 0.50'
@@ -386,7 +400,13 @@ export class DesktopAudioInput {
             continue
           }
           const event = parseDesktopAudioInputEvent(line)
-          if (event) send(event)
+          if (event) {
+            if (firstFrame && rawEvent.type === 'frame') {
+              firstFrame = false
+              startupPhase('first analysed frame')
+            }
+            send(event)
+          }
         }
       })
       child.stderr?.on('data', (chunk: Buffer) => {

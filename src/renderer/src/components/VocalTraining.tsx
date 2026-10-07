@@ -1,3 +1,4 @@
+import { reportTrainingTiming } from '../audio/training-timing'
 import type { IconName, IconProps } from '@singz/ui/icons'
 import { TRAINING_SOUNDS, type TrainingSound } from '../../../shared/training-sound'
 import { trainingRangeNotice } from '../../../shared/training-session'
@@ -138,6 +139,7 @@ interface ActiveDesktopVocalRun {
   readonly tracker: TrainingPitchLockTracker
   activeTarget: number
   targetStartedAtMs: number
+  completionAtMs?: number
   completed: boolean
 }
 
@@ -495,6 +497,43 @@ export default function VocalTraining({
           interruptRuntime()
           return
         }
+        if (run.completionAtMs !== undefined) {
+          if (performance.now() < run.completionAtMs) {
+            frame.current = requestAnimationFrame(tick)
+            return
+          }
+          run.completionAtMs = undefined
+          const endMs = run.windows.at(-1)!.endMs
+          if (run.activeTarget === prompt.targets.length - 1) {
+            finishVocalPrompt(run)
+            return
+          }
+          run.activeTarget++
+          run.targetStartedAtMs = endMs + 350
+          run.tracker.reset()
+          setPitchLock(EMPTY_TRAINING_PITCH_LOCK)
+          setLive(
+            livePitchFromLock(
+              EMPTY_TRAINING_PITCH_LOCK,
+              run.activeTarget,
+              state.setup,
+              practiceSettings.pitchWindowCents
+            )
+          )
+          if (needsTrainingTargetReference(prompt.kind, prompt.taskMode, stateRef.current.session?.config.scalePresentation)) {
+            const cue = trainingTargetReference(prompt.kind, prompt.targets[run.activeTarget].midi)
+            run.targetStartedAtMs = Infinity
+            setCountdown(Math.ceil(cue.durationSeconds))
+            void cues.schedule([cue], { noteDurationSec: cue.durationSeconds, attackSec: 0.032, releaseSec: 0.22 }).then(timeline => {
+              if (generation.current !== runId || vocalRun.current !== run) return
+              run.targetStartedAtMs = audibleCueEndTimeSec(timeline.endTime, engine.context) * 1000 + 150
+            }).catch(error => {
+              if (generation.current === runId && vocalRun.current === run) reportError(error)
+            })
+          }
+          frame.current = requestAnimationFrame(tick)
+          return
+        }
         const observation = mic.read()
         if (observation.timestampMs < run.targetStartedAtMs) {
           if (Number.isFinite(run.targetStartedAtMs)) setCountdown(Math.max(1, Math.ceil((run.targetStartedAtMs - observation.timestampMs) / 1000)))
@@ -543,33 +582,9 @@ export default function VocalTraining({
             range: trainingScoringRange(stateRef.current)!,
             options: { minimumConfidence: mic.minConfidence }
           }, TRAINING_HOLD_MS))
-          if (run.activeTarget === prompt.targets.length - 1) {
-            finishVocalPrompt(run)
-            return
-          }
-          run.activeTarget++
-          run.targetStartedAtMs = endMs + 350
-          run.tracker.reset()
-          setPitchLock(EMPTY_TRAINING_PITCH_LOCK)
-          setLive(
-            livePitchFromLock(
-              EMPTY_TRAINING_PITCH_LOCK,
-              run.activeTarget,
-              state.setup,
-              practiceSettings.pitchWindowCents
-            )
-          )
-          if (needsTrainingTargetReference(prompt.kind, prompt.taskMode, stateRef.current.session?.config.scalePresentation)) {
-            const cue = trainingTargetReference(prompt.kind, prompt.targets[run.activeTarget].midi)
-            run.targetStartedAtMs = Infinity
-            setCountdown(Math.ceil(cue.durationSeconds))
-            void cues.schedule([cue], { noteDurationSec: cue.durationSeconds, attackSec: 0.032, releaseSec: 0.22 }).then(timeline => {
-              if (generation.current !== runId || vocalRun.current !== run) return
-              run.targetStartedAtMs = audibleCueEndTimeSec(timeline.endTime, engine.context) * 1000 + 150
-            }).catch(error => {
-              if (generation.current === runId && vocalRun.current === run) reportError(error)
-            })
-          }
+          // Hold the locked state long enough for React to paint and the
+          // 120 ms meter transition to reach 100% before replacing the note.
+          run.completionAtMs = performance.now() + 250
         }
         frame.current = requestAnimationFrame(tick)
       }
@@ -671,6 +686,8 @@ export default function VocalTraining({
       const beginRun = claimTrainingBegin(beginLock.current)
       if (beginRun === null) return
       setBeginBusy(true)
+      const preparationAt = performance.now()
+      reportTrainingTiming(`prompt ${prompt.id} · preparing · ${mic.active ? 'microphone retained' : 'microphone starting'}`)
       void (async () => {
         dispatch({ type: 'set-error', error: null })
         if (!trainingOwnsForeground()) {
@@ -705,6 +722,7 @@ export default function VocalTraining({
             () => isTrainingBeginCurrent(beginLock.current, beginRun)
           )
           if (status === 'cancelled') return
+          reportTrainingTiming(`prompt ${prompt.id} · microphone ready · ${(performance.now() - preparationAt).toFixed(1)} ms preparation`)
           if (prompt.taskMode !== 'identify') onMicDevice(mic.device)
         } catch (error) {
           reportError(error)
@@ -715,6 +733,7 @@ export default function VocalTraining({
           interruptRuntime()
           return
         }
+        reportTrainingTiming(`prompt ${prompt.id} · preparation complete · ${(performance.now() - preparationAt).toFixed(1)} ms`)
         dispatch({ type: transition })
         if (!isTrainingBeginCurrent(beginLock.current, beginRun)) return
         await playPrompt(prompt)
@@ -1010,7 +1029,6 @@ export default function VocalTraining({
       onSkip={skipPrompt}
       onExit={backHome}
       preparation={state.preparation}
-      onBackToSong={backToSong}
     />
   )
 }
@@ -1660,8 +1678,7 @@ function TrainingSession({
   onReplay,
   onSkip,
   onExit,
-  preparation,
-  onBackToSong
+  preparation
 }: {
   state: DesktopTrainingState
   selected: SelectedTrainingExercise | null
@@ -1680,7 +1697,6 @@ function TrainingSession({
   onSkip: () => void
   onExit: () => void
   preparation: DesktopTrainingState['preparation']
-  onBackToSong: () => void
 }): React.JSX.Element {
   const readyButtonRef = useRef<HTMLButtonElement>(null)
   const firstAnswerRef = useRef<HTMLButtonElement>(null)
@@ -1730,12 +1746,8 @@ function TrainingSession({
         <button
           type="button"
           className="vt-back vt-session-back"
-          aria-label={
-            preparation
-              ? t('training.session.aria.backToSong')
-              : t('training.session.aria.endSession')
-          }
-          onClick={preparation ? onBackToSong : onExit}
+          aria-label={t('training.session.aria.endSession')}
+          onClick={onExit}
         >
           <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24">
             <path d="m15 18-6-6 6-6" />

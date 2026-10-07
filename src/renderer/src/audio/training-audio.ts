@@ -1,3 +1,4 @@
+import { reportTrainingTiming } from './training-timing'
 import { type TrainingSound } from '../../../shared/training-sound'
 import { TRAINING_REACHED_TONE } from '../../../shared/training-tone'
 import type { TrainingCue, TrainingCuePurpose } from '../../../shared/training-types'
@@ -92,7 +93,9 @@ export class DesktopTrainingCueController {
     if (this.context.state === 'closed') throw new Error('Training audio context is closed.')
     const generation = ++this.generation
     this.clearVoices()
+    const setupAt = performance.now()
     await this.beforeSchedule?.()
+    reportTrainingTiming(`cue setup · output handoff · ${(performance.now() - setupAt).toFixed(1)} ms`)
     this.assertCurrent(generation)
     if (this.context.state === 'suspended') await this.context.resume()
     this.assertCurrent(generation)
@@ -106,12 +109,15 @@ export class DesktopTrainingCueController {
     this.assertCurrent(generation)
     this.instrumentGain = sampleAuditionGain
     const sound = this.sound
+    const samplesAt = performance.now()
+    const cachedSamples = this.samples.size
     if (sound !== 'organ') {
       const { loadTrainingSamples } = await import('./training-samples')
       this.assertCurrent(generation)
       await loadTrainingSamples(this.context, this.samples, sound, cues, () => this.assertCurrent(generation))
     }
     this.assertCurrent(generation)
+    reportTrainingTiming(`cue setup · ${sound} samples · ${(performance.now() - samplesAt).toFixed(1)} ms · ${this.samples.size - cachedSamples} decoded`)
     const startTime = this.context.currentTime + timing.startDelaySec
     let cursor = startTime
     const scheduledCues: ScheduledTrainingCue[] = []
@@ -137,6 +143,7 @@ export class DesktopTrainingCueController {
       throw error
     }
     const endTime = scheduledCues.at(-1)?.endTime ?? startTime
+    reportTrainingTiming(`cue setup · scheduled · ${(performance.now() - setupAt).toFixed(1)} ms total · ${Math.round((startTime - this.context.currentTime) * 1000)} ms until sound`)
     return { startTime, endTime, cues: scheduledCues }
   }
 
