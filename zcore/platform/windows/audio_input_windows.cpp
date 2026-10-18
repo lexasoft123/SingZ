@@ -30,6 +30,7 @@
 #include <zcore/audio/audio_input_timestamp.h>
 
 #include "audio_input_windows_helpers.h"
+#include "audio_input_uid.h"
 
 namespace singz {
 namespace {
@@ -124,9 +125,7 @@ std::wstring wide(const std::string& value) {
 }
 
 bool endpointIdFromUid(const std::string& uid, std::wstring& id) {
-  constexpr char prefix[] = "wasapi:";
-  if (uid.compare(0, sizeof(prefix) - 1, prefix) != 0) return false;
-  id = wide(uid.substr(sizeof(prefix) - 1));
+  id = wide(std::string(detail::wasapiCaptureEndpointId(uid)));
   return !id.empty();
 }
 

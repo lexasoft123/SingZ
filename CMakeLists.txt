@@ -460,6 +460,12 @@ if(SINGZ_CORE_TESTS)
   add_test(NAME audio_host_android_policy_tests
     COMMAND audio_host_android_policy_tests)
 
+  add_executable(audio_input_uid_tests
+    ${SINGZ_REPO_ROOT}/tests/native/audio_input_uid_tests.cpp)
+  target_compile_features(audio_input_uid_tests PRIVATE cxx_std_20)
+  target_include_directories(audio_input_uid_tests PRIVATE "${SINGZ_REPO_ROOT}")
+  add_test(NAME audio_input_uid_tests COMMAND audio_input_uid_tests)
+
   if(WIN32)
     add_executable(audio_host_windows_tests
       ${SINGZ_REPO_ROOT}/tests/native/audio_host_windows_tests.cpp)

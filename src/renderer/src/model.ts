@@ -1,3 +1,4 @@
+import { normalizeAudioInputUid } from '../../shared/audio-input-uid'
 import { restoreTrainingSound, type TrainingSound } from '../../shared/training-sound'
 import { STEM_META, CUSTOM_COLORS as KIT_CUSTOM_COLORS } from '@singz/ui/stems'
 import type { DesktopPlaybackProvider, StemName } from '../../shared/types'
@@ -201,7 +202,8 @@ export function sanitizeAudioPrefs(raw: unknown): AudioPrefs {
     : undefined
   const outputId = id(r.outputId)
   const inputId = id(r.inputId)
-  const nativeInputUid = id(r.nativeInputUid)
+  const savedInputUid = id(r.nativeInputUid)
+  const nativeInputUid = savedInputUid ? normalizeAudioInputUid(savedInputUid) : undefined
   const nativeMonitorOutputUid = id(r.nativeMonitorOutputUid)
   const nativeAudioProvider = r.nativeAudioProvider === 'asio' ? 'asio'
     : r.nativeAudioProvider === 'wasapi' ? 'wasapi' : undefined

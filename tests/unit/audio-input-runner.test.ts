@@ -118,6 +118,23 @@ describe('persistent desktop microphone lifecycle', () => {
     expect(binding.initializeSharedAudio).toHaveBeenCalledOnce()
     if (second.ok) await input.stop(second.token)
   })
+  it('keeps a legacy Windows selection on the same non-default endpoint', async () => {
+    const { input, binding, sender } = fixture()
+    const endpoint = '{0.0.1.00000000}.{12345678-1234-1234-1234-123456789abc}'
+    const selected = { ...device, uid: endpoint, isDefault: false }
+    binding.inputDevices.mockReturnValue({ ok: true, devices: [device, selected] })
+    const result = await input.start(sender, { deviceUid: `wasapi:${endpoint}`, channel: 1 })
+    expect(result).toMatchObject({ ok: true, device: selected, channel: 1, fallback: false })
+    expect(binding.beginCapture.mock.calls[0][0]).toMatchObject({ deviceUid: endpoint, inputChannel: 1 })
+    if (result.ok) await input.stop(result.token)
+  })
+  it('records a failed native start and keeps the original error', async () => {
+    const { input, binding, sender } = fixture()
+    const before = logEntries().length
+    binding.beginCapture.mockReturnValueOnce({ ok: false, error: 'WASAPI capture start failed (0x88890004)' } as never)
+    expect(await input.start(sender, {})).toMatchObject({ ok: false, error: 'WASAPI capture start failed (0x88890004)' })
+    expect(logEntries().slice(before)).toEqual([expect.objectContaining({ source: 'mic', level: 'error', line: expect.stringContaining('WASAPI capture start failed (0x88890004)') })])
+  })
   it('selects the current native fallback and ignores an old session stop token', async () => {
     const { sender, binding, input } = fixture()
     const started = await input.start(sender, { deviceUid: 'missing:mic' })

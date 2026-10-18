@@ -7,6 +7,7 @@ import { loadCaptureBinding, type NativeCaptureBinding } from './capture'
 import { askMicrophoneAccess } from './mic-access'
 import { log } from './log'
 import { t } from '../shared/i18n'
+import { normalizeAudioInputUid } from '../shared/audio-input-uid'
 import type {
   DesktopAudioInputDevice,
   DesktopAudioInputEvent,
@@ -162,9 +163,11 @@ export class DesktopAudioInput {
   }
 
   async start(sender: WebContents, raw: unknown): Promise<DesktopAudioInputStartResult> {
-    return this.startGate.run(() => this.startClaimed(sender, raw), () => ({
-      ok: false, kind: 'busy', error: t('main.error.anotherTrainingMicStarting')
+    const result = await this.startGate.run(() => this.startClaimed(sender, raw), () => ({
+      ok: false as const, kind: 'busy' as const, error: t('main.error.anotherTrainingMicStarting')
     }))
+    if (!result.ok) log('mic', `startup failed · ${result.kind} · ${result.error.replace(/[\r\n]/g, ' ')}`, 'error')
+    return result
   }
 
   private async startClaimed(sender: WebContents, raw: unknown): Promise<DesktopAudioInputStartResult> {
@@ -184,7 +187,7 @@ export class DesktopAudioInput {
       return { ok: false, kind: 'unavailable', error: String(error) }
     }
     const options = (raw ?? {}) as { deviceUid?: unknown; channel?: unknown }
-    const requestedUid = typeof options.deviceUid === 'string' ? options.deviceUid : ''
+    const requestedUid = typeof options.deviceUid === 'string' ? normalizeAudioInputUid(options.deviceUid) : ''
     const requestedDevice = devices.find(device => device.uid === requestedUid)
     let device = requestedDevice ?? devices.find(device => device.isDefault) ?? devices[0]
     if (!device) return { ok: false, kind: 'unavailable', error: t('main.error.noMicrophoneAvailable') }

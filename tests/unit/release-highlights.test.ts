@@ -16,9 +16,11 @@ describe('bundled update highlights', () => {
     expect(compareReleaseVersions('0.10.0', '0.9.9')).toBeGreaterThan(0)
   })
   it.each(['en', 'ru', 'zh-CN'] as const)('keeps desktop capabilities labeled on phones in %s', locale => {
-    const phone = releaseHighlights(RELEASE_VERSION, undefined, locale, 'ios')!
-    expect(phone.entries[0].highlights.find(item => item.id === 'desktop-training')?.desktopOnly).toBe(true)
-    expect(phone.entries[0].highlights.find(item => item.id === 'reference-sounds')?.desktopOnly).toBe(false)
+    const phone = releaseHighlights(RELEASE_VERSION, '0.26.2', locale, 'ios')!
+    // The mixed-platform fixture remains v0.26.3 when a later release is added.
+    const mixed = phone.entries.find(entry => entry.version === '0.26.3')!
+    expect(mixed.highlights.find(item => item.id === 'desktop-training')?.desktopOnly).toBe(true)
+    expect(mixed.highlights.find(item => item.id === 'reference-sounds')?.desktopOnly).toBe(false)
     expect(phone.entries[0].highlights.every(item => item.title && item.description)).toBe(true)
     expect(phone.url).toBe(`https://github.com/lexasoft123/SingZ/releases/tag/v${RELEASE_VERSION}`)
   })

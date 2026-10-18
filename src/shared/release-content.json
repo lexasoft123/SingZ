@@ -1,6 +1,32 @@
 {
-  "version": "0.26.3",
+  "version": "0.26.4",
   "releases": [
+    {
+      "version": "0.26.4",
+      "highlights": [
+        {
+          "id": "windows-microphone",
+          "icon": "mic",
+          "platforms": [
+            "desktop"
+          ],
+          "text": {
+            "en": {
+              "title": "Use your Windows microphone again",
+              "description": "Windows microphones can start again, including USB audio interfaces such as MiniFuse. Saved microphone and input-channel selections are preserved. If capture fails, the app log now includes the underlying error to help diagnose the connection."
+            },
+            "ru": {
+              "title": "Микрофон Windows снова работает",
+              "description": "Микрофоны Windows снова запускаются, в том числе USB-аудиоинтерфейсы MiniFuse. Выбранный микрофон и входной канал сохраняются. Если захват звука не запустится, журнал приложения покажет причину ошибки для диагностики подключения."
+            },
+            "zh-CN": {
+              "title": "重新使用 Windows 麦克风",
+              "description": "修复 Windows 麦克风无法启动的问题，包括 MiniFuse 等 USB 音频接口。保留已选择的麦克风和输入声道。如果音频采集失败，应用日志现在会记录具体错误，方便排查连接问题。"
+            }
+          }
+        }
+      ]
+    },
     {
       "version": "0.26.3",
       "highlights": [

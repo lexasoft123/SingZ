@@ -86,6 +86,14 @@ describe('nativeInputUidForChromium', () => {
 })
 
 describe('sanitizeAudioPrefs', () => {
+  it('migrates the old WASAPI prefix without changing the chosen channel or other device IDs', () => {
+    const endpoint = '{0.0.1.00000000}.{12345678-1234-1234-1234-123456789abc}'
+    expect(sanitizeAudioPrefs({ nativeInputUid: `wasapi:${endpoint}`, inputChannel: 1 }))
+      .toEqual({ nativeInputUid: endpoint, inputChannel: 1 })
+    expect(sanitizeAudioPrefs({ nativeInputUid: endpoint })).toEqual({ nativeInputUid: endpoint })
+    expect(sanitizeAudioPrefs({ nativeInputUid: 'coreaudio:mic' })).toEqual({ nativeInputUid: 'coreaudio:mic' })
+  })
+
   it('preserves only an explicit Windows native audio provider', () => {
     expect(sanitizeAudioPrefs({ nativeAudioProvider: 'asio' })).toEqual({ nativeAudioProvider: 'asio' })
     expect(sanitizeAudioPrefs({ nativeAudioProvider: 'wasapi' })).toEqual({ nativeAudioProvider: 'wasapi' })
