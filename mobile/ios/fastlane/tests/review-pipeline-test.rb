@@ -8,7 +8,7 @@ class ReviewPipelineHarness
     def self.success(*) = nil
   end
 
-  attr_accessor :groups, :upload_failure, :contact_failure, :open_review
+  attr_accessor :groups, :upload_failure, :contact_failure, :open_review, :pending_release, :after_upload_release
   attr_reader :events
 
   def initialize
@@ -26,7 +26,13 @@ class ReviewPipelineHarness
 end
 
 fastfile = File.expand_path('../Fastfile', __dir__)
-ReviewPipelineHarness.new.instance_eval(File.read(fastfile), fastfile)
+source = File.read(fastfile)
+ReviewPipelineHarness.new.instance_eval(source, fastfile)
+# Fastfile helpers defined with `def` belong to the DSL receiver. Register
+# the real decision helper on every harness instance, while its API calls
+# below return controlled review/version state.
+helper = source[/^def store_submission_blocker\n.*?^end\n/m]
+ReviewPipelineHarness.class_eval(helper, fastfile, source[0...source.index(helper)].count("\n") + 1)
 
 class ReviewPipelineHarness
   # Override helpers after registering the real lane bodies.
@@ -40,9 +46,10 @@ class ReviewPipelineHarness
     { first_name: 'Test' }
   end
   def in_progress_review_submission = open_review
-  def refuse_if_review_in_progress
+  def pending_store_release = pending_release
+  def refuse_if_store_submission_blocked
     events << :review_checked
-    raise 'Review already open' if open_review
+    raise 'Store version blocked' if open_review || pending_release
   end
   def beta_review_info = {}
   def install_signing(**) = events << :signing
@@ -53,6 +60,7 @@ class ReviewPipelineHarness
     events << [:upload, options]
     raise 'Upload failed' if upload_failure
     events << :processed unless options[:skip_waiting_for_build_processing]
+    self.pending_release = after_upload_release if after_upload_release
   end
   def upload_to_app_store(**options) = events << [:submit, options]
 end
@@ -106,6 +114,32 @@ class ReviewPipelineTest < Minitest::Test
     @pipeline.ship
     assert_equal 1, uploads.size
     assert_equal false, uploads.first[1][:distribute_external]
+    assert_empty submissions
+  end
+
+  def test_tag_ship_preserves_an_approved_version_waiting_for_release
+    @pipeline.pending_release = Struct.new(:version_string, :app_store_state).new('0.26.0', 'PENDING_DEVELOPER_RELEASE')
+    @pipeline.groups = ['External Testers']
+    @pipeline.contact_failure = true
+    @pipeline.ship
+    assert_equal 1, uploads.size
+    assert_equal true, uploads.first[1][:distribute_external]
+    assert_empty submissions
+    refute_includes @pipeline.events, :contact_checked
+  end
+
+  def test_store_release_state_is_rechecked_after_processing
+    @pipeline.after_upload_release = Struct.new(:version_string, :app_store_state).new('0.26.0', 'PENDING_DEVELOPER_RELEASE')
+    @pipeline.ship
+    assert_equal 1, uploads.size
+    assert_includes @pipeline.events, :processed
+    assert_empty submissions
+  end
+
+  def test_manual_submission_refuses_a_version_waiting_for_release
+    @pipeline.pending_release = Struct.new(:version_string, :app_store_state).new('0.26.0', 'PENDING_DEVELOPER_RELEASE')
+    assert_raises(RuntimeError) { @pipeline.submit(build: 30) }
+    assert_empty uploads
     assert_empty submissions
   end
 

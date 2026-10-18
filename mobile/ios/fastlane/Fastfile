@@ -219,16 +219,32 @@ def in_progress_review_submission
   )
 end
 
-def refuse_if_review_in_progress
-  open = in_progress_review_submission
-  return if open.nil?
+# An approved version held for manual release also occupies Apple's version
+# slot, even though its review submission is COMPLETE. Do not release it or
+# overwrite it as a side effect of shipping a newer TestFlight build.
+def pending_store_release
+  app = Spaceship::ConnectAPI::App.find(BUNDLE_ID) or UI.user_error!("No App Store Connect app for #{BUNDLE_ID}")
+  app.get_app_store_versions(filter: { platform: Spaceship::ConnectAPI::Platform::IOS }).find do |version|
+    %w[PENDING_DEVELOPER_RELEASE PENDING_APPLE_RELEASE PROCESSING_FOR_APP_STORE].include?(version.app_store_state)
+  end
+end
 
-  UI.user_error!(
-    "Refusing to submit: review submission #{open.id} for version " \
-    "#{open.app_store_version_for_review&.version_string || '?'} is #{open.state}, and Apple allows one " \
-    "open submission per platform. A rejected one stays open until it is resubmitted or cancelled in " \
-    "App Store Connect (Distribution ▸ App Review). What the reviewer said: fastlane ios review_messages."
-  )
+def store_submission_blocker
+  open = in_progress_review_submission
+  if open
+    return "App Store review for #{open.app_store_version_for_review&.version_string || '?'} is #{open.state}. " \
+      "Resolve the existing review in App Store Connect before submitting another version."
+  end
+  pending = pending_store_release
+  return nil if pending.nil?
+
+  "App Store version #{pending.version_string} is #{pending.app_store_state}. " \
+    "Finish that version's release in App Store Connect before submitting another version."
+end
+
+def refuse_if_store_submission_blocked
+  reason = store_submission_blocker
+  UI.user_error!("Refusing to submit: #{reason}") if reason
 end
 
 # The thread kinds App Store Connect's own Resolution Center page asks for.
@@ -433,7 +449,7 @@ platform :ios do
     groups = testflight_groups
     submit_review = options[:submit_review] == true
     contact = submit_review ? review_contact : nil
-    refuse_if_review_in_progress if submit_review
+    refuse_if_store_submission_blocked if submit_review
     # Fetched BEFORE the archive, like `release`'s contact and for the same
     # reason: an incomplete review contact is the difference between "widened"
     # and "uploaded and not widened", and discovering it after the archive and
@@ -507,22 +523,28 @@ platform :ios do
     end
 
     if submit_review
-      submit_build(version: version, build_number: build_number, api_key: key, contact: contact)
+      # Processing may take an hour; recheck before deliver edits any store
+      # metadata in case another release changed state during the upload.
+      reason = store_submission_blocker
+      if reason
+        UI.important("#{reason} TestFlight upload is complete; store submission is deferred.")
+      else
+        submit_build(version: version, build_number: build_number, api_key: key, contact: contact)
+      end
     end
   end
 
-  desc "Upload to TestFlight; submit to the App Store when no review is already open"
+  desc "Upload to TestFlight; submit to the App Store when its version slot is available"
   lane :ship do
     api_key
-    open = in_progress_review_submission
-    if open
+    reason = store_submission_blocker
+    if reason
       UI.important(
-        "App Store review for #{open.app_store_version_for_review&.version_string || '?'} " \
-        "is #{open.state}. Uploading to TestFlight; leaving that submission unchanged. " \
+        "#{reason} Uploading to TestFlight; leaving that version unchanged. " \
         "Submit this build later with fastlane ios submit build:#{ci_build_number}."
       )
     end
-    beta(submit_review: open.nil?)
+    beta(submit_review: reason.nil?)
   end
 
   desc "Build, then submit to the App Store for review — held for manual release after approval"
@@ -537,7 +559,7 @@ platform :ios do
     # as tags-ignore in ios.yml: better not to start.
     contact = review_contact
     key = api_key
-    refuse_if_review_in_progress
+    refuse_if_store_submission_blocked
     install_signing(api_key: key)
     ipa = archive(build_number: build_number)
 
@@ -575,7 +597,7 @@ platform :ios do
     build_number = options[:build] || ci_build_number
     contact = review_contact
     key = api_key
-    refuse_if_review_in_progress
+    refuse_if_store_submission_blocked
     submit_build(version: version, build_number: build_number, api_key: key, contact: contact)
   end
 

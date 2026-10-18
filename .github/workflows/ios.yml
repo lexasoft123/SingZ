@@ -1,8 +1,9 @@
 name: iOS
 
 # A release tag uploads to TestFlight, waits for Apple's processing, then
-# submits that same build for App Store review when no review is already open.
-# An open App Store review defers store submission without blocking TestFlight.
+# submits that same build for App Store review when the version slot is free.
+# An open review or a version awaiting release defers store submission without
+# blocking TestFlight.
 # Configured external groups
 # also receive Beta App Review. App Store approval leaves the version held
 # for manual release; tagging does not automatically publish it.
