@@ -1,5 +1,12 @@
 # SingZ
 
+[![Latest release](https://img.shields.io/github/v/release/lexasoft123/SingZ?logo=github&label=Release&color=2563eb)](https://github.com/lexasoft123/SingZ/releases/latest)
+[![App Store — iPhone and iPad](https://img.shields.io/badge/App_Store-iPhone_%26_iPad-0D96F6?logo=appstore&logoColor=white)](https://apps.apple.com/app/singz-sing-with-the-band/id6806430347)
+[![Google Play — closed beta](https://img.shields.io/badge/Google_Play-Closed_beta-34A853?logo=googleplay&logoColor=white)](https://play.google.com/apps/testing/com.lexasoft.singz)
+[![Android — download APK](https://img.shields.io/badge/Android-Download_APK-3DDC84?logo=android&logoColor=white)](https://github.com/lexasoft123/SingZ/releases/latest)
+[![TestFlight — iOS beta](https://img.shields.io/badge/TestFlight-iOS_beta-147EFB?logo=testflight&logoColor=white)](https://testflight.apple.com/join/q6vVdkwt)
+[![Telegram — updates](https://img.shields.io/badge/Telegram-Updates-26A5E4?logo=telegram&logoColor=white)](https://t.me/SingZapp)
+
 A practice app for singers. Drop a song, see its timeline, split it into six
 stems (vocals / drums / bass / guitar / piano / instruments) with AI, and mute
 any track while it plays — kill the vocals and it's your karaoke machine, kill
@@ -70,8 +77,9 @@ Download for Mac, Windows and Android from [GitHub Releases](https://github.com/
   [App Store](https://apps.apple.com/app/singz-sing-with-the-band/id6806430347);
   early builds land first in the
   [TestFlight beta](https://testflight.apple.com/join/q6vVdkwt).
-  **Android:** the APK is attached to every release (not yet on the Play
-  Store — it's still in closed testing there).
+  **Android:** the APK is attached to every release; the
+  [Google Play closed beta](https://play.google.com/apps/testing/com.lexasoft.singz)
+  is available to enrolled testers.
 - **Vocal training** — guided programs for foundation, developing and advanced
   ear skills, plus single notes, intervals, chord tones, scales and arpeggios.
   Hear a note, sing it, and watch your pitch and hold progress. Intervals grow
