@@ -602,7 +602,7 @@ export class TrainingMicrophone {
     }
     const prior = this.diagnosticFrame
     if (!prior && 'detector' in frame)
-      log('mic', `pitch detector · ${frame.detector} · ${frame.detector === 'crepe-tiny' ? '64 ms window · 20 ms hop · confidence floor 0.50' : 'legacy YIN confidence floor 0.75'}`)
+      log('mic', `pitch detector · ${frame.detector} · ${frame.detector === 'crepe-tiny' ? (Platform.OS === 'ios' ? '128 ms context · 65–1200 Hz band-pass · 20 ms hop · confidence floor 0.50' : '64 ms window · 20 ms hop · confidence floor 0.50') : 'legacy YIN confidence floor 0.75'}`)
     if (prior && (prior.streamGeneration !== frame.streamGeneration || prior.resetCount !== frame.resetCount))
       this.pitchContinuity.reset()
     this.diagnosticFrame = frame

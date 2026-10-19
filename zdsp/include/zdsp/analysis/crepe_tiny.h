@@ -12,10 +12,15 @@ class CrepeTiny {
   explicit CrepeTiny(const std::string& modelPath);
   ~CrepeTiny();
   zdsp::analysis::LiveInputFrame analyze(const float* pcm, size_t frames, double rate);
+  // Trial path: 128 ms of real 16 kHz capture, band-limited and decimated
+  // into the unchanged 1024-sample network. No exercise target is consulted.
+  zdsp::analysis::LiveInputFrame analyzeLongContext(const float* pcm, size_t frames, double rate);
   const std::array<float, 360>& probabilities() const;
   double inferenceMs = 0;
   bool harmonicCorrected = false;
  private:
+  zdsp::analysis::LiveInputFrame analyzeNetwork(const float* pcm, size_t frames, double rate,
+                                               double minimumHz, double maximumHz);
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };

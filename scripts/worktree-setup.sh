@@ -274,6 +274,7 @@ if [ "$MODE" != "--desktop-only" ]; then
       }
     }
     const sourceFile = (name, relative) => /\.(cpp|mm|h|hpp)$/.test(name) &&
+      relative !== "src/media/audio_export.cpp" &&
       !callbackDefinitions.has(relative)
     const iosFile = (name, relative) => /\.(cpp|mm|h|hpp)$/.test(name) &&
       !callbackDefinitions.has(relative)

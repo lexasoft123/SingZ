@@ -44,6 +44,39 @@ int main(int argc,char**argv){
   if(graphFrames<20)return 15;
   input.fill(0);if(model.analyze(input.data(),1024,16000).frequency!=0)return 8;
   bool rejected=false;try{model.analyze(input.data(),1023,16000);}catch(...){rejected=true;}if(!rejected)return 9;
+  // Opt-in iOS trial keeps low notes, genuine higher registers and silence.
+  std::array<float,2048> context{};
+  for(double hz : {55.,65.4064,82.4069,103.826,130.813,196.,440.,659.255,880.,1046.50}) {
+    for(size_t i=0;i<context.size();++i) {
+      const double phase=2*3.141592653589793*hz*i/16000;
+      context[i]=.2f*(std::sin(phase)+.25*std::sin(2*phase)+.1*std::sin(3*phase));
+    }
+    const auto value=model.analyzeLongContext(context.data(),context.size(),16000);
+    if(value.frequency<=0 || std::abs(1200*std::log2(value.frequency/hz))>15)
+      throw std::runtime_error("Long-context CREPE changed a clean singing register");
+  }
+  context.fill(0);
+  if(model.analyzeLongContext(context.data(),context.size(),16000).frequency!=0)return 16;
+  rejected=false;try{model.analyzeLongContext(context.data(),1024,16000);}catch(...){rejected=true;}if(!rejected)return 17;
+  zdsp::analysis::PitchAnalysisConfig trialConfig{zdsp::analysis::PitchDetectorKind::CrepeTiny,argv[1],10};
+  trialConfig.crepeLongContextBandPass=true;
+  zdsp::analysis::PitchAnalysisModule trial(trialConfig);
+  int trialFrames=0;
+  for(int i=0;i<20;++i){
+    std::array<float,320> tone{};
+    for(size_t j=0;j<tone.size();++j)tone[j]=.25f*std::sin(2*3.141592653589793*103.826*(i*320+j)/16000);
+    singz::AudioInputBlockView capture{};capture.mono=tone.data();capture.frames=320;capture.sampleRate=16000;
+    capture.capture.clockDomainId=42;capture.capture.streamGeneration=10;capture.capture.sequence=i+1;capture.capture.sourceFrame=i*320;
+    capture.capture.sampleHostTimeNs=1000000000ull+i*20000000ull;
+    capture.capture.flags=singz::AudioInputSourceFrameValid|singz::AudioInputSampleHostTimeValid|singz::AudioInputTimestampQualityValid;
+    capture.capture.timestampQuality=singz::AudioInputTimestampQuality::Hardware;
+    if(!trial.push(capture,[&](const auto& window){
+      if(window.end.sourceFrame.value-window.start.sourceFrame.value!=2048)throw std::runtime_error("Long context timestamps must cover all 128 ms");
+      if(window.analysis.frequency<=0 || std::abs(1200*std::log2(window.analysis.frequency/103.826))>15)throw std::runtime_error("Long-context graph pitch mismatch");
+      ++trialFrames;
+    }))return 18;
+  }
+  if(trialFrames!=14)return 19; // first complete window then one every 320 frames
   singz::CaptureRecording take;take.filename="SingZ-microphone-test.wav";
   if(!singz::CaptureRecording::validName(take.filename)||singz::CaptureRecording::validName("../bad.wav"))return 10;
   input.fill(.25f);singz::AudioInputBlockView block{};block.mono=input.data();block.frames=1024;block.sampleRate=24000;

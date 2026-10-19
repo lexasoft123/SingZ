@@ -603,6 +603,7 @@ RCT_REMAP_METHOD(
       NSString* path = resource ? [[NSBundle bundleWithPath:resource] pathForResource:@"crepe-tiny" ofType:@"bin"] : nil;
       if (!path) throw std::runtime_error("CREPE-tiny model is missing from the app");
       pitchConfig.modelPath = path.UTF8String;
+      pitchConfig.crepeLongContextBandPass = true;
     }
     context = std::make_shared<IosCaptureBridge>(self, generation, std::move(pitchConfig));
   } catch (const std::exception& error) {
@@ -640,7 +641,7 @@ RCT_REMAP_METHOD(
   resolve(@{@"ok": @YES,
             @"sampleRate": @(started.sampleRate),
             @"analysisBuild": [NSString stringWithUTF8String:
-                [detector isEqualToString:@"crepe-tiny"] ? "crepe-tiny-zdsp-graph-v2" : zdsp::analysis::analysisBuildId()]});
+                [detector isEqualToString:@"crepe-tiny"] ? "crepe-tiny-context128-bp65-1200-v1" : zdsp::analysis::analysisBuildId()]});
 }
 
 RCT_REMAP_METHOD(

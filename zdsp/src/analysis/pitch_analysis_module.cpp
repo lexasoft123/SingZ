@@ -40,8 +40,10 @@ struct PitchAnalysisModule::Impl {
     size_t frames = config.windowFrames, hop = config.hopFrames;
     if (config.detector == PitchDetectorKind::CrepeTiny) {
       crepe = std::make_unique<CrepeTiny>(config.modelPath);
-      analyzer = [this](const float* pcm, size_t n, double r) { return crepe->analyze(pcm, n, r); };
-      rate = 16000; frames = 1024; hop = 320;
+      analyzer = [this](const float* pcm, size_t n, double r) {
+        return config.crepeLongContextBandPass ? crepe->analyzeLongContext(pcm,n,r) : crepe->analyze(pcm,n,r);
+      };
+      rate = 16000; frames = config.crepeLongContextBandPass ? 2048 : 1024; hop = 320;
     } else if (config.detector == PitchDetectorKind::Yin) {
       analyzer = {}; rate = 0; frames = 2048; hop = 512;
     } else if (!analyzer) throw std::invalid_argument("Custom pitch detector needs an analyzer");

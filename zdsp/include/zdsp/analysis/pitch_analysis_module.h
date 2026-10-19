@@ -21,6 +21,7 @@ struct PitchAnalysisConfig {
   int analysisRate = 16000;
   size_t windowFrames = 1024;
   size_t hopFrames = 320;
+  bool crepeLongContextBandPass = false; // opt-in iOS trial; other consumers retain parity
 };
 
 // Control-domain construction/destruction. One producer and one analysis

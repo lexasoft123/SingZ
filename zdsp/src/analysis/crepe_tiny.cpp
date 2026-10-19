@@ -96,6 +96,10 @@ CrepeTiny::CrepeTiny(const std::string& path):impl_(std::make_unique<Impl>(path)
 CrepeTiny::~CrepeTiny()=default;
 const std::array<float,360>& CrepeTiny::probabilities() const { return impl_->probabilities; }
 zdsp::analysis::LiveInputFrame CrepeTiny::analyze(const float* pcm, size_t frames, double rate) {
+  return analyzeNetwork(pcm, frames, rate, 55, 1050);
+}
+zdsp::analysis::LiveInputFrame CrepeTiny::analyzeNetwork(const float* pcm, size_t frames, double rate,
+                                                      double minimumHz, double maximumHz) {
   if (!pcm || frames != 1024 || rate != 16000) throw std::runtime_error("Invalid CREPE-tiny analysis window");
   harmonicCorrected = false;
   auto began = std::chrono::steady_clock::now();
@@ -119,7 +123,7 @@ zdsp::analysis::LiveInputFrame CrepeTiny::analyze(const float* pcm, size_t frame
   int best = -1;
   for (int i=0;i<360;++i) {
     double hz = 10*std::pow(2.,(1997.3794084376191+20*i)/1200.);
-    if (hz >= 55 && hz <= 1050 && (best<0 || probabilities[i]>probabilities[best])) best=i;
+    if (hz >= minimumHz && hz <= maximumHz && (best<0 || probabilities[i]>probabilities[best])) best=i;
   }
   if (best >= 0) {
     result.clarity = probabilities[best];
@@ -140,6 +144,66 @@ zdsp::analysis::LiveInputFrame CrepeTiny::analyze(const float* pcm, size_t frame
     result.clarity = probabilities[fullBest];
   }
   inferenceMs = std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-began).count();
+  return result;
+}
+
+zdsp::analysis::LiveInputFrame CrepeTiny::analyzeLongContext(const float* pcm, size_t frames, double rate) {
+  if (!pcm || frames != 2048 || rate != 16000)
+    throw std::runtime_error("Invalid CREPE 128 ms band-pass analysis window");
+  const auto began = std::chrono::steady_clock::now();
+  std::array<float,2048> filtered{};
+  struct Biquad {
+    double b0, b1, b2, a1, a2, z1=0, z2=0;
+    double process(double x) {
+      const double y=b0*x+z1;
+      z1=b1*x-a1*y+z2; z2=b2*x-a2*y; return y;
+    }
+  };
+  auto filter = [](double hz, bool highpass) {
+    const double omega=2*3.141592653589793*hz/16000;
+    const double c=std::cos(omega), alpha=std::sin(omega)/std::sqrt(2.);
+    const double a0=1+alpha, b=highpass ? (1+c)/2 : (1-c)/2;
+    return Biquad{b/a0,(highpass ? -2*b : 2*b)/a0,b/a0,-2*c/a0,(1-alpha)/a0};
+  };
+  auto hp=filter(65,true), lp=filter(1200,false);
+  for(size_t i=0;i<frames;++i) filtered[i]=static_cast<float>(lp.process(hp.process(pcm[i])));
+  // Symmetric 65-tap windowed-sinc anti-alias filter. Its entire support is
+  // inside this completed capture window (edge extension at its boundaries).
+  // It adds no future capture/lookahead beyond the declared 128 ms window.
+  static const auto kernel=[] {
+    std::array<double,65> taps{}; double sum=0;
+    constexpr double cutoff=.23;
+    for(int i=0;i<65;++i) {
+      const int d=i-32;
+      const double sinc=d ? std::sin(2*3.141592653589793*cutoff*d)/(3.141592653589793*d) : 2*cutoff;
+      taps[i]=sinc*(.5-.5*std::cos(2*3.141592653589793*i/64)); sum+=taps[i];
+    }
+    for(auto& t:taps)t/=sum; return taps;
+  }();
+  std::array<float,1024> decimated{};
+  for(int i=0;i<1024;++i) {
+    double value=0;
+    for(int k=0;k<65;++k)value+=kernel[k]*filtered[std::clamp(2*i+k-32,0,2047)];
+    decimated[i]=static_cast<float>(value);
+  }
+  // At 2x apparent pitch the network's search range must expand too; keeping
+  // the ordinary 1050 Hz limit would accidentally cap real notes at 525 Hz.
+  auto result=analyzeNetwork(decimated.data(),1024,16000,110,2100);
+  result.frequency*=.5;
+  // Preserve the top of the original singing range, beyond the network's
+  // ~1 kHz rescaled ceiling. The central raw 64 ms has the SAME midpoint as
+  // the full 128 ms window, so both paths share truthful capture timestamps.
+  const auto& p=probabilities();
+  const int best=static_cast<int>(std::max_element(p.begin(),p.end())-p.begin());
+  const double peakHz=10*std::pow(2.,(1997.3794084376191+20*best)/1200.);
+  if (result.clarity<.5 || peakHz>=1700) {
+    const auto longProbabilities=p;
+    const bool longCorrected=harmonicCorrected;
+    const auto high=analyzeNetwork(pcm+512,1024,16000,55,1050);
+    if (high.frequency>=800) result=high;
+    else { impl_->probabilities=longProbabilities; harmonicCorrected=longCorrected; }
+  }
+  inferenceMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-began).count();
   return result;
 }
 
