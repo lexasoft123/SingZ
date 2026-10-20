@@ -68,7 +68,7 @@ describe('mobile training state', () => {
     expect(effectiveSongPreparationKey({ pc: 7, minor: false, detVersion: 3 }, 2, 4)).toBeNull()
   })
 
-  test('chord preparation generates a six-prompt chord-only session', () => {
+  test('song preparation waits for setup review and uses the range selected before Start', () => {
     const initial = initialTrainingState(profile)
     const prepared = mobileTrainingReducer(initial, {
       type: 'prepare-song',
@@ -78,9 +78,19 @@ describe('mobile training state', () => {
       key: { tonicPc: 2, mode: 'minor' },
       seed: 'song-a-chords'
     })
-    expect(prepared.route).toBe('session')
-    expect(prepared.session?.prompts).toHaveLength(6)
-    expect(prepared.session?.prompts.every((prompt) => prompt.kind === 'chord-tone' || prompt.kind === 'arpeggio')).toBe(true)
+    expect(prepared.route).toBe('setup')
+    expect(prepared.session).toBeNull()
+    expect(prepared.error).toBeNull()
+    expect(prepared.setup).toMatchObject({ tonicPc: 2, keyMode: 'minor' })
+    const reviewed = mobileTrainingReducer(prepared, {
+      type: 'change-setup', patch: { lowMidi: 55, highMidi: 67 }
+    })
+    const started = mobileTrainingReducer(reviewed, { type: 'start', seed: 'reviewed-song' })
+    expect(started.route).toBe('session')
+    expect(started.preparation).toEqual({ sourceSongId: 'song-a', songName: 'A', choice: 'chords' })
+    expect(started.session?.config.range).toEqual({ lowMidi: 55, highMidi: 67 })
+    expect(started.session?.prompts).toHaveLength(6)
+    expect(started.session?.prompts.every((prompt) => prompt.kind === 'chord-tone' || prompt.kind === 'arpeggio')).toBe(true)
     expect(trainingSetupRequirements(prepared.setup)).toEqual({ intervalsRequired: false, chordsRequired: true, directionUsed: true })
   })
 

@@ -156,27 +156,19 @@ export function mobileTrainingReducer(
         songName: action.songName,
         choice: action.choice
       }
-      if (!action.key) {
-        return {
-          ...state,
-          route: 'setup',
-          setup: songPreparationSetup(
-            state.setup,
-            { tonicPc: state.setup.tonicPc, mode: state.setup.keyMode },
-            action.choice
-          ),
-          preparation,
-          error: t('phone.training.chooseSongKey')
-        }
+      return {
+        ...state,
+        route: 'setup',
+        phase: 'ready',
+        session: null,
+        setup: songPreparationSetup(
+          state.setup,
+          action.key ?? { tonicPc: state.setup.tonicPc, mode: state.setup.keyMode },
+          action.choice
+        ),
+        preparation,
+        error: action.key ? null : t('phone.training.chooseSongKey')
       }
-      return createSessionState(
-        {
-          ...state,
-          setup: songPreparationSetup(state.setup, action.key, action.choice),
-          preparation
-        },
-        action.seed
-      )
     }
     case 'activate':
       if (!state.session) return { ...state, error: t('phone.training.setupSessionFirst') }
