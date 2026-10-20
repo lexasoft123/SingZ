@@ -45,7 +45,6 @@ test.each([
         onIdentify={jest.fn()}
         onNext={onNext}
         onExit={jest.fn()}
-        onBackToSong={null}
       />
     )
   })

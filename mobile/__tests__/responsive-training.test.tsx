@@ -22,7 +22,7 @@ test('fold, unfold and portrait resizing retain the current lesson and transport
   const onSkip = jest.fn()
   const render = () => <TrainingSessionView state={state} liveMidi={null} activeTarget={1}
     onBegin={onBegin} onPause={onPause} onSkipSingleNote={onSkip} onIdentify={jest.fn()}
-    onNext={jest.fn()} onExit={jest.fn()} onBackToSong={null} />
+    onNext={jest.fn()} onExit={jest.fn()} />
   dimensions.mockReturnValue({ width: 430, height: 932, scale: 2, fontScale: 1 })
   let tree!: ReactTestRenderer.ReactTestRenderer
   await ReactTestRenderer.act(() => { tree = ReactTestRenderer.create(render()) })

@@ -962,7 +962,7 @@ export default function TrainingScreen({
               setIsPaused(true)
               stopRuntime()
               dispatch({ type: 'interrupt' })
-            }} onBegin={beginPrompt} onSkipSingleNote={() => { const run = vocalRun.current; if (run) finishVocalPrompt(run, 'skip') }} onIdentify={submitIdentify} onNext={() => dispatch({ type: 'next' })} onExit={close} onBackToSong={backToSong} /></LiveTrainingContext.Provider>
+            }} onBegin={beginPrompt} onSkipSingleNote={() => { const run = vocalRun.current; if (run) finishVocalPrompt(run, 'skip') }} onIdentify={submitIdentify} onNext={() => dispatch({ type: 'next' })} onExit={close} /></LiveTrainingContext.Provider>
           }}
         </TrainingStack.Screen>
         <TrainingStack.Screen
@@ -1346,7 +1346,7 @@ function CompactSetupRow({ label, value, expanded, onPress }: { label: string; v
   return <SettingsRow label={label} value={value} expanded={expanded} onPress={onPress} />
 }
 
-export function TrainingSessionView({ paused = false, onPause = () => undefined, sampleControls, state, liveMidi, micHearing = 'starting', singleNoteLock = EMPTY_SINGLE_NOTE_LOCK, singleNoteCountdown = null, pitchWindowCents = DEFAULT_SINGLE_NOTE_PITCH_WINDOW_CENTS, activeTarget, onBegin, onSkipSingleNote = () => undefined, onIdentify, onNext, onExit, onBackToSong }: { paused?: boolean; onPause?: () => void; sampleControls?: React.ReactNode; state: ReturnType<typeof initialTrainingState>; liveMidi: number | null; micHearing?: MicHearing; singleNoteLock?: SingleNoteLockState; singleNoteCountdown?: number | null; pitchWindowCents?: number; activeTarget: number; onBegin: () => void; onSkipSingleNote?: () => void; onIdentify: (answer: TrainingIdentifyAnswer) => void; onNext: () => void; onExit: () => void; onBackToSong: (() => void) | null }): React.JSX.Element {
+export function TrainingSessionView({ paused = false, onPause = () => undefined, sampleControls, state, liveMidi, micHearing = 'starting', singleNoteLock = EMPTY_SINGLE_NOTE_LOCK, singleNoteCountdown = null, pitchWindowCents = DEFAULT_SINGLE_NOTE_PITCH_WINDOW_CENTS, activeTarget, onBegin, onSkipSingleNote = () => undefined, onIdentify, onNext, onExit }: { paused?: boolean; onPause?: () => void; sampleControls?: React.ReactNode; state: ReturnType<typeof initialTrainingState>; liveMidi: number | null; micHearing?: MicHearing; singleNoteLock?: SingleNoteLockState; singleNoteCountdown?: number | null; pitchWindowCents?: number; activeTarget: number; onBegin: () => void; onSkipSingleNote?: () => void; onIdentify: (answer: TrainingIdentifyAnswer) => void; onNext: () => void; onExit: () => void }): React.JSX.Element {
   const layout = useMobileLayout()
   const [showSampleTools, setShowSampleTools] = useState(false)
   const session = state.session
@@ -1361,8 +1361,8 @@ export function TrainingSessionView({ paused = false, onPause = () => undefined,
     <View style={[styles.session, { paddingTop: layout.top, width: '100%', maxWidth: 1160, alignSelf: 'center' }]}>
       <GlassHeader
         title={trainingExerciseTitle(prompt.kind)}
-        backLabel={onBackToSong ? t('phone.training.backToSong') : t('phone.training.endSession')}
-        onBack={onBackToSong ?? onExit}
+        backLabel={t('phone.training.endSession')}
+        onBack={onExit}
         trailing={<Pressable accessibilityRole="button" accessibilityLabel={t('phone.training.recordingTools')} onPress={() => setShowSampleTools(value => !value)}><Text style={styles.counter}>{displayIndex} / {displayTotal}</Text></Pressable>}
       />
       {showSampleTools && sampleControls}

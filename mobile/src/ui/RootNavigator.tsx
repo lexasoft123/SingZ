@@ -382,7 +382,15 @@ export default function RootNavigator({
           {({ navigation }) => <SettingsScreen onClose={() => navigation.goBack()} onWhatsNew={() => navigation.navigate("WhatsNew")} />}
         </Stack.Screen>
         <Stack.Screen name="WhatsNew" options={{ presentation: 'fullScreenModal', contentStyle: styles.root }}>
-          {({ navigation }) => <WhatsNewScreen previous={navigation.canGoBack() ? undefined : newsPrevious} onClose={() => navigation.canGoBack() ? navigation.goBack() : navigation.replace('Catalog')} />}
+          {({ navigation }) => <WhatsNewScreen
+            previous={navigation.getState().index > 0 ? undefined : newsPrevious}
+            onClose={() => {
+              // canGoBack also checks the parent tabs. At startup that can
+              // switch to Training while leaving this root route open.
+              if (navigation.getState().index > 0) navigation.goBack()
+              else navigation.replace('Catalog')
+            }}
+          />}
         </Stack.Screen>
       </Stack.Navigator>
     </View>

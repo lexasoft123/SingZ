@@ -52,7 +52,6 @@ test('session End uses the same native hit surface and handler', async () => {
         onIdentify={jest.fn()}
         onNext={jest.fn()}
         onExit={onExit}
-        onBackToSong={null}
       />
     )
   })

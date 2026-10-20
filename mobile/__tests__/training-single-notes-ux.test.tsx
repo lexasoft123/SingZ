@@ -126,7 +126,7 @@ test.each(['interval', 'chord-tone', 'arpeggio', 'scale'] as const)('%s vocal pr
   let tree!: ReactTestRenderer.ReactTestRenderer
   await ReactTestRenderer.act(() => {
     tree = ReactTestRenderer.create(
-      <TrainingSessionView state={state} liveMidi={null} activeTarget={0} onBegin={jest.fn()} onIdentify={jest.fn()} onNext={jest.fn()} onExit={jest.fn()} onBackToSong={null} />
+      <TrainingSessionView state={state} liveMidi={null} activeTarget={0} onBegin={jest.fn()} onIdentify={jest.fn()} onNext={jest.fn()} onExit={jest.fn()} />
     )
   })
   expect(tree.root.findByProps({ testID: 'training-lesson-overview' })).toBeTruthy()
@@ -139,7 +139,7 @@ test.each(['interval', 'chord-tone', 'arpeggio', 'scale'] as const)('%s vocal pr
   const nextTarget = Math.min(1, prompt.targets.length - 1)
   await ReactTestRenderer.act(() => {
     tree.update(
-      <TrainingSessionView state={state} liveMidi={prompt.targets[nextTarget].midi} activeTarget={nextTarget} onBegin={jest.fn()} onIdentify={jest.fn()} onNext={jest.fn()} onExit={jest.fn()} onBackToSong={null} />
+      <TrainingSessionView state={state} liveMidi={prompt.targets[nextTarget].midi} activeTarget={nextTarget} onBegin={jest.fn()} onIdentify={jest.fn()} onNext={jest.fn()} onExit={jest.fn()} />
     )
   })
   expect(nodeText(tree.root)).toContain('FLAT±10¢SHARP')
@@ -156,7 +156,7 @@ test('single-note practice makes the target dominant and exposes a full tuner re
   let tree!: ReactTestRenderer.ReactTestRenderer
   await ReactTestRenderer.act(() => {
     tree = ReactTestRenderer.create(
-      <TrainingSessionView state={state} liveMidi={null} activeTarget={0} onBegin={jest.fn()} onIdentify={jest.fn()} onNext={jest.fn()} onExit={jest.fn()} onBackToSong={null} />
+      <TrainingSessionView state={state} liveMidi={null} activeTarget={0} onBegin={jest.fn()} onIdentify={jest.fn()} onNext={jest.fn()} onExit={jest.fn()} />
     )
   })
   expect(nodeText(tree.root)).toContain('Preparing')
@@ -170,7 +170,7 @@ test('single-note practice makes the target dominant and exposes a full tuner re
   state = mobileTrainingReducer(state, { type: 'activate' })
   await ReactTestRenderer.act(() => {
     tree.update(
-      <TrainingSessionView state={state} liveMidi={null} singleNoteCountdown={3} activeTarget={0} onBegin={jest.fn()} onIdentify={jest.fn()} onNext={jest.fn()} onExit={jest.fn()} onBackToSong={null} />
+      <TrainingSessionView state={state} liveMidi={null} singleNoteCountdown={3} activeTarget={0} onBegin={jest.fn()} onIdentify={jest.fn()} onNext={jest.fn()} onExit={jest.fn()} />
     )
   })
   expect(nodeText(tree.root)).toContain(`Hear ${target.noteName}`)
@@ -180,7 +180,7 @@ test('single-note practice makes the target dominant and exposes a full tuner re
   state = mobileTrainingReducer(state, { type: 'cue-complete' })
   await ReactTestRenderer.act(() => {
     tree.update(
-      <TrainingSessionView state={state} liveMidi={target.midi} activeTarget={0} onBegin={jest.fn()} onIdentify={jest.fn()} onNext={jest.fn()} onExit={jest.fn()} onBackToSong={null} />
+      <TrainingSessionView state={state} liveMidi={target.midi} activeTarget={0} onBegin={jest.fn()} onIdentify={jest.fn()} onNext={jest.fn()} onExit={jest.fn()} />
     )
   })
   expect(nodeText(tree.root)).toContain('FLAT±10¢SHARP')
@@ -210,7 +210,7 @@ test('single-note swipe deck maps deliberate horizontal gestures to player actio
   let tree!: ReactTestRenderer.ReactTestRenderer
   await ReactTestRenderer.act(() => {
     tree = ReactTestRenderer.create(
-      <TrainingSessionView state={state} liveMidi={null} activeTarget={0} onBegin={replay} onSkipSingleNote={skip} onIdentify={jest.fn()} onNext={jest.fn()} onExit={jest.fn()} onBackToSong={null} />
+      <TrainingSessionView state={state} liveMidi={null} activeTarget={0} onBegin={replay} onSkipSingleNote={skip} onIdentify={jest.fn()} onNext={jest.fn()} onExit={jest.fn()} />
     )
   })
   expect(tree.root.findByProps({ testID: 'training-swipe-surface' })).toBeTruthy()
@@ -230,7 +230,7 @@ test('the meter names which way the microphone is failing instead of waiting for
     let tree!: ReactTestRenderer.ReactTestRenderer
     await ReactTestRenderer.act(() => {
       tree = ReactTestRenderer.create(
-        <TrainingSessionView state={state} liveMidi={null} micHearing={micHearing} activeTarget={0} onBegin={jest.fn()} onIdentify={jest.fn()} onNext={jest.fn()} onExit={jest.fn()} onBackToSong={null} />
+        <TrainingSessionView state={state} liveMidi={null} micHearing={micHearing} activeTarget={0} onBegin={jest.fn()} onIdentify={jest.fn()} onNext={jest.fn()} onExit={jest.fn()} />
       )
     })
     return nodeText(tree.root)
@@ -265,7 +265,7 @@ test.each([0, 1, 2, 3, 17])('interval counter counts sets independently of repea
   state = { ...state, session: { ...state.session!, currentIndex: index } }
   let tree!: ReactTestRenderer.ReactTestRenderer
   await ReactTestRenderer.act(() => {
-    tree = ReactTestRenderer.create(<TrainingSessionView state={state} liveMidi={null} activeTarget={0} onBegin={jest.fn()} onIdentify={jest.fn()} onNext={jest.fn()} onExit={jest.fn()} onBackToSong={null} />)
+    tree = ReactTestRenderer.create(<TrainingSessionView state={state} liveMidi={null} activeTarget={0} onBegin={jest.fn()} onIdentify={jest.fn()} onNext={jest.fn()} onExit={jest.fn()} />)
   })
   expect(nodeText(tree.root)).toContain(`${Math.floor(index / 3) + 1} / 6`)
   expect(nodeText(tree.root)).toMatch(new RegExp(`Repeat ${index % 3 + 1} Of 3`, 'i'))
