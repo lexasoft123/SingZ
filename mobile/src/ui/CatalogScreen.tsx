@@ -15,7 +15,8 @@ import {
   View
 } from 'react-native'
 import { decodeAudioData } from 'react-native-audio-api'
-import { useFocusEffect, useIsFocused } from '@react-navigation/native'
+import { useIsFocused } from '@react-navigation/native'
+import { useLibraryRefresh } from './useLibraryRefresh'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import {
   driveAccountEmail,
@@ -622,11 +623,7 @@ export default function CatalogScreen({
      back gesture can reveal the real shelf. Re-read it whenever that shelf
      becomes current; the old conditional router got the same refresh from a
      full remount after every song. */
-  useFocusEffect(
-    useCallback(() => {
-      void refresh()
-    }, [refresh])
-  )
+  useLibraryRefresh(active && isFocused && modeReady, mode === 'gdrive', refresh)
 
   /* One writer for the cache above, so no listing path can forget it. The
      four facts are cached together because they are READ together: rows with

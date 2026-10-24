@@ -98,6 +98,30 @@ describe('the library the desktop published', () => {
     expect(requests).toBe(2) // the root query and its children — catalog.json unchanged
   })
 
+  it('adds a newly published song on a forced refresh within the listing TTL', async () => {
+    const added = drive.projects.get('Song Two')!
+    const folder = store.files.get(added.folderId)!
+    folder.name = added.dir = 'Donaukinder'
+    added.doc.bytes = Buffer.from(String(added.doc.bytes).replace('Song Two', 'Donaukinder'))
+    folder.trashed = true
+    drive.projects.delete('Song Two')
+    drive.rewriteCatalog()
+    const g = boot()
+    expect((await g.driveListProjects()).map(p => p.dir)).toEqual(['Song One'])
+
+    folder.trashed = false
+    drive.projects.set(added.dir, added)
+    drive.rewriteCatalog()
+    // A normal cached look still has the old list; app entry/resume must force.
+    expect((await g.driveListProjects()).map(p => p.dir)).toEqual(['Song One'])
+    const fresh = await g.driveListProjects(true)
+    expect(fresh.map(p => p.dir).sort()).toEqual(['Donaukinder', 'Song One'])
+    expect((await g.driveStoredProjects())?.map(p => p.dir).sort()).toEqual(['Donaukinder', 'Song One'])
+    expect(native.downloads).toEqual([])
+    net.setOffline(true)
+    expect((await boot().driveStoredProjects())?.some(p => p.dir === 'Donaukinder')).toBe(true)
+  })
+
   it('re-reads only the project the desktop touched', async () => {
     const g = boot()
     await g.driveListProjects()
