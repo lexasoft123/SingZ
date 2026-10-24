@@ -40,8 +40,9 @@ export function DailyTrainingActivity({ days }: { days: readonly { date: number;
   </View>
 }
 
-export function TrainingDashboard({ store, onLesson, onProgress, onChoose }: {
+export function TrainingDashboard({ store, onLesson, onProgress, onChoose, headerAction }: {
   store: MobileTrainingPersistence
+  headerAction?: React.ReactNode
   onLesson: (lesson: ProgramLesson, day: number) => void
   onProgress: () => void
   onChoose: (exercise: TrainingExerciseSelection) => void
@@ -70,7 +71,10 @@ export function TrainingDashboard({ store, onLesson, onProgress, onChoose }: {
   return <View style={s.dashboard}>
     <GlassSurface radius={28} elevation="none" style={s.header}>
       <Text style={[s.headerTitle, { color: theme.text }]}>{t('phone.training.dashboardTrain')}</Text>
+      <View style={s.headerActions}>
       <Pressable accessibilityRole="button" accessibilityLabel={t('phone.training.progressEntryTitle')} onPress={onProgress} style={[s.linkHit, { minWidth: 44, alignItems: 'center' }]}><Icon name="progress" size={26} color={theme.accent} /></Pressable>
+        {headerAction}
+      </View>
     </GlassSurface>
     <View style={[s.columns, layout.wide && s.columnsWide]}>
     <View style={[s.column, layout.wide && s.columnWide]}>
@@ -122,6 +126,7 @@ const s = StyleSheet.create({
   columnWide: { flex: 1 },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 18, minHeight: 64 },
   headerTitle: { fontSize: 25, fontWeight: '900' },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   between: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
   caption: { fontSize: 12, fontWeight: '800', letterSpacing: 1, textTransform: 'uppercase', flexShrink: 1 },
   streak: { fontSize: 13, fontWeight: '800' },

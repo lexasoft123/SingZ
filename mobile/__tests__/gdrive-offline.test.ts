@@ -347,17 +347,60 @@ describe('catalog without internet', () => {
     const g = require('../src/gdrive') as typeof import('../src/gdrive')
     await g.driveListProjects()
     await g.driveLocalFile('Song One', 'stems/vocals.flac')
-    signIn(-1000)
-    const network = jest.fn(() => new Promise<Response>(() => {}))
-    global.fetch = network as typeof fetch
-    void g.driveListProjects(true)
-    // Let the background refresh reach its pending token request.
-    for (let i = 0; i < 20 && network.mock.calls.length === 0; i++) await Promise.resolve()
-    expect(network).toHaveBeenCalledTimes(1)
-    const callsBeforeOpen = network.mock.calls.length
-    const path = await g.driveLocalFile('Song One', 'stems/vocals.flac')
-    expect(path).toBe('/cache/Song One/stems/vocals.flac')
-    expect(network).toHaveBeenCalledTimes(callsBeforeOpen)
+    jest.useFakeTimers()
+    try {
+      signIn(-1000)
+      const network = jest.fn(() => new Promise<Response>(() => {}))
+      global.fetch = network as typeof fetch
+      const refresh = g.driveListProjects(true).catch(e => e)
+      // Let the background refresh reach its pending token request.
+      for (let i = 0; i < 20 && network.mock.calls.length === 0; i++) await Promise.resolve()
+      expect(network).toHaveBeenCalledTimes(1)
+      const callsBeforeOpen = network.mock.calls.length
+      const path = await g.driveLocalFile('Song One', 'stems/vocals.flac')
+      expect(path).toBe('/cache/Song One/stems/vocals.flac')
+      expect(network).toHaveBeenCalledTimes(callsBeforeOpen)
+      await jest.advanceTimersByTimeAsync(45_000)
+      expect(await refresh).toBeInstanceOf(Error)
+      expect(jest.getTimerCount()).toBe(0)
+    } finally { jest.useRealTimers() }
+
+  })
+
+  it('times out a stalled metadata body and clears its watchdog', async () => {
+    const drive = newDrive()
+    install(drive)
+    signIn()
+    const g = require('../src/gdrive') as typeof import('../src/gdrive')
+    await g.driveListProjects()
+    jest.useFakeTimers()
+    try {
+      global.fetch = jest.fn(async () => ({ ok: true, status: 200,
+        text: () => new Promise<string>(() => {}) })) as unknown as typeof fetch
+      const read = g.driveReadText('Song One', 'lyrics.json').catch(e => e)
+      await jest.advanceTimersByTimeAsync(21_000)
+      expect(await read).toMatchObject({ code: 'timeout' })
+      expect(jest.getTimerCount()).toBe(0)
+    } finally { jest.useRealTimers() }
+  })
+
+  it('cancels an in-flight metadata body without leaving a timeout behind', async () => {
+    const drive = newDrive()
+    install(drive)
+    signIn()
+    const g = require('../src/gdrive') as typeof import('../src/gdrive')
+    await g.driveListProjects()
+    jest.useFakeTimers()
+    try {
+      global.fetch = jest.fn(async () => ({ ok: true, status: 200,
+        text: () => new Promise<string>(() => {}) })) as unknown as typeof fetch
+      const controller = new AbortController()
+      const read = g.driveReadText('Song One', 'lyrics.json', undefined, undefined, controller.signal).catch(e => e)
+      await jest.advanceTimersByTimeAsync(100)
+      controller.abort()
+      expect(await read).toMatchObject({ code: 'cancelled' })
+      expect(jest.getTimerCount()).toBe(0)
+    } finally { jest.useRealTimers() }
   })
 
   it('keeps lyrics for a downloaded song', async () => {

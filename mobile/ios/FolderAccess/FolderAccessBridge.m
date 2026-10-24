@@ -47,6 +47,22 @@ RCT_EXTERN_METHOD(fetchToCache : (NSString *)project
                   resolver : (RCTPromiseResolveBlock)resolve
                   rejecter : (RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(fetchToCacheTracked : (NSString *)project
+                  file : (NSString *)file
+                  url : (NSString *)url
+                  auth : (NSString *)auth
+                  expectedMd5 : (NSString *)expectedMd5
+                  expectedBytes : (nonnull NSNumber *)expectedBytes
+                  request : (NSString *)request
+                  resolver : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(driveFetchProgress : (NSString *)request
+                  resolver : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(cancelDriveFetch : (NSString *)request
+                  resolver : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(pickAudioFile : (RCTPromiseResolveBlock)resolve
                   rejecter : (RCTPromiseRejectBlock)reject)
 
