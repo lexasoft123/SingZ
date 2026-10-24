@@ -3,6 +3,13 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
+  "main.sync.downloadDeferred": "{dir} 추가 실패: {reason}. 곡은 Drive에 남아 있습니다. 문제를 해결한 후 다시 동기화하세요.",
+  "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
+  "main.sync.downloadBytes": "{got} / {total} · {speed}/초",
+  "main.sync.downloadRetry": "다시 시도 · {attempt}/3회",
+  "main.sync.downloadVerify": "검증 중…",
+  "main.sync.downloadCheck": "저장된 파일 확인 중…",
+
   "main.error.fileNotRegistered": "파일은 등록되지 않았습니다.",
   "main.error.folderNotRegistered": "폴더가 등록되지 않았습니다.",
   "main.error.playbackInvalidConfig": "네이티브 재생은 제한된 프로젝트와 라인 리스트가 필요합니다.",

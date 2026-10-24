@@ -1,5 +1,10 @@
 /* English strings for the `library` namespace — see ../index.ts. */
 export const library = {
+  "library.dropScreen.syncProgress": "Syncing with Google Drive… {msg}",
+  "library.dropScreen.cancelSync": "Cancel",
+  "library.dropScreen.syncPaused": "Sync paused. Completed files are kept. Choose Sync now to continue.",
+  "library.dropScreen.retryScheduled": "Will retry automatically · {error}",
+
   // ── shared across the library screens ──
   'library.common.close': 'Close',
   'library.common.browseFiles': 'Browse files…',

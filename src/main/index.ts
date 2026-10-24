@@ -31,7 +31,7 @@ import {
   setProjectsRoot,
   writeProjectGraph
 } from './projects'
-import { gdriveConfigured, gdriveSignedIn, gdriveSignIn, gdriveSignOut, gdriveSync } from './gdrive'
+import { gdriveConfigured, gdriveSignedIn, gdriveSignIn, gdriveSignOut, gdriveSync, gdriveCancelSync } from './gdrive'
 import { readSettings, writeSettings } from './settings'
 import { registerLocale } from './locale'
 import { registerWhatsNew } from './whats-new'
@@ -506,6 +506,7 @@ function registerIpc(): void {
     return { ok: true }
   })
   ipcMain.handle('gdrive:sync', () => scheduler.syncNow())
+  ipcMain.handle('gdrive:cancel-sync', () => gdriveCancelSync())
 
   ipcMain.handle('projects:list', () => listProjects())
 

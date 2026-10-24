@@ -3,6 +3,11 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
+  "library.dropScreen.syncProgress": "Google Drive से सिंक हो रहा है… {msg}",
+  "library.dropScreen.cancelSync": "रद्द करें",
+  "library.dropScreen.syncPaused": "सिंक रुका है। पूरी फ़ाइलें सुरक्षित हैं। जारी रखने के लिए अभी सिंक करें चुनें।",
+  "library.dropScreen.retryScheduled": "अपने आप फिर कोशिश होगी · {error}",
+
   "library.common.close": "बंद करें",
   "library.common.browseFiles": "फ़ाइलें ब्राउज़ करें ...",
   "library.common.yourProjects": "आपकी प्रोजेक्टएं",

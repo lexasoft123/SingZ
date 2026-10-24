@@ -3,6 +3,13 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
+  "main.sync.downloadDeferred": "{dir} を追加できませんでした：{reason}。曲は Drive に残っています。問題を解決して再同期してください。",
+  "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
+  "main.sync.downloadBytes": "{got} / {total} · {speed}/秒",
+  "main.sync.downloadRetry": "再試行 · {attempt}/3 回目",
+  "main.sync.downloadVerify": "検証中…",
+  "main.sync.downloadCheck": "保存済みファイルを確認中…",
+
   "main.error.fileNotRegistered": "ファイルは登録されていない.",
   "main.error.folderNotRegistered": "フォルダは登録されていません.",
   "main.error.playbackInvalidConfig": "ローンのリストは 制限されたプロジェクトとレーンのリストが必要です",

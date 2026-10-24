@@ -296,6 +296,7 @@ const api: SingzApi = {
   gdriveSignIn: () => ipcRenderer.invoke('gdrive:signin'),
   gdriveSignOut: () => ipcRenderer.invoke('gdrive:signout'),
   gdriveSync: () => ipcRenderer.invoke('gdrive:sync'),
+  gdriveCancelSync: () => ipcRenderer.invoke('gdrive:cancel-sync'),
   onGdriveState: (cb) => {
     const listener = (_e: IpcRendererEvent, s: SyncStatus): void => cb(s)
     ipcRenderer.on('gdrive:state', listener)

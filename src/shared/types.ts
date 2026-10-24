@@ -1597,12 +1597,14 @@ export interface SingzApi {
   }>
   gdriveSignIn(): Promise<{ ok: true } | { ok: false; error: string }>
   gdriveSignOut(): Promise<{ ok: boolean }>
+  gdriveCancelSync(): Promise<{ ok: boolean }>
   gdriveSync(): Promise<{
     ok: boolean
     uploaded: number
     unchanged: number
     projects: number
     error?: string
+    cancelled?: boolean
   }>
   onGdriveProgress(cb: (p: { msg: string; frac: number }) => void): () => void
   /** Pushed whenever the sync's state changes — the UI stops inferring it

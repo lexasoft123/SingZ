@@ -97,11 +97,14 @@ export default function DropScreen({
     () =>
       window.singz.onGdriveState((sync) => {
         setGdrive((g) => ({ ...g, sync }))
+        if (sync.phase === 'syncing') setDriveMsg(null)
         // A run finishing (or a mark landing) changes which songs are waiting.
         // The reply is merged, never assigned: it was asked for before whatever
         // arrived in the meantime, and a whole-object set would put the older
         // phase and dirty list back on screen.
         if (sync.phase !== 'syncing') {
+          setSyncProg(null)
+          setSyncingDir(null)
           void window.singz.gdriveStatus().then((st) =>
             setGdrive((g) => ({ ...st, sync: g.sync ?? st.sync }))
           )
@@ -140,7 +143,7 @@ export default function DropScreen({
     }
     setDriveMsg(null)
     const rep = await window.singz.gdriveSync()
-    setDriveMsg(rep.ok ? null : t('library.common.syncFailed', { error: rep.error ?? t('library.common.unknownError') }))
+    setDriveMsg(rep.cancelled ? t('library.dropScreen.syncPaused') : rep.ok ? null : t('library.common.syncFailed', { error: rep.error ?? t('library.common.unknownError') }))
     refresh()
   }, [gdrive.signedIn, refresh])
 
@@ -332,12 +335,18 @@ export default function DropScreen({
                       <img className="src-ic" src={gdriveIcon} alt="" /> {driveMsg}
                     </span>
                   ) : syncProg ? (
-                    <span className="src-card-value">
+                    <span className="src-card-value src-sync-progress">
                       <img className="src-ic" src={gdriveIcon} alt="" />
-                      {t('library.dropScreen.copyingToDrive', {
+                      {t('library.dropScreen.syncProgress', {
                         msg: syncProg.msg,
                         percent: Math.round(syncProg.frac * 100)
                       })}
+                    </span>
+                  ) : gdrive.sync?.lastError ? (
+                    <span className="src-card-value warn">
+                      {gdrive.sync.phase === 'retrying'
+                        ? t('library.dropScreen.retryScheduled', { error: gdrive.sync.lastError })
+                        : gdrive.sync.lastError}
                     </span>
                   ) : gdrive.signedIn ? (
                     <span className="src-card-value">
@@ -360,10 +369,17 @@ export default function DropScreen({
                     {t('library.dropScreen.syncLog')}
                   </button>
                 )}
+                {gdrive.sync?.phase === 'syncing' && (
+                  <button type="button" className="src-link" onClick={() => {
+                    void window.singz.gdriveCancelSync().then((res) => {
+                      if (res.ok) setDriveMsg(t('library.dropScreen.syncPaused'))
+                    })
+                  }}>{t('library.dropScreen.cancelSync')}</button>
+                )}
                 <button
                   type="button"
                   className="src-link"
-                  disabled={syncProg !== null}
+                  disabled={gdrive.sync?.phase === 'syncing'}
                   onClick={() => void onDrive()}
                 >
                   {gdrive.signedIn ? t('library.dropScreen.syncNow') : t('library.dropScreen.connect')}
