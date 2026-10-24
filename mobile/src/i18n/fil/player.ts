@@ -21,7 +21,7 @@ export const player: Translation<typeof en> = {
   "phone.player.stem.bass": "Bass",
   "phone.player.stem.guitar": "Gitara",
   "phone.player.stem.piano": "Piano",
-  "phone.player.stem.other": "Mga instrumento",
+  "phone.player.stem.other": "Instrumento",
   "phone.player.countIn.beatLabel": "Count-in, pumasa {done} ng {total}",
   "phone.player.countIn.secondsLabel": "Count-in, {seconds} segundo ang natitira",
   "phone.player.countIn.secondsText": "{seconds}s",
