@@ -1,3 +1,5 @@
+import { Icon } from '@singz/ui/native/icons'
+import { HeaderIconButton } from './HeaderIconButton'
 import { LogButton } from './LogButton'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
@@ -2146,18 +2148,12 @@ export default function CatalogScreen({
         <View style={s.brandRow}>
           <StemTile hue={0} size={26} />
           <Text style={s.brand}>SingZ</Text>
-          <Pressable
-            hitSlop={10}
-            style={{ marginLeft: 'auto' }}
-            onPress={onOpenSettings}
-            accessibilityRole="button"
-            accessibilityLabel={t('phone.library.openSettings')}
-          >
-            <Text style={s.ctxLink}>{t('phone.library.settings')}</Text>
-          </Pressable>
-          {/* where the desktop keeps it: in the header, always reachable —
-              a log you can only open when things are going well is no use */}
-          <View style={{ marginLeft: 12 }}><LogButton onPress={onOpenLog} /></View>
+          <View style={{ marginLeft: 'auto', flexDirection: 'row', alignItems: 'center', gap: 2 }}>
+            <HeaderIconButton label={t('phone.library.openSettings')} onPress={onOpenSettings}>
+              <Icon name="settings" size={20} color={C.amber} />
+            </HeaderIconButton>
+            <LogButton onPress={onOpenLog} />
+          </View>
         </View>
         <Seg
           segments={[
