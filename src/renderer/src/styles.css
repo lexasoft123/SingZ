@@ -2883,6 +2883,16 @@ body.win:not(.glass) .drop-overlay {
   gap: 6px;
 }
 
+.src-card-value.src-sync-progress {
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  align-items: flex-start;
+}
+
+.src-sync-progress .src-ic {
+  flex-shrink: 0;
+}
+
 .src-card-value.warn {
   color: var(--accent);
   white-space: normal;

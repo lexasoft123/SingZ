@@ -3,6 +3,11 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
+  "library.dropScreen.syncProgress": "Đang đồng bộ với Google Drive… {msg}",
+  "library.dropScreen.cancelSync": "Hủy",
+  "library.dropScreen.syncPaused": "Đã tạm dừng đồng bộ. Các tệp hoàn tất được giữ lại. Chọn Đồng bộ ngay để tiếp tục.",
+  "library.dropScreen.retryScheduled": "Sẽ tự động thử lại · {error}",
+
   "library.common.close": "Đóng",
   "library.common.browseFiles": "Xem các tệp...",
   "library.common.yourProjects": "Các dự án của bạn",

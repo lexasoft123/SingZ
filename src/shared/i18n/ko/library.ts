@@ -3,6 +3,11 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
+  "library.dropScreen.syncProgress": "Google Drive와 동기화 중… {msg}",
+  "library.dropScreen.cancelSync": "취소",
+  "library.dropScreen.syncPaused": "동기화가 일시 중지되었습니다. 완료된 파일은 유지됩니다. 지금 동기화를 눌러 계속하세요.",
+  "library.dropScreen.retryScheduled": "자동으로 다시 시도합니다 · {error}",
+
   "library.common.close": "닫기",
   "library.common.browseFiles": "파일 검색...",
   "library.common.yourProjects": "당신의 프로젝트",

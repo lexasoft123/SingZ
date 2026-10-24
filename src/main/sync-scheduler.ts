@@ -62,11 +62,13 @@ export function classifySyncError(error: string): SyncErrorKind {
     e.includes('enotfound') ||
     e.includes('econnrefused') ||
     e.includes('etimedout') ||
+    e.includes('timeout') ||
     e.includes('socket')
   ) {
     return 'offline'
   }
-  if (/drive api (5\d\d|429|403)/.test(e) || e.includes('already running')) return 'transient'
+  if (e.includes('drive download integrity')) return 'transient'
+  if (/drive (?:api|upload(?: init)?) (5\d\d|429|403)/.test(e) || e.includes('already running')) return 'transient'
   return 'fatal'
 }
 
@@ -240,9 +242,18 @@ export class SyncScheduler {
       this.current = null
     }
 
+    if (report.cancelled) {
+      this.followUp = false
+      this.firstMarkAt = 0
+      this.lastError = undefined
+      this.lastErrorKind = undefined
+      this.phase = 'idle'
+      this.emit()
+      return report
+    }
     if (report.ok) {
       this.attempt = 0
-      this.lastError = undefined
+      this.lastError = report.warnings?.length ? report.warnings.join(' · ') : undefined
       this.lastErrorKind = undefined
       this.firstMarkAt = 0
       // only what this run could have covered — a change that landed while it

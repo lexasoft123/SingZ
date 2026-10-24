@@ -3,6 +3,13 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
+  "main.sync.downloadDeferred": "{dir} tidak ditambahkan: {reason}. Lagu tetap di Drive; atasi masalah lalu sinkronkan lagi.",
+  "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
+  "main.sync.downloadBytes": "{got} / {total} · {speed}/dtk",
+  "main.sync.downloadRetry": "Mencoba lagi · {attempt}/3",
+  "main.sync.downloadVerify": "Memverifikasi…",
+  "main.sync.downloadCheck": "Memeriksa file tersimpan…",
+
   "main.error.fileNotRegistered": "File tidak terdaftar.",
   "main.error.folderNotRegistered": "Folder tidak terdaftar.",
   "main.error.playbackInvalidConfig": "Pemutaran asli membutuhkan daftar proyek dan jalur yang terbatas.",

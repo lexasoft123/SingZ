@@ -3,6 +3,13 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
+  "main.sync.downloadDeferred": "{dir} नहीं जोड़ा गया: {reason}। गाना Drive पर है; समस्या ठीक करके फिर सिंक करें।",
+  "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
+  "main.sync.downloadBytes": "{got} / {total} · {speed}/सेकंड",
+  "main.sync.downloadRetry": "फिर कोशिश · प्रयास {attempt}/3",
+  "main.sync.downloadVerify": "जाँच रहे हैं…",
+  "main.sync.downloadCheck": "सहेजी गई फ़ाइल की जाँच…",
+
   "main.error.fileNotRegistered": "फ़ाइल पंजीकृत नहीं है।",
   "main.error.folderNotRegistered": "फ़ोल्डर पंजीकृत नहीं है।",
   "main.error.playbackInvalidConfig": "मूल प्लेबैक के लिए एक सीमित प्रोजेक्ट और लेन सूची की आवश्यकता होती है।",

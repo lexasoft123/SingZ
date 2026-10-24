@@ -3,6 +3,13 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
+  "main.sync.downloadDeferred": "Не удалось добавить «{dir}»: {reason}. Песня осталась в Drive; устраните причину и повторите синхронизацию.",
+  "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
+  "main.sync.downloadBytes": "{got} / {total} · {speed}/с",
+  "main.sync.downloadRetry": "Повтор · попытка {attempt}/3",
+  "main.sync.downloadVerify": "Проверяем загрузку…",
+  "main.sync.downloadCheck": "Проверяем сохранённый файл…",
+
   // ── errors ──
   'main.error.fileNotRegistered': 'Файл не в реестре.',
   'main.error.folderNotRegistered': 'Папка не в реестре.',

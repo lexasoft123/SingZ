@@ -3,6 +3,13 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
+  "main.sync.downloadDeferred": "未加入 {dir}：{reason}。歌曲仍在 Drive 中；解決問題後請重新同步。",
+  "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
+  "main.sync.downloadBytes": "{got} / {total} · {speed}/秒",
+  "main.sync.downloadRetry": "重試 · 第 {attempt}/3 次",
+  "main.sync.downloadVerify": "正在驗證…",
+  "main.sync.downloadCheck": "正在檢查已儲存的檔案…",
+
   "main.error.fileNotRegistered": "檔案未註冊。",
   "main.error.folderNotRegistered": "資料夾未註冊。",
   "main.error.playbackInvalidConfig": "原生播放需要一個有限的專案和音軌列表。",

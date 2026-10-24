@@ -3,6 +3,11 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
+  "library.dropScreen.syncProgress": "Nagsi-sync sa Google Drive… {msg}",
+  "library.dropScreen.cancelSync": "Kanselahin",
+  "library.dropScreen.syncPaused": "Naka-pause ang sync. Napanatili ang natapos na mga file. Piliin ang I-sync ngayon para magpatuloy.",
+  "library.dropScreen.retryScheduled": "Awtomatikong susubukan muli · {error}",
+
   "library.common.close": "Isara",
   "library.common.browseFiles": "Mag-browse ng mga file...",
   "library.common.yourProjects": "Ang iyong mga proyekto",

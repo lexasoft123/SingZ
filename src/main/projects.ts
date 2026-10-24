@@ -765,7 +765,10 @@ export async function listProjects(): Promise<{ root: string; projects: ProjectL
   const projects: ProjectListItem[] = []
   try {
     for (const entry of await readdir(root, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue
+      // A sync can retain a complete staging document when its final rename
+      // is refused (for example a scanner holds the destination on Windows).
+      // Only the published destination belongs in the playable library.
+      if (!entry.isDirectory() || entry.name.startsWith('.singz-adopting-')) continue
       const dir = join(root, entry.name)
       const meta = await readMeta(dir)
       if (!meta) continue

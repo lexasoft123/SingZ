@@ -34,6 +34,21 @@ import {
 import { md5, scenarios, seedLibraryOnDisk, song } from '../shared/scenarios'
 import lrcFixture from '../shared/lrc-fixture.json'
 
+const { publicationFailure } = vi.hoisted(() => ({ publicationFailure: { armed: false } }))
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs/promises')>()
+  return {
+    ...real,
+    rename: async (...args: Parameters<typeof real.rename>) => {
+      if (publicationFailure.armed && String(args[0]).split(/[\\/]/).at(-1)?.startsWith('.singz-adopting-')) {
+        publicationFailure.armed = false
+        throw Object.assign(new Error('destination is busy'), { code: 'EBUSY' })
+      }
+      return real.rename(...args)
+    }
+  }
+})
+
 const CONFIG = {
   clientId: 'publish-client',
   clientSecret: 'publish-secret',
@@ -65,6 +80,7 @@ let prefTrap: {
 } | null = null
 
 beforeEach(() => {
+  publicationFailure.armed = false
   process.env.SINGZ_GDRIVE_CONFIG = JSON.stringify(CONFIG)
   root = mkdtempSync(join(tmpdir(), 'singz-library-'))
   docs = mkdtempSync(join(tmpdir(), 'singz-phone-docs-'))
@@ -215,6 +231,67 @@ async function desktopWithOneSong(): Promise<void> {
 }
 
 describe('a phone song moves to Drive and the desktop takes it in', () => {
+  it('keeps a completed staging folder hidden when publication is locked, then recovers without fetching its stems again', async () => {
+    await desktopWithOneSong()
+    const p = await phone()
+    await p.publish.moveToDrive(await splitSongOnPhone(p))
+    const folder = rootFolders().find((f) => f.name === 'Sixteen Tons')!
+    publicationFailure.armed = true
+    const failed = await desktopSync()
+    expect(failed).toMatchObject({ ok: true, adopted: [] })
+    expect((failed as { warnings?: string[] }).warnings?.join('')).toContain('EBUSY')
+    const stage = join(root, `.singz-adopting-${folder.id}`)
+    expect(existsSync(join(stage, 'project.json'))).toBe(true)
+    const { readSettings, writeSettings } = await import('../../src/main/settings')
+    writeSettings({ ...(readSettings() as Record<string, unknown>), projectsRoot: root })
+    const { listProjects } = await import('../../src/main/projects')
+    expect((await listProjects()).projects.some((entry) => entry.dir === stage)).toBe(false)
+    store.hits.length = 0
+    expect(await desktopSync()).toMatchObject({ ok: true, adopted: ['Sixteen Tons'] })
+    const stemIds = STEMS.map((s) => treeOf(store, folder.id).get(`stems/${s}.flac`)!.id)
+    expect(store.hits.filter((h) => h.includes('alt=media') && stemIds.some((id) => h.includes(`/files/${id}?`)))).toHaveLength(0)
+    expect(existsSync(stage)).toBe(false)
+    expect((await listProjects()).projects.some((entry) => entry.dir === join(root, 'Sixteen Tons'))).toBe(true)
+  })
+
+  it('keeps verified tracks across a failed desktop fetch and retries only the missing file', async () => {
+    await desktopWithOneSong()
+    const p = await phone()
+    await p.publish.moveToDrive(await splitSongOnPhone(p))
+    const folder = rootFolders().find((f) => f.name === 'Sixteen Tons')!
+    const tree = treeOf(store, folder.id)
+    const failed = tree.get('stems/other.flac')!
+    const baseFetch = globalThis.fetch
+    let reject = true
+    let failedHits = 0
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input)
+      if (url.includes(`/files/${failed.id}?alt=media`) && reject) {
+        failedHits++
+        return new Response('temporarily unavailable', { status: 503 })
+      }
+      return baseFetch(input, init)
+    }) as typeof fetch
+    try {
+      expect(await desktopSync()).toMatchObject({ ok: false })
+      expect(failedHits).toBe(3)
+      expect(existsSync(join(root, 'Sixteen Tons'))).toBe(false)
+      const stage = join(root, `.singz-adopting-${folder.id}`)
+      expect(readdirSync(join(stage, 'stems')).length).toBeGreaterThan(0)
+      expect(readdirSync(join(stage, 'stems')).some((n) => n.endsWith('.part'))).toBe(false)
+      const kept = readdirSync(join(stage, 'stems'))
+      store.hits.length = 0
+      reject = false
+      expect(await desktopSync()).toMatchObject({ ok: true, adopted: ['Sixteen Tons'] })
+      for (const name of kept) {
+        const id = tree.get(`stems/${name}`)!.id
+        expect(store.hits.filter((h) => h.includes(`/files/${id}?alt=media`))).toHaveLength(0)
+      }
+      expect(store.hits.filter((h) => h.includes(`/files/${failed.id}?alt=media`))).toHaveLength(1)
+      expect(existsSync(stage)).toBe(false)
+    } finally { globalThis.fetch = baseFetch }
+  })
+
   it('moves, is adopted byte for byte, syncs clean, and the phone finds it downloaded', async () => {
     await desktopWithOneSong()
     const p = await phone()

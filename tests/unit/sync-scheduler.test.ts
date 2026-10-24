@@ -347,3 +347,28 @@ describe('classification', () => {
     expect(one).not.toBe(two)
   })
 })
+
+
+describe('download recovery status', () => {
+  it('treats download stalls and corruption as recoverable', () => {
+    expect(classifySyncError('Drive download timeout for vocals.flac')).toBe('offline')
+    expect(classifySyncError('Drive download integrity check failed for vocals.flac')).toBe('transient')
+    expect(classifySyncError('Drive upload init 503 for vocals.flac')).toBe('transient')
+  })
+  it('keeps dirty work after cancellation without arming a retry', async () => {
+    const h = harness({ run: async () => ({ ...fail('Sync cancelled'), cancelled: true }) })
+    h.mark('waiting-song')
+    const rep = await h.scheduler.syncNow()
+    expect(h.marks.size).toBe(1)
+    expect(h.cleared).toBe(-1)
+    expect(rep.cancelled).toBe(true)
+    expect(h.scheduler.status()).toMatchObject({ phase: 'idle', attempt: 0 })
+    expect(h.clock.pending()).toBe(0)
+  })
+})
+
+ it('keeps a deferred song explanation visible after the rest of sync succeeds', async () => {
+   const h = harness({ run: async () => ({ ...ok(), warnings: ['Song: missing original; remains on Drive'] }) })
+   await h.scheduler.syncNow()
+   expect(h.scheduler.status()).toMatchObject({ phase: 'idle', lastError: 'Song: missing original; remains on Drive' })
+ })
