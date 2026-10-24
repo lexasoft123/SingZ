@@ -1,3 +1,5 @@
+import { AudioDiagnosticsScreen } from './AudioDiagnosticsScreen'
+import { nativePlayback } from '../playback/native'
 import { createNativeStackNavigator } from '@react-navigation/native-stack'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Alert, AppState, StyleSheet, View } from 'react-native'
@@ -30,6 +32,7 @@ type RootStackParamList = {
   AddSong: undefined
   Log: undefined
   Settings: undefined
+  Diagnostics: undefined
   WhatsNew: undefined
 }
 
@@ -379,7 +382,17 @@ export default function RootNavigator({
             contentStyle: styles.root
           }}
         >
-          {({ navigation }) => <SettingsScreen onClose={() => navigation.goBack()} onWhatsNew={() => navigation.navigate("WhatsNew")} />}
+          {({ navigation }) => <SettingsScreen onClose={() => navigation.goBack()} onWhatsNew={() => navigation.navigate("WhatsNew")} onDiagnostics={() => {
+            void (async () => {
+              if (!await nativePlayback.stopForOwnership('audio diagnostics requested audio ownership')) return
+              engine.pause()
+              engine.cancelTrainingCues()
+              navigation.navigate('Diagnostics')
+            })().catch(error => log('audio-debug', String(error), 'error'))
+          }} />}
+        </Stack.Screen>
+        <Stack.Screen name="Diagnostics" options={{ presentation: 'fullScreenModal', contentStyle: styles.root }}>
+          {({ navigation }) => <AudioDiagnosticsScreen engine={engine} active={active} onBack={() => navigation.goBack()} />}
         </Stack.Screen>
         <Stack.Screen name="WhatsNew" options={{ presentation: 'fullScreenModal', contentStyle: styles.root }}>
           {({ navigation }) => <WhatsNewScreen

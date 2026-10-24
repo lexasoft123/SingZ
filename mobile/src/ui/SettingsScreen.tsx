@@ -18,11 +18,13 @@ import { TEST } from './testhooks';
 export default function SettingsScreen({
   onClose,
   onWhatsNew,
+  onDiagnostics,
 }: {
   onClose: () => void;
   onWhatsNew: () => void;
+  onDiagnostics: () => void;
 }): React.JSX.Element {
-  useEffect(() => { if (TEST) TEST.openWhatsNew = onWhatsNew }, [onWhatsNew]);
+  useEffect(() => { if (TEST) { TEST.openWhatsNew = onWhatsNew; TEST.openAudioDiagnostics = onDiagnostics } }, [onWhatsNew, onDiagnostics]);
   const insets = useSafeAreaInsets();
   useLocale();
   const [loading, setLoading] = useState(true);
@@ -112,6 +114,10 @@ export default function SettingsScreen({
             </Text>
           )}
         </View>
+      <Pressable accessibilityRole="button" accessibilityLabel={t('phone.app.diagnostics.title')} onPress={onDiagnostics} style={[s.card, { marginTop: 18 }]}>
+        <Text style={s.name}>{t('phone.app.diagnostics.title')}</Text>
+        <Text style={s.description}>{t('phone.app.diagnostics.detail')}</Text>
+      </Pressable>
       <Pressable accessibilityRole="button" onPress={onWhatsNew} style={[s.card, { marginTop: 18 }]}><Text style={s.name}>{t('phone.app.whatsNew.title')}</Text></Pressable>
       </ScrollView>
     </View>
