@@ -278,6 +278,11 @@ channel. Fix and re-render rather than shipping and hoping.
 
 ## The post text
 
+Include the public Google Play URL in both captions and the post kit download links:
+`https://play.google.com/store/apps/details?id=com.lexasoft.singz`. Use it for Android
+instead of the closed-test opt-in URL. Also include the App Store and versioned
+GitHub release URLs.
+
 English and Russian, both. The notes' `<!-- store:ru-RU -->` block is the
 register to match — plain, warm, no marketing throat-clearing.
 

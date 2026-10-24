@@ -1,4 +1,4 @@
-SingZ turns a song you already own into a rehearsal room.
+Karaoke with your own music. SingZ gives you synced lyrics, separate backing tracks and guided vocal training in one app. Mute the lead vocal, change the key to suit your voice, and practise singing with live pitch feedback.
 
 Instead of one flat recording, a SingZ song has separate tracks for vocals,
 drums, bass, guitar, piano and the rest. Mute the lead vocal and the band

@@ -2,7 +2,7 @@
 
 [![Latest release](https://img.shields.io/github/v/release/lexasoft123/SingZ?logo=github&label=Release&color=2563eb)](https://github.com/lexasoft123/SingZ/releases/latest)
 [![App Store — iPhone and iPad](https://img.shields.io/badge/App_Store-iPhone_%26_iPad-0D96F6?logo=appstore&logoColor=white)](https://apps.apple.com/app/singz-sing-with-the-band/id6806430347)
-[![Google Play — closed beta](https://img.shields.io/badge/Google_Play-Closed_beta-34A853?logo=googleplay&logoColor=white)](https://play.google.com/apps/testing/com.lexasoft.singz)
+[![Google Play — Android](https://img.shields.io/badge/Google_Play-Android-34A853?logo=googleplay&logoColor=white)](https://play.google.com/store/apps/details?id=com.lexasoft.singz)
 [![Android — download APK](https://img.shields.io/badge/Android-Download_APK-3DDC84?logo=android&logoColor=white)](https://github.com/lexasoft123/SingZ/releases/latest)
 [![TestFlight — iOS beta](https://img.shields.io/badge/TestFlight-iOS_beta-147EFB?logo=testflight&logoColor=white)](https://testflight.apple.com/join/q6vVdkwt)
 [![Telegram — updates](https://img.shields.io/badge/Telegram-Updates-26A5E4?logo=telegram&logoColor=white)](https://t.me/SingZapp)
@@ -22,7 +22,7 @@ so the companion phone app can play it). A fresh OS install needs nothing
 pre-installed: the app downloads its AI splitter pack once through the
 built-in setup and keeps it updated automatically.
 
-Download for Mac, Windows and Android from [GitHub Releases](https://github.com/lexasoft123/SingZ/releases/latest), or get [SingZ for iPhone](https://apps.apple.com/app/singz-sing-with-the-band/id6806430347).
+Get SingZ for [Android on Google Play](https://play.google.com/store/apps/details?id=com.lexasoft.singz) or [iPhone and iPad on the App Store](https://apps.apple.com/app/singz-sing-with-the-band/id6806430347). Download Mac, Windows and the Android APK from [GitHub Releases](https://github.com/lexasoft123/SingZ/releases/latest).
 
 ## What it does
 
@@ -77,9 +77,9 @@ Download for Mac, Windows and Android from [GitHub Releases](https://github.com/
   [App Store](https://apps.apple.com/app/singz-sing-with-the-band/id6806430347);
   early builds land first in the
   [TestFlight beta](https://testflight.apple.com/join/q6vVdkwt).
-  **Android:** the APK is attached to every release; the
-  [Google Play closed beta](https://play.google.com/apps/testing/com.lexasoft.singz)
-  is available to enrolled testers.
+  **Android:** available on
+  [Google Play](https://play.google.com/store/apps/details?id=com.lexasoft.singz);
+  the APK is also attached to every GitHub release.
 - **Vocal training** — guided programs for foundation, developing and advanced
   ear skills, plus single notes, intervals, chord tones, scales and arpeggios.
   Hear a note, sing it, and watch your pitch and hold progress. Intervals grow

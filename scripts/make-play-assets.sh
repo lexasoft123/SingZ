@@ -52,7 +52,7 @@ fi
 # rather than captured: headline over a framed shot of the mixer. The template
 # carries no image data — the capture is inlined here at run time so it lives
 # in raw/ only.
-HERO=$RAW/hero-mixer.png
+HERO=$RAW/2-lyrics.png
 if [ -x "$CHROME" ] && [ -f "$OUT/poster.tmpl.html" ] && [ -f "$HERO" ]; then
   TMP=$(mktemp -d)
   # Strip the status and navigation bars; a store poster showing an emulator

@@ -4,6 +4,12 @@ Two destinations, one build: Google Play takes the `.aab`, the family fleet
 sideloads the `.apk`. Both come out of the same tag build, signed with the same
 upload key.
 
+## Public availability
+
+SingZ is publicly available on [Google Play](https://play.google.com/store/apps/details?id=com.lexasoft.singz). The first production release was v0.26.4 (2604). Use this store URL in download links; the closed-test opt-in URL is only for testing.
+
+Promote an existing tested bundle through the Play API rather than re-uploading its versionCode. Production countries must be selected in Play Console first; the API exposes country availability as read-only. A completed production track does not by itself prove that review has finished — verify the public Install listing before announcing it.
+
 ## The upload key
 
 Play never sees this key's private half — it signs what you upload, Google
