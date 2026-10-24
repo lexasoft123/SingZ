@@ -178,7 +178,10 @@ zdsp::analysis::LiveInputFrame CrepeTiny::analyzeLongContext(const float* pcm, s
       const double sinc=d ? std::sin(2*3.141592653589793*cutoff*d)/(3.141592653589793*d) : 2*cutoff;
       taps[i]=sinc*(.5-.5*std::cos(2*3.141592653589793*i/64)); sum+=taps[i];
     }
-    for(auto& t:taps)t/=sum; return taps;
+    for (auto& t : taps) {
+      t /= sum;
+    }
+    return taps;
   }();
   std::array<float,1024> decimated{};
   for(int i=0;i<1024;++i) {
