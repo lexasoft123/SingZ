@@ -260,3 +260,19 @@ test.each(['header', 'navigator'])('leaving an active preparation via %s stops a
     jest.useRealTimers()
   }
 })
+
+test('training log icon returns to the same paused exercise', async () => {
+  const { tree, routes, engine } = await mount()
+  try {
+    await prepare(tree, 'notes')
+    const priorSession = tree.root.findByType(TrainingSessionView).props.state.session.id
+    await act(() => button(tree, 'Open the log').props.onPress())
+    expect(routes().training).toEqual(['Home', 'Exercise', 'Log'])
+    expect(engine.cancelTrainingCues).toHaveBeenCalled()
+    await act(() => button(tree, 'Close').props.onPress())
+    expect(routes().training).toEqual(['Home', 'Exercise'])
+    const exercise = tree.root.findByType(TrainingSessionView)
+    expect(exercise.props.state.session.id).toBe(priorSession)
+    expect(exercise.props.paused).toBe(true)
+  } finally { await act(() => tree.unmount()) }
+})

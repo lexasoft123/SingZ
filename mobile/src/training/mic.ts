@@ -597,12 +597,12 @@ export class TrainingMicrophone {
       this.lastDiagnosticLogMs = now
       const report = this.pitchDiagnostics.flush()
       if (report) log('mic-pitch', `${report} · ${this.rejectedPitchFrames} rejected by continuity` +
-        (frame && 'detector' in frame ? ` · ${frame.detector} · inference ${frame.inferenceMs?.toFixed(1) ?? 'unknown'} ms` : ''))
+        (frame && 'detector' in frame ? ` · ${frame.detector}${frame.detector === 'crepe-tiny' ? ('analysisMode' in frame && frame.analysisMode === 'long-context-band-pass' ? ' · mode context128-band-pass' : ' · mode standard64') : ''} · inference ${frame.inferenceMs?.toFixed(1) ?? 'unknown'} ms` : ''))
       this.rejectedPitchFrames = 0
     }
     const prior = this.diagnosticFrame
     if (!prior && 'detector' in frame)
-      log('mic', `pitch detector · ${frame.detector} · ${frame.detector === 'crepe-tiny' ? (Platform.OS === 'ios' ? '128 ms context · 65–1200 Hz band-pass · 20 ms hop · confidence floor 0.50' : '64 ms window · 20 ms hop · confidence floor 0.50') : 'legacy YIN confidence floor 0.75'}`)
+      log('mic', `pitch detector · ${frame.detector} · ${frame.detector === 'crepe-tiny' ? (('analysisMode' in frame && frame.analysisMode === 'long-context-band-pass') ? '128 ms context · 65–1200 Hz band-pass · 20 ms hop · confidence floor 0.50' : '64 ms window · 20 ms hop · confidence floor 0.50') : 'legacy YIN confidence floor 0.75'}`)
     if (prior && (prior.streamGeneration !== frame.streamGeneration || prior.resetCount !== frame.resetCount))
       this.pitchContinuity.reset()
     this.diagnosticFrame = frame
@@ -678,7 +678,7 @@ export class TrainingMicrophone {
     const report = this.pitchDiagnostics.flush()
     const frame = this.diagnosticFrame
     if (report) log('mic-pitch', `${report} · ${this.rejectedPitchFrames} rejected by continuity` +
-        (frame && 'detector' in frame ? ` · ${frame.detector} · inference ${frame.inferenceMs?.toFixed(1) ?? 'unknown'} ms` : ''))
+        (frame && 'detector' in frame ? ` · ${frame.detector}${frame.detector === 'crepe-tiny' ? ('analysisMode' in frame && frame.analysisMode === 'long-context-band-pass' ? ' · mode context128-band-pass' : ' · mode standard64') : ''} · inference ${frame.inferenceMs?.toFixed(1) ?? 'unknown'} ms` : ''))
     const stats = await this.deps.androidCore?.stats?.().catch(() => null)
     const transport = stats
       ? ` · transport ${stats.deliveredBlocks} callbacks/${stats.deliveredFrames} frames, ` +

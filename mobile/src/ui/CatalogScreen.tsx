@@ -1,3 +1,4 @@
+import { LogButton } from './LogButton'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
@@ -2159,15 +2160,7 @@ export default function CatalogScreen({
           </Pressable>
           {/* where the desktop keeps it: in the header, always reachable —
               a log you can only open when things are going well is no use */}
-          <Pressable
-            hitSlop={10}
-            style={{ marginLeft: 18 }}
-            onPress={onOpenLog}
-            accessibilityRole="button"
-            accessibilityLabel={t('phone.library.openLog')}
-          >
-            <Text style={s.ctxLink}>{t('phone.library.log')}</Text>
-          </Pressable>
+          <View style={{ marginLeft: 12 }}><LogButton onPress={onOpenLog} /></View>
         </View>
         <Seg
           segments={[

@@ -127,11 +127,12 @@ struct IosCaptureBridge {
   uint64_t generation = 0;
   std::atomic<bool> active{true};
   std::shared_ptr<CarSample> sample;
+  const bool longContext;
   zdsp::analysis::PitchAnalysisModule adapter;
 
   IosCaptureBridge(AudioInputSession* inputOwner, uint64_t inputGeneration,
                    zdsp::analysis::PitchAnalysisConfig config)
-      : owner(inputOwner), generation(inputGeneration), adapter(std::move(config)) {}
+      : owner(inputOwner), generation(inputGeneration), longContext(config.crepeLongContextBandPass), adapter(std::move(config)) {}
 
   void accept(const singz::AudioInputBlockView& block)
   {
@@ -164,6 +165,7 @@ struct IosCaptureBridge {
           @"resetCount": [NSString stringWithFormat:@"%llu", window.resetCount],
           @"sampleRate": @(window.sampleRate.value),
           @"detector": [NSString stringWithUTF8String:adapter.detectorName()],
+          @"analysisMode": longContext ? @"long-context-band-pass" : @"standard",
           @"inferenceMs": @(adapter.inferenceMs()),
           @"harmonicCorrected": @(adapter.harmonicCorrected()),
           @"frequency": @(window.analysis.frequency),
@@ -342,7 +344,7 @@ RCT_EXPORT_METHOD(getPitchDetector:(RCTPromiseResolveBlock)resolve rejecter:(RCT
 RCT_EXPORT_METHOD(setPitchDetector:(NSString*)detector resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject)
 {
   std::lock_guard<std::mutex> lock(_captureMutex);
-  if (_captureInput || !([detector isEqualToString:@"crepe-tiny"] || [detector isEqualToString:@"yin"])) {
+  if (_captureInput || !([detector isEqualToString:@"crepe-tiny"] || [detector isEqualToString:@"crepe-tiny-long-context"] || [detector isEqualToString:@"yin"])) {
     reject(@"E_PITCH_DETECTOR", @"Stop the microphone before changing detector", nil);
     return;
   }
@@ -594,8 +596,8 @@ RCT_REMAP_METHOD(
   zdsp::analysis::PitchAnalysisConfig pitchConfig;
   pitchConfig.generation = generation;
   NSString* detector = [[NSUserDefaults standardUserDefaults] stringForKey:@"singz.pitch.detector"] ?: @"crepe-tiny";
-  pitchConfig.detector = [detector isEqualToString:@"crepe-tiny"]
-      ? zdsp::analysis::PitchDetectorKind::CrepeTiny : zdsp::analysis::PitchDetectorKind::Yin;
+  pitchConfig.detector = [detector isEqualToString:@"yin"]
+      ? zdsp::analysis::PitchDetectorKind::Yin : zdsp::analysis::PitchDetectorKind::CrepeTiny;
   std::shared_ptr<IosCaptureBridge> context;
   try {
     if (pitchConfig.detector == zdsp::analysis::PitchDetectorKind::CrepeTiny) {
@@ -603,7 +605,7 @@ RCT_REMAP_METHOD(
       NSString* path = resource ? [[NSBundle bundleWithPath:resource] pathForResource:@"crepe-tiny" ofType:@"bin"] : nil;
       if (!path) throw std::runtime_error("CREPE-tiny model is missing from the app");
       pitchConfig.modelPath = path.UTF8String;
-      pitchConfig.crepeLongContextBandPass = true;
+      pitchConfig.crepeLongContextBandPass = [detector isEqualToString:@"crepe-tiny-long-context"];
     }
     context = std::make_shared<IosCaptureBridge>(self, generation, std::move(pitchConfig));
   } catch (const std::exception& error) {
@@ -641,7 +643,8 @@ RCT_REMAP_METHOD(
   resolve(@{@"ok": @YES,
             @"sampleRate": @(started.sampleRate),
             @"analysisBuild": [NSString stringWithUTF8String:
-                [detector isEqualToString:@"crepe-tiny"] ? "crepe-tiny-context128-bp65-1200-v1" : zdsp::analysis::analysisBuildId()]});
+                [detector isEqualToString:@"yin"] ? zdsp::analysis::analysisBuildId() :
+                context->longContext ? "crepe-tiny-context128-bp65-1200-v1" : "crepe-tiny-standard64-v1"]});
 }
 
 RCT_REMAP_METHOD(

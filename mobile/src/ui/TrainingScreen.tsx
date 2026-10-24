@@ -1,3 +1,5 @@
+import { LogButton } from './LogButton'
+import LogPanel from './LogPanel'
 import { useMobileLayout } from './uiKit'
 import { trainingBodyLayout } from './layout'
 import { Icon } from '@singz/ui/native/icons'
@@ -135,7 +137,13 @@ interface ActiveVocalRun {
 const persistence = new MobileTrainingPersistence()
 const SCRIM_TOP = require('../../assets/bg/scrim-top.png')
 const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
-type TrainingStackParamList = { Home: undefined; Exercise: undefined; Progress: undefined; Diagnostics: undefined; SoundSettings: undefined; SoundLab: undefined }
+const TrainingLogContext = createContext<(() => void) | null>(null)
+function TrainingLogButton(): React.JSX.Element | null {
+  const openLog = useContext(TrainingLogContext)
+  return openLog ? <LogButton onPress={openLog} /> : null
+}
+
+type TrainingStackParamList = { Log: undefined; Home: undefined; Exercise: undefined; Progress: undefined; Diagnostics: undefined; SoundSettings: undefined; SoundLab: undefined }
 const TrainingStack = createNativeStackNavigator<TrainingStackParamList>()
 /** Polls (80 ms each) a fresh capture gets before the screen is allowed to
  * report what it is hearing — about a second, which is long enough for both
@@ -865,6 +873,15 @@ export default function TrainingScreen({
       </View>
       <TrainingStack.Navigator
         initialRouteName="Home"
+        screenLayout={({ children, navigation }) => <TrainingLogContext.Provider value={() => {
+          stopRuntime()
+          if (stateRef.current.route === 'session') {
+            paused.current = true
+            setIsPaused(true)
+            dispatch({ type: 'interrupt' })
+          }
+          navigation.navigate('Log')
+        }}>{children}</TrainingLogContext.Provider>}
         screenOptions={{
           headerShown: false,
           animation: 'slide_from_right',
@@ -873,6 +890,9 @@ export default function TrainingScreen({
           contentStyle: styles.trainingRoute
         }}
       >
+        <TrainingStack.Screen name="Log" options={{ presentation: 'fullScreenModal' }}>
+          {({ navigation }) => <LogPanel onClose={() => navigation.goBack()} />}
+        </TrainingStack.Screen>
         <TrainingStack.Screen name="Home" options={{ gestureEnabled: false }}>
           {({ navigation }) => {
             if (TEST) TEST.trainingSoundLab = () => { stopRuntime(); navigation.navigate('SoundLab') }
@@ -1048,6 +1068,7 @@ function TrainingHome({ progress, onProgramLesson, song, effectiveKey, onChoose,
   const landed = snapshot.landedRate === null ? '—' : t('phone.training.landedPercent', { pct: Math.round(snapshot.landedRate * 100) })
   return (
     <ScrollView contentContainerStyle={[styles.scroll, { paddingTop: layout.top, width: '100%', maxWidth: 1160, alignSelf: 'center' }]} showsVerticalScrollIndicator={false}>
+      <View style={{ alignSelf: 'flex-end' }}><TrainingLogButton /></View>
       {song && (
         <GlassSurface radius={26} style={styles.songCardContent}>
           <Text style={styles.eyebrow}>{t('phone.training.loadedSongEyebrow')}</Text>
@@ -1363,7 +1384,7 @@ export function TrainingSessionView({ paused = false, onPause = () => undefined,
         title={trainingExerciseTitle(prompt.kind)}
         backLabel={t('phone.training.endSession')}
         onBack={onExit}
-        trailing={<Pressable accessibilityRole="button" accessibilityLabel={t('phone.training.recordingTools')} onPress={() => setShowSampleTools(value => !value)}><Text style={styles.counter}>{displayIndex} / {displayTotal}</Text></Pressable>}
+        trailing={<View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}><Pressable accessibilityRole="button" accessibilityLabel={t('phone.training.recordingTools')} onPress={() => setShowSampleTools(value => !value)}><Text style={styles.counter}>{displayIndex} / {displayTotal}</Text></Pressable><TrainingLogButton /></View>}
       />
       {showSampleTools && sampleControls}
       {guidedVocal ? (
@@ -1697,7 +1718,7 @@ function TrainingProgressView({ progress, onBack }: { progress: TrainingProgress
   return <ScrollView contentContainerStyle={styles.scroll}><TrainingHeader title={t('phone.training.progressEntryTitle')} onBack={onBack} /><View style={styles.summaryScore}><Text style={styles.summaryNumber}>{snapshot.sessions}</Text><Text style={styles.cardCopy}>{t('phone.training.completedSessions')}</Text></View><View style={styles.summaryRow}><Metric label={t('phone.training.metricAttempts')} value={snapshot.attempts} /><Metric label={t('phone.training.metricLanded')} value={snapshot.landedRate === null ? '—' : `${Math.round(snapshot.landedRate * 100)}%`} /><Metric label={t('phone.training.metricTendency')} value={snapshot.tendency} /></View>{snapshot.weakerExercises.length > 0 && <Section label={t('phone.training.usefulNextFocus')}><Text style={styles.cardCopy}>{snapshot.weakerExercises.join(' · ')}</Text></Section>}<Section label={t('phone.training.dailyActivityTitle')}><DailyTrainingActivity days={persistence.practiceDays} /></Section><TrainingProgramPanel /><IntervalWeekProgress /><Section label={t('phone.training.recent')}>{progress.recent.length === 0 ? <Text style={styles.cardCopy}>{t('phone.training.completeSessionToStart')}</Text> : progress.recent.slice(0, 8).map((item) => <View key={item.sessionId} style={styles.recentRow}><Text style={styles.recentTitle}>{keyLabel(keyName(item.key))} · {readableExercise(item.exercise)}</Text><Text style={styles.cardCopy}>{t('phone.training.landedOfAttempts', { landed: item.onTarget + item.close, attempts: item.attempts })}</Text></View>)}</Section></ScrollView>
 }
 
-export function TrainingHeader({ title, onBack }: { title: string; onBack: () => void }): React.JSX.Element { return <GlassHeader title={title} onBack={onBack} backLabel={t('phone.training.kit.back')} /> }
+export function TrainingHeader({ title, onBack }: { title: string; onBack: () => void }): React.JSX.Element { return <GlassHeader title={title} onBack={onBack} backLabel={t('phone.training.kit.back')} trailing={<TrainingLogButton />} /> }
 function Section({ label, children }: { label: string; children: React.ReactNode }): React.JSX.Element { return <GlassSurface radius={23} style={styles.sectionContent}><Text style={styles.sectionLabel}>{label}</Text>{children}</GlassSurface> }
 function Chip({ label, selected = false, onPress }: { label: string; selected?: boolean; onPress: () => void }): React.JSX.Element { return <ChoiceChip label={label} selected={selected} onPress={onPress} /> }
 function Primary({ label, onPress }: { label: string; onPress: () => void }): React.JSX.Element { return <PrimaryAction label={label} icon={<MicGlyph color={C.amberInk} />} onPress={onPress} /> }

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { AppState, NativeModules, Platform, Pressable, ScrollView, Share, StyleSheet, Text } from 'react-native'
+import { AppState, NativeModules, Platform, Pressable, ScrollView, Share, StyleSheet, Switch, Text } from 'react-native'
 import type { MultitrackEngine } from '../engine'
 import { describeOutput, getRouteLatency } from '../latency'
 import { log } from '../log'
@@ -17,17 +17,17 @@ export function AudioDiagnosticsScreen({ engine, active, onBack, onSoundLab }: {
   const [finishingSample, setFinishingSample] = useState(false)
   const [sampleUrl, setSampleUrl] = useState<string | null>(null)
   const generation = useRef(0)
-  const [detector, setDetector] = useState<string>('CREPE-tiny (default)')
-  const [changingDetector, setChangingDetector] = useState(false)
+  const [detector, setDetector] = useState<string>('crepe-tiny')
+  const [changingDetector, setChangingDetector] = useState(Platform.OS === 'ios')
   useEffect(() => {
     let current = true
     if (Platform.OS === 'ios')
       void NativeModules.AudioInputSession?.getPitchDetector?.().then((name: string) => {
         if (current) setDetector(name)
-      }).catch(() => undefined)
+      }).catch(() => undefined).finally(() => { if (current) setChangingDetector(false) })
     return () => { current = false }
   }, [])
-  const chooseDetector = async (name: 'crepe-tiny' | 'yin') => {
+  const chooseDetector = async (name: 'crepe-tiny' | 'crepe-tiny-long-context' | 'yin') => {
     setChangingDetector(true)
     try {
       await mic.stop()
@@ -170,6 +170,16 @@ export function AudioDiagnosticsScreen({ engine, active, onBack, onSoundLab }: {
       <Text style={styles.text}>Pitch detector: {detector}. Selection also applies to vocal training.</Text>
       <Pressable disabled={changingDetector} onPress={() => void chooseDetector('crepe-tiny')}><Text style={styles.button}>Use CREPE-tiny</Text></Pressable>
       <Pressable disabled={changingDetector} onPress={() => void chooseDetector('yin')}><Text style={styles.button}>Use YIN for comparison</Text></Pressable>
+      {detector !== 'yin' && <>
+        <Text style={styles.text}>Experimental low-note detection</Text>
+        <Switch
+          accessibilityLabel="Experimental low-note detection"
+          value={detector === 'crepe-tiny-long-context'}
+          disabled={changingDetector}
+          onValueChange={enabled => void chooseDetector(enabled ? 'crepe-tiny-long-context' : 'crepe-tiny')}
+        />
+        <Text style={styles.text}>Off by default. Uses 128 ms context with gentle filtering instead of the standard 64 ms analysis. May help or worsen detection in noise. Saved for future training sessions; microphone WAV recordings stay unfiltered.</Text>
+      </>}
     </>}
     {!running && !finishingSample && <>
       {Platform.OS === 'ios' && <Pressable onPress={() => void start(false, true)}><Text style={styles.button}>Record car sample (30 seconds)</Text></Pressable>}

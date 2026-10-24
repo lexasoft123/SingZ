@@ -60,6 +60,7 @@ export interface IosAudioInputLease {
 export interface IosAudioInputFrame {
   generation: number
   detector?: 'crepe-tiny' | 'yin'
+  analysisMode?: 'standard' | 'long-context-band-pass'
   harmonicCorrected?: boolean
   inferenceMs?: number
   clockDomainId: string
