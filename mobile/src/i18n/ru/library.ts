@@ -233,7 +233,7 @@ export const library: Translation<typeof en> = {
     'Обе песни на {device}, примерно {bytes}. Они перейдут в библиотеку Drive и будут играть из вкладки Drive, уже загруженными.',
   'phone.library.offerLeadAllOther':
     'Все {n} песен на {device}, примерно {bytes}. Они перейдут в библиотеку Drive и будут играть из вкладки Drive, уже загруженными.',
-  'phone.library.offerCopies_one': ' Песня, уже в библиотеке Drive, останется здесь.',
+  'phone.library.offerCopies_one': ' {n} песня, уже в библиотеке Drive, останется здесь.',
   'phone.library.offerCopies_few': ' {n} песни, уже в библиотеке Drive, останутся здесь.',
   'phone.library.offerCopies_many': ' {n} песен, уже в библиотеке Drive, останутся здесь.',
   'phone.library.offerCopies_other': ' {n} песни, уже в библиотеке Drive, останутся здесь.',

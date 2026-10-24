@@ -23,6 +23,15 @@
 		<string>en</string>
 		<string>ru</string>
 		<string>zh-Hans</string>
+		<string>hi</string>
+		<string>ja</string>
+		<string>ko</string>
+		<string>th</string>
+		<string>id</string>
+		<string>vi</string>
+		<string>fil</string>
+		<string>ms</string>
+		<string>zh-Hant</string>
 	</array>
 	<key>CFBundleName</key>
 	<string>SingZ</string>

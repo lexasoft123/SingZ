@@ -2,7 +2,7 @@
  * The phone's language. There is no picker in the app: it follows the
  * system, and the singer changes it per app in the OS itself — iOS Settings ›
  * SingZ › Language, Android 13+ Settings › Apps › SingZ › Language. The
- * native projects declare the three languages so both OSes offer that row
+ * native projects declare the supported languages so both OSes offer that row
  * (ios/…/InfoPlist.strings, android/…/xml/locales_config.xml).
  *
  * The lookup is the desktop's core (src/shared/i18n/core.ts), used through
@@ -32,6 +32,34 @@ import { common as zhCommon } from '../../../src/shared/i18n/zh-CN/common'
 import { en } from './en'
 import { ru } from './ru'
 import { zhCN } from './zh-CN'
+import { hi } from './hi'
+import { training as hiTraining } from '../../../src/shared/i18n/hi/training'
+import { common as hiCommon } from '../../../src/shared/i18n/hi/common'
+
+import { ja } from './ja'
+import { training as jaTraining } from '../../../src/shared/i18n/ja/training'
+import { common as jaCommon } from '../../../src/shared/i18n/ja/common'
+import { ko } from './ko'
+import { training as koTraining } from '../../../src/shared/i18n/ko/training'
+import { common as koCommon } from '../../../src/shared/i18n/ko/common'
+import { th } from './th'
+import { training as thTraining } from '../../../src/shared/i18n/th/training'
+import { common as thCommon } from '../../../src/shared/i18n/th/common'
+import { id } from './id'
+import { training as idTraining } from '../../../src/shared/i18n/id/training'
+import { common as idCommon } from '../../../src/shared/i18n/id/common'
+import { vi } from './vi'
+import { training as viTraining } from '../../../src/shared/i18n/vi/training'
+import { common as viCommon } from '../../../src/shared/i18n/vi/common'
+import { fil } from './fil'
+import { training as filTraining } from '../../../src/shared/i18n/fil/training'
+import { common as filCommon } from '../../../src/shared/i18n/fil/common'
+import { ms } from './ms'
+import { training as msTraining } from '../../../src/shared/i18n/ms/training'
+import { common as msCommon } from '../../../src/shared/i18n/ms/common'
+import { zhTW } from './zh-TW'
+import { training as zhTWTraining } from '../../../src/shared/i18n/zh-TW/training'
+import { common as zhTWCommon } from '../../../src/shared/i18n/zh-TW/common'
 
 export type { Locale } from '../../../src/shared/i18n/rules'
 
@@ -39,6 +67,16 @@ export type { Locale } from '../../../src/shared/i18n/rules'
 i18nRegister('en', { ...enCommon, ...en })
 i18nRegister('ru', { ...ruCommon, ...ruTraining, ...ru })
 i18nRegister('zh-CN', { ...zhCommon, ...zhTraining, ...zhCN })
+i18nRegister('hi', { ...hiCommon, ...hiTraining, ...hi })
+
+i18nRegister('ja', { ...jaCommon, ...jaTraining, ...ja })
+i18nRegister('ko', { ...koCommon, ...koTraining, ...ko })
+i18nRegister('th', { ...thCommon, ...thTraining, ...th })
+i18nRegister('id', { ...idCommon, ...idTraining, ...id })
+i18nRegister('vi', { ...viCommon, ...viTraining, ...vi })
+i18nRegister('fil', { ...filCommon, ...filTraining, ...fil })
+i18nRegister('ms', { ...msCommon, ...msTraining, ...ms })
+i18nRegister('zh-TW', { ...zhTWCommon, ...zhTWTraining, ...zhTW })
 
 export type Key = keyof typeof en
 export type PluralKey = { [K in Key]: K extends `${infer B}_one` ? B : never }[Key]

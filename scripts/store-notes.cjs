@@ -62,7 +62,7 @@ const IOS_LIMIT = 4000
 // live case (App Store Connect has no "ru-RU", only "ru"). Adding a locale
 // on one side is a directory; this map is the one place a mismatch has to be
 // spelled out by hand.
-const IOS_LOCALE = { 'ru-RU': 'ru', 'zh-CN': 'zh-Hans' }
+const IOS_LOCALE = { 'ru-RU': 'ru', 'zh-CN': 'zh-Hans', 'hi-IN': 'hi', 'ja-JP': 'ja', 'ko-KR': 'ko', 'id': 'id', 'vi': 'vi', 'th': 'th', 'ms': 'ms', 'zh-TW': 'zh-Hant' }
 const check = process.argv.includes('--check')
 
 const fail = (msg) => {

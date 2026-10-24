@@ -1,0 +1,20 @@
+Karaoke dengan musik Anda sendiri. SingZ menyatukan lirik yang tersinkron, trek pengiring terpisah, dan latihan vokal. Bisukan vokal utama, sesuaikan nada dasar dengan suara Anda, lalu berlatih dengan umpan balik nada secara langsung.
+
+BAWA LAGU SENDIRI
+Pilih rekaman atau berkas audio yang sudah Anda beli dari penyimpanan ponsel. SingZ memisahkannya menjadi enam trek: vokal, drum, bas, gitar, piano, dan instrumen lainnya. Semua diproses di perangkat tanpa mengunggah lagu ke server. Pertama kali, model sekitar 136 MB perlu diunduh. Pemisahan memerlukan ponsel dengan kinerja dan memori yang cukup.
+
+Anda juga bisa menyiapkan lagu di aplikasi SingZ sumber terbuka untuk Mac dan Windows, lalu membukanya lewat Google Drive pribadi atau folder yang disalin. Ada satu lagu contoh untuk langsung mencoba. SingZ tidak menyediakan katalog atau toko musik; gunakan rekaman yang sudah Anda miliki.
+
+BERNYANYI DENGAN NYAMAN
+• Atur volume, bisukan, atau dengarkan tiap trek secara solo.
+• Lirik disorot kata demi kata. Ketuk baris untuk melompat ke bagian itu.
+• Ubah nada dasar dan kecepatan secara terpisah.
+• Ulangi bagian sulit dengan hitungan awal.
+• Musik tetap diputar saat layar terkunci.
+
+LATIH TELINGA DAN SUARA
+Pilih program dasar, menengah, atau lanjutan, atau latih nada tunggal, interval, akor, tangga nada, dan arpeggio. Dengarkan nada lalu nyanyikan. Pengukur nada menunjukkan ketepatan suara dan berapa lama Anda menahannya. Lihat riwayat latihan per tanggal. Pilih suara piano, piano elektrik, gitar nilon, atau organ.
+
+Mode latihan membisukan trek pilihan sesuai waktu atau baris lirik, agar Anda bisa melanjutkan tanpa bergantung pada vokal pengiring.
+
+Perbaiki kata dan waktu lirik di aplikasi komputer, lalu sinkronkan ke ponsel. Lagu yang sudah dibuka tersimpan di ponsel dan dapat dimainkan tanpa internet. Login Google Drive bersifat opsional; tidak perlu akun SingZ. Tanpa iklan, analitik, atau pelacakan. Merekam latihan juga opsional.

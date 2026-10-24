@@ -1,0 +1,20 @@
+<resources>
+    <string name="np_channel_name">Sedang dimainkan</string>
+    <string name="np_channel_desc">Lagu yang sedang dimainkan dengan kawalan main, jeda dan langkau</string>
+    <string name="np_back">Undur %1$s</string>
+    <string name="np_forward">Maju %1$s</string>
+    <string name="np_pause">Jeda</string>
+    <string name="np_play">Main</string>
+    <string name="np_seconds">%1$d s</string>
+    <string name="split_channel_name">Memisahkan trek</string>
+    <string name="split_channel_desc">Kemajuan pemisahan lagu kepada trek</string>
+    <string name="split_title">Memisahkan lagu kepada trek</string>
+    <string name="split_cancel">Batal</string>
+    <string name="split_getting_ready">Menyediakan…</string>
+    <string name="split_cancelling">Membatalkan…</string>
+    <string name="split_reading">Membaca lagu…</string>
+    <string name="split_warming">Memulakan…</string>
+    <string name="split_chunk">Bahagian %1$d daripada %2$d%3$s</string>
+    <string name="split_eta_min"> · kira-kira %1$d minit lagi</string>
+    <string name="split_eta_sec"> · kira-kira %1$d saat lagi</string>
+</resources>

@@ -1,0 +1,20 @@
+<resources>
+    <string name="np_channel_name">再生中</string>
+    <string name="np_channel_desc">再生中の曲と、再生・一時停止・スキップ操作</string>
+    <string name="np_back">%1$s戻る</string>
+    <string name="np_forward">%1$s進む</string>
+    <string name="np_pause">一時停止</string>
+    <string name="np_play">再生</string>
+    <string name="np_seconds">%1$d秒</string>
+    <string name="split_channel_name">トラック分離</string>
+    <string name="split_channel_desc">曲を各パートに分離する進行状況</string>
+    <string name="split_title">各パートに分離中</string>
+    <string name="split_cancel">キャンセル</string>
+    <string name="split_getting_ready">準備中…</string>
+    <string name="split_cancelling">キャンセル中…</string>
+    <string name="split_reading">曲を読み込み中…</string>
+    <string name="split_warming">起動中…</string>
+    <string name="split_chunk">分割 %1$d/%2$d%3$s</string>
+    <string name="split_eta_min"> · 残り約%1$d分</string>
+    <string name="split_eta_sec"> · 残り約%1$d秒</string>
+</resources>

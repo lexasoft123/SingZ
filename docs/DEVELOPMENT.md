@@ -598,7 +598,7 @@ Rules learned the hard way:
 | `SINGZ_DEMUCS` | override the splitter engine command |
 | `SINGZ_LLAMA_SERVER` | override the llama-server binary Qwen3-ASR runs through |
 | `SINGZ_CRISPASR` | override the crispasr binary the Qwen word aligner runs through |
-| `SINGZ_LANG` | `en` / `ru` / `zh-CN` / `system`: the UI language for this run, over the saved choice. Unset, a `SINGZ_E2E_HIDDEN=1` run is English — drivers find controls by their English text, and the Windows field laptop is a Russian-locale machine. A pick from the title-bar flag during the run still wins |
+| `SINGZ_LANG` | Any locale in `src/shared/i18n/rules.ts` (`LOCALE_VALUES`), or `system`: the UI language for this run, over the saved choice. Unset, a `SINGZ_E2E_HIDDEN=1` run is English — drivers find controls by their English text, and the Windows field laptop is a Russian-locale machine. A pick from the title-bar flag during the run still wins |
 | `SINGZ_QWEN_OFFER=1` | let the once-only Qwen3-ASR launch offer appear in a hidden (`SINGZ_E2E_HIDDEN=1`) driver run, which otherwise suppresses it — for the driver that tests the offer |
 
 Full clean-OS check (as CI can't do): package with
@@ -882,7 +882,7 @@ Trusted Signing (`win.azureSignOptions`) or SignPath's OSS tier.
 
 ## Localization
 
-The desktop speaks English, Russian and Simplified Chinese. The title bar's
+The desktop speaks English, Russian, Simplified and Traditional Chinese, Hindi, Japanese, Korean, Thai, Indonesian, Vietnamese, Filipino and Malay. The title bar's
 flag (the kit's `LanguageSwitcher`, `compact`) picks one, or `System`, which
 follows the machine's preferred languages (`app.getPreferredSystemLanguages()`;
 Traditional Chinese is deliberately not handed Simplified). The choice lives in
@@ -921,7 +921,7 @@ song keeps playing.
 
 ### The phone
 
-The phone speaks the same three languages but has **no picker**: it follows
+The phone speaks the same languages but has **no picker**: it follows
 the system, and the singer changes it per app in the OS — iOS Settings ›
 SingZ › Language, Android 13+ Settings › Apps › SingZ › Language.
 

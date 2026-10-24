@@ -5,11 +5,11 @@
  * without the dictionaries.
  */
 
-export type Locale = 'en' | 'ru' | 'zh-CN'
+export type Locale = 'en' | 'ru' | 'zh-CN' | 'hi' | 'ja' | 'ko' | 'th' | 'id' | 'vi' | 'fil' | 'ms' | 'zh-TW'
 /** What the preference stores: a locale, or `system` to follow the machine. */
 export type Language = Locale | 'system'
 
-export const LOCALE_VALUES: readonly Locale[] = ['en', 'ru', 'zh-CN']
+export const LOCALE_VALUES: readonly Locale[] = ['en', 'ru', 'zh-CN', 'hi', 'ja', 'ko', 'th', 'id', 'vi', 'fil', 'ms', 'zh-TW']
 
 export function isLanguage(v: unknown): v is Language {
   return v === 'system' || (typeof v === 'string' && (LOCALE_VALUES as readonly string[]).includes(v))
@@ -19,19 +19,28 @@ export function isLanguage(v: unknown): v is Language {
  * The locale a system tag maps to, or null when SingZ has nothing for it.
  *
  * Simplified Chinese is offered to `zh`, `zh-CN`, `zh-SG` and any `zh-Hans`
- * form. Traditional variants (`zh-Hant`, `zh-TW`, `zh-HK`, `zh-MO`) are
- * deliberately NOT mapped: a Traditional reader gets Simplified only by
- * choosing it, not by being handed it. Russian takes every `ru` region.
+ * form. Traditional variants (`zh-Hant`, `zh-TW`, `zh-HK`, `zh-MO`) use Traditional
+ * Chinese. Russian and the other supported languages accept regional tags.
  */
 export function fromTag(tag: string): Locale | null {
   const parts = tag.toLowerCase().replace(/_/g, '-').split('-')
   const lang = parts[0]
   if (lang === 'en') return 'en'
   if (lang === 'ru') return 'ru'
+  if (lang === 'hi') return 'hi'
+  if (lang === 'tl' || lang === 'fil') return 'fil'
+  if (lang === 'in') return 'id'
+  if (lang === 'ja') return 'ja'
+  if (lang === 'ko') return 'ko'
+  if (lang === 'th') return 'th'
+  if (lang === 'id') return 'id'
+  if (lang === 'vi') return 'vi'
+  if (lang === 'ms') return 'ms'
   if (lang === 'zh') {
-    if (parts.includes('hant')) return null
+    if (parts.includes('hant')) return 'zh-TW'
     if (parts.includes('hans')) return 'zh-CN'
     const region = parts.slice(1).find((p) => p.length === 2)
+    if (region === 'tw' || region === 'hk' || region === 'mo') return 'zh-TW'
     return region === undefined || region === 'cn' || region === 'sg' ? 'zh-CN' : null
   }
   return null
@@ -69,7 +78,7 @@ export function pluralForm(locale: Locale, n: number): PluralForm {
   if (!r) {
     // Hermes — the phone's engine — has no Intl.PluralRules (its Intl is
     // Collator, DateTimeFormat and NumberFormat), so the CLDR rules for our
-    // three languages are written out by hand for it.
+    // supported languages are written out by hand for it.
     if (typeof Intl === 'undefined' || typeof Intl.PluralRules !== 'function') return cldrPlural(locale, n)
     rules.set(locale, (r = new Intl.PluralRules(locale)))
   }
@@ -79,8 +88,15 @@ export function pluralForm(locale: Locale, n: number): PluralForm {
 
 /** CLDR cardinal rules for integer counts, for engines without PluralRules. */
 export function cldrPlural(locale: Locale, n: number): PluralForm {
-  if (!Number.isInteger(n)) return 'other'
-  const a = Math.abs(n)
+  if (!Number.isFinite(n)) return 'other'
+  const a = Math.round(Math.abs(n) * 1000) / 1000
+  if (locale === 'hi') return a < 1 || a === 1 ? 'one' : 'other'
+  if (locale === 'fil') {
+    const fraction = String(a).split('.')[1] ?? ''
+    const lastDigit = Number.isInteger(a) ? a % 10 : Number(fraction[fraction.length - 1])
+    return [4, 6, 9].includes(lastDigit) ? 'other' : 'one'
+  }
+  if (!Number.isInteger(a)) return 'other'
   if (locale === 'ru') {
     const d = a % 10
     const h = a % 100
@@ -88,6 +104,6 @@ export function cldrPlural(locale: Locale, n: number): PluralForm {
     if (d >= 2 && d <= 4 && (h < 12 || h > 14)) return 'few'
     return 'many'
   }
-  if (locale === 'zh-CN') return 'other'
+  if (['zh-CN', 'zh-TW', 'ja', 'ko', 'th', 'id', 'vi', 'ms'].includes(locale)) return 'other'
   return a === 1 ? 'one' : 'other'
 }

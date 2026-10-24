@@ -1,0 +1,20 @@
+<resources>
+    <string name="np_channel_name">กำลังเล่น</string>
+    <string name="np_channel_desc">เพลงที่กำลังเล่น พร้อมปุ่มเล่น หยุดชั่วคราว และข้าม</string>
+    <string name="np_back">ย้อนกลับ %1$s</string>
+    <string name="np_forward">ไปข้างหน้า %1$s</string>
+    <string name="np_pause">หยุดชั่วคราว</string>
+    <string name="np_play">เล่น</string>
+    <string name="np_seconds">%1$d วินาที</string>
+    <string name="split_channel_name">กำลังแยกเพลง</string>
+    <string name="split_channel_desc">ความคืบหน้าในการแยกเพลงเป็นแทร็ก</string>
+    <string name="split_title">กำลังแยกเป็นแทร็ก</string>
+    <string name="split_cancel">ยกเลิก</string>
+    <string name="split_getting_ready">กำลังเตรียม…</string>
+    <string name="split_cancelling">กำลังยกเลิก…</string>
+    <string name="split_reading">กำลังอ่านเพลง…</string>
+    <string name="split_warming">กำลังเริ่มต้น…</string>
+    <string name="split_chunk">ส่วนที่ %1$d จาก %2$d%3$s</string>
+    <string name="split_eta_min"> · เหลือประมาณ %1$d นาที</string>
+    <string name="split_eta_sec"> · เหลือประมาณ %1$d วินาที</string>
+</resources>

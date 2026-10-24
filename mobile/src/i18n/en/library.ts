@@ -267,7 +267,7 @@ export const library = {
   'phone.library.offerLeadAllOther':
     'All {n} songs on this {device}, about {bytes}. They move into your Drive library and play from the Drive tab, already downloaded.',
   // appended sentence when some songs are already in the Drive library; keep the leading space
-  'phone.library.offerCopies_one': ' A song already in your Drive library stays here too.',
+  'phone.library.offerCopies_one': ' {n} song already in your Drive library stays here too.',
   'phone.library.offerCopies_other': ' {n} songs already in your Drive library stay here too.',
   'phone.library.addAllLocalSongs': 'Add all local songs to Google Drive',
 

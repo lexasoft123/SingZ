@@ -8,21 +8,35 @@ import { cldrPlural, fill, fromTag, pluralForm, resolveLocale } from '../../src/
 import { en } from '../../src/shared/i18n/en'
 import { ru } from '../../src/shared/i18n/ru'
 import { zhCN } from '../../src/shared/i18n/zh-CN'
+import { hi } from '../../src/shared/i18n/hi'
+import { ja } from '../../src/shared/i18n/ja'
+import { ko } from '../../src/shared/i18n/ko'
+import { th } from '../../src/shared/i18n/th'
+import { id } from '../../src/shared/i18n/id'
+import { vi } from '../../src/shared/i18n/vi'
+import { fil } from '../../src/shared/i18n/fil'
+import { ms } from '../../src/shared/i18n/ms'
+import { zhTW } from '../../src/shared/i18n/zh-TW'
 import { loadLocale, setLocale, t, tn } from '../../src/shared/i18n'
 
 describe('fromTag', () => {
   it('maps every spelling the platforms use', () => {
-    for (const tag of ['en', 'en-US', 'en_GB']) expect(fromTag(tag)).toBe('en')
+    for (const tag of ['en', 'en-US', 'en_GB', 'en-IN']) expect(fromTag(tag)).toBe('en')
     for (const tag of ['ru', 'ru-RU', 'ru_UA', 'ru-KZ']) expect(fromTag(tag)).toBe('ru')
     for (const tag of ['zh', 'zh-CN', 'zh_CN', 'zh-Hans', 'zh-Hans-CN', 'zh-Hans-SG', 'zh-SG']) {
       expect(fromTag(tag)).toBe('zh-CN')
     }
   })
-  it('does not hand Simplified to a Traditional reader', () => {
-    for (const tag of ['zh-TW', 'zh-Hant', 'zh-Hant-TW', 'zh-HK', 'zh-MO']) expect(fromTag(tag)).toBeNull()
+  it('uses Traditional Chinese for Traditional readers', () => {
+    for (const tag of ['zh-TW', 'zh-Hant', 'zh-Hant-TW', 'zh-HK', 'zh-MO']) expect(fromTag(tag)).toBe('zh-TW')
+  })
+  it('resolves regional and legacy Asian language tags', () => {
+    for (const [tag, locale] of [['hi-IN','hi'],['hi_Latn_IN','hi'],['ja-JP','ja'],['ko-KR','ko'],['th-TH','th'],['id-ID','id'],['in-ID','id'],['vi-VN','vi'],['tl-PH','fil'],['fil-PH','fil'],['ms-MY','ms'],['zh-Hant-HK','zh-TW']]) {
+      expect(fromTag(tag), tag).toBe(locale)
+    }
   })
   it('has nothing for other languages', () => {
-    for (const tag of ['ja', 'de-DE', 'uk-UA', '']) expect(fromTag(tag)).toBeNull()
+    for (const tag of ['de-DE', 'uk-UA', '']) expect(fromTag(tag)).toBeNull()
   })
 })
 
@@ -33,12 +47,12 @@ describe('resolveLocale', () => {
   })
   it('walks the system list in order and takes the first it can speak', () => {
     expect(resolveLocale('system', ['ru-RU', 'en-US'])).toBe('ru')
-    expect(resolveLocale('system', ['ja', 'zh-Hans-CN'])).toBe('zh-CN')
-    expect(resolveLocale('system', ['zh-TW', 'en'])).toBe('en')
+    expect(resolveLocale('system', ['ja', 'zh-Hans-CN'])).toBe('ja')
+    expect(resolveLocale('system', ['zh-TW', 'en'])).toBe('zh-TW')
   })
   it('falls back to English', () => {
     expect(resolveLocale('system', [])).toBe('en')
-    expect(resolveLocale('system', ['ja', 'ko'])).toBe('en')
+    expect(resolveLocale('system', ['de-DE', 'uk-UA'])).toBe('en')
   })
 })
 
@@ -53,7 +67,7 @@ describe('fill and plurals', () => {
     expect(pluralForm('zh-CN', 1)).toBe('other')
   })
   it('the hand-written rules (Hermes has no PluralRules) agree with Intl', () => {
-    for (const locale of ['en', 'ru', 'zh-CN'] as const) {
+    for (const locale of ['en', 'ru', 'zh-CN', 'hi', 'ja', 'ko', 'th', 'id', 'vi', 'fil', 'ms', 'zh-TW'] as const) {
       const intl = new Intl.PluralRules(locale)
       for (let n = 0; n <= 125; n++) {
         const want = intl.select(n)
@@ -61,6 +75,13 @@ describe('fill and plurals', () => {
       }
     }
     expect([1, 2, 5, 11, 21, 22, 112].map((n) => cldrPlural('ru', n))).toEqual(['one', 'few', 'many', 'many', 'one', 'few', 'many'])
+  })
+  it('matches CLDR for Hindi and Filipino fractions without Intl.PluralRules', () => {
+    for (const locale of ['hi', 'fil'] as const) {
+      for (const n of [0, 0.1, 0.4, 0.6, 0.9, 1, 1.1, 1.4, 2, 4, 6, 9, 14, 24, 1.1234]) {
+        expect(cldrPlural(locale,n), `${locale} ${n}`).toBe(new Intl.PluralRules(locale).select(n))
+      }
+    }
   })
   it('switches language live', async () => {
     await loadLocale('ru')
@@ -74,13 +95,32 @@ describe('fill and plurals', () => {
   })
 })
 
+describe('added Asian languages load and switch', () => {
+  it.each(['hi','ja','ko','th','id','vi','fil','ms','zh-TW'] as const)('%s registers its own strings', async locale => {
+    await loadLocale(locale)
+    setLocale(locale)
+    expect(t('lang.label')).not.toBe('lang.label')
+    expect(t('app.titlebar.songs')).not.toBe('Songs')
+    setLocale('en')
+  })
+})
+
 describe('the dictionaries', () => {
   const keys = Object.keys(en) as (keyof typeof en)[]
   const holes = (s: string): string[] => [...s.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort()
   const stems = keys.filter((k) => k.endsWith('_one')).map((k) => k.slice(0, -4))
   const dicts: [string, Record<string, string>][] = [
     ['ru', ru],
-    ['zh-CN', zhCN]
+    ['zh-CN', zhCN],
+    ['hi', hi],
+    ['ja', ja],
+    ['ko', ko],
+    ['th', th],
+    ['id', id],
+    ['vi', vi],
+    ['fil', fil],
+    ['ms', ms],
+    ['zh-TW', zhTW]
   ]
 
   it('English keys are namespaced and non-empty', () => {

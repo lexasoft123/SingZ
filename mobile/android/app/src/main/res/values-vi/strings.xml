@@ -1,0 +1,20 @@
+<resources>
+    <string name="np_channel_name">Đang phát</string>
+    <string name="np_channel_desc">Bài hát đang phát với nút phát, tạm dừng và chuyển đoạn</string>
+    <string name="np_back">Lùi %1$s</string>
+    <string name="np_forward">Tiến %1$s</string>
+    <string name="np_pause">Tạm dừng</string>
+    <string name="np_play">Phát</string>
+    <string name="np_seconds">%1$d giây</string>
+    <string name="split_channel_name">Đang tách nhạc</string>
+    <string name="split_channel_desc">Tiến trình tách bài hát thành các phần</string>
+    <string name="split_title">Đang tách các phần nhạc</string>
+    <string name="split_cancel">Hủy</string>
+    <string name="split_getting_ready">Đang chuẩn bị…</string>
+    <string name="split_cancelling">Đang hủy…</string>
+    <string name="split_reading">Đang đọc bài hát…</string>
+    <string name="split_warming">Đang khởi động…</string>
+    <string name="split_chunk">Phần %1$d/%2$d%3$s</string>
+    <string name="split_eta_min"> · còn khoảng %1$d phút</string>
+    <string name="split_eta_sec"> · còn khoảng %1$d giây</string>
+</resources>

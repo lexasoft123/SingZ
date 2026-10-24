@@ -1,5 +1,7 @@
 /* English phone strings for the `phone.app` namespace — see ../index.ts. */
 export const app = {
+  "phone.app.diagnostics.title": "Audio diagnostics",
+  "phone.app.diagnostics.detail": "CarPlay latency and live microphone pitch",
   'phone.app.whatsNew.title': "What’s new",
   'phone.app.whatsNew.fullNotes': "Full release notes",
   'phone.app.whatsNew.done': "Got it",

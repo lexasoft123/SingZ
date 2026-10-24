@@ -3,6 +3,15 @@ import { isLanguage, resolveLocale, setLocale, type Language, type Locale } from
 import { register } from '../shared/i18n/core'
 import { ru } from '../shared/i18n/ru'
 import { zhCN } from '../shared/i18n/zh-CN'
+import { hi } from '../shared/i18n/hi'
+import { ja } from '../shared/i18n/ja'
+import { ko } from '../shared/i18n/ko'
+import { th } from '../shared/i18n/th'
+import { id } from '../shared/i18n/id'
+import { vi } from '../shared/i18n/vi'
+import { fil } from '../shared/i18n/fil'
+import { ms } from '../shared/i18n/ms'
+import { zhTW } from '../shared/i18n/zh-TW'
 import { readSettings, writeSettings } from './settings'
 import { log } from './log'
 import type { LocaleState } from '../shared/types'
@@ -53,6 +62,15 @@ export function localeState(): LocaleState {
 // registered up front (the renderer loads them on demand instead).
 register('ru', ru)
 register('zh-CN', zhCN)
+register('zh-TW', zhTW)
+register('ms', ms)
+register('fil', fil)
+register('vi', vi)
+register('id', id)
+register('th', th)
+register('ko', ko)
+register('ja', ja)
+register('hi', hi)
 
 /** Resolve and apply the locale for main's own strings. */
 export function applyLocale(): Locale {

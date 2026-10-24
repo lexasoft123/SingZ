@@ -37,10 +37,20 @@ const loaded = new Map<Locale, Promise<void>>([['en', Promise.resolve()]])
 export function loadLocale(l: Locale): Promise<void> {
   let p = loaded.get(l)
   if (!p) {
-    p = (l === 'ru'
-      ? import('./ru').then((m) => register('ru', m.ru))
-      : import('./zh-CN').then((m) => register('zh-CN', m.zhCN))
-    ).catch((err: unknown) => {
+    const loaders: Record<Exclude<Locale, 'en'>, () => Promise<void>> = {
+      'ru': () => import('./ru').then((m) => register('ru', m.ru)),
+      'zh-CN': () => import('./zh-CN').then((m) => register('zh-CN', m.zhCN)),
+      'hi': () => import('./hi').then((m) => register('hi', m.hi)),
+      'ja': () => import('./ja').then((m) => register('ja', m.ja)),
+      'ko': () => import('./ko').then((m) => register('ko', m.ko)),
+      'th': () => import('./th').then((m) => register('th', m.th)),
+      'id': () => import('./id').then((m) => register('id', m.id)),
+      'vi': () => import('./vi').then((m) => register('vi', m.vi)),
+      'fil': () => import('./fil').then((m) => register('fil', m.fil)),
+      'ms': () => import('./ms').then((m) => register('ms', m.ms)),
+      'zh-TW': () => import('./zh-TW').then((m) => register('zh-TW', m.zhTW)),
+    }
+    p = (l === 'en' ? Promise.resolve() : loaders[l]()).catch((err: unknown) => {
       loaded.delete(l)
       throw err
     })
@@ -54,5 +64,14 @@ export function loadLocale(l: Locale): Promise<void> {
 export const LOCALES: { value: Locale; label: string; code: string }[] = [
   { value: 'en', label: 'English', code: 'EN' },
   { value: 'ru', label: 'Русский', code: 'RU' },
-  { value: 'zh-CN', label: '简体中文', code: 'ZH' }
+  { value: 'zh-CN', label: '简体中文', code: 'ZH' },
+  { value: 'hi', label: 'हिन्दी', code: 'HI' },
+  { value: 'ja', label: '日本語', code: 'JA' },
+  { value: 'ko', label: '한국어', code: 'KO' },
+  { value: 'th', label: 'ไทย', code: 'TH' },
+  { value: 'id', label: 'Bahasa Indonesia', code: 'ID' },
+  { value: 'vi', label: 'Tiếng Việt', code: 'VI' },
+  { value: 'fil', label: 'Filipino', code: 'FIL' },
+  { value: 'ms', label: 'Bahasa Melayu', code: 'MS' },
+  { value: 'zh-TW', label: '繁體中文', code: 'ZH-TW' }
 ]

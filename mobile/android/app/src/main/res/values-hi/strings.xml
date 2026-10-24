@@ -1,0 +1,20 @@
+<resources>
+    <string name="np_channel_name">अभी चल रहा है</string>
+    <string name="np_channel_desc">चल रहे गाने को चलाएँ, रोकें या आगे-पीछे जाएँ</string>
+    <string name="np_back">पीछे %1$s</string>
+    <string name="np_forward">आगे %1$s</string>
+    <string name="np_pause">रोकें</string>
+    <string name="np_play">चलाएँ</string>
+    <string name="np_seconds">%1$d सेकंड</string>
+    <string name="split_channel_name">ट्रैक अलग करना</string>
+    <string name="split_channel_desc">गाने को अलग ट्रैक में बाँटने की प्रगति</string>
+    <string name="split_title">गाने के ट्रैक अलग हो रहे हैं</string>
+    <string name="split_cancel">रद्द करें</string>
+    <string name="split_getting_ready">तैयारी हो रही है…</string>
+    <string name="split_cancelling">रद्द हो रहा है…</string>
+    <string name="split_reading">गाना पढ़ा जा रहा है…</string>
+    <string name="split_warming">शुरू हो रहा है…</string>
+    <string name="split_chunk">हिस्सा %1$d/%2$d%3$s</string>
+    <string name="split_eta_min"> · लगभग %1$d मिनट बाकी</string>
+    <string name="split_eta_sec"> · लगभग %1$d सेकंड बाकी</string>
+</resources>

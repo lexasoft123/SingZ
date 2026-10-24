@@ -1,0 +1,20 @@
+<resources>
+    <string name="np_channel_name">Kasalukuyang tumutugtog</string>
+    <string name="np_channel_desc">Ang kasalukuyang kanta na may play, pause at skip</string>
+    <string name="np_back">Bumalik nang %1$s</string>
+    <string name="np_forward">Sumulong nang %1$s</string>
+    <string name="np_pause">I-pause</string>
+    <string name="np_play">I-play</string>
+    <string name="np_seconds">%1$d s</string>
+    <string name="split_channel_name">Paghihiwalay ng track</string>
+    <string name="split_channel_desc">Progreso habang hinahati ang kanta sa mga track</string>
+    <string name="split_title">Hinahati sa mga track</string>
+    <string name="split_cancel">Kanselahin</string>
+    <string name="split_getting_ready">Naghahanda…</string>
+    <string name="split_cancelling">Kinakansela…</string>
+    <string name="split_reading">Binabasa ang kanta…</string>
+    <string name="split_warming">Nagsisimula…</string>
+    <string name="split_chunk">Bahagi %1$d ng %2$d%3$s</string>
+    <string name="split_eta_min"> · mga %1$d minuto pa</string>
+    <string name="split_eta_sec"> · mga %1$d segundo pa</string>
+</resources>

@@ -1,0 +1,1 @@
+Mikrofon Windows boleh digunakan semula, termasuk antara muka audio USB seperti MiniFuse. Pilihan mikrofon dan saluran input dikekalkan. Jika tangkapan audio gagal, log aplikasi kini merekodkan puncanya.

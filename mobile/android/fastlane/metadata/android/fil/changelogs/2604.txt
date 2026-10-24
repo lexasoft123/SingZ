@@ -1,0 +1,1 @@
+Gumagana na muli ang mga mikropono sa Windows, pati ang USB audio interface gaya ng MiniFuse. Nananatili ang napiling mikropono at input channel. Kung hindi makuha ang audio, itinatala na ng app log ang dahilan.

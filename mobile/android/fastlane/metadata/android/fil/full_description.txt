@@ -1,0 +1,20 @@
+Mag-karaoke gamit ang sarili mong musika. Pinagsasama ng SingZ ang liriko na kasabay ng kanta, magkakahiwalay na saliw at pagsasanay sa pag-awit. I-mute ang pangunahing boses, baguhin ang key ayon sa boses mo at magsanay gamit ang live na gabay sa tono.
+
+DALHIN ANG SARILI MONG KANTA
+Pumili ng recording o audio file na binili mo mula sa telepono. Hinahati ito ng SingZ sa anim na track: boses, drums, bass, gitara, piano at iba pang instrumento. Sa mismong device ito ginagawa at hindi ina-upload ang kanta sa server. Sa unang paggamit, kailangang mag-download ng model na humigit-kumulang 136 MB. Kailangan ng sapat na memory at kakayahan ng telepono para sa paghihiwalay.
+
+Puwede ring maghanda ng kanta sa open-source na SingZ para sa Mac o Windows, at buksan ito gamit ang sarili mong Google Drive o kinopyang folder. May kasamang sample na kanta para masubukan agad. Walang katalogo o tindahan ng musika ang SingZ; gamitin ang mga recording na mayroon ka na.
+
+KUMANTA SA PARAANG BAGAY SA IYO
+• Ayusin ang lakas, i-mute o pakinggan nang solo ang bawat track.
+• Naka-highlight ang liriko kada salita. I-tap ang linya para lumipat doon.
+• Baguhin nang hiwalay ang key at bilis.
+• Ulitin ang mahirap na bahagi nang may bilang bago magsimula.
+• Tuloy ang tugtog kahit naka-lock ang screen.
+
+SANAYIN ANG PANDINIG AT BOSES
+Pumili ng panimula, panggitna o advanced na programa, o magsanay ng nota, interval, chord, scale at arpeggio. Pakinggan ang nota at kantahin ito. Ipinapakita ng pitch meter kung tama ang tono at gaano katagal mo ito napapanatili. Tingnan ang kasaysayan ng ensayo ayon sa petsa at pumili ng tunog ng piano, electric piano, nylon guitar o organ.
+
+Sa training mode, kusang nawawala ang piniling track ayon sa oras o linya ng liriko upang makakanta ka nang hindi umaasa sa gabay na boses.
+
+Ayusin ang mga salita at timing sa desktop app at i-sync sa telepono. Nananatili sa telepono ang mga nabuksang kanta para mapatugtog offline. Opsyonal ang Google Drive login at hindi kailangan ng SingZ account. Walang ads, analytics o tracking. Opsyonal din ang pag-record ng ensayo.

@@ -1062,7 +1062,7 @@ function TrainingHome({ progress, onProgramLesson, song, effectiveKey, onChoose,
         detail={snapshot.sessions ? tn('phone.training.progressSummary', snapshot.sessions, { landed }) : t('phone.training.progressEmpty')}
         onPress={onProgress}
       />
-      <ListEntry title="Audio diagnostics" detail="CarPlay latency and live microphone pitch" onPress={onDiagnostics} />
+      <ListEntry title={t('phone.app.diagnostics.title')} detail={t('phone.app.diagnostics.detail')} onPress={onDiagnostics} />
     </ScrollView>
   )
 }

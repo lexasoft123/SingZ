@@ -3,6 +3,8 @@ import type { app as en } from '../en/app'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const app: Translation<typeof en> = {
+  "phone.app.diagnostics.title": "音频诊断",
+  "phone.app.diagnostics.detail": "CarPlay 延迟与实时麦克风音高",
   'phone.app.whatsNew.title': "更新内容",
   'phone.app.whatsNew.fullNotes': "完整更新说明",
   'phone.app.whatsNew.done': "知道了",

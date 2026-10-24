@@ -35,4 +35,20 @@ const CN = (): React.JSX.Element => (
   </svg>
 )
 
-export const FLAGS: Record<Locale, React.JSX.Element> = { en: <UK />, ru: <RU />, 'zh-CN': <CN /> }
+// Language codes remain legible on every platform; these badges avoid relying on
+// emoji flags, which Windows renders as two regional-indicator letters.
+const LanguageMark = ({ code }: { code: string }): React.JSX.Element => (
+  <svg className="lang-flag" viewBox="0 0 30 21" aria-hidden>
+    <rect width="30" height="21" rx="2" fill="#26221c" />
+    <text x="15" y="14" textAnchor="middle" fill="#ffa028" fontFamily="system-ui, sans-serif" fontSize="10" fontWeight="700">{code}</text>
+  </svg>
+)
+
+export const FLAGS: Record<Locale, React.JSX.Element> = {
+  en: <UK />, ru: <RU />, 'zh-CN': <CN />,
+  hi: <LanguageMark code="HI" />, ja: <LanguageMark code="JA" />,
+  ko: <LanguageMark code="KO" />, th: <LanguageMark code="TH" />,
+  id: <LanguageMark code="ID" />, vi: <LanguageMark code="VI" />,
+  fil: <LanguageMark code="FIL" />, ms: <LanguageMark code="MS" />,
+  'zh-TW': <LanguageMark code="繁" />
+}

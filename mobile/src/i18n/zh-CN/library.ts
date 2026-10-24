@@ -226,7 +226,7 @@ export const library: Translation<typeof en> = {
     '此 {device} 上的这两首歌曲，约 {bytes}。它们将迁移到你的 Drive 曲库，从 Drive 标签页播放，且已下载好。',
   'phone.library.offerLeadAllOther':
     '此 {device} 上的全部 {n} 首歌曲，约 {bytes}。它们将迁移到你的 Drive 曲库，从 Drive 标签页播放，且已下载好。',
-  'phone.library.offerCopies_one': ' 还有一首已在你 Drive 曲库中的歌曲也会留在这里。',
+  'phone.library.offerCopies_one': ' 已在你 Drive 曲库中的 {n} 首歌曲也会留在这里。',
   'phone.library.offerCopies_other': ' 还有 {n} 首已在你 Drive 曲库中的歌曲也会留在这里。',
   'phone.library.addAllLocalSongs': '将全部本地歌曲添加到 Google Drive',
 

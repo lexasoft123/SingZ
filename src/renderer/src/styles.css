@@ -5540,3 +5540,28 @@ body.win:not(.glass) .modal-card.lyed-card {
 .whats-new-highlight p { margin: 0; color: var(--sz-dim); line-height: 1.5; }
 .whats-new-dialog .modal-actions { flex-shrink: 0; }
 .whats-new-link { cursor: pointer; background: none; border: none; color: inherit; font: inherit; }
+
+/* Keep every language reachable on the minimum-height desktop window. */
+.lang-menu {
+  max-height: calc(100dvh - 90px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  width: min(340px, calc(100vw - 24px));
+}
+.lang-menu .lang-hint {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Keep the player controls reachable when translated labels need a second row. */
+.transport {
+  height: auto;
+  min-height: 86px;
+  flex-wrap: wrap;
+  padding-block: 12px;
+  row-gap: 10px;
+}
+.transport-left,
+.transport-right {
+  flex-shrink: 0;
+}

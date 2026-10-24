@@ -53,7 +53,7 @@ export const player: Translation<typeof en> = {
   // ── lyric column (ui/SkiaLyrics.tsx + the tap-target overlay in PlayerScreen) ──
   // drawn by Skia with the lyrics' face, which has no CJK glyphs on Android —
   // a Chinese character here would render as a box
-  'phone.player.lyrics.waitSeconds': '{sec} s',
+  'phone.player.lyrics.waitSeconds': "{sec} s",
   'phone.player.lyrics.jumpHint': '跳到这一行',
   'phone.player.lyrics.empty': '此项目暂无歌词。',
   // {text} is the lyric line itself; said for a line the singer performs solo

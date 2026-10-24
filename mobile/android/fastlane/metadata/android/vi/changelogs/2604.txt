@@ -1,0 +1,1 @@
+Micrô trên Windows hoạt động trở lại, kể cả giao diện âm thanh USB như MiniFuse. Giữ nguyên micrô và kênh đầu vào đã chọn. Nếu thu âm thất bại, nhật ký ứng dụng sẽ ghi rõ nguyên nhân.

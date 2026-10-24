@@ -20,7 +20,7 @@ copy itself is version-controlled and pushed by fastlane; see below.
 
 ## Store listing
 
-The copy itself lives in `mobile/android/fastlane/metadata/android/en-US/`,
+The localized copy lives under `mobile/android/fastlane/metadata/android/` (including `hi-IN`, `ja-JP`, `ko-KR`, `th`, `id`, `vi`, `fil`, `ms`, and `zh-TW`),
 because that is what fastlane uploads. Editing it here as well would create two
 answers to one question, and the one the store shows would be whichever fastlane
 read last.

@@ -28,6 +28,15 @@
 		70F5F86D88D2E0253EA4958B /* ru */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.strings; name = ru; path = SingZPlayer/ru.lproj/InfoPlist.strings; sourceTree = "<group>"; };
 		761780EC2CA45674006654EE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = SingZPlayer/AppDelegate.swift; sourceTree = "<group>"; };
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = SingZPlayer/LaunchScreen.storyboard; sourceTree = "<group>"; };
+		A113D1A113D1A113D1A113002 /* ja */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.strings; name = ja; path = SingZPlayer/ja.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		A113D1A113D1A113D1A113003 /* ko */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.strings; name = ko; path = SingZPlayer/ko.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		A113D1A113D1A113D1A113004 /* th */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.strings; name = th; path = SingZPlayer/th.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		A113D1A113D1A113D1A113005 /* id */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.strings; name = id; path = SingZPlayer/id.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		A113D1A113D1A113D1A113006 /* vi */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.strings; name = vi; path = SingZPlayer/vi.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		A113D1A113D1A113D1A113007 /* fil */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.strings; name = fil; path = SingZPlayer/fil.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		A113D1A113D1A113D1A113008 /* ms */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.strings; name = ms; path = SingZPlayer/ms.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		A113D1A113D1A113D1A113009 /* zh-Hant */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.strings; name = "zh-Hant"; path = "SingZPlayer/zh-Hant.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
+		A113D1A113D1A113D1A113D1 /* hi */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.strings; name = hi; path = SingZPlayer/hi.lproj/InfoPlist.strings; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
@@ -149,6 +158,15 @@
 				Base,
 				ru,
 				"zh-Hans",
+				hi,
+				"zh-Hant",
+				ms,
+				fil,
+				vi,
+				id,
+				th,
+				ko,
+				ja,
 			);
 			mainGroup = 83CBB9F61A601CBA00E9B192;
 			productRefGroup = 83CBBA001A601CBA00E9B192 /* Products */;
@@ -267,6 +285,15 @@
 				1834416E8CDEA76527B7C073 /* en */,
 				70F5F86D88D2E0253EA4958B /* ru */,
 				1E81A1A14998781218ED1289 /* zh-Hans */,
+				A113D1A113D1A113D1A113D1 /* hi */,
+				A113D1A113D1A113D1A113009 /* zh-Hant */,
+				A113D1A113D1A113D1A113008 /* ms */,
+				A113D1A113D1A113D1A113007 /* fil */,
+				A113D1A113D1A113D1A113006 /* vi */,
+				A113D1A113D1A113D1A113005 /* id */,
+				A113D1A113D1A113D1A113004 /* th */,
+				A113D1A113D1A113D1A113003 /* ko */,
+				A113D1A113D1A113D1A113002 /* ja */,
 			);
 			name = InfoPlist.strings;
 			sourceTree = "<group>";

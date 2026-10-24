@@ -22,6 +22,42 @@
             "zh-CN": {
               "title": "重新使用 Windows 麦克风",
               "description": "修复 Windows 麦克风无法启动的问题，包括 MiniFuse 等 USB 音频接口。保留已选择的麦克风和输入声道。如果音频采集失败，应用日志现在会记录具体错误，方便排查连接问题。"
+            },
+            "zh-TW": {
+              "title": "重新使用 Windows 麥克風",
+              "description": "修復 Windows 麥克風無法啟動的問題，包括 MiniFuse 等 USB 音訊介面。保留已選擇的麥克風和輸入聲道。如果音訊採集失敗，應用日誌現在會記錄具體錯誤，方便排查連線問題。"
+            },
+            "hi": {
+              "title": "अपने Windows माइक्रोफोन का उपयोग फिर से",
+              "description": "Windows माइक्रोफ़ोन फिर से शुरू हो सकते हैं, जिसमें MiniFuse जैसे USB ऑडियो इंटरफ़ेस शामिल हैं। सहेजे गए माइक्रोफ़ोन और इनपुट-चैनल चयन संरक्षित हैं। यदि कैप्चर विफल रहता है, तो ऐप लॉग में अब कनेक्शन का निदान करने में मदद करने के लिए अंतर्निहित त्रुटि शामिल है।"
+            },
+            "ja": {
+              "title": "Windows マイクを再び使ってください",
+              "description": "Windows マイク は,MiniFuse などの USB オーディオ インターフェイス を 含む,再起動 することができる.保存された マイク と 入力 チャンネル 選択 が 保存 さ れ て い ます.キャプチャ が 失敗 し たら,アプリ ログ は,接続 の 診断 に 役立つ 根本 的 な エラー を 含みます."
+            },
+            "ko": {
+              "title": "Windows 마이크를 다시 사용하세요",
+              "description": "Windows 마이크는 USB 오디오 인터페이스와 같은 USB 오디오 인터페이스를 다시 시작 할 수 있습니다. 저장된 마이크 및 입력 채널 선택은 보존됩니다. 캡처가 실패하면 앱 로그는 연결을 진단하는 데 도움이되는 기본 오류를 포함합니다."
+            },
+            "th": {
+              "title": "ใช้ไมโครโฟน Windows ของคุณอีกครั้ง",
+              "description": "Windows มิโครฟอนสามารถเริ่มใหม่ได้, รวมถึงอินเตอร์เฟสเสียง USB เช่น MiniFuse. การเลือกไมโครฟอนและช่องทางเข้าที่บันทึกไว้ถูกอนุรักษ์. หากการจับล้มเหลว, ลงบันทึกแอพตอนนี้มีความผิดพลาดเบื้องหลังเพื่อช่วยตรวจสอบการเชื่อมต่อ."
+            },
+            "id": {
+              "title": "Gunakan mikrofon Windows lagi.",
+              "description": "Windows mikrofon dapat dihidupkan kembali, termasuk antarmuka audio USB seperti MiniFuse. Mikrofon yang disimpan dan pilihan saluran input disimpan. Jika pengambilan gagal, log aplikasi sekarang mencakup kesalahan mendasar untuk membantu mendiagnosis koneksi."
+            },
+            "vi": {
+              "title": "Sử dụng micro Windows của bạn một lần nữa",
+              "description": "Windows microphone có thể khởi động lại, bao gồm cả giao diện âm thanh USB như MiniFuse. microphone được lưu và các lựa chọn kênh đầu vào được bảo tồn. Nếu ghi lại thất bại, nhật ký ứng dụng bây giờ bao gồm lỗi cơ bản để giúp chẩn đoán kết nối."
+            },
+            "fil": {
+              "title": "Gamitin mo ulit ang Windows na mikropono mo",
+              "description": "Windows microphones ay maaaring magsimula muli, kabilang ang mga interface ng audio USB tulad ng MiniFuse. Ang mga naka-save na microphone at input-channel na mga pagpipilian ay nakaingatan. Kung ang pag-capture ay nabigo, ang log ng app ay naglalaman ngayon ng nasa ilalim na error upang makatulong sa pag-diagnose ng koneksyon."
+            },
+            "ms": {
+              "title": "Gunakan mikrofon Windows anda lagi",
+              "description": "Windows mikrofon boleh bermula semula, termasuk antara muka audio USB seperti MiniFuse. Mikrofon yang disimpan dan pilihan saluran input disimpan. Jika pengambilan gagal, log aplikasi kini termasuk kesilapan asas untuk membantu mendiagnosis sambungan."
             }
           }
         }
@@ -50,6 +86,42 @@
             "zh-CN": {
               "title": "更清晰地听到参考音",
               "description": "钢琴、吉他和管风琴参考音更响亮，同时保留自然的起音和延音。较高音量设置会限制增益，避免削波失真。"
+            },
+            "zh-TW": {
+              "title": "更清晰地聽到參考音",
+              "description": "鋼琴、吉他和管風琴參考音更響亮，同時保留自然的起音和延音。較高音量設定會限制增益，避免削波失真。"
+            },
+            "hi": {
+              "title": "अपने संदर्भ नोटों को स्पष्ट रूप से सुनें",
+              "description": "पियानो, गिटार और अंग के स्वर अधिक जोर से होते हैं जबकि उनका प्राकृतिक हमला और निरंतरता बनाए रखते हैं। उच्च मात्रा सेटिंग्स स्वच्छ शिखर हेडरूम के भीतर रहती हैं।"
+            },
+            "ja": {
+              "title": "参考書きをはっきりと聞け",
+              "description": "ピアノ,ギター,器官の音はより大きくて 自然な攻撃を保ち続けます.より高い音量設定は,きれいなピークヘッドルーム内に保持されます."
+            },
+            "ko": {
+              "title": "참고자료를 명확하게 들어요",
+              "description": "피아노, 기타, 오르간 음치는 자연적인 공격과 지속성을 유지하면서 더 큰 음향을 유지합니다. 더 높은 음향 설정은 깨끗한 피크 헤드룸 내에서 유지됩니다."
+            },
+            "th": {
+              "title": "ฟังคําอ้างอิงของคุณชัดเจน",
+              "description": "ปิอาโน, กีต้าร์ และนอตออร์แกนจะดังขึ้น โดยยังคงต่อสู้ตามธรรมชาติ และคงอยู่"
+            },
+            "id": {
+              "title": "Dengarkan catatan referensi Anda dengan jelas",
+              "description": "Noten piano, gitar dan organ lebih keras sementara mempertahankan serangan alami dan mempertahankan."
+            },
+            "vi": {
+              "title": "Nghe rõ những ghi chú của bạn",
+              "description": "Các âm thanh piano, guitar và cơ quan lớn hơn trong khi vẫn giữ cho cuộc tấn công tự nhiên và duy trì."
+            },
+            "fil": {
+              "title": "Makinig nang malinaw sa iyong mga talaan",
+              "description": "Ang mga tunog ng piano, gitara at organ ay mas malakas habang pinapanatili ang kanilang likas na pag-atake at pagpapanatili."
+            },
+            "ms": {
+              "title": "Dengar nota rujukan anda dengan jelas",
+              "description": "Nota piano, gitar dan organ lebih kuat sambil mengekalkan serangan semula jadi dan mengekalkan. Tetapan volume yang lebih tinggi kekal dalam ruang kepala puncak yang bersih."
             }
           }
         },
@@ -71,6 +143,42 @@
             "zh-CN": {
               "title": "专注于练习",
               "description": "打开歌曲时也能播放参考音。返回键回到练习页面，完成音符后进度条先填满再进入下一音符。麦克风准备更快，反馈提示居中显示。"
+            },
+            "zh-TW": {
+              "title": "專注於練習",
+              "description": "開啟歌曲時也能播放參考音。返回鍵回到練習頁面，完成音符後進度條先填滿再進入下一音符。麥克風準備更快，反饋提示居中顯示。"
+            },
+            "hi": {
+              "title": "अभ्यास सत्र में रहें",
+              "description": "संदर्भ नोट एक गीत के साथ खेलते हैं, बैक प्रशिक्षण में लौटता है, और आगे बढ़ने से पहले पूरा नोट प्रगति पट्टी भरते हैं। माइक्रोफोन तैयारी तेज है, केंद्रित प्रतिक्रिया बैनर के साथ।"
+            },
+            "ja": {
+              "title": "練習中にとどまる",
+              "description": "参照ノートは歌を開いたまま演奏し,バックはトレーニングに戻り,完成したノートは進捗バーを埋め,進める前に進みます.マイクロフォン準備は集中的なフィードバックバナーでより速くなります."
+            },
+            "ko": {
+              "title": "연습에 계속 가",
+              "description": "참고 메모는 열린 노래로 재생되며, 배트 훈련으로 돌아갑니다. 완료된 메모는 진행하기 전에 진행 표시줄을 채우습니다. 마이크 준비는 중심 피드백 배너로 더 빨라집니다."
+            },
+            "th": {
+              "title": "อยู่ในซ้อม",
+              "description": "นอตเตอร์อ้างอิงเล่นกับเพลงเปิด, Back กลับมาในการฝึกอบรม, และนอตเตอร์ที่เสร็จสิ้นเต็ม bar ความก้าวหน้าก่อนที่จะเดินหน้า. การเตรียมไมโครโฟนเร็วขึ้น, ด้วยธงการตอบกลับที่ตั้งใจ."
+            },
+            "id": {
+              "title": "Tetap di sesi latihan Anda",
+              "description": "Nota referensi bermain dengan lagu terbuka, Back kembali ke pelatihan, dan catatan selesai mengisi bar kemajuan sebelum maju."
+            },
+            "vi": {
+              "title": "Hãy ở trong buổi tập luyện của bạn",
+              "description": "Các ghi chú tham chiếu chơi với một bài hát mở, Back trở lại đào tạo, và ghi chú hoàn thành điền vào thanh tiến bộ trước khi tiến lên."
+            },
+            "fil": {
+              "title": "Manatili sa iyong sesyon ng pagsasanay",
+              "description": "Ang mga talaan ng referensya ay naglalaro nang may bukas na kanta, bumalik sa pagsasanay ang Back, at ang mga natapos na talaan ay punan ang progress bar bago umabot. Ang paghahanda ng mikropono ay mas mabilis, na may mga sentrong mga banner ng feedback."
+            },
+            "ms": {
+              "title": "Tinggal dalam sesi latihan anda",
+              "description": "Nota rujukan bermain dengan lagu terbuka, Balik kembali ke latihan, dan nota selesai mengisi bar kemajuan sebelum maju."
             }
           }
         },
@@ -92,6 +200,42 @@
             "zh-CN": {
               "title": "参考音结束后继续聆听",
               "description": "开始或重播参考音不再中断练习麦克风。真正的音频中断仍会安全地停止练习。"
+            },
+            "zh-TW": {
+              "title": "參考音結束後繼續聆聽",
+              "description": "開始或重播參考音不再中斷練習麥克風。真正的音訊中斷仍會安全地停止練習。"
+            },
+            "hi": {
+              "title": "संकेत के बाद सुनते रहें",
+              "description": "एक संदर्भ नोट को शुरू करने या फिर से बजाने से प्रशिक्षण माइक्रोफोन अब बाधित नहीं होता है। वास्तविक ऑडियो बाधित होने से सत्र सुरक्षित रूप से बंद हो जाता है।"
+            },
+            "ja": {
+              "title": "指示の後,聴いてください",
+              "description": "参照ノートを起動したり再生したりすると,訓練マイクが停止し,実際の音声中断は,セッションを安全に停止します."
+            },
+            "ko": {
+              "title": "신호를 듣고 계속",
+              "description": "참고 메모 를 시작 하거나 재생 하는 것 은 더 이상 훈련 마이크 를 방해 하지 않습니다. 실제 오디오 중단 은 여전히 세션 을 안전하게 중단 합니다."
+            },
+            "th": {
+              "title": "ฟังต่อไป หลังจากที่บอก",
+              "description": "การเริ่มหรือเล่นโน้ตตัวอย่างซ้ำจะไม่ขัดจังหวะไมโครโฟนฝึกอีกต่อไป หากระบบขัดจังหวะเสียงจริง เซสชันยังคงหยุดอย่างปลอดภัย"
+            },
+            "id": {
+              "title": "Terus mendengarkan setelah sinyal",
+              "description": "Memulai atau memainkan kembali catatan referensi tidak lagi mengganggu mikrofon pelatihan."
+            },
+            "vi": {
+              "title": "Cứ nghe tiếp sau khi được báo hiệu.",
+              "description": "Bắt đầu hoặc chơi lại một ghi chú tham chiếu không còn gián đoạn micro huấn luyện nữa."
+            },
+            "fil": {
+              "title": "Magpatuloy sa pakikinig pagkatapos ng signal",
+              "description": "Ang pagsisimula o pag-play ng isang talaan ng referensiya ay hindi na nakakatigil sa microphone ng pagsasanay."
+            },
+            "ms": {
+              "title": "Berhentilah mendengar selepas tanda",
+              "description": "Memulakan atau memainkan nota rujukan tidak lagi mengganggu mikrofon latihan. gangguan audio sebenar masih menghentikan sesi dengan selamat."
             }
           }
         }
@@ -119,6 +263,42 @@
             "zh-CN": {
               "title": "更新内容，一目了然",
               "description": "每次更新后查看新变化。关注 SingZ Telegram 频道，获取新闻和使用技巧。"
+            },
+            "zh-TW": {
+              "title": "更新內容，一目瞭然",
+              "description": "每次更新後檢視新變化。關注 SingZ Telegram 頻道，獲取新聞和使用技巧。"
+            },
+            "hi": {
+              "title": "एक ही स्थान पर आपके अपडेट",
+              "description": "हर अपडेट के बाद क्या बदल गया है, देखें। समाचार और सुझाव के लिए Telegram पर SingZ पर जाएं।"
+            },
+            "ja": {
+              "title": "更新は1つの場所に",
+              "description": "更新後,何が変わっているのか確認してください. ニュースやヒントについては Telegram に SingZ をご覧ください."
+            },
+            "ko": {
+              "title": "당신의 업데이트, 한 장소",
+              "description": "업데이트 후 어떤 변화가 있었는지 확인해 보세요. SingZ에 연락하여 Telegram에 연락하세요."
+            },
+            "th": {
+              "title": "ข้อมูลของคุณ ในที่เดียว",
+              "description": "ดูว่าเกิดอะไรหลังจากการอัพเดท แต่ละครั้ง ติดตาม SingZ บน Telegram เพื่อข่าวสารและข้อแนะนํา"
+            },
+            "id": {
+              "title": "Pembaruan Anda, di satu tempat",
+              "description": "Lihat apa yang berubah setelah setiap update. Ikuti SingZ di Telegram untuk berita dan tips."
+            },
+            "vi": {
+              "title": "Những thông tin mới của bạn, ở một nơi",
+              "description": "Xem những gì thay đổi sau mỗi bản cập nhật. Theo dõi SingZ trên Telegram để biết tin tức và lời khuyên."
+            },
+            "fil": {
+              "title": "Ang iyong mga update, sa isang lugar",
+              "description": "Tingnan kung ano ang nagbago pagkatapos ng bawat update. Sundan ang SingZ sa Telegram para sa mga balita at tip."
+            },
+            "ms": {
+              "title": "Pembaruan anda, di satu tempat",
+              "description": "Lihat apa yang berubah selepas setiap kemas kini. Ikuti SingZ di Telegram untuk berita dan petua."
             }
           }
         },
@@ -140,6 +320,42 @@
             "zh-CN": {
               "title": "为您的声音留出更多空间",
               "description": "练习和播放界面适配 iPhone Duo 的宽屏及折叠屏。改变窗口大小时，课程与控制按钮仍清晰可见。"
+            },
+            "zh-TW": {
+              "title": "為您的聲音留出更多空間",
+              "description": "練習和播放介面適配 iPhone Duo 的寬屏及摺疊屏。改變視窗大小時，課程與控制按鈕仍清晰可見。"
+            },
+            "hi": {
+              "title": "अपनी आवाज़ के लिए और जगह",
+              "description": "प्रशिक्षण और प्लेबैक iPhone Duos के चौड़े और तह वाले डिस्प्ले के अनुकूल है। विंडो आकार बदलने के दौरान पाठ और नियंत्रण को ध्यान में रखें।"
+            },
+            "ja": {
+              "title": "声に余裕がある",
+              "description": "訓練と再生 iPhone 窓のサイズを変更する際にレッスンとコントロールを考慮してください."
+            },
+            "ko": {
+              "title": "목소리에 더 많은 공간이 있습니다",
+              "description": "훈련 및 재생은 iPhone Duos의 넓은 및 접힌 디스플레이에 적응합니다. 창 크기를 변경할 때 수업과 컨트롤을 염두에 두십시오."
+            },
+            "th": {
+              "title": "มีพื้นที่ให้เสียงของคุณ",
+              "description": "การฝึกอบรมและการเล่นเล่นปรับตัวให้กับ iPhone Duo s หน้ากว้างและพับจอ"
+            },
+            "id": {
+              "title": "Lebih banyak ruang untuk suara Anda",
+              "description": "Pelatihan dan pemutaran menyesuaikan diri dengan layar lebar dan lipat iPhone."
+            },
+            "vi": {
+              "title": "Tới chỗ cho giọng nói của anh",
+              "description": "Trình chơi và phát tập thích nghi với màn hình rộng và gấp đôi iPhone."
+            },
+            "fil": {
+              "title": "Mas maraming puwang para sa iyong boses",
+              "description": "Ang pagsasanay at pag-play ay umaayon sa mga display ng iPhone Duos na malawak at na-fold. Panatilihin ang aralin at mga kontrol sa paningin habang binabago mo ang laki ng bintana."
+            },
+            "ms": {
+              "title": "Lebih banyak ruang untuk suara anda",
+              "description": "Latihan dan puterannya menyesuaikan diri dengan paparan lebar dan lipat iPhone."
             }
           }
         },
@@ -161,6 +377,42 @@
             "zh-CN": {
               "title": "音轨准备就绪，带入工作室",
               "description": "选择音轨和文件夹，然后导出 WAV、FLAC 或 MP3，用于后续制作。"
+            },
+            "zh-TW": {
+              "title": "音軌準備就緒，帶入工作室",
+              "description": "選擇音軌和資料夾，然後匯出 WAV、FLAC 或 MP3，用於後續製作。"
+            },
+            "hi": {
+              "title": "स्टूडियो के लिए तैयार आपके निशान",
+              "description": "ट्रैक और एक फ़ोल्डर चुनें, फिर अपने अगले सत्र के लिए WAV, FLAC या MP3 निर्यात करें।"
+            },
+            "ja": {
+              "title": "スタジオへ準備",
+              "description": "フォールダーとトラックを選択して 次のセッションに WAV, FLAC または MP3 を輸出します"
+            },
+            "ko": {
+              "title": "당신의 트랙, 스튜디오에 준비",
+              "description": "트랙과 폴더를 선택하고 다음 세션에 WAV, FLAC 또는 MP3를 수출하십시오."
+            },
+            "th": {
+              "title": "สายของคุณพร้อมสําหรับสตูดิโอ",
+              "description": "เลือกเพลงและโฟลเดอร์ แล้วส่งออก WAV, FLAC หรือ MP3 สําหรับการประชุมต่อไป"
+            },
+            "id": {
+              "title": "Lagu-lagu Anda, siap untuk studio",
+              "description": "Pilih trek dan folder, lalu ekspor WAV, FLAC atau MP3 untuk sesi berikutnya."
+            },
+            "vi": {
+              "title": "Các dấu vết của bạn, sẵn sàng cho phòng thu",
+              "description": "Chọn các bài hát và một thư mục, sau đó xuất WAV, FLAC hoặc MP3 cho phiên tiếp theo của bạn."
+            },
+            "fil": {
+              "title": "Ang iyong mga track, handa para sa studio",
+              "description": "Pumili ng mga track at isang folder, pagkatapos ay i-export WAV, FLAC o MP3 para sa iyong susunod na sesyon."
+            },
+            "ms": {
+              "title": "Lagu anda, siap untuk studio",
+              "description": "Pilih trek dan folder, kemudian eksport WAV, FLAC atau MP3 untuk sesi seterusnya anda."
             }
           }
         },
@@ -182,6 +434,42 @@
             "zh-CN": {
               "title": "制作自己的卡拉 OK 音轨",
               "description": "将伴奏与已分离的和声合并导出，不含主唱。若没有和声音轨，混音仅包含伴奏。"
+            },
+            "zh-TW": {
+              "title": "製作自己的卡拉 OK 音軌",
+              "description": "將伴奏與已分離的和聲合併匯出，不含主唱。若沒有和聲音軌，混音僅包含伴奏。"
+            },
+            "hi": {
+              "title": "अपना खुद का कराओके ट्रैक बनाएं",
+              "description": "निर्यात वाद्ययंत्र और अलग-अलग बैक-अप वॉकल एक साथ, बिना मुख्य आवाज के। बिना बैक-अप वॉकल ट्रैक, मिश्रण में केवल वाद्ययंत्र होते हैं।"
+            },
+            "ja": {
+              "title": "カラオケのトラックを作って",
+              "description": "輸出楽器と分離したバックボックルは,リードボックスのない.バックボックスのトラックがないと,ミックスには楽器のみが含まれます."
+            },
+            "ko": {
+              "title": "카라오케 트랙을 직접 만들어",
+              "description": "수출 악기와 분리된 보컬은 함께, 리드 보컬 없이."
+            },
+            "th": {
+              "title": "ทําเพลงคาราโอเกะของคุณเอง",
+              "description": "สัญกรณ์ออกและเสียงเบกแบ็กแยกกันด้วยกัน โดยไม่มีเสียงเบกแบ็ก"
+            },
+            "id": {
+              "title": "Buat lagu karaoke sendiri",
+              "description": "Instrumen ekspor dan suara pendukung terpisah bersama, tanpa vokal utama."
+            },
+            "vi": {
+              "title": "Làm bài hát karaoke của riêng bạn",
+              "description": "Các nhạc cụ xuất khẩu và giọng hát hậu thuẫn tách biệt với nhau, mà không có giọng hát chính."
+            },
+            "fil": {
+              "title": "Gumawa ng iyong sariling track karaoke",
+              "description": "Ang mga instrumento ng pag-export at ang mga nag-iihiwalay na backing vocals ay magkasama, nang walang lead vocal."
+            },
+            "ms": {
+              "title": "Buat lagu karaoke anda sendiri",
+              "description": "Eksport instrumen dan vokal sokongan berasingan bersama-sama, tanpa vokal utama. Tanpa trek vokal sokongan, campuran hanya mengandungi instrumen."
             }
           }
         },
@@ -203,6 +491,42 @@
             "zh-CN": {
               "title": "少点几下，多唱几句",
               "description": "M 取消所有音轨静音，S 清除所有独奏。“回到开头”首次跳到选区起点，再次点击跳到歌曲开头。"
+            },
+            "zh-TW": {
+              "title": "少點幾下，多唱幾句",
+              "description": "M 取消所有音軌靜音，S 清除所有獨奏。“回到開頭”首次跳到選區起點，再次點選跳到歌曲開頭。"
+            },
+            "hi": {
+              "title": "कम क्लिक करना, अधिक गाना",
+              "description": "M हर ट्रैक को अनमूट करता है, S हर एकल को साफ करता है. पहले अपने चयन पर कूदना शुरू करें, फिर गीत की शुरुआत पर।"
+            },
+            "ja": {
+              "title": "クリックする方が少ない 歌う方が多い",
+              "description": "Mはすべての曲を無声にする Sはすべてのソロをクリアする 選択を始める前にジャンプし,歌の始まりに"
+            },
+            "ko": {
+              "title": "클릭이 줄어들고 노래하는 것",
+              "description": "M는 모든 트랙을 비켜요, S는 모든 솔로를 비켜요. 먼저 선택으로 점프를 시작하세요, 그 다음 노래의 시작으로 점프를 시작하세요."
+            },
+            "th": {
+              "title": "เล็กน้อยลง คลิก เพลงมากขึ้น",
+              "description": "M เปิดเสียงทุกเพลง S เปิดเสียงทุกเพลง เริ่มกระโดดไปยังการเลือกของคุณก่อน แล้วไปยังต้นเพลง"
+            },
+            "id": {
+              "title": "Kurang mengklik, lebih banyak bernyanyi",
+              "description": "M membongkar setiap lagu, S membersihkan setiap solo, dan mulailah dengan melompat ke pilihanmu, lalu ke awal lagu."
+            },
+            "vi": {
+              "title": "Ít nhấp nhấp, nhiều hát hơn",
+              "description": "M tháo âm tất cả các bài hát, S xóa tất cả các solo. Hãy bắt đầu nhảy vào lựa chọn của bạn trước, sau đó đến đầu bài hát."
+            },
+            "fil": {
+              "title": "Mas mababa ang pag-click, mas maraming pag-awit",
+              "description": "M unmutes bawat track; S clears bawat solo. Pumunta upang simulan jumps sa iyong pagpili una, pagkatapos ay sa simula ng kanta."
+            },
+            "ms": {
+              "title": "Kurang mengklik, lebih banyak menyanyi",
+              "description": "M mematikan setiap lagu, S membersihkan setiap solo. Pergi untuk mula melompat ke pilihan anda terlebih dahulu, kemudian ke permulaan lagu."
             }
           }
         }
