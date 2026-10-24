@@ -1,7 +1,7 @@
 import React from 'react'
 import { Pressable, StyleSheet, View } from 'react-native'
 import { t } from '../i18n'
-import { C, LyricsGlyph, white } from './bits'
+import { C, LyricsGlyph } from './bits'
 
 /** Shared, labelled icon action for the app's single log viewer. */
 export function LogButton({ onPress }: { onPress: () => void }): React.JSX.Element {
@@ -11,7 +11,7 @@ export function LogButton({ onPress }: { onPress: () => void }): React.JSX.Eleme
   </Pressable>
 }
 const styles = StyleSheet.create({
-  button: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', backgroundColor: white(0.05), borderWidth: 1, borderColor: white(0.12) },
-  pressed: { backgroundColor: white(0.13) },
+  button: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  pressed: { opacity: 0.6 },
   document: { width: 19, height: 23, borderWidth: 1.4, borderRadius: 3, borderColor: C.amber, alignItems: 'center', justifyContent: 'center' }
 })
