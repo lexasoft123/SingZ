@@ -40,8 +40,9 @@ export function DailyTrainingActivity({ days }: { days: readonly { date: number;
   </View>
 }
 
-export function TrainingDashboard({ store, onLesson, onProgress, onChoose }: {
+export function TrainingDashboard({ store, onLesson, onProgress, onChoose, headerActions }: {
   store: MobileTrainingPersistence
+  headerActions?: React.ReactNode
   onLesson: (lesson: ProgramLesson, day: number) => void
   onProgress: () => void
   onChoose: (exercise: TrainingExerciseSelection) => void
@@ -70,7 +71,10 @@ export function TrainingDashboard({ store, onLesson, onProgress, onChoose }: {
   return <View style={s.dashboard}>
     <GlassSurface radius={28} elevation="none" style={s.header}>
       <Text style={[s.headerTitle, { color: theme.text }]}>{t('phone.training.dashboardTrain')}</Text>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+        {headerActions}
       <Pressable accessibilityRole="button" accessibilityLabel={t('phone.training.progressEntryTitle')} onPress={onProgress} style={[s.linkHit, { minWidth: 44, alignItems: 'center' }]}><Icon name="progress" size={26} color={theme.accent} /></Pressable>
+      </View>
     </GlassSurface>
     <View style={[s.columns, layout.wide && s.columnsWide]}>
     <View style={[s.column, layout.wide && s.columnWide]}>

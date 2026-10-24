@@ -1068,7 +1068,6 @@ function TrainingHome({ progress, onProgramLesson, song, effectiveKey, onChoose,
   const landed = snapshot.landedRate === null ? '—' : t('phone.training.landedPercent', { pct: Math.round(snapshot.landedRate * 100) })
   return (
     <ScrollView contentContainerStyle={[styles.scroll, { paddingTop: layout.top, width: '100%', maxWidth: 1160, alignSelf: 'center' }]} showsVerticalScrollIndicator={false}>
-      <View style={{ alignSelf: 'flex-end' }}><TrainingLogButton /></View>
       {song && (
         <GlassSurface radius={26} style={styles.songCardContent}>
           <Text style={styles.eyebrow}>{t('phone.training.loadedSongEyebrow')}</Text>
@@ -1077,7 +1076,7 @@ function TrainingHome({ progress, onProgramLesson, song, effectiveKey, onChoose,
           <View style={styles.wrap}>{(['notes', 'intervals', 'chords', 'mixed'] as const).map((choice) => <Chip key={choice} label={songPreparationChoiceLabel(choice)} onPress={() => onPrepare(choice)} />)}</View>
         </GlassSurface>
       )}
-      <TrainingDashboard store={persistence} onLesson={onProgramLesson} onProgress={onProgress} onChoose={onChoose} />
+      <TrainingDashboard store={persistence} onLesson={onProgramLesson} onProgress={onProgress} onChoose={onChoose} headerActions={<TrainingLogButton />} />
       <ListEntry
         title={t('phone.training.progressEntryTitle')}
         detail={snapshot.sessions ? tn('phone.training.progressSummary', snapshot.sessions, { landed }) : t('phone.training.progressEmpty')}
