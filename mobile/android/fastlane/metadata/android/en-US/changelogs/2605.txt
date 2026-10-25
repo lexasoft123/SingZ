@@ -1,0 +1,1 @@
+Save a volume level for each song, with up to +12 dB boost and a clipping meter. Review training settings before starting, and return to training when you finish. Your Drive library refreshes quietly. Nine new interface languages and fixes for clipped controls.

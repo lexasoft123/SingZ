@@ -1,0 +1,1 @@
+I-save ang volume ng bawat kanta, dagdagan hanggang +12 dB, at tingnan ang clipping meter. Suriin ang settings bago magsanay at bumalik sa training page pagkatapos. Tahimik na nagre-refresh ang Drive library. May siyam na bagong wika at mga ayos sa napuputol na controls.

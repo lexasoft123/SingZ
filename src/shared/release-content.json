@@ -1,6 +1,187 @@
 {
-  "version": "0.26.4",
+  "version": "0.26.5",
   "releases": [
+    {
+      "version": "0.26.5",
+      "highlights": [
+        {
+          "id": "song-output",
+          "icon": "controls",
+          "platforms": [
+            "desktop",
+            "ios",
+            "android"
+          ],
+          "text": {
+            "en": {
+              "title": "A level for every song",
+              "description": "Save the output level with each song. Boost quiet recordings by up to +12 dB and watch the peak meter for clipping."
+            },
+            "ru": {
+              "title": "Громкость для каждой песни",
+              "description": "Сохраняйте уровень звука вместе с песней. Усильте тихую запись до +12 dB и следите за индикатором перегрузки."
+            },
+            "zh-CN": {
+              "title": "每首歌都有自己的音量",
+              "description": "音量随歌曲保存。安静的录音可增益最高 +12 dB，并通过峰值表检查削波。"
+            },
+            "zh-TW": {
+              "title": "每首歌都有自己的音量",
+              "description": "音量隨歌曲儲存。安靜的錄音可增益最高 +12 dB，並透過峰值表檢查削波。"
+            },
+            "hi": {
+              "title": "हर गाने की अपनी आवाज़",
+              "description": "आवाज़ का स्तर गाने के साथ सहेजें। धीमी रिकॉर्डिंग को +12 dB तक बढ़ाएँ और पीक मीटर में क्लिपिंग देखें।"
+            },
+            "ja": {
+              "title": "曲ごとに音量を保存",
+              "description": "音量を曲と一緒に保存できます。静かな録音を最大+12 dBまで増幅し、ピークメーターでクリップを確認できます。"
+            },
+            "ko": {
+              "title": "곡마다 음량 저장",
+              "description": "곡과 함께 출력 음량을 저장하세요. 조용한 녹음을 최대 +12 dB까지 증폭하고 피크 미터로 클리핑을 확인할 수 있습니다."
+            },
+            "th": {
+              "title": "ระดับเสียงแยกแต่ละเพลง",
+              "description": "บันทึกระดับเสียงพร้อมเพลง เพิ่มเสียงบันทึกที่เบาได้สูงสุด +12 dB และดูคำเตือนคลิปจากมิเตอร์พีก"
+            },
+            "id": {
+              "title": "Volume untuk setiap lagu",
+              "description": "Simpan volume bersama lagu. Tingkatkan rekaman yang pelan hingga +12 dB dan periksa clipping pada meter puncak."
+            },
+            "vi": {
+              "title": "Âm lượng riêng cho từng bài",
+              "description": "Lưu âm lượng cùng bài hát. Tăng bản ghi nhỏ tiếng lên tối đa +12 dB và kiểm tra cắt ngọn trên đồng hồ đỉnh."
+            },
+            "fil": {
+              "title": "Volume para sa bawat kanta",
+              "description": "I-save ang volume kasama ng kanta. Dagdagan ang mahihinang recording hanggang +12 dB at bantayan ang clipping sa peak meter."
+            },
+            "ms": {
+              "title": "Kelantangan untuk setiap lagu",
+              "description": "Simpan kelantangan bersama lagu. Tingkatkan rakaman yang perlahan sehingga +12 dB dan pantau keratan audio pada meter puncak."
+            }
+          }
+        },
+        {
+          "id": "practice-flow",
+          "icon": "mic",
+          "platforms": [
+            "ios",
+            "android"
+          ],
+          "text": {
+            "en": {
+              "title": "Review, sing, return",
+              "description": "Check your range and settings before song practice. Ending a session returns to training. Settings and logs are close at hand."
+            },
+            "ru": {
+              "title": "Настройте, спойте, вернитесь",
+              "description": "Перед занятием проверьте диапазон и настройки. После сессии вы вернётесь к тренировкам. Настройки и журнал теперь рядом."
+            },
+            "zh-CN": {
+              "title": "先检查，再练习",
+              "description": "练习歌曲前检查音域和设置。结束后返回练习页面。设置和日志也更容易找到。"
+            },
+            "zh-TW": {
+              "title": "先檢查，再練習",
+              "description": "練習歌曲前檢查音域和設定。結束後返回練習頁面。設定和日誌也更容易找到。"
+            },
+            "hi": {
+              "title": "जाँचें, गाएँ और लौटें",
+              "description": "गाने के अभ्यास से पहले अपना रेंज और सेटिंग जाँचें। सत्र पूरा होने पर अभ्यास पेज पर लौटें। सेटिंग और लॉग आसानी से खोलें।"
+            },
+            "ja": {
+              "title": "確認してから練習",
+              "description": "曲の練習前に音域と設定を確認できます。終了後は練習ページに戻ります。設定とログもすぐに開けます。"
+            },
+            "ko": {
+              "title": "확인하고 연습하세요",
+              "description": "곡 연습 전에 음역과 설정을 확인하세요. 세션이 끝나면 연습 화면으로 돌아갑니다. 설정과 로그도 쉽게 열 수 있습니다."
+            },
+            "th": {
+              "title": "ตรวจสอบก่อนฝึกซ้อม",
+              "description": "ตรวจสอบช่วงเสียงและการตั้งค่าก่อนฝึกเพลง เมื่อจบเซสชันจะกลับสู่หน้าฝึก เปิดการตั้งค่าและบันทึกการทำงานได้ง่ายขึ้น"
+            },
+            "id": {
+              "title": "Periksa sebelum berlatih",
+              "description": "Periksa rentang suara dan pengaturan sebelum latihan lagu. Setelah selesai, Anda kembali ke halaman latihan. Pengaturan dan log mudah dibuka."
+            },
+            "vi": {
+              "title": "Kiểm tra rồi luyện tập",
+              "description": "Kiểm tra quãng giọng và cài đặt trước khi luyện bài hát. Kết thúc phiên sẽ trở về trang luyện tập. Cài đặt và nhật ký cũng dễ mở hơn."
+            },
+            "fil": {
+              "title": "Suriin bago magsanay",
+              "description": "Suriin ang range at settings bago magsanay sa kanta. Pagkatapos ng session, babalik sa training page. Madaling buksan ang settings at log."
+            },
+            "ms": {
+              "title": "Semak sebelum berlatih",
+              "description": "Semak julat suara dan tetapan sebelum latihan lagu. Selepas sesi, anda kembali ke halaman latihan. Tetapan dan log lebih mudah dibuka."
+            }
+          }
+        },
+        {
+          "id": "nine-languages",
+          "icon": "news",
+          "platforms": [
+            "desktop",
+            "ios",
+            "android"
+          ],
+          "text": {
+            "en": {
+              "title": "SingZ in nine more languages",
+              "description": "New: Hindi, Japanese, Korean, Thai, Indonesian, Vietnamese, Filipino, Malay and Traditional Chinese. Longer labels and narrow windows fit better."
+            },
+            "ru": {
+              "title": "Ещё девять языков",
+              "description": "Добавлены хинди, японский, корейский, тайский, индонезийский, вьетнамский, филиппинский, малайский и традиционный китайский. Длинные подписи лучше помещаются в окне."
+            },
+            "zh-CN": {
+              "title": "新增九种界面语言",
+              "description": "新增印地语、日语、韩语、泰语、印度尼西亚语、越南语、菲律宾语、马来语和繁体中文。长标签和窄窗口的显示也已改善。"
+            },
+            "zh-TW": {
+              "title": "新增九種介面語言",
+              "description": "新增印地語、日語、韓語、泰語、印尼語、越南語、菲律賓語、馬來語和繁體中文。長標籤和窄視窗的顯示也已改善。"
+            },
+            "hi": {
+              "title": "नौ और भाषाओं में SingZ",
+              "description": "अब हिन्दी, जापानी, कोरियाई, थाई, इंडोनेशियाई, वियतनामी, फ़िलिपीनो, मलय और पारंपरिक चीनी में। लंबे लेबल और छोटी विंडो का लेआउट भी सुधरा है।"
+            },
+            "ja": {
+              "title": "9言語を追加",
+              "description": "ヒンディー語、日本語、韓国語、タイ語、インドネシア語、ベトナム語、フィリピノ語、マレー語、繁体字中国語を追加。長いラベルや狭いウィンドウの表示も改善しました。"
+            },
+            "ko": {
+              "title": "새 언어 9개 추가",
+              "description": "힌디어, 일본어, 한국어, 태국어, 인도네시아어, 베트남어, 필리핀어, 말레이어 및 중국어 번체를 추가했습니다. 긴 라벨과 좁은 창의 표시도 개선했습니다."
+            },
+            "th": {
+              "title": "เพิ่มภาษาอีก 9 ภาษา",
+              "description": "เพิ่มฮินดี ญี่ปุ่น เกาหลี ไทย อินโดนีเซีย เวียดนาม ฟิลิปิโน มาเลย์ และจีนตัวเต็ม พร้อมปรับการแสดงป้ายยาวและหน้าต่างแคบ"
+            },
+            "id": {
+              "title": "Sembilan bahasa baru",
+              "description": "Kini tersedia dalam Hindi, Jepang, Korea, Thai, Indonesia, Vietnam, Filipino, Melayu, dan Mandarin Tradisional. Tampilan label panjang dan jendela sempit juga diperbaiki."
+            },
+            "vi": {
+              "title": "Thêm chín ngôn ngữ",
+              "description": "Thêm tiếng Hindi, Nhật, Hàn, Thái, Indonesia, Việt, Filipino, Mã Lai và Trung phồn thể. Cải thiện hiển thị nhãn dài và cửa sổ hẹp."
+            },
+            "fil": {
+              "title": "Siyam na bagong wika",
+              "description": "May Hindi, Japanese, Korean, Thai, Indonesian, Vietnamese, Filipino, Malay at Traditional Chinese na. Mas maayos din ang mahahabang label at makikitid na window."
+            },
+            "ms": {
+              "title": "Sembilan bahasa baharu",
+              "description": "Kini tersedia dalam Hindi, Jepun, Korea, Thai, Indonesia, Vietnam, Filipino, Melayu dan Cina Tradisional. Paparan label panjang dan tetingkap sempit turut diperbaiki."
+            }
+          }
+        }
+      ]
+    },
     {
       "version": "0.26.4",
       "highlights": [

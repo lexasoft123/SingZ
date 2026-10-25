@@ -1,0 +1,1 @@
+Lưu âm lượng riêng cho từng bài, tăng tối đa +12 dB và theo dõi cắt ngọn. Kiểm tra cài đặt trước khi luyện tập và trở về trang luyện tập khi kết thúc. Thư viện Drive làm mới mà không đổi màn hình. Thêm chín ngôn ngữ giao diện và sửa các nút bị cắt.

@@ -5631,3 +5631,18 @@ body.win:not(.glass) .modal-card.lyed-card {
 .transport-right {
   flex-shrink: 0;
 }
+
+/* Loading/status labels must leave room for the language and Settings buttons. */
+@media (max-width: 1100px) {
+  .titlebar .logo { flex-shrink: 0; white-space: nowrap; }
+  .header-right { min-width: 0; flex-shrink: 1; }
+  .header-right > .pill:not(.gear) {
+    min-width: 0;
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .header-right > .gear { flex-shrink: 0; }
+  .header-right .chip-status { min-width: 0; flex-shrink: 1; }
+  .header-right .chip-label { overflow: hidden; text-overflow: ellipsis; }
+}
