@@ -47,6 +47,21 @@ float SingzStretchNode::getLatencySeconds() const {
   return latencySec_.load(std::memory_order_relaxed);
 }
 
+void SingzStretchNode::meterOutput(const std::shared_ptr<DSPAudioBuffer> &buffer,
+                                  int frames, float sampleRate) {
+  float peak = 0;
+  for (size_t channel = 0; channel < buffer->getNumberOfChannels(); ++channel) {
+    const float *samples = buffer->getChannel(channel)->begin();
+    for (int frame = 0; frame < frames; ++frame)
+      peak = std::max(peak, std::fabs(samples[frame]));
+  }
+  const float release = sampleRate > 0 ? std::pow(10.0f, -frames / sampleRate) : 0;
+  outputPeak_.store(std::max(peak, outputPeak() * release), std::memory_order_relaxed);
+  const uint32_t count = clippedBlocks();
+  if (peak >= 1.0f && count < UINT32_MAX)
+    clippedBlocks_.store(count + 1, std::memory_order_relaxed);
+}
+
 std::shared_ptr<DSPAudioBuffer> SingzStretchNode::processNode(
     const std::shared_ptr<DSPAudioBuffer> &processingBuffer,
     int framesToProcess) {
@@ -61,7 +76,8 @@ std::shared_ptr<DSPAudioBuffer> SingzStretchNode::processNode(
       engaged_ = false;
       latencySec_.store(0.0f, std::memory_order_relaxed);
     }
-    return processingBuffer; // clean bypass: no latency, no CPU
+    meterOutput(processingBuffer, framesToProcess, context->getSampleRate());
+    return processingBuffer; // pitch bypass; metering still observes all channels
   }
 
   const int channels = std::min(
@@ -92,6 +108,7 @@ std::shared_ptr<DSPAudioBuffer> SingzStretchNode::processNode(
     impl_->outPtrs[c] = bus;
   }
   impl_->stretch.process(impl_->inPtrs, frames, impl_->outPtrs, frames);
+  meterOutput(processingBuffer, frames, sampleRate);
   return processingBuffer;
 }
 

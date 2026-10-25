@@ -7,9 +7,11 @@ import {
   detectProject,
   importProject,
   renameProject,
-  saveProject
+  saveProject,
+  saveProjectSongVolume
 } from '../../src/main/projects'
 import { writeSettings } from '../../src/main/settings'
+import { dirtyDirs, dirtySeq, onDirty } from '../../src/main/sync-dirty'
 
 const STEMS_6 = ['vocals', 'drums', 'bass', 'guitar', 'piano', 'other']
 
@@ -54,6 +56,41 @@ async function gone(path: string): Promise<boolean> {
 }
 
 describe('projects outside the library root stay put', () => {
+  it('round-trips independent boosted and muted song gains through real project saves', async () => {
+    const root = await makeLibrary()
+    const a = await makeProject(root, 'Quiet song')
+    const b = await makeProject(root, 'Muted song')
+    const boost = 10 ** (12 / 20)
+    expect((await saveProject(join(a, 'song.mp3'), 'Quiet song', {
+      transpose: 0, masterVolume: boost, tracks: {}
+    })).ok).toBe(true)
+    expect((await saveProject(join(b, 'song.mp3'), 'Muted song', {
+      transpose: 0, masterVolume: 0, tracks: {}
+    })).ok).toBe(true)
+    expect((await detectProject(join(a, 'song.mp3')))?.settings.masterVolume).toBe(boost)
+    expect((await detectProject(join(b, 'song.mp3')))?.settings.masterVolume).toBe(0)
+  })
+
+  it('automatically patches song gain without replacing unrelated settings or stems', async () => {
+    const root = await makeLibrary()
+    const dir = await makeProject(root, 'Gain sync')
+    const file = join(dir, 'song.mp3')
+    const before = dirtySeq()
+    let syncNotified = false
+    const unsubscribe = onDirty(() => { syncNotified = true })
+    try {
+      expect(await saveProjectSongVolume(file, 2)).toEqual({ ok: true })
+    } finally { unsubscribe() }
+    expect(dirtySeq()).toBeGreaterThan(before)
+    expect(dirtyDirs()).toContain(dir)
+    expect(syncNotified).toBe(true)
+    expect((await detectProject(file))?.settings).toMatchObject({ masterVolume: 2, transpose: 0, tracks: {} })
+    expect(await readFile(join(dir, 'stems', 'vocals.flac'), 'utf8')).toBe('fLaC-vocals')
+    expect(await saveProjectSongVolume(file, 0)).toEqual({ ok: true })
+    expect((await detectProject(file))?.settings.masterVolume).toBe(0)
+    expect((await saveProjectSongVolume(file, NaN)).ok).toBe(false)
+  })
+
   it('detectProject flags whether the folder is in the library', async () => {
     const root = await makeLibrary()
     const mine = await makeProject(root, 'My Song')

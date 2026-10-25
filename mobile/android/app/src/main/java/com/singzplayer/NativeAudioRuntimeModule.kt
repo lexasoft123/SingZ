@@ -237,6 +237,23 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
    *  codes are the core enum's own values, pinned by a static_assert beside
    *  the JNI function. */
   @ReactMethod(isBlockingSynchronousMethod = true)
+  fun outputMeter(): WritableMap {
+    val map = Arguments.createMap()
+    if (invalidated.get() || SingzCore.ensureLoaded() != null) {
+      map.putBoolean("available", false)
+      return map
+    }
+    val v = SingzCore.nativePlaybackOutputMeter()
+    map.putBoolean("available", v.size >= 4 && v[0] != 0.0)
+    if (v.size >= 4) {
+      map.putDouble("generation", v[1])
+      map.putDouble("peak", v[2])
+      map.putDouble("clippedBlocks", v[3])
+    }
+    return map
+  }
+
+  @ReactMethod(isBlockingSynchronousMethod = true)
   fun positionNow(): WritableMap {
     val map = Arguments.createMap()
     if (invalidated.get() || SingzCore.ensureLoaded() != null) {

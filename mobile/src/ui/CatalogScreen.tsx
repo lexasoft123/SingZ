@@ -1,3 +1,4 @@
+import { mobileSongVolumePersistence } from '../playback/song-volume-persistence'
 import { Icon } from '@singz/ui/native/icons'
 import { HeaderIconButton } from './HeaderIconButton'
 import { LogButton } from './LogButton'
@@ -897,9 +898,13 @@ export default function CatalogScreen({
         `opened the bundled sample — ${stems.length} lanes in ${fmtMs(Date.now() - openedAt)} · ` +
           `${fmtBytes(decodedBytes(stems))} decoded · decode ${spent.join(', ')}`
       )
+      const sampleDoc = await mobileSongVolumePersistence.resolve(
+        { source: 'readonly', dir: 'bundled-sample' }, SAMPLE_PROJECT
+      )
+      if (tok !== token.current) return releaseStems(stems)
       onLoaded({
         name: SAMPLE_PROJECT.name,
-        doc: SAMPLE_PROJECT,
+        doc: sampleDoc,
         lyrics: SAMPLE_LYRICS,
         stems
       })

@@ -1,3 +1,4 @@
+import { sanitizeSongVolume } from './song-volume'
 import { nativeOutputForBrowserLabel } from '../../../shared/output-device-policy'
 import SignalsmithStretch, { type StretchNode } from 'signalsmith-stretch'
 import {
@@ -132,6 +133,12 @@ export class MultitrackEngine {
    * creates the bounded projection immediately before each prepare/rebuild. */
   private graphDocument: ParsedGraphDocument | null = null
   private master = this.ctx.createGain()
+  private outputBus = this.ctx.createGain()
+  // Keep channels separate: a mono analyser would hide opposite-phase peaks.
+  private outputMeterSplit: ChannelSplitterNode | null = null
+  private outputMeters: AnalyserNode[] = []
+  private outputMeterSamples = new Float32Array(8192)
+
   private tracks: EngineTrack[] = []
   private sources: AudioBufferSourceNode[] = []
   /** Reads a lane's file back off disk — see `setLaneReader`. */
@@ -192,13 +199,14 @@ export class MultitrackEngine {
   duration = 0
 
   constructor() {
-    this.master.connect(this.ctx.destination)
+    this.master.connect(this.outputBus)
+    this.outputBus.connect(this.ctx.destination)
     // Clicks bypass the master bus: transpose/tempo correction and stem
     // gains must never color the metronome.
     this.clickGain.gain.value = this.met.volume
-    this.clickGain.connect(this.ctx.destination)
+    this.clickGain.connect(this.outputBus)
     this.trainingGain.gain.value = this.masterVol
-    this.trainingGain.connect(this.ctx.destination)
+    this.trainingGain.connect(this.outputBus)
   }
 
   /** Native status is the transport's word. A song that played to its end
@@ -826,6 +834,30 @@ export class MultitrackEngine {
     this.emit()
   }
 
+  /** Peak before the native safety limiter, or at the Web Audio output. */
+  readOutputPeak(): { peak: number; clipped: boolean; clipCount?: number } {
+    if (this.nativePlayback?.active) {
+      const status = this.nativePlayback.status
+      return { peak: this._playing ? status?.outputPeak ?? 0 : 0, clipped: false, clipCount: status?.outputClippedBlocks ?? 0 }
+    }
+    if (!this._playing) return { peak: 0, clipped: false }
+    if (!this.outputMeterSplit) {
+      this.outputMeterSplit = this.ctx.createChannelSplitter(2)
+      this.outputBus.connect(this.outputMeterSplit)
+      this.outputMeters = [this.ctx.createAnalyser(), this.ctx.createAnalyser()]
+      this.outputMeters.forEach((meter, channel) => {
+        meter.fftSize = 8192
+        this.outputMeterSplit!.connect(meter, channel)
+      })
+    }
+    let peak = 0
+    for (const meter of this.outputMeters) {
+      meter.getFloatTimeDomainData(this.outputMeterSamples)
+      for (const sample of this.outputMeterSamples) peak = Math.max(peak, Math.abs(sample))
+    }
+    return { peak, clipped: peak >= 1 }
+  }
+
   get masterVolume(): number {
     return this.masterVol
   }
@@ -837,7 +869,7 @@ export class MultitrackEngine {
    */
   setMasterVolume(v: number): void {
     this.scheduleNativePrepareAhead()
-    const target = Math.max(0, Math.min(1, v))
+    const target = sanitizeSongVolume(v)
     if (this.nativePlayback?.active) {
       void this.nativePlayback.setMasterGain(target).then(() => {
         this.masterVol = target
@@ -1250,7 +1282,7 @@ export class MultitrackEngine {
           this.pendingStretches.delete(node)
           throw new Error('Stretch initialization was cancelled.')
         }
-        node.connect(this.ctx.destination)
+        node.connect(this.outputBus)
         this.stretchLatency = latency
         this.stretch = node
         this.pendingStretches.delete(node)
@@ -1342,7 +1374,7 @@ export class MultitrackEngine {
       this.stretchOn = false
       this.stretch?.schedule({ active: false })
       this.master.disconnect()
-      this.master.connect(this.ctx.destination)
+      this.master.connect(this.outputBus)
       this.rearmClicksAfterLatencyFlip(wasOn)
       return
     }
@@ -1378,7 +1410,7 @@ export class MultitrackEngine {
       this.applyRate(1)
       this.stretchOn = false
       this.master.disconnect()
-      this.master.connect(this.ctx.destination)
+      this.master.connect(this.outputBus)
       this.rearmClicksAfterLatencyFlip(wasOn)
     } finally {
       if (timeout !== null) {

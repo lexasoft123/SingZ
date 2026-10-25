@@ -3247,6 +3247,10 @@ struct PreparedPlaybackGraph {
             makeBuiltin(config, &storage.durable, &storage.durableBytes);
         if (storage.processor.state == nullptr)
           return {zdsp::StatusCode::InsufficientStorage, 30};
+        if (resolved.kind == NativePlaybackGraphMaterializedKind::SafetyLimiter) {
+          callback.outputLimiter = storage.processor;
+          callback.outputCeiling = value0;
+        }
         if (resolved.kind == NativePlaybackGraphMaterializedKind::Gain) {
           if (Lane *lane = laneFor(value)) {
             lane->gainProcessor = storage.processor;
@@ -8270,6 +8274,8 @@ NativePlaybackStatus NativePlaybackSession::status() const {
         impl_->prepared->preparedStartProjectFrame;
     result.retainedBytes += impl_->prepared->retainedBytes;
     result.graphArenaBytes = impl_->prepared->graphArenaBytes;
+    result.outputPeak = rendering->callback.outputPeak.load(std::memory_order_relaxed);
+    result.outputClippedBlocks = rendering->callback.outputClippedBlocks.load(std::memory_order_relaxed);
     result.masterGain = impl_->prepared->masterGain;
     result.referenceGain = impl_->prepared->referenceGain;
     result.trainingEnabled = impl_->prepared->trainingEnabled;
@@ -8404,6 +8410,18 @@ NativePlaybackSession::lanePeaks(uint64_t generation) const {
   result.ok = true;
   result.error = NativePlaybackError::None;
   return result;
+}
+
+NativePlaybackSession::OutputMeter NativePlaybackSession::outputMeter() const noexcept {
+  try {
+    std::unique_lock<std::mutex> lock(impl_->mutex, std::try_to_lock);
+    if (!lock.owns_lock()) return {};
+    const auto *graph = impl_->renderingGraph();
+    if (graph == nullptr || graph->callback.outputLimiter.state == nullptr) return {};
+    return {true, graph->transportGeneration,
+            graph->callback.outputPeak.load(std::memory_order_relaxed),
+            graph->callback.outputClippedBlocks.load(std::memory_order_relaxed)};
+  } catch (...) { return {}; }
 }
 
 NativePlaybackPositionNow NativePlaybackSession::positionNow() const noexcept {

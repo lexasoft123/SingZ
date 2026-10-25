@@ -1,3 +1,5 @@
+import { sanitizeSongVolume } from '../../src/shared/song-volume'
+import type { SongOutputMeter } from './playback/native'
 import { trainingOutput, nativeTrainingClock, renderTrainingPcm, encodeTrainingPcm } from './training/native-cues'
 import { trainingOrganCurve } from './gen/training-lib'
 import { TRAINING_SAMPLES } from './training/samples'
@@ -76,6 +78,7 @@ const SEC_COUNT_PERIOD = 1
 interface StretchHost {
   setSemitones(semitones: number): void
   getLatencySeconds(): number
+  getOutputMeter?(): { peak: number; clippedBlocks: number }
   connect(node: unknown): void
 }
 
@@ -87,6 +90,7 @@ export class MultitrackEngine {
    * may return ownership to legacy while the app remains foregrounded. */
   private nativeOutputHandoff = false
   private master = this.ctx.createGain()
+  private outputClipOrigin = 0
   /** Song-only master. Metronome/training references intentionally bypass
    * this bus, matching NativePlaybackSession's song-gain/reference split. */
   private songMasterGain = 1
@@ -573,13 +577,19 @@ export class MultitrackEngine {
     return { semitones: this.pitchSemis, rate: this.rate }
   }
 
+  readOutputMeter(): SongOutputMeter {
+    const meter = this.stretchHost?.getOutputMeter?.()
+    return { available: !!meter, generation: 1, peak: this._playing ? meter?.peak ?? 0 : 0,
+      clippedBlocks: Math.max(0, (meter?.clippedBlocks ?? 0) - this.outputClipOrigin) }
+  }
+
   get masterGain(): number {
     return this.songMasterGain
   }
 
   setMasterGain(gain: number): void {
     if (!Number.isFinite(gain)) return
-    const next = Math.max(0, Math.min(1, gain))
+    const next = sanitizeSongVolume(gain)
     if (next === this.songMasterGain) return
     this.songMasterGain = next
     this.master.gain.setTargetAtTime(next, this.ctx.currentTime, 0.02)
@@ -1069,6 +1079,7 @@ export class MultitrackEngine {
   }
 
   load(list: EngineTrackInput[], opts: { position?: number; play?: boolean } = {}): void {
+    this.outputClipOrigin = this.stretchHost?.getOutputMeter?.().clippedBlocks ?? 0
     // teardown releases the outgoing project's stems: fresh tracks start
     // unducked, and a loop armed for one song must never bound the next.
     this.teardown()
@@ -1403,6 +1414,7 @@ export class MultitrackEngine {
    * per-process-limit jetsam kill after a few songs.
    */
   unload(): void {
+    this.outputClipOrigin = this.stretchHost?.getOutputMeter?.().clippedBlocks ?? 0
     this.cancelTrainingCues()
     // Leaving a song unloads then releases, and the teardown path can reach
     // here twice; the second call has nothing to free and saying so twice

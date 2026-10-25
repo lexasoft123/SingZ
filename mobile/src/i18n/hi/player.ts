@@ -3,6 +3,19 @@ import type { player as en } from '../en/player'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const player: Translation<typeof en> = {
+  'phone.player.output.title': "गाने का आउटपुट",
+  'phone.player.output.subtitle': "सिर्फ़ इस गाने का स्तर",
+  'phone.player.output.reset': "रीसेट",
+  'phone.player.output.peak': "पीक स्तर",
+  'phone.player.output.clip': "क्लिप",
+  'phone.player.output.hint': "+12 dB तक बढ़ाएँ। क्लिप संकेत जलने पर गेन कम करें।",
+  'phone.player.output.clippedHint': "क्लिपिंग मिली। गेन कम करें, फिर रीसेट करने के लिए क्लिप दबाएँ।",
+  'phone.player.output.saved': "इस गाने के लिए सहेजा गया",
+  'phone.player.output.saving': "सहेज रहे हैं…",
+  'phone.player.output.saveFailed': "गाने का आउटपुट सहेजा नहीं गया",
+  'phone.player.output.resetClip': "क्लिपिंग चेतावनी रीसेट करें",
+  'phone.player.output.mute': "गाने को म्यूट या अनम्यूट करें",
+
   "phone.player.unsupported.title": "अभी तक मूल प्लेबैक में उपलब्ध नहीं है",
   "phone.player.unsupported.message": "{operation} तब तक निष्क्रिय रहता है जब तक कि उसके मूल डीएसपी नियंत्रण को कनेक्ट नहीं किया जाता है।",
   "phone.player.playbackStopped.title": "प्लेबैक बंद",

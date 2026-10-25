@@ -3,6 +3,19 @@ import type { player as en } from '../en/player'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const player: Translation<typeof en> = {
+  'phone.player.output.title': "곡 출력",
+  'phone.player.output.subtitle': "이 곡만의 음량 설정",
+  'phone.player.output.reset': "초기화",
+  'phone.player.output.peak': "피크 레벨",
+  'phone.player.output.clip': "클리핑",
+  'phone.player.output.hint': "최대 +12 dB까지 증폭합니다. 클리핑 표시가 켜지면 게인을 낮추세요.",
+  'phone.player.output.clippedHint': "클리핑이 감지되었습니다. 게인을 낮춘 후 클리핑을 눌러 초기화하세요.",
+  'phone.player.output.saved': "이 곡에 저장됨",
+  'phone.player.output.saving': "저장 중…",
+  'phone.player.output.saveFailed': "곡 출력을 저장하지 못했습니다",
+  'phone.player.output.resetClip': "클리핑 경고 초기화",
+  'phone.player.output.mute': "곡 음소거 전환",
+
   "phone.player.unsupported.title": "아직 네이티브 재생에 사용할 수 없습니다",
   "phone.player.unsupported.message": "{operation}은 본래의 DSP 제어기가 연결될 때까지 비활성화됩니다.",
   "phone.player.playbackStopped.title": "재생 중지",

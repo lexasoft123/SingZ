@@ -1100,6 +1100,16 @@ static_assert(
             singz::NativePlaybackTransportState::Completed) == 4,
     "NativeAudioRuntimeModule.kt maps these codes by value");
 
+static jdoubleArray nativePlaybackOutputMeter(JNIEnv *env, jobject) {
+  const auto meter = owner().session.outputMeter();
+  const jdouble values[4] = {meter.available ? 1.0 : 0.0,
+      static_cast<jdouble>(meter.generation), meter.peak,
+      static_cast<jdouble>(meter.clippedBlocks)};
+  jdoubleArray out = env->NewDoubleArray(4);
+  if (out != nullptr) env->SetDoubleArrayRegion(out, 0, 4, values);
+  return out;
+}
+
 static jdoubleArray nativePlaybackPositionNow(JNIEnv *env, jobject) {
   const singz::NativePlaybackPositionNow now = owner().session.positionNow();
   const jdouble values[8] = {
@@ -1731,6 +1741,8 @@ static const JNINativeMethod kNativePlaybackMethods[] = {
     {const_cast<char *>("nativePlaybackUnloadRetainingLanes"),
      const_cast<char *>("(J)Ljava/lang/String;"),
      reinterpret_cast<void *>(nativePlaybackUnloadRetainingLanes)},
+    {const_cast<char *>("nativePlaybackOutputMeter"),
+     const_cast<char *>("()[D"), reinterpret_cast<void *>(nativePlaybackOutputMeter)},
     {const_cast<char *>("nativePlaybackPositionNow"),
      const_cast<char *>("()[D"),
      reinterpret_cast<void *>(nativePlaybackPositionNow)},

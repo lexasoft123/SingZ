@@ -439,6 +439,9 @@ void builtinBusContracts() {
       {DiscontinuityReason::None, 0}};
   limiter.functions->process(limiter.state, &limiterContext, &limiterInput, 1,
                              &limiterOutput, 1);
+  const MeterReading preLimit = builtinMeter(limiter);
+  expect(preLimit.peak == 2.0f && preLimit.rms == 2.0f && preLimit.frames == 2,
+         "limiter meters its input so overloads remain visible after clipping");
   expect(limiterOutputSamples[0] == 1.0f &&
          limiterOutputSamples[1] == -1.0f &&
          succeeded(deactivateProcessor(limiter)) &&

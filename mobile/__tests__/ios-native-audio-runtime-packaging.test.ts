@@ -153,6 +153,7 @@ describe('iOS native DSP runtime packaging', () => {
     // synchronous on Android (isBlockingSynchronousMethod there), which the
     // manifest is what makes checkable.
     expect(exported.filter(method => method.synchronous).map(method => method.name)).toEqual([
+      'outputMeter',
       'positionNow'
     ])
     // codecTargetProof is the one method Android's module does not carry, so

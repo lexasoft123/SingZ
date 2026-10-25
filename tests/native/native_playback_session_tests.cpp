@@ -2756,6 +2756,7 @@ void cueGraphTransportCompositionAndLifetime() {
   uint64_t generation = 1;
   uint64_t handoffLease = 0;
 
+  singz::NativePlaybackStatus lastRenderedStatus{};
   const auto render = [&](singz::NativePlaybackPrepareConfig request,
                           const std::vector<uint32_t> &partitions,
                           uint32_t frames, bool trapFirstCallback,
@@ -2797,6 +2798,13 @@ void cueGraphTransportCompositionAndLifetime() {
     }
     fake->captureOutput = false;
     std::vector<float> output = fake->outputTrace;
+    lastRenderedStatus = session.status();
+    if (lastRenderedStatus.outputClippedBlocks > 0) {
+      const auto meter = session.outputMeter();
+      CHECK(meter.available && meter.generation == generation);
+      CHECK(meter.peak == lastRenderedStatus.outputPeak);
+      CHECK(meter.clippedBlocks == lastRenderedStatus.outputClippedBlocks);
+    }
     const auto unloaded = session.unloadWithCleanup(generation);
     CHECK(unloaded.playback.ok && unloaded.cleanup.globallyComplete() &&
           unloaded.cleanup.retainedBytes == 0);
@@ -3016,6 +3024,8 @@ void cueGraphTransportCompositionAndLifetime() {
   singz::NativePlaybackStatus limitedFirst{};
   const std::vector<float> clipped = render(
       limited, {383}, preRoll + 1024, false, &limitedPrepared, &limitedFirst);
+  CHECK(lastRenderedStatus.outputPeak > singz::kNativePlaybackLimiterCeiling);
+  CHECK(lastRenderedStatus.outputClippedBlocks > 0);
   const float clippedPeak = rangePeak(clipped, preRoll, clipped.size());
   CHECK(clippedPeak <= singz::kNativePlaybackLimiterCeiling + 0.00001F &&
         clippedPeak >= singz::kNativePlaybackLimiterCeiling - 0.00001F);

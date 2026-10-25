@@ -158,7 +158,7 @@ export interface AudioPrefs {
   /** Explicit native song-output provider. Only Windows persists a choice;
    * other platforms keep their single platform provider. */
   nativeAudioProvider?: Extract<DesktopPlaybackProvider, 'wasapi' | 'asio'>
-  /** Master output level 0..1 — belongs to the machine, not to a project. */
+  /** Legacy machine volume, retained for reading older preferences. Songs use ProjectSettings.masterVolume. */
   master?: number
   /** Reference-tone gain shared by every exercise, stored with app audio prefs. */
   referenceVolume?: number

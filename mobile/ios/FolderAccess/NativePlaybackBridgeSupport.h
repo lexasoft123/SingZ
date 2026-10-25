@@ -17,6 +17,7 @@ void SingzNativePlaybackSession(RCTPromiseResolveBlock resolve,
 // publication. Android's positionNow() is its exact twin: same name, no
 // arguments, the same keys.
 NSDictionary* SingzNativePlaybackPositionNow(void);
+NSDictionary* SingzNativePlaybackOutputMeter(void);
 // Hold a parked generation's output stream without closing it, and let it go
 // again. iOS keeps rendering in the background by decision and never calls
 // these; they exist so both bridges expose the same surface (same name, one

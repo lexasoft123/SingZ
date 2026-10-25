@@ -3,6 +3,19 @@ import type { player as en } from '../en/player'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const player: Translation<typeof en> = {
+  'phone.player.output.title': "曲の出力",
+  'phone.player.output.subtitle': "この曲だけの音量設定",
+  'phone.player.output.reset': "リセット",
+  'phone.player.output.peak': "ピークレベル",
+  'phone.player.output.clip': "クリップ",
+  'phone.player.output.hint': "最大 +12 dB。クリップが点灯したらゲインを下げてください。",
+  'phone.player.output.clippedHint': "クリップを検出しました。ゲインを下げ、クリップをタップしてリセットしてください。",
+  'phone.player.output.saved': "この曲に保存済み",
+  'phone.player.output.saving': "保存中…",
+  'phone.player.output.saveFailed': "曲の出力を保存できませんでした",
+  'phone.player.output.resetClip': "クリップ表示をリセット",
+  'phone.player.output.mute': "曲のミュートを切り替え",
+
   "phone.player.unsupported.title": "ネイティブ再生ではまだ利用できません",
   "phone.player.unsupported.message": "{operation}は,本来のDSP制御が接続されるまで,無効になります.",
   "phone.player.playbackStopped.title": "再生停止",

@@ -567,6 +567,12 @@ void SingzNativePlaybackSession(RCTPromiseResolveBlock resolve,
   });
 }
 
+NSDictionary *SingzNativePlaybackOutputMeter(void) {
+  const auto meter = owner().session->outputMeter();
+  return @{ @"available": @(meter.available), @"generation": @(meter.generation),
+            @"peak": @(meter.peak), @"clippedBlocks": @(meter.clippedBlocks) };
+}
+
 NSDictionary *SingzNativePlaybackPositionNow(void) {
   // No queue hop and no boundary wrapper: positionNow() is noexcept and
   // lock-free by contract, and this runs on the JS thread at UI rate. The

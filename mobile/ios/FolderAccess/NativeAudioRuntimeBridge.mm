@@ -64,6 +64,11 @@ RCT_EXPORT_METHOD(session:(RCTPromiseResolveBlock)resolve
 // promise round trip through the control queue. react-native-audio-api's
 // install/getDevicePreferredSampleRate already run this way under the same
 // bridgeless runtime. Same name and arity (none) as Android's positionNow.
+RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(outputMeter)
+{
+  return SingzNativePlaybackOutputMeter();
+}
+
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(positionNow)
 {
   return SingzNativePlaybackPositionNow();

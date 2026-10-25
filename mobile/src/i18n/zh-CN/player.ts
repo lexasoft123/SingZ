@@ -3,6 +3,19 @@ import type { player as en } from '../en/player'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const player: Translation<typeof en> = {
+  'phone.player.output.title': "歌曲输出",
+  'phone.player.output.subtitle': "仅用于这首歌曲的音量",
+  'phone.player.output.reset': "重置",
+  'phone.player.output.peak': "峰值电平",
+  'phone.player.output.clip': "削波",
+  'phone.player.output.hint': "最多增益 +12 dB。削波指示亮起时请降低增益。",
+  'phone.player.output.clippedHint': "检测到削波。降低增益后，点击「削波」重置。",
+  'phone.player.output.saved': "已为此歌曲保存",
+  'phone.player.output.saving': "正在保存…",
+  'phone.player.output.saveFailed': "未能保存歌曲输出",
+  'phone.player.output.resetClip': "重置削波提示",
+  'phone.player.output.mute': "静音或取消静音",
+
   // ── "not available in native playback yet" alert ──
   'phone.player.unsupported.title': '原生播放暂不支持',
   'phone.player.unsupported.message': '在原生 DSP 控制接入之前，{operation}将保持禁用。',

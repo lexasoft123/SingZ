@@ -1,3 +1,5 @@
+import { sanitizeSongVolume } from '../../../src/shared/song-volume'
+import { readNativeSongOutputMeter, type SongOutputMeter } from './native'
 import type {
   EngineTrackInput,
   MultitrackEngine,
@@ -186,6 +188,7 @@ export interface PlaybackBackend {
   readonly metronome: MetronomeConfig
   readonly pitchTempo: { semitones: number; rate: number }
   readonly masterGain: number
+  readOutputMeter(): SongOutputMeter
   /** Last native command/rebuild failure. A rejected receipt is observable
    * without publishing the requested control as accepted. */
   readonly error: string | null
@@ -217,7 +220,7 @@ export interface PlaybackBackend {
   setMuted(id: string, muted: boolean): void
   setSolo(id: string, solo: boolean): void
   setVolume(id: string, volume: number): void
-  setMasterGain(gain: number): void
+  setMasterGain(gain: number): Promise<void>
   setPitchTempo(semitones: number, rate: number): void
   setTraining(spec: TrainingSpec | null): void
   previewClick(accent?: boolean): void
@@ -309,7 +312,10 @@ export class LegacyPlaybackBackend implements PlaybackBackend {
     return null
   }
 
+  readOutputMeter(): SongOutputMeter { return this.engine.readOutputMeter() }
+
   attach(project: LoadedProject): void {
+    this.engine.setMasterGain(sanitizeSongVolume(project.doc.settings?.masterVolume))
     const list: EngineTrackInput[] = project.stems.map(({ id, buffer, custom }) => ({
       id,
       buffer,
@@ -379,7 +385,7 @@ export class LegacyPlaybackBackend implements PlaybackBackend {
     this.engine.setVolume(id, volume)
   }
 
-  setMasterGain(gain: number): void {
+  async setMasterGain(gain: number): Promise<void> {
     this.engine.setMasterGain(gain)
   }
 
@@ -430,6 +436,8 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
     private readonly handle: NativePlaybackHandle,
     private readonly project: LoadedProject
   ) {
+    this.songMasterGain = sanitizeSongVolume(project.doc.settings?.masterVolume)
+    this.desiredMasterGain = this.songMasterGain
     this.kind = handle.kind
     this.transposeSemitones = Math.round(project.doc.settings?.transpose ?? 0)
     this.playbackRate = project.doc.settings?.tempo ?? 1
@@ -585,6 +593,11 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
   }
   get error(): string | null {
     return this.state().error
+  }
+
+  readOutputMeter(): SongOutputMeter {
+    const meter = readNativeSongOutputMeter()
+    return this.playing ? meter : { ...meter, peak: 0 }
   }
 
   attach(project: LoadedProject): void {
@@ -743,13 +756,13 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
     this.updateLane(id, { volume: Math.max(0, Math.min(1, volume)) })
   }
 
-  setMasterGain(gain: number): void {
-    if (!Number.isFinite(gain)) return
-    const next = Math.max(0, Math.min(1, gain))
-    if (next === this.desiredMasterGain) return
+  setMasterGain(gain: number): Promise<void> {
+    if (!Number.isFinite(gain)) return Promise.resolve()
+    const next = sanitizeSongVolume(gain)
+    if (next === this.desiredMasterGain) return this.transportTail
     const request = ++this.masterRequest
     this.desiredMasterGain = next
-    this.serialize(() => this.handle.setMasterGain(next)).then(() => {
+    return this.serialize(() => this.handle.setMasterGain(next)).then(() => {
       this.songMasterGain = next
       this.emit()
     }).catch(() => {

@@ -3,6 +3,19 @@ import type { player as en } from '../en/player'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const player: Translation<typeof en> = {
+  'phone.player.output.title': "เอาต์พุตเพลง",
+  'phone.player.output.subtitle': "ระดับเสียงเฉพาะเพลงนี้",
+  'phone.player.output.reset': "รีเซ็ต",
+  'phone.player.output.peak': "ระดับพีค",
+  'phone.player.output.clip': "คลิป",
+  'phone.player.output.hint': "เพิ่มได้ถึง +12 dB หากไฟคลิปติด ให้ลดเกนลง",
+  'phone.player.output.clippedHint': "ตรวจพบคลิป ลดเกนแล้วแตะคลิปเพื่อรีเซ็ต",
+  'phone.player.output.saved': "บันทึกสำหรับเพลงนี้แล้ว",
+  'phone.player.output.saving': "กำลังบันทึก…",
+  'phone.player.output.saveFailed': "บันทึกเอาต์พุตเพลงไม่สำเร็จ",
+  'phone.player.output.resetClip': "รีเซ็ตคำเตือนคลิป",
+  'phone.player.output.mute': "ปิดหรือเปิดเสียงเพลง",
+
   "phone.player.unsupported.title": "ยังไม่ได้เปิดให้เล่นในระบบเล่นพื้นฐาน",
   "phone.player.unsupported.message": "{operation} ยังคงปิดจนกว่าการควบคุม DSP ของพื้นที่จะเชื่อมต่อ",
   "phone.player.playbackStopped.title": "การเล่นหยุด",
