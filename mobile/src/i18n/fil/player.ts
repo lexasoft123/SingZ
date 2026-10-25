@@ -3,6 +3,19 @@ import type { player as en } from '../en/player'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const player: Translation<typeof en> = {
+  'phone.player.output.title': "Output ng kanta",
+  'phone.player.output.subtitle': "Antas para lang sa kantang ito",
+  'phone.player.output.reset': "I-reset",
+  'phone.player.output.peak': "Peak level",
+  'phone.player.output.clip': "Clip",
+  'phone.player.output.hint': "Palakasin hanggang +12 dB. Kapag umilaw ang Clip, babaan ang gain.",
+  'phone.player.output.clippedHint': "May clipping. Babaan ang gain, saka i-tap ang Clip para i-reset.",
+  'phone.player.output.saved': "Naka-save para sa kantang ito",
+  'phone.player.output.saving': "Sine-save…",
+  'phone.player.output.saveFailed': "Hindi na-save ang output ng kanta",
+  'phone.player.output.resetClip': "I-reset ang babala sa clipping",
+  'phone.player.output.mute': "I-mute o i-unmute ang kanta",
+
   "phone.player.unsupported.title": "Hindi pa magagamit sa native playback",
   "phone.player.unsupported.message": "{operation} ay mananatili nang hindi aktibo hanggang sa ang katutubong control ng DSP ay konektado.",
   "phone.player.playbackStopped.title": "Nag-iwan ang pag-play",

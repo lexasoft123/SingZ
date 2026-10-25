@@ -1,6 +1,8 @@
 #include "native_playback_callback.h"
 
 #include <array>
+#include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace singz {
@@ -60,6 +62,15 @@ bool renderGeneration(NativePlaybackCallbackState* state,
     latchTerminal(state,
                   NativePlaybackCallbackTerminalReason::RenderUnavailable);
     return false;
+  }
+  if (state->outputLimiter.state != nullptr) {
+    const auto meter = zdsp::builtinMeter(state->outputLimiter);
+    // 20 dB/s release keeps short peaks visible between status polls.
+    const float release = block.sampleRate > 0 ?
+        static_cast<float>(std::pow(10.0, -static_cast<double>(block.frames) / block.sampleRate)) : 0.0F;
+    state->heldOutputPeak = std::max(meter.peak, state->heldOutputPeak * release);
+    state->outputPeak.store(state->heldOutputPeak, std::memory_order_relaxed);
+    if (meter.peak >= state->outputCeiling) saturate(&state->outputClippedBlocks);
   }
   return true;
 }

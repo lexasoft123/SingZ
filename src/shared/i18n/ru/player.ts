@@ -22,7 +22,7 @@ export const player: Translation<typeof en> = {
   'player.transport.resetSpeed': 'Сброс скорости',
   'player.transport.muted': 'Звук выключен — нажмите для громкости',
   // {percent} is a number already rounded, e.g. "Volume 80% — click for the slider"
-  'player.transport.volumeAt': 'Звук {percent}% — нажмите для регулятора',
+  'player.transport.volumeAt': 'Звук {db} — нажмите для регулятора',
   'player.transport.metronomeTitle': 'Метроном — щелчок по доле, сетка для наблюдения, отсчёт перед игрой',
   'player.transport.carryLine': 'Веди строку',
   'player.transport.carryLineTitle': 'Веди строку — опорные дорожки отключаются по расписанию, пока песню ведёте',
@@ -36,12 +36,17 @@ export const player: Translation<typeof en> = {
   'player.bpm.setTitle': 'Задать темп в ударах в минуту',
 
   // ── volume popover ──
-  'player.volume.title': 'Звук',
+  'player.volume.title': 'Звук песни',
+  'player.volume.saved': 'Сохраняется с песней',
+  'player.volume.perSong': 'Для песни',
+  'player.volume.reset': 'Сброс',
+  'player.volume.peak': 'Пиковый уровень',
   'player.volume.muteAll': 'Заглушить всё',
   'player.volume.unmute': 'К прежнему уровню',
   'player.volume.sliderTitle': 'Насколько громко играет весь микс — метроном следует за ним',
-  'player.volume.caption':
-    'Меняет только вывод приложения — фейдеры дорожек и системная громкость не трогаются.',
+  'player.volume.caption': 'Сохраняется в песне. Усиление до +12 dB; уменьшите звук, если индикатор показывает перегрузку.',
+  'player.volume.clipped': 'Перегрузка',
+  'player.volume.peakTitle': 'Пик выхода до защитного ограничения (dBFS). Нажмите, чтобы сбросить перегрузку.',
 
   // ── metronome popover ──
   'player.metronome.title': 'Метроном',

@@ -269,6 +269,8 @@ const api: SingzApi = {
   saveTrainingPreferencesSync: (preferences) => ipcRenderer.sendSync('training-preferences:save-sync', preferences),
   recordTrainingCompletion: (receipt) => ipcRenderer.invoke('training-completion:record', receipt),
 
+  saveProjectSongVolume: (songPath, gain) => ipcRenderer.invoke('project:song-volume', songPath, gain),
+
   saveProject: (songPath, name, settings) =>
     ipcRenderer.invoke('project:save', songPath, name, settings),
 

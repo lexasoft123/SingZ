@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import type { SplitMode, SplitProgress } from '../split-workflow'
 import SplitMenu from './SplitMenu'
 import type { MultitrackEngine } from '../audio/engine'
@@ -15,6 +15,8 @@ import {
 import { analysisIsStale, BEAT_DETECT_VERSION } from '../audio/analysis-contract'
 import { fmtClock, fmtTime, laneLabel, modalCoversApp, type TrainingConfig, type UITrack } from '../model'
 import { t, tn } from '../i18n'
+
+const SongOutput = lazy(() => import('./SongOutput'))
 
 function TimeCode({ engine }: { engine: MultitrackEngine }): React.JSX.Element {
   const ref = useRef<HTMLSpanElement>(null)
@@ -90,7 +92,8 @@ interface Props {
   onToggleLoop: () => void
   hasSelection: boolean
   selection: { s: number; e: number } | null
-  /** Master output level 0..1. */
+  /** Per-song master output gain, up to +12 dB. */
+  meterKey?: string
   volume: number
   onVolume: (v: number) => void
   training: boolean
@@ -224,109 +227,6 @@ function BpmEntry({
 }
 
 /** Speaker glyph whose waves thin out as the level drops; muted gets a cross. */
-function SpeakerIcon({ level }: { level: number }): React.JSX.Element {
-  return (
-    <svg
-      width="15"
-      height="15"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.3"
-      strokeLinecap="round"
-      aria-hidden
-    >
-      <path
-        d="M3.4 6.1h1.9L8.2 3.5a.6.6 0 0 1 1 .46v8.08a.6.6 0 0 1-1 .46L5.3 9.9H3.4a.6.6 0 0 1-.6-.6V6.7a.6.6 0 0 1 .6-.6Z"
-        fill="currentColor"
-        strokeLinejoin="round"
-      />
-      {level <= 0 ? (
-        <path d="M11.6 6.2 14.2 9.8M14.2 6.2 11.6 9.8" />
-      ) : (
-        <>
-          <path d="M11.5 6.4a2.4 2.4 0 0 1 0 3.2" />
-          {level > 0.5 && <path d="M13.3 4.7a4.8 4.8 0 0 1 0 6.6" />}
-        </>
-      )}
-    </svg>
-  )
-}
-
-/** Master output: one slider for everything the singer hears, click included. */
-function VolumePopover({
-  volume,
-  onVolume,
-  onClose
-}: {
-  volume: number
-  onVolume: (v: number) => void
-  onClose: () => void
-}): React.JSX.Element {
-  const ref = useRef<HTMLDivElement>(null)
-  // What the speaker button goes back to after a mute — never 0, or unmuting
-  // would be silent. Seeded from the level the popover opened at.
-  const preMute = useRef(volume > 0 ? volume : 0.8)
-  if (volume > 0) preMute.current = volume
-
-  useEffect(() => {
-    const onDown = (e: PointerEvent): void => {
-      // The wrapper includes the volume button — its own click handles closing.
-      if (!ref.current?.parentElement?.contains(e.target as Node)) onClose()
-    }
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.code === 'Escape') {
-        e.stopPropagation() // the app-level Esc must not also clear the selection
-        onClose()
-      }
-    }
-    document.addEventListener('pointerdown', onDown)
-    window.addEventListener('keydown', onKey, true)
-    return () => {
-      document.removeEventListener('pointerdown', onDown)
-      window.removeEventListener('keydown', onKey, true)
-    }
-  }, [onClose])
-
-  return (
-    <div className="train-pop vol-pop" ref={ref}>
-      <div className="tp-head">
-        <span className="tp-title">{t('player.volume.title')}</span>
-        <span className="tp-num">{Math.round(volume * 100)}%</span>
-      </div>
-      <div className="tp-row">
-        <button
-          type="button"
-          className="round-ghost vol-mute"
-          title={volume > 0 ? t('player.volume.muteAll') : t('player.volume.unmute')}
-          aria-pressed={volume === 0}
-          onClick={() => onVolume(volume > 0 ? 0 : preMute.current)}
-        >
-          <SpeakerIcon level={volume} />
-        </button>
-        <input
-          type="range"
-          className="vol"
-          min={0}
-          max={1}
-          step={0.01}
-          value={volume}
-          autoFocus
-          style={{ '--stem': 'var(--accent)' } as React.CSSProperties}
-          title={t('player.volume.sliderTitle')}
-          onChange={(e) => onVolume(Number(e.target.value))}
-          // Arrows belong to the focused slider here; the app-level handler
-          // would otherwise seek the song out from under it.
-          onKeyDown={(e) => {
-            if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') e.stopPropagation()
-          }}
-        />
-      </div>
-      <p className="fine tp-caption">{t('player.volume.caption')}</p>
-    </div>
-  )
-}
-
 /** Metronome setup: click on/off + loudness, count-in, and the beat grid itself. */
 function MetPopover({
   engine,
@@ -881,6 +781,7 @@ export function TrainPopover({
 }
 
 export default function Transport({
+  meterKey,
   engine,
   playing,
   onTogglePlay,
@@ -924,7 +825,6 @@ export default function Transport({
   useEffect(() => { startAtSong.current = false }, [selection, engine, playing])
   const [trainOpen, setTrainOpen] = useState(false)
   const [metOpen, setMetOpen] = useState(false)
-  const [volOpen, setVolOpen] = useState(false)
   return (
     <footer className="transport">
       {sep && (
@@ -984,28 +884,9 @@ export default function Transport({
             <path d="M3.5 6.5v-1a2 2 0 0 1 2-2h7l-1.8-1.8M12.5 9.5v1a2 2 0 0 1-2 2h-7l1.8 1.8" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </button>
-        <div className="train-wrap">
-          <button
-            type="button"
-            className={`round-ghost vol-btn${volume === 0 ? ' muted' : ''}`}
-            aria-pressed={volOpen}
-            title={
-              volume === 0
-                ? t('player.transport.muted')
-                : t('player.transport.volumeAt', { percent: Math.round(volume * 100) })
-            }
-            onClick={() => setVolOpen((o) => !o)}
-          >
-            <SpeakerIcon level={volume} />
-          </button>
-          {volOpen && (
-            <VolumePopover
-              volume={volume}
-              onVolume={onVolume}
-              onClose={() => setVolOpen(false)}
-            />
-          )}
-        </div>
+        <Suspense fallback={<span className="song-output-placeholder" />}>
+          <SongOutput key={meterKey} engine={engine} volume={volume} onVolume={onVolume} />
+        </Suspense>
         <div className="train-wrap">
           <button
             type="button"

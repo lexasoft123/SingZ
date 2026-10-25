@@ -152,7 +152,7 @@ describe('Android native DSP runtime packaging', () => {
     // iOS too (RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD there).
     expect(
       module.match(/@ReactMethod\(isBlockingSynchronousMethod = true\)/g),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
     expect(module).toMatch(
       /@ReactMethod\(isBlockingSynchronousMethod = true\)\s*fun positionNow\(\): WritableMap \{/,
     );

@@ -1,3 +1,4 @@
+import { mobileSongVolumePersistence } from './playback/song-volume-persistence'
 import { NativeModules } from 'react-native'
 import { decodeAudioData, type AudioBuffer } from 'react-native-audio-api'
 // static on purpose: CatalogScreen already loads gdrive at startup, and a
@@ -507,6 +508,7 @@ export async function loadProject(
   // merge their account/project-scoped phone override over the remote doc.
   const metronomeRef = metronomeRefForEntry(entry)
   doc = await mobileMetronomePersistence.resolve(metronomeRef, doc)
+  doc = await mobileSongVolumePersistence.resolve(metronomeRef, doc)
   await crumb?.('graph')
   const graph = await loadProjectGraph(entry, doc)
 

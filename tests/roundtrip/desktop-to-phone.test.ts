@@ -87,7 +87,7 @@ async function phone(): Promise<typeof import('../../mobile/src/gdrive')> {
 const openOnPhone = async (
   g: typeof import('../../mobile/src/gdrive'),
   dir: string
-): Promise<{ name: string; stems: unknown[] }> => {
+): Promise<import('../../mobile/src/projects').LoadedProject> => {
   const entries = await g.driveListProjects()
   const entry = entries.find((p) => p.dir === dir)
   if (!entry) throw new Error(`${dir} was not in the phone's listing`)
@@ -107,6 +107,25 @@ const seed = (scenario: Scenario = scenarios.twoSongs()): Scenario => {
 }
 
 describe('desktop → Drive → phone', () => {
+  it('syncs autosaved desktop gain and lets a newer desktop level supersede a phone override', async () => {
+    seed()
+    const path = join(root, 'Song One', 'song.mp3')
+    const { saveProjectSongVolume } = await import('../../src/main/projects')
+    expect(await saveProjectSongVolume(path, 2)).toEqual({ ok: true })
+    expect(await desktopSync()).toMatchObject({ ok: true })
+    const g = await phone()
+    prefs['singz.gdrive.email'] = 'singer@example.com'
+    expect((await openOnPhone(g, 'Song One')).doc.settings.masterVolume).toBe(2)
+    const { mobileSongVolumePersistence } = await import('../../mobile/src/playback/song-volume-persistence')
+    await mobileSongVolumePersistence.save({ source: 'gdrive', dir: 'Song One' }, .5)
+    expect((await openOnPhone(g, 'Song One')).doc.settings.masterVolume).toBe(.5)
+    expect(await saveProjectSongVolume(path, 3)).toEqual({ ok: true })
+    expect(await desktopSync()).toMatchObject({ ok: true })
+    await g.driveListProjects(true)
+    expect((await openOnPhone(g, 'Song One')).doc.settings.masterVolume).toBe(3)
+    expect((await openOnPhone(g, 'Song One')).doc.settings.masterVolume).toBe(3)
+  })
+
   it('publishes every file, and the phone gets the same bytes', async () => {
     const scenario = seed()
     expect(await desktopSync()).toMatchObject({ ok: true })

@@ -2189,6 +2189,8 @@ napi_value playbackStatus(napi_env env, napi_callback_info) {
              static_cast<uint64_t>(source.parkedLaneBytes));
   setValue(env, result, "parkedLaneCount",
            makeNumber(env, source.parkedLaneCount));
+  setValue(env, result, "outputPeak", makeNumber(env, source.outputPeak));
+  setValue(env, result, "outputClippedBlocks", makeNumber(env, source.outputClippedBlocks));
   setValue(env, result, "masterGain", makeNumber(env, source.masterGain));
   setValue(env, result, "referenceGain",
            makeNumber(env, source.referenceGain));

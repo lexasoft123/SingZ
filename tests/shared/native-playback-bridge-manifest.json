@@ -41,6 +41,11 @@
         "synchronous": false
       },
       {
+        "name": "outputMeter",
+        "arity": 0,
+        "synchronous": true
+      },
+      {
         "name": "positionNow",
         "arity": 0,
         "synchronous": true
@@ -268,6 +273,7 @@
       "nativePlaybackStatus",
       "nativePlaybackSession",
       "nativePlaybackPositionNow",
+      "nativePlaybackOutputMeter",
       "nativePlaybackSuspendOutput",
       "nativePlaybackResumeOutput",
       "nativePlaybackClaim",
@@ -297,6 +303,7 @@
       "nativePlaybackConfigured",
       "nativePlaybackLanePeaks",
       "nativePlaybackOpenOutput",
+      "nativePlaybackOutputMeter",
       "nativePlaybackPause",
       "nativePlaybackPositionNow",
       "nativePlaybackPrepare",
@@ -501,6 +508,8 @@
         "graphArenaBytes",
         "parkedLaneBytes",
         "parkedLaneCount",
+        "outputPeak",
+        "outputClippedBlocks",
         "masterGain",
         "referenceGain",
         "trainingEnabled",
@@ -566,6 +575,8 @@
         "outputChannels"
       ],
       "extra": [
+        "outputPeak",
+        "outputClippedBlocks",
         "callbacks",
         "invalidCallbacks",
         "graphSnapshot",

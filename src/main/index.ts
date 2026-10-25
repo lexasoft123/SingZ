@@ -28,6 +28,7 @@ import {
   renameProject,
   saveProject,
   saveProjectWaveforms,
+  saveProjectSongVolume,
   setProjectsRoot,
   writeProjectGraph
 } from './projects'
@@ -431,6 +432,12 @@ function registerIpc(): void {
       await writeInputWav(outDir, ch0, ch1)
     }
   )
+
+  ipcMain.handle('project:song-volume', async (_e, raw: string, gain: number) => {
+    const full = resolve(String(raw))
+    if (!isAllowed(full)) return { ok: false, error: t('main.error.fileNotRegistered') }
+    return saveProjectSongVolume(full, gain)
+  })
 
   ipcMain.handle('project:save', async (_e, raw: string, name: string, settings: ProjectSettings) => {
     const full = resolve(String(raw))

@@ -18,8 +18,8 @@ export const player = {
   'player.transport.speedTitle': 'Playback speed (pitch stays put)',
   'player.transport.resetSpeed': 'Reset speed',
   'player.transport.muted': 'Sound is muted — click for the volume slider',
-  // {percent} is a number already rounded, e.g. "Volume 80% — click for the slider"
-  'player.transport.volumeAt': 'Volume {percent}% — click for the slider',
+  // {db} is formatted with its unit, e.g. "+6.0 dB".
+  'player.transport.volumeAt': 'Volume {db} — click for the slider',
   'player.transport.metronomeTitle': 'Metronome — click on the beat, a grid to watch, count-in before play',
   'player.transport.carryLine': 'Carry the line',
   'player.transport.carryLineTitle':
@@ -34,12 +34,17 @@ export const player = {
   'player.bpm.setTitle': 'Set the playback tempo in beats per minute',
 
   // ── volume popover ──
-  'player.volume.title': 'Volume',
+  'player.volume.title': 'Song output',
+  'player.volume.saved': 'Saved with the song',
+  'player.volume.perSong': 'Per song',
+  'player.volume.reset': 'Reset',
+  'player.volume.peak': 'Peak level',
   'player.volume.muteAll': 'Mute everything',
   'player.volume.unmute': 'Back to the last level',
   'player.volume.sliderTitle': 'How loud the whole mix plays — the metronome follows it too',
-  'player.volume.caption':
-    "Sets the app's own output — your stem faders and the system volume stay where they are.",
+  'player.volume.caption': 'Saved with this song. Boost up to +12 dB; lower the volume if the peak meter shows clipping.',
+  'player.volume.clipped': 'Clip',
+  'player.volume.peakTitle': 'Output peak before safety limiting (dBFS). Click to reset the clipping warning.',
 
   // ── metronome popover ──
   'player.metronome.title': 'Metronome',

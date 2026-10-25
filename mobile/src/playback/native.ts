@@ -1,3 +1,4 @@
+import { sanitizeSongVolume } from '../../../src/shared/song-volume';
 import { NativeModules, Platform } from 'react-native';
 import { barLengthAt, beatIndexAtOrAfter, beatTime } from '../beat';
 import type { MultitrackEngine } from '../engine';
@@ -559,6 +560,8 @@ interface NativePlaybackBridgeApi {
    *  back to projecting the polled position. Same name and arity (none) on
    *  both bridges. */
   positionNow?(): unknown;
+  /** Four scalars; never waits for the control mutex or enumerates devices. */
+  outputMeter?(): unknown;
   /** Hold a parked generation's output stream without closing it, and let it
    *  go again (Android's background park; iOS answers InvalidState and keeps
    *  rendering, by decision). Optional like the others: an older native build
@@ -4821,6 +4824,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
     readonly materialized: MaterializedProject,
     readonly options: PlaybackLoadOptions,
   ) {
+    this.acceptedMasterGain = sanitizeSongVolume(materialized.doc.settings?.masterVolume);
     this.kind = coordinator.handleKind();
     this.preparedAt = Date.now();
     this.beatInfo = sanitizeBeatInfo(materialized.doc.settings?.beat);
@@ -7285,7 +7289,7 @@ function prepareRequest(
     sampleRate: Math.round(output.sampleRate),
     maximumFrames: 4096,
     bufferFrames: 0,
-    masterGain: overrides.masterGain ?? 1,
+    masterGain: overrides.masterGain ?? sanitizeSongVolume(materialized.doc.settings?.masterVolume),
     maximumRetainedBytes: MAX_DECODED_BYTES,
     ...(streamLanesEnabled ? { streamLanes: true } : {}),
     ...(overrides.playback ? { playback: overrides.playback } : {}),
@@ -7501,4 +7505,22 @@ export function nativeTrainingOutput(): {
     cancelTrainingPcm: generation => { void bridge.cancelTrainingPcm(generation).catch(() => {}); },
     setTrainingPcmGain: (generation, gain) => { void bridge.setTrainingPcmGain(generation, gain).catch(() => {}); },
   };
+}
+
+
+export interface SongOutputMeter {
+  readonly available: boolean;
+  readonly generation: number;
+  readonly peak: number;
+  readonly clippedBlocks: number;
+}
+export function readNativeSongOutputMeter(): SongOutputMeter {
+  const unavailable = { available: false, generation: 0, peak: 0, clippedBlocks: 0 };
+  try {
+    const bridge = NativeModules.NativeAudioRuntime as { outputMeter?: () => unknown } | undefined;
+    const raw = bridge?.outputMeter?.() as SongOutputMeter | undefined;
+    if (!raw || raw.available !== true || !Number.isSafeInteger(raw.generation) || raw.generation <= 0 ||
+        !Number.isFinite(raw.peak) || raw.peak < 0 || !Number.isSafeInteger(raw.clippedBlocks) || raw.clippedBlocks < 0) return unavailable;
+    return raw;
+  } catch { return unavailable; }
 }

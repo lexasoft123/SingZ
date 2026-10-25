@@ -1,3 +1,4 @@
+import { sanitizeSongVolume } from './audio/song-volume'
 import type { TrainingSound } from '../../shared/training-sound'
 import {
   Suspense,
@@ -1114,7 +1115,7 @@ export default function App(): React.JSX.Element {
     localStorage.setItem('singz.met', JSON.stringify(metCfg))
   }, [metCfg])
 
-  // Device picks and the output level follow the machine, not the song.
+  // Device picks follow the machine; output gain belongs to the open song.
   useEffect(() => {
     localStorage.setItem('singz.audio', JSON.stringify(audioPrefs))
     localStorage.setItem('singz.desktop.native-playback', audioPrefs.nativePlayback ? '1' : '0')
@@ -1126,7 +1127,8 @@ export default function App(): React.JSX.Element {
     engine.setNativeAudioProvider(audioPrefs.nativeAudioProvider ?? 'wasapi')
   }, [audioPrefs.nativeAudioProvider, engine])
 
-  const masterVol = audioPrefs.master ?? 1
+  const [masterVol, setMasterVol] = useState(1)
+  const masterVolRef = useRef({ gain: 1 })
   useEffect(() => {
     engine.setMasterVolume(masterVol)
   }, [engine, masterVol])
@@ -1143,8 +1145,21 @@ export default function App(): React.JSX.Element {
   )
 
   const changeMasterVol = useCallback((v: number) => {
-    setAudioPrefs((p) => ({ ...p, master: Math.max(0, Math.min(1, v)) }))
-  }, [])
+    const gain = sanitizeSongVolume(v)
+    masterVolRef.current.gain = gain
+    setMasterVol(gain)
+    if (song && isProject) {
+      const seq = loadSeq.current
+      void window.singz.saveProjectSongVolume(song.path, gain).then(result => {
+        if (seq === loadSeq.current && !result.ok) setError(result.error)
+      }).catch(error => {
+        if (seq === loadSeq.current) setError(error instanceof Error ? error.message : String(error))
+      })
+    } else {
+      setDirty(true)
+      setSaveState((s) => (s === 'saved' ? 'idle' : s))
+    }
+  }, [song, isProject])
 
   // Boot repair, device churn and direct Settings picks share one serialized,
   // versioned intent owner. A devicechange raised during setSinkId therefore
@@ -1668,6 +1683,10 @@ export default function App(): React.JSX.Element {
       setSong(createLoadedSongIdentity(reg.path,reg.name,`song-load-${seq}`))
       setIsProject(Boolean(reg.project))
       setLeadVocalSeparated(reg.project?.settings.leadVocalSeparated === true)
+      const savedVolume = sanitizeSongVolume(reg.project?.settings.masterVolume)
+      masterVolRef.current = { gain: savedVolume }
+      setMasterVol(savedVolume)
+      engine.setMasterVolume(savedVolume)
       setInLibrary(reg.project?.inLibrary ?? true)
       setProjectDir(reg.project?.dir ?? null)
       setEditName(null)
@@ -3068,12 +3087,14 @@ export default function App(): React.JSX.Element {
     // at another, and the next save or rename acts on the wrong folder: that
     // is how a rename typed for one song moved a different song's folder.
     const seq = loadSeq.current
+    const gainState = masterVolRef.current
     setSaveState('saving')
     const settings = {
       pendingLeadVocal: pendingLeadVocal ?? undefined,
       leadVocalSeparated: leadVocalSeparated || undefined,
       transpose,
       tempo: tempoRate,
+      masterVolume: masterVol,
       view: view ?? undefined,
       selection: selection ?? undefined,
       loop: loopOn || undefined,
@@ -3096,6 +3117,24 @@ export default function App(): React.JSX.Element {
     // Another song took the stage while this one was being written. The save
     // itself stands (main finished it, and the log says so) — it is only this
     // screen's state that must not learn about a project it is no longer on.
+    if (res.ok) {
+      // Capture this song's holder: gain edits during a long first save must
+      // reach its project even if another song is opened before it finishes.
+      let savedGain = settings.masterVolume
+      while (savedGain !== gainState.gain) {
+        const latestGain = gainState.gain
+        const gainResult = await window.singz.saveProjectSongVolume(res.songPath, latestGain)
+        if (!gainResult.ok) {
+          if (seq === loadSeq.current) {
+            setDirty(true)
+            setSaveState('idle')
+            setError(gainResult.error)
+          }
+          return
+        }
+        savedGain = latestGain
+      }
+    }
     if (seq !== loadSeq.current) return
     if (res.ok) {
       setPendingLeadVocal(null)
@@ -3143,7 +3182,7 @@ export default function App(): React.JSX.Element {
       setSaveState('idle')
       setError(t('app.project.saveFailed', { error: res.error }))
     }
-  }, [song, saveState, transpose, tempoRate, view, selection, loopOn, training, trainCfg, beatInfo, melodyInfo, keyInfo, metCfg, tracks, reanchorCustom, pendingLeadVocal, leadVocalSeparated])
+  }, [song, saveState, transpose, tempoRate, masterVol, view, selection, loopOn, training, trainCfg, beatInfo, melodyInfo, keyInfo, metCfg, tracks, reanchorCustom, pendingLeadVocal, leadVocalSeparated])
 
   /** A silently tracked pitch line or (re)detected grid saves itself — but
    *  only into an existing project (never creating one under a raw file), and
@@ -4137,6 +4176,7 @@ export default function App(): React.JSX.Element {
             onToggleLoop={toggleLoop}
             hasSelection={selection !== null}
             selection={selection}
+            meterKey={song?.path}
             volume={masterVol}
             onVolume={changeMasterVol}
             training={training}
