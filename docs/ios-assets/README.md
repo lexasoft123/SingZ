@@ -8,7 +8,7 @@ Training assets refreshed for the next release:
 
 Captured from the real iPhone 17 simulator app on 6 October 2026, using this branch and UI kit 1.9.4. Practice history is demonstration data in the simulator; cue playback was muted. Captures are scaled from 1206×2622 to 1320×2868, RGB without alpha, for the 6.9-inch store slot. Existing song/library images remain valid.
 
-English screenshots are shared across the existing storefront locales. EN/RU/Simplified Chinese listing descriptions live under `mobile/ios/fastlane/metadata/`. Assets are prepared locally; publishing uses `scripts/push-ios-screenshots.rb` as documented in `docs/IOS-RELEASE.md`.
+Localized iPhone and iPad sets for the current interface are in [`localized/`](localized/README.md). The older flat files below are retained as earlier assets. EN/RU/Simplified Chinese listing descriptions live under `mobile/ios/fastlane/metadata/`. Assets are prepared locally; publishing uses `scripts/push-ios-screenshots.rb` as documented in `docs/IOS-RELEASE.md`.
 
 ## Header and search creatives
 
