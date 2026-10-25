@@ -492,6 +492,9 @@ jobs:
           ccache -sv
         working-directory: mobile/android
 
+      - name: Verify release DEX optimization
+        run: python3 scripts/check-android-optimization.py mobile/android/app/build/outputs/bundle/release/app-release.aab
+
       # Proof, in the log, of the two things Play refuses a bundle for:
       # a key it does not expect, and a versionCode it has already seen.
       - name: Report bundle identity
@@ -515,6 +518,7 @@ jobs:
           path: |
             mobile/android/app/build/outputs/bundle/release/app-release.aab
             mobile/android/app/build/outputs/apk/release/app-release.apk
+            mobile/android/app/build/outputs/mapping/release/
           retention-days: 30
 
       - name: Attach to GitHub Release
