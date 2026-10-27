@@ -288,6 +288,15 @@ struct SharedAudioService::Impl {
       // A driver can change its active sample rate without changing UID.
       const auto device = std::find_if(cached.devices.begin(),cached.devices.end(),
           [&](const auto& row) { return row.uid == selected; });
+      // Capture can negotiate mono on the same CarPlay/Bluetooth UID that
+      // previously played a stereo song. Keep valid explicit selections, but
+      // rebuild a map that no longer fits the active endpoint.
+      if (device != cached.devices.end() &&
+          std::any_of(config.outputChannels.begin(), config.outputChannels.end(),
+              [&](uint32_t channel) { return channel >= device->outputChannels; })) {
+        config.outputChannels.clear();
+        config.requestedBufferFrames = 0;
+      }
       if (device != cached.devices.end() && device->nominalSampleRate > 0 &&
           device->nominalSampleRate != config.requestedSampleRate)
         config.requestedSampleRate = device->nominalSampleRate;
