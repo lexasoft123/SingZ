@@ -1,3 +1,4 @@
+import { ScreenBackground, ScreenScrim } from './ScreenBackground'
 import { SongOutputMonitor, SongOutputMeterButton, SongOutputControls } from './SongOutput'
 import { mobileSongVolumePersistence } from '../playback/song-volume-persistence'
 import { sanitizeSongVolume } from '../../../src/shared/song-volume'
@@ -5,7 +6,7 @@ import { useMobileLayout } from './uiKit'
 import { playerWorkspaceLayout } from './layout'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { laneSliverLevels, LANE_LEVEL_CHUNK, LANE_LEVEL_SLIVERS, LANE_LEVEL_WINDOW } from '../playback/lane-levels'
-import { Alert, AppState, DeviceEventEmitter, Image, PixelRatio, Platform, Pressable, StyleSheet, Text, View, ScrollView, useWindowDimensions } from 'react-native'
+import { Alert, AppState, DeviceEventEmitter, PixelRatio, Platform, Pressable, StyleSheet, Text, View, ScrollView } from 'react-native'
 import {
   createNativeStackNavigator,
   type NativeStackNavigationProp,
@@ -82,7 +83,7 @@ import {
   white
 } from './bits'
 import { KIT } from './tokens'
-import { BlurMask, Canvas, Circle, LinearGradient as SkLinearGradient, RadialGradient, Rect, vec } from '@shopify/react-native-skia'
+import { BlurMask, Canvas, Circle } from '@shopify/react-native-skia'
 import { perf } from './perf'
 import SkiaLyrics, {
   layoutColumn,
@@ -104,8 +105,6 @@ import { iosNativePlayback } from '../playback/native'
 import { nowPlaying } from '../playback/now-playing'
 import { getLocale, t, tn, type Key } from '../i18n'
 
-const SCRIM_TOP = require('../../assets/bg/scrim-top.png')
-const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
 const isBackingVocalLane = (id: string): boolean => /^custom-backing-vocals(?:-\d+)?$/.test(id)
 
 /** The kit's STEM_META labels (TRACK_META) are English constants — translate
@@ -824,12 +823,6 @@ export default function PlayerScreen({
     [project, nativeSilent]
   )
   const stemIds = useMemo(() => visibleLanes.map(lane => lane.id), [visibleLanes])
-  /* Live window size for the tint washes — Android rotates and split-screens
-     and the iPad target allows all four orientations, so a module-load
-     capture would strand portrait extents on a landscape canvas. Still
-     nothing on the clock: the Canvas repaints only when these actually
-     change. */
-  const winDims = useWindowDimensions()
   /* The same hue the catalog gave this song's card, so the artwork carries
      over from the shelf to the stage (the sample and dir-less loads take 0,
      matching their cards). */
@@ -1948,62 +1941,7 @@ export default function PlayerScreen({
               accessibilityElementsHidden={!active}
               importantForAccessibility={active ? 'auto' : 'no-hide-descendants'}
             >
-      {/* The stage: a dusk room, fully out of focus — chosen from the design
-          canvas against the user's references. A defocused photograph of warm
-          light rather than a drawn pattern: a golden window glow upper-left,
-          soft amber air on the right, dark masses in the lower corners, and a
-          vignette. Nothing is in focus, so nothing competes with the lyrics.
-          ONE static Skia surface, painted once, nothing on the clock — a
-          radial gradient falling to transparent IS the defocused blob, no
-          blur filter needed. Same look for every song on purpose: the room
-          is the app's, the song shows in the stem tile and the seek bar. */}
-      <Canvas pointerEvents="none" style={StyleSheet.absoluteFill}>
-        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
-          <SkLinearGradient
-            start={vec(winDims.width * 0.15, 0)}
-            end={vec(winDims.width * 0.85, winDims.height)}
-            colors={['#3a2517', '#2a1c12', '#1c130d', '#120c09']}
-            positions={[0, 0.3, 0.58, 1]}
-          />
-        </Rect>
-        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
-          <RadialGradient
-            c={vec(winDims.width * 0.25, winDims.height * 0.16)}
-            r={winDims.width * 0.62}
-            colors={['rgba(236,164,84,0.55)', 'rgba(210,130,60,0.22)', 'rgba(210,130,60,0)']}
-            positions={[0, 0.55, 1]}
-          />
-        </Rect>
-        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
-          <RadialGradient
-            c={vec(winDims.width * 0.86, winDims.height * 0.34)}
-            r={winDims.width * 0.5}
-            colors={['rgba(190,120,60,0.3)', 'rgba(190,120,60,0)']}
-          />
-        </Rect>
-        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
-          <RadialGradient
-            c={vec(winDims.width * 0.28, winDims.height * 0.93)}
-            r={winDims.width * 0.55}
-            colors={['rgba(28,16,10,0.85)', 'rgba(28,16,10,0)']}
-          />
-        </Rect>
-        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
-          <RadialGradient
-            c={vec(winDims.width * 0.9, winDims.height * 0.9)}
-            r={winDims.width * 0.45}
-            colors={['rgba(52,28,14,0.75)', 'rgba(52,28,14,0)']}
-          />
-        </Rect>
-        <Rect x={0} y={0} width={winDims.width} height={winDims.height}>
-          <RadialGradient
-            c={vec(winDims.width * 0.5, winDims.height * 0.46)}
-            r={winDims.width * 1.1}
-            colors={['rgba(10,7,5,0)', 'rgba(10,7,5,0)', 'rgba(10,7,5,0.5)']}
-            positions={[0, 0.42, 1]}
-          />
-        </Rect>
-      </Canvas>
+      <ScreenBackground />
 
       {/* Lyrics. The column is ONE canvas the size of the viewport, held
           still while a transform moves the lines under it — a canvas as tall as
@@ -2099,17 +2037,10 @@ export default function PlayerScreen({
         </View>
       )}
 
-      {/* header: a dark glass pill floating on the room (the references'
-          card material — charcoal translucency, hairline rim, warm light
-          bleeding around it). The scrim is shorter and softer than the old
-          full-bleed black: it only fades scrolled lyrics before they reach
-          the status bar, without flattening the window glow. */}
-      <View
-        pointerEvents="none"
+      <ScreenScrim
+        edge="top"
         style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 140, opacity: 0.8 }}
-      >
-        <Image source={SCRIM_TOP} style={{ width: '100%', height: '100%' }} resizeMode="stretch" />
-      </View>
+      />
       <View pointerEvents="none" style={[s.hdrGlass, { top: layout.top }, layout.compact && { left: workspaceLeft + 12, right: workspaceLeft + 12 }]} />
       <View style={[s.hdr, { paddingTop: layout.top + 9 }, layout.compact && { left: workspaceLeft, right: workspaceLeft }]} pointerEvents="box-none">
         <Pressable onPress={onBack} hitSlop={12} accessibilityRole="button" accessibilityLabel={t('phone.player.header.back')}>
@@ -2168,19 +2099,10 @@ export default function PlayerScreen({
         </Pressable>
       </View>
 
-      {/* footer: the transport rides ONE floating dark glass dock — the
-          same card material as the header pill. A scrim still lives under
-          it, shorter and softer than the old 360px black: real glass blurs
-          what is behind it, and without a live blur the coming lines read
-          straight through the fill (photographed on the sim: three lines
-          legible through and BELOW the dock). The fade does the blur's job
-          of quieting them before they reach the glass. */}
-      <View
-        pointerEvents="none"
+      <ScreenScrim
+        edge="bottom"
         style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: layout.compact ? dockHeight + 24 : 340 }}
-      >
-        <Image source={SCRIM_BOTTOM} style={{ width: '100%', height: '100%' }} resizeMode="stretch" />
-      </View>
+      />
       <View
         testID="player-transport"
         onLayout={event => setDockHeight(Math.round(event.nativeEvent.layout.height))}

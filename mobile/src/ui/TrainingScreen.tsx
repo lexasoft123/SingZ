@@ -1,3 +1,4 @@
+import { ScreenBackground } from './ScreenBackground'
 import SettingsScreen from './SettingsScreen'
 import WhatsNewScreen from './WhatsNewScreen'
 import { HeaderIconButton } from './HeaderIconButton'
@@ -17,7 +18,6 @@ import React, { createContext, useContext, useSyncExternalStore, useCallback, us
 import {
   AccessibilityInfo,
   AppState,
-  Image,
   PanResponder,
   Platform,
   Pressable,
@@ -30,7 +30,6 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { AudioManager } from 'react-native-audio-api'
 import { createNativeStackNavigator } from '@react-navigation/native-stack'
-import { Canvas, LinearGradient as SkLinearGradient, RadialGradient, Rect, vec } from '@shopify/react-native-skia'
 import type { MultitrackEngine } from '../engine'
 import {
   createTrainingCompletionReceipt,
@@ -138,8 +137,6 @@ interface ActiveVocalRun {
 }
 
 const persistence = new MobileTrainingPersistence()
-const SCRIM_TOP = require('../../assets/bg/scrim-top.png')
-const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
 const TrainingLogContext = createContext<(() => void) | null>(null)
 function TrainingLogButton(): React.JSX.Element | null {
   const openLog = useContext(TrainingLogContext)
@@ -226,7 +223,6 @@ export default function TrainingScreen({
   const routeRecoveryAttempt = useRef<string | null>(null)
   const pendingRouteRecovery = useRef<{ promptKey: string; generation: number } | null>(null)
   const sampleControls = useTrainingSampleRecording(active && !state.error && state.route === 'session' && state.session?.status !== 'completed')
-  const window = useWindowDimensions()
 
   const stopRuntime = useCallback(() => {
     runGeneration.current++
@@ -870,7 +866,7 @@ export default function TrainingScreen({
       accessibilityElementsHidden={!active}
       importantForAccessibility={active ? 'auto' : 'no-hide-descendants'}
     >
-      <TrainingBackdrop width={window.width} height={window.height} />
+      <ScreenBackground />
       <View pointerEvents="none" style={styles.staff}>
         {[0, 1, 2, 3, 4].map((line) => <View key={line} style={[styles.staffLine, { top: 88 + line * 18 }]} />)}
       </View>
@@ -1020,48 +1016,6 @@ export default function TrainingScreen({
     </View>
   )
 }
-
-const TrainingBackdrop = React.memo(function TrainingBackdrop({ width, height }: { width: number; height: number }): React.JSX.Element {
-  return (
-    <>
-      <Canvas pointerEvents="none" style={StyleSheet.absoluteFill}>
-        <Rect x={0} y={0} width={width} height={height}>
-          <SkLinearGradient
-            start={vec(width * 0.15, 0)}
-            end={vec(width * 0.85, height)}
-            colors={['#3a2517', '#2a1c12', '#1c130d', '#120c09']}
-            positions={[0, 0.3, 0.58, 1]}
-          />
-        </Rect>
-        <Rect x={0} y={0} width={width} height={height}>
-          <RadialGradient
-            c={vec(width * 0.25, height * 0.16)}
-            r={width * 0.62}
-            colors={['rgba(236,164,84,0.46)', 'rgba(210,130,60,0.18)', 'rgba(210,130,60,0)']}
-            positions={[0, 0.55, 1]}
-          />
-        </Rect>
-        <Rect x={0} y={0} width={width} height={height}>
-          <RadialGradient
-            c={vec(width * 0.86, height * 0.34)}
-            r={width * 0.5}
-            colors={['rgba(190,120,60,0.24)', 'rgba(190,120,60,0)']}
-          />
-        </Rect>
-        <Rect x={0} y={0} width={width} height={height}>
-          <RadialGradient
-            c={vec(width * 0.5, height * 0.46)}
-            r={width * 1.1}
-            colors={['rgba(10,7,5,0)', 'rgba(10,7,5,0)', 'rgba(10,7,5,0.52)']}
-            positions={[0, 0.42, 1]}
-          />
-        </Rect>
-      </Canvas>
-      <View pointerEvents="none" style={styles.topScrim}><Image source={SCRIM_TOP} resizeMode="stretch" style={styles.scrimImage} /></View>
-      <View pointerEvents="none" style={styles.bottomScrim}><Image source={SCRIM_BOTTOM} resizeMode="stretch" style={styles.scrimImage} /></View>
-    </>
-  )
-})
 
 function TrainingHome({ progress, onProgramLesson, song, effectiveKey, onChoose, onPrepare, onProgress, onSoundSettings, onSettings }: {
   progress: TrainingProgress
@@ -1818,9 +1772,6 @@ const flatGlassSurface = nativeGlassStyle(nightStudioNativeTheme, 'none')
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: C.bg },
   trainingRoute: { backgroundColor: 'transparent' },
-  topScrim: { position: 'absolute', top: 0, left: 0, right: 0, width: '100%', height: 150, opacity: 0.68 },
-  bottomScrim: { position: 'absolute', bottom: 0, left: 0, right: 0, width: '100%', height: 290, opacity: 0.82 },
-  scrimImage: { width: '100%', height: '100%' },
   staff: { position: 'absolute', inset: 0, opacity: 0.22 },
   staffLine: { position: 'absolute', left: 0, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: 'rgba(255,240,220,0.12)' },
   scroll: { paddingHorizontal: 20, paddingTop: Platform.OS === 'ios' ? 58 : 34, paddingBottom: 36, gap: 18 },

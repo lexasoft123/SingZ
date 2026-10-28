@@ -1,3 +1,4 @@
+import { ScreenBackground } from './ScreenBackground'
 import { useMobileLayout } from './uiKit'
 import { mobileSongVolumePersistence } from '../playback/song-volume-persistence'
 import { Icon } from '@singz/ui/native/icons'
@@ -8,7 +9,6 @@ import {
   ActivityIndicator,
   Alert,
   DeviceEventEmitter,
-  Image,
   Keyboard,
   Platform,
   Pressable,
@@ -122,7 +122,6 @@ import {
   type BatchResult
 } from '../publish'
 
-const BG = require('../../assets/bg/catalog.png')
 const GDRIVE_ICON = require('../../assets/gdrive.png')
 const SAMPLE_PROJECT = require('../../assets/sample/project.json') as ProjectDoc
 const SAMPLE_LYRICS = require('../../assets/sample/lyrics.json') as LyricsDoc
@@ -2152,14 +2151,14 @@ export default function CatalogScreen({
 
   if (!shelfReady) return (
     <View style={{ flex: 1, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center' }}>
-      <Image source={BG} style={s.background} resizeMode="cover" />
+      <ScreenBackground />
       <ActivityIndicator color={C.amber} />
     </View>
   )
 
   return (
     <View style={{ flex: 1, backgroundColor: C.bg }}>
-      <Image source={BG} style={s.background} resizeMode="cover" />
+      <ScreenBackground />
       <View testID="library-workspace" style={[s.wrap, { paddingTop: insets.top + 6, width: '100%', maxWidth: 1120, alignSelf: 'center' }]}>
         {/* eyebrow brand row: logo + wordmark tucked beside the cutout */}
         <View style={s.brandRow}>
@@ -2887,8 +2886,6 @@ export default function CatalogScreen({
 }
 
 const s = StyleSheet.create({
-  // Override the bundled image's intrinsic size so landscape tablets are covered.
-  background: { position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' },
   wrap: { flex: 1, paddingHorizontal: 20 },
   splitCard: {
     backgroundColor: C.sheet,
