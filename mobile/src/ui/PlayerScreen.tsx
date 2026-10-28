@@ -1,3 +1,5 @@
+import { quickStartTitle } from '../../../src/shared/quick-start/meta'
+import { GuideTarget, useGuideAnchor, useQuickStart } from './QuickStart'
 import { SongOutputMonitor, SongOutputMeterButton, SongOutputControls } from './SongOutput'
 import { mobileSongVolumePersistence } from '../playback/song-volume-persistence'
 import { sanitizeSongVolume } from '../../../src/shared/song-volume'
@@ -374,6 +376,9 @@ export default function PlayerScreen({
   const [pos, setPos] = useState(0)
   const [training, setTraining] = useState(false)
   const [trainCfg, setTrainCfg] = useState<TrainingConfig>(TRAIN_DEFAULTS)
+  const guide = useQuickStart()
+  const lyricsGuideRef = useGuideAnchor('player-lyrics')
+  const loopGuideRef = useGuideAnchor('player-loop')
   const [sheet, setSheetState] = useState<'none' | 'mixer' | 'practice' | 'song'>('none')
   const sheetRef = useRef(sheet)
   sheetRef.current = sheet
@@ -1870,6 +1875,8 @@ export default function PlayerScreen({
           <View style={{ height: column.height + lyricBottom }}>
             {column.boxes.map((b, i) => (
               <Pressable
+                ref={i === Math.max(0, currentLine) ? lyricsGuideRef : undefined}
+                collapsable={false}
                 key={i}
                 onPress={() =>
                   engine.capabilities.seek
@@ -1985,7 +1992,8 @@ export default function PlayerScreen({
         {/* Song sheet. Three dots rather than a gear: a gear glyph has no
             guaranteed text presentation on Android and renders as a colour
             emoji next to a monochrome header. */}
-        <Pressable
+        <Pressable accessibilityRole="button" accessibilityLabel={quickStartTitle(getLocale())} onPress={() => guide.start('player')} hitSlop={8} style={s.songBtn}><Text style={s.songBtnText}>?</Text></Pressable>
+        <GuideTarget id="player-about"><Pressable
           onPress={() => setSheet('song')}
           hitSlop={12}
           style={s.songBtn}
@@ -1993,7 +2001,7 @@ export default function PlayerScreen({
           accessibilityLabel={t('phone.player.header.about')}
         >
           <Text style={s.songBtnText}>•••</Text>
-        </Pressable>
+        </Pressable></GuideTarget>
       </View>
 
       {/* footer: the transport rides ONE floating dark glass dock — the
@@ -2153,6 +2161,8 @@ export default function PlayerScreen({
             <Text style={s.tm}>{fmtTime(dragPos !== null ? dragPos * engine.duration : pos)}</Text>
           </View>
           <Pressable
+            ref={loopGuideRef}
+            collapsable={false}
             onPress={cycleLoop}
             hitSlop={8}
             style={[s.loopBtn, loopA !== null && s.loopBtnOn]}
@@ -2177,14 +2187,14 @@ export default function PlayerScreen({
           </View>
         </View>
         <View style={s.btnRow}>
-          <RoundBtn
+          <GuideTarget id="player-mixer"><RoundBtn
             onPress={() =>
               engine.capabilities.mixer ? setSheet('mixer') : unsupported('mixer')
             }
             label={t('phone.player.transport.mixer')}
           >
             <MixGlyph />
-          </RoundBtn>
+          </RoundBtn></GuideTarget>
           <RoundBtn
             onPress={() =>
               engine.capabilities.seek ? engine.seek(0) : unsupported('seek')
@@ -2219,9 +2229,9 @@ export default function PlayerScreen({
           >
             <Text style={s.skipText}>{t('phone.player.transport.skipForwardLabel')}</Text>
           </RoundBtn>
-          <RoundBtn onPress={() => setSheet('practice')} label={t('phone.player.transport.practice')}>
+          <GuideTarget id="player-practice"><RoundBtn onPress={() => setSheet('practice')} label={t('phone.player.transport.practice')}>
             <MicGlyph />
-          </RoundBtn>
+          </RoundBtn></GuideTarget>
         </View>
       </View>
 

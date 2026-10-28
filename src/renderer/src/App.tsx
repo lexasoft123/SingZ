@@ -1,3 +1,4 @@
+import { QUICK_START_SEEN, quickStartTitle } from '../../shared/quick-start/meta'
 import { sanitizeSongVolume } from './audio/song-volume'
 import type { TrainingSound } from '../../shared/training-sound'
 import {
@@ -652,6 +653,8 @@ function EngineChip({
   )
 }
 
+const QuickStart = lazy(() => import('./components/QuickStart'))
+
 export default function App(): React.JSX.Element {
   // Re-render on a language switch; every child App renders follows. Nothing
   // remounts, so a song keeps playing through it.
@@ -732,6 +735,15 @@ export default function App(): React.JSX.Element {
   /** Catalog page shown over a loaded song — the song stays live underneath. */
   const [showCatalog, setShowCatalog] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [startupDialogsReady, setStartupDialogsReady] = useState(false)
+  const [quickStart, setQuickStart] = useState<'welcome' | 'tour' | null>(() => {
+    try { return localStorage.getItem(QUICK_START_SEEN) === 'seen' ? null : 'welcome' }
+    catch { return 'welcome' }
+  })
+  const closeQuickStart = (): void => {
+    setQuickStart(null)
+    try { localStorage.setItem(QUICK_START_SEEN, 'seen') } catch { /* Session dismissal still works. */ }
+  }
   const [audioPrefs, setAudioPrefs] = useState<AudioPrefs>(() => {
     // The native toggle is stored explicitly from here on: the effect below
     // writes it back as '1'/'0', so a first run with no stored choice must
@@ -1484,7 +1496,7 @@ export default function App(): React.JSX.Element {
       })
       void window.singz.dismissQwenOffer()
     }).finally(() => {
-      void window.singz.whatsNew().then(result => { if (result.ok && result.notes) setWhatsNew(result.notes) })
+      void window.singz.whatsNew().then(result => { if (result.ok && result.notes) setWhatsNew(result.notes) }).finally(() => setStartupDialogsReady(true))
     })
   }, [])
 
@@ -3854,6 +3866,7 @@ export default function App(): React.JSX.Element {
           <button
             type="button"
             className={appSection === 'training' ? 'active' : ''}
+            data-guide="training"
             aria-current={appSection === 'training' ? 'page' : undefined}
             onClick={() => switchSection('training')}
           >
@@ -4004,8 +4017,10 @@ export default function App(): React.JSX.Element {
           {/* The flag alone, beside the gear: the one control someone who
               cannot read the window needs to find, on every screen. */}
           <Language compact />
+          <button type="button" className="pill ghost small" data-guide="help" title={quickStartTitle(getLocale())} aria-label={quickStartTitle(getLocale())} onClick={() => setQuickStart('tour')}>?</button>
           <button
             type="button"
+            data-guide="settings"
             className="pill ghost small gear"
             title={t('app.titlebar.settings')}
             aria-label={t('app.titlebar.settings')}
@@ -4287,8 +4302,12 @@ export default function App(): React.JSX.Element {
         </Suspense>
       )}
 
+      {quickStart && startupDialogsReady && !wizard && !whatsNew && !showSetup && !showLog && !showProjects && !showSettings && !showImport && !editingLyrics && (
+        <Suspense fallback={null}><QuickStart welcome={quickStart === 'welcome'} onClose={closeQuickStart} /></Suspense>
+      )}
       {showSettings && (
         <SettingsModal
+          onQuickStart={() => { setShowSettings(false); setQuickStart('tour') }}
           audio={audioPrefs}
           onChangeOutput={changeOutput}
           onChangeInput={changeInput}

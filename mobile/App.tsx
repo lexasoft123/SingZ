@@ -1,3 +1,4 @@
+import { QuickStartProvider } from './src/ui/QuickStart'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { DarkTheme, NavigationContainer, useIsFocused, useNavigationContainerRef } from '@react-navigation/native'
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs'
@@ -982,6 +983,7 @@ export default function App(): React.JSX.Element {
       <GestureHandlerRootView style={{ flex: 1, backgroundColor: C.bg }}>
         <StatusBar barStyle="light-content" />
         <SafeAreaView edges={['left', 'right']} style={{ flex: 1 }}>
+        <QuickStartProvider>
         <NavigationContainer
           ref={navigationRef}
           theme={navigationTheme}
@@ -1042,6 +1044,7 @@ export default function App(): React.JSX.Element {
             </Tabs.Screen>
           </Tabs.Navigator>
         </NavigationContainer>
+        </QuickStartProvider>
         </SafeAreaView>
       </GestureHandlerRootView>
     </SafeAreaProvider>

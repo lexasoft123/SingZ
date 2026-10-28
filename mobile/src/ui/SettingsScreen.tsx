@@ -1,3 +1,5 @@
+import { quickStartCopy } from '../../../src/shared/quick-start'
+import { getLocale } from '../i18n'
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
@@ -18,10 +20,12 @@ import { TEST } from './testhooks';
 export default function SettingsScreen({
   onClose,
   onWhatsNew,
+  onQuickStart,
   onDiagnostics,
 }: {
   onClose: () => void;
   onWhatsNew: () => void;
+  onQuickStart?: () => void;
   onDiagnostics: () => void;
 }): React.JSX.Element {
   useEffect(() => { if (TEST) { TEST.openWhatsNew = onWhatsNew; TEST.openAudioDiagnostics = onDiagnostics } }, [onWhatsNew, onDiagnostics]);
@@ -77,6 +81,7 @@ export default function SettingsScreen({
         </Pressable>
       </View>
       <ScrollView contentContainerStyle={s.content}>
+        {onQuickStart && <Pressable accessibilityRole="button" onPress={onQuickStart} style={[s.card, { marginBottom: 18 }]}><Text style={s.name}>{quickStartCopy(getLocale()).title}</Text></Pressable>}
         <Text style={s.section}>{t('phone.app.settings.sectionAudio')}</Text>
         <View style={s.card}>
           <View style={s.row}>

@@ -1,3 +1,4 @@
+import { GuideTarget, QuickStartWelcome, useGuideAnchor } from './QuickStart'
 import { mobileSongVolumePersistence } from '../playback/song-volume-persistence'
 import { Icon } from '@singz/ui/native/icons'
 import { HeaderIconButton } from './HeaderIconButton'
@@ -254,6 +255,7 @@ export default function CatalogScreen({
   sampleRate,
   onLoaded,
   onOpenSettings,
+  onQuickStart,
   onOpenLog,
   onOpenAddSong,
   onCloseAddSong
@@ -262,11 +264,14 @@ export default function CatalogScreen({
   engine: MultitrackEngine
   sampleRate: number
   onLoaded: (p: LoadedProject) => void
+  onQuickStart?: () => void
   onOpenSettings: () => void
   onOpenLog: () => void
   onOpenAddSong: (request: AddSongRequest) => void
   onCloseAddSong: () => void
 }): React.JSX.Element {
+  const sampleGuideRef = useGuideAnchor('catalog-sample')
+  const splitGuideRef = useGuideAnchor('catalog-split')
   const isFocused = useIsFocused()
   const insets = useSafeAreaInsets()
   const [root, setRoot] = useState<RootInfo | null>(null)
@@ -2020,6 +2025,8 @@ export default function CatalogScreen({
     const acts = opts.swipeActions ?? []
     const body = (
       <Pressable
+        ref={opts.sample ? sampleGuideRef : undefined}
+        collapsable={false}
         key={opts.key}
         onPress={opts.onPress}
         accessibilityRole="button"
@@ -2154,13 +2161,13 @@ export default function CatalogScreen({
           <StemTile hue={0} size={26} />
           <Text style={s.brand}>SingZ</Text>
           <View style={{ marginLeft: 'auto', flexDirection: 'row', alignItems: 'center', gap: 2 }}>
-            <HeaderIconButton label={t('phone.library.openSettings')} onPress={onOpenSettings}>
+            <GuideTarget id="catalog-settings"><HeaderIconButton label={t('phone.library.openSettings')} onPress={onOpenSettings}>
               <Icon name="settings" size={20} color={C.amber} />
-            </HeaderIconButton>
+            </HeaderIconButton></GuideTarget>
             <LogButton onPress={onOpenLog} />
           </View>
         </View>
-        <Seg
+        <GuideTarget id="catalog-library"><Seg
           segments={[
             ...(driveAvailable() ? [{ key: 'gdrive', label: t('phone.library.driveTab'), icon: GDRIVE_ICON }] : []),
             /* Drawn glyphs, not emoji — the app has already refused emoji
@@ -2186,7 +2193,7 @@ export default function CatalogScreen({
           // signed-out Drive view says "Sign in above" and carries its own
           // Sign in link; that is where signing in belongs.
           onSelect={k => selectMode(k as 'gdrive' | 'folder' | 'phone')}
-        />
+        /></GuideTarget>
         {/* When a source is empty or signed out, the one-line context grows a
             title saying what this source IS — the moment the explanation
             earns its space. Any other time it stays the one-liner; the three
@@ -2268,9 +2275,9 @@ export default function CatalogScreen({
                       : t('phone.library.filesCopiedPhone')}
                   </Text>
                   <Text style={s.ctxDot}>·</Text>
-                  <Pressable accessibilityRole="button" hitSlop={8} onPress={() => void beginAdd()}>
+                  <GuideTarget id="catalog-add"><Pressable accessibilityRole="button" hitSlop={8} onPress={() => void beginAdd()}>
                     <Text style={s.ctxLink}>{t('phone.library.addASong')}</Text>
-                  </Pressable>
+                  </Pressable></GuideTarget>
                 </>
               )}
             </>
@@ -2374,6 +2381,7 @@ export default function CatalogScreen({
             />
           }
         >
+          {onQuickStart && <QuickStartWelcome onStart={onQuickStart} />}
           {splitUi && (
             <View style={s.splitCard}>
               <Text style={s.splitTitle} numberOfLines={1}>
@@ -2539,6 +2547,7 @@ export default function CatalogScreen({
             </View>
           )}
           {((): React.ReactNode => {
+            const splitGuideDir = shown.find(p => canSplit(p) && (splitUi?.project !== p.dir || splitUi.phase === 'failed'))?.dir
             const renderEntry = (p: ProjectEntry): React.JSX.Element => {
               const downloaded = isDownloaded(p, usage[p.dir])
               // a Drive song can share the moving phone song's name
@@ -2610,6 +2619,8 @@ export default function CatalogScreen({
                 action:
                   canSplit(p) && (splitUi?.project !== p.dir || splitUi.phase === 'failed') ? (
                     <Pressable
+                      ref={p.dir === splitGuideDir ? splitGuideRef : undefined}
+                      collapsable={false}
                       hitSlop={10}
                       disabled={splitBusyElsewhere(p.dir)}
                       onPress={e => {
