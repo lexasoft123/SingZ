@@ -408,3 +408,65 @@ test('leaving the Songs tab pauses the native graph and keeps it prepared', asyn
     tree.unmount()
   })
 })
+
+test('iPad workspace resizes without replacing the song or losing loop marks, and keeps mixer controls live', async () => {
+  const { t } = require('../src/i18n')
+  const layoutHook = jest.spyOn(require('../src/ui/uiKit'), 'useMobileLayout').mockReturnValue({
+    width: 1194, height: 740, fontScale: 1, top: 0, compact: true, wide: true
+  })
+  const h = nativePlayerHarness()
+  const legacy = {} as MultitrackEngine
+  let tree!: ReactTestRenderer.ReactTestRenderer
+  await ReactTestRenderer.act(async () => {
+    tree = ReactTestRenderer.create(
+      <PlayerScreen engine={legacy} project={h.project} route={null} trimMs={0}
+        onTrim={jest.fn()} onBack={jest.fn()} />
+    )
+    await Promise.resolve()
+  })
+  const hooks = (globalThis as Record<string, any>).__test
+  const resize = async (width: number, height: number): Promise<void> => {
+    await ReactTestRenderer.act(async () => {
+      tree.root.findByProps({ testID: 'player-stage' }).props.onLayout({ nativeEvent: { layout: { width, height } } })
+    })
+  }
+  const panels = () => tree.root.findAllByProps({ testID: 'player-mixer-panel' }, { deep: false })
+  const mixerButton = () => tree.root.findByProps({ label: t('phone.player.transport.mixer') })
+
+  try {
+    await resize(1194, 740)
+    expect(panels()).toHaveLength(1)
+    const { StyleSheet } = require('react-native')
+    const panel = StyleSheet.flatten(panels()[0].props.style)
+    const lyrics = StyleSheet.flatten(tree.root.findByProps({ testID: 'player-lyrics' }).props.style)
+    expect(panel.left + panel.width).toBeLessThan(lyrics.left)
+    expect(lyrics.width).toBeGreaterThan(450)
+
+    await ReactTestRenderer.act(async () => {
+      const mute = tree.root.findAll(node => node.props.accessibilityLabel === t('phone.player.mixer.mute', { label: 'Vocals' }) && typeof node.props.onPress === 'function')[0]
+      mute.props.onPress()
+      await hooks.cycleLoop()
+    })
+    expect(h.project.nativePlayback!.setLaneControl).toHaveBeenCalled()
+    expect(hooks.loopMarks).toEqual({ a: 1, b: null })
+
+    await ReactTestRenderer.act(async () => { mixerButton().props.onPress() })
+    expect(panels()).toHaveLength(0)
+    await ReactTestRenderer.act(async () => { mixerButton().props.onPress() })
+    expect(panels()).toHaveLength(1)
+
+    await resize(600, 800)
+    expect(panels()).toHaveLength(0)
+    await ReactTestRenderer.act(async () => { mixerButton().props.onPress() })
+    expect(hooks.sheet).toBe('mixer')
+    await resize(1194, 740)
+    expect(hooks.sheet).toBe('none')
+    expect(panels()).toHaveLength(1)
+    expect(hooks.loopMarks).toEqual({ a: 1, b: null })
+    expect(h.project.nativePlayback!.unload).not.toHaveBeenCalled()
+    expect(h.project.nativePlayback!.start).not.toHaveBeenCalled()
+  } finally {
+    await ReactTestRenderer.act(async () => { tree.unmount() })
+    layoutHook.mockRestore()
+  }
+})

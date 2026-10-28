@@ -2,9 +2,10 @@ import { SongOutputMonitor, SongOutputMeterButton, SongOutputControls } from './
 import { mobileSongVolumePersistence } from '../playback/song-volume-persistence'
 import { sanitizeSongVolume } from '../../../src/shared/song-volume'
 import { useMobileLayout } from './uiKit'
+import { playerWorkspaceLayout } from './layout'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { laneSliverLevels, LANE_LEVEL_CHUNK, LANE_LEVEL_SLIVERS, LANE_LEVEL_WINDOW } from '../playback/lane-levels'
-import { Alert, AppState, DeviceEventEmitter, Image, PixelRatio, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
+import { Alert, AppState, DeviceEventEmitter, Image, PixelRatio, Platform, Pressable, StyleSheet, Text, View, ScrollView, useWindowDimensions } from 'react-native'
 import {
   createNativeStackNavigator,
   type NativeStackNavigationProp,
@@ -434,6 +435,33 @@ export default function PlayerScreen({
   }, [project.doc.stemHashes])
   const insets = useSafeAreaInsets()
   const layout = useMobileLayout()
+  const [scene, setScene] = useState<{ width: number; height: number } | null>(null)
+  const workspace = playerWorkspaceLayout(scene?.width ?? layout.width, scene?.height ?? layout.height, layout.fontScale)
+  const [mixerVisible, setMixerVisible] = useState(true)
+  const mixerScrollRef = useRef<ScrollView>(null)
+  const embeddedMixer = workspace.sideBySide && mixerVisible
+  const sceneWidth = scene?.width ?? layout.width
+  const workspaceLeft = Math.max(0, (sceneWidth - workspace.workspaceWidth) / 2)
+  const lyricsWidth = embeddedMixer ? workspace.lyricsWidth : Math.max(0, Math.min(workspace.workspaceWidth - 24, 780))
+  const lyricsLeft = embeddedMixer ? workspaceLeft + workspace.mixerWidth + 24 : (sceneWidth - lyricsWidth) / 2
+  const openMixer = (): void => {
+    if (workspace.sideBySide) setMixerVisible(true)
+    else setSheet('mixer')
+  }
+  const openOutput = (): void => {
+    if (workspace.sideBySide) {
+      setMixerVisible(true)
+      requestAnimationFrame(() => mixerScrollRef.current?.scrollToEnd({ animated: true }))
+    } else setSheet('mixer')
+  }
+  // A sheet opened in a narrow window becomes the inspector when it fits.
+  // Keep the same backend and song ownership through the resize.
+  useEffect(() => {
+    if (workspace.sideBySide && sheet === 'mixer') {
+      setMixerVisible(true)
+      setSheet('none')
+    }
+  }, [workspace.sideBySide, sheet, setSheet])
   const [dockHeight, setDockHeight] = useState(180)
   const lyricTop = layout.compact ? 48 : 250
   const lyricBottom = layout.compact ? 80 : 300
@@ -1614,11 +1642,12 @@ export default function PlayerScreen({
     TEST.trainingOn = training
     TEST.setTrainMode = (mode: 'time' | 'lines') => setTrainCfg((c) => ({ ...c, mode }))
     TEST.showTrainPanel = () => setSheet('practice')
-    TEST.openOutput = () => setSheet('mixer')
+    TEST.openOutput = openOutput
     TEST.songOutput = () => ({ gain: songGain, saveState: volumeSaveState, reading: outputMonitor.snapshot() })
     TEST.setSongGain = (gain: number) => changeSongGain(gain, true)
     TEST.resetOutputClip = () => outputMonitor.reset()
-    TEST.openMixer = () => setSheet('mixer')
+    TEST.openMixer = openMixer
+    TEST.playerWorkspace = { ...workspace, mixerVisible: embeddedMixer, scene, lyricsWidth }
     TEST.openPractice = () => setSheet('practice')
     TEST.closeSheets = () => setSheet('none')
     /* A-B repeat through the button's own path, not engine.setRegion — the
@@ -1777,6 +1806,128 @@ export default function PlayerScreen({
     return Math.abs(i - currentLine) === 1 ? white(0.52) : white(0.4)
   }
 
+  const songOutputControls = (
+    <SongOutputControls monitor={outputMonitor} gain={songGain}
+      onGain={gain => changeSongGain(gain)} onCommit={gain => changeSongGain(gain, true)} saveState={volumeSaveState} />
+  )
+
+  const mixerControls = (
+    <>
+      {/* One tap for the thing the app exists to do. Only offered when
+          the song has a vocal lane — an unsplit song has nothing to
+          mute. */}
+      {hasVocals && (
+        <View style={[b.segs, { marginBottom: 6 }]}>
+          <Chip label={t('phone.player.mixer.fullMix')} active={mixPreset === 'full'} onPress={() => applyMixPreset('full')} />
+          <Chip
+            label={t('phone.player.mixer.noVocals')}
+            active={mixPreset === 'novocals'}
+            onPress={() => applyMixPreset('novocals')}
+          />
+          <Chip
+            label={t('phone.player.mixer.vocalsOnly')}
+            active={mixPreset === 'vocalsonly'}
+            onPress={() => applyMixPreset('vocalsonly')}
+          />
+        </View>
+      )}
+      {/* The lane rows had no scroll container at all, so past roughly a
+          dozen lanes they clipped with no way to reach them — and the
+          44 pt fader targets below bring that cliff closer. */}
+      {tracks.map((track, i) => {
+        const meta = laneMeta[track.id] ??
+          (TRACK_META[track.id] ? { label: stemLabel(track.id) ?? TRACK_META[track.id].label, color: TRACK_META[track.id].color } : { label: track.id, color: C.dim })
+        const isDucked = ducked.includes(track.id)
+        /* Generated backing belongs beside vocals, without an Added
+           header dividing the song's stems. The header marks the
+           singer's own extra lanes. The
+           pre-split original lane is the app's, not the singer's —
+           the same exemption addedCount makes — or an unsplit song
+           would render an "Added" header over its own audio. */
+        const isCustom = !(track.id in TRACK_META) && track.id !== ORIGINAL_LANE_ID && !isBackingVocalLane(track.id)
+        const firstCustom = isCustom && (i === 0 || tracks[i - 1].id in TRACK_META || isBackingVocalLane(tracks[i - 1].id))
+        return (
+          <React.Fragment key={track.id}>
+            {firstCustom && (
+              <View style={s.addedRule}>
+                <Text style={s.addedLab}>{t('phone.player.mixer.added')}</Text>
+              </View>
+            )}
+            <View style={[s.mixRow, embeddedMixer && s.mixRowEmbedded]}>
+              <View style={[s.mixLaneHeader, embeddedMixer && s.mixLaneHeaderEmbedded]}>
+                <View style={[s.dot, { backgroundColor: meta.color }]} />
+                <Text style={s.mixName} numberOfLines={1}>
+                  {meta.label}
+                </Text>
+                {isDucked && (
+                  <View style={[s.youPill, { backgroundColor: meta.color }]}>
+                    <Text style={s.youPillText}>{t('phone.player.mixer.yourTurn')}</Text>
+                  </View>
+                )}
+              </View>
+              <View style={s.mixLaneControls}>
+                <View style={{ flex: 1 }}>
+                  <Bar
+                    value={track.volume}
+                    onChange={(v) => {
+                      if (engine.capabilities.mixer) {
+                        engine.setVolume(track.id, v)
+                        setDragVol({ id: track.id, v })
+                      }
+                    }}
+                    onCommit={() => setDragVol(null)}
+                    color={meta.color}
+                    height={22}
+                    track="rgba(255,255,255,0.14)"
+                    label={t('phone.player.mixer.volumeLabel', { label: meta.label })}
+                  />
+                  {/* The value while a finger drags; at rest, nothing. */}
+                  {dragVol?.id === track.id && (
+                    <View pointerEvents="none" style={[s.volWrap, { left: `${dragVol.v * 100}%` }]}>
+                      <View style={s.volBubble}>
+                        <Text style={s.volBubbleText}>{Math.round(dragVol.v * 100)}%</Text>
+                      </View>
+                      <View style={s.volCaret} />
+                    </View>
+                  )}
+                </View>
+                <Pressable
+                  onPress={() =>
+                    engine.capabilities.mixer
+                      ? engine.setMuted(track.id, !track.muted)
+                      : unsupported('mixer')
+                  }
+                  accessibilityRole="button"
+                  accessibilityLabel={t('phone.player.mixer.mute', { label: meta.label })}
+                  accessibilityState={{ selected: track.muted }}
+                  style={[s.msBtn, track.muted && { backgroundColor: C.red, borderColor: C.red }]}
+                >
+                  {/* Drawn, not "M" — mixing-desk initials say nothing to a
+                      singer; a crossed speaker says what happened to the
+                      sound. */}
+                  <SpeakerGlyph color={track.muted ? '#1d0f0d' : white(0.55)} slashed={track.muted} />
+                </Pressable>
+                <Pressable
+                  onPress={() =>
+                    engine.capabilities.mixer
+                      ? engine.setSolo(track.id, !track.solo)
+                      : unsupported('mixer')
+                  }
+                  accessibilityRole="button"
+                  accessibilityLabel={t('phone.player.mixer.solo', { label: meta.label })}
+                  accessibilityState={{ selected: track.solo }}
+                  style={[s.msBtn, track.solo && { backgroundColor: C.amber, borderColor: C.amber }]}
+                >
+                  <HeadphonesGlyph color={track.solo ? C.amberInk : white(0.55)} />
+                </Pressable>
+              </View>
+            </View>
+          </React.Fragment>
+        )
+      })}
+    </>
+  )
+
   return (
     <PlayerStack.Navigator
       initialRouteName="Stage"
@@ -1787,6 +1938,11 @@ export default function PlayerScreen({
           sheetNavigation.current = navigation
           return (
             <Animated.View
+              testID="player-stage"
+              onLayout={event => {
+                const { width, height } = event.nativeEvent.layout
+                setScene(previous => previous?.width === width && previous.height === height ? previous : { width, height })
+              }}
               style={{ flex: 1, backgroundColor: C.bg }}
               pointerEvents={active ? 'auto' : 'none'}
               accessibilityElementsHidden={!active}
@@ -1855,7 +2011,8 @@ export default function PlayerScreen({
           phones will allocate. What actually scrolls is a spacer carrying the
           tap targets, so the sweep costs no views at all. */}
       <View
-        style={layout.compact ? { position: 'absolute', top: layout.top + 74, left: 0, right: 0, bottom: dockHeight + Math.max(12, insets.bottom + 2) + 8 } : { flex: 1 }}
+        testID="player-lyrics"
+        style={layout.compact ? { position: 'absolute', top: layout.top + 74, left: lyricsLeft, width: lyricsWidth, bottom: dockHeight + Math.max(12, insets.bottom + 2) + 8 } : { flex: 1 }}
         onLayout={(e) => {
           const { width, height } = e.nativeEvent.layout
           if (width !== view.w || height !== view.h)
@@ -1927,6 +2084,21 @@ export default function PlayerScreen({
         {lines.length === 0 && <Text style={s.noLyrics}>{t('phone.player.lyrics.empty')}</Text>}
       </View>
 
+      {embeddedMixer && (
+        <View testID="player-mixer-panel" style={[s.mixerPanel, {
+          top: layout.top + 74,
+          left: workspaceLeft + 12,
+          width: workspace.mixerWidth,
+          bottom: dockHeight + Math.max(12, insets.bottom + 2) + 8
+        }]}>
+          <Text accessibilityRole="header" style={s.mixerTitle}>{t('phone.player.mixer.title')}</Text>
+          <ScrollView ref={mixerScrollRef} contentContainerStyle={s.mixerContent} showsVerticalScrollIndicator={false}>
+            {mixerControls}
+            {songOutputControls}
+          </ScrollView>
+        </View>
+      )}
+
       {/* header: a dark glass pill floating on the room (the references'
           card material — charcoal translucency, hairline rim, warm light
           bleeding around it). The scrim is shorter and softer than the old
@@ -1938,8 +2110,8 @@ export default function PlayerScreen({
       >
         <Image source={SCRIM_TOP} style={{ width: '100%', height: '100%' }} resizeMode="stretch" />
       </View>
-      <View pointerEvents="none" style={[s.hdrGlass, { top: layout.top }]} />
-      <View style={[s.hdr, { paddingTop: layout.top + 9 }]} pointerEvents="box-none">
+      <View pointerEvents="none" style={[s.hdrGlass, { top: layout.top }, layout.compact && { left: workspaceLeft + 12, right: workspaceLeft + 12 }]} />
+      <View style={[s.hdr, { paddingTop: layout.top + 9 }, layout.compact && { left: workspaceLeft, right: workspaceLeft }]} pointerEvents="box-none">
         <Pressable onPress={onBack} hitSlop={12} accessibilityRole="button" accessibilityLabel={t('phone.player.header.back')}>
           <Text style={s.back}>‹</Text>
         </Pressable>
@@ -2010,8 +2182,9 @@ export default function PlayerScreen({
         <Image source={SCRIM_BOTTOM} style={{ width: '100%', height: '100%' }} resizeMode="stretch" />
       </View>
       <View
+        testID="player-transport"
         onLayout={event => setDockHeight(Math.round(event.nativeEvent.layout.height))}
-        style={[s.foot, { bottom: Math.max(12, insets.bottom + 2) }, layout.compact && { width: layout.playerDockWidth, alignSelf: 'center', left: undefined, right: undefined, paddingTop: 8, paddingBottom: 8 }]}
+        style={[s.foot, { bottom: Math.max(12, insets.bottom + 2) }, layout.compact && { width: workspace.dockWidth, alignSelf: 'center', left: undefined, right: undefined, paddingTop: 8, paddingBottom: 8 }]}
       >
         {countInDisplay &&
           (countInDisplay.beatDots && countInSt?.kind === 'beats' ? (
@@ -2172,15 +2345,19 @@ export default function PlayerScreen({
             </Text>
           </Pressable>
           <View style={s.timeSide}>
-            <SongOutputMeterButton monitor={outputMonitor} gain={songGain} onPress={() => setSheet('mixer')} />
+            <SongOutputMeterButton monitor={outputMonitor} gain={songGain} onPress={openOutput} />
             <Text style={[s.tm, { textAlign: 'right' }]}>{fmtTime(engine.duration)}</Text>
           </View>
         </View>
         <View style={s.btnRow}>
           <RoundBtn
             onPress={() =>
-              engine.capabilities.mixer ? setSheet('mixer') : unsupported('mixer')
+              engine.capabilities.mixer
+                ? workspace.sideBySide ? setMixerVisible(value => !value) : openMixer()
+                : unsupported('mixer')
             }
+            bg={embeddedMixer ? KIT.accentSoft : C.btnBg}
+            selected={workspace.sideBySide ? embeddedMixer : undefined}
             label={t('phone.player.transport.mixer')}
           >
             <MixGlyph />
@@ -2248,116 +2425,8 @@ export default function PlayerScreen({
               contentInsetAdjustmentBehavior="never"
               showsVerticalScrollIndicator={false}
             >
-            <SongOutputControls monitor={outputMonitor} gain={songGain}
-              onGain={gain => changeSongGain(gain)} onCommit={gain => changeSongGain(gain, true)} saveState={volumeSaveState} />
-            {/* One tap for the thing the app exists to do. Only offered when
-                the song has a vocal lane — an unsplit song has nothing to
-                mute. */}
-            {hasVocals && (
-              <View style={[b.segs, { marginBottom: 6 }]}>
-                <Chip label={t('phone.player.mixer.fullMix')} active={mixPreset === 'full'} onPress={() => applyMixPreset('full')} />
-                <Chip
-                  label={t('phone.player.mixer.noVocals')}
-                  active={mixPreset === 'novocals'}
-                  onPress={() => applyMixPreset('novocals')}
-                />
-                <Chip
-                  label={t('phone.player.mixer.vocalsOnly')}
-                  active={mixPreset === 'vocalsonly'}
-                  onPress={() => applyMixPreset('vocalsonly')}
-                />
-              </View>
-            )}
-            {/* The lane rows had no scroll container at all, so past roughly a
-                dozen lanes they clipped with no way to reach them — and the
-                44 pt fader targets below bring that cliff closer. */}
-            {tracks.map((track, i) => {
-              const meta = laneMeta[track.id] ??
-                (TRACK_META[track.id] ? { label: stemLabel(track.id) ?? TRACK_META[track.id].label, color: TRACK_META[track.id].color } : { label: track.id, color: C.dim })
-              const isDucked = ducked.includes(track.id)
-              /* Generated backing belongs beside vocals, without an Added
-                 header dividing the song's stems. The header marks the
-                 singer's own extra lanes. The
-                 pre-split original lane is the app's, not the singer's —
-                 the same exemption addedCount makes — or an unsplit song
-                 would render an "Added" header over its own audio. */
-              const isCustom = !(track.id in TRACK_META) && track.id !== ORIGINAL_LANE_ID && !isBackingVocalLane(track.id)
-              const firstCustom = isCustom && (i === 0 || tracks[i - 1].id in TRACK_META || isBackingVocalLane(tracks[i - 1].id))
-              return (
-                <React.Fragment key={track.id}>
-                  {firstCustom && (
-                    <View style={s.addedRule}>
-                      <Text style={s.addedLab}>{t('phone.player.mixer.added')}</Text>
-                    </View>
-                  )}
-                  <View style={s.mixRow}>
-                  <View style={[s.dot, { backgroundColor: meta.color }]} />
-                  <Text style={s.mixName} numberOfLines={1}>
-                    {meta.label}
-                  </Text>
-                  {isDucked && (
-                    <View style={[s.youPill, { backgroundColor: meta.color }]}>
-                      <Text style={s.youPillText}>{t('phone.player.mixer.yourTurn')}</Text>
-                    </View>
-                  )}
-                  <View style={{ flex: 1 }}>
-                    <Bar
-                      value={track.volume}
-                      onChange={(v) => {
-                        if (engine.capabilities.mixer) {
-                          engine.setVolume(track.id, v)
-                          setDragVol({ id: track.id, v })
-                        }
-                      }}
-                      onCommit={() => setDragVol(null)}
-                      color={meta.color}
-                      height={22}
-                      track="rgba(255,255,255,0.14)"
-                      label={t('phone.player.mixer.volumeLabel', { label: meta.label })}
-                    />
-                    {/* The value while a finger drags; at rest, nothing. */}
-                    {dragVol?.id === track.id && (
-                      <View pointerEvents="none" style={[s.volWrap, { left: `${dragVol.v * 100}%` }]}>
-                        <View style={s.volBubble}>
-                          <Text style={s.volBubbleText}>{Math.round(dragVol.v * 100)}%</Text>
-                        </View>
-                        <View style={s.volCaret} />
-                      </View>
-                    )}
-                  </View>
-                  <Pressable
-                    onPress={() =>
-                      engine.capabilities.mixer
-                        ? engine.setMuted(track.id, !track.muted)
-                        : unsupported('mixer')
-                    }
-                    accessibilityRole="button"
-                    accessibilityLabel={t('phone.player.mixer.mute', { label: meta.label })}
-                    accessibilityState={{ selected: track.muted }}
-                    style={[s.msBtn, track.muted && { backgroundColor: C.red, borderColor: C.red }]}
-                  >
-                    {/* Drawn, not "M" — mixing-desk initials say nothing to a
-                        singer; a crossed speaker says what happened to the
-                        sound. */}
-                    <SpeakerGlyph color={track.muted ? '#1d0f0d' : white(0.55)} slashed={track.muted} />
-                  </Pressable>
-                  <Pressable
-                    onPress={() =>
-                      engine.capabilities.mixer
-                        ? engine.setSolo(track.id, !track.solo)
-                        : unsupported('mixer')
-                    }
-                    accessibilityRole="button"
-                    accessibilityLabel={t('phone.player.mixer.solo', { label: meta.label })}
-                    accessibilityState={{ selected: track.solo }}
-                    style={[s.msBtn, track.solo && { backgroundColor: C.amber, borderColor: C.amber }]}
-                  >
-                    <HeadphonesGlyph color={track.solo ? C.amberInk : white(0.55)} />
-                  </Pressable>
-                  </View>
-                </React.Fragment>
-              )
-            })}
+            {songOutputControls}
+            {mixerControls}
             </SheetScrollView>
             </Sheet>
           </PlayerSheetRoute>
@@ -3206,6 +3275,10 @@ const s = StyleSheet.create({
      state, not the palette; C.amberInk already covers ink on the accent. */
 
   mixRow: { flexDirection: 'row', alignItems: 'center', gap: 11, paddingVertical: 9 },
+  mixRowEmbedded: { paddingVertical: 6, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.hairline },
+  mixLaneHeaderEmbedded: { width: 118, flexWrap: 'wrap', gap: 6 },
+  mixLaneHeader: { flexDirection: 'row', alignItems: 'center', gap: 11 },
+  mixLaneControls: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 11 },
   /* Section header rows: the label plus the control that used to cost its
      own row (Reset, Training, the bpm fact). minHeight keeps headers level
      whether or not the right side is present. */
@@ -3266,6 +3339,14 @@ const s = StyleSheet.create({
     transform: [{ rotate: '45deg' }]
   },
   dot: { width: 11, height: 11, borderRadius: 6 },
+  mixerPanel: {
+    ...nativeGlassStyle(nightStudioNativeTheme, 'surface'),
+    position: 'absolute',
+    borderRadius: 24,
+    overflow: 'hidden'
+  },
+  mixerTitle: { color: C.text, fontSize: 18, fontWeight: '700', padding: 18, paddingBottom: 8 },
+  mixerContent: { paddingHorizontal: 14, paddingBottom: 20 },
   mixName: { color: C.text, fontSize: 14.5, fontWeight: '600', width: 96 },
   msBtn: {
     width: 44,
