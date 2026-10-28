@@ -2,7 +2,8 @@
 #
 # What is encrypted: the Apple credentials the iOS pipeline needs — the App
 # Store Connect API key (.p8 body, key id, issuer id) and the fastlane match
-# passphrase. See docs/IOS-RELEASE.md.
+# passphrase, plus the dedicated iOS signing-keychain password. See
+# docs/IOS-RELEASE.md.
 #
 # Recipient is the age key already on this machine
 # (~/.config/sops/age/keys.txt, which SOPS finds by default). Adding a

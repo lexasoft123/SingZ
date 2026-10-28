@@ -965,8 +965,11 @@ export default function App(): React.JSX.Element {
   // const 100 lines further down, so up there it is a temporal-dead-zone
   // ReferenceError on the first paint.
   useEffect(() => {
-    if (TEST) TEST.navigateToTab = navigateToTab
-  }, [navigateToTab])
+    if (TEST) {
+      TEST.navigateToTab = navigateToTab
+      TEST.navigation = navigationRef
+    }
+  }, [navigateToTab, navigationRef])
 
   const updateTrainingFacts = useCallback(
     (facts: { keyInfo: MobileSongTrainingFacts['keyInfo']; transpose: number }) => {

@@ -27,6 +27,9 @@
 #     `security import` needs to put the certificate into a keychain, after
 #     which CSC_KEYCHAIN/CSC_NAME do the rest. See the note at its export
 #     below for why it is not called CSC_KEY_PASSWORD.
+#   SINGZ_SIGNING_KEYCHAIN_PASSWORD_FILE, SINGZ_SIGNING_KEYCHAIN_PATH — the
+#     dedicated local iOS signing keychain. The password stays in a mode-600
+#     temporary file; Fastlane reads it only while importing signing assets.
 #   SINGZ_APPLE_ID, SINGZ_APPLE_ID_PASSWORD_FILE — an Apple ID web login,
 #     read ONLY by `fastlane ios review_messages` (App Review's messages have
 #     no API-key surface). The password goes to a mode-600 temp file beside
@@ -105,6 +108,9 @@ eval "$(
       if (s.mac_p12_password) {
         console.log(`SINGZ_MAC_P12_PASSWORD=${q(s.mac_p12_password)}`)
       }
+      if (s.singz_keychain_password) {
+        console.log(`SINGZ_SIGNING_KEYCHAIN_PASSWORD=${q(s.singz_keychain_password)}`)
+      }
       // Apple ID web login for review_messages. Optional, and only ever
       // useful as a pair.
       if (s.apple_id && s.apple_id_password) {
@@ -124,6 +130,13 @@ export APP_STORE_CONNECT_API_ISSUER_ID="$SINGZ_ASC_ISSUER_ID"
 export MATCH_PASSWORD="$SINGZ_MATCH_PASSWORD"
 export SINGZ_ASC_KEY_PATH="$tmpdir/AuthKey_${SINGZ_ASC_KEY_ID}.p8"
 unset SINGZ_ASC_KEY_ID SINGZ_ASC_ISSUER_ID SINGZ_MATCH_PASSWORD
+
+if [ -n "${SINGZ_SIGNING_KEYCHAIN_PASSWORD:-}" ]; then
+  printf '%s' "$SINGZ_SIGNING_KEYCHAIN_PASSWORD" > "$tmpdir/signing-keychain-password"
+  export SINGZ_SIGNING_KEYCHAIN_PASSWORD_FILE="$tmpdir/signing-keychain-password"
+  export SINGZ_SIGNING_KEYCHAIN_PATH="$HOME/Library/Keychains/singz-ios-signing.keychain-db"
+fi
+unset SINGZ_SIGNING_KEYCHAIN_PASSWORD
 
 # App Review contact, when the store carries it. The eval above only SETS
 # these as shell variables; without an explicit export the child process —
