@@ -597,7 +597,7 @@ export class IosNativePlaybackBackend implements PlaybackBackend {
 
   readOutputMeter(): SongOutputMeter {
     const meter = readNativeSongOutputMeter()
-    return this.playing ? meter : { ...meter, peak: 0 }
+    return this.playing ? meter : { ...meter, peak: 0, rms: 0 }
   }
 
   attach(project: LoadedProject): void {

@@ -607,6 +607,29 @@ graphSnapshot(const singz::NativePlaybackStatus &status) {
   return *status.graphSnapshot;
 }
 
+void outputMeterSeparatesStereoEnergyFromPeaks() {
+  std::vector<float> pcm(4096, 0.0F);
+  for (size_t frame = 0; frame < pcm.size() / 2; frame += 4) {
+    pcm[frame * 2] = 0.5F;
+    pcm[frame * 2 + 1] = -0.5F;
+  }
+  const auto wav = writeWav("meter-energy.wav", 2, pcm);
+  auto backend = std::make_unique<ManualOutputBackend>();
+  auto *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+  std::vector<singz::NativePlaybackLaneSource> lanes;
+  lanes.push_back(lane("song", wav));
+  CHECK(session.prepare(config(), std::move(lanes), 1).ok);
+  CHECK(session.openOutput(1).ok && session.start(1).ok);
+  CHECK(fake->drive(512, singz::AudioHostDiscontinuityStart));
+  const auto meter = session.outputMeter();
+  CHECK(meter.available && near(meter.peak, 0.5F, 0.002F));
+  CHECK(near(meter.rms, 0.25F, 0.002F));
+  CHECK(meter.clippedBlocks == 0);
+  CHECK(session.unload(1).ok);
+  std::remove(wav.c_str());
+}
+
 const singz::NativePlaybackGraphNodeStatus *
 graphNode(const singz::NativePlaybackGraphSnapshot &graph,
           const char *label) {
@@ -2803,6 +2826,7 @@ void cueGraphTransportCompositionAndLifetime() {
       const auto meter = session.outputMeter();
       CHECK(meter.available && meter.generation == generation);
       CHECK(meter.peak == lastRenderedStatus.outputPeak);
+      CHECK(std::isfinite(meter.rms) && meter.rms >= 0 && meter.rms <= meter.peak + 0.0001F);
       CHECK(meter.clippedBlocks == lastRenderedStatus.outputClippedBlocks);
     }
     const auto unloaded = session.unloadWithCleanup(generation);
@@ -7417,6 +7441,7 @@ void portableGraphDocumentMaterializesActualTopology() {
 } // namespace
 
 int main() {
+  outputMeterSeparatesStereoEnergyFromPeaks();
   if (std::getenv("SINGZ_NATIVE_PLAYBACK_PROVIDER_DISPOSE_FAILURE") !=
       nullptr) {
     providerDisposeFailureRetainsOwnershipAndPoisonsReopen();
