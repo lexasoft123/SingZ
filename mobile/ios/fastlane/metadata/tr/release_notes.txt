@@ -1,0 +1,1 @@
+Her şarkı için ses düzeyini kaydedin, +12 dB’ye kadar artırın ve kırpılma göstergesini izleyin. Çalışmaya başlamadan önce ayarlarınızı gözden geçirin; bitirdiğinizde alıştırmalara dönün. Drive arşiviniz sessizce yenilenir. Dokuz yeni arayüz dili ve kesilen düğme yazıları için düzeltmeler.

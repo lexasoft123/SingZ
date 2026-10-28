@@ -1,0 +1,1 @@
+şarkı,sözler,vokal,altyapı,nota,aralık,akor,dizi,transpoze,çevrimdışı,prova

@@ -29,6 +29,9 @@ import { training as zhTraining } from '../../../src/shared/i18n/zh-CN/training'
 import { common as enCommon } from '../../../src/shared/i18n/en/common'
 import { common as ruCommon } from '../../../src/shared/i18n/ru/common'
 import { common as zhCommon } from '../../../src/shared/i18n/zh-CN/common'
+import { tr } from './tr'
+import { training as trTraining } from '../../../src/shared/i18n/tr/training'
+import { common as trCommon } from '../../../src/shared/i18n/tr/common'
 import { en } from './en'
 import { ru } from './ru'
 import { zhCN } from './zh-CN'
@@ -65,6 +68,7 @@ export type { Locale } from '../../../src/shared/i18n/rules'
 
 // English training strings are registered by the bundle itself.
 i18nRegister('en', { ...enCommon, ...en })
+i18nRegister('tr', { ...trCommon, ...trTraining, ...tr })
 i18nRegister('ru', { ...ruCommon, ...ruTraining, ...ru })
 i18nRegister('zh-CN', { ...zhCommon, ...zhTraining, ...zhCN })
 i18nRegister('hi', { ...hiCommon, ...hiTraining, ...hi })

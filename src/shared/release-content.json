@@ -60,6 +60,10 @@
             "ms": {
               "title": "Kelantangan untuk setiap lagu",
               "description": "Simpan kelantangan bersama lagu. Tingkatkan rakaman yang perlahan sehingga +12 dB dan pantau keratan audio pada meter puncak."
+            },
+            "tr": {
+              "title": "Her şarkıya uygun ses düzeyi",
+              "description": "Çıkış düzeyini her şarkıyla birlikte kaydedin. Sessiz kayıtları +12 dB’ye kadar yükseltin ve kırpılmayı görmek için tepe göstergesini izleyin."
             }
           }
         },
@@ -118,6 +122,10 @@
             "ms": {
               "title": "Semak sebelum berlatih",
               "description": "Semak julat suara dan tetapan sebelum latihan lagu. Selepas sesi, anda kembali ke halaman latihan. Tetapan dan log lebih mudah dibuka."
+            },
+            "tr": {
+              "title": "Kontrol edin, söyleyin, geri dönün",
+              "description": "Şarkı çalışmasına başlamadan önce ses aralığınızı ve ayarlarınızı kontrol edin. Çalışma bittiğinde alıştırmalara dönersiniz. Ayarlar ve günlükler elinizin altındadır."
             }
           }
         },
@@ -177,6 +185,10 @@
             "ms": {
               "title": "Sembilan bahasa baharu",
               "description": "Kini tersedia dalam Hindi, Jepun, Korea, Thai, Indonesia, Vietnam, Filipino, Melayu dan Cina Tradisional. Paparan label panjang dan tetingkap sempit turut diperbaiki."
+            },
+            "tr": {
+              "title": "SingZ dokuz dil daha konuşuyor",
+              "description": "Yeni diller: Hintçe, Japonca, Korece, Tayca, Endonezce, Vietnamca, Filipince, Malayca ve Geleneksel Çince. Uzun metinler ve dar pencereler artık daha iyi sığıyor."
             }
           }
         }
@@ -239,6 +251,10 @@
             "ms": {
               "title": "Gunakan mikrofon Windows anda lagi",
               "description": "Windows mikrofon boleh bermula semula, termasuk antara muka audio USB seperti MiniFuse. Mikrofon yang disimpan dan pilihan saluran input disimpan. Jika pengambilan gagal, log aplikasi kini termasuk kesilapan asas untuk membantu mendiagnosis sambungan."
+            },
+            "tr": {
+              "title": "Windows mikrofonunuzu yeniden kullanın",
+              "description": "MiniFuse gibi USB ses arabirimleri dahil Windows mikrofonları yeniden başlatılabiliyor. Kaydettiğiniz mikrofon ve giriş kanalı seçimleri korunuyor. Ses yakalama başarısız olursa uygulama günlüğü, bağlantı sorununu bulmaya yardımcı olan asıl hatayı da gösteriyor."
             }
           }
         }
@@ -303,6 +319,10 @@
             "ms": {
               "title": "Dengar nota rujukan anda dengan jelas",
               "description": "Nota piano, gitar dan organ lebih kuat sambil mengekalkan serangan semula jadi dan mengekalkan. Tetapan volume yang lebih tinggi kekal dalam ruang kepala puncak yang bersih."
+            },
+            "tr": {
+              "title": "Referans notalarını net duyun",
+              "description": "Piyano, gitar ve org notaları, doğal atak ve uzama özelliklerini koruyarak daha yüksek sesle çalıyor. Yüksek ses ayarlarında da tepe düzeyi güvenli sınırlar içinde kalıyor."
             }
           }
         },
@@ -360,6 +380,10 @@
             "ms": {
               "title": "Tinggal dalam sesi latihan anda",
               "description": "Nota rujukan bermain dengan lagu terbuka, Balik kembali ke latihan, dan nota selesai mengisi bar kemajuan sebelum maju."
+            },
+            "tr": {
+              "title": "Alıştırmanız kesilmesin",
+              "description": "Bir şarkı açıkken referans notaları çalar; Geri düğmesi alıştırmalara döndürür. Tamamlanan notalar, sonraki notaya geçmeden önce ilerleme çubuğunu doldurur. Mikrofon daha hızlı hazırlanır; geri bildirim mesajları ortalanmıştır."
             }
           }
         },
@@ -417,6 +441,10 @@
             "ms": {
               "title": "Berhentilah mendengar selepas tanda",
               "description": "Memulakan atau memainkan nota rujukan tidak lagi mengganggu mikrofon latihan. gangguan audio sebenar masih menghentikan sesi dengan selamat."
+            },
+            "tr": {
+              "title": "Referans notası bitince dinlemeye devam edin",
+              "description": "Referans notasını başlatmak veya yeniden çalmak artık çalışma mikrofonunu kesintiye uğratmıyor. Gerçek ses kesintileri ise çalışmayı güvenli biçimde durdurmaya devam ediyor."
             }
           }
         }
@@ -480,6 +508,10 @@
             "ms": {
               "title": "Pembaruan anda, di satu tempat",
               "description": "Lihat apa yang berubah selepas setiap kemas kini. Ikuti SingZ di Telegram untuk berita dan petua."
+            },
+            "tr": {
+              "title": "Yenilikleriniz tek yerde",
+              "description": "Her güncellemede nelerin değiştiğini görün. Haberler ve ipuçları için Telegram’da SingZ’yi takip edin."
             }
           }
         },
@@ -537,6 +569,10 @@
             "ms": {
               "title": "Lebih banyak ruang untuk suara anda",
               "description": "Latihan dan puterannya menyesuaikan diri dengan paparan lebar dan lipat iPhone."
+            },
+            "tr": {
+              "title": "Sesinize daha fazla alan",
+              "description": "Alıştırmalar ve çalma ekranı, iPhone Duo’nun geniş ve katlanmış ekranlarına uyum sağlar. Pencere boyutunu değiştirirken dersi ve kontrolleri görünürde tutun."
             }
           }
         },
@@ -594,6 +630,10 @@
             "ms": {
               "title": "Lagu anda, siap untuk studio",
               "description": "Pilih trek dan folder, kemudian eksport WAV, FLAC atau MP3 untuk sesi seterusnya anda."
+            },
+            "tr": {
+              "title": "Kanallarınız stüdyoya hazır",
+              "description": "Kanalları ve bir klasör seçin; sonraki çalışmanız için WAV, FLAC veya MP3 olarak dışa aktarın."
             }
           }
         },
@@ -651,6 +691,10 @@
             "ms": {
               "title": "Buat lagu karaoke anda sendiri",
               "description": "Eksport instrumen dan vokal sokongan berasingan bersama-sama, tanpa vokal utama. Tanpa trek vokal sokongan, campuran hanya mengandungi instrumen."
+            },
+            "tr": {
+              "title": "Kendi karaoke altyapınızı hazırlayın",
+              "description": "Enstrümanları ve ayrılmış geri vokalleri, ana vokal olmadan birlikte dışa aktarın. Geri vokal kanalı yoksa karışım yalnızca enstrümanları içerir."
             }
           }
         },
@@ -708,6 +752,10 @@
             "ms": {
               "title": "Kurang mengklik, lebih banyak menyanyi",
               "description": "M mematikan setiap lagu, S membersihkan setiap solo. Pergi untuk mula melompat ke pilihan anda terlebih dahulu, kemudian ke permulaan lagu."
+            },
+            "tr": {
+              "title": "Daha az tıklayın, daha çok söyleyin",
+              "description": "M tüm kanalların sesini açar; S tüm solo seçimlerini temizler. Başa git önce seçiminizin başına, ardından şarkının başlangıcına atlar."
             }
           }
         }

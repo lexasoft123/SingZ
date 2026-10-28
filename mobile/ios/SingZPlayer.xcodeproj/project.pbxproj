@@ -16,6 +16,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		A113D1A113D1A113D1A113010 /* tr */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.strings; name = tr; path = SingZPlayer/tr.lproj/InfoPlist.strings; sourceTree = "<group>"; };
 		13B07F961A680F5B00A75B9A /* SingZPlayer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SingZPlayer.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		13B07FB51A68108700A75B9A /* Images.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Images.xcassets; path = SingZPlayer/Images.xcassets; sourceTree = "<group>"; };
 		13B07FB61A68108700A75B9A /* Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = Info.plist; path = SingZPlayer/Info.plist; sourceTree = "<group>"; };
@@ -159,6 +160,7 @@
 				ru,
 				"zh-Hans",
 				hi,
+				tr,
 				"zh-Hant",
 				ms,
 				fil,
@@ -286,6 +288,7 @@
 				70F5F86D88D2E0253EA4958B /* ru */,
 				1E81A1A14998781218ED1289 /* zh-Hans */,
 				A113D1A113D1A113D1A113D1 /* hi */,
+				A113D1A113D1A113D1A113010 /* tr */,
 				A113D1A113D1A113D1A113009 /* zh-Hant */,
 				A113D1A113D1A113D1A113008 /* ms */,
 				A113D1A113D1A113D1A113007 /* fil */,
