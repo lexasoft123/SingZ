@@ -2152,14 +2152,14 @@ export default function CatalogScreen({
 
   if (!shelfReady) return (
     <View style={{ flex: 1, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center' }}>
-      <Image source={BG} style={StyleSheet.absoluteFill} resizeMode="cover" />
+      <Image source={BG} style={s.background} resizeMode="cover" />
       <ActivityIndicator color={C.amber} />
     </View>
   )
 
   return (
     <View style={{ flex: 1, backgroundColor: C.bg }}>
-      <Image source={BG} style={StyleSheet.absoluteFill} resizeMode="cover" />
+      <Image source={BG} style={s.background} resizeMode="cover" />
       <View testID="library-workspace" style={[s.wrap, { paddingTop: insets.top + 6, width: '100%', maxWidth: 1120, alignSelf: 'center' }]}>
         {/* eyebrow brand row: logo + wordmark tucked beside the cutout */}
         <View style={s.brandRow}>
@@ -2887,6 +2887,8 @@ export default function CatalogScreen({
 }
 
 const s = StyleSheet.create({
+  // Override the bundled image's intrinsic size so landscape tablets are covered.
+  background: { position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' },
   wrap: { flex: 1, paddingHorizontal: 20 },
   splitCard: {
     backgroundColor: C.sheet,
