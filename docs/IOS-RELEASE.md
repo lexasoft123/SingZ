@@ -3,11 +3,34 @@
 TestFlight and the App Store both take the same `.ipa`, exported with
 `export_method: app-store` and built once per run by
 [`mobile/ios/fastlane/Fastfile`](../mobile/ios/fastlane/Fastfile). That IPA is
-**not** the sis-motors.ru sideload build — that one is development-signed and
+**not** the sis-motors.ru sideload build — that one is ad-hoc-signed and
 installs over `itms-services://`; this one is App Store-signed and is only
 ever valid inside App Store Connect. Two different certificate types, two
 different pipelines; invoke the user-global `ship-ios-ipa` skill by name for
 the other one.
+
+## Local signing: use the SOPS keychain password
+
+Always retrieve the Mac login-keychain password from its SOPS entry before
+local certificate imports or signing, including physical-device Metro debug
+builds. Use it to unlock the signing keychain and configure the signing key's
+partition list for Apple tools and `codesign`; pass it as
+`MATCH_KEYCHAIN_PASSWORD` when Fastlane imports signing assets. Do this before
+starting Xcode's build, rather than waiting for a keychain permission dialog.
+
+The login-keychain password, `MATCH_PASSWORD` (the encrypted signing repo),
+and `mac_p12_password` (a certificate export) are distinct credentials. Never
+substitute one for another or try other stored passwords. Keep the login
+password out of logs, shell history, and Xcode script-phase environments;
+consume it in a signing preflight from a mode-600 temporary file, then remove
+it from the build environment.
+
+If the entry is not in SingZ's `.keys/secrets.enc.yaml`, locate the existing
+SOPS file and exact entry name before proceeding. Do not assume the `.p12`
+password is the login password or ask for GUI approval as the normal workflow.
+If the saved entry cannot be located or decrypted, report that specific
+missing prerequisite. GitHub Actions continues to use its separate temporary
+keychain and generated password.
 
 ## What the API cannot do
 
