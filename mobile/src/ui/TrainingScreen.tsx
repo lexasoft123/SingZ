@@ -1,3 +1,4 @@
+import { tabModalListeners } from './tab-modal-dismissal'
 import { ScreenBackground } from './ScreenBackground'
 import SettingsScreen from './SettingsScreen'
 import WhatsNewScreen from './WhatsNewScreen'
@@ -871,6 +872,7 @@ export default function TrainingScreen({
         {[0, 1, 2, 3, 4].map((line) => <View key={line} style={[styles.staffLine, { top: 88 + line * 18 }]} />)}
       </View>
       <TrainingStack.Navigator
+        screenListeners={tabModalListeners}
         initialRouteName="Home"
         screenLayout={({ children, navigation }) => <TrainingLogContext.Provider value={() => {
           stopRuntime()
@@ -1030,6 +1032,9 @@ function TrainingHome({ progress, onProgramLesson, song, effectiveKey, onChoose,
 }): React.JSX.Element {
   const layout = useMobileLayout()
   const snapshot = summarizeTrainingProgress(progress)
+  const tendency = snapshot.tendency === 'not-enough-pitch' ? '—'
+    : snapshot.tendency === 'centered' ? t('phone.training.centered')
+    : snapshot.tendency === 'flat' ? t('phone.training.kit.flat') : t('phone.training.kit.sharp')
   const landed = snapshot.landedRate === null ? '—' : t('phone.training.landedPercent', { pct: Math.round(snapshot.landedRate * 100) })
   return (
     <ScrollView contentContainerStyle={[styles.scroll, { paddingTop: layout.top, width: '100%', maxWidth: 1160, alignSelf: 'center' }]} showsVerticalScrollIndicator={false}>
@@ -1681,7 +1686,10 @@ function IntervalWeekProgress(): React.JSX.Element | null {
 
 function TrainingProgressView({ progress, onBack }: { progress: TrainingProgress; onBack: () => void }): React.JSX.Element {
   const snapshot = summarizeTrainingProgress(progress)
-  return <ScrollView contentContainerStyle={styles.scroll}><TrainingHeader title={t('phone.training.progressEntryTitle')} onBack={onBack} /><View style={styles.summaryScore}><Text style={styles.summaryNumber}>{snapshot.sessions}</Text><Text style={styles.cardCopy}>{t('phone.training.completedSessions')}</Text></View><View style={styles.summaryRow}><Metric label={t('phone.training.metricAttempts')} value={snapshot.attempts} /><Metric label={t('phone.training.metricLanded')} value={snapshot.landedRate === null ? '—' : `${Math.round(snapshot.landedRate * 100)}%`} /><Metric label={t('phone.training.metricTendency')} value={snapshot.tendency} /></View>{snapshot.weakerExercises.length > 0 && <Section label={t('phone.training.usefulNextFocus')}><Text style={styles.cardCopy}>{snapshot.weakerExercises.join(' · ')}</Text></Section>}<Section label={t('phone.training.dailyActivityTitle')}><DailyTrainingActivity days={persistence.practiceDays} /></Section><TrainingProgramPanel /><IntervalWeekProgress /><Section label={t('phone.training.recent')}>{progress.recent.length === 0 ? <Text style={styles.cardCopy}>{t('phone.training.completeSessionToStart')}</Text> : progress.recent.slice(0, 8).map((item) => <View key={item.sessionId} style={styles.recentRow}><Text style={styles.recentTitle}>{keyLabel(keyName(item.key))} · {readableExercise(item.exercise)}</Text><Text style={styles.cardCopy}>{t('phone.training.landedOfAttempts', { landed: item.onTarget + item.close, attempts: item.attempts })}</Text></View>)}</Section></ScrollView>
+  const tendency = snapshot.tendency === 'not-enough-pitch' ? '—'
+    : snapshot.tendency === 'centered' ? t('phone.training.centered')
+    : snapshot.tendency === 'flat' ? t('phone.training.kit.flat') : t('phone.training.kit.sharp')
+  return <ScrollView contentContainerStyle={styles.scroll}><TrainingHeader title={t('phone.training.progressEntryTitle')} onBack={onBack} /><View style={styles.summaryScore}><Text style={styles.summaryNumber}>{snapshot.sessions}</Text><Text style={styles.cardCopy}>{t('phone.training.completedSessions')}</Text></View><View style={styles.summaryRow}><Metric label={t('phone.training.metricAttempts')} value={snapshot.attempts} /><Metric label={t('phone.training.metricLanded')} value={snapshot.landedRate === null ? '—' : `${Math.round(snapshot.landedRate * 100)}%`} /><Metric label={t('phone.training.metricTendency')} value={tendency} /></View>{snapshot.weakerExercises.length > 0 && <Section label={t('phone.training.usefulNextFocus')}><Text style={styles.cardCopy}>{snapshot.weakerExercises.join(' · ')}</Text></Section>}<Section label={t('phone.training.dailyActivityTitle')}><DailyTrainingActivity days={persistence.practiceDays} /></Section><TrainingProgramPanel /><IntervalWeekProgress /><Section label={t('phone.training.recent')}>{progress.recent.length === 0 ? <Text style={styles.cardCopy}>{t('phone.training.completeSessionToStart')}</Text> : progress.recent.slice(0, 8).map((item) => <View key={item.sessionId} style={styles.recentRow}><Text style={styles.recentTitle}>{keyLabel(keyName(item.key))} · {readableExercise(item.exercise)}</Text><Text style={styles.cardCopy}>{t('phone.training.landedOfAttempts', { landed: item.onTarget + item.close, attempts: item.attempts })}</Text></View>)}</Section></ScrollView>
 }
 
 export function TrainingHeader({ title, onBack }: { title: string; onBack: () => void }): React.JSX.Element { return <GlassHeader title={title} onBack={onBack} backLabel={t('phone.training.kit.back')} trailing={<TrainingLogButton />} /> }

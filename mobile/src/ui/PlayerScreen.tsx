@@ -1,3 +1,4 @@
+import { tabModalListeners } from './tab-modal-dismissal'
 import { ScreenBackground, ScreenScrim } from './ScreenBackground'
 import { SongOutputMonitor, SongOutputMeterButton, SongOutputControls } from './SongOutput'
 import { mobileSongVolumePersistence } from '../playback/song-volume-persistence'
@@ -1923,6 +1924,7 @@ export default function PlayerScreen({
 
   return (
     <PlayerStack.Navigator
+      screenListeners={tabModalListeners}
       initialRouteName="Stage"
       screenOptions={{ headerShown: false, contentStyle: { backgroundColor: C.bg } }}
     >

@@ -2,6 +2,10 @@
 
 @interface RCT_EXTERN_MODULE (FolderAccess, NSObject)
 
+RCT_EXTERN_METHOD(waitForNavigationModals : (NSInteger)maximumCount
+                  resolver : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(speakTrainingInterval : (NSString *)text
                   language : (NSString *)language
                   resolver : (RCTPromiseResolveBlock)resolve

@@ -15,11 +15,15 @@ const os = require('os')
 const path = require('path')
 const { execFileSync } = require('child_process')
 
+const { sampleGains } = require('./sample-headroom.cjs')
+const GENERATOR_VERSION = '2-headroom'
+
 const OUT = path.join(__dirname, '..', 'assets', 'sample')
 const STEMS_DIR = path.join(OUT, 'stems')
 const STEMS = ['vocals', 'drums', 'bass', 'guitar', 'piano', 'other']
 
-if (!process.argv.includes('--force') && STEMS.every((s) => fs.existsSync(path.join(STEMS_DIR, `${s}.flac`))) && fs.existsSync(path.join(OUT, 'project.json'))) {
+const versionFile = path.join(OUT, '.generator-version')
+if (fs.existsSync(versionFile) && fs.readFileSync(versionFile, 'utf8') === GENERATOR_VERSION && !process.argv.includes('--force') && STEMS.every((s) => fs.existsSync(path.join(STEMS_DIR, `${s}.flac`))) && fs.existsSync(path.join(OUT, 'project.json'))) {
   console.log('sample: assets/sample/ already present — skipping (use --force to regenerate)')
   process.exit(0)
 }
@@ -245,8 +249,15 @@ fs.mkdirSync(STEMS_DIR, { recursive: true })
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'singz-sample-'))
 const hasAfconvert = process.platform === 'darwin'
 const enc = (wav, flac) => {
-  if (hasAfconvert) execFileSync('afconvert', ['-f', 'flac', '-d', 'flac', wav, flac])
-  else execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', wav, '-sample_fmt', 's16', '-c:a', 'flac', flac])
+  if (hasAfconvert) {
+    try {
+      execFileSync('afconvert', ['-f', 'flac', '-d', 'flac', wav, flac], { stdio: 'ignore' })
+      return
+    } catch {
+      // Some macOS installations expose FLAC decoding but no encoder.
+    }
+  }
+  execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', wav, '-sample_fmt', 's16', '-c:a', 'flac', flac])
 }
 try {
   if (!hasAfconvert) execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' })
@@ -255,11 +266,10 @@ try {
   process.exit(1)
 }
 
-for (const s of STEMS) {
+const gains = sampleGains(STEMS.map(s => bufs[s]))
+for (const [stemIndex, s] of STEMS.entries()) {
   const b = bufs[s]
-  let peak = 0
-  for (let i = 0; i < N; i++) peak = Math.max(peak, Math.abs(b[i]))
-  const g = peak > 0 ? 0.85 / peak : 1
+  const g = gains[stemIndex]
   const pcm = Buffer.alloc(N * 2)
   for (let i = 0; i < N; i++) pcm.writeInt16LE(Math.round(Math.max(-1, Math.min(1, b[i] * g)) * 32767), i * 2)
   const header = Buffer.alloc(44)
@@ -304,5 +314,6 @@ fs.writeFileSync(
   path.join(OUT, 'lyrics.json'),
   JSON.stringify({ source: 'whisper', credit: 'Original demo song, written for SingZ', aligned: true, lines }, null, 1)
 )
+fs.writeFileSync(versionFile, GENERATOR_VERSION)
 const mb = STEMS.reduce((a, s) => a + fs.statSync(path.join(STEMS_DIR, `${s}.flac`)).size, 0) / 1e6
 console.log(`sample: wrote "Sing with me" — ${DUR.toFixed(1)}s, six stems, ${mb.toFixed(1)} MB`)

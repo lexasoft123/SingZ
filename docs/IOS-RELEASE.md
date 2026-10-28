@@ -32,6 +32,13 @@ keychain first in the search list, retaining every other entry and their order
 without changing the default keychain;
 local archives also pin codesign to the dedicated keychain.
 
+Physical-device screenshot and navigation checks must stay silent. Pause
+playback, set the transient backend master gain to zero, and mute Training
+cues before exercising screens. Repeat this after reloads or loading a song,
+which can restore its saved gain. Do not change the singer's saved volume or
+Training preferences for QA. Verify audio headroom offline; audible device
+playback requires an explicit request.
+
 For a physical-device Metro session:
 
 ```bash
