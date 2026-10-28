@@ -8420,7 +8420,8 @@ NativePlaybackSession::OutputMeter NativePlaybackSession::outputMeter() const no
     if (graph == nullptr || graph->callback.outputLimiter.state == nullptr) return {};
     return {true, graph->transportGeneration,
             graph->callback.outputPeak.load(std::memory_order_relaxed),
-            graph->callback.outputClippedBlocks.load(std::memory_order_relaxed)};
+            graph->callback.outputClippedBlocks.load(std::memory_order_relaxed),
+            zdsp::builtinMeter(graph->callback.outputLimiter).rms};
   } catch (...) { return {}; }
 }
 

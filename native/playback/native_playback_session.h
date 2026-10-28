@@ -980,6 +980,7 @@ public:
     uint64_t generation{0};
     float peak{0};
     uint32_t clippedBlocks{0};
+    float rms{0};
   };
   // A bounded observation for the mobile UI: never waits behind prepare.
   OutputMeter outputMeter() const noexcept;

@@ -45,6 +45,8 @@ jest.mock('react-native-reanimated', () => {
     runOnUI: (work: (...args: unknown[]) => unknown) => work,
     scrollTo: jest.fn(),
     useAnimatedRef: () => React.useRef(null),
+    useReducedMotion: () => false,
+    useDerivedValue: (fn: () => unknown) => ({ value: fn() }),
     useFrameCallback: () => React.useRef({ setActive: jest.fn() }).current,
     useScrollOffset: jest.fn(),
     useSharedValue: (value: unknown) => React.useRef({ value }).current
