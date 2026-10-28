@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest'
 import { cldrPlural, fill, fromTag, pluralForm, resolveLocale } from '../../src/shared/i18n/rules'
 import { en } from '../../src/shared/i18n/en'
+import { tr } from '../../src/shared/i18n/tr'
 import { ru } from '../../src/shared/i18n/ru'
 import { zhCN } from '../../src/shared/i18n/zh-CN'
 import { hi } from '../../src/shared/i18n/hi'
@@ -30,8 +31,8 @@ describe('fromTag', () => {
   it('uses Traditional Chinese for Traditional readers', () => {
     for (const tag of ['zh-TW', 'zh-Hant', 'zh-Hant-TW', 'zh-HK', 'zh-MO']) expect(fromTag(tag)).toBe('zh-TW')
   })
-  it('resolves regional and legacy Asian language tags', () => {
-    for (const [tag, locale] of [['hi-IN','hi'],['hi_Latn_IN','hi'],['ja-JP','ja'],['ko-KR','ko'],['th-TH','th'],['id-ID','id'],['in-ID','id'],['vi-VN','vi'],['tl-PH','fil'],['fil-PH','fil'],['ms-MY','ms'],['zh-Hant-HK','zh-TW']]) {
+  it('resolves supported regional and legacy language tags', () => {
+    for (const [tag, locale] of [['tr-TR','tr'],['tr_TR','tr'],['tr-CY','tr'],['hi-IN','hi'],['hi_Latn_IN','hi'],['ja-JP','ja'],['ko-KR','ko'],['th-TH','th'],['id-ID','id'],['in-ID','id'],['vi-VN','vi'],['tl-PH','fil'],['fil-PH','fil'],['ms-MY','ms'],['zh-Hant-HK','zh-TW']]) {
       expect(fromTag(tag), tag).toBe(locale)
     }
   })
@@ -67,7 +68,7 @@ describe('fill and plurals', () => {
     expect(pluralForm('zh-CN', 1)).toBe('other')
   })
   it('the hand-written rules (Hermes has no PluralRules) agree with Intl', () => {
-    for (const locale of ['en', 'ru', 'zh-CN', 'hi', 'ja', 'ko', 'th', 'id', 'vi', 'fil', 'ms', 'zh-TW'] as const) {
+    for (const locale of ['en', 'ru', 'zh-CN', 'hi', 'ja', 'ko', 'th', 'id', 'vi', 'fil', 'ms', 'zh-TW', 'tr'] as const) {
       const intl = new Intl.PluralRules(locale)
       for (let n = 0; n <= 125; n++) {
         const want = intl.select(n)
@@ -120,7 +121,8 @@ describe('the dictionaries', () => {
     ['vi', vi],
     ['fil', fil],
     ['ms', ms],
-    ['zh-TW', zhTW]
+    ['zh-TW', zhTW],
+    ['tr', tr]
   ]
 
   it('English keys are namespaced and non-empty', () => {

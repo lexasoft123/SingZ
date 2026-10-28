@@ -882,7 +882,7 @@ Trusted Signing (`win.azureSignOptions`) or SignPath's OSS tier.
 
 ## Localization
 
-The desktop speaks English, Russian, Simplified and Traditional Chinese, Hindi, Japanese, Korean, Thai, Indonesian, Vietnamese, Filipino and Malay. The title bar's
+The desktop speaks English, Russian, Simplified and Traditional Chinese, Hindi, Japanese, Korean, Thai, Indonesian, Vietnamese, Filipino, Malay and Turkish. The title bar's
 flag (the kit's `LanguageSwitcher`, `compact`) picks one, or `System`, which
 follows the machine's preferred languages (`app.getPreferredSystemLanguages()`;
 Traditional Chinese is deliberately not handed Simplified). The choice lives in

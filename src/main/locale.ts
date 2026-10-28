@@ -1,6 +1,7 @@
 import { app, ipcMain } from 'electron'
 import { isLanguage, resolveLocale, setLocale, type Language, type Locale } from '../shared/i18n'
 import { register } from '../shared/i18n/core'
+import { tr } from '../shared/i18n/tr'
 import { ru } from '../shared/i18n/ru'
 import { zhCN } from '../shared/i18n/zh-CN'
 import { hi } from '../shared/i18n/hi'
@@ -60,6 +61,7 @@ export function localeState(): LocaleState {
 
 // Main has no bundle budget and must answer synchronously: every language is
 // registered up front (the renderer loads them on demand instead).
+register('tr', tr)
 register('ru', ru)
 register('zh-CN', zhCN)
 register('zh-TW', zhTW)

@@ -15,4 +15,5 @@
     <locale android:name="fil" />
     <locale android:name="ms" />
     <locale android:name="zh-TW" />
+    <locale android:name="tr" />
 </locale-config>

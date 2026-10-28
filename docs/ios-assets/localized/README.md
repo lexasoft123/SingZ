@@ -11,7 +11,7 @@ The interface follows each system language. The sample's own English lyrics stay
 
 `iphone/<App Store locale>/` contains 1320×2868 RGB PNGs for `APP_IPHONE_67`. Captures were resized with Lanczos while preserving proportions, trimming at most two outer pixels. `ipad/<App Store locale>/` contains native 2064×2752 RGB PNGs for `APP_IPAD_PRO_3GEN_129`.
 
-Locales: en-US, ru, zh-Hans, hi, ja, ko, th, id, vi, ms and zh-Hant. Apple does not offer a Filipino listing locale; Filipino captures are included in the Google Play set instead.
+Locales: en-US, ru, zh-Hans, hi, ja, ko, th, id, vi, ms, tr and zh-Hant. Apple does not offer a Filipino listing locale; Filipino captures are included in the Google Play set instead.
 
 The uploader preflights all locale folders and replaces only the specified device family:
 
@@ -20,4 +20,4 @@ scripts/with-apple-secrets.sh ruby scripts/push-ios-screenshots.rb docs/ios-asse
 scripts/with-apple-secrets.sh ruby scripts/push-ios-screenshots.rb docs/ios-assets/localized/ipad APP_IPAD_PRO_3GEN_129
 ```
 
-Apple locks screenshot edits while a version waits for review. The uploader refuses that state before changing any sets. These assets can be applied to an editable version; replacing the pending 0.26.5 images requires withdrawing and resubmitting that version.
+Apple locks screenshot edits while a version waits for review. The uploader refuses that state before changing any sets. These assets can be applied to an editable version; released 0.26.5 screenshots remain unchanged. The Turkish sets added on 28 October 2026 are prepared for the next update.

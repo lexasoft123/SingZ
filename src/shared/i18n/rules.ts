@@ -5,11 +5,11 @@
  * without the dictionaries.
  */
 
-export type Locale = 'en' | 'ru' | 'zh-CN' | 'hi' | 'ja' | 'ko' | 'th' | 'id' | 'vi' | 'fil' | 'ms' | 'zh-TW'
+export type Locale = 'en' | 'ru' | 'zh-CN' | 'hi' | 'ja' | 'ko' | 'th' | 'id' | 'vi' | 'fil' | 'ms' | 'zh-TW' | 'tr'
 /** What the preference stores: a locale, or `system` to follow the machine. */
 export type Language = Locale | 'system'
 
-export const LOCALE_VALUES: readonly Locale[] = ['en', 'ru', 'zh-CN', 'hi', 'ja', 'ko', 'th', 'id', 'vi', 'fil', 'ms', 'zh-TW']
+export const LOCALE_VALUES: readonly Locale[] = ['en', 'ru', 'zh-CN', 'hi', 'ja', 'ko', 'th', 'id', 'vi', 'fil', 'ms', 'zh-TW', 'tr']
 
 export function isLanguage(v: unknown): v is Language {
   return v === 'system' || (typeof v === 'string' && (LOCALE_VALUES as readonly string[]).includes(v))
@@ -28,6 +28,7 @@ export function fromTag(tag: string): Locale | null {
   if (lang === 'en') return 'en'
   if (lang === 'ru') return 'ru'
   if (lang === 'hi') return 'hi'
+  if (lang === 'tr') return 'tr'
   if (lang === 'tl' || lang === 'fil') return 'fil'
   if (lang === 'in') return 'id'
   if (lang === 'ja') return 'ja'
