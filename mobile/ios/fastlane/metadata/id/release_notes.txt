@@ -1,1 +1,1 @@
-Simpan volume per lagu, tingkatkan hingga +12 dB, dan pantau clipping. Periksa pengaturan sebelum latihan, lalu kembali ke halaman latihan setelah selesai. Pustaka Drive diperbarui tanpa mengganggu tampilan. Sembilan bahasa antarmuka baru dan perbaikan kontrol yang terpotong.
+Panduan singkat membantu Anda mengenal kontrol lagu, mixer, dan latihan. Bahasa Turki, Spanyol Amerika Latin, dan Portugis Brasil kini tersedia. Tampilan puncak volume lebih jelas dan keandalan pemutaran ditingkatkan.
