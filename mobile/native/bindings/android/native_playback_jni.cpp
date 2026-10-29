@@ -1102,11 +1102,11 @@ static_assert(
 
 static jdoubleArray nativePlaybackOutputMeter(JNIEnv *env, jobject) {
   const auto meter = owner().session.outputMeter();
-  const jdouble values[4] = {meter.available ? 1.0 : 0.0,
+  const jdouble values[5] = {meter.available ? 1.0 : 0.0,
       static_cast<jdouble>(meter.generation), meter.peak,
-      static_cast<jdouble>(meter.clippedBlocks)};
-  jdoubleArray out = env->NewDoubleArray(4);
-  if (out != nullptr) env->SetDoubleArrayRegion(out, 0, 4, values);
+      static_cast<jdouble>(meter.clippedBlocks), meter.rms};
+  jdoubleArray out = env->NewDoubleArray(5);
+  if (out != nullptr) env->SetDoubleArrayRegion(out, 0, 5, values);
   return out;
 }
 

@@ -23,6 +23,14 @@ For _fastlane_ installation instructions, see [Installing _fastlane_](https://do
 
 Create/renew the signing certificate and profile in the certs repo (LOCAL ONLY — never CI)
 
+### ios debug_signing
+
+```sh
+[bundle exec] fastlane ios debug_signing
+```
+
+Refresh development signing for physical-device Metro debugging (LOCAL ONLY)
+
 ### ios add_device
 
 ```sh

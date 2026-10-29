@@ -3,11 +3,64 @@
 TestFlight and the App Store both take the same `.ipa`, exported with
 `export_method: app-store` and built once per run by
 [`mobile/ios/fastlane/Fastfile`](../mobile/ios/fastlane/Fastfile). That IPA is
-**not** the sis-motors.ru sideload build — that one is development-signed and
+**not** the sis-motors.ru sideload build — that one is ad-hoc-signed and
 installs over `itms-services://`; this one is App Store-signed and is only
 ever valid inside App Store Connect. Two different certificate types, two
 different pipelines; invoke the user-global `ship-ios-ipa` skill by name for
 the other one.
+
+## Local signing: dedicated SingZ keychain
+
+Always use `~/Library/Keychains/singz-ios-signing.keychain-db` for local iOS
+signing, including physical-device Metro debug builds. Its independent
+password is the `singz_keychain_password` entry in the shared SOPS store
+`.keys/secrets.enc.yaml` beside the main checkout. Do not use or request the
+Mac login-keychain password. Do not substitute `MATCH_PASSWORD` (the signing
+repo) or `mac_p12_password` (a certificate export).
+
+Run signing commands through `scripts/with-apple-secrets.sh`. It writes the
+keychain password into a mode-600 temporary file referenced by
+`SINGZ_SIGNING_KEYCHAIN_PASSWORD_FILE`, exports the dedicated path as
+`SINGZ_SIGNING_KEYCHAIN_PATH`, and deletes the temporary file on exit. The
+password value is not exported into Xcode's script-phase environment.
+Fastlane runs `scripts/prepare-ios-keychain.py` before importing assets,
+reads that file into the match action's `keychain_password` option, and
+imports into the dedicated keychain. After import, Fastlane explicitly runs the helper with `--authorize` to
+configure the dedicated signing-key partition list for Apple tools and codesign;
+this does not rely on match detecting partition-list support correctly. The preparation helper puts the dedicated
+keychain first in the search list, retaining every other entry and their order
+without changing the default keychain;
+local archives also pin codesign to the dedicated keychain.
+
+Physical-device screenshot and navigation checks must stay silent. Pause
+playback, set the transient backend master gain to zero, and mute Training
+cues before exercising screens. Repeat this after reloads or loading a song,
+which can restore its saved gain. Do not change the singer's saved volume or
+Training preferences for QA. Verify audio headroom offline; audible device
+playback requires an explicit request.
+
+For a physical-device Metro session:
+
+```bash
+scripts/with-apple-secrets.sh bash -c 'cd mobile/ios && bundle exec fastlane ios debug_signing'
+# Start Metro from mobile/ (default port 8081), then build Debug with:
+# CODE_SIGN_STYLE=Manual
+# PROVISIONING_PROFILE_SPECIFIER="match Development io.s-dev.singz"
+# CODE_SIGN_IDENTITY="Apple Development" DEVELOPMENT_TEAM=USJ7H3X44X
+# OTHER_CODE_SIGN_FLAGS="--keychain $HOME/Library/Keychains/singz-ios-signing.keychain-db"
+```
+
+Before a direct Xcode build, run the preparation helper through the secrets
+wrapper if the dedicated keychain is locked. Always select the dedicated
+keychain explicitly for direct codesign/Xcode commands. The development
+profile is only for Metro debugging; OTA shipping remains ad-hoc and must
+include every enabled registered device. GitHub Actions retains its separate
+temporary keychain and generated password.
+
+If `singz_keychain_password` is absent or cannot be decrypted, report that
+specific prerequisite instead of falling back to the login keychain or a GUI
+prompt. Generate and save a new password only when creating a new keychain;
+never silently rotate an existing keychain's stored password.
 
 ## What the API cannot do
 
@@ -253,7 +306,8 @@ metadata tree covers the copyright string, which is otherwise a
 `.keys/secrets.enc.yaml`, encrypted with [SOPS](https://github.com/getsops/sops)
 to the age key at `~/.config/sops/age/keys.txt`. It holds the API key id, the
 issuer id, the `.p8` body, the match passphrase, the App Review contact
-(`review_*`) and the Developer ID `.p12` export password
+(`review_*`) the dedicated signing-keychain password (`singz_keychain_password`),
+and the Developer ID `.p12` export password
 (`mac_p12_password`, for a local signed macOS build — nothing reads it
 automatically; CI signs from its own repo secret. See
 [MACOS-SIGNING.md](MACOS-SIGNING.md)), and optionally an Apple ID login
@@ -268,7 +322,9 @@ show the structure.
 `SINGZ_APPLE_ID` when the store carries them — writes the `.p8` to a mode-600 temp file pointed at
 by `SINGZ_ASC_KEY_PATH` (and any Apple ID password to a second one, pointed at by `SINGZ_APPLE_ID_PASSWORD_FILE`), runs the command, and deletes the temp files on the
 way out, so no secret reaches a shell history, a process argument list, or a
-file that outlives the command. The script's own header is the list of
+file that outlives the command. The wrapper also exports `SINGZ_SIGNING_KEYCHAIN_PATH` and a mode-600 password-file path,
+`SINGZ_SIGNING_KEYCHAIN_PASSWORD_FILE`, for the dedicated local signing keychain.
+The script's own header is the list of
 record; keep it and this sentence in step.
 
 Read a value by hand with `sops -d .keys/secrets.enc.yaml`. Edit or rotate

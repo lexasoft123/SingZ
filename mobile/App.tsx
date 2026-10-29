@@ -15,6 +15,7 @@ import RootNavigator from './src/ui/RootNavigator'
 import BottomTabs, { type RootTab, type RootTabParamList } from './src/ui/BottomTabs'
 import TrainingScreen, { type MobileSongTrainingFacts } from './src/ui/TrainingScreen'
 import { C } from './src/ui/bits'
+import { dismissTabModals } from './src/ui/tab-modal-dismissal'
 import { KEY_DETECT_VERSION } from './src/gen/analysis-lib'
 import { LoadedSongSequence } from './src/training/runtime'
 import { TEST } from './src/ui/testhooks'
@@ -899,6 +900,7 @@ export default function App(): React.JSX.Element {
     if (trainingHandoff.current) return trainingHandoff.current
     setTrainingOwnershipReady(false)
     const pending = (async (): Promise<boolean> => {
+      if (navigationRef.isReady() && !await dismissTabModals(navigationRef)) return false
       const safe = await iosNativePlayback.stopForOwnership('vocal training requested audio ownership')
       if (!safe) {
         log('native-playback', 'Train tab blocked because native output cleanup is uncertain', 'error')
@@ -953,8 +955,11 @@ export default function App(): React.JSX.Element {
         void enterTraining()
         return
       }
-      changeTab(next)
-      if (navigationRef.isReady()) navigationRef.navigate(next)
+      void (async () => {
+        if (navigationRef.isReady() && !await dismissTabModals(navigationRef)) return
+        changeTab(next)
+        if (navigationRef.isReady()) navigationRef.navigate(next)
+      })()
     },
     [changeTab, enterTraining, navigationRef]
   )
@@ -966,8 +971,11 @@ export default function App(): React.JSX.Element {
   // const 100 lines further down, so up there it is a temporal-dead-zone
   // ReferenceError on the first paint.
   useEffect(() => {
-    if (TEST) TEST.navigateToTab = navigateToTab
-  }, [navigateToTab])
+    if (TEST) {
+      TEST.navigateToTab = navigateToTab
+      TEST.navigation = navigationRef
+    }
+  }, [navigateToTab, navigationRef])
 
   const updateTrainingFacts = useCallback(
     (facts: { keyInfo: MobileSongTrainingFacts['keyInfo']; transpose: number }) => {
