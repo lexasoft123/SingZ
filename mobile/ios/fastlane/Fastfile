@@ -32,6 +32,20 @@ BUNDLE_ID  = "io.s-dev.singz"
 SCHEME     = "SingZPlayer"
 WORKSPACE  = File.join(IOS_DIR, "SingZPlayer.xcworkspace")
 
+def local_signing_options
+  return {} if ENV["GITHUB_ACTIONS"]
+  password_file = ENV["SINGZ_SIGNING_KEYCHAIN_PASSWORD_FILE"]
+  keychain = ENV["SINGZ_SIGNING_KEYCHAIN_PATH"]
+  UI.user_error!("Run through scripts/with-apple-secrets.sh; SOPS must contain singz_keychain_password.") if password_file.to_s.empty? || keychain.to_s.empty?
+  sh("python3", File.join(REPO_ROOT, "scripts/prepare-ios-keychain.py"))
+  { keychain_name: keychain, keychain_password: File.read(password_file) }
+end
+
+def authorize_local_signing
+  return if ENV["GITHUB_ACTIONS"]
+  sh("python3", File.join(REPO_ROOT, "scripts/prepare-ios-keychain.py"), "--authorize")
+end
+
 # TestFlight's Beta App Description — what a tester reads before installing.
 # Shorter and more direct than the store description: they have already
 # decided to try it, so this says what to do first and what to look at.
@@ -282,9 +296,19 @@ platform :ios do
     # Both profile types share ONE Apple Distribution certificate — match
     # reuses it rather than minting a second, which matters because Apple
     # caps them. Ad-hoc is what the sis-motors.ru install page serves.
-    match(type: "appstore", readonly: false, api_key: key)
-    match(type: "adhoc", readonly: false, api_key: key, force_for_new_devices: true)
+    signing = local_signing_options
+    match(type: "appstore", readonly: false, api_key: key, **signing)
+    match(type: "adhoc", readonly: false, api_key: key, force_for_new_devices: true, **signing)
+    authorize_local_signing
     UI.success("Certificates and profiles are in the certs repo. CI can now fetch them readonly.")
+  end
+
+  desc "Refresh development signing for physical-device Metro debugging (LOCAL ONLY)"
+  lane :debug_signing do
+    UI.user_error!("Development signing setup is local only.") if ENV["CI"]
+    match(type: "development", readonly: false, api_key: api_key,
+      force_for_new_devices: true, **local_signing_options)
+    authorize_local_signing
   end
 
   # Ad-hoc profiles only install on UDIDs registered with the team, so a new
@@ -834,7 +858,8 @@ private_lane :install_signing do |options|
   # readonly on purpose, everywhere this runs — see the top of this file.
   # git_url/app_identifier come from the Matchfile so local and CI cannot
   # drift apart; only the auth differs, and that is environment.
-  match(type: options[:type] || "appstore", readonly: true, api_key: options[:api_key])
+  match(type: options[:type] || "appstore", readonly: true, api_key: options[:api_key], **local_signing_options)
+  authorize_local_signing
 end
 
 private_lane :archive do |options|
@@ -876,6 +901,9 @@ private_lane :archive do |options|
     # team … matching 'iphoneos*]=Apple Distribution' found".
   ]
   signing_args << "DEVELOPMENT_TEAM=#{team_id}" unless team_id.to_s.empty?
+  unless ENV["GITHUB_ACTIONS"]
+    signing_args << %(OTHER_CODE_SIGN_FLAGS="--keychain #{ENV.fetch('SINGZ_SIGNING_KEYCHAIN_PATH')}")
+  end
 
   archive_path = File.join(REPO_ROOT, "build-ios/SingZ-native.xcarchive")
   native_inputs = nil

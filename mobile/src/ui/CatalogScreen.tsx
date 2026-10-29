@@ -1,3 +1,5 @@
+import { ScreenBackground } from './ScreenBackground'
+import { useMobileLayout } from './uiKit'
 import { mobileSongVolumePersistence } from '../playback/song-volume-persistence'
 import { Icon } from '@singz/ui/native/icons'
 import { HeaderIconButton } from './HeaderIconButton'
@@ -7,7 +9,6 @@ import {
   ActivityIndicator,
   Alert,
   DeviceEventEmitter,
-  Image,
   Keyboard,
   Platform,
   Pressable,
@@ -110,7 +111,7 @@ import {
   type AnalysisProgress
 } from '../analysis/run'
 import { SPLIT_STEMS } from '../split/adopt'
-import { getLocale, t, tn } from '../i18n'
+import { getLocale, t, tn, type Key } from '../i18n'
 import { records as moveRecords } from '../publish-record'
 import {
   abandonMove,
@@ -121,7 +122,6 @@ import {
   type BatchResult
 } from '../publish'
 
-const BG = require('../../assets/bg/catalog.png')
 const GDRIVE_ICON = require('../../assets/gdrive.png')
 const SAMPLE_PROJECT = require('../../assets/sample/project.json') as ProjectDoc
 const SAMPLE_LYRICS = require('../../assets/sample/lyrics.json') as LyricsDoc
@@ -139,6 +139,12 @@ const SAMPLE_DIR = '~sample'
  *  shorter than the screen and the box is clutter over something already
  *  readable; above it, finding a song by scrolling stops working. */
 const SEARCH_FROM = 8
+
+// iPhone and iPad are untranslated product names in every library locale.
+// Keep the existing sentence translations while naming the actual device,
+// including when an iPad window is as narrow as a phone.
+const iosLibraryText = (key: Extract<Key, `phone.library.${string}Iphone`>): string =>
+  t(key).replaceAll('iPhone', Platform.OS === 'ios' && Platform.isPad ? 'iPad' : 'iPhone')
 
 interface Loading {
   dir: string
@@ -269,6 +275,10 @@ export default function CatalogScreen({
 }): React.JSX.Element {
   const isFocused = useIsFocused()
   const insets = useSafeAreaInsets()
+  const layout = useMobileLayout()
+  const catalogWidth = Math.min(layout.width, 1120)
+  const twoColumns = catalogWidth >= 900 * Math.max(1, layout.fontScale)
+  const cardWidth = twoColumns ? (catalogWidth - 40 - 16) / 2 : undefined
   const [root, setRoot] = useState<RootInfo | null>(null)
   const [projects, setProjects] = useState<ProjectEntry[] | null>(lastShelf?.items ?? null)
   const [loading, setLoading] = useState<Loading | null>(null)
@@ -1597,7 +1607,7 @@ export default function CatalogScreen({
    *  is still here. */
   const announceMoveAll = useCallback(
     (res: BatchResult) => {
-      const here = Platform.OS === 'ios' ? t('phone.library.hereIphone') : t('phone.library.herePhone')
+      const here = Platform.OS === 'ios' ? iosLibraryText('phone.library.hereIphone') : t('phone.library.herePhone')
       const songs = (n: number): string => tn('phone.library.songsCount', n)
       const moved = res.moved.length
       const showMe = { text: t('phone.library.showMe'), onPress: () => selectMode('gdrive') }
@@ -1746,7 +1756,7 @@ export default function CatalogScreen({
     const closed = (): void => {
       confirmOpenRef.current = false
     }
-    const here = Platform.OS === 'ios' ? t('phone.library.hereIphone') : t('phone.library.herePhone')
+    const here = Platform.OS === 'ios' ? iosLibraryText('phone.library.hereIphone') : t('phone.library.herePhone')
     const n = offer.dirs.length
     void Promise.all(offer.dirs.map(d => moveSize(d).catch(() => 0))).then(sizes =>
       Alert.alert(
@@ -2100,55 +2110,56 @@ export default function CatalogScreen({
         )}
       </Pressable>
     )
-    // Keep the row host stable when availability adds or removes actions.
+    // The grid sizes the cell; swipe actions stay inside that cell's bounds.
     return (
-      <Swipeable
-        key={opts.key}
-        ref={m => {
-          swipeRefs.current[opts.key] = m
-        }}
-        /* A LOADING card must not swipe: the revealed actions landed under
-           the cancel ✕ (photographed on the user's phone mid-decode), and
-           deleting a song while its stems decode is not a state anyone
-           meant. */
-        enabled={!isLoading && acts.length > 0}
-        /* Default activation is 10px — inside a real finger's tap jitter, so
-           on the phone a plain TAP could fling the row open (the simulator's
-           mouse taps are pixel-perfect, which is why it never showed there).
-           24px demands a deliberate pull and costs an intentional swipe
-           nothing. */
-        dragOffsetFromRight={-24}
-        overshootRight={false}
-        containerStyle={s.swipeRow}
-        renderRightActions={(progress, _translation, methods) => (
-          <SwipeActions
-            progress={progress}
-            actions={acts.map(a => ({
-              ...a,
-              onPress: () => {
-                methods.close()
-                a.onPress()
-              }
-            }))}
-          />
-        )}
-      >
-        {body}
-      </Swipeable>
+      <View key={opts.key} collapsable={false} style={twoColumns && { width: cardWidth }}>
+        <Swipeable
+          ref={m => {
+            swipeRefs.current[opts.key] = m
+          }}
+          /* A LOADING card must not swipe: the revealed actions landed under
+             the cancel ✕ (photographed on the user's phone mid-decode), and
+             deleting a song while its stems decode is not a state anyone
+             meant. */
+          enabled={!isLoading && acts.length > 0}
+          /* Default activation is 10px — inside a real finger's tap jitter, so
+             on the phone a plain TAP could fling the row open (the simulator's
+             mouse taps are pixel-perfect, which is why it never showed there).
+             24px demands a deliberate pull and costs an intentional swipe
+             nothing. */
+          dragOffsetFromRight={-24}
+          overshootRight={false}
+          containerStyle={[s.swipeRow, twoColumns && { marginBottom: 0 }]}
+          renderRightActions={(progress, _translation, methods) => (
+            <SwipeActions
+              progress={progress}
+              actions={acts.map(a => ({
+                ...a,
+                onPress: () => {
+                  methods.close()
+                  a.onPress()
+                }
+              }))}
+            />
+          )}
+        >
+          {body}
+        </Swipeable>
+      </View>
     )
   }
 
   if (!shelfReady) return (
     <View style={{ flex: 1, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center' }}>
-      <Image source={BG} style={StyleSheet.absoluteFill} resizeMode="cover" />
+      <ScreenBackground />
       <ActivityIndicator color={C.amber} />
     </View>
   )
 
   return (
     <View style={{ flex: 1, backgroundColor: C.bg }}>
-      <Image source={BG} style={StyleSheet.absoluteFill} resizeMode="cover" />
-      <View style={[s.wrap, { paddingTop: insets.top + 6 }]}>
+      <ScreenBackground />
+      <View testID="library-workspace" style={[s.wrap, { paddingTop: insets.top + 6, width: '100%', maxWidth: 1120, alignSelf: 'center' }]}>
         {/* eyebrow brand row: logo + wordmark tucked beside the cutout */}
         <View style={s.brandRow}>
           <StemTile hue={0} size={26} />
@@ -2174,7 +2185,7 @@ export default function CatalogScreen({
             },
             {
               key: 'phone',
-              label: Platform.OS === 'ios' ? t('phone.library.thisIphone') : t('phone.library.thisPhone'),
+              label: Platform.OS === 'ios' ? iosLibraryText('phone.library.thisIphone') : t('phone.library.thisPhone'),
               glyph: (c: string) => <PhoneGlyph color={c} />
             }
           ]}
@@ -2199,7 +2210,7 @@ export default function CatalogScreen({
               ? t('phone.library.folderSrcTitle')
               : mode === 'phone' && projects !== null && projects.length === 0
               ? Platform.OS === 'ios'
-                ? t('phone.library.songsAddedIphone')
+                ? iosLibraryText('phone.library.songsAddedIphone')
                 : t('phone.library.songsAddedPhone')
               : null
           const inner = (
@@ -2264,7 +2275,7 @@ export default function CatalogScreen({
                 <>
                   <Text style={s.ctxWho} numberOfLines={1}>
                     {Platform.OS === 'ios'
-                      ? t('phone.library.filesCopiedIphone')
+                      ? iosLibraryText('phone.library.filesCopiedIphone')
                       : t('phone.library.filesCopiedPhone')}
                   </Text>
                   <Text style={s.ctxDot}>·</Text>
@@ -2693,6 +2704,7 @@ export default function CatalogScreen({
             return (
               <>
                 {grouped && <Text style={s.grp}>{t('phone.library.ready')}</Text>}
+                <View testID="library-ready-songs" style={twoColumns && s.songGrid}>
                 {readyShown.map(renderEntry)}
                 {sampleShown &&
                   card({
@@ -2708,8 +2720,9 @@ export default function CatalogScreen({
                     sample: true,
                     onPress: () => void openSample()
                   })}
+                </View>
                 {grouped && <Text style={s.grp}>{t('phone.library.notReadyYet')}</Text>}
-                {pendingShown.map(renderEntry)}
+                <View style={twoColumns && s.songGrid}>{pendingShown.map(renderEntry)}</View>
               </>
             )
           })()}
@@ -2732,7 +2745,7 @@ export default function CatalogScreen({
             <Text style={s.empty}>
               {mode === 'phone'
                 ? Platform.OS === 'ios'
-                  ? t('phone.library.noSongsIphone')
+                  ? iosLibraryText('phone.library.noSongsIphone')
                   : t('phone.library.noSongsPhone')
                 : mode === 'gdrive'
                 ? driveOn
@@ -2776,7 +2789,7 @@ export default function CatalogScreen({
           {driveOffer && !moveBatch && ((): React.ReactNode => {
             // "All" only when it IS all: copies of songs Drive already has
             // are the one thing that stays behind
-            const device = Platform.OS === 'ios' ? t('phone.library.deviceIphone') : t('phone.library.devicePhone')
+            const device = Platform.OS === 'ios' ? iosLibraryText('phone.library.deviceIphone') : t('phone.library.devicePhone')
             const bytes = fmtBytes(driveOffer.bytes)
             const lead =
               driveOffer.dirs.length < driveOffer.total
@@ -3014,6 +3027,7 @@ const s = StyleSheet.create({
      carries the card's bottom margin so the revealed red is exactly card
      height. */
   swipeRow: { marginBottom: 11 },
+  songGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 16, marginBottom: 16 },
   swipeActionsRow: { flexDirection: 'row', alignItems: 'stretch' },
   swipeAction: {
     width: 64,

@@ -31,7 +31,9 @@ test('every app-owned modal is a native-stack presentation', () => {
   expect(player.match(/fitContent=\{NATIVE_SHEET_FIT_SUPPORTED\}/g)).toHaveLength(3)
   expect(player).not.toMatch(/actionLabel=/)
   expect(player.match(/<SheetScrollView/g)).toHaveLength(3)
-  expect(player).toMatch(/name="Mixer"[\s\S]*<SheetScrollView[\s\S]*\{hasVocals &&[\s\S]*\{tracks\.map/)
+  expect(player).toMatch(/const mixerControls =[\s\S]*\{hasVocals &&[\s\S]*\{tracks\.map/)
+  expect(player).toMatch(/name="Mixer"[\s\S]*<SheetScrollView[\s\S]*\{mixerControls\}/)
+  expect(player).toMatch(/testID="player-mixer-panel"[\s\S]*<ScrollView[\s\S]*\{mixerControls\}/)
   expect(player.match(/contentInsetAdjustmentBehavior="never"/g)).toHaveLength(3)
 
   const bits = read('src/ui/bits.tsx')

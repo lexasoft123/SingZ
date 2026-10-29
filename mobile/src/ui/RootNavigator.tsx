@@ -1,3 +1,4 @@
+import { tabModalListeners } from './tab-modal-dismissal'
 import { AudioDiagnosticsScreen } from './AudioDiagnosticsScreen'
 import { nativePlayback } from '../playback/native'
 import { createNativeStackNavigator } from '@react-navigation/native-stack'
@@ -282,6 +283,7 @@ export default function RootNavigator({
           contentStyle: styles.root
         }}
         screenListeners={{
+          ...tabModalListeners,
           // Dev-only: the stack's route names with a timestamp on every
           // state change, so a driver can see a pop that came back (the
           // double swipe-back of 2026-09-06 was invisible to `__test.screen`,

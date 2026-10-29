@@ -22,6 +22,37 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate, AVSpeechSynthesizerDeleg
   private var trainingUtterance: AVSpeechUtterance?
   private var trainingSpeechResolve: RCTPromiseResolveBlock?
 
+  /** Fabric can detach a popped sheet's event emitter before UIKit finishes
+   * dismissing it. Confirm the actual native presentation state before tabs
+   * change, including sheets whose underlying controller stays visible. */
+  @objc(waitForNavigationModals:resolver:rejecter:)
+  func waitForNavigationModals(_ maximumCount: Int,
+                               resolver resolve: @escaping RCTPromiseResolveBlock,
+                               rejecter reject: @escaping RCTPromiseRejectBlock) {
+    let deadline = Date().addingTimeInterval(4.5)
+    func check() {
+      var count = 0
+      var transitioning = false
+      for scene in UIApplication.shared.connectedScenes {
+        guard let windowScene = scene as? UIWindowScene else { continue }
+        for window in windowScene.windows where window.isKeyWindow {
+          var controller = window.rootViewController
+          while let current = controller {
+            transitioning = transitioning || current.isBeingDismissed || current.isBeingPresented
+              || current.transitionCoordinator != nil
+            if current.presentingViewController != nil,
+               NSStringFromClass(type(of: current)).contains("RNSScreen") { count += 1 }
+            controller = current.presentedViewController
+          }
+        }
+      }
+      if count <= max(0, maximumCount) && !transitioning { resolve(true); return }
+      if Date() >= deadline { resolve(false); return }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.016, execute: check)
+    }
+    DispatchQueue.main.async(execute: check)
+  }
+
   @objc(speakTrainingInterval:language:resolver:rejecter:)
   func speakTrainingInterval(_ text: String, language: String,
                              resolver resolve: @escaping RCTPromiseResolveBlock,
