@@ -1,3 +1,4 @@
+import { es419, ptBR, desktopEs419, desktopPtBR, mobileEs419, mobilePtBR } from './latam'
 /** Copy shared by the desktop and phone tours of the actual interface. */
 export { QUICK_START_SEEN } from './meta'
 export const guideSections = [
@@ -101,8 +102,12 @@ const ru = {
   }
 } as const
 export function quickStartCopy(locale: string, platform: 'desktop' | 'mobile' = 'desktop') {
-  const copy = locale === 'ru' ? ru : en
+  const copy = locale === 'es-419' ? es419 : locale === 'pt-BR' ? ptBR : locale === 'ru' ? ru : en
   if (platform === 'mobile') return copy
+  if (locale === 'es-419' || locale === 'pt-BR') {
+    const desktop = locale === 'es-419' ? desktopEs419 : desktopPtBR
+    return { ...copy, steps: { ...copy.steps, library: desktop.library, split: desktop.split } }
+  }
   return {
     ...copy,
     steps: {
@@ -129,4 +134,12 @@ export function quickStartCopy(locale: string, platform: 'desktop' | 'mobile' = 
             ]
     }
   }
+}
+
+export function latinDesktopGuideCopy(locale: string) {
+  return locale === 'es-419' ? desktopEs419 : locale === 'pt-BR' ? desktopPtBR : undefined
+}
+
+export function latinMobileGuideCopy(locale: string) {
+  return locale === 'es-419' ? mobileEs419 : locale === 'pt-BR' ? mobilePtBR : undefined
 }

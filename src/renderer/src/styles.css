@@ -5642,7 +5642,8 @@ body.win:not(.glass) .modal-card.lyed-card {
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .header-right > .gear { flex-shrink: 0; }
+  .header-right > .gear,
+  .header-right > [data-guide="help"] { flex-shrink: 0; }
   .header-right .chip-status { min-width: 0; flex-shrink: 1; }
   .header-right .chip-label { overflow: hidden; text-overflow: ellipsis; }
 }

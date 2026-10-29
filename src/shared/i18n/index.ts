@@ -38,6 +38,8 @@ export function loadLocale(l: Locale): Promise<void> {
   let p = loaded.get(l)
   if (!p) {
     const loaders: Record<Exclude<Locale, 'en'>, () => Promise<void>> = {
+      'es-419': () => import('./es-419').then((m) => register('es-419', m.es419)),
+      'pt-BR': () => import('./pt-BR').then((m) => register('pt-BR', m.ptBR)),
       'tr': () => import('./tr').then((m) => register('tr', m.tr)),
       'ru': () => import('./ru').then((m) => register('ru', m.ru)),
       'zh-CN': () => import('./zh-CN').then((m) => register('zh-CN', m.zhCN)),
@@ -64,6 +66,8 @@ export function loadLocale(l: Locale): Promise<void> {
  *  who cannot read the current language. */
 export const LOCALES: { value: Locale; label: string; code: string }[] = [
   { value: 'en', label: 'English', code: 'EN' },
+  { value: 'es-419', label: 'Español (Latinoamérica)', code: 'ES' },
+  { value: 'pt-BR', label: 'Português (Brasil)', code: 'PT' },
   { value: 'tr', label: 'Türkçe', code: 'TR' },
   { value: 'ru', label: 'Русский', code: 'RU' },
   { value: 'zh-CN', label: '简体中文', code: 'ZH' },

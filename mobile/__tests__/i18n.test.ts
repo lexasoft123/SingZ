@@ -5,6 +5,8 @@
  * dictionaries are checked by tests/unit/i18n.test.ts at the repo root.
  */
 import { en } from '../src/i18n/en'
+import { es419 } from '../src/i18n/es-419'
+import { ptBR } from '../src/i18n/pt-BR'
 import { tr } from '../src/i18n/tr'
 import { ru } from '../src/i18n/ru'
 import { zhCN } from '../src/i18n/zh-CN'
@@ -29,7 +31,7 @@ describe('phone dictionaries', () => {
     for (const k of keys) expect(k).toMatch(/^phone\.[a-z]+\.[\w.-]+$/)
   })
 
-  for (const [name, dict] of [['ru', ru], ['zh-CN', zhCN], ['hi', hi], ['ja', ja], ['ko', ko], ['th', th], ['id', id], ['vi', vi], ['fil', fil], ['ms', ms], ['zh-TW', zhTW], ['tr', tr]] as const) {
+  for (const [name, dict] of [['ru', ru], ['zh-CN', zhCN], ['hi', hi], ['ja', ja], ['ko', ko], ['th', th], ['id', id], ['vi', vi], ['fil', fil], ['ms', ms], ['zh-TW', zhTW], ['tr', tr], ['pt-BR', ptBR], ['es-419', es419]] as const) {
     it(`${name} has every key, nothing empty, nothing extra`, () => {
       expect(keys.filter((k) => !dict[k]?.trim())).toEqual([])
       const allowed = new Set<string>([...keys, ...stems.flatMap((s) => [`${s}_few`, `${s}_many`])])
@@ -40,7 +42,7 @@ describe('phone dictionaries', () => {
     })
   }
 
-  it.each(['hi','ja','ko','th','id','vi','fil','ms','zh-TW','tr'] as const)('%s shares the training locale with the phone', locale => {
+  it.each(['hi','ja','ko','th','id','vi','fil','ms','zh-TW','tr','es-419','pt-BR'] as const)('%s shares the training locale with the phone', locale => {
     i18nSetLocale(locale)
     expect(t('phone.app.tab.songs')).not.toBe('Songs')
     expect(t('phone.app.tab.train')).not.toBe('Train')

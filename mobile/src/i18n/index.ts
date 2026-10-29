@@ -29,6 +29,12 @@ import { training as zhTraining } from '../../../src/shared/i18n/zh-CN/training'
 import { common as enCommon } from '../../../src/shared/i18n/en/common'
 import { common as ruCommon } from '../../../src/shared/i18n/ru/common'
 import { common as zhCommon } from '../../../src/shared/i18n/zh-CN/common'
+import { es419 } from './es-419'
+import { training as es419Training } from '../../../src/shared/i18n/es-419/training'
+import { common as es419Common } from '../../../src/shared/i18n/es-419/common'
+import { ptBR } from './pt-BR'
+import { training as ptBRTraining } from '../../../src/shared/i18n/pt-BR/training'
+import { common as ptBRCommon } from '../../../src/shared/i18n/pt-BR/common'
 import { tr } from './tr'
 import { training as trTraining } from '../../../src/shared/i18n/tr/training'
 import { common as trCommon } from '../../../src/shared/i18n/tr/common'
@@ -68,6 +74,8 @@ export type { Locale } from '../../../src/shared/i18n/rules'
 
 // English training strings are registered by the bundle itself.
 i18nRegister('en', { ...enCommon, ...en })
+i18nRegister('es-419', { ...es419Common, ...es419Training, ...es419 })
+i18nRegister('pt-BR', { ...ptBRCommon, ...ptBRTraining, ...ptBR })
 i18nRegister('tr', { ...trCommon, ...trTraining, ...tr })
 i18nRegister('ru', { ...ruCommon, ...ruTraining, ...ru })
 i18nRegister('zh-CN', { ...zhCommon, ...zhTraining, ...zhCN })

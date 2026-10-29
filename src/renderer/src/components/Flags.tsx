@@ -45,6 +45,8 @@ const LanguageMark = ({ code }: { code: string }): React.JSX.Element => (
 )
 
 export const FLAGS: Record<Locale, React.JSX.Element> = {
+  "es-419": <LanguageMark code="ES" />,
+  "pt-BR": <LanguageMark code="PT" />,
   tr: <LanguageMark code="TR" />,
   en: <UK />, ru: <RU />, 'zh-CN': <CN />,
   hi: <LanguageMark code="HI" />, ja: <LanguageMark code="JA" />,

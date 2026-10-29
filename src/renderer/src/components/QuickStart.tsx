@@ -1,7 +1,7 @@
 import { useModalLock } from '@singz/ui'
 import { useLayoutEffect, useRef, useState } from 'react'
 import { useLocale } from '../i18n'
-import { quickStartCopy } from '../../../shared/quick-start'
+import { quickStartCopy, latinDesktopGuideCopy } from '../../../shared/quick-start'
 import { placeGuide, type GuideRect } from '../../../shared/quick-start/placement'
 import './quick-start.css'
 
@@ -27,6 +27,7 @@ export default function QuickStart({
   useModalLock()
   const locale = useLocale()
   const copy = quickStartCopy(locale)
+  const latin = latinDesktopGuideCopy(locale)
   const ru = locale === 'ru'
   const [index, setIndex] = useState(welcome ? -1 : 0)
   const dialog = useRef<HTMLDialogElement>(null)
@@ -37,10 +38,10 @@ export default function QuickStart({
       { target: '.browse', title: copy.steps.library[0], body: copy.steps.library[1] },
       {
         target: '.lib .src-row:first-child, .lib-head',
-        title: ru ? 'Ваша библиотека' : 'Your saved songs',
-        body: ru
+        title: latin?.savedTitle ?? (ru ? 'Ваша библиотека' : 'Your saved songs'),
+        body: latin?.savedBody ?? (ru
           ? 'Здесь находятся сохранённые проекты. Выберите песню, чтобы открыть её. После открытия повторите гид кнопкой «?», чтобы познакомиться с управлением песней.'
-          : 'Your saved projects live here. Choose a song to open it. Once it opens, replay this guide with ? to explore the player controls.'
+          : 'Your saved projects live here. Choose a song to open it. Once it opens, replay this guide with ? to explore the player controls.')
       },
       {
         target: '.split-control > button.primary',
@@ -55,21 +56,21 @@ export default function QuickStart({
       },
       {
         target: '.transport .karaoke',
-        title: ru ? 'Режим караоке' : 'Show the lyrics',
-        body: ru
+        title: latin?.lyricsTitle ?? (ru ? 'Режим караоке' : 'Show the lyrics'),
+        body: latin?.lyricsBody ?? (ru
           ? 'Включите караоке этой кнопкой: рядом с дорожками появятся текст песни и индикатор высоты голоса.'
-          : 'Turn on Karaoke here to show synced lyrics and the pitch display alongside your tracks.'
+          : 'Turn on Karaoke here to show synced lyrics and the pitch display alongside your tracks.')
       },
       {
         target: '.transport .loop',
         title: copy.steps.practice[0],
-        body: ru
+        body: latin?.loopBody ?? (ru
           ? 'Выделите фрагмент на волне и включите повтор этой кнопкой, чтобы разучить сложное место.'
-          : 'Select a passage on the waveform, then enable Loop here to practise that section repeatedly.'
+          : 'Select a passage on the waveform, then enable Loop here to practise that section repeatedly.')
       },
       {
         target: '.transport-right',
-        title: ru ? 'Удобный темп и тональность' : 'Find your tempo and key',
+        title: latin?.tempoTitle ?? (ru ? 'Удобный темп и тональность' : 'Find your tempo and key'),
         body: copy.steps.practice[1]
       },
       {
@@ -240,9 +241,9 @@ export default function QuickStart({
           </h2>
           <p id="quick-start-body">
             {index < 0
-              ? ru
+              ? latin?.welcomeBody ?? (ru
                 ? 'Подсказки покажут настоящие кнопки и панели на этом экране. Гид можно повторить в настройках или кнопкой «?».'
-                : 'Follow the balloons beside the controls on this screen. Replay the guide from Settings or with ? at any time.'
+                : 'Follow the balloons beside the controls on this screen. Replay the guide from Settings or with ? at any time.')
               : step?.body}
           </p>
           <div className="quick-start-actions">

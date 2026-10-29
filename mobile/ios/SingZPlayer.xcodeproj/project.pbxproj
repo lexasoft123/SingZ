@@ -16,6 +16,8 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		A113D1A113D1A113D1A11312 /* pt-BR */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.strings; name = "pt-BR"; path = "SingZPlayer/pt-BR.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
+		A113D1A113D1A113D1A11311 /* es-419 */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.strings; name = "es-419"; path = "SingZPlayer/es-419.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
 		A113D1A113D1A113D1A113010 /* tr */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.strings; name = tr; path = SingZPlayer/tr.lproj/InfoPlist.strings; sourceTree = "<group>"; };
 		13B07F961A680F5B00A75B9A /* SingZPlayer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SingZPlayer.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		13B07FB51A68108700A75B9A /* Images.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Images.xcassets; path = SingZPlayer/Images.xcassets; sourceTree = "<group>"; };
@@ -161,6 +163,8 @@
 				"zh-Hans",
 				hi,
 				tr,
+				"pt-BR",
+				"es-419",
 				"zh-Hant",
 				ms,
 				fil,
@@ -289,6 +293,8 @@
 				1E81A1A14998781218ED1289 /* zh-Hans */,
 				A113D1A113D1A113D1A113D1 /* hi */,
 				A113D1A113D1A113D1A113010 /* tr */,
+				A113D1A113D1A113D1A11312 /* pt-BR */,
+				A113D1A113D1A113D1A11311 /* es-419 */,
 				A113D1A113D1A113D1A113009 /* zh-Hant */,
 				A113D1A113D1A113D1A113008 /* ms */,
 				A113D1A113D1A113D1A113007 /* fil */,
