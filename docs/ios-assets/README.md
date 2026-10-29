@@ -12,8 +12,8 @@ Localized iPhone and iPad sets for the current interface are in [`localized/`](l
 
 ## Header and search creatives
 
-`creative/header-{en-US,ru,zh-Hans}.png` uses Apple's 3840×1646 header size.
-`creative/search-{en-US,ru,zh-Hans}.png` uses the 1920×1280 search-result size.
+`creative/header-<locale>.png` uses Apple's 3840×1646 header size.
+`creative/search-<locale>.png` uses the 1920×1280 search-result size.
 All are RGB PNGs without transparency. `*-preview.png` files are 800-pixel
 review copies, not upload assets. Regenerate with:
 
@@ -22,7 +22,7 @@ node scripts/make-ios-creative-assets.cjs
 ```
 
 The artwork uses the real bundled-song player capture and the interval exercise
-capture. Marketing copy is localized; captured app screens are English.
+capture. Marketing copy and captured interface controls are localized for all 14 Apple listing locales. The bundled sample song retains its English lyrics.
 There are no prices, URLs, platform logos or unsupported awards in the artwork.
 
 References: [Apple asset best practices](https://developer.apple.com/app-store/asset-best-practices/)
