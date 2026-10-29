@@ -2108,7 +2108,7 @@ export default function PlayerScreen({
       <View
         testID="player-transport"
         onLayout={event => setDockHeight(Math.round(event.nativeEvent.layout.height))}
-        style={[s.foot, { bottom: Math.max(12, insets.bottom + 2) }, layout.compact && { width: workspace.dockWidth, alignSelf: 'center', left: undefined, right: undefined, paddingTop: 8, paddingBottom: 8 }]}
+        style={[s.foot, { bottom: Math.max(12, insets.bottom + 2) }, layout.compact && { width: workspace.dockWidth, alignSelf: 'center', left: undefined, right: undefined, paddingTop: 8, paddingBottom: 8 }, workspace.sideBySide && s.footWide]}
       >
         {countInDisplay &&
           (countInDisplay.beatDots && countInSt?.kind === 'beats' ? (
@@ -2174,12 +2174,12 @@ export default function PlayerScreen({
               else unsupported('seek')
             }}
             color="rgba(255,255,255,0.85)"
-            height={40}
+            height={workspace.sideBySide ? 28 : 40}
             label={t('phone.player.transport.position')}
             valueText={(v) => fmtTime(v * engine.duration)}
             rail={(pct) => (
               <View
-                style={s.waveBand}
+                style={[s.waveBand, workspace.sideBySide && s.waveBandWide]}
                 onLayout={(e) => setBandW(Math.round(e.nativeEvent.layout.width))}
               >
                 {wave != null && bandW > 0 ? (
@@ -2245,14 +2245,14 @@ export default function PlayerScreen({
           )}
         </View>
         {/* Keep A–B centred; the output meter uses the spare space before total time. */}
-        <View style={s.timeRow}>
+        <View style={[s.timeRow, workspace.sideBySide && s.timeRowWide]}>
           <View style={s.timeSide}>
             <Text style={s.tm}>{fmtTime(dragPos !== null ? dragPos * engine.duration : pos)}</Text>
           </View>
           <Pressable
             onPress={cycleLoop}
             hitSlop={8}
-            style={[s.loopBtn, loopA !== null && s.loopBtnOn]}
+            style={[s.loopBtn, workspace.sideBySide && s.loopBtnWide, loopA !== null && s.loopBtnOn]}
             accessibilityRole="button"
             accessibilityLabel={
               loopA === null
@@ -2275,6 +2275,7 @@ export default function PlayerScreen({
         </View>
         <View style={s.btnRow}>
           <RoundBtn
+            size={workspace.sideBySide ? 36 : undefined}
             onPress={() =>
               engine.capabilities.mixer
                 ? workspace.sideBySide ? setMixerVisible(value => !value) : openMixer()
@@ -2287,6 +2288,7 @@ export default function PlayerScreen({
             <MixGlyph />
           </RoundBtn>
           <RoundBtn
+            size={workspace.sideBySide ? 36 : undefined}
             onPress={() =>
               engine.capabilities.seek ? engine.seek(0) : unsupported('seek')
             }
@@ -2297,6 +2299,7 @@ export default function PlayerScreen({
             <ToStartGlyph color={white(0.85)} />
           </RoundBtn>
           <RoundBtn
+            size={workspace.sideBySide ? 36 : undefined}
             onPress={() =>
               engine.capabilities.seek ? engine.seekBy(-5) : unsupported('seek')
             }
@@ -2306,13 +2309,15 @@ export default function PlayerScreen({
           </RoundBtn>
           <Pressable
             onPress={() => finishPlaybackAction(engine.toggle())}
-            style={[s.play, layout.compact && { width: 48, height: 48, borderRadius: 24 }]}
+            hitSlop={4}
+            style={[s.play, layout.compact && { width: 48, height: 48, borderRadius: 24 }, workspace.sideBySide && s.playWide]}
             accessibilityRole="button"
             accessibilityLabel={playing ? t('phone.player.transport.pause') : t('phone.player.transport.play')}
           >
-            <PlayPauseGlyph playing={playing} color="#17110a" />
+            <View style={workspace.sideBySide ? { transform: [{ scale: 0.8 }] } : undefined}><PlayPauseGlyph playing={playing} color="#17110a" /></View>
           </Pressable>
           <RoundBtn
+            size={workspace.sideBySide ? 36 : undefined}
             onPress={() =>
               engine.capabilities.seek ? engine.seekBy(5) : unsupported('seek')
             }
@@ -2320,7 +2325,7 @@ export default function PlayerScreen({
           >
             <Text style={s.skipText}>{t('phone.player.transport.skipForwardLabel')}</Text>
           </RoundBtn>
-          <RoundBtn onPress={() => setSheet('practice')} label={t('phone.player.transport.practice')}>
+          <RoundBtn size={workspace.sideBySide ? 36 : undefined} onPress={() => setSheet('practice')} label={t('phone.player.transport.practice')}>
             <MicGlyph />
           </RoundBtn>
         </View>
@@ -3106,6 +3111,11 @@ const s = StyleSheet.create({
     paddingHorizontal: 12,
     paddingBottom: 16
   },
+  footWide: { borderRadius: 30, paddingTop: 4, paddingBottom: 6 },
+  waveBandWide: { height: 28, borderRadius: 14 },
+  timeRowWide: { paddingTop: 2, paddingBottom: 6 },
+  loopBtnWide: { width: 34, height: 26, borderRadius: 13 },
+  playWide: { width: 40, height: 40, borderRadius: 20 },
   waveWrap: {},
   waveBand: {
     height: 40,

@@ -22,7 +22,7 @@ export function playerWorkspaceLayout(width: number, height: number, fontScale =
     workspaceWidth,
     mixerWidth,
     lyricsWidth: sideBySide ? workspaceWidth - mixerWidth - 36 : Math.min(width, 780),
-    dockWidth: Math.min(Math.max(0, workspaceWidth - 24), sideBySide ? 960 : 680)
+    dockWidth: Math.min(Math.max(0, workspaceWidth - 24), sideBySide ? 780 : 680)
   }
 }
 
