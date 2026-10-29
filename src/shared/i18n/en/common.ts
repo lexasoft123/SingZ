@@ -9,6 +9,8 @@
  * Qwen3-ASR, Demucs, song titles — are never translated.
  */
 export const common = {
+  "lang.es-419": "Spanish (Latin America)",
+  "lang.pt-BR": "Portuguese (Brazil)",
   'lang.tr': "Turkish",
   'lang.en': 'English',
   'lang.ru': 'Russian',

@@ -9,12 +9,18 @@ const tsxUnder = (dir: string): string[] =>
     return statSync(path).isDirectory() ? tsxUnder(path) : path.endsWith('.tsx') ? [path] : []
   })
 
-test('every app-owned modal is a native-stack presentation', () => {
+test('screen modals use native-stack presentations; the read-only tour is transparent', () => {
   const offenders = tsxUnder(join(ROOT, 'src', 'ui'))
     .filter((file) => /<Modal\b/.test(readFileSync(file, 'utf8')))
     .map((file) => file.slice(ROOT.length + 1))
 
-  expect(offenders).toEqual([])
+  // The coachmark is a transparent window over the retained screen, not a
+  // navigable screen or picker. Its only actions advance or dismiss the tour;
+  // it must not open another native presentation while visible.
+  expect(offenders).toEqual(['src/ui/QuickStart.tsx'])
+  const guide = read('src/ui/QuickStart.tsx')
+  expect(guide).toMatch(/<Modal[\s\S]*?transparent[\s\S]*?>/)
+  expect(guide).not.toMatch(/navigation\.(navigate|push|present)\(/)
 
   const player = read('src/ui/PlayerScreen.tsx')
   expect(player).toMatch(/presentation: 'formSheet'/)

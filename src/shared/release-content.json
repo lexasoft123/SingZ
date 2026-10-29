@@ -64,6 +64,14 @@
             "tr": {
               "title": "Her şarkıya uygun ses düzeyi",
               "description": "Çıkış düzeyini her şarkıyla birlikte kaydedin. Sessiz kayıtları +12 dB’ye kadar yükseltin ve kırpılmayı görmek için tepe göstergesini izleyin."
+            },
+            "es-419": {
+              "title": "Un volumen para cada canción",
+              "description": "Guarda el volumen de salida de cada canción. Amplifica grabaciones suaves hasta +12 dB y vigila el medidor de picos para evitar saturación."
+            },
+            "pt-BR": {
+              "title": "Um volume para cada música",
+              "description": "Salve o volume de saída de cada música. Amplifique gravações baixas em até +12 dB e acompanhe o medidor de picos para evitar distorção."
             }
           }
         },
@@ -126,6 +134,14 @@
             "tr": {
               "title": "Kontrol edin, söyleyin, geri dönün",
               "description": "Şarkı çalışmasına başlamadan önce ses aralığınızı ve ayarlarınızı kontrol edin. Çalışma bittiğinde alıştırmalara dönersiniz. Ayarlar ve günlükler elinizin altındadır."
+            },
+            "es-419": {
+              "title": "Revisa, canta y vuelve",
+              "description": "Revisa tu rango vocal y los ajustes antes de practicar una canción. Al terminar, vuelves a los ejercicios. Los ajustes y registros están a mano."
+            },
+            "pt-BR": {
+              "title": "Revise, cante e volte",
+              "description": "Confira sua extensão vocal e os ajustes antes de praticar uma música. Ao terminar, você volta aos exercícios. Os ajustes e registros ficam à mão."
             }
           }
         },
@@ -189,6 +205,14 @@
             "tr": {
               "title": "SingZ dokuz dil daha konuşuyor",
               "description": "Yeni diller: Hintçe, Japonca, Korece, Tayca, Endonezce, Vietnamca, Filipince, Malayca ve Geleneksel Çince. Uzun metinler ve dar pencereler artık daha iyi sığıyor."
+            },
+            "es-419": {
+              "title": "SingZ habla nueve idiomas más",
+              "description": "Nuevos: hindi, japonés, coreano, tailandés, indonesio, vietnamita, filipino, malayo y chino tradicional. Mejor ajuste de textos largos y ventanas estrechas."
+            },
+            "pt-BR": {
+              "title": "O SingZ fala mais nove idiomas",
+              "description": "Novos: hindi, japonês, coreano, tailandês, indonésio, vietnamita, filipino, malaio e chinês tradicional. Melhor ajuste de textos longos e janelas estreitas."
             }
           }
         }
@@ -255,6 +279,14 @@
             "tr": {
               "title": "Windows mikrofonunuzu yeniden kullanın",
               "description": "MiniFuse gibi USB ses arabirimleri dahil Windows mikrofonları yeniden başlatılabiliyor. Kaydettiğiniz mikrofon ve giriş kanalı seçimleri korunuyor. Ses yakalama başarısız olursa uygulama günlüğü, bağlantı sorununu bulmaya yardımcı olan asıl hatayı da gösteriyor."
+            },
+            "es-419": {
+              "title": "Vuelve a usar tu micrófono de Windows",
+              "description": "Los micrófonos de Windows vuelven a iniciarse, incluidas interfaces USB como MiniFuse. Se conservan tus selecciones de micrófono y canal. Si falla la captura, el registro muestra el error original para ayudar a diagnosticar la conexión."
+            },
+            "pt-BR": {
+              "title": "Use seu microfone do Windows novamente",
+              "description": "Os microfones do Windows voltam a iniciar, incluindo interfaces USB como a MiniFuse. Suas escolhas de microfone e canal são mantidas. Se a captura falhar, o registro mostra o erro original para ajudar a diagnosticar a conexão."
             }
           }
         }
@@ -323,6 +355,14 @@
             "tr": {
               "title": "Referans notalarını net duyun",
               "description": "Piyano, gitar ve org notaları, doğal atak ve uzama özelliklerini koruyarak daha yüksek sesle çalıyor. Yüksek ses ayarlarında da tepe düzeyi güvenli sınırlar içinde kalıyor."
+            },
+            "es-419": {
+              "title": "Escucha bien las notas de referencia",
+              "description": "Las notas de piano, guitarra y órgano suenan más fuertes y conservan su ataque y duración naturales. Los ajustes altos de volumen mantienen los picos sin distorsión."
+            },
+            "pt-BR": {
+              "title": "Ouça bem as notas de referência",
+              "description": "As notas de piano, guitarra e órgão soam mais alto e mantêm seu ataque e sustentação naturais. Os ajustes altos de volume mantêm os picos sem distorção."
             }
           }
         },
@@ -384,6 +424,14 @@
             "tr": {
               "title": "Alıştırmanız kesilmesin",
               "description": "Bir şarkı açıkken referans notaları çalar; Geri düğmesi alıştırmalara döndürür. Tamamlanan notalar, sonraki notaya geçmeden önce ilerleme çubuğunu doldurur. Mikrofon daha hızlı hazırlanır; geri bildirim mesajları ortalanmıştır."
+            },
+            "es-419": {
+              "title": "Sigue en tu sesión de práctica",
+              "description": "Las notas de referencia suenan con una canción abierta, Volver regresa a los ejercicios y las notas completadas llenan la barra de progreso antes de avanzar. El micrófono se prepara más rápido y los mensajes aparecen centrados."
+            },
+            "pt-BR": {
+              "title": "Continue na sua sessão de prática",
+              "description": "As notas de referência tocam com uma música aberta, Voltar retorna aos exercícios e as notas concluídas preenchem a barra de progresso antes de avançar. O microfone se prepara mais rápido e as mensagens aparecem centralizadas."
             }
           }
         },
@@ -445,6 +493,14 @@
             "tr": {
               "title": "Referans notası bitince dinlemeye devam edin",
               "description": "Referans notasını başlatmak veya yeniden çalmak artık çalışma mikrofonunu kesintiye uğratmıyor. Gerçek ses kesintileri ise çalışmayı güvenli biçimde durdurmaya devam ediyor."
+            },
+            "es-419": {
+              "title": "Sigue escuchando después de la referencia",
+              "description": "Iniciar o repetir una nota de referencia ya no interrumpe el micrófono de práctica. Las interrupciones reales del audio siguen deteniendo la sesión de forma segura."
+            },
+            "pt-BR": {
+              "title": "Continue ouvindo após a referência",
+              "description": "Iniciar ou repetir uma nota de referência não interrompe mais o microfone de treino. Interrupções reais do áudio continuam parando a sessão com segurança."
             }
           }
         }
@@ -512,6 +568,14 @@
             "tr": {
               "title": "Yenilikleriniz tek yerde",
               "description": "Her güncellemede nelerin değiştiğini görün. Haberler ve ipuçları için Telegram’da SingZ’yi takip edin."
+            },
+            "es-419": {
+              "title": "Tus novedades en un solo lugar",
+              "description": "Consulta qué cambió en cada actualización. Sigue a SingZ en Telegram para recibir noticias y consejos."
+            },
+            "pt-BR": {
+              "title": "Suas novidades em um só lugar",
+              "description": "Confira o que mudou em cada atualização. Siga o SingZ no Telegram para receber notícias e dicas."
             }
           }
         },
@@ -573,6 +637,14 @@
             "tr": {
               "title": "Sesinize daha fazla alan",
               "description": "Alıştırmalar ve çalma ekranı, iPhone Duo’nun geniş ve katlanmış ekranlarına uyum sağlar. Pencere boyutunu değiştirirken dersi ve kontrolleri görünürde tutun."
+            },
+            "es-419": {
+              "title": "Más espacio para tu voz",
+              "description": "La práctica y la reproducción se adaptan a las pantallas anchas y plegadas del iPhone Duo. Mantén la lección y los controles a la vista al cambiar el tamaño de la ventana."
+            },
+            "pt-BR": {
+              "title": "Mais espaço para sua voz",
+              "description": "O treino e a reprodução se adaptam às telas largas e dobradas do iPhone Duo. Mantenha a lição e os controles à vista ao mudar o tamanho da janela."
             }
           }
         },
@@ -634,6 +706,14 @@
             "tr": {
               "title": "Kanallarınız stüdyoya hazır",
               "description": "Kanalları ve bir klasör seçin; sonraki çalışmanız için WAV, FLAC veya MP3 olarak dışa aktarın."
+            },
+            "es-419": {
+              "title": "Tus pistas, listas para el estudio",
+              "description": "Elige las pistas y una carpeta y exporta en WAV, FLAC o MP3 para tu próxima sesión."
+            },
+            "pt-BR": {
+              "title": "Suas faixas, prontas para o estúdio",
+              "description": "Escolha as faixas e uma pasta e exporte em WAV, FLAC ou MP3 para sua próxima sessão."
             }
           }
         },
@@ -695,6 +775,14 @@
             "tr": {
               "title": "Kendi karaoke altyapınızı hazırlayın",
               "description": "Enstrümanları ve ayrılmış geri vokalleri, ana vokal olmadan birlikte dışa aktarın. Geri vokal kanalı yoksa karışım yalnızca enstrümanları içerir."
+            },
+            "es-419": {
+              "title": "Crea tu propia pista de karaoke",
+              "description": "Exporta juntos los instrumentos y los coros separados, sin la voz principal. Si no hay una pista de coros, la mezcla contiene solo instrumentos."
+            },
+            "pt-BR": {
+              "title": "Crie sua própria faixa de karaokê",
+              "description": "Exporte os instrumentos junto com os backing vocals separados, sem a voz principal. Sem uma faixa de backing vocals, a mixagem contém apenas instrumentos."
             }
           }
         },
@@ -756,6 +844,14 @@
             "tr": {
               "title": "Daha az tıklayın, daha çok söyleyin",
               "description": "M tüm kanalların sesini açar; S tüm solo seçimlerini temizler. Başa git önce seçiminizin başına, ardından şarkının başlangıcına atlar."
+            },
+            "es-419": {
+              "title": "Menos clics, más canto",
+              "description": "M activa el sonido de todas las pistas; S quita todos los solos. Ir al inicio salta primero a tu selección y después al comienzo de la canción."
+            },
+            "pt-BR": {
+              "title": "Menos cliques, mais canto",
+              "description": "M ativa o som de todas as faixas; S limpa todos os solos. Ir ao início vai primeiro à sua seleção e depois ao começo da música."
             }
           }
         }

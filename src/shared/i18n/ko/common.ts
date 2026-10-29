@@ -3,6 +3,8 @@ import type { common as en } from '../en/common'
 import type { Translation } from '../types'
 
 export const common: Translation<typeof en> = {
+  "lang.es-419": "Español (Latinoamérica)",
+  "lang.pt-BR": "Português (Brasil)",
   "lang.tr": "Türkçe",
   "lang.en": "English",
   "lang.ru": "Русский",

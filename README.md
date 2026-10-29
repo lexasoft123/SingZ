@@ -24,7 +24,7 @@ built-in setup and keeps it updated automatically.
 
 Get SingZ for [Android on Google Play](https://play.google.com/store/apps/details?id=com.lexasoft.singz) or [iPhone and iPad on the App Store](https://apps.apple.com/app/singz-sing-with-the-band/id6806430347). Download Mac, Windows and the Android APK from [GitHub Releases](https://github.com/lexasoft123/SingZ/releases/latest).
 
-The app supports English, Russian, Hindi, Japanese, Korean, Thai, Indonesian, Vietnamese, Filipino, Malay, Turkish, and Simplified and Traditional Chinese. Choose a language on desktop; mobile follows the device or per-app language setting.
+The app supports English, Russian, Hindi, Japanese, Korean, Thai, Indonesian, Vietnamese, Filipino, Malay, Turkish, Latin American Spanish, Brazilian Portuguese, and Simplified and Traditional Chinese. Choose a language on desktop; mobile follows the device or per-app language setting.
 
 ## What it does
 
