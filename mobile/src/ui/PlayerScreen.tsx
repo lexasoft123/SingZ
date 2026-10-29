@@ -1076,6 +1076,24 @@ export default function PlayerScreen({
   /** Measured band width, for the played-clip's inner copy. */
   const [bandW, setBandW] = useState(0)
 
+  // Keep thin peaks close together as the rail widens. Resample the measured
+  // envelope once per width change; both playback layers use identical steps.
+  const displayWave = useMemo(() => {
+    if (!wave || wave.length < 2 || !workspace.sideBySide) return wave
+    const steps = Math.max(wave.length, Math.min(384, Math.floor((bandW - 8) / 3.5)))
+    if (steps === wave.length) return wave
+    return Array.from({ length: steps }, (_, index) => {
+      const at = index * (wave.length - 1) / (steps - 1)
+      const left = Math.floor(at)
+      const right = Math.min(left + 1, wave.length - 1)
+      const fraction = at - left
+      return {
+        h: wave[left].h + (wave[right].h - wave[left].h) * fraction,
+        color: wave[Math.round(at)].color
+      }
+    })
+  }, [wave, bandW, workspace.sideBySide])
+
   /* Mixer presets — one tap for the thing the app exists to do. They act on
    * mute/solo ONLY, never volumes: the volumes are the singer's mix. A chip
    * lights only when the lanes exactly match it; any hand-set state lights
@@ -2182,14 +2200,14 @@ export default function PlayerScreen({
                 style={s.waveBand}
                 onLayout={(e) => setBandW(Math.round(e.nativeEvent.layout.width))}
               >
-                {wave != null && bandW > 0 ? (
+                {displayWave != null && bandW > 0 ? (
                   <>
                     {/* Unplayed: every sliver in its loudest lane's hue, dim.
                         Played: the same slivers bright, revealed by a clip
                         whose width is the position — two static rows, no
                         per-sliver recolouring on the clock. */}
                     <View pointerEvents="none" style={[s.waveRow, workspace.sideBySide && s.waveRowWide]}>
-                      {wave.map((w, i) => (
+                      {displayWave.map((w, i) => (
                         <View
                           key={i}
                           style={[
@@ -2202,7 +2220,7 @@ export default function PlayerScreen({
                     </View>
                     <View pointerEvents="none" style={[s.waveClip, { width: bandW * pct }]}>
                       <View style={[s.waveRow, workspace.sideBySide && s.waveRowWide, { width: bandW }]}>
-                        {wave.map((w, i) => (
+                        {displayWave.map((w, i) => (
                           <View
                             key={i}
                             style={[
