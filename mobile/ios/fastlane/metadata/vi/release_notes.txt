@@ -1,1 +1,1 @@
-Lưu âm lượng riêng cho từng bài, tăng tối đa +12 dB và theo dõi cắt ngọn. Kiểm tra cài đặt trước khi luyện tập và trở về trang luyện tập khi kết thúc. Thư viện Drive làm mới mà không đổi màn hình. Thêm chín ngôn ngữ giao diện và sửa các nút bị cắt.
+Hướng dẫn nhanh giúp bạn làm quen với bài hát, bộ trộn và các nút luyện tập. Thêm tiếng Thổ Nhĩ Kỳ, tiếng Tây Ban Nha Mỹ Latinh và tiếng Bồ Đào Nha Brazil. Hiển thị đỉnh âm lượng rõ hơn và cải thiện độ ổn định khi phát.

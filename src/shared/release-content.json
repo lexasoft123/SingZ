@@ -1,6 +1,222 @@
 {
-  "version": "0.26.5",
+  "version": "0.26.6",
   "releases": [
+    {
+      "version": "0.26.6",
+      "highlights": [
+        {
+          "id": "ipad-space",
+          "icon": "controls",
+          "platforms": [
+            "ios"
+          ],
+          "text": {
+            "en": {
+              "title": "Room to sing on iPad",
+              "description": "The player, library and practice screens adapt to wider windows. Open sheets close cleanly when you switch tabs."
+            },
+            "ru": {
+              "title": "Больше места для пения на iPad",
+              "description": "Плеер, библиотека и тренировки подстраиваются под широкое окно. Открытые окна аккуратно закрываются при смене вкладки."
+            },
+            "zh-CN": {
+              "title": "iPad 上有更多歌唱空间",
+              "description": "播放器、曲库和练习页面适应更宽的窗口。切换标签页时，打开的面板会先关闭。"
+            },
+            "zh-TW": {
+              "title": "iPad 上有更多歌唱空間",
+              "description": "播放器、曲庫和練習頁面適應更寬的視窗。切換分頁時，開啟的面板會先關閉。"
+            },
+            "hi": {
+              "title": "iPad पर गाने के लिए ज़्यादा जगह",
+              "description": "प्लेयर, लाइब्रेरी और अभ्यास पेज चौड़ी विंडो के अनुसार ढलते हैं। टैब बदलते समय खुले पैनल पहले बंद होते हैं।"
+            },
+            "ja": {
+              "title": "iPadで、もっと広く歌おう",
+              "description": "プレーヤー、ライブラリ、練習画面が広いウィンドウに対応。タブを切り替えると、開いているパネルが先に閉じます。"
+            },
+            "ko": {
+              "title": "iPad에서 더 넓게 노래하세요",
+              "description": "플레이어, 라이브러리, 연습 화면이 넓은 창에 맞춰집니다. 탭을 바꾸면 열려 있는 패널이 먼저 닫힙니다."
+            },
+            "id": {
+              "title": "Lebih lega bernyanyi di iPad",
+              "description": "Pemutar, pustaka dan latihan menyesuaikan jendela lebar. Panel yang terbuka ditutup dahulu saat Anda berpindah tab."
+            },
+            "vi": {
+              "title": "Thêm không gian hát trên iPad",
+              "description": "Trình phát, thư viện và trang luyện tập thích ứng với cửa sổ rộng. Bảng đang mở đóng trước khi bạn chuyển thẻ."
+            },
+            "fil": {
+              "title": "Mas maluwag kumanta sa iPad",
+              "description": "Umaangkop ang player, library at pagsasanay sa malawak na window. Nagsasara muna ang bukas na panel kapag lumipat ka ng tab."
+            },
+            "ms": {
+              "title": "Lebih ruang menyanyi pada iPad",
+              "description": "Pemain, pustaka dan latihan menyesuaikan tetingkap lebar. Panel terbuka ditutup dahulu apabila anda menukar tab."
+            },
+            "tr": {
+              "title": "iPad’de şarkı söylemeye daha çok alan",
+              "description": "Çalar, arşiv ve çalışma ekranları geniş pencerelere uyum sağlar. Sekme değiştirirken açık paneller önce kapanır."
+            },
+            "es-419": {
+              "title": "Más espacio para cantar en iPad",
+              "description": "El reproductor, la biblioteca y la práctica se adaptan a ventanas anchas. Los paneles abiertos se cierran antes de cambiar de pestaña."
+            },
+            "pt-BR": {
+              "title": "Mais espaço para cantar no iPad",
+              "description": "O reprodutor, a biblioteca e a prática se adaptam a janelas largas. Os painéis abertos fecham antes de você trocar de aba."
+            },
+            "th": {
+              "title": "พื้นที่ร้องเพลงบน iPad มากขึ้น",
+              "description": "หน้าจอเล่นเพลง คลังเพลง และการฝึกปรับตามหน้าต่างที่กว้างขึ้น แผงที่เปิดอยู่จะปิดก่อนเปลี่ยนแท็บ"
+            }
+          }
+        },
+        {
+          "id": "quick-start",
+          "icon": "news",
+          "platforms": [
+            "desktop",
+            "ios",
+            "android"
+          ],
+          "text": {
+            "en": {
+              "title": "Meet your controls",
+              "description": "A quick tour shows songs, tracks, lyrics and practice. Reopen it with ? or from Settings."
+            },
+            "ru": {
+              "title": "Знакомство с управлением",
+              "description": "Быстрый гид покажет песни, дорожки, текст и тренировки. Повторите его кнопкой ? или в настройках."
+            },
+            "zh-CN": {
+              "title": "认识操作控件",
+              "description": "快速导览带您了解歌曲、音轨、歌词和练习。可通过 ? 或设置重新打开。"
+            },
+            "zh-TW": {
+              "title": "認識操作控制項",
+              "description": "快速導覽帶您了解歌曲、音軌、歌詞和練習。可透過 ? 或設定重新開啟。"
+            },
+            "hi": {
+              "title": "नियंत्रणों को जानें",
+              "description": "परिचय में गीत, ट्रैक, बोल और अभ्यास के नियंत्रण देखें। इसे ? या सेटिंग से फिर खोलें।"
+            },
+            "ja": {
+              "title": "操作をひと通り確認",
+              "description": "クイックガイドで曲、トラック、歌詞、練習の操作を紹介します。? または設定から再表示できます。"
+            },
+            "ko": {
+              "title": "조작 방법을 알아보세요",
+              "description": "빠른 안내로 곡, 트랙, 가사, 연습 기능을 소개합니다. ? 또는 설정에서 다시 열 수 있습니다."
+            },
+            "id": {
+              "title": "Kenali kontrol Anda",
+              "description": "Panduan singkat memperkenalkan lagu, trek, lirik dan latihan. Buka lagi melalui ? atau Pengaturan."
+            },
+            "vi": {
+              "title": "Làm quen với các nút điều khiển",
+              "description": "Hướng dẫn nhanh giới thiệu bài hát, bản nhạc, lời và luyện tập. Mở lại bằng ? hoặc trong Cài đặt."
+            },
+            "fil": {
+              "title": "Kilalanin ang mga kontrol",
+              "description": "Ipinapakita ng gabay ang kanta, tracks, lyrics at pagsasanay. Buksan muli gamit ang ? o sa Settings."
+            },
+            "ms": {
+              "title": "Kenali kawalan anda",
+              "description": "Panduan ringkas memperkenalkan lagu, trek, lirik dan latihan. Buka semula melalui ? atau Tetapan."
+            },
+            "tr": {
+              "title": "Kontrolleri tanıyın",
+              "description": "Hızlı rehber şarkıları, kanalları, sözleri ve çalışmayı tanıtır. ? düğmesinden veya Ayarlar’dan yeniden açın."
+            },
+            "es-419": {
+              "title": "Conoce los controles",
+              "description": "Un recorrido rápido presenta canciones, pistas, letra y práctica. Ábrelo de nuevo con ? o desde Ajustes."
+            },
+            "pt-BR": {
+              "title": "Conheça os controles",
+              "description": "Um guia rápido apresenta músicas, faixas, letra e prática. Abra novamente com ? ou pelos Ajustes."
+            },
+            "th": {
+              "title": "รู้จักปุ่มควบคุม",
+              "description": "คู่มือแนะนำเพลง แทร็ก เนื้อเพลง และการฝึก เปิดอีกครั้งได้จาก ? หรือการตั้งค่า"
+            }
+          }
+        },
+        {
+          "id": "three-languages",
+          "icon": "news",
+          "platforms": [
+            "desktop",
+            "ios",
+            "android"
+          ],
+          "text": {
+            "en": {
+              "title": "Three more languages",
+              "description": "SingZ now speaks Turkish, Latin American Spanish and Brazilian Portuguese, on desktop and phone."
+            },
+            "ru": {
+              "title": "Ещё три языка",
+              "description": "SingZ теперь говорит по-турецки, на испанском для Латинской Америки и на бразильском португальском — на компьютере и телефоне."
+            },
+            "zh-CN": {
+              "title": "再添三种语言",
+              "description": "电脑和手机界面新增土耳其语、拉丁美洲西班牙语和巴西葡萄牙语。"
+            },
+            "zh-TW": {
+              "title": "再添三種語言",
+              "description": "電腦和手機介面新增土耳其語、拉丁美洲西班牙語和巴西葡萄牙語。"
+            },
+            "hi": {
+              "title": "तीन और भाषाएँ",
+              "description": "कंप्यूटर और फ़ोन पर अब तुर्की, लैटिन अमेरिकी स्पैनिश और ब्राज़ीलियाई पुर्तगाली में SingZ इस्तेमाल करें।"
+            },
+            "ja": {
+              "title": "さらに3言語に対応",
+              "description": "パソコンとスマートフォンでトルコ語、中南米スペイン語、ブラジルポルトガル語を選べます。"
+            },
+            "ko": {
+              "title": "세 가지 언어 추가",
+              "description": "데스크톱과 휴대폰에서 튀르키예어, 라틴 아메리카 스페인어, 브라질 포르투갈어를 선택하세요."
+            },
+            "id": {
+              "title": "Tiga bahasa lagi",
+              "description": "SingZ kini tersedia dalam bahasa Turki, Spanyol Amerika Latin dan Portugis Brasil di komputer dan ponsel."
+            },
+            "vi": {
+              "title": "Thêm ba ngôn ngữ",
+              "description": "SingZ nay có tiếng Thổ Nhĩ Kỳ, tiếng Tây Ban Nha Mỹ Latinh và tiếng Bồ Đào Nha Brazil trên máy tính và điện thoại."
+            },
+            "fil": {
+              "title": "Tatlo pang wika",
+              "description": "May Turkish, Latin American Spanish at Brazilian Portuguese na ang SingZ sa computer at telepono."
+            },
+            "ms": {
+              "title": "Tiga bahasa lagi",
+              "description": "SingZ kini tersedia dalam bahasa Turki, Sepanyol Amerika Latin dan Portugis Brazil pada komputer dan telefon."
+            },
+            "tr": {
+              "title": "Üç dil daha",
+              "description": "SingZ artık bilgisayarda ve telefonda Türkçe, Latin Amerika İspanyolcası ve Brezilya Portekizcesi konuşuyor."
+            },
+            "es-419": {
+              "title": "Tres idiomas más",
+              "description": "SingZ ahora habla turco, español latinoamericano y portugués de Brasil en computadora y teléfono."
+            },
+            "pt-BR": {
+              "title": "Mais três idiomas",
+              "description": "O SingZ agora fala turco, espanhol latino-americano e português do Brasil no computador e no celular."
+            },
+            "th": {
+              "title": "เพิ่มอีกสามภาษา",
+              "description": "SingZ รองรับภาษาตุรกี สเปนละตินอเมริกา และโปรตุเกสบราซิลบนคอมพิวเตอร์และโทรศัพท์แล้ว"
+            }
+          }
+        }
+      ]
+    },
     {
       "version": "0.26.5",
       "highlights": [
