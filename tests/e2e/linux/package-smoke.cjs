@@ -14,6 +14,7 @@ const { _electron } = require('playwright-core')
 const { wav, stemProject, driveServer, md5 } = require('./fixtures.cjs')
 
 const projectRoot = path.resolve(__dirname, '../../..')
+const packageVersion = require(path.join(projectRoot, 'package.json')).version
 const evidence = path.resolve(process.env.SINGZ_E2E_RESULTS || path.join(projectRoot, 'build/native/linux-package-e2e'))
 const executable = path.resolve(process.env.SINGZ_E2E_PACKAGED || '/opt/SingZ/singz')
 const requireLoopback = process.env.SINGZ_E2E_REQUIRE_LOOPBACK === '1'
@@ -55,11 +56,15 @@ async function launch(offline = false) {
   }, { base: drive.base, offline })
   page = await app.firstWindow(); page.setDefaultTimeout(45000)
   await page.waitForSelector('.titlebar'); await page.waitForFunction(() => Boolean(window.__test))
-  const identity = await app.evaluate(({ app }) => ({ packaged: app.isPackaged, userData: app.getPath('userData'), appData: app.getPath('appData'), resources: process.resourcesPath, electron: process.versions.electron }))
+  const identity = await app.evaluate(({ app }) => ({ packaged: app.isPackaged, userData: app.getPath('userData'), appData: app.getPath('appData'), resources: process.resourcesPath, electron: process.versions.electron, version: app.getVersion() }))
+  assert.equal(identity.version, packageVersion, 'installed package must match the build under test')
   assert.equal(identity.packaged, true); assert.equal(identity.userData, profile); assert.ok(identity.appData.startsWith(scratch), 'must isolate models/pack via standard XDG path')
   result.install ??= identity
-  await page.evaluate(() => localStorage.setItem('singz.quick-start.v1', 'seen'))
-  await page.keyboard.press('Escape')
+}
+async function dismissWelcome() {
+  const welcome = page.locator('.quick-start-overlay')
+  await welcome.getByRole('button', { name: 'Maybe later', exact: true }).click()
+  await welcome.waitFor({ state: 'detached' })
 }
 async function chooseRoute(native, inventory) {
   await page.locator('[data-guide="settings"]').click()
@@ -117,7 +122,8 @@ async function run() {
   assert.equal(process.platform, 'linux'); assert.ok(fs.existsSync(executable), executable)
   const source = await stemProject(path.join(scratch, 'drive-source'))
   drive = await driveServer(source, scratch, projectRoot)
-  fs.writeFileSync(path.join(profile, 'settings.json'), JSON.stringify({ projectsRoot: library }), { mode: 0o600 })
+  // Preseeding a library root must preserve the normal fresh-install release baseline.
+  fs.writeFileSync(path.join(profile, 'settings.json'), JSON.stringify({ projectsRoot: library, releaseNotesSeen: packageVersion }), { mode: 0o600 })
   if (process.env.SINGZ_E2E_X11_SMOKE === '1') {
     assert.equal(ozone, 'x11', 'X11 startup leg must actually request X11')
     result.audioMode = 'not-exercised-x11-window-smoke'
@@ -127,7 +133,7 @@ async function run() {
       await app.evaluate(({ BrowserWindow }, bounds) => BrowserWindow.getAllWindows()[0].setBounds(bounds), wanted)
       await page.waitForFunction(async () => (await window.singz.modelsStatus()).find(m => m.id === 'gpu-splitter')?.present, null, { timeout: 180000 })
       if (await page.locator('.wizard').count()) await page.locator('.wizard button').filter({ hasText: /^(Skip for now|Close)$/ }).click()
-      await page.keyboard.press('Escape')
+      await dismissWelcome()
       await page.locator('[data-guide="settings"]').click(); await page.getByLabel('Use native DSP playback', { exact: true }).check(); await page.keyboard.press('Escape')
       result.x11BoundsBefore = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getBounds())
       assert.equal(result.x11BoundsBefore.width, wanted.width)
@@ -149,7 +155,7 @@ async function run() {
     const started = Date.now(); let models
     do { models = await page.evaluate(() => window.singz.modelsStatus()); if (models.find(m => m.id === 'gpu-splitter')?.present) break; assert.ok(Date.now() - started < 180000, 'bundled splitter extraction deadline'); await sleep(500) } while (true)
     if (await page.locator('.wizard').count()) { const close = page.locator('.wizard button').filter({ hasText: /^(Skip for now|Close)$/ }); if (await close.count()) await close.click() }
-    await page.keyboard.press('Escape')
+    await dismissWelcome()
     result.models = models.map(m => ({ id: m.id, present: m.present })); record('bundled splitter installs without external network')
   })
   const inventory = await page.evaluate(() => window.singz.audioHostDevices('alsa')); assert.equal(inventory.ok, true)
