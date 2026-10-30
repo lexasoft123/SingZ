@@ -50,11 +50,11 @@ struct AlsaPcm final {
 
 using AlsaCapturePush = bool (*)(void*, const float*, uint32_t, uint32_t,
                                  uint64_t, uint64_t) noexcept;
-class AlsaCaptureRoute;
+class __attribute__((visibility("hidden"))) AlsaCaptureRoute;
 
 // A direction lease: subscribing does not start callbacks. Capture adapters
 // and duplex hosts share one physical capture endpoint and bounded slots.
-class AlsaCaptureLease final {
+class __attribute__((visibility("hidden"))) AlsaCaptureLease final {
  public:
   AlsaCaptureLease(const AlsaCaptureLease&) = delete;
   AlsaCaptureLease& operator=(const AlsaCaptureLease&) = delete;

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <cerrno>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -282,7 +283,11 @@ bool AlsaPcm::open(const std::string& name, bool capture, uint32_t needed,
 }
 void AlsaPcm::wake() noexcept {
   const uint64_t value = 1;
-  if (wakeFd >= 0) (void)::write(wakeFd, &value, sizeof(value));
+  if (wakeFd < 0) return;
+  ssize_t written;
+  do { written = ::write(wakeFd, &value, sizeof(value)); }
+  while (written < 0 && errno == EINTR);
+  // EAGAIN means the eventfd already contains a pending wake.
 }
 void AlsaPcm::clearWake() noexcept {
   uint64_t value = 0;

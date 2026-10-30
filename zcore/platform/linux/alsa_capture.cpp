@@ -8,7 +8,8 @@
 #include <thread>
 
 namespace singz::detail {
-class AlsaCaptureRoute final {
+// Capture ownership is internal, matching the hidden callback gate it owns.
+class __attribute__((visibility("hidden"))) AlsaCaptureRoute final {
  public:
   struct Client {
     AudioInputCallbackGate gate;
