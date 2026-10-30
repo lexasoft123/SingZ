@@ -1,7 +1,7 @@
 'use strict'
 
 // Product component packaging has one explicit iOS manifest. The checker
-// compares shared component membership with AudioZ's pinned source manifest
+// compares shared component membership with zCore's pinned source manifest
 // before either iOS copy is materialized, so source ownership drift fails
 // instead of silently producing different callback/runtime products.
 const zdspRuntimeFiles = [

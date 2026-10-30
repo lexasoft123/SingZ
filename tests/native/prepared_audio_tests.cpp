@@ -898,7 +898,7 @@ void decodeTests() {
              singz::decodedAudioFormatForExtension(".\\\\server") ==
                  singz::DecodedAudioSourceFormat::Auto,
          "extension mapping rejects paths, protocols and device spellings");
-  // MP3 is native (third_party/audio-engine/zcore/src/media/mp3_streaming_source.cpp) and built everywhere, so
+  // MP3 is native (third_party/zcore/zcore/src/media/mp3_streaming_source.cpp) and built everywhere, so
   // a build without FFmpeg reports exactly these three and nothing else.
   constexpr uint32_t native = singz::DecodedAudioCapabilityWav |
       singz::DecodedAudioCapabilityFlac | singz::DecodedAudioCapabilityMp3;

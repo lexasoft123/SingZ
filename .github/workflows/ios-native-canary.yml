@@ -67,9 +67,9 @@ on:
       - 'tests/native/**'
       - 'tests/shared/**'
       - 'third_party/native/**'
-      - 'third_party/audio-engine/**'
-      - 'third_party/audio-engine.lock.json'
-      - 'scripts/import-audioz.py'
+      - 'third_party/zcore/**'
+      - 'third_party/zcore.lock.json'
+      - 'scripts/import-zcore.py'
       - 'zcore/**'
       - 'zdsp/**'
 

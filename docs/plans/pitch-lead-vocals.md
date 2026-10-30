@@ -6,7 +6,7 @@ Existing offline math: `trackMelodyCore(mono, sampleRate, onProgress)` in
 `src/renderer/src/audio/pitch-core.ts`, `pyinTrack` in `audio/pyin.ts`, mirrored by
 `zcore/src/legacy/melody.cpp`. Stored stamps: `PITCH_DETECT_VERSION` and
 `kPitchDetectVersion`. Native live path: `zdsp::analysis::analyzeLiveInput` delegates
-to `singz::analyzeLiveInput` in `third_party/audio-engine/zcore/src/legacy/live_input_analysis.cpp`;
+to `singz::analyzeLiveInput` in `third_party/zcore/zcore/src/legacy/live_input_analysis.cpp`;
 Web Audio fallback calls `yinPitchInfo` in `audio/pitch.ts`.
 
 Research: Mauch/Dixon pYIN (https://webspace.eecs.qmul.ac.uk/s.e.dixon/pub/2014/MauchDixon-PYIN-ICASSP2014.pdf)
@@ -30,7 +30,7 @@ Time.mp3. Keep originals unchanged. Write model outputs and reports in scratch.
 Implement measured harmonic-resistant candidate selection in both TS and native
 paths; compare MPM and YIN variants on known synthetic pitch. Cover singing low
 register with an adequate analysis window, preserve genuine high notes/octave
-leaps. Use `tests/unit/pitch-core.test.ts` and `third_party/audio-engine/zdsp/tests/zdsp_analysis_tests.cpp`
+leaps. Use `tests/unit/pitch-core.test.ts` and `third_party/zcore/zdsp/tests/zdsp_analysis_tests.cpp`
 for test conventions. Change stored stamps together if offline output changes.
 Verify exact or documented native/TS parity, invalid input and silence behavior,
 strong harmonics, vibrato and real leaps. Never fold toward a target or global

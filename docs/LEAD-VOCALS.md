@@ -77,7 +77,7 @@ new vocal through the existing 16-bit FLAC encoder.
 Those two lanes cost more on disk — about 40 MB per minute of song for the
 pair — but they must not cost more in memory. Native playback streams a song
 only if EVERY lane can be streamed, and until the core had a WAV streaming
-source (`third_party/audio-engine/zcore/src/media/wav_streaming_source.cpp`) one float lane sent the
+source (`third_party/zcore/zcore/src/media/wav_streaming_source.cpp`) one float lane sent the
 whole song back to a full decode: 115 MB held against 20 MB on a phone for a
 40-second song, and a desktop open that decoded both vocal lanes in the
 renderer (2.9 s against 0.5 s for a five-minute song). The WAV source shares

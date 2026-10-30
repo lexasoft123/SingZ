@@ -1152,28 +1152,28 @@ Field laptops (QHD+ panel + weak iGPU) taught these; keep them:
   `mms-fa.onnx` is (Q4_K_M is not a candidate: it collapses when the
   language is not known).
 
-## Shared audio engine (AudioZ)
+## Shared audio engine (zCore)
 
-The reusable C++ audio foundation is maintained in the independent **AudioZ**
+The reusable C++ audio foundation is maintained in the independent **zCore**
 project. SingZ consumes a checked-in source snapshot under
-`third_party/audio-engine`, pinned by `third_party/audio-engine.lock.json`.
+`third_party/zcore`, pinned by `third_party/zcore.lock.json`.
 Normal desktop, Android and iOS builds verify and use this snapshot offline;
 they never discover a sibling checkout or fetch a floating branch.
 
-Make shared DSP/device/media changes in AudioZ, run its standalone tests, and
+Make shared DSP/device/media changes in zCore, run its standalone tests, and
 commit the reviewed change there. Update the SingZ snapshot explicitly with the
-full AudioZ commit SHA:
+full zCore commit SHA:
 
 ```sh
-python3 third_party/audio-engine/scripts/import-audioz.py \
-  --source ../AudioZ --revision <full-commit-sha> \
-  --destination third_party/audio-engine \
-  --lock third_party/audio-engine.lock.json --repository-url AudioZ
+python3 third_party/zcore/scripts/import-zcore.py \
+  --source ../zCore --revision <full-commit-sha> \
+  --destination third_party/zcore \
+  --lock third_party/zcore.lock.json --repository-url zCore
 node mobile/scripts/sync-singzcore.js
 node mobile/scripts/sync-singz-dsp-runtime.js
 ```
 
 Treat the snapshot as a dependency: do not patch its files directly. Product
 playback/session composition, detector/ML adapters and UI remain in SingZ.
-LoopZ consumes the same AudioZ project with media/analysis components disabled.
+LoopZ consumes the same zCore project with media/analysis components disabled.
 Its dependency pin can advance independently after integration checks.

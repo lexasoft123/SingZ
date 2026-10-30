@@ -30,7 +30,7 @@ if(UNIX)
   target_link_libraries(singz_native_lame PUBLIC m)
 endif()
 
-# libFLAC is supplied by the pinned AudioZ source package.
+# libFLAC is supplied by the pinned zCore source package.
 
 # Pinned Signalsmith Stretch is isolated from zdsp_runtime's strict source
 # policy: the upstream headers use std::vector/random internally, while our

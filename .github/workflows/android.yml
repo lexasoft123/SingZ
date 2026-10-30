@@ -21,8 +21,8 @@ on:
       - 'zcore/**'
       - 'zdsp/**'
       - 'third_party/native/**'
-      - 'third_party/audio-engine/**'
-      - 'third_party/audio-engine.lock.json'
+      - 'third_party/zcore/**'
+      - 'third_party/zcore.lock.json'
       - 'tools/native/**'
       - '.github/workflows/android.yml'
       - '.github/actions/mobile-build-cache/**'
@@ -60,8 +60,8 @@ on:
       - 'zcore/**'
       - 'zdsp/**'
       - 'third_party/native/**'
-      - 'third_party/audio-engine/**'
-      - 'third_party/audio-engine.lock.json'
+      - 'third_party/zcore/**'
+      - 'third_party/zcore.lock.json'
       - 'tools/native/**'
       - '.github/workflows/android.yml'
       - '.github/actions/mobile-build-cache/**'
@@ -286,8 +286,8 @@ jobs:
 
             compile_dir="$(dirname "${valid_compile_dbs[0]}")"
             callback_objects=(
-              "$compile_dir/singz-native/third_party/audio-engine/CMakeFiles/zcore_device.dir/zcore/platform/android/audio_host_android_callback.cpp.o"
-              "$compile_dir/singz-native/third_party/audio-engine/CMakeFiles/zcore_device.dir/zcore/platform/android/audio_host_android_callback_policy.cpp.o"
+              "$compile_dir/singz-native/third_party/zcore/CMakeFiles/zcore_device.dir/zcore/platform/android/audio_host_android_callback.cpp.o"
+              "$compile_dir/singz-native/third_party/zcore/CMakeFiles/zcore_device.dir/zcore/platform/android/audio_host_android_callback_policy.cpp.o"
             )
             test "${#callback_objects[@]}" -eq 2
             for object in "${callback_objects[@]}"; do

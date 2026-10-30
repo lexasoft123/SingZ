@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * Materialize the pinned AudioZ zcore package into the SingzCore pod as REAL
+ * Materialize the pinned zCore zcore package into the SingzCore pod as REAL
  * files. CocoaPods silently
  * drops source_files globs that reach above the podspec dir, and its file
  * lists skip directory symlinks too (both measured: libSingzCore.a shipped
  * without ort_env.o and the app link died on singz::ortProbeJson) — copying
  * is the only shape that works, the same lesson as patch-audio-api.js.
  *
- * Runs from mobile's postinstall. After upgrading third_party/audio-engine, rerun
+ * Runs from mobile's postinstall. After upgrading third_party/zcore, rerun
  * this + `pod install` (with a SingzCore.podspec version bump so the glob
  * re-evaluates) or Xcode keeps building the stale copy.
  */
@@ -22,7 +22,7 @@ const {
 
 const mobileRoot = join(__dirname, '..')
 const repoRoot = join(mobileRoot, '..')
-const audioEngineRoot = join(repoRoot, 'third_party', 'audio-engine')
+const audioEngineRoot = join(repoRoot, 'third_party', 'zcore')
 const src = join(audioEngineRoot, 'zcore')
 const productSrc = join(repoRoot, 'zcore')
 const dst = join(mobileRoot, 'ios', 'SingzCore', 'core')
@@ -82,14 +82,14 @@ copyTree(join(src, 'platform', 'ios'), join(dst, 'platform', 'ios'),
 
 // SingZ retains its detector/ML and split implementation locally. Keep those
 // product-owned zcore files in this compatibility pod while the shared
-// portable base comes from AudioZ. The source manifest is authoritative for
-// ownership, so a stale local copy of a shared path can never shadow AudioZ.
-const audiozManifest = JSON.parse(require('node:fs').readFileSync(
-  join(audioEngineRoot, 'audioz-source-manifest.json'), 'utf8'))
-const audiozPaths = new Set(audiozManifest.paths)
+// portable base comes from zCore. The source manifest is authoritative for
+// ownership, so a stale local copy of a shared path can never shadow zCore.
+const zcoreManifest = JSON.parse(require('node:fs').readFileSync(
+  join(audioEngineRoot, 'zcore-source-manifest.json'), 'utf8'))
+const zcorePaths = new Set(zcoreManifest.paths)
 copyTree(productSrc, dst, (name, relative) =>
   /\.(cpp|mm|h|hpp)$/.test(name) &&
-  !audiozPaths.has(`zcore/${relative}`) &&
+  !zcorePaths.has(`zcore/${relative}`) &&
   !relative.startsWith('test_support/') &&
   !callbackDefinitions.has(relative.startsWith('src/') || relative.startsWith('platform/')
     ? relative : `src/${relative}`))

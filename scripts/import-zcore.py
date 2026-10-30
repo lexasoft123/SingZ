@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export a manifest-pinned AudioZ snapshot from a local Git repository."""
+"""Export a manifest-pinned zCore snapshot from a local Git repository."""
 import argparse, hashlib, json, os, shutil, subprocess, tempfile
 from pathlib import Path, PurePosixPath
 
@@ -41,8 +41,8 @@ def main():
             raise SystemExit(f"unsupported non-regular package entry: {p}")
         files[p] = subprocess.check_output(["git", "-C", str(root), "cat-file", "blob", _oid])
         modes[p] = mode
-    manifest_bytes = files.get("audioz-source-manifest.json")
-    if manifest_bytes is None: raise SystemExit("revision has no audioz-source-manifest.json")
+    manifest_bytes = files.get("zcore-source-manifest.json")
+    if manifest_bytes is None: raise SystemExit("revision has no zcore-source-manifest.json")
     manifest = json.loads(manifest_bytes)
     missing = set(manifest["paths"]) - set(files)
     if missing: raise SystemExit(f"manifest paths missing from revision: {sorted(missing)}")
@@ -52,7 +52,7 @@ def main():
         for rel, blob in files.items():
             target = temp / rel; target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(blob)
             if modes[rel] == "100755": target.chmod(0o755)
-        repo_id = a.repository_url or (git(root, "config", "--get", "remote.origin.url") if subprocess.run(["git", "-C", str(root), "config", "--get", "remote.origin.url"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0 else "AudioZ")
+        repo_id = a.repository_url or (git(root, "config", "--get", "remote.origin.url") if subprocess.run(["git", "-C", str(root), "config", "--get", "remote.origin.url"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0 else "zCore")
         record = {"schemaVersion": 1, "repository": repo_id, "revision": rev,
                   "manifestSha256": hashlib.sha256(manifest_bytes).hexdigest(),
                   "files": {p: hashlib.sha256(b).hexdigest() for p,b in sorted(files.items())}}

@@ -4,7 +4,7 @@ Astra planning: `astra_extraction_plan` and `astra_integration_plan`, 2026-10-30
 
 ## Outcome and invariants
 
-Create an independent AudioZ source project, consumed through checked-in,
+Create an independent zCore source project, consumed through checked-in,
 SHA-256-verified source snapshots and exact Git revisions. Builds remain offline
 and do not discover sibling checkouts. Keep public C++ types, target aliases,
 compiler policies, callback ownership and audio behavior unchanged during the
@@ -19,7 +19,7 @@ and b32d465b277ad4544856373510456143f5f9e5d1e39cd0b6573a06b28b5ab7ea.
 
 ## Boundary
 
-AudioZ owns portable zcore base/audio/device/media, resample and live analysis
+zCore owns portable zcore base/audio/device/media, resample and live analysis
 compatibility, zdsp graph/runtime/analysis/control, necessary codec source inputs,
 realtime policy checks, reusable tests and benchmarks. Retain SingZ detectors,
 ML/split code, product playback/session composition and product tests locally.
@@ -30,11 +30,11 @@ composition. Keep existing SingZ:: target names as compatibility aliases.
 
 1. Record sources and validation baselines; snapshot dirty LoopZ without touching
    its active checkout. Plan in Astra before assigning implementation.
-2. Build standalone AudioZ with optional components; preserve original DSP source
+2. Build standalone zCore with optional components; preserve original DSP source
    bytes. Establish one latest shared extraction revision with source provenance. Support verified, explicit imports from a local clone/full revision.
 3. Switch SingZ CMake, desktop provenance, mobile manifests and generated pod
    mirrors to the pinned dependency. Separate retained legacy/ML targets locally.
-4. Switch isolated LoopZ integration checkout to AudioZ; adapt overlays for latest limiter telemetry, validate the upgrade, and retain
+4. Switch isolated LoopZ integration checkout to zCore; adapt overlays for latest limiter telemetry, validate the upgrade, and retain
    all unrelated existing edits. Never overwrite a changed live
    file from the initial snapshot.
 5. Validate extraction independently, then upstream containment and idle-gain
@@ -45,7 +45,7 @@ composition. Keep existing SingZ:: target names as compatibility aliases.
 
 ## Agent ownership
 
-- Cheap foundation worker: independent AudioZ project, extraction manifest,
+- Cheap foundation worker: independent zCore project, extraction manifest,
   standalone component build, tests and dependency import tools.
 - Cheap SingZ worker: desktop/root CMake, retained local code, source provenance,
   dependency pin and desktop/build/source-contract tests (excluding mobile/).
@@ -69,7 +69,7 @@ No installed or hardware acceptance is implied by offline tests.
 
 ## Delivery
 
-Keep an independently inspectable AudioZ repository and focused consumer changes.
+Keep an independently inspectable zCore repository and focused consumer changes.
 Do not release applications, install drivers, change audio devices or overwrite
 unrelated work. Commit only reviewed trees; publish no unrelated product release.
 
@@ -82,11 +82,11 @@ validation separate; explicitly report the intentional LoopZ telemetry upgrade.
 
 ## Extraction baseline evidence
 
-Astra approved staged AudioZ tree `c9d8ac3f16a0c2d2aba21df809ab3e1f272ed17d`;
+Astra approved staged zCore tree `c9d8ac3f16a0c2d2aba21df809ab3e1f272ed17d`;
 commit `367504ce94b16914477143a36d5593781060cc3f` preserves all 237 extracted
 source paths byte-for-byte. Standalone 4/4 tests pass; LoopZ upgraded baseline
 portable 64/64 pass. SingZ baseline native 57/58 pass, with the remaining Apple
-smoke requiring relocation of its shared link fixture into AudioZ. Original
+smoke requiring relocation of its shared link fixture into zCore. Original
 iOS generated source mirrors match byte-for-byte (164/34/22/27 files in the
 four components). Source/provenance checks: 104 passed, one skipped.
 
@@ -96,7 +96,7 @@ semantics before the first commit. Product sanitizer gates stay in SingZ.
 
 ## Shared optimization revision
 
-Astra approved staged AudioZ tree `b4c1b2c66582c50c57ab52fc3246e370dbb06ddd`;
+Astra approved staged zCore tree `b4c1b2c66582c50c57ab52fc3246e370dbb06ddd`;
 commit `aae2cae17fc810dedcd911c4360b2221518ca5e3` is the shared final engine pin.
 It adds exact containment batching/SSE2 and idle-gain processing, retaining
 the current limiter and its input metering. Both consumers select canonical
@@ -117,7 +117,17 @@ and Windows execution remain distinct from these compile/offline checks.
 ## Rebase onto main
 
 Rebased onto `ab87a19a` after main added Linux ALSA/libudev providers. Preserved
-those shared sources byte-for-byte in AudioZ commit
+those shared sources byte-for-byte in zCore commit
 `6565b439e67cda6f1686ffcb54f9f1afbd377c03` and advanced SingZ's pin, keeping
 Linux tests and native cache inputs pointed at the extracted package. LoopZ's
 independent pin is unchanged by this SingZ rebase.
+
+## Shared module name
+
+The shared project is now **zCore**, at `/Users/maxplanck/Dev/my/zCore`.
+SingZ's snapshot is `third_party/zcore`, locked to naming-only revision
+`b10d08f2175ac244a80ea34947fa1c2574d778fe`; LoopZ's snapshot is `vendor/zcore`,
+locked to naming-only compatibility revision
+`14056cce5be3eb43bf7749ee3041835c2c6f0805`. Each retains its preceding engine
+version and native source bytes. Build options use `ZCORE_*`; existing
+`SingZ::` targets and native C++ contracts remain available.

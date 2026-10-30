@@ -4,7 +4,7 @@ set -euo pipefail
 script_dir=$(cd "$(dirname "$0")" && pwd)
 mobile_root=$(cd "$script_dir/.." && pwd)
 repo_root=$(cd "$mobile_root/.." && pwd)
-audio_engine_root="$repo_root/third_party/audio-engine"
+audio_engine_root="$repo_root/third_party/zcore"
 test_root=$(mktemp -d)
 trap 'rm -rf "$test_root"' EXIT
 

@@ -1,32 +1,37 @@
 cmake_minimum_required(VERSION 3.20)
-project(AudioZ VERSION 1.0.0 LANGUAGES C CXX)
+project(zCore VERSION 1.0.0 LANGUAGES C CXX)
 
-option(AUDIOZ_BUILD_MEDIA "Build file and streaming media support" OFF)
-option(AUDIOZ_BUILD_ANALYSIS "Build delivery-thread analysis adapters" OFF)
-option(AUDIOZ_BUILD_TESTS "Build reusable AudioZ tests" OFF)
-option(AUDIOZ_BUILD_BENCHMARKS "Build AudioZ benchmarks" OFF)
+option(ZCORE_BUILD_MEDIA "Build file and streaming media support" OFF)
+option(ZCORE_BUILD_ANALYSIS "Build delivery-thread analysis adapters" OFF)
+option(ZCORE_BUILD_TESTS "Build reusable zCore tests" OFF)
+option(ZCORE_BUILD_BENCHMARKS "Build zCore benchmarks" OFF)
 find_package(Threads REQUIRED)
 
 if(NOT TARGET SingZ::native_build_options)
-  add_library(audioz_build_options INTERFACE)
-  add_library(SingZ::native_build_options ALIAS audioz_build_options)
-  add_library(AudioZ::build_options ALIAS audioz_build_options)
-  target_compile_options(audioz_build_options INTERFACE
+  add_library(zcore_build_options INTERFACE)
+  add_library(SingZ::native_build_options ALIAS zcore_build_options)
+  target_compile_options(zcore_build_options INTERFACE
     "$<$<C_COMPILER_ID:MSVC>:/utf-8>" "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
-  target_compile_definitions(audioz_build_options INTERFACE _USE_MATH_DEFINES)
+  target_compile_definitions(zcore_build_options INTERFACE _USE_MATH_DEFINES)
+else()
+  # Keep the new package namespace available when embedded in an app that owns
+  # the compatibility target and its compiler policy.
+  add_library(zcore_build_options INTERFACE)
+  target_link_libraries(zcore_build_options INTERFACE SingZ::native_build_options)
 endif()
+add_library(zCore::build_options ALIAS zcore_build_options)
 include(cmake/SingZRealtimeTarget.cmake)
 
 add_library(zcore_base INTERFACE)
 add_library(SingZ::zcore_base ALIAS zcore_base)
-add_library(AudioZ::base ALIAS zcore_base)
+add_library(zCore::base ALIAS zcore_base)
 target_compile_features(zcore_base INTERFACE cxx_std_20)
 target_include_directories(zcore_base INTERFACE zcore/include)
 target_link_libraries(zcore_base INTERFACE SingZ::native_build_options)
 
 add_library(zcore_resample STATIC zcore/src/legacy/resample.cpp)
 add_library(SingZ::zcore_resample ALIAS zcore_resample)
-add_library(AudioZ::resample ALIAS zcore_resample)
+add_library(zCore::resample ALIAS zcore_resample)
 target_compile_features(zcore_resample PUBLIC cxx_std_20)
 set_target_properties(zcore_resample PROPERTIES POSITION_INDEPENDENT_CODE YES)
 target_include_directories(zcore_resample PUBLIC zcore/include)
@@ -34,7 +39,7 @@ target_link_libraries(zcore_resample PUBLIC SingZ::zcore_base)
 
 add_library(zcore_live_analysis_compat STATIC zcore/src/legacy/live_input_analysis.cpp)
 add_library(SingZ::zcore_live_analysis_compat ALIAS zcore_live_analysis_compat)
-add_library(AudioZ::live_analysis_compat ALIAS zcore_live_analysis_compat)
+add_library(zCore::live_analysis_compat ALIAS zcore_live_analysis_compat)
 target_compile_features(zcore_live_analysis_compat PUBLIC cxx_std_20)
 set_target_properties(zcore_live_analysis_compat PROPERTIES POSITION_INDEPENDENT_CODE YES)
 target_include_directories(zcore_live_analysis_compat PUBLIC zcore/include)
@@ -42,7 +47,7 @@ target_link_libraries(zcore_live_analysis_compat PUBLIC SingZ::zcore_base SingZ:
 
 add_library(zcore_audio STATIC zcore/src/audio/audio_input_transport.cpp)
 add_library(SingZ::zcore_audio ALIAS zcore_audio)
-add_library(AudioZ::audio ALIAS zcore_audio)
+add_library(zCore::audio ALIAS zcore_audio)
 target_compile_features(zcore_audio PUBLIC cxx_std_20)
 set_target_properties(zcore_audio PROPERTIES POSITION_INDEPENDENT_CODE YES)
 target_include_directories(zcore_audio PUBLIC zcore/include)
@@ -72,7 +77,7 @@ set_target_properties(zcore_device_callback PROPERTIES CXX_VISIBILITY_PRESET hid
 singz_configure_realtime_target(zcore_device_callback)
 target_link_libraries(zcore_audio PUBLIC SingZ::zcore_device_callback)
 
-set(AUDIOZ_DEVICE_SOURCES
+set(ZCORE_DEVICE_SOURCES
   zcore/src/device/audio_input.cpp zcore/src/device/audio_input_wake.cpp
   zcore/src/device/audio_host.cpp zcore/src/device/audio_host_fifo.cpp
   zcore/src/device/audio_host_unsupported.cpp
@@ -80,15 +85,15 @@ set(AUDIOZ_DEVICE_SOURCES
   zcore/platform/android/audio_host_android_policy.cpp
   zcore/platform/ios/audio_host_ios_helpers.cpp)
 if(ANDROID)
-  list(APPEND AUDIOZ_DEVICE_SOURCES zcore/platform/android/audio_host_android_callback.cpp
+  list(APPEND ZCORE_DEVICE_SOURCES zcore/platform/android/audio_host_android_callback.cpp
     zcore/platform/android/audio_host_android_callback_policy.cpp
     zcore/platform/android/audio_host_android.cpp zcore/platform/android/audio_host_android_registry.cpp
     zcore/platform/android/audio_input_android.cpp zcore/platform/android/audio_input_android_registry.cpp
     zcore/platform/android/audio_input_wake_android.cpp)
 elseif(APPLE)
-  list(APPEND AUDIOZ_DEVICE_SOURCES zcore/platform/android/audio_host_android_callback_policy.cpp)
+  list(APPEND ZCORE_DEVICE_SOURCES zcore/platform/android/audio_host_android_callback_policy.cpp)
   if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-    list(APPEND AUDIOZ_DEVICE_SOURCES zcore/platform/ios/audio_host_ios_callback.cpp
+    list(APPEND ZCORE_DEVICE_SOURCES zcore/platform/ios/audio_host_ios_callback.cpp
       zcore/platform/ios/audio_host_ios_helpers.cpp zcore/platform/ios/audio_host_ios.mm
       zcore/platform/ios/audio_input_ios.mm zcore/platform/ios/audio_input_ios_session.cpp
       zcore/platform/ios/audio_input_ios_session.mm zcore/platform/ios/audio_input_wake_ios.cpp)
@@ -97,37 +102,37 @@ elseif(APPLE)
     set_property(SOURCE zcore/platform/ios/audio_host_ios_callback.cpp APPEND PROPERTY
       COMPILE_OPTIONS "-fno-exceptions;-fno-rtti")
   else()
-    list(APPEND AUDIOZ_DEVICE_SOURCES zcore/platform/macos/audio_host_macos.cpp
+    list(APPEND ZCORE_DEVICE_SOURCES zcore/platform/macos/audio_host_macos.cpp
       zcore/platform/ios/audio_input_ios_session.cpp zcore/platform/macos/audio_input_macos.cpp
       zcore/platform/macos/audio_input_wake_macos.cpp)
     set_source_files_properties(zcore/platform/macos/audio_input_macos.cpp
       zcore/platform/macos/audio_host_macos.cpp PROPERTIES COMPILE_OPTIONS "-fblocks")
   endif()
 elseif(WIN32)
-  list(APPEND AUDIOZ_DEVICE_SOURCES zcore/platform/android/audio_host_android_callback_policy.cpp
+  list(APPEND ZCORE_DEVICE_SOURCES zcore/platform/android/audio_host_android_callback_policy.cpp
     zcore/platform/windows/audio_host_windows.cpp zcore/platform/windows/audio_host_windows_helpers.cpp
     zcore/platform/windows/audio_host_windows_provider.cpp zcore/platform/windows/audio_host_asio.cpp
     zcore/platform/windows/audio_input_windows_helpers.cpp zcore/platform/ios/audio_input_ios_session.cpp
     zcore/platform/windows/audio_input_windows.cpp zcore/platform/windows/audio_input_wake_windows.cpp)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  list(APPEND AUDIOZ_DEVICE_SOURCES
+  list(APPEND ZCORE_DEVICE_SOURCES
     zcore/platform/android/audio_host_android_callback_policy.cpp
     zcore/platform/ios/audio_input_ios_session.cpp
     zcore/platform/linux/alsa_pcm.cpp zcore/platform/linux/alsa_capture.cpp
     zcore/platform/linux/audio_host_linux.cpp zcore/platform/linux/audio_input_linux.cpp
     zcore/platform/linux/audio_input_wake_linux.cpp)
 else()
-  list(APPEND AUDIOZ_DEVICE_SOURCES zcore/platform/android/audio_host_android_callback_policy.cpp
+  list(APPEND ZCORE_DEVICE_SOURCES zcore/platform/android/audio_host_android_callback_policy.cpp
     zcore/platform/ios/audio_input_ios_session.cpp zcore/platform/unsupported/audio_host_unsupported.cpp)
 endif()
-add_library(zcore_device STATIC ${AUDIOZ_DEVICE_SOURCES})
+add_library(zcore_device STATIC ${ZCORE_DEVICE_SOURCES})
 add_library(SingZ::zcore_device ALIAS zcore_device)
-add_library(AudioZ::device ALIAS zcore_device)
+add_library(zCore::device ALIAS zcore_device)
 target_compile_features(zcore_device PUBLIC cxx_std_20)
 set_target_properties(zcore_device PROPERTIES POSITION_INDEPENDENT_CODE YES)
 target_include_directories(zcore_device PUBLIC zcore/include PRIVATE zcore/platform/android)
 target_link_libraries(zcore_device PUBLIC SingZ::zcore_audio Threads::Threads)
-if(AUDIOZ_BUILD_TESTS OR (DEFINED SINGZ_CORE_TESTS AND SINGZ_CORE_TESTS))
+if(ZCORE_BUILD_TESTS OR (DEFINED SINGZ_CORE_TESTS AND SINGZ_CORE_TESTS))
   target_compile_definitions(zcore_device PRIVATE SINGZ_CORE_TESTS=1)
 endif()
 if(WIN32)
@@ -157,25 +162,25 @@ endif()
 
 add_library(zdsp_api INTERFACE)
 add_library(SingZ::zdsp_api ALIAS zdsp_api)
-add_library(AudioZ::dsp_api ALIAS zdsp_api)
+add_library(zCore::dsp_api ALIAS zdsp_api)
 target_compile_features(zdsp_api INTERFACE cxx_std_20)
 target_include_directories(zdsp_api INTERFACE zdsp/include)
 target_link_libraries(zdsp_api INTERFACE SingZ::zcore_base)
-set(AUDIOZ_GRAPH_RUNNER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/zdsp/src/runtime/graph_runner.cpp" CACHE FILEPATH
+set(ZCORE_GRAPH_RUNNER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/zdsp/src/runtime/graph_runner.cpp" CACHE FILEPATH
   "Optional validated graph-runner source overlay")
-set(AUDIOZ_BUILTIN_NODES_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/zdsp/src/runtime/builtin_nodes.cpp" CACHE FILEPATH
+set(ZCORE_BUILTIN_NODES_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/zdsp/src/runtime/builtin_nodes.cpp" CACHE FILEPATH
   "Optional validated built-in processor source overlay")
-foreach(_overlay IN ITEMS AUDIOZ_GRAPH_RUNNER_SOURCE AUDIOZ_BUILTIN_NODES_SOURCE)
+foreach(_overlay IN ITEMS ZCORE_GRAPH_RUNNER_SOURCE ZCORE_BUILTIN_NODES_SOURCE)
   if(NOT EXISTS "${${_overlay}}")
     message(FATAL_ERROR "${_overlay} does not exist: ${${_overlay}}")
   endif()
 endforeach()
 add_library(zdsp_runtime STATIC zdsp/src/api/contracts.cpp zdsp/src/runtime/realtime_arena.cpp
-  "${AUDIOZ_BUILTIN_NODES_SOURCE}" zdsp/src/runtime/decoded_buffer_source.cpp
+  "${ZCORE_BUILTIN_NODES_SOURCE}" zdsp/src/runtime/decoded_buffer_source.cpp
   zdsp/src/runtime/streaming_window_source.cpp zdsp/src/runtime/scheduled_cue_source.cpp
-  zdsp/src/runtime/scheduled_gain.cpp zdsp/src/runtime/graph_compiler.cpp "${AUDIOZ_GRAPH_RUNNER_SOURCE}")
+  zdsp/src/runtime/scheduled_gain.cpp zdsp/src/runtime/graph_compiler.cpp "${ZCORE_GRAPH_RUNNER_SOURCE}")
 add_library(SingZ::zdsp_runtime ALIAS zdsp_runtime)
-add_library(AudioZ::runtime ALIAS zdsp_runtime)
+add_library(zCore::runtime ALIAS zdsp_runtime)
 target_compile_features(zdsp_runtime PUBLIC cxx_std_20)
 set_target_properties(zdsp_runtime PROPERTIES POSITION_INDEPENDENT_CODE YES)
 target_include_directories(zdsp_runtime PUBLIC zdsp/include PRIVATE zdsp/src/runtime)
@@ -222,7 +227,7 @@ target_include_directories(zdsp_control PUBLIC zdsp/include)
 target_link_libraries(zdsp_control PUBLIC SingZ::zdsp_api)
 
 option(SINGZ_ENABLE_FFMPEG_CODECS "Enable pinned dynamic FFmpeg codecs" OFF)
-if(AUDIOZ_BUILD_MEDIA)
+if(ZCORE_BUILD_MEDIA)
   add_subdirectory(third_party/native)
   add_library(zcore_media STATIC zcore/src/media/owned_file_descriptor.cpp zcore/src/media/decoded_audio.cpp
     zcore/src/media/ffmpeg_decoder.cpp zcore/src/media/flac_io.cpp zcore/src/media/flac_streaming_source.cpp
@@ -245,7 +250,7 @@ if(AUDIOZ_BUILD_MEDIA)
     target_link_libraries(zcore_media PRIVATE SingZ::ffmpeg_dynamic)
   endif()
 endif()
-if(AUDIOZ_BUILD_ANALYSIS)
+if(ZCORE_BUILD_ANALYSIS)
   add_library(zdsp_analysis STATIC zdsp/src/analysis/pitch_analysis_module.cpp zdsp/src/analysis/crepe_tiny.cpp
     zdsp/src/analysis/capture_adapter.cpp zdsp/src/analysis/live_input_analyzer.cpp)
   add_library(SingZ::zdsp_analysis ALIAS zdsp_analysis)
@@ -257,7 +262,7 @@ if(AUDIOZ_BUILD_ANALYSIS)
     target_link_libraries(zdsp_analysis PRIVATE "-framework Accelerate")
   endif()
 endif()
-if(AUDIOZ_BUILD_TESTS)
+if(ZCORE_BUILD_TESTS)
   enable_testing()
   foreach(_test IN ITEMS zdsp_contract_tests streaming_window_source_tests zdsp_graph_tests)
     add_executable(${_test} zdsp/tests/${_test}.cpp)
@@ -290,16 +295,16 @@ if(AUDIOZ_BUILD_TESTS)
     add_test(NAME ${_test} COMMAND ${_test})
   endforeach()
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
-  add_test(NAME audioz_importer_tests
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test-import-audioz.py")
-  if(AUDIOZ_BUILD_ANALYSIS)
+  add_test(NAME zcore_importer_tests
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test-import-zcore.py")
+  if(ZCORE_BUILD_ANALYSIS)
     add_executable(zdsp_analysis_tests zdsp/tests/zdsp_analysis_tests.cpp)
     target_compile_features(zdsp_analysis_tests PRIVATE cxx_std_20)
     target_link_libraries(zdsp_analysis_tests PRIVATE SingZ::zdsp_analysis)
     add_test(NAME zdsp_analysis_tests COMMAND zdsp_analysis_tests)
   endif()
 endif()
-if(AUDIOZ_BUILD_BENCHMARKS)
+if(ZCORE_BUILD_BENCHMARKS)
   add_executable(zdsp_graph_benchmark zdsp/benchmarks/graph_benchmark.cpp)
   target_compile_features(zdsp_graph_benchmark PRIVATE cxx_std_20)
   target_link_libraries(zdsp_graph_benchmark PRIVATE SingZ::zdsp_offline)
@@ -313,7 +318,7 @@ if(AUDIOZ_BUILD_BENCHMARKS)
 endif()
 
 # Preserve the manifest interfaces consumed by existing SingZ build checks.
-function(audioz_write_source_manifest target property global_property output_name)
+function(zcore_write_source_manifest target property global_property output_name)
   set(_targets ${target})
   set(_all_sources)
   foreach(_target IN LISTS _targets)
@@ -338,8 +343,8 @@ function(audioz_write_source_manifest target property global_property output_nam
   file(APPEND "${_manifest}" ")\n")
   set_property(GLOBAL PROPERTY ${global_property} "${_manifest}")
 endfunction()
-audioz_write_source_manifest(zcore_device_callback SINGZ_ZCORE_RT_FILES SINGZ_ZCORE_RT_MANIFEST zcore-realtime-sources.cmake)
-audioz_write_source_manifest("zdsp_runtime;zdsp_host_adapter;zdsp_prototype" SINGZ_ZDSP_RT_FILES SINGZ_ZDSP_RT_MANIFEST zdsp-realtime-sources.cmake)
+zcore_write_source_manifest(zcore_device_callback SINGZ_ZCORE_RT_FILES SINGZ_ZCORE_RT_MANIFEST zcore-realtime-sources.cmake)
+zcore_write_source_manifest("zdsp_runtime;zdsp_host_adapter;zdsp_prototype" SINGZ_ZDSP_RT_FILES SINGZ_ZDSP_RT_MANIFEST zdsp-realtime-sources.cmake)
 set(_ios_manifest "${CMAKE_CURRENT_BINARY_DIR}/ios-audio-host-realtime-sources.cmake")
 file(WRITE "${_ios_manifest}" "set(SINGZ_IOS_AUDIO_HOST_RT_FILES\n")
 foreach(_f IN ITEMS zcore/platform/ios/audio_host_ios_callback.cpp zcore/platform/ios/audio_host_ios_callback.h zcore/platform/ios/audio_host_ios_session_signals.h)
@@ -360,15 +365,15 @@ set_property(GLOBAL PROPERTY SINGZ_ANDROID_AUDIO_HOST_RT_MANIFEST "${_android_ma
 add_custom_target(singz_check_zcore_realtime ALL
   COMMAND "${CMAKE_COMMAND}" "-DSINGZ_ZCORE_RT_MANIFEST=${CMAKE_CURRENT_BINARY_DIR}/zcore-realtime-sources.cmake"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckZcoreRealtime.cmake"
-  VERBATIM COMMENT "Checking AudioZ callback source policy")
+  VERBATIM COMMENT "Checking zCore callback source policy")
 add_custom_target(singz_check_zdsp_realtime ALL
   COMMAND "${CMAKE_COMMAND}" "-DSINGZ_ZDSP_RT_MANIFEST=${CMAKE_CURRENT_BINARY_DIR}/zdsp-realtime-sources.cmake"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckZdspRealtime.cmake"
-  VERBATIM COMMENT "Checking AudioZ graph callback source policy")
+  VERBATIM COMMENT "Checking zCore graph callback source policy")
 add_custom_target(singz_check_zcore_boundaries ALL
   COMMAND "${CMAKE_COMMAND}" "-DSINGZ_ZCORE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}/zcore"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckZcoreBoundaries.cmake"
-  VERBATIM COMMENT "Checking AudioZ dependency direction")
+  VERBATIM COMMENT "Checking zCore dependency direction")
 add_custom_target(singz_check_ios_audio_host_realtime ALL
   COMMAND "${CMAKE_COMMAND}" "-DSINGZ_IOS_AUDIO_HOST_RT_MANIFEST=${_ios_manifest}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckIosAudioHostRealtime.cmake"
@@ -381,25 +386,25 @@ if(APPLE)
   add_custom_target(zcore_apple_audio_host_smoke
     COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/zcore/build-apple-audio-host-smoke.sh"
       "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/apple-audio-host-smoke"
-    VERBATIM COMMENT "Building isolated AudioZ AudioHost device/simulator contracts")
+    VERBATIM COMMENT "Building isolated zCore AudioHost device/simulator contracts")
   add_custom_target(zdsp_apple_component_smoke
     COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/zdsp/build-apple-component-smoke.sh"
       "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/apple-component-smoke"
-    VERBATIM COMMENT "Building isolated AudioZ DSP device/simulator components")
+    VERBATIM COMMENT "Building isolated zCore DSP device/simulator components")
 endif()
 add_dependencies(zcore_device_callback singz_check_zcore_realtime singz_check_zcore_boundaries)
 add_dependencies(zcore_device singz_check_zcore_boundaries singz_check_ios_audio_host_realtime singz_check_android_audio_host_realtime)
 add_dependencies(zdsp_runtime singz_check_zdsp_realtime singz_check_zcore_boundaries)
 add_dependencies(zdsp_host_adapter singz_check_zdsp_realtime singz_check_zcore_boundaries)
 # Every concrete package artifact carries the dependency-direction guard.
-get_property(_audioz_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
-get_property(_audioz_subdirectories DIRECTORY PROPERTY SUBDIRECTORIES)
-foreach(_directory IN LISTS _audioz_subdirectories)
+get_property(_zcore_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+get_property(_zcore_subdirectories DIRECTORY PROPERTY SUBDIRECTORIES)
+foreach(_directory IN LISTS _zcore_subdirectories)
   get_property(_nested_targets DIRECTORY "${_directory}" PROPERTY BUILDSYSTEM_TARGETS)
-  list(APPEND _audioz_targets ${_nested_targets})
+  list(APPEND _zcore_targets ${_nested_targets})
 endforeach()
-list(REMOVE_DUPLICATES _audioz_targets)
-foreach(_target IN LISTS _audioz_targets)
+list(REMOVE_DUPLICATES _zcore_targets)
+foreach(_target IN LISTS _zcore_targets)
   if(_target MATCHES "^singz_check_")
     continue()
   endif()
@@ -409,7 +414,7 @@ foreach(_target IN LISTS _audioz_targets)
   endif()
 endforeach()
 
-if(AUDIOZ_BUILD_TESTS AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
+if(ZCORE_BUILD_TESTS AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
   add_executable(audio_host_linux_tests tests/native/audio_host_linux_tests.cpp)
   target_compile_features(audio_host_linux_tests PRIVATE cxx_std_20)
   target_compile_definitions(audio_host_linux_tests PRIVATE SINGZ_CORE_TESTS=1)

@@ -25,16 +25,16 @@ export const loadHostProofSourceEvidence = (root) => {
   const absolute = resolve(root)
   const paths = {
     test: join(absolute, 'tests', 'native', 'codec_provisioning_tests.cpp'),
-    decoder: join(absolute, 'third_party', 'audio-engine', 'zcore', 'src', 'media', 'ffmpeg_decoder.cpp'),
-    decoderInternal: join(absolute, 'third_party', 'audio-engine', 'zcore', 'src', 'media', 'decoded_audio_internal.h'),
-    decoderPublic: join(absolute, 'third_party', 'audio-engine', 'zcore', 'include', 'zcore', 'media', 'decoded_audio.h'),
+    decoder: join(absolute, 'third_party', 'zcore', 'zcore', 'src', 'media', 'ffmpeg_decoder.cpp'),
+    decoderInternal: join(absolute, 'third_party', 'zcore', 'zcore', 'src', 'media', 'decoded_audio_internal.h'),
+    decoderPublic: join(absolute, 'third_party', 'zcore', 'zcore', 'include', 'zcore', 'media', 'decoded_audio.h'),
     generator: join(absolute, 'tests', 'fixtures', 'codecs', 'generate.sh'),
     contract: join(absolute, 'tests', 'fixtures', 'codecs', 'target-contract.json'),
     prover: join(absolute, 'scripts', 'prove-ffmpeg-codec-runtime.mjs'),
     hostContract: join(absolute, 'scripts', 'codec-host-proof-contract.mjs'),
     buildDriver: join(absolute, 'scripts', 'build-ffmpeg-codec-runtime.sh'),
     rootCmake: join(absolute, 'CMakeLists.txt'),
-    zcoreCmake: join(absolute, 'third_party', 'audio-engine', 'CMakeLists.txt'),
+    zcoreCmake: join(absolute, 'third_party', 'zcore', 'CMakeLists.txt'),
   }
   const sourceHashes = Object.fromEntries(Object.entries(paths).map(([name, path]) => [
     name, sha256File(requireFile(path, `host codec proof source ${name}`)),

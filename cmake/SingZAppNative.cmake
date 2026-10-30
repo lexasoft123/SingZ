@@ -1,11 +1,11 @@
-# SingZ product-facing targets layered over AudioZ's reusable components.
+# SingZ product-facing targets layered over zCore's reusable components.
 # Detector/ML behavior and product encoding stay owned by this application.
 
 function(singz_app_target target)
   target_compile_features(${target} PUBLIC cxx_std_20)
   target_include_directories(${target} PUBLIC
     "${SINGZ_REPO_ROOT}/zcore/include"
-    "${AUDIOZ_ROOT}/zcore/include")
+    "${ZCORE_ROOT}/zcore/include")
   set_target_properties(${target} PROPERTIES POSITION_INDEPENDENT_CODE YES)
 endfunction()
 
@@ -15,7 +15,7 @@ add_library(zcore_device_fake STATIC EXCLUDE_FROM_ALL
 add_library(SingZ::zcore_device_fake ALIAS zcore_device_fake)
 singz_app_target(zcore_device_fake)
 target_sources(zcore_device_fake PRIVATE
-  "${AUDIOZ_ROOT}/zcore/include/zcore/device/audio_host_fake.h")
+  "${ZCORE_ROOT}/zcore/include/zcore/device/audio_host_fake.h")
 target_link_libraries(zcore_device_fake PUBLIC
   SingZ::zcore_device SingZ::native_build_options Threads::Threads)
 
@@ -56,7 +56,7 @@ if(SINGZ_BUILD_ML)
 endif()
 
 add_library(zcore_audio_export STATIC EXCLUDE_FROM_ALL
-  "${AUDIOZ_ROOT}/zcore/src/media/audio_export.cpp")
+  "${ZCORE_ROOT}/zcore/src/media/audio_export.cpp")
 add_library(SingZ::zcore_audio_export ALIAS zcore_audio_export)
 singz_app_target(zcore_audio_export)
 target_link_libraries(zcore_audio_export PUBLIC SingZ::zcore_media

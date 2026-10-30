@@ -171,15 +171,15 @@ export function captureSourceFingerprint(root: string, electronVersion: string):
     }
   }
   for (const dir of [
-    'native/electron', 'native/playback', 'third_party/audio-engine',
+    'native/electron', 'native/playback', 'third_party/zcore',
     'zcore', 'zdsp', 'third_party/native', 'cmake'
   ]) {
     walk(join(root, dir))
   }
   files.push(join(root, 'CMakeLists.txt'), join(root, 'scripts', 'ccache-launcher.sh'),
     join(root, 'scripts', 'ccache-launcher.ps1'),
-    join(root, 'third_party', 'audio-engine.lock.json'),
-    join(root, 'scripts', 'import-audioz.py'),
+    join(root, 'third_party', 'zcore.lock.json'),
+    join(root, 'scripts', 'import-zcore.py'),
     join(root, 'scripts', 'build-capture-addon.cjs'))
   files.sort()
   const hash = createHash('sha1')

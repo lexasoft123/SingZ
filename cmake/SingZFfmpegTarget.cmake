@@ -1,5 +1,5 @@
 # Extended media codecs are an optional dynamically linked dependency. Define
-# the consumer-owned target before AudioZ configures its media component.
+# the consumer-owned target before zCore configures its media component.
 if(SINGZ_ENABLE_FFMPEG_CODECS)
   if(NOT EXISTS "${SINGZ_FFMPEG_INCLUDE_DIR}/libavformat/avformat.h")
     message(FATAL_ERROR

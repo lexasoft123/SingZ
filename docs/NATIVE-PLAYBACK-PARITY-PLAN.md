@@ -785,7 +785,7 @@ code-reviewer gate.
 ### Step 4 — CPU on the phone (~1–2 days)
 Measure after steps 1–3 on the POCO; only then the stream-mode A/B
 (`PerformanceMode::None` + 2–4 bursts vs `LowLatency` in
-`third_party/audio-engine/zcore/platform/android/audio_host_android.cpp:386`; note legacy already runs 128-frame
+`third_party/zcore/zcore/platform/android/audio_host_android.cpp:386`; note legacy already runs 128-frame
 LowLatency callbacks, so fewer callbacks is not why legacy is cheaper on the emulator) and,
 if anything remains, the legacy Hermes profile with `jsprof-hermes-android.cjs`
 (kept beside the project memory on the dev Mac).

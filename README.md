@@ -201,8 +201,8 @@ Contributor docs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
 
 ### Shared audio foundation
 
-SingZ and LoopZ share **AudioZ**, an independently maintained native audio
+SingZ and LoopZ share **zCore**, an independently maintained native audio
 foundation. This checkout contains its exact, verified source snapshot in
-`third_party/audio-engine`; builds require no sibling repository or network
-fetch. See [the development workflow](docs/DEVELOPMENT.md#shared-audio-engine-audioz)
+`third_party/zcore`; builds require no sibling repository or network
+fetch. See [the development workflow](docs/DEVELOPMENT.md#shared-audio-engine-zcore)
 for updating the pinned dependency.

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Materialize the exact callback-safe zdsp Apple component into its local pod.
- * The pinned AudioZ package is authoritative; CocoaPods cannot reliably glob or
+ * The pinned zCore package is authoritative; CocoaPods cannot reliably glob or
  * retain source trees outside a podspec directory, so this generated copy is
  * read-only and ignored. Run with --check to fail on a stale/missing copy.
  */
@@ -30,7 +30,7 @@ const {
 const check = process.argv.slice(2).includes('--check')
 const mobileRoot = join(__dirname, '..')
 const repoRoot = join(mobileRoot, '..')
-const audioEngineRoot = join(repoRoot, 'third_party', 'audio-engine')
+const audioEngineRoot = join(repoRoot, 'third_party', 'zcore')
 const sourceRoot = join(audioEngineRoot, 'zdsp')
 const destinationRoot = join(mobileRoot, 'ios', 'SingzDspRuntime', 'zdsp')
 const zcoreSourceRoot = join(audioEngineRoot, 'zcore')

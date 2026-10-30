@@ -139,7 +139,7 @@ describe('scripts/analyze-source-hash.sh', () => {
     const core = join(root, 'zcore')
     const dsp = join(root, 'zdsp')
     const third = join(root, 'third_party', 'native', 'flac', 'src')
-    const engine = join(root, 'third_party', 'audio-engine')
+    const engine = join(root, 'third_party', 'zcore')
     const engineFlac = join(engine, 'third_party', 'native', 'flac', 'src')
     const tools = join(root, 'tools', 'native')
     const cmake = join(root, 'cmake')
@@ -148,20 +148,20 @@ describe('scripts/analyze-source-hash.sh', () => {
     writeFileSync(join(core, 'melody.cpp'), '// stand-in\n')
     writeFileSync(join(dsp, 'graph.cpp'), '// stand-in\n')
     writeFileSync(join(third, 'stream_decoder.c'), '/* stand-in */\n')
-    writeFileSync(join(engine, 'audioz-source-manifest.json'), '{"paths":[]}\n')
+    writeFileSync(join(engine, 'zcore-source-manifest.json'), '{"paths":[]}\n')
     writeFileSync(join(engineFlac, 'stream_decoder.c'), '/* pinned stand-in */\n')
-    writeFileSync(join(root, 'third_party', 'audio-engine.lock.json'), '{"revision":"test"}\n')
+    writeFileSync(join(root, 'third_party', 'zcore.lock.json'), '{"revision":"test"}\n')
     writeFileSync(join(tools, 'singz-analyze.cpp'), '// stand-in\n')
     writeFileSync(join(cmake, 'SingZRealtimeTarget.cmake'), '# stand-in\n')
     writeFileSync(join(root, 'CMakeLists.txt'), '# stand-in\n')
-    for (const name of ['vendor-analyze.sh', 'analyze-source-hash.sh', 'engine-artifact.cjs', 'ccache-launcher.sh', 'ccache-launcher.ps1', 'import-audioz.py'])
+    for (const name of ['vendor-analyze.sh', 'analyze-source-hash.sh', 'engine-artifact.cjs', 'ccache-launcher.sh', 'ccache-launcher.ps1', 'import-zcore.py'])
       copyFileSync(join(ROOT, 'scripts', name), join(root, 'scripts', name))
     return root
   }
   const hashOf = async (root: string): Promise<string> =>
     (await run('bash', [HASH_SCRIPT, root])).stdout.trim()
 
-  it('MOVES when the pinned AudioZ libFLAC changes — it is linked into the binary', async () => {
+  it('MOVES when the pinned zCore libFLAC changes — it is linked into the binary', async () => {
     // singz_flac compiles into singz_core compiles into singz-analyze, and
     // flac_io.cpp is how the CLI reads v2 stems at all, so a patched FLAC
     // changes the binary. third_party sat outside the original fingerprint:
@@ -173,7 +173,7 @@ describe('scripts/analyze-source-hash.sh', () => {
     const root = fakeCheckout()
     const before = await hashOf(root)
     expect(before).toMatch(/^[0-9a-f]{40}$/)
-    const flac = join(root, 'third_party', 'audio-engine', 'third_party', 'native', 'flac', 'src', 'stream_decoder.c')
+    const flac = join(root, 'third_party', 'zcore', 'third_party', 'native', 'flac', 'src', 'stream_decoder.c')
     writeFileSync(flac, '/* stand-in */\n/* patched upstream */\n')
     expect(await hashOf(root)).not.toBe(before)
   })

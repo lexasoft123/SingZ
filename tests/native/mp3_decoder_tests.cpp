@@ -1,4 +1,4 @@
-// The native MP3 decoder (third_party/audio-engine/zcore/src/media/mp3_streaming_source.cpp) against FFmpeg,
+// The native MP3 decoder (third_party/zcore/zcore/src/media/mp3_streaming_source.cpp) against FFmpeg,
 // and its streaming source against its own whole-file decode.
 //
 // Two bars, and they are different on purpose:

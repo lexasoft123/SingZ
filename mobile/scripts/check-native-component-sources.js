@@ -15,7 +15,7 @@ const {
 } = require('./native-component-sources')
 
 const repoRoot = join(__dirname, '..', '..')
-const audioEngineRoot = join(repoRoot, 'third_party', 'audio-engine')
+const audioEngineRoot = join(repoRoot, 'third_party', 'zcore')
 
 execFileSync(process.execPath, [
   join(__dirname, 'verify-audio-engine-pin.js'),
@@ -95,21 +95,21 @@ const rootCmake = readFileSync(join(repoRoot, 'CMakeLists.txt'), 'utf8')
 const thirdPartyCmake = readFileSync(
   join(repoRoot, 'third_party', 'native', 'CMakeLists.txt'), 'utf8')
 
-const audiozManifest = JSON.parse(readFileSync(
-  join(audioEngineRoot, 'audioz-source-manifest.json'), 'utf8'))
-const sourcePaths = new Set(audiozManifest.paths)
+const zcoreManifest = JSON.parse(readFileSync(
+  join(audioEngineRoot, 'zcore-source-manifest.json'), 'utf8'))
+const sourcePaths = new Set(zcoreManifest.paths)
 const componentFiles = (name) => {
-  const entries = audiozManifest.components?.[name]
-  if (!Array.isArray(entries)) throw new Error(`AudioZ manifest is missing ${name}`)
+  const entries = zcoreManifest.components?.[name]
+  if (!Array.isArray(entries)) throw new Error(`zCore manifest is missing ${name}`)
   const missing = entries.filter((entry) => !sourcePaths.has(entry))
   if (missing.length) {
-    throw new Error(`${name} references paths absent from AudioZ manifest: ${missing.join(', ')}`)
+    throw new Error(`${name} references paths absent from zCore manifest: ${missing.join(', ')}`)
   }
   return entries.map((entry) => entry.replace(/^(?:zcore|zdsp)\//, ''))
 }
-for (const entry of audiozManifest.iosCallbackGroup || []) {
+for (const entry of zcoreManifest.iosCallbackGroup || []) {
   if (!sourcePaths.has(entry)) {
-    throw new Error(`iOS callback group references a path absent from AudioZ manifest: ${entry}`)
+    throw new Error(`iOS callback group references a path absent from zCore manifest: ${entry}`)
   }
 }
 
@@ -130,7 +130,7 @@ compareExact(
 )
 compareExact(
   'iOS AudioHost callback',
-  (audiozManifest.iosCallbackGroup || []).map((entry) => entry.replace(/^zcore\//, '')),
+  (zcoreManifest.iosCallbackGroup || []).map((entry) => entry.replace(/^zcore\//, '')),
   iosAudioHostCallbackFiles
 )
 compareExact(
@@ -152,4 +152,4 @@ compareExact(
   signalsmithTimePitchFiles
 )
 
-console.log('native-component-sources: AudioZ ownership and iOS manifests match exactly')
+console.log('native-component-sources: zCore ownership and iOS manifests match exactly')

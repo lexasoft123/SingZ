@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "package": "AudioZ",
+  "package": "zCore",
   "sourceRepository": "SingZ",
   "sourceRevision": "ac620fb0",
   "paths": [
@@ -378,14 +378,14 @@
     "zcore/platform/ios/audio_host_ios_session_signals.h"
   ],
   "packageFiles": [
-    ".github/workflows/audioz.yml",
+    ".github/workflows/zcore.yml",
     ".gitignore",
     "CMakeLists.txt",
     "README.md",
-    "audioz-source-manifest.json",
-    "scripts/import-audioz.py",
-    "scripts/test-import-audioz.py",
-    "scripts/verify-audioz.py",
+    "zcore-source-manifest.json",
+    "scripts/import-zcore.py",
+    "scripts/test-import-zcore.py",
+    "scripts/verify-zcore.py",
     "tests/native/audio_host_ios_link_smoke.cpp",
     "third_party/native/CMakeLists.txt"
   ],
@@ -415,7 +415,7 @@
       "tests/native/audio_host_ios_link_smoke.cpp"
     ],
     "importer": [
-      "scripts/test-import-audioz.py"
+      "scripts/test-import-zcore.py"
     ]
   },
   "upstreamUpdates": [

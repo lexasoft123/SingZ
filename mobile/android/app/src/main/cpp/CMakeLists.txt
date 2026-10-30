@@ -7,7 +7,7 @@
 #    TurboModule registration lives there). The include recreates it; the RN
 #    plugin passes REACT_ANDROID_DIR.
 #
-#  - libsingzcore.so — a JNI-only product binding over the pinned AudioZ
+#  - libsingzcore.so — a JNI-only product binding over the pinned zCore
 #    component targets shared by Android, iOS and desktop. ONNX Runtime comes
 #    from the Maven AAR, which is legacy-layout
 #    (headers/ + jni/<abi>/libonnxruntime.so, no prefab): app/build.gradle's
@@ -19,7 +19,7 @@ project(appmodules)
 
 get_filename_component(SINGZ_NATIVE_ROOT
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../.." REALPATH)
-set(SINGZ_AUDIO_ENGINE_ROOT "${SINGZ_NATIVE_ROOT}/third_party/audio-engine")
+set(SINGZ_AUDIO_ENGINE_ROOT "${SINGZ_NATIVE_ROOT}/third_party/zcore")
 
 # mobile/scripts/android-cmake-init.cmake installs the combined compile/link
 # process ceiling before every Android project(), including every native RN
