@@ -333,6 +333,14 @@ platform :ios do
     ipa
   end
 
+  desc "Warm the signed native archive cache without uploading or publishing"
+  lane :cache_warm do
+    verify_marketing_version
+    install_signing(api_key: api_key, type: "appstore")
+    archive(build_number: ci_build_number, type: "appstore")
+    UI.success("Signed native archive cache warmed; nothing uploaded")
+  end
+
   desc "Check the API key and signing setup without building or uploading anything"
   lane :validate do
     verify_marketing_version

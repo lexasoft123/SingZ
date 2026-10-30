@@ -115,7 +115,7 @@ function stripGeneratedBlocks(text) {
   }
 }
 
-function configureXcodeCache(root, env = process.env) {
+function configureXcodeCache(root, env = process.env, { checkOnly = false } = {}) {
   root = path.resolve(root)
   const reactNative = path.join(root, 'mobile/node_modules/react-native')
   const conf = path.join(reactNative, 'scripts/xcode/ccache.conf')
@@ -150,7 +150,7 @@ function configureXcodeCache(root, env = process.env) {
   // Validate both pinned upstream wrapper shapes before modifying any file.
   let changed = false
   for (const plan of plans) if (plan.next !== plan.source) {
-    fs.writeFileSync(plan.filename, plan.next)
+    if (!checkOnly) fs.writeFileSync(plan.filename, plan.next)
     changed = true
   }
   return { changed, skipped: false, conf, ccache: binary || null }

@@ -221,12 +221,37 @@ Use `SINGZ_AUDIO_API_CACHE` to override its per-user download store.
 
 The shared `.github/actions/mobile-build-cache` action installs ccache and
 restores compiler objects, audio-library downloads, Android Gradle dependencies
-and task outputs, and iOS CocoaPods downloads. Release iOS jobs additionally
-persist validated native archives. Keys separate toolchain, dependency, and
-native-source/recipe generations, so changed inputs can save a new immutable
-Actions snapshot while restoring older compatible objects. Compiler objects
-are capped at 1200 MB in CI; release archive retention is two entries / 1 GiB /
-14 days. Full DerivedData and serialized configuration graphs stay job-local.
+and task outputs, CocoaPods/React Native tarballs, and Metro transforms. Metro
+uses `SINGZ_METRO_CACHE_DIR` so runner temporary-directory changes do not discard
+its store. Full DerivedData and serialized configuration graphs stay job-local.
+
+Mutable stores use immutable run/attempt keys, with compatible restore prefixes
+separated by runner architecture, toolchain, dependencies, and source/recipe
+generation. This lets reruns accumulate compiler and task outputs rather than
+freeze an early partial snapshot. Pinned download stores retain exact keys and
+are saved only after dependency setup and cache preflight succeed. The separate
+`save-mobile-build-cache` action runs even after a later build/upload failure.
+Signed archives are saved only when completed entries pass receipt, executable
+checksum, and deep signature validation; leases and staging state are excluded.
+Compiler objects are capped at 1200 MB; CI archives retain two entries / 1 GiB /
+14 days.
+
+GitHub caches are ref-scoped: a fresh tag can read default-branch caches, but
+cannot read the preceding tag's cache. Main pushes therefore run iOS
+`cache_warm`: readonly signing plus an App Store archive, with no upload or
+submission. The iOS native canary also runs on main and pull requests; PR caches
+remain isolated from trusted release jobs. Android's existing main canary and
+scheduled release build seed its stores.
+
+`scripts/ci-build-cache.cjs begin/report` checks active compiler configuration
+without changing it, records counter deltas without resets, and uploads JSON
+and Markdown evidence. Successful native builds must show cacheable compiler
+hits/misses, verified iOS archive reuse, or cached/up-to-date Android native
+tasks. Cold misses are valid; silent cache bypass fails the job. Android also
+runs `scripts/ci-android-cache-smoke.cjs`: it deletes only checkout-local ORT
+extraction output, then requires `FROM-CACHE` restoration and reuse of the exact
+configuration graph. One additional graph run is allowed for React Native's
+generated checksum to settle. All native producers retain the shared build lock.
 
 Before archive fingerprinting, Fastlane runs React Native's installed dependency
 selector phases in Release mode. This prevents Debug-to-Release framework

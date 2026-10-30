@@ -24,6 +24,16 @@ function fixture(t) {
   return { root, conf, wrappers }
 }
 
+test('CI preflight detects stale Xcode settings without rewriting installed inputs', t => {
+  const { root, conf, wrappers } = fixture(t)
+  configureXcodeCache(root, {})
+  const before = [conf, ...Object.values(wrappers)].map(file => fs.readFileSync(file, 'utf8'))
+  assert.equal(configureXcodeCache(root, { CCACHE_MAXSIZE: '1200M' }, { checkOnly: true }).changed, true)
+  assert.deepEqual([conf, ...Object.values(wrappers)].map(file => fs.readFileSync(file, 'utf8')), before)
+  configureXcodeCache(root, { CCACHE_MAXSIZE: '1200M' })
+  assert.equal(configureXcodeCache(root, { CCACHE_MAXSIZE: '1200M' }, { checkOnly: true }).changed, false)
+})
+
 test('Xcode ccache generation preserves RN settings and replaces its own block idempotently', t => {
   const { root, conf } = fixture(t)
   assert.equal(configureXcodeCache(root, {}).changed, true)

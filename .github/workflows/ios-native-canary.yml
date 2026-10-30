@@ -1,9 +1,52 @@
 name: iOS native canary
 
 on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/ios-native-canary.yml'
+      - '.github/actions/mobile-build-cache/**'
+      - '.github/actions/save-mobile-build-cache/**'
+      - 'scripts/ci-build-cache.cjs'
+      - 'scripts/ccache-launcher.*'
+      - 'scripts/restore-audio-api-prebuilts.cjs'
+      - 'scripts/with-native-build-lock.mjs'
+      - 'scripts/native-build-lock.cjs'
+      - 'scripts/assert-native-build-lock.cjs'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'cmake/**'
+      - 'mobile/ios/**'
+      - 'mobile/package.json'
+      - 'mobile/package-lock.json'
+      - 'mobile/App.tsx'
+      - 'mobile/src/engine.ts'
+      - 'mobile/src/projects.ts'
+      - 'mobile/src/playback/**'
+      - 'mobile/src/ui/CatalogScreen.tsx'
+      - 'mobile/src/ui/PlayerScreen.tsx'
+      - 'mobile/src/ui/SettingsScreen.tsx'
+      - 'mobile/src/ui/RootNavigator.tsx'
+      - 'mobile/__tests__/**'
+      - 'mobile/scripts/**'
+      - 'native/playback/**'
+      - 'tests/native/**'
+      - 'tests/shared/**'
+      - 'third_party/native/**'
+      - 'zcore/**'
+      - 'zdsp/**'
   pull_request:
     paths:
       - '.github/workflows/ios-native-canary.yml'
+      - '.github/actions/mobile-build-cache/**'
+      - '.github/actions/save-mobile-build-cache/**'
+      - 'scripts/ci-build-cache.cjs'
+      - 'scripts/ccache-launcher.*'
+      - 'scripts/restore-audio-api-prebuilts.cjs'
+      - 'scripts/with-native-build-lock.mjs'
+      - 'scripts/native-build-lock.cjs'
+      - 'scripts/assert-native-build-lock.cjs'
       - 'CMakeLists.txt'
       - 'CMakePresets.json'
       - 'cmake/**'
@@ -48,6 +91,7 @@ jobs:
           cache-dependency-path: mobile/package-lock.json
 
       - name: Shared iOS build caches
+        id: mobile-cache
         uses: ./.github/actions/mobile-build-cache
         with:
           platform: ios
@@ -88,16 +132,20 @@ jobs:
           LANG: en_US.UTF-8
           LC_ALL: en_US.UTF-8
         run: |
-          pod install
+          node "$GITHUB_WORKSPACE/scripts/with-native-build-lock.mjs" --owner ios-canary-pods -- pod install
           git diff --exit-code -- Podfile.lock
 
+      - name: Verify active iOS compiler cache configuration
+        run: node scripts/ci-build-cache.cjs begin --platform ios
+
       - name: Test native playback bridge schemas
-        run: bash mobile/scripts/test-native-playback-bridge-schema.sh
+        run: node scripts/with-native-build-lock.mjs --owner ios-canary-schema -- bash mobile/scripts/test-native-playback-bridge-schema.sh
 
       - name: Compile component for device arm64
         working-directory: mobile/ios
         run: |
-          xcodebuild -quiet -project Pods/Pods.xcodeproj \
+          node "$GITHUB_WORKSPACE/scripts/with-native-build-lock.mjs" \
+            --owner ios-canary-dsp-device -- xcodebuild -jobs 2 -quiet -project Pods/Pods.xcodeproj \
             -scheme SingzDspRuntime -configuration Release -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath "$GITHUB_WORKSPACE/build/native/ios-dsp-device-derived" \
@@ -108,7 +156,8 @@ jobs:
       - name: Compile component for simulator arm64 and x86_64
         working-directory: mobile/ios
         run: |
-          xcodebuild -quiet -project Pods/Pods.xcodeproj \
+          node "$GITHUB_WORKSPACE/scripts/with-native-build-lock.mjs" \
+            --owner ios-canary-dsp-simulator -- xcodebuild -jobs 2 -quiet -project Pods/Pods.xcodeproj \
             -scheme SingzDspRuntime -configuration Release -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath "$GITHUB_WORKSPACE/build/native/ios-dsp-sim-derived" \
@@ -120,7 +169,8 @@ jobs:
       - name: Compile callback closure for device arm64
         working-directory: mobile/ios
         run: |
-          xcodebuild -quiet -project Pods/Pods.xcodeproj \
+          node "$GITHUB_WORKSPACE/scripts/with-native-build-lock.mjs" \
+            --owner ios-canary-callback-device -- xcodebuild -jobs 2 -quiet -project Pods/Pods.xcodeproj \
             -scheme SingzDeviceCallback -configuration Release -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath "$GITHUB_WORKSPACE/build/native/ios-callback-device-derived" \
@@ -131,7 +181,8 @@ jobs:
       - name: Compile callback closure for simulator arm64 and x86_64
         working-directory: mobile/ios
         run: |
-          xcodebuild -quiet -project Pods/Pods.xcodeproj \
+          node "$GITHUB_WORKSPACE/scripts/with-native-build-lock.mjs" \
+            --owner ios-canary-callback-simulator -- xcodebuild -jobs 2 -quiet -project Pods/Pods.xcodeproj \
             -scheme SingzDeviceCallback -configuration Release \
             -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath "$GITHUB_WORKSPACE/build/native/ios-callback-sim-derived" \
@@ -143,7 +194,8 @@ jobs:
       - name: Compile playback session for device arm64
         working-directory: mobile/ios
         run: |
-          xcodebuild -quiet -project Pods/Pods.xcodeproj \
+          node "$GITHUB_WORKSPACE/scripts/with-native-build-lock.mjs" \
+            --owner ios-canary-playback-device -- xcodebuild -jobs 2 -quiet -project Pods/Pods.xcodeproj \
             -scheme SingzPlaybackSession -configuration Release -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath "$GITHUB_WORKSPACE/build/native/ios-playback-device-derived" \
@@ -154,7 +206,8 @@ jobs:
       - name: Compile playback session for simulator arm64 and x86_64
         working-directory: mobile/ios
         run: |
-          xcodebuild -quiet -project Pods/Pods.xcodeproj \
+          node "$GITHUB_WORKSPACE/scripts/with-native-build-lock.mjs" \
+            --owner ios-canary-playback-simulator -- xcodebuild -jobs 2 -quiet -project Pods/Pods.xcodeproj \
             -scheme SingzPlaybackSession -configuration Release \
             -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath "$GITHUB_WORKSPACE/build/native/ios-playback-sim-derived" \
@@ -392,12 +445,14 @@ jobs:
           fi
 
       - name: Compile the Release iOS app for device arm64 without signing
+        id: ios-app-build
         working-directory: mobile/ios
         run: |
-          xcodebuild -quiet -workspace SingZPlayer.xcworkspace \
+          node "$GITHUB_WORKSPACE/scripts/with-native-build-lock.mjs" \
+            --owner ios-canary-app-device -- xcodebuild -jobs 2 -quiet -workspace SingZPlayer.xcworkspace \
             -scheme SingZPlayer -configuration Release -sdk iphoneos \
             -destination 'generic/platform=iOS' \
-            -derivedDataPath "$GITHUB_WORKSPACE/build/native/ios-app-derived" \
+            -derivedDataPath "$GITHUB_WORKSPACE/build/native/ios-derived" \
             ARCHS=arm64 ONLY_ACTIVE_ARCH=YES DEAD_CODE_STRIPPING=YES \
             STRIP_INSTALLED_PRODUCT=NO CODE_SIGNING_ALLOWED=NO build
 
@@ -414,17 +469,17 @@ jobs:
           # under pipefail). The line number is an offset into THIS step's
           # script, not into the workflow file.
           trap 'echo "gate failed at line $LINENO of this step: $BASH_COMMAND" >&2' ERR
-          app=$(find "$GITHUB_WORKSPACE/build/native/ios-app-derived" \
+          app=$(find "$GITHUB_WORKSPACE/build/native/ios-derived" \
             -path '*Release-iphoneos/SingZPlayer.app' -print -quit)
-          core=$(find "$GITHUB_WORKSPACE/build/native/ios-app-derived" \
+          core=$(find "$GITHUB_WORKSPACE/build/native/ios-derived" \
             -path '*Release-iphoneos/SingzCore/libSingzCore.a' -print -quit)
-          runtime=$(find "$GITHUB_WORKSPACE/build/native/ios-app-derived" \
+          runtime=$(find "$GITHUB_WORKSPACE/build/native/ios-derived" \
             -path '*Release-iphoneos/SingzDspRuntime/libSingzDspRuntime.a' \
             -print -quit)
-          callback=$(find "$GITHUB_WORKSPACE/build/native/ios-app-derived" \
+          callback=$(find "$GITHUB_WORKSPACE/build/native/ios-derived" \
             -path '*Release-iphoneos/SingzDeviceCallback/libSingzDeviceCallback.a' \
             -print -quit)
-          playback=$(find "$GITHUB_WORKSPACE/build/native/ios-app-derived" \
+          playback=$(find "$GITHUB_WORKSPACE/build/native/ios-derived" \
             -path '*Release-iphoneos/SingzPlaybackSession/libSingzPlaybackSession.a' \
             -print -quit)
           # One per line for the same reason: four of these five were exempt
@@ -570,3 +625,28 @@ jobs:
       - name: Test inert packaging boundary
         working-directory: mobile
         run: npx jest ios-native-audio-runtime-packaging.test.ts --runInBand
+
+
+      - name: Report iOS cache activity
+        if: always()
+        run: |
+          args=(report --platform ios)
+          if [ "${{ steps.ios-app-build.outcome }}" = success ]; then
+            args+=(--require-native)
+          fi
+          node scripts/ci-build-cache.cjs "${args[@]}"
+
+      - name: Save reusable iOS build caches
+        if: always() && steps.mobile-cache.outcome == 'success'
+        uses: ./.github/actions/save-mobile-build-cache
+        with:
+          cache-state: ${{ steps.mobile-cache.outputs.state }}
+
+      - name: Preserve iOS cache diagnostics
+        if: always() && env.SINGZ_CI_CACHE_REPORT_DIR != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-canary-cache-report
+          path: ${{ env.SINGZ_CI_CACHE_REPORT_DIR }}
+          retention-days: 14
+          if-no-files-found: ignore

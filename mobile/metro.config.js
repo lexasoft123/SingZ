@@ -1,5 +1,6 @@
 const { getDefaultConfig, mergeConfig } = require('@react-native/metro-config');
 const { resolve } = require('node:path');
+const { FileStore } = require('metro-cache');
 
 /**
  * Metro configuration
@@ -11,6 +12,9 @@ const defaults = getDefaultConfig(__dirname);
 
 /** FLAC stems from desktop-prepared projects ship as bundled assets. */
 const config = {
+  ...(process.env.SINGZ_METRO_CACHE_DIR ? {
+    cacheStores: [new FileStore({ root: resolve(process.env.SINGZ_METRO_CACHE_DIR) })],
+  } : {}),
   // Portable policies and metadata are shared directly with desktop. Expose only
   // this dependency-free source directory, not the repo's second React install.
   watchFolders: [resolve(__dirname, '../src/shared')],

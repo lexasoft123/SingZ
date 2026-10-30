@@ -8,7 +8,7 @@ class ReviewPipelineHarness
     def self.success(*) = nil
   end
 
-  attr_accessor :groups, :upload_failure, :contact_failure, :open_review, :pending_release, :after_upload_release
+  attr_accessor :groups, :upload_failure, :contact_failure, :open_review, :pending_release, :after_upload_release, :signing_options, :archive_options
   attr_reader :events
 
   def initialize
@@ -52,8 +52,8 @@ class ReviewPipelineHarness
     raise 'Store version blocked' if open_review || pending_release
   end
   def beta_review_info = {}
-  def install_signing(**) = events << :signing
-  def archive(**) = (events << :archive; 'test.ipa')
+  def install_signing(**options) = (self.signing_options = options; events << :signing)
+  def archive(**options) = (self.archive_options = options; events << :archive; 'test.ipa')
   def sync_release_notes(**) = nil
   def external_changelog(*) = 'Release notes'
   def upload_to_testflight(**options)
@@ -67,6 +67,14 @@ end
 
 class ReviewPipelineTest < Minitest::Test
   def setup = @pipeline = ReviewPipelineHarness.new
+
+  def test_cache_warming_builds_with_readonly_appstore_signing_and_never_uploads
+    @pipeline.cache_warm
+    assert_equal [:signing, :archive], @pipeline.events
+    assert_equal 'appstore', @pipeline.signing_options[:type]
+    assert_equal 'appstore', @pipeline.archive_options[:type]
+    assert_equal 30, @pipeline.archive_options[:build_number]
+  end
 
   def submissions = @pipeline.events.select { |e| e.is_a?(Array) && e[0] == :submit }
   def uploads = @pipeline.events.select { |e| e.is_a?(Array) && e[0] == :upload }

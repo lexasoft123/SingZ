@@ -2,6 +2,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 const vm = require('node:vm')
+const os = require('node:os')
 const { test } = require('node:test')
 
 const mobile = path.resolve(__dirname, '../..')
@@ -14,7 +15,7 @@ if (fs.existsSync(path.join(mobile, 'node_modules/metro/package.json'))) {
 }
 const available = { skip: !worker ? 'Install mobile dependencies to exercise Metro cache keys and dynamic imports' : false }
 
-function configForRoot(root) {
+function configForRoot(root, env = {}) {
   // Preserve actual installed Metro defaults, with the absolute dependency
   // path RN would generate for each checkout. Evaluate the real app config.
   const defaults = reactNativeConfig.getDefaultConfig(root)
@@ -22,6 +23,7 @@ function configForRoot(root) {
   const context = {
     __dirname: root,
     module: { exports: {} },
+    process: { env },
     require: name => name === '@react-native/metro-config'
       ? { getDefaultConfig: () => defaults, mergeConfig: reactNativeConfig.mergeConfig }
       : require(name),
@@ -37,6 +39,19 @@ function key(config) {
     transformerConfig: { transformerPath: config.transformerPath, transformerConfig },
   })
 }
+
+test('CI Metro storage survives a fresh checkout without changing transform identity', available, async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'singz-ci-metro-'))
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }))
+  const env = { SINGZ_METRO_CACHE_DIR: path.join(directory, 'persisted-store') }
+  const first = configForRoot(path.join(directory, 'checkout-a'), env)
+  const second = configForRoot(path.join(directory, 'checkout-b'), env)
+  const cacheKey = Buffer.from('0123456789abcdef', 'hex'), value = { code: 'transformed output' }
+  await first.cacheStores[0].set(cacheKey, value)
+  assert.deepEqual(await second.cacheStores[0].get(cacheKey), value)
+  assert.equal(key(first), key(second))
+  assert.equal(key(first), key(configForRoot(path.join(directory, 'checkout-a'))), 'storage location is not a transform input')
+})
 
 test('identical Metro transforms keep the same actual global key across checkout roots', available, () => {
   const first = configForRoot(path.join(mobile, 'first-checkout'))

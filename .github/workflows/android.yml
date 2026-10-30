@@ -23,6 +23,16 @@ on:
       - 'third_party/native/**'
       - 'tools/native/**'
       - '.github/workflows/android.yml'
+      - '.github/actions/mobile-build-cache/**'
+      - '.github/actions/save-mobile-build-cache/**'
+      - 'scripts/ci-build-cache.cjs'
+      - 'scripts/ci-android-cache-smoke.cjs'
+      - 'tests/tooling/ci-android-cache.test.cjs'
+      - 'scripts/ccache-launcher.*'
+      - 'scripts/restore-audio-api-prebuilts.cjs'
+      - 'scripts/native-build-lock.cjs'
+      - 'scripts/assert-native-build-lock.cjs'
+      - 'scripts/with-native-build-lock.mjs'
       # editing the release notes should check the store text they generate
       - 'docs/release-notes/**'
       - 'scripts/store-notes.cjs'
@@ -50,6 +60,16 @@ on:
       - 'third_party/native/**'
       - 'tools/native/**'
       - '.github/workflows/android.yml'
+      - '.github/actions/mobile-build-cache/**'
+      - '.github/actions/save-mobile-build-cache/**'
+      - 'scripts/ci-build-cache.cjs'
+      - 'scripts/ci-android-cache-smoke.cjs'
+      - 'tests/tooling/ci-android-cache.test.cjs'
+      - 'scripts/ccache-launcher.*'
+      - 'scripts/restore-audio-api-prebuilts.cjs'
+      - 'scripts/native-build-lock.cjs'
+      - 'scripts/assert-native-build-lock.cjs'
+      - 'scripts/with-native-build-lock.mjs'
       - 'docs/release-notes/**'
       - 'scripts/store-notes.cjs'
       - 'tests/native/**'
@@ -125,7 +145,11 @@ jobs:
       - name: ffmpeg for the sample-song generator
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
 
+      - name: Android CI cache contracts
+        run: node --test tests/tooling/ci-android-cache.test.cjs
+
       - name: Shared Android build caches
+        id: mobile-cache
         uses: ./.github/actions/mobile-build-cache
         with:
           platform: android
@@ -165,8 +189,23 @@ jobs:
           distribution: temurin
           java-version: 21
 
+      - name: Pinned NDK + CMake
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.1.12297006" "cmake;3.22.1" > /dev/null
+
+      - name: Begin Android cache evidence
+        id: cache-begin
+        run: node scripts/ci-build-cache.cjs begin --platform android
+
+      - name: Prove Gradle task and configuration caches
+        run: node scripts/ci-android-cache-smoke.cjs
+
       - name: Cache-currency conformance (Kotlin)
-        run: ./gradlew :app:testDebugUnitTest
+        run: |
+          set -euo pipefail
+          node ../../scripts/with-native-build-lock.mjs --owner ci-android-jvm -- \
+            ./gradlew :app:testDebugUnitTest --no-daemon --max-workers=1 \
+            --build-cache --configuration-cache --configuration-cache-problems=fail --console=plain \
+            2>&1 | tee "$RUNNER_TEMP/singz-android-jvm-gradle.log"
         working-directory: mobile/android
 
       # Compile the dormant paired-stream provider for both shipping phone
@@ -174,8 +213,24 @@ jobs:
       # library without opening product audio, and proves that this is more
       # than a host-only policy-test build.
       - name: Android AudioHost NDK conformance
-        run: ./gradlew :app:externalNativeBuildDebug :app:assembleDebug --no-daemon
+        id: android-native
+        run: |
+          set -euo pipefail
+          node ../../scripts/with-native-build-lock.mjs --owner ci-android-native -- \
+            ./gradlew :app:externalNativeBuildDebug :app:assembleDebug --no-daemon --max-workers=1 \
+            --build-cache --configuration-cache --configuration-cache-problems=fail --console=plain \
+            2>&1 | tee "$RUNNER_TEMP/singz-android-native-gradle.log"
         working-directory: mobile/android
+
+      - name: Verify Android native cache activity
+        if: always() && steps.cache-begin.outcome == 'success'
+        run: |
+          set -euo pipefail
+          requirements=()
+          if [ "${{ steps.android-native.outcome }}" = success ]; then requirements+=(--require-native); fi
+          node scripts/ci-build-cache.cjs report --platform android "${requirements[@]}" \
+            --log "$RUNNER_TEMP/singz-android-native-gradle.log" \
+            --log "$RUNNER_TEMP/singz-android-jvm-gradle.log"
 
       # Negative RT fixtures are intentionally not part of every product
       # build. Run the explicit target for each shipping ABI here; it fails
@@ -186,7 +241,8 @@ jobs:
             mapfile -t build_files < <(find mobile/android/app/.cxx/Debug -path "*/$abi/build.ninja" -type f -print)
             test "${#build_files[@]}" -gt 0
             for build_file in "${build_files[@]}"; do
-              cmake --build "$(dirname "$build_file")" --target singz_check_android_audio_host_realtime_negative
+              node scripts/with-native-build-lock.mjs --owner ci-android-rt-negative -- \
+                cmake --build "$(dirname "$build_file")" --target singz_check_android_audio_host_realtime_negative --parallel 4
             done
           done
 
@@ -248,6 +304,20 @@ jobs:
       - name: Native core host tests
         run: scripts/run-core-host-tests.sh
 
+      - name: Upload Android cache evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-cache-evidence-${{ github.job }}
+          path: ${{ runner.temp }}/singz-cache-report
+          retention-days: 7
+
+      - name: Save shared mobile caches
+        if: always() && steps.mobile-cache.outputs.state != ''
+        uses: ./.github/actions/save-mobile-build-cache
+        with:
+          cache-state: ${{ steps.mobile-cache.outputs.state }}
+
   # Shippable artifacts: only on v* release tags and manual dispatch.
   # The AAB is what Google Play takes; the APK is what the family sideloads.
   # One gradle invocation builds both so the NDK objects are compiled once.
@@ -295,10 +365,14 @@ jobs:
       # make-sample.js (postinstall) encodes the synthesized sample via
       # ffmpeg; the common action restores compiler objects and downloads,
       # while Gradle also caches eligible task outputs.
-      - name: ffmpeg + ccache
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg ccache
+      - name: ffmpeg for the sample-song generator
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      - name: Android CI cache contracts
+        run: node --test tests/tooling/ci-android-cache.test.cjs
 
       - name: Shared Android build caches
+        id: mobile-cache
         uses: ./.github/actions/mobile-build-cache
         with:
           platform: android
@@ -326,6 +400,13 @@ jobs:
       - name: Pinned NDK + CMake
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.1.12297006" "cmake;3.22.1" > /dev/null
 
+      - name: Begin Android cache evidence
+        id: cache-begin
+        run: node scripts/ci-build-cache.cjs begin --platform android
+
+      - name: Prove Gradle task and configuration caches
+        run: node scripts/ci-android-cache-smoke.cjs
+
       # The Play upload key. Without it gradle falls back to the debug key,
       # which Play rejects on upload with a message that never names the key —
       # so a tag build fails here instead, where the cause is legible.
@@ -348,85 +429,30 @@ jobs:
           fi
 
       - name: Build release bundle + APK
+        id: android-release
         env:
-          # CMake picks these up from the environment (>=3.17), so every
-          # native module gets ccache without touching its build files
-          CMAKE_C_COMPILER_LAUNCHER: ccache
-          CMAKE_CXX_COMPILER_LAUNCHER: ccache
-          CCACHE_DIR: /home/runner/.ccache
-          # Why the cacheable half of this build never hit once. ccache's
-          # default compiler_check is `mtime`, which hashes the compiler's
-          # mtime and size — and the pinned NDK is re-extracted every run, so
-          # clang's mtime is new every time and every object misses no matter
-          # how good the cache is. v0.16.0 and v0.16.1 both restored 146 MB
-          # and both reported "Hits: 0 / 732 (0.00%)"; so did every android
-          # run before them. Hashing the binary's content instead is, per
-          # ccache's own manual, "very slightly slower".
-          #
-          # The value is itself part of ccache's hash, so changing it orphans
-          # every entry keyed under the old one: the first run after such a
-          # change reports 0% however healthy the cache is, and the one after
-          # it is the first that can hit. Measured on two back-to-back
-          # dispatches on main: 0/366, then 366/366 direct hits and a 13m24s
-          # build became 5m54s.
-          CCACHE_COMPILERCHECK: content
-          # The rest of the build. `ccache -sv` reported 296 uncacheable calls
-          # of which 288 (97.3%) were "Could not use precompiled header" and
-          # only 8 were actual link steps — so PCH, not linking, was the whole
-          # 45% that compiler_check could not reach. reanimated and worklets
-          # are the only two modules in the tree, ours included, that call
-          # target_precompile_headers, and they account for the number
-          # exactly: 106 compile_commands entries + 38, times two ABIs, is
-          # 288. Both the generator and the consumers are counted uncacheable
-          # without this, which is why the arithmetic lands on the nose.
-          #
-          # ccache needs three things to cache a clang PCH compile. Two are
-          # already present: -include-pch from CMake's PCH support, and
-          # -fno-pch-timestamp — which comes NOT from CMake but from those two
-          # packages' own CMakeLists (target_compile_options ... -Xclang;
-          # -fno-pch-timestamp, upstream comment says it is for ccache). That
-          # makes it a dependency opt-in, not something structural: if a
-          # reanimated or worklets bump ever drops it, these 288 go back to
-          # missing every run, because clang bakes the header's mtime into the
-          # .pch and npm ci gives every header a fresh mtime. This is the
-          # third requirement and the only one we were missing.
-          #
-          # `time_macros` is inert here rather than merely tolerable: nothing
-          # we compile — reanimated, worklets, audio-api, skia, our own core —
-          # mentions __DATE__, __TIME__ or __TIMESTAMP__ at all, so there is
-          # nothing for it to be sloppy about. `pch_defines` is the real
-          # trade, and it is narrow: CMake force-includes the PCH ahead of the
-          # translation unit, so a source-level #define cannot change it, and
-          # command-line -D still gets hashed normally.
-          #
-          # The manual also suggests include_file_mtime,include_file_ctime.
-          # Deliberately NOT set: we measured 366/366 without them, so there
-          # is no evidence they are needed here, and they would give up real
-          # header-change detection to buy nothing.
-          #
-          # Unlike compiler_check, this does NOT orphan the existing cache —
-          # entries stored with sloppiness unset still direct-hit with it set.
-          # So expect ~366 hits plus ~288 fresh misses on the first run after
-          # this, and on the second a Hits line of ~654/654 (100%) against a
-          # Cacheable-calls line of ~654/662 — two different ratios that -sv
-          # prints one above the other. Only files using the time macros would
-          # re-populate, and there are none.
-          CCACHE_SLOPPINESS: pch_defines,time_macros
+          # Compiler identity, PCH policy and capacity come from the common
+          # launchers and shared cache action, just as they do for local builds.
           SINGZ_KEYSTORE_FILE: ${{ steps.upload-key.outputs.signed == 'true' && format('{0}/upload.jks', runner.temp) || '' }}
           SINGZ_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           SINGZ_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           SINGZ_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          # Bound compiler objects to the shared CI budget. Immutable cache
-          # snapshots are keyed by native inputs rather than every rerun.
-          ccache --max-size "${CCACHE_MAXSIZE:-1200M}"
-          ccache -z
-          ./gradlew bundleRelease assembleRelease --no-daemon
-          # -sv, not -s: the summary alone said 45% of calls were
-          # "uncacheable" without ever saying why, which is not something to
-          # go guessing about a second time.
-          ccache -sv
+          set -euo pipefail
+          node ../../scripts/with-native-build-lock.mjs --owner ci-android-release -- \
+            ./gradlew bundleRelease assembleRelease --no-daemon --max-workers=1 \
+            --build-cache --configuration-cache --configuration-cache-problems=fail --console=plain \
+            2>&1 | tee "$RUNNER_TEMP/singz-android-release-gradle.log"
         working-directory: mobile/android
+
+      - name: Verify Android native cache activity
+        if: always() && steps.cache-begin.outcome == 'success'
+        run: |
+          set -euo pipefail
+          requirements=()
+          if [ "${{ steps.android-release.outcome }}" = success ]; then requirements+=(--require-native); fi
+          node scripts/ci-build-cache.cjs report --platform android "${requirements[@]}" \
+            --log "$RUNNER_TEMP/singz-android-release-gradle.log"
 
       - name: Verify release DEX optimization
         run: python3 scripts/check-android-optimization.py mobile/android/app/build/outputs/bundle/release/app-release.aab
@@ -493,6 +519,20 @@ jobs:
           # .apk stays the sideload for the family fleet.
           cp mobile/android/app/build/outputs/bundle/release/app-release.aab "SingZ-$TAG-android.aab"
           gh release upload "$TAG" "SingZ-$TAG-android.apk" "SingZ-$TAG-android.aab" --clobber
+
+      - name: Upload Android cache evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-cache-evidence-${{ github.job }}
+          path: ${{ runner.temp }}/singz-cache-report
+          retention-days: 7
+
+      - name: Save shared mobile caches
+        if: always() && steps.mobile-cache.outputs.state != ''
+        uses: ./.github/actions/save-mobile-build-cache
+        with:
+          cache-state: ${{ steps.mobile-cache.outputs.state }}
 
   # Play upload.
   #
