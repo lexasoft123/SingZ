@@ -7,6 +7,17 @@
   },
   "configurePresets": [
     {
+      "name": "linux-alsa",
+      "inherits": "host-release",
+      "displayName": "Linux ALSA with Clang 21",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "binaryDir": "${sourceDir}/build/native/linux-alsa",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang-21",
+        "CMAKE_CXX_COMPILER": "clang++-21"
+      }
+    },
+    {
       "name": "host-debug",
       "displayName": "Host native debug",
       "binaryDir": "${sourceDir}/build/native/host-debug",
@@ -79,6 +90,12 @@
   ],
   "buildPresets": [
     {
+      "name": "linux-alsa",
+      "configurePreset": "linux-alsa",
+      "jobs": 4,
+      "targets": ["audio_host_linux_tests", "shared_audio_service_tests", "singz-audio-host"]
+    },
+    {
       "name": "host-debug",
       "configurePreset": "host-debug",
       "jobs": 4
@@ -111,6 +128,12 @@
     }
   ],
   "testPresets": [
+    {
+      "name": "linux-alsa",
+      "configurePreset": "linux-alsa",
+      "filter": { "include": { "name": "^(audio_host_linux_tests|shared_audio_service_tests)$" } },
+      "output": { "outputOnFailure": true }
+    },
     {
       "name": "host-debug",
       "configurePreset": "host-debug",

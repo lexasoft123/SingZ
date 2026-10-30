@@ -266,6 +266,9 @@ describe('Electron capture addon build', () => {
   })
 
   it('maps package flags to every requested capture target', () => {
+    expect(artifacts.requestedCaptureTargets(['--linux', '--x64'], 'linux', 'x64')).toEqual(['linux-x64'])
+    expect(artifacts.requestedCaptureTargets(['-l', '--arm64'], 'linux', 'arm64')).toEqual(['linux-arm64'])
+    expect(() => artifacts.assertHostCanBuildTarget('linux-x64', 'linux')).not.toThrow()
     expect(artifacts.requestedCaptureTargets(['--mac', '--x64'], 'darwin', 'arm64')).toEqual([
       'darwin-x64'
     ])
@@ -293,6 +296,32 @@ describe('Electron capture addon build', () => {
       'Cross-OS capture builds are not configured'
     )
     expect(() => artifacts.assertHostCanBuildTarget('darwin-x64', 'darwin')).not.toThrow()
+  })
+
+  it('validates Linux ELF identity and refuses truncated, executable, and wrong-ISA artifacts', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'singz-elf-'))
+    const addon = join(dir, 'capture.node')
+    const bytes = Buffer.alloc(64)
+    bytes.set([0x7f, 69, 76, 70, 2, 1, 1])
+    bytes.writeUInt16LE(3, 16)
+    bytes.writeUInt16LE(62, 18)
+    bytes.writeUInt32LE(1, 20)
+    bytes.writeUInt16LE(64, 52)
+    try {
+      writeFileSync(addon, bytes)
+      expect(() => artifacts.validateCaptureBinary(addon, 'linux-x64')).not.toThrow()
+      expect(() => artifacts.validateCaptureBinary(addon, 'linux-arm64')).toThrow('ELF64')
+      bytes.writeUInt16LE(183, 18)
+      writeFileSync(addon, bytes)
+      expect(() => artifacts.validateCaptureBinary(addon, 'linux-arm64')).not.toThrow()
+      bytes.writeUInt16LE(2, 16)
+      writeFileSync(addon, bytes)
+      expect(() => artifacts.validateCaptureBinary(addon, 'linux-arm64')).toThrow('ELF64')
+      writeFileSync(addon, bytes.subarray(0, 30))
+      expect(() => artifacts.validateCaptureBinary(addon, 'linux-arm64')).toThrow('ELF64')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('rejects builder target syntax the capture pipeline cannot reproduce exactly', () => {
@@ -490,9 +519,9 @@ describe('Electron capture addon build', () => {
     expect(builder).toContain('from: build/capture-package/darwin-${arch}')
     expect(builder).toContain('from: build/capture-package/win32-x64')
     expect(builder).toContain("x64ArchFiles: '**/engines/singz-capture.node'")
-    expect(builder.match(/singz-capture\.node\.source-hash/g)).toHaveLength(2)
-    expect(builder.match(/singz-capture\.node\.sha256/g)).toHaveLength(2)
-    expect(builder.match(/singz-capture\.manifest\.json/g)).toHaveLength(2)
+    expect(builder.match(/singz-capture\.node\.source-hash/g)).toHaveLength(3)
+    expect(builder.match(/singz-capture\.node\.sha256/g)).toHaveLength(3)
+    expect(builder.match(/singz-capture\.manifest\.json/g)).toHaveLength(3)
     expect(smoke).toContain('verifyCaptureArtifact({')
     expect(smoke).toContain('expectedSourceStamp: expectsCurrentSource ? sourceFingerprint() : undefined')
     expect(smoke).toContain("assert.equal(addon.buildInfo.sourceStamp, manifest.sourceStamp")
@@ -509,7 +538,7 @@ describe('Electron capture addon build', () => {
     expect(smoke).toContain("capability: 'singz.native.playback-session.unknown.v99'")
     expect(smoke).toContain("Object.entries(strictPlaybackConfig).filter(([name]) => name !== 'capability')")
     expect(smoke).toContain("assert.equal(hostDevices.provider, expectedProvider)")
-    expect(smoke).toContain("assert.equal(device.accessMode, 'shared')")
+    expect(smoke).toContain("assert.equal(device.accessMode, process.platform === 'linux' ? 'exclusive' : 'shared')")
     expect(packageJson.scripts['capture:verify']).toContain('--current-source')
     expect(read('tests/e2e/capture-addon-hardware.cjs')).toContain(
       'expectedSourceStamp: sourceFingerprint()'

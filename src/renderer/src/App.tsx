@@ -41,7 +41,7 @@ import {
   type DetectedBeats,
   type KeyGuess
 } from './audio/analysis-contract'
-import { desktopNativePlaybackPreferred } from './audio/native-playback-preference'
+import { desktopNativePlaybackPreferred, detectedDesktopPlatform } from './audio/native-playback-preference'
 import type { MlGrid } from './audio/analysis'
 import {
   clearUserBar,
@@ -720,6 +720,7 @@ export default function App(): React.JSX.Element {
   })
   const [song, setSong] = useState<LoadedSongIdentity | null>(null)
   const [tracks, setTracks] = useState<UITrack[]>([])
+  const [sourceMissing, setSourceMissing] = useState(false)
   const [split, setSplit] = useState(false)
   const [stemFiles, setStemFiles] = useState<Record<string, string> | null>(null)
   const [pendingLeadVocal, setPendingLeadVocal] = useState<string | null>(null)
@@ -795,7 +796,15 @@ export default function App(): React.JSX.Element {
     audioPrefs.outputId,
     {
       setOutput: (sinkId) => engine.setOutput(sinkId),
-      enumerateOutputs: () => navigator.mediaDevices.enumerateDevices(),
+      enumerateOutputs: async () => {
+        const browser = await navigator.mediaDevices.enumerateDevices()
+        if (detectedDesktopPlatform() !== 'linux') return browser
+        const inventory = await window.singz.audioHostDevices('alsa')
+        if (!inventory.ok) throw new Error(inventory.error)
+        return [...browser, ...inventory.devices.filter(device => device.outputChannels > 0).map(device => ({
+          kind: 'audiooutput' as const, deviceId: `native:${device.uid}`
+        }))]
+      },
       commit: (outputId) => setAudioPrefs((current) => ({ ...current, outputId }))
     }
   ))
@@ -1307,11 +1316,11 @@ export default function App(): React.JSX.Element {
   }, [engine, trainingCues, trainingMic])
 
   const releaseLegacyOutputForMonitor = useCallback(
-    () => engine.releaseOutputForNativeMonitor(),
+    () => engine.releaseOutputForHeadphoneMonitor(),
     [engine]
   )
   const restoreLegacyOutputAfterMonitor = useCallback(
-    () => engine.restoreOutputAfterNativeMonitor(),
+    () => engine.restoreOutputAfterHeadphoneMonitor(),
     [engine]
   )
 
@@ -1693,6 +1702,7 @@ export default function App(): React.JSX.Element {
       }
       mark(t('app.load.opening'), 0)
       setSong(createLoadedSongIdentity(reg.path,reg.name,`song-load-${seq}`))
+      setSourceMissing(Boolean(reg.project?.sourceMissing))
       setIsProject(Boolean(reg.project))
       setLeadVocalSeparated(reg.project?.settings.leadVocalSeparated === true)
       const savedVolume = sanitizeSongVolume(reg.project?.settings.masterVolume)
@@ -1764,7 +1774,22 @@ export default function App(): React.JSX.Element {
         const graphDocument = loadedGraph.graphDocument
         // Saved project with stems: load them directly and restore settings.
         if (reg.project?.stems) {
-          const proj = reg.project
+          let proj = reg.project
+          if ((proj.formatVersion ?? 1) < 2 && desktopNativePlaybackPreferred()) {
+            // Native playback opens the files at Play, rather than retaining
+            // decoded buffers. Finish compaction before adopting its paths:
+            // background migration could otherwise unlink a WAV between the
+            // open and the first native prepare. Refresh even after a partial
+            // upgrade so only stems that actually moved get FLAC paths.
+            await window.singz.upgradeProject(proj.dir)
+            if (seq !== loadSeq.current) return
+            const refreshed = await window.singz.registerSource(reg.path)
+            if (seq !== loadSeq.current) return
+            if (!refreshed.ok || !refreshed.project?.stems) {
+              throw new Error(t('library.engine.songUnreadable'))
+            }
+            proj = refreshed.project
+          }
           const stems = proj.stems as Record<string, string>
           const rawOrder = orderedStems(stems)
           /* All six at once, deliberately — the phones fetch theirs one after
@@ -1917,7 +1942,7 @@ export default function App(): React.JSX.Element {
           setPhase('ready')
           setLoadProgress(null)
           void prepLyricsRef.current?.()
-          if ((proj.formatVersion ?? 1) < 2) {
+          if ((proj.formatVersion ?? 1) < 2 && !desktopNativePlaybackPreferred()) {
             // Old WAV project: repack stems as FLAC in the background (the
             // buffers above are already in memory, so nothing here notices).
             void window.singz.upgradeProject(proj.dir).then((r) => {
@@ -4215,7 +4240,7 @@ export default function App(): React.JSX.Element {
             onRedetectBeat={redetectBeat}
             onToggleKaraoke={toggleKaraoke}
             onSplit={mode => void beginSplit(mode)}
-            canResplit={split && canResplitVocals(pendingLeadVocal, sep !== null, leadVocalSeparated)}
+            canResplit={!sourceMissing && split && canResplitVocals(pendingLeadVocal, sep !== null, leadVocalSeparated)}
             canSplitBacking={split && !pendingLeadVocal && !leadVocalSeparated}
             splitDisabled={saveState === 'saving'}
             onCancelSplit={cancelSplit}

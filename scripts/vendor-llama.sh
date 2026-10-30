@@ -72,6 +72,7 @@ case "$TARGET" in
   # Vulkan build refuses to start there), and a CUDA build would only serve
   # the RTX machines while adding hundreds of MB to every installer.
   win32-*) EXTRA="-DGGML_NATIVE=OFF" ;;
+  linux-x64) EXTRA="-DGGML_NATIVE=OFF" ;;
 esac
 
 BUILD="$SRC/build-$TARGET"

@@ -789,6 +789,10 @@ std::unique_ptr<singz::AudioHostBackend> playbackBackend(
   if (unavailableReason)
     *unavailableReason = "The requested provider is not available on macOS";
   return nullptr;
+#elif defined(__linux__) && !defined(__ANDROID__)
+  if (provider == "alsa") return singz::createPlatformAudioHostBackend();
+  if (unavailableReason) *unavailableReason = "The requested provider is not available on Linux";
+  return nullptr;
 #else
   (void)provider;
   if (unavailableReason)
@@ -843,6 +847,10 @@ napi_value audioHostProviders(napi_env env, napi_callback_info) {
   appendProvider(env, providers, 2, "asio", "ASIO", false,
                  "wrong-platform", "ASIO is available only on Windows");
 #endif
+#if defined(__linux__) && !defined(__ANDROID__)
+  appendProvider(env, providers, 3, "alsa", "ALSA", true, "none",
+                 "Direct Linux ALSA PCM with exclusive endpoint ownership");
+#endif
   return providers;
 }
 
@@ -894,6 +902,8 @@ napi_value audioHostDevices(napi_env env, napi_callback_info info) {
     provider = "wasapi";
 #elif defined(__APPLE__)
     provider = "coreaudio";
+#elif defined(__linux__) && !defined(__ANDROID__)
+    provider = "alsa";
 #else
     provider = "wasapi";
 #endif

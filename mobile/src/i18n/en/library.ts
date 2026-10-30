@@ -30,6 +30,16 @@ export const library = {
   // decoding the bundled sample's lanes one at a time; {id} is a stem name (e.g. "vocals", left untranslated), {i}/{n} = progress
   'phone.library.decoding': 'Decoding {id} · {i}/{n}',
   // loading-card step text while opening a song; {id} is a stem name or an added track's own label, {i}/{n} = progress
+  'phone.library.downloadChecking': "Checking saved {label} · {index}/{count}",
+  'phone.library.downloadTrack': "Downloading {label} · {index}/{count}",
+  'phone.library.downloadVerifying': "Verifying {label} · {index}/{count}",
+  'phone.library.downloadRetrying': "Retrying {label} · attempt {attempt}/{attempts}",
+  'phone.library.downloadInterrupted': "Connection interrupted. Downloaded tracks are kept. Tap Retry to continue.",
+  'phone.library.downloadMissing': "This track is missing from Drive. Sync the song from your computer again.",
+  'phone.library.downloadDenied': "Drive refused access to this track. Check your sign-in and try again.",
+  'phone.library.downloadStorage': "Cannot save this track. Check the free space on your phone.",
+  'phone.library.downloadDamaged': "A track arrived incomplete or damaged. Downloaded tracks are kept. Tap Retry to continue.",
+  'phone.library.downloadRetry': "Retry",
   'phone.library.fetchingStep': 'Fetching {id} · {i}/{n}',
   'phone.library.decodingStep': 'Decoding {id} · {i}/{n}',
   'phone.library.lyricsStep': 'Lyrics…',

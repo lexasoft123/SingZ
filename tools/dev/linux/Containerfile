@@ -1,0 +1,32 @@
+# Resolve DEBIAN_BASE to a digest for a recorded development image.
+ARG DEBIAN_BASE=docker.io/library/debian:13-slim
+FROM ${DEBIAN_BASE}
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      bash build-essential ca-certificates ccache clang cmake curl file git \
+      libasound2-dev libdbus-1-dev libdrm-dev libegl1-mesa-dev libgbm-dev \
+      libglib2.0-dev libnode-dev libudev-dev libwayland-dev \
+      ninja-build nodejs npm pkg-config python3 rsync tini \
+    && dpkg-query -W > /usr/local/share/singz-development-packages.txt \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 1000 --shell /bin/bash developer
+
+RUN printf '%s\n' 'deb https://deb.debian.org/debian trixie-backports main' \
+      > /etc/apt/sources.list.d/singz-backports.list \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      -t trixie-backports clang-21 lld-21 libclang-rt-21-dev \
+    && dpkg-query -W > /usr/local/share/singz-development-packages.txt \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CC=clang-21 \
+    CXX=clang++-21 \
+    CCACHE_DIR=/cache/ccache \
+    CCACHE_BASEDIR=/src \
+    CCACHE_NOHASHDIR=true \
+    npm_config_cache=/cache/npm
+USER developer
+WORKDIR /src
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["sleep", "infinity"]

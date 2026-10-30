@@ -3,6 +3,15 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
+  "library.drive.title": "Proyectos de Google Drive",
+  "library.drive.hint": "Descarga canciones para reproducirlas sin conexión. Estas copias locales no cambian tu biblioteca de Drive.",
+  "library.drive.search": "Buscar proyectos de Drive",
+  "library.drive.downloading": "Descargando proyecto…",
+  "library.drive.cancelled": "Descarga pausada. Los archivos verificados se conservan. Selecciona la canción para continuar.",
+  "library.drive.loading": "Cargando tus proyectos de Drive…",
+  "library.drive.open": "Abrir",
+  "library.drive.download": "Descargar y abrir",
+  "library.drive.empty": "No se encontraron proyectos de SingZ en Google Drive.",
   "library.dropScreen.syncProgress": "Sincronizando con Google Drive… {msg}",
   "library.dropScreen.cancelSync": "Cancelar",
   "library.dropScreen.syncPaused": "Sincronización pausada. Los archivos completados se guardan. Selecciona \"Sincronizar\" ahora para continuar.",

@@ -1239,8 +1239,8 @@ bool parseConfig(napi_env env, napi_value value,
                       kNativePlaybackMaximumLinearGain, 1.0, true,
                       &masterGain))
     return false;
-  if ((*provider == "asio") != (accessMode == "exclusive") ||
-      (*provider != "asio" && accessMode != "shared"))
+  const bool exclusiveProvider = *provider == "asio" || *provider == "alsa";
+  if (accessMode != (exclusiveProvider ? "exclusive" : "shared"))
     return false;
   config.exclusive = accessMode == "exclusive";
   // The input order is semantically meaningful, so reject duplicates without
@@ -1329,6 +1329,8 @@ bool consumeProviderDeviceUid(const std::string &provider,
   return true;
 #elif defined(__APPLE__)
   return provider == "coreaudio";
+#elif defined(__linux__) && !defined(__ANDROID__)
+  return provider == "alsa" && deviceUid->starts_with("alsa:");
 #else
   (void)provider;
   return false;

@@ -64,6 +64,15 @@ function finalVerifyCaptureSnapshots({
 function main(builderArgs = process.argv.slice(2)) {
   const targets = requestedCaptureTargets(builderArgs)
   for (const target of targets) {
+    if (target.startsWith('linux-')) {
+      for (const script of ['vendor-analyze.sh', 'vendor-llama.sh', 'vendor-crispasr.sh']) {
+        run('bash', [join(root, 'scripts', script), target])
+      }
+      for (const helper of ['singz-analyze', 'llama-server', 'crispasr']) {
+        run('bash', [join(root, 'scripts/assert-portable-binary.sh'), target, join(root, 'vendor', target, helper)])
+      }
+      run('bash', [join(root, 'scripts/build-onnx-pack.sh'), target])
+    }
     run(process.execPath, [join(root, 'scripts/build-capture-addon.cjs'), target])
   }
   if (builderArgs.includes('--universal')) {
@@ -78,7 +87,10 @@ function main(builderArgs = process.argv.slice(2)) {
   // artifacts are still checksum/manifest verified above and are load-smoked by
   // their native CI runner.
   const hostTarget = `${process.platform}-${process.arch}`
-  if (targets.includes(hostTarget)) {
+  const runtimeSmokeDeferred = process.env.SINGZ_CI_STAGE === 'build' &&
+    process.platform === 'linux' && targets.length === 1 && targets[0] === 'linux-x64'
+  if (runtimeSmokeDeferred) console.log('Linux runtime smoke deferred to the required installed-test CI stage')
+  if (targets.includes(hostTarget) && !runtimeSmokeDeferred) {
     const electron = require('electron')
     run(electron, [
       join(root, 'tests/e2e/capture-addon-smoke.cjs'),

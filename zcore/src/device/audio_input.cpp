@@ -73,6 +73,8 @@ bool audioInputBackendSupported() {
   return true;
 #elif defined(__ANDROID__)
   return true;
+#elif defined(SINGZ_HAS_ALSA)
+  return true;
 #else
   return false;
 #endif
@@ -544,7 +546,7 @@ std::string AudioInput::lastError() const {
 }
 
 #if (!defined(__APPLE__) || (!TARGET_OS_OSX && !TARGET_OS_IOS)) && !defined(_WIN32) && \
-    !defined(__ANDROID__)
+    !defined(__ANDROID__) && !defined(SINGZ_HAS_ALSA)
 std::unique_ptr<AudioInputBackend> createPlatformAudioInputBackend() { return nullptr; }
 std::vector<AudioInputDevice> enumeratePlatformAudioInputDevices(std::string* error) {
   if (error) *error = "audio input is unsupported on this platform";

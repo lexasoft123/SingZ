@@ -106,8 +106,10 @@ struct AudioHostDeviceInfo {
   // always the platform's opaque endpoint identifier; callers must not parse
   // it or derive pairing from the friendly label.
   AudioHostEndpointDirection direction{AudioHostEndpointDirection::Duplex};
-  // Inventory describes the currently active shared profile. Exclusive
-  // formats are exact-probed at open time and are never inferred from it.
+  // Shared-provider inventory describes its active shared profile. Direct
+  // ALSA inventory reports capability bounds; its exact channel count, sample
+  // format and period are negotiated at open, never inferred from the bounds.
+  // Exclusive formats are always exact-probed at open time.
   AudioHostAccessMode accessMode{AudioHostAccessMode::Shared};
   AudioHostTransport transport{AudioHostTransport::Unknown};
   AudioHostMonitoringSuitability monitoringSuitability{
@@ -158,6 +160,9 @@ enum class AudioHostSampleFormat : uint32_t {
 };
 
 struct AudioHostDiagnostics {
+  // Samples replaced by zero at the provider's non-finite trust boundary.
+  uint64_t nonFiniteInputSamples{0};
+  uint64_t nonFiniteOutputSamples{0};
   // WASAPI and future split-clock providers report their stream-level values
   // here instead of mislabeling GetStreamLatency as pure hardware latency.
   uint64_t inputStreamLatency100ns{0};
@@ -275,8 +280,11 @@ class AudioHostBackend {
   }
 };
 
-// Control-domain lifecycle owner. Construction and enumeration do not open,
-// start, or otherwise mutate an audio device. Calls to open(), start(),
+// Control-domain lifecycle owner. Construction does not open a device.
+// Enumeration never configures, starts or retains streams. ALSA capabilities
+// require a transient nonblocking PCM query-open (which can observe EBUSY);
+// other providers query their platform inventory without opening PCM streams.
+// Calls to open(), start(),
 // suspend(), resume(), stop(), and status() are serialized by the owner;
 // status() may overlap only the audio callback's lock-free telemetry updates.
 class AudioHost final {

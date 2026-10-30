@@ -235,6 +235,15 @@ elseif(WIN32)
     platform/ios/audio_input_ios_session.cpp
     platform/windows/audio_input_windows.cpp
     platform/windows/audio_input_wake_windows.cpp)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  list(APPEND ZCORE_DEVICE_SOURCES
+    platform/android/audio_host_android_callback_policy.cpp
+    platform/ios/audio_input_ios_session.cpp
+    platform/linux/alsa_pcm.cpp
+    platform/linux/alsa_capture.cpp
+    platform/linux/audio_host_linux.cpp
+    platform/linux/audio_input_linux.cpp
+    platform/linux/audio_input_wake_linux.cpp)
 else()
   list(APPEND ZCORE_DEVICE_SOURCES
     platform/android/audio_host_android_callback_policy.cpp
@@ -291,6 +300,12 @@ elseif(APPLE)
       platform/macos/audio_host_macos.cpp
       PROPERTIES COMPILE_OPTIONS "-fblocks")
   endif()
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  find_package(ALSA REQUIRED)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(UDEV REQUIRED IMPORTED_TARGET libudev)
+  target_compile_definitions(zcore_device PRIVATE SINGZ_HAS_ALSA=1)
+  target_link_libraries(zcore_device PUBLIC ALSA::ALSA PkgConfig::UDEV)
 endif()
 
 # Deterministic standalone/test provider. Keep threads and synthetic sample

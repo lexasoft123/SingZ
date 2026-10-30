@@ -3,6 +3,17 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const library: Translation<typeof en> = {
+  "phone.library.downloadChecking": "Conferindo {label} salvo · {index}/{count}",
+  "phone.library.downloadTrack": "Baixando {label} · {index}/{count}",
+  "phone.library.downloadVerifying": "Verificando {label} · {index}/{count}",
+  "phone.library.downloadRetrying": "Tentando {label} novamente · tentativa {attempt}/{attempts}",
+  "phone.library.downloadInterrupted": "A conexão foi interrompida. As faixas baixadas foram mantidas. Toque em Tentar novamente para continuar.",
+  "phone.library.downloadMissing": "Esta faixa não está no Drive. Sincronize a música novamente pelo computador.",
+  "phone.library.downloadDenied": "O Drive negou acesso a esta faixa. Confira seu login e tente novamente.",
+  "phone.library.downloadStorage": "Não foi possível salvar esta faixa. Confira o espaço livre no celular.",
+  "phone.library.downloadDamaged": "Uma faixa chegou incompleta ou danificada. As faixas baixadas foram mantidas. Toque em Tentar novamente para continuar.",
+  "phone.library.downloadRetry": "Tentar novamente",
+
   "phone.library.pickFailed": "Não foi possível abrir este arquivo ({msg})",
   "phone.library.folderInactive": "A pasta selecionada não está mais ativa. Reabra-a e tente novamente.",
   "phone.library.folderIdentityUnavailable": "A identidade da pasta selecionada não está disponível. Reabra a pasta e tente novamente.",

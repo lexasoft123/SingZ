@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { type ChildProcess } from 'node:child_process'
 import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
@@ -360,6 +361,12 @@ export class Transcriber {
   }
 
   private async cacheDir(songPath: string): Promise<string> {
+    // A restored split project has no source to hash. Its local lyrics and
+    // vocal stem are authoritative; scratch work gets a stable project key.
+    if (!(await exists(songPath)) && await projectLyricsPath(songPath)) {
+      const key = createHash('sha1').update(dirname(songPath)).digest('hex').slice(0, 16)
+      return join(stemsRoot(), `project-${key}`)
+    }
     return join(stemsRoot(), await hashFile(songPath))
   }
 

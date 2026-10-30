@@ -32,7 +32,7 @@ import {
   setProjectsRoot,
   writeProjectGraph
 } from './projects'
-import { gdriveConfigured, gdriveSignedIn, gdriveSignIn, gdriveSignOut, gdriveSync, gdriveCancelSync } from './gdrive'
+import { gdriveProjects, gdriveDownload, gdriveCancelDownload, gdriveDeviceConfigured, gdriveBrowserConfigured, gdriveSignInMode, gdriveDeviceStart, gdriveDeviceStatus, gdriveDeviceCancel, gdriveConfigured, gdriveSignedIn, gdriveSignIn, gdriveSignOut, gdriveSync, gdriveCancelSync } from './gdrive'
 import { readSettings, writeSettings } from './settings'
 import { registerLocale } from './locale'
 import { registerWhatsNew } from './whats-new'
@@ -151,13 +151,18 @@ if (!process.env.SINGZ_NO_SYNC) onDirty(() => scheduler.notifyDirty())
 
 function createWindow(): void {
   const st = loadWindowState({ width: 1240, height: 820 })
+  // Cage needs a mapped Wayland surface before the first frame. Waiting for
+  // ready-to-show with an initially hidden window can leave startup blank.
+  // Preserve the explicit hidden-window contract used by automated drivers.
+  const showOnWayland = process.platform === 'linux'
+    && Boolean(process.env.WAYLAND_DISPLAY) && !process.env.SINGZ_E2E_HIDDEN
   const win = new BrowserWindow({
     width: st.width,
     height: st.height,
     ...(st.x !== undefined && st.y !== undefined ? { x: st.x, y: st.y } : {}),
     minWidth: 940,
     minHeight: 600,
-    show: false,
+    show: showOnWayland,
     ...(process.platform === 'darwin'
       ? {
           backgroundColor: '#12100d',
@@ -208,9 +213,12 @@ function createWindow(): void {
       readGpuSoon()
       return
     }
-    win.once('show', readGpuSoon)
     if (st.maximized) win.maximize()
-    win.show()
+    if (win.isVisible()) readGpuSoon()
+    else {
+      win.once('show', readGpuSoon)
+      win.show()
+    }
   })
   win.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url)
@@ -494,7 +502,13 @@ function registerIpc(): void {
   ipcMain.on('training-preferences:save-sync', (event, raw: unknown) => { event.returnValue = saveTrainingPreferences(raw) })
   ipcMain.handle('training-completion:record', (_e, raw: unknown) => recordTrainingCompletion(raw))
 
+  ipcMain.handle('gdrive:projects', () => gdriveProjects())
+  ipcMain.handle('gdrive:download', (_event, id: unknown) => typeof id === 'string' ? gdriveDownload(id, (msg, frac) => sendGdrive('gdrive:progress', { msg, frac })) : { ok: false, error: 'Invalid Drive project' })
+  ipcMain.handle('gdrive:cancel-download', () => gdriveCancelDownload())
   ipcMain.handle('gdrive:status', () => ({
+    signInMode: gdriveSignInMode(),
+    deviceSignInConfigured: gdriveDeviceConfigured(),
+    browserSignInConfigured: gdriveBrowserConfigured(),
     configured: gdriveConfigured(),
     signedIn: gdriveConfigured() && gdriveSignedIn(),
     lastSync: readSettings().gdriveLastSync ?? null,
@@ -505,8 +519,43 @@ function registerIpc(): void {
     const res = await gdriveSignIn()
     // the scheduler arms nothing while signed out; this is where a session that
     // started that way gets its launch reconcile and its sweep
-    if (res.ok) scheduler.start()
+    if (res.ok && !process.env.SINGZ_NO_SYNC) scheduler.start()
     return res
+  })
+  let deviceSignInOwner: { id: number; dispose: () => void } | null = null
+  const releaseDeviceOwner = (): void => { deviceSignInOwner?.dispose(); deviceSignInOwner = null }
+  ipcMain.handle('gdrive:device-start', async event => {
+    if (deviceSignInOwner && deviceSignInOwner.id !== event.sender.id) return { ok: false, code: 'cancelled' }
+    releaseDeviceOwner()
+    const owner = event.sender
+    const ownerId = owner.id
+    const record = { id: ownerId, dispose: (): void => { owner.removeListener('destroyed', destroy) } }
+    const destroy = (): void => {
+      if (deviceSignInOwner === record) { gdriveDeviceCancel(); releaseDeviceOwner() }
+    }
+    deviceSignInOwner = record
+    owner.once('destroyed', destroy)
+    try {
+      const result = await gdriveDeviceStart()
+      if (!result.ok && deviceSignInOwner === record) releaseDeviceOwner()
+      return result
+    } catch {
+      if (deviceSignInOwner === record) { gdriveDeviceCancel(); releaseDeviceOwner() }
+      return { ok: false, code: 'network' }
+    }
+  })
+  ipcMain.handle('gdrive:device-status', (event, id: unknown) => {
+    if (deviceSignInOwner?.id !== event.sender.id || typeof id !== 'string') return { phase: 'error', code: 'unknown-session' }
+    const state = gdriveDeviceStatus(id)
+    if (state.phase === 'complete' && !process.env.SINGZ_NO_SYNC) scheduler.start()
+    return state
+  })
+  ipcMain.handle('gdrive:device-cancel', (event, id?: unknown) => {
+    if (deviceSignInOwner?.id !== event.sender.id || (id !== undefined && typeof id !== 'string')) return { ok: false }
+    const complete = typeof id === 'string' && gdriveDeviceStatus(id).phase === 'complete'
+    const ok = gdriveDeviceCancel(typeof id === 'string' ? id : undefined)
+    if (ok) releaseDeviceOwner()
+    return { ok, complete: ok && complete }
   })
   ipcMain.handle('gdrive:signout', () => {
     gdriveSignOut()
@@ -645,7 +694,7 @@ function registerIpc(): void {
 
   ipcMain.handle('audio-host:devices', (_event, provider: unknown) =>
     captureOwner.hostDevices(
-      provider === 'coreaudio' || provider === 'wasapi' || provider === 'asio'
+      provider === 'coreaudio' || provider === 'wasapi' || provider === 'asio' || provider === 'alsa'
         ? provider
         : undefined
     ))
