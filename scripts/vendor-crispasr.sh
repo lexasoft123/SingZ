@@ -45,6 +45,7 @@ case "$TARGET" in
   darwin-arm64) EXTRA="-DCMAKE_OSX_ARCHITECTURES=arm64 -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON" ;;
   darwin-x64) EXTRA="-DCMAKE_OSX_ARCHITECTURES=x86_64 -DGGML_NATIVE=OFF -DGGML_METAL=OFF" ;;
   win32-*) EXTRA="-DGGML_NATIVE=OFF" ;;
+  linux-x64) EXTRA="-DGGML_NATIVE=OFF" ;;
 esac
 
 BUILD="$SRC/build-$TARGET"
@@ -65,7 +66,7 @@ cmake -S "$SRC" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DCRISPASR_BUILD_TESTS=OF
   -DBUILD_SHARED_LIBS=OFF \
   -DCMAKE_IGNORE_PREFIX_PATH="$IGNORE" -DCMAKE_IGNORE_PATH="$IGNORE" $EXTRA
 
-cmake --build "$BUILD" -j --config Release --target crispasr-cli
+cmake --build "$BUILD" --parallel "${SINGZ_NATIVE_JOBS:-2}" --config Release --target crispasr-cli
 
 mkdir -p "$ROOT/vendor/$TARGET"
 BIN="$BUILD/bin/crispasr"

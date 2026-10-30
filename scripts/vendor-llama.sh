@@ -29,6 +29,9 @@ mkdir -p "$ROOT/.engines-src"
 if [ ! -d "$SRC" ]; then
   git clone --depth 1 --branch "$REF" https://github.com/ggml-org/llama.cpp "$SRC"
 fi
+# Restored source trees must follow the requested pin on every actual rebuild.
+git -C "$SRC" fetch --depth 1 origin "$REF"
+git -C "$SRC" checkout --detach FETCH_HEAD
 
 EXTRA=""
 case "$TARGET" in
@@ -41,6 +44,7 @@ case "$TARGET" in
   # Vulkan build refuses to start there), and a CUDA build would only serve
   # the RTX machines while adding hundreds of MB to every installer.
   win32-*) EXTRA="-DGGML_NATIVE=OFF" ;;
+  linux-x64) EXTRA="-DGGML_NATIVE=OFF" ;;
 esac
 
 BUILD="$SRC/build-$TARGET"
@@ -59,7 +63,7 @@ cmake -S "$SRC" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
   -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_CURL=OFF \
   -DLLAMA_OPENSSL=OFF \
   -DCMAKE_IGNORE_PREFIX_PATH="$IGNORE" -DCMAKE_IGNORE_PATH="$IGNORE" $EXTRA
-cmake --build "$BUILD" -j --config Release --target llama-server
+cmake --build "$BUILD" --parallel "${SINGZ_NATIVE_JOBS:-2}" --config Release --target llama-server
 
 mkdir -p "$ROOT/vendor/$TARGET"
 BIN="$BUILD/bin/llama-server"

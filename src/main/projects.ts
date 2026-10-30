@@ -1,4 +1,5 @@
 import { app } from 'electron'
+import { driveProjectsRoot, isDriveProject } from './drive-storage'
 import { sanitizeSongVolume } from '../shared/song-volume'
 import { t } from '../shared/i18n'
 import { createHash } from 'node:crypto'
@@ -783,38 +784,40 @@ export async function listProjects(): Promise<{ root: string; projects: ProjectL
   const root = projectsRoot()
   const projects: ProjectListItem[] = []
   try {
-    for (const entry of await readdir(root, { withFileTypes: true })) {
-      // A sync can retain a complete staging document when its final rename
-      // is refused (for example a scanner holds the destination on Windows).
-      // Only the published destination belongs in the playable library.
-      if (!entry.isDirectory() || entry.name.startsWith('.singz-adopting-')) continue
-      const dir = join(root, entry.name)
-      const meta = await readMeta(dir)
-      if (!meta) continue
-      const songPath = join(dir, meta.songFile)
-      if (!(await exists(songPath))) continue
-      const present = await stemsPresent(dir)
-      const facts = describeProject(meta, present)
-      if (facts.damaged.length || facts.missing.length) {
-        log(
-          'app',
-          `${entry.name}: ${[...facts.missing.map((f) => `${f} missing`), ...facts.damaged.map((f) => `${f} the wrong size`)].join(', ')}`,
-          'warn'
-        )
+    for (const library of [root, driveProjectsRoot()]) {
+      for (const entry of await readdir(library, { withFileTypes: true }).catch(() => [])) {
+        // A sync can retain a complete staging document when its final rename
+        // is refused (for example a scanner holds the destination on Windows).
+        // Only the published destination belongs in the playable library.
+        if (!entry.isDirectory() || entry.name.startsWith('.singz-adopting-')) continue
+        const dir = join(library, entry.name)
+        const meta = await readMeta(dir)
+        if (!meta) continue
+        const songPath = join(dir, meta.songFile)
+        const present = await stemsPresent(dir)
+        const facts = describeProject(meta, present)
+        if (!(await exists(songPath)) && !facts.playable) continue
+        if (facts.damaged.length || facts.missing.length) {
+          log(
+            'app',
+            `${entry.name}: ${[...facts.missing.map((f) => `${f} missing`), ...facts.damaged.map((f) => `${f} the wrong size`)].join(', ')}`,
+            'warn'
+          )
+        }
+        projects.push({
+          dir,
+          name: meta.name ?? entry.name,
+          songPath,
+          savedAt: meta.savedAt ?? '',
+          // playable = the core four exist; guitar/piano may be silent-hidden
+          hasStems: facts.playable,
+          stemCount: Object.keys(facts.stems).length,
+          hasLyrics: await exists(join(dir, 'lyrics.json')),
+          // what deleting it would free — stats only, so an evicted iCloud stem
+          // is measured, never downloaded
+          bytes: Object.values(present).reduce((a, b) => a + b, 0) + (await topBytes(dir))
+        })
       }
-      projects.push({
-        dir,
-        name: meta.name ?? entry.name,
-        songPath,
-        savedAt: meta.savedAt ?? '',
-        // playable = the core four exist; guitar/piano may be silent-hidden
-        hasStems: facts.playable,
-        stemCount: Object.keys(facts.stems).length,
-        hasLyrics: await exists(join(dir, 'lyrics.json')),
-        // what deleting it would free — stats only, so an evicted iCloud stem
-        // is measured, never downloaded
-        bytes: Object.values(present).reduce((a, b) => a + b, 0) + (await topBytes(dir))
-      })
     }
   } catch {
     // no library yet
@@ -830,6 +833,7 @@ export async function detectProject(songPath: string): Promise<ProjectInfo | nul
   if (!(await exists(metaPath))) return null
   try {
     const meta = JSON.parse(await readFile(metaPath, 'utf8')) as ProjectFile
+    if (basename(songPath) !== meta.songFile && !(await exists(songPath))) return null
     const facts = describeProject(meta, await stemsPresent(dir))
     const stems: Partial<Record<StemName6, string>> = {}
     for (const s of STEMS_6) {
@@ -841,6 +845,7 @@ export async function detectProject(songPath: string): Promise<ProjectInfo | nul
     return {
       dir,
       name: meta.name ?? basename(dir),
+      sourceMissing: !(await exists(songPath)),
       formatVersion: meta.version ?? 1,
       settings: { ...settings, custom: await resolveCustom(dir, settings.custom) },
       graphHash: validGraphHash(meta.graphHash) ? { ...meta.graphHash } : undefined,
@@ -917,7 +922,8 @@ export async function saveProject(
       // vanished while it waited (its project renamed, the file deleted) would
       // otherwise read as "loose song" below and fork a second copy of the
       // project into the library, built out of the splitter cache.
-      if (!(await exists(songPath))) {
+      const sourceExists = await exists(songPath)
+      if (!sourceExists && !(await detectProject(songPath))?.stems) {
         return {
           ok: false as const,
           error: t('main.error.songMoved')
@@ -940,11 +946,12 @@ export async function saveProject(
 
         // processed stems from the hash cache (if the song has been split);
         // the six-stem split wins when both exist — it is a superset
-        const hashDir = join(stemsRoot(), await hashFile(songPath))
-        const sixDir = join(hashDir, 'htdemucs_6s')
+        const hashDir = sourceExists ? join(stemsRoot(), await hashFile(songPath)) : null
+        const sixDir = hashDir ? join(hashDir, 'htdemucs_6s') : ''
         const useSix = await exists(join(sixDir, 'vocals.wav'))
-        const cacheDir = useSix ? sixDir : join(hashDir, 'htdemucs')
+        const cacheDir = hashDir ? (useSix ? sixDir : join(hashDir, 'htdemucs')) : null
         for (const s of useSix ? STEMS_6 : STEMS) {
+          if (!cacheDir) continue
           const src = join(cacheDir, `${s}.wav`)
           const dst = join(dir, 'stems', `${s}.wav`)
           // an existing FLAC already carries this stem — don't resurrect the WAV
@@ -971,7 +978,7 @@ export async function saveProject(
         const stored = await storeCustomTracks(dir, settings.custom)
 
         // lyrics from the hash cache (project-local lyrics stay as they are)
-        const cachedLyrics = join(stemsRoot(), await hashFile(songPath), 'lyrics.json')
+        const cachedLyrics = hashDir ? join(hashDir, 'lyrics.json') : ''
         const projLyrics = join(dir, 'lyrics.json')
         if ((await exists(cachedLyrics)) && !(await exists(projLyrics))) {
           await copyFile(cachedLyrics, projLyrics)
@@ -1016,7 +1023,7 @@ export async function saveProject(
           // portable; the renderer gets absolute paths back below.
           settings: storedSettings,
           stemHashes: await refreshStemHashes(dir, prevMeta?.stemHashes),
-          songHash: await refreshFileHash(join(dir, songFile), prevMeta?.songHash),
+          songHash: sourceExists ? await refreshFileHash(join(dir, songFile), prevMeta?.songHash) : prevMeta?.songHash,
           lyricsHash: await refreshFileHash(join(dir, 'lyrics.json'), prevMeta?.lyricsHash)
         }
         await writeMetaAtomic(dir, meta)
@@ -1123,7 +1130,7 @@ export async function deleteProject(
 ): Promise<{ ok: true; name: string } | { ok: false; error: string }> {
   try {
     const target = resolve(dir)
-    if (!inLibrary(target) || target === projectsRoot()) {
+    if ((!inLibrary(target) && !isDriveProject(target)) || target === projectsRoot()) {
       return { ok: false, error: t('main.error.folderNotInLibrary') }
     }
     return await withProjectLock(target, async () => {

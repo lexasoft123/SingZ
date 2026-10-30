@@ -284,7 +284,8 @@ export function monitorRouteCopy(
       copy: t('settings.monitor.routeWindowsUnavailable')
     }
   }
-  if (inventory.platform !== 'darwin') {
+  if (inventory.platform !== 'darwin' &&
+      !(inventory.platform === 'linux' && inventory.provider === 'alsa')) {
     return { ready: false, copy: t('settings.monitor.routePlatformUnavailable') }
   }
   if (!input) {
@@ -338,7 +339,7 @@ export function monitorConfig(
     sampleRate,
     bufferFrames,
     maximumFrames,
-    exclusive: false
+    exclusive: output.accessMode === 'exclusive'
   }
 }
 
@@ -1102,6 +1103,11 @@ export default function SettingsModal({
     return () => window.removeEventListener('keydown', onKey, { capture: true })
   }, [closeSettings])
 
+  const linuxOutputs = hostInventory?.provider === 'alsa' && hostInventory.ok
+    ? hostInventory.devices.filter(device => device.outputChannels > 0).map(device => ({ id: `native:${device.uid}`, label: `${device.label} (ALSA)` }))
+    : []
+  const outputOptions = [...(devices?.outputs ?? []), ...linuxOutputs]
+
   const savedGone = (id: string | undefined, rows: { id: string }[] | undefined): boolean =>
     Boolean(id && rows && !rows.some((device) => device.id === id))
   const nativeInventoryAvailable = nativeInputs !== null
@@ -1406,8 +1412,8 @@ export default function SettingsModal({
             afterMonitorStops(() => onChangeOutput(outputId))
           }}>
             <option value="">{t('settings.common.systemDefault')}</option>
-            {devices?.outputs.map((device) => <option key={device.id} value={device.id}>{device.label}</option>)}
-            {savedGone(audio.outputId, devices?.outputs) && <option value={audio.outputId}>{t('settings.common.savedDeviceMissing')}</option>}
+            {outputOptions.map((device) => <option key={device.id} value={device.id}>{device.label}</option>)}
+            {savedGone(audio.outputId, outputOptions) && <option value={audio.outputId}>{t('settings.common.savedDeviceMissing')}</option>}
           </select>
           <OutputRouteRecovery
             unconfirmed={outputRouteUnconfirmed}

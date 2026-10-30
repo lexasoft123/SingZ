@@ -1,8 +1,9 @@
 /** 日本語 UI strings. Keep keys and placeholders in sync with English. */
-import type { library as en } from '../en/library'
+import { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
+  ...en, // New Drive reader controls fall back to English until translated.
   "library.dropScreen.syncProgress": "Google Drive と同期中… {msg}",
   "library.dropScreen.cancelSync": "キャンセル",
   "library.dropScreen.syncPaused": "同期を一時停止しました。完了したファイルは保持されます。「今すぐ同期」で続行できます。",

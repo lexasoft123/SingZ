@@ -1,5 +1,15 @@
 /* English strings for the `library` namespace — see ../index.ts. */
 export const library = {
+  "library.drive.title": "Google Drive projects",
+  "library.drive.hint": "Download songs for offline playback. These local copies do not change your Drive library.",
+  "library.drive.search": "Search Drive projects",
+  "library.drive.downloading": "Downloading project\u2026",
+  "library.drive.cancelled": "Download paused. Verified files are kept. Choose the song to continue.",
+  "library.drive.loading": "Loading your Drive projects\u2026",
+  "library.drive.open": "Open",
+  "library.drive.download": "Download and open",
+  "library.drive.empty": "No SingZ projects found in Google Drive.",
+
   "library.dropScreen.syncProgress": "Syncing with Google Drive… {msg}",
   "library.dropScreen.cancelSync": "Cancel",
   "library.dropScreen.syncPaused": "Sync paused. Completed files are kept. Choose Sync now to continue.",

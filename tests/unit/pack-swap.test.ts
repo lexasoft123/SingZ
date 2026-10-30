@@ -211,7 +211,7 @@ describe('the real install routes through the swap', () => {
           : join(dir, 'python', 'bin', 'python3')
         await mkdir(dirname(py), { recursive: true })
         await writeFile(py, '#!/bin/sh\n')
-        await writeFile(join(dir, 'python', 'pack.json'), JSON.stringify({ formatVersion: version }))
+        await writeFile(join(dir, 'python', 'pack.json'), JSON.stringify({ formatVersion: version, target: `${process.platform}-${process.arch}` }))
         await mkdir(join(dir, 'python', 'models', 'uvr'), { recursive: true })
         await writeFile(join(dir, 'python', 'models', 'uvr', 'UVR_MDXNET_KARA_2.onnx'), 'x')
         // Those packs also resolve a splitter model out of a hub-style cache,
@@ -235,6 +235,10 @@ describe('the real install routes through the swap', () => {
       }
       expect(await packComplete(old), 'a pack older than this build must be refused').toBe(false)
       expect(await packComplete(good), 'a complete pack at a staging root must be accepted').toBe(true)
+      if (process.platform === 'linux') {
+        await writeFile(join(good, 'python', 'pack.json'), JSON.stringify({ formatVersion: required, target: 'darwin-x64' }))
+        expect(await packComplete(good), 'a pack for another OS must be refused').toBe(false)
+      }
     } finally {
       // The other fixtures in this file are kilobytes and can rely on temp
       // being swept; this one cannot.

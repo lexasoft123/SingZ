@@ -87,7 +87,7 @@ app.whenReady().then(async () => {
   assert.equal(typeof stats.overwrittenWindows, 'string')
   const hostDevices = addon.audioHostDevices()
   assert.equal(hostDevices.ok, true)
-  const expectedProvider = process.platform === 'darwin' ? 'coreaudio' : 'wasapi'
+  const expectedProvider = process.platform === 'darwin' ? 'coreaudio' : process.platform === 'linux' ? 'alsa' : 'wasapi'
   assert.equal(hostDevices.provider, expectedProvider)
   assert.equal(typeof hostDevices.defaultInputUid, 'string')
   assert.equal(typeof hostDevices.defaultOutputUid, 'string')
@@ -102,7 +102,7 @@ app.whenReady().then(async () => {
     assert.ok(device.outputChannelLabels.every((label) => typeof label === 'string' && label.length > 0))
     assert.equal(typeof device.transport, 'string')
     assert.equal(typeof device.monitoringSuitability, 'string')
-    assert.equal(device.accessMode, 'shared')
+    assert.equal(device.accessMode, process.platform === 'linux' ? 'exclusive' : 'shared')
     assert.ok(Array.isArray(device.sampleRateRanges))
     assert.equal(typeof device.bufferFrames.maximumFrames, 'number')
   }
@@ -216,7 +216,7 @@ app.whenReady().then(async () => {
   const strictPlaybackConfig = {
     capability: PLAYBACK_CAPABILITY,
     provider: expectedProvider,
-    accessMode: 'shared',
+    accessMode: process.platform === 'linux' ? 'exclusive' : 'shared',
     outputDeviceUid: hostDevices.defaultOutputUid || 'smoke:never-opened',
     outputChannels: [0, 1],
     sampleRate: 48000,
@@ -291,12 +291,21 @@ app.whenReady().then(async () => {
     app.quit()
     return
   }
-  assert.ok(hostDevices.defaultOutputUid,
-    'a host with outputs must name a default output')
+  if (process.platform === 'linux') {
+    // Direct ALSA has no system-default routing service. Multiple hardware
+    // endpoints deliberately require an explicit selection in the product.
+    assert.equal(hostDevices.defaultOutputUid, outputs.length === 1 ? outputs[0].uid : '')
+  } else {
+    assert.ok(hostDevices.defaultOutputUid,
+      'a host with outputs must name a default output')
+  }
   const wav = join(tmpdir(), `singz-capture-smoke-${process.pid}.wav`)
   writeSilentPcm16Wav(wav)
   try {
-    const preparedConfig = { ...strictPlaybackConfig }
+    const preparedConfig = {
+      ...strictPlaybackConfig,
+      outputDeviceUid: hostDevices.defaultOutputUid || outputs[0].uid
+    }
     delete preparedConfig.graphDocument
     const preparedResult = await addon.preparePlayback(preparedConfig, [{
       id: 'smoke', path: wav, gain: 1, muted: false, solo: false

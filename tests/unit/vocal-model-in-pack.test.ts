@@ -16,7 +16,7 @@ const read = (name: string): Promise<string> =>
  */
 describe('the vocal model ships in the pack', () => {
   it('is no longer a downloadable model on any platform', async () => {
-    for (const here of ['win32-x64', 'darwin-arm64', 'darwin-x64']) {
+    for (const here of ['win32-x64', 'darwin-arm64', 'darwin-x64', 'linux-x64']) {
       expect(registryEntryFor('backing-vocals' as never, here)).toBeUndefined()
     }
     // …and nothing in the registry quietly points at it by file name either.
@@ -40,7 +40,7 @@ describe('the vocal model ships in the pack', () => {
 
   it('stamps exactly the pack format the app requires, per platform', async () => {
     const required = (await read('src/main/models.ts'))
-      .match(/const PACK_FORMAT_REQUIRED = process\.platform === 'win32' \? (\d+) : (\d+)/)
+      .match(/const PACK_FORMAT_REQUIRED = process\.platform === 'win32' \|\| process\.platform === 'linux' \? (\d+) : (\d+)/)
     expect(required, 'PACK_FORMAT_REQUIRED shape changed').not.toBeNull()
     const [, onnx, torch] = required as RegExpMatchArray
 

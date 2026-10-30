@@ -1,8 +1,9 @@
 /** Tiếng Việt UI strings. Keep keys and placeholders in sync with English. */
-import type { library as en } from '../en/library'
+import { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
+  ...en, // New Drive reader controls fall back to English until translated.
   "library.dropScreen.syncProgress": "Đang đồng bộ với Google Drive… {msg}",
   "library.dropScreen.cancelSync": "Hủy",
   "library.dropScreen.syncPaused": "Đã tạm dừng đồng bộ. Các tệp hoàn tất được giữ lại. Chọn Đồng bộ ngay để tiếp tục.",

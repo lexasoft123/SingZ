@@ -821,6 +821,8 @@ export default function Transport({
   onCancelSplit,
   onReveal
 }: Props): React.JSX.Element {
+  const [starting, setStarting] = useState(engine.starting)
+  useEffect(() => engine.subscribe(() => setStarting(engine.starting)), [engine])
   const startAtSong = useRef(false)
   useEffect(() => { startAtSong.current = false }, [selection, engine, playing])
   const [trainOpen, setTrainOpen] = useState(false)
@@ -853,8 +855,10 @@ export default function Transport({
         </button>
         <button
           type="button"
-          className={`play${playing ? ' is-playing' : ''}`}
-          title={playing ? t('player.transport.pause') : t('player.transport.play')}
+          className={`play${playing ? ' is-playing' : ''}${starting ? ' is-starting' : ''}`}
+          disabled={starting}
+          aria-busy={starting}
+          title={starting ? t('app.load.startingPlayback') : playing ? t('player.transport.pause') : t('player.transport.play')}
           onClick={onTogglePlay}
         >
           {playing ? (

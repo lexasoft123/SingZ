@@ -1,3 +1,10 @@
+import { driveProjectsRoot } from './drive-storage'
+import { detectProject } from './projects'
+import { allowRoot } from './media'
+import { STEMS } from '../shared/types'
+import { driveTokenClient } from './gdrive-oauth-client'
+import { DriveDeviceAuthorization } from './gdrive-device-auth'
+import type { DriveOAuthTokens } from '../shared/drive-device'
 import { createHash, randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
 import { readdirSync } from 'node:fs'
@@ -66,8 +73,9 @@ function audioMime(name: string): string {
  * desktop is the writer: after saves (and on demand) it pushes the projects
  * root into a visible "SingZ" folder using the drive.file scope (the app only
  * sees files it created — no Google verification wall, works for any signed-in
- * user). Phones read the same folder over REST. One Desktop-type OAuth client
- * serves every platform via the installed-app loopback flow.
+ * user). Phones read the same folder over REST. Desktop/phone browser sign-in
+ * keeps the existing Desktop client; Linux TV sign-in uses a distinct
+ * limited-input client and Google device authorization.
  */
 
 // SINGZ_GDRIVE_CONFIG (JSON) overrides the baked config — tests point it at
@@ -81,18 +89,14 @@ const envCfg = ((): typeof gdriveConfig | null => {
     return null
   }
 })()
-const cfg = envCfg?.clientId ? envCfg : gdriveConfig.clientId ? gdriveConfig : null
+const cfg = envCfg?.clientId || envCfg?.tvClientId ? envCfg : gdriveConfig.clientId || gdriveConfig.tvClientId ? gdriveConfig : null
 const AUTH = (): string => cfg?.authBase || 'https://accounts.google.com'
 const API = (): string => cfg?.apiBase || 'https://www.googleapis.com'
 
 export const gdriveConfigured = (): boolean => cfg !== null
 const TOKEN = (): string => (cfg?.apiBase ? `${cfg.apiBase}/token` : 'https://oauth2.googleapis.com/token')
 
-interface Tokens {
-  access: string
-  refresh: string
-  expiresAt: number
-}
+type Tokens = DriveOAuthTokens
 
 function readTokens(): Tokens | null {
   const s = readSettings() as { gdrive?: Tokens }
@@ -106,12 +110,31 @@ function writeTokens(t: Tokens | null): void {
   writeSettings(s)
 }
 
-export const gdriveSignedIn = (): boolean => readTokens() !== null
-export const gdriveSignOut = (): void => writeTokens(null)
+export const gdriveDeviceConfigured = (): boolean => Boolean(cfg?.tvClientId && cfg?.tvClientSecret)
+export const gdriveBrowserConfigured = (): boolean => Boolean(cfg?.clientId)
+export const gdriveSignInMode = (): 'device' | 'browser' => process.platform === 'linux' ? 'device' : 'browser'
+export const gdriveSignedIn = (): boolean => {
+  const tokens = readTokens()
+  if (!tokens) return false
+  try { driveTokenClient(tokens, cfg); return true } catch { return false }
+}
+const deviceAuthorization = new DriveDeviceAuthorization(tokens => {
+  writeTokens(tokens)
+  if (readTokens()?.refresh !== tokens.refresh) throw new Error('Could not save Google Drive sign-in')
+  log('gdrive', 'signed in with phone approval')
+})
+export const gdriveDeviceStart = () => gdriveDeviceConfigured()
+  ? deviceAuthorization.start({ clientId: cfg!.tvClientId, clientSecret: cfg!.tvClientSecret,
+    codeUrl: cfg?.apiBase ? `${cfg.apiBase}/device/code` : 'https://oauth2.googleapis.com/device/code',
+    tokenUrl: TOKEN(), verificationOrigin: cfg?.apiBase ? new URL(cfg.apiBase).origin : undefined })
+  : Promise.resolve({ ok: false as const, code: 'not-configured' as const })
+export const gdriveDeviceStatus = (id: string) => deviceAuthorization.status(id)
+export const gdriveDeviceCancel = (id?: string): boolean => deviceAuthorization.cancel(id)
+export const gdriveSignOut = (): void => { deviceAuthorization.cancel(); readerDownload?.abort(); writeTokens(null) }
 
 /** Browser + loopback sign-in; resolves once Google redirects back. */
 export async function gdriveSignIn(): Promise<{ ok: true } | { ok: false; error: string }> {
-  if (!cfg) return { ok: false, error: t('main.error.driveNotConfigured') }
+  if (!cfg?.clientId) return { ok: false, error: t('main.error.driveNotConfigured') }
   try {
     const verifier = randomBytes(32).toString('base64url')
     const challenge = createHash('sha256').update(verifier).digest('base64url')
@@ -173,6 +196,8 @@ export async function gdriveSignIn(): Promise<{ ok: true } | { ok: false; error:
     writeTokens({
       access: tok.access_token,
       refresh: tok.refresh_token,
+      authMode: 'browser',
+      clientId: cfg.clientId,
       expiresAt: Date.now() + (tok.expires_in ?? 3600) * 1000 - 60000
     })
     log('gdrive', 'signed in')
@@ -204,14 +229,15 @@ async function accessToken(renew = false, signal = syncController?.signal): Prom
   if (!cfg) throw new Error('not configured')
   const t = readTokens()
   if (!t) throw new Error('Not signed in to Google Drive')
+  const client = driveTokenClient(t, cfg)
   if (!renew && Date.now() < t.expiresAt) return t.access
   const tok = await responseWithDeadline(TOKEN(), {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body:
       `refresh_token=${encodeURIComponent(t.refresh)}` +
-      `&client_id=${encodeURIComponent(cfg.clientId)}` +
-      `&client_secret=${encodeURIComponent(cfg.clientSecret)}&grant_type=refresh_token`
+      `&client_id=${encodeURIComponent(client.clientId)}` +
+      `&client_secret=${encodeURIComponent(client.clientSecret)}&grant_type=refresh_token`
   }, async (res) => {
     if (res.status === 400 || res.status === 401) {
       writeTokens(null)
@@ -225,6 +251,7 @@ async function accessToken(renew = false, signal = syncController?.signal): Prom
     throw new Error('Google Drive session expired — sign in again')
   }
   writeTokens({
+    ...t,
     access: tok.access_token,
     refresh: t.refresh,
     expiresAt: Date.now() + (tok.expires_in ?? 3600) * 1000 - 60000
@@ -251,25 +278,25 @@ const FOLDER = 'application/vnd.google-apps.folder'
  *  is a syntax error in it — which used to 400 the whole run, forever. */
 const qStr = (s: string): string => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
 
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const token = await accessToken()
+async function api<T>(path: string, init?: RequestInit, signal = syncController?.signal): Promise<T> {
+  const token = await accessToken(false, signal)
   return responseWithDeadline(`${API()}${path}`, {
     ...init,
     headers: { Authorization: `Bearer ${token}`, ...(init?.headers ?? {}) }
   }, async (res) => {
     if (!res.ok) throw new Error(`Drive API ${res.status} on ${path.split('?')[0]}`)
     return await res.json() as T
-  })
+  }, signal)
 }
 
-async function listChildren(parentId: string): Promise<RemoteFile[]> {
+async function listChildren(parentId: string, signal = syncController?.signal): Promise<RemoteFile[]> {
   const out: RemoteFile[] = []
   let pageToken = ''
   do {
     const page = await api<{ files: RemoteFile[]; nextPageToken?: string }>(
       `/drive/v3/files?q=${encodeURIComponent(`'${parentId}' in parents and trashed=false`)}` +
         '&fields=nextPageToken,files(id,name,mimeType,md5Checksum,size,appProperties)&pageSize=1000' +
-        (pageToken ? `&pageToken=${pageToken}` : '')
+        (pageToken ? `&pageToken=${pageToken}` : ''), undefined, signal
     )
     out.push(...page.files)
     pageToken = page.nextPageToken ?? ''
@@ -415,12 +442,12 @@ async function downloadTo(file: RemoteFile, out: string, onProgress?: (msg: stri
 
 type Arrived = Map<string, { md5: string; size: number }>
 
-/** The desktop lists a project only if its song file is there, and a doc
- *  naming bytes that did not arrive would be a song that cannot open. */
+/** A split project is playable from its declared stems; unsplit songs need their source. */
 function checkAdoptable(doc: SyncDoc & { songFile?: unknown }, got: Arrived): void {
   if (!doc || typeof doc !== 'object') throw new AdoptRefused('its project.json is not a project')
   const song = doc.songFile
-  if (typeof song !== 'string' || !plainName(song) || !got.has(song)) {
+  const hasStems = STEMS.every(stem => ['flac', 'wav'].some(ext => !!doc.stemHashes?.[`${stem}.${ext}`] && got.has(`stems/${stem}.${ext}`)))
+  if (typeof song !== 'string' || !plainName(song) || !/\.(mp3|wav|flac|m4a|aac|ogg|oga|opus|aif|aiff)$/i.test(song) || (!got.has(song) && !hasStems)) {
     throw new AdoptRefused('its song file did not come with it')
   }
   const same = (rel: string, h: { md5: string; size: number } | undefined): boolean => {
@@ -430,6 +457,7 @@ function checkAdoptable(doc: SyncDoc & { songFile?: unknown }, got: Arrived): vo
   for (const [name, h] of Object.entries(doc.stemHashes ?? {})) {
     if (!same(`stems/${name}`, h)) throw new AdoptRefused(`stems/${name} does not match its project.json`)
   }
+  if (!hasStems && doc.songHash && !same(song, doc.songHash)) throw new AdoptRefused('its source does not match project.json')
   if (doc.lyricsHash && !same('lyrics.json', doc.lyricsHash)) {
     throw new AdoptRefused('lyrics.json does not match its project.json')
   }
@@ -1107,4 +1135,84 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
     syncing = false
     syncController = undefined
   }
+}
+
+/** Reader collection: listing/downloading never creates, adopts or trashes Drive files. */
+async function readerFolders(signal?: AbortSignal): Promise<RemoteFile[]> {
+  const roots = await api<{ files: RemoteFile[] }>(
+    `/drive/v3/files?q=${encodeURIComponent("name='SingZ' and mimeType='application/vnd.google-apps.folder' and trashed=false")}&fields=files(id,name,mimeType)`, undefined, signal
+  )
+  if (!roots.files.length) return []
+  if (roots.files.length !== 1) throw new Error('More than one SingZ folder found on Google Drive')
+  return (await listChildren(roots.files[0].id, signal)).filter(f => f.mimeType === FOLDER)
+}
+
+export async function gdriveProjects(): Promise<{ ok: boolean; projects: { id: string; name: string; songPath?: string }[]; error?: string }> {
+  try {
+    const projects = await Promise.all((await readerFolders()).map(async f => {
+      const dir = join(driveProjectsRoot(), f.id)
+      const doc = await readFile(join(dir, 'project.json'), 'utf8').then(JSON.parse).catch(() => null)
+      const songPath = doc && typeof doc.songFile === 'string' && plainName(doc.songFile) ? join(dir, doc.songFile) : undefined
+      const project = songPath ? await detectProject(songPath) : null
+      return { id: f.id, name: f.name, songPath: project?.stems || (songPath && await stat(songPath).catch(() => null)) ? songPath : undefined }
+    }))
+    return { ok: true, projects: projects.sort((a, b) => a.name.localeCompare(b.name)) }
+  } catch (error) { return { ok: false, projects: [], error: error instanceof Error ? error.message : String(error) } }
+}
+
+let readerDownload: AbortController | null = null
+export function gdriveCancelDownload(): { ok: boolean } { readerDownload?.abort(); return { ok: true } }
+
+export async function gdriveDownload(id: string, onProgress: (msg: string, frac: number) => void): Promise<{ ok: boolean; songPath?: string; error?: string; cancelled?: boolean }> {
+  if (readerDownload) return { ok: false, error: 'A project download is already running' }
+  if (!/^[a-zA-Z0-9_-]{1,200}$/.test(id)) return { ok: false, error: 'Invalid Drive project' }
+  const controller = new AbortController()
+  readerDownload = controller
+  try {
+    const folder = (await readerFolders(controller.signal)).find(f => f.id === id)
+    if (!folder) throw new Error('Project is no longer in your SingZ Drive folder')
+    const root = driveProjectsRoot(), dest = join(root, id), stage = join(root, `.singz-adopting-${id}`)
+    await mkdir(root, { recursive: true })
+    if (await stat(dest).catch(() => null)) throw new Error('This project is already downloaded. Open the local copy.')
+    await mkdir(join(stage, 'stems'), { recursive: true })
+    const kids = await listChildren(id, controller.signal), stems = kids.find(f => f.name === 'stems' && f.mimeType === FOLDER)
+    const audio = stems ? await listChildren(stems.id, controller.signal) : []
+    const entries = [
+      ...kids.filter(f => f.mimeType !== FOLDER && plainName(f.name)).map(f => ({ f, rel: f.name })),
+      ...audio.filter(f => f.mimeType !== FOLDER && plainName(f.name)).map(f => ({ f, rel: `stems/${f.name}` }))
+    ]
+    if (new Set(entries.map(e => e.rel)).size !== entries.length) throw new Error('Duplicate files in Drive project')
+    const docFile = entries.find(e => e.rel === 'project.json')
+    if (!docFile || Number(docFile.f.size) > 16 * 1024 * 1024) throw new Error('Project document is missing or too large')
+    const transfer = async (entry: typeof entries[number], index: number, count: number): Promise<{ md5: string; size: number }> => {
+      if (!entry.f.md5Checksum || !entry.f.size) throw new Error(`Missing checksum for ${entry.rel}`)
+      return downloadDriveFile(entry.f, join(stage, entry.rel === 'project.json' ? 'project.json.part' : entry.rel), {
+        url: `${API()}/drive/v3/files/${encodeURIComponent(entry.f.id)}?alt=media`, signal: controller.signal,
+        token: (renew, signal) => accessToken(renew, signal),
+        onProgress: p => onProgress(`${folder.name} · ${entry.rel}`, (index + (p.total ? p.bytes / p.total : 0)) / count)
+      })
+    }
+    await transfer(docFile, 0, entries.length)
+    const doc = JSON.parse(await readFile(join(stage, 'project.json.part'), 'utf8')) as SyncDoc
+    const listed: Arrived = new Map(entries.map(e => [e.rel, { md5: e.f.md5Checksum ?? '', size: Number(e.f.size ?? -1) }]))
+    checkAdoptable(doc, listed)
+    const wanted = new Set(['project.json', 'lyrics.json', 'graph.json', ...Object.keys(doc.stemHashes ?? {}).map(n => `stems/${n}`)])
+    if (!Object.keys(doc.stemHashes ?? {}).length && typeof doc.songFile === 'string') wanted.add(doc.songFile)
+    const transfers = entries.filter(e => e !== docFile && wanted.has(e.rel))
+    const got: Arrived = new Map([['project.json', { md5: docFile.f.md5Checksum!, size: Number(docFile.f.size) }]])
+    for (const [i, entry] of transfers.entries()) got.set(entry.rel, await transfer(entry, i + 1, transfers.length + 1))
+    checkAdoptable(doc, got)
+    controller.signal.throwIfAborted()
+    // Old verified bytes can survive retries, but can never become extra lanes.
+    for (const name of await readdir(join(stage, 'stems'))) if (!wanted.has(`stems/${name}`)) await rm(join(stage, 'stems', name))
+    for (const name of await readdir(stage)) if (name !== 'stems' && name !== 'project.json.part' && !wanted.has(name)) await rm(join(stage, name))
+    await rename(join(stage, 'project.json.part'), join(stage, 'project.json'))
+    await stampMtimes(stage, doc, got)
+    await rename(stage, dest)
+    allowRoot(dest)
+    onProgress(folder.name, 1)
+    return { ok: true, songPath: join(dest, doc.songFile as string) }
+  } catch (error) {
+    return { ok: false, cancelled: controller.signal.aborted, error: controller.signal.aborted ? undefined : error instanceof Error ? error.message : String(error) }
+  } finally { readerDownload = null }
 }

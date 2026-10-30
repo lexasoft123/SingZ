@@ -28,9 +28,10 @@ describe('registryEntryFor', () => {
     )
   })
 
-  it('gives Windows and Intel Macs the ONNX aligner', () => {
+  it('gives Windows, Intel Macs and Linux the ONNX aligner', () => {
     expect(registryEntryFor('aligner', 'win32-x64')?.url).toContain('mms-fa.onnx')
     expect(registryEntryFor('aligner', 'darwin-x64')?.url).toContain('mms-fa.onnx')
+    expect(registryEntryFor('aligner', 'linux-x64')?.url).toContain('mms-fa.onnx')
   })
 
   it('gives Apple Silicon the torch aligner', () => {
@@ -41,7 +42,7 @@ describe('registryEntryFor', () => {
   })
 
   it('resolves the splitter pack everywhere it exists', () => {
-    for (const here of ['win32-x64', 'darwin-arm64', 'darwin-x64']) {
+    for (const here of ['win32-x64', 'darwin-arm64', 'darwin-x64', 'linux-x64']) {
       expect(registryEntryFor('gpu-splitter', here)?.id).toBe('gpu-splitter')
     }
   })
@@ -53,7 +54,7 @@ describe('registryEntryFor', () => {
    * every platform — and no whisper tile anywhere.
    */
   it('offers the lyrics speech model everywhere, as one tile of three parts, and no whisper', () => {
-    for (const here of ['win32-x64', 'darwin-arm64', 'darwin-x64']) {
+    for (const here of ['win32-x64', 'darwin-arm64', 'darwin-x64', 'linux-x64']) {
       const entry = registryEntryFor('qwen-asr', here)
       expect(entry?.parts?.map((p) => p.file)).toEqual([
         'Qwen3-ASR-1.7B-Q8_0.gguf',

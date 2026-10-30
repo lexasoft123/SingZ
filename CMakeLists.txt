@@ -436,6 +436,16 @@ if(SINGZ_CORE_TESTS)
     SingZ::zcore_device_fake Threads::Threads)
   add_test(NAME audio_host_tests COMMAND audio_host_tests)
 
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
+    add_executable(audio_host_linux_tests tests/native/audio_host_linux_tests.cpp)
+    target_compile_features(audio_host_linux_tests PRIVATE cxx_std_20)
+    target_compile_definitions(audio_host_linux_tests PRIVATE SINGZ_CORE_TESTS=1)
+    target_include_directories(audio_host_linux_tests PRIVATE "${SINGZ_REPO_ROOT}")
+    target_link_libraries(audio_host_linux_tests PRIVATE SingZ::zcore_device Threads::Threads)
+    add_test(NAME audio_host_linux_tests COMMAND audio_host_linux_tests)
+    set_tests_properties(audio_host_linux_tests PROPERTIES TIMEOUT 30)
+  endif()
+
   add_executable(audio_host_ios_policy_tests
     ${SINGZ_REPO_ROOT}/tests/native/audio_host_ios_policy_tests.cpp)
   target_compile_features(audio_host_ios_policy_tests PRIVATE cxx_std_20)
