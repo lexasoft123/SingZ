@@ -570,7 +570,7 @@ void SingzNativePlaybackSession(RCTPromiseResolveBlock resolve,
 NSDictionary *SingzNativePlaybackOutputMeter(void) {
   const auto meter = owner().session->outputMeter();
   return @{ @"available": @(meter.available), @"generation": @(meter.generation),
-            @"peak": @(meter.peak), @"clippedBlocks": @(meter.clippedBlocks) };
+            @"peak": @(meter.peak), @"rms": @(meter.rms), @"clippedBlocks": @(meter.clippedBlocks) };
 }
 
 NSDictionary *SingzNativePlaybackPositionNow(void) {

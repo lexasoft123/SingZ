@@ -44,6 +44,7 @@ JSI_HOST_FUNCTION_IMPL(SingzStretchNodeHostObject, getOutputMeter) {
   auto node = std::static_pointer_cast<SingzStretchNode>(node_);
   jsi::Object result(runtime);
   result.setProperty(runtime, "peak", static_cast<double>(node->outputPeak()));
+  result.setProperty(runtime, "rms", static_cast<double>(node->outputRms()));
   result.setProperty(runtime, "clippedBlocks", static_cast<double>(node->clippedBlocks()));
   return result;
 }

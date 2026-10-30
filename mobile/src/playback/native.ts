@@ -561,7 +561,7 @@ interface NativePlaybackBridgeApi {
    *  back to projecting the polled position. Same name and arity (none) on
    *  both bridges. */
   positionNow?(): unknown;
-  /** Four scalars; never waits for the control mutex or enumerates devices. */
+  /** Five scalars; never waits for the control mutex or enumerates devices. */
   outputMeter?(): unknown;
   /** Hold a parked generation's output stream without closing it, and let it
    *  go again (Android's background park; iOS answers InvalidState and keeps
@@ -7581,6 +7581,8 @@ export interface SongOutputMeter {
   readonly generation: number;
   readonly peak: number;
   readonly clippedBlocks: number;
+  /** Short-block pre-limiter signal energy; absent on older native builds. */
+  readonly rms?: number;
 }
 export function readNativeSongOutputMeter(): SongOutputMeter {
   const unavailable = { available: false, generation: 0, peak: 0, clippedBlocks: 0 };
@@ -7589,6 +7591,7 @@ export function readNativeSongOutputMeter(): SongOutputMeter {
     const raw = bridge?.outputMeter?.() as SongOutputMeter | undefined;
     if (!raw || raw.available !== true || !Number.isSafeInteger(raw.generation) || raw.generation <= 0 ||
         !Number.isFinite(raw.peak) || raw.peak < 0 || !Number.isSafeInteger(raw.clippedBlocks) || raw.clippedBlocks < 0) return unavailable;
+    if (raw.rms !== undefined && (!Number.isFinite(raw.rms) || raw.rms < 0)) return unavailable;
     return raw;
   } catch { return unavailable; }
 }

@@ -882,12 +882,14 @@ Trusted Signing (`win.azureSignOptions`) or SignPath's OSS tier.
 
 ## Localization
 
-The desktop speaks English, Russian, Simplified and Traditional Chinese, Hindi, Japanese, Korean, Thai, Indonesian, Vietnamese, Filipino, Malay and Turkish. The title bar's
+The desktop speaks English, Russian, Simplified and Traditional Chinese, Hindi, Japanese, Korean, Thai, Indonesian, Vietnamese, Filipino, Malay, Turkish, Latin American Spanish and Brazilian Portuguese. The title bar's
 flag (the kit's `LanguageSwitcher`, `compact`) picks one, or `System`, which
 follows the machine's preferred languages (`app.getPreferredSystemLanguages()`;
 Traditional Chinese is deliberately not handed Simplified). The choice lives in
 `settings.json` as `language`; switching is live — nothing remounts, a playing
 song keeps playing.
+
+Latin American Spanish (`es-419`) includes Peruvian `es-PE` system tags. Brazilian Portuguese uses `pt-BR`. Store metadata maps `es-419` to Apple's `es-MX` (the Spanish storefront locale used in Peru); both stores use `pt-BR` for Brazil. These regional variants share one dictionary per language.
 
 - **Every user-visible string goes through `t('ns.key')`** (or `tn` for a
   count, `<T k=…/>` for `**bold**`) from `src/renderer/src/i18n.tsx` /

@@ -9,12 +9,18 @@ const tsxUnder = (dir: string): string[] =>
     return statSync(path).isDirectory() ? tsxUnder(path) : path.endsWith('.tsx') ? [path] : []
   })
 
-test('every app-owned modal is a native-stack presentation', () => {
+test('screen modals use native-stack presentations; the read-only tour is transparent', () => {
   const offenders = tsxUnder(join(ROOT, 'src', 'ui'))
     .filter((file) => /<Modal\b/.test(readFileSync(file, 'utf8')))
     .map((file) => file.slice(ROOT.length + 1))
 
-  expect(offenders).toEqual([])
+  // The coachmark is a transparent window over the retained screen, not a
+  // navigable screen or picker. Its only actions advance or dismiss the tour;
+  // it must not open another native presentation while visible.
+  expect(offenders).toEqual(['src/ui/QuickStart.tsx'])
+  const guide = read('src/ui/QuickStart.tsx')
+  expect(guide).toMatch(/<Modal[\s\S]*?transparent[\s\S]*?>/)
+  expect(guide).not.toMatch(/navigation\.(navigate|push|present)\(/)
 
   const player = read('src/ui/PlayerScreen.tsx')
   expect(player).toMatch(/presentation: 'formSheet'/)
@@ -31,7 +37,9 @@ test('every app-owned modal is a native-stack presentation', () => {
   expect(player.match(/fitContent=\{NATIVE_SHEET_FIT_SUPPORTED\}/g)).toHaveLength(3)
   expect(player).not.toMatch(/actionLabel=/)
   expect(player.match(/<SheetScrollView/g)).toHaveLength(3)
-  expect(player).toMatch(/name="Mixer"[\s\S]*<SheetScrollView[\s\S]*\{hasVocals &&[\s\S]*\{tracks\.map/)
+  expect(player).toMatch(/const mixerControls =[\s\S]*\{hasVocals &&[\s\S]*\{tracks\.map/)
+  expect(player).toMatch(/name="Mixer"[\s\S]*<SheetScrollView[\s\S]*\{mixerControls\}/)
+  expect(player).toMatch(/testID="player-mixer-panel"[\s\S]*<ScrollView[\s\S]*\{mixerControls\}/)
   expect(player.match(/contentInsetAdjustmentBehavior="never"/g)).toHaveLength(3)
 
   const bits = read('src/ui/bits.tsx')
