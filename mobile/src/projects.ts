@@ -1,3 +1,5 @@
+import { describeFileProgress, fileProgressFraction } from './drive-progress'
+import { downloadCancelled } from './file-download'
 import { mobileSongVolumePersistence } from './playback/song-volume-persistence'
 import { NativeModules } from 'react-native'
 import { decodeAudioData, type AudioBuffer } from 'react-native-audio-api'
@@ -419,7 +421,7 @@ function validGraphRef(value: unknown): value is NonNullable<ProjectDoc['graphHa
 /** Resolve only the exact payload project.json names. A stray graph.json is
  * ignored; missing, mismatched, invalid, and future graphs fail closed rather
  * than silently switching this project to the legacy fixed composition. */
-export async function loadProjectGraph(entry: ProjectEntry, doc: ProjectDoc): Promise<ParsedGraphDocument | undefined> {
+export async function loadProjectGraph(entry: ProjectEntry, doc: ProjectDoc, signal?: AbortSignal): Promise<ParsedGraphDocument | undefined> {
   const ref = doc.graphHash
   if (ref === undefined) return undefined
   if (!validGraphRef(ref)) throw new Error('project.json has an invalid graphHash')
@@ -429,7 +431,7 @@ export async function loadProjectGraph(entry: ProjectEntry, doc: ProjectDoc): Pr
   }
   let text: string
   if (entry.source === 'gdrive') {
-    text = await driveReadText(entry.dir, 'graph.json', ref.md5, ref.size)
+    text = await driveReadText(entry.dir, 'graph.json', ref.md5, ref.size, signal)
   } else {
     text = await Folder.readText(entry.dir, 'graph.json')
   }
@@ -481,13 +483,23 @@ export async function loadProject(
   entry: ProjectEntry,
   sampleRate: number,
   onStep: (msg: string, frac: number) => void,
-  crumb?: (note: string) => Promise<void>
+  crumb?: (note: string) => Promise<void>,
+  signal?: AbortSignal
 ): Promise<LoadedProject> {
   const gdrive = entry.source === 'gdrive'
-  const fetchFile = (file: string, md5?: string, size?: number): Promise<string> =>
-    gdrive ? driveLocalFile(entry.dir, file, md5, size) : Folder.localFile(entry.dir, file)
+  const checkActive = (): void => { if (signal?.aborted) throw downloadCancelled() }
+  const fetchFile = async (file: string, md5: string | undefined, size: number | undefined, label: string, index: number): Promise<string> => {
+    checkActive()
+    const path = gdrive ? await driveLocalFile(entry.dir, file, md5, size, {
+      signal,
+      onProgress: p => onStep(describeFileProgress(p, label, index, total),
+        (index - 1 + 0.5 * fileProgressFraction(p)) / total)
+    }) : await Folder.localFile(entry.dir, file)
+    checkActive()
+    return path
+  }
   const readText = (file: string, md5?: string): Promise<string> =>
-    gdrive ? driveReadText(entry.dir, file, md5) : Folder.readText(entry.dir, file)
+    gdrive ? driveReadText(entry.dir, file, md5, undefined, signal) : Folder.readText(entry.dir, file)
 
   // A Drive listing's doc is a summary — the catalog manifest carries no
   // player state (beat grid, mixer, transpose). The real project.json rides
@@ -510,7 +522,7 @@ export async function loadProject(
   doc = await mobileMetronomePersistence.resolve(metronomeRef, doc)
   doc = await mobileSongVolumePersistence.resolve(metronomeRef, doc)
   await crumb?.('graph')
-  const graph = await loadProjectGraph(entry, doc)
+  const graph = await loadProjectGraph(entry, doc, signal)
 
   const ids = STEM_ORDER_ALL.filter(s => entry.stems[s])
   const added = customTracks(doc?.settings)
@@ -549,120 +561,132 @@ export async function loadProject(
       t('phone.library.songTooBigToPlay', { gb: (bytes / 1e9).toFixed(1) })
     )
   }
-  if (wholeSong && doc?.songFile) {
-    // Matches writer.ts's own never-split lane exactly — same id, same raw
-    // (untranslated) label a singer can rename, same colour — so the two
-    // paths that both mean "one whole track" read identically in the mixer.
-    const label = 'Original'
-    onStep(t('phone.library.fetchingStep', { id: label, i: 1, n: total }), 0)
-    await crumb?.('fetching the source track')
-    const want = doc.songHash
-    const path = await fetchFile(doc.songFile, want?.md5, want?.size)
-    onStep(t('phone.library.decodingStep', { id: label, i: 1, n: total }), 0.5)
-    await crumb?.('decoding the source track')
-    const t0 = Date.now()
-    stems.push({
-      id: ORIGINAL_LANE_ID,
-      buffer: await decodeAudioData(`file://${path}`, sampleRate),
-      label,
-      color: '#d08f2c',
-      custom: true
-    })
-    spent.push(`${ORIGINAL_LANE_ID} ${fmtMs(Date.now() - t0)}`)
-    if (decodedBytes(stems) > MAX_DECODED_BYTES) tooBig(decodedBytes(stems))
-  }
-  for (let i = 0; i < ids.length; i++) {
-    const id = ids[i]
-    onStep(t('phone.library.fetchingStep', { id, i: i + 1, n: total }), i / total)
-    await crumb?.(`fetching ${id}`)
-    const want = doc?.stemHashes?.[`${id}.${entry.stems[id]}`]
-    const path = await fetchFile(`stems/${id}.${entry.stems[id]}`, want?.md5, want?.size)
-    onStep(t('phone.library.decodingStep', { id, i: i + 1, n: total }), (i + 0.5) / total)
-    await crumb?.(`decoding ${id}`)
-    // file:// matters: audio-api's Android RELEASE builds treat bare strings
-    // as APK asset names ("Could not read asset bytes"); the scheme routes
-    // them to the file decoder and is stripped on every other platform.
-    const t0 = Date.now()
-    stems.push({
-      id,
-      buffer: await decodeAudioData(`file://${path}`, sampleRate)
-    })
-    spent.push(`${id} ${fmtMs(Date.now() - t0)}`)
-    // Stems are all the same length, so one decoded stem projects the whole
-    // set. Bail on the projection rather than on the total: refusing after
-    // six stems are already resident is refusing too late.
-    const projected = (decodedBytes(stems) / stems.length) * ids.length
-    if (projected > MAX_DECODED_BYTES) tooBig(projected)
-  }
-  // Guitar/piano lanes only appear when the song actually has them — the
-  // desktop's audibleStems rule (sampled RMS < SILENT_LANE_LEVEL), ported so a
-  // phone-split six-stem project shows the same lanes the desktop would.
-  // Dropped buffers are released on the spot: the GC-is-too-late rule.
-  for (let i = stems.length - 1; i >= 0; i--) {
-    const lane = stems[i]
-    if (!HIDEABLE_LANE_IDS.includes(lane.id)) continue
-    const data = lane.buffer.getChannelData(0)
-    let energy = 0
-    let n = 0
-    const step = Math.max(1, Math.floor(data.length / 200000))
-    for (let j = 0; j < data.length; j += step) {
-      energy += data[j] * data[j]
-      n++
-    }
-    if (Math.sqrt(energy / Math.max(1, n)) < SILENT_LANE_LEVEL) {
-      log('song', `${lane.id} lane is silent — hidden`)
-      releaseStems([lane])
-      stems.splice(i, 1)
-    }
-  }
-  // Tracks the singer added on the desktop. They can be any length, so there
-  // is nothing to project from — each one is checked against the budget as it
-  // lands. A declared lane is part of the project, not an optional decoration:
-  // silently skipping one makes the mixer claim that it is playing the saved
-  // arrangement while audio is missing. Loading is therefore all-or-fail.
-  for (let i = 0; i < added.length; i++) {
-    const track = added[i]
-    const at = ids.length + i
-    onStep(t('phone.library.fetchingStep', { id: track.label, i: at + 1, n: total }), at / total)
-    await crumb?.(`fetching ${track.id}`)
-    try {
-      const wantTrack = doc?.stemHashes?.[track.file.slice('stems/'.length)]
-      const path = await fetchFile(track.file, wantTrack?.md5, wantTrack?.size)
-      onStep(t('phone.library.decodingStep', { id: track.label, i: at + 1, n: total }), (at + 0.5) / total)
-      await crumb?.(`decoding ${track.id}`)
-      const buffer = await decodeAudioData(`file://${path}`, sampleRate)
+  try {
+    if (wholeSong && doc?.songFile) {
+      // Matches writer.ts's own never-split lane exactly — same id, same raw
+      // (untranslated) label a singer can rename, same colour — so the two
+      // paths that both mean "one whole track" read identically in the mixer.
+      const label = 'Original'
+      onStep(t('phone.library.fetchingStep', { id: label, i: 1, n: total }), 0)
+      await crumb?.('fetching the source track')
+      const want = doc.songHash
+      const path = await fetchFile(doc.songFile, want?.md5, want?.size, label, 1)
+      onStep(t('phone.library.decodingStep', { id: label, i: 1, n: total }), 0.5)
+      await crumb?.('decoding the source track')
+      checkActive()
+      const t0 = Date.now()
       stems.push({
-        id: track.id,
-        buffer,
-        label: track.label,
-        color: track.color,
+        id: ORIGINAL_LANE_ID,
+        buffer: await decodeAudioData(`file://${path}`, sampleRate),
+        label,
+        color: '#d08f2c',
         custom: true
       })
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err)
-      log('song', `could not load added track "${track.label}" — ${detail}`, 'error')
-      releaseStems(stems)
-      stems.length = 0
-      throw new Error(t('phone.library.addedTrackLoadFailed', { label: track.label, detail }))
+      checkActive()
+      spent.push(`${ORIGINAL_LANE_ID} ${fmtMs(Date.now() - t0)}`)
+      if (decodedBytes(stems) > MAX_DECODED_BYTES) tooBig(decodedBytes(stems))
     }
-    if (decodedBytes(stems) > MAX_DECODED_BYTES) tooBig(decodedBytes(stems))
-  }
-  log(
-    'song',
-    `opened ${doc.name ?? entry.dir} — ${stems.length} lanes from ${source} in ` +
-      `${fmtMs(Date.now() - openedAt)} · ${fmtBytes(decodedBytes(stems))} decoded · ` +
-      `decode ${spent.join(', ')}`
-  )
-  onStep(t('phone.library.lyricsStep'), 0.98)
-  await crumb?.('lyrics')
-  let lyrics: LyricsDoc | null = null
-  if (entry.hasLyrics) {
-    onStep(t('phone.library.fetchingLyricsStep'), 0.99)
-    try {
-      lyrics = JSON.parse(await readText('lyrics.json', doc?.lyricsHash?.md5)) as LyricsDoc
-    } catch {
-      lyrics = null
+    for (let i = 0; i < ids.length; i++) {
+      const id = ids[i]
+      onStep(t('phone.library.fetchingStep', { id, i: i + 1, n: total }), i / total)
+      await crumb?.(`fetching ${id}`)
+      const want = doc?.stemHashes?.[`${id}.${entry.stems[id]}`]
+      const path = await fetchFile(`stems/${id}.${entry.stems[id]}`, want?.md5, want?.size, id, i + 1)
+      onStep(t('phone.library.decodingStep', { id, i: i + 1, n: total }), (i + 0.5) / total)
+      await crumb?.(`decoding ${id}`)
+      checkActive()
+      // file:// matters: audio-api's Android RELEASE builds treat bare strings
+      // as APK asset names ("Could not read asset bytes"); the scheme routes
+      // them to the file decoder and is stripped on every other platform.
+      const t0 = Date.now()
+      stems.push({
+        id,
+        buffer: await decodeAudioData(`file://${path}`, sampleRate)
+      })
+      checkActive()
+      spent.push(`${id} ${fmtMs(Date.now() - t0)}`)
+      // Stems are all the same length, so one decoded stem projects the whole
+      // set. Bail on the projection rather than on the total: refusing after
+      // six stems are already resident is refusing too late.
+      const projected = (decodedBytes(stems) / stems.length) * ids.length
+      if (projected > MAX_DECODED_BYTES) tooBig(projected)
     }
+    // Guitar/piano lanes only appear when the song actually has them — the
+    // desktop's audibleStems rule (sampled RMS < SILENT_LANE_LEVEL), ported so a
+    // phone-split six-stem project shows the same lanes the desktop would.
+    // Dropped buffers are released on the spot: the GC-is-too-late rule.
+    for (let i = stems.length - 1; i >= 0; i--) {
+      const lane = stems[i]
+      if (!HIDEABLE_LANE_IDS.includes(lane.id)) continue
+      const data = lane.buffer.getChannelData(0)
+      let energy = 0
+      let n = 0
+      const step = Math.max(1, Math.floor(data.length / 200000))
+      for (let j = 0; j < data.length; j += step) {
+        energy += data[j] * data[j]
+        n++
+      }
+      if (Math.sqrt(energy / Math.max(1, n)) < SILENT_LANE_LEVEL) {
+        log('song', `${lane.id} lane is silent — hidden`)
+        releaseStems([lane])
+        stems.splice(i, 1)
+      }
+    }
+    // Tracks the singer added on the desktop. They can be any length, so there
+    // is nothing to project from — each one is checked against the budget as it
+    // lands. A declared lane is part of the project, not an optional decoration:
+    // silently skipping one makes the mixer claim that it is playing the saved
+    // arrangement while audio is missing. Loading is therefore all-or-fail.
+    for (let i = 0; i < added.length; i++) {
+      const track = added[i]
+      const at = ids.length + i
+      onStep(t('phone.library.fetchingStep', { id: track.label, i: at + 1, n: total }), at / total)
+      await crumb?.(`fetching ${track.id}`)
+      try {
+        const wantTrack = doc?.stemHashes?.[track.file.slice('stems/'.length)]
+        const path = await fetchFile(track.file, wantTrack?.md5, wantTrack?.size, track.label, at + 1)
+        onStep(t('phone.library.decodingStep', { id: track.label, i: at + 1, n: total }), (at + 0.5) / total)
+        await crumb?.(`decoding ${track.id}`)
+        checkActive()
+        const buffer = await decodeAudioData(`file://${path}`, sampleRate)
+        stems.push({
+          id: track.id,
+          buffer,
+          label: track.label,
+          color: track.color,
+          custom: true
+        })
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err)
+        log('song', `could not load added track "${track.label}" — ${detail}`, 'error')
+        releaseStems(stems)
+        stems.length = 0
+        throw new Error(t('phone.library.addedTrackLoadFailed', { label: track.label, detail }))
+      }
+      checkActive()
+      if (decodedBytes(stems) > MAX_DECODED_BYTES) tooBig(decodedBytes(stems))
+    }
+    log(
+      'song',
+      `opened ${doc.name ?? entry.dir} — ${stems.length} lanes from ${source} in ` +
+        `${fmtMs(Date.now() - openedAt)} · ${fmtBytes(decodedBytes(stems))} decoded · ` +
+        `decode ${spent.join(', ')}`
+    )
+    onStep(t('phone.library.lyricsStep'), 0.98)
+    await crumb?.('lyrics')
+    let lyrics: LyricsDoc | null = null
+    if (entry.hasLyrics) {
+      onStep(t('phone.library.fetchingLyricsStep'), 0.99)
+      try {
+        lyrics = JSON.parse(await readText('lyrics.json', doc?.lyricsHash?.md5)) as LyricsDoc
+      } catch {
+        lyrics = null
+      }
+    }
+    checkActive()
+    return { name: doc.name ?? entry.dir, dir: entry.dir, doc, graph, lyrics, stems, metronomeRef }
+  } catch (error) {
+    releaseStems(stems)
+    throw error
   }
-  return { name: doc.name ?? entry.dir, dir: entry.dir, doc, graph, lyrics, stems, metronomeRef }
 }

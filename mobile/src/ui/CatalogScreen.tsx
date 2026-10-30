@@ -287,6 +287,9 @@ export default function CatalogScreen({
   const [root, setRoot] = useState<RootInfo | null>(null)
   const [projects, setProjects] = useState<ProjectEntry[] | null>(lastShelf?.items ?? null)
   const [loading, setLoading] = useState<Loading | null>(null)
+  const loadAbort = useRef<AbortController | null>(null)
+  const [failedOpen, setFailedOpen] = useState<{ dir: string; mode: string; message: string } | null>(null)
+  useEffect(() => () => { loadAbort.current?.abort() }, [])
   /**
    * Every step of the open that is in flight, with the millisecond it landed.
    *
@@ -392,6 +395,13 @@ export default function CatalogScreen({
   const [cancelPending, setCancelPending] = useState(false)
   /** Bumping this token abandons any in-flight load (switch or cancel). */
   const token = useRef(0)
+  // Switching the library retires its in-flight open, including native I/O.
+  useEffect(() => () => {
+    token.current++
+    loadAbort.current?.abort()
+    loadAbort.current = null
+    setLoading(null)
+  }, [mode])
   /** Bumping this drops a superseded listing (mode switched mid-flight). */
   const listSeq = useRef(0)
   /* Which library the newest listing was asked for. The cache below pairs
@@ -741,8 +751,11 @@ export default function CatalogScreen({
 
   const cancelLoad = useCallback(() => {
     token.current++
+    loadAbort.current?.abort()
+    loadAbort.current = null
     setLoading(null)
-  }, [])
+    void loadUsage()
+  }, [loadUsage])
 
   const forget = useCallback(
     async (project: string) => {
@@ -797,6 +810,10 @@ export default function CatalogScreen({
 
   const openEntry = useCallback(
     async (entry: ProjectEntry) => {
+      loadAbort.current?.abort()
+      const abort = new AbortController()
+      loadAbort.current = abort
+      setFailedOpen(null)
       const tok = ++token.current
       setError(null)
       stepLog.current = { t0: Date.now(), rows: [] }
@@ -821,6 +838,7 @@ export default function CatalogScreen({
         const entryForLoad: ProjectEntry = { ...entry, metronomeRef }
         const loaded = await nativePlayback.load({
           entry: entryForLoad,
+          signal: abort.signal,
           engine,
           sampleRate,
           onStep: (msg, frac) => {
@@ -872,14 +890,22 @@ export default function CatalogScreen({
         await setCrumb('')
         if (tok === token.current) {
           setLoading(null)
-          setError(String(e instanceof Error ? e.message : e))
+          const message = String(e instanceof Error ? e.message : e)
+          if (mode === 'gdrive') setFailedOpen({ dir: entry.dir, mode, message })
+          else setError(message)
+          void loadUsage()
         }
+      } finally {
+        if (loadAbort.current === abort) loadAbort.current = null
       }
     },
-    [engine, onLoaded, sampleRate, mode, root]
+    [engine, onLoaded, sampleRate, mode, root, loadUsage]
   )
 
   const openSample = useCallback(async () => {
+    loadAbort.current?.abort()
+    loadAbort.current = null
+    setFailedOpen(null)
     const tok = ++token.current
     setError(null)
     try {
@@ -2032,6 +2058,7 @@ export default function CatalogScreen({
     swipeActions?: CardSwipeAction[] | null
   }): React.JSX.Element => {
     const isLoading = loading?.dir === opts.dir
+    const failed = failedOpen?.dir === opts.dir && failedOpen.mode === mode ? failedOpen : null
     const acts = opts.swipeActions ?? []
     const body = (
       <Pressable
@@ -2075,8 +2102,12 @@ export default function CatalogScreen({
             </Text>
           )}
           {isLoading ? (
-            <Text style={[s.cardMeta, { color: C.amber }]} numberOfLines={1}>
+            <Text style={[s.cardMeta, { color: C.amber }]} numberOfLines={2}>
               {loading.msg}
+            </Text>
+          ) : failed ? (
+            <Text style={[s.cardMeta, { color: C.amber }]} numberOfLines={4}>
+              {failed.message}
             </Text>
           ) : (
             <Text style={s.cardMeta} numberOfLines={1}>
@@ -2100,7 +2131,10 @@ export default function CatalogScreen({
                 always reserved, so a state fills the card without reshaping
                 it — statuses and ••• line up down the whole list. */}
             <View style={s.rail}>
-              {opts.right}
+              {failed ? <Pressable onPress={opts.onPress} accessibilityRole="button"
+                accessibilityLabel={t('phone.library.downloadRetry')} hitSlop={10}>
+                <Text style={{ color: C.amber, fontWeight: '700' }}>{t('phone.library.downloadRetry')}</Text>
+              </Pressable> : opts.right}
               {opts.action}
               {opts.keyLine != null && opts.keyLine !== '' && (
                 <Text style={s.keyLine} numberOfLines={1}>

@@ -3,6 +3,17 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const library: Translation<typeof en> = {
+  "phone.library.downloadChecking": "Comprobando {label} guardado · {index}/{count}",
+  "phone.library.downloadTrack": "Descargando {label} · {index}/{count}",
+  "phone.library.downloadVerifying": "Verificando {label} · {index}/{count}",
+  "phone.library.downloadRetrying": "Reintentando {label} · intento {attempt}/{attempts}",
+  "phone.library.downloadInterrupted": "Se interrumpió la conexión. Las pistas descargadas se conservaron. Toca Reintentar para continuar.",
+  "phone.library.downloadMissing": "Esta pista no está en Drive. Vuelve a sincronizar la canción desde tu computadora.",
+  "phone.library.downloadDenied": "Drive denegó el acceso a esta pista. Revisa tu sesión y vuelve a intentarlo.",
+  "phone.library.downloadStorage": "No se puede guardar esta pista. Revisa el espacio libre de tu teléfono.",
+  "phone.library.downloadDamaged": "Una pista llegó incompleta o dañada. Las pistas descargadas se conservaron. Toca Reintentar para continuar.",
+  "phone.library.downloadRetry": "Reintentar",
+
   "phone.library.pickFailed": "El archivo no pudo ser abierto ({msg})",
   "phone.library.folderInactive": "La carpeta seleccionada ya no está activa.  Reabríla y vuelve a intentarlo.",
   "phone.library.folderIdentityUnavailable": "La identidad de la carpeta seleccionada no está disponible. Vuelva a abrir la carpeta y intente de nuevo.",
