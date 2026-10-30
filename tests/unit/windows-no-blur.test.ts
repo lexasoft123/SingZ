@@ -10,7 +10,7 @@
  * written alongside their glass (.vt-cleanup-gate, the lyrics editor's card)
  * — and three never did: the drop overlay, as old as the app, and the vocal
  * training session's head and dock. The rule lived only in
- * CLAUDE.md, so nothing noticed. This reads every stylesheet the renderer
+ * docs/PROJECT-RULES.md, so nothing noticed. This reads every stylesheet the renderer
  * imports and fails on a blur with no twin.
  *
  * A twin is an unconditional rule with `body.win:not(.glass)` added to the

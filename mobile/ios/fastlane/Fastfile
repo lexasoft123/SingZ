@@ -67,7 +67,7 @@ BETA_DESCRIPTION = <<~TEXT.strip
 TEXT
 
 # MARKETING_VERSION is the one place besides package.json a version is
-# written by hand (docs/DEVELOPMENT.md, CLAUDE.md) — bumped before archiving,
+# written by hand (docs/DEVELOPMENT.md, docs/PROJECT-RULES.md) — bumped before archiving,
 # same as the sis-motors.ru sideload build. CI does not bump it for you: a
 # forgotten bump here is a build App Store Connect will accept and then
 # nobody outside TestFlight sees at all, because a repeat submission of an
@@ -190,7 +190,7 @@ def api_key
     key_content: base64, is_key_content_base64: true, in_house: false
   ) unless base64.empty?
 
-  # Feature work here happens in worktrees (CLAUDE.md), and a worktree's root
+  # Feature work here happens in worktrees (docs/PROJECT-RULES.md), and a worktree's root
   # is NOT where the key lives — it is kept once beside the main checkout and
   # shared, exactly like vendor/ and gdrive.config.json. So look in this
   # checkout, then in the main one (the common git dir's parent), before

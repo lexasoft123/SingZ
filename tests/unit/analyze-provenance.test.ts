@@ -149,7 +149,7 @@ describe('scripts/analyze-source-hash.sh', () => {
     writeFileSync(join(tools, 'singz-analyze.cpp'), '// stand-in\n')
     writeFileSync(join(cmake, 'SingZRealtimeTarget.cmake'), '# stand-in\n')
     writeFileSync(join(root, 'CMakeLists.txt'), '# stand-in\n')
-    for (const name of ['vendor-analyze.sh', 'analyze-source-hash.sh'])
+    for (const name of ['vendor-analyze.sh', 'analyze-source-hash.sh', 'engine-artifact.cjs'])
       copyFileSync(join(ROOT, 'scripts', name), join(root, 'scripts', name))
     return root
   }
@@ -178,6 +178,13 @@ describe('scripts/analyze-source-hash.sh', () => {
     const before = await hashOf(root)
     expect(await hashOf(root)).toBe(before)
     writeFileSync(join(root, 'zcore', 'melody.cpp'), '// edited\n')
+    expect(await hashOf(root)).not.toBe(before)
+  })
+
+  it('moves when the shared artifact publisher changes', async () => {
+    const root = fakeCheckout()
+    const before = await hashOf(root)
+    writeFileSync(join(root, 'scripts', 'engine-artifact.cjs'), '// changed publisher\n')
     expect(await hashOf(root)).not.toBe(before)
   })
 

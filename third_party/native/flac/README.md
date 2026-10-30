@@ -102,7 +102,7 @@ files — the gate deletes them at the end, so comment out its `remove()` calls
 or copy them first. Compare files a build is KNOWN to have written: the first
 attempt at this measurement diffed two files the gate had already deleted and
 reported a cheerful "identical", which is the check-that-cannot-fail shape
-CLAUDE.md warns about elsewhere. The expected numbers are the ones the gate
+docs/PROJECT-RULES.md warns about elsewhere. The expected numbers are the ones the gate
 itself prints — tonal 113255 B / `b4125f28c0bf5c5ca86530a908d7a2a1`, noise
 176598 B / `a57a4db348ab0b832b7604f7496c2b5e`.
 

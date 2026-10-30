@@ -82,7 +82,7 @@ COMMIT_RE="${BOUNDARY}${GIT_OPTS}commit([[:space:]]|\$)"
 # claims to cover.
 CONT_RE="${BOUNDARY}${GIT_OPTS}(merge|rebase|cherry-pick|revert|am)[[:space:]]+--continue([[:space:]]|\$)"
 # Changing directory first is the SPELLING PEOPLE USE for "commit somewhere
-# else" — this repo keeps 21 worktrees and CLAUDE.md mandates them — and it
+# else" — this repo keeps 21 worktrees and AGENTS.md mandates them — and it
 # defeats the gate in both directions: the hook hashes the index where IT
 # stands, so a worktree commit rode in on the main checkout's approval, and a
 # properly reviewed worktree commit was refused while quoting hashes from a
@@ -160,7 +160,7 @@ while IFS= read -r seg; do
     for tok in $args; do
       if [ "$skip_next" = yes ]; then skip_next=no; continue; fi
       case "$tok" in
-        --) deny "Refused: a pathspec takes working-tree contents for those paths, overriding the staged tree the review approved (CLAUDE.md warns about exactly this). Stage the paths instead, re-review, then commit." ;;
+        --) deny "Refused: a pathspec takes working-tree contents for those paths, overriding the staged tree the review approved (review policy: AGENTS.md). Stage the paths instead, re-review, then commit." ;;
         --*=*) ;;
         --author|--date|--cleanup|--fixup|--squash|--template|--trailer|--pathspec-from-file|--message|--file|--reuse-message|--reedit-message)
           skip_next=yes ;;
@@ -217,7 +217,7 @@ if [ "$staged" = "$reviewed" ]; then
 fi
 
 if [ -z "$reviewed" ]; then
-  deny "Not reviewed yet. CLAUDE.md: every commit is reviewed first — launch the code-reviewer agent (Agent tool, subagent_type code-reviewer) on the staged diff, act on what it reports, and it will mark this tree approved. Deliberate skip: prefix the command with SINGZ_SKIP_REVIEW=1."
+  deny "Not reviewed yet. AGENTS.md: every commit is reviewed first — launch the code-reviewer agent (Agent tool, subagent_type code-reviewer) on the staged diff, act on what it reports, and it will mark this tree approved. Deliberate skip: prefix the command with SINGZ_SKIP_REVIEW=1."
 fi
 
 deny "The staged tree changed since the review (reviewed ${reviewed:0:8}, staged ${staged:0:8}) — what would be committed is not what was reviewed. Re-run the code-reviewer agent on the staged diff. Deliberate skip: prefix the command with SINGZ_SKIP_REVIEW=1."

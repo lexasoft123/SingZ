@@ -8,7 +8,7 @@ on:
         type: string
         default: ''
       reuse_lyrics_from:
-        description: 'Optional published stable tag with identical pinned Mac lyrics-engine inputs'
+        description: 'Optional stable tag with identical Mac engine inputs and matching artifact receipts'
         type: string
         default: ''
       mac_only:
@@ -129,7 +129,7 @@ jobs:
             vendor/darwin-x64
             vendor/win32-x64
             vendor/packs
-          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-analyze.sh', 'scripts/vendor-llama.sh', 'scripts/vendor-crispasr.sh', 'scripts/assert-portable-binary.sh', 'scripts/analyze-source-hash.sh', 'CMakeLists.txt', 'cmake/**', 'zcore/**', 'zdsp/**', 'third_party/native/**', 'tools/native/**', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh') }}
+          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-analyze.sh', 'scripts/vendor-llama.sh', 'scripts/vendor-crispasr.sh', 'scripts/engine-artifact.cjs', 'scripts/assert-portable-binary.sh', 'scripts/analyze-source-hash.sh', 'CMakeLists.txt', 'cmake/**', 'zcore/**', 'zdsp/**', 'third_party/native/**', 'tools/native/**', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh') }}
 
       - name: Cache engine sources and build trees
         uses: actions/cache@v4
@@ -145,12 +145,18 @@ jobs:
         with:
           path: |
             vendor/darwin-arm64/llama-server
+            vendor/darwin-arm64/llama-server.receipt.json
             vendor/darwin-arm64/crispasr
+            vendor/darwin-arm64/crispasr.receipt.json
             vendor/darwin-x64/llama-server
+            vendor/darwin-x64/llama-server.receipt.json
             vendor/darwin-x64/crispasr
+            vendor/darwin-x64/crispasr.receipt.json
             vendor/win32-x64/llama-server.exe
+            vendor/win32-x64/llama-server.exe.receipt.json
             vendor/win32-x64/crispasr.exe
-          key: lyrics-engines-${{ runner.os }}-${{ hashFiles('scripts/vendor-llama.sh', 'scripts/vendor-crispasr.sh', 'scripts/assert-portable-binary.sh') }}
+            vendor/win32-x64/crispasr.exe.receipt.json
+          key: lyrics-engines-${{ runner.os }}-${{ hashFiles('scripts/vendor-llama.sh', 'scripts/vendor-crispasr.sh', 'scripts/engine-artifact.cjs', 'scripts/assert-portable-binary.sh') }}
 
       - name: Reuse verified published Mac lyrics engines
         if: runner.os == 'macOS' && inputs.reuse_lyrics_from != ''
@@ -161,7 +167,7 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --depth 1 origin "refs/tags/$SOURCE_TAG:refs/tags/$SOURCE_TAG"
-          git diff --exit-code "$SOURCE_TAG" HEAD -- scripts/vendor-llama.sh scripts/vendor-crispasr.sh scripts/assert-portable-binary.sh
+          git diff --exit-code "$SOURCE_TAG" HEAD -- scripts/vendor-llama.sh scripts/vendor-crispasr.sh scripts/engine-artifact.cjs scripts/assert-portable-binary.sh
           source_dir="$RUNNER_TEMP/published-lyrics"
           mkdir -p "$source_dir"
           gh release view "$SOURCE_TAG" --json isDraft,isPrerelease --jq '(.isDraft == false) and (.isPrerelease == false)' | grep -x true
@@ -185,8 +191,19 @@ jobs:
             codesign -dv "$mount/SingZ.app" 2>&1 | grep -x 'TeamIdentifier=USJ7H3X44X'
             mkdir -p "vendor/darwin-$arch"
             for engine in llama-server crispasr; do
+              receipt="$mount/SingZ.app/Contents/Resources/engines/$engine.receipt.json"
+              if [ ! -f "$receipt" ]; then
+                echo "::error::Published $SOURCE_TAG has no provenance receipt for $engine. Clear reuse_lyrics_from to rebuild or use a release with validated receipts."
+                exit 1
+              fi
               cp "$mount/SingZ.app/Contents/Resources/engines/$engine" "vendor/darwin-$arch/$engine"
+              cp "$receipt" "vendor/darwin-$arch/$engine.receipt.json"
               bash scripts/assert-portable-binary.sh "darwin-$arch" "vendor/darwin-$arch/$engine"
+              if [ "$engine" = llama-server ]; then producer=llama; else producer=crispasr; fi
+              if ! bash "scripts/vendor-$producer.sh" --check-cache "darwin-$arch"; then
+                echo "::error::Published $engine does not match its requested revision/producer/bytes receipt (signing may have changed its bytes). Clear reuse_lyrics_from to rebuild; signed artifacts require separately verified provenance."
+                exit 1
+              fi
             done
             hdiutil detach "$mount"
             trap - EXIT
@@ -462,8 +479,9 @@ jobs:
           missing=0
           for t in $targets; do
             for e in llama-server crispasr; do
-              if [ ! -f "vendor/$t/$e$exe" ]; then
-                echo "::error::vendor/$t/$e$exe is missing — this build has no lyrics engine"
+              if [ "$e" = llama-server ]; then producer=llama; else producer=crispasr; fi
+              if ! bash "scripts/vendor-$producer.sh" --check-cache "$t"; then
+                echo "::error::vendor/$t/$e$exe is missing or has invalid provenance — this build has no validated lyrics engine"
                 missing=1
               fi
             done

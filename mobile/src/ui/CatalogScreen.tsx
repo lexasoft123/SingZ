@@ -2375,7 +2375,7 @@ export default function CatalogScreen({
              on empty list area still dismisses the keyboard. The iOS half is
              simply unmeasured — the simulator boots with the Mac's hardware
              keyboard connected and shows no soft keyboard, and there is no
-             `simctl` way to raise one (see CLAUDE.md for the ⌘K that is). */
+             `simctl` way to raise one (see docs/PROJECT-RULES.md for the ⌘K that is). */
           keyboardShouldPersistTaps="handled"
           /* The last card must clear the floating search dock as well as the
              home indicator, on both platforms. */

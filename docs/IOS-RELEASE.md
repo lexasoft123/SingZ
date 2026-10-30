@@ -451,7 +451,7 @@ touch the others.
 Every lane starts by checking `MARKETING_VERSION` in
 `mobile/ios/SingZPlayer.xcodeproj/project.pbxproj` against the root
 `package.json` version and refuses to build on a mismatch — that field is
-still hand-bumped (see the root `CLAUDE.md`), CI only refuses to ship a
+still hand-bumped (see the root `docs/PROJECT-RULES.md`), CI only refuses to ship a
 stale one.
 
 The **build number** (`CURRENT_PROJECT_VERSION`) is *not* hand-bumped for
@@ -459,7 +459,7 @@ this path — the workflow passes `github.run_number`. That counter is
 **per-workflow, not repo-wide**: it starts at 1 for any newly added
 workflow, and ios.yml's first runs were numbered 1, 2, 3 while this repo had
 hundreds of Action runs across the other five workflows. (Earlier revisions
-of this page, of `CLAUDE.md` and of the Fastfile all claimed it never went
+of this page, of `docs/PROJECT-RULES.md` and of the Fastfile all claimed it never went
 backwards "across the whole repo's Action history". It was wrong in all
 three.)
 

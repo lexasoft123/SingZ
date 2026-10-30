@@ -229,7 +229,7 @@ export class MultitrackEngine {
   /** Bumps on every load() and on retireForSongSwitch(). The renderer's
    * rollbacks compare it, so a native mutation issued for the song being
    * left can never restore that song's grid, region or training into the
-   * next one — the cross-song contamination class CLAUDE.md records. */
+   * next one — the cross-song contamination class docs/PROJECT-RULES.md records. */
   private _songEpoch = 0
   /** True from retireForSongSwitch() until the next load(): the tracks on
    *  hand belong to the song being left. See both for why. */

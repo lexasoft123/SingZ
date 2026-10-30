@@ -5,13 +5,34 @@
 # Usage: scripts/vendor-llama.sh [target]   e.g. darwin-arm64, darwin-x64, win32-x64
 set -euo pipefail
 
-TARGET=${1:-"$(node -p 'process.platform + "-" + process.arch')"}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+CHECK_CACHE=0
+if [ "${1:-}" = "--check-cache" ]; then CHECK_CACHE=1; shift; fi
+TARGET=${1:-"$(node -p 'process.platform + "-" + process.arch')"}
+case "$TARGET" in
+  darwin-arm64|darwin-x64|win32-arm64|win32-x64|linux-arm64|linux-x64) ;;
+  *) echo "Unsupported native target: $TARGET" >&2; exit 1 ;;
+esac
 SRC="$ROOT/.engines-src/llama.cpp"
 # Pinned: the audio path is young and moves week to week, so a fleet-wide
 # rebuild must land the same engine everywhere rather than whatever master
 # happened to be. Measured on b11026 (Mac arm64 Metal, Windows x64 CPU).
 REF=${SINGZ_LLAMA_REF:-b11026}
+
+# Read-only provisioning check: use this checkout's pin and producer inputs
+# when deciding whether another checkout's artifact can be linked.
+if [ "$CHECK_CACHE" = 1 ]; then
+  exec node "$ROOT/scripts/engine-artifact.cjs" check "${2:-$ROOT}" llama "$TARGET" "$REF" "$ROOT"
+fi
+# These scripts have no cross-OS/non-Darwin cross-architecture toolchain.
+node "$ROOT/scripts/engine-artifact.cjs" assert-build-target "$TARGET"
+if [ -z "${SINGZ_NATIVE_BUILD_LOCK_HELD:-}" ]; then
+  exec node "$ROOT/scripts/with-native-build-lock.mjs" \
+    --owner vendor-llama -- bash "$ROOT/scripts/vendor-llama.sh" "$@"
+fi
+node "$ROOT/scripts/assert-native-build-lock.cjs"
+JOBS=${SINGZ_NATIVE_JOBS:-4}
+case "$JOBS" in 1|2|3|4) ;; *) echo "SINGZ_NATIVE_JOBS must be an integer from 1 through 4" >&2; exit 1 ;; esac
 
 if command -v ccache >/dev/null 2>&1; then
   export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
@@ -20,15 +41,25 @@ fi
 
 EXT=""
 case "$TARGET" in win32-*) EXT=".exe" ;; esac
-if [ -f "$ROOT/vendor/$TARGET/llama-server$EXT" ]; then
+if node "$ROOT/scripts/engine-artifact.cjs" check "$ROOT" llama "$TARGET" "$REF"; then
   echo "cached: vendor/$TARGET/llama-server$EXT"
   exit 0
 fi
 
+PRODUCER_HASH=$(node "$ROOT/scripts/engine-artifact.cjs" producer-hash "$ROOT" llama)
 mkdir -p "$ROOT/.engines-src"
 if [ ! -d "$SRC" ]; then
-  git clone --depth 1 --branch "$REF" https://github.com/ggml-org/llama.cpp "$SRC"
+  git clone --filter=blob:none https://github.com/ggml-org/llama.cpp "$SRC"
 fi
+# Existing source trees must also move to the requested revision on rebuild.
+if [ -n "$(git -C "$SRC" status --porcelain --untracked-files=no)" ]; then
+  echo "Refusing to rebuild from a modified third-party source tree: $SRC" >&2
+  exit 1
+fi
+git -C "$SRC" fetch --depth 1 origin "$REF"
+git -C "$SRC" checkout --detach FETCH_HEAD
+git -C "$SRC" submodule update --init --recursive --depth 1
+COMMIT=$(git -C "$SRC" rev-parse HEAD)
 
 EXTRA=""
 case "$TARGET" in
@@ -59,14 +90,18 @@ cmake -S "$SRC" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
   -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_CURL=OFF \
   -DLLAMA_OPENSSL=OFF \
   -DCMAKE_IGNORE_PREFIX_PATH="$IGNORE" -DCMAKE_IGNORE_PATH="$IGNORE" $EXTRA
-cmake --build "$BUILD" -j --config Release --target llama-server
+cmake --build "$BUILD" --parallel "$JOBS" --config Release --target llama-server
 
-mkdir -p "$ROOT/vendor/$TARGET"
 BIN="$BUILD/bin/llama-server"
 [ -f "$BIN" ] || BIN="$BUILD/bin/Release/llama-server.exe"
-cp "$BIN" "$ROOT/vendor/$TARGET/llama-server$EXT"
 
 # BUILD_SHARED_LIBS=OFF above is the intention; this is the check. The sibling
 # script shipped a machine-local engine while every flag looked right.
-"$ROOT/scripts/assert-portable-binary.sh" "$TARGET" "$ROOT/vendor/$TARGET/llama-server$EXT" "$BUILD"
+"$ROOT/scripts/assert-portable-binary.sh" "$TARGET" "$BIN" "$BUILD"
+if [ "$(git -C "$SRC" rev-parse HEAD)" != "$COMMIT" ] ||
+   [ -n "$(git -C "$SRC" status --porcelain --untracked-files=no)" ]; then
+  echo "Third-party sources changed during the build; rerun it." >&2
+  exit 1
+fi
+node "$ROOT/scripts/engine-artifact.cjs" publish "$ROOT" llama "$TARGET" "$REF" "$COMMIT" "$BIN" "$PRODUCER_HASH"
 echo "vendored: $ROOT/vendor/$TARGET/llama-server$EXT"

@@ -1620,7 +1620,7 @@ the same song from Drive — and the original song file, without which the DESKT
 nothing: `listProjects` requires `songFile`, and the first attempt on the Windows laptop timed
 out on an empty catalog for that reason). The synthesized pair never sees a real song's sizes.
 - **iPhone 13: 44/48, no void, no terminal.** Opens take ~28–33 s on this Debug build on
-  both backends (the dev bundle's number, not the product's — CLAUDE.md's rule) and native
+  both backends (the dev bundle's number, not the product's — docs/PROJECT-RULES.md's rule) and native
   trails legacy by 3–4 s on the two open rows (+14–16%; the first open +9%); the two metronome rows are the
   seam's arm on a heavier graph (245 vs 160 ms; touches → advancing 209 vs 106). Seeks
   reach their target in 24–482 ms on both; Play → advancing 251 vs 226; end → Play 309

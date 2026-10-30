@@ -40,7 +40,7 @@ on:
     # winning.
     #
     # Hyphenated prerelease tags (v0.20.0-test1, the "hand one tester a build"
-    # flow in CLAUDE.md) can NEVER succeed here: verify_marketing_version
+    # flow in docs/PROJECT-RULES.md) can NEVER succeed here: verify_marketing_version
     # compares package.json against MARKETING_VERSION, and Apple's
     # CFBundleShortVersionString is at most three integers, so the suffix
     # cannot be carried. Better to not start than to fail after checkout,

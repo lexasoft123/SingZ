@@ -197,7 +197,7 @@ const digestOf = (g) =>
 
   // Android reads a pref rather than polling JS: the worklet leg decodes six
   // stems and evaluating during a decodeAudioData segfaults the Hermes
-  // inspector (CLAUDE.md).
+  // inspector (docs/PROJECT-RULES.md).
   const crumb = () => {
     if (platform !== 'android') return ''
     try {

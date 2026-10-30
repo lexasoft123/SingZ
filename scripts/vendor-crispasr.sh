@@ -6,13 +6,34 @@
 # Usage: scripts/vendor-crispasr.sh [target]   e.g. darwin-arm64, win32-x64
 set -euo pipefail
 
-TARGET=${1:-"$(node -p 'process.platform + "-" + process.arch')"}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+CHECK_CACHE=0
+if [ "${1:-}" = "--check-cache" ]; then CHECK_CACHE=1; shift; fi
+TARGET=${1:-"$(node -p 'process.platform + "-" + process.arch')"}
+case "$TARGET" in
+  darwin-arm64|darwin-x64|win32-arm64|win32-x64|linux-arm64|linux-x64) ;;
+  *) echo "Unsupported native target: $TARGET" >&2; exit 1 ;;
+esac
 SRC="$ROOT/.engines-src/CrispASR"
 # Pinned for the same reason as llama.cpp: one engine across the fleet, not
 # whatever master was that week. This is the revision every number in
 # docs/DEVELOPMENT.md and src/main/qwen-align.ts was measured on.
 REF=${SINGZ_CRISPASR_REF:-4b937a91998b02cdf3083d5443923554c1981b19}
+
+# Read-only provisioning check: use this checkout's pin and producer inputs
+# when deciding whether another checkout's artifact can be linked.
+if [ "$CHECK_CACHE" = 1 ]; then
+  exec node "$ROOT/scripts/engine-artifact.cjs" check "${2:-$ROOT}" crispasr "$TARGET" "$REF" "$ROOT"
+fi
+# These scripts have no cross-OS/non-Darwin cross-architecture toolchain.
+node "$ROOT/scripts/engine-artifact.cjs" assert-build-target "$TARGET"
+if [ -z "${SINGZ_NATIVE_BUILD_LOCK_HELD:-}" ]; then
+  exec node "$ROOT/scripts/with-native-build-lock.mjs" \
+    --owner vendor-crispasr -- bash "$ROOT/scripts/vendor-crispasr.sh" "$@"
+fi
+node "$ROOT/scripts/assert-native-build-lock.cjs"
+JOBS=${SINGZ_NATIVE_JOBS:-4}
+case "$JOBS" in 1|2|3|4) ;; *) echo "SINGZ_NATIVE_JOBS must be an integer from 1 through 4" >&2; exit 1 ;; esac
 
 if command -v ccache >/dev/null 2>&1; then
   export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
@@ -21,11 +42,12 @@ fi
 
 EXT=""
 case "$TARGET" in win32-*) EXT=".exe" ;; esac
-if [ -f "$ROOT/vendor/$TARGET/crispasr$EXT" ]; then
+if node "$ROOT/scripts/engine-artifact.cjs" check "$ROOT" crispasr "$TARGET" "$REF"; then
   echo "cached: vendor/$TARGET/crispasr$EXT"
   exit 0
 fi
 
+PRODUCER_HASH=$(node "$ROOT/scripts/engine-artifact.cjs" producer-hash "$ROOT" crispasr)
 mkdir -p "$ROOT/.engines-src"
 if [ ! -d "$SRC" ]; then
   git clone --filter=blob:none https://github.com/CrispStrobe/CrispASR "$SRC"
@@ -34,9 +56,14 @@ fi
 # at whatever it was cloned at, and the binary skip-guard above hides that until
 # somebody deletes the vendored engine to force a rebuild — which is exactly the
 # person the pin is for. Checking out every time costs nothing and cannot drift.
+if [ -n "$(git -C "$SRC" status --porcelain --untracked-files=no)" ]; then
+  echo "Refusing to rebuild from a modified third-party source tree: $SRC" >&2
+  exit 1
+fi
 git -C "$SRC" fetch --depth 1 origin "$REF"
 git -C "$SRC" checkout --detach FETCH_HEAD
 git -C "$SRC" submodule update --init --recursive --depth 1
+COMMIT=$(git -C "$SRC" rev-parse HEAD)
 
 EXTRA=""
 case "$TARGET" in
@@ -65,13 +92,17 @@ cmake -S "$SRC" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DCRISPASR_BUILD_TESTS=OF
   -DBUILD_SHARED_LIBS=OFF \
   -DCMAKE_IGNORE_PREFIX_PATH="$IGNORE" -DCMAKE_IGNORE_PATH="$IGNORE" $EXTRA
 
-cmake --build "$BUILD" -j --config Release --target crispasr-cli
+cmake --build "$BUILD" --parallel "$JOBS" --config Release --target crispasr-cli
 
-mkdir -p "$ROOT/vendor/$TARGET"
 BIN="$BUILD/bin/crispasr"
 [ -f "$BIN" ] || BIN="$BUILD/bin/Release/crispasr.exe"
-cp "$BIN" "$ROOT/vendor/$TARGET/crispasr$EXT"
 
 # Check the output, not just the flags — see the helper for what this caught.
-"$ROOT/scripts/assert-portable-binary.sh" "$TARGET" "$ROOT/vendor/$TARGET/crispasr$EXT" "$BUILD"
+"$ROOT/scripts/assert-portable-binary.sh" "$TARGET" "$BIN" "$BUILD"
+if [ "$(git -C "$SRC" rev-parse HEAD)" != "$COMMIT" ] ||
+   [ -n "$(git -C "$SRC" status --porcelain --untracked-files=no)" ]; then
+  echo "Third-party sources changed during the build; rerun it." >&2
+  exit 1
+fi
+node "$ROOT/scripts/engine-artifact.cjs" publish "$ROOT" crispasr "$TARGET" "$REF" "$COMMIT" "$BIN" "$PRODUCER_HASH"
 echo "vendored: $ROOT/vendor/$TARGET/crispasr$EXT"

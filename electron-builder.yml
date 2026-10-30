@@ -34,7 +34,7 @@ files:
   # Tests and agent/development configuration are not runtime assets.
   - '!tests/*'
   - '!.claude/*'
-  - '!{CLAUDE.md,vitest.config.ts,tsconfig.tests.json,tsconfig.renderer-tests.json}'
+  - '!{AGENTS.md,CLAUDE.md,vitest.config.ts,tsconfig.tests.json,tsconfig.renderer-tests.json}'
   - '!scripts/*'
   - '!docs/*'
   - '!eval/*'

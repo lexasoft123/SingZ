@@ -13,8 +13,27 @@
 set -euo pipefail
 
 WT="$(cd "$(dirname "$0")/.." && pwd)"
-MAIN="$(git -C "$WT" worktree list --porcelain | head -1 | sed 's/^worktree //')"
 MODE="${1:-}"
+if [ "$#" -gt 1 ] || { [ -n "$MODE" ] && [ "$MODE" != "--desktop-only" ]; }; then
+  echo "Usage: scripts/worktree-setup.sh [--desktop-only]" >&2
+  exit 2
+fi
+# Fail before deleting dependencies or changing provisioning links.
+for tool in node npm cmake git; do
+  command -v "$tool" >/dev/null 2>&1 || { echo "FATAL: required tool missing: $tool" >&2; exit 1; }
+done
+if [ "$MODE" != "--desktop-only" ] && [ "$(uname)" = Darwin ]; then
+  command -v pod >/dev/null 2>&1 || {
+    echo "FATAL: CocoaPods is required for mobile setup on macOS. Install it or use --desktop-only." >&2
+    exit 1
+  }
+fi
+if [ -z "${SINGZ_NATIVE_BUILD_LOCK_HELD:-}" ]; then
+  exec node "$WT/scripts/with-native-build-lock.mjs" --owner worktree-setup -- bash "$WT/scripts/worktree-setup.sh" "$@"
+fi
+node "$WT/scripts/assert-native-build-lock.cjs"
+node "$WT/scripts/install-git-hooks.cjs"
+MAIN="$(git -C "$WT" worktree list --porcelain | sed -n '1s/^worktree //p')"
 
 # `-e` FOLLOWS symlinks, so a link whose target moved (the main checkout
 # renamed or relocated) reads as absent here and as "File exists" to ln, which
@@ -58,9 +77,8 @@ link() { # link <relpath> — symlink main's copy when the worktree lacks it
 # vendor/ holds two different KINDS of artifact and they cannot be shared on
 # the same terms.
 #
-#   third-party engine builds (llama-server, crispasr, the splitter packs)
-#     come from .engines-src/ and downloads. No branch of ours changes them,
-#     they cost minutes to rebuild, and every worktree wants the same copy.
+#   third-party engines can be copied only when their receipts match this
+#     checkout's requested revision, producer inputs, target and binary bytes.
 #
 #   our own engine builds (singz-analyze, singz-capture.node) come from the
 #     shared zcore/zdsp tree — which is exactly what a feature branch edits.
@@ -74,74 +92,63 @@ link() { # link <relpath> — symlink main's copy when the worktree lacks it
 # them.
 #
 # So the directory is mirrored instead of linked: third-party artifacts are
-# symlinks to main's copies, ours are absent until this worktree builds its
-# own. Only singz-analyze is built below; the capture addon has a producer but
-# is Electron/platform-specific and is built explicitly with
-# `npm run capture:addon`. Its slot stays empty until then rather than pointing
-# at another branch's addon, which is the whole point.
+# validated local snapshots of main's copies; ours are absent until this worktree builds its
+# own. Only singz-analyze is built below; `npm run capture:addon` publishes
+# immutable artifacts under this checkout's build/capture-runtime instead.
 # src/main/analyze-provenance.ts is the safety net for what this cannot reach
 # (a packaged app, a hand-copied binary); this is the fix.
-REPO_BUILT='singz-analyze singz-analyze.exe singz-analyze.source-hash
-            singz-analyze.exe.source-hash singz-capture.node
-            singz-capture.node.source-hash'
-
-is_repo_built() {
-  local name="$1" candidate
-  for candidate in $REPO_BUILT; do [ "$name" = "$candidate" ] && return 0; done
-  return 1
-}
-
 mirror_vendor() {
-  # Migrate the old whole-directory symlink. Only ever a symlink is removed —
-  # never a real directory, which in the main checkout is the actual engines.
-  if [ -L "$WT/vendor" ]; then
-    rm "$WT/vendor"
-    echo "  vendor was a symlink to the shared slot — replacing it with a mirror"
-  fi
+  # Migrate whole-directory/individual links without touching their targets.
+  if [ -L "$WT/vendor" ]; then rm "$WT/vendor"; fi
   mkdir -p "$WT/vendor"
-  # A worktree-local directory is still required when main has no vendor/: the
-  # analyzer built below needs somewhere real to publish. Returning before the
-  # symlink migration left an old dangling whole-vendor link in place, so
-  # vendor-analyze.sh could never create its per-platform output directory.
-  if [ ! -d "$MAIN/vendor" ]; then
-    echo "  skip  vendor mirror (absent in main checkout; local slot is ready)"
-    return 0
-  fi
-  local entry name inner iname
-  for entry in "$MAIN"/vendor/*; do
-    [ -e "$entry" ] || continue
-    name=$(basename "$entry")
-    # An engine target dir (darwin-arm64, win32-x64, ...) is the mixed one:
-    # go in and link per file. Everything else at this level is third-party.
-    if [ -d "$entry" ] && [ "$name" != "packs" ]; then
-      if [ -L "$WT/vendor/$name" ]; then
-        rm "$WT/vendor/$name"
-        echo "  replaced shared vendor/$name directory with a local mirror"
-      fi
-      mkdir -p "$WT/vendor/$name"
-      for inner in "$entry"/*; do
-        [ -e "$inner" ] || continue
-        iname=$(basename "$inner")
-        is_repo_built "$iname" && continue
-        present "$WT/vendor/$name/$iname" "$inner" || ln -s "$inner" "$WT/vendor/$name/$iname"
-      done
-      echo "  mirrored vendor/$name (ours stay per-worktree)"
-      continue
-    fi
-    if ! present "$WT/vendor/$name" "$entry"; then
-      ln -s "$entry" "$WT/vendor/$name"
-      echo "  linked vendor/$name"
+  local entry inner target engine binary producer
+  for entry in "$WT"/vendor/*; do
+    if [ -L "$entry" ]; then
+      rm "$entry"
+    elif [ -d "$entry" ]; then
+      for inner in "$entry"/*; do [ ! -L "$inner" ] || rm "$inner"; done
     fi
   done
+  for target in darwin-arm64 darwin-x64 win32-arm64 win32-x64 linux-arm64 linux-x64; do
+    [ -d "$MAIN/vendor/$target" ] || [ -d "$WT/vendor/$target" ] || continue
+    mkdir -p "$WT/vendor/$target"
+    for engine in llama crispasr; do
+      producer="$WT/scripts/vendor-$engine.sh"
+      if [ "$engine" = llama ]; then binary=llama-server; else binary=crispasr; fi
+      case "$target" in win32-*) binary="$binary.exe" ;; esac
+      # Preserve a valid local build; discard receiptless/stale generated output.
+      if "$producer" --check-cache "$target" "$WT"; then continue; fi
+      rm -f "$WT/vendor/$target/$binary" "$WT/vendor/$target/$binary.receipt.json"
+      if ! "$producer" --check-cache "$target" "$MAIN"; then
+        echo "  skip $target/$binary (no matching validated cache; build locally when needed)"
+        continue
+      fi
+      # Snapshot BOTH files. Mutable main-slot symlinks would silently change
+      # revisions on a later main build. The shared lock protects this copy.
+      for inner in "$binary" "$binary.receipt.json"; do
+        cp -p "$MAIN/vendor/$target/$inner" "$WT/vendor/$target/$inner.provision-$$"
+        mv -f "$WT/vendor/$target/$inner.provision-$$" "$WT/vendor/$target/$inner"
+      done
+      "$producer" --check-cache "$target" "$WT" || {
+        rm -f "$WT/vendor/$target/$binary" "$WT/vendor/$target/$binary.receipt.json"
+        echo "FATAL: copied engine failed validation: $target/$binary" >&2
+        exit 1
+      }
+      echo "  snapshotted vendor/$target/$binary"
+    done
+  done
+  # Unknown artifacts and packs need their own validators/producers; never
+  # link arbitrary directories from main into a checkout.
 }
 
 if [ "$WT" = "$MAIN" ]; then
-  echo "Main checkout — nothing to link, running installs only."
+  echo "Main checkout — validating local engines, running installs."
+  mirror_vendor
 else
-  echo "Linking machine-local artifacts from $MAIN:"
-  mirror_vendor                        # third-party engines shared, ours not
-  link mobile/gdrive.config.json       # OAuth client -> configs bake FILLED
-  link mobile/android/local.properties # Android SDK path
+  echo "Provisioning machine-local artifacts from $MAIN:"
+  mirror_vendor
+  link mobile/gdrive.config.json
+  link mobile/android/local.properties
 fi
 
 # The links are FILES (symlinks). Register them in the repo-wide exclude —
@@ -215,7 +222,7 @@ if [ "$MODE" != "--desktop-only" ]; then
   # simulator build fails, which is all of mobile/tests/. Re-invoking costs
   # nothing when the directories are there: the vendor loop is per-directory
   # idempotent and skips what it already has.
-  if [ -d "$AUDIO_API" ] && { [ ! -d "$EXTERNAL/ffmpeg_ios" ] || [ ! -d "$EXTERNAL/iphoneos" ] || [ ! -d "$EXTERNAL/iphonesimulator" ]; }; then
+  if [ "$(uname)" = Darwin ] && [ -d "$AUDIO_API" ] && { [ ! -d "$EXTERNAL/ffmpeg_ios" ] || [ ! -d "$EXTERNAL/iphoneos" ] || [ ! -d "$EXTERNAL/iphonesimulator" ]; }; then
     echo "  restoring react-native-audio-api prebuilt binaries (npm ci removes them)"
     (cd "$AUDIO_API" && ./scripts/download-prebuilt-binaries.sh ios)
     # THE DOWNLOADER CANNOT FAIL, so its exit status proves nothing: on a bad
@@ -364,4 +371,11 @@ if ! analyzer_matches_sources; then
 fi
 echo "  analyzer verified: $EXPECTED_HASH"
 
-echo "Worktree ready: npm run dev / typecheck / test all work here."
+if [ "$MODE" = --desktop-only ]; then
+  echo "Worktree ready: desktop dependencies, Git review hook, and host analyzer verified. Mobile was not provisioned."
+elif [ "$(uname)" = Darwin ]; then
+  echo "Worktree ready: desktop/mobile dependencies, Git review hook, host analyzer, and iOS Pods verified."
+else
+  echo "Worktree ready: desktop/mobile dependencies, Git review hook, and host analyzer verified. iOS Pods require macOS."
+fi
+echo "Optional lyrics engines, splitter packs, and capture addon must be built/validated separately when needed."

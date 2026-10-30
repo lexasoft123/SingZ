@@ -1,9 +1,15 @@
 # Developing SingZ
 
+[AGENTS.md](../AGENTS.md) is the canonical policy for agents, worktrees,
+bootstrap, native build serialization, cache reuse, and commits. Both agents
+also read [PROJECT-RULES.md](PROJECT-RULES.md) for product/platform invariants.
+`CLAUDE.md` is only an `@AGENTS.md` entry point; the instructions below explain
+the tooling.
+
 ## Setup
 
 ```bash
-npm install
+scripts/worktree-setup.sh --desktop-only  # installs deps + review hook, builds/verifies analyzer
 scripts/vendor-llama.sh        # llama-server, the lyrics recogniser — once per machine (needs cmake)
 scripts/vendor-crispasr.sh     # crispasr, its word aligner — once per machine (needs cmake)
 scripts/build-onnx-pack.sh     # splitter pack for win32-x64 / darwin-x64
@@ -46,8 +52,9 @@ normalized, and meaningful thin/fat slices are hashed by CPU identity;
 never overwritten (especially important for a loaded Windows DLL): rebuilding
 publishes a fresh path, validates its Mach-O/PE architecture, then moves the
 selector. The builder fingerprints the source tree again after CMake and before
-selector publication, aborting if an edit raced the build. Capture never publishes into `vendor/`: that
-directory is shared by all worktrees, while `build/` is deliberately local.
+selector publication, aborting if an edit raced the build. Capture never
+publishes into `vendor/`: that directory contains a local analyzer and validated
+third-party artifacts, while `build/` holds this checkout's capture products.
 The app independently fingerprints this checkout's native inputs and only
 resolves the matching immutable path, so another worktree cannot redirect it.
 
@@ -306,62 +313,104 @@ version the app requires).
 
 ## Worktrees
 
-Every parallel feature gets its own worktree (`git worktree add
-.claude/worktrees/<feature> -b worktree-<feature> main`). A fresh worktree
-has none of the machine-local, gitignored artifacts — bootstrap it with:
+Use one worktree per independent feature/session. Bounded agents implementing
+one feature can share its checkout with disjoint file ownership; only the
+coordinator stages and commits. Give each worker its own scratch/build paths.
+Reuse an existing task worktree when suitable. For a new Codex feature:
 
 ```bash
-scripts/worktree-setup.sh                 # desktop + mobile (pods on a Mac)
-scripts/worktree-setup.sh --desktop-only  # skip mobile deps + pods
+git worktree add ../SingZ-feature -b codex/feature main
 ```
 
-It provisions what must be shared from the main checkout
-(`mobile/gdrive.config.json` so the baked gdrive-config modules come out
-filled instead of EMPTY, `mobile/android/local.properties`, and `vendor/` —
-see below), runs `npm ci` in both roots (postinstall bakes configs, patches audio-api,
-synthesizes the sample song), restores the electron binary when npm's cache
-skipped its postinstall (the "Electron failed to install correctly" launch
-error), and pod-installs iOS with a UTF-8 `LANG` — CocoaPods crashes in
-non-interactive shells without one.
+Run bootstrap inside the new checkout:
 
-Three of its steps exist for RE-RUNS rather than fresh worktrees, which is
-the case that matters: re-running is how a worktree catches up after a
-rebase, and each of these is a way its build state can lag its source.
+```bash
+scripts/worktree-setup.sh                 # desktop + mobile; iOS Pods on macOS
+scripts/worktree-setup.sh --desktop-only  # skip mobile deps and Pods
+```
 
-- It **re-downloads react-native-audio-api's prebuilt binaries**, which
-  `npm ci` deletes and nothing else restores — they are not in the npm
-  tarball, and the podspec's `prepare_command` fetches them only when
-  CocoaPods integrates the pod for the FIRST time. This runs BEFORE
-  `pod install`, because CocoaPods records only the vendored frameworks
-  present at install time and the other order dies in `ld` with undefined
-  `_av_*` symbols. It **asserts the files arrived**: the vendor's downloader
-  `continue`s past a failed curl and still exits 0, so its status proves
-  nothing.
-- It **fails if `mobile/ios/SingzCore/core` does not match
-  `mobile/native/core`** byte for byte. That mirror is a gitignored copy
-  (CocoaPods drops globs reaching above the podspec and skips directory
-  symlinks), synced by mobile's postinstall; a worktree that skipped one
-  keeps building the stale copy and the failure names a missing header.
-- It **fails if the Pods sandbox still disagrees with `Podfile.lock`** after
-  installing — the "sandbox is not in sync" archive error, seen from here
-  instead of from xcodebuild ten minutes later.
+Bootstrap validates its mode and required tools before changing dependencies.
+On macOS, full mobile setup requires CocoaPods; it fails with an actionable
+message if `pod` is missing. Other hosts skip iOS downloads and integration.
+It holds the shared native build lock throughout provisioning, installs the
+Git review hook, links machine-local OAuth/Android configuration when available,
+and runs `npm ci` in the selected roots. Dependency directories, generated
+sources, Pods, Gradle state and native build products remain checkout-local.
+An app-local workspace setup command can invoke this same script; there is no
+second bootstrap implementation and no assumption that creating a worktree
+provisions it automatically.
 
-It touches no ccache config: the
-cross-worktree settings ride with each build (see above). Build products
-(`out/`, `Pods/`, `.gradle/`) stay per-worktree; the global npm / CocoaPods /
-ccache caches are what make the second worktree fast (pods ~30 s warm).
+Re-runs restore Electron's binary if npm skipped its installer; macOS mobile
+setup restores **all three** audio-api prebuilt directories before pod install,
+compares `mobile/ios/SingzCore/core` against top-level `zcore`, and checks the
+Pods manifest against `Podfile.lock`. It builds the host analyzer and verifies
+the executable's embedded fingerprint before reporting readiness. Output names
+what was actually provisioned; optional lyrics engines, splitter packs, and the
+capture addon need their own producers when used.
 
-`vendor/` is **mirrored, not linked**, and the distinction is the whole
-point. Third-party engine builds (llama-server, crispasr, the splitter
-packs) come from `.engines-src/` and downloads, cost minutes, and no branch
-of ours changes them — those stay symlinks to main's copies. Our own engine
-builds (`singz-analyze` and `singz-capture.node`) come from the shared
-`zcore`/`zdsp` tree, which is exactly what a feature branch edits — so the
-worktree gets an empty slot instead of a link. `worktree-setup.sh` builds
-`singz-analyze` (~10 s with a warm ccache); the capture addon stays empty until
-`npm run capture:addon` builds it for the current Electron/platform. An empty
-slot is the right answer because the app can fall back or report the missing
-transport, while a link would silently run another branch's engine.
+`vendor/` is a real local directory, never a whole-directory shared symlink.
+The analyzer is always local. Bootstrap copies only llama/CrispASR artifacts
+whose receipt matches the current producer scripts, requested revision, target,
+and binary checksum; missing or stale receipts remove old shared links.
+Validated binaries and receipts are copied locally so a later main-checkout
+rebuild cannot change this worktree's engine revision. Unknown artifacts and
+splitter packs are not shared without a validator.
+Engine producers detach shared destinations before publishing local output.
+Receipts bind raw binary bytes. Old receiptless caches rebuild once; signed
+published engines may differ from their pre-signing receipts. Release recovery
+with `reuse_lyrics_from` requires a matching receipt and fails explicitly when
+it cannot validate one, rather than silently rebuilding or blessing new bytes.
+Clear that input to build from the pinned sources in that case.
+Capture publishes immutable generations to local `build/capture-runtime/` and
+packaging snapshots to `build/capture-package/`; build it with
+`npm run capture:addon` when needed.
+
+### Shared native build lock
+
+The lock is `<git-common-dir>/singz-native-build.lock` for every worktree of a
+repository, independent of `TMPDIR`, `TEMP`, and task scratch directories.
+Exported trees without Git use `<root>/.singz-native-build.lock`. Producers
+validate inherited lock tokens rather than acquiring a second lock. Direct
+native commands (including Gradle and Xcode) must use the same wrapper:
+
+```bash
+node scripts/with-native-build-lock.mjs --owner android-feature -- bash -c 'cd mobile/android && ./gradlew :app:assembleDebug'
+```
+
+Ordinary core/engine producers accept at most four compile edges; capture and
+codec producers retain their stricter limits. Compiler-cache settings stay
+per build as described above. A busy or interrupted lock fails with owner
+information; confirm that owner and its children have stopped before removing
+it. On Windows, interrupted builds retain the lock even after `taskkill /T`
+so the recorded owner/tree can be inspected. Normal direct commands must await
+all descendants before returning. On POSIX, the wrapper forwards signals to
+the complete child process group and retains the lock while that group exists.
+Stop all builds using the old temporary-directory lock scheme before switching
+versions. Never remove a live lock to make a second build start.
+
+### Review in Claude Code and Codex
+
+Bootstrap runs `node scripts/install-git-hooks.cjs`, which installs
+`core.hooksPath=.githooks` and refuses to overwrite an unrelated configuration
+or existing active Git hooks. Installation can also be run separately without
+installing application dependencies. The relative hook path resolves inside
+the active worktree; every participating checkout must contain the hooks.
+
+Before committing, stage the intended files and delegate an independent staged
+diff review using `.claude/agents/code-reviewer.md` in that same checkout. On a
+safe verdict the reviewer writes the staged tree hash to the worktree's
+`singz-reviewed` marker under its Git directory. The Git pre-commit and
+prepare-commit-msg hooks compare that marker against the actual commit index, including alternate indexes used by
+partial commits. Changed staging requires another review. Continuations are
+checked too; `--no-verify` does not skip the prepare-commit-msg guard. Claude's tool hook
+adds earlier feedback, but Git provides the common gate for both clients.
+These are workflow guards, not a security boundary; bypassing them requires
+explicit user authorization under AGENTS.md.
+
+Dependency-free tooling regressions run with `npm run test:tooling`; `npm test`
+also runs them before Vitest, so the checks do not depend on remembering a
+separate command. Fixtures exercise sibling worktrees, different temp roots,
+review markers, corrupt/stale engine receipts, and bootstrap failure modes.
 
 It used to link the whole directory, and that is how a sibling worktree's
 core reached the main checkout during the v0.19.0 cut: `vendor-analyze.sh`
@@ -377,9 +426,9 @@ The safety net for what the mirror cannot reach — a packaged app, an
 `$SINGZ_ANALYZE` override, a hand-copied file — is
 [Which core am I running?](#which-core-am-i-running) below.
 
-What the mirror leaves behind — the per-artifact links inside `vendor/`, and
-the two config links — are still files (symlinks), and a committed `vendor`
-symlink once merged into main and clobbered the real `vendor/` on checkout —
+The two configuration links remain symlinks, while engine snapshots are real
+files. A historical committed `vendor` symlink once merged into main and
+clobbered the real `vendor/` on checkout —
 `.gitignore`'s old `vendor/` pattern only matched the directory form, and
 worktrees branched before that fix still carry the old pattern. (A mirrored
 `vendor/` is matched by both spellings, so it is if anything safer than the
@@ -714,7 +763,7 @@ against a voice that is no longer in it.
 **Stored lyrics still say `source: 'whisper'`** for anything transcribed on
 the device — the label means "transcribed here", lyrics.json, Drive and the
 phones all read it, and renaming it would strand installed phones (see
-`CLAUDE.md`). `engine: 'qwen3-asr-1.7b'` beside it says which recogniser it
+`docs/PROJECT-RULES.md`). `engine: 'qwen3-asr-1.7b'` beside it says which recogniser it
 was, and `AlignMethod` keeps `'whisper'` only so older lyrics.json files read.
 
 **The release build must ship both engines, and says so without taking the
@@ -781,7 +830,7 @@ a push that was stopped.
    `gh release create "$TAG" "${PRE[@]}" --title "$TAG" --notes ""` — still a
    prerelease if the tag is hyphenated, but public, untitled and unnoted, to be
    repaired by hand with `gh release edit`.
-   Notes are user-facing — see CLAUDE.md § Releasing for what belongs in them.
+   Notes are user-facing — see docs/PROJECT-RULES.md § Releasing for what belongs in them.
 3. Regenerate the store text and commit it:
 
    ```bash
