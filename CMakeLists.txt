@@ -129,6 +129,38 @@ get_property(SINGZ_ANDROID_AUDIO_HOST_RT_MANIFEST GLOBAL PROPERTY
   SINGZ_ANDROID_AUDIO_HOST_RT_MANIFEST)
 get_property(SINGZ_ZDSP_RT_MANIFEST GLOBAL PROPERTY SINGZ_ZDSP_RT_MANIFEST)
 
+# Keep the NDK-only compile-first negative policy proof available as a named
+# consumer target even when the app disables SingZ host tools and tests.
+if(ANDROID)
+  string(REGEX REPLACE "^android-" "" _android_fixture_api "${ANDROID_PLATFORM}")
+  if(ANDROID_ABI STREQUAL "arm64-v8a")
+    set(_android_fixture_target "aarch64-none-linux-android${_android_fixture_api}")
+  elseif(ANDROID_ABI STREQUAL "armeabi-v7a")
+    set(_android_fixture_target
+      "armv7-none-linux-androideabi${_android_fixture_api}")
+  elseif(ANDROID_ABI STREQUAL "x86_64")
+    set(_android_fixture_target "x86_64-none-linux-android${_android_fixture_api}")
+  elseif(ANDROID_ABI STREQUAL "x86")
+    set(_android_fixture_target "i686-none-linux-android${_android_fixture_api}")
+  else()
+    message(FATAL_ERROR
+      "Android AudioHost RT negative proof has no target for ${ANDROID_ABI}")
+  endif()
+  add_custom_target(singz_check_android_audio_host_realtime_negative
+    COMMAND "${CMAKE_COMMAND}"
+      "-DSINGZ_ANDROID_AUDIO_HOST_RT_MANIFEST=${SINGZ_ANDROID_AUDIO_HOST_RT_MANIFEST}"
+      "-DSINGZ_ANDROID_AUDIO_HOST_RT_CHECKER=${ZCORE_ROOT}/cmake/CheckAndroidAudioHostRealtime.cmake"
+      "-DSINGZ_ANDROID_AUDIO_HOST_RT_TEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/android-audio-host-rt-negative"
+      "-DSINGZ_ANDROID_AUDIO_HOST_RT_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+      "-DSINGZ_ANDROID_AUDIO_HOST_RT_CXX_COMPILER_ID=${CMAKE_CXX_COMPILER_ID}"
+      "-DSINGZ_ANDROID_AUDIO_HOST_RT_CXX_TARGET=${_android_fixture_target}"
+      "-DSINGZ_ANDROID_AUDIO_HOST_RT_CXX_SYSROOT=${CMAKE_SYSROOT}"
+      "-DSINGZ_ANDROID_AUDIO_HOST_RT_OBJCOPY=${CMAKE_OBJCOPY}"
+      -P "${ZCORE_ROOT}/cmake/TestAndroidAudioHostRealtimePolicy.cmake"
+    VERBATIM
+    COMMENT "Checking Android AudioHost RT negative fixtures with NDK Clang")
+endif()
+
 # Phase iOS-B1's reusable frame-zero playback composition. The strict callback
 # leaf remains separate from file decode, graph construction, host ownership
 # and product bridges. Neither target is linked into a product automatically.
