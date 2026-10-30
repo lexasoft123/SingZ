@@ -62,6 +62,8 @@ async function launch(offline = false) {
   result.install ??= identity
 }
 async function dismissWelcome() {
+  // Required setup closes itself after bundled engine extraction completes.
+  await page.locator('.wizard').waitFor({ state: 'detached' })
   const welcome = page.locator('.quick-start-overlay')
   await welcome.getByRole('button', { name: 'Maybe later', exact: true }).click()
   await welcome.waitFor({ state: 'detached' })
@@ -132,7 +134,6 @@ async function run() {
       const wanted = { x: 50, y: 40, width: 1100, height: 740 }
       await app.evaluate(({ BrowserWindow }, bounds) => BrowserWindow.getAllWindows()[0].setBounds(bounds), wanted)
       await page.waitForFunction(async () => (await window.singz.modelsStatus()).find(m => m.id === 'gpu-splitter')?.present, null, { timeout: 180000 })
-      if (await page.locator('.wizard').count()) await page.locator('.wizard button').filter({ hasText: /^(Skip for now|Close)$/ }).click()
       await dismissWelcome()
       await page.locator('[data-guide="settings"]').click(); await page.getByLabel('Use native DSP playback', { exact: true }).check(); await page.keyboard.press('Escape')
       result.x11BoundsBefore = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getBounds())
@@ -154,7 +155,6 @@ async function run() {
     for (const file of ['singz-capture.node', 'singz-capture.manifest.json', 'singz-analyze', 'llama-server', 'crispasr', 'gpu-splitter-linux-x64.tar.gz']) assert.ok(fs.statSync(path.join(engines, file)).size > 0, file)
     const started = Date.now(); let models
     do { models = await page.evaluate(() => window.singz.modelsStatus()); if (models.find(m => m.id === 'gpu-splitter')?.present) break; assert.ok(Date.now() - started < 180000, 'bundled splitter extraction deadline'); await sleep(500) } while (true)
-    if (await page.locator('.wizard').count()) { const close = page.locator('.wizard button').filter({ hasText: /^(Skip for now|Close)$/ }); if (await close.count()) await close.click() }
     await dismissWelcome()
     result.models = models.map(m => ({ id: m.id, present: m.present })); record('bundled splitter installs without external network')
   })
