@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -139,23 +139,43 @@ describe('scripts/analyze-source-hash.sh', () => {
     const core = join(root, 'zcore')
     const dsp = join(root, 'zdsp')
     const third = join(root, 'third_party', 'native', 'flac', 'src')
-    const engine = join(root, 'third_party', 'zcore')
-    const engineFlac = join(engine, 'third_party', 'native', 'flac', 'src')
     const tools = join(root, 'tools', 'native')
     const cmake = join(root, 'cmake')
-    for (const dir of [core, dsp, third, engine, engineFlac, tools, cmake]) mkdirSync(dir, { recursive: true })
+    for (const dir of [core, dsp, third, tools, cmake]) mkdirSync(dir, { recursive: true })
     mkdirSync(join(root, 'scripts'), { recursive: true })
     writeFileSync(join(core, 'melody.cpp'), '// stand-in\n')
     writeFileSync(join(dsp, 'graph.cpp'), '// stand-in\n')
     writeFileSync(join(third, 'stream_decoder.c'), '/* stand-in */\n')
-    writeFileSync(join(engine, 'zcore-source-manifest.json'), '{"paths":[]}\n')
-    writeFileSync(join(engineFlac, 'stream_decoder.c'), '/* pinned stand-in */\n')
-    writeFileSync(join(root, 'third_party', 'zcore.lock.json'), '{"revision":"test"}\n')
     writeFileSync(join(tools, 'singz-analyze.cpp'), '// stand-in\n')
     writeFileSync(join(cmake, 'SingZRealtimeTarget.cmake'), '# stand-in\n')
     writeFileSync(join(root, 'CMakeLists.txt'), '# stand-in\n')
-    for (const name of ['vendor-analyze.sh', 'analyze-source-hash.sh', 'engine-artifact.cjs', 'ccache-launcher.sh', 'ccache-launcher.ps1', 'import-zcore.py'])
+    for (const name of ['vendor-analyze.sh', 'analyze-source-hash.sh', 'engine-artifact.cjs', 'ccache-launcher.sh', 'ccache-launcher.ps1', 'verify-zcore-submodule.py', 'zcore-gitlink.cjs'])
       copyFileSync(join(ROOT, 'scripts', name), join(root, 'scripts', name))
+
+    const source = join(root, 'zcore-source')
+    mkdirSync(join(source, 'third_party', 'native', 'flac', 'src'), { recursive: true })
+    writeFileSync(join(source, 'CMakeLists.txt'), '# zCore fixture\n')
+    writeFileSync(join(source, 'third_party', 'native', 'flac', 'src', 'stream_decoder.c'),
+      '/* pinned stand-in */\n')
+    const gitEnv = {
+      ...process.env,
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
+      GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+      GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
+      GIT_ALLOW_PROTOCOL: 'file'
+    }
+    const git = (cwd: string, args: string[], localFileProtocol = false) =>
+      execFileSync('git', [
+        ...(localFileProtocol ? ['-c', 'protocol.file.allow=always'] : []),
+        '-C', cwd, ...args
+      ], { encoding: 'utf8', env: gitEnv, stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+    git(source, ['init', '-q'])
+    git(source, ['add', '.'])
+    git(source, ['commit', '-qm', 'fixture zCore'])
+    git(root, ['init', '-q'])
+    git(root, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+      'submodule', 'add', source, 'third_party/zcore'], true)
     return root
   }
   const hashOf = async (root: string): Promise<string> =>
@@ -175,6 +195,19 @@ describe('scripts/analyze-source-hash.sh', () => {
     expect(before).toMatch(/^[0-9a-f]{40}$/)
     const flac = join(root, 'third_party', 'zcore', 'third_party', 'native', 'flac', 'src', 'stream_decoder.c')
     writeFileSync(flac, '/* stand-in */\n/* patched upstream */\n')
+    const gitEnv = {
+      ...process.env,
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
+      GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+      GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid'
+    }
+    const git = (args: string[]) => execFileSync('git', ['-C', join(root, 'third_party', 'zcore'), ...args],
+      { encoding: 'utf8', env: gitEnv, stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+    git(['add', 'third_party/native/flac/src/stream_decoder.c'])
+    git(['commit', '-qm', 'change fixture FLAC'])
+    execFileSync('git', ['-C', root, 'add', 'third_party/zcore'],
+      { env: gitEnv, stdio: 'ignore' })
     expect(await hashOf(root)).not.toBe(before)
   })
 

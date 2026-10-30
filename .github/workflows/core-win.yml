@@ -21,9 +21,10 @@ on:
       - 'zdsp/**'
       - 'native/playback/**'
       - 'third_party/native/**'
+      - '.gitmodules'
+      - 'third_party/zcore'
       - 'third_party/zcore/**'
-      - 'third_party/zcore.lock.json'
-      - 'scripts/import-zcore.py'
+      - 'scripts/verify-zcore-submodule.py'
       - 'tools/native/**'
       - 'tests/native/**'
       - '.github/workflows/core-win.yml'
@@ -40,6 +41,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Configure
         run: cmake -S . -B build
       - name: Build

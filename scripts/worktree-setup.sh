@@ -19,7 +19,7 @@ if [ "$#" -gt 1 ] || { [ -n "$MODE" ] && [ "$MODE" != "--desktop-only" ]; }; the
   exit 2
 fi
 # Fail before deleting dependencies or changing provisioning links.
-for tool in node npm cmake git; do
+for tool in node npm cmake git python3; do
   command -v "$tool" >/dev/null 2>&1 || { echo "FATAL: required tool missing: $tool" >&2; exit 1; }
 done
 if [ "$MODE" != "--desktop-only" ] && [ "$(uname)" = Darwin ]; then
@@ -32,6 +32,33 @@ if [ -z "${SINGZ_NATIVE_BUILD_LOCK_HELD:-}" ]; then
   exec node "$WT/scripts/with-native-build-lock.mjs" --owner worktree-setup -- bash "$WT/scripts/worktree-setup.sh" "$@"
 fi
 node "$WT/scripts/assert-native-build-lock.cjs"
+
+# The audio engine is a public, pinned git submodule. Initialize it before any
+# dependency checks, fingerprints or native mirror generation. Refuse a flat
+# payload or a dirty child rather than letting Git replace user work.
+initialize_zcore_submodule() {
+  local relative=third_party/zcore child="$WT/third_party/zcore" entries count
+  entries=$(git -C "$WT" ls-files --stage -- "$relative")
+  count=$(printf '%s\n' "$entries" | awk '$1 == "160000" && $3 == "0" { n++ } END { print n+0 }')
+  if [ "$count" -ne 1 ]; then
+    echo "FATAL: $relative must be one stage-0 git submodule entry before setup." >&2
+    echo "       Initialize the declared submodule in a real Git checkout; setup will not replace a flat payload." >&2
+    exit 1
+  fi
+  if [ -e "$child/.git" ]; then
+    if [ -n "$(git -C "$child" status --porcelain --untracked-files=all)" ]; then
+      echo "FATAL: $relative has tracked, staged, or untracked changes; preserve them before updating the submodule." >&2
+      exit 1
+    fi
+  elif [ -d "$child" ] && find "$child" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+    echo "FATAL: $relative contains files but is not an initialized Git submodule; setup will not overwrite this directory." >&2
+    exit 1
+  fi
+  git -C "$WT" submodule sync --recursive -- "$relative"
+  git -C "$WT" submodule update --init --recursive -- "$relative"
+  python3 "$WT/scripts/verify-zcore-submodule.py" --root "$WT" --path "$relative" >/dev/null
+}
+initialize_zcore_submodule
 node "$WT/scripts/install-git-hooks.cjs"
 MAIN="$(git -C "$WT" worktree list --porcelain | sed -n '1s/^worktree //p')"
 

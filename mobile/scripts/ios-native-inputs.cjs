@@ -4,7 +4,7 @@ const path = require('node:path')
 const crypto = require('node:crypto')
 const os = require('node:os')
 const { execFileSync } = require('node:child_process')
-function nativeInputs(repo, cacheRoot = process.env.SINGZ_IOS_NATIVE_CACHE || path.join(os.homedir(), 'Library/Caches/SingZ/ios-native-archives'), toolchain = '') {
+function nativeInputs(repo, cacheRoot = process.env.SINGZ_IOS_NATIVE_CACHE || path.join(os.homedir(), 'Library/Caches/SingZ/ios-native-archives'), toolchain = '', options = {}) {
   const cacheFile = path.join(cacheRoot, 'input-digests.json')
   const extensions = /\.(?:h|hpp|inc|inl|def|c|cpp|cc|m|mm|swift|a|dylib|xcconfig|pbxproj|plist|entitlements|xcprivacy|xcworkspacedata|xcscheme|podspec|rb|sh|js|json|yaml|yml|ts|tsx|bin|onnx|modulemap|tbd|png|jpg|jpeg|pdf|strings|txt|cmake|storyboard|xib)$/i
   const eligibleFile = relative => extensions.test(relative) || /\.framework\//.test(relative) ||
@@ -46,12 +46,27 @@ function nativeInputs(repo, cacheRoot = process.env.SINGZ_IOS_NATIVE_CACHE || pa
     return pod && installedPods && !installedPods.has(pod)
   }
   const roots = ['mobile/ios', 'mobile/node_modules', 'mobile/native', 'zcore', 'zdsp', 'third_party', 'assets/pitch']
+  const gitmodules = path.join(repo, '.gitmodules')
+  const verifier = path.join(repo, 'scripts/verify-zcore-submodule.py')
+  let zcoreRevision = 'no-zcore-submodule'
+  if (fs.existsSync(gitmodules)) {
+    zcoreRevision = options.zcoreRevision ?? execFileSync('python3', [
+      verifier,
+      '--root', repo,
+      '--path', 'third_party/zcore',
+      '--print-revision',
+    ], { cwd: repo, encoding: 'utf8' }).trim()
+    if (!/^[0-9a-f]{40,64}$/i.test(zcoreRevision)) {
+      throw new Error(`zCore submodule verifier returned an invalid revision: ${zcoreRevision}`)
+    }
+  }
   let previous = {}
   try { previous = JSON.parse(fs.readFileSync(cacheFile, 'utf8')) } catch {}
   const next = {}
   const files = []
   const visited = new Set()
   function walk(relative) {
+    if (relative.split(/[\\/]/).includes('.git')) return
     const file = path.join(repo, relative)
     if (dependencyBuildOutput(relative) || stalePodMetadata(relative) || !fs.existsSync(file)) return
     const stat = fs.lstatSync(file)
@@ -75,10 +90,11 @@ function nativeInputs(repo, cacheRoot = process.env.SINGZ_IOS_NATIVE_CACHE || pa
     } else if (eligibleFile(relative)) files.push(relative)
   }
   for (const root of roots) walk(root)
-  for (const file of ['package.json', 'package-lock.json', 'mobile/package.json', 'mobile/package-lock.json', 'mobile/react-native.config.js', 'mobile/ios/Podfile', 'mobile/ios/Podfile.lock', 'mobile/ios/.xcode.env', 'mobile/ios/.xcode.env.local']) {
+  for (const file of ['.gitmodules', 'scripts/verify-zcore-submodule.py', 'scripts/zcore-gitlink.cjs', 'package.json', 'package-lock.json', 'mobile/package.json', 'mobile/package-lock.json', 'mobile/react-native.config.js', 'mobile/ios/Podfile', 'mobile/ios/Podfile.lock', 'mobile/ios/.xcode.env', 'mobile/ios/.xcode.env.local']) {
     if (fs.existsSync(path.join(repo, file))) files.push(file)
   }
-  const hash = crypto.createHash('sha256').update('singz-native-archive-v6\n').update(toolchain).update('\n')
+  const hash = crypto.createHash('sha256').update('singz-native-archive-v7\n').update(toolchain).update('\n')
+    .update('verified-zcore-gitlink\0').update(zcoreRevision).update('\n')
   for (const relative of [...new Set(files)].sort()) {
     const file = path.join(repo, relative)
     const stat = fs.lstatSync(file)

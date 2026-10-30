@@ -80,7 +80,7 @@ set(SINGZ_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 set(ZCORE_ROOT "${SINGZ_REPO_ROOT}/third_party/zcore")
 if(NOT EXISTS "${ZCORE_ROOT}/CMakeLists.txt")
   message(FATAL_ERROR
-    "zCore sources are missing. Run scripts/import-zcore.py with the pinned revision.")
+    "zCore submodule sources are missing. Initialize them with: git submodule update --init -- third_party/zcore")
 endif()
 # Product builds compile the verified canonical sources even when a previous
 # local build cache contains temporary zCore overlay paths.
@@ -95,9 +95,9 @@ set(ZCORE_BUILD_BENCHMARKS OFF CACHE BOOL "Build zCore benchmarks from SingZ" FO
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 execute_process(
   COMMAND "${Python3_EXECUTABLE}"
-    "${ZCORE_ROOT}/scripts/verify-zcore.py"
-    --root "${ZCORE_ROOT}"
-    --lock "${SINGZ_REPO_ROOT}/third_party/zcore.lock.json"
+    "${SINGZ_REPO_ROOT}/scripts/verify-zcore-submodule.py"
+    --root "${SINGZ_REPO_ROOT}"
+    --path third_party/zcore
   RESULT_VARIABLE _zcore_verify_status
   OUTPUT_VARIABLE _zcore_verify_stdout
   ERROR_VARIABLE _zcore_verify_stderr)
@@ -107,11 +107,10 @@ if(NOT _zcore_verify_status EQUAL 0)
 endif()
 include(cmake/SingZFfmpegTarget.cmake)
 add_subdirectory(third_party/zcore)
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-  "${SINGZ_REPO_ROOT}/third_party/zcore.lock.json" "${ZCORE_ROOT}/zcore-source-manifest.json")
 add_custom_target(singz_verify_zcore ALL
-  COMMAND "${Python3_EXECUTABLE}" "${ZCORE_ROOT}/scripts/verify-zcore.py"
-    --root "${ZCORE_ROOT}" --lock "${SINGZ_REPO_ROOT}/third_party/zcore.lock.json"
+  COMMAND "${Python3_EXECUTABLE}"
+    "${SINGZ_REPO_ROOT}/scripts/verify-zcore-submodule.py"
+    --root "${SINGZ_REPO_ROOT}" --path third_party/zcore
   VERBATIM COMMENT "Verifying pinned zCore source snapshot")
 get_property(_zcore_targets DIRECTORY "${ZCORE_ROOT}" PROPERTY BUILDSYSTEM_TARGETS)
 foreach(_target IN LISTS _zcore_targets)

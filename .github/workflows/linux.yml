@@ -47,6 +47,15 @@ jobs:
       SINGZ_E2E_AUDIO: browser
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Verify zCore revision for native output cache
+        id: zcore
+        shell: bash
+        run: |
+          revision=$(python3 scripts/verify-zcore-submodule.py --root "$GITHUB_WORKSPACE" --path third_party/zcore --print-revision)
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -78,7 +87,7 @@ jobs:
           # Existence skip guards mean only an exact input key is safe here.
           # Do not add a prefix fallback for compiled/downloaded outputs.
           # CI orchestration does not change engine artifact inputs.
-          key: linux-engines-debian13-clang21-v1-${{ hashFiles('package-lock.json', 'scripts/**', '!scripts/ci/**', 'CMakeLists.txt', 'cmake/**', 'native/**', 'zcore/**', 'zdsp/**', 'tools/native/**', 'third_party/native/**', 'third_party/zcore/**', 'third_party/zcore.lock.json') }}
+          key: linux-engines-debian13-clang21-v1-${{ hashFiles('package-lock.json', 'scripts/**', '!scripts/ci/**', 'CMakeLists.txt', '.gitmodules', 'scripts/verify-zcore-submodule.py', 'scripts/zcore-gitlink.cjs', 'cmake/**', 'native/**', 'zcore/**', 'zdsp/**', 'tools/native/**', 'third_party/native/**', 'third_party/zcore/**') }}-${{ steps.zcore.outputs.revision }}
 
       - name: Restore compiler objects
         id: compiler-cache

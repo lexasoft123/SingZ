@@ -202,7 +202,8 @@ Contributor docs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
 ### Shared audio foundation
 
 SingZ and LoopZ share **zCore**, an independently maintained native audio
-foundation. This checkout contains its exact, verified source snapshot in
-`third_party/zcore`; builds require no sibling repository or network
-fetch. See [the development workflow](docs/DEVELOPMENT.md#shared-audio-engine-zcore)
+foundation. This checkout pins it as a Git submodule at `third_party/zcore`.
+Builds verify the parent gitlink and clean child checkout without fetching a
+floating branch. Initialize it with `git submodule update --init -- third_party/zcore`.
+See [the development workflow](docs/DEVELOPMENT.md#shared-audio-engine-zcore)
 for updating the pinned dependency.

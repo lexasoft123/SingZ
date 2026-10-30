@@ -1155,25 +1155,29 @@ Field laptops (QHD+ panel + weak iGPU) taught these; keep them:
 ## Shared audio engine (zCore)
 
 The reusable C++ audio foundation is maintained in the independent **zCore**
-project. SingZ consumes a checked-in source snapshot under
-`third_party/zcore`, pinned by `third_party/zcore.lock.json`.
-Normal desktop, Android and iOS builds verify and use this snapshot offline;
-they never discover a sibling checkout or fetch a floating branch.
+project. SingZ pins it as a Git submodule at `third_party/zcore`. The parent
+repository records the exact zCore commit as a mode-160000 gitlink; the build
+verifier checks the index pin, the initialized child repository, matching
+`HEAD`, and a clean child worktree. Builds use only the checked-out submodule
+and never fetch a floating branch.
 
 Make shared DSP/device/media changes in zCore, run its standalone tests, and
-commit the reviewed change there. Update the SingZ snapshot explicitly with the
+publish the reviewed commit. Then update the SingZ gitlink explicitly to the
 full zCore commit SHA:
 
 ```sh
-python3 third_party/zcore/scripts/import-zcore.py \
-  --source ../zCore --revision <full-commit-sha> \
-  --destination third_party/zcore \
-  --lock third_party/zcore.lock.json --repository-url zCore
+git -C third_party/zcore fetch origin
+git -C third_party/zcore checkout --detach <full-commit-sha>
+git add third_party/zcore
+python3 scripts/verify-zcore-submodule.py --root . --path third_party/zcore
 node mobile/scripts/sync-singzcore.js
 node mobile/scripts/sync-singz-dsp-runtime.js
 ```
 
-Treat the snapshot as a dependency: do not patch its files directly. Product
+If a fresh checkout has no child repository yet, initialize it with
+`git submodule update --init -- third_party/zcore`. The parent-side verifier is
+offline and read-only; it reports that command when the child is unavailable.
+Treat the submodule as a dependency: do not patch its files directly. Product
 playback/session composition, detector/ML adapters and UI remain in SingZ.
 LoopZ consumes the same zCore project with media/analysis components disabled.
 Its dependency pin can advance independently after integration checks.

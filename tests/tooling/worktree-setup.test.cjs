@@ -4,6 +4,7 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const { execFileSync, spawnSync } = require('node:child_process')
+const { pathToFileURL } = require('node:url')
 const source = path.resolve(__dirname, '../..')
 const setupSource = process.env.SINGZ_TEST_SETUP_SCRIPT || path.join(source, 'scripts/worktree-setup.sh')
 const shellTests = process.platform === 'win32' ? { skip: 'POSIX bootstrap requires bash and POSIX provisioning links' } : {}
@@ -16,9 +17,29 @@ function fixture(t) {
   git(main, 'init', '-q'); git(main, 'config', 'user.name', 'Fixture'); git(main, 'config', 'user.email', 'fixture@example.invalid')
   fs.writeFileSync(path.join(main, '.gitignore'), 'vendor\nnode_modules\n')
   git(main, 'add', '.gitignore'); git(main, '-c', 'core.hooksPath=', 'commit', '-qm', 'fixture')
+  // A tiny local-only zCore submodule exercises real Gitlink initialization
+  // without contacting GitHub. The consumer metadata still names the public
+  // URL; a scoped local insteadOf rule redirects this fixture to its bare repo.
+  const moduleSource = path.join(dir, 'zcore-source'), moduleOrigin = path.join(dir, 'zcore-origin.git')
+  fs.mkdirSync(moduleSource)
+  git(moduleSource, 'init', '-q'); git(moduleSource, 'config', 'user.name', 'Fixture'); git(moduleSource, 'config', 'user.email', 'fixture@example.invalid')
+  fs.writeFileSync(path.join(moduleSource, 'README.md'), 'fixture zCore submodule\n')
+  git(moduleSource, 'add', 'README.md'); git(moduleSource, '-c', 'core.hooksPath=', 'commit', '-qm', 'zCore fixture')
+  const moduleRevision = git(moduleSource, 'rev-parse', 'HEAD')
+  execFileSync('git', ['clone', '--bare', '-q', moduleSource, moduleOrigin])
+  fs.writeFileSync(path.join(main, '.gitmodules'), '[submodule "third_party/zcore"]\n\tpath = third_party/zcore\n\turl = https://github.com/lexasoft123/zCore.git\n')
+  git(main, 'add', '.gitmodules')
+  git(main, '-c', 'core.hooksPath=', 'commit', '-qm', 'declare zCore fixture')
+  git(main, 'update-index', '--add', '--cacheinfo', `160000,${moduleRevision},third_party/zcore`)
+  git(main, 'config', 'protocol.file.allow', 'always')
+  git(main, 'config', `url.${pathToFileURL(moduleOrigin).href}.insteadOf`, 'https://github.com/lexasoft123/zCore.git')
+  git(main, '-c', 'core.hooksPath=', 'commit', '-qm', 'pin zCore fixture')
   git(main, 'worktree', 'add', '--detach', root)
+  fs.mkdirSync(path.join(root, 'third_party'), { recursive: true })
+  execFileSync('git', ['clone', '--no-checkout', '-q', moduleOrigin, path.join(root, 'third_party/zcore')])
+  git(path.join(root, 'third_party/zcore'), 'checkout', '--detach', moduleRevision)
   fs.mkdirSync(path.join(root, 'scripts')); fs.mkdirSync(path.join(root, '.githooks')); fs.mkdirSync(path.join(root, 'mobile/android'), { recursive: true })
-  for (const name of ['native-build-lock.cjs', 'with-native-build-lock.mjs', 'assert-native-build-lock.cjs', 'install-git-hooks.cjs', 'check-staged-review.cjs'])
+  for (const name of ['native-build-lock.cjs', 'with-native-build-lock.mjs', 'assert-native-build-lock.cjs', 'install-git-hooks.cjs', 'check-staged-review.cjs', 'verify-zcore-submodule.py'])
     fs.copyFileSync(path.join(source, 'scripts', name), path.join(root, 'scripts', name))
   for (const name of fs.readdirSync(path.join(source, '.githooks')))
     fs.copyFileSync(path.join(source, '.githooks', name), path.join(root, '.githooks', name))
@@ -64,7 +85,7 @@ test('bootstrap rejects unsupported modes before modifying dependencies or Git c
 test('macOS mobile setup refuses missing CocoaPods before npm ci', shellTests, t => {
   const f = fixture(t), isolated = path.join(f.dir, 'no-pod-bin')
   fs.mkdirSync(isolated)
-  for (const name of ['bash', 'dirname', 'git', 'node', 'head', 'sed']) {
+  for (const name of ['bash', 'dirname', 'git', 'node', 'head', 'sed', 'python3']) {
     const executable = execFileSync('/bin/sh', ['-c', `command -v ${name}`], { encoding: 'utf8' }).trim()
     fs.symlinkSync(executable, path.join(isolated, name))
   }
@@ -74,6 +95,17 @@ test('macOS mobile setup refuses missing CocoaPods before npm ci', shellTests, t
   assert.match(result.stderr, /CocoaPods is required/)
   assert.equal(fs.existsSync(path.join(f.root, 'node_modules')), false)
 })
+
+test('bootstrap refuses and preserves a dirty zCore submodule before dependency setup', shellTests, t => {
+  const f = fixture(t), child = path.join(f.root, 'third_party/zcore')
+  fs.writeFileSync(path.join(child, 'README.md'), 'user edit\n')
+  const result = f.run(['--desktop-only'])
+  assert.equal(result.status, 1, result.stderr + result.stdout)
+  assert.match(result.stderr, /has tracked, staged, or untracked changes/)
+  assert.equal(fs.readFileSync(path.join(child, 'README.md'), 'utf8'), 'user edit\n')
+  assert.equal(fs.existsSync(path.join(f.root, 'node_modules')), false)
+})
+
 test('desktop setup locks npm, installs hooks, verifies local analyzer, and snapshots only valid engines', shellTests, t => {
   const f = fixture(t), target = `${process.platform}-${process.arch}`
   const mainVendor = path.join(f.main, 'vendor', target), localVendor = path.join(f.root, 'vendor', target)
@@ -85,6 +117,8 @@ test('desktop setup locks npm, installs hooks, verifies local analyzer, and snap
   fs.mkdirSync(path.join(f.main, 'vendor/packs'), { recursive: true })
   let result = f.run(['--desktop-only'])
   assert.equal(result.status, 0, result.stderr + result.stdout)
+  assert.equal(f.git(path.join(f.root, 'third_party/zcore'), 'rev-parse', 'HEAD'), f.git(f.root, 'ls-files', '--stage', 'third_party/zcore').split(' ')[1])
+  assert.equal(f.git(path.join(f.root, 'third_party/zcore'), 'status', '--porcelain', '--untracked-files=all'), '')
   assert.match(result.stdout, /Mobile was not provisioned/)
   assert.equal(f.git(f.root, 'config', '--get', 'core.hooksPath'), '.githooks')
   assert.equal(fs.lstatSync(path.join(localVendor, 'llama-server')).isSymbolicLink(), false)

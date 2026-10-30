@@ -21,8 +21,10 @@ on:
       - 'zcore/**'
       - 'zdsp/**'
       - 'third_party/native/**'
+      - '.gitmodules'
+      - 'third_party/zcore'
       - 'third_party/zcore/**'
-      - 'third_party/zcore.lock.json'
+      - 'scripts/verify-zcore-submodule.py'
       - 'tools/native/**'
       - '.github/workflows/android.yml'
       - '.github/actions/mobile-build-cache/**'
@@ -60,8 +62,10 @@ on:
       - 'zcore/**'
       - 'zdsp/**'
       - 'third_party/native/**'
+      - '.gitmodules'
+      - 'third_party/zcore'
       - 'third_party/zcore/**'
-      - 'third_party/zcore.lock.json'
+      - 'scripts/verify-zcore-submodule.py'
       - 'tools/native/**'
       - '.github/workflows/android.yml'
       - '.github/actions/mobile-build-cache/**'
@@ -129,6 +133,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: actions/setup-node@v4
         with:
@@ -334,6 +340,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: actions/setup-java@v4
         with:
@@ -564,6 +572,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: ruby/setup-ruby@v1
         with:

@@ -3,6 +3,3 @@
 
 # Compiler/bootstrap shell launchers must also execute in CRLF-configured checkouts.
 *.sh text eol=lf
-
-# Preserve the exact hash-locked shared source bytes on every platform.
-third_party/zcore/** -text

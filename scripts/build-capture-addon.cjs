@@ -16,6 +16,7 @@ const { createHash } = require('node:crypto')
 const { get } = require('node:https')
 const { basename, dirname, join, relative, resolve } = require('node:path')
 const { spawnSync } = require('node:child_process')
+const { zcoreGitlinkRevision } = require('./zcore-gitlink.cjs')
 const {
   assertHostCanBuildTarget,
   assertSourceFingerprintUnchanged,
@@ -246,9 +247,11 @@ function extractHeaders(archivePath, cwd, extract = run) {
 // identity. Keep this byte-for-byte equivalent to captureSourceFingerprint()
 // in src/main/capture.ts; a unit test compares both implementations.
 function sourceFingerprint() {
+  const zcoreRevision = zcoreGitlinkRevision(root)
   const files = []
   const walk = (dir) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === '.git') continue
       const path = join(dir, entry.name)
       if (entry.isDirectory()) walk(path)
       else files.push(path)
@@ -260,13 +263,15 @@ function sourceFingerprint() {
   ]) {
     walk(join(root, dir))
   }
-  files.push(join(root, 'CMakeLists.txt'), join(root, 'scripts/ccache-launcher.sh'),
-    join(root, 'scripts/ccache-launcher.ps1'),
-    join(root, 'third_party', 'zcore.lock.json'),
-    join(root, 'scripts', 'import-zcore.py'), __filename)
+  files.push(join(root, 'CMakeLists.txt'), join(root, '.gitmodules'),
+    join(root, 'scripts', 'verify-zcore-submodule.py'),
+    join(root, 'scripts', 'zcore-gitlink.cjs'),
+    join(root, 'scripts/ccache-launcher.sh'),
+    join(root, 'scripts/ccache-launcher.ps1'), __filename)
   files.sort()
   const hash = createHash('sha1')
   hash.update(`electron ${electronVersion}\n`)
+  hash.update(`third_party/zcore.gitlink ${zcoreRevision}\n`)
   for (const file of files) {
     hash.update(`${relative(root, file)} ${statSync(file).size} `)
     hash.update(createHash('sha1').update(readFileSync(file)).digest('hex'))
