@@ -908,6 +908,7 @@ private_lane :archive do |options|
   archive_path = File.join(REPO_ROOT, "build-ios/SingZ-native.xcarchive")
   native_inputs = nil
   begin
+    SingzIncrementalArchive.prepare_release_dependencies(REPO_ROOT)
     native_inputs = SingzIncrementalArchive.fingerprint(REPO_ROOT)
   rescue => error
     UI.important("Native cache unavailable; using full archive: #{error.message}")

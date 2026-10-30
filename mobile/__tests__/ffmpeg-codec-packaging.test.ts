@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import os from 'node:os';
@@ -415,3 +416,73 @@ describe('FFmpeg codec product packaging', () => {
     expect(capture).toContain('codecRuntime');
   });
 });
+
+/** Run the real verifier with only the requested platform installed. */
+const createCompatibilityVerifierFixture = (platform: 'ios' | 'x86_64') => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'singz-compat-verifier-'));
+  const dependency = path.join(root, 'mobile/node_modules/react-native-audio-api');
+  const thirdParty = path.join(root, 'third_party');
+  fs.mkdirSync(path.join(thirdParty, 'ffmpeg-codec'), { recursive: true });
+  for (const file of ['NOTICE-FFMPEG.md', 'COPYING.LGPLv2.1-FFMPEG']) {
+    fs.copyFileSync(path.join(repoRoot, 'third_party', file), path.join(thirdParty, file));
+  }
+  fs.copyFileSync(path.join(repoRoot, 'third_party/ffmpeg-codec/profile.json'),
+    path.join(thirdParty, 'ffmpeg-codec/profile.json'));
+  const rows: string[] = [];
+  const libraries: string[] = [];
+  for (const component of ['avcodec', 'avformat', 'avutil', 'swresample']) {
+    const relative = platform === 'ios'
+      ? `common/cpp/audioapi/external/ffmpeg_ios/lib${component}.xcframework/ios-arm64/lib${component}.framework/lib${component}`
+      : `android/src/main/jniLibs/x86_64/lib${component}.so`;
+    const header = Buffer.alloc(32);
+    if (platform === 'ios') {
+      header.writeUInt32LE(0xfeedfacf, 0);
+      header.writeUInt32LE(6, 12); // MH_DYLIB
+    } else {
+      header.write('\x7fELF', 0, 'ascii'); header[5] = 1;
+      header.writeUInt16LE(3, 16); // ET_DYN
+    }
+    const bytes = Buffer.concat([header, Buffer.from(
+      "--enable-demuxer='wav' --enable-decoder='pcm_s16le' --enable-parser='none'\0")]);
+    const artifact = path.join(dependency, relative);
+    fs.mkdirSync(path.dirname(artifact), { recursive: true }); fs.writeFileSync(artifact, bytes);
+    libraries.push(artifact);
+    rows.push(`${createHash('sha256').update(bytes).digest('hex')}  ${relative}`);
+    // The unrequested ABI is pinned but deliberately absent.
+    rows.push(`${'0'.repeat(64)}  android/src/main/jniLibs/arm64-v8a/lib${component}.so`);
+  }
+  fs.writeFileSync(path.join(thirdParty, 'FFMPEG-SHA256SUMS'), rows.join('\n') + '\n');
+  for (const [file, macro, major] of [
+    ['libavcodec/version_major.h', 'LIBAVCODEC_VERSION_MAJOR', 62],
+    ['libavformat/version_major.h', 'LIBAVFORMAT_VERSION_MAJOR', 62],
+    ['libavutil/version.h', 'LIBAVUTIL_VERSION_MAJOR', 60],
+    ['libswresample/version_major.h', 'LIBSWRESAMPLE_VERSION_MAJOR', 6],
+  ] as const) {
+    const target = path.join(dependency, 'common/cpp/audioapi/external/include_ffmpeg', file);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, `#define ${macro} ${major}\n`);
+  }
+  return { root, libraries };
+};
+
+for (const platform of ['ios', 'x86_64'] as const) {
+  test(`compatibility configuration reads only verified ${platform} libraries`, () => {
+    const fixture = createCompatibilityVerifierFixture(platform);
+    const args = platform === 'ios' ? ['--require-ios'] : ['--require-android', 'x86_64'];
+    const verify = () => spawnSync(process.execPath,
+      [path.join(mobileRoot, 'scripts/verify-ffmpeg-codec-runtime.mjs'), ...args, '--require-full'], {
+        cwd: repoRoot, encoding: 'utf8',
+        env: { ...process.env, SINGZ_CODEC_SELECTION_ROOT: fixture.root, SINGZ_FFMPEG_CODECS: 'auto' },
+      });
+    try {
+      const result = verify();
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('FFmpeg compatibility runtime verified: 4 dynamic binaries');
+      expect(result.stdout).toContain('full matrix is missing');
+      fs.appendFileSync(fixture.libraries[0], 'changed');
+      const corrupt = verify();
+      expect(corrupt.status).not.toBe(0);
+      expect(corrupt.stderr).toContain('FFmpeg checksum mismatch');
+    } finally { fs.rmSync(fixture.root, { recursive: true, force: true }); }
+  });
+}

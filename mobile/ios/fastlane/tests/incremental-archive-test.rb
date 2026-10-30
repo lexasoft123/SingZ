@@ -5,7 +5,7 @@ require_relative '../incremental-archive'
 
 class IncrementalArchiveTest < Minitest::Test
   CACHE = SingzIncrementalArchive
-  SETTINGS = %w[SINGZ_IOS_NATIVE_CACHE SINGZ_IOS_NATIVE_CACHE_MAX_ENTRIES SINGZ_IOS_NATIVE_CACHE_MAX_BYTES SINGZ_IOS_NATIVE_CACHE_MAX_AGE_DAYS SINGZ_IOS_NATIVE_CACHE_PINNED].freeze
+  SETTINGS = %w[SINGZ_IOS_NATIVE_CACHE SINGZ_IOS_NATIVE_CACHE_MAX_ENTRIES SINGZ_IOS_NATIVE_CACHE_MAX_BYTES SINGZ_IOS_NATIVE_CACHE_MAX_AGE_DAYS SINGZ_IOS_NATIVE_CACHE_PINNED SINGZ_SIGNING_KEYCHAIN_PATH GITHUB_ACTIONS].freeze
 
   def setup
     @temporary = Dir.mktmpdir('singz-ios-cache-test-')
@@ -159,4 +159,99 @@ class IncrementalArchiveTest < Minitest::Test
       assert File.directory?(CACHE.cached_archive(key))
     end
   end
+  def test_refresh_pins_local_signing_to_the_dedicated_keychain
+    archive = make_archive('a' * 64)
+    calls = []
+    success = Struct.new(:success?).new(true)
+    ENV['SINGZ_SIGNING_KEYCHAIN_PATH'] = File.join(@temporary, 'singz-ios-signing.keychain-db')
+    replace_method(Open3, :capture3, ->(*args) { calls << args; ['', '', success] }) do
+      CACHE.refresh(@temporary, archive, '120', 'Apple Distribution')
+    end
+    signing = calls.find { |args| args.first == '/usr/bin/codesign' }
+    assert_equal ENV['SINGZ_SIGNING_KEYCHAIN_PATH'], signing[signing.index('--keychain') + 1]
+    ENV.delete('SINGZ_SIGNING_KEYCHAIN_PATH')
+    calls.clear
+    replace_method(Open3, :capture3, ->(*args) { calls << args; ['', '', success] }) do
+      assert_raises(ArgumentError) { CACHE.refresh(@temporary, archive, '121', 'Apple Distribution') }
+    end
+    assert_empty calls, 'missing local signing configuration must fail before bundling or signing'
+    ENV['GITHUB_ACTIONS'] = 'true'
+    replace_method(Open3, :capture3, ->(*args) { calls << args; ['', '', success] }) do
+      CACHE.refresh(@temporary, archive, '122', 'Apple Distribution')
+    end
+    refute_includes calls.find { |args| args.first == '/usr/bin/codesign' }, '--keychain'
+  end
+
+  def test_release_dependency_plan_uses_installed_target_phases_only
+    phase = Struct.new(:display_name, :shell_path, :shell_script)
+    target = Struct.new(:name, :shell_script_build_phases)
+    project = Struct.new(:targets).new([
+      target.new('React-Core-prebuilt', [
+        phase.new('select core', '/bin/sh', 'node "$REACT_NATIVE_PATH/scripts/replace-rncore-version.js" -r installed-core-version'),
+        phase.new('copy framework', '/bin/sh', 'copy framework')
+      ]),
+      target.new('ReactNativeDependencies', [
+        phase.new('select dependencies', '/bin/sh', 'node replace_dependencies_version.js -r installed-deps-version')
+      ]),
+      target.new('hermes-engine', [
+        phase.new('select hermes', '/bin/sh', 'node replace_hermes_version.js -r installed-hermes-version')
+      ]),
+      target.new('unrelated', [phase.new('unrelated selector', '/bin/sh', 'node replace-rncore-version.js')]),
+      target.new('React-Core', [])
+    ])
+    plan = CACHE.release_dependency_phases(@temporary, project: project)
+    assert_equal ['React-Core-prebuilt', 'ReactNativeDependencies', 'hermes-engine'], plan.map { |row| row[:target] }
+    assert_equal ['select core', 'select dependencies', 'select hermes'], plan.map { |row| row[:name] }
+    assert_includes plan.first[:script], 'installed-core-version'
+  end
+
+  def test_preparing_release_stabilizes_fresh_debug_and_existing_release_inputs
+    pods = File.join(@temporary, 'mobile/ios/Pods')
+    FileUtils.mkdir_p(pods)
+    artifact = File.join(pods, 'prebuilt-framework')
+    # An installed selector chooses its framework based on Xcode's defines.
+    # The helper must explicitly supply Release inputs and the Pods cwd.
+    script = <<~SH
+      test "$(pwd -P)" = "$(cd "$PODS_ROOT" && pwd -P)" || exit 7
+      test "$PROJECT_DIR" = "$PODS_ROOT" || exit 8
+      test "$CONFIGURATION" = Release || exit 9
+      test -n "$REACT_NATIVE_PATH" || exit 10
+      test -n "$NODE_BINARY" || exit 11
+      if echo "$GCC_PREPROCESSOR_DEFINITIONS" | grep -q 'DEBUG=1'; then
+        printf Debug > prebuilt-framework
+      else
+        printf Release > prebuilt-framework
+      fi
+      echo selected framework
+    SH
+    plan = [{ target: 'installed-selector', name: 'select framework', shell: '/bin/sh', script: script }]
+    before = ENV['GCC_PREPROCESSOR_DEFINITIONS']
+    ENV['GCC_PREPROCESSOR_DEFINITIONS'] = 'DEBUG=1'
+    replace_method(CACHE, :release_dependency_phases, ->(_repo) { plan }) do
+      File.write(artifact, 'Debug')
+      assert_equal 1, CACHE.prepare_release_dependencies(@temporary)
+      first = Digest::SHA256.file(artifact).hexdigest
+      assert_equal 'Release', File.read(artifact)
+      assert_equal 1, CACHE.prepare_release_dependencies(@temporary)
+      assert_equal first, Digest::SHA256.file(artifact).hexdigest
+      assert_includes File.read(File.join(@temporary, 'build-ios/native-dependency-preparation.log')), 'selected framework'
+    end
+  ensure
+    before ? ENV['GCC_PREPROCESSOR_DEFINITIONS'] = before : ENV.delete('GCC_PREPROCESSOR_DEFINITIONS')
+  end
+
+  def test_release_preparation_forwards_failure_and_records_diagnostics
+    FileUtils.mkdir_p(File.join(@temporary, 'mobile/ios/Pods'))
+    plan = [{ target: 'failing-prebuilt', name: 'select', shell: '/bin/sh', script: 'echo selector failed >&2; exit 23' }]
+    replace_method(CACHE, :release_dependency_phases, ->(_repo) { plan }) do
+      error = assert_raises(RuntimeError) { CACHE.prepare_release_dependencies(@temporary) }
+      assert_match(/failing-prebuilt.*exit 23/, error.message)
+      assert_includes File.read(File.join(@temporary, 'build-ios/native-dependency-preparation.log')), 'selector failed'
+    end
+    replace_method(CACHE, :release_dependency_phases, ->(_repo) { [] }) do
+      assert_equal 0, CACHE.prepare_release_dependencies(@temporary)
+      assert_includes File.read(File.join(@temporary, 'build-ios/native-dependency-preparation.log')), 'source-built'
+    end
+  end
+
 end

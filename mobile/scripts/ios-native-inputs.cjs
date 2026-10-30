@@ -17,6 +17,34 @@ function nativeInputs(repo, cacheRoot = process.env.SINGZ_IOS_NATIVE_CACHE || pa
     /\/android\/build(?:\/|$)/.test(relative) ||
     /^mobile\/node_modules\/@react-native\/gradle-plugin\/(?:[^/]+\/)?build(?:\/|$)/.test(relative) ||
     /^mobile\/node_modules\/react-native-audio-api\/common\/cpp\/audioapi\/external\/(?:android|macosx)(?:\/|$)/.test(relative))
+  // An interrupted pod install can leave unused Local Podspecs behind. The
+  // installed manifest, when fully recognized, owns that metadata's membership.
+  // Unknown/missing manifests retain all files rather than trusting a guess.
+  let installedPods
+  try {
+    const manifest = fs.readFileSync(path.join(repo, 'mobile/ios/Pods/Manifest.lock'), 'utf8')
+    const lines = manifest.split(/\r?\n/)
+    const starts = lines.flatMap((line, index) => line === 'SPEC CHECKSUMS:' ? [index] : [])
+    if (starts.length === 1) {
+      const names = new Set()
+      let recognized = false
+      for (const line of lines.slice(starts[0] + 1)) {
+        if (!line.trim()) continue
+        if (/^[^\s]/.test(line)) {
+          recognized = /^(?:PODFILE CHECKSUM: [a-fA-F0-9]{40}|COCOAPODS: [0-9]+(?:\.[0-9]+){1,2})$/.test(line)
+          break
+        }
+        const entry = line.match(/^  ([a-zA-Z0-9_.+-]+): [a-fA-F0-9]{40}$/)
+        if (!entry || names.has(entry[1])) { recognized = false; break }
+        names.add(entry[1])
+      }
+      if (recognized && names.size) installedPods = names
+    }
+  } catch {}
+  const stalePodMetadata = relative => {
+    const pod = relative.match(/^mobile\/ios\/Pods\/Local Podspecs\/([^/]+)\.podspec\.json$/)?.[1]
+    return pod && installedPods && !installedPods.has(pod)
+  }
   const roots = ['mobile/ios', 'mobile/node_modules', 'mobile/native', 'zcore', 'zdsp', 'third_party', 'assets/pitch']
   let previous = {}
   try { previous = JSON.parse(fs.readFileSync(cacheFile, 'utf8')) } catch {}
@@ -25,7 +53,7 @@ function nativeInputs(repo, cacheRoot = process.env.SINGZ_IOS_NATIVE_CACHE || pa
   const visited = new Set()
   function walk(relative) {
     const file = path.join(repo, relative)
-    if (dependencyBuildOutput(relative) || !fs.existsSync(file)) return
+    if (dependencyBuildOutput(relative) || stalePodMetadata(relative) || !fs.existsSync(file)) return
     const stat = fs.lstatSync(file)
     if (stat.isSymbolicLink()) {
       const real = fs.realpathSync(file)
@@ -50,7 +78,7 @@ function nativeInputs(repo, cacheRoot = process.env.SINGZ_IOS_NATIVE_CACHE || pa
   for (const file of ['package.json', 'package-lock.json', 'mobile/package.json', 'mobile/package-lock.json', 'mobile/react-native.config.js', 'mobile/ios/Podfile', 'mobile/ios/Podfile.lock', 'mobile/ios/.xcode.env', 'mobile/ios/.xcode.env.local']) {
     if (fs.existsSync(path.join(repo, file))) files.push(file)
   }
-  const hash = crypto.createHash('sha256').update('singz-native-archive-v5\n').update(toolchain).update('\n')
+  const hash = crypto.createHash('sha256').update('singz-native-archive-v6\n').update(toolchain).update('\n')
   for (const relative of [...new Set(files)].sort()) {
     const file = path.join(repo, relative)
     const stat = fs.lstatSync(file)

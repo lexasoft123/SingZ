@@ -179,6 +179,60 @@ module SingzIncrementalArchive
     removed
   end
 
+  # React Native installs Debug prebuilt frameworks initially. Its ordinary
+  # Xcode phases select Release during archive; perform those exact installed
+  # phases first so the fingerprint describes the bytes archive will consume.
+  def self.release_dependency_phases(repo, project: nil)
+    unless project
+      require 'xcodeproj'
+      project_path = File.join(repo, 'mobile/ios/Pods/Pods.xcodeproj')
+      raise "Pods project is missing; run pod install before archiving: #{project_path}" unless File.file?(File.join(project_path, 'project.pbxproj'))
+      project = Xcodeproj::Project.open(project_path)
+    end
+    selectors = {
+      'React-Core-prebuilt' => 'replace-rncore-version.js',
+      'ReactNativeDependencies' => 'replace_dependencies_version.js',
+      'hermes-engine' => 'replace_hermes_version.js'
+    }
+    project.targets.flat_map do |target|
+      selector = selectors[target.name]
+      next [] unless selector
+      target.shell_script_build_phases.filter_map do |phase|
+        script = phase.shell_script.to_s
+        next unless script.include?(selector)
+        { target: target.name, name: phase.display_name, shell: phase.shell_path || '/bin/sh', script: script }
+      end
+    end
+  end
+
+  def self.prepare_release_dependencies(repo)
+    phases = release_dependency_phases(repo)
+    pods = File.join(repo, 'mobile/ios/Pods')
+    log = File.join(repo, 'build-ios/native-dependency-preparation.log')
+    FileUtils.mkdir_p(File.dirname(log))
+    env = {
+      'REACT_NATIVE_PATH' => File.join(repo, 'mobile/node_modules/react-native'),
+      'PODS_ROOT' => pods, 'PROJECT_DIR' => pods, 'CONFIGURATION' => 'Release',
+      'GCC_PREPROCESSOR_DEFINITIONS' => '', 'NODE_BINARY' => ENV.fetch('NODE_BINARY', 'node')
+    }
+    File.open(log, 'w') do |output|
+      phases.each do |phase|
+        output.puts "=== #{phase.fetch(:target)}: #{phase.fetch(:name)} ==="
+        begin
+          stdout, stderr, status = Open3.capture3(env, phase.fetch(:shell), '-c', phase.fetch(:script), chdir: pods)
+          output.write(stdout)
+          output.write(stderr)
+          raise "Release dependency preparation failed for #{phase.fetch(:target)} (exit #{status.exitstatus}); see #{log}" unless status.success?
+        rescue SystemCallError => error
+          output.puts(error.message)
+          raise "Release dependency preparation failed for #{phase.fetch(:target)}: #{error.message}; see #{log}"
+        end
+      end
+      output.puts('No prebuilt dependency selectors; using source-built dependencies') if phases.empty?
+    end
+    phases.length
+  end
+
   def self.fingerprint(repo)
     output, error, status = Open3.capture3('node', File.join(repo, 'mobile/scripts/ios-native-inputs.cjs'))
     raise error unless status.success? && output.strip.match?(/\A[0-9a-f]{64}\z/)
@@ -212,6 +266,10 @@ module SingzIncrementalArchive
 
   def self.refresh(repo, archive, number, identity)
     raise ArgumentError, 'invalid build number' unless number.to_s.match?(/\A[1-9]\d*\z/)
+    keychain = ENV['SINGZ_SIGNING_KEYCHAIN_PATH']
+    if !ENV['GITHUB_ACTIONS'] && keychain.to_s.empty?
+      raise ArgumentError, 'Run through scripts/with-apple-secrets.sh; dedicated signing keychain is required'
+    end
     FileUtils.mkdir_p(File.join(repo, 'build-ios'))
     ios = File.join(repo, 'mobile/ios')
     application = app(archive)
@@ -242,8 +300,10 @@ module SingzIncrementalArchive
     end
     # Updating resources invalidates the cached signature. Export signs again
     # with the current match profile; give it a valid archive to start from.
-    _out, err, result = Open3.capture3('/usr/bin/codesign', '--force', '--sign',
-      identity, '--preserve-metadata=identifier,entitlements,flags,runtime', application)
+    signing = ['/usr/bin/codesign', '--force', '--sign', identity]
+    signing += ['--keychain', keychain] unless ENV['GITHUB_ACTIONS']
+    _out, err, result = Open3.capture3(*signing,
+      '--preserve-metadata=identifier,entitlements,flags,runtime', application)
     raise err unless result.success?
   end
 end

@@ -161,7 +161,12 @@ different cache entries.
 
 Xcode's React Native wrappers read their own `ccache.conf`. Mobile postinstall
 adds the same root/hash/compiler settings while preserving RN's PCH/module
-options. Explicit `CCACHE_DIR` and `CCACHE_MAXSIZE` are baked into that generated
+options. It embeds the discovered ccache executable in the generated compiler
+wrappers because Xcode may omit `CCACHE_BINARY` from compiler environments.
+Objective-C and prefix/PCH invocations keep their module-cache path absolute and
+hashed, preventing Clang from mixing absolute and relative references to one PCM.
+That module/PCH identity remains local; ordinary C++ retains cross-worktree
+normalization. Explicit `CCACHE_DIR` and `CCACHE_MAXSIZE` are baked into that generated
 configuration so GUI builds use the requested store/cap too. Missing expected
 RN configuration or malformed overrides fail rather than silently disabling reuse.
 Ccache covers Clang compilation, not Swift or linking. Current prebuilt React
@@ -223,10 +228,17 @@ Actions snapshot while restoring older compatible objects. Compiler objects
 are capped at 1200 MB in CI; release archive retention is two entries / 1 GiB /
 14 days. Full DerivedData and serialized configuration graphs stay job-local.
 
+Before archive fingerprinting, Fastlane runs React Native's installed dependency
+selector phases in Release mode. This prevents Debug-to-Release framework
+replacement during the archive from changing the key and suppressing publication.
+The same preparation runs before a cache lookup in another worktree.
+
 The iOS archive fingerprint excludes generated Android dependency build state
 and Android/macOS-only audio downloads. iOS headers, frameworks, static libraries,
 and shared native sources remain inputs, so Android work in a sibling checkout
-does not prevent reuse of an otherwise identical iOS archive.
+does not prevent reuse of an otherwise identical iOS archive. Unused local Podspec
+metadata left by an interrupted install is ignored only when the installed
+Pods manifest proves that the Pod is absent; unknown manifests retain all inputs.
 
 Local native archives default to eight entries / 4 GiB / 30 days. Override with
 `SINGZ_IOS_NATIVE_CACHE_MAX_ENTRIES`, `SINGZ_IOS_NATIVE_CACHE_MAX_BYTES`, and
