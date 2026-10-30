@@ -1,0 +1,45 @@
+name: Save completed mobile build caches
+description: Preserve valid cache work independently of later publication failures
+inputs:
+  cache-state:
+    description: State emitted by mobile-build-cache
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Validate cache save paths and completed archives
+      id: paths
+      shell: bash
+      env:
+        SINGZ_CI_CACHE_STATE: ${{ inputs.cache-state }}
+      run: node scripts/ci-build-cache.cjs finalize
+    - uses: actions/cache/save@v4
+      if: steps.paths.outputs.compiler-save == 'true'
+      with:
+        path: ${{ steps.paths.outputs.compiler-path }}
+        key: ${{ steps.paths.outputs.compiler-key }}
+    - uses: actions/cache/save@v4
+      if: steps.paths.outputs.gradle-save == 'true'
+      with:
+        path: ${{ steps.paths.outputs.gradle-path }}
+        key: ${{ steps.paths.outputs.gradle-key }}
+    - uses: actions/cache/save@v4
+      if: steps.paths.outputs.audio-save == 'true'
+      with:
+        path: ${{ steps.paths.outputs.audio-path }}
+        key: ${{ steps.paths.outputs.audio-key }}
+    - uses: actions/cache/save@v4
+      if: steps.paths.outputs.pods-save == 'true'
+      with:
+        path: ${{ steps.paths.outputs.pods-path }}
+        key: ${{ steps.paths.outputs.pods-key }}
+    - uses: actions/cache/save@v4
+      if: steps.paths.outputs.metro-save == 'true'
+      with:
+        path: ${{ steps.paths.outputs.metro-path }}
+        key: ${{ steps.paths.outputs.metro-key }}
+    - uses: actions/cache/save@v4
+      if: steps.paths.outputs.archives-save == 'true'
+      with:
+        path: ${{ steps.paths.outputs.archives-path }}
+        key: ${{ steps.paths.outputs.archives-key }}

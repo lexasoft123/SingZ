@@ -17,8 +17,9 @@ import {
 } from '../../scripts/ffmpeg-runtime-binary.mjs'
 
 const require = createRequire(import.meta.url)
-const { nativeBuildLockPath } = require('../../scripts/native-build-lock.cjs') as {
+const { nativeBuildLockPath, gitCommonDirectory } = require('../../scripts/native-build-lock.cjs') as {
   nativeBuildLockPath(root: string): string
+  gitCommonDirectory(root: string): string
 }
 const root = process.cwd()
 // Windows runners check out with CRLF (Git for Windows' autocrlf), and the
@@ -200,8 +201,7 @@ describe('FFmpeg release policy', () => {
     const root = mkdtempSync(join(tmpdir(), 'singz-no-git-'))
     try {
       const path = nativeBuildLockPath(root)
-      expect(path).toContain('singz-native-build-')
-      expect(path).not.toContain(root)
+      expect(path).toBe(join(gitCommonDirectory(root), '.singz-native-build.lock'))
       expect(nativeBuildLockPath(root)).toBe(path)
       const other = mkdtempSync(join(tmpdir(), 'singz-no-git-'))
       try {
@@ -216,7 +216,7 @@ describe('FFmpeg release policy', () => {
 
   it('serializes sibling checkouts on one repository identity and one compile edge', () => {
     expect(nativeBuildLockPath(root)).toBe(nativeBuildLockPath(join(root, 'zcore')))
-    expect(nativeBuildLockPath(root)).not.toContain(root)
+    expect(nativeBuildLockPath(root)).toBe(join(gitCommonDirectory(root), 'singz-native-build.lock'))
     expect(read('scripts/build-ffmpeg-codec-runtime.sh')).toContain('COMPILE_JOBS=1')
     expect(read('scripts/build-capture-addon.cjs')).toContain('Math.min(requested, 1)')
   })

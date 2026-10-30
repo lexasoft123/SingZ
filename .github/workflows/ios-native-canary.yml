@@ -1,9 +1,52 @@
 name: iOS native canary
 
 on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/ios-native-canary.yml'
+      - '.github/actions/mobile-build-cache/**'
+      - '.github/actions/save-mobile-build-cache/**'
+      - 'scripts/ci-build-cache.cjs'
+      - 'scripts/ccache-launcher.*'
+      - 'scripts/restore-audio-api-prebuilts.cjs'
+      - 'scripts/with-native-build-lock.mjs'
+      - 'scripts/native-build-lock.cjs'
+      - 'scripts/assert-native-build-lock.cjs'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'cmake/**'
+      - 'mobile/ios/**'
+      - 'mobile/package.json'
+      - 'mobile/package-lock.json'
+      - 'mobile/App.tsx'
+      - 'mobile/src/engine.ts'
+      - 'mobile/src/projects.ts'
+      - 'mobile/src/playback/**'
+      - 'mobile/src/ui/CatalogScreen.tsx'
+      - 'mobile/src/ui/PlayerScreen.tsx'
+      - 'mobile/src/ui/SettingsScreen.tsx'
+      - 'mobile/src/ui/RootNavigator.tsx'
+      - 'mobile/__tests__/**'
+      - 'mobile/scripts/**'
+      - 'native/playback/**'
+      - 'tests/native/**'
+      - 'tests/shared/**'
+      - 'third_party/native/**'
+      - 'zcore/**'
+      - 'zdsp/**'
   pull_request:
     paths:
       - '.github/workflows/ios-native-canary.yml'
+      - '.github/actions/mobile-build-cache/**'
+      - '.github/actions/save-mobile-build-cache/**'
+      - 'scripts/ci-build-cache.cjs'
+      - 'scripts/ccache-launcher.*'
+      - 'scripts/restore-audio-api-prebuilts.cjs'
+      - 'scripts/with-native-build-lock.mjs'
+      - 'scripts/native-build-lock.cjs'
+      - 'scripts/assert-native-build-lock.cjs'
       - 'CMakeLists.txt'
       - 'CMakePresets.json'
       - 'cmake/**'
@@ -47,11 +90,25 @@ jobs:
           cache: npm
           cache-dependency-path: mobile/package-lock.json
 
+      - name: Shared iOS build caches
+        id: mobile-cache
+        uses: ./.github/actions/mobile-build-cache
+        with:
+          platform: ios
+
       - name: Ensure ffmpeg
         run: command -v ffmpeg >/dev/null || brew install ffmpeg
 
       - run: npm ci
         working-directory: mobile
+
+      - name: Restore verified audio-api prebuilts
+        run: node scripts/restore-audio-api-prebuilts.cjs ios
+
+      - name: Test native cache retention and Xcode compiler configuration
+        run: |
+          ruby mobile/ios/fastlane/tests/incremental-archive-test.rb
+          node --test mobile/scripts/tests/*.test.cjs
 
       - name: Verify authoritative generated inputs
         run: |
@@ -75,78 +132,87 @@ jobs:
           LANG: en_US.UTF-8
           LC_ALL: en_US.UTF-8
         run: |
-          pod install
+          node "$GITHUB_WORKSPACE/scripts/with-native-build-lock.mjs" --owner ios-canary-pods -- pod install
           git diff --exit-code -- Podfile.lock
 
+      - name: Verify active iOS compiler cache configuration
+        run: node scripts/ci-build-cache.cjs begin --platform ios
+
       - name: Test native playback bridge schemas
-        run: bash mobile/scripts/test-native-playback-bridge-schema.sh
+        run: node scripts/with-native-build-lock.mjs --owner ios-canary-schema -- bash mobile/scripts/test-native-playback-bridge-schema.sh
 
       - name: Compile component for device arm64
         working-directory: mobile/ios
         run: |
-          xcodebuild -quiet -project Pods/Pods.xcodeproj \
+          node "$GITHUB_WORKSPACE/scripts/with-native-build-lock.mjs" \
+            --owner ios-canary-dsp-device -- xcodebuild -jobs 2 -quiet -project Pods/Pods.xcodeproj \
             -scheme SingzDspRuntime -configuration Release -sdk iphoneos \
             -destination 'generic/platform=iOS' \
-            -derivedDataPath "$RUNNER_TEMP/singz-dsp-device-derived" \
-            SYMROOT="$RUNNER_TEMP/singz-dsp-device-products" \
-            OBJROOT="$RUNNER_TEMP/singz-dsp-device-objects" \
+            -derivedDataPath "$GITHUB_WORKSPACE/build/native/ios-dsp-device-derived" \
+            SYMROOT="$GITHUB_WORKSPACE/build/native/ios-dsp-device-products" \
+            OBJROOT="$GITHUB_WORKSPACE/build/native/ios-dsp-device-objects" \
             ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO build
 
       - name: Compile component for simulator arm64 and x86_64
         working-directory: mobile/ios
         run: |
-          xcodebuild -quiet -project Pods/Pods.xcodeproj \
+          node "$GITHUB_WORKSPACE/scripts/with-native-build-lock.mjs" \
+            --owner ios-canary-dsp-simulator -- xcodebuild -jobs 2 -quiet -project Pods/Pods.xcodeproj \
             -scheme SingzDspRuntime -configuration Release -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath "$RUNNER_TEMP/singz-dsp-sim-derived" \
-            SYMROOT="$RUNNER_TEMP/singz-dsp-sim-products" \
-            OBJROOT="$RUNNER_TEMP/singz-dsp-sim-objects" \
+            -derivedDataPath "$GITHUB_WORKSPACE/build/native/ios-dsp-sim-derived" \
+            SYMROOT="$GITHUB_WORKSPACE/build/native/ios-dsp-sim-products" \
+            OBJROOT="$GITHUB_WORKSPACE/build/native/ios-dsp-sim-objects" \
             'ARCHS=arm64 x86_64' ONLY_ACTIVE_ARCH=NO \
             CODE_SIGNING_ALLOWED=NO build
 
       - name: Compile callback closure for device arm64
         working-directory: mobile/ios
         run: |
-          xcodebuild -quiet -project Pods/Pods.xcodeproj \
+          node "$GITHUB_WORKSPACE/scripts/with-native-build-lock.mjs" \
+            --owner ios-canary-callback-device -- xcodebuild -jobs 2 -quiet -project Pods/Pods.xcodeproj \
             -scheme SingzDeviceCallback -configuration Release -sdk iphoneos \
             -destination 'generic/platform=iOS' \
-            -derivedDataPath "$RUNNER_TEMP/singz-callback-device-derived" \
-            SYMROOT="$RUNNER_TEMP/singz-callback-device-products" \
-            OBJROOT="$RUNNER_TEMP/singz-callback-device-objects" \
+            -derivedDataPath "$GITHUB_WORKSPACE/build/native/ios-callback-device-derived" \
+            SYMROOT="$GITHUB_WORKSPACE/build/native/ios-callback-device-products" \
+            OBJROOT="$GITHUB_WORKSPACE/build/native/ios-callback-device-objects" \
             ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO build
 
       - name: Compile callback closure for simulator arm64 and x86_64
         working-directory: mobile/ios
         run: |
-          xcodebuild -quiet -project Pods/Pods.xcodeproj \
+          node "$GITHUB_WORKSPACE/scripts/with-native-build-lock.mjs" \
+            --owner ios-canary-callback-simulator -- xcodebuild -jobs 2 -quiet -project Pods/Pods.xcodeproj \
             -scheme SingzDeviceCallback -configuration Release \
             -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath "$RUNNER_TEMP/singz-callback-sim-derived" \
-            SYMROOT="$RUNNER_TEMP/singz-callback-sim-products" \
-            OBJROOT="$RUNNER_TEMP/singz-callback-sim-objects" \
+            -derivedDataPath "$GITHUB_WORKSPACE/build/native/ios-callback-sim-derived" \
+            SYMROOT="$GITHUB_WORKSPACE/build/native/ios-callback-sim-products" \
+            OBJROOT="$GITHUB_WORKSPACE/build/native/ios-callback-sim-objects" \
             'ARCHS=arm64 x86_64' ONLY_ACTIVE_ARCH=NO \
             CODE_SIGNING_ALLOWED=NO build
 
       - name: Compile playback session for device arm64
         working-directory: mobile/ios
         run: |
-          xcodebuild -quiet -project Pods/Pods.xcodeproj \
+          node "$GITHUB_WORKSPACE/scripts/with-native-build-lock.mjs" \
+            --owner ios-canary-playback-device -- xcodebuild -jobs 2 -quiet -project Pods/Pods.xcodeproj \
             -scheme SingzPlaybackSession -configuration Release -sdk iphoneos \
             -destination 'generic/platform=iOS' \
-            -derivedDataPath "$RUNNER_TEMP/singz-playback-device-derived" \
-            SYMROOT="$RUNNER_TEMP/singz-playback-device-products" \
-            OBJROOT="$RUNNER_TEMP/singz-playback-device-objects" \
+            -derivedDataPath "$GITHUB_WORKSPACE/build/native/ios-playback-device-derived" \
+            SYMROOT="$GITHUB_WORKSPACE/build/native/ios-playback-device-products" \
+            OBJROOT="$GITHUB_WORKSPACE/build/native/ios-playback-device-objects" \
             ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO build
 
       - name: Compile playback session for simulator arm64 and x86_64
         working-directory: mobile/ios
         run: |
-          xcodebuild -quiet -project Pods/Pods.xcodeproj \
+          node "$GITHUB_WORKSPACE/scripts/with-native-build-lock.mjs" \
+            --owner ios-canary-playback-simulator -- xcodebuild -jobs 2 -quiet -project Pods/Pods.xcodeproj \
             -scheme SingzPlaybackSession -configuration Release \
             -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath "$RUNNER_TEMP/singz-playback-sim-derived" \
-            SYMROOT="$RUNNER_TEMP/singz-playback-sim-products" \
-            OBJROOT="$RUNNER_TEMP/singz-playback-sim-objects" \
+            -derivedDataPath "$GITHUB_WORKSPACE/build/native/ios-playback-sim-derived" \
+            SYMROOT="$GITHUB_WORKSPACE/build/native/ios-playback-sim-products" \
+            OBJROOT="$GITHUB_WORKSPACE/build/native/ios-playback-sim-objects" \
             'ARCHS=arm64 x86_64' ONLY_ACTIVE_ARCH=NO \
             CODE_SIGNING_ALLOWED=NO build
 
@@ -164,9 +230,9 @@ jobs:
           # under pipefail). The line number is an offset into THIS step's
           # script, not into the workflow file.
           trap 'echo "gate failed at line $LINENO of this step: $BASH_COMMAND" >&2' ERR
-          device=$(find "$RUNNER_TEMP/singz-dsp-device-products" \
+          device=$(find "$GITHUB_WORKSPACE/build/native/ios-dsp-device-products" \
             -name libSingzDspRuntime.a -print -quit)
-          simulator=$(find "$RUNNER_TEMP/singz-dsp-sim-products" \
+          simulator=$(find "$GITHUB_WORKSPACE/build/native/ios-dsp-sim-products" \
             -name libSingzDspRuntime.a -print -quit)
           # Separate statements, not an AND-chain: a failing first half of an
           # `a && b` is exempt from errexit, so an empty $device used to sail
@@ -183,43 +249,43 @@ jobs:
           xcodebuild -project Pods/Pods.xcodeproj -scheme SingzDspRuntime \
             -configuration Release -sdk iphoneos \
             -destination 'generic/platform=iOS' -showBuildSettings \
-            > "$RUNNER_TEMP/singz-dsp-build-settings.txt"
+            > "$GITHUB_WORKSPACE/build/native/ios-dsp-build-settings.txt"
           grep -q 'CLANG_CXX_LANGUAGE_STANDARD = c++20' \
-            "$RUNNER_TEMP/singz-dsp-build-settings.txt"
+            "$GITHUB_WORKSPACE/build/native/ios-dsp-build-settings.txt"
           grep -q 'SINGZ_REALTIME_LEAF=1' \
-            "$RUNNER_TEMP/singz-dsp-build-settings.txt"
+            "$GITHUB_WORKSPACE/build/native/ios-dsp-build-settings.txt"
           grep -q -- '-fno-exceptions -fno-rtti' \
-            "$RUNNER_TEMP/singz-dsp-build-settings.txt"
+            "$GITHUB_WORKSPACE/build/native/ios-dsp-build-settings.txt"
 
-          xcrun nm -m "$device" > "$RUNNER_TEMP/singz-dsp-symbols.txt"
+          xcrun nm -m "$device" > "$GITHUB_WORKSPACE/build/native/ios-dsp-symbols.txt"
           for symbol in initializeArena createBuiltinProcessor \
             createDecodedBufferSource createPositionedDecodedBufferSource \
             createScheduledCueSource compileGraph renderGraphBlock \
             renderAudioHostGraph nativePlaybackRender \
             SingzDspRuntimeGetLinkStatus; do
-            grep -q "$symbol" "$RUNNER_TEMP/singz-dsp-symbols.txt" ||
+            grep -q "$symbol" "$GITHUB_WORKSPACE/build/native/ios-dsp-symbols.txt" ||
               { echo "missing symbol: $symbol" >&2; exit 1; }
           done
           if grep -E 'Java_|RCT|facebook|FLAC|Ort|VST|AudioUnit|AVAudio' \
-            "$RUNNER_TEMP/singz-dsp-symbols.txt"; then
+            "$GITHUB_WORKSPACE/build/native/ios-dsp-symbols.txt"; then
             echo 'forbidden product/platform dependency in SingzDspRuntime' >&2
             exit 1
           fi
           if grep -E '__cxa|gxx_personality|clang_call_terminate|__ZTI|__ZTVN10__cxxabiv1' \
-            "$RUNNER_TEMP/singz-dsp-symbols.txt"; then
+            "$GITHUB_WORKSPACE/build/native/ios-dsp-symbols.txt"; then
             echo 'exception or RTTI runtime leaked into SingzDspRuntime' >&2
             exit 1
           fi
-          if grep '_ZN4zdsp' "$RUNNER_TEMP/singz-dsp-symbols.txt" | \
+          if grep '_ZN4zdsp' "$GITHUB_WORKSPACE/build/native/ios-dsp-symbols.txt" | \
             grep ' external ' | grep -v 'private external' | grep -v '(undefined)'; then
             echo 'zdsp C++ symbol is not hidden/private-external' >&2
             exit 1
           fi
-          strings "$device" > "$RUNNER_TEMP/singz-dsp-strings.txt"
+          strings "$device" > "$GITHUB_WORKSPACE/build/native/ios-dsp-strings.txt"
           grep -q 'singz.ios.zdsp_runtime.phase-ios-q32-time-pitch-v3' \
-            "$RUNNER_TEMP/singz-dsp-strings.txt"
+            "$GITHUB_WORKSPACE/build/native/ios-dsp-strings.txt"
           if grep -q 'singz.ios.zdsp_runtime.phase-ios-b2-experimental' \
-            "$RUNNER_TEMP/singz-dsp-strings.txt"; then
+            "$GITHUB_WORKSPACE/build/native/ios-dsp-strings.txt"; then
             echo 'stale Phase B2 runtime capability is still packaged' >&2
             exit 1
           fi
@@ -238,9 +304,9 @@ jobs:
           # under pipefail). The line number is an offset into THIS step's
           # script, not into the workflow file.
           trap 'echo "gate failed at line $LINENO of this step: $BASH_COMMAND" >&2' ERR
-          device=$(find "$RUNNER_TEMP/singz-callback-device-products" \
+          device=$(find "$GITHUB_WORKSPACE/build/native/ios-callback-device-products" \
             -name libSingzDeviceCallback.a -print -quit)
-          simulator=$(find "$RUNNER_TEMP/singz-callback-sim-products" \
+          simulator=$(find "$GITHUB_WORKSPACE/build/native/ios-callback-sim-products" \
             -name libSingzDeviceCallback.a -print -quit)
           # Separate statements, not an AND-chain: a failing first half of an
           # `a && b` is exempt from errexit, so an empty $device used to sail
@@ -258,49 +324,49 @@ jobs:
           xcodebuild -project Pods/Pods.xcodeproj -scheme SingzDeviceCallback \
             -configuration Release -sdk iphoneos \
             -destination 'generic/platform=iOS' -showBuildSettings \
-            > "$RUNNER_TEMP/singz-callback-build-settings.txt"
+            > "$GITHUB_WORKSPACE/build/native/ios-callback-build-settings.txt"
           grep -q 'CLANG_CXX_LANGUAGE_STANDARD = c++20' \
-            "$RUNNER_TEMP/singz-callback-build-settings.txt"
+            "$GITHUB_WORKSPACE/build/native/ios-callback-build-settings.txt"
           grep -q 'SINGZ_REALTIME_LEAF=1' \
-            "$RUNNER_TEMP/singz-callback-build-settings.txt"
+            "$GITHUB_WORKSPACE/build/native/ios-callback-build-settings.txt"
           grep -q 'SINGZ_IOS_AUDIO_HOST_RT_COMPILE=1' \
-            "$RUNNER_TEMP/singz-callback-build-settings.txt"
+            "$GITHUB_WORKSPACE/build/native/ios-callback-build-settings.txt"
           grep -q -- '-fno-exceptions -fno-rtti' \
-            "$RUNNER_TEMP/singz-callback-build-settings.txt"
+            "$GITHUB_WORKSPACE/build/native/ios-callback-build-settings.txt"
           grep -q -- '-include .*SingzDeviceCallbackCompileGuard.h' \
-            "$RUNNER_TEMP/singz-callback-build-settings.txt"
+            "$GITHUB_WORKSPACE/build/native/ios-callback-build-settings.txt"
 
-          xcrun nm -m "$device" > "$RUNNER_TEMP/singz-callback-symbols.txt"
+          xcrun nm -m "$device" > "$GITHUB_WORKSPACE/build/native/ios-callback-symbols.txt"
           # Same index-name tolerance as the playback archive below: `ar -t`
           # prints `__.SYMDEF SORTED` or plain `__.SYMDEF` by toolchain, and
           # this gate runs first — a narrow filter here would fail before the
           # widened one there was ever reached.
           xcrun ar -t "$device" | \
             grep -vE '^(__\.SYMDEF( SORTED)?|SingzDeviceCallback-dummy.o)$' | \
-            LC_ALL=C sort > "$RUNNER_TEMP/singz-callback-objects.txt"
+            LC_ALL=C sort > "$GITHUB_WORKSPACE/build/native/ios-callback-objects.txt"
           printf '%s\n' audio_host_callback.o audio_host_fifo_hot.o \
             audio_host_ios_callback.o audio_input_callback.o \
             audio_input_callback_gate.o audio_input_convert.o \
             audio_input_timestamp.o audio_input_transport_callback.o | \
-            LC_ALL=C sort > "$RUNNER_TEMP/singz-callback-objects-expected.txt"
-          diff -u "$RUNNER_TEMP/singz-callback-objects-expected.txt" \
-            "$RUNNER_TEMP/singz-callback-objects.txt"
+            LC_ALL=C sort > "$GITHUB_WORKSPACE/build/native/ios-callback-objects-expected.txt"
+          diff -u "$GITHUB_WORKSPACE/build/native/ios-callback-objects-expected.txt" \
+            "$GITHUB_WORKSPACE/build/native/ios-callback-objects.txt"
           for symbol in iosAudioHostRenderCallback invokeAudioHostCallback \
             AudioInputRingProducer resolveAudioInputTimestamp; do
-            grep -q "$symbol" "$RUNNER_TEMP/singz-callback-symbols.txt" ||
+            grep -q "$symbol" "$GITHUB_WORKSPACE/build/native/ios-callback-symbols.txt" ||
               { echo "missing symbol: $symbol" >&2; exit 1; }
           done
           if grep -E '__cxa|gxx_personality|clang_call_terminate|__ZTI|__ZTVN10__cxxabiv1' \
-            "$RUNNER_TEMP/singz-callback-symbols.txt"; then
+            "$GITHUB_WORKSPACE/build/native/ios-callback-symbols.txt"; then
             echo 'exception or RTTI runtime leaked into callback archive' >&2
             exit 1
           fi
           if grep -E 'Java_|RCT|React|facebook|FLAC|Ort|VST|zdsp|AVAudioSession|objc_msgSend' \
-            "$RUNNER_TEMP/singz-callback-symbols.txt"; then
+            "$GITHUB_WORKSPACE/build/native/ios-callback-symbols.txt"; then
             echo 'forbidden product/control dependency in callback archive' >&2
             exit 1
           fi
-          if grep '_ZN5singz' "$RUNNER_TEMP/singz-callback-symbols.txt" | \
+          if grep '_ZN5singz' "$GITHUB_WORKSPACE/build/native/ios-callback-symbols.txt" | \
             grep ' external ' | grep -v 'private external' | grep -v '(undefined)'; then
             echo 'callback C++ symbol is not hidden/private-external' >&2
             exit 1
@@ -320,9 +386,9 @@ jobs:
           # under pipefail). The line number is an offset into THIS step's
           # script, not into the workflow file.
           trap 'echo "gate failed at line $LINENO of this step: $BASH_COMMAND" >&2' ERR
-          device=$(find "$RUNNER_TEMP/singz-playback-device-products" \
+          device=$(find "$GITHUB_WORKSPACE/build/native/ios-playback-device-products" \
             -name libSingzPlaybackSession.a -print -quit)
-          simulator=$(find "$RUNNER_TEMP/singz-playback-sim-products" \
+          simulator=$(find "$GITHUB_WORKSPACE/build/native/ios-playback-sim-products" \
             -name libSingzPlaybackSession.a -print -quit)
           # Separate statements, not an AND-chain: a failing first half of an
           # `a && b` is exempt from errexit, so an empty $device used to sail
@@ -339,7 +405,7 @@ jobs:
           # `__.SYMDEF` depending on the toolchain; neither is an object.
           xcrun ar -t "$device" | \
             grep -vE '^(__\.SYMDEF( SORTED)?|SingzPlaybackSession-dummy.o)$' \
-            | LC_ALL=C sort > "$RUNNER_TEMP/singz-playback-objects.txt"
+            | LC_ALL=C sort > "$GITHUB_WORKSPACE/build/native/ios-playback-objects.txt"
           # The expected list is DERIVED from the pod's own source manifest
           # rather than restated here. Restating it went stale the moment 4B
           # added the graph-document materializer: the archive grew a fourth
@@ -350,41 +416,43 @@ jobs:
               .filter((file) => file.endsWith('.cpp'))
               .map((file) => file.split('/').pop().replace(/\.cpp$/, '.o'));
             console.log(objects.join('\n'))" | \
-            LC_ALL=C sort > "$RUNNER_TEMP/singz-playback-objects-expected.txt"
-          diff -u "$RUNNER_TEMP/singz-playback-objects-expected.txt" \
-            "$RUNNER_TEMP/singz-playback-objects.txt"
-          xcrun nm -m "$device" > "$RUNNER_TEMP/singz-playback-symbols.txt"
+            LC_ALL=C sort > "$GITHUB_WORKSPACE/build/native/ios-playback-objects-expected.txt"
+          diff -u "$GITHUB_WORKSPACE/build/native/ios-playback-objects-expected.txt" \
+            "$GITHUB_WORKSPACE/build/native/ios-playback-objects.txt"
+          xcrun nm -m "$device" > "$GITHUB_WORKSPACE/build/native/ios-playback-symbols.txt"
           for symbol in NativePlaybackSession nativePlaybackSessionCapabilityTag \
             preparePlaybackCuePlan previewClick; do
-            grep -q "$symbol" "$RUNNER_TEMP/singz-playback-symbols.txt" ||
+            grep -q "$symbol" "$GITHUB_WORKSPACE/build/native/ios-playback-symbols.txt" ||
               { echo "missing symbol: $symbol" >&2; exit 1; }
           done
           if grep -E 'Java_|RCT|React|facebook|objc_msgSend|AVAudioSession' \
-            "$RUNNER_TEMP/singz-playback-symbols.txt"; then
+            "$GITHUB_WORKSPACE/build/native/ios-playback-symbols.txt"; then
             echo 'product/React/session mutation leaked into playback core' >&2
             exit 1
           fi
-          strings "$device" > "$RUNNER_TEMP/singz-playback-strings.txt"
+          strings "$device" > "$GITHUB_WORKSPACE/build/native/ios-playback-strings.txt"
           grep -q 'singz.native.playback-session.anchored-preview.v4' \
-            "$RUNNER_TEMP/singz-playback-strings.txt"
+            "$GITHUB_WORKSPACE/build/native/ios-playback-strings.txt"
           if grep -q 'singz.native.playback-session.wav-flac.frame-zero.v1' \
-            "$RUNNER_TEMP/singz-playback-strings.txt"; then
+            "$GITHUB_WORKSPACE/build/native/ios-playback-strings.txt"; then
             echo 'stale frame-zero playback session is still packaged' >&2
             exit 1
           fi
           if grep -q 'singz.native.playback-session.q32-time-pitch.v3' \
-            "$RUNNER_TEMP/singz-playback-strings.txt"; then
+            "$GITHUB_WORKSPACE/build/native/ios-playback-strings.txt"; then
             echo 'stale v3 playback session is still packaged' >&2
             exit 1
           fi
 
       - name: Compile the Release iOS app for device arm64 without signing
+        id: ios-app-build
         working-directory: mobile/ios
         run: |
-          xcodebuild -quiet -workspace SingZPlayer.xcworkspace \
+          node "$GITHUB_WORKSPACE/scripts/with-native-build-lock.mjs" \
+            --owner ios-canary-app-device -- xcodebuild -jobs 2 -quiet -workspace SingZPlayer.xcworkspace \
             -scheme SingZPlayer -configuration Release -sdk iphoneos \
             -destination 'generic/platform=iOS' \
-            -derivedDataPath "$RUNNER_TEMP/singz-app-derived" \
+            -derivedDataPath "$GITHUB_WORKSPACE/build/native/ios-derived" \
             ARCHS=arm64 ONLY_ACTIVE_ARCH=YES DEAD_CODE_STRIPPING=YES \
             STRIP_INSTALLED_PRODUCT=NO CODE_SIGNING_ALLOWED=NO build
 
@@ -401,17 +469,17 @@ jobs:
           # under pipefail). The line number is an offset into THIS step's
           # script, not into the workflow file.
           trap 'echo "gate failed at line $LINENO of this step: $BASH_COMMAND" >&2' ERR
-          app=$(find "$RUNNER_TEMP/singz-app-derived" \
+          app=$(find "$GITHUB_WORKSPACE/build/native/ios-derived" \
             -path '*Release-iphoneos/SingZPlayer.app' -print -quit)
-          core=$(find "$RUNNER_TEMP/singz-app-derived" \
+          core=$(find "$GITHUB_WORKSPACE/build/native/ios-derived" \
             -path '*Release-iphoneos/SingzCore/libSingzCore.a' -print -quit)
-          runtime=$(find "$RUNNER_TEMP/singz-app-derived" \
+          runtime=$(find "$GITHUB_WORKSPACE/build/native/ios-derived" \
             -path '*Release-iphoneos/SingzDspRuntime/libSingzDspRuntime.a' \
             -print -quit)
-          callback=$(find "$RUNNER_TEMP/singz-app-derived" \
+          callback=$(find "$GITHUB_WORKSPACE/build/native/ios-derived" \
             -path '*Release-iphoneos/SingzDeviceCallback/libSingzDeviceCallback.a' \
             -print -quit)
-          playback=$(find "$RUNNER_TEMP/singz-app-derived" \
+          playback=$(find "$GITHUB_WORKSPACE/build/native/ios-derived" \
             -path '*Release-iphoneos/SingzPlaybackSession/libSingzPlaybackSession.a' \
             -print -quit)
           # One per line for the same reason: four of these five were exempt
@@ -523,33 +591,33 @@ jobs:
           defined_symbols "$RUNNER_TEMP/singz-release-runtime-symbols.txt" \
             "$RUNNER_TEMP/singz-runtime-defined-external.txt"
           defined_symbols "$RUNNER_TEMP/singz-release-callback-symbols.txt" \
-            "$RUNNER_TEMP/singz-callback-defined-external.txt"
+            "$GITHUB_WORKSPACE/build/native/ios-callback-defined-external.txt"
           defined_symbols "$RUNNER_TEMP/singz-release-playback-symbols.txt" \
-            "$RUNNER_TEMP/singz-playback-defined-external.txt"
+            "$GITHUB_WORKSPACE/build/native/ios-playback-defined-external.txt"
           comm -12 "$RUNNER_TEMP/singz-core-defined-external.txt" \
             "$RUNNER_TEMP/singz-runtime-defined-external.txt" \
             > "$RUNNER_TEMP/singz-core-runtime-overlap.txt"
           comm -12 "$RUNNER_TEMP/singz-core-defined-external.txt" \
-            "$RUNNER_TEMP/singz-callback-defined-external.txt" \
+            "$GITHUB_WORKSPACE/build/native/ios-callback-defined-external.txt" \
             > "$RUNNER_TEMP/singz-core-callback-overlap.txt"
           comm -12 "$RUNNER_TEMP/singz-runtime-defined-external.txt" \
-            "$RUNNER_TEMP/singz-callback-defined-external.txt" \
+            "$GITHUB_WORKSPACE/build/native/ios-callback-defined-external.txt" \
             > "$RUNNER_TEMP/singz-runtime-callback-overlap.txt"
           comm -12 "$RUNNER_TEMP/singz-core-defined-external.txt" \
-            "$RUNNER_TEMP/singz-playback-defined-external.txt" \
+            "$GITHUB_WORKSPACE/build/native/ios-playback-defined-external.txt" \
             > "$RUNNER_TEMP/singz-core-playback-overlap.txt"
           comm -12 "$RUNNER_TEMP/singz-runtime-defined-external.txt" \
-            "$RUNNER_TEMP/singz-playback-defined-external.txt" \
+            "$GITHUB_WORKSPACE/build/native/ios-playback-defined-external.txt" \
             > "$RUNNER_TEMP/singz-runtime-playback-overlap.txt"
-          comm -12 "$RUNNER_TEMP/singz-callback-defined-external.txt" \
-            "$RUNNER_TEMP/singz-playback-defined-external.txt" \
-            > "$RUNNER_TEMP/singz-callback-playback-overlap.txt"
+          comm -12 "$GITHUB_WORKSPACE/build/native/ios-callback-defined-external.txt" \
+            "$GITHUB_WORKSPACE/build/native/ios-playback-defined-external.txt" \
+            > "$GITHUB_WORKSPACE/build/native/ios-callback-playback-overlap.txt"
           if test -s "$RUNNER_TEMP/singz-core-runtime-overlap.txt" || \
             test -s "$RUNNER_TEMP/singz-core-callback-overlap.txt" || \
             test -s "$RUNNER_TEMP/singz-runtime-callback-overlap.txt" || \
             test -s "$RUNNER_TEMP/singz-core-playback-overlap.txt" || \
             test -s "$RUNNER_TEMP/singz-runtime-playback-overlap.txt" || \
-            test -s "$RUNNER_TEMP/singz-callback-playback-overlap.txt"; then
+            test -s "$GITHUB_WORKSPACE/build/native/ios-callback-playback-overlap.txt"; then
             echo 'strict iOS archives have duplicate defined symbols' >&2
             exit 1
           fi
@@ -557,3 +625,28 @@ jobs:
       - name: Test inert packaging boundary
         working-directory: mobile
         run: npx jest ios-native-audio-runtime-packaging.test.ts --runInBand
+
+
+      - name: Report iOS cache activity
+        if: always()
+        run: |
+          args=(report --platform ios)
+          if [ "${{ steps.ios-app-build.outcome }}" = success ]; then
+            args+=(--require-native)
+          fi
+          node scripts/ci-build-cache.cjs "${args[@]}"
+
+      - name: Save reusable iOS build caches
+        if: always() && steps.mobile-cache.outcome == 'success'
+        uses: ./.github/actions/save-mobile-build-cache
+        with:
+          cache-state: ${{ steps.mobile-cache.outputs.state }}
+
+      - name: Preserve iOS cache diagnostics
+        if: always() && env.SINGZ_CI_CACHE_REPORT_DIR != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-canary-cache-report
+          path: ${{ env.SINGZ_CI_CACHE_REPORT_DIR }}
+          retention-days: 14
+          if-no-files-found: ignore

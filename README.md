@@ -181,7 +181,7 @@ options are Azure Trusted Signing or SignPath's OSS tier (see
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)).
 
 Contributor docs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
-[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) · [CLAUDE.md](CLAUDE.md)
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) · [AGENTS.md](AGENTS.md) · [product/platform rules](docs/PROJECT-RULES.md)
 
 ## How it works
 

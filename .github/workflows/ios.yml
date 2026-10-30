@@ -1,5 +1,7 @@
 name: iOS
 
+# Main-branch pushes build a signed native archive without uploading it. Tags
+# can restore default-branch caches, but cannot restore a previous tag's cache.
 # A release tag uploads to TestFlight, waits for Apple's processing, then
 # submits that same build for App Store review when the version slot is free.
 # An open review or a version awaiting release defers store submission without
@@ -22,15 +24,16 @@ on:
   workflow_dispatch:
     inputs:
       lane:
-        description: 'fastlane lane — "validate" ships nothing; "ship" = TestFlight plus store review when available; "beta" = TestFlight only; "submit" = send an already-uploaded build to App Store review; "release" = build AND submit'
+        description: 'fastlane lane — "cache_warm" builds without upload; "validate" ships nothing; "ship" = TestFlight plus store review when available; "beta" = TestFlight only; "submit" = send an already-uploaded build to App Store review; "release" = build AND submit'
         type: choice
         default: validate
-        options: [validate, ship, beta, beta_external, submit, release, metadata]
+        options: [validate, cache_warm, ship, beta, beta_external, submit, release, metadata]
       build:
         description: 'Build number to act on (submit / beta_external). Blank = this run number, which is NOT the tag run''s — pass the tag build''s number explicitly.'
         type: string
         required: false
   push:
+    branches: [main]
     # Both patterns live under `tags`, and that is not a style choice:
     # GitHub refuses to parse a workflow that defines `tags` AND
     # `tags-ignore` for one event ("you may only define one of `tags` and
@@ -40,7 +43,7 @@ on:
     # winning.
     #
     # Hyphenated prerelease tags (v0.20.0-test1, the "hand one tester a build"
-    # flow in CLAUDE.md) can NEVER succeed here: verify_marketing_version
+    # flow in docs/PROJECT-RULES.md) can NEVER succeed here: verify_marketing_version
     # compares package.json against MARKETING_VERSION, and Apple's
     # CFBundleShortVersionString is at most three integers, so the suffix
     # cannot be carried. Better to not start than to fail after checkout,
@@ -55,8 +58,9 @@ permissions:
 # The event is part of the group, as in android.yml: without it, dispatching
 # `release` on a tag whose `beta` run is still uploading cancels that run
 # mid-upload, leaving a partial binary at Apple.
+# Cache warming has a separate group so it cannot cancel a shipping run.
 concurrency:
-  group: ios-${{ github.ref }}-${{ github.event_name }}
+  group: ios-${{ github.ref }}-${{ github.event_name }}-${{ (inputs.lane == 'cache_warm' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))) && 'cache-warm' || 'publish' }}
   cancel-in-progress: true
 
 jobs:
@@ -81,6 +85,13 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: mobile/package-lock.json
+
+      - name: Shared iOS build caches
+        id: mobile-cache
+        uses: ./.github/actions/mobile-build-cache
+        with:
+          platform: ios
+          archive-cache: 'true'
 
       # make-sample.js and the analysis-bundle build (both postinstall) shell
       # out to ffmpeg. The macOS runner image usually carries it already;
@@ -125,6 +136,9 @@ jobs:
       - run: npm ci
         working-directory: mobile
 
+      - name: Restore verified audio-api prebuilts
+        run: node scripts/restore-audio-api-prebuilts.cjs ios
+
       # The runner image's own CocoaPods, NOT `bundle exec pod` — same as
       # scripts/worktree-setup.sh, which is this repo's one definition of how
       # pods get installed. `bundle exec` here is actively wrong: bundler
@@ -144,7 +158,7 @@ jobs:
         env:
           LANG: en_US.UTF-8
           LC_ALL: en_US.UTF-8
-        run: pod install
+        run: node "$GITHUB_WORKSPACE/scripts/with-native-build-lock.mjs" --owner ios-release-pods -- pod install
 
       # Only now set up bundler, for mobile/ios/Gemfile — fastlane alone.
       - uses: ruby/setup-ruby@v1
@@ -157,6 +171,8 @@ jobs:
         run: |
           ruby mobile/ios/fastlane/tests/app-build-number-test.rb
           ruby mobile/ios/fastlane/tests/review-pipeline-test.rb
+          ruby mobile/ios/fastlane/tests/incremental-archive-test.rb
+          node --test mobile/scripts/tests/*.test.cjs
 
       # On the EVENT, not the ref shape. A dispatch aimed at a tag is the
       # normal way to use `submit`/`beta_external` — they act on the build
@@ -164,18 +180,22 @@ jobs:
       # exactly that to `beta`: the archive ran again, and with `build` blank
       # it uploaded a SECOND binary for the version and pushed it to real
       # external testers, which is precisely what `submit` exists to avoid.
-      # `push` is the only event that reaches this workflow besides
-      # workflow_dispatch (see `on:`), so testing it is exact rather than a
-      # proxy. The GDRIVE_CONFIG step's ref-shape test is a different
-      # question — "is this a real release build" — and stays as it is.
+      # Only tag pushes ship. Main pushes seed the signed archive cache without
+      # uploading a binary. Manual lane choices keep their explicit meaning.
       - name: Resolve lane
         id: lane
         run: |
           if [ "$GITHUB_EVENT_NAME" = "push" ]; then
-            echo "lane=ship" >> "$GITHUB_OUTPUT"
+            case "$GITHUB_REF" in
+              refs/tags/*) echo "lane=ship" >> "$GITHUB_OUTPUT" ;;
+              *) echo "lane=cache_warm" >> "$GITHUB_OUTPUT" ;;
+            esac
           else
             echo "lane=${{ inputs.lane }}" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Verify active iOS compiler cache configuration
+        run: node scripts/ci-build-cache.cjs begin --platform ios
 
       # Every required secret is checked inside the Fastfile itself
       # (verify_marketing_version, api_key, install_signing) with a message
@@ -183,6 +203,7 @@ jobs:
       # this configured", not a second copy of the same check here that could
       # say something different.
       - name: fastlane ios ${{ steps.lane.outputs.lane }}
+        id: fastlane
         working-directory: mobile/ios
         env:
           APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
@@ -210,6 +231,8 @@ jobs:
           # it; blank falls through to the run number, which is right for
           # `ship`/`beta`/`release`, the lanes that archive their own binary.
           SINGZ_IOS_BUILD_NUMBER: ${{ inputs.build || github.run_number }}
+          # Ccache + Clang can each occupy a process for one compile edge.
+          GYM_XCODE_BUILD_COMMAND: /usr/bin/xcodebuild -jobs 2
           # The external TestFlight group(s), comma-separated — a VARIABLE,
           # not a secret: a group name is not sensitive, and a missing secret
           # and an empty one are indistinguishable at the point of use. Unset
@@ -221,7 +244,37 @@ jobs:
           # non-UTF-8 locale is how Cyrillic release notes get mangled.
           LANG: en_US.UTF-8
           LC_ALL: en_US.UTF-8
-        run: bundle exec fastlane ios ${{ steps.lane.outputs.lane }}
+        run: |
+          set -o pipefail
+          node "$GITHUB_WORKSPACE/scripts/with-native-build-lock.mjs" \
+            --owner ios-release-fastlane -- bundle exec fastlane ios ${{ steps.lane.outputs.lane }} \
+            2>&1 | tee "$RUNNER_TEMP/singz-ios-fastlane.log"
+
+      - name: Report iOS cache activity
+        if: always()
+        run: |
+          args=(report --platform ios --log "$RUNNER_TEMP/singz-ios-fastlane.log")
+          if [ "${{ steps.fastlane.outcome }}" = success ]; then
+            case "${{ steps.lane.outputs.lane }}" in
+              cache_warm|ship|beta|release) args+=(--require-native) ;;
+            esac
+          fi
+          node scripts/ci-build-cache.cjs "${args[@]}"
+
+      - name: Save reusable iOS build caches
+        if: always() && steps.mobile-cache.outcome == 'success'
+        uses: ./.github/actions/save-mobile-build-cache
+        with:
+          cache-state: ${{ steps.mobile-cache.outputs.state }}
+
+      - name: Preserve iOS cache diagnostics
+        if: always() && env.SINGZ_CI_CACHE_REPORT_DIR != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-release-cache-report
+          path: ${{ env.SINGZ_CI_CACHE_REPORT_DIR }}
+          retention-days: 14
+          if-no-files-found: ignore
 
       # Kept for a postmortem on a failed or rejected submission — the built
       # .ipa is otherwise gone the moment the runner is reclaimed, and

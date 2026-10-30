@@ -1,3 +1,15 @@
+import javax.inject.Inject
+import org.gradle.api.file.ArchiveOperations
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.FileSystemOperations
+import org.gradle.api.file.RegularFileProperty
+import org.gradle.api.tasks.CacheableTask
+import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.PathSensitive
+import org.gradle.api.tasks.PathSensitivity
+import org.gradle.api.tasks.TaskAction
+
 apply plugin: "com.android.application"
 apply plugin: "org.jetbrains.kotlin.android"
 apply plugin: "com.facebook.react"
@@ -15,7 +27,9 @@ react {
     //   The folder where the react-native Codegen package is. Default is ../../node_modules/@react-native/codegen
     // codegenDir = file("../../node_modules/@react-native/codegen")
     //   The cli.js file which is the React Native CLI entrypoint. Default is ../../node_modules/react-native/cli.js
-    // cliFile = file("../../node_modules/react-native/cli.js")
+    // Keep Metro's content-keyed transforms when Gradle actually rebundles.
+    // SINGZ_METRO_RESET_CACHE=1 preserves the upstream explicit reset behavior.
+    cliFile = file("../../scripts/bundle-android-incremental.cjs")
 
     /* Variants */
     //   The list of variants to that are debuggable. For those we're going to
@@ -86,7 +100,9 @@ def singzAndroidCmakePolicyDigest = java.security.MessageDigest.getInstance("SHA
 [
     singzAndroidCmakeInit,
     rootProject.file("../scripts/android-ccache-launcher.sh"),
-    rootProject.file("../scripts/android-ccache-launcher.ps1")
+    rootProject.file("../scripts/android-ccache-launcher.ps1"),
+    rootProject.file("../../scripts/ccache-launcher.sh"),
+    rootProject.file("../../scripts/ccache-launcher.ps1")
 ].each { policyFile -> singzAndroidCmakePolicyDigest.update(policyFile.bytes) }
 def singzAndroidCmakePolicyHash = singzAndroidCmakePolicyDigest.digest()
     .encodeHex().toString().take(16)
@@ -258,15 +274,49 @@ configurations {
     ortAar
 }
 
-tasks.register("extractOrtSdk", Copy) {
-    from({ zipTree(configurations.ortAar.singleFile) }) {
-        include "headers/**", "jni/**"
+// Inject archive/filesystem services instead of capturing Project or a live
+// Configuration in an execution-time Copy closure. This task can be restored
+// from both Gradle's configuration cache and its shared task-output cache.
+@CacheableTask
+abstract class SingzExtractOrtSdk extends DefaultTask {
+    @InputFile
+    @PathSensitive(PathSensitivity.NONE)
+    abstract RegularFileProperty getAarFile()
+
+    @OutputDirectory
+    abstract DirectoryProperty getOutputDirectory()
+
+    @Inject
+    abstract ArchiveOperations getArchiveOperations()
+
+    @Inject
+    abstract FileSystemOperations getFileSystemOperations()
+
+    @TaskAction
+    void extract() {
+        def archive = archiveOperations.zipTree(aarFile.get().asFile)
+        def destination = outputDirectory.get().asFile
+        fileSystemOperations.sync {
+            from(archive) { include "headers/**", "jni/**" }
+            into(destination)
+        }
     }
-    into layout.buildDirectory.dir("ort-sdk")
+}
+
+def ortSdkAar = layout.file(configurations.ortAar.elements.map { artifacts ->
+    if (artifacts.size() != 1) throw new GradleException("Expected exactly one ORT AAR")
+    artifacts.iterator().next().asFile
+})
+tasks.register("extractOrtSdk", SingzExtractOrtSdk) {
+    aarFile.set(ortSdkAar)
+    outputDirectory.set(layout.buildDirectory.dir("ort-sdk"))
 }
 preBuild.dependsOn("extractOrtSdk")
 
 tasks.register("selectFfmpegCodecRuntime", Exec) {
+    // A fresh npm install has no native libraries. Restore compatibility inputs
+    // before selecting/verifying the runtime, including direct Gradle builds.
+    dependsOn(":react-native-audio-api:downloadPrebuiltBinaries")
     workingDir file("../../..")
     def arguments = [
         "mobile/scripts/select-ffmpeg-codec-runtime.mjs",

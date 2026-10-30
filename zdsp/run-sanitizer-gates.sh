@@ -2,6 +2,11 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "$0")/.." && pwd)
+if [ -z "${SINGZ_NATIVE_BUILD_LOCK_HELD:-}" ]; then
+  exec node "$repo_root/scripts/with-native-build-lock.mjs" \
+    --owner sanitizer-gates -- bash "$repo_root/zdsp/run-sanitizer-gates.sh" "$@"
+fi
+node "$repo_root/scripts/assert-native-build-lock.cjs"
 cd "$repo_root"
 
 case "$(uname -s)" in
@@ -34,12 +39,12 @@ for gate in zdsp-release-strict zdsp-asan-ubsan zdsp-tsan; do
     Ninja*) keep_going=(-k 0) ;;
     *) keep_going=(-k) ;;
   esac
-  cmake --build --preset "$gate" -- "${keep_going[@]}"
+  cmake --build --preset "$gate" --parallel 4 -- "${keep_going[@]}"
   ctest --preset "$gate"
   if [[ $(uname -s) == Linux ]]; then
     # This target does not exist on Darwin. Keep its deterministic ALSA null
     # tests in every Linux gate; snd-aloop remains an explicit host-only run.
-    cmake --build "build/native/$gate" --target audio_host_linux_tests -- "${keep_going[@]}"
+    cmake --build "build/native/$gate" --target audio_host_linux_tests --parallel 4 -- "${keep_going[@]}"
     ctest --test-dir "build/native/$gate" -R '^audio_host_linux_tests$' --output-on-failure
   fi
 done

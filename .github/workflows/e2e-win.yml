@@ -55,13 +55,12 @@ jobs:
             vendor/darwin-x64
             vendor/win32-x64
             vendor/packs
-          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-analyze.sh', 'scripts/vendor-llama.sh', 'scripts/vendor-crispasr.sh', 'scripts/assert-portable-binary.sh', 'scripts/analyze-source-hash.sh', 'CMakeLists.txt', 'cmake/**', 'zcore/**', 'zdsp/**', 'third_party/native/**', 'tools/native/**', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh') }}
+          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-analyze.sh', 'scripts/vendor-llama.sh', 'scripts/vendor-crispasr.sh', 'scripts/engine-artifact.cjs', 'scripts/assert-portable-binary.sh', 'scripts/analyze-source-hash.sh', 'CMakeLists.txt', 'cmake/**', 'zcore/**', 'zdsp/**', 'third_party/native/**', 'tools/native/**', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh') }}
 
       # Mirror build.yml's key EXACTLY (this step is restore-only — build.yml
       # is the sole saver, so a drifted string here becomes an orphan key that
       # silently rebuilds engines every run once the old entry is evicted).
-      - name: Build engines if cache missed
-        if: steps.engines-out.outputs.cache-hit != 'true'
+      - name: Verify or rebuild analyzer (including cache hits)
         run: |
           bash scripts/vendor-analyze.sh win32-x64
 

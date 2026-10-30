@@ -773,14 +773,15 @@ describe('Electron capture addon build', () => {
     }
   )
 
-  it('keys temporary CMake caches by the full checkout path', () => {
+  it('keeps producer CMake state under this checkout for compiler-cache reuse', () => {
     for (const path of [
       'scripts/build-analyze-host.sh',
       'scripts/run-core-host-tests.sh',
       'scripts/vendor-analyze.sh'
     ]) {
       const script = read(path)
-      expect(script).toContain('git -C "$ROOT" hash-object --stdin | cut -c1-12')
+      expect(script).toContain('$ROOT/build/native/')
+      expect(script).not.toContain('CHECKOUT_KEY=')
       expect(script).not.toContain('$(basename "$ROOT")')
     }
   })

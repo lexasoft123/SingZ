@@ -6,6 +6,7 @@ dist/
 /build/contract/
 vendor
 .engines-src/
+/.singz-native-build.lock/
 *.log
 .DS_Store
 

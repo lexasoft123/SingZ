@@ -6,6 +6,8 @@ cmake_minimum_required(VERSION 3.16)
 
 if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
   project(singz-native LANGUAGES C CXX)
+  include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/SingZCompilerCache.cmake")
+  singz_enable_compiler_cache("${CMAKE_CURRENT_SOURCE_DIR}")
 endif()
 
 find_package(Threads REQUIRED)

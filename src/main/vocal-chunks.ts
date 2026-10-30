@@ -173,7 +173,7 @@ async function resampleMono(input: Float32Array, from: number, to: number): Prom
  * scales with how far down we are resampling: a filter sized for a gentle
  * ratio is a near-no-op at 3:1, which is how a resampler passes its own
  * quality gate and still aliases in production (docs/ARCHITECTURE and the
- * 44.1k→22.05k lesson in CLAUDE.md).
+ * 44.1k→22.05k lesson in docs/PROJECT-RULES.md).
  */
 async function lowPass(x: Float32Array, cutoff: number): Promise<Float32Array> {
   const decim = Math.max(1, 0.5 / cutoff)

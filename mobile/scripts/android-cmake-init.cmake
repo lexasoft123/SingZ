@@ -16,9 +16,9 @@ endif()
 set(SINGZ_ANDROID_NATIVE_MAX_JOBS 8 CACHE STRING
     "Maximum combined Android native compile/link jobs")
 
-if(SINGZ_ANDROID_NATIVE_MAX_JOBS LESS 1)
+if(NOT SINGZ_ANDROID_NATIVE_MAX_JOBS MATCHES "^[1-8]$")
     message(FATAL_ERROR
-        "SINGZ_ANDROID_NATIVE_MAX_JOBS must be at least 1")
+        "SINGZ_ANDROID_NATIVE_MAX_JOBS must be an integer from 1 through 8")
 endif()
 
 # One ccache launcher for every Android native module, with paths normalized
@@ -40,7 +40,7 @@ if(SINGZ_ANDROID_CCACHE_EXECUTABLE)
             set(_SINGZ_ANDROID_NATIVE_POOL_DEPTH 1)
         endif()
         set(_SINGZ_ANDROID_CCACHE_LAUNCHER
-            "powershell.exe;-NoProfile;-NonInteractive;-ExecutionPolicy;Bypass;-File;${CMAKE_CURRENT_LIST_DIR}/android-ccache-launcher.ps1;${SINGZ_ANDROID_CCACHE_EXECUTABLE};${SINGZ_ANDROID_REPO_ROOT}")
+            "powershell.exe;-NoProfile;-NonInteractive;-ExecutionPolicy;Bypass;-File;${SINGZ_ANDROID_REPO_ROOT}/scripts/ccache-launcher.ps1;${SINGZ_ANDROID_CCACHE_EXECUTABLE};${SINGZ_ANDROID_REPO_ROOT}")
     else()
         # The POSIX launcher execs ccache, leaving only ccache + clang visible.
         math(EXPR _SINGZ_ANDROID_NATIVE_POOL_DEPTH
@@ -49,7 +49,7 @@ if(SINGZ_ANDROID_CCACHE_EXECUTABLE)
             set(_SINGZ_ANDROID_NATIVE_POOL_DEPTH 1)
         endif()
         set(_SINGZ_ANDROID_CCACHE_LAUNCHER
-            "/bin/sh;${CMAKE_CURRENT_LIST_DIR}/android-ccache-launcher.sh;${SINGZ_ANDROID_CCACHE_EXECUTABLE};${SINGZ_ANDROID_REPO_ROOT}")
+            "/bin/sh;${SINGZ_ANDROID_REPO_ROOT}/scripts/ccache-launcher.sh;${SINGZ_ANDROID_CCACHE_EXECUTABLE};${SINGZ_ANDROID_REPO_ROOT}")
     endif()
     set(CMAKE_C_COMPILER_LAUNCHER "${_SINGZ_ANDROID_CCACHE_LAUNCHER}"
         CACHE STRING "SingZ Android C compiler launcher" FORCE)

@@ -1,0 +1,6 @@
+#!/bin/sh
+# Sequencer commits (cherry-pick/rebase --continue) can omit pre-commit.
+# prepare-commit-msg also sees their final index before a commit is written.
+set -eu
+singz_root=$(git rev-parse --show-toplevel)
+exec node "$singz_root/scripts/check-staged-review.cjs"

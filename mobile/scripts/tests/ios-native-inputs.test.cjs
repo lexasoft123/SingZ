@@ -57,3 +57,127 @@ test('shared cache keys survive checkout paths and JS edits, but invalidate nati
     assert.notEqual(fingerprint(first), original, 'dependency versions invalidate')
   } finally { fs.rmSync(temporary, { recursive: true, force: true }) }
 })
+
+
+test('Android work in one checkout does not invalidate an iOS native archive', t => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'singz-ios-platform-inputs-'))
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }))
+  const first = path.join(temporary, 'first'), second = path.join(temporary, 'second')
+  const cache = path.join(temporary, 'cache')
+  const write = (root, relative, bytes) => {
+    const file = path.join(root, relative)
+    fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, bytes)
+  }
+  const nativeFiles = [
+    'mobile/node_modules/library/native.h',
+    'mobile/node_modules/library/build/published/native.h',
+    'mobile/node_modules/library/android/src/main/cpp/shared.cpp',
+    'mobile/node_modules/library/libs/ios/Library.framework/Library',
+    'mobile/node_modules/react-native-audio-api/common/cpp/audioapi/external/iphoneos/libopus.a',
+  ]
+  for (const root of [first, second]) for (const file of nativeFiles) write(root, file, 'native input')
+  const fingerprint = root => nativeInputs(root, cache, 'same toolchain')
+  const original = fingerprint(first)
+  assert.equal(fingerprint(second), original)
+  for (const output of [
+    'mobile/node_modules/library/android/build/generated/source/Props.h',
+    'mobile/node_modules/library/android/build/outputs/logs/manifest.txt',
+    'mobile/node_modules/library/android/.cxx/Debug/generated/config.cmake',
+    'mobile/node_modules/library/android/.externalNativeBuild/cache.json',
+    'mobile/node_modules/@react-native/gradle-plugin/.gradle/9/executionHistory.bin',
+    'mobile/node_modules/@react-native/gradle-plugin/react-native-gradle-plugin/build/kotlin/cache.bin',
+    'mobile/node_modules/@react-native/gradle-plugin/build/generated/sources.json',
+    'mobile/node_modules/react-native-audio-api/common/cpp/audioapi/external/android/arm64-v8a/libopus.a',
+    'mobile/node_modules/react-native-audio-api/common/cpp/audioapi/external/macosx/libopus.a',
+  ]) {
+    write(first, output, 'generated output')
+    assert.equal(fingerprint(first), original, 'non-iOS output must not invalidate: ' + output)
+    write(first, output, 'changed generated output')
+    assert.equal(fingerprint(first), original, 'changing non-iOS output must not invalidate: ' + output)
+  }
+  assert.equal(fingerprint(second), original, 'fresh checkout and Android-used checkout share the iOS key')
+  for (const file of nativeFiles) {
+    write(first, file, 'changed native input')
+    assert.notEqual(fingerprint(first), original, 'genuine packaged native input must invalidate: ' + file)
+    write(first, file, 'native input')
+    assert.equal(fingerprint(first), original)
+  }
+})
+
+test('host executable symlinks obey the same input selection as regular files', {
+  skip: process.platform === 'win32' ? 'fixture requires POSIX symlinks' : false,
+}, t => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'singz-ios-symlink-inputs-'))
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }))
+  const first = path.join(temporary, 'first'), second = path.join(temporary, 'second')
+  const cache = path.join(temporary, 'cache'), target = path.join(temporary, 'host-tool')
+  fs.writeFileSync(target, 'host tool binary')
+  for (const root of [first, second]) fs.mkdirSync(path.join(root, 'mobile/node_modules/esbuild/bin'), { recursive: true })
+  fs.symlinkSync(target, path.join(first, 'mobile/node_modules/esbuild/bin/esbuild'))
+  fs.writeFileSync(path.join(second, 'mobile/node_modules/esbuild/bin/esbuild'), 'host tool binary')
+  const original = nativeInputs(first, cache)
+  assert.equal(nativeInputs(second, cache), original, 'npm install implementation does not change native inputs')
+  fs.writeFileSync(target, 'different host tool binary')
+  assert.equal(nativeInputs(first, cache), original, 'host executable is not an iOS native input')
+})
+
+test('installed Pods manifest excludes only stale local podspec metadata across checkouts', t => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'singz-ios-podspec-inputs-'))
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }))
+  const first = path.join(temporary, 'first'), second = path.join(temporary, 'second')
+  const cache = path.join(temporary, 'cache')
+  const write = (root, relative, bytes) => {
+    const file = path.join(root, relative)
+    fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, bytes)
+  }
+  const checksum = 'a'.repeat(40)
+  const manifest = `PODS:\n  - Active (1.0)\n\nSPEC CHECKSUMS:\n  Active: ${checksum}\n\nPODFILE CHECKSUM: ${checksum}\n`
+  const activeSpec = 'mobile/ios/Pods/Local Podspecs/Active.podspec.json'
+  const source = 'mobile/ios/Pods/Active/native.cpp'
+  for (const root of [first, second]) {
+    write(root, 'mobile/ios/Pods/Manifest.lock', manifest)
+    write(root, activeSpec, '{"name":"Active"}')
+    write(root, source, 'native source')
+  }
+  const fingerprint = root => nativeInputs(root, cache)
+  const original = fingerprint(first)
+  for (const pod of ['DoubleConversion', 'fmt', 'glog', 'fast_float', 'boost', 'RCT-Folly'])
+    write(second, `mobile/ios/Pods/Local Podspecs/${pod}.podspec.json`, JSON.stringify({ name: pod }))
+  assert.equal(fingerprint(second), original, 'stale metadata from an interrupted install does not change native inputs')
+  write(second, 'mobile/ios/Pods/Local Podspecs/glog.podspec.json', '{"unused":"changed"}')
+  assert.equal(fingerprint(second), original, 'unused metadata content is ignored too')
+  for (const [file, originalBytes] of [[activeSpec, '{"name":"Active"}'], [source, 'native source']]) {
+    write(second, file, 'changed active input')
+    assert.notEqual(fingerprint(second), original, 'active podspec and native sources must still invalidate: ' + file)
+    write(second, file, originalBytes)
+    assert.equal(fingerprint(second), original)
+  }
+  write(second, 'mobile/ios/Pods/Local Podspecs/glog/native.h', 'real header')
+  assert.notEqual(fingerprint(second), original, 'only exact Local Podspecs JSON metadata is excluded')
+})
+
+test('missing or unrecognized Pods manifest conservatively retains local podspec metadata', t => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'singz-ios-manifest-fallback-'))
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }))
+  const root = path.join(temporary, 'checkout'), pods = path.join(root, 'mobile/ios/Pods')
+  const manifest = path.join(pods, 'Manifest.lock'), stale = path.join(pods, 'Local Podspecs/Stale.podspec.json')
+  fs.mkdirSync(path.dirname(stale), { recursive: true })
+  const checksum = 'a'.repeat(40)
+  for (const contents of [
+    null, 'PODS:\n  - Active (1.0)\n', 'SPEC CHECKSUMS:\n',
+    `SPEC CHECKSUMS:\n  Active: ${checksum}\n`,
+    'SPEC CHECKSUMS:\n  Active: unknown checksum\n',
+    `SPEC CHECKSUMS:\n  Active: ${checksum}\n  Active: ${checksum}\n`,
+    `SPEC CHECKSUMS:\n  Active: ${checksum}\nSPEC CHECKSUMS:\n  Other: ${checksum}\n`,
+    `SPEC CHECKSUMS:\n  "Active": ${checksum}\n`,
+    `SPEC CHECKSUMS:\n  Active: ${checksum}\nStale: ${checksum}\n`,
+  ]) {
+    if (contents === null) fs.rmSync(manifest, { force: true })
+    else fs.writeFileSync(manifest, contents)
+    fs.writeFileSync(stale, 'metadata one')
+    const before = nativeInputs(root, path.join(temporary, 'cache'))
+    fs.writeFileSync(stale, 'metadata two')
+    assert.notEqual(nativeInputs(root, path.join(temporary, 'cache')), before,
+      'unrecognized membership must retain all local metadata: ' + contents)
+  }
+})

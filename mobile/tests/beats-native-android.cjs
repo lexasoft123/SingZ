@@ -179,7 +179,7 @@ const check = (label, ok, detail = '') => {
     // NO CDP EVAL FROM HERE UNTIL IT IS DONE. The worklet leg decodes six
     // stems, and evaluating JS while a decodeAudioData is in flight segfaults
     // the Hermes inspector — 3/3 reproducible, never unpolled 4/4, and it
-    // reads from out here as an OOM (CLAUDE.md). So the wait watches a PREF
+    // reads from out here as an OOM (docs/PROJECT-RULES.md). So the wait watches a PREF
     // through `adb run-as`, which touches no JS at all, and the one eval that
     // reads the result runs after the decodes are over.
     //

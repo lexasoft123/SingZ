@@ -17,21 +17,12 @@ if [ -z "${SINGZ_NATIVE_BUILD_LOCK_HELD:-}" ]; then
     --owner core-host-tests -- bash "$ROOT/scripts/run-core-host-tests.sh" "$@"
 fi
 node "$ROOT/scripts/assert-native-build-lock.cjs"
-# Scratch paths are keyed on THIS CHECKOUT, not on $TMPDIR alone. Every
-# worktree on a machine shared one build dir and one output binary, which is
-# the same defect as the shared vendor/ slot: CMake catches its half loudly
-# ("does not match the source used to generate cache" — it blocked the gates
-# in a worktree the day this was written), and the shared OUTPUT binary
-# catches nothing at all, since two trees' gates would simply overwrite each
-# other's oracle. Keep this default distinct from pre-relocation caches that
-# were configured against mobile/native/core.
-CHECKOUT_KEY=$(printf '%s' "$ROOT" | git -C "$ROOT" hash-object --stdin | cut -c1-12)
-BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-zcore-host-tests-$CHECKOUT_KEY}"
-
-if command -v ccache >/dev/null 2>&1; then
-  export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
-  export CCACHE_BASEDIR="$ROOT" CCACHE_NOHASHDIR=1 CCACHE_COMPILERCHECK=content
-fi
+# Per-worktree builds retain matching relative paths for cross-tree cache hits.
+BUILD="${SINGZ_CORE_BUILD_DIR:-$ROOT/build/native/host-tests}"
+case "$BUILD" in
+  "$ROOT"/*) ;;
+  *) echo "Warning: external SINGZ_CORE_BUILD_DIR may prevent cross-worktree ccache hits: $BUILD" >&2 ;;
+esac
 
 cmake -S "$ROOT" -B "$BUILD"
 # Four fixed edges is the measured ceiling for these ordinary CMake targets:

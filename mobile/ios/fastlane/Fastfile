@@ -67,7 +67,7 @@ BETA_DESCRIPTION = <<~TEXT.strip
 TEXT
 
 # MARKETING_VERSION is the one place besides package.json a version is
-# written by hand (docs/DEVELOPMENT.md, CLAUDE.md) — bumped before archiving,
+# written by hand (docs/DEVELOPMENT.md, docs/PROJECT-RULES.md) — bumped before archiving,
 # same as the sis-motors.ru sideload build. CI does not bump it for you: a
 # forgotten bump here is a build App Store Connect will accept and then
 # nobody outside TestFlight sees at all, because a repeat submission of an
@@ -190,7 +190,7 @@ def api_key
     key_content: base64, is_key_content_base64: true, in_house: false
   ) unless base64.empty?
 
-  # Feature work here happens in worktrees (CLAUDE.md), and a worktree's root
+  # Feature work here happens in worktrees (docs/PROJECT-RULES.md), and a worktree's root
   # is NOT where the key lives — it is kept once beside the main checkout and
   # shared, exactly like vendor/ and gdrive.config.json. So look in this
   # checkout, then in the main one (the common git dir's parent), before
@@ -331,6 +331,14 @@ platform :ios do
     ipa = archive(build_number: build_number, type: "adhoc")
     UI.success("Ad-hoc IPA for #{version} (#{build_number}) at #{ipa}")
     ipa
+  end
+
+  desc "Warm the signed native archive cache without uploading or publishing"
+  lane :cache_warm do
+    verify_marketing_version
+    install_signing(api_key: api_key, type: "appstore")
+    archive(build_number: ci_build_number, type: "appstore")
+    UI.success("Signed native archive cache warmed; nothing uploaded")
   end
 
   desc "Check the API key and signing setup without building or uploading anything"
@@ -908,6 +916,7 @@ private_lane :archive do |options|
   archive_path = File.join(REPO_ROOT, "build-ios/SingZ-native.xcarchive")
   native_inputs = nil
   begin
+    SingzIncrementalArchive.prepare_release_dependencies(REPO_ROOT)
     native_inputs = SingzIncrementalArchive.fingerprint(REPO_ROOT)
   rescue => error
     UI.important("Native cache unavailable; using full archive: #{error.message}")
@@ -916,21 +925,20 @@ private_lane :archive do |options|
     workspace: WORKSPACE, scheme: SCHEME, configuration: "Release",
     export_method: export_method, xcargs: signing_args.join(" "),
     archive_path: archive_path,
+    derived_data_path: File.join(REPO_ROOT, "build/native/ios-derived"),
     export_options: { signingStyle: "manual", provisioningProfiles: { BUNDLE_ID => profile_name } },
     output_directory: File.join(REPO_ROOT, "build-ios"), output_name: "SingZ.ipa"
   }
   reused = false
-  cached_archive = native_inputs && SingzIncrementalArchive.cached_archive(native_inputs)
-  if cached_archive && SingzIncrementalArchive.valid?(cached_archive, native_inputs)
+  if native_inputs
     begin
-      UI.message("Native inputs unchanged: rebundling JavaScript and exporting cached archive")
-      FileUtils.rm_rf(archive_path)
-      FileUtils.mkdir_p(File.dirname(archive_path))
-      FileUtils.cp_r(cached_archive, archive_path)
-      SingzIncrementalArchive.refresh(REPO_ROOT, archive_path, options[:build_number],
-        ENV["sigh_#{BUNDLE_ID}_#{type}_certificate-name"] || "Apple Distribution")
-      build_app(**build_options.merge(skip_build_archive: true))
-      reused = true
+      if SingzIncrementalArchive.copy_cached(native_inputs, archive_path)
+        UI.message("Native inputs unchanged: rebundling JavaScript and exporting cached archive")
+        SingzIncrementalArchive.refresh(REPO_ROOT, archive_path, options[:build_number],
+          ENV["sigh_#{BUNDLE_ID}_#{type}_certificate-name"] || "Apple Distribution")
+        build_app(**build_options.merge(skip_build_archive: true))
+        reused = true
+      end
     rescue => error
       UI.important("Cached export failed; rebuilding: #{error.message}")
       FileUtils.rm_f(SingzIncrementalArchive.receipt(archive_path))

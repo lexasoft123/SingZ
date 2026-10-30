@@ -42,6 +42,9 @@ SOURCE_DIRS=(
 SOURCE_FILES=(
   "$ROOT/CMakeLists.txt"
   "$ROOT/scripts/vendor-analyze.sh"
+  "$ROOT/scripts/engine-artifact.cjs"
+  "$ROOT/scripts/ccache-launcher.sh"
+  "$ROOT/scripts/ccache-launcher.ps1"
   "$ROOT/scripts/analyze-source-hash.sh"
 )
 

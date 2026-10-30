@@ -356,7 +356,7 @@ export const subscribeAndroidAudioInputState = (
  *    the driver gave up on the unresolvable eval and closed the socket, the
  *    `setTimeout` inside this capture then fired into a runtime the inspector
  *    disconnect had already begun tearing down, and the app took a SIGSEGV at
- *    0x0 in TimerCallback::invoke. CLAUDE.md's rule for decodes — connect
+ *    0x0 in TimerCallback::invoke. docs/PROJECT-RULES.md's rule for decodes — connect
  *    before, disconnect after, never hang up mid-operation — is the general
  *    case, and this seam has to make obeying it possible.
  */

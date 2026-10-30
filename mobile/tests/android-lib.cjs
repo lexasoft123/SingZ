@@ -9,7 +9,7 @@
 /**
  * The package under test. Defaults to the release/plain-debug id; a
  * SIDE-BY-SIDE debug build (`-PdebugAppIdSuffix=.debug`, the only kind that
- * may go on somebody's own phone — see CLAUDE.md) is a DIFFERENT package, so
+ * may go on somebody's own phone — see docs/PROJECT-RULES.md) is a DIFFERENT package, so
  * every path and every `run-as` has to come from here rather than a literal.
  */
 const PKG = process.env.ANDROID_PKG || 'com.lexasoft.singz'
@@ -77,7 +77,7 @@ function silenceDevice(adb) {
  * Two rules collide here and both are load-bearing:
  *  - `run-as` cannot touch /sdcard at all. It gives you the app's uid but not
  *    its storage sandbox, so it reports "Permission denied" even for
- *    directories the app itself created (CLAUDE.md says so; this is the
+ *    directories the app itself created (docs/PROJECT-RULES.md says so; this is the
  *    second suite to rediscover it).
  *  - `adb push` CAN write there, but on an EMULATOR the result is owned by
  *    `shell` and the app cannot open it. A real phone's FUSE grants by path

@@ -46,7 +46,7 @@ fi
 
 command -v sops >/dev/null || { echo "sops is not installed (brew install sops)" >&2; exit 1; }
 
-# Feature work happens in worktrees (CLAUDE.md) and the store is kept ONCE
+# Feature work happens in worktrees (AGENTS.md) and the store is kept ONCE
 # beside the main checkout, shared — same rule as vendor/ and
 # gdrive.config.json. Look here, then there.
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

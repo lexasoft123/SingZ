@@ -92,31 +92,37 @@
     {
       "name": "linux-alsa",
       "configurePreset": "linux-alsa",
+      "jobs": 4,
       "targets": ["audio_host_linux_tests", "shared_audio_service_tests", "singz-audio-host"]
     },
     {
       "name": "host-debug",
-      "configurePreset": "host-debug"
+      "configurePreset": "host-debug",
+      "jobs": 4
     },
     {
       "name": "host-release",
-      "configurePreset": "host-release"
+      "configurePreset": "host-release",
+      "jobs": 4
     },
     {
       "name": "zdsp-release-strict",
       "configurePreset": "zdsp-release-strict",
+      "jobs": 4,
       "targets": ["zdsp_graph_tests", "zdsp_analysis_tests", "prepared_audio_tests",
         "mp3_decoder_tests", "audio_monitor_session_tests", "native_audio_ownership_tests", "native_playback_session_tests", "native_playback_contract_tests"]
     },
     {
       "name": "zdsp-asan-ubsan",
       "configurePreset": "zdsp-asan-ubsan",
+      "jobs": 4,
       "targets": ["zdsp_graph_tests", "zdsp_analysis_tests", "prepared_audio_tests",
         "mp3_decoder_tests", "audio_monitor_session_tests", "native_audio_ownership_tests", "native_playback_session_tests", "native_playback_contract_tests"]
     },
     {
       "name": "zdsp-tsan",
       "configurePreset": "zdsp-tsan",
+      "jobs": 4,
       "targets": ["zdsp_graph_tests", "zdsp_analysis_tests", "prepared_audio_tests",
         "mp3_decoder_tests", "audio_monitor_session_tests", "native_audio_ownership_tests", "native_playback_session_tests", "native_playback_contract_tests"]
     }

@@ -1,0 +1,1384 @@
+# SingZ product and platform rules
+
+Read this document before changing SingZ. [AGENTS.md](../AGENTS.md) defines the
+shared development workflow for Claude Code, Codex, and their subagents.
+Paths in prose and commands below are relative to the repository root;
+Markdown links resolve from this document.
+
+Electron desktop app for singers: split songs into six stems (htdemucs_6s), karaoke with
+synced lyrics (LRCLIB + on-device Qwen3-ASR), pitch matching, transpose, vocal training
+(chosen stems drop out on a time or lyric-line schedule), projects.
+Deeper docs: [docs/ARCHITECTURE.md](ARCHITECTURE.md),
+[docs/DEVELOPMENT.md](DEVELOPMENT.md).
+
+## Commands
+
+```bash
+npm run dev          # electron-vite dev (HMR; restarts main on src/main changes)
+npm run typecheck    # tsc over node (main/preload) + web (renderer) + tests configs
+npm test             # vitest: unit suites + tests/roundtrip (real sync -> fake Drive -> real phone code)
+npm run gates        # the six TS-against-C++ parity gates (scripts/run-parity-gates.sh)
+npm run build        # bundle into out/  — ALWAYS build before driving E2E
+npm run dist         # package installer for current platform
+npx electron .       # run the built app (out/) without packaging
+scripts/vendor-llama.sh     # build llama-server (runs Qwen3-ASR, the lyrics recogniser) into vendor/<platform>-<arch>/
+scripts/vendor-crispasr.sh  # build crispasr (runs Qwen3-ForcedAligner, which times the words) into vendor/
+scripts/vendor-analyze.sh   # build singz-analyze into vendor/ (ships dark; cmake, one defn with the host scripts)
+scripts/build-gpu-pack.sh   # torch/MPS splitter pack (Apple Silicon)
+scripts/build-onnx-pack.sh  # demucs-onnx splitter pack (win32-x64 | darwin-x64)
+cd mobile && npx jest                                  # phone-side Drive logic
+cd mobile/android && ./gradlew :app:testDebugUnitTest   # Kotlin cache-currency table
+mobile/scripts/test-swift-currency.sh                   # Swift cache-currency table
+mobile/scripts/test-swift-project-paths.sh              # Swift project name/path table
+bash mobile/scripts/test-native-playback-bridge-schema.sh  # iOS bridge validators (clang only, no Xcode)
+bash zdsp/run-sanitizer-gates.sh                        # the phase-4 native ctest gate (3 presets)
+```
+
+Analyzer and lyrics-engine producers reuse outputs only after identity/receipt
+validation. Bootstrap and cache behavior are defined in [DEVELOPMENT.md](DEVELOPMENT.md).
+
+## Verification policy
+
+**The C++ core is the source of truth for every detector** (decided 2026-08-22).
+New detector work lands in `zcore/src/legacy` first; the TypeScript in
+`src/renderer/src/audio/` is a port of it, and a divergence means the TypeScript
+has drifted — not the port. What holds the two together is the seven parity gates
+under `eval/`, so they are the contract, not a diagnostic: `npm run gates`
+(`scripts/run-parity-gates.sh`) runs all seven on the bundled sample in ~45 s
+(analyze-parity is the seventh: the combined one-child pass the desktop
+actually spawns against the individual subcommands, value-identical, with the
+lattice-and-lyrics-over-stdin leg exercised both ways),
+building `singz-analyze` once and generating `mobile/src/gen/analysis-lib.js`
+and the sample itself rather than telling you to `npm ci` somewhere else.
+**`.github/workflows/checks.yml` runs typecheck + `npm test` + all seven on every
+push and PR** — before it existed nothing ran on an ordinary push or PR at all.
+The desktop was not untested (build.yml runs typecheck and `npm test` on `v*`
+tags, a dispatch and the Monday cron; e2e-win.yml runs `npm test` again on its
+branch) but every
+one of those is armed deliberately or after the fact, so a change could be
+written, reviewed and merged without a machine seeing it. It pins
+`runs-on: ubuntu-24.04` rather than `ubuntu-latest`, because the two courts
+gates compare transcendentals and a moving image would turn a runner bump into a
+red nobody caused; that platform (glibc 2.39, g++ 13.3) was measured green
+first, as were Debian 12 x86_64 and aarch64. It uses `paths-ignore`, never an
+allow-list: an allow-list stops covering a source directory the day one is
+added. A green run is a DRIFT canary
+on a 40 s synthesized sample, not a quality corpus — real-song runs
+(`--library`, a project dir) stay a deliberate act, `beats-parity` stays
+staged, and no parity gate can see the two implementations being fed DIFFERENT
+INPUTS, which is exactly how the melody framing bug survived a year of green.
+
+**Every E2E driver runs under a deadline** (`tests/shared/watchdog.cjs`, armed
+by a single `require(...).arm('<name>')` line at the top of each): a hang —
+a CDP evaluate against a suspended app, a Metro target that never appears,
+`devicectl` waiting on a locked phone — otherwise sits there for ever, because
+the open socket keeps node's loop alive, and the next run contends with it.
+Three deadlines. The one that matters is the STEP: a named operation with a
+budget it must finish inside — `await watchdog().run('open the song', 300,
+() => …)`, from `current()` in the same module, a no-op before anything armed
+it. A blanket silence timer has to be generous enough for the slowest quiet
+stretch in the repo, so a wedged five-second call would burn ten minutes before
+saying anything; a step says what was being done, how long it was allowed and
+how long it had been, on the second it runs out. Steps nest (the innermost owns
+the deadline), `{ soft: true }` rejects with a StepTimeout instead of ending the
+run, and `E2E_STEP_SCALE` multiplies every budget for a slower machine. The
+device layers under `mobile/tests/player-session/` put launch, attach, hook
+install and song open under budgets there, so every mobile driver inherits
+them. Behind the step are the two blanket ones: no output for ten minutes, or
+sixty minutes in total (the long drivers say so at their arming;
+`E2E_WATCHDOG_MINUTES` / `E2E_WATCHDOG_IDLE_MINUTES` override, `0` disarms). On expiry it names the
+deadline, how long the run had been going and the last line printed, kills its
+own DIRECT children (on Windows each with its tree, `tests/shared/kill-children.cjs`)
+— an Electron does not die with `process.exit`, and one
+was found hidden at 66 minutes — and exits 1; killing a run by hand prints the
+same diagnosis. Progress is taken from the driver's own output (the arming
+patches `console.log`), so a new driver needs no watchdog calls, only the
+arming line — and `tests/unit/e2e-watchdog.test.ts` refuses one that skips it.
+
+UI or engine changes are verified by driving the real app with
+`playwright-core`'s `_electron` (session drivers live in the scratchpad, never
+in the repo; permanent harnesses are `tests/e2e/win-smoke.cjs` (run by
+the E2E Windows workflow, which also runs `npm test`), the two capture-addon
+harnesses in `tests/e2e/` (`capture-addon-smoke.cjs`, the Electron ABI/load
+gate CI runs on both platforms; `capture-addon-hardware.cjs`, by-hand only —
+it opens the real microphone), and the mac drivers
+in `tests/e2e/mac/` (twenty-one of them: an A-B LOOP set AHEAD of the playhead
+(`loop-ahead-e2e.cjs` — the bar must wait for the song to reach A; setting
+such a loop drew it in the loop's TAIL at once, because the core folded every
+matured audible projection into the loop, the frames before A included, while
+every driver stayed green: none of them had set a loop anywhere but around
+the playhead), the lanes' PLAYED EDGE
+(`played-edge-e2e.cjs` — the brightness step must sit on the playhead line
+on every frame while a song plays, whole and zoomed, and a sliver between
+the played layer and its edge layer must render exactly like none: a user
+saw the step trailing a zoomed line by eye while every driver was green,
+because none of them looked at the lanes while a song rolled — and the
+unplayed part must sit visibly in SHADOW, because the kit's own ~16% step
+read as none at all once the edge sat on the line), align,
+lyrics editing (the editor's
+align-draft leg is a different code path from the panel's Check & align —
+both are covered), CANCELLING one of those jobs
+(`lyrics-cancel-e2e.cjs` — a cancel is not a verdict on the lyrics: the
+panel owes the singer exactly the words it was showing when they started,
+and it used to empty itself instead, 36 lines to 0 until the song was
+reopened, with lyrics.json untouched the whole time so nothing on disk
+could see it), wizard/consent, audio settings,
+bar editing — TWO of those, because dragging a line and pressing Re-detect
+are different code paths and only the drag was covered — and the
+analysis-rule drivers: the two stem-rate ones, the two song-switch races,
+and stamp-upgrade — and `player-session-e2e.cjs`, the desktop's
+native-vs-legacy session replay judged by the phone harness's rules, which needs the
+DSP-graph addon built for the tree; the native CoreAudio path bypasses Chromium's
+mute, so `SINGZ_MUTE` is honoured in MAIN instead (`mutedMasterGain` clamps the
+master gain every prepare and every master-gain command carries through) — and `mutedCueVolume` clamps the metronome's cue volume at prepare, because the clicks bypass the master bus and a muted native run with the count-in on clicked out loud until it did, which
+is what keeps a native driver silent without each one remembering to zero it; and `transport-race-e2e.cjs`, which
+presses Play the way a singer does and the session replay by construction
+cannot — EARLY, while the graph prepared ahead is still building, and TWICE
+in a row, and opens a SECOND song after the first. A field session found two
+things broken with the session replay green throughout: opening a song AFTER
+another one built a whole graph for the song being LEFT — the loader resets a
+dozen controls on the way in and each re-arms the prepare-ahead timer, which
+fired while `engine.tracks` were still the old song's, so 2.3 s of blocked
+main went into a graph nobody could use (with two songs of different lengths
+the core refuses it outright, which is what the field log showed); and a
+second Play inside one 5 Hz status poll asked the core to resume a transport
+already playing, whose refusal threw and left the BUTTON on Play for the rest
+of the song. That second one is why it reads `__test.playing`, the button's own
+React state, alongside the core's transport state and requires all three
+opinions to agree — every desktop driver before it read `engine.playing`
+alone, which was right all along while the button was wrong, exactly the
+divergence the phones added their own `__test.playing` for. It also fails on
+ANY dsp warn or error, which is what the log is FOR now; the session replay
+policed three hand-written phrases until one of them missed sixteen
+`resume failed` warnings in a row; and `open-native-e2e.cjs`, which holds
+the open to NOT decoding: under native playback the lanes are MEASURED off
+their files by the addon (`measurePlaybackLanes`, the header + computePeaks'
+peaks + the phones' envelope + the silent-lane RMS, one pass, nothing
+retained — `audio/lane-measure.ts`, `native/playback/lane_measure.h`), and
+the driver refuses to pass unless main's log says so, no lane has samples in
+the renderer after the open, native Play advances, and the measured vocals
+agree with a decode fetched back afterwards. Before it, every open decoded
+six lanes through Chromium for a duration and a drawing and released them
+after Play (2.7 s on this Mac, ~10x on the fleet); with it, 0.56 s. A lane
+the measure refuses decodes as before, so a green run here is also the
+promise that the fallback never got exercised for a healthy project; and `count-in-e2e.cjs`, the only desktop driver that turns the COUNT-IN on: it scrubs before the first Play, presses Pause INSIDE the count-in and Play after a Pause twice, and reads `engine.position` at 40 ms through every pre-roll — the two 0.21.1 field reports it guards were invisible to every driver before it because none of them counts in (every Play after a song's first was a bare resume, so the count-in sounded once per open; and the core's negative pre-roll frames were clamped to 0, so a mid-song count-in drew the bar at the top of the song and a Pause inside it parked it there — the bar HOLDS at the landing now, as the phones' does) — and it hammers Space, sampling the bar at 30 ms, because the core's audible projection is UNAVAILABLE for a latency after every transport edge and its field defaults to 0, which the facade read as a position (one poll at the top of the song on every playing→paused edge; the phones check the flag, the desktop does now, the render head standing in — less the latency while the song moves, see below); and it plays a song with its beat grid TAKEN AWAY and the metronome left on, because a click track needs a grid and the facade raised that as a product error — the click is a saved setting of the SONG, the grid is a detection that can be absent, stale or still running, so the two disagree routinely, and a singer met "Playback could not start: Native metronome playback requires a beat grid" over a song Web Audio would have played with its clicks silent; and it presses a plain Pause a set time after a steady 200 ms status poll and samples the bar well under a millisecond apart until the pause settles, because the facade stopped projecting the clock the moment the pause command returned and drew the last poll UNPROJECTED for the read-back's round trip — the bar stepped back by up to 131 ms in 4 of 28 Pauses on the field laptop, then jumped forward to where the core parked; it is held where Pause was pressed now until the park point lands (the phones' pause hold), and the driver forbids any backward step; and it presses Play and seeks while the song plays, sampling the bar the same way, because until the core's projection matures after an edge the render head stood in for the ear a whole presentation latency AHEAD of it — every Play moved the bar before the music and stepped it back by the latency when the projection took over (9.6-11.6 ms in 6 of 6 Plays on the Mac's built-in route; 150-152 ms there for a TRANSPOSED song, whose time-pitch processor puts the latency at 151 ms; 150-250 ms on a Bluetooth route; seeks, landings, seams and loop wraps whenever a poll hit the window, and a loop wrapped a latency early); the stand-in is the head less the latency now, floored where the run began, and the driver, plain and transposed and through an A-B loop, allows half a latency of step back at any status whose projection has not matured; and it seeks while the song simply plays, a set time after a steady poll, because seek() left the core's receipt to the poll already armed — a steady 200 ms one — so the bar held the target that long while the song played on and then jumped forward 50-170 ms; the poll looks every edge period after a seek now, and the driver bounds the hold at the latency plus 40 ms and any forward jump at 25 ms; and it plays a quarter-second A-B loop for ~80 laps at the fast status cadence, because a status is up to a callback stale when it is read and right after a wrap a staler stand-in could fall a hair short of the loop's start after the status before had already wrapped the bar — folded back into the lap the head had left, the bar drew the loop's start, its tail, then its start again (6 of ~190 wraps on the Mac); a fold never goes back past a lap the bar has shown now, and the driver forbids any step forward of more than half the loop; and `stems-after-end-e2e.cjs`, which plays a song out and presses Play again, and scrubs back out of its last seconds, and reads each lane's `starvedBlocks` from the core — a streamed lane the feeder had read to its END never chased the jump back, so every stem played silence under a metronome that clicked on ("the metronome plays, but the stems don't", a 0.23.3 field report from a 48 kHz WASAPI laptop), and every muted driver before it was blind to that, because the transport, the button and the bar all moved exactly as they should; the
+`e2e-verifier` agent in
+`.claude/agents/` holds the roster of record, and a new driver is not
+finished until it is listed there — launch one instance per platform in
+parallel for cross-platform verification) — vitest unit tests in
+`tests/unit/` covering the v2 FLAC format with electron aliased to a stub).
+Load files through the hidden `<input type=file>` — same code
+path as drag-drop. Read the screenshots you take.
+**A desktop change is verified on the Windows field laptop TOGETHER with the
+Mac, not after it, and not by CI alone** (the user's rule, 2026-09-13). The
+Mac is the dev box and most of the fleet is Windows, and the two have
+disagreed at every layer that matters: CoreAudio against WASAPI, `pread`
+against a seek-then-read on a shared file position (the streaming race that
+only MSVC on that machine could show — the Mac passed throughout), four cores
+where everything used to queue behind main. Neither Windows leg of CI opens a
+native transport: Core Windows is ctest, and the E2E Windows smoke never
+presses Play. So the laptop run is the ONLY place Windows native playback is
+exercised, and a playback or engine change reported "verified" on the Mac
+alone is not verified. The recipe is a repeatable half-hour and lives OUTSIDE
+this file on purpose — its host, user and paths are internal and this file is
+public: the machine half is `~/.claude/rules/dell-xps.md`, the SingZ half is
+the `dell-desktop-verification` project memory (export the tree, reuse
+`node_modules` from the newest tree with the same lockfile hash, build the
+addon under vcvars, then the session harness and any probe through a
+scheduled task in the interactive session — session 0 has no audio
+endpoint). Two rules ride with it: run the SAME harness against a control on
+that machine before calling a red a regression (its numbers are 10x the
+Mac's and it fails for its own reasons — CPU and working-set rows within a
+few percent are its noise, not yours), and report both platforms side by
+side in the same message. The `e2e-verifier` agent has a `windows-field`
+lane for exactly this; launch it alongside the mac one.
+**Metro serves JS live; NATIVE needs a rebuild+install, and a stale binary
+reports green** — a mobile run against an app built before the native change
+does not merely miss it, it turns every native-facing check VACUOUS: the
+CoreML branch could not appear in the log because it was not compiled in,
+and the download-progress poller was `undefined` behind its own typeof
+guard, both of which read as passes. Rebuild + reinstall whenever the diff
+touched .mm/.swift/.kt/.cpp, and if you want to check rather than trust,
+grep the app binary itself for a literal the change added —
+`strings <app>.app/SingZPlayer | grep …` (pods link STATICALLY here:
+use_frameworks! is behind USE_FRAMEWORKS, which nothing sets, so there is
+no dylib of ours to grep).
+**Every mobile driver must filter Metro's target list by `deviceName`** —
+Metro lists every attached app in connection order, so with an emulator and
+a simulator both up, an unfiltered `find(t => t.webSocketDebuggerUrl)` takes
+whichever answered first: a driver seeded the iOS container and then
+interrogated the ANDROID app, reporting its projects as a failure. Every
+driver in `mobile/tests/` filters now; a new one must too.
+**By default the iOS simulator shows NO soft keyboard, which quietly makes
+every keyboard-dependent check there vacuous** — it boots with the Mac's
+hardware keyboard connected. On this rig the devices are booted headlessly
+with no Simulator.app at all, which is how the drivers here run — so there is
+no window to send ⌘K to, and nothing has established what a headless device
+does when a field takes focus. It is a default, not a law: Simulator's
+I/O ▸ Keyboard ▸ **Toggle Software Keyboard (⌘K)**, or turning off **Connect
+Hardware Keyboard (⇧⌘K)**, raises a real one, and the choice persists per
+device as `ConnectHardwareKeyboard` under `DevicePreferences` in
+`~/Library/Preferences/com.apple.iphonesimulator.plist`. What is missing is a
+`simctl` subcommand, so a driver cannot flip it the way it flips everything
+else. A driver that types into a field and taps a result on the sim proves
+nothing about a phone unless somebody has raised the keyboard first: RN's
+guard for that case (`ScrollView`'s `_keyboardIsDismissible`, fed by
+keyboardWillShow/DidShow into `_keyboardMetrics`) is only as real as the
+keyboard that raised it. Measure that class on Android, whose IME is real —
+confirm it with
+`adb shell dumpsys input_method | grep -E "mInputShown|mVisibleBound"` rather
+than assuming, since `adb shell input text` types without opening one
+(`mInputShown` is the one that literally answers "is the IME up"; the other is
+a binding flag that happens to move with it) — and say which platform a
+keyboard result came from. (Measured 2026-08-22: with the IME up on an API 36
+emulator, the first tap on a search result landed both with and without
+`keyboardShouldPersistTaps`, so the first-tap-dismisses branch does not bite
+there. The iOS half is still unmeasured — ⌘K makes it possible, and nothing
+here has done it.)
+**A Fast Refresh A/B needs a VISIBLE marker in the same edit** — twice in one
+session a "the change makes no difference" result had to be re-run because
+nothing proved the bundle had landed. Rename a placeholder, move a label,
+anything the screenshot can show; without it a negative result and a stale
+bundle are the same picture.
+**Automated runs are silent** — sound is only for a human listening
+(end-user checks/demos). Desktop drivers launch with `SINGZ_MUTE=1`
+(→ Chromium mute-audio; analysers, sinkId and timing behave exactly as
+audible — permanent drivers set it themselves, scratchpad drivers must
+too); **and every driver launch sets `SINGZ_E2E_HIDDEN: '1'` in the env** —
+permanent AND scratchpad alike: main then never shows the window at all and
+disables backgroundThrottling so timers run full-rate hidden. An app window
+over the singer's work mid-session is how a measurement run makes itself
+unwelcome, and it happened THREE times before this landed: eight permanent
+drivers patched with a showInactive helper, a scratchpad driver missed it,
+and then the helper itself lost its race (it patches over IPC after launch,
+and even winning, showInactive still raises a window over the work —
+focusless is not invisible). `quiet-launch.cjs` survives only as the
+fallback for builds that predate the env; drivers do both; sim tests zero `__test.engine.master.gain` after the hook-wait
+(metronome clicks bypass master, so that test passes `volume: 0` —
+`clickCount` still counts); the Android emulator gets
+`adb shell cmd media_session volume --stream 3 --set 0` (the old
+`media volume` is gone on API 36) FOLLOWED BY twenty
+`input keyevent 25` — measured on an API-36 AVD, the documented command
+prints that it will set the volume, prints "Connecting to AudioService",
+exits within a second and silently applies nothing (streamVolume measured
+either side of the call is unmoved; it stayed 5/15 across a reboot), so
+ever since it was written the Android suites' self-mute was a
+no-op, and only add-song's own `master.gain = 0` kept that one quiet.
+On this Mac, the SDK's Android emulator must be canary channel ≥37.2.7 —
+stable 37.1.11 and earlier garble all guest audio while the default output
+has >2 channels (the Zen; Google issue 506475581, fixed upstream and
+verified clean on canary 37.2.8; details in
+~/.claude/rules/android-emulator.md). Automated runs pass `-no-audio`,
+which sidesteps the question entirely regardless of channel.
+Keyevents
+always land — twenty `input keyevent 24` (VOLUME_UP) is how you get the
+sound back for a human demo, not `--set`, which is broken in both
+directions. Details + env hooks:
+[docs/DEVELOPMENT.md](DEVELOPMENT.md).
+Mobile has its own permanent sim-driven tests in `mobile/tests/`
+(`seek-memory.cjs`, `open-close-memory.cjs`, `loop-region.cjs`,
+`ab-repeat.cjs`, `offline-cache.cjs`, `custom-track.cjs`,
+`beats-native-ios.cjs`, `song-sheet-beat.cjs`, `player-session.cjs`,
+`focus-loss-android.cjs`, `play-from-anywhere.cjs`,
+`waveform-streamed.cjs`, `now-playing.cjs`, `sample-background.cjs`,
+`move-to-drive.cjs` — both platforms, `PLATFORM=ios|android`, in three variants
+(default, `STAY_ON_PHONE=1`, `CUT_MID_BATCH=1`); it rewrites the
+generated gdrive-config.ts to aim the app at a fake Drive and restores it): CDP over
+Metro against the iOS
+Simulator — run them
+after engine or loading changes.
+**`waveform-streamed.cjs` is the one whose song must stay LONG**, and it is
+the standing example of a suite that was green because its fixture was too
+small to lose a race: the seek bar's envelope is filled in by a background
+pass one lane at a time, `lanePeaks()` cached whichever answer arrived first,
+and four builds shipped a phone that drew no waveform at all while every
+simulator run passed — because six lanes of the 40.8 s sample measure in a
+quarter of a second, before the screen's first ask. It loops the sample to
+~11 minutes so the pass is still going when the screen mounts, asserts the
+answer IMPROVED rather than merely arrived, and exits 2 as INCONCLUSIVE
+rather than passing when the pass wins the race anyway. Shortening its song
+to save a minute takes its teeth out entirely. `loop-region` and `ab-repeat` are a PAIR
+and the split is the lesson: the first drives `engine.setRegion`, which was
+never the part in doubt, and the second drives the button's own
+handler — the three-state cycle and the marks the scrub band is drawn from shipped with their test
+hooks exported and nothing referencing either. `now-playing.cjs` is the one that reads the OS
+back rather than the app: the Lock Screen / Control Center card and Android's media session and
+notification, the commands that come back from outside the app (Android's play and pause as
+REAL media keys), and a song left PLAYING that must keep advancing behind the Home Screen —
+the guard for App Review's 2.5.4 rejection of 0.19.0, which declared the `audio` background
+mode with nothing visible using it. On Android that song is kept alive by `NowPlayingService`,
+a mediaPlayback foreground service held only while a song plays; App.tsx skips the background
+park exactly while `nowPlaying().keepsPlayingInBackground`, and a pause from the notification
+parks and holds the stream as leaving the app does. `sample-background.cjs` is App Review's own path, and it exists because
+`now-playing.cjs` cannot take it: that driver turns the native backend ON and
+refuses any other, since its Lock Screen claims are about the native graph —
+while the BUNDLED SAMPLE, the only song a reviewer with no library can open and
+the one the review notes name, plays on LEGACY (it decodes bundled assets, not
+the lane files the native graph opens). So every green Now Playing run
+described a path no reviewer took, and 2.5.4 rejected the app twice for it:
+App.tsx kept the held NATIVE graph alive and then suspended the legacy engine
+two statements later, which paused the sample and, by setting `backgrounded`,
+made the Lock Screen's own play refuse it. This driver forces nothing — no
+preference, no seeded project, no backend — opens the sample from a fresh
+install, presses Play, presses Home, and asks whether the song still moves and
+whether pause and play from the OS still reach it. Four of its rules are red on
+the code that shipped in 0.22.0. `song-sheet-beat.cjs` is the one that watches
+a SCREEN rather than the engine: it seeds two phone-library projects (a
+hand-made grid, and a song with nothing detected), opens the Song sheet and
+reads the Beat row through somebody else's analysis — the rule in
+`song-sheet-copy.ts`, which no headless suite can see applied to a real row.
+`play-from-anywhere.cjs` drives the native Plays that are NOT a fresh song's first Play — a scrub or an A-B before Play, the count-in from a scrubbed spot, Play after a pause with and without the count-in — compares the seek bar's level envelope across both backends, and holds the two things the SCREEN owes a Play: the transport button turns to Pause when the song starts rather than when the next telemetry poll lands (it read `__test.playing`, the button's own React state, because `engine.playing` was right all along while the button was a second behind), and under a display trim standing in for a slow route every count-in dot lights before the row goes (the clicks sound on past the landing, so a row that ends at the landing loses them — two dots of four at 1.2 s); those paths reached a phone in build 49 with only jest and hand probes behind them, because the session harness below seeks, loops and pauses only after Play. `player-session.cjs` is the only one that runs the SAME session TWICE, once
+on each playback backend, and compares the two — and the only one that can
+drive a REAL iPhone (`--platform ios-device`, opt-in, named by `IOS_DEVICE`,
+never part of a bare run because it writes into somebody's own library; its
+CPU/memory columns are blank because a phone has no `top`): a singer's evening
+compressed into one script (a long six-lane song, three metronome touches,
+four seeks, three lane ramps, transpose, training, pause/resume,
+background/foreground, out to the end of the song, a second song, an app
+restart), every timing taken IN-APP, CPU and PSS/RSS sampled in five phases,
+and the app's own log read for `graph build refused` / `cue rebuild failed`
+/ `durable save failed`. Native must be no slower than legacy + max(50 ms,
+10%) and no heavier in any phase — with THREE carve-outs, all printed
+UNCOMPARED. The backgrounded phase is not compared at all when the two
+backends disagree about whether the transport is still running, because
+"still rendering six lanes" against "stopped" is two different jobs. The transpose is a full graph rebuild under native today and is
+held to an absolute 12 s ceiling instead, because a comparison nobody can
+pass teaches nothing; and first-audible is reported only, because legacy
+times it from its own position clock and native from the core's first audible
+callback, so the two columns are not the same measurement. Its CPU/memory columns are a legacy-vs-native comparison on ONE
+host and are never a phone's numbers. Two things to know before running it:
+the Mac's default output must be at 48 kHz or the simulator's RemoteIO
+refuses the native handoff and the "native" pass silently measures legacy
+(it refuses to start rather than produce that red), and NOTHING under
+`mobile/` may be edited while it runs — Metro reloads the app's JS on any
+change there, unmounting the player mid-session, so every measurement window
+carries a run id and a reload now fails loudly instead of arriving as a
+mystery stall. `beats-native-{ios,android}.cjs` are a PAIR
+and both are owed: the two bindings marshal differently (iOS builds its dict
+from the core's doubles, Android crosses a JSON line and parses it in Kotlin),
+so a value lost in that text hop is invisible to the iOS half. Both want a
+project whose stems ALL carry audio — a silent stem discriminates nothing, and
+a fallback mutated to drop one passed until the mutation was moved to a stem
+with music in it — and both report whether the LATTICE and the aligned WORDS
+actually crossed, because a bare comparison sends neither and those are the
+two arguments the real pipeline always fills. `focus-loss-android.cjs` takes audio
+focus away from NATIVE playback in the three windows the bridge's generation
+ledger has to get right — a playing song, an ARMED SWAP (the core keeps the
+song playing when only the candidate is cancelled, so the bridge must retire
+both generations), a HELD stream in the background (the song PAUSED first: a song
+left playing is kept playing under the media session now), and a song PLAYING under
+that media session in the background — and asserts the song
+stops, the log says why, and Play afterwards starts fresh; the loss is
+delivered by `NativeAudioRuntime.debugAudioFocusChange`, a DEBUG-build-only
+method onto the same listener AudioManager calls, because nothing an `adb
+shell` can do takes focus deterministically. `mic-android.cjs` is the one
+that cannot run on a simulator AT ALL: it drives vocal-training CAPTURE
+through the `__test.audioInput` seam, so it wants a real phone with a real
+microphone — an AVD booted `-no-audio` has no input, and the driver then
+correctly and uselessly reports a capture that delivers nothing. It needs the
+side-by-side debug build (`-PdebugAppIdSuffix=.debug`) and asserts the
+TRANSPORT contract only — the input inventory, that Bluetooth never outranks
+the built-in microphone, the negotiated device/lane/format/rate, that the
+preset was READ BACK rather than merely asked for, that audio arrives with the
+hardware callback firing and no overruns, and that the lease releases cleanly
+enough for a second capture to succeed. Pitch and level are deliberately NOT
+asserted there: they need a controlled room, and the host suite's
+mutation-checked fixtures pin them without one. Pure-JS mobile logic that no device can show
+(the Drive protocol, offline fallbacks) is jest instead: `cd mobile && npm test`
+— needs `@react-native/jest-preset`, a `transformIgnorePatterns` that exempts
+our ESM-shipping RN deps, an asset `moduleNameMapper` for the sample's FLACs,
+`jest.setup.js` to stub audio-api + the pods (they throw on import with no
+native module), and a `resolver` for `@singz/ui`, whose subpath exports are
+ESM-only. That last one is scoped to that package on purpose: the one-line
+`customExportConditions: ['import']` fix is global, and switching every other
+dependency onto its ESM build takes all 33 suites down with it (measured). A
+suite that stops being RUN is the failure mode here — nine of them went dark
+when the phone stopped carrying its own copy of the kit, and jest reported
+240 passing tests and no failures throughout.
+**Two sessions, one Mac**: another worktree's Metro already on 8081 will happily
+serve ITS bundle to your app, so a parallel run needs its own simulator *and* its
+own port — boot a second device, build with `RCT_METRO_PORT=8082`, and then set
+the runtime bundle host too:
+`xcrun simctl spawn <udid> defaults write io.s-dev.singz RCT_jsLocation -string localhost:8082`
+(the build-time port alone does NOT move the Debug app off 8081 — it silently
+attached to the neighbour's Metro). Pass `SIM_UDID`/`METRO_PORT` to the tests.
+And never `pgrep` for the app: with two simulators up there are two SingZPlayer
+processes, and measuring the wrong one made the memory test report
+"release() freed nothing" — take the pid `simctl launch` prints.
+Driving **Android** over CDP: never evaluate JS while a decode is in flight —
+the Hermes inspector segfaults the app mid-`decodeAudioData` (looks exactly
+like an OOM: SIGSEGV at 0x0 on `mqt_v_js` in libhermesvm, ~9 s into loading a
+long song, 3/3 reproducible; the same load never fails unpolled, 4/4). Poll
+the `singz.crumb` pref over `adb run-as` instead, which touches no JS.
+**DISCONNECTING the inspector mid-decode kills the app the same way**
+(measured 2026-08-21: close the socket during a six-stem load → the identical
+SIGSEGV) — the socket may sit attached idle across a whole load, but may
+neither speak nor hang up while one is running; connect before, disconnect
+after. And **no open/load time measured on the debug app describes the
+product**: the dev Metro bundle inflates the load path by roughly an order of
+magnitude (the 5.3-min test song opens in 30 s on the debug rig, inspector
+detached; the user's real songs open in 3-4 s on the release app — different
+songs, so the factor is directional, not a ratio of one measurement) — quote
+release-app numbers or none. Debug
+builds only — release APKs have no inspector. Metro also lists *every*
+connected app, so pick the target by `deviceName` or a stray simulator will
+answer your evals while you measure the phone. And its bundles are PER
+PLATFORM: a Metro already warm for iOS still builds Android from cold, which
+outlasts the app's own patience and surfaces as "no debugger target" from a
+dev server answering `packager-status:running` perfectly — pre-build it with
+`curl -s -o /dev/null "http://localhost:<port>/index.bundle?platform=android&dev=true&minify=false"`
+before launching the app.
+**Which emulator answers first and which one can be driven are different
+questions** — debug and release share the applicationId (`com.lexasoft.singz`,
+no `applicationIdSuffix`), so an AVD carrying a *release* build looks
+identical in `adb devices` and fails only once the driver is already running:
+`run-as: package not debuggable`, no inspector, no Metro target, both suites
+dead at setup for reasons that have nothing to do with the change under test.
+Ask the device before trusting it — `adb -s <serial> shell dumpsys package
+com.lexasoft.singz | grep -E 'versionName|DEBUGGABLE'` — and confirm the
+installed APK is *this* tree's (`md5sum` it against
+`mobile/android/app/build/outputs/apk/debug/app-debug.apk`). The same
+applicationId is why a PLAIN debug build must never be pushed to the user's
+own phone: same id + different signing key = Android demands an uninstall
+first, which takes `files/singz-projects` (every downloaded song) and the
+Drive sign-in with it. Build it with `-PdebugAppIdSuffix=.debug` instead and
+it installs beside the release app, touching neither — that is how the POCO
+was driven; the gotchas that follow from it are below.
+
+## Hard-won gotchas (do not re-learn these)
+
+- **userData identity**: `Electron out/main/index.js` → userData "Electron";
+  `npm run dev`/`npx electron .` → "singz"; packaged → "SingZ". Caches differ
+  per identity — shared things (model weights, GPU pack) deliberately live in
+  `~/Library/Application Support/SingZ/` via `modelsDir()`/`packDir()`.
+- **Never `fetch()` custom protocols from `file://` pages** — blocked in prod
+  builds. Audio bytes go over IPC (`media:read`).
+- **Mobile stems must be freed explicitly — GC is far too late** — decoded
+  stems are ~138 MB per minute of song (six lanes, 48 kHz float32), so a
+  4-6 min song is 630-845 MB while Hermes sees only a small wrapper and
+  collects whenever it likes. Two separate pins, both needed: the native
+  graph holds every source node it created until the render thread retires
+  it (never, once playback stops) — null `source.buffer` before discarding a
+  source; and the buffer's host object owns the PCM until finalization —
+  `AudioBuffer.release()` (**audio-api patch 4**) hands it back on the spot.
+  Leaving a song must call `engine.unload()` then `releaseProject()`, in that
+  order. References-only was measured at ~1 GB still resident per closed
+  song; on device that was a per-process-limit jetsam kill on the fifth song.
+  Guarded by `mobile/tests/open-close-memory.cjs` — note RSS only moves for
+  song-sized blocks, sample-sized ones stay in the allocator's cache.
+- **iOS presents ONE view controller at a time, and the loser is silent** —
+  an RN `<Modal>` that opens a system picker (document picker, share sheet)
+  from its own mount effect puts two presentations in flight from one commit.
+  UIKit keeps the picker and refuses the modal ("Attempt to present
+  `RCTFabricModalHostViewController` … which is waiting for a delayed
+  presention of `UIDocumentPickerViewController` to complete", visible only in
+  the device console), so the sheet NEVER appears while its JS runs the whole
+  flow behind an empty screen — which reached a real phone as "I've added song
+  but interface just freezed", with nothing in the app log because nothing
+  failed. Present the system UI FIRST, from the screen, and open the sheet on
+  what it returned (`beginAdd` in CatalogScreen; the sheet takes `src`).
+  Guarded by `mobile/__tests__/one-presentation.test.ts` — a headless suite
+  mounts no modal and can never catch this, which is why the rule is checked
+  at the source.
+- **A native method whose arity does not match JS never runs, and never
+  says so** — pass three arguments to a two-argument `RCT_EXPORT_METHOD` and
+  the bridge declines to dispatch: the promise is neither resolved nor
+  rejected, so there is no work, no error and no red box, just an app sitting
+  on its main screen looking healthy. `mlGrid` shipped that way on iOS while
+  Android's JNI already took `dumpDir`, and it read from outside as "nothing
+  happens" for ten minutes at 1.3% CPU with flat RSS. The rule that the module
+  name, **method arity** and event payloads are identical on both platforms is
+  written at the top of `SingzSplit.mm` for this reason; when a method changes
+  on one side, sweep the whole surface against `SplitModule.kt`, not just the
+  method in hand. For the PLAYBACK bridges the sweep is mechanical now:
+  `tests/shared/native-playback-bridge-manifest.json` pins every method with
+  its arity, every emitted key set, every enum table and the desktop's
+  renames, extracted from the three bridges' own sources by the two packaging
+  suites, a vitest over the addon and a native ctest — so a key added to one
+  bridge and forgotten on another is a red test rather than a platform that
+  quietly degrades. What it all means is
+  [docs/NATIVE-PLAYBACK-BRIDGE.md](NATIVE-PLAYBACK-BRIDGE.md), which also
+  carries the core-encoded product policy (click timbre, gridless count-in,
+  BPM/meter bands, the −1 dBFS limiter, the two-decode budget, odd-period
+  training) and a divergence register. The manifest is edited BY HAND on
+  purpose: regenerating it would let drift fix itself.
+  Suites that drive a native call need a settle DEADLINE, not
+  a poll count — an unsettled promise is what this looks like from the driver.
+- **Foundation's JSON parser is not correctly rounded, so no core number may
+  reach iOS as text** — `NSJSONSerialization` reads `"0.053999999999999999"`
+  as `0.054000000000000006` where `strtod`, Kotlin and JS all read `0.054`.
+  The core writes `%.17g`, which is exactly the shape it gets wrong; SHORT
+  forms parse correctly, so checking `"0.013"` says the parser is healthy and
+  sends you looking elsewhere. Parsing `mlGridJson` back cost 49 of 2041
+  probabilities their last bit while beats and downbeats stayed identical —
+  invisible to any grid comparison, which is why the suites compare every
+  VALUE and never a count. iOS bindings build their result from the core's
+  doubles (`mlGridRounded`); Android's text hop is fine because Kotlin's
+  parser is correct.
+- **A resampler's quality gate must exercise the ratio that is actually
+  used** — `Resampler` was sized for 48k→44.1k (24 taps per output sample
+  at up=147 is a ~3.5k-tap prototype) and the same 24 at 44.1k→22.05k is a
+  24-TAP lowpass: −3 dB at 10 kHz, 12-14 kHz aliasing back at −10..−25 dB,
+  16.8 dB SNR against soxr on real stems, a different beat grid. Its "110
+  dB" gate was a 1 kHz tone at a near-unity ratio, which no short filter
+  can fail. Taps now scale with net decimation and the host harness sweeps
+  the 2:1 response itself. When a new consumer uses a shared DSP block at
+  a new ratio, measure the response at THAT ratio before trusting the
+  header's number.
+- **There is no resampler-independent Beat This! grid — so ONE render, the
+  core's, is the input everywhere** (v23; the study is
+  docs/BEAT-DETECTION.md §10). Three good renders of the same stems agree
+  to 0.01 dB to 10 kHz and still differ in grids; raw lattices are
+  render-equal on GT but the FUSED rotations are not, and what actually
+  moved them was the LEVEL — beat_this normalizes nothing, and ffmpeg-style
+  equal-power mono (+3 dB over WebAudio's 0.5·(L+R)) scores 54/55 fused
+  against Chromium's 52/55. `sumStemsTo22k` (swr-shaped 65-tap Kaiser,
+  time-true via `latencyOutFrames`, ×√2) renders the mix for the desktop
+  (main spawns `singz-analyze mlmix` — `fetchMlGrid` renders nothing), the
+  phones and the eval harness alike; `scripts/render-ml-mix.cjs` only
+  reproduces the pre-v23 Chromium input for archaeology. The phone suites
+  still gate the LATTICE (beat F1 ≥ 0.98 at 70 ms, tempo, downbeat F1
+  ≥ 0.80) — the python and ORT model backends keep bit-equality off the
+  table even on one render — and their oracle recordings regenerate from
+  `mlmix`, not Chromium. Bit-equality is asserted only where the input is
+  the same bytes (the wav suites).
+- **CSS Grid**: definitely-placed items (the scrub overlay) are placed first;
+  give every sibling an explicit `gridRow` or they land in implicit rows.
+- **React-managed `className` wipes imperative classes** on re-render —
+  re-assert per frame (count-in dots pattern in LyricsPanel).
+- **A worklet's body runs on Hermes UNLOWERED, and Hermes has no per-iteration
+  loop bindings** — the worklets babel plugin serializes a `'worklet'`
+  function as source (plugins run before presets, so Metro's block-scoping
+  transform never touches it) and the worklet runtime evaluates that source
+  raw; measured on the iOS sim: `for (let k of ['a','b','c']) fns.push(() =>
+  k)` yields `c,c,c` there, `for (let i…)` likewise (function-scoped closures
+  such as `forEach` callbacks are fine). Silent and wrong, never a throw: the
+  first casualty was esbuild's own export helper (a getter closure per key in
+  a for-of), which resolved EVERY export of the analysis bundle to the last
+  one — `lib.detectBeats` was `trackMelodyCore`. `build-analysis.mjs` runs
+  the worklet-bound bundle through `@babel/plugin-transform-block-scoping`
+  before inlining it (`mobile/src/gen/analysis-worklet.js`); any hand-written
+  worklet with a closure inside a `let` loop needs the same care.
+- **The mobile lyrics are one Skia canvas** (`SkiaLyrics.tsx`): the whole
+  column, the sung line painted with a gradient whose edge travels along x —
+  desktop's `background-clip: text` a layer down. The canvas is
+  viewport-sized and held still while a transform scrolls the column under it
+  (a canvas as tall as a real song is a ~13000px surface, past what many
+  phones will allocate); what actually scrolls is a spacer carrying the tap
+  targets. It replaced ~7 nested clipped Views per
+  word, which on a 120 Hz phone fed the display 58 fps (19.6% janky) against
+  Skia's 121 (0.2%). Matching an RN `<Text>` glyph-for-glyph is fiddly and every
+  bit was measured, not guessed: multiply fontSize/lineHeight/letterSpacing by
+  `PixelRatio.getFontScale()`; wrap on the OUTER box (word **+** its
+  marginRight, the way Yoga does); Android's letter spacing widens every glyph,
+  iOS's only the gaps between them; and the face is `sans-serif`/'900' on
+  Android but `System`/'bold' on iOS — `SF Pro Text` silently does not resolve
+  (it measures ~2 px a word), and Skia's font manager matches a *static* face
+  where RN interpolates a variable one. Get any of these wrong and the line
+  re-wraps or resizes the instant it lights up. The JS frame at a line change is
+  the React commit, not the mount: the iOS sim barely noticed the whole-column
+  move (40.1 -> 38.5 ms, noise) while the phone did (56.5 -> 42, and >33ms
+  frames 41 -> 19) — measure on the phone, the sim's 60Hz hides this. Keeping
+  every line's sweep mappers alive to remove the commit entirely is much worse
+  (p95 19 -> 27 ms, dropped frames 4 -> 26). Don't chase it again.
+- **whisper.cpp `-ml 1` emitted occasional backward word offsets, and older
+  lyrics.json files still carry them** — whisper is gone (Qwen3-ASR replaced
+  it), but every song it transcribed or aligned kept its word times,
+  zero-length and backward ones included. Keep the guards: `sanitizeHyp`
+  (`src/main/align.ts`) still cleans every hypothesis before a text match, and
+  `MIN_WORD_S` (LyricsPanel, and its phone twin in `mobile/src/model.ts`)
+  refuses to divide by a word whose e <= s. The files outlive the engine.
+- **`source: 'whisper'` in lyrics.json means "transcribed on this device",
+  not whisper** — the name predates Qwen3-ASR and stays on purpose: the
+  desktop branches on it (`shouldReaskLrclib`, the AI-transcribed note, which
+  align chips it offers), Drive carries lyrics.json verbatim, and the phones'
+  type names exactly `'lrclib' | 'whisper' | 'edited'` — a fourth value would
+  reach installed phones that have never heard of it. Which recogniser it was is the
+  additive `engine` field (`'qwen3-asr-1.7b'`); `AlignMethod` keeps `'whisper'`
+  only so older files still read. Do not rename either.
+- **LRC gives line starts only** — word timing is estimated at ~12 chars/sec,
+  never stretched to the next timestamp (lag), unless AI-aligned.
+- **Splitting requires a downloaded pack** (no bundled engine since 0.3.0),
+  and every split is six stems (htdemucs_6s; silent guitar/piano lanes are
+  hidden in the UI) **followed by a lead/backing split of the vocal stem** —
+  seven lanes, one two-stage progress bar, no way to ask for six: a
+  monophonic detector handed two voices locks octave-below, and separating
+  first halves v4's octave errors ([docs/LEAD-VOCALS.md](LEAD-VOCALS.md)
+  carries the numbers). The UVR model therefore ships INSIDE the pack rather
+  than as an optional download — **pack format 5 (torch) / 9 (onnx)**, and the
+  Apple Silicon pack pins its own `onnxruntime` because torch packs carried
+  none. `Separate backing vocals` survives in the Split menu for projects an
+  older build split, which are the only ones that can still have a combined
+  vocal lane; their Split button is amber. Engines: torch/MPS on Apple
+  Silicon; demucs-onnx elsewhere.
+  Windows GPU = the TensorRT-RTX plugin EP (GeForce RTX 30xx+; pack v5+
+  ships it under python/rtx, v6 adds the pre-simplified `_trt.onnx` graph
+  (raw export = 20k shape/scatter glue nodes that shatter the TensorRT
+  partition; onnxsim with the fixed input folds it 18x, parity-gated in
+  the pack build; v8 = one fp16 model for both engines + one mainline ort) with mainline ort side-loaded by the per-split
+  runner, src/main/onnx-runner.ts) with a `trtrtx-disabled.json` marker
+  after one failure and the chunk-pace watchdog for pathologically slow
+  sessions. **DirectML was removed entirely** — across the whole fleet it
+  never completed a split (fused graph = TDR device-hung 887A0006, unfused
+  = ISTFT ConvTranspose OOM; wheel frozen at ORT 1.24) — old machines'
+  `dml-disabled.json` markers linger but decide nothing. CPU on Intel
+  Macs — CoreML crashes compiling the graph. Every downloaded
+  pack gets a renderer-rendered 44.1 kHz WAV (`needsPcm`) — demucs 4.1
+  decodes via sphn (no m4a/aac) with an ffmpeg-CLI fallback end users lack,
+  and torchaudio ≥2.9 load/save is torchcodec-only (unused by demucs 4.1,
+  not shipped); pack deps are pinned in build-gpu-pack.sh, which smoke-splits
+  an mp3 with a bare PATH + `HF_HUB_OFFLINE=1` at build time. System demucs
+  (dev machines) still splits the original file. Packs are versioned via
+  `python/pack.json` — bump `PACK_FORMAT_REQUIRED` (models.ts) with the
+  build-script stamp to force everyone onto a new pack.
+- **HF hub caches checkpoints as extension-less blobs** — never glob for
+  `*.safetensors` under `HF_HOME`.
+- **HF hub caches symlink snapshots→blobs** — packs must materialize links and
+  prune `blobs/` (build-onnx-pack.sh), because Windows tar can't extract
+  symlinks without admin rights (the v0.2.2 pack shipped broken this way).
+- **Spawned python buffers stdout when not a TTY** — set `PYTHONUNBUFFERED=1`
+  or progress lines arrive only at process exit (UI stuck on "Warming up").
+- **Every spawn reads its output through `onChildSettled`** (`src/main/child-exit.ts`),
+  never a bare `child.on('exit')` — `'close'` is the documented promise that
+  stdio has drained, `'exit'` explicitly is not. Two children actually depend
+  on it (the MMS aligner and the beat runner each print one JSON object; the
+  aligner's is ~50 bytes a word). **The truncation was NOT reproducible here
+  and nobody should re-derive that**: 400 trials, 1 KB to 8 MB, idle and busy
+  parent loop, macOS + node 26, 0 short reads — `exit` and `close` land in the
+  same millisecond. It is kept for the mostly-Windows fleet, whose libuv pipes
+  are IOCP and cannot be measured from a Mac, so treat it as correctness by
+  contract rather than as a bug that once bit. The grace timer is not optional
+  garnish: a plain `'close'` swap can hang forever, because the splitter pack
+  loads torch and can leave a descendant holding the inherited pipe, and six of
+  the seven call sites would then wait on it for good. Only `probeDetailed`
+  escapes, because its timeout resolves the promise itself; the two other
+  timers (`beats-ml`, the ONNX heartbeat) merely KILL the child, which a
+  grandchild holding the pipe survives, and the remaining four have no timer at
+  all. The unit suite's teeth are that case alone — the big-payload tests pass
+  against the old code too, and say so.
+- **Engine subprocesses run with `HF_HUB_OFFLINE=1`** — models must come from
+  the pack; without it a broken pack silently re-downloads 166 MB mid-split.
+- **electron-builder**: `files` must exclude `vendor/`, `.engines-src/` etc. or
+  they land in the asar (was 241 MB); `${os}` macro is `mac`/`win`, NOT node's
+  `darwin`/`win32` — extraResources are declared per-platform. **`mobile/` and
+  `build-ios/` are on that list too, and were missed for a long time**: the
+  RN app is a separate product that happens to share the repo, and once
+  anyone has pod-installed or built iOS in their checkout, `mobile/ios`
+  carries Pods and DerivedData. A local arm64 dmg cut from such a tree
+  measured 1.35 GB (asar 2.7 GB, of which `mobile/ios` was 2.6 GB) against
+  the 122 MB CI ships — CI escaped only because its desktop job never
+  pod-installs, so this was a landmine rather than a live break. Check the
+  asar's size, not just the dmg's, when a build looks fat.
+- **`electronLanguages` names must be EXACT — the matcher is inverted** —
+  Electron ships every Chromium translation (Electron 43: 220 `.lproj` on
+  macOS, 47 MB, because each of 55 locales now has FEMININE/MASCULINE/NEUTER
+  variants); trimming to `['en', 'en-US', 'en_GB', 'ru']` leaves 2.2 MB and
+  takes ~46 MB off the bundle. But `removeUnusedLanguagesIfNeeded` in
+  `ElectronFramework.js` tests `wantedLanguage.startsWith(language + "-")` —
+  the WANTED string against the FILE's, the opposite of what its own comment
+  ("`en` matches `en-US`") claims. So `en` DELETES `en-US` instead of keeping
+  it, and the list has to spell out every form: macOS uses
+  `en.lproj`/`en_GB.lproj`, Windows uses `locales/en-US.pak`. The loop walks
+  the FILES on disk and tests each against the list, so a name that matches
+  nothing on a platform simply never fires — the cross-platform union is the
+  safe shape. These are Chromium's own strings — context menus, form
+  validation — never SingZ's copy.
+- **macOS ad-hoc signing is mandatory** (scripts/afterPack.cjs): repacked
+  Electron has a broken signature and quarantined downloads show the
+  unrecoverable "app is damaged" dialog. The hook repairs every final bundle
+  first; electron-builder's later Developer ID pass replaces that fallback
+  when a real identity is available.
+- **Legacy engine symlinks must be materialized before packaging** — older
+  worktree setup linked third-party engines into main's mutable vendor slots.
+  Current bootstrap validates receipts and copies local snapshots instead.
+  Existing checkouts or hand-provisioned engines can still contain symlinks;
+  electron-builder copies extraResources links verbatim, producing an app that
+  points at a developer's machine and fails strict signature verification.
+  Keep `scripts/afterPack.cjs`'s `materializeLinkedEngines` safeguard and its
+  tests in `tests/unit/capture-addon-build.test.ts` for both Mac architectures.
+- **One log per platform, and it outlives the process** — everything goes
+  through `log(source, line, level)`: `src/main/log.ts` on the desktop (shown
+  in the existing Log dialog) and `mobile/src/log.ts` on the phone (the same
+  dialog ported — `mobile/src/ui/LogPanel.tsx`, opened from the header, Share
+  where the desktop has Copy). A second, sync-only panel was the wrong answer:
+  two viewers of one truth is the same mistake as two answers to "do I have
+  this file?". The desktop's sync record also persists to
+  `userData/sync-log.jsonl` (leading newline per append, so a kill mid-write
+  cannot merge two records) and is REPLAYED into the dialog at launch, so it
+  covers previous sessions; the phone persists its whole log in prefs
+  (`singz.log`, 400 lines) because phones are killed rather than quit. On a
+  release APK there is no inspector and no `run-as`, so what the app wrote down
+  is the only evidence there is — which is exactly how long the "✓ but it
+  re-downloads" hunt took without one.
+- **CocoaPods can leave the sandbox linking a React framework that no longer
+  satisfies RNGestureHandler** — symptom is a link failure on
+  `facebook::react::Props::~Props()` / `vtable for DebugStringConvertible`,
+  with the app's OTHER_LDFLAGS carrying `-framework React` and no Fabric libs.
+  It survives a clean DerivedData and is NOT caused by app sources (proved by
+  building the last-known-good sources against it). Fix: `rm -rf Pods && pod
+  install`. Adding a `test_spec` to the FolderAccess podspec is what triggered
+  it here — and it generates no test target anyway, which is why the Swift
+  conformance runner is plain swiftc.
+- **Nothing machine-specific may reach `mobile/ios/Podfile.lock`, and one
+  thing kept doing it** — a pod's SPEC CHECKSUM is the SHA1 of the evaluated
+  podspec CocoaPods writes to `Pods/Local Podspecs/<name>.podspec.json`, and
+  hermes-engine's carries `HERMES_CLI_PATH`, an ABSOLUTE path to hermesc
+  under this checkout's `node_modules`. It was the only one of ~85 sandbox
+  podspecs containing a path at all, so an unchanged hermes fingerprinted
+  differently in every worktree and the line was committed and reverted over
+  and over (49f57ed). The Podfile's `singz_relativize_hermes_cli_path`
+  rewrites it to `$(PODS_ROOT)/../../node_modules/…`. Three things about it
+  are load-bearing: the podspec JSON is edited by TEXT substitution, never
+  re-serialized (the checksum is over bytes, so CocoaPods' own formatting has
+  to survive); the memoized `@checksum` on the spec objects is cleared,
+  because `Specification#checksum` is `@checksum ||=` and the lockfile is
+  generated from `analysis_result.specifications` afterwards; and the hook
+  runs AFTER `react_native_post_install`, measured — RN's hook regenerates
+  the aggregate xcconfigs from the in-memory spec, so running first left the
+  app target compiling against the absolute path again. `HERMES_CLI_PATH` is
+  a `user_target_xcconfig`, so it is the APP target's setting and Xcode
+  expands `$(PODS_ROOT)` before the bundling script reads it. **A Debug
+  simulator build proves nothing here** — react-native-xcode.sh exits before
+  hermesc is touched; validate with `FORCE_BUNDLING=1` or a Release build.
+- **Android app C++ (new-arch)**: setting `externalNativeBuild` REPLACES the
+  RN gradle plugin's default CMake — `include(${REACT_ANDROID_DIR}/cmake-utils/
+  ReactNative-application.cmake)` first or `libappmodules.so` silently vanishes
+  and the app dies at boot with "PlatformConstants could not be found". That
+  include also GLOBS every `*.cpp` beside the CMakeLists into appmodules —
+  own reusable sources live in top-level `zcore/`; the package-specific JNI
+  shim lives under `mobile/native/bindings/android/`, never next to the
+  CMakeLists. The ORT Android
+  AAR is legacy-layout (headers/ + jni/<abi>/, no prefab) — the `extractOrtSdk`
+  gradle task unzips it and CMake imports the .so via `ORT_SDK_DIR`.
+- **A piped gradle build reports its failure as success** — `./gradlew … |
+  tail` exits with TAIL's status, so a build that died still reads as exit 0.
+  It happened twice in one session: both "rebuilds" actually aborted on
+  `Gradle requires JVM 17 or later … currently configured to use JVM 8`, the
+  APK on disk stayed the previous one, and the suite then passed against a
+  binary that did not contain the change under test — the stale-binary trap
+  arriving through the build rather than through the install. Redirect to a
+  file and echo `$?` instead of piping, and confirm the APK's mtime moved.
+  The JVM 8 came from **`/usr/libexec/java_home -v 21` EXITING 0 AND
+  RETURNING A JDK 8 PATH** — measured: only 1.8.491.10 is registered on this
+  Mac, and asking for 21 yields
+  `/Library/Internet Plug-Ins/JavaAppletPlugin.plugin/Contents/Home` with
+  status 0, so the usual `$(java_home -v 21 || echo <fallback>)` idiom never
+  reaches its fallback and hands gradle the wrong JDK. Set JAVA_HOME to the
+  brew path directly — `/opt/homebrew/opt/openjdk@21` and its
+  `…/libexec/openjdk.jdk/Contents/Home` both work — and never derive it from
+  `java_home` here.
+- **Driving a dev build on somebody's REAL phone**: build with
+  `-PdebugAppIdSuffix=.debug` so it installs beside the release app instead
+  of demanding the uninstall that would take `files/singz-projects` and the
+  Drive sign-in. Three things then bite, in order: HyperOS/MIUI refuses
+  `adb install` until "Install via USB" is on in Developer options
+  (`INSTALL_FAILED_USER_RESTRICTED`, and pushing + `pm install` does not get
+  round it); a fresh applicationId has NO `debug_http_host` pref, so on an
+  emulator RN falls back to `10.0.2.2:8081` and quietly attaches to a
+  neighbouring worktree's Metro (write
+  `<pkg>_preferences.xml` with `debug_http_host` — a real phone is fine on
+  `localhost` + `adb reverse`); and on the emulator an `adb`-created
+  `files/mlt` is owned by shell and the app cannot open it (`adb root` +
+  `chown` to the app uid fixes it; the phone's FUSE grants by path and needs
+  nothing). The same ownership decides whether a SEEDED PROJECT exists at all:
+  a folder pushed into `getExternalFilesDir(null)/SingZ projects` belongs to
+  shell, external-storage FUSE will not hand it to the app, and `listProjects`
+  skips it in a `continue` — no throw, no `listError`, the catalog just lists
+  the projects the app made itself and a driver reports "never listed" against
+  a healthy `libMode=phone`. Read the owner off the library folder rather than
+  parsing `dumpsys` for it: API 36 stopped printing `userId=`, and a regex
+  that misses arrives as a null dereference three steps later. **`run-as` is useless for diagnosing any of this** — it does not
+  inherit the app's storage sandbox, so it reports "Permission denied" even
+  for directories the app itself created.
+- **The Android debug variant optimizes the app's own native code** —
+  AGP's Debug configuration hands clang `-g` and no `-O` at all, and the
+  `.debug` APK is the only one a driver can measure (no inspector, no
+  `run-as` on release), so until 2026-09-05 every phone CPU column and
+  every Stretch prime cost was the -O0 core against Hermes: a prime that
+  costs 5 ms optimized cost hundreds there, and the landing budget for a
+  swap seam was sized to that. `mobile/android/app/src/main/cpp/CMakeLists.txt`
+  adds `-O2` to the Debug configuration (asserts stay in — no NDEBUG — so a
+  debug number is still a shade pessimistic, never flattering);
+  `-PsingzNativeUnoptimized=1` is the opt-out for stepping through the core
+  in a debugger. Check `compile_commands.json` under
+  `app/.cxx/Debug/*/arm64-v8a/` for the flag before trusting a CPU number
+  from a build you did not make.
+- **Android builds need a JDK 21** (`brew install openjdk@21`; CI pins
+  temurin 21). The Android Studio JBR moved to JDK 25, and AGP's
+  GeneratePrefabPackages treats the JDK 24+ restricted-native-access warning
+  from its `prefab` subprocess as a build error — any project with a prefab
+  consumer (reanimated/worklets) fails to configure under the new JBR.
+- **macOS validates a Mach-O it has never mapped before on its first
+  `dlopen`, and caches the verdict PER FILE** — measured on the capture
+  addon: 200 ms warm, 950 ms right after launch, 1-2 ms for the same file
+  ever after. The loader used to stage a fresh random copy of the addon on
+  every launch, so every launch paid it — invisibly, on the prepare-ahead,
+  until the lane measure made the addon the first thing an open asks for and
+  the session harness read it as +1 s on the first open. The dev-tree source
+  fingerprint everyone suspected costs 68 ms. `stageArtifactForLoad` stages
+  at a content-addressed private path now (owner, mode and bytes checked
+  before the map; the random directory stays as the fallback). When a
+  first-use cost appears on a native path, measure the `require` before the
+  verification around it.
+- **zsh**: `status` is a read-only variable in scripts.
+- **npm majors**: `@vitejs/plugin-react` must match electron-vite's supported
+  Vite major (currently plugin ^5 with electron-vite 5 / Vite 7).
+- **Stored analyses are versioned, and the bump is on you** — the beat grid
+  (`settings.beat`, `BEAT_DETECT_VERSION`) and the melody line
+  (`settings.melody`, `PITCH_DETECT_VERSION` in `audio/melody.ts`) are saved
+  into project.json because the phones have neither detector and re-running
+  them costs seconds per open. Both re-derive on load only when their stamp is
+  older than the current one, so touching pyin/the pitch worker's framing or
+  cleaner — or `detectBeats` — WITHOUT bumping the matching constant leaves
+  every saved project drawing the old answer forever. The corrected result
+  saves itself into an existing project (never creating one under a raw file).
+  **Every staleness question goes through `analysisIsStale(stamp, current)`**
+  (`audio/analysis.ts`, exported to the phone through the analysis-lib entry)
+  and the rule is UPGRADE, NEVER DOWNGRADE: missing/nonsense/lower re-derives,
+  equal or NEWER is adopted untouched. `!==` stood there until the v23 catalog
+  pass met a v22 release app on the same machine — which would have re-derived
+  its own older grid and auto-saved it back, walking a whole library backwards
+  one open at a time (a phone behind a desktop is the same story). The cost is
+  that reverting a constant no longer self-heals: that is Re-detect's job. What
+  keeps `===` is the check that the VENDORED BINARY matches this build — a
+  different question from whether a project is old.
+- **An analysis is framed by the rate it is HANDED, so that rate comes from the
+  file, never from the device** — the melody's hop is derived on both sides of
+  the port (`hop = round(sr / DECIM * HOP_SEC)`, `hopSec = hop / (sr / DECIM)`
+  in pitch-core.ts and melody.cpp alike), so the same song analysed at two
+  rates gets two grids: 44.1 kHz decimates to 14700 and rounds 367.5 up to a
+  368-sample hop (0.0250340136 s), 48 kHz decimates to 16000 and lands on
+  exactly 400 (0.025 s). The C++ core reads the stem file, so it always saw the
+  file's rate; the desktop used to track the PLAYING AudioBuffer, which
+  `decodeAudioData` had resampled to the output device's rate — 48 kHz on this
+  Mac, 44.1 kHz on plenty of Windows machines. Measured on Wild World: 8009
+  frames at hop 0.025 from the desktop against 7998 at 0.0250340136 from the
+  core, 5% of the shared voiced frames more than a quarter-tone apart, and the
+  key readout rides on the same line. Both were stamped v1 and BOTH GUARDS LET
+  IT THROUGH — `melodyFitsSong` compares coverage against the song's LENGTH,
+  and one song's two coverages differ by three milliseconds — so each side
+  adopted the other's line and neither ever re-derived it. The desktop now
+  reads the stem file at the rate the file states (`audio/stem-rate.ts`,
+  `melodyInput` in App.tsx) and `PITCH_DETECT_VERSION` is 2 to retire what the
+  old path wrote. **The beat detector had the same bug with a worse face**:
+  `monoAt44k` "pins" the rate by linearly interpolating the device-rate buffer
+  BACK down, and on that doubly-resampled audio the octave decision itself
+  flipped — the app detected Wild World at 156.6 bpm, the exact figure
+  library-gt.json records as "the pre-v16 wrong answer", and Zeit at half —
+  while eval/beats/run-current.mjs, which minted every ground truth, decodes
+  with ffmpeg at 44.1 kHz and so had NEVER ONCE scored the path the app
+  actually ran (41/51 checks vs 40/51; 45 vs 44 with the model; the neural
+  lattice usually masks the flip, which is why it looked pack-dependent).
+  Every analysis now reads stems from FILES (`analysisStems` in App.tsx — beat,
+  key, and the ML mix alike), `BEAT_DETECT_VERSION` is 22 to retire
+  device-rate grids, and `run-current.mjs --rate 48000` keeps the broken path
+  measurable. KEY_DETECT_VERSION deliberately did NOT move: the key answer was
+  measured identical at both rates across all 17 library songs. **A parity
+  gate that runs one rate cannot see any of this**: eval/melody-parity.mjs was
+  green throughout, because it read the rate off the WAV and handed the SAME
+  rate to both implementations — it now runs every file at its own rate and at
+  the other of the 44.1/48 pair. Any future detector that takes a sample rate
+  owes the same question: which rate, whose, and does the other implementation
+  get the same one?
+- **Analysis must not outlive the song it was started for** — pYIN runs for
+  seconds in a worker, so the singer can be in another song by the time it
+  answers; a line that lands late is not merely drawn in the wrong song, it is
+  AUTO-SAVED there and then adopted on every open forever after. Two field
+  projects were found carrying a neighbour's line byte for byte (notes drawn
+  all through an intro, the key read off music nobody sang). Every long job
+  captures `loadSeq.current` and drops its result if the song has changed —
+  that guard is the rule, not a nicety. Belt and braces on the stored side:
+  a line's coverage (frames × hop) IS its song's length, so `melodyFitsSong`
+  disowns one that fits a different song and re-tracks, which is how the two
+  corrupted projects healed themselves on the next open. Guarded by
+  `tests/e2e/mac/melody-song-switch-e2e.cjs`.
+  **The rule is not just pYIN's** — `prepLyrics` shipped without the guard and
+  was measured landing song A's lyrics in song B (Wild World displaying
+  "Metallica — Nothing Else Matters"). Lyrics have no `melodyFitsSong` twin to
+  heal them, and the damage is not only what is drawn: `linesRef` feeds
+  `detectBeats`' `lineStarts`/`words` aux, so a foreign phrasing is baked into
+  THIS song's beat grid and auto-saved under a current stamp that stops it
+  being re-derived. `cancelLyrics()` does not cover the window either —
+  `Transcriber.cancel()` aborts the model download and stops the recogniser
+  and the aligner, but the LRCLIB ladder runs under neither and `busy` is false
+  throughout it, so the lookup runs to completion with nothing to stop it.
+  Guarded by `tests/e2e/mac/lyrics-song-switch-e2e.cjs`, which makes the race
+  deterministic by wrapping main's `net.fetch` with a delay via
+  `app.evaluate` — the ladder runs in MAIN, so no renderer-side route
+  interception can see it.
+  **And the automatic ladder was only one of the two doors** — the singer's own
+  pick from **Change…** is the same network round-trip, and
+  `LyricsPanel.applyCandidate` handed its answer back through `onResult` with
+  no song attached at all, so the app drew it into whatever song was open by
+  then. Reported from the field 2026-09-20 as Zeit playing with Wanted Dead Or
+  Alive's lyrics on screen, and reproduced with those two songs; the pick alone
+  carries them across, no second switch needed. `beginRequest()` closes it: the
+  panel opens a request against the song showing NOW, before its await, and the
+  predicate it hands back answers "is that still the song?" from the owner's
+  own load counter when the answer lands — so it keeps working after the panel
+  has been unmounted, which a song switch always does. The trap it sidesteps is
+  worth knowing, because the first fix attempted here fell into it: comparing
+  the song the pick was made for against a closure over `song` compares two
+  STALE values — the handler the click captured belongs to the render where the
+  old song was open — and always agrees, so the guard reads as working and is
+  not. Any callback that settles after a network round-trip owes the same
+  treatment: capture what it was for at call time, and answer through a ref or
+  a predicate, never a closed-over value. `tests/e2e/mac/lyrics-song-switch-e2e.cjs`
+  covers this second door — its phase refuses to pass unless the pick actually
+  reached the song it was made for, since lrclib short-circuits on its own
+  `down` flag before any request and a pick that failed instantly leaves the
+  other song untouched, which looks exactly like a working guard. The driver
+  also turns karaoke ON rather than inheriting it from localStorage:
+  the LOOKUP runs either way (`prepLyrics` fires on every song load and knows
+  nothing about karaoke, which is exactly why a late result can still reach
+  `linesRef` and the saved grid with the panel closed) — but the PANEL is
+  karaoke-gated, so with it off the driver read a `.src-credit` that had never
+  been rendered and its "A is still looking" assertion passed against nothing.
+- **Project format v2 = FLAC stems** (~4x smaller, lossless; splitter cache
+  stays WAV). v1 WAV projects auto-upgrade on open (`migrateProjectToV2`);
+  readers must keep accepting both (`stemFile()` prefers .flac). Encoding uses
+  libflacjs's **asm.js** build in main — the wasm build `fetch()`es its binary
+  and cannot boot under node. Projects root is relocatable (settings.json →
+  cloud folders like iCloud Drive); `allowRoot` the new root after switching.
+  The `mobile/` RN player reads the same folders (v1 and v2) via its
+  FolderAccess pod.
+- **Custom tracks (the singer's own audio as extra lanes) live in `stems/`**,
+  named `custom-<slug>.<ext>` in whatever format they came in — NOT in a
+  `tracks/` folder: Drive sync only walks `project.json`, `lyrics.json` and
+  `stems/` (extension-filtered — widen that filter, not the layout), and the
+  phones reach them with no native change at all: `FolderAccess.localFile` and
+  `driveLocalFile` both take a project-relative path, so mobile JS fetches
+  exactly what `settings.custom` names. What the natives DO enumerate by the six
+  stem names is `listProjects`' `cached`/`bytes`, so a folder library's ✓ ignores
+  added tracks (the Drive listing counts them in JS). `project.json` keeps them
+  project-relative (`settings.custom`); main resolves them to absolute on the
+  way out and back to relative on save, because a moved project folder (rename,
+  import, another machine's cloud library) would rot absolute paths. Lanes may
+  now differ in length: waveform view fractions are per buffer, not per song.
+  **Renaming one changes `label` and nothing else** — the id is the mixer key
+  AND the file name, so deriving either from the display name would move audio
+  on every rename (Drive re-upload, phone re-download, orphaned mixer state).
+- **Projects open from anywhere and stay where they are** — a project folder
+  need not sit under the library root (copied, shared, another machine's cloud
+  library). `registerSource` must `allowRoot` the detected project dir or
+  media:read refuses its stems and the load dies as the misleading "Could not
+  decode that audio file."; `project:upgrade` fails the same way. Save and
+  rename act **in place**; `importProject` is the only thing that relocates a
+  project, and only when the user asks. Anything that moves a project folder
+  has to `allowRoot` the destination — the old entry does not follow it.
+- **The phone's copy of a song is durable, and re-fetch is decided by md5** —
+  downloaded stems live in `Library/Application Support/singz-projects` (iOS,
+  excluded from backup) and `filesDir/singz-projects` (Android), NOT in
+  Caches/cacheDir: the OS empties those under storage pressure and the song
+  silently downloads again. Both natives adopt the old cache dir once on first
+  use. **"Do we have this file?" is asked of the file, never of a record of
+  past downloads** — JS hands `fetchToCache` the md5 and size the doc states
+  and the native decides: missing or wrong size or wrong md5 → download,
+  else serve the copy on disk (md5s memoized per path against size+mtime, so
+  a song hashes once, and verified after every download so a half-arrived
+  file is never cached). The ledger this replaced (`singz.gdrive.have`)
+  recorded downloads, not files: it had no row for a copy fetched by an older
+  build, nor for one fetched under a project.json with no `stemHashes` — and
+  since the ✓ counted bytes on disk, those songs sat in the library ticked
+  while every open re-downloaded all six stems. Two answers to one question is
+  the bug; the ✓ now runs the same comparison minus the hashing
+  (`isDownloaded`: every file the doc names, present at its size — per file,
+  never a byte sum, or a leftover stem covers for a missing one; `.part` files
+  count for neither). The Drive
+  listing is persisted too (`singz.gdrive.catalog`, file ids included), so the
+  catalog opens instantly, works with no signal, and refreshes silently behind
+  what is already on screen. A refresh that fails mid-listing must abort, not
+  persist: skipping unreadable folders once persisted a half-listed library —
+  a wifi handover during the silent revalidate wiped the catalog and the next
+  cold start re-listed everything on a "loading from Google Drive" spinner; `driveLocalFile` tolerates a token it cannot
+  refresh offline, because the native short-circuit happens before the URL is
+  used. Anything that deletes cached files must also `driveForgetCached`.
+- **Google Drive sync needs no Drive clients**: drive.file scope (no Google
+  verification), one Desktop-type OAuth client for every platform (loopback
+  flow — Android listens on 127.0.0.1 natively). Desktop pushes the library
+  to a visible SingZ Drive folder (md5-diffed resumable uploads, auto after
+  save); phones list over REST and stream stems via FolderAccess
+  fetchToCache. **Two-level hashing**: a project IS its project.json —
+  `stemHashes` (md5+size+mtimeMs per stems/ file, save-maintained,
+  sync-backfilled; mtimes compare with ~2ms tolerance — iCloud rehydration
+  truncates them ~300ns) carries the stem list, formats, sizes and md5s, so
+  a clean sync reads no stem bytes (hashing evicted iCloud stems used to
+  re-download the whole library, which read as "sync re-uploads my media").
+  `lyricsHash` states lyrics.json the same way, so **the doc names every file
+  the project is made of** — the aligner's rewrite moves project.json with it
+  (sync backfills both before hashing the doc), and one checksum per project
+  is enough for the catalog. After every sync the desktop writes
+  `catalog.json` (format 2) at the SingZ root: one row per project —
+  project.json and lyrics.json with Drive ids and md5s, nothing else. Written
+  LAST so it never names missing files, byte-stable + md5-skipped when
+  nothing changed. **The same comparison runs at all three levels**:
+  catalog.json against the root listing's md5 (unchanged → the whole refresh
+  is 2 requests and no project is asked about), project.json against the
+  catalog row, each file against the doc. **The desktop diffs against Drive's
+  own listing, never against the catalog it wrote last time** — two batched
+  `('a' in parents or 'b' in parents)` queries (chunked 50, `fields=…,parents`)
+  cover a library of any size, so a clean sync is 4 requests and drift (a file
+  edited or deleted on Drive, a second desktop) is actually noticed. The
+  catalog is pure output. Orphan FILES are trashed like orphan folders — a lane
+  a re-split dropped would otherwise sit on Drive forever, and phones would
+  keep listing it. Phones reuse their stored entries, refetching only changed
+  projects (the doc + that folder's listings), so a downloaded song opens with
+  zero requests (doc and lyrics kept offline by md5, stems by the native
+  cache). Phones trust the catalog only
+  while it names exactly the root's project folders (an older desktop
+  pushing leaves it stale) and fall back to walking the folders otherwise,
+  so old apps and old desktops keep working. The
+  desktop also reconciles on
+  launch, not only after saves — a sync killed mid-run self-heals next start.
+  **Nothing calls `gdriveSync` directly any more**: writers mark the library
+  dirty (`sync-dirty.ts` — a seq counter in settings.json, marked on both edges
+  of long operations so a save overlapping a sync stays dirty) and
+  `sync-scheduler.ts` owns the single-flight, a 4 s debounce with a 60 s max
+  wait, backoff on offline/5xx, `blocked` on auth, and a sweep. `gdrive.ts`
+  must never import the ledger — its own stemHashes/lyricsHash backfill would
+  re-dirty every project forever. **The "is this copy current?" rule is one
+  table, three runners**: `tests/shared/currency-cases.json` is read by
+  `tests/unit/current.test.ts` (TS + the desktop mtime rule),
+  `mobile/android/app/src/test/.../CacheCurrencyTest.kt`
+  (`./gradlew :app:testDebugUnitTest`) and
+  `mobile/scripts/test-swift-currency.sh` (swiftc, no simulator needed — a
+  CocoaPods `test_spec` does NOT generate a test target for this pod). The
+  rule itself lives in `CacheCurrency.kt`/`CacheCurrency.swift`/`current.ts`,
+  apart from the file handling, so it can be tested without a device. The ledger decides WHETHER to sync, never
+  WHAT to upload: scope stays the whole root, diffed against Drive. Every
+  lyrics writer goes through `writeCache` (four of the seven used to reach
+  Drive only by accident). E2E drivers on a signed-in dev machine must launch
+  with SINGZ_NO_SYNC=1 (SINGZ_NO_LAUNCH_SYNC is the older, narrower opt-out)
+  or every test run syncs the real Drive (two dev builds of different vintages
+  then rewrite the catalog at each other). OAuth client config: mobile/gdrive.config.json (gitignored;
+  CI injects from the GDRIVE_CONFIG repo secret; postinstall/build scripts
+  generate the gdrive-config.ts modules from it — both are gitignored, never
+  in the repo, EMPTY when the json is absent, so a fresh checkout needs
+  npm install before typecheck). Tests: tests/unit/mock-drive.ts is a mini
+  Drive v3 used by
+  gdrive-sync.test.ts AND the emulator streaming E2E (config apiBase →
+  http://10.0.2.2:8765, tokens seeded via run-as into shared_prefs).
+- **Phones move songs INTO the Drive library, and the desktop adopts them**
+  (Phase 6, docs/PHONE-STANDALONE.md § "Phase 6 — as built"). The phone
+  assembles a song under a top-level `SingZ uploads` folder, verifies every
+  file against Drive's md5, then moves the finished folder into the SingZ root
+  tagged `appProperties.singzState: 'published'` in ONE `files.update`; the
+  desktop's `gdriveSync` adopts every published folder before it scans the
+  library, then tags it `'adopted'`. Each rule here keeps a song from being
+  lost: the reconcile never trashes a `published` folder and the by-name
+  pairing never syncs into one (`ensureFolder` skips them too); the
+  empty-library refusal is decided BEFORE adoption, or one phone song makes a
+  not-yet-arrived library look populated and the reconcile trashes the rest; a
+  name clash is renamed on Drive before anything downloads, because the sync
+  pairs folders by name and trashes stems it does not know; and the catalog
+  stays `format: 2` — phones check `=== 2` exactly — with `capabilities.adopt`
+  ADDED, which is what a phone reads before it will move a song (a catalog
+  without it means an older desktop that would trash the folder; no catalog is
+  safe only while every root folder is phone-tagged). A phone adds
+  root folders without touching catalog.json, so the phone's "catalog
+  unchanged" skip must also check the root's folder set. On the phone a song
+  is on "This phone" OR in the Drive library, never both: the one door is the
+  library's "Add all local songs to Google Drive" offer, and a move cut off
+  after its move-in is finished (`finishCompletedMoves`) on the next look.
+  A moved song joins the phone's SAVED Drive listing before the phone lets go
+  of its copy (`driveListMovedIn`) — offline, or after a kill mid-batch, it is
+  otherwise in neither tab. Move jobs run one at a time (`oneAtATime`), and
+  every Drive listing is numbered as it begins (`listGen`): an older one never
+  replaces a newer one on screen or on disk.
+
+## Conventions
+
+- **Native artifact identity is checked against this checkout** — analyzer
+  provisioning verifies embedded `build-info.sourceHash` against
+  `scripts/analyze-source-hash.sh`; a stale sidecar alone never approves it.
+  After native analysis changes, rebuild before exercising the analyzer.
+  `src/main/analyze-provenance.ts` logs development mismatches; treat a warning
+  as a rebuild requirement. Capture artifacts are independently verified under
+  local `build/capture-runtime` and `build/capture-package`, not `vendor/`.
+  See [docs/DEVELOPMENT.md](DEVELOPMENT.md) for producer details.
+- IPC handlers return result objects (`{ ok: false, error }`), never throw
+  (avoids the "Error invoking remote method" prefix in the renderer).
+- File access from the renderer is allowlisted in `src/main/media.ts` —
+  register paths or roots before reading.
+- Long jobs (separation, transcription, downloads) stream progress events and
+  are cancellable; caches key on the 16-hex sha1 of the source file.
+- `--controls-w` in styles.css must equal `CONTROLS_W` in model.ts.
+- User-visible copy is sentence-case, friendly, and states sizes/time costs.
+- **The desktop is localized (English, Russian, Simplified Chinese)** — every
+  user-visible string is `t('ns.key')` over `src/shared/i18n/en/*.ts`, with
+  `ru/` and `zh-CN/` typed against it, so a string added without its two
+  translations fails typecheck. Nothing user-visible in a module-level
+  constant. The phone does the same over `mobile/src/i18n` (`phone.*` keys)
+  and has no picker — it follows the OS's per-app language setting.
+  Details: [docs/DEVELOPMENT.md](DEVELOPMENT.md) § Localization.
+- Renderer perf rules (weak-iGPU fleet): rAF loops are change-gated to whole
+  device pixels (value-identity gating still damages every vsync — sub-pixel
+  `--p` steps kept the QHD+ Dell at 60%+ GPU) and skip under
+  `body.modal-open`; canvases repaint on visible-state flips, never on the
+  clock (pitch strip keys on bars-passed; its now-line is a 1px DOM layer);
+  every infinite CSS animation needs a modal-open pause rule and must not
+  outlive the state that justifies it (a paused count-in pulse held 20% GPU
+  forever); Windows keeps solid, blur-free surfaces unless main vouched for
+  the GPU Chromium composites on (`body.glass`, `src/main/glass.ts`: the
+  ACTIVE adapter of the launch's one `getGPUInfo('complete')`, read a second
+  after the window is on screen and judged by name — RTX, GTX 1050-1660, a Radeon RX above
+  Polaris 12 or a four-digit Pro, Arc A/B; never a GT, an MX, an APU or an
+  older Arc iGPU — and taken back if Chromium falls to software compositing) —
+  every `backdrop-filter`, in styles.css or the kit's sheet, has a
+  `body.win:not(.glass)` twin with no blur and a fill of its own (any
+  per-frame damage re-runs a backdrop blur above it), a twin keyed on plain
+  `body.win` (the kit's scrim) needs a `body.win.glass` restore matching the
+  glass, and `tests/unit/windows-no-blur.test.ts` fails on either missing.
+  `SINGZ_GLASS=1|0` forces the verdict; the log's `hw` line says which it
+  was and why.
+  No layer the playhead crosses may carry a `filter` that moves pixels
+  (`drop-shadow`, `blur`): damage touching such a layer widens to the WHOLE
+  layer, and the playhead crosses every lane every device pixel. The kit's
+  2px lane glow, written as a CSS drop-shadow, took the playing player from
+  20% to 57% of the field laptop's GPU and added 34 points of DWM; since
+  @singz/ui v1.7.1 the glow is drawn into the canvas (colour filters move no
+  pixels and stay CSS), and `tests/unit/lanes-no-moving-filter.test.ts` fails
+  on one. The playhead line and the waveforms' played layer write separate
+  `--p`s (`playhead-writes.ts`), because re-clipping a layer damages its whole
+  visible part — the six lanes re-clipped every device pixel re-composited the
+  whole PLAYED part of the stack on every step (DWM ~31% late in a song on the
+  field laptop, with every filter removed). The line takes every device pixel,
+  and so does the played EDGE: since @singz/ui v1.9.0 each lane carries
+  `.wave-edge`, a copy of the played layer shown only from the stack's `--p`
+  to its own `--p-edge`, written per step on those canvases (never on the
+  stack — that restyles every lane), so a step damages only the sliver behind
+  the line. The stack's `--p` catches up once the sliver is 64 device pixels
+  wide and at most 4 times a second, and snaps on pause/seek/zoom. The edge
+  layers are HIDDEN while the view moves: every lane redraws then, and each
+  showing edge is one more filtered layer to redo per frame (a zoomed
+  follow-pan went ~30 -> ~80 ms a frame on the field laptop with them up;
+  they have nothing to show anyway, the snap leaves no sliver). (A 4 Hz
+  clock alone, the version before, left the brightness step visibly trailing
+  the line in a zoomed view.) Both values land on whole WINDOW device pixels:
+  off a pixel boundary the two clips both paint the column between them, a
+  one-pixel bright seam. Measure paint VISIBLE, per adapter (an Optimus laptop
+  renders on the dGPU and pays a copy to the display GPU every frame), and
+  read DWM's share as well as the app's. A view change (pan, zoom, resize)
+  redraws every lane, so its cost is paid per EVENT: pans and zooms land at
+  most once a frame (`view-frames.ts` — the first at once, later ones composed
+  at the next frame), and since @singz/ui v1.8.1 a redraw draws each lane's
+  envelope once for both layers, as flat columns faded by one fill. Any frame
+  loop that reads the view calls `settleView()` FIRST (TrackStack's playhead
+  tick, PitchStrip's): held steps land there, because a frame callback
+  requested from an input event runs after every loop that re-armed itself a
+  frame earlier — landing held steps in one made the playhead trail the lanes
+  for a whole drag. Before v1.8.1 and view-frames, one wheel notch on a
+  zoomed view reached the screen ~340 ms later on the field laptop (the GPU
+  process unpacked a gradient with each of ~37k column rectangles a pan) and
+  a drag ran at 4 fps. Time a redraw by when its frame is PRESENTED — in a
+  trace, the GPU's last raster after the event, then the next swap — never by
+  a rAF after the event: that read 183 ms while the GPU queue held the frame
+  for 340.
+
+## Releasing
+
+Push to main freely once the user approves pushes; **releases are cut by
+tagging `v*`** — CI builds mac (arm64+x64 dmg) + win (NSIS) + all three
+splitter packs and attaches everything to the GitHub Release (gh-based
+attach step, race-safe). **Hyphenated tags (`v0.14.1-test1`) become
+prereleases**: never "latest", so updaters and the in-app pack URL ignore
+them — the way to hand one tester a build (the tag may sit on a feature
+branch; bump package.json to the full prerelease string). The Android workflow runs a cheap canary on
+mobile/** pushes (npm ci + tsc — postinstall is the audio-api patch-drift
+canary and synthesizes the bundled sample song via make-sample.js) and
+builds the full APK only on `v*` tags / manual dispatch, attaching
+`SingZ-<tag>-android.apk` to the release — the family fleet sideloads
+that. Superseded same-ref runs auto-cancel. Bump `package.json` version to match
+the tag (artifact names use it) — **and the iOS project with it**:
+`MARKETING_VERSION` (= the release semver — package.json's version, or its
+`major.minor.patch` prefix when package.json carries a prerelease string) and
+`CURRENT_PROJECT_VERSION` (a per-build counter, 27 at v0.19.0 and 28-32 across
+the five mic testers — never the semver) in
+`mobile/ios/SingZPlayer.xcodeproj/project.pbxproj` are the one place a version
+is written down by hand (android/app/build.gradle reads package.json, the
+desktop reads it too), and iOS treats an install of an unchanged version as
+nothing to do — so a forgotten bump ships an `.ipa` that silently will not
+replace the copy already on the phone. Engine steps are cached keyed on the vendor
+scripts' hash. Releases must stay public (the in-app GPU-pack URL uses
+`releases/latest/download/`). `HF_TOKEN` repo secret = read-only, build-time.
+
+Release notes are written BEFORE tagging, as part of cutting the release:
+diff against the previous tag (`git log <prev>..HEAD --oneline` plus what
+you know shipped) and commit `docs/release-notes/v<version>.md` together
+with the version bump — first line `v<version> — <tagline>` becomes the
+release title, the rest (after a blank line) the body. Both workflows'
+attach steps read that file at create time, so the release goes public
+already titled and noted while artifacts stream in; a tag without its file
+falls back to the bare create (fix it with `gh release edit`). Notes are
+user-facing and genuinely funny — singer's-eye view, not commit prose: what
+they can do now, what stopped being annoying, sizes/time costs where they
+matter. Group by platform when it helps. Writing them is part of cutting
+the release, not optional polish. The `<!-- store:LOCALE -->` blocks inside
+that same file feed BOTH stores now (`scripts/store-notes.cjs` writes Play's
+per-versionCode changelog and, for whichever locales
+`mobile/ios/fastlane/metadata` has a directory for, App Store's unversioned
+`release_notes.txt` — Apple's locale codes are not always Android's, `ru` vs
+`ru-RU`) — write those blocks assuming either audience reads them; wording
+true only on one OS (a v0.19.0 draft named "Android's own low-latency
+capture" before this was noticed and generalized) is wrong on the other
+platform's listing. When a release genuinely IS a different release on the
+two phones, `<!-- store:LOCALE:ios -->` REPLACES the shared block for Apple
+alone (0.19.1 is the case that forced it: an Android capture rewrite and an
+Android 9 floor, neither of which happened on iPhone, heading for an App
+Store submission that names another mobile platform — guideline 2.3.10, on a
+first review with no history to survive it). It is an override and not an
+addition: with none, both stores get the shared block exactly as before, and
+two copies of one claim drift, which is what this file exists to prevent.
+The workflows strip `:ios` blocks from the GitHub Release body, so the
+release page keeps opening with the same two blurbs it always has.
+
+**iOS ships through `.github/workflows/ios.yml`** — a `v*` tag uploads to
+TestFlight automatically AND, when the `TESTFLIGHT_GROUPS` repo variable
+names a group (`External Testers` today — the one behind the public link
+README.md hands out), sends that build to **Beta App Review** so external
+testers actually get it. Unset variable = internal-only upload, said out
+loud in the log. The tag job therefore now BLOCKS on Apple's processing
+(15-60 min): a build that is still processing cannot be distributed. It is
+deliberately ONE `upload_to_testflight` call rather than `beta` followed by
+`beta_external` — one wait, and the group named in one place — and NOT
+because chaining would race Apple, which it would not: the
+`upload_to_testflight` ACTION waits on the distribute-only path too
+(upload_to_testflight.rb:31 in the pinned 2.240.0), even though the
+`Pilot::BuildManager#distribute` it wraps does not wait itself. What IS
+sharp: `skip_waiting_for_build_processing: true` alongside a widen makes
+pilot abandon the distribution and still exit GREEN (build_manager.rb:202),
+so that flag and an external group must never be set together.
+Submitting for App Store review stays manual-dispatch-only, and it carries
+`automatic_release: true` — an
+approved build goes LIVE on the store by itself, so dispatching that lane IS
+the decision to publish, same "tagging is not enough to reach
+production" shape as Android's `publish` job. Two lanes reach the store and
+the difference bites when aiming at an already-built tag: `submit` sends an
+ALREADY-UPLOADED build (pass its number in the workflow's `build` input,
+which lands in `SINGZ_IOS_BUILD_NUMBER` — a dispatch's own `run_number` is
+NOT the tag run's), while `release` archives a fresh binary and so leaves a
+second build number for one version. The deliver call itself lives in one
+place, `private_lane :submit_build`, shared by both. The app record itself cannot
+be created by the API at all (Apple's docs say so outright) — that and the
+App Store Connect API key are one-time by-hand setup, see
+[docs/IOS-RELEASE.md](IOS-RELEASE.md). **Signing is `fastlane match`**:
+the Apple Distribution certificate and App Store profile live encrypted in a
+private repo (`lexasoft123/singz-ios-certs`) and are fetched per run, so the
+profile NAME is never written into a secret or variable — match exports it
+as `sigh_<bundle>_appstore_profile-name` and the archive lane reads that,
+which is why regenerating the profile cannot desynchronize CI from the
+portal. **CI runs match READONLY and must never mint a certificate** —
+Apple caps Distribution certs per team and a job creating one per run is how
+a team runs out and cannot ship; `fastlane ios certs` is the only lane that
+may create them, it refuses to run when `$CI` is set, and it is deliberately
+absent from the workflow's lane choices. The iOS bundle id is
+`io.s-dev.singz` and the team is `USJ7H3X44X`, NOT the `com.lexasoft.singz`
+Android and the desktop still use, and NOT the old team `9384M82Y8P` — that
+bundle id was already registered under a different Apple ID whose membership
+has since expired (bundle ids are unique across all Apple accounts, not per
+team), and that team is dead rather than a fallback. **Signing is overridden
+on the xcodebuild command line, never written into `project.pbxproj`**
+(`xcargs`: `CODE_SIGN_STYLE=Manual`, the match profile specifier, and
+`CODE_SIGN_IDENTITY` in its BARE form only — the `[sdk=iphoneos*]`
+conditional form is impossible on a command line, because xcodebuild splits
+an override on the first `=` and reads the name as `CODE_SIGN_IDENTITY[sdk`
+and the value as `iphoneos*]=Apple Distribution`, which surfaces as "No
+certificate for team … matching 'iphoneos*]=Apple Distribution' found". The
+bare override does displace the project's sdk-qualified `iPhone Developer`;
+what makes an archive fail with "No profiles … were found" while naming *App
+Development* profiles is a missing `CODE_SIGN_STYLE=Manual`, not a missing
+conditional identity). The project therefore stays on automatic development signing,
+which is what Xcode and the sis-motors.ru sideload build both want, and the
+two never fight over the same file. `pod install` runs as the **system**
+CocoaPods, never `bundle exec pod` — from `mobile/ios` bundler resolves the
+fastlane-only Gemfile added for this pipeline and dies with "can't find
+executable pod for gem cocoapods"; `scripts/worktree-setup.sh` is the one
+definition of how pods get installed and it uses the bare command.
+**Ad-hoc is now available too** (`fastlane ios adhoc`) — the same one
+certificate carries an AdHoc profile beside the App Store one, so the
+sis-motors.ru install page no longer needs a development-signed export. It
+installs only on registered UDIDs: `fastlane ios add_device` then
+`fastlane ios certs` again, because registering a device does NOT
+retroactively change an existing profile, and a profile covering zero
+devices looks exactly like a healthy one until an install fails on the
+phone. Every lane checks
+`MARKETING_VERSION` against `package.json` and refuses a mismatch, but does
+**not** bump it for you — still hand-bumped per the paragraph above. The
+**build number** is the one version CI does own end to end: it passes
+`github.run_number`, which never repeats and never goes backwards **for this
+workflow** — it is a PER-WORKFLOW counter, not a repo-wide one, and an
+earlier version of this paragraph claimed otherwise. ios.yml's runs are
+numbered 1, 2, 3 while the repo has had hundreds of Action runs, so the
+counter starts at 1 for any newly added workflow. That is fine for every
+version whose builds this workflow alone produced, and it is exactly wrong
+for a version that already carries HIGHER builds from somewhere else: 0.19.0
+reached build 33 through hand-driven local uploads, so a `beta` run against
+0.19.0 offers build 4 and Apple refuses it — a build number cannot go
+backwards within a version train. Bump `MARKETING_VERSION` before letting CI
+upload, or the first CI build of a hand-uploaded version is rejected. Past
+that one seam, no build number is ever typed by hand on this path — which is
+still a real improvement on the trap there is for the `ship-ios-ipa` skill's
+hand-bumped sideload build (that skill is user-global, in `~/.claude/skills/`
+— it is not in this repo, and the link that used to point inside the tree was
+dead) — a different pipeline, a different certificate type
+(development-signed, not App Store-signed), and not interchangeable with
+this one.
+
+**The mac `.dmg` is Developer ID-signed and notarized when the secrets are
+present, ad-hoc signed exactly as before when they are not** — `notarize:
+true` in `electron-builder.yml` skips itself with a warning rather than
+failing when unset, which is what keeps every trigger of `build.yml` (tag,
+dispatch, the weekly cache warmer) building in a fork, or on any machine with
+no Developer ID certificate, with no Apple secrets at all. `build.yml`'s
+signing step imports the certificate into a keychain it creates itself and
+writes **`CSC_KEYCHAIN`/`CSC_NAME`** (plus `APPLE_API_KEY`, `APPLE_TEAM_ID`,
+`APPLE_API_KEY_ID`, `APPLE_API_ISSUER`), each only when the value it needs is
+present — `APPLE_TEAM_ID` is a literal, guarded on the certificate secret. It
+deliberately writes **neither `CSC_LINK` nor `CSC_KEY_PASSWORD`** — an
+earlier revision of this paragraph said it wrote
+exactly those two, and setting `CSC_LINK` is the one thing that breaks this,
+because electron-builder 26.15.3 then hands the `.p12` password to
+`security set-key-partition-list -k`, which wants the keychain password. The
+step stays on the macOS leg of that job's matrix regardless, for two reasons:
+it runs `security`, which is macOS-only, and `CSC_*` is a shared namespace
+whose `CSC_LINK`/`CSC_KEY_PASSWORD` the Windows leg reads for Authenticode —
+not because what it writes today could reach `signtool` (nothing on Windows
+reads `CSC_KEYCHAIN` or `CSC_NAME`). Notarization reuses the iOS
+pipeline's App Store Connect API key rather than minting a second one — see
+[docs/MACOS-SIGNING.md](MACOS-SIGNING.md), including why the
+entitlements files carry exactly three Hardened Runtime keys: the two
+JIT flags Electron itself needs, and
+`com.apple.security.device.audio-input` — no App Sandbox entitlements, this
+is the `dmg` target, not `mas`. **The audio-input key is a Hardened Runtime
+key, not only a sandbox one**, and an earlier version of this paragraph said
+the opposite: it told the reader mic access "keeps working through the
+ordinary `NSMicrophoneUsageDescription` TCC prompt without it", which was
+checked on ad-hoc dev builds that carry no `runtime` flag and so are never
+held to it. Every signed release from v0.19.1 to v0.20.1 shipped without it,
+and on those a hardened SingZ was refused by TCC before any prompt: no
+permission request, `askForMediaAccess` false with the status still
+`not-determined`, silence into the spawned `singz-analyze live-input`. The
+key lives in BOTH plists because the child process and the helpers are
+signed with the inherit file. `tests/unit/mac-entitlements.test.ts` pins it
+there. `hardenedRuntime`/`entitlements`/`entitlementsInherit`
+are flat `mac:` siblings, not nested under a `sign:` key — this repo pins
+electron-builder ^26.15.3, where `mac.sign` is a custom-sign-*function* slot
+(a later major's docs describe the nested object; the two schemas are not
+interchangeable within one version). A misconfigured nested `sign:` object
+doesn't fail on any run with no identity available — a fork, or a secret
+rotated away; `sign()` returns before touching it when none is found, and
+this dev Mac stopped being an example of that once the Developer ID
+certificate was installed on it — it only throws
+(`customSign is not a function`) the moment a real Developer ID identity
+shows up, i.e. exactly when someone finally wires up the secrets this was
+all for; caught in review before it ever ran for real. **This has since run
+for real, and both halves of the sentence that used to close this paragraph
+("nothing has actually notarized a build yet", "there is no Developer ID
+certificate on this machine") are now false** — a local `--mac --arm64`
+build signed, notarized and stapled, verified by `spctl` accepting the app
+inside a quarantined, mounted dmg; and CI run 33243835099 logged
+`notarization successful` for both architectures. The evidence, the
+verification commands and the two traps that bit on the way (electron-
+builder's `CSC_LINK` keychain-password bug, and worktree `vendor/` symlinks
+that `codesign --strict` rejects) are in
+[docs/MACOS-SIGNING.md](MACOS-SIGNING.md).

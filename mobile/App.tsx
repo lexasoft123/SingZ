@@ -503,7 +503,7 @@ if (TEST) {
       // A CRUMB in the prefs, not just the in-memory flag. The Android driver
       // cannot poll this over CDP: the worklet leg decodes six stems, and
       // evaluating JS while a decodeAudioData is in flight segfaults the
-      // Hermes inspector (CLAUDE.md — 3/3 reproducible, and it reads as an
+      // Hermes inspector (docs/PROJECT-RULES.md — 3/3 reproducible, and it reads as an
       // OOM). It watches this pref with `adb run-as` instead and evaluates
       // exactly once, after the decodes are over.
       .finally(() => {

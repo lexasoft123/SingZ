@@ -1,4 +1,4 @@
-const { createHash, randomBytes } = require('node:crypto')
+const { randomBytes } = require('node:crypto')
 const {
   mkdirSync,
   readFileSync,
@@ -6,7 +6,6 @@ const {
   rmSync,
   writeFileSync
 } = require('node:fs')
-const { tmpdir } = require('node:os')
 const { isAbsolute, join, resolve } = require('node:path')
 const { execFileSync } = require('node:child_process')
 
@@ -43,10 +42,15 @@ function gitCommonDirectory(repoRoot) {
 }
 
 function nativeBuildLockPath(repoRoot) {
-  let identity = gitCommonDirectory(repoRoot)
-  if (process.platform === 'win32') identity = identity.toLowerCase()
-  const digest = createHash('sha256').update(identity).digest('hex').slice(0, 24)
-  return join(tmpdir(), `singz-native-build-${digest}.lock`)
+  const identity = gitCommonDirectory(repoRoot)
+  // Keep the lock beside the shared repository metadata, not in os.tmpdir().
+  // Workers deliberately use distinct TMPDIRs; hashing a common identity into
+  // those different directories still creates independent, ineffective locks.
+  // Preserve the canonical path's casing, including on Windows.
+  const name = identity === realpathSync(repoRoot)
+    ? '.singz-native-build.lock' // exported tree (or bare repository)
+    : 'singz-native-build.lock'
+  return join(identity, name)
 }
 
 function acquireNativeBuildLock(repoRoot, owner) {
