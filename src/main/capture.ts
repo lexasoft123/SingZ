@@ -1294,6 +1294,7 @@ export class CaptureOwner {
   private reanchorLoggedAt = 0
   /** The streamed-lane starvation watch; see judgeLaneStarvation(). */
   private starveWatch: LaneStarveWatch | null = null
+  private terminalLoggedKey = ''
   private starveLoggedGeneration = ''
   private starveLoggedAt = 0
   private playbackHighWater = 0n
@@ -1360,10 +1361,11 @@ export class CaptureOwner {
     const exposedPlatform = platform === 'darwin' || platform === 'win32' || platform === 'linux'
       ? platform
       : 'other'
-    const exposedProvider = provider ?? (platform === 'darwin' ? 'coreaudio' : 'wasapi')
+    const exposedProvider = provider ?? (platform === 'darwin' ? 'coreaudio' : platform === 'linux' ? 'alsa' : 'wasapi')
     const providerMatchesPlatform = provider === undefined ||
       (platform === 'darwin' && provider === 'coreaudio') ||
-      (platform === 'win32' && (provider === 'wasapi' || provider === 'asio'))
+      (platform === 'win32' && (provider === 'wasapi' || provider === 'asio')) ||
+      (platform === 'linux' && provider === 'alsa')
     if (!providerMatchesPlatform) {
       return {
         ok: false,
@@ -1579,6 +1581,13 @@ export class CaptureOwner {
   playbackProviders(platform: NodeJS.Platform = process.platform): DesktopPlaybackProviderInfo[] {
     const fallback: DesktopPlaybackProviderInfo[] = [
       {
+        id: 'alsa',
+        label: 'ALSA',
+        available: false,
+        errorCode: platform === 'linux' ? 'runtime-unavailable' : 'wrong-platform',
+        detail: platform === 'linux' ? 'Native Linux ALSA runtime is unavailable' : 'Available only on Linux'
+      },
+      {
         id: 'coreaudio',
         label: 'CoreAudio',
         available: platform === 'darwin',
@@ -1611,7 +1620,7 @@ export class CaptureOwner {
         'none', 'not-compiled', 'runtime-unavailable', 'platform-not-ready', 'wrong-platform'
       ])
       const valid = native.every((row) => row &&
-        (row.id === 'coreaudio' || row.id === 'wasapi' || row.id === 'asio') &&
+        (row.id === 'coreaudio' || row.id === 'wasapi' || row.id === 'asio' || row.id === 'alsa') &&
         typeof row.label === 'string' && typeof row.available === 'boolean' &&
         validCodes.has(row.errorCode) && typeof row.detail === 'string')
       if (!valid) return fallback
@@ -1735,7 +1744,7 @@ export class CaptureOwner {
     if (
       config.capability !== DESKTOP_PLAYBACK_CAPABILITY ||
       config.playback?.version !== DESKTOP_PLAYBACK_CONTRACT_VERSION ||
-      config.accessMode !== (config.provider === 'asio' ? 'exclusive' : 'shared')
+      config.accessMode !== (config.provider === 'asio' || config.provider === 'alsa' ? 'exclusive' : 'shared')
     ) {
       return refused(
         'The desktop native playback contract is not the current strict version.',
@@ -2019,6 +2028,15 @@ export class CaptureOwner {
     }
     if (status?.capability !== DESKTOP_PLAYBACK_CAPABILITY) return null
     try {
+      if (status.state === 'terminal' || status.state === 'quarantined') {
+        const key = `${status.generation}:${status.terminalOrdinal}:${status.state}`
+        if (key !== this.terminalLoggedKey) {
+          log('dsp', `playback stopped · generation ${status.generation} · ${status.state} · ` +
+            `${status.hostState} · ${status.terminalReason || 'unknown cause'} · xruns ${status.xruns}` +
+            (status.error ? ` · ${status.error}` : ''), 'error')
+          this.terminalLoggedKey = key
+        }
+      }
       this.watchLaneStarvation(status)
     } catch {
       // A diagnostic never costs the renderer its status.

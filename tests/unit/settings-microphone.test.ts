@@ -753,6 +753,16 @@ describe('settings microphone input strip', () => {
 })
 
 describe('native monitoring route policy', () => {
+  it('accepts an approved same-endpoint ALSA route and preserves exclusive ownership', () => {
+    const device = hostDevice({ uid: 'alsa:loop:pcm:0', accessMode: 'exclusive', transport: 'virtual' })
+    const linux = { ...inventory('linux', device), provider: 'alsa' as const }
+    expect(monitorRouteCopy(linux, device, device).ready).toBe(true)
+    expect(monitorConfig(device, device, 0, [0, 1])).toMatchObject({ exclusive: true })
+    expect(monitorRouteCopy(linux, device, { ...device, uid: 'alsa:loop:pcm:1' }).ready).toBe(false)
+    const unknown = { ...device, monitoringSuitability: 'unknown' as const }
+    expect(monitorRouteCopy(linux, unknown, unknown).ready).toBe(false)
+    expect(monitorRouteCopy({ ...linux, provider: 'wasapi' }, device, device).ready).toBe(false)
+  })
   it('accepts only the exact low-latency same-device macOS route', () => {
     const device = hostDevice()
     expect(monitorRouteCopy(inventory('darwin', device), device, device)).toEqual({

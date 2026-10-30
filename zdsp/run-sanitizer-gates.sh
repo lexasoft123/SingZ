@@ -36,6 +36,12 @@ for gate in zdsp-release-strict zdsp-asan-ubsan zdsp-tsan; do
   esac
   cmake --build --preset "$gate" -- "${keep_going[@]}"
   ctest --preset "$gate"
+  if [[ $(uname -s) == Linux ]]; then
+    # This target does not exist on Darwin. Keep its deterministic ALSA null
+    # tests in every Linux gate; snd-aloop remains an explicit host-only run.
+    cmake --build "build/native/$gate" --target audio_host_linux_tests -- "${keep_going[@]}"
+    ctest --test-dir "build/native/$gate" -R '^audio_host_linux_tests$' --output-on-failure
+  fi
 done
 
 echo "zdsp sanitizer gates: strict Release + ASan/UBSan + TSan passed"

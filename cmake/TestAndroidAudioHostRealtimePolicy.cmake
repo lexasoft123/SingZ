@@ -439,13 +439,37 @@ if(_visibility_suffix_result EQUAL 0 OR
     "Android RT checker accepted visibility-suffix allocation:\n${_visibility_suffix_out}${_visibility_suffix_err}")
 endif()
 
+# The configured Clang may use libc++ (Apple/NDK) or libstdc++ with glibc
+# (Debian). Probe the allowed header instead of assuming its private helper
+# spelling. Both fixtures below still compile the exact allocating bypass
+# before asking the lexical checker to reject it.
+set(_system_macro_probe
+  "${SINGZ_ANDROID_AUDIO_HOST_RT_TEST_DIR}/system-macro-probe.cpp")
+file(WRITE "${_system_macro_probe}" "#include <array>\n")
+execute_process(COMMAND ${_android_rt_compile_command}
+  -std=c++20 -dM -E "${_system_macro_probe}"
+  RESULT_VARIABLE _system_macro_probe_result
+  OUTPUT_VARIABLE _system_macros ERROR_VARIABLE _system_macro_probe_err)
+if(NOT _system_macro_probe_result EQUAL 0)
+  message(FATAL_ERROR
+    "Clang could not probe standard-library macros:\n${_system_macro_probe_err}")
+endif()
+if(_system_macros MATCHES "#define _LIBCPP_CONCAT\\(")
+  set(_system_concat_helper "_LIBCPP_CONCAT")
+elseif(_system_macros MATCHES "#define __CONCAT\\(")
+  set(_system_concat_helper "__CONCAT")
+else()
+  message(FATAL_ERROR
+    "Compile-first token-paste proof needs a known standard-library helper")
+endif()
+
 # An identity forwarder can defer expansion of a system token-paste helper.
 # Compile the exact SAFE schedule, then prove the scanner rejects every
 # non-production project definition before forwarding can hide allocation.
 set(_identity_forwarder
   "${SINGZ_ANDROID_AUDIO_HOST_RT_TEST_DIR}/identity-forwarder.cpp")
 file(WRITE "${_identity_forwarder}"
-  "#include <array>\n#define SAFE(x) x\nvoid* callbackAllocate(){ return SAFE(_LIBCPP_CONCAT)(__builtin_, malloc)(1); }\n")
+  "#include <array>\n#define SAFE(x) x\nvoid* callbackAllocate(){ return SAFE(${_system_concat_helper})(__builtin_, malloc)(1); }\n")
 execute_process(COMMAND ${_android_rt_compile_command}
   -std=c++20 -Wall -Wextra -Wpedantic -Werror -fsyntax-only
   "${_identity_forwarder}"
@@ -562,7 +586,7 @@ if(_paste_result EQUAL 0 OR NOT "${_paste_out}${_paste_err}" MATCHES
     "Android RT checker accepted token-pasted allocation:\n${_paste_out}${_paste_err}")
 endif()
 
-# libc++ exposes _LIBCPP_CONCAT through an otherwise allowed standard header.
+# The library exposes a paste helper through an allowed standard header.
 # Its replacement list contains the token paste outside the project closure,
 # so the callback source has no literal ## for the scanner to see. Compile the
 # exact bypass first, then require fail-closed rejection of the reserved macro
@@ -570,7 +594,7 @@ endif()
 set(_system_paste
   "${SINGZ_ANDROID_AUDIO_HOST_RT_TEST_DIR}/system-token-paste.cpp")
 file(WRITE "${_system_paste}"
-  "#include <array>\nvoid* callbackAllocate(){ return _LIBCPP_CONCAT(__builtin_, malloc)(1); }\n")
+  "#include <array>\nvoid* callbackAllocate(){ return ${_system_concat_helper}(__builtin_, malloc)(1); }\n")
 execute_process(COMMAND ${_android_rt_compile_command}
   -std=c++20 -Wall -Wextra -Wpedantic -Werror -fsyntax-only
   "${_system_paste}"
@@ -579,7 +603,7 @@ execute_process(COMMAND ${_android_rt_compile_command}
   ERROR_VARIABLE _system_paste_compile_err)
 if(NOT _system_paste_compile_result EQUAL 0)
   message(FATAL_ERROR
-    "Android Clang did not accept libc++ token-pasted allocation fixture:\n${_system_paste_compile_out}${_system_paste_compile_err}")
+    "Android Clang did not accept system token-pasted allocation fixture:\n${_system_paste_compile_out}${_system_paste_compile_err}")
 endif()
 set(_manifest
   "${SINGZ_ANDROID_AUDIO_HOST_RT_TEST_DIR}/system-token-paste.cmake")
@@ -591,9 +615,9 @@ execute_process(COMMAND "${CMAKE_COMMAND}"
   ERROR_VARIABLE _system_paste_err)
 if(_system_paste_result EQUAL 0 OR
    NOT "${_system_paste_out}${_system_paste_err}" MATCHES
-       "Implementation-reserved identifier is forbidden.*_LIBCPP_CONCAT")
+       "Implementation-reserved identifier is forbidden.*${_system_concat_helper}")
   message(FATAL_ERROR
-    "Android RT checker accepted libc++ token-pasted allocation:\n${_system_paste_out}${_system_paste_err}")
+    "Android RT checker accepted system token-pasted allocation:\n${_system_paste_out}${_system_paste_err}")
 endif()
 
 set(_macro "${SINGZ_ANDROID_AUDIO_HOST_RT_TEST_DIR}/macro.cpp")

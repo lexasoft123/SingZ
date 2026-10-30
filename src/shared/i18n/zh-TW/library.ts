@@ -1,8 +1,9 @@
 /** 繁體中文：使用台灣慣用詞。 */
-import type { library as en } from '../en/library'
+import { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
+  ...en, // New Drive reader controls fall back to English until translated.
   "library.dropScreen.syncProgress": "正在與 Google Drive 同步… {msg}",
   "library.dropScreen.cancelSync": "取消",
   "library.dropScreen.syncPaused": "同步已暫停。已完成的檔案會保留。點選立即同步以繼續。",

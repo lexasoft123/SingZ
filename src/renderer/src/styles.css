@@ -5647,3 +5647,21 @@ body.win:not(.glass) .modal-card.lyed-card {
   .header-right .chip-status { min-width: 0; flex-shrink: 1; }
   .header-right .chip-label { overflow: hidden; text-overflow: ellipsis; }
 }
+
+/* Phone approval remains readable at TV distance, including Google's 15-W code fixture. */
+.drive-phone-signin { width: min(880px, calc(100vw - 48px)); }
+.drive-phone-body { display: flex; align-items: center; gap: 32px; margin: 24px 0; }
+.drive-phone-qr { width: 300px; height: 300px; flex-shrink: 0; border-radius: 8px; }
+.drive-phone-instructions { min-width: 0; flex: 1; }
+.drive-phone-url { font-size: 18px; overflow-wrap: anywhere; }
+.drive-phone-code { white-space: pre-wrap; font-family: 'Martian Mono Variable', monospace; font-size: clamp(18px, 2.5vw, 30px); color: var(--accent, #ffbd59); letter-spacing: .04em; overflow-wrap: anywhere; margin: 24px 0; }
+.drive-phone-actions { display: flex; gap: 12px; justify-content: flex-end; flex-wrap: wrap; }
+.drive-phone-actions button:focus-visible { outline: 3px solid #ffbd59; outline-offset: 4px; }
+@media (max-width: 650px) { .drive-phone-body { flex-direction: column; gap: 16px; } .drive-phone-qr { width: 240px; height: 240px; } }
+
+/* Native graph preparation can take seconds; acknowledge Play immediately. */
+.play.is-starting { cursor: progress; }
+.play.is-starting svg { animation: play-starting 0.8s linear infinite; }
+body.modal-open .play.is-starting svg { animation-play-state: paused; }
+@media (prefers-reduced-motion: reduce) { .play.is-starting svg { animation: none; } }
+@keyframes play-starting { to { transform: rotate(360deg); } }

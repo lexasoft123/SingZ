@@ -26,16 +26,16 @@
  * every red is a marginal rule rather than a class of failure. Settings carries
  * the toggle for a singer who disagrees.
  *
- * Linux ('other') has never run the harness and stays on Web Audio.
+ * Linux has a native ALSA development path. It remains opt-in until the full session harness and physical hardware are qualified.
  *
  * A module of its own because the engine imports the facade lazily and as
  * types only.
  */
 export const DESKTOP_NATIVE_PLAYBACK_KEY = 'singz.desktop.native-playback'
 
-export function detectedDesktopPlatform(): 'darwin' | 'win32' | 'other' {
+export function detectedDesktopPlatform(): 'darwin' | 'win32' | 'linux' | 'other' {
   const p = typeof navigator === 'undefined' ? '' : navigator.platform
-  return /Mac/i.test(p) ? 'darwin' : /Win/i.test(p) ? 'win32' : 'other'
+  return /Mac/i.test(p) ? 'darwin' : /Win/i.test(p) ? 'win32' : /Linux/i.test(p) ? 'linux' : 'other'
 }
 
 export function desktopNativePlaybackPreferred(platform = detectedDesktopPlatform()): boolean {

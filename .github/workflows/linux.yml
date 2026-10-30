@@ -1,0 +1,199 @@
+name: Linux desktop packages
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - '.claude/**'
+      - '.agents/**'
+      - '.codex/**'
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - '.claude/**'
+      - '.agents/**'
+      - '.codex/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-desktop-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  debian-amd64:
+    # Newer host libc can execute the Debian 13 build without raising the
+    # package's ABI floor.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      CC: clang-21
+      CXX: clang++-21
+      SINGZ_NATIVE_JOBS: '2'
+      SINGZ_BUILD_JOBS: '2'
+      SINGZ_MUTE: '1'
+      SINGZ_NO_SYNC: '1'
+      # Hosted kernels are not assumed to expose an ALSA card or snd-aloop.
+      SINGZ_E2E_REQUIRE_LOOPBACK: '0'
+      SINGZ_E2E_AUDIO: browser
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install host desktop test dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            alsa-utils cage labwc xvfb xauth dbus-x11 pulseaudio pulseaudio-utils \
+            libasound2t64 libudev1 libgtk-3-0t64 libnss3 libatk-bridge2.0-0t64 \
+            libcups2t64 libgbm1 libxss1 libstdc++6 libgomp1 xdg-utils
+
+      - name: Restore npm downloads
+        id: npm-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/singz-linux-cache/npm
+          key: linux-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: linux-npm-
+
+      - name: Restore compiled engines and splitter pack
+        id: engine-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            vendor/linux-x64
+            vendor/packs/gpu-splitter-linux-x64.tar.gz
+          # Existence skip guards mean only an exact input key is safe here.
+          # Do not add a prefix fallback for compiled/downloaded outputs.
+          # CI orchestration does not change engine artifact inputs.
+          key: linux-engines-debian13-clang21-v1-${{ hashFiles('package-lock.json', 'scripts/**', '!scripts/ci/**', 'CMakeLists.txt', 'cmake/**', 'native/**', 'zcore/**', 'zdsp/**', 'tools/native/**', 'third_party/native/**') }}
+
+      - name: Restore compiler objects
+        id: compiler-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/singz-linux-cache/ccache
+          key: linux-ccache-debian13-clang21-v1-${{ github.sha }}
+          restore-keys: linux-ccache-debian13-clang21-v1-
+
+      - name: Prepare the Debian 13 build image
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/singz-linux-image"
+          cat > "$RUNNER_TEMP/singz-linux-image/Dockerfile" <<'DOCKERFILE'
+          FROM node:24-trixie
+          ARG CI_UID=1001
+          ARG CI_GID=1001
+          RUN apt-get update \
+              && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                bash build-essential ca-certificates ccache cmake curl file git \
+                libasound2-dev libdbus-1-dev libdrm-dev libegl1-mesa-dev libgbm-dev \
+                libglib2.0-dev libudev-dev libwayland-dev ninja-build pkg-config \
+                libnode-dev python3 python3-venv rsync unzip util-linux xz-utils \
+                libgtk-3-0t64 libnss3 libatk-bridge2.0-0t64 libcups2t64 libxss1 \
+                libstdc++6 libgomp1 xdg-utils \
+              && printf '%s\n' 'deb https://deb.debian.org/debian trixie-backports main' \
+                > /etc/apt/sources.list.d/singz-backports.list \
+              && apt-get update \
+              && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                -t trixie-backports clang-21 lld-21 libclang-rt-21-dev \
+              && dpkg-query -W > /usr/local/share/singz-development-packages.txt \
+              && rm -rf /var/lib/apt/lists/*
+          # Match the runner so bind-mounted sources/caches need no chown.
+          RUN (getent group "$CI_GID" >/dev/null || groupadd --gid "$CI_GID" developer) \
+              && useradd --non-unique --create-home --uid "$CI_UID" --gid "$CI_GID" --shell /bin/bash developer
+          ENV CC=clang-21 CXX=clang++-21
+          USER developer
+          WORKDIR /src
+          DOCKERFILE
+          docker build --file "$RUNNER_TEMP/singz-linux-image/Dockerfile" \
+            --build-arg CI_UID="$(id -u)" --build-arg CI_GID="$(id -g)" \
+            --tag singz-linux-build:ci "$RUNNER_TEMP/singz-linux-image"
+
+      - name: Build and package in Debian 13
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/singz-linux-cache/npm" "$RUNNER_TEMP/singz-linux-cache/ccache"
+          # Model preparation needs more than 6 GiB; leave host headroom on the 16 GiB runner.
+          docker run --rm --init --memory=12g --memory-swap=14g \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/src" \
+            --mount "type=bind,source=$RUNNER_TEMP/singz-linux-cache/npm,target=/cache/npm" \
+            --mount "type=bind,source=$RUNNER_TEMP/singz-linux-cache/ccache,target=/cache/ccache" \
+            --env CI=true --env SINGZ_CI_STAGE=build \
+            --env CC=clang-21 --env CXX=clang++-21 \
+            --env SINGZ_NATIVE_JOBS=2 --env SINGZ_BUILD_JOBS=2 \
+            --env npm_config_cache=/cache/npm \
+            --env CCACHE_DIR=/cache/ccache --env CCACHE_BASEDIR=/src \
+            --env CCACHE_NOHASHDIR=true --env CCACHE_MAXSIZE=1G \
+            --env SINGZ_MUTE=1 --env SINGZ_NO_SYNC=1 \
+            singz-linux-build:ci bash scripts/ci/linux-package.sh
+
+      # Save only a completed build; installed-app failures must not discard it.
+      - name: Save compiled engines and splitter pack
+        if: steps.engine-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            vendor/linux-x64
+            vendor/packs/gpu-splitter-linux-x64.tar.gz
+          key: ${{ steps.engine-cache.outputs.cache-primary-key }}
+
+      - name: Install and test the packaged desktop app on the host
+        env:
+          SINGZ_CI_STAGE: installed-test
+          SINGZ_E2E_PACKAGED: /opt/SingZ/singz
+        run: bash scripts/ci/linux-package.sh
+
+      # Build-only output is not qualified. Upload an installer only after the
+      # installed-host addon smoke and app E2E both pass.
+      - name: Upload Linux installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: SingZ-linux-amd64
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+          path: |
+            dist/*.deb
+            dist/latest-linux*.yml
+            dist/*.sha256
+            dist/SHA256SUMS
+
+      - name: Upload test and package diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-desktop-diagnostics
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            build/native/linux-package-e2e/**
+            build/native/linux-package-ci/**
+
+      # These caches validate entries themselves and remain reusable after a
+      # downstream build/test failure. Partially built engine outputs do not.
+      - name: Save compiler objects
+        if: always() && !cancelled() && steps.compiler-cache.outputs.cache-primary-key != '' && steps.compiler-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/singz-linux-cache/ccache
+          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
+
+      - name: Save npm downloads
+        if: always() && !cancelled() && steps.npm-cache.outputs.cache-primary-key != '' && steps.npm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/singz-linux-cache/npm
+          key: ${{ steps.npm-cache.outputs.cache-primary-key }}

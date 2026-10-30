@@ -1,5 +1,8 @@
 appId: com.lexasoft.singz
 productName: SingZ
+extraMetadata:
+  desktopName: singz.desktop
+  homepage: https://github.com/lexasoft123/SingZ
 directories:
   buildResources: build
 files:
@@ -34,6 +37,10 @@ files:
   # Tests and agent/development configuration are not runtime assets.
   - '!tests/*'
   - '!.claude/*'
+  - '!.Codex/*'
+  - '!.codex/*'
+  - '!.agents/*'
+  - '!AGENTS.md'
   - '!{CLAUDE.md,vitest.config.ts,tsconfig.tests.json,tsconfig.renderer-tests.json}'
   - '!scripts/*'
   - '!docs/*'
@@ -134,6 +141,43 @@ mac:
     - target: dmg
 dmg:
   title: ${productName}
+linux:
+  icon: build/icon.png
+  syncDesktopName: true
+  category: AudioVideo
+  executableName: singz
+  target:
+    - target: deb
+  extraResources:
+    - from: assets/pitch
+      to: pitch
+    - from: vendor/linux-${arch}
+      to: engines
+      filter: ['singz-analyze*', 'llama-server*', 'crispasr*']
+    - from: third_party/notices/lyrics-engines
+      to: open-source-notices/lyrics-engines
+    - from: vendor/packs/gpu-splitter-linux-${arch}.tar.gz
+      to: engines/gpu-splitter-linux-${arch}.tar.gz
+    - from: build/capture-package/linux-${arch}
+      to: engines
+      filter: ['singz-capture.node', 'singz-capture.node.source-hash', 'singz-capture.node.sha256', 'singz-capture.manifest.json', 'ffmpeg/**/*']
+    - from: third_party/native/signalsmith
+      to: open-source-notices/signalsmith
+      filter: ['VENDORED.txt', 'LICENSE-stretch.txt', 'LICENSE-linear.txt']
+deb:
+  depends:
+    - libasound2t64
+    - libudev1
+    - libgtk-3-0t64
+    - libnss3
+    - libatk-bridge2.0-0t64
+    - libcups2t64
+    - libgbm1
+    - libxss1
+    - libc6 (>= 2.38)
+    - libstdc++6 (>= 13.1)
+    - libgomp1
+    - xdg-utils
 win:
   extraResources:
     - from: assets/pitch

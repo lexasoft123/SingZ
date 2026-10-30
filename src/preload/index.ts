@@ -294,7 +294,13 @@ const api: SingzApi = {
   setProjectsRoot: (path) => ipcRenderer.invoke('projects:set-root', path),
   chooseProjectsRoot: () => ipcRenderer.invoke('projects:choose-root'),
 
+  gdriveProjects: () => ipcRenderer.invoke('gdrive:projects'),
+  gdriveDownload: id => ipcRenderer.invoke('gdrive:download', id),
+  gdriveCancelDownload: () => ipcRenderer.invoke('gdrive:cancel-download'),
   gdriveStatus: () => ipcRenderer.invoke('gdrive:status'),
+  gdriveDeviceStart: () => ipcRenderer.invoke('gdrive:device-start'),
+  gdriveDeviceStatus: id => ipcRenderer.invoke('gdrive:device-status', id),
+  gdriveDeviceCancel: id => ipcRenderer.invoke('gdrive:device-cancel', id),
   gdriveSignIn: () => ipcRenderer.invoke('gdrive:signin'),
   gdriveSignOut: () => ipcRenderer.invoke('gdrive:signout'),
   gdriveSync: () => ipcRenderer.invoke('gdrive:sync'),

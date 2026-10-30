@@ -107,6 +107,7 @@ export class MultitrackEngine {
   private outputRouteVersion = 0
   private outputRouteApplyPending: Promise<void> | null = null
   private nativeMonitorLease = false
+  private headphoneMonitorLease = false
   private nativePlayback: DesktopNativePlaybackClient | null = null
   /** The prepare-ahead debounce: the loader and the settings that follow a
    * load (grid, metronome, transpose, tempo, training, region, faders) each
@@ -214,6 +215,27 @@ export class MultitrackEngine {
    * Playing, and the core refuses resume() from there: park the renderer at
    * the end and hand the core a Pause, so the next Play seeks and resumes. */
   private onNativeStatus(status: DesktopPlaybackStatus | null): void {
+    if (status && (status.state === 'terminal' || status.state === 'quarantined') &&
+        this._playing && this.nativePlayback?.active) {
+      const frame = Number(status.audibleProjectionQuality === 'current'
+        ? status.audibleProjectFrame : status.renderedProjectFrame)
+      if (Number.isFinite(frame)) this.startOffset = Math.max(0, Math.min(this.duration,
+        frame / (status.format.sampleRate || this.ctx.sampleRate)))
+      this._playing = false
+      this.cancelPendingClicks()
+      this.countInfo = null
+      this.nextClickIdx = null
+      this.startBeatIdx = null
+      this.syncBoundWatcher()
+      this.syncTrainWatcher()
+      this.syncClickWatcher()
+      const message = status.error || (Number(status.xruns) > 0
+        ? 'Audio playback stopped after a buffer underrun. Press Play to retry.'
+        : `Audio playback stopped (${status.terminalReason || status.hostState}). Press Play to retry.`)
+      this.requestedPlaybackError = { reason: 'toggle', code: 'provider-failure',
+        provider: this.nativePlayback.recoveryProviderId, message, cause: status }
+      console.error('Native playback stopped:', message)
+    }
     if (status?.transportState === 'completed' && this._playing && this.nativePlayback?.active) {
       this._playing = false
       this.startOffset = this.duration
@@ -298,7 +320,7 @@ export class MultitrackEngine {
     if (this.aheadTimer !== null) clearTimeout(this.aheadTimer)
     this.aheadTimer = null
     if (this.teardownStarted || this._playing || this.tracks.length === 0 ||
-        !this.aheadAllowed || this.betweenSongs) return
+        !this.aheadAllowed || this.betweenSongs || this.headphoneMonitorLease) return
     this.aheadTimer = setTimeout(() => {
       this.aheadTimer = null
       void this.prepareNativeAhead().catch((error) => {
@@ -309,14 +331,14 @@ export class MultitrackEngine {
 
   private async prepareNativeAhead(): Promise<void> {
     if (this.teardownStarted || this._playing || this.tracks.length === 0 ||
-        this.pendingPlayRequests.size > 0 || !this.aheadAllowed || this.betweenSongs) return
+        this.pendingPlayRequests.size > 0 || !this.aheadAllowed || this.betweenSongs || this.headphoneMonitorLease) return
     if (!desktopNativePlaybackPreferred()) return
     const epoch = this._songEpoch
     const ahead = this.aheadEpoch
     const stale = (): boolean =>
       epoch !== this._songEpoch || ahead !== this.aheadEpoch || this._playing ||
       this.pendingPlayRequests.size > 0 || !this.aheadAllowed || this.teardownStarted ||
-      this.betweenSongs
+      this.betweenSongs || this.headphoneMonitorLease
     const module = await this.ensureNativePlayback()
     if (stale() || module.client.active || module.client.recoveryPending) return
     if (module.client.preparedAhead) await module.client.discardAhead()
@@ -360,7 +382,11 @@ export class MultitrackEngine {
     this.nativePlayback ??= new module.DesktopNativePlaybackClient(
       {
         releaseLegacyOutput: () => this.releaseOutputForNativeMonitor(),
-        restoreLegacyOutput: () => this.restoreOutputAfterNativeMonitor()
+        restoreLegacyOutput: async () => {
+          // Monitoring takes over the silent renderer lease while the song
+          // graph retires. Only the monitor coordinator may restore it then.
+          if (!this.headphoneMonitorLease) await this.restoreOutputAfterNativeMonitor()
+        }
       },
       (status) => this.onNativeStatus(status)
     )
@@ -521,7 +547,7 @@ export class MultitrackEngine {
         ? candidate.code as EnginePlaybackErrorCode
         : 'playback-failure'
       const provider = candidate?.provider === 'asio' || candidate?.provider === 'wasapi' ||
-        candidate?.provider === 'coreaudio'
+        candidate?.provider === 'coreaudio' || candidate?.provider === 'alsa'
         ? candidate.provider
         : null
       const message = cause instanceof Error ? cause.message : String(cause)
@@ -583,12 +609,15 @@ export class MultitrackEngine {
   }
 
   private async configureTrainingOutput(): Promise<void> {
-    const provider: DesktopPlaybackProvider = detectedDesktopPlatform() === 'win32' ? this.nativeAudioProvider : 'coreaudio'
+    const platform = detectedDesktopPlatform()
+    const provider: DesktopPlaybackProvider = platform === 'win32' ? this.nativeAudioProvider : platform === 'linux' ? 'alsa' : 'coreaudio'
     const routeKey = `${provider}:${this.desiredOutputId}`
     if (this.nativePlayback?.active || this.trainingConfiguredOutputId === routeKey) return
     const requested = this.desiredOutputId
     let uid = ''
-    if (requested && requested !== 'default') {
+    if (provider === 'alsa' && requested.startsWith('native:')) {
+      uid = requested.slice(7)
+    } else if (requested && requested !== 'default') {
       const inventory = await window.singz.audioHostDevices(provider)
       if (!inventory.ok) throw new Error(inventory.error)
       const outputs = await navigator.mediaDevices.enumerateDevices()
@@ -631,7 +660,7 @@ export class MultitrackEngine {
     // restoration, but never let Chromium reacquire a device underneath it.
     if (this.nativeMonitorLease) return
     await this.applyDesiredOutputRoute()
-    await this.configureTrainingOutput()
+    if (detectedDesktopPlatform() !== 'linux' || deviceId.startsWith('native:')) await this.configureTrainingOutput()
     if (this._playing && this.ctx.state !== 'running') await this.ctx.resume()
   }
 
@@ -644,14 +673,18 @@ export class MultitrackEngine {
         const version = this.outputRouteVersion
         const target = this.desiredOutputId
         try {
-          if (this.ctx.sinkId !== target) await this.ctx.setSinkId(target)
+          if (target.startsWith('native:')) {
+            await (this.ctx.setSinkId as unknown as (sink: { type: 'none' }) => Promise<void>)({ type: 'none' })
+          } else if (this.ctx.sinkId !== target) await this.ctx.setSinkId(target)
         } catch (error) {
           if (version !== this.outputRouteVersion) continue
           this.desiredOutputId = this.confirmedOutputId
           this.outputRouteVersion++
           const fallbackVersion = this.outputRouteVersion
           if (this.ctx.sinkId !== this.confirmedOutputId) {
-            await this.ctx.setSinkId(this.confirmedOutputId)
+            await (this.ctx.setSinkId as unknown as (sink: string | { type: 'none' }) => Promise<void>)(
+              this.confirmedOutputId.startsWith('native:') ? { type: 'none' } : this.confirmedOutputId
+            )
           }
           if (fallbackVersion !== this.outputRouteVersion) continue
           throw error
@@ -671,6 +704,36 @@ export class MultitrackEngine {
 
   /** Pause/suspend and detach Chromium's destination before the native host
    * opens it. The silent sink is an explicit device release, not a mute. */
+  async releaseOutputForHeadphoneMonitor(): Promise<void> {
+    this.headphoneMonitorLease = true
+    const position = this.position
+    if (this.nativePlayback?.active) {
+      // Unload serializes behind the coordinator's pause and stops the host;
+      // do not enqueue a second pause against an already parked transport.
+      this.generation++
+      this._playing = false
+    } else this.pause()
+    try {
+      await Promise.allSettled([...this.pendingPlayRequests])
+      await this.discardNativeAhead()
+      this.beginNativePlaybackUnload()
+      await this.settleNativePlaybackUnload()
+      this.startOffset = position
+      this._playing = false
+      await this.releaseOutputForNativeMonitor()
+    } catch (error) {
+      // A failed native cleanup retains its own existing recovery owner;
+      // do not claim a second, invisible headphone-monitor owner.
+      this.headphoneMonitorLease = false
+      throw error
+    }
+  }
+
+  async restoreOutputAfterHeadphoneMonitor(): Promise<void> {
+    await this.restoreOutputAfterNativeMonitor()
+    this.headphoneMonitorLease = false
+  }
+
   async releaseOutputForNativeMonitor(): Promise<void> {
     if (this.nativeMonitorLease) return
     this.nativeMonitorLease = true
@@ -1556,12 +1619,16 @@ export class MultitrackEngine {
     else this.scheduleNativePrepareAhead()
   }
 
+  get starting(): boolean { return this.pendingPlayRequests.size > 0 && !this._playing }
+
   play(opts: { countIn?: boolean } = {}): Promise<void> {
     if (this.teardownStarted) return Promise.resolve()
     const operation = this.performPlay(opts)
     this.pendingPlayRequests.add(operation)
+    this.emit()
     return operation.finally(() => {
       this.pendingPlayRequests.delete(operation)
+      if (!this.teardownStarted) this.emit()
     })
   }
 
@@ -1705,6 +1772,9 @@ export class MultitrackEngine {
         null,
         'The retained native provider cannot retry with the current runtime, toggle, or graph.'
       )
+    }
+    if (this.desiredOutputId.startsWith('native:')) {
+      throw new Error('This ALSA output needs native playback. Enable it in Settings and use a supported audio format.')
     }
 
     // Native declined, so Web Audio is about to do the playing — and it can

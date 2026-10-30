@@ -47,7 +47,7 @@ describe('desktop native playback preference', () => {
     vi.stubGlobal('navigator', { platform: 'Win32' })
     expect(detectedDesktopPlatform()).toBe('win32')
     vi.stubGlobal('navigator', { platform: 'Linux x86_64' })
-    expect(detectedDesktopPlatform()).toBe('other')
+    expect(detectedDesktopPlatform()).toBe('linux')
     vi.stubGlobal('navigator', undefined)
     expect(detectedDesktopPlatform()).toBe('other')
   })

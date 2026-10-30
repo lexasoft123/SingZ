@@ -165,7 +165,7 @@ function validCaptureArtifact({
 
 function assertHostCanBuildTarget(target, hostPlatform = process.platform) {
   const platform = target.startsWith('darwin-') ? 'darwin' :
-    target.startsWith('win32-') ? 'win32' : ''
+    target.startsWith('win32-') ? 'win32' : target.startsWith('linux-') ? 'linux' : ''
   if (platform !== hostPlatform) {
     throw new Error(
       `Cross-OS capture builds are not configured: ${hostPlatform} cannot build ${target}`
@@ -182,7 +182,7 @@ function assertSourceFingerprintUnchanged(expected, actual, phase) {
 }
 
 function captureTarget(platform, arch) {
-  if (!['darwin', 'win32'].includes(platform) || !['arm64', 'x64'].includes(arch)) {
+  if (!['darwin', 'win32', 'linux'].includes(platform) || !['arm64', 'x64'].includes(arch)) {
     throw new Error(`The desktop capture addon is not supported on ${platform}-${arch}`)
   }
   if (platform === 'win32' && arch !== 'x64') {
@@ -197,8 +197,6 @@ function requestedCaptureTargets(args, hostPlatform = process.platform, hostArch
     'create-self-signed-cert', 'clear-cache'
   ])
   const unsupportedExact = new Map([
-    ['--linux', 'Linux desktop capture packaging is not supported'],
-    ['-l', 'Linux desktop capture packaging is not supported'],
     ['--ia32', 'The desktop capture addon does not support ia32'],
     ['--armv7l', 'The desktop capture addon does not support armv7l'],
     ['-o', 'The -o electron-builder shorthand is not supported by the SingZ dist wrapper']
@@ -250,6 +248,7 @@ function requestedCaptureTargets(args, hostPlatform = process.platform, hostArch
   const platforms = []
   if (wantsMac) platforms.push('darwin')
   if (wantsWin) platforms.push('win32')
+  if (has('--linux', '-l')) platforms.push('linux')
   if (platforms.length === 0) platforms.push(hostPlatform)
 
   const wantsUniversal = has('--universal')
@@ -385,6 +384,19 @@ function validatePeX64(path) {
 }
 
 function validateCaptureBinary(addon, target) {
+  if (target === 'linux-x64' || target === 'linux-arm64') {
+    const bytes = readFileSync(addon)
+    const machine = target === 'linux-x64' ? 62 : 183
+    // ELF64, little endian, current version, ET_DYN and the requested ISA.
+    // Check the complete ELF header before reading any of its fields.
+    if (bytes.length < 64 || !bytes.subarray(0, 4).equals(Buffer.from([0x7f, 69, 76, 70])) ||
+        bytes[4] !== 2 || bytes[5] !== 1 || bytes[6] !== 1 ||
+        bytes.readUInt16LE(16) !== 3 || bytes.readUInt16LE(18) !== machine ||
+        bytes.readUInt32LE(20) !== 1 || bytes.readUInt16LE(52) !== 64) {
+      throw new Error(`Capture addon is not an ELF64 shared object for ${target}: ${addon}`)
+    }
+    return
+  }
   if (target === 'win32-x64') {
     validatePeX64(addon)
     return

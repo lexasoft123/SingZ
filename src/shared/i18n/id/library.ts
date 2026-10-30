@@ -1,8 +1,9 @@
 /** Bahasa Indonesia UI strings. Keep keys and placeholders in sync with English. */
-import type { library as en } from '../en/library'
+import { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
+  ...en, // New Drive reader controls fall back to English until translated.
   "library.dropScreen.syncProgress": "Menyinkronkan dengan Google Drive… {msg}",
   "library.dropScreen.cancelSync": "Batal",
   "library.dropScreen.syncPaused": "Sinkronisasi dijeda. File yang selesai tetap disimpan. Pilih Sinkronkan sekarang untuk melanjutkan.",

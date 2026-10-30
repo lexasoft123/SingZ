@@ -269,6 +269,7 @@ export type ProjectGraphWriteResult =
   | { ok: false; code: 'not-project' | 'unsupported' | 'invalid' | 'write-failed'; error: string }
 
 export interface ProjectInfo {
+  sourceMissing?: boolean
   dir: string
   name: string
   /** 1 = WAV stems (pre-0.7), 2 = FLAC stems. Missing on old metas = 1. */
@@ -755,7 +756,7 @@ export interface DesktopMonitorStatus {
   rejectedBlocks: number
 }
 
-export type DesktopPlaybackProvider = 'coreaudio' | 'wasapi' | 'asio'
+export type DesktopPlaybackProvider = 'coreaudio' | 'wasapi' | 'asio' | 'alsa'
 
 export interface DesktopPlaybackProviderInfo {
   id: DesktopPlaybackProvider
@@ -1594,7 +1595,13 @@ export interface SingzApi {
   >
 
   /** Google Drive sync (drive.file scope — no Drive client needed anywhere). */
+  gdriveProjects(): Promise<{ ok: boolean; projects: { id: string; name: string; songPath?: string }[]; error?: string }>
+  gdriveDownload(id: string): Promise<{ ok: boolean; songPath?: string; error?: string; cancelled?: boolean }>
+  gdriveCancelDownload(): Promise<{ ok: boolean }>
   gdriveStatus(): Promise<{
+    signInMode: 'device' | 'browser'
+    deviceSignInConfigured: boolean
+    browserSignInConfigured: boolean
     configured: boolean
     signedIn: boolean
     lastSync?: number | null
@@ -1602,6 +1609,9 @@ export interface SingzApi {
     /** Absolute dirs waiting to reach Drive — what the per-song badges read. */
     dirtyDirs: string[]
   }>
+  gdriveDeviceStart(): Promise<import('./drive-device').DriveDeviceStart>
+  gdriveDeviceStatus(id: string): Promise<import('./drive-device').DriveDeviceStatus>
+  gdriveDeviceCancel(id?: string): Promise<{ ok: boolean; complete?: boolean }>
   gdriveSignIn(): Promise<{ ok: true } | { ok: false; error: string }>
   gdriveSignOut(): Promise<{ ok: boolean }>
   gdriveCancelSync(): Promise<{ ok: boolean }>

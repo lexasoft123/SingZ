@@ -45,6 +45,9 @@ const arch = requested?.at(-1) || process.arch
 const printingFingerprint = runningAsScript && process.argv.includes('--print-source-fingerprint')
 const target = runningAsScript && !printingFingerprint ? captureTarget(platform, arch) : null
 if (target) assertHostCanBuildTarget(target)
+if (platform === 'linux' && arch !== process.arch) {
+  throw new Error('Linux capture cross-compilation needs an explicit toolchain; build on the target architecture')
+}
 
 const headersRoot = join(root, '.engines-src', 'electron-headers', electronVersion)
 const archive = join(headersRoot, `node-v${electronVersion}-headers.tar.gz`)
@@ -366,8 +369,8 @@ function loadCodecPack() {
 }
 
 function validateFfmpegImports(addon, codecPack) {
-  const command = platform === 'darwin' ? 'otool' : 'dumpbin.exe'
-  const args = platform === 'darwin' ? ['-L', addon] : ['/dependents', addon]
+  const command = platform === 'darwin' ? 'otool' : platform === 'linux' ? 'readelf' : 'dumpbin.exe'
+  const args = platform === 'darwin' ? ['-L', addon] : platform === 'linux' ? ['-d', addon] : ['/dependents', addon]
   const result = spawnSync(command, args, { encoding: 'utf8' })
   if (!codecPack) {
     // A base build must not have picked up a developer machine's libav*:
