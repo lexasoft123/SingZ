@@ -29,7 +29,7 @@ concurrency:
 jobs:
   debian-amd64:
     # Newer host libc can execute the Debian 13 build without raising the
-    # package's ABI floor. The Debian stand remains its baseline runtime gate.
+    # package's ABI floor.
     runs-on: ubuntu-26.04
     timeout-minutes: 180
     defaults:
@@ -60,15 +60,17 @@ jobs:
             libasound2t64 libudev1 libgtk-3-0t64 libnss3 libatk-bridge2.0-0t64 \
             libcups2t64 libgbm1 libxss1 libstdc++6 libgomp1 xdg-utils
 
-      - name: Cache npm downloads
-        uses: actions/cache@v4
+      - name: Restore npm downloads
+        id: npm-cache
+        uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/singz-linux-cache/npm
           key: linux-npm-${{ hashFiles('package-lock.json') }}
           restore-keys: linux-npm-
 
-      - name: Cache compiled engines and splitter pack
-        uses: actions/cache@v4
+      - name: Restore compiled engines and splitter pack
+        id: engine-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             vendor/linux-x64
@@ -77,8 +79,9 @@ jobs:
           # Do not add a prefix fallback for compiled/downloaded outputs.
           key: linux-engines-debian13-clang21-v1-${{ hashFiles('package-lock.json', 'scripts/**', 'CMakeLists.txt', 'cmake/**', 'native/**', 'zcore/**', 'zdsp/**', 'tools/native/**', 'third_party/native/**') }}
 
-      - name: Cache compiler objects
-        uses: actions/cache@v4
+      - name: Restore compiler objects
+        id: compiler-cache
+        uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/singz-linux-cache/ccache
           key: linux-ccache-debian13-clang21-v1-${{ github.sha }}
@@ -122,9 +125,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/singz-linux-cache/npm" "$RUNNER_TEMP/singz-linux-cache/ccache"
-          # No credentials, host devices, extra capabilities, host IPC or
-          # sandbox overrides enter this build-only container.
-          docker run --rm --init --memory=6g --memory-swap=6g \
+          # Model preparation needs more than 6 GiB; leave host headroom on the 16 GiB runner.
+          docker run --rm --init --memory=12g --memory-swap=14g \
             --mount "type=bind,source=$GITHUB_WORKSPACE,target=/src" \
             --mount "type=bind,source=$RUNNER_TEMP/singz-linux-cache/npm,target=/cache/npm" \
             --mount "type=bind,source=$RUNNER_TEMP/singz-linux-cache/ccache,target=/cache/ccache" \
@@ -136,6 +138,16 @@ jobs:
             --env CCACHE_NOHASHDIR=true --env CCACHE_MAXSIZE=1G \
             --env SINGZ_MUTE=1 --env SINGZ_NO_SYNC=1 \
             singz-linux-build:ci bash scripts/ci/linux-package.sh
+
+      # Save only a completed build; installed-app failures must not discard it.
+      - name: Save compiled engines and splitter pack
+        if: steps.engine-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            vendor/linux-x64
+            vendor/packs/gpu-splitter-linux-x64.tar.gz
+          key: ${{ steps.engine-cache.outputs.cache-primary-key }}
 
       - name: Install and test the packaged desktop app on the host
         env:
@@ -168,3 +180,19 @@ jobs:
           path: |
             build/native/linux-package-e2e/**
             build/native/linux-package-ci/**
+
+      # These caches validate entries themselves and remain reusable after a
+      # downstream build/test failure. Partially built engine outputs do not.
+      - name: Save compiler objects
+        if: always() && !cancelled() && steps.compiler-cache.outputs.cache-primary-key != '' && steps.compiler-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/singz-linux-cache/ccache
+          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
+
+      - name: Save npm downloads
+        if: always() && !cancelled() && steps.npm-cache.outputs.cache-primary-key != '' && steps.npm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/singz-linux-cache/npm
+          key: ${{ steps.npm-cache.outputs.cache-primary-key }}
