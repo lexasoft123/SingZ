@@ -259,15 +259,6 @@ jobs:
       - name: Android AudioHost provider symbols and callback flags
         run: |
           for abi in arm64-v8a armeabi-v7a; do
-            lib="mobile/android/app/build/intermediates/cmake/debug/obj/$abi/libsingzcore.so"
-            test -f "$lib"
-            nm_file="$RUNNER_TEMP/singzcore-$abi.nm"
-            strings_file="$RUNNER_TEMP/singzcore-$abi.strings"
-            "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" -D "$lib" > "$nm_file"
-            strings "$lib" > "$strings_file"
-            grep -F 'Java_com_singzplayer_split_SingzCore_hasAndroidAudioHostProvider' "$nm_file"
-            grep -F 'singz.android.oboe.audio_host.phase3d' "$strings_file"
-
             valid_compile_dbs=()
             while IFS= read -r compile_db; do
               if jq -e '
@@ -291,6 +282,14 @@ jobs:
             test "${#valid_compile_dbs[@]}" -eq 1
 
             compile_dir="$(dirname "${valid_compile_dbs[0]}")"
+            lib="$(node mobile/scripts/android-native-library-output.cjs "$compile_dir" "$abi")"
+            nm_file="$RUNNER_TEMP/singzcore-$abi.nm"
+            strings_file="$RUNNER_TEMP/singzcore-$abi.strings"
+            "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" -D "$lib" > "$nm_file"
+            strings "$lib" > "$strings_file"
+            grep -F 'Java_com_singzplayer_split_SingzCore_hasAndroidAudioHostProvider' "$nm_file"
+            grep -F 'singz.android.oboe.audio_host.phase3d' "$strings_file"
+
             callback_objects=(
               "$compile_dir/singz-native/third_party/zcore/CMakeFiles/zcore_device.dir/zcore/platform/android/audio_host_android_callback.cpp.o"
               "$compile_dir/singz-native/third_party/zcore/CMakeFiles/zcore_device.dir/zcore/platform/android/audio_host_android_callback_policy.cpp.o"

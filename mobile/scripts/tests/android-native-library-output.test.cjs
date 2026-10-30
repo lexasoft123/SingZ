@@ -1,0 +1,42 @@
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const os = require('node:os')
+const path = require('node:path')
+const { test } = require('node:test')
+const { resolveLibraryOutput } = require('../android-native-library-output.cjs')
+const repository = path.resolve(__dirname, '../../..')
+
+test('native library lookup follows the active hashed CMake output directory', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'singz-android-native-output-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const compileDir = path.join(root, 'app', '.cxx', 'Debug', 'current hash', 'arm64-v8a')
+  const outputDir = path.join(root, 'app', 'build', 'intermediates', 'cxx', 'Debug', 'current hash', 'obj', 'arm64-v8a')
+  fs.mkdirSync(compileDir, { recursive: true })
+  fs.mkdirSync(outputDir, { recursive: true })
+  fs.writeFileSync(path.join(compileDir, 'CMakeCache.txt'), `CMAKE_LIBRARY_OUTPUT_DIRECTORY:PATH=${outputDir}\n`)
+  fs.writeFileSync(path.join(outputDir, 'libsingzcore.so'), 'native library fixture')
+
+  const stalePath = path.join(root, 'app', 'build', 'intermediates', 'cmake', 'debug', 'obj', 'arm64-v8a', 'libsingzcore.so')
+  assert.equal(fs.existsSync(stalePath), false)
+  assert.equal(resolveLibraryOutput(compileDir, 'arm64-v8a'), path.join(outputDir, 'libsingzcore.so'))
+})
+
+test('native library lookup fails closed for missing or ambiguous CMake output settings', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'singz-android-native-output-invalid-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  fs.writeFileSync(path.join(root, 'CMakeCache.txt'), 'CMAKE_BUILD_TYPE:STRING=Debug\n')
+  assert.throws(() => resolveLibraryOutput(root, 'arm64-v8a'), /expected one nonempty/)
+  fs.writeFileSync(path.join(root, 'CMakeCache.txt'), 'CMAKE_LIBRARY_OUTPUT_DIRECTORY:PATH=/one/arm64-v8a\nCMAKE_LIBRARY_OUTPUT_DIRECTORY:UNINITIALIZED=/two/arm64-v8a\n')
+  assert.throws(() => resolveLibraryOutput(root, 'arm64-v8a'), /expected one nonempty/)
+})
+
+test('Android CI resolves symbols from the validated ABI CMake build directory', () => {
+  const workflow = fs.readFileSync(path.join(repository, '.github/workflows/android.yml'), 'utf8')
+  const step = workflow.split(/(?=^      - )/m).find(block => block.includes('- name: Android AudioHost provider symbols and callback flags'))
+  assert.ok(step)
+  assert.ok(step.indexOf('valid_compile_dbs+=') < step.indexOf('android-native-library-output.cjs'))
+  assert.ok(step.indexOf('android-native-library-output.cjs') < step.indexOf('llvm-nm'))
+  assert.doesNotMatch(step, /intermediates\/cmake\/debug\/obj/)
+  assert.match(step, /audio_host_android_callback_policy\.cpp\.o/)
+  assert.match(step, /singz-native\/third_party\/zcore\/CMakeFiles\/zcore_device\.dir/)
+})
