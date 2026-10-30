@@ -3,6 +3,7 @@
 #include <cmath>
 #include <atomic>
 #include <bit>
+#include <limits>
 #include <limits.h>
 #include <memory>
 
@@ -103,7 +104,11 @@ void consumeAutomationAt(BuiltinState* state, const ProcessContext* context,
 }
 
 float finiteSample(float value, BuiltinState* state) noexcept {
-  if (std::isfinite(value)) return value;
+  // Classify the IEEE encoding without a per-sample CRT call on Windows.
+  // Every finite encoding, including signed zero and subnormals, stays intact.
+  static_assert(sizeof(float) == sizeof(uint32_t) &&
+                std::numeric_limits<float>::is_iec559);
+  if ((std::bit_cast<uint32_t>(value) & 0x7f800000U) != 0x7f800000U) return value;
   if (state->nonFinite != UINT32_MAX) ++state->nonFinite;
   return 0.0f;
 }
@@ -233,6 +238,18 @@ void passInput(BuiltinState* state, const ConstAudioBusView* inputs,
 void processGain(BuiltinState* state, const ProcessContext* context,
                  const ConstAudioBusView* inputs,
                  const MutableAudioBusView& output) noexcept {
+  // With no pending automation, traverse contiguous planes. Automated and
+  // in-flight ramps retain the upstream sample-accurate implementation below.
+  if (context->parameterCount == 0 && state->rampRemaining == 0) {
+    const float value = state->currentValue;
+    for (uint32_t channel = 0; channel < output.channelCount; ++channel) {
+      const float* source = inputs[0].channels[channel];
+      float* destination = output.channels[channel];
+      for (uint32_t frame = 0; frame < context->frames.value; ++frame)
+        destination[frame] = finiteSample(source[frame], state) * value;
+    }
+    return;
+  }
   uint32_t eventIndex = 0;
   if (context->frames.value == 0)
     consumeAutomationAt(state, context, 0, kGainParameter, &eventIndex);

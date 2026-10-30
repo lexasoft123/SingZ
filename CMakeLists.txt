@@ -77,9 +77,52 @@ target_compile_definitions(singz_native_build_options INTERFACE
   _USE_MATH_DEFINES)
 
 set(SINGZ_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
+set(AUDIOZ_ROOT "${SINGZ_REPO_ROOT}/third_party/audio-engine")
+if(NOT EXISTS "${AUDIOZ_ROOT}/CMakeLists.txt")
+  message(FATAL_ERROR
+    "AudioZ sources are missing. Run scripts/import-audioz.py with the pinned revision.")
+endif()
+# Product builds compile the verified canonical sources even when a previous
+# local build cache contains temporary AudioZ overlay paths.
+set(AUDIOZ_GRAPH_RUNNER_SOURCE "${AUDIOZ_ROOT}/zdsp/src/runtime/graph_runner.cpp"
+  CACHE FILEPATH "Canonical pinned AudioZ graph runner" FORCE)
+set(AUDIOZ_BUILTIN_NODES_SOURCE "${AUDIOZ_ROOT}/zdsp/src/runtime/builtin_nodes.cpp"
+  CACHE FILEPATH "Canonical pinned AudioZ built-in processors" FORCE)
+set(AUDIOZ_BUILD_MEDIA ON CACHE BOOL "Build AudioZ media components" FORCE)
+set(AUDIOZ_BUILD_ANALYSIS ON CACHE BOOL "Build AudioZ analysis components" FORCE)
+set(AUDIOZ_BUILD_TESTS OFF CACHE BOOL "Build AudioZ tests from SingZ" FORCE)
+set(AUDIOZ_BUILD_BENCHMARKS OFF CACHE BOOL "Build AudioZ benchmarks from SingZ" FORCE)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+execute_process(
+  COMMAND "${Python3_EXECUTABLE}"
+    "${AUDIOZ_ROOT}/scripts/verify-audioz.py"
+    --root "${AUDIOZ_ROOT}"
+    --lock "${SINGZ_REPO_ROOT}/third_party/audio-engine.lock.json"
+  RESULT_VARIABLE _audioz_verify_status
+  OUTPUT_VARIABLE _audioz_verify_stdout
+  ERROR_VARIABLE _audioz_verify_stderr)
+if(NOT _audioz_verify_status EQUAL 0)
+  message(FATAL_ERROR
+    "Pinned AudioZ verification failed:\n${_audioz_verify_stdout}${_audioz_verify_stderr}")
+endif()
+include(cmake/SingZFfmpegTarget.cmake)
+add_subdirectory(third_party/audio-engine)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${SINGZ_REPO_ROOT}/third_party/audio-engine.lock.json" "${AUDIOZ_ROOT}/audioz-source-manifest.json")
+add_custom_target(singz_verify_audioz ALL
+  COMMAND "${Python3_EXECUTABLE}" "${AUDIOZ_ROOT}/scripts/verify-audioz.py"
+    --root "${AUDIOZ_ROOT}" --lock "${SINGZ_REPO_ROOT}/third_party/audio-engine.lock.json"
+  VERBATIM COMMENT "Verifying pinned AudioZ source snapshot")
+get_property(_audioz_targets DIRECTORY "${AUDIOZ_ROOT}" PROPERTY BUILDSYSTEM_TARGETS)
+foreach(_target IN LISTS _audioz_targets)
+  get_target_property(_kind "${_target}" TYPE)
+  if(NOT _kind STREQUAL "INTERFACE_LIBRARY")
+    add_dependencies("${_target}" singz_verify_audioz)
+  endif()
+endforeach()
+
 add_subdirectory(third_party/native)
-add_subdirectory(zcore)
-add_subdirectory(zdsp)
+include(cmake/SingZAppNative.cmake)
 get_property(SINGZ_ZCORE_RT_MANIFEST GLOBAL PROPERTY SINGZ_ZCORE_RT_MANIFEST)
 get_property(SINGZ_IOS_AUDIO_HOST_RT_MANIFEST GLOBAL PROPERTY
   SINGZ_IOS_AUDIO_HOST_RT_MANIFEST)
@@ -90,7 +133,7 @@ get_property(SINGZ_ZDSP_RT_MANIFEST GLOBAL PROPERTY SINGZ_ZDSP_RT_MANIFEST)
 # Phase iOS-B1's reusable frame-zero playback composition. The strict callback
 # leaf remains separate from file decode, graph construction, host ownership
 # and product bridges. Neither target is linked into a product automatically.
-include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/SingZRealtimeTarget.cmake")
+include("${AUDIOZ_ROOT}/cmake/SingZRealtimeTarget.cmake")
 add_library(singz_native_playback_callback STATIC EXCLUDE_FROM_ALL
   native/playback/native_playback_callback.cpp
   native/playback/native_playback_callback.h)
@@ -126,7 +169,7 @@ foreach(_target IN ITEMS
   endforeach()
 endforeach()
 list(APPEND _playback_rt_files
-  "${SINGZ_REPO_ROOT}/zcore/include/zcore/device/audio_host_render.h")
+  "${AUDIOZ_ROOT}/zcore/include/zcore/device/audio_host_render.h")
 list(REMOVE_DUPLICATES _playback_rt_files)
 file(WRITE "${SINGZ_PLAYBACK_RT_MANIFEST}"
   "set(SINGZ_ZDSP_RT_FILES\n")
@@ -139,7 +182,7 @@ add_custom_target(singz_check_playback_realtime
   COMMAND "${CMAKE_COMMAND}"
     "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_PLAYBACK_RT_MANIFEST}"
     "-DSINGZ_ZDSP_RT_PROFILE=playback"
-    -P "${SINGZ_REPO_ROOT}/cmake/CheckZdspRealtime.cmake"
+    -P "${AUDIOZ_ROOT}/cmake/CheckZdspRealtime.cmake"
   VERBATIM
   COMMENT "Checking native playback callback source policy")
 add_dependencies(singz_native_playback_callback
@@ -178,7 +221,7 @@ set_target_properties(singz_native_playback_session PROPERTIES
 # Phase 4A monitor callback leaf. The actual host thunk, silence containment,
 # and terminal counters compile independently from the control-domain session
 # owner and are scanned from the target's authoritative source list.
-include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/SingZRealtimeTarget.cmake")
+include("${AUDIOZ_ROOT}/cmake/SingZRealtimeTarget.cmake")
 add_library(singz_monitor_callback STATIC
   native/electron/audio_monitor_callback.cpp
   native/electron/audio_monitor_callback.h)
@@ -218,7 +261,7 @@ add_custom_target(singz_check_monitor_realtime ALL
   COMMAND "${CMAKE_COMMAND}"
     "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_MONITOR_RT_MANIFEST}"
     "-DSINGZ_ZDSP_RT_PROFILE=monitor"
-    -P "${SINGZ_REPO_ROOT}/cmake/CheckZdspRealtime.cmake"
+    -P "${AUDIOZ_ROOT}/cmake/CheckZdspRealtime.cmake"
   VERBATIM
   COMMENT "Checking monitor callback source policy")
 add_dependencies(singz_monitor_callback singz_check_monitor_realtime)
@@ -353,34 +396,34 @@ if(SINGZ_CORE_TESTS)
   enable_testing()
   add_test(NAME zcore_dependency_boundaries
     COMMAND "${CMAKE_COMMAND}"
-      "-DSINGZ_ZCORE_ROOT=${SINGZ_REPO_ROOT}/zcore"
-      -P "${SINGZ_REPO_ROOT}/cmake/CheckZcoreBoundaries.cmake")
+      "-DSINGZ_ZCORE_ROOT=${AUDIOZ_ROOT}/zcore"
+      -P "${AUDIOZ_ROOT}/cmake/CheckZcoreBoundaries.cmake")
   add_test(NAME zcore_realtime_source_policy
     COMMAND "${CMAKE_COMMAND}"
       "-DSINGZ_ZCORE_RT_MANIFEST=${SINGZ_ZCORE_RT_MANIFEST}"
-      -P "${SINGZ_REPO_ROOT}/cmake/CheckZcoreRealtime.cmake")
+      -P "${AUDIOZ_ROOT}/cmake/CheckZcoreRealtime.cmake")
   add_test(NAME zcore_realtime_policy_negative
     COMMAND "${CMAKE_COMMAND}"
       "-DSINGZ_ZCORE_RT_MANIFEST=${SINGZ_ZCORE_RT_MANIFEST}"
-      "-DSINGZ_ZCORE_RT_CHECKER=${SINGZ_REPO_ROOT}/cmake/CheckZcoreRealtime.cmake"
+      "-DSINGZ_ZCORE_RT_CHECKER=${AUDIOZ_ROOT}/cmake/CheckZcoreRealtime.cmake"
       "-DSINGZ_ZCORE_RT_TEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/zcore-rt-negative"
-      -P "${SINGZ_REPO_ROOT}/cmake/TestZcoreRealtimePolicy.cmake")
+      -P "${AUDIOZ_ROOT}/cmake/TestZcoreRealtimePolicy.cmake")
   add_test(NAME ios_audio_host_realtime_source_policy
     COMMAND "${CMAKE_COMMAND}"
       "-DSINGZ_IOS_AUDIO_HOST_RT_MANIFEST=${SINGZ_IOS_AUDIO_HOST_RT_MANIFEST}"
-      -P "${SINGZ_REPO_ROOT}/cmake/CheckIosAudioHostRealtime.cmake")
+      -P "${AUDIOZ_ROOT}/cmake/CheckIosAudioHostRealtime.cmake")
   add_test(NAME ios_audio_host_realtime_policy_negative
     COMMAND "${CMAKE_COMMAND}"
       "-DSINGZ_IOS_AUDIO_HOST_RT_MANIFEST=${SINGZ_IOS_AUDIO_HOST_RT_MANIFEST}"
-      "-DSINGZ_IOS_AUDIO_HOST_RT_CHECKER=${SINGZ_REPO_ROOT}/cmake/CheckIosAudioHostRealtime.cmake"
+      "-DSINGZ_IOS_AUDIO_HOST_RT_CHECKER=${AUDIOZ_ROOT}/cmake/CheckIosAudioHostRealtime.cmake"
       "-DSINGZ_IOS_AUDIO_HOST_RT_TEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/ios-audio-host-rt-negative"
       "-DSINGZ_IOS_AUDIO_HOST_RT_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
       "-DSINGZ_IOS_AUDIO_HOST_RT_CXX_COMPILER_ID=${CMAKE_CXX_COMPILER_ID}"
-      -P "${SINGZ_REPO_ROOT}/cmake/TestIosAudioHostRealtimePolicy.cmake")
+      -P "${AUDIOZ_ROOT}/cmake/TestIosAudioHostRealtimePolicy.cmake")
   add_test(NAME android_audio_host_realtime_source_policy
     COMMAND "${CMAKE_COMMAND}"
       "-DSINGZ_ANDROID_AUDIO_HOST_RT_MANIFEST=${SINGZ_ANDROID_AUDIO_HOST_RT_MANIFEST}"
-      -P "${SINGZ_REPO_ROOT}/cmake/CheckAndroidAudioHostRealtime.cmake")
+      -P "${AUDIOZ_ROOT}/cmake/CheckAndroidAudioHostRealtime.cmake")
   # #import/raw-byte fixtures are compile-first proofs, so they only exist on
   # a host whose configured compiler can genuinely accept Clang preprocessing.
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -394,55 +437,56 @@ if(SINGZ_CORE_TESTS)
     add_test(NAME android_audio_host_realtime_policy_negative
       COMMAND "${CMAKE_COMMAND}"
         "-DSINGZ_ANDROID_AUDIO_HOST_RT_MANIFEST=${SINGZ_ANDROID_AUDIO_HOST_RT_MANIFEST}"
-        "-DSINGZ_ANDROID_AUDIO_HOST_RT_CHECKER=${SINGZ_REPO_ROOT}/cmake/CheckAndroidAudioHostRealtime.cmake"
+        "-DSINGZ_ANDROID_AUDIO_HOST_RT_CHECKER=${AUDIOZ_ROOT}/cmake/CheckAndroidAudioHostRealtime.cmake"
         "-DSINGZ_ANDROID_AUDIO_HOST_RT_TEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/android-audio-host-rt-negative"
         "-DSINGZ_ANDROID_AUDIO_HOST_RT_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
         "-DSINGZ_ANDROID_AUDIO_HOST_RT_CXX_COMPILER_ID=${CMAKE_CXX_COMPILER_ID}"
         "-DSINGZ_ANDROID_AUDIO_HOST_RT_HEX_WRITER=$<TARGET_FILE:android_audio_host_rt_hex_writer>"
-        -P "${SINGZ_REPO_ROOT}/cmake/TestAndroidAudioHostRealtimePolicy.cmake")
+        -P "${AUDIOZ_ROOT}/cmake/TestAndroidAudioHostRealtimePolicy.cmake")
   endif()
   add_test(NAME zdsp_realtime_source_policy
     COMMAND "${CMAKE_COMMAND}"
       "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_ZDSP_RT_MANIFEST}"
-      -P "${SINGZ_REPO_ROOT}/cmake/CheckZdspRealtime.cmake")
+      -P "${AUDIOZ_ROOT}/cmake/CheckZdspRealtime.cmake")
   add_test(NAME monitor_realtime_source_policy
     COMMAND "${CMAKE_COMMAND}"
       "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_MONITOR_RT_MANIFEST}"
       "-DSINGZ_ZDSP_RT_PROFILE=monitor"
-      -P "${SINGZ_REPO_ROOT}/cmake/CheckZdspRealtime.cmake")
+      -P "${AUDIOZ_ROOT}/cmake/CheckZdspRealtime.cmake")
   add_test(NAME playback_realtime_source_policy
     COMMAND "${CMAKE_COMMAND}"
       "-DSINGZ_ZDSP_RT_MANIFEST=${SINGZ_PLAYBACK_RT_MANIFEST}"
       "-DSINGZ_ZDSP_RT_PROFILE=playback"
-      -P "${SINGZ_REPO_ROOT}/cmake/CheckZdspRealtime.cmake")
+      -P "${AUDIOZ_ROOT}/cmake/CheckZdspRealtime.cmake")
   add_test(NAME playback_realtime_policy_negative
     COMMAND "${CMAKE_COMMAND}"
       "-DSINGZ_PLAYBACK_RT_MANIFEST=${SINGZ_PLAYBACK_RT_MANIFEST}"
-      "-DSINGZ_PLAYBACK_RT_CHECKER=${SINGZ_REPO_ROOT}/cmake/CheckZdspRealtime.cmake"
+      "-DSINGZ_PLAYBACK_RT_CHECKER=${AUDIOZ_ROOT}/cmake/CheckZdspRealtime.cmake"
       "-DSINGZ_PLAYBACK_RT_TEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/playback-rt-negative"
-      -P "${SINGZ_REPO_ROOT}/cmake/TestPlaybackRealtimePolicy.cmake")
+      -P "${AUDIOZ_ROOT}/cmake/TestPlaybackRealtimePolicy.cmake")
   add_executable(core_host_tests ${SINGZ_REPO_ROOT}/tests/native/core_host_tests.cpp)
   add_dependencies(core_host_tests singz_check_zcore_boundaries)
   target_compile_features(core_host_tests PRIVATE cxx_std_20)
   target_compile_definitions(core_host_tests PRIVATE SINGZ_CORE_TESTS=1)
   target_include_directories(core_host_tests PRIVATE
-    "${SINGZ_REPO_ROOT}/zcore/src/device")
+    "${AUDIOZ_ROOT}/zcore/src/device")
   target_link_libraries(core_host_tests PRIVATE SingZ::zcore_legacy)
   add_test(NAME core_host_tests COMMAND core_host_tests)
 
   add_executable(audio_host_tests
     ${SINGZ_REPO_ROOT}/tests/native/audio_host_tests.cpp)
   target_compile_features(audio_host_tests PRIVATE cxx_std_20)
-  target_include_directories(audio_host_tests PRIVATE "${SINGZ_REPO_ROOT}")
+  target_include_directories(audio_host_tests PRIVATE
+    "${SINGZ_REPO_ROOT}" "${AUDIOZ_ROOT}")
   target_link_libraries(audio_host_tests PRIVATE
     SingZ::zcore_device_fake Threads::Threads)
   add_test(NAME audio_host_tests COMMAND audio_host_tests)
 
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
-    add_executable(audio_host_linux_tests tests/native/audio_host_linux_tests.cpp)
+    add_executable(audio_host_linux_tests "${AUDIOZ_ROOT}/tests/native/audio_host_linux_tests.cpp")
     target_compile_features(audio_host_linux_tests PRIVATE cxx_std_20)
     target_compile_definitions(audio_host_linux_tests PRIVATE SINGZ_CORE_TESTS=1)
-    target_include_directories(audio_host_linux_tests PRIVATE "${SINGZ_REPO_ROOT}")
+    target_include_directories(audio_host_linux_tests PRIVATE "${AUDIOZ_ROOT}")
     target_link_libraries(audio_host_linux_tests PRIVATE SingZ::zcore_device Threads::Threads)
     add_test(NAME audio_host_linux_tests COMMAND audio_host_linux_tests)
     set_tests_properties(audio_host_linux_tests PROPERTIES TIMEOUT 30)
@@ -452,7 +496,7 @@ if(SINGZ_CORE_TESTS)
     ${SINGZ_REPO_ROOT}/tests/native/audio_host_ios_policy_tests.cpp)
   target_compile_features(audio_host_ios_policy_tests PRIVATE cxx_std_20)
   target_include_directories(audio_host_ios_policy_tests PRIVATE
-    "${SINGZ_REPO_ROOT}")
+    "${SINGZ_REPO_ROOT}" "${AUDIOZ_ROOT}")
   target_link_libraries(audio_host_ios_policy_tests PRIVATE
     SingZ::zcore_device)
   add_test(NAME audio_host_ios_policy_tests COMMAND audio_host_ios_policy_tests)
@@ -462,7 +506,8 @@ if(SINGZ_CORE_TESTS)
   target_compile_features(audio_host_android_policy_tests PRIVATE cxx_std_20)
   target_include_directories(audio_host_android_policy_tests PRIVATE
     "${SINGZ_REPO_ROOT}"
-    "${SINGZ_REPO_ROOT}/zcore/platform/android")
+    "${AUDIOZ_ROOT}"
+    "${AUDIOZ_ROOT}/zcore/platform/android")
   target_link_libraries(audio_host_android_policy_tests PRIVATE
     SingZ::zcore_device)
   if(TARGET android_audio_host_rt_hex_writer)
@@ -475,7 +520,8 @@ if(SINGZ_CORE_TESTS)
   add_executable(audio_input_uid_tests
     ${SINGZ_REPO_ROOT}/tests/native/audio_input_uid_tests.cpp)
   target_compile_features(audio_input_uid_tests PRIVATE cxx_std_20)
-  target_include_directories(audio_input_uid_tests PRIVATE "${SINGZ_REPO_ROOT}")
+  target_include_directories(audio_input_uid_tests PRIVATE
+    "${SINGZ_REPO_ROOT}" "${AUDIOZ_ROOT}")
   add_test(NAME audio_input_uid_tests COMMAND audio_input_uid_tests)
 
   if(WIN32)
@@ -483,7 +529,7 @@ if(SINGZ_CORE_TESTS)
       ${SINGZ_REPO_ROOT}/tests/native/audio_host_windows_tests.cpp)
     target_compile_features(audio_host_windows_tests PRIVATE cxx_std_20)
     target_include_directories(audio_host_windows_tests PRIVATE
-      "${SINGZ_REPO_ROOT}")
+      "${SINGZ_REPO_ROOT}" "${AUDIOZ_ROOT}")
     target_link_libraries(audio_host_windows_tests PRIVATE
       SingZ::zcore_device)
     add_test(NAME audio_host_windows_tests COMMAND audio_host_windows_tests)
@@ -492,22 +538,22 @@ if(SINGZ_CORE_TESTS)
       ${SINGZ_REPO_ROOT}/tests/native/audio_host_asio_tests.cpp)
     target_compile_features(audio_host_asio_tests PRIVATE cxx_std_20)
     target_include_directories(audio_host_asio_tests PRIVATE
-      "${SINGZ_REPO_ROOT}")
+      "${SINGZ_REPO_ROOT}" "${AUDIOZ_ROOT}")
     target_link_libraries(audio_host_asio_tests PRIVATE
       SingZ::zcore_device)
     add_test(NAME audio_host_asio_tests COMMAND audio_host_asio_tests)
   endif()
 
   add_executable(audio_host_graph_adapter_tests
-    ${SINGZ_REPO_ROOT}/zdsp/tests/audio_host_graph_adapter_tests.cpp
-    ${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.cpp
-    ${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.h)
+    ${AUDIOZ_ROOT}/zdsp/tests/audio_host_graph_adapter_tests.cpp
+    ${AUDIOZ_ROOT}/zdsp/tests/allocation_trap.cpp
+    ${AUDIOZ_ROOT}/zdsp/tests/allocation_trap.h)
   target_compile_features(audio_host_graph_adapter_tests PRIVATE cxx_std_20)
   target_include_directories(audio_host_graph_adapter_tests PRIVATE
-    "${SINGZ_REPO_ROOT}/zdsp/tests")
+    "${AUDIOZ_ROOT}/zdsp/tests")
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     set_source_files_properties(
-      "${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.cpp" PROPERTIES
+      "${AUDIOZ_ROOT}/zdsp/tests/allocation_trap.cpp" PROPERTIES
       COMPILE_OPTIONS "-Wno-mismatched-new-delete")
   endif()
   target_link_libraries(audio_host_graph_adapter_tests PRIVATE
@@ -516,14 +562,14 @@ if(SINGZ_CORE_TESTS)
 
   add_executable(prepared_audio_tests
     ${SINGZ_REPO_ROOT}/tests/native/prepared_audio_tests.cpp
-    ${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.cpp
-    ${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.h)
+    ${AUDIOZ_ROOT}/zdsp/tests/allocation_trap.cpp
+    ${AUDIOZ_ROOT}/zdsp/tests/allocation_trap.h)
   target_compile_features(prepared_audio_tests PRIVATE cxx_std_20)
   target_include_directories(prepared_audio_tests PRIVATE
-    "${SINGZ_REPO_ROOT}/zdsp/tests")
+    "${AUDIOZ_ROOT}/zdsp/tests")
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     set_source_files_properties(
-      "${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.cpp" PROPERTIES
+      "${AUDIOZ_ROOT}/zdsp/tests/allocation_trap.cpp" PROPERTIES
       COMPILE_OPTIONS "-Wno-mismatched-new-delete")
   endif()
   target_link_libraries(prepared_audio_tests PRIVATE
@@ -603,15 +649,15 @@ if(SINGZ_CORE_TESTS)
     ${SINGZ_REPO_ROOT}/native/electron/audio_monitor_session.cpp
     ${SINGZ_REPO_ROOT}/native/electron/audio_monitor_session.h
     ${SINGZ_REPO_ROOT}/zdsp/tests/audio_monitor_session_tests.cpp
-    ${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.cpp
-    ${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.h)
+    ${AUDIOZ_ROOT}/zdsp/tests/allocation_trap.cpp
+    ${AUDIOZ_ROOT}/zdsp/tests/allocation_trap.h)
   target_compile_features(audio_monitor_session_tests PRIVATE cxx_std_20)
   target_include_directories(audio_monitor_session_tests PRIVATE
     "${SINGZ_REPO_ROOT}"
-    "${SINGZ_REPO_ROOT}/zdsp/tests")
+    "${AUDIOZ_ROOT}/zdsp/tests")
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     set_source_files_properties(
-      "${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.cpp" PROPERTIES
+      "${AUDIOZ_ROOT}/zdsp/tests/allocation_trap.cpp" PROPERTIES
       COMPILE_OPTIONS "-Wno-mismatched-new-delete")
   endif()
   target_link_libraries(audio_monitor_session_tests PRIVATE
@@ -635,15 +681,15 @@ if(SINGZ_CORE_TESTS)
 
   add_executable(native_playback_session_tests
     ${SINGZ_REPO_ROOT}/tests/native/native_playback_session_tests.cpp
-    ${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.cpp
-    ${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.h)
+    ${AUDIOZ_ROOT}/zdsp/tests/allocation_trap.cpp
+    ${AUDIOZ_ROOT}/zdsp/tests/allocation_trap.h)
   target_compile_features(native_playback_session_tests PRIVATE cxx_std_20)
   target_include_directories(native_playback_session_tests PRIVATE
     "${SINGZ_REPO_ROOT}"
-    "${SINGZ_REPO_ROOT}/zdsp/tests")
+    "${AUDIOZ_ROOT}/zdsp/tests")
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     set_source_files_properties(
-      "${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.cpp" PROPERTIES
+      "${AUDIOZ_ROOT}/zdsp/tests/allocation_trap.cpp" PROPERTIES
       COMPILE_OPTIONS "-Wno-mismatched-new-delete")
   endif()
   target_link_libraries(native_playback_session_tests PRIVATE
@@ -700,10 +746,10 @@ if(SINGZ_CORE_TESTS)
 
   add_executable(signalsmith_time_pitch_tests
     tests/native/signalsmith_time_pitch_tests.cpp
-    zdsp/tests/allocation_trap.cpp)
+    "${AUDIOZ_ROOT}/zdsp/tests/allocation_trap.cpp")
   target_compile_features(signalsmith_time_pitch_tests PRIVATE cxx_std_20)
   target_include_directories(signalsmith_time_pitch_tests PRIVATE
-    "${SINGZ_REPO_ROOT}")
+    "${SINGZ_REPO_ROOT}" "${AUDIOZ_ROOT}")
   target_link_libraries(signalsmith_time_pitch_tests PRIVATE
     SingZ::signalsmith_time_pitch)
   add_test(NAME signalsmith_time_pitch_tests
@@ -720,7 +766,7 @@ if(SINGZ_CORE_TESTS)
       -P ${SINGZ_REPO_ROOT}/tests/native/audio_host_cli_fault_test.cmake)
 
   add_executable(zdsp_contract_tests
-    ${SINGZ_REPO_ROOT}/zdsp/tests/zdsp_contract_tests.cpp)
+    ${AUDIOZ_ROOT}/zdsp/tests/zdsp_contract_tests.cpp)
   target_compile_features(zdsp_contract_tests PRIVATE cxx_std_20)
   set_target_properties(zdsp_contract_tests PROPERTIES CXX_EXTENSIONS OFF)
   target_link_libraries(zdsp_contract_tests PRIVATE
@@ -731,7 +777,7 @@ if(SINGZ_CORE_TESTS)
   # so it links the runtime rather than the offline renderer: no graph, no WAV,
   # just the two processors driven through the same transport.
   add_executable(streaming_window_source_tests
-    ${SINGZ_REPO_ROOT}/zdsp/tests/streaming_window_source_tests.cpp)
+    ${AUDIOZ_ROOT}/zdsp/tests/streaming_window_source_tests.cpp)
   target_compile_features(streaming_window_source_tests PRIVATE cxx_std_20)
   set_target_properties(streaming_window_source_tests PROPERTIES
     CXX_EXTENSIONS OFF)
@@ -741,14 +787,14 @@ if(SINGZ_CORE_TESTS)
     COMMAND streaming_window_source_tests)
 
   add_executable(zdsp_graph_tests
-    ${SINGZ_REPO_ROOT}/zdsp/tests/zdsp_graph_tests.cpp)
+    ${AUDIOZ_ROOT}/zdsp/tests/zdsp_graph_tests.cpp)
   set(_zdsp_allocation_trap_source
-    "${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.cpp")
+    "${AUDIOZ_ROOT}/zdsp/tests/allocation_trap.cpp")
   target_sources(zdsp_graph_tests PRIVATE
     "${_zdsp_allocation_trap_source}"
-    "${SINGZ_REPO_ROOT}/zdsp/tests/allocation_trap.h")
+    "${AUDIOZ_ROOT}/zdsp/tests/allocation_trap.h")
   target_include_directories(zdsp_graph_tests PRIVATE
-    "${SINGZ_REPO_ROOT}/zdsp/tests")
+    "${AUDIOZ_ROOT}/zdsp/tests")
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     # This test-only replacement allocation API intentionally pairs malloc/free.
     # Keep GCC's heuristic suppression local so real mismatches remain errors.
@@ -761,7 +807,7 @@ if(SINGZ_CORE_TESTS)
   add_test(NAME zdsp_graph_tests COMMAND zdsp_graph_tests)
 
   add_executable(zdsp_analysis_tests
-    ${SINGZ_REPO_ROOT}/zdsp/tests/zdsp_analysis_tests.cpp)
+    ${AUDIOZ_ROOT}/zdsp/tests/zdsp_analysis_tests.cpp)
   target_compile_features(zdsp_analysis_tests PRIVATE cxx_std_20)
   set_target_properties(zdsp_analysis_tests PROPERTIES CXX_EXTENSIONS OFF)
   target_link_libraries(zdsp_analysis_tests PRIVATE
@@ -770,24 +816,24 @@ if(SINGZ_CORE_TESTS)
   if(APPLE)
     add_test(NAME zcore_apple_audio_host_smoke
       COMMAND bash
-        "${SINGZ_REPO_ROOT}/zcore/build-apple-audio-host-smoke.sh"
-        "${SINGZ_REPO_ROOT}"
+        "${AUDIOZ_ROOT}/zcore/build-apple-audio-host-smoke.sh"
+        "${AUDIOZ_ROOT}"
         "${CMAKE_CURRENT_BINARY_DIR}/zcore-apple-audio-host-ctest")
     add_test(NAME zdsp_apple_component_smoke
       COMMAND bash
-        "${SINGZ_REPO_ROOT}/zdsp/build-apple-component-smoke.sh"
-        "${SINGZ_REPO_ROOT}"
+        "${AUDIOZ_ROOT}/zdsp/build-apple-component-smoke.sh"
+        "${AUDIOZ_ROOT}"
         "${CMAKE_CURRENT_BINARY_DIR}/zdsp-apple-component-ctest")
   endif()
 
   add_executable(zdsp_fake_host_benchmark
-    ${SINGZ_REPO_ROOT}/zdsp/benchmarks/fake_host_benchmark.cpp)
+    ${AUDIOZ_ROOT}/zdsp/benchmarks/fake_host_benchmark.cpp)
   target_compile_features(zdsp_fake_host_benchmark PRIVATE cxx_std_20)
   set_target_properties(zdsp_fake_host_benchmark PROPERTIES CXX_EXTENSIONS OFF)
   target_link_libraries(zdsp_fake_host_benchmark PRIVATE SingZ::zdsp_prototype)
 
   add_executable(zdsp_graph_benchmark
-    ${SINGZ_REPO_ROOT}/zdsp/benchmarks/graph_benchmark.cpp)
+    ${AUDIOZ_ROOT}/zdsp/benchmarks/graph_benchmark.cpp)
   target_compile_features(zdsp_graph_benchmark PRIVATE cxx_std_20)
   set_target_properties(zdsp_graph_benchmark PROPERTIES CXX_EXTENSIONS OFF)
   target_link_libraries(zdsp_graph_benchmark PRIVATE SingZ::zdsp_offline)

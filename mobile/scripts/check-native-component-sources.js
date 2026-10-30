@@ -2,6 +2,7 @@
 'use strict'
 
 const { readFileSync } = require('node:fs')
+const { execFileSync } = require('node:child_process')
 const { join } = require('node:path')
 const {
   iosAudioHostCallbackFiles,
@@ -14,6 +15,11 @@ const {
 } = require('./native-component-sources')
 
 const repoRoot = join(__dirname, '..', '..')
+const audioEngineRoot = join(repoRoot, 'third_party', 'audio-engine')
+
+execFileSync(process.execPath, [
+  join(__dirname, 'verify-audio-engine-pin.js'),
+], { stdio: 'inherit' })
 
 const invocationTokenGroups = (text, command, firstArgument) => {
   const pattern = new RegExp(
@@ -61,28 +67,6 @@ const addLibraryMembers = (text, target) => {
   return tokens.slice(2).filter((token) => token !== 'EXCLUDE_FROM_ALL')
 }
 
-const targetSourceMembers = (text, target) => {
-  return invocationTokenGroups(text, 'target_sources', target)
-    .flatMap((tokens) => {
-      if (tokens[0] !== target || tokens[1] !== 'PRIVATE') {
-        throw new Error(`${target} target_sources is no longer PRIVATE`)
-      }
-      return tokens.slice(2)
-    })
-}
-
-const setMembers = (text, variable) => {
-  const groups = invocationTokenGroups(text, 'set', variable)
-  if (groups.length !== 1) {
-    throw new Error(`${variable} has more than one set declaration`)
-  }
-  const tokens = groups[0]
-  if (tokens[0] !== variable) throw new Error(`invalid set(${variable})`)
-  return tokens.slice(1).map((entry) =>
-    entry.replace(/^\$\{CMAKE_CURRENT_SOURCE_DIR\}\//, '')
-  )
-}
-
 const normalized = (entries, label) => {
   const clean = entries.map((entry) => entry.replaceAll('\\', '/'))
   if (new Set(clean).size !== clean.length) {
@@ -107,36 +91,46 @@ const compareExact = (label, cmakeEntries, iosEntries) => {
   }
 }
 
-const zdspCmake = readFileSync(join(repoRoot, 'zdsp', 'CMakeLists.txt'), 'utf8')
-const zcoreCmake = readFileSync(join(repoRoot, 'zcore', 'CMakeLists.txt'), 'utf8')
 const rootCmake = readFileSync(join(repoRoot, 'CMakeLists.txt'), 'utf8')
 const thirdPartyCmake = readFileSync(
   join(repoRoot, 'third_party', 'native', 'CMakeLists.txt'), 'utf8')
 
+const audiozManifest = JSON.parse(readFileSync(
+  join(audioEngineRoot, 'audioz-source-manifest.json'), 'utf8'))
+const sourcePaths = new Set(audiozManifest.paths)
+const componentFiles = (name) => {
+  const entries = audiozManifest.components?.[name]
+  if (!Array.isArray(entries)) throw new Error(`AudioZ manifest is missing ${name}`)
+  const missing = entries.filter((entry) => !sourcePaths.has(entry))
+  if (missing.length) {
+    throw new Error(`${name} references paths absent from AudioZ manifest: ${missing.join(', ')}`)
+  }
+  return entries.map((entry) => entry.replace(/^(?:zcore|zdsp)\//, ''))
+}
+for (const entry of audiozManifest.iosCallbackGroup || []) {
+  if (!sourcePaths.has(entry)) {
+    throw new Error(`iOS callback group references a path absent from AudioZ manifest: ${entry}`)
+  }
+}
+
 compareExact(
   'zdsp_runtime',
-  addLibraryMembers(zdspCmake, 'zdsp_runtime').concat(
-    targetSourceMembers(zdspCmake, 'zdsp_runtime')
-  ),
+  componentFiles('zdsp_runtime'),
   zdspRuntimeFiles
 )
 compareExact(
   'zdsp_host_adapter',
-  addLibraryMembers(zdspCmake, 'zdsp_host_adapter').concat(
-    targetSourceMembers(zdspCmake, 'zdsp_host_adapter')
-  ),
+  componentFiles('zdsp_host_adapter'),
   zdspHostAdapterFiles
 )
 compareExact(
   'zcore_device_callback',
-  addLibraryMembers(zcoreCmake, 'zcore_device_callback').concat(
-    targetSourceMembers(zcoreCmake, 'zcore_device_callback')
-  ),
+  componentFiles('zcore_device_callback'),
   zcoreDeviceCallbackFiles
 )
 compareExact(
   'iOS AudioHost callback',
-  setMembers(zcoreCmake, 'SINGZ_IOS_AUDIO_HOST_RT_SOURCES'),
+  (audiozManifest.iosCallbackGroup || []).map((entry) => entry.replace(/^zcore\//, '')),
   iosAudioHostCallbackFiles
 )
 compareExact(
@@ -158,4 +152,4 @@ compareExact(
   signalsmithTimePitchFiles
 )
 
-console.log('native-component-sources: CMake and iOS manifests match exactly')
+console.log('native-component-sources: AudioZ ownership and iOS manifests match exactly')

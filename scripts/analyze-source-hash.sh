@@ -33,6 +33,7 @@ set -euo pipefail
 
 ROOT=${1:-"$(cd "$(dirname "$0")/.." && pwd)"}
 SOURCE_DIRS=(
+  "$ROOT/third_party/audio-engine"
   "$ROOT/zcore"
   "$ROOT/zdsp"
   "$ROOT/third_party/native"
@@ -41,6 +42,8 @@ SOURCE_DIRS=(
 )
 SOURCE_FILES=(
   "$ROOT/CMakeLists.txt"
+  "$ROOT/scripts/import-audioz.py"
+  "$ROOT/third_party/audio-engine.lock.json"
   "$ROOT/scripts/vendor-analyze.sh"
   "$ROOT/scripts/engine-artifact.cjs"
   "$ROOT/scripts/ccache-launcher.sh"

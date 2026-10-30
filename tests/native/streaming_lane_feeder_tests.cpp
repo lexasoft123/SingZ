@@ -1,6 +1,6 @@
 // The feeder and the source node together, against the full decode.
 //
-// The node's own tests (zdsp/tests/streaming_window_source_tests.cpp) hand it a
+// The node's own tests (third_party/audio-engine/zdsp/tests/streaming_window_source_tests.cpp) hand it a
 // window filled by hand. This one puts the real pieces in a line — a FLAC on
 // disk, the streaming decoder, the ring, the transport — and asks the question
 // that actually matters to a singer: does the song come out of the graph the

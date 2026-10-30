@@ -10,7 +10,7 @@ This is a research note, not a plan of record. Nothing here is implemented.
 
 ## Built and measured (2026-09-08)
 
-`zcore/src/media/flac_streaming_source.cpp` implements `StreamingAudioSource`
+`third_party/audio-engine/zcore/src/media/flac_streaming_source.cpp` implements `StreamingAudioSource`
 over the vendored libFLAC. Not wired into the graph — the realtime node that
 consumes it is the next step — but real, tested against the full decode, and
 benchmarked on hardware.
@@ -132,7 +132,7 @@ conclusion flipped. See "Do we add a seektable?" below.
 - **Vendored libFLAC** (`third_party/native/flac`), the reference implementation
   — which already has both the pull/push streaming API and
   `FLAC__stream_decoder_seek_absolute`. The decoder we would need is in the tree.
-- **`DecodedBufferView`** (`zdsp/include/zdsp/decoded_buffer_source.h`): the
+- **`DecodedBufferView`** (`third_party/audio-engine/zdsp/include/zdsp/decoded_buffer_source.h`): the
   graph's source node is a view over immutable planar floats for the WHOLE song.
   This is the thing that would change.
 - **`PositionedDecodedBufferSourceConfig`**: project time maps to source frame
@@ -144,7 +144,7 @@ conclusion flipped. See "Do we add a seektable?" below.
 
 Three routes exist, and checking them changed the recommendation:
 
-1. **The core's C++ encoder** (`zcore/src/media/flac_io.cpp`): trivial. libFLAC's
+1. **The core's C++ encoder** (`third_party/audio-engine/zcore/src/media/flac_io.cpp`): trivial. libFLAC's
    `FLAC__metadata_object_seektable_template_append_spaced_points_by_samples`
    plus `FLAC__stream_encoder_set_metadata` before init, about ten lines. Covers
    only the stems a PHONE writes.
@@ -221,7 +221,7 @@ So the field is split, and streaming compressed multitrack audio is ordinary.
 2. **A streaming source node beside `DecodedBufferSource`**, chosen per lane, so
    the two can be compared on the same song with the existing harnesses. The
    sanitizer gates and `player-session` are the judges. It implements
-   `StreamingAudioSource` (`zcore/include/zcore/media/streaming_audio_source.h`,
+   `StreamingAudioSource` (`third_party/audio-engine/zcore/include/zcore/media/streaming_audio_source.h`,
    interface only today) so MP3 and AAC adapters slot in behind the same
    contract later.
 3. **Retire parking/adoption** once streaming is the only path.
@@ -235,7 +235,7 @@ built. What shipped:
 
 | piece | where |
 |---|---|
-| the source node | `zdsp/include/zdsp/streaming_window_source.h` |
+| the source node | `third_party/audio-engine/zdsp/include/zdsp/streaming_window_source.h` |
 | the feeder | `native/playback/streaming_lane_feeder.h` |
 | the session flag | `NativePlaybackPrepareConfig::streamLanes` |
 | the bridges | iOS schema, Kotlin schema, JNI, `mobile/src/playback/native.ts` |

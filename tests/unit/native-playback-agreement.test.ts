@@ -72,7 +72,7 @@ describe('the synthesized graph node count', () => {
 
 describe('the codec bit table', () => {
   // Read out of the switch rather than restated here. The same nine bits are
-  // asserted against zcore/include/zcore/media/decoded_audio.h by the native
+  // asserted against third_party/audio-engine/zcore/include/zcore/media/decoded_audio.h by the native
   // contract test, so the two tables agree by construction rather than by
   // somebody remembering to update both.
   const supports = (formatMask: number, extension: string): boolean => {

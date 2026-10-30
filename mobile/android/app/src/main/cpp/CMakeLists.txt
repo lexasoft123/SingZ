@@ -7,7 +7,7 @@
 #    TurboModule registration lives there). The include recreates it; the RN
 #    plugin passes REACT_ANDROID_DIR.
 #
-#  - libsingzcore.so — a JNI-only product binding over the top-level zcore
+#  - libsingzcore.so — a JNI-only product binding over the pinned AudioZ
 #    component targets shared by Android, iOS and desktop. ONNX Runtime comes
 #    from the Maven AAR, which is legacy-layout
 #    (headers/ + jni/<abi>/libonnxruntime.so, no prefab): app/build.gradle's
@@ -19,6 +19,7 @@ project(appmodules)
 
 get_filename_component(SINGZ_NATIVE_ROOT
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../.." REALPATH)
+set(SINGZ_AUDIO_ENGINE_ROOT "${SINGZ_NATIVE_ROOT}/third_party/audio-engine")
 
 # mobile/scripts/android-cmake-init.cmake installs the combined compile/link
 # process ceiling before every Android project(), including every native RN
@@ -204,7 +205,7 @@ add_custom_command(TARGET singzcore POST_BUILD
     COMMAND ${CMAKE_COMMAND}
         "-DSINGZ_SHARED_BINARY=$<TARGET_FILE:singzcore>"
         "-DSINGZ_NM=${CMAKE_NM}"
-        -P "${SINGZ_NATIVE_ROOT}/cmake/CheckZdspSharedExports.cmake"
+        -P "${SINGZ_AUDIO_ENGINE_ROOT}/cmake/CheckZdspSharedExports.cmake"
     VERBATIM
     COMMENT "Checking libsingzcore internal export surface")
 if(SINGZ_ENABLE_FFMPEG_CODECS)
@@ -212,7 +213,7 @@ if(SINGZ_ENABLE_FFMPEG_CODECS)
         COMMAND ${CMAKE_COMMAND}
             "-DSINGZ_SHARED_BINARY=$<TARGET_FILE:singzcore>"
             "-DSINGZ_READELF=${CMAKE_READELF}"
-            -P "${SINGZ_NATIVE_ROOT}/cmake/CheckFfmpegDynamic.cmake"
+            -P "${SINGZ_AUDIO_ENGINE_ROOT}/cmake/CheckFfmpegDynamic.cmake"
         VERBATIM
         COMMENT "Checking libsingzcore dynamic LGPL FFmpeg imports")
 endif()

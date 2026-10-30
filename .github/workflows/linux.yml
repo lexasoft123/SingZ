@@ -78,7 +78,7 @@ jobs:
           # Existence skip guards mean only an exact input key is safe here.
           # Do not add a prefix fallback for compiled/downloaded outputs.
           # CI orchestration does not change engine artifact inputs.
-          key: linux-engines-debian13-clang21-v1-${{ hashFiles('package-lock.json', 'scripts/**', '!scripts/ci/**', 'CMakeLists.txt', 'cmake/**', 'native/**', 'zcore/**', 'zdsp/**', 'tools/native/**', 'third_party/native/**') }}
+          key: linux-engines-debian13-clang21-v1-${{ hashFiles('package-lock.json', 'scripts/**', '!scripts/ci/**', 'CMakeLists.txt', 'cmake/**', 'native/**', 'zcore/**', 'zdsp/**', 'tools/native/**', 'third_party/native/**', 'third_party/audio-engine/**', 'third_party/audio-engine.lock.json') }}
 
       - name: Restore compiler objects
         id: compiler-cache

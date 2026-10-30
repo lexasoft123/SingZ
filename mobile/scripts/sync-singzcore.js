@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * Materialize the top-level zcore package into the SingzCore pod as REAL
+ * Materialize the pinned AudioZ zcore package into the SingzCore pod as REAL
  * files. CocoaPods silently
  * drops source_files globs that reach above the podspec dir, and its file
  * lists skip directory symlinks too (both measured: libSingzCore.a shipped
  * without ort_env.o and the app link died on singz::ortProbeJson) — copying
  * is the only shape that works, the same lesson as patch-audio-api.js.
  *
- * Runs from mobile's postinstall. After EDITING files in ../zcore, rerun
+ * Runs from mobile's postinstall. After upgrading third_party/audio-engine, rerun
  * this + `pod install` (with a SingzCore.podspec version bump so the glob
  * re-evaluates) or Xcode keeps building the stale copy.
  */
@@ -22,9 +22,11 @@ const {
 
 const mobileRoot = join(__dirname, '..')
 const repoRoot = join(mobileRoot, '..')
-const src = join(repoRoot, 'zcore')
+const audioEngineRoot = join(repoRoot, 'third_party', 'audio-engine')
+const src = join(audioEngineRoot, 'zcore')
+const productSrc = join(repoRoot, 'zcore')
 const dst = join(mobileRoot, 'ios', 'SingzCore', 'core')
-const dspSrc = join(repoRoot, 'zdsp')
+const dspSrc = join(audioEngineRoot, 'zdsp')
 const dspDst = join(mobileRoot, 'ios', 'SingzCore', 'dsp')
 const complianceDst = join(mobileRoot, 'ios', 'SingzCore', 'compliance')
 
@@ -78,6 +80,20 @@ copyTree(join(src, 'platform', 'ios'), join(dst, 'platform', 'ios'),
   (name, relative) => /\.(cpp|mm|h|hpp)$/.test(name) &&
     !callbackDefinitions.has(`platform/ios/${relative}`))
 
+// SingZ retains its detector/ML and split implementation locally. Keep those
+// product-owned zcore files in this compatibility pod while the shared
+// portable base comes from AudioZ. The source manifest is authoritative for
+// ownership, so a stale local copy of a shared path can never shadow AudioZ.
+const audiozManifest = JSON.parse(require('node:fs').readFileSync(
+  join(audioEngineRoot, 'audioz-source-manifest.json'), 'utf8'))
+const audiozPaths = new Set(audiozManifest.paths)
+copyTree(productSrc, dst, (name, relative) =>
+  /\.(cpp|mm|h|hpp)$/.test(name) &&
+  !audiozPaths.has(`zcore/${relative}`) &&
+  !relative.startsWith('test_support/') &&
+  !callbackDefinitions.has(relative.startsWith('src/') || relative.startsWith('platform/')
+    ? relative : `src/${relative}`))
+
 // Phase 2 capture analysis only. The callback-safe runtime and decoded source
 // now belong to the isolated SingzDspRuntime component; this compatibility pod
 // must not compile a second copy of their symbols.
@@ -111,7 +127,7 @@ for (const relative of dspAllowlist) {
 // flac/src/*.c and wav.cpp dispatches to it. Directory structure is
 // preserved — deduplication/ holds #included fragments the podspec must NOT
 // compile, and the include/ tree is what <FLAC/…> resolves against.
-const flacSrc = join(repoRoot, 'third_party', 'native', 'flac')
+const flacSrc = join(audioEngineRoot, 'third_party', 'native', 'flac')
 const flacDst = join(mobileRoot, 'ios', 'SingzCore', 'flac')
 mirror(flacDst)
 copyTree(flacSrc, flacDst, name => /\.(c|h)$/.test(name))
@@ -120,7 +136,7 @@ copyTree(flacSrc, flacDst, name => /\.(c|h)$/.test(name))
 // mp3_streaming_source.cpp compiles its implementation (every symbol static),
 // so nothing here is a source file — the podspec only puts it on a SYSTEM-ish
 // header search path, as CMake does.
-const drMp3Src = join(repoRoot, 'third_party', 'native', 'dr_mp3')
+const drMp3Src = join(audioEngineRoot, 'third_party', 'native', 'dr_mp3')
 const drMp3Dst = join(mobileRoot, 'ios', 'SingzCore', 'dr_mp3')
 mirror(drMp3Dst)
 copyTree(drMp3Src, drMp3Dst, name => name === 'dr_mp3.h')

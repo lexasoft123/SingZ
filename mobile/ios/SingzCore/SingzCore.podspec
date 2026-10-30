@@ -9,14 +9,14 @@ Pod::Spec.new do |s|
   s.author       = 'SingZ'
   s.platforms    = { :ios => '15.1' }
   s.source       = { :path => '.' }
-  # One source tree with Android: core/ is a generated COPY of top-level zcore
+  # One source tree with Android: core/ is a generated COPY of pinned AudioZ zcore
   # materialized by mobile/scripts/sync-singzcore.js (postinstall; gitignored).
   # CocoaPods silently drops source_files globs that reach above the podspec
   # dir AND skips directory symlinks (both measured: libSingzCore.a shipped
   # without ort_env.o and the app link died on singz::ortProbeJson) — copying
   # is the only shape that works, the audio-api patch-3 lesson. After editing
-  # zcore: rerun the sync, bump this version, pod install (re-glob).
-  # flac/ is the vendored libFLAC (third_party/native/flac), synced by the
+  # AudioZ: rerun the sync, bump this version, pod install (re-glob).
+  # flac/ is the vendored libFLAC (AudioZ third_party/native/flac), synced by the
   # same script. Only flac/src/*.c COMPILES — the deduplication/ fragments
   # are #included by lpc.c/bitreader.c and must stay out of source_files or
   # they compile standalone and fail; they ride in preserve_paths with the

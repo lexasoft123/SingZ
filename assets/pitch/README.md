@@ -1,6 +1,6 @@
 # Shared CREPE Tiny model
 
-The frozen float32 weights are exported from the pinned torchcrepe ONNX model already used by the iOS trial. Runtime inference is implemented in `zdsp/src/analysis/crepe_tiny.cpp`: six convolution / ReLU / batch-normalization / max-pool blocks and a sigmoid classifier. Apple builds use Accelerate matrix multiplication; Android and Windows use the portable vectorizable kernel. zcore remains independent of zdsp.
+The frozen float32 weights are exported from the pinned torchcrepe ONNX model already used by the iOS trial. Runtime inference is implemented in `third_party/audio-engine/zdsp/src/analysis/crepe_tiny.cpp`: six convolution / ReLU / batch-normalization / max-pool blocks and a sigmoid classifier. Apple builds use Accelerate matrix multiplication; Android and Windows use the portable vectorizable kernel. zcore remains independent of zdsp.
 
 - Model source: https://huggingface.co/FredrikKarlssonSpeech/torchcrepe-onnx
 - Upstream architecture and license: https://github.com/maxrmorrison/torchcrepe (MIT; see `torchcrepe-LICENSE.txt`).

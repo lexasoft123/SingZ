@@ -8,7 +8,7 @@ Pod::Spec.new do |s|
   s.platforms    = { :ios => '15.1' }
   s.source       = { :path => '.' }
 
-  # zdsp/ is an exact generated COPY of the authoritative top-level package,
+  # zdsp/ is an exact generated COPY of the pinned AudioZ package,
   # materialized by mobile/scripts/sync-singz-dsp-runtime.js. Keep this list
   # equal to CMake's zdsp_runtime + zdsp_host_adapter sources. The legacy
   # SingzCore compatibility pod no longer compiles these runtime sources, so

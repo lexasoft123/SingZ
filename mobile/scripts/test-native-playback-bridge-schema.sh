@@ -4,8 +4,11 @@ set -euo pipefail
 script_dir=$(cd "$(dirname "$0")" && pwd)
 mobile_root=$(cd "$script_dir/.." && pwd)
 repo_root=$(cd "$mobile_root/.." && pwd)
+audio_engine_root="$repo_root/third_party/audio-engine"
 test_root=$(mktemp -d)
 trap 'rm -rf "$test_root"' EXIT
+
+node "$mobile_root/scripts/verify-audio-engine-pin.js"
 
 # Mirror the pod's public header set: every header under native/playback,
 # so a new header the session includes (the graph document, the projection)
@@ -18,10 +21,10 @@ done
 xcrun clang++ -std=c++20 -fobjc-arc \
   -framework Foundation \
   -I"$test_root/include" \
-  -I"$repo_root/zcore/include" \
-  -I"$repo_root/zdsp/include" \
+  -I"$audio_engine_root/zcore/include" \
+  -I"$audio_engine_root/zdsp/include" \
   -I"$mobile_root/ios/FolderAccess" \
-  "$repo_root/zcore/src/media/owned_file_descriptor.cpp" \
+  "$audio_engine_root/zcore/src/media/owned_file_descriptor.cpp" \
   "$mobile_root/ios/FolderAccess/NativePlaybackAuthorizedPath.mm" \
   "$mobile_root/ios/FolderAccess/NativePlaybackAudioSessionPolicy.mm" \
   "$mobile_root/ios/FolderAccess/NativePlaybackBridgeResult.mm" \

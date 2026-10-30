@@ -198,3 +198,11 @@ Contributor docs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
   from peak envelopes or raw samples
   depending on zoom; playback progress drives a single CSS variable so it
   costs no redraws.
+
+### Shared audio foundation
+
+SingZ and LoopZ share **AudioZ**, an independently maintained native audio
+foundation. This checkout contains its exact, verified source snapshot in
+`third_party/audio-engine`; builds require no sibling repository or network
+fetch. See [the development workflow](docs/DEVELOPMENT.md#shared-audio-engine-audioz)
+for updating the pinned dependency.

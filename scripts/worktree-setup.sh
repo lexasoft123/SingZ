@@ -269,15 +269,24 @@ if [ "$MODE" != "--desktop-only" ]; then
       !callbackDefinitions.has(relative)
     const iosFile = (name, relative) => /\.(cpp|mm|h|hpp)$/.test(name) &&
       !callbackDefinitions.has(relative)
-    compare("zcore/include", `${dst}/include`, "include",
+    compare("third_party/audio-engine/zcore/include", `${dst}/include`, "include",
             (name) => /\.(h|hpp)$/.test(name))
-    compare("zcore/src", `${dst}/src`, "src", sourceFile)
-    compare("zcore/platform/ios", `${dst}/platform/ios`, "platform/ios", iosFile)
+    compare("third_party/audio-engine/zcore/src", `${dst}/src`, "src", sourceFile)
+    compare("third_party/audio-engine/zcore/platform/ios", `${dst}/platform/ios`, "platform/ios", iosFile)
+    // Retained product detectors and ML adapters are mirrored beside AudioZ.
+    // They must receive the same content check after the package extraction.
+    if (fs.existsSync("zcore/include"))
+      compare("zcore/include", `${dst}/include`, "include",
+              (name) => /\.(h|hpp)$/.test(name))
+    if (fs.existsSync("zcore/src"))
+      compare("zcore/src", `${dst}/src`, "src", sourceFile)
+    if (fs.existsSync("zcore/platform/ios"))
+      compare("zcore/platform/ios", `${dst}/platform/ios`, "platform/ios", iosFile)
     if (bad.length) console.log(bad.slice(0, 3).join(", ") +
       (bad.length > 3 ? ` +${bad.length - 3} more` : ""))
   ')
   if [ -n "$stale" ]; then
-    echo "FATAL: mobile/ios/SingzCore/core does not match top-level zcore ($stale)." >&2
+    echo "FATAL: mobile/ios/SingzCore/core does not match AudioZ and retained SingZ sources ($stale)." >&2
     echo "       Expected mobile's postinstall to sync it. Run:" >&2
     echo "         (cd mobile && npm run postinstall)" >&2
     exit 1

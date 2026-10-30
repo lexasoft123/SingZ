@@ -800,8 +800,8 @@ Implement as a dedicated, behavior-preserving PR before graph work:
   narrow wrapper targets own their licenses and compile requirements; leave
   genuinely app-specific React Native code under `mobile/`.
 - Split source ownership while moving: portable implementation goes under
-  `zcore/src/`, OS device/session providers under `zcore/platform/`, narrow
-  public contracts under `zcore/include/zcore/`, and CLI entry points under
+  `third_party/audio-engine/zcore/src/`, OS device/session providers under `third_party/audio-engine/zcore/platform/`, narrow
+  public contracts under `third_party/audio-engine/zcore/include/zcore/`, and CLI entry points under
   `tools/native/`. Move `singz_core_jni.cpp` and any other package-specific JNI
   out to `mobile/native/bindings/android/`; retain the product Objective-C++
   pod wrappers under `mobile/ios/SingzCore/` and Electron adapters under
@@ -893,8 +893,8 @@ Implement:
 
 References:
 
-- `zcore/include/zcore/device/audio_input.h`
-- `zcore/include/zcore/device/audio_input_backend.h`
+- `third_party/audio-engine/zcore/include/zcore/device/audio_input.h`
+- `third_party/audio-engine/zcore/include/zcore/device/audio_input_backend.h`
 - `tests/native/core_host_tests.cpp`
 - platform audio documents in `docs/`
 

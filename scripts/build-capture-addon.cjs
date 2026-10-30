@@ -255,12 +255,15 @@ function sourceFingerprint() {
     }
   }
   for (const dir of [
-    'native/electron', 'native/playback', 'zcore', 'zdsp', 'third_party/native', 'cmake'
+    'native/electron', 'native/playback', 'third_party/audio-engine',
+    'zcore', 'zdsp', 'third_party/native', 'cmake'
   ]) {
     walk(join(root, dir))
   }
   files.push(join(root, 'CMakeLists.txt'), join(root, 'scripts/ccache-launcher.sh'),
-    join(root, 'scripts/ccache-launcher.ps1'), __filename)
+    join(root, 'scripts/ccache-launcher.ps1'),
+    join(root, 'third_party', 'audio-engine.lock.json'),
+    join(root, 'scripts', 'import-audioz.py'), __filename)
   files.sort()
   const hash = createHash('sha1')
   hash.update(`electron ${electronVersion}\n`)
