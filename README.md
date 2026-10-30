@@ -198,3 +198,12 @@ Contributor docs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
   from peak envelopes or raw samples
   depending on zoom; playback progress drives a single CSS variable so it
   costs no redraws.
+
+### Shared audio foundation
+
+SingZ and LoopZ share **zCore**, an independently maintained native audio
+foundation. This checkout pins it as a Git submodule at `third_party/zcore`.
+Builds verify the parent gitlink and clean child checkout without fetching a
+floating branch. Initialize it with `git submodule update --init -- third_party/zcore`.
+See [the development workflow](docs/DEVELOPMENT.md#shared-audio-engine-zcore)
+for updating the pinned dependency.

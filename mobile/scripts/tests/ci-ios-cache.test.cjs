@@ -54,6 +54,24 @@ test('shared iOS cache policy changes trigger their native canary', () => {
   ]) assert.ok(canary.includes(`- '${input}'`), 'missing native cache trigger: ' + input)
 })
 
+test('mobile native cache identity verifies and keys the public zCore gitlink', () => {
+  const action = fs.readFileSync(path.join(root, '.github/actions/mobile-build-cache/action.yml'), 'utf8')
+  assert.match(action, /Verify zCore submodule revision[\s\S]*?verify-zcore-submodule\.py[\s\S]*?--print-revision/)
+  assert.match(action, /\.gitmodules/)
+  assert.match(action, /scripts\/verify-zcore-submodule\.py/)
+  assert.match(action, /scripts\/zcore-gitlink\.cjs/)
+  assert.match(action, /steps\.zcore\.outputs\.revision/)
+  for (const source of [release, canary]) {
+    assert.match(source, /submodules: recursive/)
+  }
+  for (const workflow of ['android.yml', 'ios-native-canary.yml', 'core-win.yml']) {
+    const source = read(workflow)
+    assert.match(source, /- '\.gitmodules'/)
+    assert.match(source, /- 'third_party\/zcore'/)
+    assert.match(source, /- 'scripts\/verify-zcore-submodule\.py'/)
+  }
+})
+
 function runScript(source, name) {
   const step = steps(source).find(step => step.includes('- name: ' + name))
   assert.ok(step, 'missing workflow step: ' + name)

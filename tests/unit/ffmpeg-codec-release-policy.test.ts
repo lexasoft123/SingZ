@@ -260,7 +260,7 @@ describe('FFmpeg release policy', () => {
   })
 
   it('accounts for retained, scratch and replacement buffers at once', () => {
-    const decoder = read('zcore/src/media/ffmpeg_decoder.cpp')
+    const decoder = read('third_party/zcore/zcore/src/media/ffmpeg_decoder.cpp')
     expect(decoder).toContain('liveBeforeReplacement + replacement.capacity()')
     expect(decoder).toContain('std::vector<float> replacement(targetCapacity)')
     expect(decoder).toContain('const size_t doubled = oldCapacity * 2')

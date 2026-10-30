@@ -14,6 +14,13 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Verify zCore submodule revision
+      id: zcore
+      shell: bash
+      run: |
+        set -euo pipefail
+        revision=$(python3 scripts/verify-zcore-submodule.py --root "$GITHUB_WORKSPACE" --path third_party/zcore --print-revision)
+        echo "revision=$revision" >> "$GITHUB_OUTPUT"
     - name: Install compiler cache and identify toolchain
       id: paths
       shell: bash
@@ -21,7 +28,7 @@ runs:
         CACHE_PLATFORM: ${{ inputs.platform }}
         CACHE_ARCHIVES: ${{ inputs.archive-cache }}
         CACHE_DEPS: ${{ hashFiles('mobile/package-lock.json', 'mobile/ios/Podfile.lock', 'mobile/android/gradle/wrapper/gradle-wrapper.properties') }}
-        CACHE_SOURCES: ${{ hashFiles('package*.json', 'CMakeLists.txt', 'CMakePresets.json', 'cmake/**', 'scripts/**', 'zcore/**', 'zdsp/**', 'native/**', 'third_party/**', 'assets/pitch/**', 'mobile/ios/**', 'mobile/native/**', 'mobile/scripts/**', 'mobile/android/**', 'mobile/src/specs/**', 'mobile/*.js', 'mobile/package.json', 'tests/native/**', 'tools/native/**', '.github/actions/**', '.github/workflows/ios*.yml', '.github/workflows/android.yml') }}
+        CACHE_SOURCES: ${{ hashFiles('package*.json', '.gitmodules', 'scripts/verify-zcore-submodule.py', 'scripts/zcore-gitlink.cjs', 'CMakeLists.txt', 'CMakePresets.json', 'cmake/**', 'scripts/**', 'zcore/**', 'zdsp/**', 'native/**', 'third_party/**', 'assets/pitch/**', 'mobile/ios/**', 'mobile/native/**', 'mobile/scripts/**', 'mobile/android/**', 'mobile/src/specs/**', 'mobile/*.js', 'mobile/package.json', 'tests/native/**', 'tools/native/**', '.github/actions/**', '.github/workflows/ios*.yml', '.github/workflows/android.yml') }}-${{ steps.zcore.outputs.revision }}
         CACHE_METRO_SOURCES: ${{ hashFiles('mobile/package-lock.json', 'mobile/*.js', 'mobile/*.tsx', 'mobile/src/**', 'src/shared/**', 'mobile/scripts/**') }}
       run: |
         set -euo pipefail

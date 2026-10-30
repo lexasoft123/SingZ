@@ -13,6 +13,15 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Verify zCore revision for native output cache
+        id: zcore
+        shell: bash
+        run: |
+          revision=$(python3 scripts/verify-zcore-submodule.py --root "$GITHUB_WORKSPACE" --path third_party/zcore --print-revision)
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v4
         with:
@@ -55,7 +64,7 @@ jobs:
             vendor/darwin-x64
             vendor/win32-x64
             vendor/packs
-          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-analyze.sh', 'scripts/vendor-llama.sh', 'scripts/vendor-crispasr.sh', 'scripts/engine-artifact.cjs', 'scripts/assert-portable-binary.sh', 'scripts/analyze-source-hash.sh', 'CMakeLists.txt', 'cmake/**', 'zcore/**', 'zdsp/**', 'third_party/native/**', 'tools/native/**', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh') }}
+          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-analyze.sh', 'scripts/vendor-llama.sh', 'scripts/vendor-crispasr.sh', 'scripts/engine-artifact.cjs', 'scripts/assert-portable-binary.sh', 'scripts/analyze-source-hash.sh', 'CMakeLists.txt', '.gitmodules', 'scripts/verify-zcore-submodule.py', 'scripts/zcore-gitlink.cjs', 'cmake/**', 'zcore/**', 'zdsp/**', 'third_party/native/**', 'third_party/zcore/**', 'tools/native/**', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh') }}-${{ steps.zcore.outputs.revision }}
 
       # Mirror build.yml's key EXACTLY (this step is restore-only — build.yml
       # is the sole saver, so a drifted string here becomes an orphan key that

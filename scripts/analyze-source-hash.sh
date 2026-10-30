@@ -12,18 +12,12 @@
 # the first place.
 #
 # The fingerprint covers everything compiled into the binary plus everything
-# that decides how: zcore, zdsp, the native third-party tree, the host tools,
-# root CMake and its modules, and both scripts. The vendored libFLAC matters:
-# zcore_media links it into singz-analyze, and flac_io.cpp is how the CLI reads
-# v2 project stems.
+# that decides how: the verified zCore gitlink, SingZ's product-owned zcore and
+# zdsp files, the native third-party tree, host tools, root CMake, and the
+# verifier. The vendored libFLAC matters: zcore_media links it into
+# singz-analyze, and flac_io.cpp is how the CLI reads v2 project stems.
 #
-# third_party was NOT in the original set, and leaving it out was survivable
-# only while this was a build-cache key: patch the vendored FLAC, and
-# vendor-analyze.sh would print "cached", ship the old binary, and this check
-# would then vouch for it in green. Promoting the hash to the authoritative
-# answer is what made that gap worth closing.
-#
-# Untracked files under core/ are hashed too — deliberately. A local edit that
+# Untracked files under source directories are hashed too — deliberately. A local edit that
 # was never committed is exactly the state a stale binary hides.
 #
 # Known limit, inherited and kept on purpose so the value stays comparable
@@ -32,7 +26,22 @@
 set -euo pipefail
 
 ROOT=${1:-"$(cd "$(dirname "$0")/.." && pwd)"}
+if command -v python3 >/dev/null 2>&1; then
+  ZCORE_PYTHON=python3
+elif command -v python >/dev/null 2>&1; then
+  ZCORE_PYTHON=python
+else
+  echo "analyze-source-hash: Python 3 is required to verify the zCore submodule" >&2
+  exit 1
+fi
+ZCORE_REVISION=$("$ZCORE_PYTHON" "$ROOT/scripts/verify-zcore-submodule.py" \
+  --root "$ROOT" --path third_party/zcore --print-revision)
+if [[ ! "$ZCORE_REVISION" =~ ^[0-9a-f]{40,64}$ ]]; then
+  echo "analyze-source-hash: verifier returned an invalid zCore revision" >&2
+  exit 1
+fi
 SOURCE_DIRS=(
+  "$ROOT/third_party/zcore"
   "$ROOT/zcore"
   "$ROOT/zdsp"
   "$ROOT/third_party/native"
@@ -41,6 +50,9 @@ SOURCE_DIRS=(
 )
 SOURCE_FILES=(
   "$ROOT/CMakeLists.txt"
+  "$ROOT/.gitmodules"
+  "$ROOT/scripts/verify-zcore-submodule.py"
+  "$ROOT/scripts/zcore-gitlink.cjs"
   "$ROOT/scripts/vendor-analyze.sh"
   "$ROOT/scripts/engine-artifact.cjs"
   "$ROOT/scripts/ccache-launcher.sh"
@@ -75,10 +87,11 @@ done
 # is not the file set. Measured: chmod 000 on one subdirectory yields a
 # different 40-hex hash and exit 0. The build side then stamps that hash and
 # reports "cached" forever after; the runtime side accuses an innocent binary.
-list=$(mktemp) sorted=$(mktemp)
-trap 'rm -f "$list" "$sorted"' EXIT
+list=$(mktemp) sorted=$(mktemp) records=$(mktemp)
+trap 'rm -f "$list" "$sorted" "$records"' EXIT
 
-find "${SOURCE_DIRS[@]}" -type f -print > "$list"
+find "${SOURCE_DIRS[@]}" -type d -name .git -prune -o \
+  -type f ! -name .git -print > "$list"
 printf '%s\n' "${SOURCE_FILES[@]}" >> "$list"
 LC_ALL=C sort "$list" > "$sorted"
 
@@ -102,4 +115,8 @@ if [ "$(printf '%s\n' "$shas" | grep -c '')" -ne "${#files[@]}" ]; then
   exit 1
 fi
 
-paste -d' ' <(printf '%s' "$rels") <(printf '%s\n' "$shas") | git -C "$ROOT" hash-object --stdin
+paste -d' ' <(printf '%s' "$rels") <(printf '%s\n' "$shas") > "$records"
+# Gitlinks are not files, so bind the checked-out revision explicitly. The
+# relative path keeps the digest stable across fresh clones and linked worktrees.
+printf 'third_party/zcore.gitlink %s\n' "$ZCORE_REVISION" >> "$records"
+LC_ALL=C sort "$records" | git -C "$ROOT" hash-object --stdin

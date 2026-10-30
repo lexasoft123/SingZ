@@ -58,6 +58,52 @@ test('shared cache keys survive checkout paths and JS edits, but invalidate nati
   } finally { fs.rmSync(temporary, { recursive: true, force: true }) }
 })
 
+test('the verified zCore gitlink, declaration, and guard code invalidate iOS archives', t => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'singz-ios-zcore-gitlink-'))
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }))
+  const first = path.join(temporary, 'first'), second = path.join(temporary, 'second')
+  const cache = path.join(temporary, 'cache')
+  const write = (root, relative, bytes) => {
+    const file = path.join(root, relative)
+    fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, bytes)
+  }
+  const declaration = '[submodule "third_party/zcore"]\n\tpath = third_party/zcore\n\turl = https://github.com/lexasoft123/zCore.git\n'
+  const verifier = 'verify zCore Gitlink'
+  const revision = 'b'.repeat(40)
+  for (const root of [first, second]) {
+    write(root, '.gitmodules', declaration)
+    write(root, 'scripts/verify-zcore-submodule.py', verifier)
+    write(root, 'third_party/zcore/.git', `gitdir: ${root}/.git/modules/zcore`)
+    write(root, 'third_party/zcore/include/api.h', 'same child content')
+  }
+  const fingerprint = (root, oid = revision) =>
+    nativeInputs(root, cache, 'same toolchain', { zcoreRevision: oid })
+  const original = fingerprint(first)
+  assert.equal(fingerprint(second), original, 'checkout metadata paths and .git files are pruned')
+  assert.notEqual(fingerprint(first, 'c'.repeat(40)), original,
+    'a new gitlink revision invalidates even if child bytes are identical')
+
+  write(first, '.gitmodules', declaration.replace('zCore.git', 'fork.git'))
+  assert.notEqual(fingerprint(first), original, '.gitmodules changes invalidate')
+  write(first, '.gitmodules', declaration)
+  assert.equal(fingerprint(first), original)
+
+  write(first, 'scripts/verify-zcore-submodule.py', verifier + ' changed')
+  assert.notEqual(fingerprint(first), original, 'guard implementation changes invalidate')
+})
+
+test('synthetic iOS-input fixtures without .gitmodules use the explicit no-submodule case offline', t => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'singz-ios-no-submodule-'))
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }))
+  const root = path.join(temporary, 'checkout')
+  const cache = path.join(temporary, 'cache')
+  const file = path.join(root, 'mobile/ios/FolderAccess/Bridge.mm')
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, 'native source')
+  assert.doesNotThrow(() => nativeInputs(root, cache, 'test toolchain'))
+  assert.equal(fs.existsSync(path.join(root, '.gitmodules')), false)
+})
+
 
 test('Android work in one checkout does not invalidate an iOS native archive', t => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'singz-ios-platform-inputs-'))

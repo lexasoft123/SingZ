@@ -36,6 +36,10 @@ on:
       - 'third_party/native/**'
       - 'zcore/**'
       - 'zdsp/**'
+      - '.gitmodules'
+      - 'third_party/zcore'
+      - 'third_party/zcore/**'
+      - 'scripts/verify-zcore-submodule.py'
   pull_request:
     paths:
       - '.github/workflows/ios-native-canary.yml'
@@ -67,6 +71,10 @@ on:
       - 'tests/native/**'
       - 'tests/shared/**'
       - 'third_party/native/**'
+      - '.gitmodules'
+      - 'third_party/zcore'
+      - 'third_party/zcore/**'
+      - 'scripts/verify-zcore-submodule.py'
       - 'zcore/**'
       - 'zdsp/**'
 
@@ -83,6 +91,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: actions/setup-node@v4
         with:

@@ -162,24 +162,37 @@ export function resolveCaptureAddonPath(runtime: CaptureAddonRuntime): string {
 
 /** Same native-input fingerprint as scripts/build-capture-addon.cjs. */
 export function captureSourceFingerprint(root: string, electronVersion: string): string {
+  // Source fingerprints run only for development checkouts. Packaged apps do
+  // not ship build scripts, so loading this helper must stay inside this path.
+  const { zcoreGitlinkRevision } = require(join(root, 'scripts', 'zcore-gitlink.cjs')) as {
+    zcoreGitlinkRevision(root: string): string
+  }
+  const zcoreRevision = zcoreGitlinkRevision(root)
   const files: string[] = []
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === '.git') continue
       const path = join(dir, entry.name)
       if (entry.isDirectory()) walk(path)
       else files.push(path)
     }
   }
   for (const dir of [
-    'native/electron', 'native/playback', 'zcore', 'zdsp', 'third_party/native', 'cmake'
+    'native/electron', 'native/playback', 'third_party/zcore',
+    'zcore', 'zdsp', 'third_party/native', 'cmake'
   ]) {
     walk(join(root, dir))
   }
-  files.push(join(root, 'CMakeLists.txt'), join(root, 'scripts', 'ccache-launcher.sh'),
-    join(root, 'scripts', 'ccache-launcher.ps1'), join(root, 'scripts', 'build-capture-addon.cjs'))
+  files.push(join(root, 'CMakeLists.txt'), join(root, '.gitmodules'),
+    join(root, 'scripts', 'verify-zcore-submodule.py'),
+    join(root, 'scripts', 'zcore-gitlink.cjs'),
+    join(root, 'scripts', 'ccache-launcher.sh'),
+    join(root, 'scripts', 'ccache-launcher.ps1'),
+    join(root, 'scripts', 'build-capture-addon.cjs'))
   files.sort()
   const hash = createHash('sha1')
   hash.update(`electron ${electronVersion}\n`)
+  hash.update(`third_party/zcore.gitlink ${zcoreRevision}\n`)
   for (const file of files) {
     hash.update(`${relative(root, file)} ${statSync(file).size} `)
     hash.update(createHash('sha1').update(readFileSync(file)).digest('hex'))

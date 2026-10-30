@@ -61,7 +61,15 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
+          submodules: recursive
           ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Verify zCore revision for native output cache
+        id: zcore
+        shell: bash
+        run: |
+          revision=$(python3 scripts/verify-zcore-submodule.py --root "$GITHUB_WORKSPACE" --path third_party/zcore --print-revision)
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
 
       - name: Verify explicit release source
         if: inputs.release_tag != ''
@@ -129,7 +137,7 @@ jobs:
             vendor/darwin-x64
             vendor/win32-x64
             vendor/packs
-          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-analyze.sh', 'scripts/vendor-llama.sh', 'scripts/vendor-crispasr.sh', 'scripts/engine-artifact.cjs', 'scripts/assert-portable-binary.sh', 'scripts/analyze-source-hash.sh', 'CMakeLists.txt', 'cmake/**', 'zcore/**', 'zdsp/**', 'third_party/native/**', 'tools/native/**', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh') }}
+          key: engines-out-${{ runner.os }}-${{ hashFiles('scripts/vendor-analyze.sh', 'scripts/vendor-llama.sh', 'scripts/vendor-crispasr.sh', 'scripts/engine-artifact.cjs', 'scripts/assert-portable-binary.sh', 'scripts/analyze-source-hash.sh', 'CMakeLists.txt', '.gitmodules', 'scripts/verify-zcore-submodule.py', 'scripts/zcore-gitlink.cjs', 'cmake/**', 'zcore/**', 'zdsp/**', 'third_party/native/**', 'third_party/zcore/**', 'tools/native/**', 'scripts/build-gpu-pack.sh', 'scripts/build-onnx-pack.sh') }}-${{ steps.zcore.outputs.revision }}
 
       - name: Cache engine sources and build trees
         uses: actions/cache@v4

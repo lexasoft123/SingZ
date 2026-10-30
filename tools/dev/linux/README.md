@@ -37,6 +37,30 @@ podman start singz-dev
 podman exec singz-dev bash tools/dev/linux/native-tests.sh
 ```
 
+The source mount must include real Git metadata because native configuration
+verifies the pinned `third_party/zcore` gitlink. A normal checkout has its
+`.git` directory and submodule metadata inside `$PWD`, so the source mount above
+is sufficient. A linked worktree stores its `.git` pointer and common object
+database outside the worktree; mount that metadata read-only at the same
+absolute path inside the container as well:
+
+```sh
+git_common_dir=$(git rev-parse --path-format=absolute --git-common-dir)
+podman create --name singz-dev-linked --userns=keep-id \
+  --user "$(id -u):$(id -g)" \
+  --volume "$PWD:/src:ro" \
+  --volume "$git_common_dir:$git_common_dir:ro" \
+  --volume "$PWD/../container-work:/work:rw" \
+  --volume "$PWD/../container-cache:/cache:rw" \
+  localhost/singz-dev:debian13
+```
+
+The parent checkout's metadata contains the linked worktree pointer and the
+submodule object store. Git archive exports have neither an index gitlink nor
+submodule metadata; use a real clone/worktree instead. The verifier will stop
+with an initialization instruction rather than build from an unverifiable
+directory.
+
 The image includes GCC, Clang 21, CMake/Ninja, ccache, and Linux development
 headers. Clang 21 comes from `trixie-backports` and is the default compiler.
 `tini` reaps test subprocesses. The native suites need no audio/GPU devices
