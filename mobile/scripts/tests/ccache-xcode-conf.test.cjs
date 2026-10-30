@@ -77,8 +77,11 @@ test('installed ccache accepts generated Xcode configuration with spaces in path
   if (spawnSync('ccache', ['--version']).status !== 0) return t.skip('ccache not installed')
   const { root, conf } = fixture(t)
   configureXcodeCache(root, { CCACHE_MAXSIZE: '750M' })
+  // This probe tests the generated file. CI exports per-build overrides that
+  // intentionally take precedence over it, so keep them out of the fixture.
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('CCACHE_')))
   const result = spawnSync('ccache', ['--show-config'], {
-    env: { ...process.env, CCACHE_CONFIGPATH: conf }, encoding: 'utf8'
+    env: { ...env, CCACHE_CONFIGPATH: conf }, encoding: 'utf8'
   })
   assert.equal(result.status, 0, result.stderr)
   assert.ok(result.stdout.includes(`base_dir = ${root}`))
