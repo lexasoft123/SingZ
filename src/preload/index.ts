@@ -269,6 +269,8 @@ const api: SingzApi = {
   saveTrainingPreferencesSync: (preferences) => ipcRenderer.sendSync('training-preferences:save-sync', preferences),
   recordTrainingCompletion: (receipt) => ipcRenderer.invoke('training-completion:record', receipt),
 
+  saveProjectSongVolume: (songPath, gain) => ipcRenderer.invoke('project:song-volume', songPath, gain),
+
   saveProject: (songPath, name, settings) =>
     ipcRenderer.invoke('project:save', songPath, name, settings),
 
@@ -296,6 +298,7 @@ const api: SingzApi = {
   gdriveSignIn: () => ipcRenderer.invoke('gdrive:signin'),
   gdriveSignOut: () => ipcRenderer.invoke('gdrive:signout'),
   gdriveSync: () => ipcRenderer.invoke('gdrive:sync'),
+  gdriveCancelSync: () => ipcRenderer.invoke('gdrive:cancel-sync'),
   onGdriveState: (cb) => {
     const listener = (_e: IpcRendererEvent, s: SyncStatus): void => cb(s)
     ipcRenderer.on('gdrive:state', listener)

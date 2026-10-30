@@ -1,4 +1,5 @@
 import { app } from 'electron'
+import { sanitizeSongVolume } from '../shared/song-volume'
 import { t } from '../shared/i18n'
 import { createHash } from 'node:crypto'
 import { existsSync, readdirSync } from 'node:fs'
@@ -557,6 +558,24 @@ export function withProjectDocumentTransaction<T>(
   })
 }
 
+/** Persist only song gain, without capturing stale mixer/analysis settings. */
+export async function saveProjectSongVolume(songPath: string, value: number): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!Number.isFinite(value)) return { ok: false, error: 'Invalid song output gain.' }
+  const dir = dirname(songPath)
+  try {
+    return await withProjectDocumentTransaction(dir, async (meta, replace) => {
+      const masterVolume = sanitizeSongVolume(value)
+      if (meta.settings.masterVolume === masterVolume) return { ok: true as const }
+      return withDirty(dir, 'song output gain', async () => {
+        await replace({ ...meta, savedAt: new Date().toISOString(), settings: { ...meta.settings, masterVolume } })
+        return { ok: true as const }
+      })
+    })
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
 /**
  * The seek bar's envelope, computed here and read by the phones.
  *
@@ -765,7 +784,10 @@ export async function listProjects(): Promise<{ root: string; projects: ProjectL
   const projects: ProjectListItem[] = []
   try {
     for (const entry of await readdir(root, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue
+      // A sync can retain a complete staging document when its final rename
+      // is refused (for example a scanner holds the destination on Windows).
+      // Only the published destination belongs in the playable library.
+      if (!entry.isDirectory() || entry.name.startsWith('.singz-adopting-')) continue
       const dir = join(root, entry.name)
       const meta = await readMeta(dir)
       if (!meta) continue
@@ -841,6 +863,7 @@ export async function projectLyricsPath(songPath: string): Promise<string | null
 }
 
 const STORED_SETTING_KEYS = [
+  'masterVolume',
   'transpose',
   'tempo',
   'beat',

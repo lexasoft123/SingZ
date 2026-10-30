@@ -15,7 +15,7 @@ describe('bundled update highlights', () => {
     expect(releaseHighlights('dev', undefined, 'en', 'desktop')).toBeNull()
     expect(compareReleaseVersions('0.10.0', '0.9.9')).toBeGreaterThan(0)
   })
-  it.each(['en', 'ru', 'zh-CN', 'hi', 'ja', 'ko', 'th', 'id', 'vi', 'fil', 'ms', 'zh-TW'] as const)('keeps desktop capabilities labeled on phones in %s', locale => {
+  it.each(['en', 'ru', 'zh-CN', 'hi', 'ja', 'ko', 'th', 'id', 'vi', 'fil', 'ms', 'zh-TW', 'tr'] as const)('keeps desktop capabilities labeled on phones in %s', locale => {
     const phone = releaseHighlights(RELEASE_VERSION, '0.26.2', locale, 'ios')!
     // The mixed-platform fixture remains v0.26.3 when a later release is added.
     const mixed = phone.entries.find(entry => entry.version === '0.26.3')!

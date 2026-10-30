@@ -737,6 +737,8 @@ struct NativePlaybackStatus {
    * PCM has never released everything, and must not say that it has. */
   size_t parkedLaneBytes{0};
   uint32_t parkedLaneCount{0};
+  float outputPeak{0.0F};
+  uint32_t outputClippedBlocks{0};
   float masterGain{1.0F};
   float referenceGain{0.0F};
   bool trainingEnabled{false};
@@ -973,6 +975,14 @@ public:
       uint64_t generation,
       NativePlaybackPreviewClickSound sound =
           NativePlaybackPreviewClickSound::Ordinary);
+  struct OutputMeter {
+    bool available{false};
+    uint64_t generation{0};
+    float peak{0};
+    uint32_t clippedBlocks{0};
+  };
+  // A bounded observation for the mobile UI: never waits behind prepare.
+  OutputMeter outputMeter() const noexcept;
   NativePlaybackStatus status() const;
   // Lock-free and wait-free from any thread: see NativePlaybackPositionNow.
   // Safe to call at UI rate while a prepare decodes, while stop waits for

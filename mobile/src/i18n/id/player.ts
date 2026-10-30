@@ -3,6 +3,19 @@ import type { player as en } from '../en/player'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const player: Translation<typeof en> = {
+  'phone.player.output.title': "Output lagu",
+  'phone.player.output.subtitle': "Level khusus untuk lagu ini",
+  'phone.player.output.reset': "Reset",
+  'phone.player.output.peak': "Level puncak",
+  'phone.player.output.clip': "Klip",
+  'phone.player.output.hint': "Naikkan hingga +12 dB. Jika Klip menyala, turunkan gain.",
+  'phone.player.output.clippedHint': "Klip terdeteksi. Turunkan gain, lalu ketuk Klip untuk mereset.",
+  'phone.player.output.saved': "Disimpan untuk lagu ini",
+  'phone.player.output.saving': "Menyimpan…",
+  'phone.player.output.saveFailed': "Output lagu tidak tersimpan",
+  'phone.player.output.resetClip': "Reset peringatan klip",
+  'phone.player.output.mute': "Bisukan atau aktifkan suara lagu",
+
   "phone.player.unsupported.title": "Belum tersedia dalam pemutaran asli",
   "phone.player.unsupported.message": "{operation} tetap tidak aktif sampai kontrol DSP asli terhubung.",
   "phone.player.playbackStopped.title": "Putar berhenti",

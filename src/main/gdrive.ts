@@ -1,11 +1,9 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
-import { createWriteStream, readdirSync } from 'node:fs'
-import { mkdir, readFile, rename, rm, stat, unlink, utimes, writeFile } from 'node:fs/promises'
+import { readdirSync } from 'node:fs'
+import { lstat, mkdir, readFile, readdir, rename, rm, stat, unlink, utimes, writeFile } from 'node:fs/promises'
 import { extname, join, sep } from 'node:path'
-import { Readable, Transform } from 'node:stream'
-import { pipeline } from 'node:stream/promises'
-import type { ReadableStream as WebReadableStream } from 'node:stream/web'
+import { downloadDriveFile } from './drive-download'
 import { shell } from 'electron'
 import gdriveConfig from './gdrive-config'
 import { log } from './log'
@@ -184,20 +182,44 @@ export async function gdriveSignIn(): Promise<{ ok: true } | { ok: false; error:
   }
 }
 
-async function accessToken(): Promise<string> {
+async function responseWithDeadline<T>(url: string, init: RequestInit, read: (res: Response) => Promise<T>, signal = syncController?.signal, timeoutMs = 30_000): Promise<T> {
+  const deadline = new AbortController()
+  const timer = setTimeout(() => deadline.abort(), timeoutMs)
+  timer.unref?.()
+  const combined = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal
+  try {
+    const res = await fetch(url, { ...init, signal: combined })
+    return await read(res)
+  } catch (err) {
+    signal?.throwIfAborted()
+    if (deadline.signal.aborted) throw new Error('Google Drive network timeout')
+    throw err
+  } finally {
+    clearTimeout(timer)
+    deadline.abort()
+  }
+}
+
+async function accessToken(renew = false, signal = syncController?.signal): Promise<string> {
   if (!cfg) throw new Error('not configured')
   const t = readTokens()
   if (!t) throw new Error('Not signed in to Google Drive')
-  if (Date.now() < t.expiresAt) return t.access
-  const res = await fetch(TOKEN(), {
+  if (!renew && Date.now() < t.expiresAt) return t.access
+  const tok = await responseWithDeadline(TOKEN(), {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body:
       `refresh_token=${encodeURIComponent(t.refresh)}` +
       `&client_id=${encodeURIComponent(cfg.clientId)}` +
       `&client_secret=${encodeURIComponent(cfg.clientSecret)}&grant_type=refresh_token`
-  })
-  const tok = (await res.json()) as { access_token?: string; expires_in?: number }
+  }, async (res) => {
+    if (res.status === 400 || res.status === 401) {
+      writeTokens(null)
+      throw new Error('Google Drive session expired — sign in again')
+    }
+    if (!res.ok) throw new Error(`Drive API ${res.status} renewing session`)
+    return await res.json() as { access_token?: string; expires_in?: number }
+  }, signal)
   if (!tok.access_token) {
     writeTokens(null)
     throw new Error('Google Drive session expired — sign in again')
@@ -231,12 +253,13 @@ const qStr = (s: string): string => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'"
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const token = await accessToken()
-  const res = await fetch(`${API()}${path}`, {
+  return responseWithDeadline(`${API()}${path}`, {
     ...init,
     headers: { Authorization: `Bearer ${token}`, ...(init?.headers ?? {}) }
+  }, async (res) => {
+    if (!res.ok) throw new Error(`Drive API ${res.status} on ${path.split('?')[0]}`)
+    return await res.json() as T
   })
-  if (!res.ok) throw new Error(`Drive API ${res.status} on ${path.split('?')[0]}`)
-  return (await res.json()) as T
 }
 
 async function listChildren(parentId: string): Promise<RemoteFile[]> {
@@ -316,24 +339,28 @@ async function uploadBytes(
 ): Promise<string> {
   const token = await accessToken()
   const base = (cfg?.uploadBase || API()) + '/upload/drive/v3/files'
-  const initRes = await fetch(
+  const session = await responseWithDeadline(
     existingId ? `${base}/${existingId}?uploadType=resumable` : `${base}?uploadType=resumable`,
     {
       method: existingId ? 'PATCH' : 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(existingId ? {} : { name, parents: [parentId] })
+    }, async (res) => {
+      if (!res.ok) throw new Error(`Drive upload init ${res.status} for ${name}`)
+      const location = res.headers.get('location')
+      await res.body?.cancel()
+      return location
     }
   )
-  if (!initRes.ok) throw new Error(`Drive upload init ${initRes.status} for ${name}`)
-  const session = initRes.headers.get('location')
   if (!session) throw new Error(`Drive gave no upload session for ${name}`)
-  const put = await fetch(session, {
+  const done = await responseWithDeadline(session, {
     method: 'PUT',
     headers: { 'Content-Type': mime, 'Content-Length': String(bytes.length) },
     body: bytes
-  })
-  if (!put.ok) throw new Error(`Drive upload ${put.status} for ${name}`)
-  const done = (await put.json().catch(() => ({}))) as { id?: string }
+  }, async (res) => {
+    if (!res.ok) throw new Error(`Drive upload ${res.status} for ${name}`)
+    return await res.json() as { id?: string }
+  }, syncController?.signal, 300_000)
   return done.id ?? existingId ?? ''
 }
 
@@ -368,30 +395,22 @@ class AdoptRefused extends Error {}
 const LOCAL_FS_ERRORS = new Set(['EPERM', 'EACCES', 'EBUSY', 'EEXIST', 'ENOTEMPTY', 'ENOSPC', 'EROFS', 'EXDEV', 'EMFILE'])
 
 /** Stream one Drive file to disk, checking what arrived against the listing. */
-async function downloadTo(file: RemoteFile, out: string): Promise<{ md5: string; size: number }> {
-  const token = await accessToken()
-  const res = await fetch(`${API()}/drive/v3/files/${file.id}?alt=media`, {
-    headers: { Authorization: `Bearer ${token}` }
+async function downloadTo(file: RemoteFile, out: string, onProgress?: (msg: string, frac: number) => void,
+  dir = '', index = 1, count = 1): Promise<{ md5: string; size: number }> {
+  const bytes = (n: number): string => n < 1024 * 1024 ? `${Math.round(n / 1024)} KB` : `${(n / (1024 * 1024)).toFixed(1)} MB`
+  return downloadDriveFile(file, out, {
+    url: `${API()}/drive/v3/files/${file.id}?alt=media`,
+    token: accessToken,
+    signal: syncController?.signal,
+    onProgress: (p) => {
+      const detail = p.phase === 'downloading'
+        ? t('main.sync.downloadBytes', { got: bytes(p.bytes), total: bytes(p.total), speed: bytes(p.bytesPerSecond) })
+        : p.phase === 'retrying' ? t('main.sync.downloadRetry', { attempt: p.attempt })
+        : p.phase === 'verifying' ? t('main.sync.downloadVerify') : t('main.sync.downloadCheck')
+      onProgress?.(t('main.sync.downloadingFile', { dir, file: file.name, index, count, detail }),
+        0.02 + 0.4 * ((index - 1 + (p.total > 0 ? Math.min(1, p.bytes / p.total) : 0)) / count))
+    }
   })
-  if (!res.ok || !res.body) throw new Error(`Drive API ${res.status} downloading ${file.name}`)
-  const hash = createHash('md5')
-  let size = 0
-  await pipeline(
-    Readable.fromWeb(res.body as unknown as WebReadableStream<Uint8Array>),
-    new Transform({
-      transform(chunk: Buffer, _encoding, done) {
-        hash.update(chunk)
-        size += chunk.length
-        done(null, chunk)
-      }
-    }),
-    createWriteStream(out)
-  )
-  const md5 = hash.digest('hex')
-  if ((file.md5Checksum && md5 !== file.md5Checksum) || (file.size !== undefined && Number(file.size) !== size)) {
-    throw new AdoptRefused(`${file.name} arrived damaged`)
-  }
-  return { md5, size }
 }
 
 type Arrived = Map<string, { md5: string; size: number }>
@@ -468,7 +487,8 @@ async function adoptPublished(
   root: string,
   remoteTop: RemoteFile[],
   localDirs: string[],
-  onProgress?: (msg: string, frac: number) => void
+  onProgress?: (msg: string, frac: number) => void,
+  warnings: string[] = []
 ): Promise<string[]> {
   const adopted: string[] = []
 
@@ -519,7 +539,13 @@ async function adoptPublished(
     try {
       // inside the try: a leftover a scanner still holds is this song's
       // trouble, not the sync's (see the catch)
-      await rm(tmp, { recursive: true, force: true })
+      for (const path of [tmp, join(tmp, 'stems')]) {
+        const info = await lstat(path).catch((err: NodeJS.ErrnoException) => {
+          if (err.code !== 'ENOENT') throw err
+          return null
+        })
+        if (info && (!info.isDirectory() || info.isSymbolicLink())) await rm(path, { recursive: true, force: true })
+      }
       const kids = await listChildren(f.id)
       const docFile = kids.find((k) => k.name === 'project.json' && k.mimeType !== FOLDER)
       if (!docFile) throw new AdoptRefused('it has no project.json')
@@ -530,7 +556,7 @@ async function adoptPublished(
       // held against Drive's own listing before any stem is fetched: a folder
       // whose doc and files disagree is refused for one small download rather
       // than the whole song, and it is asked again on every sync.
-      await downloadTo(docFile, join(tmp, 'project.json.part'))
+      await downloadTo(docFile, join(tmp, 'project.json.part'), onProgress, dir)
       let doc: SyncDoc & { songFile?: unknown }
       try {
         doc = JSON.parse(await readFile(join(tmp, 'project.json.part'), 'utf8'))
@@ -546,13 +572,21 @@ async function adoptPublished(
         if (plainName(k.name)) listed.set(`stems/${k.name}`, { md5: k.md5Checksum ?? '', size: Number(k.size ?? -1) })
       }
       checkAdoptable(doc, listed)
-      const got: Arrived = new Map()
-      for (const k of kids) {
-        if (k.mimeType === FOLDER || k === docFile || !plainName(k.name)) continue
-        got.set(k.name, await downloadTo(k, join(tmp, k.name)))
+      const transfers = [
+        ...kids.filter((k) => k.mimeType !== FOLDER && k !== docFile && plainName(k.name)).map((k) => ({ file: k, rel: k.name })),
+        ...stemKids.filter((k) => plainName(k.name)).map((k) => ({ file: k, rel: `stems/${k.name}` }))
+      ]
+      // Remove files a newer project revision dropped, including old partials.
+      const wanted = new Set(['project.json.part', 'stems', ...transfers.map((x) => x.rel)])
+      for (const name of await readdir(tmp)) {
+        if (!wanted.has(name)) await rm(join(tmp, name), { recursive: true, force: true })
       }
-      for (const k of stemKids) {
-        if (plainName(k.name)) got.set(`stems/${k.name}`, await downloadTo(k, join(tmp, 'stems', k.name)))
+      for (const name of await readdir(join(tmp, 'stems'))) {
+        if (!wanted.has(`stems/${name}`)) await rm(join(tmp, 'stems', name), { recursive: true, force: true })
+      }
+      const got: Arrived = new Map()
+      for (const [i, transfer] of transfers.entries()) {
+        got.set(transfer.rel, await downloadTo(transfer.file, join(tmp, transfer.rel), onProgress, dir, i + 1, transfers.length))
       }
       // …and against the bytes that actually arrived
       checkAdoptable(doc, got)
@@ -565,7 +599,9 @@ async function adoptPublished(
       if (readdirSync(root).includes(dir)) throw new AdoptRefused(`a folder named ${dir} appeared here meanwhile`)
       await rename(tmp, join(root, dir))
     } catch (err) {
-      await rm(tmp, { recursive: true, force: true }).catch(() => {})
+      // Unusable metadata cannot establish which files belong to the project.
+      // Network/disk failures keep verified files for the next attempt.
+      if (err instanceof AdoptRefused) await rm(tmp, { recursive: true, force: true }).catch(() => {})
       // One song's own trouble — refused, or this disk saying no (a folder a
       // scanner holds at the rename, a full disk) — must not stop the rest of
       // the library syncing: it stays on Drive, spared, for the next run. A
@@ -574,6 +610,7 @@ async function adoptPublished(
       const diskSaidNo = typeof code === 'string' && LOCAL_FS_ERRORS.has(code)
       if (!(err instanceof AdoptRefused) && !diskSaidNo) throw err
       const why = diskSaidNo ? `this computer could not write it (${code})` : (err as Error).message
+      warnings.push(t('main.sync.downloadDeferred', { dir, reason: why }))
       syncLog('error', `${dir}: not taken in from the phone yet — ${why}; left on Drive for the next sync`)
       continue
     }
@@ -680,9 +717,18 @@ export interface SyncReport {
   outsideLibrary?: string[]
   /** Songs taken in from a phone this run, by their folder name here. */
   adopted?: string[]
+  cancelled?: boolean
+  warnings?: string[]
 }
 
 let syncing = false
+let syncController: AbortController | undefined
+
+export function gdriveCancelSync(): { ok: boolean } {
+  if (!syncController) return { ok: false }
+  syncController.abort(new Error('Sync cancelled'))
+  return { ok: true }
+}
 
 /** Push every local project to Drive; md5-diffed so clean runs are cheap. */
 export interface SyncOptions {
@@ -700,6 +746,7 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
   if (!cfg) return { ok: false, uploaded: 0, unchanged: 0, projects: 0, error: 'not configured' }
   if (syncing) return { ok: false, uploaded: 0, unchanged: 0, projects: 0, error: 'sync already running' }
   syncing = true
+  syncController = new AbortController()
   try {
     const root = opts.root ?? projectsRoot()
     // sorted so the manifest is byte-stable — readdir order is not, and a
@@ -739,7 +786,8 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
       )
       return { ok: false, uploaded: 0, unchanged: 0, projects: 0, error: 'the library looks empty — nothing was synced' }
     }
-    const adopted = await adoptPublished(root, remoteTop, projectDirs, onProgress)
+    const warnings: string[] = []
+    const adopted = await adoptPublished(root, remoteTop, projectDirs, onProgress, warnings)
     if (adopted.length > 0) projectDirs = await scanLibrary()
 
     // What Drive actually holds, in two batched listings however big the
@@ -1049,12 +1097,14 @@ export async function gdriveSync(opts: SyncOptions = {}): Promise<SyncReport> {
     const s = readSettings() as Record<string, unknown>
     s.gdriveLastSync = Date.now()
     writeSettings(s)
-    return { ok: true, uploaded, unchanged, projects: projectDirs.length, outsideLibrary: outside, adopted }
+    return { ok: true, uploaded, unchanged, projects: projectDirs.length, outsideLibrary: outside, adopted, warnings }
   } catch (err) {
+    const cancelled = syncController?.signal.aborted ?? false
     const error = err instanceof Error ? err.message : String(err)
-    syncLog('error', `sync failed: ${error}`)
-    return { ok: false, uploaded: 0, unchanged: 0, projects: 0, error }
+    syncLog(cancelled ? 'run' : 'error', cancelled ? 'sync cancelled; completed downloads kept' : `sync failed: ${error}`)
+    return { ok: false, uploaded: 0, unchanged: 0, projects: 0, error, cancelled }
   } finally {
     syncing = false
+    syncController = undefined
   }
 }

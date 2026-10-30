@@ -1,3 +1,4 @@
+import { GuideTarget } from './QuickStart'
 import { useMobileLayout } from './uiKit'
 import React from 'react'
 import type { BottomTabBarProps } from '@react-navigation/bottom-tabs'
@@ -46,8 +47,7 @@ function ResponsiveBottomTabs({
           const fallback = tabMeta()[tab]
           const label = typeof options.tabBarLabel === 'string' ? options.tabBarLabel : options.title ?? fallback.label
           return (
-            <GlassTab
-              key={route.key}
+            <GuideTarget key={route.key} id={tab === 'training' ? 'training-tab' : 'songs-tab'} style={{ flex: 1 }}><GlassTab
               label={label}
               accessibilityLabel={options.tabBarAccessibilityLabel ?? label}
               testID={options.tabBarButtonTestID}
@@ -66,7 +66,7 @@ function ResponsiveBottomTabs({
                 navigation.navigate(route.name, route.params)
               }}
               onLongPress={() => navigation.emit({ type: 'tabLongPress', target: route.key })}
-            />
+            /></GuideTarget>
           )
         })}
       </GlassTabBar>

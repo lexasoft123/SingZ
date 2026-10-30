@@ -27,7 +27,7 @@ test('every app-owned modal is a native-stack presentation', () => {
   expect(player.match(/options=\{PLAYER_SHEET_OPTIONS\}/g)).toHaveLength(2)
   expect(player).toMatch(/name="Mixer"[\s\S]*options=\{MIXER_SHEET_OPTIONS\}/)
   expect(player).toMatch(/MIXER_SHEET_OPTIONS[\s\S]*sheetInitialDetentIndex: 0/)
-  expect(player.match(/<Sheet\n/g)).toHaveLength(3)
+  expect(player.match(/<Sheet[\s>]/g)).toHaveLength(3)
   expect(player.match(/fitContent=\{NATIVE_SHEET_FIT_SUPPORTED\}/g)).toHaveLength(3)
   expect(player).not.toMatch(/actionLabel=/)
   expect(player.match(/<SheetScrollView/g)).toHaveLength(3)

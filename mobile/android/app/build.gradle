@@ -54,10 +54,8 @@ react {
     autolinkLibrariesWithApp()
 }
 
-/**
- * Set this to true to Run Proguard on Release builds to minify the Java bytecode.
- */
-def enableProguardInReleaseBuilds = false
+// Release DEX is shrunk, optimized and obfuscated by R8. Keep JNI entry
+// points in proguard-rules.pro; debug builds remain unoptimized.
 
 /**
  * The preferred build flavor of JavaScriptCore (JSC)
@@ -246,8 +244,9 @@ android {
         }
         release {
             signingConfig hasUploadKey ? signingConfigs.upload : signingConfigs.debug
-            minifyEnabled enableProguardInReleaseBuilds
-            proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
         }
     }
 }

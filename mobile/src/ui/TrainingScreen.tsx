@@ -1,3 +1,6 @@
+import SettingsScreen from './SettingsScreen'
+import WhatsNewScreen from './WhatsNewScreen'
+import { HeaderIconButton } from './HeaderIconButton'
 import { LogButton } from './LogButton'
 import LogPanel from './LogPanel'
 import { useMobileLayout } from './uiKit'
@@ -143,7 +146,7 @@ function TrainingLogButton(): React.JSX.Element | null {
   return openLog ? <LogButton onPress={openLog} /> : null
 }
 
-type TrainingStackParamList = { Log: undefined; Home: undefined; Exercise: undefined; Progress: undefined; Diagnostics: undefined; SoundSettings: undefined; SoundLab: undefined }
+type TrainingStackParamList = { Settings: undefined; WhatsNew: undefined; Log: undefined; Home: undefined; Exercise: undefined; Progress: undefined; Diagnostics: undefined; SoundSettings: undefined; SoundLab: undefined }
 const TrainingStack = createNativeStackNavigator<TrainingStackParamList>()
 /** Polls (80 ms each) a fresh capture gets before the screen is allowed to
  * report what it is hearing — about a second, which is long enough for both
@@ -890,11 +893,19 @@ export default function TrainingScreen({
           contentStyle: styles.trainingRoute
         }}
       >
+        <TrainingStack.Screen name="Settings" options={{ presentation: 'fullScreenModal' }}>
+          {({ navigation }) => <SettingsScreen onClose={() => navigation.goBack()} onWhatsNew={() => navigation.navigate('WhatsNew')} onDiagnostics={() => navigation.navigate('Diagnostics')} />}
+        </TrainingStack.Screen>
+        <TrainingStack.Screen name="WhatsNew" options={{ presentation: 'fullScreenModal' }}>
+          {({ navigation }) => <WhatsNewScreen onClose={() => navigation.goBack()} />}
+        </TrainingStack.Screen>
         <TrainingStack.Screen name="Log" options={{ presentation: 'fullScreenModal' }}>
           {({ navigation }) => <LogPanel onClose={() => navigation.goBack()} />}
         </TrainingStack.Screen>
         <TrainingStack.Screen name="Home" options={{ gestureEnabled: false }}>
           {({ navigation }) => {
+            const openSettings = () => { stopRuntime(); navigation.navigate('Settings') }
+            if (TEST) TEST.trainingSettings = openSettings
             if (TEST) TEST.trainingSoundLab = () => { stopRuntime(); navigation.navigate('SoundLab') }
             if (TEST) TEST.trainingSoundSettings = () => { stopRuntime(); navigation.navigate('SoundSettings') }
             if (TEST) TEST.trainingConfigure = (patch: Partial<MobileTrainingSetup>) => {
@@ -928,7 +939,7 @@ export default function TrainingScreen({
                 navigation.navigate('Exercise')
               }}
               onSoundSettings={() => { stopRuntime(); navigation.navigate('SoundSettings') }}
-              onDiagnostics={() => { stopRuntime(); navigation.navigate('Diagnostics') }}
+              onSettings={openSettings}
               onProgress={() => {
                 dispatch({ type: 'progress' })
                 navigation.navigate('Progress')
@@ -1052,7 +1063,7 @@ const TrainingBackdrop = React.memo(function TrainingBackdrop({ width, height }:
   )
 })
 
-function TrainingHome({ progress, onProgramLesson, song, effectiveKey, onChoose, onPrepare, onProgress, onDiagnostics, onSoundSettings }: {
+function TrainingHome({ progress, onProgramLesson, song, effectiveKey, onChoose, onPrepare, onProgress, onSoundSettings, onSettings }: {
   progress: TrainingProgress
   onProgramLesson: (lesson: ProgramLesson, day: number) => void
   song: MobileSongTrainingFacts | null
@@ -1060,8 +1071,8 @@ function TrainingHome({ progress, onProgramLesson, song, effectiveKey, onChoose,
   onChoose: (exercise: MobileTrainingSetup['exercise']) => void
   onPrepare: (choice: SongPreparationChoice) => void
   onProgress: () => void
-  onDiagnostics: () => void
   onSoundSettings: () => void
+  onSettings: () => void
 }): React.JSX.Element {
   const layout = useMobileLayout()
   const snapshot = summarizeTrainingProgress(progress)
@@ -1076,13 +1087,15 @@ function TrainingHome({ progress, onProgramLesson, song, effectiveKey, onChoose,
           <View style={styles.wrap}>{(['notes', 'intervals', 'chords', 'mixed'] as const).map((choice) => <Chip key={choice} label={songPreparationChoiceLabel(choice)} onPress={() => onPrepare(choice)} />)}</View>
         </GlassSurface>
       )}
-      <TrainingDashboard store={persistence} onLesson={onProgramLesson} onProgress={onProgress} onChoose={onChoose} headerAction={<TrainingLogButton />} />
+      <TrainingDashboard store={persistence} onLesson={onProgramLesson} onProgress={onProgress} onChoose={onChoose} headerActions={<>
+        <HeaderIconButton label={t('phone.library.openSettings')} onPress={onSettings}><Icon name="settings" size={20} color={C.amber} /></HeaderIconButton>
+        <TrainingLogButton />
+      </>} />
       <ListEntry
         title={t('phone.training.progressEntryTitle')}
         detail={snapshot.sessions ? tn('phone.training.progressSummary', snapshot.sessions, { landed }) : t('phone.training.progressEmpty')}
         onPress={onProgress}
       />
-      <ListEntry title={t('phone.app.diagnostics.title')} detail={t('phone.app.diagnostics.detail')} onPress={onDiagnostics} />
     </ScrollView>
   )
 }

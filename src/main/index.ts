@@ -28,10 +28,11 @@ import {
   renameProject,
   saveProject,
   saveProjectWaveforms,
+  saveProjectSongVolume,
   setProjectsRoot,
   writeProjectGraph
 } from './projects'
-import { gdriveConfigured, gdriveSignedIn, gdriveSignIn, gdriveSignOut, gdriveSync } from './gdrive'
+import { gdriveConfigured, gdriveSignedIn, gdriveSignIn, gdriveSignOut, gdriveSync, gdriveCancelSync } from './gdrive'
 import { readSettings, writeSettings } from './settings'
 import { registerLocale } from './locale'
 import { registerWhatsNew } from './whats-new'
@@ -432,6 +433,12 @@ function registerIpc(): void {
     }
   )
 
+  ipcMain.handle('project:song-volume', async (_e, raw: string, gain: number) => {
+    const full = resolve(String(raw))
+    if (!isAllowed(full)) return { ok: false, error: t('main.error.fileNotRegistered') }
+    return saveProjectSongVolume(full, gain)
+  })
+
   ipcMain.handle('project:save', async (_e, raw: string, name: string, settings: ProjectSettings) => {
     const full = resolve(String(raw))
     if (!isAllowed(full)) return { ok: false, error: t('main.error.fileNotRegistered') }
@@ -506,6 +513,7 @@ function registerIpc(): void {
     return { ok: true }
   })
   ipcMain.handle('gdrive:sync', () => scheduler.syncNow())
+  ipcMain.handle('gdrive:cancel-sync', () => gdriveCancelSync())
 
   ipcMain.handle('projects:list', () => listProjects())
 

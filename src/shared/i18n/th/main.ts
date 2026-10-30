@@ -3,6 +3,13 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
+  "main.sync.downloadDeferred": "ไม่ได้เพิ่ม {dir}: {reason} เพลงยังอยู่ใน Drive แก้ปัญหาแล้วซิงค์อีกครั้ง",
+  "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
+  "main.sync.downloadBytes": "{got} / {total} · {speed}/วินาที",
+  "main.sync.downloadRetry": "ลองใหม่ · ครั้งที่ {attempt}/3",
+  "main.sync.downloadVerify": "กำลังตรวจสอบ…",
+  "main.sync.downloadCheck": "กำลังตรวจสอบไฟล์ที่บันทึก…",
+
   "main.error.fileNotRegistered": "รายงานไม่ได้ลงทะเบียน",
   "main.error.folderNotRegistered": "หัวหน้าไม่ได้ลงทะเบียน",
   "main.error.playbackInvalidConfig": "การเล่นในพื้นที่ต้องมีรายการโครงการและเส้นทางที่จํากัด",

@@ -22,7 +22,7 @@ export const player: Translation<typeof en> = {
   'player.transport.resetSpeed': '重置速度',
   'player.transport.muted': '声音已静音——点击打开音量滑块',
   // {percent} is a number already rounded, e.g. "Volume 80% — click for the slider"
-  'player.transport.volumeAt': '音量 {percent}%——点击打开滑块',
+  'player.transport.volumeAt': '音量 {db}——点击打开滑块',
   'player.transport.metronomeTitle': '节拍器——随节拍敲击、查看节拍网格、播放前预备拍',
   'player.transport.carryLine': '接唱',
   'player.transport.carryLineTitle': '接唱——引导音轨按计划间歇消音，由你接唱',
@@ -36,11 +36,17 @@ export const player: Translation<typeof en> = {
   'player.bpm.setTitle': '以每分钟节拍数设置播放速度',
 
   // ── volume popover ──
-  'player.volume.title': '音量',
+  'player.volume.title': '歌曲输出',
+  'player.volume.saved': '随歌曲保存',
+  'player.volume.perSong': '单曲',
+  'player.volume.reset': '重置',
+  'player.volume.peak': '峰值电平',
   'player.volume.muteAll': '全部静音',
   'player.volume.unmute': '恢复到之前的音量',
   'player.volume.sliderTitle': '整体混音的播放音量——节拍器音量也随之变化',
-  'player.volume.caption': '这只设置应用自身的输出——你的分轨音量和系统音量不受影响。',
+  'player.volume.caption': '随歌曲保存。最多增益 +12 dB；峰值表显示削波时请降低音量。',
+  'player.volume.clipped': '削波',
+  'player.volume.peakTitle': '安全限幅前的输出峰值（dBFS）。点击重置削波提示。',
 
   // ── metronome popover ──
   'player.metronome.title': '节拍器',

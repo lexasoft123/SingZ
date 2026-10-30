@@ -1,3 +1,6 @@
+import { useQuickStart } from './QuickStart'
+import { AudioDiagnosticsScreen } from './AudioDiagnosticsScreen'
+import { nativePlayback } from '../playback/native'
 import { createNativeStackNavigator } from '@react-navigation/native-stack'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Alert, AppState, StyleSheet, View } from 'react-native'
@@ -30,6 +33,7 @@ type RootStackParamList = {
   AddSong: undefined
   Log: undefined
   Settings: undefined
+  Diagnostics: undefined
   WhatsNew: undefined
 }
 
@@ -223,6 +227,8 @@ export default function RootNavigator({
       RELEASE_VERSION, previous ?? undefined, getLocale(), Platform.OS === 'ios' ? 'ios' : 'android'
     )) }).catch(error => { log('whats-new', String(error), 'error'); setNewsReady(false) })
   }, [])
+  const guide = useQuickStart()
+  const pendingGuide = useRef(false)
   const [project, setProject] = useState<LoadedProject | null>(null)
   const [addSong, setAddSong] = useState<AddSongRequest | null>(null)
   const mounted = useRef(true)
@@ -279,6 +285,15 @@ export default function RootNavigator({
           contentStyle: styles.root
         }}
         screenListeners={{
+          transitionEnd: event => {
+            // The retained screen's appearance proves the Settings controller
+            // has finished dismissing. A removed route can lose its closing
+            // event listener before onDisappear is delivered.
+            if (!event.data.closing && pendingGuide.current) {
+              pendingGuide.current = false
+              guide.start(project ? 'player' : 'catalog')
+            }
+          },
           // Dev-only: the stack's route names with a timestamp on every
           // state change, so a driver can see a pop that came back (the
           // double swipe-back of 2026-09-06 was invisible to `__test.screen`,
@@ -299,6 +314,7 @@ export default function RootNavigator({
               active={active}
               engine={engine}
               sampleRate={engine.sampleRate}
+              onQuickStart={() => guide.start('catalog')}
               onOpenSettings={() => navigation.navigate('Settings')}
               onOpenLog={() => navigation.navigate('Log')}
               onOpenAddSong={request => {
@@ -379,7 +395,17 @@ export default function RootNavigator({
             contentStyle: styles.root
           }}
         >
-          {({ navigation }) => <SettingsScreen onClose={() => navigation.goBack()} onWhatsNew={() => navigation.navigate("WhatsNew")} />}
+          {({ navigation }) => <SettingsScreen onQuickStart={() => { pendingGuide.current = true; navigation.goBack() }} onClose={() => navigation.goBack()} onWhatsNew={() => navigation.navigate("WhatsNew")} onDiagnostics={() => {
+            void (async () => {
+              if (!await nativePlayback.stopForOwnership('audio diagnostics requested audio ownership')) return
+              engine.pause()
+              engine.cancelTrainingCues()
+              navigation.navigate('Diagnostics')
+            })().catch(error => log('audio-debug', String(error), 'error'))
+          }} />}
+        </Stack.Screen>
+        <Stack.Screen name="Diagnostics" options={{ presentation: 'fullScreenModal', contentStyle: styles.root }}>
+          {({ navigation }) => <AudioDiagnosticsScreen engine={engine} active={active} onBack={() => navigation.goBack()} />}
         </Stack.Screen>
         <Stack.Screen name="WhatsNew" options={{ presentation: 'fullScreenModal', contentStyle: styles.root }}>
           {({ navigation }) => <WhatsNewScreen

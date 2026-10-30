@@ -567,6 +567,12 @@ void SingzNativePlaybackSession(RCTPromiseResolveBlock resolve,
   });
 }
 
+NSDictionary *SingzNativePlaybackOutputMeter(void) {
+  const auto meter = owner().session->outputMeter();
+  return @{ @"available": @(meter.available), @"generation": @(meter.generation),
+            @"peak": @(meter.peak), @"clippedBlocks": @(meter.clippedBlocks) };
+}
+
 NSDictionary *SingzNativePlaybackPositionNow(void) {
   // No queue hop and no boundary wrapper: positionNow() is noexcept and
   // lock-free by contract, and this runs on the JS thread at UI rate. The
@@ -1246,6 +1252,9 @@ void SingzScheduleTrainingPcm(NSString* payload, NSNumber* rate, NSNumber* gener
         resolve(@{@"ok": @NO, @"message": error.localizedDescription ?: @"Audio session unavailable"}); return;
       }
       auto& service = singz::sharedAudioService();
+      // Activation/capture may change channel count without changing the port
+      // UID. Read the negotiated route now rather than wait for its notification.
+      service.refreshInventory();
       service.setTrainingRenderer([](void* context, const singz::AudioHostRenderBlock& block) noexcept {
         return static_cast<singz::TrainingPcmMixer*>(context)->render(block);
       }, &bridge.training);

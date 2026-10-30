@@ -3,6 +3,11 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
+  "library.dropScreen.syncProgress": "Menyinkronkan dengan Google Drive… {msg}",
+  "library.dropScreen.cancelSync": "Batal",
+  "library.dropScreen.syncPaused": "Sinkronisasi dijeda. File yang selesai tetap disimpan. Pilih Sinkronkan sekarang untuk melanjutkan.",
+  "library.dropScreen.retryScheduled": "Akan mencoba lagi otomatis · {error}",
+
   "library.common.close": "Tutup",
   "library.common.browseFiles": "Menelusuri file...",
   "library.common.yourProjects": "Proyek Anda",

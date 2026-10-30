@@ -1,1 +1,1 @@
-Windows microphones can start again, including USB audio interfaces such as MiniFuse. Saved microphone and input-channel selections are preserved. If capture fails, the app log now includes the underlying error to help diagnose the connection.
+Save a volume level for each song, with up to +12 dB boost and a clipping meter. Review training settings before starting, and return to training when you finish. Your Drive library refreshes quietly. Nine new interface languages and fixes for clipped controls.

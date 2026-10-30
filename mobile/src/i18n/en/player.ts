@@ -1,5 +1,18 @@
 /* English phone strings for the `phone.player` namespace — see ../index.ts. */
 export const player = {
+  'phone.player.output.title': "Song output",
+  'phone.player.output.subtitle': "A level just for this song",
+  'phone.player.output.reset': "Reset",
+  'phone.player.output.peak': "Peak level",
+  'phone.player.output.clip': "Clip",
+  'phone.player.output.hint': "Boost up to +12 dB. If Clip lights up, lower the gain.",
+  'phone.player.output.clippedHint': "Clipping detected. Lower the gain, then tap Clip to reset.",
+  'phone.player.output.saved': "Saved with this song",
+  'phone.player.output.saving': "Saving…",
+  'phone.player.output.saveFailed': "Song output was not saved",
+  'phone.player.output.resetClip': "Reset clipping warning",
+  'phone.player.output.mute': "Mute or unmute song",
+
   // ── "not available in native playback yet" alert ──
   'phone.player.unsupported.title': 'Not available in native playback yet',
   'phone.player.unsupported.message': '{operation} stays disabled until its native DSP control is connected.',

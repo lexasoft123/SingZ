@@ -3,6 +3,13 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
+  "main.sync.downloadDeferred": "Chưa thêm {dir}: {reason}. Bài hát vẫn trên Drive; hãy khắc phục rồi đồng bộ lại.",
+  "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
+  "main.sync.downloadBytes": "{got} / {total} · {speed}/giây",
+  "main.sync.downloadRetry": "Thử lại · lần {attempt}/3",
+  "main.sync.downloadVerify": "Đang xác minh…",
+  "main.sync.downloadCheck": "Đang kiểm tra tệp đã lưu…",
+
   "main.error.fileNotRegistered": "Tài liệu không được đăng ký.",
   "main.error.folderNotRegistered": "Dữ liệu không được đăng ký.",
   "main.error.playbackInvalidConfig": "Động tác phát bản địa đòi hỏi một danh sách dự án và đường đua bị giới hạn.",

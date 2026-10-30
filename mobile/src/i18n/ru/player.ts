@@ -3,6 +3,19 @@ import type { player as en } from '../en/player'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const player: Translation<typeof en> = {
+  'phone.player.output.title': "Звук песни",
+  'phone.player.output.subtitle': "Отдельный уровень для этой песни",
+  'phone.player.output.reset': "Сброс",
+  'phone.player.output.peak': "Пиковый уровень",
+  'phone.player.output.clip': "Перегрузка",
+  'phone.player.output.hint': "Усиление до +12 dB. При перегрузке уменьшите усиление.",
+  'phone.player.output.clippedHint': "Обнаружена перегрузка. Уменьшите усиление и нажмите «Перегрузка» для сброса.",
+  'phone.player.output.saved': "Сохранено для этой песни",
+  'phone.player.output.saving': "Сохранение…",
+  'phone.player.output.saveFailed': "Уровень песни не сохранён",
+  'phone.player.output.resetClip': "Сбросить индикатор перегрузки",
+  'phone.player.output.mute': "Выключить или включить звук песни",
+
   // ── "not available in native playback yet" alert ──
   'phone.player.unsupported.title': 'Пока нет в нативном режиме',
   'phone.player.unsupported.message': '«{operation}» недоступно, пока не подключено нативное DSP-управление.',

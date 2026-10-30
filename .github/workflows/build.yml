@@ -2,6 +2,19 @@ name: Build & Release
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional existing stable tag to build and publish; blank preserves normal ref behavior'
+        type: string
+        default: ''
+      reuse_lyrics_from:
+        description: 'Optional published stable tag with identical pinned Mac lyrics-engine inputs'
+        type: string
+        default: ''
+      mac_only:
+        description: 'Build only macOS'
+        type: boolean
+        default: false
   push:
     tags: ['v*']
   # Keeps main's engine caches warm. Actions caches cannot be shared between
@@ -12,9 +25,9 @@ on:
   # on a real release: "Cache not found for input keys: engines-out-Windows-…"
   # for a key that existed in the repo, on another tag.
   #
-  # Nothing is published from here — "Attach to GitHub Release" is gated on a
-  # tag ref. The weekly full build doubles as a smoke test that the desktop
-  # packaging still works between releases.
+  # Scheduled branch builds publish nothing. Manual recovery can explicitly
+  # select an existing tag; checkout, version and notes checks bind publication
+  # to that tag's source. The weekly build keeps packaging exercised too.
   schedule:
     - cron: '47 5 * * 1'
 
@@ -26,14 +39,39 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-latest
-            args: --mac --arm64 --x64
-          - os: windows-latest
-            args: --win
+        include: ${{ fromJSON(inputs.mac_only && '[{"os":"macos-latest","args":"--mac --arm64 --x64"}]' || '[{"os":"macos-latest","args":"--mac --arm64 --x64"},{"os":"windows-latest","args":"--win"}]') }}
     runs-on: ${{ matrix.os }}
     steps:
+      - name: Validate recovery inputs
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_TAG: ${{ inputs.reuse_lyrics_from }}
+        run: |
+          for tag in "$RELEASE_TAG" "$SOURCE_TAG"; do
+            if [ -n "$tag" ] && ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Recovery inputs must name stable release tags"
+              exit 1
+            fi
+          done
+          if [ -n "$SOURCE_TAG" ] && [ -z "$RELEASE_TAG" ]; then
+            echo "::error::Engine reuse requires an explicit release_tag"
+            exit 1
+          fi
+
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Verify explicit release source
+        if: inputs.release_tag != ''
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          test "v$(node -p 'require("./package.json").version')" = "$RELEASE_TAG"
+          test -f "docs/release-notes/$RELEASE_TAG.md"
 
       - uses: actions/setup-node@v4
         with:
@@ -99,6 +137,60 @@ jobs:
           path: .engines-src
           key: engines-src-${{ runner.os }}-v4
           restore-keys: engines-src-${{ runner.os }}-
+
+      # These upstream engines do not depend on zcore/zdsp. Native analysis
+      # changes must not spend three hours recompiling unchanged pinned code.
+      - name: Cache pinned lyrics engines
+        uses: actions/cache@v4
+        with:
+          path: |
+            vendor/darwin-arm64/llama-server
+            vendor/darwin-arm64/crispasr
+            vendor/darwin-x64/llama-server
+            vendor/darwin-x64/crispasr
+            vendor/win32-x64/llama-server.exe
+            vendor/win32-x64/crispasr.exe
+          key: lyrics-engines-${{ runner.os }}-${{ hashFiles('scripts/vendor-llama.sh', 'scripts/vendor-crispasr.sh', 'scripts/assert-portable-binary.sh') }}
+
+      - name: Reuse verified published Mac lyrics engines
+        if: runner.os == 'macOS' && inputs.reuse_lyrics_from != ''
+        shell: bash
+        env:
+          SOURCE_TAG: ${{ inputs.reuse_lyrics_from }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git fetch --depth 1 origin "refs/tags/$SOURCE_TAG:refs/tags/$SOURCE_TAG"
+          git diff --exit-code "$SOURCE_TAG" HEAD -- scripts/vendor-llama.sh scripts/vendor-crispasr.sh scripts/assert-portable-binary.sh
+          source_dir="$RUNNER_TEMP/published-lyrics"
+          mkdir -p "$source_dir"
+          gh release view "$SOURCE_TAG" --json isDraft,isPrerelease --jq '(.isDraft == false) and (.isPrerelease == false)' | grep -x true
+          gh release download "$SOURCE_TAG" --pattern "SingZ-${SOURCE_TAG#v}-mac-*.dmg" --dir "$source_dir" --skip-existing
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$SOURCE_TAG" > "$source_dir/release.json"
+          for arch in arm64 x64; do
+            image="$source_dir/SingZ-${SOURCE_TAG#v}-mac-$arch.dmg"
+            IMAGE="$image" SOURCE_DIR="$source_dir" node <<'JS'
+          const fs = require('fs'), path = require('path'), crypto = require('crypto')
+          const image = process.env.IMAGE
+          const asset = JSON.parse(fs.readFileSync(path.join(process.env.SOURCE_DIR, 'release.json'))).assets.find(a => a.name === path.basename(image))
+          const bytes = fs.readFileSync(image)
+          const digest = 'sha256:' + crypto.createHash('sha256').update(bytes).digest('hex')
+          if (!asset || bytes.length !== asset.size || digest !== asset.digest) throw new Error('Published engine image checksum mismatch')
+          JS
+            mount="$source_dir/mount-$arch"
+            mkdir -p "$mount"
+            trap 'hdiutil detach "$mount" >/dev/null 2>&1 || true' EXIT
+            hdiutil attach "$image" -readonly -nobrowse -mountpoint "$mount"
+            codesign --verify --deep --strict "$mount/SingZ.app"
+            codesign -dv "$mount/SingZ.app" 2>&1 | grep -x 'TeamIdentifier=USJ7H3X44X'
+            mkdir -p "vendor/darwin-$arch"
+            for engine in llama-server crispasr; do
+              cp "$mount/SingZ.app/Contents/Resources/engines/$engine" "vendor/darwin-$arch/$engine"
+              bash scripts/assert-portable-binary.sh "darwin-$arch" "vendor/darwin-$arch/$engine"
+            done
+            hdiutil detach "$mount"
+            trap - EXIT
+          done
 
       - name: Build engines and splitter packs (macOS)
         if: runner.os == 'macOS'
@@ -318,12 +410,13 @@ jobs:
       # gh handles the create/update race between matrix jobs gracefully
       # (softprops/action-gh-release once lost the macOS assets to it).
       - name: Attach to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="${RELEASE_TAG:-${GITHUB_REF#refs/tags/}}"
           # docs/release-notes/<tag>.md (committed before tagging; first line
           # is the release title) makes the release public with real notes
           # from the first attach — no file falls back to the bare create

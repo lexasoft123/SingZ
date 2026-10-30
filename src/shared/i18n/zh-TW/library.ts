@@ -3,6 +3,11 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
+  "library.dropScreen.syncProgress": "正在與 Google Drive 同步… {msg}",
+  "library.dropScreen.cancelSync": "取消",
+  "library.dropScreen.syncPaused": "同步已暫停。已完成的檔案會保留。點選立即同步以繼續。",
+  "library.dropScreen.retryScheduled": "將自動重試 · {error}",
+
   "library.common.close": "關閉",
   "library.common.browseFiles": "瀏覽檔案…",
   "library.common.yourProjects": "你的專案",

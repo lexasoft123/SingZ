@@ -1,3 +1,5 @@
+import { QUICK_START_SEEN, quickStartTitle } from '../../shared/quick-start/meta'
+import { sanitizeSongVolume } from './audio/song-volume'
 import type { TrainingSound } from '../../shared/training-sound'
 import {
   Suspense,
@@ -651,6 +653,8 @@ function EngineChip({
   )
 }
 
+const QuickStart = lazy(() => import('./components/QuickStart'))
+
 export default function App(): React.JSX.Element {
   // Re-render on a language switch; every child App renders follows. Nothing
   // remounts, so a song keeps playing through it.
@@ -731,6 +735,15 @@ export default function App(): React.JSX.Element {
   /** Catalog page shown over a loaded song — the song stays live underneath. */
   const [showCatalog, setShowCatalog] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [startupDialogsReady, setStartupDialogsReady] = useState(false)
+  const [quickStart, setQuickStart] = useState<'welcome' | 'tour' | null>(() => {
+    try { return localStorage.getItem(QUICK_START_SEEN) === 'seen' ? null : 'welcome' }
+    catch { return 'welcome' }
+  })
+  const closeQuickStart = (): void => {
+    setQuickStart(null)
+    try { localStorage.setItem(QUICK_START_SEEN, 'seen') } catch { /* Session dismissal still works. */ }
+  }
   const [audioPrefs, setAudioPrefs] = useState<AudioPrefs>(() => {
     // The native toggle is stored explicitly from here on: the effect below
     // writes it back as '1'/'0', so a first run with no stored choice must
@@ -1114,7 +1127,7 @@ export default function App(): React.JSX.Element {
     localStorage.setItem('singz.met', JSON.stringify(metCfg))
   }, [metCfg])
 
-  // Device picks and the output level follow the machine, not the song.
+  // Device picks follow the machine; output gain belongs to the open song.
   useEffect(() => {
     localStorage.setItem('singz.audio', JSON.stringify(audioPrefs))
     localStorage.setItem('singz.desktop.native-playback', audioPrefs.nativePlayback ? '1' : '0')
@@ -1126,7 +1139,8 @@ export default function App(): React.JSX.Element {
     engine.setNativeAudioProvider(audioPrefs.nativeAudioProvider ?? 'wasapi')
   }, [audioPrefs.nativeAudioProvider, engine])
 
-  const masterVol = audioPrefs.master ?? 1
+  const [masterVol, setMasterVol] = useState(1)
+  const masterVolRef = useRef({ gain: 1 })
   useEffect(() => {
     engine.setMasterVolume(masterVol)
   }, [engine, masterVol])
@@ -1143,8 +1157,21 @@ export default function App(): React.JSX.Element {
   )
 
   const changeMasterVol = useCallback((v: number) => {
-    setAudioPrefs((p) => ({ ...p, master: Math.max(0, Math.min(1, v)) }))
-  }, [])
+    const gain = sanitizeSongVolume(v)
+    masterVolRef.current.gain = gain
+    setMasterVol(gain)
+    if (song && isProject) {
+      const seq = loadSeq.current
+      void window.singz.saveProjectSongVolume(song.path, gain).then(result => {
+        if (seq === loadSeq.current && !result.ok) setError(result.error)
+      }).catch(error => {
+        if (seq === loadSeq.current) setError(error instanceof Error ? error.message : String(error))
+      })
+    } else {
+      setDirty(true)
+      setSaveState((s) => (s === 'saved' ? 'idle' : s))
+    }
+  }, [song, isProject])
 
   // Boot repair, device churn and direct Settings picks share one serialized,
   // versioned intent owner. A devicechange raised during setSinkId therefore
@@ -1469,7 +1496,7 @@ export default function App(): React.JSX.Element {
       })
       void window.singz.dismissQwenOffer()
     }).finally(() => {
-      void window.singz.whatsNew().then(result => { if (result.ok && result.notes) setWhatsNew(result.notes) })
+      void window.singz.whatsNew().then(result => { if (result.ok && result.notes) setWhatsNew(result.notes) }).finally(() => setStartupDialogsReady(true))
     })
   }, [])
 
@@ -1668,6 +1695,10 @@ export default function App(): React.JSX.Element {
       setSong(createLoadedSongIdentity(reg.path,reg.name,`song-load-${seq}`))
       setIsProject(Boolean(reg.project))
       setLeadVocalSeparated(reg.project?.settings.leadVocalSeparated === true)
+      const savedVolume = sanitizeSongVolume(reg.project?.settings.masterVolume)
+      masterVolRef.current = { gain: savedVolume }
+      setMasterVol(savedVolume)
+      engine.setMasterVolume(savedVolume)
       setInLibrary(reg.project?.inLibrary ?? true)
       setProjectDir(reg.project?.dir ?? null)
       setEditName(null)
@@ -3068,12 +3099,14 @@ export default function App(): React.JSX.Element {
     // at another, and the next save or rename acts on the wrong folder: that
     // is how a rename typed for one song moved a different song's folder.
     const seq = loadSeq.current
+    const gainState = masterVolRef.current
     setSaveState('saving')
     const settings = {
       pendingLeadVocal: pendingLeadVocal ?? undefined,
       leadVocalSeparated: leadVocalSeparated || undefined,
       transpose,
       tempo: tempoRate,
+      masterVolume: masterVol,
       view: view ?? undefined,
       selection: selection ?? undefined,
       loop: loopOn || undefined,
@@ -3096,6 +3129,24 @@ export default function App(): React.JSX.Element {
     // Another song took the stage while this one was being written. The save
     // itself stands (main finished it, and the log says so) — it is only this
     // screen's state that must not learn about a project it is no longer on.
+    if (res.ok) {
+      // Capture this song's holder: gain edits during a long first save must
+      // reach its project even if another song is opened before it finishes.
+      let savedGain = settings.masterVolume
+      while (savedGain !== gainState.gain) {
+        const latestGain = gainState.gain
+        const gainResult = await window.singz.saveProjectSongVolume(res.songPath, latestGain)
+        if (!gainResult.ok) {
+          if (seq === loadSeq.current) {
+            setDirty(true)
+            setSaveState('idle')
+            setError(gainResult.error)
+          }
+          return
+        }
+        savedGain = latestGain
+      }
+    }
     if (seq !== loadSeq.current) return
     if (res.ok) {
       setPendingLeadVocal(null)
@@ -3143,7 +3194,7 @@ export default function App(): React.JSX.Element {
       setSaveState('idle')
       setError(t('app.project.saveFailed', { error: res.error }))
     }
-  }, [song, saveState, transpose, tempoRate, view, selection, loopOn, training, trainCfg, beatInfo, melodyInfo, keyInfo, metCfg, tracks, reanchorCustom, pendingLeadVocal, leadVocalSeparated])
+  }, [song, saveState, transpose, tempoRate, masterVol, view, selection, loopOn, training, trainCfg, beatInfo, melodyInfo, keyInfo, metCfg, tracks, reanchorCustom, pendingLeadVocal, leadVocalSeparated])
 
   /** A silently tracked pitch line or (re)detected grid saves itself — but
    *  only into an existing project (never creating one under a raw file), and
@@ -3815,6 +3866,7 @@ export default function App(): React.JSX.Element {
           <button
             type="button"
             className={appSection === 'training' ? 'active' : ''}
+            data-guide="training"
             aria-current={appSection === 'training' ? 'page' : undefined}
             onClick={() => switchSection('training')}
           >
@@ -3965,8 +4017,10 @@ export default function App(): React.JSX.Element {
           {/* The flag alone, beside the gear: the one control someone who
               cannot read the window needs to find, on every screen. */}
           <Language compact />
+          <button type="button" className="pill ghost small" data-guide="help" title={quickStartTitle(getLocale())} aria-label={quickStartTitle(getLocale())} onClick={() => setQuickStart('tour')}>?</button>
           <button
             type="button"
+            data-guide="settings"
             className="pill ghost small gear"
             title={t('app.titlebar.settings')}
             aria-label={t('app.titlebar.settings')}
@@ -4137,6 +4191,7 @@ export default function App(): React.JSX.Element {
             onToggleLoop={toggleLoop}
             hasSelection={selection !== null}
             selection={selection}
+            meterKey={song?.path}
             volume={masterVol}
             onVolume={changeMasterVol}
             training={training}
@@ -4247,8 +4302,12 @@ export default function App(): React.JSX.Element {
         </Suspense>
       )}
 
+      {quickStart && startupDialogsReady && !wizard && !whatsNew && !showSetup && !showLog && !showProjects && !showSettings && !showImport && !editingLyrics && (
+        <Suspense fallback={null}><QuickStart welcome={quickStart === 'welcome'} onClose={closeQuickStart} /></Suspense>
+      )}
       {showSettings && (
         <SettingsModal
+          onQuickStart={() => { setShowSettings(false); setQuickStart('tour') }}
           audio={audioPrefs}
           onChangeOutput={changeOutput}
           onChangeInput={changeInput}

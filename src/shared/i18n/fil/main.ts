@@ -3,6 +3,13 @@ import type { main as en } from '../en/main'
 import type { Translation } from '../types'
 
 export const main: Translation<typeof en> = {
+  "main.sync.downloadDeferred": "Hindi naidagdag ang {dir}: {reason}. Nasa Drive pa rin ito; ayusin ang problema at mag-sync muli.",
+  "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
+  "main.sync.downloadBytes": "{got} / {total} · {speed}/s",
+  "main.sync.downloadRetry": "Sinusubukan muli · {attempt}/3",
+  "main.sync.downloadVerify": "Bineberipika…",
+  "main.sync.downloadCheck": "Sinusuri ang naka-save na file…",
+
   "main.error.fileNotRegistered": "Hindi nakarehistro ang file.",
   "main.error.folderNotRegistered": "Hindi nakarehistro ang folder.",
   "main.error.playbackInvalidConfig": "Ang native playback ay nangangailangan ng isang limitadong listahan ng proyekto at lane.",

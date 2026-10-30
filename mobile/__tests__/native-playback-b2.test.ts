@@ -4846,6 +4846,52 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
     return { ...base, session: { ...base.session, transportState: 'paused' } };
   };
 
+  it.each(['playing', 'pre-roll'] as const)(
+    'reconciles a refused Resume when the exact native generation is already %s',
+    async transportState => {
+      const h = harness();
+      const handle = await started(h);
+      const generation = handle.snapshot().generation;
+      await handle.pause();
+      h.native.transport.mockResolvedValueOnce({
+        ...result(generation, 'running', false),
+        error: 'invalid-state', message: 'Native playback is not paused',
+      });
+      const base = capability(generation, 'running');
+      h.native.session.mockResolvedValueOnce({ ...base.session, transportState });
+
+      await expect(handle.start()).resolves.toEqual({ kind: 'started' });
+      expect(handle.snapshot().phase).toBe('playing');
+      expect(h.native.start).toHaveBeenCalledTimes(1);
+      expect(h.native.unload).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['paused', 'terminal', 'stale', 'unavailable', 'read-failed', 'host-failure'])(
+    'does not hide a refused Resume with %s native state',
+    async reason => {
+      const h = harness();
+      const handle = await started(h);
+      const generation = handle.snapshot().generation;
+      await handle.pause();
+      h.native.transport.mockResolvedValueOnce({
+        ...result(generation, 'running', false),
+        error: reason === 'host-failure' ? 'host-failure' : 'invalid-state',
+        message: 'resume refused',
+      });
+      const base = capability(generation, 'running');
+      if (reason === 'read-failed') h.native.session.mockRejectedValueOnce(new Error('offline bridge'));
+      else h.native.session.mockResolvedValueOnce({
+        ...base.session,
+        ...(reason === 'paused' ? { transportState: 'paused' as const } : {}),
+        ...(reason === 'terminal' ? { state: 'terminal', terminalReason: 'device-lost' } : {}),
+        ...(reason === 'stale' ? { generation: generation + 1 } : {}),
+        ...(reason === 'unavailable' ? { transportTelemetryQuality: 'unavailable' as const } : {}),
+      });
+      await expect(handle.start()).resolves.toEqual({ kind: 'failed', error: 'resume refused' });
+    },
+  );
+
   it('a song paused before the background is held too, and coming back releases it', async () => {
     const h = harness({ platform: 'android' });
     const handle = await started(h);

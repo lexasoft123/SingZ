@@ -1,5 +1,11 @@
-# iPad store screenshot
+# iPad store screenshots
 
-`01-training.png` is a real capture of SingZ 0.26.2 on an isolated 13-inch iPad simulator, rebuilt after the iPhone Duo scene and layout changes. It is a 2064×2752 RGB PNG without alpha. Training was muted; the screenshot shows the app’s own training dashboard and no third-party lyrics.
+`01-player.png` and `02-training.png` are real captures of SingZ 0.26.5 on an isolated 13-inch iPad simulator. Both are 2064×2752 RGB PNGs without alpha. The player comes first and shows highlighted lyrics from the app’s own bundled sample. Training was muted.
 
-Prepared for the iPad listing required by the universal iOS device family. This file is not evidence of an App Store upload or approval. Existing iPhone screenshots remain separate.
+Uploaded to the English primary listing for 0.26.5 using `APP_IPAD_PRO_3GEN_129`, the API display type for the required 13-inch iPad set. Existing iPhone screenshots remain separate.
+
+To replace only this device set across listing locales:
+
+```bash
+scripts/with-apple-secrets.sh ruby scripts/push-ios-screenshots.rb docs/ios-assets/ipad APP_IPAD_PRO_3GEN_129
+```

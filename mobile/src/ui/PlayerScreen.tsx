@@ -1,3 +1,8 @@
+import { quickStartTitle } from '../../../src/shared/quick-start/meta'
+import { GuideTarget, useGuideAnchor, useQuickStart } from './QuickStart'
+import { SongOutputMonitor, SongOutputMeterButton, SongOutputControls } from './SongOutput'
+import { mobileSongVolumePersistence } from '../playback/song-volume-persistence'
+import { sanitizeSongVolume } from '../../../src/shared/song-volume'
 import { useMobileLayout } from './uiKit'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { laneSliverLevels, LANE_LEVEL_CHUNK, LANE_LEVEL_SLIVERS, LANE_LEVEL_WINDOW } from '../playback/lane-levels'
@@ -330,6 +335,37 @@ export default function PlayerScreen({
     },
     [onFallback]
   )
+  const outputMonitor = useMemo(() => new SongOutputMonitor(engine), [engine])
+  useEffect(() => { outputMonitor.setActive(active) }, [active, outputMonitor])
+  const [songGain, setSongGain] = useState(() => sanitizeSongVolume(project.doc.settings?.masterVolume))
+  const [volumeSaveState, setVolumeSaveState] = useState<'saved' | 'saving' | 'failed'>('saved')
+  const gainSequence = useRef(0)
+  const volumeMounted = useRef(true)
+  useEffect(() => { volumeMounted.current = true; return () => { volumeMounted.current = false } }, [engine])
+  const volumeRef = project.metronomeRef ?? { source: 'readonly' as const, dir: project.dir ?? 'bundled-sample' }
+  const changeSongGain = useCallback((value: number, commit = false): void => {
+    const next = sanitizeSongVolume(value)
+    const sequence = ++gainSequence.current
+    setSongGain(next)
+    setVolumeSaveState('saving')
+    void engine.setMasterGain(next).then(async () => {
+      if (sequence !== gainSequence.current || !commit) return
+      if (Math.abs(engine.masterGain - next) > 0.000001) throw new Error(engine.error ?? t('phone.player.output.saveFailed'))
+      await mobileSongVolumePersistence.save(volumeRef, next)
+      if (volumeMounted.current && sequence === gainSequence.current) {
+        project.doc.settings.masterVolume = next
+        setVolumeSaveState('saved')
+      }
+    }).catch(error => {
+      log('volume', error instanceof Error ? error.message : String(error), 'error')
+      if (volumeMounted.current && sequence === gainSequence.current) {
+        setSongGain(engine.masterGain)
+        setVolumeSaveState('failed')
+        Alert.alert(t('phone.player.output.saveFailed'), error instanceof Error ? error.message : String(error))
+      }
+    })
+  }, [engine, project, volumeRef.source, volumeRef.dir, volumeRef.root])
+
   const [allTracks, setTracks] = useState<TrackState[]>([])
   /** The fader being dragged right now, for the value bubble — set on every
    *  move, cleared on commit (Bar fires commit on release AND on the
@@ -340,6 +376,9 @@ export default function PlayerScreen({
   const [pos, setPos] = useState(0)
   const [training, setTraining] = useState(false)
   const [trainCfg, setTrainCfg] = useState<TrainingConfig>(TRAIN_DEFAULTS)
+  const guide = useQuickStart()
+  const lyricsGuideRef = useGuideAnchor('player-lyrics')
+  const loopGuideRef = useGuideAnchor('player-loop')
   const [sheet, setSheetState] = useState<'none' | 'mixer' | 'practice' | 'song'>('none')
   const sheetRef = useRef(sheet)
   sheetRef.current = sheet
@@ -1580,6 +1619,10 @@ export default function PlayerScreen({
     TEST.trainingOn = training
     TEST.setTrainMode = (mode: 'time' | 'lines') => setTrainCfg((c) => ({ ...c, mode }))
     TEST.showTrainPanel = () => setSheet('practice')
+    TEST.openOutput = () => setSheet('mixer')
+    TEST.songOutput = () => ({ gain: songGain, saveState: volumeSaveState, reading: outputMonitor.snapshot() })
+    TEST.setSongGain = (gain: number) => changeSongGain(gain, true)
+    TEST.resetOutputClip = () => outputMonitor.reset()
     TEST.openMixer = () => setSheet('mixer')
     TEST.openPractice = () => setSheet('practice')
     TEST.closeSheets = () => setSheet('none')
@@ -1832,6 +1875,8 @@ export default function PlayerScreen({
           <View style={{ height: column.height + lyricBottom }}>
             {column.boxes.map((b, i) => (
               <Pressable
+                ref={i === Math.max(0, currentLine) ? lyricsGuideRef : undefined}
+                collapsable={false}
                 key={i}
                 onPress={() =>
                   engine.capabilities.seek
@@ -1947,7 +1992,8 @@ export default function PlayerScreen({
         {/* Song sheet. Three dots rather than a gear: a gear glyph has no
             guaranteed text presentation on Android and renders as a colour
             emoji next to a monochrome header. */}
-        <Pressable
+        <Pressable accessibilityRole="button" accessibilityLabel={quickStartTitle(getLocale())} onPress={() => guide.start('player')} hitSlop={8} style={s.songBtn}><Text style={s.songBtnText}>?</Text></Pressable>
+        <GuideTarget id="player-about"><Pressable
           onPress={() => setSheet('song')}
           hitSlop={12}
           style={s.songBtn}
@@ -1955,7 +2001,7 @@ export default function PlayerScreen({
           accessibilityLabel={t('phone.player.header.about')}
         >
           <Text style={s.songBtnText}>•••</Text>
-        </Pressable>
+        </Pressable></GuideTarget>
       </View>
 
       {/* footer: the transport rides ONE floating dark glass dock — the
@@ -2109,11 +2155,14 @@ export default function PlayerScreen({
             </View>
           )}
         </View>
-        {/* Times and the loop button on their own row beneath the band —
-            elapsed left, loop centre, total right. */}
+        {/* Keep A–B centred; the output meter uses the spare space before total time. */}
         <View style={s.timeRow}>
-          <Text style={s.tm}>{fmtTime(dragPos !== null ? dragPos * engine.duration : pos)}</Text>
+          <View style={s.timeSide}>
+            <Text style={s.tm}>{fmtTime(dragPos !== null ? dragPos * engine.duration : pos)}</Text>
+          </View>
           <Pressable
+            ref={loopGuideRef}
+            collapsable={false}
             onPress={cycleLoop}
             hitSlop={8}
             style={[s.loopBtn, loopA !== null && s.loopBtnOn]}
@@ -2132,17 +2181,20 @@ export default function PlayerScreen({
                 : t('phone.player.loop.buttonAB')}
             </Text>
           </Pressable>
-          <Text style={[s.tm, { textAlign: 'right' }]}>{fmtTime(engine.duration)}</Text>
+          <View style={s.timeSide}>
+            <SongOutputMeterButton monitor={outputMonitor} gain={songGain} onPress={() => setSheet('mixer')} />
+            <Text style={[s.tm, { textAlign: 'right' }]}>{fmtTime(engine.duration)}</Text>
+          </View>
         </View>
         <View style={s.btnRow}>
-          <RoundBtn
+          <GuideTarget id="player-mixer"><RoundBtn
             onPress={() =>
               engine.capabilities.mixer ? setSheet('mixer') : unsupported('mixer')
             }
             label={t('phone.player.transport.mixer')}
           >
             <MixGlyph />
-          </RoundBtn>
+          </RoundBtn></GuideTarget>
           <RoundBtn
             onPress={() =>
               engine.capabilities.seek ? engine.seek(0) : unsupported('seek')
@@ -2177,9 +2229,9 @@ export default function PlayerScreen({
           >
             <Text style={s.skipText}>{t('phone.player.transport.skipForwardLabel')}</Text>
           </RoundBtn>
-          <RoundBtn onPress={() => setSheet('practice')} label={t('phone.player.transport.practice')}>
+          <GuideTarget id="player-practice"><RoundBtn onPress={() => setSheet('practice')} label={t('phone.player.transport.practice')}>
             <MicGlyph />
-          </RoundBtn>
+          </RoundBtn></GuideTarget>
         </View>
       </View>
 
@@ -2206,6 +2258,8 @@ export default function PlayerScreen({
               contentInsetAdjustmentBehavior="never"
               showsVerticalScrollIndicator={false}
             >
+            <SongOutputControls monitor={outputMonitor} gain={songGain}
+              onGain={gain => changeSongGain(gain)} onCommit={gain => changeSongGain(gain, true)} saveState={volumeSaveState} />
             {/* One tap for the thing the app exists to do. Only offered when
                 the song has a vocal lane — an unsplit song has nothing to
                 mute. */}
@@ -3107,6 +3161,7 @@ const s = StyleSheet.create({
     paddingTop: 8,
     paddingBottom: 10
   },
+  timeSide: { flex: 1, flexDirection: 'row', alignItems: 'center', minWidth: 0 },
   tm: { color: white(0.5), fontSize: 11.5, fontVariant: ['tabular-nums'], width: 36 },
   loopBtn: {
     width: 40,

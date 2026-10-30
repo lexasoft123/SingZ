@@ -1,0 +1,21 @@
+Kendi müziğinizle karaoke yapın. SingZ; eşzamanlı şarkı sözlerini, ayrı enstrüman kanallarını ve rehberli ses alıştırmalarını bir araya getirir. Ana vokali kapatın, tonu sesinize göre değiştirin ve canlı perde göstergesiyle çalışın.
+
+KENDİ ŞARKILARINIZI EKLEYİN
+Telefonunuzdaki bir ses dosyasını seçin: kendi kaydınız veya satın aldığınız bir şarkı olabilir. SingZ, şarkıyı cihaz üzerinde vokal, davul, bas, gitar, piyano ve diğer enstrümanlar olmak üzere altı kanala ayırır. Şarkınız bir sunucuya yüklenmez. İlk kullanımda yaklaşık 136 MB'lık bir model indirilir; ayırma işlemi yeterli bellek ve işlem gücü gerektirir.
+
+Şarkıları Mac ve Windows için ücretsiz, açık kaynaklı SingZ uygulamasında da hazırlayabilirsiniz. Ardından kendi Google Drive hesabınızdan veya kopyaladığınız bir klasörden açın. Hemen denemeniz için uygulamada bir örnek şarkı bulunur. SingZ bir müzik kataloğu veya mağaza sunmaz; zaten sahip olduğunuz kayıtlarla çalışır.
+
+KENDİ TARZINIZDA SÖYLEYİN
+• Her kanalın ses düzeyini ayrı ayarlayın, sesi kapatın veya yalnızca o kanalı dinleyin.
+• Çalarken kelime kelime vurgulanan sözleri izleyin. İstediğiniz yere atlamak için bir satıra dokunun.
+• Tonu ve çalma hızını birbirinden bağımsız değiştirin.
+• Zorlandığınız bölümleri giriş sayımıyla tekrar edin.
+• Ekranı kilitlediğinizde de müzik çalmaya devam eder.
+
+KULAĞINIZI VE SESİNİZİ GELİŞTİRİN
+Başlangıç, gelişim veya ileri düzey programlardan birini seçin; tek notalar, aralıklar, akor sesleri, diziler ve arpejlerle çalışın. Önce notayı dinleyin, sonra söyleyin. Canlı perde göstergesi, sesinizin doğruluğunu ve notayı ne kadar süre koruduğunuzu gösterir. Alıştırma geçmişinizi tarihe göre inceleyin. Piyano, elektrikli piyano, naylon telli gitar veya org sesi seçin; ses ve düzey ayarlarınız alıştırmalar arasında korunur.
+
+Şarkı çalışması sırasında seçtiğiniz kanallar belirlediğiniz zamanlarda veya söz satırlarında devre dışı kalabilir. Böylece yardımcı vokale güvenmeden kendi partinizi sürdürmeyi öğrenirsiniz.
+
+SÖZLERİ DÜZELTİN, ÇEVRİMDIŞI ÇALIŞIN
+Sözleri ve zamanlamayı masaüstü uygulamasında düzeltin; sonraki eşitlemede telefona da gelsin. Açtığınız şarkılar telefonda saklanır ve çevrimdışı çalınabilir. Google Drive ile oturum açmak isteğe bağlıdır; SingZ hesabı gerekmez. Reklam, kullanım analizi veya takip yoktur. Alıştırmanızı kaydetmek de isteğe bağlıdır.

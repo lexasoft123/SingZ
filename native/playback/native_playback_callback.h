@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include <zdsp/audio_host_graph_adapter.h>
+#include <zdsp/builtin_nodes.h>
 #include <zcore/device/audio_host_render.h>
 
 namespace singz {
@@ -20,6 +21,11 @@ enum class NativePlaybackCallbackTerminalReason : uint32_t {
 // callback admission and drained the provider callback.
 struct NativePlaybackCallbackState {
   zdsp::AudioHostGraphAdapter* adapter{nullptr};
+  zdsp::ProcessorHandle outputLimiter{};
+  float outputCeiling{1.0F};
+  float heldOutputPeak{0.0F}; // render-thread only
+  std::atomic<float> outputPeak{0.0F};
+  std::atomic<uint32_t> outputClippedBlocks{0};
   AudioHostTerminalCauseLatch firstTerminalCause{};
   std::atomic<uint32_t> terminalFailures{0};
 };
@@ -56,6 +62,7 @@ struct NativePlaybackRenderRouter {
   std::atomic<uint32_t> swapsLanded{0};
 };
 
+static_assert(std::atomic<float>::is_always_lock_free);
 static_assert(std::atomic<NativePlaybackCallbackState*>::is_always_lock_free);
 static_assert(
     std::atomic<const NativePlaybackSwapRequest*>::is_always_lock_free);

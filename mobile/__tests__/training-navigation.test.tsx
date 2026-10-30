@@ -1,3 +1,4 @@
+import SettingsScreen from '../src/ui/SettingsScreen'
 import React from 'react'
 import ReactTestRenderer, { act } from 'react-test-renderer'
 import { View } from 'react-native'
@@ -175,15 +176,17 @@ test('Progress, sound settings, and nested diagnostics Back remain in Training',
     expect(routes().training).toEqual(['Home', 'SoundSettings'])
     await act(() => button(tree, 'Back').props.onPress())
     expect(routes().training).toEqual(['Home'])
-    await act(() => home(tree).props.onDiagnostics())
-    expect(routes().training).toEqual(['Home', 'Diagnostics'])
+    await act(() => button(tree, 'Open Settings').props.onPress())
+    await act(() => button(tree, 'Audio diagnostics').props.onPress())
+    expect(routes().training).toEqual(['Home', 'Settings', 'Diagnostics'])
     const diagnostics = tree.root.findAll(node => typeof node.props.onSoundLab === 'function')[0]
     await act(() => diagnostics.props.onSoundLab())
-    expect(routes().training).toEqual(['Home', 'Diagnostics', 'SoundLab'])
+    expect(routes().training).toEqual(['Home', 'Settings', 'Diagnostics', 'SoundLab'])
     const lab = tree.root.findAll(node => node.props.engine && typeof node.props.onBack === 'function' && !node.props.onSoundLab)[0]
     await act(() => lab.props.onBack())
-    expect(routes().training).toEqual(['Home', 'Diagnostics'])
+    expect(routes().training).toEqual(['Home', 'Settings', 'Diagnostics'])
     await act(() => tree.root.findAll(node => typeof node.props.onSoundLab === 'function')[0].props.onBack())
+    await act(() => tree.root.findByType(SettingsScreen).props.onClose())
     expect(routes()).toEqual({ tab: 'training', training: ['Home'], songs: ['Player'] })
   } finally { await act(() => tree.unmount()) }
 })
@@ -274,5 +277,25 @@ test('training log icon returns to the same paused exercise', async () => {
     const exercise = tree.root.findByType(TrainingSessionView)
     expect(exercise.props.state.session.id).toBe(priorSession)
     expect(exercise.props.paused).toBe(true)
+  } finally { await act(() => tree.unmount()) }
+})
+
+
+test('header Settings reuses the catalog screen and closes back to Training', async () => {
+  const { tree, routes } = await mount()
+  try {
+    await act(() => button(tree, 'Open Settings').props.onPress())
+    expect(routes().training).toEqual(['Home', 'Settings'])
+    expect(tree.root.findByType(SettingsScreen)).toBeTruthy()
+    await act(() => tree.root.findByType(SettingsScreen).props.onWhatsNew())
+    expect(routes().training).toEqual(['Home', 'Settings', 'WhatsNew'])
+    await act(() => (TEST!.newsClose as () => void)())
+    expect(routes().training).toEqual(['Home', 'Settings'])
+    await act(() => button(tree, 'Audio diagnostics').props.onPress())
+    expect(routes().training).toEqual(['Home', 'Settings', 'Diagnostics'])
+    await act(() => tree.root.findAll(node => typeof node.props.onSoundLab === 'function')[0].props.onBack())
+    expect(routes().training).toEqual(['Home', 'Settings'])
+    await act(() => tree.root.findByType(SettingsScreen).props.onClose())
+    expect(routes()).toEqual({ tab: 'training', training: ['Home'], songs: ['Player'] })
   } finally { await act(() => tree.unmount()) }
 })

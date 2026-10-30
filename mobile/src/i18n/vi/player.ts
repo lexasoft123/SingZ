@@ -3,6 +3,19 @@ import type { player as en } from '../en/player'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const player: Translation<typeof en> = {
+  'phone.player.output.title': "Đầu ra bài hát",
+  'phone.player.output.subtitle': "Mức âm lượng riêng cho bài này",
+  'phone.player.output.reset': "Đặt lại",
+  'phone.player.output.peak': "Mức đỉnh",
+  'phone.player.output.clip': "Clipping",
+  'phone.player.output.hint': "Tăng tối đa +12 dB. Khi báo clipping sáng, hãy giảm gain.",
+  'phone.player.output.clippedHint': "Đã phát hiện clipping. Giảm gain rồi chạm Clipping để đặt lại.",
+  'phone.player.output.saved': "Đã lưu cho bài hát này",
+  'phone.player.output.saving': "Đang lưu…",
+  'phone.player.output.saveFailed': "Chưa lưu được đầu ra bài hát",
+  'phone.player.output.resetClip': "Đặt lại cảnh báo clipping",
+  'phone.player.output.mute': "Tắt hoặc bật tiếng bài hát",
+
   "phone.player.unsupported.title": "Không có sẵn trong phát bản địa",
   "phone.player.unsupported.message": "{operation} vẫn bị vô hiệu hóa cho đến khi điều khiển DSP gốc của nó được kết nối.",
   "phone.player.playbackStopped.title": "Động thanh dừng",

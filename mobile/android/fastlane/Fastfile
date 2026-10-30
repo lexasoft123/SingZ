@@ -138,22 +138,35 @@ end
 # scripts/make-play-assets.sh). supply wants its own tree, so build that tree
 # at run time rather than committing the same PNGs twice.
 private_lane :stage_images do
-  images = File.join(LOCALE_DIR, "images")
-  shots  = File.join(images, "phoneScreenshots")
-  FileUtils.rm_rf(images)
-  FileUtils.mkdir_p(shots)
-
-  FileUtils.cp(File.join(ASSETS_DIR, "icon-512.png"), File.join(images, "icon.png"))
-  FileUtils.cp(File.join(ASSETS_DIR, "feature-1024x500.png"),
-               File.join(images, "featureGraphic.png"))
-
-  found = Dir[File.join(ASSETS_DIR, "screenshot-*.png")].sort
-  UI.user_error!("No screenshots in #{ASSETS_DIR}") if found.empty?
-  UI.important("Play wants at least 2 phone screenshots, found #{found.size}") if found.size < 2
-  found.each_with_index do |src, i|
-    FileUtils.cp(src, File.join(shots, format("%02d_en-US.png", i + 1)))
+  localized_root = File.join(ASSETS_DIR, "localized")
+  locale_dirs = if Dir.exist?(localized_root)
+                  Dir[File.join(__dir__, "metadata/android/*")].select do |dir|
+                    File.exist?(File.join(dir, "title.txt"))
+                  end.sort
+                else
+                  [LOCALE_DIR]
+                end
+  # Validate every set before replacing any staged images. A missing locale
+  # must not silently inherit English or leave a partially staged upload.
+  sets = locale_dirs.to_h do |dir|
+    locale = File.basename(dir)
+    source = Dir.exist?(localized_root) ? File.join(localized_root, locale, "*.png") : File.join(ASSETS_DIR, "screenshot-*.png")
+    files = Dir[source].sort
+    UI.user_error!("Play requires 2–8 screenshots for #{locale}; found #{files.size}") unless (2..8).cover?(files.size)
+    [dir, files]
   end
-  UI.message("Staged #{found.size} screenshots + icon + feature graphic")
+  sets.each do |dir, files|
+    images = File.join(dir, "images")
+    shots = File.join(images, "phoneScreenshots")
+    FileUtils.rm_rf(images)
+    FileUtils.mkdir_p(shots)
+    FileUtils.cp(File.join(ASSETS_DIR, "icon-512.png"), File.join(images, "icon.png"))
+    FileUtils.cp(File.join(ASSETS_DIR, "feature-1024x500.png"), File.join(images, "featureGraphic.png"))
+    files.each_with_index do |src, i|
+      FileUtils.cp(src, File.join(shots, format("%02d_%s.png", i + 1, File.basename(dir))))
+    end
+    UI.message("Staged #{files.size} screenshots for #{File.basename(dir)} + icon + feature graphic")
+  end
 end
 
 # supply keys changelogs by versionCode. Reuse the release note that the repo

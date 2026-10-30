@@ -196,6 +196,8 @@ export interface KeyInfo {
 }
 
 export interface ProjectSettings {
+  /** Per-song output gain, linear; 1 = 0 dB. */
+  masterVolume?: number
   transpose: number
   /** Playback speed (1 = original); optional for projects saved before it existed. */
   tempo?: number
@@ -1143,6 +1145,9 @@ export interface DesktopPlaybackStatus {
   swapLateLandings: number
   swapPrimeNs: string
   swapLandingFrames: string
+  /** Pre-limiter peak with a short release; overload count is generation-local. */
+  outputPeak?: number
+  outputClippedBlocks?: number
   masterGain: number
   referenceGain: number
   trainingEnabled: boolean
@@ -1543,6 +1548,8 @@ export interface SingzApi {
     | { ok: false; error: string }
   >
   /** Read graph.json only when its project.json reference matches exactly. */
+  /** Automatically persist song gain and schedule library sync. */
+  saveProjectSongVolume(songPath: string, gain: number): Promise<{ ok: true } | { ok: false; error: string }>
   /** Store the seek bar's envelope per lane in project.json, so a phone that
    *  opens this song draws its bar without decoding every stem to measure it.
    *  Best-effort: a failure costs the phone one background pass. */
@@ -1597,12 +1604,14 @@ export interface SingzApi {
   }>
   gdriveSignIn(): Promise<{ ok: true } | { ok: false; error: string }>
   gdriveSignOut(): Promise<{ ok: boolean }>
+  gdriveCancelSync(): Promise<{ ok: boolean }>
   gdriveSync(): Promise<{
     ok: boolean
     uploaded: number
     unchanged: number
     projects: number
     error?: string
+    cancelled?: boolean
   }>
   onGdriveProgress(cb: (p: { msg: string; frac: number }) => void): () => void
   /** Pushed whenever the sync's state changes — the UI stops inferring it

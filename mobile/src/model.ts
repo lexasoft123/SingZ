@@ -113,6 +113,8 @@ export interface CustomTrack {
 }
 
 export interface ProjectSettings {
+  /** Per-song output gain (1 = 0 dB), shared with desktop. */
+  masterVolume?: number
   transpose: number
   tempo?: number
   view?: { s: number; e: number }

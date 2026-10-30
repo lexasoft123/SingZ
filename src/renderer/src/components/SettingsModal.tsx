@@ -1,3 +1,5 @@
+import { quickStartCopy } from '../../../shared/quick-start'
+import { getLocale } from '../i18n'
 import React, {
   useCallback,
   useEffect,
@@ -41,6 +43,7 @@ import DspGraphVisualization from './DspGraphVisualization'
 import { t } from '../i18n'
 
 export interface SettingsModalProps {
+  onQuickStart?: () => void
   audio: AudioPrefs
   onChangeOutput: (id: string | undefined) => Promise<void>
   onChangeInput: (nativeUid: string | undefined, chromiumId: string | undefined) => void
@@ -636,6 +639,7 @@ export function OutputRouteRecovery({
 }
 
 export default function SettingsModal({
+  onQuickStart,
   audio,
   onChangeOutput,
   onChangeInput,
@@ -1390,6 +1394,7 @@ export default function SettingsModal({
   return (
     <Modal onClose={closeSettings} cardClassName="settings-card">
       <h2>{t('settings.title')}</h2>
+      {onQuickStart && <button type="button" className="pill ghost" onClick={onQuickStart}>{quickStartCopy(getLocale()).title}</button>}
       <div className="settings-body">
         <nav className="settings-nav"><button type="button" className="settings-tab active">{t('settings.tab.audio')}</button></nav>
         <div className="settings-page">

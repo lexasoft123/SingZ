@@ -20,11 +20,13 @@ class SingzStretchNodeHostObject : public AudioNodeHostObject {
       : AudioNodeHostObject(context->createSingzStretch(options), options) {
     addFunctions(
         JSI_EXPORT_FUNCTION(SingzStretchNodeHostObject, setSemitones),
-        JSI_EXPORT_FUNCTION(SingzStretchNodeHostObject, getLatencySeconds));
+        JSI_EXPORT_FUNCTION(SingzStretchNodeHostObject, getLatencySeconds),
+        JSI_EXPORT_FUNCTION(SingzStretchNodeHostObject, getOutputMeter));
   }
 
   JSI_HOST_FUNCTION_DECL(setSemitones);
   JSI_HOST_FUNCTION_DECL(getLatencySeconds);
+  JSI_HOST_FUNCTION_DECL(getOutputMeter);
 };
 
 JSI_HOST_FUNCTION_IMPL(SingzStretchNodeHostObject, setSemitones) {
@@ -36,6 +38,14 @@ JSI_HOST_FUNCTION_IMPL(SingzStretchNodeHostObject, setSemitones) {
 JSI_HOST_FUNCTION_IMPL(SingzStretchNodeHostObject, getLatencySeconds) {
   auto node = std::static_pointer_cast<SingzStretchNode>(node_);
   return {static_cast<double>(node->getLatencySeconds())};
+}
+
+JSI_HOST_FUNCTION_IMPL(SingzStretchNodeHostObject, getOutputMeter) {
+  auto node = std::static_pointer_cast<SingzStretchNode>(node_);
+  jsi::Object result(runtime);
+  result.setProperty(runtime, "peak", static_cast<double>(node->outputPeak()));
+  result.setProperty(runtime, "clippedBlocks", static_cast<double>(node->clippedBlocks()));
+  return result;
 }
 
 } // namespace audioapi

@@ -1,1 +1,1 @@
-Micrô trên Windows hoạt động trở lại, kể cả giao diện âm thanh USB như MiniFuse. Giữ nguyên micrô và kênh đầu vào đã chọn. Nếu thu âm thất bại, nhật ký ứng dụng sẽ ghi rõ nguyên nhân.
+Lưu âm lượng riêng cho từng bài, tăng tối đa +12 dB và theo dõi cắt ngọn. Kiểm tra cài đặt trước khi luyện tập và trở về trang luyện tập khi kết thúc. Thư viện Drive làm mới mà không đổi màn hình. Thêm chín ngôn ngữ giao diện và sửa các nút bị cắt.

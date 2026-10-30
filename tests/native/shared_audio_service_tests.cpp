@@ -15,13 +15,14 @@ class TestBackend final : public AudioHostBackend {
   AudioHostStatus current;
   AudioHostConfig lastConfig;
   bool preferredPresent = true;
+  uint32_t selectedChannels = 2;
   std::string defaultUid = "selected";
   AudioHostInventory enumerate() const override {
     ++enumerations;
     AudioHostDeviceInfo device;
     device.uid = "selected"; device.defaultInput = true;
     device.defaultOutput = true; device.inputChannels = 1;
-    device.outputChannels = 2; device.nominalSampleRate = 48000;
+    device.outputChannels = selectedChannels; device.nominalSampleRate = 48000;
     AudioHostDeviceInfo alternate = device;
     alternate.uid = "alternate"; alternate.inputChannels = 0; alternate.defaultInput = false;
     alternate.nominalSampleRate = 44100;
@@ -34,8 +35,12 @@ class TestBackend final : public AudioHostBackend {
   AudioHostResult open(const AudioHostConfig& config, AudioHostRender render, void* object) override {
     CHECK(config.inputDeviceUid.empty()); CHECK(config.inputChannels.empty());
     ++opens; callback = render; context = object; lastConfig = config;
+    for (uint32_t channel : config.outputChannels)
+      if (config.outputDeviceUid == "selected" && channel >= selectedChannels)
+        return {false, AudioHostError::InvalidConfiguration, AudioHostState::Error,
+                {}, {}, "Output channel map exceeds active route"};
     current.state = AudioHostState::Open;
-    current.format = {config.requestedSampleRate ? config.requestedSampleRate : 48000, config.maximumFrames, 512, 0, 2};
+    current.format = {config.requestedSampleRate ? config.requestedSampleRate : 48000, config.maximumFrames, 512, 0, static_cast<uint32_t>(config.outputChannels.size())};
     return {true, AudioHostError::None, current.state, current.format, {}, {}};
   }
   AudioHostResult start() override {
@@ -136,6 +141,21 @@ int main() {
   CHECK(service.ensureOutput().ok);
   CHECK(backend->lastConfig.outputDeviceUid == "selected");
   client->stop();
+  // Starting capture can reduce a stereo car route to mono under the same UID.
+  service.parkOutput();
+  backend->selectedChannels = 1;
+  service.refreshInventory();
+  CHECK(service.ensureOutput().ok);
+  CHECK(backend->lastConfig.outputDeviceUid == "selected");
+  CHECK(backend->lastConfig.outputChannels == std::vector<uint32_t>{0});
+  CHECK(service.status().format.outputChannels == 1);
+  const auto monoOpens = backend->opens;
+  CHECK(service.ensureOutput().ok && backend->opens == monoOpens);
+  // A mono selection remains valid when the route becomes stereo again.
+  backend->selectedChannels = 2;
+  service.refreshInventory();
+  CHECK(service.ensureOutput().ok);
+  CHECK(backend->lastConfig.outputChannels == std::vector<uint32_t>{0});
   client.reset();
   service.shutdown();
 }

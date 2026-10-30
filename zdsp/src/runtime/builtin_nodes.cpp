@@ -362,6 +362,8 @@ void processTap(BuiltinState* state, const ConstAudioBusView* inputs,
 void processLimiter(BuiltinState* state, const ProcessContext* context,
                     const ConstAudioBusView* inputs,
                     const MutableAudioBusView& output) noexcept {
+  float peak = 0.0f;
+  double energy = 0.0;
   uint32_t eventIndex = 0;
   if (context->frames.value == 0)
     consumeAutomationAt(state, context, 0, kLimiterThresholdParameter,
@@ -372,12 +374,16 @@ void processLimiter(BuiltinState* state, const ProcessContext* context,
     const float threshold = state->currentValue;
     for (uint32_t channel = 0; channel < output.channelCount; ++channel) {
       float value = finiteSample(inputs[0].channels[channel][frame], state);
+      if (std::abs(value) > peak) peak = std::abs(value);
+      energy += static_cast<double>(value) * value;
       if (value > threshold) value = threshold;
       if (value < -threshold) value = -threshold;
       output.channels[channel][frame] = value;
     }
     advanceAutomation(state);
   }
+  const uint64_t count = static_cast<uint64_t>(output.frames.value) * output.channelCount;
+  publishMeter(state, peak, count == 0 ? 0.0f : static_cast<float>(std::sqrt(energy / count)), output.frames.value);
 }
 
 void process(void* opaque, const ProcessContext* context,

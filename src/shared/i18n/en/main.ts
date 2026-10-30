@@ -1,5 +1,12 @@
 /* English strings for the `main` namespace — see ../index.ts. */
 export const main = {
+  "main.sync.downloadDeferred": "{dir} was not added: {reason}. It remains on Drive; fix the problem and sync again.",
+  "main.sync.downloadingFile": "{dir} · {file} · {index}/{count}\n{detail}",
+  "main.sync.downloadBytes": "{got} / {total} · {speed}/s",
+  "main.sync.downloadRetry": "Retrying · attempt {attempt}/3",
+  "main.sync.downloadVerify": "Verifying…",
+  "main.sync.downloadCheck": "Checking saved file…",
+
   // ── errors ──
   'main.error.fileNotRegistered': 'File is not registered.',
   'main.error.folderNotRegistered': 'Folder is not registered.',
