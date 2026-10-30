@@ -4,7 +4,7 @@
 # desktop's way into the core (spawned by main like the lyrics engines) as the
 # cutover lands. Prints the binary's path on stdout and NOTHING ELSE — the
 # gates capture stdout as the path.
-#   scripts/build-analyze-host.sh [out-path]  default: $TMPDIR/singz-analyze-<checkout>
+#   scripts/build-analyze-host.sh [out-path]  default: build/native/analyze-host/singz-analyze
 #
 # A thin wrapper over the root CMakeLists.txt — the ONE definition
 # of the host build, shared with run-core-host-tests.sh, the vendor step and
@@ -20,25 +20,14 @@ if [ -z "${SINGZ_NATIVE_BUILD_LOCK_HELD:-}" ]; then
     --owner analyze-host -- bash "$ROOT/scripts/build-analyze-host.sh" "$@"
 fi
 node "$ROOT/scripts/assert-native-build-lock.cjs" 1>&2
-# Scratch paths are keyed on THIS CHECKOUT, not on $TMPDIR alone. Every
-# worktree on a machine shared one build dir and one output binary, which is
-# the same defect as the shared vendor/ slot: CMake catches its half loudly
-# ("does not match the source used to generate cache" — it blocked the gates
-# in a worktree the day this was written), and the shared OUTPUT binary
-# catches nothing at all, since two trees' gates would simply overwrite each
-# other's oracle. A basename is not unique (`/a/foo` and `/b/foo`), so use a
-# hash of the absolute checkout path on every supported dev shell.
-CHECKOUT_KEY=$(printf '%s' "$ROOT" | git -C "$ROOT" hash-object --stdin | cut -c1-12)
-OUT="${1:-${TMPDIR:-/tmp}/singz-analyze-$CHECKOUT_KEY}"
-BUILD="${SINGZ_CORE_BUILD_DIR:-${TMPDIR:-/tmp}/singz-zcore-analyze-host-$CHECKOUT_KEY}"
-
-# Compiler cache when the machine has one — same launchers, base_dir and
-# hash_dir story as vendor-llama.sh (a sibling worktree hits only with
-# BASEDIR + NOHASHDIR, because absolute paths and -g hash the CWD).
-if command -v ccache >/dev/null 2>&1; then
-  export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
-  export CCACHE_BASEDIR="$ROOT" CCACHE_NOHASHDIR=1 CCACHE_COMPILERCHECK=content
-fi
+# Keep both source and build paths under the same checkout so ccache can
+# normalize command lines to identical relative paths in sibling worktrees.
+BUILD="${SINGZ_CORE_BUILD_DIR:-$ROOT/build/native/analyze-host}"
+OUT="${1:-$BUILD/singz-analyze}"
+case "$BUILD" in
+  "$ROOT"/*) ;;
+  *) echo "Warning: external SINGZ_CORE_BUILD_DIR may prevent cross-worktree ccache hits: $BUILD" >&2 ;;
+esac
 
 # All cmake chatter to stderr; stdout stays the contract (the path). No
 # -DSINGZ_CORE_TESTS=OFF here: the option would persist in the cmake cache,
@@ -47,5 +36,5 @@ fi
 cmake -S "$ROOT" -B "$BUILD" 1>&2
 cmake --build "$BUILD" --target singz-analyze --parallel 4 1>&2
 
-cp "$BUILD/singz-analyze" "$OUT"
+[ "$BUILD/singz-analyze" = "$OUT" ] || cp "$BUILD/singz-analyze" "$OUT"
 echo "$OUT"

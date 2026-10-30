@@ -1,29 +1,18 @@
 #!/usr/bin/env node
 /**
- * Run an Android command with ccache's worktree-portable identity in its
- * environment. React Native installs the one compiler launcher in its CMake
- * application include; the app CMake file enriches that launcher with these
- * same settings for direct Gradle builds. Native concurrency is enforced for
- * every Android CMake project by android/build.gradle plus android-cmake-init.
+ * Run an Android command. Every native module gets worktree-portable compiler
+ * identity and PCH settings from android-cmake-init's shared compiler launcher,
+ * including builds launched directly by Gradle or Android Studio. Keep policy
+ * in that one launcher rather than duplicating it in this process environment.
  * Do not also set CMake's compiler launcher here: stacking the two makes
  * ccache wrap ccache and caches nothing. Without ccache the command runs
  * untouched.
  */
 const { spawnSync } = require('child_process')
-const path = require('path')
 
 const probe = spawnSync(process.platform === 'win32' ? 'where' : 'which', ['ccache'])
 const env = { ...process.env }
-if (probe.status === 0) {
-  // Cross-worktree hits: the NDK compiles with absolute paths and Debug adds
-  // -g (which hashes the CWD), so without these a sibling checkout shares the
-  // cache dir and hits nothing in it. base_dir is this checkout's own root —
-  // paths under it hash relative, so every worktree agrees. Env only: we set
-  // no ccache config file, the machine's own settings stay untouched.
-  env.CCACHE_BASEDIR = env.CCACHE_BASEDIR || path.resolve(__dirname, '..', '..')
-  env.CCACHE_NOHASHDIR = env.CCACHE_NOHASHDIR || '1'
-  env.CCACHE_COMPILERCHECK = env.CCACHE_COMPILERCHECK || 'content'
-} else {
+if (probe.status !== 0) {
   console.log('ccache not found — native builds run without a compiler cache')
 }
 

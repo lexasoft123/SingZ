@@ -149,7 +149,7 @@ describe('scripts/analyze-source-hash.sh', () => {
     writeFileSync(join(tools, 'singz-analyze.cpp'), '// stand-in\n')
     writeFileSync(join(cmake, 'SingZRealtimeTarget.cmake'), '# stand-in\n')
     writeFileSync(join(root, 'CMakeLists.txt'), '# stand-in\n')
-    for (const name of ['vendor-analyze.sh', 'analyze-source-hash.sh', 'engine-artifact.cjs'])
+    for (const name of ['vendor-analyze.sh', 'analyze-source-hash.sh', 'engine-artifact.cjs', 'ccache-launcher.sh', 'ccache-launcher.ps1'])
       copyFileSync(join(ROOT, 'scripts', name), join(root, 'scripts', name))
     return root
   }

@@ -916,21 +916,20 @@ private_lane :archive do |options|
     workspace: WORKSPACE, scheme: SCHEME, configuration: "Release",
     export_method: export_method, xcargs: signing_args.join(" "),
     archive_path: archive_path,
+    derived_data_path: File.join(REPO_ROOT, "build/native/ios-derived"),
     export_options: { signingStyle: "manual", provisioningProfiles: { BUNDLE_ID => profile_name } },
     output_directory: File.join(REPO_ROOT, "build-ios"), output_name: "SingZ.ipa"
   }
   reused = false
-  cached_archive = native_inputs && SingzIncrementalArchive.cached_archive(native_inputs)
-  if cached_archive && SingzIncrementalArchive.valid?(cached_archive, native_inputs)
+  if native_inputs
     begin
-      UI.message("Native inputs unchanged: rebundling JavaScript and exporting cached archive")
-      FileUtils.rm_rf(archive_path)
-      FileUtils.mkdir_p(File.dirname(archive_path))
-      FileUtils.cp_r(cached_archive, archive_path)
-      SingzIncrementalArchive.refresh(REPO_ROOT, archive_path, options[:build_number],
-        ENV["sigh_#{BUNDLE_ID}_#{type}_certificate-name"] || "Apple Distribution")
-      build_app(**build_options.merge(skip_build_archive: true))
-      reused = true
+      if SingzIncrementalArchive.copy_cached(native_inputs, archive_path)
+        UI.message("Native inputs unchanged: rebundling JavaScript and exporting cached archive")
+        SingzIncrementalArchive.refresh(REPO_ROOT, archive_path, options[:build_number],
+          ENV["sigh_#{BUNDLE_ID}_#{type}_certificate-name"] || "Apple Distribution")
+        build_app(**build_options.merge(skip_build_archive: true))
+        reused = true
+      end
     rescue => error
       UI.important("Cached export failed; rebuilding: #{error.message}")
       FileUtils.rm_f(SingzIncrementalArchive.receipt(archive_path))

@@ -211,33 +211,17 @@ if [ "$MODE" != "--desktop-only" ]; then
   # Download first, pod install second.
   AUDIO_API="$WT/mobile/node_modules/react-native-audio-api"
   EXTERNAL="$AUDIO_API/common/cpp/audioapi/external"
-  # Gate on ALL THREE, not just ffmpeg_ios. The downloader fetches
-  # ffmpeg_ios.zip, iphoneos.zip and iphonesimulator.zip in that order and
-  # `continue`s past a failed one, so a network drop mid-run leaves the first
-  # present and a later one absent. Gating on ffmpeg_ios alone then skips the
-  # whole block on the very re-run that is supposed to repair it — this
-  # script's own documented remedy — and setup ends "Worktree ready" with the
-  # archive still doomed. iphonesimulator is not optional either: the podspec
-  # resolves -force_load against $(PLATFORM_NAME), so without it every
-  # simulator build fails, which is all of mobile/tests/. Re-invoking costs
-  # nothing when the directories are there: the vendor loop is per-directory
-  # idempotent and skips what it already has.
+  # All three directories must exist before CocoaPods discovers frameworks.
+  # The shared restorer validates ZIPs and fails on incomplete downloads.
   if [ "$(uname)" = Darwin ] && [ -d "$AUDIO_API" ] && { [ ! -d "$EXTERNAL/ffmpeg_ios" ] || [ ! -d "$EXTERNAL/iphoneos" ] || [ ! -d "$EXTERNAL/iphonesimulator" ]; }; then
     echo "  restoring react-native-audio-api prebuilt binaries (npm ci removes them)"
-    (cd "$AUDIO_API" && ./scripts/download-prebuilt-binaries.sh ios)
-    # THE DOWNLOADER CANNOT FAIL, so its exit status proves nothing: on a bad
-    # curl it prints one line, `continue`s past that archive, and still ends
-    # on status 0 — it carries no `set -e`, so the `set -euo pipefail` up top
-    # never sees it either. Offline, rate-limited or missing unzip therefore
-    # walks straight into the pod install this ordering exists to protect,
-    # and that failure surfaces much later as undefined _av_* symbols in ld.
-    # Assert the outcome rather than the exit code.
+    node "$WT/scripts/restore-audio-api-prebuilts.cjs" ios
+    # Keep a concrete postcondition before pod integration too.
     for d in ffmpeg_ios iphoneos iphonesimulator; do
       [ -d "$EXTERNAL/$d" ] || {
         echo "FATAL: react-native-audio-api prebuilts are still missing ($d)." >&2
-        echo "       Its downloader reports success even when the fetch failed." >&2
-        echo "       Re-run with a working network:" >&2
-        echo "         (cd mobile/node_modules/react-native-audio-api && ./scripts/download-prebuilt-binaries.sh ios)" >&2
+        echo "       Re-run the verified cache restorer (network needed only on a cold cache):" >&2
+        echo "         node scripts/restore-audio-api-prebuilts.cjs ios" >&2
         exit 1
       }
     done

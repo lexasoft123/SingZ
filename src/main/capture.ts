@@ -175,7 +175,8 @@ export function captureSourceFingerprint(root: string, electronVersion: string):
   ]) {
     walk(join(root, dir))
   }
-  files.push(join(root, 'CMakeLists.txt'), join(root, 'scripts', 'build-capture-addon.cjs'))
+  files.push(join(root, 'CMakeLists.txt'), join(root, 'scripts', 'ccache-launcher.sh'),
+    join(root, 'scripts', 'ccache-launcher.ps1'), join(root, 'scripts', 'build-capture-addon.cjs'))
   files.sort()
   const hash = createHash('sha1')
   hash.update(`electron ${electronVersion}\n`)

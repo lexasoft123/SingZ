@@ -61,19 +61,13 @@ if analyzer_matches_sources; then
   exit 0
 fi
 
-# ccache when present — same launcher/base_dir/hash_dir story as
-# vendor-whisper.sh, so sibling worktrees hit.
-if command -v ccache >/dev/null 2>&1; then
-  export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
-  export CCACHE_BASEDIR="$ROOT" CCACHE_NOHASHDIR=1 CCACHE_COMPILERCHECK=content
-fi
-
-# Keyed on the CHECKOUT, not just the target: every worktree builds its own
-# singz-analyze now (scripts/worktree-setup.sh no longer shares ours), and one
-# shared build dir would have two roots fighting over a CMakeCache that names
-# a source directory.
-CHECKOUT_KEY=$(printf '%s' "$ROOT" | git -C "$ROOT" hash-object --stdin | cut -c1-12)
-BUILD="${TMPDIR:-/tmp}/singz-zcore-analyze-vendor-$TARGET-$CHECKOUT_KEY"
+# Default builds live beneath this checkout so source/include/build paths
+# normalize identically in every worktree; do not share CMake state itself.
+BUILD="${SINGZ_CORE_BUILD_DIR:-$ROOT/build/native/analyze-vendor-$TARGET}"
+case "$BUILD" in
+  "$ROOT"/*) ;;
+  *) echo "Warning: external SINGZ_CORE_BUILD_DIR may prevent cross-worktree ccache hits: $BUILD" >&2 ;;
+esac
 # The hash goes INTO the binary as well as beside it: `singz-analyze
 # build-info` then answers for itself, which a sidecar cannot do for an
 # $SINGZ_ANALYZE override or a hand-copied file. It lands in a generated TU

@@ -4,11 +4,11 @@
   "private": true,
   "scripts": {
     "android": "node scripts/run-with-ccache.js react-native run-android",
-    "ios": "react-native run-ios",
+    "ios": "react-native run-ios --buildFolder ../../build/native/ios-derived",
     "lint": "eslint .",
     "start": "react-native start",
     "test": "jest",
-    "postinstall": "node scripts/patch-audio-api.js && node scripts/select-ffmpeg-codec-runtime.mjs && node scripts/apply-gdrive-config.js && node scripts/build-analysis.mjs && node scripts/build-training.mjs && node scripts/sync-graph-document.js && node scripts/sync-singzcore.js && node scripts/sync-singz-dsp-runtime.js && node scripts/make-sample.js && node scripts/ccache-xcode-conf.js"
+    "postinstall": "node scripts/patch-audio-api.js && node scripts/patch-gradle-cache.cjs && node scripts/patch-ios-cache.cjs && node scripts/select-ffmpeg-codec-runtime.mjs && node scripts/apply-gdrive-config.js && node scripts/build-analysis.mjs && node scripts/build-training.mjs && node scripts/sync-graph-document.js && node scripts/sync-singzcore.js && node scripts/sync-singz-dsp-runtime.js && node scripts/make-sample.js && node scripts/ccache-xcode-conf.js"
   },
   "dependencies": {
     "@react-native/new-app-screen": "0.86.2",

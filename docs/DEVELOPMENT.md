@@ -124,60 +124,117 @@ Electron's `node.lib` still names `node.exe`, so the CMake target must retain it
 delay-load hook and `/DELAYLOAD:node.exe`; a hard `node.exe` PE dependency loads
 in Node but fails before module initialization in `electron.exe`.
 
-The zcore host scripts key their temporary CMake directories on a hash of the
-complete checkout path, not its basename; two unrelated `foo` checkouts cannot
-reuse one CMake cache.
+### Native compiler caches
 
-Local clang builds pick up **ccache** automatically when it is installed
-(`brew install ccache`): `vendor-llama.sh`, `vendor-crispasr.sh` and `npm run android` export
-CMake's compiler-launcher env (the mechanism the Android CI uses), and the
-iOS Podfile turns on React Native's `ccache_enabled` wrappers at pod install.
-No setup step — the settings ride with the build, never with the machine.
+`ccache` is optional and shared per user; build outputs remain worktree-local.
+The root CMake build, including direct presets, finds it automatically through
+`cmake/SingZCompilerCache.cmake`. An explicitly configured different launcher
+is preserved. Use `-DSINGZ_COMPILER_CACHE=OFF` to disable this integration.
 
-**Sharing the cache across worktrees takes more than one cache dir.** The dir
-already is shared (`cache_dir` is per-user, nothing to pass), but CMake and
-Xcode compile with absolute paths, and `-g` hashes the working directory too,
-so a second checkout hits *nothing* in it — measured 0% of a real CMake Debug
-build, and 5.6% overall on this machine before the fix. Two settings fix it,
-and both are needed for Debug builds (`base_dir` alone was still 0%):
+Host producers now keep CMake state under `build/native/analyze-host`,
+`build/native/host-tests`, and `build/native/analyze-vendor-<target>`. Matching
+relative source/build layouts are necessary for cross-worktree hits: an external
+`SINGZ_CORE_BUILD_DIR` is still supported but warns that reuse may be lost.
+Temporary build directories outside the checkout did not reliably share objects,
+even with `base_dir` and `hash_dir=false`. Fastlane and `npm run ios` likewise
+use local `build/native/ios-derived`, and iOS canary products/intermediates stay
+under the checkout. For direct Xcode GUI builds, select a DerivedData location
+inside this checkout to get the same path normalization; the GUI's global
+path-specific default can reduce cross-worktree compiler hits.
 
-| Setting | Why |
+The common `scripts/ccache-launcher.sh` / `.ps1` carry these settings with every
+host/Android compile rather than changing machine configuration:
+
+| Setting | Purpose |
 |---|---|
-| `base_dir` = this checkout's root | hashes paths under it relative, so worktrees agree |
-| `hash_dir = false` | drops the CWD from `-g` compilations |
-| `compiler_check = content` | survives an Xcode/CLT update re-stamping clang (unrelated to worktrees, cheap) |
+| `CCACHE_BASEDIR=<checkout root>` | Normalize absolute inputs under this checkout |
+| `CCACHE_NOHASHDIR=1` | Permit identical debug compilations in sibling checkouts |
+| `CCACHE_COMPILERCHECK=content` | Survive compiler re-extraction/restamping |
+| `CCACHE_SLOPPINESS=pch_defines,time_macros` plus caller options | Cache the PCH generators/consumers used by native dependencies |
 
-They are passed **per build, never written to the machine's ccache config**:
-`vendor-llama.sh` and `vendor-crispasr.sh` export them, Android's all-project CMake prelude installs
-one env-carrying compiler launcher (`run-with-ccache.js` also puts the settings
-in the child env), and `mobile/scripts/ccache-xcode-conf.js` appends them to
-react-native's
-`scripts/xcode/ccache.conf` at postinstall — that last one because RN's
-`ccache-clang.sh` sets `CCACHE_CONFIGPATH` to that file, which *replaces* the
-machine's config (so `ccache --set-config` never reaches a pod build), and a
-build started from Xcode.app inherits no shell env either. It lives in
-`node_modules`, so it is disposable and re-applied by every `npm ci`.
+PCH support also requires Clang's `-fno-pch-timestamp`; the React Native native
+dependencies already provide it. The PCH opt-in relaxes time-macro/define
+checking, so avoid build-time macros in cached native code. Reused debug objects
+can refer to the first checkout's source paths; disable reuse when debugging
+source-diverged trees. Compiler/ABI/SDK/flags/input differences still select
+different cache entries.
 
-The cost of `hash_dir = false`: a reused object carries the debug info of
-whichever worktree compiled it first, so lldb may open a sibling's copy of a
-source file — invisible while they agree, confusing when they differ. Drop
-`CCACHE_NOHASHDIR` (or the conf line) if you are stepping through native code
-in two diverged worktrees at once.
+Xcode's React Native wrappers read their own `ccache.conf`. Mobile postinstall
+adds the same root/hash/compiler settings while preserving RN's PCH/module
+options. Explicit `CCACHE_DIR` and `CCACHE_MAXSIZE` are baked into that generated
+configuration so GUI builds use the requested store/cap too. Missing expected
+RN configuration or malformed overrides fail rather than silently disabling reuse.
+Ccache covers Clang compilation, not Swift or linking. Current prebuilt React
+Native disables Swift explicit modules, so we do not force the incompatible
+Swift compilation-cache mode; Xcode incremental state remains local and whole
+native-archive reuse covers unchanged Swift builds.
 
-Running `mobile/android/gradlew` directly instead of `npm run android` is also
-cached: `mobile/scripts/android-cmake-init.cmake` is injected into the app and
-every native React Native dependency and applies the same checkout root,
-`hash_dir = false` and compiler-content identity without changing machine
-configuration. `org.gradle.workers.max=1` serializes AGP worker actions so
-native dependency modules cannot overlap. The one active Ninja graph gives
-compile and link edges one shared eight-process ceiling: four edges when
-ccache is present on POSIX because both ccache and the compiler match
-`ps ... | grep clang`, two on Windows where the PowerShell launcher remains
-resident too, otherwise eight. The POSIX launcher `exec`s ccache so it adds no
-third process line. ABIs and dependency modules therefore cannot multiply into
-dozens of simultaneous clang lines. We still run only one native build at a
-time across worktrees because separate Gradle processes cannot share a
-project-level worker limit.
+### Android task, configuration, and bundle caches
+
+`org.gradle.caching=true` enables shared eligible task outputs under Gradle User
+Home, in addition to existing dependency/transformation caches.
+`org.gradle.configuration-cache=true` enables checkout-local graph reuse with
+strict incompatibility checking. Postinstall's `patch-gradle-cache.cjs` replaces
+the pinned Skia/audio-api configuration-time external commands with tracked
+`providers.exec` calls; unknown upstream shapes fail before partial patching.
+The ORT SDK extraction task has explicit cacheable inputs/outputs and avoids
+execution-time Project capture. Repeat the same task graph to observe
+`Configuration cache entry reused`; removing only generated ORT output should
+restore `:app:extractOrtSdk FROM-CACHE`.
+
+Every Android CMake dependency uses one common env-carrying compiler launcher,
+including direct Gradle builds. One Gradle worker serializes native tasks, while
+Ninja's compile/link pool respects the existing process ceiling. Worktree-local
+`.gradle`, `.cxx`, Java/Kotlin incremental files and APK/AAB outputs are never
+shared by symlink. Both shipping ABIs retain distinct correct compiler objects.
+
+Android release bundling now uses `bundle-android-incremental.cjs`, which
+preserves Metro transforms instead of resetting them each time a bundle task
+runs. `SINGZ_METRO_RESET_CACHE=1` requests the original reset explicitly. Arguments,
+environment and failures still pass through to React Native's official CLI.
+iOS native-archive refresh likewise rebundles fresh JS/Hermes output without a
+forced Metro reset.
+
+### Dependency downloads and hosted caches
+
+`node scripts/restore-audio-api-prebuilts.cjs ios|android` caches upstream ZIPs
+across fresh worktrees and `npm ci`. The key binds URL/release tag, npm version,
+and upstream download-script content; receipts verify the ZIP checksum on reuse.
+Only complete, tested archives with safe paths/symlinks are installed, through
+local staging. Upstream `__MACOSX` metadata is discarded. Extracted libraries
+remain local, and an existing product-selected real directory is preserved.
+Bootstrap and mobile CI call the same helper before pod/native integration.
+Postinstall patches the pinned Android download task and iOS pod prepare command
+to call it too; direct Gradle/CocoaPods builds cannot bypass the shared store.
+Both patches reject unknown upstream shapes rather than silently falling back.
+Use `SINGZ_AUDIO_API_CACHE` to override its per-user download store.
+
+The shared `.github/actions/mobile-build-cache` action installs ccache and
+restores compiler objects, audio-library downloads, Android Gradle dependencies
+and task outputs, and iOS CocoaPods downloads. Release iOS jobs additionally
+persist validated native archives. Keys separate toolchain, dependency, and
+native-source/recipe generations, so changed inputs can save a new immutable
+Actions snapshot while restoring older compatible objects. Compiler objects
+are capped at 1200 MB in CI; release archive retention is two entries / 1 GiB /
+14 days. Full DerivedData and serialized configuration graphs stay job-local.
+
+Local native archives default to eight entries / 4 GiB / 30 days. Override with
+`SINGZ_IOS_NATIVE_CACHE_MAX_ENTRIES`, `SINGZ_IOS_NATIVE_CACHE_MAX_BYTES`, and
+`SINGZ_IOS_NATIVE_CACHE_MAX_AGE_DAYS`; comma-separated 64-hex fingerprints in
+`SINGZ_IOS_NATIVE_CACHE_PINNED` are protected. Pruning only recognizes owned
+fingerprint directories with matching receipts. Reader leases protect a cache
+hit while copying it locally; current/pinned/active entries can temporarily
+exceed the limits. Existing caches are pruned only after a successful publication.
+
+To test real cross-checkout compiler hits without touching shared cache counters:
+
+```bash
+SINGZ_TEST_COMPILER_CACHE=1 node scripts/with-native-build-lock.mjs --owner cache-probe -- node --test tests/tooling/compiler-cache.test.cjs
+```
+
+The probe builds tiny Debug and Release fixtures under an isolated cache, checks
+second-checkout hits, and verifies a source edit misses. CI runs it explicitly;
+ordinary tooling tests skip the native probes unless requested.
 
 ### Target-executed mobile codec proof
 
@@ -299,8 +356,8 @@ later run that selects nothing restores them and drops the receipt, so
 switching a machine between proven and base builds needs no network. A
 dependency that was replaced before that copy existed (a proof-staging install
 from before this rule) cannot be restored offline; the selector says so and
-points at `scripts/worktree-setup.sh`, which re-downloads the prebuilt
-binaries. The Gradle `-PsingzCodecTargetProof=true` harness and
+points at `scripts/worktree-setup.sh`, which restores verified prebuilts from
+the shared download cache (fetching only on a cold/corrupt entry). The Gradle `-PsingzCodecTargetProof=true` harness and
 `SINGZ_CODEC_TARGET_PROOF=1 pod install` are `required`-strict regardless of
 the variable: the proof has to execute the staged pack it is proving.
 

@@ -125,6 +125,11 @@ jobs:
       - name: ffmpeg for the sample-song generator
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
 
+      - name: Shared Android build caches
+        uses: ./.github/actions/mobile-build-cache
+        with:
+          platform: android
+
       - run: npm ci
         working-directory: mobile
 
@@ -134,12 +139,10 @@ jobs:
       # 4B) checks those pinned artifacts by checksum before it will build
       # anything. Without this the canary dies on "Missing pinned FFmpeg
       # artifact" three minutes in, having compiled nothing. The packaging
-      # path restores them the same way, from the package's own downloader;
-      # run from the package's `android/` because the script derives its
-      # destination as `$(pwd)/..` in that mode.
+      # path restores them through the same checksum-verified download cache;
+      # extracted libraries remain local to this dependency installation.
       - name: Restore react-native-audio-api prebuilt binaries
-        run: bash ../scripts/download-prebuilt-binaries.sh android
-        working-directory: mobile/node_modules/react-native-audio-api/android
+        run: node scripts/restore-audio-api-prebuilts.cjs android
 
       - name: Typecheck
         run: npx tsc --noEmit
@@ -158,7 +161,6 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
-          cache: gradle
 
       - name: Cache-currency conformance (Kotlin)
         run: ./gradlew :app:testDebugUnitTest
@@ -260,7 +262,6 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
-          cache: gradle
 
       - uses: actions/setup-node@v4
         with:
@@ -289,31 +290,16 @@ jobs:
           fi
 
       # make-sample.js (postinstall) encodes the synthesized sample via
-      # ffmpeg; ccache makes the NDK compile of the audio engine incremental
-      # across tag builds (the gradle cache only covers dependencies).
+      # ffmpeg; the common action restores compiler objects and downloads,
+      # while Gradle also caches eligible task outputs.
       - name: ffmpeg + ccache
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg ccache
 
-      # The key carries the run id because actions/cache is WRITE-ONCE per key:
-      # with a stable key the first save is frozen forever and later runs
-      # restore it but never save an improved one. That is not a theory — the
-      # first CI build of this job reported "Hits: 0 / 712 (0.00%)". A unique
-      # key per run plus a prefix restore means every run inherits the best
-      # previous cache and then saves a superset.
-      - name: ccache store
-        uses: actions/cache@v4
+      - name: Shared Android build caches
+        uses: ./.github/actions/mobile-build-cache
         with:
-          path: ~/.ccache
-          key: ccache-apk-${{ hashFiles('mobile/package-lock.json', 'mobile/scripts/patch-audio-api.js') }}-${{ github.run_id }}
-          # audio-api version or our C++ patches changing invalidates most
-          # objects anyway; the bare prefix keeps partial hits across bumps
-          restore-keys: |
-            ccache-apk-${{ hashFiles('mobile/package-lock.json', 'mobile/scripts/patch-audio-api.js') }}-
-            ccache-apk-
+          platform: android
 
-      # postinstall applies the audio-api C++ patches and fails loud on
-      # upstream drift. It also synthesizes the bundled sample project (an
-      # original composition; the repo carries no audio).
       - run: npm ci
         working-directory: mobile
 
@@ -323,12 +309,10 @@ jobs:
       # 4B) checks those pinned artifacts by checksum before it will build
       # anything. Without this the canary dies on "Missing pinned FFmpeg
       # artifact" three minutes in, having compiled nothing. The packaging
-      # path restores them the same way, from the package's own downloader;
-      # run from the package's `android/` because the script derives its
-      # destination as `$(pwd)/..` in that mode.
+      # path restores them through the same checksum-verified download cache;
+      # extracted libraries remain local to this dependency installation.
       - name: Restore react-native-audio-api prebuilt binaries
-        run: bash ../scripts/download-prebuilt-binaries.sh android
-        working-directory: mobile/node_modules/react-native-audio-api/android
+        run: node scripts/restore-audio-api-prebuilts.cjs android
 
       # Neither version ships in the runner image — ubuntu-latest was 24.04
       # with NDK 27.3/28.2/29.0 and CMake 3.31/4.1 when this was written — so
@@ -430,60 +414,9 @@ jobs:
           SINGZ_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           SINGZ_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          # Bounded, but with real headroom, because overflowing this is the
-          # one failure here that is SILENT: ccache LRU-evicts inside the run,
-          # hits go partial, the build creeps back up and nothing in the log
-          # says why — it just looks like the cache fix stopped holding.
-          # Everything in this block is DECIMAL GB, because that is what both
-          # tools here actually speak. ccache's bare M suffix is decimal (the
-          # manual: "kB, MB, GB, TB (decimal), KiB, MiB, GiB or TiB
-          # (binary)"), and 4.9.1's "Cache size (GB)" line means what it says
-          # — verified rather than assumed, by changing the cap: 600M printed
-          # "/ 0.6" and 1200M prints "/ 1.2". `gh api …/actions/cache/usage`
-          # returns decimal bytes too.
-          #
-          # Measured at two ABIs with compiler_check fixed: 0.2 of 0.6, and
-          # PCH caching took it to 0.4 of 1.2 — 284 more objects plus four
-          # .pch blobs (two modules x two ABIs; the 288 above is those 284
-          # plus the four generator compiles), a .pch carrying libc++, fbjni
-          # and jsi being tens of MB on its own. 0.4 against the old 600M cap
-          # is 67%, which is why it moved.
-          #
-          # Raising the cap does not make the cache grow — the four flat
-          # ccache-apk entries measured 231.49, 231.48, 231.48 and 231.46 MB,
-          # which is what a superset-save under a unique key per run should
-          # look like. What ships to Actions is what ccache stores, not the
-          # cap; the cap only stops eviction INSIDE the run. The other two of
-          # the six are the PCH one at 396.13 MB — content, not the raised cap
-          # — and a 152.99 MB fossil predating the run-id key and the ABI cut.
-          #
-          # But do not read that as free. The repo's Actions budget is
-          # SATURATED — 10.45 GB across 22 caches against a documented 10 GB —
-          # so every new entry evicts older ones to fit:
-          #
-          #   setup-java gradle   6.08 GB   4 entries   <- the real pressure
-          #   ccache-apk          1.48 GB   6 entries   <- this, and growing
-          #   engines-src-Windows 0.86 GB   1
-          #   engines-src-macOS   0.63 GB   1
-          #   engines-out-macOS   0.49 GB   1
-          #
-          # Only ccache-apk's newest entry is ever restored — a unique key per
-          # run never prunes the ones it supersedes, so five of those six are
-          # dead weight, and PCH content made each new one bigger. What loses
-          # an LRU race is whatever is touched least, which is the engine
-          # caches, so an android cache that grows costs a DESKTOP run an
-          # engine rebuild, on another workflow, with nothing connecting the
-          # two. Pruning superseded ccache-apk entries, or trimming
-          # setup-java's generations, frees several times what any argument
-          # about this cap is worth.
-          #
-          # Go and measure rather than trusting a word of this — and mind the
-          # units when you do. An earlier draft of this block reported
-          # watching 700 MB get evicted; nothing had happened at all. It had
-          # divided cache/usage's decimal bytes by 2^30 and compared the
-          # result against the same figure in decimal, which is a 7.4% gap
-          # and looks exactly like an eviction.
-          ccache -M 1200M
+          # Bound compiler objects to the shared CI budget. Immutable cache
+          # snapshots are keyed by native inputs rather than every rerun.
+          ccache --max-size "${CCACHE_MAXSIZE:-1200M}"
           ccache -z
           ./gradlew bundleRelease assembleRelease --no-daemon
           # -sv, not -s: the summary alone said 45% of calls were

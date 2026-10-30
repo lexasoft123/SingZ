@@ -1,0 +1,96 @@
+name: Shared mobile build caches
+description: Reuse compiler objects and immutable dependency downloads across hosted builds
+inputs:
+  platform:
+    description: ios or android
+    required: true
+  archive-cache:
+    description: Persist validated iOS native archives for Fastlane reuse
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - name: Install compiler cache and identify toolchain
+      id: paths
+      shell: bash
+      env:
+        CACHE_PLATFORM: ${{ inputs.platform }}
+        CACHE_DEPS: ${{ hashFiles('mobile/package-lock.json', 'mobile/ios/Podfile.lock') }}
+        CACHE_SOURCES: ${{ hashFiles('package.json', 'package-lock.json', 'CMakeLists.txt', 'CMakePresets.json', 'cmake/**', 'scripts/**', 'zcore/**', 'zdsp/**', 'native/**', 'third_party/**', 'assets/pitch/**', 'mobile/ios/**', 'mobile/native/**', 'mobile/scripts/**', 'mobile/android/**', 'mobile/*.js', 'mobile/package.json') }}
+      run: |
+        set -euo pipefail
+        case "$CACHE_PLATFORM" in
+          ios)
+            command -v ccache >/dev/null || brew install ccache
+            cache="$HOME/Library/Caches/ccache"
+            audio="$HOME/Library/Caches/SingZ/audio-api-prebuilts"
+            toolchain=$( { xcodebuild -version; xcrun --sdk iphoneos --show-sdk-build-version; } | shasum -a 256 | cut -c1-16)
+            ;;
+          android)
+            command -v ccache >/dev/null || { sudo apt-get update -qq; sudo apt-get install -y -qq ccache; }
+            cache="$HOME/.ccache"
+            audio="$HOME/.cache/SingZ/audio-api-prebuilts"
+            toolchain=ndk-27.1.12297006
+            ;;
+          *) echo "Unsupported mobile cache platform: $CACHE_PLATFORM" >&2; exit 1 ;;
+        esac
+        echo "compiler=$cache" >> "$GITHUB_OUTPUT"
+        echo "audio=$audio" >> "$GITHUB_OUTPUT"
+        echo "toolchain=$toolchain" >> "$GITHUB_OUTPUT"
+        echo "deps=$CACHE_DEPS" >> "$GITHUB_OUTPUT"
+        echo "sources=$CACHE_SOURCES" >> "$GITHUB_OUTPUT"
+        echo "CCACHE_DIR=$cache" >> "$GITHUB_ENV"
+        echo "CCACHE_MAXSIZE=1200M" >> "$GITHUB_ENV"
+        echo "SINGZ_AUDIO_API_CACHE=$audio" >> "$GITHUB_ENV"
+        echo "SINGZ_IOS_NATIVE_CACHE_MAX_ENTRIES=2" >> "$GITHUB_ENV"
+        echo "SINGZ_IOS_NATIVE_CACHE_MAX_BYTES=1073741824" >> "$GITHUB_ENV"
+        echo "SINGZ_IOS_NATIVE_CACHE_MAX_AGE_DAYS=14" >> "$GITHUB_ENV"
+
+    - name: Restore compiler objects
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.paths.outputs.compiler }}
+        key: mobile-ccache-v2-${{ runner.os }}-${{ steps.paths.outputs.toolchain }}-${{ steps.paths.outputs.deps }}-${{ steps.paths.outputs.sources }}-${{ github.job }}
+        restore-keys: |
+          mobile-ccache-v2-${{ runner.os }}-${{ steps.paths.outputs.toolchain }}-${{ steps.paths.outputs.deps }}-
+          mobile-ccache-v2-${{ runner.os }}-${{ steps.paths.outputs.toolchain }}-
+
+    - name: Restore Gradle dependencies and task outputs
+      if: inputs.platform == 'android'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+        key: mobile-gradle-v1-${{ runner.os }}-${{ steps.paths.outputs.deps }}-${{ steps.paths.outputs.sources }}-${{ github.job }}
+        restore-keys: |
+          mobile-gradle-v1-${{ runner.os }}-${{ steps.paths.outputs.deps }}-
+          mobile-gradle-v1-${{ runner.os }}-
+
+    - name: Restore audio library downloads
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.paths.outputs.audio }}
+        key: audio-api-downloads-v1-${{ runner.os }}-${{ hashFiles('mobile/package-lock.json', 'scripts/restore-audio-api-prebuilts.cjs') }}
+        restore-keys: audio-api-downloads-v1-${{ runner.os }}-
+
+    - name: Restore CocoaPods downloads
+      if: inputs.platform == 'ios'
+      uses: actions/cache@v4
+      with:
+        path: ~/Library/Caches/CocoaPods
+        key: cocoa-downloads-v1-${{ runner.os }}-${{ steps.paths.outputs.toolchain }}-${{ hashFiles('mobile/ios/Podfile.lock', 'mobile/package-lock.json') }}
+        restore-keys: cocoa-downloads-v1-${{ runner.os }}-${{ steps.paths.outputs.toolchain }}-
+
+    # Full DerivedData stays job-local. Current prebuilt React Native disables
+    # Swift explicit modules, so its independent Swift CAS is not enabled.
+    # Ccache and validated whole-native archives provide portable native reuse.
+    - name: Restore validated native archives
+      if: inputs.platform == 'ios' && inputs.archive-cache == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ~/Library/Caches/SingZ/ios-native-archives
+        key: ios-native-archives-v2-${{ steps.paths.outputs.toolchain }}-${{ steps.paths.outputs.deps }}-${{ steps.paths.outputs.sources }}
+        restore-keys: |
+          ios-native-archives-v2-${{ steps.paths.outputs.toolchain }}-${{ steps.paths.outputs.deps }}-
+          ios-native-archives-v2-${{ steps.paths.outputs.toolchain }}-

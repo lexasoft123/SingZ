@@ -82,6 +82,12 @@ jobs:
           cache: npm
           cache-dependency-path: mobile/package-lock.json
 
+      - name: Shared iOS build caches
+        uses: ./.github/actions/mobile-build-cache
+        with:
+          platform: ios
+          archive-cache: 'true'
+
       # make-sample.js and the analysis-bundle build (both postinstall) shell
       # out to ffmpeg. The macOS runner image usually carries it already;
       # this is a cheap no-op when it does and a real install when it doesn't,
@@ -125,6 +131,9 @@ jobs:
       - run: npm ci
         working-directory: mobile
 
+      - name: Restore verified audio-api prebuilts
+        run: node scripts/restore-audio-api-prebuilts.cjs ios
+
       # The runner image's own CocoaPods, NOT `bundle exec pod` — same as
       # scripts/worktree-setup.sh, which is this repo's one definition of how
       # pods get installed. `bundle exec` here is actively wrong: bundler
@@ -157,6 +166,8 @@ jobs:
         run: |
           ruby mobile/ios/fastlane/tests/app-build-number-test.rb
           ruby mobile/ios/fastlane/tests/review-pipeline-test.rb
+          ruby mobile/ios/fastlane/tests/incremental-archive-test.rb
+          node --test mobile/scripts/tests/ccache-xcode-conf.test.cjs mobile/scripts/tests/patch-ios-cache.test.cjs
 
       # On the EVENT, not the ref shape. A dispatch aimed at a tag is the
       # normal way to use `submit`/`beta_external` — they act on the build

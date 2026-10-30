@@ -4,9 +4,7 @@ param(
   [Parameter(ValueFromRemainingArguments = $true)][string[]]$CompilerArguments
 )
 
-$env:CCACHE_BASEDIR = $BaseDirectory
-$env:CCACHE_NOHASHDIR = '1'
-$env:CCACHE_COMPILERCHECK = 'content'
-
-& $CcacheExecutable @CompilerArguments
+# Compatibility entry point for previously configured Ninja graphs.
+$sharedLauncher = Join-Path $PSScriptRoot '../../scripts/ccache-launcher.ps1'
+& $sharedLauncher $CcacheExecutable $BaseDirectory @CompilerArguments
 exit $LASTEXITCODE
