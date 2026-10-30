@@ -2,8 +2,18 @@
 // exits, instead of sitting there until somebody notices (tests/shared/watchdog.cjs).
 require('../shared/watchdog.cjs').arm('capture-addon-smoke')
 
-const { app } = require('electron')
 const assert = require('node:assert/strict')
+const electronNodeMode = process.env.ELECTRON_RUN_AS_NODE === '1'
+assert.ok(process.versions.electron, 'smoke test must use the Electron runtime')
+const app = electronNodeMode ? null : require('electron').app
+function finish(code = 0) {
+  if (app) {
+    if (code) app.exit(code)
+    else app.quit()
+  } else {
+    process.exit(code)
+  }
+}
 const { unlinkSync, writeFileSync } = require('node:fs')
 const { tmpdir } = require('node:os')
 const { join, resolve } = require('node:path')
@@ -37,9 +47,10 @@ function writeSilentPcm16Wav(path, frames = 512) {
 }
 
 process.env.SINGZ_MUTE = '1'
-app.commandLine.appendSwitch('mute-audio')
+app?.commandLine.appendSwitch('mute-audio')
 
-app.whenReady().then(async () => {
+const ready = app ? app.whenReady() : Promise.resolve()
+ready.then(async () => {
   const target = `${process.platform}-${process.arch}`
   const requested = process.argv.slice(2).find((arg) => !arg.startsWith('--'))
   const expectsCurrentSource = process.argv.includes('--current-source')
@@ -288,7 +299,7 @@ app.whenReady().then(async () => {
       'prepared-graph accounting skipped: the host has no output device at all ' +
       `(provider ${hostDevices.provider}, ${hostDevices.devices.length} devices)`
     )
-    app.quit()
+    finish()
     return
   }
   if (process.platform === 'linux') {
@@ -329,8 +340,8 @@ app.whenReady().then(async () => {
     addon.unloadPlayback(4n)
     try { unlinkSync(wav) } catch {}
   }
-  app.quit()
+  finish()
 }).catch((error) => {
   console.error(error)
-  app.exit(1)
+  finish(1)
 })

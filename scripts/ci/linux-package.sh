@@ -49,8 +49,9 @@ if [[ $stage == installed-test || $stage == all ]]; then
   /opt/SingZ/resources/engines/crispasr --help > "$report/crispasr-help.txt" 2>&1
   sha256sum "${packages[0]}" /opt/SingZ/resources/app.asar /opt/SingZ/resources/engines/singz-capture.node > "$report/installed-sha256.txt"
   export SINGZ_E2E_PACKAGED=${SINGZ_E2E_PACKAGED:-/opt/SingZ/singz}
-  xvfb-run -a -s '-screen 0 1920x1080x24' dbus-run-session -- \
-    node_modules/.bin/electron tests/e2e/capture-addon-smoke.cjs \
+  # Use the installed Electron runtime for this Node-API-only check. The app
+  # UI is tested below through its normal desktop launcher.
+  ELECTRON_RUN_AS_NODE=1 /opt/SingZ/singz tests/e2e/capture-addon-smoke.cjs \
     /opt/SingZ/resources/engines/singz-capture.node --current-source \
     2>&1 | tee "$report/installed-addon-smoke.log"
   # Private software sink gives Chromium a running clock on hardware-free CI.
