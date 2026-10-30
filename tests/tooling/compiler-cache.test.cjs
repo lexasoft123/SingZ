@@ -96,7 +96,7 @@ for (const preset of ['host-debug', 'host-release']) {
     fs.writeFileSync(conf, 'max_size = 100M\n')
     const env = { ...process.env, CCACHE_CONFIGPATH: conf, CCACHE_DIR: path.join(directory, 'cache') }
     for (const key of ['CCACHE_BASEDIR', 'CCACHE_NOHASHDIR', 'CCACHE_COMPILERCHECK', 'CMAKE_C_COMPILER_LAUNCHER', 'CMAKE_CXX_COMPILER_LAUNCHER']) delete env[key]
-    const stats = () => JSON.parse(execute('ccache', ['--print-stats', '--format=json'], { env }))
+    const stats = () => require('../../scripts/ci-build-cache.cjs').parseStats(execute('ccache', ['--print-stats'], { env }))
     const compile = root => {
       execute('cmake', ['--preset', preset], { cwd: root, env })
       execute('cmake', ['--build', '--preset', preset], { cwd: root, env })
