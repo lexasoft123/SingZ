@@ -293,7 +293,11 @@ if(SINGZ_BUILD_ELECTRON_CAPTURE)
     native/electron/training_audio_session.h
     native/electron/native_audio_ownership.h)
   target_compile_features(singz_capture PRIVATE cxx_std_20)
-  target_include_directories(singz_capture PRIVATE "${SINGZ_NODE_INCLUDE_DIR}")
+  target_include_directories(singz_capture PRIVATE
+    "${SINGZ_NODE_INCLUDE_DIR}"
+    # Platform provider headers live under zcore/platform and intentionally
+    # remain a private source-tree include for app bindings.
+    "${ZCORE_ROOT}")
   # Build identity, compiled in and exported: the loader refuses an addon
   # whose Electron version differs from the process it runs in, and the
   # source stamp lets harnesses tell a foreign/stale binary from this one

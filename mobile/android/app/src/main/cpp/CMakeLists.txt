@@ -180,7 +180,10 @@ if(SINGZ_CODEC_TARGET_PROOF)
 endif()
 add_dependencies(singzcore singz_check_zcore_boundaries)
 target_compile_features(singzcore PRIVATE cxx_std_20)
-target_include_directories(singzcore PRIVATE "${SINGZ_NATIVE_ROOT}")
+target_include_directories(singzcore PRIVATE
+    "${SINGZ_NATIVE_ROOT}"
+    # Provider headers are source-tree APIs, not exported zCore include dirs.
+    "${SINGZ_AUDIO_ENGINE_ROOT}")
 set_target_properties(singzcore PROPERTIES
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN YES)
