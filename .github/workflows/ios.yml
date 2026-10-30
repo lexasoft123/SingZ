@@ -167,7 +167,7 @@ jobs:
           ruby mobile/ios/fastlane/tests/app-build-number-test.rb
           ruby mobile/ios/fastlane/tests/review-pipeline-test.rb
           ruby mobile/ios/fastlane/tests/incremental-archive-test.rb
-          node --test mobile/scripts/tests/ccache-xcode-conf.test.cjs mobile/scripts/tests/patch-ios-cache.test.cjs
+          node --test mobile/scripts/tests/*.test.cjs
 
       # On the EVENT, not the ref shape. A dispatch aimed at a tag is the
       # normal way to use `submit`/`beta_external` — they act on the build

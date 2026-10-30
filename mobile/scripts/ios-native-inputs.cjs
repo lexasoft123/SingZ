@@ -7,6 +7,16 @@ const { execFileSync } = require('node:child_process')
 function nativeInputs(repo, cacheRoot = process.env.SINGZ_IOS_NATIVE_CACHE || path.join(os.homedir(), 'Library/Caches/SingZ/ios-native-archives'), toolchain = '') {
   const cacheFile = path.join(cacheRoot, 'input-digests.json')
   const extensions = /\.(?:h|hpp|inc|inl|def|c|cpp|cc|m|mm|swift|a|dylib|xcconfig|pbxproj|plist|entitlements|xcprivacy|xcworkspacedata|xcscheme|podspec|rb|sh|js|json|yaml|yml|ts|tsx|bin|onnx|modulemap|tbd|png|jpg|jpeg|pdf|strings|txt|cmake|storyboard|xib)$/i
+  const eligibleFile = relative => extensions.test(relative) || /\.framework\//.test(relative) ||
+    (relative.startsWith('mobile/ios/') && relative.includes('/compliance/'))
+  // Android builds must not invalidate an iOS archive. Match only known
+  // generated trees and platform-specific downloads; published build/native
+  // sources and iOS framework binaries remain inputs.
+  const dependencyBuildOutput = relative => relative.startsWith('mobile/node_modules/') && (
+    /\/(?:\.gradle|\.cxx|\.externalNativeBuild)(?:\/|$)/.test(relative) ||
+    /\/android\/build(?:\/|$)/.test(relative) ||
+    /^mobile\/node_modules\/@react-native\/gradle-plugin\/(?:[^/]+\/)?build(?:\/|$)/.test(relative) ||
+    /^mobile\/node_modules\/react-native-audio-api\/common\/cpp\/audioapi\/external\/(?:android|macosx)(?:\/|$)/.test(relative))
   const roots = ['mobile/ios', 'mobile/node_modules', 'mobile/native', 'zcore', 'zdsp', 'third_party', 'assets/pitch']
   let previous = {}
   try { previous = JSON.parse(fs.readFileSync(cacheFile, 'utf8')) } catch {}
@@ -15,12 +25,13 @@ function nativeInputs(repo, cacheRoot = process.env.SINGZ_IOS_NATIVE_CACHE || pa
   const visited = new Set()
   function walk(relative) {
     const file = path.join(repo, relative)
-    if (!fs.existsSync(file)) return
+    if (dependencyBuildOutput(relative) || !fs.existsSync(file)) return
     const stat = fs.lstatSync(file)
     if (stat.isSymbolicLink()) {
       const real = fs.realpathSync(file)
-      if (fs.statSync(real).isFile()) files.push(relative)
-      else if (!visited.has(real)) {
+      if (fs.statSync(real).isFile()) {
+        if (eligibleFile(relative)) files.push(relative)
+      } else if (!visited.has(real)) {
         visited.add(real)
         for (const entry of fs.readdirSync(file).sort()) walk(relative + '/' + entry)
       }
@@ -33,14 +44,13 @@ function nativeInputs(repo, cacheRoot = process.env.SINGZ_IOS_NATIVE_CACHE || pa
       if (['mobile/ios/build', 'mobile/ios/DerivedData', 'mobile/ios/.build'].includes(relative)) return
       if (relative === 'mobile/ios/fastlane' || /(?:^|\/)\.cache(?:\/|$)/.test(relative)) return
       for (const entry of fs.readdirSync(file).sort()) walk(relative + '/' + entry)
-    } else if (extensions.test(relative) || /\.framework\//.test(relative) ||
-      (relative.startsWith('mobile/ios/') && relative.includes('/compliance/'))) files.push(relative)
+    } else if (eligibleFile(relative)) files.push(relative)
   }
   for (const root of roots) walk(root)
   for (const file of ['package.json', 'package-lock.json', 'mobile/package.json', 'mobile/package-lock.json', 'mobile/react-native.config.js', 'mobile/ios/Podfile', 'mobile/ios/Podfile.lock', 'mobile/ios/.xcode.env', 'mobile/ios/.xcode.env.local']) {
     if (fs.existsSync(path.join(repo, file))) files.push(file)
   }
-  const hash = crypto.createHash('sha256').update('singz-native-archive-v4\n').update(toolchain).update('\n')
+  const hash = crypto.createHash('sha256').update('singz-native-archive-v5\n').update(toolchain).update('\n')
   for (const relative of [...new Set(files)].sort()) {
     const file = path.join(repo, relative)
     const stat = fs.lstatSync(file)

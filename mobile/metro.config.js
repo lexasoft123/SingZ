@@ -19,6 +19,11 @@ const config = {
     nodeModulesPaths: [resolve(__dirname, 'node_modules')],
     assetExts: [...defaults.resolver.assetExts, 'flac'],
   },
+  transformer: {
+    // Metro hashes this dependency name into every transform key. RN's
+    // absolute default prevents cache hits in an otherwise identical worktree.
+    asyncRequireModulePath: 'metro-runtime/src/modules/asyncRequire',
+  },
 };
 
 module.exports = mergeConfig(defaults, config);

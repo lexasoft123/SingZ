@@ -177,6 +177,8 @@ Home, in addition to existing dependency/transformation caches.
 strict incompatibility checking. Postinstall's `patch-gradle-cache.cjs` replaces
 the pinned Skia/audio-api configuration-time external commands with tracked
 `providers.exec` calls; unknown upstream shapes fail before partial patching.
+Runtime selection depends on the cached native-library restore task, so a fresh
+`npm ci` cannot run verification before its compatibility libraries exist.
 The ORT SDK extraction task has explicit cacheable inputs/outputs and avoids
 execution-time Project capture. Repeat the same task graph to observe
 `Configuration cache entry reused`; removing only generated ORT output should
@@ -192,6 +194,9 @@ Android release bundling now uses `bundle-android-incremental.cjs`, which
 preserves Metro transforms instead of resetting them each time a bundle task
 runs. `SINGZ_METRO_RESET_CACHE=1` requests the original reset explicitly. Arguments,
 environment and failures still pass through to React Native's official CLI.
+Metro uses its stable async-runtime module identifier rather than React Native's
+checkout-absolute default, so identical transforms also share keys across worktrees;
+dynamic imports still resolve the runtime from the consuming checkout.
 iOS native-archive refresh likewise rebundles fresh JS/Hermes output without a
 forced Metro reset.
 
@@ -217,6 +222,11 @@ native-source/recipe generations, so changed inputs can save a new immutable
 Actions snapshot while restoring older compatible objects. Compiler objects
 are capped at 1200 MB in CI; release archive retention is two entries / 1 GiB /
 14 days. Full DerivedData and serialized configuration graphs stay job-local.
+
+The iOS archive fingerprint excludes generated Android dependency build state
+and Android/macOS-only audio downloads. iOS headers, frameworks, static libraries,
+and shared native sources remain inputs, so Android work in a sibling checkout
+does not prevent reuse of an otherwise identical iOS archive.
 
 Local native archives default to eight entries / 4 GiB / 30 days. Override with
 `SINGZ_IOS_NATIVE_CACHE_MAX_ENTRIES`, `SINGZ_IOS_NATIVE_CACHE_MAX_BYTES`, and

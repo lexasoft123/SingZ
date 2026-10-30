@@ -314,6 +314,9 @@ tasks.register("extractOrtSdk", SingzExtractOrtSdk) {
 preBuild.dependsOn("extractOrtSdk")
 
 tasks.register("selectFfmpegCodecRuntime", Exec) {
+    // A fresh npm install has no native libraries. Restore compatibility inputs
+    // before selecting/verifying the runtime, including direct Gradle builds.
+    dependsOn(":react-native-audio-api:downloadPrebuiltBinaries")
     workingDir file("../../..")
     def arguments = [
         "mobile/scripts/select-ffmpeg-codec-runtime.mjs",

@@ -270,3 +270,12 @@ test('dependency Gradle patch rejects an obsolete downloader patch that drops sk
   assert.throws(() => patchGradleCaches(f.directory), /upstream changed.*react-native-audio-api/)
   assert.equal(readFileSync(f.audio, 'utf8'), previous)
 })
+
+
+test('fresh Android builds restore cached native libraries before product selection and verification', () => {
+  const source = readFileSync(join(root, 'mobile/android/app/build.gradle'), 'utf8')
+  const selection = source.split('tasks.register("selectFfmpegCodecRuntime", Exec) {')[1].split('tasks.register("verifyFfmpegCodecRuntime", Exec) {')[0]
+  const verification = source.split('tasks.register("verifyFfmpegCodecRuntime", Exec) {')[1].split('preBuild.dependsOn("verifyFfmpegCodecRuntime")')[0]
+  assert.match(selection, /dependsOn\(":react-native-audio-api:downloadPrebuiltBinaries"\)/)
+  assert.match(verification, /dependsOn\("selectFfmpegCodecRuntime"\)/)
+})

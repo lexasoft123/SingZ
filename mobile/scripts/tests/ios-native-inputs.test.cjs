@@ -57,3 +57,66 @@ test('shared cache keys survive checkout paths and JS edits, but invalidate nati
     assert.notEqual(fingerprint(first), original, 'dependency versions invalidate')
   } finally { fs.rmSync(temporary, { recursive: true, force: true }) }
 })
+
+
+test('Android work in one checkout does not invalidate an iOS native archive', t => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'singz-ios-platform-inputs-'))
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }))
+  const first = path.join(temporary, 'first'), second = path.join(temporary, 'second')
+  const cache = path.join(temporary, 'cache')
+  const write = (root, relative, bytes) => {
+    const file = path.join(root, relative)
+    fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, bytes)
+  }
+  const nativeFiles = [
+    'mobile/node_modules/library/native.h',
+    'mobile/node_modules/library/build/published/native.h',
+    'mobile/node_modules/library/android/src/main/cpp/shared.cpp',
+    'mobile/node_modules/library/libs/ios/Library.framework/Library',
+    'mobile/node_modules/react-native-audio-api/common/cpp/audioapi/external/iphoneos/libopus.a',
+  ]
+  for (const root of [first, second]) for (const file of nativeFiles) write(root, file, 'native input')
+  const fingerprint = root => nativeInputs(root, cache, 'same toolchain')
+  const original = fingerprint(first)
+  assert.equal(fingerprint(second), original)
+  for (const output of [
+    'mobile/node_modules/library/android/build/generated/source/Props.h',
+    'mobile/node_modules/library/android/build/outputs/logs/manifest.txt',
+    'mobile/node_modules/library/android/.cxx/Debug/generated/config.cmake',
+    'mobile/node_modules/library/android/.externalNativeBuild/cache.json',
+    'mobile/node_modules/@react-native/gradle-plugin/.gradle/9/executionHistory.bin',
+    'mobile/node_modules/@react-native/gradle-plugin/react-native-gradle-plugin/build/kotlin/cache.bin',
+    'mobile/node_modules/@react-native/gradle-plugin/build/generated/sources.json',
+    'mobile/node_modules/react-native-audio-api/common/cpp/audioapi/external/android/arm64-v8a/libopus.a',
+    'mobile/node_modules/react-native-audio-api/common/cpp/audioapi/external/macosx/libopus.a',
+  ]) {
+    write(first, output, 'generated output')
+    assert.equal(fingerprint(first), original, 'non-iOS output must not invalidate: ' + output)
+    write(first, output, 'changed generated output')
+    assert.equal(fingerprint(first), original, 'changing non-iOS output must not invalidate: ' + output)
+  }
+  assert.equal(fingerprint(second), original, 'fresh checkout and Android-used checkout share the iOS key')
+  for (const file of nativeFiles) {
+    write(first, file, 'changed native input')
+    assert.notEqual(fingerprint(first), original, 'genuine packaged native input must invalidate: ' + file)
+    write(first, file, 'native input')
+    assert.equal(fingerprint(first), original)
+  }
+})
+
+test('host executable symlinks obey the same input selection as regular files', {
+  skip: process.platform === 'win32' ? 'fixture requires POSIX symlinks' : false,
+}, t => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'singz-ios-symlink-inputs-'))
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }))
+  const first = path.join(temporary, 'first'), second = path.join(temporary, 'second')
+  const cache = path.join(temporary, 'cache'), target = path.join(temporary, 'host-tool')
+  fs.writeFileSync(target, 'host tool binary')
+  for (const root of [first, second]) fs.mkdirSync(path.join(root, 'mobile/node_modules/esbuild/bin'), { recursive: true })
+  fs.symlinkSync(target, path.join(first, 'mobile/node_modules/esbuild/bin/esbuild'))
+  fs.writeFileSync(path.join(second, 'mobile/node_modules/esbuild/bin/esbuild'), 'host tool binary')
+  const original = nativeInputs(first, cache)
+  assert.equal(nativeInputs(second, cache), original, 'npm install implementation does not change native inputs')
+  fs.writeFileSync(target, 'different host tool binary')
+  assert.equal(nativeInputs(first, cache), original, 'host executable is not an iOS native input')
+})

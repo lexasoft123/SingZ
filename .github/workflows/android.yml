@@ -144,6 +144,9 @@ jobs:
       - name: Restore react-native-audio-api prebuilt binaries
         run: node scripts/restore-audio-api-prebuilts.cjs android
 
+      - name: Build cache and generated-input regressions
+        run: node --test mobile/scripts/tests/*.test.cjs
+
       - name: Typecheck
         run: npx tsc --noEmit
         working-directory: mobile

@@ -64,7 +64,7 @@ jobs:
       - name: Test native cache retention and Xcode compiler configuration
         run: |
           ruby mobile/ios/fastlane/tests/incremental-archive-test.rb
-          node --test mobile/scripts/tests/ccache-xcode-conf.test.cjs mobile/scripts/tests/patch-ios-cache.test.cjs
+          node --test mobile/scripts/tests/*.test.cjs
 
       - name: Verify authoritative generated inputs
         run: |
