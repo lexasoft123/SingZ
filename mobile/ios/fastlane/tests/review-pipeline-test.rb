@@ -1,4 +1,5 @@
 require 'minitest/autorun'
+require 'tmpdir'
 
 # Execute the real lane bodies with store actions replaced by recording fakes.
 # No credentials, archives or network calls are used by this suite.
@@ -6,6 +7,8 @@ class ReviewPipelineHarness
   module UI
     def self.important(*) = nil
     def self.success(*) = nil
+    def self.message(*) = nil
+    def self.user_error!(message) = raise(message)
   end
 
   attr_accessor :groups, :upload_failure, :contact_failure, :open_review, :pending_release, :after_upload_release, :signing_options, :archive_options
@@ -35,6 +38,7 @@ helper = source[/^def store_submission_blocker\n.*?^end\n/m]
 ReviewPipelineHarness.class_eval(helper, fastfile, source[0...source.index(helper)].count("\n") + 1)
 
 class ReviewPipelineHarness
+  alias archive_with_real_build_flow archive
   # Override helpers after registering the real lane bodies.
   def verify_marketing_version = '0.26.1'
   def ci_build_number = 30
@@ -176,5 +180,74 @@ class ReviewPipelineTest < Minitest::Test
     refute_includes @pipeline.events, :archive
     assert_empty uploads
     assert_empty submissions
+  end
+
+  def with_stub(object, name, replacement)
+    original = object.method(name)
+    object.define_singleton_method(name) do |*args, &block|
+      replacement.respond_to?(:call) ? replacement.call(*args, &block) : replacement
+    end
+    yield
+  ensure
+    object.define_singleton_method(name, original)
+  end
+
+  def test_real_archive_returns_the_exported_ipa_across_cache_paths
+    Dir.mktmpdir('singz-archive-return-') do |temporary|
+      ipa = File.join(temporary, 'SingZ.ipa')
+      File.write(ipa, 'fake exported application')
+      keys = %w[GITHUB_ACTIONS sigh_io.s-dev.singz_appstore_profile-name]
+      previous = keys.to_h { |key| [key, ENV[key]] }
+      ENV['GITHUB_ACTIONS'] = 'true'
+      ENV[keys.last] = 'test profile'
+      begin
+        [:cold, :cached, :cached_export_failure, :cache_publish_failure].each do |mode|
+          builds = []
+          published = []
+          refreshed = []
+          @pipeline.define_singleton_method(:build_app) do |**options|
+            builds << options
+            raise 'cached export failed' if mode == :cached_export_failure && options[:skip_build_archive]
+            ipa
+          end
+          prepare = ->(*) { nil }
+          fingerprint = ->(*) { 'native-inputs' }
+          copy_cached = ->(*) { [:cached, :cached_export_failure].include?(mode) }
+          refresh = ->(*args) { refreshed << args }
+          publish = ->(*args) do
+            published << args
+            raise 'cache is unavailable' if mode == :cache_publish_failure
+            [:cache_receipt] # Must never become the lane's IPA return value.
+          end
+          with_number = ->(*_args, &block) { block.call }
+          with_stub(SingzIncrementalArchive, :prepare_release_dependencies, prepare) do
+            with_stub(SingzIncrementalArchive, :fingerprint, fingerprint) do
+              with_stub(SingzIncrementalArchive, :copy_cached, copy_cached) do
+                with_stub(SingzIncrementalArchive, :refresh, refresh) do
+                  with_stub(SingzIncrementalArchive, :publish, publish) do
+                    with_stub(SingzIncrementalArchive, :receipt, File.join(temporary, 'cache-receipt')) do
+                      with_stub(SingzAppBuildNumber, :with_number, with_number) do
+                        result = @pipeline.archive_with_real_build_flow(build_number: 31)
+                        assert_instance_of String, result, mode.to_s
+                        assert_equal ipa, result, mode.to_s
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+          assert_equal(mode == :cached_export_failure ? 2 : 1, builds.size, mode.to_s)
+          assert_equal([:cached, :cached_export_failure].include?(mode),
+                       builds.first[:skip_build_archive] == true, mode.to_s)
+          assert_equal(mode == :cached ? 0 : 1, published.size, mode.to_s)
+          assert_equal([:cached, :cached_export_failure].include?(mode) ? 1 : 0,
+                       refreshed.size, mode.to_s)
+          refute builds.last[:skip_build_archive] if mode == :cached_export_failure
+        end
+      ensure
+        previous.each { |key, value| value ? ENV[key] = value : ENV.delete(key) }
+      end
+    end
   end
 end

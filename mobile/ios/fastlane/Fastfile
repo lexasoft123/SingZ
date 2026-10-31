@@ -930,13 +930,14 @@ private_lane :archive do |options|
     output_directory: File.join(REPO_ROOT, "build-ios"), output_name: "SingZ.ipa"
   }
   reused = false
+  ipa = nil
   if native_inputs
     begin
       if SingzIncrementalArchive.copy_cached(native_inputs, archive_path)
         UI.message("Native inputs unchanged: rebundling JavaScript and exporting cached archive")
         SingzIncrementalArchive.refresh(REPO_ROOT, archive_path, options[:build_number],
           ENV["sigh_#{BUNDLE_ID}_#{type}_certificate-name"] || "Apple Distribution")
-        build_app(**build_options.merge(skip_build_archive: true))
+        ipa = build_app(**build_options.merge(skip_build_archive: true))
         reused = true
       end
     rescue => error
@@ -947,7 +948,7 @@ private_lane :archive do |options|
   unless reused
     SingzAppBuildNumber.with_number(
       File.join(IOS_DIR, "SingZPlayer.xcodeproj/project.pbxproj"), options[:build_number]
-    ) { build_app(**build_options) }
+    ) { ipa = build_app(**build_options) }
     if native_inputs
       begin
         after = SingzIncrementalArchive.fingerprint(REPO_ROOT)
@@ -957,6 +958,10 @@ private_lane :archive do |options|
       end
     end
   end
+  # Cache publication is best effort and has its own return value. Always
+  # hand upload/distribution the IPA exported by gym on either build path.
+  UI.user_error!("Archive did not produce an IPA file") unless ipa.is_a?(String) && File.file?(ipa)
+  ipa
 end
 
 
