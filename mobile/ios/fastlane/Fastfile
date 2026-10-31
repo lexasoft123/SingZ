@@ -579,7 +579,7 @@ platform :ios do
     beta(submit_review: reason.nil?)
   end
 
-  desc "Build, then submit to the App Store for review — held for manual release after approval"
+  desc "Build, then submit to the App Store for review — release automatically after approval"
   lane :release do
     version = verify_marketing_version
     build_number = ci_build_number
@@ -613,7 +613,7 @@ platform :ios do
     submit_build(version: version, build_number: build_number, api_key: key, contact: contact)
   end
 
-  desc "Submit an ALREADY-UPLOADED build for App Store review — no rebuild. Held for manual release after approval"
+  desc "Submit an ALREADY-UPLOADED build for App Store review — no rebuild. Release automatically after approval"
   # The manual counterpart to a tag: the tag's own run built and uploaded the
   # binary, and this sends THAT build to review without producing a second
   # one. `release` archives afresh, which on a dispatch aimed at an existing
@@ -992,8 +992,8 @@ private_lane :submit_build do |options|
     app_version: options[:version],
     build_number: options[:build_number].to_s,
     submit_for_review: true,
-    # Submission authorizes review; publishing remains a separate decision.
-    automatic_release: false,
+    # Store submissions authorize publication as soon as Apple approves.
+    automatic_release: true,
     # The binary lane must not rewrite the shopfront's screenshots/graphics
     # by accident — that is the `metadata` lane's job, run on purpose. Text
     # (name/subtitle/description/keywords/release notes) still goes up:
@@ -1019,5 +1019,5 @@ private_lane :submit_build do |options|
     # scripts/with-apple-secrets.sh; only notes.txt is tracked.
     app_review_information: options[:contact]
   )
-  UI.success("SingZ #{options[:version]} (#{options[:build_number]}) submitted for App Store review — held for manual release after approval.")
+  UI.success("SingZ #{options[:version]} (#{options[:build_number]}) submitted for App Store review — releases automatically after approval.")
 end

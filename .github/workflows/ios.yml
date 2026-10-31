@@ -7,8 +7,8 @@ name: iOS
 # An open review or a version awaiting release defers store submission without
 # blocking TestFlight.
 # Configured external groups
-# also receive Beta App Review. App Store approval leaves the version held
-# for manual release; tagging does not automatically publish it.
+# also receive Beta App Review. App Store submissions release automatically
+# as soon as Apple approves them.
 #
 # Manual beta uploads remain TestFlight-only. Use submit with an existing
 # build number to retry review without rebuilding or uploading another IPA.

@@ -398,10 +398,10 @@ touch the others.
 - **A `v*` tag** builds, uploads to **TestFlight**, and — when the
   `TESTFLIGHT_GROUPS` repo variable names a group — sends the build to
   **Beta App Review** for that group, so the people on the public TestFlight
-  link actually receive what the release notes just promised them. Same
+  link actually receive what the release notes just promised them.
   The `ship` lane then submits the same processed build for **App Store
-  review**, even if no external group is configured. Approval holds the
-  version for manual release; it does not publish automatically.
+  review**, even if no external group is configured. The version releases
+  automatically as soon as Apple approves it.
 
   `TESTFLIGHT_GROUPS` is a **variable, not a secret** (a group name is not
   sensitive, and an unset secret is indistinguishable from an empty one at
@@ -435,8 +435,8 @@ touch the others.
     version; prefer `submit` there.
   - `metadata` — pushes the store listing text only, no binary.
 
-  `ship`, `submit` and `release` submit with `automatic_release: false`.
-  After approval, publish from App Store Connect when ready. If review
+  `ship`, `submit` and `release` submit with `automatic_release: true`.
+  Submitting through these lanes authorizes publication after Apple approval. If review
   submission fails after upload, retry `submit` with the existing build
   number rather than rebuilding. Beta App Review is separate from App
   Store review and only controls external testing.

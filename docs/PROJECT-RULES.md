@@ -1248,11 +1248,12 @@ because chaining would race Apple, which it would not: the
 sharp: `skip_waiting_for_build_processing: true` alongside a widen makes
 pilot abandon the distribution and still exit GREEN (build_manager.rb:202),
 so that flag and an external group must never be set together.
-Submitting for App Store review stays manual-dispatch-only, and it carries
-`automatic_release: true` — an
-approved build goes LIVE on the store by itself, so dispatching that lane IS
-the decision to publish, same "tagging is not enough to reach
-production" shape as Android's `publish` job. Two lanes reach the store and
+Tags use `ship` to submit for App Store review when Apple's version slot is
+available; an open review or pending release defers that submission while
+TestFlight still proceeds. Store submissions through `ship`, `submit` and
+`release` carry `automatic_release: true`: Apple approval publishes the
+version automatically. Android production remains manual-dispatch-only.
+Two manual lanes reach the store and
 the difference bites when aiming at an already-built tag: `submit` sends an
 ALREADY-UPLOADED build (pass its number in the workflow's `build` input,
 which lands in `SINGZ_IOS_BUILD_NUMBER` — a dispatch's own `run_number` is

@@ -91,7 +91,7 @@ class ReviewPipelineTest < Minitest::Test
     assert_equal '30', submissions.first[1][:build_number]
     assert_equal '0.26.1', submissions.first[1][:app_version]
     assert_equal true, submissions.first[1][:submit_for_review]
-    assert_equal false, submissions.first[1][:automatic_release]
+    assert_equal true, submissions.first[1][:automatic_release]
     assert_operator @pipeline.events.index(:processed), :<, @pipeline.events.index(submissions.first)
     assert_operator @pipeline.events.index(:contact_checked), :<, @pipeline.events.index(:archive)
     assert_operator @pipeline.events.index(:review_checked), :<, @pipeline.events.index(:archive)
@@ -160,6 +160,16 @@ class ReviewPipelineTest < Minitest::Test
     assert_raises(RuntimeError) { @pipeline.submit(build: 30) }
     assert_empty submissions
     assert_empty uploads
+  end
+
+  def test_all_store_submission_lanes_release_automatically_after_approval
+    [:ship, :release, :submit].each do |name|
+      @pipeline = ReviewPipelineHarness.new
+      @pipeline.public_send(name)
+      assert_equal 1, submissions.size, "#{name} must submit one build"
+      assert_equal true, submissions.first[1][:automatic_release],
+        "#{name} must release after approval"
+    end
   end
 
   def test_manual_beta_remains_upload_only

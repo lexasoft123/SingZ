@@ -93,7 +93,7 @@ Upload to TestFlight; submit to the App Store when no review is already open
 [bundle exec] fastlane ios release
 ```
 
-Build, then submit to the App Store for review — held for manual release after approval
+Build, then submit to the App Store for review — release automatically after approval
 
 ### ios submit
 
@@ -101,7 +101,7 @@ Build, then submit to the App Store for review — held for manual release after
 [bundle exec] fastlane ios submit
 ```
 
-Submit an ALREADY-UPLOADED build for App Store review — no rebuild. Held for manual release after approval
+Submit an ALREADY-UPLOADED build for App Store review — no rebuild. Release automatically after approval
 
 ### ios review_status
 
