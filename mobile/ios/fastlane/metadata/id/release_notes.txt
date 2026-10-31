@@ -1,1 +1,1 @@
-Panduan singkat membantu Anda mengenal kontrol lagu, mixer, dan latihan. Bahasa Turki, Spanyol Amerika Latin, dan Portugis Brasil kini tersedia. Tampilan puncak volume lebih jelas dan keandalan pemutaran ditingkatkan.
+Pemuatan lagu lebih andal: unduhan menampilkan byte dan kecepatan, mencoba lagi saat terjadi gangguan sementara, dan pemuatan yang macet dapat dibatalkan. File cache yang sudah lengkap dapat dipakai saat mencoba lagi. Ikon Pengaturan dan Log lebih ringkas.

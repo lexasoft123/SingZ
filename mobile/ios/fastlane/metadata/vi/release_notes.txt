@@ -1,1 +1,1 @@
-Hướng dẫn nhanh giúp bạn làm quen với bài hát, bộ trộn và các nút luyện tập. Thêm tiếng Thổ Nhĩ Kỳ, tiếng Tây Ban Nha Mỹ Latinh và tiếng Bồ Đào Nha Brazil. Hiển thị đỉnh âm lượng rõ hơn và cải thiện độ ổn định khi phát.
+Tải bài hát ổn định hơn: hiển thị số byte và tốc độ, tự thử lại khi có lỗi tạm thời và cho phép hủy khi bị kẹt. Khi thử lại, các tệp đã tải xong trong bộ nhớ đệm có thể được dùng lại. Biểu tượng Cài đặt và Nhật ký gọn hơn, giúp phần đầu màn hình thoáng hơn.

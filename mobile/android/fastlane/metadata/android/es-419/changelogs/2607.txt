@@ -1,0 +1,1 @@
+Carga de canciones más confiable: las descargas muestran bytes y velocidad, reintentan ante fallas temporales y permiten cancelar una carga atascada. Al volver a intentar, se pueden reutilizar los archivos completos en caché. Los íconos de Ajustes y Registro ocupan menos espacio.

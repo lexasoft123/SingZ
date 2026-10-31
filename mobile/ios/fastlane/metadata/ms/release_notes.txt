@@ -1,1 +1,1 @@
-Panduan ringkas membantu anda mengenali kawalan lagu, pengadun dan latihan. Bahasa Turki, Sepanyol Amerika Latin dan Portugis Brazil kini tersedia. Paparan puncak kelantangan lebih jelas dan kebolehpercayaan main balik ditambah baik.
+Pemuatan lagu lebih andal: muat turun menunjukkan bait dan kelajuan, mencuba semula apabila berlaku gangguan sementara, dan pemuatan yang tersekat boleh dibatalkan. Fail cache yang lengkap boleh digunakan semula pada cubaan seterusnya. Ikon Tetapan dan Log kini lebih ringkas.

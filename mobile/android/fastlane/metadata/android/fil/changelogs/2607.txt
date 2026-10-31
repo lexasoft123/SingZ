@@ -1,0 +1,1 @@
+Mas maaasahan ang pag-load ng kanta: makikita ang byte at bilis ng download, awtomatikong susubok muli sa pansamantalang aberya, at puwedeng kanselahin ang natigil na pag-load. Magagamit muli ang kumpletong naka-cache na file sa susunod na subok. Mas maliit na ang mga icon ng Settings at Log.

@@ -1,0 +1,1 @@
+Şarkı yükleme daha güvenilir: indirmelerde bayt ve hız gösterilir, geçici hatalarda otomatik yeniden denenir ve takılan yükleme iptal edilebilir. Tekrar denediğinizde önbellekteki tamamlanmış dosyalar yeniden kullanılabilir. Kompakt Ayarlar ve Günlük simgeleri başlıklarda yer açar.

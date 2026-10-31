@@ -1,0 +1,1 @@
+More reliable song loading: downloads show bytes and speed, retry temporary failures, and let you cancel a stalled load. Completed cached files can be reused when you try again. Compact Settings and Log icons leave more room in the headers.

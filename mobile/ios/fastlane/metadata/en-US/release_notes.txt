@@ -1,1 +1,1 @@
-A quick tour helps you find the song, mixer and practice controls. Turkish, Latin American Spanish and Brazilian Portuguese join the interface languages. Clearer output peak meters and playback reliability fixes.
+More reliable song loading: downloads show bytes and speed, retry temporary failures, and let you cancel a stalled load. Completed cached files can be reused when you try again. Compact Settings and Log icons leave more room in the headers.

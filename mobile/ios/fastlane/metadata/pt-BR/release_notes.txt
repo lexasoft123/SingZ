@@ -1,1 +1,1 @@
-Um guia rápido apresenta os controles de músicas, mixer e prática. Agora com turco, espanhol latino-americano e português do Brasil. Picos de volume mais claros e melhorias na estabilidade da reprodução.
+Carregamento de músicas mais confiável: os downloads mostram bytes e velocidade, tentam novamente após falhas temporárias e permitem cancelar um carregamento travado. Ao tentar de novo, os arquivos completos em cache podem ser reutilizados. Ícones de Ajustes e Log mais compactos liberam espaço.
