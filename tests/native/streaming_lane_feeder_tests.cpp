@@ -540,7 +540,9 @@ int main(int argc, char** argv) {
     // 44.1 kHz fixture, written by hand: the helper above is fixed at kRate.
     {
       std::FILE* f = std::fopen(wav441.c_str(), "wb");
-      const uint32_t frames = 120000;
+      // At 48 kHz this has a fractional frame above one half, so truncating
+      // the extent cannot accidentally satisfy the decoded-length assertion.
+      const uint32_t frames = 120003;
       const uint32_t dataBytes = frames * 2 * 2;
       auto u32 = [&](uint32_t v) { std::fwrite(&v, 4, 1, f); };
       auto u16 = [&](uint16_t v) { std::fwrite(&v, 2, 1, f); };
@@ -576,12 +578,12 @@ int main(int argc, char** argv) {
             "a resampled lane opens");
       check(group.prime(0) == singz::DecodedAudioStatus::Ok,
             "and primes at the device rate");
-      // Within a frame or two of the decode: both round the same way from the
-      // same rates, which is what keeps six lanes together.
+      // The timeline must match the decoded path exactly. A one-frame short
+      // streamed extent rejects a whole-song loop rounded from file duration.
       const uint64_t got = group.outputFrames(0);
       const uint64_t want = resampled.audio->frameCount();
-      check(got + 2 >= want && want + 2 >= got,
-            "and its length agrees with the resampled decode");
+      check(got == want,
+            "and its length exactly matches the resampled decode");
 
       // The samples themselves, over the first stretch the ring holds.
       uint64_t start = 0;

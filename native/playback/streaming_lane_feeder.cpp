@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 
 #if defined(__APPLE__)
 #include <pthread.h>
@@ -50,16 +51,24 @@ DecodedAudioStatus StreamingLaneGroup::addLane(OwnedFileDescriptor descriptor,
   const uint32_t outputRate =
       requiredSampleRate == 0 ? info.sampleRate : requiredSampleRate;
 
+  // Match decoded_audio's exactOutputFrames: round the resampled extent to
+  // the nearest frame using integer arithmetic. Truncation made a whole-song
+  // loop rounded from the measured duration exceed a streamed song by one
+  // frame when 44.1 kHz stems played through a 48 kHz output.
+  const uint64_t whole = info.frameCount / info.sampleRate;
+  const uint64_t remainder = info.frameCount % info.sampleRate;
+  if (whole > std::numeric_limits<uint64_t>::max() / outputRate)
+    return DecodedAudioStatus::LimitExceeded;
+  const uint64_t base = whole * outputRate;
+  const uint64_t partial =
+      (remainder * outputRate + info.sampleRate / 2) / info.sampleRate;
+  if (base > std::numeric_limits<uint64_t>::max() - partial)
+    return DecodedAudioStatus::LimitExceeded;
+  const uint64_t outputFrames = base + partial;
   // Never allocate a ring larger than the song it holds. A short stem would
   // otherwise be charged for a window it can never fill, and on a lane shorter
   // than the window the ring IS the whole lane — at which point streaming
   // costs the same as decoding and should at least not cost more.
-  const uint64_t outputFrames =
-      outputRate == info.sampleRate
-          ? info.frameCount
-          : static_cast<uint64_t>(static_cast<double>(info.frameCount) *
-                                  static_cast<double>(outputRate) /
-                                  static_cast<double>(info.sampleRate));
   uint64_t capacity = options_.windowFrames;
   if (outputFrames != 0 && outputFrames < capacity) {
     capacity = 1;
@@ -94,12 +103,7 @@ DecodedAudioStatus StreamingLaneGroup::addLane(OwnedFileDescriptor descriptor,
   lane->outputRate = outputRate;
   // Everything the window and the graph deal in is OUTPUT frames; only the
   // decoder and the waveform pass speak the file's own rate.
-  lane->window.totalFrames =
-      outputRate == info.sampleRate
-          ? info.frameCount
-          : static_cast<uint64_t>(static_cast<double>(info.frameCount) *
-                                  static_cast<double>(outputRate) /
-                                  static_cast<double>(info.sampleRate));
+  lane->window.totalFrames = outputFrames;
   lane->window.sampleRate = {static_cast<double>(outputRate)};
   zdsp::streamingWindowInitialize(&lane->window, 0);
 
