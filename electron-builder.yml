@@ -140,6 +140,19 @@ mac:
     - target: dmg
 dmg:
   title: ${productName}
+  background: build/dmg-background.tiff
+  window:
+    width: 720
+    height: 480
+  iconSize: 88
+  iconTextSize: 16
+  contents:
+    - x: 180
+      y: 280
+    - x: 540
+      y: 280
+      type: link
+      path: /Applications
 linux:
   icon: build/icon.png
   syncDesktopName: true
