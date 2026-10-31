@@ -143,6 +143,17 @@ Prereq state on this machine: models under "~/Library/Application Support/SingZ/
 
 ## Platform: simulators (ios + android)
 
+Android release layout: `ANDROID_SERIAL=emulator-5582 node mobile/tests/edge-to-edge-android.cjs`
+checks an installed English release APK without Metro. Use an isolated API 34+
+emulator: it temporarily switches gesture/three-button navigation and portrait/landscape,
+restoring navigation and rotation afterwards. Native `dumpsys activity top` content
+bounds must fill the display; Library, Settings, Log and Training controls must stay
+inside the system-bar/cutout safe bounds reported by `dumpsys window displays`.
+An API 34 build with `edgeToEdgeEnabled=false` must fail the native content-bounds
+check, proving that the driver detects the regression. UI XML, native dumps and
+screenshots are saved under `E2E_ARTIFACTS` (a temporary directory by default).
+The driver requires an explicit emulator serial, mutes it and never plays audio.
+
 Do iOS first, then Android. All mobile commands run from /Users/maxplanck/Dev/my/SingZ/mobile.
 
 Environment traps (do not re-learn):

@@ -12,6 +12,9 @@ def check(bundle_path):
         for key in ('isObfuscationEnabled', 'isOptimizationsEnabled', 'isShrinkingEnabled'):
             if options.get(key) is not True:
                 raise ValueError(f'R8 {key} must be enabled')
+        if report.get('resourceOptimization', {}).get('isOptimizedShrinkingEnabled') is not True:
+            raise ValueError('R8 optimized resource shrinking must be enabled')
+        print('Resource shrinking: optimized (verified in R8 metadata)')
         for category in ('Obfuscation', 'Optimization', 'Shrinking'):
             restricted = float(report['stats'][f'no{category}Percentage'])
             if not 0 <= restricted <= 100:
