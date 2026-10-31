@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict')
 const { spawnSync } = require('node:child_process')
 const { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs')
-const { devNull, tmpdir } = require('node:os')
+const { tmpdir } = require('node:os')
 const { join, resolve } = require('node:path')
 const { test } = require('node:test')
 
@@ -13,7 +13,14 @@ function fixture(t) {
   t.after(() => rmSync(parent, { recursive: true, force: true }))
   const root = join(parent, 'main checkout')
   mkdirSync(root)
-  const env = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: devNull }
+  // Git for Windows does not accept Node's \\.\nul device spelling as a
+  // config file. Ordinary fixture-owned paths isolate configuration and
+  // bootstrap hooks on every platform without special-device semantics.
+  const globalConfig = join(parent, 'empty global config')
+  const disabledHooks = join(parent, 'empty hooks')
+  writeFileSync(globalConfig, '')
+  mkdirSync(disabledHooks)
+  const env = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: globalConfig }
   for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'SINGZ_SKIP_REVIEW']) delete env[key]
   env.GIT_EDITOR = 'true'
   const run = (args, cwd = root, extraEnv = {}) => spawnSync('git', args, {
@@ -37,7 +44,7 @@ function fixture(t) {
   writeFileSync(join(root, 'file.txt'), 'initial\n')
   writeFileSync(join(root, 'other.txt'), 'initial\n')
   git(['add', '.'])
-  git(['-c', 'core.hooksPath=' + devNull, 'commit', '-qm', 'fixture'])
+  git(['-c', 'core.hooksPath=' + disabledHooks, 'commit', '-qm', 'fixture'])
   const approve = (cwd = root) => {
     writeFileSync(join(git(['rev-parse', '--absolute-git-dir'], cwd), 'singz-reviewed'), `${git(['write-tree'], cwd)}\n`)
   }

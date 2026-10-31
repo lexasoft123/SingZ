@@ -4,7 +4,7 @@ const path = require('node:path')
 const { test } = require('node:test')
 
 const workflow = fs.readFileSync(process.env.SINGZ_TEST_ANDROID_CI_WORKFLOW ||
-  path.resolve(__dirname, '../../.github/workflows/android.yml'), 'utf8')
+  path.resolve(__dirname, '../../.github/workflows/android.yml'), 'utf8').replace(/\r\n/g, '\n')
 function job(name) {
   const start = workflow.indexOf(`\n  ${name}:\n`)
   assert.notEqual(start, -1, `Missing Android ${name} job`)
@@ -19,6 +19,31 @@ function step(source, name) {
   const next = tail.slice(1).search(/^      - /m)
   return next < 0 ? tail : tail.slice(0, next + 1)
 }
+
+test('workflow assertions accept CRLF checkouts without accepting missing cache steps', t => {
+  const temporary = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'singz-android-workflow-crlf-'))
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }))
+  const fixture = path.join(temporary, 'android.yml')
+  const childEnv = { ...process.env, SINGZ_TEST_ANDROID_CI_WORKFLOW: fixture }
+  // This is an independent test-runner invocation, not a worker belonging to
+  // the outer runner; inherited worker context can suppress its exit status.
+  delete childEnv.NODE_TEST_CONTEXT
+  const run = source => {
+    fs.writeFileSync(fixture, source.replace(/\n/g, '\r\n'))
+    return require('node:child_process').spawnSync(process.execPath, [
+      '--test', '--test-name-pattern',
+      '^(both Android build jobs|JVM, native|CI jobs prove|Android cache state)', __filename,
+    ], {
+      env: childEnv,
+      encoding: 'utf8', timeout: 20_000,
+    })
+  }
+  const valid = run(workflow)
+  assert.equal(valid.status, 0, valid.stdout + valid.stderr)
+  const missingRestore = run(workflow.replaceAll('uses: ./.github/actions/mobile-build-cache', 'uses: missing/cache'))
+  assert.notEqual(missingRestore.status, 0)
+  assert.match(missingRestore.stdout + missingRestore.stderr, /cache restore must precede npm postinstall/)
+})
 
 test('both Android build jobs restore shared caches before fresh dependency installation', () => {
   for (const name of ['canary', 'artifacts']) {

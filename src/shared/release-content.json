@@ -1,6 +1,150 @@
 {
-  "version": "0.26.6",
+  "version": "0.26.7",
   "releases": [
+    {
+      "version": "0.26.7",
+      "highlights": [
+        {
+          "id": "whole-song-repeat",
+          "icon": "controls",
+          "platforms": [
+            "desktop"
+          ],
+          "text": {
+            "en": {
+              "title": "Whole-song repeat plays again",
+              "description": "Fixed songs refusing to start with repeat enabled because their end fell between audio frames."
+            },
+            "ru": {
+              "title": "Повтор всей песни снова работает",
+              "description": "Исправлен отказ запуска с включённым повтором, когда конец песни оказывался между аудиокадрами."
+            },
+            "zh-CN": {
+              "title": "整曲循环恢复播放",
+              "description": "修复了歌曲结尾落在两个音频帧之间时，开启循环会导致无法开始播放的问题。"
+            },
+            "zh-TW": {
+              "title": "整首循環恢復播放",
+              "description": "修正歌曲結尾落在兩個音訊影格之間時，開啟循環會導致無法開始播放的問題。"
+            },
+            "hi": {
+              "title": "पूरे गीत का दोहराव फिर चलता है",
+              "description": "गीत का अंत ऑडियो फ़्रेमों के बीच पड़ने पर दोहराव चालू होने से प्लेबैक शुरू नहीं होता था। इसे ठीक किया गया है।"
+            },
+            "ja": {
+              "title": "曲全体のリピートが再び再生可能に",
+              "description": "曲の終わりが音声フレームの間にあると、リピートを有効にした状態で再生を開始できない問題を修正しました。"
+            },
+            "ko": {
+              "title": "전체 곡 반복 재생 복구",
+              "description": "곡 끝이 오디오 프레임 사이에 있을 때 반복을 켜면 재생을 시작할 수 없던 문제를 수정했습니다."
+            },
+            "id": {
+              "title": "Pengulangan seluruh lagu kembali berfungsi",
+              "description": "Memperbaiki lagu yang gagal diputar saat pengulangan aktif karena akhir lagu berada di antara bingkai audio."
+            },
+            "vi": {
+              "title": "Lặp cả bài hát đã hoạt động trở lại",
+              "description": "Sửa lỗi không thể bắt đầu phát khi bật lặp nếu điểm kết thúc bài hát nằm giữa các khung âm thanh."
+            },
+            "fil": {
+              "title": "Gumagana na muli ang pag-ulit ng buong kanta",
+              "description": "Naayos ang hindi pagsisimula ng kanta kapag naka-repeat at ang dulo nito ay nasa pagitan ng mga audio frame."
+            },
+            "ms": {
+              "title": "Ulangan seluruh lagu berfungsi semula",
+              "description": "Membaiki lagu yang gagal dimainkan apabila ulangan dihidupkan kerana hujung lagu berada di antara bingkai audio."
+            },
+            "tr": {
+              "title": "Tüm şarkıyı tekrar çalma düzeltildi",
+              "description": "Şarkının sonu ses kareleri arasına denk geldiğinde tekrar açıkken çalmanın başlayamaması düzeltildi."
+            },
+            "es-419": {
+              "title": "Vuelve a repetir la canción completa",
+              "description": "Se corrigió el error que impedía iniciar canciones con repetición activada cuando su final caía entre fotogramas de audio."
+            },
+            "pt-BR": {
+              "title": "A repetição da música inteira voltou",
+              "description": "Corrigido o erro que impedia iniciar músicas com a repetição ativada quando o final ficava entre quadros de áudio."
+            },
+            "th": {
+              "title": "เล่นเพลงทั้งเพลงซ้ำได้อีกครั้ง",
+              "description": "แก้ไขปัญหาเริ่มเล่นเพลงไม่ได้เมื่อเปิดเล่นซ้ำ หากจุดจบเพลงอยู่ระหว่างเฟรมเสียง"
+            }
+          }
+        },
+        {
+          "id": "phone-download-recovery",
+          "icon": "export",
+          "platforms": [
+            "ios",
+            "android"
+          ],
+          "text": {
+            "en": {
+              "title": "More reliable phone downloads",
+              "description": "Song downloads show bytes and speed, retry temporary failures and let you cancel a stalled load. Completed cached files can be reused."
+            },
+            "ru": {
+              "title": "Надёжнее загрузки на телефоне",
+              "description": "При скачивании видны объём и скорость. Временные сбои запускают повторную попытку, зависшую загрузку можно отменить, а готовые файлы из кэша — использовать снова."
+            },
+            "zh-CN": {
+              "title": "手机下载更可靠",
+              "description": "歌曲下载显示字节数和速度，临时故障会自动重试，可取消停滞的加载，并复用已缓存的完整文件。"
+            },
+            "zh-TW": {
+              "title": "手機下載更可靠",
+              "description": "歌曲下載顯示位元組數與速度，暫時故障會自動重試，可取消停滯的載入，並重用已快取的完整檔案。"
+            },
+            "hi": {
+              "title": "फ़ोन पर ज़्यादा भरोसेमंद डाउनलोड",
+              "description": "गीत डाउनलोड में बाइट और गति दिखती है। अस्थायी त्रुटियों पर फिर कोशिश होती है, अटकी लोडिंग रद्द कर सकते हैं और कैश की पूरी फ़ाइलें फिर इस्तेमाल होती हैं।"
+            },
+            "ja": {
+              "title": "スマートフォンのダウンロードを改善",
+              "description": "曲の転送量と速度を表示し、一時的なエラーは再試行します。進まない読み込みはキャンセルでき、保存済みの完全なファイルは再利用できます。"
+            },
+            "ko": {
+              "title": "더 안정적인 휴대폰 다운로드",
+              "description": "곡 다운로드 용량과 속도를 표시하고 일시적인 오류는 재시도합니다. 멈춘 불러오기를 취소할 수 있으며 완전히 저장된 캐시 파일은 재사용합니다."
+            },
+            "id": {
+              "title": "Unduhan ponsel lebih andal",
+              "description": "Unduhan lagu menampilkan byte dan kecepatan, mencoba lagi saat gangguan sementara, dan pemuatan macet dapat dibatalkan. File cache yang lengkap dapat dipakai lagi."
+            },
+            "vi": {
+              "title": "Tải xuống trên điện thoại ổn định hơn",
+              "description": "Tải bài hát hiển thị số byte và tốc độ, tự thử lại khi có lỗi tạm thời và cho phép hủy khi bị kẹt. Các tệp hoàn chỉnh trong bộ nhớ đệm có thể được dùng lại."
+            },
+            "fil": {
+              "title": "Mas maaasahang download sa telepono",
+              "description": "Makikita ang byte at bilis ng pag-download ng kanta. Susubok muli sa pansamantalang aberya at puwedeng kanselahin ang natigil na pag-load. Magagamit muli ang kumpletong naka-cache na file."
+            },
+            "ms": {
+              "title": "Muat turun telefon lebih andal",
+              "description": "Muat turun lagu menunjukkan bait dan kelajuan, mencuba semula semasa gangguan sementara dan pemuatan tersekat boleh dibatalkan. Fail cache lengkap boleh digunakan semula."
+            },
+            "tr": {
+              "title": "Telefonda daha güvenilir indirmeler",
+              "description": "Şarkı indirmelerinde bayt ve hız gösterilir, geçici hatalarda yeniden denenir ve takılan yükleme iptal edilebilir. Tamamlanmış önbellek dosyaları yeniden kullanılabilir."
+            },
+            "es-419": {
+              "title": "Descargas más confiables en el teléfono",
+              "description": "Las descargas muestran bytes y velocidad, reintentan ante fallas temporales y permiten cancelar una carga atascada. Se pueden reutilizar archivos completos en caché."
+            },
+            "pt-BR": {
+              "title": "Downloads mais confiáveis no celular",
+              "description": "Os downloads mostram bytes e velocidade, tentam novamente após falhas temporárias e permitem cancelar um carregamento travado. Arquivos completos em cache podem ser reutilizados."
+            },
+            "th": {
+              "title": "ดาวน์โหลดบนโทรศัพท์ได้เสถียรขึ้น",
+              "description": "แสดงจำนวนไบต์และความเร็วในการดาวน์โหลดเพลง ลองใหม่เมื่อเกิดข้อผิดพลาดชั่วคราว ยกเลิกการโหลดที่ค้างได้ และใช้ไฟล์ที่ดาวน์โหลดครบแล้วในแคชซ้ำได้"
+            }
+          }
+        }
+      ]
+    },
     {
       "version": "0.26.6",
       "highlights": [

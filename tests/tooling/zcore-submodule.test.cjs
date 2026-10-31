@@ -107,7 +107,7 @@ test('verifies the parent gitlink and prints only its revision', (t) => {
   const fixture = createFixture(t)
   const result = invokeVerifier(fixture.parent, { printRevision: true })
   assert.equal(result.status, 0, result.stderr)
-  assert.equal(result.stdout, `${fixture.firstRevision}\n`)
+  assert.equal(result.stdout.replace(/\r\n/g, '\n'), `${fixture.firstRevision}\n`)
   assert.equal(result.stderr, '')
   const human = invokeVerifier(fixture.parent)
   assert.equal(human.status, 0, human.stderr)
