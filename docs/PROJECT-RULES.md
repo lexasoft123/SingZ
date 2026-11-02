@@ -1,7 +1,8 @@
 # SingZ product and platform rules
 
-Read this document before changing SingZ. [AGENTS.md](../AGENTS.md) defines the
-shared development workflow for Claude Code, Codex, and their subagents.
+For product/platform changes, consult the applicable invariants in this document.
+[AGENTS.md](../AGENTS.md) owns the shared development workflow and documentation
+routing for Claude Code, Codex, and their subagents.
 Paths in prose and commands below are relative to the repository root;
 Markdown links resolve from this document.
 

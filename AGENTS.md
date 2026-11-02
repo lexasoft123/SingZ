@@ -1,27 +1,39 @@
 # SingZ development rules
 
-Canonical workflow for Claude Code, Codex, and subagents. Before making changes,
-read [docs/PROJECT-RULES.md](docs/PROJECT-RULES.md) for product/platform invariants
-and commands; use [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for build runbooks.
-This file owns workflow policy. Current user and host instructions take
+Canonical workflow for Claude Code, Codex, and subagents. This file owns workflow
+policy. Before editing, read applicable sections of
+[docs/PROJECT-RULES.md](docs/PROJECT-RULES.md) for product/platform invariants and
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for setup, build, test, or release
+runbooks. Follow relevant references as needed; small documentation or mechanical
+edits do not require unrelated guides. Current user and host instructions take
 precedence; historical memory must be checked against this checkout.
 
 ## Agents and ownership
 
-- Delegate bounded parts of substantial work when supported; small, tightly
-  coupled fixes can stay with one agent. Pin interfaces and acceptance checks
-  first. Assign explicit files and unique build/scratch directories. Tell each
-  worker it is not alone, must preserve others' edits, and must never run
+- For substantial work, state the goal, milestones, ownership, and acceptance
+  checks before editing. Keep small fixes direct; replan affected work when
+  evidence invalidates the approach. Use persistent plans when duration or
+  coordination warrants them.
+- Delegate bounded work when parallel execution, isolated investigation, or fresh
+  review adds value; keep small, tightly coupled fixes direct. Pin interfaces and
+  acceptance checks first. Assign explicit files and unique build/scratch
+  directories. Tell each worker it is not alone, must preserve others' edits, and
+  must never run
   `git stash`, `checkout`, `reset`, `clean`, `add`, `commit`, or `push`.
 - The coordinator owns Git mutations, integrates changes, independently runs
   acceptance checks, and resolves review findings. Independent features/sessions
   use separate worktrees; bounded workers may share one feature's tree only
   with disjoint ownership. Never race edits to headers, dependencies, or outputs.
-- Use the least expensive suitable available model within host rules. Claude:
-  Sonnet for development/review, Haiku for mechanical work when available;
-  expensive architecture models require a user request. Codex: inherit the
-  configured model unless an override is authorized. Use available roles or a
-  general-purpose agent with the same bounded brief; never invent model IDs.
+- Select agent models autonomously within host rules, optimizing cost per
+  verified result, including retries and supervision. Match capability and effort
+  to task complexity and risk; escalate when results justify it. Use only model
+  IDs and roles available in this environment. Keep briefs bounded; do not restart
+  useful running work merely to change models.
+- Complete the authorized goal autonomously through concrete milestones. Use logs,
+  errors, and failing tests to fix root causes with the smallest sound change; defer
+  unrelated polish. Run meaningful checks at integration checkpoints and repeat
+  when changes, failures, or new risks justify it. Required staged review remains
+  mandatory.
 
 ## Worktrees and builds
 
@@ -49,6 +61,12 @@ precedence; historical memory must be checked against this checkout.
 
 - Add meaningful behavior regressions and prove they reject the old behavior or
   a deliberate negative control. Run applicable checks after integration.
+  Follow applicable CI checks to completion; report evidence and any unverified
+  behavior before declaring completion.
+- Record durable lessons from corrections in existing canonical rules or
+  documentation when they prevent recurrence; avoid task-specific policy and
+  duplicate lesson logs. Periodically prune stale or redundant rules, especially
+  after model or workflow changes.
 - Bootstrap installs `.githooks` via `node scripts/install-git-hooks.cjs`; run it
   separately if needed. Preserve unrelated hook configurations. Both clients
   use the Git hooks; Claude's tool hook only adds early feedback.
