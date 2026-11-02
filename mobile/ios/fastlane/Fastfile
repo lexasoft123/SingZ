@@ -1,5 +1,6 @@
 require_relative "app-build-number"
 require_relative "incremental-archive"
+require_relative "local-signing"
 
 # App Store Connect uploads.
 #
@@ -266,6 +267,14 @@ def review_plain_text(html)
   CGI.unescapeHTML(text).gsub(/\n{3,}/, "\n\n").strip
 end
 
+def signing_match(**options)
+  return match(**options) if ENV["GITHUB_ACTIONS"]
+  password = SingzLocalSigning.prepare
+  result = match(**options, keychain_name: SingzLocalSigning.path, keychain_password: password)
+  SingzLocalSigning.authorize(password)
+  result
+end
+
 platform :ios do
   # The one lane that is ALLOWED to create signing assets, and it is never
   # run by CI — see the readonly note at the top of this file. Run it once
@@ -282,8 +291,8 @@ platform :ios do
     # Both profile types share ONE Apple Distribution certificate — match
     # reuses it rather than minting a second, which matters because Apple
     # caps them. Ad-hoc is what the sis-motors.ru install page serves.
-    match(type: "appstore", readonly: false, api_key: key)
-    match(type: "adhoc", readonly: false, api_key: key, force_for_new_devices: true)
+    signing_match(type: "appstore", readonly: false, api_key: key)
+    signing_match(type: "adhoc", readonly: false, api_key: key, force_for_new_devices: true)
     UI.success("Certificates and profiles are in the certs repo. CI can now fetch them readonly.")
   end
 
@@ -834,7 +843,7 @@ private_lane :install_signing do |options|
   # readonly on purpose, everywhere this runs — see the top of this file.
   # git_url/app_identifier come from the Matchfile so local and CI cannot
   # drift apart; only the auth differs, and that is environment.
-  match(type: options[:type] || "appstore", readonly: true, api_key: options[:api_key])
+  signing_match(type: options[:type] || "appstore", readonly: true, api_key: options[:api_key])
 end
 
 private_lane :archive do |options|
@@ -876,6 +885,7 @@ private_lane :archive do |options|
     # team … matching 'iphoneos*]=Apple Distribution' found".
   ]
   signing_args << "DEVELOPMENT_TEAM=#{team_id}" unless team_id.to_s.empty?
+  signing_args << SingzLocalSigning.xcarg unless ENV["GITHUB_ACTIONS"]
 
   archive_path = File.join(REPO_ROOT, "build-ios/SingZ-native.xcarchive")
   native_inputs = nil

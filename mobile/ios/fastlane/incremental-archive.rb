@@ -100,7 +100,8 @@ module SingzIncrementalArchive
     end
     # Updating resources invalidates the cached signature. Export signs again
     # with the current match profile; give it a valid archive to start from.
-    _out, err, result = Open3.capture3('/usr/bin/codesign', '--force', '--sign',
+    keychain_args = ENV['GITHUB_ACTIONS'] ? [] : ['--keychain', ENV.fetch('SINGZ_SIGNING_KEYCHAIN_PATH')]
+    _out, err, result = Open3.capture3('/usr/bin/codesign', *keychain_args, '--force', '--sign',
       identity, '--preserve-metadata=identifier,entitlements,flags,runtime', application)
     raise err unless result.success?
   end

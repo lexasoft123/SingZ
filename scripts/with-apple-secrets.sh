@@ -75,6 +75,20 @@ trap cleanup EXIT INT TERM HUP
 # that depend on where you happened to be standing.
 plain=$(sops --config /dev/null -d --output-type json "$store")
 
+# Local signing password stays in a private temporary file, never Xcode's
+# environment. The shared store has a dedicated password for this keychain.
+printf '%s' "$plain" | node -e '
+  let raw = "";
+  process.stdin.on("data", d => raw += d);
+  process.stdin.on("end", () => {
+    const password = JSON.parse(raw).singz_keychain_password;
+    if (!password) { console.error("Missing singz_keychain_password in SOPS store"); process.exit(1); }
+    require("node:fs").writeFileSync(process.argv[1], password, {mode: 0o600});
+  });
+' "$tmpdir/signing-password"
+export SINGZ_SIGNING_KEYCHAIN_PASSWORD_FILE="$tmpdir/signing-password"
+export SINGZ_SIGNING_KEYCHAIN_PATH="$HOME/Library/Keychains/singz-ios-signing.keychain-db"
+
 # Parse with node rather than grep/sed: the .p8 is a multi-line PEM, and a
 # line-oriented parse of it is how you get a key that is subtly truncated
 # and an auth error three steps later that says nothing about parsing.
