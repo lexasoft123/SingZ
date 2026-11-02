@@ -21,6 +21,7 @@ import {
 import { torrentRequest } from '../torrent'
 import { C } from './bits'
 import TorrentDownloads from './TorrentDownloads'
+import TorrentSongSearch from './TorrentSongSearch'
 import type { TorrentJob } from '../../../src/shared/torrent'
 const fmt = (n: number): string =>
   n >= 1e9
@@ -240,6 +241,20 @@ export default function TorrentScreen({
             <Text style={s.eyebrow}>Add song / RuTracker</Text>
             <Text style={s.title}>Find your next song</Text>
             <View style={s.tabs}>
+              {button(
+                'Songs',
+                () => flow?.setSearchKind('song'),
+                state.searchKind === 'song',
+                state.busy
+              )}
+              {button(
+                'Releases',
+                () => flow?.setSearchKind('release'),
+                state.searchKind === 'release',
+                state.busy
+              )}
+            </View>
+            <View style={s.tabs}>
               {button('MP3', () => flow?.setFormat('mp3'), state.format === 'mp3', state.busy)}
               {button(
                 'All formats',
@@ -253,111 +268,117 @@ export default function TorrentScreen({
                 ? 'Search MP3 releases for smaller downloads.'
                 : 'Include all supported audio formats, including FLAC.'}
             </Text>
-            {TORRENT_FILENAME_SEARCH_ENABLED && (
-              <View style={s.tabs}>
-                {button(
-                  'Song filenames',
-                  () => flow?.setMode('filename'),
-                  state.mode === 'filename',
-                  state.busy
+            {state.searchKind === 'song' ? (
+              <TorrentSongSearch flow={flow} state={state} />
+            ) : (
+              <>
+                {TORRENT_FILENAME_SEARCH_ENABLED && (
+                  <View style={s.tabs}>
+                    {button(
+                      'Song filenames',
+                      () => flow?.setMode('filename'),
+                      state.mode === 'filename',
+                      state.busy
+                    )}
+                    {button(
+                      'Release titles',
+                      () => flow?.setMode('release'),
+                      state.mode === 'release',
+                      state.busy
+                    )}
+                  </View>
                 )}
-                {button(
-                  'Release titles',
-                  () => flow?.setMode('release'),
-                  state.mode === 'release',
-                  state.busy
-                )}
-              </View>
-            )}
-            <Text style={s.hint}>
-              {state.mode === 'filename'
-                ? 'Find torrents containing a matching song filename, even when the album title is different.'
-                : 'Search release titles by artist, album, or song.'}
-            </Text>
-            <TextInput
-              accessibilityLabel={
-                state.mode === 'filename' ? 'Song filename' : 'Artist or song title'
-              }
-              placeholder={
-                state.mode === 'filename'
-                  ? 'Song filename, for example Sonne'
-                  : 'Artist or song title'
-              }
-              placeholderTextColor={C.dim}
-              value={query}
-              onChangeText={setQuery}
-              autoCorrect={false}
-              autoCapitalize="none"
-              onSubmitEditing={search}
-              returnKeyType="search"
-              maxLength={200}
-              style={s.input}
-            />
-            {button('Search', search, true, state.busy || !query.trim())}
-            <View style={s.stats}>
-              <Text style={s.hint}>{state.releases.length} releases</Text>
-              <Text style={s.sort}>↓ Most seeders first</Text>
-            </View>
+                <Text style={s.hint}>
+                  {state.mode === 'filename'
+                    ? 'Find torrents containing a matching song filename, even when the album title is different.'
+                    : 'Search release titles by artist, album, or song.'}
+                </Text>
+                <TextInput
+                  accessibilityLabel={
+                    state.mode === 'filename' ? 'Song filename' : 'Artist or song title'
+                  }
+                  placeholder={
+                    state.mode === 'filename'
+                      ? 'Song filename, for example Sonne'
+                      : 'Artist or song title'
+                  }
+                  placeholderTextColor={C.dim}
+                  value={query}
+                  onChangeText={setQuery}
+                  autoCorrect={false}
+                  autoCapitalize="none"
+                  onSubmitEditing={search}
+                  returnKeyType="search"
+                  maxLength={200}
+                  style={s.input}
+                />
+                {button('Search', search, true, state.busy || !query.trim())}
+                <View style={s.stats}>
+                  <Text style={s.hint}>{state.releases.length} releases</Text>
+                  <Text style={s.sort}>↓ Most seeders first</Text>
+                </View>
 
-            {state.coverage && (
-              <Text style={s.notice}>
-                {state.coverage.indexedTorrents} torrents indexed
-                {state.coverage.expectedTorrents !== null
-                  ? ' of ' + state.coverage.expectedTorrents
-                  : ''}
-                .
-                {!state.coverage.complete
-                  ? ' Coverage is incomplete; unindexed torrents may be missing.'
-                  : ''}
-                {' Seeder counts are from the catalog snapshot.'}
-              </Text>
-            )}
-            {state.releases.map(release => (
-              <Pressable
-                key={release.id}
-                accessibilityRole="button"
-                disabled={state.busy}
-                onPress={() => {
-                  Keyboard.dismiss()
-                  setFilter(state.mode === 'filename' ? state.query : '')
-                  void flow?.choose(release)
-                }}
-                style={s.release}
-              >
-                <View style={s.grow}>
-                  <Text style={s.fileName}>{release.title}</Text>
-                  {release.matches?.map(file => (
-                    <Text key={file.index} style={s.path}>
-                      {file.path}
-                    </Text>
-                  ))}
-                  {release.matchCount && release.matchCount > (release.matches?.length ?? 0) ? (
-                    <Text style={s.path}>{release.matchCount} matching files</Text>
-                  ) : null}
-                  <Text style={s.path}>
-                    {release.size ? fmt(release.size) : 'Size listed in the torrent'}
+                {state.coverage && (
+                  <Text style={s.notice}>
+                    {state.coverage.indexedTorrents} torrents indexed
+                    {state.coverage.expectedTorrents !== null
+                      ? ' of ' + state.coverage.expectedTorrents
+                      : ''}
+                    .
+                    {!state.coverage.complete
+                      ? ' Coverage is incomplete; unindexed torrents may be missing.'
+                      : ''}
+                    {' Seeder counts are from the catalog snapshot.'}
                   </Text>
-                </View>
-                <View>
-                  <Text style={s.seeders}>{release.seeders}</Text>
-                  <Text style={s.size}>seeders</Text>
-                </View>
-              </Pressable>
-            ))}
-            {!state.busy && state.query && state.releases.length === 0 && (
-              <Text style={s.hint}>
-                {state.mode === 'filename'
-                  ? 'No matching filenames in the indexed catalog.'
-                  : 'No releases found. Try an artist or album title.'}
-              </Text>
+                )}
+                {state.releases.map(release => (
+                  <Pressable
+                    key={release.id}
+                    accessibilityRole="button"
+                    disabled={state.busy}
+                    onPress={() => {
+                      Keyboard.dismiss()
+                      setFilter(state.mode === 'filename' ? state.query : '')
+                      void flow?.choose(release)
+                    }}
+                    style={s.release}
+                  >
+                    <View style={s.grow}>
+                      <Text style={s.fileName}>{release.title}</Text>
+                      {release.matches?.map(file => (
+                        <Text key={file.index} style={s.path}>
+                          {file.path}
+                        </Text>
+                      ))}
+                      {release.matchCount && release.matchCount > (release.matches?.length ?? 0) ? (
+                        <Text style={s.path}>{release.matchCount} matching files</Text>
+                      ) : null}
+                      <Text style={s.path}>
+                        {release.size ? fmt(release.size) : 'Size listed in the torrent'}
+                      </Text>
+                    </View>
+                    <View>
+                      <Text style={s.seeders}>{release.seeders}</Text>
+                      <Text style={s.size}>seeders</Text>
+                    </View>
+                  </Pressable>
+                ))}
+                {!state.busy && state.query && state.releases.length === 0 && (
+                  <Text style={s.hint}>
+                    {state.mode === 'filename'
+                      ? 'No matching filenames in the indexed catalog.'
+                      : 'No releases found. Try an artist or album title.'}
+                  </Text>
+                )}
+                {state.hasMore &&
+                  button(
+                    'More releases',
+                    () => void flow?.search(state.query, true),
+                    false,
+                    state.busy
+                  )}
+              </>
             )}
-            {state.hasMore &&
-              button(
-                'More releases',
-                () => void flow?.search(state.query, true),
-                false,
-                state.busy
-              )}
           </View>
         ) : null}
       </ScrollView>

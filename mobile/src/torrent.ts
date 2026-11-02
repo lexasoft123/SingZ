@@ -22,6 +22,8 @@ export async function torrentRequest(request: TorrentRequest): Promise<TorrentRe
       error: 'The torrent engine is missing from this build. Rebuild and install the native app.'
     }
   try {
+    if (request.op === 'search') log('torrent', `Search releases: ${request.query}`)
+    if (request.op === 'files') log('torrent', `Reading file list: release ${request.release}`)
     if (request.op === 'start' || request.op === 'resume')
       await requestForegroundNotification('torrent')
     const payload =
@@ -29,6 +31,12 @@ export async function torrentRequest(request: TorrentRequest): Promise<TorrentRe
         ? { ...request, url: ruTrackerSearchURL(request.query, request.offset) }
         : request
     const result = JSON.parse(await native.request(JSON.stringify(payload))) as TorrentResult
+    if (request.op === 'search' || request.op === 'files')
+      log(
+        'torrent',
+        result.ok ? `${request.op} completed` : `${request.op} failed: ${result.error}`,
+        result.ok ? 'info' : 'warn'
+      )
     if (['start', 'pause', 'resume', 'cancel', 'consume'].includes(request.op))
       log(
         'torrent',
@@ -37,7 +45,9 @@ export async function torrentRequest(request: TorrentRequest): Promise<TorrentRe
       )
     return result
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : 'Torrent operation failed' }
+    const message = error instanceof Error ? error.message : 'Torrent operation failed'
+    log('torrent', `${request.op} failed: ${message}`, 'warn')
+    return { ok: false, error: message }
   }
 }
 export const torrentBackgroundHint =

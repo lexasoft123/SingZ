@@ -8,6 +8,7 @@ import {
 } from '../../../shared/torrent'
 import './torrent.css'
 import TorrentDownloads from './TorrentDownloads'
+import TorrentSongSearch from './TorrentSongSearch'
 import type { TorrentJob } from '../../../shared/torrent'
 
 const fmt = (n: number): string =>
@@ -136,6 +137,22 @@ export default function TorrentDialog({
       ) : (
         state && (
           <>
+            <div className="torrent-search-modes" aria-label="Search type">
+              <button
+                className={'pill ' + (state.searchKind === 'song' ? 'primary' : 'ghost')}
+                disabled={state.busy}
+                onClick={() => flow?.setSearchKind('song')}
+              >
+                Songs
+              </button>
+              <button
+                className={'pill ' + (state.searchKind === 'release' ? 'primary' : 'ghost')}
+                disabled={state.busy}
+                onClick={() => flow?.setSearchKind('release')}
+              >
+                Releases
+              </button>
+            </div>
             <div className="torrent-search-modes" aria-label="Audio format">
               <button
                 className={'pill ' + (state.format === 'mp3' ? 'primary' : 'ghost')}
@@ -152,171 +169,181 @@ export default function TorrentDialog({
                 All formats
               </button>
             </div>
-            {TORRENT_FILENAME_SEARCH_ENABLED && (
-              <div className="torrent-search-modes">
-                <button
-                  className={'pill ' + (state.mode === 'filename' ? 'primary' : 'ghost')}
-                  disabled={state.busy}
-                  onClick={() => flow?.setMode('filename')}
-                >
-                  Song filenames
-                </button>
-                <button
-                  className={'pill ' + (state.mode === 'release' ? 'primary' : 'ghost')}
-                  disabled={state.busy}
-                  onClick={() => flow?.setMode('release')}
-                >
-                  Release titles
-                </button>
-              </div>
-            )}
-            <p>
-              {state.mode === 'filename'
-                ? 'Find torrents containing a matching song filename, even when the album title is different.'
-                : 'Search release titles by artist, album, or song.'}
-            </p>
-            <form
-              className="torrent-search"
-              onSubmit={(event) => {
-                event.preventDefault()
-                void flow?.search(query)
-              }}
-            >
-              <input
-                id="torrent-search"
-                aria-label={state.mode === 'filename' ? 'Song filename' : 'Artist or song title'}
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder={
-                  state.mode === 'filename'
-                    ? 'Song filename, for example Sonne'
-                    : 'Artist or song title'
-                }
-                maxLength={200}
-              />
-              <button className="pill primary" disabled={state.busy || !query.trim()}>
-                Search
-              </button>
-            </form>
-            <div className="torrent-columns">
-              <section aria-label="Releases sorted by seeders descending">
-                <div className="torrent-list-heading">
-                  <span>{state.releases.length} releases</span>
-                  <strong>↓ Most seeders first</strong>
-                </div>
-
-                {state.coverage && (
-                  <p className="torrent-hint">
-                    {state.coverage.indexedTorrents} torrents indexed
-                    {state.coverage.expectedTorrents !== null
-                      ? ' of ' + state.coverage.expectedTorrents
-                      : ''}
-                    .
-                    {!state.coverage.complete
-                      ? ' Coverage is incomplete; unindexed torrents may be missing.'
-                      : ''}{' '}
-                    Seeder counts are from the catalog snapshot.
-                  </p>
-                )}
-                {state.releases.map((release) => (
-                  <button
-                    key={release.id}
-                    className={
-                      'torrent-release' + (state.release?.id === release.id ? ' selected' : '')
-                    }
-                    disabled={state.busy}
-                    onClick={() => {
-                      setFilter(state.mode === 'filename' ? state.query : '')
-                      void flow?.choose(release)
-                    }}
-                  >
-                    <span>
-                      <b>{release.title}</b>
-                      <small>
-                        {release.size ? fmt(release.size) : 'Size listed in the torrent'}
-                      </small>
-                    </span>
-                    <span className="torrent-seeders">
-                      {release.seeders}
-                      <small>seeders</small>
-                    </span>
-                  </button>
-                ))}
-                {!state.busy && state.query && state.releases.length === 0 && (
-                  <p className="torrent-empty">No releases found. Try an artist or album title.</p>
-                )}
-                {!state.query && (
-                  <p className="torrent-empty">
-                    Search for a release, then choose the song inside it.
-                  </p>
-                )}
-                {state.hasMore && (
-                  <button
-                    className="pill ghost"
-                    disabled={state.busy}
-                    onClick={() => void flow?.search(state.query, true)}
-                  >
-                    More releases
-                  </button>
-                )}
-              </section>
-              <section className="torrent-files" aria-label="Choose one song">
-                {state.listing ? (
-                  <>
-                    <span className="torrent-eyebrow">Choose one song</span>
-                    <h3>{state.listing.name}</h3>
-                    <p>{fmt(state.listing.total)} in the full release</p>
-                    <input
-                      aria-label="Find a song in this release"
-                      value={filter}
-                      onChange={(event) => setFilter(event.target.value)}
-                      placeholder="Find a song in this release"
-                    />
-                    <div className="torrent-file-list">
-                      {state.listing.files
-                        .filter((file) =>
-                          (file.path + ' ' + file.name)
-                            .toLocaleLowerCase()
-                            .includes(filter.toLocaleLowerCase())
-                        )
-                        .map((file) => (
-                          <label key={file.index} className="torrent-file">
-                            <input
-                              type="radio"
-                              name="torrent-song"
-                              checked={state.selected === file.index}
-                              disabled={state.busy}
-                              onChange={() => flow?.select(file.index)}
-                            />
-                            <span>
-                              {file.name}
-                              <small>{file.path}</small>
-                            </span>
-                            <span>{fmt(file.size)}</span>
-                          </label>
-                        ))}
-                    </div>
-                    <p>
-                      {selected
-                        ? '1 song selected · ' + fmt(selected.size)
-                        : 'Select one audio file.'}
-                    </p>
+            {state.searchKind === 'song' ? (
+              <TorrentSongSearch flow={flow} state={state} />
+            ) : (
+              <>
+                {TORRENT_FILENAME_SEARCH_ENABLED && (
+                  <div className="torrent-search-modes">
                     <button
-                      className="pill primary torrent-download-button"
-                      disabled={state.busy || !selected}
-                      onClick={() => void flow?.download()}
+                      className={'pill ' + (state.mode === 'filename' ? 'primary' : 'ghost')}
+                      disabled={state.busy}
+                      onClick={() => flow?.setMode('filename')}
                     >
-                      Add to queue{selected ? ' · ' + fmt(selected.size) : ''}
+                      Song filenames
                     </button>
-                  </>
-                ) : (
-                  <div className="torrent-empty">
-                    <h3>An album, just your song.</h3>
-                    <p>Choose a release on the left, then select the track you want.</p>
+                    <button
+                      className={'pill ' + (state.mode === 'release' ? 'primary' : 'ghost')}
+                      disabled={state.busy}
+                      onClick={() => flow?.setMode('release')}
+                    >
+                      Release titles
+                    </button>
                   </div>
                 )}
-              </section>
-            </div>
+                <p>
+                  {state.mode === 'filename'
+                    ? 'Find torrents containing a matching song filename, even when the album title is different.'
+                    : 'Search release titles by artist, album, or song.'}
+                </p>
+                <form
+                  className="torrent-search"
+                  onSubmit={(event) => {
+                    event.preventDefault()
+                    void flow?.search(query)
+                  }}
+                >
+                  <input
+                    id="torrent-search"
+                    aria-label={
+                      state.mode === 'filename' ? 'Song filename' : 'Artist or song title'
+                    }
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    placeholder={
+                      state.mode === 'filename'
+                        ? 'Song filename, for example Sonne'
+                        : 'Artist or song title'
+                    }
+                    maxLength={200}
+                  />
+                  <button className="pill primary" disabled={state.busy || !query.trim()}>
+                    Search
+                  </button>
+                </form>
+                <div className="torrent-columns">
+                  <section aria-label="Releases sorted by seeders descending">
+                    <div className="torrent-list-heading">
+                      <span>{state.releases.length} releases</span>
+                      <strong>↓ Most seeders first</strong>
+                    </div>
+
+                    {state.coverage && (
+                      <p className="torrent-hint">
+                        {state.coverage.indexedTorrents} torrents indexed
+                        {state.coverage.expectedTorrents !== null
+                          ? ' of ' + state.coverage.expectedTorrents
+                          : ''}
+                        .
+                        {!state.coverage.complete
+                          ? ' Coverage is incomplete; unindexed torrents may be missing.'
+                          : ''}{' '}
+                        Seeder counts are from the catalog snapshot.
+                      </p>
+                    )}
+                    {state.releases.map((release) => (
+                      <button
+                        key={release.id}
+                        className={
+                          'torrent-release' + (state.release?.id === release.id ? ' selected' : '')
+                        }
+                        disabled={state.busy}
+                        onClick={() => {
+                          setFilter(state.mode === 'filename' ? state.query : '')
+                          void flow?.choose(release)
+                        }}
+                      >
+                        <span>
+                          <b>{release.title}</b>
+                          <small>
+                            {release.size ? fmt(release.size) : 'Size listed in the torrent'}
+                          </small>
+                        </span>
+                        <span className="torrent-seeders">
+                          {release.seeders}
+                          <small>seeders</small>
+                        </span>
+                      </button>
+                    ))}
+                    {!state.busy && state.query && state.releases.length === 0 && (
+                      <p className="torrent-empty">
+                        No releases found. Try an artist or album title.
+                      </p>
+                    )}
+                    {!state.query && (
+                      <p className="torrent-empty">
+                        Search for a release, then choose the song inside it.
+                      </p>
+                    )}
+                    {state.hasMore && (
+                      <button
+                        className="pill ghost"
+                        disabled={state.busy}
+                        onClick={() => void flow?.search(state.query, true)}
+                      >
+                        More releases
+                      </button>
+                    )}
+                  </section>
+                  <section className="torrent-files" aria-label="Choose one song">
+                    {state.listing ? (
+                      <>
+                        <span className="torrent-eyebrow">Choose one song</span>
+                        <h3>{state.listing.name}</h3>
+                        <p>{fmt(state.listing.total)} in the full release</p>
+                        <input
+                          aria-label="Find a song in this release"
+                          value={filter}
+                          onChange={(event) => setFilter(event.target.value)}
+                          placeholder="Find a song in this release"
+                        />
+                        <div className="torrent-file-list">
+                          {state.listing.files
+                            .filter((file) =>
+                              (file.path + ' ' + file.name)
+                                .toLocaleLowerCase()
+                                .includes(filter.toLocaleLowerCase())
+                            )
+                            .map((file) => (
+                              <label key={file.index} className="torrent-file">
+                                <input
+                                  type="radio"
+                                  name="torrent-song"
+                                  checked={state.selected === file.index}
+                                  disabled={state.busy}
+                                  onChange={() => flow?.select(file.index)}
+                                />
+                                <span>
+                                  {file.name}
+                                  <small>{file.path}</small>
+                                </span>
+                                <span>{fmt(file.size)}</span>
+                              </label>
+                            ))}
+                        </div>
+                        <p>
+                          {selected
+                            ? '1 song selected · ' + fmt(selected.size)
+                            : 'Select one audio file.'}
+                        </p>
+                        <button
+                          className="pill primary torrent-download-button"
+                          disabled={state.busy || !selected}
+                          onClick={() => void flow?.download()}
+                        >
+                          Add to queue{selected ? ' · ' + fmt(selected.size) : ''}
+                        </button>
+                      </>
+                    ) : (
+                      <div className="torrent-empty">
+                        <h3>An album, just your song.</h3>
+                        <p>Choose a release on the left, then select the track you want.</p>
+                      </div>
+                    )}
+                  </section>
+                </div>
+              </>
+            )}
           </>
         )
       )}
