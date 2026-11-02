@@ -8,6 +8,9 @@ precedence; historical memory must be checked against this checkout.
 
 ## Agents and ownership
 
+- For substantial work, state the goal, milestones, ownership, and acceptance
+  checks before editing. Keep small fixes direct; replan affected work when
+  evidence invalidates the approach.
 - Delegate bounded parts of substantial work when supported; small, tightly
   coupled fixes can stay with one agent. Pin interfaces and acceptance checks
   first. Assign explicit files and unique build/scratch directories. Tell each
@@ -24,9 +27,11 @@ precedence; historical memory must be checked against this checkout.
   Give each agent a bounded brief; escalate only when needed, and do not
   restart useful running work merely to change its model. Use only model IDs
   and roles actually available in the current environment.
-- Prioritize completing the full goal through concrete milestones. Defer minor
-  polish and unrelated fixes; run meaningful checks at integration checkpoints
-  instead of repeatedly testing unchanged work or multiplying review cycles.
+- Complete the authorized goal autonomously through concrete milestones. Use logs,
+  errors, and failing tests to fix root causes with the smallest sound change; defer
+  unrelated polish. Run meaningful checks at integration checkpoints and repeat
+  when changes, failures, or new risks justify it. Required staged review remains
+  mandatory.
 
 ## Worktrees and builds
 
@@ -54,6 +59,11 @@ precedence; historical memory must be checked against this checkout.
 
 - Add meaningful behavior regressions and prove they reject the old behavior or
   a deliberate negative control. Run applicable checks after integration.
+  Follow applicable CI checks to completion; report evidence and any unverified
+  behavior before declaring completion.
+- Record durable lessons from corrections in existing canonical rules or
+  documentation when they prevent recurrence; avoid task-specific policy and
+  duplicate lesson logs.
 - Bootstrap installs `.githooks` via `node scripts/install-git-hooks.cjs`; run it
   separately if needed. Preserve unrelated hook configurations. Both clients
   use the Git hooks; Claude's tool hook only adds early feedback.
