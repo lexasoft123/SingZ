@@ -10,7 +10,9 @@ The downloader uses C++ libtorrent-rasterbar, linked statically with OpenSSL;
 there is no Go runtime or daemon. Shared TypeScript owns the screen state,
 CP1251 search encoding and site extraction scripts. Electron uses a stable
 N-API addon; iOS uses a local Objective-C++ pod; Android uses JNI. Website
-credentials stay in the platform browser session. Passwords are not stored in
+credentials stay in the platform browser session. On iOS, Cloudflare challenge
+frames at `challenges.cloudflare.com` and `about:blank`/`about:srcdoc` are
+allowed as embedded frames; main-page navigation remains on RuTracker. Passwords are not stored in
 SingZ settings or passed to the torrent engine.
 
 ## Build
@@ -93,6 +95,10 @@ cmake -S native/torrent -B .engines-src/torrent/tests \
 cmake --build .engines-src/torrent/tests --parallel 4
 ctest --test-dir .engines-src/torrent/tests --output-on-failure
 ```
+
+Run `mobile/scripts/test-torrent-navigation.sh` on macOS for the iOS navigation
+allowlist regression cases (including Cloudflare frames and blocked external
+main-page/popup navigation).
 
 The test-only peer connector is excluded from production builds. Device E2E
 uses fixture provider responses and the real native downloader, then drives

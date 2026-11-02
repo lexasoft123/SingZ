@@ -7,7 +7,7 @@ Pod::Spec.new do |s|
  s.author='SingZ'
  s.source={:path=>'.'}
  s.platforms={:ios=>'15.1'}
- s.source_files='TorrentModule.mm','rutracker_scripts.h'
+ s.source_files='TorrentModule.mm','*.h'
  s.vendored_frameworks='SingzTorrentCore.xcframework'
  s.resource_bundles={'SingzTorrentNotices'=>'notices/*'}
  s.frameworks='WebKit','UIKit','Security','SystemConfiguration'

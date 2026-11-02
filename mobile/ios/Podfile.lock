@@ -2657,7 +2657,7 @@ SPEC CHECKSUMS:
   SingzDeviceCallback: 34dbf61665b0e42edc7880f58f18fd01a7c6cc17
   SingzDspRuntime: edd3662e17eea69477fa9ee2dd2b3abcb54e8df8
   SingzPlaybackSession: 13519bcf87d36889c81aa7ae9c445d54206b1029
-  SingzTorrent: dc59969baea3ab6b8671629bee75f940a892ff09
+  SingzTorrent: c7438a4fbf2f0016c6a26ae75fb2938f83be82ce
   Yoga: 9891cfb1c680f64de9c41b09e7453dea33454d2b
 
 PODFILE CHECKSUM: 9a7e1e69575b7c1e3917501188b06937fd1337f0
