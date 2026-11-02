@@ -14,10 +14,11 @@ export function MelodyGrid({ prompt, activeTarget, matchedCount }: { prompt: Tra
       {grid.rows.map(row => <View key={row.midi} style={[s.row, { top: y(row.y)-7 }]}><Text style={[s.rowLabel, { color: theme.dim }]}>{row.label}</Text><View style={{ flex: 1, height: 1, backgroundColor: theme.text, opacity: row.label ? .14 : .06 }} /></View>)}
       {grid.notes.map((note, i) => {
         const prev = grid.notes[i-1], dx = prev ? x(note.x) - x(prev.x) : 0, dy = prev ? y(note.y) - y(prev.y) : 0
+        const connectorLength = Math.max(0, Math.hypot(dx, dy) - 24)
         const done = i < matchedCount
         return <React.Fragment key={i}>
           <View style={{ position: 'absolute', left: x(note.x), top: 22, height: 114, borderLeftWidth: 1, borderStyle: 'dashed', borderColor: theme.line }} />
-          {prev && <><View style={{ position: 'absolute', left: (x(note.x)+x(prev.x))/2 - Math.hypot(dx,dy)/2, top: (y(note.y)+y(prev.y))/2, width: Math.hypot(dx,dy), height: 2, backgroundColor: theme.accent, opacity: .3, transform: [{ rotate: `${Math.atan2(dy, dx)}rad` }] }} /><Text style={[s.interval, { left: (x(note.x)+x(prev.x))/2 - 18, color: theme.dim }]}>{signedMelodyInterval(note.interval!)}</Text></>}
+          {prev && <><View style={{ position: 'absolute', left: (x(note.x)+x(prev.x))/2 - connectorLength/2, top: (y(note.y)+y(prev.y))/2 - 1, width: connectorLength, height: 2, backgroundColor: theme.accent, opacity: .3, transform: [{ rotate: `${Math.atan2(dy, dx)}rad` }] }} /><Text style={[s.interval, { left: (x(note.x)+x(prev.x))/2 - 18, color: theme.dim }]}>{signedMelodyInterval(note.interval!)}</Text></>}
           <View testID={`melody-note-${i}`} accessibilityLabel={`${note.noteName}, ${done ? t('phone.training.noteLocked') : i === activeTarget ? t('phone.training.currentTarget') : i+1}`} style={[s.ring, { left: x(note.x)-17, top: y(note.y)-17, borderColor: i === activeTarget && !done ? theme.accent : 'transparent' }]}><View style={[s.dot, { backgroundColor: done ? '#ffce45' : theme.panelDeep, borderColor: done ? '#ffce45' : theme.dim }]}>{done && <Text style={s.check}>✓</Text>}</View></View>
           <Text style={[s.number, { left: x(note.x)-12, color: theme.dim }]}>{i+1}</Text>
         </React.Fragment>
