@@ -85,14 +85,20 @@ export default function TorrentDialog({
       {state?.view === 'account' ? (
         <section className="torrent-account">
           <h3>{state.connected ? 'Connected to RuTracker' : 'Bring your RuTracker account'}</h3>
-          <p>Sign in on the RuTracker website inside SingZ. Your password stays with the site.</p>
-          <button
-            className="pill primary"
-            disabled={state.busy}
-            onClick={() => void flow?.connect()}
-          >
-            Sign in to RuTracker
-          </button>
+          <p>
+            {state.connected
+              ? 'Return to search, or sign out to switch accounts.'
+              : 'Sign in on the RuTracker website inside SingZ. Your password stays with the site.'}
+          </p>
+          {!state.connected && (
+            <button
+              className="pill primary"
+              disabled={state.busy}
+              onClick={() => void flow?.connect()}
+            >
+              Sign in to RuTracker
+            </button>
+          )}
           {state.connected && (
             <>
               <button className="pill ghost" disabled={state.busy} onClick={() => flow?.back()}>

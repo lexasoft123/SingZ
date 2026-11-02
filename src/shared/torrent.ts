@@ -44,6 +44,16 @@ export interface TorrentSearch {
 }
 export type TorrentTransport = (request: TorrentRequest) => Promise<TorrentResult>
 export const RUTRACKER_ORIGIN = 'https://rutracker.org'
+/** Cookie presence restores the account UI without a network request. The
+ * authenticated page remains authoritative when performing a search. */
+export function hasRuTrackerSession(
+  cookies: ReadonlyArray<{ name: string; value: string }>
+): boolean {
+  return cookies.some(
+    ({ name, value }) => (name === 'bb_session' || name === 'bb_data') && value.length > 0
+  )
+}
+
 export function validTorrentRequest(input: unknown): input is TorrentRequest {
   if (!input || typeof input !== 'object') return false
   const r = input as Record<string, unknown>

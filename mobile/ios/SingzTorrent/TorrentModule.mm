@@ -1,4 +1,5 @@
 #include "NavigationPolicy.h"
+#include "SessionCookie.h"
 #include "rutracker_scripts.h"
 #import <React/RCTBridgeModule.h>
 #import <UIKit/UIKit.h>
@@ -397,14 +398,7 @@ RCT_EXPORT_METHOD(request : (NSString *)input resolver : (
     if ([op isEqual:@"account"]) {
       [self.site.web.configuration.websiteDataStore.httpCookieStore
           getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
-            BOOL connected = NO;
-            for (NSHTTPCookie *cookie in cookies)
-              if ([cookie.name isEqual:@"bb_data"] && cookie.value.length > 0 &&
-                  ([cookie.domain isEqual:@"rutracker.org"] ||
-                   [cookie.domain hasSuffix:@".rutracker.org"])) {
-                connected = YES;
-                break;
-              }
+            BOOL connected = SZTorrentHasSession(cookies);
             resolve(connected
                         ? @"{\"ok\":true,\"data\":{\"connected\":true}}"
                         : @"{\"ok\":true,\"data\":{\"connected\":false}}");
