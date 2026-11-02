@@ -148,8 +148,9 @@ const readIfPresent = (path) => (existsSync(path) ? readFileSync(path, 'utf8') :
     await win.waitForSelector('.pill.karaoke', { timeout: 60000 })
     await win.waitForFunction(() => window.__melody && window.__melody.f0, null, { timeout: 180000 })
     // Checked once a line is drawn, not at the click: right after the switch
-    // the engine can still hold A (and the karaoke pill can be A's), and B's
-    // own line is published only after B's lanes are loaded.
+    // the engine can still hold A (and before the loader stopped closing the
+    // catalog early, the karaoke pill could be A's), and B's own line is
+    // published only after B's lanes are loaded.
     await assertOpenedProject(win, { dir: B_DIR, name: bName, backups: others })
 
     // Watch long enough for A's tracker to have finished and tried to speak.
