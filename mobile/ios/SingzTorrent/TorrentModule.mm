@@ -1,3 +1,4 @@
+#include "NavigationPolicy.h"
 #include "rutracker_scripts.h"
 #import <React/RCTBridgeModule.h>
 #import <UIKit/UIKit.h>
@@ -169,9 +170,8 @@ typedef void (^SZCompletion)(id, NSError *);
                     decisionHandler:
                         (void (^)(WKNavigationActionPolicy))decision {
   NSURL *url = action.request.URL;
-  BOOL trusted = [url.scheme isEqualToString:@"https"] &&
-                 [url.host isEqualToString:@"rutracker.org"] &&
-                 (!url.port || url.port.integerValue == 443);
+  BOOL trusted = SZTorrentNavigationAllowed(url, action.targetFrame != nil,
+                                            action.targetFrame.isMainFrame);
   decision(trusted ? WKNavigationActionPolicyAllow
                    : WKNavigationActionPolicyCancel);
 }
