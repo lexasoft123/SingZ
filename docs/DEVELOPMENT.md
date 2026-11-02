@@ -2,7 +2,8 @@
 
 [AGENTS.md](../AGENTS.md) is the canonical policy for agents, worktrees,
 bootstrap, native build serialization, cache reuse, and commits. Both agents
-also read [PROJECT-RULES.md](PROJECT-RULES.md) for product/platform invariants.
+consult applicable sections of [PROJECT-RULES.md](PROJECT-RULES.md) for
+product/platform invariants. Load the runbooks below when the task needs them.
 `CLAUDE.md` is only an `@AGENTS.md` entry point; the instructions below explain
 the tooling.
 
