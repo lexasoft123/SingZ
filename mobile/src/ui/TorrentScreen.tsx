@@ -58,7 +58,7 @@ export default function TorrentScreen({
     [filter, setFilter] = useState('')
   useEffect(() => {
     mounted.current = true
-    const flow = new TorrentFlow(torrentRequest)
+    const flow = new TorrentFlow(torrentRequest, 'mp3')
     ref.current = flow
     const off = flow.subscribe(() => setState(flow.state))
     setState(flow.state)
@@ -239,6 +239,20 @@ export default function TorrentScreen({
           <View style={s.section}>
             <Text style={s.eyebrow}>Add song / RuTracker</Text>
             <Text style={s.title}>Find your next song</Text>
+            <View style={s.tabs}>
+              {button('MP3', () => flow?.setFormat('mp3'), state.format === 'mp3', state.busy)}
+              {button(
+                'All formats',
+                () => flow?.setFormat('all'),
+                state.format === 'all',
+                state.busy
+              )}
+            </View>
+            <Text style={s.hint}>
+              {state.format === 'mp3'
+                ? 'Search MP3 releases for smaller downloads.'
+                : 'Include all supported audio formats, including FLAC.'}
+            </Text>
             {TORRENT_FILENAME_SEARCH_ENABLED && (
               <View style={s.tabs}>
                 {button(

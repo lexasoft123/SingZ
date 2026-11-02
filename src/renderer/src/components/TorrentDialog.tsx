@@ -136,6 +136,22 @@ export default function TorrentDialog({
       ) : (
         state && (
           <>
+            <div className="torrent-search-modes" aria-label="Audio format">
+              <button
+                className={'pill ' + (state.format === 'mp3' ? 'primary' : 'ghost')}
+                disabled={state.busy}
+                onClick={() => flow?.setFormat('mp3')}
+              >
+                MP3
+              </button>
+              <button
+                className={'pill ' + (state.format === 'all' ? 'primary' : 'ghost')}
+                disabled={state.busy}
+                onClick={() => flow?.setFormat('all')}
+              >
+                All formats
+              </button>
+            </div>
             {TORRENT_FILENAME_SEARCH_ENABLED && (
               <div className="torrent-search-modes">
                 <button

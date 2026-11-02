@@ -6,6 +6,14 @@ seeders descending, open a release and choose one audio file. The interface
 shows release size separately from the selected song size. It does not display
 or rank by leechers. Completed audio enters the existing Add song flow.
 
+Phones default to MP3 release searches; All formats includes lossless audio.
+Desktop exposes the same choice and defaults to All formats. MP3 adds the
+format keyword to the site search while preserving seeders-descending order.
+Opening a release checks its actual metadata and offers only .mp3 files in
+MP3 mode. A release title is not treated as proof of its contents; a release
+without MP3 files gets an explicit message instead of offering FLAC.
+This searches release titles; catalog-wide filename search remains gated below.
+
 The downloader uses C++ libtorrent-rasterbar, linked statically with OpenSSL;
 there is no Go runtime or daemon. Shared TypeScript owns the screen state,
 CP1251 search encoding and site extraction scripts. Electron uses a stable

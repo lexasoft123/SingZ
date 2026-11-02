@@ -221,6 +221,68 @@ describe('Torrent acquisition flow', () => {
     expect(f.state.queue.downloads).toEqual([active])
     expect(f.state.job).toEqual(active)
   })
+  it('searches MP3 releases without changing seeder order and offers only verified MP3 files', async () => {
+    const calls: TorrentRequest[] = []
+    const f = new TorrentFlow(async (r) => {
+      calls.push(r)
+      if (r.op === 'status') return ok(null)
+      if (r.op === 'queue') return ok({ paused: false, downloads: [] })
+      if (r.op === 'account') return ok({ connected: true })
+      if (r.op === 'search') return ok({ releases, nextOffset: 50, hasMore: true })
+      if (r.op === 'files')
+        return ok({
+          ...listing,
+          files: [
+            ...listing.files,
+            { index: 7, name: 'Sonne.MP3', path: 'album/Sonne.MP3', size: 300 }
+          ]
+        })
+      if (r.op === 'start') return ok({ ...job, index: r.index })
+      return ok(null)
+    }, 'mp3')
+    flows.push(f)
+    await f.initialize()
+    expect(f.state.format).toBe('mp3')
+    await f.search('Rammstein Sonne')
+    await f.search('Rammstein Sonne', true)
+    expect(calls.filter((r) => r.op === 'search')).toEqual([
+      { op: 'search', query: 'Rammstein Sonne mp3', mode: 'release', offset: 0 },
+      { op: 'search', query: 'Rammstein Sonne mp3', mode: 'release', offset: 50 }
+    ])
+    expect(f.state.query).toBe('Rammstein Sonne')
+    expect(f.state.releases.map((r) => r.seeders)).toEqual([42, 4])
+    await f.choose(releases[0])
+    expect(f.state.listing?.files.map((file) => file.index)).toEqual([7])
+    f.select(0)
+    expect(f.state.selected).toBeNull()
+    f.select(7)
+    await f.download()
+    expect(calls.find((r) => r.op === 'start')).toEqual({ op: 'start', release: '12345', index: 7 })
+    f.setFormat('all')
+    expect(f.state.releases).toEqual([])
+    expect(f.state.nextOffset).toBe(0)
+    await f.choose(releases[0])
+    expect(f.state.listing?.files.map((file) => file.index)).toEqual([0, 7])
+  })
+  it('does not substitute FLAC when a release found by MP3 keyword has no MP3 files', async () => {
+    const f = new TorrentFlow(
+      async (r) =>
+        r.op === 'files'
+          ? ok(listing)
+          : r.op === 'account'
+            ? ok({ connected: true })
+            : r.op === 'queue'
+              ? ok({ paused: false, downloads: [] })
+              : ok(null),
+      'mp3'
+    )
+    flows.push(f)
+    await f.initialize()
+    await f.choose(releases[0])
+    expect(f.state.listing).toBeNull()
+    expect(f.state.error).toContain('no MP3 files')
+    expect(f.state.selected).toBeNull()
+  })
   it('merges subsequent search pages without duplicating a release', async () => {
     let page = 0
     const f = flow(async (r) => {
