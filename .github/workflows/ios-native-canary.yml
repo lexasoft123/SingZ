@@ -69,6 +69,9 @@ jobs:
           node scripts/sync-singz-dsp-runtime.js --check
         working-directory: mobile
 
+      - name: Build C++ torrent SDK for device and simulator
+        run: python3 scripts/build-torrent-ios.py
+
       - name: Install pods
         working-directory: mobile/ios
         env:

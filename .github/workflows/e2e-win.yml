@@ -19,7 +19,14 @@ jobs:
           node-version: 24
           cache: npm
 
+      - uses: ilammy/msvc-dev-cmd@v1
+
       - run: npm ci
+
+      - name: Build C++ torrent SDK and addon
+        run: |
+          python scripts/vendor-torrent.py win32-x64
+          node scripts/build-torrent-addon.cjs win32-x64
 
       - name: Build and load native capture addon in Electron
         run: |

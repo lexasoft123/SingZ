@@ -65,6 +65,8 @@ function main(builderArgs = process.argv.slice(2)) {
   const targets = requestedCaptureTargets(builderArgs)
   for (const target of targets) {
     run(process.execPath, [join(root, 'scripts/build-capture-addon.cjs'), target])
+    run(process.platform === 'win32' ? 'python' : 'python3', [join(root, 'scripts/vendor-torrent.py'), target])
+    run(process.execPath, [join(root, 'scripts/build-torrent-addon.cjs'), target])
   }
   if (builderArgs.includes('--universal')) {
     run(process.execPath, [join(root, 'scripts/build-capture-universal.cjs')])

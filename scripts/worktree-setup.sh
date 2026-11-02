@@ -81,7 +81,7 @@ link() { # link <relpath> — symlink main's copy when the worktree lacks it
 # at another branch's addon, which is the whole point.
 # src/main/analyze-provenance.ts is the safety net for what this cannot reach
 # (a packaged app, a hand-copied binary); this is the fix.
-REPO_BUILT='singz-analyze singz-analyze.exe singz-analyze.source-hash
+REPO_BUILT='torrent singz-analyze singz-analyze.exe singz-analyze.source-hash
             singz-analyze.exe.source-hash singz-capture.node
             singz-capture.node.source-hash'
 
@@ -111,6 +111,7 @@ mirror_vendor() {
   for entry in "$MAIN"/vendor/*; do
     [ -e "$entry" ] || continue
     name=$(basename "$entry")
+    is_repo_built "$name" && continue
     # An engine target dir (darwin-arm64, win32-x64, ...) is the mixed one:
     # go in and link per file. Everything else at this level is third-party.
     if [ -d "$entry" ] && [ "$name" != "packs" ]; then
@@ -293,6 +294,7 @@ if [ "$MODE" != "--desktop-only" ]; then
   fi
 
   if [ "$(uname)" = "Darwin" ] && command -v pod >/dev/null 2>&1; then
+    python3 "$WT/scripts/build-torrent-ios.py"
     echo "iOS pods (CocoaPods global cache + ccache make repeats quick):"
     # LANG: CocoaPods crashes in non-interactive shells (agent sessions)
     # with "Unicode Normalization not appropriate for ASCII-8BIT" otherwise.

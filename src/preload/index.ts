@@ -10,6 +10,7 @@ import type {
 } from '../shared/types'
 
 const api: SingzApi = {
+  torrentRequest: request => ipcRenderer.invoke('torrent:request', request),
   pathForFile: (file) => webUtils.getPathForFile(file),
 
   getSplitterMode: () => ipcRenderer.invoke('splitter:mode'),

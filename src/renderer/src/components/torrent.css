@@ -1,0 +1,43 @@
+.torrent-dialog{width:min(980px,94vw);max-height:90vh;overflow:auto;padding:28px;color:var(--text);background:var(--bg)}
+.torrent-heading{display:flex;align-items:center;gap:10px;margin-bottom:24px}
+.torrent-heading>div{margin-right:auto;min-width:0}
+.torrent-heading h2{margin:6px 0 0}
+.torrent-eyebrow{font-size:11px;letter-spacing:1.2px;text-transform:uppercase;color:var(--dim)}
+.torrent-search{display:flex;gap:10px;margin-bottom:22px}
+.torrent-search input,.torrent-files>input{min-width:0;flex:1;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--text);font:inherit}
+.torrent-columns{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:26px}
+.torrent-list-heading{display:flex;justify-content:space-between;gap:10px;margin-bottom:10px;font-size:12px;color:var(--dim)}
+.torrent-list-heading strong{color:var(--accent);font-weight:500}
+.torrent-release{display:flex;justify-content:space-between;gap:14px;text-align:left;width:100%;padding:16px 12px;background:transparent;color:var(--text);border:0;border-top:1px solid var(--line);font:inherit}
+.torrent-release.selected{box-shadow:inset 3px 0 var(--accent);background:color-mix(in srgb,var(--accent) 10%,var(--bg))}
+.torrent-release b{font-weight:550;overflow-wrap:anywhere}
+.torrent-release small,.torrent-file small{display:block;color:var(--dim);font-size:11px;margin-top:5px;overflow-wrap:anywhere}
+.torrent-seeders{color:var(--accent);font-size:20px;text-align:right;flex-shrink:0;font-variant-numeric:tabular-nums}
+.torrent-files{padding:20px;border:1px solid var(--line);border-radius:12px;min-width:0}
+.torrent-files h3{overflow-wrap:anywhere;margin:8px 0}
+.torrent-files p,.torrent-account p,.torrent-download p{color:var(--dim);font-size:13px}
+.torrent-files>input{width:100%;margin:12px 0}
+.torrent-file-list{max-height:360px;overflow:auto}
+.torrent-file{display:flex;align-items:center;gap:10px;padding:13px 0;border-bottom:1px solid var(--line)}
+.torrent-file>span:nth-child(2){min-width:0;flex:1;overflow-wrap:anywhere;font-size:13px}
+.torrent-file>span:last-child{font-size:11px;color:var(--dim);flex-shrink:0}
+.torrent-file input{accent-color:var(--accent)}
+.torrent-download-button{width:100%;margin-top:12px}
+.torrent-empty{padding:30px 6px;color:var(--dim);font-size:13px}
+.torrent-account{padding:30px 0}
+.torrent-account .pill{margin:18px 10px 0 0}
+.torrent-download{max-width:510px;margin:38px auto}
+.torrent-download h3{font-size:25px;overflow-wrap:anywhere}
+.torrent-download progress{width:100%;height:8px;accent-color:var(--accent);border:0}
+.torrent-progress-text{display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin-top:30px}
+.torrent-progress-text strong{font-size:36px;font-weight:500;font-variant-numeric:tabular-nums}
+.torrent-progress-text span{color:var(--dim);font-size:12px}
+.torrent-download-actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:28px}
+.torrent-error{border-left:3px solid var(--accent);padding:12px;margin:12px 0;color:var(--text);background:color-mix(in srgb,var(--accent) 8%,var(--bg))}
+.torrent-busy{color:var(--dim);font-size:13px}
+@media(max-width:720px){.torrent-columns{grid-template-columns:1fr}.torrent-heading{flex-wrap:wrap}.torrent-dialog{padding:18px}.torrent-heading>div{width:100%}}
+
+.torrent-download progress { appearance: none; -webkit-appearance: none; background: var(--line); border-radius: 4px; overflow: hidden; }
+.torrent-download progress::-webkit-progress-bar { background: var(--line); border-radius: 4px; }
+.torrent-download progress::-webkit-progress-value { background: var(--accent); border-radius: 4px; }
+.torrent-download progress::-moz-progress-bar { background: var(--accent); border-radius: 4px; }

@@ -160,6 +160,14 @@ jobs:
           java-version: 21
           cache: gradle
 
+      - name: Build C++ torrent SDKs for shipping ABIs
+        working-directory: .
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.1.12297006" > /dev/null
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.1.12297006"
+          python3 scripts/vendor-torrent.py android-armeabi-v7a
+          python3 scripts/vendor-torrent.py android-arm64-v8a
+
       - name: Cache-currency conformance (Kotlin)
         run: ./gradlew :app:testDebugUnitTest
         working-directory: mobile/android
@@ -336,6 +344,14 @@ jobs:
       # is what CCACHE_COMPILERCHECK below is about; see the build step. The
       # fix does not depend on which image is current, only on the pin being
       # something the image does not already have.
+      - name: Build C++ torrent SDKs for shipping ABIs
+        working-directory: .
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.1.12297006" > /dev/null
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.1.12297006"
+          python3 scripts/vendor-torrent.py android-armeabi-v7a
+          python3 scripts/vendor-torrent.py android-arm64-v8a
+
       - name: Pinned NDK + CMake
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.1.12297006" "cmake;3.22.1" > /dev/null
 
