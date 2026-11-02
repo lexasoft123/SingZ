@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react'
 import {
   ActivityIndicator,
+  Keyboard,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -79,6 +81,11 @@ export default function TorrentScreen({
       <Text style={[s.buttonText, primary && s.primaryText]}>{label}</Text>
     </Pressable>
   )
+  const search = (): void => {
+    if (!query.trim() || state?.busy) return
+    Keyboard.dismiss()
+    void flow?.search(query)
+  }
   const importSong = async (): Promise<void> => {
     if (consuming.current) return
     consuming.current = true
@@ -103,7 +110,12 @@ export default function TorrentScreen({
         <Text style={s.navTitle}>Add song</Text>
         {button('Account', () => flow?.account(), false, !!state?.busy)}
       </View>
-      <ScrollView contentContainerStyle={s.body} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        contentContainerStyle={s.body}
+        automaticallyAdjustKeyboardInsets
+        keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+        keyboardShouldPersistTaps="handled"
+      >
         {state?.error && (
           <Text accessibilityRole="alert" style={s.error}>
             {state.error}
@@ -205,6 +217,10 @@ export default function TorrentScreen({
               placeholderTextColor={C.dim}
               value={filter}
               onChangeText={setFilter}
+              autoCorrect={false}
+              autoCapitalize="none"
+              returnKeyType="done"
+              onSubmitEditing={Keyboard.dismiss}
               style={s.input}
             />
             {state.listing.files
@@ -222,7 +238,10 @@ export default function TorrentScreen({
                     disabled: state.busy
                   }}
                   disabled={state.busy}
-                  onPress={() => flow?.select(file.index)}
+                  onPress={() => {
+                    Keyboard.dismiss()
+                    flow?.select(file.index)
+                  }}
                   style={s.file}
                 >
                   <Text style={[s.radio, state.selected === file.index && s.selected]}>
@@ -253,21 +272,25 @@ export default function TorrentScreen({
           <View style={s.section}>
             <Text style={s.eyebrow}>Add song / RuTracker</Text>
             <Text style={s.title}>Find your next song</Text>
-            <Text style={s.hint}>Search by artist or song title.</Text>
+            <Text style={s.hint}>Search release titles by artist, album, or song.</Text>
+            <Text style={s.hint}>
+              To find a song inside an album or discography, search the artist, open a release, then
+              filter its filenames.
+            </Text>
             <TextInput
               accessibilityLabel="Artist or song title"
               placeholder="Artist or song title"
               placeholderTextColor={C.dim}
               value={query}
               onChangeText={setQuery}
-              onSubmitEditing={() => {
-                if (query.trim()) void flow?.search(query)
-              }}
+              autoCorrect={false}
+              autoCapitalize="none"
+              onSubmitEditing={search}
               returnKeyType="search"
               maxLength={200}
               style={s.input}
             />
-            {button('Search', () => void flow?.search(query), true, state.busy || !query.trim())}
+            {button('Search', search, true, state.busy || !query.trim())}
             <View style={s.stats}>
               <Text style={s.hint}>{state.releases.length} releases</Text>
               <Text style={s.sort}>↓ Most seeders first</Text>
@@ -278,6 +301,7 @@ export default function TorrentScreen({
                 accessibilityRole="button"
                 disabled={state.busy}
                 onPress={() => {
+                  Keyboard.dismiss()
                   setFilter('')
                   void flow?.choose(release)
                 }}
