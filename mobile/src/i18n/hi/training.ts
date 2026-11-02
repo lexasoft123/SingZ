@@ -3,6 +3,11 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const training: Translation<typeof en> = {
+  "phone.training.exerciseMelodyTitle": "धुन",
+  "phone.training.melodyHelp": "पूरी धुन सुनें, फिर सुरों को क्रम से गाएँ। अपना समय लें — लय का मूल्यांकन नहीं होता।",
+  "phone.training.melodyLength": "हर धुन में सुर",
+  "phone.training.melodyGridCaption": "1 पंक्ति = 1 अर्धस्वर · संख्याएँ अंतराल दिखाती हैं",
+
   "phone.training.soundSettingsSaved": "आपकी आवाज और आवाज हर प्रशिक्षण अभ्यास पर लागू होती है।",
   "phone.training.soundLabBack": "वापस",
   "phone.training.soundLabTitle": "उपकरण ध्वनि प्रयोगशाला",

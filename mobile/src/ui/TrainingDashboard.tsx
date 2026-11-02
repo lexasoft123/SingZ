@@ -15,7 +15,7 @@ export function programLessonLabel(lesson: ProgramLesson): string {
     const label = intervalLabel(INTERVAL_LESSONS[lesson.semitones - 1])
     return label.charAt(0).toUpperCase() + label.slice(1)
   }
-  const key = ({ note: 'exerciseNoteTitle', interval: 'exerciseIntervalTitle', 'chord-tone': 'exerciseChordToneTitle', scale: 'exerciseScaleTitle', arpeggio: 'exerciseArpeggioTitle', 'scale-degree': 'exerciseScaleDegreeTitle', mixed: 'exerciseMixedTitle' } as const)[lesson.exercise]
+  const key = ({ melody: 'exerciseMelodyTitle', note: 'exerciseNoteTitle', interval: 'exerciseIntervalTitle', 'chord-tone': 'exerciseChordToneTitle', scale: 'exerciseScaleTitle', arpeggio: 'exerciseArpeggioTitle', 'scale-degree': 'exerciseScaleDegreeTitle', mixed: 'exerciseMixedTitle' } as const)[lesson.exercise]
   return t(`phone.training.${key}`)
 }
 
@@ -58,6 +58,7 @@ export function TrainingDashboard({ store, onLesson, onProgress, onChoose, heade
   const completed = stages.filter(stage => stage.done).length
   const items = [
     { exercise: 'note', key: 'exerciseNoteTitle', mark: '●' },
+    { exercise: 'melody', key: 'exerciseMelodyTitle', mark: '⌁' },
     { exercise: 'interval', key: 'exerciseIntervalTitle', mark: '↗' },
     { exercise: 'chord-tone', key: 'dashboardChordNotes', mark: '△' },
     { exercise: 'scale', key: 'exerciseScaleTitle', mark: '↗' },

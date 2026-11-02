@@ -3,6 +3,11 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  "training.exercise.melody.label": "멜로디",
+  "training.melody.help": "멜로디 전체를 듣고 음을 순서대로 부르세요. 천천히 불러도 돼요. 리듬은 평가하지 않아요.",
+  "training.melody.length": "멜로디의 음 개수",
+  "training.melody.gridCaption": "1행 = 반음 · 숫자는 음정 표시",
+
   "training.setup.soundType": "기기",
   "training.sound.piano": "피아노",
   "training.sound.electric": "전기 피아노",

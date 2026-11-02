@@ -11,6 +11,7 @@ export function trainingReferenceCues(prompt: {
   readonly cues: readonly { readonly purpose?: TrainingCuePurpose; readonly articulation: 'together' | 'sequence'; readonly notes: readonly number[] }[]
   readonly targets: readonly { readonly midi: number }[]
 }, scalePresentation: 'guided' | 'phrase' = 'guided'): readonly TrainingReferenceCue[] {
+  if (prompt.kind === 'melody') return [{ purpose: 'answer', articulation: 'sequence', notes: prompt.targets.map(t => t.midi), durationSeconds: 0.65 }]
   const purpose = prompt.taskMode === 'imitate' ? 'answer' : 'question'
   if (prompt.kind === 'note' && prompt.taskMode === 'imitate')
     return prompt.targets[0] ? [{ purpose, articulation: 'sequence', notes: [prompt.targets[0].midi], durationSeconds: 2.75 }] : []

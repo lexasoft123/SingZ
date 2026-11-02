@@ -34,6 +34,7 @@ await esbuild.build({
     contents: `
 export * from './shared/music-theory'
 export * from './shared/training-types'
+export * from './shared/training-melody'
 export * from './shared/training-tone'
 export * from './shared/training-sound'
 export { sampleAuditionGain, trainingOrganCurve, TRAINING_INSTRUMENT_BOOST, TRAINING_INSTRUMENT_BOOST_DB } from './shared/training-sound-levels'
@@ -70,6 +71,7 @@ writeFileSync(
   `${banner}
 export * from '../../../src/shared/music-theory'
 export * from '../../../src/shared/training-types'
+export * from '../../../src/shared/training-melody'
 export * from '../../../src/shared/training-tone'
 export * from '../../../src/shared/training-sound'
 export { sampleAuditionGain, trainingOrganCurve, TRAINING_INSTRUMENT_BOOST, TRAINING_INSTRUMENT_BOOST_DB } from '../../../src/shared/training-sound-levels'

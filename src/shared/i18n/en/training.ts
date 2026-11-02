@@ -8,6 +8,11 @@
  * needed (button labels), so translate them as the bare word.
  */
 export const training = {
+  "training.exercise.melody.label": "Melody",
+  "training.melody.help": "Listen to the whole melody, then sing the notes in order. Take your time — rhythm is not scored.",
+  "training.melody.length": "Notes in each melody",
+  "training.melody.gridCaption": "1 row = 1 semitone · numbers show the interval",
+
   'training.setup.soundType': 'Instrument',
   'training.sound.piano': 'Piano',
   'training.sound.electric': 'Electric piano',

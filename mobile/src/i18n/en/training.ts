@@ -1,5 +1,10 @@
 /* English phone strings for the `phone.training` namespace — see ../index.ts. */
 export const training = {
+  "phone.training.exerciseMelodyTitle": "Melody",
+  "phone.training.melodyHelp": "Listen to the whole melody, then sing each note in order. Take your time — rhythm is not scored.",
+  "phone.training.melodyLength": "Notes in each melody",
+  "phone.training.melodyGridCaption": "1 row = 1 semitone · numbers show the interval",
+
   'phone.training.soundSettingsSaved': 'Your sound and volume apply to every training exercise.',
   'phone.training.soundLabBack': 'Back',
   'phone.training.soundLabTitle': 'Instrument sound lab',

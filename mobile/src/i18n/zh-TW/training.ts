@@ -3,6 +3,11 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const training: Translation<typeof en> = {
+  "phone.training.exerciseMelodyTitle": "旋律",
+  "phone.training.melodyHelp": "聽完整段旋律，再依序唱出每個音。不必著急，本練習不評分節奏。",
+  "phone.training.melodyLength": "每段旋律的音符數",
+  "phone.training.melodyGridCaption": "1 行 = 1 個半音 · 數字表示音程",
+
   "phone.training.soundSettingsSaved": "聲音和音量設定適用於所有訓練練習。",
   "phone.training.soundLabBack": "返回",
   "phone.training.soundLabTitle": "樂器試聽",

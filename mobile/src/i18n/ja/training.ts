@@ -3,6 +3,11 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const training: Translation<typeof en> = {
+  "phone.training.exerciseMelodyTitle": "メロディー",
+  "phone.training.melodyHelp": "メロディー全体を聴いてから、音を順番に歌いましょう。リズムは採点されないので、自分のペースで歌ってください。",
+  "phone.training.melodyLength": "メロディーの音数",
+  "phone.training.melodyGridCaption": "1行 = 半音 · 数字は音程を表示",
+
   "phone.training.soundSettingsSaved": "あなたの音と音は訓練のあらゆる練習に適用されます",
   "phone.training.soundLabBack": "戻る",
   "phone.training.soundLabTitle": "楽器音響ラボ",

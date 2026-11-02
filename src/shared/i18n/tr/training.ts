@@ -3,6 +3,11 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  "training.exercise.melody.label": "Melodi",
+  "training.melody.help": "Melodinin tamamını dinle, ardından notaları sırayla söyle. Acele etme — ritim puanlanmaz.",
+  "training.melody.length": "Melodideki nota sayısı",
+  "training.melody.gridCaption": "1 satır = 1 yarım ses · sayılar aralığı gösterir",
+
   "training.setup.soundType": "Enstrüman",
   "training.sound.piano": "Piyano",
   "training.sound.electric": "Elektrikli piyano",

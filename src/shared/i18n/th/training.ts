@@ -3,6 +3,11 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  "training.exercise.melody.label": "ทำนอง",
+  "training.melody.help": "ฟังทำนองทั้งหมด แล้วร้องโน้ตตามลำดับ ไม่ต้องรีบ — แบบฝึกนี้ไม่ให้คะแนนจังหวะ",
+  "training.melody.length": "จำนวนโน้ตในแต่ละทำนอง",
+  "training.melody.gridCaption": "1 แถว = 1 ครึ่งเสียง · ตัวเลขแสดงระยะห่างของเสียง",
+
   "training.setup.soundType": "เครื่องมือ",
   "training.sound.piano": "เปียโน",
   "training.sound.electric": "ปิโอโนไฟฟ้า",

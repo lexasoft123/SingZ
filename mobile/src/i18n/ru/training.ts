@@ -4,6 +4,11 @@ import type {
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const training: Translation<typeof en> = {
+  "phone.training.exerciseMelodyTitle": "Мелодия",
+  "phone.training.melodyHelp": "Послушайте мелодию целиком, затем спойте ноты по порядку. Не спешите — ритм не оценивается.",
+  "phone.training.melodyLength": "Нот в мелодии",
+  "phone.training.melodyGridCaption": "1 строка = 1 полутон · числа показывают интервал",
+
   'phone.training.soundSettingsSaved': 'Звук и громкость сохраняются для всех упражнений.',
   'phone.training.soundLabBack': 'Назад',
   'phone.training.soundLabTitle': 'Проверка инструментов',

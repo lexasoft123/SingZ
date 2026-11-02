@@ -3,6 +3,11 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  "training.exercise.melody.label": "धुन",
+  "training.melody.help": "पूरी धुन सुनें, फिर सुरों को क्रम से गाएँ। अपना समय लें — लय का मूल्यांकन नहीं होता।",
+  "training.melody.length": "हर धुन में सुर",
+  "training.melody.gridCaption": "1 पंक्ति = 1 अर्धस्वर · संख्याएँ अंतराल दिखाती हैं",
+
   "training.setup.soundType": "उपकरण",
   "training.sound.piano": "पियानो",
   "training.sound.electric": "विद्युत पियानो",

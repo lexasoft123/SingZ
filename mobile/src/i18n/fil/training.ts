@@ -3,6 +3,11 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const training: Translation<typeof en> = {
+  "phone.training.exerciseMelodyTitle": "Melodiya",
+  "phone.training.melodyHelp": "Pakinggan ang buong melodiya, saka kantahin ang mga nota nang sunod-sunod. Hindi binibigyan ng marka ang ritmo.",
+  "phone.training.melodyLength": "Mga nota sa bawat melodiya",
+  "phone.training.melodyGridCaption": "1 hanay = 1 semitono · ipinapakita ng mga numero ang pagitan",
+
   "phone.training.soundSettingsSaved": "Ang iyong tunog at lakas ng tunog ay may kaugnayan sa bawat ehersisyo sa pagsasanay.",
   "phone.training.soundLabBack": "Bumalik",
   "phone.training.soundLabTitle": "Lab ng tunog ng instrumento",

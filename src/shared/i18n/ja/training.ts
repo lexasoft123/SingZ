@@ -3,6 +3,11 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  "training.exercise.melody.label": "メロディー",
+  "training.melody.help": "メロディー全体を聴いてから、音を順番に歌いましょう。リズムは採点されないので、自分のペースで歌ってください。",
+  "training.melody.length": "メロディーの音数",
+  "training.melody.gridCaption": "1行 = 半音 · 数字は音程を表示",
+
   "training.setup.soundType": "楽器",
   "training.sound.piano": "ピアノ",
   "training.sound.electric": "電動ピアノ",

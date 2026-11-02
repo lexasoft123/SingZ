@@ -122,6 +122,7 @@ export interface DesktopTrainingSetup {
   readonly lowMidi: number
   readonly highMidi: number
   readonly intervalSemitones?: number
+  readonly melodyLength?: 3 | 5 | 7
   readonly scalePresentation?: 'guided' | 'phrase'
   readonly intervalSizes: readonly number[]
   readonly chordDegrees: readonly number[]
@@ -216,7 +217,7 @@ export function desktopTrainingReducer(
         setup: {
           ...state.setup,
           exercise: action.exercise,
-          taskMode: action.exercise === 'note' || action.exercise === 'scale' ? 'imitate' : state.setup.taskMode,
+          taskMode: action.exercise === 'note' || action.exercise === 'scale' || action.exercise === 'melody' ? 'imitate' : state.setup.taskMode,
           mixedKinds: undefined
         },
         error: null,
@@ -368,6 +369,7 @@ export function trainingConfigFromSetup(
     taskMode: setup.taskMode,
     length: setup.length * (setup.exercise === 'interval' && setup.taskMode === 'imitate' ? 3 : 1),
     intervalSemitones: setup.exercise === 'interval' ? setup.intervalSemitones : undefined,
+    melodyLength: setup.melodyLength,
     scalePresentation: setup.scalePresentation,
     seed,
     direction: setup.direction,
@@ -546,6 +548,7 @@ export function identifyAnswerOptions(prompt: TrainingPrompt): IdentifyAnswerOpt
         label: titleCase(chordRoleWord(role)),
         answer: { kind: 'chord-tone' as const, role }
       }))
+    case 'melody':
     case 'scale':
       return []
     case 'arpeggio':
@@ -588,6 +591,8 @@ export function trainingPromptKindLabel(prompt: TrainingPrompt, revealAnswer: bo
         : intervalLabel(prompt.intervalName)
     case 'chord-tone':
       return chordNameText(prompt.chord)
+    case 'melody':
+      return t('training.exercise.melody.label')
     case 'scale':
       return t('training.exercise.scaleDegree.label')
     case 'arpeggio':
@@ -612,6 +617,7 @@ export function identifyAnswerReveal(prompt: TrainingPrompt): string | null {
         role: chordRoleWord(prompt.role),
         chord: chordNameText(prompt.chord)
       })
+    case 'melody':
     case 'scale':
       return null
     case 'arpeggio':

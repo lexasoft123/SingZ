@@ -3,6 +3,11 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const training: Translation<typeof en> = {
+  "phone.training.exerciseMelodyTitle": "ทำนอง",
+  "phone.training.melodyHelp": "ฟังทำนองทั้งหมด แล้วร้องโน้ตตามลำดับ ไม่ต้องรีบ — แบบฝึกนี้ไม่ให้คะแนนจังหวะ",
+  "phone.training.melodyLength": "จำนวนโน้ตในแต่ละทำนอง",
+  "phone.training.melodyGridCaption": "1 แถว = 1 ครึ่งเสียง · ตัวเลขแสดงระยะห่างของเสียง",
+
   "phone.training.soundSettingsSaved": "เสียงและเสียงของคุณใช้กับการออกกําลังกายทุกครั้ง",
   "phone.training.soundLabBack": "กลับ",
   "phone.training.soundLabTitle": "ลาบอลออนไลน์เครื่องมือ",

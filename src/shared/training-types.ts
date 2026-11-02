@@ -31,6 +31,7 @@ export type TrainingExerciseKind =
   | 'interval'
   | 'chord-tone'
   | 'arpeggio'
+  | 'melody'
   | 'scale'
 
 /** `mixed` is a session recipe; every generated prompt still has a concrete kind. */
@@ -46,6 +47,7 @@ export interface TrainingSessionConfig {
   /** A string or integer produces the same session on every platform. */
   readonly seed: string | number
   /** Used by interval and arpeggio prompts; defaults to both directions. */
+  readonly melodyLength?: 3 | 5 | 7
   readonly scalePresentation?: 'guided' | 'phrase'
   readonly direction?: TrainingDirectionChoice
   /** Natural minor by default. Harmonic minor raises degree 7. */
@@ -136,7 +138,12 @@ export interface ScalePrompt extends PromptBase {
   readonly direction: TrainingDirection
 }
 
+export interface MelodyPrompt extends PromptBase {
+  readonly kind: 'melody'
+}
+
 export type TrainingPrompt =
+  | MelodyPrompt
   | NotePrompt
   | ScalePrompt
   | ScaleDegreePrompt

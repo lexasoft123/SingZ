@@ -3,6 +3,11 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  "training.exercise.melody.label": "Melodia",
+  "training.melody.help": "Ouça a melodia inteira e depois cante as notas na ordem. Vá no seu ritmo — o ritmo não é avaliado.",
+  "training.melody.length": "Notas em cada melodia",
+  "training.melody.gridCaption": "1 linha = 1 semitom · os números mostram o intervalo",
+
   "training.setup.soundType": "Instrumento",
   "training.sound.piano": "Piano",
   "training.sound.electric": "Piano elétrico",

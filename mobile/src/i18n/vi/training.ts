@@ -3,6 +3,11 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const training: Translation<typeof en> = {
+  "phone.training.exerciseMelodyTitle": "Giai điệu",
+  "phone.training.melodyHelp": "Nghe toàn bộ giai điệu, rồi hát các nốt theo thứ tự. Cứ thong thả — nhịp điệu không được chấm điểm.",
+  "phone.training.melodyLength": "Số nốt trong mỗi giai điệu",
+  "phone.training.melodyGridCaption": "1 hàng = 1 nửa cung · số biểu thị quãng",
+
   "phone.training.soundSettingsSaved": "Âm thanh và âm thanh của bạn áp dụng cho mọi bài tập tập.",
   "phone.training.soundLabBack": "Quay lại",
   "phone.training.soundLabTitle": "Phòng thí nghiệm âm thanh nhạc cụ",

@@ -3,6 +3,11 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  "training.exercise.melody.label": "Melodi",
+  "training.melody.help": "Dengar seluruh melodi, kemudian nyanyikan nota mengikut urutan. Tidak perlu tergesa-gesa \u2014 irama tidak dinilai.",
+  "training.melody.length": "Nota dalam setiap melodi",
+  "training.melody.gridCaption": "1 baris = 1 semiton \u00b7 nombor menunjukkan sela",
+
   "training.setup.soundType": "Instrumen",
   "training.sound.piano": "Piano",
   "training.sound.electric": "Piano elektrik",

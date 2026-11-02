@@ -3,6 +3,11 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  "training.exercise.melody.label": "旋律",
+  "training.melody.help": "听完整段旋律，再按顺序唱出每个音。不必着急，本练习不评判节奏。",
+  "training.melody.length": "每段旋律的音符数",
+  "training.melody.gridCaption": "1 行 = 1 个半音 · 数字表示音程",
+
   'training.setup.soundType': '乐器',
   'training.sound.piano': '钢琴',
   'training.sound.electric': '电钢琴',

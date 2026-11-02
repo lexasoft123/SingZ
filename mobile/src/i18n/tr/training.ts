@@ -3,6 +3,11 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const training: Translation<typeof en> = {
+  "phone.training.exerciseMelodyTitle": "Melodi",
+  "phone.training.melodyHelp": "Melodinin tamamını dinle, ardından notaları sırayla söyle. Acele etme — ritim puanlanmaz.",
+  "phone.training.melodyLength": "Melodideki nota sayısı",
+  "phone.training.melodyGridCaption": "1 satır = 1 yarım ses · sayılar aralığı gösterir",
+
   "phone.training.soundSettingsSaved": "Sesiniz ve ses seviyen, tüm çalışma aktiviteleri için geçerlidir.",
   "phone.training.soundLabBack": "Geri",
   "phone.training.soundLabTitle": "Enstrüman ses laboratuvarı",

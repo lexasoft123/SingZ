@@ -4,6 +4,11 @@ import type {
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const training: Translation<typeof en> = {
+  "phone.training.exerciseMelodyTitle": "旋律",
+  "phone.training.melodyHelp": "听完整段旋律，再按顺序唱出每个音。不必着急，本练习不评判节奏。",
+  "phone.training.melodyLength": "每段旋律的音符数",
+  "phone.training.melodyGridCaption": "1 行 = 1 个半音 · 数字表示音程",
+
   'phone.training.soundSettingsSaved': '声音和音量设置适用于所有训练练习。',
   'phone.training.soundLabBack': '返回',
   'phone.training.soundLabTitle': '乐器试听',

@@ -3,6 +3,11 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  "training.exercise.melody.label": "Giai điệu",
+  "training.melody.help": "Nghe toàn bộ giai điệu, rồi hát các nốt theo thứ tự. Cứ thong thả — nhịp điệu không được chấm điểm.",
+  "training.melody.length": "Số nốt trong mỗi giai điệu",
+  "training.melody.gridCaption": "1 hàng = 1 nửa cung · số biểu thị quãng",
+
   "training.setup.soundType": "Công cụ",
   "training.sound.piano": "Piano",
   "training.sound.electric": "Piano điện",
