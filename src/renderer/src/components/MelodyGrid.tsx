@@ -1,4 +1,5 @@
 import { melodyGrid, signedMelodyInterval } from '../../../shared/training-melody'
+import { MELODY_LEVELS, type MelodyLevel } from '../../../shared/training-types'
 import type { TrainingPrompt } from '../../../shared/training-types'
 import { t } from '../../../shared/i18n'
 
@@ -25,6 +26,16 @@ export function MelodyGrid({ prompt, activeTarget, matchedCount }: { prompt: Tra
   </figure>
 }
 
-export function MelodyLengthSelector({ value, onChange }: { value: 3 | 5 | 7; onChange: (value: 3 | 5 | 7) => void }): React.JSX.Element {
-  return <fieldset className="vt-fieldset"><legend>{t('training.melody.length')}</legend><div className="vt-segment">{([3,5,7] as const).map(n => <button type="button" key={n} aria-pressed={value === n} className={value === n ? 'active' : ''} onClick={() => onChange(n)}>{n}</button>)}</div><p>{t('training.melody.help')}</p></fieldset>
+export function MelodyLengthSelector({ setup, onChange }: { setup: { melodyLength?: 3 | 5 | 7; melodyLevel?: MelodyLevel }; onChange: (patch: { melodyLength?: 3 | 5 | 7; melodyLevel?: MelodyLevel }) => void }): React.JSX.Element {
+  const level = setup.melodyLevel ?? 'first-phrases'
+  return <fieldset className="vt-fieldset">
+    <legend>{t('training.melody.level')}</legend>
+    <select aria-label={t('training.melody.level')} value={level} onChange={e => onChange({ melodyLevel: e.target.value as MelodyLevel })}>
+      {MELODY_LEVELS.map((value, i) => <option key={value} value={value}>{i+1}. {t(`training.melody.level.${value}`)}</option>)}
+    </select>
+    <p>{t(`training.melody.level.${level}.help`)}</p>
+    <p className="vt-label">{t('training.melody.length')}</p>
+    <div className="vt-segment">{([3,5,7] as const).map(n => <button type="button" key={n} aria-pressed={(setup.melodyLength ?? 5) === n} className={(setup.melodyLength ?? 5) === n ? 'active' : ''} onClick={() => onChange({ melodyLength: n })}>{n}</button>)}</div>
+    <p>{t('training.melody.help')}</p>
+  </fieldset>
 }

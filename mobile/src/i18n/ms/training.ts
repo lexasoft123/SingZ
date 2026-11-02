@@ -3,6 +3,18 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const training: Translation<typeof en> = {
+  "phone.training.melodyLevel": "Tahap melodi",
+  "phone.training.melodyLevel.first-phrases": "Frasa pertama",
+  "phone.training.melodyLevel.five-notes": "Lima nota",
+  "phone.training.melodyLevel.motifs": "Motif",
+  "phone.training.melodyLevel.wide": "Frasa lebih luas",
+  "phone.training.melodyLevel.chromatic": "Nota kromatik",
+  "phone.training.melodyLevel.first-phrases.help": "Tiga nota skala dalam julat sempit.",
+  "phone.training.melodyLevel.five-notes.help": "Lima nota skala, dengan langkah dan sela ketiga.",
+  "phone.training.melodyLevel.motifs.help": "Ingat motif pendek dan variasinya.",
+  "phone.training.melodyLevel.wide.help": "Sehingga satu oktaf, dengan lompatan terkawal.",
+  "phone.training.melodyLevel.chromatic.help": "Nota laluan dan jiran di luar nada, diselesaikan dengan semiton.",
+
   "phone.training.exerciseMelodyTitle": "Melodi",
   "phone.training.melodyHelp": "Dengar seluruh melodi, kemudian nyanyikan nota mengikut urutan. Tidak perlu tergesa-gesa \u2014 irama tidak dinilai.",
   "phone.training.melodyLength": "Nota dalam setiap melodi",

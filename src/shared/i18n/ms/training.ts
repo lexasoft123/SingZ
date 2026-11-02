@@ -3,6 +3,18 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  "training.melody.level": "Tahap melodi",
+  "training.melody.level.first-phrases": "Frasa pertama",
+  "training.melody.level.five-notes": "Lima nota",
+  "training.melody.level.motifs": "Motif",
+  "training.melody.level.wide": "Frasa lebih luas",
+  "training.melody.level.chromatic": "Nota kromatik",
+  "training.melody.level.first-phrases.help": "Tiga nota skala dalam julat sempit.",
+  "training.melody.level.five-notes.help": "Lima nota skala, dengan langkah dan sela ketiga.",
+  "training.melody.level.motifs.help": "Ingat motif pendek dan variasinya.",
+  "training.melody.level.wide.help": "Sehingga satu oktaf, dengan lompatan terkawal.",
+  "training.melody.level.chromatic.help": "Nota laluan dan jiran di luar nada, diselesaikan dengan semiton.",
+
   "training.exercise.melody.label": "Melodi",
   "training.melody.help": "Dengar seluruh melodi, kemudian nyanyikan nota mengikut urutan. Tidak perlu tergesa-gesa \u2014 irama tidak dinilai.",
   "training.melody.length": "Nota dalam setiap melodi",

@@ -1,3 +1,4 @@
+import { MELODY_LEVELS } from './training-types'
 import {
   assertTrainingRange,
   diatonicInterval,
@@ -9,6 +10,7 @@ import {
   scaleSteps
 } from './music-theory'
 import { t } from './i18n/training'
+import { generateMelodyCandidates } from './training-melody-generator'
 import { intervalLabel } from './music-labels'
 import type {
   ArpeggioPrompt,
@@ -67,7 +69,7 @@ const RESULT_CLASSIFICATIONS: readonly TrainingResultClassification[] = [
 type Rng = () => number
 const trustedSessions = new WeakSet<object>()
 /** Identifies the reproducible prompt graph; completion receipts have their own format. */
-export const TRAINING_SESSION_FORMAT_VERSION = 7
+export const TRAINING_SESSION_FORMAT_VERSION = 8
 
 export function generateTrainingPrompts(config: TrainingSessionConfig): TrainingPrompt[] {
   validateConfig(config)
@@ -318,31 +320,12 @@ function buildCandidates(config: TrainingSessionConfig, kind: TrainingExerciseKi
   }
 }
 
-/** Short tonal phrases, placed wholly within the chosen singing range.
- * Every phrase resolves to its starting note and moves by steps or thirds. */
 function melodyCandidates(config: TrainingSessionConfig): MelodyPrompt[] {
-  const pool = noteCandidates(config).map(p => p.targets[0]).sort((a, b) => a.midi - b.midi)
-  if (pool.length < 2) return []
-  const length = config.melodyLength ?? 5
-  const patterns = length === 3 ? [[0,1,0], [0,2,0]]
-    : length === 5 ? [[0,1,2,1,0], [0,2,1,2,0], [0,1,3,2,0], [0,2,4,2,0]]
-    : [[0,1,2,1,0,1,0], [0,1,2,1,3,2,0], [0,2,1,3,4,2,0]]
-  const tonics = pool.flatMap((note, i) => note.pitchClass === config.key.tonicPc ? [i] : [])
-  const starts = tonics.length ? tonics : pool.map((_, i) => i)
-  const candidates: MelodyPrompt[] = []
-  const seen = new Set<string>()
-  for (const start of starts) for (const direction of [1, -1]) for (const pattern of patterns) {
-    const indices = pattern.map(step => start + direction * step)
-    if (indices.some(i => i < 0 || i >= pool.length)) continue
-    const targets = indices.map(i => cloneTarget(pool[i]))
-    const signature = targets.map(t => t.midi).join(',')
-    if (seen.has(signature)) continue
-    seen.add(signature)
-    candidates.push({ id: '', kind: 'melody', taskMode: config.taskMode, key: { ...config.key },
-      instruction: t('training.melody.help'), targets,
-      cues: [cue('answer', 'sequence', targets.map(t => t.midi))] })
-  }
-  return candidates
+  return generateMelodyCandidates(config, { scaleForKey, midiNoteNameForSpelling, midiToPitchClass }).map(targets => ({
+    id: '', kind: 'melody', taskMode: config.taskMode, key: { ...config.key },
+    instruction: t('training.melody.help'), targets,
+    cues: [keyContextCue(config), cue('answer', 'sequence', targets.map(t => t.midi))]
+  }))
 }
 
 function noteCandidates(config: TrainingSessionConfig): NotePrompt[] {
@@ -744,6 +727,7 @@ function validateConfig(config: TrainingSessionConfig): void {
       'intervalSemitones',
       'scalePresentation',
       'melodyLength',
+      'melodyLevel',
       'chordDegrees',
       'mixedKinds'
     ],
@@ -767,8 +751,9 @@ function validateConfig(config: TrainingSessionConfig): void {
   )
     throw new RangeError('Session seed must be a string or finite integer.')
   if (config.scalePresentation !== undefined) validateOneOf(config.scalePresentation, ['guided', 'phrase'], 'Scale presentation')
+  if (config.melodyLevel !== undefined) validateOneOf(config.melodyLevel, MELODY_LEVELS, 'Melody level')
   if (config.melodyLength !== undefined) validateOneOf(config.melodyLength, [3, 5, 7], 'Melody length')
-  if ((config.exercise === 'scale' || config.exercise === 'melody') && config.taskMode !== 'imitate') throw new RangeError('Scales require singing.')
+  if ((config.exercise === 'scale' || config.exercise === 'melody') && config.taskMode !== 'imitate') throw new RangeError('This exercise requires singing.')
   if (config.intervalSemitones !== undefined) validateIntegerRange(config.intervalSemitones, 1, 12, 'Interval distance')
   if (config.direction !== undefined)
     validateOneOf(config.direction, ['ascending', 'descending', 'both'], 'Direction')
@@ -896,8 +881,8 @@ function validatePrompt(prompt: TrainingPrompt, config: TrainingSessionConfig): 
   }
   switch (prompt.kind) {
     case 'melody':
-      if (!melodyCandidates(config).some(candidate => JSON.stringify(candidate.targets) === JSON.stringify(prompt.targets)))
-        throw new RangeError('Melody targets mismatch.')
+      // restoreTrainingSession compares the entire phrase with the canonical
+      // generator once, rather than rebuilding the vocabulary for every prompt.
       return
     case 'note':
       return
@@ -1076,7 +1061,8 @@ function validateCue(item: TrainingCue, maximumNotes = MAX_NOTES_PER_CUE): void 
 
 function validateTarget(target: TrainingTarget): void {
   if (!target || typeof target !== 'object') throw new RangeError('Training target is invalid.')
-  assertExactKeys(target, ['midi', 'pitchClass', 'noteName', 'scaleDegree'], 'Training target')
+  assertExactKeys(target, ['midi', 'pitchClass', 'noteName', 'scaleDegree', ...(target.alteration === undefined ? [] : ['alteration'])], 'Training target')
+  if (target.alteration !== undefined) validateOneOf(target.alteration, [-1, 1], 'Target alteration')
   validateIntegerRange(target.midi, 0, 127, 'Target MIDI note')
   validateIntegerRange(target.pitchClass, 0, 11, 'Target pitch class')
   if (target.pitchClass !== midiToPitchClass(target.midi))
@@ -1410,6 +1396,7 @@ function stableConfig(config: TrainingSessionConfig): string {
     intervalSizes: config.intervalSizes ?? DEFAULT_INTERVALS,
     chordDegrees: config.chordDegrees ?? DEFAULT_DEGREES,
     ...(config.melodyLength === undefined ? {} : { melodyLength: config.melodyLength }),
+    ...(config.melodyLevel === undefined ? {} : { melodyLevel: config.melodyLevel }),
     scalePresentation: config.scalePresentation ?? 'guided',
     mixedKinds: config.mixedKinds ?? DEFAULT_MIXED_KINDS
   })
@@ -1449,6 +1436,7 @@ function cloneConfig(config: TrainingSessionConfig): TrainingSessionConfig {
       : { minorScaleForm: config.minorScaleForm }),
     ...(config.minorHarmony === undefined ? {} : { minorHarmony: config.minorHarmony }),
     ...(config.melodyLength === undefined ? {} : { melodyLength: config.melodyLength }),
+    ...(config.melodyLevel === undefined ? {} : { melodyLevel: config.melodyLevel }),
     ...(config.scalePresentation === undefined ? {} : { scalePresentation: config.scalePresentation }),
     ...(config.intervalSemitones === undefined ? {} : { intervalSemitones: config.intervalSemitones }),
     intervalSizes: config.intervalSizes ? [...config.intervalSizes].sort((a, b) => a - b) : undefined,
@@ -1466,7 +1454,8 @@ function cloneTarget(target: TrainingTarget): TrainingTarget {
     midi: target.midi,
     pitchClass: target.pitchClass,
     noteName: target.noteName,
-    scaleDegree: target.scaleDegree
+    scaleDegree: target.scaleDegree,
+    ...(target.alteration === undefined ? {} : { alteration: target.alteration })
   }
 }
 

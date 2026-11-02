@@ -3,6 +3,18 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const training: Translation<typeof en> = {
+  "phone.training.melodyLevel": "Nível da melodia",
+  "phone.training.melodyLevel.first-phrases": "Primeiras frases",
+  "phone.training.melodyLevel.five-notes": "Cinco notas da escala",
+  "phone.training.melodyLevel.motifs": "Motivos",
+  "phone.training.melodyLevel.wide": "Frases mais amplas",
+  "phone.training.melodyLevel.chromatic": "Notas cromáticas",
+  "phone.training.melodyLevel.first-phrases.help": "Três notas da escala em uma extensão pequena.",
+  "phone.training.melodyLevel.five-notes.help": "Cinco notas da escala, com graus conjuntos e terças.",
+  "phone.training.melodyLevel.motifs.help": "Memorize um motivo curto e suas variações.",
+  "phone.training.melodyLevel.wide.help": "Até uma oitava, com saltos controlados.",
+  "phone.training.melodyLevel.chromatic.help": "Notas de passagem e bordaduras fora da tonalidade, com resolução por semitom.",
+
   "phone.training.exerciseMelodyTitle": "Melodia",
   "phone.training.melodyHelp": "Ouça a melodia inteira e depois cante as notas na ordem. Vá no seu ritmo — o ritmo não é avaliado.",
   "phone.training.melodyLength": "Notas em cada melodia",

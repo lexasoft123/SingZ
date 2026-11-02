@@ -3,6 +3,18 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  "training.melody.level": "Cấp độ giai điệu",
+  "training.melody.level.first-phrases": "Những câu đầu tiên",
+  "training.melody.level.five-notes": "Năm nốt",
+  "training.melody.level.motifs": "Mô-típ",
+  "training.melody.level.wide": "Câu nhạc rộng hơn",
+  "training.melody.level.chromatic": "Nốt bán cung",
+  "training.melody.level.first-phrases.help": "Ba nốt của âm giai trong âm vực hẹp.",
+  "training.melody.level.five-notes.help": "Năm nốt của âm giai, đi liền bậc và quãng ba.",
+  "training.melody.level.motifs.help": "Ghi nhớ mô-típ ngắn và các biến thể.",
+  "training.melody.level.wide.help": "Trong một quãng tám, với bước nhảy có kiểm soát.",
+  "training.melody.level.chromatic.help": "Nốt lướt và nốt thêu ngoài giọng, giải quyết bằng nửa cung.",
+
   "training.exercise.melody.label": "Giai điệu",
   "training.melody.help": "Nghe toàn bộ giai điệu, rồi hát các nốt theo thứ tự. Cứ thong thả — nhịp điệu không được chấm điểm.",
   "training.melody.length": "Số nốt trong mỗi giai điệu",

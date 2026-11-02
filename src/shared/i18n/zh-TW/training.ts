@@ -3,6 +3,18 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  "training.melody.level": "旋律級別",
+  "training.melody.level.first-phrases": "入門樂句",
+  "training.melody.level.five-notes": "五音練習",
+  "training.melody.level.motifs": "動機",
+  "training.melody.level.wide": "寬音域樂句",
+  "training.melody.level.chromatic": "半音變化",
+  "training.melody.level.first-phrases.help": "在較窄音域內練習音階的三個音。",
+  "training.melody.level.five-notes.help": "使用音階的五個音，練習級進和三度。",
+  "training.melody.level.motifs.help": "記住短小的動機及其變化。",
+  "training.melody.level.wide.help": "在一個八度內練習有控制的跳進。",
+  "training.melody.level.chromatic.help": "使用調外經過音和輔助音，以半音解決。",
+
   "training.exercise.melody.label": "旋律",
   "training.melody.help": "聽完整段旋律，再依序唱出每個音。不必著急，本練習不評分節奏。",
   "training.melody.length": "每段旋律的音符數",

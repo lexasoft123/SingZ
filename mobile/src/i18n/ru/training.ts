@@ -4,6 +4,18 @@ import type {
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const training: Translation<typeof en> = {
+  "phone.training.melodyLevel": "Уровень мелодии",
+  "phone.training.melodyLevel.first-phrases": "Первые фразы",
+  "phone.training.melodyLevel.five-notes": "Пять ступеней",
+  "phone.training.melodyLevel.motifs": "Мотивы",
+  "phone.training.melodyLevel.wide": "Широкие фразы",
+  "phone.training.melodyLevel.chromatic": "Хроматические ноты",
+  "phone.training.melodyLevel.first-phrases.help": "Три ступени гаммы в узком диапазоне.",
+  "phone.training.melodyLevel.five-notes.help": "Пять ступеней, движение по секундам и терциям.",
+  "phone.training.melodyLevel.motifs.help": "Запоминайте короткий мотив и его варианты.",
+  "phone.training.melodyLevel.wide.help": "До октавы, с подготовленными скачками.",
+  "phone.training.melodyLevel.chromatic.help": "Проходящие и вспомогательные ноты вне тональности с разрешением на полутон.",
+
   "phone.training.exerciseMelodyTitle": "Мелодия",
   "phone.training.melodyHelp": "Послушайте мелодию целиком, затем спойте ноты по порядку. Не спешите — ритм не оценивается.",
   "phone.training.melodyLength": "Нот в мелодии",

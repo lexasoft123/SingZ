@@ -3,6 +3,18 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  "training.melody.level": "धुन का स्तर",
+  "training.melody.level.first-phrases": "पहली धुनें",
+  "training.melody.level.five-notes": "पाँच स्वरों का समूह",
+  "training.melody.level.motifs": "संगीत खंड",
+  "training.melody.level.wide": "विस्तृत धुनें",
+  "training.melody.level.chromatic": "क्रोमैटिक स्वर",
+  "training.melody.level.first-phrases.help": "सीमित विस्तार में स्केल के तीन स्वर।",
+  "training.melody.level.five-notes.help": "स्केल के पाँच स्वर, क्रमिक चाल और तृतीय अंतराल।",
+  "training.melody.level.motifs.help": "छोटा संगीत खंड और उसके बदलाव याद करें।",
+  "training.melody.level.wide.help": "नियंत्रित छलाँगों के साथ एक सप्तक तक।",
+  "training.melody.level.chromatic.help": "स्केल के बाहर के बीच और पड़ोसी स्वर, जो अर्धस्वर से स्थिर स्वर पर लौटते हैं।",
+
   "training.exercise.melody.label": "धुन",
   "training.melody.help": "पूरी धुन सुनें, फिर सुरों को क्रम से गाएँ। अपना समय लें — लय का मूल्यांकन नहीं होता।",
   "training.melody.length": "हर धुन में सुर",

@@ -3,6 +3,18 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  "training.melody.level": "メロディーのレベル",
+  "training.melody.level.first-phrases": "最初のフレーズ",
+  "training.melody.level.five-notes": "5音の音域",
+  "training.melody.level.motifs": "モチーフ",
+  "training.melody.level.wide": "広い音域のフレーズ",
+  "training.melody.level.chromatic": "半音階の音",
+  "training.melody.level.first-phrases.help": "狭い音域で音階の3音を練習します。",
+  "training.melody.level.five-notes.help": "音階の5音を使い、順次進行と3度を練習します。",
+  "training.melody.level.motifs.help": "短いモチーフとその変化を覚えましょう。",
+  "training.melody.level.wide.help": "1オクターブ以内で跳躍を練習します。",
+  "training.melody.level.chromatic.help": "調の外の経過音や刺繍音を使い、半音で解決します。",
+
   "training.exercise.melody.label": "メロディー",
   "training.melody.help": "メロディー全体を聴いてから、音を順番に歌いましょう。リズムは採点されないので、自分のペースで歌ってください。",
   "training.melody.length": "メロディーの音数",

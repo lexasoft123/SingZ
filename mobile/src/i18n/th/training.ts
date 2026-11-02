@@ -3,6 +3,18 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const training: Translation<typeof en> = {
+  "phone.training.melodyLevel": "ระดับทำนอง",
+  "phone.training.melodyLevel.first-phrases": "วลีเริ่มต้น",
+  "phone.training.melodyLevel.five-notes": "โน้ตห้าตัว",
+  "phone.training.melodyLevel.motifs": "โมทีฟ",
+  "phone.training.melodyLevel.wide": "วลีช่วงเสียงกว้าง",
+  "phone.training.melodyLevel.chromatic": "โน้ตโครมาติก",
+  "phone.training.melodyLevel.first-phrases.help": "โน้ตสามตัวในบันไดเสียง ช่วงเสียงแคบ",
+  "phone.training.melodyLevel.five-notes.help": "โน้ตห้าตัวในบันไดเสียง เคลื่อนทีละขั้นและคู่สาม",
+  "phone.training.melodyLevel.motifs.help": "จำโมทีฟสั้นและรูปแบบที่เปลี่ยนไป",
+  "phone.training.melodyLevel.wide.help": "ช่วงเสียงไม่เกินหนึ่งอ็อกเทฟ พร้อมการกระโดดที่ควบคุม",
+  "phone.training.melodyLevel.chromatic.help": "โน้ตผ่านและโน้ตข้างเคียงนอกคีย์ คลี่คลายด้วยครึ่งเสียง",
+
   "phone.training.exerciseMelodyTitle": "ทำนอง",
   "phone.training.melodyHelp": "ฟังทำนองทั้งหมด แล้วร้องโน้ตตามลำดับ ไม่ต้องรีบ — แบบฝึกนี้ไม่ให้คะแนนจังหวะ",
   "phone.training.melodyLength": "จำนวนโน้ตในแต่ละทำนอง",

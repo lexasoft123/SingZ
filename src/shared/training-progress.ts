@@ -1,4 +1,5 @@
-import type { ChordToneRole, TrainingDirectionChoice, TrainingExerciseKind, TrainingExerciseSelection, TrainingRange, TrainingSessionData, TrainingTaskMode } from './training-types'
+import { MELODY_LEVELS } from './training-types'
+import type { ChordToneRole, TrainingDirectionChoice, TrainingExerciseKind, TrainingExerciseSelection, TrainingRange, TrainingSessionData, TrainingTaskMode, MelodyLevel } from './training-types'
 
 export const TRAINING_PROGRESS_FORMAT_VERSION = 1
 export const TRAINING_PREFERENCES_FORMAT_VERSION = 2
@@ -7,7 +8,7 @@ export const TRAINING_PROGRESS_HISTORY_LIMIT = 100
 export const TRAINING_RECEIPT_MAX_BYTES = 16 * 1024
 
 export type TrainingNotationPreference = 'note-names' | 'scale-degrees' | 'movable-do'
-export interface TrainingPreferences { readonly formatVersion: typeof TRAINING_PREFERENCES_FORMAT_VERSION; readonly tonicPc: number; readonly keyMode: 'major' | 'minor'; readonly exercise: TrainingExerciseSelection; readonly melodyLength?: 3 | 5 | 7; readonly scalePresentation?: 'guided' | 'phrase'; readonly length: number; readonly range: TrainingRange; readonly notation: TrainingNotationPreference; readonly taskMode: TrainingTaskMode; readonly direction: TrainingDirectionChoice; readonly intervalSizes: readonly number[]; readonly chordDegrees: readonly number[] }
+export interface TrainingPreferences { readonly formatVersion: typeof TRAINING_PREFERENCES_FORMAT_VERSION; readonly tonicPc: number; readonly keyMode: 'major' | 'minor'; readonly exercise: TrainingExerciseSelection; readonly melodyLength?: 3 | 5 | 7; readonly melodyLevel?: MelodyLevel; readonly scalePresentation?: 'guided' | 'phrase'; readonly length: number; readonly range: TrainingRange; readonly notation: TrainingNotationPreference; readonly taskMode: TrainingTaskMode; readonly direction: TrainingDirectionChoice; readonly intervalSizes: readonly number[]; readonly chordDegrees: readonly number[] }
 export interface TrainingOutcomeCounter { readonly attempts: number; readonly onTarget: number; readonly close: number }
 export interface TrainingProgressAggregate {
   readonly sessions: number; readonly attempts: number; readonly onTarget: number; readonly close: number
@@ -35,7 +36,8 @@ export function restoreTrainingPreferences(raw: unknown): TrainingPreferences {
   if(!legacy&&v.formatVersion!==TRAINING_PREFERENCES_FORMAT_VERSION)throw new RangeError('Unsupported training preferences version.')
   exactKeys(v,legacy
     ? ['formatVersion','range','notation','taskMode','direction','intervalSizes','chordDegrees']
-    : ['formatVersion','tonicPc','keyMode','exercise','length','range','notation','taskMode','direction','intervalSizes','chordDegrees', ...(v.melodyLength === undefined ? [] : ['melodyLength']), ...(v.scalePresentation === undefined ? [] : ['scalePresentation'])], 'Training preferences')
+    : ['formatVersion','tonicPc','keyMode','exercise','length','range','notation','taskMode','direction','intervalSizes','chordDegrees', ...(v.melodyLength === undefined ? [] : ['melodyLength']), ...(v.melodyLevel === undefined ? [] : ['melodyLevel']), ...(v.scalePresentation === undefined ? [] : ['scalePresentation'])], 'Training preferences')
+  if(v.melodyLevel!==undefined&&!MELODY_LEVELS.includes(v.melodyLevel as MelodyLevel))throw new RangeError('Melody level preference is invalid.')
   if(v.melodyLength!==undefined&&![3,5,7].includes(v.melodyLength as number))throw new RangeError('Melody length preference is invalid.')
   if(v.scalePresentation!==undefined&&!['guided','phrase'].includes(String(v.scalePresentation)))throw new RangeError('Scale presentation preference is invalid.')
   const range = object(v.range, 'Training range'); exactKeys(range, ['lowMidi','highMidi'], 'Training range')
@@ -45,7 +47,7 @@ export function restoreTrainingPreferences(raw: unknown): TrainingPreferences {
   if (!['ascending','descending','both'].includes(String(v.direction))) throw new RangeError('Direction preference is invalid.')
   if(!legacy&&!['major','minor'].includes(String(v.keyMode)))throw new RangeError('Key mode preference is invalid.')
   if(!legacy&&!isExerciseSelection(v.exercise))throw new RangeError('Exercise preference is invalid.')
-  return { formatVersion:TRAINING_PREFERENCES_FORMAT_VERSION, ...(v.melodyLength === undefined ? {} : { melodyLength: v.melodyLength as 3 | 5 | 7 }), ...(v.scalePresentation === undefined ? {} : { scalePresentation: v.scalePresentation as 'guided' | 'phrase' }), tonicPc:legacy?0:integer(v.tonicPc,0,11,'Key pitch class'), keyMode:legacy?'major':v.keyMode as 'major'|'minor', exercise:legacy?'note':v.exercise as TrainingExerciseSelection, length:legacy?20:integer(v.length,1,1_000,'Session length'), range:{lowMidi,highMidi}, notation:v.notation as TrainingNotationPreference, taskMode:v.taskMode as TrainingTaskMode, direction:v.direction as TrainingDirectionChoice, intervalSizes:numberList(v.intervalSizes,2,8,'Interval preferences'), chordDegrees:numberList(v.chordDegrees,1,7,'Chord preferences') }
+  return { formatVersion:TRAINING_PREFERENCES_FORMAT_VERSION, ...(v.melodyLength === undefined ? {} : { melodyLength: v.melodyLength as 3 | 5 | 7 }), ...(v.melodyLevel === undefined ? {} : { melodyLevel: v.melodyLevel as MelodyLevel }), ...(v.scalePresentation === undefined ? {} : { scalePresentation: v.scalePresentation as 'guided' | 'phrase' }), tonicPc:legacy?0:integer(v.tonicPc,0,11,'Key pitch class'), keyMode:legacy?'major':v.keyMode as 'major'|'minor', exercise:legacy?'note':v.exercise as TrainingExerciseSelection, length:legacy?20:integer(v.length,1,1_000,'Session length'), range:{lowMidi,highMidi}, notation:v.notation as TrainingNotationPreference, taskMode:v.taskMode as TrainingTaskMode, direction:v.direction as TrainingDirectionChoice, intervalSizes:numberList(v.intervalSizes,2,8,'Interval preferences'), chordDegrees:numberList(v.chordDegrees,1,7,'Chord preferences') }
 }
 export function updateTrainingPreferences(progress: TrainingProgress, patch: Partial<TrainingPreferences>): TrainingProgress { return { ...progress, profile: restoreTrainingPreferences({ ...progress.profile, ...patch }) } }
 
@@ -74,6 +76,7 @@ export function createTrainingCompletionReceipt(session: TrainingSessionData, co
     if (landed) { a[landed]++; exercise[landed]++ }
     const degreeOutcomes=new Map<number,Array<'onTarget'|'close'|null>>()
     for(let index=0;index<prompt.targets.length;index++){
+      if (prompt.targets[index].alteration !== undefined) continue
       const degree=prompt.targets[index].scaleDegree
       let outcome=landed
       if(result.response==='vocal'){
@@ -113,7 +116,7 @@ export function restoreTrainingCompletionReceipt(raw: unknown): TrainingCompleti
   const intervalExercise=aggregate.byExercise.interval??{attempts:0,onTarget:0,close:0},chordExercise=aggregate.byExercise['chord-tone']??{attempts:0,onTarget:0,close:0}
   if(JSON.stringify(intervalTotals)!==JSON.stringify(intervalExercise)||JSON.stringify(chordTotals)!==JSON.stringify(chordExercise))throw new RangeError('Training receipt skill outcomes are inconsistent.')
   const baseDegreeAttempts=(aggregate.byExercise.note?.attempts??0)+(aggregate.byExercise['scale-degree']?.attempts??0)+(aggregate.byExercise['chord-tone']?.attempts??0),arpeggioAttempts=aggregate.byExercise.arpeggio?.attempts??0,intervalAttempts=intervalExercise.attempts
-  const minimumDegrees=(aggregate.byExercise.melody?.attempts??0)*2+baseDegreeAttempts+arpeggioAttempts*3+intervalAttempts+(aggregate.byExercise.scale?.attempts??0)*7,maximumDegrees=minimumDegrees+intervalAttempts+(aggregate.byExercise.melody?.attempts??0)*5
+  const minimumDegrees=(aggregate.byExercise.melody?.attempts??0)+baseDegreeAttempts+arpeggioAttempts*3+intervalAttempts+(aggregate.byExercise.scale?.attempts??0)*7,maximumDegrees=minimumDegrees+intervalAttempts+(aggregate.byExercise.melody?.attempts??0)*6
   if(aggregate.scaleDegreeOccurrences<minimumDegrees||aggregate.scaleDegreeOccurrences>maximumDegrees)throw new RangeError('Training receipt scale-degree occurrences are inconsistent.')
   return { formatVersion:TRAINING_RECEIPT_FORMAT_VERSION, ...(v.intervalSemitones === undefined ? {} : { intervalSemitones: integer(v.intervalSemitones,1,12,'Interval') }), sessionId:restoreSessionId(v.sessionId), completedAt:integer(v.completedAt,0,Number.MAX_SAFE_INTEGER,'Completion timestamp'), key:{tonicPc:integer(key.tonicPc,0,11,'Key pitch class'),mode:key.mode as 'major'|'minor'}, exercise:v.exercise, taskMode:v.taskMode as TrainingTaskMode, aggregate }
 }

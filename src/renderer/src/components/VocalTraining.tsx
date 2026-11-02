@@ -643,7 +643,7 @@ export default function VocalTraining({
           return
         }
         const promptCues = desktopTrainingCues(prompt, stateRef.current.session?.config.scalePresentation)
-        const countdownSeconds = desktopTrainingCountdownSeconds(promptCues)
+        const countdownSeconds = desktopTrainingCountdownSeconds(promptCues, prompt.kind)
         const noteDurationSec = desktopTrainingCueDurationSeconds(promptCues)
         setCountdown(countdownSeconds)
         const timeline = await cues.schedule(promptCues, {
@@ -660,6 +660,7 @@ export default function VocalTraining({
         const audioRemainingMs = Math.max(0, (audibleEndTime - cues.currentTime) * 1000)
         const countdownDurationMs = countdownSeconds * 1_000
         const waitMs = Math.max(audioRemainingMs, countdownDurationMs)
+        setCountdown(Math.max(1, Math.ceil(waitMs / 1000)))
         const countdownDeadline = performance.now() + waitMs
         countdownTimer.current = window.setInterval(() => {
           if (generation.current !== run) return
@@ -1353,7 +1354,7 @@ function TrainingSetup({
         <h1>{exercise.label}</h1>
       </header>
       {rangeNotice && <Banner className="vt-notice">{rangeNotice}</Banner>}
-      {setup.exercise === 'melody' && <Suspense fallback={null}><MelodyLengthSelector value={setup.melodyLength ?? 5} onChange={melodyLength => onChange({ melodyLength })} /></Suspense>}
+      {setup.exercise === 'melody' && <Suspense fallback={null}><MelodyLengthSelector setup={setup} onChange={onChange} /></Suspense>}
       <div className="vt-setup-grid">
         <fieldset className="vt-fieldset">
           <legend>{t('training.setup.legend.musicalContext')}</legend>

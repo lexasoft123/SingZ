@@ -13,6 +13,7 @@ import {
   type DesktopPlaybackStatus,
   type SingzApi
 } from '../../src/shared/types'
+import type { TrainingReferenceCue } from '../../src/shared/training-reference'
 import type { TrainingCue } from '../../src/shared/training-types'
 
 const signalsmithFactory = vi.hoisted(() => vi.fn())
@@ -186,6 +187,20 @@ describe('shared native training cues', () => {
     // is applied once by the training countdown.
     expect(controller.outputLatency).toBe(.175)
     controller.dispose()
+  })
+  it('honors different context and melody note durations', async () => {
+    const controller = new DesktopTrainingCueController(new FakeAudioContext() as unknown as AudioContext, {} as AudioNode)
+    controller.setSound('organ')
+    try {
+      const mixedCues: readonly TrainingReferenceCue[] = [
+        { purpose: 'context', articulation: 'together', notes: [60,64,67], durationSeconds: .7 },
+        { purpose: 'answer', articulation: 'sequence', notes: [60,62], durationSeconds: .65 }
+      ]
+      const timeline = await controller.schedule(mixedCues)
+      expect(timeline.cues[0].endTime - timeline.cues[0].startTime).toBeCloseTo(.7)
+      expect(timeline.cues[1].notes[0].endTime - timeline.cues[1].notes[0].startTime).toBeCloseTo(.65)
+      expect(timeline.cues[1].notes[1].startTime - timeline.cues[1].notes[0].startTime).toBeCloseTo(.75)
+    } finally { controller.dispose() }
   })
   it('excludes native scheduling work from the IPC clock estimate', async () => {
     let now = 1000

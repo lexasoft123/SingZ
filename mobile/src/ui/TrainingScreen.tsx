@@ -1,5 +1,7 @@
 import { tabModalListeners } from './tab-modal-dismissal'
 import { ScreenBackground } from './ScreenBackground'
+import { MelodyLevelSelector } from './MelodyLevelSelector'
+import { melodyReferenceTargetIndices } from '../gen/training-lib'
 import SettingsScreen from './SettingsScreen'
 import WhatsNewScreen from './WhatsNewScreen'
 import { HeaderIconButton } from './HeaderIconButton'
@@ -376,6 +378,7 @@ export default function TrainingScreen({
   const saveSetupPreferences = useCallback((setup: MobileTrainingSetup) => {
     persistence.savePreferences({
       ...progress.profile,
+      ...(setup.melodyLevel === undefined ? {} : { melodyLevel: setup.melodyLevel }),
       ...(setup.melodyLength === undefined ? {} : { melodyLength: setup.melodyLength }),
       ...(setup.scalePresentation === undefined ? {} : { scalePresentation: setup.scalePresentation }),
       tonicPc: setup.tonicPc,
@@ -633,7 +636,7 @@ export default function TrainingScreen({
     }
     setActiveTarget(0)
     const mobileCues = mobileTrainingCues(prompt, session?.config.scalePresentation)
-    const countdownSeconds = mobileTrainingCountdownSeconds(mobileCues)
+    const countdownSeconds = mobileTrainingCountdownSeconds(mobileCues, prompt.kind)
     setSingleNoteCountdown(countdownSeconds)
     const cueResult = await engine.playTrainingCues(mobileCues)
     if (generation !== runGeneration.current || !activeRef.current) {
@@ -647,20 +650,24 @@ export default function TrainingScreen({
     // Highlight each target on its audible onset, including the final target
     // during a whole-scale demonstration. Context chords remain unselected.
     const planned = planTrainingCues(mobileCues, cueResult.startsAt)
+    const melodyIndices = prompt.kind === 'melody'
+      ? melodyReferenceTargetIndices(prompt) : []
     for (const [voiceIndex, voice] of planned.voices.entries()) {
-      const targetIndex = prompt.kind === 'melody' ? voiceIndex : prompt.targets.findIndex(target => target.midi === voice.midi)
+      const targetIndex = prompt.kind === 'melody' ? melodyIndices[voiceIndex] ?? -1 : prompt.targets.findIndex(target => target.midi === voice.midi)
       if (targetIndex < 0) continue
       timers.current.push(setTimeout(() => {
         if (generation === runGeneration.current && activeRef.current) setActiveTarget(targetIndex)
       }, Math.max(0, (voice.start + engine.outputDisplayLatency - engine.trainingCurrentTime) * 1000)))
     }
-    const audioDelay = Math.max(0, (cueResult.endsAt - engine.trainingCurrentTime) * 1000)
+    const audioDelay = Math.max(0, (cueResult.endsAt + (prompt.kind === 'melody' ? engine.outputDisplayLatency : 0) - engine.trainingCurrentTime) * 1000)
     const cueDelay = Math.max(audioDelay, countdownSeconds * 1_000)
-    for (let remaining = countdownSeconds - 1; remaining >= 1; remaining--) {
-      const elapsed = countdownSeconds - remaining
+    const visibleSeconds = Math.max(1, Math.ceil(cueDelay / 1000))
+    setSingleNoteCountdown(visibleSeconds)
+    for (let remaining = visibleSeconds - 1; remaining >= 1; remaining--) {
+      const elapsed = visibleSeconds - remaining
       timers.current.push(setTimeout(
         () => setSingleNoteCountdown(remaining),
-        cueDelay * elapsed / countdownSeconds
+        cueDelay * elapsed / visibleSeconds
       ))
     }
     timers.current.push(setTimeout(() => {
@@ -1205,7 +1212,7 @@ export function SingleNoteSetup({
             <Hairline />
           </>
         )}
-        {setup.exercise === 'melody' && <View style={styles.compactEditor}><Text style={styles.sectionLabel}>{t('phone.training.melodyLength')}</Text><View style={styles.wrap}>{([3,5,7] as const).map(n => <Chip key={n} label={String(n)} selected={(setup.melodyLength ?? 5) === n} onPress={() => onChange({ melodyLength: n })} />)}</View><Text style={styles.cardCopy}>{t('phone.training.melodyHelp')}</Text></View>}
+        {setup.exercise === 'melody' && <View style={styles.compactEditor}><MelodyLevelSelector value={setup.melodyLevel ?? 'first-phrases'} onChange={melodyLevel => onChange({ melodyLevel })} /><Text style={styles.sectionLabel}>{t('phone.training.melodyLength')}</Text><View style={styles.wrap}>{([3,5,7] as const).map(n => <Chip key={n} label={String(n)} selected={(setup.melodyLength ?? 5) === n} onPress={() => onChange({ melodyLength: n })} />)}</View><Text style={styles.cardCopy}>{t('phone.training.melodyHelp')}</Text></View>}
         {setup.exercise === 'scale' && <View style={styles.compactEditor}><Text style={styles.sectionLabel}>{t('phone.training.setupPractice')}</Text><View style={styles.wrap}><Chip label={t('phone.training.scaleGuided')} selected={setup.scalePresentation !== 'phrase'} onPress={() => onChange({ scalePresentation: 'guided' })} /><Chip label={t('phone.training.scalePhrase')} selected={setup.scalePresentation === 'phrase'} onPress={() => onChange({ scalePresentation: 'phrase' })} /></View></View>}
         {setup.exercise === 'interval' && (
           <View style={styles.intervalPlan}>

@@ -23,6 +23,7 @@ import {
   type SongPreparationChoice
 } from '../../shared/training-preparation'
 import type {
+  MelodyLevel,
   TrainingAttemptInput,
   TrainingAttemptResult,
   TrainingDirectionChoice,
@@ -122,6 +123,7 @@ export interface DesktopTrainingSetup {
   readonly lowMidi: number
   readonly highMidi: number
   readonly intervalSemitones?: number
+  readonly melodyLevel?: MelodyLevel
   readonly melodyLength?: 3 | 5 | 7
   readonly scalePresentation?: 'guided' | 'phrase'
   readonly intervalSizes: readonly number[]
@@ -369,6 +371,7 @@ export function trainingConfigFromSetup(
     taskMode: setup.taskMode,
     length: setup.length * (setup.exercise === 'interval' && setup.taskMode === 'imitate' ? 3 : 1),
     intervalSemitones: setup.exercise === 'interval' ? setup.intervalSemitones : undefined,
+    melodyLevel: setup.melodyLevel,
     melodyLength: setup.melodyLength,
     scalePresentation: setup.scalePresentation,
     seed,

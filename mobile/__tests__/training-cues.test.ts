@@ -112,3 +112,9 @@ test('scale presentation switches from a single reference to the whole eight-not
   expect(mobileTrainingTargetCue('scale', 62).durationSeconds).toBe(1.82)
   expect(planTrainingCues([next], 10).voices[0].end).toBe(14)
 })
+
+test('melody listening follows scheduled audio instead of two seconds per event', () => {
+  const cues = [{ articulation: 'sequence' as const, notes: [60,62,64,65,67,62,60], durationSeconds: .65 }]
+  expect(mobileTrainingCountdownSeconds(cues, 'melody')).toBe(0)
+  expect(planTrainingCues(cues, 0).endsAt).toBeCloseTo(5.33)
+})

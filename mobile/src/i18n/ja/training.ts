@@ -3,6 +3,18 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const training: Translation<typeof en> = {
+  "phone.training.melodyLevel": "メロディーのレベル",
+  "phone.training.melodyLevel.first-phrases": "最初のフレーズ",
+  "phone.training.melodyLevel.five-notes": "5音の音域",
+  "phone.training.melodyLevel.motifs": "モチーフ",
+  "phone.training.melodyLevel.wide": "広い音域のフレーズ",
+  "phone.training.melodyLevel.chromatic": "半音階の音",
+  "phone.training.melodyLevel.first-phrases.help": "狭い音域で音階の3音を練習します。",
+  "phone.training.melodyLevel.five-notes.help": "音階の5音を使い、順次進行と3度を練習します。",
+  "phone.training.melodyLevel.motifs.help": "短いモチーフとその変化を覚えましょう。",
+  "phone.training.melodyLevel.wide.help": "1オクターブ以内で跳躍を練習します。",
+  "phone.training.melodyLevel.chromatic.help": "調の外の経過音や刺繍音を使い、半音で解決します。",
+
   "phone.training.exerciseMelodyTitle": "メロディー",
   "phone.training.melodyHelp": "メロディー全体を聴いてから、音を順番に歌いましょう。リズムは採点されないので、自分のペースで歌ってください。",
   "phone.training.melodyLength": "メロディーの音数",

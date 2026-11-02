@@ -3,6 +3,18 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  "training.melody.level": "ระดับทำนอง",
+  "training.melody.level.first-phrases": "วลีเริ่มต้น",
+  "training.melody.level.five-notes": "โน้ตห้าตัว",
+  "training.melody.level.motifs": "โมทีฟ",
+  "training.melody.level.wide": "วลีช่วงเสียงกว้าง",
+  "training.melody.level.chromatic": "โน้ตโครมาติก",
+  "training.melody.level.first-phrases.help": "โน้ตสามตัวในบันไดเสียง ช่วงเสียงแคบ",
+  "training.melody.level.five-notes.help": "โน้ตห้าตัวในบันไดเสียง เคลื่อนทีละขั้นและคู่สาม",
+  "training.melody.level.motifs.help": "จำโมทีฟสั้นและรูปแบบที่เปลี่ยนไป",
+  "training.melody.level.wide.help": "ช่วงเสียงไม่เกินหนึ่งอ็อกเทฟ พร้อมการกระโดดที่ควบคุม",
+  "training.melody.level.chromatic.help": "โน้ตผ่านและโน้ตข้างเคียงนอกคีย์ คลี่คลายด้วยครึ่งเสียง",
+
   "training.exercise.melody.label": "ทำนอง",
   "training.melody.help": "ฟังทำนองทั้งหมด แล้วร้องโน้ตตามลำดับ ไม่ต้องรีบ — แบบฝึกนี้ไม่ให้คะแนนจังหวะ",
   "training.melody.length": "จำนวนโน้ตในแต่ละทำนอง",

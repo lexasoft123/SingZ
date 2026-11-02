@@ -3,6 +3,18 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const training: Translation<typeof en> = {
+  "phone.training.melodyLevel": "멜로디 단계",
+  "phone.training.melodyLevel.first-phrases": "첫 프레이즈",
+  "phone.training.melodyLevel.five-notes": "다섯 음",
+  "phone.training.melodyLevel.motifs": "동기",
+  "phone.training.melodyLevel.wide": "넓은 프레이즈",
+  "phone.training.melodyLevel.chromatic": "반음계 음",
+  "phone.training.melodyLevel.first-phrases.help": "좁은 음역에서 음계의 세 음을 연습해요.",
+  "phone.training.melodyLevel.five-notes.help": "음계의 다섯 음으로 순차 진행과 3도를 연습해요.",
+  "phone.training.melodyLevel.motifs.help": "짧은 동기와 그 변형을 기억해 보세요.",
+  "phone.training.melodyLevel.wide.help": "한 옥타브 안에서 도약을 연습해요.",
+  "phone.training.melodyLevel.chromatic.help": "조 밖의 경과음과 보조음을 쓰고 반음으로 해결해요.",
+
   "phone.training.exerciseMelodyTitle": "멜로디",
   "phone.training.melodyHelp": "멜로디 전체를 듣고 음을 순서대로 부르세요. 천천히 불러도 돼요. 리듬은 평가하지 않아요.",
   "phone.training.melodyLength": "멜로디의 음 개수",

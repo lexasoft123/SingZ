@@ -3,6 +3,18 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  "training.melody.level": "Melodi seviyesi",
+  "training.melody.level.first-phrases": "İlk cümleler",
+  "training.melody.level.five-notes": "Beş nota",
+  "training.melody.level.motifs": "Motifler",
+  "training.melody.level.wide": "Geniş cümleler",
+  "training.melody.level.chromatic": "Kromatik notalar",
+  "training.melody.level.first-phrases.help": "Dar bir aralıkta dizinin üç notası.",
+  "training.melody.level.five-notes.help": "Adımlar ve üçlülerle dizinin beş notası.",
+  "training.melody.level.motifs.help": "Kısa bir motifi ve çeşitlemelerini hatırla.",
+  "training.melody.level.wide.help": "Kontrollü sıçramalarla bir oktava kadar.",
+  "training.melody.level.chromatic.help": "Ton dışındaki geçiş ve komşu notaları, yarım sesle çözülür.",
+
   "training.exercise.melody.label": "Melodi",
   "training.melody.help": "Melodinin tamamını dinle, ardından notaları sırayla söyle. Acele etme — ritim puanlanmaz.",
   "training.melody.length": "Melodideki nota sayısı",

@@ -3,6 +3,18 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  "training.melody.level": "Tingkat melodi",
+  "training.melody.level.first-phrases": "Frasa pertama",
+  "training.melody.level.five-notes": "Lima nada",
+  "training.melody.level.motifs": "Motif",
+  "training.melody.level.wide": "Frasa lebih luas",
+  "training.melody.level.chromatic": "Nada kromatis",
+  "training.melody.level.first-phrases.help": "Tiga nada tangga nada dalam rentang sempit.",
+  "training.melody.level.five-notes.help": "Lima nada tangga nada, dengan langkah dan terts.",
+  "training.melody.level.motifs.help": "Ingat motif pendek dan variasinya.",
+  "training.melody.level.wide.help": "Hingga satu oktaf, dengan lompatan terkontrol.",
+  "training.melody.level.chromatic.help": "Nada lewat dan tetangga di luar tangga nada, diselesaikan dengan seminada.",
+
   "training.exercise.melody.label": "Melodi",
   "training.melody.help": "Dengarkan seluruh melodi, lalu nyanyikan nadanya secara berurutan. Tidak perlu terburu-buru — ritme tidak dinilai.",
   "training.melody.length": "Nada dalam setiap melodi",

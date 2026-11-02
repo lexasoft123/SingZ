@@ -108,3 +108,8 @@ describe('desktop holder-friendly training practice', () => {
   })
 
 })
+
+it('melody listening follows scheduled audio instead of two seconds per event', () => {
+  const prompt = createTrainingSession({ key: { tonicPc: 0, mode: 'major' }, range: { lowMidi: 48, highMidi: 72 }, exercise: 'melody', melodyLength: 7, taskMode: 'imitate', length: 1, seed: 1 }).prompts[0]
+  expect(desktopTrainingCountdownSeconds(desktopTrainingCues(prompt), prompt.kind)).toBe(0)
+})

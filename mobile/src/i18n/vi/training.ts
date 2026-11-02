@@ -3,6 +3,18 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const training: Translation<typeof en> = {
+  "phone.training.melodyLevel": "Cấp độ giai điệu",
+  "phone.training.melodyLevel.first-phrases": "Những câu đầu tiên",
+  "phone.training.melodyLevel.five-notes": "Năm nốt",
+  "phone.training.melodyLevel.motifs": "Mô-típ",
+  "phone.training.melodyLevel.wide": "Câu nhạc rộng hơn",
+  "phone.training.melodyLevel.chromatic": "Nốt bán cung",
+  "phone.training.melodyLevel.first-phrases.help": "Ba nốt của âm giai trong âm vực hẹp.",
+  "phone.training.melodyLevel.five-notes.help": "Năm nốt của âm giai, đi liền bậc và quãng ba.",
+  "phone.training.melodyLevel.motifs.help": "Ghi nhớ mô-típ ngắn và các biến thể.",
+  "phone.training.melodyLevel.wide.help": "Trong một quãng tám, với bước nhảy có kiểm soát.",
+  "phone.training.melodyLevel.chromatic.help": "Nốt lướt và nốt thêu ngoài giọng, giải quyết bằng nửa cung.",
+
   "phone.training.exerciseMelodyTitle": "Giai điệu",
   "phone.training.melodyHelp": "Nghe toàn bộ giai điệu, rồi hát các nốt theo thứ tự. Cứ thong thả — nhịp điệu không được chấm điểm.",
   "phone.training.melodyLength": "Số nốt trong mỗi giai điệu",

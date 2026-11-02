@@ -3,6 +3,18 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  "training.melody.level": "Antas ng melodiya",
+  "training.melody.level.first-phrases": "Mga unang parirala",
+  "training.melody.level.five-notes": "Limang nota",
+  "training.melody.level.motifs": "Mga motibo",
+  "training.melody.level.wide": "Mas malawak na parirala",
+  "training.melody.level.chromatic": "Mga kromatikong nota",
+  "training.melody.level.first-phrases.help": "Tatlong nota ng iskala sa makitid na saklaw.",
+  "training.melody.level.five-notes.help": "Limang nota ng iskala, na may mga hakbang at tersiya.",
+  "training.melody.level.motifs.help": "Tandaan ang maikling motibo at mga baryasyon nito.",
+  "training.melody.level.wide.help": "Hanggang isang oktaba, na may kontroladong pagtalon.",
+  "training.melody.level.chromatic.help": "Mga nota sa pagitan at katabi na wala sa tono, na lumulutas nang isang semitono.",
+
   "training.exercise.melody.label": "Melodiya",
   "training.melody.help": "Pakinggan ang buong melodiya, saka kantahin ang mga nota nang sunod-sunod. Hindi binibigyan ng marka ang ritmo.",
   "training.melody.length": "Mga nota sa bawat melodiya",
