@@ -5,9 +5,17 @@ import {
   type TorrentResult
 } from '../../src/shared/torrent'
 import { log } from './log'
+import { searchTorrentFilenames } from '../../src/shared/torrent-filenames'
 import { requestForegroundNotification } from './foreground-notification'
 const native = NativeModules.SingzTorrent as { request(input: string): Promise<string> } | undefined
 export async function torrentRequest(request: TorrentRequest): Promise<TorrentResult> {
+  if (request.op === 'search' && request.mode === 'filename') {
+    try {
+      return { ok: true, data: await searchTorrentFilenames(request.query, request.offset) }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'Filename search failed' }
+    }
+  }
   if (!native)
     return {
       ok: false,

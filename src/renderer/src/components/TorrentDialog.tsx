@@ -1,14 +1,21 @@
 import { useEffect, useRef, useState } from 'react'
 import { Modal } from '@singz/ui'
-import { TorrentFlow, type TorrentViewState, type TorrentImport } from '../../../shared/torrent'
+import {
+  TORRENT_FILENAME_SEARCH_ENABLED,
+  TorrentFlow,
+  type TorrentViewState,
+  type TorrentImport
+} from '../../../shared/torrent'
 import './torrent.css'
+import TorrentDownloads from './TorrentDownloads'
+import type { TorrentJob } from '../../../shared/torrent'
 
 const fmt = (n: number): string =>
   n >= 1e9
     ? (n / 1e9).toFixed(1) + ' GB'
     : n >= 1e6
-    ? (n / 1e6).toFixed(1) + ' MB'
-    : Math.max(0, Math.round(n / 1e3)) + ' KB'
+      ? (n / 1e6).toFixed(1) + ' MB'
+      : Math.max(0, Math.round(n / 1e3)) + ' KB'
 export default function TorrentDialog({
   onClose,
   onImport
@@ -42,12 +49,11 @@ export default function TorrentDialog({
   }, [])
   const flow = ref.current
   const selected = state?.listing?.files.find((f) => f.index === state.selected)
-  const job = state?.job
-  const importSong = async (): Promise<void> => {
+  const importSong = async (job?: TorrentJob): Promise<void> => {
     if (consuming.current) return
     consuming.current = true
     setImporting(true)
-    const file = await ref.current?.consume()
+    const file = await ref.current?.consume(job)
     consuming.current = false
     if (!mounted.current) return
     setImporting(false)
@@ -58,8 +64,11 @@ export default function TorrentDialog({
       <header className="torrent-heading">
         <div>
           <span className="torrent-eyebrow">Add song / RuTracker</span>
-          <h2>{state?.view === 'download' ? 'Your song download' : 'Find your next song'}</h2>
+          <h2>{state?.view === 'download' ? 'Your downloads' : 'Find your next song'}</h2>
         </div>
+        <button className="pill ghost" disabled={state?.busy} onClick={() => flow?.downloads()}>
+          Downloads ({state?.queue.downloads.length ?? 0})
+        </button>
         <button className="pill ghost" disabled={state?.busy} onClick={() => flow?.account()}>
           {state?.connected ? 'RuTracker account' : 'Sign in'}
         </button>
@@ -115,76 +124,41 @@ export default function TorrentDialog({
           )}
         </section>
       ) : state?.view === 'download' ? (
-        <section className="torrent-download">
-          {job ? (
-            <>
-              <span className="torrent-eyebrow">
-                {job.state === 'complete'
-                  ? 'Song downloaded'
-                  : job.state === 'paused'
-                  ? 'Download paused'
-                  : job.state === 'verifying'
-                  ? 'Finishing the download'
-                  : job.state === 'error'
-                  ? 'Download needs attention'
-                  : job.done === 0
-                  ? 'Connecting to seeders'
-                  : 'Downloading your song'}
-              </span>
-              <h3>{job.name}</h3>
-              <p>{fmt(job.size)} · One selected song</p>
-              <div className="torrent-progress-text">
-                <strong>{Math.min(100, Math.floor((job.done / job.size) * 100))}%</strong>
-                <span>
-                  {fmt(job.done)} / {fmt(job.size)}
-                </span>
-              </div>
-              <progress value={job.done} max={job.size} aria-label="Song download" />
-              <p>
-                {job.state === 'downloading'
-                  ? fmt(job.speed) + '/s'
-                  : job.state === 'complete'
-                  ? 'Verified and ready'
-                  : job.state === 'verifying'
-                  ? 'Verifying and saving your song'
-                  : job.error || 'Resume whenever you’re ready.'}
-              </p>
-              <div className="torrent-download-actions">
-                {job.state === 'complete' ? (
-                  <button
-                    className="pill primary"
-                    disabled={state.busy}
-                    onClick={() => void importSong()}
-                  >
-                    Continue to Add song →
-                  </button>
-                ) : (
-                  <button
-                    className="pill primary"
-                    disabled={state.busy || job.state === 'verifying'}
-                    onClick={() =>
-                      void flow?.control(job.state === 'downloading' ? 'pause' : 'resume')
-                    }
-                  >
-                    {job.state === 'downloading' ? 'Pause download' : 'Resume download'}
-                  </button>
-                )}
-                <button
-                  className="pill ghost"
-                  disabled={state.busy}
-                  onClick={() => void flow?.control('cancel')}
-                >
-                  Cancel download
-                </button>
-              </div>
-            </>
-          ) : (
-            <p>No active download.</p>
-          )}
-        </section>
+        <TorrentDownloads
+          queue={state.queue}
+          busy={state.busy}
+          onPause={() => void flow?.control('pause')}
+          onResume={() => void flow?.control('resume')}
+          onRemove={(job) => void flow?.remove(job)}
+          onAdd={(job) => void importSong(job)}
+          onBrowse={() => flow?.browse()}
+        />
       ) : (
         state && (
           <>
+            {TORRENT_FILENAME_SEARCH_ENABLED && (
+              <div className="torrent-search-modes">
+                <button
+                  className={'pill ' + (state.mode === 'filename' ? 'primary' : 'ghost')}
+                  disabled={state.busy}
+                  onClick={() => flow?.setMode('filename')}
+                >
+                  Song filenames
+                </button>
+                <button
+                  className={'pill ' + (state.mode === 'release' ? 'primary' : 'ghost')}
+                  disabled={state.busy}
+                  onClick={() => flow?.setMode('release')}
+                >
+                  Release titles
+                </button>
+              </div>
+            )}
+            <p>
+              {state.mode === 'filename'
+                ? 'Find torrents containing a matching song filename, even when the album title is different.'
+                : 'Search release titles by artist, album, or song.'}
+            </p>
             <form
               className="torrent-search"
               onSubmit={(event) => {
@@ -194,10 +168,14 @@ export default function TorrentDialog({
             >
               <input
                 id="torrent-search"
-                aria-label="Artist or song title"
+                aria-label={state.mode === 'filename' ? 'Song filename' : 'Artist or song title'}
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="Artist or song title"
+                placeholder={
+                  state.mode === 'filename'
+                    ? 'Song filename, for example Sonne'
+                    : 'Artist or song title'
+                }
                 maxLength={200}
               />
               <button className="pill primary" disabled={state.busy || !query.trim()}>
@@ -210,6 +188,20 @@ export default function TorrentDialog({
                   <span>{state.releases.length} releases</span>
                   <strong>↓ Most seeders first</strong>
                 </div>
+
+                {state.coverage && (
+                  <p className="torrent-hint">
+                    {state.coverage.indexedTorrents} torrents indexed
+                    {state.coverage.expectedTorrents !== null
+                      ? ' of ' + state.coverage.expectedTorrents
+                      : ''}
+                    .
+                    {!state.coverage.complete
+                      ? ' Coverage is incomplete; unindexed torrents may be missing.'
+                      : ''}{' '}
+                    Seeder counts are from the catalog snapshot.
+                  </p>
+                )}
                 {state.releases.map((release) => (
                   <button
                     key={release.id}
@@ -218,7 +210,7 @@ export default function TorrentDialog({
                     }
                     disabled={state.busy}
                     onClick={() => {
-                      setFilter('')
+                      setFilter(state.mode === 'filename' ? state.query : '')
                       void flow?.choose(release)
                     }}
                   >
@@ -298,7 +290,7 @@ export default function TorrentDialog({
                       disabled={state.busy || !selected}
                       onClick={() => void flow?.download()}
                     >
-                      Download song{selected ? ' · ' + fmt(selected.size) : ''}
+                      Add to queue{selected ? ' · ' + fmt(selected.size) : ''}
                     </button>
                   </>
                 ) : (

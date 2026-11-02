@@ -41,3 +41,5 @@
 .torrent-download progress::-webkit-progress-bar { background: var(--line); border-radius: 4px; }
 .torrent-download progress::-webkit-progress-value { background: var(--accent); border-radius: 4px; }
 .torrent-download progress::-moz-progress-bar { background: var(--accent); border-radius: 4px; }
+
+.torrent-download-item { padding: 16px; margin: 12px 0; border: 1px solid var(--line); border-radius: 12px; }

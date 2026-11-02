@@ -37,6 +37,25 @@ int main() {
            std::chrono::steady_clock::now().time_since_epoch().count()));
   fs::create_directories(root / "seed" / "album");
   try {
+    // Corrupt or incomplete persisted records must return errors, never crash
+    // inside libtorrent's unchecked typed bdecode accessors.
+    int malformed = 0;
+    for (auto const &record : {"d6:formati2ee", "li2ee",
+                              "d6:formati2e7:pendingli1ee5:readylee",
+                              "d6:activei1e6:formati2e7:pendingle5:readylee"}) {
+      auto broken = root / ("broken-" + std::to_string(malformed++));
+      fs::create_directories(broken);
+      std::ofstream(broken / "queue.bencode") << record;
+      require(call(broken, "status").find("\"ok\":false") != std::string::npos,
+              "malformed queue was accepted");
+      singz_torrent_shutdown(broken.string().c_str());
+    }
+    auto brokenLegacy = root / "broken-legacy";
+    fs::create_directories(brokenLegacy);
+    std::ofstream(brokenLegacy / "job.bencode") << "li1ee";
+    require(call(brokenLegacy, "status").find("\"ok\":false") != std::string::npos,
+            "malformed legacy job was accepted");
+    singz_torrent_shutdown(brokenLegacy.string().c_str());
     constexpr int size = 512 * 1024;
     std::string first(size, 'A'), second(size, 'B');
     {
@@ -122,8 +141,15 @@ int main() {
     auto consumed = call(owned, "consume");
     require(consumed.find("first.flac") != std::string::npos, "handoff failed");
     require(fs::exists(exported), "handoff deleted import source too early");
-    require(call(owned, "status").find("\"data\":null") != std::string::npos,
-            "consumed job remained active");
+    require(call(owned, "queue").find("first.flac") != std::string::npos,
+            "opening Add song lost the recoverable download");
+    singz_torrent_shutdown(owned.string().c_str());
+    require(call(owned, "queue").find("first.flac") != std::string::npos,
+            "restart lost a downloaded but unadded song");
+    require(call(owned, "consume").find("first.flac") != std::string::npos,
+            "recovered song could not reopen Add song");
+    require(call(owned, "remove", 0).find("\"data\":null") != std::string::npos,
+            "explicit removal kept the downloaded song");
     require(call(owned, "start", 1).find("downloading") != std::string::npos,
             "second job did not start");
     require(call(owned, "cancel").find("\"data\":null") != std::string::npos,
@@ -134,6 +160,75 @@ int main() {
                 std::string::npos,
             "invalid metadata accepted");
     singz_torrent_shutdown(owned.string().c_str());
+    auto queued = root / "queue";
+    require(call(queued, "inspect", -1, bytes).find("first.flac") !=
+                std::string::npos,
+            "queue metadata inspection failed");
+    call(queued, "start", 0);
+    call(queued, "pause");
+    call(queued, "start", 1);
+    require(call(queued, "queue").find("second.flac") != std::string::npos,
+            "second song was not queued");
+    singz_torrent_shutdown(queued.string().c_str());
+    require(call(queued, "queue").find("second.flac") != std::string::npos,
+            "restart lost pending song");
+    call(queued, "resume");
+    singz_torrent_test_connect(queued.string().c_str(), port);
+    auto completedNamed = [&](std::string const &name) {
+      auto q = call(queued, "queue");
+      auto a = q.find("\"name\":\"" + name + "\"");
+      if (a == std::string::npos)
+        return false;
+      return q.substr(a, q.find('}', a) - a).find("\"state\":\"complete\"") !=
+             std::string::npos;
+    };
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(40);
+    while (!completedNamed("first.flac") &&
+           std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    require(completedNamed("first.flac"), "first queued song did not complete");
+    require(call(queued, "status").find("second.flac") != std::string::npos,
+            "queue did not advance automatically");
+    require(call(queued, "consume", 0).find("first.flac") != std::string::npos,
+            "ready song could not open while another downloads");
+    require(call(queued, "consume", 0).find("first.flac") != std::string::npos,
+            "opening Add song retired the download");
+    singz_torrent_shutdown(queued.string().c_str());
+    require(completedNamed("first.flac"), "restart lost completed queue item");
+    call(queued, "resume");
+    singz_torrent_test_connect(queued.string().c_str(), port);
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(40);
+    while (!completedNamed("second.flac") &&
+           std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    require(completedNamed("second.flac"),
+            "second queued song did not complete");
+    call(queued, "remove", 0);
+    require(call(queued, "queue").find("first.flac") == std::string::npos,
+            "explicitly removed song remained in queue");
+    require(completedNamed("second.flac"),
+            "removing one song lost another completed song");
+    call(queued, "remove", 1);
+    singz_torrent_shutdown(queued.string().c_str());
+    auto legacy = root / "legacy";
+    fs::create_directories(legacy / "metadata");
+    fs::create_directories(legacy / "imports/12345-0");
+    {
+      std::ofstream out(legacy / "metadata/12345.torrent", std::ios::binary);
+      out.write(bytes.data(), bytes.size());
+    }
+    {
+      std::ofstream out(legacy / "imports/12345-0/first.flac",
+                        std::ios::binary);
+      out.write(first.data(), first.size());
+    }
+    require(call(legacy, "queue").find("first.flac") != std::string::npos,
+            "legacy unadded original was not recovered");
+    call(legacy, "remove", 0);
+    singz_torrent_shutdown(legacy.string().c_str());
+    require(call(legacy, "queue").find("first.flac") == std::string::npos,
+            "deleted legacy download resurrected");
+    singz_torrent_shutdown(legacy.string().c_str());
     fs::remove_all(root);
     std::cout << "PASS: metadata-only inspection, file validation, local TCP "
                  "transfer, pause, restart/resume, selected-file verification, "

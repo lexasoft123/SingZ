@@ -12,15 +12,22 @@ import {
 } from 'react-native'
 import { useNavigation, usePreventRemove } from '@react-navigation/native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { TorrentFlow, type TorrentImport, type TorrentViewState } from '../../../src/shared/torrent'
-import { torrentBackgroundHint, torrentRequest } from '../torrent'
+import {
+  TORRENT_FILENAME_SEARCH_ENABLED,
+  TorrentFlow,
+  type TorrentImport,
+  type TorrentViewState
+} from '../../../src/shared/torrent'
+import { torrentRequest } from '../torrent'
 import { C } from './bits'
+import TorrentDownloads from './TorrentDownloads'
+import type { TorrentJob } from '../../../src/shared/torrent'
 const fmt = (n: number): string =>
   n >= 1e9
     ? (n / 1e9).toFixed(1) + ' GB'
     : n >= 1e6
-    ? (n / 1e6).toFixed(1) + ' MB'
-    : Math.max(0, Math.round(n / 1e3)) + ' KB'
+      ? (n / 1e6).toFixed(1) + ' MB'
+      : Math.max(0, Math.round(n / 1e3)) + ' KB'
 export default function TorrentScreen({
   onClose,
   onImport
@@ -64,7 +71,6 @@ export default function TorrentScreen({
     }
   }, [])
   const flow = ref.current,
-    job = state?.job,
     selected = state?.listing?.files.find(f => f.index === state.selected)
   const button = (
     label: string,
@@ -86,11 +92,11 @@ export default function TorrentScreen({
     Keyboard.dismiss()
     void flow?.search(query)
   }
-  const importSong = async (): Promise<void> => {
+  const importSong = async (job?: TorrentJob): Promise<void> => {
     if (consuming.current) return
     consuming.current = true
     setImporting(true)
-    const file = await ref.current?.consume()
+    const file = await ref.current?.consume(job)
     consuming.current = false
     if (!mounted.current) return
     if (file) setImported(file)
@@ -109,6 +115,15 @@ export default function TorrentScreen({
         )}
         <Text style={s.navTitle}>Add song</Text>
         {button('Account', () => flow?.account(), false, !!state?.busy)}
+      </View>
+      <View style={s.tabs}>
+        {button('Find songs', () => flow?.browse(), false, !!state?.busy)}
+        {button(
+          'Downloads (' + (state?.queue.downloads.length ?? 0) + ')',
+          () => flow?.downloads(),
+          false,
+          !!state?.busy
+        )}
       </View>
       <ScrollView
         contentContainerStyle={s.body}
@@ -145,68 +160,15 @@ export default function TorrentScreen({
             )}
           </View>
         ) : state?.view === 'download' ? (
-          <View style={s.section}>
-            {job ? (
-              <>
-                <Text style={s.eyebrow}>
-                  {job.state === 'complete'
-                    ? 'Song downloaded'
-                    : job.state === 'paused'
-                    ? 'Download paused'
-                    : job.state === 'verifying'
-                    ? 'Finishing the download'
-                    : job.state === 'error'
-                    ? 'Download needs attention'
-                    : job.done === 0
-                    ? 'Connecting to seeders'
-                    : 'Downloading your song'}
-                </Text>
-                <Text style={s.title}>{job.name}</Text>
-                <Text style={s.hint}>{fmt(job.size)} · One selected song</Text>
-                <Text style={s.percent}>
-                  {Math.min(100, Math.floor((job.done / job.size) * 100))}%
-                </Text>
-                <View
-                  accessible
-                  accessibilityRole="progressbar"
-                  accessibilityValue={{
-                    min: 0,
-                    max: 100,
-                    now: Math.floor((job.done / job.size) * 100)
-                  }}
-                  style={s.rail}
-                >
-                  <View
-                    style={[
-                      s.fill,
-                      { width: (Math.min(100, (job.done / job.size) * 100) + '%') as `${number}%` }
-                    ]}
-                  />
-                </View>
-                <View style={s.stats}>
-                  <Text style={s.hint}>
-                    {fmt(job.done)} / {fmt(job.size)}
-                  </Text>
-                  <Text style={s.hint}>
-                    {job.state === 'downloading' ? fmt(job.speed) + '/s' : job.state}
-                  </Text>
-                </View>
-                {job.error ? <Text style={s.error}>{job.error}</Text> : null}
-                <Text style={s.notice}>{torrentBackgroundHint}</Text>
-                {job.state === 'complete'
-                  ? button('Continue to Add song →', () => void importSong(), true, state.busy)
-                  : button(
-                      job.state === 'downloading' ? 'Pause download' : 'Resume download',
-                      () => void flow?.control(job.state === 'downloading' ? 'pause' : 'resume'),
-                      true,
-                      state.busy || job.state === 'verifying'
-                    )}
-                {button('Cancel download', () => void flow?.control('cancel'), false, state.busy)}
-              </>
-            ) : (
-              <Text style={s.hint}>No active download.</Text>
-            )}
-          </View>
+          <TorrentDownloads
+            queue={state.queue}
+            busy={state.busy}
+            onPause={() => void flow?.control('pause')}
+            onResume={() => void flow?.control('resume')}
+            onRemove={job => void flow?.remove(job)}
+            onAdd={job => void importSong(job)}
+            onBrowse={() => flow?.browse()}
+          />
         ) : state?.view === 'files' && state.listing ? (
           <View style={s.section}>
             <Text style={s.eyebrow}>Choose one song</Text>
@@ -228,9 +190,11 @@ export default function TorrentScreen({
             />
             {state.listing.files
               .filter(file =>
-                (file.path + ' ' + file.name)
+                filter
+                  .trim()
                   .toLocaleLowerCase()
-                  .includes(filter.toLocaleLowerCase())
+                  .split(/\s+/)
+                  .every(word => (file.path + ' ' + file.name).toLocaleLowerCase().includes(word))
               )
               .map(file => (
                 <Pressable
@@ -265,7 +229,7 @@ export default function TorrentScreen({
             </View>
             <Text style={s.hint}>The rest of the release stays unselected.</Text>
             {button(
-              'Download song' + (selected ? ' · ' + fmt(selected.size) : ''),
+              'Add to queue' + (selected ? ' · ' + fmt(selected.size) : ''),
               () => void flow?.download(),
               true,
               state.busy || !selected
@@ -275,14 +239,36 @@ export default function TorrentScreen({
           <View style={s.section}>
             <Text style={s.eyebrow}>Add song / RuTracker</Text>
             <Text style={s.title}>Find your next song</Text>
-            <Text style={s.hint}>Search release titles by artist, album, or song.</Text>
+            {TORRENT_FILENAME_SEARCH_ENABLED && (
+              <View style={s.tabs}>
+                {button(
+                  'Song filenames',
+                  () => flow?.setMode('filename'),
+                  state.mode === 'filename',
+                  state.busy
+                )}
+                {button(
+                  'Release titles',
+                  () => flow?.setMode('release'),
+                  state.mode === 'release',
+                  state.busy
+                )}
+              </View>
+            )}
             <Text style={s.hint}>
-              To find a song inside an album or discography, search the artist, open a release, then
-              filter its filenames.
+              {state.mode === 'filename'
+                ? 'Find torrents containing a matching song filename, even when the album title is different.'
+                : 'Search release titles by artist, album, or song.'}
             </Text>
             <TextInput
-              accessibilityLabel="Artist or song title"
-              placeholder="Artist or song title"
+              accessibilityLabel={
+                state.mode === 'filename' ? 'Song filename' : 'Artist or song title'
+              }
+              placeholder={
+                state.mode === 'filename'
+                  ? 'Song filename, for example Sonne'
+                  : 'Artist or song title'
+              }
               placeholderTextColor={C.dim}
               value={query}
               onChangeText={setQuery}
@@ -298,6 +284,20 @@ export default function TorrentScreen({
               <Text style={s.hint}>{state.releases.length} releases</Text>
               <Text style={s.sort}>↓ Most seeders first</Text>
             </View>
+
+            {state.coverage && (
+              <Text style={s.notice}>
+                {state.coverage.indexedTorrents} torrents indexed
+                {state.coverage.expectedTorrents !== null
+                  ? ' of ' + state.coverage.expectedTorrents
+                  : ''}
+                .
+                {!state.coverage.complete
+                  ? ' Coverage is incomplete; unindexed torrents may be missing.'
+                  : ''}
+                {' Seeder counts are from the catalog snapshot.'}
+              </Text>
+            )}
             {state.releases.map(release => (
               <Pressable
                 key={release.id}
@@ -305,13 +305,21 @@ export default function TorrentScreen({
                 disabled={state.busy}
                 onPress={() => {
                   Keyboard.dismiss()
-                  setFilter('')
+                  setFilter(state.mode === 'filename' ? state.query : '')
                   void flow?.choose(release)
                 }}
                 style={s.release}
               >
                 <View style={s.grow}>
                   <Text style={s.fileName}>{release.title}</Text>
+                  {release.matches?.map(file => (
+                    <Text key={file.index} style={s.path}>
+                      {file.path}
+                    </Text>
+                  ))}
+                  {release.matchCount && release.matchCount > (release.matches?.length ?? 0) ? (
+                    <Text style={s.path}>{release.matchCount} matching files</Text>
+                  ) : null}
                   <Text style={s.path}>
                     {release.size ? fmt(release.size) : 'Size listed in the torrent'}
                   </Text>
@@ -323,7 +331,11 @@ export default function TorrentScreen({
               </Pressable>
             ))}
             {!state.busy && state.query && state.releases.length === 0 && (
-              <Text style={s.hint}>No releases found. Try an artist or album title.</Text>
+              <Text style={s.hint}>
+                {state.mode === 'filename'
+                  ? 'No matching filenames in the indexed catalog.'
+                  : 'No releases found. Try an artist or album title.'}
+              </Text>
             )}
             {state.hasMore &&
               button(
@@ -346,11 +358,22 @@ const s = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: 8
   },
+  tabs: { flexDirection: 'row', gap: 10, paddingHorizontal: 20, paddingTop: 8 },
   navTitle: { color: C.text, fontSize: 15, fontWeight: '600' },
   body: { padding: 20, paddingBottom: 30 },
   section: { gap: 12 },
-  eyebrow: { fontSize: 11, letterSpacing: 1.2, textTransform: 'uppercase', color: C.dim },
-  title: { color: C.text, fontSize: 26, fontWeight: '700', letterSpacing: -0.7 },
+  eyebrow: {
+    fontSize: 11,
+    letterSpacing: 1.2,
+    textTransform: 'uppercase',
+    color: C.dim
+  },
+  title: {
+    color: C.text,
+    fontSize: 26,
+    fontWeight: '700',
+    letterSpacing: -0.7
+  },
   hint: { fontSize: 13, color: C.dim, lineHeight: 19 },
   input: {
     borderWidth: 1,
@@ -386,7 +409,12 @@ const s = StyleSheet.create({
   fileName: { fontSize: 14, color: C.text, fontWeight: '500' },
   path: { fontSize: 11, color: C.dim, marginTop: 5 },
   size: { fontSize: 11, color: C.dim },
-  seeders: { fontSize: 22, color: C.amber, textAlign: 'right', fontVariant: ['tabular-nums'] },
+  seeders: {
+    fontSize: 22,
+    color: C.amber,
+    textAlign: 'right',
+    fontVariant: ['tabular-nums']
+  },
   stats: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -412,7 +440,12 @@ const s = StyleSheet.create({
     marginTop: 25,
     fontVariant: ['tabular-nums']
   },
-  rail: { height: 6, backgroundColor: C.btnBg, borderRadius: 4, overflow: 'hidden' },
+  rail: {
+    height: 6,
+    backgroundColor: C.btnBg,
+    borderRadius: 4,
+    overflow: 'hidden'
+  },
   fill: { height: 6, backgroundColor: C.amber },
   notice: {
     fontSize: 13,

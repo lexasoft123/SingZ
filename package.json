@@ -23,7 +23,9 @@
     "capture:verify": "electron tests/e2e/capture-addon-smoke.cjs --current-source",
     "torrent:sdk": "python3 scripts/vendor-torrent.py",
     "torrent:addon": "node scripts/build-torrent-addon.cjs",
-    "torrent:ios": "python3 scripts/build-torrent-ios.py"
+    "torrent:ios": "python3 scripts/build-torrent-ios.py",
+    "torrent:index:test": "node --test services/torrent-index/*.test.mjs",
+    "torrent:index:serve": "node services/torrent-index/server.mjs"
   },
   "devDependencies": {
     "@fontsource-variable/bricolage-grotesque": "^5.3.0",
