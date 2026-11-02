@@ -17,11 +17,16 @@ precedence; historical memory must be checked against this checkout.
   acceptance checks, and resolves review findings. Independent features/sessions
   use separate worktrees; bounded workers may share one feature's tree only
   with disjoint ownership. Never race edits to headers, dependencies, or outputs.
-- Use the least expensive suitable available model within host rules. Claude:
-  Sonnet for development/review, Haiku for mechanical work when available;
-  expensive architecture models require a user request. Codex: inherit the
-  configured model unless an override is authorized. Use available roles or a
-  general-purpose agent with the same bounded brief; never invent model IDs.
+- Select agent models autonomously by task difficulty and cost, within host
+  rules. Use the least expensive suitable available model: Luna or Haiku for
+  mechanical tasks, Sol or Sonnet for implementation and debugging, and Astra
+  or another available architecture model for difficult research or design.
+  Give each agent a bounded brief; escalate only when needed, and do not
+  restart useful running work merely to change its model. Use only model IDs
+  and roles actually available in the current environment.
+- Prioritize completing the full goal through concrete milestones. Defer minor
+  polish and unrelated fixes; run meaningful checks at integration checkpoints
+  instead of repeatedly testing unchanged work or multiplying review cycles.
 
 ## Worktrees and builds
 
