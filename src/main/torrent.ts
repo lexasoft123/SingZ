@@ -9,6 +9,7 @@ import {
   RUTRACKER_ORIGIN,
   RUTRACKER_SEARCH_SCRIPT,
   ruTrackerSearchURL,
+  hasRuTrackerSession,
   validTorrentRequest,
   type TorrentRequest,
   type TorrentResult
@@ -165,7 +166,7 @@ async function request(input: TorrentRequest, parent?: BrowserWindow): Promise<T
       return {
         ok: true,
         data: {
-          connected: cookies.some((cookie) => cookie.name === 'bb_data' && cookie.value.length > 0)
+          connected: hasRuTrackerSession(cookies)
         }
       }
     }

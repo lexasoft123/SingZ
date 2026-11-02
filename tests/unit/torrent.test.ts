@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   TorrentFlow,
+  hasRuTrackerSession,
   ruTrackerSearchURL,
   validTorrentRequest,
   type TorrentTransport,
@@ -39,6 +40,47 @@ function ok(data: unknown) {
 afterEach(() => {
   flows.splice(0).forEach((f) => f.dispose())
   vi.useRealTimers()
+})
+describe('RuTracker session restoration', () => {
+  it('recognizes current and legacy sessions without confusing clearance cookies for login', () => {
+    expect(hasRuTrackerSession([{ name: 'bb_session', value: 'fixture-session' }])).toBe(true)
+    expect(hasRuTrackerSession([{ name: 'bb_data', value: 'fixture-legacy' }])).toBe(true)
+    expect(
+      hasRuTrackerSession([
+        { name: 'bb_session', value: '' },
+        { name: 'bb_data', value: '' }
+      ])
+    ).toBe(false)
+    expect(
+      hasRuTrackerSession([
+        { name: 'cf_clearance', value: 'fixture' },
+        { name: 'bb_guid', value: 'fixture' }
+      ])
+    ).toBe(false)
+    expect(hasRuTrackerSession([])).toBe(false)
+  })
+  it('reopens directly in search while the browser session exists and returns to sign-in after logout', async () => {
+    let cookies = [{ name: 'bb_session', value: 'fixture-session' }]
+    const transport: TorrentTransport = async (request) => {
+      if (request.op === 'status') return ok(null)
+      if (request.op === 'logout') cookies = []
+      return ok({ connected: hasRuTrackerSession(cookies) })
+    }
+    const first = flow(transport)
+    await first.initialize()
+    expect(first.state.view).toBe('search')
+    first.dispose()
+    const reopened = flow(transport)
+    await reopened.initialize()
+    expect(reopened.state.connected).toBe(true)
+    expect(reopened.state.view).toBe('search')
+    await reopened.logout()
+    expect(reopened.state.connected).toBe(false)
+    expect(reopened.state.view).toBe('account')
+    const signedOut = flow(transport)
+    await signedOut.initialize()
+    expect(signedOut.state.view).toBe('account')
+  })
 })
 describe('RuTracker request boundaries', () => {
   it('encodes Russian using the site charset and requests seeders descending', () => {

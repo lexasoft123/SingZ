@@ -51,6 +51,12 @@ to avoid a NASM dependency. The vendored Mozilla CA snapshot supplies HTTPS
 trust roots on phones while certificate and hostname verification stay on.
 Notices ship with the addon, pod and APK.
 
+Account restoration recognizes the current `bb_session` and legacy `bb_data`
+cookies from the browser store; clearance cookies alone never indicate a
+RuTracker login. The account panel shows Back to search and Sign out for a
+connected session. `mobile/scripts/test-torrent-session.sh` exercises the iOS
+cookie policy; the TypeScript unit suite covers reopening and logout.
+
 ## Lifecycle and storage
 
 Inspection only fetches torrent metadata. Every payload filename is mapped to

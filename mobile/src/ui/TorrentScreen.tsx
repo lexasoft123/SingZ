@@ -131,9 +131,12 @@ export default function TorrentScreen({
               {state.connected ? 'Connected to RuTracker' : 'Bring your account'}
             </Text>
             <Text style={s.hint}>
-              Sign in on the RuTracker website inside SingZ. Your password stays with the site.
+              {state.connected
+                ? 'Return to search, or sign out to switch accounts.'
+                : 'Sign in on the RuTracker website inside SingZ. Your password stays with the site.'}
             </Text>
-            {button('Sign in to RuTracker', () => void flow?.connect(), true, state.busy)}
+            {!state.connected &&
+              button('Sign in to RuTracker', () => void flow?.connect(), true, state.busy)}
             {state.connected && (
               <>
                 {button('Back to search', () => flow?.back(), false, state.busy)}

@@ -169,7 +169,7 @@ class TorrentModule(private val ctx:ReactApplicationContext):ReactContextBaseJav
    try{
     when(op){
      "connect"->connect{promise.resolve(connected(it))}
-     "account"->promise.resolve(connected((CookieManager.getInstance().getCookie("https://rutracker.org/forum/")?:"").split(';').any{it.trim().startsWith("bb_data=")&&it.trim().length>8}))
+     "account"->promise.resolve(connected((CookieManager.getInstance().getCookie("https://rutracker.org/forum/")?:"").split(';').any{val cookie=it.trim();cookie.substringBefore('=') in listOf("bb_session","bb_data")&&cookie.substringAfter('=',"").isNotEmpty()}))
      "logout"->{
       // WebView's CookieManager has no per-host removal API. Expire only
       // this host's cookies, preserving all other app WebView sessions.
