@@ -23,6 +23,34 @@ frames at `challenges.cloudflare.com` and `about:blank`/`about:srcdoc` are
 allowed as embedded frames; main-page navigation remains on RuTracker. Passwords are not stored in
 SingZ settings or passed to the torrent engine.
 
+## Direct artist and song search
+
+Songs is the default search mode on desktop and phones. Enter an artist and a
+song title, then Find song. SingZ searches artist releases in seeder order and
+reads their actual torrent metadata; matching audio basenames appear as
+individual result cards with file size, album/path, source release and seeders.
+Add to queue rechecks that the file still has the same index, name, path and size
+before starting its selective download. No song payload is fetched during search.
+
+Each batch checks up to ten releases. Progress states how many loaded releases
+were checked; Stop search finishes the in-flight request and starts no next
+request. Search more releases continues the remaining artist releases and site
+pages. Failed metadata stays at the cursor so Continue retries it; an unavailable
+file list is not treated as a successful search with no matches. At most two
+site pages are fetched per batch, preventing endless duplicate-page loops.
+
+This is artist-scoped discovery, not a claim to have indexed every RuTracker
+file. It handles tracks inside discographies even when release titles omit the
+song. Matching uses complete Unicode-normalized words in audio basenames,
+ignoring case, accents and punctuation; folder-only matches are excluded. MP3
+mode filters actual extensions. Up to 100 result cards are displayed; larger
+result sets explicitly ask for a more specific title. Releases mode preserves
+the existing manual release/file picker.
+
+Live acceptance: Joe Cocker / First We Take Manhattan returns seven verified
+MP3 files in topic 5859639, including file 1582 in ORIGINAL CD/1999 - No Ordinary
+World (8,957,887 bytes). The implementation contains no artist/topic special case.
+
 ## Build
 
 Requirements: Python 3.12+, CMake, a C++17 toolchain, Perl and make (nmake in a

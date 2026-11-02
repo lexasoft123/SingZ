@@ -43,3 +43,8 @@
 .torrent-download progress::-moz-progress-bar { background: var(--accent); border-radius: 4px; }
 
 .torrent-download-item { padding: 16px; margin: 12px 0; border: 1px solid var(--line); border-radius: 12px; }
+
+.torrent-song-fields { display: flex; flex-wrap: wrap; gap: 12px; }
+.torrent-song-fields input { flex: 1; min-width: 200px; padding: 12px; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 12px; }
+.torrent-song-search article p, .torrent-song-search article small { overflow-wrap: anywhere; }
+.torrent-search-modes { display: flex; gap: 8px; margin-bottom: 12px; }

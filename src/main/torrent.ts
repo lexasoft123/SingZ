@@ -184,17 +184,26 @@ async function request(input: TorrentRequest, parent?: BrowserWindow): Promise<T
       })
       return { ok: true, data: { connected: false } }
     }
-    if (input.op === 'search')
-      return JSON.parse(
+    if (input.op === 'search') {
+      log('torrent', `Search releases: ${input.query}`)
+      const result = JSON.parse(
         String(
           await enqueue(() =>
             page(ruTrackerSearchURL(input.query, input.offset), RUTRACKER_SEARCH_SCRIPT)
           )
         )
       ) as TorrentResult
+      log(
+        'torrent',
+        result.ok ? 'Search completed' : `Search failed: ${result.error}`,
+        result.ok ? 'info' : 'warn'
+      )
+      return result
+    }
+    if (input.op === 'files') log('torrent', `Reading file list: release ${input.release}`)
     const op = input.op === 'files' ? 'inspect' : input.op
-    const release = 'release' in input ? input.release ?? '' : ''
-    const index = 'index' in input ? input.index ?? -1 : -1
+    const release = 'release' in input ? (input.release ?? '') : ''
+    const index = 'index' in input ? (input.index ?? -1) : -1
     const bytes = input.op === 'files' ? await metadata(input.release) : undefined
     const result = JSON.parse(
       await native().request(root(), op, release, index, bytes)

@@ -1,3 +1,9 @@
+import {
+  TorrentSongFinder,
+  type TorrentSongMatch,
+  type TorrentSongProgress
+} from './torrent-song-search'
+export type { TorrentSongMatch, TorrentSongProgress } from './torrent-song-search'
 // Enable after the verified metadata catalog and HTTPS service are published.
 export const TORRENT_FILENAME_SEARCH_ENABLED = false
 /** Torrent transport contracts shared by Electron and the phone bridges. */
@@ -171,6 +177,11 @@ export const RUTRACKER_METADATA_BODY = `
 
 export type TorrentFormat = 'mp3' | 'all'
 export interface TorrentViewState {
+  searchKind: 'song' | 'release'
+  songArtist: string
+  songTitle: string
+  songMatches: TorrentSongMatch[]
+  songProgress: TorrentSongProgress | null
   format: TorrentFormat
   view: 'account' | 'search' | 'files' | 'download'
   connected: boolean
@@ -191,6 +202,7 @@ export interface TorrentViewState {
 /** Both UIs drive one platform-neutral state machine. Every long response
  * carries a generation so a dismissed or superseded screen cannot adopt it. */
 export class TorrentFlow {
+  private finder: TorrentSongFinder | null = null
   private listeners = new Set<() => void>()
   private generation = 0
   private disposed = false
@@ -198,6 +210,11 @@ export class TorrentFlow {
   private timer: ReturnType<typeof setInterval> | null = null
   state: TorrentViewState = {
     view: 'search',
+    searchKind: 'song',
+    songArtist: '',
+    songTitle: '',
+    songMatches: [],
+    songProgress: null,
     format: 'all',
     connected: false,
     mode: 'release',
@@ -324,6 +341,67 @@ export class TorrentFlow {
       await this.call({ op: 'logout' })
       return { connected: false, view: 'account', releases: [] }
     })
+  setSearchKind = (searchKind: 'song' | 'release'): void => {
+    if (!this.state.busy && searchKind !== this.state.searchKind)
+      this.update({
+        searchKind,
+        view: 'search',
+        error: null,
+        release: null,
+        listing: null,
+        selected: null
+      })
+  }
+  searchSong = (artist: string, title: string, more = false): Promise<void> =>
+    this.run(async () => {
+      let finder = this.finder
+      if (!more || !finder || finder.artist !== artist.trim() || finder.title !== title.trim()) {
+        finder = new TorrentSongFinder(
+          this.transport,
+          artist.trim(),
+          title.trim(),
+          this.state.format
+        )
+        this.finder = finder
+        this.update({
+          songArtist: artist.trim(),
+          songTitle: title.trim(),
+          songMatches: [],
+          songProgress: null
+        })
+      }
+      const current = finder
+      const result = await current.next((result) => {
+        if (this.finder === current && !this.disposed)
+          this.update({ songMatches: result.matches, songProgress: result.progress })
+      })
+      return { songMatches: result.matches, songProgress: result.progress, view: 'search' }
+    })
+  cancelSongSearch = (): void => {
+    this.finder?.cancel()
+  }
+  queueSong = (match: TorrentSongMatch): Promise<void> =>
+    this.run(async () => {
+      // Reinspect before queueing: another lookup or an edited release must
+      // never turn a remembered file index into a different song.
+      const fresh = await this.call<TorrentFiles>({ op: 'files', release: match.release.id })
+      const file = fresh.files.find(
+        (file) =>
+          file.index === match.file.index &&
+          file.path === match.file.path &&
+          file.name === match.file.name &&
+          file.size === match.file.size
+      )
+      if (!file)
+        throw new Error('This release changed. Search for the song again before downloading.')
+      const job = await this.call<TorrentJob>({
+        op: 'start',
+        release: match.release.id,
+        index: file.index
+      })
+      const queue = await this.call<TorrentQueue>({ op: 'queue' })
+      return { job, queue, view: 'download' }
+    })
   search = (query: string, more = false): Promise<void> =>
     this.run(async () => {
       if (this.state.format === 'mp3' && query.trim().length > 195)
@@ -378,9 +456,12 @@ export class TorrentFlow {
     if (!this.state.busy) this.update({ view: 'download', error: null })
   }
   setFormat = (format: TorrentFormat): void => {
-    if (!this.state.busy && format !== this.state.format)
+    if (!this.state.busy && format !== this.state.format) {
+      this.finder = null
       this.update({
         format,
+        songMatches: [],
+        songProgress: null,
         view: 'search',
         releases: [],
         release: null,
@@ -391,6 +472,7 @@ export class TorrentFlow {
         hasMore: false,
         error: null
       })
+    }
   }
   setMode = (mode: 'release' | 'filename'): void => {
     if (!this.state.busy && mode !== this.state.mode)
@@ -465,6 +547,7 @@ export class TorrentFlow {
     }
   }
   dispose(): void {
+    this.finder?.cancel()
     this.disposed = true
     ++this.generation
     if (this.timer) clearInterval(this.timer)
