@@ -169,7 +169,9 @@ export const RUTRACKER_METADATA_BODY = `
  return btoa(binary);
 `
 
+export type TorrentFormat = 'mp3' | 'all'
 export interface TorrentViewState {
+  format: TorrentFormat
   view: 'account' | 'search' | 'files' | 'download'
   connected: boolean
   mode: 'release' | 'filename'
@@ -196,6 +198,7 @@ export class TorrentFlow {
   private timer: ReturnType<typeof setInterval> | null = null
   state: TorrentViewState = {
     view: 'search',
+    format: 'all',
     connected: false,
     mode: 'release',
     coverage: null,
@@ -211,7 +214,12 @@ export class TorrentFlow {
     nextOffset: 0,
     hasMore: false
   }
-  constructor(private transport: TorrentTransport) {}
+  constructor(
+    private transport: TorrentTransport,
+    format: TorrentFormat = 'all'
+  ) {
+    this.state.format = format
+  }
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener)
     return () => {
@@ -318,9 +326,14 @@ export class TorrentFlow {
     })
   search = (query: string, more = false): Promise<void> =>
     this.run(async () => {
+      if (this.state.format === 'mp3' && query.trim().length > 195)
+        throw new Error('Shorten the search to 195 characters when searching for MP3 releases.')
       const result = await this.call<TorrentSearch>({
         op: 'search',
-        query,
+        query:
+          this.state.format === 'mp3'
+            ? query.trim() + (this.state.mode === 'filename' ? ' .mp3' : ' mp3')
+            : query,
         mode: this.state.mode,
         offset: more ? this.state.nextOffset : 0
       })
@@ -344,7 +357,15 @@ export class TorrentFlow {
         op: 'files',
         release: release.id
       })
-      return { release, listing, selected: null, view: 'files' }
+      const files =
+        this.state.format === 'mp3'
+          ? listing.files.filter((file) => /\.mp3$/i.test(file.name))
+          : listing.files
+      if (!files.length && this.state.format === 'mp3')
+        throw new Error(
+          'This release has no MP3 files. Choose another release or switch to All formats.'
+        )
+      return { release, listing: { ...listing, files }, selected: null, view: 'files' }
     })
   browse = (): void => {
     if (!this.state.busy)
@@ -355,6 +376,21 @@ export class TorrentFlow {
   }
   downloads = (): void => {
     if (!this.state.busy) this.update({ view: 'download', error: null })
+  }
+  setFormat = (format: TorrentFormat): void => {
+    if (!this.state.busy && format !== this.state.format)
+      this.update({
+        format,
+        view: 'search',
+        releases: [],
+        release: null,
+        listing: null,
+        selected: null,
+        coverage: null,
+        nextOffset: 0,
+        hasMore: false,
+        error: null
+      })
   }
   setMode = (mode: 'release' | 'filename'): void => {
     if (!this.state.busy && mode !== this.state.mode)
