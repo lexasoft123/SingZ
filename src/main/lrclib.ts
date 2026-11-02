@@ -1,3 +1,5 @@
+import packageInfo from '../../package.json'
+import { createLrclibTransport } from '../shared/lrclib-transport'
 import { net } from 'electron'
 import {
   LRCLIB_API,
@@ -5,7 +7,6 @@ import {
   lookupLyrics as coreLookupLyrics,
   lyricsById as coreLyricsById,
   searchCandidates as coreSearchCandidates,
-  type ApiAnswer,
   type LookupOutcome,
   type LyricsCandidate,
   type TrackMeta
@@ -19,60 +20,14 @@ import { log } from './log'
  * owns electron's net.fetch and the down-TTL memory.
  */
 
-// One non-answer usually means the service is down or blocking this network —
-// remember briefly so a batch of songs doesn't each queue 20s of dead waits.
-const DOWN_TTL_MS = 5 * 60_000
-let downUntil = 0
-let downReason = ''
-
-async function apiJson(path: string): Promise<ApiAnswer> {
-  const url = `${LRCLIB_API}${path}`
-  const started = Date.now()
-  if (started < downUntil) {
-    log(
-      'lyrics',
-      `LRCLIB skipped ${url}: retry cooldown ${Math.ceil((downUntil - started) / 1000)}s remaining after ${downReason}`,
-      'warn'
-    )
-    return 'down'
-  }
-  const ac = new AbortController()
-  const timer = setTimeout(() => ac.abort(), 10_000)
-  const failed = (reason: string): ApiAnswer => {
-    downUntil = Date.now() + DOWN_TTL_MS
-    downReason = reason
-    log(
-      'lyrics',
-      `LRCLIB ${url}: ${reason} (${Date.now() - started}ms); retry cooldown 300s`,
-      'warn'
-    )
-    return 'down'
-  }
-  log('lyrics', `LRCLIB GET ${url}`)
-  try {
-    const res = await net.fetch(url, { headers: LRCLIB_HEADERS, signal: ac.signal })
-    if (!res.ok && res.status !== 404) return failed(`HTTP ${res.status}`)
-    log('lyrics', `LRCLIB ${url}: HTTP ${res.status} (${Date.now() - started}ms)`)
-    if (res.status === 404) return 'miss'
-    // Status 200 may be an HTML challenge instead of a JSON API response.
-    try {
-      return { json: await res.json() }
-    } catch {
-      return failed(
-        ac.signal.aborted
-          ? 'timeout after 10000ms while reading response'
-          : `invalid JSON response (content-type ${res.headers?.get('content-type') ?? 'unknown'})`
-      )
-    }
-  } catch (error) {
-    const detail = String(error instanceof Error ? `${error.name}: ${error.message}` : error)
-      .replace(/[\r\n\t]+/g, ' ')
-      .slice(0, 300)
-    return failed(ac.signal.aborted ? 'timeout after 10000ms' : `network failure: ${detail}`)
-  } finally {
-    clearTimeout(timer)
-  }
-}
+const client = `SingZ/${packageInfo.version} (https://github.com/lexasoft123/SingZ)`
+const transport = createLrclibTransport({
+  baseURL: LRCLIB_API,
+  headers: { ...LRCLIB_HEADERS, 'User-Agent': client, 'Lrclib-Client': client },
+  fetch: (url, init) => net.fetch(url, init),
+  log: (message, level = 'info') => log('lyrics', message, level)
+})
+const apiJson = transport.request
 
 export {
   fixTagEncoding,

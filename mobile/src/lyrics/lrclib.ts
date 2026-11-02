@@ -1,10 +1,10 @@
+import { createLrclibTransport } from '../../../src/shared/lrclib-transport'
 import {
   LRCLIB_API,
   LRCLIB_HEADERS,
   lookupLyrics as coreLookupLyrics,
   lyricsById as coreLyricsById,
   searchCandidates as coreSearchCandidates,
-  type ApiAnswer,
   type LookupOutcome,
   type LyricsCandidate,
   type TrackMeta
@@ -20,60 +20,14 @@ import { log } from '../log'
  * lesson): callers leave lyrics absent and re-offerable.
  */
 
-// One non-answer usually means the service is down or blocking this network —
-// remember briefly so a batch of songs doesn't each queue 20s of dead waits.
-const DOWN_TTL_MS = 5 * 60_000
-let downUntil = 0
-let downReason = ''
-
-async function apiJson(path: string): Promise<ApiAnswer> {
-  const url = `${LRCLIB_API}${path}`
-  const started = Date.now()
-  if (started < downUntil) {
-    log(
-      'lyrics',
-      `LRCLIB skipped ${url}: retry cooldown ${Math.ceil((downUntil - started) / 1000)}s remaining after ${downReason}`,
-      'warn'
-    )
-    return 'down'
-  }
-  const ac = new AbortController()
-  const timer = setTimeout(() => ac.abort(), 10_000)
-  const failed = (reason: string): ApiAnswer => {
-    downUntil = Date.now() + DOWN_TTL_MS
-    downReason = reason
-    log(
-      'lyrics',
-      `LRCLIB ${url}: ${reason} (${Date.now() - started}ms); retry cooldown 300s`,
-      'warn'
-    )
-    return 'down'
-  }
-  log('lyrics', `LRCLIB GET ${url}`)
-  try {
-    const res = await fetch(url, { headers: LRCLIB_HEADERS, signal: ac.signal })
-    if (!res.ok && res.status !== 404) return failed(`HTTP ${res.status}`)
-    log('lyrics', `LRCLIB ${url}: HTTP ${res.status} (${Date.now() - started}ms)`)
-    if (res.status === 404) return 'miss'
-    // Status 200 may be an HTML challenge instead of a JSON API response.
-    try {
-      return { json: await res.json() }
-    } catch {
-      return failed(
-        ac.signal.aborted
-          ? 'timeout after 10000ms while reading response'
-          : `invalid JSON response (content-type ${res.headers?.get('content-type') ?? 'unknown'})`
-      )
-    }
-  } catch (error) {
-    const detail = String(error instanceof Error ? `${error.name}: ${error.message}` : error)
-      .replace(/[\r\n\t]+/g, ' ')
-      .slice(0, 300)
-    return failed(ac.signal.aborted ? 'timeout after 10000ms' : `network failure: ${detail}`)
-  } finally {
-    clearTimeout(timer)
-  }
-}
+const client = 'SingZ mobile (https://github.com/lexasoft123/SingZ)'
+const transport = createLrclibTransport({
+  baseURL: LRCLIB_API,
+  headers: { ...LRCLIB_HEADERS, 'User-Agent': client, 'Lrclib-Client': client },
+  fetch: (url, init) => fetch(url, init),
+  log: (message, level = 'info') => log('lyrics', message, level)
+})
+const apiJson = transport.request
 
 export {
   fixTagEncoding,
@@ -85,20 +39,12 @@ export {
   type TrackMeta
 } from '../gen/analysis-lib'
 
-/** An explicit user retry must not inherit a previous network failure. */
-function retryNow(): void {
-  if (Date.now() < downUntil)
-    log('lyrics', `LRCLIB manual retry: clearing cooldown after ${downReason}`)
-  downUntil = 0
-  downReason = ''
-}
-
 /** Look up synced lyrics by meta (exact triple first, then search). */
 export const lookupLyrics = async (
   meta: TrackMeta,
   options?: { retry?: boolean }
 ): Promise<LookupOutcome> => {
-  if (options?.retry) retryNow()
+  if (options?.retry) transport.retryNow()
   log(
     'lyrics',
     `Lookup ${JSON.stringify(meta.title)} by ${JSON.stringify(meta.artist ?? '')}, ${Math.round(meta.durationSec)}s`
@@ -119,12 +65,12 @@ export const searchCandidates = (
   query: { artist?: string; title?: string; free?: string },
   durationSec: number
 ): Promise<LyricsCandidate[]> => {
-  retryNow()
+  transport.retryNow()
   return coreSearchCandidates(apiJson, query, durationSec)
 }
 
 /** Fetch one record by id and parse its synced lyrics. */
 export const lyricsById = (id: number, durationSec: number): ReturnType<typeof coreLyricsById> => {
-  retryNow()
+  transport.retryNow()
   return coreLyricsById(apiJson, id, durationSec)
 }
