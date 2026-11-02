@@ -17,6 +17,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -210,8 +211,18 @@ public:
     if (op == "inspect")
       return inspect(release, bytes);
     if (op == "start") {
-      if (job_)
-        throw std::runtime_error("Finish or cancel the current download first");
+      if ((job_ && job_->release == release && job_->index == index) ||
+          std::any_of(pending_.begin(), pending_.end(),
+                      [&](auto const &j) {
+                        return j.release == release && j.index == index;
+                      }) ||
+          std::any_of(ready_.begin(), ready_.end(), [&](auto const &j) {
+            return j.release == release && j.index == index;
+          }))
+        return status();
+      if (pending_.size() + ready_.size() + (job_ ? 1 : 0) >= 200)
+        throw std::runtime_error(
+            "The download list is full. Remove finished downloads first");
       if (!releaseOK(release))
         throw std::runtime_error("Invalid RuTracker release");
       auto data = read(metaPath(release));
@@ -227,14 +238,24 @@ public:
       if (size > std::int64_t(5) * 1024 * 1024 * 1024)
         throw std::runtime_error(
             "This song is larger than 5 GB. Choose a smaller release");
-      job_ = std::make_unique<Job>();
-      job_->release = release;
-      job_->index = index;
-      job_->name = name;
-      job_->size = size;
-      persist();
-      activate(info);
+      Job next;
+      next.release = release;
+      next.index = index;
+      next.name = name;
+      next.size = size;
+      next.state = "queued";
+      pending_.push_back(next);
+      try {
+        persist();
+      } catch (...) {
+        pending_.pop_back();
+        throw;
+      }
+      if (!job_ && !queuePaused_)
+        activateNext();
     } else if (op == "pause") {
+      queuePaused_ = true;
+      persist();
       if (job_ && job_->state != "complete" && job_->state != "verifying") {
         job_->state = "paused";
         job_->speed = 0;
@@ -245,8 +266,13 @@ public:
         }
       }
     } else if (op == "resume") {
-      if (!job_)
-        throw std::runtime_error("There is no paused download");
+      queuePaused_ = false;
+      if (!job_ && !pending_.empty())
+        activateNext();
+      if (!job_) {
+        persist();
+        return status();
+      }
       if (job_->state != "complete" && job_->state != "verifying") {
         if (handle_.is_valid()) {
           job_->state = "downloading";
@@ -257,39 +283,78 @@ public:
         } else
           activate(metadata(read(metaPath(job_->release))));
       }
-    } else if (op == "cancel") {
-      if (job_) {
-        auto releaseId = job_->release;
-        auto exported = exportPath();
-        handle_ = {};
-        session_.reset(); // Drain libtorrent disk/network jobs first.
-        fs::remove(root_ / "job.bencode");
+    } else if (op == "cancel" || op == "remove") {
+      std::string targetRelease = release;
+      int targetIndex = index;
+      if (targetRelease.empty() || (op == "cancel" && targetIndex < 0)) {
+        if (job_) {
+          targetRelease = job_->release;
+          targetIndex = job_->index;
+        } else if (!pending_.empty()) {
+          targetRelease = pending_.front().release;
+          targetIndex = pending_.front().index;
+        } else if (!ready_.empty()) {
+          targetRelease = ready_.front().release;
+          targetIndex = ready_.front().index;
+        } else
+          return status();
+      }
+      if (!releaseOK(targetRelease) || targetIndex < 0 || targetIndex >= 25000)
+        throw std::runtime_error("Invalid download selection");
+      bool active =
+          job_ && job_->release == targetRelease && job_->index == targetIndex;
+      auto pending = pending_, ready = ready_;
+      auto old = job_ ? std::make_unique<Job>(*job_) : nullptr;
+      if (active)
         job_.reset();
-        fs::remove_all(root_ / "partial" / releaseId);
-        fs::remove_all(exported.parent_path());
+      auto same = [&](auto const &j) {
+        return j.release == targetRelease && j.index == targetIndex;
+      };
+      pending_.erase(std::remove_if(pending_.begin(), pending_.end(), same),
+                     pending_.end());
+      ready_.erase(std::remove_if(ready_.begin(), ready_.end(), same),
+                   ready_.end());
+      try {
+        persist();
+      } catch (...) {
+        pending_ = std::move(pending);
+        ready_ = std::move(ready);
+        job_ = std::move(old);
+        throw;
+      }
+      if (active) {
+        handle_ = {};
+        session_.reset();
+        fs::remove_all(root_ / "partial" / targetRelease);
         fs::remove(root_ / "resume.bencode");
       }
+      fs::remove_all(root_ / "imports" /
+                     (targetRelease + "-" + std::to_string(targetIndex)));
+      if (!job_ && !queuePaused_)
+        activateNext();
     } else if (op == "consume") {
-      if (!job_ || job_->state != "complete")
+      auto found =
+          std::find_if(ready_.begin(), ready_.end(), [&](auto const &j) {
+            return (release.empty() || j.release == release) &&
+                   (index < 0 || j.index == index);
+          });
+      if (found == ready_.end() || found->state != "complete")
         throw std::runtime_error(
             "The selected song has not finished downloading");
-      auto out = exportPath();
+      auto out = exportPath(*found);
       if (!fs::is_regular_file(out) ||
-          fs::file_size(out) != std::uintmax_t(job_->size))
+          fs::file_size(out) != std::uintmax_t(found->size))
         throw std::runtime_error(
             "The downloaded song is missing or incomplete");
-      auto result = "{\"path\":" + quote(utf8(out)) +
-                    ",\"name\":" + quote(job_->name) +
-                    ",\"size\":" + std::to_string(job_->size) + "}";
-      auto releaseId = job_->release;
-      fs::remove(root_ / "job.bencode");
-      job_.reset();
-      handle_ = {};
-      session_.reset();
-      fs::remove_all(root_ / "partial" / releaseId);
-      fs::remove(root_ / "resume.bencode");
-      return result; // Existing importer now owns this separate, durable
-                     // source.
+      // Opening Add song is not an acknowledgement. Keep this original until
+      // the user explicitly removes it; hosts give their importer a COPY.
+      return "{\"path\":" + quote(utf8(out)) +
+             ",\"name\":" + quote(found->name) +
+             ",\"size\":" + std::to_string(found->size) +
+             ",\"release\":" + quote(found->release) +
+             ",\"index\":" + std::to_string(found->index) + "}";
+    } else if (op == "queue") {
+      return queueStatus();
     } else if (op != "status")
       throw std::runtime_error("Unknown torrent operation");
     return status();
@@ -303,6 +368,8 @@ public:
   }
   std::vector<std::int64_t> testProgress() {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!handle_.is_valid())
+      return testLastProgress_;
     return handle_.file_progress(lt::torrent_handle::piece_granularity);
   }
 #endif
@@ -312,81 +379,237 @@ private:
   bool stopping_ = false;
   std::thread worker_;
   std::unique_ptr<Job> job_;
+  std::vector<Job> pending_, ready_;
+  bool queuePaused_ = false;
   std::unique_ptr<lt::session> session_;
   lt::torrent_handle handle_;
+#ifdef SINGZ_TORRENT_TESTS
+  std::vector<std::int64_t> testLastProgress_;
+#endif
   Clock::time_point lastSave_ = Clock::now();
   fs::path metaPath(std::string const &id) const {
     return root_ / "metadata" / (id + ".torrent");
   }
-  fs::path exportPath() const {
-    return root_ / "imports" /
-           (job_->release + "-" + std::to_string(job_->index)) /
-           fs::u8path(job_->name);
+  fs::path exportPath(Job const &j) const {
+    return root_ / "imports" / (j.release + "-" + std::to_string(j.index)) /
+           fs::u8path(j.name);
   }
+  fs::path exportPath() const { return exportPath(*job_); }
   fs::path payloadPath() const {
     return root_ / "partial" / job_->release /
            (std::to_string(job_->index) + ".payload");
   }
-  void persist() {
-    if (!job_)
-      return;
+  static lt::entry encode(Job const &j) {
     lt::entry e;
-    e["release"] = job_->release;
-    e["name"] = job_->name;
-    e["index"] = job_->index;
-    e["size"] = job_->size;
-    e["state"] = job_->state;
-    e["done"] = job_->done;
+    e["release"] = j.release;
+    e["name"] = j.name;
+    e["index"] = j.index;
+    e["size"] = j.size;
+    e["state"] = j.state;
+    e["done"] = j.done;
+    e["error"] = j.error;
+    return e;
+  }
+  static Job decode(lt::bdecode_node const &e) {
+    if (e.type() != lt::bdecode_node::dict_t)
+      throw std::runtime_error("Invalid saved download record");
+    Job j;
+    j.release = std::string(e.dict_find_string_value("release"));
+    j.name = std::string(e.dict_find_string_value("name"));
+    auto index = e.dict_find_int_value("index", -1);
+    if (index < 0 || index >= 25000)
+      throw std::runtime_error("Invalid saved download index");
+    j.index = int(index);
+    j.size = e.dict_find_int_value("size");
+    j.done = std::clamp<std::int64_t>(e.dict_find_int_value("done"), 0,
+                                      std::max<std::int64_t>(0, j.size));
+    j.state = std::string(e.dict_find_string_value("state"));
+    j.error = std::string(e.dict_find_string_value("error"));
+    if (!releaseOK(j.release) || !safeName(j.name) || !audio(j.name) ||
+        j.index < 0 || j.index >= 25000 || j.size <= 0 ||
+        j.size > std::int64_t(5) * 1024 * 1024 * 1024)
+      throw std::runtime_error("Invalid saved download");
+    return j;
+  }
+  void persist() {
+    lt::entry e;
+    e["format"] = 2;
+    e["paused"] = queuePaused_ ? 1 : 0;
+    if (job_)
+      e["active"] = encode(*job_);
+    e["pending"] = lt::entry(lt::entry::list_type{});
+    e["ready"] = lt::entry(lt::entry::list_type{});
+    for (auto const &j : pending_)
+      e["pending"].list().push_back(encode(j));
+    for (auto const &j : ready_)
+      e["ready"].list().push_back(encode(j));
     std::vector<char> bytes;
     lt::bencode(std::back_inserter(bytes), e);
-    atomicWrite(root_ / "job.bencode", bytes);
+    atomicWrite(root_ / "queue.bencode", bytes);
+    // The v1 file is only read for migration. Leaving it would resurrect a
+    // removed download if the queue were ever migrated again.
+    fs::remove(root_ / "job.bencode");
+  }
+  void activateNext() {
+    if (job_ || pending_.empty() || queuePaused_)
+      return;
+    auto next = pending_.front();
+    auto info = metadata(read(metaPath(next.release)));
+    if (next.index >= info->num_files() ||
+        std::string(info->files().file_name(lt::file_index_t(next.index))) !=
+            next.name ||
+        info->files().file_size(lt::file_index_t(next.index)) != next.size)
+      throw std::runtime_error("Queued torrent metadata has changed");
+    job_ = std::make_unique<Job>(next);
+    pending_.erase(pending_.begin());
+    persist();
+    activate(info);
+  }
+  void archiveComplete() {
+    if (!job_ || job_->state != "complete")
+      return;
+    auto completed = *job_;
+#ifdef SINGZ_TORRENT_TESTS
+    if (handle_.is_valid())
+      testLastProgress_ =
+          handle_.file_progress(lt::torrent_handle::piece_granularity);
+#endif
+    ready_.push_back(completed);
+    job_.reset();
+    try {
+      persist();
+    } catch (...) {
+      ready_.pop_back();
+      job_ = std::make_unique<Job>(completed);
+      throw;
+    }
+    handle_ = {};
+    session_.reset();
+    fs::remove(root_ / "resume.bencode");
+    fs::remove_all(root_ / "partial" / completed.release);
+    if (!queuePaused_)
+      activateNext();
+  }
+  void recoverLegacyExports() {
+    auto directory = root_ / "imports";
+    if (!fs::is_directory(directory))
+      return;
+    for (auto const &item : fs::directory_iterator(directory)) {
+      try {
+        if (!item.is_directory() || item.is_symlink())
+          continue;
+        auto key = utf8(item.path().filename());
+        auto split = key.rfind('-');
+        if (split == std::string::npos)
+          continue;
+        auto release = key.substr(0, split), number = key.substr(split + 1);
+        if (!releaseOK(release) || number.empty() ||
+            !std::all_of(number.begin(), number.end(),
+                         [](unsigned char c) { return c >= '0' && c <= '9'; }))
+          continue;
+        auto selected = std::stol(number);
+        if (selected < 0 || selected >= 25000)
+          continue;
+        bool known =
+            (job_ && job_->release == release && job_->index == selected) ||
+            std::any_of(ready_.begin(), ready_.end(), [&](auto const &j) {
+              return j.release == release && j.index == selected;
+            });
+        if (known || ready_.size() + pending_.size() + (job_ ? 1 : 0) >= 200)
+          continue;
+        auto info = metadata(read(metaPath(release)));
+        if (selected >= info->num_files())
+          continue;
+        auto index = lt::file_index_t(int(selected));
+        Job j;
+        j.release = release;
+        j.index = int(selected);
+        j.name = std::string(info->files().file_name(index));
+        j.size = info->files().file_size(index);
+        auto path = exportPath(j);
+        if (!audio(j.name) || j.size <= 0 || fs::is_symlink(path) ||
+            !fs::is_regular_file(path) ||
+            fs::file_size(path) != std::uintmax_t(j.size))
+          continue;
+        j.state = "complete";
+        j.done = j.size;
+        ready_.push_back(j);
+      } catch (...) { /* A malformed orphan must not hide other downloads. */
+      }
+    }
   }
   void restore() {
-    if (!fs::exists(root_ / "job.bencode"))
-      return;
-    try {
+    auto file = root_ / "queue.bencode";
+    bool migrate = !fs::exists(file);
+    if (fs::exists(file)) {
+      auto data = read(file, 1024 * 1024);
+      lt::bdecode_node e;
+      lt::error_code ec;
+      lt::bdecode(data.data(), data.data() + data.size(), e, ec);
+      if (ec || e.type() != lt::bdecode_node::dict_t ||
+          e.dict_find_int_value("format") != 2)
+        throw std::runtime_error("Cannot read the saved download queue");
+      auto pending = e.dict_find_list("pending"),
+           ready = e.dict_find_list("ready");
+      if (!pending || !ready)
+        throw std::runtime_error("Saved download queue lists are missing");
+      if (pending.list_size() + ready.list_size() +
+              (e.dict_find("active") ? 1 : 0) > 200)
+        throw std::runtime_error("Saved download queue is too large");
+      for (int i = 0; i < pending.list_size(); ++i) {
+        auto j = decode(pending.list_at(i));
+        j.state = "queued";
+        pending_.push_back(j);
+      }
+      for (int i = 0; i < ready.list_size(); ++i) {
+        auto j = decode(ready.list_at(i));
+        if (!fs::is_regular_file(exportPath(j)) ||
+            fs::file_size(exportPath(j)) != std::uintmax_t(j.size)) {
+          j.state = "error";
+          j.error = "The downloaded file is missing or incomplete";
+        }
+        ready_.push_back(j);
+      }
+      auto active = e.dict_find("active");
+      if (active)
+        job_ = std::make_unique<Job>(decode(active));
+    } else if (fs::exists(root_ / "job.bencode")) {
       auto data = read(root_ / "job.bencode", 65536);
       lt::bdecode_node e;
       lt::error_code ec;
       lt::bdecode(data.data(), data.data() + data.size(), e, ec);
-      if (ec)
-        return;
-      auto j = std::make_unique<Job>();
-      j->release = std::string(e.dict_find_string_value("release"));
-      j->name = std::string(e.dict_find_string_value("name"));
-      j->index = int(e.dict_find_int_value("index", -1));
-      j->size = e.dict_find_int_value("size");
-      j->done = std::max<std::int64_t>(
-          0, std::min(j->size, e.dict_find_int_value("done")));
-      if (!releaseOK(j->release) || !safeName(j->name) || !audio(j->name) ||
-          j->index < 0 || j->size <= 0)
-        return;
-      j->state = std::string(e.dict_find_string_value("state"));
-      job_ = std::move(j);
-      auto info = metadata(read(metaPath(job_->release)));
-      auto i = lt::file_index_t(job_->index);
-      if (job_->index >= info->num_files() ||
-          std::string(info->files().file_name(i)) != job_->name ||
-          info->files().file_size(i) != job_->size) {
-        job_.reset();
-        return;
-      }
+      if (ec || e.type() != lt::bdecode_node::dict_t)
+        throw std::runtime_error("Cannot read the saved download");
+      job_ = std::make_unique<Job>(decode(e));
+    }
+    queuePaused_ = bool(job_) || !pending_.empty();
+    if (job_) {
       if (job_->state == "complete" && fs::is_regular_file(exportPath()) &&
-          fs::file_size(exportPath()) == std::uintmax_t(job_->size))
+          fs::file_size(exportPath()) == std::uintmax_t(job_->size)) {
         job_->done = job_->size;
-      else
+        ready_.push_back(*job_);
+        job_.reset();
+      } else {
         job_->state = "paused";
-    } catch (...) {
-      job_.reset();
+        job_->speed = 0;
+      }
+    }
+    if (migrate) {
+      recoverLegacyExports();
+      persist();
     }
   }
   std::string inspect(std::string const &id, std::vector<char> const &bytes) {
     if (!releaseOK(id))
       throw std::runtime_error("Invalid RuTracker release");
     auto info = metadata(bytes);
-    if (job_ && job_->release == id)
+    bool queued = (job_ && job_->release == id) ||
+                  std::any_of(pending_.begin(), pending_.end(),
+                              [&](auto const &j) { return j.release == id; });
+    if (queued &&
+        metadata(read(metaPath(id)))->info_hashes() != info->info_hashes())
       throw std::runtime_error(
-          "Finish or cancel this release's current download first");
+          "This release changed while its songs were queued");
     std::string result = "{\"name\":" + quote(info->name()) +
                          ",\"total\":" + std::to_string(info->total_size()) +
                          ",\"files\":[";
@@ -411,6 +634,12 @@ private:
     return result;
   }
   void activate(std::shared_ptr<lt::torrent_info> const &info) {
+    if (!job_ || job_->index < 0 || job_->index >= info->num_files() ||
+        std::string(info->files().file_name(lt::file_index_t(job_->index))) !=
+            job_->name ||
+        info->files().file_size(lt::file_index_t(job_->index)) != job_->size)
+      throw std::runtime_error(
+          "Saved download does not match its torrent metadata");
     lt::settings_pack settings;
     settings.set_str(lt::settings_pack::user_agent, "SingZ/1.0");
     settings.set_str(lt::settings_pack::listen_interfaces, "0.0.0.0:0,[::]:0");
@@ -457,10 +686,17 @@ private:
     persist();
     lastSave_ = Clock::now();
   }
-  std::string status() const {
-    if (!job_)
-      return "null";
-    auto const &j = *job_;
+  std::string jobStatus(Job const &stored) const {
+    Job j = stored;
+    if (j.state == "complete") {
+      std::error_code ec;
+      auto path = exportPath(j);
+      if (fs::is_symlink(path, ec) || !fs::is_regular_file(path, ec) ||
+          fs::file_size(path, ec) != std::uintmax_t(j.size) || ec) {
+        j.state = "error";
+        j.error = "The downloaded file is missing or incomplete";
+      }
+    }
     std::string result =
         "{\"release\":" + quote(j.release) +
         ",\"index\":" + std::to_string(j.index) + ",\"name\":" + quote(j.name) +
@@ -469,8 +705,36 @@ private:
         ",\"speed\":" + std::to_string(j.speed) +
         ",\"state\":" + quote(j.state) + ",\"error\":" + quote(j.error);
     if (j.state == "complete")
-      result += ",\"path\":" + quote(utf8(exportPath()));
+      result += ",\"path\":" + quote(utf8(exportPath(j)));
     return result + "}";
+  }
+  std::string status() const {
+    if (job_)
+      return jobStatus(*job_);
+    if (!pending_.empty())
+      return jobStatus(pending_.front());
+    if (!ready_.empty())
+      return jobStatus(ready_.front());
+    return "null";
+  }
+  std::string queueStatus() const {
+    std::string result =
+        "{\"paused\":" + std::string(queuePaused_ ? "true" : "false") +
+        ",\"downloads\":[";
+    bool first = true;
+    auto add = [&](Job const &j) {
+      if (!first)
+        result += ',';
+      first = false;
+      result += jobStatus(j);
+    };
+    if (job_)
+      add(*job_);
+    for (auto const &j : pending_)
+      add(j);
+    for (auto const &j : ready_)
+      add(j);
+    return result + "]}";
   }
   void finish() {
     auto source = payloadPath(), destination = exportPath();
@@ -494,9 +758,17 @@ private:
       std::lock_guard<std::mutex> lock(mutex_);
       if (stopping_)
         return;
-      if (!job_ || !session_ || !handle_.is_valid())
-        continue;
       try {
+        if (!job_) {
+          activateNext();
+          continue;
+        }
+        if (job_->state == "complete") {
+          archiveComplete();
+          continue;
+        }
+        if (!session_ || !handle_.is_valid())
+          continue;
         std::vector<lt::alert *> alerts;
         session_->pop_alerts(&alerts);
         for (auto *alert : alerts) {
@@ -510,12 +782,17 @@ private:
                      job_->state == "verifying") {
             finish();
           } else if (lt::alert_cast<lt::file_error_alert>(alert)) {
+            queuePaused_ = true;
             job_->state = "error";
             job_->speed = 0;
             job_->error = "Cannot write the song. Check free space and resume";
             handle_.pause();
             persist();
           }
+        }
+        if (job_->state == "complete") {
+          archiveComplete();
+          continue;
         }
         if (job_->state != "downloading")
           continue;
@@ -526,6 +803,7 @@ private:
           job_->done = std::min(job_->size, progress[std::size_t(job_->index)]);
         job_->speed = s.download_payload_rate;
         if (s.errc) {
+          queuePaused_ = true;
           job_->state = "error";
           job_->error = "Torrent download failed. Check your connection or "
                         "free space, then resume";
@@ -543,6 +821,15 @@ private:
           lastSave_ = Clock::now();
         }
       } catch (...) {
+        if (!job_) {
+          queuePaused_ = true;
+          try {
+            persist();
+          } catch (...) {
+          };
+          continue;
+        }
+        queuePaused_ = true;
         job_->state = "error";
         job_->speed = 0;
         job_->error = "Cannot finish the download. Check free space and resume";

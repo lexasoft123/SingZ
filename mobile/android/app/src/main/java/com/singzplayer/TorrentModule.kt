@@ -124,24 +124,19 @@ class TorrentModule(private val ctx:ReactApplicationContext):ReactContextBaseJav
    main.postDelayed({if(asyncTicket==ticket)finish(null,"RuTracker did not finish sending the torrent file. Try again.")},40000)
   }
  }
- // Stage into the picker's existing imports area before retiring the durable
- // torrent job. Cancelling Add song then uses the same cleanup as a local pick.
- private fun consume():String {
-  val root=TorrentNative.root(ctx)
-  val status=JSONObject(TorrentNative.call(root,"status","",-1,null))
-  val job=status.optJSONObject("data")
-  if(!status.optBoolean("ok")||job?.optString("state")!="complete") return failure("The song has not finished downloading")
-  val source=File(job.getString("path"))
+ // Every Add song attempt receives a copy; the verified original remains recoverable.
+ private fun consume(release:String,index:Int):String {
+  val result=JSONObject(TorrentNative.call(TorrentNative.root(ctx),"consume",release,index,null))
+  if(!result.optBoolean("ok"))return result.toString()
+  val file=result.getJSONObject("data")
+  val source=File(file.getString("path"))
   val dir=File(ctx.filesDir,"singz-projects/imports/"+java.util.UUID.randomUUID())
   try {
    check(dir.mkdirs())
    val destination=File(dir,source.name)
    source.inputStream().use { input -> java.io.FileOutputStream(destination).use { output -> input.copyTo(output);output.fd.sync() } }
-   check(destination.length()==job.getLong("size"))
-   val result=JSONObject(TorrentNative.call(root,"consume","",-1,null))
-   if(!result.optBoolean("ok")){dir.deleteRecursively();return result.toString()}
-   result.getJSONObject("data").put("path",destination.absolutePath)
-   source.delete();source.parentFile?.delete()
+   check(destination.length()==file.getLong("size"))
+   file.put("path",destination.absolutePath)
    return result.toString()
   }catch(_:Exception){dir.deleteRecursively();return failure("Could not prepare the downloaded song. Check free storage and try again.")}
  }
@@ -149,10 +144,10 @@ class TorrentModule(private val ctx:ReactApplicationContext):ReactContextBaseJav
   if(input.length>8192){promise.resolve(failure("Torrent request is too large"));return}
   val request=try{JSONObject(input)}catch(_:Exception){promise.resolve(failure("Invalid torrent request"));return}
   val op=request.optString("op")
-  if(op in listOf("status","start","pause","resume","cancel","consume","capabilities")){
+  if(op in listOf("status","queue","remove","start","pause","resume","cancel","consume","capabilities")){
    worker.execute{
     try{
-     val result=if(op=="consume") consume() else TorrentNative.call(TorrentNative.root(ctx),op,request.optString("release"),request.optInt("index",-1),null)
+     val result=if(op=="consume") consume(request.optString("release"),request.optInt("index",-1)) else TorrentNative.call(TorrentNative.root(ctx),op,request.optString("release"),request.optInt("index",-1),null)
      val data=JSONObject(result)
      if(op in listOf("start","resume")&&data.optBoolean("ok")&&data.optJSONObject("data")?.optString("state")=="downloading"){
       main.post{

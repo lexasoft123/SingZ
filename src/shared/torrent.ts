@@ -1,7 +1,18 @@
+// Enable after the verified metadata catalog and HTTPS service are published.
+export const TORRENT_FILENAME_SEARCH_ENABLED = false
 /** Torrent transport contracts shared by Electron and the phone bridges. */
 export type TorrentRequest =
-  | { op: 'account' | 'connect' | 'logout' | 'status' | 'pause' | 'resume' | 'cancel' | 'consume' }
-  | { op: 'search'; query: string; offset?: number }
+  | {
+      op: 'account' | 'connect' | 'logout' | 'status' | 'queue' | 'pause' | 'resume' | 'cancel'
+    }
+  | {
+      op: 'search'
+      query: string
+      offset?: number
+      mode?: 'release' | 'filename'
+    }
+  | { op: 'consume'; release?: string; index?: number }
+  | { op: 'remove'; release: string; index: number }
   | { op: 'files'; release: string }
   | { op: 'start'; release: string; index: number }
 export type TorrentResult<T = unknown> = { ok: true; data: T } | { ok: false; error: string }
@@ -10,6 +21,9 @@ export interface TorrentRelease {
   title: string
   size: number
   seeders: number
+  matches?: TorrentFile[]
+  matchCount?: number
+  seedersUpdatedAt?: string
 }
 export interface TorrentFile {
   index: number
@@ -29,8 +43,20 @@ export interface TorrentJob {
   size: number
   done: number
   speed: number
-  state: 'paused' | 'downloading' | 'verifying' | 'complete' | 'error'
+  state: 'queued' | 'paused' | 'downloading' | 'verifying' | 'complete' | 'error'
   error?: string
+}
+export interface TorrentQueue {
+  paused: boolean
+  downloads: TorrentJob[]
+}
+export interface TorrentCoverage {
+  indexedTorrents: number
+  indexedFiles: number
+  expectedTorrents: number | null
+  source: string
+  updatedAt: string | null
+  complete: boolean
 }
 export interface TorrentImport {
   path: string
@@ -38,6 +64,7 @@ export interface TorrentImport {
   size: number
 }
 export interface TorrentSearch {
+  coverage?: TorrentCoverage
   releases: TorrentRelease[]
   nextOffset: number
   hasMore: boolean
@@ -59,20 +86,20 @@ export function validTorrentRequest(input: unknown): input is TorrentRequest {
   const r = input as Record<string, unknown>
   if (typeof r.op !== 'string') return false
   if (
-    ['account', 'connect', 'logout', 'status', 'pause', 'resume', 'cancel', 'consume'].includes(
-      r.op
-    )
+    ['account', 'connect', 'logout', 'status', 'queue', 'pause', 'resume', 'cancel'].includes(r.op)
   )
     return true
+  if (r.op === 'consume' && r.release === undefined && r.index === undefined) return true
   if (r.op === 'search')
     return (
+      (r.mode === undefined || r.mode === 'release' || r.mode === 'filename') &&
       typeof r.query === 'string' &&
       r.query.trim().length > 0 &&
       r.query.length <= 200 &&
       (r.offset === undefined ||
         (Number.isInteger(r.offset) && Number(r.offset) >= 0 && Number(r.offset) <= 10000))
     )
-  if (r.op === 'files' || r.op === 'start')
+  if (r.op === 'files' || r.op === 'start' || r.op === 'remove' || r.op === 'consume')
     return (
       typeof r.release === 'string' &&
       /^[1-9][0-9]{0,11}$/.test(r.release) &&
@@ -145,6 +172,9 @@ export const RUTRACKER_METADATA_BODY = `
 export interface TorrentViewState {
   view: 'account' | 'search' | 'files' | 'download'
   connected: boolean
+  mode: 'release' | 'filename'
+  coverage: TorrentCoverage | null
+  queue: TorrentQueue
   busy: boolean
   error: string | null
   query: string
@@ -167,6 +197,9 @@ export class TorrentFlow {
   state: TorrentViewState = {
     view: 'search',
     connected: false,
+    mode: 'release',
+    coverage: null,
+    queue: { paused: false, downloads: [] },
     busy: true,
     error: null,
     query: '',
@@ -206,7 +239,12 @@ export class TorrentFlow {
       const job = await this.call<TorrentJob | null>({ op: 'status' })
       if (seq !== this.generation || this.disposed) return
       if (job) this.update({ job, view: 'download', busy: false })
-      const account = await this.call<{ connected: boolean }>({ op: 'account' })
+      const queue = await this.call<TorrentQueue | null>({ op: 'queue' })
+      if (seq !== this.generation || this.disposed) return
+      if (queue) this.update({ queue })
+      const account = await this.call<{ connected: boolean }>({
+        op: 'account'
+      })
       if (seq !== this.generation || this.disposed) return
       this.update({
         connected: account.connected,
@@ -220,7 +258,10 @@ export class TorrentFlow {
         }, 1000)
     } catch (error) {
       if (seq === this.generation) {
-        this.update({ error: String(error instanceof Error ? error.message : error), busy: false })
+        this.update({
+          error: String(error instanceof Error ? error.message : error),
+          busy: false
+        })
         if (this.state.job && !this.timer)
           this.timer = setInterval(() => {
             void this.poll()
@@ -229,15 +270,18 @@ export class TorrentFlow {
     }
   }
   private async poll(): Promise<void> {
-    if (this.polling || this.disposed || this.state.busy || this.state.view !== 'download') return
+    if (this.polling || this.disposed || this.state.busy) return
     this.polling = true
     const seq = this.generation
     try {
       const job = await this.call<TorrentJob | null>({ op: 'status' })
-      if (seq === this.generation) this.update({ job })
+      const queue = await this.call<TorrentQueue | null>({ op: 'queue' })
+      if (seq === this.generation) this.update({ job, ...(queue ? { queue } : {}) })
     } catch (error) {
       if (seq === this.generation)
-        this.update({ error: String(error instanceof Error ? error.message : error) })
+        this.update({
+          error: String(error instanceof Error ? error.message : error)
+        })
     } finally {
       this.polling = false
     }
@@ -251,12 +295,17 @@ export class TorrentFlow {
       if (seq === this.generation) this.update({ ...next, busy: false })
     } catch (error) {
       if (seq === this.generation)
-        this.update({ error: String(error instanceof Error ? error.message : error), busy: false })
+        this.update({
+          error: String(error instanceof Error ? error.message : error),
+          busy: false
+        })
     }
   }
   connect = (): Promise<void> =>
     this.run(async () => {
-      const account = await this.call<{ connected: boolean }>({ op: 'connect' })
+      const account = await this.call<{ connected: boolean }>({
+        op: 'connect'
+      })
       return {
         connected: account.connected,
         view: this.state.job ? 'download' : account.connected ? 'search' : 'account'
@@ -272,12 +321,14 @@ export class TorrentFlow {
       const result = await this.call<TorrentSearch>({
         op: 'search',
         query,
+        mode: this.state.mode,
         offset: more ? this.state.nextOffset : 0
       })
       const byId = new Map((more ? this.state.releases : []).map((r) => [r.id, r]))
       result.releases.forEach((r) => byId.set(r.id, r))
       return {
         query,
+        coverage: result.coverage ?? null,
         releases: [...byId.values()].sort((a, b) => b.seeders - a.seeders),
         view: 'search',
         release: null,
@@ -289,8 +340,42 @@ export class TorrentFlow {
     })
   choose = (release: TorrentRelease): Promise<void> =>
     this.run(async () => {
-      const listing = await this.call<TorrentFiles>({ op: 'files', release: release.id })
+      const listing = await this.call<TorrentFiles>({
+        op: 'files',
+        release: release.id
+      })
       return { release, listing, selected: null, view: 'files' }
+    })
+  browse = (): void => {
+    if (!this.state.busy)
+      this.update({
+        view: this.state.connected ? 'search' : 'account',
+        error: null
+      })
+  }
+  downloads = (): void => {
+    if (!this.state.busy) this.update({ view: 'download', error: null })
+  }
+  setMode = (mode: 'release' | 'filename'): void => {
+    if (!this.state.busy && mode !== this.state.mode)
+      this.update({
+        mode,
+        releases: [],
+        query: '',
+        coverage: null,
+        nextOffset: 0,
+        hasMore: false
+      })
+  }
+  remove = (job: TorrentJob): Promise<void> =>
+    this.run(async () => {
+      const current = await this.call<TorrentJob | null>({
+        op: 'remove',
+        release: job.release,
+        index: job.index
+      })
+      const queue = await this.call<TorrentQueue>({ op: 'queue' })
+      return { job: current, queue }
     })
   select = (index: number): void => {
     if (this.state.listing?.files.some((f) => f.index === index)) this.update({ selected: index })
@@ -313,25 +398,33 @@ export class TorrentFlow {
         release: this.state.release.id,
         index: this.state.selected
       })
-      return { job, view: 'download' }
+      const queue = await this.call<TorrentQueue | null>({ op: 'queue' })
+      return { job, view: 'download', ...(queue ? { queue } : {}) }
     })
   control = (op: 'pause' | 'resume' | 'cancel'): Promise<void> =>
     this.run(async () => {
       const job = await this.call<TorrentJob | null>({ op })
-      return { job, view: op === 'cancel' ? (this.state.listing ? 'files' : 'search') : 'download' }
+      const queue = await this.call<TorrentQueue | null>({ op: 'queue' })
+      return { job, view: 'download', ...(queue ? { queue } : {}) }
     })
-  async consume(): Promise<TorrentImport | null> {
+  async consume(job?: TorrentJob): Promise<TorrentImport | null> {
     if (this.state.busy || this.disposed) return null
     const seq = ++this.generation
     this.update({ busy: true, error: null })
     try {
-      const file = await this.call<TorrentImport>({ op: 'consume' })
+      const file = await this.call<TorrentImport>({
+        op: 'consume',
+        ...(job ? { release: job.release, index: job.index } : {})
+      })
       if (seq !== this.generation || this.disposed) return null
-      this.update({ busy: false, job: null })
+      this.update({ busy: false })
       return file
     } catch (error) {
       if (seq === this.generation)
-        this.update({ busy: false, error: String(error instanceof Error ? error.message : error) })
+        this.update({
+          busy: false,
+          error: String(error instanceof Error ? error.message : error)
+        })
       return null
     }
   }

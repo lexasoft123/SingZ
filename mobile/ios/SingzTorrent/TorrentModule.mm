@@ -31,18 +31,17 @@ static NSString *SZCore(NSString *root, NSString *op, NSString *release,
   return result ?: SZFailure(@"Invalid torrent engine response");
 }
 // Use the document picker's import ownership and cancellation cleanup.
-static NSString *SZConsume(NSString *root) {
-  NSFileManager *fm = NSFileManager.defaultManager;
-  NSDictionary *status = [NSJSONSerialization
-      JSONObjectWithData:[SZCore(root, @"status", @"", -1, nil)
-                             dataUsingEncoding:NSUTF8StringEncoding]
-                 options:0
+static NSString *SZConsume(NSString *root, NSString *release, NSInteger index) {
+  NSString *response = SZCore(root, @"consume", release, index, nil);
+  NSMutableDictionary *result = [NSJSONSerialization
+      JSONObjectWithData:[response dataUsingEncoding:NSUTF8StringEncoding]
+                 options:NSJSONReadingMutableContainers
                    error:nil];
-  NSDictionary *job = status[@"data"];
-  if (![job isKindOfClass:NSDictionary.class] ||
-      ![job[@"state"] isEqual:@"complete"])
-    return SZFailure(@"The song has not finished downloading");
-  NSURL *source = [NSURL fileURLWithPath:job[@"path"]];
+  if (![result[@"ok"] boolValue])
+    return response;
+  NSDictionary *file = result[@"data"];
+  NSFileManager *fm = NSFileManager.defaultManager;
+  NSURL *source = [NSURL fileURLWithPath:file[@"path"]];
   NSURL *support = [fm URLsForDirectory:NSApplicationSupportDirectory
                               inDomains:NSUserDomainMask]
                        .firstObject;
@@ -63,18 +62,9 @@ static NSString *SZConsume(NSString *root) {
                      @"storage and try again.");
   }
   [dir setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
-  NSMutableDictionary *result = [[NSJSONSerialization
-      JSONObjectWithData:[SZCore(root, @"consume", @"", -1, nil)
-                             dataUsingEncoding:NSUTF8StringEncoding]
-                 options:NSJSONReadingMutableContainers
-                   error:nil] mutableCopy];
-  if (![result[@"ok"] boolValue]) {
-    [fm removeItemAtURL:dir error:nil];
-    return SZFailure(@"Could not prepare the downloaded song. Try again.");
-  }
   result[@"data"][@"path"] = destination.path;
-  [fm removeItemAtURL:source error:nil];
-  [fm removeItemAtURL:source.URLByDeletingLastPathComponent error:nil];
+  // Keep the verified original in the download collection even if Add song is
+  // cancelled.
   NSData *data = [NSJSONSerialization dataWithJSONObject:result
                                                  options:0
                                                    error:nil];
@@ -350,8 +340,8 @@ RCT_EXPORT_METHOD(request : (NSString *)input resolver : (
     return;
   }
   if ([@[
-        @"status", @"start", @"pause", @"resume", @"cancel", @"consume",
-        @"capabilities"
+        @"status", @"queue", @"remove", @"start", @"pause", @"resume",
+        @"cancel", @"consume", @"capabilities"
       ] containsObject:op]) {
     NSString *release = [request[@"release"] isKindOfClass:NSString.class]
                             ? request[@"release"]
@@ -362,7 +352,7 @@ RCT_EXPORT_METHOD(request : (NSString *)input resolver : (
             : -1;
     NSString *root = self.root;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-      resolve([op isEqual:@"consume"] ? SZConsume(root)
+      resolve([op isEqual:@"consume"] ? SZConsume(root, release, index)
                                       : SZCore(root, op, release, index, nil));
     });
     return;

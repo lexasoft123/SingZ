@@ -30,7 +30,9 @@ const releases = [
 ]
 const flows: TorrentFlow[] = []
 function flow(transport: TorrentTransport): TorrentFlow {
-  const f = new TorrentFlow(transport)
+  const f = new TorrentFlow(async (r) =>
+    r.op === 'queue' ? ok({ paused: false, downloads: [] }) : transport(r)
+  )
   flows.push(f)
   return f
 }
@@ -128,7 +130,7 @@ describe('Torrent acquisition flow', () => {
     expect(calls.some((r) => r.op === 'start')).toBe(false)
     f.select(0)
     await f.download()
-    expect(calls.at(-1)).toEqual({ op: 'start', release: '12345', index: 0 })
+    expect(calls.find((r) => r.op === 'start')).toEqual({ op: 'start', release: '12345', index: 0 })
     expect(f.state.view).toBe('download')
   })
   it('recovers an active job before an account check finishes and keeps polling after resume', async () => {
@@ -150,7 +152,7 @@ describe('Torrent acquisition flow', () => {
     const initializing = f.initialize()
     await Promise.resolve()
     await Promise.resolve()
-    expect(f.state.view).toBe('download')
+    await vi.waitFor(() => expect(f.state.view).toBe('download'))
     expect(f.state.busy).toBe(false)
     await f.control('resume')
     accountDone(ok({ connected: true }))
@@ -164,10 +166,10 @@ describe('Torrent acquisition flow', () => {
       r.op === 'status'
         ? ok(null)
         : r.op === 'account'
-        ? ok({ connected: true })
-        : new Promise((resolve) => {
-            complete = resolve
-          })
+          ? ok({ connected: true })
+          : new Promise((resolve) => {
+              complete = resolve
+            })
     )
     await f.initialize()
     const searching = f.search('old song')
@@ -183,6 +185,41 @@ describe('Torrent acquisition flow', () => {
     expect(f.state.view).toBe('account')
     f.back()
     expect(f.state.view).toBe('download')
+  })
+  it('retains ready downloads after repeated handoff and removes only the selected entry', async () => {
+    const ready: TorrentJob = { ...job, state: 'complete', done: job.size }
+    const active: TorrentJob = { ...job, index: 1, name: 'next.flac', state: 'downloading' }
+    let downloads = [active, ready]
+    const calls: TorrentRequest[] = []
+    const f = new TorrentFlow(async (r) => {
+      calls.push(r)
+      if (r.op === 'status') return ok(active)
+      if (r.op === 'queue') return ok({ paused: false, downloads: [...downloads] })
+      if (r.op === 'account') return ok({ connected: true })
+      if (r.op === 'consume')
+        return ok({ path: '/private/import-copy.flac', name: ready.name, size: ready.size })
+      if (r.op === 'remove') {
+        downloads = downloads.filter((j) => j.release !== r.release || j.index !== r.index)
+        return ok(active)
+      }
+      return ok(null)
+    })
+    flows.push(f)
+    await f.initialize()
+    expect(f.state.queue.downloads).toHaveLength(2)
+    f.browse()
+    expect(f.state.view).toBe('search')
+    f.downloads()
+    await f.consume(ready)
+    await f.consume(ready)
+    expect(f.state.queue.downloads).toHaveLength(2)
+    expect(calls.filter((r) => r.op === 'consume')).toEqual([
+      { op: 'consume', release: ready.release, index: ready.index },
+      { op: 'consume', release: ready.release, index: ready.index }
+    ])
+    await f.remove(ready)
+    expect(f.state.queue.downloads).toEqual([active])
+    expect(f.state.job).toEqual(active)
   })
   it('merges subsequent search pages without duplicating a release', async () => {
     let page = 0

@@ -64,10 +64,13 @@ an internal numeric filename; all unselected files have zero priority.
 Libtorrent may still fetch boundary pieces shared with the chosen file.
 The downloaded song is hash verified before export. Symlink entries, unsafe
 portable filenames, metadata above 16 MiB and selected files above 5 GiB are
-rejected. At most one active song download exists per app storage root.
+rejected. Up to 200 songs can be retained across the queue and completed downloads.
+One song downloads at a time; completing it starts the next queued song.
+The Downloads tab remains available while browsing for more songs.
 
-Pause saves resume data. A restarted app restores the job paused; Resume
-continues it. Cancel removes the partial job. On iOS, backgrounding pauses
+Pause saves resume data and pauses the entire queue. A restarted app restores
+unfinished work paused; Resume continues it. Cancel removes only the selected
+queued or active song; other queued songs remain. On iOS, backgrounding pauses
 work; downloads need the app in the foreground. Android uses a dataSync
 foreground service with a progress notification and Pause action. Notification
 permission is requested at the initiating tap; denying it does not deny the
@@ -76,10 +79,14 @@ resume the durable job.
 
 Mobile jobs live outside `singz-projects`, under durable private
 `torrent-downloads`. On import, a completed file is copied to the existing
-`singz-projects/imports/<uuid>` staging area before retiring the job. Cancelling
-Add song uses the same cleanup as a document picker import. iOS storage is
-excluded from backup. Desktop jobs live in userData/torrent-downloads and the
-completed file is allowlisted for the existing loader.
+`singz-projects/imports/<uuid>` staging area. The original remains in Ready to add
+until the user explicitly removes it, including after closing or cancelling Add
+song. Repeated handoffs create independent disposable copies. iOS storage is
+excluded from backup. Desktop jobs live in userData/torrent-downloads and use
+allowlisted copies in userData/torrent-imports (discarded on next launch).
+The native queue is atomically persisted in queue.bencode, with a bounded v1
+job migration and recovery of v1 exported originals using their saved metadata.
+A malformed queue returns an error rather than crashing.
 
 The libtorrent SDK is always Release. Its exported Debug assertion definition
 is removed for consumers because it changes public C++ object layouts. This
@@ -90,7 +97,8 @@ is required even when the surrounding Android application is Debug.
 Unit coverage exercises request boundaries, Cyrillic encoding, seeder sorting,
 selection, pagination, recovery and late-result disposal. The native integration
 test runs a real local TCP seeder, selective transfer, pause/restart/resume,
-byte verification, unselected-file exclusion and cancellation:
+byte verification, unselected-file exclusion, queue advancement, repeated
+handoff, malformed persisted records, legacy recovery and targeted removal:
 
 ```sh
 cmake -S native/torrent -B .engines-src/torrent/tests \
@@ -110,3 +118,19 @@ The test-only peer connector is excluded from production builds. Device E2E
 uses fixture provider responses and the real native downloader, then drives
 the existing Add song handoff. Live RuTracker authentication/search requires
 a user's own site session and was not verified with real account credentials.
+
+
+## Search by filename across torrents
+
+`services/torrent-index` is the metadata index and read-only HTTP service. It
+searches actual audio basenames, groups matching files by release, and sorts
+releases by seeders descending. An album title does not have to contain the
+search term. Both apps can display matching file previews and catalog coverage.
+
+This requires a separately populated catalog of topic IDs and verified torrent
+metadata. The service has not been deployed and no RuTracker-wide metadata
+corpus has been imported. Release-title search remains the default. The
+filename tab is hidden until the verified catalog is published and
+`TORRENT_FILENAME_SEARCH_ENABLED` is enabled; the client never silently uses
+title search or claims a partial catalog covers all RuTracker torrents. See
+[the service instructions](../services/torrent-index/README.md).

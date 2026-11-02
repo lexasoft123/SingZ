@@ -1,8 +1,9 @@
 import { app, BrowserWindow, ipcMain, session } from 'electron'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
-import { existsSync, readFileSync } from 'node:fs'
-import { createHash } from 'node:crypto'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
+import { mkdir, copyFile, stat, rm } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   RUTRACKER_ACCOUNT_SCRIPT,
   RUTRACKER_METADATA_BODY,
@@ -15,6 +16,7 @@ import {
   type TorrentResult
 } from '../shared/torrent'
 import { allowFile } from './media'
+import { searchTorrentFilenames } from '../shared/torrent-filenames'
 import { log } from './log'
 
 interface Addon {
@@ -158,6 +160,8 @@ async function metadata(release: string): Promise<Buffer> {
 
 async function request(input: TorrentRequest, parent?: BrowserWindow): Promise<TorrentResult> {
   try {
+    if (input.op === 'search' && input.mode === 'filename')
+      return { ok: true, data: await searchTorrentFilenames(input.query, input.offset) }
     if (input.op === 'connect') return { ok: true, data: await enqueue(() => connect(parent)) }
     if (input.op === 'account') {
       const cookies = await session
@@ -189,15 +193,26 @@ async function request(input: TorrentRequest, parent?: BrowserWindow): Promise<T
         )
       ) as TorrentResult
     const op = input.op === 'files' ? 'inspect' : input.op
-    const release = 'release' in input ? input.release : ''
-    const index = 'index' in input ? input.index : -1
+    const release = 'release' in input ? input.release ?? '' : ''
+    const index = 'index' in input ? input.index ?? -1 : -1
     const bytes = input.op === 'files' ? await metadata(input.release) : undefined
     const result = JSON.parse(
       await native().request(root(), op, release, index, bytes)
     ) as TorrentResult
     if (result.ok && input.op === 'consume') {
-      const file = result.data as { path: string }
-      allowFile(file.path)
+      const file = result.data as { path: string; name: string; size: number }
+      const directory = join(app.getPath('userData'), 'torrent-imports', randomUUID())
+      try {
+        await mkdir(directory, { recursive: true })
+        const path = join(directory, file.name)
+        await copyFile(file.path, path)
+        if ((await stat(path)).size !== file.size) throw new Error('Import copy is incomplete')
+        allowFile(path)
+        return { ok: true, data: { ...file, path } }
+      } catch (error) {
+        await rm(directory, { recursive: true, force: true })
+        throw error
+      }
     }
     if (['start', 'pause', 'resume', 'cancel', 'consume'].includes(input.op))
       log(
@@ -211,6 +226,13 @@ async function request(input: TorrentRequest, parent?: BrowserWindow): Promise<T
   }
 }
 export function registerTorrent(): void {
+  // Copies abandoned by a quit/crash are disposable: verified originals live
+  // independently in the persistent download collection until explicit removal.
+  try {
+    rmSync(join(app.getPath('userData'), 'torrent-imports'), { recursive: true, force: true })
+  } catch {
+    log('torrent', 'Could not clear old import copies', 'warn')
+  }
   // Cancel browser-triggered downloads. Metadata is fetched explicitly above;
   // all song payloads belong to the C++ job, never Electron's Downloads folder.
   const siteSession = session.fromPartition(partition)
