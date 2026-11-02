@@ -23,31 +23,52 @@ import { log } from './log'
 // remember briefly so a batch of songs doesn't each queue 20s of dead waits.
 const DOWN_TTL_MS = 5 * 60_000
 let downUntil = 0
+let downReason = ''
 
 async function apiJson(path: string): Promise<ApiAnswer> {
-  if (Date.now() < downUntil) return 'down'
+  const url = `${LRCLIB_API}${path}`
+  const started = Date.now()
+  if (started < downUntil) {
+    log(
+      'lyrics',
+      `LRCLIB skipped ${url}: retry cooldown ${Math.ceil((downUntil - started) / 1000)}s remaining after ${downReason}`,
+      'warn'
+    )
+    return 'down'
+  }
   const ac = new AbortController()
   const timer = setTimeout(() => ac.abort(), 10_000)
+  const failed = (reason: string): ApiAnswer => {
+    downUntil = Date.now() + DOWN_TTL_MS
+    downReason = reason
+    log(
+      'lyrics',
+      `LRCLIB ${url}: ${reason} (${Date.now() - started}ms); retry cooldown 300s`,
+      'warn'
+    )
+    return 'down'
+  }
+  log('lyrics', `LRCLIB GET ${url}`)
   try {
-    const res = await net.fetch(`${LRCLIB_API}${path}`, {
-      headers: LRCLIB_HEADERS,
-      signal: ac.signal
-    })
+    const res = await net.fetch(url, { headers: LRCLIB_HEADERS, signal: ac.signal })
+    if (!res.ok && res.status !== 404) return failed(`HTTP ${res.status}`)
+    log('lyrics', `LRCLIB ${url}: HTTP ${res.status} (${Date.now() - started}ms)`)
     if (res.status === 404) return 'miss'
-    if (!res.ok) {
-      downUntil = Date.now() + DOWN_TTL_MS
-      return 'down'
-    }
-    // a bot-check HTML page with status 200 lands here — treat it as down too
+    // Status 200 may be an HTML challenge instead of a JSON API response.
     try {
       return { json: await res.json() }
     } catch {
-      downUntil = Date.now() + DOWN_TTL_MS
-      return 'down'
+      return failed(
+        ac.signal.aborted
+          ? 'timeout after 10000ms while reading response'
+          : `invalid JSON response (content-type ${res.headers?.get('content-type') ?? 'unknown'})`
+      )
     }
-  } catch {
-    downUntil = Date.now() + DOWN_TTL_MS
-    return 'down'
+  } catch (error) {
+    const detail = String(error instanceof Error ? `${error.name}: ${error.message}` : error)
+      .replace(/[\r\n\t]+/g, ' ')
+      .slice(0, 300)
+    return failed(ac.signal.aborted ? 'timeout after 10000ms' : `network failure: ${detail}`)
   } finally {
     clearTimeout(timer)
   }
@@ -64,8 +85,21 @@ export {
 } from '../shared/lrclib-core'
 
 /** Look up synced lyrics by meta (exact triple first, then search). */
-export const lookupLyrics = (meta: TrackMeta): Promise<LookupOutcome> =>
-  coreLookupLyrics(apiJson, meta, (m) => log('lyrics', m))
+export const lookupLyrics = async (meta: TrackMeta): Promise<LookupOutcome> => {
+  log(
+    'lyrics',
+    `Lookup ${JSON.stringify(meta.title)} by ${JSON.stringify(meta.artist ?? '')}, ${Math.round(meta.durationSec)}s`
+  )
+  const outcome = await coreLookupLyrics(apiJson, meta, (m) => log('lyrics', m))
+  log(
+    'lyrics',
+    typeof outcome === 'object'
+      ? `Lookup found ${outcome.hit.lines.length} lines: ${outcome.hit.credit}`
+      : `Lookup ${outcome === 'down' ? 'unavailable' : 'no match'}: ${JSON.stringify(meta.title)}`,
+    outcome === 'down' ? 'warn' : 'info'
+  )
+  return outcome
+}
 
 /** Manual search for the variant picker: synced first, then closest duration. */
 export const searchCandidates = (
@@ -74,7 +108,5 @@ export const searchCandidates = (
 ): Promise<LyricsCandidate[]> => coreSearchCandidates(apiJson, query, durationSec)
 
 /** Fetch one record by id and parse its synced lyrics. */
-export const lyricsById = (
-  id: number,
-  durationSec: number
-): ReturnType<typeof coreLyricsById> => coreLyricsById(apiJson, id, durationSec)
+export const lyricsById = (id: number, durationSec: number): ReturnType<typeof coreLyricsById> =>
+  coreLyricsById(apiJson, id, durationSec)
