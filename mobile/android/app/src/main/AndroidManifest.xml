@@ -46,6 +46,7 @@
            that keeps it playing behind the lock screen. Same process as the
            player on purpose: it talks to NowPlayingModule directly. Foreground
            only while a song plays; see NowPlayingService. -->
+      <service android:name=".TorrentDownloadService" android:exported="false" android:foregroundServiceType="dataSync" />
       <service
         android:name=".NowPlayingService"
         android:exported="false"

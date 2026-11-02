@@ -13,6 +13,7 @@ class SingZPackage : ReactPackage {
       AudioInputModule(ctx),
       NativeAudioRuntimeModule(ctx),
       NowPlayingModule(ctx),
+      TorrentModule(ctx),
       SplitModule(ctx)
     )
 

@@ -116,6 +116,7 @@ import { Language } from './components/Language'
 const loadRetainedAudio = () => import('./components/RetainedAudioControl')
 const RetainedAudioControl = lazy(loadRetainedAudio)
 
+const TorrentDialog = lazy(() => import('./components/TorrentDialog'))
 const LyricsEditor = lazy(() => import('./components/LyricsEditor'))
 import PitchStrip, { type MelodyState } from './components/PitchStrip'
 import type ProjectPickerComponent from './components/ProjectPicker'
@@ -758,6 +759,7 @@ export default function App(): React.JSX.Element {
   const acceptedRegionUiRef = useRef({ selection, loopOn })
   const acceptedTrainingUiRef = useRef({ enabled: training, config: trainCfg })
   const songLoadRequests=useRef(new SongLoadRequestEpoch())
+  const [showTorrent, setShowTorrent] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const trackInputRef = useRef<HTMLInputElement>(null)
   /**
@@ -4043,6 +4045,7 @@ export default function App(): React.JSX.Element {
           songName={song?.name}
           openName={showCatalog ? song?.name : undefined}
           onBrowse={openPicker}
+          onTorrent={() => setShowTorrent(true)}
           onOpenProject={(p) => void loadPath(p)}
           onManageStorage={() => setShowProjects(true)}
           onShowLog={() => setShowLog(true)}
@@ -4162,6 +4165,11 @@ export default function App(): React.JSX.Element {
           onClose={() => !importing && setShowImport(false)}
         />
       )}
+
+      {showTorrent && <Suspense fallback={null}><TorrentDialog onClose={() => setShowTorrent(false)} onImport={file => {
+        setShowTorrent(false)
+        void loadPath(file.path)
+      }} /></Suspense>}
 
       <input
         ref={fileInputRef}

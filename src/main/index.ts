@@ -36,6 +36,7 @@ import {
 import { gdriveProjects, gdriveDownload, gdriveCancelDownload, gdriveDeviceConfigured, gdriveBrowserConfigured, gdriveSignInMode, gdriveDeviceStart, gdriveDeviceStatus, gdriveDeviceCancel, gdriveConfigured, gdriveSignedIn, gdriveSignIn, gdriveSignOut, gdriveSync, gdriveCancelSync } from './gdrive'
 import { readSettings, writeSettings } from './settings'
 import { registerLocale } from './locale'
+import { registerTorrent, shutdownTorrent } from './torrent'
 import { registerWhatsNew } from './whats-new'
 import { loadTrainingProgress, recordTrainingCompletion, saveTrainingPreferences } from './training-progress'
 import { hashFile, writeInputWav } from './separation'
@@ -698,6 +699,7 @@ function registerIpc(): void {
   })
 
   registerLocale()
+  registerTorrent()
 
   ipcMain.handle('app:version', () => (app.isPackaged ? app.getVersion() : 'dev'))
 
@@ -1166,6 +1168,7 @@ app.on('before-quit', event => {
   event.preventDefault()
   if (audioQuitPending) return
   audioQuitPending = true
+  shutdownTorrent()
   scheduler.stop()
   separator.cancel()
   vocalSeparator.cancel()

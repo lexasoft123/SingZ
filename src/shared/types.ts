@@ -1322,6 +1322,7 @@ export interface SingzApi {
   /** Main-selected Box socket service owns playback beyond this renderer. */
   readonly boxAudioPersistent: boolean
   box: BoxAPI
+  torrentRequest(request: import('./torrent').TorrentRequest): Promise<import('./torrent').TorrentResult>
   /** True only when main was launched with SINGZ_E2E_HOOKS=1: the renderer
    * then publishes `window.__test` (engine, transport, metronome, training,
    * open/back) for the desktop player-session driver. Never set in a
