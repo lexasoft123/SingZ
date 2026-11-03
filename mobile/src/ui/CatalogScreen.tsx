@@ -976,6 +976,7 @@ export default function CatalogScreen({
     async (p: ProjectEntry) => {
       try {
         setLoading({ dir: p.dir, msg: t('phone.library.lookingForLyrics'), frac: 0.5 })
+        log('lyrics', `Library lookup: ${p.dir}`)
         const docJson = await readProjectText(p.dir, 'project.json')
         const doc = JSON.parse(docJson) as ProjectDoc
         // real duration (LRCLIB match tolerance) + the file's own artist tag;
@@ -986,7 +987,7 @@ export default function CatalogScreen({
           title: doc.name,
           artist: facts.artist,
           durationSec: facts.durationSec
-        })
+        }, { retry: true })
         if (typeof outcome === 'object') {
           // writeLyrics enters the shared project transaction and re-reads
           // NOW: the lookup took seconds, and a project deleted meanwhile
@@ -1002,6 +1003,7 @@ export default function CatalogScreen({
           )
         }
       } catch (e) {
+        log('lyrics', `Library lookup failed: ${String(e instanceof Error ? e.message : e)}`, 'error')
         setLoading(null)
         setError(String(e instanceof Error ? e.message : e))
       }

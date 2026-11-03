@@ -1,10 +1,10 @@
+import { createLrclibTransport } from '../../../src/shared/lrclib-transport'
 import {
   LRCLIB_API,
   LRCLIB_HEADERS,
   lookupLyrics as coreLookupLyrics,
   lyricsById as coreLyricsById,
   searchCandidates as coreSearchCandidates,
-  type ApiAnswer,
   type LookupOutcome,
   type LyricsCandidate,
   type TrackMeta
@@ -20,36 +20,14 @@ import { log } from '../log'
  * lesson): callers leave lyrics absent and re-offerable.
  */
 
-// One non-answer usually means the service is down or blocking this network —
-// remember briefly so a batch of songs doesn't each queue 20s of dead waits.
-const DOWN_TTL_MS = 5 * 60_000
-let downUntil = 0
-
-async function apiJson(path: string): Promise<ApiAnswer> {
-  if (Date.now() < downUntil) return 'down'
-  const ac = new AbortController()
-  const timer = setTimeout(() => ac.abort(), 10_000)
-  try {
-    const res = await fetch(`${LRCLIB_API}${path}`, { headers: LRCLIB_HEADERS, signal: ac.signal })
-    if (res.status === 404) return 'miss'
-    if (!res.ok) {
-      downUntil = Date.now() + DOWN_TTL_MS
-      return 'down'
-    }
-    // a bot-check HTML page with status 200 lands here — treat it as down too
-    try {
-      return { json: await res.json() }
-    } catch {
-      downUntil = Date.now() + DOWN_TTL_MS
-      return 'down'
-    }
-  } catch {
-    downUntil = Date.now() + DOWN_TTL_MS
-    return 'down'
-  } finally {
-    clearTimeout(timer)
-  }
-}
+const client = 'SingZ mobile (https://github.com/lexasoft123/SingZ)'
+const transport = createLrclibTransport({
+  baseURL: LRCLIB_API,
+  headers: { ...LRCLIB_HEADERS, 'User-Agent': client, 'Lrclib-Client': client },
+  fetch: (url, init) => fetch(url, init),
+  log: (message, level = 'info') => log('lyrics', message, level)
+})
+const apiJson = transport.request
 
 export {
   fixTagEncoding,
@@ -62,17 +40,37 @@ export {
 } from '../gen/analysis-lib'
 
 /** Look up synced lyrics by meta (exact triple first, then search). */
-export const lookupLyrics = (meta: TrackMeta): Promise<LookupOutcome> =>
-  coreLookupLyrics(apiJson, meta, (m) => log('lyrics', m))
+export const lookupLyrics = async (
+  meta: TrackMeta,
+  options?: { retry?: boolean }
+): Promise<LookupOutcome> => {
+  if (options?.retry) transport.retryNow()
+  log(
+    'lyrics',
+    `Lookup ${JSON.stringify(meta.title)} by ${JSON.stringify(meta.artist ?? '')}, ${Math.round(meta.durationSec)}s`
+  )
+  const outcome = await coreLookupLyrics(apiJson, meta, m => log('lyrics', m))
+  log(
+    'lyrics',
+    typeof outcome === 'object'
+      ? `Lookup found ${outcome.hit.lines.length} lines: ${outcome.hit.credit}`
+      : `Lookup ${outcome === 'down' ? 'unavailable' : 'no match'}: ${JSON.stringify(meta.title)}`,
+    outcome === 'down' ? 'warn' : 'info'
+  )
+  return outcome
+}
 
 /** Manual search for the variant picker: synced first, then closest duration. */
 export const searchCandidates = (
   query: { artist?: string; title?: string; free?: string },
   durationSec: number
-): Promise<LyricsCandidate[]> => coreSearchCandidates(apiJson, query, durationSec)
+): Promise<LyricsCandidate[]> => {
+  transport.retryNow()
+  return coreSearchCandidates(apiJson, query, durationSec)
+}
 
 /** Fetch one record by id and parse its synced lyrics. */
-export const lyricsById = (
-  id: number,
-  durationSec: number
-): ReturnType<typeof coreLyricsById> => coreLyricsById(apiJson, id, durationSec)
+export const lyricsById = (id: number, durationSec: number): ReturnType<typeof coreLyricsById> => {
+  transport.retryNow()
+  return coreLyricsById(apiJson, id, durationSec)
+}

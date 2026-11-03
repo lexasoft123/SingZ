@@ -12,7 +12,8 @@ import type { LyricLine, LyricWord } from './types'
 
 export const LRCLIB_API = 'https://lrclib.net/api'
 export const LRCLIB_HEADERS = {
-  'Lrclib-Client': 'SingZ v0.2.0 (https://github.com/lexasoft123/SingZ)'
+  Accept: 'application/json',
+  'Lrclib-Client': 'SingZ (https://github.com/lexasoft123/SingZ)'
 }
 const DURATION_TOLERANCE_S = 5
 

@@ -76,7 +76,8 @@ export async function readSongFacts(
   }
 }
 
-export const findLyrics = (meta: TrackMeta): Promise<LookupOutcome> => lookupLyrics(meta)
+export const findLyrics = (meta: TrackMeta, options?: { retry?: boolean }): Promise<LookupOutcome> =>
+  lookupLyrics(meta, options)
 
 export const lyricsCandidates = (
   query: { artist?: string; title?: string; free?: string },
