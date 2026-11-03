@@ -99,7 +99,8 @@ jobs:
 
   capture-windows:
     runs-on: windows-latest
-    timeout-minutes: 15
+    # A cold package builds pinned OpenSSL and libtorrent before the load smoke.
+    timeout-minutes: 40
     permissions:
       contents: read
     steps:
