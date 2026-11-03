@@ -344,3 +344,56 @@ print('Perl fixture passed')
   assert.equal(result.stdout.trim(), 'Perl fixture passed')
   assert.equal(result.stderr, '')
 })
+
+test('Windows SDK launches tools from its prepared PATH using full executable paths', () => {
+  const driver = String.raw`
+import runpy,subprocess,sys
+from pathlib import Path
+from unittest import mock
+sdk=runpy.run_path(sys.argv[1],run_name='executable_environment_fixture')
+launch=sdk['run']
+prepared={'PATH':r'C:\Visual Studio Ж with spaces\bin','BUILD_SECRET':'private fixture value'}
+nmake=r'C:\Visual Studio Ж with spaces\bin\nmake.exe'
+perl=r'C:\Native Perl Ж with spaces\bin\perl.exe'
+source=Path('source dir/Configure')
+commands=[];lookups=[]
+def locate(name,path=None):
+ lookups.append((name,path))
+ return nmake if name=='nmake' and path==prepared['PATH'] else None
+def create_process(args,**options):
+ # Model the Windows boundary: a child env cannot locate a bare nmake when
+ # it is absent from the parent environment, as the actual CI log showed.
+ if sys.platform=='win32' and args[0]=='nmake':raise FileNotFoundError('nmake absent from parent PATH')
+ assert options['env'] is prepared and options['check'] is True
+ assert options['cwd']=='build dir Ж' and not options.get('shell',False)
+ assert all(isinstance(arg,str) for arg in args)
+ commands.append(args)
+with mock.patch.object(sys,'platform','win32'),mock.patch.object(sdk['shutil'],'which',locate),mock.patch.object(subprocess,'run',create_process):
+ # Negative control: the old bare command fails at process creation.
+ try:subprocess.run(['nmake','install_sw'],cwd='build dir Ж',env=prepared,check=True)
+ except FileNotFoundError:pass
+ else:raise AssertionError('The old command unexpectedly found parent tools')
+ launch(['nmake','install_sw'],cwd='build dir Ж',env=prepared)
+ assert commands==[[nmake,'install_sw']] and lookups==[('nmake',prepared['PATH'])]
+ # The already-selected native Perl is absolute and must not be re-resolved.
+ launch([perl,source,'VC-WIN64A'],cwd='build dir Ж',env=prepared)
+ assert commands[-1]==[perl,str(source),'VC-WIN64A'] and len(lookups)==1
+ with mock.patch.object(sdk['shutil'],'which',lambda *a,**k:None):
+  try:launch(['missing-tool'],cwd='build dir Ж',env=prepared)
+  except RuntimeError as error:
+   assert 'prepared Windows environment' in str(error) and 'private fixture value' not in str(error)
+  else:raise AssertionError('A missing prepared tool fell back to the parent environment')
+ assert len(commands)==2
+with mock.patch.object(sys,'platform','linux'),mock.patch.object(sdk['shutil'],'which',side_effect=AssertionError('POSIX lookup changed')),mock.patch.object(subprocess,'run',create_process):
+ launch(['nmake','install_sw'],cwd='build dir Ж',env=prepared)
+ assert commands[-1]==['nmake','install_sw']
+print('Executable fixture passed')
+`
+  const result = spawnSync(python, ['-c', driver, join(source, 'vendor-torrent.py')], {
+    encoding: 'utf8', timeout: 15_000,
+  })
+  assert.ifError(result.error)
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout.trim(), 'Executable fixture passed')
+  assert.equal(result.stderr, '')
+})
