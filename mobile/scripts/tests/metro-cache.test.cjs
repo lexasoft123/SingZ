@@ -2,11 +2,13 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 const vm = require('node:vm')
+const { createRequire } = require('node:module')
 const os = require('node:os')
 const { test } = require('node:test')
 
 const mobile = path.resolve(__dirname, '../..')
 const configFile = process.env.SINGZ_TEST_METRO_CONFIG || path.join(mobile, 'metro.config.js')
+const requireFromConfig = createRequire(path.resolve(configFile))
 let reactNativeConfig, transformCacheKey, worker
 if (fs.existsSync(path.join(mobile, 'node_modules/metro/package.json'))) {
   reactNativeConfig = require('@react-native/metro-config')
@@ -26,7 +28,7 @@ function configForRoot(root, env = {}) {
     process: { env },
     require: name => name === '@react-native/metro-config'
       ? { getDefaultConfig: () => defaults, mergeConfig: reactNativeConfig.mergeConfig }
-      : require(name),
+      : requireFromConfig(name),
   }
   vm.runInNewContext(fs.readFileSync(configFile, 'utf8'), context, { filename: configFile })
   return context.module.exports
