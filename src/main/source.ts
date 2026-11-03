@@ -34,16 +34,17 @@ export async function registerSource(raw: string): Promise<RegisterResult> {
     if (!AUDIO_EXT.has(ext)) {
       return { ok: false, error: t('main.error.cantUseFileDrop', { ext: ext || t('main.error.thatFile') }) }
     }
-    const info = await stat(full)
-    if (!info.isFile()) return { ok: false, error: t('main.error.notAFile') }
-    allowFile(full)
     const project = await detectProject(full)
+    const info = await stat(full).catch(() => null)
+    if (!info && !project?.stems) return { ok: false, error: t('main.error.couldNotReadFile') }
+    if (info && !info.isFile()) return { ok: false, error: t('main.error.notAFile') }
+    allowFile(full)
     if (project) allowRoot(project.dir)
     return {
       ok: true,
       path: full,
       name: project?.name ?? basename(full, ext),
-      size: info.size,
+      size: info?.size ?? 0,
       project: project ?? undefined
     }
   } catch {

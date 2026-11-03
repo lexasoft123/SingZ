@@ -1,0 +1,5 @@
+# Git executes these extensionless shell hooks directly, including on Windows.
+.githooks/* text eol=lf
+
+# Compiler/bootstrap shell launchers must also execute in CRLF-configured checkouts.
+*.sh text eol=lf

@@ -1,3 +1,5 @@
+import DriveProjectsButton from './DriveProjectsButton'
+import { useDriveSignIn } from './DriveSignInProvider'
 import { useCallback, useEffect, useState } from 'react'
 import type { CloudRoot, ProjectListItem } from '../../../shared/types'
 import { Modal } from '@singz/ui'
@@ -20,6 +22,7 @@ interface Props {
 
 /** In-app library of saved projects (~/Documents/SingZ or a cloud folder). */
 export default function ProjectPicker({ gdriveIcon, onOpen, onBrowse, onClose }: Props): React.JSX.Element {
+  const signInToDrive = useDriveSignIn()
   const [root, setRoot] = useState('')
   const [projects, setProjects] = useState<ProjectListItem[] | null>(null)
   const [cloud, setCloud] = useState<CloudRoot[]>([])
@@ -54,7 +57,7 @@ export default function ProjectPicker({ gdriveIcon, onOpen, onBrowse, onClose }:
   const onDrive = useCallback(async () => {
     if (!gdrive.signedIn) {
       setGdriveMsg(t('library.common.finishGoogleSignIn'))
-      const res = await window.singz.gdriveSignIn()
+      const res = await signInToDrive()
       if (!res.ok) {
         setGdriveMsg(t('library.projectPicker.googleSignInFailed', { error: res.error }))
         return
@@ -68,7 +71,7 @@ export default function ProjectPicker({ gdriveIcon, onOpen, onBrowse, onClose }:
         ? t('library.projectPicker.driveUpToDate', { uploaded: rep.uploaded, unchanged: rep.unchanged })
         : t('library.common.syncFailed', { error: rep.error ?? t('library.common.unknownError') })
     )
-  }, [gdrive.signedIn])
+  }, [gdrive.signedIn, signInToDrive])
 
   const applyRoot = useCallback(
     async (run: () => Promise<{ ok: boolean; copied?: number; error?: string; cancelled?: boolean }>) => {
@@ -151,6 +154,7 @@ export default function ProjectPicker({ gdriveIcon, onOpen, onBrowse, onClose }:
                   : t('library.projectPicker.useCloud', { label: c.label })}
               </button>
             ))}
+                {gdrive.signedIn && <DriveProjectsButton onOpen={onOpen} />}
             {gdrive.configured && (
               <button
                 type="button"

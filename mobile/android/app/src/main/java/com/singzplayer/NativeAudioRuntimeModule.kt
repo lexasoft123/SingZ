@@ -249,6 +249,7 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
       map.putDouble("generation", v[1])
       map.putDouble("peak", v[2])
       map.putDouble("clippedBlocks", v[3])
+      if (v.size >= 5) map.putDouble("rms", v[4])
     }
     return map
   }

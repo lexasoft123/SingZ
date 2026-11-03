@@ -24,7 +24,7 @@ built-in setup and keeps it updated automatically.
 
 Get SingZ for [Android on Google Play](https://play.google.com/store/apps/details?id=com.lexasoft.singz) or [iPhone and iPad on the App Store](https://apps.apple.com/app/singz-sing-with-the-band/id6806430347). Download Mac, Windows and the Android APK from [GitHub Releases](https://github.com/lexasoft123/SingZ/releases/latest).
 
-The app supports English, Russian, Hindi, Japanese, Korean, Thai, Indonesian, Vietnamese, Filipino, Malay, Turkish, and Simplified and Traditional Chinese. Choose a language on desktop; mobile follows the device or per-app language setting.
+The app supports English, Russian, Hindi, Japanese, Korean, Thai, Indonesian, Vietnamese, Filipino, Malay, Turkish, Latin American Spanish, Brazilian Portuguese, and Simplified and Traditional Chinese. Choose a language on desktop; mobile follows the device or per-app language setting.
 
 ## What it does
 
@@ -181,7 +181,7 @@ options are Azure Trusted Signing or SignPath's OSS tier (see
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)).
 
 Contributor docs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
-[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) · [CLAUDE.md](CLAUDE.md)
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) · [AGENTS.md](AGENTS.md) · [product/platform rules](docs/PROJECT-RULES.md)
 
 ## How it works
 
@@ -198,3 +198,12 @@ Contributor docs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
   from peak envelopes or raw samples
   depending on zoom; playback progress drives a single CSS variable so it
   costs no redraws.
+
+### Shared audio foundation
+
+SingZ and LoopZ share **zCore**, an independently maintained native audio
+foundation. This checkout pins it as a Git submodule at `third_party/zcore`.
+Builds verify the parent gitlink and clean child checkout without fetching a
+floating branch. Initialize it with `git submodule update --init -- third_party/zcore`.
+See [the development workflow](docs/DEVELOPMENT.md#shared-audio-engine-zcore)
+for updating the pinned dependency.

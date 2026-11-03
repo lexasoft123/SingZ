@@ -170,6 +170,8 @@ test('Progress, sound settings, and nested diagnostics Back remain in Training',
   try {
     await act(() => home(tree).props.onProgress())
     expect(routes().training).toEqual(['Home', 'Progress'])
+    expect(text(tree.root)).not.toContain('not-enough-pitch')
+    expect(tree.root.findAll(node => node.props.label === 'Tendency').map(node => node.props.value)).toContain('—')
     await act(() => button(tree, 'Back').props.onPress())
     expect(routes().training).toEqual(['Home'])
     await act(() => (TEST!.trainingSoundSettings as () => void)())

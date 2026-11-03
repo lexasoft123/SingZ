@@ -97,6 +97,8 @@ describe('desktop native playback selection', () => {
   })
 
   it('selects separate platform providers only for an exact compatible graph', () => {
+    expect(selectDesktopPlaybackBackend('linux', eligible)).toEqual({ backend: 'native', provider: 'alsa' })
+    expect(selectDesktopPlaybackBackend('linux', { ...eligible, requestedProvider: 'wasapi' }).backend).toBe('legacy')
     expect(selectDesktopPlaybackBackend('darwin', eligible)).toEqual({
       backend: 'native',
       provider: 'coreaudio'
@@ -2098,6 +2100,33 @@ describe('desktop native playback facade', () => {
     ;(client as unknown as { stopPolling: () => void }).stopPolling()
   })
 
+  it('retires stale Playing telemetry after a terminal provider failure and retains exact cleanup', async () => {
+    let failed = false
+    const api = asioPollingApi(async () => ({ ...status('1', '48000'),
+      transportState: 'playing', state: failed ? 'terminal' : 'running',
+      hostState: failed ? 'error' : 'running', terminalReason: failed ? 'provider-failure' : '',
+      xruns: failed ? '1' : '0' }), async generation => result(generation, 'unloaded', true))
+    vi.stubGlobal('window', { singz: api })
+    const changes = vi.fn()
+    const client = new DesktopNativePlaybackClient({
+      releaseLegacyOutput: async () => undefined, restoreLegacyOutput: async () => undefined
+    }, changes)
+    await client.prepareAndStart(asioRequest())
+    expect(client.transportActive).toBe(true)
+    failed = true
+    await vi.advanceTimersByTimeAsync(50)
+    expect(client.transportActive).toBe(false)
+    expect(client.active).toBe(true)
+    expect(client.recoveryMode).toBe('cleanup-required')
+    expect(changes).toHaveBeenLastCalledWith(expect.objectContaining({ state: 'terminal', xruns: '1' }))
+    await expect(client.resume()).rejects.toMatchObject({ code: 'provider-cleanup-incomplete' })
+    const reads = vi.mocked(api.desktopPlaybackStatus).mock.calls.length
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(api.desktopPlaybackStatus).toHaveBeenCalledTimes(reads)
+    await client.unload()
+    expect(client.active).toBe(false)
+  })
+
   it('makes a current polling rejection observable and cleanup-only', async () => {
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     let reads = 0
@@ -3944,4 +3973,66 @@ describe('desktop native control acceptance wiring', () => {
     expect(resume).toBeGreaterThan(play)
     expect(source.slice(play, resume)).toContain('await this.nativePlayback.seek(restart)')
   })
+})
+
+describe('Linux ALSA output ownership', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it.each([512, 4096])('uses a bounded song buffer when ALSA permits %i frames', async maximum => {
+    const api = asioPollingApi(async () => status('1'), async () => result('1', 'unloaded', true))
+    const old = await api.audioHostDevices('asio')
+    if (!old.ok) throw new Error(old.error)
+    api.desktopPlaybackProviders = vi.fn<SingzApi['desktopPlaybackProviders']>(async () => [{ id: 'alsa', label: 'ALSA', available: true, errorCode: 'none', detail: '' }])
+    api.audioHostDevices = vi.fn<SingzApi['audioHostDevices']>(async () => ({ ...old, platform: 'linux', provider: 'alsa',
+      defaultOutputUid: '', devices: old.devices.map(device => ({ ...device, uid: 'alsa:loop:pcm:0',
+        bufferFrames: { ...device.bufferFrames, preferredFrames: 256, maximumFrames: maximum } })) }))
+    vi.stubGlobal('window', { singz: api })
+    const client = new DesktopNativePlaybackClient({ releaseLegacyOutput: async () => undefined,
+      restoreLegacyOutput: async () => undefined }, () => undefined)
+    try {
+      await client.prepareAndStart({ ...asioRequest(), provider: 'alsa', browserOutputId: 'native:alsa:loop:pcm:0' })
+      expect(api.prepareDesktopPlayback).toHaveBeenCalledWith(expect.objectContaining({ bufferFrames: Math.min(maximum, 1024) }), expect.any(Array))
+    } finally { await client.unload() }
+  })
+
+  it.each(['selected', 'missing', 'ambiguous'] as const)(
+    'resolves %s routes from native inventory without Chromium name matching', async (route) => {
+      const api = asioPollingApi(async () => status('1'), async () => result('1', 'unloaded', true))
+      const old = await api.audioHostDevices('asio')
+      if (!old.ok) throw new Error(old.error)
+      api.desktopPlaybackProviders = vi.fn<SingzApi['desktopPlaybackProviders']>(async () => [{
+        id: 'alsa', label: 'ALSA', available: true, errorCode: 'none', detail: ''
+      }])
+      api.audioHostDevices = vi.fn<SingzApi['audioHostDevices']>(async () => ({
+        ...old, platform: 'linux', provider: 'alsa', defaultOutputUid: '',
+        devices: old.devices.map(device => ({ ...device, uid: 'alsa:loop:pcm:0' }))
+      }))
+      const enumerateDevices = vi.fn(() => { throw new Error('Chromium inventory must not be used') })
+      vi.stubGlobal('navigator', { mediaDevices: { enumerateDevices } })
+      vi.stubGlobal('window', { singz: api })
+      const release = vi.fn(async () => undefined)
+      const client = new DesktopNativePlaybackClient({
+        releaseLegacyOutput: release, restoreLegacyOutput: async () => undefined
+      }, () => undefined)
+      const request: DesktopNativePlaybackPrepare = {
+        ...asioRequest(), provider: 'alsa',
+        browserOutputId: route === 'ambiguous' ? '' : `native:alsa:${route === 'selected' ? 'loop' : 'gone'}:pcm:0`
+      }
+      try {
+        if (route === 'selected') {
+          expect(await client.prepareAndStart(request)).toBe(true)
+          expect(api.prepareDesktopPlayback).toHaveBeenCalledWith(expect.objectContaining({
+            provider: 'alsa', accessMode: 'exclusive', outputDeviceUid: 'alsa:loop:pcm:0'
+          }), expect.any(Array))
+        } else {
+          await expect(client.prepareAndStart(request)).rejects.toMatchObject({ provider: 'alsa', code: 'provider-failure' })
+          expect(release).not.toHaveBeenCalled()
+          expect(api.prepareDesktopPlayback).not.toHaveBeenCalled()
+        }
+        expect(enumerateDevices).not.toHaveBeenCalled()
+      } finally {
+        await client.unload()
+      }
+    }
+  )
 })

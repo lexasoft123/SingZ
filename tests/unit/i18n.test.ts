@@ -6,6 +6,8 @@
 import { describe, expect, it } from 'vitest'
 import { cldrPlural, fill, fromTag, pluralForm, resolveLocale } from '../../src/shared/i18n/rules'
 import { en } from '../../src/shared/i18n/en'
+import { es419 } from '../../src/shared/i18n/es-419'
+import { ptBR } from '../../src/shared/i18n/pt-BR'
 import { tr } from '../../src/shared/i18n/tr'
 import { ru } from '../../src/shared/i18n/ru'
 import { zhCN } from '../../src/shared/i18n/zh-CN'
@@ -32,7 +34,7 @@ describe('fromTag', () => {
     for (const tag of ['zh-TW', 'zh-Hant', 'zh-Hant-TW', 'zh-HK', 'zh-MO']) expect(fromTag(tag)).toBe('zh-TW')
   })
   it('resolves supported regional and legacy language tags', () => {
-    for (const [tag, locale] of [['tr-TR','tr'],['tr_TR','tr'],['tr-CY','tr'],['hi-IN','hi'],['hi_Latn_IN','hi'],['ja-JP','ja'],['ko-KR','ko'],['th-TH','th'],['id-ID','id'],['in-ID','id'],['vi-VN','vi'],['tl-PH','fil'],['fil-PH','fil'],['ms-MY','ms'],['zh-Hant-HK','zh-TW']]) {
+    for (const [tag, locale] of [['es','es-419'],['es_PE','es-419'],['es-MX','es-419'],['es-419','es-419'],['es-PE','es-419'],['pt','pt-BR'],['pt-BR','pt-BR'],['pt_BR','pt-BR'],['tr-TR','tr'],['tr_TR','tr'],['tr-CY','tr'],['hi-IN','hi'],['hi_Latn_IN','hi'],['ja-JP','ja'],['ko-KR','ko'],['th-TH','th'],['id-ID','id'],['in-ID','id'],['vi-VN','vi'],['tl-PH','fil'],['fil-PH','fil'],['ms-MY','ms'],['zh-Hant-HK','zh-TW']]) {
       expect(fromTag(tag), tag).toBe(locale)
     }
   })
@@ -68,7 +70,7 @@ describe('fill and plurals', () => {
     expect(pluralForm('zh-CN', 1)).toBe('other')
   })
   it('the hand-written rules (Hermes has no PluralRules) agree with Intl', () => {
-    for (const locale of ['en', 'ru', 'zh-CN', 'hi', 'ja', 'ko', 'th', 'id', 'vi', 'fil', 'ms', 'zh-TW', 'tr'] as const) {
+    for (const locale of ['en', 'ru', 'zh-CN', 'hi', 'ja', 'ko', 'th', 'id', 'vi', 'fil', 'ms', 'zh-TW', 'tr', 'es-419', 'pt-BR'] as const) {
       const intl = new Intl.PluralRules(locale)
       for (let n = 0; n <= 125; n++) {
         const want = intl.select(n)
@@ -84,6 +86,13 @@ describe('fill and plurals', () => {
       }
     }
   })
+  it('matches Latin American plurals including zero, fractions and millions', () => {
+    for (const locale of ['es-419', 'pt-BR'] as const) {
+      for (const n of [0, 0.5, 1, 1.5, 2, 100, 1_000_000, 2_000_000]) {
+        expect(cldrPlural(locale, n), `${locale} ${n}`).toBe(new Intl.PluralRules(locale).select(n))
+      }
+    }
+  })
   it('switches language live', async () => {
     await loadLocale('ru')
     await loadLocale('zh-CN')
@@ -96,8 +105,8 @@ describe('fill and plurals', () => {
   })
 })
 
-describe('added Asian languages load and switch', () => {
-  it.each(['hi','ja','ko','th','id','vi','fil','ms','zh-TW'] as const)('%s registers its own strings', async locale => {
+describe('additional languages load and switch', () => {
+  it.each(['hi','ja','ko','th','id','vi','fil','ms','zh-TW','es-419','pt-BR'] as const)('%s registers its own strings', async locale => {
     await loadLocale(locale)
     setLocale(locale)
     expect(t('lang.label')).not.toBe('lang.label')
@@ -122,7 +131,7 @@ describe('the dictionaries', () => {
     ['fil', fil],
     ['ms', ms],
     ['zh-TW', zhTW],
-    ['tr', tr]
+    ['tr', tr], ['pt-BR', ptBR], ['es-419', es419]
   ]
 
   it('English keys are namespaced and non-empty', () => {

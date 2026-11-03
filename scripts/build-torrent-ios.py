@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """Package the same static C++ core for iPhone and Apple Silicon Simulator."""
-import argparse,hashlib,json,shutil,subprocess
+import argparse,hashlib,json,os,shutil,subprocess,sys
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 def run(args):subprocess.run([str(x)for x in args],cwd=ROOT,check=True)
 parser=argparse.ArgumentParser();parser.add_argument('--skip-build',action='store_true');args=parser.parse_args()
+if not os.environ.get('SINGZ_NATIVE_BUILD_LOCK_HELD'):
+ os.execvp('node',['node',str(ROOT/'scripts/with-native-build-lock.mjs'),
+  '--owner','torrent-ios','--',sys.executable,str(Path(__file__).resolve()),*sys.argv[1:]])
+# Bootstrap already holds the canonical lock; validate its actual token instead
+# of acquiring it again. Nested SDK builds inherit and assert this same owner.
+run(['node',ROOT/'scripts/assert-native-build-lock.cjs'])
 parts=[]
 for target in ['ios-arm64','ios-sim-arm64']:
  if not args.skip_build:run(['python3','scripts/vendor-torrent.py',target])

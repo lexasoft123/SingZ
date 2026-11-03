@@ -1,3 +1,5 @@
+import { tabModalListeners } from './tab-modal-dismissal'
+import { ScreenBackground } from './ScreenBackground'
 import SettingsScreen from './SettingsScreen'
 import WhatsNewScreen from './WhatsNewScreen'
 import { HeaderIconButton } from './HeaderIconButton'
@@ -17,7 +19,6 @@ import React, { createContext, useContext, useSyncExternalStore, useCallback, us
 import {
   AccessibilityInfo,
   AppState,
-  Image,
   PanResponder,
   Platform,
   Pressable,
@@ -30,7 +31,6 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { AudioManager } from 'react-native-audio-api'
 import { createNativeStackNavigator } from '@react-navigation/native-stack'
-import { Canvas, LinearGradient as SkLinearGradient, RadialGradient, Rect, vec } from '@shopify/react-native-skia'
 import type { MultitrackEngine } from '../engine'
 import {
   createTrainingCompletionReceipt,
@@ -138,8 +138,6 @@ interface ActiveVocalRun {
 }
 
 const persistence = new MobileTrainingPersistence()
-const SCRIM_TOP = require('../../assets/bg/scrim-top.png')
-const SCRIM_BOTTOM = require('../../assets/bg/scrim-bottom.png')
 const TrainingLogContext = createContext<(() => void) | null>(null)
 function TrainingLogButton(): React.JSX.Element | null {
   const openLog = useContext(TrainingLogContext)
@@ -226,7 +224,6 @@ export default function TrainingScreen({
   const routeRecoveryAttempt = useRef<string | null>(null)
   const pendingRouteRecovery = useRef<{ promptKey: string; generation: number } | null>(null)
   const sampleControls = useTrainingSampleRecording(active && !state.error && state.route === 'session' && state.session?.status !== 'completed')
-  const window = useWindowDimensions()
 
   const stopRuntime = useCallback(() => {
     runGeneration.current++
@@ -870,11 +867,12 @@ export default function TrainingScreen({
       accessibilityElementsHidden={!active}
       importantForAccessibility={active ? 'auto' : 'no-hide-descendants'}
     >
-      <TrainingBackdrop width={window.width} height={window.height} />
+      <ScreenBackground />
       <View pointerEvents="none" style={styles.staff}>
         {[0, 1, 2, 3, 4].map((line) => <View key={line} style={[styles.staffLine, { top: 88 + line * 18 }]} />)}
       </View>
       <TrainingStack.Navigator
+        screenListeners={tabModalListeners}
         initialRouteName="Home"
         screenLayout={({ children, navigation }) => <TrainingLogContext.Provider value={() => {
           stopRuntime()
@@ -1021,48 +1019,6 @@ export default function TrainingScreen({
   )
 }
 
-const TrainingBackdrop = React.memo(function TrainingBackdrop({ width, height }: { width: number; height: number }): React.JSX.Element {
-  return (
-    <>
-      <Canvas pointerEvents="none" style={StyleSheet.absoluteFill}>
-        <Rect x={0} y={0} width={width} height={height}>
-          <SkLinearGradient
-            start={vec(width * 0.15, 0)}
-            end={vec(width * 0.85, height)}
-            colors={['#3a2517', '#2a1c12', '#1c130d', '#120c09']}
-            positions={[0, 0.3, 0.58, 1]}
-          />
-        </Rect>
-        <Rect x={0} y={0} width={width} height={height}>
-          <RadialGradient
-            c={vec(width * 0.25, height * 0.16)}
-            r={width * 0.62}
-            colors={['rgba(236,164,84,0.46)', 'rgba(210,130,60,0.18)', 'rgba(210,130,60,0)']}
-            positions={[0, 0.55, 1]}
-          />
-        </Rect>
-        <Rect x={0} y={0} width={width} height={height}>
-          <RadialGradient
-            c={vec(width * 0.86, height * 0.34)}
-            r={width * 0.5}
-            colors={['rgba(190,120,60,0.24)', 'rgba(190,120,60,0)']}
-          />
-        </Rect>
-        <Rect x={0} y={0} width={width} height={height}>
-          <RadialGradient
-            c={vec(width * 0.5, height * 0.46)}
-            r={width * 1.1}
-            colors={['rgba(10,7,5,0)', 'rgba(10,7,5,0)', 'rgba(10,7,5,0.52)']}
-            positions={[0, 0.42, 1]}
-          />
-        </Rect>
-      </Canvas>
-      <View pointerEvents="none" style={styles.topScrim}><Image source={SCRIM_TOP} resizeMode="stretch" style={styles.scrimImage} /></View>
-      <View pointerEvents="none" style={styles.bottomScrim}><Image source={SCRIM_BOTTOM} resizeMode="stretch" style={styles.scrimImage} /></View>
-    </>
-  )
-})
-
 function TrainingHome({ progress, onProgramLesson, song, effectiveKey, onChoose, onPrepare, onProgress, onSoundSettings, onSettings }: {
   progress: TrainingProgress
   onProgramLesson: (lesson: ProgramLesson, day: number) => void
@@ -1076,6 +1032,9 @@ function TrainingHome({ progress, onProgramLesson, song, effectiveKey, onChoose,
 }): React.JSX.Element {
   const layout = useMobileLayout()
   const snapshot = summarizeTrainingProgress(progress)
+  const tendency = snapshot.tendency === 'not-enough-pitch' ? '—'
+    : snapshot.tendency === 'centered' ? t('phone.training.centered')
+    : snapshot.tendency === 'flat' ? t('phone.training.kit.flat') : t('phone.training.kit.sharp')
   const landed = snapshot.landedRate === null ? '—' : t('phone.training.landedPercent', { pct: Math.round(snapshot.landedRate * 100) })
   return (
     <ScrollView contentContainerStyle={[styles.scroll, { paddingTop: layout.top, width: '100%', maxWidth: 1160, alignSelf: 'center' }]} showsVerticalScrollIndicator={false}>
@@ -1727,7 +1686,10 @@ function IntervalWeekProgress(): React.JSX.Element | null {
 
 function TrainingProgressView({ progress, onBack }: { progress: TrainingProgress; onBack: () => void }): React.JSX.Element {
   const snapshot = summarizeTrainingProgress(progress)
-  return <ScrollView contentContainerStyle={styles.scroll}><TrainingHeader title={t('phone.training.progressEntryTitle')} onBack={onBack} /><View style={styles.summaryScore}><Text style={styles.summaryNumber}>{snapshot.sessions}</Text><Text style={styles.cardCopy}>{t('phone.training.completedSessions')}</Text></View><View style={styles.summaryRow}><Metric label={t('phone.training.metricAttempts')} value={snapshot.attempts} /><Metric label={t('phone.training.metricLanded')} value={snapshot.landedRate === null ? '—' : `${Math.round(snapshot.landedRate * 100)}%`} /><Metric label={t('phone.training.metricTendency')} value={snapshot.tendency} /></View>{snapshot.weakerExercises.length > 0 && <Section label={t('phone.training.usefulNextFocus')}><Text style={styles.cardCopy}>{snapshot.weakerExercises.join(' · ')}</Text></Section>}<Section label={t('phone.training.dailyActivityTitle')}><DailyTrainingActivity days={persistence.practiceDays} /></Section><TrainingProgramPanel /><IntervalWeekProgress /><Section label={t('phone.training.recent')}>{progress.recent.length === 0 ? <Text style={styles.cardCopy}>{t('phone.training.completeSessionToStart')}</Text> : progress.recent.slice(0, 8).map((item) => <View key={item.sessionId} style={styles.recentRow}><Text style={styles.recentTitle}>{keyLabel(keyName(item.key))} · {readableExercise(item.exercise)}</Text><Text style={styles.cardCopy}>{t('phone.training.landedOfAttempts', { landed: item.onTarget + item.close, attempts: item.attempts })}</Text></View>)}</Section></ScrollView>
+  const tendency = snapshot.tendency === 'not-enough-pitch' ? '—'
+    : snapshot.tendency === 'centered' ? t('phone.training.centered')
+    : snapshot.tendency === 'flat' ? t('phone.training.kit.flat') : t('phone.training.kit.sharp')
+  return <ScrollView contentContainerStyle={styles.scroll}><TrainingHeader title={t('phone.training.progressEntryTitle')} onBack={onBack} /><View style={styles.summaryScore}><Text style={styles.summaryNumber}>{snapshot.sessions}</Text><Text style={styles.cardCopy}>{t('phone.training.completedSessions')}</Text></View><View style={styles.summaryRow}><Metric label={t('phone.training.metricAttempts')} value={snapshot.attempts} /><Metric label={t('phone.training.metricLanded')} value={snapshot.landedRate === null ? '—' : `${Math.round(snapshot.landedRate * 100)}%`} /><Metric label={t('phone.training.metricTendency')} value={tendency} /></View>{snapshot.weakerExercises.length > 0 && <Section label={t('phone.training.usefulNextFocus')}><Text style={styles.cardCopy}>{snapshot.weakerExercises.join(' · ')}</Text></Section>}<Section label={t('phone.training.dailyActivityTitle')}><DailyTrainingActivity days={persistence.practiceDays} /></Section><TrainingProgramPanel /><IntervalWeekProgress /><Section label={t('phone.training.recent')}>{progress.recent.length === 0 ? <Text style={styles.cardCopy}>{t('phone.training.completeSessionToStart')}</Text> : progress.recent.slice(0, 8).map((item) => <View key={item.sessionId} style={styles.recentRow}><Text style={styles.recentTitle}>{keyLabel(keyName(item.key))} · {readableExercise(item.exercise)}</Text><Text style={styles.cardCopy}>{t('phone.training.landedOfAttempts', { landed: item.onTarget + item.close, attempts: item.attempts })}</Text></View>)}</Section></ScrollView>
 }
 
 export function TrainingHeader({ title, onBack }: { title: string; onBack: () => void }): React.JSX.Element { return <GlassHeader title={title} onBack={onBack} backLabel={t('phone.training.kit.back')} trailing={<TrainingLogButton />} /> }
@@ -1818,9 +1780,6 @@ const flatGlassSurface = nativeGlassStyle(nightStudioNativeTheme, 'none')
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: C.bg },
   trainingRoute: { backgroundColor: 'transparent' },
-  topScrim: { position: 'absolute', top: 0, left: 0, right: 0, width: '100%', height: 150, opacity: 0.68 },
-  bottomScrim: { position: 'absolute', bottom: 0, left: 0, right: 0, width: '100%', height: 290, opacity: 0.82 },
-  scrimImage: { width: '100%', height: '100%' },
   staff: { position: 'absolute', inset: 0, opacity: 0.22 },
   staffLine: { position: 'absolute', left: 0, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: 'rgba(255,240,220,0.12)' },
   scroll: { paddingHorizontal: 20, paddingTop: Platform.OS === 'ios' ? 58 : 34, paddingBottom: 36, gap: 18 },

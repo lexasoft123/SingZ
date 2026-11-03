@@ -38,7 +38,7 @@ CHECKS = [
     # is the same failure as a green that means nothing.
     ('home-relative', r'(?<![\w/])~(?:[A-Za-z_][\w.-]*)?/\S*'),
     ('ipv4', r'\b\d{1,3}(?:\.\d{1,3}){3}\b'),
-    # CLAUDE.md's rule is machine names, IPs AND lab paths. A path-shaped
+    # docs/PROJECT-RULES.md's rule is machine names, IPs AND lab paths. A path-shaped
     # scanner covers two of the three, so identity gets its own checks: a
     # non-web URL scheme is always a machine, and .local/.lan/.internal is a
     # hostname on somebody's network.

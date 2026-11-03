@@ -301,7 +301,7 @@ job log either way — still the first place to look.
 What DID bite on the way there is recorded above: the `CSC_LINK` keychain-
 password bug, and a dangling absolute symlink in the bundle when packaging
 from a git worktree (`vendor/darwin-<arch>/whisper-cli` was a link to the main
-checkout, and `codesign --strict` rejects it — see the note in `CLAUDE.md`).
+checkout, and `codesign --strict` rejects it — see the note in `docs/PROJECT-RULES.md`).
 The trap outlived whisper: it applies to whichever third-party engines a
 worktree links from main, today `llama-server` and `crispasr`, and what
 defuses it is `scripts/afterPack.cjs` copying every linked engine into the

@@ -607,6 +607,29 @@ graphSnapshot(const singz::NativePlaybackStatus &status) {
   return *status.graphSnapshot;
 }
 
+void outputMeterSeparatesStereoEnergyFromPeaks() {
+  std::vector<float> pcm(4096, 0.0F);
+  for (size_t frame = 0; frame < pcm.size() / 2; frame += 4) {
+    pcm[frame * 2] = 0.5F;
+    pcm[frame * 2 + 1] = -0.5F;
+  }
+  const auto wav = writeWav("meter-energy.wav", 2, pcm);
+  auto backend = std::make_unique<ManualOutputBackend>();
+  auto *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+  std::vector<singz::NativePlaybackLaneSource> lanes;
+  lanes.push_back(lane("song", wav));
+  CHECK(session.prepare(config(), std::move(lanes), 1).ok);
+  CHECK(session.openOutput(1).ok && session.start(1).ok);
+  CHECK(fake->drive(512, singz::AudioHostDiscontinuityStart));
+  const auto meter = session.outputMeter();
+  CHECK(meter.available && near(meter.peak, 0.5F, 0.002F));
+  CHECK(near(meter.rms, 0.25F, 0.002F));
+  CHECK(meter.clippedBlocks == 0);
+  CHECK(session.unload(1).ok);
+  std::remove(wav.c_str());
+}
+
 const singz::NativePlaybackGraphNodeStatus *
 graphNode(const singz::NativePlaybackGraphSnapshot &graph,
           const char *label) {
@@ -2803,6 +2826,7 @@ void cueGraphTransportCompositionAndLifetime() {
       const auto meter = session.outputMeter();
       CHECK(meter.available && meter.generation == generation);
       CHECK(meter.peak == lastRenderedStatus.outputPeak);
+      CHECK(std::isfinite(meter.rms) && meter.rms >= 0 && meter.rms <= meter.peak + 0.0001F);
       CHECK(meter.clippedBlocks == lastRenderedStatus.outputClippedBlocks);
     }
     const auto unloaded = session.unloadWithCleanup(generation);
@@ -5779,6 +5803,86 @@ void preparedInitialTransportIsAtomicAtFirstCallback() {
   std::remove(wav.c_str());
 }
 
+void roundedWholeSongLoopsUseTheResampledTimeline() {
+  // A measured file duration is converted to device frames with round() by
+  // the desktop. The decoded path rounds its resampled frame count too, and
+  // streaming must agree exactly: truncating this fixture made the timeline
+  // one frame shorter and refused the whole-song loop at preparation.
+  constexpr uint32_t sourceFrames = 40001;
+  constexpr uint32_t sourceRate = 44100;
+  constexpr uint32_t deviceRate = 48000;
+  const double durationSeconds = static_cast<double>(sourceFrames) / sourceRate;
+  const int64_t requestedEnd = std::llround(durationSeconds * deviceRate);
+  const int64_t truncatedEnd = static_cast<int64_t>(
+      static_cast<double>(sourceFrames) * deviceRate / sourceRate);
+  CHECK(requestedEnd == truncatedEnd + 1);
+  const int64_t mediaEnd = requestedEnd;
+  const std::string wav = writeWav("rounded-loop.wav", 1,
+                                  std::vector<float>(sourceFrames, 0.2F),
+                                  sourceRate);
+  const std::string flac = scratch("rounded-loop.flac");
+  std::remove(flac.c_str());
+  CHECK(singz::compactStem(wav, flac).ok);
+
+  auto backend = std::make_unique<ManualOutputBackend>();
+  ManualOutputBackend *fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+  uint64_t generation = 760;
+  for (const bool streamed : {false, true}) {
+    const auto prepare = [&](int64_t loopStart, int64_t loopEnd) {
+      singz::NativePlaybackPrepareConfig request = config();
+      request.streamLanes = streamed;
+      request.preparedStartProjectFrame = mediaEnd - 2;
+      request.initialTransport.loop =
+          singz::NativePlaybackInitialLoop{loopStart, loopEnd};
+      auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+      lanes.push_back(lane("song", flac));
+      return session.prepare(std::move(request), std::move(lanes), generation);
+    };
+
+    CHECK(prepare(0, requestedEnd).ok);
+    CHECK(session.status().durationFrames == static_cast<uint64_t>(mediaEnd));
+    CHECK(session.status().lanes.size() == 1 &&
+          session.status().lanes[0].streamed == streamed);
+    CHECK(session.openOutput(generation).ok && session.start(generation).ok);
+    // The whole-song loop must already be installed in callback one, wrapping
+    // at the media boundary rather than rendering an extra frame or stopping.
+    CHECK(fake->drive(6, singz::AudioHostDiscontinuityStart));
+    auto status = session.status();
+    CHECK(status.loopEnabled && status.loopStartFrame == 0 &&
+          status.loopEndFrame == mediaEnd && status.loopCount == 1 &&
+          status.renderedProjectFrame == 4 &&
+          status.transportState == singz::NativePlaybackTransportState::Playing);
+
+    // Turning the loop on after playback starts uses the same conversion and
+    // must have the same answer as the initial transport snapshot.
+    CHECK(session.clearLoop(generation).ok && fake->drive(1));
+    CHECK(!session.status().loopEnabled);
+    CHECK(session.setLoop(generation, 1, requestedEnd).ok);
+    CHECK(session.seek(generation, mediaEnd - 2).ok && fake->drive(6));
+    status = session.status();
+    CHECK(status.loopEnabled && status.loopStartFrame == 1 &&
+          status.loopEndFrame == mediaEnd && status.loopCount == 2 &&
+          status.renderedProjectFrame == 5);
+    CHECK(session.setLoop(generation, 0, mediaEnd + 1).error ==
+          singz::NativePlaybackError::InvalidConfiguration);
+    CHECK(session.setLoop(generation, mediaEnd, requestedEnd).error ==
+          singz::NativePlaybackError::InvalidConfiguration);
+    CHECK(session.unload(generation++).ok);
+
+    // Rounding the media extent must not weaken loop bounds: even one frame
+    // beyond it, or an empty region at its boundary, remains invalid.
+    CHECK(prepare(0, mediaEnd + 1).error ==
+          singz::NativePlaybackError::InvalidConfiguration);
+    CHECK(session.unload(generation++).ok);
+    CHECK(prepare(mediaEnd, requestedEnd).error ==
+          singz::NativePlaybackError::InvalidConfiguration);
+    CHECK(session.unload(generation++).ok);
+  }
+  std::remove(wav.c_str());
+  std::remove(flac.c_str());
+}
+
 void publicationAndCancellation() {
   const std::string wav =
       writeWav("publication.wav", 1, std::vector<float>(64, 0.1F));
@@ -7417,6 +7521,7 @@ void portableGraphDocumentMaterializesActualTopology() {
 } // namespace
 
 int main() {
+  outputMeterSeparatesStereoEnergyFromPeaks();
   if (std::getenv("SINGZ_NATIVE_PLAYBACK_PROVIDER_DISPOSE_FAILURE") !=
       nullptr) {
     providerDisposeFailureRetainsOwnershipAndPoisonsReopen();
@@ -7473,6 +7578,7 @@ int main() {
   telemetryCollisionPublishesCoherentGeneration();
   preparedStartOverridePreservesRebuildPosition();
   preparedInitialTransportIsAtomicAtFirstCallback();
+  roundedWholeSongLoopsUseTheResampledTimeline();
   publicationAndCancellation();
   callbackTerminalLatch();
   outputClampAndStartLinearization();

@@ -19,7 +19,7 @@ import {
   type ViewProps
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { quickStartCopy, QUICK_START_SEEN } from '../../../src/shared/quick-start'
+import { quickStartCopy, latinMobileGuideCopy, QUICK_START_SEEN } from '../../../src/shared/quick-start'
 import { placeGuide, type GuideRect } from '../../../src/shared/quick-start/placement'
 import { useLocale } from '../i18n'
 import { getStoredText, setStoredText } from '../latency'
@@ -57,6 +57,7 @@ async function remember(): Promise<void> {
 export function QuickStartWelcome({ onStart }: { onStart: () => void }): React.JSX.Element | null {
   const locale = useLocale()
   const copy = quickStartCopy(locale, 'mobile')
+  const latin = latinMobileGuideCopy(locale)
   const [visible, setVisible] = useState(false)
   useEffect(() => {
     let mounted = true
@@ -80,9 +81,9 @@ export function QuickStartWelcome({ onStart }: { onStart: () => void }): React.J
     <View style={s.welcome}>
       <Text style={s.heading}>{copy.title}</Text>
       <Text style={s.body}>
-        {locale === 'ru'
+        {latin?.welcomeBody ?? (locale === 'ru'
           ? 'Подсказки покажут настоящие кнопки на этом экране. Гид можно повторить в настройках.'
-          : 'Follow the balloons beside the controls on this screen. Replay the guide from Settings at any time.'}
+          : 'Follow the balloons beside the controls on this screen. Replay the guide from Settings at any time.')}
       </Text>
       <View style={s.actions}>
         <Pressable accessibilityRole="button" onPress={dismiss} style={s.button}>
@@ -106,6 +107,7 @@ export function QuickStartWelcome({ onStart }: { onStart: () => void }): React.J
 export function QuickStartProvider({ children }: { children: React.ReactNode }): React.JSX.Element {
   const locale = useLocale()
   const copy = quickStartCopy(locale, 'mobile')
+  const latin = latinMobileGuideCopy(locale)
   const ru = locale === 'ru'
   const registry = useRef(new Map<string, View>())
   const register = useCallback((id: string, node: View | null) => {
@@ -153,19 +155,19 @@ export function QuickStartProvider({ children }: { children: React.ReactNode }):
           ? [
               {
                 anchor: 'catalog-library',
-                title: ru ? 'Выберите библиотеку' : 'Choose your library',
-                body: ru
+                title: latin?.libraryTitle ?? (ru ? 'Выберите библиотеку' : 'Choose your library'),
+                body: latin?.libraryBody ?? (ru
                   ? 'Здесь можно переключаться между Google Drive, выбранной папкой и песнями на телефоне. Выберите песню ниже, чтобы открыть её.'
-                  : 'Switch between Google Drive, a chosen folder and songs on this phone here. Select a song below to open it.'
+                  : 'Switch between Google Drive, a chosen folder and songs on this phone here. Select a song below to open it.')
               },
               { anchor: 'catalog-add', title: copy.steps.library[0], body: copy.steps.library[1] },
               { anchor: 'catalog-split', title: copy.steps.split[0], body: copy.steps.split[1] },
               {
                 anchor: 'catalog-sample',
-                title: ru ? 'Попробуйте демопесню' : 'Try the sample song',
-                body: ru
+                title: latin?.sampleTitle ?? (ru ? 'Попробуйте демопесню' : 'Try the sample song'),
+                body: latin?.sampleBody ?? (ru
                   ? 'Эта песня уже разделена на дорожки. Откройте её, затем нажмите «?» в плеере, чтобы познакомиться с микшером, текстом и повтором.'
-                  : 'This song already has its stems. Open it, then tap ? in the player for a tour of the mixer, lyrics and practice controls.'
+                  : 'This song already has its stems. Open it, then tap ? in the player for a tour of the mixer, lyrics and practice controls.')
               },
               {
                 anchor: 'training-tab',
@@ -182,24 +184,24 @@ export function QuickStartProvider({ children }: { children: React.ReactNode }):
               {
                 anchor: 'player-mixer',
                 title: copy.steps.stems[0],
-                body: ru
+                body: latin?.mixerBody ?? (ru
                   ? 'Эта кнопка открывает микшер. В нём можно приглушить вокал, изменить громкость отдельных дорожек или включить соло.'
-                  : 'Open the mixer here to lower or mute Vocals, adjust each stem’s volume, or solo a part.'
+                  : 'Open the mixer here to lower or mute Vocals, adjust each stem’s volume, or solo a part.')
               },
               { anchor: 'player-lyrics', title: copy.steps.lyrics[0], body: copy.steps.lyrics[1] },
               {
                 anchor: 'player-loop',
                 title: copy.steps.practice[0],
-                body: ru
+                body: latin?.loopBody ?? (ru
                   ? 'Нажмите A в начале нужного фрагмента, затем B в конце. Плеер будет повторять этот отрывок.'
-                  : 'Tap A at the start of a passage, then B at its end. The player repeats that section while you practise.'
+                  : 'Tap A at the start of a passage, then B at its end. The player repeats that section while you practise.')
               },
               {
                 anchor: 'player-practice',
-                title: ru ? 'Настройте занятия' : 'Adjust your practice',
-                body: ru
+                title: latin?.practiceTitle ?? (ru ? 'Настройте занятия' : 'Adjust your practice'),
+                body: latin?.practiceBody ?? (ru
                   ? 'Здесь открываются настройки тональности, темпа, метронома и чередования «слушаю / пою».'
-                  : 'Open Practice here for pitch, speed, metronome and alternating listen/sing settings.'
+                  : 'Open Practice here for pitch, speed, metronome and alternating listen/sing settings.')
               },
               {
                 anchor: 'training-tab',
@@ -208,10 +210,10 @@ export function QuickStartProvider({ children }: { children: React.ReactNode }):
               },
               {
                 anchor: 'player-about',
-                title: ru ? 'Информация о песне' : 'Song details',
-                body: ru
+                title: latin?.detailsTitle ?? (ru ? 'Информация о песне' : 'Song details'),
+                body: latin?.detailsBody ?? (ru
                   ? 'Эта кнопка открывает сведения о песне. Повторить гид можно кнопкой «?» рядом с ней.'
-                  : 'Open song details here. Replay this guide with the ? button beside it whenever you need a refresher.'
+                  : 'Open song details here. Replay this guide with the ? button beside it whenever you need a refresher.')
               }
             ]
       const sequence = ++request.current
@@ -226,7 +228,7 @@ export function QuickStartProvider({ children }: { children: React.ReactNode }):
         }
       })
     },
-    [copy, ru, measureAnchor]
+    [copy, latin, ru, measureAnchor]
   )
   const value = useMemo(() => ({ register, start }), [register, start])
   const step = tour?.steps[tour.index]

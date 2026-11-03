@@ -108,7 +108,7 @@ export async function packOnnxModel(
 // pdb/tcl pruned, fp16 beat model.
 // v10 ONNX / v6 torch update ORT to 1.30.0 on supported architectures.
 // Intel macOS keeps its last published ORT wheel (1.23.2).
-export const PACK_FORMAT_REQUIRED = process.platform === 'win32' ? 10 : 6
+export const PACK_FORMAT_REQUIRED = process.platform === 'win32' || process.platform === 'linux' ? 10 : 6
 
 /** The UVR vocal model, inside the pack since format 5 (torch) / 9 (onnx). */
 export function packVocalModel(root = packDir()): string {
@@ -155,6 +155,15 @@ export async function packComplete(root = packDir()): Promise<boolean> {
   // an incoming copy too, where the dialog says the opposite.
   const which = root === packDir() ? 'installed splitter pack' : 'downloaded splitter pack'
   if (!(await exists(packPython(root)))) return false
+  if (process.platform === 'linux') {
+    try {
+      const manifest = JSON.parse(await readFile(join(root, 'python', 'pack.json'), 'utf8'))
+      if (manifest.target !== `linux-${process.arch}`) {
+        log('models', `${which} targets ${String(manifest.target)}, expected linux-${process.arch}`, 'warn')
+        return false
+      }
+    } catch { return false }
+  }
   const version = await packFormatVersion(root)
   if (version < PACK_FORMAT_REQUIRED) {
     log('models', `${which} is format v${version}, app needs v${PACK_FORMAT_REQUIRED}`, 'warn')
@@ -206,9 +215,10 @@ export async function cleanupObsoleteModels(): Promise<void> {
   }
 }
 
-/** Packs on Windows and Intel Macs run demucs-onnx (Apple Silicon: torch). */
+/** Windows, Intel Macs and Linux run demucs-onnx (Apple Silicon: torch). */
 export function isOnnxPack(): boolean {
-  return process.platform === 'win32' || (process.platform === 'darwin' && process.arch === 'x64')
+  return process.platform === 'win32' || process.platform === 'linux' ||
+    (process.platform === 'darwin' && process.arch === 'x64')
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -273,16 +283,24 @@ export async function downloadFile(
   }
 }
 
-function untar(archive: string, destDir: string): Promise<void> {
+function untar(archive: string, destDir: string, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted()
   log('models', `extracting ${archive}`)
   return new Promise((resolve, reject) => {
     let tail = ''
     const child = spawn('tar', ['-xzf', archive, '-C', destDir])
+    const cancel = (): void => { child.kill('SIGTERM') }
+    signal?.addEventListener('abort', cancel, { once: true })
     child.stderr?.on('data', (c: Buffer) => {
       tail = (tail + c.toString('utf8')).slice(-2000)
     })
-    child.on('error', reject)
+    child.on('error', (error) => {
+      signal?.removeEventListener('abort', cancel)
+      reject(error)
+    })
     onChildSettled(child, 'models', (code) => {
+      signal?.removeEventListener('abort', cancel)
+      if (signal?.aborted) { reject(new Error('cancelled')); return }
       if (code === 0) {
         resolve()
       } else {
@@ -531,13 +549,13 @@ const REGISTRY: RegistryEntry[] = [
     // Measured on the tarballs CI actually built (run 35390756585, the first
     // build carrying the vocal model): 344/336/273 MiB → the decimal MB this
     // field is in. Was 296/272/259 before the model moved inside the pack.
-    sizeMb: process.platform === 'win32' ? 361 : process.arch === 'arm64' ? 352 : 286,
+    sizeMb: process.platform === 'linux' ? 366 : process.platform === 'win32' ? 361 : process.arch === 'arm64' ? 352 : 286,
     kind: 'archive',
     url:
       process.env.SINGZ_GPU_PACK_URL ??
       gpuSplitterPackUrl(),
     optional: false,
-    platforms: ['darwin-arm64', 'darwin-x64', 'win32-x64']
+    platforms: ['darwin-arm64', 'darwin-x64', 'win32-x64', 'linux-x64']
   },
   {
     id: 'qwen-asr',
@@ -568,7 +586,7 @@ const REGISTRY: RegistryEntry[] = [
     file: 'mms-fa.onnx',
     url: 'https://github.com/lexasoft123/SingZ/releases/download/models-1/mms-fa.onnx',
     optional: true,
-    platforms: ['win32-x64', 'darwin-x64']
+    platforms: ['win32-x64', 'darwin-x64', 'linux-x64']
   },
 ]
 
@@ -780,23 +798,34 @@ export class ModelManager {
           log('models', `${entry.id} installed (${entry.file})`)
           onProgress({ id: entry.id, percent: 100 })
         } else {
-          const archive = join(packDir(), '..', `${entry.id}.tar.gz`)
-          await downloadFile(
-            entry.url as string,
-            archive,
-            entry.sizeMb * 1e6,
-            (pct) => onProgress({ id: entry.id, percent: pct * 0.9 }),
-            this.abort.signal
-          )
+          // The first Linux installer includes its CPU runtime and weights.
+          // Extract through the same verified, recoverable swap as a download;
+          // installation must never delete the archive inside app resources.
+          const bundled = app.isPackaged && process.platform === 'linux' && entry.id === 'gpu-splitter'
+          const archive = bundled
+            ? join(process.resourcesPath, 'engines', `gpu-splitter-linux-${process.arch}.tar.gz`)
+            : join(packDir(), '..', `${entry.id}.tar.gz`)
+          if (bundled) {
+            if (!(await exists(archive))) throw new Error('The included stem splitter is missing. Reinstall SingZ.')
+            log('models', `installing included Linux stem splitter from ${archive}`)
+          } else {
+            await downloadFile(
+              entry.url as string,
+              archive,
+              entry.sizeMb * 1e6,
+              (pct) => onProgress({ id: entry.id, percent: pct * 0.9 }),
+              this.abort.signal
+            )
+          }
           onProgress({ id: entry.id, percent: 92 })
           try {
             await swapInVerifiedPack(
               packDir(),
-              (staging) => untar(archive, staging),
+              (staging) => untar(archive, staging, this.abort!.signal),
               packComplete
             )
           } finally {
-            await rm(archive, { force: true })
+            if (!bundled) await rm(archive, { force: true })
           }
           // fresh pack → give the GPU engines another chance if disabled
           await rm(dmlFlagPath(), { force: true })

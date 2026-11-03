@@ -140,7 +140,9 @@ export function selectDesktopPlaybackBackend(
       ? (features.requestedProvider === 'asio' ? 'asio'
         : features.requestedProvider === undefined || features.requestedProvider === 'wasapi'
           ? 'wasapi' : null)
-      : null
+      : platform === 'linux'
+        ? (!features.requestedProvider || features.requestedProvider === 'alsa' ? 'alsa' : null)
+        : null
   if (!provider) return { backend: 'legacy', reason: 'no native desktop provider for this platform' }
   if (!validRuntime(features.runtime)) {
     return { backend: 'legacy', reason: 'native playback runtime capability is unavailable' }
@@ -264,7 +266,7 @@ export async function decideDesktopNativePlayback(
     training: request.training,
     lanes: request.lanes,
     runtime,
-    requestedProvider: platform === 'win32' ? request.nativeAudioProvider : 'coreaudio'
+    requestedProvider: platform === 'win32' ? request.nativeAudioProvider : platform === 'linux' ? 'alsa' : 'coreaudio'
   })
   if (decision.backend !== 'native') return null
   return {
@@ -948,7 +950,9 @@ export class DesktopNativePlaybackClient {
    * diagnosis, but neither makes Pause a valid next command. */
   get transportActive(): boolean {
     const state = this.last?.transportState
-    return this.ownsOutput && this.started && (state === 'playing' || state === 'pre-roll')
+    return this.ownsOutput && this.started &&
+      this.last?.state !== 'terminal' && this.last?.state !== 'quarantined' &&
+      (state === 'playing' || state === 'pre-roll')
   }
 
   /** Chromium's sink is still released and recovery owns the next action.
@@ -1068,7 +1072,7 @@ export class DesktopNativePlaybackClient {
             await this.lease.releaseLegacyOutput()
             this.ownsOutput = true
             const activated = await this.activate(
-              request, ahead.route, request.provider !== 'asio', undefined, undefined, ahead.generation
+              request, ahead.route, request.provider !== 'asio' && request.provider !== 'alsa', undefined, undefined, ahead.generation
             )
             if (activated) {
               this.recoveryProvider = null
@@ -1087,7 +1091,7 @@ export class DesktopNativePlaybackClient {
           await this.lease.releaseLegacyOutput()
           this.ownsOutput = true
         }
-        const activated = await this.activate(request, route, request.provider !== 'asio')
+        const activated = await this.activate(request, route, request.provider !== 'asio' && request.provider !== 'alsa')
         if (activated) {
           this.recoveryProvider = null
           this.recoveryKind = null
@@ -1096,7 +1100,7 @@ export class DesktopNativePlaybackClient {
         }
         return activated
       } catch (error) {
-        if (request.provider === 'asio' &&
+        if ((request.provider === 'asio' || request.provider === 'alsa') &&
             !(error instanceof DesktopNativeProviderError) &&
             !(error instanceof DesktopNativeRecoveryError)) {
           throw new DesktopNativeProviderError(request.provider, error)
@@ -1116,7 +1120,14 @@ export class DesktopNativePlaybackClient {
       throw new Error('Native output inventory belongs to a different provider.')
     }
     let output = outputFor(inventory.devices, inventory.defaultOutputUid, request.preferredOutputUid)
-    if (request.browserOutputId && request.browserOutputId !== 'default') {
+    if (request.provider === 'alsa') {
+      const uid = request.browserOutputId?.startsWith('native:')
+        ? request.browserOutputId.slice(7) : request.preferredOutputUid
+      output = uid
+        ? inventory.devices.find(device => device.uid === uid && device.outputChannels > 0) ?? null
+        : inventory.devices.find(device => device.uid === inventory.defaultOutputUid && device.outputChannels > 0) ?? null
+      if (!output) throw new Error('Select an available ALSA output in Settings.')
+    } else if (request.browserOutputId && request.browserOutputId !== 'default') {
       const browserOutputs = await navigator.mediaDevices.enumerateDevices()
       const selected = browserOutputs.find(device => device.kind === 'audiooutput' && device.deviceId === request.browserOutputId)
       if (!selected) throw new Error('The selected output is no longer connected.')
@@ -1130,7 +1141,11 @@ export class DesktopNativePlaybackClient {
       outputDeviceUid: output.uid,
       outputChannels,
       sampleRate: Math.round(output.nominalSampleRate || request.sampleRate),
-      bufferFrames: Math.max(1, output.bufferFrames.preferredFrames || 512)
+      // Song playback tolerates a larger ALSA ring than live microphone monitoring.
+      bufferFrames: request.provider === 'alsa'
+        ? Math.max(1, Math.min(output.bufferFrames.maximumFrames || 4096, 4096,
+          Math.max(output.bufferFrames.minimumFrames || 1, 1024, output.bufferFrames.preferredFrames || 0)))
+        : Math.max(1, output.bufferFrames.preferredFrames || 512)
     }
   }
 
@@ -1253,7 +1268,7 @@ export class DesktopNativePlaybackClient {
     return {
       capability: DESKTOP_PLAYBACK_CAPABILITY,
       provider: request.provider,
-      accessMode: request.provider === 'asio' ? 'exclusive' : 'shared',
+      accessMode: request.provider === 'asio' || request.provider === 'alsa' ? 'exclusive' : 'shared',
       outputDeviceUid: route.outputDeviceUid,
       outputChannels: route.outputChannels,
       sampleRate: route.sampleRate,
@@ -1339,6 +1354,7 @@ export class DesktopNativePlaybackClient {
       this.transportIntent = initialTransport?.state === 'paused' ? 'paused' : 'playing'
       this.edgeAtMs = Date.now()
       await this.refresh(generation)
+      if (this.recoveryKind === 'cleanup-required') this.assertCommandableGeneration()
       this.startPolling()
       return true
     } catch (error) {
@@ -2253,8 +2269,15 @@ export class DesktopNativePlaybackClient {
         this.lastAtMs = Date.now()
         this.followRun(status)
         this.observeTransportBoundary(expectedGeneration, status)
+        if (status.state === 'terminal' || status.state === 'quarantined') {
+          // Last transport telemetry may still say Playing after the device stops.
+          // Retain ownership until exact cleanup; an explicit Play can recover.
+          this.started = false
+          this.recoveryProvider = this.request?.provider ?? this.recoveryProvider ?? 'coreaudio'
+          this.recoveryKind = 'cleanup-required'
+          this.stopPolling()
+        }
         this.onStateChange(status)
-        if (status.state === 'terminal' || status.state === 'quarantined') this.stopPolling()
         return status
       } catch (error) {
         // Publish a current polling failure before the serialized status lane
@@ -2278,6 +2301,7 @@ export class DesktopNativePlaybackClient {
     try {
       const status = await this.readStatus(generation, { requireCommandable: true })
       if (!status) throw new Error('Native playback status belongs to a retired generation.')
+      this.assertCommandableGeneration()
       return status
     } catch (error) {
       if (error instanceof DesktopNativeRecoveryError) throw error

@@ -27,6 +27,9 @@
 #     `security import` needs to put the certificate into a keychain, after
 #     which CSC_KEYCHAIN/CSC_NAME do the rest. See the note at its export
 #     below for why it is not called CSC_KEY_PASSWORD.
+#   SINGZ_SIGNING_KEYCHAIN_PASSWORD_FILE, SINGZ_SIGNING_KEYCHAIN_PATH — the
+#     dedicated local iOS signing keychain. The password stays in a mode-600
+#     temporary file; Fastlane reads it only while importing signing assets.
 #   SINGZ_APPLE_ID, SINGZ_APPLE_ID_PASSWORD_FILE — an Apple ID web login,
 #     read ONLY by `fastlane ios review_messages` (App Review's messages have
 #     no API-key surface). The password goes to a mode-600 temp file beside
@@ -43,7 +46,7 @@ fi
 
 command -v sops >/dev/null || { echo "sops is not installed (brew install sops)" >&2; exit 1; }
 
-# Feature work happens in worktrees (CLAUDE.md) and the store is kept ONCE
+# Feature work happens in worktrees (AGENTS.md) and the store is kept ONCE
 # beside the main checkout, shared — same rule as vendor/ and
 # gdrive.config.json. Look here, then there.
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -75,20 +78,6 @@ trap cleanup EXIT INT TERM HUP
 # that depend on where you happened to be standing.
 plain=$(sops --config /dev/null -d --output-type json "$store")
 
-# Local signing password stays in a private temporary file, never Xcode's
-# environment. The shared store has a dedicated password for this keychain.
-printf '%s' "$plain" | node -e '
-  let raw = "";
-  process.stdin.on("data", d => raw += d);
-  process.stdin.on("end", () => {
-    const password = JSON.parse(raw).singz_keychain_password;
-    if (!password) { console.error("Missing singz_keychain_password in SOPS store"); process.exit(1); }
-    require("node:fs").writeFileSync(process.argv[1], password, {mode: 0o600});
-  });
-' "$tmpdir/signing-password"
-export SINGZ_SIGNING_KEYCHAIN_PASSWORD_FILE="$tmpdir/signing-password"
-export SINGZ_SIGNING_KEYCHAIN_PATH="$HOME/Library/Keychains/singz-ios-signing.keychain-db"
-
 # Parse with node rather than grep/sed: the .p8 is a multi-line PEM, and a
 # line-oriented parse of it is how you get a key that is subtly truncated
 # and an auth error three steps later that says nothing about parsing.
@@ -119,6 +108,9 @@ eval "$(
       if (s.mac_p12_password) {
         console.log(`SINGZ_MAC_P12_PASSWORD=${q(s.mac_p12_password)}`)
       }
+      if (s.singz_keychain_password) {
+        console.log(`SINGZ_SIGNING_KEYCHAIN_PASSWORD=${q(s.singz_keychain_password)}`)
+      }
       // Apple ID web login for review_messages. Optional, and only ever
       // useful as a pair.
       if (s.apple_id && s.apple_id_password) {
@@ -138,6 +130,13 @@ export APP_STORE_CONNECT_API_ISSUER_ID="$SINGZ_ASC_ISSUER_ID"
 export MATCH_PASSWORD="$SINGZ_MATCH_PASSWORD"
 export SINGZ_ASC_KEY_PATH="$tmpdir/AuthKey_${SINGZ_ASC_KEY_ID}.p8"
 unset SINGZ_ASC_KEY_ID SINGZ_ASC_ISSUER_ID SINGZ_MATCH_PASSWORD
+
+if [ -n "${SINGZ_SIGNING_KEYCHAIN_PASSWORD:-}" ]; then
+  printf '%s' "$SINGZ_SIGNING_KEYCHAIN_PASSWORD" > "$tmpdir/signing-keychain-password"
+  export SINGZ_SIGNING_KEYCHAIN_PASSWORD_FILE="$tmpdir/signing-keychain-password"
+  export SINGZ_SIGNING_KEYCHAIN_PATH="$HOME/Library/Keychains/singz-ios-signing.keychain-db"
+fi
+unset SINGZ_SIGNING_KEYCHAIN_PASSWORD
 
 # App Review contact, when the store carries it. The eval above only SETS
 # these as shell variables; without an explicit export the child process —

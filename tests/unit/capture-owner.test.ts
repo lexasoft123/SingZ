@@ -1271,6 +1271,22 @@ describe('streamed-lane starvation', () => {
       .toEqual({ watch: null, report: null })
   })
 
+  it('logs an asynchronous terminal failure once even when the provider supplied no text', () => {
+    const binding = fakeBinding()
+    let current = { ...playbackStatus(), state: 'terminal', hostState: 'error',
+      terminalReason: 'provider-failure', terminalOrdinal: '1', xruns: '1', error: '' } as DesktopPlaybackStatus
+    binding.playbackStatus = () => current
+    const owner = new CaptureOwner(binding)
+    const before = logEntries().length
+    owner.playbackStatus(); owner.playbackStatus()
+    const lines = () => logEntries().slice(before).filter(x => x.line.startsWith('playback stopped'))
+    expect(lines()).toHaveLength(1)
+    expect(lines()[0]).toMatchObject({ level: 'error', line: expect.stringContaining('provider-failure · xruns 1') })
+    current = { ...current, generation: 'next' }
+    owner.playbackStatus()
+    expect(lines()).toHaveLength(2)
+  })
+
   it('writes one dsp warning per starving generation per ten seconds', () => {
     vi.useFakeTimers()
     try {

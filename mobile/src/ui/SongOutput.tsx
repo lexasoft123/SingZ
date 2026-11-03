@@ -1,14 +1,15 @@
-import React, { useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import React, { useRef, useSyncExternalStore } from 'react'
 import { AppState, Pressable, StyleSheet, Text, View } from 'react-native'
 import type { PlaybackBackend } from '../playback/backend'
 import { formatSongVolume, songVolumeFromDb, songVolumeToDb } from '../../../src/shared/song-volume'
 import { Bar, C, SpeakerGlyph } from './bits'
 import { KIT } from './tokens'
+import { AnimatedPeakMeter } from './AnimatedPeakMeter'
 import { t } from '../i18n'
 
 interface Reading { peakDb: number; clipped: boolean; available: boolean }
-/** A small shared store keeps 10 Hz meter updates out of the lyric screen's
- * React tree. It reads four scalars, never the full playback/device status. */
+/** A small shared store keeps 20 Hz meter updates out of the lyric screen's
+ * React tree. It reads five scalars, never the full playback/device status. */
 export class SongOutputMonitor {
   private reading: Reading = { peakDb: -Infinity, clipped: false, available: false }
   private listeners = new Set<() => void>()
@@ -17,11 +18,15 @@ export class SongOutputMonitor {
   private generation = 0
   private enabled = true
   constructor(private readonly backend: PlaybackBackend) {}
-  setActive(active: boolean): void { this.enabled = active }
+  get active(): boolean { return this.enabled }
+  setActive(active: boolean): void {
+    this.enabled = active
+    if (!active) this.publish({ ...this.reading, peakDb: -Infinity, available: false })
+  }
   snapshot = (): Reading => this.reading
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener)
-    if (!this.timer) this.timer = setInterval(() => this.tick(), 100)
+    if (!this.timer) this.timer = setInterval(() => this.tick(), 50)
     return () => {
       this.listeners.delete(listener)
       if (this.listeners.size === 0 && this.timer) { clearInterval(this.timer); this.timer = null }
@@ -53,26 +58,11 @@ export class SongOutputMonitor {
 function useReading(monitor: SongOutputMonitor): Reading {
   return useSyncExternalStore(monitor.subscribe, monitor.snapshot, monitor.snapshot)
 }
-function PeakBar({ db, mini = false, clipped = false }: { db: number; mini?: boolean; clipped?: boolean }): React.JSX.Element {
-  const [width, setWidth] = useState(0)
-  const pixels = Math.round(Math.max(0, Math.min(1, (db + 60) / 60)) * width)
-  const segments = useMemo(() => Array.from({ length: mini ? 12 : 40 }, (_, i) => <View key={i} style={{ flex: 1, height: '100%', borderRadius: 1,
-    backgroundColor: i >= (mini ? 11 : 38) ? KIT.danger : i >= (mini ? 10 : 34) ? C.amber : KIT.success }} />), [mini])
-  return <View style={[s.meter, mini && s.miniMeter]} onLayout={e => setWidth(Math.round(e.nativeEvent.layout.width))}>
-    {mini && <View pointerEvents="none" style={{ position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, flexDirection: 'row', gap: 1 }}>
-      {Array.from({ length: 12 }, (_, i) => <View key={i} style={{ flex: 1, borderRadius: 1, backgroundColor: clipped ? KIT.danger : C.faint, opacity: clipped ? 0.75 : 0.5 }} />)}
-    </View>}
-    <View style={{ width: pixels, height: '100%', overflow: 'hidden' }}>
-      <View style={{ width, height: '100%', flexDirection: 'row', gap: mini ? 1 : 2 }}>
-        {segments}
-      </View>
-    </View>
-  </View>
-}
 export function SongOutputMeterButton({ monitor, gain, onPress }: { monitor: SongOutputMonitor; gain: number; onPress: () => void }): React.JSX.Element {
   const reading = useReading(monitor)
   return <Pressable testID="song-output-open" onPress={onPress} hitSlop={{ top: 6, bottom: 6 }} accessibilityRole="button" accessibilityLabel={`${t('phone.player.output.title')}, ${formatSongVolume(gain)}${reading.clipped ? `, ${t('phone.player.output.clip')}` : ''}`} style={s.meterButton}>
-    <PeakBar db={reading.available ? reading.peakDb : -Infinity} mini clipped={reading.clipped} />
+    {/* Both the live bar and held brick use peaks, keeping their gap meaningful. */}
+    <AnimatedPeakMeter db={reading.available ? reading.peakDb : -Infinity} peakDb={reading.available ? reading.peakDb : -Infinity} mini clipped={reading.clipped} identity={monitor} enabled={monitor.active} />
   </Pressable>
 }
 export function SongOutputControls({ monitor, gain, onGain, onCommit, saveState }: {
@@ -105,7 +95,7 @@ export function SongOutputControls({ monitor, gain, onGain, onCommit, saveState 
           <View style={[s.led, reading.clipped && { backgroundColor: KIT.danger }]} /><Text style={[s.clipText, reading.clipped && { color: KIT.danger }]}>{t('phone.player.output.clip')}</Text>
         </Pressable>
       </View>
-      <PeakBar db={reading.available ? reading.peakDb : -Infinity} />
+      <AnimatedPeakMeter db={reading.available ? reading.peakDb : -Infinity} peakDb={reading.available ? reading.peakDb : -Infinity} identity={monitor} enabled={monitor.active} />
       <View style={s.meterScale}>{['−60', '−36', '−18', '−6', '0'].map((label, i) => <Text key={label} style={[s.scaleText, { left: `${[0, 40, 70, 90, 100][i]}%`, transform: [{ translateX: i === 0 ? 0 : i === 4 ? -6 : -10 }] }]}>{label}</Text>)}</View>
     </View>
     {reading.clipped && <Text style={s.hint}>{t('phone.player.output.clippedHint')}</Text>}
@@ -125,7 +115,6 @@ const s = StyleSheet.create({
   meterHead: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 4 }, label: { color: C.dim, fontSize: 12 },
   peakValue: { marginLeft: 'auto', color: C.text, fontSize: 12, fontVariant: ['tabular-nums'] }, peakUnit: { color: C.dim, fontSize: 11 },
   clip: { minHeight: 44, minWidth: 49, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5 }, clipText: { color: C.dim, fontSize: 11 },
-  meter: { height: 16, borderRadius: 3, overflow: 'hidden', backgroundColor: KIT.panelDeep }, miniMeter: { width: '100%', height: 7 },
   meterScale: { position: 'relative', height: 14, marginTop: 8 }, scaleText: { position: 'absolute', color: C.dim, fontSize: 11 },
   hint: { color: KIT.danger, fontSize: 12, lineHeight: 18, marginTop: 8 }, saved: { color: C.dim, fontSize: 11, marginTop: 8 }
 })

@@ -16,6 +16,7 @@ const { createHash } = require('node:crypto')
 const { get } = require('node:https')
 const { basename, dirname, join, relative, resolve } = require('node:path')
 const { spawnSync } = require('node:child_process')
+const { zcoreGitlinkRevision } = require('./zcore-gitlink.cjs')
 const {
   assertHostCanBuildTarget,
   assertSourceFingerprintUnchanged,
@@ -45,6 +46,9 @@ const arch = requested?.at(-1) || process.arch
 const printingFingerprint = runningAsScript && process.argv.includes('--print-source-fingerprint')
 const target = runningAsScript && !printingFingerprint ? captureTarget(platform, arch) : null
 if (target) assertHostCanBuildTarget(target)
+if (platform === 'linux' && arch !== process.arch) {
+  throw new Error('Linux capture cross-compilation needs an explicit toolchain; build on the target architecture')
+}
 
 const headersRoot = join(root, '.engines-src', 'electron-headers', electronVersion)
 const archive = join(headersRoot, `node-v${electronVersion}-headers.tar.gz`)
@@ -243,23 +247,31 @@ function extractHeaders(archivePath, cwd, extract = run) {
 // identity. Keep this byte-for-byte equivalent to captureSourceFingerprint()
 // in src/main/capture.ts; a unit test compares both implementations.
 function sourceFingerprint() {
+  const zcoreRevision = zcoreGitlinkRevision(root)
   const files = []
   const walk = (dir) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === '.git') continue
       const path = join(dir, entry.name)
       if (entry.isDirectory()) walk(path)
       else files.push(path)
     }
   }
   for (const dir of [
-    'native/electron', 'native/playback', 'zcore', 'zdsp', 'third_party/native', 'cmake'
+    'native/electron', 'native/playback', 'third_party/zcore',
+    'zcore', 'zdsp', 'third_party/native', 'cmake'
   ]) {
     walk(join(root, dir))
   }
-  files.push(join(root, 'CMakeLists.txt'), __filename)
+  files.push(join(root, 'CMakeLists.txt'), join(root, '.gitmodules'),
+    join(root, 'scripts', 'verify-zcore-submodule.py'),
+    join(root, 'scripts', 'zcore-gitlink.cjs'),
+    join(root, 'scripts/ccache-launcher.sh'),
+    join(root, 'scripts/ccache-launcher.ps1'), __filename)
   files.sort()
   const hash = createHash('sha1')
   hash.update(`electron ${electronVersion}\n`)
+  hash.update(`third_party/zcore.gitlink ${zcoreRevision}\n`)
   for (const file of files) {
     hash.update(`${relative(root, file)} ${statSync(file).size} `)
     hash.update(createHash('sha1').update(readFileSync(file)).digest('hex'))
@@ -366,8 +378,8 @@ function loadCodecPack() {
 }
 
 function validateFfmpegImports(addon, codecPack) {
-  const command = platform === 'darwin' ? 'otool' : 'dumpbin.exe'
-  const args = platform === 'darwin' ? ['-L', addon] : ['/dependents', addon]
+  const command = platform === 'darwin' ? 'otool' : platform === 'linux' ? 'readelf' : 'dumpbin.exe'
+  const args = platform === 'darwin' ? ['-L', addon] : platform === 'linux' ? ['-d', addon] : ['/dependents', addon]
   const result = spawnSync(command, args, { encoding: 'utf8' })
   if (!codecPack) {
     // A base build must not have picked up a developer machine's libav*:

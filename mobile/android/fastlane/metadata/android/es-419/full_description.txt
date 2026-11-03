@@ -1,0 +1,21 @@
+Haz karaoke con tu propia música. SingZ combina letras sincronizadas, pistas de instrumentos y ejercicios de canto guiados. Silencia la voz principal, cambia la tonalidad para adaptarla a tu voz y practica con un indicador de afinación en vivo.
+
+AGREGA TUS CANCIONES
+Elige un archivo de audio de tu teléfono: una grabación propia o una canción que hayas comprado. SingZ separa la canción en seis pistas en el dispositivo: voz, batería, bajo, guitarra, piano y otros instrumentos. Tu canción no se sube a ningún servidor. La primera vez se descarga un modelo de unos 136 MB; la separación requiere suficiente memoria y capacidad de procesamiento.
+
+También puedes preparar canciones en la aplicación gratuita y de código abierto de SingZ para Mac y Windows. Luego ábrelas desde tu propia cuenta de Google Drive o una carpeta que hayas copiado. Incluye una canción de muestra para empezar de inmediato. SingZ trabaja con tus grabaciones; no ofrece un catálogo ni una tienda de música.
+
+CANTA A TU MANERA
+• Ajusta el volumen de cada pista, silénciala o escúchala por separado.
+• Sigue las letras con resaltado palabra por palabra. Toca una línea para saltar a ese momento.
+• Cambia la tonalidad y la velocidad de reproducción de forma independiente.
+• Repite los pasajes difíciles con una cuenta de entrada.
+• La música sigue sonando con la pantalla bloqueada.
+
+ENTRENA TU OÍDO Y TU VOZ
+Elige un programa inicial, intermedio o avanzado para practicar notas, intervalos, acordes, escalas y arpegios. Primero escucha la nota y luego cántala. El indicador de afinación en vivo muestra tu precisión y cuánto tiempo mantienes cada nota. Consulta tu historial por fecha. Elige piano, piano eléctrico, guitarra de nailon u órgano; tus ajustes de sonido y nivel se conservan entre ejercicios.
+
+Al practicar una canción, puedes programar que ciertas pistas se silencien en momentos concretos o en determinadas líneas de la letra. Así aprendes a mantener tu parte sin depender de la voz de referencia.
+
+CORRIGE LAS LETRAS Y PRACTICA SIN CONEXIÓN
+Edita las letras y su sincronización en la aplicación de escritorio; los cambios llegan al teléfono en la siguiente sincronización. Las canciones que abres se guardan en el teléfono para reproducirlas sin conexión. Iniciar sesión en Google Drive es opcional y no necesitas una cuenta de SingZ. Sin anuncios, analítica de uso ni seguimiento. Grabar tu práctica también es opcional.

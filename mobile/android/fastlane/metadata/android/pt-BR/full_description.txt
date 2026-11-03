@@ -1,0 +1,21 @@
+Faça karaokê com suas próprias músicas. O SingZ reúne letras sincronizadas, faixas de instrumentos e exercícios de canto guiados. Silencie o vocal principal, mude o tom para sua voz e pratique com um indicador de afinação em tempo real.
+
+ADICIONE SUAS MÚSICAS
+Escolha um arquivo de áudio do celular: uma gravação sua ou uma música que você comprou. O SingZ separa a música em seis faixas no próprio aparelho: voz, bateria, baixo, guitarra, piano e outros instrumentos. Sua música não é enviada a um servidor. No primeiro uso, é baixado um modelo de cerca de 136 MB; a separação exige memória e capacidade de processamento suficientes.
+
+Você também pode preparar músicas no aplicativo gratuito e de código aberto do SingZ para Mac e Windows. Depois, abra-as pela sua própria conta do Google Drive ou por uma pasta copiada. Uma música de exemplo já vem no aplicativo para você experimentar. O SingZ trabalha com suas gravações; não oferece catálogo nem loja de músicas.
+
+CANTE DO SEU JEITO
+• Ajuste o volume de cada faixa, silencie-a ou ouça apenas ela.
+• Acompanhe as letras com destaque palavra por palavra. Toque em uma linha para ir até aquele trecho.
+• Mude o tom e a velocidade de reprodução de forma independente.
+• Repita trechos difíceis com uma contagem de entrada.
+• A música continua tocando com a tela bloqueada.
+
+TREINE SEU OUVIDO E SUA VOZ
+Escolha um programa iniciante, intermediário ou avançado para praticar notas, intervalos, acordes, escalas e arpejos. Primeiro ouça a nota e depois cante. O indicador de afinação em tempo real mostra sua precisão e por quanto tempo você sustenta cada nota. Consulte seu histórico por data. Escolha piano, piano elétrico, violão de náilon ou órgão; seus ajustes de som e nível são mantidos entre os exercícios.
+
+Ao praticar uma música, você pode programar o silenciamento de certas faixas em momentos específicos ou em determinadas linhas da letra. Assim, aprende a manter sua parte sem depender da voz de referência.
+
+CORRIJA AS LETRAS E PRATIQUE OFFLINE
+Edite as letras e a sincronização no aplicativo de computador; as alterações chegam ao celular na próxima sincronização. As músicas que você abre ficam salvas no celular para ouvir offline. Entrar no Google Drive é opcional e você não precisa de uma conta do SingZ. Sem anúncios, análise de uso ou rastreamento. Gravar sua prática também é opcional.

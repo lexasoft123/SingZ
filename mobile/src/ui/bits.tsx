@@ -542,13 +542,15 @@ export function RoundBtn({
   onPress,
   children,
   bg = C.btnBg,
-  label
+  label,
+  selected
 }: {
   size?: number
   onPress: () => void
   children: React.ReactNode
   bg?: string
   label?: string
+  selected?: boolean
 }): React.JSX.Element {
   return (
     <Pressable
@@ -556,6 +558,7 @@ export function RoundBtn({
       hitSlop={8}
       accessibilityRole="button"
       accessibilityLabel={label}
+      accessibilityState={selected === undefined ? undefined : { selected }}
       style={({ pressed }) => ({
         width: size,
         height: size,

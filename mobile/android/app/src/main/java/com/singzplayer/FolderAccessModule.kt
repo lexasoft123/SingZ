@@ -18,6 +18,8 @@ import java.net.HttpURLConnection
 import java.net.ServerSocket
 import java.net.URL
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
+import java.util.UUID
 import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 
@@ -576,51 +578,121 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
    * stems are too big for the JS bridge). Same .part+rename discipline as
    * the SAF copies; skipped when the cached size already matches.
    */
+  // Downloads must not block listing/cacheUsage on the general file queue.
+  private val driveDownloadExec = Executors.newSingleThreadExecutor()
+  private class DriveTransfer(val expected: Long) {
+    @Volatile var cancelled = false
+    @Volatile var got = 0L
+    @Volatile var total = expected
+    @Volatile var verifying = false
+    @Volatile var connection: HttpURLConnection? = null
+  }
+  private class DriveFailure(val code: String, message: String) : Exception(message)
+  private val driveTransfers = ConcurrentHashMap<String, DriveTransfer>()
+
+  @ReactMethod
+  fun driveFetchProgress(request: String, promise: Promise) {
+    val state = driveTransfers[request]
+    if (state == null) { promise.resolve(null); return }
+    val m = Arguments.createMap()
+    m.putDouble("got", state.got.toDouble())
+    m.putDouble("total", state.total.toDouble())
+    m.putBoolean("verifying", state.verifying)
+    promise.resolve(m)
+  }
+
+  @ReactMethod
+  fun cancelDriveFetch(request: String, promise: Promise) {
+    val state = driveTransfers[request]
+    state?.cancelled = true
+    // disconnect may wait on a socket; never hold the React bridge behind it.
+    if (state != null) thread(name = "singz-drive-cancel") {
+      runCatching { state.connection?.disconnect() }
+    }
+    promise.resolve(state != null)
+  }
+
   @ReactMethod
   fun fetchToCache(
-    project: String,
-    file: String,
-    url: String,
-    auth: String,
-    expectedMd5: String,
-    expectedBytes: Double,
-    promise: Promise
+    project: String, file: String, url: String, auth: String,
+    expectedMd5: String, expectedBytes: Double, promise: Promise
+  ) = fetchDriveFile(project, file, url, auth, expectedMd5, expectedBytes,
+                    UUID.randomUUID().toString(), promise)
+
+  @ReactMethod
+  fun fetchToCacheTracked(
+    project: String, file: String, url: String, auth: String,
+    expectedMd5: String, expectedBytes: Double, request: String, promise: Promise
+  ) = fetchDriveFile(project, file, url, auth, expectedMd5, expectedBytes, request, promise)
+
+  private fun fetchDriveFile(
+    project: String, file: String, url: String, auth: String,
+    expectedMd5: String, expectedBytes: Double, request: String, promise: Promise
   ) {
-    exec.execute {
+    if (!ProjectPaths.plainChild(project) || !ProjectPaths.relOk(file)) {
+      promise.reject("fetch", "Bad project or file path"); return
+    }
+    val state = DriveTransfer(expectedBytes.toLong())
+    driveTransfers[request] = state
+    val queue = if (url.isEmpty()) exec else driveDownloadExec
+    queue.execute {
+      var tmp: File? = null
       try {
+        if (state.cancelled) throw DriveFailure("cancelled", "Download cancelled")
         val out = cacheFile(project, file)
         if (isCurrent(out, expectedMd5, expectedBytes.toLong())) {
-          promise.resolve(result(out, false))
-          return@execute
+          promise.resolve(result(out, false)); return@execute
         }
-        if (url.isEmpty()) {
-          promise.reject("cacheMiss", "Drive cache miss for $file")
-          return@execute
-        }
+        if (url.isEmpty()) throw DriveFailure("cacheMiss", "Drive cache miss for $file")
         val conn = URL(url).openConnection() as HttpURLConnection
+        state.connection = conn
         conn.setRequestProperty("Authorization", auth)
         conn.connectTimeout = 20000
-        conn.readTimeout = 60000
-        if (conn.responseCode / 100 != 2) {
-          throw Exception("Drive download failed (${conn.responseCode}) for $file")
+        conn.readTimeout = 20000
+        val status = conn.responseCode
+        if (status / 100 != 2) throw DriveFailure("http$status", "Drive download failed ($status) for $file")
+        if (state.total <= 0) state.total = conn.contentLengthLong
+        if (out.parentFile?.let { it.isDirectory || it.mkdirs() } != true)
+          throw DriveFailure("cacheWrite", "Cannot create the download folder")
+        val part = File(out.path + "." + UUID.randomUUID().toString() + ".part")
+        tmp = part
+        val digest = MessageDigest.getInstance("MD5")
+        conn.inputStream.use { input ->
+          val output = try { part.outputStream() } catch (e: Exception) {
+            throw DriveFailure("cacheWrite", "Cannot save $file: ${e.message}")
+          }
+          output.use { o ->
+            val buffer = ByteArray(65536)
+            while (true) {
+              if (state.cancelled) throw DriveFailure("cancelled", "Download cancelled")
+              val n = input.read(buffer)
+              if (n < 0) break
+              try { o.write(buffer, 0, n) } catch (e: Exception) {
+                throw DriveFailure("cacheWrite", "Cannot save $file: ${e.message}")
+              }
+              digest.update(buffer, 0, n)
+              state.got += n
+            }
+          }
         }
-        out.parentFile?.mkdirs()
-        val tmp = File(out.path + ".part")
-        conn.inputStream.use { input -> tmp.outputStream().use { o -> input.copyTo(o) } }
-        if (!tmp.renameTo(out)) throw Exception("Cannot cache $file")
-        // What landed must be what was asked for — a connection cut halfway
-        // leaves a plausible file, and caching it would poison every later
-        // open with audio that decodes to silence or noise.
-        if (expectedMd5.isNotEmpty() && hashOf(out) != expectedMd5) {
-          out.delete()
-          throw Exception("$file arrived damaged — try again")
-        }
+        state.verifying = true
+        val md5 = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        if ((expectedBytes > 0 && state.got != expectedBytes.toLong()) ||
+            (expectedMd5.isNotEmpty() && md5 != expectedMd5))
+          throw DriveFailure("integrity", "$file arrived incomplete or damaged")
+        if (state.cancelled) throw DriveFailure("cancelled", "Download cancelled")
+        // Atomic replacement only AFTER verification; a failed update leaves
+        // the previous durable copy intact. Completed tracks survive retries.
+        if (!part.renameTo(out)) throw DriveFailure("cacheWrite", "Cannot cache $file")
+        hashPrefs.edit().remove(out.path).apply()
         promise.resolve(result(out, true))
       } catch (e: Exception) {
-        // a dead .part would otherwise sit there counting against nothing and
-        // be mistaken for progress on the next attempt
-        cacheFile(project, "$file.part").delete()
-        promise.reject("fetch", e.message ?: "Cannot fetch $file")
+        val code = if (state.cancelled) "cancelled" else (e as? DriveFailure)?.code ?: "fetch"
+        promise.reject(code, e.message ?: "Cannot fetch $file")
+      } finally {
+        tmp?.delete()
+        runCatching { state.connection?.disconnect() }
+        driveTransfers.remove(request, state)
       }
     }
   }

@@ -1,5 +1,6 @@
 ---
 name: score-scout
+model: sonnet
 description: Fetch the OFFICIAL published score/tab for one song from Ultimate Guitar via Playwright, and return its meter map (tempo, time signature, every meter change with bar number and the lyric under it). Use when beat-detection work needs ground truth for a song — one agent per song, launch in parallel. The prompt names the song and artist.
 ---
 

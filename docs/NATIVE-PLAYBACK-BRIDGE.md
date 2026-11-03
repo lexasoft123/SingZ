@@ -107,7 +107,7 @@ nothing between them:
 | full matrix | `0x1ff` | true | `singz-prepared-audio-fd-ffmpeg-full-matrix-v3` | non-empty |
 
 **native** is every build since zcore gained its own MP3 decoder
-(`zcore/src/media/mp3_streaming_source.cpp`, over the vendored MIT-0 dr_mp3 —
+(`third_party/zcore/zcore/src/media/mp3_streaming_source.cpp`, over the vendored MIT-0 dr_mp3 —
 `third_party/native/dr_mp3/README.md`): WAV, FLAC and MP3 with no FFmpeg at
 all, so an unsplit phone song's `song.mp3` or an MP3 custom track plays and
 streams on the native graph. MP3 is native on FFmpeg builds too; FFmpeg keeps
@@ -123,12 +123,12 @@ only when the loaded addon's `playbackStatus().mediaCodecTag` — the addon's ow
 
 A third tag exists in C++ and no TypeScript parser accepts it:
 `singz-prepared-audio-fd-ffmpeg-partial-runtime-v2`
-(`zcore/src/media/decoded_audio.cpp`). A partial-ffmpeg build therefore reads
+(`third_party/zcore/zcore/src/media/decoded_audio.cpp`). A partial-ffmpeg build therefore reads
 as "no native playback" on both facades. That is deliberate; it is recorded
 here so nobody re-derives it from a silent decline.
 
 Per-extension bits (`codecSupportsExtension` in `native.ts`, against
-`zcore/include/zcore/media/decoded_audio.h`): wav `0x001`, flac `0x002`, mp3
+`third_party/zcore/zcore/include/zcore/media/decoded_audio.h`): wav `0x001`, flac `0x002`, mp3
 `0x004`, **m4a needs both** AAC `0x008` and ALAC `0x010`, aac `0x020`,
 ogg/oga `0x0c0`, opus `0x080`, aif/aiff `0x100`.
 
@@ -569,7 +569,7 @@ closed and opened again, which prepared against whatever was live by then and
 played first time. Nothing retried, because the route was only ever read when
 a graph was prepared. The iOS coordinator now reads it again at exactly that
 refusal (`reprepareForMovedRoute`): the inventory is `currentRoute` at the
-moment it is asked (`zcore/platform/ios/audio_host_ios.mm`), so a status taken
+moment it is asked (`third_party/zcore/zcore/platform/ios/audio_host_ios.mm`), so a status taken
 after the refusal is the route the session actually has — the same device
 means the refusal was about something else and is reported unchanged, a
 different one means the old generation is released and the graph prepared
@@ -976,7 +976,7 @@ argument. The default retention cap is 1 GiB
 
 **Odd-period training** — `trainingInside`,
 `native_playback_session.cpp:2082-2094`, and identically in
-`zdsp/src/runtime/scheduled_gain.cpp`. In period mode, **odd period index
+`third_party/zcore/zdsp/src/runtime/scheduled_gain.cpp`. In period mode, **odd period index
 means inside means ducked**; period 0 is heard. Window mode excludes the end
 frame. The TypeScript engines compute the same parity in *seconds*
 (`Math.floor(pos / periodSec) % 2 === 1`) where the core divides *frames*, so

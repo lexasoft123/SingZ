@@ -1,9 +1,9 @@
 'use strict'
 
-// Product component packaging has one explicit source manifest. The checker
-// compares each target-membership array against CMake before either iOS copy
-// is materialized, so an add/remove on either side fails instead of silently
-// producing different callback/runtime products.
+// Product component packaging has one explicit iOS manifest. The checker
+// compares shared component membership with zCore's pinned source manifest
+// before either iOS copy is materialized, so source ownership drift fails
+// instead of silently producing different callback/runtime products.
 const zdspRuntimeFiles = [
   'src/api/contracts.cpp',
   'src/runtime/realtime_arena.cpp',

@@ -4,13 +4,14 @@
 # app downloads on first run (Windows + Intel Macs; Apple Silicon uses the
 # torch/MPS pack from build-gpu-pack.sh).
 #
-# Usage: scripts/build-onnx-pack.sh [win32-x64|darwin-x64]
+# Usage: scripts/build-onnx-pack.sh [win32-x64|darwin-x64|linux-x64]
 #   win32-x64  — mainline onnxruntime + TensorRT-RTX plugin EP (RTX 30xx+)
 #   darwin-x64 — onnxruntime CPU (CoreML crashes on this graph)
 set -euo pipefail
 
 TARGET="${1:-win32-x64}"
 PBS_TAG="20260718"
+LINUX_PACK=0
 case "$TARGET" in
   win32-x64)
     PBS_PY="cpython-3.12.13+${PBS_TAG}-x86_64-pc-windows-msvc-install_only.tar.gz"
@@ -23,6 +24,13 @@ case "$TARGET" in
     PYBIN="python/bin/python3"
     SITE="python/lib/python3.12/site-packages"
     WIN_PACK=0
+    ;;
+  linux-x64)
+    PBS_PY="cpython-3.12.13+${PBS_TAG}-x86_64-unknown-linux-gnu-install_only.tar.gz"
+    PYBIN="python/bin/python3"
+    SITE="python/lib/python3.12/site-packages"
+    WIN_PACK=0
+    LINUX_PACK=1
     ;;
   *)
     echo "unknown target: $TARGET" >&2
@@ -67,7 +75,7 @@ TRTRTX_EP_TAG="v0.4.0"
 TRTRTX_EP_ZIP="TensorRT-RTX-EP-ABI-${TRTRTX_EP_TAG}-cu12.zip"
 TRTRTX_EP_URL="https://github.com/NVIDIA/TensorRT-RTX-EP-ABI/releases/download/${TRTRTX_EP_TAG}/${TRTRTX_EP_ZIP}"
 # Intel macOS wheels stopped at 1.23.2; keep its latest supported release.
-if [ "$WIN_PACK" = 1 ]; then
+if [ "$WIN_PACK" = 1 ] || [ "$LINUX_PACK" = 1 ]; then
   ORT_MAINLINE_PIN="onnxruntime==1.30.0"
 else
   ORT_MAINLINE_PIN="onnxruntime==1.23.2"
@@ -112,7 +120,11 @@ if ! "$PY" -c "import demucs_onnx, onnxruntime; assert onnxruntime.__version__ =
   rm -rf "$WORK/python"
   tar -C "$WORK" -xzf "$WORK/$PBS_PY"
   "$PY" -m pip install --no-cache-dir --upgrade pip >/dev/null
-  "$PY" -m pip install --no-cache-dir demucs-onnx
+  if [ "$LINUX_PACK" = 1 ]; then
+    "$PY" -m pip install --no-cache-dir demucs-onnx==0.3.4
+  else
+    "$PY" -m pip install --no-cache-dir demucs-onnx
+  fi
   # One pinned runtime hosts the Windows plugin EP and the CPU runners.
   # Intel macOS keeps the last compatible wheel.
   "$PY" -m pip uninstall -y onnxruntime >/dev/null
@@ -229,7 +241,15 @@ else
 fi
 if ! "$EXPORT_PY" -c "import torch, beat_this, onnx, onnxscript" >/dev/null 2>&1; then
   rm -rf "$EXPORT_VENV"
-  if [ "$TARGET" = win32-x64 ]; then
+  if [ "$LINUX_PACK" = 1 ]; then
+    "$PY" -m venv "$EXPORT_VENV"
+    "$EXPORT_PY" -m pip install --no-cache-dir --upgrade pip >/dev/null
+    "$EXPORT_PY" -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
+      "$TORCH_EXPORT_PIN" "$TORCHAUDIO_PIN"
+    "$EXPORT_PY" -m pip install --no-cache-dir "$NUMPY_PIN" \
+      "$EINOPS_PIN" "$ROTARY_PIN" "$SOXR_PIN" "$BEAT_THIS_PIN" \
+      "$ONNX_PIN" "$ONNXSCRIPT_PIN"
+  elif [ "$TARGET" = win32-x64 ]; then
     "$PY" -m venv "$EXPORT_VENV"
     "$EXPORT_PY" -m pip install --no-cache-dir --upgrade pip >/dev/null
     "$EXPORT_PY" -m pip install --no-cache-dir "$TORCH_EXPORT_PIN" "$NUMPY_PIN" \

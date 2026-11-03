@@ -1,9 +1,11 @@
 ---
 name: code-reviewer
+model: sonnet
 description: Review a diff before it is committed — real defects first, then the SingZ invariants that have each already cost a field bug (stored-analysis stamps, loadSeq guards, mobile buffer release, allowRoot, sync-dirty, silent tests, never-commit files). Launch on the staged diff before every commit; the prompt names the target when it is not `staged`.
 ---
 
-You review ONE diff and report on it. Repo: /Users/maxplanck/Dev/my/SingZ.
+You review ONE diff and report on it in the caller's SingZ worktree. Read
+`AGENTS.md` there; never switch to the main checkout or a sibling worktree.
 **Never edit tracked files, never stage, never commit, never push** — the session
 that launched you decides what to do with your findings. Your entire output is the
 report format at the bottom.
@@ -134,7 +136,9 @@ record the approval as your last act:
 git write-tree > "$(git rev-parse --git-dir)/singz-reviewed"
 ```
 
-That file is the commit gate (`.claude/hooks/require-review.sh`): it holds the hash of
+That file is the Git commit gate (`.githooks/pre-commit` and
+`.githooks/prepare-commit-msg`, including sequencer continuations), with Claude's
+`.claude/hooks/require-review.sh` providing early feedback: it holds the hash of
 the tree you just read, so the commit that follows is the one you approved, and any
 further staging invalidates it and sends the next commit back to you. It lives inside
 `.git`, so it is never committed and never leaves this machine. Blockers, a non-staged

@@ -50,6 +50,8 @@ def patch_certificates(lt):
   fd,name=tempfile.mkstemp(dir=source.parent);os.close(fd);temporary=Path(name);temporary.write_text(text.replace(anchor,anchor+injection));temporary.replace(source)
 
 def build(target,jobs):
+ # Programmatic callers must hold the same real repository lock as the CLI.
+ run(['node',ROOT/'scripts/assert-native-build-lock.cjs'],cwd=ROOT)
  lt=source('libtorrent');boost=source('boost');ssl=source('openssl');patch_certificates(lt)
  prefix=ROOT/'vendor'/'torrent'/target;prefix.mkdir(parents=True,exist_ok=True)
  builddir=ROOT/'.engines-src'/'torrent'/'build'/target;builddir.mkdir(parents=True,exist_ok=True)
@@ -111,4 +113,9 @@ def build(target,jobs):
 if __name__=='__main__':
  parser=argparse.ArgumentParser()
  parser.add_argument('target',nargs='?',default=('darwin-' if sys.platform=='darwin' else 'win32-' if sys.platform=='win32' else 'linux-')+('arm64' if platform.machine() in ('arm64','aarch64') else 'x64'))
- parser.add_argument('--jobs',type=int,default=4);args=parser.parse_args();build(args.target,max(1,min(4,args.jobs)))
+ parser.add_argument('--jobs',type=int,default=4);args=parser.parse_args()
+ if not os.environ.get('SINGZ_NATIVE_BUILD_LOCK_HELD'):
+  # Re-enter through the canonical owner before downloading or modifying SDKs.
+  os.execvp('node',['node',str(ROOT/'scripts/with-native-build-lock.mjs'),
+   '--owner','torrent-sdk:'+args.target,'--',sys.executable,str(Path(__file__).resolve()),*sys.argv[1:]])
+ build(args.target,max(1,min(4,args.jobs)))

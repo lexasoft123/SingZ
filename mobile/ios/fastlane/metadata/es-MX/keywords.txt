@@ -1,0 +1,1 @@
+cantar,letras,voz,pistas,afinación,notas,acordes,escalas,transponer,ensayo,sin conexión

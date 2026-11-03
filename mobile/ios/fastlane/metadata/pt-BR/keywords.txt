@@ -1,0 +1,1 @@
+cantar,letras,vocal,playback,afinação,notas,acordes,escalas,transpor,ensaio,offline

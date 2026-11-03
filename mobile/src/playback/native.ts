@@ -1,3 +1,4 @@
+import { describeFileProgress, fileProgressFraction } from '../drive-progress';
 import { sanitizeSongVolume } from '../../../src/shared/song-volume';
 import { NativeModules, Platform } from 'react-native';
 import { barLengthAt, beatIndexAtOrAfter, beatTime } from '../beat';
@@ -560,7 +561,7 @@ interface NativePlaybackBridgeApi {
    *  back to projecting the polled position. Same name and arity (none) on
    *  both bridges. */
   positionNow?(): unknown;
-  /** Four scalars; never waits for the control mutex or enumerates devices. */
+  /** Five scalars; never waits for the control mutex or enumerates devices. */
   outputMeter?(): unknown;
   /** Hold a parked generation's output stream without closing it, and let it
    *  go again (Android's background park; iOS answers InvalidState and keeps
@@ -802,6 +803,7 @@ export interface PlaybackLoadOptions {
   readonly onStep: (message: string, fraction: number) => void;
   readonly crumb?: (message: string) => Promise<void>;
   readonly isCurrent: () => boolean;
+  readonly signal?: AbortSignal;
 }
 
 export interface NativePlaybackEligibility {
@@ -1983,7 +1985,7 @@ export class IosNativePlaybackCoordinator {
   }
 
   async load(options: PlaybackLoadOptions): Promise<LoadedProject> {
-    const doc = await readActualProjectDoc(options.entry, options.crumb);
+    const doc = await readActualProjectDoc(options.entry, options.crumb, options.signal);
     if (!options.isCurrent()) throw new Error('Song load was superseded.');
     const preference = await this.deps.preferences.load();
     if (!options.isCurrent()) throw new Error('Song load was superseded.');
@@ -2031,6 +2033,7 @@ export class IosNativePlaybackCoordinator {
           options.sampleRate,
           options.onStep,
           options.crumb,
+          options.signal,
         );
         if (!options.isCurrent()) {
           releaseProject(loaded);
@@ -7364,13 +7367,14 @@ function prepareRequest(
 async function readActualProjectDoc(
   entry: ProjectEntry,
   crumb?: (message: string) => Promise<void>,
+  signal?: AbortSignal,
 ): Promise<ProjectDoc> {
   let doc = entry.doc;
   if (entry.source === 'gdrive') {
     await crumb?.('fetching project.json');
     try {
       doc = JSON.parse(
-        await driveReadText(entry.dir, 'project.json'),
+        await driveReadText(entry.dir, 'project.json', undefined, undefined, signal),
       ) as ProjectDoc;
     } catch {
       doc = entry.doc;
@@ -7387,7 +7391,7 @@ async function materializeNativeProject(
 ): Promise<MaterializedProject> {
   const { entry, onStep, crumb, isCurrent } = options;
   await crumb?.('graph');
-  const graph = await loadProjectGraph(entry, doc);
+  const graph = await loadProjectGraph(entry, doc, options.signal);
   if (!isCurrent()) throw new Error('Song load was superseded.');
   const ids = STEM_ORDER_ALL.filter(id => entry.stems[id] != null);
   const added = customTracks(doc.settings);
@@ -7409,6 +7413,11 @@ async function materializeNativeProject(
       custom: true,
     })),
   ];
+  const weights = sources.map(source =>
+    doc.stemHashes?.[source.hashName]?.size ?? entry.expect?.[source.relative] ?? 0);
+  const byteWeighted = weights.every(bytes => bytes > 0);
+  const totalWeight = byteWeighted ? weights.reduce((sum, bytes) => sum + bytes, 0) : sources.length;
+  let completedWeight = 0;
   const lanes: MaterializedLane[] = [];
   const materializeStartedAt = Date.now();
   log(
@@ -7427,7 +7436,7 @@ async function materializeNativeProject(
         index: index + 1,
         count: sources.length,
       }),
-      MATERIALIZE_SHARE * (index / sources.length),
+      MATERIALIZE_SHARE * completedWeight / Math.max(1, totalWeight),
     );
     await crumb?.(`fetching ${source.id}`);
     const path =
@@ -7437,8 +7446,19 @@ async function materializeNativeProject(
             source.relative,
             wanted?.md5,
             wanted?.size,
+            {
+              signal: options.signal,
+              onProgress: progress => {
+                if (!isCurrent()) return;
+                const weight = byteWeighted ? weights[index] : 1;
+                onStep(describeFileProgress(progress, source.label, index + 1, sources.length),
+                  MATERIALIZE_SHARE * (completedWeight + weight * fileProgressFraction(progress)) / Math.max(1, totalWeight));
+              },
+            },
           )
         : await localProjectFile(entry.dir, source.relative);
+    if (!isCurrent()) throw new Error('Song load was superseded.');
+    completedWeight += byteWeighted ? weights[index] : 1;
     const track = doc.settings?.tracks?.[source.id];
     lanes.push({
       id: source.id,
@@ -7453,11 +7473,11 @@ async function materializeNativeProject(
   }
   let lyrics: LyricsDoc | null = null;
   if (entry.hasLyrics && isCurrent()) {
-    onStep(t('phone.app.native.progress.fetchingLyrics'), MATERIALIZE_SHARE * 0.9);
+    onStep(t('phone.app.native.progress.fetchingLyrics'), MATERIALIZE_SHARE);
     try {
       const text =
         entry.source === 'gdrive'
-          ? await driveReadText(entry.dir, 'lyrics.json', doc.lyricsHash?.md5)
+          ? await driveReadText(entry.dir, 'lyrics.json', doc.lyricsHash?.md5, undefined, options.signal)
           : await readProjectText(entry.dir, 'lyrics.json');
       lyrics = JSON.parse(text) as LyricsDoc;
     } catch {
@@ -7561,6 +7581,8 @@ export interface SongOutputMeter {
   readonly generation: number;
   readonly peak: number;
   readonly clippedBlocks: number;
+  /** Short-block pre-limiter signal energy; absent on older native builds. */
+  readonly rms?: number;
 }
 export function readNativeSongOutputMeter(): SongOutputMeter {
   const unavailable = { available: false, generation: 0, peak: 0, clippedBlocks: 0 };
@@ -7569,6 +7591,7 @@ export function readNativeSongOutputMeter(): SongOutputMeter {
     const raw = bridge?.outputMeter?.() as SongOutputMeter | undefined;
     if (!raw || raw.available !== true || !Number.isSafeInteger(raw.generation) || raw.generation <= 0 ||
         !Number.isFinite(raw.peak) || raw.peak < 0 || !Number.isSafeInteger(raw.clippedBlocks) || raw.clippedBlocks < 0) return unavailable;
+    if (raw.rms !== undefined && (!Number.isFinite(raw.rms) || raw.rms < 0)) return unavailable;
     return raw;
   } catch { return unavailable; }
 }

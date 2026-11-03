@@ -23,6 +23,14 @@ For _fastlane_ installation instructions, see [Installing _fastlane_](https://do
 
 Create/renew the signing certificate and profile in the certs repo (LOCAL ONLY — never CI)
 
+### ios debug_signing
+
+```sh
+[bundle exec] fastlane ios debug_signing
+```
+
+Refresh development signing for physical-device Metro debugging (LOCAL ONLY)
+
 ### ios add_device
 
 ```sh
@@ -85,7 +93,7 @@ Upload to TestFlight; submit to the App Store when no review is already open
 [bundle exec] fastlane ios release
 ```
 
-Build, then submit to the App Store for review — held for manual release after approval
+Build, then submit to the App Store for review — release automatically after approval
 
 ### ios submit
 
@@ -93,7 +101,7 @@ Build, then submit to the App Store for review — held for manual release after
 [bundle exec] fastlane ios submit
 ```
 
-Submit an ALREADY-UPLOADED build for App Store review — no rebuild. Held for manual release after approval
+Submit an ALREADY-UPLOADED build for App Store review — no rebuild. Release automatically after approval
 
 ### ios review_status
 

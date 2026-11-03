@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>SingZ installer background</title>
+<style>
+/* Same tokens and font as scripts/make-ios-creative-assets.cjs. */
+@font-face{font-family:Brand;src:url('../node_modules/@fontsource-variable/bricolage-grotesque/files/bricolage-grotesque-latin-ext-wght-normal.woff2')}
+*{box-sizing:border-box}
+html,body{width:720px;height:480px;margin:0;overflow:hidden}
+body{background:radial-gradient(ellipse at 74% 65%,#624019 0,transparent 52%),radial-gradient(ellipse at 5% 5%,#2a1c12 0,transparent 60%),#12100d;color:#f4efe6;font-family:Brand,-apple-system,BlinkMacSystemFont,sans-serif}
+header{position:absolute;left:64px;top:42px}
+.brand{display:flex;align-items:center;gap:10px;font-size:22px;font-weight:800}
+.bars{display:flex;flex-direction:column;gap:3px;width:24px}
+.bars i{display:block;height:4px;border-radius:3px;background:#ff7068}
+.bars i:nth-child(2){width:19px;background:#ffd34b}
+.bars i:nth-child(3){width:22px;background:#687bff}
+.bars i:nth-child(4){width:14px;background:#2bc9a5}
+h1{color:#ffa028;font-size:42px;font-weight:800;line-height:1.04;letter-spacing:-2px;margin:20px 0 0}
+.arrow{position:absolute;left:304px;top:252px;width:112px;height:56px;overflow:visible}
+/* Finder supplies the icons and labels. Muted cream caption wells keep
+   dark labels readable independently of the system appearance. Half-point
+   offsets center the wells on Finder's rasterized 16pt label glyphs. */
+.caption{position:absolute;top:327.5px;width:164px;height:30px;border-radius:7px;background:#d5cab6}
+.app{left:97.5px}.applications{left:457.5px}
+</style>
+<header>
+  <div class="brand"><span class="bars"><i></i><i></i><i></i><i></i></span>SingZ</div>
+  <h1>Your music.<br>Your voice.</h1>
+</header>
+<svg class="arrow" viewBox="0 0 160 80" fill="none" aria-hidden="true">
+  <defs>
+    <linearGradient id="amber" x1="12" y1="40" x2="150" y2="40" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f98424" stop-opacity="0.12"/>
+      <stop offset="0.45" stop-color="#ffa028"/>
+      <stop offset="1" stop-color="#ffd178"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="30" y1="40" x2="127" y2="36" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fff1cc" stop-opacity="0"/>
+      <stop offset="1" stop-color="#fff1cc" stop-opacity="0.7"/>
+    </linearGradient>
+    <filter id="glow" x="-25%" y="-65%" width="150%" height="230%">
+      <feGaussianBlur stdDeviation="4"/>
+    </filter>
+    <path id="arrow-shape" d="M12 40L123 36L113 25Q111 22 115 23L148 37Q152 40 148 43L115 57Q111 58 113 55L123 44Z"/>
+  </defs>
+  <use href="#arrow-shape" fill="#ffa028" opacity="0.3" filter="url(#glow)"/>
+  <use href="#arrow-shape" fill="url(#amber)"/>
+  <path d="M30 39.5L122 36.7" stroke="url(#sheen)" stroke-width="0.8" stroke-linecap="round"/>
+</svg>
+<div class="caption app"></div><div class="caption applications"></div>
+</html>

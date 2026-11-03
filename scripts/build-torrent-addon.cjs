@@ -2,6 +2,7 @@
 const { join, resolve } = require('node:path')
 const { existsSync, mkdirSync, copyFileSync } = require('node:fs')
 const { spawnSync } = require('node:child_process')
+const { assertNativeBuildLockHeld } = require('./native-build-lock.cjs')
 const { downloadHeaderFile, extractHeaders } = require('./build-capture-addon.cjs')
 const root = resolve(__dirname, '..')
 function run(command, args) {
@@ -66,7 +67,18 @@ async function main() {
   )
   console.log('Torrent addon: ' + out)
 }
-main().catch((error) => {
-  console.error(error.message)
-  process.exitCode = 1
-})
+if (!process.env.SINGZ_NATIVE_BUILD_LOCK_HELD) {
+  const locked = spawnSync(process.execPath, [
+    join(root, 'scripts', 'with-native-build-lock.mjs'),
+    '--owner', `torrent-addon:${process.argv[2] || process.platform + '-' + (process.env.SINGZ_TARGET_ARCH || process.arch)}`,
+    '--', process.execPath, __filename, ...process.argv.slice(2)
+  ], { cwd: process.cwd(), stdio: 'inherit' })
+  if (locked.error) throw locked.error
+  process.exitCode = locked.status ?? 1
+} else {
+  assertNativeBuildLockHeld(root, process.env.SINGZ_NATIVE_BUILD_LOCK_HELD)
+  main().catch((error) => {
+    console.error(error.message)
+    process.exitCode = 1
+  })
+}

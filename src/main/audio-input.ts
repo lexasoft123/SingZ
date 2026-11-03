@@ -267,7 +267,7 @@ export class DesktopAudioInput {
   }
 
   configureOutput(uid: unknown, provider: unknown): { ok: boolean; error?: string } {
-    if (typeof uid !== 'string' || uid.length > 4096 || (provider !== 'coreaudio' && provider !== 'wasapi' && provider !== 'asio')) return { ok: false, error: 'Invalid output device.' }
+    if (typeof uid !== 'string' || uid.length > 4096 || (provider !== 'coreaudio' && provider !== 'wasapi' && provider !== 'asio' && provider !== 'alsa')) return { ok: false, error: 'Invalid output device.' }
     try { return this.native().initializeSharedAudio({ outputDeviceUid: uid, provider: provider as DesktopPlaybackProvider }) }
     catch (error) { return { ok: false, error: String(error) } }
   }
@@ -383,7 +383,10 @@ export function reportDesktopAudioInputFallback(raw: unknown): {
 const desktopAudioInput = new DesktopAudioInput()
 
 export function registerDesktopAudioInput(): void {
-  void desktopAudioInput.initialize().catch(error => log('dsp', `shared audio startup failed: ${String(error)}`, 'error'))
+  // ALSA has no system default when several endpoints are present. Wait for
+  // an explicit native route instead of opening hardware at desktop startup.
+  if (process.platform !== 'linux')
+    void desktopAudioInput.initialize().catch(error => log('dsp', `shared audio startup failed: ${String(error)}`, 'error'))
   app.on('before-quit', () => { if (desktopAudioInput) void desktopAudioInput.stopActive() })
   ipcMain.handle('training:output-route', (_event, uid: unknown, provider: unknown) => desktopAudioInput.configureOutput(uid, provider))
   ipcMain.handle('training:audio-status', () => desktopAudioInput.status())

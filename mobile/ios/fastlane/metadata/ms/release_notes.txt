@@ -1,1 +1,1 @@
-Simpan kelantangan setiap lagu, tingkatkan sehingga +12 dB dan pantau keratan audio. Semak tetapan sebelum latihan dan kembali ke halaman latihan selepas selesai. Pustaka Drive disegar tanpa mengganggu paparan. Sembilan bahasa antara muka baharu dan pembaikan kawalan yang terpotong.
+Pemuatan lagu lebih andal: muat turun menunjukkan bait dan kelajuan, mencuba semula apabila berlaku gangguan sementara, dan pemuatan yang tersekat boleh dibatalkan. Fail cache yang lengkap boleh digunakan semula pada cubaan seterusnya. Ikon Tetapan dan Log kini lebih ringkas.

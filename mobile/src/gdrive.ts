@@ -1,3 +1,4 @@
+import { downloadFile, FileDownloadError, type FileDownloadNative, type FileDownloadOptions } from './file-download'
 import { AppState, Linking, NativeModules, Platform } from 'react-native'
 import { filesOfProject } from './current'
 import { fmtBytes, fmtMs, log } from './log'
@@ -23,7 +24,10 @@ const cfg = gdriveConfig.clientId ? gdriveConfig : null
 export const driveAvailable = (): boolean => cfg !== null
 
 const AUTH = (): string => cfg?.authBase || 'https://accounts.google.com'
-const API = (): string => cfg?.apiBase || 'https://www.googleapis.com'
+// Dev-only local Drive fixture server; production builds use the signed-in API.
+const API = (): string =>
+  (typeof __DEV__ !== 'undefined' && __DEV__ ? (globalThis as { __test?: { driveApiBase?: string } }).__test?.driveApiBase : undefined) ||
+  cfg?.apiBase || 'https://www.googleapis.com'
 const TOKEN = (): string => (cfg?.apiBase ? `${cfg.apiBase}/token` : 'https://oauth2.googleapis.com/token')
 
 /**
@@ -45,16 +49,49 @@ const whenForeground = (): Promise<void> =>
         })
       })
 
-async function fetchRetry(url: string, init: RequestInit): Promise<Response> {
+type MetadataResponse = Pick<Response, 'ok' | 'status' | 'json' | 'text'>
+/** Metadata bodies are small. Bound headers AND body reads, so a lost token
+ * renewal/catalog/lyrics response cannot strand a song or silent refresh. */
+async function fetchMetadata(url: string, init: RequestInit = {}): Promise<MetadataResponse> {
+  if (init.signal?.aborted) throw new FileDownloadError('cancelled', 'Request cancelled')
+  const controller = new AbortController()
+  const parent = init.signal
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let abort = () => {}
+  const deadline = new Promise<never>((_, reject) => {
+    abort = () => { controller.abort(); reject(new FileDownloadError('cancelled', 'Request cancelled')) }
+    if (parent?.aborted) abort()
+    else parent?.addEventListener('abort', abort, { once: true })
+    timer = setTimeout(() => {
+      controller.abort()
+      reject(new FileDownloadError('timeout', 'Drive did not respond within 20 seconds'))
+    }, 20_000)
+  })
   try {
-    return await fetch(url, init)
-  } catch {
-    await new Promise<void>((r) => setTimeout(r, 1200))
-    return await fetch(url, init)
+    const body = (async () => {
+      const response = await globalThis.fetch(url, { ...init, signal: controller.signal })
+      const text = await response.text()
+      return { ok: response.ok, status: response.status,
+        text: async () => text, json: async () => JSON.parse(text) }
+    })()
+    return await Promise.race([body, deadline])
+  } finally {
+    if (timer) clearTimeout(timer)
+    parent?.removeEventListener('abort', abort)
   }
 }
 
-interface FolderNative {
+async function fetchRetry(url: string, init: RequestInit): Promise<MetadataResponse> {
+  try {
+    return await fetchMetadata(url, init)
+  } catch (error) {
+    if (init.signal?.aborted) throw error
+    await new Promise<void>((r) => setTimeout(r, 1200))
+    return await fetchMetadata(url, init)
+  }
+}
+
+interface FolderNative extends FileDownloadNative {
   oauthStart(): Promise<number>
   oauthWait(): Promise<string>
   /** In-app consent: iOS auth sheet / Android Custom Tab — both self-close. */
@@ -249,12 +286,13 @@ export const driveAccountEmail = async (): Promise<string | null> => {
   return e || null
 }
 
-async function accessToken(): Promise<string> {
+async function accessToken(renew = false, signal?: AbortSignal): Promise<string> {
   if (!cfg) throw new Error(t('phone.library.driveNotConfigured'))
   const tokens = await readTokens()
   if (!tokens) throw new Error(t('phone.library.driveNotSignedIn'))
-  if (Date.now() < tokens.expiresAt) return tokens.access
+  if (!renew && Date.now() < tokens.expiresAt) return tokens.access
   const res = await fetchRetry(TOKEN(), {
+    signal,
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body:
@@ -306,7 +344,7 @@ const writeJson = (key: string, value: unknown): Promise<void> =>
  * a missing scope, a disabled API or a quota; they are one word apart in the
  * response and a support round-trip apart without it.
  */
-async function driveError(res: Response, where: string): Promise<Error> {
+async function driveError(res: MetadataResponse, where: string): Promise<Error> {
   let reason = ''
   let detail = ''
   try {
@@ -334,7 +372,7 @@ async function driveError(res: Response, where: string): Promise<Error> {
 
 async function api<T>(path: string): Promise<T> {
   const token = await accessToken()
-  const res = await fetch(`${API()}${path}`, { headers: { Authorization: `Bearer ${token}` } })
+  const res = await fetchMetadata(`${API()}${path}`, { headers: { Authorization: `Bearer ${token}` } })
   if (!res.ok) throw await driveError(res, path.split('?')[0])
   return (await res.json()) as T
 }
@@ -668,7 +706,7 @@ async function manifestEntries(
     log('gdrive', `unchanged — ${listCache.entries.length} songs, nothing fetched`)
     return { entries: listCache.entries, md5: catalogMd5, dirs: catalogDirs }
   }
-  const res = await fetch(`${API()}/drive/v3/files/${file.id}?alt=media`, {
+  const res = await fetchMetadata(`${API()}/drive/v3/files/${file.id}?alt=media`, {
     headers: { Authorization: `Bearer ${token}` }
   })
   if (!res.ok) throw new Error(`Drive API ${res.status} reading catalog.json`)
@@ -708,7 +746,7 @@ async function manifestEntries(
   const one = async (c: (typeof changed)[number]): Promise<ProjectEntry | null> => {
     const meta = c.row.get('project.json')
     if (!meta) return null
-    const metaRes = await fetch(`${API()}/drive/v3/files/${meta.id}?alt=media`, {
+    const metaRes = await fetchMetadata(`${API()}/drive/v3/files/${meta.id}?alt=media`, {
       headers: { Authorization: `Bearer ${token}` }
     })
     if (metaRes.status === 404) return null
@@ -767,7 +805,7 @@ export async function driveListProjects(force = false): Promise<ProjectEntry[]> 
     const byName = new Map(kid.map((f) => [f.name, f]))
     const meta = byName.get('project.json')
     if (!meta) return null
-    const metaRes = await fetch(`${API()}/drive/v3/files/${meta.id}?alt=media`, {
+    const metaRes = await fetchMetadata(`${API()}/drive/v3/files/${meta.id}?alt=media`, {
       headers: { Authorization: `Bearer ${token}` }
     })
     if (metaRes.status === 404) return null // deleted while we were listing
@@ -808,7 +846,8 @@ export async function driveLocalFile(
   project: string,
   file: string,
   expectedMd5?: string,
-  expectedBytes?: number
+  expectedBytes?: number,
+  options: FileDownloadOptions = {}
 ): Promise<string> {
   const files = projectFiles.get(project)
   if (!files) throw new Error(`Project ${project} was not listed from Drive`)
@@ -816,42 +855,34 @@ export async function driveLocalFile(
   const entry = file.startsWith('stems/') ? files.stemsByName.get(name) : files.byName.get(name)
   if (!entry) throw new Error(`${file} is missing from Drive`)
 
-  // An empty URL asks the native for a verified local copy only. Token
-  // renewal can hang on poor internet; it belongs after a cache miss.
   const size = expectedBytes ?? Number(entry.size ?? 0)
   const digest = expectedMd5 || entry.md5Checksum || ''
-  try {
-    const local = await Native.fetchToCache(project, file, '', '', digest, size)
-    log('gdrive', `${project}/${file} · ${fmtBytes(size)} · already here`)
-    return local.path
-  } catch (e) {
-    if ((e as { code?: string }).code !== 'cacheMiss') throw e
-  }
   const started = Date.now()
   try {
-    const auth = `Bearer ${await accessToken()}`
-    const res = await Native.fetchToCache(
-      project,
-      file,
-      `${API()}/drive/v3/files/${entry.id}?alt=media`,
-      auth,
-      expectedMd5 || entry.md5Checksum || '',
-      size
+    const result = await downloadFile(
+      Native,
+      { project, file, url: `${API()}/drive/v3/files/${entry.id}?alt=media`, md5: digest, bytes: size },
+      async (renew, signal) => {
+        try { return `Bearer ${await accessToken(renew, signal)}` } catch (e) {
+          if (!await driveSignedIn()) throw new FileDownloadError('auth', String(e))
+          throw e
+        }
+      },
+      options,
+      message => log('gdrive', `${project}/${message}`, 'warn')
     )
-    // The native says whether bytes actually crossed the network. Inferring it
-    // from elapsed time called every file "downloaded" on the first open after
-    // an update, when the hash memo is cold and a 40 MB stem is read and hashed
-    // before being served — a false positive in the one place this log exists
-    // to be trusted.
-    log(
-      'gdrive',
-      `${project}/${file} · ${fmtBytes(size)} · ${fmtMs(Date.now() - started)} · ` +
-        (res.downloaded ? 'downloaded' : 'already here')
-    )
-    return res.path
+    log('gdrive', `${project}/${file} · ${fmtBytes(size)} · ${fmtMs(Date.now() - started)} · ` +
+      (result.downloaded ? 'downloaded' : 'already here'))
+    return result.path
   } catch (e) {
-    log('gdrive', `${project}/${file} — ${String(e)}`, 'error')
-    throw e
+    const code = String((e as { code?: string })?.code ?? 'fetch')
+    log('gdrive', `${project}/${file} — ${code}: ${String(e)}`, code === 'cancelled' ? 'info' : 'error')
+    if (code === 'cancelled') throw e
+    const key = code === 'http404' ? 'phone.library.downloadMissing' :
+      code === 'auth' || code === 'http401' || code === 'http403' ? 'phone.library.downloadDenied' :
+      code === 'integrity' ? 'phone.library.downloadDamaged' :
+      code === 'cacheWrite' ? 'phone.library.downloadStorage' : 'phone.library.downloadInterrupted'
+    throw new Error(t(key))
   }
 }
 
@@ -870,7 +901,8 @@ export async function driveReadText(
   project: string,
   file: string,
   expectedMd5?: string,
-  expectedBytes?: number
+  expectedBytes?: number,
+  signal?: AbortSignal
 ): Promise<string> {
   const files = projectFiles.get(project)
   if (!files) throw new Error(`Project ${project} was not listed from Drive`)
@@ -899,9 +931,9 @@ export async function driveReadText(
     return keptText
   }
   try {
-    const token = await accessToken()
-    const res = await fetch(`${API()}/drive/v3/files/${entry.id}?alt=media`, {
-      headers: { Authorization: `Bearer ${token}` }
+    const token = await accessToken(false, signal)
+    const res = await fetchMetadata(`${API()}/drive/v3/files/${entry.id}?alt=media`, {
+      headers: { Authorization: `Bearer ${token}` }, signal
     })
     if (!res.ok) throw new Error(`Drive read failed (${res.status}) for ${file}`)
     const text = await res.text()

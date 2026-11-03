@@ -8,6 +8,11 @@
 #include <utility>
 #include <zcore/device/audio_input_callback_gate.h>
 
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <libudev.h>
+#include <poll.h>
+#endif
+
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #if TARGET_OS_OSX
@@ -179,6 +184,21 @@ struct SharedAudioService::Impl {
   void startWatcherLocked() {
     if (!watchDevices || watcher.joinable()) return;
     watcher = std::thread([this] {
+#if defined(__linux__) && !defined(__ANDROID__)
+      udev* deviceContext = udev_new();
+      udev_monitor* monitor = deviceContext ?
+          udev_monitor_new_from_netlink(deviceContext, "udev") : nullptr;
+      int monitorFd = -1;
+      if (monitor && udev_monitor_filter_add_match_subsystem_devtype(
+          monitor, "sound", nullptr) == 0 &&
+          udev_monitor_enable_receiving(monitor) == 0) {
+        monitorFd = udev_monitor_get_fd(monitor);
+        watchedDevices.store(1, std::memory_order_relaxed);
+        // Close the first-enumeration/monitor-registration race, including
+        // a device that was absent when the service was constructed.
+        dirty->store(true, std::memory_order_release);
+      }
+#endif
 #if defined(_WIN32)
       const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
       IMMDeviceEnumerator* enumerator = nullptr;
@@ -189,6 +209,18 @@ struct SharedAudioService::Impl {
 #endif
       while (!quitting.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+#if defined(__linux__) && !defined(__ANDROID__)
+        if (monitorFd >= 0) {
+          pollfd descriptor{monitorFd, POLLIN, 0};
+          for (uint32_t events = 0; events < 64 &&
+               ::poll(&descriptor, 1, 0) > 0 && (descriptor.revents & POLLIN); ++events) {
+            udev_device* device = udev_monitor_receive_device(monitor);
+            if (!device) break;
+            udev_device_unref(device);
+            dirty->store(true, std::memory_order_release);
+          }
+        }
+#endif
         if (!dirty->exchange(false, std::memory_order_acq_rel)) continue;
         std::lock_guard<std::mutex> lock(mutex);
         try {
@@ -202,6 +234,10 @@ struct SharedAudioService::Impl {
           dirty->store(true, std::memory_order_release);
         }
       }
+#if defined(__linux__) && !defined(__ANDROID__)
+      if (monitor) udev_monitor_unref(monitor);
+      if (deviceContext) udev_unref(deviceContext);
+#endif
 #if defined(_WIN32)
       if (enumerator) {
         enumerator->UnregisterEndpointNotificationCallback(notifications);
@@ -390,10 +426,18 @@ class SharedAudioService::Client final : public AudioHostBackend {
   }
   AudioHostStatus status() const noexcept override {
     auto result = service_.status();
-    if (result.state != AudioHostState::DeviceLost && result.state != AudioHostState::Error)
-      result.state = state_;
-    if (service_.impl_->playback.failed.load(std::memory_order_acquire))
-      result.state = AudioHostState::Error;
+    const auto clientState = state_.load(std::memory_order_acquire);
+    // stop() publishes Stopped only after this client's callback gate drains.
+    // The shared physical stream may retain an error for another owner, but
+    // that history cannot revoke proof that this song's callback is detached.
+    if (clientState == AudioHostState::Stopped) {
+      result.state = clientState;
+    } else {
+      if (result.state != AudioHostState::DeviceLost && result.state != AudioHostState::Error)
+        result.state = clientState;
+      if (service_.impl_->playback.failed.load(std::memory_order_acquire))
+        result.state = AudioHostState::Error;
+    }
     result.callbacks = service_.impl_->playback.callbacks.load(std::memory_order_acquire);
     result.renderedFrames = service_.impl_->playback.frames.load(std::memory_order_acquire);
     return result;
@@ -426,6 +470,8 @@ SharedAudioService::SharedAudioService()
   impl_->provider = "wasapi";
 #elif defined(__ANDROID__)
   impl_->provider = "oboe";
+#elif defined(__linux__)
+  impl_->provider = "alsa";
 #endif
 }
 SharedAudioService::SharedAudioService(std::unique_ptr<AudioHostBackend> backend)

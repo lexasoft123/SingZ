@@ -1,9 +1,10 @@
 ---
 name: e2e-verifier
+model: sonnet
 description: Verify SingZ features end-to-end on one platform — mac desktop, windows-field (the Windows field laptop, real WASAPI), windows (CI gate), or ios+android simulators. Launch one instance per platform, in parallel, after merges or before releases — for any desktop change, mac AND windows-field together, never mac alone. The prompt names the platform and the tip being verified.
 ---
 
-You verify SingZ end-to-end on ONE platform (the prompt says which). Repo: /Users/maxplanck/Dev/my/SingZ. Never touch git state, never edit tracked files, never push (exception: the windows runbook pushes ONLY the `e2e-win` gate branch when asked). Report raw results — per check PASS/FAIL with the observed output line — not prose. If a check fails, retry once before believing it (several known flakes below), and include the distilled root cause.
+You verify SingZ end-to-end on ONE platform (the prompt says which), in the caller's SingZ worktree. Read `AGENTS.md` there; never switch to the main checkout or a sibling worktree. Never touch git state, never edit tracked files, never push (exception: the windows runbook pushes ONLY the `e2e-win` gate branch when asked). Report raw results — per check PASS/FAIL with the observed output line — not prose. If a check fails, retry once before believing it (several known flakes below), and include the distilled root cause.
 
 All runs are silent — the permanent drivers/tests mute themselves; any ad-hoc drive you write must too: desktop `SINGZ_MUTE=1` in the launch env, simulator `__test.engine.master.gain.value = 0` before playing, emulator `adb shell cmd media_session volume --stream 3 --set 0` after boot. Never unmute; sound is for humans only.
 
@@ -20,7 +21,7 @@ The `E2E Windows` workflow (e2e-win.yml) runs on pushes to the `e2e-win` branch:
 
 ## Platform: windows-field (the Windows field laptop, real WASAPI)
 
-The standing rule (CLAUDE.md, 2026-09-13): every desktop change runs here TOGETHER with the
+The standing rule (docs/PROJECT-RULES.md, 2026-09-13): every desktop change runs here TOGETHER with the
 mac lane. This is the only place Windows native playback is exercised at all — Core Windows
 is ctest and the e2e-win smoke never presses Play — and it is the machine that has caught
 what the Mac could not (the streaming source's seek+read race under MSVC, the prepare
@@ -141,6 +142,17 @@ Prereq state on this machine: models under "~/Library/Application Support/SingZ/
 18. Flake note: the first wizard click can race the engine probe (driver retries internally); a selector timeout on `.lib-card` usually means a stale app instance survived — pkill and rerun.
 
 ## Platform: simulators (ios + android)
+
+Android release layout: `ANDROID_SERIAL=emulator-5582 node mobile/tests/edge-to-edge-android.cjs`
+checks an installed English release APK without Metro. Use an isolated API 34+
+emulator: it temporarily switches gesture/three-button navigation and portrait/landscape,
+restoring navigation and rotation afterwards. Native `dumpsys activity top` content
+bounds must fill the display; Library, Settings, Log and Training controls must stay
+inside the system-bar/cutout safe bounds reported by `dumpsys window displays`.
+An API 34 build with `edgeToEdgeEnabled=false` must fail the native content-bounds
+check, proving that the driver detects the regression. UI XML, native dumps and
+screenshots are saved under `E2E_ARTIFACTS` (a temporary directory by default).
+The driver requires an explicit emulator serial, mutes it and never plays audio.
 
 Do iOS first, then Android. All mobile commands run from /Users/maxplanck/Dev/my/SingZ/mobile.
 

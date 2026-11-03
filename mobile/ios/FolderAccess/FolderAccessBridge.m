@@ -2,6 +2,10 @@
 
 @interface RCT_EXTERN_MODULE (FolderAccess, NSObject)
 
+RCT_EXTERN_METHOD(waitForNavigationModals : (NSInteger)maximumCount
+                  resolver : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(speakTrainingInterval : (NSString *)text
                   language : (NSString *)language
                   resolver : (RCTPromiseResolveBlock)resolve
@@ -44,6 +48,22 @@ RCT_EXTERN_METHOD(fetchToCache : (NSString *)project
                   auth : (NSString *)auth
                   expectedMd5 : (NSString *)expectedMd5
                   expectedBytes : (nonnull NSNumber *)expectedBytes
+                  resolver : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(fetchToCacheTracked : (NSString *)project
+                  file : (NSString *)file
+                  url : (NSString *)url
+                  auth : (NSString *)auth
+                  expectedMd5 : (NSString *)expectedMd5
+                  expectedBytes : (nonnull NSNumber *)expectedBytes
+                  request : (NSString *)request
+                  resolver : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(driveFetchProgress : (NSString *)request
+                  resolver : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(cancelDriveFetch : (NSString *)request
                   resolver : (RCTPromiseResolveBlock)resolve
                   rejecter : (RCTPromiseRejectBlock)reject)
 

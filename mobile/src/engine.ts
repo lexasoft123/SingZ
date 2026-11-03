@@ -78,7 +78,7 @@ const SEC_COUNT_PERIOD = 1
 interface StretchHost {
   setSemitones(semitones: number): void
   getLatencySeconds(): number
-  getOutputMeter?(): { peak: number; clippedBlocks: number }
+  getOutputMeter?(): { peak: number; rms?: number; clippedBlocks: number }
   connect(node: unknown): void
 }
 
@@ -580,6 +580,7 @@ export class MultitrackEngine {
   readOutputMeter(): SongOutputMeter {
     const meter = this.stretchHost?.getOutputMeter?.()
     return { available: !!meter, generation: 1, peak: this._playing ? meter?.peak ?? 0 : 0,
+      rms: this._playing ? meter?.rms ?? meter?.peak ?? 0 : 0,
       clippedBlocks: Math.max(0, (meter?.clippedBlocks ?? 0) - this.outputClipOrigin) }
   }
 

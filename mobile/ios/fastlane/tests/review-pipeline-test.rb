@@ -1,4 +1,5 @@
 require 'minitest/autorun'
+require 'tmpdir'
 
 # Execute the real lane bodies with store actions replaced by recording fakes.
 # No credentials, archives or network calls are used by this suite.
@@ -6,9 +7,11 @@ class ReviewPipelineHarness
   module UI
     def self.important(*) = nil
     def self.success(*) = nil
+    def self.message(*) = nil
+    def self.user_error!(message) = raise(message)
   end
 
-  attr_accessor :groups, :upload_failure, :contact_failure, :open_review, :pending_release, :after_upload_release
+  attr_accessor :groups, :upload_failure, :contact_failure, :open_review, :pending_release, :after_upload_release, :signing_options, :archive_options
   attr_reader :events
 
   def initialize
@@ -35,6 +38,7 @@ helper = source[/^def store_submission_blocker\n.*?^end\n/m]
 ReviewPipelineHarness.class_eval(helper, fastfile, source[0...source.index(helper)].count("\n") + 1)
 
 class ReviewPipelineHarness
+  alias archive_with_real_build_flow archive
   # Override helpers after registering the real lane bodies.
   def verify_marketing_version = '0.26.1'
   def ci_build_number = 30
@@ -52,8 +56,8 @@ class ReviewPipelineHarness
     raise 'Store version blocked' if open_review || pending_release
   end
   def beta_review_info = {}
-  def install_signing(**) = events << :signing
-  def archive(**) = (events << :archive; 'test.ipa')
+  def install_signing(**options) = (self.signing_options = options; events << :signing)
+  def archive(**options) = (self.archive_options = options; events << :archive; 'test.ipa')
   def sync_release_notes(**) = nil
   def external_changelog(*) = 'Release notes'
   def upload_to_testflight(**options)
@@ -68,6 +72,14 @@ end
 class ReviewPipelineTest < Minitest::Test
   def setup = @pipeline = ReviewPipelineHarness.new
 
+  def test_cache_warming_builds_with_readonly_appstore_signing_and_never_uploads
+    @pipeline.cache_warm
+    assert_equal [:signing, :archive], @pipeline.events
+    assert_equal 'appstore', @pipeline.signing_options[:type]
+    assert_equal 'appstore', @pipeline.archive_options[:type]
+    assert_equal 30, @pipeline.archive_options[:build_number]
+  end
+
   def submissions = @pipeline.events.select { |e| e.is_a?(Array) && e[0] == :submit }
   def uploads = @pipeline.events.select { |e| e.is_a?(Array) && e[0] == :upload }
 
@@ -79,7 +91,7 @@ class ReviewPipelineTest < Minitest::Test
     assert_equal '30', submissions.first[1][:build_number]
     assert_equal '0.26.1', submissions.first[1][:app_version]
     assert_equal true, submissions.first[1][:submit_for_review]
-    assert_equal false, submissions.first[1][:automatic_release]
+    assert_equal true, submissions.first[1][:automatic_release]
     assert_operator @pipeline.events.index(:processed), :<, @pipeline.events.index(submissions.first)
     assert_operator @pipeline.events.index(:contact_checked), :<, @pipeline.events.index(:archive)
     assert_operator @pipeline.events.index(:review_checked), :<, @pipeline.events.index(:archive)
@@ -150,6 +162,16 @@ class ReviewPipelineTest < Minitest::Test
     assert_empty uploads
   end
 
+  def test_all_store_submission_lanes_release_automatically_after_approval
+    [:ship, :release, :submit].each do |name|
+      @pipeline = ReviewPipelineHarness.new
+      @pipeline.public_send(name)
+      assert_equal 1, submissions.size, "#{name} must submit one build"
+      assert_equal true, submissions.first[1][:automatic_release],
+        "#{name} must release after approval"
+    end
+  end
+
   def test_manual_beta_remains_upload_only
     @pipeline.beta
     assert_equal true, uploads.first[1][:skip_waiting_for_build_processing]
@@ -168,5 +190,83 @@ class ReviewPipelineTest < Minitest::Test
     refute_includes @pipeline.events, :archive
     assert_empty uploads
     assert_empty submissions
+  end
+
+  def with_stub(object, name, replacement)
+    original = object.method(name)
+    object.define_singleton_method(name) do |*args, &block|
+      replacement.respond_to?(:call) ? replacement.call(*args, &block) : replacement
+    end
+    yield
+  ensure
+    object.define_singleton_method(name, original)
+  end
+
+  def test_real_archive_returns_the_exported_ipa_across_cache_paths
+    Dir.mktmpdir('singz-archive-return-') do |temporary|
+      ipa = File.join(temporary, 'SingZ.ipa')
+      File.write(ipa, 'fake exported application')
+      keys = %w[GITHUB_ACTIONS sigh_io.s-dev.singz_appstore_profile-name sigh_io.s-dev.singz_adhoc_profile-name]
+      previous = keys.to_h { |key| [key, ENV[key]] }
+      ENV['GITHUB_ACTIONS'] = 'true'
+      keys.drop(1).each { |key| ENV[key] = 'test profile' }
+      begin
+        %w[appstore adhoc].product([:cold, :cached, :cached_export_failure, :cache_publish_failure]).each do |distribution, mode|
+          proofs = []
+          verify = ->(*args) { proofs << args }
+          builds = []
+          published = []
+          refreshed = []
+          @pipeline.define_singleton_method(:build_app) do |**options|
+            builds << options
+            raise 'cached export failed' if mode == :cached_export_failure && options[:skip_build_archive]
+            ipa
+          end
+          prepare = ->(*) { nil }
+          fingerprint = ->(*) { 'native-inputs' }
+          copy_cached = ->(*) { [:cached, :cached_export_failure].include?(mode) }
+          refresh = ->(*args) { refreshed << args }
+          publish = ->(*args) do
+            published << args
+            raise 'cache is unavailable' if mode == :cache_publish_failure
+            [:cache_receipt] # Must never become the lane's IPA return value.
+          end
+          with_number = ->(*_args, &block) { block.call }
+          with_stub(SingzIncrementalArchive, :prepare_release_dependencies, prepare) do
+            with_stub(SingzIncrementalArchive, :fingerprint, fingerprint) do
+              with_stub(SingzIncrementalArchive, :copy_cached, copy_cached) do
+                with_stub(SingzIncrementalArchive, :refresh, refresh) do
+                  with_stub(SingzIncrementalArchive, :publish, publish) do
+                    with_stub(SingzIncrementalArchive, :receipt, File.join(temporary, 'cache-receipt')) do
+                      with_stub(SingzAppBuildNumber, :with_number, with_number) do
+                        with_stub(SingzTorrentBuild, :verify!, verify) do
+                          result = @pipeline.archive_with_real_build_flow(build_number: 31, type: distribution)
+                          assert_instance_of String, result, mode.to_s
+                          assert_equal ipa, result, mode.to_s
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+          expected_configuration = distribution == 'adhoc' ? 'AdHoc' : 'Release'
+          assert builds.all? { |build| build[:configuration] == expected_configuration }
+          assert proofs.all? { |proof| proof.last == distribution }
+          assert_equal ipa, proofs.last[1]
+          assert refreshed.all? { |args| args.last == expected_configuration }
+          assert_equal(mode == :cached_export_failure ? 2 : 1, builds.size, mode.to_s)
+          assert_equal([:cached, :cached_export_failure].include?(mode),
+                       builds.first[:skip_build_archive] == true, mode.to_s)
+          assert_equal(mode == :cached ? 0 : 1, published.size, mode.to_s)
+          assert_equal([:cached, :cached_export_failure].include?(mode) ? 1 : 0,
+                       refreshed.size, mode.to_s)
+          refute builds.last[:skip_build_archive] if mode == :cached_export_failure
+        end
+      ensure
+        previous.each { |key, value| value ? ENV[key] = value : ENV.delete(key) }
+      end
+    end
   end
 end

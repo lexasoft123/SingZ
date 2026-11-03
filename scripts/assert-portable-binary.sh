@@ -24,6 +24,30 @@ TARGET=$1
 BIN=$2
 BUILD=${3:-}
 
+if [[ "$TARGET" == linux-* ]]; then
+  # Linux helpers are static with respect to GGML and the engine itself.
+  # Only the distribution runtime libraries declared by the Debian package
+  # may remain dynamic; build-tree runpaths would hide a missing payload.
+  if ! command -v readelf >/dev/null 2>&1; then
+    rm -f "$BIN"
+    echo "assert-portable-binary: readelf is required to check $BIN" >&2
+    exit 1
+  fi
+  if ! DYNAMIC=$(readelf -d "$BIN"); then
+    rm -f "$BIN"
+    echo "assert-portable-binary: could not inspect $BIN" >&2
+    exit 1
+  fi
+  STRAY=$(printf '%s\n' "$DYNAMIC" | sed -n 's/.*(NEEDED).*\[\(.*\)\].*/\1/p' |
+    grep -Ev '^(lib(c|m|pthread|dl|rt)\.so\.[0-9]+|libstdc\+\+\.so\.6|libgcc_s\.so\.1|libgomp\.so\.1|libatomic\.so\.1|libasound\.so\.2|libudev\.so\.1|ld-linux-x86-64\.so\.2|ld-linux-aarch64\.so\.1)$' || true)
+  if [ -n "$STRAY" ] || printf '%s\n' "$DYNAMIC" | grep -Eq '\((RPATH|RUNPATH)\).*\[[^]]+\]'; then
+    rm -f "$BIN"
+    echo "$(basename "$BIN"): undeclared runtime libraries or build-tree search paths:" >&2
+    printf '%s\n' "$DYNAMIC" >&2
+    exit 1
+  fi
+  exit 0
+fi
 case "$TARGET" in darwin-*) ;; *) exit 0 ;; esac
 # A darwin target that just produced a Mach-O and has no otool is not a
 # machine to skip the check on — this whole check exists because something

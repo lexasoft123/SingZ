@@ -43,7 +43,7 @@ Read `docs/release-notes/v<version>.md`. It is the source of truth for what
 shipped, and its first line (`v<version> — <tagline>`) is the release's own
 framing. Pick the **two or three** changes a singer would actually notice —
 not the longest section, not the cleverest engineering. If the notes do not
-exist yet, they get written first (see CLAUDE.md § Releasing); a poster for a
+exist yet, they get written first (see docs/PROJECT-RULES.md § Releasing); a poster for a
 release nobody has described is guesswork.
 
 Decide from the notes **which surface the release is about**. A phone release
@@ -520,7 +520,7 @@ only what the captions and download rows link to, and no rule can decide that
 for you.
 
 The nine are two questions, not one. **Paths**: rooted, Windows, UNC, `~/` and
-`~user/`. **Identity that is not a path**, because CLAUDE.md's rule is machine
+`~user/`. **Identity that is not a path**, because docs/PROJECT-RULES.md's rule is machine
 names and IPs as much as lab paths, and a path-shaped scanner is blind to the
 first: IPv4, non-web URL schemes (`smb://`, `afp://`, `ssh://`…), `.local` /
 `.lan` / `.internal` hostnames, and `user@host`. Plus one that is neither —

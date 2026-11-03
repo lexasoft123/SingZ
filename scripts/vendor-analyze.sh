@@ -15,7 +15,20 @@
 set -euo pipefail
 
 TARGET=${1:-"$(node -p 'process.platform + "-" + process.arch')"}
+case "$TARGET" in
+  darwin-arm64|darwin-x64|win32-arm64|win32-x64|linux-arm64|linux-x64) ;;
+  *) echo "Unsupported native target: $TARGET" >&2; exit 1 ;;
+esac
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+# These scripts have no cross-OS/non-Darwin cross-architecture toolchain.
+node "$ROOT/scripts/engine-artifact.cjs" assert-build-target "$TARGET"
+if [ -z "${SINGZ_NATIVE_BUILD_LOCK_HELD:-}" ]; then
+  exec node "$ROOT/scripts/with-native-build-lock.mjs" \
+    --owner vendor-analyze -- bash "$ROOT/scripts/vendor-analyze.sh" "$@"
+fi
+node "$ROOT/scripts/assert-native-build-lock.cjs"
+JOBS=${SINGZ_NATIVE_JOBS:-4}
+case "$JOBS" in 1|2|3|4) ;; *) echo "SINGZ_NATIVE_JOBS must be an integer from 1 through 4" >&2; exit 1 ;; esac
 
 EXT=""
 case "$TARGET" in win32-*) EXT=".exe" ;; esac
@@ -27,24 +40,34 @@ STAMP="$OUT.source-hash"
 # from this tree (src/main/analyze-provenance.ts), and two copies of the
 # algorithm would be two answers to one question.
 SOURCE_HASH=$("$ROOT/scripts/analyze-source-hash.sh" "$ROOT")
-if [ -f "$OUT" ] && [ -f "$STAMP" ] && [ "$(tr -d '\r\n' < "$STAMP")" = "$SOURCE_HASH" ]; then
+analyzer_matches_sources() {
+  local info status=0
+  [ ! -L "$ROOT/vendor" ] && [ ! -L "$OUT_DIR" ] && [ ! -L "$OUT" ] && [ ! -L "$STAMP" ] || return 1
+  [ -f "$OUT" ] && [ -f "$STAMP" ] || return 1
+  [ "$(tr -d '\r\n' < "$STAMP")" = "$SOURCE_HASH" ] || return 1
+  info=$("$OUT" build-info 2>/dev/null) || status=$?
+  # Return 2 only when the shell cannot execute this target (no emulator,
+  # unsupported executable format, or unavailable target loader). A process
+  # that ran but reported bad/malformed identity remains a definitive failure.
+  case "$status" in 0) ;; 126|127) return 2 ;; *) return 1 ;; esac
+  printf '%s' "$info" | node -e '
+    let text = ""; process.stdin.on("data", data => text += data).on("end", () => {
+      try { process.exit(JSON.parse(text).sourceHash === process.argv[1] ? 0 : 1) }
+      catch { process.exit(1) }
+    })' "$SOURCE_HASH"
+}
+if analyzer_matches_sources; then
   echo "cached: vendor/$TARGET/singz-analyze$EXT"
   exit 0
 fi
 
-# ccache when present — same launcher/base_dir/hash_dir story as
-# vendor-whisper.sh, so sibling worktrees hit.
-if command -v ccache >/dev/null 2>&1; then
-  export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
-  export CCACHE_BASEDIR="$ROOT" CCACHE_NOHASHDIR=1 CCACHE_COMPILERCHECK=content
-fi
-
-# Keyed on the CHECKOUT, not just the target: every worktree builds its own
-# singz-analyze now (scripts/worktree-setup.sh no longer shares ours), and one
-# shared build dir would have two roots fighting over a CMakeCache that names
-# a source directory.
-CHECKOUT_KEY=$(printf '%s' "$ROOT" | git -C "$ROOT" hash-object --stdin | cut -c1-12)
-BUILD="${TMPDIR:-/tmp}/singz-zcore-analyze-vendor-$TARGET-$CHECKOUT_KEY"
+# Default builds live beneath this checkout so source/include/build paths
+# normalize identically in every worktree; do not share CMake state itself.
+BUILD="${SINGZ_CORE_BUILD_DIR:-$ROOT/build/native/analyze-vendor-$TARGET}"
+case "$BUILD" in
+  "$ROOT"/*) ;;
+  *) echo "Warning: external SINGZ_CORE_BUILD_DIR may prevent cross-worktree ccache hits: $BUILD" >&2 ;;
+esac
 # The hash goes INTO the binary as well as beside it: `singz-analyze
 # build-info` then answers for itself, which a sidecar cannot do for an
 # $SINGZ_ANALYZE override or a hand-copied file. It lands in a generated TU
@@ -59,14 +82,33 @@ cmake -S "$ROOT" -B "$BUILD" "${CONFIG_ARGS[@]}"
 # SINGZ_NATIVE_JOBS caps the compile fan-out the way the other native build
 # scripts do, so a rebuild beside other sessions' builds stays polite.
 cmake --build "$BUILD" --target singz-analyze --config Release \
-  -j "${SINGZ_NATIVE_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
+  --parallel "$JOBS"
 
-mkdir -p "$OUT_DIR"
+# A concurrent source edit must not label the just-built binary as current.
+[ "$("$ROOT/scripts/analyze-source-hash.sh" "$ROOT")" = "$SOURCE_HASH" ] || {
+  echo "Analyzer sources changed during the build; rerun it." >&2; exit 1;
+}
 # MSVC's multi-config generator nests the exe under Release/.
 if [ -f "$BUILD/Release/singz-analyze$EXT" ]; then
-  cp "$BUILD/Release/singz-analyze$EXT" "$OUT"
+  BIN="$BUILD/Release/singz-analyze$EXT"
 else
-  cp "$BUILD/singz-analyze$EXT" "$OUT"
+  BIN="$BUILD/singz-analyze$EXT"
 fi
-printf '%s\n' "$SOURCE_HASH" > "$STAMP"
+node "$ROOT/scripts/engine-artifact.cjs" publish-file "$ROOT" "$TARGET" "singz-analyze$EXT" "$BIN"
+printf '%s\n' "$SOURCE_HASH" > "$STAMP.partial-$$"
+mv -f "$STAMP.partial-$$" "$STAMP"
+IDENTITY_STATUS=0
+analyzer_matches_sources || IDENTITY_STATUS=$?
+if [ "$IDENTITY_STATUS" != 0 ]; then
+  HOST_TARGET=$(node -p 'process.platform + "-" + process.arch')
+  if [ "$TARGET" = "$HOST_TARGET" ] || [ "$IDENTITY_STATUS" != 2 ]; then
+    rm -f "$STAMP"
+    echo "Published analyzer does not report the expected source fingerprint." >&2
+    exit 1
+  fi
+  # Cross-compilation is supported without a target emulator (e.g. Rosetta).
+  # Fresh compilation above embeds SOURCE_HASH, but an unexecutable target's
+  # sidecar can never authorize the cached fast path on the next invocation.
+  echo "Cross-target analyzer built; verify build-info on $TARGET before release." >&2
+fi
 echo "built: vendor/$TARGET/singz-analyze$EXT"

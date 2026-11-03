@@ -132,6 +132,9 @@ export default function SettingsScreen({
 const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: C.bg },
   header: {
+    width: '100%',
+    maxWidth: 780,
+    alignSelf: 'center',
     minHeight: 52,
     paddingHorizontal: 22,
     flexDirection: 'row',
@@ -140,7 +143,7 @@ const s = StyleSheet.create({
   },
   title: { color: C.text, fontSize: 28, fontWeight: '800' },
   close: { color: C.amber, fontSize: 16, fontWeight: '700' },
-  content: { padding: 20, paddingBottom: 48 },
+  content: { padding: 20, paddingBottom: 48, width: '100%', maxWidth: 780, alignSelf: 'center' },
   section: {
     color: C.dim,
     fontSize: 12,

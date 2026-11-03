@@ -24,6 +24,7 @@ class SingzStretchNode : public AudioNode {
   void setSemitones(float semitones);
   [[nodiscard]] float getLatencySeconds() const;
   float outputPeak() const { return outputPeak_.load(std::memory_order_relaxed); }
+  float outputRms() const { return outputRms_.load(std::memory_order_relaxed); }
   uint32_t clippedBlocks() const { return clippedBlocks_.load(std::memory_order_relaxed); }
 
  protected:
@@ -38,6 +39,7 @@ class SingzStretchNode : public AudioNode {
   std::atomic<float> latencySec_{0.0f};
   void meterOutput(const std::shared_ptr<DSPAudioBuffer> &buffer, int frames, float sampleRate);
   std::atomic<float> outputPeak_{0};
+  std::atomic<float> outputRms_{0};
   std::atomic<uint32_t> clippedBlocks_{0};
   bool engaged_ = false;
   float configuredSemitones_ = 0.0f;

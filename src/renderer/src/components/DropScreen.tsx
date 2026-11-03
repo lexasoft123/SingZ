@@ -1,3 +1,5 @@
+import DriveProjectsButton from './DriveProjectsButton'
+import { useDriveSignIn } from './DriveSignInProvider'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Modal } from '@singz/ui'
 import type { ProjectListItem, SyncStatus } from '../../../shared/types'
@@ -81,6 +83,7 @@ export default function DropScreen({
   const [projects, setProjects] = useState<ProjectListItem[]>([])
   const [root, setRoot] = useState('')
   const [query, setQuery] = useState('')
+  const signInToDrive = useDriveSignIn()
   const [gdrive, setGdrive] = useState<{
     configured: boolean
     signedIn: boolean
@@ -136,7 +139,7 @@ export default function DropScreen({
   const onDrive = useCallback(async () => {
     if (!gdrive.signedIn) {
       setDriveMsg(t('library.common.finishGoogleSignIn'))
-      const res = await window.singz.gdriveSignIn()
+      const res = await signInToDrive()
       if (!res.ok) {
         setDriveMsg(t('library.dropScreen.signInFailed', { error: res.error }))
         return
@@ -147,7 +150,7 @@ export default function DropScreen({
     const rep = await window.singz.gdriveSync()
     setDriveMsg(rep.cancelled ? t('library.dropScreen.syncPaused') : rep.ok ? null : t('library.common.syncFailed', { error: rep.error ?? t('library.common.unknownError') }))
     refresh()
-  }, [gdrive.signedIn, refresh])
+  }, [gdrive.signedIn, refresh, signInToDrive])
 
   // body.modal-open is the kit <Modal>'s job now, and it ref-counts it. This
   // was the second independent owner of that class: a `remove` here fired
@@ -301,7 +304,7 @@ export default function DropScreen({
           </>
         )}
       </div>
-      {!loading && projects.length > 0 && (
+      {!loading && (projects.length > 0 || gdrive.configured) && (
         <div className="lib">
           <div className="lib-head">
             <span className="drop-projects-title">{t('library.common.yourProjects')}</span>
@@ -368,6 +371,7 @@ export default function DropScreen({
                     </span>
                   )}
                 </div>
+                {gdrive.signedIn && <DriveProjectsButton onOpen={onOpenProject} />}
                 {gdrive.signedIn && (
                   <button type="button" className="src-link" onClick={onShowLog}>
                     {t('library.dropScreen.syncLog')}

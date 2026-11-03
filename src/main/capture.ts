@@ -162,23 +162,37 @@ export function resolveCaptureAddonPath(runtime: CaptureAddonRuntime): string {
 
 /** Same native-input fingerprint as scripts/build-capture-addon.cjs. */
 export function captureSourceFingerprint(root: string, electronVersion: string): string {
+  // Source fingerprints run only for development checkouts. Packaged apps do
+  // not ship build scripts, so loading this helper must stay inside this path.
+  const { zcoreGitlinkRevision } = require(join(root, 'scripts', 'zcore-gitlink.cjs')) as {
+    zcoreGitlinkRevision(root: string): string
+  }
+  const zcoreRevision = zcoreGitlinkRevision(root)
   const files: string[] = []
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === '.git') continue
       const path = join(dir, entry.name)
       if (entry.isDirectory()) walk(path)
       else files.push(path)
     }
   }
   for (const dir of [
-    'native/electron', 'native/playback', 'zcore', 'zdsp', 'third_party/native', 'cmake'
+    'native/electron', 'native/playback', 'third_party/zcore',
+    'zcore', 'zdsp', 'third_party/native', 'cmake'
   ]) {
     walk(join(root, dir))
   }
-  files.push(join(root, 'CMakeLists.txt'), join(root, 'scripts', 'build-capture-addon.cjs'))
+  files.push(join(root, 'CMakeLists.txt'), join(root, '.gitmodules'),
+    join(root, 'scripts', 'verify-zcore-submodule.py'),
+    join(root, 'scripts', 'zcore-gitlink.cjs'),
+    join(root, 'scripts', 'ccache-launcher.sh'),
+    join(root, 'scripts', 'ccache-launcher.ps1'),
+    join(root, 'scripts', 'build-capture-addon.cjs'))
   files.sort()
   const hash = createHash('sha1')
   hash.update(`electron ${electronVersion}\n`)
+  hash.update(`third_party/zcore.gitlink ${zcoreRevision}\n`)
   for (const file of files) {
     hash.update(`${relative(root, file)} ${statSync(file).size} `)
     hash.update(createHash('sha1').update(readFileSync(file)).digest('hex'))
@@ -1294,6 +1308,7 @@ export class CaptureOwner {
   private reanchorLoggedAt = 0
   /** The streamed-lane starvation watch; see judgeLaneStarvation(). */
   private starveWatch: LaneStarveWatch | null = null
+  private terminalLoggedKey = ''
   private starveLoggedGeneration = ''
   private starveLoggedAt = 0
   private playbackHighWater = 0n
@@ -1360,10 +1375,11 @@ export class CaptureOwner {
     const exposedPlatform = platform === 'darwin' || platform === 'win32' || platform === 'linux'
       ? platform
       : 'other'
-    const exposedProvider = provider ?? (platform === 'darwin' ? 'coreaudio' : 'wasapi')
+    const exposedProvider = provider ?? (platform === 'darwin' ? 'coreaudio' : platform === 'linux' ? 'alsa' : 'wasapi')
     const providerMatchesPlatform = provider === undefined ||
       (platform === 'darwin' && provider === 'coreaudio') ||
-      (platform === 'win32' && (provider === 'wasapi' || provider === 'asio'))
+      (platform === 'win32' && (provider === 'wasapi' || provider === 'asio')) ||
+      (platform === 'linux' && provider === 'alsa')
     if (!providerMatchesPlatform) {
       return {
         ok: false,
@@ -1579,6 +1595,13 @@ export class CaptureOwner {
   playbackProviders(platform: NodeJS.Platform = process.platform): DesktopPlaybackProviderInfo[] {
     const fallback: DesktopPlaybackProviderInfo[] = [
       {
+        id: 'alsa',
+        label: 'ALSA',
+        available: false,
+        errorCode: platform === 'linux' ? 'runtime-unavailable' : 'wrong-platform',
+        detail: platform === 'linux' ? 'Native Linux ALSA runtime is unavailable' : 'Available only on Linux'
+      },
+      {
         id: 'coreaudio',
         label: 'CoreAudio',
         available: platform === 'darwin',
@@ -1611,7 +1634,7 @@ export class CaptureOwner {
         'none', 'not-compiled', 'runtime-unavailable', 'platform-not-ready', 'wrong-platform'
       ])
       const valid = native.every((row) => row &&
-        (row.id === 'coreaudio' || row.id === 'wasapi' || row.id === 'asio') &&
+        (row.id === 'coreaudio' || row.id === 'wasapi' || row.id === 'asio' || row.id === 'alsa') &&
         typeof row.label === 'string' && typeof row.available === 'boolean' &&
         validCodes.has(row.errorCode) && typeof row.detail === 'string')
       if (!valid) return fallback
@@ -1735,7 +1758,7 @@ export class CaptureOwner {
     if (
       config.capability !== DESKTOP_PLAYBACK_CAPABILITY ||
       config.playback?.version !== DESKTOP_PLAYBACK_CONTRACT_VERSION ||
-      config.accessMode !== (config.provider === 'asio' ? 'exclusive' : 'shared')
+      config.accessMode !== (config.provider === 'asio' || config.provider === 'alsa' ? 'exclusive' : 'shared')
     ) {
       return refused(
         'The desktop native playback contract is not the current strict version.',
@@ -2019,6 +2042,15 @@ export class CaptureOwner {
     }
     if (status?.capability !== DESKTOP_PLAYBACK_CAPABILITY) return null
     try {
+      if (status.state === 'terminal' || status.state === 'quarantined') {
+        const key = `${status.generation}:${status.terminalOrdinal}:${status.state}`
+        if (key !== this.terminalLoggedKey) {
+          log('dsp', `playback stopped · generation ${status.generation} · ${status.state} · ` +
+            `${status.hostState} · ${status.terminalReason || 'unknown cause'} · xruns ${status.xruns}` +
+            (status.error ? ` · ${status.error}` : ''), 'error')
+          this.terminalLoggedKey = key
+        }
+      }
       this.watchLaneStarvation(status)
     } catch {
       // A diagnostic never costs the renderer its status.

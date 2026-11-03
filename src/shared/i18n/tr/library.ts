@@ -1,8 +1,9 @@
 /** Turkish UI strings. Keep keys and placeholders in sync with English. */
-import type { library as en } from '../en/library'
+import { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
+  ...en, // New Drive reader controls fall back to English until translated.
   "library.dropScreen.syncProgress": "Google Drive ile senkronize oluyor… {msg}",
   "library.dropScreen.cancelSync": "İptal",
   "library.dropScreen.syncPaused": "Senkronizasyon durduruldu. Tamamlanmış dosyalar kaydedildi. Şimdi senkronize et seçeneğini seçerek devam edin.",

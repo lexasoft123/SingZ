@@ -18,7 +18,7 @@
 	  for the microphone. Apple's Hardened Runtime page lists it there,
 	  beside camera, location and Apple events — it is NOT only an App
 	  Sandbox key, which is what an earlier revision of this comment (and
-	  docs/MACOS-SIGNING.md, and CLAUDE.md) claimed. A hardened process
+	  docs/MACOS-SIGNING.md, and docs/PROJECT-RULES.md) claimed. A hardened process
 	  without it is refused by TCC before any prompt: the singer never sees
 	  a permission request, `systemPreferences.askForMediaAccess` resolves
 	  false while the access status stays "not-determined", and CoreAudio
