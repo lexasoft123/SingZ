@@ -8,6 +8,13 @@ import type {
   NativePlaybackViewState
 } from '../src/projects'
 
+// The stage stack is rendered directly below; supply its navigation lifecycle.
+jest.mock('@react-navigation/native', () => ({
+  ...jest.requireActual('@react-navigation/native'),
+  useIsFocused: () => true,
+  useNavigation: () => ({ addListener: () => () => {}, getParent: () => undefined })
+}))
+
 jest.mock('@react-navigation/native-stack', () => {
   const React = require('react')
   const navigation = {

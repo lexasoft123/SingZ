@@ -1,3 +1,4 @@
+import { SceneBackgroundRoot } from './src/ui/ScreenBackground'
 import { QuickStartProvider } from './src/ui/QuickStart'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { DarkTheme, NavigationContainer, useIsFocused, useNavigationContainerRef } from '@react-navigation/native'
@@ -29,7 +30,7 @@ const navigationTheme = {
   ...DarkTheme,
   colors: {
     ...DarkTheme.colors,
-    background: C.bg,
+    background: 'transparent',
     card: C.bg
   }
 }
@@ -992,6 +993,7 @@ export default function App(): React.JSX.Element {
         <StatusBar barStyle="light-content" />
         <SafeAreaView edges={['left', 'right']} style={{ flex: 1 }}>
         <QuickStartProvider>
+        <SceneBackgroundRoot>
         <NavigationContainer
           ref={navigationRef}
           theme={navigationTheme}
@@ -1007,7 +1009,7 @@ export default function App(): React.JSX.Element {
               lazy: false,
               freezeOnBlur: false,
               popToTopOnBlur: false,
-              sceneStyle: { backgroundColor: C.bg }
+              sceneStyle: { backgroundColor: 'transparent' }
             }}
             tabBar={BottomTabs}
           >
@@ -1052,6 +1054,7 @@ export default function App(): React.JSX.Element {
             </Tabs.Screen>
           </Tabs.Navigator>
         </NavigationContainer>
+        </SceneBackgroundRoot>
         </QuickStartProvider>
         </SafeAreaView>
       </GestureHandlerRootView>

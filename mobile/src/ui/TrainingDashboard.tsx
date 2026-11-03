@@ -40,9 +40,10 @@ export function DailyTrainingActivity({ days }: { days: readonly { date: number;
   </View>
 }
 
-export function TrainingDashboard({ store, onLesson, onProgress, onChoose, headerActions }: {
+export function TrainingDashboard({ store, onLesson, onProgress, onChoose, headerActions, beforeRoutine }: {
   store: MobileTrainingPersistence
   headerActions?: React.ReactNode
+  beforeRoutine?: React.ReactNode
   onLesson: (lesson: ProgramLesson, day: number) => void
   onProgress: () => void
   onChoose: (exercise: TrainingExerciseSelection) => void
@@ -74,6 +75,7 @@ export function TrainingDashboard({ store, onLesson, onProgress, onChoose, heade
       {headerActions}
       <HeaderAction label={t('phone.training.progressEntryTitle')} onPress={onProgress}><Icon name="progress" size={24} color={theme.accent} /></HeaderAction>
     </>} />
+    {beforeRoutine}
     <View style={[s.columns, layout.wide && s.columnsWide]}>
     <View style={[s.column, layout.wide && s.columnWide]}>
     <View style={s.between}><Text style={[s.caption, { color: theme.dim }]}>{t('phone.training.dashboardDaily')}</Text>{store.programPracticeStreak > 0 && <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}><Icon name="flame" size={18} color={theme.accent} /><Text style={[s.streak, { color: theme.accent }]}>{t('phone.training.dashboardStreak', { days: store.programPracticeStreak })}</Text></View>}</View>

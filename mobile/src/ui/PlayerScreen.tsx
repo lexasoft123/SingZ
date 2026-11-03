@@ -1,7 +1,7 @@
 import { quickStartTitle } from '../../../src/shared/quick-start/meta'
 import { GuideTarget, useGuideAnchor, useQuickStart } from './QuickStart'
 import { tabModalListeners } from './tab-modal-dismissal'
-import { ScreenBackground, ScreenScrim } from './ScreenBackground'
+import { ScreenScrim } from './ScreenBackground'
 import { SongOutputMonitor, SongOutputMeterButton, SongOutputControls } from './SongOutput'
 import { mobileSongVolumePersistence } from '../playback/song-volume-persistence'
 import { sanitizeSongVolume } from '../../../src/shared/song-volume'
@@ -1950,7 +1950,7 @@ export default function PlayerScreen({
     <PlayerStack.Navigator
       screenListeners={tabModalListeners}
       initialRouteName="Stage"
-      screenOptions={{ headerShown: false, contentStyle: { backgroundColor: C.bg } }}
+      screenOptions={{ headerShown: false, contentStyle: { backgroundColor: 'transparent' } }}
     >
       <PlayerStack.Screen name="Stage">
         {({ navigation }) => {
@@ -1962,12 +1962,11 @@ export default function PlayerScreen({
                 const { width, height } = event.nativeEvent.layout
                 setScene(previous => previous?.width === width && previous.height === height ? previous : { width, height })
               }}
-              style={{ flex: 1, backgroundColor: C.bg }}
+              style={{ flex: 1, backgroundColor: 'transparent' }}
               pointerEvents={active ? 'auto' : 'none'}
               accessibilityElementsHidden={!active}
               importantForAccessibility={active ? 'auto' : 'no-hide-descendants'}
             >
-      <ScreenBackground />
 
       {/* Lyrics. The column is ONE canvas the size of the viewport, held
           still while a transform moves the lines under it — a canvas as tall as

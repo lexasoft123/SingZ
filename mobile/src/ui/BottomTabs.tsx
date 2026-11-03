@@ -1,3 +1,4 @@
+import { useSceneTabBarLayout } from './ScreenBackground'
 import { GuideTarget } from './QuickStart'
 import { useMobileLayout } from './uiKit'
 import React from 'react'
@@ -36,8 +37,9 @@ function ResponsiveBottomTabs({
   insets
 }: BottomTabBarProps): React.JSX.Element {
   const layout = useMobileLayout()
+  const onLayout = useSceneTabBarLayout()
   return (
-    <View style={[styles.ground, { paddingBottom: Math.max(6, insets.bottom) }]}>
+    <View testID="root-tab-bar" onLayout={onLayout} style={[styles.ground, { paddingBottom: Math.max(6, insets.bottom) }]}>
       <GlassTabBar style={{ width: '100%', maxWidth: layout.compact ? 680 : undefined, alignSelf: 'center' }}>
         {state.routes.map((route, index) => {
           if (!isRootTab(route.name)) return null

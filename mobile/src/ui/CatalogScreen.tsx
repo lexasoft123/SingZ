@@ -1,6 +1,5 @@
 import { GlassHeader } from '@singz/ui/native'
 import { GuideTarget, QuickStartWelcome, useGuideAnchor } from './QuickStart'
-import { ScreenBackground } from './ScreenBackground'
 import { useMobileLayout } from './uiKit'
 import { mobileSongVolumePersistence } from '../playback/song-volume-persistence'
 import { Icon } from '@singz/ui/native/icons'
@@ -2192,18 +2191,17 @@ export default function CatalogScreen({
   }
 
   if (!shelfReady) return (
-    <View style={{ flex: 1, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center' }}>
-      <ScreenBackground />
+    <View style={{ flex: 1, backgroundColor: 'transparent', alignItems: 'center', justifyContent: 'center' }}>
       <ActivityIndicator color={C.amber} />
     </View>
   )
 
   return (
-    <View style={{ flex: 1, backgroundColor: C.bg }}>
-      <ScreenBackground />
-      <View testID="library-workspace" style={[s.wrap, { paddingTop: insets.top + 6, width: '100%', maxWidth: 1120, alignSelf: 'center' }]}>
+    <View style={{ flex: 1, backgroundColor: 'transparent' }}>
+      <View testID="library-workspace" style={[s.wrap, { paddingTop: layout.top, width: '100%', maxWidth: 1120, alignSelf: 'center' }]}>
         <GlassHeader
           testID="catalog-header"
+          variant="plain"
           title="SingZ"
           align="start"
           leading={<StemTile hue={0} size={26} />}

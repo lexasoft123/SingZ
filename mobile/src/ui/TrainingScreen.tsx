@@ -1,5 +1,4 @@
 import { tabModalListeners } from './tab-modal-dismissal'
-import { ScreenBackground } from './ScreenBackground'
 import { MelodyLevelSelector } from './MelodyLevelSelector'
 import { melodyReferenceTargetIndices } from '../gen/training-lib'
 import SettingsScreen from './SettingsScreen'
@@ -878,7 +877,6 @@ export default function TrainingScreen({
       accessibilityElementsHidden={!active}
       importantForAccessibility={active ? 'auto' : 'no-hide-descendants'}
     >
-      <ScreenBackground />
       <View pointerEvents="none" style={styles.staff}>
         {[0, 1, 2, 3, 4].map((line) => <View key={line} style={[styles.staffLine, { top: 88 + line * 18 }]} />)}
       </View>
@@ -1048,16 +1046,15 @@ function TrainingHome({ progress, onProgramLesson, song, effectiveKey, onChoose,
     : snapshot.tendency === 'flat' ? t('phone.training.kit.flat') : t('phone.training.kit.sharp')
   const landed = snapshot.landedRate === null ? '—' : t('phone.training.landedPercent', { pct: Math.round(snapshot.landedRate * 100) })
   return (
-    <ScrollView contentContainerStyle={[styles.scroll, { paddingTop: layout.top, width: '100%', maxWidth: 1160, alignSelf: 'center' }]} showsVerticalScrollIndicator={false}>
-      {song && (
+    <ScrollView contentContainerStyle={[styles.scroll, { paddingTop: layout.top, width: '100%', maxWidth: 1120, alignSelf: 'center' }]} showsVerticalScrollIndicator={false}>
+      <TrainingDashboard store={persistence} onLesson={onProgramLesson} onProgress={onProgress} onChoose={onChoose} beforeRoutine={song && (
         <GlassSurface radius={26} style={styles.songCardContent}>
           <Text style={styles.eyebrow}>{t('phone.training.loadedSongEyebrow')}</Text>
           <Text style={styles.cardTitle}>{t('phone.training.prepareFor', { song: song.songName })}</Text>
           <Text style={styles.cardCopy}>{effectiveKey ? t('phone.training.keyWithTranspose', { key: keyLabel(keyName(effectiveKey)) }) : t('phone.training.noCurrentKey')}</Text>
           <View style={styles.wrap}>{(['notes', 'intervals', 'chords', 'mixed'] as const).map((choice) => <Chip key={choice} label={songPreparationChoiceLabel(choice)} onPress={() => onPrepare(choice)} />)}</View>
         </GlassSurface>
-      )}
-      <TrainingDashboard store={persistence} onLesson={onProgramLesson} onProgress={onProgress} onChoose={onChoose} headerActions={<>
+      )} headerActions={<>
         <HeaderIconButton label={t('phone.library.openSettings')} onPress={onSettings}><Icon name="settings" size={20} color={C.amber} /></HeaderIconButton>
         <TrainingLogButton />
       </>} />
@@ -1799,7 +1796,7 @@ const glassSurface = nativeGlassStyle(nightStudioNativeTheme, 'surface')
 const flatGlassSurface = nativeGlassStyle(nightStudioNativeTheme, 'none')
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: C.bg },
+  screen: { flex: 1, backgroundColor: 'transparent' },
   trainingRoute: { backgroundColor: 'transparent' },
   staff: { position: 'absolute', inset: 0, opacity: 0.22 },
   staffLine: { position: 'absolute', left: 0, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: 'rgba(255,240,220,0.12)' },
