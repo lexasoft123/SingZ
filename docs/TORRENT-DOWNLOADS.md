@@ -55,8 +55,10 @@ World (8,957,887 bytes). The implementation contains no artist/topic special cas
 
 Requirements: Python 3.12+, CMake, a C++17 toolchain, Perl and make. Windows
 uses native MSWin32 Perl (such as Strawberry) and the x64 Visual Studio C++
-toolchain. The SDK producer discovers both and prepares its child environment;
-these are build tools only. See [OpenSSL's Windows prerequisites](https://raw.githubusercontent.com/openssl/openssl/openssl-3.5.9/NOTES-WINDOWS.md).
+toolchain. The SDK producer discovers both and prepares its child environment.
+It resolves executable paths against that prepared PATH before launching them:
+[Python’s Windows process launcher](https://docs.python.org/3/library/subprocess.html#popen-constructor)
+does not use a supplied child PATH to locate bare tool names such as `nmake`. These are build tools only. See [OpenSSL's Windows prerequisites](https://raw.githubusercontent.com/openssl/openssl/openssl-3.5.9/NOTES-WINDOWS.md).
 Android needs the pinned NDK
 27.1.12297006; set ANDROID_NDK_HOME, or ANDROID_HOME to its SDK parent. iOS
 requires Xcode. Dependency archives are pinned and SHA256 checked. SDKs and

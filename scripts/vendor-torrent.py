@@ -10,7 +10,15 @@ SOURCES={
  "boost":("https://archives.boost.io/release/1.89.0/source/boost_1_89_0.tar.bz2","85a33fa22621b4f314f8e85e1a5e2a9363d22e4f4992925d4bb3bc631b5a0c7a"),
  "openssl":("https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz","603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a")
 }
-def run(args,cwd=None,env=None):subprocess.run([str(a) for a in args],cwd=cwd,env=env,check=True)
+def run(args,cwd=None,env=None):
+ command=[str(a) for a in args]
+ if sys.platform=='win32' and env is not None and not ntpath.isabs(command[0]):
+  # CreateProcess ignores the supplied child PATH when locating a bare exe.
+  # Resolve against the prepared toolchain, not the caller's unconfigured PATH.
+  executable=shutil.which(command[0],path=env.get('PATH',env.get('Path','')))
+  if not executable:raise RuntimeError('Build tool is missing from the prepared Windows environment: '+command[0])
+  command[0]=executable
+ subprocess.run(command,cwd=cwd,env=env,check=True)
 def source(name):
  url,digest=SOURCES[name];base=ROOT/'.engines-src'/'torrent';base.mkdir(parents=True,exist_ok=True)
  archive=base/url.rsplit('/',1)[1]
