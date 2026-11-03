@@ -91,11 +91,44 @@ def msvc_environment(environment):
   raise RuntimeError('Visual Studio did not provide cl, nmake, INCLUDE and LIB for the Windows torrent SDK.')
  return env
 
+def windows_perl_environment(environment):
+ # Git Bash puts MSYS Perl first, but VC-WIN64A needs a native Windows Perl.
+ # Probe the interpreter rather than inferring its runtime from a directory.
+ env={key.upper():value for key,value in environment.items()}
+ candidates=[]
+ explicit=env.get('PERL','').strip().strip('"')
+ if explicit:
+  candidates.append(explicit)
+  resolved=shutil.which(explicit,path=env.get('PATH',''))
+  if resolved:candidates.append(resolved)
+ for directory in env.get('PATH','').split(';'):
+  directory=directory.strip().strip('"')
+  if directory:candidates.append(ntpath.join(directory,'perl.exe'))
+ candidates.append(ntpath.join(env.get('SYSTEMDRIVE','C:')+'\\',
+  'Strawberry','perl','bin','perl.exe'))
+ seen=set()
+ for candidate in candidates:
+  candidate=ntpath.abspath(candidate)
+  key=ntpath.normcase(ntpath.normpath(candidate))
+  if key in seen or not Path(candidate).is_file():continue
+  seen.add(key)
+  try:
+   runtime=subprocess.check_output([candidate,'-e','print $^O'],env=env,
+    encoding='ascii',stderr=subprocess.PIPE,timeout=10).strip()
+  except (subprocess.SubprocessError,UnicodeError,OSError):
+   continue
+  if runtime!='MSWin32':continue
+  env['PERL']=candidate
+  directory=ntpath.dirname(candidate)
+  env['PATH']=directory+(';' + env['PATH'] if env.get('PATH') else '')
+  return env
+ raise RuntimeError('Native Windows Perl is required for the torrent SDK. Install Strawberry Perl or set PERL to a native Windows perl.exe; Git/MSYS and Cygwin Perl are not supported for VC-WIN64A.')
+
 def build(target,jobs):
  # Programmatic callers must hold the same real repository lock as the CLI.
  run(['node',ROOT/'scripts/assert-native-build-lock.cjs'],cwd=ROOT)
  host=platform.system()
- env=msvc_environment(os.environ) if host=='Windows' and target=='win32-x64' else os.environ.copy()
+ env=windows_perl_environment(msvc_environment(os.environ)) if host=='Windows' and target=='win32-x64' else os.environ.copy()
  lt=source('libtorrent');boost=source('boost');ssl=source('openssl');patch_certificates(lt)
  prefix=ROOT/'vendor'/'torrent'/target;prefix.mkdir(parents=True,exist_ok=True)
  builddir=ROOT/'.engines-src'/'torrent'/'build'/target;builddir.mkdir(parents=True,exist_ok=True)
@@ -125,7 +158,8 @@ def build(target,jobs):
  sslbuild=builddir/'openssl';sslbuild.mkdir(exist_ok=True)
  if flags: env.update(CFLAGS=' '.join(flags),CXXFLAGS=' '.join(flags))
  if not (prefix/'lib/libcrypto.a').exists() and not (prefix/'lib/libcrypto.lib').exists():
-  run(['perl',ssl/'Configure',ssl_target,'no-shared','no-tests','no-module',*(['no-asm'] if host=='Windows' else []),'--prefix='+str(prefix),'--libdir=lib'],sslbuild,env)
+  perl=env.get('PERL','perl') if host=='Windows' else 'perl'
+  run([perl,ssl/'Configure',ssl_target,'no-shared','no-tests','no-module',*(['no-asm'] if host=='Windows' else []),'--prefix='+str(prefix),'--libdir=lib'],sslbuild,env)
   maker='nmake' if host=='Windows' else 'make'
   run([maker,*([] if host=='Windows' else ['-j'+str(jobs)])],sslbuild,env);run([maker,'install_sw'],sslbuild,env)
  # Libtorrent uses Boost headers only. No system Boost or Boost binaries.

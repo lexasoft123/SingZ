@@ -255,11 +255,12 @@ with mock.patch.object(sdk['shutil'],'which',which),mock.patch.object(Path,'is_f
 build=sdk['build'];events=[]
 def guard(*args,**kwargs):events.append('guard')
 def environment(*args):events.append('environment');return {}
+def perl(*args):events.append('perl');return {}
 def source(*args):events.append('source');raise RuntimeError('fixture source boundary')
-with mock.patch.object(sdk['platform'],'system',lambda:'Windows'),mock.patch.dict(build.__globals__,{'run':guard,'msvc_environment':environment,'source':source}):
+with mock.patch.object(sdk['platform'],'system',lambda:'Windows'),mock.patch.dict(build.__globals__,{'run':guard,'msvc_environment':environment,'windows_perl_environment':perl,'source':source}):
  try:build('win32-x64',4)
  except RuntimeError as error:assert str(error)=='fixture source boundary'
- assert events==['guard','environment','source']
+ assert events==['guard','environment','perl','source']
 print('MSVC fixture passed')
 `
   const result = spawnSync(python, ['-c', driver, join(source, 'vendor-torrent.py')], {
@@ -268,5 +269,78 @@ print('MSVC fixture passed')
   assert.ifError(result.error)
   assert.equal(result.status, 0, result.stderr)
   assert.equal(result.stdout.trim(), 'MSVC fixture passed')
+  assert.equal(result.stderr, '')
+})
+
+test('Windows SDK rejects MSYS Perl and propagates the selected native interpreter', () => {
+  const driver = String.raw`
+import ntpath,runpy,subprocess,sys
+from pathlib import Path
+from unittest import mock
+sdk=runpy.run_path(sys.argv[1],run_name='perl_environment_fixture')
+prepare=sdk['windows_perl_environment']
+msys=r'C:\Git\usr\bin\perl.exe'
+cygwin=r'C:\cygwin64\bin\perl.exe'
+native=r'C:\Native Perl Ж with spaces\bin\perl.exe'
+explicit=r'D:\Explicit Perl Ж with spaces\bin\perl.exe'
+strawberry=r'C:\Strawberry\perl\bin\perl.exe'
+base={'Path':ntpath.dirname(msys)+';'+ntpath.dirname(native),'Fixture_Secret':'private-value=never-log'}
+probes=[]
+def capture(args,**options):
+ assert len(args)==3 and args[1:]==['-e','print $^O']
+ assert options['env']['FIXTURE_SECRET']=='private-value=never-log'
+ assert options['encoding']=='ascii' and options['stderr']==subprocess.PIPE
+ probes.append(args[0])
+ return 'msys' if args[0]==msys else 'cygwin' if args[0]==cygwin else 'MSWin32'
+installed={msys,native,explicit,strawberry,cygwin}
+with mock.patch.object(Path,'is_file',lambda p:str(p) in installed),mock.patch.object(sdk['shutil'],'which',lambda *a,**k:None),mock.patch.object(subprocess,'check_output',capture):
+ result=prepare(base)
+ assert probes==[msys,native]
+ assert result['PERL']==native and result['PATH'].split(';')[0]==ntpath.dirname(native)
+ assert 'Path' not in result and result['FIXTURE_SECRET']=='private-value=never-log'
+ probes.clear()
+ assert prepare({**base,'PERL':'"'+explicit+'"'})['PERL']==explicit
+ assert probes==[explicit], 'An explicitly configured native interpreter must be preferred'
+ probes.clear()
+ normalized=prepare({**base,'PATH':ntpath.dirname(cygwin)})
+ assert normalized['PERL']==strawberry and 'Path' not in normalized
+ assert probes==[cygwin,strawberry], 'Case-normalized PATH must not create duplicate environment entries'
+ probes.clear()
+ assert prepare({'Path':ntpath.dirname(msys),'Fixture_Secret':'private-value=never-log'})['PERL']==strawberry
+ assert probes==[msys,strawberry]
+with mock.patch.object(Path,'is_file',lambda p:str(p) in {msys,cygwin}),mock.patch.object(sdk['shutil'],'which',lambda *a,**k:None),mock.patch.object(subprocess,'check_output',capture):
+ try:prepare({'Path':ntpath.dirname(msys)+';'+ntpath.dirname(cygwin),'Fixture_Secret':'private-value=never-log'})
+ except RuntimeError as error:
+  assert 'Native Windows Perl' in str(error) and 'Strawberry' in str(error)
+  assert 'private-value' not in str(error)
+ else:raise AssertionError('A POSIX Perl was accepted for VC-WIN64A')
+# Observe the real build function handing the selected executable/environment
+# to Configure and NMake. All source paths and mkdirs belong to a temp fixture;
+# stop at the first mocked NMake boundary before any compiler can be invoked.
+import tempfile
+commands=[]
+def native_command(args,cwd=None,env=None):
+ if args[0]=='node':commands.append('guard');return
+ assert env['PERL']==native and env['PATH'].split(';')[0]==ntpath.dirname(native)
+ if args[0]==native:
+  assert str(args[1]).endswith('Configure') and args[2]=='VC-WIN64A'
+  commands.append('configure');return
+ assert args[0]=='nmake'
+ commands.append('nmake');raise RuntimeError('mocked nmake boundary')
+with tempfile.TemporaryDirectory(prefix='singz perl command ') as temporary:
+ root=Path(temporary);build=sdk['build']
+ with mock.patch.object(Path,'is_file',lambda p:str(p) in installed),mock.patch.object(sdk['shutil'],'which',lambda *a,**k:None),mock.patch.object(subprocess,'check_output',capture),mock.patch.object(sdk['platform'],'system',lambda:'Windows'),mock.patch.dict(build.__globals__,{'ROOT':root,'run':native_command,'msvc_environment':lambda env:dict(base),'source':lambda name:root/name,'patch_certificates':lambda lt:None}):
+  try:build('win32-x64',4)
+  except RuntimeError as error:assert str(error)=='mocked nmake boundary'
+  else:raise AssertionError('A native work boundary was not reached')
+ assert commands==['guard','configure','nmake']
+print('Perl fixture passed')
+`
+  const result = spawnSync(python, ['-c', driver, join(source, 'vendor-torrent.py')], {
+    encoding: 'utf8', timeout: 15_000,
+  })
+  assert.ifError(result.error)
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout.trim(), 'Perl fixture passed')
   assert.equal(result.stderr, '')
 })
