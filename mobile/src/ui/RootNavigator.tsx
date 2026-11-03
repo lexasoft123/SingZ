@@ -15,7 +15,7 @@ import {
 } from '../playback/metronome-durability'
 import { releaseProject, type LoadedProject } from '../projects'
 import AddSongSheet, { type AddSongRequest } from './AddSongSheet'
-import TorrentScreen from './TorrentScreen'
+import { TorrentScreen, torrentsEnabled } from '../features/torrent-feature'
 import type { PickedFile } from '../writer'
 import CatalogScreen from './CatalogScreen'
 import LogPanel from './LogPanel'
@@ -360,7 +360,7 @@ export default function RootNavigator({
             />
           )}
         </Stack.Screen>
-        <Stack.Screen name="Torrent" options={{ contentStyle: styles.root }}>
+        {torrentsEnabled && <Stack.Screen name="Torrent" options={{ contentStyle: styles.root }}>
           {({ navigation }) => (
             <TorrentScreen
               onClose={() => {
@@ -383,7 +383,7 @@ export default function RootNavigator({
               }}
             />
           )}
-        </Stack.Screen>
+        </Stack.Screen>}
         <Stack.Screen name="Player" options={playerScreenOptions()}>
           {({ navigation }) =>
             project == null ? (

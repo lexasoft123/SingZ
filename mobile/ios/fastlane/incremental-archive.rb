@@ -37,10 +37,10 @@ module SingzIncrementalArchive
     end
   end
 
-  def self.fingerprint(repo)
+  def self.fingerprint(repo, configuration = "Release")
     output, error, status = Open3.capture3('node', File.join(repo, 'mobile/scripts/ios-native-inputs.cjs'))
     raise error unless status.success? && output.strip.match?(/\A[0-9a-f]{64}\z/)
-    output.strip
+    Digest::SHA256.hexdigest("singz-native-configuration-v1\n#{configuration}\n#{output.strip}")
   end
 
   def self.app(archive)
@@ -68,7 +68,7 @@ module SingzIncrementalArchive
       binary: Digest::SHA256.file(File.join(app(archive), 'SingZPlayer')).hexdigest }))
   end
 
-  def self.refresh(repo, archive, number, identity)
+  def self.refresh(repo, archive, number, identity, configuration = "Release")
     raise ArgumentError, 'invalid build number' unless number.to_s.match?(/\A[1-9]\d*\z/)
     FileUtils.mkdir_p(File.join(repo, 'build-ios'))
     ios = File.join(repo, 'mobile/ios')
@@ -76,7 +76,8 @@ module SingzIncrementalArchive
     # Metro owns this directory; regenerate it so removed JS assets do not linger.
     FileUtils.rm_rf(File.join(application, 'assets'))
     env = {
-      'CONFIGURATION' => 'Release', 'PLATFORM_NAME' => 'iphoneos',
+      'CONFIGURATION' => configuration,
+      'SINGZ_ENABLE_TORRENTS' => configuration == 'AdHoc' ? '1' : '0', 'PLATFORM_NAME' => 'iphoneos',
       'PROJECT_DIR' => ios, 'PROJECT_ROOT' => File.join(repo, 'mobile'),
       'PODS_ROOT' => File.join(ios, 'Pods'),
       'CONFIGURATION_BUILD_DIR' => File.dirname(application),

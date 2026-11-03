@@ -1,3 +1,4 @@
+import { TorrentEntry } from '../features/torrent-feature'
 import { GuideTarget, QuickStartWelcome, useGuideAnchor } from './QuickStart'
 import { mobileSongVolumePersistence } from '../playback/song-volume-persistence'
 import { Icon } from '@singz/ui/native/icons'
@@ -2282,10 +2283,8 @@ export default function CatalogScreen({
                   <GuideTarget id="catalog-add"><Pressable accessibilityRole="button" hitSlop={8} onPress={() => void beginAdd()}>
                     <Text style={s.ctxLink}>{t('phone.library.addASong')}</Text>
                   </Pressable></GuideTarget>
-                  <Text style={s.ctxDot}>·</Text>
-                  <Pressable accessibilityRole="button" hitSlop={8} onPress={() => onOpenTorrent(file => presentAddRef.current(file))}>
-                    <Text style={s.ctxLink}>Search RuTracker</Text>
-                  </Pressable>
+                  <TorrentEntry textStyle={s.ctxLink} separatorStyle={s.ctxDot}
+                    onPress={() => onOpenTorrent(file => presentAddRef.current(file))} />
                 </>
               )}
             </>

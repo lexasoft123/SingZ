@@ -1,5 +1,6 @@
 const { getDefaultConfig, mergeConfig } = require('@react-native/metro-config');
 const { resolve } = require('node:path');
+const { resolveTorrentModule } = require('./scripts/torrent-build-policy.cjs');
 
 /**
  * Metro configuration
@@ -15,6 +16,7 @@ const config = {
   // this dependency-free source directory, not the repo's second React install.
   watchFolders: [resolve(__dirname, '../src/shared')],
   resolver: {
+    resolveRequest: resolveTorrentModule,
     // Shared TS may use Babel helpers; resolve those from the phone's runtime.
     nodeModulesPaths: [resolve(__dirname, 'node_modules')],
     assetExts: [...defaults.resolver.assetExts, 'flac'],
