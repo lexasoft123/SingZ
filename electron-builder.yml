@@ -119,6 +119,10 @@ mac:
   extendInfo:
     NSMicrophoneUsageDescription: SingZ listens to your singing to show how well you match the melody.
   extraResources:
+    - from: vendor/torrent/darwin-${arch}/singz-torrent.node
+      to: engines/singz-torrent.node
+    - from: vendor/torrent/darwin-${arch}/notices
+      to: third_party/torrent
     - from: assets/pitch
       to: pitch
     - from: vendor/darwin-${arch}
@@ -161,6 +165,10 @@ linux:
   target:
     - target: deb
   extraResources:
+    - from: vendor/torrent/linux-${arch}/singz-torrent.node
+      to: engines/singz-torrent.node
+    - from: vendor/torrent/linux-${arch}/notices
+      to: third_party/torrent
     - from: assets/pitch
       to: pitch
     - from: vendor/linux-${arch}
@@ -192,6 +200,10 @@ deb:
     - xdg-utils
 win:
   extraResources:
+    - from: vendor/torrent/win32-${arch}/singz-torrent.node
+      to: engines/singz-torrent.node
+    - from: vendor/torrent/win32-${arch}/notices
+      to: third_party/torrent
     - from: assets/pitch
       to: pitch
     - from: vendor/win32-x64

@@ -220,3 +220,18 @@ if(SINGZ_ENABLE_FFMPEG_CODECS)
         VERBATIM
         COMMENT "Checking libsingzcore dynamic LGPL FFmpeg imports")
 endif()
+
+
+# Song acquisition shares one C++ libtorrent core with desktop and iOS.
+# Provision target SDKs explicitly; ordinary Gradle builds never download.
+set(SINGZ_TORRENT_PREFIX "${SINGZ_NATIVE_ROOT}/vendor/torrent/android-${ANDROID_ABI}")
+if(NOT EXISTS "${SINGZ_TORRENT_PREFIX}/manifest.json")
+ message(FATAL_ERROR "Torrent SDK missing. Run python3 scripts/vendor-torrent.py android-${ANDROID_ABI}")
+endif()
+set(LibtorrentRasterbar_DIR "${SINGZ_TORRENT_PREFIX}/lib/cmake/LibtorrentRasterbar")
+set(Boost_DIR "${SINGZ_TORRENT_PREFIX}/lib/cmake/Boost-1.89.0")
+set(OPENSSL_INCLUDE_DIR "${SINGZ_TORRENT_PREFIX}/include")
+set(OPENSSL_SSL_LIBRARY "${SINGZ_TORRENT_PREFIX}/lib/libssl.a")
+set(OPENSSL_CRYPTO_LIBRARY "${SINGZ_TORRENT_PREFIX}/lib/libcrypto.a")
+set(OPENSSL_USE_STATIC_LIBS ON)
+add_subdirectory("${SINGZ_NATIVE_ROOT}/native/torrent" "${CMAKE_CURRENT_BINARY_DIR}/singz-torrent")

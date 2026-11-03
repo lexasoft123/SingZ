@@ -206,12 +206,14 @@ class ReviewPipelineTest < Minitest::Test
     Dir.mktmpdir('singz-archive-return-') do |temporary|
       ipa = File.join(temporary, 'SingZ.ipa')
       File.write(ipa, 'fake exported application')
-      keys = %w[GITHUB_ACTIONS sigh_io.s-dev.singz_appstore_profile-name]
+      keys = %w[GITHUB_ACTIONS sigh_io.s-dev.singz_appstore_profile-name sigh_io.s-dev.singz_adhoc_profile-name]
       previous = keys.to_h { |key| [key, ENV[key]] }
       ENV['GITHUB_ACTIONS'] = 'true'
-      ENV[keys.last] = 'test profile'
+      keys.drop(1).each { |key| ENV[key] = 'test profile' }
       begin
-        [:cold, :cached, :cached_export_failure, :cache_publish_failure].each do |mode|
+        %w[appstore adhoc].product([:cold, :cached, :cached_export_failure, :cache_publish_failure]).each do |distribution, mode|
+          proofs = []
+          verify = ->(*args) { proofs << args }
           builds = []
           published = []
           refreshed = []
@@ -237,9 +239,11 @@ class ReviewPipelineTest < Minitest::Test
                   with_stub(SingzIncrementalArchive, :publish, publish) do
                     with_stub(SingzIncrementalArchive, :receipt, File.join(temporary, 'cache-receipt')) do
                       with_stub(SingzAppBuildNumber, :with_number, with_number) do
-                        result = @pipeline.archive_with_real_build_flow(build_number: 31)
-                        assert_instance_of String, result, mode.to_s
-                        assert_equal ipa, result, mode.to_s
+                        with_stub(SingzTorrentBuild, :verify!, verify) do
+                          result = @pipeline.archive_with_real_build_flow(build_number: 31, type: distribution)
+                          assert_instance_of String, result, mode.to_s
+                          assert_equal ipa, result, mode.to_s
+                        end
                       end
                     end
                   end
@@ -247,6 +251,11 @@ class ReviewPipelineTest < Minitest::Test
               end
             end
           end
+          expected_configuration = distribution == 'adhoc' ? 'AdHoc' : 'Release'
+          assert builds.all? { |build| build[:configuration] == expected_configuration }
+          assert proofs.all? { |proof| proof.last == distribution }
+          assert_equal ipa, proofs.last[1]
+          assert refreshed.all? { |args| args.last == expected_configuration }
           assert_equal(mode == :cached_export_failure ? 2 : 1, builds.size, mode.to_s)
           assert_equal([:cached, :cached_export_failure].include?(mode),
                        builds.first[:skip_build_archive] == true, mode.to_s)

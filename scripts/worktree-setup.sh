@@ -320,6 +320,9 @@ if [ "$MODE" != "--desktop-only" ]; then
   fi
 
   if [ "$(uname)" = "Darwin" ] && command -v pod >/dev/null 2>&1; then
+    # The torrent SDK contains our shared core: build it locally under the
+    # enclosing native lock instead of mirroring another checkout's output.
+    python3 "$WT/scripts/build-torrent-ios.py"
     echo "iOS pods (CocoaPods global cache + ccache make repeats quick):"
     # LANG: CocoaPods crashes in non-interactive shells (agent sessions)
     # with "Unicode Normalization not appropriate for ASCII-8BIT" otherwise.

@@ -44,7 +44,8 @@ concurrency:
 jobs:
   capture-macos:
     runs-on: macos-latest
-    timeout-minutes: 15
+    # Universal packaging builds the pinned torrent SDK for both architectures.
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -99,7 +100,8 @@ jobs:
 
   capture-windows:
     runs-on: windows-latest
-    timeout-minutes: 15
+    # A cold package builds pinned OpenSSL and libtorrent before the load smoke.
+    timeout-minutes: 40
     permissions:
       contents: read
     steps:

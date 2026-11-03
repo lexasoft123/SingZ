@@ -121,5 +121,7 @@
 	</array>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<false/>
+	<key>SingzTorrentsEnabled</key>
+	<string>$(SINGZ_ENABLE_TORRENTS)</string>
 </dict>
 </plist>

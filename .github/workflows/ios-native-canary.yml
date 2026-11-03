@@ -504,6 +504,9 @@ jobs:
           bundle="$app/main.jsbundle"
           test -f "$binary"
           test -f "$bundle"
+          # Release must stay independent of the internal torrent SDK. Inspect
+          # the built Mach-O, Hermes bundle, metadata and resources together.
+          node mobile/scripts/verify-torrent-build.cjs "$app" 0
           strings "$binary" > "$RUNNER_TEMP/singz-app-strings.txt"
           xcrun nm -m "$binary" > "$RUNNER_TEMP/singz-app-symbols.txt"
           grep -q 'singz.ios.zdsp_runtime.phase-ios-q32-time-pitch-v3' \

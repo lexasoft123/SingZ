@@ -1,3 +1,4 @@
+import { TorrentEntry } from '../features/torrent-feature'
 import { GuideTarget, QuickStartWelcome, useGuideAnchor } from './QuickStart'
 import { ScreenBackground } from './ScreenBackground'
 import { useMobileLayout } from './uiKit'
@@ -264,6 +265,7 @@ export default function CatalogScreen({
   onQuickStart,
   onOpenLog,
   onOpenAddSong,
+  onOpenTorrent,
   onCloseAddSong
 }: {
   active?: boolean
@@ -274,6 +276,7 @@ export default function CatalogScreen({
   onOpenSettings: () => void
   onOpenLog: () => void
   onOpenAddSong: (request: AddSongRequest) => void
+  onOpenTorrent: (onDownloaded: (src: PickedFile) => void) => void
   onCloseAddSong: () => void
 }): React.JSX.Element {
   const sampleGuideRef = useGuideAnchor('catalog-sample')
@@ -2325,6 +2328,8 @@ export default function CatalogScreen({
                   <GuideTarget id="catalog-add"><Pressable accessibilityRole="button" hitSlop={8} onPress={() => void beginAdd()}>
                     <Text style={s.ctxLink}>{t('phone.library.addASong')}</Text>
                   </Pressable></GuideTarget>
+                  <TorrentEntry textStyle={s.ctxLink} separatorStyle={s.ctxDot}
+                    onPress={() => onOpenTorrent(file => presentAddRef.current(file))} />
                 </>
               )}
             </>

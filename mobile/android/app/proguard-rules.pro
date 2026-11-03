@@ -13,3 +13,10 @@
 }
 -keep class com.singzplayer.playback.NativePlaybackGraphNodeJni { *; }
 -keep class com.singzplayer.playback.NativePlaybackGraphConnectionJni { *; }
+
+
+# JNI names and the single browser-result callback are native protocol.
+-keep class com.singzplayer.TorrentNative { *; }
+-keepclassmembers class com.singzplayer.TorrentModule$* {
+    @android.webkit.JavascriptInterface <methods>;
+}

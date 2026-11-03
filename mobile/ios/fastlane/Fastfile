@@ -1,5 +1,6 @@
 require_relative "app-build-number"
 require_relative "incremental-archive"
+require_relative "torrent-build"
 
 # App Store Connect uploads.
 #
@@ -872,6 +873,7 @@ end
 
 private_lane :archive do |options|
   type = options[:type] || "appstore"
+  configuration = SingzTorrentBuild.configuration(type)
   # Apple's export_method spelling is not match's type spelling.
   export_method = { "appstore" => "app-store", "adhoc" => "ad-hoc" }.fetch(type)
 
@@ -916,13 +918,13 @@ private_lane :archive do |options|
   archive_path = File.join(REPO_ROOT, "build-ios/SingZ-native.xcarchive")
   native_inputs = nil
   begin
-    SingzIncrementalArchive.prepare_release_dependencies(REPO_ROOT)
-    native_inputs = SingzIncrementalArchive.fingerprint(REPO_ROOT)
+    SingzIncrementalArchive.prepare_release_dependencies(REPO_ROOT, configuration)
+    native_inputs = SingzIncrementalArchive.fingerprint(REPO_ROOT, configuration)
   rescue => error
     UI.important("Native cache unavailable; using full archive: #{error.message}")
   end
   build_options = {
-    workspace: WORKSPACE, scheme: SCHEME, configuration: "Release",
+    workspace: WORKSPACE, scheme: SCHEME, configuration: configuration,
     export_method: export_method, xcargs: signing_args.join(" "),
     archive_path: archive_path,
     derived_data_path: File.join(REPO_ROOT, "build/native/ios-derived"),
@@ -934,9 +936,10 @@ private_lane :archive do |options|
   if native_inputs
     begin
       if SingzIncrementalArchive.copy_cached(native_inputs, archive_path)
+        SingzTorrentBuild.verify!(REPO_ROOT, SingzIncrementalArchive.app(archive_path), type)
         UI.message("Native inputs unchanged: rebundling JavaScript and exporting cached archive")
         SingzIncrementalArchive.refresh(REPO_ROOT, archive_path, options[:build_number],
-          ENV["sigh_#{BUNDLE_ID}_#{type}_certificate-name"] || "Apple Distribution")
+          ENV["sigh_#{BUNDLE_ID}_#{type}_certificate-name"] || "Apple Distribution", configuration)
         ipa = build_app(**build_options.merge(skip_build_archive: true))
         reused = true
       end
@@ -949,9 +952,10 @@ private_lane :archive do |options|
     SingzAppBuildNumber.with_number(
       File.join(IOS_DIR, "SingZPlayer.xcodeproj/project.pbxproj"), options[:build_number]
     ) { ipa = build_app(**build_options) }
+    SingzTorrentBuild.verify!(REPO_ROOT, SingzIncrementalArchive.app(archive_path), type)
     if native_inputs
       begin
-        after = SingzIncrementalArchive.fingerprint(REPO_ROOT)
+        after = SingzIncrementalArchive.fingerprint(REPO_ROOT, configuration)
         SingzIncrementalArchive.publish(archive_path, after) if after == native_inputs
       rescue => error
         UI.important("Native archive built successfully but could not be cached: #{error.message}")
@@ -961,6 +965,7 @@ private_lane :archive do |options|
   # Cache publication is best effort and has its own return value. Always
   # hand upload/distribution the IPA exported by gym on either build path.
   UI.user_error!("Archive did not produce an IPA file") unless ipa.is_a?(String) && File.file?(ipa)
+  SingzTorrentBuild.verify!(REPO_ROOT, ipa, type)
   ipa
 end
 

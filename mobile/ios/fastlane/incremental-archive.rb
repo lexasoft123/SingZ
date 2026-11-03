@@ -205,14 +205,14 @@ module SingzIncrementalArchive
     end
   end
 
-  def self.prepare_release_dependencies(repo)
+  def self.prepare_release_dependencies(repo, configuration = "Release")
     phases = release_dependency_phases(repo)
     pods = File.join(repo, 'mobile/ios/Pods')
     log = File.join(repo, 'build-ios/native-dependency-preparation.log')
     FileUtils.mkdir_p(File.dirname(log))
     env = {
       'REACT_NATIVE_PATH' => File.join(repo, 'mobile/node_modules/react-native'),
-      'PODS_ROOT' => pods, 'PROJECT_DIR' => pods, 'CONFIGURATION' => 'Release',
+      'PODS_ROOT' => pods, 'PROJECT_DIR' => pods, 'CONFIGURATION' => configuration,
       'GCC_PREPROCESSOR_DEFINITIONS' => '', 'NODE_BINARY' => ENV.fetch('NODE_BINARY', 'node')
     }
     File.open(log, 'w') do |output|
@@ -233,10 +233,10 @@ module SingzIncrementalArchive
     phases.length
   end
 
-  def self.fingerprint(repo)
+  def self.fingerprint(repo, configuration = "Release")
     output, error, status = Open3.capture3('node', File.join(repo, 'mobile/scripts/ios-native-inputs.cjs'))
     raise error unless status.success? && output.strip.match?(/\A[0-9a-f]{64}\z/)
-    output.strip
+    Digest::SHA256.hexdigest("singz-native-configuration-v1\n#{configuration}\n#{output.strip}")
   end
 
   def self.app(archive)
@@ -264,7 +264,7 @@ module SingzIncrementalArchive
       binary: Digest::SHA256.file(File.join(app(archive), 'SingZPlayer')).hexdigest }))
   end
 
-  def self.refresh(repo, archive, number, identity)
+  def self.refresh(repo, archive, number, identity, configuration = "Release")
     raise ArgumentError, 'invalid build number' unless number.to_s.match?(/\A[1-9]\d*\z/)
     keychain = ENV['SINGZ_SIGNING_KEYCHAIN_PATH']
     if !ENV['GITHUB_ACTIONS'] && keychain.to_s.empty?
@@ -276,7 +276,9 @@ module SingzIncrementalArchive
     # Metro owns this directory; regenerate it so removed JS assets do not linger.
     FileUtils.rm_rf(File.join(application, 'assets'))
     env = {
-      'CONFIGURATION' => 'Release', 'PLATFORM_NAME' => 'iphoneos',
+      'CONFIGURATION' => configuration,
+      'SINGZ_ENABLE_TORRENTS' => configuration == 'AdHoc' ? '1' : '0',
+      'PLATFORM_NAME' => 'iphoneos',
       'PROJECT_DIR' => ios, 'PROJECT_ROOT' => File.join(repo, 'mobile'),
       'PODS_ROOT' => File.join(ios, 'Pods'),
       'CONFIGURATION_BUILD_DIR' => File.dirname(application),

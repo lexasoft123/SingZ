@@ -8,7 +8,7 @@
   "private": true,
   "scripts": {
     "dev": "node scripts/check-installed-deps.cjs && electron-vite dev",
-    "postinstall": "node scripts/apply-gdrive-config.cjs && node mobile/scripts/apply-gdrive-config.js",
+    "postinstall": "node scripts/apply-gdrive-config.cjs && node mobile/scripts/apply-gdrive-config.js && node scripts/sync-torrent-scripts.cjs",
     "build": "node scripts/check-installed-deps.cjs && node scripts/apply-gdrive-config.cjs && electron-vite build && node scripts/check-renderer-split.mjs && node scripts/check-capture-addon.cjs",
     "capture:addon:check": "node scripts/check-capture-addon.cjs --strict",
     "preview": "electron-vite preview",
@@ -21,7 +21,12 @@
     "store-notes": "node scripts/store-notes.cjs",
     "store-notes:check": "node scripts/store-notes.cjs --check",
     "capture:addon": "node scripts/build-capture-addon.cjs",
-    "capture:verify": "electron tests/e2e/capture-addon-smoke.cjs --current-source"
+    "capture:verify": "electron tests/e2e/capture-addon-smoke.cjs --current-source",
+    "torrent:sdk": "python3 scripts/vendor-torrent.py",
+    "torrent:addon": "node scripts/build-torrent-addon.cjs",
+    "torrent:ios": "python3 scripts/build-torrent-ios.py",
+    "torrent:index:test": "node --test services/torrent-index/*.test.mjs",
+    "torrent:index:serve": "node services/torrent-index/server.mjs"
   },
   "devDependencies": {
     "@fontsource-variable/bricolage-grotesque": "^5.3.0",

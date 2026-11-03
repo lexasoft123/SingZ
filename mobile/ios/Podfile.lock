@@ -2291,6 +2291,8 @@ PODS:
   - SingzPlaybackSession (0.1.0):
     - SingzCore
     - SingzDspRuntime
+  - SingzTorrent (1.0.0):
+    - React-Core
   - Yoga (0.0.0)
 
 DEPENDENCIES:
@@ -2381,6 +2383,7 @@ DEPENDENCIES:
   - SingzDeviceCallback (from `./SingzDeviceCallback`)
   - SingzDspRuntime (from `./SingzDspRuntime`)
   - SingzPlaybackSession (from `./SingzPlaybackSession`)
+  - SingzTorrent (from `./SingzTorrent`)
   - Yoga (from `../node_modules/react-native/ReactCommon/yoga`)
 
 SPEC REPOS:
@@ -2561,6 +2564,8 @@ EXTERNAL SOURCES:
     :path: "./SingzDspRuntime"
   SingzPlaybackSession:
     :path: "./SingzPlaybackSession"
+  SingzTorrent:
+    :path: "./SingzTorrent"
   Yoga:
     :path: "../node_modules/react-native/ReactCommon/yoga"
 
@@ -2652,8 +2657,9 @@ SPEC CHECKSUMS:
   SingzDeviceCallback: 34dbf61665b0e42edc7880f58f18fd01a7c6cc17
   SingzDspRuntime: edd3662e17eea69477fa9ee2dd2b3abcb54e8df8
   SingzPlaybackSession: 189a7474bb5c402469a6db082d4f855e9c6ae4c6
+  SingzTorrent: c7438a4fbf2f0016c6a26ae75fb2938f83be82ce
   Yoga: 9891cfb1c680f64de9c41b09e7453dea33454d2b
 
-PODFILE CHECKSUM: 314f029afbb9bc097ce34aab0b3e6f45b1d07d64
+PODFILE CHECKSUM: c41d5f25887489cfdd1ef6a09d80c6bd9bbde03d
 
 COCOAPODS: 1.17.0
