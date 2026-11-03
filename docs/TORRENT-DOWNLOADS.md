@@ -53,8 +53,11 @@ World (8,957,887 bytes). The implementation contains no artist/topic special cas
 
 ## Build
 
-Requirements: Python 3.12+, CMake, a C++17 toolchain, Perl and make (nmake in a
-Windows Developer Command Prompt). Android needs the pinned NDK
+Requirements: Python 3.12+, CMake, a C++17 toolchain, Perl and make. Windows
+uses native MSWin32 Perl (such as Strawberry) and the x64 Visual Studio C++
+toolchain. The SDK producer discovers both and prepares its child environment;
+these are build tools only. See [OpenSSL's Windows prerequisites](https://raw.githubusercontent.com/openssl/openssl/openssl-3.5.9/NOTES-WINDOWS.md).
+Android needs the pinned NDK
 27.1.12297006; set ANDROID_NDK_HOME, or ANDROID_HOME to its SDK parent. iOS
 requires Xcode. Dependency archives are pinned and SHA256 checked. SDKs and
 build outputs are ignored; do not copy another worktree's torrent binaries.
@@ -80,8 +83,10 @@ python3 scripts/vendor-torrent.py android-arm64-v8a
 ```
 
 `npm run dist` builds each requested desktop SDK/addon before packaging.
-The iOS/Android workflows provision their SDKs explicitly. A full worktree
-setup builds the iOS XCFramework before integrating pods. Normal app builds
+Android workflows provision the shipping-ABI SDKs explicitly. iOS store Release
+workflows omit the torrent SDK and verify its exclusion from the built app.
+A full worktree setup builds the iOS XCFramework for Debug/AdHoc before
+integrating pods. Normal app builds
 do not fetch torrent dependencies. Windows builds disable OpenSSL assembly
 to avoid a NASM dependency. The vendored Mozilla CA snapshot supplies HTTPS
 trust roots on phones while certificate and hostname verification stay on.
