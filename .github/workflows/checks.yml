@@ -44,7 +44,8 @@ concurrency:
 jobs:
   capture-macos:
     runs-on: macos-latest
-    timeout-minutes: 15
+    # Universal packaging builds the pinned torrent SDK for both architectures.
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
