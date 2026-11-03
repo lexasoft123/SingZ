@@ -2,7 +2,7 @@ import { useMobileLayout } from './uiKit'
 import React, { useState } from 'react'
 import { Icon } from '@singz/ui/native/icons'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
-import { ChoiceChip, GlassSurface, PrimaryAction, useNativeTheme } from '@singz/ui/native'
+import { ChoiceChip, GlassHeader, HeaderAction, GlassSurface, PrimaryAction, useNativeTheme } from '@singz/ui/native'
 import { intervalLabel, type TrainingExerciseSelection } from '../gen/training-lib'
 import { INTERVAL_LESSONS } from '../training/interval-plan'
 import { selectTrainingProgramLevel, type ProgramLesson } from '../training/program'
@@ -70,13 +70,10 @@ export function TrainingDashboard({ store, onLesson, onProgress, onChoose, heade
     void store.flush().then(() => update(value => value + 1))
   }
   return <View style={s.dashboard}>
-    <GlassSurface radius={28} elevation="none" style={s.header}>
-      <Text style={[s.headerTitle, { color: theme.text }]}>{t('phone.training.dashboardTrain')}</Text>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-        {headerActions}
-      <Pressable accessibilityRole="button" accessibilityLabel={t('phone.training.progressEntryTitle')} onPress={onProgress} style={[s.linkHit, { minWidth: 44, alignItems: 'center' }]}><Icon name="progress" size={26} color={theme.accent} /></Pressable>
-      </View>
-    </GlassSurface>
+    <GlassHeader testID="training-home-header" title={t('phone.training.dashboardTrain')} align="start" trailing={<>
+      {headerActions}
+      <HeaderAction label={t('phone.training.progressEntryTitle')} onPress={onProgress}><Icon name="progress" size={24} color={theme.accent} /></HeaderAction>
+    </>} />
     <View style={[s.columns, layout.wide && s.columnsWide]}>
     <View style={[s.column, layout.wide && s.columnWide]}>
     <View style={s.between}><Text style={[s.caption, { color: theme.dim }]}>{t('phone.training.dashboardDaily')}</Text>{store.programPracticeStreak > 0 && <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}><Icon name="flame" size={18} color={theme.accent} /><Text style={[s.streak, { color: theme.accent }]}>{t('phone.training.dashboardStreak', { days: store.programPracticeStreak })}</Text></View>}</View>
@@ -125,8 +122,6 @@ const s = StyleSheet.create({
   columnsWide: { flexDirection: 'row', alignItems: 'flex-start' },
   column: { minWidth: 0, gap: 14 },
   columnWide: { flex: 1 },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 18, minHeight: 64 },
-  headerTitle: { fontSize: 25, fontWeight: '900' },
   between: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
   caption: { fontSize: 12, fontWeight: '800', letterSpacing: 1, textTransform: 'uppercase', flexShrink: 1 },
   streak: { fontSize: 13, fontWeight: '800' },

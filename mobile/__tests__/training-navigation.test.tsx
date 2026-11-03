@@ -274,7 +274,7 @@ test('training log icon returns to the same paused exercise', async () => {
     await act(() => button(tree, 'Open the log').props.onPress())
     expect(routes().training).toEqual(['Home', 'Exercise', 'Log'])
     expect(engine.cancelTrainingCues).toHaveBeenCalled()
-    await act(() => button(tree, 'Close').props.onPress())
+    await act(() => button(tree, 'Close the log').props.onPress())
     expect(routes().training).toEqual(['Home', 'Exercise'])
     const exercise = tree.root.findByType(TrainingSessionView)
     expect(exercise.props.state.session.id).toBe(priorSession)

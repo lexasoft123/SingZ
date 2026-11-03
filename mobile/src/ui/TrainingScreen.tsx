@@ -102,6 +102,7 @@ import {
   ChoiceChip,
   FeatureCard,
   GlassHeader,
+  HeaderAction,
   GlassSurface,
   Hairline,
   ListEntry,
@@ -1366,7 +1367,8 @@ export function TrainingSessionView({ paused = false, onPause = () => undefined,
         title={trainingExerciseTitle(prompt.kind)}
         backLabel={t('phone.training.endSession')}
         onBack={onExit}
-        trailing={<View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}><Pressable accessibilityRole="button" accessibilityLabel={t('phone.training.recordingTools')} onPress={() => setShowSampleTools(value => !value)}><Text style={styles.counter}>{displayIndex} / {displayTotal}</Text></Pressable><TrainingLogButton /></View>}
+        testID="training-session-header"
+        trailing={<><HeaderAction label={t('phone.training.recordingTools')} onPress={() => setShowSampleTools(value => !value)}><Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.7} maxFontSizeMultiplier={1.2} style={styles.counter}>{displayIndex} / {displayTotal}</Text></HeaderAction><TrainingLogButton /></>}
       />
       {showSampleTools && sampleControls}
       {guidedVocal ? (
@@ -1846,7 +1848,7 @@ const styles = StyleSheet.create({
   stepperActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   stepperValue: { color: C.text, fontSize: 16, fontWeight: '900', minWidth: 36, textAlign: 'center' },
   session: { flex: 1, paddingHorizontal: 12, paddingTop: Platform.OS === 'ios' ? 58 : 34, paddingBottom: 10 },
-  counter: { color: C.dim, fontSize: 12, fontWeight: '800', letterSpacing: 1 },
+  counter: { color: C.dim, fontSize: 11, fontWeight: '800' },
   swipeSurface: { flex: 1 },
   singleStage: { flexGrow: 1, alignItems: 'center', gap: 8 },
   practiceDetector: { minHeight: 240, flex: 1, width: '100%', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.hairline, paddingTop: 10 },

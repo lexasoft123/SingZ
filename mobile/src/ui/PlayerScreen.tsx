@@ -96,7 +96,7 @@ import SkiaLyrics, {
 } from './SkiaLyrics'
 import { sheetRowState, stemFormatLine } from './song-sheet-copy'
 import { TEST } from './testhooks'
-import { nativeGlassStyle, nightStudioNativeTheme } from '@singz/ui/native'
+import { GlassHeader, HeaderAction, nativeGlassStyle, nightStudioNativeTheme } from '@singz/ui/native'
 import { mobileMetronomePersistence } from '../playback/metronome-persistence'
 import {
   createPlaybackBackend,
@@ -468,7 +468,8 @@ export default function PlayerScreen({
     }
   }, [workspace.sideBySide, sheet, setSheet])
   const [dockHeight, setDockHeight] = useState(180)
-  const lyricTop = layout.compact ? 48 : 250
+  const [chromeHeight, setChromeHeight] = useState(62)
+  const lyricTop = layout.compact ? 48 : Math.max(250, layout.top + chromeHeight + 12)
   const lyricBottom = layout.compact ? 80 : 300
   /* Android 15 draws edge-to-edge: keep controls clear of the system bar.
    * iOS keeps its hand-tuned paddings. */
@@ -1975,7 +1976,7 @@ export default function PlayerScreen({
           tap targets, so the sweep costs no views at all. */}
       <View
         testID="player-lyrics"
-        style={layout.compact ? { position: 'absolute', top: layout.top + 74, left: lyricsLeft, width: lyricsWidth, bottom: dockHeight + Math.max(12, insets.bottom + 2) + 8 } : { flex: 1 }}
+        style={layout.compact ? { position: 'absolute', top: layout.top + chromeHeight + 12, left: lyricsLeft, width: lyricsWidth, bottom: dockHeight + Math.max(12, insets.bottom + 2) + 8 } : { flex: 1 }}
         onLayout={(e) => {
           const { width, height } = e.nativeEvent.layout
           if (width !== view.w || height !== view.h)
@@ -2051,7 +2052,7 @@ export default function PlayerScreen({
 
       {embeddedMixer && (
         <View testID="player-mixer-panel" style={[s.mixerPanel, {
-          top: layout.top + 74,
+          top: layout.top + chromeHeight + 12,
           left: workspaceLeft + 12,
           width: workspace.mixerWidth,
           bottom: dockHeight + Math.max(12, insets.bottom + 2) + 8
@@ -2068,20 +2069,18 @@ export default function PlayerScreen({
         edge="top"
         style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 140, opacity: 0.8 }}
       />
-      <View pointerEvents="none" style={[s.hdrGlass, { top: layout.top }, layout.compact && { left: workspaceLeft + 12, right: workspaceLeft + 12 }]} />
-      <View style={[s.hdr, { paddingTop: layout.top + 9 }, layout.compact && { left: workspaceLeft, right: workspaceLeft }]} pointerEvents="box-none">
-        <Pressable onPress={onBack} hitSlop={12} accessibilityRole="button" accessibilityLabel={t('phone.player.header.back')}>
-          <Text style={s.back}>‹</Text>
-        </Pressable>
-        <StemTile hue={tileHue} size={46} />
-        <View style={{ flex: 1, minWidth: 0 }}>
-          <Text style={s.hTitle} numberOfLines={1}>
-            {splitSongName(project.name).title}
-          </Text>
-          {/* "SingZ project" used to lead here, spending the most prominent
-              line under the title telling the singer that this app's song is
-              this app's song. What is left is what varies between songs. */}
-          <Text style={s.hSub} numberOfLines={1}>
+      <View pointerEvents="box-none"
+        style={[s.hdr, { top: layout.top }, layout.compact && { left: workspaceLeft + 12, right: workspaceLeft + 12 }]}
+        onLayout={event => setChromeHeight(Math.ceil(event.nativeEvent.layout.height))}>
+        <GlassHeader
+        testID="player-header"
+        title={splitSongName(project.name).title}
+        align="start"
+        onBack={onBack}
+        backLabel={t('phone.player.header.back')}
+        leading={<StemTile hue={tileHue} size={28} />}
+        subtitle={
+          <Text style={s.hSub} numberOfLines={1} maxFontSizeMultiplier={1.2}>
             {splitSongName(project.name).artist != null
               ? `${splitSongName(project.name).artist} · `
               : ''}
@@ -2096,7 +2095,13 @@ export default function PlayerScreen({
                 }`
               : ''}
           </Text>
-        </View>
+        }
+        trailing={<>
+          <HeaderAction label={quickStartTitle(getLocale())} onPress={() => guide.start('player')}><Text style={s.songBtnText}>?</Text></HeaderAction>
+          <GuideTarget id="player-about"><HeaderAction label={t('phone.player.header.about')} onPress={() => setSheet('song')}><Text style={s.songBtnText}>•••</Text></HeaderAction></GuideTarget>
+        </>}
+      />
+        {(ktBadge.length > 0 || training && ducked.length > 0) && <View style={s.headerBadges}>
         {ktBadge.length > 0 && (
           <View style={s.ktBadge}>
             <Text style={s.ktBadgeText}>{ktBadge.join(' · ')}</Text>
@@ -2112,19 +2117,8 @@ export default function PlayerScreen({
             <Text style={s.youChipText}>{t('phone.player.header.youSing')}</Text>
           </View>
         )}
-        {/* Song sheet. Three dots rather than a gear: a gear glyph has no
-            guaranteed text presentation on Android and renders as a colour
-            emoji next to a monochrome header. */}
-        <Pressable accessibilityRole="button" accessibilityLabel={quickStartTitle(getLocale())} onPress={() => guide.start('player')} hitSlop={8} style={s.songBtn}><Text style={s.songBtnText}>?</Text></Pressable>
-        <GuideTarget id="player-about"><Pressable
-          onPress={() => setSheet('song')}
-          hitSlop={12}
-          style={s.songBtn}
-          accessibilityRole="button"
-          accessibilityLabel={t('phone.player.header.about')}
-        >
-          <Text style={s.songBtnText}>•••</Text>
-        </Pressable></GuideTarget>
+
+        </View>}
       </View>
 
       <ScreenScrim
@@ -3033,15 +3027,6 @@ const KEY_NAMES = ['C', 'C♯', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A',
 const meterName = (bpb: number): string => (bpb === 6 ? '6/8' : `${bpb}/4`)
 
 const s = StyleSheet.create({
-  songBtn: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    borderWidth: 1.5,
-    borderColor: white(0.2),
-    alignItems: 'center',
-    justifyContent: 'center'
-  },
   // The dots sit optically low in the box; lift them rather than centre them.
   songBtnText: { color: white(0.72), fontSize: 15, fontWeight: '800', marginTop: -3 },
   songVal: { color: C.bright, fontSize: 16, fontWeight: '700' },
@@ -3064,31 +3049,9 @@ const s = StyleSheet.create({
      inset from the edge, capped at a capsule. Pill: capsule (62/2). Dock:
      55 − 10 inset ≈ 44, continuous curve. Waveband: concentric would be
      44 − 12 padding = 32, capped at its own capsule (40/2). */
-  hdrGlass: {
-    ...nativeGlassStyle(nightStudioNativeTheme, 'surface'),
-    position: 'absolute',
-    left: 12,
-    right: 12,
-    top: 54,
-    height: 62,
-    borderRadius: 31,
-    borderCurve: 'continuous'
-  },
-  hdr: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    paddingTop: 63,
-    paddingHorizontal: 26,
-    paddingBottom: 14
-  },
-  back: { color: white(0.85), fontSize: 30, fontWeight: '600', paddingRight: 4, marginTop: -4 },
-  hTitle: { color: C.bright, fontSize: 15.5, fontWeight: '700' },
-  hSub: { color: C.dim, fontSize: 12.5, marginTop: 1 },
+  hdr: { position: 'absolute', left: 12, right: 12 },
+  headerBadges: { paddingTop: 4, paddingHorizontal: 8, flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
+  hSub: { color: C.dim, fontSize: 11, lineHeight: 14, marginTop: 1 },
   ktBadge: { backgroundColor: C.btnBg, borderRadius: 999, paddingHorizontal: 10, paddingVertical: 5 },
   ktBadgeText: { color: white(0.8), fontSize: 11.5, fontWeight: '800', letterSpacing: 0.2 },
   youChip: { backgroundColor: C.amber, borderRadius: 999, paddingHorizontal: 11, paddingVertical: 5 },

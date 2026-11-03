@@ -17,6 +17,7 @@ import {
   type ViewStyle
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
+import { GlassHeader, HeaderAction } from '@singz/ui/native'
 import { t } from '../i18n'
 
 /** react-native-screens implements native fit-to-contents sheets on iOS 16+.
@@ -264,6 +265,20 @@ export function TrashGlyph({ color }: { color: string }): React.JSX.Element {
       />
     </View>
   )
+}
+
+/** Share's conventional tray and upward arrow, drawn like the app's other glyphs. */
+export function ShareGlyph({ color }: { color: string }): React.JSX.Element {
+  return <View pointerEvents="none" style={{ width: 20, height: 22 }}>
+    <View style={{ position: 'absolute', left: 2, right: 2, bottom: 1, height: 12, borderWidth: 1.5, borderColor: color, borderTopWidth: 0, borderBottomLeftRadius: 3, borderBottomRightRadius: 3 }} />
+    <View style={{ position: 'absolute', left: 9.25, top: 1, width: 1.5, height: 14, backgroundColor: color }} />
+    <View style={{ position: 'absolute', left: 6, top: 2, width: 8, height: 8, borderTopWidth: 1.5, borderLeftWidth: 1.5, borderColor: color, transform: [{ rotate: '45deg' }] }} />
+  </View>
+}
+
+/** A non-scaling close icon; its surrounding HeaderAction supplies the label. */
+export function CloseGlyph({ color }: { color: string }): React.JSX.Element {
+  return <Text allowFontScaling={false} style={{ color, fontSize: 24, lineHeight: 28 }}>×</Text>
 }
 
 /** Circular action arrow shared by replay and redetect controls. */
@@ -926,6 +941,8 @@ export function Bar({
   )
 }
 
+const SheetHeaderHeightContext = React.createContext(0)
+
 /**
  * Content surface for a native-stack form sheet. Presentation, dimming,
  * detents, grabber, interactive movement and system back all belong to the
@@ -956,36 +973,36 @@ export function Sheet({
 }): React.JSX.Element {
   const { height: windowHeight } = useWindowDimensions()
   const insets = useSafeAreaInsets()
+  const [headerHeight, setHeaderHeight] = React.useState(0)
 
   return (
-    <View
-      style={[
-        b.sheet,
-        fitContent && b.sheetFitContent,
-        fitContent && { maxHeight: Math.max(0, windowHeight - insets.top) },
-        pad
-      ]}
-      accessible={false}
-      onAccessibilityEscape={onClose}
-    >
-      <View style={b.sheetHeader}>
-        <Text style={b.sheetTitle} numberOfLines={1}>
-          {title}
-        </Text>
-        {!actionHidden && actionLabel != null && (
-          <Pressable
-            style={b.sheetClose}
-            hitSlop={10}
-            onPress={onClose}
-            accessibilityRole="button"
-            accessibilityLabel={actionAccessibilityLabel ?? actionLabel}
-          >
-            <Text style={b.sheetCloseText}>{actionLabel}</Text>
-          </Pressable>
-        )}
+    <SheetHeaderHeightContext.Provider value={headerHeight}>
+      <View
+        style={[
+          b.sheet,
+          fitContent && b.sheetFitContent,
+          fitContent && { maxHeight: Math.max(0, windowHeight - insets.top) },
+          pad
+        ]}
+        accessible={false}
+        onAccessibilityEscape={onClose}
+      >
+        <View testID="sheet-header" onLayout={event => setHeaderHeight(Math.ceil(event.nativeEvent.layout.height))}>
+          <GlassHeader
+            title={title}
+            align="start"
+            variant="plain"
+            trailing={!actionHidden && actionLabel != null ? <HeaderAction
+              onPress={onClose}
+              label={actionAccessibilityLabel ?? actionLabel}
+            >
+              <CloseGlyph color={C.amber} />
+            </HeaderAction> : undefined}
+          />
+        </View>
+        <View style={[b.sheetBody, fitContent && b.sheetBodyFitContent]}>{children}</View>
       </View>
-      <View style={[b.sheetBody, fitContent && b.sheetBodyFitContent]}>{children}</View>
-    </View>
+    </SheetHeaderHeightContext.Provider>
   )
 }
 
@@ -1002,7 +1019,7 @@ export function SheetScrollView({
   const { height: windowHeight } = useWindowDimensions()
   const insets = useSafeAreaInsets()
   const [contentHeight, setContentHeight] = React.useState(1)
-  const headerHeight = Platform.OS === 'ios' ? 62 : 50
+  const headerHeight = React.useContext(SheetHeaderHeightContext)
   const bottomInset = Platform.OS === 'ios' ? 0 : Math.max(34, insets.bottom + 18)
   const maxHeight = Math.max(1, windowHeight - insets.top - headerHeight - bottomInset)
 
@@ -1090,18 +1107,8 @@ export const b = StyleSheet.create({
     width: '100%',
     paddingBottom: Platform.OS === 'ios' ? 0 : 34
   },
-  sheetHeader: {
-    minHeight: Platform.OS === 'ios' ? 62 : 50,
-    paddingTop: Platform.OS === 'ios' ? 16 : 0,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 16
-  },
   sheetBody: { flex: 1, minWidth: 0, width: '100%', overflow: 'hidden' },
   sheetBodyFitContent: { flex: 0 },
-  sheetClose: { flexShrink: 0 },
-  sheetCloseText: { color: C.amber, fontSize: 15, fontWeight: '700' },
-  sheetTitle: { color: C.bright, fontSize: 19, fontWeight: '800', letterSpacing: -0.2, flex: 1 },
   sheetScroll: { minWidth: 0 },
   sheetScrollFill: { flex: 1 },
   sheetScrollContent: { paddingBottom: 4 },
