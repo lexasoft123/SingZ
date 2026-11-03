@@ -2,7 +2,7 @@
 """Build pinned static libtorrent + OpenSSL for desktop, iOS and Android.
 Only this script downloads dependencies; normal application builds stay offline.
 """
-import argparse,hashlib,json,os,platform,re,shutil,subprocess,sys,tarfile,tempfile,urllib.request
+import argparse,hashlib,json,ntpath,os,platform,re,shutil,subprocess,sys,tarfile,tempfile,urllib.request
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 SOURCES={
@@ -49,13 +49,57 @@ def patch_certificates(lt):
   if text.count(anchor)!=1:raise RuntimeError("libtorrent trust-store patch anchor changed")
   fd,name=tempfile.mkstemp(dir=source.parent);os.close(fd);temporary=Path(name);temporary.write_text(text.replace(anchor,anchor+injection));temporary.replace(source)
 
+def msvc_environment(environment):
+ # Windows environment names are case-insensitive. Normalize before merging so
+ # a captured Path never coexists with the caller's PATH in CreateProcess.
+ env={key.upper():value for key,value in environment.items()}
+ def ready(candidate):
+  arch=candidate.get('VSCMD_ARG_TGT_ARCH','').lower()
+  return (arch in ('','x64','amd64') and candidate.get('INCLUDE') and candidate.get('LIB')
+   and shutil.which('cl.exe',path=candidate.get('PATH',''))
+   and shutil.which('nmake.exe',path=candidate.get('PATH','')))
+ if ready(env):return env
+ vswhere=shutil.which('vswhere.exe',path=env.get('PATH',''))
+ if not vswhere:
+  vswhere=ntpath.join(env.get('PROGRAMFILES(X86)',r'C:\Program Files (x86)'),
+   'Microsoft Visual Studio','Installer','vswhere.exe')
+ if not Path(vswhere).is_file():
+  raise RuntimeError('Visual Studio C++ Build Tools are required for the Windows torrent SDK; use an x64 Developer Command Prompt or install the C++ workload.')
+ try:
+  installation=subprocess.check_output([vswhere,'-latest','-products','*','-requires',
+   'Microsoft.VisualStudio.Component.VC.Tools.x86.x64','-property','installationPath','-utf8'],
+   env=env,encoding='utf-8',timeout=30).strip().lstrip('\ufeff')
+  vcvars=ntpath.join(installation,'VC','Auxiliary','Build','vcvars64.bat')
+  if not installation or not Path(vcvars).is_file():
+   raise RuntimeError('No Visual Studio x64 C++ toolchain was found for the torrent SDK.')
+  # Keep the command itself quote-free: list2cmdline must not turn the batch
+  # path's quotes into literal backslashes. cmd expands this quoted value.
+  previous_command=env.get('SINGZ_TORRENT_VCVARS_COMMAND')
+  command_env={**env,'SINGZ_TORRENT_VCVARS_COMMAND':'"'+vcvars+'"'}
+  output=subprocess.check_output([env.get('COMSPEC','cmd.exe'),'/d','/u','/v:off','/s','/c',
+   'call %SINGZ_TORRENT_VCVARS_COMMAND% >nul && set'],env=command_env,
+   stderr=subprocess.PIPE,timeout=60).decode('utf-16le').lstrip('\ufeff')
+ except (subprocess.SubprocessError,UnicodeError,OSError):
+  # Never print the captured `set` output: it includes inherited secrets.
+  raise RuntimeError('Could not initialize the Visual Studio x64 environment for the torrent SDK.') from None
+ for line in output.splitlines():
+  key,separator,value=line.partition('=')
+  if separator and key:env[key.upper()]=value
+ if previous_command is None:env.pop('SINGZ_TORRENT_VCVARS_COMMAND',None)
+ else:env['SINGZ_TORRENT_VCVARS_COMMAND']=previous_command
+ if not ready(env):
+  raise RuntimeError('Visual Studio did not provide cl, nmake, INCLUDE and LIB for the Windows torrent SDK.')
+ return env
+
 def build(target,jobs):
  # Programmatic callers must hold the same real repository lock as the CLI.
  run(['node',ROOT/'scripts/assert-native-build-lock.cjs'],cwd=ROOT)
+ host=platform.system()
+ env=msvc_environment(os.environ) if host=='Windows' and target=='win32-x64' else os.environ.copy()
  lt=source('libtorrent');boost=source('boost');ssl=source('openssl');patch_certificates(lt)
  prefix=ROOT/'vendor'/'torrent'/target;prefix.mkdir(parents=True,exist_ok=True)
  builddir=ROOT/'.engines-src'/'torrent'/'build'/target;builddir.mkdir(parents=True,exist_ok=True)
- env=os.environ.copy();cmake=[];flags=[];host=platform.system()
+ cmake=[];flags=[]
  if target.startswith('ios-'):
   sim='sim' in target;arch='x86_64' if target.endswith('x64') else 'arm64';sdk='iphonesimulator' if sim else 'iphoneos'
   sdkpath=subprocess.check_output(['xcrun','--sdk',sdk,'--show-sdk-path'],text=True).strip()
@@ -116,6 +160,11 @@ if __name__=='__main__':
  parser.add_argument('--jobs',type=int,default=4);args=parser.parse_args()
  if not os.environ.get('SINGZ_NATIVE_BUILD_LOCK_HELD'):
   # Re-enter through the canonical owner before downloading or modifying SDKs.
-  os.execvp('node',['node',str(ROOT/'scripts/with-native-build-lock.mjs'),
-   '--owner','torrent-sdk:'+args.target,'--',sys.executable,str(Path(__file__).resolve()),*sys.argv[1:]])
+  lock_command=['node',str(ROOT/'scripts/with-native-build-lock.mjs'),
+   '--owner','torrent-sdk:'+args.target,'--',sys.executable,str(Path(__file__).resolve()),*sys.argv[1:]]
+  # Windows exec spawns and exits instead of replacing this process. Wait
+  # for the real lock owner so callers cannot start the next build early.
+  if sys.platform == 'win32':
+   sys.exit(subprocess.run(lock_command,check=False).returncode)
+  os.execvp(lock_command[0],lock_command)
  build(args.target,max(1,min(4,args.jobs)))

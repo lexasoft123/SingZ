@@ -6,8 +6,13 @@ ROOT=Path(__file__).resolve().parents[1]
 def run(args):subprocess.run([str(x)for x in args],cwd=ROOT,check=True)
 parser=argparse.ArgumentParser();parser.add_argument('--skip-build',action='store_true');args=parser.parse_args()
 if not os.environ.get('SINGZ_NATIVE_BUILD_LOCK_HELD'):
- os.execvp('node',['node',str(ROOT/'scripts/with-native-build-lock.mjs'),
-  '--owner','torrent-ios','--',sys.executable,str(Path(__file__).resolve()),*sys.argv[1:]])
+ lock_command=['node',str(ROOT/'scripts/with-native-build-lock.mjs'),
+  '--owner','torrent-ios','--',sys.executable,str(Path(__file__).resolve()),*sys.argv[1:]]
+ # Windows exec spawns and exits instead of replacing this process. Wait
+ # for the real lock owner so callers cannot start the next build early.
+ if sys.platform == 'win32':
+  sys.exit(subprocess.run(lock_command,check=False).returncode)
+ os.execvp(lock_command[0],lock_command)
 # Bootstrap already holds the canonical lock; validate its actual token instead
 # of acquiring it again. Nested SDK builds inherit and assert this same owner.
 run(['node',ROOT/'scripts/assert-native-build-lock.cjs'])

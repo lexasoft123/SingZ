@@ -488,7 +488,10 @@ per build as described above. A busy or interrupted lock fails with owner
 information; confirm that owner and its children have stopped before removing
 it. On Windows, interrupted builds retain the lock even after `taskkill /T`
 so the recorded owner/tree can be inspected. Normal direct commands must await
-all descendants before returning. On POSIX, the wrapper forwards signals to
+all descendants before returning. Python producers must wait for the Node lock
+wrapper with `subprocess.run` on Windows and propagate its status; `os.execvp`
+can return early there while SDK compilation continues.
+On POSIX, the wrapper forwards signals to
 the complete child process group and retains the lock while that group exists.
 Stop all builds using the old temporary-directory lock scheme before switching
 versions. Never remove a live lock to make a second build start.
