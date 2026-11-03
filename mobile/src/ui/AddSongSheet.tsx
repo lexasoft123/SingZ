@@ -198,7 +198,7 @@ export default function AddSongSheet({
         durationSec: facts.durationSec
       }
       log('song', `add-song sheet: searching lyrics for "${meta.title}"`)
-      const outcome = await findLyrics(meta)
+      const outcome = await findLyrics(meta, { retry: true })
       if (my !== seq.current) return
       log('song', `add-song sheet: lyrics ${typeof outcome === 'object' ? 'found' : outcome}`)
       if (typeof outcome === 'object') {
