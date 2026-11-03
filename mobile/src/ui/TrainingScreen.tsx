@@ -1439,22 +1439,28 @@ function SingleNoteSessionBody({ paused, onPause, repetition, phrase, phase, pro
   const target = prompt.targets[targetIndex]
   const swipeLeft = phase === 'respond' && countdown === null ? onSkip : undefined
   const swipeRight = phase === 'respond' && countdown === null ? onBegin : undefined
+  const scrollWholeMelody = prompt.kind === 'melody' && compact && !layout.wide
+  const lesson = <TrainingLessonOverview matchedCount={phase === 'cue' || phase === 'ready' ? 0 : activeTarget + (lock.locked ? 1 : 0)} prompt={prompt} activeTarget={targetIndex} phrase={phrase} repetition={repetition} compact={compact} topAligned={layout.wide || scrollWholeMelody} intrinsic={scrollWholeMelody} />
+  const detector = <View style={[styles.practiceDetector, compact && styles.practiceDetectorCompact, scrollWholeMelody && { flex: 0, flexShrink: 0 }]}>
+    <Text accessibilityLiveRegion="polite" style={[styles.practicePhase, compact && styles.practicePhaseCompact]}>{phase === 'cue' || countdown !== null ? prompt.kind === 'melody' ? t('phone.training.listen') : t('phone.training.hearNamedNote', { note: target.noteName }) : phase === 'respond' ? t('phone.training.yourTurn') : paused ? t('phone.training.paused') : error ? t('phone.training.tapStartWhenReady') : t('phone.training.preparing')}</Text>
+    <SingleNotePitchMeter compact={compact} prompt={prompt} activeTarget={targetIndex} liveMidi={liveMidi} micHearing={micHearing} lock={lock} pitchWindowCents={pitchWindowCents} listening={phase !== 'respond' || countdown !== null} />
+    {phase === 'feedback' && result && <Text style={styles.feedback}>{trainingFeedback(result)}</Text>}
+  </View>
+  const transport = <SingleNoteTransport paused={paused} onPause={onPause} phase={phase === 'respond' && countdown !== null ? 'cue' : phase} error={error} onBegin={onBegin} onSkip={onSkip} />
   return (
     <PracticeSwipeSurface onSwipeLeft={swipeLeft} onSwipeRight={swipeRight}>
       <View testID="training-practice-body" onLayout={event => setBodyHeight(event.nativeEvent.layout.height)} style={[styles.practiceColumns, layout.wide && styles.practiceColumnsWide]}>
-      <ScrollView style={styles.lessonColumn} contentContainerStyle={styles.singleStage} showsVerticalScrollIndicator={false}>
-        <TrainingLessonOverview matchedCount={phase === 'cue' || phase === 'ready' ? 0 : activeTarget + (lock.locked ? 1 : 0)} prompt={prompt} activeTarget={targetIndex} phrase={phrase} repetition={repetition} compact={compact} topAligned={layout.wide} />
-      </ScrollView>
-      <View style={[styles.performanceColumn, !layout.wide && styles.performanceColumnNarrow]}>
-      <ScrollView style={layout.wide ? { flex: 1 } : { flexGrow: 0, flexShrink: 0 }} contentContainerStyle={styles.detectorScroll} showsVerticalScrollIndicator={false}>
-        <View style={[styles.practiceDetector, compact && styles.practiceDetectorCompact]}>
-          <Text accessibilityLiveRegion="polite" style={[styles.practicePhase, compact && styles.practicePhaseCompact]}>{phase === 'cue' || countdown !== null ? prompt.kind === 'melody' ? t('phone.training.listen') : t('phone.training.hearNamedNote', { note: target.noteName }) : phase === 'respond' ? t('phone.training.yourTurn') : paused ? t('phone.training.paused') : error ? t('phone.training.tapStartWhenReady') : t('phone.training.preparing')}</Text>
-          <SingleNotePitchMeter compact={compact} prompt={prompt} activeTarget={targetIndex} liveMidi={liveMidi} micHearing={micHearing} lock={lock} pitchWindowCents={pitchWindowCents} listening={phase !== 'respond' || countdown !== null} />
-          {phase === 'feedback' && result && <Text style={styles.feedback}>{trainingFeedback(result)}</Text>}
-        </View>
-      </ScrollView>
-        <SingleNoteTransport paused={paused} onPause={onPause} phase={phase === 'respond' && countdown !== null ? 'cue' : phase} error={error} onBegin={onBegin} onSkip={onSkip} />
-      </View>
+        {scrollWholeMelody ? <ScrollView testID="training-melody-body-scroll" style={{ flex: 1 }} contentContainerStyle={{ gap: 12, paddingBottom: 8 }} directionalLockEnabled>
+          {lesson}
+          {detector}
+          {transport}
+        </ScrollView> : <>
+          <ScrollView style={styles.lessonColumn} contentContainerStyle={styles.singleStage} showsVerticalScrollIndicator={false}>{lesson}</ScrollView>
+          <View style={[styles.performanceColumn, !layout.wide && styles.performanceColumnNarrow]}>
+            <ScrollView style={layout.wide ? { flex: 1 } : { flexGrow: 0, flexShrink: 0 }} contentContainerStyle={styles.detectorScroll} showsVerticalScrollIndicator={false}>{detector}</ScrollView>
+            {transport}
+          </View>
+        </>}
       </View>
     </PracticeSwipeSurface>
   )
