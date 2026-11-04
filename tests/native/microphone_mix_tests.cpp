@@ -158,7 +158,7 @@ void feed(uint64_t begin=origin,float l=.3f,float r=-.4f,double actual=48000,uin
     for(const auto& input:inputs)if(input->running) {
       samples.fill(input->config.channel==8?l:r);
       CHECK(realtime([&]{return input->callback(input->context,samples.data(),256,begin+ns(block*256,actual),0,
-          AudioInputTimestampQuality{});}));
+          AudioInputTimestampQuality::CallbackEstimate);}));
     }
   }
 }
@@ -195,6 +195,66 @@ void relayStereoAndLifetime() {
   feed(origin+2000000000,.15f,-.2f,48000.0*1.0002);
   auto restarted=render(relayRecord,origin+2000000000+ns(1536));
   for(uint32_t i=0;i<1024;++i){close(restarted[0][i],.15f);close(restarted[1][i],-.2f);}
+}
+void unknownCaptureRecovery() {
+  Fixture fixture;MicrophoneMixSession session(fixture.service,inputFactory,outputFactory);
+  CHECK(session.start(relayConfig()).ok);feed();
+  const auto before=session.status();
+  CHECK(before.active && before.diagnostics.size()==2);
+  std::array<float,256> unanchored;
+  for(int repeat=0;repeat<2;++repeat) {
+    const auto timestamp=repeat==0?0:origin+ns(4096);
+    const float level=repeat==0?.9f:.7f;
+    for(const auto& input:inputs) {
+      unanchored.fill(input->config.channel==8?level:-level);
+      CHECK(realtime([&]{return input->callback(input->context,unanchored.data(),256,timestamp,0,
+          AudioInputTimestampQuality::Unknown);}));
+    }
+  }
+  const auto gap=session.status();
+  CHECK(gap.active && gap.failures==0 && gap.diagnostics.size()==2);
+  for(size_t index=0;index<gap.diagnostics.size();++index) {
+    const auto& source=gap.diagnostics[index];const auto& prior=before.diagnostics[index];
+    CHECK(source.historyOnline && source.historyCallbacks==8 && source.historyDiscontinuities==0);
+    CHECK(source.historyCallbacks==prior.historyCallbacks && source.lastHostNs==prior.lastHostNs);
+    CHECK(source.publishedEndHostNs==prior.publishedEndHostNs);
+  }
+  auto old=render(relayRecord,origin+ns(1536));
+  for(uint32_t i=0;i<1024;++i){close(old[0][i],.3f);close(old[1][i],-.4f);}
+  const auto recovered=origin+ns(2048)+50000;
+  feed(recovered,.15f,-.2f,48000,8);
+  auto routed=render(relayRecord,recovered+ns(1536));
+  for(uint32_t i=0;i<1024;++i){close(routed[0][i],.15f);close(routed[1][i],-.2f);}
+  const auto after=session.status();
+  CHECK(after.active && after.failures==0 && after.diagnostics.size()==2);
+  for(const auto& source:after.diagnostics) {
+    CHECK(source.historyOnline && source.historyCallbacks==16 && source.historyDiscontinuities==1);
+    CHECK(source.lastHostNs==recovered+ns(1792));
+    CHECK(source.publishedEndHostNs==recovered+ns(2048));
+    CHECK(source.verifiedClockSteps==0);
+  }
+}
+void malformedCaptureFailsClosed() {
+  for(int kind=0;kind<7;++kind) {
+    Fixture fixture;MicrophoneMixSession session(fixture.service,inputFactory,outputFactory);
+    CHECK(session.start(relayConfig()).ok);feed();
+    std::array<float,256> samples{};const auto& input=inputs[0];
+    auto push=[&](const float* pcm,uint32_t count,uint64_t firstNs,AudioInputTimestampQuality quality) {
+      CHECK(realtime([&]{return input->callback(input->context,pcm,count,firstNs,0,quality);}));
+    };
+    switch(kind) {
+      case 0:push(nullptr,256,origin+ns(2048),AudioInputTimestampQuality::CallbackEstimate);break;
+      case 1:push(samples.data(),kAudioHostMaxFrames+1,origin+ns(2048),AudioInputTimestampQuality::CallbackEstimate);break;
+      case 2:push(samples.data(),256,0,AudioInputTimestampQuality::CallbackEstimate);break;
+      case 3:push(nullptr,256,0,AudioInputTimestampQuality::Unknown);break;
+      case 4:push(samples.data(),kAudioHostMaxFrames+1,origin+ns(2048),AudioInputTimestampQuality::Unknown);break;
+      case 5:push(samples.data(),0,0,AudioInputTimestampQuality::Unknown);break;
+      default:push(samples.data(),0,origin+ns(2048),AudioInputTimestampQuality::CallbackEstimate);break;
+    }
+    const auto status=session.status();
+    CHECK(!status.active && status.failures>0);
+    CHECK(status.error=="Native capture returned invalid timestamped audio");
+  }
 }
 uint64_t reasonTotal(const MicrophoneMixSourceDiagnostics& source) {
   const auto& missing=source.missingFramesByReason;
@@ -299,5 +359,5 @@ void routeChangesFailClosed() {
   CHECK(!session.status().active);
 }
 }
-int main(){relayStereoAndLifetime();relayDiagnostics();validationAndFailures();partialCaptureFailureAndAdditive();routeChangesFailClosed();
-  std::puts("Hardware main relay: stereo, diagnostics, independent clock, drain, recovery and fail-closed routes passed");}
+int main(){relayStereoAndLifetime();unknownCaptureRecovery();relayDiagnostics();validationAndFailures();malformedCaptureFailsClosed();partialCaptureFailureAndAdditive();routeChangesFailClosed();
+  std::puts("Hardware main relay: stereo, unknown-timeline recovery, diagnostics, independent clock, drain and fail-closed routes passed");}

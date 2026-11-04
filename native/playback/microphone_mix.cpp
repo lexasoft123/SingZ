@@ -26,13 +26,30 @@ struct MicrophoneMixSession::Impl {
     route::AudioReadCursor cursor{};
     double rate = 48000;
     uint64_t frames = 0;
+    bool timelineGap = false;
     std::array<float, route::kBlock> samples{};
     std::atomic<uint64_t> rejected{0};
     static bool capture(void* context, const float* mono, uint32_t count,
                         uint64_t firstNs, uint64_t,
-                        AudioInputTimestampQuality) noexcept {
+                        AudioInputTimestampQuality quality) noexcept {
       auto& self = *static_cast<Source*>(context);
-      if (!mono || !count || count > kAudioHostMaxFrames || self.frames > UINT64_MAX - count) {
+      if (!mono || !count || count > kAudioHostMaxFrames ||
+          (quality != AudioInputTimestampQuality::Unknown && !firstNs)) {
+        self.rejected.fetch_add(1, std::memory_order_relaxed);
+        return true;
+      }
+      // Unknown PCM has no trustworthy timeline, even when a timestamp was
+      // supplied. Drop it without advancing source time; the next anchored
+      // block starts a new epoch instead of bridging unknown loss.
+      if (quality == AudioInputTimestampQuality::Unknown) {
+        self.timelineGap = true;
+        return true;
+      }
+      if (self.timelineGap) {
+        self.frames = 0;
+        self.timelineGap = false;
+      }
+      if (self.frames > UINT64_MAX - count) {
         self.rejected.fetch_add(1, std::memory_order_relaxed);
         return true;
       }
