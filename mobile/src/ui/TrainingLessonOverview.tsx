@@ -1,12 +1,13 @@
 import React from 'react'
+import { MelodyGrid } from './MelodyGrid'
 import { StyleSheet, Text, View } from 'react-native'
 import { useNativeTheme } from '@singz/ui/native'
 import { chordNameText, chordRoleWord, directionWord, intervalLabel, keyLabel, keyName, type TrainingPrompt } from '../gen/training-lib'
 import { t } from '../i18n'
 
 /** The lesson stays visible during both reference playback and singing. */
-export function TrainingLessonOverview({ prompt, activeTarget, phrase, repetition, compact = false, topAligned = false }: {
-  prompt: TrainingPrompt; activeTarget: number; phrase: boolean; repetition?: number; compact?: boolean; topAligned?: boolean
+export function TrainingLessonOverview({ prompt, activeTarget, matchedCount = activeTarget, phrase, repetition, compact = false, topAligned = false, intrinsic = false }: {
+  prompt: TrainingPrompt; activeTarget: number; matchedCount?: number; phrase: boolean; repetition?: number; compact?: boolean; topAligned?: boolean; intrinsic?: boolean
 }): React.JSX.Element {
   const theme = useNativeTheme()
   const index = Math.max(0, Math.min(activeTarget, prompt.targets.length - 1))
@@ -18,16 +19,18 @@ export function TrainingLessonOverview({ prompt, activeTarget, phrase, repetitio
     : keyLabel(keyName(prompt.key))
   const description = prompt.kind === 'chord-tone'
     ? t('phone.training.chordSing', { note: target.noteName, role: chordRoleWord(prompt.role) })
+    : prompt.kind === 'melody' ? t('phone.training.noteOfTotal', { note: index + 1, total: notes.length })
     : prompt.kind === 'scale' ? t(phrase ? 'phone.training.scalePhraseHelp' : 'phone.training.scaleGuidedHelp')
     : prompt.kind === 'interval' ? t(prompt.taskMode === 'find' ? 'phone.training.intervalFindHelp' : 'phone.training.intervalStepHelp')
     : prompt.kind === 'arpeggio' ? t('phone.training.arpeggioStepHelp') : t('phone.training.singNamedNote', { note: target.noteName })
   const pitch = target.noteName.replace(/-?\d+$/, '')
   const octave = target.noteName.slice(pitch.length)
-  return <View testID="training-lesson-overview" style={[s.overview, prompt.kind === 'scale' && s.scaleOverview, compact && s.compactOverview, topAligned && s.topAligned]}>
-    <View accessibilityLabel={`Target note ${target.noteName}`} style={s.heading}><Text style={[s.title, compact && s.compactTitle, { color: theme.text }]}>{title}</Text>{'direction' in prompt && <Text style={[s.direction, compact && s.compactDirection, { color: theme.dim }]}>{directionWord(prompt.direction)}</Text>}</View>
-    <Text style={[s.description, prompt.kind === 'scale' && s.scaleDescription, compact && s.compactDescription, { color: theme.text }]}>{description}</Text>
+  return <View testID="training-lesson-overview" style={[s.overview, prompt.kind === 'melody' && { minHeight: 0, gap: 4, paddingVertical: 0 }, prompt.kind === 'scale' && s.scaleOverview, compact && s.compactOverview, topAligned && s.topAligned, intrinsic && { flex: 0, flexShrink: 0 }]}>
+    <View accessibilityLabel={`Target note ${target.noteName}`} style={s.heading}><Text style={[s.title, prompt.kind === 'melody' && { fontSize: 22, lineHeight: 26 }, compact && s.compactTitle, { color: theme.text }]}>{title}</Text>{'direction' in prompt && <Text style={[s.direction, compact && s.compactDirection, { color: theme.dim }]}>{directionWord(prompt.direction)}</Text>}</View>
+    <Text style={[s.description, prompt.kind === 'melody' && { fontSize: 14, lineHeight: 18 }, prompt.kind === 'scale' && s.scaleDescription, compact && s.compactDescription, { color: theme.text }]}>{description}</Text>
     {repetition !== undefined && <Text style={[s.direction, compact && s.compactDirection, { color: theme.dim }]}>{t('phone.training.repeatN', { n: repetition })}</Text>}
-    {notes.length > 1 && <View style={s.notes}>{notes.map((note, position) => {
+    {prompt.kind === 'melody' && <MelodyGrid prompt={prompt} activeTarget={activeTarget} matchedCount={matchedCount} />}
+    {prompt.kind !== 'melody' && notes.length > 1 && <View style={s.notes}>{notes.map((note, position) => {
       const selected = prompt.kind === 'chord-tone' ? note.pitchClass === target.pitchClass : position === index
       const done = (prompt.kind === 'note' || prompt.kind === 'scale-degree' || prompt.kind === 'scale') && position < index
       return <View key={`${note.noteName}:${position}`} testID={selected ? 'training-current-note' : undefined} accessibilityLabel={`${note.noteName}${selected ? `, ${t('phone.training.currentTarget')}` : ''}`} style={[s.note, notes.length > 4 && s.scaleNote, compact && notes.length <= 4 && s.compactNote, { backgroundColor: selected ? theme.accentSoft : done ? theme.line : theme.panelDeep, borderColor: selected ? theme.accent : done ? theme.lineStrong : theme.controlLine }]}>

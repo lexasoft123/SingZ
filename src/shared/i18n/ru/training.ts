@@ -3,6 +3,23 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  "training.melody.level": "Уровень мелодии",
+  "training.melody.level.first-phrases": "Первые фразы",
+  "training.melody.level.five-notes": "Пять ступеней",
+  "training.melody.level.motifs": "Мотивы",
+  "training.melody.level.wide": "Широкие фразы",
+  "training.melody.level.chromatic": "Хроматические ноты",
+  "training.melody.level.first-phrases.help": "Три ступени гаммы в узком диапазоне.",
+  "training.melody.level.five-notes.help": "Пять ступеней, движение по секундам и терциям.",
+  "training.melody.level.motifs.help": "Запоминайте короткий мотив и его варианты.",
+  "training.melody.level.wide.help": "До октавы, с подготовленными скачками.",
+  "training.melody.level.chromatic.help": "Проходящие и вспомогательные ноты вне тональности с разрешением на полутон.",
+
+  "training.exercise.melody.label": "Мелодия",
+  "training.melody.help": "Послушайте мелодию целиком, затем спойте ноты по порядку. Не спешите — ритм не оценивается.",
+  "training.melody.length": "Нот в мелодии",
+  "training.melody.gridCaption": "1 строка = 1 полутон · числа показывают интервал",
+
   'training.setup.soundType': 'Инструмент',
   'training.sound.piano': 'Фортепиано',
   'training.sound.electric': 'Электропиано',

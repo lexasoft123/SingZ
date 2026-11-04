@@ -16,6 +16,9 @@ export interface TrainingRange {
   readonly highMidi: number
 }
 
+export const MELODY_LEVELS = ['first-phrases', 'five-notes', 'motifs', 'wide', 'chromatic'] as const
+export type MelodyLevel = typeof MELODY_LEVELS[number]
+
 export type TrainingTaskMode = 'imitate' | 'find' | 'identify'
 export type TrainingDirection = 'ascending' | 'descending'
 export type TrainingDirectionChoice = TrainingDirection | 'both'
@@ -31,6 +34,7 @@ export type TrainingExerciseKind =
   | 'interval'
   | 'chord-tone'
   | 'arpeggio'
+  | 'melody'
   | 'scale'
 
 /** `mixed` is a session recipe; every generated prompt still has a concrete kind. */
@@ -45,8 +49,11 @@ export interface TrainingSessionConfig {
   readonly length: number
   /** A string or integer produces the same session on every platform. */
   readonly seed: string | number
-  /** Used by interval and arpeggio prompts; defaults to both directions. */
+  /** Note count, independent of the melody vocabulary and difficulty. */
+  readonly melodyLength?: 3 | 5 | 7
+  readonly melodyLevel?: MelodyLevel
   readonly scalePresentation?: 'guided' | 'phrase'
+  /** Used by interval and arpeggio prompts; defaults to both directions. */
   readonly direction?: TrainingDirectionChoice
   /** Natural minor by default. Harmonic minor raises degree 7. */
   readonly minorScaleForm?: MinorScaleForm
@@ -66,8 +73,10 @@ export interface TrainingTarget {
   readonly midi: number
   readonly pitchClass: number
   readonly noteName: string
-  /** Scale degree in the session key, 1–7. */
+  /** Diatonic reference degree, 1–7; apply alteration for a chromatic target. */
   readonly scaleDegree: number
+  /** Chromatic alteration of the named scale degree, not a detuning allowance. */
+  readonly alteration?: -1 | 1
 }
 
 export interface TrainingChord {
@@ -136,7 +145,12 @@ export interface ScalePrompt extends PromptBase {
   readonly direction: TrainingDirection
 }
 
+export interface MelodyPrompt extends PromptBase {
+  readonly kind: 'melody'
+}
+
 export type TrainingPrompt =
+  | MelodyPrompt
   | NotePrompt
   | ScalePrompt
   | ScaleDegreePrompt

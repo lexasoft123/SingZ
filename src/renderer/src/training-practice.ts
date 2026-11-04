@@ -47,7 +47,8 @@ export function desktopTrainingCues(prompt: TrainingPrompt, scalePresentation: '
   return trainingReferenceCues(prompt, scalePresentation)
 }
 
-export function desktopTrainingCountdownSeconds(cues: readonly TrainingCue[]): number {
+export function desktopTrainingCountdownSeconds(cues: readonly TrainingCue[], kind?: string): number {
+  if (kind === 'melody') return 0 // The scheduled audio clock owns the listening phase.
   const events = cues.reduce(
     (total, cue) => total + (cue.articulation === 'sequence' ? cue.notes.length : 1),
     0

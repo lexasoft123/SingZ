@@ -4,7 +4,7 @@ export const TRAINING_RESPONSE_MS = 1_550
 
 export {
   SINGLE_NOTE_PITCH_WINDOW_OPTIONS, DEFAULT_SINGLE_NOTE_PITCH_WINDOW_CENTS,
-  SINGLE_NOTE_HOLD_MS, SINGLE_NOTE_MIN_CONFIDENCE, EMPTY_SINGLE_NOTE_LOCK,
+  trainingTargetHoldMs, SINGLE_NOTE_HOLD_MS, SINGLE_NOTE_MIN_CONFIDENCE, EMPTY_SINGLE_NOTE_LOCK,
   clampSingleNotePitchWindow, SingleNoteLockTracker,
   type SingleNoteLockState, type SingleNoteLockStatus
 } from '../gen/training-lib'

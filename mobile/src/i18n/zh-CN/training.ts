@@ -4,6 +4,23 @@ import type {
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const training: Translation<typeof en> = {
+  "phone.training.melodyLevel": "旋律级别",
+  "phone.training.melodyLevel.first-phrases": "入门乐句",
+  "phone.training.melodyLevel.five-notes": "五音练习",
+  "phone.training.melodyLevel.motifs": "动机",
+  "phone.training.melodyLevel.wide": "宽音域乐句",
+  "phone.training.melodyLevel.chromatic": "半音变化",
+  "phone.training.melodyLevel.first-phrases.help": "在较窄音域内练习音阶的三个音。",
+  "phone.training.melodyLevel.five-notes.help": "使用音阶的五个音，练习级进和三度。",
+  "phone.training.melodyLevel.motifs.help": "记住短小的动机及其变化。",
+  "phone.training.melodyLevel.wide.help": "在一个八度内练习有控制的跳进。",
+  "phone.training.melodyLevel.chromatic.help": "使用调外经过音和辅助音，以半音解决。",
+
+  "phone.training.exerciseMelodyTitle": "旋律",
+  "phone.training.melodyHelp": "听完整段旋律，再按顺序唱出每个音。不必着急，本练习不评判节奏。",
+  "phone.training.melodyLength": "每段旋律的音符数",
+  "phone.training.melodyGridCaption": "1 行 = 1 个半音 · 数字表示音程",
+
   'phone.training.soundSettingsSaved': '声音和音量设置适用于所有训练练习。',
   'phone.training.soundLabBack': '返回',
   'phone.training.soundLabTitle': '乐器试听',

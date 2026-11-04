@@ -3,6 +3,23 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const training: Translation<typeof en> = {
+  "phone.training.melodyLevel": "Melodi seviyesi",
+  "phone.training.melodyLevel.first-phrases": "İlk cümleler",
+  "phone.training.melodyLevel.five-notes": "Beş nota",
+  "phone.training.melodyLevel.motifs": "Motifler",
+  "phone.training.melodyLevel.wide": "Geniş cümleler",
+  "phone.training.melodyLevel.chromatic": "Kromatik notalar",
+  "phone.training.melodyLevel.first-phrases.help": "Dar bir aralıkta dizinin üç notası.",
+  "phone.training.melodyLevel.five-notes.help": "Adımlar ve üçlülerle dizinin beş notası.",
+  "phone.training.melodyLevel.motifs.help": "Kısa bir motifi ve çeşitlemelerini hatırla.",
+  "phone.training.melodyLevel.wide.help": "Kontrollü sıçramalarla bir oktava kadar.",
+  "phone.training.melodyLevel.chromatic.help": "Ton dışındaki geçiş ve komşu notaları, yarım sesle çözülür.",
+
+  "phone.training.exerciseMelodyTitle": "Melodi",
+  "phone.training.melodyHelp": "Melodinin tamamını dinle, ardından notaları sırayla söyle. Acele etme — ritim puanlanmaz.",
+  "phone.training.melodyLength": "Melodideki nota sayısı",
+  "phone.training.melodyGridCaption": "1 satır = 1 yarım ses · sayılar aralığı gösterir",
+
   "phone.training.soundSettingsSaved": "Sesiniz ve ses seviyen, tüm çalışma aktiviteleri için geçerlidir.",
   "phone.training.soundLabBack": "Geri",
   "phone.training.soundLabTitle": "Enstrüman ses laboratuvarı",

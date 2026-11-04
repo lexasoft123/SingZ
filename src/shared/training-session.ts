@@ -1,3 +1,4 @@
+import { MELODY_LEVELS } from './training-types'
 import {
   assertTrainingRange,
   diatonicInterval,
@@ -9,9 +10,11 @@ import {
   scaleSteps
 } from './music-theory'
 import { t } from './i18n/training'
+import { generateMelodyCandidates } from './training-melody-generator'
 import { intervalLabel } from './music-labels'
 import type {
   ArpeggioPrompt,
+  MelodyPrompt,
   ChordTonePrompt,
   ChordToneRole,
   IdentifyTrainingAttemptResult,
@@ -66,7 +69,7 @@ const RESULT_CLASSIFICATIONS: readonly TrainingResultClassification[] = [
 type Rng = () => number
 const trustedSessions = new WeakSet<object>()
 /** Identifies the reproducible prompt graph; completion receipts have their own format. */
-export const TRAINING_SESSION_FORMAT_VERSION = 7
+export const TRAINING_SESSION_FORMAT_VERSION = 8
 
 export function generateTrainingPrompts(config: TrainingSessionConfig): TrainingPrompt[] {
   validateConfig(config)
@@ -184,7 +187,7 @@ export function trainingRangeNotice(setup: {
     const labels: Record<TrainingExerciseKind, Parameters<typeof t>[0]> = {
       note: 'training.exercise.note.label', 'scale-degree': 'training.exercise.scaleDegree.label',
       interval: 'training.exercise.interval.label', 'chord-tone': 'training.exercise.chordTone.label',
-      scale: 'training.exercise.scaleDegree.label', arpeggio: 'training.exercise.arpeggio.label'
+      melody: 'training.exercise.melody.label', scale: 'training.exercise.scaleDegree.label', arpeggio: 'training.exercise.arpeggio.label'
     }
     const missing: string[] = []
     for (const kind of kinds) {
@@ -298,6 +301,8 @@ export function abandonTrainingSession(session: TrainingSessionData): TrainingSe
 
 function buildCandidates(config: TrainingSessionConfig, kind: TrainingExerciseKind): TrainingPrompt[] {
   switch (kind) {
+    case 'melody':
+      return melodyCandidates(config)
     case 'note':
       return noteCandidates(config)
     case 'scale-degree':
@@ -313,6 +318,14 @@ function buildCandidates(config: TrainingSessionConfig, kind: TrainingExerciseKi
     default:
       return assertNever(kind)
   }
+}
+
+function melodyCandidates(config: TrainingSessionConfig): MelodyPrompt[] {
+  return generateMelodyCandidates(config, { scaleForKey, midiNoteNameForSpelling, midiToPitchClass }).map(targets => ({
+    id: '', kind: 'melody', taskMode: config.taskMode, key: { ...config.key },
+    instruction: t('training.melody.help'), targets,
+    cues: [keyContextCue(config), cue('answer', 'sequence', targets.map(t => t.midi))]
+  }))
 }
 
 function noteCandidates(config: TrainingSessionConfig): NotePrompt[] {
@@ -713,6 +726,8 @@ function validateConfig(config: TrainingSessionConfig): void {
       'intervalSizes',
       'intervalSemitones',
       'scalePresentation',
+      'melodyLength',
+      'melodyLevel',
       'chordDegrees',
       'mixedKinds'
     ],
@@ -726,7 +741,7 @@ function validateConfig(config: TrainingSessionConfig): void {
   if (!Number.isInteger(config.key.tonicPc) || config.key.tonicPc < 0 || config.key.tonicPc > 11)
     throw new RangeError('Training key pitch class must be an integer from 0 to 11.')
   validateOneOf(config.key.mode, ['major', 'minor'], 'Training key mode')
-  validateOneOf(config.exercise, [...DEFAULT_MIXED_KINDS, 'scale', 'mixed'], 'Exercise selection')
+  validateOneOf(config.exercise, [...DEFAULT_MIXED_KINDS, 'scale', 'melody', 'mixed'], 'Exercise selection')
   validateOneOf(config.taskMode, ['imitate', 'find', 'identify'], 'Task mode')
   if (!Number.isInteger(config.length) || config.length < 1 || config.length > 1000)
     throw new RangeError('Session length must be an integer from 1 to 1000.')
@@ -736,7 +751,9 @@ function validateConfig(config: TrainingSessionConfig): void {
   )
     throw new RangeError('Session seed must be a string or finite integer.')
   if (config.scalePresentation !== undefined) validateOneOf(config.scalePresentation, ['guided', 'phrase'], 'Scale presentation')
-  if (config.exercise === 'scale' && config.taskMode !== 'imitate') throw new RangeError('Scales require singing.')
+  if (config.melodyLevel !== undefined) validateOneOf(config.melodyLevel, MELODY_LEVELS, 'Melody level')
+  if (config.melodyLength !== undefined) validateOneOf(config.melodyLength, [3, 5, 7], 'Melody length')
+  if ((config.exercise === 'scale' || config.exercise === 'melody') && config.taskMode !== 'imitate') throw new RangeError('This exercise requires singing.')
   if (config.intervalSemitones !== undefined) validateIntegerRange(config.intervalSemitones, 1, 12, 'Interval distance')
   if (config.direction !== undefined)
     validateOneOf(config.direction, ['ascending', 'descending', 'both'], 'Direction')
@@ -831,7 +848,7 @@ function validatePrompt(prompt: TrainingPrompt, config: TrainingSessionConfig): 
   if (!prompt || typeof prompt !== 'object') throw new RangeError('Training prompt is invalid.')
   validateOneOf(
     prompt.kind,
-    ['note', 'scale-degree', 'interval', 'chord-tone', 'arpeggio', 'scale'],
+    ['note', 'scale-degree', 'interval', 'chord-tone', 'arpeggio', 'scale', 'melody'],
     'Prompt kind'
   )
   assertExactKeys(prompt, promptKeys(prompt.kind), 'Training prompt')
@@ -853,8 +870,8 @@ function validatePrompt(prompt: TrainingPrompt, config: TrainingSessionConfig): 
     prompt.cues.length > MAX_CUES_PER_PROMPT
   )
     throw new RangeError(`Training prompt needs one to ${MAX_CUES_PER_PROMPT} playback cues.`)
-  for (const item of prompt.cues) validateCue(item, prompt.kind === 'scale' ? 8 : MAX_NOTES_PER_CUE)
-  const expectedTargets = targetCountForKind(prompt.kind)
+  for (const item of prompt.cues) validateCue(item, prompt.kind === 'scale' || prompt.kind === 'melody' ? 8 : MAX_NOTES_PER_CUE)
+  const expectedTargets = prompt.kind === 'melody' ? config.melodyLength ?? 5 : targetCountForKind(prompt.kind)
   if (!Array.isArray(prompt.targets) || prompt.targets.length !== expectedTargets)
     throw new RangeError(`${prompt.kind} prompts require exactly ${expectedTargets} target notes.`)
   for (const target of prompt.targets) {
@@ -863,6 +880,10 @@ function validatePrompt(prompt: TrainingPrompt, config: TrainingSessionConfig): 
       throw new RangeError('Prompt target is outside the configured singing range.')
   }
   switch (prompt.kind) {
+    case 'melody':
+      // restoreTrainingSession compares the entire phrase with the canonical
+      // generator once, rather than rebuilding the vocabulary for every prompt.
+      return
     case 'note':
       return
     case 'scale-degree':
@@ -916,6 +937,7 @@ function validatePromptKindSelection(
 function promptKeys(kind: TrainingExerciseKind): readonly string[] {
   const common = ['id', 'kind', 'taskMode', 'key', 'instruction', 'cues', 'targets'] as const
   switch (kind) {
+    case 'melody':
     case 'note':
       return common
     case 'scale-degree':
@@ -1039,7 +1061,8 @@ function validateCue(item: TrainingCue, maximumNotes = MAX_NOTES_PER_CUE): void 
 
 function validateTarget(target: TrainingTarget): void {
   if (!target || typeof target !== 'object') throw new RangeError('Training target is invalid.')
-  assertExactKeys(target, ['midi', 'pitchClass', 'noteName', 'scaleDegree'], 'Training target')
+  assertExactKeys(target, ['midi', 'pitchClass', 'noteName', 'scaleDegree', ...(target.alteration === undefined ? [] : ['alteration'])], 'Training target')
+  if (target.alteration !== undefined) validateOneOf(target.alteration, [-1, 1], 'Target alteration')
   validateIntegerRange(target.midi, 0, 127, 'Target MIDI note')
   validateIntegerRange(target.pitchClass, 0, 11, 'Target pitch class')
   if (target.pitchClass !== midiToPitchClass(target.midi))
@@ -1085,7 +1108,7 @@ function validateNumberList(
   if (new Set(values).size !== values.length) throw new RangeError(`${label} must be unique.`)
 }
 
-function targetCountForKind(kind: TrainingExerciseKind): 1 | 2 | 3 | 8 {
+function targetCountForKind(kind: Exclude<TrainingExerciseKind, 'melody'>): 1 | 2 | 3 | 8 {
   switch (kind) {
     case 'note':
     case 'scale-degree':
@@ -1217,6 +1240,7 @@ function identifyAnswerIsCorrect(prompt: TrainingPrompt, answer: TrainingIdentif
     case 'chord-tone':
       if (answer.kind !== 'chord-tone') return false
       return answer.role === prompt.role
+    case 'melody':
     case 'scale':
       return false
     case 'arpeggio':
@@ -1371,6 +1395,8 @@ function stableConfig(config: TrainingSessionConfig): string {
     intervalSemitones: config.intervalSemitones,
     intervalSizes: config.intervalSizes ?? DEFAULT_INTERVALS,
     chordDegrees: config.chordDegrees ?? DEFAULT_DEGREES,
+    ...(config.melodyLength === undefined ? {} : { melodyLength: config.melodyLength }),
+    ...(config.melodyLevel === undefined ? {} : { melodyLevel: config.melodyLevel }),
     scalePresentation: config.scalePresentation ?? 'guided',
     mixedKinds: config.mixedKinds ?? DEFAULT_MIXED_KINDS
   })
@@ -1409,6 +1435,8 @@ function cloneConfig(config: TrainingSessionConfig): TrainingSessionConfig {
       ? {}
       : { minorScaleForm: config.minorScaleForm }),
     ...(config.minorHarmony === undefined ? {} : { minorHarmony: config.minorHarmony }),
+    ...(config.melodyLength === undefined ? {} : { melodyLength: config.melodyLength }),
+    ...(config.melodyLevel === undefined ? {} : { melodyLevel: config.melodyLevel }),
     ...(config.scalePresentation === undefined ? {} : { scalePresentation: config.scalePresentation }),
     ...(config.intervalSemitones === undefined ? {} : { intervalSemitones: config.intervalSemitones }),
     intervalSizes: config.intervalSizes ? [...config.intervalSizes].sort((a, b) => a - b) : undefined,
@@ -1426,7 +1454,8 @@ function cloneTarget(target: TrainingTarget): TrainingTarget {
     midi: target.midi,
     pitchClass: target.pitchClass,
     noteName: target.noteName,
-    scaleDegree: target.scaleDegree
+    scaleDegree: target.scaleDegree,
+    ...(target.alteration === undefined ? {} : { alteration: target.alteration })
   }
 }
 
@@ -1457,6 +1486,8 @@ function clonePrompt(prompt: TrainingPrompt, id = prompt.id): TrainingPrompt {
     targets: prompt.targets.map(cloneTarget)
   }
   switch (prompt.kind) {
+    case 'melody':
+      return { ...common, kind: 'melody' }
     case 'note':
       return { ...common, kind: 'note' }
     case 'scale-degree':

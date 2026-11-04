@@ -3,6 +3,23 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  "training.melody.level": "Nivel de melodía",
+  "training.melody.level.first-phrases": "Primeras frases",
+  "training.melody.level.five-notes": "Cinco notas de la escala",
+  "training.melody.level.motifs": "Motivos",
+  "training.melody.level.wide": "Frases más amplias",
+  "training.melody.level.chromatic": "Notas cromáticas",
+  "training.melody.level.first-phrases.help": "Tres notas de la escala en un registro reducido.",
+  "training.melody.level.five-notes.help": "Cinco notas de la escala, con pasos y terceras.",
+  "training.melody.level.motifs.help": "Recuerda un motivo corto y sus variaciones.",
+  "training.melody.level.wide.help": "Hasta una octava, con saltos controlados.",
+  "training.melody.level.chromatic.help": "Notas de paso y vecinas fuera de la tonalidad, que resuelven por semitono.",
+
+  "training.exercise.melody.label": "Melodía",
+  "training.melody.help": "Escucha toda la melodía y luego canta las notas en orden. Tómate tu tiempo: el ritmo no se evalúa.",
+  "training.melody.length": "Notas en cada melodía",
+  "training.melody.gridCaption": "1 fila = 1 semitono · los números indican el intervalo",
+
   "training.setup.soundType": "Instrumento",
   "training.sound.piano": "Piano",
   "training.sound.electric": "Piano eléctrico",

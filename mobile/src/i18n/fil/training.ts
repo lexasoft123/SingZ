@@ -3,6 +3,23 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const training: Translation<typeof en> = {
+  "phone.training.melodyLevel": "Antas ng melodiya",
+  "phone.training.melodyLevel.first-phrases": "Mga unang parirala",
+  "phone.training.melodyLevel.five-notes": "Limang nota",
+  "phone.training.melodyLevel.motifs": "Mga motibo",
+  "phone.training.melodyLevel.wide": "Mas malawak na parirala",
+  "phone.training.melodyLevel.chromatic": "Mga kromatikong nota",
+  "phone.training.melodyLevel.first-phrases.help": "Tatlong nota ng iskala sa makitid na saklaw.",
+  "phone.training.melodyLevel.five-notes.help": "Limang nota ng iskala, na may mga hakbang at tersiya.",
+  "phone.training.melodyLevel.motifs.help": "Tandaan ang maikling motibo at mga baryasyon nito.",
+  "phone.training.melodyLevel.wide.help": "Hanggang isang oktaba, na may kontroladong pagtalon.",
+  "phone.training.melodyLevel.chromatic.help": "Mga nota sa pagitan at katabi na wala sa tono, na lumulutas nang isang semitono.",
+
+  "phone.training.exerciseMelodyTitle": "Melodiya",
+  "phone.training.melodyHelp": "Pakinggan ang buong melodiya, saka kantahin ang mga nota nang sunod-sunod. Hindi binibigyan ng marka ang ritmo.",
+  "phone.training.melodyLength": "Mga nota sa bawat melodiya",
+  "phone.training.melodyGridCaption": "1 hanay = 1 semitono · ipinapakita ng mga numero ang pagitan",
+
   "phone.training.soundSettingsSaved": "Ang iyong tunog at lakas ng tunog ay may kaugnayan sa bawat ehersisyo sa pagsasanay.",
   "phone.training.soundLabBack": "Bumalik",
   "phone.training.soundLabTitle": "Lab ng tunog ng instrumento",

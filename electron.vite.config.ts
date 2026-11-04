@@ -9,7 +9,15 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()]
   },
   renderer: {
-    build: { assetsInlineLimit: path => path.includes('/training-sounds/') ? true : undefined },
+    build: {
+      assetsInlineLimit: path => path.includes('/training-sounds/') ? true : undefined,
+      rollupOptions: { output: {
+        onlyExplicitManualChunks: true,
+        // Keep route recovery from fetching an app-shell dependency URL again.
+        hoistTransitiveImports: false,
+        manualChunks: id => /\/training-(melody-generator|types)\.ts$/.test(id) ? 'melody-generator' : undefined
+      } }
+    },
     plugins: [
       {
         name: 'drive-reader-recovery-isolation',
@@ -29,11 +37,12 @@ export default defineConfig({
         async resolveId(source, importer) {
           const route = importer?.match(/[?&]training-route=(primary|recovery)/)?.[1]
           if (!route) return null
+          const melodyModule = source === './MelodyGrid' || source.endsWith('/training-melody') || source.endsWith('/training-types')
           const iconEntry = source === '@singz/ui/icons'
           const bannerEntry = source === '@singz/ui/banner'
           const bannerUtility = source === '../util/cx.js' && importer?.includes('/@singz/ui/dist/primitives/Banner.js')
           const iconArtwork = source === './artwork.js' && importer?.includes('/@singz/ui/dist/icons/')
-          if (!iconEntry && !iconArtwork && !bannerEntry && !bannerUtility) return null
+          if (!melodyModule && !iconEntry && !iconArtwork && !bannerEntry && !bannerUtility) return null
           // Recovery must not refetch a failed primary UIKit URL. Keep each
           // route's small UIKit module closure independent, like the route itself.
           const resolved = await this.resolve(source, importer?.split('?')[0], { skipSelf: true })

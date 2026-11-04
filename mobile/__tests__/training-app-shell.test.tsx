@@ -1,6 +1,6 @@
 import React from 'react'
 import ReactTestRenderer from 'react-test-renderer'
-import { AppState } from 'react-native'
+import { AppState, View } from 'react-native'
 import { AudioManager } from 'react-native-audio-api'
 import { trainingTargetWindows } from '../src/training/runtime'
 import { readFileSync } from 'node:fs'
@@ -215,6 +215,25 @@ describe('mobile training app shell', () => {
     mockSetTrimMs.mockResolvedValue(undefined)
     mockStopForOwnership.mockResolvedValue(true)
     mockParkForBackground.mockResolvedValue(undefined)
+  })
+
+  test('keeps one background outside retained tab scenes and reserves the measured tab bar', async () => {
+    let tree!: ReactTestRenderer.ReactTestRenderer
+    await ReactTestRenderer.act(async () => { tree = ReactTestRenderer.create(<App />); await Promise.resolve() })
+    const backgrounds = () => tree.root.findAllByType(View).filter(node => node.props.testID === 'scene-background')
+    expect(backgrounds()).toHaveLength(1)
+    const initial = backgrounds()[0]
+    const bar = tree.root.findByProps({ testID: 'root-tab-bar' })
+    await ReactTestRenderer.act(() => bar.props.onLayout({ nativeEvent: { layout: { height: 107 } } }))
+    const { StyleSheet } = require('react-native')
+    expect(StyleSheet.flatten(backgrounds()[0].props.style).bottom).toBe(107)
+    for (const label of ['Train', 'Songs', 'Train', 'Songs']) {
+      const tab = tree.root.findAll(node => node.props.accessibilityRole === 'tab' && node.props.accessibilityLabel === label && typeof node.props.onPress === 'function')[0]
+      await ReactTestRenderer.act(async () => { tab.props.onPress(); await flushOwnershipHandoff() })
+      expect(backgrounds()).toHaveLength(1)
+      expect(backgrounds()[0]).toBe(initial)
+    }
+    await ReactTestRenderer.act(() => tree.unmount())
   })
 
   test('does not activate microphone training until native output cleanup is proven', async () => {

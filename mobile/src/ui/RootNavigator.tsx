@@ -426,6 +426,6 @@ export default function RootNavigator({
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: C.bg },
+  root: { flex: 1, backgroundColor: 'transparent' },
   sheet: { flex: 1, backgroundColor: C.sheet }
 })

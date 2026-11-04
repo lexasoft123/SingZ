@@ -5665,3 +5665,7 @@ body.win:not(.glass) .modal-card.lyed-card {
 body.modal-open .play.is-starting svg { animation-play-state: paused; }
 @media (prefers-reduced-motion: reduce) { .play.is-starting svg { animation: none; } }
 @keyframes play-starting { to { transform: rotate(360deg); } }
+
+/* A whole melody needs its graph's natural height rather than the single-note slots. */
+.vt-target-stage.vt-melody-stage { display: flex; flex-direction: column; height: auto; gap: 6px; }
+.vt-melody-stage .vt-target-note { font-size: 30px; letter-spacing: -.02em; }

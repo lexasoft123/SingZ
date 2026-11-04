@@ -120,7 +120,11 @@ jest.mock('@shopify/react-native-skia', () => {
   const node = () => null;
   return {
     __esModule: true,
-    Canvas: View,
+    Canvas: require('react').forwardRef((props, ref) => {
+      require('react').useImperativeHandle(ref, () => ({ redraw: jest.fn() }));
+      return require('react').createElement(View, props);
+    }),
+    useCanvasRef: () => require('react').useRef(null),
     Rect: View,
     RoundedRect: View,
     Group: node,

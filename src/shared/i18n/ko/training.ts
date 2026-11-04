@@ -3,6 +3,23 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../types'
 
 export const training: Translation<typeof en> = {
+  "training.melody.level": "멜로디 단계",
+  "training.melody.level.first-phrases": "첫 프레이즈",
+  "training.melody.level.five-notes": "다섯 음",
+  "training.melody.level.motifs": "동기",
+  "training.melody.level.wide": "넓은 프레이즈",
+  "training.melody.level.chromatic": "반음계 음",
+  "training.melody.level.first-phrases.help": "좁은 음역에서 음계의 세 음을 연습해요.",
+  "training.melody.level.five-notes.help": "음계의 다섯 음으로 순차 진행과 3도를 연습해요.",
+  "training.melody.level.motifs.help": "짧은 동기와 그 변형을 기억해 보세요.",
+  "training.melody.level.wide.help": "한 옥타브 안에서 도약을 연습해요.",
+  "training.melody.level.chromatic.help": "조 밖의 경과음과 보조음을 쓰고 반음으로 해결해요.",
+
+  "training.exercise.melody.label": "멜로디",
+  "training.melody.help": "멜로디 전체를 듣고 음을 순서대로 부르세요. 천천히 불러도 돼요. 리듬은 평가하지 않아요.",
+  "training.melody.length": "멜로디의 음 개수",
+  "training.melody.gridCaption": "1행 = 반음 · 숫자는 음정 표시",
+
   "training.setup.soundType": "기기",
   "training.sound.piano": "피아노",
   "training.sound.electric": "전기 피아노",

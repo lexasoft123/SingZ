@@ -8,6 +8,23 @@
  * needed (button labels), so translate them as the bare word.
  */
 export const training = {
+  "training.melody.level": "Melody level",
+  "training.melody.level.first-phrases": "First phrases",
+  "training.melody.level.five-notes": "Five notes",
+  "training.melody.level.motifs": "Motifs",
+  "training.melody.level.wide": "Wider phrases",
+  "training.melody.level.chromatic": "Chromatic notes",
+  "training.melody.level.first-phrases.help": "Three scale notes in a narrow range.",
+  "training.melody.level.five-notes.help": "Five scale notes, with steps and thirds.",
+  "training.melody.level.motifs.help": "Short motifs and their variations.",
+  "training.melody.level.wide.help": "Up to an octave, with controlled leaps.",
+  "training.melody.level.chromatic.help": "Non-key passing and neighbor notes resolve by semitone.",
+
+  "training.exercise.melody.label": "Melody",
+  "training.melody.help": "Listen to the whole melody, then sing the notes in order. Take your time — rhythm is not scored.",
+  "training.melody.length": "Notes in each melody",
+  "training.melody.gridCaption": "1 row = 1 semitone · numbers show the interval",
+
   'training.setup.soundType': 'Instrument',
   'training.sound.piano': 'Piano',
   'training.sound.electric': 'Electric piano',

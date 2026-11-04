@@ -1,3 +1,4 @@
+import { trainingTargetHoldMs } from '../../../shared/training-pitch-lock'
 import { Banner } from '@singz/ui/banner'
 import { reportTrainingTiming } from '../audio/training-timing'
 import type { IconName, IconProps } from '@singz/ui/icons'
@@ -68,7 +69,6 @@ import {
 } from '../training-ui-state'
 import {
   EMPTY_TRAINING_PITCH_LOCK,
-  TRAINING_HOLD_MS,
   TRAINING_PITCH_WINDOW_OPTIONS,
   TRAINING_REFERENCE_VOLUME_MAX,
   TRAINING_REFERENCE_VOLUME_MIN,
@@ -144,6 +144,9 @@ interface ActiveDesktopVocalRun {
   completed: boolean
 }
 
+const MelodyLengthSelector = lazy(() => import('./MelodyGrid').then(module => ({ default: module.MelodyLengthSelector })))
+const MelodyGrid = lazy(() => import('./MelodyGrid').then(module => ({ default: module.MelodyGrid })))
+
 const LazyIcon = lazy(() => import('@singz/ui/icons').then(module => ({ default: module.Icon })))
 function TrainingIcon(props: IconProps): React.JSX.Element {
   return <Suspense fallback={null}><LazyIcon {...props} /></Suspense>
@@ -183,6 +186,7 @@ function trainingExercises(): readonly {
       cue: 'R·3·5',
       description: t('training.exercise.chordTone.description')
     },
+    { value: 'melody', label: t('training.exercise.melody.label'), cue: '●·●·●', description: t('training.melody.help') },
     {
       value: 'arpeggio',
       label: t('training.exercise.arpeggio.label'),
@@ -510,7 +514,7 @@ export default function VocalTraining({
             return
           }
           run.activeTarget++
-          run.targetStartedAtMs = endMs + 350
+          run.targetStartedAtMs = endMs + (prompt.kind === 'melody' ? 80 : 350)
           run.tracker.reset()
           setPitchLock(EMPTY_TRAINING_PITCH_LOCK)
           setLive(
@@ -551,7 +555,8 @@ export default function VocalTraining({
           observation.midi,
           observation.confidence,
           target.midi,
-          mic.minConfidence
+          mic.minConfidence,
+          trainingTargetHoldMs(prompt.kind)
         )
         const next = livePitchFromLock(
           lock,
@@ -582,7 +587,7 @@ export default function VocalTraining({
             prompt, targetWindows: run.windows, observations: run.observations,
             range: trainingScoringRange(stateRef.current)!,
             options: { minimumConfidence: mic.minConfidence }
-          }, TRAINING_HOLD_MS))
+          }, trainingTargetHoldMs(prompt.kind)))
           // Hold the locked state long enough for React to paint and the
           // 120 ms meter transition to reach 100% before replacing the note.
           run.completionAtMs = performance.now() + 250
@@ -638,7 +643,7 @@ export default function VocalTraining({
           return
         }
         const promptCues = desktopTrainingCues(prompt, stateRef.current.session?.config.scalePresentation)
-        const countdownSeconds = desktopTrainingCountdownSeconds(promptCues)
+        const countdownSeconds = desktopTrainingCountdownSeconds(promptCues, prompt.kind)
         const noteDurationSec = desktopTrainingCueDurationSeconds(promptCues)
         setCountdown(countdownSeconds)
         const timeline = await cues.schedule(promptCues, {
@@ -655,6 +660,7 @@ export default function VocalTraining({
         const audioRemainingMs = Math.max(0, (audibleEndTime - cues.currentTime) * 1000)
         const countdownDurationMs = countdownSeconds * 1_000
         const waitMs = Math.max(audioRemainingMs, countdownDurationMs)
+        setCountdown(Math.max(1, Math.ceil(waitMs / 1000)))
         const countdownDeadline = performance.now() + waitMs
         countdownTimer.current = window.setInterval(() => {
           if (generation.current !== run) return
@@ -1324,7 +1330,7 @@ function TrainingSetup({
   onBack: () => void
 }): React.JSX.Element {
   useEffect(() => {
-    if (!micAvailable && setup.exercise !== 'scale' && setup.taskMode !== 'identify') onChange({ taskMode: 'identify' })
+    if (!micAvailable && setup.exercise !== 'scale' && setup.exercise !== 'melody' && setup.taskMode !== 'identify') onChange({ taskMode: 'identify' })
   }, [micAvailable, onChange, setup.taskMode, setup.exercise])
   const rangeNotice = trainingRangeNotice(setup)
   const exercise = trainingExercises().find((item) => item.value === setup.exercise)!
@@ -1348,6 +1354,7 @@ function TrainingSetup({
         <h1>{exercise.label}</h1>
       </header>
       {rangeNotice && <Banner className="vt-notice">{rangeNotice}</Banner>}
+      {setup.exercise === 'melody' && <Suspense fallback={null}><MelodyLengthSelector setup={setup} onChange={onChange} /></Suspense>}
       <div className="vt-setup-grid">
         <fieldset className="vt-fieldset">
           <legend>{t('training.setup.legend.musicalContext')}</legend>
@@ -1388,7 +1395,7 @@ function TrainingSetup({
                   key={mode}
                   className={setup.taskMode === mode ? 'active' : ''}
                   aria-pressed={setup.taskMode === mode}
-                  disabled={setup.exercise === 'scale' ? mode !== 'imitate' || !micAvailable : !micAvailable && mode !== 'identify'}
+                  disabled={(setup.exercise === 'scale' || setup.exercise === 'melody') ? mode !== 'imitate' || !micAvailable : !micAvailable && mode !== 'identify'}
                   onClick={() => onChange({ taskMode: mode })}
                 >
                   {mode === 'imitate'
@@ -1604,7 +1611,7 @@ function TrainingSetup({
             </div>
             <p className="vt-help">
               {t('training.setup.help.pitchTolerance', {
-                seconds: TRAINING_HOLD_MS / 1_000
+                seconds: trainingTargetHoldMs(setup.exercise) / 1_000
               })}
             </p>
           </div>
@@ -1632,7 +1639,7 @@ function TrainingSetup({
         <button
           type="button"
           className="pill primary"
-          disabled={invalidSelection || audioBlocked || (setup.exercise === 'scale' && !micAvailable)}
+          disabled={invalidSelection || audioBlocked || ((setup.exercise === 'scale' || setup.exercise === 'melody') && !micAvailable)}
           onClick={onStart}
         >
           {t('training.setup.startPractice')}
@@ -1767,12 +1774,13 @@ function TrainingSession({
         </div>
       </header>
       <section className="vt-stage" key={`${prompt.id}:${state.exercisePhase}`}>
-        <div className="vt-target-stage">
+        <div className={`vt-target-stage${prompt.kind === 'melody' ? ' vt-melody-stage' : ''}`}>
           <p className="vt-eyebrow">
             {keyLabel(keyName(session.config.key))} ·{' '}
             {trainingPromptKindLabel(prompt, revealAnswer)}
           </p>
-          {prompt.targets.length > 1 && (
+          {prompt.kind === 'melody' && <Suspense fallback={null}><MelodyGrid prompt={prompt} matchedCount={activeTargetIndex + (pitchLock.locked ? 1 : 0)} activeTarget={activeTargetIndex} /></Suspense>}
+          {prompt.kind !== 'melody' && prompt.targets.length > 1 && (
             <div className="vt-target-sequence" aria-label={t('training.session.aria.targetNotes')}>
               {prompt.targets.map((item, index) => (
                 <span
@@ -1830,6 +1838,7 @@ function TrainingSession({
         )}
         {state.exercisePhase === 'respond' && countdown === null && prompt.taskMode !== 'identify' && target && (
           <PitchRunway
+            holdMs={trainingTargetHoldMs(prompt.kind)}
             live={live}
             pitchLock={pitchLock}
             pitchWindowCents={pitchWindowCents}
@@ -1916,11 +1925,13 @@ function CueListening({
 }
 
 function PitchRunway({
+  holdMs,
   live,
   pitchLock,
   pitchWindowCents,
   coarseGuidance
 }: {
+  holdMs: number
   live: LivePitch | null
   pitchLock: TrainingPitchLockState
   pitchWindowCents: number
@@ -1937,7 +1948,7 @@ function PitchRunway({
     live?.cents === null || live === null
       ? t('training.session.runway.holdInstruction', {
           cents: pitchWindowCents,
-          seconds: TRAINING_HOLD_MS / 1_000
+          seconds: holdMs / 1_000
         })
       : Math.abs(live.cents) <= pitchWindowCents
       ? t('training.session.runway.inTune')
@@ -2408,7 +2419,7 @@ function TrainingRecording({ active }: { active: boolean }): React.JSX.Element {
 function programLessonLabel(lesson: ProgramLesson): string {
   const names = ['unison', 'minor second', 'major second', 'minor third', 'major third', 'perfect fourth', 'diminished fifth', 'perfect fifth', 'minor sixth', 'major sixth', 'minor seventh', 'major seventh', 'perfect octave']
   if (lesson.semitones !== undefined) return musicalIntervalLabel(names[lesson.semitones])
-  const keys = { note: 'training.exercise.note.label', interval: 'training.exercise.interval.label', 'scale-degree': 'training.exercise.scaleDegree.label', 'chord-tone': 'training.exercise.chordTone.label', arpeggio: 'training.exercise.arpeggio.label', mixed: 'training.exercise.mixed.label', scale: 'training.program.scaleLabel' } as const
+  const keys = { melody: 'training.exercise.melody.label', note: 'training.exercise.note.label', interval: 'training.exercise.interval.label', 'scale-degree': 'training.exercise.scaleDegree.label', 'chord-tone': 'training.exercise.chordTone.label', arpeggio: 'training.exercise.arpeggio.label', mixed: 'training.exercise.mixed.label', scale: 'training.program.scaleLabel' } as const
   return t(keys[lesson.exercise])
 }
 

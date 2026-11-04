@@ -207,3 +207,13 @@ test('interval identification does not add vocal repetitions', () => {
   state = mobileTrainingReducer(state, { type: 'start', seed: 'six-questions' })
   expect(state.session!.prompts).toHaveLength(6)
 })
+
+test('restores melody level and length independently and generates chromatic targets', () => {
+  let state=initialTrainingState({...profile,exercise:'melody',melodyLevel:'chromatic',melodyLength:7})
+  expect(state.setup).toMatchObject({melodyLevel:'chromatic',melodyLength:7})
+  state=mobileTrainingReducer(state,{type:'choose-exercise',exercise:'melody'})
+  state=mobileTrainingReducer(state,{type:'start',seed:'chromatic-state'})
+  expect(state.error).toBeNull()
+  expect(state.session?.config).toMatchObject({melodyLevel:'chromatic',melodyLength:7})
+  expect(state.session?.prompts.every(p=>p.targets.length===7&&p.targets.some(t=>t.alteration!==undefined))).toBe(true)
+})

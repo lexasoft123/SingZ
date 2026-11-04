@@ -1,6 +1,10 @@
 export const SINGLE_NOTE_PITCH_WINDOW_OPTIONS = [5, 10, 15, 20] as const
 export const DEFAULT_SINGLE_NOTE_PITCH_WINDOW_CENTS = 10
 export const SINGLE_NOTE_HOLD_MS = 1_500
+export const MELODY_NOTE_HOLD_MS = 350
+export function trainingTargetHoldMs(kind: string): number {
+  return kind === 'melody' ? MELODY_NOTE_HOLD_MS : SINGLE_NOTE_HOLD_MS
+}
 export const SINGLE_NOTE_MIN_CONFIDENCE = 0.75
 
 const SINGLE_NOTE_MEDIAN_WINDOW_MS = 400
@@ -76,7 +80,8 @@ export class SingleNoteLockTracker {
     midi: number | null,
     confidence: number,
     targetMidi: number,
-    minConfidence = SINGLE_NOTE_MIN_CONFIDENCE
+    minConfidence = SINGLE_NOTE_MIN_CONFIDENCE,
+    holdMs = SINGLE_NOTE_HOLD_MS
   ): SingleNoteLockState {
     const elapsedMs = this.lastUpdateMs === null
       ? 0
@@ -117,7 +122,7 @@ export class SingleNoteLockTracker {
 
     if (centered) {
       this.outsideSinceMs = null
-      this.progressMs = Math.min(SINGLE_NOTE_HOLD_MS, this.progressMs + elapsedMs)
+      this.progressMs = Math.min(holdMs, this.progressMs + elapsedMs)
     } else {
       if (this.outsideSinceMs === null) this.outsideSinceMs = nowMs
       if (nowMs - this.outsideSinceMs > SINGLE_NOTE_DRIFT_GRACE_MS) {
@@ -125,10 +130,10 @@ export class SingleNoteLockTracker {
       }
     }
 
-    const locked = centered && this.progressMs >= SINGLE_NOTE_HOLD_MS
+    const locked = centered && this.progressMs >= holdMs
     return {
       status: locked ? 'locked' : centered ? 'holding' : voiced ? 'adjust' : 'waiting',
-      progress: this.progressMs / SINGLE_NOTE_HOLD_MS,
+      progress: this.progressMs / holdMs,
       progressMs: this.progressMs,
       centered,
       locked,

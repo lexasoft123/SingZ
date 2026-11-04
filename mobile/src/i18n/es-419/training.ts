@@ -3,6 +3,23 @@ import type { training as en } from '../en/training'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const training: Translation<typeof en> = {
+  "phone.training.melodyLevel": "Nivel de melodía",
+  "phone.training.melodyLevel.first-phrases": "Primeras frases",
+  "phone.training.melodyLevel.five-notes": "Cinco notas de la escala",
+  "phone.training.melodyLevel.motifs": "Motivos",
+  "phone.training.melodyLevel.wide": "Frases más amplias",
+  "phone.training.melodyLevel.chromatic": "Notas cromáticas",
+  "phone.training.melodyLevel.first-phrases.help": "Tres notas de la escala en un registro reducido.",
+  "phone.training.melodyLevel.five-notes.help": "Cinco notas de la escala, con pasos y terceras.",
+  "phone.training.melodyLevel.motifs.help": "Recuerda un motivo corto y sus variaciones.",
+  "phone.training.melodyLevel.wide.help": "Hasta una octava, con saltos controlados.",
+  "phone.training.melodyLevel.chromatic.help": "Notas de paso y vecinas fuera de la tonalidad, que resuelven por semitono.",
+
+  "phone.training.exerciseMelodyTitle": "Melodía",
+  "phone.training.melodyHelp": "Escucha toda la melodía y luego canta las notas en orden. Tómate tu tiempo: el ritmo no se evalúa.",
+  "phone.training.melodyLength": "Notas en cada melodía",
+  "phone.training.melodyGridCaption": "1 fila = 1 semitono · los números indican el intervalo",
+
   "phone.training.soundSettingsSaved": "Tu sonido y volumen se aplican a cada ejercicio de práctica.",
   "phone.training.soundLabBack": "Volver",
   "phone.training.soundLabTitle": "Laboratorio de sonido de instrumentos",
