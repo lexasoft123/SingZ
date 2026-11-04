@@ -982,7 +982,9 @@ public: the in-app pack URLs are
 There is no bundled splitter — every platform downloads its pack on first
 run. `scripts/build-gpu-pack.sh` builds the Apple Silicon torch/MPS pack;
 `scripts/build-onnx-pack.sh <target>` builds the demucs-onnx packs
-(win32-x64 with onnxruntime-directml, darwin-x64 with CPU onnxruntime).
+(win32-x64 with onnxruntime-directml, darwin-x64 with CPU onnxruntime,
+linux-x64 and linux-arm64 with the same CPU pipeline — each on a matching
+host; see docs/LINUX-ARM64.md).
 Pack tarballs must contain no symlinks in the model cache (Windows tar
 can't extract them without admin rights) — the script materializes and
 asserts this, then re-verifies the cache resolves fully offline.

@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # ONNX splitter pack: relocatable Python + demucs-onnx with the htdemucs fp16
 # model prewarmed into python/model-cache. This is the DEFAULT splitter the
-# app downloads on first run (Windows + Intel Macs; Apple Silicon uses the
-# torch/MPS pack from build-gpu-pack.sh).
+# app downloads on first run (Windows, Intel Macs and Linux; Apple Silicon
+# uses the torch/MPS pack from build-gpu-pack.sh).
 #
-# Usage: scripts/build-onnx-pack.sh [win32-x64|darwin-x64|linux-x64]
-#   win32-x64  — mainline onnxruntime + TensorRT-RTX plugin EP (RTX 30xx+)
-#   darwin-x64 — onnxruntime CPU (CoreML crashes on this graph)
+# Usage: scripts/build-onnx-pack.sh [win32-x64|darwin-x64|linux-x64|linux-arm64]
+#   win32-x64   — mainline onnxruntime + TensorRT-RTX plugin EP (RTX 30xx+)
+#   darwin-x64  — onnxruntime CPU (CoreML crashes on this graph)
+#   linux-x64   — mainline onnxruntime CPU, same pipeline as Windows minus the EP
+#   linux-arm64 — identical CPU pipeline on the aarch64 python-build-standalone
 set -euo pipefail
 
 TARGET="${1:-win32-x64}"
@@ -32,11 +34,34 @@ case "$TARGET" in
     WIN_PACK=0
     LINUX_PACK=1
     ;;
+  linux-arm64)
+    PBS_PY="cpython-3.12.13+${PBS_TAG}-aarch64-unknown-linux-gnu-install_only.tar.gz"
+    PYBIN="python/bin/python3"
+    SITE="python/lib/python3.12/site-packages"
+    WIN_PACK=0
+    LINUX_PACK=1
+    ;;
   *)
     echo "unknown target: $TARGET" >&2
     exit 1
     ;;
 esac
+# The pack embeds a native CPython and pip-installs native wheels, so it can
+# only be assembled on the target architecture itself — same matching-host
+# rule as the engine vendor scripts, which fail at assert-build-target. This
+# is the script's own guard for direct invocations (dist.cjs calls it with
+# the target the host can actually build). Both the system and the machine
+# are checked: an arm64 macOS host passes `uname -m` alone but cannot run
+# the aarch64-unknown-linux-gnu interpreter, which fails far later and
+# quieter than this.
+if [ "$LINUX_PACK" = 1 ]; then
+  host_system=$(uname -s)
+  host_machine=$(uname -m)
+  case "$TARGET:$host_system:$host_machine" in
+    linux-x64:Linux:x86_64|linux-arm64:Linux:aarch64|linux-arm64:Linux:arm64) ;;
+    *) echo "build-onnx-pack: $TARGET requires a matching native Linux ARM64/x64 host (uname reports: $host_system $host_machine)" >&2; exit 1 ;;
+  esac
+fi
 PBS_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_TAG}/${PBS_PY}"
 
 # Beat This! beat/downbeat model (MIT, code AND weights): exported to ONNX at

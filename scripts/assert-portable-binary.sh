@@ -33,7 +33,29 @@ if [[ "$TARGET" == linux-* ]]; then
     echo "assert-portable-binary: readelf is required to check $BIN" >&2
     exit 1
   fi
-  if ! DYNAMIC=$(readelf -d "$BIN"); then
+  # ELF identity before library hygiene: a cache link or a copy-paste can
+  # bless an x86-64 helper into vendor/linux-arm64 (or the reverse). On the
+  # matching host every NEEDED/RPATH check below then passes — the binary is
+  # only useless the moment a real board tries to exec it. readelf output is
+  # localized, so parse it under LC_ALL=C.
+  if ! HEADER=$(LC_ALL=C readelf -h "$BIN"); then
+    rm -f "$BIN"
+    echo "assert-portable-binary: could not inspect $BIN" >&2
+    exit 1
+  fi
+  ELF_CLASS=$(printf '%s\n' "$HEADER" | sed -n 's/^[[:space:]]*Class:[[:space:]]*//p')
+  ELF_DATA=$(printf '%s\n' "$HEADER" | sed -n 's/^[[:space:]]*Data:[[:space:]]*//p')
+  ELF_MACHINE=$(printf '%s\n' "$HEADER" | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')
+  WANT_MACHINE="Advanced Micro Devices X86-64"
+  [[ "$TARGET" == linux-arm64 ]] && WANT_MACHINE="AArch64"
+  if [ "$ELF_CLASS" != "ELF64" ] ||
+     [[ "$ELF_DATA" != "2's complement, little endian"* ]] ||
+     [[ "$ELF_MACHINE" != "$WANT_MACHINE"* ]]; then
+    rm -f "$BIN"
+    echo "$(basename "$BIN"): ELF identity is '$ELF_CLASS'/'$ELF_MACHINE' ($ELF_DATA), expected ELF64/$WANT_MACHINE little endian for $TARGET" >&2
+    exit 1
+  fi
+  if ! DYNAMIC=$(LC_ALL=C readelf -d "$BIN"); then
     rm -f "$BIN"
     echo "assert-portable-binary: could not inspect $BIN" >&2
     exit 1

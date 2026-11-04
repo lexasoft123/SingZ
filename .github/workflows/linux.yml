@@ -27,10 +27,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  debian-amd64:
-    # Newer host libc can execute the Debian 13 build without raising the
-    # package's ABI floor.
-    runs-on: ubuntu-26.04
+  debian:
+    # One leg per architecture; each builds natively (the ARM64 leg runs on
+    # the ARM64 hosted image, so the Debian 13 container is aarch64 there and
+    # the host installs and execs the arm64 .deb directly). A newer host libc
+    # can execute the Debian 13 build without raising the package's ABI floor.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-26.04
+            arch: x64
+            deb: amd64
+          - runner: ubuntu-26.04-arm
+            arch: arm64
+            deb: arm64
+    name: debian-${{ matrix.deb }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     defaults:
       run:
@@ -74,28 +87,31 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/singz-linux-cache/npm
-          key: linux-npm-${{ hashFiles('package-lock.json') }}
-          restore-keys: linux-npm-
+          key: linux-${{ matrix.arch }}-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: linux-${{ matrix.arch }}-npm-
 
       - name: Restore compiled engines and splitter pack
         id: engine-cache
         uses: actions/cache/restore@v4
         with:
           path: |
-            vendor/linux-x64
-            vendor/packs/gpu-splitter-linux-x64.tar.gz
+            vendor/linux-${{ matrix.arch }}
+            vendor/packs/gpu-splitter-linux-${{ matrix.arch }}.tar.gz
           # Existence skip guards mean only an exact input key is safe here.
           # Do not add a prefix fallback for compiled/downloaded outputs.
-          # CI orchestration does not change engine artifact inputs.
-          key: linux-engines-debian13-clang21-v1-${{ hashFiles('package-lock.json', 'scripts/**', '!scripts/ci/**', 'CMakeLists.txt', '.gitmodules', 'scripts/verify-zcore-submodule.py', 'scripts/zcore-gitlink.cjs', 'cmake/**', 'native/**', 'zcore/**', 'zdsp/**', 'tools/native/**', 'third_party/native/**', 'third_party/zcore/**') }}-${{ steps.zcore.outputs.revision }}
+          # CI orchestration does not change engine artifact inputs. The key
+          # carries the arch so one leg can never restore the other's cached
+          # binaries (a cache hit must never launder an x64 helper into an
+          # arm64 package or vice versa).
+          key: linux-${{ matrix.arch }}-engines-debian13-clang21-v1-${{ hashFiles('package-lock.json', 'scripts/**', '!scripts/ci/**', 'CMakeLists.txt', '.gitmodules', 'scripts/verify-zcore-submodule.py', 'scripts/zcore-gitlink.cjs', 'cmake/**', 'native/**', 'zcore/**', 'zdsp/**', 'tools/native/**', 'third_party/native/**', 'third_party/zcore/**') }}-${{ steps.zcore.outputs.revision }}
 
       - name: Restore compiler objects
         id: compiler-cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/singz-linux-cache/ccache
-          key: linux-ccache-debian13-clang21-v1-${{ github.sha }}
-          restore-keys: linux-ccache-debian13-clang21-v1-
+          key: linux-${{ matrix.arch }}-ccache-debian13-clang21-v1-${{ github.sha }}
+          restore-keys: linux-${{ matrix.arch }}-ccache-debian13-clang21-v1-
 
       - name: Prepare the Debian 13 build image
         run: |
@@ -129,7 +145,7 @@ jobs:
           DOCKERFILE
           docker build --file "$RUNNER_TEMP/singz-linux-image/Dockerfile" \
             --build-arg CI_UID="$(id -u)" --build-arg CI_GID="$(id -g)" \
-            --tag singz-linux-build:ci "$RUNNER_TEMP/singz-linux-image"
+            --tag singz-linux-build:ci-${{ matrix.arch }} "$RUNNER_TEMP/singz-linux-image"
 
       - name: Build and package in Debian 13
         run: |
@@ -147,7 +163,7 @@ jobs:
             --env CCACHE_DIR=/cache/ccache --env CCACHE_BASEDIR=/src \
             --env CCACHE_NOHASHDIR=true --env CCACHE_MAXSIZE=1G \
             --env SINGZ_MUTE=1 --env SINGZ_NO_SYNC=1 \
-            singz-linux-build:ci bash scripts/ci/linux-package.sh
+            singz-linux-build:ci-${{ matrix.arch }} bash scripts/ci/linux-package.sh
 
       # Save only a completed build; installed-app failures must not discard it.
       - name: Save compiled engines and splitter pack
@@ -155,8 +171,8 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: |
-            vendor/linux-x64
-            vendor/packs/gpu-splitter-linux-x64.tar.gz
+            vendor/linux-${{ matrix.arch }}
+            vendor/packs/gpu-splitter-linux-${{ matrix.arch }}.tar.gz
           key: ${{ steps.engine-cache.outputs.cache-primary-key }}
 
       - name: Install and test the packaged desktop app on the host
@@ -170,7 +186,7 @@ jobs:
       - name: Upload Linux installers
         uses: actions/upload-artifact@v4
         with:
-          name: SingZ-linux-amd64
+          name: SingZ-linux-${{ matrix.deb }}
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
@@ -184,12 +200,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: linux-desktop-diagnostics
+          name: linux-desktop-diagnostics-${{ matrix.arch }}
           if-no-files-found: warn
           retention-days: 14
           path: |
-            build/native/linux-package-e2e/**
-            build/native/linux-package-ci/**
+            build/native/linux-package-e2e-${{ matrix.arch }}/**
+            build/native/linux-package-ci-${{ matrix.arch }}/**
 
       # These caches validate entries themselves and remain reusable after a
       # downstream build/test failure. Partially built engine outputs do not.

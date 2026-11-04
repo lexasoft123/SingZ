@@ -152,7 +152,7 @@ async function run() {
   await step('launch installed package and extract bundled splitter offline', 240, async () => {
     await launch()
     const engines = path.join(result.install.resources, 'engines')
-    for (const file of ['singz-capture.node', 'singz-capture.manifest.json', 'singz-analyze', 'llama-server', 'crispasr', 'gpu-splitter-linux-x64.tar.gz']) assert.ok(fs.statSync(path.join(engines, file)).size > 0, file)
+    for (const file of ['singz-capture.node', 'singz-capture.manifest.json', 'singz-analyze', 'llama-server', 'crispasr', `gpu-splitter-linux-${process.arch}.tar.gz`]) assert.ok(fs.statSync(path.join(engines, file)).size > 0, file)
     const started = Date.now(); let models
     do { models = await page.evaluate(() => window.singz.modelsStatus()); if (models.find(m => m.id === 'gpu-splitter')?.present) break; assert.ok(Date.now() - started < 180000, 'bundled splitter extraction deadline'); await sleep(500) } while (true)
     await dismissWelcome()
