@@ -6,8 +6,8 @@ import { chordNameText, chordRoleWord, directionWord, intervalLabel, keyLabel, k
 import { t } from '../i18n'
 
 /** The lesson stays visible during both reference playback and singing. */
-export function TrainingLessonOverview({ prompt, activeTarget, matchedCount = activeTarget, phrase, repetition, compact = false, topAligned = false }: {
-  prompt: TrainingPrompt; activeTarget: number; matchedCount?: number; phrase: boolean; repetition?: number; compact?: boolean; topAligned?: boolean
+export function TrainingLessonOverview({ prompt, activeTarget, matchedCount = activeTarget, phrase, repetition, compact = false, topAligned = false, intrinsic = false }: {
+  prompt: TrainingPrompt; activeTarget: number; matchedCount?: number; phrase: boolean; repetition?: number; compact?: boolean; topAligned?: boolean; intrinsic?: boolean
 }): React.JSX.Element {
   const theme = useNativeTheme()
   const index = Math.max(0, Math.min(activeTarget, prompt.targets.length - 1))
@@ -25,7 +25,7 @@ export function TrainingLessonOverview({ prompt, activeTarget, matchedCount = ac
     : prompt.kind === 'arpeggio' ? t('phone.training.arpeggioStepHelp') : t('phone.training.singNamedNote', { note: target.noteName })
   const pitch = target.noteName.replace(/-?\d+$/, '')
   const octave = target.noteName.slice(pitch.length)
-  return <View testID="training-lesson-overview" style={[s.overview, prompt.kind === 'melody' && { minHeight: 0, gap: 4, paddingVertical: 0 }, prompt.kind === 'scale' && s.scaleOverview, compact && s.compactOverview, topAligned && s.topAligned]}>
+  return <View testID="training-lesson-overview" style={[s.overview, prompt.kind === 'melody' && { minHeight: 0, gap: 4, paddingVertical: 0 }, prompt.kind === 'scale' && s.scaleOverview, compact && s.compactOverview, topAligned && s.topAligned, intrinsic && { flex: 0, flexShrink: 0 }]}>
     <View accessibilityLabel={`Target note ${target.noteName}`} style={s.heading}><Text style={[s.title, prompt.kind === 'melody' && { fontSize: 22, lineHeight: 26 }, compact && s.compactTitle, { color: theme.text }]}>{title}</Text>{'direction' in prompt && <Text style={[s.direction, compact && s.compactDirection, { color: theme.dim }]}>{directionWord(prompt.direction)}</Text>}</View>
     <Text style={[s.description, prompt.kind === 'melody' && { fontSize: 14, lineHeight: 18 }, prompt.kind === 'scale' && s.scaleDescription, compact && s.compactDescription, { color: theme.text }]}>{description}</Text>
     {repetition !== undefined && <Text style={[s.direction, compact && s.compactDirection, { color: theme.dim }]}>{t('phone.training.repeatN', { n: repetition })}</Text>}

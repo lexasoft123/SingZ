@@ -560,6 +560,12 @@ was driven; the gotchas that follow from it are below.
   the worklet-bound bundle through `@babel/plugin-transform-block-scoping`
   before inlining it (`mobile/src/gen/analysis-worklet.js`); any hand-written
   worklet with a closure inside a `let` loop needs the same care.
+- **Static Skia backgrounds must survive retained tab screens** — keep the shared
+  scene background above navigation, with transparent scene roots. A hidden Metal
+  surface can drop a draw without another layout change to request it. Screen-local
+  fades redraw on focus, completed ancestor transitions, and foregrounding; release
+  their listeners on blur. Verify repeated tab switches and modal dismissal in the
+  native app, including the first Player entry, rather than only fresh screenshots.
 - **The mobile lyrics are one Skia canvas** (`SkiaLyrics.tsx`): the whole
   column, the sung line painted with a gradient whose edge travels along x —
   desktop's `background-clip: text` a layer down. The canvas is

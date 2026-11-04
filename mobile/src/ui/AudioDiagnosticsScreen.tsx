@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { AppState, NativeModules, Platform, Pressable, ScrollView, Share, StyleSheet, Switch, Text } from 'react-native'
+import { GlassHeader } from '@singz/ui/native'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import type { MultitrackEngine } from '../engine'
 import { describeOutput, getRouteLatency } from '../latency'
 import { log } from '../log'
@@ -8,10 +10,12 @@ import { detectedToneDelayMs } from '../training/diagnostics'
 import { trainingMustStopForAppState } from '../training/runtime'
 import { nextMicrophoneSampleName, microphoneSampleName } from '../training/sample-name'
 import { C } from './bits'
+import { t } from '../i18n'
 
 export function AudioDiagnosticsScreen({ engine, active, onBack, onSoundLab }: {
   engine: MultitrackEngine; active: boolean; onBack: () => void; onSoundLab?: () => void
 }): React.JSX.Element {
+  const insets = useSafeAreaInsets()
   const mic = useRef(new TrainingMicrophone()).current
   const recording = useRef(false)
   const [finishingSample, setFinishingSample] = useState(false)
@@ -157,9 +161,8 @@ export function AudioDiagnosticsScreen({ engine, active, onBack, onSoundLab }: {
       stop()
     }
   }
-  return <ScrollView contentContainerStyle={styles.content}>
-    <Pressable onPress={onBack}><Text style={styles.button}>Back</Text></Pressable>
-    <Text style={styles.title}>Audio diagnostics</Text>
+  return <ScrollView contentContainerStyle={[styles.content, { paddingTop: insets.top + 8 }]}>
+    <GlassHeader title={t('phone.app.diagnostics.title')} onBack={onBack} backLabel={t('phone.training.kit.back')} />
     {!running && onSoundLab && <Pressable onPress={onSoundLab}><Text style={styles.button}>Instrument sound lab</Text></Pressable>}
     <Text style={styles.text}>Connect CarPlay while parked. Keep the phone microphone near a speaker and stay quiet during the tone test. Use moderate volume.</Text>
     <Text style={styles.text}>This measures speaker → microphone → pitch detection, including analysis and screen delivery. It is not isolated hardware latency. Reference tones use the selected instrument as training. Microphone audio is never played back. Record sample explicitly saves up to 30 seconds of microphone audio; sharing is manual.</Text>
@@ -193,8 +196,7 @@ export function AudioDiagnosticsScreen({ engine, active, onBack, onSoundLab }: {
   </ScrollView>
 }
 const styles = StyleSheet.create({
-  content: { padding: 24, paddingTop: 64, gap: 18, backgroundColor: C.bg },
-  title: { color: C.text, fontSize: 28, fontWeight: '700' },
+  content: { padding: 24, gap: 18, backgroundColor: C.bg },
   text: { color: C.text, fontSize: 16 },
   reading: { color: C.text, fontSize: 17, fontVariant: ['tabular-nums'] },
   button: { color: C.amber, fontSize: 18, paddingVertical: 12 }

@@ -1,5 +1,5 @@
+import { GlassHeader } from '@singz/ui/native'
 import { GuideTarget, QuickStartWelcome, useGuideAnchor } from './QuickStart'
-import { ScreenBackground } from './ScreenBackground'
 import { useMobileLayout } from './uiKit'
 import { mobileSongVolumePersistence } from '../playback/song-volume-persistence'
 import { Icon } from '@singz/ui/native/icons'
@@ -2191,27 +2191,27 @@ export default function CatalogScreen({
   }
 
   if (!shelfReady) return (
-    <View style={{ flex: 1, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center' }}>
-      <ScreenBackground />
+    <View style={{ flex: 1, backgroundColor: 'transparent', alignItems: 'center', justifyContent: 'center' }}>
       <ActivityIndicator color={C.amber} />
     </View>
   )
 
   return (
-    <View style={{ flex: 1, backgroundColor: C.bg }}>
-      <ScreenBackground />
-      <View testID="library-workspace" style={[s.wrap, { paddingTop: insets.top + 6, width: '100%', maxWidth: 1120, alignSelf: 'center' }]}>
-        {/* eyebrow brand row: logo + wordmark tucked beside the cutout */}
-        <View style={s.brandRow}>
-          <StemTile hue={0} size={26} />
-          <Text style={s.brand}>SingZ</Text>
-          <View style={{ marginLeft: 'auto', flexDirection: 'row', alignItems: 'center', gap: 2 }}>
+    <View style={{ flex: 1, backgroundColor: 'transparent' }}>
+      <View testID="library-workspace" style={[s.wrap, { paddingTop: layout.top, width: '100%', maxWidth: 1120, alignSelf: 'center' }]}>
+        <GlassHeader
+          testID="catalog-header"
+          variant="plain"
+          title="SingZ"
+          align="start"
+          leading={<StemTile hue={0} size={26} />}
+          trailing={<>
             <GuideTarget id="catalog-settings"><HeaderIconButton label={t('phone.library.openSettings')} onPress={onOpenSettings}>
               <Icon name="settings" size={20} color={C.amber} />
             </HeaderIconButton></GuideTarget>
             <LogButton onPress={onOpenLog} />
-          </View>
-        </View>
+          </>}
+        />
         <GuideTarget id="catalog-library"><Seg
           segments={[
             ...(driveAvailable() ? [{ key: 'gdrive', label: t('phone.library.driveTab'), icon: GDRIVE_ICON }] : []),
@@ -2984,18 +2984,6 @@ const s = StyleSheet.create({
   },
   logWhen: { color: C.dim, fontSize: 11, marginBottom: 2 },
   logMsg: { color: C.text, fontSize: 13 },
-  brandRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 9,
-    marginBottom: 14
-  },
-  brand: {
-    color: C.amber,
-    fontSize: 20,
-    fontWeight: '800',
-    letterSpacing: -0.3
-  },
   ctx: {
     flexDirection: 'row',
     alignItems: 'center',

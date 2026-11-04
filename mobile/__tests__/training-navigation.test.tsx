@@ -1,7 +1,7 @@
 import SettingsScreen from '../src/ui/SettingsScreen'
 import React from 'react'
 import ReactTestRenderer, { act } from 'react-test-renderer'
-import { View } from 'react-native'
+import { ScrollView, StyleSheet, View } from 'react-native'
 import { NavigationContainer, createNavigationContainerRef, useIsFocused } from '@react-navigation/native'
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs'
 import { createNativeStackNavigator } from '@react-navigation/native-stack'
@@ -9,6 +9,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context'
 import type { MultitrackEngine } from '../src/engine'
 import TrainingScreen, { TrainingSessionView, type MobileSongTrainingFacts } from '../src/ui/TrainingScreen'
 import { TEST } from '../src/ui/testhooks'
+import { t } from '../src/i18n'
 
 jest.mock('../src/training/mic', () => ({
   TrainingMicrophone: class {
@@ -125,6 +126,21 @@ async function prepare(tree: ReactTestRenderer.ReactTestRenderer, choice: 'notes
 }
 
 beforeEach(() => jest.clearAllMocks())
+
+test('loaded-song preparation follows the home header and precedes the daily routine', async () => {
+  const { tree } = await mount()
+  try {
+    const content = text(home(tree))
+    const header = content.indexOf(t('phone.training.dashboardTrain'))
+    const preparation = content.indexOf(t('phone.training.prepareFor', { song: song.songName }))
+    const routine = content.indexOf(t('phone.training.dashboardDaily'))
+    expect(header).toBeGreaterThanOrEqual(0)
+    expect(preparation).toBeGreaterThan(header)
+    expect(routine).toBeGreaterThan(preparation)
+    const scroll = home(tree).findByType(ScrollView)
+    expect(StyleSheet.flatten(scroll.props.contentContainerStyle).maxWidth).toBe(1120)
+  } finally { await act(() => tree.unmount()) }
+})
 
 test.each(['notes', 'intervals', 'chords', 'mixed'] as const)('%s preparation Back returns to Training and preserves the player', async choice => {
   const { tree, navigation, routes, backToSong, engine } = await mount()
@@ -274,7 +290,7 @@ test('training log icon returns to the same paused exercise', async () => {
     await act(() => button(tree, 'Open the log').props.onPress())
     expect(routes().training).toEqual(['Home', 'Exercise', 'Log'])
     expect(engine.cancelTrainingCues).toHaveBeenCalled()
-    await act(() => button(tree, 'Close').props.onPress())
+    await act(() => button(tree, 'Close the log').props.onPress())
     expect(routes().training).toEqual(['Home', 'Exercise'])
     const exercise = tree.root.findByType(TrainingSessionView)
     expect(exercise.props.state.session.id).toBe(priorSession)
