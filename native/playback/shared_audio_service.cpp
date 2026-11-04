@@ -51,7 +51,7 @@ struct SharedAudioService::Impl {
     std::atomic<bool> failed{false};
     std::atomic<uint64_t> callbacks{0};
     std::atomic<uint64_t> frames{0};
-  } playback, training;
+  } playback, training, microphone;
   mutable std::mutex mutex;
   std::unique_ptr<AudioHostBackend> backend;
   AudioHostInventory cached;
@@ -65,6 +65,7 @@ struct SharedAudioService::Impl {
   std::atomic<bool> quitting{false};
   std::thread watcher;
   std::atomic<uint64_t> frames{0};
+  std::atomic<uint64_t> outputGeneration{0};
   std::atomic<double> rate{0};
   std::atomic<uint64_t> revisions{0};
   std::atomic<uint64_t> enumerations{0};
@@ -269,6 +270,12 @@ struct SharedAudioService::Impl {
           !self.training.render(self.training.context, block))
         self.training.failed.store(true, std::memory_order_release);
     }
+    {
+      AudioInputCallbackScope scope(self.microphone.gate);
+      if (scope && self.microphone.render &&
+          !self.microphone.render(self.microphone.context, block))
+        self.microphone.failed.store(true, std::memory_order_release);
+    }
     self.frames.fetch_add(block.frames, std::memory_order_relaxed);
     return true;
   }
@@ -302,6 +309,7 @@ struct SharedAudioService::Impl {
       drain(playback.gate);
       playback.failed.store(true, std::memory_order_release);
     }
+    outputGeneration.fetch_add(1, std::memory_order_release);
     backend->stop();
     auto result = backend->open(config, render, this);
     if (result.ok) {
@@ -507,6 +515,7 @@ AudioHostResult SharedAudioService::configureProvider(std::unique_ptr<AudioHostB
   }
   if (impl_->playback.render) return failure("Change the song output provider before starting training");
   if (!backend) return failure("The selected audio provider is unavailable");
+  impl_->outputGeneration.fetch_add(1, std::memory_order_release);
   impl_->backend->stop();
   impl_->removeListeners();
   impl_->backend = std::move(backend); impl_->provider = provider;
@@ -544,6 +553,15 @@ void SharedAudioService::setTrainingRenderer(AudioHostRender render, void* conte
   if (render) impl_->training.gate.open();
 }
 void SharedAudioService::clearTrainingRenderer() { setTrainingRenderer(nullptr, nullptr); }
+void SharedAudioService::setMicrophoneRenderer(AudioHostRender render, void* context) {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  drain(impl_->microphone.gate);
+  impl_->microphone.render = render;
+  impl_->microphone.context = context;
+  impl_->microphone.failed.store(false, std::memory_order_release);
+  if (render) impl_->microphone.gate.open();
+}
+void SharedAudioService::clearMicrophoneRenderer() { setMicrophoneRenderer(nullptr, nullptr); }
 AudioHostStatus SharedAudioService::status() const {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   return impl_->backend->status();
@@ -556,18 +574,28 @@ uint64_t SharedAudioService::watchedDeviceCount() const noexcept { return impl_-
 std::string SharedAudioService::providerId() const {
   std::lock_guard<std::mutex> lock(impl_->mutex); return impl_->provider;
 }
+std::string SharedAudioService::activeOutputUid() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex); return impl_->route.outputDeviceUid;
+}
+uint64_t SharedAudioService::outputRouteGeneration() const noexcept {
+  return impl_->outputGeneration.load(std::memory_order_acquire);
+}
 void SharedAudioService::parkOutput() noexcept {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->parked = true;
+  impl_->outputGeneration.fetch_add(1, std::memory_order_release);
   impl_->backend->stop();
 }
 void SharedAudioService::shutdown() noexcept {
   impl_->quitting.store(true, std::memory_order_release);
   if (impl_->watcher.joinable()) impl_->watcher.join();
   std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->outputGeneration.fetch_add(1, std::memory_order_release);
   impl_->backend->stop();
   drain(impl_->playback.gate);
   drain(impl_->training.gate);
+  drain(impl_->microphone.gate);
+  impl_->microphone.render = nullptr;
   impl_->playback.render = nullptr;
   impl_->training.render = nullptr;
   impl_->removeListeners();

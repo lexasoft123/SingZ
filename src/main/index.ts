@@ -715,6 +715,15 @@ function registerIpc(): void {
       return captureOwner.setMonitorGain(event.sender.id, generation, gainDb, enabled)
     }
   )
+
+  ipcMain.handle('audio-host:microphone-mix-configure', (event, config: unknown) => {
+    const result = captureOwner.configureMicrophoneMix(event.sender.id, config)
+    if (result.ok) bindNativeAudioCleanup(event.sender)
+    return result
+  })
+  ipcMain.handle('audio-host:microphone-mix-stop', event => captureOwner.stopMicrophoneMix(event.sender.id))
+  ipcMain.handle('audio-host:microphone-mix-status', () => captureOwner.microphoneMixStatus())
+
   ipcMain.handle('audio-host:monitor-status', () => captureOwner.monitorStatus())
   ipcMain.handle('audio-host:monitor-end', (event, generation: unknown) =>
     captureOwner.endMonitor(event.sender.id, typeof generation === 'string' ? generation : '')

@@ -1192,6 +1192,26 @@ export interface DesktopPlaybackStatus {
   mediaCodecTag: string
 }
 
+/** Native ALSA input routing. Channels are zero-based; an explicit target relays capture only. */
+export interface DesktopMicrophoneMixConfig {
+  deviceUid: string
+  /** Omit to add inputs to song output. Set to relay captured hardware mix only to this output. */
+  outputDeviceUid?: string
+  channels: { channel: number; gain: number; muted: boolean; pan?: number }[]
+  delayFrames?: number
+}
+export type DesktopMicrophoneMixResult = { ok: true } | { ok: false; error: string }
+export type DesktopMicrophoneMixStatus = {
+  ok: true
+  active: boolean
+  callbacks: string
+  missingFrames: string
+  failures: string
+  sampleRate: number
+  /** Last capture/output failure is retained after the route stops. */
+  error: string
+} | { ok: false; error: string }
+
 export interface DesktopTrainingAudioStatus {
   hostTimeNs: string
   outputLatencyMs: number
@@ -1300,6 +1320,9 @@ export interface SingzApi {
   }): Promise<DesktopAudioInputStartResult>
   configureDesktopTrainingOutput(outputDeviceUid: string, provider: DesktopPlaybackProvider): Promise<{ ok: boolean; error?: string }>
   desktopTrainingAudioStatus(): Promise<DesktopTrainingAudioStatus | null>
+  configureMicrophoneMix(config: DesktopMicrophoneMixConfig): Promise<DesktopMicrophoneMixResult>
+  stopMicrophoneMix(): Promise<DesktopMicrophoneMixResult>
+  microphoneMixStatus(): Promise<DesktopMicrophoneMixStatus>
   scheduleDesktopTrainingCue(config: DesktopTrainingPcmCue): Promise<DesktopTrainingPcmResult>
   setDesktopTrainingCueGain(generation: string, gain: number): Promise<{ ok: boolean; error?: string }>
   cancelDesktopTrainingCues(generation: string): Promise<{ ok: boolean; error?: string }>
