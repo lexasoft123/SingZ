@@ -52,6 +52,92 @@ class FakeAudioContext {
   async setSinkId(): Promise<void> {}
 }
 
+class StartupAudioContext extends FakeAudioContext {
+  static last: StartupAudioContext | null = null
+  sinkId: string | { type: 'none' }
+  readonly physicalRoutes: string[]
+
+  constructor(options: { sinkId?: string | { type: 'none' } } = {}) {
+    super()
+    this.sinkId = options.sinkId ?? ''
+    this.physicalRoutes = [this.route(this.sinkId)]
+    StartupAudioContext.last = this
+  }
+
+  private route(sink: string | { type: 'none' }): string {
+    return typeof sink === 'string' ? sink || 'default' : 'none'
+  }
+
+  async setSinkId(sink: string | { type: 'none' } = ''): Promise<void> {
+    this.sinkId = sink
+    this.physicalRoutes.push(this.route(sink))
+  }
+}
+
+async function reconcileStartupOutput(
+  savedOutputId: string | undefined,
+  nativeAvailable: boolean
+): Promise<{
+  result: import('../../src/renderer/src/audio/output-routing').PlaybackOutputReconcileResult
+  context: StartupAudioContext
+  enumerateOutputs: ReturnType<typeof vi.fn>
+}> {
+  vi.stubGlobal('AudioContext', StartupAudioContext)
+  vi.stubGlobal('navigator', { platform: 'Linux' })
+  vi.stubGlobal('window', {
+    singz: { configureDesktopTrainingOutput: vi.fn(async () => ({ ok: true })) }
+  })
+  const { MultitrackEngine } = await import('../../src/renderer/src/audio/engine')
+  const { PlaybackOutputArbiter } = await import('../../src/renderer/src/audio/output-routing')
+  const engine = new MultitrackEngine()
+  const context = StartupAudioContext.last!
+  const enumerateOutputs = vi.fn(async () =>
+    savedOutputId && nativeAvailable && context.physicalRoutes.at(-1) === 'none'
+      ? [{ kind: 'audiooutput' as const, deviceId: savedOutputId }]
+      : []
+  )
+  const arbiter = new PlaybackOutputArbiter(savedOutputId, {
+    setOutput: (sinkId) => engine.setOutput(sinkId),
+    enumerateOutputs,
+    commit: vi.fn()
+  })
+  const result = await arbiter.reconcile()
+  return { result, context, enumerateOutputs }
+}
+
+describe('startup output ownership', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.resetModules()
+  })
+
+  it('does not make the initial default sink hide a saved native endpoint from inventory', async () => {
+    const outputId = 'native:alsa:sysfs:/sys/devices/platform/usb/5-1:pcm:0'
+
+    const { result, context } = await reconcileStartupOutput(outputId, true)
+
+    expect(result).toEqual({ kind: 'applied', outputId })
+    expect(context.physicalRoutes).toEqual(['none', 'none'])
+  })
+
+  it('negative control: restores the ordinary browser default after starting detached', async () => {
+    const { result, context, enumerateOutputs } = await reconcileStartupOutput(undefined, false)
+
+    expect(result).toEqual({ kind: 'applied', outputId: undefined })
+    expect(context.physicalRoutes).toEqual(['none', 'default'])
+    expect(enumerateOutputs).not.toHaveBeenCalled()
+  })
+
+  it('still falls back to the browser default when the saved native endpoint is really missing', async () => {
+    const outputId = 'native:alsa:disconnected'
+
+    const { result, context } = await reconcileStartupOutput(outputId, false)
+
+    expect(result).toEqual({ kind: 'missing', outputId })
+    expect(context.physicalRoutes).toEqual(['none', 'default'])
+  })
+})
+
 interface FakeClient {
   pauses: number
   [key: string]: unknown
