@@ -24,11 +24,30 @@ struct MicrophoneMixConfig {
   std::string outputDeviceUid;
 };
 struct MicrophoneMixResult { bool ok; std::string error; };
+struct MicrophoneMixMissingFrames {
+  uint64_t invalidRequest = 0, offline = 0, anchorUnavailable = 0;
+  uint64_t clockMapping = 0, resamplingSupport = 0, generationChanged = 0;
+};
+// One control-thread snapshot per mono capture channel. Live fields are
+// independent atomic observations, not a coherent cross-source snapshot.
+// History misses exclude render silence emitted without a history read.
+struct MicrophoneMixSourceDiagnostics {
+  uint32_t channel = 0;
+  bool historyOnline = false;
+  uint64_t historyCallbacks = 0, historyDiscontinuities = 0;
+  double measuredRate = 0;
+  uint64_t lastHostNs = 0, publishedEndHostNs = 0;
+  MicrophoneMixMissingFrames missingFramesByReason;
+  uint64_t unpublishedSampleReads = 0, expiredSampleReads = 0;
+  uint64_t racingSampleReads = 0, absentSampleReads = 0;
+  uint64_t verifiedClockSteps = 0, maximumVerifiedClockStepNs = 0;
+};
 struct MicrophoneMixStatus {
   bool active = false;
   uint64_t callbacks = 0, missingFrames = 0, failures = 0;
   double sampleRate = 0;
   std::string error;
+  std::vector<MicrophoneMixSourceDiagnostics> diagnostics;
 };
 // Control calls are serialized. Stop drains the shared/relay output callback
 // before joining capture and reclaiming histories and the prepared graph.

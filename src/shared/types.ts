@@ -1210,6 +1210,33 @@ export type DesktopMicrophoneMixStatus = {
   sampleRate: number
   /** Last capture/output failure is retained after the route stops. */
   error: string
+  /** Optional for older bindings. One row per mono capture channel; live fields
+   * are independent atomic observations, not a coherent cross-source snapshot.
+   * History misses exclude non-read pre-delay silence, while missingFrames sums
+   * all input-channel misses including that silence. Counters are decimal strings. */
+  diagnostics?: {
+    channel: number
+    historyOnline: boolean
+    historyCallbacks: string
+    historyDiscontinuities: string
+    measuredRate: number
+    lastHostNs: string
+    publishedEndHostNs: string
+    missingFramesByReason: {
+      invalidRequest: string
+      offline: string
+      anchorUnavailable: string
+      clockMapping: string
+      resamplingSupport: string
+      generationChanged: string
+    }
+    unpublishedSampleReads: string
+    expiredSampleReads: string
+    racingSampleReads: string
+    absentSampleReads: string
+    verifiedClockSteps: string
+    maximumVerifiedClockStepNs: string
+  }[]
 } | { ok: false; error: string }
 
 export interface DesktopTrainingAudioStatus {

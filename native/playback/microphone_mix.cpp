@@ -1,5 +1,6 @@
 #include "microphone_mix.h"
 #include <zcore/routing/audio_history.h>
+#include <zcore/routing/audio_resampler.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -18,7 +19,9 @@ struct MicrophoneMixSession::Impl {
   Impl(SharedAudioService& output, InputFactory inputFactory, OutputFactory outputFactory)
       : service(output), factory(inputFactory), outputFactory(outputFactory) {}
   struct Source {
-    route::AudioHistory history{1};
+    route::AudioHistory history{1, route::AudioHistory::kDefaultCapacityFrames,
+                                route::ResamplingFilter::LinearPhase, true};
+    uint32_t channel = 0;
     std::unique_ptr<AudioInputBackend> backend;
     route::AudioReadCursor cursor{};
     double rate = 48000;
@@ -200,6 +203,7 @@ MicrophoneMixResult MicrophoneMixSession::start(const MicrophoneMixConfig& confi
           route::defaultChannelConnections(2, 2)});
     for (const auto& channel : config.channels) {
       auto source = std::make_unique<Impl::Source>();
+      source->channel = channel.channel;
       source->backend = self.factory ? self.factory() : nullptr;
       if (!source->backend) { stop(); return {false, "Native capture is unavailable"}; }
       self.sources.push_back(std::move(source));
@@ -278,7 +282,39 @@ MicrophoneMixStatus MicrophoneMixSession::status() {
       stop();
     }
   }
-  return {self.active, self.callbacks.load(), self.missing.load(),
-          self.failures.load(), self.rate, self.lastError};
+  MicrophoneMixStatus result{self.active, self.callbacks.load(), self.missing.load(),
+                             self.failures.load(), self.rate, self.lastError};
+  result.diagnostics.reserve(self.sources.size());
+  for (const auto& source : self.sources) {
+    const auto history = source->history.status();
+    const auto reads = source->history.readDiagnostics();
+    auto& row = result.diagnostics.emplace_back();
+    row.channel = source->channel;
+    row.historyOnline = history.online;
+    row.historyCallbacks = history.callbacks;
+    row.historyDiscontinuities = history.discontinuities;
+    row.measuredRate = history.measuredRate;
+    row.lastHostNs = history.lastHostNs;
+    row.publishedEndHostNs = source->history.publishedBlockEndHostNs();
+    row.missingFramesByReason.invalidRequest = reads.missingFrames[
+        static_cast<size_t>(route::AudioHistoryMissingReason::InvalidRequest)];
+    row.missingFramesByReason.offline = reads.missingFrames[
+        static_cast<size_t>(route::AudioHistoryMissingReason::Offline)];
+    row.missingFramesByReason.anchorUnavailable = reads.missingFrames[
+        static_cast<size_t>(route::AudioHistoryMissingReason::AnchorUnavailable)];
+    row.missingFramesByReason.clockMapping = reads.missingFrames[
+        static_cast<size_t>(route::AudioHistoryMissingReason::ClockMapping)];
+    row.missingFramesByReason.resamplingSupport = reads.missingFrames[
+        static_cast<size_t>(route::AudioHistoryMissingReason::ResamplingSupport)];
+    row.missingFramesByReason.generationChanged = reads.missingFrames[
+        static_cast<size_t>(route::AudioHistoryMissingReason::GenerationChanged)];
+    row.unpublishedSampleReads = reads.unpublishedSampleReads;
+    row.expiredSampleReads = reads.expiredSampleReads;
+    row.racingSampleReads = reads.racingSampleReads;
+    row.absentSampleReads = reads.absentSampleReads;
+    row.verifiedClockSteps = reads.verifiedClockSteps;
+    row.maximumVerifiedClockStepNs = reads.maximumVerifiedClockStepNs;
+  }
+  return result;
 }
 } // namespace singz

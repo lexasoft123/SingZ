@@ -42,6 +42,31 @@ napi_value result(napi_env env, bool ok, const std::string& error = {}) {
   if (!ok) text(env, value, "error", error);
   return value;
 }
+napi_value sourceDiagnostics(napi_env env, const MicrophoneMixSourceDiagnostics& source) {
+  auto value = object(env);
+  number(env, value, "channel", source.channel);
+  boolean(env, value, "historyOnline", source.historyOnline);
+  text(env, value, "historyCallbacks", std::to_string(source.historyCallbacks));
+  text(env, value, "historyDiscontinuities", std::to_string(source.historyDiscontinuities));
+  number(env, value, "measuredRate", source.measuredRate);
+  text(env, value, "lastHostNs", std::to_string(source.lastHostNs));
+  text(env, value, "publishedEndHostNs", std::to_string(source.publishedEndHostNs));
+  auto missing = object(env);
+  text(env, missing, "invalidRequest", std::to_string(source.missingFramesByReason.invalidRequest));
+  text(env, missing, "offline", std::to_string(source.missingFramesByReason.offline));
+  text(env, missing, "anchorUnavailable", std::to_string(source.missingFramesByReason.anchorUnavailable));
+  text(env, missing, "clockMapping", std::to_string(source.missingFramesByReason.clockMapping));
+  text(env, missing, "resamplingSupport", std::to_string(source.missingFramesByReason.resamplingSupport));
+  text(env, missing, "generationChanged", std::to_string(source.missingFramesByReason.generationChanged));
+  napi_set_named_property(env, value, "missingFramesByReason", missing);
+  text(env, value, "unpublishedSampleReads", std::to_string(source.unpublishedSampleReads));
+  text(env, value, "expiredSampleReads", std::to_string(source.expiredSampleReads));
+  text(env, value, "racingSampleReads", std::to_string(source.racingSampleReads));
+  text(env, value, "absentSampleReads", std::to_string(source.absentSampleReads));
+  text(env, value, "verifiedClockSteps", std::to_string(source.verifiedClockSteps));
+  text(env, value, "maximumVerifiedClockStepNs", std::to_string(source.maximumVerifiedClockStepNs));
+  return value;
+}
 bool property(napi_env env, napi_value value, const char* key, napi_value* field) {
   napi_valuetype type;
   napi_value nullValue;
@@ -163,6 +188,11 @@ napi_value status(napi_env env, napi_callback_info) {
   text(env, value, "failures", std::to_string(current.failures));
   number(env, value, "sampleRate", current.sampleRate);
   text(env, value, "error", current.error);
+  napi_value diagnostics;
+  napi_create_array_with_length(env, current.diagnostics.size(), &diagnostics);
+  for (uint32_t index = 0; index < current.diagnostics.size(); ++index)
+    napi_set_element(env, diagnostics, index, sourceDiagnostics(env, current.diagnostics[index]));
+  napi_set_named_property(env, value, "diagnostics", diagnostics);
   return value;
 }
 template <napi_value (*Call)(napi_env, napi_callback_info)>

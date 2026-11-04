@@ -196,6 +196,62 @@ void relayStereoAndLifetime() {
   auto restarted=render(relayRecord,origin+2000000000+ns(1536));
   for(uint32_t i=0;i<1024;++i){close(restarted[0][i],.15f);close(restarted[1][i],-.2f);}
 }
+uint64_t reasonTotal(const MicrophoneMixSourceDiagnostics& source) {
+  const auto& missing=source.missingFramesByReason;
+  return missing.invalidRequest+missing.offline+missing.anchorUnavailable+
+      missing.clockMapping+missing.resamplingSupport+missing.generationChanged;
+}
+void relayDiagnostics() {
+  Fixture fixture;MicrophoneMixSession session(fixture.service,inputFactory,outputFactory);
+  CHECK(session.start(relayConfig()).ok);
+  render(relayRecord,origin+ns(1536));
+  auto status=session.status();
+  CHECK(status.active && status.callbacks==1 && status.missingFrames==2048);
+  CHECK(status.diagnostics.size()==2);
+  for(size_t index=0;index<status.diagnostics.size();++index) {
+    const auto& source=status.diagnostics[index];
+    CHECK(source.channel==(index==0?8:9));
+    CHECK(!source.historyOnline && source.historyCallbacks==0 && source.historyDiscontinuities==0);
+    CHECK(source.measuredRate==0 && source.lastHostNs==0 && source.publishedEndHostNs==0);
+    CHECK(source.missingFramesByReason.offline==1024 && reasonTotal(source)==1024);
+    CHECK(source.unpublishedSampleReads==0 && source.expiredSampleReads==0);
+    CHECK(source.racingSampleReads==0 && source.absentSampleReads==0);
+    CHECK(source.verifiedClockSteps==0 && source.maximumVerifiedClockStepNs==0);
+  }
+  feed();render(relayRecord,origin+ns(1536));
+  status=session.status();
+  CHECK(status.missingFrames==2048);
+  for(const auto& source:status.diagnostics) {
+    CHECK(source.historyOnline && source.historyCallbacks==8 && source.historyDiscontinuities==0);
+    CHECK(source.measuredRate==48000 && source.lastHostNs==origin+ns(1792));
+    CHECK(source.publishedEndHostNs==origin+ns(2048));
+    CHECK(source.missingFramesByReason.offline==1024 && reasonTotal(source)==1024);
+    CHECK(source.unpublishedSampleReads==0 && source.expiredSampleReads==0);
+    CHECK(source.racingSampleReads==0 && source.absentSampleReads==0);
+    CHECK(source.verifiedClockSteps==0 && source.maximumVerifiedClockStepNs==1);
+  }
+  render(relayRecord,origin+ns(4096));
+  status=session.status();
+  CHECK(status.missingFrames==4096);
+  uint64_t channelMissing=0;
+  for(const auto& source:status.diagnostics) {
+    CHECK(source.missingFramesByReason.offline==1024);
+    CHECK(source.missingFramesByReason.resamplingSupport==1024);
+    CHECK(reasonTotal(source)==2048);
+    channelMissing+=reasonTotal(source);
+    CHECK(source.unpublishedSampleReads>0 && source.expiredSampleReads==0);
+    CHECK(source.racingSampleReads==0 && source.absentSampleReads==0);
+  }
+  CHECK(channelMissing==status.missingFrames);
+  const auto stepped=origin+ns(2048)+50000;
+  feed(stepped,.3f,-.4f,48000,1);
+  status=session.status();
+  for(const auto& source:status.diagnostics) {
+    CHECK(source.historyOnline && source.historyCallbacks==9 && source.historyDiscontinuities==0);
+    CHECK(source.lastHostNs==stepped && source.publishedEndHostNs==stepped+ns(256));
+    CHECK(source.verifiedClockSteps==1 && source.maximumVerifiedClockStepNs==50000);
+  }
+}
 void validationAndFailures() {
   Fixture fixture;MicrophoneMixSession session(fixture.service,inputFactory,outputFactory);
   auto bad=relayConfig();bad.outputDeviceUid="flow";CHECK(!session.start(bad).ok);
@@ -243,5 +299,5 @@ void routeChangesFailClosed() {
   CHECK(!session.status().active);
 }
 }
-int main(){relayStereoAndLifetime();validationAndFailures();partialCaptureFailureAndAdditive();routeChangesFailClosed();
-  std::puts("Hardware main relay: stereo, no duplicate song, independent clock, drain, recovery and fail-closed routes passed");}
+int main(){relayStereoAndLifetime();relayDiagnostics();validationAndFailures();partialCaptureFailureAndAdditive();routeChangesFailClosed();
+  std::puts("Hardware main relay: stereo, diagnostics, independent clock, drain, recovery and fail-closed routes passed");}
