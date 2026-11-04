@@ -990,6 +990,76 @@ describe('CaptureOwner', () => {
     expect(malformedOwner.cancel(5, '52')).toEqual({ ok: true, cancelled: false })
   })
 
+  it('refreshes an incomplete ALSA output bound once after a transient busy probe', () => {
+    const binding = fakeBinding()
+    const healthy = binding.audioHostDevices('alsa')
+    const ready = { ...healthy, devices: healthy.devices.map(device => ({
+      ...device, outputChannels: 4, outputChannelLabels: ['USB 1', 'USB 2', 'USB 3', 'USB 4']
+    })) }
+    const busy = { ...healthy, devices: healthy.devices.map(device => ({
+      ...device, outputChannels: 0, outputChannelLabels: []
+    })) }
+    const inventory = vi.fn().mockReturnValueOnce(busy).mockReturnValue(ready)
+    const refresh = vi.fn(() => ({ ok: true }))
+    binding.audioHostDevices = inventory
+    binding.refreshSharedAudioInventory = refresh
+    expect(new CaptureOwner(binding).hostDevices('alsa', 'linux')).toMatchObject({
+      ok: true, provider: 'alsa', devices: [{ outputChannels: 4 }]
+    })
+    expect(refresh).toHaveBeenCalledOnce()
+    expect(inventory).toHaveBeenCalledTimes(2)
+    expect(refresh.mock.invocationCallOrder[0]).toBeGreaterThan(inventory.mock.invocationCallOrder[0])
+    expect(refresh.mock.invocationCallOrder[0]).toBeLessThan(inventory.mock.invocationCallOrder[1])
+  })
+
+  it('does not refresh a healthy ALSA inventory, a capture-only device or another platform', () => {
+    for (const kind of ['healthy', 'capture-only', 'other-platform'] as const) {
+      const binding = fakeBinding()
+      const original = binding.audioHostDevices(kind === 'other-platform' ? 'coreaudio' : 'alsa')
+      const row = kind === 'healthy' ? original : { ...original, devices: original.devices.map(device => ({
+        ...device, outputChannels: 0, outputChannelLabels: [],
+        direction: kind === 'capture-only' ? 'input' as const : 'duplex' as const
+      })) }
+      binding.audioHostDevices = vi.fn(() => row)
+      const refresh = vi.fn(() => ({ ok: true }))
+      binding.refreshSharedAudioInventory = refresh
+      const result = new CaptureOwner(binding).hostDevices(
+        kind === 'other-platform' ? 'coreaudio' : 'alsa', kind === 'other-platform' ? 'darwin' : 'linux')
+      expect(result.ok).toBe(true)
+      expect(refresh).not.toHaveBeenCalled()
+      expect(binding.audioHostDevices).toHaveBeenCalledOnce()
+    }
+  })
+
+  it('bounds the retry when ALSA is still busy and validates the refreshed response', () => {
+    for (const malformed of [false, true]) {
+      const binding = fakeBinding()
+      const original = binding.audioHostDevices('alsa')
+      const busy = { ...original, devices: original.devices.map(device => ({
+        ...device, outputChannels: 0, outputChannelLabels: []
+      })) }
+      const next = malformed ? { ...busy, devices: [{ invalid: true }] } : busy
+      binding.audioHostDevices = vi.fn().mockReturnValueOnce(busy).mockReturnValue(next)
+      const refresh = vi.fn(() => ({ ok: true }))
+      binding.refreshSharedAudioInventory = refresh
+      expect(new CaptureOwner(binding).hostDevices('alsa', 'linux').ok).toBe(!malformed)
+      expect(refresh).toHaveBeenCalledOnce()
+      expect(binding.audioHostDevices).toHaveBeenCalledTimes(2)
+    }
+  })
+
+  it('preserves compatibility when an older binding has no inventory refresh export', () => {
+    const binding = fakeBinding()
+    const original = binding.audioHostDevices('alsa')
+    const busy = { ...original, devices: original.devices.map(device => ({
+      ...device, outputChannels: 0, outputChannelLabels: []
+    })) }
+    binding.audioHostDevices = vi.fn(() => busy)
+    delete (binding as Partial<NativeCaptureBinding>).refreshSharedAudioInventory
+    expect(new CaptureOwner(binding).hostDevices('alsa', 'linux').ok).toBe(true)
+    expect(binding.audioHostDevices).toHaveBeenCalledOnce()
+  })
+
   it('exposes exact HAL inventory and mints monotonic monitor generations in main', () => {
     const binding = fakeBinding()
     const owner = new CaptureOwner(binding)
