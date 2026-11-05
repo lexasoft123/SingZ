@@ -1141,10 +1141,12 @@ export class DesktopNativePlaybackClient {
       outputDeviceUid: output.uid,
       outputChannels,
       sampleRate: Math.round(output.nominalSampleRate || request.sampleRate),
-      // Song playback tolerates a larger ALSA ring than live microphone monitoring.
+      // ALSA bufferFrames requests the period, not the ring. Native negotiates
+      // the nearest supported period and validates it against its 4096-frame
+      // maximum; the ring is sized separately. Ignore cached inventory caps
+      // because an active Chromium/preview stream can constrain them to 1024.
       bufferFrames: request.provider === 'alsa'
-        ? Math.max(1, Math.min(output.bufferFrames.maximumFrames || 4096, 4096,
-          Math.max(output.bufferFrames.minimumFrames || 1, 1024, output.bufferFrames.preferredFrames || 0)))
+        ? 256
         : Math.max(1, output.bufferFrames.preferredFrames || 512)
     }
   }
