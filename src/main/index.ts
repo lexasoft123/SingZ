@@ -63,10 +63,11 @@ import { Separator } from './separation'
 import { registerVocalSeparation, vocalSeparator } from './vocal-separation'
 import { registerAnalyze } from './analyze'
 import { registerStemExport } from './stem-export'
-import { registerDesktopAudioInput } from './audio-input'
+import { registerDesktopAudioInput, stopDesktopAudioInput } from './audio-input'
 import { askMicrophoneAccess } from './mic-access'
 import { cancelBeatsMl, registerBeatsIpc } from './beats-ml'
-import { CaptureOwner, playbackCodecSupportsPath } from './capture'
+import { failedPlayback, playbackCodecSupportsPath } from './capture'
+import { createRemoteCaptureOwner } from './audio-process'
 
 // Test hook: fake microphone input so E2E drivers can exercise pitch matching.
 if (process.env.SINGZ_FAKE_MIC) {
@@ -90,7 +91,7 @@ if (process.env.SINGZ_USERDATA_DIR) {
 const separator = new Separator()
 const transcriber = new Transcriber()
 const modelManager = new ModelManager()
-const captureOwner = new CaptureOwner()
+const captureOwner = createRemoteCaptureOwner()
 
 /** Every window hears about Drive: progress while a sync runs, and the state
  *  the badges read. One helper, because three copies of this loop drifted. */
@@ -621,33 +622,39 @@ function registerIpc(): void {
 
   ipcMain.handle('mic:ask', () => askMicrophoneAccess())
 
-  ipcMain.handle('capture:devices', () => {
+  ipcMain.handle('capture:devices', async () => {
     try {
-      return captureOwner.devices()
+      return await captureOwner.devices()
     } catch (error) {
       return { ok: false, devices: [], error: String(error) }
     }
   })
-  const bindNativeAudioCleanup = (sender: WebContents): void => {
-    if (!captureOwner.bindRendererCleanup(sender.id)) return
-    const rendererId = sender.id
-    const gone = (): void => captureOwner.rendererGone(rendererId)
-    sender.once('destroyed', gone)
-    // A crashed or reloaded renderer can keep the same webContents. These
-    // listeners retire native output before a replacement document inherits it.
-    sender.on('render-process-gone', gone)
-    sender.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => {
-      if (isMainFrame) gone()
-    })
+  const audioLifetimes = new WeakMap<WebContents, { epoch: number }>()
+  const bindNativeAudioCleanup = (sender: WebContents): (() => boolean) => {
+    let lifetime = audioLifetimes.get(sender)
+    if (!lifetime) {
+      lifetime = { epoch: 0 }
+      audioLifetimes.set(sender, lifetime)
+      const tracked = lifetime
+      const rendererId = sender.id
+      const detached = (): void => { ++tracked.epoch; captureOwner.rendererDetached(rendererId) }
+      sender.on('render-process-gone', detached)
+      sender.on('did-start-navigation', (_event, _url, inPlace, isMainFrame) => {
+        if (isMainFrame && !inPlace) detached()
+      })
+      sender.once('destroyed', () => { ++tracked.epoch; captureOwner.rendererGone(rendererId) })
+    }
+    const epoch = lifetime.epoch
+    return () => !sender.isDestroyed() && lifetime.epoch === epoch
   }
   ipcMain.handle(
     'capture:begin',
-    (e, config: { deviceUid?: string; inputChannel: number; ringBlocks?: number }, generation: string) => {
+    async (e, config: { deviceUid?: string; inputChannel: number; ringBlocks?: number }, generation: string) => {
       try {
-        const result = captureOwner.begin(e.sender.id, config, String(generation), (window) => {
+        bindNativeAudioCleanup(e.sender)
+        const result = await captureOwner.begin(e.sender.id, config, String(generation), (window) => {
           if (!e.sender.isDestroyed()) e.sender.send('capture:window', window)
         })
-        if (result.ok) bindNativeAudioCleanup(e.sender)
         return result
       } catch (error) {
         return {
@@ -667,23 +674,23 @@ function registerIpc(): void {
       }
     }
   )
-  ipcMain.handle('capture:cancel', (e, generation: string) => {
+  ipcMain.handle('capture:cancel', async (e, generation: string) => {
     try {
-      return captureOwner.cancel(e.sender.id, String(generation))
+      return await captureOwner.cancel(e.sender.id, String(generation))
     } catch (error) {
       return { ok: false, error: String(error) }
     }
   })
-  ipcMain.handle('capture:state', () => {
+  ipcMain.handle('capture:state', async () => {
     try {
-      return captureOwner.state()
+      return await captureOwner.state()
     } catch (error) {
       return { state: 'error', ownershipGeneration: '', error: String(error) }
     }
   })
-  ipcMain.handle('capture:stats', () => {
+  ipcMain.handle('capture:stats', async () => {
     try {
-      return captureOwner.stats()
+      return await captureOwner.stats()
     } catch {
       return {
         deliveredBlocks: '0', deliveredFrames: '0', overruns: '0',
@@ -698,11 +705,9 @@ function registerIpc(): void {
         ? provider
         : undefined
     ))
-  ipcMain.handle('audio-host:monitor-begin', (event, raw: unknown) => {
-    const result = captureOwner.beginMonitor(event.sender.id, (raw ?? {}) as DesktopMonitorConfig)
-    // A failed native begin may intentionally retain a quarantined generation
-    // for teardown retry. Binding cleanup is harmless when nothing was retained.
+  ipcMain.handle('audio-host:monitor-begin', async (event, raw: unknown) => {
     bindNativeAudioCleanup(event.sender)
+    const result = await captureOwner.beginMonitor(event.sender.id, (raw ?? {}) as DesktopMonitorConfig)
     return result
   })
   ipcMain.handle(
@@ -716,9 +721,9 @@ function registerIpc(): void {
     }
   )
 
-  ipcMain.handle('audio-host:microphone-mix-configure', (event, config: unknown) => {
-    const result = captureOwner.configureMicrophoneMix(event.sender.id, config)
-    if (result.ok) bindNativeAudioCleanup(event.sender)
+  ipcMain.handle('audio-host:microphone-mix-configure', async (event, config: unknown) => {
+    bindNativeAudioCleanup(event.sender)
+    const result = await captureOwner.configureMicrophoneMix(event.sender.id, config)
     return result
   })
   ipcMain.handle('audio-host:microphone-mix-stop', event => captureOwner.stopMicrophoneMix(event.sender.id))
@@ -772,7 +777,10 @@ function registerIpc(): void {
         }
       }
       const authorized = lanes.map((lane) => ({ ...lane, path: resolve(lane.path) }))
-      const codecCapability = captureOwner.playbackCapability()
+      const callerIsCurrent = bindNativeAudioCleanup(event.sender)
+      const codecCapability = await captureOwner.playbackCapability()
+      if (!callerIsCurrent())
+        return failedPlayback('The audio window changed before playback could start.', 'invalid-generation')
       const unauthorized = authorized.find((lane) =>
         !isAllowed(lane.path) || !codecCapability.available ||
         !playbackCodecSupportsPath(codecCapability, lane.path))
@@ -795,10 +803,7 @@ function registerIpc(): void {
           latency: { inputDeviceFrames: 0, outputDeviceFrames: 0, bufferFrames: 0, externalRouteFrames: 0 }
         }
       }
-      // Bound BEFORE the await: the graph is claimed inside the addon the
-      // moment the call is made, so a renderer that dies while it decodes
-      // must already have its cleanup wired.
-      bindNativeAudioCleanup(event.sender)
+      // Lifecycle is already bound and fenced across capability discovery.
       const result = await captureOwner.preparePlayback(event.sender.id, config, authorized)
       // Both outcomes are logged by the owner, which is where the timing, the
       // seam and the negotiated format are known. Saying it twice here only
@@ -882,7 +887,7 @@ function registerIpc(): void {
         return refused('a measure request failed schema validation')
       }
       const lanes = request.lanes.map((lane) => ({ id: lane.id, path: resolve(lane.path) }))
-      const codecCapability = captureOwner.playbackCapability()
+      const codecCapability = await captureOwner.playbackCapability()
       const unauthorized = lanes.find((lane) =>
         !isAllowed(lane.path) || !codecCapability.available ||
         !playbackCodecSupportsPath(codecCapability, lane.path))
@@ -975,17 +980,38 @@ app.whenReady().then(async () => {
   })
 })
 
-app.on('before-quit', () => {
-  captureOwner.stop()
+let audioQuitPending = false
+let audioQuitComplete = false
+app.on('before-quit', event => {
+  if (audioQuitComplete) return
+  event.preventDefault()
+  if (audioQuitPending) return
+  audioQuitPending = true
   scheduler.stop()
   separator.cancel()
   vocalSeparator.cancel()
   transcriber.cancel()
   cancelBeatsMl()
+  let finishing = false
+  const finish = async (): Promise<void> => {
+    if (finishing) return
+    finishing = true
+    await captureOwner.stop()
+    audioQuitComplete = true
+    app.quit()
+  }
+  // A dead driver cannot indefinitely prevent quitting. Normal shutdown first
+  // finishes an active take and confirms private microphone cancellation.
+  const deadline = setTimeout(() => void finish(), 5000)
+  void stopDesktopAudioInput().then(result => {
+    if (!result.ok) log('mic', `shutdown cleanup failed · ${result.error}`, 'warn')
+  }, error => log('mic', `shutdown cleanup failed · ${String(error)}`, 'warn')).finally(() => {
+    clearTimeout(deadline)
+    void finish()
+  })
 })
 
 app.on('window-all-closed', () => {
-  captureOwner.stop()
   separator.cancel()
   vocalSeparator.cancel()
   transcriber.cancel()

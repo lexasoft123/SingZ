@@ -29,8 +29,9 @@ re-found after it moves.
   `mobile/android/app/src/main/java/com/singzplayer/NativeAudioRuntimeModule.kt`
   → `playback/NativePlaybackBridgeSchema.kt` → `split/SingzCore.kt` →
   `mobile/native/bindings/android/native_playback_jni.cpp`.
-- The desktop: `native/electron/playback_addon_bridge.cpp` → `src/main/capture.ts`
-  → IPC in `src/main/index.ts` → `src/preload/index.ts` →
+- The desktop: `native/electron/playback_addon_bridge.cpp` → `CaptureOwner` in
+  `src/main/capture.ts` inside `audio-service.ts` → asynchronous process RPC
+  in `audio-process.ts` → IPC in `src/main/index.ts` → `src/preload/index.ts` →
   `src/renderer/src/audio/desktop-native-playback.ts`.
 - The core: `native/playback/native_playback_session.h` / `.cpp`,
   `playback_cue_plan.{h,cpp}`, `native_playback_graph_document.{h,cpp}`.

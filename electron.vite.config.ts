@@ -3,7 +3,8 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()]
+    plugins: [externalizeDepsPlugin()],
+    build: { rollupOptions: { input: { index: 'src/main/index.ts', 'audio-service': 'src/main/audio-service.ts' } } }
   },
   preload: {
     plugins: [externalizeDepsPlugin()]

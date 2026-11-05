@@ -18,17 +18,35 @@ npm run dev
 ```
 
 The desktop capture *addon* is a stable Node-API module built explicitly for
-the Electron version installed in `node_modules`. It is the in-process
-transport for the shared `AudioInput` core. Karaoke mic matching still captures
-via `getUserMedia` (echo cancellation intact), and vocal training talks to the
-same core through the spawned `singz-analyze` session (`src/main/audio-input.ts`).
-The experimental headphone monitor is app-shell owned: Settings configures its
-device, channels, gain and native DSP graph, while the persistent top bar keeps
-its status and Stop control available after Settings closes. It transfers
-exclusive output ownership from Web Audio before opening the native graph, and
-restores Web Audio readiness without resuming the song when monitoring ends.
-Swapping karaoke or vocal training capture onto the addon remains a deliberate
-future step, not a side effect of building it:
+the installed Electron version. The production app loads it only in the
+**SingZ Audio** utility process. Main keeps the file allowlist and renderer IPC;
+`audio-process.ts` forwards asynchronous controls to `audio-service.ts`, which
+owns the existing playback/capture/relay service. Both helper entry and shared
+main chunks are bundled under `out/main` and ship inside the app asar. Do not
+copy only `out/main/index.js` when testing an overlay.
+
+Build before driving the app. Automated runs set `SINGZ_MUTE=1` and
+`SINGZ_NO_SYNC=1`; native cues and playback must remain muted too. The log's
+`audio process ready` receipt names the helper PID and Electron main PID.
+Confirm different PIDs and inspect the actual helper's addon mapping before
+claiming isolation. Exercise repeated Chromium camera/helper launches during
+playback, renderer reload, stop/unload, pending-prepare cancellation, and helper
+crash. A successful mocked RPC test does not qualify hardware buffer sizes.
+
+Renderer reload retains song/relay audio but releases private microphone
+analysis and monitoring. The replacement screen exposes top-bar Stop controls
+for audio that remains active without a loaded song. Destroying the owning
+webContents releases its native ownership; app quit tears down the helper. A helper crash or
+control timeout fails closed and needs an app restart; status polls must not
+spawn a replacement and replay stale commands. This implementation does not
+keep audio alive across an Electron main restart; a separately supervised
+system service would need a different lifecycle contract.
+
+The helper performs the same artifact fingerprint, checksum, ABI and codec
+validation as the former main-process loader. Do not point a worktree at a
+neighbour's addon to bypass a source mismatch. The low-level `capture:verify`
+probe below deliberately loads the addon directly as an ABI/native-contract
+test; production process-isolation verification also needs the real app.
 
 ```bash
 npm run capture:addon                    # current platform/architecture

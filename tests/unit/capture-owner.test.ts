@@ -957,6 +957,23 @@ describe('CaptureOwner', () => {
     expect(binding.cancelled).toEqual([41n])
   })
 
+  it('keeps the song owned across UI detach while releasing private capture', async () => {
+    const binding = fakeBinding()
+    binding.preparePlayback = async (_config, _lanes, generation) => ({
+      ...playbackResult(generation.toString()), ownershipRetained: true
+    })
+    const unload = vi.spyOn(binding, 'unloadPlayback')
+    const owner = new CaptureOwner(binding)
+    expect(await owner.preparePlayback(3, playbackConfig(), playbackLanes(), 'darwin')).toMatchObject({ ok: true, generation: '1' })
+    expect(owner.begin(3, { inputChannel: 0 }, '43', () => {})).toMatchObject({ ok: true })
+    owner.rendererDetached(3)
+    expect(binding.cancelled).toEqual([43n])
+    expect(unload).not.toHaveBeenCalled()
+    expect(owner.startPlayback(3, '1')).toMatchObject({ ok: true })
+    owner.rendererGone(3)
+    expect(unload).toHaveBeenCalledWith(1n)
+  })
+
   it('binds renderer destruction cleanup only once across restarts', () => {
     const binding = fakeBinding()
     const owner = new CaptureOwner(binding)
