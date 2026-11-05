@@ -1199,6 +1199,10 @@ export interface DesktopMicrophoneMixConfig {
   outputDeviceUid?: string
   channels: { channel: number; gain: number; muted: boolean; pan?: number }[]
   delayFrames?: number
+  /** Requested relay period; negotiated outputPeriodFrames remains authoritative. */
+  requestedOutputPeriodFrames?: 256 | 512 | 1024
+  /** Opt-in relay render wall/thread-CPU measurements; additive mixing is not instrumented. */
+  measureRenderTiming?: boolean
 }
 export type DesktopMicrophoneMixResult = { ok: true } | { ok: false; error: string }
 export type DesktopMicrophoneMixStatus = {
@@ -1219,6 +1223,15 @@ export type DesktopMicrophoneMixStatus = {
   outputXruns?: string
   /** Callback blocks silenced for missing presentation time; not selected-mono missingFrames. */
   outputTimestampUnavailableBlocks?: string
+  /** Optional relay render/mix timing; uint64 durations and counts are decimal strings. */
+  relayRenderCalls?: string
+  relayRenderTotalWallNs?: string
+  relayRenderMaxWallNs?: string
+  relayRenderTotalCpuNs?: string
+  relayRenderMaxCpuNs?: string
+  relayRenderBudgetOverruns?: string
+  relayRenderCpuTimingAvailable?: boolean
+  relayRenderTimingEnabled?: boolean
   /** Optional for older bindings. One row per mono capture channel; live fields
    * are independent atomic observations, not a coherent cross-source snapshot.
    * History misses exclude non-read pre-delay silence, while missingFrames sums

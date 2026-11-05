@@ -151,6 +151,26 @@ bool readConfig(napi_env env, napi_value value, MicrophoneMixConfig* config) {
       config->delayFrames = static_cast<uint32_t>(delay);
     }
   }
+  present = false;
+  if (napi_has_named_property(env, value, "requestedOutputPeriodFrames", &present) != napi_ok)
+    return false;
+  if (present) {
+    if (!property(env, value, "requestedOutputPeriodFrames", &field)) return false;
+    if (!undefined(env, field)) {
+      double period = 0;
+      if (!finiteNumber(env, field, &period) ||
+          (period != 256 && period != 512 && period != 1024)) return false;
+      config->requestedOutputPeriodFrames = static_cast<uint32_t>(period);
+    }
+  }
+  present = false;
+  if (napi_has_named_property(env, value, "measureRenderTiming", &present) != napi_ok)
+    return false;
+  if (present) {
+    if (!property(env, value, "measureRenderTiming", &field)) return false;
+    if (!undefined(env, field) &&
+        napi_get_value_bool(env, field, &config->measureRenderTiming) != napi_ok) return false;
+  }
   return true;
 }
 napi_value configure(napi_env env, napi_callback_info info) {
@@ -159,7 +179,7 @@ napi_value configure(napi_env env, napi_callback_info info) {
   napi_get_cb_info(env, info, &count, &argument, nullptr, nullptr);
   MicrophoneMixConfig config;
   if (count != 1 || !readConfig(env, argument, &config))
-    return result(env, false, "Microphone mixing requires valid input/output device UIDs, 1–8 unique channels, gains 0–1, boolean mute values, optional pan −1–1 and an optional 256–8192-frame delay");
+    return result(env, false, "Microphone mixing requires valid routes and channels, gains 0–1, pan −1–1, delay 256–8192, relay period 256/512/1024 and boolean measureRenderTiming");
 #if !defined(__linux__) || defined(__ANDROID__)
   return result(env, false, "Microphone and song mixing is currently available only with Linux ALSA");
 #else
@@ -197,6 +217,14 @@ napi_value status(napi_env env, napi_callback_info) {
   text(env, value, "outputXruns", std::to_string(current.outputXruns));
   text(env, value, "outputTimestampUnavailableBlocks",
        std::to_string(current.outputTimestampUnavailableBlocks));
+  text(env, value, "relayRenderCalls", std::to_string(current.relayRenderCalls));
+  text(env, value, "relayRenderTotalWallNs", std::to_string(current.relayRenderTotalWallNs));
+  text(env, value, "relayRenderMaxWallNs", std::to_string(current.relayRenderMaxWallNs));
+  text(env, value, "relayRenderTotalCpuNs", std::to_string(current.relayRenderTotalCpuNs));
+  text(env, value, "relayRenderMaxCpuNs", std::to_string(current.relayRenderMaxCpuNs));
+  text(env, value, "relayRenderBudgetOverruns", std::to_string(current.relayRenderBudgetOverruns));
+  boolean(env, value, "relayRenderCpuTimingAvailable", current.relayRenderCpuTimingAvailable);
+  boolean(env, value, "relayRenderTimingEnabled", current.relayRenderTimingEnabled);
   napi_value diagnostics;
   napi_create_array_with_length(env, current.diagnostics.size(), &diagnostics);
   for (uint32_t index = 0; index < current.diagnostics.size(); ++index)

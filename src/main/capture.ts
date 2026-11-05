@@ -1048,8 +1048,14 @@ export function validMicrophoneMixConfig(value: unknown): value is DesktopMicrop
       return false
     channels.add(row.channel)
   }
-  return config.delayFrames === undefined || (Number.isInteger(config.delayFrames) &&
-    config.delayFrames >= 256 && config.delayFrames <= 8192)
+  if (!(config.delayFrames === undefined || (Number.isInteger(config.delayFrames) &&
+      config.delayFrames >= 256 && config.delayFrames <= 8192))) return false
+  if (config.requestedOutputPeriodFrames !== undefined &&
+      (typeof config.requestedOutputPeriodFrames !== 'number' ||
+       !Number.isInteger(config.requestedOutputPeriodFrames) ||
+       (config.requestedOutputPeriodFrames !== 256 && config.requestedOutputPeriodFrames !== 512 &&
+        config.requestedOutputPeriodFrames !== 1024))) return false
+  return config.measureRenderTiming === undefined || typeof config.measureRenderTiming === 'boolean'
 }
 
 function parseGeneration(raw: string): bigint | null {

@@ -38,6 +38,16 @@ describe('microphone mix request boundary', () => {
       expect(validMicrophoneMixConfig({ ...config(), delayFrames })).toBe(true)
   })
 
+  it('accepts requested relay period choices and optional render timing booleans', () => {
+    for (const requestedOutputPeriodFrames of [256, 512, 1024] as const)
+      expect(validMicrophoneMixConfig({ ...config(), requestedOutputPeriodFrames })).toBe(true)
+    for (const measureRenderTiming of [true, false])
+      expect(validMicrophoneMixConfig({ ...config(), measureRenderTiming })).toBe(true)
+    expect(validMicrophoneMixConfig({
+      ...config(), requestedOutputPeriodFrames: undefined, measureRenderTiming: undefined
+    })).toBe(true)
+  })
+
   it('rejects malformed values before loading or calling a native module', () => {
     const invalid: unknown[] = [
       null, undefined, [], {}, { ...config(), deviceUid: '' },
@@ -53,7 +63,10 @@ describe('microphone mix request boundary', () => {
       ...[-0.1, 1.1, NaN, Infinity, '0.1'].map(gain => ({ ...config(), channels: [{ channel: 0, gain, muted: false }] })),
       ...[-1.1, 1.1, NaN, Infinity, 'left'].map(pan => ({ ...config(), channels: [{ channel: 0, gain: 0.1, muted: false, pan }] })),
       ...[0, 'false', null].map(muted => ({ ...config(), channels: [{ channel: 0, gain: 0.1, muted }] })),
-      ...[255, 8193, 256.5, NaN, Infinity, '1024'].map(delayFrames => ({ ...config(), delayFrames }))
+      ...[255, 8193, 256.5, NaN, Infinity, '1024'].map(delayFrames => ({ ...config(), delayFrames })),
+      ...[0, 255, 768, 1025, 2048, 256.5, NaN, Infinity, '256', null, false, []]
+        .map(requestedOutputPeriodFrames => ({ ...config(), requestedOutputPeriodFrames })),
+      ...[0, 1, 'true', null, [], {}].map(measureRenderTiming => ({ ...config(), measureRenderTiming }))
     ]
     const load = vi.fn(() => { throw new Error('must not load') })
     const owner = new CaptureOwner(undefined, load)
@@ -87,6 +100,17 @@ describe('microphone mix ownership and cleanup', () => {
     const native = binding()
     const owner = ownerFor(native)
     const relay = { ...config(), outputDeviceUid: 'alsa:hdmi1' }
+    expect(owner.configureMicrophoneMix(11, relay)).toEqual({ ok: true })
+    expect(native.configureMicrophoneMix).toHaveBeenCalledExactlyOnceWith(relay)
+  })
+
+  it('forwards the requested period and timing flag unchanged', () => {
+    const native = binding()
+    const owner = ownerFor(native)
+    const relay = {
+      ...config(), outputDeviceUid: 'alsa:hdmi1',
+      requestedOutputPeriodFrames: 512 as const, measureRenderTiming: true
+    }
     expect(owner.configureMicrophoneMix(11, relay)).toEqual({ ok: true })
     expect(native.configureMicrophoneMix).toHaveBeenCalledExactlyOnceWith(relay)
   })

@@ -4,15 +4,39 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <set>
+#if defined(__linux__)
+#include <time.h>
+#endif
 
 namespace singz {
 namespace route = zcore::routing;
 namespace {
 bool validUid(const std::string& uid) {
   return !uid.empty() && uid.size() <= 4096 && uid.find('\0') == std::string::npos;
+}
+uint64_t renderWallNs() noexcept {
+  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+bool renderThreadCpuNs(uint64_t& value) noexcept {
+#if defined(__linux__)
+  timespec time{};
+  if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &time) != 0) return false;
+  value = static_cast<uint64_t>(time.tv_sec) * 1000000000ULL +
+          static_cast<uint64_t>(time.tv_nsec);
+  return true;
+#else
+  (void)value;
+  return false;
+#endif
+}
+void updateMaximum(std::atomic<uint64_t>& counter, uint64_t value) noexcept {
+  if (value > counter.load(std::memory_order_relaxed))
+    counter.store(value, std::memory_order_relaxed);
 }
 }
 struct MicrophoneMixSession::Impl {
@@ -77,7 +101,10 @@ struct MicrophoneMixSession::Impl {
   std::unique_ptr<AudioHostBackend> relay;
   std::atomic<uint64_t> callbacks{0}, missing{0}, failures{0};
   std::atomic<uint64_t> outputTimestampUnavailableBlocks{0};
-  std::atomic<bool> renderFailed{false};
+  std::atomic<uint64_t> relayRenderCalls{0}, relayRenderTotalWallNs{0}, relayRenderMaxWallNs{0};
+  std::atomic<uint64_t> relayRenderTotalCpuNs{0}, relayRenderMaxCpuNs{0};
+  std::atomic<uint64_t> relayRenderBudgetOverruns{0};
+  std::atomic<bool> renderFailed{false}, relayRenderCpuClockFailed{false};
   uint64_t outputGeneration = 0;
   std::string captureUid, lastError;
   double rate = 0;
@@ -85,10 +112,34 @@ struct MicrophoneMixSession::Impl {
   uint32_t captureSafetyFrames = 0, outputPeriodFrames = 0, outputBufferFrames = 0;
   uint32_t presentationDelayFrames = 0;
   uint64_t outputXruns = 0;
-  bool active = false, attached = false, relayMode = false;
+  bool active = false, attached = false, relayMode = false, measureRenderTiming = false;
   std::array<std::array<float, route::kBlock>, 2> song{}, mixed{};
   static bool render(void* context, const AudioHostRenderBlock& block) noexcept {
-    return static_cast<Impl*>(context)->mix(block);
+    auto& self = *static_cast<Impl*>(context);
+    if (!self.relayMode || !self.measureRenderTiming) return self.mix(block);
+    const auto wallBegin = renderWallNs();
+    uint64_t cpuBegin = 0, cpuEnd = 0;
+    const bool cpuBeginValid = !self.relayRenderCpuClockFailed.load(std::memory_order_relaxed) &&
+                               renderThreadCpuNs(cpuBegin);
+    const bool result = self.mix(block);
+    const bool cpuEndValid = cpuBeginValid && renderThreadCpuNs(cpuEnd);
+    const auto wallEnd = renderWallNs();
+    const bool cpuValid = cpuEndValid && cpuEnd >= cpuBegin;
+    if (!cpuValid) self.relayRenderCpuClockFailed.store(true, std::memory_order_relaxed);
+    const auto wallNs = wallEnd >= wallBegin ? wallEnd - wallBegin : 0;
+    self.relayRenderCalls.fetch_add(1, std::memory_order_relaxed);
+    self.relayRenderTotalWallNs.fetch_add(wallNs, std::memory_order_relaxed);
+    updateMaximum(self.relayRenderMaxWallNs, wallNs);
+    if (cpuValid) {
+      const auto cpuNs = cpuEnd - cpuBegin;
+      self.relayRenderTotalCpuNs.fetch_add(cpuNs, std::memory_order_relaxed);
+      updateMaximum(self.relayRenderMaxCpuNs, cpuNs);
+    }
+    if (block.frames && std::isfinite(block.sampleRate) && block.sampleRate > 0 &&
+        static_cast<long double>(wallNs) >
+            static_cast<long double>(block.frames) * 1e9L / block.sampleRate)
+      self.relayRenderBudgetOverruns.fetch_add(1, std::memory_order_relaxed);
+    return result;
   }
   static void silence(const AudioHostRenderBlock& block) noexcept {
     if (!block.output || block.frames > block.maximumFrames ||
@@ -203,6 +254,11 @@ MicrophoneMixResult MicrophoneMixSession::start(const MicrophoneMixConfig& confi
       config.channels.empty() || config.channels.size() > 8 ||
       config.delayFrames < 256 || config.delayFrames > 8192)
     return {false, "Invalid microphone route or feedback between capture and relay output"};
+  if (config.requestedOutputPeriodFrames != 256 && config.requestedOutputPeriodFrames != 512 &&
+      config.requestedOutputPeriodFrames != 1024)
+    return {false, "Requested relay output period must be 256, 512 or 1024 frames"};
+  if (config.measureRenderTiming && config.outputDeviceUid.empty())
+    return {false, "Render timing measurement requires a relay output"};
   std::set<uint32_t> channels;
   for (const auto& channel : config.channels)
     if (channel.channel >= kAudioHostMaxChannels ||
@@ -232,6 +288,14 @@ MicrophoneMixResult MicrophoneMixSession::start(const MicrophoneMixConfig& confi
   self.outputPeriodFrames = self.outputBufferFrames = self.presentationDelayFrames = 0;
   self.outputXruns = 0;
   self.outputTimestampUnavailableBlocks.store(0);
+  self.relayRenderCalls.store(0);
+  self.relayRenderTotalWallNs.store(0);
+  self.relayRenderMaxWallNs.store(0);
+  self.relayRenderTotalCpuNs.store(0);
+  self.relayRenderMaxCpuNs.store(0);
+  self.relayRenderBudgetOverruns.store(0);
+  self.relayRenderCpuClockFailed.store(false);
+  self.measureRenderTiming = relayMode && config.measureRenderTiming;
   self.outputGeneration = self.service.outputRouteGeneration();
   self.captureUid = config.deviceUid;
   self.relayMode = relayMode;
@@ -270,7 +334,7 @@ MicrophoneMixResult MicrophoneMixSession::start(const MicrophoneMixConfig& confi
       output.outputDeviceUid = config.outputDeviceUid;
       output.outputChannels = {0, 1};
       output.requestedSampleRate = self.rate;
-      output.requestedBufferFrames = route::kBlock;
+      output.requestedBufferFrames = config.requestedOutputPeriodFrames;
       auto result = self.relay->open(output, Impl::render, &self);
       if (!result.ok) { stop(); return {false, result.message}; }
       if (result.format.sampleRate != self.rate || result.format.outputChannels != 2) {
@@ -348,6 +412,15 @@ MicrophoneMixStatus MicrophoneMixSession::status() {
   result.presentationDelayFrames = self.presentationDelayFrames;
   result.outputXruns = self.outputXruns;
   result.outputTimestampUnavailableBlocks = self.outputTimestampUnavailableBlocks.load();
+  result.relayRenderCalls = self.relayRenderCalls.load();
+  result.relayRenderTotalWallNs = self.relayRenderTotalWallNs.load();
+  result.relayRenderMaxWallNs = self.relayRenderMaxWallNs.load();
+  result.relayRenderTotalCpuNs = self.relayRenderTotalCpuNs.load();
+  result.relayRenderMaxCpuNs = self.relayRenderMaxCpuNs.load();
+  result.relayRenderBudgetOverruns = self.relayRenderBudgetOverruns.load();
+  result.relayRenderCpuTimingAvailable = self.measureRenderTiming && result.relayRenderCalls != 0 &&
+                                         !self.relayRenderCpuClockFailed.load();
+  result.relayRenderTimingEnabled = self.measureRenderTiming;
   result.diagnostics.reserve(self.sources.size());
   for (const auto& source : self.sources) {
     const auto history = source->history.status();

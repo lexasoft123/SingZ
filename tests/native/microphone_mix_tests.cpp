@@ -296,6 +296,77 @@ void outputBoundsRequired() {
     for(const auto& input:inputs)CHECK(!input->running && input->stops>0);
   }
 }
+void requestedOutputPeriodChoices() {
+  for(const uint32_t requested:{0u,512u,1024u}) {
+    Fixture fixture;MicrophoneMixSession session(fixture.service,inputFactory,outputFactory);
+    auto config=relayConfig();
+    if(requested)config.requestedOutputPeriodFrames=requested;
+    CHECK(session.start(config).ok);
+    CHECK(relayRecord->config.requestedBufferFrames==(requested?requested:256u));
+    const auto status=session.status();
+    CHECK(status.outputPeriodFrames==1024 && status.outputBufferFrames==4096);
+    CHECK(status.captureSafetyFrames==1024 && status.presentationDelayFrames==5120);
+  }
+}
+void invalidPeriodKeepsActiveRoute() {
+  Fixture fixture;MicrophoneMixSession session(fixture.service,inputFactory,outputFactory);
+  CHECK(session.start(relayConfig()).ok);feed();
+  const auto opens=relayRecord->opens;
+  for(const uint32_t period:{0u,255u,768u,1025u,2048u}) {
+    auto bad=relayConfig();bad.requestedOutputPeriodFrames=period;
+    CHECK(!session.start(bad).ok);
+    CHECK(session.status().active && relayRecord->opens==opens);
+    CHECK(relayRecord->config.requestedBufferFrames==256);
+  }
+  const auto before=session.status();
+  auto output=render(relayRecord,origin+ns(1536));
+  for(uint32_t i=0;i<1024;++i){close(output[0][i],.3f);close(output[1][i],-.4f);}
+  CHECK(session.status().callbacks==before.callbacks+1);
+}
+bool zeroRenderTiming(const MicrophoneMixStatus& status) {
+  return status.relayRenderCalls==0 && status.relayRenderTotalWallNs==0 &&
+      status.relayRenderMaxWallNs==0 && status.relayRenderTotalCpuNs==0 &&
+      status.relayRenderMaxCpuNs==0 && status.relayRenderBudgetOverruns==0 &&
+      !status.relayRenderCpuTimingAvailable;
+}
+void checkRenderTiming(const MicrophoneMixStatus& status,uint64_t calls) {
+  CHECK(status.relayRenderCalls==calls);
+  CHECK(status.relayRenderTotalWallNs>=status.relayRenderMaxWallNs);
+  CHECK(status.relayRenderTotalCpuNs>=status.relayRenderMaxCpuNs);
+  CHECK(status.relayRenderBudgetOverruns<=calls);
+  if(calls==1 && !status.relayRenderCpuTimingAvailable)
+    CHECK(status.relayRenderTotalCpuNs==0 && status.relayRenderMaxCpuNs==0);
+}
+void renderTimingOptIn() {
+  {
+    Fixture fixture;MicrophoneMixSession session(fixture.service,inputFactory,outputFactory);
+    CHECK(session.start(relayConfig()).ok);feed();render(relayRecord,origin+ns(1536));
+    const auto status=session.status();
+    CHECK(!status.relayRenderTimingEnabled && zeroRenderTiming(status));
+  }
+  {
+    Fixture fixture;MicrophoneMixSession session(fixture.service,inputFactory,outputFactory);
+    auto config=relayConfig();config.measureRenderTiming=true;
+    CHECK(session.start(config).ok);
+    auto status=session.status();
+    CHECK(status.relayRenderTimingEnabled && zeroRenderTiming(status));
+    feed();render(relayRecord,origin+ns(1536));
+    status=session.status();checkRenderTiming(status,1);
+    CHECK(status.relayRenderTimingEnabled);
+    render(relayRecord,origin+ns(1536),true,origin+ns(16384),false);
+    status=session.status();checkRenderTiming(status,2);
+    CHECK(status.active && status.outputTimestampUnavailableBlocks==1 && status.failures==0);
+    session.stop();const auto stopped=session.status();
+    CHECK(stopped.relayRenderTimingEnabled && stopped.relayRenderCalls==status.relayRenderCalls);
+    CHECK(stopped.relayRenderTotalWallNs==status.relayRenderTotalWallNs &&
+          stopped.relayRenderMaxWallNs==status.relayRenderMaxWallNs);
+    CHECK(stopped.relayRenderTotalCpuNs==status.relayRenderTotalCpuNs &&
+          stopped.relayRenderMaxCpuNs==status.relayRenderMaxCpuNs);
+    CHECK(stopped.relayRenderBudgetOverruns==status.relayRenderBudgetOverruns);
+    CHECK(session.start(relayConfig()).ok);status=session.status();
+    CHECK(!status.relayRenderTimingEnabled && zeroRenderTiming(status));
+  }
+}
 void unknownCaptureRecovery() {
   Fixture fixture;MicrophoneMixSession session(fixture.service,inputFactory,outputFactory);
   CHECK(session.start(relayConfig()).ok);feed();
@@ -465,6 +536,7 @@ void routeChangesFailClosed() {
 }
 }
 int main(){relayStereoAndLifetime();presentationClockDoesNotUseCallbackArrival();outputTimestampRecovery();
-  outputBoundsRequired();unknownCaptureRecovery();relayDiagnostics();validationAndFailures();
-  malformedCaptureFailsClosed();partialCaptureFailureAndAdditive();routeChangesFailClosed();
-  std::puts("Hardware main relay: presentation clock, timestamp recovery, bounds, stereo, diagnostics and fail-closed routes passed");}
+  outputBoundsRequired();requestedOutputPeriodChoices();invalidPeriodKeepsActiveRoute();renderTimingOptIn();
+  unknownCaptureRecovery();relayDiagnostics();validationAndFailures();malformedCaptureFailsClosed();
+  partialCaptureFailureAndAdditive();routeChangesFailClosed();
+  std::puts("Hardware main relay: presentation clock, output periods, render timing, recovery and fail-closed routes passed");}

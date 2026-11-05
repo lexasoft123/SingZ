@@ -18,6 +18,8 @@ struct MicrophoneMixConfig {
   std::string deviceUid;
   std::vector<MicrophoneMixChannel> channels;
   uint32_t delayFrames = 1024;
+  uint32_t requestedOutputPeriodFrames = 256;
+  bool measureRenderTiming = false;
   // Empty: add microphones to the existing shared output. Nonempty: relay
   // only captured audio to this separate output; the song stays on the shared
   // device (e.g. FLOW 8 USB return -> hardware main -> HDMI).
@@ -57,6 +59,11 @@ struct MicrophoneMixStatus {
   // Relay callbacks without a usable presentation timestamp. Separate from the
   // selected-mono-frame missingFrames counter and not a hardware xrun count.
   uint64_t outputTimestampUnavailableBlocks = 0;
+  // Opt-in relay render/mix timing, excluding the ALSA provider's other work.
+  uint64_t relayRenderCalls = 0, relayRenderTotalWallNs = 0, relayRenderMaxWallNs = 0;
+  uint64_t relayRenderTotalCpuNs = 0, relayRenderMaxCpuNs = 0;
+  uint64_t relayRenderBudgetOverruns = 0;
+  bool relayRenderCpuTimingAvailable = false, relayRenderTimingEnabled = false;
   std::vector<MicrophoneMixSourceDiagnostics> diagnostics;
 };
 // Control calls are serialized. Stop drains the shared/relay output callback
