@@ -1219,6 +1219,9 @@ export type DesktopMicrophoneMixStatus = {
     historyOnline: boolean
     historyCallbacks: string
     historyDiscontinuities: string
+    /** Valid received PCM discarded for Unknown timestamp quality, not measured hardware loss. */
+    unanchoredBlocks?: string
+    unanchoredFrames?: string
     measuredRate: number
     lastHostNs: string
     publishedEndHostNs: string

@@ -28,7 +28,7 @@ struct MicrophoneMixSession::Impl {
     uint64_t frames = 0;
     bool timelineGap = false;
     std::array<float, route::kBlock> samples{};
-    std::atomic<uint64_t> rejected{0};
+    std::atomic<uint64_t> rejected{0}, unanchoredBlocks{0}, unanchoredFrames{0};
     static bool capture(void* context, const float* mono, uint32_t count,
                         uint64_t firstNs, uint64_t,
                         AudioInputTimestampQuality quality) noexcept {
@@ -42,6 +42,8 @@ struct MicrophoneMixSession::Impl {
       // supplied. Drop it without advancing source time; the next anchored
       // block starts a new epoch instead of bridging unknown loss.
       if (quality == AudioInputTimestampQuality::Unknown) {
+        self.unanchoredBlocks.fetch_add(1, std::memory_order_relaxed);
+        self.unanchoredFrames.fetch_add(count, std::memory_order_relaxed);
         self.timelineGap = true;
         return true;
       }
@@ -310,6 +312,8 @@ MicrophoneMixStatus MicrophoneMixSession::status() {
     row.historyOnline = history.online;
     row.historyCallbacks = history.callbacks;
     row.historyDiscontinuities = history.discontinuities;
+    row.unanchoredBlocks = source->unanchoredBlocks.load(std::memory_order_relaxed);
+    row.unanchoredFrames = source->unanchoredFrames.load(std::memory_order_relaxed);
     row.measuredRate = history.measuredRate;
     row.lastHostNs = history.lastHostNs;
     row.publishedEndHostNs = source->history.publishedBlockEndHostNs();

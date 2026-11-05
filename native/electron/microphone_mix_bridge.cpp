@@ -48,6 +48,8 @@ napi_value sourceDiagnostics(napi_env env, const MicrophoneMixSourceDiagnostics&
   boolean(env, value, "historyOnline", source.historyOnline);
   text(env, value, "historyCallbacks", std::to_string(source.historyCallbacks));
   text(env, value, "historyDiscontinuities", std::to_string(source.historyDiscontinuities));
+  text(env, value, "unanchoredBlocks", std::to_string(source.unanchoredBlocks));
+  text(env, value, "unanchoredFrames", std::to_string(source.unanchoredFrames));
   number(env, value, "measuredRate", source.measuredRate);
   text(env, value, "lastHostNs", std::to_string(source.lastHostNs));
   text(env, value, "publishedEndHostNs", std::to_string(source.publishedEndHostNs));

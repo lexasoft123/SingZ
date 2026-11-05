@@ -35,6 +35,9 @@ struct MicrophoneMixSourceDiagnostics {
   uint32_t channel = 0;
   bool historyOnline = false;
   uint64_t historyCallbacks = 0, historyDiscontinuities = 0;
+  // Valid positive-count PCM discarded for Unknown timestamp quality. These
+  // count received data, not missing hardware frames or an exact overrun count.
+  uint64_t unanchoredBlocks = 0, unanchoredFrames = 0;
   double measuredRate = 0;
   uint64_t lastHostNs = 0, publishedEndHostNs = 0;
   MicrophoneMixMissingFrames missingFramesByReason;

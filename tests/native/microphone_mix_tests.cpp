@@ -201,6 +201,8 @@ void unknownCaptureRecovery() {
   CHECK(session.start(relayConfig()).ok);feed();
   const auto before=session.status();
   CHECK(before.active && before.diagnostics.size()==2);
+  for(const auto& source:before.diagnostics)
+    CHECK(source.unanchoredBlocks==0 && source.unanchoredFrames==0);
   std::array<float,256> unanchored;
   for(int repeat=0;repeat<2;++repeat) {
     const auto timestamp=repeat==0?0:origin+ns(4096);
@@ -216,6 +218,8 @@ void unknownCaptureRecovery() {
   for(size_t index=0;index<gap.diagnostics.size();++index) {
     const auto& source=gap.diagnostics[index];const auto& prior=before.diagnostics[index];
     CHECK(source.historyOnline && source.historyCallbacks==8 && source.historyDiscontinuities==0);
+    CHECK(source.unanchoredBlocks==2 && source.unanchoredFrames==512);
+    CHECK(source.historyDiscontinuities==prior.historyDiscontinuities);
     CHECK(source.historyCallbacks==prior.historyCallbacks && source.lastHostNs==prior.lastHostNs);
     CHECK(source.publishedEndHostNs==prior.publishedEndHostNs);
   }
@@ -229,6 +233,7 @@ void unknownCaptureRecovery() {
   CHECK(after.active && after.failures==0 && after.diagnostics.size()==2);
   for(const auto& source:after.diagnostics) {
     CHECK(source.historyOnline && source.historyCallbacks==16 && source.historyDiscontinuities==1);
+    CHECK(source.unanchoredBlocks==2 && source.unanchoredFrames==512);
     CHECK(source.lastHostNs==recovered+ns(1792));
     CHECK(source.publishedEndHostNs==recovered+ns(2048));
     CHECK(source.verifiedClockSteps==0);
