@@ -7,6 +7,7 @@ import {
 } from './waveform-cache'
 import { log } from './log'
 import { mutateProjectDocument } from './project-document'
+import type { MetronomeProjectRef } from './playback/metronome-persistence'
 import { forgetMove } from './publish-record'
 import {
   GRAPH_DOCUMENT_FORMAT,
@@ -182,12 +183,13 @@ export async function writeLyrics(
  * landing while analysis or lyrics are being written cannot clobber either —
  * this is a strictly additive field on whatever the doc says at the time. */
 export async function writeProjectWaveform(
-  dir: string,
+  ref: MetronomeProjectRef | undefined,
   waveforms: Record<string, PersistedWaveform>,
   currentIds?: readonly string[],
   isCurrent: () => boolean = () => true
 ): Promise<ProjectDoc | null> {
-  if (!isCurrent()) return null
+  if (!isCurrent() || ref?.source !== 'phone' || !ref.dir) return null
+  const dir = ref.dir
   const fresh: Record<string, PersistedWaveform> = {}
   for (const [id, value] of Object.entries(waveforms).slice(0, MAX_WAVEFORM_LANES)) {
     const parsed = parsePersistedWaveform(value)

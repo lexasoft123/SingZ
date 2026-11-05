@@ -50,11 +50,14 @@ import {
 } from './preferences';
 import { FlacStreamingPreferenceStore } from './preferences';
 import { mobileMetronomePersistence } from './metronome-persistence';
+import { mobileWaveformStore, type WaveformStore } from '../waveform-store';
 import {
   MAX_WAVEFORM_LANES,
   WAVEFORM_BUCKET_COUNT,
   validWaveformMd5,
   waveformSeedFor,
+  waveformCacheFor,
+  type PersistedWaveform,
   type NativeWaveformSeed,
 } from '../waveform-cache';
 
@@ -829,6 +832,7 @@ export interface NativePlaybackCoordinatorDeps {
   readonly platform: string;
   readonly native: NativePlaybackApi | undefined;
   readonly preferences: IosNativePlaybackPreferenceStore;
+  readonly waveforms?: Pick<WaveformStore, 'seed' | 'remember'>;
   readonly legacyLoad: typeof loadProject;
   readonly now: () => number;
 }
@@ -1952,6 +1956,7 @@ export class IosNativePlaybackCoordinator {
       platform: Platform.OS,
       native: nativeModule(),
       preferences: iosNativePlaybackPreference,
+      waveforms: mobileWaveformStore,
       legacyLoad: loadProject,
       now: Date.now,
     },
@@ -2069,7 +2074,7 @@ export class IosNativePlaybackCoordinator {
       });
     }
 
-    const materialized = await materializeNativeProject(options, doc);
+    const materialized = await materializeNativeProject(options, doc, this.deps.waveforms);
     if (!options.isCurrent()) throw new Error('Song load was superseded.');
     return this.withOwnershipLock(async () => {
       if (!options.isCurrent()) throw new Error('Song load was superseded.');
@@ -2208,6 +2213,10 @@ export class IosNativePlaybackCoordinator {
   readLanePeaks(generation: number): Promise<unknown> {
     const native = this.deps.native;
     return native ? native.lanePeaks(generation) : Promise.resolve(null);
+  }
+
+  rememberWaveforms(entries: readonly PersistedWaveform[], isCurrent: () => boolean): Promise<void> {
+    return this.deps.waveforms?.remember(entries, isCurrent) ?? Promise.resolve();
   }
 
   /**
@@ -4794,6 +4803,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
   private displayTrimSec = 0;
   private lanePeaksGeneration = 0;
   private lanePeaksCache: NativePlaybackLanePeaksResult | null = null;
+  private readonly rememberedWaveforms = new Set<string>();
   private retryProjectSeconds: number | null = null;
   /** The frame the current generation's count-in lands on (a Play from
    *  mid-song with the count-in on), 0 when its pre-roll precedes the entry:
@@ -5383,6 +5393,22 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       parsed = null;
     }
     if (!this.routeValid || this.generation !== generation) return null;
+    if (parsed) {
+      const entries = Object.values(waveformCacheFor(parsed, this.laneContentMd5))
+        .filter(entry => !this.rememberedWaveforms.has(entry.md5));
+      if (entries.length > 0) {
+        for (const entry of entries) this.rememberedWaveforms.add(entry.md5);
+        // The app-owned cache also covers read-only picked folders.
+        // Never delay a waveform response on preference I/O.
+        // A cue rebuild changes generation, but these MD5-bound source bytes
+        // remain the same. Cancel only when this song/route loses ownership.
+        void this.coordinator.rememberWaveforms(entries,
+          () => this.routeValid && this.isCurrent())
+          .catch(() => {
+            for (const entry of entries) this.rememberedWaveforms.delete(entry.md5);
+          });
+      }
+    }
     const expectedIds = new Set(this.materialized.lanes.map(lane => lane.id));
     const complete =
       parsed != null &&
@@ -7425,6 +7451,7 @@ async function readActualProjectDoc(
 async function materializeNativeProject(
   options: PlaybackLoadOptions,
   doc: ProjectDoc,
+  waveforms?: Pick<WaveformStore, 'seed' | 'remember'>,
 ): Promise<MaterializedProject> {
   const { entry, onStep, crumb, isCurrent } = options;
   await crumb?.('graph');
@@ -7500,8 +7527,9 @@ async function materializeNativeProject(
     completedWeight += byteWeighted ? weights[index] : 1;
     const track = doc.settings?.tracks?.[source.id];
     const waveform = identity
-      ? waveformSeedFor(doc, source.id, identity.md5)
+      ? waveformSeedFor(doc, source.id, identity.md5) ?? await waveforms?.seed(identity.md5)
       : undefined;
+    if (!isCurrent()) throw new Error('Song load was superseded.');
     lanes.push({
       id: source.id,
       path,

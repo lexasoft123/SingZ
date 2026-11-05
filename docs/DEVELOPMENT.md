@@ -173,6 +173,13 @@ legacy unstamped records mean only the original v1 algorithm. Both writers prune
 removed, stale and malformed lanes and resolve custom IDs through
 `settings.custom[].file`, rather than deriving filenames from labels or IDs.
 
+Mobile also keeps up to 64 validated RMS96 envelopes in the durable app-private
+`singz.waveforms.rms96.v1` preference, bounded to 256 KiB and keyed by the actual
+audio MD5. This survives process restarts for read-only picked folders and Drive
+projects. Only a project explicitly owned by the phone may receive a
+`project.json` waveform update; never write a same-named Documents shadow for an
+external source. App-private writes are serialized and discard superseded loads.
+
 A streamed prepare passes validated envelopes into the native session before
 analysis starts, so a cache hit avoids opening a background analysis reader.
 Desktop seeds come only from main's verified measurement cache, after path/codec
@@ -185,7 +192,7 @@ measure progressively. Short custom lanes are padded with silence in the mixed
 seek-bar timeline, while their stored envelope remains relative to their source.
 
 Focused checks: desktop `lane-measure-cache`, `desktop-waveform-seed` and
-`project-waveforms` Vitest suites; mobile `waveform-cache`, `waveform-writer`,
+`project-waveforms` Vitest suites; mobile `waveform-cache`, `waveform-store`, `waveform-writer`,
 `waveform-mix` and `native-playback-b2` Jest suites; the Swift folder runner at
 `mobile/__tests__/test-swift-folder-materialization.sh`; Android folder/schema
 unit tests; and native playback/streaming feeder tests in all sanitizer presets.

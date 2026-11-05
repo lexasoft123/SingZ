@@ -21,6 +21,7 @@ const hashes = {
   drums: 'c'.repeat(32),
   retired: 'd'.repeat(32)
 }
+const phone = { source: 'phone', dir: 'Song' } as const
 const peaks = (value: number) => new Array(96).fill(value)
 const current = (md5: string, values = peaks(0.5)) => ({
   version: WAVEFORM_CACHE_VERSION,
@@ -49,6 +50,16 @@ const project = (): ProjectDoc => ({
 beforeEach(() => mutate.mockReset())
 
 describe('waveform persistence transaction', () => {
+  it.each([
+    { source: 'picked', dir: 'Song', root: 'another-library' } as const,
+    { source: 'gdrive', dir: 'Song' } as const,
+    { source: 'readonly', dir: 'Song' } as const,
+    undefined,
+  ])('never writes a same-named Documents project without phone authority (%j)', async ref => {
+    await expect(writeProjectWaveform(ref, { vocals: current(hashes.current) })).resolves.toBeNull()
+    expect(mutate).not.toHaveBeenCalled()
+  })
+
   it('drops an old-song write that waited behind another document transaction', async () => {
     const existing = project()
     let release!: () => void
@@ -58,7 +69,7 @@ describe('waveform persistence transaction', () => {
       return callback(existing)
     })
     let currentSong = true
-    const pending = writeProjectWaveform('Song', { vocals: current(hashes.current) },
+    const pending = writeProjectWaveform(phone, { vocals: current(hashes.current) },
       ['vocals', 'drums'], () => currentSong)
     currentSong = false
     release()
@@ -71,7 +82,7 @@ describe('waveform persistence transaction', () => {
     const existing = project()
     mutate.mockImplementation(async (_dir, callback) => callback(existing))
     const next = await writeProjectWaveform(
-      'Song',
+      phone,
       { vocals: current(hashes.current, peaks(0.6)) },
       ['vocals', 'drums']
     )
@@ -82,7 +93,7 @@ describe('waveform persistence transaction', () => {
     // A late write remains bound to its measured bytes. It cannot become a hit
     // after replacement, even if the project mutation itself already landed.
     const late = await writeProjectWaveform(
-      'Song',
+      phone,
       { vocals: current(hashes.old) },
       ['vocals', 'drums']
     )
@@ -90,7 +101,7 @@ describe('waveform persistence transaction', () => {
   })
 
   it('does not open a project transaction for wholly corrupt input', async () => {
-    const next = await writeProjectWaveform('Song', {
+    const next = await writeProjectWaveform(phone, {
       vocals: current(hashes.current, peaks(0.5).fill(Number.POSITIVE_INFINITY, 8, 9))
     })
     expect(next).toBeNull()
@@ -105,7 +116,7 @@ describe('waveform persistence transaction', () => {
         `lane-${index}`, current(hashes.current)
       ])
     )
-    const next = await writeProjectWaveform('Song', fresh)
+    const next = await writeProjectWaveform(phone, fresh)
     expect(Object.keys(next!.waveforms!)).toHaveLength(MAX_WAVEFORM_LANES)
   })
 })

@@ -870,14 +870,15 @@ export default function PlayerScreen({
       }
       const wantedCount = Object.keys(wanted).length
       const persist = (envelope: NativeLaneEnvelope): void => {
-        if (!project.dir) return
+        const ref = project.metronomeRef
+        if (!project.dir || ref?.source !== 'phone' || ref.dir !== project.dir) return
         const fresh = waveformCacheFor(envelope, wanted)
         const pending = Object.fromEntries(
           Object.entries(fresh).filter(([id]) => !persisted.has(id))
         )
         if (Object.keys(pending).length === 0) return
         for (const id of Object.keys(pending)) persisted.add(id)
-        void writeProjectWaveform(project.dir, pending, Object.keys(wanted), () => !cancelled).catch(() => {
+        void writeProjectWaveform(ref, pending, Object.keys(wanted), () => !cancelled).catch(() => {
           // A cache that cannot be written costs a repeat pass, not a wrong picture.
         })
       }

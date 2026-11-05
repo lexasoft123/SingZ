@@ -24,6 +24,7 @@ import {
 import type { IosNativePlaybackPreferenceStore } from '../src/playback/preferences';
 import { playbackCountInDisplay } from '../src/playback/count-in-display';
 import { md5Text, utf8TextByteLength } from '../src/md5';
+import { WaveformStore } from '../src/waveform-store';
 
 const doc = (overrides: Partial<ProjectDoc['settings']> = {}): ProjectDoc => ({
   version: 2,
@@ -298,6 +299,7 @@ const capability = (
 
 function harness(
   options: {
+    waveforms?: Pick<WaveformStore, 'seed' | 'remember'>;
     prepareOk?: boolean;
     cleanupComplete?: boolean;
     current?: () => boolean;
@@ -555,6 +557,7 @@ function harness(
     platform,
     native: native as never,
     preferences,
+    waveforms: options.waveforms,
     legacyLoad: legacyLoad as never,
     now: () => 10,
   });
@@ -624,6 +627,90 @@ beforeEach(() => {
 describe.each(['ios', 'android'] as const)(
   '%s Phase 4B product coordinator',
   platform => {
+    it('persists content-bound envelopes queued before a same-song generation rebuild', async () => {
+      (NativeModules.FolderAccess as Record<string, unknown>).fileIdentity = jest.fn(
+        async (path: string) => ({ path, md5: md5Text(path), size: 1, mtimeMs: 1 }),
+      );
+      let stored: string | null = null;
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const store = new WaveformStore({
+        getPreference: async () => stored,
+        setPreference: async (_key, value) => { stored = value; },
+      });
+      const remember = jest.fn(async (...args: Parameters<WaveformStore['remember']>) => {
+        await gate;
+        await store.remember(...args);
+      });
+      const h = harness({ platform, waveforms: { seed: md5 => store.seed(md5), remember } });
+      const project = await h.load(platform === 'android' ? androidEntry() : entry());
+      const handle = project.nativePlayback!;
+      await handle.lanePeaks();
+      expect(remember).toHaveBeenCalledTimes(1);
+      await rebuildNativePlaybackCues(handle, null, {
+        click: false, countInBars: 0, volume: 0, accent: true,
+      });
+      expect(h.native.prepare).toHaveBeenCalledTimes(2);
+      release();
+      await remember.mock.results[0].value;
+      expect(stored).not.toBeNull();
+      const persisted = JSON.parse(stored!);
+      expect(persisted.entries.length).toBeGreaterThan(0);
+      for (const envelope of persisted.entries) {
+        expect(await new WaveformStore({ getPreference: async () => stored, setPreference: async () => {} }).seed(envelope.md5))
+          .toMatchObject({ sourceMd5: envelope.md5, peaks: envelope.peaks });
+      }
+      await handle.unload('queued waveform rebuild complete');
+    });
+
+    it('reuses private measured envelopes across restarts of a picked folder with stale document hashes', async () => {
+      const prepared = (h: ReturnType<typeof harness>) => h.prepareRequests[0].lanes as Array<{ id: string; contentMd5?: string; waveform?: { sourceMd5: string; peaks: readonly number[] } }>;
+      let stored: string | null = null;
+      const api = {
+        getPreference: async (_key: string) => stored,
+        setPreference: async (_key: string, value: string) => { stored = value; },
+      };
+      let vocalHash = 'a'.repeat(32);
+      (NativeModules.FolderAccess as Record<string, unknown>).fileIdentity = jest.fn(
+        async (path: string) => ({ path, md5: path.includes('vocals.') ? vocalHash : md5Text(path), size: 1, mtimeMs: 1 }),
+      );
+      const picked = platform === 'android' ? androidEntry() : entry();
+      picked.metronomeRef = { source: 'picked', dir: picked.dir, root: 'picked-root' };
+      picked.doc.stemHashes = { 'vocals.flac': { md5: 'f'.repeat(32), size: 1, mtimeMs: 1 } };
+      picked.doc.waveforms = { vocals: { md5: 'f'.repeat(32), peaks: Array(96).fill(0.9) } };
+      const external = JSON.stringify(picked.doc.waveforms);
+      const first = harness({ platform, waveforms: new WaveformStore(api) });
+      const loaded = await first.load(picked);
+      first.native.lanePeaks = jest.fn(async generation => ({ ok: true, error: 'none', generation, bucketCount: 96, lanes: prepared(first).map(lane => ({ id: lane.id, peaksValid: true, peaks: Array(96).fill(0.5) })), message: '' }));
+      expect(prepared(first).every(lane => lane.waveform === undefined)).toBe(true);
+      const measured = await loaded.nativePlayback!.lanePeaks();
+      await until(() => stored !== null);
+      await loaded.nativePlayback!.unload('private waveform first process');
+
+      const restart = harness({ platform, waveforms: new WaveformStore(api) });
+      const restored = await restart.load(picked);
+      for (const lane of prepared(restart)) {
+        expect(lane.waveform?.peaks).toEqual(measured!.lanes.find(old => old.id === lane.id)!.peaks);
+        expect(lane.waveform?.sourceMd5).toBe(lane.contentMd5);
+      }
+      await restored.nativePlayback!.unload('private waveform second process');
+
+      // Same-size/restored-mtime replacement with unchanged external metadata.
+      vocalHash = 'e'.repeat(32);
+      const replaced = harness({ platform, waveforms: new WaveformStore(api) });
+      const changed = await replaced.load(picked);
+      expect(prepared(replaced).find(lane => lane.id === 'vocals')!.waveform).toBeUndefined();
+      expect(prepared(replaced).filter(lane => lane.id !== 'vocals').every(lane => lane.waveform != null)).toBe(true);
+      await changed.nativePlayback!.lanePeaks();
+      await until(() => stored?.includes(vocalHash) === true);
+      await changed.nativePlayback!.unload('private waveform replacement');
+      const third = harness({ platform, waveforms: new WaveformStore(api) });
+      const reopened = await third.load(picked);
+      expect(prepared(third).find(lane => lane.id === 'vocals')!.waveform?.sourceMd5).toBe(vocalHash);
+      expect(JSON.stringify(picked.doc.waveforms)).toBe(external);
+      await reopened.nativePlayback!.unload('private waveform third process');
+    });
+
     it('selects one native owner with a whole-song cue DTO and no JS PCM decode', async () => {
       const h = harness({ platform });
       const project = await h.load();
