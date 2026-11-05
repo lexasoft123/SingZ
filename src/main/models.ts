@@ -536,26 +536,39 @@ export function gpuSplitterPackUrl(
   return `https://github.com/lexasoft123/SingZ/releases/download/v${version}/gpu-splitter-${platform}-${arch}.tar.gz`
 }
 
+/**
+ * Which splitter description fits this machine. The "Apple Silicon" text is
+ * darwin-arm64 only: Linux ARM64 boards (Orange Pi 5 et al) run the CPU ONNX
+ * pack, and claiming an Apple GPU there is how a board owner learns the label
+ * is a lie.
+ */
+export function splitterDescriptionId(
+  platform = process.platform,
+  arch = process.arch
+): 'descriptionWin' | 'descriptionAppleSilicon' | 'descriptionGeneric' {
+  if (platform === 'win32') return 'descriptionWin'
+  if (platform === 'darwin' && arch === 'arm64') return 'descriptionAppleSilicon'
+  return 'descriptionGeneric'
+}
+
 const REGISTRY: RegistryEntry[] = [
   {
     id: 'gpu-splitter',
     label: () => t('main.model.splitter.label'),
-    description: () =>
-      process.platform === 'win32'
-        ? t('main.model.splitter.descriptionWin')
-        : process.arch === 'arm64'
-          ? t('main.model.splitter.descriptionAppleSilicon')
-          : t('main.model.splitter.descriptionGeneric'),
+    description: () => t(`main.model.splitter.${splitterDescriptionId()}`),
     // Measured on the tarballs CI actually built (run 35390756585, the first
     // build carrying the vocal model): 344/336/273 MiB → the decimal MB this
     // field is in. Was 296/272/259 before the model moved inside the pack.
+    // The Linux number was measured on x64; the ARM64 pack is the same
+    // pipeline and content, so this stays an estimate until an ARM64 tarball
+    // is measured (the field only sizes the progress bar).
     sizeMb: process.platform === 'linux' ? 366 : process.platform === 'win32' ? 361 : process.arch === 'arm64' ? 352 : 286,
     kind: 'archive',
     url:
       process.env.SINGZ_GPU_PACK_URL ??
       gpuSplitterPackUrl(),
     optional: false,
-    platforms: ['darwin-arm64', 'darwin-x64', 'win32-x64', 'linux-x64']
+    platforms: ['darwin-arm64', 'darwin-x64', 'win32-x64', 'linux-x64', 'linux-arm64']
   },
   {
     id: 'qwen-asr',
@@ -586,7 +599,7 @@ const REGISTRY: RegistryEntry[] = [
     file: 'mms-fa.onnx',
     url: 'https://github.com/lexasoft123/SingZ/releases/download/models-1/mms-fa.onnx',
     optional: true,
-    platforms: ['win32-x64', 'darwin-x64', 'linux-x64']
+    platforms: ['win32-x64', 'darwin-x64', 'linux-x64', 'linux-arm64']
   },
 ]
 

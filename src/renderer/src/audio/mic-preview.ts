@@ -68,6 +68,10 @@ export class MicrophonePreview {
     const context = this.makeContext()
     const mic = this.makeMic()
     try {
+      if (typeof context.setSinkId === 'function') {
+        await (context.setSinkId as unknown as (sink: { type: 'none' }) => Promise<void>)({ type: 'none' })
+        this.assertCurrent(generation)
+      }
       await context.resume()
       this.assertCurrent(generation)
       await mic.start(context, options)

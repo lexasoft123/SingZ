@@ -73,6 +73,12 @@ case "$TARGET" in
   # the RTX machines while adding hundreds of MB to every installer.
   win32-*) EXTRA="-DGGML_NATIVE=OFF" ;;
   linux-x64) EXTRA="-DGGML_NATIVE=OFF" ;;
+  # ARM64 boards are not one machine: Orange Pi 5's RK3588, a Raspberry Pi 4,
+  # an AWS Graviton all differ. -march=native would tune for the builder's
+  # core only, and there is no runner-specific extension worth taking (the
+  # RK3588 NPU/Mali path is not wired up — CPU inference, fleet-wide baseline
+  # ISA), so the build matches the x64 leg: no native tuning at all.
+  linux-arm64) EXTRA="-DGGML_NATIVE=OFF" ;;
 esac
 
 BUILD="$SRC/build-$TARGET"

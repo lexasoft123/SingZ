@@ -165,6 +165,13 @@ endif()
 # leaf remains separate from file decode, graph construction, host ownership
 # and product bridges. Neither target is linked into a product automatically.
 include("${ZCORE_ROOT}/cmake/SingZRealtimeTarget.cmake")
+add_library(singz_microphone_mix STATIC
+  native/playback/microphone_mix.cpp native/playback/microphone_mix.h)
+target_compile_features(singz_microphone_mix PUBLIC cxx_std_20)
+target_include_directories(singz_microphone_mix PUBLIC native/playback)
+target_link_libraries(singz_microphone_mix PUBLIC zCore::routing SingZ::zcore_device)
+set_target_properties(singz_microphone_mix PROPERTIES POSITION_INDEPENDENT_CODE YES)
+
 add_library(singz_native_playback_callback STATIC EXCLUDE_FROM_ALL
   native/playback/native_playback_callback.cpp
   native/playback/native_playback_callback.h)
@@ -321,6 +328,7 @@ if(SINGZ_BUILD_ELECTRON_CAPTURE)
     native/electron/audio_monitor_session.h
     native/electron/playback_addon_bridge.cpp
     native/electron/playback_addon_bridge.h
+    native/electron/microphone_mix_bridge.cpp
     native/electron/training_audio_session.cpp
     native/electron/training_audio_session.h
     native/electron/native_audio_ownership.h)
@@ -349,6 +357,7 @@ if(SINGZ_BUILD_ELECTRON_CAPTURE)
     SingZ::native_build_options
     SingZ::zdsp_analysis
     SingZ::zcore_audio_export
+    singz_microphone_mix
     SingZ::monitor_callback
     SingZ::native_playback_session
     singz_native_audio_ownership)
@@ -705,6 +714,13 @@ if(SINGZ_CORE_TESTS)
   target_link_libraries(native_audio_ownership_tests PRIVATE
     singz_native_audio_ownership Threads::Threads)
   add_test(NAME native_audio_ownership_tests COMMAND native_audio_ownership_tests)
+
+  add_executable(microphone_mix_tests
+    tests/native/microphone_mix_tests.cpp native/playback/shared_audio_service.cpp)
+  target_compile_features(microphone_mix_tests PRIVATE cxx_std_20)
+  target_include_directories(microphone_mix_tests PRIVATE "${SINGZ_REPO_ROOT}")
+  target_link_libraries(microphone_mix_tests PRIVATE singz_microphone_mix Threads::Threads)
+  add_test(NAME microphone_mix_tests COMMAND microphone_mix_tests)
 
   add_executable(shared_audio_service_tests
     native/playback/shared_audio_service.cpp

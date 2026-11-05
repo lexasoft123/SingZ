@@ -21,6 +21,9 @@ import { t } from '../shared/i18n'
 import type {
   DesktopAudioHostDevice,
   DesktopTrainingAudioStatus,
+  DesktopMicrophoneMixConfig,
+  DesktopMicrophoneMixResult,
+  DesktopMicrophoneMixStatus,
   DesktopAudioHostInventoryResult,
   DesktopMonitorConfig,
   DesktopMonitorFormat,
@@ -65,6 +68,9 @@ export interface NativeCaptureBinding {
   setTrainingCueGain(generation: bigint, gain: number): { ok: boolean; error?: string }
   cancelTrainingCues(generation: bigint): { ok: boolean; error?: string }
   trainingCueStatus(): DesktopTrainingAudioStatus
+  configureMicrophoneMix?(config: DesktopMicrophoneMixConfig): DesktopMicrophoneMixResult
+  stopMicrophoneMix?(): DesktopMicrophoneMixResult
+  microphoneMixStatus?(): DesktopMicrophoneMixStatus
   captureRecording(action: 'record' | 'finish', path: string, generation: bigint): Record<string, unknown>
 
   exportAudio?(sourceFd: number | number[], destinationFd: number, format: 'wav' | 'flac' | 'mp3', job: string): Promise<{ ok: boolean; error?: string }>
@@ -1021,6 +1027,37 @@ export function loadCaptureBinding(): NativeCaptureBinding {
   }
 }
 
+export function validMicrophoneMixConfig(value: unknown): value is DesktopMicrophoneMixConfig {
+  if (typeof value !== 'object' || value === null) return false
+  const config = value as Partial<DesktopMicrophoneMixConfig>
+  if (typeof config.deviceUid !== 'string' || !config.deviceUid ||
+      Buffer.byteLength(config.deviceUid, 'utf8') > 4096 || config.deviceUid.includes('\0') ||
+      !Array.isArray(config.channels) || config.channels.length < 1 || config.channels.length > 8)
+    return false
+  if (config.outputDeviceUid !== undefined &&
+      (typeof config.outputDeviceUid !== 'string' || !config.outputDeviceUid ||
+       Buffer.byteLength(config.outputDeviceUid, 'utf8') > 4096 || config.outputDeviceUid.includes('\0')))
+    return false
+  const channels = new Set<number>()
+  for (const row of config.channels) {
+    if (typeof row !== 'object' || row === null || !Number.isInteger(row.channel) ||
+        row.channel < 0 || row.channel > 0xffffffff || channels.has(row.channel) ||
+        typeof row.gain !== 'number' || !Number.isFinite(row.gain) || row.gain < 0 || row.gain > 1 ||
+        typeof row.muted !== 'boolean' ||
+        (row.pan !== undefined && (typeof row.pan !== 'number' || !Number.isFinite(row.pan) || row.pan < -1 || row.pan > 1)))
+      return false
+    channels.add(row.channel)
+  }
+  if (!(config.delayFrames === undefined || (Number.isInteger(config.delayFrames) &&
+      config.delayFrames >= 256 && config.delayFrames <= 8192))) return false
+  if (config.requestedOutputPeriodFrames !== undefined &&
+      (typeof config.requestedOutputPeriodFrames !== 'number' ||
+       !Number.isInteger(config.requestedOutputPeriodFrames) ||
+       (config.requestedOutputPeriodFrames !== 256 && config.requestedOutputPeriodFrames !== 512 &&
+        config.requestedOutputPeriodFrames !== 1024))) return false
+  return config.measureRenderTiming === undefined || typeof config.measureRenderTiming === 'boolean'
+}
+
 function parseGeneration(raw: string): bigint | null {
   if (!/^[1-9]\d{0,19}$/.test(raw)) return null
   try {
@@ -1292,6 +1329,7 @@ export class CaptureOwner {
   private rendererId: number | null = null
   private monitorGeneration = ''
   private monitorRendererId: number | null = null
+  private microphoneMixRendererId: number | null = null
   private monitorHighWater = 0n
   private playbackGeneration = ''
   private playbackRendererId: number | null = null
@@ -1362,6 +1400,40 @@ export class CaptureOwner {
     return this.binding
   }
 
+  configureMicrophoneMix(rendererId: number, config: unknown): DesktopMicrophoneMixResult {
+    if (this.microphoneMixRendererId !== null && this.microphoneMixRendererId !== rendererId)
+      return { ok: false, error: 'Microphone mixing belongs to another window' }
+    if (!validMicrophoneMixConfig(config))
+      return { ok: false, error: 'Invalid microphone mixing input/output device, channels, gain, pan or delay' }
+    const binding = this.native()
+    if (!binding?.configureMicrophoneMix || !binding.stopMicrophoneMix || !binding.microphoneMixStatus)
+      return { ok: false, error: this.loadError ?? 'This native audio build does not support microphone mixing' }
+    try {
+      const result = binding.configureMicrophoneMix(config)
+      if (result.ok) this.microphoneMixRendererId = rendererId
+      return result
+    } catch (error) { return { ok: false, error: String(error) } }
+  }
+
+  stopMicrophoneMix(rendererId: number): DesktopMicrophoneMixResult {
+    if (this.microphoneMixRendererId !== null && this.microphoneMixRendererId !== rendererId)
+      return { ok: false, error: 'Microphone mixing belongs to another window' }
+    if (!this.binding?.stopMicrophoneMix) return { ok: true }
+    try {
+      const result = this.binding.stopMicrophoneMix()
+      if (result.ok) this.microphoneMixRendererId = null
+      return result
+    } catch (error) { return { ok: false, error: String(error) } }
+  }
+
+  microphoneMixStatus(): DesktopMicrophoneMixStatus {
+    const binding = this.native()
+    if (!binding?.microphoneMixStatus)
+      return { ok: false, error: this.loadError ?? 'This native audio build does not support microphone mixing' }
+    try { return binding.microphoneMixStatus() }
+    catch (error) { return { ok: false, error: String(error) } }
+  }
+
   devices(): { ok: true; devices: CaptureInputDevice[] } | { ok: false; devices: []; error: string } {
     const binding = this.native()
     if (!binding) return { ok: false, devices: [], error: this.loadError ?? t('main.error.nativeCaptureUnavailable') }
@@ -1404,39 +1476,53 @@ export class CaptureOwner {
       }
     }
     try {
-      const raw = binding.audioHostDevices(provider) as {
-        ok?: unknown
-        provider?: unknown
-        defaultInputUid?: unknown
-        defaultOutputUid?: unknown
-        devices?: unknown
-        error?: unknown
-      }
-      if (
-        raw.ok !== true || raw.provider !== exposedProvider || typeof raw.defaultInputUid !== 'string' ||
-        typeof raw.defaultOutputUid !== 'string' || !Array.isArray(raw.devices) ||
-        !raw.devices.every(validHostDevice)
-      ) {
+      const readInventory = (): DesktopAudioHostInventoryResult => {
+        const raw = binding.audioHostDevices(provider) as {
+          ok?: unknown
+          provider?: unknown
+          defaultInputUid?: unknown
+          defaultOutputUid?: unknown
+          devices?: unknown
+          error?: unknown
+        }
+        if (
+          raw.ok !== true || raw.provider !== exposedProvider || typeof raw.defaultInputUid !== 'string' ||
+          typeof raw.defaultOutputUid !== 'string' || !Array.isArray(raw.devices) ||
+          !raw.devices.every(validHostDevice)
+        ) {
+          return {
+            ok: false,
+            platform: exposedPlatform,
+            provider: exposedProvider,
+            defaultInputUid: '',
+            defaultOutputUid: '',
+            devices: [],
+            error: typeof raw.error === 'string'
+              ? raw.error
+              : t('main.error.nativeAudioHostInvalidInventory')
+          }
+        }
         return {
-          ok: false,
+          ok: true,
           platform: exposedPlatform,
           provider: exposedProvider,
-          defaultInputUid: '',
-          defaultOutputUid: '',
-          devices: [],
-          error: typeof raw.error === 'string'
-            ? raw.error
-            : t('main.error.nativeAudioHostInvalidInventory')
+          defaultInputUid: raw.defaultInputUid,
+          defaultOutputUid: raw.defaultOutputUid,
+          devices: raw.devices
         }
       }
-      return {
-        ok: true,
-        platform: exposedPlatform,
-        provider: exposedProvider,
-        defaultInputUid: raw.defaultInputUid,
-        defaultOutputUid: raw.defaultOutputUid,
-        devices: raw.devices
+      const inventory = readInventory()
+      // An early ALSA probe can see EBUSY while Chromium releases an endpoint.
+      // A direction-known output with no capability bound must not stay hidden
+      // forever in the process cache. Retry once; healthy inventories stay cheap.
+      if (platform === 'linux' && exposedProvider === 'alsa' && inventory.ok &&
+          inventory.devices.some(device => device.outputChannels === 0 &&
+            (device.direction === 'duplex' || device.direction === 'output')) &&
+          typeof binding.refreshSharedAudioInventory === 'function') {
+        binding.refreshSharedAudioInventory()
+        return readInventory()
       }
+      return inventory
     } catch (error) {
       return {
         ok: false,
@@ -2268,7 +2354,7 @@ export class CaptureOwner {
     if (preparingForThisRenderer) this.playbackAbandoned = true
     if (
       rendererId === this.rendererId || rendererId === this.monitorRendererId ||
-      rendererId === this.playbackRendererId || preparingForThisRenderer
+      rendererId === this.playbackRendererId || rendererId === this.microphoneMixRendererId || preparingForThisRenderer
     ) this.stop()
   }
 
@@ -2280,6 +2366,7 @@ export class CaptureOwner {
   }
 
   stop(): void {
+    if (this.microphoneMixRendererId !== null) this.stopMicrophoneMix(this.microphoneMixRendererId)
     // Same reason as in rendererGone: a prepare in flight owns audio the
     // unload below cannot name. On the quit path the addon's env cleanup
     // hook is the fail-closed owner — it cancels the decode and unloads —

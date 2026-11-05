@@ -100,7 +100,12 @@ const SEC_COUNT_PERIOD = 1
  * ramps so toggling mid-playback is click-free.
  */
 export class MultitrackEngine {
-  private ctx = new AudioContext({ latencyHint: 'interactive' })
+  // Boot inventory must run before Chromium claims an exclusive endpoint;
+  // output reconciliation attaches the saved native, browser, or default route.
+  private ctx = new AudioContext({
+    latencyHint: 'interactive',
+    sinkId: { type: 'none' }
+  } as AudioContextOptions)
   private desiredOutputId = ''
   private trainingConfiguredOutputId: string | null = null
   private confirmedOutputId = ''

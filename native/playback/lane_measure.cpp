@@ -5,6 +5,7 @@
 #include <zcore/media/streaming_audio_source.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <exception>
 #include <thread>
@@ -264,26 +265,30 @@ LaneMeasure measureLane(LaneMeasureRequest request,
 std::vector<LaneMeasure> measureLanes(std::vector<LaneMeasureRequest> requests,
                                       const DecodeCancellation& cancel) noexcept {
   std::vector<LaneMeasure> results(requests.size());
-  std::vector<std::thread> threads;
-  try {
-    threads.reserve(requests.size());
-  } catch (...) {
-    // No room for the bookkeeping: every lane on this thread.
-  }
-  for (size_t index = 0; index < requests.size(); ++index) {
-    bool spawned = false;
-    try {
-      threads.emplace_back([&results, &requests, &cancel, index] {
-        results[index] = measureLane(std::move(requests[index]), cancel);
-      });
-      spawned = true;
-    } catch (...) {
-      spawned = false;
+  std::atomic<size_t> next{0};
+  const auto work = [&]() noexcept {
+    for (;;) {
+      const size_t index = next.fetch_add(1, std::memory_order_relaxed);
+      if (index >= requests.size()) return;
+      results[index] = measureLane(std::move(requests[index]), cancel);
     }
-    if (!spawned) results[index] = measureLane(std::move(requests[index]), cancel);
+  };
+  if (requests.size() < 2) {
+    work();
+    return results;
   }
-  for (std::thread& thread : threads)
-    if (thread.joinable()) thread.join();
+
+  // Full-song scans allocate decoder state and compete for CPU and file I/O.
+  // Bound their fan-out so a lane batch cannot create a thread per lane while
+  // live audio is preparing or playing.
+  std::thread worker;
+  try {
+    worker = std::thread(work);
+  } catch (...) {
+    // No background worker: the caller drains every unclaimed lane below.
+  }
+  work();
+  if (worker.joinable()) worker.join();
   return results;
 }
 

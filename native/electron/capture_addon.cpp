@@ -6,6 +6,7 @@
 #include "playback_addon_bridge.h"
 #include "../playback/shared_audio_service.h"
 #include "training_audio_session.h"
+#include "microphone_mix_bridge.h"
 #include <zcore/audio/capture_recording.h>
 #include <filesystem>
 
@@ -1022,6 +1023,13 @@ napi_value beginMonitor(napi_env env, napi_callback_info info) {
               status.host.latency,
               "Monitor configuration values must have exact bounded types"});
   }
+  if (singz::microphoneMixActive()) {
+    const auto status = monitor.status();
+    return monitorResultValue(env,
+        {false, singz::AudioMonitorError::NativeAudioBusy, generation,
+         status.host.state, status.host.format, status.host.latency,
+         "Stop microphone mixing before starting exclusive headphone monitoring"});
+  }
   const singz::NativeAudioAcquireResult acquired =
       nativeAudioOwnership.acquire(singz::NativeAudioOwnerKind::Monitor,
                                    generation);
@@ -1212,6 +1220,7 @@ napi_value captureRecording(napi_env env, napi_callback_info info) {
 }
 
 void cleanup(void*) {
+  singz::cleanupMicrophoneMix();
   singz::cleanupTrainingAudio();
   singz::cleanupPlaybackBridge();
   std::lock_guard<std::mutex> lock(owner.mutex);
@@ -1228,6 +1237,7 @@ void cleanup(void*) {
 
 napi_value init(napi_env env, napi_value exports) {
   singz::defineAudioExport(env, exports);
+  singz::defineMicrophoneMixExports(env, exports, &nativeAudioOwnership);
   singz::defineTrainingAudioExports(env, exports, &nativeAudioOwnership, playbackBackend);
   napi_add_env_cleanup_hook(env, cleanup, nullptr);
   napi_property_descriptor properties[] = {

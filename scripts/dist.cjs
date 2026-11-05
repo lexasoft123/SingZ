@@ -39,6 +39,20 @@ function electronBuilderArgs(args) {
   return hasExplicitPublishArg(args) ? [...args] : [...args, '--publish', 'never']
 }
 
+/**
+ * The Linux CI build stage assembles the package inside a container that
+ * cannot open a desktop, so the host dlopen smoke cannot run there. Both
+ * Linux architectures defer it to the installed-test stage; every other
+ * host/target combination smokes immediately when the target matches the
+ * host (the caller still gates on `targets.includes(hostTarget)`).
+ */
+function shouldDeferRuntimeSmoke(env, targets, hostTarget) {
+  return env.SINGZ_CI_STAGE === 'build' &&
+    hostTarget.startsWith('linux-') &&
+    targets.length === 1 &&
+    (targets[0] === 'linux-x64' || targets[0] === 'linux-arm64')
+}
+
 function finalVerifyCaptureSnapshots({
   projectRoot,
   targets,
@@ -85,10 +99,11 @@ function main(builderArgs = process.argv.slice(2)) {
 
   // Only the host architecture can be dlopen-smoked here; cross-architecture
   // artifacts are still checksum/manifest verified above and are load-smoked by
-  // their native CI runner.
+  // their native CI runner. The Linux CI build stage runs inside a container
+  // that cannot open a desktop, so EITHER Linux arch defers its runtime smoke
+  // to the installed-test stage (same rule as the x64 gate it replaces).
   const hostTarget = `${process.platform}-${process.arch}`
-  const runtimeSmokeDeferred = process.env.SINGZ_CI_STAGE === 'build' &&
-    process.platform === 'linux' && targets.length === 1 && targets[0] === 'linux-x64'
+  const runtimeSmokeDeferred = shouldDeferRuntimeSmoke(process.env, targets, hostTarget)
   if (runtimeSmokeDeferred) console.log('Linux runtime smoke deferred to the required installed-test CI stage')
   if (targets.includes(hostTarget) && !runtimeSmokeDeferred) {
     const electron = require('electron')
@@ -117,5 +132,6 @@ module.exports = {
   electronBuilderArgs,
   finalVerifyCaptureSnapshots,
   hasExplicitPublishArg,
+  shouldDeferRuntimeSmoke,
   spawnOptions
 }

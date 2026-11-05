@@ -1192,6 +1192,78 @@ export interface DesktopPlaybackStatus {
   mediaCodecTag: string
 }
 
+/** Native ALSA input routing. Channels are zero-based; an explicit target relays capture only. */
+export interface DesktopMicrophoneMixConfig {
+  deviceUid: string
+  /** Omit to add inputs to song output. Set to relay captured hardware mix only to this output. */
+  outputDeviceUid?: string
+  channels: { channel: number; gain: number; muted: boolean; pan?: number }[]
+  delayFrames?: number
+  /** Requested relay period; negotiated outputPeriodFrames remains authoritative. */
+  requestedOutputPeriodFrames?: 256 | 512 | 1024
+  /** Opt-in relay render wall/thread-CPU measurements; additive mixing is not instrumented. */
+  measureRenderTiming?: boolean
+}
+export type DesktopMicrophoneMixResult = { ok: true } | { ok: false; error: string }
+export type DesktopMicrophoneMixStatus = {
+  ok: true
+  active: boolean
+  callbacks: string
+  missingFrames: string
+  failures: string
+  sampleRate: number
+  /** Last capture/output failure is retained after the route stops. */
+  error: string
+  /** Optional configured relay software timing, not acoustic latency measurements. */
+  captureSafetyFrames?: number
+  outputPeriodFrames?: number
+  outputBufferFrames?: number
+  presentationDelayFrames?: number
+  /** Optional relay recovery counters, preserved as decimal strings. */
+  outputXruns?: string
+  /** Callback blocks silenced for missing presentation time; not selected-mono missingFrames. */
+  outputTimestampUnavailableBlocks?: string
+  /** Optional relay render/mix timing; uint64 durations and counts are decimal strings. */
+  relayRenderCalls?: string
+  relayRenderTotalWallNs?: string
+  relayRenderMaxWallNs?: string
+  relayRenderTotalCpuNs?: string
+  relayRenderMaxCpuNs?: string
+  relayRenderBudgetOverruns?: string
+  relayRenderCpuTimingAvailable?: boolean
+  relayRenderTimingEnabled?: boolean
+  /** Optional for older bindings. One row per mono capture channel; live fields
+   * are independent atomic observations, not a coherent cross-source snapshot.
+   * History misses exclude non-read pre-delay silence, while missingFrames sums
+   * all input-channel misses including that silence. Counters are decimal strings. */
+  diagnostics?: {
+    channel: number
+    historyOnline: boolean
+    historyCallbacks: string
+    historyDiscontinuities: string
+    /** Valid received PCM discarded for Unknown timestamp quality, not measured hardware loss. */
+    unanchoredBlocks?: string
+    unanchoredFrames?: string
+    measuredRate: number
+    lastHostNs: string
+    publishedEndHostNs: string
+    missingFramesByReason: {
+      invalidRequest: string
+      offline: string
+      anchorUnavailable: string
+      clockMapping: string
+      resamplingSupport: string
+      generationChanged: string
+    }
+    unpublishedSampleReads: string
+    expiredSampleReads: string
+    racingSampleReads: string
+    absentSampleReads: string
+    verifiedClockSteps: string
+    maximumVerifiedClockStepNs: string
+  }[]
+} | { ok: false; error: string }
+
 export interface DesktopTrainingAudioStatus {
   hostTimeNs: string
   outputLatencyMs: number
@@ -1300,6 +1372,9 @@ export interface SingzApi {
   }): Promise<DesktopAudioInputStartResult>
   configureDesktopTrainingOutput(outputDeviceUid: string, provider: DesktopPlaybackProvider): Promise<{ ok: boolean; error?: string }>
   desktopTrainingAudioStatus(): Promise<DesktopTrainingAudioStatus | null>
+  configureMicrophoneMix(config: DesktopMicrophoneMixConfig): Promise<DesktopMicrophoneMixResult>
+  stopMicrophoneMix(): Promise<DesktopMicrophoneMixResult>
+  microphoneMixStatus(): Promise<DesktopMicrophoneMixStatus>
   scheduleDesktopTrainingCue(config: DesktopTrainingPcmCue): Promise<DesktopTrainingPcmResult>
   setDesktopTrainingCueGain(generation: string, gain: number): Promise<{ ok: boolean; error?: string }>
   cancelDesktopTrainingCues(generation: string): Promise<{ ok: boolean; error?: string }>

@@ -31,6 +31,9 @@ class SharedAudioService final {
   // Replacement/clear drains the callback before returning to the caller.
   void setTrainingRenderer(AudioHostRender render, void* context);
   void clearTrainingRenderer();
+  // Final bus mixer sees song plus training PCM and must preserve that input.
+  void setMicrophoneRenderer(AudioHostRender render, void* context);
+  void clearMicrophoneRenderer();
   AudioHostStatus status() const;
   uint64_t renderedFrames() const noexcept;
   double sampleRate() const noexcept;
@@ -38,6 +41,8 @@ class SharedAudioService final {
   uint64_t enumerationCount() const noexcept;
   uint64_t watchedDeviceCount() const noexcept;
   std::string providerId() const;
+  std::string activeOutputUid() const;
+  uint64_t outputRouteGeneration() const noexcept;
   // Monitoring has an exclusive direct host until it joins this service.
   void parkOutput() noexcept;
   void shutdown() noexcept;

@@ -73,6 +73,10 @@ case "$TARGET" in
   darwin-x64) EXTRA="-DCMAKE_OSX_ARCHITECTURES=x86_64 -DGGML_NATIVE=OFF -DGGML_METAL=OFF" ;;
   win32-*) EXTRA="-DGGML_NATIVE=OFF" ;;
   linux-x64) EXTRA="-DGGML_NATIVE=OFF" ;;
+  # Same fleet-wide baseline ISA reasoning as vendor-llama.sh: no
+  # -march=native tuning for one ARM64 board's core, no RK3588-specific
+  # extensions — CPU inference on the common ARMv8 baseline.
+  linux-arm64) EXTRA="-DGGML_NATIVE=OFF" ;;
 esac
 
 BUILD="$SRC/build-$TARGET"
