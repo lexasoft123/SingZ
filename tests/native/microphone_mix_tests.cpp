@@ -97,21 +97,38 @@ class Host final:public AudioHostBackend {
 std::unique_ptr<AudioHostBackend> outputFactory(){return std::make_unique<Host>(relayRecord);}
 struct InputRecord {
   AudioInputConfig config;
+  AudioInputBusConfig busConfig;
   AudioInputPush callback=nullptr;
+  AudioInputBusPush busCallback=nullptr;
   void* context=nullptr;
+  void* busContext=nullptr;
+  uint32_t opens=0,busPushes=0,monoPushes=0;
   bool running=false,failure=false;
   unsigned stops=0;
 };
 std::vector<std::shared_ptr<InputRecord>> inputs;
 int failOpenAt=-1,failStartAt=-1;
+AudioInputBusOpenStatus inputBusStatus=AudioInputBusOpenStatus::Unsupported;
 class Input final:public AudioInputBackend {
  public:
-  Input():record(std::make_shared<InputRecord>()),index(inputs.size()){inputs.push_back(record);}
+  Input():record(std::make_shared<InputRecord>()){}
   AudioInputResult open(const AudioInputConfig& config,AudioInputPush callback,void* context)override {
+    index=inputs.size();inputs.push_back(record);++record->opens;
     record->config=config;record->callback=callback;record->context=context;
     if(static_cast<int>(index)==failOpenAt)
       return AudioInputResult::failure(AudioInputState::Error,"capture open failure",config.channel);
     return AudioInputResult::success(AudioInputState::Starting,48000,config.channel);
+  }
+  AudioInputBusResult openBus(const AudioInputBusConfig& config,AudioInputBusPush callback,
+                              void* context)override {
+    if(inputBusStatus==AudioInputBusOpenStatus::Unsupported)return {};
+    index=inputs.size();inputs.push_back(record);++record->opens;
+    record->busConfig=config;record->busCallback=callback;record->busContext=context;
+    if(inputBusStatus==AudioInputBusOpenStatus::Error || static_cast<int>(index)==failOpenAt)
+      return {AudioInputBusOpenStatus::Error,
+          AudioInputResult::failure(AudioInputState::Error,"capture bus open failure",config.channels[0])};
+    return {AudioInputBusOpenStatus::Ready,
+        AudioInputResult::success(AudioInputState::Starting,48000,config.channels[0])};
   }
   AudioInputResult start()override {
     if(static_cast<int>(index)==failStartAt)
@@ -122,12 +139,13 @@ class Input final:public AudioInputBackend {
   void stop()override {
     ++record->stops;events.push_back("capture-stop");record->running=false;
     record->callback=nullptr;record->context=nullptr;
+    record->busCallback=nullptr;record->busContext=nullptr;
   }
   bool takeFailure(std::string& error)override {
     if(!record->failure)return false;
     record->failure=false;error="capture disconnected";return true;
   }
- private:std::shared_ptr<InputRecord> record;size_t index;
+ private:std::shared_ptr<InputRecord> record;size_t index=0;
 };
 std::unique_ptr<AudioInputBackend> inputFactory(){return std::make_unique<Input>();}
 bool song(void*,const AudioHostRenderBlock& block)noexcept {
@@ -140,6 +158,7 @@ struct Fixture {
   std::unique_ptr<AudioHostBackend> client;
   Fixture() {
     events.clear();inputs.clear();failOpenAt=failStartAt=-1;
+    inputBusStatus=AudioInputBusOpenStatus::Unsupported;
     relayRecord=std::make_shared<HostRecord>();relayRecord->label="relay";
     relayRecord->status.diagnostics.outputPeriodFrames=1024;
     relayRecord->status.diagnostics.outputBufferFrames=4096;
@@ -155,13 +174,24 @@ MicrophoneMixConfig relayConfig() {
   MicrophoneMixConfig config;config.deviceUid="flow";config.outputDeviceUid="hdmi";
   config.channels={{8,1,false,-1},{9,1,false,1}};return config;
 }
+bool pushPlanar(const std::shared_ptr<InputRecord>& input,const float* left,const float* right,
+    uint32_t count,uint64_t firstNs,AudioInputTimestampQuality quality) {
+  if(input->busCallback) {
+    const float* planes[]{left,right};
+    AudioInputBusBlock block{planes,2,count,count,firstNs,firstNs,quality};
+    ++input->busPushes;
+    return realtime([&]{return input->busCallback(input->busContext,block);});
+  }
+  ++input->monoPushes;
+  return realtime([&]{return input->callback(input->context,left,count,firstNs,0,quality);});
+}
 void feed(uint64_t begin=origin,float l=.3f,float r=-.4f,double actual=48000,uint32_t blocks=8) {
   for(uint32_t block=0;block<blocks;++block) {
-    std::array<float,256> samples;
+    std::array<float,256> left,right;left.fill(l);right.fill(r);
     for(const auto& input:inputs)if(input->running) {
-      samples.fill(input->config.channel==8?l:r);
-      CHECK(realtime([&]{return input->callback(input->context,samples.data(),256,begin+ns(block*256,actual),0,
-          AudioInputTimestampQuality::CallbackEstimate);}));
+      const float* selected=input->config.channel==8?left.data():right.data();
+      CHECK(pushPlanar(input,input->busCallback?left.data():selected,right.data(),256,
+          begin+ns(block*256,actual),AudioInputTimestampQuality::CallbackEstimate));
     }
   }
 }
@@ -213,14 +243,14 @@ float waveform(uint64_t frame) {
   return .05F+static_cast<float>(frame)*.000001F+(frame==4224?.25F:0);
 }
 void closeWaveform(float a,float b){CHECK(std::abs(a-b)<.0000002F);}
-void feedWaveform() {
-  for(uint32_t block=0;block<64;++block) {
-    std::array<float,256> samples;
-    for(uint32_t frame=0;frame<256;++frame)samples[frame]=waveform(block*256+frame);
-    for(const auto& input:inputs)if(input->running) {
-      CHECK(realtime([&]{return input->callback(input->context,samples.data(),256,
-          origin+ns(block*256),0,AudioInputTimestampQuality::CallbackEstimate);}));
-    }
+void feedWaveform(double actual=48000,uint32_t blockFrames=256) {
+  for(uint32_t block=0;block<16384/blockFrames;++block) {
+    std::array<float,1024> samples;
+    for(uint32_t frame=0;frame<blockFrames;++frame)
+      samples[frame]=waveform(block*blockFrames+frame);
+    for(const auto& input:inputs)if(input->running)
+      CHECK(pushPlanar(input,samples.data(),samples.data(),blockFrames,
+          origin+ns(block*blockFrames,actual),AudioInputTimestampQuality::CallbackEstimate));
   }
 }
 void presentationClockDoesNotUseCallbackArrival() {
@@ -367,21 +397,128 @@ void renderTimingOptIn() {
     CHECK(!status.relayRenderTimingEnabled && zeroRenderTiming(status));
   }
 }
-void unknownCaptureRecovery() {
-  Fixture fixture;MicrophoneMixSession session(fixture.service,inputFactory,outputFactory);
+void sharedStereoBusResourcesAndErrors() {
+  {
+    Fixture fixture;inputBusStatus=AudioInputBusOpenStatus::Ready;
+    MicrophoneMixSession session(fixture.service,inputFactory,outputFactory);
+    CHECK(session.start(relayConfig()).ok);
+    CHECK(inputs.size()==1 && inputs[0]->opens==1);
+    auto empty=render(relayRecord,origin+ns(1536));
+    for(uint32_t i=0;i<1024;++i){close(empty[0][i],0);close(empty[1][i],0);}
+    CHECK(session.status().missingFrames==2048);
+    feed();
+    CHECK(inputs[0]->busPushes==8 && inputs[0]->monoPushes==0);
+    auto output=render(relayRecord,origin+ns(1536));
+    for(uint32_t i=0;i<1024;++i){close(output[0][i],.3f);close(output[1][i],-.4f);}
+    const auto status=session.status();
+    CHECK(status.missingFrames==2048);
+    CHECK(status.diagnostics.size()==2 && status.diagnostics[0].historyCallbacks==8);
+    CHECK(status.diagnostics[0].historyCallbacks==status.diagnostics[1].historyCallbacks);
+    session.stop();CHECK(!session.status().active && inputs[0]->stops>0);
+  }
+  {
+    Fixture fixture;MicrophoneMixSession session(fixture.service,inputFactory,outputFactory);
+    CHECK(session.start(relayConfig()).ok);
+    CHECK(inputs.size()==2 && inputs[0]->opens==1 && inputs[1]->opens==1);
+    feed();
+    CHECK(inputs[0]->monoPushes==8 && inputs[1]->monoPushes==8);
+    CHECK(inputs[0]->busPushes==0 && inputs[1]->busPushes==0);
+  }
+  {
+    Fixture fixture;inputBusStatus=AudioInputBusOpenStatus::Error;
+    MicrophoneMixSession session(fixture.service,inputFactory,outputFactory);
+    CHECK(!session.start(relayConfig()).ok);
+    CHECK(inputs.size()==1 && inputs[0]->opens==1 && inputs[0]->monoPushes==0);
+    CHECK(!session.status().active && inputs[0]->stops>0);
+  }
+  {
+    Fixture fixture;inputBusStatus=AudioInputBusOpenStatus::Ready;failStartAt=0;
+    MicrophoneMixSession session(fixture.service,inputFactory,outputFactory);
+    CHECK(!session.start(relayConfig()).ok);
+    CHECK(inputs.size()==1 && !inputs[0]->running && inputs[0]->stops>0);
+  }
+}
+void malformedBusFailsClosed() {
+  for(int kind=0;kind<6;++kind) {
+    Fixture fixture;inputBusStatus=AudioInputBusOpenStatus::Ready;
+    MicrophoneMixSession session(fixture.service,inputFactory,outputFactory);
+    CHECK(session.start(relayConfig()).ok);
+    const auto& input=inputs[0];
+    std::array<float,256> left{},right{};
+    const float* planes[]{left.data(),right.data()};
+    AudioInputBusBlock block{planes,2,256,256,origin+ns(2048),origin+ns(2048),
+        AudioInputTimestampQuality::CallbackEstimate};
+    if(kind==0)block.planes=nullptr;
+    if(kind==1)planes[1]=nullptr;
+    if(kind==2)block.channelCount=1;
+    if(kind==3)block.frames=0;
+    if(kind==4)block.capacityFrames=255;
+    if(kind==5)block.firstNs=0;
+    CHECK(realtime([&]{return input->busCallback(input->busContext,block);}));
+    const auto status=session.status();
+    CHECK(!status.active && status.failures>0);
+    CHECK(status.error=="Native capture returned invalid timestamped audio");
+  }
+}
+void sharedStereoBusWaveformParity() {
+  std::array<std::array<float,1024>,2> shared{},mono{},sharedImpulse{},monoImpulse{};
+  {
+    Fixture fixture;inputBusStatus=AudioInputBusOpenStatus::Ready;
+    MicrophoneMixSession session(fixture.service,inputFactory,outputFactory);
+    CHECK(session.start(relayConfig()).ok);
+    feedWaveform(48000.0*1.0002,1024);
+    CHECK(inputs.size()==1 && inputs[0]->busPushes==16 && inputs[0]->monoPushes==0);
+    shared=render(relayRecord,origin+ns(4096),true,origin+ns(8192));
+    sharedImpulse=render(relayRecord,origin+ns(4096),true,origin+ns(9216));
+    const auto status=session.status();
+    CHECK(status.missingFrames==0 && status.diagnostics.size()==2);
+    CHECK(status.diagnostics[0].historyCallbacks==64 && status.diagnostics[1].historyCallbacks==64);
+  }
+  {
+    Fixture fixture;MicrophoneMixSession session(fixture.service,inputFactory,outputFactory);
+    CHECK(session.start(relayConfig()).ok);
+    feedWaveform(48000.0*1.0002,1024);
+    CHECK(inputs.size()==2 && inputs[0]->monoPushes==16 && inputs[1]->monoPushes==16);
+    mono=render(relayRecord,origin+ns(4096),true,origin+ns(8192));
+    monoImpulse=render(relayRecord,origin+ns(4096),true,origin+ns(9216));
+  }
+  for(uint32_t i=0;i<1024;++i) {
+    closeWaveform(shared[0][i],mono[0][i]);
+    closeWaveform(shared[1][i],mono[1][i]);
+    closeWaveform(sharedImpulse[0][i],monoImpulse[0][i]);
+    closeWaveform(sharedImpulse[1][i],monoImpulse[1][i]);
+  }
+}
+void sharedStereoBusGainPanMute() {
+  Fixture fixture;inputBusStatus=AudioInputBusOpenStatus::Ready;
+  MicrophoneMixSession session(fixture.service,inputFactory,outputFactory);
+  auto config=relayConfig();config.channels={{8,.4F,false,-.5F},{9,.2F,false,.5F}};
+  CHECK(session.start(config).ok);feed();
+  auto output=render(relayRecord,origin+ns(1536));
+  for(uint32_t i=0;i<1024;++i){close(output[0][i],.08f);close(output[1][i],-.02f);}
+  config.channels[1].muted=true;
+  CHECK(session.start(config).ok);feed();
+  output=render(relayRecord,origin+ns(1536));
+  for(uint32_t i=0;i<1024;++i){close(output[0][i],.12f);close(output[1][i],.06f);}
+}
+void unknownCaptureRecovery(bool bus=false) {
+  Fixture fixture;
+  if(bus)inputBusStatus=AudioInputBusOpenStatus::Ready;
+  MicrophoneMixSession session(fixture.service,inputFactory,outputFactory);
   CHECK(session.start(relayConfig()).ok);feed();
   const auto before=session.status();
   CHECK(before.active && before.diagnostics.size()==2);
   for(const auto& source:before.diagnostics)
     CHECK(source.unanchoredBlocks==0 && source.unanchoredFrames==0);
-  std::array<float,256> unanchored;
+  std::array<float,256> left,right;
   for(int repeat=0;repeat<2;++repeat) {
     const auto timestamp=repeat==0?0:origin+ns(4096);
     const float level=repeat==0?.9f:.7f;
+    left.fill(level);right.fill(-level);
     for(const auto& input:inputs) {
-      unanchored.fill(input->config.channel==8?level:-level);
-      CHECK(realtime([&]{return input->callback(input->context,unanchored.data(),256,timestamp,0,
-          AudioInputTimestampQuality::Unknown);}));
+      const float* selected=input->config.channel==8?left.data():right.data();
+      CHECK(pushPlanar(input,input->busCallback?left.data():selected,right.data(),256,
+          timestamp,AudioInputTimestampQuality::Unknown));
     }
   }
   const auto gap=session.status();
@@ -537,6 +674,8 @@ void routeChangesFailClosed() {
 }
 int main(){relayStereoAndLifetime();presentationClockDoesNotUseCallbackArrival();outputTimestampRecovery();
   outputBoundsRequired();requestedOutputPeriodChoices();invalidPeriodKeepsActiveRoute();renderTimingOptIn();
-  unknownCaptureRecovery();relayDiagnostics();validationAndFailures();malformedCaptureFailsClosed();
-  partialCaptureFailureAndAdditive();routeChangesFailClosed();
-  std::puts("Hardware main relay: presentation clock, output periods, render timing, recovery and fail-closed routes passed");}
+  sharedStereoBusResourcesAndErrors();sharedStereoBusWaveformParity();sharedStereoBusGainPanMute();
+  malformedBusFailsClosed();unknownCaptureRecovery();unknownCaptureRecovery(true);
+  relayDiagnostics();validationAndFailures();
+  malformedCaptureFailsClosed();partialCaptureFailureAndAdditive();routeChangesFailClosed();
+  std::puts("Hardware main relay: shared stereo bus, mono fallback, presentation clock and recovery passed");}

@@ -93,10 +93,57 @@ struct MicrophoneMixSession::Impl {
       return true;
     }
   };
+  struct StereoSource {
+    route::AudioHistory history{2, route::AudioHistory::kDefaultCapacityFrames,
+                                route::ResamplingFilter::LinearPhase, true};
+    std::array<uint32_t, 2> channel{};
+    std::unique_ptr<AudioInputBackend> backend;
+    route::AudioReadCursor cursor{};
+    double rate = 48000;
+    uint64_t frames = 0;
+    bool timelineGap = false;
+    std::array<std::array<float, route::kBlock>, 2> samples{};
+    std::atomic<uint64_t> rejected{0}, unanchoredBlocks{0}, unanchoredFrames{0};
+    static bool capture(void* context, const AudioInputBusBlock& block) noexcept {
+      auto& self = *static_cast<StereoSource*>(context);
+      if (!block.planes || block.channelCount != 2 || !block.frames ||
+          block.frames > block.capacityFrames || block.frames > kAudioHostMaxFrames ||
+          !block.planes[0] || !block.planes[1] ||
+          (block.quality != AudioInputTimestampQuality::Unknown && !block.firstNs)) {
+        self.rejected.fetch_add(1, std::memory_order_relaxed);
+        return true;
+      }
+      if (block.quality == AudioInputTimestampQuality::Unknown) {
+        self.unanchoredBlocks.fetch_add(1, std::memory_order_relaxed);
+        self.unanchoredFrames.fetch_add(block.frames, std::memory_order_relaxed);
+        self.timelineGap = true;
+        return true;
+      }
+      if (self.timelineGap) {
+        self.frames = 0;
+        self.timelineGap = false;
+      }
+      if (self.frames > UINT64_MAX - block.frames) {
+        self.rejected.fetch_add(1, std::memory_order_relaxed);
+        return true;
+      }
+      for (uint32_t offset = 0; offset < block.frames; offset += route::kBlock) {
+        const auto frames = std::min(route::kBlock, block.frames - offset);
+        const float* planes[]{block.planes[0] + offset, block.planes[1] + offset};
+        const auto timestamp = block.firstNs + static_cast<uint64_t>(offset * 1e9L / self.rate);
+        const bool ok = self.history.append({{planes, 2}, frames}, frames,
+            timestamp, self.rate, static_cast<double>(self.frames + offset), true);
+        if (!ok) self.rejected.fetch_add(1, std::memory_order_relaxed);
+      }
+      self.frames += block.frames;
+      return true;
+    }
+  };
   SharedAudioService& service;
   InputFactory factory;
   OutputFactory outputFactory;
   std::vector<std::unique_ptr<Source>> sources;
+  std::unique_ptr<StereoSource> stereo;
   std::unique_ptr<route::RoutingGraph> graph;
   std::unique_ptr<AudioHostBackend> relay;
   std::atomic<uint64_t> callbacks{0}, missing{0}, failures{0};
@@ -179,9 +226,16 @@ struct MicrophoneMixSession::Impl {
     std::array<float*, 2> output{mixed[0].data(), mixed[1].data()};
     const size_t firstMic = relayMode ? 0 : 1;
     if (!relayMode) inputs[0] = {{songPlanes.data(), 2}, route::kBlock};
-    for (size_t index = 0; index < sources.size(); ++index) {
-      micPlanes[index] = sources[index]->samples.data();
-      inputs[index + firstMic] = {{&micPlanes[index], 1}, route::kBlock};
+    if (stereo) {
+      for (size_t index = 0; index < 2; ++index) {
+        micPlanes[index] = stereo->samples[index].data();
+        inputs[index + firstMic] = {{&micPlanes[index], 1}, route::kBlock};
+      }
+    } else {
+      for (size_t index = 0; index < sources.size(); ++index) {
+        micPlanes[index] = sources[index]->samples.data();
+        inputs[index + firstMic] = {{&micPlanes[index], 1}, route::kBlock};
+      }
     }
     for (uint32_t offset = 0; offset < block.frames; offset += route::kBlock) {
       const auto count = std::min(route::kBlock, block.frames - offset);
@@ -189,18 +243,30 @@ struct MicrophoneMixSession::Impl {
         for (uint32_t channel = 0; channel < 2; ++channel)
           std::copy_n(block.output[channel] + offset, count, song[channel].data());
       const uint64_t now = firstHostNs + static_cast<uint64_t>(offset * 1e9L / rate);
-      for (auto& source : sources) {
-        float* destination = source->samples.data();
+      if (stereo) {
+        float* destinations[]{stereo->samples[0].data(), stereo->samples[1].data()};
         if (now < readDelayNs) {
-          std::fill_n(destination, count, 0);
-          missing.fetch_add(count, std::memory_order_relaxed);
+          for (auto* destination : destinations) std::fill_n(destination, count, 0);
+          missing.fetch_add(2 * count, std::memory_order_relaxed);
         } else {
-          const auto read = source->history.read(now - readDelayNs, rate,
-              {{&destination, 1}, route::kBlock}, count, source->cursor);
-          missing.fetch_add(read.missingFrames, std::memory_order_relaxed);
+          const auto read = stereo->history.read(now - readDelayNs, rate,
+              {{destinations, 2}, route::kBlock}, count, stereo->cursor);
+          missing.fetch_add(2 * read.missingFrames, std::memory_order_relaxed);
+        }
+      } else {
+        for (auto& source : sources) {
+          float* destination = source->samples.data();
+          if (now < readDelayNs) {
+            std::fill_n(destination, count, 0);
+            missing.fetch_add(count, std::memory_order_relaxed);
+          } else {
+            const auto read = source->history.read(now - readDelayNs, rate,
+                {{&destination, 1}, route::kBlock}, count, source->cursor);
+            missing.fetch_add(read.missingFrames, std::memory_order_relaxed);
+          }
         }
       }
-      const bool ok = graph->render({inputs.data(), sources.size() + firstMic},
+      const bool ok = graph->render({inputs.data(), (stereo ? 2 : sources.size()) + firstMic},
           {{output.data(), 2}, route::kBlock}, count, block.outputFrame + offset);
       if (!ok) {
         failures.fetch_add(1, std::memory_order_relaxed);
@@ -240,6 +306,11 @@ void MicrophoneMixSession::stop() noexcept {
     source->history.stop();
   }
   self.sources.clear();
+  if (self.stereo) {
+    self.stereo->backend->stop();
+    self.stereo->history.stop();
+    self.stereo.reset();
+  }
   self.graph.reset();
   self.active = false;
 }
@@ -307,24 +378,55 @@ MicrophoneMixResult MicrophoneMixSession::start(const MicrophoneMixConfig& confi
     if (!relayMode)
       graph.sources.push_back({"song", 2, 1, true, false,
           route::defaultChannelConnections(2, 2)});
-    for (const auto& channel : config.channels) {
-      auto source = std::make_unique<Impl::Source>();
-      source->channel = channel.channel;
-      source->backend = self.factory ? self.factory() : nullptr;
-      if (!source->backend) { stop(); return {false, "Native capture is unavailable"}; }
-      self.sources.push_back(std::move(source));
-      auto& stored = *self.sources.back();
-      auto result = stored.backend->open({config.deviceUid, channel.channel, 32},
-          Impl::Source::capture, &stored);
-      if (!result.ok) { stop(); return {false, result.error}; }
-      if (!std::isfinite(result.sampleRate) || result.sampleRate < 8000 || result.sampleRate > 192000) {
-        stop(); return {false, "Native capture returned an invalid sample rate"};
-      }
-      stored.rate = result.sampleRate;
+    auto appendGraphSource = [&](const MicrophoneMixChannel& channel) {
       graph.sources.push_back({"mic-" + std::to_string(channel.channel), 1,
           channel.gain, true, channel.muted,
           {{0, 0, channel.pan > 0 ? 1 - channel.pan : 1},
            {0, 1, channel.pan < 0 ? 1 + channel.pan : 1}}});
+    };
+    if (config.channels.size() == 2) {
+      auto candidate = std::make_unique<Impl::StereoSource>();
+      auto backend = self.factory ? self.factory() : nullptr;
+      if (!backend) { stop(); return {false, "Native capture is unavailable"}; }
+      AudioInputBusConfig bus{config.deviceUid,
+          {config.channels[0].channel, config.channels[1].channel}};
+      auto opened = backend->openBus(bus, Impl::StereoSource::capture, candidate.get());
+      if (opened.status == AudioInputBusOpenStatus::Error ||
+          (opened.status == AudioInputBusOpenStatus::Ready && !opened.result.ok)) {
+        backend->stop();
+        stop(); return {false, opened.result.error};
+      }
+      if (opened.status == AudioInputBusOpenStatus::Ready) {
+        if (!std::isfinite(opened.result.sampleRate) || opened.result.sampleRate < 8000 ||
+            opened.result.sampleRate > 192000) {
+          backend->stop();
+          stop(); return {false, "Native capture returned an invalid sample rate"};
+        }
+        candidate->backend = std::move(backend);
+        candidate->rate = opened.result.sampleRate;
+        candidate->channel = {config.channels[0].channel, config.channels[1].channel};
+        self.stereo = std::move(candidate);
+        appendGraphSource(config.channels[0]);
+        appendGraphSource(config.channels[1]);
+      }
+    }
+    if (!self.stereo) {
+      for (const auto& channel : config.channels) {
+        auto source = std::make_unique<Impl::Source>();
+        source->channel = channel.channel;
+        source->backend = self.factory ? self.factory() : nullptr;
+        if (!source->backend) { stop(); return {false, "Native capture is unavailable"}; }
+        self.sources.push_back(std::move(source));
+        auto& stored = *self.sources.back();
+        auto result = stored.backend->open({config.deviceUid, channel.channel, 32},
+            Impl::Source::capture, &stored);
+        if (!result.ok) { stop(); return {false, result.error}; }
+        if (!std::isfinite(result.sampleRate) || result.sampleRate < 8000 || result.sampleRate > 192000) {
+          stop(); return {false, "Native capture returned an invalid sample rate"};
+        }
+        stored.rate = result.sampleRate;
+        appendGraphSource(channel);
+      }
     }
     self.graph = std::make_unique<route::RoutingGraph>(self.rate, graph);
     if (relayMode) {
@@ -358,6 +460,10 @@ MicrophoneMixResult MicrophoneMixSession::start(const MicrophoneMixConfig& confi
     }
     for (auto& source : self.sources) {
       auto result = source->backend->start();
+      if (!result.ok) { stop(); return {false, result.error}; }
+    }
+    if (self.stereo) {
+      auto result = self.stereo->backend->start();
       if (!result.ok) { stop(); return {false, result.error}; }
     }
     if (relayMode) {
@@ -398,6 +504,13 @@ MicrophoneMixStatus MicrophoneMixSession::status() {
         break;
       }
     }
+    if (error.empty() && self.stereo) {
+      std::string captureError;
+      if (self.stereo->backend->takeFailure(captureError))
+        error = captureError.empty() ? "Native capture failed" : captureError;
+      else if (self.stereo->rejected.load(std::memory_order_relaxed))
+        error = "Native capture returned invalid timestamped audio";
+    }
     if (!error.empty()) {
       self.failures.fetch_add(1);
       self.lastError = std::move(error);
@@ -421,20 +534,21 @@ MicrophoneMixStatus MicrophoneMixSession::status() {
   result.relayRenderCpuTimingAvailable = self.measureRenderTiming && result.relayRenderCalls != 0 &&
                                          !self.relayRenderCpuClockFailed.load();
   result.relayRenderTimingEnabled = self.measureRenderTiming;
-  result.diagnostics.reserve(self.sources.size());
-  for (const auto& source : self.sources) {
-    const auto history = source->history.status();
-    const auto reads = source->history.readDiagnostics();
+  result.diagnostics.reserve(self.sources.size() + (self.stereo ? 2 : 0));
+  auto appendDiagnostics = [&](uint32_t channel, const route::AudioHistory& historySource,
+                               uint64_t unanchoredBlocks, uint64_t unanchoredFrames) {
+    const auto history = historySource.status();
+    const auto reads = historySource.readDiagnostics();
     auto& row = result.diagnostics.emplace_back();
-    row.channel = source->channel;
+    row.channel = channel;
     row.historyOnline = history.online;
     row.historyCallbacks = history.callbacks;
     row.historyDiscontinuities = history.discontinuities;
-    row.unanchoredBlocks = source->unanchoredBlocks.load(std::memory_order_relaxed);
-    row.unanchoredFrames = source->unanchoredFrames.load(std::memory_order_relaxed);
+    row.unanchoredBlocks = unanchoredBlocks;
+    row.unanchoredFrames = unanchoredFrames;
     row.measuredRate = history.measuredRate;
     row.lastHostNs = history.lastHostNs;
-    row.publishedEndHostNs = source->history.publishedBlockEndHostNs();
+    row.publishedEndHostNs = historySource.publishedBlockEndHostNs();
     row.missingFramesByReason.invalidRequest = reads.missingFrames[
         static_cast<size_t>(route::AudioHistoryMissingReason::InvalidRequest)];
     row.missingFramesByReason.offline = reads.missingFrames[
@@ -453,7 +567,16 @@ MicrophoneMixStatus MicrophoneMixSession::status() {
     row.absentSampleReads = reads.absentSampleReads;
     row.verifiedClockSteps = reads.verifiedClockSteps;
     row.maximumVerifiedClockStepNs = reads.maximumVerifiedClockStepNs;
-  }
+  };
+  for (const auto& source : self.sources)
+    appendDiagnostics(source->channel, source->history,
+        source->unanchoredBlocks.load(std::memory_order_relaxed),
+        source->unanchoredFrames.load(std::memory_order_relaxed));
+  if (self.stereo)
+    for (const auto channel : self.stereo->channel)
+      appendDiagnostics(channel, self.stereo->history,
+          self.stereo->unanchoredBlocks.load(std::memory_order_relaxed),
+          self.stereo->unanchoredFrames.load(std::memory_order_relaxed));
   return result;
 }
 } // namespace singz

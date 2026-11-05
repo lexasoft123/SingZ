@@ -30,8 +30,9 @@ struct MicrophoneMixMissingFrames {
   uint64_t invalidRequest = 0, offline = 0, anchorUnavailable = 0;
   uint64_t clockMapping = 0, resamplingSupport = 0, generationChanged = 0;
 };
-// One control-thread snapshot per mono capture channel. Live fields are
-// independent atomic observations, not a coherent cross-source snapshot.
+// One control-thread snapshot per selected capture channel. A shared stereo bus
+// mirrors the same capture/history counters into both channel rows. Other live
+// fields are independent atomic observations, not a coherent cross-source snapshot.
 // History misses exclude render silence emitted without a history read.
 struct MicrophoneMixSourceDiagnostics {
   uint32_t channel = 0;
