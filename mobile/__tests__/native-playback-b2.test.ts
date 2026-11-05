@@ -441,10 +441,10 @@ function harness(
         ok: true,
         error: 'none',
         generation: next,
-        bucketCount: 2,
+        bucketCount: 96,
         lanes: [
-          { id: 'vocals', peaksValid: true, peaks: [0.5, 1] },
-          { id: 'drums', peaksValid: true, peaks: [1, 0.25] },
+          { id: 'vocals', peaksValid: true, peaks: new Array<number>(96).fill(0.5) },
+          { id: 'drums', peaksValid: true, peaks: new Array<number>(96).fill(0.25) },
         ],
         message: '',
       };
@@ -609,6 +609,7 @@ async function until(predicate: () => boolean): Promise<void> {
 }
 
 beforeEach(() => {
+  delete (NativeModules.FolderAccess as Record<string, unknown>).fileIdentity;
   (NativeModules.FolderAccess as Record<string, unknown>).localFile = jest.fn(
     async (_project: string, file: string) => `/app/${file}`,
   );
@@ -648,6 +649,91 @@ describe.each(['ios', 'android'] as const)(
       expect(h.prepareRequests[0]).not.toHaveProperty('events');
       expect(h.native.previewClick).toBeDefined();
       await project.nativePlayback?.unload('cross-platform contract cleanup');
+    });
+
+    it('seeds only valid actual-content lanes, including custom file mappings', async () => {
+      const hashes = {
+        vocals: 'a'.repeat(32),
+        drums: 'b'.repeat(32),
+        custom: 'c'.repeat(32),
+        stale: 'd'.repeat(32),
+      };
+      const settings = {
+        custom: [{
+          id: 'custom-studio-id',
+          label: 'Studio double',
+          color: '#ffffff',
+          file: 'stems/custom-take-7.mp3',
+        }],
+      };
+      const projectDoc = doc(settings);
+      projectDoc.stemHashes = {
+        'vocals.flac': { md5: hashes.vocals, size: 1, mtimeMs: 1 },
+        'drums.wav': { md5: hashes.drums, size: 1, mtimeMs: 1 },
+        'custom-take-7.mp3': { md5: hashes.custom, size: 1, mtimeMs: 1 },
+      };
+      projectDoc.waveforms = {
+        vocals: {
+          version: 1,
+          policy: 'singz.native.streaming-envelope.rms96-v1',
+          md5: hashes.vocals,
+          peaks: new Array(96).fill(0.5),
+        },
+        drums: {
+          version: 1,
+          policy: 'singz.native.streaming-envelope.rms96-v1',
+          md5: hashes.stale,
+          peaks: new Array(96).fill(0.25),
+        },
+        'custom-studio-id': {
+          md5: hashes.custom,
+          peaks: new Array(96).fill(0.4),
+        },
+      };
+      const projectEntry = platform === 'android'
+        ? androidEntry(settings)
+        : entry(settings);
+      projectEntry.doc = projectDoc;
+      const identity = jest.fn(async (path: string) => ({
+        path,
+        md5: path.includes('vocals.')
+          ? hashes.vocals
+          : path.includes('drums.')
+            ? hashes.drums
+            : hashes.custom,
+        size: 1,
+        mtimeMs: 1,
+      }));
+      (NativeModules.FolderAccess as Record<string, unknown>).fileIdentity = identity;
+      const h = harness({ platform });
+      const project = await h.load(projectEntry);
+      const lanes = h.prepareRequests[0].lanes as Array<{
+        id: string;
+        contentMd5?: string;
+        waveform?: {
+          version: number;
+          policy: string;
+          sourceMd5: string;
+          bucketCount: number;
+        };
+      }>;
+      const byId = Object.fromEntries(lanes.map(lane => [lane.id, lane]));
+
+      expect(byId.vocals.contentMd5).toBe(hashes.vocals);
+      expect(byId.vocals.waveform?.sourceMd5).toBe(hashes.vocals);
+      expect(byId.drums.contentMd5).toBe(hashes.drums);
+      // Negative control: trusting the document's stale hash or discarding the
+      // whole set would either seed the wrong drums or lose the two valid hits.
+      expect(byId.drums).not.toHaveProperty('waveform');
+      expect(byId['custom-studio-id'].waveform).toMatchObject({
+        version: 1,
+        policy: 'singz.native.streaming-envelope.rms96-v1',
+        sourceMd5: hashes.custom,
+        bucketCount: 96,
+      });
+      expect(byId['custom-take-7']).toBeUndefined();
+      expect(identity).toHaveBeenCalledTimes(lanes.length);
+      await project.nativePlayback?.unload('waveform seed test cleanup');
     });
 
     it('queues an accent preview click on the exact running generation', async () => {
@@ -4230,7 +4316,7 @@ describe("the seek bar's waveform", () => {
     // second read is free. This is why it is off the status poll at all.
     expect(h.calls).toEqual([`native.lanePeaks:${generation}`]);
     expect(first).toEqual(second);
-    expect(first?.bucketCount).toBe(2);
+    expect(first?.bucketCount).toBe(96);
     expect(first?.lanes.map(lane => lane.id)).toEqual(['vocals', 'drums']);
   });
 
@@ -4258,10 +4344,10 @@ describe("the seek bar's waveform", () => {
         ok: true,
         error: 'none',
         generation: next,
-        bucketCount: 2,
+        bucketCount: 96,
         lanes: [
-          { id: 'vocals', peaksValid: measured >= 2, peaks: [0.5, 1] },
-          { id: 'drums', peaksValid: measured >= 3, peaks: [1, 0.25] },
+          { id: 'vocals', peaksValid: measured >= 2, peaks: new Array(96).fill(0.5) },
+          { id: 'drums', peaksValid: measured >= 3, peaks: new Array(96).fill(0.25) },
         ],
         message: '',
       };
@@ -4273,8 +4359,8 @@ describe("the seek bar's waveform", () => {
     const all = await handle.lanePeaks();
     const cached = await handle.lanePeaks();
 
-    // Three real calls for the three states, and NOTHING for the fourth ask:
-    // the complete answer is the one that gets kept.
+    // Negative control: caching `none` or `half` would suppress the remaining
+    // native calls and freeze a partial waveform for this whole generation.
     expect(h.calls).toEqual([
       `native.lanePeaks:${generation}`,
       `native.lanePeaks:${generation}`,
@@ -4286,50 +4372,79 @@ describe("the seek bar's waveform", () => {
     expect(cached).toEqual(all);
   });
 
-  it('draws nothing rather than throwing when the envelope is malformed', () => {
+  it('does not freeze an all-valid subset of the prepared lanes', async () => {
+    const h = harness();
+    const project = await h.load();
+    const handle = project.nativePlayback!;
+    h.native.lanePeaks = jest.fn(async (next: number) => ({
+      ok: true,
+      error: 'none',
+      generation: next,
+      bucketCount: 96,
+      lanes: [{ id: 'vocals', peaksValid: true, peaks: new Array(96).fill(0.5) }],
+      message: '',
+    }));
+    h.calls.length = 0;
+    await handle.lanePeaks();
+    await handle.lanePeaks();
+    // Negative control: every returned lane is valid, so an every(valid) memo
+    // would stop here even though drums never arrived.
+    expect(h.native.lanePeaks).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses malformed RMS96 envelopes instead of clamping them into evidence', () => {
     const good = {
       ok: true,
-      bucketCount: 2,
-      lanes: [{ id: 'vocals', peaksValid: true, peaks: [0.5, 1] }],
+      bucketCount: 96,
+      lanes: [{
+        id: 'vocals',
+        peaksValid: true,
+        peaks: [0.5, 1, ...new Array(94).fill(0.25)],
+      }],
     };
-    expect(parseNativePlaybackLanePeaks(good)).toMatchObject({
-      bucketCount: 2,
-    });
+    expect(parseNativePlaybackLanePeaks(good)).toMatchObject({ bucketCount: 96 });
+    const invalid: unknown[] = [
+      null,
+      { ...good, ok: false },
+      { ...good, bucketCount: 0 },
+      { ...good, bucketCount: 500_000 },
+      { ...good, lanes: [] },
+      { ...good, lanes: [{ ...good.lanes[0], peaks: [0.5] }] },
+      { ...good, lanes: [{ ...good.lanes[0], peaks: [Number.NaN, ...new Array(95).fill(0)] }] },
+      { ...good, lanes: [{ ...good.lanes[0], peaks: [Number.POSITIVE_INFINITY, ...new Array(95).fill(0)] }] },
+      { ...good, lanes: [{ ...good.lanes[0], peaks: [-0.01, ...new Array(95).fill(0)] }] },
+      { ...good, lanes: [{ ...good.lanes[0], peaks: [1.01, ...new Array(95).fill(0)] }] },
+      { ...good, lanes: [{ ...good.lanes[0], peaksValid: 'true' }] },
+      { ...good, lanes: [good.lanes[0], good.lanes[0]] },
+      { ...good, lanes: [{ ...good.lanes[0], extra: true }] },
+      { ...good, extra: true },
+    ];
+    for (const value of invalid) expect(parseNativePlaybackLanePeaks(value)).toBeNull();
+  });
 
-    // A seek bar handed a NaN draws nothing at all, so every one of these
-    // has to end as a plain bar rather than as an exception on a screen.
-    expect(parseNativePlaybackLanePeaks(null)).toBeNull();
-    expect(parseNativePlaybackLanePeaks({ ...good, ok: false })).toBeNull();
-    expect(parseNativePlaybackLanePeaks({ ...good, bucketCount: 0 })).toBeNull();
-    // Both consumers SPREAD these arrays, so an absurd count is not a
-    // plain bar, it is a stack overflow on a screen. The payload has to be
-    // internally consistent or the length check refuses it first and the
-    // bound is never asked.
-    expect(
-      parseNativePlaybackLanePeaks({
-        ...good,
-        bucketCount: 500_000,
-        lanes: [
-          {
-            id: 'vocals',
-            peaksValid: true,
-            peaks: new Array(500_000).fill(0.5),
-          },
-        ],
-      }),
-    ).toBeNull();
-    expect(
-      parseNativePlaybackLanePeaks({
-        ...good,
-        lanes: [{ id: 'vocals', peaksValid: true, peaks: [0.5] }],
-      }),
-    ).toBeNull();
-    expect(
-      parseNativePlaybackLanePeaks({
-        ...good,
-        lanes: [{ id: 'vocals', peaksValid: true, peaks: [Number.NaN, 2] }],
-      })?.lanes[0].peaks,
-    ).toEqual([0, 1]);
+  it('fences a late envelope after its handle has been retired', async () => {
+    const h = harness();
+    const project = await h.load();
+    const handle = project.nativePlayback!;
+    type RawPeaks = Awaited<ReturnType<typeof h.native.lanePeaks>>;
+    let publish!: (value: RawPeaks) => void;
+    h.native.lanePeaks = jest.fn((_next: number) => new Promise<RawPeaks>(resolve => {
+      publish = resolve;
+    }));
+    const pending = handle.lanePeaks();
+    await handle.unload('retire the owner before the waveform arrives');
+    publish({
+      ok: true,
+      error: 'none',
+      generation: handle.snapshot().generation,
+      bucketCount: 96,
+      lanes: [{ id: 'vocals', peaksValid: true, peaks: new Array(96).fill(0.5) }],
+      message: '',
+    });
+    // Negative control: generation alone stays on the unloaded handle, so a
+    // fence that checks only that number publishes this stale result.
+    await expect(pending).resolves.toBeNull();
+    await expect(handle.lanePeaks()).resolves.toBeNull();
   });
 });
 

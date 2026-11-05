@@ -65,6 +65,13 @@ import {
 import type { ProjectDoc } from '../model'
 import { writeProjectWaveform } from '../writer'
 import {
+  cachedWaveform,
+  mergeWaveformLanes,
+  mixWaveformEnvelope,
+  waveformCacheFor,
+  type NativeLaneEnvelope
+} from '../waveform-cache'
+import {
   b,
   Bar,
   C,
@@ -204,15 +211,7 @@ const CUE_BAR_GAP = 8 * PixelRatio.getFontScale()
 /** Ring for a beat not yet landed; the stroke straddles r, hence the inset. */
 const CUE_RING_W = 1.5 * PixelRatio.getFontScale()
 
-type NativeLaneEnvelope = {
-  readonly bucketCount: number
-  readonly lanes: readonly {
-    readonly id: string
-    readonly peaksValid: boolean
-    readonly peaks: readonly number[]
-  }[]
-  readonly waveformDiagnostics?: string
-}
+export { cachedWaveform, laneHashes, waveformCacheFor } from '../waveform-cache'
 
 /** A streamed lane's envelope arrives from a background pass over the whole
  *  stem — a second or two per song on a phone, once ever, because the answer is
@@ -228,58 +227,6 @@ const WAVEFORM_SLOW_ATTEMPTS = 30
 /** ~6 s in: long enough that a healthy pass has finished, early enough to be
  *  in a log a singer sends before closing the song. */
 const WAVEFORM_DIAGNOSTIC_ATTEMPT = 15
-
-/** lane id -> the md5 of the stem it is drawn from. The doc keys stemHashes by
- *  FILE name (`vocals.flac`) and the envelope keys lanes by id (`vocals`), so
- *  this is where the two meet. A lane with no recorded hash is not cacheable:
- *  there would be nothing to invalidate it with. */
-export function laneHashes(doc: ProjectDoc): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const [file, hash] of Object.entries(doc.stemHashes ?? {})) {
-    const dot = file.lastIndexOf('.')
-    const id = dot > 0 ? file.slice(0, dot) : file
-    if (hash?.md5) out[id] = hash.md5
-  }
-  return out
-}
-
-/** The cached envelope, but ONLY when every lane in it was measured from the
- *  bytes the project has now. A partly stale cache is discarded whole: a bar
- *  drawn half from one split and half from another is worse than waiting. */
-export function cachedWaveform(
-  doc: ProjectDoc,
-  wanted: Record<string, string>
-): NativeLaneEnvelope | null {
-  const cache = doc.waveforms
-  if (!cache) return null
-  const ids = Object.keys(wanted)
-  if (ids.length === 0) return null
-  const lanes: { id: string; peaksValid: boolean; peaks: number[] }[] = []
-  let buckets = 0
-  for (const id of ids) {
-    const entry = cache[id]
-    if (!entry || entry.md5 !== wanted[id] || entry.peaks.length === 0) return null
-    if (buckets === 0) buckets = entry.peaks.length
-    if (entry.peaks.length !== buckets) return null
-    lanes.push({ id, peaksValid: true, peaks: entry.peaks })
-  }
-  return { bucketCount: buckets, lanes }
-}
-
-/** What to keep from an envelope the core just produced: only lanes whose bytes
- *  we can name, so nothing is stored that cannot later be invalidated. */
-export function waveformCacheFor(
-  envelope: NativeLaneEnvelope,
-  wanted: Record<string, string>
-): Record<string, { md5: string; peaks: number[] }> {
-  const out: Record<string, { md5: string; peaks: number[] }> = {}
-  for (const lane of envelope.lanes) {
-    const md5 = wanted[lane.id]
-    if (!md5 || !lane.peaksValid || lane.peaks.length === 0) continue
-    out[lane.id] = { md5, peaks: Array.from(lane.peaks) }
-  }
-  return out
-}
 
 export default function PlayerScreen({
   active = true,
@@ -881,84 +828,74 @@ export default function PlayerScreen({
       // after the song starts — but only ever ONCE per file, because the
       // answer is kept here against the stem's md5. On every later open the
       // bar is drawn before the first frame plays.
-      const wanted = laneHashes(project.doc)
+      const wanted = native.laneContentMd5 ?? {}
       const cachedEnvelope = cachedWaveform(project.doc, wanted)
+      let best = new Map<string, NativeLaneEnvelope['lanes'][number]>()
+      const persisted = new Set<string>()
+      for (const lane of cachedEnvelope?.lanes ?? []) {
+        best.set(lane.id, lane)
+        persisted.add(lane.id)
+      }
+      const merged = (diagnostics?: string): NativeLaneEnvelope => ({
+        bucketCount: 96,
+        lanes: [...best.values()],
+        ...(diagnostics ? { waveformDiagnostics: diagnostics } : {})
+      })
       const consume = (envelope: NativeLaneEnvelope | null): void => {
         if (cancelled || !envelope || envelope.lanes.length === 0) return
-          setNativeSilent(
-            envelope.lanes
-              .filter(
-                lane =>
-                  HIDEABLE_LANE_IDS.includes(lane.id) &&
-                  lane.peaksValid &&
-                  Math.max(...lane.peaks) < SILENT_LANE_LEVEL
-              )
-              .map(lane => lane.id)
-          )
-          const buckets = envelope.bucketCount
-          const raw: { level: number; color: string }[] = []
-          for (let i = 0; i < buckets; i++) {
-            let total = 0
-            let loudest = 0
-            let color: string = C.dim
-            for (const lane of envelope.lanes) {
-              if (!lane.peaksValid) continue
-              const level = lane.peaks[i] ?? 0
-              total += level * level
-              if (level > loudest) {
-                loudest = level
-                color = laneMeta[lane.id]?.color ?? C.dim
-              }
-            }
-            raw.push({ level: Math.sqrt(total), color })
-          }
-          const peak = Math.max(0.0001, ...raw.map(r => r.level))
-          setWave(
-            raw.map(r => ({ h: Math.max(0.1, Math.min(1, r.level / peak)), color: r.color }))
-          )
+        setNativeSilent(
+          envelope.lanes
+            .filter(
+              lane =>
+                HIDEABLE_LANE_IDS.includes(lane.id) &&
+                lane.peaksValid &&
+                Math.max(...lane.peaks) < SILENT_LANE_LEVEL
+            )
+            .map(lane => lane.id)
+        )
+        const raw = mixWaveformEnvelope(
+          envelope,
+          new Map<string, number>(native.lanes.map(lane => [lane.id, lane.totalFrames])),
+          id => laneMeta[id]?.color ?? C.dim,
+          C.dim
+        )
+        const peak = Math.max(0.0001, ...raw.map(r => r.level))
+        setWave(
+          raw.map(r => ({ h: Math.max(0.1, Math.min(1, r.level / peak)), color: r.color }))
+        )
       }
       if (cachedEnvelope) {
         log('waveform', `from the project · ${cachedEnvelope.lanes.length} lanes · 0 ms`)
         consume(cachedEnvelope)
-        return () => {
-          cancelled = true
-        }
       }
-      // Not cached, or cached against different bytes: ask the core, and keep
-      // asking while a streamed song's background pass is still running. The
-      // interval is generous because nothing is waiting on it — the song is
-      // already playing.
+      const wantedCount = Object.keys(wanted).length
+      const persist = (envelope: NativeLaneEnvelope): void => {
+        if (!project.dir) return
+        const fresh = waveformCacheFor(envelope, wanted)
+        const pending = Object.fromEntries(
+          Object.entries(fresh).filter(([id]) => !persisted.has(id))
+        )
+        if (Object.keys(pending).length === 0) return
+        for (const id of Object.keys(pending)) persisted.add(id)
+        void writeProjectWaveform(project.dir, pending, Object.keys(wanted), () => !cancelled).catch(() => {
+          // A cache that cannot be written costs a repeat pass, not a wrong picture.
+        })
+      }
       let attempts = 0
-      // The best answer drawn so far. The pass measures lanes one at a time,
-      // so the envelope IMPROVES: draw each improvement rather than settling
-      // for the first one and stopping, which is what left a six-lane song
-      // drawn from a single lane.
-      let drawn = 0
+      let drawn = best.size
       const askedAt = Date.now()
       const ask = (): void => {
         void native
           .lanePeaks()
           .then(envelope => {
             if (cancelled) return
-            const ready =
-              envelope == null
-                ? 0
-                : envelope.lanes.filter(lane => lane.peaksValid).length
-            const total = envelope == null ? 0 : envelope.lanes.length
-            // EVERY lane, not merely one. The background pass measures the
-            // lanes one after another, so the first answer routinely has a
-            // single lane in it — and drawing that and never asking again is
-            // what a blank-looking seek bar actually was: "measured · 1/6
-            // lanes · 101 ms" in the app's own log, six lanes of song drawn
-            // from one. Past the quick attempts, take whatever exists rather
-            // than drawing nothing at all.
-            const complete = total > 0 && ready === total
-            // Draw as soon as there is anything, and keep drawing as more
-            // lanes land. On a Debug simulator build the core is compiled at
-            // -O0 and a lane takes seconds rather than milliseconds, so a
-            // deadline that gave up at twelve seconds reported "1/6" forever;
-            // on a release phone the whole set lands in about that many
-            // hundred milliseconds and the first draw is already complete.
+            if (envelope) {
+              best = mergeWaveformLanes(best, envelope, new Set(native.lanes.map(lane => lane.id)))
+              persist(envelope)
+            }
+            const ready = best.size
+            const total = Math.max(native.lanes.length, wantedCount, envelope?.lanes.length ?? 0)
+            const complete = total > 0 && ready === total && native.lanes.every(lane => best.has(lane.id))
             if (
               attempts === WAVEFORM_DIAGNOSTIC_ATTEMPT &&
               ready === 0 &&
@@ -966,49 +903,31 @@ export default function PlayerScreen({
             ) {
               log('waveform', `still measuring · ${envelope.waveformDiagnostics}`, 'warn')
             }
-            if (envelope != null && ready > drawn) {
+            if (envelope != null && (ready > drawn || complete)) {
               drawn = ready
               log(
                 'waveform',
                 `measured · ${ready}/${total} lanes · ${Math.round(Date.now() - askedAt)} ms` +
                   (complete ? '' : ' · so far')
               )
-              consume(envelope)
-              // Cached only when every lane is in it: a partial envelope is
-              // refused on the next open anyway (cachedWaveform is
-              // all-or-nothing), so storing one buys nothing.
-              if (project.dir && complete)
-                void writeProjectWaveform(
-                  project.dir,
-                  waveformCacheFor(envelope, wanted)
-                ).catch(() => {
-                  // A cache that cannot be written costs a repeat pass, not a
-                  // wrong picture.
-                })
+              consume(merged(envelope.waveformDiagnostics))
             }
             if (complete) return
-            {
-              attempts += 1
-              if (attempts < WAVEFORM_ATTEMPTS + WAVEFORM_SLOW_ATTEMPTS) {
-                setTimeout(
-                  ask,
-                  attempts < WAVEFORM_ATTEMPTS
-                    ? WAVEFORM_RETRY_MS
-                    : WAVEFORM_SLOW_RETRY_MS
-                )
-              } else if (drawn === 0) {
-                // Said out loud, because a blank seek bar with a silent log is
-                // exactly what sent this back for a second look: nothing in
-                // the log named the waveform at all, so there was no way to
-                // tell a slow measurement from one that never started.
-                log(
-                  'waveform',
-                  `no waveform after ${Math.round((Date.now() - askedAt) / 1000)}s · ` +
-                    `${envelope == null ? 'the core returned none' : `0 of ${total} lanes measured`}`,
-                  'warn'
-                )
-              }
-              return
+            attempts += 1
+            if (attempts < WAVEFORM_ATTEMPTS + WAVEFORM_SLOW_ATTEMPTS) {
+              setTimeout(
+                ask,
+                attempts < WAVEFORM_ATTEMPTS
+                  ? WAVEFORM_RETRY_MS
+                  : WAVEFORM_SLOW_RETRY_MS
+              )
+            } else if (drawn === 0) {
+              log(
+                'waveform',
+                `no waveform after ${Math.round((Date.now() - askedAt) / 1000)}s · ` +
+                  `${envelope == null ? 'the core returned none' : `0 of ${total} lanes measured`}`,
+                'warn'
+              )
             }
           })
       }

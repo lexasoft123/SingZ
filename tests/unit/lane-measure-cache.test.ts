@@ -331,7 +331,7 @@ describe('persistent lane measurement cache', () => {
     }
   )
 
-  it('a source changed during native measurement is not persisted', async () => {
+  it('a source changed during native measurement is refused and not persisted', async () => {
     const entered = deferred()
     const release = deferred()
     const native = vi.fn(async (value: DesktopPlaybackLaneMeasureRequest) => {
@@ -346,13 +346,96 @@ describe('persistent lane measurement cache', () => {
     await writeFile(source, 'bbbb')
     await utimes(source, before.atime, before.mtime)
     release.resolve()
-    expect((await pending).ok).toBe(true)
+    const result = await pending
+    expect(result.ok).toBe(true)
+    expect(result.lanes).toHaveLength(1)
+    expect(result.lanes[0]).toMatchObject({
+      id: 'a',
+      ok: false,
+      error: 'source-changed',
+      sampleRate: 0,
+      channels: 0,
+      frameCount: 0,
+      durationSeconds: 0,
+      rms: 0
+    })
+    expect(result.lanes[0].peaks).toHaveLength(0)
+    expect(result.lanes[0].envelope).toHaveLength(0)
     expect(await cacheFiles(cacheDir)).toHaveLength(0)
 
     const nextNative = nativeSuccess()
     const next = new LaneMeasureCache({ cacheDir, measure: nextNative })
-    await next.measurePlaybackLanes(request())
+    const unchanged = await next.measurePlaybackLanes(request())
     expect(nextNative).toHaveBeenCalledTimes(1)
+    expect(unchanged.lanes[0]).toMatchObject({ ok: true, error: 'ok' })
+  })
+
+  it('a changed miss does not suppress a healthy cache hit', async () => {
+    const other = join(dir, 'b.flac')
+    await writeFile(other, 'bbbb')
+    const entered = deferred()
+    const release = deferred()
+    const native = vi.fn(async (value: DesktopPlaybackLaneMeasureRequest) => {
+      if (value.lanes[0].id === 'changing') {
+        entered.resolve()
+        await release.promise
+      }
+      return success(value)
+    })
+    const cache = new LaneMeasureCache({ cacheDir, measure: native })
+    const seeded = await cache.measurePlaybackLanes(request([{ id: 'healthy', path: source }]))
+    const pending = cache.measurePlaybackLanes(request([
+      { id: 'healthy', path: source },
+      { id: 'changing', path: other }
+    ]))
+    await entered.promise
+    await writeFile(other, 'bbbb changed')
+    release.resolve()
+
+    const result = await pending
+    expect(result.ok).toBe(true)
+    expect(result.lanes.map(lane => lane.id)).toEqual(['healthy', 'changing'])
+    expect(result.lanes[0]).toMatchObject({ ok: true, error: 'ok' })
+    expect(floatBits(result.lanes[0].peaks)).toEqual(floatBits(seeded.lanes[0].peaks))
+    expect(result.lanes[1]).toMatchObject({ ok: false, error: 'source-changed' })
+    expect(result.lanes[1].peaks).toHaveLength(0)
+    expect(result.lanes[1].envelope).toHaveLength(0)
+    expect(native).toHaveBeenCalledTimes(2)
+    expect(native.mock.calls[1][0].lanes).toEqual([{ id: 'changing', path: other }])
+    expect(await cacheFiles(cacheDir)).toHaveLength(1)
+  })
+
+  it('a disk hit changed during another lane miss is refused while the miss survives', async () => {
+    const other = join(dir, 'b.flac')
+    await writeFile(other, 'bbbb')
+    const entered = deferred()
+    const release = deferred()
+    const native = vi.fn(async (value: DesktopPlaybackLaneMeasureRequest) => {
+      if (value.lanes.some(lane => lane.id === 'miss')) {
+        entered.resolve()
+        await release.promise
+      }
+      return success(value)
+    })
+    const cache = new LaneMeasureCache({ cacheDir, measure: native })
+    await cache.measurePlaybackLanes(request([{ id: 'hit', path: source }]))
+    const pending = cache.measurePlaybackLanes(request([
+      { id: 'hit', path: source },
+      { id: 'miss', path: other }
+    ]))
+    await entered.promise
+    await writeFile(source, 'changed cached source while another lane measures')
+    release.resolve()
+
+    const result = await pending
+    expect(result.ok).toBe(true)
+    expect(result.lanes.map(lane => lane.id)).toEqual(['hit', 'miss'])
+    expect(result.lanes[0]).toMatchObject({ ok: false, error: 'source-changed' })
+    expect(result.lanes[0].peaks).toHaveLength(0)
+    expect(result.lanes[0].envelope).toHaveLength(0)
+    expect(result.lanes[1]).toMatchObject({ ok: true, error: 'ok' })
+    expect(native).toHaveBeenCalledTimes(2)
+    expect(native.mock.calls[1][0].lanes).toEqual([{ id: 'miss', path: other }])
   })
 
   it('a newer cache hit supersedes an older native call without publishing or caching it', async () => {
@@ -461,6 +544,130 @@ describe('persistent lane measurement cache', () => {
     expect(result.ok).toBe(false)
     expect(result.lanes).toEqual([])
     expect(native).not.toHaveBeenCalled()
+  })
+
+  it('retains trusted seeds from final measurements and restart disk hits without payload reads', async () => {
+    const firstNative = nativeSuccess()
+    const first = new LaneMeasureCache({ cacheDir, measure: firstNative })
+    await first.measurePlaybackLanes(request())
+    const expected = await first.waveformSeedForPath(source)
+    expect(expected).toMatchObject({
+      version: 1,
+      policy: 'singz.native.streaming-envelope.rms96-v1'
+    })
+    expect(expected?.contentKey).toMatch(/^measure:[0-9a-f]{64}$/)
+    expect(expected?.peaks).toHaveLength(96)
+
+    const restartedNative = nativeSuccess()
+    const restarted = new LaneMeasureCache({ cacheDir, measure: restartedNative })
+    await restarted.measurePlaybackLanes(request())
+    expect(restartedNative).not.toHaveBeenCalled()
+    await rm(await onlyCacheFile(cacheDir))
+    expect(await restarted.waveformSeedForPath(source)).toEqual(expected)
+    expect(restartedNative).not.toHaveBeenCalled()
+  })
+
+  it('read-only lookup returns no seed for missing or stale sources and never measures', async () => {
+    const native = nativeSuccess()
+    const cache = new LaneMeasureCache({ cacheDir, measure: native })
+    expect(await cache.waveformSeedForPath(source)).toBeNull()
+    expect(await cache.waveformSeedForPath(join(dir, 'missing.flac'))).toBeNull()
+    expect(native).not.toHaveBeenCalled()
+    expect(await cacheFiles(cacheDir)).toHaveLength(0)
+
+    await cache.measurePlaybackLanes(request())
+    const before = await stat(source)
+    await writeFile(source, 'bbbb')
+    await utimes(source, before.atime, before.mtime)
+    expect(await cache.waveformSeedForPath(source)).toBeNull()
+    expect(native).toHaveBeenCalledTimes(1)
+  })
+
+  it('binds seed identity to measurement policy and returns defensive copies', async () => {
+    const native = nativeSuccess()
+    const cache = new LaneMeasureCache({ cacheDir, measure: native })
+    await cache.measurePlaybackLanes(request())
+    const initial = await cache.waveformSeedForPath(source)
+    expect(initial).not.toBeNull()
+    initial!.peaks[0] = 0.75
+    expect((await cache.waveformSeedForPath(source))!.peaks[0]).not.toBe(0.75)
+
+    const otherPolicy = { ...POLICY, peaksPerSecond: 2000 }
+    await cache.measurePlaybackLanes(request(undefined, otherPolicy))
+    const rebound = await cache.waveformSeedForPath(source)
+    expect(rebound).toMatchObject({ version: 1, policy: 'singz.native.streaming-envelope.rms96-v1' })
+    expect(rebound?.contentKey).not.toBe(initial?.contentKey)
+  })
+
+  it('excludes cancelled and invalid measurements but retains seeds when disk writes fail', async () => {
+    const cancelled = new LaneMeasureCache({
+      cacheDir,
+      measure: async value => ({
+        ok: true,
+        error: '',
+        lanes: value.lanes.map(lane => failure(lane.id, 'cancelled'))
+      })
+    })
+    await cancelled.measurePlaybackLanes(request())
+    expect(await cancelled.waveformSeedForPath(source)).toBeNull()
+
+    const invalid = new LaneMeasureCache({
+      cacheDir,
+      measure: async value => ({
+        ok: true,
+        error: '',
+        lanes: value.lanes.map(lane => measurement(lane.id, value, {
+          envelope: new Float32Array(95)
+        }))
+      })
+    })
+    await invalid.measurePlaybackLanes(request())
+    expect(await invalid.waveformSeedForPath(source)).toBeNull()
+
+    const blocked = join(dir, 'not-a-directory')
+    await writeFile(blocked, 'file')
+    const native = nativeSuccess()
+    const writableFailure = new LaneMeasureCache({ cacheDir: blocked, measure: native })
+    await writableFailure.measurePlaybackLanes(request())
+    expect(await writableFailure.waveformSeedForPath(source)).not.toBeNull()
+    expect(native).toHaveBeenCalledTimes(1)
+  })
+
+  it('bounds trusted seed memory to 64 recent source identities', async () => {
+    const native = nativeSuccess()
+    const cache = new LaneMeasureCache({ cacheDir, measure: native })
+    let first = ''
+    let last = ''
+    for (let index = 0; index < 65; ++index) {
+      const path = join(dir, `${index}.flac`)
+      if (index === 0) first = path
+      last = path
+      await writeFile(path, `lane-${index}`)
+      await cache.measurePlaybackLanes(request([{ id: `lane-${index}`, path }]))
+    }
+    expect(await cache.waveformSeedForPath(first)).toBeNull()
+    expect(await cache.waveformSeedForPath(last)).not.toBeNull()
+    expect(native).toHaveBeenCalledTimes(65)
+  })
+
+  it('enriches only trusted seed hits and never measures a prepare miss', async () => {
+    const other = join(dir, 'b.flac')
+    await writeFile(other, 'bbbb')
+    const native = nativeSuccess()
+    const cache = new LaneMeasureCache({ cacheDir, measure: native })
+    await cache.measurePlaybackLanes(request())
+    const seed = await cache.waveformSeedForPath(source)
+    const lanes = await cache.seedPlaybackLanes([
+      { id: 'hit', path: source, gain: 1, muted: false, solo: false },
+      { id: 'miss', path: other, gain: 0.5, muted: true, solo: false }
+    ])
+    expect(lanes[0]).toEqual({
+      id: 'hit', path: source, gain: 1, muted: false, solo: false,
+      sourceKey: seed?.contentKey,
+      waveform: seed
+    })
+    expect(lanes[1]).toEqual({ id: 'miss', path: other, gain: 0.5, muted: true, solo: false })
+    expect(native).toHaveBeenCalledTimes(1)
   })
 
   it('native results mapped to the wrong miss are refused and never cached', async () => {

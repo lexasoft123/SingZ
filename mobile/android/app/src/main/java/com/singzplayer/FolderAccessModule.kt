@@ -281,9 +281,8 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
   private fun isCurrent(f: File, md5: String, size: Long): Boolean =
     CacheCurrency.isCurrent(if (f.isFile) f.length() else -1L, size, md5) { hashOf(f) }
 
-  /** md5 of a file, remembered against its own identity (size + mtime) so a
-   *  song hashes once and not on every open. A rewrite moves the mtime, so a
-   *  stale row cannot outlive the bytes it describes. */
+  /** MD5 memo for Drive currency only. Folder identity/materialization uses
+   * FolderMaterialization's fresh reads instead. */
   private fun hashOf(f: File): String? {
     val stamp = "${f.length()}:${f.lastModified()}"
     hashPrefs.getString(f.path, null)?.let {
@@ -475,17 +474,48 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
           ?: throw Exception("The picked folder is no longer reachable")
         val src = resolvePath(root, "$project/$file") ?: throw Exception("$file is missing")
         val out = cacheFile(project, file)
-        if (!out.isFile || out.length() != src.length()) {
+        // A restored mtime and equal size cannot prove these are the same
+        // bytes. Compare the provider stream and cached file directly.
+        val current = out.isFile && out.length() == src.length() &&
+          FolderMaterialization.sameContent({
+            ctx.contentResolver.openInputStream(src.uri)
+              ?: throw Exception("Cannot open $file")
+          }, out)
+        if (!current) {
           out.parentFile?.mkdirs()
           val tmp = File(out.path + ".part")
           ctx.contentResolver.openInputStream(src.uri)?.use { input ->
             tmp.outputStream().use { output -> input.copyTo(output) }
           } ?: throw Exception("Cannot open $file")
           if (!tmp.renameTo(out)) throw Exception("Cannot cache $file")
+          hashPrefs.edit().remove(out.path).apply()
         }
         promise.resolve(out.absolutePath)
       } catch (e: Exception) {
         promise.reject("file", e.message ?: "Cannot fetch $file")
+      }
+    }
+  }
+
+  /** Actual content identity for a file this module owns or materialized. */
+  @ReactMethod
+  fun fileIdentity(path: String, promise: Promise) {
+    exec.execute {
+      try {
+        val file = File(path).canonicalFile
+        val owned = listOf(cacheRoot().canonicalPath, documentsDir().canonicalPath).any { root ->
+          file.path.startsWith(root + File.separator)
+        }
+        if (!owned || !file.isFile) throw Exception("Not a readable file this app owns")
+        val md5 = FolderMaterialization.md5(file) ?: throw Exception("The file is unreadable")
+        val result = Arguments.createMap()
+        result.putString("path", path)
+        result.putString("md5", md5)
+        result.putDouble("size", file.length().toDouble())
+        result.putDouble("mtimeMs", file.lastModified().toDouble())
+        promise.resolve(result)
+      } catch (e: Exception) {
+        promise.reject("identity", e.message ?: "Cannot identify the file")
       }
     }
   }

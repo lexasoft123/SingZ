@@ -325,15 +325,15 @@ test('hands the singer\'s latency trim to the native backend', async () => {
 test('does not draw a mixer row for a lane the core reports silent', async () => {
   const h = nativePlayerHarness()
   ;(h.project.nativePlayback!.lanePeaks as jest.Mock).mockResolvedValue({
-    bucketCount: 2,
+    bucketCount: 96,
     lanes: [
       // Silent, but NOT a lane the rule may hide: an instrumental has no
       // singing, and the singer still gets to see and unmute that fader.
-      { id: 'vocals', peaksValid: true, peaks: [0, 0] },
+      { id: 'vocals', peaksValid: true, peaks: Array(96).fill(0) },
       // A song with no guitar still gets a guitar stem from the splitter.
-      { id: 'guitar', peaksValid: true, peaks: [0, 0.0001] },
+      { id: 'guitar', peaksValid: true, peaks: Array(96).fill(0.0001) },
       // A track the singer added themselves is never hidden either.
-      { id: 'custom-harmony', peaksValid: true, peaks: [0, 0] }
+      { id: 'custom-harmony', peaksValid: true, peaks: Array(96).fill(0) }
     ]
   })
   const legacy = {} as MultitrackEngine

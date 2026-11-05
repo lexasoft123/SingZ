@@ -164,6 +164,52 @@ bool hasOnlyKeys(NSDictionary *value,
   return true;
 }
 
+bool parseMd5(id value, std::string *result) {
+  if (!parseString(value, result) || result->size() != 32)
+    return false;
+  for (const char character : *result)
+    if ((character < '0' || character > '9') &&
+        (character < 'a' || character > 'f'))
+      return false;
+  return true;
+}
+
+bool parseWaveformSeed(id value, const std::string &contentMd5,
+                       singz::NativePlaybackLaneWaveformSeed *seed) {
+  if (seed == nullptr || contentMd5.empty() ||
+      ![value isKindOfClass:NSDictionary.class] ||
+      !hasOnlyKeys(value, {@"version", @"policy", @"sourceMd5",
+                           @"bucketCount", @"peaks"}))
+    return false;
+  NSDictionary *object = value;
+  uint32_t version = 0;
+  uint32_t bucketCount = 0;
+  std::string policy;
+  std::string sourceMd5;
+  NSArray *peaks = object[@"peaks"];
+  if (!parseUint32(object[@"version"], &version, false) ||
+      version != singz::kNativePlaybackWaveformSeedVersion ||
+      !parseString(object[@"policy"], &policy) ||
+      policy != singz::kNativePlaybackWaveformSeedPolicy ||
+      !parseMd5(object[@"sourceMd5"], &sourceMd5) ||
+      sourceMd5 != contentMd5 ||
+      !parseUint32(object[@"bucketCount"], &bucketCount, false) ||
+      bucketCount != singz::kNativePlaybackLaneSummaryBuckets ||
+      ![peaks isKindOfClass:NSArray.class] ||
+      peaks.count != singz::kNativePlaybackLaneSummaryBuckets)
+    return false;
+  singz::NativePlaybackLaneWaveformSeed candidate;
+  candidate.contentKey = "md5:" + contentMd5;
+  for (NSUInteger index = 0; index < peaks.count; ++index) {
+    double peak = 0.0;
+    if (!parseFiniteDouble(peaks[index], &peak, 0.0, 1.0))
+      return false;
+    candidate.peaks[index] = static_cast<float>(peak);
+  }
+  *seed = std::move(candidate);
+  return true;
+}
+
 bool parseChannels(NSArray *values, std::vector<uint32_t> *channels) {
   if (channels == nullptr)
     return false;
@@ -814,7 +860,8 @@ bool SingzParsePlaybackPrepare(NSDictionary *request,
   candidate.lanes.reserve(specs.count);
   for (id object in specs) {
     if (![object isKindOfClass:NSDictionary.class] ||
-        !hasOnlyKeys(object, {@"id", @"path", @"gain", @"muted", @"solo"})) {
+        !hasOnlyKeys(object, {@"id", @"path", @"gain", @"muted", @"solo",
+                              @"contentMd5", @"waveform"})) {
       *error = @"A native playback lane schema is invalid";
       return false;
     }
@@ -834,6 +881,15 @@ bool SingzParsePlaybackPrepare(NSDictionary *request,
         (solo != nil && !parseBool(solo, &lane.solo))) {
       *error = @"A native playback lane control is invalid";
       return false;
+    }
+    id contentMd5 = spec[@"contentMd5"];
+    if (contentMd5 != nil && !parseMd5(contentMd5, &lane.contentMd5))
+      lane.contentMd5.clear();
+    id waveform = spec[@"waveform"];
+    if (waveform != nil) {
+      singz::NativePlaybackLaneWaveformSeed seed;
+      if (parseWaveformSeed(waveform, lane.contentMd5, &seed))
+        lane.waveform = std::move(seed);
     }
     candidate.lanes.push_back(std::move(lane));
   }

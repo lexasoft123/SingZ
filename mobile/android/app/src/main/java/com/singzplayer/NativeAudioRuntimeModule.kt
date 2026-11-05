@@ -359,6 +359,13 @@ class NativeAudioRuntimeModule(private val ctx: ReactApplicationContext) :
           parsed.initialTransport.loop?.endProjectFrame ?: 0L,
           authorized.map { it.id }.toTypedArray(),
           authorized.map { it.path }.toTypedArray(),
+          NativePlaybackBridgeSchema.WAVEFORM_SEED_VERSION,
+          NativePlaybackBridgeSchema.WAVEFORM_SEED_POLICY,
+          authorized.map { it.contentMd5.orEmpty() }.toTypedArray(),
+          IntArray(authorized.size) { index -> authorized[index].waveform?.bucketCount ?: 0 },
+          authorized.flatMap { lane ->
+            lane.waveform?.peaks?.toList() ?: List(NativePlaybackBridgeSchema.WAVEFORM_BUCKET_COUNT) { 0.0 }
+          }.toDoubleArray(),
           authorized.map { it.gain }.toFloatArray(),
           authorized.map { it.muted }.toBooleanArray(),
           authorized.map { it.solo }.toBooleanArray(),

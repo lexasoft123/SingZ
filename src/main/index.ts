@@ -4,7 +4,6 @@ import { readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import type {
   DesktopMonitorConfig,
-  DesktopPlaybackLaneConfig,
   DesktopPlaybackLaneMeasureRequest,
   DesktopPlaybackLaneMeasureResult,
   DesktopPlaybackPrepareConfig,
@@ -68,7 +67,7 @@ import { askMicrophoneAccess } from './mic-access'
 import { cancelBeatsMl, registerBeatsIpc } from './beats-ml'
 import { failedPlayback, playbackCodecSupportsPath } from './capture'
 import { createRemoteCaptureOwner } from './audio-process'
-import { LaneMeasureCache } from './lane-measure-cache'
+import { LaneMeasureCache, parseDesktopPlaybackLaneConfigs } from './lane-measure-cache'
 
 // Test hook: fake microphone input so E2E drivers can exercise pitch matching.
 if (process.env.SINGZ_FAKE_MIC) {
@@ -759,18 +758,11 @@ function registerIpc(): void {
         }
       }
       const config = rawConfig as DesktopPlaybackPrepareConfig
-      const lanes = rawLanes as DesktopPlaybackLaneConfig[]
-      if (
-        lanes.length < 1 || lanes.length > 16 ||
-        lanes.some((lane) =>
-          !lane || typeof lane !== 'object' || typeof lane.id !== 'string' ||
-          lane.id.length < 1 || lane.id.length > 96 || typeof lane.path !== 'string' ||
-          typeof lane.gain !== 'number' || !Number.isFinite(lane.gain) ||
-          typeof lane.muted !== 'boolean' || typeof lane.solo !== 'boolean')
-      ) {
+      const lanes = parseDesktopPlaybackLaneConfigs(rawLanes)
+      if (!lanes) {
         log(
           'dsp',
-          `graph refused · invalid-configuration · a lane in a list of ${lanes.length} failed schema validation`,
+          `graph refused · invalid-configuration · a lane in a list of ${rawLanes.length} failed schema validation`,
           'warn'
         )
         return {
@@ -810,8 +802,13 @@ function registerIpc(): void {
           latency: { inputDeviceFrames: 0, outputDeviceFrames: 0, bufferFrames: 0, externalRouteFrames: 0 }
         }
       }
-      // Lifecycle is already bound and fenced across capability discovery.
-      const result = await captureOwner.preparePlayback(event.sender.id, config, authorized)
+      const seeded = config.streamLanes === true
+        ? await laneMeasureCache.seedPlaybackLanes(authorized)
+        : authorized
+      if (!callerIsCurrent())
+        return failedPlayback('The audio window changed before playback could start.', 'invalid-generation')
+      // Lifecycle is already bound and fenced across capability discovery and seed lookup.
+      const result = await captureOwner.preparePlayback(event.sender.id, config, seeded)
       // Both outcomes are logged by the owner, which is where the timing, the
       // seam and the negotiated format are known. Saying it twice here only
       // made the log harder to read.

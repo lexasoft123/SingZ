@@ -1,4 +1,5 @@
 import type { TrainingCompletionReceipt, TrainingPreferences, TrainingProgress } from './training-progress'
+import { POLICY as WAVEFORM_POLICY, VERSION as WAVEFORM_VERSION } from './waveform-envelope-cache'
 import type { NativeGraphDocumentProjection } from './graph-document'
 
 import type { ReleaseNotes } from './release-highlights'
@@ -908,6 +909,20 @@ export interface DesktopPlaybackLaneConfig {
   gain: number
   muted: boolean
   solo: boolean
+}
+
+export interface DesktopPlaybackLaneWaveformSeed {
+  version: typeof WAVEFORM_VERSION
+  policy: typeof WAVEFORM_POLICY
+  contentKey: string
+  peaks: number[]
+}
+
+/** Main-only prepare fields, attached after its allowlist and source checks.
+ * Renderer input remains DesktopPlaybackLaneConfig and cannot supply these. */
+export interface DesktopPlaybackTrustedLaneConfig extends DesktopPlaybackLaneConfig {
+  sourceKey?: string
+  waveform?: DesktopPlaybackLaneWaveformSeed
 }
 
 /**

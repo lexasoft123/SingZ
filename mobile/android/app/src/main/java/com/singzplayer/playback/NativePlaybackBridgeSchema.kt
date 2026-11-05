@@ -53,6 +53,9 @@ object NativePlaybackBridgeSchema {
   const val MAXIMUM_GRAPH_CONNECTIONS = 256
   const val MAXIMUM_GRAPH_PORTS_PER_NODE = 16
   const val MAXIMUM_GRAPH_PARAMETERS_PER_NODE = 64
+  const val WAVEFORM_SEED_VERSION = 1
+  const val WAVEFORM_SEED_POLICY = "singz.native.streaming-envelope.rms96-v1"
+  const val WAVEFORM_BUCKET_COUNT = 96
 
   data class GraphPort(val id: String, val channels: Int)
   data class GraphParameter(val id: String, val normalizedValue: Double)
@@ -93,12 +96,22 @@ object NativePlaybackBridgeSchema {
     val connections: List<GraphConnection>
   )
 
+  data class WaveformSeed(
+    val version: Int,
+    val policy: String,
+    val sourceMd5: String,
+    val bucketCount: Int,
+    val peaks: DoubleArray
+  )
+
   data class Lane(
     val id: String,
     val path: String,
     val gain: Float,
     val muted: Boolean,
-    val solo: Boolean
+    val solo: Boolean,
+    val contentMd5: String? = null,
+    val waveform: WaveformSeed? = null
   )
 
   data class BeatGrid(
@@ -222,13 +235,16 @@ object NativePlaybackBridgeSchema {
       invalid("The native playback lane list is invalid")
     val lanes = laneValues.map { raw ->
       val lane = map(raw, "lane")
-      exactKeys(lane, setOf("id", "path", "gain", "muted", "solo"))
+      exactKeys(lane, setOf("id", "path", "gain", "muted", "solo", "contentMd5", "waveform"))
+      val contentMd5 = md5OrNull(lane["contentMd5"])
       Lane(
         string(lane["id"], "lane id"),
         string(lane["path"], "lane path"),
         optionalGain(lane, "gain", 1.0F),
         optionalBoolean(lane, "muted", false),
-        optionalBoolean(lane, "solo", false)
+        optionalBoolean(lane, "solo", false),
+        contentMd5,
+        waveformSeed(lane["waveform"], contentMd5)
       )
     }
     if (lanes.map { it.id }.toSet().size != lanes.size)
@@ -280,6 +296,31 @@ object NativePlaybackBridgeSchema {
       training = value["training"]?.let { training(map(it, "training")) },
       graphDocument = value["graphDocument"]?.let { graphDocument(map(it, "graph document")) }
     )
+  }
+
+  private fun md5OrNull(value: Any?): String? =
+    (value as? String)?.takeIf { it.matches(Regex("^[0-9a-f]{32}$")) }
+
+  private fun waveformSeed(value: Any?, contentMd5: String?): WaveformSeed? {
+    if (value == null || contentMd5 == null) return null
+    return try {
+      val objectValue = map(value, "waveform seed")
+      exactKeys(objectValue, setOf("version", "policy", "sourceMd5", "bucketCount", "peaks"))
+      val version = uint32(objectValue["version"], false, "waveform version")
+      val policy = string(objectValue["policy"], "waveform policy")
+      val sourceMd5 = requireNotNull(md5OrNull(objectValue["sourceMd5"]))
+      val bucketCount = uint32(objectValue["bucketCount"], false, "waveform bucket count")
+      val peaks = list(objectValue["peaks"], "waveform peaks").map {
+        finite(it, 0.0, 1.0, "waveform peak")
+      }
+      if (version != WAVEFORM_SEED_VERSION || policy != WAVEFORM_SEED_POLICY ||
+        sourceMd5 != contentMd5 || bucketCount != WAVEFORM_BUCKET_COUNT ||
+        peaks.size != WAVEFORM_BUCKET_COUNT
+      ) invalid("The native waveform seed is invalid")
+      WaveformSeed(version, policy, sourceMd5, bucketCount, peaks.toDoubleArray())
+    } catch (_: Throwable) {
+      null
+    }
   }
 
   private fun graphDocument(value: Map<String, Any?>): GraphDocument {

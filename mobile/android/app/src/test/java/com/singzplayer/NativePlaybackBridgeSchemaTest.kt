@@ -62,6 +62,58 @@ class NativePlaybackBridgeSchemaTest {
   }
 
   @Test
+  fun `waveform seeds are exact and corrupt lanes fall back to measurement`() {
+    val md5 = "0123456789abcdef0123456789abcdef"
+    val seed = mapOf(
+      "version" to 1.0,
+      "policy" to "singz.native.streaming-envelope.rms96-v1",
+      "sourceMd5" to md5,
+      "bucketCount" to 96.0,
+      "peaks" to List(96) { index -> if (index == 0) 0.25 else 0.5 }
+    )
+    val originalLane = (validPrepare()["lanes"] as List<Map<String, Any?>>).first()
+    val lane = originalLane + mapOf("contentMd5" to md5, "waveform" to seed)
+    val request = validPrepare() + ("lanes" to listOf(lane))
+    val parsed = NativePlaybackBridgeSchema.prepare(request).lanes.single()
+    assertEquals(md5, parsed.contentMd5)
+    assertEquals(md5, parsed.waveform!!.sourceMd5)
+    assertEquals(96, parsed.waveform!!.bucketCount)
+    assertArrayEquals(
+      DoubleArray(96) { index -> if (index == 0) 0.25 else 0.5 },
+      parsed.waveform!!.peaks,
+      0.0
+    )
+
+    val invalid = listOf(
+      seed + ("version" to 2.0),
+      seed + ("policy" to "other-policy"),
+      seed + ("sourceMd5" to "fedcba9876543210fedcba9876543210"),
+      seed + ("bucketCount" to 95.0),
+      seed + ("peaks" to emptyList<Double>()),
+      seed + ("peaks" to listOf(Double.NaN)),
+      seed + ("extra" to true)
+    )
+    for (candidate in invalid) {
+      val degraded = NativePlaybackBridgeSchema.prepare(
+        validPrepare() + ("lanes" to listOf(lane + ("waveform" to candidate)))
+      ).lanes.single()
+      // Negative control: accepting any of these would seed corrupt evidence;
+      // rejecting the whole prepare would turn an advisory cache into a playback failure.
+      assertEquals(null, degraded.waveform)
+      assertEquals(md5, degraded.contentMd5)
+    }
+    val outOfRange = seed + ("peaks" to List(96) { index -> if (index == 47) 1.01 else 0.5 })
+    assertEquals(null, NativePlaybackBridgeSchema.prepare(
+      validPrepare() + ("lanes" to listOf(lane + ("waveform" to outOfRange)))
+    ).lanes.single().waveform)
+    val wrongIdentity = NativePlaybackBridgeSchema.prepare(
+      validPrepare() + ("lanes" to listOf(lane + ("contentMd5" to md5.uppercase())))
+    ).lanes.single()
+    assertEquals(null, wrongIdentity.contentMd5)
+    assertEquals(null, wrongIdentity.waveform)
+  }
+
+  @Test
   fun `a swap source generation parses and defaults to an ordinary prepare`() {
     assertEquals(0L, NativePlaybackBridgeSchema.prepare(validPrepare()).swapFromGeneration)
     val swap = validPrepare() + ("swapFromGeneration" to 3.0)

@@ -1,5 +1,10 @@
 import { NativeModules } from 'react-native'
 import type { LyricLine, ProjectDoc, ProjectSettings } from './model'
+import {
+  MAX_WAVEFORM_LANES,
+  parsePersistedWaveform,
+  type PersistedWaveform
+} from './waveform-cache'
 import { log } from './log'
 import { mutateProjectDocument } from './project-document'
 import { forgetMove } from './publish-record'
@@ -178,14 +183,35 @@ export async function writeLyrics(
  * this is a strictly additive field on whatever the doc says at the time. */
 export async function writeProjectWaveform(
   dir: string,
-  waveforms: Record<string, { md5: string; peaks: number[] }>
+  waveforms: Record<string, PersistedWaveform>,
+  currentIds?: readonly string[],
+  isCurrent: () => boolean = () => true
 ): Promise<ProjectDoc | null> {
-  if (Object.keys(waveforms).length === 0) return null
-  return mutateProjectDocument(dir, async (doc) => ({
-    ...doc,
-    savedAt: new Date().toISOString(),
-    waveforms: { ...(doc.waveforms ?? {}), ...waveforms },
-  }))
+  if (!isCurrent()) return null
+  const fresh: Record<string, PersistedWaveform> = {}
+  for (const [id, value] of Object.entries(waveforms).slice(0, MAX_WAVEFORM_LANES)) {
+    const parsed = parsePersistedWaveform(value)
+    if (parsed) fresh[id] = parsed
+  }
+  if (Object.keys(fresh).length === 0) return null
+  const allowed = new Set((currentIds ?? Object.keys(fresh)).slice(0, MAX_WAVEFORM_LANES))
+  return mutateProjectDocument(dir, async (doc) => {
+    if (!isCurrent()) return null
+    const merged: Record<string, PersistedWaveform> = {}
+    for (const [id, value] of Object.entries(doc.waveforms ?? {})) {
+      if (!allowed.has(id)) continue
+      const parsed = parsePersistedWaveform(value)
+      if (parsed) merged[id] = parsed
+    }
+    for (const [id, value] of Object.entries(fresh)) {
+      if (allowed.has(id)) merged[id] = value
+    }
+    return {
+      ...doc,
+      savedAt: new Date().toISOString(),
+      waveforms: merged
+    }
+  })
 }
 
 /** Explicit portable-graph transaction: canonical graph.json first, native

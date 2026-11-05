@@ -133,7 +133,7 @@ describe('Electron capture addon build', () => {
       '{"mode", "periodFrames", "windows", "laneIds",',
       '{"startProjectFrame", "endProjectFrame"}',
       '{"state", "loop"}',
-      '{"id", "path", "gain", "muted", "solo"}',
+      '{"id", "path", "gain", "muted", "solo", "sourceKey", "waveform"}',
       '{"format", "engine", "nodes", "connections"}',
       '{"id", "type", "typeVersion", "execution",',
       '{"inputs", "outputs"}',

@@ -20,6 +20,7 @@ import {
   type ParsedGraphDocument
 } from './gen/graph-document'
 import { md5Text, utf8TextByteLength } from './md5'
+import { validWaveformMd5 } from './waveform-cache'
 
 /**
  * Bridge to the FolderAccess native module: the library root is either the
@@ -34,6 +35,7 @@ interface FolderAccessApi {
   listProjects(): Promise<NativeProject[]>
   readText(project: string, file: string): Promise<string>
   localFile(project: string, file: string): Promise<string>
+  fileIdentity?(path: string): Promise<LocalFileIdentity>
   statFile(project: string, file: string): Promise<{ md5: string; size: number; mtimeMs: number }>
   cacheUsage(): Promise<CacheUsage[]>
   clearCache(project: string): Promise<boolean>
@@ -175,6 +177,36 @@ export const readProjectText = (project: string, file: string): Promise<string> 
 export const localProjectFile = (project: string, file: string): Promise<string> =>
   Folder.localFile(project, file)
 
+export interface LocalFileIdentity {
+  readonly path: string
+  readonly md5: string
+  readonly size: number
+  readonly mtimeMs: number
+}
+
+/** Actual bytes, not the document's claim or a memo keyed by a restorable
+ * mtime. Older FolderAccess builds simply cannot seed a native waveform. */
+export async function localFileIdentity(path: string): Promise<LocalFileIdentity | null> {
+  if (typeof Folder.fileIdentity !== 'function') return null
+  try {
+    const value = await Folder.fileIdentity(path) as unknown
+    if (!value || typeof value !== 'object') return null
+    const raw = value as Record<string, unknown>
+    if (raw.path !== path || !validWaveformMd5(raw.md5) ||
+        !Number.isSafeInteger(raw.size) || (raw.size as number) < 0 ||
+        typeof raw.mtimeMs !== 'number' || !Number.isFinite(raw.mtimeMs) || raw.mtimeMs < 0)
+      return null
+    return {
+      path,
+      md5: raw.md5,
+      size: raw.size as number,
+      mtimeMs: raw.mtimeMs
+    }
+  } catch {
+    return null
+  }
+}
+
 export async function listProjects(): Promise<ProjectEntry[]> {
   const raw = await Folder.listProjects()
   const out: ProjectEntry[] = []
@@ -305,6 +337,8 @@ export type NativePlaybackTrainingSpec =
 export interface NativePlaybackHandle {
   readonly kind: 'ios-native' | 'android-native'
   readonly lanes: readonly NativePlaybackLaneView[]
+  /** Actual materialized content identities, when FolderAccess provides them. */
+  readonly laneContentMd5?: Readonly<Record<string, string>>
   readonly transportControls: true
   /** Generation-bound scalar controls are implemented by the shared
    * NativePlaybackSession on both mobile platforms. They ramp through zdsp's

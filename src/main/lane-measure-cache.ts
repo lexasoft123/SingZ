@@ -12,10 +12,18 @@ import {
 } from 'node:fs/promises'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
+import {
+  BUCKETS as WAVEFORM_BUCKETS,
+  POLICY as WAVEFORM_POLICY,
+  VERSION as WAVEFORM_VERSION
+} from '../shared/waveform-envelope-cache'
 import type {
+  DesktopPlaybackLaneConfig,
   DesktopPlaybackLaneMeasure,
   DesktopPlaybackLaneMeasureRequest,
-  DesktopPlaybackLaneMeasureResult
+  DesktopPlaybackLaneMeasureResult,
+  DesktopPlaybackLaneWaveformSeed,
+  DesktopPlaybackTrustedLaneConfig
 } from '../shared/types'
 
 export const LANE_MEASURE_CACHE_VERSION = 1
@@ -25,7 +33,8 @@ const MAGIC = Buffer.from('SZLMC001', 'ascii')
 const PREFIX_BYTES = 12
 const MAX_HEADER_BYTES = 4096
 const SCALAR_BYTES = 32
-const ENVELOPE_BUCKETS = 96
+const ENVELOPE_BUCKETS = WAVEFORM_BUCKETS
+const MAX_WAVEFORM_SEEDS = 64
 const MAX_PEAKS = 1_000_000
 const MAX_PAYLOAD_BYTES = SCALAR_BYTES + (MAX_PEAKS + ENVELOPE_BUCKETS) * 4
 const MAX_FILE_BYTES = PREFIX_BYTES + MAX_HEADER_BYTES + MAX_PAYLOAD_BYTES
@@ -57,6 +66,15 @@ interface PendingLane {
   key: string | null
 }
 
+interface WaveformSeedRecord {
+  source: SourceSnapshot
+  key: string
+  peakPolicy: PeakPolicy
+  version: typeof WAVEFORM_VERSION
+  policy: typeof WAVEFORM_POLICY
+  peaks: Float32Array
+}
+
 export interface LaneMeasureCacheBatch {
   hits: number
   misses: number
@@ -71,6 +89,25 @@ interface LaneMeasureCacheOptions {
 
 function wholeNumber(value: unknown, min: number, max: number): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max
+}
+
+const PLAYBACK_LANE_KEYS = ['id', 'path', 'gain', 'muted', 'solo'] as const
+
+export function parseDesktopPlaybackLaneConfigs(value: unknown): DesktopPlaybackLaneConfig[] | null {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 16) return null
+  const out: DesktopPlaybackLaneConfig[] = []
+  for (const lane of value) {
+    if (!lane || typeof lane !== 'object' || Array.isArray(lane)) return null
+    const record = lane as Record<string, unknown>
+    if (Object.keys(record).some(key => !(PLAYBACK_LANE_KEYS as readonly string[]).includes(key)) ||
+        PLAYBACK_LANE_KEYS.some(key => !Object.prototype.hasOwnProperty.call(record, key))) return null
+    const { id, path, gain, muted, solo } = record
+    if (typeof id !== 'string' || id.length < 1 || id.length > 96 ||
+        typeof path !== 'string' || typeof gain !== 'number' || !Number.isFinite(gain) ||
+        typeof muted !== 'boolean' || typeof solo !== 'boolean') return null
+    out.push({ id, path, gain, muted, solo })
+  }
+  return out
 }
 
 function requestRefusal(request: DesktopPlaybackLaneMeasureRequest): string | null {
@@ -327,8 +364,45 @@ function invalidNativeResult(): DesktopPlaybackLaneMeasureResult {
 export class LaneMeasureCache {
   private epoch = 0
   private pruneChain: Promise<void> = Promise.resolve()
+  private readonly waveformSeeds = new Map<string, WaveformSeedRecord>()
 
   constructor(private readonly options: LaneMeasureCacheOptions) {}
+
+  async waveformSeedForPath(path: string): Promise<DesktopPlaybackLaneWaveformSeed | null> {
+    const source = await sourceSnapshot(path)
+    if (!source) return null
+    const record = this.waveformSeeds.get(source.canonicalPath)
+    if (!record || record.version !== WAVEFORM_VERSION || record.policy !== WAVEFORM_POLICY ||
+        !CACHE_NAME.test(record.key) || record.key !== cacheKey(record.source, record.peakPolicy) ||
+        record.peaks.length !== ENVELOPE_BUCKETS || !finiteNonnegative(record.peaks, 1) ||
+        !sameSource(record.source, source)) return null
+    return {
+      version: WAVEFORM_VERSION,
+      policy: WAVEFORM_POLICY,
+      contentKey: `measure:${record.key}`,
+      peaks: Array.from(record.peaks)
+    }
+  }
+
+  async seedPlaybackLanes(
+    lanes: readonly DesktopPlaybackLaneConfig[]
+  ): Promise<DesktopPlaybackTrustedLaneConfig[]> {
+    return Promise.all(lanes.map(async lane => {
+      const clean: DesktopPlaybackLaneConfig = {
+        id: lane.id,
+        path: lane.path,
+        gain: lane.gain,
+        muted: lane.muted,
+        solo: lane.solo
+      }
+      try {
+        const waveform = await this.waveformSeedForPath(lane.path)
+        return waveform ? { ...clean, sourceKey: waveform.contentKey, waveform } : clean
+      } catch {
+        return clean
+      }
+    }))
+  }
 
   async measurePlaybackLanes(
     request: DesktopPlaybackLaneMeasureRequest
@@ -351,7 +425,9 @@ export class LaneMeasureCache {
           const key = cacheKey(source, policy)
           const bytes = await readBounded(join(this.options.cacheDir, key))
           const cached = bytes ? decodeMeasurement(bytes, key, policy, lane.id) : null
-          if (cached && sameSource(source, await sourceSnapshot(lane.path))) return { cached }
+          if (cached && sameSource(source, await sourceSnapshot(lane.path))) {
+            return { cached, hit: { lane, source, key } }
+          }
         }
         const current = await sourceSnapshot(lane.path)
         const pending: PendingLane = {
@@ -362,10 +438,12 @@ export class LaneMeasureCache {
         return { pending }
       }))
       const byId = new Map<string, DesktopPlaybackLaneMeasure>()
+      const cachedHits: PendingLane[] = []
       const pending: PendingLane[] = []
       for (const lookup of lookups) {
         if (lookup.cached) {
           byId.set(lookup.cached.id, lookup.cached)
+          cachedHits.push(lookup.hit!)
           ++hits
         } else {
           pending.push(lookup.pending!)
@@ -404,7 +482,33 @@ export class LaneMeasureCache {
         ))
         if (persisted.some(Boolean)) await this.enqueuePrune()
       }
+      const published = [...cachedHits, ...pending]
+      const current = await Promise.all(published.map(item => this.lookupSource(item)))
       if (epoch !== this.epoch) return cancelledResult(request)
+      for (let index = 0; index < published.length; ++index) {
+        const measured = byId.get(published[index].lane.id)!
+        if (!measured.ok || current[index]) continue
+        byId.set(measured.id, {
+          id: measured.id,
+          ok: false,
+          error: 'source-changed',
+          sampleRate: 0,
+          channels: 0,
+          frameCount: 0,
+          durationSeconds: 0,
+          rms: 0,
+          peaks: new Float32Array(0),
+          envelope: new Float32Array(0)
+        })
+      }
+      if (epoch !== this.epoch) return cancelledResult(request)
+      for (let index = 0; index < published.length; ++index) {
+        const item = published[index]
+        if (!current[index] || !item.source || !item.key) continue
+        const measured = byId.get(item.lane.id)!
+        if (!cacheableMeasurement(measured, policy)) continue
+        this.rememberWaveformSeed(item.source, item.key, policy, measured)
+      }
       return {
         ok: true,
         error: nativeError,
@@ -428,6 +532,29 @@ export class LaneMeasureCache {
 
   private async lookupSource(item: PendingLane): Promise<boolean> {
     return sameSource(item.source, await sourceSnapshot(item.lane.path))
+  }
+
+  private rememberWaveformSeed(
+    source: SourceSnapshot,
+    key: string,
+    peakPolicy: PeakPolicy,
+    lane: DesktopPlaybackLaneMeasure
+  ): void {
+    const canonicalPath = source.canonicalPath
+    this.waveformSeeds.delete(canonicalPath)
+    this.waveformSeeds.set(canonicalPath, {
+      source: { ...source },
+      key,
+      peakPolicy: { ...peakPolicy },
+      version: WAVEFORM_VERSION,
+      policy: WAVEFORM_POLICY,
+      peaks: new Float32Array(lane.envelope)
+    })
+    while (this.waveformSeeds.size > MAX_WAVEFORM_SEEDS) {
+      const oldest = this.waveformSeeds.keys().next().value as string | undefined
+      if (oldest === undefined) break
+      this.waveformSeeds.delete(oldest)
+    }
   }
 
   private async persist(

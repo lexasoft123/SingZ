@@ -507,14 +507,58 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate, AVSpeechSynthesizerDeleg
       try ensureDownloaded(src, timeout: 300)
       let srcSize = (try? src.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -1
       let dstSize = (try? dst.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -2
-      if srcSize != dstSize {
+      // Size and a restorable mtime are not content identity. The helper reads
+      // both files fresh; neither the project document nor the memo wins.
+      let current = srcSize == dstSize && SingzFolderContentMatches(src, dst)
+      if !current {
         try fm.createDirectory(at: dstDir, withIntermediateDirectories: true)
         let data = try coordinatedRead(src)
         try data.write(to: dst, options: .atomic)
+        UserDefaults.standard.removeObject(forKey: "singz.hash.\(dst.path)")
       }
       resolve(dst.path)
     } catch {
       reject("local_failed", "\(file): \(error.localizedDescription)", error)
+    }
+  }
+
+  /** Fresh identity of a path this module materialized or owns. This deliberately
+   * bypasses hash memos: a replacement can restore both size and mtime. */
+  @objc func fileIdentity(
+    _ path: NSString,
+    resolver resolve: @escaping RCTPromiseResolveBlock,
+    rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    DispatchQueue.global(qos: .utility).async {
+      let candidate = URL(fileURLWithPath: path as String)
+        .standardizedFileURL.resolvingSymlinksInPath()
+      let roots = [self.cacheRootURL(), self.documentsURL()].map {
+        $0.standardizedFileURL.resolvingSymlinksInPath().path + "/"
+      }
+      guard roots.contains(where: { candidate.path.hasPrefix($0) }) else {
+        reject("identity", "Not a file this app owns", nil)
+        return
+      }
+      var isDirectory: ObjCBool = false
+      guard self.fm.fileExists(atPath: candidate.path, isDirectory: &isDirectory),
+        !isDirectory.boolValue,
+        let attrs = try? self.fm.attributesOfItem(atPath: candidate.path),
+        let size = (attrs[.size] as? NSNumber)?.int64Value,
+        let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970
+      else {
+        reject("identity", "The file is missing or unreadable", nil)
+        return
+      }
+      guard let md5 = SingzFolderContentMd5(candidate) else {
+        reject("identity", "The file is missing or unreadable", nil)
+        return
+      }
+      resolve([
+        "path": path as String,
+        "md5": md5,
+        "size": NSNumber(value: size),
+        "mtimeMs": mtime * 1000
+      ])
     }
   }
 
@@ -573,10 +617,9 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate, AVSpeechSynthesizerDeleg
     }
   }
 
-  /** md5 of a file, remembered against its own identity (size + mtime) so a
-   *  song hashes once and not on every open. A rewrite moves the mtime, so a
-   *  stale row cannot outlive the bytes it describes. The read is chunked —
-   *  these are whole stems, and a song's worth will not fit in memory twice. */
+  /** MD5 with an optional size+mtime memo for ordinary download currency.
+   * Content-identity callers disable it because mtime can be restored. The read
+   * is chunked — a song's worth must not sit in memory twice. */
   private func hashOf(_ url: URL, _ attrs: [FileAttributeKey: Any], memoize: Bool = true) -> String {
     let size = (attrs[.size] as? Int64) ?? 0
     let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0

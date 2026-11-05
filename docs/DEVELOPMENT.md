@@ -166,6 +166,32 @@ an app restart must use the persisted data, not merely a process-local memo.
 This cache avoids repeated waveform scans; it does not cache the native
 playback graph or change the streaming preference.
 
+The small per-lane RMS96 envelope also lives in `project.json` for phone reuse.
+`src/shared/waveform-envelope-cache.ts` owns its version, policy, 96-bucket shape
+and 16-lane bound. Change the policy/version when envelope semantics change;
+legacy unstamped records mean only the original v1 algorithm. Both writers prune
+removed, stale and malformed lanes and resolve custom IDs through
+`settings.custom[].file`, rather than deriving filenames from labels or IDs.
+
+A streamed prepare passes validated envelopes into the native session before
+analysis starts, so a cache hit avoids opening a background analysis reader.
+Desktop seeds come only from main's verified measurement cache, after path/codec
+authorization; renderer-supplied seeds are refused. Mobile seeds require the
+fresh MD5 of the materialized file, not merely the hash in the document. Folder
+copies compare source and destination contents even when size and mtime match.
+The native in-memory envelope map is bounded to 64 content-bound identities;
+path-only identities never reuse measurements. Missing or rejected lanes still
+measure progressively. Short custom lanes are padded with silence in the mixed
+seek-bar timeline, while their stored envelope remains relative to their source.
+
+Focused checks: desktop `lane-measure-cache`, `desktop-waveform-seed` and
+`project-waveforms` Vitest suites; mobile `waveform-cache`, `waveform-writer`,
+`waveform-mix` and `native-playback-b2` Jest suites; the Swift folder runner at
+`mobile/__tests__/test-swift-folder-materialization.sh`; Android folder/schema
+unit tests; and native playback/streaming feeder tests in all sanitizer presets.
+The real addon smoke includes valid and mismatched seed controls. Rebuild and
+install mobile binaries after bridge/core changes before claiming runtime reuse.
+
 ### Native compiler caches
 
 `ccache` is optional and shared per user; build outputs remain worktree-local.
