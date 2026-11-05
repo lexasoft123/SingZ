@@ -186,6 +186,26 @@ Desktop seeds come only from main's verified measurement cache, after path/codec
 authorization; renderer-supplied seeds are refused. Mobile seeds require the
 fresh MD5 of the materialized file, not merely the hash in the document. Folder
 copies compare source and destination contents even when size and mtime match.
+Mobile download currency and waveform identity share a bounded 128-entry process
+memo. Its key includes canonical path, device/inode, size, and nanosecond mtime
+and ctime; a restored mtime alone cannot preserve an entry. Hashes come from one
+opened descriptor with stamps checked before/after the read and against the live
+path. Authorization is rechecked after canonicalization and on the opened target.
+Read errors, short reads and concurrent replacement fail closed. Old persisted
+size/mtime-only MD5 records are not identity evidence. Opaque folder-provider
+sources still receive a fresh content comparison; validated destinations reuse
+the same identity instead of being hashed again for waveform seeding.
+
+Catalog loading coalesces visual progress at 100 ms. Every diagnostic step and
+awaited durable breadcrumb is still recorded; fast file callbacks must not pay
+for a complete catalog render per step. Completion, cancellation and a newer
+load discard pending visual updates before they can restore a stale spinner.
+
+The playback log's presentation counter is a sampled, latency-adjusted frame
+estimate. It does not detect PCM energy or establish the instant sound began;
+status polling and bridge scheduling delay its observation. Report its sampling
+scope and graph/route latency rather than calling it a first audible callback.
+
 The native in-memory envelope map is bounded to 64 content-bound identities;
 path-only identities never reuse measurements. Missing or rejected lanes still
 measure progressively. Short custom lanes are padded with silence in the mixed

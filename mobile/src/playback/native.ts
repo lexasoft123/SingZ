@@ -5992,8 +5992,10 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
       this.firstAudibleLogged = true;
       log(
         'dsp',
-        `first audible callback · generation ${this.generation} · ` +
-          `zcore AudioHost → zdsp graph → native output · ${session.audibleFrames} frames · ` +
+        `presentation counter first observed · generation ${this.generation} · ` +
+          `estimated presented ${session.audibleFrames} frames · rendered ${session.renderedFrames} frames · ` +
+          `presentation latency ${session.presentationLatencyFrames} frames (graph ${session.graphLatencyFrames}, route ${session.devicePresentationLatencyFrames}) · ${sampleRate} Hz · ` +
+          `status polling ${this.pollIntervalMs()} ms nominal · ` +
           `${since(this.startRequestedAt)} after Play · ` +
           `xruns ${session.xruns} · deadlines ${session.deadlineMisses} · ` +
           `discontinuities ${session.discontinuities}`,
@@ -6005,7 +6007,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
         'dsp',
         `render health · generation ${this.generation} · ${(
           session.renderedFrames / sampleRate
-        ).toFixed(1)} s processed · ${session.audibleFrames} audible frames · ` +
+        ).toFixed(1)} s processed · estimated presented ${session.audibleFrames} frames · ` +
           `xruns ${session.xruns} · deadlines ${session.deadlineMisses} · ` +
           `discontinuities ${session.discontinuities}`,
       );

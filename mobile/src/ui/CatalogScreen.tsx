@@ -35,6 +35,7 @@ import {
 } from '../gdrive'
 import { getCrumb, getStoredText, setCrumb, setStoredText } from '../latency'
 import { fmtBytes, fmtMs, log } from '../log'
+import { createLoadingProgress } from '../loading-progress'
 import type { MultitrackEngine } from '../engine'
 import { addedTracks, STEM_ORDER_ALL, type LyricsDoc, type ProjectDoc } from '../model'
 import {
@@ -818,6 +819,8 @@ export default function CatalogScreen({
       setError(null)
       stepLog.current = { t0: Date.now(), rows: [] }
       setLoading({ dir: entry.dir, msg: t('phone.library.opening'), frac: 0 })
+      const progress = createLoadingProgress<Loading>(setLoading,
+        () => tok === token.current && !abort.signal.aborted)
       try {
         const pickedRoot =
           mode === 'folder' ? (root?.kind === 'picked' ? root : await getRoot()) : null
@@ -844,7 +847,7 @@ export default function CatalogScreen({
           onStep: (msg, frac) => {
             if (tok !== token.current) return
             stepLog.current.rows.push({ ms: Date.now() - stepLog.current.t0, frac, msg })
-            setLoading({ dir: entry.dir, msg, frac })
+            progress.update({ dir: entry.dir, msg, frac })
           },
           crumb: setCrumb,
           isCurrent: () => tok === token.current
@@ -856,6 +859,7 @@ export default function CatalogScreen({
         }
         await setCrumb('')
         stepLog.current.rows.push({ ms: Date.now() - stepLog.current.t0, frac: 1, msg: 'open' })
+        progress.stop()
         setLoading(null)
         // the player has it from here (while loading, loadingDirRef answers);
         // a load that failed or was superseded never gets this far
@@ -887,6 +891,7 @@ export default function CatalogScreen({
             startAnalysis(entry.dir, entry.stems, loaded.lyrics)
         }
       } catch (e) {
+        progress.stop()
         await setCrumb('')
         if (tok === token.current) {
           setLoading(null)
@@ -896,6 +901,7 @@ export default function CatalogScreen({
           void loadUsage()
         }
       } finally {
+        progress.stop()
         if (loadAbort.current === abort) loadAbort.current = null
       }
     },

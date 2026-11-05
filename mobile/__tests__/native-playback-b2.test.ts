@@ -18,6 +18,7 @@ import {
   rebuildIosNativePlaybackCues,
   rebuildNativePlaybackCues,
   type NativePlaybackCapability,
+  type NativePlaybackSessionStatus,
   type NativePlaybackResult,
   type NativePlaybackUnloadResult,
 } from '../src/playback/native';
@@ -1092,6 +1093,36 @@ describe.each(['ios', 'android'] as const)(
 );
 
 describe('iOS B2 backend selection and ownership', () => {
+  it('reports a sampled presentation estimate with route latency, never detected sound onset', async () => {
+    const lines: string[] = [];
+    const off = onLogLine(e => { if (e.source === 'dsp') lines.push(e.line); });
+    const h = harness();
+    const project = await h.load();
+    try {
+      await project.nativePlayback!.start();
+      const telemetry = project.nativePlayback as unknown as {
+        publishTelemetry(session: NativePlaybackSessionStatus): void;
+      };
+      const sample = { ...capability(1, 'running', 48_000).session!,
+        audibleFrames: 0, graphLatencyFrames: 0,
+        devicePresentationLatencyFrames: 96_000, presentationLatencyFrames: 96_000,
+        totalPresentationLatencyFrames: 96_000,
+      };
+      telemetry.publishTelemetry(sample);
+      expect(lines.some(line => line.startsWith('presentation counter first observed'))).toBe(false);
+      telemetry.publishTelemetry({ ...sample, renderedFrames: 144_000, audibleFrames: 48_000 });
+      const observed = lines.find(line => line.startsWith('presentation counter first observed'));
+      expect(observed).toContain('estimated presented 48000 frames · rendered 144000 frames');
+      expect(observed).toContain('presentation latency 96000 frames (graph 0, route 96000)');
+      expect(observed).toContain('48000 Hz');
+      expect(observed).toContain('status polling');
+      expect(lines.some(line => line.startsWith('first audible callback'))).toBe(false);
+    } finally {
+      off();
+      await project.nativePlayback!.unload('presentation estimate diagnostic test');
+    }
+  });
+
   it('records explicit DSP initialization, graph, AudioHost and render evidence', async () => {
     const lines: string[] = [];
     const unsubscribe = onLogLine(logEntry => {
@@ -1119,7 +1150,7 @@ describe('iOS B2 backend selection and ownership', () => {
             /rendering started.*zdsp graph owns native output/i,
           ),
           expect.stringMatching(
-            /first audible callback.*zcore AudioHost → zdsp graph/i,
+            /presentation counter first observed.*estimated presented.*presentation latency/i,
           ),
           expect.stringMatching(/render health.*1\.0 s processed.*xruns 0/i),
         ]),
@@ -5485,7 +5516,7 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
       lines.length = 0;
       // Keep the harness's own lifecycle (generation and state must stay
       // truthful through prepare) and only make the callback audible, so the
-      // rebuilt graph reports a first audible callback of its own.
+      // rebuilt graph reports a presentation estimate of its own.
       const lifecycle = h.native.status.getMockImplementation()!;
       h.native.status.mockImplementation(async () => {
         const base = await lifecycle();
@@ -5512,13 +5543,13 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
         accent: false,
       });
       await until(() =>
-        lines.some(line => line.startsWith('first audible callback')),
+        lines.some(line => line.startsWith('presentation counter first observed')),
       );
 
       const audible = lines.find(line =>
-        line.startsWith('first audible callback'),
+        line.startsWith('presentation counter first observed'),
       )!;
-      // The graph became audible moments after the REBUILD. Timing it from
+      // The presentation estimate became positive after the REBUILD. Timing it from
       // the last Play tap instead would print the four minutes of singing
       // that preceded it, making every pitch change read as a stall to
       // whoever opens the log — the one thing these numbers exist to prevent.
