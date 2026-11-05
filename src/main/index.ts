@@ -68,6 +68,7 @@ import { askMicrophoneAccess } from './mic-access'
 import { cancelBeatsMl, registerBeatsIpc } from './beats-ml'
 import { failedPlayback, playbackCodecSupportsPath } from './capture'
 import { createRemoteCaptureOwner } from './audio-process'
+import { LaneMeasureCache } from './lane-measure-cache'
 
 // Test hook: fake microphone input so E2E drivers can exercise pitch matching.
 if (process.env.SINGZ_FAKE_MIC) {
@@ -92,6 +93,12 @@ const separator = new Separator()
 const transcriber = new Transcriber()
 const modelManager = new ModelManager()
 const captureOwner = createRemoteCaptureOwner()
+const laneMeasureCache = new LaneMeasureCache({
+  cacheDir: join(app.getPath('userData'), 'lane-measure-cache-v1'),
+  measure: request => captureOwner.measurePlaybackLanes(request),
+  onBatch: ({ hits, misses, elapsedMs }) =>
+    log('dsp', `lanes measured · cache · ${hits} hits · ${misses} misses · ${elapsedMs} ms`)
+})
 
 /** Every window hears about Drive: progress while a sync runs, and the state
  *  the badges read. One helper, because three copies of this loop drifted. */
@@ -882,9 +889,14 @@ function registerIpc(): void {
         !wholeNumber(request.maximumPeaks, request.minimumPeaks, 1_000_000) ||
         request.lanes.some((lane) =>
           !lane || typeof lane !== 'object' || typeof lane.id !== 'string' ||
-          lane.id.length < 1 || lane.id.length > 96 || typeof lane.path !== 'string')
+          lane.id.length < 1 || Buffer.byteLength(lane.id, 'utf8') > 96 || lane.id.includes('\0') ||
+          typeof lane.path !== 'string' || lane.path.length < 1 ||
+          Buffer.byteLength(lane.path, 'utf8') > 32768 || lane.path.includes('\0'))
       ) {
         return refused('a measure request failed schema validation')
+      }
+      if (new Set(request.lanes.map(lane => lane.id)).size !== request.lanes.length) {
+        return refused('a measure request has duplicate lane ids')
       }
       const lanes = request.lanes.map((lane) => ({ id: lane.id, path: resolve(lane.path) }))
       const codecCapability = await captureOwner.playbackCapability()
@@ -892,7 +904,7 @@ function registerIpc(): void {
         !isAllowed(lane.path) || !codecCapability.available ||
         !playbackCodecSupportsPath(codecCapability, lane.path))
       if (unauthorized) return refused(`unauthorized-path · ${unauthorized.id}`)
-      return captureOwner.measurePlaybackLanes({
+      return laneMeasureCache.measurePlaybackLanes({
         lanes,
         peaksPerSecond: request.peaksPerSecond,
         minimumPeaks: request.minimumPeaks,

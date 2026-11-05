@@ -143,6 +143,29 @@ Electron's `node.lib` still names `node.exe`, so the CMake target must retain it
 delay-load hook and `/DELAYLOAD:node.exe`; a hard `node.exe` PE dependency loads
 in Node but fails before module initialization in `electron.exe`.
 
+### Waveform measurements
+
+Desktop native waveform measurements are cached locally under `userData`. The
+cache stores full-resolution, unnormalized peaks, the seek-bar envelope, RMS
+and source duration/format metadata. It is advisory data, separate from
+`project.json` and Drive sync; cache failures must preserve the normal native
+measurement and legacy decode fallback paths.
+
+A hit requires the current source-file identity, measurement algorithm/schema
+version and every peak-policy parameter to match. Source identity includes
+canonical path and high-resolution size, inode/device, mtime and ctime data;
+replacing a stem or restoring its mtime must not reuse stale statistics. The
+entry is checksummed, shape-validated and bounded before use. Bump the cache
+version when measurement semantics change. Recheck source identity after
+asynchronous work and discard superseded requests before publication.
+
+Cache lookup stays after the IPC file allowlist and codec checks. Never let a
+cache hit grant access to an unregistered path. Persist through atomic writes,
+keep the disk budget bounded and prune only owned cache files. Reopening after
+an app restart must use the persisted data, not merely a process-local memo.
+This cache avoids repeated waveform scans; it does not cache the native
+playback graph or change the streaming preference.
+
 ### Native compiler caches
 
 `ccache` is optional and shared per user; build outputs remain worktree-local.
