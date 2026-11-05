@@ -6,10 +6,52 @@
 import { mkdtempSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
-import { log, logSessions, readLogSession, startSessionLog } from '../../src/main/log'
+import { EventEmitter } from 'node:events'
+import { describe, expect, it, vi } from 'vitest'
+import { BrowserWindow } from 'electron'
+import { attachRendererLogs, log, logEntries, logSessions, readLogSession, startSessionLog } from '../../src/main/log'
 
 describe('the desktop session logs', () => {
+  it('persists renderer failures with severity and source, without console chatter or URL credentials', () => {
+    const contents = new EventEmitter()
+    attachRendererLogs(contents as unknown as Electron.WebContents)
+    const before = logEntries().length
+    contents.emit('console-message', { level: 'info', message: 'ordinary console chatter' })
+    contents.emit('console-message', {
+      level: 'warning', message: 'Audio fallback selected', lineNumber: 42,
+      sourceId: 'https://user:password@example.test/assets/player.js?token=secret#private'
+    })
+    contents.emit('console-message', { level: 'error', message: 'Song open failed', lineNumber: 12, sourceId: 'file:///app/player.js' })
+    contents.emit('render-process-gone', {}, { reason: 'clean-exit', exitCode: 0 })
+    contents.emit('render-process-gone', {}, { reason: 'oom', exitCode: 9 })
+    contents.emit('did-fail-load', {}, -3, 'ERR_ABORTED', 'file:///old-page', true)
+    contents.emit('did-fail-load', {}, -2, 'ERR_FAILED', 'file:///missing', true)
+    contents.emit('did-fail-load', {}, -2, 'ERR_FAILED', 'file:///image', false)
+    const entries = logEntries().slice(before)
+    expect(entries.map(e => [e.level, e.source, e.line])).toEqual([
+      ['warn', 'renderer', 'Audio fallback selected · player.js:42'],
+      ['error', 'renderer', 'Song open failed · player.js:12'],
+      ['error', 'renderer', 'process exited unexpectedly · oom · exit code 9'],
+      ['error', 'renderer', 'page load failed · ERR_FAILED (-2)']
+    ])
+    expect(JSON.stringify(entries)).not.toMatch(/password|token=secret|private|ordinary console/)
+  })
+
+  it('keeps a diagnostic and reaches surviving windows when another renderer closes during delivery', () => {
+    const delivered = vi.fn()
+    const closing = { isDestroyed: () => false, webContents: {
+      isDestroyed: () => false, send: () => { throw new Error('Object has been destroyed') }
+    } }
+    const healthy = { isDestroyed: () => false, webContents: { isDestroyed: () => false, send: delivered } }
+    const windows = vi.spyOn(BrowserWindow, 'getAllWindows').mockReturnValue([closing, healthy] as unknown as BrowserWindow[])
+    try {
+      expect(() => log('dsp', 'shutdown diagnostic remains available', 'warn')).not.toThrow()
+      expect(delivered).toHaveBeenCalledWith('log:line', expect.objectContaining({
+        source: 'dsp', line: 'shutdown diagnostic remains available', level: 'warn'
+      }))
+    } finally { windows.mockRestore() }
+  })
+
   it('writes this launch, keeps the current launch and ten previous and reads a past one back', () => {
     const dir = mkdtempSync(join(tmpdir(), 'singz-session-logs-'))
     // twelve earlier launches, a stray file that is not ours, and one

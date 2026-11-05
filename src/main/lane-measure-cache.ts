@@ -81,6 +81,12 @@ export interface LaneMeasureCacheBatch {
   elapsedMs: number
 }
 
+/** This is the whole request, including native misses and cache maintenance.
+ * A disk hit reuses prior statistics; it does not measure the audio again. */
+export function describeLaneMeasureBatch({ hits, misses, elapsedMs }: LaneMeasureCacheBatch): string {
+  return `waveform request · disk cache ${hits} hits · ${misses} misses · ${elapsedMs} ms total`
+}
+
 interface LaneMeasureCacheOptions {
   cacheDir: string
   measure: (request: DesktopPlaybackLaneMeasureRequest) => Promise<DesktopPlaybackLaneMeasureResult>

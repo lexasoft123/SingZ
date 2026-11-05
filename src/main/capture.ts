@@ -1967,8 +1967,7 @@ export class CaptureOwner {
         if (abandoned) {
           log(
             'dsp',
-            `graph ready for a caller that left · generation ${rawGeneration} · unloading`,
-            'warn'
+            `graph ${result.ok ? 'ready' : 'refused'} after caller left · generation ${rawGeneration} · unloading`
           )
           this.unloadPlayback(rendererId, rawGeneration)
         }

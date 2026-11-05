@@ -12,8 +12,11 @@ function fmtTime(t: number): string {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
 
-function fmtAll(entries: LogEntry[]): string {
-  return entries.map((e) => `${fmtTime(e.t)} [${e.level}] ${e.source}: ${e.line}`).join('\n')
+export function formatLogEntries(entries: LogEntry[]): string {
+  return entries.map((e) => {
+    const when = Number.isFinite(e.t) ? new Date(e.t).toISOString() : ''
+    return `${when} [${e.level}] ${e.source}: ${e.line}`
+  }).join('\n')
 }
 
 /** A kept launch log back into rows; its lines are `ISO [level] source: line`. */
@@ -97,7 +100,7 @@ export default function LogPanel({ onClose }: { onClose: () => void }): React.JS
   }, [])
 
   const copy = useCallback(() => {
-    void navigator.clipboard.writeText(fmtAll(rows)).then(() => {
+    void navigator.clipboard.writeText(formatLogEntries(rows)).then(() => {
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     })

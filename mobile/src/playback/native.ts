@@ -4413,6 +4413,7 @@ export class IosNativePlaybackCoordinator {
         );
       }
     }
+    const alreadyClean = handle.hasCleanupFor(generation);
     const safe = await this.cleanupGeneration(handle, generation);
     if (!safe) {
       handle.fail(t('phone.app.native.unloadUncertainNotStarted'));
@@ -4426,7 +4427,7 @@ export class IosNativePlaybackCoordinator {
       countInStatus: null,
       regionState: handle.pendingRegionState(),
     });
-    log(
+    if (!alreadyClean) log(
       'native-playback',
       `unloaded generation ${generation} · ${reason} · ${since(unloadStartedAt)}`,
     );
@@ -5896,9 +5897,7 @@ class IosNativePlaybackHandle implements NativePlaybackHandle {
 
   graphDescription(): string {
     const shape = `${this.graphNodeCount} nodes/${this.graphConnectionCount} connections`;
-    return this.graphTopology.length > 0
-      ? `${shape} · ${this.graphTopology}`
-      : `${shape} · native topology unavailable`;
+    return shape;
   }
 
   publishTelemetry(session: NativePlaybackSessionStatus): void {
@@ -7184,7 +7183,7 @@ function logDspGraphPrepared(
     'dsp',
     `graph ready · generation ${session.generation} · ${session.graphNodeCount} nodes/${
       session.graphConnectionCount
-    } connections · ${session.topology || 'native topology unavailable'} · ` +
+    } connections · ` +
       `transport pre-roll ${session.preRollFrames} frames · ${session.cueEventCount} cues · ` +
       `reference gain ${session.referenceGain.toFixed(3)} · ` +
       `${formatSampleRate(session.sampleRate || result.sampleRate)} · ` +
@@ -7484,6 +7483,8 @@ async function materializeNativeProject(
   let completedWeight = 0;
   const lanes: MaterializedLane[] = [];
   const materializeStartedAt = Date.now();
+  let projectSeeds = 0;
+  let privateSeeds = 0;
   log(
     'native-playback',
     `materializing ${doc.name ?? entry.dir} · ${
@@ -7526,9 +7527,11 @@ async function materializeNativeProject(
     if (!isCurrent()) throw new Error('Song load was superseded.');
     completedWeight += byteWeighted ? weights[index] : 1;
     const track = doc.settings?.tracks?.[source.id];
-    const waveform = identity
-      ? waveformSeedFor(doc, source.id, identity.md5) ?? await waveforms?.seed(identity.md5)
-      : undefined;
+    const projectSeed = identity ? waveformSeedFor(doc, source.id, identity.md5) : undefined;
+    const privateSeed = identity && !projectSeed ? await waveforms?.seed(identity.md5) : undefined;
+    const waveform = projectSeed ?? privateSeed;
+    if (projectSeed) projectSeeds += 1;
+    if (privateSeed) privateSeeds += 1;
     if (!isCurrent()) throw new Error('Song load was superseded.');
     lanes.push({
       id: source.id,
@@ -7559,7 +7562,11 @@ async function materializeNativeProject(
   log(
     'native-playback',
     `materialized ${doc.name ?? entry.dir} · ${lanes.length} lanes · ` +
-      `${lyrics ? 'lyrics ready' : 'no lyrics'} · ${since(materializeStartedAt)}`,
+      `${lyrics ? 'lyrics ready' : 'no lyrics'} · file preparation ${since(materializeStartedAt)} total (resolve/download/cache/copy/hash/lyrics)`,
+  );
+  log(
+    'waveform',
+    `seed candidates · ${doc.name ?? entry.dir} · ${lanes.length} lanes · project ${projectSeeds} · private ${privateSeeds} · unseeded ${lanes.length - projectSeeds - privateSeeds} · native acceptance not reported`,
   );
   return { entry, doc, graph, lyrics, lanes };
 }

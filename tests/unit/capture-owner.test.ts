@@ -974,6 +974,28 @@ describe('CaptureOwner', () => {
     expect(unload).toHaveBeenCalledWith(1n)
   })
 
+  it('does not call a failed prepare ready when its caller left before completion', async () => {
+    const binding = fakeBinding()
+    let finish!: (value: DesktopPlaybackResult) => void
+    binding.preparePlayback = () => new Promise(resolve => { finish = resolve })
+    const unload = vi.spyOn(binding, 'unloadPlayback')
+      .mockReturnValueOnce({ ...playbackResult('1'), cleanupComplete: false })
+    const owner = new CaptureOwner(binding)
+    const before = logEntries().length
+    const preparing = owner.preparePlayback(3, playbackConfig(), playbackLanes(), 'darwin')
+    await vi.waitFor(() => expect(finish).toBeDefined())
+    owner.rendererGone(3)
+    finish({
+      ...playbackResult('1'), ok: false, errorCode: 'host-failure',
+      error: 'fixture prepare failed', ownershipRetained: true
+    })
+    expect(await preparing).toMatchObject({ ok: false })
+    expect(unload).toHaveBeenCalledTimes(2)
+    const lines = logEntries().slice(before)
+    expect(lines.some(entry => entry.line === 'graph refused after caller left · generation 1 · unloading')).toBe(true)
+    expect(lines.some(entry => /graph ready.*caller.*left/.test(entry.line))).toBe(false)
+  })
+
   it('binds renderer destruction cleanup only once across restarts', () => {
     const binding = fakeBinding()
     const owner = new CaptureOwner(binding)

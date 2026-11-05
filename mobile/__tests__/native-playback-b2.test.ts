@@ -1112,7 +1112,7 @@ describe('iOS B2 backend selection and ownership', () => {
           expect.stringMatching(
             /preparing graph.*transport v2 entry 0\.000 s.*cues click off, count-in 0 bars/i,
           ),
-          expect.stringMatching(/graph ready.*fixture source→map→gain/i),
+          expect.stringMatching(/graph ready.*10 nodes\/9 connections/i),
           expect.stringMatching(/iOS audio session ready.*48 kHz.*256 frame/i),
           expect.stringMatching(/zcore AudioHost open.*iPhone Speaker/i),
           expect.stringMatching(
@@ -4381,7 +4381,8 @@ describe('a slow open explains itself', () => {
 
       const ready = lines.find(line => line.startsWith('graph ready'))!;
       expect(ready).toMatch(/prepared in/);
-      expect(ready).not.toMatch(/decoded one at a time|did not fit/);
+      expect(ready).not.toMatch(/decoded one at a time|did not fit|fixture source|→/);
+      expect(ready.length).toBeLessThan(600);
     } finally {
       unsubscribe();
     }
@@ -6722,5 +6723,37 @@ describe("the player's clock", () => {
       await polled(h, handle, t0, 'paused', 5 * SR);
       expect(readAt(handle, t0 + NATIVE_TELEMETRY_POLL_MS * 3)).toBeCloseTo(5, 5);
     });
+  });
+});
+
+
+describe('honest playback diagnostics', () => {
+  it('reports mixed seed candidates without claiming native acceptance', async () => {
+    const lines: string[] = [];
+    const off = onLogLine(e => { if (e.source === 'waveform') lines.push(e.line); });
+    try {
+      const vocals = md5Text('vocals-bytes'); const drums = md5Text('drums-bytes');
+      (NativeModules.FolderAccess as Record<string, unknown>).fileIdentity = jest.fn(async (path: string) => ({ path, md5: path.includes('vocals') ? vocals : drums, size: 1, mtimeMs: 1 }));
+      const store = new WaveformStore({ getPreference: async () => null, setPreference: async () => {} });
+      await store.remember([{ version: 1, policy: 'singz.native.streaming-envelope.rms96-v1', md5: drums, peaks: Array(96).fill(.2) }]);
+      const e = entry();
+      e.doc!.waveforms = { vocals: { version: 1, policy: 'singz.native.streaming-envelope.rms96-v1', md5: vocals, peaks: Array(96).fill(.3) } };
+      const h = harness({ waveforms: store }); const project = await h.load(e);
+      expect(lines).toContain('seed candidates · Test Song · 2 lanes · project 1 · private 1 · unseeded 0 · native acceptance not reported');
+      expect(lines.join(' ')).not.toMatch(/measured|scan avoided|accepted 2/);
+      await project.nativePlayback!.unload();
+    } finally { off(); }
+  });
+  it('reports unseeded lanes and logs repeated cleanup only once', async () => {
+    const lines: string[] = []; const off = onLogLine(e => { lines.push(e.line); });
+    try {
+      const h = harness(); const project = await h.load();
+      expect(lines.some(line => /seed candidates.*project 0 · private 0 · unseeded 2/.test(line))).toBe(true);
+      expect(lines.some(line => /materialized.*file preparation.*total \(resolve\/download\/cache\/copy\/hash\/lyrics\)/.test(line))).toBe(true);
+      await project.nativePlayback!.unload('closed'); const deliveries = h.native.unload.mock.calls.length;
+      await project.nativePlayback!.unload('closed again');
+      expect(h.native.unload).toHaveBeenCalledTimes(deliveries);
+      expect(lines.filter(line => line.startsWith('unloaded generation'))).toHaveLength(1);
+    } finally { off(); }
   });
 });

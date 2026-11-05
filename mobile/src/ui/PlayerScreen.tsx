@@ -28,6 +28,7 @@ import { syncFrameCallbackVisibility } from './frame-visibility'
 import type { MultitrackEngine, TrackState, TrainingSpec } from '../engine'
 import type { RouteLatency } from '../latency'
 import { log } from '../log'
+import { waveformReadyMessage } from '../waveform-diagnostics'
 import {
   ANALYSIS_EVENT,
   analysisPending,
@@ -818,16 +819,12 @@ export default function PlayerScreen({
     setNativeSilent([])
     const stems = project.stems
     if (stems.length === 0) {
-      // Native playback never decodes in JS, so there are no buffers to
-      // scan. The core summarised the same audio while it decoded, once per
-      // prepared generation; ask it rather than leaving the rail blank.
+      // Native playback exposes envelopes without JS PCM. Project values can
+      // draw immediately; the native response may contain accepted seeds,
+      // in-memory reuse, or progressively measured missing lanes. This UI
+      // observes availability, not which native work produced each value.
       const native = project.nativePlayback
       if (!native) return
-      // The project's own cache first. A streamed song has no decoded PCM to
-      // summarise, so its envelope arrives from a background pass seconds
-      // after the song starts — but only ever ONCE per file, because the
-      // answer is kept here against the stem's md5. On every later open the
-      // bar is drawn before the first frame plays.
       const wanted = native.laneContentMd5 ?? {}
       const cachedEnvelope = cachedWaveform(project.doc, wanted)
       let best = new Map<string, NativeLaneEnvelope['lanes'][number]>()
@@ -865,7 +862,7 @@ export default function PlayerScreen({
         )
       }
       if (cachedEnvelope) {
-        log('waveform', `from the project · ${cachedEnvelope.lanes.length} lanes · 0 ms`)
+        log('waveform', waveformReadyMessage('project', cachedEnvelope.lanes.length, native.lanes.length))
         consume(cachedEnvelope)
       }
       const wantedCount = Object.keys(wanted).length
@@ -902,13 +899,13 @@ export default function PlayerScreen({
               ready === 0 &&
               envelope?.waveformDiagnostics
             ) {
-              log('waveform', `still measuring · ${envelope.waveformDiagnostics}`, 'warn')
+              log('waveform', `waiting for native envelope · ${envelope.waveformDiagnostics}`, 'warn')
             }
             if (envelope != null && (ready > drawn || complete)) {
               drawn = ready
               log(
                 'waveform',
-                `measured · ${ready}/${total} lanes · ${Math.round(Date.now() - askedAt)} ms` +
+                waveformReadyMessage('native', ready, total, Date.now() - askedAt) +
                   (complete ? '' : ' · so far')
               )
               consume(merged(envelope.waveformDiagnostics))
@@ -926,7 +923,7 @@ export default function PlayerScreen({
               log(
                 'waveform',
                 `no waveform after ${Math.round((Date.now() - askedAt) / 1000)}s · ` +
-                  `${envelope == null ? 'the core returned none' : `0 of ${total} lanes measured`}`,
+                  `${envelope == null ? 'the core returned none' : `0 of ${total} lane envelopes ready`}`,
                 'warn'
               )
             }

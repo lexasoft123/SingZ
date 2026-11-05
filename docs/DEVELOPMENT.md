@@ -680,6 +680,27 @@ on whether the vendored binary supports native capture — so which binary is
 present decides which half of that driver runs, and provenance is a testing
 question, not only a correctness one.
 
+## Diagnostic log wording
+
+Log confirmed outcomes, not inferred work. A native envelope read can return a
+seed, an in-memory result or newly scanned data: call it “envelopes ready” unless
+the producer actually reports a scan. A seed offered by JS is a cache candidate,
+not proof that native accepted it. Cache summaries name the layer and count hits,
+misses or pending lanes independently. Never invent a zero-duration lookup.
+
+Every duration names its scope: a full waveform request can include disk lookup,
+native measurement, cache writes and pruning; mobile file preparation can include
+download/cache validation, copying and content hashing. Cancellation is a normal
+outcome, failures retain their operation and reason, and an already completed
+cleanup must not announce another successful release. Routine graph logs retain
+counts and resource totals without repeating the entire topology.
+
+Use the existing persistent Log pipeline. Desktop renderer warnings/errors and
+renderer crashes/load failures are captured there as well; a closing log viewer
+cannot fail the operation being logged. Copy/Share exports use full ISO UTC
+timestamps so archived launches and midnight remain distinguishable, while the
+on-screen clock remains compact.
+
 ## Test suites
 
 | command | covers |

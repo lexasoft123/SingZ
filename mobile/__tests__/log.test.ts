@@ -83,6 +83,18 @@ describe('the phone sync log', () => {
     expect(l.fmtMs(3200)).toBe('3.2 s')
     expect(l.fmtMs(8)).toBe('8 ms')
   })
+
+  it('shares complete timestamps so archived sessions and midnight cannot be confused', () => {
+    const l = install()
+    const entries = [
+      { t: Date.parse('2026-11-05T23:59:59Z'), source: 'waveform', level: 'info' as const, line: 'envelopes ready' },
+      { t: Date.parse('2026-11-06T00:00:01Z'), source: 'dsp', level: 'warn' as const, line: 'route changed' }
+    ]
+    expect(l.formatLog(entries)).toBe(
+      '2026-11-05T23:59:59.000Z [info] waveform: envelopes ready\n' +
+      '2026-11-06T00:00:01.000Z [warn] dsp: route changed'
+    )
+  })
 })
 
 

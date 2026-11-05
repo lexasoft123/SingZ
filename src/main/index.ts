@@ -41,7 +41,7 @@ import type { ModelsProgress, ProjectSettings } from '../shared/types'
 import { allowRoot, isAllowed, stemsRoot } from './media'
 import { t } from '../shared/i18n'
 import { registerSource, registerTrack } from './source'
-import { log, logEntries, logSessions, readLogSession, saveLog, startSessionLog } from './log'
+import { attachRendererLogs, log, logEntries, logSessions, readLogSession, saveLog, startSessionLog } from './log'
 import { clearDirty, dirtyDirs, dirtySeq, dirtyState, isDirty, markProjectDirty, onDirty } from './sync-dirty'
 import { syncLog } from './sync-log'
 import { SyncScheduler } from './sync-scheduler'
@@ -67,7 +67,7 @@ import { askMicrophoneAccess } from './mic-access'
 import { cancelBeatsMl, registerBeatsIpc } from './beats-ml'
 import { failedPlayback, playbackCodecSupportsPath } from './capture'
 import { createRemoteCaptureOwner } from './audio-process'
-import { LaneMeasureCache, parseDesktopPlaybackLaneConfigs } from './lane-measure-cache'
+import { describeLaneMeasureBatch, LaneMeasureCache, parseDesktopPlaybackLaneConfigs } from './lane-measure-cache'
 
 // Test hook: fake microphone input so E2E drivers can exercise pitch matching.
 if (process.env.SINGZ_FAKE_MIC) {
@@ -95,8 +95,7 @@ const captureOwner = createRemoteCaptureOwner()
 const laneMeasureCache = new LaneMeasureCache({
   cacheDir: join(app.getPath('userData'), 'lane-measure-cache-v1'),
   measure: request => captureOwner.measurePlaybackLanes(request),
-  onBatch: ({ hits, misses, elapsedMs }) =>
-    log('dsp', `lanes measured · cache · ${hits} hits · ${misses} misses · ${elapsedMs} ms`)
+  onBatch: batch => log('dsp', describeLaneMeasureBatch(batch))
 })
 
 /** Every window hears about Drive: progress while a sync runs, and the state
@@ -197,6 +196,7 @@ function createWindow(): void {
     }
   })
 
+  attachRendererLogs(win.webContents)
   trackWindowState(win)
   win.on('maximize', () => win.webContents.send('win:maximized', true))
   win.on('unmaximize', () => win.webContents.send('win:maximized', false))

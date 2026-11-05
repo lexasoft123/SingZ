@@ -43,10 +43,11 @@ export function syncLog(kind: SyncLogEntry['kind'], msg: string): void {
  */
 export function replaySyncLog(): void {
   const past = syncLogEntries().reverse()
-  for (const e of past.slice(-120)) {
+  const replayed = past.slice(-120)
+  for (const e of replayed) {
     log('gdrive', `${new Date(e.at).toLocaleString()} · ${e.msg}`, e.kind === 'error' ? 'warn' : 'info')
   }
-  if (past.length) log('gdrive', `— ${past.length} earlier sync entries above —`)
+  if (replayed.length) log('gdrive', `— ${replayed.length} earlier sync entries above (${past.length} kept) —`)
 }
 
 /** Newest first, and trimmed on the way out — cheaper than rewriting per line. */

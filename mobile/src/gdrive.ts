@@ -703,7 +703,7 @@ async function manifestEntries(
   const sameFolders =
     dirs.length === catalogDirs.length && dirs.every((d) => catalogDirs.includes(d.name))
   if (file.md5Checksum && file.md5Checksum === catalogMd5 && listCache?.entries.length && sameFolders) {
-    log('gdrive', `unchanged — ${listCache.entries.length} songs, nothing fetched`)
+    log('gdrive', `unchanged — ${listCache.entries.length} songs, no project files fetched`)
     return { entries: listCache.entries, md5: catalogMd5, dirs: catalogDirs }
   }
   const res = await fetchMetadata(`${API()}/drive/v3/files/${file.id}?alt=media`, {

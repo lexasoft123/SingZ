@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   LANE_MEASURE_CACHE_VERSION,
+  describeLaneMeasureBatch,
   LaneMeasureCache,
   type LaneMeasureCacheBatch
 } from '../../src/main/lane-measure-cache'
@@ -161,6 +162,12 @@ describe('persistent lane measurement cache', () => {
       { hits: 1, misses: 0 }
     ])
     expect(batches.every(batch => Number.isFinite(batch.elapsedMs) && batch.elapsedMs >= 0)).toBe(true)
+    // The second request reads statistics without a native measurement. Its
+    // log must not describe that cache reuse as newly measured audio, and the
+    // duration is the whole request (miss work and persistence included).
+    expect(describeLaneMeasureBatch(batches[0])).toMatch(/^waveform request · disk cache 0 hits · 1 misses · \d+ ms total$/)
+    expect(describeLaneMeasureBatch(batches[1])).toMatch(/^waveform request · disk cache 1 hits · 0 misses · \d+ ms total$/)
+    expect(describeLaneMeasureBatch(batches[1])).not.toContain('measured')
   })
 
   it('a new cache instance reads the persisted result after a restart', async () => {

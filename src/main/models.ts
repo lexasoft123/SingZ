@@ -2,7 +2,7 @@ import { app, net } from 'electron'
 import { spawn } from 'node:child_process'
 import { createWriteStream } from 'node:fs'
 import { access, mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import type { ModelId, ModelInfo, ModelsProgress } from '../shared/types'
 import { log } from './log'
 import { t } from '../shared/i18n'
@@ -278,7 +278,8 @@ export async function downloadFile(
     onPct(100)
   } catch (err) {
     await rm(part, { force: true })
-    log('models', `download failed: ${err instanceof Error ? err.message : String(err)}`, 'error')
+    if (signal?.aborted) log('models', `download cancelled: ${basename(dest)}`)
+    else log('models', `download failed: ${basename(dest)} · ${err instanceof Error ? err.message : String(err)}`, 'error')
     throw err
   }
 }

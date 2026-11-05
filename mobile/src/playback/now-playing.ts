@@ -210,6 +210,7 @@ export class NowPlayingController {
     let pushed: Pushed | null = null
     let settle: unknown = null
     let closed = false
+    let backgroundWarning = false
 
     const push = (): void => {
       settle = null
@@ -228,6 +229,11 @@ export class NowPlayingController {
           if (closed) return
           const held = this.background
           this.background = info.playing && result?.backgroundPlayback === true
+          if (info.playing && result?.backgroundPlayback === false && !backgroundWarning) {
+            log('now-playing', `background playback unavailable · ${info.title} · the OS did not confirm background ownership; playback may stop when the app leaves the screen`, 'warn')
+            backgroundWarning = true
+          }
+          if (!info.playing || this.background) backgroundWarning = false
           if (held && !this.background) target.onBackgroundLost?.()
         })
         // One refused update must not wedge every later call behind it.
