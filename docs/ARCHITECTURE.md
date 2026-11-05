@@ -18,8 +18,37 @@ LogPanel (diagnostics)                            log.ts       ring-buffer app l
 App.tsx (orchestration)                           projects.ts  ~/Documents/SingZ projects
 ```
 
-Desktop song playback and training now attach to a process-lifetime native audio
-service. Its output host remains prepared when individual clients stop; capture
+Desktop song playback, training cues, native microphone capture and the FLOW 8
+microphone/main-mix → HDMI relay run in **SingZ Audio**, a dedicated Electron
+Node utility process (`src/main/audio-service.ts`). Electron main never loads
+`singz-capture.node`. `audio-process.ts` sends asynchronous control requests;
+the service retains the existing `CaptureOwner`, native shared service, device
+hosts and DSP engine. This is an address-space boundary, not a worker thread:
+Chromium launching camera/helper processes must not hold the audio workers'
+process memory-map lock.
+
+The Electron main process owns the service lifetime and file authorization.
+Playback and relay survive a renderer reload; renderer-owned microphone
+analysis and headphone monitoring release on detach. Destroying the owning
+webContents releases all of its native ownership; app quit closes the service.
+A replacement screen shows top-bar Stop controls for retained song playback
+and active relay audio, even before a song document has been reopened. This is not a system daemon: restarting Electron main stops audio,
+and a crashed audio helper requires an app restart rather than automatically
+resuming playback. Generation checks inside the existing native owner remain
+in force, and a per-helper epoch rejects replies from a previous lifetime.
+
+Control requests are bounded to 64 outstanding calls and 64 MiB of aggregate
+request payload, with a 120-second deadline.
+A deadline failure terminates the helper and rejects pending calls so a late
+command cannot silently start sound. Capture analysis uses one acknowledged,
+coalesced telemetry packet at a time, rather than sending raw microphone PCM.
+No IPC was added to the native real-time callbacks. Helper errors and identity
+receipts feed the existing application log. Stem export snapshots authorized
+open descriptors into private scratch files before the helper opens its own
+descriptors; descriptor integers never cross process boundaries.
+
+The native audio service's output host remains prepared when individual
+clients stop; capture
 is activated only on demand. On macOS, stopping capture retains a prepared
 audio unit while stopping hardware recording; the next matching device/channel
 activation creates fresh delivery state and restarts that unit. Device discovery is cached and refreshed by native

@@ -105,6 +105,9 @@ import { Language } from './components/Language'
 // The lyrics editor rides outside the boot bundle like VocalTraining does —
 // it exists only behind an explicit click, and the renderer entry has a
 // size budget (scripts/check-renderer-split.mjs) that keeps it honest.
+const loadRetainedAudio = () => import('./components/RetainedAudioControl')
+const RetainedAudioControl = lazy(loadRetainedAudio)
+
 const LyricsEditor = lazy(() => import('./components/LyricsEditor'))
 import PitchStrip, { type MelodyState } from './components/PitchStrip'
 import PersistentMonitorControl from './components/PersistentMonitorControl'
@@ -1612,6 +1615,11 @@ export default function App(): React.JSX.Element {
       if(!songLoadRequests.current.isLatest(request))return
       if(!reg.ok){continueAfterSourceRegistration(reg,()=>{},setError);return}
       if(!songLoadRequests.current.acceptIfLatest(request))return
+      if (engine.duration === 0) {
+        const error = await (await loadRetainedAudio()).releaseRetainedPlayback(() => songLoadRequests.current.isAccepted(request))
+        if (!songLoadRequests.current.isAccepted(request)) return
+        if (error) { setError(error); return }
+      }
       if (appSectionRef.current === 'training') {
         // Registration proves the source is valid before foreground cleanup.
         // Continue this invocation with its original request token after the
@@ -3979,6 +3987,7 @@ export default function App(): React.JSX.Element {
           </div>
         )}
         <div className="header-right no-drag">
+          <Suspense fallback={null}><RetainedAudioControl songLoaded={song !== null} /></Suspense>
           <PersistentMonitorControl
             snapshot={monitorShell}
             routeUnconfirmed={outputRouteUnconfirmed}

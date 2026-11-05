@@ -286,6 +286,34 @@ describe('measureLanes', () => {
 })
 
 describe('readLanes', () => {
+  it('uses native measurement for supported ALSA lanes on Linux without Chromium decoding', async () => {
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => key === 'singz.desktop.native-playback' ? '1' : null
+    })
+    try {
+      const decode = vi.fn(async () => buffer([tone(44100, 0.5)]))
+      const measure = vi.fn(async (request: DesktopPlaybackLaneMeasureRequest) => ({
+        ok: true,
+        error: '',
+        lanes: request.lanes.map((lane) => measured(lane.id))
+      }))
+      const { reads, errors, superseded } = await readLanes(
+        flacLanes,
+        decode,
+        host({ measureDesktopPlaybackLanes: measure }, 'linux')
+      )
+      expect(superseded).toBe(false)
+      expect(errors.size).toBe(0)
+      expect([...reads.keys()]).toEqual(['vocals', 'drums'])
+      expect(measure).toHaveBeenCalledTimes(1)
+      expect(measure).toHaveBeenCalledWith(laneMeasureRequest(flacLanes))
+      expect(decode).not.toHaveBeenCalled()
+      expect([...reads.values()].every((lane) => lane.buffer === null)).toBe(true)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('decodes only what the core did not measure', async () => {
     const decode = vi.fn(async (path: string) => buffer([tone(44100, path.includes('drums') ? 0.3 : 0.6)]))
     const { reads, errors } = await readLanes(

@@ -1,4 +1,4 @@
-import { app } from 'electron'
+import { audioApp as app, audioResourcesPath } from './audio-service-runtime'
 import { createHash, randomBytes } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import {
@@ -932,12 +932,12 @@ function captureBindingLoadRuntime(): CaptureBindingLoadRuntime {
     addonPath = resolve(envOverride)
     manifest = parseCaptureManifest(captureAddonManifestPath(addonPath))
   } else if (app.isPackaged) {
-    const engines = join(process.resourcesPath, 'engines')
+    const engines = join(audioResourcesPath, 'engines')
     manifest = parseCaptureManifest(join(engines, 'singz-capture.manifest.json'))
     addonPath = resolveCaptureAddonPath({
       envOverride,
       packaged: true,
-      resourcesPath: process.resourcesPath,
+      resourcesPath: audioResourcesPath,
       cwd: root,
       platform: process.platform,
       arch: process.arch
@@ -947,7 +947,7 @@ function captureBindingLoadRuntime(): CaptureBindingLoadRuntime {
     manifest = parseCaptureManifest(manifestPath)
     addonPath = resolveCaptureAddonPath({
       packaged: false,
-      resourcesPath: process.resourcesPath,
+      resourcesPath: audioResourcesPath,
       cwd: root,
       platform: process.platform,
       arch: process.arch,
@@ -1017,6 +1017,8 @@ export function sharedCaptureBindingLoader(loader: () => NativeCaptureBinding): 
 }
 const processCaptureBinding = sharedCaptureBindingLoader(() => loadCaptureBindingWith(captureBindingLoadRuntime()))
 export function loadCaptureBinding(): NativeCaptureBinding {
+  if (process.env.SINGZ_AUDIO_PROCESS !== '1' || !process.parentPort)
+    throw new Error('Native audio can only load inside the dedicated audio process')
   try { return processCaptureBinding() }
   catch (error) {
     if (error instanceof CaptureAddonLoadError) throw error
@@ -1159,7 +1161,7 @@ const EMPTY_PLAYBACK_FORMAT: DesktopPlaybackResult['format'] = {
   outputChannels: 0
 }
 
-function failedPlayback(
+export function failedPlayback(
   error: string,
   errorCode: DesktopPlaybackResult['errorCode'] = 'host-failure',
   generation = '0',
@@ -1337,9 +1339,11 @@ export class CaptureOwner {
    *  who asked for it. See preparePlayback for why this is recorded before
    *  the await rather than after it. */
   private playbackPending: { generation: string; rendererId: number } | null = null
-  /** Set by a teardown that found a prepare in flight, so the graph is
-   *  unloaded when it lands instead of outliving the app. */
+  /** Set by a teardown that found a prepare in flight. Unload reaches the
+   *  native worker immediately; the receipt decides whether completion still
+   *  needs to repeat cleanup when the prepare promise settles. */
   private playbackAbandoned = false
+  private playbackAbandonCleanupComplete = false
   /** Re-anchor log throttling; see reanchorPlayback(). */
   private reanchorGeneration = ''
   private reanchorCount = 0
@@ -1919,6 +1923,7 @@ export class CaptureOwner {
       this.playbackPending = { generation: rawGeneration, rendererId }
       let result: DesktopPlaybackResult
       let abandoned = false
+      let abandonCleanupComplete = false
       try {
         result = await binding.preparePlayback(nativeConfig, lanes, generation)
       } finally {
@@ -1927,7 +1932,9 @@ export class CaptureOwner {
         // rendererGone() would then tear down capture and monitoring too.
         this.playbackPending = null
         abandoned = this.playbackAbandoned
+        abandonCleanupComplete = this.playbackAbandonCleanupComplete
         this.playbackAbandoned = false
+        this.playbackAbandonCleanupComplete = false
       }
       if (result.ok)
         log(
@@ -1950,12 +1957,13 @@ export class CaptureOwner {
       // retire, and no unload for it will ever arrive from the renderer. A
       // seam the core refused leaves the running generation exactly as it
       // was (the candidate's claim is spent, nothing of it exists).
-      if (result.generation === rawGeneration && result.ownershipRetained === true) {
+      if (result.generation === rawGeneration && result.ownershipRetained === true &&
+          !(abandoned && abandonCleanupComplete)) {
         this.playbackGeneration = rawGeneration
         this.playbackRendererId = rendererId
-        // The renderer that asked for this graph is gone, or the app is on
-        // its way out, and the teardown that would have unloaded it ran while
-        // the decode was still going. Nothing else will ever unload it.
+        // A teardown already drained the worker through native unload. Repeat
+        // only when that unload did not prove global cleanup; a late prepare
+        // result must never recreate an owner after a successful receipt.
         if (abandoned) {
           log(
             'dsp',
@@ -2219,13 +2227,30 @@ export class CaptureOwner {
   }
 
   unloadPlayback(rendererId: number, generation: string): DesktopPlaybackResult {
-    const result = this.playbackCommand(
-      rendererId,
-      generation,
-      (binding, value) => binding.unloadPlayback(value),
-      'unload',
-      true
-    )
+    const pending = this.playbackPending?.generation === generation &&
+      this.playbackPending.rendererId === rendererId ? this.playbackPending : null
+    let result: DesktopPlaybackResult
+    if (pending) {
+      // Native unload requests cancellation before draining the worker. This
+      // branch is deliberately not behind playbackCommand's active-generation
+      // check: a pending prepare has claimed its generation but is not active.
+      this.playbackAbandoned = true
+      try {
+        result = this.binding!.unloadPlayback(parseGeneration(generation)!)
+        if (result.ok) log('dsp', `unload · generation ${generation} · ${result.state}`)
+      } catch (error) {
+        result = failedPlayback(`Native playback command failed: ${String(error)}`, 'host-failure', generation)
+      }
+      this.playbackAbandonCleanupComplete ||= result.ok && result.cleanupComplete === true
+    } else {
+      result = this.playbackCommand(
+        rendererId,
+        generation,
+        (binding, value) => binding.unloadPlayback(value),
+        'unload',
+        true
+      )
+    }
     // The one command whose PARTIAL success matters: an unload that returns ok
     // without a cleanup receipt has left the core holding audio, and on the
     // desktop that is hundreds of megabytes per song sitting there unnamed.
@@ -2347,15 +2372,19 @@ export class CaptureOwner {
   }
 
   rendererGone(rendererId: number): void {
-    // A graph still decoding for this renderer has no generation on record
-    // yet, so stop() below cannot unload it. Mark it instead: prepare unloads
-    // it the moment it lands.
     const preparingForThisRenderer = this.playbackPending?.rendererId === rendererId
-    if (preparingForThisRenderer) this.playbackAbandoned = true
     if (
       rendererId === this.rendererId || rendererId === this.monitorRendererId ||
       rendererId === this.playbackRendererId || rendererId === this.microphoneMixRendererId || preparingForThisRenderer
     ) this.stop()
+  }
+
+  /** A UI reload releases private microphone analysis/monitoring, while the
+   * app-owned song and configured relay continue in this process. */
+  rendererDetached(rendererId: number): void {
+    if (this.rendererId === rendererId && this.generation) this.cancel(rendererId, this.generation)
+    if (this.monitorRendererId === rendererId && this.monitorGeneration)
+      this.endMonitor(rendererId, this.monitorGeneration)
   }
 
   /** True once per webContents lifetime, so restarts/reloads add no listeners. */
@@ -2367,11 +2396,10 @@ export class CaptureOwner {
 
   stop(): void {
     if (this.microphoneMixRendererId !== null) this.stopMicrophoneMix(this.microphoneMixRendererId)
-    // Same reason as in rendererGone: a prepare in flight owns audio the
-    // unload below cannot name. On the quit path the addon's env cleanup
-    // hook is the fail-closed owner — it cancels the decode and unloads —
-    // and this flag covers the teardowns the process survives.
-    if (this.playbackPending) this.playbackAbandoned = true
+    // Unload is also the native prepare-cancellation boundary: it requests
+    // cancellation and drains the worker instead of waiting for its promise.
+    const pending = this.playbackPending
+    if (pending) this.unloadPlayback(pending.rendererId, pending.generation)
     if (this.playbackGeneration && this.binding) {
       try {
         const result = this.binding.unloadPlayback(BigInt(this.playbackGeneration))

@@ -1,4 +1,11 @@
-import { app, BrowserWindow, dialog } from 'electron'
+import * as Electron from 'electron'
+
+// A utility process imports this module for log forwarding, but has none of
+// Electron's main-process app/window/dialog exports.
+const helper = process.env.SINGZ_AUDIO_PROCESS === '1' && Boolean(process.parentPort)
+const app = (helper ? undefined : Electron.app) as Electron.App
+const BrowserWindow = (helper ? undefined : Electron.BrowserWindow) as typeof Electron.BrowserWindow
+const dialog = (helper ? undefined : Electron.dialog) as typeof Electron.dialog
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -13,6 +20,10 @@ const MAX_ENTRIES = 4000
 const buf: LogEntry[] = []
 
 export function log(source: string, line: string, level: LogLevel = 'info'): void {
+  if (process.env.SINGZ_AUDIO_PROCESS === '1' && process.parentPort) {
+    process.parentPort.postMessage({ type: 'log', epoch: process.env.SINGZ_AUDIO_EPOCH, source, line: line.slice(0, 2000), level })
+    return
+  }
   const entry: LogEntry = { t: Date.now(), level, source, line: line.slice(0, 2000) }
   buf.push(entry)
   if (buf.length > MAX_ENTRIES) buf.splice(0, buf.length - MAX_ENTRIES)

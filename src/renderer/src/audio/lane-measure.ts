@@ -143,7 +143,7 @@ export async function desktopLaneMeasureApplies(
     training: null,
     lanes,
     runtime,
-    requestedProvider: platform === 'win32' ? undefined : 'coreaudio'
+    requestedProvider: platform === 'win32' ? undefined : platform === 'linux' ? 'alsa' : 'coreaudio'
   })
   return decision.backend === 'native'
 }

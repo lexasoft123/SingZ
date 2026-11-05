@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events'
 import { describe, expect, it } from 'vitest'
 import type { WebContents } from 'electron'
 import { DesktopAudioInput } from '../../src/main/audio-input'
@@ -84,13 +85,13 @@ describe('askMicrophoneAccess', () => {
 })
 
 describe('DesktopAudioInput.start', () => {
-  it('reports a refused microphone as denied before touching the core or the sender', async () => {
-    const sender = {
+  it('reports a refused microphone as denied without native work or renderer messages', async () => {
+    const sender = Object.assign(new EventEmitter(), {
       isDestroyed: () => false,
       send: () => {
         throw new Error('nothing may be sent to a renderer whose start was refused')
       }
-    } as unknown as WebContents
+    }) as unknown as WebContents
     let asked = 0
     const input = new DesktopAudioInput(async () => {
       asked += 1
