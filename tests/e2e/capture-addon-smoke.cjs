@@ -96,9 +96,10 @@ ready.then(async () => {
   assert.equal(typeof stats.deliveredBlocks, 'string')
   assert.equal(typeof stats.droppedEvents, 'string')
   assert.equal(typeof stats.overwrittenWindows, 'string')
-  const hostDevices = addon.audioHostDevices()
-  assert.equal(hostDevices.ok, true)
   const expectedProvider = process.platform === 'darwin' ? 'coreaudio' : process.platform === 'linux' ? 'alsa' : 'wasapi'
+  // Playback requires provider-scoped device identities (notably wasapi: on Windows).
+  const hostDevices = addon.audioHostDevices(expectedProvider)
+  assert.equal(hostDevices.ok, true)
   assert.equal(hostDevices.provider, expectedProvider)
   assert.equal(typeof hostDevices.defaultInputUid, 'string')
   assert.equal(typeof hostDevices.defaultOutputUid, 'string')
