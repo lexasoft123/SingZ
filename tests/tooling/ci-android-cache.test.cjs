@@ -60,6 +60,7 @@ test('Android package setup is bounded and uses the tested missing-package insta
     ['canary', 'Sample generator and native host dependencies', 'ffmpeg libasound2-dev libudev-dev pkg-config'],
     ['artifacts', 'ffmpeg for the sample-song generator', 'ffmpeg'],
   ]) {
+    assert.match(job(name), /runs-on: ubuntu-24\.04/)
     const setup = step(job(name), label)
     assert.match(setup, /timeout-minutes: 5/)
     assert.ok(setup.includes(`run: bash scripts/ci-install-apt.sh ${packages}`))
