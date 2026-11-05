@@ -76,11 +76,15 @@ struct MicrophoneMixSession::Impl {
   std::unique_ptr<route::RoutingGraph> graph;
   std::unique_ptr<AudioHostBackend> relay;
   std::atomic<uint64_t> callbacks{0}, missing{0}, failures{0};
+  std::atomic<uint64_t> outputTimestampUnavailableBlocks{0};
   std::atomic<bool> renderFailed{false};
   uint64_t outputGeneration = 0;
   std::string captureUid, lastError;
   double rate = 0;
-  uint64_t delayNs = 0;
+  uint64_t delayNs = 0, presentationDelayNs = 0;
+  uint32_t captureSafetyFrames = 0, outputPeriodFrames = 0, outputBufferFrames = 0;
+  uint32_t presentationDelayFrames = 0;
+  uint64_t outputXruns = 0;
   bool active = false, attached = false, relayMode = false;
   std::array<std::array<float, route::kBlock>, 2> song{}, mixed{};
   static bool render(void* context, const AudioHostRenderBlock& block) noexcept {
@@ -100,12 +104,24 @@ struct MicrophoneMixSession::Impl {
     if (!block.output || block.outputChannels != 2 || !block.output[0] ||
         !block.output[1] || !block.frames || block.frames > block.maximumFrames ||
         block.maximumFrames > kAudioHostMaxFrames || block.sampleRate != rate ||
-        !block.callbackHostTimeNs ||
+        (!relayMode && !block.callbackHostTimeNs) ||
         (relayMode && service.outputRouteGeneration() != outputGeneration)) {
       failures.fetch_add(1, std::memory_order_relaxed);
       renderFailed.store(true, std::memory_order_release);
       return !relayMode; // Additive failure preserves backing playback.
     }
+    if (relayMode) {
+      const auto finalOffsetNs =
+          static_cast<uint64_t>((block.frames - 1) * 1e9L / rate);
+      if (!block.outputTimestampValid || !block.outputHostTimeNs ||
+          block.outputHostTimeNs > UINT64_MAX - finalOffsetNs) {
+        // Output timing can recover. Never substitute callback arrival time.
+        outputTimestampUnavailableBlocks.fetch_add(1, std::memory_order_relaxed);
+        return true;
+      }
+    }
+    const uint64_t firstHostNs = relayMode ? block.outputHostTimeNs : block.callbackHostTimeNs;
+    const uint64_t readDelayNs = relayMode ? presentationDelayNs : delayNs;
     std::array<route::RoutingInput, 9> inputs{};
     std::array<const float*, 2> songPlanes{song[0].data(), song[1].data()};
     std::array<const float*, 8> micPlanes{};
@@ -121,15 +137,14 @@ struct MicrophoneMixSession::Impl {
       if (!relayMode)
         for (uint32_t channel = 0; channel < 2; ++channel)
           std::copy_n(block.output[channel] + offset, count, song[channel].data());
-      const uint64_t now = block.callbackHostTimeNs +
-          static_cast<uint64_t>(offset * 1e9L / rate);
+      const uint64_t now = firstHostNs + static_cast<uint64_t>(offset * 1e9L / rate);
       for (auto& source : sources) {
         float* destination = source->samples.data();
-        if (now < delayNs) {
+        if (now < readDelayNs) {
           std::fill_n(destination, count, 0);
           missing.fetch_add(count, std::memory_order_relaxed);
         } else {
-          const auto read = source->history.read(now - delayNs, rate,
+          const auto read = source->history.read(now - readDelayNs, rate,
               {{&destination, 1}, route::kBlock}, count, source->cursor);
           missing.fetch_add(read.missingFrames, std::memory_order_relaxed);
         }
@@ -164,7 +179,10 @@ void MicrophoneMixSession::stop() noexcept {
   }
   // The physical relay callback must have retired before capture or graph
   // storage is reclaimed. Shared song playback remains running on its device.
-  if (self.relay) self.relay->stop();
+  if (self.relay) {
+    self.relay->stop();
+    self.outputXruns = self.relay->status().xruns;
+  }
   self.relay.reset();
   for (auto& source : self.sources) {
     source->backend->stop();
@@ -209,6 +227,11 @@ MicrophoneMixResult MicrophoneMixSession::start(const MicrophoneMixConfig& confi
   stop();
   self.rate = host.format.sampleRate;
   self.delayNs = static_cast<uint64_t>(config.delayFrames * 1e9L / self.rate);
+  self.presentationDelayNs = 0;
+  self.captureSafetyFrames = config.delayFrames;
+  self.outputPeriodFrames = self.outputBufferFrames = self.presentationDelayFrames = 0;
+  self.outputXruns = 0;
+  self.outputTimestampUnavailableBlocks.store(0);
   self.outputGeneration = self.service.outputRouteGeneration();
   self.captureUid = config.deviceUid;
   self.relayMode = relayMode;
@@ -247,12 +270,27 @@ MicrophoneMixResult MicrophoneMixSession::start(const MicrophoneMixConfig& confi
       output.outputDeviceUid = config.outputDeviceUid;
       output.outputChannels = {0, 1};
       output.requestedSampleRate = self.rate;
-      output.requestedBufferFrames = 1024;
+      output.requestedBufferFrames = route::kBlock;
       auto result = self.relay->open(output, Impl::render, &self);
       if (!result.ok) { stop(); return {false, result.message}; }
       if (result.format.sampleRate != self.rate || result.format.outputChannels != 2) {
         stop(); return {false, "Relay output did not negotiate stereo 48 kHz"};
       }
+      const auto negotiated = self.relay->status();
+      const auto period = negotiated.diagnostics.outputPeriodFrames;
+      const auto buffer = negotiated.diagnostics.outputBufferFrames;
+      if (!period || period > kAudioHostMaxFrames || !buffer || buffer < period) {
+        stop(); return {false, "Relay output did not report valid period and buffer bounds"};
+      }
+      const auto presentationDelay = static_cast<uint64_t>(buffer) + config.delayFrames;
+      if (presentationDelay > route::AudioHistory::kDefaultCapacityFrames) {
+        stop(); return {false, "Relay presentation delay exceeds capture history capacity"};
+      }
+      self.outputPeriodFrames = period;
+      self.outputBufferFrames = buffer;
+      self.presentationDelayFrames = static_cast<uint32_t>(presentationDelay);
+      self.presentationDelayNs = static_cast<uint64_t>(presentationDelay * 1e9L / self.rate);
+      self.outputXruns = negotiated.xruns;
     }
     for (auto& source : self.sources) {
       auto result = source->backend->start();
@@ -271,6 +309,7 @@ MicrophoneMixResult MicrophoneMixSession::start(const MicrophoneMixConfig& confi
 }
 MicrophoneMixStatus MicrophoneMixSession::status() {
   auto& self = *impl_;
+  if (self.relay) self.outputXruns = self.relay->status().xruns;
   if (self.active) {
     std::string error;
     if (self.renderFailed.load(std::memory_order_acquire))
@@ -303,6 +342,12 @@ MicrophoneMixStatus MicrophoneMixSession::status() {
   }
   MicrophoneMixStatus result{self.active, self.callbacks.load(), self.missing.load(),
                              self.failures.load(), self.rate, self.lastError};
+  result.captureSafetyFrames = self.captureSafetyFrames;
+  result.outputPeriodFrames = self.outputPeriodFrames;
+  result.outputBufferFrames = self.outputBufferFrames;
+  result.presentationDelayFrames = self.presentationDelayFrames;
+  result.outputXruns = self.outputXruns;
+  result.outputTimestampUnavailableBlocks = self.outputTimestampUnavailableBlocks.load();
   result.diagnostics.reserve(self.sources.size());
   for (const auto& source : self.sources) {
     const auto history = source->history.status();

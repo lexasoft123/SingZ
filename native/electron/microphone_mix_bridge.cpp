@@ -190,6 +190,13 @@ napi_value status(napi_env env, napi_callback_info) {
   text(env, value, "failures", std::to_string(current.failures));
   number(env, value, "sampleRate", current.sampleRate);
   text(env, value, "error", current.error);
+  number(env, value, "captureSafetyFrames", current.captureSafetyFrames);
+  number(env, value, "outputPeriodFrames", current.outputPeriodFrames);
+  number(env, value, "outputBufferFrames", current.outputBufferFrames);
+  number(env, value, "presentationDelayFrames", current.presentationDelayFrames);
+  text(env, value, "outputXruns", std::to_string(current.outputXruns));
+  text(env, value, "outputTimestampUnavailableBlocks",
+       std::to_string(current.outputTimestampUnavailableBlocks));
   napi_value diagnostics;
   napi_create_array_with_length(env, current.diagnostics.size(), &diagnostics);
   for (uint32_t index = 0; index < current.diagnostics.size(); ++index)

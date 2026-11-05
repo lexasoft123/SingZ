@@ -1210,6 +1210,15 @@ export type DesktopMicrophoneMixStatus = {
   sampleRate: number
   /** Last capture/output failure is retained after the route stops. */
   error: string
+  /** Optional configured relay software timing, not acoustic latency measurements. */
+  captureSafetyFrames?: number
+  outputPeriodFrames?: number
+  outputBufferFrames?: number
+  presentationDelayFrames?: number
+  /** Optional relay recovery counters, preserved as decimal strings. */
+  outputXruns?: string
+  /** Callback blocks silenced for missing presentation time; not selected-mono missingFrames. */
+  outputTimestampUnavailableBlocks?: string
   /** Optional for older bindings. One row per mono capture channel; live fields
    * are independent atomic observations, not a coherent cross-source snapshot.
    * History misses exclude non-read pre-delay silence, while missingFrames sums

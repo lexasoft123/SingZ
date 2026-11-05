@@ -50,6 +50,13 @@ struct MicrophoneMixStatus {
   uint64_t callbacks = 0, missingFrames = 0, failures = 0;
   double sampleRate = 0;
   std::string error;
+  // Configured relay software timing, not an acoustic latency measurement.
+  uint32_t captureSafetyFrames = 0, outputPeriodFrames = 0, outputBufferFrames = 0;
+  uint32_t presentationDelayFrames = 0;
+  uint64_t outputXruns = 0;
+  // Relay callbacks without a usable presentation timestamp. Separate from the
+  // selected-mono-frame missingFrames counter and not a hardware xrun count.
+  uint64_t outputTimestampUnavailableBlocks = 0;
   std::vector<MicrophoneMixSourceDiagnostics> diagnostics;
 };
 // Control calls are serialized. Stop drains the shared/relay output callback

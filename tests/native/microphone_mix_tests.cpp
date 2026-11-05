@@ -51,6 +51,7 @@ struct HostRecord {
   AudioHostStatus status;
   AudioHostRender callback=nullptr;
   void* context=nullptr;
+  uint64_t nextOutputFrame=0,lastOutputFrame=0,xrunsOnStop=0;
   bool failOpen=false,failStart=false,lateOnStop=false;
   std::string label="shared";
 };
@@ -69,7 +70,7 @@ class Host final:public AudioHostBackend {
     auto& r=*record;++r.opens;r.config=config;r.callback=render;r.context=context;
     CHECK(config.inputDeviceUid.empty() && config.inputChannels.empty());
     if(r.failOpen)return {false,AudioHostError::ProviderFailure,AudioHostState::Error,{},{},"open failure"};
-    r.status.state=AudioHostState::Open;
+    r.status.state=AudioHostState::Open;r.status.xruns=0;
     r.status.format={48000,config.maximumFrames,1024,0,static_cast<uint32_t>(config.outputChannels.size())};
     return {true,AudioHostError::None,r.status.state,r.status.format,{},{}};
   }
@@ -80,7 +81,7 @@ class Host final:public AudioHostBackend {
     return {true,AudioHostError::None,r.status.state,r.status.format,{},{}};
   }
   void stop()noexcept override {
-    auto& r=*record;++r.stops;events.push_back(r.label+"-stop");
+    auto& r=*record;++r.stops;events.push_back(r.label+"-stop");r.status.xruns+=r.xrunsOnStop;
     if(r.lateOnStop && r.callback) {
       std::array<float,256>a{},b{};float* output[]{a.data(),b.data()};
       AudioHostRenderBlock block;block.output=output;block.outputChannels=2;
@@ -140,6 +141,8 @@ struct Fixture {
   Fixture() {
     events.clear();inputs.clear();failOpenAt=failStartAt=-1;
     relayRecord=std::make_shared<HostRecord>();relayRecord->label="relay";
+    relayRecord->status.diagnostics.outputPeriodFrames=1024;
+    relayRecord->status.diagnostics.outputBufferFrames=4096;
     CHECK(service.configureProvider(std::make_unique<Host>(shared),"alsa").ok);
     client=service.playbackBackend(std::make_unique<Host>(std::make_shared<HostRecord>()),"alsa");
     AudioHostConfig route;route.outputDeviceUid="flow";route.outputChannels={0,1};
@@ -163,13 +166,20 @@ void feed(uint64_t begin=origin,float l=.3f,float r=-.4f,double actual=48000,uin
   }
 }
 std::array<std::array<float,1024>,2> render(const std::shared_ptr<HostRecord>& host,uint64_t time,
-    bool expected=true) {
+    bool expected=true,uint64_t presentation=0,bool timestampValid=true,bool zeroPresentation=false) {
   std::array<std::array<float,1024>,2> result;for(auto& plane:result)plane.fill(.75f);
   float* pointers[]{result[0].data(),result[1].data()};
   AudioHostRenderBlock block;block.output=pointers;block.outputChannels=2;
   block.frames=1024;block.maximumFrames=kAudioHostMaxFrames;block.sampleRate=48000;
-  block.callbackHostTimeNs=time;
+  block.callbackHostTimeNs=time;block.outputFrame=host->nextOutputFrame;
+  host->lastOutputFrame=block.outputFrame;
+  if(host==relayRecord) {
+    block.outputHostTimeNs=zeroPresentation?0:presentation?presentation:
+        time+ns(host->status.diagnostics.outputBufferFrames);
+    block.outputTimestampValid=timestampValid;
+  }
   CHECK(host->callback && realtime([&]{return host->callback(host->context,block);})==expected);
+  host->nextOutputFrame+=block.frames;
   return result;
 }
 void close(float a,float b){CHECK(std::abs(a-b)<.00003f);}
@@ -179,6 +189,7 @@ void relayStereoAndLifetime() {
   CHECK(session.start(relayConfig()).ok);
   CHECK(relayRecord->config.outputDeviceUid=="hdmi");
   CHECK(relayRecord->config.outputChannels==std::vector<uint32_t>({0,1}));
+  CHECK(relayRecord->config.requestedBufferFrames==256);
   CHECK(inputs.size()==2 && inputs[0]->config.channel==8 && inputs[1]->config.channel==9);
   auto empty=render(relayRecord,origin+ns(1536));
   for(uint32_t i=0;i<1024;++i){close(empty[0][i],0);close(empty[1][i],0);}
@@ -189,12 +200,101 @@ void relayStereoAndLifetime() {
   CHECK(fixture.shared->opens==opens && fixture.shared->stops==stops);
   events.clear();relayRecord->lateOnStop=true;session.stop();
   CHECK(!session.status().active && relayRecord->status.state==AudioHostState::Stopped);
+  CHECK(session.status().outputTimestampUnavailableBlocks==1);
   CHECK(events.size()>=3 && events[0]=="relay-stop");
   CHECK(fixture.shared->opens==opens && fixture.shared->stops==stops);
   relayRecord->lateOnStop=false;CHECK(session.start(relayConfig()).ok);
+  CHECK(session.status().outputTimestampUnavailableBlocks==0);
   feed(origin+2000000000,.15f,-.2f,48000.0*1.0002);
   auto restarted=render(relayRecord,origin+2000000000+ns(1536));
   for(uint32_t i=0;i<1024;++i){close(restarted[0][i],.15f);close(restarted[1][i],-.2f);}
+}
+float waveform(uint64_t frame) {
+  return .05F+static_cast<float>(frame)*.000001F+(frame==4224?.25F:0);
+}
+void closeWaveform(float a,float b){CHECK(std::abs(a-b)<.0000002F);}
+void feedWaveform() {
+  for(uint32_t block=0;block<64;++block) {
+    std::array<float,256> samples;
+    for(uint32_t frame=0;frame<256;++frame)samples[frame]=waveform(block*256+frame);
+    for(const auto& input:inputs)if(input->running) {
+      CHECK(realtime([&]{return input->callback(input->context,samples.data(),256,
+          origin+ns(block*256),0,AudioInputTimestampQuality::CallbackEstimate);}));
+    }
+  }
+}
+void presentationClockDoesNotUseCallbackArrival() {
+  Fixture fixture;MicrophoneMixSession session(fixture.service,inputFactory,outputFactory);
+  CHECK(session.start(relayConfig()).ok);feedWaveform();
+  const std::array<uint64_t,3> arrivals{
+      origin+ns(4096),origin+ns(6144),origin+ns(6144)+100000};
+  for(uint32_t block=0;block<3;++block) {
+    // Presentation-D is 3072, 4096, 5120. Callback arrival-D would instead
+    // advance to 5120 and then only about four frames on the final block.
+    auto output=render(relayRecord,arrivals[block],true,origin+ns(8192+block*1024));
+    const auto first=3072+block*1024;
+    CHECK(relayRecord->lastOutputFrame==block*1024);
+    for(uint32_t frame=0;frame<1024;++frame) {
+      closeWaveform(output[0][frame],waveform(first+frame));
+      closeWaveform(output[1][frame],waveform(first+frame));
+    }
+  }
+  const auto status=session.status();
+  CHECK(status.active && status.callbacks==3 && status.failures==0 && status.missingFrames==0);
+  CHECK(status.captureSafetyFrames==1024 && status.outputPeriodFrames==1024);
+  CHECK(status.outputBufferFrames==4096 && status.presentationDelayFrames==5120);
+  CHECK(status.outputXruns==0 && status.outputTimestampUnavailableBlocks==0);
+}
+void outputTimestampRecovery() {
+  Fixture fixture;MicrophoneMixSession session(fixture.service,inputFactory,outputFactory);
+  CHECK(session.start(relayConfig()).ok);feedWaveform();
+  auto initial=render(relayRecord,origin+ns(4096),true,origin+ns(8192));
+  for(uint32_t i=0;i<1024;++i) {
+    closeWaveform(initial[0][i],waveform(3072+i));
+    closeWaveform(initial[1][i],waveform(3072+i));
+  }
+  relayRecord->status.xruns=7;relayRecord->xrunsOnStop=3;
+  auto invalid=render(relayRecord,origin+ns(4096),true,origin+ns(9216),false);
+  auto zero=render(relayRecord,origin+ns(4096),true,0,true,true);
+  for(uint32_t i=0;i<1024;++i) {
+    close(invalid[0][i],0);close(invalid[1][i],0);
+    close(zero[0][i],0);close(zero[1][i],0);
+  }
+  auto status=session.status();
+  CHECK(status.active && status.callbacks==1 && status.failures==0 && status.missingFrames==0);
+  CHECK(status.outputXruns==7 && status.outputTimestampUnavailableBlocks==2);
+  auto recovered=render(relayRecord,origin+ns(4096),true,origin+ns(11264));
+  CHECK(relayRecord->lastOutputFrame==3072);
+  for(uint32_t i=0;i<1024;++i) {
+    closeWaveform(recovered[0][i],waveform(6144+i));
+    closeWaveform(recovered[1][i],waveform(6144+i));
+  }
+  status=session.status();
+  CHECK(status.active && status.callbacks==2 && status.failures==0);
+  CHECK(status.outputXruns==7 && status.outputTimestampUnavailableBlocks==2);
+  session.stop();status=session.status();
+  CHECK(status.outputXruns==10 && status.outputTimestampUnavailableBlocks==2);
+  CHECK(session.start(relayConfig()).ok);status=session.status();
+  CHECK(status.outputXruns==0 && status.outputTimestampUnavailableBlocks==0);
+}
+void outputBoundsRequired() {
+  for(int kind=0;kind<5;++kind) {
+    Fixture fixture;MicrophoneMixSession session(fixture.service,inputFactory,outputFactory);
+    auto& diagnostics=relayRecord->status.diagnostics;
+    if(kind==0)diagnostics.outputBufferFrames=0;
+    if(kind==1)diagnostics.outputPeriodFrames=0;
+    if(kind==2)diagnostics.outputBufferFrames=512;
+    if(kind==3)diagnostics.outputBufferFrames=std::numeric_limits<uint32_t>::max();
+    if(kind==4) {
+      diagnostics.outputPeriodFrames=kAudioHostMaxFrames+1;
+      diagnostics.outputBufferFrames=kAudioHostMaxFrames+1;
+    }
+    const auto started=session.start(relayConfig());
+    CHECK(!started.ok);
+    CHECK(started.error.find(kind==3?"history capacity":"period and buffer")!=std::string::npos);
+    CHECK(!session.status().active && relayRecord->stops>0);
+    for(const auto& input:inputs)CHECK(!input->running && input->stops>0);
+  }
 }
 void unknownCaptureRecovery() {
   Fixture fixture;MicrophoneMixSession session(fixture.service,inputFactory,outputFactory);
@@ -364,5 +464,7 @@ void routeChangesFailClosed() {
   CHECK(!session.status().active);
 }
 }
-int main(){relayStereoAndLifetime();unknownCaptureRecovery();relayDiagnostics();validationAndFailures();malformedCaptureFailsClosed();partialCaptureFailureAndAdditive();routeChangesFailClosed();
-  std::puts("Hardware main relay: stereo, unknown-timeline recovery, diagnostics, independent clock, drain and fail-closed routes passed");}
+int main(){relayStereoAndLifetime();presentationClockDoesNotUseCallbackArrival();outputTimestampRecovery();
+  outputBoundsRequired();unknownCaptureRecovery();relayDiagnostics();validationAndFailures();
+  malformedCaptureFailsClosed();partialCaptureFailureAndAdditive();routeChangesFailClosed();
+  std::puts("Hardware main relay: presentation clock, timestamp recovery, bounds, stereo, diagnostics and fail-closed routes passed");}
