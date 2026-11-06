@@ -26,6 +26,71 @@ import os, sys
 PROFILE_PATH = []
 
 
+def _arm64_cpu_cores():
+    """Use only permitted CPUs; topology is optional on older kernels."""
+    try:
+        available = sorted(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        available = list(range(os.cpu_count() or 1))
+    if not available:
+        return [0], False
+    for attribute in ("cpu_capacity", "cpufreq/cpuinfo_max_freq"):
+        try:
+            capacities = {}
+            for cpu in available:
+                with open(f"/sys/devices/system/cpu/cpu{cpu}/{attribute}") as f:
+                    capacities[cpu] = int(f.read().strip())
+            if min(capacities.values()) <= 0:
+                continue
+            fastest = max(capacities.values())
+            return [cpu for cpu in available if capacities[cpu] == fastest][:4], True
+        except (OSError, ValueError):
+            continue
+    return available[:4], False
+
+
+def setup_arm64_cpu():
+    import platform
+    if sys.platform != "linux" or platform.machine().lower() not in ("aarch64", "arm64"):
+        return
+    import onnxruntime as ort
+    from demucs_onnx import inference
+    original = inference._make_session
+    selection = None
+
+    def make_session(onnx_path, providers):
+        names = [p[0] if isinstance(p, tuple) else p for p in providers]
+        if names != ["CPUExecutionProvider"]:
+            return original(onnx_path, providers)
+        nonlocal selection
+        if selection is None:
+            selection = _arm64_cpu_cores()
+        cores, known_topology = selection
+        pinned = False
+        if known_topology:
+            try:
+                # The calling thread runs on the first big core. ORT workers
+                # use the others, with ORT's one-based processor numbering.
+                os.sched_setaffinity(0, {cores[0]})
+                pinned = True
+            except (AttributeError, OSError):
+                pass
+        options = ort.SessionOptions()
+        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        options.intra_op_num_threads = len(cores)
+        options.inter_op_num_threads = 1
+        options.enable_cpu_mem_arena = False
+        options.enable_mem_pattern = False
+        if pinned and len(cores) > 1:
+            options.add_session_config_entry(
+                "session.intra_op_thread_affinities",
+                ";".join(str(cpu + 1) for cpu in cores[1:]))
+        print(f"ARM64 CPU: {len(cores)} threads, cores {cores}, pinned={pinned}", flush=True)
+        return ort.InferenceSession(str(onnx_path), sess_options=options, providers=list(providers))
+
+    inference._make_session = make_session
+
+
 def setup_trtrtx():
     """TensorRT-RTX plugin EP (GeForce RTX 30xx+) on the pack's ONE mainline
     ort in site-packages; python/rtx holds the EP payload only, never a
@@ -210,6 +275,7 @@ def main():
         _print_trtrtx_profile()
         return ret
 
+    setup_arm64_cpu()
     from demucs_onnx.cli import main as demucs_main
     return demucs_main()
 

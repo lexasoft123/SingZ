@@ -298,7 +298,7 @@ fi
 # original through the pack's own onnxruntime (same discipline as the beat
 # runner below), then REPLACE the original in the hub cache — cpu and
 # TensorRT-RTX sessions load the identical file.
-if [ "$TARGET" = win32-x64 ]; then
+if [ "$TARGET" = win32-x64 ] || [ "$TARGET" = linux-arm64 ]; then
   MODEL_FILE=$(find "$WORK/python/model-cache" -name 'htdemucs_6s_fp16weights.onnx' -type f | head -n 1)
   [ -n "$MODEL_FILE" ] || { echo "ERROR: prewarmed model not found" >&2; exit 1; }
   TRT_MODEL="$WORK/htdemucs_6s_sim_fp16.onnx"
