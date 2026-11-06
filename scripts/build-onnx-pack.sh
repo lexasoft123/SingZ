@@ -323,7 +323,15 @@ diff = float(np.abs(out[0] - out[1]).max())
 print(f"slim-model parity vs original: max abs diff {diff:.2e}")
 assert diff < 1e-3, f"parity broken: {diff}"
 PYEOF
-  cp "$TRT_MODEL" "$MODEL_FILE"
+  # HF cache entries may be read-only or hardlinked to a shared blob. Replace
+  # the directory entry atomically without modifying that original inode.
+  (
+    MODEL_REPLACEMENT=$(mktemp "${MODEL_FILE}.slim.XXXXXX")
+    trap 'rm -f "$MODEL_REPLACEMENT"' EXIT
+    cp "$TRT_MODEL" "$MODEL_REPLACEMENT"
+    chmod 644 "$MODEL_REPLACEMENT"
+    mv -f "$MODEL_REPLACEMENT" "$MODEL_FILE"
+  )
   echo "hub-cache model replaced with the slim graph"
 fi
 
