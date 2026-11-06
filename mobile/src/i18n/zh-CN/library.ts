@@ -3,6 +3,10 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const library: Translation<typeof en> = {
+  'phone.library.openingConnect': '正在连接…',
+  'phone.library.openingDownload': '正在下载…',
+  'phone.library.openingVerify': '正在验证下载…',
+  'phone.library.openingRetry': '正在重试…',
   // ── add-song errors ──
   'phone.library.pickFailed': '无法打开该文件（{msg}）',
   'phone.library.folderInactive': '所选文件夹已失效。请重新打开它并重试。',

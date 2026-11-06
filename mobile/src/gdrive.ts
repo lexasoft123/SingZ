@@ -850,10 +850,16 @@ export async function driveLocalFile(
   options: FileDownloadOptions = {}
 ): Promise<string> {
   const files = projectFiles.get(project)
-  if (!files) throw new Error(`Project ${project} was not listed from Drive`)
+  if (!files) {
+    log('gdrive', `${project}/${file} — project is missing from the stored Drive listing`, 'error')
+    throw new Error(t('phone.library.downloadInterrupted'))
+  }
   const name = file.startsWith('stems/') ? file.slice(6) : file
   const entry = file.startsWith('stems/') ? files.stemsByName.get(name) : files.byName.get(name)
-  if (!entry) throw new Error(`${file} is missing from Drive`)
+  if (!entry) {
+    log('gdrive', `${project}/${file} — file is missing from Drive`, 'error')
+    throw new Error(t('phone.library.downloadMissing'))
+  }
 
   const size = expectedBytes ?? Number(entry.size ?? 0)
   const digest = expectedMd5 || entry.md5Checksum || ''

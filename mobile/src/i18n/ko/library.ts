@@ -3,6 +3,10 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const library: Translation<typeof en> = {
+  'phone.library.openingConnect': '연결 중…',
+  'phone.library.openingDownload': '다운로드 중…',
+  'phone.library.openingVerify': '다운로드 확인 중…',
+  'phone.library.openingRetry': '다시 시도 중…',
   "phone.library.pickFailed": "이 파일은 열 수 없었습니다 ({msg})",
   "phone.library.folderInactive": "선택된 폴더가 더 이상 활성화되지 않습니다. 다시 열고 다시 시도하십시오.",
   "phone.library.folderIdentityUnavailable": "선택한 폴더 아이덴티티는 사용할 수 없습니다. 폴더를 다시 열고 다시 시도하십시오.",

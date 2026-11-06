@@ -1,5 +1,9 @@
 /* English phone strings for the `phone.library` namespace — see ../index.ts. */
 export const library = {
+  'phone.library.openingConnect': 'Connecting…',
+  'phone.library.openingDownload': 'Downloading…',
+  'phone.library.openingVerify': 'Checking download…',
+  'phone.library.openingRetry': 'Retrying…',
   // ── add-song errors ──
   // shown when the system file picker returns a file the app then fails to open; {msg} is the raw error text
   'phone.library.pickFailed': "That file couldn't be opened ({msg})",

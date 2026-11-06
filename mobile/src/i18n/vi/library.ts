@@ -3,6 +3,10 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const library: Translation<typeof en> = {
+  'phone.library.openingConnect': 'Đang kết nối…',
+  'phone.library.openingDownload': 'Đang tải xuống…',
+  'phone.library.openingVerify': 'Đang kiểm tra bản tải…',
+  'phone.library.openingRetry': 'Đang thử lại…',
   "phone.library.pickFailed": "Dữ liệu đó không thể mở được ({msg})",
   "phone.library.folderInactive": "Dữ liệu được chọn không còn hoạt động nữa.",
   "phone.library.folderIdentityUnavailable": "Tên thư mục được chọn không có sẵn. mở thư mục lại và thử lại.",

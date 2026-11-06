@@ -3,6 +3,10 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const library: Translation<typeof en> = {
+  'phone.library.openingConnect': '正在連線…',
+  'phone.library.openingDownload': '正在下載…',
+  'phone.library.openingVerify': '正在驗證下載…',
+  'phone.library.openingRetry': '正在重試…',
   "phone.library.pickFailed": "無法開啟該檔案（{msg}）",
   "phone.library.folderInactive": "所選資料夾已失效。請重新開啟它並重試。",
   "phone.library.folderIdentityUnavailable": "無法獲取所選資料夾的身份資訊。請重新開啟該資料夾並重試。",

@@ -3,6 +3,10 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const library: Translation<typeof en> = {
+  'phone.library.openingConnect': 'Bağlanıyor…',
+  'phone.library.openingDownload': 'İndiriliyor…',
+  'phone.library.openingVerify': 'İndirme doğrulanıyor…',
+  'phone.library.openingRetry': 'Yeniden deneniyor…',
   "phone.library.pickFailed": "Bu dosya açılamadı ({msg})",
   "phone.library.folderInactive": "Seçilen klasör artık etkin değil. Tekrar açın ve tekrar deneyin.",
   "phone.library.folderIdentityUnavailable": "Seçilen klasörün adı bulunamadı. Klasörü yeniden açıp tekrar deneyin.",

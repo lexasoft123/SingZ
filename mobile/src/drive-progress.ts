@@ -4,6 +4,7 @@ import { t } from './i18n'
 const amount = (bytes: number): string => bytes >= 1_000_000
   ? `${(bytes / 1_000_000).toFixed(1)} MB` : `${Math.ceil(Math.max(0, bytes) / 1000)} KB`
 export function describeFileProgress(p: FileProgress, label: string, index: number, count: number): string {
+  if (p.phase === 'connecting') return t('phone.library.openingConnect')
   if (p.phase === 'checking') return t('phone.library.downloadChecking', { label, index, count })
   if (p.phase === 'retrying') return t('phone.library.downloadRetrying', { label, attempt: p.attempt, attempts: p.attempts })
   if (p.phase === 'verifying') return t('phone.library.downloadVerifying', { label, index, count })

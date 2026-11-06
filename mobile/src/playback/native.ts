@@ -1,3 +1,4 @@
+import type { OpeningActivity } from '../loading-progress'
 import { describeFileProgress, fileProgressFraction } from '../drive-progress';
 import { sanitizeSongVolume } from '../../../src/shared/song-volume';
 import { NativeModules, Platform } from 'react-native';
@@ -817,7 +818,7 @@ export interface PlaybackLoadOptions {
   readonly entry: ProjectEntry;
   readonly engine: MultitrackEngine;
   readonly sampleRate: number;
-  readonly onStep: (message: string, fraction: number) => void;
+  readonly onStep: (message: string, fraction: number, activity?: OpeningActivity) => void;
   readonly crumb?: (message: string) => Promise<void>;
   readonly isCurrent: () => boolean;
   readonly signal?: AbortSignal;
@@ -7519,7 +7520,8 @@ async function materializeNativeProject(
                 if (!isCurrent()) return;
                 const weight = byteWeighted ? weights[index] : 1;
                 onStep(describeFileProgress(progress, source.label, index + 1, sources.length),
-                  MATERIALIZE_SHARE * (completedWeight + weight * fileProgressFraction(progress)) / Math.max(1, totalWeight));
+                  MATERIALIZE_SHARE * (completedWeight + weight * fileProgressFraction(progress)) / Math.max(1, totalWeight),
+                  progress.phase === 'checking' ? undefined : progress.phase);
               },
             },
           )
@@ -7532,6 +7534,7 @@ async function materializeNativeProject(
     const projectSeed = identity ? waveformSeedFor(doc, source.id, identity.md5) : undefined;
     const privateSeed = identity && !projectSeed ? await waveforms?.seed(identity.md5) : undefined;
     const waveform = projectSeed ?? privateSeed;
+    onStep(t('phone.library.opening'), MATERIALIZE_SHARE * completedWeight / Math.max(1, totalWeight));
     if (projectSeed) projectSeeds += 1;
     if (privateSeed) privateSeeds += 1;
     if (!isCurrent()) throw new Error('Song load was superseded.');
@@ -7573,32 +7576,17 @@ async function materializeNativeProject(
   return { entry, doc, graph, lyrics, lanes };
 }
 
-/**
- * How much of the opening bar `materializeNativeProject` is worth.
- *
- * MEASURED, not reasoned about, and the reasoning was wrong. "Zero JS decode"
- * in materialize's own log says nothing about its cost: resolving each stem's
- * authorized path takes ~400 ms on the field phone, six of them in sequence,
- * and with the lyrics that is ~3.0 s of a 4.5 s open — about 65%. The graph
- * build after it is ~1.5 s.
- *
- * So the original 0-to-0.98 was nearly right about materialize and wrong about
- * what follows: the core's build reported NOTHING, and the bar sat at 98%
- * under a message still saying "Fetching lyrics…" for the last third of the
- * wait. That is the "freezes at 100%" this fixes — by reporting the build, not
- * by shrinking the fetch.
- *
- * (The first attempt at this file put materialize at 0.3, on the assumption
- * that path resolution was free. `mobile/tests/open-steps-android.cjs` printed
- * the steps and said otherwise.)
+/** Estimated opening-stage allocation, not a measured download percentage.
+ * File resolution/hash/lyrics occupies the first part; native preparation has
+ * no intermediate completion events. Only a returned load may publish 100%.
  */
 const MATERIALIZE_SHARE = 0.65;
 
 /**
  * A bar that keeps moving through a step that cannot report its own progress.
  *
- * `native.prepare` is one awaited call into the core — six stems decoded, no
- * events — so there is nothing true to report between its start and its end.
+ * `native.prepare` is one awaited call into the core — streaming graph prepared, no
+ * intermediate events — so there is nothing true to report between its start and its end.
  * This eases from `from` toward `to` and NEVER reaches it: an asymptote is the
  * honest shape for "still working, cannot say how much longer", where a bar
  * pinned at 100% is a claim that it is finished.

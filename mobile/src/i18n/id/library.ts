@@ -3,6 +3,10 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const library: Translation<typeof en> = {
+  'phone.library.openingConnect': 'Menghubungkan…',
+  'phone.library.openingDownload': 'Mengunduh…',
+  'phone.library.openingVerify': 'Memeriksa unduhan…',
+  'phone.library.openingRetry': 'Mencoba lagi…',
   "phone.library.pickFailed": "File itu tidak bisa dibuka ({msg})",
   "phone.library.folderInactive": "Folder yang dipilih tidak lagi aktif. Buka kembali dan coba lagi.",
   "phone.library.folderIdentityUnavailable": "Identitas folder yang dipilih tidak tersedia. Buka folder lagi dan coba lagi.",

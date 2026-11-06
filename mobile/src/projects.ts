@@ -1,3 +1,4 @@
+import type { OpeningActivity } from './loading-progress'
 import { describeFileProgress, fileProgressFraction } from './drive-progress'
 import { downloadCancelled } from './file-download'
 import { mobileSongVolumePersistence } from './playback/song-volume-persistence'
@@ -516,7 +517,7 @@ export function releaseStems(stems: { buffer: AudioBuffer }[]): void {
 export async function loadProject(
   entry: ProjectEntry,
   sampleRate: number,
-  onStep: (msg: string, frac: number) => void,
+  onStep: (msg: string, frac: number, activity?: OpeningActivity) => void,
   crumb?: (note: string) => Promise<void>,
   signal?: AbortSignal
 ): Promise<LoadedProject> {
@@ -527,7 +528,8 @@ export async function loadProject(
     const path = gdrive ? await driveLocalFile(entry.dir, file, md5, size, {
       signal,
       onProgress: p => onStep(describeFileProgress(p, label, index, total),
-        (index - 1 + 0.5 * fileProgressFraction(p)) / total)
+        (index - 1 + 0.5 * fileProgressFraction(p)) / total,
+        p.phase === 'checking' ? undefined : p.phase)
     }) : await Folder.localFile(entry.dir, file)
     checkActive()
     return path
