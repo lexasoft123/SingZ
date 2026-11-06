@@ -1,0 +1,1479 @@
+{
+  "standardId": "gpui-lyrics-approved-120hz-v1",
+  "authority": "Explicit user decision: approved native GPUI After highlighting from the frame-by-frame preview is the de facto standard, preferred to Electron.",
+  "recordedDate": "2026-11-06",
+  "approvalContext": [
+    "User approved the corrected per-frame preview: Cool now.",
+    "User later reaffirmed: We did perfect highlighting before, better than it in electron.",
+    "User instructed: Record it as a standard de-facto, the one we had with per fps screenshot preview."
+  ],
+  "positiveSequence": "After \u2014 partial-glyph sweep",
+  "negativeSequence": "Before \u2014 whole-glyph switch; comparison context only, never a positive baseline",
+  "previewFile": "preview.html",
+  "previewSha256": "3fb655bd7c6a676901af79cdda5bd47522ec70ef9baaf280a14a73b22a1b453c",
+  "frameCount": 161,
+  "timelineSamplingHz": 120,
+  "startPositionSeconds": 63.85,
+  "endPositionSeconds": 65.18333333333334,
+  "livePresentationFps": "Not established by stepped screenshots",
+  "imageProvenance": "Exact JPEG bytes embedded in the user-approved corrected preview. No re-encoding, recoloring, resizing, or baseline substitution. Original full-window PNG identities retained below.",
+  "frames": [
+    {
+      "frame": 0,
+      "position_s": 63.85,
+      "timeline_fps": 120,
+      "file": "frames/frame-0000.jpg",
+      "sha256": "cefa1426a0ec485b4ee447279c0082c5103f37db283502a4c900af0112c33004",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0000.png",
+      "originalFullFrameSha256": "81e4a3c56f3764a8cc9a64538a675ad76d7c1e033bc0b97b3f72d7d2b131f35a"
+    },
+    {
+      "frame": 1,
+      "position_s": 63.858333333333334,
+      "timeline_fps": 120,
+      "file": "frames/frame-0001.jpg",
+      "sha256": "4342d1ac7259dc505f776a4ab29235bb0e1f4f8f7353354830c88a686e2795e6",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0001.png",
+      "originalFullFrameSha256": "96c7593a28e8522a6811b9590bf15d61ae1d1ff64f9ee69986b6a88bd3f96f84"
+    },
+    {
+      "frame": 2,
+      "position_s": 63.86666666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0002.jpg",
+      "sha256": "7965ec2da3399734ea1b0f2ccb12e040ba04719af1685aa41ea2f1df457ca458",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0002.png",
+      "originalFullFrameSha256": "3b239dd230c9c3fb179e062c7049cf74ff05b4e92baad81cf1b895e5a7ed7390"
+    },
+    {
+      "frame": 3,
+      "position_s": 63.875,
+      "timeline_fps": 120,
+      "file": "frames/frame-0003.jpg",
+      "sha256": "cc3e129460f757356977102c629373f6733f25e79b1e6afccae82346be8b1195",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0003.png",
+      "originalFullFrameSha256": "03bcc7e352dab5a02007f41e84463da30e56119b61cb7582401a1c8c0ddece6d"
+    },
+    {
+      "frame": 4,
+      "position_s": 63.88333333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0004.jpg",
+      "sha256": "370e235a646e19a8bb0167335df7dc6d497db077c08e8835a7656822b0385696",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0004.png",
+      "originalFullFrameSha256": "e636880f676db83f53c3c041fd88f2838e512273b2d033a26a1701b3cc4ba2da"
+    },
+    {
+      "frame": 5,
+      "position_s": 63.891666666666666,
+      "timeline_fps": 120,
+      "file": "frames/frame-0005.jpg",
+      "sha256": "d2eaff18b467bb851bfe73c580cbf442d2f037aa637b3c6d046df6c6ae1d7949",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0005.png",
+      "originalFullFrameSha256": "f62445f36097e0ee396a80a87062cae08ff0be48cb9087ab550a9d9c50da93e9"
+    },
+    {
+      "frame": 6,
+      "position_s": 63.9,
+      "timeline_fps": 120,
+      "file": "frames/frame-0006.jpg",
+      "sha256": "8e2dd1427d7d01c9778c46ea93f0c5e84c7bd7ae689ff8b3076f8f9c4ff9f03d",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0006.png",
+      "originalFullFrameSha256": "0e66f3a2902926917920f98df1858d5f688a0d5adf088f2c4a8c07013a8ece31"
+    },
+    {
+      "frame": 7,
+      "position_s": 63.90833333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0007.jpg",
+      "sha256": "709f72e959860cd6e1d90a870c8a4a8a8c9210cd7afb6ece2f08f6ea96f04d4f",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0007.png",
+      "originalFullFrameSha256": "89d68db1f9bc18a04cae27689ec5be14c6ed6d5903e5444c8721e46993be667b"
+    },
+    {
+      "frame": 8,
+      "position_s": 63.91666666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0008.jpg",
+      "sha256": "2e4b8237bb218f404f4a4a033a4b1790c06c7796d3e4538557b53d78ab034264",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0008.png",
+      "originalFullFrameSha256": "66e37225909b3d0e703dbc0e6d23bbf093434cf7ae2ca333d88feffb18b06a79"
+    },
+    {
+      "frame": 9,
+      "position_s": 63.925000000000004,
+      "timeline_fps": 120,
+      "file": "frames/frame-0009.jpg",
+      "sha256": "c3d38d179a46dbf8e808695fd5074267357670a327f0919e88b5ab77629d3dde",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0009.png",
+      "originalFullFrameSha256": "8d261a850b215af3c6b9c29116c6bc8c4f326668d6ad5ac8df8f76ebc6f15861"
+    },
+    {
+      "frame": 10,
+      "position_s": 63.93333333333334,
+      "timeline_fps": 120,
+      "file": "frames/frame-0010.jpg",
+      "sha256": "6bf9fe48dea15679744d4550c09e28ef22a1e259a201b5b9ca70b752a893afbd",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0010.png",
+      "originalFullFrameSha256": "86d480a8d07edcac3bb1775d5953274a95148e72feb784c49c20d9aabbd779c5"
+    },
+    {
+      "frame": 11,
+      "position_s": 63.94166666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0011.jpg",
+      "sha256": "b25be16b1caeb00686c612d9f717ac90b6c8d9d111e985d2e36f1ecdd9db9566",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0011.png",
+      "originalFullFrameSha256": "fac451508513a97400e8ae8ab222567ba4febc934efb73e551eb8a30e0854f00"
+    },
+    {
+      "frame": 12,
+      "position_s": 63.95,
+      "timeline_fps": 120,
+      "file": "frames/frame-0012.jpg",
+      "sha256": "48d082d27501e6335ef71829204633a209e16a6b0b92c11be60fc6847c34e6be",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0012.png",
+      "originalFullFrameSha256": "27e6145407be32a1e7ad96a7cf64a08d4874b9e301f4c48023ee5bf3fd8f77af"
+    },
+    {
+      "frame": 13,
+      "position_s": 63.958333333333336,
+      "timeline_fps": 120,
+      "file": "frames/frame-0013.jpg",
+      "sha256": "32d54b23d9fe6e7db60fbee70be08e787366951360df2cce2adbd2c99aaeb07b",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0013.png",
+      "originalFullFrameSha256": "59d0625409b386545b50e6ef2256b3fe1628e9fed201180e9b942364b74597ab"
+    },
+    {
+      "frame": 14,
+      "position_s": 63.96666666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0014.jpg",
+      "sha256": "b7c32c0dd3d5b3d9912535baaec13fe6869e118faad2b8b1e588aef2248c6ea1",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0014.png",
+      "originalFullFrameSha256": "1eb2f48f35243869448d4ce2bb8406c26684cbed18cf5ec82ee2fac6774dbce9"
+    },
+    {
+      "frame": 15,
+      "position_s": 63.975,
+      "timeline_fps": 120,
+      "file": "frames/frame-0015.jpg",
+      "sha256": "31c2eb6f8f6124b950439717b090ab17d5c330356cfeadfb6914fc2e01288f0f",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0015.png",
+      "originalFullFrameSha256": "d0aa06e2c13f2ef06fb112ce31713a084517559de76f821bff839cc6c194bc70"
+    },
+    {
+      "frame": 16,
+      "position_s": 63.983333333333334,
+      "timeline_fps": 120,
+      "file": "frames/frame-0016.jpg",
+      "sha256": "4ce9d582e44892cd010823269846e6d0a6dd18fb28428b66528704be74e65716",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0016.png",
+      "originalFullFrameSha256": "1c9137e2b51eb82c1f949676cd47fa9b7782a3ab6b5118109bf4ff4d6dc10848"
+    },
+    {
+      "frame": 17,
+      "position_s": 63.99166666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0017.jpg",
+      "sha256": "de0bf2a39b4e87adf57f8b8bd7e8a2715fee3d948004da17310eaac0cb94303d",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0017.png",
+      "originalFullFrameSha256": "f17db466df9fbfe5bdd57effea8e085818a44f7febedfd890eb2c9f46de3fcb4"
+    },
+    {
+      "frame": 18,
+      "position_s": 64.0,
+      "timeline_fps": 120,
+      "file": "frames/frame-0018.jpg",
+      "sha256": "2856b1f883d3efef34d5fddb1285268a1409acb5b05c2cd9cebb20fdc4ea4d2a",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0018.png",
+      "originalFullFrameSha256": "e36a1bd28b0fbf0fd8bfea7bbeaca78caff323cfa3a856146b5c056b2a58de2a"
+    },
+    {
+      "frame": 19,
+      "position_s": 64.00833333333334,
+      "timeline_fps": 120,
+      "file": "frames/frame-0019.jpg",
+      "sha256": "90eb3beb9c851edb2e3d64b32f56fb7d89bfa7b629ebdad3f7ca38a688836345",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0019.png",
+      "originalFullFrameSha256": "bbfac76d422bc9c4c4d724bc18263d5dd54989ded6f3d6afe1ea97aeb11cf4d1"
+    },
+    {
+      "frame": 20,
+      "position_s": 64.01666666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0020.jpg",
+      "sha256": "4e854a728143c428874bd1230480b1bd79c60d67218bbec14cadaaf9174b5b9c",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0020.png",
+      "originalFullFrameSha256": "262c4dad3d30e9d7fe34c05f629f626f0d1f6630502a62d3900df4ff8cbbeb48"
+    },
+    {
+      "frame": 21,
+      "position_s": 64.025,
+      "timeline_fps": 120,
+      "file": "frames/frame-0021.jpg",
+      "sha256": "f2ba52694a4138515876c9dafc0dddd5d9d2ac9a3fe1da4f41ec3ee6b6c65934",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0021.png",
+      "originalFullFrameSha256": "729992be29e24e334d6fd0a6c2bee69aa88c581718f8ba6eda6c452c5cd564f0"
+    },
+    {
+      "frame": 22,
+      "position_s": 64.03333333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0022.jpg",
+      "sha256": "ab50ba096f2899063c6cb321bda7f33cdc259eafa1ac885123ba74b715448e02",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0022.png",
+      "originalFullFrameSha256": "d35238e517fc0b615fee8f29eb8bc150a4dc5a944e197b255dfe19a36a2f91bb"
+    },
+    {
+      "frame": 23,
+      "position_s": 64.04166666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0023.jpg",
+      "sha256": "e7ba6699e8fce06d4b45cb436b86564527935efb2beddd01d1252144ae00448a",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0023.png",
+      "originalFullFrameSha256": "d7b3a7799bdd2d699ff9cff7e8832ccd92356bfbd862364da22220683f56d52e"
+    },
+    {
+      "frame": 24,
+      "position_s": 64.05,
+      "timeline_fps": 120,
+      "file": "frames/frame-0024.jpg",
+      "sha256": "fa4162eee449f8325d9b96b9c5ad1550b5a13cd30ea62f4cce45463cee9568d9",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0024.png",
+      "originalFullFrameSha256": "792109051537359dee6b74298850f661f8e20ef388501b506b9269b87b88638e"
+    },
+    {
+      "frame": 25,
+      "position_s": 64.05833333333334,
+      "timeline_fps": 120,
+      "file": "frames/frame-0025.jpg",
+      "sha256": "e95c87024c9034dc5f620fdac73c076e94239c14c18a98eb3f4176a1a84eba96",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0025.png",
+      "originalFullFrameSha256": "7241ba4ca5d582700f314b65012d177b3c57cb2b02f9ce03ad57815b0dfad6bd"
+    },
+    {
+      "frame": 26,
+      "position_s": 64.06666666666666,
+      "timeline_fps": 120,
+      "file": "frames/frame-0026.jpg",
+      "sha256": "dc76e270e40ab0c3e71c25cab2a8b0372efb7bc1c18de9a9c08f9987441ca2f4",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0026.png",
+      "originalFullFrameSha256": "7d9e5281f6b1a15b7dc38d5db3a266910af3f6e80d8f5cdd0c952fe27b573c6a"
+    },
+    {
+      "frame": 27,
+      "position_s": 64.075,
+      "timeline_fps": 120,
+      "file": "frames/frame-0027.jpg",
+      "sha256": "1bc5235a02365e69c849564e8f74754a9905642416a9e40d5b846d54ffb7f9c6",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0027.png",
+      "originalFullFrameSha256": "c1b948b1c8a3ec8cd9b419ec928f7faedc8a1684b31233fd5716ed80a5fd1a76"
+    },
+    {
+      "frame": 28,
+      "position_s": 64.08333333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0028.jpg",
+      "sha256": "67e82b0492538b8bab2bbabfe2db5a06dbbee7ab7a7fb1c14771d05d1c28e2da",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0028.png",
+      "originalFullFrameSha256": "cadeac72ebb475da92e42314b072777faa80917e252ce9c507af0415b25b4c25"
+    },
+    {
+      "frame": 29,
+      "position_s": 64.09166666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0029.jpg",
+      "sha256": "c87cd4bbf99b5a17ee9bb659572bc96ecad39fde6d03396653932fb51ed4449e",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0029.png",
+      "originalFullFrameSha256": "675abadc925d858b2cf1efe47a583351c5488073a6ddde3f7893c6020cdfc2c4"
+    },
+    {
+      "frame": 30,
+      "position_s": 64.1,
+      "timeline_fps": 120,
+      "file": "frames/frame-0030.jpg",
+      "sha256": "a0f4f04c4c7a9176d285ff2011e1e9b7e044a164b255e2faa7d4df3553d19e3f",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0030.png",
+      "originalFullFrameSha256": "1542af191feec4510923b4a9d354b41c2138517982cb18e971f630e6736f44e0"
+    },
+    {
+      "frame": 31,
+      "position_s": 64.10833333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0031.jpg",
+      "sha256": "e0dc7cdebf76c2dde2dd11c158ad2a402a1f8d1adfd8aded7ff9e93e68516829",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0031.png",
+      "originalFullFrameSha256": "5e27e6a807c74811a70f1610ec9475101ae8eece675f9d8793dc84e277dd4bd9"
+    },
+    {
+      "frame": 32,
+      "position_s": 64.11666666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0032.jpg",
+      "sha256": "2bf7f2b23ef45fb798de17a18ee336d1a24e31279edc294571d3967890af6117",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0032.png",
+      "originalFullFrameSha256": "9bf4281faafa63555f83a1073b46cf47e0e084acf4996cc4618d74e802a53b94"
+    },
+    {
+      "frame": 33,
+      "position_s": 64.125,
+      "timeline_fps": 120,
+      "file": "frames/frame-0033.jpg",
+      "sha256": "e4eefa683a7fe14c3df66ed2cd0fdafac349a72695b159e189c9bbbbddee75cd",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0033.png",
+      "originalFullFrameSha256": "6b4ab9a4e0479a185bc256e0b64884a14e18ec18a059858f8a98c324960f6a81"
+    },
+    {
+      "frame": 34,
+      "position_s": 64.13333333333334,
+      "timeline_fps": 120,
+      "file": "frames/frame-0034.jpg",
+      "sha256": "87f3bca68c82dd7970e100498ae662cc67ba328014a67bcc7a97d29610e4c691",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0034.png",
+      "originalFullFrameSha256": "0c64a6e9e36a9a02c03b57605182275394fe50203795e9218c048509593da6cb"
+    },
+    {
+      "frame": 35,
+      "position_s": 64.14166666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0035.jpg",
+      "sha256": "c90cddbb725f43271cefe60fcc99cbb29c74f1ce60ad1ab447618f349ef638d4",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0035.png",
+      "originalFullFrameSha256": "7044490ce2db44865df8cd72c320a39013fe00c66f4c057bd44c2665d4f9c7da"
+    },
+    {
+      "frame": 36,
+      "position_s": 64.15,
+      "timeline_fps": 120,
+      "file": "frames/frame-0036.jpg",
+      "sha256": "865abef3849c0f993a55b68230c69621d5ac81e2c8438358ada1fe1a9ed276eb",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0036.png",
+      "originalFullFrameSha256": "3c46cfeeb7d3ed81fa2a1f0d242f480d2973ec075c188db2c9f0bad226f445c7"
+    },
+    {
+      "frame": 37,
+      "position_s": 64.15833333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0037.jpg",
+      "sha256": "37f3cb0f61f1c0a22f9a1f9a65baf355325b65f129b8d284d94bee2cb7e46b1a",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0037.png",
+      "originalFullFrameSha256": "1e81f834f56b307996cebd70288240f831412abaf7cd466a6f223d033259f8b3"
+    },
+    {
+      "frame": 38,
+      "position_s": 64.16666666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0038.jpg",
+      "sha256": "fbe4c8ac855f2d1afdc49ab27a8087829055c58cd026fceab682dc54140f7a93",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0038.png",
+      "originalFullFrameSha256": "be1b1a8659e8ede169ed34efecfe7f691fc9dcb6909e5eca5c9025b75fc4cef1"
+    },
+    {
+      "frame": 39,
+      "position_s": 64.175,
+      "timeline_fps": 120,
+      "file": "frames/frame-0039.jpg",
+      "sha256": "6089dc29a71280cd33e4690bafe0913b7ad3d3e5c6bc0f207cdf2e268a0394ac",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0039.png",
+      "originalFullFrameSha256": "91fb3ff228b078773525cdf7c0399ea7691518eda63d6bf014d663bca5e07bdd"
+    },
+    {
+      "frame": 40,
+      "position_s": 64.18333333333334,
+      "timeline_fps": 120,
+      "file": "frames/frame-0040.jpg",
+      "sha256": "cfc590a089374566c4317351996510f252ce84142ee6c2e7060b5052ab5fb5c3",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0040.png",
+      "originalFullFrameSha256": "e9277f437d3c3f422167e48a3454cc769a3d5410556eb25d37afb73736a19147"
+    },
+    {
+      "frame": 41,
+      "position_s": 64.19166666666666,
+      "timeline_fps": 120,
+      "file": "frames/frame-0041.jpg",
+      "sha256": "2520438c92a53408f664f0683a61ef3c89979b8f0026e6bf1d0109b9469430d4",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0041.png",
+      "originalFullFrameSha256": "cf98bf153b56ebaa03480988c79067081f446ba15e068869b420d6337ad648cd"
+    },
+    {
+      "frame": 42,
+      "position_s": 64.2,
+      "timeline_fps": 120,
+      "file": "frames/frame-0042.jpg",
+      "sha256": "fc38689e96e3c7796e76943ab11b9d0784a04ae3308394d29ea467c7ead2ca6b",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0042.png",
+      "originalFullFrameSha256": "9d1f0343f23f1d3ab1e3375ef3aafe963211cbbbb52aff0064b7750fd35d00ad"
+    },
+    {
+      "frame": 43,
+      "position_s": 64.20833333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0043.jpg",
+      "sha256": "7d0f59db49d6ef8177ce48afe9ba52ae3e3a8a61055bd21e791b1d767ddd45b2",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0043.png",
+      "originalFullFrameSha256": "ad9e815540ed4693f77083f3d902a76899ce0496a91faed95c12baf8b35c3d09"
+    },
+    {
+      "frame": 44,
+      "position_s": 64.21666666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0044.jpg",
+      "sha256": "5baaca47dfaa3ac9664bde3332a3da529a65155b57904bcd4d93839ffaca52f2",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0044.png",
+      "originalFullFrameSha256": "e26c67ef94e671729416e7151c26a2713149005a16447c04c835d429eed9f71d"
+    },
+    {
+      "frame": 45,
+      "position_s": 64.225,
+      "timeline_fps": 120,
+      "file": "frames/frame-0045.jpg",
+      "sha256": "969e062ea99292641c122447921ada54b6a0aeafaa94111d65857ffc7fa232ab",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0045.png",
+      "originalFullFrameSha256": "f49308fb18d58c9eb4ef29f74784938935d121ead48a4c826e4cded5c43016d5"
+    },
+    {
+      "frame": 46,
+      "position_s": 64.23333333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0046.jpg",
+      "sha256": "8bbfa6ae2df824d82cc849ad5a0d0c5bd4a0ae8e1c269e3cdf0c11377dbb26d0",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0046.png",
+      "originalFullFrameSha256": "fcd8374dc28c9191678e4bbd85703d707484454a5c07ac3fd12e3e5d5e00bb56"
+    },
+    {
+      "frame": 47,
+      "position_s": 64.24166666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0047.jpg",
+      "sha256": "8b336a5e5809c46652ab71bb0c8502c87606c80f34c350b39cba405c3946fcad",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0047.png",
+      "originalFullFrameSha256": "470a877c08c0774a5e92b74020302bd595b3b22d33d59e746300edeed5bf4e6a"
+    },
+    {
+      "frame": 48,
+      "position_s": 64.25,
+      "timeline_fps": 120,
+      "file": "frames/frame-0048.jpg",
+      "sha256": "19e716c078f84f1e11259f3f8bd8fe9bb473b257653f5afbf7f35f4051f102b1",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0048.png",
+      "originalFullFrameSha256": "be6e518f33514d2de9e33d3ac71ed9bf4e23bc31426c9dd43ccca022cb2a98b9"
+    },
+    {
+      "frame": 49,
+      "position_s": 64.25833333333334,
+      "timeline_fps": 120,
+      "file": "frames/frame-0049.jpg",
+      "sha256": "4862cf0976ce2e47707c2ff08a8ef6c28c199d160e52774cd0f55c737ffed3a8",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0049.png",
+      "originalFullFrameSha256": "a5e61625cc94c0cd328bda9bd35ddab0dcd6202cd77f46f53604c9cfd3a843c7"
+    },
+    {
+      "frame": 50,
+      "position_s": 64.26666666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0050.jpg",
+      "sha256": "c7cfd4a6ae743712efe07dbeea8bf361bfa6aedabb61d8be264595f9f2085d7c",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0050.png",
+      "originalFullFrameSha256": "a18e06b101ca24e4a72102a25cbe9a5c5d4b738a8b0275bcc529fbc1be50b7ee"
+    },
+    {
+      "frame": 51,
+      "position_s": 64.275,
+      "timeline_fps": 120,
+      "file": "frames/frame-0051.jpg",
+      "sha256": "49707dc663f13576f0e4147d5b4cd37926ea1e0f63d5109811c3cfd95a1159d6",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0051.png",
+      "originalFullFrameSha256": "cc302f2ed483c4f14fc9ffb448b7b1b2e84927cc3f741a371e9deb78bbe90fb5"
+    },
+    {
+      "frame": 52,
+      "position_s": 64.28333333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0052.jpg",
+      "sha256": "5082d6d917d1c458dc4c394aaf439e4a7ed24aecaf1e9eaa929959d18a2018ae",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0052.png",
+      "originalFullFrameSha256": "7ccc9565db2558cd1afb54fcdf2daf3e274315400eec26f6884140e7886d9f07"
+    },
+    {
+      "frame": 53,
+      "position_s": 64.29166666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0053.jpg",
+      "sha256": "66cf204edf041ed0bdd2e8fd73282bee2e55d7d214645ebfd7082dc247696612",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0053.png",
+      "originalFullFrameSha256": "81c3f90909e02e8eef2a9a15a8c514f7dacebff1b9f92f6b8a175d81e79f9d8d"
+    },
+    {
+      "frame": 54,
+      "position_s": 64.3,
+      "timeline_fps": 120,
+      "file": "frames/frame-0054.jpg",
+      "sha256": "bf663070cfcbbb924a3cfd164786f8eb47525007daf4280a5b91a6d200865e4a",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0054.png",
+      "originalFullFrameSha256": "9be09661f5e23a89014a979e065354168f181e09d0c3f44c3dc035bda158fb32"
+    },
+    {
+      "frame": 55,
+      "position_s": 64.30833333333334,
+      "timeline_fps": 120,
+      "file": "frames/frame-0055.jpg",
+      "sha256": "328e0aba591e458b31c9d337f2e7ffc033843aa254c3ac088274a8fbcd401afd",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0055.png",
+      "originalFullFrameSha256": "da56b80ce06764e3dfd48869bd91f74c29e80e189bf15d044bb079a73f0ad9d3"
+    },
+    {
+      "frame": 56,
+      "position_s": 64.31666666666666,
+      "timeline_fps": 120,
+      "file": "frames/frame-0056.jpg",
+      "sha256": "ad546608592c1b68985af57f133adc7a954e6a6dc15a4ccf836681bdb2e861f4",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0056.png",
+      "originalFullFrameSha256": "ec92adfc39c23b6f367d2389991254077db81e6cf29036168d00e666c3557b8a"
+    },
+    {
+      "frame": 57,
+      "position_s": 64.325,
+      "timeline_fps": 120,
+      "file": "frames/frame-0057.jpg",
+      "sha256": "1f18aac355529617b15161373c946e7d8b608796114eacdf03e200a8fd7b66d4",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0057.png",
+      "originalFullFrameSha256": "160341030fbc1e994f0d37a86e58757008afa5230a80b782c3224843f8bd6c3a"
+    },
+    {
+      "frame": 58,
+      "position_s": 64.33333333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0058.jpg",
+      "sha256": "5f903a26595b9230441acc656b782642dc5a66faee224743ea9fb072e42647b2",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0058.png",
+      "originalFullFrameSha256": "9385057e66941711bb9716c85277243d6586bbf1b409d8aa06524ae9d4c27b1d"
+    },
+    {
+      "frame": 59,
+      "position_s": 64.34166666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0059.jpg",
+      "sha256": "ca60b1ed8444b2d298e7704cddcacee33dd1487dffb31382d878344382e994c2",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0059.png",
+      "originalFullFrameSha256": "4afe6bdcaec395cd3f3a923bf31466c42a73555d1997d2f99bee78af1d9d2d41"
+    },
+    {
+      "frame": 60,
+      "position_s": 64.35,
+      "timeline_fps": 120,
+      "file": "frames/frame-0060.jpg",
+      "sha256": "7add9f516d9ad88d91507e153039f44a3e41dd1dbad063461c84f20da067167a",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0060.png",
+      "originalFullFrameSha256": "62b2b892d59f9cab6dab17d3ef496de39684e710466243d56e35ecdb63bd22e2"
+    },
+    {
+      "frame": 61,
+      "position_s": 64.35833333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0061.jpg",
+      "sha256": "60cdc5b2f9f5a949005d184035f5a435cb019947f63eef0d5b546100268d7923",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0061.png",
+      "originalFullFrameSha256": "11faee07f1bfdd3a37ddd91a34b979d90dd5c0445ed1e6cb81e7d5a262e20c7b"
+    },
+    {
+      "frame": 62,
+      "position_s": 64.36666666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0062.jpg",
+      "sha256": "f183958e7b7aad34f573a59498f4a4d11d266a5523c11a5a8de36b035e28017b",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0062.png",
+      "originalFullFrameSha256": "69baaf0dac902d3a04df5133fa0837e4112b55a7078a7c1387b415a7120ed566"
+    },
+    {
+      "frame": 63,
+      "position_s": 64.375,
+      "timeline_fps": 120,
+      "file": "frames/frame-0063.jpg",
+      "sha256": "7383809868dff2369b6cf7ccdf778df71c9af5236802e4a4e1c2d3985d0529ea",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0063.png",
+      "originalFullFrameSha256": "970c43de8a9fcbeb4887e320b551282ed1b4ce74ce0a00bd3008839a1d673abe"
+    },
+    {
+      "frame": 64,
+      "position_s": 64.38333333333334,
+      "timeline_fps": 120,
+      "file": "frames/frame-0064.jpg",
+      "sha256": "8add818b2e5c0ee0548661333738ccf385bd4cbc1dd4ddf61a89bd1feb664d03",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0064.png",
+      "originalFullFrameSha256": "63d578aaa6b3f37bf37809d3056851f1e536983365d03aad37dd0f243c76f734"
+    },
+    {
+      "frame": 65,
+      "position_s": 64.39166666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0065.jpg",
+      "sha256": "002d0f7d9e72bca599d47a5661e2603e2c92bde6bcf9e52d43422390a6fe3100",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0065.png",
+      "originalFullFrameSha256": "759ffc8d5e4076d9e4d6b17c0bfb30733a4bfad28b68ad4c4d3cfc0a53afd694"
+    },
+    {
+      "frame": 66,
+      "position_s": 64.4,
+      "timeline_fps": 120,
+      "file": "frames/frame-0066.jpg",
+      "sha256": "a35af8a607745cf7e1d87a0baf469ef579a4b542eb22ee390743bbf16c0795a4",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0066.png",
+      "originalFullFrameSha256": "9e2a59889ed9b34aced01763dbb57fb2162f4203e61e230a9f33f558516e3266"
+    },
+    {
+      "frame": 67,
+      "position_s": 64.40833333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0067.jpg",
+      "sha256": "fc9e37cf3e3a847a3fc1d6e009fd97fc40669b95ba6b99d8cab584a431f7e717",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0067.png",
+      "originalFullFrameSha256": "714a50ac2f74edbcda98c68d8ca769be525e65e216f74762feac63a53ff6ff5c"
+    },
+    {
+      "frame": 68,
+      "position_s": 64.41666666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0068.jpg",
+      "sha256": "49b974eb9504480f9b6e276593edbf0246bc96898ee3f45a671cd9d6e0e9c5c3",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0068.png",
+      "originalFullFrameSha256": "6629cfb142f98764b47dccf3fd74b8ae36c9e84b4e43247a7f5691859a904f4d"
+    },
+    {
+      "frame": 69,
+      "position_s": 64.425,
+      "timeline_fps": 120,
+      "file": "frames/frame-0069.jpg",
+      "sha256": "2ce4a4cccb7a9e5ff9ecab98a06d99c3c6006f54c997dfb118228b76cb671650",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0069.png",
+      "originalFullFrameSha256": "877eb20cf573ad4626398c3e9f81fd2d9d4ad0de96902ee3242342c2137dbb00"
+    },
+    {
+      "frame": 70,
+      "position_s": 64.43333333333334,
+      "timeline_fps": 120,
+      "file": "frames/frame-0070.jpg",
+      "sha256": "77593fdc90007ee0c3f14e5a92e0b6fbdeccdc66ea67bfbe9560881b813077eb",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0070.png",
+      "originalFullFrameSha256": "13f40d4fefbe52449ebb0141b6a5d31fc8e2ca83a15d404312ac5825734b9182"
+    },
+    {
+      "frame": 71,
+      "position_s": 64.44166666666666,
+      "timeline_fps": 120,
+      "file": "frames/frame-0071.jpg",
+      "sha256": "a69398cf644e04faad2c719323dd3da2cfc69fd387185e447ee48908c344fd0f",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0071.png",
+      "originalFullFrameSha256": "d451ffaa07727a9878f6e568d25b34543dc57cf0a759cb806fe9fe5519557325"
+    },
+    {
+      "frame": 72,
+      "position_s": 64.45,
+      "timeline_fps": 120,
+      "file": "frames/frame-0072.jpg",
+      "sha256": "b6e3a1079eb5a4fc8cb4ffce8eca19d569bfe66d4abeedc133d88f402806f52b",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0072.png",
+      "originalFullFrameSha256": "950f8b26b364c8b985ffaa2897e74e948ecb6c1fa377d37aa3e5739a57334e26"
+    },
+    {
+      "frame": 73,
+      "position_s": 64.45833333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0073.jpg",
+      "sha256": "a4080a8dd02a1e752d8d344c0b78a831e65ad46b63f76b935639b200fb4b4857",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0073.png",
+      "originalFullFrameSha256": "ff4661c01640becafd75d11d3311f03a701af8c4f1d75482c8743d3f09acb8f0"
+    },
+    {
+      "frame": 74,
+      "position_s": 64.46666666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0074.jpg",
+      "sha256": "d140ec34048eda9dea71d73e8408f6ff4e06514036c67c798c5051eab5213b9e",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0074.png",
+      "originalFullFrameSha256": "3c25010d670da2b368171754c6b454919ff18c95a559aa70cfd707a16664857b"
+    },
+    {
+      "frame": 75,
+      "position_s": 64.475,
+      "timeline_fps": 120,
+      "file": "frames/frame-0075.jpg",
+      "sha256": "2d737e793837c027100a5a8560af2f9333a38f34c6e435fac8944453a7e9ca4e",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0075.png",
+      "originalFullFrameSha256": "59cac9d1ed79fc30712660b44ca24947a1749b1e6a204b908e0f439ac414fcf4"
+    },
+    {
+      "frame": 76,
+      "position_s": 64.48333333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0076.jpg",
+      "sha256": "47cdd5b99711b043365341004dffbc8291486fa2615ec45a418681851f08719b",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0076.png",
+      "originalFullFrameSha256": "9044c7905e850dd97c7629e3c829484e2db68a48a56862d5ec1ff87d3c0a8632"
+    },
+    {
+      "frame": 77,
+      "position_s": 64.49166666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0077.jpg",
+      "sha256": "a8d4410a369351798b2fbdd0b383365e5cdf0e1749f701e1c37d83143523b634",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0077.png",
+      "originalFullFrameSha256": "30254935313824112b2a60866b688c783d36da3ed985ab56f74d458fa355ac57"
+    },
+    {
+      "frame": 78,
+      "position_s": 64.5,
+      "timeline_fps": 120,
+      "file": "frames/frame-0078.jpg",
+      "sha256": "f2309fb0e355a5f71cfea5fda4d0d9d6a904aaaeeedf3b74126b6b25f28c08a9",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0078.png",
+      "originalFullFrameSha256": "20732e2bb3c82d9fe4e86d46140fa85fa8ae39293de3be7dec7884728dc25ef7"
+    },
+    {
+      "frame": 79,
+      "position_s": 64.50833333333334,
+      "timeline_fps": 120,
+      "file": "frames/frame-0079.jpg",
+      "sha256": "d8f53ac4a6e1f223e036b3f1c93403f280a551177adcfccb12790b96008fa983",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0079.png",
+      "originalFullFrameSha256": "1ad598d76a371de27cb535d888250776ca1dfd476cbae5821355d5ce5e22ec23"
+    },
+    {
+      "frame": 80,
+      "position_s": 64.51666666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0080.jpg",
+      "sha256": "c08d74f6460f593a00442a72e255996a73e9f6ba4f961be2046a8bc4be2489d7",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0080.png",
+      "originalFullFrameSha256": "50a165f38c5e8c583aa96a958047ce97873889233263f0fd12171ae5a983a14f"
+    },
+    {
+      "frame": 81,
+      "position_s": 64.525,
+      "timeline_fps": 120,
+      "file": "frames/frame-0081.jpg",
+      "sha256": "043ba6b17b4a1a837ca723707b446922eba35c511cb616d09fb16c329f50d47e",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0081.png",
+      "originalFullFrameSha256": "a6437929c9971ba5f7c8e406540dca747a1d0ae0899af58c5ccf2a6ed035bfd7"
+    },
+    {
+      "frame": 82,
+      "position_s": 64.53333333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0082.jpg",
+      "sha256": "d3ef0d7fc5e776d460ae386c38a42f0f71a455b7309e2736de9b880fa389d682",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0082.png",
+      "originalFullFrameSha256": "9228661e0442309f59901993f7d785cdadb5bb10efa12f2edbdae333f4113da9"
+    },
+    {
+      "frame": 83,
+      "position_s": 64.54166666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0083.jpg",
+      "sha256": "317d6b3d692adcaeb476428ff9c05f8d3bb7aecc4d689752cae7c2ae984f6b92",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0083.png",
+      "originalFullFrameSha256": "ead56947892405f3502b5376dc806334fe1af2a2cf6301bf17499fb46297be5b"
+    },
+    {
+      "frame": 84,
+      "position_s": 64.55,
+      "timeline_fps": 120,
+      "file": "frames/frame-0084.jpg",
+      "sha256": "cd9840832574ef61760781f3dce9e8c635cf70fb84a0e9f51178e64b1ae3c487",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0084.png",
+      "originalFullFrameSha256": "cb6a11078953fb6f8a975a62e23868472f6f0ac8b721d527b724efae32e10b01"
+    },
+    {
+      "frame": 85,
+      "position_s": 64.55833333333334,
+      "timeline_fps": 120,
+      "file": "frames/frame-0085.jpg",
+      "sha256": "9c3186e96bd147498413cccd3eb852eda8d5950bd42e2dfde799c737cf300050",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0085.png",
+      "originalFullFrameSha256": "f17e66f6a02cf2d0ab676559901c096618de23f2a62ff7cef1a2d474a9d8d7c5"
+    },
+    {
+      "frame": 86,
+      "position_s": 64.56666666666666,
+      "timeline_fps": 120,
+      "file": "frames/frame-0086.jpg",
+      "sha256": "9abc857d901251643e07b18d72d9bc6acd8b7a66e42acdc5206b64d13dc75fa7",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0086.png",
+      "originalFullFrameSha256": "208b1f47a1a0736d8ad4c4b637eaea514579d6ef52bb299fddc42f54d59cb939"
+    },
+    {
+      "frame": 87,
+      "position_s": 64.575,
+      "timeline_fps": 120,
+      "file": "frames/frame-0087.jpg",
+      "sha256": "ff01cadaf8bc8dbb9baaf50f21e72fcd7a21825e3dc9a6944e9834ef46c38fcf",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0087.png",
+      "originalFullFrameSha256": "dae104db106e5c2e8ac9a951a3bf35bc87aca170918fd113e7922474beee0b58"
+    },
+    {
+      "frame": 88,
+      "position_s": 64.58333333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0088.jpg",
+      "sha256": "9cdfbab242d07f54319aa320310b841a9c927b1b1f61be8cafb784a867f83d66",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0088.png",
+      "originalFullFrameSha256": "af5ea97d713ef521eeea30ddc4837cfb77c09dfbc616a48e73f1dcf8b085b77e"
+    },
+    {
+      "frame": 89,
+      "position_s": 64.59166666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0089.jpg",
+      "sha256": "682590264cd622737d682805e015cd42a299142c3493c7af3a7b027fe2d0a2f3",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0089.png",
+      "originalFullFrameSha256": "f996ca76dd26c8a8d057dba845b0e7246111ab53838c6e91dd9c34e8c6fa1961"
+    },
+    {
+      "frame": 90,
+      "position_s": 64.6,
+      "timeline_fps": 120,
+      "file": "frames/frame-0090.jpg",
+      "sha256": "a9e774fd4a9df5a95c09f42849b6505e7efddcdafba311dfaccd6a352c2e71e3",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0090.png",
+      "originalFullFrameSha256": "8859daf778bd9d4deb3ed89249fe97592a5ac982b2221618bb7f63dba932134b"
+    },
+    {
+      "frame": 91,
+      "position_s": 64.60833333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0091.jpg",
+      "sha256": "d58869a88bda7dac9660457b58299ce2db0c24a1581864820cbb7f2a59c5f149",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0091.png",
+      "originalFullFrameSha256": "2057f2ad6eba42ee795a77db2c2a0ab7a5932f823fdefdd3d8fd4762019532c7"
+    },
+    {
+      "frame": 92,
+      "position_s": 64.61666666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0092.jpg",
+      "sha256": "cc827c8efbb60156b4f95899b789262da7cffa35c56d8b16621309de924da04e",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0092.png",
+      "originalFullFrameSha256": "a5d762b2a0fd9ec05a6acf33729523799fe965555fb75eb0c4177d69637f4f51"
+    },
+    {
+      "frame": 93,
+      "position_s": 64.625,
+      "timeline_fps": 120,
+      "file": "frames/frame-0093.jpg",
+      "sha256": "2ad3106434c0f5693c2d2d831c932d16407dcb0bb5d225a9ddb2c66caf64a7c9",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0093.png",
+      "originalFullFrameSha256": "56c3f7647af9232a87ba0fea23b56dd48a2cf46ef2c26c7a618efe8f43aa075e"
+    },
+    {
+      "frame": 94,
+      "position_s": 64.63333333333334,
+      "timeline_fps": 120,
+      "file": "frames/frame-0094.jpg",
+      "sha256": "324ab92feb2f9714be381ec3939dc82961b3ed7a883449f7e3d078dd3a5cc7a0",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0094.png",
+      "originalFullFrameSha256": "b215e5213918c598840e12eaff9a8fda45b3fc44fd8ba3949f12c672600c4008"
+    },
+    {
+      "frame": 95,
+      "position_s": 64.64166666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0095.jpg",
+      "sha256": "b1f41620fb21c2346b3b37ce960e680af83059bca7b2d3382b8d098eb7875cad",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0095.png",
+      "originalFullFrameSha256": "af8b8022fbbd1f7cdc96c83d8641aeb758e65a5de570ecd821c65f5cf1803d44"
+    },
+    {
+      "frame": 96,
+      "position_s": 64.65,
+      "timeline_fps": 120,
+      "file": "frames/frame-0096.jpg",
+      "sha256": "5861ff9bd40403c073cc56c4054de2564b120df9d35f87bcc7c104a43a687ca4",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0096.png",
+      "originalFullFrameSha256": "6c4a40836c21fc804d0053b0bcae1818bde6b5f7d93f595161cf31864a38e850"
+    },
+    {
+      "frame": 97,
+      "position_s": 64.65833333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0097.jpg",
+      "sha256": "2e28254f5c39c8f78cfb7390db6d7c6892c2d54c0eb331c08f8dfbe52a59e30a",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0097.png",
+      "originalFullFrameSha256": "7135d216e2aa95c925a309a5873a382e531d8341c5c897c773683e7c5aac26c1"
+    },
+    {
+      "frame": 98,
+      "position_s": 64.66666666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0098.jpg",
+      "sha256": "8d4b57a00eb382d26957f2969b3ff6e444aa32f34cdbf37b1d106c3ebac049a2",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0098.png",
+      "originalFullFrameSha256": "2e4bae5130f0adb100de4d75918a437cab992e4c8b16a314a4114085ed3d8573"
+    },
+    {
+      "frame": 99,
+      "position_s": 64.675,
+      "timeline_fps": 120,
+      "file": "frames/frame-0099.jpg",
+      "sha256": "d294377657a39508f1389f37dd33b27a6e27459e6ec2f0e10c06ba1a482033c5",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0099.png",
+      "originalFullFrameSha256": "f5be3c0bd64c832e7903a8593a2f06a3fe6ee1aa4537fdc4659b732e89524edd"
+    },
+    {
+      "frame": 100,
+      "position_s": 64.68333333333334,
+      "timeline_fps": 120,
+      "file": "frames/frame-0100.jpg",
+      "sha256": "cd5450792397446d5cecaadb8691aa35f89f1d11d8832542a81fd10326bca177",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0100.png",
+      "originalFullFrameSha256": "e7395fb0bfd8721f9122b5fd75d61b7ed70899010120b3706a5c8f356347c5d3"
+    },
+    {
+      "frame": 101,
+      "position_s": 64.69166666666666,
+      "timeline_fps": 120,
+      "file": "frames/frame-0101.jpg",
+      "sha256": "fec384f387c0d5ced94f575033d57b13705eb6bbc85b56d5f80f22103ea189d8",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0101.png",
+      "originalFullFrameSha256": "02c2f4452a28eb6fbb28fb056603ff9f692e751883005246e3a99b2af21ab968"
+    },
+    {
+      "frame": 102,
+      "position_s": 64.7,
+      "timeline_fps": 120,
+      "file": "frames/frame-0102.jpg",
+      "sha256": "d47b76f0b638240fbcf111acfadb0cf07d6272c65cbfb2a1b6aec8faccd92dda",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0102.png",
+      "originalFullFrameSha256": "c2f5f8ee468bfc6ef008912611bdb89b72ee190f042e806f4df6e586c429225c"
+    },
+    {
+      "frame": 103,
+      "position_s": 64.70833333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0103.jpg",
+      "sha256": "d8eb1f5949995acc176a3740099ea7b5a3f9b125df3f3498953ba03ece6b8174",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0103.png",
+      "originalFullFrameSha256": "35c61a36000039159ea5556ec00fe53cc5ce58191ba8f5dda3bef5b141b91dab"
+    },
+    {
+      "frame": 104,
+      "position_s": 64.71666666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0104.jpg",
+      "sha256": "b8093459b9370721164fa2dc5450dfb775c5bf71f3953a854154c39a2b74cc0f",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0104.png",
+      "originalFullFrameSha256": "52a5e9953fb62323147d4ebed0431871b5e49d3a49c178d810e24e9006ea1b1e"
+    },
+    {
+      "frame": 105,
+      "position_s": 64.725,
+      "timeline_fps": 120,
+      "file": "frames/frame-0105.jpg",
+      "sha256": "92523dc4327907d653e164286da9f9543e82c5f113f47f5d807663c5ea25726c",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0105.png",
+      "originalFullFrameSha256": "66b82351930b98d721016910893aa415e37680c4de95dca4a143376e8f91a988"
+    },
+    {
+      "frame": 106,
+      "position_s": 64.73333333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0106.jpg",
+      "sha256": "7e5aceb7bcc090d0cdd9eaa2062210ed64e4fc311546692bddc9b06aa0c80c31",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0106.png",
+      "originalFullFrameSha256": "ddca813d41255f12d188ec9abf375d156037aec0fa5d3335975f49c4d5a25ef3"
+    },
+    {
+      "frame": 107,
+      "position_s": 64.74166666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0107.jpg",
+      "sha256": "3595e3784135e658b9d7287c1da6a35b0c331ece72f817ad5e2a198342539f64",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0107.png",
+      "originalFullFrameSha256": "06449e4ed1304fb18f77706bc905cf2ea8fa0fabc89bb37f5da98d96c0ef2bcf"
+    },
+    {
+      "frame": 108,
+      "position_s": 64.75,
+      "timeline_fps": 120,
+      "file": "frames/frame-0108.jpg",
+      "sha256": "6f4f9002ab426197ff963f530e925dc671a1db0d1024c8d2416de7fa000359aa",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0108.png",
+      "originalFullFrameSha256": "e2ebb293a839559675a1da6b2d2302ab7d44683dc51ed606673aec52ad858ba1"
+    },
+    {
+      "frame": 109,
+      "position_s": 64.75833333333334,
+      "timeline_fps": 120,
+      "file": "frames/frame-0109.jpg",
+      "sha256": "7f6c0ed8a17620731eaedfe68744349583fc5e12e5d1067fd5e5dea7993dd1c5",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0109.png",
+      "originalFullFrameSha256": "e4b1dfccfcd5e162b01f2bd8b70d693ba13dbbca0a78979d997078e24bcaeb14"
+    },
+    {
+      "frame": 110,
+      "position_s": 64.76666666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0110.jpg",
+      "sha256": "4e7efaf4c782ec4f25335af68e04941f91e18fd20c978cf859b1b14894c6a657",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0110.png",
+      "originalFullFrameSha256": "a098e2350dfd3061391fa9001ed1b4a938d6c12bc2ff1fc2ff6da0cd76316eae"
+    },
+    {
+      "frame": 111,
+      "position_s": 64.775,
+      "timeline_fps": 120,
+      "file": "frames/frame-0111.jpg",
+      "sha256": "d14f644f2c27b8b81568e6a2bfee738a5f1533e2de315036ffc31377a93d845e",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0111.png",
+      "originalFullFrameSha256": "5597c31fde752de0d8148c86a886d41da9a5598b154017525e99ca10bb311939"
+    },
+    {
+      "frame": 112,
+      "position_s": 64.78333333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0112.jpg",
+      "sha256": "35b582f217e2c338d4de36ee8697c747ba8dc8f9ba8716784c92be4248700c61",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0112.png",
+      "originalFullFrameSha256": "d0100566495e81e2c64a71717cf26362b36f7eb5b0508506377db9256852ac84"
+    },
+    {
+      "frame": 113,
+      "position_s": 64.79166666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0113.jpg",
+      "sha256": "fbd4cd064de701375430af1fb2bc7ef2fb8bbfb50119aea54a9a53c834ee12fb",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0113.png",
+      "originalFullFrameSha256": "7c6efa76df7804571d17b6624fc7882c2ab25625b0580df33b16c09780aaa12e"
+    },
+    {
+      "frame": 114,
+      "position_s": 64.8,
+      "timeline_fps": 120,
+      "file": "frames/frame-0114.jpg",
+      "sha256": "38ae9f2d8b6c24a0399fd0ca1b97b75e4c6c49e3040794c1eb047e9f41967352",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0114.png",
+      "originalFullFrameSha256": "a04d6a9f7d6ea4deae98e0bab25c785dd9ccee3fec24a854397a36ac8c00fa25"
+    },
+    {
+      "frame": 115,
+      "position_s": 64.80833333333334,
+      "timeline_fps": 120,
+      "file": "frames/frame-0115.jpg",
+      "sha256": "3c99dd6993f3658dad2ed768a151bbb2550ab5b7f35a7b181431dd6b36f55fbb",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0115.png",
+      "originalFullFrameSha256": "5f2fb823d7b8269043192a4f99e3a20b993910132b712970cd702b8a6665a076"
+    },
+    {
+      "frame": 116,
+      "position_s": 64.81666666666666,
+      "timeline_fps": 120,
+      "file": "frames/frame-0116.jpg",
+      "sha256": "ca51714e6439540b151b0ce71ca5659aa567a988161e16943b1c8ec85feada3f",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0116.png",
+      "originalFullFrameSha256": "ae152058da830187150c0ee0ec7a1183c949fdd88add49809b67eaa84014068c"
+    },
+    {
+      "frame": 117,
+      "position_s": 64.825,
+      "timeline_fps": 120,
+      "file": "frames/frame-0117.jpg",
+      "sha256": "de15d5c39204d567f856cb396bd2709aef4858acb0077b9b85eed60eb3664bb3",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0117.png",
+      "originalFullFrameSha256": "c644a817e68a964999fcec36ce3bb055cecf8c18fd6727c98ed7c6e43e333fc7"
+    },
+    {
+      "frame": 118,
+      "position_s": 64.83333333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0118.jpg",
+      "sha256": "3dc514de742d5bcd97ee45a398b85852cdad096c4d655306536ccf42c3f03ead",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0118.png",
+      "originalFullFrameSha256": "a8815d520f9a5f9a0b05e7871aa0635ec23d92a774feec634fbaa8cb4c3e308d"
+    },
+    {
+      "frame": 119,
+      "position_s": 64.84166666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0119.jpg",
+      "sha256": "cb09f6e36fc5f0f970e183ef1ec073cd3e5f2c1633f0267cb763578d9aba8a73",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0119.png",
+      "originalFullFrameSha256": "6f805203bc7fb8c5424fb3fe01c676a19e8c00fd1685d887c7ef179253311480"
+    },
+    {
+      "frame": 120,
+      "position_s": 64.85,
+      "timeline_fps": 120,
+      "file": "frames/frame-0120.jpg",
+      "sha256": "233f48999947d31e92340e6a269179e22ee68195e67a86c6c9ffbdf864e68372",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0120.png",
+      "originalFullFrameSha256": "4ef394917a0e1f79be2ef7ef866e09e5fd1746420d21b7da4115423718b9ceb5"
+    },
+    {
+      "frame": 121,
+      "position_s": 64.85833333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0121.jpg",
+      "sha256": "e835266d819014d63b3c6364c744b374a3fa2449790ee764dcc7359cfdd7d19c",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0121.png",
+      "originalFullFrameSha256": "c2781b68f7ea3372844f7efef64e0858d5e073f22b1e8b09f232123e635b4538"
+    },
+    {
+      "frame": 122,
+      "position_s": 64.86666666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0122.jpg",
+      "sha256": "efe3a9380a539e45c2cad16d1bb3ac2a4fcc388a3d9e03697e46aacdcbcd072a",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0122.png",
+      "originalFullFrameSha256": "510aff90936a0aac7eaf3a34fad5b7a92586a970591d0761d41345bcbf1702c9"
+    },
+    {
+      "frame": 123,
+      "position_s": 64.875,
+      "timeline_fps": 120,
+      "file": "frames/frame-0123.jpg",
+      "sha256": "fbee130ccf18c58b9423f07dd567bd09fc978bc9a8b35a6724749c0ecf4c001b",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0123.png",
+      "originalFullFrameSha256": "b5aeb5e2d7dfec2b953d7831a9de229591a2deb620d64d38f645c9be168d7207"
+    },
+    {
+      "frame": 124,
+      "position_s": 64.88333333333334,
+      "timeline_fps": 120,
+      "file": "frames/frame-0124.jpg",
+      "sha256": "7d47315a8ca750619c51a7591cc62a2ddf7826b5b6bd8a4659512c25ab37a85b",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0124.png",
+      "originalFullFrameSha256": "fba5eb5c41342ec96e7e7b2846da8ba6bc623859dc89946d9a984f1420a923b0"
+    },
+    {
+      "frame": 125,
+      "position_s": 64.89166666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0125.jpg",
+      "sha256": "0e1d61c2f439fa4be7281717855db6129a44c0cf4a1df75f50fea231e3039454",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0125.png",
+      "originalFullFrameSha256": "812e6d6e6cc975c0cbe82f0614aaadb4ba4e5097fc581404a66e3ed2e8cd64b8"
+    },
+    {
+      "frame": 126,
+      "position_s": 64.9,
+      "timeline_fps": 120,
+      "file": "frames/frame-0126.jpg",
+      "sha256": "6852d3cca08845a197df0dbf02bc0b19cbc140d7da836e0353e922d61742ceaa",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0126.png",
+      "originalFullFrameSha256": "476382fd9eebe42d73a1b3074e6fb997466738e5eda2e9b90da610e97f92fb13"
+    },
+    {
+      "frame": 127,
+      "position_s": 64.90833333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0127.jpg",
+      "sha256": "fdac25c4f4cfa0ba48dabac69ca9be4e2fdddb81be4e2a67ed9d91a5d4f37418",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0127.png",
+      "originalFullFrameSha256": "c35a0d5e9ea27fc2e396336bc079bb058a2f6f12bc6842dbaef36389fa437025"
+    },
+    {
+      "frame": 128,
+      "position_s": 64.91666666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0128.jpg",
+      "sha256": "20dc31d2b5bf7c3935b078cb8a30f7658698b7e726261b855deba637dbf33e57",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0128.png",
+      "originalFullFrameSha256": "8db94c11ac6e75c17e0694930474775c38b96c54e236fe28080f6212468ced52"
+    },
+    {
+      "frame": 129,
+      "position_s": 64.925,
+      "timeline_fps": 120,
+      "file": "frames/frame-0129.jpg",
+      "sha256": "236973b11913431a93a4eb2d32f783bb1ff3f8158faefe78e4e88134d95a0efe",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0129.png",
+      "originalFullFrameSha256": "ac533e879636af872c9c6c73e1e8c98c43647551484ef66a5218865f1b3b53ae"
+    },
+    {
+      "frame": 130,
+      "position_s": 64.93333333333334,
+      "timeline_fps": 120,
+      "file": "frames/frame-0130.jpg",
+      "sha256": "4ae98caa03cdca347216891987089573fb5de170636d7dfc0be6229f9dce4c7f",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0130.png",
+      "originalFullFrameSha256": "9989eeac4ede648a1ca9929053f6e5be41ec1c2d49a2e902f01438f0195dcdd7"
+    },
+    {
+      "frame": 131,
+      "position_s": 64.94166666666666,
+      "timeline_fps": 120,
+      "file": "frames/frame-0131.jpg",
+      "sha256": "ba351cd0ff91888bcfcb2a65ef294727f09cd9c1c5f1caefc82514ca5d3d08ab",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0131.png",
+      "originalFullFrameSha256": "1e2cc9d8bc28c0bd0f5187e84f8b24332afbfeabb8be2eba1b2af83ac325f595"
+    },
+    {
+      "frame": 132,
+      "position_s": 64.95,
+      "timeline_fps": 120,
+      "file": "frames/frame-0132.jpg",
+      "sha256": "d347f23a2b683a94fa9ecc70870ce3c6ea6f394fc28db7aeb304666b85e2256f",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0132.png",
+      "originalFullFrameSha256": "946baf139c4453f9584e6162b3ce2284e17c732aa14bd79d291321b29308170c"
+    },
+    {
+      "frame": 133,
+      "position_s": 64.95833333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0133.jpg",
+      "sha256": "c722807a271652990328f43aa9cbf7203da24ae8e8d54a859eb9d35de22bb7c3",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0133.png",
+      "originalFullFrameSha256": "d12aa1e0bab5f2ddc8d1cfe536ecd5da67f934198ccf39350af46ee6211dfdb7"
+    },
+    {
+      "frame": 134,
+      "position_s": 64.96666666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0134.jpg",
+      "sha256": "3c89137127ca991f95ed6f31596a78e6ca265b10305aa13138bd28de64676db9",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0134.png",
+      "originalFullFrameSha256": "ed7d8ddbbeef0811e5930f8bf940b7c3d6d29ac00a0c580ed5ce80e5bc429e36"
+    },
+    {
+      "frame": 135,
+      "position_s": 64.975,
+      "timeline_fps": 120,
+      "file": "frames/frame-0135.jpg",
+      "sha256": "c54caf1da8b5c47f87a342dab09ac3b91b9b9e1ce243dd7cd57949d131a7dbe7",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0135.png",
+      "originalFullFrameSha256": "ebcd6e12f44562cf33ed7fb9f3345ee4162be839dbbf85a4a80225a41e5c8d1b"
+    },
+    {
+      "frame": 136,
+      "position_s": 64.98333333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0136.jpg",
+      "sha256": "ab1ddc2590eaff84941f160f83dae2ab412bbc3b83a9a7401d708a2b3beceab1",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0136.png",
+      "originalFullFrameSha256": "39f47dabf90175557bdba54a6cd6b4263331848627faacb05e223be3964048d5"
+    },
+    {
+      "frame": 137,
+      "position_s": 64.99166666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0137.jpg",
+      "sha256": "a63310bf47b4f706e98707153977109989845416684740babeca40663c558150",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0137.png",
+      "originalFullFrameSha256": "f9a6fbc997b3c06fd6ea3d645923b904e0fa0a02559db66dd58133485884c847"
+    },
+    {
+      "frame": 138,
+      "position_s": 65.0,
+      "timeline_fps": 120,
+      "file": "frames/frame-0138.jpg",
+      "sha256": "be04ce61e9cfae8749afc97405d6460e4c01ca0eb340b863d3e56eb9db9219c6",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0138.png",
+      "originalFullFrameSha256": "a0e2a29e44c1ee5fd1b2ba96ffaab107c03aa69d3b60cf565ca2599de1d30cfc"
+    },
+    {
+      "frame": 139,
+      "position_s": 65.00833333333334,
+      "timeline_fps": 120,
+      "file": "frames/frame-0139.jpg",
+      "sha256": "759f991ff25efaed22a36de2f4d858264b3b48137a3865b25a9f17dfe4e629ab",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0139.png",
+      "originalFullFrameSha256": "6241ae2e0205307be74931bc01fa629772c5c4d22f8327e474b7c3cdd380993b"
+    },
+    {
+      "frame": 140,
+      "position_s": 65.01666666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0140.jpg",
+      "sha256": "3ffdedb6b81193cb07ba8168ef3dfbd5f3684a9d1837f816ddae4b6ab02be648",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0140.png",
+      "originalFullFrameSha256": "97f0384f1e188a6717cbca4936bb7c3ec09d7b084e3a5cb65193f4fc9d294fa2"
+    },
+    {
+      "frame": 141,
+      "position_s": 65.025,
+      "timeline_fps": 120,
+      "file": "frames/frame-0141.jpg",
+      "sha256": "474dbbb9313225cf4adf34033238f53d16c39f080ded82c3d560724130adb66b",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0141.png",
+      "originalFullFrameSha256": "37b9e64f6ea5f576050281ef0f1e6ced79ab6354829263ca9264c0300281a30d"
+    },
+    {
+      "frame": 142,
+      "position_s": 65.03333333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0142.jpg",
+      "sha256": "29ca60945ee0a6c1a11de0a097afff6dc81756554435599e6e36375fda05e298",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0142.png",
+      "originalFullFrameSha256": "e63a9c2141590e290d5ebdfba69bbb233cc68763512219bbdd7ebb3c112e72ea"
+    },
+    {
+      "frame": 143,
+      "position_s": 65.04166666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0143.jpg",
+      "sha256": "29ee6b6ce1200d315a410e9620234a743c780e1b3488f76f99d62e0dc93c522b",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0143.png",
+      "originalFullFrameSha256": "285d974590263de283ae08b536f8def38007e9716e5c68ab0bc2cfada2a1b880"
+    },
+    {
+      "frame": 144,
+      "position_s": 65.05,
+      "timeline_fps": 120,
+      "file": "frames/frame-0144.jpg",
+      "sha256": "878e19ff2c6f173123ade0c8ebae900550042656768adf5c3b0b9a26456dfb29",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0144.png",
+      "originalFullFrameSha256": "8298034f0b1c53f83265e1d2a906661ea6904df901fea8dbfd7ef25f179e58c4"
+    },
+    {
+      "frame": 145,
+      "position_s": 65.05833333333334,
+      "timeline_fps": 120,
+      "file": "frames/frame-0145.jpg",
+      "sha256": "ed59cd62da63a749c7d080cadfb151428e0de4dc652d0747546c1ddf0b7423f0",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0145.png",
+      "originalFullFrameSha256": "18689f361c929268cf2635fa888c7ed52e8b138ec3eaa64384d688e3c1facd7e"
+    },
+    {
+      "frame": 146,
+      "position_s": 65.06666666666666,
+      "timeline_fps": 120,
+      "file": "frames/frame-0146.jpg",
+      "sha256": "05671458ca60f4af71c8262f743e52e0ff7cb4157f125213babd232c7fd84518",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0146.png",
+      "originalFullFrameSha256": "16e13dbe351002ee7e26c106dfaea2450bf49aa3cba8c971c76ab682ecd09a48"
+    },
+    {
+      "frame": 147,
+      "position_s": 65.075,
+      "timeline_fps": 120,
+      "file": "frames/frame-0147.jpg",
+      "sha256": "47c6a11df4a00b73b73cdff08a7b5ed85a3e513f9e357b2972a8d8aa18a10bac",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0147.png",
+      "originalFullFrameSha256": "9965944a08066c6e5a2d4a7b915b2448c0d075e262889533e92db0bdb8656bbd"
+    },
+    {
+      "frame": 148,
+      "position_s": 65.08333333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0148.jpg",
+      "sha256": "feb4ff510c6d1a1f5f150e6dd34329d0b4299c05edef78a26fab261f06baf21c",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0148.png",
+      "originalFullFrameSha256": "dd831f616a15e132712aa4ef54c27360656240ab91bd982909856d8b93bca9d5"
+    },
+    {
+      "frame": 149,
+      "position_s": 65.09166666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0149.jpg",
+      "sha256": "7f46b644f0573ee7b48c665267fd00d09e373464921bbcb7706a47cc09f9ab41",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0149.png",
+      "originalFullFrameSha256": "7dfd087250f9d5ff1719c23669904ea799ac25834bb770322aa1787d5313dcc5"
+    },
+    {
+      "frame": 150,
+      "position_s": 65.1,
+      "timeline_fps": 120,
+      "file": "frames/frame-0150.jpg",
+      "sha256": "d9048f0a25acd58e5e0b0cd0dcd2b498b3076d930dd4ca63493d5c5331c1954f",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0150.png",
+      "originalFullFrameSha256": "afa5101592d3c129167b5bf336cc742e1914b8111895655b62004f293aa223ba"
+    },
+    {
+      "frame": 151,
+      "position_s": 65.10833333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0151.jpg",
+      "sha256": "a691a2a271e86ac9bad5d6fecf5df709f1257af9725eb95a14db8d7bfcbc0a9c",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0151.png",
+      "originalFullFrameSha256": "84fa784b4f1d7ee2f4a273b05d0d6d345ea4c8848a20bf10d50546e26e7b3991"
+    },
+    {
+      "frame": 152,
+      "position_s": 65.11666666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0152.jpg",
+      "sha256": "f5c5e03e7c687cc57a9b49964370b293f7fb1fe99aeda3bd7cf7d50f038b7dc2",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0152.png",
+      "originalFullFrameSha256": "8b45dd18a8d6b25863c0a10f9eefd47f9ae50f04a4ce3cda9515246196ba4ea4"
+    },
+    {
+      "frame": 153,
+      "position_s": 65.125,
+      "timeline_fps": 120,
+      "file": "frames/frame-0153.jpg",
+      "sha256": "317fe19fe374542117efe1258a4fda95bffb0d068ba6bbfb24415575972cf121",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0153.png",
+      "originalFullFrameSha256": "2e91ce81fe732584e1225e399388c30b257ebeafee8fcb636f079c3da4a98c59"
+    },
+    {
+      "frame": 154,
+      "position_s": 65.13333333333334,
+      "timeline_fps": 120,
+      "file": "frames/frame-0154.jpg",
+      "sha256": "c225abe1897d2e4f9a42673469fa6722212e7a4fd52eeef0db32039a7100372c",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0154.png",
+      "originalFullFrameSha256": "c9aff6c0777d55913ac755e88246712fa4f02a7878bbd4e84685429cdffe6f2f"
+    },
+    {
+      "frame": 155,
+      "position_s": 65.14166666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0155.jpg",
+      "sha256": "0e79c773e11605070a60f7ea31d71192f318a3315d10f5842ef513b80e5a9d59",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0155.png",
+      "originalFullFrameSha256": "c6b1c0bb45ece8067559266e1d5a0a8d726d59232fa410f12de63869b804ad64"
+    },
+    {
+      "frame": 156,
+      "position_s": 65.15,
+      "timeline_fps": 120,
+      "file": "frames/frame-0156.jpg",
+      "sha256": "0e79c773e11605070a60f7ea31d71192f318a3315d10f5842ef513b80e5a9d59",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0156.png",
+      "originalFullFrameSha256": "12e68e122192b30c8b4e651c4ab9a4319504a75ae4a024b38cb6f4561546acf1"
+    },
+    {
+      "frame": 157,
+      "position_s": 65.15833333333333,
+      "timeline_fps": 120,
+      "file": "frames/frame-0157.jpg",
+      "sha256": "2797e9b86a08a0d6aea904e9cc3c7e261a034e8cc2dd453d137f11422ca9776b",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0157.png",
+      "originalFullFrameSha256": "47b9f4d6d5da0599ec48352654ee5d1bef9842aa38e3029856bbe3b2bb651948"
+    },
+    {
+      "frame": 158,
+      "position_s": 65.16666666666667,
+      "timeline_fps": 120,
+      "file": "frames/frame-0158.jpg",
+      "sha256": "979d60277fffa5472c75dcf80890dba80f4a2c6c6b08038c72c3bf44266551db",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0158.png",
+      "originalFullFrameSha256": "83eaf61116e1b0021b68bd30d50d1817b628e115eaf8ae9181a8dfa309966e98"
+    },
+    {
+      "frame": 159,
+      "position_s": 65.175,
+      "timeline_fps": 120,
+      "file": "frames/frame-0159.jpg",
+      "sha256": "0c71282abaaf6e30891d04a544cde89e90cd88a6da1f07922aeddad270bd1bbc",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0159.png",
+      "originalFullFrameSha256": "1ab19a03bc7c99dda9a8a860e239b8968513d4cc1fd1f386024cf87ed5f6edc1"
+    },
+    {
+      "frame": 160,
+      "position_s": 65.18333333333334,
+      "timeline_fps": 120,
+      "file": "frames/frame-0160.jpg",
+      "sha256": "65053964bc36341aa47b35cac34c5b38c7185d5b53db392233016228e33e4f0c",
+      "originalFullFrame": "/Users/maxplanck/.codex/visualizations/2026/11/05/01a1add5-9a90-73c3-bec3-c18bfb04e619/gpui-highlight-frames/after/frame-0160.png",
+      "originalFullFrameSha256": "fe7766d752d7b4d290688ca9ada42d7d893c62a450ae85fd3f539b4543ad8aa8"
+    }
+  ],
+  "historicalImplementation": {
+    "approved-advancing-band.rs": "a37cde5adb57f834f96555da7422be045cb7fcb6364731ad71313139e046e1d0",
+    "approved-amber-trail.rs": "9311b7c279a4f0e818f76ace6973bafbcd46d609ecee62a29498b759d9330592",
+    "approved-build-lyric-glow-textures.py": "e97446355c13879d51a2b8b27e4f067e2ac064cfdd286f07d44f9ace4802c8ae",
+    "provenance.json": "91e373f9b5762a112f62a65122ada272cbbf893a36d92d69ff4afab9e6318c03"
+  },
+  "approvalTimestampUtc": "2026-11-06T10:11:53.097Z",
+  "approvalSessionEvent": 1466
+}

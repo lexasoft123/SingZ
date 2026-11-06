@@ -1,0 +1,16 @@
+{
+  "session": "/Users/maxplanck/.codex/sessions/2026/11/06/rollout-2026-11-06T01-30-19-01a1add5-9a90-73c3-bec3-c18bfb04e619.jsonl",
+  "line_number_convention": "zero-based JSONL indices",
+  "approved_user_event": {
+    "line": 1466,
+    "timestamp": "2026-11-06T10:11:53.097Z",
+    "text": "Cool now.\nLet's implement other required components and details.\nStart with frameless window"
+  },
+  "continuous_band_source_event": 1204,
+  "glyph_halo_removal_event": 1223,
+  "base_texture_source_event": 904,
+  "captured_frames": 161,
+  "timeline_fps": 120,
+  "start_s": 63.85,
+  "note": "Timeline samples are deterministic frozen screenshot captures, not live presentation-rate evidence."
+}
