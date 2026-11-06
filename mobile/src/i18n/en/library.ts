@@ -1,5 +1,6 @@
 /* English phone strings for the `phone.library` namespace — see ../index.ts. */
 export const library = {
+  'phone.library.openingCheck': 'Checking…',
   'phone.library.openingConnect': 'Connecting…',
   'phone.library.openingDownload': 'Downloading…',
   'phone.library.openingVerify': 'Checking download…',

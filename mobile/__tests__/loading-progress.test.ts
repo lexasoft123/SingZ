@@ -43,9 +43,9 @@ describe('opening presentation', () => {
   beforeEach(() => jest.useFakeTimers())
   afterEach(() => jest.useRealTimers())
   it('distinguishes local preparation, connection, transfer, verification and retry', () => {
-    expect([undefined, 'connecting', 'downloading', 'verifying', 'retrying'].map(activity =>
+    expect([undefined, 'checking', 'preparing', 'connecting', 'downloading', 'verifying', 'retrying'].map(activity =>
       openingStatusKey(activity as Parameters<typeof openingStatusKey>[0]))).toEqual([
-      'phone.library.opening', 'phone.library.openingConnect', 'phone.library.openingDownload',
+      'phone.library.opening', 'phone.library.openingCheck', 'phone.library.warmingUp', 'phone.library.openingConnect', 'phone.library.openingDownload',
       'phone.library.openingVerify', 'phone.library.openingRetry'])
   })
   it('never moves backwards on retry or completes from a file counter', () => {

@@ -1,5 +1,5 @@
-import type { OpeningActivity } from '../loading-progress'
-import { describeFileProgress, fileProgressFraction } from '../drive-progress';
+import type { OpeningActivity, OpeningTrack } from '../loading-progress'
+import { describeFileProgress, fileProgressFraction, openingTrack } from '../drive-progress';
 import { sanitizeSongVolume } from '../../../src/shared/song-volume';
 import { NativeModules, Platform } from 'react-native';
 import { barLengthAt, beatIndexAtOrAfter, beatTime } from '../beat';
@@ -818,7 +818,7 @@ export interface PlaybackLoadOptions {
   readonly entry: ProjectEntry;
   readonly engine: MultitrackEngine;
   readonly sampleRate: number;
-  readonly onStep: (message: string, fraction: number, activity?: OpeningActivity) => void;
+  readonly onStep: (message: string, fraction: number, activity?: OpeningActivity, track?: OpeningTrack) => void;
   readonly crumb?: (message: string) => Promise<void>;
   readonly isCurrent: () => boolean;
   readonly signal?: AbortSignal;
@@ -2082,7 +2082,7 @@ export class IosNativePlaybackCoordinator {
       // Everything from here is where the seconds actually go, and none of it
       // said so. Retiring the last song's graph can take a moment of its own;
       // the core's build takes most of it.
-      options.onStep(t('phone.app.native.progress.releasingLastSong'), MATERIALIZE_SHARE + 0.02);
+      options.onStep(t('phone.app.native.progress.releasingLastSong'), MATERIALIZE_SHARE + 0.02, 'preparing');
       const retired = await this.retireActiveLocked(
         'new native project selected',
       );
@@ -2099,7 +2099,7 @@ export class IosNativePlaybackCoordinator {
       // longest part of the open. The bar eases toward 0.95 and stops there
       // until the song is really open — see `creepingProgress`.
       const building = creepingProgress(
-        options.onStep,
+        (msg, frac) => options.onStep(msg, frac, 'preparing'),
         t('phone.app.native.progress.buildingGraph'),
         MATERIALIZE_SHARE + 0.05,
         0.97,
@@ -7498,6 +7498,7 @@ async function materializeNativeProject(
     if (!isCurrent()) throw new Error('Song load was superseded.');
     const source = sources[index];
     const wanted = doc.stemHashes?.[source.hashName];
+    const detail = openingTrack(source.id, index + 1, sources.length, source.custom ? source.label : undefined);
     onStep(
       t('phone.app.native.progress.fetchingTrack', {
         label: source.label,
@@ -7505,6 +7506,7 @@ async function materializeNativeProject(
         count: sources.length,
       }),
       MATERIALIZE_SHARE * completedWeight / Math.max(1, totalWeight),
+      undefined, detail,
     );
     await crumb?.(`fetching ${source.id}`);
     const path =
@@ -7521,7 +7523,7 @@ async function materializeNativeProject(
                 const weight = byteWeighted ? weights[index] : 1;
                 onStep(describeFileProgress(progress, source.label, index + 1, sources.length),
                   MATERIALIZE_SHARE * (completedWeight + weight * fileProgressFraction(progress)) / Math.max(1, totalWeight),
-                  progress.phase === 'checking' ? undefined : progress.phase);
+                  progress.phase, detail);
               },
             },
           )
@@ -7534,7 +7536,7 @@ async function materializeNativeProject(
     const projectSeed = identity ? waveformSeedFor(doc, source.id, identity.md5) : undefined;
     const privateSeed = identity && !projectSeed ? await waveforms?.seed(identity.md5) : undefined;
     const waveform = projectSeed ?? privateSeed;
-    onStep(t('phone.library.opening'), MATERIALIZE_SHARE * completedWeight / Math.max(1, totalWeight));
+    onStep(t('phone.library.opening'), MATERIALIZE_SHARE * completedWeight / Math.max(1, totalWeight), 'checking', detail);
     if (projectSeed) projectSeeds += 1;
     if (privateSeed) privateSeeds += 1;
     if (!isCurrent()) throw new Error('Song load was superseded.');

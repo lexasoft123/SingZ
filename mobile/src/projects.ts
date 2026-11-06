@@ -1,5 +1,5 @@
-import type { OpeningActivity } from './loading-progress'
-import { describeFileProgress, fileProgressFraction } from './drive-progress'
+import type { OpeningActivity, OpeningTrack } from './loading-progress'
+import { describeFileProgress, fileProgressFraction, openingTrack } from './drive-progress'
 import { downloadCancelled } from './file-download'
 import { mobileSongVolumePersistence } from './playback/song-volume-persistence'
 import { NativeModules } from 'react-native'
@@ -517,19 +517,19 @@ export function releaseStems(stems: { buffer: AudioBuffer }[]): void {
 export async function loadProject(
   entry: ProjectEntry,
   sampleRate: number,
-  onStep: (msg: string, frac: number, activity?: OpeningActivity) => void,
+  onStep: (msg: string, frac: number, activity?: OpeningActivity, track?: OpeningTrack) => void,
   crumb?: (note: string) => Promise<void>,
   signal?: AbortSignal
 ): Promise<LoadedProject> {
   const gdrive = entry.source === 'gdrive'
   const checkActive = (): void => { if (signal?.aborted) throw downloadCancelled() }
-  const fetchFile = async (file: string, md5: string | undefined, size: number | undefined, label: string, index: number): Promise<string> => {
+  const fetchFile = async (file: string, md5: string | undefined, size: number | undefined, label: string, index: number, detail: OpeningTrack): Promise<string> => {
     checkActive()
     const path = gdrive ? await driveLocalFile(entry.dir, file, md5, size, {
       signal,
       onProgress: p => onStep(describeFileProgress(p, label, index, total),
         (index - 1 + 0.5 * fileProgressFraction(p)) / total,
-        p.phase === 'checking' ? undefined : p.phase)
+        p.phase, detail)
     }) : await Folder.localFile(entry.dir, file)
     checkActive()
     return path
@@ -603,11 +603,12 @@ export async function loadProject(
       // (untranslated) label a singer can rename, same colour — so the two
       // paths that both mean "one whole track" read identically in the mixer.
       const label = 'Original'
-      onStep(t('phone.library.fetchingStep', { id: label, i: 1, n: total }), 0)
+      const detail = openingTrack('original', 1, total)
+      onStep(t('phone.library.fetchingStep', { id: label, i: 1, n: total }), 0, undefined, detail)
       await crumb?.('fetching the source track')
       const want = doc.songHash
-      const path = await fetchFile(doc.songFile, want?.md5, want?.size, label, 1)
-      onStep(t('phone.library.decodingStep', { id: label, i: 1, n: total }), 0.5)
+      const path = await fetchFile(doc.songFile, want?.md5, want?.size, label, 1, detail)
+      onStep(t('phone.library.decodingStep', { id: label, i: 1, n: total }), 0.5, 'preparing', detail)
       await crumb?.('decoding the source track')
       checkActive()
       const t0 = Date.now()
@@ -624,11 +625,12 @@ export async function loadProject(
     }
     for (let i = 0; i < ids.length; i++) {
       const id = ids[i]
-      onStep(t('phone.library.fetchingStep', { id, i: i + 1, n: total }), i / total)
+      const detail = openingTrack(id, i + 1, total)
+      onStep(t('phone.library.fetchingStep', { id, i: i + 1, n: total }), i / total, undefined, detail)
       await crumb?.(`fetching ${id}`)
       const want = doc?.stemHashes?.[`${id}.${entry.stems[id]}`]
-      const path = await fetchFile(`stems/${id}.${entry.stems[id]}`, want?.md5, want?.size, id, i + 1)
-      onStep(t('phone.library.decodingStep', { id, i: i + 1, n: total }), (i + 0.5) / total)
+      const path = await fetchFile(`stems/${id}.${entry.stems[id]}`, want?.md5, want?.size, id, i + 1, detail)
+      onStep(t('phone.library.decodingStep', { id, i: i + 1, n: total }), (i + 0.5) / total, 'preparing', detail)
       await crumb?.(`decoding ${id}`)
       checkActive()
       // file:// matters: audio-api's Android RELEASE builds treat bare strings
@@ -676,12 +678,13 @@ export async function loadProject(
     for (let i = 0; i < added.length; i++) {
       const track = added[i]
       const at = ids.length + i
-      onStep(t('phone.library.fetchingStep', { id: track.label, i: at + 1, n: total }), at / total)
+      const detail = openingTrack(track.id, at + 1, total, track.label)
+      onStep(t('phone.library.fetchingStep', { id: track.label, i: at + 1, n: total }), at / total, undefined, detail)
       await crumb?.(`fetching ${track.id}`)
       try {
         const wantTrack = doc?.stemHashes?.[track.file.slice('stems/'.length)]
-        const path = await fetchFile(track.file, wantTrack?.md5, wantTrack?.size, track.label, at + 1)
-        onStep(t('phone.library.decodingStep', { id: track.label, i: at + 1, n: total }), (at + 0.5) / total)
+        const path = await fetchFile(track.file, wantTrack?.md5, wantTrack?.size, track.label, at + 1, detail)
+        onStep(t('phone.library.decodingStep', { id: track.label, i: at + 1, n: total }), (at + 0.5) / total, 'preparing', detail)
         await crumb?.(`decoding ${track.id}`)
         checkActive()
         const buffer = await decodeAudioData(`file://${path}`, sampleRate)

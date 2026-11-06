@@ -563,6 +563,7 @@ function harness(
     now: () => 10,
   });
   const current = options.current ?? (() => true);
+  const openingSteps = jest.fn();
   const load = (
     nextEntry: ProjectEntry = platform === 'android' ? androidEntry() : entry(),
     isCurrent: () => boolean = current,
@@ -571,11 +572,12 @@ function harness(
       entry: nextEntry,
       engine,
       sampleRate: 48_000,
-      onStep: jest.fn(),
+      onStep: openingSteps,
       isCurrent,
     });
   return {
     coordinator,
+    openingSteps,
     native,
     engine,
     legacyLoad,
@@ -6787,4 +6789,19 @@ describe('honest playback diagnostics', () => {
       expect(lines.filter(line => line.startsWith('unloaded generation'))).toHaveLength(1);
     } finally { off(); }
   });
+});
+
+it('carries per-stem context through native file checks and clears it for graph preparation', async () => {
+  const h = harness({ platform: 'ios' });
+  const project = await h.load();
+  const calls = h.openingSteps.mock.calls;
+  const details = calls.filter(call => call[3] !== undefined);
+  expect(details.length).toBeGreaterThan(0);
+  expect(details.map(call => call[3].index)).toEqual([1, 1, 2, 2]);
+  expect(details.every(call => call[3].count === 2)).toBe(true);
+  expect(details.filter(call => call[2] === 'checking')).toHaveLength(2);
+  const preparation = calls.filter(call => call[2] === 'preparing');
+  expect(preparation.length).toBeGreaterThan(0);
+  expect(preparation.every(call => call[3] === undefined)).toBe(true);
+  await project.nativePlayback!.unload('opening stem status regression');
 });

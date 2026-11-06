@@ -3,6 +3,7 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const library: Translation<typeof en> = {
+  'phone.library.openingCheck': 'กำลังตรวจสอบ…',
   'phone.library.openingConnect': 'กำลังเชื่อมต่อ…',
   'phone.library.openingDownload': 'กำลังดาวน์โหลด…',
   'phone.library.openingVerify': 'กำลังตรวจสอบไฟล์…',

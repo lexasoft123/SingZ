@@ -35,7 +35,7 @@ import {
 } from '../gdrive'
 import { getCrumb, getStoredText, setCrumb, setStoredText } from '../latency'
 import { fmtBytes, fmtMs, log } from '../log'
-import { createLoadingProgress, openingStatusKey, openingFraction, waitForProgressPaint } from '../loading-progress'
+import { type OpeningTrack, createLoadingProgress, openingStatusKey, openingFraction, waitForProgressPaint } from '../loading-progress'
 import type { MultitrackEngine } from '../engine'
 import { addedTracks, STEM_ORDER_ALL, type LyricsDoc, type ProjectDoc } from '../model'
 import {
@@ -149,6 +149,7 @@ const iosLibraryText = (key: Extract<Key, `phone.library.${string}Iphone`>): str
   t(key).replaceAll('iPhone', Platform.OS === 'ios' && Platform.isPad ? 'iPad' : 'iPhone')
 
 interface Loading {
+  track?: OpeningTrack
   dir: string
   msg: string
   frac: number
@@ -845,12 +846,13 @@ export default function CatalogScreen({
           signal: abort.signal,
           engine,
           sampleRate,
-          onStep: (msg, frac, activity) => {
+          onStep: (msg, frac, activity, track) => {
             if (tok !== token.current) return
             stepLog.current.rows.push({ ms: Date.now() - stepLog.current.t0, frac, msg })
             completedFraction = openingFraction(completedFraction, frac)
             progress.update({ dir: entry.dir,
-              msg: t(openingStatusKey(activity)),
+              msg: track ? `${t(openingStatusKey(activity)).replace(/(?:…|\.{3})$/, '')} · ${track.label}` : t(openingStatusKey(activity)),
+              track,
               frac: completedFraction })
           },
           crumb: setCrumb,
@@ -2121,9 +2123,13 @@ export default function CatalogScreen({
             </Text>
           )}
           {isLoading ? (
-            <Text style={[s.cardMeta, { color: C.amber }]} numberOfLines={1} accessibilityLabel={loading.msg}>
-              {loading.msg}
-            </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'baseline' }}>
+              <Text style={[s.cardMeta, { color: C.amber, flexShrink: 1 }]} numberOfLines={1}
+                accessibilityLabel={loading.track ? `${loading.msg} · ${loading.track.index}/${loading.track.count}` : loading.msg}>
+                {loading.msg}
+              </Text>
+              {loading.track && <Text accessible={false} style={[s.cardMeta, { color: C.amber }]}> · {loading.track.index}/{loading.track.count}</Text>}
+            </View>
           ) : failed ? (
             <Text style={[s.cardMeta, { color: C.amber }]} numberOfLines={4}>
               {failed.message}

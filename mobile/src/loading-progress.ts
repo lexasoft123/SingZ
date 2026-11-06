@@ -1,10 +1,18 @@
 import type { FileProgress } from './file-download'
 
-export type OpeningActivity = Exclude<FileProgress['phase'], 'checking'>
+export type OpeningActivity = FileProgress['phase'] | 'preparing'
 
-/** Card copy describes the opening stage, never an individual local stem. */
+export interface OpeningTrack {
+  label: string
+  index: number
+  count: number
+}
+
+/** A compact stage label; the card renders stem and ordinal separately. */
 export function openingStatusKey(activity?: OpeningActivity) {
   switch (activity) {
+    case 'checking': return 'phone.library.openingCheck'
+    case 'preparing': return 'phone.library.warmingUp'
     case 'connecting': return 'phone.library.openingConnect'
     case 'downloading': return 'phone.library.openingDownload'
     case 'verifying': return 'phone.library.openingVerify'
