@@ -166,6 +166,59 @@ an app restart must use the persisted data, not merely a process-local memo.
 This cache avoids repeated waveform scans; it does not cache the native
 playback graph or change the streaming preference.
 
+The small per-lane RMS96 envelope also lives in `project.json` for phone reuse.
+`src/shared/waveform-envelope-cache.ts` owns its version, policy, 96-bucket shape
+and 16-lane bound. Change the policy/version when envelope semantics change;
+legacy unstamped records mean only the original v1 algorithm. Both writers prune
+removed, stale and malformed lanes and resolve custom IDs through
+`settings.custom[].file`, rather than deriving filenames from labels or IDs.
+
+Mobile also keeps up to 64 validated RMS96 envelopes in the durable app-private
+`singz.waveforms.rms96.v1` preference, bounded to 256 KiB and keyed by the actual
+audio MD5. This survives process restarts for read-only picked folders and Drive
+projects. Only a project explicitly owned by the phone may receive a
+`project.json` waveform update; never write a same-named Documents shadow for an
+external source. App-private writes are serialized and discard superseded loads.
+
+A streamed prepare passes validated envelopes into the native session before
+analysis starts, so a cache hit avoids opening a background analysis reader.
+Desktop seeds come only from main's verified measurement cache, after path/codec
+authorization; renderer-supplied seeds are refused. Mobile seeds require the
+fresh MD5 of the materialized file, not merely the hash in the document. Folder
+copies compare source and destination contents even when size and mtime match.
+Mobile download currency and waveform identity share a bounded 128-entry process
+memo. Its key includes canonical path, device/inode, size, and nanosecond mtime
+and ctime; a restored mtime alone cannot preserve an entry. Hashes come from one
+opened descriptor with stamps checked before/after the read and against the live
+path. Authorization is rechecked after canonicalization and on the opened target.
+Read errors, short reads and concurrent replacement fail closed. Old persisted
+size/mtime-only MD5 records are not identity evidence. Opaque folder-provider
+sources still receive a fresh content comparison; validated destinations reuse
+the same identity instead of being hashed again for waveform seeding.
+
+Catalog loading coalesces visual progress at 100 ms. Every diagnostic step and
+awaited durable breadcrumb is still recorded; fast file callbacks must not pay
+for a complete catalog render per step. Completion, cancellation and a newer
+load discard pending visual updates before they can restore a stale spinner.
+
+The playback log's presentation counter is a sampled, latency-adjusted frame
+estimate. It does not detect PCM energy or establish the instant sound began;
+status polling and bridge scheduling delay its observation. Report its sampling
+scope and graph/route latency rather than calling it a first audible callback.
+
+The native in-memory envelope map is bounded to 64 content-bound identities;
+path-only identities never reuse measurements. Missing or rejected lanes still
+measure progressively. Short custom lanes are padded with silence in the mixed
+seek-bar timeline, while their stored envelope remains relative to their source.
+
+Focused checks: desktop `lane-measure-cache`, `desktop-waveform-seed` and
+`project-waveforms` Vitest suites; mobile `waveform-cache`, `waveform-store`, `waveform-writer`,
+`waveform-mix` and `native-playback-b2` Jest suites; the Swift folder runner at
+`mobile/__tests__/test-swift-folder-materialization.sh`; Android folder/schema
+unit tests; and native playback/streaming feeder tests in all sanitizer presets.
+The real addon smoke includes valid and mismatched seed controls. Rebuild and
+install mobile binaries after bridge/core changes before claiming runtime reuse.
+
 ### Native compiler caches
 
 `ccache` is optional and shared per user; build outputs remain worktree-local.
@@ -646,6 +699,27 @@ code**, which is precisely what a parallel worktree produces. Note also that
 on whether the vendored binary supports native capture — so which binary is
 present decides which half of that driver runs, and provenance is a testing
 question, not only a correctness one.
+
+## Diagnostic log wording
+
+Log confirmed outcomes, not inferred work. A native envelope read can return a
+seed, an in-memory result or newly scanned data: call it “envelopes ready” unless
+the producer actually reports a scan. A seed offered by JS is a cache candidate,
+not proof that native accepted it. Cache summaries name the layer and count hits,
+misses or pending lanes independently. Never invent a zero-duration lookup.
+
+Every duration names its scope: a full waveform request can include disk lookup,
+native measurement, cache writes and pruning; mobile file preparation can include
+download/cache validation, copying and content hashing. Cancellation is a normal
+outcome, failures retain their operation and reason, and an already completed
+cleanup must not announce another successful release. Routine graph logs retain
+counts and resource totals without repeating the entire topology.
+
+Use the existing persistent Log pipeline. Desktop renderer warnings/errors and
+renderer crashes/load failures are captured there as well; a closing log viewer
+cannot fail the operation being logged. Copy/Share exports use full ISO UTC
+timestamps so archived launches and midnight remain distinguishable, while the
+on-screen clock remains compact.
 
 ## Test suites
 

@@ -96,9 +96,10 @@ ready.then(async () => {
   assert.equal(typeof stats.deliveredBlocks, 'string')
   assert.equal(typeof stats.droppedEvents, 'string')
   assert.equal(typeof stats.overwrittenWindows, 'string')
-  const hostDevices = addon.audioHostDevices()
-  assert.equal(hostDevices.ok, true)
   const expectedProvider = process.platform === 'darwin' ? 'coreaudio' : process.platform === 'linux' ? 'alsa' : 'wasapi'
+  // Playback requires provider-scoped device identities (notably wasapi: on Windows).
+  const hostDevices = addon.audioHostDevices(expectedProvider)
+  assert.equal(hostDevices.ok, true)
   assert.equal(hostDevices.provider, expectedProvider)
   assert.equal(typeof hostDevices.defaultInputUid, 'string')
   assert.equal(typeof hostDevices.defaultOutputUid, 'string')
@@ -334,10 +335,57 @@ ready.then(async () => {
     assert.equal(unloaded.ok, true, unloaded.error)
     assert.equal(unloaded.cleanupComplete, true)
     assert.equal(addon.playbackStatus().graphArenaBytes, '0')
+
+    const streamingConfig = { ...preparedConfig, streamLanes: true }
+    const seededKey = `measure:${'a'.repeat(64)}`
+    const seededResult = await addon.preparePlayback(streamingConfig, [{
+      id: 'seeded', path: wav, gain: 1, muted: false, solo: false,
+      sourceKey: seededKey,
+      waveform: {
+        version: 1,
+        policy: 'singz.native.streaming-envelope.rms96-v1',
+        contentKey: seededKey,
+        peaks: Array(96).fill(0.75)
+      }
+    }], 5n)
+    assert.equal(seededResult.ok, true, seededResult.error)
+    const seeded = addon.playbackLanePeaks(5n)
+    assert.equal(seeded.ok, true, seeded.message)
+    assert.equal(seeded.bucketCount, 96)
+    assert.equal(seeded.lanes.length, 1)
+    assert.equal(seeded.lanes[0].peaksValid, true)
+    // Silent PCM measures zero everywhere. Only the consumed sentinel seed can
+    // produce this answer, so dropping the N-API handoff fails this smoke.
+    assert.deepEqual(seeded.lanes[0].peaks, Array(96).fill(0.75))
+    assert.equal(addon.unloadPlayback(5n).ok, true)
+
+    const mismatchedResult = await addon.preparePlayback(streamingConfig, [{
+      id: 'fallback', path: wav, gain: 1, muted: false, solo: false,
+      sourceKey: `measure:${'b'.repeat(64)}`,
+      waveform: {
+        version: 1,
+        policy: 'singz.native.streaming-envelope.rms96-v1',
+        contentKey: seededKey,
+        peaks: Array(96).fill(0.9)
+      }
+    }], 6n)
+    assert.equal(mismatchedResult.ok, true, mismatchedResult.error)
+    let measured
+    for (let attempt = 0; attempt < 600; ++attempt) {
+      measured = addon.playbackLanePeaks(6n)
+      if (measured.lanes[0]?.peaksValid) break
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(measured.ok, true, measured.message)
+    assert.equal(measured.lanes[0].peaksValid, true)
+    assert.deepEqual(measured.lanes[0].peaks, Array(96).fill(0))
+    assert.equal(addon.unloadPlayback(6n).ok, true)
   } finally {
     // Exact-generation unload is idempotently rejected after success and
     // provides cleanup on an assertion failure after prepare.
     addon.unloadPlayback(4n)
+    addon.unloadPlayback(5n)
+    addon.unloadPlayback(6n)
     try { unlinkSync(wav) } catch {}
   }
   finish()

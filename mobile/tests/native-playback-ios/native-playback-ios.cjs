@@ -312,7 +312,7 @@ const report = (item, ok, detail) => {
   for (let i = 0; i < 100 && (renderT === null || audibleT === null); i++) {
     playLog = await logSince(playRes.t0);
     const r = playLog.find((e) => /rendering started/.test(e.line));
-    const a = playLog.find((e) => /first audible callback/.test(e.line));
+    const a = playLog.find((e) => /presentation counter first observed/.test(e.line));
     if (r) renderT = r.t;
     if (a) audibleT = a.t;
     if (renderT === null || audibleT === null) await sleep(100);
@@ -324,9 +324,9 @@ const report = (item, ok, detail) => {
   const playToRender = renderT === null ? null : renderT - playRes.t0;
   const playToAudible = audibleT === null ? null : audibleT - playRes.t0;
   report(
-    '2. play: rendering started + first audible callback, no new preparing graph, play→rendering well under 1 s',
+    '2. play: rendering started + presentation counter first observed, no new preparing graph, play→rendering well under 1 s',
     renderT !== null && audibleT !== null && prepPlay === 0 && playToRender < 1000,
-    `play() resolved in ${playRes.tDone - playRes.t0} ms (${JSON.stringify(playRes.r)}) · play→"rendering started" ${playToRender} ms · play→"first audible callback" ${playToAudible} ms · preparing graph lines after play=${prepPlay}`
+    `play() resolved in ${playRes.tDone - playRes.t0} ms (${JSON.stringify(playRes.r)}) · play→"rendering started" ${playToRender} ms · play→"presentation counter first observed" ${playToAudible} ms · preparing graph lines after play=${prepPlay}`
   );
 
   // wait until past the count-in

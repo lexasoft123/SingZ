@@ -534,8 +534,10 @@ describe('iOS native DSP runtime packaging', () => {
     expect(iosAudio).toContain('`releaseProject()`')
     expect(iosAudio).toContain('before lazily decoding a legacy fallback')
     expect(facade).not.toContain('decodeAudioData(')
+    const materialization = facade.indexOf('await materializeNativeProject(options, doc,');
+    expect(materialization).toBeGreaterThan(-1)
     expect(facade.indexOf('nativePlaybackEligibility(')).toBeLessThan(
-      facade.indexOf('materializeNativeProject(options, doc)')
+      materialization
     )
     expect(facade).toContain('cleanup.globallyComplete === true')
     expect(facade).toContain('cleanup.handoffLease > 0')

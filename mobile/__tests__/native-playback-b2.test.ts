@@ -18,12 +18,14 @@ import {
   rebuildIosNativePlaybackCues,
   rebuildNativePlaybackCues,
   type NativePlaybackCapability,
+  type NativePlaybackSessionStatus,
   type NativePlaybackResult,
   type NativePlaybackUnloadResult,
 } from '../src/playback/native';
 import type { IosNativePlaybackPreferenceStore } from '../src/playback/preferences';
 import { playbackCountInDisplay } from '../src/playback/count-in-display';
 import { md5Text, utf8TextByteLength } from '../src/md5';
+import { WaveformStore } from '../src/waveform-store';
 
 const doc = (overrides: Partial<ProjectDoc['settings']> = {}): ProjectDoc => ({
   version: 2,
@@ -298,6 +300,7 @@ const capability = (
 
 function harness(
   options: {
+    waveforms?: Pick<WaveformStore, 'seed' | 'remember'>;
     prepareOk?: boolean;
     cleanupComplete?: boolean;
     current?: () => boolean;
@@ -441,10 +444,10 @@ function harness(
         ok: true,
         error: 'none',
         generation: next,
-        bucketCount: 2,
+        bucketCount: 96,
         lanes: [
-          { id: 'vocals', peaksValid: true, peaks: [0.5, 1] },
-          { id: 'drums', peaksValid: true, peaks: [1, 0.25] },
+          { id: 'vocals', peaksValid: true, peaks: new Array<number>(96).fill(0.5) },
+          { id: 'drums', peaksValid: true, peaks: new Array<number>(96).fill(0.25) },
         ],
         message: '',
       };
@@ -555,10 +558,12 @@ function harness(
     platform,
     native: native as never,
     preferences,
+    waveforms: options.waveforms,
     legacyLoad: legacyLoad as never,
     now: () => 10,
   });
   const current = options.current ?? (() => true);
+  const openingSteps = jest.fn();
   const load = (
     nextEntry: ProjectEntry = platform === 'android' ? androidEntry() : entry(),
     isCurrent: () => boolean = current,
@@ -567,11 +572,12 @@ function harness(
       entry: nextEntry,
       engine,
       sampleRate: 48_000,
-      onStep: jest.fn(),
+      onStep: openingSteps,
       isCurrent,
     });
   return {
     coordinator,
+    openingSteps,
     native,
     engine,
     legacyLoad,
@@ -609,6 +615,7 @@ async function until(predicate: () => boolean): Promise<void> {
 }
 
 beforeEach(() => {
+  delete (NativeModules.FolderAccess as Record<string, unknown>).fileIdentity;
   (NativeModules.FolderAccess as Record<string, unknown>).localFile = jest.fn(
     async (_project: string, file: string) => `/app/${file}`,
   );
@@ -623,6 +630,90 @@ beforeEach(() => {
 describe.each(['ios', 'android'] as const)(
   '%s Phase 4B product coordinator',
   platform => {
+    it('persists content-bound envelopes queued before a same-song generation rebuild', async () => {
+      (NativeModules.FolderAccess as Record<string, unknown>).fileIdentity = jest.fn(
+        async (path: string) => ({ path, md5: md5Text(path), size: 1, mtimeMs: 1 }),
+      );
+      let stored: string | null = null;
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const store = new WaveformStore({
+        getPreference: async () => stored,
+        setPreference: async (_key, value) => { stored = value; },
+      });
+      const remember = jest.fn(async (...args: Parameters<WaveformStore['remember']>) => {
+        await gate;
+        await store.remember(...args);
+      });
+      const h = harness({ platform, waveforms: { seed: md5 => store.seed(md5), remember } });
+      const project = await h.load(platform === 'android' ? androidEntry() : entry());
+      const handle = project.nativePlayback!;
+      await handle.lanePeaks();
+      expect(remember).toHaveBeenCalledTimes(1);
+      await rebuildNativePlaybackCues(handle, null, {
+        click: false, countInBars: 0, volume: 0, accent: true,
+      });
+      expect(h.native.prepare).toHaveBeenCalledTimes(2);
+      release();
+      await remember.mock.results[0].value;
+      expect(stored).not.toBeNull();
+      const persisted = JSON.parse(stored!);
+      expect(persisted.entries.length).toBeGreaterThan(0);
+      for (const envelope of persisted.entries) {
+        expect(await new WaveformStore({ getPreference: async () => stored, setPreference: async () => {} }).seed(envelope.md5))
+          .toMatchObject({ sourceMd5: envelope.md5, peaks: envelope.peaks });
+      }
+      await handle.unload('queued waveform rebuild complete');
+    });
+
+    it('reuses private measured envelopes across restarts of a picked folder with stale document hashes', async () => {
+      const prepared = (h: ReturnType<typeof harness>) => h.prepareRequests[0].lanes as Array<{ id: string; contentMd5?: string; waveform?: { sourceMd5: string; peaks: readonly number[] } }>;
+      let stored: string | null = null;
+      const api = {
+        getPreference: async (_key: string) => stored,
+        setPreference: async (_key: string, value: string) => { stored = value; },
+      };
+      let vocalHash = 'a'.repeat(32);
+      (NativeModules.FolderAccess as Record<string, unknown>).fileIdentity = jest.fn(
+        async (path: string) => ({ path, md5: path.includes('vocals.') ? vocalHash : md5Text(path), size: 1, mtimeMs: 1 }),
+      );
+      const picked = platform === 'android' ? androidEntry() : entry();
+      picked.metronomeRef = { source: 'picked', dir: picked.dir, root: 'picked-root' };
+      picked.doc.stemHashes = { 'vocals.flac': { md5: 'f'.repeat(32), size: 1, mtimeMs: 1 } };
+      picked.doc.waveforms = { vocals: { md5: 'f'.repeat(32), peaks: Array(96).fill(0.9) } };
+      const external = JSON.stringify(picked.doc.waveforms);
+      const first = harness({ platform, waveforms: new WaveformStore(api) });
+      const loaded = await first.load(picked);
+      first.native.lanePeaks = jest.fn(async generation => ({ ok: true, error: 'none', generation, bucketCount: 96, lanes: prepared(first).map(lane => ({ id: lane.id, peaksValid: true, peaks: Array(96).fill(0.5) })), message: '' }));
+      expect(prepared(first).every(lane => lane.waveform === undefined)).toBe(true);
+      const measured = await loaded.nativePlayback!.lanePeaks();
+      await until(() => stored !== null);
+      await loaded.nativePlayback!.unload('private waveform first process');
+
+      const restart = harness({ platform, waveforms: new WaveformStore(api) });
+      const restored = await restart.load(picked);
+      for (const lane of prepared(restart)) {
+        expect(lane.waveform?.peaks).toEqual(measured!.lanes.find(old => old.id === lane.id)!.peaks);
+        expect(lane.waveform?.sourceMd5).toBe(lane.contentMd5);
+      }
+      await restored.nativePlayback!.unload('private waveform second process');
+
+      // Same-size/restored-mtime replacement with unchanged external metadata.
+      vocalHash = 'e'.repeat(32);
+      const replaced = harness({ platform, waveforms: new WaveformStore(api) });
+      const changed = await replaced.load(picked);
+      expect(prepared(replaced).find(lane => lane.id === 'vocals')!.waveform).toBeUndefined();
+      expect(prepared(replaced).filter(lane => lane.id !== 'vocals').every(lane => lane.waveform != null)).toBe(true);
+      await changed.nativePlayback!.lanePeaks();
+      await until(() => stored?.includes(vocalHash) === true);
+      await changed.nativePlayback!.unload('private waveform replacement');
+      const third = harness({ platform, waveforms: new WaveformStore(api) });
+      const reopened = await third.load(picked);
+      expect(prepared(third).find(lane => lane.id === 'vocals')!.waveform?.sourceMd5).toBe(vocalHash);
+      expect(JSON.stringify(picked.doc.waveforms)).toBe(external);
+      await reopened.nativePlayback!.unload('private waveform third process');
+    });
+
     it('selects one native owner with a whole-song cue DTO and no JS PCM decode', async () => {
       const h = harness({ platform });
       const project = await h.load();
@@ -648,6 +739,91 @@ describe.each(['ios', 'android'] as const)(
       expect(h.prepareRequests[0]).not.toHaveProperty('events');
       expect(h.native.previewClick).toBeDefined();
       await project.nativePlayback?.unload('cross-platform contract cleanup');
+    });
+
+    it('seeds only valid actual-content lanes, including custom file mappings', async () => {
+      const hashes = {
+        vocals: 'a'.repeat(32),
+        drums: 'b'.repeat(32),
+        custom: 'c'.repeat(32),
+        stale: 'd'.repeat(32),
+      };
+      const settings = {
+        custom: [{
+          id: 'custom-studio-id',
+          label: 'Studio double',
+          color: '#ffffff',
+          file: 'stems/custom-take-7.mp3',
+        }],
+      };
+      const projectDoc = doc(settings);
+      projectDoc.stemHashes = {
+        'vocals.flac': { md5: hashes.vocals, size: 1, mtimeMs: 1 },
+        'drums.wav': { md5: hashes.drums, size: 1, mtimeMs: 1 },
+        'custom-take-7.mp3': { md5: hashes.custom, size: 1, mtimeMs: 1 },
+      };
+      projectDoc.waveforms = {
+        vocals: {
+          version: 1,
+          policy: 'singz.native.streaming-envelope.rms96-v1',
+          md5: hashes.vocals,
+          peaks: new Array(96).fill(0.5),
+        },
+        drums: {
+          version: 1,
+          policy: 'singz.native.streaming-envelope.rms96-v1',
+          md5: hashes.stale,
+          peaks: new Array(96).fill(0.25),
+        },
+        'custom-studio-id': {
+          md5: hashes.custom,
+          peaks: new Array(96).fill(0.4),
+        },
+      };
+      const projectEntry = platform === 'android'
+        ? androidEntry(settings)
+        : entry(settings);
+      projectEntry.doc = projectDoc;
+      const identity = jest.fn(async (path: string) => ({
+        path,
+        md5: path.includes('vocals.')
+          ? hashes.vocals
+          : path.includes('drums.')
+            ? hashes.drums
+            : hashes.custom,
+        size: 1,
+        mtimeMs: 1,
+      }));
+      (NativeModules.FolderAccess as Record<string, unknown>).fileIdentity = identity;
+      const h = harness({ platform });
+      const project = await h.load(projectEntry);
+      const lanes = h.prepareRequests[0].lanes as Array<{
+        id: string;
+        contentMd5?: string;
+        waveform?: {
+          version: number;
+          policy: string;
+          sourceMd5: string;
+          bucketCount: number;
+        };
+      }>;
+      const byId = Object.fromEntries(lanes.map(lane => [lane.id, lane]));
+
+      expect(byId.vocals.contentMd5).toBe(hashes.vocals);
+      expect(byId.vocals.waveform?.sourceMd5).toBe(hashes.vocals);
+      expect(byId.drums.contentMd5).toBe(hashes.drums);
+      // Negative control: trusting the document's stale hash or discarding the
+      // whole set would either seed the wrong drums or lose the two valid hits.
+      expect(byId.drums).not.toHaveProperty('waveform');
+      expect(byId['custom-studio-id'].waveform).toMatchObject({
+        version: 1,
+        policy: 'singz.native.streaming-envelope.rms96-v1',
+        sourceMd5: hashes.custom,
+        bucketCount: 96,
+      });
+      expect(byId['custom-take-7']).toBeUndefined();
+      expect(identity).toHaveBeenCalledTimes(lanes.length);
+      await project.nativePlayback?.unload('waveform seed test cleanup');
     });
 
     it('queues an accent preview click on the exact running generation', async () => {
@@ -919,6 +1095,36 @@ describe.each(['ios', 'android'] as const)(
 );
 
 describe('iOS B2 backend selection and ownership', () => {
+  it('reports a sampled presentation estimate with route latency, never detected sound onset', async () => {
+    const lines: string[] = [];
+    const off = onLogLine(e => { if (e.source === 'dsp') lines.push(e.line); });
+    const h = harness();
+    const project = await h.load();
+    try {
+      await project.nativePlayback!.start();
+      const telemetry = project.nativePlayback as unknown as {
+        publishTelemetry(session: NativePlaybackSessionStatus): void;
+      };
+      const sample = { ...capability(1, 'running', 48_000).session!,
+        audibleFrames: 0, graphLatencyFrames: 0,
+        devicePresentationLatencyFrames: 96_000, presentationLatencyFrames: 96_000,
+        totalPresentationLatencyFrames: 96_000,
+      };
+      telemetry.publishTelemetry(sample);
+      expect(lines.some(line => line.startsWith('presentation counter first observed'))).toBe(false);
+      telemetry.publishTelemetry({ ...sample, renderedFrames: 144_000, audibleFrames: 48_000 });
+      const observed = lines.find(line => line.startsWith('presentation counter first observed'));
+      expect(observed).toContain('estimated presented 48000 frames · rendered 144000 frames');
+      expect(observed).toContain('presentation latency 96000 frames (graph 0, route 96000)');
+      expect(observed).toContain('48000 Hz');
+      expect(observed).toContain('status polling');
+      expect(lines.some(line => line.startsWith('first audible callback'))).toBe(false);
+    } finally {
+      off();
+      await project.nativePlayback!.unload('presentation estimate diagnostic test');
+    }
+  });
+
   it('records explicit DSP initialization, graph, AudioHost and render evidence', async () => {
     const lines: string[] = [];
     const unsubscribe = onLogLine(logEntry => {
@@ -939,14 +1145,14 @@ describe('iOS B2 backend selection and ownership', () => {
           expect.stringMatching(
             /preparing graph.*transport v2 entry 0\.000 s.*cues click off, count-in 0 bars/i,
           ),
-          expect.stringMatching(/graph ready.*fixture source→map→gain/i),
+          expect.stringMatching(/graph ready.*10 nodes\/9 connections/i),
           expect.stringMatching(/iOS audio session ready.*48 kHz.*256 frame/i),
           expect.stringMatching(/zcore AudioHost open.*iPhone Speaker/i),
           expect.stringMatching(
             /rendering started.*zdsp graph owns native output/i,
           ),
           expect.stringMatching(
-            /first audible callback.*zcore AudioHost → zdsp graph/i,
+            /presentation counter first observed.*estimated presented.*presentation latency/i,
           ),
           expect.stringMatching(/render health.*1\.0 s processed.*xruns 0/i),
         ]),
@@ -4208,7 +4414,8 @@ describe('a slow open explains itself', () => {
 
       const ready = lines.find(line => line.startsWith('graph ready'))!;
       expect(ready).toMatch(/prepared in/);
-      expect(ready).not.toMatch(/decoded one at a time|did not fit/);
+      expect(ready).not.toMatch(/decoded one at a time|did not fit|fixture source|→/);
+      expect(ready.length).toBeLessThan(600);
     } finally {
       unsubscribe();
     }
@@ -4230,7 +4437,7 @@ describe("the seek bar's waveform", () => {
     // second read is free. This is why it is off the status poll at all.
     expect(h.calls).toEqual([`native.lanePeaks:${generation}`]);
     expect(first).toEqual(second);
-    expect(first?.bucketCount).toBe(2);
+    expect(first?.bucketCount).toBe(96);
     expect(first?.lanes.map(lane => lane.id)).toEqual(['vocals', 'drums']);
   });
 
@@ -4258,10 +4465,10 @@ describe("the seek bar's waveform", () => {
         ok: true,
         error: 'none',
         generation: next,
-        bucketCount: 2,
+        bucketCount: 96,
         lanes: [
-          { id: 'vocals', peaksValid: measured >= 2, peaks: [0.5, 1] },
-          { id: 'drums', peaksValid: measured >= 3, peaks: [1, 0.25] },
+          { id: 'vocals', peaksValid: measured >= 2, peaks: new Array(96).fill(0.5) },
+          { id: 'drums', peaksValid: measured >= 3, peaks: new Array(96).fill(0.25) },
         ],
         message: '',
       };
@@ -4273,8 +4480,8 @@ describe("the seek bar's waveform", () => {
     const all = await handle.lanePeaks();
     const cached = await handle.lanePeaks();
 
-    // Three real calls for the three states, and NOTHING for the fourth ask:
-    // the complete answer is the one that gets kept.
+    // Negative control: caching `none` or `half` would suppress the remaining
+    // native calls and freeze a partial waveform for this whole generation.
     expect(h.calls).toEqual([
       `native.lanePeaks:${generation}`,
       `native.lanePeaks:${generation}`,
@@ -4286,50 +4493,79 @@ describe("the seek bar's waveform", () => {
     expect(cached).toEqual(all);
   });
 
-  it('draws nothing rather than throwing when the envelope is malformed', () => {
+  it('does not freeze an all-valid subset of the prepared lanes', async () => {
+    const h = harness();
+    const project = await h.load();
+    const handle = project.nativePlayback!;
+    h.native.lanePeaks = jest.fn(async (next: number) => ({
+      ok: true,
+      error: 'none',
+      generation: next,
+      bucketCount: 96,
+      lanes: [{ id: 'vocals', peaksValid: true, peaks: new Array(96).fill(0.5) }],
+      message: '',
+    }));
+    h.calls.length = 0;
+    await handle.lanePeaks();
+    await handle.lanePeaks();
+    // Negative control: every returned lane is valid, so an every(valid) memo
+    // would stop here even though drums never arrived.
+    expect(h.native.lanePeaks).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses malformed RMS96 envelopes instead of clamping them into evidence', () => {
     const good = {
       ok: true,
-      bucketCount: 2,
-      lanes: [{ id: 'vocals', peaksValid: true, peaks: [0.5, 1] }],
+      bucketCount: 96,
+      lanes: [{
+        id: 'vocals',
+        peaksValid: true,
+        peaks: [0.5, 1, ...new Array(94).fill(0.25)],
+      }],
     };
-    expect(parseNativePlaybackLanePeaks(good)).toMatchObject({
-      bucketCount: 2,
-    });
+    expect(parseNativePlaybackLanePeaks(good)).toMatchObject({ bucketCount: 96 });
+    const invalid: unknown[] = [
+      null,
+      { ...good, ok: false },
+      { ...good, bucketCount: 0 },
+      { ...good, bucketCount: 500_000 },
+      { ...good, lanes: [] },
+      { ...good, lanes: [{ ...good.lanes[0], peaks: [0.5] }] },
+      { ...good, lanes: [{ ...good.lanes[0], peaks: [Number.NaN, ...new Array(95).fill(0)] }] },
+      { ...good, lanes: [{ ...good.lanes[0], peaks: [Number.POSITIVE_INFINITY, ...new Array(95).fill(0)] }] },
+      { ...good, lanes: [{ ...good.lanes[0], peaks: [-0.01, ...new Array(95).fill(0)] }] },
+      { ...good, lanes: [{ ...good.lanes[0], peaks: [1.01, ...new Array(95).fill(0)] }] },
+      { ...good, lanes: [{ ...good.lanes[0], peaksValid: 'true' }] },
+      { ...good, lanes: [good.lanes[0], good.lanes[0]] },
+      { ...good, lanes: [{ ...good.lanes[0], extra: true }] },
+      { ...good, extra: true },
+    ];
+    for (const value of invalid) expect(parseNativePlaybackLanePeaks(value)).toBeNull();
+  });
 
-    // A seek bar handed a NaN draws nothing at all, so every one of these
-    // has to end as a plain bar rather than as an exception on a screen.
-    expect(parseNativePlaybackLanePeaks(null)).toBeNull();
-    expect(parseNativePlaybackLanePeaks({ ...good, ok: false })).toBeNull();
-    expect(parseNativePlaybackLanePeaks({ ...good, bucketCount: 0 })).toBeNull();
-    // Both consumers SPREAD these arrays, so an absurd count is not a
-    // plain bar, it is a stack overflow on a screen. The payload has to be
-    // internally consistent or the length check refuses it first and the
-    // bound is never asked.
-    expect(
-      parseNativePlaybackLanePeaks({
-        ...good,
-        bucketCount: 500_000,
-        lanes: [
-          {
-            id: 'vocals',
-            peaksValid: true,
-            peaks: new Array(500_000).fill(0.5),
-          },
-        ],
-      }),
-    ).toBeNull();
-    expect(
-      parseNativePlaybackLanePeaks({
-        ...good,
-        lanes: [{ id: 'vocals', peaksValid: true, peaks: [0.5] }],
-      }),
-    ).toBeNull();
-    expect(
-      parseNativePlaybackLanePeaks({
-        ...good,
-        lanes: [{ id: 'vocals', peaksValid: true, peaks: [Number.NaN, 2] }],
-      })?.lanes[0].peaks,
-    ).toEqual([0, 1]);
+  it('fences a late envelope after its handle has been retired', async () => {
+    const h = harness();
+    const project = await h.load();
+    const handle = project.nativePlayback!;
+    type RawPeaks = Awaited<ReturnType<typeof h.native.lanePeaks>>;
+    let publish!: (value: RawPeaks) => void;
+    h.native.lanePeaks = jest.fn((_next: number) => new Promise<RawPeaks>(resolve => {
+      publish = resolve;
+    }));
+    const pending = handle.lanePeaks();
+    await handle.unload('retire the owner before the waveform arrives');
+    publish({
+      ok: true,
+      error: 'none',
+      generation: handle.snapshot().generation,
+      bucketCount: 96,
+      lanes: [{ id: 'vocals', peaksValid: true, peaks: new Array(96).fill(0.5) }],
+      message: '',
+    });
+    // Negative control: generation alone stays on the unloaded handle, so a
+    // fence that checks only that number publishes this stale result.
+    await expect(pending).resolves.toBeNull();
+    await expect(handle.lanePeaks()).resolves.toBeNull();
   });
 });
 
@@ -5282,7 +5518,7 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
       lines.length = 0;
       // Keep the harness's own lifecycle (generation and state must stay
       // truthful through prepare) and only make the callback audible, so the
-      // rebuilt graph reports a first audible callback of its own.
+      // rebuilt graph reports a presentation estimate of its own.
       const lifecycle = h.native.status.getMockImplementation()!;
       h.native.status.mockImplementation(async () => {
         const base = await lifecycle();
@@ -5309,13 +5545,13 @@ describe('iOS Phase 4B parking instead of tearing down', () => {
         accent: false,
       });
       await until(() =>
-        lines.some(line => line.startsWith('first audible callback')),
+        lines.some(line => line.startsWith('presentation counter first observed')),
       );
 
       const audible = lines.find(line =>
-        line.startsWith('first audible callback'),
+        line.startsWith('presentation counter first observed'),
       )!;
-      // The graph became audible moments after the REBUILD. Timing it from
+      // The presentation estimate became positive after the REBUILD. Timing it from
       // the last Play tap instead would print the four minutes of singing
       // that preceded it, making every pitch change read as a stall to
       // whoever opens the log — the one thing these numbers exist to prevent.
@@ -6521,4 +6757,51 @@ describe("the player's clock", () => {
       expect(readAt(handle, t0 + NATIVE_TELEMETRY_POLL_MS * 3)).toBeCloseTo(5, 5);
     });
   });
+});
+
+
+describe('honest playback diagnostics', () => {
+  it('reports mixed seed candidates without claiming native acceptance', async () => {
+    const lines: string[] = [];
+    const off = onLogLine(e => { if (e.source === 'waveform') lines.push(e.line); });
+    try {
+      const vocals = md5Text('vocals-bytes'); const drums = md5Text('drums-bytes');
+      (NativeModules.FolderAccess as Record<string, unknown>).fileIdentity = jest.fn(async (path: string) => ({ path, md5: path.includes('vocals') ? vocals : drums, size: 1, mtimeMs: 1 }));
+      const store = new WaveformStore({ getPreference: async () => null, setPreference: async () => {} });
+      await store.remember([{ version: 1, policy: 'singz.native.streaming-envelope.rms96-v1', md5: drums, peaks: Array(96).fill(.2) }]);
+      const e = entry();
+      e.doc!.waveforms = { vocals: { version: 1, policy: 'singz.native.streaming-envelope.rms96-v1', md5: vocals, peaks: Array(96).fill(.3) } };
+      const h = harness({ waveforms: store }); const project = await h.load(e);
+      expect(lines).toContain('seed candidates · Test Song · 2 lanes · project 1 · private 1 · unseeded 0 · native acceptance not reported');
+      expect(lines.join(' ')).not.toMatch(/measured|scan avoided|accepted 2/);
+      await project.nativePlayback!.unload();
+    } finally { off(); }
+  });
+  it('reports unseeded lanes and logs repeated cleanup only once', async () => {
+    const lines: string[] = []; const off = onLogLine(e => { lines.push(e.line); });
+    try {
+      const h = harness(); const project = await h.load();
+      expect(lines.some(line => /seed candidates.*project 0 · private 0 · unseeded 2/.test(line))).toBe(true);
+      expect(lines.some(line => /materialized.*file preparation.*total \(resolve\/download\/cache\/copy\/hash\/lyrics\)/.test(line))).toBe(true);
+      await project.nativePlayback!.unload('closed'); const deliveries = h.native.unload.mock.calls.length;
+      await project.nativePlayback!.unload('closed again');
+      expect(h.native.unload).toHaveBeenCalledTimes(deliveries);
+      expect(lines.filter(line => line.startsWith('unloaded generation'))).toHaveLength(1);
+    } finally { off(); }
+  });
+});
+
+it('carries per-stem context through native file checks and clears it for graph preparation', async () => {
+  const h = harness({ platform: 'ios' });
+  const project = await h.load();
+  const calls = h.openingSteps.mock.calls;
+  const details = calls.filter(call => call[3] !== undefined);
+  expect(details.length).toBeGreaterThan(0);
+  expect(details.map(call => call[3].index)).toEqual([1, 1, 2, 2]);
+  expect(details.every(call => call[3].count === 2)).toBe(true);
+  expect(details.filter(call => call[2] === 'checking')).toHaveLength(2);
+  const preparation = calls.filter(call => call[2] === 'preparing');
+  expect(preparation.length).toBeGreaterThan(0);
+  expect(preparation.every(call => call[3] === undefined)).toBe(true);
+  await project.nativePlayback!.unload('opening stem status regression');
 });

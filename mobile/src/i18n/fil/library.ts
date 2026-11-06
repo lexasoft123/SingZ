@@ -3,6 +3,11 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const library: Translation<typeof en> = {
+  'phone.library.openingCheck': 'Sinusuri…',
+  'phone.library.openingConnect': 'Kumokonekta…',
+  'phone.library.openingDownload': 'Dina-download…',
+  'phone.library.openingVerify': 'Sinusuri ang download…',
+  'phone.library.openingRetry': 'Sinusubukan muli…',
   "phone.library.pickFailed": "Hindi maaaring buksan ang file na iyon ({msg})",
   "phone.library.folderInactive": "Ang piniling folder ay hindi na aktibo. Buksan ito at subukan muli.",
   "phone.library.folderIdentityUnavailable": "Hindi magagamit ang pinili na pagkakakilanlan ng folder. Buksan muli ang folder at subukan muli.",

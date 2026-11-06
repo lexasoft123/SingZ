@@ -1,4 +1,5 @@
-import { describeFileProgress, fileProgressFraction } from './drive-progress'
+import type { OpeningActivity, OpeningTrack } from './loading-progress'
+import { describeFileProgress, fileProgressFraction, openingTrack } from './drive-progress'
 import { downloadCancelled } from './file-download'
 import { mobileSongVolumePersistence } from './playback/song-volume-persistence'
 import { NativeModules } from 'react-native'
@@ -20,6 +21,7 @@ import {
   type ParsedGraphDocument
 } from './gen/graph-document'
 import { md5Text, utf8TextByteLength } from './md5'
+import { validWaveformMd5 } from './waveform-cache'
 
 /**
  * Bridge to the FolderAccess native module: the library root is either the
@@ -34,6 +36,7 @@ interface FolderAccessApi {
   listProjects(): Promise<NativeProject[]>
   readText(project: string, file: string): Promise<string>
   localFile(project: string, file: string): Promise<string>
+  fileIdentity?(path: string): Promise<LocalFileIdentity>
   statFile(project: string, file: string): Promise<{ md5: string; size: number; mtimeMs: number }>
   cacheUsage(): Promise<CacheUsage[]>
   clearCache(project: string): Promise<boolean>
@@ -175,6 +178,36 @@ export const readProjectText = (project: string, file: string): Promise<string> 
 export const localProjectFile = (project: string, file: string): Promise<string> =>
   Folder.localFile(project, file)
 
+export interface LocalFileIdentity {
+  readonly path: string
+  readonly md5: string
+  readonly size: number
+  readonly mtimeMs: number
+}
+
+/** Actual bytes, not the document's claim or a memo keyed by a restorable
+ * mtime. Older FolderAccess builds simply cannot seed a native waveform. */
+export async function localFileIdentity(path: string): Promise<LocalFileIdentity | null> {
+  if (typeof Folder.fileIdentity !== 'function') return null
+  try {
+    const value = await Folder.fileIdentity(path) as unknown
+    if (!value || typeof value !== 'object') return null
+    const raw = value as Record<string, unknown>
+    if (raw.path !== path || !validWaveformMd5(raw.md5) ||
+        !Number.isSafeInteger(raw.size) || (raw.size as number) < 0 ||
+        typeof raw.mtimeMs !== 'number' || !Number.isFinite(raw.mtimeMs) || raw.mtimeMs < 0)
+      return null
+    return {
+      path,
+      md5: raw.md5,
+      size: raw.size as number,
+      mtimeMs: raw.mtimeMs
+    }
+  } catch {
+    return null
+  }
+}
+
 export async function listProjects(): Promise<ProjectEntry[]> {
   const raw = await Folder.listProjects()
   const out: ProjectEntry[] = []
@@ -305,6 +338,8 @@ export type NativePlaybackTrainingSpec =
 export interface NativePlaybackHandle {
   readonly kind: 'ios-native' | 'android-native'
   readonly lanes: readonly NativePlaybackLaneView[]
+  /** Actual materialized content identities, when FolderAccess provides them. */
+  readonly laneContentMd5?: Readonly<Record<string, string>>
   readonly transportControls: true
   /** Generation-bound scalar controls are implemented by the shared
    * NativePlaybackSession on both mobile platforms. They ramp through zdsp's
@@ -482,18 +517,19 @@ export function releaseStems(stems: { buffer: AudioBuffer }[]): void {
 export async function loadProject(
   entry: ProjectEntry,
   sampleRate: number,
-  onStep: (msg: string, frac: number) => void,
+  onStep: (msg: string, frac: number, activity?: OpeningActivity, track?: OpeningTrack) => void,
   crumb?: (note: string) => Promise<void>,
   signal?: AbortSignal
 ): Promise<LoadedProject> {
   const gdrive = entry.source === 'gdrive'
   const checkActive = (): void => { if (signal?.aborted) throw downloadCancelled() }
-  const fetchFile = async (file: string, md5: string | undefined, size: number | undefined, label: string, index: number): Promise<string> => {
+  const fetchFile = async (file: string, md5: string | undefined, size: number | undefined, label: string, index: number, detail: OpeningTrack): Promise<string> => {
     checkActive()
     const path = gdrive ? await driveLocalFile(entry.dir, file, md5, size, {
       signal,
       onProgress: p => onStep(describeFileProgress(p, label, index, total),
-        (index - 1 + 0.5 * fileProgressFraction(p)) / total)
+        (index - 1 + 0.5 * fileProgressFraction(p)) / total,
+        p.phase, detail)
     }) : await Folder.localFile(entry.dir, file)
     checkActive()
     return path
@@ -567,11 +603,12 @@ export async function loadProject(
       // (untranslated) label a singer can rename, same colour — so the two
       // paths that both mean "one whole track" read identically in the mixer.
       const label = 'Original'
-      onStep(t('phone.library.fetchingStep', { id: label, i: 1, n: total }), 0)
+      const detail = openingTrack('original', 1, total)
+      onStep(t('phone.library.fetchingStep', { id: label, i: 1, n: total }), 0, undefined, detail)
       await crumb?.('fetching the source track')
       const want = doc.songHash
-      const path = await fetchFile(doc.songFile, want?.md5, want?.size, label, 1)
-      onStep(t('phone.library.decodingStep', { id: label, i: 1, n: total }), 0.5)
+      const path = await fetchFile(doc.songFile, want?.md5, want?.size, label, 1, detail)
+      onStep(t('phone.library.decodingStep', { id: label, i: 1, n: total }), 0.5, 'preparing', detail)
       await crumb?.('decoding the source track')
       checkActive()
       const t0 = Date.now()
@@ -588,11 +625,12 @@ export async function loadProject(
     }
     for (let i = 0; i < ids.length; i++) {
       const id = ids[i]
-      onStep(t('phone.library.fetchingStep', { id, i: i + 1, n: total }), i / total)
+      const detail = openingTrack(id, i + 1, total)
+      onStep(t('phone.library.fetchingStep', { id, i: i + 1, n: total }), i / total, undefined, detail)
       await crumb?.(`fetching ${id}`)
       const want = doc?.stemHashes?.[`${id}.${entry.stems[id]}`]
-      const path = await fetchFile(`stems/${id}.${entry.stems[id]}`, want?.md5, want?.size, id, i + 1)
-      onStep(t('phone.library.decodingStep', { id, i: i + 1, n: total }), (i + 0.5) / total)
+      const path = await fetchFile(`stems/${id}.${entry.stems[id]}`, want?.md5, want?.size, id, i + 1, detail)
+      onStep(t('phone.library.decodingStep', { id, i: i + 1, n: total }), (i + 0.5) / total, 'preparing', detail)
       await crumb?.(`decoding ${id}`)
       checkActive()
       // file:// matters: audio-api's Android RELEASE builds treat bare strings
@@ -640,12 +678,13 @@ export async function loadProject(
     for (let i = 0; i < added.length; i++) {
       const track = added[i]
       const at = ids.length + i
-      onStep(t('phone.library.fetchingStep', { id: track.label, i: at + 1, n: total }), at / total)
+      const detail = openingTrack(track.id, at + 1, total, track.label)
+      onStep(t('phone.library.fetchingStep', { id: track.label, i: at + 1, n: total }), at / total, undefined, detail)
       await crumb?.(`fetching ${track.id}`)
       try {
         const wantTrack = doc?.stemHashes?.[track.file.slice('stems/'.length)]
-        const path = await fetchFile(track.file, wantTrack?.md5, wantTrack?.size, track.label, at + 1)
-        onStep(t('phone.library.decodingStep', { id: track.label, i: at + 1, n: total }), (at + 0.5) / total)
+        const path = await fetchFile(track.file, wantTrack?.md5, wantTrack?.size, track.label, at + 1, detail)
+        onStep(t('phone.library.decodingStep', { id: track.label, i: at + 1, n: total }), (at + 0.5) / total, 'preparing', detail)
         await crumb?.(`decoding ${track.id}`)
         checkActive()
         const buffer = await decodeAudioData(`file://${path}`, sampleRate)

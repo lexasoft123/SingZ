@@ -56,6 +56,27 @@ async function gone(path: string): Promise<boolean> {
 }
 
 describe('projects outside the library root stay put', () => {
+  it('preserves a custom lane filename across saves when its ID differs', async () => {
+    const root = await makeLibrary()
+    const dir = await makeProject(root, 'Custom identity')
+    const file = join(dir, 'stems', 'custom-different.flac')
+    await writeFile(file, 'custom-audio')
+    const custom = [{ id: 'custom-stable-id', label: 'First name', color: '#aabbcc', file }]
+    for (const label of ['First name', 'Renamed']) {
+      const result = await saveProject(join(dir, 'song.mp3'), 'Custom identity', {
+        transpose: 0, tracks: {}, custom: custom.map(track => ({ ...track, label }))
+      })
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+      expect(result.custom?.[0]).toMatchObject({ id: 'custom-stable-id', label, file })
+      expect(await readFile(file, 'utf8')).toBe('custom-audio')
+      const meta = JSON.parse(await readFile(join(dir, 'project.json'), 'utf8'))
+      expect(meta.settings.custom[0].file).toBe('stems/custom-different.flac')
+      expect(meta.stemHashes['custom-different.flac']).toBeDefined()
+      expect(meta.stemHashes['custom-stable-id.flac']).toBeUndefined()
+    }
+  })
+
   it('round-trips independent boosted and muted song gains through real project saves', async () => {
     const root = await makeLibrary()
     const a = await makeProject(root, 'Quiet song')

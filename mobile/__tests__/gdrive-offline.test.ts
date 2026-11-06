@@ -915,3 +915,15 @@ describe('stems are fetched once', () => {
     expect(downloads).toHaveLength(2) // fetched again, nothing to forget
   })
 })
+
+test('missing audio listing entries use the friendly opening error without starting a transfer', async () => {
+  const drive = newDrive()
+  install(drive)
+  signIn()
+  const g = require('../src/gdrive') as typeof import('../src/gdrive')
+  await g.driveListProjects()
+  const { t } = require('../src/i18n') as typeof import('../src/i18n')
+  await expect(g.driveLocalFile('Song One', 'stems/not-there.flac')).rejects.toThrow(t('phone.library.downloadMissing'))
+  await expect(g.driveLocalFile('Not Listed', 'stems/vocals.flac')).rejects.toThrow(t('phone.library.downloadInterrupted'))
+  expect(fetchToCache).not.toHaveBeenCalled()
+})

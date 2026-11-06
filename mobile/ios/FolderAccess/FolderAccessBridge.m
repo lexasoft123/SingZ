@@ -28,6 +28,9 @@ RCT_EXTERN_METHOD(localFile : (NSString *)project
                   file : (NSString *)file
                   resolve : (RCTPromiseResolveBlock)resolve
                   reject : (RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(fileIdentity : (NSString *)path
+                  resolver : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject)
 
 RCT_EXTERN_METHOD(cacheUsage : (RCTPromiseResolveBlock)resolve
                   rejecter : (RCTPromiseRejectBlock)reject)

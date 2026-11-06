@@ -46,7 +46,10 @@ export function registerStemExport(): void {
       })
       sender.once('destroyed', destroyed)
       return { ok: true, token }
-    } catch (error) { return { ok: false, error: String(error) } }
+    } catch (error) {
+      log('export', `could not choose export folder: ${String(error)}`, 'error')
+      return { ok: false, error: String(error) }
+    }
   })
   ipcMain.handle('stems:export-end', (event, token: string) => {
     if (sessions.get(token)?.owner === event.sender.id) finish(token)
@@ -112,6 +115,8 @@ export function registerStemExport(): void {
       log('export', `track exported: ${outputPath}`)
       return { ok: true }
     } catch (error) {
+      if (session?.cancelled) log('export', `track export cancelled: ${name}`)
+      else log('export', `track export failed: ${name} · ${String(error)}`, 'error')
       return { ok: false, error: session?.cancelled ? 'Export cancelled' : String(error) }
     } finally {
       if (session?.job === job) session.job = undefined

@@ -726,12 +726,12 @@ void SingzNativePlaybackPrepare(NSNumber *generationValue,
                     dispatchedGuard->markDelivered();
                     return;
                   }
-                  // The authorized path is this bridge's opaque identity for
-                  // the bytes: the core never opens or resolves it, it only
-                  // compares it when a retaining unload offers an already
-                  // decoded lane to the next prepare.
+                  const std::string sourceKey = lane.contentMd5.empty()
+                                                    ? lane.path
+                                                    : "md5:" + lane.contentMd5;
                   lanes.push_back({lane.id, std::move(descriptor), lane.gain,
-                                   lane.muted, lane.solo, lane.path});
+                                   lane.muted, lane.solo, sourceKey,
+                                   lane.waveform});
                 }
                 dispatchedGuard->markSessionMutation();
                 const singz::NativePlaybackResult result =

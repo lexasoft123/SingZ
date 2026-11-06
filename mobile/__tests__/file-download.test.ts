@@ -106,3 +106,18 @@ test('cancel addresses only its own native request and stops retries', async () 
   expect(native.fetchToCacheTracked).toHaveBeenCalledTimes(2)
   expect(jest.getTimerCount()).toBe(0)
 })
+
+test('does not call cached checks or pending authorization a download', async () => {
+  const { native } = harness()
+  let grant!: (value: string) => void
+  const authorize = jest.fn(() => new Promise<string>(resolve => { grant = resolve }))
+  const progress: FileProgress[] = []
+  const result = downloadFile(native, request, authorize, { onProgress: p => progress.push(p) })
+  await jest.advanceTimersByTimeAsync(500)
+  expect(progress.map(p => p.phase)).toEqual(['checking', 'connecting'])
+  expect(native.fetchToCacheTracked).not.toHaveBeenCalled()
+  grant('Bearer token')
+  await result
+  expect(progress.map(p => p.phase)).toEqual(['checking', 'connecting', 'downloading'])
+  expect(jest.getTimerCount()).toBe(0)
+})

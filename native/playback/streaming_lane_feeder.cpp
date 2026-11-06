@@ -507,8 +507,8 @@ void StreamingLaneGroup::waveformLoop() {
       buckets[bucket] =
           counted[bucket] == 0
               ? 0.0F
-              : static_cast<float>(std::sqrt(
-                    energy[bucket] / static_cast<double>(counted[bucket])));
+              : static_cast<float>(std::min(1.0, std::sqrt(
+                    energy[bucket] / static_cast<double>(counted[bucket]))));
     {
       std::lock_guard<std::mutex> lock(mutex_);
       lane.waveformBuckets = std::move(buckets);
