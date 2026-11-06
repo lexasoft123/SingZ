@@ -2,7 +2,7 @@
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 root=Path(__file__).resolve().parent
-font=ImageFont.truetype(str(root/'Bricolage650.ttf'),36)
+font=ImageFont.truetype(str(root.parents[2].parent/'singz-ui/gpui/assets/fonts/Bricolage650.ttf'),36)
 words='Let the city fade away Find a little room to breathe Every note will light way Sing song you carry underneath moment find its place And begin again with me'.split()
 lines=['use gpui_kit::RenderImage;','use std::{sync::Arc,collections::HashMap};','pub fn load() -> HashMap<&\'static str,Arc<RenderImage>> {','    let mut result=HashMap::new();']
 for index,word in enumerate(dict.fromkeys(words)):

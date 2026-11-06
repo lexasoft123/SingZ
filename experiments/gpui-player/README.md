@@ -49,15 +49,17 @@ checkboxes, selectors/popups, sliders, modal material, scrollbars, badges, searc
 transport controls. Screen composition stays in this project. Production SVG paths are
 reused rather than replaced with font glyphs.
 
-Bundled OFL fonts are static instances of the exact installed
-`@fontsource-variable` WOFF2 files. Explicit native family names pin the face weight without
-adding a width axis. The host registers them once. Regenerate from the repository root
-with FontTools installed:
+Fonts are owned by the sibling UIKit crate and distributed in UIKit's `dist/fonts`.
+`singz_uikit::init(cx)` registers its bundled native faces once per App; this prototype
+keeps no private TTF copies. Regenerate at the UIKit root with
+`python3 scripts/gen-fonts.py && npm run build`. The explicit native families select the heavier visual outlines by family name;
+Windows aliases normalize style metadata while macOS retains its original metadata.
+Both variants have identical static glyph outlines and layout tables. License and source provenance ship with the distribution.
 
-```sh
-python3 experiments/gpui-player/assets/instance-fonts.py
-python3 experiments/gpui-player/assets/build-lyric-glow-textures.py
-```
+See [Dell Windows verification](WINDOWS_PORT_REVIEW.md) for font matching,
+background interaction results, measured resource use and remaining platform gaps.
+See [Linux VM 403 verification](LINUX_PORT_REVIEW.md) for Linux captures,
+frameless/background fixes and software-Vulkan qualification limits.
 
 The waveform fixture uses normalized peaks exported from the real Electron renderer after
 it decoded the six FLAC stems. `assets/review-peaks.bin` includes six arrays of 192000
@@ -156,7 +158,15 @@ The macOS window is frameless with native traffic lights inside the 52px SingZ h
 Header content reserves 92px on the left; fullscreen releases that space. Native resize,
 minimize, close and fullscreen controls remain native. Drag/double-click handling delegates
 to the platform preference; controls preserve GPUI click tracking while preventing header
-drag propagation. Other platforms retain their native decorations pending platform checks.
+drag propagation. Windows also draws into the complete window frame, reserving
+150px on the right for UIKit's minimize/maximize/close controls. Native edge and
+corner hit tests retain resizing. Linux uses the same controls with client-side
+resize grips and an opt-in zero-padding component frame. X11 is verified on
+VM 403; Wayland runtime checks remain outstanding.
+
+The pitch strip uses a separate toolbar for Note bars, Fit and the compact
+microphone status. The key/piano roll stays below it, and short-window stem
+lanes scroll within their own clipped viewport rather than covering the pitch panel.
 
 Earlier manual Mac checks covered drag, zoom/restore, minimize/restore and resize. Hidden
 scene captures omit AppKit traffic lights and the OS shadow, so content parity does not

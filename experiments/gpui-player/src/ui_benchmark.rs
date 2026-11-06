@@ -116,7 +116,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, output: PathBuf, cx: &
                 "\"definitions\":{{\"offscreenFramesPerSecond\":\"completed GPU-rendered readback images per wall second; not display or presentation FPS\",",
                 "\"prepareAndDrawWallMs\":\"main-thread state update, layout and draw wall time; process CPU is sampled separately\",",
                 "\"gpuRenderReadbackWallMs\":\"synchronous offscreen GPU render plus CPU readback wait, not pure GPU execution time\",",
-                "\"liveFPS\":\"unmeasured: hidden macOS windows suspend display callbacks\"}}\n}}\n"),
+                "\"liveFPS\":\"unmeasured: hidden scene captures do not measure presentation cadence\"}}\n}}\n"),
                 viewport.0,viewport.1,scale,image_pixels.0,image_pixels.1,warmup,actual,frames,frames as f64/actual,
                 summary(&frame_intervals),summary(&prepare),summary(&readback),summary(&lyrics),moving_glow_draws,moving_glow_draws>0);
             if let Some(parent)=output.parent(){std::fs::create_dir_all(parent)?;}

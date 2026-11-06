@@ -27,7 +27,7 @@ fn key_shadow() -> Arc<RenderImage> {
 const CONTROLS_W: f32 = 228.;
 const KEYBOARD_W: f32 = 60.;
 const DURATION: f32 = 192.;
-const MIC_UNAVAILABLE: &str = "Microphone is unavailable while another audio owner or route change is active. Open Settings to review the audio owner or retry the output route.";
+const MIC_UNAVAILABLE: &str = "Microphone unavailable";
 
 pub struct PitchStrip {
     position: f32,
@@ -123,7 +123,7 @@ fn scene(
     div()
         .relative()
         .flex_none()
-        .h(px(172.))
+        .h(px(206.))
         .w_full()
         .border_t_1()
         .border_color(rgba(LINE))
@@ -139,14 +139,14 @@ fn scene(
             .absolute()
             .left(px(10.))
             .right(px(22.))
-            .top_0()
+            .top(px(34.))
             .bottom_0(),
         )
         .child(
             div()
                 .absolute()
                 .left(px(10.))
-                .top_0()
+                .top(px(34.))
                 .bottom_0()
                 .w(px(154.))
                 .pt(px(14.))
@@ -165,21 +165,21 @@ fn scene(
 fn hud(note_button: Stateful<Div>, fit_button: Stateful<Div>) -> Div {
     div()
         .absolute()
-        .top(px(10.))
+        .top(px(5.))
         .right(px(24.))
-        .left_0()
+        .left(px(16.))
+        .h(px(24.))
         .flex()
         .items_center()
         .gap(px(10.))
-        // The reference's long lease warning makes this HUD wrap inside
-        // the strip. Preserve that state rather than abbreviating copy.
-        .child(note_button)
-        .child(fit_button)
+        // A dedicated toolbar stays clear of the key readout and piano roll.
+        .child(note_button.flex_none().w(px(80.)).whitespace_nowrap())
+        .child(fit_button.flex_none())
         .child(
             small_ghost_pill("pitch-microphone-unavailable", "")
                 .flex_shrink_1()
                 .min_w_0()
-                .h(px(42.))
+                .h(px(24.)).ml_auto().overflow_hidden()
                 .opacity(0.45)
                 .cursor_default()
                 .child(colored_icon(TransportIcon::Mic, TEXT).with_size(12))
@@ -192,7 +192,7 @@ fn hud(note_button: Stateful<Div>, fit_button: Stateful<Div>) -> Div {
                         .line_height(px(14.))
                         .font_family(DISPLAY_600)
                         .font_weight(FontWeight::NORMAL)
-                        .child(tracked_label(MIC_UNAVAILABLE, 0.01).wrap()),
+                        .child(tracked_label(MIC_UNAVAILABLE, 0.01)),
                 ),
         )
 }

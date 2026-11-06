@@ -3,7 +3,7 @@ from pathlib import Path
 from fontTools.ttLib import TTFont
 from fontTools.pens.svgPathPen import SVGPathPen
 root=Path(__file__).resolve().parent
-font=TTFont(root/'Bricolage650.ttf');glyphs=font.getGlyphSet();cmap=font.getBestCmap()
+font=TTFont(root.parents[2].parent/'singz-ui/gpui/assets/fonts/Bricolage650.ttf');glyphs=font.getGlyphSet();cmap=font.getBestCmap()
 scale=18.025/font['head'].unitsPerEm
 lh=25.375*1.03;pad=21
 asc=font['hhea'].ascent*scale;desc=-font['hhea'].descent*scale

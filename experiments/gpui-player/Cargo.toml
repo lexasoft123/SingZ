@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [features]
-ui-tests = []
+ui-tests = ["dep:gpui_linux_capture"]
 
 [dependencies]
 gpui-kit = "=0.9.0"
@@ -30,3 +30,11 @@ gpui_apple = { package = "gpui-pre-apple", version = "=0.3.11", features = ["run
 [patch.crates-io]
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
 gpui-pre = { path = "vendor/gpui-pre" }
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
+
+gpui-component = { path = "vendor/gpui-component" }
+gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
+gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui_linux_capture = { package = "gpui-pre-linux", version = "=0.3.11", optional = true, features = ["test-support"] }

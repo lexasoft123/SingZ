@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 mod background;
 mod header;
 mod library;
@@ -149,6 +150,7 @@ struct Player {
     lyric_view_height: Rc<Cell<f32>>,
     lyric_horizontal: Rc<Cell<bool>>,
     lyric_scroll_handle: ScrollHandle,
+    stem_scroll_handle: ScrollHandle,
     lyric_scroll_active: Rc<Cell<bool>>,
     lyric_hits: Rc<RefCell<Vec<(usize, Bounds<Pixels>)>>>,
     playing: bool,
@@ -303,6 +305,7 @@ impl Player {
             lyric_view_height: Rc::new(Cell::new(0.)),
             lyric_horizontal: Rc::new(Cell::new(false)),
             lyric_scroll_handle: ScrollHandle::new(),
+            stem_scroll_handle: ScrollHandle::new(),
             lyric_scroll_active: Rc::new(Cell::new(false)),
             lyric_hits: Rc::new(RefCell::new(vec![])),
             playing: std::env::var_os("SINGZ_GPUI_PROFILE").is_some(),
@@ -1136,8 +1139,8 @@ impl Render for Player {
             Screen::Settings | Screen::Log => unreachable!(),
             Screen::Player => div().flex().flex_col().flex_1().min_h_0()
                 .child(div().flex().flex_1().min_h_0()
-                    .child(div().flex_1().min_w_0().flex().flex_col()
-                        .child(div().relative().flex_1().min_h_0().pl(px(10.)).pr(px(22.)).pt(px(4.)).pb(px(10.)).flex().flex_col()
+                    .child(div().flex_1().min_w_0().min_h_0().flex().flex_col()
+                        .child(div().relative().flex_1().min_h_0().overflow_hidden().pl(px(10.)).pr(px(22.)).pt(px(4.)).pb(px(10.)).flex().flex_col()
                             .child(div().h(px(30.)).flex_shrink_0().flex()
                                 .child(div().w(px(228.)).pl(px(14.)).flex().gap(px(5.)).items_center()
                                     .child(singz_uikit::ruler_button("add-track","+ Add track…",false,false).on_click(cx.listener(|this,_,_,cx| { this.notice=Some("Custom audio tracks are not connected in this prototype.".into());cx.notify(); })))
@@ -1163,7 +1166,7 @@ impl Render for Player {
                                         singz_uikit::zoom_button("zoom-fit","Full",self.view_start==0.&&self.view_end==1.).on_click(cx.listener(|this,_,_,cx|{this.view_start=0.;this.view_end=1.;cx.notify();})),
                                     ])))
                                 ))
-                            .children((0..6).map(|i|self.lane(i,cx))).child(playhead))
+                            .child(div().id("stem-lane-scroll").track_scroll(&self.stem_scroll_handle).flex().flex_col().flex_1().min_h_0().overflow_y_scroll().children((0..6).map(|i|self.lane(i,cx)))).child(playhead))
                         .when(self.karaoke, |column| column.child(self.pitch_strip.clone())))
                     .when(self.karaoke,|row|row.child(div().w(px(360.)).flex_shrink_0().border_l_1().border_color(rgba(0xfff0d614)).bg(rgba(0x1b181466)).flex().flex_col()
                         .child(div().h(px(53.)).flex_shrink_0().px(px(18.)).pt(px(14.)).pb(px(12.)).flex().items_center().justify_between().border_b_1().border_color(rgba(0xfff0d614))
@@ -1269,7 +1272,9 @@ impl Render for Player {
                             ))),
                     ),
                 )
-            });
+            })
+            .when(cfg!(any(target_os = "windows", target_os = "linux")), |root| root.child(singz_uikit::window_buttons(window.is_maximized())))
+            .when(cfg!(target_os = "linux") && !window.is_maximized() && !window.is_fullscreen(), |root| root.children(singz_uikit::window_resize_edges(window.viewport_size())));
         #[cfg(feature = "ui-tests")]
         let root = root.when(self.text_phase_check, |root| {
             root.child(ui_text_phase::overlay())
@@ -1309,24 +1314,13 @@ fn main() {
     gpui_kit::application().with_assets(Assets).run(|cx| {
         gpui_kit::init(cx);
         singz_uikit::init(cx);
+        #[cfg(target_os = "linux")]
+        cx.set_global(gpui_kit::component::WindowFrameStyle { shadow_size: px(0.), border_size: px(0.) });
         #[cfg(target_os = "macos")]
         {
             gpui_kit::component::Theme::global_mut(cx).tokens.background =
                 Hsla::from(rgba(0)).into();
         }
-        cx.text_system()
-            .add_fonts(vec![
-                Cow::Borrowed(include_bytes!("../assets/Bricolage400.ttf")),
-                Cow::Borrowed(include_bytes!("../assets/Bricolage500.ttf")),
-                Cow::Borrowed(include_bytes!("../assets/Bricolage600.ttf")),
-                Cow::Borrowed(include_bytes!("../assets/Bricolage650.ttf")),
-                Cow::Borrowed(include_bytes!("../assets/Bricolage700.ttf")),
-                Cow::Borrowed(include_bytes!("../assets/Bricolage800.ttf")),
-                Cow::Borrowed(include_bytes!("../assets/MartianMono400.ttf")),
-                Cow::Borrowed(include_bytes!("../assets/MartianMono500.ttf")),
-                Cow::Borrowed(include_bytes!("../assets/MartianMono700.ttf")),
-            ])
-            .expect("load bundled fonts");
         let background = std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some();
         let (window_handle, view) = gpui_kit::open_window(
             WindowOptions {

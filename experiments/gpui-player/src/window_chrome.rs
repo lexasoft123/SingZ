@@ -1,5 +1,6 @@
 //! Native Mac traffic lights over the app's 52px header. No separate AppKit title strip.
 use gpui_kit::*;
+use gpui_kit::prelude::FluentBuilder;
 use std::{cell::Cell, rc::Rc};
 
 pub fn options() -> WindowOptions {
@@ -15,6 +16,17 @@ pub fn options() -> WindowOptions {
         // One owner for dragging/double clicks; don't let AppKit repeat our action.
         options.app_owns_titlebar_drag = true;
     }
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    {
+        options.titlebar = Some(TitlebarOptions {
+            title: Some("SingZ".into()),
+            appears_transparent: true,
+            ..Default::default()
+        });
+        options.app_owns_titlebar_drag = true;
+        #[cfg(target_os = "linux")]
+        { options.window_decorations = Some(WindowDecorations::Client); }
+    }
     options
 }
 
@@ -27,6 +39,7 @@ pub fn header(armed: Rc<Cell<bool>>, fullscreen: bool) -> Stateful<Div> {
         .h(px(52.))
         .flex_shrink_0()
         .px(px(16.))
+        .when(cfg!(any(target_os = "windows", target_os = "linux")), |header| header.pr(px(150.)))
         .pl(px(if cfg!(target_os = "macos") && !fullscreen {
             92.
         } else {

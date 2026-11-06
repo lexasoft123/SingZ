@@ -53,7 +53,13 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
             let graph_bottom_offset=Rc::new(Cell::new(0_f32));
             // Input is dispatched only into the hidden window, never through the OS.
             cx.background_executor().timer(Duration::from_millis(100)).await;
+            // Win32 delivers its client resize through the event loop. Allow that
+            // callback before drawing or dispatching fixture coordinates.
+            handle.update(cx, |_, window, _| window.resize(size(px(1280.), px(800.))))?;
+            cx.background_executor().timer(Duration::from_millis(100)).await;
             handle.update(cx, |_, window, cx| -> anyhow::Result<()> {
+                for _ in 0..6 { window.simulate_next_frame(cx); window.refresh(); let _=window.draw(cx); }
+                anyhow::ensure!(window.viewport_size()==size(px(1280.),px(800.)), "Smoke viewport was not initialized: {:?}", window.viewport_size());
                 anyhow::ensure!(view.read(cx).screen == Screen::Library, "Startup did not show catalog");
                 view.read(cx).library.clone().update(cx, |library,cx|library.set_animation_time(1.,cx));
                 let _ = window.draw(cx);
@@ -108,8 +114,8 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                 click(window,cx,37.,133.); // First-lane mute.
                 click(window,cx,69.,133.); // First-lane solo.
                 click(window,cx,121.,133.); // Lane volume near 25%.
-                click(window,cx,33.75,541.); // Note bars.
-                click(window,cx,93.25,541.); // Fit.
+                click(window,cx,56.,489.); // Note bars.
+                click(window,cx,125.,489.); // Fit.
                 Ok(())
             })??;
             cx.background_executor().timer(Duration::from_millis(30)).await;
@@ -194,7 +200,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
             cx.background_executor().timer(Duration::from_millis(30)).await;
             handle.update(cx, |_, window, cx| -> anyhow::Result<()> {
                 anyhow::ensure!(view.read(cx).muted[0],"Guide vocals did not toggle vocals mute");
-                click(window,cx,1248.,26.); // SVG Settings gear.
+                click(window,cx,if cfg!(any(target_os="windows",target_os="linux")){1114.}else{1248.},26.); // SVG Settings gear.
                 Ok(())
             })??;
             cx.background_executor().timer(Duration::from_millis(30)).await;
@@ -276,7 +282,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
             cx.background_executor().timer(Duration::from_millis(30)).await;
             handle.update(cx, |_, window, cx| -> anyhow::Result<()> {
                 anyhow::ensure!(view.read(cx).screen==Screen::Player,"Settings Close did not restore player");
-                click(window,cx,1248.,26.); // Reopen Settings for keyboard dismissal.
+                click(window,cx,if cfg!(any(target_os="windows",target_os="linux")){1114.}else{1248.},26.); // Reopen Settings for keyboard dismissal.
                 Ok(())
             })??;
             cx.background_executor().timer(Duration::from_millis(30)).await;
@@ -311,7 +317,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
             cx.background_executor().timer(Duration::from_millis(30)).await;
             handle.update(cx, |_, window, cx| -> anyhow::Result<()> {
                 anyhow::ensure!(view.read(cx).screen==Screen::Player,"Second Escape did not restore player");
-                click(window,cx,1248.,26.);
+                click(window,cx,if cfg!(any(target_os="windows",target_os="linux")){1114.}else{1248.},26.);
                 Ok(())
             })??;
             cx.background_executor().timer(Duration::from_millis(30)).await;
@@ -323,7 +329,26 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
             cx.background_executor().timer(Duration::from_millis(30)).await;
             handle.update(cx, |_, window, cx| -> anyhow::Result<()> {
                 anyhow::ensure!(view.read(cx).screen==Screen::Player,"Settings scrim did not restore player");
-                click(window,cx,392.,26.); // Loaded-song Catalog control.
+                window.resize(size(px(1060.),px(640.)));
+                Ok(())
+            })??;
+            cx.background_executor().timer(Duration::from_millis(100)).await;
+            handle.update(cx, |_, window, cx| -> anyhow::Result<()> {
+                window.refresh();let _=window.draw(cx);
+                window.dispatch_event(PlatformInput::Scroll(ScrollEvent {
+                    position:point(px(300.),px(220.)),delta:ScrollDelta::Pixels(point(px(0.),px(-500.))),..Default::default()
+                }),cx);
+                window.refresh();let _=window.draw(cx);
+                anyhow::ensure!(view.read(cx).stem_scroll_handle.offset().y < px(-100.),"Short-window stems did not scroll: {:?}",view.read(cx).stem_scroll_handle.offset());
+                window.render_to_image()?.save(directory.join("stem-lanes-scrolled-1060.png"))?;
+                view.read(cx).stem_scroll_handle.set_offset(point(px(0.),px(0.)));
+                window.resize(size(px(1280.),px(800.)));
+                Ok(())
+            })??;
+            cx.background_executor().timer(Duration::from_millis(100)).await;
+            handle.update(cx, |_, window, cx| -> anyhow::Result<()> {
+                eprintln!("UI_SMOKE short-window stems scroll within their viewport");
+                click(window,cx,if cfg!(target_os="macos"){392.}else{292.},26.); // Windows has no 76px traffic-light reservation.
                 Ok(())
             })??;
             cx.background_executor().timer(Duration::from_millis(30)).await;
@@ -333,6 +358,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                 window.render_to_image()?.save(directory.join("catalog-loaded.png"))?;
                 Ok(())
             })??;
+            eprintln!("UI_SMOKE interactions passed; checking platform renderer contracts next");
             handle.update(cx, |_,window,cx| ui_text_phase::run_check(&view,window,cx))??;
             handle.update(cx, |_,window,cx| ui_grain::check(window,cx))??;
             Ok(())

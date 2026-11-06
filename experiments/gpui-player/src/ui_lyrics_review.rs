@@ -42,7 +42,12 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                             cx.notify();
                         });
                         // Explicit settling is intentional: this case measures paint, not scroll animation.
-                        for _ in 0..90 { window.simulate_next_frame(cx); window.refresh(); let _ = window.draw(cx); }
+                        for settle in 0..90 {
+                            window.simulate_next_frame(cx); window.refresh(); let _ = window.draw(cx);
+                            // Only render the frames needed to settle this position. Replaying
+                            // 90 identical hidden DirectX frames per sample is not cadence evidence.
+                            if settle >= 1 && !view.read(cx).lyric_scroll_active.get() { break; }
+                        }
                         anyhow::ensure!(!view.read(cx).lyric_scroll_active.get(), "lyric scroll did not settle");
                         let stats = view.read(cx).frame_stats.clone();
                         stats.borrow_mut().advancing_glow_draws = 0;
@@ -79,7 +84,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                 "viewport":[1280,800],"capture":"hidden GPUI render_to_image; settled scrolling","silent":true,
                 "fixture":"192s repeated six-line verse; char-weighted 6.5s words; anticipation 0.15s; gains 0.8",
                 "comparisonLimit":"Historical approved preview has different typography/geometry/timing. Paint layers restored from archived code; no claim of whole-image pixel identity.",
-                "binarySha256":hash(&std::fs::read(std::env::current_exe()?)?),"mainSourceSha256":hash(include_bytes!("main.rs")),"glowSourceSha256":hash(include_bytes!("lyric_glow.rs")),"font650Sha256":hash(include_bytes!("../assets/Bricolage650.ttf")),"frames":frames
+                "binarySha256":hash(&std::fs::read(std::env::current_exe()?)?),"mainSourceSha256":hash(include_bytes!("main.rs")),"glowSourceSha256":hash(include_bytes!("lyric_glow.rs")),"font650Sha256":hash(singz_uikit::fonts::DISPLAY_650),"frames":frames
             }))?)?;
             Ok(())
         }.await;

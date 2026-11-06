@@ -19,7 +19,7 @@ from fontTools.pens.svgPathPen import SVGPathPen
 from fontTools.pens.transformPen import TransformPen
 
 ROOT = Path(__file__).resolve().parent
-FONT = ROOT / "Bricolage800.ttf"
+FONT = ROOT.parents[2].parent / "singz-ui/gpui/assets/fonts/Bricolage800.ttf"
 font = TTFont(FONT)
 glyphs = font.getGlyphSet()
 glyph = glyphs[font.getBestCmap()[ord("Z")]]

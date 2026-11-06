@@ -132,8 +132,9 @@ impl Header {
 
 impl Render for Header {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let compact = window.viewport_size().width <= px(1100.);
-        let tiny = window.viewport_size().width <= px(1000.);
+        let available = window.viewport_size().width - px(if cfg!(any(target_os = "windows", target_os = "linux")) {134.} else {0.});
+        let compact = available <= px(if cfg!(any(target_os = "windows", target_os = "linux")) {1200.} else {1100.});
+        let tiny = available <= px(1000.);
         let catalog = self.catalog;
         // Blink rounds this bundled face's hhea ascent/descent (930/-270,
         // UPEM1000) in device-scaled layout units before normal line spacing.

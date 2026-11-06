@@ -2227,8 +2227,6 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45bbfdba0efa392190f2fd446ec311325302eb047d5ce45dc1bcf189cb18f5eb"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2498,8 +2496,6 @@ dependencies = [
 [[package]]
 name = "gpui-pre-linux"
 version = "0.3.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79cac5cbd3485c1e3db8eafd5dc69019188f5cb0a39846946af772efa386f624"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -2516,6 +2512,7 @@ dependencies = [
  "gpui-pre-http-client",
  "gpui-pre-util",
  "gpui-pre-wgpu",
+ "image",
  "libc",
  "log",
  "notify-rust",
@@ -2754,8 +2751,6 @@ dependencies = [
 [[package]]
 name = "gpui-pre-wgpu"
 version = "0.3.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "211cf352de1a0b0c9bea3f105df5572ce1d2c899389b924a888e5af36b50f93d"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2782,8 +2777,6 @@ dependencies = [
 [[package]]
 name = "gpui-pre-windows"
 version = "0.3.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5141a3db59bab761a16ab19529fe4117a86e91922e8fc00af6dfc4829cb1744d"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -6234,6 +6227,7 @@ dependencies = [
  "core-foundation-sys",
  "gpui-kit",
  "gpui-pre-apple",
+ "gpui-pre-linux",
  "gpui-pre-platform",
  "image",
  "objc2-foundation 0.3.2",
@@ -6247,6 +6241,7 @@ dependencies = [
 name = "singz-uikit"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "gpui-kit",
  "image",
  "resvg 0.46.0",
