@@ -37,6 +37,11 @@ No real playback, decoding, separation, pitch detection, project saving or backe
 implemented by this UI executable. A native backend experiment is forthcoming; this screen
 prototype is not evidence of backend availability or audio performance.
 
+The header Log button now opens a native diagnostic dialog with selectable rows, local
+session selection, Copy and standard dismissal. It starts empty until a log backend is
+connected; Save explicitly reports its prototype limitation. See [screen inventory](SCREEN_PORT_STATUS.md)
+and [Log port review](LOG_PORT_REVIEW.md) for remaining states and visual differences.
+
 ## Shared UIKit and assets
 
 Reusable native controls live in `../singz-ui/gpui`: pills, icon buttons, play control,

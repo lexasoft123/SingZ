@@ -1,6 +1,7 @@
 mod background;
 mod header;
 mod library;
+mod log_panel;
 mod lyric_glow;
 mod pitch_strip;
 mod settings;
@@ -12,6 +13,8 @@ mod ui_benchmark;
 mod ui_grain;
 #[cfg(feature = "ui-tests")]
 mod ui_library_review;
+#[cfg(feature = "ui-tests")]
+mod ui_log_review;
 #[cfg(feature = "ui-tests")]
 mod ui_lyrics_review;
 #[cfg(feature = "ui-tests")]
@@ -110,6 +113,7 @@ enum Screen {
     Player,
     Library,
     Settings,
+    Log,
 }
 
 struct Player {
@@ -129,6 +133,7 @@ struct Player {
     master_volume: f32,
     library: Entity<library::LibraryScreen>,
     settings: Entity<settings::SettingsScreen>,
+    log_panel: Entity<log_panel::LogPanel>,
     _subscriptions: Vec<Subscription>,
     song_title: SharedString,
     song_artist: SharedString,
@@ -171,6 +176,17 @@ impl Player {
         let header = cx.new(|cx| header::Header::new(window, cx));
         let library = cx.new(|cx| library::LibraryScreen::new(window, cx));
         let settings = cx.new(|cx| settings::SettingsScreen::new(window, cx));
+        let log_panel = cx.new(|_| log_panel::LogPanel::new());
+        let log_subscription = cx.subscribe(&log_panel, |this, _, event, cx| {
+            match event {
+                log_panel::LogEvent::Close => this.screen = this.previous_screen,
+                log_panel::LogEvent::Save => {
+                    this.notice =
+                        Some("Saving log files is not connected in this prototype.".into())
+                }
+            }
+            cx.notify();
+        });
         let library_subscription = cx.subscribe(&library, |this, _, event, cx| match event {
             library::LibraryEvent::OpenSong { title, artist } => {
                 this.loaded_song = true;
@@ -202,7 +218,7 @@ impl Player {
                 header::HeaderEvent::Catalog => { if this.loaded_song { this.screen = if this.screen == Screen::Library { Screen::Player } else { Screen::Library }; } }
                 header::HeaderEvent::Settings => { if this.screen == Screen::Settings { this.screen=this.previous_screen; } else { this.settings.update(cx, |settings,cx| settings.on_open(cx)); this.previous_screen=this.screen;this.screen=Screen::Settings; } }
                 header::HeaderEvent::Training => this.notice=Some("Vocal training is not connected in this prototype.".into()),
-                header::HeaderEvent::Log => this.notice=Some("The prototype has no audio engine session to log.".into()),
+                header::HeaderEvent::Log => { this.log_panel.update(cx,|log,cx|log.on_open(cx)); this.previous_screen=this.screen; this.screen=Screen::Log; },
                 header::HeaderEvent::Engine => this.notice=Some("The separation engine is not connected in this prototype.".into()),
                 header::HeaderEvent::Language => this.notice=Some("This review fixture uses English.".into()),
                 header::HeaderEvent::Help => this.notice=Some("Choose a song, adjust the mix, and follow its lyrics.".into()),
@@ -265,9 +281,11 @@ impl Player {
             master_volume: 1.,
             library,
             settings,
+            log_panel,
             _subscriptions: vec![
                 library_subscription,
                 settings_subscription,
+                log_subscription,
                 header_subscription,
                 transport_subscription,
             ],
@@ -326,7 +344,8 @@ impl Player {
     fn lyrics(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let position = self.position + 0.15;
         let active = ((position / 8.).floor() as usize).min(23);
-        let suspended = self.notice.is_some() || self.screen == Screen::Settings;
+        let suspended =
+            self.notice.is_some() || matches!(self.screen, Screen::Settings | Screen::Log);
         let glow_textures = self.glow_textures.clone();
         let glow_bands = self.glow_bands.clone();
         let stats = self.frame_stats.clone();
@@ -933,7 +952,8 @@ impl Player {
 }
 impl Render for Player {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let modal_open = self.screen == Screen::Settings || self.notice.is_some();
+        let modal_open =
+            matches!(self.screen, Screen::Settings | Screen::Log) || self.notice.is_some();
         if modal_open != self.modal_was_open {
             // Resume from now, excluding time spent behind a modal.
             self.last = Instant::now();
@@ -946,7 +966,10 @@ impl Render for Player {
             self.modal_was_open = modal_open;
         }
         self.library.update(cx, |library, cx| {
-            library.set_suspended(self.screen == Screen::Settings || self.notice.is_some(), cx)
+            library.set_suspended(
+                matches!(self.screen, Screen::Settings | Screen::Log) || self.notice.is_some(),
+                cx,
+            )
         });
         self.pitch_strip.update(cx, |strip, cx| {
             strip.set_position(self.position, cx);
@@ -963,11 +986,12 @@ impl Render for Player {
             transport.set_karaoke(self.karaoke, cx);
         });
         let base_catalog = self.screen == Screen::Library
-            || self.screen == Screen::Settings && self.previous_screen == Screen::Library;
+            || matches!(self.screen, Screen::Settings | Screen::Log)
+                && self.previous_screen == Screen::Library;
         self.header.update(cx, |header, cx| {
             header.set_state(self.loaded_song, base_catalog, self.song_title.clone(), cx)
         });
-        if self.screen == Screen::Settings {
+        if matches!(self.screen, Screen::Settings | Screen::Log) {
             if self.backdrop.is_none() {
                 self.backdrop = window.render_to_image().ok().map(|image| {
                     let mut blurred = image::imageops::blur(&image, 8. * window.scale_factor());
@@ -1025,7 +1049,7 @@ impl Render for Player {
             window.request_animation_frame();
         }
 
-        let base_screen = if self.screen == Screen::Settings {
+        let base_screen = if matches!(self.screen, Screen::Settings | Screen::Log) {
             self.previous_screen
         } else {
             self.screen
@@ -1109,7 +1133,7 @@ impl Render for Player {
             });
         let content = match base_screen {
             Screen::Library => self.library.clone().into_any_element(),
-            Screen::Settings => unreachable!(),
+            Screen::Settings | Screen::Log => unreachable!(),
             Screen::Player => div().flex().flex_col().flex_1().min_h_0()
                 .child(div().flex().flex_1().min_h_0()
                     .child(div().flex_1().min_w_0().flex().flex_col()
@@ -1157,6 +1181,13 @@ impl Render for Player {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" {
                     if this.notice.take().is_some() {
+                        cx.notify();
+                        cx.stop_propagation();
+                    } else if this.screen == Screen::Log {
+                        let dismissed = this.log_panel.update(cx, |log, cx| log.dismiss_popup(cx));
+                        if !dismissed {
+                            this.screen = this.previous_screen;
+                        }
                         cx.notify();
                         cx.stop_propagation();
                     } else if this.screen == Screen::Settings {
@@ -1217,6 +1248,12 @@ impl Render for Player {
                         .child(self.settings.clone()),
                 )
             })
+            .when(self.screen == Screen::Log, |root| {
+                root.when_some(self.backdrop.clone(), |root, image| {
+                    root.child(div().absolute().inset_0().child(img(image).size_full()))
+                })
+                .child(self.log_panel.clone())
+            })
             .when_some(self.notice.clone(), |root, text| {
                 root.child(
                     singz_uikit::modal_scrim().child(
@@ -1237,7 +1274,9 @@ impl Render for Player {
         let root = root.when(self.text_phase_check, |root| {
             root.child(ui_text_phase::overlay())
         });
-        root
+        root.when(self.screen == Screen::Log, |root| {
+            root.child(gpui_kit::base::TextSelectionLayer)
+        })
     }
 }
 
@@ -1317,6 +1356,11 @@ fn main() {
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_REVIEW_CAPTURE") {
             assert!(background, "UI review requires background mode");
             ui_review::run(window_handle, view.clone(), directory.into(), cx);
+        }
+        #[cfg(feature = "ui-tests")]
+        if let Some(directory) = std::env::var_os("SINGZ_GPUI_LOG_REVIEW") {
+            assert!(background);
+            ui_log_review::run(window_handle, view.clone(), directory.into(), cx);
         }
         #[cfg(feature = "ui-tests")]
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_LYRICS_REVIEW") {
