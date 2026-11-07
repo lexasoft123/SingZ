@@ -703,7 +703,7 @@ async function manifestEntries(
   const sameFolders =
     dirs.length === catalogDirs.length && dirs.every((d) => catalogDirs.includes(d.name))
   if (file.md5Checksum && file.md5Checksum === catalogMd5 && listCache?.entries.length && sameFolders) {
-    log('gdrive', `unchanged — ${listCache.entries.length} songs, nothing fetched`)
+    log('gdrive', `unchanged — ${listCache.entries.length} songs, no project files fetched`)
     return { entries: listCache.entries, md5: catalogMd5, dirs: catalogDirs }
   }
   const res = await fetchMetadata(`${API()}/drive/v3/files/${file.id}?alt=media`, {
@@ -850,10 +850,16 @@ export async function driveLocalFile(
   options: FileDownloadOptions = {}
 ): Promise<string> {
   const files = projectFiles.get(project)
-  if (!files) throw new Error(`Project ${project} was not listed from Drive`)
+  if (!files) {
+    log('gdrive', `${project}/${file} — project is missing from the stored Drive listing`, 'error')
+    throw new Error(t('phone.library.downloadInterrupted'))
+  }
   const name = file.startsWith('stems/') ? file.slice(6) : file
   const entry = file.startsWith('stems/') ? files.stemsByName.get(name) : files.byName.get(name)
-  if (!entry) throw new Error(`${file} is missing from Drive`)
+  if (!entry) {
+    log('gdrive', `${project}/${file} — file is missing from Drive`, 'error')
+    throw new Error(t('phone.library.downloadMissing'))
+  }
 
   const size = expectedBytes ?? Number(entry.size ?? 0)
   const digest = expectedMd5 || entry.md5Checksum || ''

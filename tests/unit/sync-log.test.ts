@@ -4,7 +4,8 @@
  * cannot answer because it dies with the process.
  */
 import { describe, expect, it } from 'vitest'
-import { syncLog, syncLogEntries } from '../../src/main/sync-log'
+import { replaySyncLog, syncLog, syncLogEntries } from '../../src/main/sync-log'
+import { logEntries } from '../../src/main/log'
 
 describe('the desktop sync log', () => {
   it('keeps what happened, newest first, across reads', () => {
@@ -32,5 +33,16 @@ describe('the desktop sync log', () => {
   it('records a failure as one', () => {
     syncLog('error', 'sync failed: Drive API 503')
     expect(syncLogEntries()[0].kind).toBe('error')
+  })
+
+  it('reports the number actually replayed rather than the larger retained history', () => {
+    for (let index = 0; index < 160; ++index) syncLog('run', `replay-count-${index}`)
+    const kept = syncLogEntries().length
+    const before = logEntries().length
+    replaySyncLog()
+    const replay = logEntries().slice(before).filter(entry => entry.source === 'gdrive')
+    expect(replay).toHaveLength(121)
+    expect(replay.slice(0, -1).every(entry => entry.line.includes('replay-count-'))).toBe(true)
+    expect(replay.at(-1)?.line).toBe(`— 120 earlier sync entries above (${kept} kept) —`)
   })
 })

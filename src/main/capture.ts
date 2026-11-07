@@ -30,7 +30,7 @@ import type {
   DesktopMonitorLatency,
   DesktopMonitorResult,
   DesktopMonitorStatus,
-  DesktopPlaybackLaneConfig,
+  DesktopPlaybackTrustedLaneConfig,
   DesktopPlaybackLaneMeasureRequest,
   DesktopPlaybackLaneMeasureResult,
   DesktopPlaybackPrepareConfig,
@@ -97,7 +97,7 @@ export interface NativeCaptureBinding {
    *  JS thread either side of it. */
   preparePlayback(
     config: DesktopPlaybackPrepareConfig,
-    lanes: DesktopPlaybackLaneConfig[],
+    lanes: DesktopPlaybackTrustedLaneConfig[],
     generation: bigint
   ): Promise<DesktopPlaybackResult>
   openPlaybackOutput(generation: bigint): DesktopPlaybackResult
@@ -1807,7 +1807,7 @@ export class CaptureOwner {
   async preparePlayback(
     rendererId: number,
     config: DesktopPlaybackPrepareConfig,
-    lanes: DesktopPlaybackLaneConfig[],
+    lanes: DesktopPlaybackTrustedLaneConfig[],
     platform: NodeJS.Platform = process.platform
   ): Promise<DesktopPlaybackResult> {
     // Every refusal below is an answer to "why did this song end up on Web
@@ -1967,8 +1967,7 @@ export class CaptureOwner {
         if (abandoned) {
           log(
             'dsp',
-            `graph ready for a caller that left · generation ${rawGeneration} · unloading`,
-            'warn'
+            `graph ${result.ok ? 'ready' : 'refused'} after caller left · generation ${rawGeneration} · unloading`
           )
           this.unloadPlayback(rendererId, rawGeneration)
         }

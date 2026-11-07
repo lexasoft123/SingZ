@@ -748,6 +748,37 @@ int main(int argc, char** argv) {
     group.stop();
   }
 
+  // The bridge's bounded RMS96 contract also applies to float recordings
+  // whose samples exceed full scale. An unclamped producer makes the strict
+  // mobile parser reject every lane in an otherwise healthy song.
+  {
+    const std::string lead = writeFloatWav(1920, kRate);
+    {
+      singz::StreamingLaneGroup group;
+      check(group.addLane(openRead(lead), openRead(lead), kRate) ==
+                singz::DecodedAudioStatus::Ok, "over-range float waveform opens");
+      group.startWaveformPass();
+      std::vector<float> buckets(singz::kStreamingWaveformBuckets, -1.0F);
+      bool ready = false;
+      for (int attempt = 0; attempt < 400 && !ready; ++attempt) {
+        ready = group.waveform(0, buckets.data(), buckets.size());
+        if (!ready) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      check(ready, "over-range float waveform completes");
+      check(std::all_of(buckets.begin(), buckets.end(), [](float value) {
+        return std::isfinite(value) && value >= 0.0F && value <= 1.0F;
+      }), "float RMS stays within the native bridge contract");
+      check(std::any_of(buckets.begin(), buckets.end(), [](float value) {
+        return value == 1.0F;
+      }), "the fixture actually exercises full-scale clamping");
+      check(std::any_of(buckets.begin(), buckets.end(), [](float value) {
+        return value > 0.1F && value < 0.9F;
+      }), "clamping preserves lower waveform levels");
+      group.stop();
+    }
+    std::remove(lead.c_str());
+  }
+
   std::remove(flac.c_str());
   std::remove(wav.c_str());
   if (failures == 0)

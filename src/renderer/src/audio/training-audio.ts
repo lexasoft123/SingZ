@@ -1,4 +1,5 @@
 import { reportTrainingTiming } from './training-timing'
+
 import { type TrainingSound } from '../../../shared/training-sound'
 import { TRAINING_REACHED_TONE } from '../../../shared/training-tone'
 import type { TrainingCue, TrainingCuePurpose } from '../../../shared/training-types'
@@ -6,6 +7,13 @@ import {
   DEFAULT_TRAINING_REFERENCE_VOLUME,
   clampTrainingReferenceVolume
 } from '../training-practice'
+
+/** Command refusals and rejected IPC calls share the same diagnostic path. */
+function reportCueCommand(operation: string, request: Promise<{ ok: boolean; error?: string }>): void {
+  void request.then(result => {
+    if (!result.ok) throw result.error
+  }).catch(error => console.error(`Training ${operation} failed:`, error))
+}
 
 export interface TrainingCueTimingOptions {
   /** Scheduling headroom on the native render clock. */
@@ -125,22 +133,19 @@ export class DesktopTrainingCueController {
       const envelope = at < tone.attackSeconds ? at / tone.attackSeconds : (tone.durationSeconds - at) / (tone.durationSeconds - tone.attackSeconds)
       samples[index] = Math.sin(2 * Math.PI * tone.frequency * at) * envelope * tone.peakGain
     }
-    void window.singz.scheduleDesktopTrainingCue({ channels: [samples], sampleRate,
-      startDelayMs: tone.startDelaySeconds * 1000, gain: this.outputGain * Math.min(1, this.referenceVolume), generation: this.nativeGeneration }).then(result => {
-      if (!result.ok) reportTrainingTiming(`latch failed · ${result.error}`)
-    }).catch(error => reportTrainingTiming(`latch failed · ${String(error)}`))
+    reportCueCommand('latch', window.singz.scheduleDesktopTrainingCue({ channels: [samples], sampleRate,
+      startDelayMs: tone.startDelaySeconds * 1000, gain: this.outputGain * Math.min(1, this.referenceVolume), generation: this.nativeGeneration }))
   }
   cancel(): void {
     this.reachedTargets = new WeakSet<object>()
     this.generation++
-    void window.singz.cancelDesktopTrainingCues(this.nativeGeneration).catch(error => reportTrainingTiming(`cue cancellation failed · ${String(error)}`))
+    reportCueCommand('cue cancellation', window.singz.cancelDesktopTrainingCues(this.nativeGeneration))
   }
   stop(): void { this.cancel() }
   setReferenceVolume(volume: number): void { this.referenceVolume = clampTrainingReferenceVolume(volume); this.applyGain() }
   setOutputGain(gain: number): void { this.outputGain = Math.max(0, Math.min(1, gain)); this.applyGain() }
   private applyGain(): void {
-    void window.singz.setDesktopTrainingCueGain(this.nativeGeneration, this.outputGain * this.referenceVolume)
-      .catch(error => reportTrainingTiming(`cue gain failed · ${String(error)}`))
+    reportCueCommand('cue gain', window.singz.setDesktopTrainingCueGain(this.nativeGeneration, this.outputGain * this.referenceVolume))
   }
   getReferenceVolume(): number { return this.referenceVolume }
   dispose(): void { if (!this.disposed) { this.cancel(); this.samples.clear(); this.disposed = true } }

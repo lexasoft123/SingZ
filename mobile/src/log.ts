@@ -215,9 +215,10 @@ export async function clearLog(): Promise<void> {
   await writing
 }
 
-/** One line per entry, for sharing — the same format the desktop copies. */
+/** Shared/exported logs retain the date and UTC offset across archived launches
+ * and midnight. The on-screen clock stays short through fmtTime(). */
 export const formatLog = (entries: LogEntry[]): string =>
-  entries.map((e) => `${fmtTime(e.t)} [${e.level}] ${e.source}: ${e.line}`).join('\n')
+  entries.map((e) => `${new Date(e.t).toISOString()} [${e.level}] ${e.source}: ${e.line}`).join('\n')
 
 /**
  * The first line of every session: which build, on what, with how much room.

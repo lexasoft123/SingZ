@@ -1,9 +1,11 @@
+import type { OpeningTrack } from './loading-progress'
 import type { FileProgress } from './file-download'
 import { t } from './i18n'
 
 const amount = (bytes: number): string => bytes >= 1_000_000
   ? `${(bytes / 1_000_000).toFixed(1)} MB` : `${Math.ceil(Math.max(0, bytes) / 1000)} KB`
 export function describeFileProgress(p: FileProgress, label: string, index: number, count: number): string {
+  if (p.phase === 'connecting') return t('phone.library.openingConnect')
   if (p.phase === 'checking') return t('phone.library.downloadChecking', { label, index, count })
   if (p.phase === 'retrying') return t('phone.library.downloadRetrying', { label, attempt: p.attempt, attempts: p.attempts })
   if (p.phase === 'verifying') return t('phone.library.downloadVerifying', { label, index, count })
@@ -13,4 +15,16 @@ export function describeFileProgress(p: FileProgress, label: string, index: numb
 }
 export function fileProgressFraction(p: FileProgress): number {
   return p.total > 0 ? Math.max(0, Math.min(1, p.got / p.total)) : 0
+}
+
+/** Built-in names follow the app language; user-authored track names stay intact. */
+export function openingTrack(id: string, index: number, count: number, customLabel?: string): OpeningTrack {
+  const keys = {
+    original: 'phone.player.stem.original', vocals: 'phone.player.stem.vocals',
+    drums: 'phone.player.stem.drums', bass: 'phone.player.stem.bass',
+    guitar: 'phone.player.stem.guitar', piano: 'phone.player.stem.piano',
+    other: 'phone.player.stem.other',
+  } as const
+  const key = keys[id as keyof typeof keys]
+  return { label: customLabel ?? (key ? t(key) : id), index, count }
 }

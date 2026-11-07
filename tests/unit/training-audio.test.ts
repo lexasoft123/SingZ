@@ -169,6 +169,35 @@ beforeEach(() => {
 
 describe('shared native training cues', () => {
   afterEach(() => vi.unstubAllGlobals())
+  it.each(['refused', 'rejected'] as const)('reports %s cue commands at error severity instead of info timing', async mode => {
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const error = new Error('fixture native cue failure')
+    const gain = vi.spyOn(window.singz, 'setDesktopTrainingCueGain')
+    try {
+      if (mode === 'refused') {
+        nativeSchedule.mockResolvedValueOnce({ ok: false, error: error.message } as never)
+        nativeCancel.mockResolvedValueOnce({ ok: false, error: error.message } as never)
+        gain.mockResolvedValueOnce({ ok: false, error: error.message })
+      } else {
+        nativeSchedule.mockRejectedValueOnce(error)
+        nativeCancel.mockRejectedValueOnce(error)
+        gain.mockRejectedValueOnce(error)
+      }
+      const controller = new DesktopTrainingCueController(new FakeAudioContext() as unknown as AudioContext, {} as AudioNode)
+      controller.latch()
+      controller.cancel()
+      controller.setOutputGain(0.5)
+      await flushPlaybackRequest()
+      const detail = mode === 'refused' ? error.message : error
+      expect(report).toHaveBeenCalledWith('Training latch failed:', detail)
+      expect(report).toHaveBeenCalledWith('Training cue cancellation failed:', detail)
+      expect(report).toHaveBeenCalledWith('Training cue gain failed:', detail)
+    } finally {
+      gain.mockRestore()
+      report.mockRestore()
+    }
+  })
+
   it('prepares sampled notes offline and schedules only PCM on the native output', async () => {
     const fetcher = vi.fn(async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(1) }))
     vi.stubGlobal('fetch', fetcher)

@@ -42,10 +42,9 @@ describe('a waveform the desktop saved', () => {
     expect(loudest).toBeGreaterThan(0.1)
   })
 
-  it('is refused the moment a stem it was measured from changes', () => {
-    // A re-split rewrites the stems and their hashes. The envelope is then a
-    // picture of audio the project no longer holds, and drawing it would look
-    // perfectly fine — which is why this is checked rather than assumed.
+  it('remeasures only the lane whose bytes changed', () => {
+    // Negative control: all-or-nothing rejection would discard the five healthy
+    // lanes too. A changed lane must be absent, never drawn from its old bytes.
     const restemmed = {
       ...saved,
       stemHashes: {
@@ -56,13 +55,14 @@ describe('a waveform the desktop saved', () => {
         }
       }
     } as ProjectDoc
-    expect(cachedWaveform(restemmed, laneHashes(restemmed))).toBeNull()
+    const cached = cachedWaveform(restemmed, laneHashes(restemmed))
+    expect(cached?.lanes).toHaveLength(5)
+    expect(cached?.lanes.some(lane => lane.id === 'vocals')).toBe(false)
   })
 
   it('round-trips: what the phone would store matches what the desktop wrote', () => {
-    // The two writers must agree, or a phone-measured song and a
-    // desktop-measured one would be stored differently and only one of them
-    // would be readable on the next open.
+    // Mobile adds the explicit policy stamp while preserving the desktop's
+    // content identity and exact values, so both readers accept the result.
     const wanted = laneHashes(saved)
     const envelope = cachedWaveform(saved, wanted)!
     const restored = waveformCacheFor(envelope, wanted)

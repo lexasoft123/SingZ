@@ -84,10 +84,12 @@ describe('loadProject builds the lanes', () => {
   /** A folder project: six stems on disk plus whatever project.json declares. */
   function setup(custom: unknown, opts: { failing?: string[] } = {}): {
     fetched: string[]
+    steps: jest.Mock
     load: () => Promise<import('../src/projects').LoadedProject>
   } {
     jest.resetModules()
     const fetched: string[] = []
+    const steps = jest.fn()
     const { NativeModules } = require('react-native')
     NativeModules.FolderAccess = {
       localFile: async (_p: string, file: string) => {
@@ -117,17 +119,21 @@ describe('loadProject builds the lanes', () => {
       bytes: 0,
       hasLyrics: false
     } as unknown as import('../src/projects').ProjectEntry
-    return { fetched, load: () => projects.loadProject(entry, 48000, () => {}) }
+    return { fetched, steps, load: () => projects.loadProject(entry, 48000, steps) }
   }
 
   it('adds them after the stems, with their desktop name and colour', async () => {
-    const { fetched, load } = setup([
+    const { fetched, steps, load } = setup([
       { id: 'custom-harmony', label: 'Harmony', color: '#ff9ad5', file: 'stems/custom-harmony.mp3' }
     ])
     const p = await load()
     await flush()
     expect(p.stems.map((l) => l.id)).toEqual(['vocals', 'drums', 'custom-harmony'])
     expect(fetched).toEqual(['stems/vocals.flac', 'stems/drums.flac', 'stems/custom-harmony.mp3'])
+    const progress = steps.mock.calls.filter(call => call[3] !== undefined)
+    expect(progress.map(call => call[3].index)).toEqual([1, 1, 2, 2, 3, 3])
+    expect(progress.every(call => call[3].count === 3)).toBe(true)
+    expect(progress.at(-1)?.[3].label).toBe('Harmony')
     expect(p.stems[2]).toMatchObject({ label: 'Harmony', color: '#ff9ad5', custom: true })
     // stems keep their own identity — the UI reads TRACK_META for those
     expect(p.stems[0].custom).toBeUndefined()

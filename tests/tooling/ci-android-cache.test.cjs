@@ -55,6 +55,21 @@ test('both Android build jobs restore shared caches before fresh dependency inst
   }
 })
 
+test('Android package setup is bounded and uses the tested missing-package installer', () => {
+  for (const [name, label, packages] of [
+    ['canary', 'Sample generator and native host dependencies', 'ffmpeg libasound2-dev libudev-dev pkg-config'],
+    ['artifacts', 'ffmpeg for the sample-song generator', 'ffmpeg'],
+  ]) {
+    assert.match(job(name), /runs-on: ubuntu-24\.04/)
+    const setup = step(job(name), label)
+    assert.match(setup, /timeout-minutes: 5/)
+    assert.ok(setup.includes(`run: bash scripts/ci-install-apt.sh ${packages}`))
+    assert.doesNotMatch(setup, /apt-get update/)
+  }
+  for (const input of ['scripts/ci-install-apt.sh', 'tests/tooling/ci-install-apt.test.cjs'])
+    assert.equal(workflow.split(`- '${input}'`).length - 1, 2)
+})
+
 test('Android CI keeps compiler policy in the shared launcher without resetting or rewriting shared cache state', () => {
   assert.doesNotMatch(workflow, /CMAKE_C(?:XX)?_COMPILER_LAUNCHER:\s*ccache/)
   assert.doesNotMatch(workflow, /CCACHE_(?:COMPILERCHECK|SLOPPINESS):/)

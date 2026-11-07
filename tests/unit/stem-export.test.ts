@@ -21,11 +21,13 @@ vi.mock('../../src/main/audio-process', () => ({ desktopAudioProcess: {
 } }))
 vi.mock('../../src/main/log', () => ({ log: vi.fn() }))
 import { registerStemExport } from '../../src/main/stem-export'
+import { log } from '../../src/main/log'
 import { allowFile, allowRoot } from '../../src/main/media'
 const sender = { sender: Object.assign(new EventEmitter(), { id: 1, isDestroyed: () => false }) }
 const invoke = (name: string, ...args: any[]): any => mock.handlers.get(`stems:export-${name}`)!(sender, ...args)
 let source: string
 beforeEach(async () => {
+  vi.mocked(log).mockClear()
   mock.folder = await mkdtemp(join(tmpdir(), 'singz-export-ipc-'))
   source = join(mock.folder, 'source.wav')
   await writeFile(source, 'fixture: PCM belongs to native code')
@@ -67,6 +69,16 @@ it('cancels the native job and never publishes cancelled output', async () => {
   expect(mock.cancel).toHaveBeenCalledOnce()
   finish!({ ok: true })
   expect((await writing).ok).toBe(false)
+  expect(await readdir(mock.folder)).toEqual(['source.wav'])
+  expect(log).toHaveBeenCalledWith('export', 'track export cancelled: a')
+  expect(vi.mocked(log).mock.calls.some(([, , level]) => level === 'error')).toBe(false)
+})
+
+it('keeps a failed native export in the app log with the requested track name', async () => {
+  mock.native.mockRejectedValueOnce(new Error('fixture encoder stopped'))
+  const { token } = await invoke('begin')
+  expect(await invoke('write', token, 'vocals', 'wav', source)).toMatchObject({ ok: false })
+  expect(log).toHaveBeenCalledWith('export', 'track export failed: vocals · Error: fixture encoder stopped', 'error')
   expect(await readdir(mock.folder)).toEqual(['source.wav'])
 })
 
