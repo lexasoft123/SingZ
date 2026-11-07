@@ -2566,7 +2566,7 @@ EXTERNAL SOURCES:
 
 SPEC CHECKSUMS:
   FBLazyVector: 3c3be9a019176b5699455f7f66c5444b78a411c6
-  FolderAccess: c0ce03e1bdb310b865f6b63fea2115aa67777faa
+  FolderAccess: 8daef3b6807cad2d8aab7a96c10cb459b6c09800
   hermes-engine: 6a26e94b4a974cbadc751eed9caa12624c38f226
   onnxruntime-c: 36ca0f2cdbc89c6b330ec5287c3faf5ca6ed394d
   RCTDeprecation: bccb6545c26db881ecddfd83a3f9ea82aba1605f

@@ -1997,6 +1997,38 @@ struct PlaybackGraphComposition {
 using NativePlaybackLanePeaks =
     std::array<float, kNativePlaybackLaneSummaryBuckets>;
 
+[[nodiscard]] bool contentBoundWaveformKey(const std::string &key) noexcept {
+  size_t prefixLength = 0;
+  if (key.size() == 36 && key.compare(0, 4, "md5:") == 0)
+    prefixLength = 4;
+  else if (key.size() == 72 && key.compare(0, 8, "measure:") == 0)
+    prefixLength = 8;
+  else
+    return false;
+  for (size_t index = prefixLength; index < key.size(); ++index) {
+    const char value = key[index];
+    if ((value < '0' || value > '9') && (value < 'a' || value > 'f'))
+      return false;
+  }
+  return true;
+}
+
+[[nodiscard]] bool validWaveformSeed(
+    const NativePlaybackLaneSource &source) noexcept {
+  if (!source.waveform.has_value())
+    return false;
+  const auto &seed = *source.waveform;
+  if (seed.version != kNativePlaybackWaveformSeedVersion ||
+      seed.policy != kNativePlaybackWaveformSeedPolicy ||
+      seed.contentKey != source.sourceKey ||
+      !contentBoundWaveformKey(seed.contentKey))
+    return false;
+  for (const float peak : seed.peaks)
+    if (!std::isfinite(peak) || peak < 0.0F || peak > 1.0F)
+      return false;
+  return true;
+}
+
 // Everything that decides whether an already-decoded lane is the same audio
 // as a lane a new prepare is asking for: the bridge's opaque identity for the
 // bytes, and the decode settings that shaped the published samples. Nothing
@@ -4694,21 +4726,35 @@ struct NativePlaybackSession::Impl {
   // deliberately never takes. Lock order: this one is always innermost.
   mutable std::mutex parkedMutex;
   std::vector<ParkedLane> parkedLanes;
-  // Lane envelopes this session has already measured, keyed by the BRIDGE'S
-  // SOURCE KEY for the lane — never by its id.
-  //
-  // A cue, pitch or tempo change REBUILDS the graph, and a rebuilt graph used
-  // to start measuring from the first lane again, so a singer touching the
-  // metronome and the pitch in the first seconds of a song restarted the pass
-  // over and over and saw no waveform at all. None of those changes touch the
-  // stems, so the numbers stay true across every one of them.
-  //
-  // The key matters as much as the carrying: every song has a lane called
-  // "vocals", so an id-keyed cache would hand the next song the last one's
-  // waveform — drawn perfectly, and wrong. The source key names the bytes'
-  // location, which is the same comparison lane adoption already makes, and an
-  // empty key caches nothing for the same reason it never adopts.
+  // Reuse requires a content hash or a main-verified file/stat cache identity.
+  // A path can be rewritten between opens and must never name a waveform.
+  mutable std::mutex waveformMutex;
   std::map<std::string, NativePlaybackLanePeaks> measuredWaveforms;
+
+  [[nodiscard]] std::optional<NativePlaybackLanePeaks>
+  measuredWaveform(const std::string &key) const {
+    if (!contentBoundWaveformKey(key)) return std::nullopt;
+    std::lock_guard<std::mutex> lock(waveformMutex);
+    const auto found = measuredWaveforms.find(key);
+    return found == measuredWaveforms.end() ? std::nullopt
+                                            : std::optional{found->second};
+  }
+
+  void rememberMeasuredWaveform(const std::string &key,
+                                const NativePlaybackLanePeaks &peaks) {
+    if (!contentBoundWaveformKey(key)) return;
+    for (const float peak : peaks)
+      if (!std::isfinite(peak) || peak < 0.0F || peak > 1.0F) return;
+    std::lock_guard<std::mutex> lock(waveformMutex);
+    const auto found = measuredWaveforms.find(key);
+    if (found != measuredWaveforms.end()) {
+      found->second = peaks;
+      return;
+    }
+    if (measuredWaveforms.size() >= kNativePlaybackMaximumMeasuredWaveforms)
+      measuredWaveforms.erase(measuredWaveforms.begin());
+    measuredWaveforms.emplace(key, peaks);
+  }
   std::atomic<size_t> parkedLaneBytes{0};
   std::atomic<uint32_t> parkedLaneCount{0};
   // A short control-domain gate linearizes generation/cancellation claims
@@ -6108,9 +6154,11 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
   // feeder seeks on the first block's published demand anyway, which is the
   // same mechanism a scrub uses and is already covered by its tests.
   std::shared_ptr<StreamingLaneGroup> streamingGroup;
+  std::vector<std::optional<NativePlaybackLanePeaks>> waveformSeeds(sources.size());
   if (config.streamLanes && !adoptedParkedLanes) {
     streamingGroup = std::make_shared<StreamingLaneGroup>();
-    for (NativePlaybackLaneSource &source : sources) {
+    for (size_t sourceIndex = 0; sourceIndex < sources.size(); ++sourceIndex) {
+      auto &source = sources[sourceIndex];
       if (combined.isRequested())
         return failPreparation(NativePlaybackError::Cancelled,
                                "Native playback preparation was superseded");
@@ -6123,13 +6171,16 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
         streamingGroup.reset();
         break;
       }
-      // A plain duplicate for the waveform pass. Sharing an open file
-      // description with playback is safe because the streaming source reads
-      // POSITIONALLY and carries its own cursor — which is also why this is no
-      // longer reopened by path. That reopen worked on a Mac and was an
-      // unanswered question inside a sandboxed app on a phone, which is a bad
-      // thing for a feature to depend on and impossible to test from here.
-      const int forWaveform = duplicateDescriptor(source.descriptor.get());
+      // A validated persisted or process-local envelope needs no second decode.
+      // Every other lane keeps an independent descriptor for its background pass.
+      // Keep the exact answer that allowed omitting the analysis reader.
+      // Installing earlier lanes can evict this key from the bounded memo.
+      waveformSeeds[sourceIndex] = validWaveformSeed(source)
+          ? std::optional{source.waveform->peaks}
+          : impl_->measuredWaveform(source.sourceKey);
+      const int forWaveform = waveformSeeds[sourceIndex].has_value()
+                                  ? -1
+                                  : duplicateDescriptor(source.descriptor.get());
       // The DEVICE's rate: the feeder resamples into it as it fills, the same
       // way the decoded path resamples before publishing. Our stems are
       // 44.1 kHz and phones run at 48, so a feeder that could not do this
@@ -6178,11 +6229,8 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
       lane.streamFrames = laneFrames;
       lane.waveformKey = sources[index].sourceKey;
       lane.streamBytes = bytes;
-      // KNOWN GAP, stated rather than hidden: the seek bar's waveform is a
-      // linear pass over decoded PCM, and a streamed lane has none to pass
-      // over. Computing it here would mean decoding the whole song, which is
-      // the exact cost streaming exists to avoid, so the bar renders without
-      // a waveform until peaks are made asynchronous.
+      // A streamed lane publishes through lanePeaks() after its persisted seed
+      // or independent background pass is installed below.
       lane.peaksValid = false;
       lane.gain = sources[index].gain;
       lane.muted = sources[index].muted;
@@ -6423,16 +6471,15 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
   // initial seek, and an idle feeder costs one timed wait every 4 ms.
   if (streamingGroup != nullptr) {
     prepared->streaming = std::move(streamingGroup);
-    // Hand over every envelope this session has already measured for these
-    // exact stems, so a rebuild costs nothing and the bar does not vanish the
-    // moment somebody touches the metronome.
+    // Seed each usable lane independently; every other lane keeps its ordinary
+    // background measurement. The persisted seed was validated again above.
     for (size_t index = 0; index < prepared->lanes.size(); ++index) {
       const std::string &key = prepared->lanes[index].waveformKey;
-      if (key.empty()) continue;
-      const auto found = impl_->measuredWaveforms.find(key);
-      if (found != impl_->measuredWaveforms.end())
-        prepared->streaming->seedWaveform(index, found->second.data(),
-                                          found->second.size());
+      const auto &seed = waveformSeeds[index];
+      if (seed.has_value()) {
+        prepared->streaming->seedWaveform(index, seed->data(), seed->size());
+        impl_->rememberMeasuredWaveform(key, *seed);
+      }
     }
     prepared->streaming->start();
     // Started here, after the graph is built: the waveform is wanted soon but
@@ -8370,8 +8417,8 @@ NativePlaybackSession::lanePeaks(uint64_t generation) const {
       valid = streaming->waveform(index, peaks.data(), peaks.size());
       // Remembered for the next generation of this song. This is the only
       // place that sees a finished lane, and a rebuild is usually seconds away.
-      if (valid && !lane.waveformKey.empty())
-        impl_->measuredWaveforms[lane.waveformKey] = peaks;
+      if (valid)
+        impl_->rememberMeasuredWaveform(lane.waveformKey, peaks);
     }
     result.lanes.push_back({lane.id, valid, peaks});
   }

@@ -201,11 +201,11 @@ export class MultitrackEngine {
   duration = 0
 
   constructor(private readonly nativePlaybackPolicy: DesktopNativePlaybackPolicy = {}) {
-    // Mandatory-native surfaces must enumerate before Chromium claims the
-    // default ALSA device. Suspended contexts can still hold that endpoint.
-    this.ctx = new AudioContext(nativePlaybackPolicy.requireNative
-      ? { latencyHint: 'interactive', sinkId: { type: 'none' } } as AudioContextOptions
-      : { latencyHint: 'interactive' })
+    // Boot inventory must precede Chromium claiming an exclusive endpoint.
+    // Each surface reconciles its native, browser, or default route afterward.
+    this.ctx = new AudioContext({
+      latencyHint: 'interactive', sinkId: { type: 'none' }
+    } as AudioContextOptions)
     this.master = this.ctx.createGain()
     this.outputBus = this.ctx.createGain()
     this.clickGain = this.ctx.createGain()

@@ -35,7 +35,11 @@ class Sender extends EventEmitter {
 const dirs: string[] = []
 const backends: Array<NonNullable<ReturnType<typeof registerBoxIpc>>> = []
 const originalSurface = process.env.SINGZ_SURFACE
-async function register(rendererURL: string, surface = 'box') {
+async function register(
+  rendererURL: string,
+  surface = 'box',
+  audio: Partial<Pick<Parameters<typeof registerBoxIpc>[0], 'audioInputs' | 'audioHost'>> = {}
+) {
   process.env.SINGZ_SURFACE = surface
   const userDataDir = await mkdtemp(join(tmpdir(), 'box-ipc-'))
   dirs.push(userDataDir)
@@ -44,7 +48,8 @@ async function register(rendererURL: string, surface = 'box') {
     appVersion: 'test',
     rendererURL,
     audioInputs: () => ({ ok: true, devices: [] }),
-    audioHost: () => ({ ok: true, devices: [] })
+    audioHost: () => ({ ok: true, devices: [] }),
+    ...audio
   })
   if (backend) backends.push(backend)
   return backend
@@ -67,6 +72,22 @@ afterEach(async () => {
 })
 
 describe('Box IPC renderer trust', () => {
+  it('resolves remote audio inventories before returning diagnostics over IPC', async () => {
+    const url = 'file:///tmp/SingZ/out/renderer/box/box.html'
+    const inputs = { ok: true, devices: [{ uid: 'mic', name: 'Microphone' }] }
+    const host = { ok: true, devices: [{ uid: 'output', label: 'USB interface' }] }
+    const backend = await register(url, 'box', {
+      audioInputs: async () => inputs,
+      audioHost: async () => host
+    })
+    if (!backend) throw new Error('Box backend was not registered')
+    const owner = new Sender(url)
+    attached(backend, owner)
+    const result = await invoke(owner, 'box:diagnostics')
+    expect(result).toMatchObject({ ok: true, value: { audio: { inputs, host } } })
+    expect(() => structuredClone(result)).not.toThrow()
+  })
+
   it('registers no Box handlers for Desktop', async () => {
     expect(await register('file:///tmp/renderer/box/box.html', 'desktop')).toBeNull()
     expect(ipc.handlers.size).toBe(0)

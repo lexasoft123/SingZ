@@ -55,12 +55,13 @@ export class RecoverableModule<Props> extends Component<
     void this.props.attempts[attempt]().then(({ default: Loaded }) => {
       if (!this.mounted || generation !== this.generation) return
       this.setState({ phase: 'loaded', attempt, Component: Loaded })
-    }).catch(() => {
+    }).catch((error: unknown) => {
       // Chromium remembers a failed module URL even if its view disappeared
       // before the request settled. Record that provenance for the next
       // route mount, but never update the unmounted instance's state. A
       // superseded generation must not poison the currently selected URL.
       if (generation !== this.generation) return
+      console[attempt ? 'error' : 'warn']('UI import failed:', error, attempt ? 'retry exhausted' : 'retry available')
       this.props.onAttemptFailed(attempt)
       if (!this.mounted) return
       this.setState({ phase: 'failed', attempt, Component: null })

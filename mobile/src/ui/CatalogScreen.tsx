@@ -35,6 +35,7 @@ import {
 } from '../gdrive'
 import { getCrumb, getStoredText, setCrumb, setStoredText } from '../latency'
 import { fmtBytes, fmtMs, log } from '../log'
+import { type OpeningTrack, createLoadingProgress, openingStatusKey, openingFraction, waitForProgressPaint } from '../loading-progress'
 import type { MultitrackEngine } from '../engine'
 import { addedTracks, STEM_ORDER_ALL, type LyricsDoc, type ProjectDoc } from '../model'
 import {
@@ -148,6 +149,7 @@ const iosLibraryText = (key: Extract<Key, `phone.library.${string}Iphone`>): str
   t(key).replaceAll('iPhone', Platform.OS === 'ios' && Platform.isPad ? 'iPad' : 'iPhone')
 
 interface Loading {
+  track?: OpeningTrack
   dir: string
   msg: string
   frac: number
@@ -818,6 +820,9 @@ export default function CatalogScreen({
       setError(null)
       stepLog.current = { t0: Date.now(), rows: [] }
       setLoading({ dir: entry.dir, msg: t('phone.library.opening'), frac: 0 })
+      let completedFraction = 0
+      const progress = createLoadingProgress<Loading>(setLoading,
+        () => tok === token.current && !abort.signal.aborted)
       try {
         const pickedRoot =
           mode === 'folder' ? (root?.kind === 'picked' ? root : await getRoot()) : null
@@ -841,10 +846,14 @@ export default function CatalogScreen({
           signal: abort.signal,
           engine,
           sampleRate,
-          onStep: (msg, frac) => {
+          onStep: (msg, frac, activity, track) => {
             if (tok !== token.current) return
             stepLog.current.rows.push({ ms: Date.now() - stepLog.current.t0, frac, msg })
-            setLoading({ dir: entry.dir, msg, frac })
+            completedFraction = openingFraction(completedFraction, frac)
+            progress.update({ dir: entry.dir,
+              msg: track ? `${t(openingStatusKey(activity)).replace(/(?:…|\.{3})$/, '')} · ${track.label}` : t(openingStatusKey(activity)),
+              track,
+              frac: completedFraction })
           },
           crumb: setCrumb,
           isCurrent: () => tok === token.current
@@ -856,6 +865,14 @@ export default function CatalogScreen({
         }
         await setCrumb('')
         stepLog.current.rows.push({ ms: Date.now() - stepLog.current.t0, frac: 1, msg: 'open' })
+        progress.finish({ dir: entry.dir, msg: t('phone.library.ready'), frac: 1 })
+        // Give the completed bar a paint opportunity, without a timed dwell.
+        await waitForProgressPaint()
+        if (tok !== token.current || abort.signal.aborted) {
+          await loaded.nativePlayback?.unload('catalog completion superseded')
+          releaseProject(loaded)
+          return
+        }
         setLoading(null)
         // the player has it from here (while loading, loadingDirRef answers);
         // a load that failed or was superseded never gets this far
@@ -887,6 +904,7 @@ export default function CatalogScreen({
             startAnalysis(entry.dir, entry.stems, loaded.lyrics)
         }
       } catch (e) {
+        progress.stop()
         await setCrumb('')
         if (tok === token.current) {
           setLoading(null)
@@ -896,6 +914,7 @@ export default function CatalogScreen({
           void loadUsage()
         }
       } finally {
+        progress.stop()
         if (loadAbort.current === abort) loadAbort.current = null
       }
     },
@@ -2104,9 +2123,13 @@ export default function CatalogScreen({
             </Text>
           )}
           {isLoading ? (
-            <Text style={[s.cardMeta, { color: C.amber }]} numberOfLines={2}>
-              {loading.msg}
-            </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'baseline' }}>
+              <Text style={[s.cardMeta, { color: C.amber, flexShrink: 1 }]} numberOfLines={1}
+                accessibilityLabel={loading.track ? `${loading.msg} · ${loading.track.index}/${loading.track.count}` : loading.msg}>
+                {loading.msg}
+              </Text>
+              {loading.track && <Text accessible={false} style={[s.cardMeta, { color: C.amber }]}> · {loading.track.index}/{loading.track.count}</Text>}
+            </View>
           ) : failed ? (
             <Text style={[s.cardMeta, { color: C.amber }]} numberOfLines={4}>
               {failed.message}
@@ -2117,6 +2140,7 @@ export default function CatalogScreen({
             </Text>
           )}
         </View>
+        {isLoading && <ActivityIndicator size="small" color={C.amber} />}
         {isLoading ? (
           <Pressable
             hitSlop={10}
@@ -2147,7 +2171,8 @@ export default function CatalogScreen({
           </>
         )}
         {isLoading && (
-          <View style={s.progressRail}>
+          <View style={s.progressRail} accessibilityRole="progressbar"
+            accessibilityValue={{ text: loading.msg }}>
             <View style={[s.progressFill, { width: `${Math.round(loading.frac * 100)}%` }]} />
           </View>
         )}

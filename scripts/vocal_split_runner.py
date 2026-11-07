@@ -129,6 +129,10 @@ def main():
     # Leaving it symbolic sends the whole graph to CPU with static-shapes=1.
     opts.add_free_dimension_override_by_name('batch_size', 1)
     providers = execution_providers(args.cpu, ort.get_available_providers())
+    if (sys.platform == 'linux' and platform.machine().lower() in ('aarch64', 'arm64')
+            and providers == ['CPUExecutionProvider']):
+        opts.enable_cpu_mem_arena = False
+        opts.enable_mem_pattern = False
     try:
         session = ort.InferenceSession(args.model, sess_options=opts, providers=providers)
     except Exception:

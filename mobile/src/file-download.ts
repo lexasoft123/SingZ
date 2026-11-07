@@ -1,7 +1,7 @@
 /** Per-file transfer state. Native owns bytes and verification; JS owns the
  * bounded retry policy and a request-scoped watchdog/cancel button. */
 export interface FileProgress {
-  phase: 'checking' | 'downloading' | 'verifying' | 'retrying'
+  phase: 'checking' | 'connecting' | 'downloading' | 'verifying' | 'retrying'
   got: number
   total: number
   attempt: number
@@ -68,6 +68,7 @@ export async function downloadFile(
     const attemptAbort = new AbortController()
     let timer: ReturnType<typeof setInterval> | undefined
     let polling = false
+    let transferStarted = false
     let done = false
     let cancel = () => {}
     const started = Date.now()
@@ -90,7 +91,7 @@ export async function downloadFile(
             attemptAbort.abort()
             void native.cancelDriveFetch?.(id).catch(() => {})
           }
-          if (!native.driveFetchProgress || polling) return
+          if (!transferStarted || !native.driveFetchProgress || polling) return
           polling = true
           void native.driveFetchProgress(id).then(p => {
             if (done || !p) return
@@ -104,9 +105,11 @@ export async function downloadFile(
         }, 300)
       })
       const work = (async () => {
+        onProgress?.({ phase: 'connecting', got: 0, total: bytes, attempt, attempts, bytesPerSecond: 0 })
         const auth = await authorize(renew, attemptAbort.signal)
         check(signal)
         if (done) throw downloadCancelled()
+        transferStarted = true
         onProgress?.({ phase: 'downloading', got: 0, total: bytes, attempt, attempts, bytesPerSecond: 0 })
         return native.fetchToCacheTracked
           ? native.fetchToCacheTracked(project, file, url, auth, md5, bytes, id)

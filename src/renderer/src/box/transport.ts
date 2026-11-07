@@ -126,6 +126,7 @@ export class BoxTransport {
   private snapshot: BoxTransportSnapshot
   private readonly saveDelayMs: number
   private readonly nativePlaybackEnabled?: boolean
+  private browserOutputReconciled = false
 
   constructor(
     private readonly api: SingzApi,
@@ -365,6 +366,14 @@ export class BoxTransport {
       if (!this.current(generation)) return false
       return await this.enqueueEngine(async () => {
         if (!this.current(generation)) return
+        // Desktop reconciles its output in the app shell. Box previews need
+        // their own first-open route before Web Audio can leave the silent sink.
+        // Mandatory-native Linux must stay detached for exclusive ALSA probing.
+        if (this.nativePlaybackEnabled !== true && !this.browserOutputReconciled && this.engine.setOutput) {
+          await this.engine.setOutput(this.engine.outputDeviceId ?? '')
+          this.browserOutputReconciled = true
+          if (!this.current(generation)) return
+        }
         this.committing = true
         this.publish()
         try {

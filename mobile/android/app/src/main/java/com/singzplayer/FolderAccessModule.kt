@@ -4,6 +4,10 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.ParcelFileDescriptor
+import android.system.Os
+import android.system.OsConstants
+import android.system.StructStat
 import androidx.documentfile.provider.DocumentFile
 import com.facebook.react.bridge.ActivityEventListener
 import com.facebook.react.bridge.Arguments
@@ -14,6 +18,7 @@ import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableArray
 import com.facebook.react.bridge.WritableMap
 import java.io.File
+import java.io.FileInputStream
 import java.net.HttpURLConnection
 import java.net.ServerSocket
 import java.net.URL
@@ -59,7 +64,8 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
   private val prefs
     get() = ctx.getSharedPreferences("singz", Context.MODE_PRIVATE)
 
-  /** md5 per downloaded file, keyed by path and stamped with size + mtime. */
+  /** Legacy memo storage is retained for SHA-256/model bookkeeping. Its old
+   * MD5 rows are never trusted by currency or actual file identity. */
   private val hashPrefs
     get() = ctx.getSharedPreferences("singz-hashes", Context.MODE_PRIVATE)
 
@@ -281,34 +287,7 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
   private fun isCurrent(f: File, md5: String, size: Long): Boolean =
     CacheCurrency.isCurrent(if (f.isFile) f.length() else -1L, size, md5) { hashOf(f) }
 
-  /** md5 of a file, remembered against its own identity (size + mtime) so a
-   *  song hashes once and not on every open. A rewrite moves the mtime, so a
-   *  stale row cannot outlive the bytes it describes. */
-  private fun hashOf(f: File): String? {
-    val stamp = "${f.length()}:${f.lastModified()}"
-    hashPrefs.getString(f.path, null)?.let {
-      val parts = it.split(":")
-      if (parts.size == 3 && "${parts[0]}:${parts[1]}" == stamp) return parts[2]
-    }
-    return try {
-      val digest = MessageDigest.getInstance("MD5")
-      f.inputStream().use { input ->
-        val buf = ByteArray(1 shl 16)
-        while (true) {
-          val n = input.read(buf)
-          if (n <= 0) break
-          digest.update(buf, 0, n)
-        }
-      }
-      val md5 = digest.digest().joinToString("") { "%02x".format(it) }
-      hashPrefs.edit().putString(f.path, "$stamp:$md5").apply()
-      md5
-    } catch (e: Exception) {
-      // present but unreadable is not the file we want — fetch it again,
-      // rather than failing the open the way a thrown exception would
-      null
-    }
-  }
+  private fun hashOf(f: File): String? = identities.identity(f.path)?.md5
 
   /** Drop one project's downloaded files, or everything when project is "". */
   @ReactMethod
@@ -475,17 +454,51 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
           ?: throw Exception("The picked folder is no longer reachable")
         val src = resolvePath(root, "$project/$file") ?: throw Exception("$file is missing")
         val out = cacheFile(project, file)
-        if (!out.isFile || out.length() != src.length()) {
+        // A restored mtime and equal size cannot prove these are the same
+        // bytes. Compare the provider stream and cached file directly.
+        val current = out.isFile && out.length() == src.length() &&
+          FolderMaterialization.sameContent({
+            ctx.contentResolver.openInputStream(src.uri)
+              ?: throw Exception("Cannot open $file")
+          }, out, ::hashOf)
+        if (!current) {
           out.parentFile?.mkdirs()
           val tmp = File(out.path + ".part")
           ctx.contentResolver.openInputStream(src.uri)?.use { input ->
             tmp.outputStream().use { output -> input.copyTo(output) }
           } ?: throw Exception("Cannot open $file")
           if (!tmp.renameTo(out)) throw Exception("Cannot cache $file")
+          hashPrefs.edit().remove(out.path).apply()
         }
         promise.resolve(out.absolutePath)
       } catch (e: Exception) {
         promise.reject("file", e.message ?: "Cannot fetch $file")
+      }
+    }
+  }
+
+  /** Actual content identity for a file this module owns or materialized. */
+  @ReactMethod
+  fun fileIdentity(path: String, promise: Promise) {
+    exec.execute {
+      try {
+        val file = File(path).canonicalFile
+        val roots = listOf(cacheRoot().canonicalPath, documentsDir().canonicalPath)
+        val owned = roots.any { root ->
+          file.path.startsWith(root + File.separator)
+        }
+        if (!owned || !file.isFile) throw Exception("Not a readable file this app owns")
+        val identity = identities.identity(file.path) { canonical ->
+          roots.any { root -> canonical.startsWith(root + File.separator) }
+        } ?: throw Exception("The file is unreadable or changed while hashing")
+        val result = Arguments.createMap()
+        result.putString("path", path)
+        result.putString("md5", identity.md5)
+        result.putDouble("size", identity.stamp.size.toDouble())
+        result.putDouble("mtimeMs", identity.stamp.modifiedSeconds * 1000.0 + identity.stamp.modifiedNanoseconds / 1e6)
+        promise.resolve(result)
+      } catch (e: Exception) {
+        promise.reject("identity", e.message ?: "Cannot identify the file")
       }
     }
   }
@@ -1226,5 +1239,28 @@ class FolderAccessModule(private val ctx: ReactApplicationContext) :
     private const val PICK_REQUEST = 42901
     private const val PICK_FILE_REQUEST = 42902
     private val STEMS = listOf("vocals", "drums", "bass", "guitar", "piano", "other")
+
+    private fun strongStamp(info: StructStat): FolderFileStamp? =
+      if (!OsConstants.S_ISREG(info.st_mode)) null else FolderFileStamp(
+        info.st_dev, info.st_ino, info.st_size,
+        info.st_mtim.tv_sec, info.st_mtim.tv_nsec,
+        info.st_ctim.tv_sec, info.st_ctim.tv_nsec
+      )
+
+    // Shared by Drive currency, materialized destination comparison and the
+    // waveform identity handoff. No persisted size+mtime digest is trusted.
+    private val identities = FolderIdentityCache(
+      stampPath = { path -> strongStamp(Os.stat(path)) },
+      openFile = { path ->
+        val stream = FileInputStream(path)
+        object : FolderIdentityReader {
+          override val input = stream
+          override fun stamp(): FolderFileStamp? = strongStamp(Os.fstat(stream.fd))
+          override fun canonicalPath(): String? = ParcelFileDescriptor.dup(stream.fd).use {
+            Os.readlink("/proc/self/fd/${it.fd}")
+          }
+        }
+      }
+    )
   }
 }

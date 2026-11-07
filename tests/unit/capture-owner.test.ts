@@ -957,6 +957,45 @@ describe('CaptureOwner', () => {
     expect(binding.cancelled).toEqual([41n])
   })
 
+  it('keeps the song owned across UI detach while releasing private capture', async () => {
+    const binding = fakeBinding()
+    binding.preparePlayback = async (_config, _lanes, generation) => ({
+      ...playbackResult(generation.toString()), ownershipRetained: true
+    })
+    const unload = vi.spyOn(binding, 'unloadPlayback')
+    const owner = new CaptureOwner(binding)
+    expect(await owner.preparePlayback(3, playbackConfig(), playbackLanes(), 'darwin')).toMatchObject({ ok: true, generation: '1' })
+    expect(owner.begin(3, { inputChannel: 0 }, '43', () => {})).toMatchObject({ ok: true })
+    owner.rendererDetached(3)
+    expect(binding.cancelled).toEqual([43n])
+    expect(unload).not.toHaveBeenCalled()
+    expect(owner.startPlayback(3, '1')).toMatchObject({ ok: true })
+    owner.rendererGone(3)
+    expect(unload).toHaveBeenCalledWith(1n)
+  })
+
+  it('does not call a failed prepare ready when its caller left before completion', async () => {
+    const binding = fakeBinding()
+    let finish!: (value: DesktopPlaybackResult) => void
+    binding.preparePlayback = () => new Promise(resolve => { finish = resolve })
+    const unload = vi.spyOn(binding, 'unloadPlayback')
+      .mockReturnValueOnce({ ...playbackResult('1'), cleanupComplete: false })
+    const owner = new CaptureOwner(binding)
+    const before = logEntries().length
+    const preparing = owner.preparePlayback(3, playbackConfig(), playbackLanes(), 'darwin')
+    await vi.waitFor(() => expect(finish).toBeDefined())
+    owner.rendererGone(3)
+    finish({
+      ...playbackResult('1'), ok: false, errorCode: 'host-failure',
+      error: 'fixture prepare failed', ownershipRetained: true
+    })
+    expect(await preparing).toMatchObject({ ok: false })
+    expect(unload).toHaveBeenCalledTimes(2)
+    const lines = logEntries().slice(before)
+    expect(lines.some(entry => entry.line === 'graph refused after caller left · generation 1 · unloading')).toBe(true)
+    expect(lines.some(entry => /graph ready.*caller.*left/.test(entry.line))).toBe(false)
+  })
+
   it('binds renderer destruction cleanup only once across restarts', () => {
     const binding = fakeBinding()
     const owner = new CaptureOwner(binding)
@@ -990,22 +1029,21 @@ describe('CaptureOwner', () => {
     expect(malformedOwner.cancel(5, '52')).toEqual({ ok: true, cancelled: false })
   })
 
-  it('refreshes an ALSA capability cache that retained a transient busy FLOW 8 output probe', () => {
+  it('refreshes an incomplete ALSA output bound once after a transient busy probe', () => {
     const binding = fakeBinding()
-    const base = binding.audioHostDevices('alsa')
-    const ready = { ...base, devices: base.devices.map(device => ({
+    const healthy = binding.audioHostDevices('alsa')
+    const ready = { ...healthy, devices: healthy.devices.map(device => ({
       ...device, inputChannels: 10, outputChannels: 4,
       inputChannelLabels: Array.from({ length: 10 }, (_, index) => `Input ${index + 1}`),
       outputChannelLabels: ['USB 1', 'USB 2', 'USB 3', 'USB 4']
     })) }
-    let cached = { ...ready, devices: ready.devices.map(device => ({
-      ...device, outputChannels: 0, outputChannelLabels: [] as string[]
+    const busy = { ...healthy, devices: healthy.devices.map(device => ({
+      ...device, outputChannels: 0, outputChannelLabels: []
     })) }
-    const inventory = vi.fn(() => cached)
-    const refresh = vi.fn(() => { cached = ready; return { ok: true } })
+    const inventory = vi.fn().mockReturnValueOnce(busy).mockReturnValue(ready)
+    const refresh = vi.fn(() => ({ ok: true }))
     binding.audioHostDevices = inventory
     binding.refreshSharedAudioInventory = refresh
-
     expect(new CaptureOwner(binding).hostDevices('alsa', 'linux')).toMatchObject({
       ok: true, provider: 'alsa', devices: [{ inputChannels: 10, outputChannels: 4 }]
     })
@@ -1015,47 +1053,51 @@ describe('CaptureOwner', () => {
     expect(refresh.mock.invocationCallOrder[0]).toBeLessThan(inventory.mock.invocationCallOrder[1])
   })
 
-  it('does not refresh healthy ALSA outputs, capture-only endpoints, or other providers', () => {
+  it('does not refresh a healthy ALSA inventory, a capture-only device or another platform', () => {
     for (const kind of ['healthy', 'capture-only', 'other-platform'] as const) {
       const binding = fakeBinding()
-      const provider = kind === 'other-platform' ? 'coreaudio' : 'alsa'
-      const base = binding.audioHostDevices(provider)
-      const value = kind === 'healthy' ? base : { ...base, devices: base.devices.map(device => ({
+      const original = binding.audioHostDevices(kind === 'other-platform' ? 'coreaudio' : 'alsa')
+      const row = kind === 'healthy' ? original : { ...original, devices: original.devices.map(device => ({
         ...device, outputChannels: 0, outputChannelLabels: [],
         direction: kind === 'capture-only' ? 'input' as const : 'duplex' as const
       })) }
-      binding.audioHostDevices = vi.fn(() => value)
-      binding.refreshSharedAudioInventory = vi.fn(() => ({ ok: true }))
-      expect(new CaptureOwner(binding).hostDevices(provider, kind === 'other-platform' ? 'darwin' : 'linux').ok).toBe(true)
-      expect(binding.refreshSharedAudioInventory).not.toHaveBeenCalled()
+      binding.audioHostDevices = vi.fn(() => row)
+      const refresh = vi.fn(() => ({ ok: true }))
+      binding.refreshSharedAudioInventory = refresh
+      const result = new CaptureOwner(binding).hostDevices(
+        kind === 'other-platform' ? 'coreaudio' : 'alsa', kind === 'other-platform' ? 'darwin' : 'linux')
+      expect(result.ok).toBe(true)
+      expect(refresh).not.toHaveBeenCalled()
       expect(binding.audioHostDevices).toHaveBeenCalledOnce()
     }
   })
 
-  it('bounds the incomplete ALSA retry and validates its refreshed response', () => {
+  it('bounds the retry when ALSA is still busy and validates the refreshed response', () => {
     for (const malformed of [false, true]) {
       const binding = fakeBinding()
-      const base = binding.audioHostDevices('alsa')
-      const busy = { ...base, devices: base.devices.map(device => ({
+      const original = binding.audioHostDevices('alsa')
+      const busy = { ...original, devices: original.devices.map(device => ({
         ...device, outputChannels: 0, outputChannelLabels: []
       })) }
-      const refreshed = malformed ? { ...busy, devices: [{ invalid: true }] } : busy
-      binding.audioHostDevices = vi.fn().mockReturnValueOnce(busy).mockReturnValue(refreshed)
-      binding.refreshSharedAudioInventory = vi.fn(() => ({ ok: true }))
+      const next = malformed ? { ...busy, devices: [{ invalid: true }] } : busy
+      binding.audioHostDevices = vi.fn().mockReturnValueOnce(busy).mockReturnValue(next)
+      const refresh = vi.fn(() => ({ ok: true }))
+      binding.refreshSharedAudioInventory = refresh
       const result = new CaptureOwner(binding).hostDevices('alsa', 'linux')
       expect(result.ok).toBe(!malformed)
       if (!malformed) expect(result.devices[0].outputChannels).toBe(0)
-      expect(binding.refreshSharedAudioInventory).toHaveBeenCalledOnce()
+      expect(refresh).toHaveBeenCalledOnce()
       expect(binding.audioHostDevices).toHaveBeenCalledTimes(2)
     }
   })
 
-  it('keeps older binding compatibility when an inventory refresh export is absent', () => {
+  it('preserves compatibility when an older binding has no inventory refresh export', () => {
     const binding = fakeBinding()
-    const base = binding.audioHostDevices('alsa')
-    binding.audioHostDevices = vi.fn(() => ({ ...base, devices: base.devices.map(device => ({
+    const original = binding.audioHostDevices('alsa')
+    const busy = { ...original, devices: original.devices.map(device => ({
       ...device, outputChannels: 0, outputChannelLabels: []
-    })) }))
+    })) }
+    binding.audioHostDevices = vi.fn(() => busy)
     delete (binding as Partial<NativeCaptureBinding>).refreshSharedAudioInventory
     expect(new CaptureOwner(binding).hostDevices('alsa', 'linux').ok).toBe(true)
     expect(binding.audioHostDevices).toHaveBeenCalledOnce()

@@ -3,6 +3,11 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const library: Translation<typeof en> = {
+  'phone.library.openingCheck': 'Проверка…',
+  'phone.library.openingConnect': 'Подключение…',
+  'phone.library.openingDownload': 'Скачивание…',
+  'phone.library.openingVerify': 'Проверка загрузки…',
+  'phone.library.openingRetry': 'Повторная попытка…',
   // ── add-song errors ──
   'phone.library.pickFailed': 'Не удалось открыть этот файл ({msg})',
   'phone.library.folderInactive': 'Папка больше не активна. Откройте её заново и попробуйте снова.',

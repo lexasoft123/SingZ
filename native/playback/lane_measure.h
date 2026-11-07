@@ -90,10 +90,10 @@ struct LaneMeasure {
 [[nodiscard]] LaneMeasure measureLane(LaneMeasureRequest request,
                                       const DecodeCancellation& cancel) noexcept;
 
-// Every lane, each on a thread of its own (the decode dominates and the
-// files are independent), results in request order. A thread that cannot be
-// created measures its lane on the calling thread instead — slower, never
-// wrong.
+// Every lane, with at most two scans in flight (one worker plus the caller),
+// results in request order. Empty and single-lane batches run on the caller.
+// If the worker cannot be created, the caller drains the shared queue instead
+// — slower, never wrong.
 [[nodiscard]] std::vector<LaneMeasure> measureLanes(
     std::vector<LaneMeasureRequest> requests,
     const DecodeCancellation& cancel) noexcept;

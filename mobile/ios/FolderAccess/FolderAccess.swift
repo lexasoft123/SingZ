@@ -507,14 +507,51 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate, AVSpeechSynthesizerDeleg
       try ensureDownloaded(src, timeout: 300)
       let srcSize = (try? src.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -1
       let dstSize = (try? dst.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -2
-      if srcSize != dstSize {
+      // Read provider-backed source bytes fresh. Destination reuse requires
+      // strong inode/device/size/mtime+ctime identity, never a document hash.
+      let current = srcSize == dstSize && SingzFolderContentMatches(src, dst)
+      if !current {
         try fm.createDirectory(at: dstDir, withIntermediateDirectories: true)
         let data = try coordinatedRead(src)
         try data.write(to: dst, options: .atomic)
+        UserDefaults.standard.removeObject(forKey: "singz.hash.\(dst.path)")
       }
       resolve(dst.path)
     } catch {
       reject("local_failed", "\(file): \(error.localizedDescription)", error)
+    }
+  }
+
+  /** Actual identity of a path this module owns. Reuse requires nanosecond
+   * ctime as well as mtime, inode, device and size; restored mtime is insufficient. */
+  @objc func fileIdentity(
+    _ path: NSString,
+    resolver resolve: @escaping RCTPromiseResolveBlock,
+    rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    DispatchQueue.global(qos: .utility).async {
+      let candidate = URL(fileURLWithPath: path as String)
+        .standardizedFileURL.resolvingSymlinksInPath()
+      let roots = [self.cacheRootURL(), self.documentsURL()].map {
+        $0.standardizedFileURL.resolvingSymlinksInPath().path + "/"
+      }
+      guard roots.contains(where: { candidate.path.hasPrefix($0) }) else {
+        reject("identity", "Not a file this app owns", nil)
+        return
+      }
+      guard let identity = SingzContentIdentityStore.shared.identity(candidate, authorized: { actual in
+        roots.contains(where: { actual.hasPrefix($0) })
+      }) else {
+        reject("identity", "The file is missing, changing or unreadable", nil)
+        return
+      }
+      resolve([
+        "path": path as String,
+        "md5": identity.md5,
+        "size": NSNumber(value: identity.stamp.size),
+        "mtimeMs": Double(identity.stamp.mtimeSeconds) * 1000 +
+          Double(identity.stamp.mtimeNanoseconds) / 1_000_000
+      ])
     }
   }
 
@@ -573,26 +610,13 @@ class FolderAccess: NSObject, UIDocumentPickerDelegate, AVSpeechSynthesizerDeleg
     }
   }
 
-  /** md5 of a file, remembered against its own identity (size + mtime) so a
-   *  song hashes once and not on every open. A rewrite moves the mtime, so a
-   *  stale row cannot outlive the bytes it describes. The read is chunked —
-   *  these are whole stems, and a song's worth will not fit in memory twice. */
+  /** Shared strong identity: currency and waveform handoff hash a file once.
+   * The legacy persistent size+mtime memo is deliberately ignored. */
   private func hashOf(_ url: URL, _ attrs: [FileAttributeKey: Any], memoize: Bool = true) -> String {
-    let size = (attrs[.size] as? Int64) ?? 0
-    let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-    let stamp = "\(size):\(Int64(mtime * 1000))"
-    let key = "singz.hash.\(url.path)"
-    let kept = UserDefaults.standard.string(forKey: key)?.split(separator: ":", maxSplits: 2)
-    if memoize, let kept, kept.count == 3, "\(kept[0]):\(kept[1])" == stamp { return String(kept[2]) }
-    guard let handle = try? FileHandle(forReadingFrom: url) else { return "" }
-    defer { try? handle.close() }
-    var md5 = Insecure.MD5()
-    while let chunk = try? handle.read(upToCount: 1 << 16), !chunk.isEmpty {
-      md5.update(data: chunk)
-    }
-    let hex = md5.finalize().map { String(format: "%02x", $0) }.joined()
-    if memoize { UserDefaults.standard.set("\(stamp):\(hex)", forKey: key) }
-    return hex
+    // Temporary downloads may bypass reuse, but still need the same stable-FD
+    // proof and throwing read path. They are not trusted from document hashes.
+    let store = memoize ? SingzContentIdentityStore.shared : SingzContentIdentityStore(capacity: 1)
+    return store.identity(url)?.md5 ?? ""
   }
 
   /** Drop one project's downloaded files, or everything when project is "". */

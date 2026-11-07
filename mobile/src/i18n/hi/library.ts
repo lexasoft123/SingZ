@@ -3,6 +3,11 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const library: Translation<typeof en> = {
+  'phone.library.openingCheck': 'जाँच हो रही है…',
+  'phone.library.openingConnect': 'कनेक्ट हो रहा है…',
+  'phone.library.openingDownload': 'डाउनलोड हो रहा है…',
+  'phone.library.openingVerify': 'डाउनलोड की जाँच…',
+  'phone.library.openingRetry': 'फिर कोशिश हो रही है…',
   "phone.library.pickFailed": "उस फ़ाइल को नहीं खोला जा सका ({msg})",
   "phone.library.folderInactive": "चयनित फ़ोल्डर अब सक्रिय नहीं है. इसे फिर से खोलें और पुनः प्रयास करें।",
   "phone.library.folderIdentityUnavailable": "चयनित फ़ोल्डर पहचान अनुपलब्ध है फ़ोल्डर को फिर से खोलें और पुनः प्रयास करें।",

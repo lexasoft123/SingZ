@@ -169,15 +169,28 @@ describe('persistent desktop microphone lifecycle', () => {
     expect((await starting).ok).toBe(false)
     expect(binding.beginCapture).not.toHaveBeenCalled()
   })
-  it('rejects oversized IPC generations and mutes every native cue under SINGZ_MUTE', () => {
+  it('does not start native capture after its window closes during async inventory', async () => {
+    const { input, binding, sender } = fixture()
+    let release!: (value: unknown) => void
+    const inventory = new Promise(resolve => { release = resolve })
+    binding.inputDevices.mockImplementationOnce(() => inventory as never)
+    const starting = input.start(sender, {})
+    await vi.waitFor(() => expect(binding.inputDevices).toHaveBeenCalledOnce())
+    vi.spyOn(sender, 'isDestroyed').mockReturnValue(true)
+    release({ ok: true, devices: [device] })
+    expect((await starting).ok).toBe(false)
+    expect(binding.beginCapture).not.toHaveBeenCalled()
+  })
+
+  it('rejects oversized IPC generations and mutes every native cue under SINGZ_MUTE', async () => {
     const { input, binding } = fixture()
     const config = { generation: '1', channels: [new Float32Array(480)], sampleRate: 48000, startDelayMs: 50, gain: 1 }
-    expect(input.cue({ ...config, generation: String(1n << 64n) }).ok).toBe(false)
+    expect((await input.cue({ ...config, generation: String(1n << 64n) })).ok).toBe(false)
     expect(binding.scheduleTrainingCue).not.toHaveBeenCalled()
     vi.stubEnv('SINGZ_MUTE', '1')
-    expect(input.cue(config)).toMatchObject({ ok: true, startsAfterMs: 50, durationMs: 100, outputLatencyMs: 20 })
+    expect(await input.cue(config)).toMatchObject({ ok: true, startsAfterMs: 50, durationMs: 100, outputLatencyMs: 20 })
     expect(binding.scheduleTrainingCue.mock.calls[0][0]).toMatchObject({ gain: 0 })
-    input.setCueGain('1', 2)
+    await input.setCueGain('1', 2)
     expect(binding.setTrainingCueGain).toHaveBeenCalledWith(1n, 0)
   })
 })

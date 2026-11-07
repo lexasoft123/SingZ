@@ -79,8 +79,9 @@ test('main bootstrap is emitted as index and keeps dynamic chunks in the flat ma
   assert.ok(main, 'main Vite config must remain present for Desktop and development builds')
   assert.match(main, /rollupOptions:\s*\{/)
   assert.match(main,
-    /input:\s*\{\s*index:\s*resolve\(import\.meta\.dirname,\s*'src\/main\/bootstrap\.ts'\)\s*\}/
+    /input:\s*\{\s*index:\s*resolve\(import\.meta\.dirname,\s*'src\/main\/bootstrap\.ts'\)\s*,/
   )
+  assert.match(main, /'audio-service':\s*resolve\(import\.meta\.dirname,\s*'src\/main\/audio-service\.ts'\)/)
   const chunkFileNames = main.match(/\bchunkFileNames:\s*'([^']+)'/)?.[1]
   assertFlatMainChunkFileNames(chunkFileNames)
   assert.doesNotMatch(main, /\boutDir\s*:/)

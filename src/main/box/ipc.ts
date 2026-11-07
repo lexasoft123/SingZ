@@ -77,15 +77,18 @@ export function registerBoxIpc(options: BoxIpcOptions) {
     'box:platform-command': (_event, [value]) => platform.command(value),
     'box:storage-snapshot': () => storage.snapshot(),
     'box:cache-remove': (_event, [value]) => storage.removeCachedProject(value as string),
-    'box:diagnostics': () => ({
-      ok: true,
-      value: {
-        appVersion: options.appVersion,
-        platform: process.platform,
-        arch: process.arch,
-        audio: { inputs: options.audioInputs(), host: options.audioHost() }
+    'box:diagnostics': async () => {
+      const [inputs, host] = await Promise.all([options.audioInputs(), options.audioHost()])
+      return {
+        ok: true,
+        value: {
+          appVersion: options.appVersion,
+          platform: process.platform,
+          arch: process.arch,
+          audio: { inputs, host }
+        }
       }
-    }),
+    },
     'box:phone-start': () => phone.start(),
     'box:phone-state': () => ({ ok: true, value: phone.state() }),
     'box:phone-approve': (_event, [value]) => phone.approve(value as string),

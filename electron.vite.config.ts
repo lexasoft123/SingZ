@@ -19,7 +19,8 @@ export default defineConfig(() => {
         build: {
           rollupOptions: {
             input: {
-              index: resolve(import.meta.dirname, 'src/main/bootstrap.ts')
+              index: resolve(import.meta.dirname, 'src/main/bootstrap.ts'),
+              'audio-service': resolve(import.meta.dirname, 'src/main/audio-service.ts')
             },
             output: {
               chunkFileNames: '[name]-[hash].js'

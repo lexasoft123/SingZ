@@ -7,11 +7,11 @@ export async function speakTrainingInterval(text: string): Promise<void> {
   if (Platform.OS !== 'ios') return
   const bridge = NativeModules.FolderAccess
   if (typeof bridge?.speakTrainingInterval !== 'function') {
-    log('training', 'Spoken interval names need the updated iOS build.')
+    log('training', 'Spoken interval names need the updated iOS build.', 'warn')
     return
   }
   try { await bridge.speakTrainingInterval(text, getLocale()) }
-  catch (error) { log('training', `Spoken interval name unavailable: ${String(error)}`) }
+  catch (error) { log('training', `Spoken interval name unavailable: ${String(error)}`, 'warn') }
 }
 
 export function cancelTrainingSpeech(): void {

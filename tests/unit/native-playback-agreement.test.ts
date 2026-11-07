@@ -239,10 +239,9 @@ describe('scalar bounds', () => {
     expect(facade).toContain(`playbackRate > ${bound('playbackRateMaximum')}`)
     expect(facade).toContain(`transposeSemitones < ${bound('transposeSemitonesMinimum')}`)
     expect(facade).toContain(`transposeSemitones > ${bound('transposeSemitonesMaximum')}`)
-    // The core pins 96 buckets; the facade's MAX_LANE_PEAK_BUCKETS is a much
-    // larger defensive stack bound and deliberately NOT the same number, so
-    // the two are asserted apart rather than compared.
+    // The facade now admits the same exact RMS96 envelope as the core.
     expect(bound('laneSummaryBuckets')).toBe(96)
-    expect(facade).toContain('MAX_LANE_PEAK_BUCKETS = 4096')
+    expect(facade).toContain('root.bucketCount !== WAVEFORM_BUCKET_COUNT')
+    expect(facade).toContain('lane.peaks.length !== WAVEFORM_BUCKET_COUNT')
   })
 })

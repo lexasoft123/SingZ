@@ -3,6 +3,11 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../../../../src/shared/i18n/types'
 
 export const library: Translation<typeof en> = {
+  'phone.library.openingCheck': 'Verificando…',
+  'phone.library.openingConnect': 'Conectando…',
+  'phone.library.openingDownload': 'Baixando…',
+  'phone.library.openingVerify': 'Verificando download…',
+  'phone.library.openingRetry': 'Tentando novamente…',
   "phone.library.downloadChecking": "Conferindo {label} salvo · {index}/{count}",
   "phone.library.downloadTrack": "Baixando {label} · {index}/{count}",
   "phone.library.downloadVerifying": "Verificando {label} · {index}/{count}",

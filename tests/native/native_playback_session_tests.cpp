@@ -938,7 +938,7 @@ void streamedLanesPlayTheSameAudioAsDecodedOnes() {
     request.streamLanes = true;
     auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
     auto one = lane("song", toneFlac);
-    one.sourceKey = toneFlac;  // the bridge's key for these bytes
+    one.sourceKey = "md5:" + std::string(32, '1');
     lanes.push_back(std::move(one));
     CHECK(session.prepare(std::move(request), std::move(lanes), 11).ok);
     singz::NativePlaybackLanePeaksResult first;
@@ -956,7 +956,7 @@ void streamedLanesPlayTheSameAudioAsDecodedOnes() {
     again.streamLanes = true;
     auto rebuilt = std::vector<singz::NativePlaybackLaneSource>{};
     auto second = lane("song", toneFlac);
-    second.sourceKey = toneFlac;
+    second.sourceKey = "md5:" + std::string(32, '1');
     rebuilt.push_back(std::move(second));
     CHECK(session.prepare(std::move(again), std::move(rebuilt), 12).ok);
     const auto carried = session.lanePeaks(12);
@@ -983,7 +983,7 @@ void streamedLanesPlayTheSameAudioAsDecodedOnes() {
     third.streamLanes = true;
     auto otherLanes = std::vector<singz::NativePlaybackLaneSource>{};
     auto otherLane = lane("song", otherFlac);
-    otherLane.sourceKey = otherFlac;
+    otherLane.sourceKey = "md5:" + std::string(32, '2');
     otherLanes.push_back(std::move(otherLane));
     CHECK(session.prepare(std::move(third), std::move(otherLanes), 13).ok);
     singz::NativePlaybackLanePeaksResult fresh;
@@ -1003,8 +1003,198 @@ void streamedLanesPlayTheSameAudioAsDecodedOnes() {
     std::remove(otherFlac.c_str());
   }
 
+  // Persisted envelopes seed per lane. A valid seed is available on the FIRST
+  // read, while an unseeded lane still measures. Invalid policy/version data
+  // and a different content key on the same path cannot reuse that answer.
+  {
+    const std::string seededKey = "md5:" + std::string(32, 'a');
+    singz::NativePlaybackPrepareConfig request = config();
+    request.streamLanes = true;
+    auto lanes = std::vector<singz::NativePlaybackLaneSource>{};
+    auto seeded = lane("seeded", toneFlac);
+    seeded.sourceKey = seededKey;
+    singz::NativePlaybackLaneWaveformSeed seed;
+    seed.contentKey = seededKey;
+    seed.peaks.fill(0.75F);
+    seeded.waveform = seed;
+    lanes.push_back(std::move(seeded));
+    auto measuring = lane("measuring", toneFlac);
+    measuring.sourceKey = "md5:" + std::string(32, 'b');
+    lanes.push_back(std::move(measuring));
+    CHECK(session.prepare(std::move(request), std::move(lanes), 14).ok);
+    const auto immediate = session.lanePeaks(14);
+    CHECK(immediate.ok && immediate.lanes.size() == 2);
+    CHECK(immediate.lanes[0].valid);
+    CHECK(std::all_of(immediate.lanes[0].peaks.begin(),
+                      immediate.lanes[0].peaks.end(),
+                      [](float peak) { return peak == 0.75F; }));
+    // Negative control: without the seed this first answer would require the
+    // background scan. The second lane is not frozen or faked from the seed.
+    CHECK(immediate.waveformDiagnostics.find("seeded") == std::string::npos);
+    singz::NativePlaybackLanePeaksResult measured;
+    for (int attempt = 0; attempt < 600; ++attempt) {
+      measured = session.lanePeaks(14);
+      if (measured.ok && measured.lanes.size() == 2 && measured.lanes[1].valid)
+        break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(measured.ok && measured.lanes.size() == 2 && measured.lanes[1].valid);
+    CHECK(std::any_of(measured.lanes[1].peaks.begin(),
+                      measured.lanes[1].peaks.end(),
+                      [](float peak) { return peak != 0.75F; }));
+    CHECK(session.unload(14).ok);
+
+    singz::NativePlaybackPrepareConfig changed = config();
+    changed.streamLanes = true;
+    auto changedLanes = std::vector<singz::NativePlaybackLaneSource>{};
+    auto differentContent = lane("seeded", toneFlac);
+    differentContent.sourceKey = "md5:" + std::string(32, 'c');
+    changedLanes.push_back(std::move(differentContent));
+    CHECK(session.prepare(std::move(changed), std::move(changedLanes), 15).ok);
+    const auto changedFirst = session.lanePeaks(15);
+    CHECK(changedFirst.ok && changedFirst.lanes.size() == 1);
+    CHECK(std::any_of(changedFirst.lanes[0].peaks.begin(),
+                      changedFirst.lanes[0].peaks.end(),
+                      [](float peak) { return peak != 0.75F; }));
+    CHECK(session.unload(15).ok);
+
+    singz::NativePlaybackPrepareConfig invalid = config();
+    invalid.streamLanes = true;
+    auto invalidLanes = std::vector<singz::NativePlaybackLaneSource>{};
+    auto invalidSeedLane = lane("invalid", toneFlac);
+    invalidSeedLane.sourceKey = "md5:" + std::string(32, 'd');
+    singz::NativePlaybackLaneWaveformSeed invalidSeed;
+    invalidSeed.version = singz::kNativePlaybackWaveformSeedVersion + 1;
+    invalidSeed.contentKey = invalidSeedLane.sourceKey;
+    invalidSeed.peaks.fill(0.9F);
+    invalidSeedLane.waveform = invalidSeed;
+    invalidLanes.push_back(std::move(invalidSeedLane));
+    CHECK(session.prepare(std::move(invalid), std::move(invalidLanes), 16).ok);
+    singz::NativePlaybackLanePeaksResult measuredInstead;
+    for (int attempt = 0; attempt < 600; ++attempt) {
+      measuredInstead = session.lanePeaks(16);
+      if (measuredInstead.ok && measuredInstead.lanes.size() == 1 &&
+          measuredInstead.lanes[0].valid)
+        break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(measuredInstead.ok && measuredInstead.lanes.size() == 1 &&
+          measuredInstead.lanes[0].valid);
+    CHECK(std::any_of(measuredInstead.lanes[0].peaks.begin(),
+                      measuredInstead.lanes[0].peaks.end(),
+                      [](float peak) { return peak != 0.9F; }));
+    CHECK(session.unload(16).ok);
+  }
+
+  {
+    auto request = config();
+    request.streamLanes = true;
+    auto measured = lane("desktop", toneFlac);
+    measured.sourceKey = "measure:" + std::string(64, 'f');
+    singz::NativePlaybackLaneWaveformSeed seed;
+    seed.contentKey = measured.sourceKey;
+    seed.peaks.fill(0.625F);
+    measured.waveform = seed;
+    std::vector<singz::NativePlaybackLaneSource> lanes;
+    lanes.push_back(std::move(measured));
+    CHECK(session.prepare(std::move(request), std::move(lanes), 17).ok);
+    const auto ready = session.lanePeaks(17);
+    CHECK(ready.ok && ready.lanes.size() == 1 && ready.lanes[0].valid);
+    CHECK(std::all_of(ready.lanes[0].peaks.begin(), ready.lanes[0].peaks.end(),
+                      [](float value) { return value == 0.625F; }));
+    CHECK(session.unload(17).ok);
+  }
+
+  // Path-only callers cannot prove content identity. Rewriting the same file
+  // must produce a fresh answer rather than inherit its old measured level.
+  {
+    const std::string rewritten = scratch("waveform-rewritten.flac");
+    const std::string quietWav = writeWav("waveform-quiet.wav", 1,
+                                         std::vector<float>(60000, 0.01F));
+    const std::string quietFlac = scratch("waveform-quiet.flac");
+    std::remove(quietFlac.c_str());
+    CHECK(singz::compactStem(quietWav, quietFlac).ok);
+    const auto prepare = [&](uint64_t generation, const std::string &source) {
+      std::filesystem::copy_file(source, rewritten,
+                                std::filesystem::copy_options::overwrite_existing);
+      auto request = config();
+      request.streamLanes = true;
+      auto input = lane("rewritten", rewritten);
+      input.sourceKey = rewritten;
+      std::vector<singz::NativePlaybackLaneSource> lanes;
+      lanes.push_back(std::move(input));
+      CHECK(session.prepare(std::move(request), std::move(lanes), generation).ok);
+      singz::NativePlaybackLanePeaksResult result;
+      for (int attempt = 0; attempt < 600; ++attempt) {
+        result = session.lanePeaks(generation);
+        if (result.ok && result.lanes.size() == 1 && result.lanes[0].valid) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      CHECK(result.ok && result.lanes.size() == 1 && result.lanes[0].valid);
+      CHECK(session.unload(generation).ok);
+      return result;
+    };
+    const auto before = prepare(18, toneFlac);
+    const auto after = prepare(19, quietFlac);
+    CHECK(*std::max_element(before.lanes[0].peaks.begin(), before.lanes[0].peaks.end()) > 0.05F);
+    CHECK(*std::max_element(after.lanes[0].peaks.begin(), after.lanes[0].peaks.end()) < 0.02F);
+    std::remove(rewritten.c_str());
+    std::remove(quietWav.c_str());
+    std::remove(quietFlac.c_str());
+  }
+
   std::remove(toneWav.c_str());
   std::remove(toneFlac.c_str());
+}
+
+void waveformEvictionPreservesPreparedCacheHits() {
+  const auto wav = writeWav("waveform-eviction.wav", 1, std::vector<float>(4096, 0.1F));
+  auto backend = std::make_unique<ManualOutputBackend>();
+  singz::NativePlaybackSession session(std::move(backend));
+  // Fill the bounded memo, then insert a seed before adopting an older lane.
+  // Eviction must not strand a lane whose analysis descriptor was omitted.
+  {
+    const auto key = [](unsigned number) {
+      const auto digits = std::to_string(number);
+      return "md5:" + std::string(32 - digits.size(), '0') + digits;
+    };
+    const auto seededLane = [&](const std::string &id, const std::string &identity) {
+      auto source = lane(id.c_str(), wav);
+      source.sourceKey = identity;
+      singz::NativePlaybackLaneWaveformSeed seed;
+      seed.contentKey = identity;
+      seed.peaks.fill(0.625F);
+      source.waveform = seed;
+      return source;
+    };
+    for (unsigned batch = 0; batch < 4; ++batch) {
+      auto request = config();
+      request.streamLanes = true;
+      std::vector<singz::NativePlaybackLaneSource> lanes;
+      for (unsigned index = 0; index < 16; ++index) {
+        const auto number = batch * 16 + index + 1;
+        lanes.push_back(seededLane("fill-" + std::to_string(index), key(number)));
+      }
+      CHECK(session.prepare(std::move(request), std::move(lanes), 20 + batch).ok);
+      CHECK(session.unload(20 + batch).ok);
+    }
+    auto request = config();
+    request.streamLanes = true;
+    std::vector<singz::NativePlaybackLaneSource> lanes;
+    lanes.push_back(seededLane("new", "md5:" + std::string(32, 'f')));
+    auto cached = lane("cached", wav);
+    cached.sourceKey = key(1);
+    lanes.push_back(std::move(cached));
+    CHECK(session.prepare(std::move(request), std::move(lanes), 24).ok);
+    const auto result = session.lanePeaks(24);
+    CHECK(result.ok && result.lanes.size() == 2);
+    CHECK(result.lanes[1].valid);
+    CHECK(std::all_of(result.lanes[1].peaks.begin(), result.lanes[1].peaks.end(),
+                      [](float peak) { return peak == 0.625F; }));
+    CHECK(session.unload(24).ok);
+  }
+
+  std::remove(wav.c_str());
 }
 
 // A fader can emit hundreds of updates before Play or while the host is held.
@@ -7542,6 +7732,7 @@ int main() {
   mixerEditsWithoutCallbacksKeepTheLatestValues();
   compositionAndLifetime();
   streamedLanesPlayTheSameAudioAsDecodedOnes();
+  waveformEvictionPreservesPreparedCacheHits();
   laneWaveformSummaryAndCountInMeter();
   parallelLaneDecodeMatchesSequential();
   laneDecodePoolStaysInsideTheMemoryBudget();

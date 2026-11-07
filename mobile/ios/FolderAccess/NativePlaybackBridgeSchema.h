@@ -14,6 +14,8 @@ struct SingzParsedPlaybackLane {
   float gain{1.0F};
   bool muted{false};
   bool solo{false};
+  std::string contentMd5;
+  std::optional<singz::NativePlaybackLaneWaveformSeed> waveform;
 };
 
 struct SingzParsedPlaybackPrepare {

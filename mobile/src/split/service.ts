@@ -246,7 +246,7 @@ export function subscribeSplit(
   })
   const state = DeviceEventEmitter.addListener('singzSplitState', (v) => {
     const s = v as SplitState
-    log('split', `state ${s.state}${s.error ? ` — ${s.error}` : ''}`)
+    log('split', `state ${s.state}${s.error ? ` — ${s.error}` : ''}`, s.error ? 'error' : 'info')
     onState(s)
   })
   void native().attachSplitEvents()

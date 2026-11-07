@@ -1,6 +1,6 @@
 import { createElement, type ComponentProps, type ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   createLazyDialogRoute,
   DialogRuntimeBoundary,
@@ -22,7 +22,31 @@ const labels: LazyDialogLabels = {
   failureMessage: 'The test dialog could not be loaded. The app is still running.'
 }
 
+beforeEach(() => {
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+})
+afterEach(() => vi.restoreAllMocks())
+
 describe('load-only non-audio dialog route', () => {
+  it('reports the swallowed import reason and distinguishes available from exhausted retry', async () => {
+    const primaryError = new Error('fixture primary chunk missing')
+    const retryError = new Error('fixture retry chunk missing')
+    const Route = createLazyDialogRoute<DialogProps>([
+      async () => { throw primaryError },
+      async () => { throw retryError }
+    ], labels)
+    const loader = routeLoader(Route, { message: 'hello', onClose: vi.fn() })
+    loader.componentDidMount()
+    await vi.waitFor(() => expect(loader.state.phase).toBe('failed'))
+    expect(console.warn).toHaveBeenCalledWith('UI import failed:', primaryError, 'retry available')
+    const failure = loader.render() as ReactElement<ComponentProps<typeof LazyDialogFailure>>
+    failure.props.onRetry?.()
+    await vi.waitFor(() => expect(loader.state).toMatchObject({ phase: 'failed', attempt: 1 }))
+    expect(console.error).toHaveBeenCalledWith('UI import failed:', retryError, 'retry exhausted')
+    loader.componentWillUnmount()
+  })
+
   it('contains primary import rejection and recovers through a distinct module attempt', async () => {
     const rejected = Promise.reject(new Error('primary chunk unavailable'))
     void rejected.catch(() => {})

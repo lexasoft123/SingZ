@@ -1,4 +1,11 @@
-import { app, BrowserWindow, dialog } from 'electron'
+import * as Electron from 'electron'
+
+// A utility process imports this module for log forwarding, but has none of
+// Electron's main-process app/window/dialog exports.
+const helper = process.env.SINGZ_AUDIO_PROCESS === '1' && Boolean(process.parentPort)
+const app = (helper ? undefined : Electron.app) as Electron.App
+const BrowserWindow = (helper ? undefined : Electron.BrowserWindow) as typeof Electron.BrowserWindow
+const dialog = (helper ? undefined : Electron.dialog) as typeof Electron.dialog
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -13,13 +20,46 @@ const MAX_ENTRIES = 4000
 const buf: LogEntry[] = []
 
 export function log(source: string, line: string, level: LogLevel = 'info'): void {
+  if (process.env.SINGZ_AUDIO_PROCESS === '1' && process.parentPort) {
+    process.parentPort.postMessage({ type: 'log', epoch: process.env.SINGZ_AUDIO_EPOCH, source, line: line.slice(0, 2000), level })
+    return
+  }
   const entry: LogEntry = { t: Date.now(), level, source, line: line.slice(0, 2000) }
   buf.push(entry)
   if (buf.length > MAX_ENTRIES) buf.splice(0, buf.length - MAX_ENTRIES)
   toSessionFile(entry)
   for (const win of BrowserWindow.getAllWindows()) {
-    if (!win.isDestroyed()) win.webContents.send('log:line', entry)
+    // Closing a viewer must not turn a diagnostic into a playback/shutdown
+    // exception or stop delivery to the remaining windows.
+    try {
+      if (!win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send('log:line', entry)
+    } catch { /* The renderer can disappear between the check and send. */ }
   }
+}
+
+/** Console warnings/errors otherwise disappear with DevTools closed. Keep them
+ * in the same persisted log as main-process failures, without console chatter. */
+export function attachRendererLogs(contents: Electron.WebContents): void {
+  contents.on('console-message', details => {
+    if (details.level !== 'warning' && details.level !== 'error') return
+    let source = ''
+    try {
+      const path = new URL(details.sourceId).pathname
+      source = path.split('/').pop() ?? ''
+    } catch {
+      source = details.sourceId.split(/[?#]/)[0].split(/[\\/]/).pop() ?? ''
+    }
+    const location = source ? ` · ${source}:${details.lineNumber}` : ''
+    log('renderer', `${details.message}${location}`, details.level === 'warning' ? 'warn' : 'error')
+  })
+  contents.on('render-process-gone', (_event, details) => {
+    if (details.reason !== 'clean-exit')
+      log('renderer', `process exited unexpectedly · ${details.reason} · exit code ${details.exitCode}`, 'error')
+  })
+  contents.on('did-fail-load', (_event, code, description, _url, mainFrame) => {
+    if (mainFrame && code !== -3)
+      log('renderer', `page load failed · ${description} (${code})`, 'error')
+  })
 }
 
 /** Log every non-empty line of child-process output, skipping progress spam. */

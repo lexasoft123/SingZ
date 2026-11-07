@@ -950,6 +950,58 @@ int openReadOnly(const std::string &utf8Path) noexcept {
 #endif
 }
 
+bool validMeasureWaveformKey(const std::string &key) noexcept {
+  constexpr char prefix[] = "measure:";
+  constexpr size_t prefixBytes = sizeof(prefix) - 1;
+  if (key.size() != prefixBytes + 64 ||
+      key.compare(0, prefixBytes, prefix) != 0)
+    return false;
+  for (size_t index = prefixBytes; index < key.size(); ++index) {
+    const char value = key[index];
+    if ((value < '0' || value > '9') && (value < 'a' || value > 'f'))
+      return false;
+  }
+  return true;
+}
+
+bool parseWaveformSeed(napi_env env, napi_value value,
+                       const std::string &sourceKey,
+                       NativePlaybackLaneWaveformSeed *result) {
+  if (result == nullptr || !validMeasureWaveformKey(sourceKey) ||
+      !objectWithOnlyKeys(env, value,
+                          {"version", "policy", "contentKey", "peaks"}))
+    return false;
+  NativePlaybackLaneWaveformSeed seed;
+  if (!unsignedProperty(env, value, "version", kNativePlaybackWaveformSeedVersion,
+                        kNativePlaybackWaveformSeedVersion, 0, true, &seed.version) ||
+      !stringProperty(env, value, "policy", 128, &seed.policy) ||
+      seed.policy != kNativePlaybackWaveformSeedPolicy ||
+      !stringProperty(env, value, "contentKey", 72, &seed.contentKey) ||
+      seed.contentKey != sourceKey)
+    return false;
+  napi_value peaks{};
+  bool isArray = false;
+  uint32_t count = 0;
+  if (!named(env, value, "peaks", &peaks) ||
+      napi_is_array(env, peaks, &isArray) != napi_ok || !isArray ||
+      napi_get_array_length(env, peaks, &count) != napi_ok ||
+      count != kNativePlaybackLaneSummaryBuckets)
+    return false;
+  for (uint32_t index = 0; index < count; ++index) {
+    napi_value item{};
+    napi_valuetype type{};
+    double peak = 0.0;
+    if (napi_get_element(env, peaks, index, &item) != napi_ok ||
+        napi_typeof(env, item, &type) != napi_ok || type != napi_number ||
+        napi_get_value_double(env, item, &peak) != napi_ok ||
+        !std::isfinite(peak) || peak < 0.0 || peak > 1.0)
+      return false;
+    seed.peaks[index] = static_cast<float>(peak);
+  }
+  *result = std::move(seed);
+  return true;
+}
+
 bool parseLanes(napi_env env, napi_value value,
                 std::vector<NativePlaybackLaneSource> *result) {
   bool isArray = false;
@@ -967,7 +1019,7 @@ bool parseLanes(napi_env env, napi_value value,
     double gain = 1.0;
     if (napi_get_element(env, value, index, &laneValue) != napi_ok ||
         !objectWithOnlyKeys(env, laneValue,
-                            {"id", "path", "gain", "muted", "solo"}) ||
+                            {"id", "path", "gain", "muted", "solo", "sourceKey", "waveform"}) ||
         !stringProperty(env, laneValue, "id", 96, &lane.id) ||
         !stringProperty(env, laneValue, "path", 32768, &path) ||
         !numberProperty(env, laneValue, "gain", 0.0,
@@ -984,10 +1036,21 @@ bool parseLanes(napi_env env, napi_value value,
       return false;
     lane.descriptor = OwnedFileDescriptor(descriptor);
     lane.gain = static_cast<float>(gain);
-    // The path this bridge opened is the core's opaque identity for the
-    // bytes; it is compared, never opened, when a retaining unload offers an
-    // already decoded lane to the next prepare.
+    // Without a complete validated seed pair, the opened path remains the
+    // core's opaque identity and its ordinary background measurement runs.
     lane.sourceKey = path;
+    napi_value sourceKeyValue{};
+    napi_value waveformValue{};
+    if (named(env, laneValue, "sourceKey", &sourceKeyValue) &&
+        named(env, laneValue, "waveform", &waveformValue)) {
+      std::string sourceKey;
+      NativePlaybackLaneWaveformSeed seed;
+      if (stringValue(env, sourceKeyValue, 72, &sourceKey) &&
+          parseWaveformSeed(env, waveformValue, sourceKey, &seed)) {
+        lane.sourceKey = std::move(sourceKey);
+        lane.waveform = std::move(seed);
+      }
+    }
     lanes.push_back(std::move(lane));
   }
   *result = std::move(lanes);

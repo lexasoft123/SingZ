@@ -60,6 +60,76 @@ describe('settings microphone preview', () => {
     expect(preview.readLevel()).toMatchObject({ dbfs: -12.041, signal: true })
   })
 
+  it('selects the silent sink and waits for it before resuming analysis', async () => {
+    const mic = new FakeMic()
+    const context = fakeContext()
+    const events: string[] = []
+    let finishSink!: () => void
+    const sinkPending = new Promise<void>((resolve) => { finishSink = resolve })
+    context.setSinkId = vi.fn(async () => {
+      events.push('sink pending')
+      await sinkPending
+      events.push('sink selected')
+    })
+    context.resume = async () => {
+      context.resumeCount++
+      events.push('resume')
+    }
+    const preview = new MicrophonePreview({
+      makeMic: () => mic as unknown as MicPitch,
+      makeContext: () => context,
+      askAccess: async () => true
+    })
+
+    const starting = preview.start({})
+    await vi.waitFor(() => expect(context.setSinkId).toHaveBeenCalledWith({ type: 'none' }))
+    expect(context.resumeCount).toBe(0)
+    finishSink()
+    await starting
+
+    expect(events).toEqual(['sink pending', 'sink selected', 'resume'])
+    expect(mic.starts).toHaveLength(1)
+  })
+
+  it('cancels while selecting the silent sink without resuming or capturing', async () => {
+    const mic = new FakeMic()
+    const context = fakeContext()
+    let finishSink!: () => void
+    context.setSinkId = vi.fn(() => new Promise<void>((resolve) => { finishSink = resolve }))
+    const preview = new MicrophonePreview({
+      makeMic: () => mic as unknown as MicPitch,
+      makeContext: () => context,
+      askAccess: async () => true
+    })
+
+    const starting = preview.start({})
+    await vi.waitFor(() => expect(context.setSinkId).toHaveBeenCalledWith({ type: 'none' }))
+    preview.stop()
+    finishSink()
+
+    await expect(starting).rejects.toThrow('cancelled')
+    expect(context.resumeCount).toBe(0)
+    expect(mic.starts).toHaveLength(0)
+    expect(context.closeCount).toBe(1)
+  })
+
+  it('cleans up without resuming or capturing when silent sink selection fails', async () => {
+    const mic = new FakeMic()
+    const context = fakeContext()
+    context.setSinkId = vi.fn(async () => { throw new Error('silent sink failed') })
+    const preview = new MicrophonePreview({
+      makeMic: () => mic as unknown as MicPitch,
+      makeContext: () => context,
+      askAccess: async () => true
+    })
+
+    await expect(preview.start({})).rejects.toThrow('silent sink failed')
+    expect(context.resumeCount).toBe(0)
+    expect(mic.starts).toHaveLength(0)
+    expect(mic.stops).toBe(1)
+    expect(context.closeCount).toBe(1)
+  })
+
   it('reselects without leaking the old stream or AudioContext and cleans up on close', async () => {
     const mics = [new FakeMic(), new FakeMic()]
     let nextMic = 0

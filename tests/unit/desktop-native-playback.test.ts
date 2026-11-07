@@ -3978,20 +3978,20 @@ describe('desktop native control acceptance wiring', () => {
 describe('Linux ALSA output ownership', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  it.each([512, 4096])('uses a bounded song buffer when ALSA permits %i frames', async maximum => {
+  it('requests a 256-frame period despite cached 1024-frame ALSA inventory limits', async () => {
     const api = asioPollingApi(async () => status('1'), async () => result('1', 'unloaded', true))
     const old = await api.audioHostDevices('asio')
     if (!old.ok) throw new Error(old.error)
     api.desktopPlaybackProviders = vi.fn<SingzApi['desktopPlaybackProviders']>(async () => [{ id: 'alsa', label: 'ALSA', available: true, errorCode: 'none', detail: '' }])
     api.audioHostDevices = vi.fn<SingzApi['audioHostDevices']>(async () => ({ ...old, platform: 'linux', provider: 'alsa',
       defaultOutputUid: '', devices: old.devices.map(device => ({ ...device, uid: 'alsa:loop:pcm:0',
-        bufferFrames: { ...device.bufferFrames, preferredFrames: 256, maximumFrames: maximum } })) }))
+        bufferFrames: { ...device.bufferFrames, minimumFrames: 1024, maximumFrames: 1024, preferredFrames: 1024 } })) }))
     vi.stubGlobal('window', { singz: api })
     const client = new DesktopNativePlaybackClient({ releaseLegacyOutput: async () => undefined,
       restoreLegacyOutput: async () => undefined }, () => undefined)
     try {
       await client.prepareAndStart({ ...asioRequest(), provider: 'alsa', browserOutputId: 'native:alsa:loop:pcm:0' })
-      expect(api.prepareDesktopPlayback).toHaveBeenCalledWith(expect.objectContaining({ bufferFrames: Math.min(maximum, 1024) }), expect.any(Array))
+      expect(api.prepareDesktopPlayback).toHaveBeenCalledWith(expect.objectContaining({ bufferFrames: 256 }), expect.any(Array))
     } finally { await client.unload() }
   })
 

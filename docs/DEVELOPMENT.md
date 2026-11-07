@@ -18,17 +18,35 @@ npm run dev
 ```
 
 The desktop capture *addon* is a stable Node-API module built explicitly for
-the Electron version installed in `node_modules`. It is the in-process
-transport for the shared `AudioInput` core. Karaoke mic matching still captures
-via `getUserMedia` (echo cancellation intact), and vocal training talks to the
-same core through the spawned `singz-analyze` session (`src/main/audio-input.ts`).
-The experimental headphone monitor is app-shell owned: Settings configures its
-device, channels, gain and native DSP graph, while the persistent top bar keeps
-its status and Stop control available after Settings closes. It transfers
-exclusive output ownership from Web Audio before opening the native graph, and
-restores Web Audio readiness without resuming the song when monitoring ends.
-Swapping karaoke or vocal training capture onto the addon remains a deliberate
-future step, not a side effect of building it:
+the installed Electron version. The production app loads it only in the
+**SingZ Audio** utility process. Main keeps the file allowlist and renderer IPC;
+`audio-process.ts` forwards asynchronous controls to `audio-service.ts`, which
+owns the existing playback/capture/relay service. Both helper entry and shared
+main chunks are bundled under `out/main` and ship inside the app asar. Do not
+copy only `out/main/index.js` when testing an overlay.
+
+Build before driving the app. Automated runs set `SINGZ_MUTE=1` and
+`SINGZ_NO_SYNC=1`; native cues and playback must remain muted too. The log's
+`audio process ready` receipt names the helper PID and Electron main PID.
+Confirm different PIDs and inspect the actual helper's addon mapping before
+claiming isolation. Exercise repeated Chromium camera/helper launches during
+playback, renderer reload, stop/unload, pending-prepare cancellation, and helper
+crash. A successful mocked RPC test does not qualify hardware buffer sizes.
+
+Renderer reload retains song/relay audio but releases private microphone
+analysis and monitoring. The replacement screen exposes top-bar Stop controls
+for audio that remains active without a loaded song. Destroying the owning
+webContents releases its native ownership; app quit tears down the helper. A helper crash or
+control timeout fails closed and needs an app restart; status polls must not
+spawn a replacement and replay stale commands. This implementation does not
+keep audio alive across an Electron main restart; a separately supervised
+system service would need a different lifecycle contract.
+
+The helper performs the same artifact fingerprint, checksum, ABI and codec
+validation as the former main-process loader. Do not point a worktree at a
+neighbour's addon to bypass a source mismatch. The low-level `capture:verify`
+probe below deliberately loads the addon directly as an ABI/native-contract
+test; production process-isolation verification also needs the real app.
 
 ```bash
 npm run capture:addon                    # current platform/architecture
@@ -124,6 +142,82 @@ override. On Windows,
 Electron's `node.lib` still names `node.exe`, so the CMake target must retain its
 delay-load hook and `/DELAYLOAD:node.exe`; a hard `node.exe` PE dependency loads
 in Node but fails before module initialization in `electron.exe`.
+
+### Waveform measurements
+
+Desktop native waveform measurements are cached locally under `userData`. The
+cache stores full-resolution, unnormalized peaks, the seek-bar envelope, RMS
+and source duration/format metadata. It is advisory data, separate from
+`project.json` and Drive sync; cache failures must preserve the normal native
+measurement and legacy decode fallback paths.
+
+A hit requires the current source-file identity, measurement algorithm/schema
+version and every peak-policy parameter to match. Source identity includes
+canonical path and high-resolution size, inode/device, mtime and ctime data;
+replacing a stem or restoring its mtime must not reuse stale statistics. The
+entry is checksummed, shape-validated and bounded before use. Bump the cache
+version when measurement semantics change. Recheck source identity after
+asynchronous work and discard superseded requests before publication.
+
+Cache lookup stays after the IPC file allowlist and codec checks. Never let a
+cache hit grant access to an unregistered path. Persist through atomic writes,
+keep the disk budget bounded and prune only owned cache files. Reopening after
+an app restart must use the persisted data, not merely a process-local memo.
+This cache avoids repeated waveform scans; it does not cache the native
+playback graph or change the streaming preference.
+
+The small per-lane RMS96 envelope also lives in `project.json` for phone reuse.
+`src/shared/waveform-envelope-cache.ts` owns its version, policy, 96-bucket shape
+and 16-lane bound. Change the policy/version when envelope semantics change;
+legacy unstamped records mean only the original v1 algorithm. Both writers prune
+removed, stale and malformed lanes and resolve custom IDs through
+`settings.custom[].file`, rather than deriving filenames from labels or IDs.
+
+Mobile also keeps up to 64 validated RMS96 envelopes in the durable app-private
+`singz.waveforms.rms96.v1` preference, bounded to 256 KiB and keyed by the actual
+audio MD5. This survives process restarts for read-only picked folders and Drive
+projects. Only a project explicitly owned by the phone may receive a
+`project.json` waveform update; never write a same-named Documents shadow for an
+external source. App-private writes are serialized and discard superseded loads.
+
+A streamed prepare passes validated envelopes into the native session before
+analysis starts, so a cache hit avoids opening a background analysis reader.
+Desktop seeds come only from main's verified measurement cache, after path/codec
+authorization; renderer-supplied seeds are refused. Mobile seeds require the
+fresh MD5 of the materialized file, not merely the hash in the document. Folder
+copies compare source and destination contents even when size and mtime match.
+Mobile download currency and waveform identity share a bounded 128-entry process
+memo. Its key includes canonical path, device/inode, size, and nanosecond mtime
+and ctime; a restored mtime alone cannot preserve an entry. Hashes come from one
+opened descriptor with stamps checked before/after the read and against the live
+path. Authorization is rechecked after canonicalization and on the opened target.
+Read errors, short reads and concurrent replacement fail closed. Old persisted
+size/mtime-only MD5 records are not identity evidence. Opaque folder-provider
+sources still receive a fresh content comparison; validated destinations reuse
+the same identity instead of being hashed again for waveform seeding.
+
+Catalog loading coalesces visual progress at 100 ms. Every diagnostic step and
+awaited durable breadcrumb is still recorded; fast file callbacks must not pay
+for a complete catalog render per step. Completion, cancellation and a newer
+load discard pending visual updates before they can restore a stale spinner.
+
+The playback log's presentation counter is a sampled, latency-adjusted frame
+estimate. It does not detect PCM energy or establish the instant sound began;
+status polling and bridge scheduling delay its observation. Report its sampling
+scope and graph/route latency rather than calling it a first audible callback.
+
+The native in-memory envelope map is bounded to 64 content-bound identities;
+path-only identities never reuse measurements. Missing or rejected lanes still
+measure progressively. Short custom lanes are padded with silence in the mixed
+seek-bar timeline, while their stored envelope remains relative to their source.
+
+Focused checks: desktop `lane-measure-cache`, `desktop-waveform-seed` and
+`project-waveforms` Vitest suites; mobile `waveform-cache`, `waveform-store`, `waveform-writer`,
+`waveform-mix` and `native-playback-b2` Jest suites; the Swift folder runner at
+`mobile/__tests__/test-swift-folder-materialization.sh`; Android folder/schema
+unit tests; and native playback/streaming feeder tests in all sanitizer presets.
+The real addon smoke includes valid and mismatched seed controls. Rebuild and
+install mobile binaries after bridge/core changes before claiming runtime reuse.
 
 ### Native compiler caches
 
@@ -605,6 +699,27 @@ code**, which is precisely what a parallel worktree produces. Note also that
 on whether the vendored binary supports native capture — so which binary is
 present decides which half of that driver runs, and provenance is a testing
 question, not only a correctness one.
+
+## Diagnostic log wording
+
+Log confirmed outcomes, not inferred work. A native envelope read can return a
+seed, an in-memory result or newly scanned data: call it “envelopes ready” unless
+the producer actually reports a scan. A seed offered by JS is a cache candidate,
+not proof that native accepted it. Cache summaries name the layer and count hits,
+misses or pending lanes independently. Never invent a zero-duration lookup.
+
+Every duration names its scope: a full waveform request can include disk lookup,
+native measurement, cache writes and pruning; mobile file preparation can include
+download/cache validation, copying and content hashing. Cancellation is a normal
+outcome, failures retain their operation and reason, and an already completed
+cleanup must not announce another successful release. Routine graph logs retain
+counts and resource totals without repeating the entire topology.
+
+Use the existing persistent Log pipeline. Desktop renderer warnings/errors and
+renderer crashes/load failures are captured there as well; a closing log viewer
+cannot fail the operation being logged. Copy/Share exports use full ISO UTC
+timestamps so archived launches and midnight remain distinguishable, while the
+on-screen clock remains compact.
 
 ## Test suites
 
