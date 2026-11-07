@@ -16,7 +16,8 @@ import type {
   DesktopNativeRecoveryErrorCode
 } from './desktop-native-playback'
 import type { DesktopNativePlaybackEngineRequest } from './desktop-native-playback'
-import { desktopNativePlaybackPreferred, detectedDesktopPlatform } from './native-playback-preference'
+import type { AcceptedControlHost } from './accepted-controls'
+import { desktopNativePlaybackPreferred, detectedDesktopPlatform, type DesktopNativePlaybackPolicy } from './native-playback-preference'
 import type { DesktopPlaybackProvider, DesktopPlaybackStatus } from '../../../shared/types'
 import type { ParsedGraphDocument } from '../../../shared/graph-document'
 import { t } from '../i18n'
@@ -100,7 +101,7 @@ const SEC_COUNT_PERIOD = 1
  * ramps so toggling mid-playback is click-free.
  */
 export class MultitrackEngine {
-  private ctx = new AudioContext({ latencyHint: 'interactive' })
+  private ctx: AudioContext
   private desiredOutputId = ''
   private trainingConfiguredOutputId: string | null = null
   private confirmedOutputId = ''
@@ -133,8 +134,8 @@ export class MultitrackEngine {
   /** Full verified JS document. Opaque state remains here; the native facade
    * creates the bounded projection immediately before each prepare/rebuild. */
   private graphDocument: ParsedGraphDocument | null = null
-  private master = this.ctx.createGain()
-  private outputBus = this.ctx.createGain()
+  private master: GainNode
+  private outputBus: GainNode
   // Keep channels separate: a mono analyser would hide opposite-phase peaks.
   private outputMeterSplit: ChannelSplitterNode | null = null
   private outputMeters: AnalyserNode[] = []
@@ -176,9 +177,9 @@ export class MultitrackEngine {
   private trainTimer: ReturnType<typeof setInterval> | null = null
   private beatsInfo: BeatInfo | null = null
   private met: MetronomeConfig = { ...MET_DEFAULTS }
-  private clickGain = this.ctx.createGain()
+  private clickGain: GainNode
   /** Exercise cues bypass pitch/stretch processing but follow the user's master volume. */
-  private trainingGain = this.ctx.createGain()
+  private trainingGain: GainNode
   private trainingCues: DesktopTrainingCueController | null = null
   /** Output level for everything the singer hears, mix and click alike. */
   private masterVol = 1
@@ -199,7 +200,16 @@ export class MultitrackEngine {
 
   duration = 0
 
-  constructor() {
+  constructor(private readonly nativePlaybackPolicy: DesktopNativePlaybackPolicy = {}) {
+    // Mandatory-native surfaces must enumerate before Chromium claims the
+    // default ALSA device. Suspended contexts can still hold that endpoint.
+    this.ctx = new AudioContext(nativePlaybackPolicy.requireNative
+      ? { latencyHint: 'interactive', sinkId: { type: 'none' } } as AudioContextOptions
+      : { latencyHint: 'interactive' })
+    this.master = this.ctx.createGain()
+    this.outputBus = this.ctx.createGain()
+    this.clickGain = this.ctx.createGain()
+    this.trainingGain = this.ctx.createGain()
     this.master.connect(this.outputBus)
     this.outputBus.connect(this.ctx.destination)
     // Clicks bypass the master bus: transpose/tempo correction and stem
@@ -306,7 +316,9 @@ export class MultitrackEngine {
       training: this.training,
       loop: this.regionLoop ? this.region : null,
       nativeAudioProvider: this.nativeAudioProvider,
-      graphDocument: this.graphDocument
+      graphDocument: this.graphDocument,
+      nativePlaybackEnabled: this.nativePlaybackPolicy.playback,
+      streamLanes: this.nativePlaybackPolicy.streamLanes
     }
   }
 
@@ -332,7 +344,7 @@ export class MultitrackEngine {
   private async prepareNativeAhead(): Promise<void> {
     if (this.teardownStarted || this._playing || this.tracks.length === 0 ||
         this.pendingPlayRequests.size > 0 || !this.aheadAllowed || this.betweenSongs || this.headphoneMonitorLease) return
-    if (!desktopNativePlaybackPreferred()) return
+    if (!desktopNativePlaybackPreferred(detectedDesktopPlatform(), this.nativePlaybackPolicy.playback)) return
     const epoch = this._songEpoch
     const ahead = this.aheadEpoch
     const stale = (): boolean =>
@@ -933,8 +945,10 @@ export class MultitrackEngine {
   setMasterVolume(v: number): void {
     this.scheduleNativePrepareAhead()
     const target = sanitizeSongVolume(v)
+    const epoch = this._songEpoch
     if (this.nativePlayback?.active) {
       void this.nativePlayback.setMasterGain(target).then(() => {
+        if (epoch !== this._songEpoch) return
         this.masterVol = target
         this.trainingCues?.setOutputGain(target)
         this.master.gain.setTargetAtTime(target, this.ctx.currentTime, 0.02)
@@ -950,6 +964,11 @@ export class MultitrackEngine {
     this.clickGain.gain.setTargetAtTime(this.met.volume * this.masterVol, this.ctx.currentTime, 0.02)
     this.trainingGain.gain.setTargetAtTime(this.masterVol, this.ctx.currentTime, 0.02)
     this.emit()
+  }
+
+  async setMasterVolumeAccepted(v: number): Promise<void> {
+    const { setMasterVolumeAccepted } = await import('./accepted-controls')
+    return setMasterVolumeAccepted(this.acceptedControlHost(), sanitizeSongVolume(v))
   }
 
   async setMetronome(m: MetronomeConfig): Promise<void> {
@@ -1621,6 +1640,16 @@ export class MultitrackEngine {
 
   get starting(): boolean { return this.pendingPlayRequests.size > 0 && !this._playing }
 
+  /** Confirm command acceptance without waiting for the native render snapshot. */
+  async playAccepted(): Promise<void> {
+    const operation = this.play()
+    const generation = this.generation
+    await operation
+    if (this.teardownStarted || generation !== this.generation || !this._playing) {
+      throw new Error('Playback was superseded.')
+    }
+  }
+
   play(opts: { countIn?: boolean } = {}): Promise<void> {
     if (this.teardownStarted) return Promise.resolve()
     const operation = this.performPlay(opts)
@@ -1773,6 +1802,9 @@ export class MultitrackEngine {
         'The retained native provider cannot retry with the current runtime, toggle, or graph.'
       )
     }
+    if (this.nativePlaybackPolicy.requireNative) {
+      throw new Error(t('box.nativeRequired'))
+    }
     if (this.desiredOutputId.startsWith('native:')) {
       throw new Error('This ALSA output needs native playback. Enable it in Settings and use a supported audio format.')
     }
@@ -1788,7 +1820,8 @@ export class MultitrackEngine {
     }
     if (requestGeneration !== this.generation) return
 
-    const gen = ++this.generation
+    // The last await still belongs to this request; its source callbacks do too.
+    const gen = requestGeneration
     let when = this.ctx.currentTime + START_DELAY
     // Metronome pipeline. A count-in pushes the music start out and clicks
     // through the beats leading up to it — real preceding beats when they
@@ -1886,6 +1919,10 @@ export class MultitrackEngine {
   }
 
   pause(): void {
+    void this.pauseAccepted().catch(error => console.error('Native pause failed:', error))
+  }
+
+  pauseAccepted(): Promise<void> {
     // A play request can be awaiting AudioContext.resume() without having
     // created sources or set _playing yet. Pausing still revokes that request.
     this.generation++
@@ -1900,9 +1937,9 @@ export class MultitrackEngine {
         this.syncBoundWatcher()
         this.syncTrainWatcher()
         this.emit()
-        return
+        return Promise.resolve()
       }
-      void this.nativePlayback.pause().then(() => {
+      return this.nativePlayback.pause().then(() => {
         this._playing = false
         // Remember where it parked, as the Web Audio path does: the position
         // a Play after this counts in to, and what the song reopens at once
@@ -1912,10 +1949,9 @@ export class MultitrackEngine {
         this.syncBoundWatcher()
         this.syncTrainWatcher()
         this.emit()
-      }).catch((error) => console.error('Native pause failed:', error))
-      return
+      })
     }
-    if (!this._playing) return
+    if (!this._playing) return Promise.resolve()
     this.startOffset = this.position
     this._playing = false
     this.stopSources()
@@ -1927,6 +1963,7 @@ export class MultitrackEngine {
     this.syncTrainWatcher()
     this.syncClickWatcher()
     this.emit()
+    return Promise.resolve()
   }
 
   toggle(): void {
@@ -2003,10 +2040,12 @@ export class MultitrackEngine {
 
   setMuted(id: string, muted: boolean): void {
     this.scheduleNativePrepareAhead()
-    const t = this.tracks.find((t) => t.id === id)
+    const t = this.tracks.find((track) => track.id === id)
     if (!t) return
+    const epoch = this._songEpoch
     if (this.nativePlayback?.active) {
       void this.nativePlayback.updateLane(t.id, { muted }).then((accepted) => {
+        if (epoch !== this._songEpoch) return
         t.volume = accepted.gain
         t.muted = accepted.muted
         t.solo = accepted.solo
@@ -2022,10 +2061,12 @@ export class MultitrackEngine {
 
   setSolo(id: string, solo: boolean): void {
     this.scheduleNativePrepareAhead()
-    const t = this.tracks.find((t) => t.id === id)
+    const t = this.tracks.find((track) => track.id === id)
     if (!t) return
+    const epoch = this._songEpoch
     if (this.nativePlayback?.active) {
       void this.nativePlayback.updateLane(t.id, { solo }).then((accepted) => {
+        if (epoch !== this._songEpoch) return
         t.volume = accepted.gain
         t.muted = accepted.muted
         t.solo = accepted.solo
@@ -2041,11 +2082,13 @@ export class MultitrackEngine {
 
   setVolume(id: string, volume: number): void {
     this.scheduleNativePrepareAhead()
-    const t = this.tracks.find((t) => t.id === id)
+    const t = this.tracks.find((track) => track.id === id)
     if (!t) return
     const target = Math.max(0, Math.min(1, volume))
+    const epoch = this._songEpoch
     if (this.nativePlayback?.active) {
       void this.nativePlayback.updateLane(t.id, { gain: target }).then((accepted) => {
+        if (epoch !== this._songEpoch) return
         t.volume = accepted.gain
         t.muted = accepted.muted
         t.solo = accepted.solo
@@ -2057,6 +2100,47 @@ export class MultitrackEngine {
     t.volume = target
     this.applyGains()
     this.emit()
+  }
+
+  setMutedAccepted(id: string, muted: boolean): Promise<void> {
+    return this.setLaneAccepted(id, { muted })
+  }
+
+  setSoloAccepted(id: string, solo: boolean): Promise<void> {
+    return this.setLaneAccepted(id, { solo })
+  }
+
+  setVolumeAccepted(id: string, volume: number): Promise<void> {
+    return this.setLaneAccepted(id, { gain: Math.max(0, Math.min(1, volume)) })
+  }
+
+  private async setLaneAccepted(id: string, patch: { gain?: number; muted?: boolean; solo?: boolean }): Promise<void> {
+    const { setLaneAccepted } = await import('./accepted-controls')
+    return setLaneAccepted(this.acceptedControlHost(), id, patch)
+  }
+
+  private acceptedControlHost(): AcceptedControlHost {
+    return {
+      schedule: () => this.scheduleNativePrepareAhead(),
+      epoch: () => this._songEpoch,
+      native: () => this.nativePlayback,
+      lane: id => this.tracks.find(track => track.id === id),
+      applyLane: (track, accepted) => {
+        track.volume = accepted.gain
+        track.muted = accepted.muted
+        track.solo = accepted.solo
+        this.applyGains()
+        this.emit()
+      },
+      applyMaster: target => {
+        this.masterVol = target
+        this.trainingCues?.setOutputGain(target)
+        this.master.gain.setTargetAtTime(target, this.ctx.currentTime, 0.02)
+        this.clickGain.gain.setTargetAtTime(this.met.volume * target, this.ctx.currentTime, 0.02)
+        this.trainingGain.gain.setTargetAtTime(target, this.ctx.currentTime, 0.02)
+        this.emit()
+      }
+    }
   }
 
   private applyGains(instant = false): void {

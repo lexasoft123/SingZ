@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, shell, type Me
 import { loadWindowState, trackWindowState } from './window-state'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import type {
   DesktopMonitorConfig,
   DesktopPlaybackLaneConfig,
@@ -67,6 +68,9 @@ import { registerDesktopAudioInput } from './audio-input'
 import { askMicrophoneAccess } from './mic-access'
 import { cancelBeatsMl, registerBeatsIpc } from './beats-ml'
 import { CaptureOwner, playbackCodecSupportsPath } from './capture'
+import { boxKioskRequested, desktopUpdaterEnabled, developmentRendererUrl, requestedRendererSurface } from './launch-surface'
+import { shouldDeferBoxApplicationQuit, shouldResumeBoxApplicationQuit } from './box-close-policy'
+import { registerBoxIpc } from './box/ipc'
 
 // Test hook: fake microphone input so E2E drivers can exercise pitch matching.
 if (process.env.SINGZ_FAKE_MIC) {
@@ -80,17 +84,43 @@ if (process.env.SINGZ_MUTE) {
   app.commandLine.appendSwitch('mute-audio')
 }
 
-// Test hook: isolate userData — concurrent E2E drivers (or a driver next to
-// a dev instance) sharing the default "Electron" profile crash each other's
-// renderers. Shared caches (models, GPU pack) stay in appData/SingZ.
-if (process.env.SINGZ_USERDATA_DIR) {
-  app.setPath('userData', resolve(process.env.SINGZ_USERDATA_DIR))
-}
-
 const separator = new Separator()
 const transcriber = new Transcriber()
 const modelManager = new ModelManager()
 const captureOwner = new CaptureOwner()
+let boxBackend: ReturnType<typeof registerBoxIpc> = null
+let boxBackendDisposeStarted = false
+const boxCloseCompletions = new WeakSet<WebContents>()
+const boxCloseTimers = new WeakMap<WebContents, ReturnType<typeof setTimeout>>()
+let boxApplicationQuitRequested = false
+let boxCleanupFinished = false
+let boxQuitWindowCount = 0
+let boxCompletedWindowCount = 0
+
+function finishBoxClose(win: BrowserWindow): void {
+  if (boxCloseCompletions.has(win.webContents)) return
+  const timer = boxCloseTimers.get(win.webContents)
+  if (timer) clearTimeout(timer)
+  boxCloseTimers.delete(win.webContents)
+  boxCloseCompletions.add(win.webContents)
+  boxCompletedWindowCount++
+  win.close()
+  if (shouldResumeBoxApplicationQuit(boxApplicationQuitRequested, boxCompletedWindowCount, boxQuitWindowCount)) {
+    boxCleanupFinished = true
+    app.quit()
+  }
+}
+
+function requestBoxClose(win: BrowserWindow): void {
+  if (boxCloseCompletions.has(win.webContents) || boxCloseTimers.has(win.webContents)) return
+  const timer = setTimeout(() => {
+    log('app', 'Box close cleanup exceeded 12 seconds; closing with pending recovery work', 'warn')
+    finishBoxClose(win)
+  }, 12000)
+  timer.unref()
+  boxCloseTimers.set(win.webContents, timer)
+  win.webContents.send('box:close-request')
+}
 
 /** Every window hears about Drive: progress while a sync runs, and the state
  *  the badges read. One helper, because three copies of this loop drifted. */
@@ -150,35 +180,49 @@ const scheduler = new SyncScheduler({
 if (!process.env.SINGZ_NO_SYNC) onDirty(() => scheduler.notifyDirty())
 
 function createWindow(): void {
+  const surface = requestedRendererSurface(process.argv)
   const st = loadWindowState({ width: 1240, height: 820 })
   // Cage needs a mapped Wayland surface before the first frame. Waiting for
   // ready-to-show with an initially hidden window can leave startup blank.
   // Preserve the explicit hidden-window contract used by automated drivers.
   const showOnWayland = process.platform === 'linux'
     && Boolean(process.env.WAYLAND_DISPLAY) && !process.env.SINGZ_E2E_HIDDEN
+  const kiosk = boxKioskRequested(surface, {
+    developmentUrl: process.env['ELECTRON_RENDERER_URL'],
+    hiddenTest: Boolean(process.env.SINGZ_E2E_HIDDEN),
+    windowed: process.env.SINGZ_BOX_WINDOWED === '1'
+  })
   const win = new BrowserWindow({
-    width: st.width,
-    height: st.height,
-    ...(st.x !== undefined && st.y !== undefined ? { x: st.x, y: st.y } : {}),
-    minWidth: 940,
-    minHeight: 600,
+    width: surface === 'box' ? 1600 : st.width,
+    height: surface === 'box' ? 900 : st.height,
+    ...(surface === 'desktop' && st.x !== undefined && st.y !== undefined ? { x: st.x, y: st.y } : {}),
+    minWidth: surface === 'box' ? 640 : 940,
+    minHeight: surface === 'box' ? 360 : 600,
     show: showOnWayland,
-    ...(process.platform === 'darwin'
+    ...(surface === 'box'
       ? {
-          backgroundColor: '#12100d',
-          titleBarStyle: 'hiddenInset' as const,
-          trafficLightPosition: { x: 18, y: 17 }
+          frame: false,
+          autoHideMenuBar: true,
+          fullscreen: kiosk,
+          kiosk,
+          backgroundColor: '#12100d'
         }
-      : process.platform === 'win32'
+      : process.platform === 'darwin'
         ? {
-            // Fully frameless + transparent so the renderer can draw rounded
-            // corners (Windows 10 never rounds native frames). Window buttons
-            // are ours, wired over IPC.
-            frame: false,
-            transparent: true,
-            backgroundColor: '#00000000'
+            backgroundColor: '#12100d',
+            titleBarStyle: 'hiddenInset' as const,
+            trafficLightPosition: { x: 18, y: 17 }
           }
-        : { backgroundColor: '#12100d' }),
+        : process.platform === 'win32'
+          ? {
+              // Fully frameless + transparent so the renderer can draw rounded
+              // corners (Windows 10 never rounds native frames). Window buttons
+              // are ours, wired over IPC.
+              frame: false,
+              transparent: true,
+              backgroundColor: '#00000000'
+            }
+          : { backgroundColor: '#12100d' }),
     webPreferences: {
       preload: join(import.meta.dirname, '../preload/index.mjs'),
       sandbox: false,
@@ -190,7 +234,13 @@ function createWindow(): void {
     }
   })
 
-  trackWindowState(win)
+  boxBackend?.attachRenderer(win.webContents)
+  if (surface === 'desktop') trackWindowState(win)
+  win.on('close', (event) => {
+    if (surface !== 'box' || boxCloseCompletions.has(win.webContents)) return
+    event.preventDefault()
+    requestBoxClose(win)
+  })
   win.on('maximize', () => win.webContents.send('win:maximized', true))
   win.on('unmaximize', () => win.webContents.send('win:maximized', false))
   win.on('ready-to-show', () => {
@@ -213,7 +263,7 @@ function createWindow(): void {
       readGpuSoon()
       return
     }
-    if (st.maximized) win.maximize()
+    if (surface === 'desktop' && st.maximized) win.maximize()
     if (win.isVisible()) readGpuSoon()
     else {
       win.once('show', readGpuSoon)
@@ -242,9 +292,9 @@ function createWindow(): void {
   })
 
   if (process.env['ELECTRON_RENDERER_URL']) {
-    void win.loadURL(process.env['ELECTRON_RENDERER_URL'])
+    void win.loadURL(developmentRendererUrl(process.env['ELECTRON_RENDERER_URL'], surface))
   } else {
-    void win.loadFile(join(import.meta.dirname, '../renderer/index.html'))
+    void win.loadFile(join(import.meta.dirname, surface === 'box' ? '../renderer/box/box.html' : '../renderer/index.html'))
   }
 }
 
@@ -258,9 +308,15 @@ function registerIpc(): void {
     else w.maximize()
   })
   ipcMain.on('win:close', (e) => BrowserWindow.fromWebContents(e.sender)?.close())
+  ipcMain.on('box:close-ready', (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (win) finishBoxClose(win)
+  })
   ipcMain.handle('win:is-maximized', (e) => BrowserWindow.fromWebContents(e.sender)?.isMaximized() ?? false)
   ipcMain.handle('update:state', () => updateState())
-  ipcMain.on('update:install', () => installUpdate())
+  ipcMain.on('update:install', () => {
+    if (desktopUpdaterEnabled(requestedRendererSurface(process.argv))) installUpdate()
+  })
 
   ipcMain.handle('splitter:mode', async () => {
     try {
@@ -349,6 +405,12 @@ function registerIpc(): void {
       return res
     }
   )
+
+  ipcMain.handle('lyrics:get-cached', async (_e, raw: string) => {
+    const full = resolve(String(raw))
+    if (!isAllowed(full)) return { ok: false, error: t('main.error.fileNotRegistered') }
+    return transcriber.readCached(full)
+  })
 
   ipcMain.handle('lyrics:align-caps', async () => ({ precise: await preciseCapable() }))
 
@@ -932,11 +994,13 @@ app.whenReady().then(async () => {
   log('app', `userData: ${app.getPath('userData')}`)
   log('app', `models: ${modelsDir()} · pack: ${packDir()}`)
   logHardwareInfo()
-  startUpdater((st) => {
-    for (const w of BrowserWindow.getAllWindows()) {
-      if (!w.isDestroyed()) w.webContents.send('update:state', st)
-    }
-  })
+  if (desktopUpdaterEnabled(requestedRendererSurface(process.argv))) {
+    startUpdater((st) => {
+      for (const w of BrowserWindow.getAllWindows()) {
+        if (!w.isDestroyed()) w.webContents.send('update:state', st)
+      }
+    })
+  }
   // macOS keeps its menu (⌘-shortcuts live there); elsewhere it's just noise
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
   await migrateProjects()
@@ -947,6 +1011,16 @@ app.whenReady().then(async () => {
   allowRoot(stemsRoot())
   allowRoot(projectsRoot())
   registerIpc()
+  boxBackend = registerBoxIpc({
+    userDataDir: app.getPath('userData'),
+    appVersion: app.isPackaged ? app.getVersion() : 'dev',
+    rendererURL: process.env.ELECTRON_RENDERER_URL
+      ? developmentRendererUrl(process.env.ELECTRON_RENDERER_URL, 'box')
+      : pathToFileURL(join(import.meta.dirname, '../renderer/box/box.html')).toString(),
+    socketPath: process.env.SINGZ_BOX_PLATFORM_SOCKET,
+    audioInputs: () => captureOwner.devices(),
+    audioHost: () => captureOwner.hostDevices()
+  })
   createWindow()
 
   // Signed-in libraries reconcile on launch, not only after saves: analysis
@@ -966,7 +1040,30 @@ app.whenReady().then(async () => {
   })
 })
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (shouldDeferBoxApplicationQuit(requestedRendererSurface(process.argv), boxCleanupFinished)) {
+    event.preventDefault()
+    boxApplicationQuitRequested = true
+    boxQuitWindowCount = BrowserWindow.getAllWindows().length
+    boxCompletedWindowCount = 0
+    if (boxQuitWindowCount === 0) {
+      boxCleanupFinished = true
+      app.quit()
+      return
+    }
+    for (const win of BrowserWindow.getAllWindows()) requestBoxClose(win)
+    return
+  }
+  if (boxBackend && !boxBackendDisposeStarted) {
+    event.preventDefault()
+    boxBackendDisposeStarted = true
+    const backend = boxBackend
+    void backend.dispose().catch(() => undefined).finally(() => {
+      boxBackend = null
+      app.quit()
+    })
+    return
+  }
   captureOwner.stop()
   scheduler.stop()
   separator.cancel()

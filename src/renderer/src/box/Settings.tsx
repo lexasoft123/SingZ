@@ -1,0 +1,297 @@
+import { useEffect, useLayoutEffect, useMemo, useReducer, useRef } from 'react'
+import { Button } from '@singz/ui'
+import type {
+  DesktopAudioHostDevice,
+  DesktopAudioHostInventoryResult
+} from '../../../shared/types'
+import { tSettings } from './settings-i18n'
+import {
+  formatSampleRate,
+  formatSampleRateRanges,
+  initialSettingsState,
+  inputDevices,
+  outputApplyIssue,
+  outputDevices,
+  settingsReducer
+} from './settings-model'
+import './settings.css'
+
+export interface BoxSettingsProps {
+  inventory: DesktopAudioHostInventoryResult | null
+  loading: boolean
+  error: string | null
+  currentOutputUid: string | null
+  playbackActive: boolean
+  onRefresh: () => void
+  onApplyOutput: (uid: string) => Promise<void>
+  onBack: () => void
+  canApplyOutput?: boolean
+  applyUnavailableReason?: string | null
+}
+
+function deviceName(device: DesktopAudioHostDevice): string {
+  return device.label.trim() || tSettings('box.settings.unnamedDevice')
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+export function Settings({
+  inventory,
+  loading,
+  error,
+  currentOutputUid,
+  playbackActive,
+  onRefresh,
+  onApplyOutput,
+  onBack,
+  canApplyOutput = true,
+  applyUnavailableReason = null
+}: BoxSettingsProps): React.JSX.Element {
+  const outputs = useMemo(() => outputDevices(inventory), [inventory])
+  const inputs = useMemo(() => inputDevices(inventory), [inventory])
+  const outputUids = useMemo(() => outputs.map(device => device.uid), [outputs])
+  const knownOutputUids = !loading && inventory?.ok === true ? outputUids : null
+  const [state, dispatch] = useReducer(settingsReducer, currentOutputUid, initialSettingsState)
+  const pendingRequest = useRef<{ uid: string; settled: boolean } | null>(null)
+
+  useLayoutEffect(() => {
+    dispatch({ type: 'sync', currentOutputUid, outputUids: knownOutputUids })
+  }, [currentOutputUid, knownOutputUids])
+
+  useLayoutEffect(() => {
+    if (state.pendingOutputUid === null && pendingRequest.current?.settled) {
+      pendingRequest.current = null
+    }
+  }, [state.pendingOutputUid])
+
+  useEffect(() => () => {
+    pendingRequest.current = null
+  }, [])
+
+  const pending = state.pendingOutputUid !== null
+  const issue = outputApplyIssue({
+    uid: state.draftOutputUid,
+    committedOutputUid: state.committedOutputUid,
+    outputs,
+    canApplyOutput,
+    loading,
+    pending
+  })
+  const inventoryError = inventory && !inventory.ok ? inventory.error : null
+  const parentError = error && error !== inventoryError ? error : null
+  const selectionDisabled = pending || loading || !canApplyOutput
+  const accepted = state.acceptedOutputUid !== null && state.acceptedOutputUid === currentOutputUid
+  const unavailableReason = applyUnavailableReason || tSettings('box.settings.routeUnavailable')
+
+  const selectOutput = (uid: string): void => {
+    dispatch({ type: 'select-output', uid, outputs, canApplyOutput, loading })
+  }
+
+  const applyOutput = (): void => {
+    const uid = state.draftOutputUid
+    const activeRequest = pendingRequest.current
+    if (
+      uid === null || issue !== null || state.pendingOutputUid !== null ||
+      (activeRequest !== null && !activeRequest.settled)
+    ) return
+    const started = settingsReducer(state, {
+      type: 'apply-started',
+      outputs,
+      canApplyOutput,
+      loading
+    })
+    if (started === state) return
+    const requestIdentity = { uid, settled: false }
+    pendingRequest.current = requestIdentity
+    dispatch({ type: 'apply-started', outputs, canApplyOutput, loading })
+
+    const rejected = (caught: unknown): void => {
+      if (pendingRequest.current !== requestIdentity) return
+      requestIdentity.settled = true
+      pendingRequest.current = null
+      dispatch({ type: 'apply-rejected', uid, message: errorText(caught) })
+    }
+
+    let request: Promise<void>
+    try {
+      request = onApplyOutput(uid)
+    } catch (caught) {
+      rejected(caught)
+      return
+    }
+    void request.then(() => {
+      if (pendingRequest.current !== requestIdentity) return
+      requestIdentity.settled = true
+      dispatch({ type: 'apply-resolved', uid })
+    }, rejected)
+  }
+
+  let actionStatus = ''
+  if (state.phase === 'applying') actionStatus = tSettings('box.settings.applying')
+  else if (state.phase === 'awaiting-readback') actionStatus = tSettings('box.settings.awaitingReadback')
+  else if (!canApplyOutput) actionStatus = unavailableReason
+  else if (accepted) actionStatus = tSettings('box.settings.appliedForSession')
+  else if (state.draftOutputUid !== null && state.draftOutputUid !== state.committedOutputUid) {
+    actionStatus = tSettings('box.settings.draftReady')
+  }
+
+  return <main className="box-settings" data-surface="settings" aria-label={tSettings('box.settings.navigation')}>
+    <div className="settings-heading">
+      <div>
+        <h1>{tSettings('box.settings.title')}</h1>
+        <p>{tSettings('box.settings.subtitle')}</p>
+      </div>
+      <div className="settings-heading-actions">
+        <Button data-settings-refresh disabled={pending || loading} onClick={onRefresh}>
+          {loading ? tSettings('box.settings.refreshing') : tSettings('box.settings.refresh')}
+        </Button>
+        <Button data-settings-back disabled={pending} onClick={onBack}>← {tSettings('box.settings.back')}</Button>
+      </div>
+    </div>
+
+    <div className="settings-content">
+      <section className="settings-panel settings-output-panel" aria-labelledby="box-settings-outputs">
+        <div className="settings-panel-heading">
+          <div>
+            <h2 id="box-settings-outputs">{tSettings('box.settings.outputs')}</h2>
+            <p>{tSettings(canApplyOutput ? 'box.settings.outputsHelp' : 'box.settings.outputsReadOnlyHelp')}</p>
+          </div>
+          {loading && inventory !== null && <span className="settings-panel-state">{tSettings('box.settings.refreshing')}</span>}
+        </div>
+
+        {playbackActive && <p className="settings-pause-caption">{tSettings('box.settings.applyPauseCaption')}</p>}
+        {parentError && <div className="settings-alert" role="alert"><p>{parentError}</p></div>}
+        {inventoryError && <div className="settings-alert" role="alert">
+          <strong>{tSettings('box.settings.errorTitle')}</strong>
+          <p>{inventoryError}</p>
+        </div>}
+        {state.error?.kind === 'device-disconnected' && <div className="settings-alert" role="alert">
+          <p>{tSettings('box.settings.deviceDisconnected')}</p>
+        </div>}
+        {state.error?.kind === 'apply-failed' && <div className="settings-alert" role="alert">
+          <p>{tSettings('box.settings.applyFailed', { error: state.error.message })}</p>
+        </div>}
+
+        <div className="settings-output-list" role="radiogroup" aria-label={tSettings('box.settings.outputList')}>
+          {outputs.map(device => {
+            const draft = state.draftOutputUid === device.uid
+            const current = currentOutputUid === device.uid
+            return <Button
+              key={device.uid}
+              className="settings-output-row"
+              role="radio"
+              aria-checked={draft}
+              aria-disabled={selectionDisabled}
+              disabled={pending || loading}
+              data-settings-output={device.uid}
+              onClick={() => selectOutput(device.uid)}
+            >
+              <span className="settings-radio" aria-hidden="true" />
+              <span className="settings-device-copy">
+                <strong>{deviceName(device)}</strong>
+                <span>{tSettings('box.settings.outputChannels', { count: device.outputChannels })} · {formatSampleRate(device.nominalSampleRate)}</span>
+              </span>
+              <span className="settings-row-badges">
+                {device.defaultOutput && <small>{tSettings('box.settings.defaultOutput')}</small>}
+                {current && <small className="settings-current-badge">{tSettings('box.settings.current')}</small>}
+                {draft && !current && <small className="settings-draft-badge">{tSettings('box.settings.draft')}</small>}
+              </span>
+            </Button>
+          })}
+
+          {loading && inventory === null && <div className="settings-empty">
+            <h3>{tSettings('box.settings.loadingTitle')}</h3>
+            <p>{tSettings('box.settings.loadingBody')}</p>
+          </div>}
+          {!loading && inventory?.ok && outputs.length === 0 && <div className="settings-empty">
+            <h3>{tSettings('box.settings.noOutputsTitle')}</h3>
+            <p>{tSettings('box.settings.noOutputsBody')}</p>
+          </div>}
+          {!loading && inventory === null && !parentError && <div className="settings-empty">
+            <h3>{tSettings('box.settings.errorTitle')}</h3>
+            <p>{tSettings('box.settings.noInventory')}</p>
+          </div>}
+        </div>
+      </section>
+
+      <aside className="settings-panel settings-input-panel" aria-labelledby="box-settings-inputs">
+        <div className="settings-panel-heading">
+          <div>
+            <h2 id="box-settings-inputs">{tSettings('box.settings.inputs')}</h2>
+            <p>{tSettings('box.settings.inputsHelp')}</p>
+          </div>
+          <span className="settings-panel-state">{tSettings('box.settings.readOnly')}</span>
+        </div>
+
+        <div className="settings-input-list" aria-label={tSettings('box.settings.inputList')}>
+          {inputs.map(device => {
+            const rates = formatSampleRateRanges(device)
+            return <article
+              className="settings-input-row"
+              key={device.uid}
+              data-settings-input={device.uid}
+              data-remote-focus
+              tabIndex={0}
+            >
+              <div className="settings-input-name">
+                <strong>{deviceName(device)}</strong>
+                <span>{tSettings('box.settings.inputChannels', { count: device.inputChannels })}</span>
+              </div>
+              <dl>
+                <div>
+                  <dt>{tSettings('box.settings.nominalRate')}</dt>
+                  <dd aria-label={device.nominalSampleRate > 0 ? undefined : tSettings('box.settings.sampleRateUnknown')}>
+                    {formatSampleRate(device.nominalSampleRate)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{tSettings('box.settings.supportedRates')}</dt>
+                  <dd aria-label={rates === '—' ? tSettings('box.settings.sampleRatesUnknown') : undefined}>{rates}</dd>
+                </div>
+              </dl>
+            </article>
+          })}
+          {!loading && inputs.length === 0 &&
+            (inventoryError !== null || (parentError !== null && inventory === null)) &&
+            <div className="settings-empty settings-input-empty">
+              <p>{tSettings('box.settings.inputUnavailable')}</p>
+            </div>}
+          {!loading && inventory?.ok && inputs.length === 0 && <div className="settings-empty settings-input-empty">
+            <h3>{tSettings('box.settings.noInputsTitle')}</h3>
+          </div>}
+          {loading && inventory === null && <div className="settings-empty settings-input-empty">
+            <h3>{tSettings('box.settings.loadingTitle')}</h3>
+          </div>}
+          {!loading && inventory === null && !parentError && <div className="settings-empty settings-input-empty">
+            <p>{tSettings('box.settings.inputUnavailable')}</p>
+          </div>}
+        </div>
+        <p className="settings-mic-setup">{tSettings('box.settings.microphoneSetup')}</p>
+      </aside>
+    </div>
+
+    <div className="settings-action-band">
+      <p className="settings-action-status" aria-live="polite">{actionStatus}</p>
+      <div className="settings-actions">
+        <Button
+          data-settings-cancel
+          disabled={pending}
+          onClick={() => dispatch({ type: 'cancel', outputUids: knownOutputUids })}
+        >
+          {tSettings('box.settings.cancel')}
+        </Button>
+        <Button variant="primary" data-settings-apply disabled={issue !== null} onClick={applyOutput}>
+          {state.phase === 'applying' ? tSettings('box.settings.applying') : tSettings('box.settings.apply')}
+        </Button>
+      </div>
+    </div>
+
+    <footer className="settings-footer">
+      <span className="box-key">↑ ↓ ← →</span><span>{tSettings('box.settings.hintMove')}</span>
+      <span className="box-key">OK</span><span>{tSettings('box.settings.hintSelect')}</span>
+      <span className="box-key">Back</span><span>{tSettings('box.settings.back')}</span>
+    </footer>
+  </main>
+}

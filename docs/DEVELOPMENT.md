@@ -620,6 +620,18 @@ question, not only a correctness one.
 | `bash mobile/scripts/test-native-playback-bridge-schema.sh` | the iOS bridge's request/result validators — one `clang++` call over the real `.mm` sources, no Xcode, no Pods, no simulator; run by the iOS native canary |
 | `bash zdsp/run-sanitizer-gates.sh` | the native gate, three presets (strict, asan/ubsan, tsan): the playback session and its two injected-failure runs, the bridge-contract test against `tests/shared/`, the graph and analysis suites, the realtime-source policies. What each preset runs is the `filter.include.name` regex in `CMakePresets.json` — a new `add_test` is NOT picked up until it is added there and to the build preset's `targets`, which is why `playback_cue_plan_tests` still runs only under the unfiltered Windows job |
 
+After a desktop-only bootstrap, generate the mobile shared modules imported by
+the desktop tests before running the full suite, using the same steps as CI:
+
+```sh
+node mobile/scripts/sync-graph-document.js
+node mobile/scripts/build-training.mjs
+npm test
+```
+
+These generators use the root build dependencies and write ignored outputs in
+this worktree; installing the mobile app dependencies is not required.
+
 The three-language agreement fixtures under `tests/shared/` are read by more
 than one of these at once — `native-playback-bridge-manifest.json` by jest,
 vitest and ctest; `native-playback-agreement-cases.json` and

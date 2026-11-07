@@ -35,8 +35,30 @@ function hasExplicitPublishArg(args) {
   )
 }
 
-function electronBuilderArgs(args) {
-  return hasExplicitPublishArg(args) ? [...args] : [...args, '--publish', 'never']
+function electronBuilderArgs(args, box = false) {
+  const builderArgs = box ? [...args, '--config', 'electron-builder.box.yml'] : [...args]
+  return hasExplicitPublishArg(args) ? builderArgs : [...builderArgs, '--publish', 'never']
+}
+
+function parseDistRequest(args, hostPlatform = process.platform, hostArch = process.arch) {
+  let box = false
+  const builderArgs = []
+  for (const arg of args) {
+    if (arg === '--box') {
+      if (box) throw new Error('The internal --box selector may be specified only once')
+      box = true
+      continue
+    }
+    if (/^--(?:no-)?box(?:[.=]|$)/.test(arg)) {
+      throw new Error(`Unsupported SingZ dist selector: ${arg}`)
+    }
+    builderArgs.push(arg)
+  }
+  return {
+    args: builderArgs,
+    box,
+    targets: requestedCaptureTargets(builderArgs, hostPlatform, hostArch)
+  }
 }
 
 /**
@@ -75,8 +97,8 @@ function finalVerifyCaptureSnapshots({
   )
 }
 
-function main(builderArgs = process.argv.slice(2)) {
-  const targets = requestedCaptureTargets(builderArgs)
+function main(args = process.argv.slice(2)) {
+  const { args: builderArgs, box, targets } = parseDistRequest(args)
   for (const target of targets) {
     if (target.startsWith('linux-')) {
       for (const script of ['vendor-analyze.sh', 'vendor-llama.sh', 'vendor-crispasr.sh']) {
@@ -122,7 +144,7 @@ function main(builderArgs = process.argv.slice(2)) {
   })
   run(process.execPath, [
     require.resolve('electron-builder/cli.js'),
-    ...electronBuilderArgs(builderArgs)
+    ...electronBuilderArgs(builderArgs, box)
   ])
 }
 
@@ -132,6 +154,7 @@ module.exports = {
   electronBuilderArgs,
   finalVerifyCaptureSnapshots,
   hasExplicitPublishArg,
+  parseDistRequest,
   shouldDeferRuntimeSmoke,
   spawnOptions
 }

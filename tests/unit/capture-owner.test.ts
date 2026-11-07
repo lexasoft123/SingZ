@@ -990,6 +990,77 @@ describe('CaptureOwner', () => {
     expect(malformedOwner.cancel(5, '52')).toEqual({ ok: true, cancelled: false })
   })
 
+  it('refreshes an ALSA capability cache that retained a transient busy FLOW 8 output probe', () => {
+    const binding = fakeBinding()
+    const base = binding.audioHostDevices('alsa')
+    const ready = { ...base, devices: base.devices.map(device => ({
+      ...device, inputChannels: 10, outputChannels: 4,
+      inputChannelLabels: Array.from({ length: 10 }, (_, index) => `Input ${index + 1}`),
+      outputChannelLabels: ['USB 1', 'USB 2', 'USB 3', 'USB 4']
+    })) }
+    let cached = { ...ready, devices: ready.devices.map(device => ({
+      ...device, outputChannels: 0, outputChannelLabels: [] as string[]
+    })) }
+    const inventory = vi.fn(() => cached)
+    const refresh = vi.fn(() => { cached = ready; return { ok: true } })
+    binding.audioHostDevices = inventory
+    binding.refreshSharedAudioInventory = refresh
+
+    expect(new CaptureOwner(binding).hostDevices('alsa', 'linux')).toMatchObject({
+      ok: true, provider: 'alsa', devices: [{ inputChannels: 10, outputChannels: 4 }]
+    })
+    expect(refresh).toHaveBeenCalledOnce()
+    expect(inventory).toHaveBeenCalledTimes(2)
+    expect(refresh.mock.invocationCallOrder[0]).toBeGreaterThan(inventory.mock.invocationCallOrder[0])
+    expect(refresh.mock.invocationCallOrder[0]).toBeLessThan(inventory.mock.invocationCallOrder[1])
+  })
+
+  it('does not refresh healthy ALSA outputs, capture-only endpoints, or other providers', () => {
+    for (const kind of ['healthy', 'capture-only', 'other-platform'] as const) {
+      const binding = fakeBinding()
+      const provider = kind === 'other-platform' ? 'coreaudio' : 'alsa'
+      const base = binding.audioHostDevices(provider)
+      const value = kind === 'healthy' ? base : { ...base, devices: base.devices.map(device => ({
+        ...device, outputChannels: 0, outputChannelLabels: [],
+        direction: kind === 'capture-only' ? 'input' as const : 'duplex' as const
+      })) }
+      binding.audioHostDevices = vi.fn(() => value)
+      binding.refreshSharedAudioInventory = vi.fn(() => ({ ok: true }))
+      expect(new CaptureOwner(binding).hostDevices(provider, kind === 'other-platform' ? 'darwin' : 'linux').ok).toBe(true)
+      expect(binding.refreshSharedAudioInventory).not.toHaveBeenCalled()
+      expect(binding.audioHostDevices).toHaveBeenCalledOnce()
+    }
+  })
+
+  it('bounds the incomplete ALSA retry and validates its refreshed response', () => {
+    for (const malformed of [false, true]) {
+      const binding = fakeBinding()
+      const base = binding.audioHostDevices('alsa')
+      const busy = { ...base, devices: base.devices.map(device => ({
+        ...device, outputChannels: 0, outputChannelLabels: []
+      })) }
+      const refreshed = malformed ? { ...busy, devices: [{ invalid: true }] } : busy
+      binding.audioHostDevices = vi.fn().mockReturnValueOnce(busy).mockReturnValue(refreshed)
+      binding.refreshSharedAudioInventory = vi.fn(() => ({ ok: true }))
+      const result = new CaptureOwner(binding).hostDevices('alsa', 'linux')
+      expect(result.ok).toBe(!malformed)
+      if (!malformed) expect(result.devices[0].outputChannels).toBe(0)
+      expect(binding.refreshSharedAudioInventory).toHaveBeenCalledOnce()
+      expect(binding.audioHostDevices).toHaveBeenCalledTimes(2)
+    }
+  })
+
+  it('keeps older binding compatibility when an inventory refresh export is absent', () => {
+    const binding = fakeBinding()
+    const base = binding.audioHostDevices('alsa')
+    binding.audioHostDevices = vi.fn(() => ({ ...base, devices: base.devices.map(device => ({
+      ...device, outputChannels: 0, outputChannelLabels: []
+    })) }))
+    delete (binding as Partial<NativeCaptureBinding>).refreshSharedAudioInventory
+    expect(new CaptureOwner(binding).hostDevices('alsa', 'linux').ok).toBe(true)
+    expect(binding.audioHostDevices).toHaveBeenCalledOnce()
+  })
+
   it('exposes exact HAL inventory and mints monotonic monitor generations in main', () => {
     const binding = fakeBinding()
     const owner = new CaptureOwner(binding)

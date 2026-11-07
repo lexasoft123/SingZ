@@ -8,18 +8,19 @@ import { log } from './log'
 import { t } from '../shared/i18n'
 import { onChildSettled } from './child-exit'
 import { VOCAL_MODEL_FILE } from './vocal-model'
+import { productProfileDir } from '../shared/product-identity'
 
 /**
- * Shared local model cache, identical for every way the app runs (dev,
- * packaged, tests) so weights download exactly once. Override: SINGZ_MODELS_DIR.
+ * Product-local model cache for dev, packaged and test runs. Override:
+ * SINGZ_MODELS_DIR to share or relocate it explicitly.
  */
 export function modelsDir(): string {
-  return process.env.SINGZ_MODELS_DIR ?? join(app.getPath('appData'), 'SingZ', 'models')
+  return process.env.SINGZ_MODELS_DIR ?? join(app.getPath('appData'), productProfileDir(process.env.SINGZ_SURFACE), 'models')
 }
 
 /** Optional GPU splitter pack (relocatable Python + torch/MPS + demucs). */
 export function packDir(): string {
-  return process.env.SINGZ_PACK_DIR ?? join(app.getPath('appData'), 'SingZ', 'gpu-splitter')
+  return process.env.SINGZ_PACK_DIR ?? join(app.getPath('appData'), productProfileDir(process.env.SINGZ_SURFACE), 'gpu-splitter')
 }
 
 export function packPython(root = packDir()): string {
@@ -721,10 +722,10 @@ export async function restoreInterruptedPackSwap(dir = packDir()): Promise<void>
     // update — when they most need it to start.
     log('models', `could not settle an interrupted pack update: ${String(err)}`, 'warn')
   }
-  // `${dir}.incoming` is deliberately NOT swept: packDir() is shared by every
-  // userData identity on this machine, so it may be another instance's live
-  // staging directory mid-unpack. swapInVerifiedPack clears it before its own
-  // download, which reclaims a genuinely stale one without racing anybody.
+  // `${dir}.incoming` is deliberately NOT swept: another instance using this
+  // product's packDir() (or an explicit shared override) may own a live staging
+  // directory mid-unpack. swapInVerifiedPack clears it before its own download,
+  // which reclaims a genuinely stale one without racing anybody.
 }
 
 export class ModelManager {

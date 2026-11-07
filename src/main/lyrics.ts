@@ -40,6 +40,7 @@ import {
 } from './models'
 import { projectLyricsPath } from './projects'
 import { hashFile } from './separation'
+import { parseStrictLyricsCache } from '../shared/strict-lyrics'
 
 /** Recorded in lyrics.json so a re-listen can tell which engine wrote a line. */
 const QWEN_ENGINE_ID = 'qwen3-asr-1.7b'
@@ -392,6 +393,19 @@ export class Transcriber {
       }
     } catch {
       return null
+    }
+  }
+
+  async readCached(songPath: string): Promise<import('../shared/types').CachedLyricsResult> {
+    try {
+      const raw = JSON.parse(await readFile(await this.lyricsFile(songPath), 'utf8')) as unknown
+      const cached = parseStrictLyricsCache(raw)
+      return cached ? { ok: true, cached: true, ...cached } : { ok: true, cached: false }
+    } catch (error) {
+      if (error instanceof SyntaxError || (error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { ok: true, cached: false }
+      }
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
   }
 

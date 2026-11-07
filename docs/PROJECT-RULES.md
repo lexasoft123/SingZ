@@ -96,6 +96,11 @@ same diagnosis. Progress is taken from the driver's own output (the arming
 patches `console.log`), so a new driver needs no watchdog calls, only the
 arming line — and `tests/unit/e2e-watchdog.test.ts` refuses one that skips it.
 
+Playwright predicates passed to `waitForFunction` must be synchronous with the
+pinned runner: a returned Promise is itself truthy, even when it resolves to
+false. For IPC or HTTP readback, use a bounded Node-side poll that awaits each
+result, then assert the authoritative state.
+
 UI or engine changes are verified by driving the real app with
 `playwright-core`'s `_electron` (session drivers live in the scratchpad, never
 in the repo; permanent harnesses are `tests/e2e/win-smoke.cjs` (run by
@@ -452,6 +457,11 @@ was driven; the gotchas that follow from it are below.
   `npm run dev`/`npx electron .` → "singz"; packaged → "SingZ". Caches differ
   per identity — shared things (model weights, GPU pack) deliberately live in
   `~/Library/Application Support/SingZ/` via `modelsDir()`/`packDir()`.
+  The dedicated SingZ Box package selects its product before importing main
+  services and uses `appData/SingZ Box` for preferences, Chromium sessions,
+  models and packs, plus `Documents/SingZ Box` for projects. It does not adopt
+  Desktop state. Explicit cache/library overrides can intentionally share data;
+  see [Box packaging](specs/singz-box/packaging.md).
 - **Never `fetch()` custom protocols from `file://` pages** — blocked in prod
   builds. Audio bytes go over IPC (`media:read`).
 - **Mobile stems must be freed explicitly — GC is far too late** — decoded

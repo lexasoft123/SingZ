@@ -197,8 +197,9 @@ describe('Electron capture addon build', () => {
     expect(main).toContain('if (isMainFrame) gone()')
     expect(main).toContain("ipcMain.handle('audio-host:monitor-begin'")
     expect(main).toContain("ipcMain.handle('audio-host:monitor-end'")
-    expect(main).toContain("app.on('before-quit', () => {")
-    expect(main).toContain('captureOwner.stop()')
+    const quitHandler = main.slice(main.indexOf("app.on('before-quit',"), main.indexOf("app.on('window-all-closed',"))
+    expect(quitHandler).toMatch(/app\.on\('before-quit',\s*\([^)]*\)\s*=>\s*\{/)
+    expect(quitHandler).toContain('captureOwner.stop()')
   })
 
   it('keeps only the latest scalar window instead of a deep TSFN FIFO', () => {

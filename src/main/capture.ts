@@ -1404,39 +1404,52 @@ export class CaptureOwner {
       }
     }
     try {
-      const raw = binding.audioHostDevices(provider) as {
-        ok?: unknown
-        provider?: unknown
-        defaultInputUid?: unknown
-        defaultOutputUid?: unknown
-        devices?: unknown
-        error?: unknown
-      }
-      if (
-        raw.ok !== true || raw.provider !== exposedProvider || typeof raw.defaultInputUid !== 'string' ||
-        typeof raw.defaultOutputUid !== 'string' || !Array.isArray(raw.devices) ||
-        !raw.devices.every(validHostDevice)
-      ) {
+      const readInventory = (): DesktopAudioHostInventoryResult => {
+        const raw = binding.audioHostDevices(provider) as {
+          ok?: unknown
+          provider?: unknown
+          defaultInputUid?: unknown
+          defaultOutputUid?: unknown
+          devices?: unknown
+          error?: unknown
+        }
+        if (
+          raw.ok !== true || raw.provider !== exposedProvider || typeof raw.defaultInputUid !== 'string' ||
+          typeof raw.defaultOutputUid !== 'string' || !Array.isArray(raw.devices) ||
+          !raw.devices.every(validHostDevice)
+        ) {
+          return {
+            ok: false,
+            platform: exposedPlatform,
+            provider: exposedProvider,
+            defaultInputUid: '',
+            defaultOutputUid: '',
+            devices: [],
+            error: typeof raw.error === 'string'
+              ? raw.error
+              : t('main.error.nativeAudioHostInvalidInventory')
+          }
+        }
         return {
-          ok: false,
+          ok: true,
           platform: exposedPlatform,
           provider: exposedProvider,
-          defaultInputUid: '',
-          defaultOutputUid: '',
-          devices: [],
-          error: typeof raw.error === 'string'
-            ? raw.error
-            : t('main.error.nativeAudioHostInvalidInventory')
+          defaultInputUid: raw.defaultInputUid,
+          defaultOutputUid: raw.defaultOutputUid,
+          devices: raw.devices
         }
       }
-      return {
-        ok: true,
-        platform: exposedPlatform,
-        provider: exposedProvider,
-        defaultInputUid: raw.defaultInputUid,
-        defaultOutputUid: raw.defaultOutputUid,
-        devices: raw.devices
+      const inventory = readInventory()
+      // Chromium may briefly own an ALSA output during the initial probe.
+      // Refresh its cached zero bound once; never invent missing capabilities.
+      if (platform === 'linux' && exposedProvider === 'alsa' && inventory.ok &&
+          inventory.devices.some(device => device.outputChannels === 0 &&
+            (device.direction === 'duplex' || device.direction === 'output')) &&
+          typeof binding.refreshSharedAudioInventory === 'function') {
+        binding.refreshSharedAudioInventory()
+        return readInventory()
       }
+      return inventory
     } catch (error) {
       return {
         ok: false,

@@ -1,0 +1,17 @@
+extends: electron-builder.yml
+appId: com.lexasoft.singz.box
+productName: SingZ Box
+extraMetadata:
+  name: singz-box
+  singzProduct: box
+  desktopName: singz-box.desktop
+directories:
+  output: dist/box
+files:
+  - '!electron-builder.box.yml'
+artifactName: SingZ-Box-${version}-linux-${arch}.${ext}
+publish: null
+linux:
+  executableName: singz-box
+deb:
+  packageName: singz-box

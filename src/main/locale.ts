@@ -15,6 +15,9 @@ import { vi } from '../shared/i18n/vi'
 import { fil } from '../shared/i18n/fil'
 import { ms } from '../shared/i18n/ms'
 import { zhTW } from '../shared/i18n/zh-TW'
+import { box as enBox } from '../shared/i18n/en/box'
+import { box as ruBox } from '../shared/i18n/ru/box'
+import { box as zhBox } from '../shared/i18n/zh-CN/box'
 import { readSettings, writeSettings } from './settings'
 import { log } from './log'
 import type { LocaleState } from '../shared/types'
@@ -86,6 +89,9 @@ export function applyLocale(): Locale {
 }
 
 export function registerLocale(): void {
+  register('en', enBox)
+  register('ru', ruBox)
+  register('zh-CN', zhBox)
   applyLocale()
   const s = localeState()
   log('app', `language: ${s.language} → ${s.locale} (system ${s.systemLocale})`)

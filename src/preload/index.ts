@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
+import type { BoxAPI } from '../shared/box-contract'
 import type {
   GlassVerdict,
   LogEntry,
@@ -9,7 +10,33 @@ import type {
   SyncStatus
 } from '../shared/types'
 
+const box: BoxAPI = {
+  getState: () => ipcRenderer.invoke('box:state-get'),
+  setPreferences: (preferences) => ipcRenderer.invoke('box:preferences-set', preferences),
+  saveQueue: (queue) => ipcRenderer.invoke('box:queue-save', queue),
+  platformSnapshot: () => ipcRenderer.invoke('box:platform-snapshot'),
+  platformCommand: (command) => ipcRenderer.invoke('box:platform-command', command),
+  storageSnapshot: () => ipcRenderer.invoke('box:storage-snapshot'),
+  removeCachedProject: (dir) => ipcRenderer.invoke('box:cache-remove', dir),
+  diagnostics: () => ipcRenderer.invoke('box:diagnostics'),
+  phoneStart: () => ipcRenderer.invoke('box:phone-start'),
+  phoneState: () => ipcRenderer.invoke('box:phone-state'),
+  phoneApprove: (requestId) => ipcRenderer.invoke('box:phone-approve', requestId),
+  phoneDeny: (requestId) => ipcRenderer.invoke('box:phone-deny', requestId),
+  phoneRevoke: (sessionId) => ipcRenderer.invoke('box:phone-revoke', sessionId),
+  phoneStop: () => ipcRenderer.invoke('box:phone-stop'),
+  publishControllerSnapshot: (snapshot) => ipcRenderer.invoke('box:controller-publish', snapshot),
+  respondControllerCommand: (id, result) => ipcRenderer.invoke('box:controller-respond', id, result),
+  isControllerCommandActive: (id) => ipcRenderer.invoke('box:controller-active', id),
+  onControllerCommand: (callback) => {
+    const listener = (_event: IpcRendererEvent, envelope: import('../shared/box-contract').BoxControllerEnvelope): void => callback(envelope)
+    ipcRenderer.on('box:controller-command', listener)
+    return () => ipcRenderer.removeListener('box:controller-command', listener)
+  }
+}
+
 const api: SingzApi = {
+  box,
   pathForFile: (file) => webUtils.getPathForFile(file),
 
   getSplitterMode: () => ipcRenderer.invoke('splitter:mode'),
@@ -36,6 +63,14 @@ const api: SingzApi = {
       ipcRenderer.removeListener('win:maximized', listener)
     }
   },
+  onBoxCloseRequest: (cb) => {
+    const listener = (): void => cb()
+    ipcRenderer.on('box:close-request', listener)
+    return () => {
+      ipcRenderer.removeListener('box:close-request', listener)
+    }
+  },
+  boxCloseReady: () => ipcRenderer.send('box:close-ready'),
 
   readAudio: (path) => ipcRenderer.invoke('media:read', path),
   beginStemExport: () => ipcRenderer.invoke('stems:export-begin'),
@@ -103,6 +138,8 @@ const api: SingzApi = {
 
   getLyrics: (songPath, durationSec, allowDownload, prefer) =>
     ipcRenderer.invoke('lyrics:get', songPath, durationSec, Boolean(allowDownload), prefer ?? 'auto'),
+
+  getCachedLyrics: (songPath) => ipcRenderer.invoke('lyrics:get-cached', songPath),
 
   alignCaps: () => ipcRenderer.invoke('lyrics:align-caps'),
 

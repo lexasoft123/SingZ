@@ -1,4 +1,5 @@
 import type { TrainingCompletionReceipt, TrainingPreferences, TrainingProgress } from './training-progress'
+import type { BoxAPI } from './box-contract'
 import type { NativeGraphDocumentProjection } from './graph-document'
 
 import type { ReleaseNotes } from './release-highlights'
@@ -427,6 +428,19 @@ export type LyricsResult =
       needsModel?: { sizeMb: number; what?: 'speech' | 'aligner' }
       error: string
     }
+
+export type CachedLyricsResult =
+  | {
+      ok: true
+      cached: true
+      lines: LyricLine[]
+      source: LyricsSource
+      credit?: string
+      aligned?: boolean
+      check?: AlignCheck
+    }
+  | { ok: true; cached: false }
+  | { ok: false; error: string }
 
 /**
  * ML beat analysis from the splitter pack's Beat This! runner: peak-picked
@@ -1247,6 +1261,7 @@ export interface LocaleState {
 }
 
 export interface SingzApi {
+  box: BoxAPI
   /** True only when main was launched with SINGZ_E2E_HOOKS=1: the renderer
    * then publishes `window.__test` (engine, transport, metronome, training,
    * open/back) for the desktop player-session driver. Never set in a
@@ -1263,6 +1278,9 @@ export interface SingzApi {
   winClose: () => void
   winIsMaximized: () => Promise<boolean>
   onWinMaximized: (cb: (maximized: boolean) => void) => () => void
+  /** Box-only normal-close request; other surfaces never receive it. */
+  onBoxCloseRequest(cb: () => void): () => void
+  boxCloseReady(): void
   /** Resolve the on-disk path of a dropped/picked File (empty string if none). */
   pathForFile(file: File): string
   /** Read a registered audio file's bytes (source song or produced stem). */
@@ -1385,6 +1403,9 @@ export interface SingzApi {
     allowDownload?: boolean,
     prefer?: 'auto' | 'transcribe' | 'align' | 'precise'
   ): Promise<LyricsResult>
+  /** Read only an existing validated lyrics cache. Never searches, downloads,
+   * transcribes, aligns, or writes the cache. */
+  getCachedLyrics(songPath: string): Promise<CachedLyricsResult>
   /** Whether the precise (CTC forced-alignment) aligner can run on this machine. */
   alignCaps(): Promise<{ precise: boolean }>
   /** Manual LRCLIB search for the variant picker. */

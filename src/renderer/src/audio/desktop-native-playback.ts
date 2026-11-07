@@ -182,6 +182,8 @@ export interface DesktopNativePlaybackPrepare {
   preferredOutputUid?: string
   preferredOutputChannels?: number[]
   graphDocument?: ParsedGraphDocument
+  /** In-memory policy resolved from the engine request; Desktop default is undefined. */
+  streamLanes?: boolean
 }
 
 export interface DesktopNativePlaybackLease {
@@ -230,6 +232,9 @@ export interface DesktopNativePlaybackEngineRequest {
   nativeAudioProvider: Extract<DesktopPlaybackProvider, 'wasapi' | 'asio'>
   /** Full verified renderer document; opaque fields never cross native IPC. */
   graphDocument: ParsedGraphDocument | null
+  /** Optional in-memory surface policy, absent for ordinary Desktop. */
+  nativePlaybackEnabled?: boolean
+  streamLanes?: boolean
 }
 
 /** Renderer-engine adapter kept in this lazy chunk so the ordinary Web Audio
@@ -260,7 +265,7 @@ export async function decideDesktopNativePlayback(
     return null
   }
   const decision = selectDesktopPlaybackBackend(platform, {
-    enabled: desktopNativePlaybackPreferred(platform),
+    enabled: desktopNativePlaybackPreferred(platform, request.nativePlaybackEnabled),
     playbackRate: request.playbackRate,
     transpose: request.transpose,
     training: request.training,
@@ -290,6 +295,7 @@ export async function decideDesktopNativePlayback(
     transpose: request.transpose,
     training: request.training,
     loop: request.loop,
+    streamLanes: request.streamLanes,
     ...(request.graphDocument ? { graphDocument: request.graphDocument } : {})
   }
 }
@@ -1304,7 +1310,7 @@ export class DesktopNativePlaybackClient {
       // silent mismatch. On by default on macOS and Windows, as on the
       // phones (see the preference for the Windows read-path history); the
       // core falls back to decoding any lane it cannot stream.
-      streamLanes: desktopStreamLanesPreferred(detectedDesktopPlatform())
+      streamLanes: desktopStreamLanesPreferred(detectedDesktopPlatform(), request.streamLanes)
     }
   }
 
