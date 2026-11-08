@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
+import { boxAudioPersistentLifetime } from '../shared/box-audio'
 import type { BoxAPI } from '../shared/box-contract'
 import type {
   GlassVerdict,
@@ -19,6 +20,10 @@ const box: BoxAPI = {
   storageSnapshot: () => ipcRenderer.invoke('box:storage-snapshot'),
   removeCachedProject: (dir) => ipcRenderer.invoke('box:cache-remove', dir),
   diagnostics: () => ipcRenderer.invoke('box:diagnostics'),
+  retainedPlaybackSnapshot: () => ipcRenderer.invoke('box:retained-playback-snapshot'),
+  stopRetainedPlayback: expected => ipcRenderer.invoke('box:retained-playback-stop', expected),
+  routingSnapshot: () => ipcRenderer.invoke('box:routing-snapshot'),
+  routingEdit: edit => ipcRenderer.invoke('box:routing-edit', edit),
   phoneStart: () => ipcRenderer.invoke('box:phone-start'),
   phoneState: () => ipcRenderer.invoke('box:phone-state'),
   phoneApprove: (requestId) => ipcRenderer.invoke('box:phone-approve', requestId),
@@ -36,6 +41,7 @@ const box: BoxAPI = {
 }
 
 const api: SingzApi = {
+  boxAudioPersistent: boxAudioPersistentLifetime(process.env),
   box,
   pathForFile: (file) => webUtils.getPathForFile(file),
 

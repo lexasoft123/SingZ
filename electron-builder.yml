@@ -168,6 +168,8 @@ linux:
       filter: ['singz-analyze*', 'llama-server*', 'crispasr*']
     - from: third_party/notices/lyrics-engines
       to: open-source-notices/lyrics-engines
+    - from: third_party/loopz/vendor/nlohmann/LICENSE.MIT
+      to: open-source-notices/nlohmann-json-LICENSE.MIT
     - from: vendor/packs/gpu-splitter-linux-${arch}.tar.gz
       to: engines/gpu-splitter-linux-${arch}.tar.gz
     - from: build/capture-package/linux-${arch}

@@ -1,10 +1,11 @@
-import { useEffect, useLayoutEffect, useMemo, useReducer, useRef } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { Button } from '@singz/ui'
+import type { BoxMetronomeOverride } from '../../../shared/box-contract'
 import type {
   DesktopAudioHostDevice,
   DesktopAudioHostInventoryResult
 } from '../../../shared/types'
-import { tSettings } from './settings-i18n'
+import { tSettings, tMicrophone } from './settings-i18n'
 import {
   formatSampleRate,
   formatSampleRateRanges,
@@ -14,9 +15,18 @@ import {
   outputDevices,
   settingsReducer
 } from './settings-model'
+import { RoutingSettings } from './RoutingSettings'
+import { physicalInputDevices, physicalChannels, physicalInputLevel, physicalInventoryIssue, selectPhysicalChannel, usePhysicalRoutingPreview, type PhysicalSelection, type RoutingPreview } from './physical-inputs-model'
+import { microphoneChannelLevel, type BoxMicrophones, type MicrophoneSnapshot } from './microphones'
 import './settings.css'
 
 export interface BoxSettingsProps {
+  metronomeOverride?: BoxMetronomeOverride | null
+  metronomeBusy?: boolean
+  metronomeError?: string | null
+  onMetronomeOverride?: (mode: BoxMetronomeOverride) => Promise<void>
+  microphones?: BoxMicrophones
+  microphoneSnapshot?: MicrophoneSnapshot
   inventory: DesktopAudioHostInventoryResult | null
   loading: boolean
   error: string | null
@@ -38,6 +48,9 @@ function errorText(error: unknown): string {
 }
 
 export function Settings({
+  metronomeOverride = null, metronomeBusy = false, metronomeError = null, onMetronomeOverride,
+  microphones,
+  microphoneSnapshot,
   inventory,
   loading,
   error,
@@ -49,6 +62,10 @@ export function Settings({
   canApplyOutput = true,
   applyUnavailableReason = null
 }: BoxSettingsProps): React.JSX.Element {
+  const [routingOpen, setRoutingOpen] = useState(false)
+  const persistent = typeof window !== 'undefined' && window.singz?.boxAudioPersistent === true
+  const physical = usePhysicalRoutingPreview(persistent)
+  const [physicalSelection, setPhysicalSelection] = useState<PhysicalSelection>(null)
   const outputs = useMemo(() => outputDevices(inventory), [inventory])
   const inputs = useMemo(() => inputDevices(inventory), [inventory])
   const outputUids = useMemo(() => outputs.map(device => device.uid), [outputs])
@@ -71,6 +88,7 @@ export function Settings({
   }, [])
 
   const pending = state.pendingOutputUid !== null
+  const microphonePending = microphoneSnapshot?.phase === 'starting' || microphoneSnapshot?.phase === 'stopping'
   const issue = outputApplyIssue({
     uid: state.draftOutputUid,
     committedOutputUid: state.committedOutputUid,
@@ -144,14 +162,15 @@ export function Settings({
         <p>{tSettings('box.settings.subtitle')}</p>
       </div>
       <div className="settings-heading-actions">
-        <Button data-settings-refresh disabled={pending || loading} onClick={onRefresh}>
+        <Button disabled={pending || !persistent} onClick={() => setRoutingOpen(value => !value)}>{routingOpen ? 'Devices' : 'Routing'}</Button>
+        <Button data-settings-refresh disabled={routingOpen || pending || loading} onClick={() => { onRefresh(); void microphones?.refreshDevices(); void physical.controller.refresh() }}>
           {loading ? tSettings('box.settings.refreshing') : tSettings('box.settings.refresh')}
         </Button>
-        <Button data-settings-back disabled={pending} onClick={onBack}>← {tSettings('box.settings.back')}</Button>
+        <Button data-settings-back disabled={pending || microphonePending || metronomeBusy} onClick={onBack}>← {tSettings('box.settings.back')}</Button>
       </div>
     </div>
 
-    <div className="settings-content">
+    {routingOpen ? <RoutingSettings preview={physical.preview} controller={physical.controller} /> : <><div className="settings-content">
       <section className="settings-panel settings-output-panel" aria-labelledby="box-settings-outputs">
         <div className="settings-panel-heading">
           <div>
@@ -174,6 +193,21 @@ export function Settings({
           <p>{tSettings('box.settings.applyFailed', { error: state.error.message })}</p>
         </div>}
 
+        <section className="settings-global-overrides" aria-label={tSettings('box.settings.globalOverrides')}>
+          <h3>{tSettings('box.settings.globalOverrides')} · {tSettings('box.settings.metronome')}</h3>
+          <p>{tSettings('box.settings.metronomePause')}</p>
+          <div role="radiogroup" aria-label={tSettings('box.settings.metronome')}>
+            {(['song', 'off'] as const).map(mode => <Button key={mode} role="radio"
+              data-metronome-override={mode} aria-checked={metronomeOverride === mode}
+              disabled={metronomeBusy || pending || !onMetronomeOverride}
+              onClick={() => { void onMetronomeOverride?.(mode).catch(() => undefined) }}>
+              {tSettings(mode === 'off' ? 'box.settings.metronomeOff' : 'box.settings.metronomeSong')}
+            </Button>)}
+          </div>
+          {metronomeBusy && <p role="status">{tSettings('box.settings.metronomeApplying')}</p>}
+          {!metronomeBusy && metronomeOverride === null && <p>{tSettings('box.settings.metronomeUnknown')}</p>}
+          {metronomeError && <p role="alert">{metronomeError}</p>}
+        </section>
         <div className="settings-output-list" role="radiogroup" aria-label={tSettings('box.settings.outputList')}>
           {outputs.map(device => {
             const draft = state.draftOutputUid === device.uid
@@ -216,7 +250,12 @@ export function Settings({
         </div>
       </section>
 
-      <aside className="settings-panel settings-input-panel" aria-labelledby="box-settings-inputs">
+      {persistent ? <PhysicalInputsPanel preview={physical.preview} selection={microphoneSnapshot ? microphoneSnapshot.selection : physicalSelection}
+        microphones={microphones} microphoneSnapshot={microphoneSnapshot}
+        onSelect={(uid, channel) => {
+          const selected = selectPhysicalChannel(physical.preview.state, uid, channel)
+          if (selected) { if (microphones) microphones.select(selected); else setPhysicalSelection(selected) }
+        }} /> : <aside className="settings-panel settings-input-panel" aria-labelledby="box-settings-inputs">
         <div className="settings-panel-heading">
           <div>
             <h2 id="box-settings-inputs">{tSettings('box.settings.inputs')}</h2>
@@ -269,7 +308,7 @@ export function Settings({
           </div>}
         </div>
         <p className="settings-mic-setup">{tSettings('box.settings.microphoneSetup')}</p>
-      </aside>
+      </aside>}
     </div>
 
     <div className="settings-action-band">
@@ -278,7 +317,7 @@ export function Settings({
         <Button
           data-settings-cancel
           disabled={pending}
-          onClick={() => dispatch({ type: 'cancel', outputUids: knownOutputUids })}
+          onClick={() => { dispatch({ type: 'cancel', outputUids: knownOutputUids }); microphones?.resetSelection() }}
         >
           {tSettings('box.settings.cancel')}
         </Button>
@@ -286,7 +325,7 @@ export function Settings({
           {state.phase === 'applying' ? tSettings('box.settings.applying') : tSettings('box.settings.apply')}
         </Button>
       </div>
-    </div>
+    </div></>}
 
     <footer className="settings-footer">
       <span className="box-key">↑ ↓ ← →</span><span>{tSettings('box.settings.hintMove')}</span>
@@ -294,4 +333,72 @@ export function Settings({
       <span className="box-key">Back</span><span>{tSettings('box.settings.back')}</span>
     </footer>
   </main>
+}
+
+/** Physical capture inventory is independent of the virtual song producer.
+ * Selecting a row only selects a channel; it never opens or wires a device. */
+export function PhysicalInputsPanel({ preview, selection, onSelect, microphones, microphoneSnapshot }: {
+  microphones?: BoxMicrophones
+  microphoneSnapshot?: MicrophoneSnapshot
+  preview: RoutingPreview
+  selection: PhysicalSelection
+  onSelect: (uid: string, channel: number) => void
+}): React.JSX.Element {
+  const devices = physicalInputDevices(preview.state)
+  const issue = preview.error || physicalInventoryIssue(preview.state)
+  const microphonePending = microphoneSnapshot?.phase === 'starting' || microphoneSnapshot?.phase === 'stopping'
+  const active = microphoneSnapshot?.active
+  return <aside className="settings-panel settings-input-panel" aria-labelledby="box-settings-physical-inputs">
+    <div className="settings-panel-heading"><div>
+      <h2 id="box-settings-physical-inputs">{tMicrophone('box.microphones.inputsTitle')}</h2>
+      <p>{tMicrophone('box.microphones.interfaceHelp')}</p>
+    </div></div>
+    {issue && <p className="settings-input-status" role="status">{issue}</p>}
+    <div className="settings-input-list" aria-label={tMicrophone('box.microphones.physicalChannels')}>
+      {devices.map(device => <section key={device.uid} data-settings-physical-device={device.uid}>
+        <div className="settings-input-name"><strong>{device.name}</strong>
+          <span>{tSettings('box.settings.inputChannels', { count: device.inputChannels })}{device.rate ? ` · ${formatSampleRate(device.rate)}` : ''}</span>
+        </div>
+        <div role="radiogroup" aria-label={tMicrophone('box.microphones.deviceChannelGroup', { device: device.name })}>
+          {physicalChannels(device).map(({ channel, name }) => {
+            const privateLevel = microphoneChannelLevel(microphoneSnapshot, device.uid, channel)
+            const level = active?.uid === device.uid
+              ? privateLevel === null ? null : { peak: privateLevel, rms: privateLevel }
+              : physicalInputLevel(preview, device.uid, channel)
+            const selected = selection?.uid === device.uid && selection.channel === channel
+            return <Button key={channel} className="settings-physical-channel" role="radio" aria-checked={selected}
+              disabled={!!issue || preview.pending || microphonePending} data-settings-input={device.uid} data-input-channel={channel} data-remote-focus
+              onClick={() => onSelect(device.uid, channel)}>
+              <span className="settings-channel-name">{channel + 1}. {name}</span>
+              {level ? <span className="settings-input-meter" role="meter" aria-label={tMicrophone('box.microphones.namedLevel', { name })}
+                aria-valuemin={0} aria-valuemax={1} aria-valuenow={Math.min(1, level.peak)}
+                aria-valuetext={level.peak > 1 ? tMicrophone('box.microphones.clipping') : tMicrophone('box.microphones.percent', { value: Math.round(level.peak * 100) })}>
+                <span style={{ transform: `scaleX(${Math.min(1, level.peak)})` }} />
+              </span> : <span className="settings-channel-unavailable">{tMicrophone('box.microphones.levelUnavailable')}</span>}
+            </Button>
+          })}
+        </div>
+        {device.inputChannels > 64 && <p className="settings-input-status">{tMicrophone('box.microphones.limit64')}</p>}
+      </section>)}
+      {!issue && devices.length === 0 && <p className="settings-input-status">{tMicrophone('box.microphones.noPhysical')}</p>}
+    </div>
+    {microphones && microphoneSnapshot ? <div className="settings-analysis-controls">
+      <p>{microphoneSnapshot.phase === 'running' && active
+        ? tMicrophone('box.microphones.running', { device: active.label, channel: active.channel + 1 })
+        : microphoneSnapshot.phase === 'starting' ? tMicrophone('box.microphones.starting')
+        : microphoneSnapshot.phase === 'stopping' ? tMicrophone('box.microphones.stopping')
+        : microphoneSnapshot.capability === 'unavailable' ? tMicrophone('box.microphones.unavailable')
+        : microphoneSnapshot.capability === 'unknown' ? tMicrophone('box.microphones.checking')
+        : tMicrophone('box.microphones.select')}</p>
+      {(microphoneSnapshot.error || microphoneSnapshot.inventoryError) && <p role="alert">{microphoneSnapshot.error || microphoneSnapshot.inventoryError}</p>}
+      <div className="routing-actions">
+        <Button data-microphone-start disabled={!selection || !!issue || !!microphoneSnapshot.inventoryError || microphonePending || (microphoneSnapshot.phase === 'running' && active?.uid === selection?.uid && active?.channel === selection?.channel) || microphoneSnapshot.capability !== 'available' || microphoneSnapshot.phase === 'uncertain'}
+          onClick={() => { void microphones.start() }}>{tMicrophone(active ? 'box.microphones.switch' : 'box.microphones.start')}</Button>
+        <Button data-microphone-stop disabled={microphoneSnapshot.phase === 'stopping' || (!active && microphoneSnapshot.phase !== 'uncertain' && microphoneSnapshot.phase !== 'starting')}
+          onClick={() => { void microphones.stop() }}>{tMicrophone('box.microphones.stop')}</Button>
+        <Button disabled={microphonePending} onClick={microphones.resetSelection}>{tMicrophone('box.microphones.cancel')}</Button>
+      </div>
+      <p className="settings-mic-setup">{tMicrophone('box.microphones.note')}</p>
+    </div> : <p className="settings-mic-setup">{tMicrophone('box.microphones.routeNote')}</p>}
+  </aside>
 }

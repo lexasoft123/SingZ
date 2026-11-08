@@ -139,3 +139,42 @@
 .settings-footer { display: flex; align-items: center; color: var(--sz-dim); font-size: 14px; }
 .settings-footer .box-key { margin-left: 18px; }
 .settings-footer .box-key:first-child { margin-left: 0; }
+
+.routing-panel { overflow: hidden; }
+.routing-list { overflow: auto; min-height: 0; padding: 4px; }
+.routing-route { padding: 16px; border-bottom: 1px solid var(--sz-line); }
+.routing-route h3 { margin: 0 0 12px; font-size: var(--box-section-size); }
+.routing-route p, .routing-status { color: var(--sz-dim); font-size: var(--box-label-size); }
+.routing-source, .routing-output { padding: 12px 0; }
+.routing-source strong, .routing-output strong { font-size: var(--box-row-size); }
+.routing-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.routing-actions .pill { min-height: var(--box-compact-height); font-size: var(--box-label-size); }
+.routing-actions .pill:focus-visible { outline: 3px solid var(--sz-accent); outline-offset: 3px; }
+
+/* Physical input channels share UIKit focus and a bounded, scrollable TV panel. */
+.settings-input-list > section { padding: 8px 0 16px; border-bottom: 1px solid var(--sz-line); }
+.settings-physical-channel.pill { width: 100%; min-height: var(--box-compact-height); padding: 8px 10px; margin-top: 4px; display: flex; gap: 12px; text-align: left; justify-content: space-between; }
+.settings-physical-channel[aria-checked="true"] { background: var(--sz-accent-soft); border-color: var(--sz-accent); }
+.settings-channel-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-input-meter { display: block; width: 120px; height: 8px; flex: 0 0 120px; overflow: hidden; background: var(--sz-line); border-radius: 4px; }
+.settings-input-meter > span { display: block; width: 100%; height: 100%; transform-origin: left; background: var(--sz-accent); }
+.settings-channel-unavailable, .settings-input-status { color: var(--sz-dim); font-size: var(--box-meta-size); }
+.settings-channel-unavailable { flex-shrink: 0; }
+.routing-input-levels { display: flex; gap: 16px; flex-wrap: wrap; }
+
+.settings-analysis-controls { padding-top: 12px; border-top: 1px solid var(--sz-line); font-size: var(--box-label-size); }
+.settings-analysis-controls > p { margin: 8px 0; }
+.player-meters > .player-microphone-row { display: contents; }
+.player-microphone-row > span:first-child { font: 11px/16px var(--sz-font-mono); color: var(--sz-dim); }
+.player-microphone-row > small { color: var(--sz-dim); font-size: 10px; line-height: 14px; }
+.player-microphone-level { width: 60px; height: 7px; overflow: hidden; background: var(--sz-line); border-radius: 3px; }
+.player-microphone-level > span { display: block; width: 100%; height: 100%; background: var(--sz-accent); transform-origin: left; }
+
+.settings-global-overrides { flex-shrink: 0; margin: 0 0 14px; padding-bottom: 14px; border-bottom: 1px solid var(--sz-line); }
+.settings-global-overrides h3 { margin: 0; font-size: var(--box-label-size); line-height: var(--box-label-line); }
+.settings-global-overrides p { margin: 6px 0; color: var(--sz-dim); font-size: 15px; line-height: 1.35; }
+.settings-global-overrides [role="radiogroup"] { display: flex; gap: 12px; margin-top: 10px; }
+.settings-global-overrides .pill { min-height: var(--box-compact-height); font-size: var(--box-label-size); }
+.settings-global-overrides [aria-checked="true"] { border-color: var(--sz-accent); background: var(--sz-accent-soft); }
+.settings-global-overrides [role="alert"] { color: var(--sz-danger); }
+.box-policy-startup { position: absolute; inset: 0; z-index: 40; display: grid; place-content: center; gap: 20px; padding: 120px; background: var(--sz-bg); font-size: var(--box-label-size); }

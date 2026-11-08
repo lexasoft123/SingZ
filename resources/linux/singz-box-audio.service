@@ -1,0 +1,20 @@
+[Unit]
+Description=SingZ Box persistent native audio host
+
+[Service]
+Type=simple
+ExecStart=/opt/singz-box/singz-box --box-audio-host --ozone-platform=headless
+Environment=SINGZ_SURFACE=box
+Environment=SINGZ_BOX_AUDIO_SOCKET=%t/singz-box-audio/control.sock
+Environment=ELECTRON_OZONE_PLATFORM_HINT=headless
+RuntimeDirectory=singz-box-audio
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=no
+UMask=0077
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=30
+KillMode=control-group
+
+[Install]
+WantedBy=default.target

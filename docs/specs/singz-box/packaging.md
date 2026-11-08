@@ -3,10 +3,13 @@
 SingZ Box has a separate Debian identity from SingZ Desktop:
 
 - Application ID: `com.lexasoft.singz.box`
-- Product and installation directory: `SingZ Box` and `/opt/SingZ Box`
+- Display name: `SingZ Box`
+- Filesystem product name and installation directory: `singz-box` and `/opt/singz-box`
 - Executable and Debian package: `singz-box`
 - Desktop entry: `singz-box.desktop`
-- Packaged metadata: `name: singz-box` and `singzProduct: box`
+- Packaged metadata: `name: singz-box`, `productName: SingZ Box` and `singzProduct: box`
+
+The builder uses `productName: singz-box` for its Debian installation path. Packaged Electron metadata and the desktop entry retain the display name `SingZ Box`; app ID, preferences and project directories remain unchanged.
 
 The dedicated executable reads the packaged product metadata and starts Box without a `--box` command-line argument. Desktop development and `npm run dist` keep their existing identity and behavior.
 
@@ -55,7 +58,7 @@ dpkg-deb -f "$artifact" Package Version Architecture
 dpkg-deb -c "$artifact"
 ```
 
-The package name must be `singz-box`. Its payload must include `/opt/SingZ Box/singz-box`, `/usr/share/applications/singz-box.desktop`, and product-specific icons under `/usr/share/icons/hicolor/*/apps/singz-box.*`. It must not replace Desktop's `/opt/SingZ` contents, `singz.desktop`, or `singz` icons.
+The package name must be `singz-box`. Its payload must include `/opt/singz-box/singz-box`, `/usr/share/applications/singz-box.desktop`, and product-specific icons under `/usr/share/icons/hicolor/*/apps/singz-box.*`. It must not replace Desktop's `/opt/SingZ` contents, `singz.desktop`, or `singz` icons.
 
 On an installed test system, separately verify the binary link and check that it resolves to the Box installation rather than Desktop:
 
@@ -63,7 +66,7 @@ On an installed test system, separately verify the binary link and check that it
 readlink -f /usr/bin/singz-box
 ```
 
-The result must be `/opt/SingZ Box/singz-box`. Also confirm that `/usr/bin/singz` and the Desktop icons have not been replaced. Launch `singz-box` normally; no profile flag is required.
+The result must be `/opt/singz-box/singz-box`. Also confirm that `/usr/bin/singz` and the Desktop icons have not been replaced. Launch `singz-box` normally; no profile flag is required.
 
 ## Packaging checks
 
@@ -74,3 +77,7 @@ node --test tests/tooling/box-package*.test.cjs
 ```
 
 The main build maps its `index` entry to `src/main/bootstrap.ts`. Consequently the packaged entry remains `out/main/index.js`; the bootstrap selects the profile and dynamically imports the application index as a chunk in that same directory. Renderer staging remains isolated from this main-process output.
+
+### Linux font fallback
+
+The Box Debian package depends on `fonts-noto-cjk` for Chinese labels and lyrics. The appliance runtime image must include that font as well: host font installation alone does not supply fonts inside a container. UIKit remains the primary font; CJK glyphs use the installed fallback. Qualify actual rendered Chinese text in the packaged app.

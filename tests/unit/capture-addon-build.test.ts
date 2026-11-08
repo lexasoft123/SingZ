@@ -54,6 +54,7 @@ const artifacts = require('../../scripts/capture-artifact.cjs') as {
   machCanonicalSha256(path: string): string
 }
 const captureBuilder = require('../../scripts/build-capture-addon.cjs') as {
+  captureBuildDirectory(root: string, target: string, override?: string): string
   findAddon(buildDir: string): string | null
 }
 const dist = require('../../scripts/dist.cjs') as {
@@ -99,6 +100,51 @@ const root = process.cwd()
 // bare \n, so normalize every read.
 const read = (path: string): string =>
   readFileSync(resolve(root, path), 'utf8').replaceAll('\r\n', '\n')
+
+describe('capture CMake build reuse', () => {
+  function fixture() {
+    const checkout = mkdtempSync(join(tmpdir(), 'singz-capture-build-path-'))
+    const build = join(checkout, 'build', 'native', 'qualified')
+    mkdirSync(build, { recursive: true })
+    writeFileSync(join(build, 'CMakeCache.txt'), `CMAKE_HOME_DIRECTORY:INTERNAL=${checkout}\n`)
+    return { checkout, build }
+  }
+  it('keeps the default path and accepts an existing same-checkout build by relative or absolute path', () => {
+    const { checkout, build } = fixture()
+    try {
+      expect(captureBuilder.captureBuildDirectory(checkout, 'linux-arm64')).toBe(join(checkout, 'build', 'capture-linux-arm64'))
+      expect(captureBuilder.captureBuildDirectory(checkout, 'linux-arm64', 'build/native/qualified')).toBe(build)
+      expect(captureBuilder.captureBuildDirectory(checkout, 'linux-arm64', build)).toBe(build)
+    } finally { rmSync(checkout, { recursive: true, force: true }) }
+  })
+  it('rejects escaped paths, unconfigured directories and CMake trees belonging to a sibling', () => {
+    const { checkout, build } = fixture()
+    const sibling = mkdtempSync(join(tmpdir(), 'singz-capture-sibling-'))
+    try {
+      for (const path of ['../sibling-build', 'build/../outside', sibling, 'build'])
+        expect(() => captureBuilder.captureBuildDirectory(checkout, 'linux-arm64', path)).toThrow(/beneath/)
+      expect(() => captureBuilder.captureBuildDirectory(checkout, 'linux-arm64', 'build/not-yet-created')).toThrow(/existing configured/)
+      writeFileSync(join(build, 'CMakeCache.txt'), `CMAKE_HOME_DIRECTORY:INTERNAL=${sibling}\n`)
+      expect(() => captureBuilder.captureBuildDirectory(checkout, 'linux-arm64', build)).toThrow(/different source checkout/)
+    } finally {
+      rmSync(checkout, { recursive: true, force: true })
+      rmSync(sibling, { recursive: true, force: true })
+    }
+  })
+  it('rejects linked components even when the final requested directory does not exist', () => {
+    const { checkout, build } = fixture()
+    const sibling = mkdtempSync(join(tmpdir(), 'singz-capture-linked-build-'))
+    try {
+      symlinkSync(sibling, join(checkout, 'build', 'linked'), process.platform === 'win32' ? 'junction' : 'dir')
+      expect(() => captureBuilder.captureBuildDirectory(checkout, 'linux-arm64', 'build/linked/future')).toThrow(/symbolic links/)
+      symlinkSync(build, join(checkout, 'build', 'alias'), process.platform === 'win32' ? 'junction' : 'dir')
+      expect(() => captureBuilder.captureBuildDirectory(checkout, 'linux-arm64', 'build/alias')).toThrow(/symbolic links/)
+    } finally {
+      rmSync(checkout, { recursive: true, force: true })
+      rmSync(sibling, { recursive: true, force: true })
+    }
+  })
+})
 
 describe('Electron capture addon build', () => {
   it('keeps desktop playback on the strict v4 prepare and complete status contract', () => {

@@ -19,7 +19,43 @@ export function remoteTargets(scope: HTMLElement): HTMLElement[] {
   )
 }
 
+function moveMixerChannelFocus(scope: HTMLElement, direction: 'ArrowUp' | 'ArrowDown'): boolean {
+  const rows = Array.from(scope.querySelectorAll<HTMLElement>('[data-mix-row]'))
+  const channels = rows.flatMap(row => {
+    const level = remoteTargets(row).find(target => target.matches('input[type="range"]'))
+    return level ? [{ row, level }] : []
+  })
+  const active = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  const currentRow = active?.closest('[data-mix-row]')
+  const current = channels.findIndex(channel => channel.row === currentRow)
+  let target: HTMLElement | null | undefined
+  if (!currentRow) {
+    if (direction === 'ArrowDown') target = channels[0]?.level
+  } else if (current < 0) {
+    const rowIndex = rows.indexOf(currentRow as HTMLElement)
+    const ordered = direction === 'ArrowDown' ? channels : [...channels].reverse()
+    target = ordered.find(channel => {
+      const index = rows.indexOf(channel.row)
+      return direction === 'ArrowDown' ? index > rowIndex : index < rowIndex
+    })?.level
+  } else if (direction === 'ArrowDown') {
+    target = channels[current + 1]?.level
+  } else if (current === 0) {
+    target = scope.querySelector<HTMLElement>('.mode-seg button[aria-pressed="true"]')
+  } else {
+    target = channels[current - 1]?.level
+  }
+  if (target) {
+    target.focus({ preventScroll: true })
+    target.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }
+  return true
+}
+
 export function moveSpatialFocus(scope: HTMLElement, direction: RemoteDirection): boolean {
+  if (scope.dataset.surface === 'mix' && (direction === 'ArrowUp' || direction === 'ArrowDown')) {
+    return moveMixerChannelFocus(scope, direction)
+  }
   const targets = remoteTargets(scope)
   if (targets.length === 0) return false
   const active = document.activeElement instanceof HTMLElement ? document.activeElement : null

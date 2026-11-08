@@ -38,7 +38,7 @@ const originalSurface = process.env.SINGZ_SURFACE
 async function register(
   rendererURL: string,
   surface = 'box',
-  audio: Partial<Pick<Parameters<typeof registerBoxIpc>[0], 'audioInputs' | 'audioHost'>> = {}
+  audio: Partial<Pick<Parameters<typeof registerBoxIpc>[0], 'audioInputs' | 'audioHost' | 'cecStatus' | 'retainedPlaybackSnapshot' | 'stopRetainedPlayback'>> = {}
 ) {
   process.env.SINGZ_SURFACE = surface
   const userDataDir = await mkdtemp(join(tmpdir(), 'box-ipc-'))
@@ -88,6 +88,40 @@ describe('Box IPC renderer trust', () => {
     expect(() => structuredClone(result)).not.toThrow()
   })
 
+  it('reports CEC independently when the audio service is unavailable', async () => {
+    const url = 'file:///tmp/renderer/box/box.html'
+    const cec = { state: 'unavailable' as const, detail: 'No HDMI output CEC adapter.', lastInputAt: null }
+    const backend = await register(url, 'box', {
+      audioInputs: () => { throw new Error('private native failure') },
+      audioHost: async () => { throw new Error('private audio socket path') },
+      cecStatus: () => cec
+    })
+    if (!backend) throw new Error('Box backend was not registered')
+    const owner = new Sender(url); attached(backend, owner)
+    const result = await invoke(owner, 'box:diagnostics')
+    expect(result).toMatchObject({ ok: true, value: { cec, audio: {
+      inputs: { ok: false }, host: { ok: false }
+    } } })
+    expect(JSON.stringify(result)).not.toContain('private')
+  })
+
+  it('restricts retained-song recovery/Stop to the trusted TV and preserves stale-epoch errors', async () => {
+    const url = 'file:///tmp/renderer/box/box.html'
+    const snapshot = vi.fn(async () => ({ epoch: 'service-e', playback: null }))
+    const stop = vi.fn(async () => { throw new Error('Audio service changed. Refresh before stopping the song.') })
+    const backend = await register(url, 'box', { retainedPlaybackSnapshot: snapshot, stopRetainedPlayback: stop })
+    if (!backend) throw new Error('Box backend was not registered')
+    const owner = new Sender(url)
+    const outsider = new Sender(url)
+    attached(backend, owner)
+    expect((await invoke(outsider, 'box:retained-playback-snapshot')).code).toBe('unauthorized')
+    expect((await invoke(outsider, 'box:retained-playback-stop', outsider.mainFrame, { epoch: 'old-e', generation: '1' })).code).toBe('unauthorized')
+    expect(snapshot).not.toHaveBeenCalled(); expect(stop).not.toHaveBeenCalled()
+    expect(await invoke(owner, 'box:retained-playback-snapshot')).toEqual({ ok: true, value: { epoch: 'service-e', playback: null } })
+    expect((await invoke(owner, 'box:retained-playback-stop', owner.mainFrame, { epoch: 'old-e', generation: '01' })).code).toBe('invalid-command')
+    expect(await invoke(owner, 'box:retained-playback-stop', owner.mainFrame, { epoch: 'old-e', generation: '1' })).toMatchObject({ ok: false, error: 'Audio service changed. Refresh before stopping the song.' })
+    expect(stop).toHaveBeenCalledWith({ epoch: 'old-e', generation: '1' })
+  })
   it('registers no Box handlers for Desktop', async () => {
     expect(await register('file:///tmp/renderer/box/box.html', 'desktop')).toBeNull()
     expect(ipc.handlers.size).toBe(0)

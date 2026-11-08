@@ -36,8 +36,8 @@ node "$WT/scripts/assert-native-build-lock.cjs"
 # The audio engine is a public, pinned git submodule. Initialize it before any
 # dependency checks, fingerprints or native mirror generation. Refuse a flat
 # payload or a dirty child rather than letting Git replace user work.
-initialize_zcore_submodule() {
-  local relative=third_party/zcore child="$WT/third_party/zcore" entries count
+initialize_native_submodule() {
+  local relative="$1" child="$WT/$1" entries count
   entries=$(git -C "$WT" ls-files --stage -- "$relative")
   count=$(printf '%s\n' "$entries" | awk '$1 == "160000" && $3 == "0" { n++ } END { print n+0 }')
   if [ "$count" -ne 1 ]; then
@@ -58,7 +58,8 @@ initialize_zcore_submodule() {
   git -C "$WT" submodule update --init --recursive -- "$relative"
   python3 "$WT/scripts/verify-zcore-submodule.py" --root "$WT" --path "$relative" >/dev/null
 }
-initialize_zcore_submodule
+initialize_native_submodule third_party/zcore
+initialize_native_submodule third_party/loopz
 node "$WT/scripts/install-git-hooks.cjs"
 MAIN="$(git -C "$WT" worktree list --porcelain | sed -n '1s/^worktree //p')"
 

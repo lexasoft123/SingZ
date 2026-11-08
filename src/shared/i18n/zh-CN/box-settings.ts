@@ -2,6 +2,17 @@ import type { Translation } from '../types'
 import type { boxSettings as english } from '../en/box-settings'
 
 export const boxSettings: Translation<typeof english> = {
+  'box.settings.globalOverrides': "全局覆盖设置",
+  'box.settings.metronome': "节拍器",
+  'box.settings.metronomeSong': "使用歌曲设置",
+  'box.settings.metronomeOff': "始终关闭",
+  'box.settings.metronomePause': "更改此设置会暂停播放。按播放键继续。",
+  'box.settings.metronomeApplying': "正在应用节拍器设置…",
+  'box.settings.metronomeFailed': "无法保存或确认节拍器设置。请重试以解除播放锁定。{error}",
+  'box.settings.metronomeChecking': "正在检查节拍器设置…",
+  'box.settings.metronomeRetry': "重试",
+  'box.settings.metronomeUnknown': "节拍器状态尚未确认。",
+
   'box.settings.navigation': '设置',
   'box.settings.title': '声音设置',
   'box.settings.subtitle': '音频输出和已连接的麦克风输入',

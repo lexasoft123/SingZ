@@ -1,4 +1,15 @@
 export const boxSettings = {
+  'box.settings.globalOverrides': "Global overrides",
+  'box.settings.metronome': "Metronome",
+  'box.settings.metronomeSong': "Use song settings",
+  'box.settings.metronomeOff': "Always off",
+  'box.settings.metronomePause': "Changing this setting pauses playback. Press Play to continue.",
+  'box.settings.metronomeApplying': "Applying metronome preference…",
+  'box.settings.metronomeFailed': "Metronome preference could not be saved or confirmed. Playback is locked until you retry. {error}",
+  'box.settings.metronomeChecking': "Checking metronome preference…",
+  'box.settings.metronomeRetry': "Retry",
+  'box.settings.metronomeUnknown': "Metronome status is unconfirmed.",
+
   'box.settings.navigation': 'Settings',
   'box.settings.title': 'Sound settings',
   'box.settings.subtitle': 'Audio output and connected microphone inputs',

@@ -584,6 +584,8 @@ export interface CaptureStartResult {
 }
 
 export interface CaptureStats {
+  /** Native scalar levels from a private LoopZ history reader, never PCM. */
+  microphoneLevels?: { valid: boolean; channels: number; ownershipGeneration: string; peak: number[]; rms: number[] }
   deliveredBlocks: string
   deliveredFrames: string
   overruns: string
@@ -1348,6 +1350,8 @@ export interface LocaleState {
 }
 
 export interface SingzApi {
+  /** Main-selected Box socket service owns playback beyond this renderer. */
+  readonly boxAudioPersistent: boolean
   box: BoxAPI
   /** True only when main was launched with SINGZ_E2E_HOOKS=1: the renderer
    * then publishes `window.__test` (engine, transport, metronome, training,

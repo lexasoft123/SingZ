@@ -9,13 +9,13 @@ const MAX_QUEUE = 256
 
 export const defaultBoxState = (): BoxState => ({
   version: 1,
-  preferences: { setupComplete: false, safeAreaPercent: 0, language: 'system' },
+  preferences: { setupComplete: false, safeAreaPercent: 0, language: 'system', metronomeOverride: 'song' },
   queue: []
 })
 
 const cloneState = (state: BoxState): BoxState => ({
   version: 1,
-  preferences: { ...state.preferences },
+  preferences: { ...state.preferences, metronomeOverride: state.preferences.metronomeOverride ?? 'song' },
   queue: state.queue.map((entry) => ({ ...entry }))
 })
 
@@ -47,7 +47,9 @@ const validState = (value: unknown): value is BoxState => {
   if (!record(value) || !exactKeys(value, ['version', 'preferences', 'queue'])) return false
   if (value.version !== 1 || !record(value.preferences) || !validQueue(value.queue)) return false
   const preferences = value.preferences
-  return exactKeys(preferences, ['setupComplete', 'safeAreaPercent', 'language']) &&
+  return exactKeys(preferences, ['setupComplete', 'safeAreaPercent', 'language', 'metronomeOverride'],
+    ['setupComplete', 'safeAreaPercent', 'language']) &&
+    (!Object.hasOwn(preferences, 'metronomeOverride') || preferences.metronomeOverride === 'song' || preferences.metronomeOverride === 'off') &&
     typeof preferences.setupComplete === 'boolean' &&
     (preferences.safeAreaPercent === 0 || preferences.safeAreaPercent === 3 || preferences.safeAreaPercent === 5) &&
     boundedText(preferences.language, 64)
@@ -71,7 +73,7 @@ export class BoxStateService {
 
   setPreferences(patch: Partial<BoxPreferences>): Promise<BoxResult<BoxState>> {
     return this.serial(async () => {
-      if (!record(patch) || !exactKeys(patch, ['setupComplete', 'safeAreaPercent', 'language'], [])) {
+      if (!record(patch) || !exactKeys(patch, ['setupComplete', 'safeAreaPercent', 'language', 'metronomeOverride'], [])) {
         return failure('Invalid Box preferences.', 'invalid-input')
       }
       const loaded = await this.load()
@@ -90,6 +92,12 @@ export class BoxStateService {
       if (Object.hasOwn(patch, 'language')) {
         if (!boundedText(patch.language, 64)) return failure('Invalid language preference.', 'invalid-input')
         candidate.preferences.language = patch.language
+      }
+      if (Object.hasOwn(patch, 'metronomeOverride')) {
+        if (patch.metronomeOverride !== 'song' && patch.metronomeOverride !== 'off') {
+          return failure('Invalid metronome override preference.', 'invalid-input')
+        }
+        candidate.preferences.metronomeOverride = patch.metronomeOverride
       }
       const saved = await this.write(candidate)
       return saved.ok ? { ok: true, value: cloneState(candidate) } : saved

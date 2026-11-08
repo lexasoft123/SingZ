@@ -65,9 +65,38 @@ PR, issue, commit or release note.
 6. Report the mac and windows-field results side by side, per rule, with the control's
    column when one was needed.
 
+## Platform: Linux persistent Box audio host
+
+`node tests/e2e/box-audio-host-smoke.cjs` runs a real sandboxed headless Electron
+host with private profiles/socket and generated muted audio. It follows the
+normal playback inventory into the driverless song producer and two logical
+LoopZ buses, then checks controls, paused-frame stability, reconnect identity,
+stop/unload and active shutdown. Set `SINGZ_E2E_PACKAGED` to the installed
+executable to qualify the packaged host. The Linux installed-package lane runs
+this driver after the addon identity check. Use a container without physical
+sound devices for this gate; do not bypass Electron sandboxing.
+
+This driver does not exercise TV renderer shutdown, restored project/lyrics,
+physical microphones, FLOW 8 routing or audible latency. Persistent playback
+changes also need the actual Box window-close/restart path, including the
+retained-song notice and explicit Stop-before-open recovery.
+
+## Box HDMI-CEC input
+
+`electron tests/e2e/box-cec-input-smoke.cjs` uses a hidden isolated profile and
+fake CEC transport to verify native Electron DOM key names, repeat flags and
+range-input defaults. On Linux use `xvfb-run -a` plus
+`--ozone-platform=x11 --disable-gpu`; headless audio-host qualification is a
+separate gate and does not establish BrowserWindow input support. Pair it with
+`tests/unit/box-cec.test.ts`, the Python
+kernel-API fixture in `tests/tooling/box-cec-input.test.cjs`, and the full Box
+wake-chord smoke. It never opens a CEC device. Real HDMI output/TV/handset,
+hotplug and kernel-driver qualification are separate; see
+`docs/specs/singz-box/cec-input.md`.
+
 ## Platform: mac (local desktop)
 
-`node tests/e2e/box-smoke.cjs` drives the separate Box surface with generated silent FLAC fixtures, an isolated library/userData/model root and no original recordings. It checks paused stem-only open, real transport/lyrics, queue continuity and switch confirmation, persisted mix, the complete remote wake chord and fixed UHD scaling. Set `E2E_PACKAGED` to an installed SingZ executable to run the same driver against that app; without it the driver uses this checkout's `out/` build. This is not Pi, TV, FLOW 8 or microphone qualification.
+`node tests/e2e/box-smoke.cjs` drives the separate Box surface with generated silent FLAC fixtures, an isolated library/userData/model root and no original recordings. It checks one-action preview Sing with stem-only projects, real transport/lyrics, queue continuity and switch confirmation, persisted mix, the complete remote wake chord and fixed UHD scaling. Set `E2E_PACKAGED` to an installed SingZ executable to run the same driver against that app; without it the driver uses this checkout's `out/` build. This is not Pi, TV, FLOW 8 or microphone qualification.
 
 Prereq state on this machine: models under "~/Library/Application Support/SingZ/models/" (the three Qwen lyrics files — Qwen3-ASR-1.7B-Q8_0.gguf, mmproj-Qwen3-ASR-1.7B-Q8_0.gguf, qwen3-forced-aligner-0.6b-q8_0.gguf — + MMS at torch-home/hub/checkpoints/model.pt), GPU pack at "~/Library/Application Support/SingZ/gpu-splitter/", projects in iCloud Drive/SingZ. **Any build from Qwen-default onwards deletes every `ggml-*.bin` whisper model in its models folder at startup once the three Qwen files are there** — if the real folder still holds whisper models the user has not said to discard, launch with `SINGZ_MODELS_DIR` pointed at a scratch folder of APFS clones (`cp -c`) instead. Build first if out/ is stale: `npm run build`. You own the desktop app exclusively — `pkill -f "out/main/index.js"; sleep 1` before each driver, and the drivers must run SEQUENTIALLY (same userData identity "Electron").
 

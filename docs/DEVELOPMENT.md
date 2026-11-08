@@ -547,6 +547,16 @@ the executable's embedded fingerprint before reporting readiness. Output names
 what was actually provisioned; optional lyrics engines, splitter packs, and the
 capture addon need their own producers when used.
 
+After completing native tests, the capture producer can reuse that checkout's
+configured CMake build with `SINGZ_CAPTURE_BUILD_DIR=build/native/<name>`.
+The directory must be a real local directory under `build/`, with a regular cache
+naming this exact checkout; escapes and shared links are rejected. The producer
+still holds the native build lock, applies its own configuration and verifies
+immutable output identity. Finish CTest first because addon configuration changes
+the enabled targets in the reused build. This avoids recompiling the same core
+under ARM64 emulation without sharing build state across checkouts.
+
+
 `vendor/` is a real local directory, never a whole-directory shared symlink.
 The analyzer is always local. Bootstrap copies only llama/CrispASR artifacts
 whose receipt matches the current producer scripts, requested revision, target,

@@ -2,6 +2,17 @@ import type { Translation } from '../types'
 import type { boxSettings as english } from '../en/box-settings'
 
 export const boxSettings: Translation<typeof english> = {
+  'box.settings.globalOverrides': "Глобальные настройки",
+  'box.settings.metronome': "Метроном",
+  'box.settings.metronomeSong': "Настройки песни",
+  'box.settings.metronomeOff': "Всегда выключен",
+  'box.settings.metronomePause': "Изменение настройки приостанавливает воспроизведение. Нажмите «Пуск», чтобы продолжить.",
+  'box.settings.metronomeApplying': "Применяем настройку метронома…",
+  'box.settings.metronomeFailed': "Не удалось сохранить или подтвердить настройку метронома. Повторите попытку, чтобы разблокировать воспроизведение. {error}",
+  'box.settings.metronomeChecking': "Проверяем настройку метронома…",
+  'box.settings.metronomeRetry': "Повторить",
+  'box.settings.metronomeUnknown': "Состояние метронома не подтверждено.",
+
   'box.settings.navigation': 'Настройки',
   'box.settings.title': 'Настройки звука',
   'box.settings.subtitle': 'Аудиовыход и подключённые микрофонные входы',

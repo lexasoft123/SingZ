@@ -73,6 +73,7 @@ class FakeEngine implements BoxEngine {
   }
   subscribe(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener) }
   async teardown(): Promise<void> { this.teardownCount++ }
+  async detachPersistentPlayback(): Promise<void> {}
 }
 
 const stems = { vocals: '/a/vocals.flac', drums: '/a/drums.flac', bass: '/a/bass.flac', other: '/a/other.flac' }
@@ -695,5 +696,321 @@ describe('Box output routing', () => {
     await applying
     await closing
     expect(engine.teardownCount).toBe(1)
+  })
+})
+
+
+describe('fresh persistent UI admission', () => {
+  function persistent() {
+    const fixture = host()
+    Object.defineProperty(fixture.api, 'boxAudioPersistent', { value: true })
+    const status = vi.fn(async () => ({ generation: '9', state: 'running' }))
+    fixture.api.box = { retainedPlaybackSnapshot: async () => ({ ok: true, value: { epoch: 'service-e', playback: { ...await status(), transportState: 'playing' } } }) } as unknown as SingzApi['box']
+    return { ...fixture, ...makeTransport(fixture.api), status }
+  }
+  it('blocks fresh song selection before project/lyrics loading while an unknown public song is retained', async () => {
+    const { api, transport, engine, status } = persistent()
+    expect(await transport.open(item('/b', 'Another song'))).toBe(false)
+    expect(status).toHaveBeenCalledOnce()
+    expect(api.registerSource).not.toHaveBeenCalled()
+    expect(engine.loaded).toHaveLength(0)
+    expect(engine.retireCount).toBe(0)
+    expect(transport.getSnapshot()).toMatchObject({ active: null, loadingName: null, lastError: 'Stop the previous song before opening another song.' })
+  })
+  it('allows an unloaded service then preserves normal transitions for a known active project', async () => {
+    const { api, transport, engine, status } = persistent()
+    status.mockResolvedValueOnce({ generation: '0', state: 'unloaded' })
+    expect(await transport.open(item('/a', 'First song'))).toBe(true)
+    expect(await transport.open(item('/b', 'Next known song'))).toBe(true)
+    expect(status).toHaveBeenCalledOnce()
+    expect(api.registerSource).toHaveBeenCalledTimes(2)
+    expect(engine.loaded).toHaveLength(2)
+    expect(transport.getSnapshot().active?.item.dir).toBe('/b')
+  })
+  it('ignores an old unloaded preflight after a newer selection was denied', async () => {
+    const { api, transport, engine, status } = persistent()
+    const older = deferred<{ generation: string; state: string }>()
+    status.mockImplementationOnce(() => older.promise)
+    const first = transport.open(item('/a', 'Older choice'))
+    expect(await transport.open(item('/b', 'Newer choice'))).toBe(false)
+    older.resolve({ generation: '0', state: 'unloaded' })
+    expect(await first).toBe(false)
+    expect(api.registerSource).not.toHaveBeenCalled()
+    expect(engine.loaded).toHaveLength(0)
+    expect(transport.getSnapshot().lastError).toContain('Stop the previous song')
+  })
+  it('cannot publish a project when close wins the authoritative preflight race', async () => {
+    const { api, transport, engine, status } = persistent()
+    const pending = deferred<{ generation: string; state: string }>()
+    status.mockImplementationOnce(() => pending.promise)
+    const opening = transport.open(item('/a', 'Closing choice'))
+    await transport.teardown()
+    pending.resolve({ generation: '0', state: 'unloaded' })
+    expect(await opening).toBe(false)
+    expect(api.registerSource).not.toHaveBeenCalled()
+    expect(engine.loaded).toHaveLength(0)
+    expect(transport.getSnapshot().active).toBeNull()
+  })
+  it('keeps ordinary Box opening independent of service status', async () => {
+    const { api } = host()
+    api.desktopPlaybackStatus = vi.fn(async () => { throw new Error('must not query a daemon') })
+    const { transport } = makeTransport(api)
+    expect(await transport.open(item())).toBe(true)
+    expect(api.desktopPlaybackStatus).not.toHaveBeenCalled()
+  })
+})
+
+describe('Box global metronome policy', () => {
+  const cue = { click: true, countInBars: 2, volume: 0.75, accent: true, grid: false }
+  const registration = (dir: string, metronome = cue) => ({
+    ok: true, path: `${dir}/original.wav`, name: dir, size: 0,
+    project: project(dir, { settings: { ...project(dir).settings, metronome } })
+  })
+
+  it('disables current and future click/count-in cues and restores original song settings without saving the override', async () => {
+    const otherCue = { ...cue, countInBars: 1, volume: 0.4 }
+    const { api, saves } = host({ a: () => registration('/a'), b: () => registration('/b', otherCue) })
+    const { transport, engine } = makeTransport(api)
+    const metronome = vi.spyOn(engine, 'setMetronome')
+    expect(await transport.open(item())).toBe(true)
+    expect(metronome).toHaveBeenLastCalledWith(cue)
+    await transport.setMetronomeOverride('off')
+    expect(metronome).toHaveBeenLastCalledWith({ ...cue, click: false, countInBars: 0, volume: 0 })
+    transport.setMasterVolume(0.3)
+    await transport.flushPersistence()
+    expect(saves.at(-1)?.settings.metronome).toEqual(cue)
+    expect(await transport.open(item('/b'))).toBe(true)
+    expect(metronome).toHaveBeenLastCalledWith({ ...otherCue, click: false, countInBars: 0, volume: 0 })
+    await transport.setMetronomeOverride('song')
+    expect(metronome).toHaveBeenLastCalledWith(otherCue)
+    expect(transport.getSnapshot().active?.project.settings.metronome).toEqual(otherCue)
+  })
+
+  it('blocks local and phone Play while disabling is pending or failed, and retries the same off mode', async () => {
+    const { api } = host({ a: () => registration('/a') })
+    const { transport, engine } = makeTransport(api)
+    expect(await transport.open(item())).toBe(true)
+    const pending = deferred<void>()
+    const metronome = vi.spyOn(engine, 'setMetronome').mockImplementationOnce(() => pending.promise)
+    const changing = transport.setMetronomeOverride('off')
+    await vi.waitFor(() => expect(metronome).toHaveBeenCalledTimes(1))
+    transport.toggle()
+    expect(engine.playing).toBe(false)
+    await expect(transport.controllerPlayPause()).rejects.toThrow('metronome policy')
+    pending.resolve()
+    await changing
+    await transport.controllerPlayPause()
+    expect(engine.playing).toBe(true)
+    metronome.mockRejectedValueOnce(new Error('Native cues refused disable'))
+    await expect(transport.setMetronomeOverride('off')).rejects.toThrow('Native cues refused disable')
+    expect(engine.playing).toBe(false)
+    transport.toggle()
+    expect(engine.playing).toBe(false)
+    await expect(transport.controllerPlayPause()).rejects.toThrow('metronome policy')
+    await transport.setMetronomeOverride('off')
+    await transport.controllerPlayPause()
+    expect(engine.playing).toBe(true)
+  })
+
+  it('captures one accepted pause receipt and coalesces policy requests while native pause is pending', async () => {
+    const { api } = host({ a: () => registration('/a') })
+    const { transport, engine } = makeTransport(api)
+    expect(await transport.open(item())).toBe(true)
+    const pause = deferred<void>()
+    let parked = false
+    let pausing = false
+    let nativePauseRequests = 0
+    const acceptedPause = vi.fn(() => {
+      if (parked) return Promise.resolve()
+      if (pausing) return Promise.reject(new Error('Native duplicate pause refused'))
+      pausing = true
+      ++nativePauseRequests
+      return pause.promise.then(() => { parked = true; pausing = false; engine.playing = false })
+    })
+    Object.assign(engine, { pauseAccepted: acceptedPause })
+    // Match the real Engine: pause() starts the SAME accepted native pause.
+    vi.spyOn(engine, 'pause').mockImplementation(() => { void acceptedPause().catch(() => undefined) })
+    const metronome = vi.spyOn(engine, 'setMetronome')
+    engine.playing = true
+    const disabling = transport.setMetronomeOverride('off').then(() => null, error => error as Error)
+    const restoring = transport.setMetronomeOverride('song')
+    expect(acceptedPause).toHaveBeenCalledTimes(1)
+    transport.toggle()
+    await expect(transport.controllerPlayPause()).rejects.toThrow('metronome policy')
+    expect(metronome).not.toHaveBeenCalled()
+    pause.resolve()
+    await restoring
+    expect((await disabling)?.message).toContain('superseded')
+    expect(nativePauseRequests).toBe(1)
+    expect(engine.playing).toBe(false)
+    await transport.setMetronomeOverride('off')
+    expect(nativePauseRequests).toBe(1) // already parked: no duplicate core command
+  })
+
+  it('rejects a previously queued phone pause before it can duplicate the policy pause receipt', async () => {
+    const { api } = host({ a: () => registration('/a') })
+    const { transport, engine } = makeTransport(api)
+    expect(await transport.open(item())).toBe(true)
+    engine.playing = true
+    const mixed = deferred<void>()
+    const volume = vi.spyOn(engine, 'setMasterVolumeAccepted').mockImplementationOnce(() => mixed.promise)
+    const mixing = transport.controllerMix({ type: 'volume', target: 'master', value: 0.3 })
+    await vi.waitFor(() => expect(volume).toHaveBeenCalledTimes(1))
+    const phone = transport.controllerPlayPause().then(() => null, error => error as Error)
+    const paused = deferred<void>()
+    let pauseCalls = 0
+    const acceptedPause = vi.fn(() => {
+      if (++pauseCalls > 1) return Promise.reject(new Error('Duplicate phone pause'))
+      return paused.promise.then(() => { engine.playing = false })
+    })
+    Object.assign(engine, { pauseAccepted: acceptedPause })
+    const metronome = vi.spyOn(engine, 'setMetronome')
+    const disabling = transport.setMetronomeOverride('off')
+    expect(acceptedPause).toHaveBeenCalledTimes(1)
+    mixed.resolve()
+    await mixing
+    expect((await phone)?.message).toContain('metronome policy')
+    expect(acceptedPause).toHaveBeenCalledTimes(1)
+    expect(metronome).not.toHaveBeenCalled()
+    paused.resolve()
+    await disabling
+    expect(engine.playing).toBe(false)
+  })
+
+  it('reports an accepted pause failure and keeps Play blocked before any cue update', async () => {
+    const { api } = host({ a: () => registration('/a') })
+    const { transport, engine } = makeTransport(api)
+    expect(await transport.open(item())).toBe(true)
+    const acceptedPause = vi.fn().mockRejectedValue(new Error('Native pause unavailable'))
+    Object.assign(engine, { pauseAccepted: acceptedPause })
+    const metronome = vi.spyOn(engine, 'setMetronome')
+    await expect(transport.setMetronomeOverride('off')).rejects.toThrow('Native pause unavailable')
+    expect(acceptedPause).toHaveBeenCalledTimes(1)
+    expect(metronome).not.toHaveBeenCalled()
+    transport.toggle()
+    expect(engine.playing).toBe(false)
+    await expect(transport.controllerPlayPause()).rejects.toThrow('metronome policy')
+  })
+
+  it('applies a changed policy to the newly committed song rather than a stale song captured before open', async () => {
+    const otherCue = { ...cue, countInBars: 1, volume: 0.4 }
+    const { api } = host({ a: () => registration('/a'), b: () => registration('/b', otherCue) })
+    const { transport, engine } = makeTransport(api)
+    await transport.setMetronomeOverride('off')
+    expect(await transport.open(item())).toBe(true)
+    const pending = deferred<void>()
+    const metronome = vi.spyOn(engine, 'setMetronome').mockImplementationOnce(() => pending.promise)
+    const opening = transport.open(item('/b'))
+    await vi.waitFor(() => expect(metronome).toHaveBeenCalledTimes(1))
+    const restoring = transport.setMetronomeOverride('song')
+    transport.toggle()
+    expect(engine.playing).toBe(false)
+    pending.resolve()
+    expect(await opening).toBe(true)
+    await restoring
+    expect(metronome).toHaveBeenLastCalledWith(otherCue)
+    expect(transport.getSnapshot().active?.item.dir).toBe('/b')
+  })
+
+  it('rejects unknown policy modes and failed future opens without allowing old cues to play', async () => {
+    const { api } = host({ a: () => registration('/a'), b: () => registration('/b') })
+    const { transport, engine } = makeTransport(api)
+    expect(await transport.open(item())).toBe(true)
+    await expect(transport.setMetronomeOverride('bad' as 'off')).rejects.toThrow('Invalid')
+    transport.toggle()
+    expect(engine.playing).toBe(false)
+    await expect(transport.controllerPlayPause()).rejects.toThrow('metronome policy')
+    expect(await transport.open(item('/b'))).toBe(true)
+    transport.toggle()
+    expect(engine.playing).toBe(false)
+    await expect(transport.controllerPlayPause()).rejects.toThrow('metronome policy')
+    await transport.setMetronomeOverride('off')
+    vi.spyOn(engine, 'setMetronome').mockRejectedValueOnce(new Error('Off receipt failed'))
+    expect(await transport.open(item('/b'))).toBe(false)
+    expect(transport.getSnapshot().active).toBeNull()
+    transport.toggle()
+    expect(engine.playing).toBe(false)
+  })
+})
+
+describe('explicit preview start', () => {
+  it('resumes the same paused song exactly once and never toggles already playing audio', async () => {
+    const { transport, engine } = makeTransport(host().api)
+    await transport.open(item())
+    const play = vi.spyOn(engine, 'play')
+    const pause = vi.spyOn(engine, 'pause')
+    await Promise.all([transport.controllerPlay('/a'), transport.controllerPlay('/a')])
+    await transport.controllerPlay('/a')
+    expect(engine.playing).toBe(true)
+    expect(play).toHaveBeenCalledTimes(1)
+    expect(pause).not.toHaveBeenCalled()
+    expect(engine.loaded).toHaveLength(1)
+  })
+
+  it('rejects a different owner and a canceled intent before dispatch', async () => {
+    const { transport, engine } = makeTransport(host().api)
+    await transport.open(item())
+    const play = vi.spyOn(engine, 'play')
+    await expect(transport.controllerPlay('/b')).rejects.toThrow('changed')
+    await expect(transport.controllerPlay('/a', () => false)).rejects.toThrow('changed')
+    expect(play).not.toHaveBeenCalled()
+  })
+
+  it('revokes a canceled preview after a deferred native start receipt', async () => {
+    const { transport, engine } = makeTransport(host().api)
+    await transport.open(item())
+    const ack = deferred<void>()
+    let current = true
+    const accepted = vi.fn(async () => { await ack.promise; engine.playing = true })
+    const pause = vi.fn(async () => { engine.playing = false })
+    Object.assign(engine, { playAccepted: accepted, pauseAccepted: pause })
+    const pending = transport.controllerPlay('/a', () => current)
+    const rejected = expect(pending).rejects.toThrow('superseded')
+    await vi.waitFor(() => expect(accepted).toHaveBeenCalledTimes(1))
+    current = false
+    ack.resolve()
+    await rejected
+    expect(pause).toHaveBeenCalledTimes(1)
+    expect(engine.playing).toBe(false)
+  })
+
+  it('revokes a deferred old start before a replacement owns the engine', async () => {
+    const { transport, engine } = makeTransport(host().api)
+    await transport.open(item())
+    const ack = deferred<void>()
+    const accepted = vi.fn(async () => { await ack.promise; engine.playing = true })
+    const pause = vi.fn(async () => { engine.playing = false })
+    Object.assign(engine, { playAccepted: accepted, pauseAccepted: pause })
+    const pending = transport.controllerPlay('/a')
+    const rejected = expect(pending).rejects.toThrow('superseded')
+    await vi.waitFor(() => expect(accepted).toHaveBeenCalledTimes(1))
+    const replacement = transport.open(item('/b'))
+    ack.resolve()
+    await rejected
+    expect(await replacement).toBe(true)
+    expect(transport.getSnapshot().active?.item.dir).toBe('/b')
+    expect(engine.playing).toBe(false)
+    expect(pause).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not start a preview blocked by a failed metronome policy', async () => {
+    const { transport, engine } = makeTransport(host().api)
+    await transport.open(item())
+    vi.spyOn(engine, 'setMetronome').mockRejectedValueOnce(new Error('policy failed'))
+    await expect(transport.setMetronomeOverride('off')).rejects.toThrow('policy failed')
+    const play = vi.spyOn(engine, 'play')
+    await expect(transport.controllerPlay('/a')).rejects.toThrow('blocked')
+    expect(play).not.toHaveBeenCalled()
+  })
+
+  it('keeps generic open paused and starts a newly selected song only explicitly', async () => {
+    const { transport, engine } = makeTransport(host().api)
+    await transport.open(item())
+    await transport.controllerPlay('/a')
+    await transport.open(item('/b'))
+    expect(engine.playing).toBe(false)
+    await expect(transport.controllerPlay('/a')).rejects.toThrow('changed')
+    await transport.controllerPlay('/b')
+    expect(engine.playing).toBe(true)
   })
 })

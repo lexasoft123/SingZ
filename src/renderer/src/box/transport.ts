@@ -1,3 +1,5 @@
+import type { BoxMetronomeOverride } from '../../../shared/box-contract'
+import { retainedPlaybackSnapshot } from '../../../shared/box-retained-playback'
 import type {
   LyricLine,
   ProjectInfo,
@@ -55,6 +57,7 @@ export interface BoxEngine {
   setOutput?(deviceId: string): Promise<void>
   subscribe(listener: () => void): () => void
   teardown(): Promise<void>
+  detachPersistentPlayback?(): Promise<void>
 }
 
 export interface BoxActiveSong {
@@ -127,6 +130,12 @@ export class BoxTransport {
   private readonly saveDelayMs: number
   private readonly nativePlaybackEnabled?: boolean
   private browserOutputReconciled = false
+  private metronomeOverride: BoxMetronomeOverride = 'song'
+  private metronomeRevision = 0
+  private metronomePending = 0
+  private metronomeApplyFailed = false
+  private metronomeInvalid = false
+  private metronomePauseReceipt: Promise<void> | null = null
 
   constructor(
     private readonly api: SingzApi,
@@ -243,6 +252,83 @@ export class BoxTransport {
     return run
   }
 
+  /** Session policy; callers persist Box preferences only after this receipt.
+   * A failed preference save must not restore audible song cues automatically. */
+  setMetronomeOverride(mode: BoxMetronomeOverride): Promise<void> {
+    if (this.disposed || this.tearingDown) return Promise.reject(new Error('Playback controls are unavailable.'))
+    const revision = ++this.metronomeRevision
+    this.metronomeApplyFailed = true
+    const pause = this.pauseForMetronome()
+    if (mode !== 'song' && mode !== 'off') {
+      this.metronomeInvalid = true
+      this.lastError = 'Invalid metronome override.'
+      this.publish()
+      return Promise.reject(new Error(this.lastError))
+    }
+    this.metronomeInvalid = false
+    this.metronomeOverride = mode
+    ++this.metronomePending
+    this.publish()
+    const operation = this.enqueueEngine(async () => {
+      if (this.disposed || this.tearingDown) throw new Error('Playback controls are unavailable.')
+      if (revision !== this.metronomeRevision) throw new Error('Metronome policy was superseded.')
+      try {
+        await pause
+        await this.applyMetronomePolicy(this.active?.project.settings, revision, false)
+        if (revision !== this.metronomeRevision) throw new Error('Metronome policy was superseded.')
+        this.lastError = null
+      } catch (error) {
+        if (revision === this.metronomeRevision) {
+          this.metronomeApplyFailed = true
+          this.lastError = error instanceof Error ? error.message : String(error)
+        }
+        throw error
+      }
+    })
+    return operation.finally(() => {
+      --this.metronomePending
+      this.publish()
+    })
+  }
+
+  private pauseForMetronome(): Promise<void> {
+    if (this.metronomePauseReceipt) return this.metronomePauseReceipt
+    let receipt: Promise<void>
+    try {
+      if (this.engine.pauseAccepted) receipt = this.engine.pauseAccepted()
+      else { this.engine.pause(); receipt = Promise.resolve() }
+    } catch (error) {
+      receipt = Promise.reject(error)
+    }
+    const pending = receipt.finally(() => {
+      if (this.metronomePauseReceipt === pending) this.metronomePauseReceipt = null
+    })
+    this.metronomePauseReceipt = pending
+    // Native receipt can fail while a song open still owns engineTail. Observe
+    // rejection immediately; the queued setter later reports the same failure.
+    void pending.catch(() => undefined)
+    return pending
+  }
+
+  private async applyMetronomePolicy(settings: ProjectSettings | undefined, revision = this.metronomeRevision, pauseOnFailure = true): Promise<void> {
+    const song = settings?.metronome ? sanitizeMetronome(settings.metronome) : { ...MET_DEFAULTS }
+    const effective = this.metronomeOverride === 'off'
+      ? { ...song, click: false, countInBars: 0, volume: 0 }
+      : song
+    try {
+      await this.engine.setMetronome(effective)
+      if (revision === this.metronomeRevision && !this.metronomeInvalid) this.metronomeApplyFailed = false
+    } catch (error) {
+      this.metronomeApplyFailed = true
+      if (pauseOnFailure) this.engine.pause()
+      throw error
+    }
+  }
+
+  private get metronomeBlocked(): boolean {
+    return this.metronomePending > 0 || this.metronomeApplyFailed
+  }
+
   applyOutput(rawUid: string): Promise<void> {
     if (this.outputApplyPromise) {
       if (this.applyingOutputUid === rawUid) return this.outputApplyPromise
@@ -312,6 +398,15 @@ export class BoxTransport {
     this.lastError = null
     this.publish()
     try {
+      if (this.api.boxAudioPersistent === true && this.active === null) {
+        const result = await this.api.box.retainedPlaybackSnapshot()
+        if (!result.ok) throw new Error(result.error)
+        const retained = retainedPlaybackSnapshot(result.value).playback
+        if (!this.current(generation)) return false
+        if (retained && retained.state !== 'unloaded') {
+          throw new Error('Stop the previous song before opening another song.')
+        }
+      }
       const { registration, inspection, lyrics } = await inspectBoxProject(this.api, item)
       if (!this.current(generation)) return false
       if (inspection.readiness !== 'ready' || !registration.ok || !registration.project?.stems || !lyrics) {
@@ -386,9 +481,7 @@ export class BoxTransport {
           if (!this.current(generation)) return
           await this.engine.setBeats(sanitizeBeatInfo(project.settings.beat))
           if (!this.current(generation)) return
-          await this.engine.setMetronome(project.settings.metronome
-            ? sanitizeMetronome(project.settings.metronome)
-            : { ...MET_DEFAULTS })
+          await this.applyMetronomePolicy(project.settings)
           if (!this.current(generation)) return
           await this.engine.setTranspose(project.settings.transpose ?? 0)
           if (!this.current(generation)) return
@@ -437,8 +530,9 @@ export class BoxTransport {
   }
 
   toggle(): void {
+    if (this.metronomeBlocked) return
     if (this.active?.lyrics.status !== 'ready' || this.active.lyrics.lines.length === 0) return
-    if (!this.engine.playing && (this.routingBlocked || this.applyingOutput || this.restartRequired)) return
+    if (!this.engine.playing && (this.routingBlocked || this.applyingOutput || this.restartRequired || this.metronomeBlocked)) return
     this.engine.toggle()
   }
 
@@ -446,11 +540,43 @@ export class BoxTransport {
     this.engine.pause()
   }
 
+  /** Explicit preview start; unlike a toggle, repeated activation never pauses. */
+  async controllerPlay(expectedDir: string, isCurrent: () => boolean = () => true): Promise<void> {
+    const owner = this.activeGeneration
+    const ownsSong = (): boolean => this.activeGeneration === owner && this.active?.item.dir === expectedDir &&
+      !this.tearingDown && !this.disposed
+    const current = (): boolean => ownsSong() && this.generation === owner && isCurrent()
+    const ready = (): boolean => this.active?.lyrics.status === 'ready' && this.active.lyrics.lines.length > 0
+    if (!current() || !ready()) throw new Error('The preview song changed before playback was started.')
+    await this.enqueueEngine(async () => {
+      if (!current() || !ready()) throw new Error('The preview song changed before playback was started.')
+      if (this.routingBlocked || this.applyingOutput || this.restartRequired || this.metronomeBlocked) {
+        throw new Error('Playback is blocked until the audio output and metronome policy are applied.')
+      }
+      if (this.engine.playing) return
+      if (this.engine.playAccepted) await this.engine.playAccepted()
+      else await this.engine.play()
+      if (!current()) {
+        // A queued replacement cannot commit until this receipt finishes. Revoke
+        // the stale start only while its song still owns the engine.
+        if (ownsSong()) {
+          if (this.engine.pauseAccepted) await this.engine.pauseAccepted()
+          else this.engine.pause()
+        }
+        throw new Error('The preview start was superseded before its receipt arrived.')
+      }
+      this.refresh()
+    })
+  }
+
   async controllerPlayPause(): Promise<void> {
     const active = this.active
     const owner = this.activeGeneration
     if (!active || active.lyrics.status !== 'ready' || active.lyrics.lines.length === 0) {
       throw new Error('No song with ready lyrics can be controlled.')
+    }
+    if (this.metronomeBlocked) {
+      throw new Error('Playback is blocked until the metronome policy is applied.')
     }
     if (this.tearingDown || this.disposed || this.generation !== owner) {
       throw new Error('The current song changed before playback was controlled.')
@@ -460,11 +586,12 @@ export class BoxTransport {
       const ownsEngine = (): boolean => this.activeGeneration === owner && this.active?.item.dir === dir &&
         !this.tearingDown && !this.disposed && this.generation === owner
       if (!ownsEngine()) throw new Error('The current song changed before playback was controlled.')
+      if (this.metronomeBlocked) throw new Error('Playback is blocked until the metronome policy is applied.')
       const desiredPlaying = !this.engine.playing
       const acceptedPlay = desiredPlaying && this.engine.playAccepted !== undefined
       if (desiredPlaying) {
-        if (this.routingBlocked || this.applyingOutput || this.restartRequired) {
-          throw new Error('Playback is blocked by the current audio output state.')
+        if (this.routingBlocked || this.applyingOutput || this.restartRequired || this.metronomeBlocked) {
+          throw new Error('Playback is blocked until the audio output and metronome policy are applied.')
         }
         if (this.engine.playAccepted) await this.engine.playAccepted()
         else await this.engine.play()
@@ -667,9 +794,14 @@ export class BoxTransport {
       }
       await this.engineTail
       await this.outputApplyPromise?.catch(() => undefined)
-      this.engine.pause()
       try {
-        await this.engine.teardown()
+        if (this.api.boxAudioPersistent === true) {
+          if (!this.engine.detachPersistentPlayback) throw new Error('Persistent audio detach is unavailable.')
+          await this.engine.detachPersistentPlayback()
+        } else {
+          this.engine.pause()
+          await this.engine.teardown()
+        }
       } finally {
         this.unsubscribeEngine()
         this.disposed = true

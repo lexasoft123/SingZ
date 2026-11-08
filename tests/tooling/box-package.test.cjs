@@ -22,7 +22,9 @@ async function loadConfig(filename) {
 
 function assertBoxIdentity(config) {
   assert.equal(config.appId, 'com.lexasoft.singz.box')
-  assert.equal(config.productName, 'SingZ Box')
+  assert.equal(config.productName, 'singz-box')
+  assert.equal(config.extraMetadata.productName, 'SingZ Box')
+  assert.equal(config.linux.desktop.entry.Name, 'SingZ Box')
   assert.equal(config.extraMetadata.name, 'singz-box')
   assert.equal(config.extraMetadata.singzProduct, 'box')
   assert.equal(config.extraMetadata.desktopName, 'singz-box.desktop')
@@ -52,10 +54,13 @@ test('Box config validates and preserves the trusted Desktop packaging inputs', 
     repo: 'SingZ'
   })
   assert.deepEqual(box.linux.target, desktop.linux.target)
-  assert.deepEqual(box.deb.depends, desktop.deb.depends)
+  assert.deepEqual(box.deb.depends, [...desktop.deb.depends, 'python3', 'fonts-noto-cjk'])
   assert.deepEqual(box.mac, desktop.mac)
   assert.deepEqual(box.win, desktop.win)
   assert.deepEqual(box.linux.extraResources, desktop.linux.extraResources)
+  assert.ok(box.extraResources.some(resource =>
+    resource.from === 'resources/linux' && resource.to === 'box-audio'
+  ))
   const fileRules = config => config.files.flatMap(file =>
     (file.filter || []).map(filter => ({ from: file.from, to: file.to, filter }))
   )
@@ -88,10 +93,11 @@ test('effective Box metadata produces the distinct Debian launcher without a pro
 
   assert.equal(appInfo.id, 'com.lexasoft.singz.box')
   assert.equal(appInfo.name, 'singz-box')
-  assert.equal(appInfo.productName, 'SingZ Box')
+  assert.equal(appInfo.productName, 'singz-box')
+  assert.equal(metadata.productName, 'SingZ Box')
   assert.equal(appInfo.productFilename, 'singz-box')
   assert.equal(appInfo.linuxPackageName, 'singz-box')
-  assert.equal(`/opt/${appInfo.sanitizedProductName}`, '/opt/SingZ Box')
+  assert.equal(`/opt/${appInfo.sanitizedProductName}`, '/opt/singz-box')
   assert.equal(metadata.main, './out/main/index.js')
   assert.equal(config.linux.executableArgs, undefined)
 
@@ -107,7 +113,7 @@ test('effective Box metadata produces the distinct Debian launcher without a pro
   assert.equal(helper.getDesktopFileName(), 'singz-box')
   const entry = await helper.computeDesktopEntry(config.linux)
   assert.match(entry, /^Name=SingZ Box$/m)
-  assert.match(entry, /^Exec="\/opt\/SingZ Box\/singz-box" %U$/m)
+  assert.match(entry, /^Exec=\/opt\/singz-box\/singz-box %U$/m)
   assert.match(entry, /^Icon=singz-box$/m)
   assert.match(entry, /^StartupWMClass=singz-box$/m)
   assert.doesNotMatch(entry, /--box/)
@@ -130,4 +136,20 @@ test('Box identity assertions reject a deliberately restored Desktop update feed
     () => assertBoxIdentity({ ...box, publish: desktop.publish }),
     assert.AssertionError
   )
+})
+
+test('Box installation identity rejects the former spaced installation path', async () => {
+  const config = await loadConfig('electron-builder.box.yml')
+  assert.throws(
+    () => assertBoxIdentity({ ...config, productName: 'SingZ Box' }),
+    assert.AssertionError
+  )
+})
+
+test('Box audio service and launcher use the lowercase installation directory', () => {
+  const service = readFileSync(join(repository, 'resources/linux/singz-box-audio.service'), 'utf8')
+  assert.match(service, /^ExecStart=\/opt\/singz-box\/singz-box --box-audio-host --ozone-platform=headless$/m)
+  assert.doesNotMatch(service, /\/opt\/SingZ Box/)
+  const launcher = readFileSync(join(repository, 'resources/linux/singz-box-with-audio'), 'utf8')
+  assert.match(launcher, /exec "\$launcher_dir\/\.\.\/\.\.\/singz-box" "\$@"/)
 })

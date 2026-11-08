@@ -70,6 +70,13 @@ host natively executes the Debian 13-built binaries. Engine, compiler and
 npm caches are keyed per architecture; one leg can never restore the
 other's compiled binaries.
 
+When transferring a macOS source overlay to a Linux build stand, create it
+with `COPYFILE_DISABLE=1 tar ...` to omit AppleDouble `._*` metadata files.
+Compare the capture source fingerprint on both checkouts before building;
+the fingerprint includes files under native source directories, including
+archive metadata that does not participate in compilation. Do not copy
+generated OAuth configuration in a source overlay.
+
 Local reproduction is identical to the x64 stand, on an ARM64 machine or
 ARM64 VM/container running Debian 13:
 

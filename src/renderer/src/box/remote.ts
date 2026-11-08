@@ -81,3 +81,24 @@ export function lyricLineAt(lines: { start: number; end: number }[], position: n
   }
   return lines.length - 1
 }
+
+/** A fractional/early browser timer must not lose the idle deadline. */
+export function scheduleControlsHide(
+  read: () => { state: IdleState; held: number; lastInput: number },
+  hide: () => void,
+  now: () => number = () => performance.now()
+): () => void {
+  let cancelled = false
+  let timer: ReturnType<typeof setTimeout>
+  const schedule = (): void => {
+    timer = setTimeout(check, Math.max(1, Math.ceil(5000 - (now() - read().lastInput))))
+  }
+  const check = (): void => {
+    if (cancelled) return
+    const current = read(), time = now()
+    if (shouldHideControls(current.state, current.held, time, current.lastInput)) hide()
+    else if (time - current.lastInput < 5000) schedule()
+  }
+  schedule()
+  return () => { cancelled = true; clearTimeout(timer) }
+}

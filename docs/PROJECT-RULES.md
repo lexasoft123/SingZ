@@ -453,6 +453,10 @@ was driven; the gotchas that follow from it are below.
 
 ## Hard-won gotchas (do not re-learn these)
 
+- **Electron ESM readiness**: initial module evaluation must complete before
+  Electron can emit `ready`. Register `app.whenReady().then(...)` with explicit
+  startup-error handling; do not top-level-await a startup path that itself
+  awaits `whenReady()`, which deadlocks before any window or service starts.
 - **userData identity**: `Electron out/main/index.js` → userData "Electron";
   `npm run dev`/`npx electron .` → "singz"; packaged → "SingZ". Caches differ
   per identity — shared things (model weights, GPU pack) deliberately live in

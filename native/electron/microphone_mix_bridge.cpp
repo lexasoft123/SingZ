@@ -1,4 +1,7 @@
 #include "microphone_mix_bridge.h"
+#ifdef SINGZ_BOX_LOOPZ_ROUTING
+#include "../playback/box_routing_owner.h"
+#endif
 #include "native_audio_ownership.h"
 #include "../playback/microphone_mix.h"
 #include "../playback/shared_audio_service.h"
@@ -174,6 +177,10 @@ bool readConfig(napi_env env, napi_value value, MicrophoneMixConfig* config) {
   return true;
 }
 napi_value configure(napi_env env, napi_callback_info info) {
+#ifdef SINGZ_BOX_LOOPZ_ROUTING
+  if (boxRoutingOwnsCapture())
+    return result(env, false, "Microphone routing is owned by the Box audio host");
+#endif
   size_t count = 1;
   napi_value argument;
   napi_get_cb_info(env, info, &count, &argument, nullptr, nullptr);

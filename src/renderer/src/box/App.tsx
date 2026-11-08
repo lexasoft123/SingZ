@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { flushSync } from 'react-dom'
 import { applyPlatformClasses } from '@singz/ui'
-import type { BoxAPI, BoxControllerEnvelope, BoxControllerResponse, BoxQueueRef } from '../../../shared/box-contract'
+import type { BoxAPI, BoxMetronomeOverride, BoxControllerEnvelope, BoxControllerResponse, BoxQueueRef } from '../../../shared/box-contract'
 import type { DesktopAudioHostInventoryResult, ProjectListItem } from '../../../shared/types'
 import { MultitrackEngine } from '../audio/engine'
 import { boxNativePlaybackPolicy } from './playback-policy'
@@ -10,16 +10,21 @@ import { Catalog, type CatalogRow } from './Catalog'
 import { moveSpatialFocus, remoteScope } from './focus'
 import { LatestOpenIntent } from './open-intent'
 import { Player } from './Player'
+import { BoxMicrophones } from './microphones'
 import { Mixer, type MixerTab } from './Mixer'
 import { Queue } from './Queue'
-import { RemoteKeyGate, shouldHideControls } from './remote'
+import { RemoteKeyGate, scheduleControlsHide } from './remote'
 import { Settings } from './Settings'
+import { applyBoxMetronomePolicy, boxMetronomePreference, MetronomePolicyError } from './metronome-policy'
+import { RetainedPlayback } from './RetainedPlayback'
+import { closeBoxSession } from './close-session'
 import { t } from './i18n'
 import { tSettings } from './settings-i18n'
 import { BoxSettingsNavigator, type BoxRoute } from './settings-navigation'
 import { SongDetails } from './SongDetails'
 import { SwitchDialog } from './SwitchDialog'
 import { BoxTransport } from './transport'
+import { cancelPreviewStart } from './preview-start'
 import { BoxNavigation } from './Navigation'
 import { useFixedTvFrame } from './useFixedTvFrame'
 import { JourneyHub, type JourneyHubHandle, type JourneyPage } from './journeys/JourneyHub'
@@ -49,6 +54,12 @@ export default function BoxApp(): React.JSX.Element {
     })
   }
   const transport = transportRef.current
+  const microphones = useMemo(() => new BoxMicrophones(window.singz), [])
+  const microphoneSnapshot = useSyncExternalStore(microphones.subscribe, microphones.getSnapshot)
+  useEffect(() => {
+    microphones.connect()
+    return () => { void microphones.dispose().catch(() => undefined) }
+  }, [microphones])
   const collectionRef = useRef<BoxCollectionController | null>(null)
   if (!collectionRef.current) {
     collectionRef.current = new BoxCollectionController({
@@ -61,6 +72,9 @@ export default function BoxApp(): React.JSX.Element {
   const queueStoreRef = useRef<BoxQueueStore | null>(null)
   if (!queueStoreRef.current) queueStoreRef.current = new BoxQueueStore(boxApi)
   const queueStore = queueStoreRef.current
+  const flushPrivateState = useCallback(async (): Promise<void> => {
+    await Promise.all([queueStore.flush(), microphones.dispose()])
+  }, [queueStore, microphones])
   const phoneProjectionRef = useRef<BoxPhoneProjection | null>(null)
   if (!phoneProjectionRef.current) phoneProjectionRef.current = new BoxPhoneProjection()
   const phoneProjection = phoneProjectionRef.current
@@ -73,6 +87,33 @@ export default function BoxApp(): React.JSX.Element {
   const frame = useFixedTvFrame(viewportRef)
   const [route, setRoute] = useState<BoxRoute>('catalog')
   const [hydrated, setHydrated] = useState(false)
+  const [metronomeMode, setMetronomeMode] = useState<BoxMetronomeOverride | null>(null)
+  const [metronomeBusy, setMetronomeBusy] = useState(false)
+  const [metronomeError, setMetronomeError] = useState<string | null>(null)
+  const metronomePending = useRef(false)
+  const metronomeReady = useRef(false)
+  const metronomeBlocked = useRef(true)
+  const metronomeFailure = useCallback((error: unknown): void => {
+    setMetronomeMode(error instanceof MetronomePolicyError ? error.safeMode : null)
+    setMetronomeError(tSettings('box.settings.metronomeFailed', { error: error instanceof Error ? error.message : String(error) }))
+    metronomeBlocked.current = true
+  }, [])
+  const changeMetronome = useCallback(async (mode: BoxMetronomeOverride): Promise<void> => {
+    if (metronomePending.current) return
+    metronomePending.current = true
+    metronomeBlocked.current = true
+    setMetronomeBusy(true)
+    setMetronomeError(null)
+    try {
+      const applied = await applyBoxMetronomePolicy(mode, value => transport.setMetronomeOverride(value), async value => {
+        const result = await boxApi.setPreferences({ metronomeOverride: value })
+        if (!result.ok) throw new Error(result.error)
+      })
+      setMetronomeMode(applied)
+      metronomeBlocked.current = false
+    } catch (error) { metronomeFailure(error); throw error }
+    finally { metronomePending.current = false; setMetronomeBusy(false) }
+  }, [boxApi, transport, metronomeFailure])
   const [collectionReady, setCollectionReady] = useState(false)
   const [safeArea, setSafeArea] = useState<0 | 3 | 5>(0)
   const initialHubPage = useRef<JourneyPage>('home')
@@ -103,6 +144,8 @@ export default function BoxApp(): React.JSX.Element {
   const settingsInventoryGeneration = useRef(0)
   const hydrationGeneration = useRef(0)
   const openIntent = useRef(new LatestOpenIntent())
+  const previewStartIntent = useRef<number | null>(null)
+  const pendingSwitchStart = useRef(false)
   const catalogScroll = useRef(0)
   const gate = useRef(new RemoteKeyGate())
   const lastInput = useRef(performance.now())
@@ -128,7 +171,7 @@ export default function BoxApp(): React.JSX.Element {
   }, [])
 
   const interactionLocked = useCallback((): boolean => {
-    return !latest.current.hydrated || transport.getSnapshot().applyingOutput || latest.current.pendingSwitch !== null ||
+    return !latest.current.hydrated || metronomePending.current || transport.getSnapshot().applyingOutput || latest.current.pendingSwitch !== null ||
       latest.current.signOutConfirm || latest.current.signOutBusy || hubInteractionLocked()
   }, [hubInteractionLocked, transport])
 
@@ -176,20 +219,49 @@ export default function BoxApp(): React.JSX.Element {
   }, [boxApi, phoneProjection])
 
   const hydrate = useCallback(async (refreshAccount: boolean): Promise<void> => {
+    const initializing = !metronomeReady.current
+    if (initializing && metronomePending.current) return
     const generation = ++hydrationGeneration.current
-    const { state, localReady } = await hydrateBoxLocally(queueStore, collection, refreshAccount)
-    if (generation !== hydrationGeneration.current) return
-    // Failed refreshes retain the last successfully verified local collection.
-    setCollectionReady(current => current || localReady)
-    if (state && !setupDecision.current) {
-      setSafeArea(state.preferences.safeAreaPercent)
-      phoneProjection.update(queueStore.getRefs(), true)
-      setupDecision.current = true
-      initialHubPage.current = state.preferences.setupComplete ? 'home' : 'setup'
-      if (!state.preferences.setupComplete) setRoute('home')
+    if (initializing) {
+      metronomePending.current = true
+      metronomeBlocked.current = true
+      setMetronomeBusy(true)
+      setMetronomeError(null)
     }
-    setHydrated(true)
-  }, [collection, phoneProjection, queueStore])
+    try {
+      // First establish silence even if the profile read subsequently fails.
+      if (initializing) await transport.setMetronomeOverride('off')
+      const { state, localReady } = await hydrateBoxLocally(queueStore, collection, refreshAccount)
+      if (generation !== hydrationGeneration.current) return
+      if (initializing) {
+        if (!state) throw new Error(tSettings('box.settings.metronomeUnknown'))
+        const mode = boxMetronomePreference(state.preferences.metronomeOverride)
+        if (mode === null) throw new Error(tSettings('box.settings.metronomeUnknown'))
+        const applied = await applyBoxMetronomePolicy(mode, value => transport.setMetronomeOverride(value))
+        if (generation !== hydrationGeneration.current) return
+        setMetronomeMode(applied)
+        metronomeReady.current = true
+        metronomeBlocked.current = false
+      }
+      // Failed refreshes retain the last successfully verified local collection.
+      setCollectionReady(current => current || localReady)
+      if (state && !setupDecision.current) {
+        setSafeArea(state.preferences.safeAreaPercent)
+        phoneProjection.update(queueStore.getRefs(), true)
+        setupDecision.current = true
+        initialHubPage.current = state.preferences.setupComplete ? 'home' : 'setup'
+        if (!state.preferences.setupComplete) setRoute('home')
+      }
+      setHydrated(true)
+    } catch (error) {
+      if (generation === hydrationGeneration.current) {
+        // A failed initial receipt is unknown; do not unlock opening or Play.
+        metronomeFailure(error)
+      }
+    } finally {
+      if (initializing) { metronomePending.current = false; setMetronomeBusy(false) }
+    }
+  }, [collection, phoneProjection, queueStore, transport, metronomeFailure])
 
   useEffect(() => {
     void hydrate(true)
@@ -235,47 +307,42 @@ export default function BoxApp(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
-    const unload = (): void => { void boxCloseWork(() => transport.teardown(), () => queueStore.flush()) }
+    const unload = (): void => { void boxCloseWork(() => transport.teardown(), flushPrivateState).catch(error => { console.warn('Box private cleanup could not be confirmed.', error) }) }
     window.addEventListener('beforeunload', unload, { once: true })
     return () => {
       window.removeEventListener('beforeunload', unload)
       collection.dispose()
-      void boxCloseWork(() => transport.teardown(), () => queueStore.flush())
+      void boxCloseWork(() => transport.teardown(), flushPrivateState).catch(error => { console.warn('Box private cleanup could not be confirmed.', error) })
     }
-  }, [collection, queueStore, transport])
+  }, [collection, flushPrivateState, transport])
 
   useEffect(() => {
     let requested = false
-    let timer: ReturnType<typeof setTimeout> | null = null
-    const finish = (): void => {
-      if (timer !== null) clearTimeout(timer)
-      timer = null
-      window.singz.boxCloseReady()
-    }
+    const finish = (): void => { window.singz.boxCloseReady() }
     const unsubscribe = window.singz.onBoxCloseRequest(() => {
       if (requested) return
       requested = true
-      transport.pause()
-      const bounded = new Promise<void>(resolve => { timer = setTimeout(resolve, 8000) })
-      const work = boxCloseWork(() => transport.teardown(), () => queueStore.flush())
-      void Promise.race([work, bounded]).then(finish, finish)
+      void closeBoxSession(transport, flushPrivateState, finish)
     })
     return () => {
-      if (timer !== null) clearTimeout(timer)
       unsubscribe()
     }
-  }, [queueStore, transport])
+  }, [flushPrivateState, transport])
 
   const cancelOpenForNavigation = useCallback((): boolean => {
+    if (['starting', 'stopping'].includes(microphones.getSnapshot().phase)) return false
     if (!settingsNavigator.canNavigate() || interactionLocked()) return false
-    if (!latest.current.snapshot.loadingName) return true
+    if (!latest.current.snapshot.loadingName) {
+      cancelPreviewStart(openIntent.current, previewStartIntent, openingDir, () => setBusyDir(null), publishPhoneSnapshot)
+      return true
+    }
     if (!transport.cancelOpen()) return false
     openIntent.current.cancel()
     openingDir.current = null
     setBusyDir(null)
     void publishPhoneSnapshot()
     return true
-  }, [interactionLocked, publishPhoneSnapshot, settingsNavigator, transport])
+  }, [microphones, interactionLocked, publishPhoneSnapshot, settingsNavigator, transport])
 
   const goCatalog = useCallback(() => {
     if (!cancelOpenForNavigation()) return
@@ -328,6 +395,7 @@ export default function BoxApp(): React.JSX.Element {
   }, [collection, signOutBusy, signOutConfirm])
 
   const backFromSettings = useCallback(() => {
+    if (metronomePending.current) return
     settingsNavigator.backFromSettings()
   }, [settingsNavigator])
 
@@ -351,53 +419,61 @@ export default function BoxApp(): React.JSX.Element {
     else goCatalog()
   }, [goAccount, goCatalog, goCurrent, goHub, goQueue])
 
-  const openNow = useCallback(async (entry: CollectionEntry): Promise<void> => {
+  const openNow = useCallback(async (entry: CollectionEntry, startFromPreview = false): Promise<void> => {
+    if (metronomeBlocked.current) return
     const item = entry.local
     if (!item || !item.songPath || collection.getSnapshot().rows[entry.id]?.inspection?.readiness !== 'ready') return
-    if (snapshot.active?.item.dir === item.dir) {
-      goCurrent()
-      return
-    }
+    if (previewStartIntent.current !== null && openIntent.current.isCurrent(previewStartIntent.current)) return
     if (busyDir) return
+    if (!startFromPreview && transport.getSnapshot().active?.item.dir === item.dir) { goCurrent(); return }
     const intent = openIntent.current.begin()
+    previewStartIntent.current = intent
+    const current = (): boolean => openIntent.current.isCurrent(intent)
     openingDir.current = item.dir
     setBusyDir(item.dir)
     setPendingSwitch(null)
     setSelectedId(entry.id)
     setActionError(null)
     setRoute('details')
-    const published = await publishPhoneSnapshot()
-    if (!openIntent.current.isCurrent(intent)) return
-    if (!published) {
-      if (openingDir.current === item.dir) openingDir.current = null
-      setBusyDir(current => current === item.dir ? null : current)
-      setActionError(t('box.details.openGuardFailed'))
-      void publishPhoneSnapshot()
-      return
+    try {
+      if (!await publishPhoneSnapshot()) throw new Error(t('box.details.openGuardFailed'))
+      if (!current()) return
+      const sameSong = transport.getSnapshot().active?.item.dir === item.dir
+      const opened = sameSong || await transport.open(item)
+      if (!current() || !opened) return
+      const openedSong = transport.getSnapshot().active
+      if (openedSong) collection.recordOpened(item, { readiness: 'ready', project: openedSong.project, message: null }, openedSong.metadata)
+      const published = await publishPhoneSnapshot()
+      if (!current()) return
+      if (startFromPreview) {
+        if (!published) throw new Error(t('box.details.openGuardFailed'))
+        await transport.controllerPlay(item.dir, current)
+        if (!current()) return
+      }
+      setMixOpen(false)
+      setRoute('player')
+      setControlsVisible(true)
+      setFocusVersion(version => version + 1)
+    } catch (error) {
+      if (current()) setActionError(error instanceof Error ? error.message : String(error))
+    } finally {
+      if (current()) {
+        previewStartIntent.current = null
+        if (openingDir.current === item.dir) openingDir.current = null
+        setBusyDir(null)
+        void publishPhoneSnapshot()
+      }
     }
-    const opened = await transport.open(item)
-    if (!openIntent.current.isCurrent(intent)) return
-    setBusyDir(current => current === item.dir ? null : current)
-    if (!opened) {
-      if (openingDir.current === item.dir) openingDir.current = null
-      void publishPhoneSnapshot()
-      return
-    }
-    const openedSong = transport.getSnapshot().active
-    if (openedSong) collection.recordOpened(item, { readiness: 'ready', project: openedSong.project, message: null }, openedSong.metadata)
-    await publishPhoneSnapshot()
-    if (!openIntent.current.isCurrent(intent)) return
-    setMixOpen(false)
-    setRoute('player')
-    setControlsVisible(true)
-    setFocusVersion(version => version + 1)
-  }, [busyDir, collection, goCurrent, publishPhoneSnapshot, snapshot.active, transport])
+  }, [busyDir, collection, goCurrent, publishPhoneSnapshot, transport])
 
   const requestSing = useCallback((entry: CollectionEntry) => {
-    if (!entry.local) return
-    if (snapshot.active && snapshot.active.item.dir !== entry.local.dir) setPendingSwitch(entry)
-    else void openNow(entry)
-  }, [openNow, snapshot.active])
+    if (metronomeBlocked.current || !entry.local) return
+    const current = transport.getSnapshot()
+    if (current.active && current.active.item.dir !== entry.local.dir && (current.playing || current.starting)) {
+      pendingSwitchStart.current = true
+      setPendingSwitch(entry)
+    } else void openNow(entry, true)
+  }, [openNow, transport])
 
   const prepare = useCallback(async (entry: CollectionEntry) => {
     setActionError(null)
@@ -438,6 +514,7 @@ export default function BoxApp(): React.JSX.Element {
       openDetails(entry)
       return
     }
+    pendingSwitchStart.current = false
     setPendingSwitch(entry)
   }, [allEntries, collectionSnapshot.rows, goCurrent, openDetails, queueRefs, snapshot.active])
 
@@ -467,6 +544,7 @@ export default function BoxApp(): React.JSX.Element {
       return
     }
     if (route === 'settings') {
+      if (['starting', 'stopping'].includes(microphones.getSnapshot().phase)) return
       backFromSettings()
       return
     }
@@ -481,7 +559,7 @@ export default function BoxApp(): React.JSX.Element {
       setFocusVersion(version => version + 1)
       tvRef.current?.querySelector<HTMLElement>('.box-navigation button.on')?.focus()
     }
-  }, [backFromAccount, backFromDetails, backFromSettings, closeMix, goCatalog, goCurrent, goQueue, mixOpen, pendingSwitch, route, settingsNavigator, snapshot.active])
+  }, [microphones, backFromAccount, backFromDetails, backFromSettings, closeMix, goCatalog, goCurrent, goQueue, mixOpen, pendingSwitch, route, settingsNavigator, snapshot.active])
 
   const actionsRef = useRef({ back, goCatalog, goQueue, goCurrent, closeMix })
   actionsRef.current = { back, goCatalog, goQueue, goCurrent, closeMix }
@@ -490,7 +568,8 @@ export default function BoxApp(): React.JSX.Element {
     const keyDown = (event: KeyboardEvent): void => {
       if (event.altKey || event.ctrlKey || event.metaKey) return
       const current = latest.current
-      if (!current.hydrated) {
+      const recoveryScope = tvRef.current ? remoteScope(tvRef.current) : null
+      if (!current.hydrated && recoveryScope?.dataset.surface !== 'retained-playback' && recoveryScope?.dataset.surface !== 'policy-startup') {
         event.preventDefault()
         event.stopPropagation()
         return
@@ -512,6 +591,16 @@ export default function BoxApp(): React.JSX.Element {
       if (target?.matches('input[type="range"]') && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) return
       event.preventDefault()
       event.stopPropagation()
+      const scope = tvRef.current ? remoteScope(tvRef.current) : null
+      if (scope?.dataset.surface === 'retained-playback' || scope?.dataset.surface === 'policy-startup') {
+        // The retained-song dialog owns remote focus, including Back/media
+        // keys. A focus repair press must never activate an obscured control.
+        if (event.key === 'Escape' || event.key === 'Backspace' || event.key.startsWith('Media')) return
+        if (!target || !scope.contains(target)) {
+          scope.querySelector<HTMLElement>('button:not(:disabled)')?.focus()
+          return
+        }
+      }
       if (event.key === 'Escape' || event.key === 'Backspace') {
         actionsRef.current.back()
         return
@@ -519,7 +608,7 @@ export default function BoxApp(): React.JSX.Element {
       if (event.key.startsWith('Media') && interactionLocked()) return
       if (event.key === 'MediaPlayPause') {
         if (transport.getSnapshot().routingBlocked || transport.getSnapshot().restartRequired) goHub('home')
-        else transport.toggle()
+        else if (!metronomeBlocked.current) transport.toggle()
         return
       }
       if (event.key === 'MediaTrackPrevious') {
@@ -577,18 +666,18 @@ export default function BoxApp(): React.JSX.Element {
   }, [snapshot.playing])
 
   useEffect(() => {
-    const remaining = Math.max(0, 5000 - (performance.now() - lastInput.current))
-    const timer = setTimeout(() => {
-      if (shouldHideControls({
+    return scheduleControlsHide(() => ({
+      state: {
         playing: latest.current.snapshot.playing,
         visible: latest.current.controlsVisible,
         playerActive: latest.current.route === 'player',
         overlayOpen: latest.current.mixOpen || latest.current.pendingSwitch !== null || latest.current.signOutConfirm,
         hasLyrics: latest.current.snapshot.active?.lyrics.status === 'ready',
         documentVisible: !document.hidden
-      }, gate.current.heldCount, performance.now(), lastInput.current)) setControlsVisible(false)
-    }, remaining)
-    return () => clearTimeout(timer)
+      },
+      held: gate.current.heldCount,
+      lastInput: lastInput.current
+    }), () => setControlsVisible(false))
   }, [remoteVersion, snapshot.playing, route, mixOpen, pendingSwitch, signOutConfirm, controlsVisible, snapshot.active])
 
   useEffect(() => {
@@ -615,7 +704,9 @@ export default function BoxApp(): React.JSX.Element {
     const query = (selector: string): HTMLElement | null => Array.from(root.querySelectorAll<HTMLElement>(selector))
       .find(element => element.getClientRects().length > 0 && !element.closest('[hidden], [inert]')) ?? null
     let target: HTMLElement | null = null
-    if (signOutConfirm) target = query('[data-signout-cancel]')
+    if (query('[data-retained-refresh]')) target = query('[data-retained-refresh]:not(:disabled)')
+    else if (!hydrated) target = query('[data-surface="policy-startup"] button:not(:disabled)')
+    else if (signOutConfirm) target = query('[data-signout-cancel]')
     else if (pendingSwitch) target = query('[data-keep-current]')
     else if (mixOpen) target = query(snapshot.routingBlocked ? '[data-mix-close]' : '[data-mix-play]')
     else if (route === 'catalog') {
@@ -636,7 +727,7 @@ export default function BoxApp(): React.JSX.Element {
     focusTarget.current = target
     target?.focus({ preventScroll: true })
     target?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
-  }, [route, hydrated, mixOpen, pendingSwitch, signOutConfirm, controlsVisible, focusVersion, snapshot.routingBlocked])
+  }, [route, hydrated, mixOpen, pendingSwitch, signOutConfirm, controlsVisible, focusVersion, snapshot.routingBlocked, metronomeError, metronomeBusy])
 
   phoneActionsRef.current = async (envelope: BoxControllerEnvelope): Promise<void> => {
     let response: BoxControllerResponse = { ok: false, error: 'The command could not be completed.' }
@@ -686,6 +777,7 @@ export default function BoxApp(): React.JSX.Element {
           response = next !== refs && await commitQueue(next) ? { ok: true } : response
         }
       } else if (command.type === 'play-pause') {
+        if (metronomeBlocked.current) throw new Error('Metronome policy is unresolved.')
         await transport.controllerPlayPause()
         response = { ok: true }
       } else if (command.type === 'volume' || command.type === 'mute' || command.type === 'solo') {
@@ -715,7 +807,7 @@ export default function BoxApp(): React.JSX.Element {
   const queueRows: Record<string, CatalogRow> = {}
   for (const item of queueProjection) queueRows[item.item.dir] = collectionSnapshot.rows[item.entry.id]
   const showNavigation = route !== 'player'
-  const canPlay = !snapshot.routingBlocked && !snapshot.applyingOutput && !snapshot.restartRequired
+  const canPlay = !metronomeBusy && !metronomeError && metronomeMode !== null && !snapshot.routingBlocked && !snapshot.applyingOutput && !snapshot.restartRequired
   const canApplyOutput = !snapshot.restartRequired && settingsInventory?.ok === true && settingsInventory.provider === 'alsa'
   const settingsError = snapshot.restartRequired
     ? `${tSettings('box.settings.restartRequired')}${snapshot.outputError ? ` ${snapshot.outputError}` : ''}`
@@ -733,6 +825,11 @@ export default function BoxApp(): React.JSX.Element {
 
   return <div className="box-viewport" ref={viewportRef} data-app="singz-box">
     <div className="box-tv" ref={tvRef} data-route={route} style={{ transform: `scale(${frame.scale})`, left: frame.left, top: frame.top }}>
+      {!hydrated && <section className="box-policy-startup" role="dialog" data-surface="policy-startup">
+        <p role={metronomeError ? 'alert' : 'status'}>{metronomeError ?? tSettings('box.settings.metronomeChecking')}</p>
+        {metronomeError && <button className="pill" disabled={metronomeBusy} onClick={() => { void hydrate(false) }}>{tSettings('box.settings.metronomeRetry')}</button>}
+      </section>}
+      {!active && window.singz.boxAudioPersistent && <RetainedPlayback />}
       <div className="box-safe-surface" inert={!hydrated} style={{ transform: `scale(${safeScale})`, left: safeArea * 16, top: safeArea * 9 }}>
         {hydrated && <div className="box-hub-slot" hidden={route !== 'home'} inert={route !== 'home'}>
           <JourneyHub
@@ -820,6 +917,12 @@ export default function BoxApp(): React.JSX.Element {
           onOpenStorage={() => goHub('storage', 'account')}
         />}
         {route === 'settings' && <Settings
+          metronomeOverride={metronomeMode}
+          metronomeBusy={metronomeBusy}
+          metronomeError={metronomeError}
+          onMetronomeOverride={changeMetronome}
+          microphones={microphones}
+          microphoneSnapshot={microphoneSnapshot}
           inventory={settingsInventory}
           loading={settingsInventoryLoading}
           error={settingsError}
@@ -831,7 +934,7 @@ export default function BoxApp(): React.JSX.Element {
           canApplyOutput={canApplyOutput}
           applyUnavailableReason={applyUnavailableReason}
         />}
-        {route === 'player' && <Player snapshot={snapshot} controlsVisible={controlsVisible} onLibrary={goCatalog} onMix={() => { setMixOpen(true); setControlsVisible(true); noteInput() }} onQueue={goQueue} onSettings={() => goHub('home')} onToggle={() => transport.toggle()} onSeek={position => transport.seek(position)} onSeekBy={delta => transport.seekBy(delta)} />}
+        {route === 'player' && <Player snapshot={snapshot} microphoneSnapshot={microphoneSnapshot} controlsVisible={controlsVisible} onLibrary={goCatalog} onMix={() => { setMixOpen(true); setControlsVisible(true); noteInput() }} onQueue={goQueue} onSettings={() => goHub('home')} onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }} onSeek={position => transport.seek(position)} onSeekBy={delta => transport.seekBy(delta)} />}
         {route === 'queue' && <Queue
           items={queueItems}
           rows={queueRows}
@@ -851,10 +954,10 @@ export default function BoxApp(): React.JSX.Element {
           }}
           onBrowse={goCatalog}
           onClose={active ? goCurrent : goCatalog}
-          onToggle={() => transport.toggle()}
+          onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }}
         />}
-        {route === 'player' && mixOpen && <Mixer tab={mixTab} tracks={snapshot.tracks} masterVolume={snapshot.masterVolume} playing={snapshot.playing} canPlay={active?.lyrics.status === 'ready' && canPlay} onTab={setMixTab} onVolume={(id, volume) => transport.setVolume(id, volume)} onMuted={(id, muted) => transport.setMuted(id, muted)} onSolo={(id, solo) => transport.setSolo(id, solo)} onMasterVolume={volume => transport.setMasterVolume(volume)} onToggle={() => transport.toggle()} onClose={closeMix} />}
-        {pendingSwitch?.local && <SwitchDialog active={active} target={pendingSwitch.local} onCancel={() => setPendingSwitch(null)} onConfirm={() => void openNow(pendingSwitch)} />}
+        {route === 'player' && mixOpen && <Mixer microphoneSnapshot={microphoneSnapshot} tab={mixTab} tracks={snapshot.tracks} masterVolume={snapshot.masterVolume} playing={snapshot.playing} canPlay={active?.lyrics.status === 'ready' && canPlay} onTab={setMixTab} onVolume={(id, volume) => transport.setVolume(id, volume)} onMuted={(id, muted) => transport.setMuted(id, muted)} onSolo={(id, solo) => transport.setSolo(id, solo)} onMasterVolume={volume => transport.setMasterVolume(volume)} onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }} onClose={closeMix} />}
+        {pendingSwitch?.local && <SwitchDialog active={active} target={pendingSwitch.local} onCancel={() => setPendingSwitch(null)} onConfirm={() => void openNow(pendingSwitch, pendingSwitchStart.current)} />}
         {(queueError || queueSnapshot.loading) && route !== 'player' && route !== 'home' && <div className="box-state-toast" role="alert">
           <span>{queueSnapshot.loading ? t('box.queue.loading') : queueError}</span>
           {!queueSnapshot.loaded && !queueSnapshot.loading && <button type="button" onClick={() => { void hydrate(false) }}>{t('app.retry')}</button>}

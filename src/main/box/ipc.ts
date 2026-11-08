@@ -2,9 +2,10 @@ import { ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import { BoxControllerHub } from './controller'
 import { BoxPhoneService } from './phone'
 import { BoxPlatformService } from './platform'
+import { BoxRoutingService } from './routing'
 import { BoxStateService } from './state'
 import { BoxStorageService } from './storage'
-import type { BoxPreferences, BoxQueueRef, BoxResult } from '../../shared/box-contract'
+import type { BoxPreferences, BoxQueueRef, BoxResult, BoxRetainedPlaybackSnapshot, BoxCecStatus } from '../../shared/box-contract'
 
 export type BoxBackend = ReturnType<typeof registerBoxIpc> extends infer T ? Exclude<T, null> : never
 type BoxIpcOptions = {
@@ -14,6 +15,11 @@ type BoxIpcOptions = {
   socketPath?: string
   audioInputs: () => unknown
   audioHost: () => unknown
+  cecStatus?: () => BoxCecStatus
+  retainedPlaybackSnapshot?: () => Promise<BoxRetainedPlaybackSnapshot>
+  stopRetainedPlayback?: (expected: { epoch: string; generation: string }) => Promise<BoxRetainedPlaybackSnapshot>
+  routingRequest?: (json: string) => Promise<string>
+  routingReconcile?: () => Promise<unknown>
 }
 type Handler = (event: IpcMainInvokeEvent, args: unknown[]) => unknown | Promise<unknown>
 const failure = (error: string, code: string): BoxResult<never> => ({ ok: false, error, code })
@@ -24,6 +30,7 @@ export function registerBoxIpc(options: BoxIpcOptions) {
   const state = new BoxStateService(options.userDataDir)
   const storage = new BoxStorageService(options.userDataDir, controller)
   const platform = new BoxPlatformService({ socketPath: options.socketPath, currentVersion: options.appVersion })
+  const routing = new BoxRoutingService(options.routingRequest, options.routingReconcile)
   const phone = new BoxPhoneService({ controller })
   let attached: WebContents | null = null
   let disposed = false
@@ -69,7 +76,22 @@ export function registerBoxIpc(options: BoxIpcOptions) {
       return false
     }
   }
+  const retainedResult = async (operation: () => Promise<BoxRetainedPlaybackSnapshot>): Promise<BoxResult<BoxRetainedPlaybackSnapshot>> => {
+    try { return { ok: true, value: await operation() } }
+    catch (error) { return failure(error instanceof Error ? error.message.slice(0, 2000) : 'Audio state is uncertain. Refresh before retrying.', 'audio-state') }
+  }
   const routes: Record<string, Handler> = {
+    'box:retained-playback-snapshot': async () => options.retainedPlaybackSnapshot
+      ? retainedResult(options.retainedPlaybackSnapshot) : failure('Independent audio is not configured.', 'unavailable'),
+    'box:retained-playback-stop': async (_event, [expected]) => {
+      if (!options.stopRetainedPlayback) return failure('Independent audio is not configured.', 'unavailable')
+      if (!expected || typeof expected !== 'object' || Array.isArray(expected) || Object.keys(expected).some(key => !['epoch', 'generation'].includes(key))) return failure('Invalid retained song identity.', 'invalid-command')
+      const value = expected as { epoch: string; generation: string }
+      if (typeof value.epoch !== 'string' || !value.epoch || value.epoch.length > 128 || typeof value.generation !== 'string' || !/^[1-9][0-9]{0,19}$/.test(value.generation)) return failure('Invalid retained song identity.', 'invalid-command')
+      return retainedResult(() => options.stopRetainedPlayback!(value))
+    },
+    'box:routing-snapshot': () => routing.snapshot(),
+    'box:routing-edit': (_event, [value]) => routing.edit(value),
     'box:state-get': () => state.getState(),
     'box:preferences-set': (_event, [value]) => state.setPreferences(value as Partial<BoxPreferences>),
     'box:queue-save': (_event, [value]) => state.saveQueue(value as BoxQueueRef[]),
@@ -78,14 +100,19 @@ export function registerBoxIpc(options: BoxIpcOptions) {
     'box:storage-snapshot': () => storage.snapshot(),
     'box:cache-remove': (_event, [value]) => storage.removeCachedProject(value as string),
     'box:diagnostics': async () => {
-      const [inputs, host] = await Promise.all([options.audioInputs(), options.audioHost()])
+      const inventories = await Promise.allSettled([
+        Promise.resolve().then(options.audioInputs), Promise.resolve().then(options.audioHost)
+      ])
+      const [inputs, host] = inventories.map(result => result.status === 'fulfilled' ? result.value
+        : { ok: false, error: 'Audio service is unavailable.' })
       return {
         ok: true,
         value: {
           appVersion: options.appVersion,
           platform: process.platform,
           arch: process.arch,
-          audio: { inputs, host }
+          audio: { inputs, host },
+          cec: options.cecStatus?.()
         }
       }
     },

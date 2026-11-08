@@ -1,7 +1,8 @@
 extends: electron-builder.yml
 appId: com.lexasoft.singz.box
-productName: SingZ Box
+productName: singz-box
 extraMetadata:
+  productName: SingZ Box
   name: singz-box
   singzProduct: box
   desktopName: singz-box.desktop
@@ -10,8 +11,17 @@ directories:
 files:
   - '!electron-builder.box.yml'
 artifactName: SingZ-Box-${version}-linux-${arch}.${ext}
+extraResources:
+  - from: resources/linux
+    to: box-audio
 publish: null
 linux:
   executableName: singz-box
+  desktop:
+    entry:
+      Name: SingZ Box
 deb:
   packageName: singz-box
+  depends:
+    - python3
+    - fonts-noto-cjk

@@ -1,3 +1,6 @@
 [submodule "third_party/zcore"]
 	path = third_party/zcore
 	url = https://github.com/lexasoft123/zCore.git
+[submodule "third_party/loopz"]
+	path = third_party/loopz
+	url = https://github.com/lexasoft123/LoopZ.git

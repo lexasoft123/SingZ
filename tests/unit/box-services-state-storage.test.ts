@@ -64,6 +64,30 @@ describe('Box state', () => {
     })
   })
 
+  it('normalizes legacy cue policy without discarding queue/profile and persists the override privately', async () => {
+    const dir = await temp()
+    const legacy = {
+      version: 1,
+      preferences: { setupComplete: true, safeAreaPercent: 3, language: 'en' },
+      queue: [{ kind: 'drive', id: 'preserved-project' }]
+    }
+    await writeFile(join(dir, 'box-state.json'), JSON.stringify(legacy))
+    const service = new BoxStateService(dir)
+    expect(await service.getState()).toMatchObject({ ok: true, value: {
+      ...legacy, preferences: { ...legacy.preferences, metronomeOverride: 'song' }
+    } })
+    expect(await service.setPreferences({ metronomeOverride: 'off' })).toMatchObject({ ok: true })
+    expect(await new BoxStateService(dir).getState()).toMatchObject({ ok: true, value: {
+      ...legacy, preferences: { ...legacy.preferences, metronomeOverride: 'off' }
+    } })
+    const file = join(dir, 'box-state.json')
+    if (process.platform !== 'win32') expect((await stat(file)).mode & 0o777).toBe(0o600)
+    expect(await service.setPreferences({ metronomeOverride: 'unknown' as 'off' })).toMatchObject({ ok: false, code: 'invalid-input' })
+    expect(await service.getState()).toMatchObject({ ok: true, value: { preferences: { metronomeOverride: 'off' } } })
+    await writeFile(file, JSON.stringify({ ...legacy, preferences: { ...legacy.preferences, metronomeOverride: 'unknown' } }))
+    expect(await new BoxStateService(dir).getState()).toMatchObject({ ok: false, code: 'invalid-state' })
+  })
+
   it('rejects invalid persisted schemas without overwriting their bytes', async () => {
     const dir = await temp()
     const file = join(dir, 'box-state.json')

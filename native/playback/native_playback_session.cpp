@@ -1,4 +1,7 @@
 #include "native_playback_session.h"
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+#include "box_routing_owner.h"
+#endif
 
 #include "streaming_lane_feeder.h"
 
@@ -1667,6 +1670,13 @@ struct PreparedPlaybackTransport {
     if (slice->discontinuity.reason != zdsp::DiscontinuityReason::None)
       callbackTimePitchBoundaryPrepared = false;
 
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+    recordBoxSongSlice(block.callbackHostTimeNs +
+                           uint64_t(offset) * 1000000000ull / 48000,
+                       frames, generation, callbackProjectFrame,
+                       callbackProjectFractionQ32, playbackRateQ32,
+                       advancesProject ? 1u : 0u, callbackSeekCount);
+#endif
     callbackContinuousFrame += frames;
     if (advancesProject) {
       if (!advancePosition(frames)) {
@@ -8297,6 +8307,22 @@ NativePlaybackStatus NativePlaybackSession::status() const {
             NativePlaybackAudibleProjectionQuality::Current;
       }
     }
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+    if (boxRoutingInitialized()) {
+      const auto projected = boxAudibleProjection(telemetry.generation,
+                                                  telemetry.seekCount, graphLatency);
+      result.audibleProjectionQuality = projected.available
+          ? NativePlaybackAudibleProjectionQuality::Current
+          : NativePlaybackAudibleProjectionQuality::Unavailable;
+      if (projected.available) result.audibleProjectFrame = projected.projectFrame;
+      result.devicePresentationLatencyFrames = projected.routeDelayFrames;
+      result.totalPresentationLatencyFrames = projected.routeDelayFrames + graphLatency;
+      result.presentationLatencyFrames = result.totalPresentationLatencyFrames;
+      result.audibleFrames = projected.available &&
+          result.renderedFrames > result.totalPresentationLatencyFrames
+          ? result.renderedFrames - result.totalPresentationLatencyFrames : 0;
+    }
+#endif
     result.durationFrames = impl_->prepared->durationFrames;
     result.remainingPreRollFrames = telemetry.remainingPreRoll;
     result.cueEventsCompleted = telemetry.cueEventsCompleted;

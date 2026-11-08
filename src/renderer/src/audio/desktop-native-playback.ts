@@ -647,6 +647,8 @@ export class DesktopNativePlaybackClient {
   private request: DesktopNativePlaybackPrepare | null = null
   private route: PreparedRoute | null = null
   private mutationTail: Promise<void> = Promise.resolve()
+  private detachedPersistentHost = false
+  private detachPending: Promise<void> | null = null
   /** Transport-boundary bookkeeping for the generation being polled. A host
    * route/stream/clock boundary, or a rising adapter render-failure count
    * while the transport is advancing, means the callback is refusing every
@@ -977,7 +979,11 @@ export class DesktopNativePlaybackClient {
   }
 
   private serialize<T>(operation: () => Promise<T>): Promise<T> {
-    const current = this.mutationTail.then(operation, operation)
+    const admitted = (): Promise<T> => {
+      if (this.detachedPersistentHost) throw new Error('Native playback UI is detached.')
+      return operation()
+    }
+    const current = this.mutationTail.then(admitted, admitted)
     this.mutationTail = current.then(() => undefined, () => undefined)
     return current
   }
@@ -2012,6 +2018,28 @@ export class DesktopNativePlaybackClient {
       )
       if (this.request) this.request = { ...this.request, masterGain: gain }
       await this.refreshCommandStatus(this.generation, this.request?.provider ?? 'coreaudio')
+    })
+  }
+
+  /** Release renderer bookkeeping after queued commands, retaining the
+   * service-owned generation and output lease in the independent audio host. */
+  detachPersistentPlayback(): Promise<void> {
+    if (window.singz.boxAudioPersistent !== true) return Promise.reject(new Error('Persistent Box audio is not configured.'))
+    if (this.detachPending) return this.detachPending
+    this.stopPolling()
+    return this.detachPending = this.serialize(async () => {
+      this.stopPolling()
+      await this.statusReadTail
+      this.detachedPersistentHost = true
+      this.generation = ''
+      this.ahead = null
+      this.started = false
+      this.last = null
+      this.ownsOutput = false
+      this.request = null
+      this.route = null
+      this.forgetTransport()
+      this.stopPolling()
     })
   }
 

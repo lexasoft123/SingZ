@@ -2,6 +2,8 @@ import type { BoxPlatformSnapshot } from '../../../../shared/box-contract'
 import type { DesktopAudioHostInventoryResult } from '../../../../shared/types'
 import { tJourney, type JourneyKey } from './i18n'
 
+export type JourneyAudioInventory = DesktopAudioHostInventoryResult & { physicalInputCount?: number | null; physicalInputError?: string }
+
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '—'
   if (bytes < 1024) return `${Math.round(bytes)} B`
@@ -16,14 +18,14 @@ export function formatBytes(bytes: number): string {
   return `${value.toFixed(digits)} ${units[unit]}`
 }
 
-export function audioCounts(inventory: DesktopAudioHostInventoryResult | null): {
+export function audioCounts(inventory: JourneyAudioInventory | null): {
   outputs: number
   inputs: number
 } {
   if (!inventory?.ok) return { outputs: 0, inputs: 0 }
   return {
     outputs: inventory.devices.filter(device => device.outputChannels > 0).length,
-    inputs: inventory.devices.filter(device => device.inputChannels > 0).length
+    inputs: inventory.physicalInputCount ?? inventory.devices.filter(device => device.inputChannels > 0).length
   }
 }
 

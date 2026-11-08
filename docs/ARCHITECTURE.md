@@ -20,14 +20,25 @@ App.tsx (orchestration)                           projects.ts  ~/Documents/SingZ
 
 Desktop song playback, training cues, native microphone capture and the FLOW 8
 microphone/main-mix → HDMI relay run in **SingZ Audio**, a dedicated Electron
-Node utility process (`src/main/audio-service.ts`). Electron main never loads
-`singz-capture.node`. `audio-process.ts` sends asynchronous control requests;
+Node utility process (`src/main/audio-service.ts`). The UI-owning Electron main
+process never loads `singz-capture.node`. `audio-process.ts` sends asynchronous control requests;
 the service retains the existing `CaptureOwner`, native shared service, device
 hosts and DSP engine. This is an address-space boundary, not a worker thread:
 Chromium launching camera/helper processes must not hold the audio workers'
 process memory-map lock.
 
-The Electron main process owns the service lifetime and file authorization.
+SingZ Box can instead connect to its separately supervised `--box-audio-host`
+process over a private Unix socket. This headless process loads the same verified
+native addon only after establishing its isolated profile and exclusive owner
+capability. LoopZ owns physical routes; native song rendering feeds a bounded
+history source inside that process. UI disconnects preserve public routing and
+playback; uncertain commands require canonical reconciliation rather than helper
+termination or replay. The trusted TV configures routes; phone guests keep their
+transport, mix and queue scope. Private input analysis uses the native LoopZ tap to share routed captures
+without a second device owner. See the
+[Box integration contract](specs/singz-box/loopz-integration.md).
+
+For the Desktop utility path, the Electron main process owns the service lifetime and file authorization.
 Playback and relay survive a renderer reload; renderer-owned microphone
 analysis and headphone monitoring release on detach. Destroying the owning
 webContents releases all of its native ownership; app quit closes the service.

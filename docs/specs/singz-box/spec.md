@@ -79,7 +79,7 @@ research. Screen IDs are defined in section 5.
 | J06 Connect collection | Approve Drive on phone or continue with existing local songs | S06, S20, P02 | QR/link and code, approval status, cancel/expiry/retry; separate phone-remote pairing | Never type credentials on TV; denial leaves offline songs intact | A07 |
 | J07 Discover and choose | Browse artist first; inspect key, BPM and vocal range | S07 → S08 | Flat catalog; remembered row; known values or unknown marker | Can I sing it? Missing analysis is not fabricated data | A08, A09 |
 | J08 Prepare unavailable song | Open a Drive song and choose Sing | S08 → S09 → S08 | Download/verify stems and lyrics; show progress; enable Sing only when usable | Network/storage/integrity failure; cancel, retry or pick offline song | A10, A11 |
-| J09 Start singing | Open prepared song; deliberately press Play | S10 → S11 | Start synchronized transport; large lyrics; controls hide after idle | Avoid surprise audio; no auto-start on open or after failure | A12, A13 |
+| J09 Start singing | Select a song, then deliberately choose Sing/Play on its preview | S08 → S10 → S11 | Open and start the chosen song with that single preview action; large lyrics; controls hide after idle | Catalog browsing is silent; failed, cancelled or superseded opens do not start playback | A12, A13 |
 | J09a Lyrics unavailable | Understand missing, empty or unsynchronized lyrics | S27 → S08/S10 | Explain lyric state; offer return/retry and an explicit instrumental option if approved | Never invent synchronized text or silently present stale lyrics | A23 |
 | J10 Adjust during singing | Wake remote controls; open Mix; adjust stem or mic | S11 → S12 → S13/S14 → S11 | First key only wakes; mixing retains playback; Back restores Play focus | Accidental pause/seek or wrong mic; expose labels and absolute levels | A13, A14 |
 | J11 Run the evening | Queue, reorder, remove, select next song | S15, S08, S10 | Queue stays stable during preparation and navigation; explicit next-song policy | Avoid missing/duplicate entries or unrequested autoplay | A15 |
@@ -105,8 +105,9 @@ flowchart TD
   Prepare -->|Ready| Detail
   Prepare -->|Error| Retry[Retry, cancel or offline song]
   Retry --> Catalog
-  Ready -->|Yes| Paused[Player paused]
-  Paused -->|Play| Sing[Large lyrics and hidden controls]
+  Ready -->|Preview Sing / Play| Sing[Large lyrics and hidden controls]
+  Sing -->|Pause| Paused[Player paused]
+  Paused -->|Play| Sing
   Sing -->|First remote key| Wake[Controls visible, key consumed]
   Wake -->|Mix| Mixer[On demand mixer]
   Mixer -->|Back| Wake
@@ -226,13 +227,15 @@ A screen is not complete until its entry, exit, focus and failure states are cov
 | PREP-01 | Preparation is cancellable and generation-scoped. Old task completion cannot open or overwrite another selected song. |
 | PREP-02 | Verify required files before publishing ready state. Atomic local availability survives reboot; partial downloads do not become playable projects. |
 | PREP-03 | Cache removal affects this box only. A partial TV collection cannot delete desktop or cloud projects. |
-| PLAY-01 | Opening a song is paused. Play/Pause UI, authoritative audio transport and lyric time agree. Seek and end-of-song restore coherent focus. |
-| PLAY-02 | On-demand mixer changes the intended stem/mic only and does not pause transport. State survives close/reopen and, after qualification, restart. |
+| PLAY-01 | Catalog selection opens a silent preview. Its explicit Sing/Play action opens and starts the chosen song once without another Play press; generic project opening and queue-only selection may still open paused. Failed, cancelled or superseded start intents never start a different song. Play/Pause UI, authoritative audio transport and lyric time agree. Seek and end-of-song restore coherent focus. |
+| PLAY-02 | On-demand mixer changes the intended stem/mic only and does not pause transport. State survives close/reopen and, after qualification, restart. Stepped dB sliders render values aligned to their step grid; saved gain and its readout stay exact until user input. |
 | PLAY-03 | Queue browsing preserves the current transport. Back returns to the current song's lyrics and Play focus. Reordering/removing entries never changes active playback; replacing the active song is deliberate. |
+| PLAY-04 | Lyric highlighting uses the shaped text’s measured geometry with a continuous amber edge and glyph-shaped bright core/glow. Seconds and 3/2/1 dots sit just above the lyric line they lead into and guide vocal entries through intros and instrumental gaps independently of audio metronome settings; they hide while paused. Painting pauses under dialogs and resumes at the current accepted song time. Very long wrapped single tokens retain readable text when single-run masks cannot represent them. |
 | QUEUE-01 | Proposed baseline: manual next-song selection, no autoplay. Opening does not consume a queued item; remove is explicit. If autoplay is added, specify consent, failure and consumption rules first. |
 | AUDIO-01 | UI restart/reconnection reads authoritative audio state instead of restarting playback or restoring stale levels. A separate native audio service is the proposed isolation architecture, to be confirmed during implementation. |
 | AUDIO-02 | FLOW 8 USB and HDMI are explicit output choices. Mic 1/Mic 2 route independently. No automatic loud-route fallback after unplug. |
 | AUDIO-03 | Proposed initial mix controls change local DSP levels. Hardware FLOW 8 control is a separate adapter capability; relative commands require fresh qualified readback or explicit takeover. Stale requested values must not raise volume after a physical fader move. |
+| AUDIO-04 | A persistent Box-wide metronome override either follows song settings or suppresses both clicks and audio count-in for current and future songs, without rewriting project preferences. Policy changes pause playback and require audio acknowledgement; failures do not silently restore audible song cues. |
 | AUTH-01 | Phone controller pairing and Drive authorization are independent revocable sessions. TV shows public codes/URLs only; secrets stay in trusted services. |
 | STORE-01 | Persist effective audio routes, approved account state, verified project availability and per-project stem preferences atomically. Queue persistence is proposed on the same box; no cloud queue sync implied. |
 | NET-01 | Network status reflects service results; choosing Wi-Fi is not equivalent to successful connection. Preserve a recovery link or offline continuation. |
@@ -274,9 +277,9 @@ prove a service or hardware scenario. Audit case IDs and evidence live separatel
 | A07 Phone authorization | Unauthorized, denied, expired or canceled session | Approval succeeds/fails/races cancel | Only live approval signs in; retry works; offline library survives | AUTH-01, S06/20, P02 |
 | A08 Catalog order | Collection has analyzed and unknown metadata | Browse | Artist first; song/key/BPM/range/time; optional accessible state icon | BOX-04/05, LIB-01, S07 |
 | A09 Catalog transitions | Loading/empty/error/offline collection | Service changes state | Truthful screen, actionable fallback, stable remembered row | LIB-02, NAV-02, S07 |
-| A10 Prepare/retry | Drive-only song | Prepare, fail, retry | Progress, enabled Cancel/Retry, verified ready; Sing opens paused | PREP-01/02, S08/09 |
+| A10 Prepare/retry | Drive-only song | Prepare, fail, retry | Progress, enabled Cancel/Retry, verified ready; preview Sing opens and starts playback | PREP-01/02, S08/09 |
 | A11 Cancel race/storage | Preparation in progress | Cancel, switch song, corrupt file or fill storage | Stale completion ignored; no partial-ready state; verified older copy safe | PREP-01–03, S09/21 |
-| A12 Play from ready | Stems and lyrics exist without original | Open and Play; seek; pause | Audio advances, lyrics synchronize, controls agree; open itself is silent | PLAY-01, S08/10/11 |
+| A12 Play from ready | Stems and lyrics exist without original | Select catalog song; choose Sing/Play on preview; seek; pause | Preview remains silent until its explicit action; that action opens and starts once, lyrics synchronize, controls agree | PLAY-01, S08/10/11 |
 | A13 Idle/wake | Singing, controls visible | Idle ≥5s, then Enter/Back/direction/media held | Hidden controls cannot act; first sequence wakes only; next press acts | BOX-07, NAV-06/07, S11/12 |
 | A14 Mix/focus | Song playing | Open Mix, alter one lane, Back | Playback continues; correct lane changes; Play focus restored | PLAY-02, NAV-04/05, S13/14 |
 | A15 Queue lifecycle | Ready and Drive-only queued songs | Reorder/remove/open/prepare/cancel | Explicit ordering/removal, no surprise autoplay/consumption | QUEUE-01, S15 |

@@ -32,7 +32,7 @@ Production outputs are `out/renderer/index.html` for Desktop and
   tolerance and legacy zero spans, and rejects out-of-line, backward,
   non-finite, empty and untimed data. Opening a song never invokes lyric
   search, transcription or alignment.
-- One app-lifetime `MultitrackEngine`: paused open, native transport clock,
+- One app-lifetime `MultitrackEngine`: generic paused open plus explicit preview Sing/Play start, native transport clock,
   play/pause/seek, end handling, per-word highlighting and explicit cleanup.
 - Audio Settings with native device inventory, remote navigation and draft
   Apply/Cancel. Linux/ALSA output selection is session-only. Browsing preserves
@@ -96,11 +96,21 @@ Use a supported board/TV/audio interface and a separate test profile/library.
 Retain the prior runtime and a rollback path before replacing an appliance
 runtime. App checks do not authorize firmware, hardware mixer or host OS changes.
 
+For quiet automated playback checks, enable **Global overrides → Metronome →
+Always off** before Play and verify native `cueEventCount` and
+`countInEventCount` are zero. A zero song master gain alone does not prove that
+generated click/count-in cues are silent. Keep original project preferences
+unchanged; the override belongs to this Box profile.
+
 Verify fresh startup focus without pointer input, actual directions/OK/Back,
-4K scale and fonts, output inventory, explicit route Apply and paused song open.
+4K scale and fonts, output inventory, explicit route Apply, silent catalog previews, and one-action Sing/Play from the preview.
+Check cancelled/failed opens and repeated remote input do not start a different song.
 During playback, inspect native frame/callback progression, underrun/error
 counters and the physical PCM format. Browse mixer/queue/settings, then verify
-Back and wake-only input. Pair a handset, approve it on TV, exercise playback,
+Back and wake-only input. Reach mixer sliders from its normal initial focus using
+only remote directions before changing a value: directly focusing a slider in
+a test does not verify that a person can reach it. Check both Main and Stems,
+master gain readback, and return from each mixer tab. Pair a handset, approve it on TV, exercise playback,
 mixing and queue changes, and revoke it. Confirm QR scanning and audible output
 with a person; telemetry alone cannot establish either.
 
@@ -108,3 +118,5 @@ Qualify microphone routing/monitoring, USB reconnect/device-loss recovery,
 long-run playback, latency and physical CEC/HID behavior separately. Network
 provisioning, signed image installation, boot health and rollback need real
 OS-service and failure-injection tests; the screen contract alone is insufficient.
+
+See [HDMI-CEC input](cec-input.md) for adapter selection, remote mappings, diagnostics and physical qualification.

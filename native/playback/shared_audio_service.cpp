@@ -1,4 +1,7 @@
 #include "shared_audio_service.h"
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+#include "box_routing_owner.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -257,8 +260,12 @@ struct SharedAudioService::Impl {
     {
       AudioInputCallbackScope scope(self.playback.gate);
       if (scope && self.playback.render &&
-          !self.playback.render(self.playback.context, block))
+          !self.playback.render(self.playback.context, block)) {
         self.playback.failed.store(true, std::memory_order_release);
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+        recordBoxSongFailure(block.callbackHostTimeNs, block.frames);
+#endif
+      }
       if (scope) {
         self.playback.callbacks.fetch_add(1, std::memory_order_relaxed);
         self.playback.frames.fetch_add(block.frames, std::memory_order_relaxed);
@@ -348,6 +355,12 @@ struct SharedAudioService::Impl {
     config.outputDeviceUid = selected;
     return config;
   }
+  void retireIdleBoxProducerLocked() noexcept {
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+    if (provider == "box-loopz" && !playback.render &&
+        !training.render && !microphone.render) backend->stop();
+#endif
+  }
   AudioHostResult ensureLocked() {
     parked = false;
     auto result = openLocked(preferredRouteLocked());
@@ -361,7 +374,11 @@ class SharedAudioService::Client final : public AudioHostBackend {
  public:
   Client(SharedAudioService& service, std::unique_ptr<AudioHostBackend> backend,
          std::string provider)
-      : service_(service), candidate_(std::move(backend)), provider_(std::move(provider)) {}
+      : service_(service), candidate_(std::move(backend)), provider_(std::move(provider)) {
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+    if (boxRoutingInitialized()) provider_ = "box-loopz";
+#endif
+  }
   ~Client() override { stop(); }
   AudioHostInventory enumerate() const override { return service_.inventory(); }
   std::optional<AudioHostDeviceInfo> describeOutputDevice(const std::string& uid) const override {
@@ -429,6 +446,7 @@ class SharedAudioService::Client final : public AudioHostBackend {
     self.playback.render = nullptr;
     self.playback.context = nullptr;
     self.playback.failed.store(false, std::memory_order_release);
+    self.retireIdleBoxProducerLocked();
     attached_ = false;
     state_ = AudioHostState::Stopped;
   }
@@ -509,7 +527,12 @@ AudioHostResult SharedAudioService::configureOutput(const std::string& preferred
 AudioHostResult SharedAudioService::configureProvider(std::unique_ptr<AudioHostBackend> backend,
                                                     const std::string& provider) {
   std::lock_guard<std::mutex> lock(impl_->mutex);
-  if (impl_->provider == provider) {
+  const std::string effectiveProvider =
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+      boxRoutingInitialized() ? "box-loopz" :
+#endif
+      provider;
+  if (impl_->provider == effectiveProvider) {
     const auto status = impl_->backend->status();
     return {true,AudioHostError::None,status.state,status.format,status.latency,{}};
   }
@@ -518,7 +541,7 @@ AudioHostResult SharedAudioService::configureProvider(std::unique_ptr<AudioHostB
   impl_->outputGeneration.fetch_add(1, std::memory_order_release);
   impl_->backend->stop();
   impl_->removeListeners();
-  impl_->backend = std::move(backend); impl_->provider = provider;
+  impl_->backend = std::move(backend); impl_->provider = effectiveProvider;
   impl_->route = {}; impl_->preferredOutputUid.clear(); impl_->enumerated = false;
   return impl_->openLocked({});
 }
@@ -551,6 +574,7 @@ void SharedAudioService::setTrainingRenderer(AudioHostRender render, void* conte
   impl_->training.context = context;
   impl_->training.failed.store(false, std::memory_order_release);
   if (render) impl_->training.gate.open();
+  else impl_->retireIdleBoxProducerLocked();
 }
 void SharedAudioService::clearTrainingRenderer() { setTrainingRenderer(nullptr, nullptr); }
 void SharedAudioService::setMicrophoneRenderer(AudioHostRender render, void* context) {
@@ -560,6 +584,7 @@ void SharedAudioService::setMicrophoneRenderer(AudioHostRender render, void* con
   impl_->microphone.context = context;
   impl_->microphone.failed.store(false, std::memory_order_release);
   if (render) impl_->microphone.gate.open();
+  else impl_->retireIdleBoxProducerLocked();
 }
 void SharedAudioService::clearMicrophoneRenderer() { setMicrophoneRenderer(nullptr, nullptr); }
 AudioHostStatus SharedAudioService::status() const {

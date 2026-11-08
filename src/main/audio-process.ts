@@ -1,9 +1,12 @@
+import { retainedPlaybackSnapshot } from '../shared/box-retained-playback'
+import type { BoxRetainedPlaybackSnapshot } from '../shared/box-contract'
 import { app, utilityProcess, type UtilityProcess } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CaptureOwner, type NativeCaptureBinding } from './capture'
 import { log, logChunk } from './log'
+import { createBoxAudioClient } from './box-audio/client'
 import {
   AUDIO_BINDING_METHODS,
   AudioProcessRpc,
@@ -210,7 +213,9 @@ class DesktopAudioProcess {
 
 }
 
-export const desktopAudioProcess = new DesktopAudioProcess()
+const boxAudioProcess = process.env.SINGZ_SURFACE === 'box' && process.env.SINGZ_BOX_AUDIO_SOCKET
+  ? createBoxAudioClient(process.env.SINGZ_BOX_AUDIO_SOCKET) : undefined
+export const desktopAudioProcess = boxAudioProcess ?? new DesktopAudioProcess()
 
 let lastFallbackError = ''
 let lastFallbackLogAt = 0
@@ -248,6 +253,7 @@ export function createRemoteCaptureOwner(): Omit<AsyncCaptureOwner, 'bindRendere
         try { return await desktopAudioProcess.call('owner', method, args) }
         catch (error) {
           reportFallback(method, error)
+          if (process.env.SINGZ_SURFACE === 'box' && process.env.SINGZ_BOX_AUDIO_SOCKET) throw error
           const fallback = unavailable[method as keyof CaptureOwner]
           if (typeof fallback !== 'function') throw error
           const result = (fallback as (...args: unknown[]) => unknown).apply(unavailable, args)
@@ -271,4 +277,35 @@ export function remoteCaptureBinding(): AwaitableCaptureBinding {
         : Promise.reject(new Error(`Unknown raw audio method: ${method}`))
     }
   }) as AwaitableCaptureBinding
+}
+
+function requireBoxAudioSocket(): void {
+  if (process.env.SINGZ_SURFACE !== 'box' || !process.env.SINGZ_BOX_AUDIO_SOCKET)
+    throw new Error('Persistent Box audio is not configured')
+}
+/** Trusted main-process routing only; never expose directly to phone guests. */
+export function boxRoutingRequest(json: string): Promise<string> {
+  requireBoxAudioSocket()
+  return boxAudioProcess!.call('routing', 'request', [json])
+}
+export function boxRoutingCapabilities(): Promise<unknown> {
+  requireBoxAudioSocket()
+  return boxAudioProcess!.call('routing', 'capabilities', [])
+}
+export function boxRoutingReconcile(): Promise<unknown> {
+  requireBoxAudioSocket()
+  return boxAudioProcess!.call('service', 'reconcile', [])
+}
+
+/** Explicit retained-session recovery reads are separate from active-player polling. */
+export async function boxRetainedPlaybackSnapshot(): Promise<BoxRetainedPlaybackSnapshot> {
+  requireBoxAudioSocket()
+  return retainedPlaybackSnapshot(await boxAudioProcess!.reconcile())
+}
+export async function boxStopRetainedPlayback(expected: { epoch: string; generation: string }): Promise<BoxRetainedPlaybackSnapshot> {
+  requireBoxAudioSocket()
+  // Clear uncertainty through an idle barrier, retaining the TV's original
+  // expected revision. The serialized host rejects stale epochs/generations.
+  await boxAudioProcess!.reconcile()
+  return retainedPlaybackSnapshot(await boxAudioProcess!.call('service', 'stopRetained', [expected]))
 }

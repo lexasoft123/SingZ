@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { DesktopAudioHostInventoryResult } from '../../../../shared/types'
+import type { SingzApi } from '../../../../shared/types'
+import type { JourneyAudioInventory } from './format'
 import { errorText } from './api'
 import { tJourney } from './i18n'
 import { useJourneyResource } from './resource'
@@ -10,7 +11,7 @@ export type DriveStatus = Awaited<ReturnType<typeof window.singz.gdriveStatus>>
 export function useInventory(audioActive: boolean, driveActive: boolean, onSignOut?: () => Promise<boolean>) {
   const signOutOwner = useRef(onSignOut)
   signOutOwner.current = onSignOut
-  const audio = useJourneyResource<DesktopAudioHostInventoryResult>()
+  const audio = useJourneyResource<JourneyAudioInventory>()
   const drive = useJourneyResource<DriveStatus>()
   const audioService = useRef(audio)
   const driveService = useRef(drive)
@@ -23,8 +24,11 @@ export function useInventory(audioActive: boolean, driveActive: boolean, onSignO
     const current = audioService.current
     const token = current.begin()
     try {
-      const result = await window.singz.audioHostDevices()
-      if (result.ok) current.succeed(token, result)
+      const result = await readJourneyAudioInventory(window.singz, window.singz.boxAudioPersistent)
+      if (result.ok) {
+        current.succeed(token, result)
+        if (result.physicalInputError) current.fail(token, result.physicalInputError)
+      }
       else current.fail(token, result.error)
     } catch (error) {
       current.fail(token, errorText(error))
@@ -86,4 +90,13 @@ export function useInventory(audioActive: boolean, driveActive: boolean, onSignO
     refreshDrive,
     signOut
   }
+}
+
+/** Read-only summary override, not a synthetic physical playback inventory. */
+export async function readJourneyAudioInventory(api: Pick<SingzApi, 'audioHostDevices' | 'captureInputDevices'>, persistent: boolean): Promise<JourneyAudioInventory> {
+  const physical = persistent ? api.captureInputDevices().then(result => result.ok
+    ? { count: result.devices.filter(device => device.channels > 0).length }
+    : { count: null, error: result.error }).catch(error => ({ count: null, error: errorText(error) })) : null
+  const [audio, inputs] = await Promise.all([api.audioHostDevices(), physical])
+  return inputs ? { ...audio, physicalInputCount: inputs.count, physicalInputError: 'error' in inputs ? inputs.error : undefined } : audio
 }

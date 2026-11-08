@@ -3,6 +3,8 @@
 const {
   createWriteStream,
   existsSync,
+  lstatSync,
+  realpathSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -14,9 +16,9 @@ const {
 } = require('node:fs')
 const { createHash } = require('node:crypto')
 const { get } = require('node:https')
-const { basename, dirname, join, relative, resolve } = require('node:path')
+const { basename, dirname, isAbsolute, join, relative, resolve, sep } = require('node:path')
 const { spawnSync } = require('node:child_process')
-const { zcoreGitlinkRevision } = require('./zcore-gitlink.cjs')
+const { zcoreGitlinkRevision, loopzBuildInputs } = require('./zcore-gitlink.cjs')
 const {
   assertHostCanBuildTarget,
   assertSourceFingerprintUnchanged,
@@ -248,6 +250,7 @@ function extractHeaders(archivePath, cwd, extract = run) {
 // in src/main/capture.ts; a unit test compares both implementations.
 function sourceFingerprint() {
   const zcoreRevision = zcoreGitlinkRevision(root)
+  const loopz = loopzBuildInputs(root)
   const files = []
   const walk = (dir) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -268,10 +271,12 @@ function sourceFingerprint() {
     join(root, 'scripts', 'zcore-gitlink.cjs'),
     join(root, 'scripts/ccache-launcher.sh'),
     join(root, 'scripts/ccache-launcher.ps1'), __filename)
+  files.push(...loopz.files)
   files.sort()
   const hash = createHash('sha1')
   hash.update(`electron ${electronVersion}\n`)
   hash.update(`third_party/zcore.gitlink ${zcoreRevision}\n`)
+  hash.update(`third_party/loopz.gitlink ${loopz.revision}\n`)
   for (const file of files) {
     hash.update(`${relative(root, file)} ${statSync(file).size} `)
     hash.update(createHash('sha1').update(readFileSync(file)).digest('hex'))
@@ -665,12 +670,52 @@ function prunePackageDebris(destination) {
   }
 }
 
+/** Reuse only a real CMake tree owned by this checkout; never follow output links. */
+function captureBuildDirectory(checkoutRoot, requestedTarget, override) {
+  const checkout = resolve(checkoutRoot)
+  if (!override) return join(checkout, 'build', `capture-${requestedTarget}`)
+  if (typeof override !== 'string' || override.includes('\0')) throw new Error('Invalid SINGZ_CAPTURE_BUILD_DIR')
+  const boundary = join(checkout, 'build')
+  const selected = resolve(checkout, override)
+  const suffix = relative(boundary, selected)
+  if (!suffix || isAbsolute(suffix) || suffix === '..' || suffix.startsWith(`..${sep}`)) {
+    throw new Error('SINGZ_CAPTURE_BUILD_DIR must be beneath this checkout build/ directory')
+  }
+  // Walk every component even if the final directory does not exist. Checking
+  // realpath only on the final path would miss links to mutable sibling builds.
+  let cursor = checkout
+  for (const component of ['', 'build', ...suffix.split(sep)]) {
+    if (component) cursor = join(cursor, component)
+    let info
+    try { info = lstatSync(cursor) }
+    catch (error) { if (error.code === 'ENOENT') continue; throw error }
+    if (info.isSymbolicLink()) throw new Error('SINGZ_CAPTURE_BUILD_DIR must not contain symbolic links')
+    if (!info.isDirectory()) throw new Error('SINGZ_CAPTURE_BUILD_DIR must contain only directories')
+  }
+  const cache = join(selected, 'CMakeCache.txt')
+  let info
+  try { info = lstatSync(cache) }
+  catch (error) {
+    if (error.code === 'ENOENT') throw new Error('SINGZ_CAPTURE_BUILD_DIR must be an existing configured CMake build')
+    throw error
+  }
+  if (info.isSymbolicLink() || !info.isFile() || info.nlink !== 1) {
+    throw new Error('SINGZ_CAPTURE_BUILD_DIR requires a local regular CMakeCache.txt')
+  }
+  const home = readFileSync(cache, 'utf8').match(/^CMAKE_HOME_DIRECTORY:INTERNAL=(.+)\r?$/m)?.[1]
+  if (!home || realpathSync(resolve(home.replace(/\r$/, ''))) !== realpathSync(checkout)) {
+    throw new Error('SINGZ_CAPTURE_BUILD_DIR belongs to a different source checkout')
+  }
+  return selected
+}
+
 async function main() {
   const fingerprint = sourceFingerprint()
   if (printingFingerprint) {
     console.log(fingerprint)
     return
   }
+  const buildDir = captureBuildDirectory(root, target, process.env.SINGZ_CAPTURE_BUILD_DIR)
   const codecPack = loadCodecPack()
   const buildPolicy = nativeBuildPolicy()
   let addon
@@ -704,13 +749,13 @@ async function main() {
       await downloadHeaderFile(`https://electronjs.org/headers/v${electronVersion}/win-x64/node.lib`, nodeLibrary)
     }
 
-    const buildDir = join(root, 'build', `capture-${target}`)
     const configure = [
       '-S', root,
       '-B', buildDir,
       '-DSINGZ_BUILD_HOST_TOOLS=OFF',
       '-DSINGZ_CORE_TESTS=OFF',
       '-DSINGZ_BUILD_ELECTRON_CAPTURE=ON',
+      `-DSINGZ_BOX_LOOPZ_ROUTING=${platform === 'linux' ? 'ON' : 'OFF'}`,
       '-DCMAKE_BUILD_TYPE=Release',
       `-DSINGZ_NODE_INCLUDE_DIR=${includeDir}`,
       `-DSINGZ_CAPTURE_ELECTRON=${electronVersion}`,
@@ -790,4 +835,4 @@ if (runningAsScript) {
   }
 }
 
-module.exports = { download, downloadHeaderFile, extractHeaders, findAddon, sourceFingerprint }
+module.exports = { download, downloadHeaderFile, extractHeaders, findAddon, sourceFingerprint, captureBuildDirectory }

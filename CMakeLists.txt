@@ -23,6 +23,7 @@ option(SINGZ_CORE_TESTS "Build the host test suite" ON)
 option(SINGZ_BUILD_HOST_TOOLS "Build singz-analyze and native host tests" ON)
 option(SINGZ_BUILD_ML "Build the ONNX-backed mobile analysis/split adapter" OFF)
 option(SINGZ_BUILD_ELECTRON_CAPTURE "Build the stable Node-API capture addon" OFF)
+option(SINGZ_BOX_LOOPZ_ROUTING "Build the independent Box LoopZ routing host" OFF)
 option(SINGZ_ENABLE_FFMPEG_CODECS
   "Enable descriptor-only extended codecs through dynamic FFmpeg libraries" OFF)
 set(SINGZ_FFMPEG_INCLUDE_DIR "" CACHE PATH
@@ -119,6 +120,45 @@ foreach(_target IN LISTS _zcore_targets)
     add_dependencies("${_target}" singz_verify_zcore)
   endif()
 endforeach()
+
+if(SINGZ_BOX_LOOPZ_ROUTING)
+  if(CMAKE_VERSION VERSION_LESS 3.24)
+    message(FATAL_ERROR "Box LoopZ routing requires CMake 3.24 or newer")
+  endif()
+  execute_process(
+    COMMAND "${Python3_EXECUTABLE}"
+      "${SINGZ_REPO_ROOT}/scripts/verify-zcore-submodule.py"
+      --root "${SINGZ_REPO_ROOT}" --path third_party/loopz
+    RESULT_VARIABLE _loopz_verify_status
+    OUTPUT_VARIABLE _loopz_verify_stdout ERROR_VARIABLE _loopz_verify_stderr)
+  if(NOT _loopz_verify_status EQUAL 0)
+    message(FATAL_ERROR "Pinned LoopZ verification failed:\n${_loopz_verify_stdout}${_loopz_verify_stderr}")
+  endif()
+  set(LOOPZ_SHARED_ZCORE_ROOT "${ZCORE_ROOT}" CACHE PATH "Shared verified zCore" FORCE)
+  set(LOOPZ_BUILD_MACOS_BACKEND OFF CACHE BOOL "" FORCE)
+  set(LOOPZ_BUILD_ENGINE OFF CACHE BOOL "" FORCE)
+  set(LOOPZ_BUILD_RUNTIME_LIBRARY ON CACHE BOOL "" FORCE)
+  set(LOOPZ_BUILD_CONTROL_LIBRARY ON CACHE BOOL "" FORCE)
+  set(LOOPZ_BUILD_LINUX_DESKTOP OFF CACHE BOOL "" FORCE)
+  set(LOOPZ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  add_subdirectory(third_party/loopz)
+  # The control serializer also enters Electron's shared Node-API module.
+  set_target_properties(loopz_document_json PROPERTIES POSITION_INDEPENDENT_CODE YES)
+  add_custom_target(singz_verify_loopz ALL
+    COMMAND "${Python3_EXECUTABLE}"
+      "${SINGZ_REPO_ROOT}/scripts/verify-zcore-submodule.py"
+      --root "${SINGZ_REPO_ROOT}" --path third_party/loopz
+    VERBATIM COMMENT "Verifying pinned LoopZ source snapshot")
+  add_library(singz_box_routing OBJECT
+    native/playback/loopz_source_backend.cpp
+    native/playback/box_routing_owner.cpp
+    native/playback/box_input_capture.cpp)
+  target_compile_features(singz_box_routing PUBLIC cxx_std_20)
+  target_compile_definitions(singz_box_routing PUBLIC SINGZ_BOX_LOOPZ_ROUTING=1)
+  target_link_libraries(singz_box_routing PUBLIC LoopZ::Control SingZ::zcore_device)
+  set_target_properties(singz_box_routing PROPERTIES POSITION_INDEPENDENT_CODE YES)
+  add_dependencies(singz_box_routing singz_verify_loopz)
+endif()
 
 add_subdirectory(third_party/native)
 include(cmake/SingZAppNative.cmake)
@@ -256,6 +296,10 @@ set_target_properties(singz_native_playback_session PROPERTIES
   POSITION_INDEPENDENT_CODE YES CXX_EXTENSIONS OFF
   CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN YES)
 
+if(SINGZ_BOX_LOOPZ_ROUTING)
+  target_link_libraries(singz_native_playback_session PUBLIC singz_box_routing)
+endif()
+
 # Phase 4A monitor callback leaf. The actual host thunk, silence containment,
 # and terminal counters compile independently from the control-domain session
 # owner and are scanned from the target's authoritative source list.
@@ -361,6 +405,9 @@ if(SINGZ_BUILD_ELECTRON_CAPTURE)
     SingZ::monitor_callback
     SingZ::native_playback_session
     singz_native_audio_ownership)
+  if(SINGZ_BOX_LOOPZ_ROUTING)
+    target_sources(singz_capture PRIVATE native/electron/box_routing_bridge.cpp)
+  endif()
   set_target_properties(singz_capture PROPERTIES
     PREFIX ""
     SUFFIX ".node"
@@ -983,4 +1030,38 @@ if(BUILD_TESTING)
   target_compile_features(training_pcm_mixer_tests PRIVATE cxx_std_20)
   target_link_libraries(training_pcm_mixer_tests PRIVATE SingZ::zcore_device)
   add_test(NAME training_pcm_mixer_tests COMMAND training_pcm_mixer_tests)
+endif()
+
+if(BUILD_TESTING AND SINGZ_BOX_LOOPZ_ROUTING)
+  add_executable(loopz_source_backend_tests
+    tests/native/loopz_source_backend_tests.cpp
+    native/playback/loopz_source_backend.cpp)
+  target_compile_features(loopz_source_backend_tests PRIVATE cxx_std_20)
+  target_include_directories(loopz_source_backend_tests PRIVATE "${SINGZ_REPO_ROOT}")
+  target_link_libraries(loopz_source_backend_tests PRIVATE LoopZ::Runtime Threads::Threads)
+  add_test(NAME loopz_source_backend_tests COMMAND loopz_source_backend_tests)
+
+  add_executable(box_routing_owner_tests
+    tests/native/box_routing_owner_tests.cpp
+    native/playback/box_routing_owner.cpp
+    native/playback/box_input_capture.cpp
+    native/playback/loopz_source_backend.cpp
+    native/playback/shared_audio_service.cpp)
+  target_compile_features(box_routing_owner_tests PRIVATE cxx_std_20)
+  target_compile_definitions(box_routing_owner_tests PRIVATE SINGZ_BOX_LOOPZ_ROUTING=1)
+  target_include_directories(box_routing_owner_tests PRIVATE "${SINGZ_REPO_ROOT}")
+  target_link_libraries(box_routing_owner_tests PRIVATE LoopZ::Control Threads::Threads)
+  add_test(NAME box_routing_owner_tests COMMAND box_routing_owner_tests)
+  add_executable(box_input_capture_tests
+    tests/native/box_input_capture_tests.cpp
+    native/playback/box_routing_owner.cpp
+    native/playback/box_input_capture.cpp
+    native/playback/loopz_source_backend.cpp
+    native/playback/shared_audio_service.cpp)
+  target_compile_features(box_input_capture_tests PRIVATE cxx_std_20)
+  target_compile_definitions(box_input_capture_tests PRIVATE SINGZ_BOX_LOOPZ_ROUTING=1)
+  target_include_directories(box_input_capture_tests PRIVATE "${SINGZ_REPO_ROOT}")
+  target_link_libraries(box_input_capture_tests PRIVATE LoopZ::Control Threads::Threads)
+  add_test(NAME box_input_capture_tests COMMAND box_input_capture_tests)
+  set_tests_properties(loopz_source_backend_tests box_routing_owner_tests box_input_capture_tests PROPERTIES TIMEOUT 20)
 endif()

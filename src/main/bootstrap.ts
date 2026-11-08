@@ -7,6 +7,7 @@ import {
   type ProductIdentity
 } from '../shared/product-identity'
 import { requestedRendererSurface } from './launch-surface'
+import { configureBoxAudioHostProfile } from './box-audio/profile'
 
 function packagedProductIdentity(): ProductIdentity {
   try {
@@ -39,6 +40,23 @@ function configureProductIdentity(argv: readonly string[], env: NodeJS.ProcessEn
 }
 
 export async function bootstrap(): Promise<void> {
+  if (process.argv.includes('--box-audio-host')) {
+    const authority = configureBoxAudioHostProfile(app, process.env)
+    if (!authority) {
+      app.exit(0)
+      return
+    }
+    // Electron emits ready after the initial ESM evaluation completes. Awaiting
+    // the host here would deadlock that evaluation on its own whenReady call.
+    void app.whenReady().then(async () => {
+      const { runBoxAudioHost } = await import('./box-audio/entry')
+      await runBoxAudioHost(authority)
+    }).catch(error => {
+      console.error('Box audio host startup failed:', error)
+      app.exit(1)
+    })
+    return
+  }
   configureProductIdentity(process.argv, process.env)
   await import('./index')
 }

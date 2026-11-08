@@ -1,4 +1,7 @@
 #include "playback_addon_bridge.h"
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+#include "../playback/box_routing_owner.h"
+#endif
 
 #include "native_audio_ownership.h"
 #include "../playback/shared_audio_service.h"
@@ -1393,6 +1396,12 @@ bool consumeProviderDeviceUid(const std::string &provider,
 #elif defined(__APPLE__)
   return provider == "coreaudio";
 #elif defined(__linux__) && !defined(__ANDROID__)
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+  // This is the advertised driverless song endpoint, never a physical ALSA UID.
+  // Admit it only after the independent Box host has installed its routing owner.
+  if (boxRoutingInitialized() && provider == "alsa" && *deviceUid == "native:singz")
+    return true;
+#endif
   return provider == "alsa" && deviceUid->starts_with("alsa:");
 #else
   (void)provider;

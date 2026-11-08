@@ -118,6 +118,19 @@ let app = null
   await watchdog.run('catalog Settings returns without opening a song', 60, async () => {
     await page.getByRole('button', { name: 'Settings', exact: true }).click()
     await page.waitForSelector('[data-journey-page="home"]')
+    await page.locator('[data-focus="journey-audio"]').focus()
+    await page.keyboard.press('ArrowDown')
+    const remoteFocus = await page.evaluate(() => {
+      const previous = document.querySelector('[data-focus="journey-audio"]')
+      const current = document.activeElement
+      return {
+        moved: current !== previous && current?.matches('.journey-row'),
+        immediate: [previous, current].every(element => getComputedStyle(element).transitionDuration.split(',').every(value => parseFloat(value) === 0)),
+        transitions: [previous, current].flatMap(element => element.getAnimations()).filter(animation => animation instanceof CSSTransition).length
+      }
+    })
+    check(remoteFocus.moved, 'remote arrow moves Settings focus on keydown')
+    check(remoteFocus.immediate && remoteFocus.transitions === 0, 'old and new TV focus settle immediately without desktop colour/glow transitions')
     await page.locator('[data-focus="journey-audio"]').click()
     await page.waitForSelector('[data-settings-back]')
     await page.locator('[data-settings-back]').click()
@@ -136,18 +149,16 @@ let app = null
     await page.getByRole('button', { name: '← Catalog' }).click()
   })
 
-  await watchdog.run('open A paused without its original', 90, async () => {
+  await watchdog.run('preview Sing starts A without its original', 90, async () => {
     await page.locator('.box-song-row', { hasText: 'Fixture A' }).click()
     await page.getByText('The original recording is absent. The prepared stems will be used instead.').waitFor()
     await page.getByRole('button', { name: 'Sing', exact: true }).click()
     await page.waitForSelector('.box-player[data-active-song]', { timeout: 60000 })
-    check(await page.locator('.box-player').getAttribute('data-playing') === 'false', 'verified song opens paused')
-    check(Number(await page.locator('.box-player').getAttribute('data-position')) === 0, 'verified song opens at zero')
+    check(await page.locator('.box-player').getAttribute('data-playing') === 'true', 'preview Sing starts the verified song')
     check((await page.locator('.player-lyrics').textContent()).includes('Silent fixture line one'), 'real cached project lyrics render')
   })
 
   await watchdog.run('play, pause and seek with the real transport', 90, async () => {
-    await page.locator('[data-control="play"]').click()
     await page.waitForFunction(() => Number(document.querySelector('.box-player').dataset.position) > 0.25, null, { timeout: 30000 })
     check(await page.locator('.box-player').getAttribute('data-playing') === 'true', 'native/shared engine enters playback')
     await page.locator('[data-control="play"]').click()

@@ -1,3 +1,4 @@
+import { withBoxAudioHostAuthority, type BoxAudioHostAuthority } from './box-audio/profile'
 import { audioApp as app, audioResourcesPath } from './audio-service-runtime'
 import { createHash, randomBytes } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
@@ -170,10 +171,12 @@ export function resolveCaptureAddonPath(runtime: CaptureAddonRuntime): string {
 export function captureSourceFingerprint(root: string, electronVersion: string): string {
   // Source fingerprints run only for development checkouts. Packaged apps do
   // not ship build scripts, so loading this helper must stay inside this path.
-  const { zcoreGitlinkRevision } = require(join(root, 'scripts', 'zcore-gitlink.cjs')) as {
+  const { zcoreGitlinkRevision, loopzBuildInputs } = require(join(root, 'scripts', 'zcore-gitlink.cjs')) as {
     zcoreGitlinkRevision(root: string): string
+    loopzBuildInputs(root: string): { revision: string; files: string[] }
   }
   const zcoreRevision = zcoreGitlinkRevision(root)
+  const loopz = loopzBuildInputs(root)
   const files: string[] = []
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -195,10 +198,12 @@ export function captureSourceFingerprint(root: string, electronVersion: string):
     join(root, 'scripts', 'ccache-launcher.sh'),
     join(root, 'scripts', 'ccache-launcher.ps1'),
     join(root, 'scripts', 'build-capture-addon.cjs'))
+  files.push(...loopz.files)
   files.sort()
   const hash = createHash('sha1')
   hash.update(`electron ${electronVersion}\n`)
   hash.update(`third_party/zcore.gitlink ${zcoreRevision}\n`)
+  hash.update(`third_party/loopz.gitlink ${loopz.revision}\n`)
   for (const file of files) {
     hash.update(`${relative(root, file)} ${statSync(file).size} `)
     hash.update(createHash('sha1').update(readFileSync(file)).digest('hex'))
@@ -1019,6 +1024,15 @@ const processCaptureBinding = sharedCaptureBindingLoader(() => loadCaptureBindin
 export function loadCaptureBinding(): NativeCaptureBinding {
   if (process.env.SINGZ_AUDIO_PROCESS !== '1' || !process.parentPort)
     throw new Error('Native audio can only load inside the dedicated audio process')
+  return loadProcessCaptureBinding()
+}
+
+/** Separate browser-main service authority; Desktop keeps the utility-only gate. */
+export function loadBoxAudioHostBinding(authority: BoxAudioHostAuthority): NativeCaptureBinding {
+  return withBoxAudioHostAuthority(authority, loadProcessCaptureBinding)
+}
+
+function loadProcessCaptureBinding(): NativeCaptureBinding {
   try { return processCaptureBinding() }
   catch (error) {
     if (error instanceof CaptureAddonLoadError) throw error

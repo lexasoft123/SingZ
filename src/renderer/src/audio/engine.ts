@@ -530,6 +530,29 @@ export class MultitrackEngine {
     return operation
   }
 
+  /** Closing the TV retires this UI, not its independently owned song.
+   * Already admitted plays/mutations settle before the native facade detaches;
+   * no public pause, unload or browser-output restoration is issued here. */
+  detachPersistentPlayback(): Promise<void> {
+    if (window.singz.boxAudioPersistent !== true) return Promise.reject(new Error('Persistent Box audio is not configured.'))
+    if (this.teardownPending) return this.teardownPending
+    this.teardownStarted = true
+    this.aheadAllowed = false
+    if (this.aheadTimer !== null) clearTimeout(this.aheadTimer)
+    this.aheadTimer = null
+    const operation = (async () => {
+      // Do not revoke generation before accepted native Play has drained: its
+      // supersession cleanup would unload the very song being preserved.
+      await Promise.allSettled([...this.pendingPlayRequests])
+      if (this.nativePlaybackUnload) await this.nativePlaybackUnload
+      await this.nativePlayback?.detachPersistentPlayback()
+      this.playRequestEpoch++
+      this.stopTransportForTeardown()
+      this.listeners.clear()
+    })()
+    return this.teardownPending = operation
+  }
+
   subscribe(fn: () => void): () => void {
     this.listeners.add(fn)
     return () => {
