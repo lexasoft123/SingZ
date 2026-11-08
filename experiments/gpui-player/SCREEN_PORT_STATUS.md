@@ -6,15 +6,22 @@ controls are implemented as a first slice; see `NATIVE_INTEGRATION.md`. Full vis
 and the remaining backend features remain separate.
 Common native controls live in sibling `singz-ui/gpui`.
 
-Draft checkpoint (2026-11-09): ruler/waveform region creation, edge resizing,
-click/Escape clearing, non-loop end stopping and optional-selection persistence
-are implemented. Three gesture tests, five project-store tests, the focused
-native region tests and the full native playback-session suite pass; the current
-UI-feature and production-helper builds pass. The combined hidden workflow passes
-navigation but currently stops awaiting its unmuted Karaoke baseline, before the
-region UI journey. Region gesture captures and end-to-end Save/reopen remain
-unverified. Native Karaoke preference persistence also remains missing. This is
-an in-progress migration draft, not a completed parity or release checkpoint.
+Draft follow-up (2026-11-09): the combined hidden graph workflow now passes in
+two independent launches with twelve captures. Karaoke defaults off, persists
+through the existing preference worker, restores on with an initially enabled
+guide muted by the actual native lane command, and persists off through Escape.
+Songs/catalog navigation pauses native playback and retains catalog state through
+Training. Region creation, both-edge resizing, click/Escape clearing, actual native
+non-loop end stopping and loop wrapping, and Save/reopen of selected/cleared
+regions pass at both desktop sizes. All four region captures were inspected;
+foreground identity stayed unchanged and all nine observed helpers retired.
+Three gesture tests, five project-store tests, focused native region tests, the
+full native playback-session suite, five preference tests and five focused
+Karaoke tests pass. Source review also fixed queued-preference loss at Quit,
+independent preference-write failures, and guide remuting on same-song handoffs.
+The latter lifecycle cases have scoped unit/source evidence, rather than a new
+physical-device or full visual-parity claim. Live FPS remains unmeasured. This
+is an in-progress migration draft, not a completed parity or release checkpoint.
 
 Completion audit (2026-11-09): the real native footer now reveals the vocal file
 through “Stem files”, and opening Karaoke mutes the guide vocal unless Carry is

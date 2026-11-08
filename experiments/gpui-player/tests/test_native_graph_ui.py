@@ -27,8 +27,12 @@ with tempfile.TemporaryDirectory(prefix='singz-native-graph-ui-') as tmp:
  if a.region:env['SINGZ_GPUI_TEST_REGION']='1'
  for stage in ('first','restart'):
   folder=out/stage;folder.mkdir(exist_ok=True);samples=[];errors=[];previous=None;before=front();started=time.monotonic();next_sample=0;helpers={}
+  input_project=json.loads((project/'project.json').read_text());input_guide_muted=input_project['settings']['tracks']['vocals']['muted']
+  (folder/'stage-input.json').write_text(json.dumps({'stage':stage,'projectSha256':sha(project/'project.json'),'inputGuideMuted':input_guide_muted,'fixturePreparation':'For Karaoke restart only, vocals.muted was set false after the first-stage actual Save proof; all other project fields retained' if a.karaoke and stage=='restart' else 'original or normally saved fixture'},indent=2))
+  stage_env={**env,'SINGZ_GPUI_INTEGRATION_TEST':str(folder)}
+  if a.karaoke:stage_env.update(SINGZ_GPUI_TEST_KARAOKE_PREF_EXPECT='0' if stage=='first' else '1',SINGZ_GPUI_TEST_KARAOKE_PREF_FINISH='1' if stage=='first' else '0')
   with (folder/'app.log').open('w') as log:
-   child=subprocess.Popen([str(app)],env={**env,'SINGZ_GPUI_INTEGRATION_TEST':str(folder)},stdout=log,stderr=subprocess.STDOUT)
+   child=subprocess.Popen([str(app)],env=stage_env,stdout=log,stderr=subprocess.STDOUT)
    try:
     while child.poll() is None:
      assert time.monotonic()-started<120,'Native saved-graph UI timeout'
@@ -70,6 +74,15 @@ with tempfile.TemporaryDirectory(prefix='singz-native-graph-ui-') as tmp:
    for name in ('onObservedLanes','offObservedLanes','reopenedObservedLanes'):
     assert next(lane for lane in proof[name] if lane['id']=='vocals')['muted'] is True,(name,proof)
    assert sha(project/'lyrics.json')==lyrics_hash,'Transport Karaoke altered the saved local lyrics fixture'
+   preference=json.loads((folder/'karaoke-preference.json').read_text());initial=stage=='restart';finish=stage=='first'
+   assert preference['initial']['preferred'] is initial and preference['initial']['visible'] is initial,preference
+   assert preference['final']['preferred'] is finish and preference['final']['visible'] is finish,preference
+   assert preference['durableWorkerAcknowledged'] is True and preference['final']['savedSequence']==preference['final']['sequence']>0,preference
+   assert json.loads((root/'prefs/audio.json').read_text())['karaoke'] is finish,'Durably acknowledged Karaoke preference did not reach audio.json'
+   if initial:assert preference['initial']['nativeVocalsMuted'] is True,preference
+   if initial:
+    assert input_guide_muted is False,'Restart must prove preferred On mutes an initially enabled guide'
+    assert preference['offViaActualEscape'] is True and preference['escapeSelectionWasNone'] is True,preference
   if a.navigation:
    assert 'NATIVE_NAVIGATION passed:' in text,text[-5000:]
    proof=json.loads((folder/'navigation.json').read_text())
@@ -87,5 +100,11 @@ with tempfile.TemporaryDirectory(prefix='singz-native-graph-ui-') as tmp:
    for width in (1280,1060):
     state=json.loads((folder/f'region-selection-{width}.json').read_text());assert state['selection'] is not None and not state['regionBusy'] and not state['gesture']
   (folder/'project-after.json').write_text(json.dumps(saved,indent=2));(folder/'observer.json').write_text(json.dumps({'foregroundUnchanged':before==after,'samples':samples,'errors':errors,'liveFps':'unmeasured','scope':'app CPU/footprint only; helper CPU excluded; GPU system-wide','observedHelpersRetired':list(helpers)},indent=2))
-  results.append({'stage':stage,'captures':6 if a.region else 4,'foregroundUnchanged':before==after})
-(out/'result.json').write_text(json.dumps({'passed':True,'appSha256':sha(app),'helperSha256':sha(app.with_name('singz-gpui-audio.exe' if platform.system()=='Windows' else 'singz-gpui-audio')),'graphSha256':sha(graph),'regionGesturesNativeBoundariesAndPersistence':a.region,'actualGraphAdmission':True,'actualSaveAndRestart':True,'karaokeNativeMuteAndPersistence':a.karaoke,'karaokeScope':'Production native_transport event route; real native vocals lane; Save/reopen/restart; no measured Karaoke button click' if a.karaoke else 'not exercised','navigationNativePauseAndRememberedCatalog':a.navigation,'navigationScope':'Production Header entity events and transport subscription; native pause receipts; no measured header button clicks' if a.navigation else 'not exercised','savedLyricsFixtureSha256':lyrics_hash,'stages':results,'muted':True,'hidden':True,'newProductionParity':'unqualified','liveFps':'unmeasured'},indent=2))
+  results.append({'stage':stage,'captures':6 if a.region else 4,'foregroundUnchanged':before==after,'inputGuideMuted':input_guide_muted})
+  if a.karaoke and stage=='first':
+   # Controlled next-launch fixture preparation, after the real Save proof
+   # above has already been retained in first/project-after.json.
+   before_preparation=sha(project/'project.json');prepared=json.loads(json.dumps(saved));prepared['settings']['tracks']['vocals']['muted']=False
+   (project/'project.json').write_text(json.dumps(prepared));assert sha(source)==source_hash and sha(project/'lyrics.json')==lyrics_hash and (project/'graph.json').read_bytes()==graph.read_bytes()
+   (folder/'restart-fixture-preparation.json').write_text(json.dumps({'fixturePreparationOnly':True,'firstStageSavedGuideMuted':saved['settings']['tracks']['vocals']['muted'],'nextLaunchGuideMuted':False,'onlyChangedField':'settings.tracks.vocals.muted','beforeProjectSha256':before_preparation,'afterProjectSha256':sha(project/'project.json'),'graphAudioLyricsUnchanged':True},indent=2))
+(out/'result.json').write_text(json.dumps({'passed':True,'appSha256':sha(app),'helperSha256':sha(app.with_name('singz-gpui-audio.exe' if platform.system()=='Windows' else 'singz-gpui-audio')),'graphSha256':sha(graph),'regionGesturesNativeBoundariesAndPersistence':a.region,'actualGraphAdmission':True,'actualSaveAndRestart':True,'karaokeRestoredOnMutesInitiallyEnabledGuide':a.karaoke,'karaokeEscapePersistsOff':a.karaoke,'karaokePreferencePersistenceAndRelaunch':a.karaoke,'karaokeNativeMuteAndPersistence':a.karaoke,'karaokeScope':'Production native_transport event route; real native vocals lane; Save/reopen/restart; no measured Karaoke button click' if a.karaoke else 'not exercised','navigationNativePauseAndRememberedCatalog':a.navigation,'navigationScope':'Production Header entity events and transport subscription; native pause receipts; no measured header button clicks' if a.navigation else 'not exercised','savedLyricsFixtureSha256':lyrics_hash,'stages':results,'muted':True,'hidden':True,'newProductionParity':'unqualified','liveFps':'unmeasured'},indent=2))

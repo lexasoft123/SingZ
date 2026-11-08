@@ -294,6 +294,15 @@ pub fn save_input(prefs: &crate::microphone::Prefs) -> Result<Value> {
     let _ = crate::microphone::Prefs::read(&prefs.patch())?;
     patch_at(&directory(), prefs.patch())
 }
+pub fn karaoke(raw: &Value) -> bool {
+    raw.get("karaoke").and_then(Value::as_bool).unwrap_or(false)
+}
+pub fn save_karaoke(enabled: bool) -> Result<Value> {
+    save_karaoke_at(&directory(), enabled)
+}
+pub(crate) fn save_karaoke_at(directory: &Path, enabled: bool) -> Result<Value> {
+    patch_at(directory, json!({"karaoke":enabled}))
+}
 fn patch_at(dir: &Path, patch: Value) -> Result<Value> {
     fs::create_dir_all(dir)?;
     let lock = OpenOptions::new()
@@ -337,6 +346,24 @@ fn patch_at(dir: &Path, patch: Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn karaoke_preference_defaults_off_and_patches_without_losing_audio_choices() {
+        assert!(!karaoke(&json!({})));
+        assert!(!karaoke(&json!({"karaoke":"1"})));
+        let dir=std::env::temp_dir().join(format!("singz-karaoke-prefs-{}",std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("audio.json"),br#"{"outputUid":"keep","inputUid":"mic","future":{"token":7}}"#).unwrap();
+        patch_at(&dir,json!({"karaoke":true})).unwrap();
+        let reopened=load_at(&dir).unwrap();
+        assert!(karaoke(&reopened));
+        assert_eq!(reopened["outputUid"],"keep");assert_eq!(reopened["inputUid"],"mic");
+        assert_eq!(reopened["future"]["token"],7);
+        save_at(&dir,"new output").unwrap();
+        assert!(karaoke(&load_at(&dir).unwrap()));
+        patch_at(&dir,json!({"karaoke":false})).unwrap();
+        assert!(!karaoke(&load_at(&dir).unwrap()));
+        fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn saved_output_preserves_preferences_and_rejects_corrupt_data() {
         let dir = std::env::temp_dir().join(format!("singz-audio-prefs-{}", std::process::id()));

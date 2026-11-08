@@ -7,6 +7,7 @@ mod ui_project_key;
 mod ui_region;
 mod region_gesture;
 mod region_host;
+mod karaoke_host;
 mod analysis_host;
 mod project_key;
 mod desktop_actions;
@@ -516,6 +517,9 @@ struct Player {
     transport: Entity<transport::Transport>,
     pitch_strip: Entity<pitch_strip::PitchStrip>,
     karaoke: bool,
+    karaoke_preferred: bool,
+    karaoke_pref_seq: u64,
+    karaoke_pref_saved_seq: u64,
     tempo: f32,
     paint_beats: Option<Rc<beat::Beats>>,
     beat_cache: Rc<RefCell<beat_grid::Cache>>,
@@ -1338,7 +1342,10 @@ impl Player {
             background: background::Background::new(),
             transport,
             pitch_strip,
-            karaoke: true,
+            karaoke: integration::fixture_mode(),
+            karaoke_preferred: false,
+            karaoke_pref_seq: 0,
+            karaoke_pref_saved_seq: 0,
             tempo: 1.,
             paint_beats: None,
             beat_cache,
@@ -2264,6 +2271,8 @@ impl Player {
             match request {
                 Ok(epoch) => {
                     self.native_epoch = epoch;
+                    self.karaoke=false;
+                    self.transport.update(cx,|transport,cx|transport.set_karaoke(false,cx));
                     self.loading = true;
                     self.playing = false;
                     self.native_anchor = None;
@@ -2392,6 +2401,14 @@ impl Player {
                 integration::Event::Inventory(result) => self
                     .settings
                     .update(cx, |settings, cx| settings.set_inventory(result, cx)),
+                integration::Event::KaraokePref(enabled) => {
+                    if self.karaoke_pref_seq==0 {self.karaoke_preferred=enabled;}
+                }
+                integration::Event::KaraokePrefSaved(sequence,error) => {
+                    if let Some(error)=error {
+                        if sequence==self.karaoke_pref_seq {self.notice=Some(error);}
+                    } else {self.karaoke_pref_saved_seq=self.karaoke_pref_saved_seq.max(sequence);}
+                }
                 integration::Event::AudioPrefs(uid, error) => self
                     .settings
                     .update(cx, |settings, cx| settings.set_route(uid, None, error, cx)),
@@ -2562,7 +2579,7 @@ impl Player {
                     self.native_loop_count = 0;
                     let (s, e) = project.view.unwrap_or((0., status.duration));
                     if status.duration>0.{self.view_start=(s/status.duration).clamp(0.,0.999);self.view_end=(e/status.duration).clamp(self.view_start+0.001,1.);}else{self.view_start=0.;self.view_end=1.;}
-                    self.karaoke = project.has_audio()&&(project.lyrics.is_some() || project.lyrics_error.is_some());
+                    self.karaoke = false;
                     self.lyric_document = project.lyrics.clone().unwrap_or_default();
                     self.lyric_ai_note_top.set(-1.);
                     self.native_glows.borrow_mut().clear();
@@ -2604,18 +2621,20 @@ impl Player {
                     if !self.lyric_document.lines.is_empty(){self.sidebar_ready(None,cx);}
                     else if let Some(error)=self.project.as_ref().and_then(|p|p.lyrics_error.clone()){self.lyrics_sidebar.update(cx,|s,cx|s.failure(error,cx));}
                     else{self.lyrics_sidebar.update(cx,|s,cx|s.idle(cx));}
-                    if self.karaoke&&self.project.as_ref().and_then(|p|p.lyrics_raw.as_ref()).is_some_and(lyrics_resolution::needs_online_recheck){
-                        self.start_sidebar_lyrics(lyrics_resolution::Intent::Auto,cx);
-                    }
                     if resume.is_none() {
                         self.screen = Screen::Player;
                         self.songs_catalog = false;
                     }
                     self.started = Instant::now();
                     self.lane_entered=self.project.as_ref().unwrap().lane_specs.iter().map(|lane|(lane.id.clone(),self.started)).collect();
+                    let mute_karaoke_guide=resume.as_ref().is_none_or(|handoff|handoff.mode.is_some());
                     if let Some(resume) = resume {
                         self.resume_project_audio(resume, cx);
                     }
+                    // Fresh loads/splits enter Karaoke. Same-song rename/import/
+                    // deletion recovery keeps its restored mixer, including a
+                    // guide the user deliberately unmuted while Karaoke was on.
+                    self.restore_karaoke(mute_karaoke_guide,cx);
                     self.start_beat_detection(false, cx);
                 }
                 integration::Event::Status(epoch,status)=>self.playback_status(epoch,status,cx),
@@ -2759,7 +2778,7 @@ impl Player {
                             self.beat_mutation+=1;self.beat_job=None;self.beat_result=None;
                             if let Some(backend)=&self.backend{backend.cancel_beat_detection();}
                             if let Some(project)=&mut self.project {project.lyrics=Some(document.clone());project.lyrics_error=None;project.lyrics_fingerprint=fingerprint;}
-                            self.lyric_document=document;self.karaoke=true;
+                            self.lyric_document=document;
                             self.native_glows.borrow_mut().clear();self.shape_cache.borrow_mut().clear();*self.layout_cache.borrow_mut()=None;
                             self.lyric_active.set(0);self.lyric_scroll.set(0.);self.lyric_scroll_target.set(0.);self.lyric_scroll_handle.set_offset(point(px(0.),px(0.)));
                             self.lyrics_editor.update(cx,|s,cx|s.saved_revision(self.lyrics_editor_save_revision,None,cx));
@@ -4003,7 +4022,8 @@ impl Player {
                     return;
                 }
                 self.karaoke = !self.karaoke;
-                if self.karaoke&&!self.lyrics_sidebar.read(cx).is_ready()&&self.lyrics_sidebar_pending.is_none()&&self.lyrics_sidebar_needs.is_empty()&&!self.lyrics_sidebar_download_waiting{self.start_sidebar_lyrics(self.lyrics_sidebar_intent,cx);}
+                self.remember_karaoke(self.karaoke,cx);
+                self.prepare_karaoke_lyrics(cx);
                 self.transport
                     .update(cx, |transport, cx| transport.set_karaoke(self.karaoke, cx));
             }
@@ -5334,6 +5354,7 @@ impl Render for Player {
                         this.request_region(region_gesture::Target{selection:None,..target},cx);
                     } else {
                         this.karaoke=false;
+                        this.remember_karaoke(false,cx);
                         this.transport.update(cx,|transport,cx|transport.set_karaoke(false,cx));
                     }
                     cx.notify();cx.stop_propagation();return;

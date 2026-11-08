@@ -5,6 +5,15 @@ fn native_vocals_muted(p:&Player)->Option<bool>{
     p.last_playback_status.as_ref()?.observed_lanes.as_array()?.iter()
         .find(|lane|lane["id"]=="vocals")?["muted"].as_bool()
 }
+fn click_vocals_mute(view:&Entity<Player>,window:&mut Window,cx:&mut App)->anyhow::Result<()> {
+    super::ui_training_run::draw(window,cx);
+    let bounds=view.read(cx).track_bounds.borrow().get("mute-0").copied()
+        .ok_or_else(||anyhow::anyhow!("Shared vocal M control was not laid out"))?;
+    anyhow::ensure!(bounds.size.width>px(0.)&&bounds.size.height>px(0.)&&bounds.left()>=px(0.)&&bounds.top()>=px(0.)
+        &&bounds.right()<=window.viewport_size().width&&bounds.bottom()<=window.viewport_size().height,
+        "Shared vocal M control is outside the accepted viewport: {bounds:?}");
+    super::ui_training_run::click(window,cx,bounds.center());Ok(())
+}
 fn snapshot(view:&Entity<Player>,window:&mut Window,cx:&mut App,directory:&std::path::Path,name:&str)->anyhow::Result<()> {
     anyhow::ensure!(!window.is_visible()&&!window.is_window_active(),"Integration capture activated the window");
     let _=window.draw(cx);window.render_to_image()?.save(directory.join(format!("{name}.png")))?;
@@ -78,11 +87,24 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                 }
                 eprintln!("NATIVE_ANALYSIS passed: native vocal detection, saved-format adoption and pitch notes");
             }
-            let originally_muted=handle.update(cx,|_,_,cx|view.read(cx).muted[0])?;
             let karaoke_case=std::env::var("SINGZ_GPUI_TEST_KARAOKE").as_deref()==Ok("1");
             let navigation_case=std::env::var("SINGZ_GPUI_TEST_NAVIGATION").as_deref()==Ok("1");
-            let expected_saved_muted=if karaoke_case {true}else{!originally_muted};
             let mut karaoke_evidence=serde_json::json!({});
+            let mut karaoke_pref_initial=serde_json::Value::Null;
+            if karaoke_case {
+                let expected=std::env::var("SINGZ_GPUI_TEST_KARAOKE_PREF_EXPECT")?.parse::<u8>()?;
+                anyhow::ensure!(expected<=1,"Invalid Karaoke preference expectation");
+                let expected=expected==1;
+                let deadline=Instant::now()+Duration::from_secs(10);
+                loop{cx.background_executor().timer(Duration::from_millis(20)).await;
+                    let ready=handle.update(cx,|_,_,cx|{let p=view.read(cx);p.karaoke_preferred==expected&&p.karaoke==expected
+                        &&(!expected||native_vocals_muted(p)==Some(true))})?;
+                    if ready{break;}anyhow::ensure!(Instant::now()<deadline,"Loaded Karaoke preference did not match the independently launched stage");
+                }
+                karaoke_pref_initial=handle.update(cx,|_,_,cx|{let p=view.read(cx);serde_json::json!({"preferred":p.karaoke_preferred,"visible":p.karaoke,"nativeVocalsMuted":native_vocals_muted(p)})})?;
+            }
+            let originally_muted=handle.update(cx,|_,_,cx|view.read(cx).muted[0])?;
+            let expected_saved_muted=if karaoke_case {true}else{!originally_muted};
             cx.background_executor().timer(Duration::from_millis(1100)).await;
             handle.update(cx,|_,window,cx|->anyhow::Result<()>{
                 let player=view.read(cx);anyhow::ensure!(player.backend.is_some()&&player.screen==Screen::Player,"Not the native playback screen");
@@ -148,11 +170,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                 anyhow::ensure!(Instant::now()<deadline,"Pause click did not reach native transport");
             }
             handle.update(cx,|_,window,cx|->anyhow::Result<()>{
-                let p=view.read(cx);let bounds=p.stem_scroll_handle.bounds();
-                let rows=p.project.as_ref().ok_or_else(||anyhow::anyhow!("Native project retired before mute/seek: {:?}",p.notice))?.lanes.len() as f32;
-                anyhow::ensure!(rows>0.,"Native fixture has no playable lanes");
-                let y=f32::from(bounds.top())+(f32::from(bounds.size.height)/rows).max(64.)/2.+14.;
-                click(window,cx,37.,y); // Actual shared M control, from the real lane viewport.
+                click_vocals_mute(&view,window,cx)?;
                 view.update(cx,|p,cx|{p.position=p.duration/2.;p.seek_native(cx);});
                 Ok(())
             })??;
@@ -163,25 +181,34 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                 Ok(())
             })??;
             if karaoke_case {
-                handle.update(cx,|_,window,cx|->anyhow::Result<()>{
+                handle.update(cx,|_,_,cx|{
                     if view.read(cx).karaoke {
                         view.update(cx,|p,cx|p.native_transport(transport::TransportEvent::Karaoke,cx));
                     }
+                })?;
+                // Let the collapsed lyric/pitch layout reach a frame before
+                // consulting the exact shared control's new hit rectangle.
+                cx.background_executor().timer(Duration::from_millis(40)).await;
+                handle.update(cx,|_,window,cx|->anyhow::Result<()>{
+                    super::ui_training_run::draw(window,cx);
                     let p=view.read(cx);
                     anyhow::ensure!(!p.karaoke&&!p.carry.enabled&&p.project.as_ref().is_some_and(|project|project.lyrics.is_some()),
                         "Karaoke regression requires saved lyrics, Carry off and Karaoke initially off");
-                    if p.muted[0] {
-                        let bounds=p.stem_scroll_handle.bounds();
-                        let rows=p.project.as_ref().unwrap().lanes.len() as f32;
-                        let y=f32::from(bounds.top())+(f32::from(bounds.size.height)/rows).max(64.)/2.+14.;
-                        click(window,cx,37.,y);
-                    }
+                    if p.muted[0] {click_vocals_mute(&view,window,cx)?;}
                     Ok(())
                 })??;
                 let deadline=Instant::now()+Duration::from_secs(10);
                 loop{cx.background_executor().timer(Duration::from_millis(20)).await;
-                    let ready=handle.update(cx,|_,_,cx|{let p=view.read(cx);!p.muted[0]&&native_vocals_muted(p)==Some(false)})?;
-                    if ready{break;}anyhow::ensure!(Instant::now()<deadline,"Karaoke unmuted native baseline did not settle");
+                    let (ready,diagnostic)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(!p.muted[0]&&native_vocals_muted(p)==Some(false),
+                        serde_json::json!({"karaoke":p.karaoke,"uiMuted":p.muted[0],"nativeMuted":native_vocals_muted(p),"epoch":p.native_epoch,
+                            "nativeLanes":p.last_playback_status.as_ref().map(|status|&status.observed_lanes),
+                            "muteBounds":p.track_bounds.borrow().get("mute-0").map(|b|format!("{b:?}")),"notice":p.notice,
+                            "tracksPending":p.tracks_pending.is_some(),"carryPending":p.carry_pending.is_some(),"tracksAudioFailed":p.tracks_audio_failed}))})?;
+                    if ready{break;}
+                    if Instant::now()>=deadline {
+                        std::fs::write(directory.join("karaoke-baseline-failure.json"),serde_json::to_vec_pretty(&diagnostic)?)?;
+                        anyhow::bail!("Karaoke unmuted native baseline did not settle: {diagnostic}");
+                    }
                 }
                 handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.native_transport(transport::TransportEvent::Karaoke,cx)))?;
                 let deadline=Instant::now()+Duration::from_secs(10);
@@ -289,6 +316,40 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                 cx.background_executor().timer(Duration::from_millis(25)).await;
                 if handle.update(cx,|_,_,cx|view.read(cx).project.is_some())?{break;}
                 anyhow::ensure!(Instant::now()<deadline,"Shutdown fixture did not prepare");
+            }
+            if karaoke_case {
+                let desired=std::env::var("SINGZ_GPUI_TEST_KARAOKE_PREF_FINISH")?.parse::<u8>()?;
+                anyhow::ensure!(desired<=1,"Invalid final Karaoke preference expectation");
+                let desired=desired==1;
+                // The final Off stage deliberately arms and durably writes On
+                // first, so Escape proves an actual preference transition.
+                handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{if !p.karaoke {p.native_transport(transport::TransportEvent::Karaoke,cx);}}))?;
+                if !desired {
+                    let deadline=Instant::now()+Duration::from_secs(10);
+                    loop{cx.background_executor().timer(Duration::from_millis(20)).await;
+                        let ready=handle.update(cx,|_,_,cx|{let p=view.read(cx);p.karaoke&&p.karaoke_preferred
+                            &&p.karaoke_pref_saved_seq==p.karaoke_pref_seq})?;
+                        if ready{break;}anyhow::ensure!(Instant::now()<deadline,"Karaoke On did not persist before the Escape check");
+                    }
+                    handle.update(cx,|_,window,cx|->anyhow::Result<()>{
+                        anyhow::ensure!(view.read(cx).region_target().selection.is_none(),"Escape preference check requires no selected region");
+                        let focus=view.read(cx).focus_handle.clone();focus.focus(window,cx);
+                        window.dispatch_event(PlatformInput::KeyDown(KeyDownEvent{keystroke:Keystroke::parse("escape").unwrap(),is_held:false,prefer_character_input:false}),cx);Ok(())
+                    })??;
+                }
+                let deadline=Instant::now()+Duration::from_secs(10);
+                loop{cx.background_executor().timer(Duration::from_millis(20)).await;
+                    let ready=handle.update(cx,|_,_,cx|{let p=view.read(cx);p.karaoke==desired&&p.karaoke_preferred==desired
+                        &&p.karaoke_pref_saved_seq==p.karaoke_pref_seq})?;
+                    if ready{break;}anyhow::ensure!(Instant::now()<deadline,"Karaoke preference did not receive durable worker acknowledgement");
+                }
+                let final_state=handle.update(cx,|_,_,cx|{let p=view.read(cx);serde_json::json!({"preferred":p.karaoke_preferred,"visible":p.karaoke,
+                    "sequence":p.karaoke_pref_seq,"savedSequence":p.karaoke_pref_saved_seq})})?;
+                std::fs::write(directory.join("karaoke-preference.json"),serde_json::to_vec_pretty(&serde_json::json!({
+                    "initial":karaoke_pref_initial,"final":final_state,"durableWorkerAcknowledged":true,
+                    "offViaActualEscape":!desired,"escapeSelectionWasNone":!desired,
+                    "scope":"actual preference worker acknowledgement; independent process restart verified by the driver"
+                }))?)?;
             }
             Ok(())
         }.await;

@@ -612,6 +612,8 @@ pub enum Event {
     InputPrefs(std::result::Result<crate::microphone::Prefs, String>),
     Inventory(std::result::Result<crate::audio_devices::Inventory, String>),
     AudioPrefs(String, Option<String>),
+    KaraokePref(bool),
+    KaraokePrefSaved(u64, Option<String>),
     OutputChanged(u64, String, Option<Status>, Option<String>),
     Catalog(u64,PathBuf,Vec<Project>),
     Opened(u64, Project, Status, Vec<Vec<f32>>),
@@ -646,6 +648,7 @@ pub struct OwnedAudioProbe {
 }
 
 enum Request {
+    KaraokePref(u64,bool),
     Region(u64,u64,crate::region_gesture::Target,f32),
     Rate(u64,u64,f32,i32),
     Carry(u64,u64,crate::carry_line::Plan,Arc<AtomicU64>),
@@ -801,6 +804,9 @@ impl Backend {
             events.push(Event::Status(epoch, status));
         }
         events
+    }
+    pub fn karaoke_pref(&self,sequence:u64,enabled:bool)->Result<()> {
+        self.requests.try_send(Request::KaraokePref(sequence,enabled)).context("Native command queue is full")
     }
     pub fn input_prefs(&self, sequence: u64, prefs: crate::microphone::Prefs) -> Result<()> {
         self.requests
@@ -1806,17 +1812,25 @@ fn read_inventory_reply(replies:&Receiver<Result<Value>>,epoch:u64,latest:&Atomi
 fn flush_metronome_adoptions(
     requests: &Receiver<Request>,
     first: Option<crate::beat::Metronome>,
+    first_karaoke: Option<bool>,
     directory: &Path,
 ) -> Result<()> {
-    let mut accepted = first;let mut carry=None;
+    let mut accepted = first;let mut carry=None;let mut karaoke=first_karaoke;
     for request in requests.try_iter() {
-        match request{Request::AdoptMetronomePreferences(_,met)=>accepted=Some(met),Request::AdoptCarryPreferences(_,config)=>carry=Some(config),_=>{}}
+        match request{Request::AdoptMetronomePreferences(_,met)=>accepted=Some(met),Request::AdoptCarryPreferences(_,config)=>carry=Some(config),Request::KaraokePref(_,enabled)=>karaoke=Some(enabled),_=>{}}
     }
-    if let Some(config)=carry{crate::carry_line::retain(directory,&config)?;}
+    // Each accepted choice has an independent file. A failed write must not
+    // prevent another choice from being retained during shutdown.
+    let mut first_error=None;
+    let mut attempt=|result:Result<()>| {
+        if let Err(error)=result {if first_error.is_none(){first_error=Some(error);}}
+    };
+    if let Some(enabled)=karaoke{attempt(crate::audio_devices::save_karaoke_at(directory,enabled).map(|_|()));}
+    if let Some(config)=carry{attempt(crate::carry_line::retain(directory,&config));}
     if let Some(met) = accepted {
-        crate::metronome_store::retain(directory, &met)?;
+        attempt(crate::metronome_store::retain(directory, &met));
     }
-    Ok(())
+    first_error.map_or(Ok(()),Err)
 }
 
 fn worker(
@@ -1856,6 +1870,7 @@ fn worker(
     };
     let mut global_carry=match crate::carry_line::load(&crate::audio_devices::directory()) {Ok(config)=>{let _=events.send(Event::CarryPrefs(Ok(config.clone())));config},Err(e)=>{let _=events.send(Event::CarryPrefs(Err(format!("Could not restore Carry the line preferences: {e:#}"))));Default::default()}};
     let mut output_uid = crate::audio_devices::output_uid(&audio_preferences).unwrap_or_default();
+    let _ = events.send(Event::KaraokePref(crate::audio_devices::karaoke(&audio_preferences)));
     let _ = events.send(Event::AudioPrefs(output_uid.clone(), prefs_error));
     let _ = events.send(Event::InputPrefs(
         crate::microphone::Prefs::read(&audio_preferences).map_err(|e| e.to_string()),
@@ -1874,6 +1889,7 @@ fn worker(
     let mut poll = Instant::now();
     let mut shutdown_preference = None;
     let mut shutdown_carry=None;
+    let mut shutdown_karaoke=None;
     while alive.load(Ordering::Acquire) {
         let mut index=0;while index<deletions.len(){if deletions[index].is_finished(){let _=deletions.swap_remove(index).join();}else{index+=1;}}
         // Cancellation intent bypasses the bounded command queue. Navigation
@@ -1919,7 +1935,7 @@ fn worker(
             // received adoption, but never dispatch queued audio after observing
             // that request. The remaining adoptions are drained below in FIFO.
             Ok(request) if !alive.load(Ordering::Acquire) => {
-                match request{Request::AdoptMetronomePreferences(_,met)=>shutdown_preference=Some(met),Request::AdoptCarryPreferences(_,config)=>shutdown_carry=Some(config),_=>{}}
+                match request{Request::AdoptMetronomePreferences(_,met)=>shutdown_preference=Some(met),Request::AdoptCarryPreferences(_,config)=>shutdown_carry=Some(config),Request::KaraokePref(_,enabled)=>shutdown_karaoke=Some(enabled),_=>{}}
                 break;
             }
             Ok(Request::Training(epoch, phrase)) => {
@@ -2047,6 +2063,11 @@ fn worker(
                     parked,
                     result.map_err(|e| format!("{e:#}")),
                 ));
+            }
+            Ok(Request::KaraokePref(sequence,enabled)) => {
+                let error=crate::audio_devices::save_karaoke(enabled).err().map(|error|
+                    format!("Karaoke mode changed, but its preference could not be saved: {error:#}"));
+                let _=events.send(Event::KaraokePrefSaved(sequence,error));
             }
             Ok(Request::InputPrefs(sequence, prefs)) => {
                 let error = crate::audio_devices::save_input(&prefs).err().map(|e| {
@@ -2754,11 +2775,12 @@ fn worker(
     if let Err(error) = flush_metronome_adoptions(
         &requests,
         shutdown_preference,
+        shutdown_karaoke,
         &crate::audio_devices::directory(),
     ) {
         // The window/event consumer may already be gone. Do not disguise an
         // orderly-quit preference failure as success merely because no UI remains.
-        eprintln!("Could not save accepted metronome preferences during shutdown: {error:#}");
+        eprintln!("Could not save accepted preferences during shutdown: {error:#}");
     }
 }
 
@@ -2901,6 +2923,41 @@ mod tests {
         root
     }
     #[test]
+    fn shutdown_karaoke_failure_still_retains_other_preferences() {
+        let root=fixture("karaoke-shutdown-write-failure");
+        fs::write(root.join("audio.json"),b"broken").unwrap();
+        let (sender,requests)=mpsc::sync_channel(4);
+        let met=crate::beat::Metronome{volume:0.41,..Default::default()};
+        sender.send(Request::KaraokePref(1,true)).unwrap();
+        sender.send(Request::AdoptMetronomePreferences(1,met.clone())).unwrap();
+        assert!(flush_metronome_adoptions(&requests,None,None,&root).is_err());
+        assert_eq!(fs::read(root.join("audio.json")).unwrap(),b"broken");
+        assert_eq!(crate::metronome_store::load(&root).unwrap(),met);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn shutdown_retains_received_and_latest_queued_karaoke_choice_without_audio() {
+        let root=fixture("karaoke-shutdown");
+        fs::write(root.join("audio.json"),br#"{"outputUid":"keep","future":{"token":7}}"#).unwrap();
+        let (sender,requests)=mpsc::sync_channel(8);
+        // Models a preference already received by recv_timeout when Drop
+        // sets alive=false: it must survive the early shutdown match arm.
+        flush_metronome_adoptions(&requests,None,Some(true),&root).unwrap();
+        let read=||serde_json::from_slice::<Value>(&fs::read(root.join("audio.json")).unwrap()).unwrap();
+        assert!(crate::audio_devices::karaoke(&read()));
+        // Remaining FIFO requests supersede that received choice, without
+        // starting queued playback or opening a new project during teardown.
+        sender.send(Request::KaraokePref(2,true)).unwrap();
+        sender.send(Request::Control(1,"play".into())).unwrap();
+        sender.send(Request::Open(3,root.join("must-not-open"),None,None,None)).unwrap();
+        sender.send(Request::KaraokePref(3,false)).unwrap();
+        flush_metronome_adoptions(&requests,None,Some(true),&root).unwrap();
+        let saved=read();
+        assert!(!crate::audio_devices::karaoke(&saved));
+        assert_eq!(saved["outputUid"],"keep");assert_eq!(saved["future"]["token"],7);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn shutdown_flushes_last_visible_adoption_but_not_queued_audio_intent() {
         let root = fixture("metronome-shutdown");
         let first = crate::beat::Metronome {
@@ -2930,13 +2987,13 @@ mod tests {
         sender
             .send(Request::Metronome(3, 99, unapplied.clone(), None))
             .unwrap();
-        flush_metronome_adoptions(&requests, Some(first), &root).unwrap();
+        flush_metronome_adoptions(&requests, Some(first), None, &root).unwrap();
         assert_eq!(crate::metronome_store::load(&root).unwrap(), last);
         let saved = fs::read(root.join("metronome.json")).unwrap();
         sender
             .send(Request::Metronome(4, 100, unapplied, None))
             .unwrap();
-        flush_metronome_adoptions(&requests, None, &root).unwrap();
+        flush_metronome_adoptions(&requests, None, None, &root).unwrap();
         assert_eq!(fs::read(root.join("metronome.json")).unwrap(), saved);
         fs::remove_dir_all(root).unwrap();
     }
@@ -2949,7 +3006,7 @@ mod tests {
         sender
             .send(Request::AdoptMetronomePreferences(1, Default::default()))
             .unwrap();
-        assert!(flush_metronome_adoptions(&requests, None, &root).is_err());
+        assert!(flush_metronome_adoptions(&requests, None, None, &root).is_err());
         assert_eq!(fs::read(root.join("metronome.json")).unwrap(), future);
         fs::remove_dir_all(root).unwrap();
     }

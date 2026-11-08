@@ -16,6 +16,18 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 let loaded=handle.update(cx,|_,_,cx|->anyhow::Result<bool>{let p=view.read(cx);anyhow::ensure!(p.notice.is_none(),"{:?}",p.notice);Ok(!p.loading&&p.project.is_some())})??;
                 if loaded{break;}anyhow::ensure!(Instant::now()<deadline,"Lyrics load timed out");
             }
+            // This fixture qualifies saved lyric paint, independently of the
+            // normal application's persisted Karaoke preference/default.
+            handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{
+                if !p.karaoke {p.native_transport(transport::TransportEvent::Karaoke,cx);}
+            }))?;
+            let deadline=Instant::now()+Duration::from_secs(10);
+            loop{
+                cx.background_executor().timer(Duration::from_millis(20)).await;
+                let ready=handle.update(cx,|_,_,cx|->anyhow::Result<bool>{let p=view.read(cx);
+                    anyhow::ensure!(p.notice.is_none(),"{:?}",p.notice);Ok(p.karaoke)})??;
+                if ready{break;}anyhow::ensure!(Instant::now()<deadline,"Explicit native Karaoke did not open the lyric paint fixture");
+            }
             handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.karaoke&&!p.lyric_document.lines.is_empty(),"Saved lyrics not connected");anyhow::ensure!(!p.lyric_document.masks.is_empty(),"Native glyph glow masks missing");anyhow::ensure!(p.project.as_ref().unwrap().pitch.range()==Some((45,48)),"Saved pitch notes are not bound to this project");anyhow::ensure!(p.project.as_ref().unwrap().pitch.key=="C"&&p.project.as_ref().unwrap().pitch.tempo=="96","Saved key/tempo missing");anyhow::ensure!(p.project.as_ref().unwrap().lyrics_error.is_none(),"{:?}",p.project.as_ref().unwrap().lyrics_error);Ok(())})??;
             cx.background_executor().timer(Duration::from_millis(1000)).await;
             let first=handle.update(cx,|_,_,cx|view.read(cx).lyric_document.lines[0].words[0].clone())?;
