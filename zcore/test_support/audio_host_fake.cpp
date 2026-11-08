@@ -204,7 +204,8 @@ class FakeAudioHostBackend final : public AudioHostBackend {
         float* samples = inputSamples_.data() +
                          static_cast<size_t>(channel) * format_.maximumFrames;
         for (uint32_t frame = 0; frame < frames; ++frame) {
-          samples[frame] = static_cast<float>((channel + 1) * 1000 +
+          samples[frame] = options_.inputScale *
+                           static_cast<float>((channel + 1) * 1000 +
                                               ((outputFrame + frame) % 997));
         }
       }
@@ -235,6 +236,11 @@ class FakeAudioHostBackend final : public AudioHostBackend {
           outputFrame, hostNs, hostNs != 0, false, hostNs, discontinuity, true};
       invokeAudioHostCallback(&endpoint_, block);
       outputFrame = advanceAudioHostFrame(outputFrame, frames);
+      if (options_.realtimePaced) {
+        std::this_thread::sleep_until(
+            start + std::chrono::nanoseconds(static_cast<int64_t>(
+                        outputFrame * 1e9 / format_.sampleRate)));
+      }
     }
     if (!stopRequested_.load(std::memory_order_acquire)) {
       state_.store(AudioHostState::Stopped, std::memory_order_release);

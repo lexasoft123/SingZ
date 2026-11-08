@@ -1,4 +1,5 @@
 //! Production DropScreen composition over an isolated, read-only sample collection.
+use crate::i18n::{t,tv,tn};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -8,6 +9,8 @@ use std::{
     sync::{Arc, OnceLock},
     time::Instant,
 };
+
+actions!(singz_library_drive, [ActivateDrive]);
 
 /// Source-browser rounded bars plus their shadows, before the CSS scaleY.
 /// Kept separately so animation transforms the complete primitive, including
@@ -38,11 +41,14 @@ pub enum LibraryEvent {
         title: SharedString,
         artist: SharedString,
     },
+    OpenProject(std::path::PathBuf),
     Browse,
     ManageStorage,
+    Drive(crate::drive_state::Action),
     DeleteSong {
         title: SharedString,
     },
+    DeleteProject(std::path::PathBuf),
 }
 
 struct DemoSong {
@@ -128,7 +134,25 @@ const SONGS: [DemoSong; 12] = [
     },
 ];
 
+#[derive(Clone)]
+struct CatalogSong {
+    title: String,
+    saved: String,
+    lyrics: bool,
+    project_dir: Option<std::path::PathBuf>,
+    stems: usize,
+}
+
 pub struct LibraryScreen {
+    pub guides: singz_uikit::GuideAnchors,
+    page_scroll: ScrollHandle,
+    songs: Vec<CatalogSong>,
+    native_root: String,
+    delete_error: Option<String>,
+    drive: crate::drive_state::Snapshot,
+    drive_focus: std::cell::RefCell<std::collections::HashMap<String, FocusHandle>>,
+    drive_bounds: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, Bounds<Pixels>>>>,
+    drive_keyboard: std::rc::Rc<std::cell::Cell<bool>>,
     search: Entity<InputState>,
     query: String,
     open_song: Option<SharedString>,
@@ -137,11 +161,44 @@ pub struct LibraryScreen {
     scroll: ScrollHandle,
     suspended_at: Option<Instant>,
     _search_subscription: Subscription,
+    #[cfg(feature = "ui-tests")]
+    delete_bounds: std::rc::Rc<
+        std::cell::RefCell<std::collections::HashMap<std::path::PathBuf, Bounds<Pixels>>>,
+    >,
+    #[cfg(feature = "ui-tests")]
+    project_bounds: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<std::path::PathBuf, Bounds<Pixels>>>>,
+}
+
+fn catalog_date(date: &str) -> String {
+    let fields = date
+        .get(..10)
+        .unwrap_or(date)
+        .split('-')
+        .collect::<Vec<_>>();
+    if fields.len() == 3 {
+        if let (Ok(month), Ok(day)) = (fields[1].parse::<usize>(), fields[2].parse::<u32>()) {
+            if (1..=12).contains(&month) && (1..=31).contains(&day) {
+                return format!(
+                    "{} {}",
+                    [
+                        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct",
+                        "Nov", "Dec"
+                    ][month - 1],
+                    day
+                );
+            }
+        }
+    }
+    date.into()
 }
 
 impl EventEmitter<LibraryEvent> for LibraryScreen {}
 
 impl LibraryScreen {
+    pub fn refresh_locale(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.update(cx, |input, cx| input.set_placeholder(crate::i18n::t("library.dropScreen.searchPlaceholder"), window, cx));
+        cx.notify();
+    }
     #[cfg(feature = "ui-tests")]
     pub fn review_snapshot(&self) -> serde_json::Value {
         let query = self.query.trim().to_lowercase();
@@ -157,6 +214,10 @@ impl LibraryScreen {
     }
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        cx.bind_keys([
+            KeyBinding::new("enter", ActivateDrive, Some("SingZLibraryDrive")),
+            KeyBinding::new("space", ActivateDrive, Some("SingZLibraryDrive")),
+        ]);
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search projects…"));
         let subscription = cx.subscribe_in(&search, window, |this, state, event, _, cx| {
             if matches!(event, InputEvent::Change) {
@@ -165,6 +226,28 @@ impl LibraryScreen {
             }
         });
         Self {
+            native_root: String::new(),
+            delete_error: None,
+            drive: Default::default(),
+            drive_focus: Default::default(),
+            drive_bounds: Default::default(),
+            drive_keyboard: Default::default(),
+            guides: Default::default(),
+            page_scroll: ScrollHandle::new(),
+            songs: if crate::integration::fixture_mode() {
+                SONGS
+                    .iter()
+                    .map(|s| CatalogSong {
+                        title: s.title.into(),
+                        saved: s.saved.into(),
+                        lyrics: s.lyrics,
+                        project_dir: None,
+                        stems: 6,
+                    })
+                    .collect()
+            } else {
+                vec![]
+            },
             search,
             query: String::new(),
             open_song: None,
@@ -173,9 +256,164 @@ impl LibraryScreen {
             scroll: ScrollHandle::new(),
             suspended_at: None,
             _search_subscription: subscription,
+            #[cfg(feature = "ui-tests")]
+            delete_bounds: Default::default(),
+            #[cfg(feature = "ui-tests")]
+            project_bounds: Default::default(),
         }
     }
 
+    pub fn set_root(&mut self, root: String, cx: &mut Context<Self>) {
+        if self.native_root != root {
+            self.native_root = root;
+            cx.notify();
+        }
+    }
+    pub fn set_drive(&mut self, drive: crate::drive_state::Snapshot, cx: &mut Context<Self>) {
+        if !crate::integration::fixture_mode() && self.drive != drive {
+            self.drive = drive;
+            cx.notify();
+        }
+    }
+    pub fn drive_bounds(&self, id: &str) -> Option<Bounds<Pixels>> {
+        self.drive_bounds.borrow().get(id).copied()
+    }
+    pub fn drive_state(&self, w: &Window) -> serde_json::Value {
+        serde_json::json!({"drive": self.drive,
+            "focusedControl": self.drive_focus.borrow().iter().find(|(id,f)|self.drive_bounds.borrow().contains_key(*id) && f.is_focused(w)).map(|(id,_)|id.clone())})
+    }
+    fn drive_action(
+        &self, id: &str, label: &str, action: crate::drive_state::Action,
+        enabled: bool, w: &Window, cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let previous_primary=match id {
+            "library-drive-connect"=>self.drive_focus.borrow().get("library-drive-sync").cloned(),
+            "library-drive-sync"=>self.drive_focus.borrow().get("library-drive-connect").cloned(),
+            _=>None,
+        };
+        let focus = self.drive_focus.borrow_mut().entry(id.into())
+            .or_insert_with(||previous_primary.unwrap_or_else(||cx.focus_handle().tab_stop(true))).clone();
+        let bounds=self.drive_bounds.clone(); let probe_id=id.to_owned();
+        let mouse_focus=focus.clone();
+        singz_uikit::drive_library_action(id.to_owned(), label.to_owned(), enabled, w)
+            .key_context("SingZLibraryDrive")
+            .when(enabled, |d|d.track_focus(&focus).child(singz_uikit::guide_focus_ring(focus,self.drive_keyboard.clone(),1.)))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |s,_,w,cx| {
+                s.drive_keyboard.set(false);
+                if enabled { mouse_focus.focus(w,cx); }
+                cx.stop_propagation();
+            }))
+            .on_action(cx.listener(move |s,_:&ActivateDrive,_,cx| {
+                s.drive_keyboard.set(true);
+                if enabled { cx.emit(LibraryEvent::Drive(action)); }
+                cx.stop_propagation();
+            }))
+            .on_click(cx.listener(move |_,_,_,cx| {
+                if enabled { cx.emit(LibraryEvent::Drive(action)); }
+                cx.stop_propagation();
+            }))
+            .relative().child(canvas(move |b,_,_| {bounds.borrow_mut().insert(probe_id.clone(),b);b},|_,_,_,_|{}).absolute().inset_0())
+    }
+    fn drive_row(&self, w: &Window, cx: &mut Context<Self>) -> Div {
+        use crate::{drive_state::Action, sync_scheduler::Phase};
+        let drive=&self.drive;
+        let syncing=drive.busy || drive.scheduler.phase==Phase::Syncing;
+        let status=if drive.signing_in {
+            singz_uikit::drive_status_line(t("library.common.finishGoogleSignIn"),true,true,false,true,w)
+        } else if let Some(error)=&drive.error {
+            singz_uikit::drive_status_line(error.clone(),true,true,false,true,w)
+        } else if syncing {
+            singz_uikit::drive_status_line(tv("library.dropScreen.syncProgress", &[("msg",drive.progress.clone())]),true,false,false,true,w)
+        } else if drive.progress.starts_with("Sync paused.") || drive.progress=="Signed out of Google Drive." {
+            // Source driveMsg survives the completed operation. It takes
+            // precedence over the generic signed-in/waiting status, without
+            // turning a pending or warning-bearing run into an up-to-date claim.
+            singz_uikit::drive_status_line(drive.progress.clone(),true,true,false,true,w)
+        } else if let Some(error)=&drive.scheduler.last_error {
+            let text=if drive.scheduler.phase==Phase::Retrying {tv("library.dropScreen.retryScheduled", &[("error",error.clone())])}else{error.clone()};
+            singz_uikit::drive_status_line(text,false,true,false,true,w)
+        } else if drive.signed_in && drive.scheduler.last_sync.is_some() && drive.scheduler.dirty==0 {
+            let label=drive.scheduler.last_sync.and_then(|time| {
+                let now=chrono::Utc::now().timestamp_millis().max(0) as u64;
+                let minutes=((now.saturating_sub(time)) as f64/60_000.).round() as u64;
+                Some(if minutes<1 {t("library.dropScreen.justNow")}else if minutes<60 {tv("library.dropScreen.minAgo", &[("mins",minutes.to_string())])}
+                    else { let hours=(minutes as f64/60.).round() as u64;
+                        if hours<24 {tv("library.dropScreen.hAgo", &[("h",hours.to_string())])}else{
+                            chrono::DateTime::from_timestamp_millis(time as i64)?.with_timezone(&chrono::Local).format("%b %-d").to_string()
+                        }
+                    })
+            });
+            singz_uikit::drive_synced_status_labels(t("library.dropScreen.driveCopyLives"),label.map(|value|format!("{} · {value}",t("library.dropScreen.upToDate"))).unwrap_or_else(||t("library.dropScreen.upToDate")),w)
+        } else if drive.signed_in {
+            // A signed-in account alone is not evidence of a durable Drive copy.
+            singz_uikit::drive_status_line(t("library.dropScreen.waitingTitle"),true,false,false,false,w)
+        } else {
+            singz_uikit::drive_status_line(t("library.dropScreen.keepCopyHint"),true,false,true,false,w)
+        };
+        let mut row=singz_uikit::drive_storage_subrow().child(singz_uikit::drive_status_body().child(status));
+        if drive.signed_in { row=row.child(self.drive_action("library-drive-log",&t("library.dropScreen.syncLog"),Action::ShowLog,true,w,cx)); }
+        if syncing { row=row.child(self.drive_action("library-drive-cancel",&t("library.dropScreen.cancelSync"),Action::Cancel,true,w,cx)); }
+        let (id,label,action)=if drive.signed_in {("library-drive-sync",t("library.dropScreen.syncNow"),Action::SyncNow)}
+            else {("library-drive-connect",t("library.dropScreen.connect"),Action::SignIn)};
+        row.child(self.drive_action(id,&label,action,!syncing && !drive.signing_in,w,cx))
+    }
+    pub fn set_delete_error(&mut self, error: Option<String>, cx: &mut Context<Self>) {
+        if self.delete_error != error {
+            self.delete_error = error;
+            cx.notify();
+        }
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn delete_error(&self) -> Option<&str> {
+        self.delete_error.as_deref()
+    }
+    pub fn set_projects(
+        &mut self,
+        projects: Vec<crate::integration::Project>,
+        cx: &mut Context<Self>,
+    ) {
+        self.songs = projects
+            .into_iter()
+            .map(|p| CatalogSong {
+                title: p.name,
+                saved: catalog_date(&p.saved),
+                lyrics: p.has_lyrics,
+                project_dir: Some(p.dir),
+                stems: p.lanes.len(),
+            })
+            .collect();
+        cx.notify();
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn project_delete_bounds(&self, dir: &std::path::Path) -> Option<Bounds<Pixels>> {
+        self.delete_bounds.borrow().get(dir).copied()
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn project_open_bounds(&self, dir: &std::path::Path) -> Option<Bounds<Pixels>> {
+        self.project_bounds.borrow().get(dir).copied()
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn project_snapshot(&self) -> serde_json::Value {
+        serde_json::json!(self.songs.iter().map(|s|serde_json::json!({"dir":s.project_dir,"name":s.title,"stemCount":s.stems,"hasLyrics":s.lyrics})).collect::<Vec<_>>())
+    }
+    pub fn reveal_guide(&self, bounds: Bounds<Pixels>) {
+        let viewport = self.page_scroll.bounds();
+        let mut offset = self.page_scroll.offset();
+        if bounds.top() < viewport.top() + px(8.) {
+            offset.y += viewport.top() + px(8.) - bounds.top();
+        } else if bounds.bottom() > viewport.bottom() - px(8.) {
+            offset.y -= bounds.bottom() - viewport.bottom() + px(8.);
+        }
+        self.page_scroll.set_offset(offset);
+    }
+    pub fn focus_search(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let focus = self.search.read(cx).focus_handle(cx);
+        focus.focus(window, cx);
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn search_focused(&self, window: &Window, cx: &App) -> bool {
+        self.search.read(cx).focus_handle(cx).is_focused(window)
+    }
     pub fn set_open_song(&mut self, title: Option<SharedString>, cx: &mut Context<Self>) {
         self.open_song = title;
         cx.notify();
@@ -198,19 +436,54 @@ impl LibraryScreen {
         }
     }
 
-    fn song_card(index: usize, palette: usize, cx: &mut Context<Self>) -> AnyElement {
-        let song = &SONGS[index];
+    fn song_card(&self, index: usize, palette: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let song = &self.songs[index];
         let hues = [
             [0xf66d5c, 0xf2a83d, 0x58d68a],
             [0x5ba8f5, 0xf2a83d, 0xb58cf2],
             [0x58d68a, 0xffd97a, 0xf66d5c],
         ];
+        // Native Project.dir is authoritative even when its playable audio is
+        // outside the project or the project contains only stems.
+        let project_path = song.project_dir.clone();
+        let delete_dir = song.project_dir.clone();
+        let delete_title = song.title.clone();
+        let delete = catalog_delete(("library-delete", index))
+            .absolute()
+            .right(px(7.))
+            .top(px(22.5))
+            .on_click(cx.listener(move |_, _, _, cx| {
+                if let Some(dir) = &delete_dir {
+                    cx.emit(LibraryEvent::DeleteProject(dir.clone()));
+                } else {
+                    cx.emit(LibraryEvent::DeleteSong {
+                        title: delete_title.clone().into(),
+                    });
+                }
+                cx.stop_propagation();
+            }));
+        #[cfg(feature = "ui-tests")]
+        let delete = if let Some(dir) = song.project_dir.clone() {
+            let bounds = self.delete_bounds.clone();
+            delete.child(
+                canvas(
+                    move |b, _, _| {
+                        bounds.borrow_mut().insert(dir.clone(), b);
+                        b
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+        } else {
+            delete
+        };
         let (month, day) = song.saved.split_once(' ').unwrap_or(("", ""));
-        let meta = format!(
-            "6 stems{} · {day} {month}",
-            if song.lyrics { " · lyrics" } else { "" }
-        );
-        div()
+        let meta = format!("{}{} · {day} {month}",
+            tn("library.dropScreen.stemsCount", song.stems as f64, &[]),
+            if song.lyrics {format!(" · {}",t("library.dropScreen.lyricsBadge"))}else{String::new()});
+        let card=div()
             .relative()
             .flex_1()
             .min_w_0()
@@ -233,6 +506,10 @@ impl LibraryScreen {
                     .cursor_pointer()
                     .hover(|s| s.border_color(rgb(0xffa028)))
                     .on_click(cx.listener(move |_, _, _, cx| {
+                        if let Some(path) = project_path.clone() {
+                            cx.emit(LibraryEvent::OpenProject(path));
+                            return;
+                        }
                         let song = &SONGS[index];
                         cx.emit(LibraryEvent::OpenSong {
                             title: song.title.into(),
@@ -272,7 +549,10 @@ impl LibraryScreen {
                                     .text_size(px(14.5))
                                     .line_height(px(17.5))
                                     .font_family("SingZ Display 700")
-                                    .child(singz_uikit::tracked_label(song.title, -0.2 / 14.5)),
+                                    .child(singz_uikit::tracked_label(
+                                        song.title.clone(),
+                                        -0.2 / 14.5,
+                                    )),
                             )
                             .child(
                                 div()
@@ -281,20 +561,37 @@ impl LibraryScreen {
                                     .text_color(rgb(DIM))
                                     .child(meta),
                             ),
-                    ),
+                    )
+                    .when_some(song.project_dir.as_ref().and_then(|dir| {
+                        self.drive.configured.then(||self.drive.projects.get(dir).copied()).flatten()
+                            .filter(|state|self.drive.signed_in || *state==crate::drive_state::ProjectState::Syncing)
+                    }), |card,state| {
+                        use crate::drive_state::ProjectState;
+                        let state=match state {
+                            ProjectState::Pending=>singz_uikit::DriveBadge::Pending,
+                            ProjectState::Syncing=>singz_uikit::DriveBadge::Syncing,
+                            ProjectState::Synced=>singz_uikit::DriveBadge::Synced,
+                            ProjectState::Blocked=>singz_uikit::DriveBadge::Blocked,
+                        };
+                        let title=match state {
+                            singz_uikit::DriveBadge::Pending=>t("library.dropScreen.waitingTitle"),
+                            singz_uikit::DriveBadge::Syncing=>t("library.dropScreen.uploadingTitle"),
+                            singz_uikit::DriveBadge::Synced=>t("library.dropScreen.upToDateTitle"),
+                            singz_uikit::DriveBadge::Blocked=>tv("library.dropScreen.notOnDriveTitle", &[("reason",self.drive.scheduler.last_error.clone().or_else(||self.drive.error.clone()).unwrap_or_else(||t("library.dropScreen.syncFailedFallback")))]),
+                        };
+                        let bounds=self.drive_bounds.clone();
+                        let id=format!("library-drive-badge-{index}");
+                        card.child(singz_uikit::drive_project_badge_title(("library-drive-badge",index),state,title,window)
+                            .relative().child(canvas(move |b,_,_|{bounds.borrow_mut().insert(id.clone(),b);b},|_,_,_,_|{}).absolute().inset_0()))
+                    }),
             )
-            .child(
-                catalog_delete(("library-delete", index))
-                    .absolute()
-                    .right(px(7.))
-                    .top(px(22.5))
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(LibraryEvent::DeleteSong {
-                            title: SONGS[index].title.into(),
-                        });
-                    })),
-            )
-            .into_any_element()
+            .child(delete);
+        #[cfg(feature="ui-tests")]
+        let card=card.children(song.project_dir.clone().map(|dir| {
+            let bounds=self.project_bounds.clone();
+            canvas(move |b,_,_| {bounds.borrow_mut().insert(dir.clone(),b);b},|_,_,_,_|{}).absolute().inset_0()
+        }));
+        card.into_any_element()
     }
 
     fn equalizer(time: f32) -> Div {
@@ -362,8 +659,12 @@ impl LibraryScreen {
 
 impl Render for LibraryScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "ui-tests")]
+        self.delete_bounds.borrow_mut().clear();
+        self.drive_bounds.borrow_mut().clear();
         let query = self.query.trim().to_lowercase();
-        let indices: Vec<usize> = SONGS
+        let indices: Vec<usize> = self
+            .songs
             .iter()
             .enumerate()
             .filter(|(_, song)| query.is_empty() || song.title.to_lowercase().contains(&query))
@@ -379,7 +680,7 @@ impl Render for LibraryScreen {
             .map(|(row_index, chunk)| {
                 let mut row = div().flex().gap(px(12.)).h(px(68.)).flex_shrink_0();
                 for (column, &index) in chunk.iter().enumerate() {
-                    row = row.child(Self::song_card(index, row_index * columns + column, cx));
+                    row = row.child(self.song_card(index, row_index * columns + column, window, cx));
                 }
                 for _ in chunk.len()..columns {
                     row = row.child(div().flex_1().min_w_0());
@@ -408,15 +709,21 @@ impl Render for LibraryScreen {
         if self.animation_time.is_none() && self.suspended_at.is_none() {
             window.request_animation_frame();
         }
+        let native = !crate::integration::fixture_mode();
         let description = match self.open_song.as_ref() {
-            Some(song) => format!("Pick a project below, or drop another song anywhere in this window — “{song}” stays loaded until you do."),
-            None => "MP3, WAV, FLAC or M4A — SingZ splits it into vocals, drums, bass & instruments you can mute while you sing.".to_owned(),
+            Some(song)=>tv("library.dropScreen.catalogHint", &[("song",song.to_string())]),
+            None=>t("library.dropScreen.dropHintDesc"),
         };
         let description_height = if self.open_song.is_some() { 72. } else { 48. };
-        // Match DropScreen's min-height:0 flex negotiation, including its
-        // zero-height card viewport at 1060×640. The outer page stays scrollable.
+        // Keep the immutable demo reference's min-height:0 negotiation. The
+        // real native catalog reserves one complete card row instead: the old
+        // zero-height grid at 1060×640 made Open/Delete unreachable. Its section
+        // takes an intrinsic, nonshrinking flex basis so the outer page can
+        // scroll that row into view. This is a native usability correction,
+        // not a pixel-parity claim for the broken reference state.
         div()
             .id("library-screen")
+            .track_scroll(&self.page_scroll)
             .w_full()
             .flex_1()
             .min_h_0()
@@ -451,11 +758,7 @@ impl Render for LibraryScreen {
                             .font_family("SingZ Display 800")
                             .mb(px(14.))
                             .child(singz_uikit::tracked_text(
-                                if self.open_song.is_some() {
-                                    "Your catalog."
-                                } else {
-                                    "Drop a song."
-                                },
+                                if self.open_song.is_some() {t("library.dropScreen.yourCatalog")} else {t("library.dropScreen.dropASong")},
                                 "SingZ Display 800",
                                 52.,
                                 -0.52,
@@ -474,12 +777,16 @@ impl Render for LibraryScreen {
                             .child(singz_uikit::tracked_label(description, 0.).wrap()),
                     )
                     .child(
-                        ghost_pill("library-browse", "Browse files…")
-                            .text_size(px(14.))
-                            .line_height(px(16.5))
-                            .h(px(36.5))
-                            .flex_shrink_0()
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(LibraryEvent::Browse))),
+                        ghost_pill(
+                            "library-browse",
+                            t("library.common.browseFiles"),
+                        )
+                        .text_size(px(14.))
+                        .line_height(px(16.5))
+                        .h(px(36.5))
+                        .flex_shrink_0()
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(LibraryEvent::Browse)))
+                        .when(true, |d| self.guides.track_box(d, "browse", [1.; 4])),
                     )
                     .child(
                         div()
@@ -487,11 +794,7 @@ impl Render for LibraryScreen {
                             .text_size(px(12.))
                             .line_height(px(14.5))
                             .text_color(rgb(FAINT))
-                            .child(if self.open_song.is_some() {
-                                "or press Esc to go back to your song"
-                            } else {
-                                "or drag it anywhere into this window"
-                            }),
+                            .child(if self.open_song.is_some(){t("library.dropScreen.escHint")}else{t("library.dropScreen.dragHint")}),
                     ),
             )
             .child(
@@ -503,6 +806,7 @@ impl Render for LibraryScreen {
                     .border_color(rgba(0xfff0d614))
                     .flex_1()
                     .min_h_0()
+                    .when(native, |section| section.flex_auto().flex_shrink_0())
                     .flex()
                     .flex_col()
                     .child(
@@ -522,7 +826,7 @@ impl Render for LibraryScreen {
                                     .font_family("SingZ Display 700")
                                     .text_color(rgb(FAINT))
                                     .child(singz_uikit::tracked_text(
-                                        "YOUR PROJECTS",
+                                        t("library.common.yourProjects").to_uppercase(),
                                         "SingZ Display 700",
                                         10.5,
                                         1.47,
@@ -538,6 +842,7 @@ impl Render for LibraryScreen {
                             .flex_shrink_0()
                             .h(px(53.5))
                             .w_full()
+                            .when(true, |d| self.guides.track_box(d, "saved", [1.; 4]))
                             .rounded(px(13.))
                             .border_1()
                             .border_color(rgba(0xffffff0d))
@@ -571,27 +876,69 @@ impl Render for LibraryScreen {
                                             // (12.5px); CoreText's color-glyph advance is wider.
                                             // Preserve the source flex-item width without scaling ink.
                                             .child(div().w(px(12.5)).flex_none().child("📁"))
-                                            .child("Demo › SingZ"),
+                                            .child(if native {
+                                                self.native_root.clone()
+                                            } else {
+                                                "Demo › SingZ".into()
+                                            }),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(11.))
                                             .line_height(px(13.))
                                             .text_color(rgb(DIM))
-                                            .child(
-                                                "Your library lives here · On this computer only",
-                                            ),
+                                            .child(if native {
+                                                "Project folders · Saved in place".to_owned()
+                                            } else {
+                                                tv("library.dropScreen.libraryLivesHere", &[("cloud",t("library.dropScreen.cloudLocal"))])
+                                            }),
                                     ),
                             )
-                            .child(text_link("library-storage", "Change…").on_click(
-                                cx.listener(|_, _, _, cx| cx.emit(LibraryEvent::ManageStorage)),
-                            )),
+                            .child(
+                                self.guides
+                                    .track_box(
+                                        text_link("library-storage", t("library.dropScreen.change")),
+                                        "storage",
+                                        [1.; 4],
+                                    )
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(LibraryEvent::ManageStorage)
+                                    })),
+                            )
+                            .when(native && self.drive.configured, |storage| {
+                                singz_uikit::drive_storage_panel()
+                                    .child(storage.h(px(51.5)).mb_0().border_0().bg(rgba(0)))
+                                    .child(self.drive_row(window,cx))
+                            })
+                            .when_some(
+                                self.delete_error.clone().filter(|_| native),
+                                |storage, error| {
+                                    // The source uses the storage panel's warning sub-row.
+                                    // Keep it visible offline as well: its old Drive-only
+                                    // condition hid deletion failures without an account.
+                                    if self.drive.configured {
+                                        storage.child(singz_uikit::library_delete_error(error,window))
+                                    } else { div()
+                                        .w_full()
+                                        .flex_none()
+                                        .rounded(px(13.))
+                                        .border_1()
+                                        .border_color(rgba(0xffffff0d))
+                                        .bg(rgba(0xffffff09))
+                                        .mb(px(14.))
+                                        .child(storage.h(px(51.5)).mb_0().border_0().bg(rgba(0)))
+                                        .child(singz_uikit::library_delete_error(error, window)) }
+                                },
+                            ),
                     )
                     .child(
                         div()
                             .relative()
                             .flex_1()
                             .min_h_0()
+                            .when(native, |grid| {
+                                grid.min_h(px(if indices.is_empty() { 47.2 } else { 68. }))
+                            })
                             .child(
                                 div()
                                     .id("library-grid")
@@ -616,10 +963,14 @@ impl Render for LibraryScreen {
                                                 .line_height(px(19.2))
                                                 .mb(px(28.))
                                                 .text_color(rgb(FAINT))
-                                                .child(format!(
-                                                    "Nothing matches “{}”.",
-                                                    self.query.trim()
-                                                )),
+                                                .child(if native && self.query.is_empty() {
+                                                    "No playable projects in this folder".to_owned()
+                                                } else {
+                                                    format!(
+                                                        "Nothing matches “{}”.",
+                                                        self.query.trim()
+                                                    )
+                                                }),
                                         )
                                     }),
                             )

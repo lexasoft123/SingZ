@@ -91,6 +91,14 @@ struct Voice {
     for (auto& voice : voices_) if (voice.state.load(std::memory_order_acquire) != Voice::Finished && voice.generation == generation)
       voice.gain.store(std::min(gain, voice.maximumGain), std::memory_order_relaxed);
   }
+  // Ordinary-thread observation; completion is published by render(), not
+  // inferred from wall time. Physical output latency remains a separate fact.
+  bool active(uint64_t generation) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& voice : voices_)
+      if (voice.state.load(std::memory_order_acquire) != Voice::Finished && voice.generation == generation) return true;
+    return false;
+  }
   void clearQuiesced() {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto& voice : voices_) { voice.state.store(Voice::Finished, std::memory_order_release); voice.planes.clear(); }

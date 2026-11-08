@@ -5,7 +5,7 @@
 #endif
 
 #if (!defined(__APPLE__) || (!TARGET_OS_OSX && !TARGET_OS_IOS)) && !defined(_WIN32) && \
-    !defined(__ANDROID__)
+    !defined(__ANDROID__) && !defined(SINGZ_HAS_ALSA)
 
 #include <chrono>
 #include <thread>

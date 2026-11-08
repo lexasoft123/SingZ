@@ -2,12 +2,51 @@
 #include <zcore/base/file_compat.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <vector>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace singz {
 namespace {
+
+// Public native paths are UTF-8. The Windows CRT's narrow fopen uses the
+// process ACP, so translate strictly at this file boundary rather than changing
+// the process-wide code page (which would also affect unrelated libraries).
+static std::FILE* openUtf8(const std::string& path, const char* mode) {
+#if defined(_WIN32)
+  if (path.empty() || path.find('\0') != std::string::npos ||
+      path.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+    errno = EINVAL;
+    return nullptr;
+  }
+  const int bytes = static_cast<int>(path.size());
+  const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                       path.data(), bytes, nullptr, 0);
+  if (count <= 0) { errno = EINVAL; return nullptr; }
+  std::wstring wide(static_cast<size_t>(count), L'\0');
+  if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.data(), bytes,
+                          wide.data(), count) != count) {
+    errno = EINVAL;
+    return nullptr;
+  }
+  const std::wstring wideMode(mode, mode + std::strlen(mode));
+  return _wfopen(wide.c_str(), wideMode.c_str());
+#else
+  return std::fopen(path.c_str(), mode);
+#endif
+}
 
 void putU32(uint8_t* p, uint32_t v) {
   p[0] = v & 0xff;
@@ -30,7 +69,7 @@ bool WavWriter::open(const std::string& path, int sampleRate, int channels,
   channels_ = channels;
   finalized_ = false;
   if (existingFrames >= 0) {
-    f_ = std::fopen(path.c_str(), "r+b");
+    f_ = openUtf8(path, "r+b");
     if (f_ == nullptr) return false;
     // Backstop: the file must really hold every claimed frame — a resume
     // after a kill that outran stdio would otherwise zero-fill the gap.
@@ -42,7 +81,7 @@ bool WavWriter::open(const std::string& path, int sampleRate, int channels,
     frames_ = existingFrames;
     return fseeko(f_, 44 + existingFrames * channels_ * 2, SEEK_SET) == 0;
   }
-  f_ = std::fopen(path.c_str(), "wb");
+  f_ = openUtf8(path, "wb");
   if (f_ == nullptr) return false;
   frames_ = 0;
   uint8_t header[44] = {0};
@@ -118,7 +157,7 @@ namespace {
 // otherwise fail as "not a RIFF/WAVE file" while a WAV named .flac already
 // fails loudly — the asymmetric case is the one the suffix cannot catch.
 bool looksFlac(const std::string& path) {
-  std::FILE* f = std::fopen(path.c_str(), "rb");
+  std::FILE* f = openUtf8(path, "rb");
   if (f == nullptr) return false;
   unsigned char magic[4] = {0, 0, 0, 0};
   const size_t got = std::fread(magic, 1, 4, f);
@@ -222,7 +261,7 @@ bool walkHeader(std::FILE* f, WavHeader& h) {
 WavInfo readWavInfo(const std::string& path) {
   if (looksFlac(path)) return readFlacInfo(path);
   WavInfo out;
-  std::FILE* f = std::fopen(path.c_str(), "rb");
+  std::FILE* f = openUtf8(path, "rb");
   if (f == nullptr) {
     out.error = "cannot open";
     return out;
@@ -244,7 +283,7 @@ WavInfo readWavInfo(const std::string& path) {
 MonoWav readWavMono(const std::string& path) {
   if (looksFlac(path)) return readFlacMono(path);
   MonoWav out;
-  std::FILE* f = std::fopen(path.c_str(), "rb");
+  std::FILE* f = openUtf8(path, "rb");
   if (f == nullptr) {
     out.error = "cannot open";
     return out;

@@ -1,19 +1,40 @@
-//! Settings composition mirrors SettingsModal.tsx; all draft state remains local.
+//! Settings composition mirrors SettingsModal.tsx; native routes are host-owned.
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use singz_uikit::tokens::{ACCENT, DANGER, DIM, FAINT, LINE, LINE_STRONG, PANEL, PANEL_DEEP, TEXT};
 use singz_uikit::{
     checkbox, disabled_monitor_pill, ghost_pill, modal_card, monitor_badge, nav_tab,
-    production_scrollbar, range_slider, select_field, select_option, select_popup,
+    production_scrollbar, range_slider, scrolling_select_popup, select_field, select_option,
+    select_popup,
 };
 
 pub enum SettingsEvent {
     Close,
     QuickStart,
+    Output(String),
+    InputPrefs(crate::microphone::Prefs),
+    EnableMicrophone,
+    Monitor,
 }
 impl EventEmitter<SettingsEvent> for SettingsScreen {}
 
 pub struct SettingsScreen {
+    #[cfg(feature = "ui-tests")]
+    inventory_revision: u64,
+    #[cfg(feature = "ui-tests")]
+    field_bounds:
+        std::rc::Rc<std::cell::RefCell<std::collections::HashMap<&'static str, Bounds<Pixels>>>>,
+    input_prefs: crate::microphone::Prefs,
+    microphone: crate::microphone::View,
+    input_pref_error: Option<String>,
+    monitor_busy: bool,
+    monitor_error: Option<String>,
+    native: bool,
+    inventory: Option<crate::audio_devices::Inventory>,
+    output_uid: String,
+    route_error: Option<String>,
+    route_busy: bool,
+    route_label: Option<String>,
     output: usize,
     input: usize,
     channel: usize,
@@ -40,6 +61,21 @@ const MONITOR_OUTPUTS: &[&str] = &["Choose playback device…", "Studio interfac
 impl SettingsScreen {
     pub fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
         Self {
+            #[cfg(feature = "ui-tests")]
+            inventory_revision: 0,
+            #[cfg(feature = "ui-tests")]
+            field_bounds: Default::default(),
+            input_prefs: Default::default(),
+            microphone: Default::default(),
+            input_pref_error: None,
+            monitor_busy: false,
+            monitor_error: None,
+            native: !crate::integration::fixture_mode(),
+            inventory: None,
+            output_uid: String::new(),
+            route_error: None,
+            route_busy: false,
+            route_label: None,
             output: 0,
             input: 0,
             channel: 0,
@@ -55,6 +91,275 @@ impl SettingsScreen {
             #[cfg(feature = "ui-tests")]
             gain_bounds: Default::default(),
         }
+    }
+    pub fn clear_input_pref_error(&mut self, cx: &mut Context<Self>) {
+        self.input_pref_error = None;
+        cx.notify();
+    }
+    pub fn input_pref_error(&mut self, error: String, cx: &mut Context<Self>) {
+        self.input_pref_error = Some(error);
+        cx.notify();
+    }
+    pub fn set_input_prefs(&mut self, prefs: crate::microphone::Prefs, cx: &mut Context<Self>) {
+        self.channel = prefs.channel;
+        self.gain = prefs.gain;
+        self.headphones = prefs.headphones;
+        self.output_channels = prefs.outputs;
+        self.input_prefs = prefs;
+        self.input_pref_error = None;
+        cx.notify();
+    }
+    pub fn set_monitor_state(&mut self, busy: bool, error: Option<String>, cx: &mut Context<Self>) {
+        if busy != self.monitor_busy
+            || error
+                .as_ref()
+                .is_some_and(|e| self.monitor_error.as_ref() != Some(e))
+        {
+            if busy && !self.monitor_busy {
+                self.monitor_error = None;
+            }
+            self.monitor_busy = busy;
+            if error.is_some() {
+                self.monitor_error = error;
+            }
+            cx.notify();
+        }
+    }
+    pub fn monitor_route(&self) -> Result<(), String> {
+        if cfg!(any(target_os = "windows", target_os = "linux")) {
+            return Err(
+                crate::i18n::t("settings.monitor.routePlatformUnavailable").into(),
+            );
+        }
+        if !self.input_prefs.headphones {
+            return Err("Connect wired headphones and confirm them below.".into());
+        }
+        let inventory = self
+            .inventory
+            .as_ref()
+            .ok_or("Native device inventory is unavailable.")?;
+        let uid = if self.input_prefs.input.is_empty() {
+            &inventory.default_input
+        } else {
+            &self.input_prefs.input
+        };
+        let input = inventory
+            .devices
+            .iter()
+            .find(|d| &d.uid == uid && d.inputs > self.input_prefs.channel)
+            .ok_or("Selected microphone channel is unavailable.")?;
+        let output = inventory
+            .devices
+            .iter()
+            .find(|d| d.uid == self.input_prefs.monitor_output && d.outputs > 0)
+            .ok_or("Choose a monitoring output device.")?;
+        if input.uid != output.uid {
+            return Err("Monitoring requires input and output on the same audio interface.".into());
+        }
+        if self.input_prefs.outputs[0] == self.input_prefs.outputs[1]
+            || self
+                .input_prefs
+                .outputs
+                .iter()
+                .any(|c| *c >= output.outputs)
+        {
+            return Err("Choose two distinct available playback channels.".into());
+        }
+        Ok(())
+    }
+    pub fn set_microphone(&mut self, view: crate::microphone::View, cx: &mut Context<Self>) {
+        self.microphone = view;
+        cx.notify();
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn field_bounds(&self, id: &str) -> Option<Bounds<Pixels>> {
+        self.field_bounds.borrow().get(id).copied()
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn native_snapshot(
+        &self,
+    ) -> (
+        Option<crate::audio_devices::Inventory>,
+        String,
+        bool,
+        Option<String>,
+    ) {
+        (
+            self.inventory.clone(),
+            self.output_uid.clone(),
+            self.route_busy,
+            self.route_error.clone(),
+        )
+    }
+    pub fn output_uid(&self) -> String { self.output_uid.clone() }
+    pub fn route_applying(&mut self, cx: &mut Context<Self>) {
+        self.route_busy = true;
+        self.route_error = None;
+        cx.notify();
+    }
+    pub fn route_failed(&mut self, error: String, cx: &mut Context<Self>) {
+        self.route_error = Some(error);
+        self.route_busy = false;
+        cx.notify();
+    }
+    pub fn set_inventory(
+        &mut self,
+        result: Result<crate::audio_devices::Inventory, String>,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(feature = "ui-tests")]
+        { self.inventory_revision += 1; }
+        match result {
+            Ok(inventory) => {
+                if let Err(error) = inventory.output(&self.output_uid) {
+                    self.route_error = Some(error.to_string());
+                }
+                self.inventory = Some(inventory)
+            }
+            Err(error) => self.route_error = Some(error),
+        }
+        cx.notify();
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn inventory_revision(&self) -> u64 { self.inventory_revision }
+    pub fn confirm_route(&mut self, label: String, cx: &mut Context<Self>) {
+        self.route_label = Some(label);
+        cx.notify();
+    }
+    pub fn set_route(
+        &mut self,
+        uid: String,
+        label: Option<String>,
+        error: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.output_uid = uid;
+        self.route_label = label.or_else(|| self.route_label.take());
+        self.route_error = error;
+        self.route_busy = false;
+        cx.notify();
+    }
+    fn options(&self, id: &str, defaults: &[&str]) -> Vec<(String, String)> {
+        if !self.native {
+            return defaults
+                .iter()
+                .map(|s| (String::new(), s.to_string()))
+                .collect();
+        }
+        let Some(inventory) = &self.inventory else {
+            return vec![(String::new(), "Loading native devices…".into())];
+        };
+        let devices = match id {
+            "settings-output" | "settings-monitor-output" => Some(false),
+            "settings-input" => Some(true),
+            _ => None,
+        };
+        if let Some(input) = devices {
+            let mut options = vec![(
+                String::new(),
+                if id == "settings-monitor-output" {
+                    "Choose playback device…".into()
+                } else {
+                    "System default".into()
+                },
+            )];
+            options.extend(
+                inventory
+                    .devices
+                    .iter()
+                    .filter(|d| if input { d.inputs > 0 } else { d.outputs > 0 })
+                    .map(|d| {
+                        (
+                            d.uid.clone(),
+                            if input {
+                                format!("{} · {} ch", d.label, d.inputs)
+                            } else {
+                                d.label.clone()
+                            },
+                        )
+                    }),
+            );
+            if id == "settings-input"
+                && !self.input_prefs.input.is_empty()
+                && !options
+                    .iter()
+                    .any(|(uid, _)| uid == &self.input_prefs.input)
+            {
+                options.push((
+                    self.input_prefs.input.clone(),
+                    "Saved microphone · unavailable".into(),
+                ));
+            }
+            if id == "settings-output"
+                && !self.output_uid.is_empty()
+                && !options.iter().any(|(uid, _)| uid == &self.output_uid)
+            {
+                options.push((self.output_uid.clone(), "Saved output · unavailable".into()));
+            }
+            if id == "settings-monitor-output"
+                && !self.input_prefs.monitor_output.is_empty()
+                && !options
+                    .iter()
+                    .any(|(uid, _)| uid == &self.input_prefs.monitor_output)
+            {
+                options.push((
+                    self.input_prefs.monitor_output.clone(),
+                    "Saved monitoring output · unavailable".into(),
+                ));
+            }
+            return options;
+        }
+        let channels = if id == "settings-channel" {
+            self.input_channels()
+        } else {
+            let outputs = self.options("settings-monitor-output", MONITOR_OUTPUTS);
+            outputs
+                .get(
+                    outputs
+                        .iter()
+                        .position(|(uid, _)| uid == &self.input_prefs.monitor_output)
+                        .unwrap_or(0),
+                )
+                .and_then(|(uid, _)| inventory.output(uid).ok())
+                .map_or(0, |d| d.outputs)
+        };
+        (0..channels)
+            .map(|i| {
+                (
+                    i.to_string(),
+                    format!(
+                        "{} {}",
+                        if id == "settings-channel" {
+                            "IN"
+                        } else {
+                            "OUT"
+                        },
+                        i + 1
+                    ),
+                )
+            })
+            .collect()
+    }
+    fn input_channels(&self) -> usize {
+        if !self.native {
+            return if self.input == 2 { 2 } else { 1 };
+        }
+        if self.microphone.fixture && self.microphone.phase == crate::microphone::Phase::Live {
+            return self.microphone.channels.max(1);
+        }
+        let Some(inventory) = &self.inventory else {
+            return 1;
+        };
+        let uid = if self.input_prefs.input.is_empty() {
+            &inventory.default_input
+        } else {
+            &self.input_prefs.input
+        };
+        inventory
+            .devices
+            .iter()
+            .find(|d| &d.uid == uid)
+            .map_or(1, |d| d.inputs.max(1))
     }
     /// The capture runner supplies the same sample inventory and startup state to both apps.
     /// This changes display metadata only; it never starts hardware or an asynchronous job.
@@ -79,6 +384,10 @@ impl SettingsScreen {
     /// A production modal mounts fresh when reopened: reset transient scroll/menu state,
     /// retaining the host-owned audio draft preferences.
     pub fn on_open(&mut self, cx: &mut Context<Self>) {
+        if self.native {
+            self.headphones = false;
+            self.input_prefs.headphones = false;
+        }
         self.open_field = None;
         self.scroll.set_offset(point(px(0.), px(0.)));
         self.graph_scroll.set_offset(point(px(0.), px(0.)));
@@ -133,55 +442,151 @@ impl SettingsScreen {
         selected: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        let options = self.options(id, options);
+        let selected = if self.native && id == "settings-input" {
+            options
+                .iter()
+                .position(|(uid, _)| uid == &self.input_prefs.input)
+                .unwrap_or(0)
+        } else if self.native && id == "settings-monitor-output" {
+            options
+                .iter()
+                .position(|(uid, _)| uid == &self.input_prefs.monitor_output)
+                .unwrap_or(0)
+        } else if self.native && id == "settings-output" {
+            options
+                .iter()
+                .position(|(uid, _)| uid == &self.output_uid)
+                .unwrap_or(0)
+        } else {
+            selected.min(options.len().saturating_sub(1))
+        };
         let expanded = self.open_field == Some(id);
-        div()
+        let popup = if self.native && options.len() > 8 {
+            scrolling_select_popup(format!("{id}-popup"))
+        } else {
+            select_popup().id(format!("{id}-popup"))
+        };
+        #[cfg(feature = "ui-tests")]
+        let bounds = self.field_bounds.clone();
+        let field = div()
             .relative()
             .w_full()
-            .child(select_field(id, options[selected]).on_click(cx.listener(
-                move |this, _, _, cx| {
+            .child(
+                select_field(
+                    id,
+                    options
+                        .get(selected)
+                        .map(|(_, label)| label.clone())
+                        .unwrap_or("No channels".into()),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if this.native && id == "settings-output" && this.route_busy {
+                        return;
+                    }
                     this.open_field = if this.open_field == Some(id) {
                         None
                     } else {
                         Some(id)
                     };
                     cx.notify();
-                },
-            )))
+                })),
+            )
             .when(expanded, |v| {
                 v.child(
-                    deferred(select_popup().children(options.iter().enumerate().map(
-                        |(index, &option)| {
-                            select_option((id, index), option, index == selected).on_click(
-                                cx.listener(move |this, _, _, cx| {
+                    deferred(popup.children(options.into_iter().enumerate().map(
+                        |(index, (uid, option))| {
+                            select_option((id, index), option, index == selected)
+                                .flex_none()
+                                .on_click(cx.listener(move |this, _, _, cx| {
                                     match id {
-                                        "settings-output" => this.output = index,
+                                        "settings-output" => {
+                                            this.output = index;
+                                            if this.native {
+                                                this.route_busy = true;
+                                                this.route_error = None;
+                                                cx.emit(SettingsEvent::Output(uid.clone()));
+                                            }
+                                        }
                                         "settings-input" => {
                                             this.input = index;
                                             this.channel = 0;
+                                            if this.native {
+                                                this.input_prefs.input = uid.clone();
+                                                this.input_prefs.channel = 0;
+                                                cx.emit(SettingsEvent::InputPrefs(
+                                                    this.input_prefs.clone(),
+                                                ));
+                                            }
                                         }
-                                        "settings-channel" => this.channel = index,
-                                        "settings-monitor-output" => this.monitor_output = index,
-                                        "settings-output-left" => this.output_channels[0] = index,
-                                        "settings-output-right" => this.output_channels[1] = index,
+                                        "settings-channel" => {
+                                            this.channel = index;
+                                            if this.native {
+                                                this.input_prefs.channel = index;
+                                                cx.emit(SettingsEvent::InputPrefs(
+                                                    this.input_prefs.clone(),
+                                                ));
+                                            }
+                                        }
+                                        "settings-monitor-output" => {
+                                            this.monitor_output = index;
+                                            if this.native {
+                                                this.input_prefs.monitor_output = uid.clone();
+                                                cx.emit(SettingsEvent::InputPrefs(
+                                                    this.input_prefs.clone(),
+                                                ));
+                                            }
+                                        }
+                                        "settings-output-left" => {
+                                            this.output_channels[0] = index;
+                                            if this.native {
+                                                this.input_prefs.outputs[0] = index;
+                                                cx.emit(SettingsEvent::InputPrefs(
+                                                    this.input_prefs.clone(),
+                                                ));
+                                            }
+                                        }
+                                        "settings-output-right" => {
+                                            this.output_channels[1] = index;
+                                            if this.native {
+                                                this.input_prefs.outputs[1] = index;
+                                                cx.emit(SettingsEvent::InputPrefs(
+                                                    this.input_prefs.clone(),
+                                                ));
+                                            }
+                                        }
                                         _ => {}
                                     }
                                     this.open_field = None;
                                     cx.notify();
-                                }),
-                            )
+                                }))
                         },
                     )))
                     .with_priority(100),
                 )
-            })
+            });
+        #[cfg(feature = "ui-tests")]
+        let field = field.child(
+            canvas(
+                move |b, _, _| {
+                    bounds.borrow_mut().insert(id, b);
+                    b
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        );
+        field
     }
     fn check_row(
         &self,
         id: &'static str,
-        label: &'static str,
+        label: impl Into<SharedString>,
         on: bool,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
+    ) -> Stateful<Div> {
+        let label:SharedString=label.into();
         div()
             .id(format!("{id}-row"))
             .mt(px(10.))
@@ -193,42 +598,123 @@ impl SettingsScreen {
             .line_height(px(15.))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
+                if this.native && id == "settings-native" {
+                    return;
+                }
                 match id {
                     "settings-native" => this.native_playback = !this.native_playback,
                     _ => this.headphones = !this.headphones,
+                }
+                if this.native && id == "settings-headphones" {
+                    this.input_prefs.headphones = this.headphones;
+                    cx.emit(SettingsEvent::InputPrefs(this.input_prefs.clone()));
                 }
                 cx.notify();
             }))
             .child(
                 checkbox(id, on).on_click(cx.listener(move |this, _, _, cx| {
+                    if this.native && id == "settings-native" {
+                        cx.stop_propagation();
+                        return;
+                    }
                     match id {
                         "settings-native" => this.native_playback = !this.native_playback,
                         _ => this.headphones = !this.headphones,
+                    }
+                    if this.native && id == "settings-headphones" {
+                        this.input_prefs.headphones = this.headphones;
+                        cx.emit(SettingsEvent::InputPrefs(this.input_prefs.clone()));
                     }
                     cx.notify();
                 })),
             )
             .child(label)
+            .when(cfg!(feature = "ui-tests"), |row| {
+                #[cfg(feature = "ui-tests")]
+                let row = {
+                    let probe = self.field_bounds.clone();
+                    row.relative().child(
+                        canvas(
+                            move |bounds, _, _| {
+                                probe.borrow_mut().insert(id, bounds);
+                                bounds
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+                };
+                row
+            })
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn monitor_error(&self) -> Option<String> {
+        self.monitor_error.clone()
     }
     fn mic(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let stereo = self.input == 2;
+        let failed = self.native
+            && matches!(
+                self.microphone.phase,
+                crate::microphone::Phase::Error | crate::microphone::Phase::Permission
+            );
+        let stereo = self.input_channels() > 1;
+        let live = self.native && self.microphone.fresh();
+        let db = if live && self.microphone.rms > 0. {
+            20. * self.microphone.rms.log10()
+        } else {
+            -72.
+        };
+        let peak = if live && self.microphone.peak > 0. {
+            20. * self.microphone.peak.log10()
+        } else {
+            -72.
+        };
+        let level = ((db + 72.) / 72.).clamp(0., 1.);
+        let peak_level = ((peak + 72.) / 72.).clamp(0., 1.);
+        let status = if self.native {
+            match self.microphone.phase {
+                crate::microphone::Phase::Live | crate::microphone::Phase::Monitoring => {
+                    if live {
+                        format!("{db:.1} dBFS")
+                    } else {
+                        "Waiting for microphone…".into()
+                    }
+                }
+                crate::microphone::Phase::Starting | crate::microphone::Phase::Stopping => {
+                    crate::i18n::t("settings.mic.startingPreview").into()
+                }
+                crate::microphone::Phase::Permission => "Microphone permission required".into(),
+                crate::microphone::Phase::Error => "Microphone unavailable".into(),
+                _ => "Microphone is off".into(),
+            }
+        } else if self.review_fixture {
+            crate::i18n::t("settings.mic.startingPreview").into()
+        } else {
+            "Microphone capture unavailable".into()
+        };
         Self::strip(12.)
             .child(
                 div()
                     .flex()
                     .justify_between()
                     .items_center()
-                    .child(Self::label("Microphone").mt(px(0.)).mb(px(7.)))
-                    .when(self.input > 0, |v| {
-                        v.child(
-                            Self::mono(format!(
-                                "IN {}/{}",
-                                self.channel + 1,
-                                if stereo { 2 } else { 1 }
-                            ))
-                            .text_color(rgb(ACCENT)),
-                        )
-                    }),
+                    .child(Self::label(crate::i18n::t("settings.mic.label")).mt(px(0.)).mb(px(7.)))
+                    .when(
+                        self.input > 0
+                            || (self.native
+                                && (!self.input_prefs.input.is_empty() || self.microphone.fresh())),
+                        |v| {
+                            v.child(
+                                Self::mono(format!(
+                                    "IN {}/{}",
+                                    self.channel + 1,
+                                    self.input_channels()
+                                ))
+                                .text_color(rgb(ACCENT)),
+                            )
+                        },
+                    ),
             )
             .child(self.field("settings-input", INPUTS, self.input, cx))
             .child(
@@ -241,9 +727,9 @@ impl SettingsScreen {
                     .text_size(px(12.))
                     .text_color(rgb(if stereo { DIM } else { FAINT }))
                     .child(if stereo {
-                        "Input channel"
+                        crate::i18n::t("settings.mic.channelLabel")
                     } else {
-                        "Mono input · channel 1"
+                        crate::i18n::t("settings.mic.monoInput")
                     })
                     .when(stereo, |v| {
                         v.child(div().w(px(142.)).child(self.field(
@@ -262,14 +748,11 @@ impl SettingsScreen {
                     .text_color(rgb(DIM))
                     .text_size(px(11.))
                     .line_height(px(13.))
-                    .child("Input level")
+                    .child(crate::i18n::t("settings.mic.levelLabel"))
                     .child(
-                        Self::mono(if self.review_fixture {
-                            "Starting microphone preview…"
-                        } else {
-                            "Microphone capture unavailable"
-                        })
-                        .line_height(px(12.)),
+                        Self::mono(status)
+                            .line_height(px(12.))
+                            .text_color(rgb(if failed { DANGER } else { FAINT })),
                     ),
             )
             .child(
@@ -280,6 +763,24 @@ impl SettingsScreen {
                     .rounded(px(5.))
                     .overflow_hidden()
                     .bg(rgb(0x0c0b09))
+                    .when(cfg!(feature = "ui-tests"), |meter| {
+                        #[cfg(feature = "ui-tests")]
+                        let meter = {
+                            let probe = self.field_bounds.clone();
+                            meter.child(
+                                canvas(
+                                    move |bounds, _, _| {
+                                        probe.borrow_mut().insert("settings-meter", bounds);
+                                        bounds
+                                    },
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .inset_0(),
+                            )
+                        };
+                        meter
+                    })
                     .border_1()
                     .border_color(rgba(LINE_STRONG))
                     .child(
@@ -300,6 +801,17 @@ impl SettingsScreen {
                             .right_0()
                             .bg(rgb(0xff624c).alpha(0.08)),
                     )
+                    .when(self.native, |meter| {
+                        meter.child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .top_0()
+                                .bottom_0()
+                                .w(relative(level))
+                                .bg(rgb(ACCENT).alpha(0.7)),
+                        )
+                    })
                     .children([(0.3333, "−48"), (0.6666, "−24"), (0.8333, "−12")].map(
                         |(x, label)| {
                             Self::mono(label)
@@ -318,7 +830,8 @@ impl SettingsScreen {
                     .child(
                         div()
                             .absolute()
-                            .left_0()
+                            .when(!self.native, |peak| peak.left_0())
+                            .when(self.native, |peak| peak.left(relative(peak_level)))
                             .top(px(3.))
                             .bottom(px(3.))
                             .w(px(1.))
@@ -335,30 +848,119 @@ impl SettingsScreen {
                     ),
             )
             .child(
-                Self::mono(if self.review_fixture {
-                    "Microphone preview is opening."
+                Self::mono(if self.native {
+                    self.microphone.error.clone().unwrap_or_else(|| {
+                        if self.microphone.label.is_empty() {
+                            "Microphone preview is off.".into()
+                        } else {
+                            format!(
+                                "{} · IN {}/{}{}",
+                                self.microphone.label,
+                                self.microphone.channel + 1,
+                                self.microphone.channels,
+                                if self.microphone.fixture {
+                                    " · test fixture"
+                                } else {
+                                    ""
+                                }
+                            )
+                        }
+                    })
+                } else if self.review_fixture {
+                    crate::i18n::t("settings.mic.previewOpening").into()
                 } else {
                     "Native microphone capture unavailable: desktop audio service is not connected."
+                        .into()
                 })
                 .mt(px(6.))
                 .min_h(px(16.)),
+            )
+            .when(
+                self.native
+                    && matches!(
+                        self.microphone.phase,
+                        crate::microphone::Phase::Permission | crate::microphone::Phase::Error
+                    ),
+                |view| {
+                    view.child(
+                        ghost_pill(
+                            "settings-enable-microphone",
+                            if self.microphone.phase == crate::microphone::Phase::Permission {
+                                "Enable microphone"
+                            } else {
+                                "Retry microphone"
+                            },
+                        )
+                        .mt(px(8.))
+                        .on_click(
+                            cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::EnableMicrophone)),
+                        ),
+                    )
+                },
             )
     }
     fn graph(&self) -> impl IntoElement + use<> {
         let vertical_scroll = self.scroll.clone();
         let horizontal_scroll = self.graph_scroll.clone();
+        let db = |rms: f32| {
+            if rms > 0. && self.microphone.fresh() {
+                format!("{:.1} dBFS", 20. * rms.log10())
+            } else {
+                "−∞ dBFS".into()
+            }
+        };
+        let pre = if self.native {
+            db(self.microphone.rms)
+        } else {
+            "−∞ dBFS".into()
+        };
+        let post = if self.native {
+            db(self.microphone.post_rms)
+        } else {
+            "−∞ dBFS".into()
+        };
+        let active = self.native && self.microphone.phase == crate::microphone::Phase::Monitoring;
+        let input_note = if active {
+            self.microphone.label.as_str()
+        } else {
+            "Choose an input"
+        };
+        let route_note = if self.native {
+            format!(
+                "IN {} to OUT {}·{}",
+                self.input_prefs.channel + 1,
+                self.input_prefs.outputs[0] + 1,
+                self.input_prefs.outputs[1] + 1
+            )
+        } else {
+            "IN — to OUT —".into()
+        };
+        let output_note = if active {
+            "Native duplex output"
+        } else {
+            "Choose an output"
+        };
+        let buffer = if active && self.microphone.buffer_frames > 0 {
+            format!(
+                "{} frames · {:.1} ms",
+                self.microphone.buffer_frames,
+                self.microphone.buffer_frames as f32 * 1000. / self.microphone.sample_rate.max(1.)
+            )
+        } else {
+            "Buffer pending".into()
+        };
         let nodes = [
             (
                 "DEVICE",
                 "Input",
-                if self.input > 0 {
+                if self.native || self.input > 0 {
                     format!("IN {}", self.channel + 1)
                 } else {
                     "IN —".into()
                 },
-                "Choose an input",
+                input_note,
             ),
-            ("ANALYZER", "Pre", "RMS".into(), "−∞ dBFS"),
+            ("ANALYZER", "Pre", "RMS".into(), pre.as_str()),
             (
                 "PROCESSOR",
                 "Gain",
@@ -368,12 +970,14 @@ impl SettingsScreen {
             (
                 "ROUTER",
                 "Map",
-                if self.input > 0 && self.monitor_output > 0 {
+                if (self.native && !self.input_prefs.monitor_output.is_empty())
+                    || (self.input > 0 && self.monitor_output > 0)
+                {
                     "1→2".into()
                 } else {
                     "— → —".into()
                 },
-                "IN — to OUT —",
+                route_note.as_str(),
             ),
             (
                 "PROCESSOR",
@@ -381,16 +985,22 @@ impl SettingsScreen {
                 "−1 dB".into(),
                 "Output ceiling · dBFS",
             ),
-            ("ANALYZER", "Post", "RMS".into(), "−∞ dBFS"),
+            ("ANALYZER", "Post", "RMS".into(), post.as_str()),
             (
                 "DEVICE",
                 "Output",
-                if self.monitor_output > 0 {
+                if self.native && !self.input_prefs.monitor_output.is_empty() {
+                    format!(
+                        "OUT {}·{}",
+                        self.input_prefs.outputs[0] + 1,
+                        self.input_prefs.outputs[1] + 1
+                    )
+                } else if self.monitor_output > 0 {
                     "OUT 1·2".into()
                 } else {
                     "OUT —".into()
                 },
-                "Choose an output",
+                output_note,
             ),
         ];
         div()
@@ -437,10 +1047,22 @@ impl SettingsScreen {
                                             )),
                                     ),
                             )
-                            .child(Self::mono("●  Route blocked").text_size(px(8.))),
+                            .child(
+                                Self::mono(
+                                    if self.native
+                                        && self.microphone.phase
+                                            == crate::microphone::Phase::Monitoring
+                                    {
+                                        "●  Active"
+                                    } else {
+                                        "●  Route blocked"
+                                    },
+                                )
+                                .text_size(px(8.)),
+                            ),
                     )
                     .child(div().mt(px(12.)).flex().gap(px(4.)).children(
-                        ["Float32 native path", "Buffer pending", "32-bit float"].map(|text| {
+                        ["Float32 native path", buffer.as_str(), "32-bit float"].map(|text| {
                             div()
                                 .font_family("SingZ Mono 400")
                                 .text_color(rgb(FAINT))
@@ -543,6 +1165,16 @@ impl SettingsScreen {
             )
     }
     fn monitor(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let route_caption = if self.review_fixture {
+            crate::i18n::t("settings.monitor.routePlatformUnavailable").into()
+        } else {
+            self.monitor_error
+                .clone()
+                .or_else(|| self.monitor_route().err())
+                .unwrap_or_else(|| {
+                    "Starting monitoring pauses song playback. Stop restores it paused.".into()
+                })
+        };
         let weak = cx.entity().downgrade();
         let gain_slider = range_slider(
             "settings-monitor-gain",
@@ -552,6 +1184,10 @@ impl SettingsScreen {
             move |value, _window, cx| {
                 let _ = weak.update(cx, |this, cx| {
                     this.gain = value.round();
+                    if this.native {
+                        this.input_prefs.gain = this.gain;
+                        cx.emit(SettingsEvent::InputPrefs(this.input_prefs.clone()));
+                    }
                     cx.notify();
                 });
             },
@@ -588,12 +1224,12 @@ impl SettingsScreen {
                                     .line_height(px(15.5))
                                     .font_family("SingZ Display 700")
                                     .child(
-                                        singz_uikit::tracked_label("Headphone monitoring", 0.01)
+                                        singz_uikit::tracked_label(crate::i18n::t("settings.monitor.heading"), 0.01)
                                             .wrap(),
                                     ),
                             )
                             .child(
-                                Self::hint("Hear this mic through the native DSP graph")
+                                Self::hint(crate::i18n::t("settings.monitor.subheading"))
                                     .mt(px(3.))
                                     .text_size(px(11.))
                                     .line_height(px(13.))
@@ -602,61 +1238,81 @@ impl SettingsScreen {
                     )
                     .child(monitor_badge("EXPERIMENTAL")),
             )
-            .child(Self::label("Audio interface playback").mt(px(13.)))
+            .child(Self::label(crate::i18n::t("settings.monitor.outputLabel")).mt(px(13.)))
             .child(self.field(
                 "settings-monitor-output",
                 MONITOR_OUTPUTS,
                 self.monitor_output,
                 cx,
             ))
-            .when(self.input == 2, |v| {
-                v.child(
-                    div()
-                        .mt(px(12.))
-                        .flex()
-                        .gap(px(8.))
-                        .child(
-                            div()
-                                .flex_1()
-                                .p(px(8.))
-                                .rounded(px(8.))
-                                .border_1()
-                                .border_color(rgba(LINE))
-                                .bg(rgb(PANEL))
-                                .child(Self::mono("MIC CHANNEL").text_size(px(9.)))
-                                .child(
-                                    Self::mono(format!("IN {}", self.channel + 1))
-                                        .text_color(rgb(ACCENT))
-                                        .line_height(px(28.)),
-                                ),
-                        )
-                        .when(self.monitor_output > 0, |v| {
-                            v.children(
-                                [
-                                    (0, "Playback L", "settings-output-left"),
-                                    (1, "Playback R", "settings-output-right"),
-                                ]
-                                .map(|(slot, label, id)| {
-                                    div()
-                                        .flex_1()
-                                        .min_w(px(0.))
-                                        .p(px(8.))
-                                        .rounded(px(8.))
-                                        .border_1()
-                                        .border_color(rgba(LINE))
-                                        .bg(rgb(PANEL))
-                                        .child(Self::mono(label).text_size(px(9.)).mb(px(5.)))
-                                        .child(self.field(
-                                            id,
-                                            &["OUT 1", "OUT 2"],
-                                            self.output_channels[slot],
-                                            cx,
-                                        ))
-                                }),
+            .when(
+                if self.native {
+                    self.input_channels() > 0
+                } else {
+                    self.input == 2
+                },
+                |v| {
+                    v.child(
+                        div()
+                            .mt(px(12.))
+                            .flex()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .p(px(8.))
+                                    .rounded(px(8.))
+                                    .border_1()
+                                    .border_color(rgba(LINE))
+                                    .bg(rgb(PANEL))
+                                    .child(Self::mono("MIC CHANNEL").text_size(px(9.)))
+                                    .child(
+                                        Self::mono(format!("IN {}", self.channel + 1))
+                                            .text_color(rgb(ACCENT))
+                                            .line_height(px(28.)),
+                                    ),
                             )
-                        }),
-                )
-            })
+                            .when(
+                                if self.native {
+                                    !self.input_prefs.monitor_output.is_empty()
+                                } else {
+                                    self.monitor_output > 0
+                                },
+                                |v| {
+                                    v.children(
+                                        [
+                                            (0, crate::i18n::t("settings.monitor.playbackLeft"), "settings-output-left"),
+                                            (1, crate::i18n::t("settings.monitor.playbackRight"), "settings-output-right"),
+                                        ]
+                                        .map(
+                                            |(slot, label, id)| {
+                                                div()
+                                                    .flex_1()
+                                                    .min_w(px(0.))
+                                                    .p(px(8.))
+                                                    .rounded(px(8.))
+                                                    .border_1()
+                                                    .border_color(rgba(LINE))
+                                                    .bg(rgb(PANEL))
+                                                    .child(
+                                                        Self::mono(label)
+                                                            .text_size(px(9.))
+                                                            .mb(px(5.)),
+                                                    )
+                                                    .child(self.field(
+                                                        id,
+                                                        &["OUT 1", "OUT 2"],
+                                                        self.output_channels[slot],
+                                                        cx,
+                                                    ))
+                                            },
+                                        ),
+                                    )
+                                },
+                            ),
+                    )
+                },
+            )
             .child(self.graph())
             .child(
                 div()
@@ -667,7 +1323,7 @@ impl SettingsScreen {
                     .text_size(px(11.))
                     .line_height(px(13.))
                     .text_color(rgb(DIM))
-                    .child("Monitor gain")
+                    .child(crate::i18n::t("settings.monitor.gainLabel"))
                     .child(gain_slider)
                     .child(
                         Self::mono(format!("{} dB", self.gain as i32))
@@ -680,18 +1336,14 @@ impl SettingsScreen {
             // .modal-card p wins specificity over .monitor-route-status.
             // Preserve its bottom margin; CSS collapses it with the next row's 10px margin.
             .child(
-                Self::hint(if self.review_fixture {
-                    "Headphone monitoring is not available on this desktop platform yet."
-                } else {
-                    "Choose physical input and output channels that are available on this device."
-                })
-                .mt(px(10.))
-                .mb(px(14.))
-                .text_color(rgb(if self.review_fixture { DANGER } else { FAINT })),
+                Self::hint(route_caption)
+                    .mt(px(10.))
+                    .mb(px(14.))
+                    .text_color(rgb(if self.review_fixture { DANGER } else { FAINT })),
             )
             .child(self.check_row(
                 "settings-headphones",
-                "Wired headphones are connected to this device",
+                crate::i18n::t("settings.monitor.headphonesConfirmLabel"),
                 self.headphones,
                 cx,
             ))
@@ -701,15 +1353,52 @@ impl SettingsScreen {
                     .flex()
                     .items_center()
                     .gap(px(12.))
-                    .child(disabled_monitor_pill(
-                        "settings-monitor-start",
-                        "Start monitoring",
-                    ))
+                    .child({
+                        let button = if self.native
+                            && (self.monitor_busy || self.monitor_route().is_ok())
+                        {
+                            ghost_pill(
+                                "settings-monitor-start",
+                                if self.monitor_busy {
+                                    crate::i18n::t("settings.monitor.stopButton")
+                                } else {
+                                    crate::i18n::t("settings.monitor.startButton")
+                                },
+                            )
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::Monitor)))
+                        } else {
+                            disabled_monitor_pill("settings-monitor-start", crate::i18n::t("settings.monitor.startButton"))
+                        };
+                        #[cfg(feature = "ui-tests")]
+                        let button = {
+                            let probe = self.field_bounds.clone();
+                            button.relative().child(
+                                canvas(
+                                    move |bounds, _, _| {
+                                        probe.borrow_mut().insert("settings-monitor-start", bounds);
+                                        bounds
+                                    },
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .inset_0(),
+                            )
+                        };
+                        button
+                    })
                     .child(
                         Self::hint(if self.review_fixture {
-                            "Monitoring is off."
+                            crate::i18n::t("settings.monitorCoordinator.idle")
                         } else {
-                            "Native audio service is not connected."
+                            if self.monitor_busy {
+                                if self.microphone.phase == crate::microphone::Phase::Monitoring {
+                                    "Monitoring is active.".to_owned()
+                                } else {
+                                    "Switching native audio ownership…".to_owned()
+                                }
+                            } else {
+                                crate::i18n::t("settings.monitorCoordinator.idle")
+                            }
                         })
                         .mt(px(0.))
                         .mb(px(14.))
@@ -731,14 +1420,41 @@ impl SettingsScreen {
             a: alpha,
         }
     }
+    fn retry_route(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let control=ghost_pill("settings-retry",crate::i18n::t("settings.output.retryRoute"))
+            .on_click(cx.listener(|this,_,_,cx| {
+                if !this.route_busy {
+                    this.route_busy=true;
+                    cx.emit(SettingsEvent::Output(this.output_uid.clone()));
+                    cx.notify();
+                }
+            }));
+        #[cfg(feature="ui-tests")]
+        {
+            let bounds=self.field_bounds.clone();
+            return control.relative().child(canvas(move |b,_,_| {
+                bounds.borrow_mut().insert("settings-retry".into(),b); b
+            },|_,_,_,_|{}).absolute().inset_0());
+        }
+        #[cfg(not(feature="ui-tests"))]
+        control
+    }
     fn audio(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        div().w_full().child(Self::label("Playback device").mt(px(2.)))
+        div().w_full().child(Self::label(crate::i18n::t("settings.output.label")).mt(px(2.)))
             .child(self.field("settings-output",OUTPUTS,self.output,cx))
-            .child(div().mt(px(9.)).px(px(11.)).py(px(10.)).rounded(px(9.)).border_1().border_color(Self::recovery_border()).bg(Rgba { r:0.124706,g:0.080902,b:0.0617255,a:1. })
-                .child(Self::hint("Playback route could not be confirmed — choose an output or retry").mt(px(0.)).text_color(rgb(DANGER)))
-                .child(div().mt(px(8.)).flex().items_center().gap(px(10.)).child(ghost_pill("settings-retry","Retry output route").opacity(if self.review_fixture {1.}else{0.4}))))
-            .child(self.check_row("settings-native","Use native DSP playback",self.native_playback,cx))
-            .child(Self::hint("Uses the selected native provider when the song's features exactly match the native graph."))
+            .when(!self.native,|view|view
+                .child(div().mt(px(9.)).px(px(11.)).py(px(10.)).rounded(px(9.)).border_1().border_color(Self::recovery_border()).bg(Rgba { r:0.124706,g:0.080902,b:0.0617255,a:1. })
+                .child(Self::hint(crate::i18n::t("settings.output.unconfirmedStatus")).mt(px(0.)).text_color(rgb(DANGER)))
+                .child(div().mt(px(8.)).flex().items_center().gap(px(10.)).child(ghost_pill("settings-retry",crate::i18n::t("settings.output.retryRoute")).opacity(if self.review_fixture {1.}else{0.4}))))
+                .child(self.check_row("settings-native",crate::i18n::t("settings.playback.useNativeLabel"),self.native_playback,cx))
+                .child(Self::hint(crate::i18n::t("settings.playback.hint"))))
+            .when(self.native,|view|view
+                .when(self.route_error.is_some(),|view|view.child(div().mt(px(9.)).px(px(11.)).py(px(10.)).rounded(px(9.)).border_1().border_color(Self::recovery_border()).bg(Rgba {r:0.124706,g:0.080902,b:0.0617255,a:1.})
+                    .child(Self::hint(self.route_error.clone().unwrap_or_default()).mt(px(0.)).text_color(rgb(DANGER)))
+                    .child(div().mt(px(8.)).flex().items_center().gap(px(10.)).child(self.retry_route(cx)))))
+                .when(self.route_busy,|view|view.child(Self::hint("Applying output route… Playback will stay paused.")))
+                .child(div().opacity(0.45).child(self.check_row("settings-native",crate::i18n::t("settings.playback.useNativeLabel"),true,cx)))
+                .child(Self::hint("Native DSP playback is always enabled.")))
             .child(self.mic(cx)).child(self.monitor(cx))
     }
 }
@@ -769,7 +1485,7 @@ impl Render for SettingsScreen {
                             .line_height(px(25.))
                             .font_family("SingZ Display 800")
                             .mb(px(12.))
-                            .child("Settings"),
+                            .child(crate::i18n::t("settings.title")),
                     )
                     .child(
                         ghost_pill("settings-quick-start", "Quick start")
@@ -797,7 +1513,7 @@ impl Render for SettingsScreen {
                                     .flex()
                                     .flex_col()
                                     .gap(px(4.))
-                                    .child(nav_tab("settings-tab-audio", "Audio", true)),
+                                    .child(nav_tab("settings-tab-audio", crate::i18n::t("settings.tab.audio"), true)),
                             )
                             .child(
                                 div()
@@ -823,7 +1539,7 @@ impl Render for SettingsScreen {
                             .flex_shrink_0()
                             .flex()
                             .gap(px(10.))
-                            .child(ghost_pill("settings-close", "Close").on_click(
+                            .child(ghost_pill("settings-close", crate::i18n::t("settings.action.close")).on_click(
                                 cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::Close)),
                             )),
                     ),

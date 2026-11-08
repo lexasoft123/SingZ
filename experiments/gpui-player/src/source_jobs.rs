@@ -1,0 +1,1987 @@
+//! Native file opening and existing local inference orchestration. Working
+//! projects are private copies; only an explicit Save publishes into the library.
+use crate::{
+    integration::STEMS,
+    model_catalog::{Config, Flavor},
+    model_install::{cancelled, command_observe},
+};
+use anyhow::{Context, Result, ensure};
+use serde_json::{Value, json};
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    process::Command,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, SyncSender},
+    },
+    thread,
+    time::{Duration, Instant},
+};
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Stems,
+    Combined,
+    Vocals,
+}
+#[derive(Clone, Debug)]
+pub struct Target {
+    pub dir: PathBuf,
+    pub fingerprint: String,
+    /// Independent editor Saves do not change project.json. Keep their original
+    /// identity so publishing a working re-split cannot overwrite newer words.
+    pub lyrics_fingerprint: Option<String>,
+}
+#[derive(Clone, Debug)]
+pub struct Output {
+    /// Hash of the exact metadata bytes committed by an owned Save.
+    pub publication_hash: Option<String>,
+    pub path: PathBuf,
+    pub working: bool,
+    pub target: Option<Target>,
+}
+pub enum Job {
+    Open(PathBuf),
+    /// Reconcile an accepted independent editor Save that completed after a
+    /// split's first snapshot. This reuses the computed private output.
+    RefreshLyrics {
+        source_dir: PathBuf,
+        expected: Option<String>,
+        output: Output,
+    },
+    Split {
+        dir: PathBuf,
+        raw: Value,
+        custom: Vec<crate::tracks::Lane>,
+        mode: Mode,
+        target: Option<Target>,
+    },
+    Save {
+        dir: PathBuf,
+        raw: Value,
+        custom: Vec<crate::tracks::Lane>,
+        target: Option<Target>,
+    },
+}
+#[derive(Clone, Debug, Default)]
+pub struct Snapshot {
+    pub revision: u64,
+    pub generation: u64,
+    pub busy: bool,
+    pub label: String,
+    pub percent: f32,
+    pub ready: bool,
+    pub engine_status: crate::engine_status::EngineStatus,
+    /// Changes only when discovery completes, never for ordinary job progress.
+    pub engine_revision: u64,
+    /// Monotonic start of the discovery producing engine_revision.
+    pub engine_probe_started: Option<Instant>,
+    pub result: Option<Output>,
+    pub error: Option<String>,
+}
+enum Request {
+    Run(u64, Job),
+    Check(u64),
+    Quit,
+}
+pub struct Service {
+    serial: Arc<AtomicU64>,
+    tx: SyncSender<Request>,
+    view: Arc<Mutex<Arc<Snapshot>>>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+impl Service {
+    pub fn new() -> Self {
+        let service = Self::new_unchecked();
+        let _ = service.check();
+        service
+    }
+    /// A separate instance lets dialog rechecks avoid cancelling active source jobs.
+    pub fn new_unchecked() -> Self {
+        let (tx, rx) = mpsc::sync_channel(8);
+        let serial = Arc::new(AtomicU64::new(1));
+        let generation = serial.clone();
+        let view = Arc::new(Mutex::new(Arc::new(Snapshot::default())));
+        let output = view.clone();
+        let worker = thread::spawn(move || {
+            let config = Config::source();
+            let mut state = Snapshot::default();
+            while let Ok(req) = rx.recv() {
+                if let Request::Check(id) = req {
+                    if cancelled(&generation, id).is_ok() {
+                        state.generation = id;
+                        state.result = None;
+                        let started = Instant::now();
+                        match crate::engine_status::discover(&config, &generation, id) {
+                            Ok(status) => {
+                                state.ready = status.ok;
+                                state.engine_status = status;
+                                state.error = None;
+                                state.engine_probe_started = Some(started);
+                                state.engine_revision += 1;
+                                publish(&mut state, &output);
+                            }
+                            Err(error) if cancelled(&generation, id).is_ok() => {
+                                state.ready = false;
+                                state.engine_status = crate::engine_status::EngineStatus {
+                                    needs_models: false,
+                                    message: Some(format!("{error:#}")),
+                                    ..Default::default()
+                                };
+                                state.error = Some(format!("{error:#}"));
+                                state.engine_probe_started = Some(started);
+                                state.engine_revision += 1;
+                                publish(&mut state, &output);
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                    continue;
+                }
+                let Request::Run(id, job) = req else { break };
+                if cancelled(&generation, id).is_err() {
+                    continue;
+                }
+                state.generation = id;
+                state.busy = true;
+                state.label = "Preparing…".into();
+                state.percent = 0.;
+                state.error = None;
+                state.result = None;
+                let description = match &job {
+                    Job::Open(path) => format!("Opening {}", path.display()),
+                    Job::Split { mode, .. } => format!("Starting {mode:?} separation"),
+                    Job::Save { dir, .. } => format!("Saving project {}", dir.display()),
+                    Job::RefreshLyrics { .. } => {
+                        "Refreshing the working project's accepted lyrics".into()
+                    }
+                };
+                crate::diagnostics::event("projects", description, crate::diagnostics::Level::Info);
+                publish(&mut state, &output);
+                let mut engine_status = state.engine_status.clone();
+                let mut engine_revision = state.engine_revision;
+                let mut engine_probe_started = state.engine_probe_started;
+                let mut last_stage = String::new();
+                // Marks bracket the complete long-running writer, not merely its
+                // final UI receipt. A sync racing the copy earns a new sequence.
+                let sync_save = match &job {
+                    Job::Save { target, .. } => Some(SaveSync::new(
+                        crate::sync_dirty::Store::new(crate::audio_devices::directory()),
+                        target.as_ref().map(|t| t.dir.clone()),
+                    )),
+                    _ => None,
+                };
+                let result = execute_with_engine(
+                    &config,
+                    job,
+                    &generation,
+                    id,
+                    &mut engine_status,
+                    &mut engine_revision,
+                    &mut engine_probe_started,
+                    |label, percent| {
+                        if label != last_stage {
+                            crate::diagnostics::event(
+                                "splitter",
+                                label.to_owned(),
+                                crate::diagnostics::Level::Info,
+                            );
+                            last_stage = label.to_owned();
+                        }
+                        state.label = label.into();
+                        state.percent = percent;
+                        publish(&mut state, &output)
+                    },
+                );
+                if let Some(sync_save) = sync_save {
+                    sync_save.finished(result.as_ref().ok().map(|output| output.path.as_path()));
+                }
+                state.ready = engine_status.ok;
+                state.engine_status = engine_status;
+                state.engine_revision = engine_revision;
+                state.engine_probe_started = engine_probe_started;
+                state.busy = false;
+                if generation.load(Ordering::Acquire) == id {
+                    match result {
+                        Ok(result) => {
+                            crate::diagnostics::event(
+                                "projects",
+                                format!("Project operation completed: {}", result.path.display()),
+                                crate::diagnostics::Level::Info,
+                            );
+                            state.result = Some(result);
+                        }
+                        Err(e) => {
+                            crate::diagnostics::event(
+                                "projects",
+                                format!("{e:#}"),
+                                crate::diagnostics::Level::Error,
+                            );
+                            state.error = Some(format!("{e:#}"));
+                        }
+                    }
+                }
+                publish(&mut state, &output);
+            }
+        });
+        let service = Self {
+            serial,
+            tx,
+            view,
+            worker: Some(worker),
+        };
+        service
+    }
+    pub fn start(&self, job: Job) -> Result<u64> {
+        let id = self.serial.fetch_add(1, Ordering::AcqRel) + 1;
+        self.tx
+            .try_send(Request::Run(id, job))
+            .context("Native source queue is full")?;
+        Ok(id)
+    }
+    pub fn check(&self) -> Result<u64> {
+        let id = self.serial.fetch_add(1, Ordering::AcqRel) + 1;
+        self.tx
+            .try_send(Request::Check(id))
+            .context("Native source check queue is full")?;
+        Ok(id)
+    }
+    pub fn cancel(&self) {
+        self.serial.fetch_add(1, Ordering::AcqRel);
+    }
+    pub fn snapshot(&self) -> Arc<Snapshot> {
+        self.view.lock().unwrap().clone()
+    }
+}
+impl Drop for Service {
+    fn drop(&mut self) {
+        self.cancel();
+        let _ = self.tx.send(Request::Quit);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+fn publish(s: &mut Snapshot, view: &Mutex<Arc<Snapshot>>) {
+    s.revision += 1;
+    *view.lock().unwrap() = Arc::new(s.clone());
+}
+fn cache() -> PathBuf {
+    crate::audio_devices::directory().join("source-work")
+}
+fn token() -> String {
+    static ID: AtomicU64 = AtomicU64::new(1);
+    format!(
+        "{}-{}-{}",
+        std::process::id(),
+        crate::training_store::now(),
+        ID.fetch_add(1, Ordering::Relaxed)
+    )
+}
+struct Pending(PathBuf);
+impl Drop for Pending {
+    fn drop(&mut self) {
+        if self
+            .0
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with(".native-split-"))
+            && self
+                .0
+                .parent()
+                .is_some_and(|p| p.join(".singz-native-split.json").exists())
+        {
+            return;
+        }
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+fn copy(from: &Path, to: &Path, serial: &AtomicU64, id: u64) -> Result<()> {
+    let before = from.metadata()?;
+    ensure!(
+        before.is_file() && before.len() <= 2 * 1024 * 1024 * 1024,
+        "Audio/project member exceeds its size limit"
+    );
+    fs::create_dir_all(to.parent().unwrap())?;
+    let mut input = File::open(from)?;
+    let mut output = OpenOptions::new().write(true).create_new(true).open(to)?;
+    let mut bytes = [0u8; 65536];
+    let mut n = 0;
+    loop {
+        cancelled(serial, id)?;
+        let got = input.read(&mut bytes)?;
+        if got == 0 {
+            break;
+        }
+        output.write_all(&bytes[..got])?;
+        n += got as u64;
+        ensure!(n <= before.len(), "Source changed while copying");
+    }
+    output.sync_all()?;
+    let after = input.metadata()?;
+    ensure!(
+        n == before.len()
+            && after.len() == before.len()
+            && after.modified()? == before.modified()?,
+        "Source changed while copying"
+    );
+    Ok(())
+}
+fn clone_project(from: &Path, to: &Path, serial: &AtomicU64, id: u64) -> Result<()> {
+    let mut todo = vec![(from.to_owned(), to.to_owned())];
+    let mut count = 0;
+    let mut size = 0u64;
+    while let Some((src, dst)) = todo.pop() {
+        fs::create_dir_all(&dst)?;
+        for entry in fs::read_dir(src)? {
+            cancelled(serial, id)?;
+            let entry = entry?;
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with(".singz-native-")
+                || name.to_string_lossy().starts_with(".native-split-")
+            {
+                continue;
+            }
+            let meta = fs::symlink_metadata(entry.path())?;
+            ensure!(
+                !meta.file_type().is_symlink(),
+                "Import a project with ordinary files before splitting linked media"
+            );
+            count += 1;
+            ensure!(count <= 4096, "Project has too many files to copy");
+            let target = dst.join(name);
+            if meta.is_dir() {
+                todo.push((entry.path(), target));
+            } else {
+                size = size
+                    .checked_add(meta.len())
+                    .context("Project size overflow")?;
+                ensure!(size <= 8 * 1024 * 1024 * 1024, "Project copy exceeds 8 GB");
+                copy(&entry.path(), &target, serial, id)?;
+            }
+        }
+    }
+    Ok(())
+}
+fn render(input: &Path, dest: &Path, serial: &AtomicU64, id: u64) -> Result<()> {
+    let mut cmd = Command::new(crate::audio_devices::helper());
+    cmd.arg("--render-input").arg(input).arg(dest);
+    let bytes = command_observe(
+        cmd,
+        serial,
+        id,
+        Duration::from_secs(180),
+        || Ok(()),
+        |_, _| Ok(()),
+    )?;
+    let value: Value = serde_json::from_slice(&bytes)?;
+    ensure!(
+        value["ok"] == true
+            && value["sampleRate"] == 44100
+            && value["channels"] == 2
+            && value["frames"].as_u64().is_some_and(|n| n > 0),
+        "Invalid native input preparation receipt"
+    );
+    Ok(())
+}
+fn python_command(config: &Config) -> Command {
+    crate::engine_status::pack_command(config)
+}
+fn last_progress(bytes: &[u8]) -> Option<f32> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut pct = None;
+    for line in text.split(['\n', '\r']) {
+        if let Ok(v) = serde_json::from_str::<Value>(line) {
+            if let Some(p) = v["percent"].as_f64().filter(|p| p.is_finite()) {
+                pct = Some(p as f32);
+            }
+        }
+        if let Some((before, _)) = line.rsplit_once("%|") {
+            let number = before
+                .rsplit(|c: char| !c.is_ascii_digit() && c != '.')
+                .next()
+                .unwrap_or("");
+            if let Ok(p) = number.parse::<f32>() {
+                pct = Some(p);
+            }
+        }
+        if let Some((_, tail)) = line.rsplit_once("chunk ") {
+            if let Some((done, total)) = tail.split_once('/') {
+                let total = total
+                    .split(|c: char| !c.is_ascii_digit())
+                    .next()
+                    .unwrap_or("");
+                if let (Ok(a), Ok(b)) = (done.parse::<f32>(), total.parse::<f32>()) {
+                    if b > 0. {
+                        pct = Some(a / b * 100.);
+                    }
+                }
+            }
+        }
+    }
+    pct.map(|p| p.clamp(0., 99.))
+}
+fn providers(config: &Config) -> Vec<&'static str> {
+    if config.flavor == Flavor::Windows
+        && config
+            .pack
+            .join("python/rtx/ep/onnxruntime_providers_nv_tensorrt_rtx.dll")
+            .is_file()
+        && !config
+            .pack
+            .parent()
+            .unwrap()
+            .join("trtrtx-disabled.json")
+            .exists()
+    {
+        vec!["trtrtx", "cpu"]
+    } else {
+        vec!["cpu"]
+    }
+}
+fn gpu_expired(
+    saw_output: bool,
+    saw_chunk: bool,
+    quiet: Duration,
+    total: Duration,
+    chunk: Duration,
+) -> bool {
+    if !saw_output {
+        quiet >= Duration::from_secs(240)
+    } else if saw_chunk {
+        chunk >= Duration::from_secs(300)
+    } else {
+        total >= Duration::from_secs(600)
+    }
+}
+fn stems(
+    config: &Config,
+    engine: &crate::engine_status::ResolvedEngine,
+    dir: &Path,
+    input: &Path,
+    serial: &AtomicU64,
+    id: u64,
+    progress: &mut impl FnMut(&str, f32),
+    combined: bool,
+) -> Result<()> {
+    let onnx = matches!(
+        engine,
+        crate::engine_status::ResolvedEngine::Pack { onnx: true }
+    );
+    let runner = dir.join("onnx-runner.py");
+    if onnx {
+        fs::write(
+            &runner,
+            include_str!("../../../scripts/onnx_split_runner.py"),
+        )?;
+    }
+    let mut last_error = None;
+    for provider in if onnx {
+        providers(config)
+    } else {
+        vec!["torch"]
+    } {
+        cancelled(serial, id)?;
+        if onnx {
+            crate::diagnostics::event(
+                "splitter",
+                format!("ONNX separation: trying provider {provider}"),
+                crate::diagnostics::Level::Info,
+            );
+        }
+        let output = dir.join("inference");
+        if output.exists() {
+            fs::remove_dir_all(&output)?;
+        }
+        fs::create_dir(&output)?;
+        let system = engine.system_command();
+        let is_system = system.is_some();
+        let mut cmd = system.unwrap_or_else(|| python_command(config));
+        if onnx {
+            cmd.arg(&runner)
+                .arg("separate")
+                .arg(input)
+                .arg(&output)
+                .args([
+                    "--model",
+                    "htdemucs_6s",
+                    "--precision",
+                    "fp16weights",
+                    "--cache-dir",
+                ])
+                .arg(config.pack.join("python/model-cache"))
+                .args(["--providers", provider, "-v"]);
+        } else {
+            if !is_system {
+                cmd.args(["-m", "demucs"]);
+            }
+            cmd.args(["-n", "htdemucs_6s", "--filename", "{stem}.{ext}", "-o"])
+                .arg(&output)
+                .arg(input);
+        }
+        let mut last_bytes = (0, 0);
+        let mut last_output = Instant::now();
+        let started = Instant::now();
+        let mut last_chunk = Instant::now();
+        let mut previous = 0.;
+        let result = command_observe(
+            cmd,
+            serial,
+            id,
+            Duration::from_secs(7200),
+            || Ok(()),
+            |out, err| {
+                if (out.len(), err.len()) != last_bytes {
+                    last_output = Instant::now();
+                    last_bytes = (out.len(), err.len());
+                }
+                let p = last_progress(err)
+                    .or_else(|| last_progress(out))
+                    .unwrap_or(0.);
+                if p != previous {
+                    last_chunk = Instant::now();
+                    previous = p;
+                }
+                progress(
+                    if combined {
+                        "1/2 · Splitting stems"
+                    } else {
+                        "Splitting stems"
+                    },
+                    p * 0.98 / if combined { 2. } else { 1. },
+                );
+                if provider == "trtrtx" {
+                    ensure!(
+                        !gpu_expired(
+                            !out.is_empty() || !err.is_empty(),
+                            p > 0.,
+                            last_output.elapsed(),
+                            started.elapsed(),
+                            last_chunk.elapsed()
+                        ),
+                        "The GPU engine is too slow; switching to CPU"
+                    );
+                }
+                Ok(())
+            },
+        );
+        match result {
+            Ok(_) => {
+                let from = if onnx {
+                    output.clone()
+                } else {
+                    output.join("htdemucs_6s")
+                };
+                for stem in &STEMS[..6] {
+                    let src = from.join(format!("{stem}.wav"));
+                    validate_wav(&src)?;
+                    let dst = dir.join("stems").join(format!("{stem}.wav"));
+                    if dst.exists() {
+                        fs::remove_file(&dst)?;
+                    }
+                    fs::rename(src, dst)?;
+                    let old = dir.join("stems").join(format!("{stem}.flac"));
+                    if old.exists() {
+                        fs::remove_file(old)?;
+                    }
+                }
+                fs::remove_dir_all(output)?;
+                let _ = fs::remove_file(&runner);
+                if onnx {
+                    crate::diagnostics::event(
+                        "splitter",
+                        format!("ONNX separation completed using provider {provider}"),
+                        crate::diagnostics::Level::Info,
+                    );
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                cancelled(serial, id)?;
+                if onnx {
+                    crate::diagnostics::event(
+                        "splitter",
+                        format!("ONNX provider {provider} failed: {e:#}"),
+                        crate::diagnostics::Level::Warn,
+                    );
+                }
+                if provider == "trtrtx" {
+                    let flag = config.pack.parent().unwrap().join("trtrtx-disabled.json");
+                    let temp = dir.join("gpu-disabled.json");
+                    fs::write(
+                        &temp,
+                        serde_json::to_vec_pretty(
+                            &json!({"at":chrono::Utc::now().to_rfc3339(),"reason":e.to_string()}),
+                        )?,
+                    )
+                    .map_err(|error| {
+                        crate::diagnostics::event(
+                            "splitter",
+                            format!("Could not prepare the GPU-disable marker: {error}"),
+                            crate::diagnostics::Level::Warn,
+                        );
+                        error
+                    })?;
+                    match crate::project_store::replace(&temp, &flag) {
+                        Ok(()) => crate::diagnostics::event(
+                            "splitter",
+                            format!("GPU engine disabled; saved marker {}", flag.display()),
+                            crate::diagnostics::Level::Warn,
+                        ),
+                        Err(error) => crate::diagnostics::event(
+                            "splitter",
+                            format!(
+                                "Could not persist the GPU-disable marker {}: {error:#}",
+                                flag.display()
+                            ),
+                            crate::diagnostics::Level::Warn,
+                        ),
+                    }
+                    crate::diagnostics::event(
+                        "splitter",
+                        "Falling back to the ONNX CPU provider",
+                        crate::diagnostics::Level::Info,
+                    );
+                }
+                last_error = Some(e);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No splitter engine")))
+}
+fn validate_wav(path: &Path) -> Result<()> {
+    let mut b = [0u8; 12];
+    let mut f =
+        File::open(path).with_context(|| format!("Splitter did not produce {}", path.display()))?;
+    f.read_exact(&mut b)?;
+    ensure!(
+        &b[..4] == b"RIFF" && &b[8..] == b"WAVE" && f.metadata()?.len() > 44,
+        "Splitter produced an invalid WAV"
+    );
+    Ok(())
+}
+fn validate_stem(dir: &Path, stem: &str) -> Result<()> {
+    let flac = dir.join("stems").join(format!("{stem}.flac"));
+    if flac.is_file() {
+        let mut magic = [0u8; 4];
+        File::open(&flac)?.read_exact(&mut magic)?;
+        ensure!(
+            &magic == b"fLaC" && flac.metadata()?.len() > 42,
+            "Invalid FLAC stem"
+        );
+        Ok(())
+    } else {
+        validate_wav(&dir.join("stems").join(format!("{stem}.wav")))
+    }
+}
+fn compact(dir: &Path, serial: &AtomicU64, id: u64) -> Result<bool> {
+    let mut complete = true;
+    for stem in &STEMS[..6] {
+        cancelled(serial, id)?;
+        let wav = dir.join("stems").join(format!("{stem}.wav"));
+        if !wav.is_file() {
+            continue;
+        }
+        let mut header = [0u8; 24];
+        File::open(&wav)?.read_exact(&mut header)?;
+        // UVR's float residuals must remain unquantized, as in production.
+        if &header[12..16] == b"fmt " && u16::from_le_bytes([header[20], header[21]]) == 3 {
+            continue;
+        }
+        let flac = dir.join("stems").join(format!("{stem}.flac"));
+        let mut cmd = Command::new(crate::audio_devices::helper());
+        cmd.arg("--compact-stem").arg(&wav).arg(&flac);
+        if command_observe(
+            cmd,
+            serial,
+            id,
+            Duration::from_secs(300),
+            || Ok(()),
+            |_, _| Ok(()),
+        )
+        .is_err()
+        {
+            cancelled(serial, id)?;
+            complete = false;
+        }
+    }
+    Ok(complete)
+}
+fn vocals(
+    config: &Config,
+    dir: &Path,
+    serial: &AtomicU64,
+    id: u64,
+    progress: &mut impl FnMut(&str, f32),
+    combined: bool,
+    backing_name: &str,
+) -> Result<()> {
+    let runner = dir.join("vocal-runner.py");
+    fs::write(
+        &runner,
+        include_str!("../../../scripts/vocal_split_runner.py"),
+    )?;
+    let output = dir.join("vocal-output");
+    fs::create_dir(&output)?;
+    let mut cmd = python_command(config);
+    cmd.arg(&runner)
+        .arg("--model")
+        .arg(config.pack.join("python/models/uvr/UVR_MDXNET_KARA_2.onnx"))
+        .arg("--input")
+        .arg(if dir.join("stems/vocals.flac").is_file() {
+            dir.join("stems/vocals.flac")
+        } else {
+            dir.join("stems/vocals.wav")
+        })
+        .arg("--output")
+        .arg(&output);
+    command_observe(
+        cmd,
+        serial,
+        id,
+        Duration::from_secs(7200),
+        || Ok(()),
+        |out, _| {
+            let p = last_progress(out).unwrap_or(0.);
+            progress(
+                if combined {
+                    "2/2 · Separating vocals"
+                } else {
+                    "Separating vocals"
+                },
+                if combined { 50. + p * 0.49 } else { p * 0.98 },
+            );
+            Ok(())
+        },
+    )?;
+    for name in ["lead", "backing"] {
+        validate_wav(&output.join(format!("{name}.wav")))?;
+    }
+    let vocal = dir.join("stems/vocals.wav");
+    if vocal.exists() {
+        fs::remove_file(&vocal)?;
+    }
+    fs::rename(output.join("lead.wav"), vocal)?;
+    fs::rename(
+        output.join("backing.wav"),
+        dir.join("stems").join(backing_name),
+    )?;
+    let old = dir.join("stems/vocals.flac");
+    if old.exists() {
+        fs::remove_file(old)?;
+    }
+    fs::remove_dir_all(output)?;
+    fs::remove_file(runner)?;
+    Ok(())
+}
+fn fresh_backing_id(custom: &[crate::tracks::Lane]) -> String {
+    let mut id = "custom-backing-vocals".to_owned();
+    let mut n = 2;
+    while custom.iter().any(|lane| lane.id == id) {
+        id = format!("custom-backing-vocals-{n}");
+        n += 1;
+    }
+    id
+}
+fn publish_target(
+    source: &Path,
+    raw: &mut Value,
+    target: Target,
+    custom: &[crate::tracks::Lane],
+    serial: &AtomicU64,
+    id: u64,
+) -> Result<Output> {
+    cancelled(serial, id)?;
+    let _lease = crate::project_publish::lock(&target.dir)?;
+    crate::project_publish::recover_locked(&target.dir)?;
+    ensure!(
+        crate::lyrics_store::identity(&target.dir)? == target.lyrics_fingerprint,
+        "Lyrics changed in the saved project while splitting; reopen it before retrying"
+    );
+    let key = token();
+    let staging = target.dir.join(format!(".native-split-{key}"));
+    fs::create_dir(&staging)?;
+    struct PublicationStage(PathBuf);
+    impl Drop for PublicationStage {
+        fn drop(&mut self) {
+            if self
+                .0
+                .parent()
+                .is_some_and(|p| fs::symlink_metadata(p.join(".singz-native-split.json")).is_ok())
+            {
+                return;
+            }
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let guard = PublicationStage(staging.clone());
+    let next = staging.join("next");
+    fs::create_dir(&next)?;
+    let mut files = vec![];
+    for stem in &STEMS[..crate::tracks::BUILTIN_SLOTS] {
+        for ext in ["wav", "flac"] {
+            let relative = format!("stems/{stem}.{ext}");
+            let from = source.join(&relative);
+            let present = from.is_file();
+            if present {
+                copy(&from, &next.join(&relative), serial, id)?;
+            }
+            files.push((relative, present));
+        }
+    }
+    let materialized =
+        crate::project_store::materialize_custom(source, &next, raw, custom, &|| {
+            serial.load(Ordering::Acquire) != id
+        })?;
+    for warning in &materialized.warnings {
+        crate::diagnostics::event("projects", warning.clone(), crate::diagnostics::Level::Warn);
+    }
+    files.extend(materialized.files.iter().map(|file| (file.clone(), true)));
+    files.extend(
+        crate::project_store::unused_custom_files(&target.dir, &materialized.files, &|| {
+            serial.load(Ordering::Acquire) != id
+        })?
+        .into_iter()
+        .map(|file| (file, false)),
+    );
+    let source_lyrics = crate::lyrics_store::identity(&source)?;
+    ensure!(
+        source_lyrics.is_some() || target.lyrics_fingerprint.is_none(),
+        "Working-copy lyrics disappeared before publication"
+    );
+    if source_lyrics.is_some() {
+        copy(
+            &source.join("lyrics.json"),
+            &next.join("lyrics.json"),
+            serial,
+            id,
+        )?;
+        ensure!(
+            crate::lyrics_store::identity(&source)? == source_lyrics,
+            "Working-copy lyrics changed while saving"
+        );
+        files.push(("lyrics.json".into(), true));
+    }
+    raw["version"] = json!(if compact(&next, serial, id)? { 2 } else { 1 });
+    for (relative, present) in &mut files {
+        *present = next.join(relative).is_file();
+    }
+    let metadata = serde_json::to_vec_pretty(&raw)?;
+    let publication_hash = crate::project_store::fingerprint(&metadata);
+    fs::write(next.join("project.json"), metadata)?;
+    files.push(("project.json".into(), true));
+    cancelled(serial, id)?;
+    ensure!(
+        crate::lyrics_store::identity(&source)? == source_lyrics,
+        "Working-copy lyrics changed while saving"
+    );
+    ensure!(
+        crate::lyrics_store::identity(&target.dir)? == target.lyrics_fingerprint,
+        "Lyrics changed in the saved project while saving; reopen it before retrying"
+    );
+    crate::project_publish::commit(&target.dir, &key, files, &target.fingerprint)?;
+    drop(guard);
+    Ok(Output {
+        publication_hash: Some(publication_hash),
+        path: target.dir,
+        working: false,
+        target: None,
+    })
+}
+
+/// Finalize lyrics independently of the potentially long inference pass. Only
+/// the existing private output is changed; the active source remains untouched.
+fn refresh_split_lyrics(
+    source_dir: &Path,
+    output_dir: &Path,
+    expected: Option<&Option<String>>,
+    target: &mut Option<Target>,
+    serial: &AtomicU64,
+    id: u64,
+) -> Result<()> {
+    cancelled(serial, id)?;
+    let source = source_dir.canonicalize()?;
+    let output = output_dir.canonicalize()?;
+    ensure!(
+        source != output,
+        "Split lyrics output must be a separate private copy"
+    );
+    let _source_lease = crate::project_publish::lock(&source)?;
+    crate::project_publish::recover_locked(&source)?;
+    let _output_lease = crate::project_publish::lock(&output)?;
+    crate::project_publish::recover_locked(&output)?;
+    let source_bytes = crate::project_store::member_bytes(&source, "lyrics.json")?;
+    let source_identity = source_bytes
+        .as_ref()
+        .map(|bytes| crate::project_store::fingerprint(bytes));
+    if let Some(expected) = expected {
+        ensure!(
+            &source_identity == expected,
+            "Lyrics changed after the editor Save; reopen the project before continuing"
+        );
+    }
+    let target_is_source = target.as_ref().is_some_and(|target| target.dir == source);
+    let old_identity = crate::lyrics_store::identity(&output)?;
+    if source_identity != old_identity {
+        let destination = output.join("lyrics.json");
+        if let Some(bytes) = source_bytes {
+            let temporary = output.join(format!(".lyrics-refresh-{}.part", token()));
+            struct PendingLyrics(PathBuf);
+            impl Drop for PendingLyrics {
+                fn drop(&mut self) {
+                    let _ = fs::remove_file(&self.0);
+                }
+            }
+            let pending = PendingLyrics(temporary);
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&pending.0)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            drop(file);
+            cancelled(serial, id)?;
+            ensure!(
+                crate::lyrics_store::identity(&source)? == source_identity,
+                "Lyrics changed while finalizing the split"
+            );
+            ensure!(
+                crate::lyrics_store::identity(&output)? == old_identity,
+                "Working-copy lyrics changed while finalizing the split"
+            );
+            if old_identity.is_none() {
+                fs::hard_link(&pending.0, &destination)
+                    .context("Working-copy lyrics appeared while finalizing the split")?;
+            } else {
+                crate::project_store::replace(&pending.0, &destination)?;
+            }
+        } else {
+            cancelled(serial, id)?;
+            ensure!(
+                crate::lyrics_store::identity(&source)?.is_none(),
+                "Lyrics appeared while finalizing the split"
+            );
+            ensure!(
+                crate::lyrics_store::identity(&output)? == old_identity,
+                "Working-copy lyrics changed while finalizing the split"
+            );
+            fs::remove_file(destination)?;
+        }
+        #[cfg(unix)]
+        File::open(&output)?.sync_all()?;
+    }
+    cancelled(serial, id)?;
+    ensure!(
+        crate::lyrics_store::identity(&source)? == source_identity,
+        "Lyrics changed while finalizing the split"
+    );
+    if target_is_source {
+        // This is the exact saved source whose current bytes we just retained.
+        // A different publication target keeps its original conflict identity.
+        target.as_mut().unwrap().lyrics_fingerprint = source_identity;
+    }
+    Ok(())
+}
+#[cfg(test)]
+fn execute(
+    config: &Config,
+    job: Job,
+    serial: &AtomicU64,
+    id: u64,
+    ready: &mut bool,
+    progress: impl FnMut(&str, f32),
+) -> Result<Output> {
+    let mut status = crate::engine_status::EngineStatus::default();
+    status.ok = *ready;
+    let result = execute_with_engine(
+        config,
+        job,
+        serial,
+        id,
+        &mut status,
+        &mut 0,
+        &mut None,
+        progress,
+    );
+    *ready = status.ok;
+    result
+}
+fn execute_with_engine(
+    config: &Config,
+    job: Job,
+    serial: &AtomicU64,
+    id: u64,
+    engine_status: &mut crate::engine_status::EngineStatus,
+    engine_revision: &mut u64,
+    engine_probe_started: &mut Option<Instant>,
+    mut progress: impl FnMut(&str, f32),
+) -> Result<Output> {
+    cancelled(serial, id)?;
+    let job = match job {
+        Job::RefreshLyrics {
+            source_dir,
+            expected,
+            mut output,
+        } => {
+            ensure!(
+                output.working,
+                "Only a private split output can refresh its lyrics"
+            );
+            progress("Updating lyrics…", 98.);
+            refresh_split_lyrics(
+                &source_dir,
+                &output.path,
+                Some(&expected),
+                &mut output.target,
+                serial,
+                id,
+            )?;
+            return Ok(output);
+        }
+        job => job,
+    };
+    fs::create_dir_all(cache())?;
+    let dir = if matches!(&job, Job::Save { target: None, .. }) {
+        let root = crate::integration::library_root();
+        fs::create_dir_all(&root)?;
+        root.join(format!(".native-import-{}", token()))
+    } else {
+        cache().join(token())
+    };
+    fs::create_dir(&dir)?;
+    let dir = dir.canonicalize()?;
+    let mut pending = Pending(dir.clone());
+    let result = match job {
+        Job::Open(path) => {
+            let path = path.canonicalize()?;
+            if path.is_dir() || path.file_name().is_some_and(|s| s == "project.json") {
+                let project = crate::integration::read_project(&path)?;
+                return Ok(Output {
+        publication_hash: None,
+                    path: project.dir,
+                    working: false,
+                    target: None,
+                });
+            }
+            let ext = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            ensure!(
+                [
+                    "mp3", "wav", "flac", "m4a", "aac", "ogg", "oga", "opus", "aif", "aiff"
+                ]
+                .contains(&ext.as_str()),
+                "Choose an audio file or a SingZ project"
+            );
+            if path
+                .parent()
+                .is_some_and(|p| p.join("project.json").is_file())
+            {
+                let project = crate::integration::read_project(&path)?;
+                return Ok(Output {
+        publication_hash: None,
+                    path: project.dir,
+                    working: false,
+                    target: None,
+                });
+            }
+            progress("Reading audio…", 0.);
+            let song = format!("song.{ext}");
+            copy(&path, &dir.join(&song), serial, id)?;
+            progress("Decoding audio…", 20.);
+            let rendered = dir.join("input44k.wav");
+            render(&dir.join(&song), &rendered, serial, id)?;
+            fs::remove_file(rendered)?;
+            let raw = json!({"version":2,"name":path.file_stem().and_then(|s|s.to_str()).unwrap_or("Song"),"sourceFileName":path.file_name().and_then(|s|s.to_str()).unwrap_or("Song"),"songFile":song,"settings":{}});
+            fs::write(dir.join("project.json"), serde_json::to_vec_pretty(&raw)?)?;
+            Output {
+        publication_hash: None,
+                path: dir.clone(),
+                working: true,
+                target: None,
+            }
+        }
+        Job::Split {
+            dir: source,
+            mut raw,
+            custom,
+            mode,
+            mut target,
+        } => {
+            progress("Checking splitter…", 0.);
+            let started = Instant::now();
+            let discovered = crate::engine_status::discover(config, serial, id);
+            cancelled(serial, id)?;
+            *engine_probe_started = Some(started);
+            *engine_revision += 1;
+            match discovered {
+                Ok(status) => *engine_status = status,
+                Err(error) => {
+                    *engine_status = crate::engine_status::EngineStatus {
+                        needs_models: false,
+                        message: Some(format!("{error:#}")),
+                        ..Default::default()
+                    };
+                    return Err(error);
+                }
+            }
+            ensure!(
+                engine_status.ok,
+                "{}",
+                engine_status
+                    .message
+                    .as_deref()
+                    .unwrap_or("The stem splitter has not been downloaded yet.")
+            );
+            let engine = engine_status
+                .resolved
+                .as_ref()
+                .context("The splitter has no validated execution command")?;
+            if mode != Mode::Stems {
+                ensure!(
+                    crate::engine_status::validated_pack(config),
+                    "Backing-vocal separation requires the installed splitter pack. Download or reinstall it in AI models."
+                );
+            }
+            progress("Preparing audio…", 0.);
+            clone_project(&source, &dir, serial, id)?;
+            fs::create_dir_all(dir.join("stems"))?;
+            let materialized = crate::project_store::materialize_custom(
+                &source,
+                &dir,
+                &mut raw,
+                &custom,
+                &|| serial.load(Ordering::Acquire) != id,
+            )?;
+            for warning in &materialized.warnings {
+                crate::diagnostics::event(
+                    "projects",
+                    warning.clone(),
+                    crate::diagnostics::Level::Warn,
+                );
+            }
+            for stale in
+                crate::project_store::unused_custom_files(&dir, &materialized.files, &|| {
+                    serial.load(Ordering::Acquire) != id
+                })?
+            {
+                fs::remove_file(dir.join(stale))?;
+            }
+            let builtins = if mode == Mode::Vocals {
+                STEMS[..crate::tracks::BUILTIN_SLOTS]
+                    .iter()
+                    .filter(|stem| {
+                        ["wav", "flac"]
+                            .iter()
+                            .any(|ext| source.join("stems").join(format!("{stem}.{ext}")).is_file())
+                    })
+                    .count()
+            } else {
+                crate::tracks::BUILTIN_SLOTS
+            };
+            ensure!(
+                builtins + materialized.custom.len() + usize::from(mode != Mode::Stems)
+                    <= crate::tracks::MAX_ACTIVE_LANES,
+                "Separating this song would exceed the native active-lane limit"
+            );
+            let backing_id = fresh_backing_id(&materialized.custom);
+            let backing_name = format!("{backing_id}.wav");
+            if mode != Mode::Vocals {
+                let song = raw["songFile"]
+                    .as_str()
+                    .context("This project has no original song to re-split")?;
+                let input = dir.join("input44k.wav");
+                let source = dir.join(song).canonicalize()?;
+                ensure!(source.starts_with(&dir), "Song leaves its project");
+                let inference_input = if engine.needs_pcm() {
+                    render(&source, &input, serial, id)?;
+                    &input
+                } else {
+                    &source
+                };
+                stems(
+                    config,
+                    engine,
+                    &dir,
+                    inference_input,
+                    serial,
+                    id,
+                    &mut progress,
+                    mode == Mode::Combined,
+                )?;
+                if engine.needs_pcm() {
+                    fs::remove_file(input)?;
+                }
+                for key in ["melody", "key", "beat"] {
+                    raw["settings"]
+                        .as_object_mut()
+                        .context("Invalid settings")?
+                        .remove(key);
+                }
+            }
+            if mode != Mode::Stems {
+                ensure!(
+                    mode == Mode::Combined || raw["settings"]["leadVocalSeparated"] != true,
+                    "Backing vocals are already separated"
+                );
+                validate_stem(&dir, "vocals")?;
+                vocals(
+                    config,
+                    &dir,
+                    serial,
+                    id,
+                    &mut progress,
+                    mode == Mode::Combined,
+                    &backing_name,
+                )?;
+                raw["settings"]["leadVocalSeparated"] = json!(true);
+                let mut entries = raw["settings"]["custom"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                entries.push(json!({"id":backing_id,"label":"Backing vocals","color":"#c7e06a","file":format!("stems/{backing_name}")}));
+                raw["settings"]["custom"] = Value::Array(entries);
+                raw["settings"].as_object_mut().unwrap().remove("melody");
+            }
+            raw.as_object_mut()
+                .context("Invalid project")?
+                .remove("stemHashes");
+            fs::write(dir.join("project.json"), serde_json::to_vec_pretty(&raw)?)?;
+            for stem in &STEMS[..crate::tracks::BUILTIN_SLOTS] {
+                validate_stem(&dir, stem)?;
+            }
+            if mode != Mode::Stems {
+                validate_wav(&dir.join("stems").join(&backing_name))?;
+            }
+            refresh_split_lyrics(&source, &dir, None, &mut target, serial, id)?;
+            Output {
+        publication_hash: None,
+                path: dir.clone(),
+                working: true,
+                target,
+            }
+        }
+        Job::Save {
+            dir: source,
+            mut raw,
+            custom,
+            target,
+        } => {
+            raw["name"] = json!(safe_name(raw["name"].as_str().unwrap_or("Song")));
+            progress("Saving project…", 0.);
+            #[cfg(feature = "ui-tests")]
+            if let Some(gate) = std::env::var_os("SINGZ_GPUI_SOURCE_SAVE_PREPARE_GATE")
+                .map(PathBuf::from)
+                .filter(|p| p.exists())
+            {
+                fs::write(gate.with_extension("ready"), b"saving")?;
+                let deadline = Instant::now() + Duration::from_secs(8);
+                while gate.exists() && Instant::now() < deadline {
+                    cancelled(serial, id)?;
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
+            if let Some(target) = target {
+                return publish_target(&source, &mut raw, target, &custom, serial, id);
+            }
+            clone_project(&source, &dir, serial, id)?;
+            let materialized = crate::project_store::materialize_custom(
+                &source,
+                &dir,
+                &mut raw,
+                &custom,
+                &|| serial.load(Ordering::Acquire) != id,
+            )?;
+            for warning in &materialized.warnings {
+                crate::diagnostics::event(
+                    "projects",
+                    warning.clone(),
+                    crate::diagnostics::Level::Warn,
+                );
+            }
+            for stale in
+                crate::project_store::unused_custom_files(&dir, &materialized.files, &|| {
+                    serial.load(Ordering::Acquire) != id
+                })?
+            {
+                fs::remove_file(dir.join(stale))?;
+            }
+            raw["version"] = json!(if compact(&dir, serial, id)? { 2 } else { 1 });
+            let metadata = serde_json::to_vec_pretty(&raw)?;
+            let publication_hash = crate::project_store::fingerprint(&metadata);
+            fs::write(dir.join("project.json"), metadata)?;
+            let root = crate::integration::library_root();
+            fs::create_dir_all(&root)?;
+            let lock = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(root.join(".singz-native-import.lock"))?;
+            let _lease = crate::file_lease::Lease::acquire(lock)
+                .context("Another song is being saved to the library")?;
+            let name = safe_name(raw["name"].as_str().unwrap_or("Song"));
+            let mut suffix = 1;
+            let destination = loop {
+                cancelled(serial, id)?;
+                let p = root.join(if suffix == 1 {
+                    name.clone()
+                } else {
+                    format!("{name} ({suffix})")
+                });
+                match fs::create_dir(&p) {
+                    Ok(()) => break p,
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => suffix += 1,
+                    Err(e) => return Err(e.into()),
+                }
+            };
+            #[cfg(windows)]
+            fs::remove_dir(&destination)?;
+            if let Err(e) = fs::rename(&dir, &destination) {
+                let _ = fs::remove_dir(&destination);
+                return Err(e.into());
+            }
+            #[cfg(unix)]
+            File::open(&root)?.sync_all()?;
+            return Ok(Output {
+                publication_hash: Some(publication_hash),
+                path: destination,
+                working: false,
+                target: None,
+            });
+        }
+        Job::RefreshLyrics { .. } => anyhow::bail!("Unexpected lyrics refresh dispatch"),
+    };
+    cancelled(serial, id)?;
+    crate::integration::read_project(&dir)?;
+    pending.0.clear();
+    Ok(result)
+}
+// These helpers are worker-only and accept an explicit store so publication
+// tests cannot accidentally write the user's durable sync ledger.
+struct SaveSync {
+    store: crate::sync_dirty::Store,
+    target: Option<PathBuf>,
+}
+fn sync_warning(result: Result<()>) {
+    if let Err(error) = result {
+        crate::diagnostics::event("sync", format!("Could not record project sync intent: {error:#}"), crate::diagnostics::Level::Warn);
+    }
+}
+impl SaveSync {
+    fn new(store: crate::sync_dirty::Store, target: Option<PathBuf>) -> Self {
+        let value = Self { store, target };
+        value.mark("saving project");
+        value
+    }
+    fn mark(&self, reason: &str) {
+        if let Some(target) = &self.target {
+            sync_warning(self.store.mark_project(target, reason));
+        } else {
+            // The public collision-free name is unknown until encoding ends.
+            sync_warning(self.store.mark_library_preserving_projects(reason));
+        }
+    }
+    fn finished(self, published: Option<&Path>) {
+        self.mark("saving project (finished)");
+        if let Some(path) = published {
+            sync_warning(self.store.mark_project(path, "saved project"));
+        }
+    }
+}
+pub(crate) fn safe_name(name: &str) -> String {
+    let mut name = name;
+    if let Some((stem, ext)) = name.rsplit_once('.') {
+        if [
+            "mp3", "wav", "flac", "m4a", "aac", "ogg", "oga", "opus", "aif", "aiff",
+        ]
+        .iter()
+        .any(|e| ext.eq_ignore_ascii_case(e))
+        {
+            name = stem;
+        }
+    }
+    let replaced: String = name
+        .chars()
+        .map(|c| if "/\\:*?\"<>|".contains(c) { ' ' } else { c })
+        .collect();
+    let mut cleaned = String::new();
+    let mut run = String::new();
+    for c in replaced.chars().chain(std::iter::once('\0')) {
+        if c.is_whitespace() {
+            run.push(c);
+            continue;
+        }
+        if run.chars().count() > 1 {
+            cleaned.push(' ');
+        } else {
+            cleaned.push_str(&run);
+        }
+        run.clear();
+        if c != '\0' {
+            cleaned.push(c);
+        }
+    }
+    let cleaned = cleaned
+        .trim_start_matches(|c: char| c.is_whitespace() || c == '.')
+        .trim();
+    if cleaned.is_empty() {
+        "Untitled song".into()
+    } else {
+        cleaned.into()
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn save_marks_survive_sync_captured_during_long_publication() {
+        let fixture = Fixture::new();
+        let store = crate::sync_dirty::Store::new(fixture.0.join("private-prefs"));
+        let old = fixture.0.join("old-library-song");
+        store.mark_project(&old, "older edit").unwrap();
+        let saving = SaveSync::new(store.clone(), None);
+        let captured = store.snapshot().unwrap().seq;
+        let destination = fixture.0.join("Published");
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("project.json"), b"{}").unwrap();
+        saving.finished(Some(&destination));
+        assert!(store.snapshot().unwrap().dirs.contains_key(old.to_str().unwrap()));
+        let remaining = store.clear(captured).unwrap();
+        assert!(remaining.all_seq > captured);
+        assert!(remaining.dirs.contains_key(destination.to_str().unwrap()));
+        let target = SaveSync::new(store.clone(), Some(destination.clone()));
+        let captured = store.snapshot().unwrap().seq;
+        target.finished(None); // Failed/cancelled attempt still gets finally mark.
+        assert!(store.clear(captured).unwrap().dirs.contains_key(destination.to_str().unwrap()));
+    }
+
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!("singz-source-lyrics-{}", token()));
+            fs::create_dir(&dir).unwrap();
+            fs::create_dir(dir.join("stems")).unwrap();
+            fs::write(
+                dir.join("project.json"),
+                b"{\"version\":2,\"name\":\"Song\",\"settings\":{}}",
+            )
+            .unwrap();
+            Self(dir.canonicalize().unwrap())
+        }
+        fn target(&self) -> Target {
+            Target {
+                dir: self.0.clone(),
+                fingerprint: crate::project_store::read(&self.0, "project.json")
+                    .unwrap()
+                    .1,
+                lyrics_fingerprint: crate::lyrics_store::identity(&self.0).unwrap(),
+            }
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    #[test]
+    fn targeted_working_copy_save_carries_edited_lyrics_and_preserves_other_files() {
+        for existing in [false, true] {
+            let target = Fixture::new();
+            let source = Fixture::new();
+            if existing {
+                fs::write(target.0.join("lyrics.json"), b"old saved words").unwrap();
+            }
+            let captured = target.target();
+            let edited=b"{\"source\":\"edited\",\"credit\":\"Singer\",\"lines\":[{\"start\":0,\"end\":1,\"text\":\"New words\"}]}";
+            fs::write(source.0.join("lyrics.json"), edited).unwrap();
+            fs::write(target.0.join("notes.txt"), b"private notes").unwrap();
+            let mut raw = crate::project_store::read(&source.0, "project.json")
+                .unwrap()
+                .0;
+            let serial = AtomicU64::new(1);
+            let output = publish_target(&source.0, &mut raw, captured, &[], &serial, 1).unwrap();
+            assert_eq!(output.path, target.0);
+            assert!(!output.working);
+            assert_eq!(output.publication_hash, Some(crate::project_store::read(&target.0,"project.json").unwrap().1));
+            assert_eq!(fs::read(target.0.join("lyrics.json")).unwrap(), edited);
+            assert_eq!(
+                fs::read(target.0.join("notes.txt")).unwrap(),
+                b"private notes"
+            );
+            assert_eq!(
+                crate::lyrics_store::read(&target.0)
+                    .unwrap()
+                    .document
+                    .unwrap()
+                    .source,
+                "edited"
+            );
+            assert!(!target.0.join(".singz-native-split.json").exists());
+        }
+    }
+    #[test]
+    fn independent_saved_lyrics_conflict_or_cancellation_cannot_publish_working_changes() {
+        let target = Fixture::new();
+        let source = Fixture::new();
+        fs::write(target.0.join("lyrics.json"), b"original words").unwrap();
+        fs::write(source.0.join("lyrics.json"), b"working words").unwrap();
+        let captured = target.target();
+        let metadata = fs::read(target.0.join("project.json")).unwrap();
+        fs::write(target.0.join("lyrics.json"), b"external words").unwrap();
+        let mut raw = crate::project_store::read(&source.0, "project.json")
+            .unwrap()
+            .0;
+        assert!(publish_target(&source.0, &mut raw, captured, &[], &AtomicU64::new(1), 1).is_err());
+        assert_eq!(fs::read(target.0.join("project.json")).unwrap(), metadata);
+        assert_eq!(
+            fs::read(target.0.join("lyrics.json")).unwrap(),
+            b"external words"
+        );
+        let captured = target.target();
+        assert!(publish_target(&source.0, &mut raw, captured, &[], &AtomicU64::new(2), 1).is_err());
+        assert_eq!(
+            fs::read(target.0.join("lyrics.json")).unwrap(),
+            b"external words"
+        );
+        assert!(!target.0.join(".singz-native-split.json").exists());
+        assert!(fs::read_dir(&target.0).unwrap().all(|e| {
+            !e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".native-split-")
+        }));
+    }
+    #[test]
+    fn disappearing_working_lyrics_never_deletes_the_saved_singers_words() {
+        let target = Fixture::new();
+        let source = Fixture::new();
+        fs::write(target.0.join("lyrics.json"), b"saved words").unwrap();
+        let captured = target.target();
+        let metadata = fs::read(target.0.join("project.json")).unwrap();
+        let mut raw = crate::project_store::read(&source.0, "project.json")
+            .unwrap()
+            .0;
+        assert!(publish_target(&source.0, &mut raw, captured, &[], &AtomicU64::new(1), 1).is_err());
+        assert_eq!(
+            fs::read(target.0.join("lyrics.json")).unwrap(),
+            b"saved words"
+        );
+        assert_eq!(fs::read(target.0.join("project.json")).unwrap(), metadata);
+    }
+    fn edited_words(text: &str) -> Value {
+        json!([{"start":0.,"end":2.,"text":text,"words":[{"w":text,"s":0.,"e":2.}]}])
+    }
+    #[test]
+    fn split_completion_and_late_refresh_keep_independent_editor_saves_without_recomputing_stems() {
+        let source = Fixture::new();
+        let output = Fixture::new();
+        let first = crate::lyrics_store::save(
+            &source.0,
+            None,
+            &edited_words("Initial words"),
+            Some("Singer"),
+        )
+        .unwrap();
+        fs::copy(source.0.join("lyrics.json"), output.0.join("lyrics.json")).unwrap();
+        fs::write(output.0.join("stems/keep.bin"), b"computed inference").unwrap();
+        let output_metadata = fs::read(output.0.join("project.json")).unwrap();
+        let mut target = Some(source.target());
+        let second = crate::lyrics_store::save(
+            &source.0,
+            first.fingerprint.as_deref(),
+            &edited_words("Saved during inference"),
+            None,
+        )
+        .unwrap();
+        let serial = AtomicU64::new(7);
+        refresh_split_lyrics(&source.0, &output.0, None, &mut target, &serial, 7).unwrap();
+        assert_eq!(
+            crate::lyrics_store::identity(&output.0).unwrap(),
+            second.fingerprint
+        );
+        assert_eq!(
+            target.as_ref().unwrap().lyrics_fingerprint,
+            second.fingerprint
+        );
+        let third = crate::lyrics_store::save(
+            &source.0,
+            second.fingerprint.as_deref(),
+            &edited_words("Saved before handoff"),
+            None,
+        )
+        .unwrap();
+        let config = Config::source();
+        let mut ready = false;
+        let mut labels = vec![];
+        let refreshed = execute(
+            &config,
+            Job::RefreshLyrics {
+                source_dir: source.0.clone(),
+                expected: third.fingerprint.clone(),
+                output: Output {
+        publication_hash: None,
+                    path: output.0.clone(),
+                    working: true,
+                    target,
+                },
+            },
+            &serial,
+            7,
+            &mut ready,
+            |label, _| labels.push(label.to_owned()),
+        )
+        .unwrap();
+        assert_eq!(refreshed.path, output.0);
+        assert_eq!(
+            refreshed.target.as_ref().unwrap().lyrics_fingerprint,
+            third.fingerprint
+        );
+        assert_eq!(
+            crate::lyrics_store::identity(&output.0).unwrap(),
+            third.fingerprint
+        );
+        assert_eq!(
+            crate::lyrics_store::read(&output.0)
+                .unwrap()
+                .document
+                .unwrap()
+                .lines[0]
+                .text,
+            "Saved before handoff"
+        );
+        assert_eq!(
+            fs::read(output.0.join("project.json")).unwrap(),
+            output_metadata
+        );
+        assert_eq!(
+            fs::read(output.0.join("stems/keep.bin")).unwrap(),
+            b"computed inference"
+        );
+        assert_eq!(labels, vec!["Updating lyrics…"]);
+    }
+    #[test]
+    fn refresh_uses_accepted_source_identity_and_preserves_computed_output_on_conflict_or_cancel() {
+        let source = Fixture::new();
+        let output = Fixture::new();
+        let original =
+            crate::lyrics_store::save(&source.0, None, &edited_words("Original words"), None)
+                .unwrap();
+        fs::write(output.0.join("lyrics.json"), b"private computed copy").unwrap();
+        fs::write(output.0.join("stems/keep.bin"), b"computed inference").unwrap();
+        let target = Some(source.target());
+        let expected = original.fingerprint.clone();
+        let latest = crate::lyrics_store::save(
+            &source.0,
+            expected.as_deref(),
+            &edited_words("Unacknowledged external words"),
+            None,
+        )
+        .unwrap();
+        let job = || Job::RefreshLyrics {
+            source_dir: source.0.clone(),
+            expected: expected.clone(),
+            output: Output {
+        publication_hash: None,
+                path: output.0.clone(),
+                working: true,
+                target: target.clone(),
+            },
+        };
+        let config = Config::source();
+        let mut ready = false;
+        assert!(execute(&config, job(), &AtomicU64::new(1), 1, &mut ready, |_, _| {}).is_err());
+        assert!(execute(&config, job(), &AtomicU64::new(2), 1, &mut ready, |_, _| {}).is_err());
+        assert_eq!(
+            crate::lyrics_store::identity(&source.0).unwrap(),
+            latest.fingerprint
+        );
+        assert_eq!(
+            fs::read(output.0.join("lyrics.json")).unwrap(),
+            b"private computed copy"
+        );
+        assert_eq!(
+            fs::read(output.0.join("stems/keep.bin")).unwrap(),
+            b"computed inference"
+        );
+        assert!(output.0.is_dir());
+        assert!(fs::read_dir(&output.0).unwrap().all(|e| {
+            !e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".lyrics-refresh-")
+        }));
+    }
+    #[test]
+    fn refreshing_a_working_source_keeps_the_original_target_conflict_identity() {
+        let saved = Fixture::new();
+        let source = Fixture::new();
+        let output = Fixture::new();
+        let baseline =
+            crate::lyrics_store::save(&saved.0, None, &edited_words("Saved words"), None).unwrap();
+        let edited =
+            crate::lyrics_store::save(&source.0, None, &edited_words("Working editor words"), None)
+                .unwrap();
+        let mut target = Some(saved.target());
+        refresh_split_lyrics(
+            &source.0,
+            &output.0,
+            Some(&edited.fingerprint),
+            &mut target,
+            &AtomicU64::new(1),
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            target.as_ref().unwrap().lyrics_fingerprint,
+            baseline.fingerprint
+        );
+        assert_eq!(
+            crate::lyrics_store::identity(&output.0).unwrap(),
+            edited.fingerprint
+        );
+        let mut raw = crate::project_store::read(&output.0, "project.json")
+            .unwrap()
+            .0;
+        publish_target(
+            &output.0,
+            &mut raw,
+            target.unwrap(),
+            &[],
+            &AtomicU64::new(1),
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::lyrics_store::identity(&saved.0).unwrap(),
+            edited.fingerprint
+        );
+        assert_eq!(
+            crate::lyrics_store::read(&saved.0)
+                .unwrap()
+                .document
+                .unwrap()
+                .lines[0]
+                .text,
+            "Working editor words"
+        );
+    }
+    #[test]
+    fn source_song_names_keep_real_dots_and_refuse_hidden_parent_names() {
+        assert_eq!(safe_name("Mr. Crowley"), "Mr. Crowley");
+        assert_eq!(safe_name(" . . AC:DC.MP3 ".trim()), "AC DC");
+        assert_eq!(safe_name("...mp3"), "Untitled song");
+        assert_eq!(safe_name("a   b?c.wav"), "a b c");
+    }
+    #[test]
+    fn gpu_deadlines_keep_the_source_first_chunk_and_cpu_fallback_rules() {
+        let d = Duration::from_secs;
+        assert!(gpu_expired(false, false, d(240), d(240), d(240)));
+        assert!(!gpu_expired(true, false, d(500), d(599), d(599)));
+        assert!(gpu_expired(true, false, d(5), d(600), d(600)));
+        assert!(!gpu_expired(true, true, d(200), d(1800), d(299)));
+        assert!(gpu_expired(true, true, d(1), d(1800), d(300)));
+    }
+    #[test]
+    fn progress_parses_fragment_tails_and_native_json() {
+        assert_eq!(last_progress(b"noise\r 12.5%|stuff"), Some(12.5));
+        assert_eq!(last_progress(b"chunk 3/12: 4.1s elapsed"), Some(25.));
+        assert_eq!(last_progress(b"{\"percent\":64}\n"), Some(64.));
+        assert_eq!(last_progress(b"{\"percent\":100}\n"), Some(99.));
+        assert_eq!(safe_name("../a:b"), "a b");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn resolved_system_splitter_executes_original_input_without_pack_python_or_pcm_rewrite() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new();
+        let input = fixture.0.join("source recording.mp3");
+        let mut wav = vec![];
+        let frames = 20u32;
+        let rate = 8000u32;
+        wav.extend(b"RIFF");
+        wav.extend((36 + frames * 2).to_le_bytes());
+        wav.extend(b"WAVEfmt ");
+        wav.extend(16u32.to_le_bytes());
+        wav.extend(1u16.to_le_bytes());
+        wav.extend(1u16.to_le_bytes());
+        wav.extend(rate.to_le_bytes());
+        wav.extend((rate * 2).to_le_bytes());
+        wav.extend(2u16.to_le_bytes());
+        wav.extend(16u16.to_le_bytes());
+        wav.extend(b"data");
+        wav.extend((frames * 2).to_le_bytes());
+        wav.resize(44 + frames as usize * 2, 0);
+        fs::write(&input, &wav).unwrap();
+        let script = fixture.0.join("system-demucs");
+        let log = fixture.0.join("system-argv");
+        let body = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n[ \"$1\" = --fixture-system ] || exit 9\nshift\n[ \"$1\" = --help ] && exit 0\nout=\ninput=\nwhile [ \"$#\" -gt 0 ]; do\n case \"$1\" in -o) shift; out=$1;; *) input=$1;; esac\n shift\ndone\n/bin/mkdir -p \"$out/htdemucs_6s\" || exit 10\nfor stem in vocals drums bass other guitar piano; do /bin/cp \"$input\" \"$out/htdemucs_6s/$stem.wav\" || exit 11; done\nprintf '100%%| complete\\n'\n",
+            log.display()
+        );
+        fs::write(&script, body).unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+        let engine = crate::engine_status::ResolvedEngine::System {
+            argv: vec![script.into_os_string(), "--fixture-system".into()],
+            path: std::env::var_os("PATH").unwrap_or_default(),
+        };
+        let mut probe = engine.system_command().unwrap();
+        probe.arg("--help");
+        command_observe(
+            probe,
+            &AtomicU64::new(1),
+            1,
+            Duration::from_secs(2),
+            || Ok(()),
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        let mut config = Config::source();
+        config.pack = fixture.0.join("missing-pack");
+        let mut progress = vec![];
+        stems(
+            &config,
+            &engine,
+            &fixture.0,
+            &input,
+            &AtomicU64::new(1),
+            1,
+            &mut |label, p| progress.push((label.to_owned(), p)),
+            false,
+        )
+        .unwrap();
+        let args = fs::read_to_string(log).unwrap();
+        assert!(
+            args.starts_with("--fixture-system\n-n\nhtdemucs_6s\n--filename\n{stem}.{ext}\n-o\n")
+        );
+        assert!(args.ends_with(&format!("{}\n", input.display())));
+        assert!(!args.contains("-m\ndemucs"));
+        for stem in &STEMS[..6] {
+            assert_eq!(
+                fs::read(fixture.0.join("stems").join(format!("{stem}.wav"))).unwrap(),
+                wav
+            );
+        }
+        assert_eq!(fs::read(input).unwrap(), wav);
+        assert!(!fixture.0.join("onnx-runner.py").exists());
+        assert!(!fixture.0.join("input44k.wav").exists());
+        assert!(!progress.is_empty());
+    }
+    #[test]
+    fn working_save_preserves_custom_encoded_audio_and_prunes_only_its_removed_copy() {
+        let target = Fixture::new();
+        let source = Fixture::new();
+        let picked = source.0.join("harmony.MP3");
+        fs::write(&picked, b"ID3encoded original bytes").unwrap();
+        fs::write(
+            target.0.join("stems/custom-removed.ogg"),
+            b"old owned track",
+        )
+        .unwrap();
+        fs::write(target.0.join("stems/foreign-notes.txt"), b"leave it").unwrap();
+        let captured = target.target();
+        let mut raw = crate::project_store::read(&source.0, "project.json")
+            .unwrap()
+            .0;
+        let custom = crate::tracks::Lane {
+            slot: 7,
+            id: "custom-harmony".into(),
+            label: "My harmony".into(),
+            color: "#8fd3ff".into(),
+            file: picked.clone(),
+            custom: true,
+        };
+        publish_target(
+            &source.0,
+            &mut raw,
+            captured,
+            &[custom],
+            &AtomicU64::new(1),
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(target.0.join("stems/custom-harmony.mp3")).unwrap(),
+            b"ID3encoded original bytes"
+        );
+        assert_eq!(fs::read(picked).unwrap(), b"ID3encoded original bytes");
+        assert!(!target.0.join("stems/custom-removed.ogg").exists());
+        assert_eq!(
+            fs::read(target.0.join("stems/foreign-notes.txt")).unwrap(),
+            b"leave it"
+        );
+        assert_eq!(raw["settings"]["custom"][0]["id"], "custom-harmony");
+        assert_eq!(
+            raw["settings"]["custom"][0]["file"],
+            "stems/custom-harmony.mp3"
+        );
+    }
+    #[test]
+    fn generated_backing_identity_never_overwrites_a_singers_existing_custom_lane() {
+        let lane = crate::tracks::Lane {
+            slot: 6,
+            id: "custom-backing-vocals".into(),
+            label: "My own take".into(),
+            color: "#abcdef".into(),
+            file: PathBuf::from("/already/picked.wav"),
+            custom: true,
+        };
+        assert_eq!(fresh_backing_id(&[]), "custom-backing-vocals");
+        assert_eq!(fresh_backing_id(&[lane.clone()]), "custom-backing-vocals-2");
+        let mut second = lane.clone();
+        second.id = "custom-backing-vocals-2".into();
+        assert_eq!(fresh_backing_id(&[lane, second]), "custom-backing-vocals-3");
+    }
+    #[test]
+    fn empty_working_document_saves_marker_and_lyrics_without_any_audio_source() {
+        let target = Fixture::new();
+        let source = Fixture::new();
+        fs::write(
+            target.0.join("stems/custom-removed.mp3"),
+            b"previous encoded member",
+        )
+        .unwrap();
+        let lyrics = b"{\"source\":\"edited\",\"lines\":[]}";
+        fs::write(source.0.join("lyrics.json"), lyrics).unwrap();
+        let captured = target.target();
+        let mix = crate::project_store::Mix {
+            carry: Default::default(),
+            metronome: Default::default(),
+            beat: None,
+            original: false,
+            lanes: vec![],
+            custom: vec![],
+            gain: [1.; crate::tracks::LANE_SLOTS],
+            muted: [false; crate::tracks::LANE_SLOTS],
+            solo: [false; crate::tracks::LANE_SLOTS],
+            master: 1.,
+            transpose: 0,
+            tempo: 1.,
+            looping: false,
+            selection: Some((0., 0.)),
+            view: (0., 0.),
+        };
+        let mut raw = crate::project_store::update_mix(
+            crate::project_store::read(&source.0, "project.json")
+                .unwrap()
+                .0,
+            &mix,
+        )
+        .unwrap();
+        let result =
+            publish_target(&source.0, &mut raw, captured, &[], &AtomicU64::new(1), 1).unwrap();
+        assert_eq!(result.path, target.0);
+        let saved = crate::project_store::read(&target.0, "project.json")
+            .unwrap()
+            .0;
+        assert_eq!(saved["settings"]["nativeEmptyTracks"], true);
+        assert_eq!(saved["settings"]["nativeOriginalDisabled"], true);
+        assert_eq!(saved["settings"]["custom"], json!([]));
+        assert!(saved["settings"].get("selection").is_none());
+        assert!(!target.0.join("stems/custom-removed.mp3").exists());
+        assert_eq!(fs::read(target.0.join("lyrics.json")).unwrap(), lyrics);
+    }
+}

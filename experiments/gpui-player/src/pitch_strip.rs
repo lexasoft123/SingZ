@@ -7,6 +7,17 @@ use singz_uikit::{
     TransportIcon, colored_icon, small_ghost_pill, tracked_label, tracked_text, zoom_chip,
 };
 use std::sync::{Arc, OnceLock};
+use std::{cell::RefCell, rc::Rc};
+pub enum PitchEvent {
+    ToggleMic,
+}
+impl EventEmitter<PitchEvent> for PitchStrip {}
+#[derive(Clone, Copy)]
+struct TrailPoint {
+    time: f32,
+    midi: f32,
+    hit: bool,
+}
 
 fn key_shadow() -> Arc<RenderImage> {
     static IMAGE: OnceLock<Arc<RenderImage>> = OnceLock::new();
@@ -30,6 +41,17 @@ const DURATION: f32 = 192.;
 const MIC_UNAVAILABLE: &str = "Microphone unavailable";
 
 pub struct PitchStrip {
+    #[cfg(feature = "ui-tests")]
+    mic_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+    microphone: crate::microphone::View,
+    trail: Rc<RefCell<Vec<TrailPoint>>>,
+    hits: u64,
+    total: u64,
+    data: Option<Arc<crate::project_pitch::Pitch>>,
+    beat_tempo: Option<f64>,
+    beat_progress: Option<f32>,
+    rate: f32,
+    transpose: i32,
     position: f32,
     note_bars: bool,
     fit: bool,
@@ -39,11 +61,127 @@ pub struct PitchStrip {
 impl PitchStrip {
     pub fn new(position: f32, _: &mut Context<Self>) -> Self {
         Self {
+            #[cfg(feature = "ui-tests")]
+            mic_bounds: Default::default(),
+            microphone: Default::default(),
+            trail: Rc::new(RefCell::new(Vec::with_capacity(1024))),
+            hits: 0,
+            total: 0,
+            data: None,
+            beat_tempo: None,
+            beat_progress: None,
+            rate: 1.,
+            transpose: 0,
             position,
             note_bars: true,
             fit: true,
             view_start: 0.,
             view_end: 1.,
+        }
+    }
+    pub fn set_beat_progress(&mut self, progress: Option<f32>, cx: &mut Context<Self>) {
+        if self.beat_progress != progress {self.beat_progress = progress;cx.notify();}
+    }
+    pub fn set_microphone(
+        &mut self,
+        view: crate::microphone::View,
+        position: f32,
+        playing: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if view.generation != self.microphone.generation
+            || !matches!(view.phase, crate::microphone::Phase::Live)
+        {
+            self.trail.borrow_mut().clear();
+            self.hits = 0;
+            self.total = 0;
+        }
+        if view.fresh()
+            && view.sequence != self.microphone.sequence
+            && matches!(view.phase, crate::microphone::Phase::Live)
+        {
+            let target = self
+                .data
+                .as_ref()
+                .and_then(|d| {
+                    d.f0.get((position / d.hop.max(0.001)).round().max(0.) as usize)
+                })
+                .copied()
+                .unwrap_or(0.);
+            let sung = if view.frequency > 0. {
+                crate::project_pitch::midi(view.frequency)
+            } else {
+                0.
+            };
+            let target = if target > 0. {
+                crate::project_pitch::midi(target) + self.transpose as f32
+            } else {
+                0.
+            };
+            let cents = (((sung - target) * 100. + 600.).rem_euclid(1200.) - 600.).abs();
+            let hit = sung > 0. && target > 0. && cents <= 60.;
+            if playing && target > 0. {
+                self.total += 1;
+                if hit {
+                    self.hits += 1;
+                }
+            }
+            if sung > 0. {
+                let mut trail = self.trail.borrow_mut();
+                trail.push(TrailPoint {
+                    time: position,
+                    midi: sung,
+                    hit,
+                });
+                if trail.len() > 900 {
+                    trail.drain(..150);
+                }
+            }
+        }
+        self.microphone = view;
+        cx.notify();
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn mic_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.mic_bounds.get()
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn match_counts(&self) -> (u64, u64) {
+        (self.hits, self.total)
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn trail_len(&self) -> usize {
+        self.trail.borrow().len()
+    }
+    /// A custom lane changes timeline length while the vocal source and its
+    /// matching history remain the same.
+    pub fn update_native_timeline(&mut self,data:Arc<crate::project_pitch::Pitch>,cx:&mut Context<Self>){
+        self.data=Some(data);cx.notify();
+    }
+    #[cfg(feature="ui-tests")]
+    pub fn native_duration(&self)->Option<f32>{self.data.as_ref().map(|p|p.duration)}
+    pub fn set_native(&mut self, data: Arc<crate::project_pitch::Pitch>, cx: &mut Context<Self>) {
+        self.trail.borrow_mut().clear();
+        self.hits = 0;
+        self.total = 0;
+        self.data = Some(data);
+        cx.notify();
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn effects(&self) -> (f32, i32) {
+        (self.rate, self.transpose)
+    }
+    pub fn set_beat_tempo(&mut self, bpm: Option<f64>, cx: &mut Context<Self>) {
+        if self.beat_tempo != bpm {
+            self.beat_tempo = bpm;
+            cx.notify();
+        }
+    }
+    pub fn set_effects(&mut self, rate: f32, transpose: i32, cx: &mut Context<Self>) {
+        if self.rate != rate || self.transpose != transpose {
+            self.rate = rate;
+            self.transpose = transpose;
+            cx.notify();
         }
     }
     pub fn set_position(&mut self, position: f32, cx: &mut Context<Self>) {
@@ -75,19 +213,106 @@ impl PitchStrip {
 }
 impl Render for PitchStrip {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let note = zoom_chip("pitch-note-bars", "Note bars", self.note_bars).on_click(cx.listener(
+        let note = zoom_chip("pitch-note-bars", crate::i18n::t("player.pitch.noteBars"), self.note_bars).on_click(cx.listener(
             |this, _, _, cx| {
                 this.note_bars = !this.note_bars;
                 cx.notify();
             },
         ));
-        let fit = zoom_chip("pitch-fit", "Fit", self.fit)
+        let fit = zoom_chip("pitch-fit", crate::i18n::t("player.pitch.fit"), self.fit)
             .whitespace_nowrap()
             .on_click(cx.listener(|this, _, _, cx| {
                 this.fit = !this.fit;
                 cx.notify();
             }));
+        let native = self.data.is_some() && !crate::integration::fixture_mode();
+        let mic_label = if !native {
+            MIC_UNAVAILABLE.to_owned()
+        } else {
+            match self.microphone.phase {
+                crate::microphone::Phase::Live => crate::i18n::t("player.pitch.micOn"),
+                crate::microphone::Phase::Starting => crate::i18n::t("player.pitch.micStarting"),
+                crate::microphone::Phase::Stopping => "Stopping…".to_owned(),
+                crate::microphone::Phase::Permission => crate::i18n::t("player.pitch.micBlocked"),
+                crate::microphone::Phase::Error => "Mic unavailable".to_owned(),
+                crate::microphone::Phase::Monitoring => "Monitoring owns microphone".to_owned(),
+                crate::microphone::Phase::Off => crate::i18n::t("player.pitch.micMatch"),
+            }
+        };
+        let microphone = small_ghost_pill("pitch-microphone-unavailable", "")
+            .flex_shrink_1()
+            .min_w_0()
+            .h(px(24.))
+            .ml_auto()
+            .overflow_hidden()
+            .opacity(
+                if native && self.microphone.phase != crate::microphone::Phase::Starting {
+                    1.
+                } else {
+                    0.45
+                },
+            )
+            .cursor_default()
+            .when(
+                native && self.microphone.phase == crate::microphone::Phase::Live,
+                |button| {
+                    button
+                        .bg(rgb(0x58d68a).alpha(0.12))
+                        .border_color(rgb(0x58d68a).alpha(0.5))
+                        .text_color(rgb(0x58d68a))
+                },
+            )
+            .when(native, |button| button.cursor_pointer())
+            .on_click(cx.listener(|this, _, _, cx| {
+                if this.data.is_some()
+                    && this.microphone.phase != crate::microphone::Phase::Starting
+                {
+                    cx.emit(PitchEvent::ToggleMic);
+                }
+            }))
+            .child(
+                colored_icon(
+                    TransportIcon::Mic,
+                    if native && self.microphone.phase == crate::microphone::Phase::Live {
+                        0x58d68a
+                    } else {
+                        TEXT
+                    },
+                )
+                .with_size(12),
+            )
+            .child(
+                div()
+                    .flex_shrink_1()
+                    .min_w_0()
+                    .text_center()
+                    .text_size(px(12.))
+                    .line_height(px(14.))
+                    .font_family(DISPLAY_600)
+                    .font_weight(FontWeight::NORMAL)
+                    .child(tracked_label(mic_label, 0.01)),
+            );
+        #[cfg(feature = "ui-tests")]
+        let microphone = {
+            let probe = self.mic_bounds.clone();
+            microphone.relative().child(
+                canvas(
+                    move |bounds, _, _| {
+                        probe.set(Some(bounds));
+                        bounds
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+        };
         scene(
+            self.data.clone(),
+            self.trail.clone(),
+            self.rate,
+            self.beat_tempo,
+            self.transpose,
             self.position,
             self.note_bars,
             self.fit,
@@ -95,7 +320,17 @@ impl Render for PitchStrip {
             self.view_end,
             window,
         )
-        .child(hud(note, fit))
+        .child(hud(
+            self.beat_progress.filter(|_| self.data.as_ref().is_none_or(|p|p.warning.as_deref() != Some("Analyzing vocals…"))),
+            note,
+            fit,
+            microphone,
+            if self.total > 30 && self.microphone.phase == crate::microphone::Phase::Live {
+                Some(format!("{}% match", self.hits * 100 / self.total))
+            } else {
+                None
+            },
+        ))
     }
 }
 
@@ -113,6 +348,11 @@ fn normalized_view(start: f32, end: f32) -> (f32, f32) {
 }
 
 fn scene(
+    data: Option<Arc<crate::project_pitch::Pitch>>,
+    trail: Rc<RefCell<Vec<TrailPoint>>>,
+    rate: f32,
+    beat_tempo: Option<f64>,
+    transpose: i32,
     position: f32,
     note_bars: bool,
     fit: bool,
@@ -120,6 +360,33 @@ fn scene(
     view_end: f32,
     window: &Window,
 ) -> Div {
+    let key = data
+        .as_ref()
+        .map_or("G#m".to_owned(), |d| d.key_label(transpose));
+    let tempo = beat_tempo
+        .map(|b| format!("{:.0}", b * rate as f64))
+        .unwrap_or_else(|| {
+            data.as_ref().map_or("—".to_owned(), |d| {
+                d.tempo
+                    .parse::<f32>()
+                    .map(|b| format!("{:.0}", b * rate))
+                    .unwrap_or_else(|_| d.tempo.clone())
+            })
+        });
+    let range = data.as_ref().map_or("A2–A2".to_owned(), |d| {
+        d.range()
+            .map(|(a, b)| {
+                format!(
+                    "{}–{}",
+                    crate::project_pitch::note_name(a + transpose),
+                    crate::project_pitch::note_name(b + transpose)
+                )
+            })
+            .unwrap_or("—".into())
+    });
+    let length = data.as_ref().map_or("3:12".to_owned(), |d| {
+        format!("{}:{:02}", d.duration as u32 / 60, d.duration as u32 % 60)
+    });
     div()
         .relative()
         .flex_none()
@@ -133,7 +400,19 @@ fn scene(
             canvas(
                 |b, _, _| b,
                 move |_, b, w, cx| {
-                    paint_roll(b, position, note_bars, fit, view_start, view_end, w, cx)
+                    paint_roll(
+                        b,
+                        data.as_deref(),
+                        &trail.borrow(),
+                        transpose,
+                        position,
+                        note_bars,
+                        fit,
+                        view_start,
+                        view_end,
+                        w,
+                        cx,
+                    )
                 },
             )
             .absolute()
@@ -156,13 +435,19 @@ fn scene(
                 .flex()
                 .flex_col()
                 .justify_between()
-                .child(info_row("KEY", "G#m", true, window))
-                .child(info_row("TEMPO", "—", false, window))
-                .child(info_row("RANGE", "A2–A2", false, window))
-                .child(info_row("LENGTH", "3:12", false, window)),
+                .child(info_row(crate::i18n::t("player.pitch.keyLabel").to_uppercase(), key, true, window))
+                .child(info_row(crate::i18n::t("player.pitch.tempoLabel").to_uppercase(), tempo, false, window))
+                .child(info_row(crate::i18n::t("player.pitch.rangeLabel").to_uppercase(), range, false, window))
+                .child(info_row(crate::i18n::t("player.pitch.lengthLabel").to_uppercase(), length, false, window)),
         )
 }
-fn hud(note_button: Stateful<Div>, fit_button: Stateful<Div>) -> Div {
+fn hud(
+    beat_progress: Option<f32>,
+    note_button: Stateful<Div>,
+    fit_button: Stateful<Div>,
+    microphone: Stateful<Div>,
+    score: Option<String>,
+) -> Div {
     div()
         .absolute()
         .top(px(5.))
@@ -173,31 +458,28 @@ fn hud(note_button: Stateful<Div>, fit_button: Stateful<Div>) -> Div {
         .items_center()
         .gap(px(10.))
         // A dedicated toolbar stays clear of the key readout and piano roll.
+        .when_some(beat_progress, |hud,p|hud.child(singz_uikit::analysis_progress_note(format!("finding the beat… {}%",(p*100.).round() as u32),p)))
         .child(note_button.flex_none().w(px(80.)).whitespace_nowrap())
         .child(fit_button.flex_none())
-        .child(
-            small_ghost_pill("pitch-microphone-unavailable", "")
-                .flex_shrink_1()
-                .min_w_0()
-                .h(px(24.)).ml_auto().overflow_hidden()
-                .opacity(0.45)
-                .cursor_default()
-                .child(colored_icon(TransportIcon::Mic, TEXT).with_size(12))
-                .child(
-                    div()
-                        .flex_shrink_1()
-                        .min_w_0()
-                        .text_center()
-                        .text_size(px(12.))
-                        .line_height(px(14.))
-                        .font_family(DISPLAY_600)
-                        .font_weight(FontWeight::NORMAL)
-                        .child(tracked_label(MIC_UNAVAILABLE, 0.01)),
-                ),
-        )
+        .when_some(score, |hud, score| {
+            hud.child(
+                div()
+                    .font_family(MONO_400)
+                    .text_size(px(12.))
+                    .text_color(rgb(0x58d68a))
+                    .child(score),
+            )
+        })
+        .child(microphone)
 }
 
-fn info_row(label: &'static str, value: &'static str, key: bool, window: &Window) -> Div {
+fn info_row(
+    label: impl Into<SharedString>,
+    value: impl Into<SharedString>,
+    key: bool,
+    window: &Window,
+) -> Div {
+    let value: SharedString = value.into();
     let value_size = if key { 19. } else { 14. };
     let (label_height, label_baseline) =
         singz_uikit::css_normal_line_metrics(window, MONO_400, 8.5);
@@ -308,6 +590,9 @@ fn text(
 
 fn paint_roll(
     b: Bounds<Pixels>,
+    data: Option<&crate::project_pitch::Pitch>,
+    trail: &[TrailPoint],
+    transpose: i32,
     position: f32,
     note_bars: bool,
     fit: bool,
@@ -320,7 +605,15 @@ fn paint_roll(
     let view_span = view_end - view_start;
     let width = f32::from(b.size.width);
     let height = f32::from(b.size.height);
-    let (lo, hi) = if fit { (39., 51.) } else { (36., 84.) };
+    let (lo, hi) = if fit {
+        data.map(|d| {
+            let (a, b) = d.fit_range();
+            (a + transpose as f32, b + transpose as f32)
+        })
+        .unwrap_or((39., 51.))
+    } else {
+        (36., 84.)
+    };
     let row_h = height / (hi - lo);
     let kb_font = (row_h * 0.7).clamp(8., 12.).round();
     let y_of = |m: f32| b.top() + px(height - (m - lo) / (hi - lo) * height);
@@ -391,6 +684,37 @@ fn paint_roll(
         b.size.height,
         rgba(0xfff0d626).into(),
     );
+    if let Some(data) = data {
+        paint_native_notes(
+            data, b, x0, roll_w, lo, hi, transpose, position, note_bars, view_start, view_end, w,
+            cx,
+        );
+        let duration = data.duration.max(0.001);
+        let radius = (row_h * 0.22).clamp(2.5, 4.5);
+        w.with_content_mask(
+            Some(ContentMask {
+                bounds: Bounds::new(point(x0, b.top()), size(roll_w, b.size.height)),
+            }),
+            |w| {
+                for dot in trail {
+                    let fraction = dot.time / duration;
+                    if fraction < view_start
+                        || fraction > view_end
+                        || dot.midi < lo - 1.
+                        || dot.midi > hi + 1.
+                    {
+                        continue;
+                    }
+                    let center = point(
+                        x0 + roll_w * ((fraction - view_start) / view_span),
+                        y_of(dot.midi),
+                    );
+                    let _ = singz_uikit::paint_pitch_match_dot(w, center, radius, dot.hit);
+                }
+            },
+        );
+        return;
+    }
     let y = y_of(45.);
     let bar_h = px((row_h - 3.).clamp(3., 16.));
     // The faint raw f0 trace is drawn beneath the note bar in production.
@@ -508,4 +832,179 @@ fn paint_roll(
             rgba(0xfff4e0d9).into(),
         );
     }
+}
+
+fn paint_native_notes(
+    data: &crate::project_pitch::Pitch,
+    b: Bounds<Pixels>,
+    x0: Pixels,
+    width: Pixels,
+    lo: f32,
+    hi: f32,
+    transpose: i32,
+    position: f32,
+    note_bars: bool,
+    start: f32,
+    end: f32,
+    w: &mut Window,
+    cx: &mut App,
+) {
+    let duration = data.duration.max(0.001);
+    let span = (end - start) * duration;
+    let x = |time: f32| x0 + width * ((time - start * duration) / span);
+    let row = f32::from(b.size.height) / (hi - lo);
+    let y = |note: f32| b.bottom() - px((note - lo) / (hi - lo) * f32::from(b.size.height));
+    w.with_content_mask(
+        Some(ContentMask {
+            bounds: Bounds::new(point(x0, b.top()), size(width, b.size.height)),
+        }),
+        |w| {
+            let mut path = PathBuilder::stroke(px(1.));
+            let mut connected = false;
+            let mut points = 0;
+            // Aggregate to display columns when zoomed out, retaining no per-frame allocations beyond the path.
+            let first =
+                ((start * duration / data.hop.max(0.001)).floor() as usize).min(data.f0.len());
+            let last = ((end * duration / data.hop.max(0.001)).ceil() as usize).min(data.f0.len());
+            let stride = ((last - first) as f32 / f32::from(width).max(1.))
+                .floor()
+                .max(1.) as usize;
+            for index in (first..last).step_by(stride) {
+                let hz = data.f0[index];
+                if hz <= 0. {
+                    connected = false;
+                    continue;
+                }
+                let point = point(
+                    x(index as f32 * data.hop),
+                    y(crate::project_pitch::midi(hz) + transpose as f32),
+                );
+                if connected {
+                    path.line_to(point);
+                } else {
+                    path.move_to(point);
+                }
+                connected = true;
+                points += 1;
+            }
+            if note_bars && points > 1 {
+                if let Ok(path) = path.build() {
+                    w.paint_path(path, rgba(0xffd6964d));
+                }
+            }
+            let seg_font = (row * 0.75).clamp(if note_bars { 11. } else { 9. }, 13.).round();
+            let mut last_label_x = b.left() - px(100.);
+            let mut last_label_end = b.left() - px(100.);
+            for note in if note_bars {
+                &data.notes
+            } else {
+                &data.frame_notes
+            } {
+                let a = note.start.max(start * duration);
+                let z = note.end.min(end * duration);
+                if z <= a {
+                    continue;
+                }
+                let midi = note.midi + transpose as f32;
+                if midi < lo - 1. || midi > hi + 1. {
+                    continue;
+                }
+                let top = y(midi);
+                let bar = px((row - 3.).clamp(3., 16.));
+                // Label fit uses the segment's original extent, as Canvas does;
+                // only its visible anchor is clipped to the left roll boundary.
+                let sx = x(note.start);
+                let ex = x(note.end);
+                let left = x(a);
+                let right = x(z);
+                let radius = bar / 2.;
+                w.paint_quad(quad(
+                    Bounds::new(point(left, top - bar / 2.), size(right - left, bar)),
+                    Corners {
+                        top_left: if a == note.start { radius } else { px(0.) },
+                        bottom_left: if a == note.start { radius } else { px(0.) },
+                        top_right: if z == note.end { radius } else { px(0.) },
+                        bottom_right: if z == note.end { radius } else { px(0.) },
+                    },
+                    rgba(if note_bars { 0xffaa37d9 } else { 0xffa02899 }),
+                    px(0.),
+                    rgba(0),
+                    BorderStyle::Solid,
+                ));
+                if note_bars || row >= 6. {
+                    let label = crate::project_pitch::note_name(note.midi as i32 + transpose);
+                    if note_bars {
+                        let label_width = w
+                            .text_system()
+                            .shape_line(
+                                label.clone().into(),
+                                px(seg_font),
+                                &[TextRun {
+                                    len: label.len(),
+                                    font: Font {
+                                        family: MONO_400.into(),
+                                        ..Default::default()
+                                    },
+                                    color: rgb(0xfff0d7).into(),
+                                    background_color: None,
+                                    underline: None,
+                                    strikethrough: None,
+                                }],
+                                None,
+                            )
+                            .width;
+                        let label_start = if sx > x0 { sx } else { x0 } + px(3.);
+                        let shifted = label_start < last_label_end + px(5.);
+                        let label_x = if shifted { last_label_end + px(5.) } else { label_start };
+                        if !shifted || label_x + label_width <= ex {
+                            let above = top - bar / 2. - px(2.);
+                            let minimum = b.top() + px(seg_font + 2.);
+                            let label_y = if above > minimum { above } else { minimum };
+                            w.paint_quad(quad(
+                                Bounds::new(
+                                    point(label_x - px(2.), label_y - px(seg_font + 1.)),
+                                    size(label_width + px(4.), px(seg_font + 3.)),
+                                ),
+                                px(3.),
+                                rgba(0x100c08c7),
+                                px(0.),
+                                rgba(0),
+                                BorderStyle::Solid,
+                            ));
+                            text(w, cx, &label, label_x, label_y, seg_font, 0xfff0d7, false);
+                            last_label_end = label_x + label_width;
+                        }
+                    } else if ex - sx >= px(34.) && sx - last_label_x >= px(30.) {
+                        text(w, cx, &label, sx + px(3.), top - bar / 2. - px(2.), seg_font, 0xffd696d9, false);
+                        last_label_x = sx;
+                    }
+                }
+            }
+            let fraction = position / duration;
+            if (start..=end).contains(&fraction) {
+                let left = x(position);
+                let left = px((f32::from(left) * w.scale_factor()).round() / w.scale_factor());
+                rect(
+                    w,
+                    left,
+                    b.top(),
+                    px(1.),
+                    b.size.height,
+                    rgba(0xfff4e0d9).into(),
+                );
+            }
+            if let Some(warning) = &data.warning {
+                text(
+                    w,
+                    cx,
+                    warning,
+                    x0 + px(10.),
+                    b.top() + px(20.),
+                    10.,
+                    FAINT,
+                    false,
+                );
+            }
+        },
+    );
 }

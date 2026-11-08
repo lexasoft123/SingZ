@@ -159,6 +159,15 @@ add_library(singz_native_playback_session STATIC EXCLUDE_FROM_ALL
   native/playback/lane_measure.h)
 add_library(SingZ::native_playback_session ALIAS
   singz_native_playback_session)
+
+# Offline training PCM construction; device ownership remains with the shared
+# audio service. No Electron/N-API or Rust DSP dependency.
+add_library(singz_training_renderer STATIC EXCLUDE_FROM_ALL
+  native/playback/training_phrase_renderer.cpp)
+target_compile_features(singz_training_renderer PUBLIC cxx_std_20)
+target_include_directories(singz_training_renderer PUBLIC "${SINGZ_REPO_ROOT}/native/playback")
+target_link_libraries(singz_training_renderer PUBLIC SingZ::zcore_media SingZ::zcore_legacy)
+set_target_properties(singz_training_renderer PROPERTIES POSITION_INDEPENDENT_CODE YES)
 target_compile_features(singz_native_playback_session PUBLIC cxx_std_20)
 target_include_directories(singz_native_playback_session PUBLIC
   "${SINGZ_REPO_ROOT}/native/playback")
@@ -342,6 +351,46 @@ target_link_libraries(singz-audio-host PRIVATE
   SingZ::native_build_options
   SingZ::zcore_device_fake)
 
+# GPUI uses the same native playback session as desktop/mobile, out of process.
+add_executable(singz-gpui-audio EXCLUDE_FROM_ALL tools/native/singz-gpui-audio.cpp)
+target_compile_features(singz-gpui-audio PRIVATE cxx_std_20)
+target_link_libraries(singz-gpui-audio PRIVATE
+  SingZ::native_playback_session SingZ::zcore_device_fake singz_training_renderer SingZ::zcore_legacy
+  SingZ::zcore_audio_export)
+
+# Native GPUI capture/monitor composition reuses the audited core owners.
+add_library(singz_gpui_monitor STATIC EXCLUDE_FROM_ALL native/electron/audio_monitor_session.cpp)
+target_compile_features(singz_gpui_monitor PUBLIC cxx_std_20)
+target_link_libraries(singz_gpui_monitor PUBLIC SingZ::monitor_callback)
+add_executable(singz-gpui-input EXCLUDE_FROM_ALL tools/native/singz-gpui-input.cpp)
+target_compile_features(singz-gpui-input PRIVATE cxx_std_20)
+target_link_libraries(singz-gpui-input PRIVATE singz_gpui_monitor SingZ::zcore_device_fake SingZ::zcore_legacy SingZ::zdsp_analysis)
+if(APPLE)
+  enable_language(OBJCXX)
+  target_link_libraries(singz-gpui-input PRIVATE "-framework AVFoundation")
+  target_sources(singz-gpui-input PRIVATE tools/native/gpui-microphone-permission.mm)
+  set_source_files_properties(tools/native/gpui-microphone-permission.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_link_options(singz-gpui-input PRIVATE "LINKER:-sectcreate,__TEXT,__info_plist,${CMAKE_CURRENT_SOURCE_DIR}/tools/native/gpui-input-info.plist")
+endif()
+
+# Native GPUI helpers carry their selected codec libraries beside the helper
+# folder. Linux uses DT_RPATH deliberately: unlike DT_RUNPATH it also resolves
+# avformat's avcodec/avutil dependencies from this directory without requiring
+# LD_LIBRARY_PATH or changing the separately replaceable upstream libraries.
+if(SINGZ_ENABLE_FFMPEG_CODECS)
+  foreach(_singz_gpui_helper IN ITEMS singz-gpui-audio singz-gpui-input singz-analyze)
+    set_target_properties(${_singz_gpui_helper} PROPERTIES
+      BUILD_WITH_INSTALL_RPATH TRUE
+      INSTALL_RPATH_USE_LINK_PATH FALSE)
+    if(APPLE)
+      set_property(TARGET ${_singz_gpui_helper} APPEND PROPERTY INSTALL_RPATH "@loader_path/ffmpeg")
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
+      set_property(TARGET ${_singz_gpui_helper} APPEND PROPERTY INSTALL_RPATH "\$ORIGIN/ffmpeg")
+      target_link_options(${_singz_gpui_helper} PRIVATE "LINKER:--disable-new-dtags")
+    endif()
+  endforeach()
+endif()
+
 # ---- the host test suite (tests/native at the repo root) --------------------
 # The wav suites and flac_roundtrip synthesize their own audio, so ctest needs
 # no fixtures, no ffmpeg and no node — which is exactly what lets the Windows
@@ -349,6 +398,15 @@ target_link_libraries(singz-audio-host PRIVATE
 if(SINGZ_CORE_TESTS)
   target_compile_definitions(singz-analyze PRIVATE SINGZ_CORE_TESTS=1)
   enable_testing()
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
+    add_executable(audio_host_linux_tests tests/native/audio_host_linux_tests.cpp)
+    target_compile_features(audio_host_linux_tests PRIVATE cxx_std_20)
+    target_compile_definitions(audio_host_linux_tests PRIVATE SINGZ_CORE_TESTS=1)
+    target_include_directories(audio_host_linux_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(audio_host_linux_tests PRIVATE SingZ::zcore_device Threads::Threads)
+    add_test(NAME audio_host_linux_tests COMMAND audio_host_linux_tests)
+    set_tests_properties(audio_host_linux_tests PROPERTIES TIMEOUT 30)
+  endif()
   add_test(NAME zcore_dependency_boundaries
     COMMAND "${CMAKE_COMMAND}"
       "-DSINGZ_ZCORE_ROOT=${SINGZ_REPO_ROOT}/zcore"
@@ -870,6 +928,11 @@ if(SINGZ_CORE_TESTS AND SINGZ_BUILD_HOST_TOOLS)
 endif()
 
 if(BUILD_TESTING)
+  enable_testing()
+  add_executable(training_phrase_renderer_tests native/playback/training_phrase_renderer_tests.cpp)
+  target_link_libraries(training_phrase_renderer_tests PRIVATE singz_training_renderer)
+  add_test(NAME training_phrase_renderer_tests COMMAND training_phrase_renderer_tests
+    "${SINGZ_REPO_ROOT}/mobile/assets/training-sounds")
   add_executable(training_pcm_mixer_tests native/playback/training_pcm_mixer_tests.cpp)
   target_compile_features(training_pcm_mixer_tests PRIVATE cxx_std_20)
   target_link_libraries(training_pcm_mixer_tests PRIVATE SingZ::zcore_device)

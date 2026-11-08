@@ -541,6 +541,15 @@ impl TextSystem {
         }
     }
 
+    /// Rasterize an owned glyph mask for background image effects. Uses the
+    /// same platform font fallback and raster policy as ordinary glyph paint.
+    /// Callers own the returned bytes; this does not touch a window or its atlas.
+    pub fn glyph_image_mask(&self, params: &RenderGlyphParams) -> Result<(Bounds<DevicePixels>, Vec<u8>)> {
+        let bounds = self.raster_bounds(params)?;
+        let (_, bytes) = self.rasterize_glyph(params)?;
+        Ok((bounds, bytes))
+    }
+
     pub(crate) fn rasterize_glyph(
         &self,
         params: &RenderGlyphParams,

@@ -315,6 +315,7 @@ enum class PlaybackTransportCommandKind : uint32_t {
   Resume,
   Seek,
   SetLoop,
+  SetRegion,
   ClearLoop,
   Reanchor,
   Stop,
@@ -334,6 +335,10 @@ struct PlaybackTransportCommand {
   // queued it; armed if it is the final one-shot of its drain, else discarded
   // there). See SignalsmithTimePitchSeekPlan for the race this closes.
   SignalsmithTimePitchSeekPlan seekPlan{};
+  bool regionEnabled{false};
+  int64_t regionStart{0};
+  int64_t regionEnd{0};
+  bool regionStopArmed{false};
 };
 
 // Where the song is, for a reader that holds NO lock.
@@ -442,6 +447,10 @@ struct PreparedPlaybackTransport {
   bool initialLoopEnabled{false};
   int64_t initialLoopStart{0};
   int64_t initialLoopEnd{0};
+  bool initialRegionEnabled{false};
+  int64_t initialRegionStart{0};
+  int64_t initialRegionEnd{0};
+  bool initialRegionStopArmed{false};
   int64_t durationFrames{0};
   const zdsp::ScheduledCueEvent *cueEvents{nullptr};
   uint32_t cueEventCount{0};
@@ -457,6 +466,9 @@ struct PreparedPlaybackTransport {
   bool desiredLoopEnabled{false};
   int64_t desiredLoopStart{0};
   int64_t desiredLoopEnd{0};
+  bool desiredRegionEnabled{false};
+  int64_t desiredRegionStart{0};
+  int64_t desiredRegionEnd{0};
 
   // Callback-domain state.
   NativePlaybackTransportState callbackState{
@@ -467,6 +479,13 @@ struct PreparedPlaybackTransport {
   bool callbackLoopEnabled{false};
   int64_t callbackLoopStart{0};
   int64_t callbackLoopEnd{0};
+  bool callbackRegionEnabled{false};
+  int64_t callbackRegionStart{0};
+  int64_t callbackRegionEnd{0};
+  bool callbackRegionStopArmed{false};
+  // Stop cause survives Clear Region until Play/Seek consumes the pause.
+  bool callbackStoppedByRegion{false};
+  int64_t callbackRunStartFrame{0};
   uint64_t callbackRouteGeneration{0};
   uint64_t callbackStreamGeneration{0};
   bool callbackHostIdentityValid{false};
@@ -538,6 +557,13 @@ struct PreparedPlaybackTransport {
   std::atomic<uint64_t> publishedRemainingPreRoll{0};
   std::atomic<uint32_t> publishedCueEventsCompleted{0};
   std::atomic<uint32_t> publishedNextCueEvent{0};
+  std::atomic<uint32_t> publishedRegionEnabled{0};
+  std::atomic<int64_t> publishedRegionStart{0};
+  std::atomic<int64_t> publishedRegionEnd{0};
+  std::atomic<uint32_t> publishedRegionStopArmed{0};
+  std::atomic<uint32_t> publishedStoppedByRegion{0};
+  std::atomic<uint32_t> publishedCommandsApplied{0};
+  std::atomic<int64_t> publishedRunStartFrame{0};
   std::atomic<uint32_t> publishedLoopEnabled{0};
   std::atomic<int64_t> publishedLoopStart{0};
   std::atomic<int64_t> publishedLoopEnd{0};
@@ -557,6 +583,13 @@ struct PreparedPlaybackTransport {
     uint64_t remainingPreRoll{0};
     uint32_t cueEventsCompleted{0};
     uint32_t nextCueEvent{0};
+    bool regionEnabled{false};
+    int64_t regionStart{0};
+    int64_t regionEnd{0};
+    bool regionStopArmed{false};
+    bool stoppedByRegion{false};
+    uint32_t commandsApplied{0};
+    int64_t runStartFrame{0};
     bool loopEnabled{false};
     int64_t loopStart{0};
     int64_t loopEnd{0};
@@ -627,6 +660,13 @@ struct PreparedPlaybackTransport {
         frame < 0 ? static_cast<uint64_t>(-(frame + 1)) + 1u : 0u;
     telemetry.cueEventsCompleted = cueIndex;
     telemetry.nextCueEvent = cueIndex;
+    telemetry.regionEnabled = callbackRegionEnabled;
+    telemetry.regionStart = callbackRegionStart;
+    telemetry.regionEnd = callbackRegionEnd;
+    telemetry.regionStopArmed = callbackRegionStopArmed;
+    telemetry.stoppedByRegion = callbackStoppedByRegion;
+    telemetry.commandsApplied = commandRead.load(std::memory_order_relaxed);
+    telemetry.runStartFrame = callbackRunStartFrame;
     telemetry.loopEnabled = callbackLoopEnabled;
     telemetry.loopStart = callbackLoopStart;
     telemetry.loopEnd = callbackLoopEnd;
@@ -663,6 +703,13 @@ struct PreparedPlaybackTransport {
                                       std::memory_order_relaxed);
     publishedNextCueEvent.store(telemetry.nextCueEvent,
                                 std::memory_order_relaxed);
+    publishedRegionEnabled.store(telemetry.regionEnabled ? 1u : 0u, std::memory_order_relaxed);
+    publishedRegionStart.store(telemetry.regionStart, std::memory_order_relaxed);
+    publishedRegionEnd.store(telemetry.regionEnd, std::memory_order_relaxed);
+    publishedRegionStopArmed.store(telemetry.regionStopArmed ? 1u : 0u, std::memory_order_relaxed);
+    publishedStoppedByRegion.store(telemetry.stoppedByRegion ? 1u : 0u, std::memory_order_relaxed);
+    publishedCommandsApplied.store(telemetry.commandsApplied, std::memory_order_relaxed);
+    publishedRunStartFrame.store(telemetry.runStartFrame, std::memory_order_relaxed);
     publishedLoopEnabled.store(telemetry.loopEnabled ? 1u : 0u,
                                std::memory_order_relaxed);
     publishedLoopStart.store(telemetry.loopStart, std::memory_order_relaxed);
@@ -709,6 +756,13 @@ struct PreparedPlaybackTransport {
           publishedCueEventsCompleted.load(std::memory_order_relaxed);
       sampled.nextCueEvent =
           publishedNextCueEvent.load(std::memory_order_relaxed);
+      sampled.regionEnabled = publishedRegionEnabled.load(std::memory_order_relaxed) != 0;
+      sampled.regionStart = publishedRegionStart.load(std::memory_order_relaxed);
+      sampled.regionEnd = publishedRegionEnd.load(std::memory_order_relaxed);
+      sampled.regionStopArmed = publishedRegionStopArmed.load(std::memory_order_relaxed) != 0;
+      sampled.stoppedByRegion = publishedStoppedByRegion.load(std::memory_order_relaxed) != 0;
+      sampled.commandsApplied = publishedCommandsApplied.load(std::memory_order_relaxed);
+      sampled.runStartFrame = publishedRunStartFrame.load(std::memory_order_relaxed);
       sampled.loopEnabled =
           publishedLoopEnabled.load(std::memory_order_relaxed) != 0;
       sampled.loopStart = publishedLoopStart.load(std::memory_order_relaxed);
@@ -782,6 +836,12 @@ struct PreparedPlaybackTransport {
     initialLoopEnd = initialTransport.loop.has_value()
                          ? initialTransport.loop->endProjectFrame
                          : 0;
+    const auto region = initialTransport.region.has_value() ? initialTransport.region : initialTransport.loop;
+    initialRegionEnabled = region.has_value();
+    initialRegionStart = region ? region->startProjectFrame : 0;
+    initialRegionEnd = region ? region->endProjectFrame : 0;
+    initialRegionStopArmed = initialRegionEnabled && !initialLoopEnabled &&
+        initialTransport.regionStopArmed.value_or((landingProjectFrame > 0 ? landingProjectFrame : initialFrame) < initialRegionEnd);
     durationFrames = authoritativeDuration;
     cueEvents = events;
     cueEventCount = eventCount;
@@ -805,6 +865,9 @@ struct PreparedPlaybackTransport {
     desiredLoopEnabled = initialLoopEnabled;
     desiredLoopStart = initialLoopEnabled ? initialLoopStart : 0;
     desiredLoopEnd = initialLoopEnabled ? initialLoopEnd : 0;
+    desiredRegionEnabled = initialRegionEnabled;
+    desiredRegionStart = initialRegionStart;
+    desiredRegionEnd = initialRegionEnd;
     callbackState = NativePlaybackTransportState::Stopped;
     callbackProjectFrame = initialProjectFrame;
     callbackProjectFractionQ32 = 0;
@@ -813,6 +876,11 @@ struct PreparedPlaybackTransport {
     callbackLoopEnabled = false;
     callbackLoopStart = 0;
     callbackLoopEnd = 0;
+    callbackRegionEnabled = false;
+    callbackRegionStart = callbackRegionEnd = 0;
+    callbackRegionStopArmed = false;
+    callbackStoppedByRegion = false;
+    callbackRunStartFrame = landingProjectFrame > 0 ? landingProjectFrame : initialProjectFrame;
     callbackRouteGeneration = 0;
     callbackStreamGeneration = 0;
     callbackHostIdentityValid = false;
@@ -846,10 +914,23 @@ struct PreparedPlaybackTransport {
     return true;
   }
 
-  bool hasCommandCapacity() const noexcept {
+  bool hasCommandCapacity(uint32_t count = 1) const noexcept {
     const uint32_t write = commandWrite.load(std::memory_order_relaxed);
     const uint32_t read = commandRead.load(std::memory_order_acquire);
-    return write - read < kCommandCapacity;
+    return count <= kCommandCapacity && write - read <= kCommandCapacity - count;
+  }
+
+  void reconcileRegionPause() noexcept {
+    if (desiredState != NativePlaybackTransportState::Playing &&
+        desiredState != NativePlaybackTransportState::PreRoll) return;
+    const uint32_t consumed = commandRead.load(std::memory_order_acquire);
+    if (consumed != commandWrite.load(std::memory_order_acquire)) return;
+    Telemetry paused{};
+    // A callback may drain Resume before publishing its next state. Its old
+    // paused telemetry must not overwrite that newer desired Play intent.
+    if (snapshotTelemetry(&paused) && paused.commandsApplied == consumed &&
+        paused.state == NativePlaybackTransportState::Paused && paused.stoppedByRegion)
+      desiredState = NativePlaybackTransportState::Paused;
   }
 
   int64_t resolvedSeekFrame(int64_t projectFrame) const noexcept {
@@ -868,11 +949,16 @@ struct PreparedPlaybackTransport {
             ? NativePlaybackTransportState::Paused
             : (initialProjectFrame < 0 ? NativePlaybackTransportState::PreRoll
                                        : NativePlaybackTransportState::Playing);
-    if (!enqueue({generation, PlaybackTransportCommandKind::Start, state,
+    PlaybackTransportCommand command{generation, PlaybackTransportCommandKind::Start, state,
                   initialProjectFrame,
                   initialLoopEnabled ? initialLoopStart : 0,
                   initialLoopEnabled ? initialLoopEnd : 0,
-                  initialTimePitchLoopPlan}))
+                  initialTimePitchLoopPlan};
+    command.regionEnabled = initialRegionEnabled;
+    command.regionStart = initialRegionStart;
+    command.regionEnd = initialRegionEnd;
+    command.regionStopArmed = initialRegionStopArmed;
+    if (!enqueue(command))
       return false;
     desiredState = state;
     return true;
@@ -940,6 +1026,20 @@ struct PreparedPlaybackTransport {
     desiredLoopEnabled = true;
     desiredLoopStart = startFrame;
     desiredLoopEnd = endFrame;
+    desiredRegionEnabled = true;
+    desiredRegionStart = startFrame;
+    desiredRegionEnd = endFrame;
+    return true;
+  }
+
+  bool setRegion(int64_t startFrame, int64_t endFrame) noexcept {
+    if (!enqueue({generation, PlaybackTransportCommandKind::SetRegion,
+                  desiredState, 0, startFrame, endFrame})) return false;
+    desiredLoopEnabled = false;
+    desiredLoopStart = desiredLoopEnd = 0;
+    desiredRegionEnabled = true;
+    desiredRegionStart = startFrame;
+    desiredRegionEnd = endFrame;
     return true;
   }
 
@@ -950,6 +1050,8 @@ struct PreparedPlaybackTransport {
     desiredLoopEnabled = false;
     desiredLoopStart = 0;
     desiredLoopEnd = 0;
+    desiredRegionEnabled = false;
+    desiredRegionStart = desiredRegionEnd = 0;
     return true;
   }
 
@@ -1027,6 +1129,12 @@ struct PreparedPlaybackTransport {
         callbackProjectFrame = command.projectFrame;
         callbackProjectFractionQ32 = 0;
         callbackState = command.state;
+        callbackRegionEnabled = command.regionEnabled;
+        callbackRegionStart = command.regionStart;
+        callbackRegionEnd = command.regionEnd;
+        callbackRegionStopArmed = command.regionStopArmed;
+        callbackStoppedByRegion = false;
+        callbackRunStartFrame = landingProjectFrame > 0 ? landingProjectFrame : command.projectFrame;
         callbackLoopEnabled = command.loopEndFrame > command.loopStartFrame;
         callbackLoopStart = callbackLoopEnabled ? command.loopStartFrame : 0;
         callbackLoopEnd = callbackLoopEnabled ? command.loopEndFrame : 0;
@@ -1041,16 +1149,23 @@ struct PreparedPlaybackTransport {
         break;
       case PlaybackTransportCommandKind::Pause:
         callbackState = NativePlaybackTransportState::Paused;
+        callbackRunStartFrame = callbackProjectFrame;
         callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
         break;
       case PlaybackTransportCommandKind::Resume:
+        callbackStoppedByRegion = false;
         callbackState = command.state;
+        callbackRunStartFrame = landingPending ? landingProjectFrame : callbackProjectFrame;
+        callbackRegionStopArmed = callbackRegionEnabled && !callbackLoopEnabled && callbackRunStartFrame < callbackRegionEnd;
         callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
         break;
       case PlaybackTransportCommandKind::Seek: {
+        callbackStoppedByRegion = false;
         const bool cancelsLanding = landingPending;
         callbackProjectFrame = command.projectFrame;
         callbackProjectFractionQ32 = 0;
+        callbackRunStartFrame = command.projectFrame;
+        callbackRegionStopArmed = callbackRegionEnabled && !callbackLoopEnabled && callbackRunStartFrame < callbackRegionEnd;
         pendingSourcePositionMoved = true;
         landingPending = false;
         callbackState = command.state;
@@ -1088,6 +1203,10 @@ struct PreparedPlaybackTransport {
         break;
       }
       case PlaybackTransportCommandKind::SetLoop:
+        callbackRegionEnabled = true;
+        callbackRegionStart = command.loopStartFrame;
+        callbackRegionEnd = command.loopEndFrame;
+        callbackRegionStopArmed = false;
         callbackLoopEnabled = true;
         callbackLoopStart = command.loopStartFrame;
         callbackLoopEnd = command.loopEndFrame;
@@ -1095,7 +1214,19 @@ struct PreparedPlaybackTransport {
           (void)activateSignalsmithTimePitchLoop(timePitchProcessor,
                                                  command.loopPlan);
         break;
+      case PlaybackTransportCommandKind::SetRegion:
+        callbackRegionEnabled = true;
+        callbackRegionStart = command.loopStartFrame;
+        callbackRegionEnd = command.loopEndFrame;
+        callbackRegionStopArmed = callbackRunStartFrame < callbackRegionEnd;
+        callbackLoopEnabled = false;
+        callbackLoopStart = callbackLoopEnd = 0;
+        deactivateSignalsmithTimePitchLoop(timePitchProcessor);
+        break;
       case PlaybackTransportCommandKind::ClearLoop:
+        callbackRegionEnabled = false;
+        callbackRegionStart = callbackRegionEnd = 0;
+        callbackRegionStopArmed = false;
         callbackLoopEnabled = false;
         callbackLoopStart = 0;
         callbackLoopEnd = 0;
@@ -1303,6 +1434,12 @@ struct PreparedPlaybackTransport {
         out.frame = wrappedLoopFrame(out.frame, from.loopStart, from.loopEnd);
         continue;
       }
+      if (from.regionStopArmed && !from.loopEnabled && out.frame >= from.regionEnd) {
+        out.frame = from.regionEnd;
+        out.fractionQ32 = 0;
+        advancing = false;
+        break;
+      }
       if (out.frame >= durationFrames) {
         advancing = false;
         break;
@@ -1316,6 +1453,8 @@ struct PreparedPlaybackTransport {
       int64_t boundary = durationFrames;
       if (from.loopEnabled && out.frame < from.loopEnd)
         boundary = std::min(boundary, from.loopEnd);
+      if (from.regionStopArmed && !from.loopEnabled)
+        boundary = std::min(boundary, from.regionEnd);
       if (landingAhead)
         boundary = std::min<int64_t>(boundary, 0);
       const uint32_t chunk = static_cast<uint32_t>(
@@ -1337,6 +1476,10 @@ struct PreparedPlaybackTransport {
         out.frame = landingProjectFrame;
         out.fractionQ32 = 0;
       }
+    }
+    if (from.regionStopArmed && !from.loopEnabled && out.frame >= from.regionEnd) {
+      out.frame = from.regionEnd;
+      out.fractionQ32 = 0;
     }
     out.valid = out.valid && (!advancing || remaining == 0);
     if (out.valid && landLoopEnabled && landLoopEnd > landLoopStart &&
@@ -1457,6 +1600,12 @@ struct PreparedPlaybackTransport {
     callbackDiscontinuities = from.callbackDiscontinuities;
     callbackLastBoundary = from.callbackLastBoundary;
     callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
+    callbackRegionEnabled = initialRegionEnabled;
+    callbackRegionStart = initialRegionStart;
+    callbackRegionEnd = initialRegionEnd;
+    callbackRunStartFrame = from.callbackRunStartFrame;
+    callbackStoppedByRegion = from.callbackStoppedByRegion;
+    callbackRegionStopArmed = callbackRegionEnabled && !initialLoopEnabled && callbackRunStartFrame < callbackRegionEnd;
     callbackLoopEnabled = initialLoopEnabled;
     callbackLoopStart = initialLoopEnabled ? initialLoopStart : 0;
     callbackLoopEnd = initialLoopEnabled ? initialLoopEnd : 0;
@@ -1611,6 +1760,15 @@ struct PreparedPlaybackTransport {
       }
       wrapAtLoopBoundary();
     }
+    if (running && callbackRegionStopArmed && !callbackLoopEnabled && callbackProjectFrame >= callbackRegionEnd) {
+      callbackProjectFrame = callbackRegionEnd;
+      callbackProjectFractionQ32 = 0;
+      callbackState = NativePlaybackTransportState::Paused;
+      callbackStoppedByRegion = true;
+      callbackRunStartFrame = callbackRegionEnd;
+      callbackRegionStopArmed = false;
+      callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
+    }
     if ((callbackState == NativePlaybackTransportState::Playing ||
          callbackState == NativePlaybackTransportState::PreRoll) &&
         callbackProjectFrame >= durationFrames) {
@@ -1631,6 +1789,8 @@ struct PreparedPlaybackTransport {
       int64_t boundary = durationFrames;
       if (callbackLoopEnabled && callbackProjectFrame < callbackLoopEnd)
         boundary = std::min(boundary, callbackLoopEnd);
+      if (callbackRegionStopArmed && !callbackLoopEnabled)
+        boundary = std::min(boundary, callbackRegionEnd);
       if (landingPending && callbackProjectFrame < 0)
         boundary = std::min<int64_t>(boundary, 0);
       if (callbackProjectFrame < boundary) {
@@ -1676,7 +1836,15 @@ struct PreparedPlaybackTransport {
       callbackState = callbackProjectFrame < 0
                           ? NativePlaybackTransportState::PreRoll
                           : NativePlaybackTransportState::Playing;
-      if (!callbackLoopEnabled && callbackProjectFrame >= durationFrames)
+      if (callbackRegionStopArmed && !callbackLoopEnabled && callbackProjectFrame >= callbackRegionEnd) {
+        callbackProjectFrame = callbackRegionEnd;
+        callbackProjectFractionQ32 = 0;
+        callbackState = NativePlaybackTransportState::Paused;
+        callbackStoppedByRegion = true;
+        callbackRunStartFrame = callbackRegionEnd;
+        callbackRegionStopArmed = false;
+        callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
+      } else if (!callbackLoopEnabled && callbackProjectFrame >= durationFrames)
         callbackState = NativePlaybackTransportState::Completed;
       if (callbackState == NativePlaybackTransportState::Completed)
         callbackProjectionAnchorContinuousFrame = callbackContinuousFrame;
@@ -2450,6 +2618,7 @@ struct PreparedPlaybackGraph {
                             preparedGraphDocument,
                         double sampleRate, uint32_t outputChannels,
                         uint32_t maximumFrames, float initialMaster,
+                        std::optional<float> initialReference,
                         double rate, double transpose,
                         int64_t startProjectFrame,
                         NativePlaybackInitialTransportConfig initialTransport,
@@ -2463,6 +2632,7 @@ struct PreparedPlaybackGraph {
         transposeSemitones(transpose),
         preparedStartProjectFrame(startProjectFrame),
         initialTransport(std::move(initialTransport)), testHooks(hooks) {
+    referenceGainIntent=initialReference.value_or(cuePlan==nullptr?0.F:cuePlan->volume);
     (void)rateToQ32(rate, &playbackRateQ32);
     timePitchCorrectionSemitones = static_cast<float>(
         transpose - 12.0 * std::log2(rate));
@@ -2538,6 +2708,8 @@ struct PreparedPlaybackGraph {
   float masterGain{1.0F};
   float masterGraphTrim{1.0F};
   uint64_t masterGainNodeId{0};
+  float referenceGainIntent{0.F},referenceGraphTrim{1.F};
+  uint64_t referenceGainNodeId{0};
   std::shared_ptr<const PlaybackCuePlan> cuePlan;
   std::optional<NativePlaybackTrainingDuckConfig> training;
   std::optional<NativePlaybackGraphDocument> graphDocument;
@@ -2836,7 +3008,7 @@ struct PreparedPlaybackGraph {
     graphContext.hasTraining = training.has_value();
     graphContext.needsTimePitch = hasTimePitch;
     graphContext.masterGain = masterGain;
-    graphContext.referenceGain = cuePlan == nullptr ? 0.0F : cuePlan->volume;
+    graphContext.referenceGain = referenceGainIntent;
     graphContext.lanes.reserve(lanes.size());
     for (const Lane &lane : lanes)
       graphContext.lanes.push_back(
@@ -3183,7 +3355,8 @@ struct PreparedPlaybackGraph {
             value0 = masterGain * trim;
           } else if (value.binding.has_value() &&
                      value.binding->kind == "reference-gain") {
-            value0 = (cuePlan == nullptr ? 0.0F : cuePlan->volume) * trim;
+            referenceGainNodeId=value.id;referenceGraphTrim=trim;
+            value0 = referenceGainIntent * trim;
             referenceGain = value0;
           }
           flags = zdsp::GraphNodeFlagMayProcessInPlace;
@@ -3657,7 +3830,7 @@ struct PreparedPlaybackGraph {
       addConfig(zdsp::BuiltinNodeKind::ChannelMap, kCueMapNode, 1, 1, 0.0F);
       finalConfigs[2].channelMatrix = cueMatrix.data();
       addConfig(zdsp::BuiltinNodeKind::Gain, kReferenceGainNode, outputChannels,
-                1, cuePlan->volume);
+                1, referenceGainIntent);
       addConfig(zdsp::BuiltinNodeKind::Mix, kOutputMixNode, outputChannels, 2,
                 0.0F);
       addConfig(zdsp::BuiltinNodeKind::Gain, kOutputGainNode, outputChannels, 1,
@@ -3676,7 +3849,8 @@ struct PreparedPlaybackGraph {
         return {zdsp::StatusCode::InsufficientStorage, 5};
     }
     masterProcessor = finalProcessors[1];
-    referenceGain = hasReference ? cuePlan->volume : 0.0F;
+    referenceGain = hasReference ? referenceGainIntent : 0.0F;
+    masterGainNodeId=kSongGainNode;referenceGainNodeId=hasReference?kReferenceGainNode:0;
     if (hasTimePitch) {
       const SignalsmithTimePitchConfig timePitchConfig{
           {kTimePitchNode}, {sampleRate}, outputChannels, maximumFrames,
@@ -4010,6 +4184,18 @@ struct PreparedPlaybackGraph {
   bool enqueueMaster(float value) noexcept {
     return masterGainNodeId != 0 &&
            enqueueGain({masterGainNodeId}, value * masterGraphTrim);
+  }
+
+  bool enqueueOutputGains(float song,float reference) noexcept {
+    if(masterGainNodeId==0 || (referenceGainNodeId==0 && reference!=0.F))return false;
+    std::array<zdsp::ParameterEvent,2> events{{
+      {{masterGainNodeId},zdsp::kGainParameter,{0},song*masterGraphTrim,zdsp::ParameterCurve::Linear,{kNativePlaybackGainRampFrames}},
+      {{referenceGainNodeId},zdsp::kGainParameter,{0},reference*referenceGraphTrim,zdsp::ParameterCurve::Linear,{kNativePlaybackGainRampFrames}}
+    }};
+    if(!parameters.pushBatch(events.data(),referenceGainNodeId?2:1)){
+      diagnostics.parameterOverflows.fetch_add(1,std::memory_order_relaxed);return false;
+    }
+    referenceGainIntent=reference;referenceGain=reference*referenceGraphTrim;return true;
   }
 
   bool enqueueTrainingEnabled(bool enabled) noexcept {
@@ -5905,6 +6091,7 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
       std::floor(config.requestedSampleRate) != config.requestedSampleRate ||
       config.maximumFrames == 0 || config.maximumFrames > kAudioHostMaxFrames ||
       !finiteGain(config.masterGain) ||
+      (config.referenceGainOverride.has_value() && (!finiteGain(*config.referenceGainOverride) || (!config.cuePlan && *config.referenceGainOverride!=0.F))) ||
       !rateToQ32(config.playbackRate, &preparedPlaybackRateQ32) ||
       !std::isfinite(config.transposeSemitones) ||
       config.transposeSemitones < -24.0 ||
@@ -6408,12 +6595,21 @@ NativePlaybackSession::prepare(NativePlaybackPrepareConfig config,
     }
   }
 
+  if (config.initialTransport.region) {
+    const auto& region = *config.initialTransport.region;
+    if (region.startProjectFrame < 0 || region.endProjectFrame <= region.startProjectFrame || region.endProjectFrame > finalProjectDuration ||
+        (config.initialTransport.loop && (config.initialTransport.loop->startProjectFrame != region.startProjectFrame || config.initialTransport.loop->endProjectFrame != region.endProjectFrame))) {
+      return failPreparation(NativePlaybackError::InvalidConfiguration,
+                             "The prepared playback region is invalid or differs from its loop");
+    }
+  }
+
   auto prepared = std::make_unique<PreparedPlaybackGraph>(
       std::move(decoded), std::move(cuePlan), config.trainingDuck,
       std::move(config.graphDocument),
       config.requestedSampleRate,
       static_cast<uint32_t>(config.outputChannels.size()), config.maximumFrames,
-      config.masterGain, config.playbackRate, config.transposeSemitones,
+      config.masterGain, config.referenceGainOverride, config.playbackRate, config.transposeSemitones,
       preparedStartProjectFrame,
       config.initialTransport, generation, impl_->testHooks);
   prepared->laneDecodeFallback = laneDecodeFallback;
@@ -7484,11 +7680,34 @@ NativePlaybackResult NativePlaybackSession::resume(uint64_t generation) {
   if (!impl_->currentForCommand(generation))
     return failure(NativePlaybackError::InvalidGeneration, generation,
                    impl_->state, "The playback generation is stale");
+  PreparedPlaybackTransport::Telemetry resumeAnchor{};
+  const bool stoppedRegion = impl_->state == NativePlaybackState::Running &&
+      impl_->prepared->transport.snapshotTelemetry(&resumeAnchor) &&
+      resumeAnchor.state == NativePlaybackTransportState::Paused && resumeAnchor.stoppedByRegion;
+  if (impl_->state == NativePlaybackState::Running)
+    impl_->prepared->transport.reconcileRegionPause();
   if (impl_->state != NativePlaybackState::Running ||
-      impl_->prepared->transport.desiredState !=
-          NativePlaybackTransportState::Paused) {
+      impl_->prepared->transport.desiredState != NativePlaybackTransportState::Paused)
     return failure(NativePlaybackError::InvalidState, generation, impl_->state,
                    "Native playback is not paused");
+  if (stoppedRegion && impl_->prepared->timePitchProcessor.state != nullptr) {
+    // A live resize may have clamped backwards, or a fractional-rate stop may
+    // have rounded to its exact endpoint. Prime the actual resume position off
+    // RT. Respect any newer queued UI seek rather than overwriting its target.
+    impl_->prepared->transport.overlayQueuedPositionIntent(&resumeAnchor);
+    resumeAnchor.projectFrame = impl_->prepared->transport.resolvedSeekFrame(resumeAnchor.projectFrame);
+    if (!impl_->prepared->transport.hasCommandCapacity(2))
+      return failure(NativePlaybackError::QueueFull, generation, impl_->state,
+                     "The bounded transport command mailbox is full");
+    const auto primed = impl_->prepared->primeTimePitchSeekPlan(resumeAnchor.projectFrame);
+    if (!primed.ok)
+      return failure(NativePlaybackError::QueueFull, generation, impl_->state,
+                     "The playback resume anchor pool is full");
+    if (!impl_->prepared->transport.seek(resumeAnchor.projectFrame, primed.plan)) {
+      discardSignalsmithTimePitchSeekPlan(impl_->prepared->timePitchProcessor, primed.plan);
+      return failure(NativePlaybackError::QueueFull, generation, impl_->state,
+                     "The bounded transport command mailbox is full");
+    }
   }
   if (!impl_->prepared->transport.resume())
     return failure(NativePlaybackError::QueueFull, generation, impl_->state,
@@ -7509,6 +7728,7 @@ NativePlaybackResult NativePlaybackSession::seek(uint64_t generation,
     return failure(NativePlaybackError::InvalidConfiguration, generation,
                    impl_->state, "The absolute playback seek is invalid");
   }
+  impl_->prepared->transport.reconcileRegionPause();
   if (!impl_->prepared->transport.hasCommandCapacity())
     return failure(NativePlaybackError::QueueFull, generation, impl_->state,
                    "The bounded transport command mailbox is full");
@@ -7549,6 +7769,7 @@ NativePlaybackResult NativePlaybackSession::setLoop(uint64_t generation,
     return failure(NativePlaybackError::InvalidConfiguration, generation,
                    impl_->state, "The playback loop region is invalid");
   }
+  impl_->prepared->transport.reconcileRegionPause();
   if (!impl_->prepared->transport.hasCommandCapacity())
     return failure(NativePlaybackError::QueueFull, generation, impl_->state,
                    "The bounded transport command mailbox is full");
@@ -7571,6 +7792,38 @@ NativePlaybackResult NativePlaybackSession::setLoop(uint64_t generation,
   return impl_->success(generation);
 }
 
+NativePlaybackResult NativePlaybackSession::setRegion(uint64_t generation,
+                                                      int64_t startFrame,
+                                                      int64_t endFrame,
+                                                      bool looping) {
+  if (looping) return setLoop(generation, startFrame, endFrame);
+  impl_->releaseParkedLanes();
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->refreshTerminalState();
+  if (!impl_->currentForCommand(generation))
+    return failure(NativePlaybackError::InvalidGeneration, generation, impl_->state,
+                   "The playback generation is stale");
+  if (impl_->state != NativePlaybackState::Running || startFrame < 0 || endFrame <= startFrame ||
+      static_cast<uint64_t>(endFrame) > impl_->prepared->durationFrames)
+    return failure(NativePlaybackError::InvalidConfiguration, generation, impl_->state,
+                   "The playback region is invalid");
+  impl_->prepared->transport.reconcileRegionPause();
+  if (!impl_->prepared->transport.hasCommandCapacity())
+    return failure(NativePlaybackError::QueueFull, generation, impl_->state,
+                   "The bounded transport command mailbox is full");
+  if (!impl_->prepared->configureTimePitchLoop(std::nullopt).ok())
+    return failure(NativePlaybackError::GraphFailure, generation, impl_->state,
+                   "The prepared playback loop anchor could not be cleared");
+  if (!impl_->prepared->transport.setRegion(startFrame, endFrame))
+    return failure(NativePlaybackError::QueueFull, generation, impl_->state,
+                   "The bounded transport command mailbox is full");
+  return impl_->success(generation);
+}
+
+NativePlaybackResult NativePlaybackSession::clearRegion(uint64_t generation) {
+  return clearLoop(generation);
+}
+
 NativePlaybackResult NativePlaybackSession::clearLoop(uint64_t generation) {
   impl_->releaseParkedLanes();
   std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -7581,8 +7834,9 @@ NativePlaybackResult NativePlaybackSession::clearLoop(uint64_t generation) {
   if (impl_->state != NativePlaybackState::Running)
     return failure(NativePlaybackError::InvalidState, generation, impl_->state,
                    "Native playback output is not running");
-  if (!impl_->prepared->transport.desiredLoopEnabled)
+  if (!impl_->prepared->transport.desiredLoopEnabled && !impl_->prepared->transport.desiredRegionEnabled)
     return impl_->success(generation);
+  impl_->prepared->transport.reconcileRegionPause();
   if (!impl_->prepared->transport.hasCommandCapacity())
     return failure(NativePlaybackError::QueueFull, generation, impl_->state,
                    "The bounded transport command mailbox is full");
@@ -7993,6 +8247,17 @@ NativePlaybackResult NativePlaybackSession::setMasterGain(uint64_t generation,
   return impl_->success(generation);
 }
 
+NativePlaybackResult NativePlaybackSession::setSongAndReferenceGain(uint64_t generation,float song,float reference) {
+  impl_->releaseParkedLanes();
+  std::lock_guard<std::mutex> lock(impl_->mutex);impl_->refreshTerminalState();
+  if(!impl_->currentForCommand(generation))return failure(NativePlaybackError::InvalidGeneration,generation,impl_->state,"The playback generation is stale");
+  if((impl_->state!=NativePlaybackState::Prepared && impl_->state!=NativePlaybackState::OutputOpen && impl_->state!=NativePlaybackState::Running)||!finiteGain(song)||!finiteGain(reference))return failure(NativePlaybackError::InvalidConfiguration,generation,impl_->state,"The output gains are invalid");
+  if(impl_->prepared->referenceGainNodeId==0 && reference!=0.F)return failure(NativePlaybackError::InvalidConfiguration,generation,impl_->state,"The playback graph has no reference bus");
+  impl_->compactIdleParameters();
+  if(!impl_->prepared->enqueueOutputGains(song,reference))return failure(NativePlaybackError::QueueFull,generation,impl_->state,"The bounded playback parameter queue is full");
+  impl_->prepared->masterGain=song;return impl_->success(generation);
+}
+
 NativePlaybackResult
 NativePlaybackSession::setTrainingEnabled(uint64_t generation, bool enabled) {
   impl_->releaseParkedLanes();
@@ -8254,6 +8519,10 @@ NativePlaybackStatus NativePlaybackSession::status() const {
     result.remainingPreRollFrames = telemetry.remainingPreRoll;
     result.cueEventsCompleted = telemetry.cueEventsCompleted;
     result.nextCueEventIndex = telemetry.nextCueEvent;
+    result.regionEnabled = telemetry.regionEnabled;
+    result.regionStartFrame = telemetry.regionStart;
+    result.regionEndFrame = telemetry.regionEnd;
+    result.regionStopArmed = telemetry.regionStopArmed;
     result.loopEnabled = telemetry.loopEnabled;
     result.loopStartFrame = telemetry.loopStart;
     result.loopEndFrame = telemetry.loopEnd;

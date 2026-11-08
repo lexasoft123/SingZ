@@ -1,0 +1,481 @@
+{
+  "format": 1,
+  "engine": "singz-dsp",
+  "nodes": [
+    {
+      "id": "1",
+      "type": "73696e677a2d64737000000000000001",
+      "typeVersion": 1,
+      "execution": "native",
+      "unavailable": "silence",
+      "ports": {
+        "inputs": [],
+        "outputs": [
+          {
+            "id": "out",
+            "channels": 1
+          }
+        ]
+      },
+      "parameters": {},
+      "binding": {
+        "kind": "project-lane",
+        "laneId": "vocals"
+      }
+    },
+    {
+      "id": "2",
+      "type": "73696e677a2d64737000000000000002",
+      "typeVersion": 1,
+      "execution": "builtin",
+      "unavailable": "silence",
+      "ports": {
+        "inputs": [
+          {
+            "id": "in",
+            "channels": 1
+          }
+        ],
+        "outputs": [
+          {
+            "id": "out",
+            "channels": 2
+          }
+        ]
+      },
+      "parameters": {},
+      "binding": {
+        "kind": "project-lane",
+        "laneId": "vocals"
+      }
+    },
+    {
+      "id": "3",
+      "type": "73696e677a2d64737000000000000003",
+      "typeVersion": 1,
+      "execution": "builtin",
+      "unavailable": "silence",
+      "ports": {
+        "inputs": [
+          {
+            "id": "in",
+            "channels": 2
+          }
+        ],
+        "outputs": [
+          {
+            "id": "out",
+            "channels": 2
+          }
+        ]
+      },
+      "parameters": {
+        "gain": 1
+      },
+      "binding": {
+        "kind": "project-lane",
+        "laneId": "vocals"
+      }
+    },
+    {
+      "id": "4",
+      "type": "73696e677a2d64737000000000000004",
+      "typeVersion": 1,
+      "execution": "builtin",
+      "unavailable": "silence",
+      "ports": {
+        "inputs": [
+          {
+            "id": "lane:vocals",
+            "channels": 2
+          }
+        ],
+        "outputs": [
+          {
+            "id": "out",
+            "channels": 2
+          }
+        ]
+      },
+      "parameters": {}
+    },
+    {
+      "id": "5",
+      "type": "73696e677a2d64737000000000000003",
+      "typeVersion": 1,
+      "execution": "builtin",
+      "unavailable": "silence",
+      "ports": {
+        "inputs": [
+          {
+            "id": "in",
+            "channels": 2
+          }
+        ],
+        "outputs": [
+          {
+            "id": "out",
+            "channels": 2
+          }
+        ]
+      },
+      "parameters": {
+        "gain": 1
+      },
+      "binding": {
+        "kind": "song-master"
+      }
+    },
+    {
+      "id": "6",
+      "type": "73696e677a2d64737000000000000003",
+      "typeVersion": 1,
+      "execution": "builtin",
+      "unavailable": "silence",
+      "ports": {
+        "inputs": [
+          {
+            "id": "in",
+            "channels": 2
+          }
+        ],
+        "outputs": [
+          {
+            "id": "out",
+            "channels": 2
+          }
+        ]
+      },
+      "parameters": {
+        "gain": 0.5
+      }
+    },
+    {
+      "id": "7",
+      "type": "73696e677a2d6473700000000000000b",
+      "typeVersion": 1,
+      "execution": "builtin",
+      "unavailable": "silence",
+      "ports": {
+        "inputs": [
+          {
+            "id": "in",
+            "channels": 2
+          }
+        ],
+        "outputs": [
+          {
+            "id": "out",
+            "channels": 2
+          }
+        ]
+      },
+      "parameters": {
+        "ceiling": 0.89
+      }
+    },
+    {
+      "id": "8",
+      "type": "73696e677a2d6473700000000000000c",
+      "typeVersion": 1,
+      "execution": "native",
+      "unavailable": "silence",
+      "ports": {
+        "inputs": [
+          {
+            "id": "in",
+            "channels": 2
+          }
+        ],
+        "outputs": []
+      },
+      "parameters": {},
+      "binding": {
+        "kind": "project-output"
+      }
+    },
+    {
+      "id": "9",
+      "type": "73696e677a2d64737000000000000007",
+      "typeVersion": 1,
+      "execution": "native",
+      "unavailable": "silence",
+      "ports": {
+        "inputs": [],
+        "outputs": [
+          {
+            "id": "out",
+            "channels": 1
+          }
+        ]
+      },
+      "parameters": {},
+      "binding": {
+        "kind": "reference-cues"
+      }
+    },
+    {
+      "id": "10",
+      "type": "73696e677a2d64737000000000000002",
+      "typeVersion": 1,
+      "execution": "builtin",
+      "unavailable": "silence",
+      "ports": {
+        "inputs": [
+          {
+            "id": "in",
+            "channels": 1
+          }
+        ],
+        "outputs": [
+          {
+            "id": "out",
+            "channels": 2
+          }
+        ]
+      },
+      "parameters": {},
+      "binding": {
+        "kind": "reference-map"
+      }
+    },
+    {
+      "id": "11",
+      "type": "73696e677a2d64737000000000000003",
+      "typeVersion": 1,
+      "execution": "builtin",
+      "unavailable": "silence",
+      "ports": {
+        "inputs": [
+          {
+            "id": "in",
+            "channels": 2
+          }
+        ],
+        "outputs": [
+          {
+            "id": "out",
+            "channels": 2
+          }
+        ]
+      },
+      "parameters": {
+        "gain": 1
+      },
+      "binding": {
+        "kind": "reference-gain"
+      }
+    },
+    {
+      "id": "12",
+      "type": "73696e677a2d64737000000000000004",
+      "typeVersion": 1,
+      "execution": "builtin",
+      "unavailable": "silence",
+      "ports": {
+        "inputs": [
+          {
+            "id": "song",
+            "channels": 2
+          },
+          {
+            "id": "reference",
+            "channels": 2
+          }
+        ],
+        "outputs": [
+          {
+            "id": "out",
+            "channels": 2
+          }
+        ]
+      },
+      "parameters": {}
+    },
+    {
+      "id": "13",
+      "type": "73696e677a2d64737000000000000003",
+      "typeVersion": 1,
+      "execution": "builtin",
+      "unavailable": "silence",
+      "ports": {
+        "inputs": [
+          {
+            "id": "in",
+            "channels": 2
+          }
+        ],
+        "outputs": [
+          {
+            "id": "out",
+            "channels": 2
+          }
+        ]
+      },
+      "parameters": {
+        "gain": 1
+      },
+      "binding": {
+        "kind": "output-gain"
+      }
+    },
+    {
+      "id": "14",
+      "type": "73696e677a2d64737000000000000006",
+      "typeVersion": 1,
+      "execution": "native",
+      "unavailable": "silence",
+      "ports": {
+        "inputs": [
+          {
+            "id": "in",
+            "channels": 2
+          }
+        ],
+        "outputs": [
+          {
+            "id": "out",
+            "channels": 2
+          }
+        ]
+      },
+      "parameters": {}
+    }
+  ],
+  "connections": [
+    {
+      "from": {
+        "node": "1",
+        "port": "out"
+      },
+      "to": {
+        "node": "2",
+        "port": "in"
+      }
+    },
+    {
+      "from": {
+        "node": "2",
+        "port": "out"
+      },
+      "to": {
+        "node": "3",
+        "port": "in"
+      }
+    },
+    {
+      "from": {
+        "node": "3",
+        "port": "out"
+      },
+      "to": {
+        "node": "4",
+        "port": "lane:vocals"
+      }
+    },
+    {
+      "from": {
+        "node": "4",
+        "port": "out"
+      },
+      "to": {
+        "node": "5",
+        "port": "in"
+      }
+    },
+    {
+      "from": {
+        "node": "5",
+        "port": "out"
+      },
+      "to": {
+        "node": "14",
+        "port": "in"
+      }
+    },
+    {
+      "from": {
+        "node": "6",
+        "port": "out"
+      },
+      "to": {
+        "node": "12",
+        "port": "song"
+      }
+    },
+    {
+      "from": {
+        "node": "9",
+        "port": "out"
+      },
+      "to": {
+        "node": "10",
+        "port": "in"
+      }
+    },
+    {
+      "from": {
+        "node": "10",
+        "port": "out"
+      },
+      "to": {
+        "node": "11",
+        "port": "in"
+      }
+    },
+    {
+      "from": {
+        "node": "11",
+        "port": "out"
+      },
+      "to": {
+        "node": "12",
+        "port": "reference"
+      }
+    },
+    {
+      "from": {
+        "node": "12",
+        "port": "out"
+      },
+      "to": {
+        "node": "13",
+        "port": "in"
+      }
+    },
+    {
+      "from": {
+        "node": "13",
+        "port": "out"
+      },
+      "to": {
+        "node": "7",
+        "port": "in"
+      }
+    },
+    {
+      "from": {
+        "node": "7",
+        "port": "out"
+      },
+      "to": {
+        "node": "8",
+        "port": "in"
+      }
+    },
+    {
+      "from": {
+        "node": "14",
+        "port": "out"
+      },
+      "to": {
+        "node": "6",
+        "port": "in"
+      }
+    }
+  ],
+  "opaque": {
+    "retain": "exact original graph bytes",
+    "futureNumber": 123456789012345678901234567890
+  }
+}

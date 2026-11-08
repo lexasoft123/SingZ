@@ -7,8 +7,12 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-const COLORS: [u32; 6] = [0xff5c65, 0xffc53d, 0x527dff, 0xf98424, 0xda81da, 0x27e7bb];
 const PAD: f32 = 4.;
+thread_local! {static PROJECT_PEAKS: RefCell<Option<[Vec<f32>;crate::tracks::LANE_SLOTS]>> = const {RefCell::new(None)};}
+pub fn set_project_peaks(peaks: [Vec<f32>; crate::tracks::LANE_SLOTS]) {
+    PROJECT_PEAKS.with_borrow_mut(|p| *p = Some(peaks));
+    LAYERS.with_borrow_mut(|layers| *layers = std::array::from_fn(|_|None));
+}
 static PEAKS: OnceLock<[Vec<f32>; 6]> = OnceLock::new();
 
 fn peaks() -> &'static [Vec<f32>; 6] {
@@ -30,6 +34,7 @@ fn peaks() -> &'static [Vec<f32>; 6] {
 }
 
 struct Layers {
+    color: u32,
     key: (u32, u32, u32, u8, u32, u32),
     base: Arc<RenderImage>,
     bright: Arc<RenderImage>,
@@ -38,7 +43,7 @@ struct Layers {
 }
 thread_local! {
     // One current size/state per lane; resizing or fading cannot grow this cache.
-    static LAYERS: RefCell<[Option<Layers>; 6]> = const { RefCell::new([None,None,None,None,None,None]) };
+    static LAYERS: RefCell<[Option<Layers>; crate::tracks::LANE_SLOTS]> = const { RefCell::new([const {None};crate::tracks::LANE_SLOTS]) };
 }
 
 fn filtered_rgb(color: u32, saturation: f32, brightness: f32) -> [u8; 3] {
@@ -70,7 +75,8 @@ fn mask(
         (width as f32 * dpr).round() as u32 + pad * 2,
         (height as f32 * dpr).round() as u32 + pad * 2,
     );
-    let envelope = &peaks()[index];
+    let project = PROJECT_PEAKS.with_borrow(|p| p.as_ref().map(|p| p[index].clone()));
+    let envelope = project.as_ref().unwrap_or_else(|| &peaks()[index.min(5)]);
     let mid = height as f32 / 2.;
     let amplitude = mid - 2.;
     for x in 0..width {
@@ -148,6 +154,7 @@ fn normalized_view(start: f32, end: f32) -> (f32, f32) {
 /// The normalized view selects the same interval from the immutable peak envelope.
 pub fn paint(
     index: usize,
+    color: u32,
     position: f32,
     duration: f32,
     fade: f32,
@@ -157,7 +164,7 @@ pub fn paint(
     view_start: f32,
     view_end: f32,
 ) {
-    if index >= 6 || bounds.size.width <= px(0.) || bounds.size.height <= px(0.) {
+    if index >= crate::tracks::LANE_SLOTS || bounds.size.width <= px(0.) || bounds.size.height <= px(0.) {
         return;
     }
     let (view_start, view_end) = normalized_view(view_start, view_end);
@@ -176,6 +183,7 @@ pub fn paint(
     );
     LAYERS.with_borrow_mut(|cache| {
         if cache[index].as_ref().is_none_or(|layers| {
+            layers.color != color ||
             (
                 layers.key.0,
                 layers.key.1,
@@ -188,18 +196,19 @@ pub fn paint(
             let blur = image::imageops::blur(&mask, 2. * dpr);
             let t = fade_step as f32 / 64.;
             cache[index] = Some(Layers {
+                color,
                 key,
                 base: texture(
                     &mask,
                     &blur,
-                    filtered_rgb(COLORS[index], 1.15, 0.65),
+                    filtered_rgb(color, 1.15, 0.65),
                     0.2,
                     0.1 + 0.9 * t,
                 ),
                 bright: texture(
                     &mask,
                     &blur,
-                    filtered_rgb(COLORS[index], 0.15 + t, 1. + 0.06 * t),
+                    filtered_rgb(color, 0.15 + t, 1. + 0.06 * t),
                     0.26,
                     0.14 + 0.86 * t,
                 ),
@@ -213,14 +222,14 @@ pub fn paint(
             layers.base = texture(
                 &layers.mask,
                 &layers.blur,
-                filtered_rgb(COLORS[index], 1.15, 0.65),
+                filtered_rgb(color, 1.15, 0.65),
                 0.2,
                 0.1 + 0.9 * t,
             );
             layers.bright = texture(
                 &layers.mask,
                 &layers.blur,
-                filtered_rgb(COLORS[index], 0.15 + t, 1. + 0.06 * t),
+                filtered_rgb(color, 0.15 + t, 1. + 0.06 * t),
                 0.26,
                 0.14 + 0.86 * t,
             );

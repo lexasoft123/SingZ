@@ -1,0 +1,483 @@
+"""Pure assembly tests with synthetic headers and injected inspection/signing.
+
+These tests do not establish that fixture bytes are valid loadable Mach-O, that
+codesign worked, or that a packaged application ran. Native qualification is
+separate. Only the Darwin-specific publication test uses the real rename API.
+"""
+import importlib.util
+import hashlib
+import json
+import os
+from pathlib import Path
+import plistlib
+import shutil
+import stat
+import sys
+import tempfile
+import unittest
+
+SCRIPT = Path(__file__).resolve().parents[2] / 'scripts/package-gpui-macos.py'
+SPEC = importlib.util.spec_from_file_location('package_gpui_macos', SCRIPT)
+package = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(package)
+
+
+def test_publish(source, destination):
+    if os.path.lexists(destination):
+        raise package.PackageError('Test destination exists')
+    source.rename(destination)
+
+
+class AssemblyTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='gpui package test ')
+        self.addCleanup(self.temporary.cleanup)
+        self.base = Path(self.temporary.name).resolve()
+        self.runtime = self.base / 'runtime with spaces'
+        self.runtime.mkdir()
+        for name in package.EXECUTABLES:
+            path = self.runtime / name
+            path.write_bytes(bytes.fromhex('cffaedfe') + b'synthetic non-runnable test header')
+            path.chmod(0o755)
+        for directory, names in (('pitch', ('crepe-tiny.bin', 'torchcrepe-LICENSE.txt')),
+                                 ('training-sounds', package.SAMPLES)):
+            target = self.runtime / directory
+            target.mkdir()
+            for name in names:
+                (target / name).write_bytes(b'nonempty test asset')
+        self.output = self.base / 'SingZ Preview.app'
+        self.font_licenses = self.base / 'font notices'
+        self.font_licenses.mkdir()
+        for name in package.FONT_LICENSES:
+            (self.font_licenses / name).write_bytes(('Exact fixture notice: ' + name + '\n').encode())
+        self.commands = []
+
+    def assemble(self, **kwargs):
+        options = dict(version='0.1.2', inspector=lambda _: (['/usr/lib/libSystem.B.dylib'], []),
+                       run=lambda args: self.commands.append(args) or '', publisher=test_publish,
+                       font_license_dir=self.font_licenses)
+        options.update(kwargs)
+        inspect = options['inspector']
+        # Deliberately synthetic deployment metadata; no native inspection claim.
+        def with_metadata(path):
+            result = inspect(path)
+            dependencies, rpaths = result[:2]
+            metadata = result[2] if len(result) == 3 else {'architectures': ['fixture'], 'minimumMacOS': '14.0'}
+            metadata = {'filetype': 'DYLIB' if path.suffix == '.dylib' else 'EXECUTE', **metadata}
+            metadata.setdefault('slices', {architecture: {'dependencies': dependencies, 'rpaths': rpaths,
+                'filetype': metadata['filetype'], 'minimumMacOS': metadata['minimumMacOS']}
+                for architecture in metadata['architectures']})
+            return dependencies, rpaths, metadata
+        options['inspector'] = with_metadata
+        return package.assemble(self.runtime, self.output, **options)
+
+    def assert_clean(self):
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.output.with_name(self.output.name + '.manifest.json').exists())
+        self.assertFalse(list(self.base.glob('.singz-package-*')))
+
+    def test_plist_manifest_and_exact_payload_paths(self):
+        manifest_path = self.assemble()
+        with (self.output / 'Contents/Info.plist').open('rb') as stream:
+            info = plistlib.load(stream)
+        self.assertEqual(info['CFBundleExecutable'], 'singz-gpui-player')
+        self.assertEqual(info['CFBundleIdentifier'], package.BUNDLE_ID)
+        self.assertEqual(info['CFBundleVersion'], '0.1.2')
+        self.assertEqual(info['LSMinimumSystemVersion'], '14.0')
+        self.assertTrue(info['NSHighResolutionCapable'])
+        self.assertIn('microphone', info['NSMicrophoneUsageDescription'])
+        manifest = json.loads(manifest_path.read_text())
+        self.assertFalse(manifest['adHocSigned'])
+        self.assertEqual(len(manifest['machoDependencies']), 4)
+        for record in manifest['files']:
+            payload = self.output / record['path']
+            self.assertEqual(record['sha256'], hashlib.sha256(payload.read_bytes()).hexdigest())
+        for name in package.EXECUTABLES:
+            self.assertTrue((self.output / 'Contents/MacOS' / name).stat().st_mode & 0o111)
+        self.assertTrue((self.output / 'Contents/Resources/pitch/crepe-tiny.bin').is_file())
+        self.assertTrue((self.output / 'Contents/Resources/training-sounds/guitar-C6.mp3').is_file())
+        self.assertFalse((self.output / 'Contents/MacOS/pitch').exists())
+        self.assertFalse((self.output / 'Contents/MacOS/training-sounds').exists())
+        for name in package.FONT_LICENSES:
+            self.assertEqual((self.output / 'Contents/Resources/licenses' / name).read_bytes(), (self.font_licenses / name).read_bytes())
+        self.assertEqual(self.commands, [])
+
+    def test_missing_or_empty_embedded_font_notices_refused(self):
+        for name in package.FONT_LICENSES:
+            with self.subTest(name=name):
+                path = self.font_licenses / name
+                content = path.read_bytes()
+                path.unlink()
+                with self.assertRaisesRegex(package.PackageError, 'font-license-dir'):
+                    self.assemble()
+                self.assert_clean()
+                path.write_bytes(b'')
+                with self.assertRaisesRegex(package.PackageError, 'font-license-dir'):
+                    self.assemble()
+                path.write_bytes(content)
+
+    def test_missing_or_empty_required_assets(self):
+        for relative in ('singz-analyze', 'pitch/crepe-tiny.bin', 'pitch/torchcrepe-LICENSE.txt',
+                         'training-sounds/piano-C2.mp3', 'training-sounds/loudness-calibration.json'):
+            with self.subTest(relative=relative):
+                path = self.runtime / relative
+                content, mode = path.read_bytes(), path.stat().st_mode
+                path.unlink()
+                with self.assertRaises(package.PackageError):
+                    self.assemble()
+                self.assert_clean()
+                path.write_bytes(b'')
+                with self.assertRaises(package.PackageError):
+                    self.assemble()
+                path.write_bytes(content)
+                path.chmod(mode)
+
+    def test_linked_or_special_payload_refused(self):
+        path = self.runtime / 'training-sounds/piano-C2.mp3'
+        path.unlink()
+        outside = self.base / 'foreign.mp3'
+        outside.write_bytes(b'foreign')
+        path.symlink_to(outside)
+        with self.assertRaises(package.PackageError):
+            self.assemble()
+        self.assert_clean()
+        path.unlink()
+        os.mkfifo(path)
+        with self.assertRaises(package.PackageError):
+            self.assemble()
+        self.assert_clean()
+
+    def test_no_overwrite_existing_bundle_or_dangling_manifest(self):
+        self.output.mkdir()
+        marker = self.output / 'keep'
+        marker.write_text('original')
+        with self.assertRaises(package.PackageError):
+            self.assemble()
+        self.assertEqual(marker.read_text(), 'original')
+        shutil.rmtree(self.output)
+        manifest = self.output.with_name(self.output.name + '.manifest.json')
+        manifest.symlink_to(self.base / 'missing')
+        with self.assertRaises(package.PackageError):
+            self.assemble()
+        self.assertTrue(manifest.is_symlink())
+
+    def test_dependency_rejection_cleans_private_staging(self):
+        for dependency in ('/opt/homebrew/lib/libforeign.dylib', '/usr/lib/../../opt/homebrew/x.dylib',
+                           '/System/Library/../../opt/homebrew/x.dylib', '@rpath/missing.dylib', '@loader_path/../../../foreign.dylib'):
+            with self.subTest(dependency=dependency):
+                with self.assertRaisesRegex(package.PackageError, 'dependency'):
+                    self.assemble(inspector=lambda _: ([dependency], []))
+                self.assert_clean()
+
+    def test_explicit_engine_payload_internal_dependency_and_icon(self):
+        engines = self.base / 'engines'
+        engines.mkdir()
+        engine = engines / 'llama-server'
+        engine.write_bytes(bytes.fromhex('cffaedfe') + b'synthetic engine')
+        engine.chmod(0o755)
+        library = engines / 'libengine.dylib'
+        library.write_bytes(bytes.fromhex('cffaedfe') + b'synthetic dylib')
+        icon = self.base / 'existing.icns'
+        icon.write_bytes(b'icns\0\0\0\x08')
+        def inspect(path):
+            return (['@executable_path/libengine.dylib'], []) if path.name == 'llama-server' else ([], [])
+        self.assemble(engines=engines, icon=icon, inspector=inspect)
+        with (self.output / 'Contents/Info.plist').open('rb') as stream:
+            self.assertEqual(plistlib.load(stream)['CFBundleIconFile'], 'SingZ.icns')
+        self.assertEqual((self.output / 'Contents/Resources/SingZ.icns').read_bytes(), icon.read_bytes())
+
+    def test_native_engine_payload_rejects_node_addon_before_publication(self):
+        engines = self.base / 'mixed engines'
+        engines.mkdir()
+        (engines / 'capture.node').write_bytes(bytes.fromhex('cffaedfe') + b'synthetic addon')
+        with self.assertRaisesRegex(package.PackageError, 'provide a pure-native engine payload'):
+            self.assemble(engines=engines)
+        self.assert_clean()
+        self.assertEqual(self.commands, [])
+
+    def test_native_engine_payload_rejects_node_modules_directory(self):
+        engines = self.base / 'mixed engines'
+        (engines / 'node_modules').mkdir(parents=True)
+        (engines / 'node_modules/package.json').write_text('{}')
+        with self.assertRaisesRegex(package.PackageError, 'Node/Electron'):
+            self.assemble(engines=engines)
+        self.assert_clean()
+
+    def test_pure_native_two_cli_engine_payload_and_js_documentation_are_allowed(self):
+        engines = self.base / 'native engines'
+        engines.mkdir()
+        for name in ('llama-server', 'crispasr'):
+            path = engines / name
+            path.write_bytes(bytes.fromhex('cffaedfe') + b'synthetic native executable')
+            path.chmod(0o755)
+        (engines / 'runtime-notes.js').write_text('// documentation, not a Node runtime')
+        manifest = json.loads(self.assemble(engines=engines).read_text())
+        paths = {record['path'] for record in manifest['files']}
+        self.assertTrue({'Contents/Resources/engines/llama-server', 'Contents/Resources/engines/crispasr',
+                         'Contents/Resources/engines/runtime-notes.js'}.issubset(paths))
+        self.assertEqual(self.commands, [])
+
+    @unittest.skipUnless(sys.platform == 'darwin' and all(hasattr(os, name) for name in ('setxattr', 'getxattr', 'listxattr')),
+                         'Actual macOS extended attributes required')
+    def test_assembly_copies_bytes_and_mode_without_source_download_xattrs(self):
+        engines = self.base / 'downloaded native engines'
+        engines.mkdir()
+        engine = engines / 'llama-server'
+        engine.write_bytes(bytes.fromhex('cffaedfe') + b'synthetic native CLI')
+        engine.chmod(0o755)
+        ui = self.runtime / 'singz-gpui-player'
+        asset_directory = self.runtime / 'pitch'
+        asset = asset_directory / 'crepe-tiny.bin'
+        sources = [engines, engine, ui, asset_directory, asset]
+        quarantine = b'0083;00000000;SyntheticPackagingTest;'
+        provenance = b'packager synthetic metadata, not a source byte'
+        for source in sources:
+            os.setxattr(source, 'com.apple.quarantine', quarantine)
+            os.setxattr(source, 'com.singz.packaging.fixture', provenance)
+        manifest = json.loads(self.assemble(engines=engines).read_text())
+        targets = [self.output / 'Contents/Resources/engines',
+                   self.output / 'Contents/Resources/engines/llama-server',
+                   self.output / 'Contents/MacOS/singz-gpui-player',
+                   self.output / 'Contents/Resources/pitch',
+                   self.output / 'Contents/Resources/pitch/crepe-tiny.bin']
+        for source, target in zip(sources, targets):
+            self.assertEqual(os.getxattr(source, 'com.apple.quarantine'), quarantine)
+            self.assertEqual(os.getxattr(source, 'com.singz.packaging.fixture'), provenance)
+            self.assertNotIn('com.apple.quarantine', os.listxattr(target))
+            self.assertNotIn('com.singz.packaging.fixture', os.listxattr(target))
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode), stat.S_IMODE(source.stat().st_mode) & 0o777)
+            if source.is_file():
+                self.assertEqual(target.read_bytes(), source.read_bytes())
+        indexed = {record['path']: record for record in manifest['files']}
+        for target in targets:
+            if target.is_file():
+                self.assertEqual(indexed[target.relative_to(self.output).as_posix()]['sha256'], hashlib.sha256(target.read_bytes()).hexdigest())
+
+    def test_engine_symlink_refused(self):
+        engines = self.base / 'engines'
+        engines.mkdir()
+        (engines / 'escape').symlink_to(self.runtime / 'singz-analyze')
+        with self.assertRaises(package.PackageError):
+            self.assemble(engines=engines)
+        self.assert_clean()
+
+    def test_staging_inside_copied_payload_is_refused_before_copy(self):
+        original = self.output
+        engines = self.base / 'explicit engines'
+        engines.mkdir()
+        (engines / 'payload.txt').write_text('fixture payload')
+        for source in (self.runtime / 'pitch', self.runtime / 'training-sounds', engines):
+            with self.subTest(source=source):
+                nested = source / 'nested output'
+                nested.mkdir()
+                self.output = nested / 'Preview.app'
+                with self.assertRaisesRegex(package.PackageError, 'recursively copied payload'):
+                    self.assemble(engines=engines)
+                self.assertFalse(self.output.exists())
+                self.assertFalse(list(nested.glob('.singz-package-*')))
+        self.output = original
+
+    def test_output_beside_helpers_is_allowed(self):
+        self.output = self.runtime / 'Preview.app'
+        self.assemble()
+        self.assertTrue(self.output.is_dir())
+
+    def test_signing_order_and_failure_cleanup(self):
+        self.assemble(ad_hoc_sign=True)
+        signs = [args for args in self.commands if '--sign' in args]
+        self.assertEqual(len(signs), 4)
+        self.assertTrue(signs[-1][-1].endswith('.app'))
+        self.assertTrue(all('/Contents/MacOS/' in args[-1] for args in signs[:-1]))
+        self.assertFalse(any(args[-1].endswith('/singz-gpui-player') for args in signs))
+        self.assertIn('--verify', self.commands[-1])
+        shutil.rmtree(self.output)
+        self.output.with_name(self.output.name + '.manifest.json').unlink()
+        def fail(_):
+            raise package.PackageError('injected signing failure')
+        with self.assertRaises(package.PackageError):
+            self.assemble(ad_hoc_sign=True, run=fail)
+        self.assert_clean()
+
+    def test_publication_race_preserves_winners_bundle(self):
+        def raced_publish(source, destination):
+            if destination == self.output:
+                destination.mkdir()
+                (destination / 'winner').write_text('other process')
+                raise package.PackageError('injected exclusive publish collision')
+            test_publish(source, destination)
+        with self.assertRaises(package.PackageError):
+            self.assemble(publisher=raced_publish)
+        self.assertEqual((self.output / 'winner').read_text(), 'other process')
+        self.assertFalse(self.output.with_name(self.output.name + '.manifest.json').exists())
+        self.assertFalse(list(self.base.glob('.singz-package-*')))
+
+    def test_manifest_replacement_or_disappearance_does_not_mask_publish_error(self):
+        manifest = self.output.with_name(self.output.name + '.manifest.json')
+        for replace in (True, False):
+            with self.subTest(replace=replace):
+                def publish(source, destination):
+                    if destination == self.output:
+                        if replace:
+                            foreign = self.base / 'foreign-manifest'
+                            foreign.write_text('foreign replacement')
+                            foreign.replace(manifest)
+                        else:
+                            manifest.unlink()
+                        raise package.PackageError('original bundle collision')
+                    test_publish(source, destination)
+                with self.assertRaisesRegex(package.PackageError, 'original bundle collision'):
+                    self.assemble(publisher=publish)
+                if replace:
+                    self.assertEqual(manifest.read_text(), 'foreign replacement')
+                    manifest.unlink()
+                else:
+                    self.assertFalse(manifest.exists())
+                self.assertFalse(self.output.exists())
+
+    def test_minimum_os_is_maximum_of_actual_inspection_results(self):
+        def inspect(path):
+            return [], [], {'architectures': ['fixture'], 'minimumMacOS': '15.2' if path.name == 'singz-gpui-input' else '14.5'}
+        self.assemble(inspector=inspect)
+        with (self.output / 'Contents/Info.plist').open('rb') as stream:
+            self.assertEqual(plistlib.load(stream)['LSMinimumSystemVersion'], '15.2')
+
+    def test_incompatible_helper_architecture_refused(self):
+        def inspect(path):
+            return [], [], {'architectures': ['x86_64'] if path.name == 'singz-gpui-input' else ['arm64'], 'minimumMacOS': '14.0'}
+        with self.assertRaisesRegex(package.PackageError, 'architectures'):
+            self.assemble(inspector=inspect)
+        self.assert_clean()
+
+    def test_otool_parser_records_target_rpaths_and_excludes_dylib_id(self):
+        calls = []
+        def run(args):
+            calls.append(args)
+            flag = args[3] if args[0].endswith('/otool') else args[1]
+            return {
+                '-D': 'fixture:\n@rpath/libfixture.dylib\n',
+                '-L': 'fixture:\n\t@rpath/libfixture.dylib (compatibility version 1.0.0, current version 1.0.0)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1.0.0)\n',
+                '-l': 'cmd LC_BUILD_VERSION\ncmdsize 32\nplatform 1\nminos 13.5\nsdk 15.0\ncmd LC_RPATH\ncmdsize 32\npath @loader_path (offset 12)\n',
+                '-archs': 'arm64 x86_64\n',
+                '-hv': 'fixture:\n magic cputype cpusubtype caps filetype ncmds sizeofcmds flags\n MH_MAGIC_64 ARM64 ALL 0x00 DYLIB 12 1024 NOUNDEFS\n',
+            }[flag]
+        dependencies, rpaths, metadata = package.inspect_dependencies(Path('fixture'), run)
+        self.assertEqual(dependencies, ['/usr/lib/libSystem.B.dylib'])
+        self.assertEqual(rpaths, ['@loader_path'])
+        self.assertEqual(metadata['architectures'], ['arm64', 'x86_64'])
+        self.assertEqual(metadata['minimumMacOS'], '13.5')
+        self.assertEqual(metadata['filetype'], 'DYLIB')
+        self.assertEqual(set(metadata['slices']), {'arm64', 'x86_64'})
+        for arch in ('arm64', 'x86_64'):
+            for flag in ('-D', '-L', '-l', '-hv'):
+                self.assertIn(['/usr/bin/otool', '-arch', arch, flag, 'fixture'], calls)
+
+    def test_normalized_system_dependency_preserves_raw_and_resolved_paths(self):
+        manifest = json.loads(self.assemble(inspector=lambda _: (['/usr/lib/../lib/libSystem.B.dylib'], [])).read_text())
+        for record in manifest['machoDependencies']:
+            self.assertEqual(record['contexts'][0]['resolvedDependencies'],
+                [{'load': '/usr/lib/../lib/libSystem.B.dylib', 'resolved': '/usr/lib/libSystem.B.dylib'}])
+
+    def test_universal_slice_cannot_borrow_another_architectures_rpath(self):
+        engines = self.base / 'engines'
+        engines.mkdir()
+        for name in ('engine', 'libEngine.dylib'):
+            path = engines / name
+            path.write_bytes(bytes.fromhex('cafebabe') + b'synthetic universal metadata seam')
+            path.chmod(0o755)
+        def inspect(path):
+            architectures = ['arm64', 'x86_64']
+            kind = 'DYLIB' if path.suffix == '.dylib' else 'EXECUTE'
+            slices = {arch: {'dependencies': [], 'rpaths': [], 'filetype': kind, 'minimumMacOS': '14.0'} for arch in architectures}
+            if path.name == 'engine':
+                slices['arm64']['dependencies'] = ['@rpath/libEngine.dylib']
+                slices['x86_64']['dependencies'] = ['@rpath/libEngine.dylib']
+                slices['x86_64']['rpaths'] = ['@loader_path']
+            return ['@rpath/libEngine.dylib'] if path.name == 'engine' else [], ['@loader_path'] if path.name == 'engine' else [], {
+                'architectures': architectures, 'filetype': kind, 'minimumMacOS': '14.0', 'slices': slices}
+        with self.assertRaisesRegex(package.PackageError, 'Unresolved'):
+            self.assemble(engines=engines, inspector=inspect)
+        self.assert_clean()
+
+    def test_dependency_target_must_supply_referencing_slice(self):
+        engines = self.base / 'engines'
+        engines.mkdir()
+        for name in ('engine', 'libEngine.dylib'):
+            path = engines / name
+            path.write_bytes(bytes.fromhex('cffaedfe') + b'synthetic architecture seam')
+            path.chmod(0o755)
+        def inspect(path):
+            return (['@loader_path/libEngine.dylib'] if path.name == 'engine' else [], [], {
+                'architectures': ['x86_64'] if path.suffix == '.dylib' else ['arm64'],
+                'minimumMacOS': '14.0', 'filetype': 'DYLIB' if path.suffix == '.dylib' else 'EXECUTE'})
+        with self.assertRaisesRegex(package.PackageError, 'Referencing architecture arm64'):
+            self.assemble(engines=engines, inspector=inspect)
+        self.assert_clean()
+
+    def test_engine_executable_cannot_resolve_dependency_from_main_app_directory(self):
+        engines = self.base / 'engines'
+        engines.mkdir()
+        engine = engines / 'llama-server'
+        engine.write_bytes(bytes.fromhex('cffaedfe') + b'synthetic engine')
+        engine.chmod(0o755)
+        # This target exists beside the app, but not beside the standalone engine.
+        def inspect(path):
+            return (['@executable_path/singz-analyze'], []) if path.name == 'llama-server' else ([], [])
+        with self.assertRaisesRegex(package.PackageError, 'Unresolved'):
+            self.assemble(engines=engines, inspector=inspect)
+        self.assert_clean()
+
+    def test_engine_loader_chain_inherits_rpaths_and_keeps_executable_context(self):
+        engines = self.base / 'engines'
+        engines.mkdir()
+        for name in ('llama-server', 'libA.dylib', 'libB.dylib'):
+            path = engines / name
+            path.write_bytes(bytes.fromhex('cffaedfe') + b'synthetic dependency graph')
+            path.chmod(0o755)
+        def inspect(path):
+            if path.name == 'llama-server':
+                return ['@rpath/libA.dylib'], ['@loader_path']
+            if path.name == 'libA.dylib':
+                return ['@rpath/libB.dylib'], []
+            if path.name == 'libB.dylib':
+                return ['@executable_path/libA.dylib'], []  # bounded cycle
+            return [], []
+        manifest = json.loads(self.assemble(engines=engines, inspector=inspect).read_text())
+        records = {record['path']: record for record in manifest['machoDependencies']}
+        for name in ('libA.dylib', 'libB.dylib'):
+            context = records['Contents/Resources/engines/' + name]['contexts'][0]
+            self.assertEqual(context['executable'], 'Contents/Resources/engines/llama-server')
+            self.assertEqual(context['rpathSearch'], ['Contents/Resources/engines'])
+        self.assertEqual(records['Contents/Resources/engines/libA.dylib']['contexts'][0]['resolvedDependencies'],
+                         [{'load': '@rpath/libB.dylib', 'resolved': 'Contents/Resources/engines/libB.dylib'}])
+
+    def test_required_binary_must_be_execute_and_dylib_context_is_not_guessed(self):
+        def wrong_kind(path):
+            return [], [], {'architectures': ['fixture'], 'minimumMacOS': '14.0', 'filetype': 'DYLIB' if path.name == 'singz-analyze' else 'EXECUTE'}
+        with self.assertRaisesRegex(package.PackageError, 'MH_EXECUTE'):
+            self.assemble(inspector=wrong_kind)
+        self.assert_clean()
+        engines = self.base / 'engines'
+        engines.mkdir()
+        (engines / 'libengine.dylib').write_bytes(bytes.fromhex('cffaedfe') + b'synthetic dylib')
+        def ambiguous(path):
+            return (['@executable_path/singz-analyze'], []) if path.suffix == '.dylib' else ([], [])
+        with self.assertRaisesRegex(package.PackageError, 'Ambiguous @executable_path'):
+            self.assemble(engines=engines, inspector=ambiguous)
+        self.assert_clean()
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'Real exclusive macOS publication')
+    def test_actual_exclusive_publisher_refuses_existing_names(self):
+        source, destination = self.base / 'source', self.base / 'destination'
+        source.mkdir()
+        destination.mkdir()
+        with self.assertRaises(package.PackageError):
+            package.rename_exclusive(source, destination)
+        self.assertTrue(source.is_dir())
+        destination.rmdir()
+        package.rename_exclusive(source, destination)
+        self.assertFalse(source.exists())
+        self.assertTrue(destination.is_dir())
+
+
+if __name__ == '__main__':
+    unittest.main()

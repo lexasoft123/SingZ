@@ -21,9 +21,9 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                     this.loaded_song = true;
                     this.playing = false;
                     this.karaoke = true;
-                    this.muted = [true, false, false, false, false, false];
-                    this.solo = [false; 6];
-                    this.fade = [0.14, 1., 1., 1., 1., 1.];
+                    this.muted = std::array::from_fn(|i|i==0);
+                    this.solo = [false; crate::tracks::LANE_SLOTS];
+                    this.fade = std::array::from_fn(|i|if i==0{0.14}else{1.});
                     this.notice = None;
                     this.started = Instant::now() - Duration::from_secs(2);
                     this.header.update(cx, |header, cx| header.set_review_fixture(true, cx));

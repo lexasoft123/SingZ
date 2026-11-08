@@ -22,8 +22,8 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                         this.previous_screen = Screen::Library;
                         this.playing = false;
                         this.position = position;
-                        this.muted = [true,false,false,false,false,false];
-                        this.fade = [0.14,1.,1.,1.,1.,1.];
+                        this.muted = std::array::from_fn(|i|i==0);
+                        this.fade = std::array::from_fn(|i|if i==0{0.14}else{1.});
                         this.started = Instant::now() - Duration::from_secs(2);
                         this.last = Instant::now();
                         cx.notify();

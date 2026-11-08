@@ -37,8 +37,8 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, output: PathBuf, cx: &
                 window.resize(size(px(1280.),px(800.)));
                 view.update(cx,|this,cx| {
                     this.screen=Screen::Player; this.loaded_song=true; this.playing=false;
-                    this.karaoke=true; this.muted=[false;6]; this.muted[0]=true;
-                    this.solo=[false;6]; this.fade=[1.;6]; this.fade[0]=0.16;
+                    this.karaoke=true; this.muted=[false;crate::tracks::LANE_SLOTS]; this.muted[0]=true;
+                    this.solo=[false;crate::tracks::LANE_SLOTS]; this.fade=[1.;crate::tracks::LANE_SLOTS]; this.fade[0]=0.16;
                     this.position=64.; this.started=Instant::now()-Duration::from_secs(2);
                     this.last=Instant::now(); this.capture_file=None; this.notice=None;
                     cx.notify();

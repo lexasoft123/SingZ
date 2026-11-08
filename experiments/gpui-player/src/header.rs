@@ -1,44 +1,308 @@
 //! App.tsx titlebar content; the host owns the native drag surface and reservation.
+use crate::i18n::t;
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use singz_uikit::tokens::{ACCENT, DIM, FAINT, TEXT};
 use singz_uikit::{
-    glow, persistent_monitor_status, segmented_nav, segmented_tab, small_ghost_pill, status_chip,
-    text_link,
+    glow, persistent_monitor_control, persistent_monitor_status, segmented_nav, segmented_tab,
+    small_ghost_pill_enabled, status_chip, text_link,
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum HeaderEvent {
+    Songs,
     Catalog,
     Settings,
+    StopMonitor,
     Training,
     Log,
     Engine,
     Language,
     Help,
+    WhatsNew,
     Save,
     Projects,
     AddToLibrary,
+    Rename(String),
+    TitleClosed,
 }
 
 pub struct Header {
+    pub guides: singz_uikit::GuideAnchors,
+    output_label: String,
+    controls: std::collections::BTreeMap<&'static str, FocusHandle>,
+    monitor_label: Option<String>,
+    monitor_stopping: bool,
+    monitor_attention: bool,
+    monitor_status_focus: FocusHandle,
+    monitor_stop_focus: FocusHandle,
+    save_status: u8,
+    save_enabled: bool,
+    native_audio_ready: bool,
+    training: bool,
     loaded: bool,
     catalog: bool,
     title: SharedString,
     review_fixture: bool,
+    import_available: bool,
+    engine_ready: bool,
+    editing: bool,
+    rename_enabled: bool,
+    title_input: Entity<InputState>,
+    _title_subscription: Subscription,
+    #[cfg(feature = "ui-tests")]
+    pub rename_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
 }
 impl EventEmitter<HeaderEvent> for Header {}
 
 impl Header {
-    pub fn new(_: &mut Window, _: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let input = cx.new(|cx| InputState::new(window, cx));
+        let subscription = cx.subscribe_in(&input, window, |this, _, event, _, cx| {
+            if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                this.commit_title(cx);
+            }
+        });
         Self {
+            guides: Default::default(),
+            controls: ["header-language","header-help","header-settings","header-log","header-save","header-import","header-projects","header-catalog","header-songs","header-training","header-version","header-engine"].into_iter().map(|id|(id,cx.focus_handle().tab_stop(true))).collect(),
+            output_label: "System default output".into(),
+            monitor_label: None,
+            monitor_stopping: false,
+            monitor_attention: false,
+            monitor_status_focus: cx.focus_handle(),
+            monitor_stop_focus: cx.focus_handle(),
+            native_audio_ready: false,
+            save_status: 0,
+            save_enabled: true,
+            training: false,
             loaded: false,
             catalog: true,
             title: "".into(),
             review_fixture: false,
+            import_available: false,
+            engine_ready: false,
+            editing: false,
+            rename_enabled: true,
+            title_input: input,
+            _title_subscription: subscription,
+            #[cfg(feature = "ui-tests")]
+            rename_bounds: Default::default(),
         }
     }
 
+    pub fn cancel_title(&mut self, cx: &mut Context<Self>) {
+        if self.editing {
+            self.editing = false;
+            cx.notify();
+        }
+    }
+    pub fn title_input_focused(&self, window: &Window, cx: &App) -> bool {
+        self.title_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+    }
+    pub fn is_editing(&self) -> bool {
+        self.editing
+    }
+    pub fn set_rename_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.rename_enabled != enabled {
+            self.rename_enabled = enabled;
+            cx.notify();
+        }
+    }
+    fn begin_title(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.rename_enabled {
+            return;
+        }
+        self.editing = true;
+        let value = self.title.clone();
+        self.title_input.update(cx, |input, cx| {
+            input.set_value(value, window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+    fn commit_title(&mut self, cx: &mut Context<Self>) {
+        if !self.editing {
+            return;
+        }
+        self.editing = false;
+        cx.emit(HeaderEvent::TitleClosed);
+        let value = self.title_input.read(cx).value().trim().to_owned();
+        if !value.is_empty() && value != self.title.as_str() {
+            cx.emit(HeaderEvent::Rename(value));
+        }
+        cx.notify();
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn title_state(&self) -> Entity<InputState> {
+        self.title_input.clone()
+    }
+    fn rename_button(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let button = text_link("header-rename", "✎")
+            .text_size(px(13.))
+            .font_family("SingZ Display 400")
+            .line_height(px(13.))
+            .px(px(5.))
+            .py(px(3.))
+            .rounded(px(7.))
+            .text_color(rgb(FAINT))
+            .on_click(cx.listener(|s, _, w, cx| s.begin_title(w, cx)));
+        #[cfg(feature = "ui-tests")]
+        {
+            let hit = self.rename_bounds.clone();
+            return button.relative().child(
+                canvas(
+                    move |b, _, _| {
+                        hit.set(Some(b));
+                        b
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            );
+        }
+        #[cfg(not(feature = "ui-tests"))]
+        button
+    }
+    pub fn language_focus(&self)->FocusHandle {self.controls["header-language"].clone()}
+    #[cfg(feature="ui-tests")]
+    pub fn focused_control(&self, window:&Window)->Option<String> {
+        self.controls.iter().find_map(|(id,focus)|focus.is_focused(window).then(||(*id).to_owned()))
+    }
+    pub fn set_engine(&mut self, ready: bool, cx: &mut Context<Self>) {
+        if self.engine_ready != ready {
+            self.engine_ready = ready;
+            cx.notify();
+        }
+    }
+    #[cfg(feature="ui-tests")]
+    pub fn engine_ready(&self)->bool{self.engine_ready}
+    pub fn set_training(&mut self, training: bool, cx: &mut Context<Self>) {
+        if self.training != training {
+            self.training = training;
+            cx.notify();
+        }
+    }
+    pub fn set_save_status(&mut self, status: u8, cx: &mut Context<Self>) {
+        if self.save_status != status {
+            self.save_status = status;
+            cx.notify();
+        }
+    }
+    pub fn set_save_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.save_enabled != enabled {
+            self.save_enabled = enabled;
+            cx.notify();
+        }
+    }
+    pub fn save_control_focused(&self, window: &Window) -> bool {
+        self.controls["header-save"].is_focused(window)
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn save_control_focus(&self) -> FocusHandle {
+        self.controls["header-save"].clone()
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn save_enabled(&self) -> bool {
+        self.save_enabled
+    }
+    pub fn set_output_label(&mut self, label: String, cx: &mut Context<Self>) {
+        if self.output_label != label {
+            self.output_label = label;
+            cx.notify();
+        }
+    }
+    pub fn set_monitor_state(
+        &mut self,
+        label: Option<String>,
+        stopping: bool,
+        attention: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.monitor_label != label
+            || self.monitor_stopping != stopping
+            || self.monitor_attention != attention
+        {
+            self.monitor_label = label;
+            self.monitor_stopping = stopping;
+            self.monitor_attention = attention;
+            cx.notify();
+        }
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn monitor_state(&self) -> serde_json::Value {
+        serde_json::json!({"visible":crate::integration::fixture_mode()||self.review_fixture||self.monitor_label.is_some(),
+            "label":self.monitor_label,"stopping":self.monitor_stopping,"attention":self.monitor_attention})
+    }
+    fn monitor_control(&self, label: &str, cx: &mut Context<Self>) -> Stateful<Div> {
+        let control = persistent_monitor_control(
+            "header-monitor",
+            label.to_owned(),
+            self.monitor_attention,
+            !self.monitor_stopping,
+        );
+        let status = control
+            .status
+            .track_focus(&self.monitor_status_focus)
+            .tab_index(0)
+            .on_click(cx.listener(|_, _, _, cx| {
+                cx.emit(HeaderEvent::Settings);
+                cx.stop_propagation();
+            }))
+            .on_key_down(cx.listener(|_, e: &KeyDownEvent, _, cx| {
+                if e.keystroke.key == "enter" || e.keystroke.key == "space" {
+                    cx.emit(HeaderEvent::Settings);
+                    cx.stop_propagation();
+                }
+            }));
+        let stop = control
+            .stop
+            .when(!self.monitor_stopping, |d| {
+                d.track_focus(&self.monitor_stop_focus).tab_index(0)
+            })
+            .when(true, |d| {
+                self.guides.track_box(d, "monitor-stop", [1., 0., 0., 0.])
+            })
+            .on_click(cx.listener(|s, _, _, cx| {
+                if !s.monitor_stopping && s.monitor_label.is_some() {
+                    cx.emit(HeaderEvent::StopMonitor);
+                }
+                cx.stop_propagation();
+            }))
+            .on_key_down(cx.listener(|s, e: &KeyDownEvent, _, cx| {
+                if e.keystroke.key == "enter" || e.keystroke.key == "space" {
+                    if !s.monitor_stopping && s.monitor_label.is_some() {
+                        cx.emit(HeaderEvent::StopMonitor);
+                    }
+                    cx.stop_propagation();
+                }
+            }));
+        control
+            .shell
+            .tab_group()
+            .tab_stop(false)
+            .child(status)
+            .child(stop)
+    }
+    pub fn set_native_status(&mut self, ready: bool, cx: &mut Context<Self>) {
+        if self.native_audio_ready != ready {
+            self.native_audio_ready = ready;
+            cx.notify();
+        }
+    }
+    pub fn set_import_available(&mut self, available: bool, cx: &mut Context<Self>) {
+        if self.import_available != available {
+            self.import_available = available;
+            cx.notify();
+        }
+    }
     pub fn set_review_fixture(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if self.review_fixture != enabled {
             self.review_fixture = enabled;
@@ -62,30 +326,43 @@ impl Header {
     }
 
     fn button(
+        &self,
         id: &'static str,
-        label: &'static str,
+        label: impl Into<SharedString>,
         action: HeaderEvent,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        small_ghost_pill(id, label)
+        let enabled = id != "header-save" || self.save_enabled;
+        let keyboard_action=action.clone();
+        small_ghost_pill_enabled(id, label, enabled)
+            .when(enabled, |button| {
+                button
+                    .track_focus(&self.controls[id])
+                    .tab_index(0)
+                    .on_key_down(cx.listener(move |_,e:&KeyDownEvent,_,cx|{if matches!(e.keystroke.key.as_str(),"enter"|"space"){cx.emit(keyboard_action.clone());cx.stop_propagation();}}))
+            })
             .line_height(px(14.))
             .flex_shrink_0()
-            .on_click(cx.listener(move |_, _, _, cx| cx.emit(action)))
+            .when(enabled, |button| {
+                button.on_click(cx.listener(move |_, _, _, cx| cx.emit(action.clone())))
+            })
     }
 
     fn right_button(
+        &self,
         id: &'static str,
-        label: &'static str,
+        label: impl Into<SharedString>,
         action: HeaderEvent,
         compact: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        Self::button(id, label, action, cx).when(compact, |button| {
+        self.button(id, label, action, cx).when(compact, |button| {
             button
                 .block()
                 .min_w_0()
                 .flex_shrink_1()
-                .truncate()
+                .when(id == "header-projects", |button| button.flex_shrink_0())
+                .when(id != "header-projects", |button| button.truncate())
                 .text_center()
         })
     }
@@ -132,8 +409,18 @@ impl Header {
 
 impl Render for Header {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let available = window.viewport_size().width - px(if cfg!(any(target_os = "windows", target_os = "linux")) {134.} else {0.});
-        let compact = available <= px(if cfg!(any(target_os = "windows", target_os = "linux")) {1200.} else {1100.});
+        let available = window.viewport_size().width
+            - px(if cfg!(any(target_os = "windows", target_os = "linux")) {
+                134.
+            } else {
+                0.
+            });
+        let compact = available
+            <= px(if cfg!(any(target_os = "windows", target_os = "linux")) {
+                1200.
+            } else {
+                1100.
+            });
         let tiny = available <= px(1000.);
         let catalog = self.catalog;
         // Blink rounds this bundled face's hhea ascent/descent (930/-270,
@@ -193,31 +480,37 @@ impl Render for Header {
                             ),
                     )
                     .child(
-                        text_link("header-version", "")
+                        self.guides.track(text_link("header-version", ""),"version")
                             .ml(px(7.))
                             .mt(px(version_top))
                             .text_size(px(10.5))
                             .line_height(px(version_line))
                             .font_family("SingZ Display 500")
                             .text_color(rgb(FAINT))
-                            .child(singz_uikit::tracked_label("dev", 0.04))
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(HeaderEvent::Help))),
+                            .child(singz_uikit::tracked_label(if self.review_fixture {"dev"} else {crate::release_highlights::CURRENT_VERSION}, 0.04))
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(HeaderEvent::WhatsNew))),
                     ),
             )
             .child(
                 segmented_nav()
                     .child(
-                        segmented_tab("header-songs", "Songs", true)
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(HeaderEvent::Catalog))),
+                        segmented_tab("header-songs", t("app.titlebar.songs"), !self.training)
+                            .when(true,|d|self.guides.track(d,"songs"))
+                            .track_focus(&self.controls["header-songs"]).tab_index(0)
+                            .on_key_down(cx.listener(|_,e:&KeyDownEvent,_,cx|{if matches!(e.keystroke.key.as_str(),"enter"|"space"){cx.emit(HeaderEvent::Songs);cx.stop_propagation();}}))
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(HeaderEvent::Songs))),
                     )
                     .child(
-                        segmented_tab("header-training", "Vocal training", false)
+                        segmented_tab("header-training", t("app.titlebar.training"), self.training)
+                            .when(true, |d| self.guides.track(d, "training"))
+                            .track_focus(&self.controls["header-training"]).tab_index(0)
+                            .on_key_down(cx.listener(|_,e:&KeyDownEvent,_,cx|{if matches!(e.keystroke.key.as_str(),"enter"|"space"){cx.emit(HeaderEvent::Training);cx.stop_propagation();}}))
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(HeaderEvent::Training))),
                     ),
             )
-            .when(self.loaded, |d| {
+            .when(self.loaded && !self.training, |d| {
                 d.child(
-                    Self::button("header-catalog", "", HeaderEvent::Catalog, cx)
+                    self.button("header-catalog", "", HeaderEvent::Catalog, cx)
                         .ml(px(-4.))
                         .gap(px(7.))
                         .text_color(rgb(if catalog { ACCENT } else { TEXT }))
@@ -232,7 +525,7 @@ impl Render for Header {
                             }),
                         ))
                         .when(!compact, |s| {
-                            s.child(singz_uikit::tracked_label("Catalog", 0.01))
+                            s.child(singz_uikit::tracked_label(t("app.titlebar.catalog"), 0.01))
                         }),
                 )
             })
@@ -249,18 +542,37 @@ impl Render for Header {
                         .text_color(rgb(DIM))
                         .text_size(px(13.))
                         .font_family("SingZ Display 500")
-                        .child(div().truncate().min_w_0().child(self.title.clone()))
-                        .child(
-                            text_link("header-rename", "✎")
-                                .text_size(px(13.))
-                                .font_family("SingZ Display 400")
-                                .line_height(px(13.))
-                                .px(px(5.))
-                                .py(px(3.))
-                                .rounded(px(7.))
-                                .text_color(rgb(FAINT))
-                                .on_click(cx.listener(|_, _, _, cx| cx.emit(HeaderEvent::Save))),
-                        ),
+                        .when(self.editing, |d| {
+                            d.child(
+                                div()
+                                    .id("header-title-editor")
+                                    .w_full()
+                                    .max_w(px(360_f32.min(f32::from(window.viewport_size().width) * 0.4)))
+                                    .min_w_0()
+                                    .on_mouse_down_out(
+                                        cx.listener(|s, _, _, cx| s.commit_title(cx)),
+                                    )
+                                    .on_key_down(cx.listener(|s, e: &KeyDownEvent, _, cx| {
+                                        if e.keystroke.key == "escape" {
+                                            s.editing = false;
+                                            cx.emit(HeaderEvent::TitleClosed);
+                                            cx.notify();
+                                        }
+                                        cx.stop_propagation();
+                                    }))
+                                    .child(singz_uikit::title_input(
+                                        &self.title_input,
+                                        f32::from(window.viewport_size().width),
+                                    ).w_full())
+                                    .when(cfg!(feature = "ui-tests"), |editor| {
+                                        self.guides.track(editor, "title-editor")
+                                    }),
+                            )
+                        })
+                        .when(!self.editing, |d| {
+                            d.child(div().truncate().min_w_0().child(self.title.clone()))
+                                .child(self.rename_button(cx))
+                        }),
                 )
             })
             .child(
@@ -271,86 +583,158 @@ impl Render for Header {
                     .gap(px(if compact { 6. } else { 10. }))
                     .flex_shrink_0()
                     .when(compact, |right| right.min_w_0().flex_shrink_1())
-                    .child(
-                        persistent_monitor_status(
-                            "header-monitor",
-                            "Audio route needs attention",
-                            true,
-                        )
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(HeaderEvent::Settings))),
+                    .when(
+                        crate::integration::fixture_mode() || self.review_fixture,
+                        |right| {
+                            right.child(
+                                persistent_monitor_status(
+                                    "header-monitor",
+                                    if crate::integration::fixture_mode() {
+                                        "Audio route needs attention"
+                                    } else if self.native_audio_ready {
+                                        self.output_label.as_str()
+                                    } else {
+                                        "Audio not opened"
+                                    },
+                                    crate::integration::fixture_mode(),
+                                )
+                                .on_click(
+                                    cx.listener(|_, _, _, cx| cx.emit(HeaderEvent::Settings)),
+                                ),
+                            )
+                        },
+                    )
+                    .when(
+                        !crate::integration::fixture_mode() && !self.review_fixture,
+                        |right| {
+                            right.when_some(self.monitor_label.clone(), |right, label| {
+                                right.child(self.monitor_control(&label, cx))
+                            })
+                        },
                     )
                     .when(self.loaded, |d| {
-                        d.child(Self::right_button(
-                            "header-save",
-                            if self.review_fixture {
-                                "Saved ✓"
-                            } else {
-                                "Save"
-                            },
-                            HeaderEvent::Save,
-                            compact,
-                            cx,
-                        ))
+                        d.child(
+                            self.right_button(
+                                "header-save",
+                                if self.review_fixture
+                                    || (!crate::integration::fixture_mode()
+                                        && self.save_status == 2)
+                                {
+                                    t("app.save.saved")
+                                } else if !crate::integration::fixture_mode()
+                                    && self.save_status == 1
+                                {
+                                    t("app.save.saving")
+                                } else {
+                                    t("app.save.save")
+                                },
+                                HeaderEvent::Save,
+                                compact,
+                                cx,
+                            )
+                            .when(true, |button| {
+                                self.guides.track_box(button, "save", [1.; 4])
+                            }),
+                        )
                     })
-                    .when(self.loaded && self.review_fixture, |d| {
-                        d.child(Self::right_button(
-                            "header-import",
-                            "Add to library…",
-                            HeaderEvent::AddToLibrary,
-                            compact,
-                            cx,
-                        ))
-                    })
+                    .when(
+                        self.loaded && (self.review_fixture || self.import_available),
+                        |d| {
+                            d.child(
+                                self.right_button(
+                                    "header-import",
+                                    t("app.library.add"),
+                                    HeaderEvent::AddToLibrary,
+                                    compact,
+                                    cx,
+                                )
+                                .when(true, |button| {
+                                    self.guides.track_box(button, "import", [1.; 4])
+                                }),
+                            )
+                        },
+                    )
                     .when(self.loaded && !self.catalog, |d| {
-                        d.child(Self::right_button(
-                            "header-projects",
-                            "Open…",
-                            HeaderEvent::Projects,
-                            compact,
-                            cx,
-                        ))
+                        d.child(
+                            self.right_button(
+                                "header-projects",
+                                t("app.library.open"),
+                                HeaderEvent::Projects,
+                                compact,
+                                cx,
+                            )
+                            .when(true, |button| {
+                                self.guides.track_box(button, "projects", [1.; 4])
+                            }),
+                        )
                     })
-                    .child(Self::right_button(
+                    .child(self.right_button(
                         "header-log",
-                        "Log",
+                        t("app.titlebar.log"),
                         HeaderEvent::Log,
                         compact,
                         cx,
-                    ))
+                    ).when(true,|d|self.guides.track_box(d,"log",[1.;4])))
                     .child(
                         status_chip("header-engine", "")
+                            .track_focus(&self.controls["header-engine"]).tab_index(0)
+                            .on_key_down(cx.listener(|_,e:&KeyDownEvent,_,cx|{if matches!(e.keystroke.key.as_str(),"enter"|"space"){cx.emit(HeaderEvent::Engine);cx.stop_propagation();}}))
+                            .when(true, |d| self.guides.track_box(d,"engine",[1.;4]))
                             .when(compact, |chip| chip.min_w_0().flex_shrink_1())
                             .child(
                                 div()
                                     .size(px(7.))
                                     .flex_none()
                                     .rounded_full()
-                                    .bg(rgb(0x58d68a))
-                                    .shadow(vec![glow(0x58d68a, 0.7, 8.)]),
+                                    .bg(rgb(
+                                        if crate::integration::fixture_mode() || self.engine_ready {
+                                            0x58d68a
+                                        } else {
+                                            FAINT
+                                        },
+                                    ))
+                                    .shadow(
+                                        if crate::integration::fixture_mode() || self.engine_ready {
+                                            vec![glow(0x58d68a, 0.7, 8.)]
+                                        } else {
+                                            vec![]
+                                        },
+                                    ),
                             )
                             .when(!tiny, |d| {
                                 d.child(
                                     div()
                                         .when(compact, |label| label.min_w_0().truncate())
-                                        .child(singz_uikit::tracked_label("splitter ready", 0.02)),
+                                        .child(singz_uikit::tracked_label(
+                                            if crate::integration::fixture_mode()
+                                                || self.engine_ready
+                                            {
+                                                t("app.engine.ready")
+                                            } else {
+                                                t("app.engine.setup")
+                                            },
+                                            0.02,
+                                        )),
                                 )
                             })
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(HeaderEvent::Engine))),
                     )
                     .child(
-                        Self::button("header-language", "", HeaderEvent::Language, cx)
+                        self.button("header-language", "", HeaderEvent::Language, cx)
                             .px(px(8.))
-                            .child(Self::flag()),
+                            .when(true,|d|self.guides.track_box(d,"language",[1.;4]))
+                            .child(singz_uikit::language_header_flag(crate::i18n::current().as_str())),
                     )
-                    .child(Self::right_button(
+                    .child(self.right_button(
                         "header-help",
                         "?",
                         HeaderEvent::Help,
                         compact,
                         cx,
-                    ))
+                    ).when(true,|d|self.guides.track_box(d,"help",[1.;4])))
                     .child(
-                        Self::button("header-settings", "", HeaderEvent::Settings, cx)
+                        self.button("header-settings", "", HeaderEvent::Settings, cx)
+                            .when(true, |d| self.guides.track_box(d, "settings", [1.; 4]))
                             .px(px(8.))
                             .child(
                                 svg()

@@ -2949,6 +2949,14 @@ void cueGraphTransportCompositionAndLifetime() {
   const float quarterPeak = rangePeak(quarter, 1, 1024);
   CHECK(near(halfPeak, quarterPeak * 2.0F, 0.002F));
 
+  auto explicitlySilent=quarterReference;explicitlySilent.referenceGainOverride=0.F;
+  singz::NativePlaybackStatus silentPrepared{},silentFirst{};
+  const auto silentReference=render(explicitlySilent,{512},1024,false,&silentPrepared,&silentFirst);
+  CHECK(silentPrepared.referenceGain==0.F && rangePeak(silentReference,0,silentReference.size())==0.F);
+  auto boostedReference=quarterReference;boostedReference.referenceGainOverride=0.5F;
+  const auto boosted=render(boostedReference,{512},1024,false,&silentPrepared,&silentFirst);
+  CHECK(silentPrepared.referenceGain==0.5F && near(rangePeak(boosted,1,1024),quarterPeak*2.F,0.002F));
+
   singz::NativePlaybackPrepareConfig stretchedReference = config();
   stretchedReference.masterGain = 0.0F;
   stretchedReference.playbackRate = 0.75;
@@ -3278,6 +3286,12 @@ void nativeReferencePreviewClickContract() {
         status.audibleProjectionQuality ==
             singz::NativePlaybackAudibleProjectionQuality::Current &&
         status.audibleProjectFrame == preparedProjectFrame);
+  CHECK(session.setSongAndReferenceGain(31,0.F,0.F).ok && fake->drive(512));
+  CHECK(session.status().masterGain==0.F && session.status().referenceGain==0.F);
+  CHECK(session.setSongAndReferenceGain(31,0.2F,0.35F).ok && fake->drive(512));
+  CHECK(session.status().masterGain==0.2F && session.status().referenceGain==0.35F);
+  CHECK(session.setSongAndReferenceGain(31,0.3F,5.F).error==singz::NativePlaybackError::InvalidConfiguration);
+  CHECK(session.status().masterGain==0.2F && session.status().referenceGain==0.35F);
   CHECK(session.previewClick(999).error ==
         singz::NativePlaybackError::InvalidGeneration);
   CHECK(session.unload(31).ok);
@@ -5676,6 +5690,92 @@ void preparedStartOverridePreservesRebuildPosition() {
   std::remove(longerWav.c_str());
 }
 
+void nonLoopRegionsStopOnTheActualSampleBoundary() {
+  const std::string wav = writeWav("nonloop-region.wav", 1, std::vector<float>(256, 0.2F));
+  auto backend = std::make_unique<ManualOutputBackend>();
+  auto* fake = backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+  auto request = config();
+  request.initialTransport.region = singz::NativePlaybackInitialLoop{8, 20};
+  auto lanes = std::vector<singz::NativePlaybackLaneSource>{};lanes.push_back(lane("song", wav));
+  CHECK(session.prepare(std::move(request), std::move(lanes), 81).ok);
+  CHECK(session.openOutput(81).ok && session.start(81).ok);
+  fake->captureOutput = true;
+  CHECK(fake->drive(32, singz::AudioHostDiscontinuityStart));
+  fake->captureOutput = false;
+  CHECK(fake->outputTrace.size() == 32);
+  // Source's startOffset < end rule includes playback BEFORE selection start.
+  for (size_t frame=0;frame<32;++frame) CHECK(near(fake->outputTrace[frame], frame<20 ? pcm16(.2F) : 0.F));
+  auto status = session.status();
+  CHECK(status.regionEnabled && status.regionStartFrame==8 && status.regionEndFrame==20 && !status.regionStopArmed && !status.loopEnabled);
+  CHECK(status.transportState==singz::NativePlaybackTransportState::Paused && status.renderedProjectFrame==20);
+  CHECK(fake->drive(8));CHECK(session.status().renderedProjectFrame==20);
+  // Direct resume at end is disarmed, unlike the UI Play action which seeks
+  // selection start first. Resizing uses this actual last Play/Seek origin.
+  CHECK(session.resume(81).ok && fake->drive(4));
+  CHECK(session.status().renderedProjectFrame==24 && !session.status().regionStopArmed);
+  CHECK(session.setRegion(81,8,22,false).ok && fake->drive(4));
+  CHECK(session.status().transportState==singz::NativePlaybackTransportState::Paused && session.status().renderedProjectFrame==22);
+  CHECK(session.clearRegion(81).ok && fake->drive(1));
+  CHECK(!session.status().regionEnabled && session.status().transportState==singz::NativePlaybackTransportState::Paused);
+  const auto resumedAfterClear=session.resume(81);
+  if(!resumedAfterClear.ok)std::fprintf(stderr,"Resume after cleared stopped region: %s\n",resumedAfterClear.message.c_str());
+  CHECK(resumedAfterClear.ok);
+  CHECK(fake->drive(4));CHECK(session.status().renderedProjectFrame==26);
+  CHECK(!session.setRegion(80,1,2,false).ok && !session.setRegion(81,-1,2,false).ok && !session.setRegion(81,2,2,false).ok && !session.setRegion(81,2,257,false).ok);
+  // Compatible old aliases remain real loops and clear the entire region.
+  CHECK(session.setLoop(81,8,16).ok && fake->drive(3));
+  CHECK(session.status().regionEnabled && session.status().loopEnabled && session.status().renderedProjectFrame==13);
+  CHECK(session.clearLoop(81).ok && fake->drive(1));CHECK(!session.status().regionEnabled && !session.status().loopEnabled);
+  CHECK(session.unload(81).ok);
+  // An initial start after end must not be dragged back by a later region
+  // whose end is still before that start. Growing past the old start arms it.
+  request = config();request.preparedStartProjectFrame=40;
+  request.initialTransport.region=singz::NativePlaybackInitialLoop{8,20};
+  lanes.clear();lanes.push_back(lane("song",wav));
+  CHECK(session.prepare(std::move(request),std::move(lanes),82).ok && session.openOutput(82).ok && session.start(82).ok);
+  CHECK(fake->drive(8,singz::AudioHostDiscontinuityStart));
+  CHECK(session.setRegion(82,8,32,false).ok && fake->drive(4));
+  CHECK(session.status().renderedProjectFrame==52 && session.status().transportState==singz::NativePlaybackTransportState::Playing);
+  CHECK(session.setRegion(82,8,45,false).ok && fake->drive(4));
+  CHECK(session.status().renderedProjectFrame==45 && session.status().transportState==singz::NativePlaybackTransportState::Paused);
+  CHECK(session.unload(82).ok);std::remove(wav.c_str());
+}
+
+void nonLoopRegionSurvivesRateSwapAndRetainedRestore() {
+  const std::string wav=writeWav("region-rate-restore.wav",1,std::vector<float>(96000,.1F));
+  auto backend=std::make_unique<ManualOutputBackend>();auto* fake=backend.get();
+  singz::NativePlaybackTestHooks hooks{};hooks.timePitchPrimeNs=1'000'000;
+  singz::NativePlaybackSession session(std::move(backend),&hooks);
+  auto request=config();request.initialTransport.region=singz::NativePlaybackInitialLoop{100,80000};
+  auto lanes=std::vector<singz::NativePlaybackLaneSource>{};lanes.push_back(keyedLane("song",wav));
+  CHECK(session.prepare(std::move(request),std::move(lanes),83).ok && session.openOutput(83).ok && session.start(83).ok);
+  CHECK(fake->drive(512,singz::AudioHostDiscontinuityStart));
+  auto replacement=config();replacement.swapFromGeneration=83;replacement.playbackRate=1.5;replacement.preparedStartProjectFrame=512;
+  replacement.initialTransport.region=singz::NativePlaybackInitialLoop{100,80000};
+  lanes.clear();lanes.push_back(keyedLane("song",wav));
+  CHECK(session.prepare(std::move(replacement),std::move(lanes),84).ok);
+  for(unsigned block=0;block<128 && session.status().transportGeneration!=84;++block) CHECK(fake->drive(512));
+  auto status=session.status();CHECK(status.transportGeneration==84 && status.regionEnabled && !status.loopEnabled && status.regionStopArmed && status.adapterRenderFailures==0);
+  // The seam preserves original startOffset=0, not its current playhead.
+  const int64_t end=status.renderedProjectFrame-5;CHECK(end>100);
+  CHECK(session.setRegion(84,100,end,false).ok && fake->drive(8));
+  status=session.status();CHECK(status.renderedProjectFrame==end && status.transportState==singz::NativePlaybackTransportState::Paused);
+  const auto retired=session.unloadWithCleanup(84,singz::NativePlaybackLaneRetention::Park);CHECK(retired.playback.ok);
+  request=config();request.playbackRate=1.5;request.preparedStartProjectFrame=end-1;request.initialTransport.startPaused=true;
+  request.initialTransport.region=singz::NativePlaybackInitialLoop{100,end};request.initialTransport.regionStopArmed=true;
+  lanes.clear();lanes.push_back(keyedLane("song",wav));
+  CHECK(session.prepare(std::move(request),std::move(lanes),85).ok && session.openOutput(85).ok && session.start(85).ok);
+  CHECK(fake->drive(8,singz::AudioHostDiscontinuityStart));status=session.status();
+  CHECK(status.regionEnabled && status.regionEndFrame==end && !status.loopEnabled && status.renderedProjectFrame==end-1 && status.transportState==singz::NativePlaybackTransportState::Paused);
+  CHECK(session.resume(85).ok && fake->drive(8));status=session.status();
+  CHECK(status.renderedProjectFrame==end && status.transportState==singz::NativePlaybackTransportState::Paused && status.adapterRenderFailures==0);
+  CHECK(fake->drive(16));CHECK(session.status().renderedProjectFrame==end);
+  CHECK(session.resume(85).ok && fake->drive(8));status=session.status();
+  CHECK(status.transportState==singz::NativePlaybackTransportState::Playing && status.renderedProjectFrame==end+12 && status.adapterRenderFailures==0);
+  CHECK(session.unload(85).ok);std::remove(wav.c_str());
+}
+
 void preparedInitialTransportIsAtomicAtFirstCallback() {
   std::vector<float> ramp(64);
   for (size_t frame = 0; frame < ramp.size(); ++frame)
@@ -7417,6 +7517,12 @@ void portableGraphDocumentMaterializesActualTopology() {
 } // namespace
 
 int main() {
+  if (std::getenv("SINGZ_NATIVE_PLAYBACK_REGIONS") != nullptr) {
+    nonLoopRegionsStopOnTheActualSampleBoundary();
+    nonLoopRegionSurvivesRateSwapAndRetainedRestore();
+    std::puts("native playback region tests: ok");
+    return 0;
+  }
   if (std::getenv("SINGZ_NATIVE_PLAYBACK_PROVIDER_DISPOSE_FAILURE") !=
       nullptr) {
     providerDisposeFailureRetainsOwnershipAndPoisonsReopen();
@@ -7472,6 +7578,8 @@ int main() {
   hostBoundariesWithoutSourceMovementKeepRendering();
   telemetryCollisionPublishesCoherentGeneration();
   preparedStartOverridePreservesRebuildPosition();
+  nonLoopRegionsStopOnTheActualSampleBoundary();
+  nonLoopRegionSurvivesRateSwapAndRetainedRestore();
   preparedInitialTransportIsAtomicAtFirstCallback();
   publicationAndCancellation();
   callbackTerminalLatch();

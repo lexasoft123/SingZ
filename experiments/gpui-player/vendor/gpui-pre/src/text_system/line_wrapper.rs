@@ -541,9 +541,11 @@ impl LineWrapper {
         (text, Cow::Borrowed(runs))
     }
 
-    /// The byte offsets in `text` at which a line break is allowed.
-    pub(crate) fn break_indices(text: &str) -> impl Iterator<Item = usize> {
-        icu_segmenter::LineSegmenter::new_for_non_complex_scripts(Default::default())
+    /// Unicode line-break opportunities as UTF-8 byte offsets. This pure
+    /// segmentation API uses the same compiled script dictionaries as native
+    /// wrapping and truncation, without requiring fonts or a window.
+    pub fn break_indices(text: &str) -> impl Iterator<Item = usize> {
+        icu_segmenter::LineSegmenter::new_dictionary(Default::default())
             .segment_str(text)
     }
 
@@ -1107,6 +1109,34 @@ mod tests {
                 .collect::<Vec<_>>(),
             &[Boundary::new(12, 0),], // special chars above take up 3, 2 and 3 bytes, so boundary ends up at 12
         );
+    }
+
+    #[test]
+    fn test_line_break_dictionary_thai_and_mixed_scripts() {
+        // ICU's Thai word-break vector: no whitespace separates these words.
+        // Exercise the exact production factory used by wrap and truncation.
+        let thai = "ภาษาไทยภาษาไทย";
+        assert_eq!(
+            LineWrapper::break_indices(thai).collect::<Vec<_>>(),
+            [0, 12, 21, 33, 42]
+        );
+        for text in ["abc ภาษาไทย xyz", "เก้าเก้า ภาษาไทย e\u{301} 你好！"] {
+            let breaks = LineWrapper::break_indices(text).collect::<Vec<_>>();
+            let mut clusters: Vec<_> = text.grapheme_indices(true).map(|(index, _)| index).collect();
+            clusters.push(text.len());
+            assert_eq!(breaks.first(), Some(&0));
+            assert_eq!(breaks.last(), Some(&text.len()));
+            assert!(breaks.windows(2).all(|pair| pair[0] < pair[1]));
+            assert!(breaks.iter().all(|index| clusters.contains(index)), "Split a grapheme: {text:?} {breaks:?}");
+            let word_end = text.find("ภาษา").unwrap() + "ภาษา".len();
+            assert!(breaks.contains(&word_end), "Lost Thai word boundary: {text:?} {breaks:?}");
+        }
+        // Loading SEA dictionaries must preserve ordinary Unicode line rules.
+        for text in ["hello world! 你好！", "Русский текст — SingZ", "हिन्दी भाषा", "one\u{a0}two / three"] {
+            let prior = icu_segmenter::LineSegmenter::new_for_non_complex_scripts(Default::default())
+                .segment_str(text).collect::<Vec<_>>();
+            assert_eq!(LineWrapper::break_indices(text).collect::<Vec<_>>(), prior);
+        }
     }
 
     #[test]

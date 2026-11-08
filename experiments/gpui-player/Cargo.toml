@@ -13,10 +13,26 @@ gpui-kit = "=0.9.0"
 gpui-test-platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["test-support"] }
 singz-uikit = { path = "../../../singz-ui/gpui" }
 anyhow = "1"
-serde_json = "1"
+base64 = "=0.22.1"
+getrandom = "=0.3.4"
+libc = "=0.2.191"
+md-5 = "=0.10.6"
+url = "=2.5.8"
+dirs = "=6.0.0"
+lofty = "=0.25.2"
+regex = "1"
+unicode-normalization = "0.1"
+sha1 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
+chrono = { version = "=0.4.45", default-features = false, features = ["std", "clock"] }
 sha2 = "=0.11.1"
 resvg = "=0.46.0"
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+[build-dependencies]
+serde_json = "1"
+url = "2.5"
 
 [profile.dev]
 debug = 0
