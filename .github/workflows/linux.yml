@@ -1,4 +1,4 @@
-name: Linux desktop packages
+name: Linux Desktop and Box packages
 
 on:
   workflow_dispatch:
@@ -42,7 +42,7 @@ jobs:
           - runner: ubuntu-26.04-arm
             arch: arm64
             deb: arm64
-    name: debian-${{ matrix.deb }}
+    name: debian-desktop-box-${{ matrix.deb }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     defaults:
@@ -175,15 +175,15 @@ jobs:
             vendor/packs/gpu-splitter-linux-${{ matrix.arch }}.tar.gz
           key: ${{ steps.engine-cache.outputs.cache-primary-key }}
 
-      - name: Install and test the packaged desktop app on the host
+      - name: Install and test the packaged Desktop and Box apps on the host
         env:
           SINGZ_CI_STAGE: installed-test
           SINGZ_E2E_PACKAGED: /opt/SingZ/singz
         run: bash scripts/ci/linux-package.sh
 
-      # Build-only output is not qualified. Upload an installer only after the
-      # installed-host addon smoke and app E2E both pass.
-      - name: Upload Linux installers
+      # Build-only output is not qualified. Upload installers only after both
+      # installed products and their native runtime smokes pass.
+      - name: Upload Linux Desktop and Box installers
         uses: actions/upload-artifact@v4
         with:
           name: SingZ-linux-${{ matrix.deb }}
@@ -195,6 +195,9 @@ jobs:
             dist/latest-linux*.yml
             dist/*.sha256
             dist/SHA256SUMS
+            dist/box/*.deb
+            dist/box/*.sha256
+            dist/box/SHA256SUMS
 
       - name: Upload test and package diagnostics
         if: always()
