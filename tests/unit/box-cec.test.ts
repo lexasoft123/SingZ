@@ -27,6 +27,41 @@ function fixture(ready = true) {
 afterEach(async () => { for (const service of services.splice(0)) await service.dispose(); vi.useRealTimers() })
 
 describe('Box HDMI-CEC input', () => {
+  it('reconstructs bounded helper telemetry and counts delivery independently of readiness', () => {
+    const f = fixture(false); f.child.ready()
+    const report = { type: 'telemetry', received: 5, acceptedPress: 1, acceptedRelease: 1,
+      rejectedFormat: 1, rejectedInitiator: 1, rejectedDestination: 1,
+      physicalAddress: 4096, logicalAddressMask: 16, powerReplyQueued: 2, powerReplyCompleted: 1, lastPowerReplyTxStatus: 1,
+      lastRx: { initiator: 5, destination: 4, opcode: 68, length: 3, rxStatus: 1 },
+      lastStateChange: { physicalAddress: 4096, logicalAddressMask: 16 }, secret: 'not exposed' }
+    f.child.frame(report)
+    const diagnostics = f.service.snapshot().diagnostics!
+    expect(diagnostics.helper).toMatchObject({ received: 5, rejectedInitiator: 1, powerReplyQueued: 2, powerReplyCompleted: 1, lastPowerReplyTxStatus: 1 })
+    expect(diagnostics.helperReceivedAt).toBeGreaterThan(0)
+    expect(JSON.stringify(diagnostics)).not.toContain('secret')
+    diagnostics.helper!.received = 999
+    expect(f.service.snapshot().diagnostics!.helper!.received).toBe(5)
+    f.child.key(0); f.child.key(0)
+    expect(f.service.snapshot().diagnostics).toMatchObject({ notReadyPresses: 1, blockedPresses: 1, deliveredEvents: 0 })
+    f.child.key(0, false)
+    f.sink.ready = () => true
+    f.child.key(0); f.child.key(0, false)
+    expect(f.service.snapshot().diagnostics!.deliveredEvents).toBe(2)
+  })
+  it.each([-1, 2147483648, 1.5, '1', null])('rejects invalid telemetry counter %j', received => {
+    const f = fixture(); f.child.ready()
+    f.child.frame({ type: 'telemetry', received, acceptedPress: 0, acceptedRelease: 0,
+      rejectedFormat: 0, rejectedInitiator: 0, rejectedDestination: 0, physicalAddress: 4096, logicalAddressMask: 16 })
+    expect(f.child.kill).toHaveBeenCalledWith('SIGTERM')
+    expect(f.service.snapshot().state).toBe('error')
+  })
+  it('rejects out-of-range frame metadata', () => {
+    const f = fixture(); f.child.ready()
+    f.child.frame({ type: 'telemetry', received: 1, acceptedPress: 0, acceptedRelease: 0,
+      rejectedFormat: 0, rejectedInitiator: 0, rejectedDestination: 0, physicalAddress: 4096, logicalAddressMask: 16,
+      lastRx: { initiator: 16, destination: 4, opcode: 68, length: 3, rxStatus: 1 } })
+    expect(f.service.snapshot().state).toBe('error')
+  })
   it('starts only for visible Linux Box, never Desktop/headless tests or opt-out', () => {
     expect(boxCecEnabled('linux', 'box', {})).toBe(true)
     for (const [platform, surface, env] of [

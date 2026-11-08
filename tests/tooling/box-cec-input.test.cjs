@@ -15,11 +15,25 @@ test('kernel CEC follower honors adapter ownership, protocol filtering and shutd
   const result = run()
   assert.equal(result.error, undefined)
   assert.equal(result.status, 0, result.stderr + result.stdout)
-  assert.match(result.stderr, /Ran 22 tests/)
+  assert.match(result.stderr, /Ran 26 tests/)
 })
 test('foreign-initiator negative control is rejected by the behavior suite', unixOnly, () => {
   const result = run(['--negative-control'])
   assert.equal(result.error, undefined)
   assert.equal(result.status, 1, result.stderr + result.stdout)
   assert.match(result.stderr, /FAIL: test_frames_filter_foreign_and_malformed/)
+})
+
+test('telemetry removal negative control fails the real helper regression', unixOnly, () => {
+  const result = run(['--negative-telemetry', '-k', 'bounded_prefilter'])
+  assert.equal(result.error, undefined)
+  assert.equal(result.status, 1, result.stderr + result.stdout)
+  assert.match(result.stderr, /FAIL: test_bounded_prefilter_telemetry_and_topology/)
+})
+
+test('missing power-status reply negative control fails the real helper regression', unixOnly, () => {
+  const result = run(['--negative-power-status', '-k', 'power_status_reply_is_solicited'])
+  assert.equal(result.error, undefined)
+  assert.equal(result.status, 1, result.stderr + result.stdout)
+  assert.match(result.stderr, /FAIL: test_power_status_reply_is_solicited_exact_and_completion_is_authoritative/)
 })

@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import type { KeyboardInputEvent } from 'electron'
-import type { BoxCecStatus } from '../../shared/box-contract'
+import type { BoxCecStatus, BoxCecTelemetry } from '../../shared/box-contract'
 
 // CEC user-control codes, not Linux evdev key numbers. Volume/power/standby
 // stay with the TV; Stop has no implicit destructive/toggle interpretation.
@@ -9,6 +9,32 @@ const KEYS = new Map<number, string>([
   [0x0d, 'Escape'], [0x44, 'MediaPlayPause'], [0x46, 'MediaPlayPause'],
   [0x4b, 'MediaNextTrack'], [0x4c, 'MediaPreviousTrack']
 ])
+const COUNTERS = ['received', 'acceptedPress', 'acceptedRelease', 'rejectedFormat', 'rejectedInitiator', 'rejectedDestination'] as const
+function telemetry(value: Record<string, unknown>): BoxCecTelemetry {
+  const integer = (item: unknown, max: number): number => {
+    if (!Number.isInteger(item) || (item as number) < 0 || (item as number) > max) throw new Error()
+    return item as number
+  }
+  const result = Object.fromEntries(COUNTERS.map(key => [key, integer(value[key], 2147483647)])) as Pick<BoxCecTelemetry, typeof COUNTERS[number]>
+  const output: BoxCecTelemetry = { ...result,
+    physicalAddress: integer(value.physicalAddress, 65535), logicalAddressMask: integer(value.logicalAddressMask, 65535) }
+  for (const key of ['powerReplyQueued', 'powerReplyErrors', 'powerReplySuppressed', 'powerReplyCompleted', 'powerReplyFailed', 'powerReplyExpired'] as const) {
+    if (value[key] !== undefined) output[key] = integer(value[key], 2147483647)
+  }
+  if (value.lastPowerReplyTxStatus !== undefined) output.lastPowerReplyTxStatus = integer(value.lastPowerReplyTxStatus, 255)
+  if (value.lastRx !== undefined) {
+    const row = value.lastRx as Record<string, unknown>
+    if (!row || typeof row !== 'object' || Array.isArray(row)) throw new Error()
+    output.lastRx = { initiator: integer(row.initiator, 15), destination: integer(row.destination, 15),
+      opcode: integer(row.opcode, 255), length: integer(row.length, 16), rxStatus: integer(row.rxStatus, 255) }
+  }
+  if (value.lastStateChange !== undefined) {
+    const row = value.lastStateChange as Record<string, unknown>
+    if (!row || typeof row !== 'object' || Array.isArray(row)) throw new Error()
+    output.lastStateChange = { physicalAddress: integer(row.physicalAddress, 65535), logicalAddressMask: integer(row.logicalAddressMask, 65535) }
+  }
+  return output
+}
 export type CecInputSink = { ready(): boolean; send(event: KeyboardInputEvent): void }
 export type CecOptions = {
   enabled: boolean
@@ -40,9 +66,14 @@ export class BoxCecService {
 
   constructor(private readonly options: CecOptions) {
     this.now = options.now ?? Date.now
-    this.state = { state: options.enabled ? 'starting' : 'disabled', lastInputAt: null }
+    this.state = { state: options.enabled ? 'starting' : 'disabled', lastInputAt: null,
+      diagnostics: { deliveredEvents: 0, notReadyPresses: 0, blockedPresses: 0 } }
   }
-  snapshot(): BoxCecStatus { return { ...this.state } }
+  snapshot(): BoxCecStatus { return structuredClone(this.state) }
+  private count(key: 'deliveredEvents' | 'notReadyPresses' | 'blockedPresses'): void {
+    const diagnostics = this.state.diagnostics!
+    diagnostics[key] = Math.min(2147483647, diagnostics[key] + 1)
+  }
   start(): void {
     if (this.started || this.disposed || !this.options.enabled) return
     this.started = true
@@ -69,8 +100,9 @@ export class BoxCecService {
     if (!keyCode || !this.sink) return
     try {
       // Key-up must clear an already delivered press even after focus loss.
-      if (pressed && !this.sink.ready()) return
+      if (pressed && !this.sink.ready()) { this.count('notReadyPresses'); return }
       this.sink.send({ type: pressed ? 'keyDown' : 'keyUp', keyCode, modifiers: repeat ? ['isautorepeat'] : [] })
+      this.count('deliveredEvents')
     } catch { this.blocked.add(code) }
   }
   private key(code: number, pressed: boolean): void {
@@ -81,8 +113,8 @@ export class BoxCecService {
       this.blocked.delete(code)
       return
     }
-    if (this.blocked.has(code)) return
-    if (!this.sink?.ready()) { this.blocked.add(code); return }
+    if (this.blocked.has(code)) { this.count('blockedPresses'); return }
+    if (!this.sink?.ready()) { this.count('notReadyPresses'); this.blocked.add(code); return }
     const repeat = this.held === code
     if (this.held !== null && !repeat) this.releaseKeys()
     this.held = code
@@ -141,6 +173,9 @@ export class BoxCecService {
               }
               this.key(value.code, value.pressed)
             }
+          } else if (value.type === 'telemetry') {
+            const helper = telemetry(value)
+            this.state.diagnostics = { ...this.state.diagnostics!, helper, helperReceivedAt: this.now() }
           } else if (value.type === 'status' && ['ready', 'unavailable', 'error'].includes(value.state) &&
               typeof value.detail === 'string' && value.detail.length <= 240 && !/[\u0000-\u001f\u007f]/.test(value.detail)) {
             if (value.state !== 'ready') this.releaseKeys()

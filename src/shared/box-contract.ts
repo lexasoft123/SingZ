@@ -52,6 +52,26 @@ export type BoxStorageSnapshot = {
   projects: { dir: string; name: string; bytes: number; driveId: string }[]
 }
 
+export type BoxCecTelemetry = {
+  received: number
+  acceptedPress: number
+  acceptedRelease: number
+  rejectedFormat: number
+  rejectedInitiator: number
+  rejectedDestination: number
+  powerReplyQueued?: number
+  powerReplyErrors?: number
+  powerReplySuppressed?: number
+  powerReplyCompleted?: number
+  powerReplyFailed?: number
+  powerReplyExpired?: number
+  lastPowerReplyTxStatus?: number
+  physicalAddress: number
+  logicalAddressMask: number
+  lastRx?: { initiator: number; destination: number; opcode: number; length: number; rxStatus: number }
+  lastStateChange?: { physicalAddress: number; logicalAddressMask: number }
+}
+
 export type BoxCecStatus = {
   state: 'disabled' | 'starting' | 'ready' | 'unavailable' | 'error'
   detail?: string
@@ -59,6 +79,13 @@ export type BoxCecStatus = {
   /** Kernel receive to Electron main, excluding TV transmission/display delay. */
   lastReceiveToMainMs?: number
   lastPressAt?: number
+  diagnostics?: {
+    helper?: BoxCecTelemetry
+    helperReceivedAt?: number
+    deliveredEvents: number
+    notReadyPresses: number
+    blockedPresses: number
+  }
 }
 
 export type BoxDiagnostics = {

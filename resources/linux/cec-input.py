@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Linux CEC input follower. stdout is JSONL; this helper never transmits commands.
+"""Linux CEC input follower. stdout is JSONL; only solicited TV power-status replies are transmitted.
 
 UAPI layouts/ioctls: include/uapi/linux/cec.h in the Linux kernel.
 https://docs.kernel.org/userspace-api/media/cec/cec-ioc-g-mode.html
@@ -70,6 +70,7 @@ G_CAPS = ioctl_number(3, 0, Caps)
 G_PHYS = ioctl_number(2, 1, C.c_uint16)
 G_LOG = ioctl_number(2, 3, LogAddrs)
 S_LOG = ioctl_number(3, 4, LogAddrs)
+TRANSMIT = ioctl_number(3, 5, Message)
 RECEIVE = ioctl_number(3, 6, Message)
 DQEVENT = ioctl_number(3, 7, Event)
 S_MODE = ioctl_number(1, 9, C.c_uint32)
@@ -168,6 +169,13 @@ class Follower:
         self.owned = False
         self.mask = 0
         self.held = None
+        self.telemetry = dict.fromkeys(('received', 'acceptedPress', 'acceptedRelease',
+                                       'rejectedFormat', 'rejectedInitiator', 'rejectedDestination',
+                                       'powerReplyQueued', 'powerReplyErrors', 'powerReplySuppressed',
+                                       'powerReplyCompleted', 'powerReplyFailed', 'powerReplyExpired'), 0)
+        self.next_telemetry = 0
+        self.last_power_reply = float('-inf')
+        self.pending_power_reply = None
 
     def release(self):
         if self.held is not None:
@@ -217,26 +225,94 @@ class Follower:
         if not stopping():
             raise Unavailable("Timed out claiming a playback logical address.")
 
-    def message(self, value):
-        if value.sequence or value.tx_status or value.rx_status != 1 or value.flags:
+    def count(self, name):
+        self.telemetry[name] = min(2147483647, self.telemetry[name] + 1)
+
+    def report_telemetry(self, force=False):
+        now = self.clock()
+        if not force and now < self.next_telemetry:
             return
-        if value.len not in (2, 3) or value.msg[0] >> 4 != 0:
+        self.next_telemetry = now + 5
+        try:
+            physical = self.kernel.request(self.adapter.fd, G_PHYS, C.c_uint16()).value
+            logs = self.kernel.request(self.adapter.fd, G_LOG, LogAddrs())
+        except OSError:
+            return  # Diagnostics must not introduce an input-service failure.
+        self.output({"type": "telemetry", **self.telemetry,
+                     "physicalAddress": physical, "logicalAddressMask": logs.log_addr_mask})
+        self.next_telemetry = now + 5
+
+    def power_status_reply(self, logical_address):
+        # A query reports this running appliance's state; it never powers a TV
+        # or selects a source. One pending reply and one attempt/sec bound TX.
+        now = self.clock()
+        if self.pending_power_reply and now >= self.pending_power_reply[1]:
+            self.count('powerReplyExpired')
+            self.pending_power_reply = None
+        if not self.owned or now - self.last_power_reply < 1 or self.pending_power_reply:
+            self.count('powerReplySuppressed')
+            return
+        self.last_power_reply = now
+        reply = Message()
+        reply.len = 3
+        reply.msg[:3] = [logical_address << 4, 0x90, 0]  # Report Power Status: On -> TV
+        try:
+            result = self.kernel.request(self.adapter.fd, TRANSMIT, reply)
+        except OSError:
+            # EBUSY/EAGAIN and disconnected adapters must not break key input.
+            self.count('powerReplyErrors')
+            return
+        self.count('powerReplyQueued')
+        if result.tx_status:
+            self.power_status_completion(result.tx_status)
+        elif result.sequence:
+            self.pending_power_reply = (int(result.sequence), now + 2)
+
+    def power_status_completion(self, tx_status):
+        self.telemetry['lastPowerReplyTxStatus'] = int(tx_status)
+        self.count('powerReplyCompleted' if tx_status & 1 else 'powerReplyFailed')
+
+    def message(self, value):
+        if value.sequence and value.tx_status and not value.rx_status:
+            if self.pending_power_reply and value.sequence == self.pending_power_reply[0]:
+                self.pending_power_reply = None
+                self.power_status_completion(value.tx_status)
+            return
+        self.count('received')
+        self.telemetry['lastRx'] = {
+            'initiator': int(value.msg[0] >> 4), 'destination': int(value.msg[0] & 15),
+            'opcode': int(value.msg[1]) if value.len >= 2 else 0,
+            'length': int(value.len), 'rxStatus': int(value.rx_status)}
+        if value.sequence or value.tx_status or value.rx_status != 1 or value.flags:
+            self.count('rejectedFormat')
+            return
+        if value.len not in (2, 3):
+            self.count('rejectedFormat')
+            return
+        if value.msg[0] >> 4 != 0:
+            self.count('rejectedInitiator')
             return
         destination = value.msg[0] & 15
         if not self.mask & (1 << destination):
+            self.count('rejectedDestination')
             return
-        if value.msg[1] == 0x44 and value.len == 3:
+        if value.msg[1] == 0x8f and value.len == 2:
+            self.power_status_reply(destination)
+        elif value.msg[1] == 0x44 and value.len == 3:
+            self.count('acceptedPress')
             code = int(value.msg[2])
             if self.held is not None and self.held != code:
                 self.release()
             self.held = code
             output = {"type": "key", "code": code, "pressed": True}
-            # Linux CLOCK_MONOTONIC timestamp, kept as a string to preserve ns.
             if value.rx_ts:
                 output["receivedAtNs"] = str(value.rx_ts)
             self.output(output)
         elif value.msg[1] == 0x45 and value.len == 2:
+            self.count('acceptedRelease')
             self.release()
+        else:
+            self.count('rejectedFormat')
 
     def drain_events(self, initial=False):
         for _ in range(32):
@@ -250,7 +326,10 @@ class Follower:
                 raise Unavailable("CEC input events were lost; reconnect the remote.")
             if event.event == 1:
                 changed = event.state_change
+                self.telemetry['lastStateChange'] = {
+                    'physicalAddress': int(changed.phys_addr), 'logicalAddressMask': int(changed.log_addr_mask)}
                 if changed.phys_addr != self.adapter.physical or (not initial and changed.log_addr_mask != self.mask):
+                    self.report_telemetry(force=True)
                     raise Unavailable("HDMI CEC connection changed.")
             elif event.event == 5:
                 raise Unavailable("HDMI CEC output disconnected.")
@@ -276,6 +355,7 @@ class Follower:
         if stopping():
             return
         status(self.output, 'ready', 'TV remote connected.')
+        self.report_telemetry(force=True)
         poll = (poll_factory or select.poll)()
         poll.register(self.adapter.fd, select.POLLIN | select.POLLPRI | select.POLLERR | select.POLLHUP)
         while not stopping():
@@ -299,6 +379,7 @@ class Follower:
                         continue
                     raise
                 self.message(value)
+            self.report_telemetry()
 
 
 def main(argv=None):

@@ -25,7 +25,9 @@ The helper accepts only TV-initiated user-control messages addressed to its own
 logical address. It registers a Playback address and disables RC passthrough so
 kernel-global keyboard input cannot duplicate app input. It never changes the
 physical address or sends TV power, standby or active-source commands. Kernel
-logical-address negotiation and protocol replies remain kernel responsibilities.
+logical-address negotiation and core identity replies remain kernel responsibilities.
+The helper answers only a valid TV-addressed Give Device Power Status query
+with Report Power Status: On, describing this running appliance.
 
 ## Configuration and recovery
 
@@ -82,3 +84,39 @@ Arrows/OK/Back/media and held wake sequences. Test disconnect/reconnect, UI
 restart, display and audio stability. Synthetic tests cannot prove TV forwarding
 or remote compatibility. On RK3588 the HDMI-QP output driver must implement CEC;
 the mere presence of an HDMI-input `/dev/cec0` does not establish support.
+
+### Power-cycle input diagnostics
+
+The existing helper reports bounded counters at readiness and every five seconds:
+received frames, accepted press/release frames, and rejected format, initiator or
+destination. It reports current physical address/logical mask and only the last
+frame header metadata (initiator, destination, opcode, length and receive status),
+plus the last state-change address/mask. No key arguments or raw payloads are logged.
+Helper counters restart with the helper; main records telemetry receipt wall time
+and keeps app-lifetime delivered-event, not-ready-press and blocked-press counters.
+Delivery counts mean Electron accepted injection, not that the renderer acted.
+The snapshot is available through the existing diagnostics API. Ready means the
+local address is registered; it does not establish that the display forwards keys.
+Compare counters around a remote press after power-on to separate absent bus
+traffic, filtering and main delivery. This adds no source announcement, power
+command, address retry, global input or second CEC client.
+
+### Solicited power-status reply
+
+A received TV logical-address 0 query (`0x8f`, exactly two bytes) directed to
+our claimed playback address gets a directed `0x90 0x00` reply (On). It uses
+`CEC_TRANSMIT` on the existing nonblocking descriptor, at most one attempt per
+second and one pending completion, expiring after two seconds. No retry queue
+is created. Busy/disconnected transmit errors are counted without stopping keys.
+No reply is sent during startup or for foreign, broadcast, malformed or other
+requests. This neither powers another device nor selects/announces a source.
+
+Optional diagnostics distinguish `powerReplyQueued` (kernel accepted enqueue),
+`powerReplyErrors`, `powerReplySuppressed`, `powerReplyCompleted` (successful
+kernel TX result), `powerReplyFailed`, `powerReplyExpired`, and the last kernel
+TX status. Enqueue does not prove delivery; a successful TX result does not prove
+that the TV resumes forwarding remote keys. New fields are optional for older
+helper/main combinations. Physical recovery still requires qualification.
+
+References: [v4l-utils follower power-status handling](https://github.com/gjasny/v4l-utils/blob/master/utils/cec-follower/cec-processing.cpp),
+[Linux CEC transmit/receive API](https://docs.kernel.org/userspace-api/media/cec/cec-ioc-receive.html).

@@ -23,9 +23,17 @@ NEGATIVE = '--negative-control' in sys.argv
 if NEGATIVE:
     sys.argv.remove('--negative-control')
     source = Path(spec.origin).read_text().replace(
-        'if value.len not in (2, 3) or value.msg[0] >> 4 != 0:',
-        'if value.len not in (2, 3):')
+        'if value.msg[0] >> 4 != 0:',
+        'if False:')
     exec(compile(source, spec.origin, 'exec'), cec.__dict__)
+
+if '--negative-telemetry' in sys.argv:
+    sys.argv.remove('--negative-telemetry')
+    cec.Follower.report_telemetry = lambda *args, **kwargs: None
+
+if '--negative-power-status' in sys.argv:
+    sys.argv.remove('--negative-power-status')
+    cec.Follower.power_status_reply = lambda *args, **kwargs: None
 
 
 def copy(value):
@@ -53,6 +61,8 @@ class FakeKernel(cec.Kernel):
         super().__init__(self.ioctl_fake)
         self.devices = devices or {'/dev/cec0': (caps(), 0x1000)}
         self.opened, self.closed, self.operations, self.configurations = [], [], [], []
+        self.transmissions = []
+        self.tx_error = None
         self.logs = cec.LogAddrs()
         self.events, self.messages = [], []
         self.claim = True
@@ -90,6 +100,12 @@ class FakeKernel(cec.Kernel):
             if not self.events:
                 raise BlockingIOError(errno.EAGAIN, 'no events')
             result = self.events.pop(0)
+        elif operation == cec.TRANSMIT:
+            if self.tx_error:
+                raise OSError(self.tx_error, 'transmit unavailable')
+            result = cec.Message.from_buffer_copy(buffer)
+            self.transmissions.append(copy(result))
+            result.sequence = len(self.transmissions)
         elif operation == cec.RECEIVE:
             if not self.messages:
                 raise BlockingIOError(errno.EAGAIN, 'no messages')
@@ -279,6 +295,100 @@ class CecTests(unittest.TestCase):
         follower.close()
         self.assertEqual(kernel.configurations[-1].num_log_addrs, 0)
 
+    def test_power_status_reply_is_solicited_exact_and_completion_is_authoritative(self):
+        kernel, output = FakeKernel(), []
+        follower = kernel.follower(output)
+        follower.register()
+        self.assertEqual(kernel.transmissions, [])
+        self.assertEqual(cec.TRANSMIT, cec.ioctl_number(3, 5, cec.Message))
+        follower.message(frame([0x04, 0x8f]))
+        self.assertEqual(len(kernel.transmissions), 1)
+        reply = kernel.transmissions[0]
+        self.assertEqual(list(reply.msg[:reply.len]), [0x40, 0x90, 0])
+        self.assertEqual((reply.timeout, reply.reply, reply.flags), (0, 0, 0))
+        self.assertEqual(follower.telemetry['powerReplyQueued'], 1)
+        self.assertEqual(follower.telemetry['powerReplyCompleted'], 0)
+        follower.message(frame([0x40, 0x90, 0], sequence=999, tx_status=1, rx_status=0))
+        self.assertEqual(follower.telemetry['powerReplyCompleted'], 0)
+        follower.message(frame([0x40, 0x90, 0], sequence=1, tx_status=1, rx_status=0))
+        self.assertEqual(follower.telemetry['powerReplyCompleted'], 1)
+        self.assertEqual(follower.telemetry['lastPowerReplyTxStatus'], 1)
+        follower.message(frame([0x04, 0x8f]))
+        self.assertEqual(len(kernel.transmissions), 1)  # one/sec, even after completion
+        kernel.clock = 1
+        follower.message(frame([0x04, 0x8f]))
+        follower.message(frame([0x40, 0x90, 0], sequence=2, tx_status=4, rx_status=0))
+        self.assertEqual(follower.telemetry['powerReplyFailed'], 1)
+        self.assertEqual(follower.telemetry['lastPowerReplyTxStatus'], 4)
+        follower.close()
+
+    def test_power_status_rejects_foreign_wrong_address_and_malformed_queries(self):
+        kernel = FakeKernel()
+        follower = kernel.follower()
+        follower.register()
+        invalid = [frame([0x54, 0x8f]), frame([0x08, 0x8f]), frame([0x0f, 0x8f]),
+                   frame([0x04, 0x8e]), frame([0x04, 0x8f, 0]), frame([0x04]),
+                   frame([0x04, 0x8f], rx_status=0), frame([0x04, 0x8f], flags=1),
+                   frame([0x04, 0x8f], sequence=1), frame([0x04, 0x8f], tx_status=1)]
+        for message in invalid:
+            follower.message(message)
+        self.assertEqual(kernel.transmissions, [])
+        follower.close()
+
+    def test_busy_power_reply_never_breaks_remote_input_and_pending_is_bounded(self):
+        kernel, output = FakeKernel(), []
+        follower = kernel.follower(output)
+        follower.register()
+        for error in (errno.EBUSY, errno.EAGAIN, getattr(errno, 'ENONET', 64)):
+            kernel.tx_error = error
+            follower.message(frame([0x04, 0x8f]))
+            follower.message(frame([0x04, 0x44, 1]))
+            follower.message(frame([0x04, 0x45]))
+            kernel.clock += 1
+        self.assertEqual(follower.telemetry['powerReplyErrors'], 3)
+        self.assertEqual(len(output), 6)
+        kernel.tx_error = None
+        follower.message(frame([0x04, 0x8f]))
+        kernel.clock += 1
+        follower.message(frame([0x04, 0x8f]))
+        self.assertEqual(len(kernel.transmissions), 1)  # outstanding reply not stacked
+        kernel.clock += 1
+        follower.message(frame([0x04, 0x8f]))
+        self.assertEqual(len(kernel.transmissions), 2)
+        self.assertEqual(follower.telemetry['powerReplyExpired'], 1)
+        follower.close()
+
+    def test_bounded_prefilter_telemetry_and_topology(self):
+        kernel, output = FakeKernel(), []
+        follower = kernel.follower(output)
+        follower.register()
+        follower.report_telemetry(force=True)
+        follower.message(frame([0x54, 0x44, 1]))
+        follower.message(frame([0x08, 0x44, 1]))
+        follower.message(frame([0x04, 0x44, 1]))
+        follower.message(frame([0x04, 0x45]))
+        follower.message(frame([0x04, 0x44], rx_status=0))
+        event = cec.Event()
+        event.event, event.state_change.phys_addr, event.state_change.log_addr_mask = 1, 0x1000, 1 << 4
+        kernel.events.append(event)
+        follower.drain_events()
+        follower.report_telemetry()
+        self.assertEqual(len([v for v in output if v['type'] == 'telemetry']), 1)
+        kernel.clock = 5
+        follower.report_telemetry()
+        report = output[-1]
+        self.assertEqual(report['received'], 5)
+        self.assertEqual((report['acceptedPress'], report['acceptedRelease']), (1, 1))
+        self.assertEqual((report['rejectedInitiator'], report['rejectedDestination'], report['rejectedFormat']), (1, 1, 1))
+        self.assertEqual(report['lastRx'], dict(initiator=0, destination=4, opcode=0x44, length=2, rxStatus=0))
+        self.assertEqual(report['lastStateChange'], dict(physicalAddress=0x1000, logicalAddressMask=1 << 4))
+        self.assertEqual(len(kernel.configurations), 1)  # unchanged topology never reclaims
+        event.state_change.log_addr_mask = 1 << 8
+        kernel.events.append(event)
+        with self.assertRaises(cec.Unavailable):
+            follower.drain_events()
+        follower.close()
+
     def test_frames_filter_foreign_and_malformed(self):
         kernel, output = FakeKernel(), []
         follower = kernel.follower(output)
@@ -358,7 +468,8 @@ class CecTests(unittest.TestCase):
             signal.signal(signal.SIGTERM, old_term)
             signal.signal(signal.SIGINT, old_int)
         events = [json.loads(line) for line in output.getvalue().splitlines()]
-        self.assertEqual(events, [{'type': 'status', 'state': 'ready', 'detail': 'TV remote connected.'}, {'type': 'key', 'code': 1, 'pressed': True}, {'type': 'key', 'code': 1, 'pressed': False}])
+        self.assertEqual(len([v for v in events if v['type'] == 'telemetry']), 1)
+        self.assertEqual([v for v in events if v['type'] != 'telemetry'], [{'type': 'status', 'state': 'ready', 'detail': 'TV remote connected.'}, {'type': 'key', 'code': 1, 'pressed': True}, {'type': 'key', 'code': 1, 'pressed': False}])
         self.assertEqual(kernel.configurations[-1].num_log_addrs, 0)
         self.assertEqual(kernel.closed, [100])
 
