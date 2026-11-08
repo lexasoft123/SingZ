@@ -118,6 +118,19 @@ let app = null
   await watchdog.run('catalog Settings returns without opening a song', 60, async () => {
     await page.getByRole('button', { name: 'Settings', exact: true }).click()
     await page.waitForSelector('[data-journey-page="home"]')
+    await page.locator('[data-focus="journey-audio"]').focus()
+    await page.keyboard.press('ArrowDown')
+    const remoteFocus = await page.evaluate(() => {
+      const previous = document.querySelector('[data-focus="journey-audio"]')
+      const current = document.activeElement
+      return {
+        moved: current !== previous && current?.matches('.journey-row'),
+        immediate: [previous, current].every(element => getComputedStyle(element).transitionDuration.split(',').every(value => parseFloat(value) === 0)),
+        transitions: [previous, current].flatMap(element => element.getAnimations()).filter(animation => animation instanceof CSSTransition).length
+      }
+    })
+    check(remoteFocus.moved, 'remote arrow moves Settings focus on keydown')
+    check(remoteFocus.immediate && remoteFocus.transitions === 0, 'old and new TV focus settle immediately without desktop colour/glow transitions')
     await page.locator('[data-focus="journey-audio"]').click()
     await page.waitForSelector('[data-settings-back]')
     await page.locator('[data-settings-back]').click()

@@ -30,6 +30,12 @@ export function DiagnosticsPage({ diagnostics, loading, error, onRefresh, onAudi
       {audio.playing !== null && <p>{tJourney('journey.diagnostics.playing', { value: booleanText(audio.playing) })}</p>}
       <p className="journey-note">{tJourney('journey.diagnostics.safeAudio')}</p>
     </section>
+    {diagnostics?.cec && <section className="journey-section" data-cec-status={diagnostics.cec.state}>
+      <h2>{tJourney('journey.diagnostics.cec')}</h2>
+      <p>{tJourney(`journey.diagnostics.cec.${diagnostics.cec.state}`)}</p>
+      {diagnostics.cec.detail && <p>{diagnostics.cec.detail}</p>}
+      <p>{tJourney('journey.diagnostics.cec.lastInput')}: {diagnostics.cec.lastInputAt === null ? '—' : new Date(diagnostics.cec.lastInputAt).toLocaleTimeString()}</p>
+    </section>}
     <p className="journey-note">{tJourney('journey.diagnostics.noResume')}</p>
     <div className="journey-actions">
       <Button data-journey-primary variant="primary" disabled={loading} onClick={onRefresh}>{tJourney('journey.refresh')}</Button>

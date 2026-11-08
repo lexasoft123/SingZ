@@ -48,11 +48,21 @@ export type BoxStorageSnapshot = {
   projects: { dir: string; name: string; bytes: number; driveId: string }[]
 }
 
+export type BoxCecStatus = {
+  state: 'disabled' | 'starting' | 'ready' | 'unavailable' | 'error'
+  detail?: string
+  lastInputAt: number | null
+  /** Kernel receive to Electron main, excluding TV transmission/display delay. */
+  lastReceiveToMainMs?: number
+  lastPressAt?: number
+}
+
 export type BoxDiagnostics = {
   appVersion: string
   platform: string
   arch: string
   audio: unknown
+  cec?: BoxCecStatus
 }
 
 export type BoxPhoneState = {

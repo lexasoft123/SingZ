@@ -35,6 +35,9 @@ body { font-family: var(--sz-font-display); -webkit-font-smoothing: antialiased;
 .box-tv { position: absolute; width: 1600px; height: 900px; transform-origin: top left; overflow: hidden; color: var(--sz-text); background: radial-gradient(900px 620px at 16% -12%, var(--sz-ambient-warm), transparent), radial-gradient(760px 540px at 96% 112%, var(--sz-ambient-cool), transparent), var(--sz-bg); }
 .box-tv * { box-sizing: border-box; }
 .box-tv button { cursor: pointer; text-decoration: none; }
+/* Remote focus must appear and clear on the same frame. UIKit's desktop
+ * button colour/glow transitions otherwise trail each TV arrow by 150–200 ms. */
+.box-tv button, .box-tv input, .box-tv [data-remote-focus] { transition: none; }
 .box-tv .pill { justify-content: center; font-weight: 600; line-height: var(--box-row-line); text-align: center; white-space: nowrap; }
 .box-tv button:focus-visible, .box-tv input:focus-visible { outline: 2px solid var(--sz-accent); outline-offset: 3px; }
 .box-titlebar { height: 64px; display: flex; align-items: center; gap: 28px; padding: 0 var(--box-page-x); border-bottom: 1px solid var(--sz-line); }

@@ -69,6 +69,7 @@ import { cancelBeatsMl, registerBeatsIpc } from './beats-ml'
 import { boxKioskRequested, desktopUpdaterEnabled, developmentRendererUrl, requestedRendererSurface } from './launch-surface'
 import { shouldDeferBoxApplicationQuit, shouldResumeBoxApplicationQuit } from './box-close-policy'
 import { registerBoxIpc } from './box/ipc'
+import { BoxCecService, boxCecEnabled } from './box/cec'
 import { failedPlayback, playbackCodecSupportsPath } from './capture'
 import { createRemoteCaptureOwner } from './audio-process'
 import { describeLaneMeasureBatch, LaneMeasureCache, parseDesktopPlaybackLaneConfigs } from './lane-measure-cache'
@@ -96,6 +97,7 @@ const laneMeasureCache = new LaneMeasureCache({
 })
 let boxBackend: ReturnType<typeof registerBoxIpc> = null
 let boxBackendDisposeStarted = false
+let boxCec: BoxCecService | null = null
 const boxCloseCompletions = new WeakSet<WebContents>()
 const boxCloseTimers = new WeakMap<WebContents, ReturnType<typeof setTimeout>>()
 let boxApplicationQuitRequested = false
@@ -242,10 +244,26 @@ function createWindow(): void {
 
   attachRendererLogs(win.webContents)
   boxBackend?.attachRenderer(win.webContents)
+  if (surface === 'box' && boxCec) {
+    let loaded = false
+    const cec = boxCec
+    cec.attach({
+      ready: () => loaded && !win.isDestroyed() && win.isFocused() && !boxCloseTimers.has(win.webContents),
+      send: input => { if (!win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.sendInputEvent(input) }
+    })
+    win.webContents.on('did-start-navigation', (_event, _url, _inPlace, mainFrame) => {
+      if (mainFrame) { loaded = false; cec.releaseKeys() }
+    })
+    win.webContents.on('did-finish-load', () => { loaded = true })
+    win.webContents.on('render-process-gone', () => { loaded = false; cec.releaseKeys() })
+    win.on('blur', () => cec.releaseKeys())
+    win.once('closed', () => cec.detach())
+  }
   if (surface === 'desktop') trackWindowState(win)
   win.on('close', (event) => {
     if (surface !== 'box' || boxCloseCompletions.has(win.webContents)) return
     event.preventDefault()
+    boxCec?.releaseKeys()
     requestBoxClose(win)
   })
   win.on('maximize', () => win.webContents.send('win:maximized', true))
@@ -1034,6 +1052,13 @@ app.whenReady().then(async () => {
   allowRoot(stemsRoot())
   allowRoot(projectsRoot())
   registerIpc()
+  boxCec = new BoxCecService({
+    enabled: boxCecEnabled(process.platform, requestedRendererSurface(process.argv), process.env),
+    helperPath: app.isPackaged ? join(process.resourcesPath, 'box-audio/cec-input.py')
+      : join(app.getAppPath(), 'resources/linux/cec-input.py'),
+    device: process.env.SINGZ_BOX_CEC_DEVICE
+  })
+  boxCec.start()
   boxBackend = registerBoxIpc({
     userDataDir: app.getPath('userData'),
     appVersion: app.isPackaged ? app.getVersion() : 'dev',
@@ -1041,6 +1066,7 @@ app.whenReady().then(async () => {
       ? developmentRendererUrl(process.env.ELECTRON_RENDERER_URL, 'box')
       : pathToFileURL(join(import.meta.dirname, '../renderer/box/box.html')).toString(),
     socketPath: process.env.SINGZ_BOX_PLATFORM_SOCKET,
+    cecStatus: () => boxCec!.snapshot(),
     audioInputs: () => captureOwner.devices(),
     audioHost: () => captureOwner.hostDevices()
   })
@@ -1066,6 +1092,7 @@ app.whenReady().then(async () => {
 let audioQuitPending = false
 let audioQuitComplete = false
 app.on('before-quit', event => {
+  void boxCec?.dispose()
   if (audioQuitComplete) return
   if (shouldDeferBoxApplicationQuit(requestedRendererSurface(process.argv), boxCleanupFinished)) {
     event.preventDefault()
@@ -1103,6 +1130,7 @@ app.on('before-quit', event => {
     if (finishing) return
     finishing = true
     await captureOwner.stop()
+    await boxCec?.dispose()
     audioQuitComplete = true
     app.quit()
   }

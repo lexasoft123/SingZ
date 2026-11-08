@@ -52,7 +52,7 @@ test('Box config validates and preserves the trusted Desktop packaging inputs', 
     repo: 'SingZ'
   })
   assert.deepEqual(box.linux.target, desktop.linux.target)
-  assert.deepEqual(box.deb.depends, desktop.deb.depends)
+  assert.deepEqual(box.deb.depends, [...desktop.deb.depends, 'python3'])
   assert.deepEqual(box.mac, desktop.mac)
   assert.deepEqual(box.win, desktop.win)
   assert.deepEqual(box.linux.extraResources, desktop.linux.extraResources)

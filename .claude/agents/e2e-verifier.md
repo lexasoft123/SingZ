@@ -65,6 +65,19 @@ PR, issue, commit or release note.
 6. Report the mac and windows-field results side by side, per rule, with the control's
    column when one was needed.
 
+## Box HDMI-CEC input
+
+`electron tests/e2e/box-cec-input-smoke.cjs` uses a hidden isolated profile and
+fake CEC transport to verify native Electron DOM key names, repeat flags and
+range-input defaults. On Linux use `xvfb-run -a` plus
+`--ozone-platform=x11 --disable-gpu`; headless audio-host qualification is a
+separate gate and does not establish BrowserWindow input support. Pair it with
+`tests/unit/box-cec.test.ts`, the Python
+kernel-API fixture in `tests/tooling/box-cec-input.test.cjs`, and the full Box
+wake-chord smoke. It never opens a CEC device. Real HDMI output/TV/handset,
+hotplug and kernel-driver qualification are separate; see
+`docs/specs/singz-box/cec-input.md`.
+
 ## Platform: mac (local desktop)
 
 `node tests/e2e/box-smoke.cjs` drives the separate Box surface with generated silent FLAC fixtures, an isolated library/userData/model root and no original recordings. It checks paused stem-only open, real transport/lyrics, queue continuity and switch confirmation, persisted mix, the complete remote wake chord and fixed UHD scaling. Set `E2E_PACKAGED` to an installed SingZ executable to run the same driver against that app; without it the driver uses this checkout's `out/` build. This is not Pi, TV, FLOW 8 or microphone qualification.

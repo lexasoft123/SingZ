@@ -4,7 +4,7 @@ import { BoxPhoneService } from './phone'
 import { BoxPlatformService } from './platform'
 import { BoxStateService } from './state'
 import { BoxStorageService } from './storage'
-import type { BoxPreferences, BoxQueueRef, BoxResult } from '../../shared/box-contract'
+import type { BoxPreferences, BoxQueueRef, BoxResult, BoxCecStatus } from '../../shared/box-contract'
 
 export type BoxBackend = ReturnType<typeof registerBoxIpc> extends infer T ? Exclude<T, null> : never
 type BoxIpcOptions = {
@@ -14,6 +14,7 @@ type BoxIpcOptions = {
   socketPath?: string
   audioInputs: () => unknown
   audioHost: () => unknown
+  cecStatus?: () => BoxCecStatus
 }
 type Handler = (event: IpcMainInvokeEvent, args: unknown[]) => unknown | Promise<unknown>
 const failure = (error: string, code: string): BoxResult<never> => ({ ok: false, error, code })
@@ -78,14 +79,19 @@ export function registerBoxIpc(options: BoxIpcOptions) {
     'box:storage-snapshot': () => storage.snapshot(),
     'box:cache-remove': (_event, [value]) => storage.removeCachedProject(value as string),
     'box:diagnostics': async () => {
-      const [inputs, host] = await Promise.all([options.audioInputs(), options.audioHost()])
+      const inventories = await Promise.allSettled([
+        Promise.resolve().then(options.audioInputs), Promise.resolve().then(options.audioHost)
+      ])
+      const [inputs, host] = inventories.map(result => result.status === 'fulfilled' ? result.value
+        : { ok: false, error: 'Audio service is unavailable.' })
       return {
         ok: true,
         value: {
           appVersion: options.appVersion,
           platform: process.platform,
           arch: process.arch,
-          audio: { inputs, host }
+          audio: { inputs, host },
+          cec: options.cecStatus?.()
         }
       }
     },

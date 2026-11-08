@@ -10,8 +10,13 @@ directories:
 files:
   - '!electron-builder.box.yml'
 artifactName: SingZ-Box-${version}-linux-${arch}.${ext}
+extraResources:
+  - from: resources/linux/cec-input.py
+    to: box-audio/cec-input.py
 publish: null
 linux:
   executableName: singz-box
 deb:
   packageName: singz-box
+  depends:
+    - python3

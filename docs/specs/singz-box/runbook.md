@@ -108,3 +108,5 @@ Qualify microphone routing/monitoring, USB reconnect/device-loss recovery,
 long-run playback, latency and physical CEC/HID behavior separately. Network
 provisioning, signed image installation, boot health and rollback need real
 OS-service and failure-injection tests; the screen contract alone is insufficient.
+
+See [HDMI-CEC input](cec-input.md) for adapter selection, remote mappings, diagnostics and physical qualification.

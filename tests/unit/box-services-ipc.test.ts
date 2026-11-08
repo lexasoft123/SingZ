@@ -38,7 +38,7 @@ const originalSurface = process.env.SINGZ_SURFACE
 async function register(
   rendererURL: string,
   surface = 'box',
-  audio: Partial<Pick<Parameters<typeof registerBoxIpc>[0], 'audioInputs' | 'audioHost'>> = {}
+  audio: Partial<Pick<Parameters<typeof registerBoxIpc>[0], 'audioInputs' | 'audioHost' | 'cecStatus'>> = {}
 ) {
   process.env.SINGZ_SURFACE = surface
   const userDataDir = await mkdtemp(join(tmpdir(), 'box-ipc-'))
@@ -86,6 +86,23 @@ describe('Box IPC renderer trust', () => {
     const result = await invoke(owner, 'box:diagnostics')
     expect(result).toMatchObject({ ok: true, value: { audio: { inputs, host } } })
     expect(() => structuredClone(result)).not.toThrow()
+  })
+
+  it('reports CEC independently when the audio service is unavailable', async () => {
+    const url = 'file:///tmp/renderer/box/box.html'
+    const cec = { state: 'unavailable' as const, detail: 'No HDMI output CEC adapter.', lastInputAt: null }
+    const backend = await register(url, 'box', {
+      audioInputs: () => { throw new Error('private native failure') },
+      audioHost: async () => { throw new Error('private audio socket path') },
+      cecStatus: () => cec
+    })
+    if (!backend) throw new Error('Box backend was not registered')
+    const owner = new Sender(url); attached(backend, owner)
+    const result = await invoke(owner, 'box:diagnostics')
+    expect(result).toMatchObject({ ok: true, value: { cec, audio: {
+      inputs: { ok: false }, host: { ok: false }
+    } } })
+    expect(JSON.stringify(result)).not.toContain('private')
   })
 
   it('registers no Box handlers for Desktop', async () => {
