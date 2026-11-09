@@ -664,6 +664,22 @@ impl TrainingScreen {
     }
     fn activate_setup(&mut self,id:&str,w:&mut Window,cx:&mut Context<Self>){
         if !self.keyboard_order.borrow().iter().any(|item|item==id){return;}
+        if let Some(choice) = match id {
+            "training-prepare-notes" => Some(crate::training_preparation::Choice::Notes),
+            "training-prepare-intervals" => Some(crate::training_preparation::Choice::Intervals),
+            "training-prepare-chords" => Some(crate::training_preparation::Choice::Chords),
+            "training-prepare-mixed" => Some(crate::training_preparation::Choice::Mixed),
+            _ => None,
+        } {
+            // A queued pointer/key event must still belong to the mounted Home
+            // card and satisfy the current song/audio eligibility. Choosing a
+            // recipe opens setup only; capture/cues require explicit Start.
+            if self.run.is_none() && self.route == Route::Home
+                && self.song.as_ref().is_some_and(|song|self.audio_available || song.key.is_none()) {
+                self.prepare_song(choice,cx);
+            }
+            return;
+        }
         if let Some(index)=id.strip_prefix("training-exercise-").and_then(|v|v.parse::<usize>().ok()).filter(|i|*i<EXERCISES.len()){
             self.preparation=None;self.preparation_notice=None;self.mixed_kinds=None;self.exercise=EXERCISES[index];if matches!(self.exercise,Exercise::Note|Exercise::Scale){self.task=0;}self.navigate(Route::Setup,cx);return;
         }
@@ -720,7 +736,7 @@ impl TrainingScreen {
     pub fn focused_control(&self,w:&Window)->Option<String>{self.keyboard_focus.borrow().iter().find(|(_,focus)|focus.is_focused(w)).map(|(id,_)|id.clone())}
     pub fn keyboard_state(&self,w:&Window,cx:&App)->serde_json::Value{
         let focused=self.focused_control(w);let bounds=focused.as_ref().and_then(|id|self.keyboard_bounds.borrow().get(id).copied());let viewport=self.keyboard_viewport();let sticky=self.keyboard_bounds.borrow().get("training-footer").copied().filter(|_|self.run.is_none()&&self.route==Route::Setup);let body_bottom=sticky.map_or(viewport.bottom(),|footer|footer.top()-px(8.));let popup_bounds=self.open.and_then(|id|self.keyboard_bounds.borrow().get(&format!("training-popup-{id}")).copied());
-        serde_json::json!({"route":format!("{:?}",self.route),"exercise":format!("{:?}",self.exercise),"focusOrder":self.keyboard_order.borrow().clone(),"focusedControl":focused,"focusInside":self.keyboard_scope.contains_focused(w,cx),"focusedBounds":bounds.map(|b|[f32::from(b.left()),f32::from(b.top()),f32::from(b.size.width),f32::from(b.size.height)]),"viewportBounds":[f32::from(viewport.left()),f32::from(viewport.top()),f32::from(viewport.size.width),f32::from((body_bottom-viewport.top()).max(px(0.)))],"scrollViewportBounds":[f32::from(viewport.left()),f32::from(viewport.top()),f32::from(viewport.size.width),f32::from(viewport.size.height)],"stickyFooterBounds":sticky.map(|b|[f32::from(b.left()),f32::from(b.top()),f32::from(b.size.width),f32::from(b.size.height)]),"popupBounds":popup_bounds.map(|b|[f32::from(b.left()),f32::from(b.top()),f32::from(b.size.width),f32::from(b.size.height)]),"scrollOffset":[f32::from(self.keyboard_scroll().offset().x),f32::from(self.keyboard_scroll().offset().y)],"scrollMaxOffset":[f32::from(self.keyboard_scroll().max_offset().x),f32::from(self.keyboard_scroll().max_offset().y)],"runPhase":self.run.as_ref().map(|run|format!("{:?}",run.phase)),"popup":self.open,"menuIndex":self.menu_index,"selectorOptions":self.selector_options.borrow().clone(),"menuScrollOffset":[f32::from(self.menu_scroll.offset().x),f32::from(self.menu_scroll.offset().y)],"config":{"tonic":self.tonic,"minor":self.minor,"task":self.task,"direction":self.direction,"low":self.low,"high":self.high,"length":self.length,"sound":self.sound,"volume":self.volume,"tolerance":self.tolerance,"intervals":self.intervals,"degrees":self.degrees,"intervalFocus":self.focus,"level":self.level,"pathOpen":self.path_open},"audioAvailable":self.audio_available,"testing":self.testing})
+        serde_json::json!({"route":format!("{:?}",self.route),"exercise":format!("{:?}",self.exercise),"focusOrder":self.keyboard_order.borrow().clone(),"focusedControl":focused,"focusInside":self.keyboard_scope.contains_focused(w,cx),"focusedBounds":bounds.map(|b|[f32::from(b.left()),f32::from(b.top()),f32::from(b.size.width),f32::from(b.size.height)]),"viewportBounds":[f32::from(viewport.left()),f32::from(viewport.top()),f32::from(viewport.size.width),f32::from((body_bottom-viewport.top()).max(px(0.)))],"scrollViewportBounds":[f32::from(viewport.left()),f32::from(viewport.top()),f32::from(viewport.size.width),f32::from(viewport.size.height)],"stickyFooterBounds":sticky.map(|b|[f32::from(b.left()),f32::from(b.top()),f32::from(b.size.width),f32::from(b.size.height)]),"popupBounds":popup_bounds.map(|b|[f32::from(b.left()),f32::from(b.top()),f32::from(b.size.width),f32::from(b.size.height)]),"scrollOffset":[f32::from(self.keyboard_scroll().offset().x),f32::from(self.keyboard_scroll().offset().y)],"scrollMaxOffset":[f32::from(self.keyboard_scroll().max_offset().x),f32::from(self.keyboard_scroll().max_offset().y)],"runPhase":self.run.as_ref().map(|run|format!("{:?}",run.phase)),"popup":self.open,"menuIndex":self.menu_index,"selectorOptions":self.selector_options.borrow().clone(),"menuScrollOffset":[f32::from(self.menu_scroll.offset().x),f32::from(self.menu_scroll.offset().y)],"config":{"tonic":self.tonic,"minor":self.minor,"task":self.task,"direction":self.direction,"low":self.low,"high":self.high,"length":self.length,"sound":self.sound,"volume":self.volume,"tolerance":self.tolerance,"intervals":self.intervals,"degrees":self.degrees,"intervalFocus":self.focus,"level":self.level,"pathOpen":self.path_open},"audioAvailable":self.audio_available,"testing":self.testing,"song":self.song.as_ref().map(|song|serde_json::json!({"source":song.source,"name":song.name,"effectiveKey":song.key.map(|key|serde_json::json!({"tonic":key.tonic,"minor":key.minor})),"transpose":song.transpose})),"preparation":self.preparation.as_ref().map(|preparation|serde_json::json!({"source":preparation.source,"name":preparation.name,"choice":format!("{:?}",preparation.choice)})),"preparationNotice":self.preparation_notice,"mixedKinds":self.mixed_kinds})
     }
     fn back(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         self.probe(
@@ -1775,7 +1791,14 @@ impl Render for TrainingScreen {
         // The banner is painted before page content although its control is
         // registered afterward. Keep logical boundaries aligned with GPUI's
         // rendered tab stops so the final action can hand focus to the header.
-        self.keyboard_order.borrow_mut().sort_by_key(|id|id != "training-save-retry");
+        self.keyboard_order.borrow_mut().sort_by_key(|id|match id.as_str(){
+            "training-save-retry"=>0,
+            "training-prepare-notes"=>1,
+            "training-prepare-intervals"=>2,
+            "training-prepare-chords"=>3,
+            "training-prepare-mixed"=>4,
+            _=>5,
+        });
         let page_width = width.min(if home { 1240. } else { 1040. });
         let view=div()
             .track_focus(&self.keyboard_scope)

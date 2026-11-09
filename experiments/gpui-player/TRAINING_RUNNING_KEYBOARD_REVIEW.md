@@ -30,3 +30,5 @@ The normal preview and durable evidence are published under `gpui-native-package
 ## Remaining qualification
 
 This native regression baseline does not establish production Electron visual parity. Conditional Back to Song activation, overflowing Summary autoscroll, all locales, platform/hardware audio, live display cadence, full temporal/accessibility parity and release qualification remain open. The normal preview is ad-hoc signed, not notarized. Training song-preparation controls still need a keyboard audit. The full desktop migration remains active.
+
+Follow-up: [Song preparation keyboard review](TRAINING_SONG_KEYBOARD_REVIEW.md) adds the four recipe controls, qualifies conditional Back to Song with six actual Identify prompts, and verifies autoscroll for the overflowing compact six-result Summary. Other Summary sizes and the broader qualification gates remain open.

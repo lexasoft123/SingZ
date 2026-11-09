@@ -221,6 +221,8 @@ mod ui_training_keyboard;
 #[cfg(feature = "ui-tests")]
 mod ui_training_running_keyboard;
 #[cfg(feature = "ui-tests")]
+mod ui_training_song_keyboard;
+#[cfg(feature = "ui-tests")]
 mod ui_training_recovery;
 #[cfg(feature = "ui-tests")]
 mod ui_training_input_recovery;
@@ -5939,6 +5941,12 @@ fn main() {
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_TRAINING_REVIEW") {
             assert!(background && std::env::var_os("SINGZ_MUTE").is_some());
             ui_training::run(window_handle, view.clone(), directory.into(), cx);
+        }
+        #[cfg(feature = "ui-tests")]
+        if let Some(directory) = std::env::var_os("SINGZ_GPUI_TRAINING_SONG_KEYBOARD_TEST") {
+            assert!(background && std::env::var("SINGZ_MUTE").as_deref()==Ok("1")
+                && std::env::var_os("SINGZ_GPUI_CAPTURE_FIXTURE").is_some());
+            ui_training_song_keyboard::run(window_handle, view.clone(), directory.into(), cx);
         }
         #[cfg(feature = "ui-tests")]
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_TRAINING_PREPARATION_TEST") {

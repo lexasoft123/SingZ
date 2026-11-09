@@ -1,7 +1,6 @@
 //! Loaded-song preparation composition. Recipe clicks always open setup;
 //! capture and reference audio start only from its explicit Start action.
 use super::*;
-use crate::training_preparation::Choice;
 impl TrainingScreen {
     pub(super) fn song_card(&self, cx: &mut Context<Self>) -> Option<Div> {
         let song = self.song.as_ref()?;
@@ -68,26 +67,22 @@ impl TrainingScreen {
                             (
                                 "notes",
                                 t("training.home.songPrep.choice.notes"),
-                                Choice::Notes,
                             ),
                             (
                                 "intervals",
                                 t("training.exercise.interval.label"),
-                                Choice::Intervals,
                             ),
                             (
                                 "chords",
                                 t("training.home.songPrep.choice.chords"),
-                                Choice::Chords,
                             ),
                             (
                                 "mixed",
                                 t("training.home.songPrep.choice.mixed"),
-                                Choice::Mixed,
                             ),
                         ]
                         .into_iter()
-                        .map(|(id, label, choice)| {
+                        .map(|(id, label)| {
                             let enabled = self.audio_available || song.key.is_none();
                             self.probe(
                                 format!("training-prepare-{id}"),
@@ -96,12 +91,8 @@ impl TrainingScreen {
                                     label,
                                     enabled,
                                 )
-                                .on_click(cx.listener(
-                                    move |s, _, _, cx| {
-                                        if enabled {
-                                            s.prepare_song(choice, cx)
-                                        }
-                                    },
+                                .when(true, |button| self.setup_control(
+                                    format!("training-prepare-{id}"),button,enabled,cx,
                                 )),
                             )
                         }),

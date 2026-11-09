@@ -6,6 +6,16 @@ controls are implemented as a first slice; see `NATIVE_INTEGRATION.md`. Full vis
 and the remaining backend features remain separate.
 Common native controls live in sibling `singz-ui/gpui`.
 
+Song-preparation keyboard follow-up (2026-11-09): all four loaded-song recipe
+choices now use shared UIKit activation and explicit focus order. The hidden
+native two-size journey passes 16 checks, 16 captures and ten lifecycle receipts,
+including twelve actual prepared Identify answers, Back to Song with Enter/Space,
+paused source retention, native playback afterward and stale-key manual setup.
+The compact six-result Summary verifies actual focus autoscroll. Setup and
+exercise/history keyboard regressions pass; all 17 static native frames and six
+default sidecars remain exact. See [Song keyboard review](TRAINING_SONG_KEYBOARD_REVIEW.md)
+for binary scope, observer measurements and remaining parity/platform/release gates.
+
 Training exercise keyboard follow-up (2026-11-09): shared UIKit activation now
 covers native exercise/summary controls and recording; mounted focus survives
 updates and removed answers/Retry recover. Progress has scoped Tab and reading

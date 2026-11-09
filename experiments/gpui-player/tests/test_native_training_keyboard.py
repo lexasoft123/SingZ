@@ -45,7 +45,7 @@ def sha(path):
     return digest.hexdigest()
 
 
-def run_observed(app,folder,env,timeout):
+def run_observed(app,folder,env,timeout,*,expect_input_helper=True):
     """Observe owned identities and resources; screenshots do not qualify live FPS."""
     mac=platform.system()=='Darwin'
     front=lambda:foreground() if mac else {'available':False,'reason':'Foreground observation unavailable on this platform'}
@@ -134,7 +134,10 @@ def run_observed(app,folder,env,timeout):
     assert child.returncode==0 and not forced,(folder/'app.log').read_text()[-8000:]
     if mac:
         assert helpers,'No real native audio helper was observed'
-        assert inputs,'No real replay input/CREPE helper was observed'
+        if expect_input_helper:
+            assert inputs,'No real replay input/CREPE helper was observed'
+        else:
+            assert not inputs,'Identify-only journey unexpectedly opened an input helper'
         assert owners and not survivors and not remaining,'Observed native process failed natural retirement'
         assert stable,'Hidden test changed foreground or foreground identity was unavailable'
         assert samples and not errors,'Invalid live CPU/GPU resource observation'
