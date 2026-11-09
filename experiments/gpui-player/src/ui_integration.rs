@@ -367,7 +367,8 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
             }
             if std::env::var("SINGZ_GPUI_TEST_KEYBOARD").as_deref()==Ok("1") {
                 let receiver=handle.update(cx,|_,_,cx|ui_desktop_keyboard::run(handle,view.clone(),path.clone(),directory.clone(),cx))?;
-                let deadline=Instant::now()+Duration::from_secs(90);
+                let seconds=if std::env::var_os("SINGZ_GPUI_TEST_FOOTER_KEYBOARD").is_some(){180}else{90};
+                let deadline=Instant::now()+Duration::from_secs(seconds);
                 loop {
                     match receiver.try_recv() {
                         Ok(result)=>{result.map_err(anyhow::Error::msg)?;break;},

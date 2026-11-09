@@ -70,3 +70,7 @@ Remaining concrete keyboard gaps include footer transport actions/Split menu and
 training setup. Full production visual/temporal/accessibility parity, live FPS,
 physical hardware, current Windows/Linux delivery and release qualification
 remain open. The full desktop goal remains active.
+
+Later follow-up: [Footer keyboard review](FOOTER_KEYBOARD_REVIEW.md) records the
+footer/Split keyboard implementation and its actual native journeys. Training
+Home/setup keyboard access remains a concrete gap.

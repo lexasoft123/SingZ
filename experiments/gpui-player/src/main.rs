@@ -4962,6 +4962,9 @@ impl Render for Player {
         let can_reveal_stems=self.backend.is_none() || self.project.as_ref().is_some_and(|p|
             p.lane_id(0)==Some("vocals") && p.lanes.iter().any(|(slot,_)|*slot==0));
         self.transport.update(cx,|t,cx|{t.set_audio_available(audio_available,cx);t.set_stem_reveal(can_reveal_stems,cx);});
+        if self.transport.update(cx,|t,_|t.take_focus_player(window)) && self.screen==Screen::Player {
+            self.focus_player=true;
+        }
         if self.focus_after_title {
             self.focus_after_title = false;
             if window.focused(cx).is_none() || self.header.read(cx).title_input_focused(window, cx)
@@ -5522,6 +5525,12 @@ impl Render for Player {
                 if event.keystroke.key == "escape"
                     && this.transport.update(cx, |t, cx| t.dismiss_popovers(cx))
                 {
+                    cx.stop_propagation();
+                    return;
+                }
+                if this.transport.read(cx).has_popover() {
+                    // Owned transport menus keep song/file commands behind
+                    // them, including while a menu item loses eligibility.
                     cx.stop_propagation();
                     return;
                 }

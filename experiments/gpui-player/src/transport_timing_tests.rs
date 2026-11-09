@@ -23,6 +23,8 @@ fn status(seconds: f64, total: usize, per_bar: usize, pre: f64) -> Status {
         graph_connections: 0,
         #[cfg(feature="ui-tests")]
         observed_lanes: serde_json::Value::Null,
+        #[cfg(feature="ui-tests")]
+        observed_master_gain: None,
         counting_in: true,
         count_in_heard: Some(Heard {
             seconds_to_landing: seconds,

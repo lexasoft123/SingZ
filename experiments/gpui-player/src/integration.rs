@@ -356,6 +356,8 @@ pub struct Status {
     pub graph_connections: u64,
     #[cfg(feature="ui-tests")]
     pub observed_lanes: serde_json::Value,
+    #[cfg(feature="ui-tests")]
+    pub observed_master_gain: Option<f64>,
     pub counting_in: bool,
     pub count_in_heard:Option<crate::transport_timing::Heard>,
     pub rendered_frame: i64,
@@ -431,6 +433,8 @@ impl Status {
             },
             #[cfg(feature="ui-tests")]
             observed_lanes: v["lanes"].clone(),
+            #[cfg(feature="ui-tests")]
+            observed_master_gain: v["masterGain"].as_f64(),
             counting_in: v["countingIn"] == true,
             count_in_heard,
             rendered_frame: v["renderedProjectFrame"].as_i64().unwrap_or(0),

@@ -6,6 +6,19 @@ controls are implemented as a first slice; see `NATIVE_INTEGRATION.md`. Full vis
 and the remaining backend features remain separate.
 Common native controls live in sibling `singz-ui/gpui`.
 
+Footer keyboard follow-up (2026-11-09): ordinary transport buttons now use shared
+UIKit Enter activation with song Space/arrows preserved. Split has scoped menu
+keys, first-enabled focus and disabled-item recovery; output popup dismissal no
+longer strands focus, and Mute/Unity/clip avoid duplicate keyup activation.
+Actual hidden keyboard/restart checks pass both sizes, including real native
+playback/rate/loop receipts and missing-engine Split refusal. The final combined
+desktop workflow passes 52 main captures plus four motion frames, 671 resource
+samples without errors, stable foreground and 50 observed processes retired.
+Two prior native player images and sidecars remain exact. The normal preview is
+rebuilt/package-verified. See [Footer keyboard review](FOOTER_KEYBOARD_REVIEW.md)
+for fixture limits, muted native gain, high capture-run memory and remaining gates.
+Training Home/setup keyboard access remains the next concrete migration gap.
+
 Models keyboard follow-up (2026-11-09): shared UIKit focus/activation now reaches
 Get/Reinstall, GPU/CPU, Retry and Close/Skip, with modal Tab/Shift-Tab, automatic
 scrolling and busy-control focus recovery. Actual hidden keyboard installation

@@ -10,6 +10,8 @@ use singz_uikit::{
     round_button, split_pill, transport_badge, transport_chip,
 };
 
+actions!(singz_transport_split, [NextSplitFocus, PreviousSplitFocus]);
+
 fn song_db(gain:f32)->f32 {if gain>0. {20.*gain.log10()}else{f32::NEG_INFINITY}}
 fn song_gain(db:f32)->f32 {if db<=-60. {0.}else{10_f32.powf(db/20.)}}
 fn song_fader_db(gain:f32)->f32 {((song_db(gain).clamp(-60.,12.)*2.).round()/2.).clamp(-60.,12.)}
@@ -89,6 +91,16 @@ pub struct Transport {
     output_mounted:bool,
     output_meter_tick:std::time::Instant,
     split_open: bool,
+    footer_scope: FocusHandle,
+    split_scope: FocusHandle,
+    control_focus: std::collections::BTreeMap<&'static str,FocusHandle>,
+    footer_order: std::cell::RefCell<Vec<&'static str>>,
+    split_order: std::cell::RefCell<Vec<&'static str>>,
+    control_bounds: std::rc::Rc<std::cell::RefCell<std::collections::BTreeMap<&'static str,Bounds<Pixels>>>>,
+    split_focus_pending: bool,
+    focus_player_pending: bool,
+    #[cfg(feature = "ui-tests")]
+    last_focus_recovery_scope_owned: Option<bool>,
     progress: Option<(String, f32)>,
     progress_started: std::time::Instant,
     #[cfg(feature = "ui-tests")]
@@ -103,6 +115,10 @@ pub struct Transport {
 }
 impl Transport {
     pub fn new(w: &mut Window, cx: &mut Context<Self>) -> Self {
+        cx.bind_keys([
+            KeyBinding::new("tab",NextSplitFocus,Some("SingZTransportSplit")),
+            KeyBinding::new("shift-tab",PreviousSplitFocus,Some("SingZTransportSplit")),
+        ]);
         let bpm_input = cx.new(|cx| InputState::new(w, cx));
         let subscription = cx.subscribe_in(&bpm_input, w, |s, _, event, w, cx| match event {
             InputEvent::Change => {
@@ -174,6 +190,13 @@ impl Transport {
             output_mounted:false,
             output_meter_tick:std::time::Instant::now(),
             split_open: false,
+            footer_scope: cx.focus_handle(),
+            split_scope: cx.focus_handle(),
+            control_focus: ["transport-restart","transport-play","transport-loop","transport-output","transport-met","transport-carry","transport-transpose-down","transport-transpose-reset","transport-transpose-up","transport-tempo-down","transport-tempo-reset","transport-tempo-up","transport-bpm-down","transport-bpm-up","transport-karaoke","transport-split","split-cancel","transport-stem-files","split-vocals","split-stems","split-combined"].into_iter().map(|id|(id,cx.focus_handle().tab_stop(true))).collect(),
+            footer_order: Default::default(),split_order:Default::default(),control_bounds:Default::default(),
+            split_focus_pending:false,focus_player_pending:false,
+            #[cfg(feature = "ui-tests")]
+            last_focus_recovery_scope_owned:None,
             progress: None,
             progress_started: std::time::Instant::now(),
             #[cfg(feature = "ui-tests")]
@@ -187,6 +210,96 @@ impl Transport {
             bounds: Default::default(),
         }
     }
+    fn control_enabled(&self,id:&str)->bool {
+        match id {
+            "transport-output"=>true,
+            "transport-transpose-down"|"transport-transpose-reset"|"transport-transpose-up"|"transport-tempo-down"|"transport-tempo-reset"|"transport-tempo-up"=>self.audio_available&&self.duration>0.,
+            "transport-bpm-down"|"transport-bpm-up"=>self.bpm_enabled(),
+            "split-cancel"=>self.progress.is_some(),
+            "transport-karaoke"=>self.audio_available&&self.split&&self.progress.is_none(),
+            "transport-split"=>self.audio_available&&self.progress.is_none(),
+            "transport-stem-files"=>self.audio_available&&self.split&&self.can_reveal_stems&&self.progress.is_none(),
+            "split-vocals"=>self.audio_available&&self.split&&self.can_backing&&self.split_open,
+            "split-stems"=>self.audio_available&&self.split&&self.can_resplit&&self.split_open,
+            "split-combined"=>self.audio_available&&!self.split&&self.split_open,
+            _=>self.audio_available,
+        }
+    }
+    fn activate_control(&mut self,id:&'static str,w:&mut Window,cx:&mut Context<Self>){
+        if !self.control_enabled(id){return;}
+        let event=match id {
+            "transport-restart"=>Some(TransportEvent::Restart),"transport-play"=>Some(TransportEvent::Play),"transport-loop"=>Some(TransportEvent::Loop),
+            "transport-met"=>Some(TransportEvent::Metronome),"transport-carry"=>Some(TransportEvent::CarryLine),
+            "transport-transpose-down"=>Some(TransportEvent::Transpose(self.transpose-1)),"transport-transpose-reset"=>Some(TransportEvent::Transpose(0)),"transport-transpose-up"=>Some(TransportEvent::Transpose(self.transpose+1)),
+            "transport-tempo-down"=>Some(TransportEvent::Tempo((self.tempo-0.05).max(0.5))),"transport-tempo-reset"=>Some(TransportEvent::Tempo(1.)),"transport-tempo-up"=>Some(TransportEvent::Tempo((self.tempo+0.05).min(1.5))),
+            "transport-bpm-down"|"transport-bpm-up"=>self.bpm.zip(self.effective_bpm()).map(|(base,shown)|TransportEvent::Tempo((shown+if id=="transport-bpm-down"{-1.}else{1.})/base)),
+            "transport-karaoke"=>{self.karaoke=!self.karaoke;Some(TransportEvent::Karaoke)},
+            "transport-stem-files"=>Some(TransportEvent::StemFiles),"split-cancel"=>Some(TransportEvent::CancelSplit),
+            "transport-output"=>{self.split_open=false;self.output_open=!self.output_open;self.output_focus_pending=self.output_open;None},
+            "transport-split"=>{self.output_open=false;self.split_open=!self.split_open;self.split_focus_pending=self.split_open;None},
+            "split-vocals"|"split-stems"|"split-combined"=>{self.close_split(w,cx);Some(TransportEvent::Split(match id{"split-vocals"=>crate::source_jobs::Mode::Vocals,"split-stems"=>crate::source_jobs::Mode::Stems,_=>crate::source_jobs::Mode::Combined}))},
+            _=>None,
+        };if let Some(event)=event{cx.emit(event);}cx.notify();
+    }
+    fn footer_control(&self,id:&'static str,element:Stateful<Div>,cx:&mut Context<Self>)->Stateful<Div>{
+        self.focus_control_element(id,element,false,cx)
+    }
+    fn split_control(&self,id:&'static str,element:Stateful<Div>,cx:&mut Context<Self>)->Stateful<Div>{
+        self.focus_control_element(id,element,true,cx)
+    }
+    fn focus_control_element(&self,id:&'static str,element:Stateful<Div>,menu:bool,cx:&mut Context<Self>)->Stateful<Div>{
+        let enabled=self.control_enabled(id);if enabled{if menu{self.split_order.borrow_mut().push(id);}else{self.footer_order.borrow_mut().push(id);}}
+        let focus=self.control_focus[id].clone();let weak=cx.entity().downgrade();
+        let callback=move|w:&mut Window,cx:&mut App|{let _=weak.update(cx,|s,cx|s.activate_control(id,w,cx));};
+        let element=if menu{singz_uikit::settings_control_with_focus(element,focus,enabled,callback)}else{singz_uikit::song_button_with_focus(element,focus,enabled,callback)};
+        let bounds=self.control_bounds.clone();element.relative().child(canvas(move|b,_,_|{bounds.borrow_mut().insert(id,b);b},|_,_,_,_|{}).absolute().inset_0())
+    }
+    fn close_split(&mut self,w:&mut Window,cx:&mut Context<Self>){
+        self.split_open=false;self.split_focus_pending=false;
+        if self.control_enabled("transport-split"){self.control_focus["transport-split"].focus(w,cx);}else{self.footer_scope.focus(w,cx);self.focus_player_pending=true;}cx.notify();
+    }
+    fn move_split_focus(&mut self,backwards:bool,edge:Option<bool>,w:&mut Window,cx:&mut Context<Self>){
+        if !self.split_open{return;}
+        let order=self.split_order.borrow().clone();
+        if !order.is_empty(){
+            let current=order.iter().position(|id|self.control_focus[id].is_focused(w));
+            let index=match edge{
+                Some(false)=>0,Some(true)=>order.len()-1,
+                None=>match current{Some(i)if backwards=>(i+order.len()-1)%order.len(),Some(i)=>(i+1)%order.len(),None if backwards=>order.len()-1,None=>0},
+            };
+            self.control_focus[order[index]].focus(w,cx);
+        }else{self.split_scope.focus(w,cx);}
+        cx.notify();
+    }
+    fn split_key(&mut self,event:&KeyDownEvent,w:&mut Window,cx:&mut Context<Self>){
+        if !self.split_open{return;}
+        let key=event.keystroke.key.as_str();
+        if key=="escape"{self.close_split(w,cx);}
+        else if matches!(key,"tab"|"up"|"down"|"left"|"right"|"home"|"end"){
+            let backwards=key=="up"||key=="left"||(key=="tab"&&event.keystroke.modifiers.shift);
+            self.move_split_focus(backwards,match key{"home"=>Some(false),"end"=>Some(true),_=>None},w,cx);
+        }else if matches!(key,"enter"|"space"){
+            let order=self.split_order.borrow();if order.iter().any(|id|self.control_focus[id].is_focused(w)){return;}
+            if let Some(id)=order.first(){self.control_focus[id].focus(w,cx);}
+        }
+        w.prevent_default();cx.stop_propagation();cx.notify();
+    }
+    pub fn focused_control(&self,w:&Window)->Option<String>{self.control_focus.iter().find(|(_,focus)|focus.is_focused(w)).map(|(id,_)|(*id).to_owned())}
+    pub fn split_focused(&self,w:&Window,cx:&App)->bool{self.split_open&&self.split_scope.contains_focused(w,cx)}
+    pub fn split_open(&self)->bool{self.split_open}
+    pub fn take_focus_player(&mut self,w:&Window)->bool{
+        if !std::mem::take(&mut self.focus_player_pending){return false;}
+        let scope_owned=self.footer_scope.is_focused(w);
+        #[cfg(feature = "ui-tests")]
+        {self.last_focus_recovery_scope_owned=Some(scope_owned);}
+        scope_owned
+    }
+    pub fn keyboard_state(&self,w:&Window,cx:&App)->serde_json::Value{
+        #[cfg(feature = "ui-tests")]
+        let last_focus_recovery_scope_owned=self.last_focus_recovery_scope_owned;
+        #[cfg(not(feature = "ui-tests"))]
+        let last_focus_recovery_scope_owned:Option<bool>=None;
+        let focused=self.focused_control(w);let bounds=focused.as_deref().and_then(|id|self.control_bounds.borrow().get(id).copied());serde_json::json!({"focusOrder":self.footer_order.borrow().clone(),"focusedControl":focused,"splitOpen":self.split_open,"splitFocused":self.split_focused(w,cx),"splitFocusOrder":self.split_order.borrow().clone(),"focusedBounds":bounds.map(|b|[f32::from(b.left()),f32::from(b.top()),f32::from(b.size.width),f32::from(b.size.height)]),"outputOpen":self.output_open,"outputFocused":self.output_focus.is_focused(w),"outputControlFocused":self.output_control_focus.iter().map(|focus|focus.is_focused(w)).collect::<Vec<_>>(),"bpmFocused":self.bpm_focused(w,cx),"audioAvailable":self.audio_available,"recoveryPending":self.focus_player_pending,"lastFocusRecoveryScopeOwned":last_focus_recovery_scope_owned,"footerScopeFocused":self.footer_scope.is_focused(w),"controlFocusDebug":self.control_focus.iter().map(|(id,focus)|((*id).to_owned(),format!("{focus:?}"))).collect::<std::collections::BTreeMap<_,_>>(),"footerScopeDebug":format!("{:?}",self.footer_scope),"splitScopeDebug":format!("{:?}",self.split_scope),"outputFocusDebug":format!("{:?}",self.output_focus),"outputControlFocusDebug":self.output_control_focus.iter().map(|focus|format!("{focus:?}")).collect::<Vec<_>>()})}
     pub fn set_carry_state(&mut self, enabled: bool, ducking: bool, cx: &mut Context<Self>) {
         let ducking = enabled && ducking;
         if (self.carry_enabled, self.carry_ducking) != (enabled, ducking) {
@@ -386,23 +499,13 @@ impl Transport {
         &self,
         id: &'static str,
         label: &'static str,
-        step: f32,
+        _step: f32,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let enabled = self.bpm_enabled();
-        self.probe(
-            id,
-            transport_chip(id, label)
-                .when(!enabled, |d| d.opacity(0.35).cursor_default())
-                .on_click(cx.listener(move |s, _, _, cx| {
-                    if s.bpm_enabled() {
-                        if let (Some(base), Some(shown)) = (s.bpm, s.effective_bpm()) {
-                            cx.emit(TransportEvent::Tempo((shown + step) / base));
-                        }
-                    }
-                })),
-        )
+        self.probe(id,self.footer_control(id,transport_chip(id,label).when(!enabled,|d|d.opacity(0.35).cursor_default()),cx))
     }
+
     pub fn set_progress(&mut self, progress: Option<(String, f32)>, cx: &mut Context<Self>) {
         if self.progress != progress {
             if self.progress.is_none() {
@@ -631,20 +734,26 @@ impl Transport {
                 if let Some(db)=db {s.output_db(db,cx);cx.stop_propagation();}
                 else if matches!(event.keystroke.key.as_str(),"space"|"enter") {cx.stop_propagation();}
             }));
-        let mute=self.probe("transport-output-mute",singz_uikit::song_output_mute("transport-output-mute",self.volume==0.)
-            .tooltip(move|w,cx|gpui_kit::component::tooltip::Tooltip::new(mute_hint.clone()).build(w,cx))
-            .track_focus(&self.output_control_focus[1]).tab_index(0)
-            .on_key_down(cx.listener(|s,e:&KeyDownEvent,_,cx|{if matches!(e.keystroke.key.as_str(),"space"|"enter") {s.output_gain(muted_song_gain(s.volume,s.output_pre_mute),cx);cx.stop_propagation();}}))
-            .on_click(cx.listener(|s,_,_,cx|s.output_gain(muted_song_gain(s.volume,s.output_pre_mute),cx))));
-        let unity=self.probe("transport-output-unity",singz_uikit::song_output_action("transport-output-unity",crate::i18n::t("player.volume.reset"))
-            .track_focus(&self.output_control_focus[2]).tab_index(0)
-            .on_key_down(cx.listener(|s,e:&KeyDownEvent,_,cx|{if matches!(e.keystroke.key.as_str(),"space"|"enter") {s.output_gain(1.,cx);cx.stop_propagation();}}))
-            .on_click(cx.listener(|s,_,_,cx|s.output_gain(1.,cx))));
-        let clip=self.probe("transport-output-clip",singz_uikit::song_output_clip("transport-output-clip",crate::i18n::t("player.volume.clipped"),self.output_meter.clipped)
-            .tooltip(move|w,cx|gpui_kit::component::tooltip::Tooltip::new(clip_hint.clone()).build(w,cx))
-            .track_focus(&self.output_control_focus[3]).tab_index(0)
-            .on_key_down(cx.listener(|s,e:&KeyDownEvent,_,cx|{if matches!(e.keystroke.key.as_str(),"space"|"enter") {s.output_meter.reset_clip(s.output_latest_clips);cx.notify();cx.stop_propagation();}}))
-            .on_click(cx.listener(|s,_,_,cx|{s.output_meter.reset_clip(s.output_latest_clips);cx.notify();})));
+        let mute_owner=cx.entity().downgrade();
+        let mute=self.probe("transport-output-mute",singz_uikit::settings_control_with_focus(
+            singz_uikit::song_output_mute("transport-output-mute",self.volume==0.)
+                .tooltip(move|w,cx|gpui_kit::component::tooltip::Tooltip::new(mute_hint.clone()).build(w,cx)),
+            self.output_control_focus[1].clone(),true,move|_,cx|{
+                let _=mute_owner.update(cx,|s,cx|s.output_gain(muted_song_gain(s.volume,s.output_pre_mute),cx));
+            }));
+        let unity_owner=cx.entity().downgrade();
+        let unity=self.probe("transport-output-unity",singz_uikit::settings_control_with_focus(
+            singz_uikit::song_output_action("transport-output-unity",crate::i18n::t("player.volume.reset")),
+            self.output_control_focus[2].clone(),true,move|_,cx|{
+                let _=unity_owner.update(cx,|s,cx|s.output_gain(1.,cx));
+            }));
+        let clip_owner=cx.entity().downgrade();
+        let clip=self.probe("transport-output-clip",singz_uikit::settings_control_with_focus(
+            singz_uikit::song_output_clip("transport-output-clip",crate::i18n::t("player.volume.clipped"),self.output_meter.clipped)
+                .tooltip(move|w,cx|gpui_kit::component::tooltip::Tooltip::new(clip_hint.clone()).build(w,cx)),
+            self.output_control_focus[3].clone(),true,move|_,cx|{
+                let _=clip_owner.update(cx,|s,cx|{s.output_meter.reset_clip(s.output_latest_clips);cx.notify();});
+            }));
         let panel=singz_uikit::song_output_panel(singz_uikit::SongOutputCopy{
             title:crate::i18n::t("player.volume.title"),saved:crate::i18n::t("player.volume.saved"),
             per_song:crate::i18n::t("player.volume.perSong"),peak:crate::i18n::t("player.volume.peak"),caption:crate::i18n::t("player.volume.caption")
@@ -653,11 +762,9 @@ impl Transport {
                 if !s.output_trigger.get().is_some_and(|b|b.contains(&event.position)){s.output_open=false;cx.notify();}
             }));
         div().relative().flex_shrink_0()
-            .child(self.probe("transport-output",singz_uikit::song_output_trigger_meter("transport-output",label,compact,self.volume==0.,self.output_open,self.output_meter.held,self.output_meter.clipped)
+            .child(self.probe("transport-output",self.footer_control("transport-output",singz_uikit::song_output_trigger_meter("transport-output",label,compact,self.volume==0.,self.output_open,self.output_meter.held,self.output_meter.clipped),cx)
                 .tooltip(move|w,cx|gpui_kit::component::tooltip::Tooltip::new(trigger_hint.clone()).build(w,cx))
-                .track_focus(&self.output_control_focus[0]).tab_index(0)
-                .on_key_down(cx.listener(|s,e:&KeyDownEvent,_,cx|{if matches!(e.keystroke.key.as_str(),"space"|"enter") {s.output_open=!s.output_open;s.output_focus_pending=s.output_open;cx.notify();cx.stop_propagation();}}))
-                .on_click(cx.listener(|s,_,_,cx|{s.output_open=!s.output_open;s.output_focus_pending=s.output_open;cx.notify();})))
+                )
                 .relative().child(canvas(move|b,_,_|{trigger.set(Some(b));b},|_,_,_,_|{}).absolute().inset_0()))
             .when(self.output_open,|d|d.child(deferred(panel.absolute().bottom_full().mb(px(12.)).left(px(-8.))).with_priority(120)))
     }
@@ -668,6 +775,17 @@ impl Render for Transport {
         #[cfg(feature = "ui-tests")]
         self.bounds.borrow_mut().clear();
         self.reconcile_focus(window, cx);
+        // Escape/outside dismissal unmounts the popup's native controls. Keep
+        // their old handle from stranding key dispatch outside the live tree.
+        if !self.output_open && (self.output_focus.is_focused(window)
+            || self.output_control_focus.iter().any(|focus|focus.is_focused(window))) {
+            self.control_focus["transport-output"].focus(window,cx);
+            self.output_focus_pending=false;
+            cx.notify();
+        }
+        self.footer_order.borrow_mut().clear();self.split_order.borrow_mut().clear();self.control_bounds.borrow_mut().clear();
+        let focus_split=self.split_focus_pending&&self.split_open;
+        if focus_split{self.split_focus_pending=false;self.split_scope.focus(window,cx);}
         if self.output_open&&self.output_focus_pending {self.output_focus_pending=false;self.output_focus.focus(window,cx);}
         if self.bpm_refresh_input {
             self.bpm_refresh_input = false;
@@ -692,7 +810,8 @@ impl Render for Transport {
         if self.progress.is_some() {
             window.request_animation_frame();
         }
-        div()
+        let view=div()
+            .track_focus(&self.footer_scope)
             .w_full()
             .min_h(px(86.))
             .flex_shrink_0()
@@ -717,17 +836,17 @@ impl Render for Transport {
                     .min_w(px(if compact { 540.84375 } else { 576.84375 }))
                     .flex_shrink_0()
                     .child(
-                        self.probe("transport-restart", singz_uikit::audio_control(round_button("transport-restart", false),self.audio_available)
+                        self.probe("transport-restart", singz_uikit::audio_control(self.footer_control("transport-restart",round_button("transport-restart", false),cx),self.audio_available)
                             .child(Self::icon("restart", 13.))
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(TransportEvent::Restart)))),
+                            ),
                     )
                     .child(
-                        self.probe("transport-play", singz_uikit::audio_control(play_button("transport-play", self.playing),self.audio_available)
+                        self.probe("transport-play", singz_uikit::audio_control(self.footer_control("transport-play",play_button("transport-play", self.playing),cx),self.audio_available)
                             .child(
                                 Self::icon(if self.playing { "pause" } else { "play" }, 16.)
                                     .ml(px(if self.playing { 0. } else { 1. })),
                             )
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(TransportEvent::Play)))),
+                            ),
                     )
                     .child(
                         div()
@@ -771,13 +890,13 @@ impl Render for Transport {
                     )
                     .when(!self.count_in_text().is_empty(),|d|d.child(self.probe("countin-dots",singz_uikit::transport_count_in_dots("countin-dots",self.count_in_text()))))
                     .child(
-                        singz_uikit::audio_control(round_button("transport-loop", self.looping),self.audio_available).when(true,|d|self.guides.track_box(d,"loop",[1.;4]))
+                        singz_uikit::audio_control(self.footer_control("transport-loop",round_button("transport-loop", self.looping),cx),self.audio_available).when(true,|d|self.guides.track_box(d,"loop",[1.;4]))
                             .child(Self::icon("loop", 14.))
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(TransportEvent::Loop))),
+                            ,
                     )
                     .child(self.output(compact, cx))
                     .child(
-                        singz_uikit::audio_control(metronome_button("transport-met", self.met_enabled),self.audio_available).when(true,|d|self.guides.track_box(d,"metronome",[1.;4]))
+                        singz_uikit::audio_control(self.footer_control("transport-met",metronome_button("transport-met", self.met_enabled),cx),self.audio_available).when(true,|d|self.guides.track_box(d,"metronome",[1.;4]))
                             .child(
                                 div()
                                     .size(px(14.))
@@ -787,17 +906,13 @@ impl Render for Transport {
                                         if self.met_enabled { ACCENT } else { DIM },
                                     )),
                             )
-                            .on_click(
-                                cx.listener(|_, _, _, cx| cx.emit(TransportEvent::Metronome)),
-                            ),
+                            ,
                     )
                     .child(
-                        singz_uikit::audio_control(singz_uikit::carry_line_trigger("transport-carry", self.carry_enabled, self.carry_ducking),self.audio_available)
+                        singz_uikit::audio_control(self.footer_control("transport-carry",singz_uikit::carry_line_trigger("transport-carry", self.carry_enabled, self.carry_ducking),cx),self.audio_available)
                             .when(true,|d|self.guides.track_box(d,"carry",[1.;4]))
                             .child(if self.carry_enabled {div().size(px(14.)).flex_shrink_0().child(colored_icon(TransportIcon::CarryLine,if self.carry_ducking {singz_uikit::tokens::BG}else{ACCENT}))} else {Self::icon("transport-carry", 14.)})
-                            .on_click(
-                                cx.listener(|_, _, _, cx| cx.emit(TransportEvent::CarryLine)),
-                            ),
+                            ,
                     ),
             )
             .child(
@@ -815,14 +930,9 @@ impl Render for Transport {
                             .flex()
                             .items_center()
                             .gap(px(5.))
-                            .child(transport_chip("transport-transpose-down", "−").on_click(
-                                cx.listener(move |_, _, _, cx| {
-                                    cx.emit(TransportEvent::Transpose(transpose - 1))
-                                }),
-                            ))
+                            .child(self.footer_control("transport-transpose-down",transport_chip("transport-transpose-down", "−"),cx))
                             .child(
-                                transport_badge(
-                                    "transport-transpose-reset",
+                                self.footer_control("transport-transpose-reset",transport_badge("transport-transpose-reset",
                                     if transpose > 0 {
                                         format!("+{transpose}")
                                     } else {
@@ -830,50 +940,29 @@ impl Render for Transport {
                                     },
                                     "st",
                                     transpose != 0,
-                                )
+                                ),cx)
                                 .cursor_pointer()
-                                .on_click(
-                                    cx.listener(|_, _, _, cx| {
-                                        cx.emit(TransportEvent::Transpose(0))
-                                    }),
-                                ),
+                                ,
                             )
-                            .child(transport_chip("transport-transpose-up", "+").on_click(
-                                cx.listener(move |_, _, _, cx| {
-                                    cx.emit(TransportEvent::Transpose(transpose + 1))
-                                }),
-                            )),
+                            .child(self.footer_control("transport-transpose-up",transport_chip("transport-transpose-up", "+"),cx)),
                     )
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap(px(5.))
-                            .child(transport_chip("transport-tempo-down", "−").on_click(
-                                cx.listener(move |_, _, _, cx| {
-                                    cx.emit(TransportEvent::Tempo((tempo - 0.05).max(0.5)));
-                                }),
-                            ))
+                            .child(self.footer_control("transport-tempo-down",transport_chip("transport-tempo-down", "−"),cx))
                             .child(
-                                transport_badge(
-                                    "transport-tempo-reset",
+                                self.footer_control("transport-tempo-reset",transport_badge("transport-tempo-reset",
                                     format!("{}", (tempo * 100.).round() as u32),
                                     "%",
                                     (tempo - 1.).abs() > 0.001,
-                                )
+                                ),cx)
                                 .cursor_pointer()
-                                .on_click(cx.listener(
-                                    |_, _, _, cx| {
-                                        cx.emit(TransportEvent::Tempo(1.));
-                                    },
-                                )),
+                                ,
                             )
                             .child(
-                                transport_chip("transport-tempo-up", "+").on_click(cx.listener(
-                                    move |_, _, _, cx| {
-                                        cx.emit(TransportEvent::Tempo((tempo + 0.05).min(1.5)));
-                                    },
-                                )),
+                                self.footer_control("transport-tempo-up",transport_chip("transport-tempo-up", "+"),cx),
                             )
                             .child(self.bpm_step("transport-bpm-down","−",-1.,cx))
                             .child(self.bpm_field(window,cx))
@@ -881,45 +970,66 @@ impl Render for Transport {
                     )
                     .when_some(self.progress.clone(), |d, (label, percent)| d.child(
                         self.probe("split-progress", singz_uikit::split_progress(label, percent, self.progress_phase()).id("split-progress")
-                            .child(self.probe("split-cancel", singz_uikit::split_cancel("split-cancel").on_click(cx.listener(|_, _, _, cx| cx.emit(TransportEvent::CancelSplit))))))
+                            .child(self.probe("split-cancel", self.footer_control("split-cancel",singz_uikit::split_cancel("split-cancel"),cx))))
                     ))
                     .when(self.progress.is_none(), |d| d
                     .when(self.split, |d| d.child(
-                        self.probe("transport-karaoke", singz_uikit::audio_control(karaoke_pill("transport-karaoke", "", self.karaoke),self.audio_available).when(true,|d|self.guides.track_box(d,"karaoke",[1.;4]))
+                        self.probe("transport-karaoke", singz_uikit::audio_control(self.footer_control("transport-karaoke",karaoke_pill("transport-karaoke", "", self.karaoke),cx),self.audio_available).when(true,|d|self.guides.track_box(d,"karaoke",[1.;4]))
                             .child(Self::icon("transport-mic", 13.))
                             .child(tracked_label(crate::i18n::t("player.transport.karaoke"), 0.01))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if !this.audio_available{return;}
-                                this.karaoke = !this.karaoke;
-                                cx.emit(TransportEvent::Karaoke);
-                                cx.notify();
-                            }))),
+                            ),
                     ))
                     .child(
                         div()
                             .relative()
-                            .child(self.probe("transport-split",singz_uikit::audio_control(split_pill("transport-split", crate::i18n::t("player.split.button")),self.audio_available).when(true,|d|self.guides.track_box(d,"split",[1.;4]))
+                            .child(self.probe("transport-split",singz_uikit::audio_control(self.footer_control("transport-split",split_pill("transport-split", crate::i18n::t("player.split.button")),cx),self.audio_available).when(true,|d|self.guides.track_box(d,"split",[1.;4]))
                                     .child(Self::icon("transport-chevron", 8.))
-                                    .on_click(cx.listener(|this, _, _, cx| {if this.audio_available{this.split_open = !this.split_open;cx.notify();}}))))
+                                    ))
                             .when(self.split_open, |v| {
-                                v.child(deferred(singz_uikit::transport_popover().on_mouse_down_out(cx.listener(|s,event:&MouseDownEvent,_,cx|{if !s.split_trigger.get().is_some_and(|b|b.contains(&event.position)){s.split_open=false;cx.notify();}})).absolute().bottom_full().right_0().mb(px(12.)).w(px(320.))
+                                v.child(deferred(singz_uikit::transport_popover().track_focus(&self.split_scope).key_context("SingZTransportSplit")
+                                    .on_action(cx.listener(|s,_:&NextSplitFocus,w,cx|{s.move_split_focus(false,None,w,cx);w.prevent_default();cx.stop_propagation();}))
+                                    .on_action(cx.listener(|s,_:&PreviousSplitFocus,w,cx|{s.move_split_focus(true,None,w,cx);w.prevent_default();cx.stop_propagation();}))
+                                    .capture_key_down(cx.listener(|s,event:&KeyDownEvent,w,cx|s.split_key(event,w,cx)))
+                                    .on_key_up(|_,_,cx|cx.stop_propagation())
+                                    .on_mouse_down_out(cx.listener(|s,event:&MouseDownEvent,_,cx|{if !s.split_trigger.get().is_some_and(|b|b.contains(&event.position)){s.split_open=false;cx.notify();}})).absolute().bottom_full().right_0().mb(px(12.)).w(px(320.))
                                     .child(div().mb(px(10.)).text_size(px(13.)).font_family(singz_uikit::tokens::DISPLAY_700).child(if self.split{crate::i18n::t("player.split.optionsTitle")}else{crate::i18n::t("player.split.title")}))
                                     .when(self.split,|d|d
-                                        .child(self.probe("split-vocals",singz_uikit::split_action("split-vocals",crate::i18n::t("player.split.separateBacking"),self.can_backing).on_click(cx.listener(|s,_,_,cx|{if s.can_backing{s.split_open=false;cx.emit(TransportEvent::Split(crate::source_jobs::Mode::Vocals));cx.notify();}}))))
-                                        .child(self.probe("split-stems",singz_uikit::split_action("split-stems",crate::i18n::t("player.split.resplitStems"),self.can_resplit).on_click(cx.listener(|s,_,_,cx|{if s.can_resplit{s.split_open=false;cx.emit(TransportEvent::Split(crate::source_jobs::Mode::Stems));cx.notify();}})))))
+                                        .child(self.probe("split-vocals",self.split_control("split-vocals",singz_uikit::split_action("split-vocals",crate::i18n::t("player.split.separateBacking"),self.can_backing),cx)))
+                                        .child(self.probe("split-stems",self.split_control("split-stems",singz_uikit::split_action("split-stems",crate::i18n::t("player.split.resplitStems"),self.can_resplit),cx))))
                                     .when(!self.split,|d|d
                                         .child(div().text_size(px(13.)).line_height(px(19.5)).text_color(rgb(DIM)).mb(px(14.)).child(crate::i18n::t("player.split.explain")))
                                         .child(div().text_size(px(12.)).line_height(px(18.)).text_color(rgb(DIM)).mt(px(8.)).mb(px(16.)).child(crate::i18n::t("player.split.hint")))
-                                        .child(self.probe("split-combined",singz_uikit::pill("split-combined",crate::i18n::t("player.split.button"),true).on_click(cx.listener(|s,_,_,cx|{s.split_open=false;cx.emit(TransportEvent::Split(crate::source_jobs::Mode::Combined));cx.notify();}))))))
+                                        .child(self.probe("split-combined",self.split_control("split-combined",singz_uikit::pill("split-combined",crate::i18n::t("player.split.button"),true),cx)))))
                                     .with_priority(120))
                             }),
                     )
                     .when(self.split && self.can_reveal_stems, |d| d.child(
-                        self.probe("transport-stem-files", singz_uikit::audio_control(ghost_pill("transport-stem-files", crate::i18n::t("player.transport.stemFiles")),self.audio_available).on_click(
-                            cx.listener(|_, _, _, cx| cx.emit(TransportEvent::StemFiles)),
-                        )),
+                        self.probe("transport-stem-files", singz_uikit::audio_control(self.footer_control("transport-stem-files",ghost_pill("transport-stem-files", crate::i18n::t("player.transport.stemFiles")),cx),self.audio_available)),
                     )),                    )
-            )
+            );
+        // Source SplitMenu focuses its first enabled action on opening.
+        // Choose it after this render has registered the actual menu items.
+        if focus_split {
+            if let Some(id)=self.split_order.borrow().first() {
+                self.control_focus[id].focus(window,cx);
+            }
+        }
+        if let Some(id)=self.focused_control(window){
+            let menu=matches!(id.as_str(),"split-vocals"|"split-stems"|"split-combined");
+            let valid=if menu{self.split_open&&self.split_order.borrow().contains(&id.as_str())}else{self.footer_order.borrow().contains(&id.as_str())};
+            if !valid {
+                if menu&&self.split_open{self.split_scope.focus(window,cx);}
+                else if menu&&self.control_enabled("transport-split"){self.control_focus["transport-split"].focus(window,cx);}
+                else{self.footer_scope.focus(window,cx);self.focus_player_pending=true;}
+                cx.notify();
+            }
+        }
+        if !self.split_open&&self.split_scope.is_focused(window){
+            if self.control_enabled("transport-split"){self.control_focus["transport-split"].focus(window,cx);}
+            else{self.footer_scope.focus(window,cx);self.focus_player_pending=true;}
+            cx.notify();
+        }
+        view
     }
 }
 
