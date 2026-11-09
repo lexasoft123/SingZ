@@ -14,6 +14,7 @@ pub enum SettingsEvent {
     Close,
     QuickStart,
     Output(String),
+    Provider(crate::audio_devices::Provider),
     InputPrefs(crate::microphone::Prefs),
     EnableMicrophone,
     Monitor,
@@ -58,6 +59,11 @@ pub struct SettingsScreen {
     output_uid: String,
     route_error: Option<String>,
     route_busy: bool,
+    provider: Option<crate::integration::ProviderSnapshot>,
+    provider_renderer_revision: u64,
+    provider_renderer_busy: bool,
+    provider_pending: bool,
+    provider_error: Option<String>,
     route_label: Option<String>,
     output: usize,
     input: usize,
@@ -125,6 +131,11 @@ impl SettingsScreen {
             output_uid: String::new(),
             route_error: None,
             route_busy: false,
+            provider: None,
+            provider_renderer_revision: 0,
+            provider_renderer_busy: true,
+            provider_pending: false,
+            provider_error: None,
             route_label: None,
             output: 0,
             input: 0,
@@ -318,6 +329,43 @@ impl SettingsScreen {
         )
     }
     pub fn output_uid(&self) -> String { self.output_uid.clone() }
+    pub fn set_provider_state(&mut self, snapshot: Option<&crate::integration::ProviderSnapshot>, renderer_revision:u64, renderer_busy:bool, pending:bool, cx:&mut Context<Self>) {
+        let changed=self.provider.as_ref().map(|s|s.revision)!=snapshot.map(|s|s.revision)
+            ||self.provider_renderer_revision!=renderer_revision||self.provider_renderer_busy!=renderer_busy||self.provider_pending!=pending;
+        if changed {
+            if self.provider.as_ref().map(|s|s.revision)!=snapshot.map(|s|s.revision) {
+                self.provider_error=snapshot.and_then(|s|s.error.clone());
+            }
+            self.provider=snapshot.cloned();self.provider_renderer_revision=renderer_revision;
+            self.provider_renderer_busy=renderer_busy;self.provider_pending=pending;
+            if !self.field_enabled("settings-provider")&&self.open_field==Some("settings-provider") {
+                self.open_field=None;self.menu_index=None;self.typeahead.clear();
+            }
+            cx.notify();
+        }
+    }
+    pub fn provider_failed(&mut self,error:String,cx:&mut Context<Self>) {self.provider_error=Some(error);self.provider_pending=false;cx.notify();}
+    fn windows_provider(&self)->bool {
+        cfg!(windows)||self.provider.as_ref().and_then(|s|s.availability.as_ref()).is_some_and(|p|p.platform=="win32")
+    }
+    #[cfg(feature="ui-tests")]
+    pub fn provider_ui_state(&self,window:&Window)->serde_json::Value {
+        let snapshot=self.provider.as_ref();
+        let availability=snapshot.and_then(|s|s.availability.as_ref()).map(|a|serde_json::json!({
+            "platform":a.platform,"defaultProvider":a.default_provider.as_str(),
+            "providers":a.providers.iter().map(|p|serde_json::json!({"id":p.id.as_str(),"label":p.label,"compiled":p.compiled,"available":p.available,"detail":p.detail,"errorCode":p.error_code})).collect::<Vec<_>>()
+        }));
+        let bounds=|b:Bounds<Pixels>|[f32::from(b.left()),f32::from(b.top()),f32::from(b.size.width),f32::from(b.size.height)];
+        let focused=self.focus_order.borrow().iter().copied().find(|id|self.controls.borrow().get(id).is_some_and(|f|f.is_focused(window)));
+        serde_json::json!({"visible":self.windows_provider(),"selected":snapshot.map(|s|s.selected.as_str()),"availability":availability,
+            "enabled":self.field_enabled("settings-provider"),"pending":self.provider_pending,"error":self.provider_error,
+            "canChange":snapshot.is_some_and(|s|s.can_change),"rendererBusy":self.provider_renderer_busy,
+            "rendererRevision":self.provider_renderer_revision,"snapshotRendererRevision":snapshot.map(|s|s.renderer_revision),
+            "revision":snapshot.map(|s|s.revision),"epoch":snapshot.map(|s|s.epoch),"request":snapshot.map(|s|s.request),
+            "openField":self.open_field,"menuIndex":self.menu_index,"focusedControl":focused,
+            "bounds":self.control_bounds.borrow().get("settings-provider").copied().map(bounds),
+            "options":(0..2).map(|i|serde_json::json!({"index":i,"disabled":self.option_disabled("settings-provider",i),"bounds":self.option_bounds("settings-provider",i).map(bounds)})).collect::<Vec<_>>()})
+    }
     pub fn route_applying(&mut self, cx: &mut Context<Self>) {
         self.route_busy = true;
         self.route_error = None;
@@ -342,7 +390,10 @@ impl SettingsScreen {
                 }
                 self.inventory = Some(inventory)
             }
-            Err(error) => self.route_error = Some(error),
+            Err(error) => {
+                if self.windows_provider() {self.inventory=None;}
+                self.route_error=Some(error);
+            },
         }
         cx.notify();
     }
@@ -366,6 +417,7 @@ impl SettingsScreen {
         cx.notify();
     }
     fn options(&self, id: &str, defaults: &[&str]) -> Vec<(String, String)> {
+        if id=="settings-provider" {return vec![("wasapi".into(),crate::i18n::t("settings.windows.wasapiOption")),("asio".into(),"ASIO".into())];}
         if !self.native {
             return defaults
                 .iter()
@@ -389,14 +441,14 @@ impl SettingsScreen {
                     "System default".into()
                 },
             )];
+            let devices:Vec<_>=if input {inventory.devices.iter().filter(|d|d.inputs>0).collect()}
+                else if id=="settings-monitor-output" {inventory.monitor_outputs().collect()}
+                else {inventory.playback_outputs().collect()};
             options.extend(
-                inventory
-                    .devices
-                    .iter()
-                    .filter(|d| if input { d.inputs > 0 } else { d.outputs > 0 })
+                devices.into_iter()
                     .map(|d| {
                         (
-                            d.uid.clone(),
+                            if id=="settings-monitor-output" {crate::audio_devices::raw_monitor_uid(&d.uid)}else{d.uid.clone()},
                             if input {
                                 format!("{} · {} ch", d.label, d.inputs)
                             } else {
@@ -446,7 +498,7 @@ impl SettingsScreen {
                         .position(|(uid, _)| uid == &self.input_prefs.monitor_output)
                         .unwrap_or(0),
                 )
-                .and_then(|(uid, _)| inventory.output(uid).ok())
+                .and_then(|(uid, _)| inventory.monitor_output(uid).ok())
                 .map_or(0, |d| d.outputs)
         };
         (0..channels)
@@ -577,19 +629,29 @@ impl SettingsScreen {
     }
     fn field_enabled(&self, id: &str) -> bool {
         match id {
-            "settings-output" => !self.native || !self.route_busy,
+            "settings-provider"=>self.windows_provider()&&!self.provider_pending&&!self.provider_renderer_busy
+                &&self.provider.as_ref().is_some_and(|s|s.can_change&&s.renderer_revision==self.provider_renderer_revision),
+            "settings-output" => (!self.native || !self.route_busy)&&!self.provider_pending,
             "settings-monitor-output" | "settings-output-left" | "settings-output-right" => !self.native || !self.monitor_busy,
             _ => true,
         }
     }
     fn option_disabled(&self, id: &str, index: usize) -> bool {
         match id {
+            "settings-provider"=>{
+                let id=match index {0=>"wasapi",1=>"asio",_=>return true};
+                !self.provider.as_ref().and_then(|s|s.availability.as_ref())
+                    .and_then(|p|p.providers.iter().find(|p|p.id.as_str()==id)).is_some_and(|p|p.available)
+            },
             "settings-output-left" => monitor_channel_choice(self.output_channels, 0, index).is_none(),
             "settings-output-right" => monitor_channel_choice(self.output_channels, 1, index).is_none(),
             _ => false,
         }
     }
     fn selected_option(&self, id: &str, options: &[(String, String)]) -> usize {
+        if id=="settings-provider" {
+            return self.provider.as_ref().map(|s|options.iter().position(|(id,_)|s.selected.as_str()==id).unwrap_or(options.len())).unwrap_or(0);
+        }
         if self.native {
             let uid = match id {
                 "settings-output" => Some(&self.output_uid),
@@ -627,6 +689,7 @@ impl SettingsScreen {
         }, |_, _, _, _| {}).absolute().inset_0())
     }
     fn control(&self, id: &'static str, control: Stateful<Div>, enabled: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+        let enabled=enabled&&(id!="settings-monitor-start"||!self.provider_pending);
         let focus = self.register_control(id, enabled, cx);
         let weak = cx.entity().downgrade();
         self.probe_control(id, singz_uikit::settings_control_with_focus(control, focus, enabled, move |w, cx| {
@@ -673,7 +736,7 @@ impl SettingsScreen {
             "settings-close" => cx.emit(SettingsEvent::Close),
             "settings-quick-start" => cx.emit(SettingsEvent::QuickStart),
             "settings-enable-microphone" => cx.emit(SettingsEvent::EnableMicrophone),
-            "settings-monitor-start" => cx.emit(SettingsEvent::Monitor),
+            "settings-monitor-start" => if !self.provider_pending {cx.emit(SettingsEvent::Monitor)},
             "settings-retry" => {
                 if !self.route_busy { self.route_busy = true; cx.emit(SettingsEvent::Output(self.output_uid.clone())); }
             }
@@ -727,7 +790,7 @@ impl SettingsScreen {
             if let Some(x)=next { self.graph_scroll.set_offset(point(px(x),offset.y)); window.prevent_default(); cx.stop_propagation(); cx.notify(); }
             return;
         }
-        if !matches!(id, "settings-output" | "settings-input" | "settings-channel" | "settings-monitor-output" | "settings-output-left" | "settings-output-right") { return; }
+        if !matches!(id, "settings-provider" | "settings-output" | "settings-input" | "settings-channel" | "settings-monitor-output" | "settings-output-left" | "settings-output-right") { return; }
         if !self.field_enabled(id) { return; }
         let options = self.field_options(id);
         let indices: Vec<_> = (0..options.len()).filter(|i| !self.option_disabled(id, *i)).collect();
@@ -779,6 +842,10 @@ impl SettingsScreen {
         let Some((uid, _)) = options.get(index) else { return; };
         let uid = uid.clone();
                                     match id {
+                                        "settings-provider"=>{
+                                            let provider=match uid.as_str(){"wasapi"=>crate::audio_devices::Provider::Wasapi,"asio"=>crate::audio_devices::Provider::Asio,_=>return};
+                                            self.provider_pending=true;self.provider_error=None;cx.emit(SettingsEvent::Provider(provider));
+                                        },
                                         "settings-output" => {
                                             self.output = index;
                                             if self.native {
@@ -855,7 +922,9 @@ impl SettingsScreen {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let options = self.options(id, options);
-        let selected = if self.native && id == "settings-input" {
+        let selected = if id=="settings-provider" {
+            self.selected_option(id,&options)
+        } else if self.native && id == "settings-input" {
             options
                 .iter()
                 .position(|(uid, _)| uid == &self.input_prefs.input)
@@ -886,7 +955,9 @@ impl SettingsScreen {
         #[cfg(feature = "ui-tests")]
         let bounds = self.field_bounds.clone();
         let label = options.get(selected).map(|(_, label)| label.clone()).unwrap_or_else(|| {
-            if options.is_empty() {
+            if id=="settings-provider" {
+                "Saved audio provider · unavailable".into()
+            } else if options.is_empty() {
                 "No channels".into()
             } else {
                 "Saved channel · unavailable".into()
@@ -904,13 +975,7 @@ impl SettingsScreen {
                 v.child(
                     deferred(popup.children(options.into_iter().enumerate().map(
                         |(index, (_uid, option))| {
-                            let slot = match id {
-                                "settings-output-left" => Some(0),
-                                "settings-output-right" => Some(1),
-                                _ => None,
-                            };
-                            let disabled = slot.is_some_and(|slot|
-                                monitor_channel_choice(self.output_channels, slot, index).is_none());
+                            let disabled=self.option_disabled(id,index);
                             let option = select_option((id, index), option, if expanded { self.menu_index == Some(index) } else { index == selected })
                                 .flex_none()
                                 .when(disabled, |option| option.opacity(0.45).cursor_default())
@@ -1786,6 +1851,12 @@ impl SettingsScreen {
                 .when(self.route_busy,|view|view.child(Self::hint("Applying output route… Playback will stay paused.")))
                 .child(div().opacity(0.45).child(self.check_row("settings-native",crate::i18n::t("settings.playback.useNativeLabel"),true,cx)))
                 .child(Self::hint("Native DSP playback is always enabled.")))
+            .when(self.windows_provider(),|view|view
+                .child(Self::label(crate::i18n::t("settings.windows.providerLabel")))
+                .child(self.field("settings-provider",&["System audio (WASAPI)","ASIO"],0,cx))
+                .when_some(self.provider.as_ref().and_then(|s|s.availability.as_ref().and_then(|a|a.providers.iter().find(|p|p.id==s.selected))).map(|p|(p.detail.clone(),p.available)),|view,(detail,available)|
+                    view.child(Self::hint(detail).when(!available,|hint|hint.text_color(rgb(DANGER)))))
+                .when_some(self.provider_error.clone(),|view,error|view.child(Self::hint(error).text_color(rgb(DANGER)))))
             .child(self.mic(cx))
             .when_some(self.input_pref_error.clone(), |view, error| {
                 let notice = Self::hint(error).text_color(rgb(DANGER)).id("settings-input-pref-error");

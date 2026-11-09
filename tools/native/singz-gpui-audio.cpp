@@ -18,6 +18,7 @@
 #include <zcore/device/audio_host_fake.h>
 #include "json_string.h"
 #include "gpui_playback_graph.h"
+#include "gpui_audio_provider.h"
 #include <cmath>
 #include <algorithm>
 #include <chrono>
@@ -455,8 +456,9 @@ class TestDefaultAudioHost final : public singz::AudioHostBackend {
   std::shared_ptr<std::atomic<bool>> alternate_;
 };
 
-void printInventory(const singz::AudioHostInventory& inventory, bool newline=true) {
-  std::cout<<"{\"protocol\":1,\"ok\":true,\"defaultInputUid\":"<<singz::tools::jsonString(inventory.defaultInputUid)<<",\"defaultOutputUid\":"<<singz::tools::jsonString(inventory.defaultOutputUid)<<",\"devices\":[";
+void printInventory(const singz::AudioHostInventory& inventory, const singz::tools::GpuiAudioProviderSelection& provider, bool newline=true) {
+  std::cout<<"{\"protocol\":1,\"ok\":true";singz::tools::writeGpuiAudioProviderIdentity(std::cout,provider);
+  std::cout<<",\"defaultInputUid\":"<<singz::tools::jsonString(inventory.defaultInputUid)<<",\"defaultOutputUid\":"<<singz::tools::jsonString(inventory.defaultOutputUid)<<",\"devices\":[";
   for(size_t i=0;i<inventory.devices.size();++i){if(i)std::cout<<',';const auto& d=inventory.devices[i];std::cout<<"{\"uid\":"<<singz::tools::jsonString(d.uid)<<",\"label\":"<<singz::tools::jsonString(d.label)<<",\"inputChannels\":"<<d.inputChannels<<",\"outputChannels\":"<<d.outputChannels<<",\"sampleRate\":"<<d.nominalSampleRate<<",\"inputProbeBusy\":"<<(d.inputProbeBusy?"true":"false")<<",\"outputProbeBusy\":"<<(d.outputProbeBusy?"true":"false")<<"}";}
   std::cout<<"]}";if(newline)std::cout<<'\n'<<std::flush;
 }
@@ -620,16 +622,42 @@ int run(int argc, char** argv) {
     std::cout<<"{\"protocol\":1,\"ok\":true,\"bytes\":"<<result.bytes<<"}\n";return 0;
   }
   const bool muted = std::getenv("SINGZ_MUTE") != nullptr;
-  bool fake = false;
-  int first = 1;
-  if (argc > 1 && std::string(argv[1]) == "--test-fake-host") { fake = true; ++first; }
-  const bool trainingOnly=first<argc && std::string(argv[first])=="--training-only";
-  if(trainingOnly)++first;
-  bool emptyProject=!trainingOnly && first<argc && std::string(argv[first])=="--empty-project";
-  if(emptyProject)++first;
-  if(first<argc && std::string(argv[first])=="--devices" && argc==first+1){auto inventoryHost=fake?std::make_unique<NativePlaybackSession>(createFakeAudioHostBackend()):std::make_unique<NativePlaybackSession>();printInventory(inventoryHost->enumerate());return 0;}
+  if(argc==2 && std::string(argv[1])=="--providers") {singz::tools::writeGpuiAudioProviders(std::cout);std::cout<<'\n'<<std::flush;return 0;}
+  bool fake=false,trainingOnly=false,emptyProject=false,devicesOnly=false,explicitProvider=false;
+  std::string requestedProvider;
+  int first=1;
+  auto providerFailure=[&](const std::string& id,const std::string& code,const std::string& message,int exitCode=1) {
+    std::cout<<"{\"protocol\":1,\"ok\":false,\"provider\":"<<singz::tools::jsonString(id)
+      <<",\"backendProvider\":null,\"fixture\":"<<(fake?"true":"false")
+      <<",\"errorCode\":"<<singz::tools::jsonString(code)<<",\"detail\":"<<singz::tools::jsonString(message)
+      <<",\"error\":"<<singz::tools::jsonString(message)<<"}\n"<<std::flush;return exitCode;
+  };
+  while(first<argc) {
+    const std::string option=argv[first];
+    if(option=="--test-fake-host") {if(fake)return providerFailure(requestedProvider,"invalid-arguments","Duplicate fake host option",2);fake=true;++first;}
+    else if(option=="--provider") {
+      if(explicitProvider || first+1>=argc)return providerFailure(requestedProvider,"invalid-provider","Expected one explicit Windows provider",2);
+      requestedProvider=argv[first+1];explicitProvider=true;first+=2;
+    } else if(option=="--training-only") {if(trainingOnly||emptyProject||devicesOnly)return providerFailure(requestedProvider,"invalid-arguments","Conflicting native helper modes",2);trainingOnly=true;++first;}
+    else if(option=="--empty-project") {if(trainingOnly||emptyProject||devicesOnly)return providerFailure(requestedProvider,"invalid-arguments","Conflicting native helper modes",2);emptyProject=true;++first;}
+    else if(option=="--devices") {if(trainingOnly||emptyProject||devicesOnly)return providerFailure(requestedProvider,"invalid-arguments","Conflicting native helper modes",2);devicesOnly=true;++first;}
+    else break;
+  }
+  singz::tools::GpuiAudioProviderSelection providerSelection;
+  singz::tools::GpuiAudioProviderInfo unavailableProvider;
+  if(!singz::tools::selectGpuiAudioProvider(requestedProvider,explicitProvider,fake,providerSelection,unavailableProvider))
+    return providerFailure(providerSelection.id,unavailableProvider.errorCode,unavailableProvider.detail);
+  if(devicesOnly) {
+    if(first!=argc)return providerFailure(providerSelection.id,"invalid-arguments","Unexpected inventory arguments",2);
+    auto backend=fake?createFakeAudioHostBackend():singz::tools::createGpuiPlatformAudioProvider(providerSelection);
+    backend=singz::tools::scopeGpuiOutputProvider(std::move(backend),providerSelection);
+    if(!backend)return providerFailure(providerSelection.id,"runtime-unavailable","The selected native provider could not be created");
+    NativePlaybackSession inventoryHost(std::move(backend));printInventory(inventoryHost.enumerate(),providerSelection);return 0;
+  }
   std::string selectedOutput;
   if(first+1<argc && std::string(argv[first])=="--output"){selectedOutput=argv[first+1];first+=2;}
+  if(!providerSelection.validOutputUid(selectedOutput))
+    return providerFailure(providerSelection.id,"provider-device-mismatch","Output device identity does not match the selected provider");
   double initialTempo=1.,initialTranspose=0.;
   while(first+1<argc && (std::string(argv[first])=="--tempo" || std::string(argv[first])=="--transpose")) {
     double value=0.;size_t consumed=0;try{value=std::stod(argv[first+1],&consumed);}catch(...){return 2;}
@@ -642,7 +670,7 @@ int run(int argc, char** argv) {
   if(first+1<argc && std::string(argv[first])=="--graph-manifest") {
     NativePlaybackGraphDocument graph;
     if(trainingOnly||emptyProject||!readGpuiGraphManifest(argv[first+1],graph)){
-      std::cout<<"{\"protocol\":1,\"ok\":false,\"error\":\"Invalid native graph manifest\"}\n"<<std::flush;return 1;
+      return providerFailure(providerSelection.id,"invalid-graph","Invalid native graph manifest");
     }
     graphDocument=std::move(graph);first+=2;
   }
@@ -656,7 +684,9 @@ int run(int argc, char** argv) {
   auto testDefault = fake ? std::make_shared<std::atomic<bool>>(false) : nullptr;
   std::unique_ptr<AudioHostBackend> provider;
   if(fake)provider=std::make_unique<TestDefaultAudioHost>(fakeOptions,testDefault);
-  else provider=createPlatformAudioHostBackend();
+  else provider=singz::tools::createGpuiPlatformAudioProvider(providerSelection);
+  provider=singz::tools::scopeGpuiOutputProvider(std::move(provider),providerSelection);
+  if(!provider)return providerFailure(providerSelection.id,"runtime-unavailable","The selected native provider could not be created");
   auto service = std::make_unique<SharedAudioService>(std::move(provider));
   auto owner = std::make_unique<NativePlaybackSession>(service->playbackBackend(nullptr,service->providerId()));
   auto& engine = *owner;
@@ -693,7 +723,7 @@ int run(int argc, char** argv) {
   const auto inventory=engine.enumerate();
   const AudioHostDeviceInfo* output=nullptr;
   for(const auto& device:inventory.devices) if(device.uid==(selectedOutput.empty()?inventory.defaultOutputUid:selectedOutput) && device.outputChannels>0) {output=&device;break;}
-  if(!output && !emptyProject) {std::cout<<"{\"protocol\":1,\"ok\":false,\"error\":\"Selected native output device is unavailable\"}\n"<<std::flush;return 1;}
+  if(!output && !emptyProject) return providerFailure(providerSelection.id,"device-unavailable","Selected native output device is unavailable");
   // An empty saved document is still usable without any output endpoint.
   // These are desired prepare options only; no device is opened or claimed.
   if(output){
@@ -795,8 +825,9 @@ int run(int argc, char** argv) {
       }else {countInPending=false;countInSeen=false;countInLandingSeconds=-1.;}
     }
     const bool countingIn=secondsToLanding.has_value();
-    std::cout << "{\"protocol\":1,\"ok\":" << (receipt.ok?"true":"false")
-      << ",\"trainingOnly\":" << (trainingOnly?"true":"false")
+    std::cout << "{\"protocol\":1,\"ok\":" << (receipt.ok?"true":"false");
+    singz::tools::writeGpuiAudioProviderIdentity(std::cout,providerSelection);
+    std::cout << ",\"trainingOnly\":" << (trainingOnly?"true":"false")
       << ",\"emptyProject\":" << (emptyProject?"true":"false")
       << ",\"laneSetRevision\":" << laneSetRevision
       << ",\"lanesCommitted\":" << (lanesCommitted?"true":"false")
@@ -909,7 +940,7 @@ int run(int argc, char** argv) {
     // without an explicit output command. Publish its proven capabilities on
     // that same receipt, before a fresh exclusive-device probe can see EBUSY.
     if(publishInventory || publishedOutputUid!=outputUid){
-      std::cout<<",\"deviceInventory\":";printInventory(engine.enumerate(),false);
+      std::cout<<",\"deviceInventory\":";printInventory(engine.enumerate(),providerSelection,false);
       publishInventory=false;publishedOutputUid=outputUid;
     }
     std::cout << "}\n" << std::flush;
@@ -984,6 +1015,7 @@ int run(int argc, char** argv) {
       wantsPlaying=false;completionParked=true;
     }
     auto changeOutput=[&](std::string uid){NativePlaybackResult result;const bool useDefault=uid.empty();
+        if(!providerSelection.validOutputUid(uid)){result.message="Output device identity does not match the selected provider";return result;}
         service->refreshInventory();
         const auto devices=engine.enumerate();if(uid.empty())uid=devices.defaultOutputUid;
         const AudioHostDeviceInfo* target=nullptr;for(const auto& d:devices.devices)if(d.uid==uid&&d.outputChannels>0&&d.nominalSampleRate>0){target=&d;break;}
@@ -1293,6 +1325,7 @@ int run(int argc, char** argv) {
       else if(command=="output"){
         std::string token,uid;
         if(input>>token && validEnd() && decodeUid(token,uid)){
+          if(!providerSelection.validOutputUid(uid)){result.message="Output device identity does not match the selected provider";reply(result);continue;}
           service->refreshInventory();const auto devices=engine.enumerate();const auto requested=uid.empty()?devices.defaultOutputUid:uid;
           for(const auto& device:devices.devices)if(device.uid==requested && device.outputChannels>0 && device.nominalSampleRate>0){
             clearCues();service->parkOutput();selectedOutput=uid;outputUid=device.uid;outputLabel=device.label;

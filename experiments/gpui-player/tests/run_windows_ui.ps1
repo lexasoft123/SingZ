@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory=$true)][string]$Python,
     [Parameter(Mandatory=$true)][string]$App,
     [Parameter(Mandatory=$true)][string]$Out,
-    [ValidateSet('key','graph','drive','adoption','title','import','delete','recording',
+    [ValidateSet('key','graph','drive','adoption','provider','title','import','delete','recording',
         'recording-publication','recording-publication-helper','recording-recovery',
         'training-input-cue','training-input-completing','training-output',
         'training-output-standalone','training-output-song','training-run')][string]$Case = 'graph'
@@ -64,6 +64,7 @@ $driverName=switch($Case){
  'graph'{'test_native_graph_ui.py'}
  'drive'{'test_native_drive_ui.py'}
  'adoption'{'test_native_drive_adoption_ui.py'}
+ 'provider'{'test_native_audio_provider_ui.py'}
  'title'{'test_native_title.py'}
  'import'{'test_native_library_import.py'}
  'delete'{'test_native_project_delete.py'}
@@ -156,7 +157,7 @@ try {
  }
  $run.WaitForExit()
  if($run.ExitCode-ne0){throw "Native UI driver failed: $($run.ExitCode)"}
- $expectedProcesses=if($Case-in@('key','graph','drive','adoption')){2}else{1}
+ $expectedProcesses=if($Case-in@('key','graph','drive','adoption','provider')){2}else{1}
  if($frames.Count-ne$expectedProcesses){throw "Expected $expectedProcesses native app processes for $Case; observed $($frames.Count)"}
  if([NativeGpuiProbe]::GetForegroundWindow().ToInt64()-ne$before){throw 'Foreground window changed during verification'}
  $remaining=@(Processes)

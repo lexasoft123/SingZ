@@ -35,6 +35,7 @@ mod native_build_info;
 #[path="../build_config.rs"]
 mod build_config;
 mod audio_devices;
+mod audio_provider_host;
 mod audio_tags;
 mod diagnostics;
 mod diagnostics_host;
@@ -61,6 +62,8 @@ mod drive_restore_host;
 mod drive_projects;
 #[cfg(feature="ui-tests")]
 mod ui_drive_restore;
+#[cfg(feature = "ui-tests")]
+mod ui_audio_provider;
 mod sync_scheduler;
 mod lrclib;
 mod lyrics_resolution;
@@ -446,6 +449,9 @@ struct Player {
     #[cfg(feature="ui-tests")]
     notice_close_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     backend: Option<integration::Backend>,
+    audio_provider: Option<integration::ProviderSnapshot>,
+    audio_provider_serial: u64,
+    audio_provider_pending: Option<u64>,
     native_epoch: u64,
     native_rate: f32,
     native_seek_count: u64,
@@ -1100,6 +1106,7 @@ impl Player {
                     this.mic_serial += 1;
                 }
                 settings::SettingsEvent::Monitor => {
+                    if this.audio_provider_pending.is_some() {return;}
                     if this.monitor_busy() {
                         this.monitor_requested = false;
                     } else if !this.loading && !this.rate_busy() && this.mic_prefs_valid {
@@ -1115,12 +1122,14 @@ impl Player {
                     }
                 }
                 settings::SettingsEvent::Output(uid) => this.select_output(uid.clone(), cx),
+                settings::SettingsEvent::Provider(provider) => this.select_audio_provider(*provider, cx),
                 settings::SettingsEvent::Close => this.screen = this.previous_screen,
                 settings::SettingsEvent::QuickStart => {
                     this.screen = this.previous_screen;
                     this.open_quick_start(false, cx);
                 }
             }
+            this.sync_audio_provider(cx);
             this.last = Instant::now();
             cx.notify();
         });
@@ -1374,6 +1383,9 @@ impl Player {
             pending_seek: None,
             native_floor: None,
             backend,
+            audio_provider: None,
+            audio_provider_serial: 0,
+            audio_provider_pending: None,
             native_epoch: 0,
             practice: None,
             practice_reached: None,
@@ -2369,10 +2381,12 @@ impl Player {
         }
     }
     fn poll_backend(&mut self, cx: &mut Context<Self>) {
+        self.sync_audio_provider(cx);
         if let Some(store)=&mut self.desktop_window_state{store.save_if_due(Instant::now());}
         let events = self.backend.as_ref().map(|b| b.drain()).unwrap_or_default();
         for event in events {
             match event {
+                integration::Event::Provider(snapshot)=>self.adopt_audio_provider(snapshot,cx),
                 integration::Event::Training(epoch, generation, result)
                     if epoch == self.native_epoch =>
                 {
@@ -3030,6 +3044,7 @@ impl Player {
         self.training
             .update(cx, |screen, cx| screen.set_song(song, cx));
         self.sync_microphone(cx);
+        self.sync_audio_provider(cx);
         self.poll_practice(cx);
         self.poll_training_recording(cx);
         self.poll_training_store(cx);
@@ -4980,10 +4995,12 @@ impl Player {
 }
 impl Render for Player {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_audio_provider(cx);
         #[cfg(feature="ui-tests")]
         self.notice_close_bounds.set(None);
         self.poll_locale(window,cx);
         self.sync_microphone(cx);
+        self.sync_audio_provider(cx);
         if self.screen!=Screen::Player {self.carry_open=false;}
         self.refresh_carry_widget(cx);
         let progress = self
@@ -5980,6 +5997,12 @@ fn main() {
             assert!(background && std::env::var("SINGZ_MUTE").as_deref()==Ok("1")
                 && std::env::var("SINGZ_GPUI_TEST_NO_CAPTURE").as_deref()==Ok("1"));
             ui_drive_restore::run(window_handle,view.clone(),directory.into(),cx);
+        }
+        #[cfg(feature = "ui-tests")]
+        if let Some(directory)=std::env::var_os("SINGZ_GPUI_AUDIO_PROVIDER_TEST") {
+            assert!(background&&std::env::var("SINGZ_MUTE").as_deref()==Ok("1")
+                &&std::env::var("SINGZ_GPUI_TEST_NO_CAPTURE").as_deref()==Ok("1"));
+            ui_audio_provider::run(window_handle,view.clone(),directory.into(),cx);
         }
         #[cfg(feature = "ui-tests")]
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_PLAYBACK_GRAPH_TEST") {

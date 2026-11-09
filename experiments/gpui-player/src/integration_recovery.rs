@@ -104,6 +104,8 @@ pub(super) fn prepare(
     alive: Arc<AtomicBool>,
     handoff: Arc<AtomicU64>,
     uid: &str,
+    provider:crate::audio_devices::Provider,
+    provider_retired:Arc<AtomicU64>,
 ) -> Result<(Connection, Status, RecoveredMedia)> {
     anyhow::ensure!(
         uid.len() <= 2000 && !uid.contains('\0'),
@@ -116,7 +118,7 @@ pub(super) fn prepare(
         latest.clone(),
         alive.clone(),
         handoff,
-        uid,
+        uid,provider,provider_retired,
     )?;
     let initial = Status::parse(&receipt)?;
     let media = RecoveredMedia {

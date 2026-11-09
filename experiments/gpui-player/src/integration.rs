@@ -347,6 +347,10 @@ pub fn fixture_mode() -> bool {
                     .any(|s| key.contains(s))
         })
 }
+#[path="integration_provider.rs"]
+mod provider_control;
+pub use provider_control::ProviderSnapshot;
+
 #[derive(Clone, Debug)]
 pub struct Status {
     pub graph_snapshot: Option<Arc<crate::playback_graph::Snapshot>>,
@@ -362,6 +366,12 @@ pub struct Status {
     pub observed_lanes: serde_json::Value,
     #[cfg(feature="ui-tests")]
     pub observed_master_gain: Option<f64>,
+    #[cfg(feature="ui-tests")]
+    pub observed_provider: Option<String>,
+    #[cfg(feature="ui-tests")]
+    pub observed_backend_provider: Option<String>,
+    #[cfg(feature="ui-tests")]
+    pub observed_fixture: Option<bool>,
     pub counting_in: bool,
     pub count_in_heard:Option<crate::transport_timing::Heard>,
     pub rendered_frame: i64,
@@ -463,6 +473,12 @@ impl Status {
             observed_lanes: v["lanes"].clone(),
             #[cfg(feature="ui-tests")]
             observed_master_gain: v["masterGain"].as_f64(),
+            #[cfg(feature="ui-tests")]
+            observed_provider: v["provider"].as_str().map(str::to_owned),
+            #[cfg(feature="ui-tests")]
+            observed_backend_provider: v["backendProvider"].as_str().map(str::to_owned),
+            #[cfg(feature="ui-tests")]
+            observed_fixture: v["fixture"].as_bool(),
             counting_in: v["countingIn"] == true,
             count_in_heard,
             rendered_frame: v["renderedProjectFrame"].as_i64().unwrap_or(0),
@@ -640,6 +656,7 @@ fn publish_resolved_lyrics(project:&Project,mut proposal:crate::lyrics_resolutio
     if cancel()&&!result.as_ref().is_ok_and(|r|r.written){Err(Failure::Cancelled)}else{result.map_err(|e|Failure::Error(format!("{e:#}")))}
 }
 pub enum Event {
+    Provider(ProviderSnapshot),
     Region(u64,u64,std::result::Result<Status,String>),
     Playback(u64,u64,Status),
     AnalysisStarted(u64,u64),
@@ -714,6 +731,7 @@ pub struct OwnedAudioProbe {
 }
 
 enum Request {
+    Provider(u64,u64,u64,u64,crate::audio_devices::Provider),
     KaraokePref(u64,bool),
     Region(u64,u64,crate::region_gesture::Target,f32),
     Rate(u64,u64,f32,i32),
@@ -750,6 +768,12 @@ enum Request {
     ReplaceLanes(u64,u64,Project,Vec<PathBuf>,Arc<AtomicU64>),
 }
 pub struct Backend {
+    provider_selected:Arc<AtomicU64>,
+    provider_renderer:Arc<AtomicU64>,
+    provider_pending:Arc<AtomicU64>,
+    provider_retired:Arc<AtomicU64>,
+    provider_gate:Arc<Mutex<()>>,
+    provider_reserved:Arc<AtomicBool>,
     saves: save_worker::Service,
     carry_intent:Arc<AtomicU64>,
     playback_intent:Arc<AtomicU64>,
@@ -811,6 +835,14 @@ impl Backend {
         let delete_events = events.clone();
         let delete_alive = alive.clone();
         let delete_inspect_worker = thread::spawn(move || inspect_delete_requests(delete_inspect_rx,delete_events,delete_alive));
+        let provider_selected=Arc::new(AtomicU64::new(crate::audio_devices::Provider::platform_default().code()));
+        let provider_renderer=Arc::new(AtomicU64::new(1));
+        let provider_pending=Arc::new(AtomicU64::new(0));
+        let provider_retired=Arc::new(AtomicU64::new(0));
+        let provider_gate=Arc::new(Mutex::new(()));
+        let provider_reserved=Arc::new(AtomicBool::new(false));
+        let inventory_provider=provider_selected.clone();
+        let inventory_provider_gate=provider_gate.clone();
         let (inventory_requests, inventory_rx) = mpsc::sync_channel(1);
         let inventory_events = events.clone();
         let inventory_alive = alive.clone();
@@ -818,8 +850,12 @@ impl Backend {
             while inventory_alive.load(Ordering::Acquire) {
                 match inventory_rx.recv_timeout(Duration::from_millis(20)) {
                     Ok(()) => {
-                        let result = crate::audio_devices::inventory(&inventory_alive)
+                        let token=inventory_provider.load(Ordering::Acquire);
+                        let selected=crate::audio_devices::Provider::from_code(token);
+                        let result = crate::audio_devices::inventory_with_provider(&inventory_alive,selected)
                             .map_err(|e| format!("{e:#}"));
+                        let _gate=inventory_provider_gate.lock().unwrap_or_else(|e|e.into_inner());
+                        if inventory_provider.load(Ordering::Acquire)!=token{continue;}
                         let _ = inventory_events.send(Event::Inventory(result));
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -837,8 +873,10 @@ impl Backend {
         let lyrics_align_intent=Arc::new(AtomicU64::new(0));let lyrics_align=lyrics_align_intent.clone();
         let lyrics_search_intent=Arc::new(AtomicU64::new(0));let lyrics_search=lyrics_search_intent.clone();
         let copy_handoff=Arc::new(AtomicU64::new(0));let worker_handoff=copy_handoff.clone();
-        let worker = thread::spawn(move || worker(rx, events, e, a, pending, text, intent, beat_cancel, lyrics_preview,lyrics_align,lyrics_search,worker_handoff,save_reanchors,playback_worker));
+        let provider_args=(provider_selected.clone(),provider_renderer.clone(),provider_pending.clone(),provider_retired.clone(),provider_gate.clone(),provider_reserved.clone());
+        let worker = thread::spawn(move || worker(rx, events, e, a, pending, text, intent, beat_cancel, lyrics_preview,lyrics_align,lyrics_search,worker_handoff,save_reanchors,playback_worker,provider_args));
         Self {
+            provider_selected,provider_renderer,provider_pending,provider_retired,provider_gate,provider_reserved,
             saves,
             carry_intent:Arc::new(AtomicU64::new(0)),
             playback_intent,
@@ -874,6 +912,32 @@ impl Backend {
         }
         events
     }
+    /// Mirror only renderer leases that can own playback output. Ordinary
+    /// independent Settings input preview is deliberately not such a lease.
+    pub fn provider_renderer_busy(&self,busy:bool)->u64 {
+        let _gate=self.provider_gate.lock().unwrap_or_else(|e|e.into_inner());
+        let old=self.provider_renderer.load(Ordering::Acquire);
+        if (old&1!=0)==busy{return old;}
+        let next=((old>>1)+1)*2+u64::from(busy);self.provider_renderer.store(next,Ordering::Release);next
+    }
+    pub fn provider(&self,serial:u64,expected_revision:u64,expected_epoch:u64,provider:crate::audio_devices::Provider)->Result<()> {
+        anyhow::ensure!(serial>0&&expected_epoch==self.current_epoch(),"Audio provider eligibility changed");
+        let renderer=self.provider_renderer.load(Ordering::Acquire);
+        anyhow::ensure!(renderer&1==0,"Release renderer playback leases before changing provider");
+        self.requests.try_send(Request::Provider(serial,expected_revision,expected_epoch,renderer,provider)).context("Native command queue is full")
+    }
+    /// Negative-control adapter: exercise the unchanged worker admission using
+    /// its actual renderer fence. This never changes owner or renderer state.
+    #[cfg(feature="ui-tests")]
+    pub fn probe_provider_worker(&self,serial:u64,expected_revision:u64,expected_epoch:u64,provider:crate::audio_devices::Provider)->Result<()> {
+        anyhow::ensure!(serial>0,"Invalid provider probe identifier");
+        let renderer=self.provider_renderer.load(Ordering::Acquire);
+        self.requests.try_send(Request::Provider(serial,expected_revision,expected_epoch,renderer,provider)).context("Native command queue is full")
+    }
+    fn ownership_send(&self,request:Request)->Result<()> {
+        self.provider_pending.fetch_add(1,Ordering::AcqRel);
+        if self.requests.try_send(request).is_err(){self.provider_pending.fetch_sub(1,Ordering::AcqRel);bail!("Native command queue is full");}Ok(())
+    }
     pub fn karaoke_pref(&self,sequence:u64,enabled:bool)->Result<()> {
         self.requests.try_send(Request::KaraokePref(sequence,enabled)).context("Native command queue is full")
     }
@@ -886,9 +950,9 @@ impl Backend {
         let _ = self.inventory_requests.try_send(());
     }
     pub fn park(&self, epoch: u64, serial: u64, parked: bool) -> Result<()> {
-        self.requests
-            .try_send(Request::Park(epoch, serial, parked))
-            .context("Native command queue is full")
+        let _gate=self.provider_gate.lock().unwrap_or_else(|e|e.into_inner());
+        provider_control::owner_admission(&self.provider_reserved)?;
+        self.ownership_send(Request::Park(epoch,serial,parked))
     }
     pub fn output(&self, uid: String) -> Result<()> {
         self.requests
@@ -899,7 +963,9 @@ impl Backend {
         self.requests.try_send(Request::RestoreSeek(epoch,position)).context("Native command queue is full")
     }
     pub fn recover_output(&self, epoch: u64, serial: u64, request: AudioRecovery, uid: String) -> Result<()> {
-        self.requests.try_send(Request::RecoverOutput(epoch, serial, request, uid)).context("Native command queue is full")
+        let _gate=self.provider_gate.lock().unwrap_or_else(|e|e.into_inner());
+        provider_control::owner_admission(&self.provider_reserved)?;
+        self.ownership_send(Request::RecoverOutput(epoch,serial,request,uid))
     }
     pub fn read_publication(&self, epoch: u64, serial: u64, publication: Publication) -> Result<()> {
         self.requests.try_send(Request::ReadPublication(epoch, serial, publication)).context("Native command queue is full")
@@ -944,11 +1010,12 @@ impl Backend {
         self.open_request(path,fallback,confirmed,overlay)
     }
     fn open_request(&self,path:PathBuf,fallback:Option<crate::beat::Metronome>,confirmed:Option<crate::project_delete::Target>,overlay:Option<OpenCustomOverlay>)->Result<u64> {
+        let _gate=self.provider_gate.lock().unwrap_or_else(|e|e.into_inner());
+        provider_control::owner_admission(&self.provider_reserved)?;
         let previous = self.epoch.fetch_add(1, Ordering::AcqRel);
         let epoch = previous + 1;
         if self
-            .requests
-            .try_send(Request::Open(epoch, path, fallback, confirmed, overlay))
+            .ownership_send(Request::Open(epoch, path, fallback, confirmed, overlay))
             .is_err()
         {
             self.epoch.store(previous, Ordering::Release);
@@ -970,12 +1037,13 @@ impl Backend {
             .context("Native command queue is full")
     }
     pub fn rename(&self, dir: PathBuf, expected: String, name: String) -> Result<u64> {
+        let _gate=self.provider_gate.lock().unwrap_or_else(|e|e.into_inner());
+        provider_control::owner_admission(&self.provider_reserved)?;
         // Revoking the previous load epoch cancels analysis before joining it.
         let previous = self.epoch.fetch_add(1, Ordering::AcqRel);
         let epoch = previous + 1;
         if self
-            .requests
-            .try_send(Request::Rename(epoch, dir, expected, name))
+            .ownership_send(Request::Rename(epoch, dir, expected, name))
             .is_err()
         {
             self.epoch.store(previous, Ordering::Release);
@@ -984,6 +1052,8 @@ impl Backend {
         Ok(epoch)
     }
     pub fn import_library(&self,project:&Project,root:PathBuf,mode:crate::project_import::Mode)->Result<u64>{
+        let _gate=self.provider_gate.lock().unwrap_or_else(|e|e.into_inner());
+        provider_control::owner_admission(&self.provider_reserved)?;
         let input=crate::project_import::Input{source:project.dir.clone(),root,expected_project:project.metadata_hash.clone(),expected_lyrics:project.lyrics_fingerprint.clone(),mode};
         // Revocation cancels every source-bound worker before a Move releases
         // its helper handles and changes the active directory.
@@ -992,7 +1062,7 @@ impl Backend {
         if self.epoch.compare_exchange(previous,epoch,Ordering::AcqRel,Ordering::Acquire).is_err(){
             let _=self.copy_handoff.compare_exchange(epoch,0,Ordering::AcqRel,Ordering::Acquire);bail!("Project changed before Add to library could start");
         }
-        if self.requests.try_send(Request::ImportLibrary(epoch,input)).is_err(){
+        if self.ownership_send(Request::ImportLibrary(epoch,input)).is_err(){
             let _=self.epoch.compare_exchange(epoch,previous,Ordering::AcqRel,Ordering::Acquire);
             let _=self.copy_handoff.compare_exchange(epoch,0,Ordering::AcqRel,Ordering::Acquire);bail!("Native command queue is full");
         }
@@ -1006,7 +1076,12 @@ impl Backend {
     /// including a private working copy anchored to that saved destination.
     pub fn delete(&self, target:crate::project_delete::Target, serial:u64, loaded_target:bool)->Result<(u64,bool)> {
         anyhow::ensure!(self.alive.load(Ordering::Acquire), "Native backend has stopped");
-        let epoch=admit_delete_request(&self.requests,&self.epoch,loaded_target,|epoch,armed|Request::Delete(serial,epoch,loaded_target,target,armed))?;
+        let _gate=self.provider_gate.lock().unwrap_or_else(|e|e.into_inner());
+        provider_control::owner_admission(&self.provider_reserved)?;
+        self.provider_pending.fetch_add(1,Ordering::AcqRel);
+        let mut armed_packet=None;
+        let admitted=admit_delete_request(&self.requests,&self.epoch,loaded_target,|epoch,armed|{armed_packet=Some(armed.clone());Request::Delete(serial,epoch,loaded_target,target,armed)});
+        let epoch=match admitted {Ok(epoch)=>epoch,Err(error)=>{if !armed_packet.is_some_and(|armed|armed.load(Ordering::Acquire)==2){self.provider_pending.fetch_sub(1,Ordering::AcqRel);}return Err(error);}};
         Ok((epoch,loaded_target))
     }
     pub fn save(
@@ -1102,12 +1177,13 @@ impl Backend {
         phrase: &crate::training_audio::Phrase,
     ) -> Result<()> {
         phrase.command()?;
+        let _gate=self.provider_gate.lock().unwrap_or_else(|e|e.into_inner());
+        provider_control::owner_admission(&self.provider_reserved)?;
         let previous = self
             .training_intent
             .swap(phrase.generation, Ordering::AcqRel);
         if self
-            .requests
-            .try_send(Request::Training(epoch, phrase.clone()))
+            .ownership_send(Request::Training(epoch, phrase.clone()))
             .is_err()
         {
             let _ = self.training_intent.compare_exchange(
@@ -1122,15 +1198,15 @@ impl Backend {
     }
     pub fn cancel_training(&self, epoch: u64, generation: u64) -> Result<()> {
         anyhow::ensure!(generation > 0, "Invalid training generation");
+        let _gate=self.provider_gate.lock().unwrap_or_else(|e|e.into_inner());
+        provider_control::owner_admission(&self.provider_reserved)?;
         let _ = self.training_intent.compare_exchange(
             generation,
             0,
             Ordering::AcqRel,
             Ordering::Acquire,
         );
-        self.requests
-            .try_send(Request::CancelTraining(epoch, generation))
-            .context("Native command queue is full")
+        self.ownership_send(Request::CancelTraining(epoch,generation))
     }
 }
 fn inspect_delete_requests(requests:Receiver<(PathBuf,PathBuf,u64)>,events:mpsc::Sender<Event>,alive:Arc<AtomicBool>) {
@@ -1579,6 +1655,8 @@ struct PendingInventory {
     reply: Value,
 }
 struct Connection {
+    provider:crate::audio_devices::Provider,
+    provider_retired:Arc<AtomicU64>,
     pending_inventory: Option<PendingInventory>,
     carry_revision:u64,
     lane_revision:u64,
@@ -1596,7 +1674,7 @@ struct Connection {
 impl Drop for Connection {
     fn drop(&mut self) {
         let _ = self.child.kill();
-        let _ = self.child.wait();
+        if self.child.wait().is_ok(){self.provider_retired.fetch_sub(1,Ordering::AcqRel);}
     }
 }
 impl Connection {
@@ -1607,7 +1685,10 @@ impl Connection {
         alive: Arc<AtomicBool>,
         copy_handoff: Arc<AtomicU64>,
         output_uid: &str,
+        provider:crate::audio_devices::Provider,
+        provider_retired:Arc<AtomicU64>,
     ) -> Result<(Self, Value)> {
+        crate::audio_devices::validate_output_uid(provider,output_uid,cfg!(windows))?;
         let helper = std::env::var_os("SINGZ_GPUI_AUDIO_HELPER")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
@@ -1625,6 +1706,7 @@ impl Connection {
         if project.is_none() {
             command.arg("--training-only");
         }
+        if cfg!(windows){command.arg("--provider").arg(provider.as_str());}
         command.arg("--output").arg(output_uid);
         if let Some(project) = project {
             command
@@ -1648,8 +1730,12 @@ impl Connection {
             .stderr(Stdio::inherit())
             .spawn()
             .context("Native audio helper is missing; build with scripts/build-gpui-audio.sh")?;
-        let input = child.stdin.take().context("Missing helper input")?;
-        let output = child.stdout.take().context("Missing helper output")?;
+        provider_retired.fetch_add(1,Ordering::AcqRel);
+        let pipes=child.stdin.take().zip(child.stdout.take());
+        let (input,output)=match pipes {Some(pipes)=>pipes,None=>{
+            let _=child.kill();if child.wait().is_ok(){provider_retired.fetch_sub(1,Ordering::AcqRel);}
+            bail!("Missing native helper pipes");
+        }};
         let (tx, rx) = mpsc::sync_channel(4);
         thread::spawn(move || {
             let mut reader = BufReader::new(output);
@@ -1674,6 +1760,7 @@ impl Connection {
             }
         });
         let mut connection = Self {
+            provider,provider_retired,
             pending_inventory:None,
             carry_revision:0,
             lane_revision:0,
@@ -1705,7 +1792,12 @@ impl Connection {
         Ok((connection, value))
     }
     fn read(&mut self, timeout: Duration) -> Result<Value> {
-        read_inventory_reply(&self.replies,self.epoch,&self.latest,&self.alive,&self.copy_handoff,timeout,&mut self.pending_inventory,|reply,kind,current| crate::audio_devices::remember_native_inventory(reply,kind,current))
+        let provider=self.provider;
+        let value=read_inventory_reply(&self.replies,self.epoch,&self.latest,&self.alive,&self.copy_handoff,timeout,&mut self.pending_inventory,|reply,kind,current| {
+            crate::audio_devices::verify_provider_receipt(reply,provider)?;
+            crate::audio_devices::remember_native_inventory(reply,kind,current)
+        })?;
+        crate::audio_devices::verify_provider_receipt(&value,self.provider)?;Ok(value)
     }
     fn metronome(&mut self, commands: &[String]) -> Result<Status> {
         let mut status = None;
@@ -1724,6 +1816,7 @@ impl Connection {
         admit_lane_revision(&mut self.lane_revision,&status)?;admit_carry_revision(&mut self.carry_revision,&status)?;Ok(status)
     }
     fn output_route(&mut self,uid:&str)->std::result::Result<Status,LaneReplaceFailure> {
+        crate::audio_devices::validate_output_uid(self.provider,uid,cfg!(windows)).map_err(|e|LaneReplaceFailure::Refused(e.to_string()))?;
         let before=self.raw_command_for("status",Duration::from_secs(10))
             .map_err(|e|LaneReplaceFailure::Disconnected(e.to_string()))?;
         Status::parse(&before).map_err(|e|LaneReplaceFailure::Disconnected(e.to_string()))?;
@@ -1926,6 +2019,7 @@ fn worker(
     copy_handoff: Arc<AtomicU64>,
     save_reanchors: save_worker::Reanchors,
     playback_intent: Arc<AtomicU64>,
+    provider_args:(Arc<AtomicU64>,Arc<AtomicU64>,Arc<AtomicU64>,Arc<AtomicU64>,Arc<Mutex<()>>,Arc<AtomicBool>),
 ) {
     let _=events.send(Event::LyricsCapabilities(crate::lyrics_align::capability()));
     let (audio_preferences, prefs_error) = match crate::audio_devices::load() {
@@ -1948,7 +2042,18 @@ fn worker(
         }
     };
     let mut global_carry=match crate::carry_line::load(&crate::audio_devices::directory()) {Ok(config)=>{let _=events.send(Event::CarryPrefs(Ok(config.clone())));config},Err(e)=>{let _=events.send(Event::CarryPrefs(Err(format!("Could not restore Carry the line preferences: {e:#}"))));Default::default()}};
-    let mut output_uid = crate::audio_devices::output_uid(&audio_preferences).unwrap_or_default();
+    let (provider_selected,provider_renderer,provider_pending,provider_retired,provider_gate,provider_reserved)=provider_args;
+    let selected=crate::audio_devices::restored_provider(&audio_preferences);
+    let selected_error=selected.as_ref().err().map(|e|format!("{e:#}"));
+    let selected=selected.unwrap_or(crate::audio_devices::Provider::Unsupported);
+    provider_selected.store(selected.code(),Ordering::Release);
+    let availability=crate::audio_devices::providers(&alive);
+    let unavailable_error=availability.as_ref().ok().and_then(|facts|facts.require_available(selected).err()).map(|e|format!("{e:#}"));
+    let mut provider_state=provider_control::ProviderState{snapshot:ProviderSnapshot{selected,availability:availability.as_ref().ok().cloned(),error:selected_error.or(unavailable_error).or_else(||availability.err().map(|e|format!("{e:#}"))),..Default::default()},
+        renderer:provider_renderer,pending:provider_pending,retired:provider_retired.clone(),gate:provider_gate,reserved:provider_reserved};
+    let restored_output=crate::audio_devices::scoped_output_uid(&audio_preferences,selected,cfg!(windows));
+    let mut output_uid=restored_output.as_ref().cloned().unwrap_or_else(|_|crate::audio_devices::output_uid(&audio_preferences).unwrap_or_default());
+    let prefs_error=prefs_error.or_else(||restored_output.err().map(|e|format!("Could not restore audio output: {e:#}")));
     let _ = events.send(Event::KaraokePref(crate::audio_devices::karaoke(&audio_preferences)));
     let _ = events.send(Event::AudioPrefs(output_uid.clone(), prefs_error));
     let _ = events.send(Event::InputPrefs(
@@ -1970,6 +2075,7 @@ fn worker(
     let mut shutdown_carry=None;
     let mut shutdown_karaoke=None;
     while alive.load(Ordering::Acquire) {
+        provider_state.publish(&events,latest.load(Ordering::Acquire),connection.is_some(),monitor_lease,active_training.is_some(),training_intent.load(Ordering::Acquire));
         let mut index=0;while index<deletions.len(){if deletions[index].is_finished(){let _=deletions.swap_remove(index).join();}else{index+=1;}}
         // Cancellation intent bypasses the bounded command queue. Navigation
         // must still retire a live cue if that queue is full.
@@ -2009,6 +2115,7 @@ fn worker(
                 }
             }
         }
+        let _provider_work=request.as_ref().ok().filter(|r|provider_control::ownership_request(r)).map(|_|provider_control::PendingWork(provider_state.pending.clone()));
         match request {
             // Drop can request shutdown while recv_timeout is waiting. Keep a
             // received adoption, but never dispatch queued audio after observing
@@ -2016,6 +2123,10 @@ fn worker(
             Ok(request) if !alive.load(Ordering::Acquire) => {
                 match request{Request::AdoptMetronomePreferences(_,met)=>shutdown_preference=Some(met),Request::AdoptCarryPreferences(_,config)=>shutdown_carry=Some(config),Request::KaraokePref(_,enabled)=>shutdown_karaoke=Some(enabled),_=>{}}
                 break;
+            }
+            Ok(Request::Provider(serial,revision,epoch,renderer,provider))=>{
+                provider_state.choose(&events,&latest,&alive,&provider_selected,serial,revision,epoch,renderer,provider,
+                    connection.is_some(),monitor_lease,active_training.is_some(),&training_intent,&mut output_uid);
             }
             Ok(Request::Training(epoch, phrase)) => {
                 let generation = phrase.generation;
@@ -2037,6 +2148,7 @@ fn worker(
                             alive.clone(),
                             copy_handoff.clone(),
                             &output_uid,
+                            crate::audio_devices::Provider::from_code(provider_selected.load(Ordering::Acquire)),provider_retired.clone(),
                         )?;
                         connection = Some(child);
                     }
@@ -2209,7 +2321,7 @@ fn worker(
                         drop(connection.take());
                         *telemetry.lock().unwrap_or_else(|e|e.into_inner())=None;
                         active_training=None;training_intent.store(0,Ordering::Release);
-                        let (child,status,media)=recovery::prepare(&request,epoch,latest.clone(),alive.clone(),copy_handoff.clone(),&uid)?;
+                        let (child,status,media)=recovery::prepare(&request,epoch,latest.clone(),alive.clone(),copy_handoff.clone(),&uid,crate::audio_devices::Provider::from_code(provider_selected.load(Ordering::Acquire)),provider_retired.clone())?;
                         connection=Some(child);(status,Some(media))
                     };
                     anyhow::ensure!(uid.is_empty()||status.output_uid==uid,"Native output differs from the selected device");
@@ -2255,7 +2367,7 @@ fn worker(
                         );
                         Ok(Some(status))
                     } else {
-                        crate::audio_devices::inventory(&alive)?.output(&uid)?;
+                        crate::audio_devices::inventory_with_provider(&alive,crate::audio_devices::Provider::from_code(provider_selected.load(Ordering::Acquire)))?.output(&uid)?;
                         Ok(None)
                     }
                 })();
@@ -2423,6 +2535,7 @@ fn worker(
                         alive.clone(),
                         copy_handoff.clone(),
                         &output_uid,
+                        crate::audio_devices::Provider::from_code(provider_selected.load(Ordering::Acquire)),provider_retired.clone(),
                     )?;
                     let (mut child,value)=checked_delete_recovery(&path,confirmed.as_ref(),prepared)?;
                     child.command(&format!("master {}", project.master))?;

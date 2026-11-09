@@ -6,6 +6,12 @@ controls are implemented as a first slice; see `NATIVE_INTEGRATION.md`. Full vis
 and the remaining backend features remain separate.
 Common native controls live in sibling `singz-ui/gpui`.
 
+Windows provider source checkpoint (2026-11-09): native availability, explicit
+provider preferences, provider-scoped playback outputs and owner-safe switching
+are implemented, with independent WASAPI input/monitor inventory preserved.
+The full Rust suite passes 920 tests; Windows runtime/UI qualification is still
+pending. ASIO remains honestly unavailable. See [provider review](WINDOWS_PROVIDER_REVIEW.md).
+
 Settings runtime graph follow-up (2026-11-09): accepted native playback snapshots
 now provide the actual modules, bus connections and latency compensation. Shared
 UIKit renders the source playback view with persistent viewport focus; native
