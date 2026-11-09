@@ -229,7 +229,10 @@ def inspect_pack(pack_dir: Path, target: str) -> dict:
             raise CodecError(f'Missing installed public header: {header}')
         link = path
         if target.startswith('win32-'):
-            link = next((candidate for candidate in (pack / f'lib/{component}.lib', pack / f'lib/lib{component}.lib')
+            # FFmpeg's MSVC install places import libraries beside its DLLs.
+            # Preserve that upstream layout as well as existing SDK lib paths.
+            link = next((candidate for candidate in (pack / f'lib/{component}.lib', pack / f'lib/lib{component}.lib',
+                                                     pack / f'bin/{component}.lib')
                          if candidate.relative_to(pack).as_posix().casefold() in seen), None)
             if link is None:
                 raise CodecError(f'Missing MSVC import library for {component}')

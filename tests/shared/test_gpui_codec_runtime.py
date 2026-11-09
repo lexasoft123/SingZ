@@ -105,6 +105,39 @@ class CodecTests(unittest.TestCase):
         with self.assertRaises((codec.CodecError, OSError)):
             codec.inspect_pack(self.pack, 'win32-x64')
 
+    def test_windows_upstream_bin_import_libraries_inspect_and_stage(self):
+        manifest = self.fixture('win32-x64')
+        # FFmpeg's MSVC make install puts import libraries beside its DLLs.
+        for component in codec.COMPONENTS:
+            (self.pack / f'lib/{component}.lib').rename(self.pack / f'bin/{component}.lib')
+        self.inventory(manifest)
+
+        result = codec.inspect_pack(self.pack, 'win32-x64')
+        for library in result['libraries']:
+            component = library['component']
+            link = self.pack / f'bin/{component}.lib'
+            runtime = self.pack / f'bin/{codec.runtime_name(component, "win32-x64")}'
+            self.assertEqual(library['linkPath'], str(link))
+            self.assertEqual(library['runtimePath'], str(runtime))
+            self.assertIn(f'-DSINGZ_FFMPEG_{component.upper()}_LIBRARY={link}', result['cmakeArgs'])
+            self.assertIn(f'-DSINGZ_FFMPEG_{component.upper()}_RUNTIME={runtime}', result['cmakeArgs'])
+
+        output = self.root / 'windows runtime only'
+        receipt = codec.stage_runtime(self.pack, 'win32-x64', output)
+        self.assertFalse(list(output.rglob('*.lib')))
+        self.assertFalse((output / 'include').exists())
+        self.assertIn('not validated', receipt['fixtureEvidence'])
+        self.assertEqual({path.name for path in output.glob('*.dll')},
+                         {library['runtimeName'] for library in result['libraries']})
+        for row in receipt['files']:
+            self.assertEqual(codec.digest(output / row['path']), row['sha256'])
+
+        missing = self.pack / 'bin/avcodec.lib'
+        missing.unlink()
+        self.inventory(manifest)
+        with self.assertRaisesRegex(codec.CodecError, 'Missing MSVC import library for avcodec'):
+            codec.inspect_pack(self.pack, 'win32-x64')
+
     def test_macos_header_target_and_install_identity(self):
         self.fixture('darwin-arm64')
         codec.inspect_pack(self.pack, 'darwin-arm64')
