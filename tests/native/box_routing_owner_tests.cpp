@@ -6,6 +6,7 @@
 #include "native/playback/shared_audio_service.h"
 #include <loopz/document_json.hpp>
 #include <loopz/audio_scene.hpp>
+#include <loopz/audio_resampler.hpp>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -131,6 +132,62 @@ void emit(const std::shared_ptr<Probe>& probe, bool timestampValid = true) {
   block.outputHostTimeNs = block.callbackHostTimeNs; block.outputTimestampValid = timestampValid;
   block.outputTimestampHardware = false; block.routeGeneration = 1; block.streamGeneration = probe->stream;
   CHECK(probe->callback(probe->context, block));
+}
+void pollingDoesNotDemandMeterPreview() {
+  const auto path = std::string("/tmp/box-poll-preview-") + std::to_string(getpid()) + ".json";
+  loopz::VirtualDeviceDefinition bus; bus.id = "parked"; bus.name = "Undemanded song";
+  loopz::SourceRouting source; source.id = "native"; source.channels = 2;
+  source.connections = {{0, 0, 1}, {1, 1, 1}};
+  bus.routing.sources.push_back(source);
+  bus.bindings.push_back({"native", loopz::SourceKind::Application, "native:singz", false});
+  loopz::RouteDocument document; document.devices.push_back(bus);
+  std::ofstream(path) << loopz::JSON{{"version", 1}, {"generation", "1"},
+                                    {"document", loopz::encodeDocument(document)}};
+  auto sourceHistory = std::make_shared<LoopZSongSource>();
+  sourceHistory->history = std::make_shared<loopz::AudioHistory>(2,
+      loopz::AudioHistory::kDefaultCapacityFrames, loopz::ResamplingFilter::LinearPhase, true);
+  std::vector<float> pcm(32768, .25f);
+  std::array<const float*, 2> planes{pcm.data(), pcm.data()};
+  CHECK(sourceHistory->history->append({planes, 32768}, 32768, nowNs() - 100000000,
+                                      48000, 0, true));
+  auto probes = std::make_shared<FakeHost::Probes>();
+  std::string error;
+  CHECK(initializeBoxRoutingWithHost(path, error,
+      [probes] { return std::make_unique<FakeHost>(probes); }, sourceHistory));
+  // An actual visible state reader still requests the existing bounded preview.
+  (void)boxRoutingRequest(R"({"version":1,"operation":"state"})");
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+  while (!sourceHistory->history->readDiagnostics().reads && std::chrono::steady_clock::now() < deadline) {
+    pollBoxRouting();
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  CHECK(sourceHistory->history->readDiagnostics().reads > 0);
+  auto previous = sourceHistory->history->readDiagnostics().reads;
+  auto stableSince = std::chrono::steady_clock::now();
+  const auto started = stableSince;
+  bool parked = false;
+  while (std::chrono::steady_clock::now() < deadline) {
+    pollBoxRouting();
+    const auto reads = sourceHistory->history->readDiagnostics().reads;
+    const auto now = std::chrono::steady_clock::now();
+    if (reads != previous) { previous = reads; stableSince = now; }
+    if (now - started >= std::chrono::milliseconds(700) &&
+        now - stableSince >= std::chrono::milliseconds(250)) { parked = true; break; }
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  CHECK(parked); // Old refreshMapping(state) renews preview on every poll and fails.
+  const auto parkedReads = sourceHistory->history->readDiagnostics().reads;
+  (void)boxRoutingRequest(R"({"version":1,"operation":"state"})");
+  const auto resumeDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (sourceHistory->history->readDiagnostics().reads == parkedReads &&
+         std::chrono::steady_clock::now() < resumeDeadline) {
+    pollBoxRouting();
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  CHECK(sourceHistory->history->readDiagnostics().reads > parkedReads);
+  CHECK(probes->empty()); // No physical output was created for a meter preview.
+  shutdownBoxRouting();
+  unlink(path.c_str());
 }
 int main() {
   singz::box_timing::runJournalRegression();
@@ -313,6 +370,7 @@ int main() {
   // SharedAudioService retains its provider backend after shutdown. Run the
   // discovery-only lifecycle fixture last so its separate synthetic source
   // cannot replace the history identity assumed by the playback fixture.
+  pollingDoesNotDemandMeterPreview();
   inventoryCacheRegression();
   std::puts("Box routing physical delay/seek/generation/stop regression passed");
 }

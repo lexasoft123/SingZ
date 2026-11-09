@@ -336,7 +336,7 @@ export function Settings({
 }
 
 /** Physical capture inventory is independent of the virtual song producer.
- * Selecting a row only selects a channel; it never opens or wires a device. */
+ * Channel buttons toggle private analysis inputs without changing speaker routes. */
 export function PhysicalInputsPanel({ preview, selection, onSelect, microphones, microphoneSnapshot }: {
   microphones?: BoxMicrophones
   microphoneSnapshot?: MicrophoneSnapshot
@@ -359,30 +359,24 @@ export function PhysicalInputsPanel({ preview, selection, onSelect, microphones,
         <div className="settings-input-name"><strong>{device.name}</strong>
           <span>{tSettings('box.settings.inputChannels', { count: device.inputChannels })}{device.rate ? ` · ${formatSampleRate(device.rate)}` : ''}</span>
         </div>
-        <div role="radiogroup" aria-label={tMicrophone('box.microphones.deviceChannelGroup', { device: device.name })}>
+        <div role="group" aria-label={tMicrophone('box.microphones.deviceChannelGroup', { device: device.name })}>
           {physicalChannels(device).map(({ channel, name }) => {
             const enabled = !microphones || !!microphoneSnapshot?.enabledChannelsByDevice[device.uid]?.includes(channel)
             const privateLevel = microphoneChannelLevel(microphoneSnapshot, device.uid, channel)
             const level = active?.uid === device.uid
               ? privateLevel === null ? null : { peak: privateLevel, rms: privateLevel }
               : physicalInputLevel(preview, device.uid, channel)
-            const selected = selection?.uid === device.uid && selection.channel === channel
-            return <div key={channel} className="settings-physical-channel-row">
-              {microphones && <Button role="checkbox" aria-checked={enabled} aria-label={tMicrophone('box.microphones.enableChannel', { name })}
-                className="settings-channel-enable" data-microphone-channel-enable={channel} data-remote-focus
-                disabled={!!issue || preview.pending || microphoneSnapshot?.phase === 'uncertain'}
-                onClick={() => { void microphones.toggleChannel(device.uid, channel) }}>{enabled ? '☑' : '☐'}</Button>}
-              <Button className="settings-physical-channel" role="radio" aria-checked={selected}
-              disabled={!enabled || !!issue || preview.pending || microphonePending} data-settings-input={device.uid} data-input-channel={channel} data-remote-focus
-              onClick={() => onSelect(device.uid, channel)}>
+            return <Button key={channel} className="settings-physical-channel" aria-pressed={enabled}
+              disabled={!!issue || preview.pending || microphoneSnapshot?.phase === 'uncertain'}
+              data-settings-input={device.uid} data-input-channel={channel} data-remote-focus
+              onClick={() => { if (microphones) void microphones.toggleChannel(device.uid, channel); else onSelect(device.uid, channel) }}>
               <span className="settings-channel-name">{channel + 1}. {name}</span>
               {!enabled ? <span className="settings-channel-unavailable">{tMicrophone('box.microphones.disabled')}</span> : level ? <span className="settings-input-meter" role="meter" aria-label={tMicrophone('box.microphones.namedLevel', { name })}
                 aria-valuemin={0} aria-valuemax={1} aria-valuenow={Math.min(1, level.peak)}
                 aria-valuetext={level.peak > 1 ? tMicrophone('box.microphones.clipping') : tMicrophone('box.microphones.percent', { value: Math.round(level.peak * 100) })}>
                 <span style={{ transform: `scaleX(${Math.min(1, level.peak)})` }} />
               </span> : <span className="settings-channel-unavailable">{tMicrophone('box.microphones.levelUnavailable')}</span>}
-              </Button>
-            </div>
+            </Button>
           })}
         </div>
         {device.inputChannels > 64 && <p className="settings-input-status">{tMicrophone('box.microphones.limit64')}</p>}

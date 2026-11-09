@@ -154,7 +154,7 @@
 /* Physical input channels share UIKit focus and a bounded, scrollable TV panel. */
 .settings-input-list > section { padding: 8px 0 16px; border-bottom: 1px solid var(--sz-line); }
 .settings-physical-channel.pill { width: 100%; min-height: var(--box-compact-height); padding: 8px 10px; margin-top: 4px; display: flex; gap: 12px; text-align: left; justify-content: space-between; }
-.settings-physical-channel[aria-checked="true"] { background: var(--sz-accent-soft); border-color: var(--sz-accent); }
+.settings-physical-channel[aria-pressed="true"] { background: var(--sz-accent-soft); border-color: var(--sz-accent); }
 .settings-channel-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .settings-input-meter { display: block; width: 120px; height: 8px; flex: 0 0 120px; overflow: hidden; background: var(--sz-line); border-radius: 4px; }
 .settings-input-meter > span { display: block; width: 100%; height: 100%; transform-origin: left; background: var(--sz-accent); }
@@ -179,7 +179,5 @@
 .settings-global-overrides [role="alert"] { color: var(--sz-danger); }
 .box-policy-startup { position: absolute; inset: 0; z-index: 40; display: grid; place-content: center; gap: 20px; padding: 120px; background: var(--sz-bg); font-size: var(--box-label-size); }
 
-/* Channel admission and analysis selection are independent remote targets. */
-.settings-physical-channel-row { display: flex; align-items: stretch; gap: 8px; }
-.settings-physical-channel-row .settings-physical-channel { flex: 1; min-width: 0; }
-.settings-channel-enable.pill { flex: 0 0 52px; margin-top: 4px; font-size: 24px; padding: 8px; }
+/* Each physical input is one remote toggle; disabled admission remains focusable. */
+.settings-physical-channel .settings-channel-unavailable { width: 120px; flex: 0 0 120px; text-align: right; }

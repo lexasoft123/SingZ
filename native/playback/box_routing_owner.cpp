@@ -44,8 +44,11 @@ loopz::runtime::AudioRuntime* runtimeView = nullptr;
 uint64_t endpointSerial = 0;
 struct Endpoint { uint64_t id; std::string uid; };
 std::vector<Endpoint> endpoints;
-std::string selectedGeneration, selectedPrimary;
+uint64_t selectedGeneration = 0, selectedDocumentRevision = 0;
+std::string selectedPrimary;
 uint64_t selectedDelay = 0;
+std::optional<loopz::SceneTimingPlan> mappingTiming;
+uint64_t mappingDocumentRevision = 0, mappingActiveGeneration = 0;
 
 class ObservedSongSource final : public loopz::AudioSource {
  public:
@@ -174,14 +177,26 @@ bool carriesSong(const loopz::RouteDocument& document, size_t bus, size_t depth 
 void refreshMapping() {
   mappingKnown.store(false, std::memory_order_release);
   if (!control || !runtimeView) return;
-  const auto state = control->request({{"version", 1}, {"operation", "state"}});
-  const auto& snap = state.at("snapshot");
-  const auto& restoration = snap.at("restoration");
-  const std::string active = restoration.at("activeGeneration").get<std::string>();
-  if (active != restoration.at("desiredGeneration").get<std::string>() || snap.at("document").is_null()) return;
-  auto document = loopz::decodeDocument(snap.at("document"));
+  const auto view = control->routeView();
+  const auto active = view.activeGeneration;
+  if (active != view.desiredGeneration || !view.desired) {
+    mappingTiming.reset();
+    return;
+  }
+  const auto& document = *view.desired;
+  if (!mappingTiming || mappingDocumentRevision != view.documentRevision ||
+      mappingActiveGeneration != active) {
+    // Drop the old plan before a possibly throwing rebuild. The borrowed
+    // document is used only during this serialized control-owner call.
+    mappingTiming.reset();
+    mappingTiming = loopz::planSceneTiming(document, {48000, 256, 1024, 128});
+    mappingDocumentRevision = view.documentRevision;
+    mappingActiveGeneration = active;
+  }
+  // Endpoint health still refreshes every poll; a cached plan never proves an
+  // offline endpoint connected or resurrects an old audible mapping.
   const auto runtime = runtimeView->status();
-  const auto timing = loopz::planSceneTiming(document, {48000, 256, 1024, 128});
+  const auto& timing = *mappingTiming;
   // The first enabled, unmuted song-bearing monitor is the explicit primary
   // according to saved document order. Additional monitors remain independent.
   for (size_t bus = 0; bus < document.devices.size(); ++bus) {
@@ -197,9 +212,11 @@ void refreshMapping() {
         if (!id) continue;
         const std::string primary = device.id + "/" + monitor.id + "/" + std::to_string(id);
         const uint64_t routeDelay = uint64_t(telemetry.historyDelayFrames) + timing.latencyFrames.at(bus);
-        if (selectedGeneration != active || selectedPrimary != primary || selectedDelay != routeDelay) {
+        if (selectedGeneration != active || selectedDocumentRevision != view.documentRevision ||
+            selectedPrimary != primary || selectedDelay != routeDelay) {
           epoch.fetch_add(1, std::memory_order_acq_rel);
-          selectedGeneration = active; selectedPrimary = primary; selectedDelay = routeDelay;
+          selectedGeneration = active; selectedDocumentRevision = view.documentRevision;
+          selectedPrimary = primary; selectedDelay = routeDelay;
         }
         primaryEndpoint.store(id, std::memory_order_relaxed);
         // H already includes queued output, period, filter and reserve.
@@ -309,7 +326,9 @@ void shutdownBoxRouting() noexcept {
   song.reset();
   runtimeView = nullptr;
   endpoints.clear();
-  selectedGeneration.clear(); selectedPrimary.clear();
+  selectedGeneration = selectedDocumentRevision = 0; selectedPrimary.clear();
+  mappingTiming.reset();
+  mappingDocumentRevision = mappingActiveGeneration = 0;
   // Both the native producer and all runtime/render/physical workers have now
   // joined. Only this full drain permits reclaiming journal slots and loss.
   for (auto& row : physical) row.sequence.store(0, std::memory_order_relaxed);

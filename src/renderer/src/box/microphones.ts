@@ -85,6 +85,7 @@ export class BoxMicrophones {
   private latestWindow: { value: CaptureAnalysisWindow; receivedAt: number } | null = null
   private disposal?: Promise<void>
   private requested: MicrophoneSelection | null = null
+  private initializedSelection = false
   constructor(private readonly api: Api, private readonly now: () => number = Date.now,
     private readonly generation: () => string = microphoneGeneration,
     private readonly storage: MicrophoneChannelStorage | undefined = defaultStorage()) {
@@ -102,12 +103,13 @@ export class BoxMicrophones {
     if (JSON.stringify(enabled) === JSON.stringify(this.value.enabledChannelsByDevice[uid])) return Promise.resolve(true)
     const requested = this.requested?.uid === uid ? this.requested : null
     let selection = this.value.selection
-    if (selection?.uid === uid && !enabled.includes(selection.channel)) selection = enabled.length ? { uid, channel: enabled[0] } : null
+    if (enabled.length) selection = { uid, channel: enabled[0] }
+    else if (selection?.uid === uid) selection = null
     this.publish({ enabledChannelsByDevice: { ...this.value.enabledChannelsByDevice, [uid]: enabled }, selection, levels: requested ? null : this.value.levels })
     this.persistChannels()
     if (!requested) return Promise.resolve(true)
     if (!enabled.length) return this.stop()
-    return this.startSelection({ uid, channel: enabled.includes(requested.channel) ? requested.channel : enabled[0] })
+    return this.startSelection({ uid, channel: enabled[0] })
   }
   toggleChannel = (uid: string, channel: number): Promise<boolean> => {
     const enabled = this.enabledChannels(uid)
@@ -152,7 +154,13 @@ export class BoxMicrophones {
               if (Object.keys(enabled).length < 64) enabled[device.uid] = Array.from({ length: Math.min(2, device.channels) }, (_, index) => index)
             } else enabled[device.uid] = enabled[device.uid].filter(index => index < device.channels)
           }
-          this.publish({ devices: result.devices, inventoryError: null, enabledChannelsByDevice: enabled })
+          let selection = this.value.selection
+          if (!this.initializedSelection && result.devices.length) {
+            this.initializedSelection = true
+            const first = result.devices.find(device => enabled[device.uid]?.length)
+            if (!selection && first) selection = { uid: first.uid, channel: enabled[first.uid][0] }
+          }
+          this.publish({ devices: result.devices, inventoryError: null, enabledChannelsByDevice: enabled, selection })
           this.persistChannels()
         }
         else this.publish({ inventoryError: tMicrophone('box.microphones.inventoryFailed', { detail: result.error }) })
@@ -266,7 +274,7 @@ export class BoxMicrophones {
   }
   resetSelection = (): void => {
     const active = this.value.active
-    this.publish({ selection: active ? { uid: active.uid, channel: active.channel } : null })
+    this.publish({ selection: active ? { uid: active.uid, channel: active.channel } : this.value.selection })
   }
   start = (): Promise<boolean> => this.startSelection(this.value.selection)
   private startSelection(selection: MicrophoneSelection | null): Promise<boolean> {

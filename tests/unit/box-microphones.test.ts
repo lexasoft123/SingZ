@@ -394,13 +394,17 @@ describe('Home physical input count without fabricated playback devices', () => 
 
 
 describe('Box enabled microphone channels', () => {
-  it('defaults to the first two channels without starting capture and refuses disabled analysis', async () => {
+  it('defaults to two enabled channels and a Start-ready draft without automatically starting capture', async () => {
     const f = fixture(); f.controller.connect(); await vi.advanceTimersByTimeAsync(0)
     expect(f.controller.getSnapshot().enabledChannelsByDevice[device.uid]).toEqual([0, 1])
     f.controller.select({ uid: device.uid, channel: 7 })
-    expect(f.controller.getSnapshot().selection).toBeNull()
-    expect(await f.controller.start()).toBe(false)
-    expect(f.api.beginCapture).not.toHaveBeenCalled(); await f.controller.dispose()
+    expect(f.controller.getSnapshot().selection).toEqual({ uid: device.uid, channel: 0 })
+    expect(f.api.beginCapture).not.toHaveBeenCalled()
+    f.controller.resetSelection()
+    expect(f.controller.getSnapshot().selection).toEqual({ uid: device.uid, channel: 0 })
+    expect(await f.controller.start()).toBe(true)
+    expect(f.api.beginCapture).toHaveBeenLastCalledWith({ deviceUid: device.uid, inputChannel: 0, enabledChannels: [0, 1] }, '11')
+    await f.controller.dispose()
   })
   it('persists a noncontiguous pair and explicit all-off across controller recreation without auto-start', async () => {
     const storage = memoryStorage()
@@ -408,10 +412,12 @@ describe('Box enabled microphone channels', () => {
     await a.controller.setEnabledChannels(device.uid, [7, 2]); await a.controller.dispose()
     const b = fixture(storage); b.controller.connect(); await vi.advanceTimersByTimeAsync(0)
     expect(b.controller.getSnapshot().enabledChannelsByDevice[device.uid]).toEqual([2, 7])
+    expect(b.controller.getSnapshot().selection).toEqual({ uid: device.uid, channel: 2 })
     expect(b.api.beginCapture).not.toHaveBeenCalled()
     await b.controller.setEnabledChannels(device.uid, []); await b.controller.dispose()
     const c = fixture(storage); c.controller.connect(); await vi.advanceTimersByTimeAsync(0)
     expect(c.controller.getSnapshot().enabledChannelsByDevice[device.uid]).toEqual([])
+    expect(c.controller.getSnapshot().selection).toBeNull()
     expect(c.api.beginCapture).not.toHaveBeenCalled(); await c.controller.dispose()
   })
   it('restarts only its active reader with exact sorted channels and selects an enabled analysis channel', async () => {
@@ -464,12 +470,16 @@ describe('Box enabled microphone channels', () => {
     expect(await g.controller.setEnabledChannels(device.uid, [2, 7])).toBe(true)
     expect(g.controller.enabledChannels(device.uid)).toEqual([2, 7]); await g.controller.dispose()
   })
-  it('renders independent remote checkbox and radio buttons; disabled channels have no unavailable meter', async () => {
+  it('renders one pressed-state channel button per row and disabled status instead of a meter', async () => {
     const f = fixture(); f.controller.connect(); await vi.advanceTimersByTimeAsync(0)
     const routing = { version: 1 as const, inventory: { devicesFresh: true, devices: [{ uid: device.uid, name: device.label, inputChannels: 10, outputChannels: 4 }] }, snapshot: { revision: { epoch: 'e', generation: '0' }, document: null, restoration: { phase: 'no-document', error: '', desiredGeneration: '0', activeGeneration: '0' }, runtime: { metersFresh: false, monitors: [] } } }
-    const html = renderToStaticMarkup(createElement(PhysicalInputsPanel, { preview: { state: routing, error: '', pending: false, receivedAt: Date.now() }, selection: null, onSelect: vi.fn(), microphones: f.controller, microphoneSnapshot: f.controller.getSnapshot() }))
-    expect(html.match(/role="checkbox"/g)).toHaveLength(10)
-    expect(html.match(/role="radio"/g)).toHaveLength(10)
+    const html = renderToStaticMarkup(createElement(PhysicalInputsPanel, { preview: { state: routing, error: '', pending: false, receivedAt: Date.now() }, selection: f.controller.getSnapshot().selection, onSelect: vi.fn(), microphones: f.controller, microphoneSnapshot: f.controller.getSnapshot() }))
+    expect(html.match(/<button[^>]*data-microphone-start[^>]*>/)?.[0]).not.toContain('disabled=')
+    expect(html.match(/data-input-channel=/g)).toHaveLength(10)
+    expect(html.match(/aria-pressed="true"/g)).toHaveLength(2)
+    expect(html.match(/aria-pressed="false"/g)).toHaveLength(8)
+    expect(html).not.toMatch(/role="(?:checkbox|radio|radiogroup)"|☑|☐/)
+    expect(html.match(/<button[^>]*data-input-channel="2"[^>]*>/)?.[0]).not.toContain('disabled=')
     expect(html.match(/>Disabled</g)).toHaveLength(8)
     expect(html.match(/>Level unavailable</g)).toHaveLength(2)
     expect(html).not.toMatch(/<button[^>]*>(?:(?!<\/button>)[\s\S])*<button/)
@@ -479,17 +489,17 @@ describe('Box enabled microphone channels', () => {
 
 
 describe('Settings channel remote targets', () => {
-  it('navigates actual panel button props and keeps enabling separate from selecting analysis', async () => {
+  it('uses one focus stop per row; Enter toggles once and disabled rows stay reachable', async () => {
     const f = fixture(); f.controller.connect(); await vi.advanceTimersByTimeAsync(0)
     let active: Target | null = null
-    type Props = { role?: string; disabled?: boolean; children?: ReactNode; onClick?: () => void; 'data-input-channel'?: number; 'data-microphone-channel-enable'?: number }
+    type Props = { disabled?: boolean; children?: ReactNode; onClick?: () => void; 'data-input-channel'?: number; 'aria-pressed'?: boolean }
     class Target {
       constructor(readonly props: Props) {}
       matches(selector: string): boolean { return selector === ':disabled' && !!this.props.disabled }
       closest(): null { return null }
       getClientRects(): object[] { return [{}] }
       getBoundingClientRect(): { left: number; top: number; width: number; height: number } {
-        return { left: this.props.role === 'checkbox' ? 0 : 100, top: Number(this.props['data-input-channel'] ?? this.props['data-microphone-channel-enable']) * 60, width: 50, height: 40 }
+        return { left: 0, top: Number(this.props['data-input-channel']) * 60, width: 400, height: 40 }
       }
       focus(): void { active = this }
       scrollIntoView(): void {}
@@ -502,7 +512,7 @@ describe('Settings channel remote targets', () => {
       const found: Target[] = []
       const visit = (value: ReactNode): void => Children.forEach(value, element => {
         if (!isValidElement<Props>(element)) return
-        if (element.props.role === 'radio' || element.props.role === 'checkbox') found.push(new Target(element.props))
+        if (element.props['data-input-channel'] !== undefined) found.push(new Target(element.props))
         visit(element.props.children)
       })
       visit(PhysicalInputsPanel({ preview: { state: routing, error: '', pending: false, receivedAt: Date.now() }, selection: f.controller.getSnapshot().selection,
@@ -512,25 +522,40 @@ describe('Settings channel remote targets', () => {
     try {
       let buttons = targets()
       const scope = { dataset: { surface: 'settings' }, querySelectorAll: () => buttons } as unknown as HTMLElement
-      expect(remoteTargets(scope)).toHaveLength(12) // ten enable targets, two admitted analysis targets
-      active = buttons[0]
-      expect(moveSpatialFocus(scope, 'ArrowRight')).toBe(true)
-      expect(active).toBe(buttons[1]); (active as Target | null)?.click()
-      expect(f.controller.getSnapshot().selection?.channel).toBe(0)
-      expect(moveSpatialFocus(scope, 'ArrowLeft')).toBe(true)
-      expect(active).toBe(buttons[0])
-      expect(moveSpatialFocus(scope, 'ArrowDown')).toBe(true)
-      expect(active).toBe(buttons[2])
-      buttons[4].click() // enable physical input 3, without selecting it or starting capture
-      expect(f.controller.getSnapshot().selection?.channel).toBe(0)
-      buttons = targets(); expect(remoteTargets(scope)).toHaveLength(13)
-      active = buttons[4]; moveSpatialFocus(scope, 'ArrowRight'); expect(active).toBe(buttons[5])
-      ;(active as Target | null)?.click(); expect(f.controller.getSnapshot().selection?.channel).toBe(2)
+      expect(remoteTargets(scope)).toHaveLength(10)
+      expect(buttons[0].props['aria-pressed']).toBe(true)
+      const toggles = vi.spyOn(f.controller, 'toggleChannel')
+      const enter = (): void => { (active as Target | null)?.click() } // Electron's native Enter activation for a button
+      active = buttons[0]; enter()
+      expect(toggles).toHaveBeenCalledTimes(1)
+      expect(f.controller.enabledChannels(device.uid)).toEqual([1])
+      buttons = targets(); active = buttons[0]
+      expect(buttons[0].props.disabled).toBe(false)
+      expect(moveSpatialFocus(scope, 'ArrowDown')).toBe(true); expect(active).toBe(buttons[1])
+      enter(); expect(f.controller.enabledChannels(device.uid)).toEqual([])
+      expect(f.controller.getSnapshot().selection).toBeNull()
+      expect(await f.controller.start()).toBe(false)
+      buttons = targets(); active = buttons[1]
+      moveSpatialFocus(scope, 'ArrowDown'); expect(active).toBe(buttons[2]); enter()
+      expect(toggles).toHaveBeenCalledTimes(3)
+      expect(f.controller.enabledChannels(device.uid)).toEqual([2])
+      expect(f.controller.getSnapshot().selection).toEqual({ uid: device.uid, channel: 2 })
+      buttons = targets(); active = buttons[2]
+      moveSpatialFocus(scope, 'ArrowUp'); expect(active).toBe(buttons[1])
+      expect(remoteTargets(scope)).toHaveLength(10)
       expect(f.api.beginCapture).not.toHaveBeenCalled()
     } finally { vi.unstubAllGlobals(); await f.controller.dispose() }
   })
+  it('does not silently choose another device after the selected device is switched fully off', async () => {
+    const f = fixture(); f.controller.connect(); await vi.advanceTimersByTimeAsync(0)
+    await f.controller.setEnabledChannels(device.uid, [])
+    f.api.captureInputDevices.mockResolvedValue({ ok: true, devices: [device, { ...device, uid: 'alsa:other' }] })
+    await f.controller.refreshDevices()
+    expect(f.controller.getSnapshot().selection).toBeNull()
+    expect(f.controller.enabledChannels('alsa:other')).toEqual([0, 1])
+    expect(f.api.beginCapture).not.toHaveBeenCalled(); await f.controller.dispose()
+  })
 })
-
 
 describe('dense microphone channel arrays', () => {
   it('rejects a sparse enabled selection before persistence or native admission', async () => {
