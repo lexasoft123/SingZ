@@ -192,7 +192,9 @@ fn shot(
         "sidebar":state(p,w,cx),"project":p.project.as_ref().map(|p|p.dir.clone()),"epoch":p.native_epoch,"playing":p.playing,"position":p.position,"nativeSeekCount":p.native_seek_count,
         "pending":p.lyrics_sidebar_pending,"searchPending":p.lyrics_search_pending,"settled":p.lyrics_sidebar_settled,
         "windowPresented":w.is_visible(),"windowActive":w.is_window_active(),"hiddenConfigured":std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some(),"mutedConfigured":std::env::var("SINGZ_MUTE").as_deref()==Ok("1"),
-        "scope":if std::env::var_os("SINGZ_GPUI_LYRICS_LIVE_TEST").is_some() {
+        "scope":if std::env::var("SINGZ_GPUI_LYRICS_QWEN_AUTO_UI").as_deref()==Ok("1") {
+            "actual automatic production LRCLIB lookup and preinstalled native Qwen transcription/publication; no timing-quality or live-cadence claim"
+        } else if std::env::var_os("SINGZ_GPUI_LYRICS_LIVE_TEST").is_some() {
             "actual sidebar controls and production LRCLIB HTTPS; precise inference is a separate subsequent phase"
         } else {"actual controls/HTTP/install/decoder/publication; deterministic inference protocols, no neural quality claim"},
         "visualReference":"candidate only; matching production capture absent","liveFps":"unmeasured: hidden static captures"});
@@ -204,6 +206,10 @@ fn shot(
 }
 
 pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut App) {
+    if std::env::var("SINGZ_GPUI_LYRICS_QWEN_AUTO_UI").as_deref()==Ok("1") {
+        run_qwen_auto(handle,view,out,cx);
+        return;
+    }
     if std::env::var_os("SINGZ_GPUI_LYRICS_LIVE_TEST").is_some() {
         run_live(handle, view, out, cx);
         return;
@@ -552,5 +558,162 @@ fn run_live(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mu
             let _=handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,"live-failure",None));
             cx.update(|cx|cx.quit());
         }
+    }).detach();
+}
+
+fn qwen_auto_lines(raw:&serde_json::Value,duration:f64)->anyhow::Result<Vec<lyrics_edit::Line>> {
+    let lines:Vec<lyrics_edit::Line>=serde_json::from_value(raw["lines"].clone())?;
+    anyhow::ensure!(!lines.is_empty()&&duration.is_finite()&&duration>0.,"Automatic Qwen has no real lyric timeline");
+    let mut words=0;
+    for line in &lines {
+        anyhow::ensure!(!line.text.trim().is_empty()&&line.start.is_finite()&&line.end.is_finite()
+            &&line.start>=0.&&line.end>=line.start&&line.end<=duration+0.01&&!line.words.is_empty(),"Invalid automatic Qwen line");
+        let mut previous=-1.;
+        for word in &line.words {
+            anyhow::ensure!(!word.w.trim().is_empty()&&word.s.is_finite()&&word.e.is_finite()
+                &&word.s>=0.&&word.e>=word.s&&word.e<=duration+0.01&&word.s>=previous,"Invalid automatic Qwen word timing");
+            previous=word.s;words+=1;
+        }
+    }
+    anyhow::ensure!(words>0,"Automatic Qwen produced no timed words");Ok(lines)
+}
+
+/// A fresh no-lyrics song takes the actual LRCLIB Auto path. A live hit is a
+/// valid production outcome, but explicitly bypasses Qwen qualification.
+fn run_qwen_auto(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App) {
+    cx.spawn(async move|cx|{
+        let result:anyhow::Result<bool>=async {
+            anyhow::ensure!(std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some()
+                &&std::env::var("SINGZ_MUTE").as_deref()==Ok("1")&&std::env::var("SINGZ_NO_SYNC").as_deref()==Ok("1")
+                &&!integration::fixture_mode(),"Automatic Qwen UI requires hidden/muted isolated native execution");
+            for name in ["SINGZ_GPUI_LRCLIB_URL","SINGZ_GPUI_LYRICS_SIDEBAR_FIXTURES","SINGZ_GPUI_LYRICS_ALIGN_FIXTURES",
+                "SINGZ_GPUI_MODEL_FIXTURE","SINGZ_GPUI_MODEL_CONTROL","SINGZ_GPUI_SOURCE_CONTROL","SINGZ_GPU_PACK_URL",
+                "SINGZ_GPUI_LYRICS_RESOLVE_RECEIPT_GATE","SINGZ_GPUI_LYRICS_TEST_RECEIPT_GATE",
+                "SINGZ_GPUI_LYRICS_ALIGN_TEST","SINGZ_GPUI_LYRICS_LIVE_TEST"] {
+                anyhow::ensure!(std::env::var_os(name).is_none(),"Automatic Qwen UI refuses override {name}");
+            }
+            let required=|name:&str|->anyhow::Result<PathBuf>{let p=PathBuf::from(std::env::var_os(name).ok_or_else(||anyhow::anyhow!("Missing {name}"))?);
+                anyhow::ensure!(p.is_absolute(),"{name} must be absolute");Ok(p.canonicalize()?)};
+            let project=required("SINGZ_GPUI_LYRICS_REAL_PROJECT")?;
+            let library=required("SINGZ_GPUI_PROJECTS_ROOT")?;let config_dir=required("SINGZ_GPUI_CONFIG_DIR")?;
+            anyhow::ensure!(project.parent()==Some(library.as_path())&&config_dir!=project&&config_dir!=library,"Automatic Qwen requires private library/config roots");
+            for name in ["SINGZ_LLAMA_SERVER","SINGZ_CRISPASR"] {
+                let path=required(name)?;anyhow::ensure!(std::fs::symlink_metadata(path)?.file_type().is_file(),"Actual native executable required: {name}");
+            }
+            anyhow::ensure!(std::env::var_os("SINGZ_MODELS_DIR").is_some(),"Actual preinstalled Qwen weights required");
+            let config=model_catalog::Config::source();config.validate()?;
+            anyhow::ensure!(lyrics_align::capability().can_align&&lyrics_align::needs_models(lyrics_align::Tier::Align).is_empty(),"Automatic Qwen requires installed real runtimes/models");
+            std::fs::create_dir_all(&out)?;anyhow::ensure!(out.is_absolute()&&!out.canonicalize()?.starts_with(&project),"Automatic Qwen captures must be outside the project");
+            let lyrics_path=project.join("lyrics.json");let heard_path=project.join("heard-words.json");
+            anyhow::ensure!(!lyrics_path.try_exists()?&&!heard_path.try_exists()?,"Automatic Qwen must start without lyrics or heard cache");
+            macro_rules! wait {($seconds:expr,$p:ident,$w:ident,$app:ident => $condition:expr)=>{{
+                let deadline=Instant::now()+Duration::from_secs($seconds);
+                loop {cx.background_executor().timer(Duration::from_millis(20)).await;
+                    if handle.update(cx,|_,$w,$app|->anyhow::Result<bool>{let $p=view.read($app);
+                        anyhow::ensure!(!$w.is_visible()&&!$w.is_window_active()&&$p.notice.is_none(),"Automatic Qwen changed hidden state or raised {:?}",$p.notice);
+                        Ok($condition)})??{break;}
+                    anyhow::ensure!(Instant::now()<deadline,"Automatic Qwen timeout: {}",stringify!($condition));
+                }
+            }};}
+            macro_rules! both {($stem:expr)=>{{for(width,height)in[(1280.,800.),(1060.,640.)]{
+                handle.update(cx,|_,w,_|w.resize(size(px(width),px(height))))?;
+                wait!(30,p,w,app=>w.viewport_size()==size(px(width),px(height)));
+                handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,&format!("{}-{}",$stem,width as u32),Some((width,height))))??;
+            }}};}
+            macro_rules! bypass {($first:expr,$current:expr,$inferred:expr,$reason:expr)=>{{
+                both!("qwen-auto-lrclib-hit");
+                std::fs::write(out.join("qwen-auto-result.json"),serde_json::to_vec_pretty(&serde_json::json!({
+                    "passed":false,"bypassed":true,"qwenQualified":false,"realInference":$inferred,"fixtureInference":false,
+                    "bypassReason":$reason,"lookupOutcome":"hit","finalLookupOutcome":"hit","source":"lrclib","productionEndpoint":"https://lrclib.net/api",
+                    "automaticPath":true,"manualTranscribe":false,"headerSave":false,"project":project,
+                    "initialPublishedLyrics":$first,"publishedLyrics":$current,"sizes":[[1280,800],[1060,640]],"hidden":true,"muted":true}))?)?;
+                return Ok(false);
+            }};}
+            handle.update(cx,|_,w,cx|{w.resize(size(px(1280.),px(800.)));view.update(cx,|p,cx|p.open_project(project.clone(),cx));})?;
+            wait!(90,p,w,app=>!p.loading&&p.project.as_ref().is_some_and(|s|s.dir==project));
+            let (vocal,vocal_size,vocal_modified,duration)=handle.update(cx,|_,_,cx|->anyhow::Result<_>{let p=view.read(cx);let loaded=p.project.as_ref().unwrap();
+                anyhow::ensure!(!p.karaoke&&!loaded.has_lyrics&&loaded.raw.get("songFile").is_none(),"Automatic Qwen needs a fresh song with Karaoke initially off and no legacy song cache");
+                let vocal=loaded.lanes.iter().find(|(slot,_)|*slot==0).ok_or_else(||anyhow::anyhow!("Automatic Qwen fixture has no vocal"))?.1.clone();
+                let meta=std::fs::symlink_metadata(&vocal)?;anyhow::ensure!(meta.file_type().is_file(),"Automatic Qwen vocal must be ordinary");
+                Ok((vocal,meta.len(),meta.modified()?,p.duration as f64))})??;
+            handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let b=view.read(cx).transport.read(cx).guides.get("karaoke").ok_or_else(||anyhow::anyhow!("Actual Karaoke control missing"))?;
+                click(w,cx,b.center());Ok(())})??;
+            let deadline=Instant::now()+Duration::from_secs(900);let mut searching=false;let mut transcribing=false;
+            let mut captured_searching=false;let mut captured_transcribing=false;let mut trace=vec![];let mut last=None;
+            loop {
+                cx.background_executor().timer(Duration::from_millis(20)).await;
+                let snapshot=handle.update(cx,|_,w,cx|->anyhow::Result<serde_json::Value>{let p=view.read(cx);
+                    anyhow::ensure!(!w.is_visible()&&!w.is_window_active()&&p.notice.is_none()&&p.karaoke,"Automatic Qwen lost hidden Karaoke state");
+                    anyhow::ensure!(!p.lyrics_sidebar_download_waiting&&p.lyrics_sidebar_needs.is_empty(),"Automatic Qwen unexpectedly requested model download");
+                    let s=state(p,w,cx);anyhow::ensure!(s["status"]!="error"&&s["status"]!="consent","Automatic Qwen failed: {s}");
+                    Ok(serde_json::json!({"sidebar":s,"pending":p.lyrics_sidebar_pending,"settled":p.lyrics_sidebar_settled}))})??;
+                let s=&snapshot["sidebar"];let stage=s["details"]["progress"]["stage"].as_str().unwrap_or("");
+                searching|=s["status"]=="loading"&&stage=="searching"&&!snapshot["pending"].is_null();
+                transcribing|=s["status"]=="loading"&&stage=="transcribing"&&!snapshot["pending"].is_null();
+                if last.as_ref()!=Some(&snapshot){trace.push(snapshot.clone());last=Some(snapshot.clone());}
+                if stage=="searching"&&!captured_searching {
+                    captured_searching=handle.update(cx,|_,w,cx|->anyhow::Result<bool>{draw(w,cx);if state(view.read(cx),w,cx)["details"]["progress"]["stage"]!="searching"{return Ok(false);}
+                        shot(&view,w,cx,&out,"qwen-auto-searching-1280",Some((1280.,800.)))?;Ok(true)})??;
+                }
+                if stage=="transcribing"&&!captured_transcribing {
+                    captured_transcribing=handle.update(cx,|_,w,cx|->anyhow::Result<bool>{draw(w,cx);if state(view.read(cx),w,cx)["details"]["progress"]["stage"]!="transcribing"{return Ok(false);}
+                        shot(&view,w,cx,&out,"qwen-auto-transcribing-1280",Some((1280.,800.)))?;Ok(true)})??;
+                }
+                if s["status"]=="ready"&&snapshot["pending"].is_null(){break;}
+                anyhow::ensure!(Instant::now()<deadline,"Automatic Qwen lookup/transcription timed out");
+            }
+            let initial=raw(&lyrics_path)?;
+            if initial["source"]=="lrclib" {
+                anyhow::ensure!(!heard_path.try_exists()?,"LRCLIB hit unexpectedly populated Qwen heard cache");
+                bypass!(initial.clone(),initial.clone(),false,"Live LRCLIB returned a usable hit");
+            }
+            anyhow::ensure!(searching&&transcribing,"Automatic Qwen did not expose Searching then Transcribing: searching={searching}, transcribing={transcribing}");
+            anyhow::ensure!(initial["source"]=="whisper"&&initial["engine"]==lyrics_resolution::ENGINE
+                &&initial["lookup"].as_u64()==Some(lyrics_resolution::LOOKUP_VERSION)&&initial["lrclibPending"].is_boolean(),"Automatic Qwen did not publish the production whisper/lookup format");
+            let lookup=if initial["lrclibPending"]==true{"down"}else{"miss"};
+            let initial_lines=qwen_auto_lines(&initial,duration)?;
+            let cache_meta=std::fs::symlink_metadata(&heard_path)?;anyhow::ensure!(cache_meta.file_type().is_file()&&cache_meta.len()<=8*1024*1024,"Automatic Qwen heard cache is not bounded/ordinary");
+            let heard=raw(&heard_path)?;let modified_ms=vocal_modified.duration_since(std::time::UNIX_EPOCH)?.as_secs_f64()*1000.;
+            anyhow::ensure!(heard["version"]==1&&heard["engine"]==lyrics_resolution::ENGINE&&heard["vocals"]["size"].as_u64()==Some(vocal_size)
+                &&heard["vocals"]["mtimeMs"].as_f64().is_some_and(|ms|(ms-modified_ms).abs()<=2.)
+                &&heard["chunks"].as_array().is_some_and(|chunks|chunks.iter().any(|c|c["text"].as_str().is_some_and(|text|!text.trim().is_empty()))),"Automatic Qwen did not create fresh source-bound speech text");
+            handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let p=view.read(cx);let sidebar=p.lyrics_sidebar.read(cx);
+                anyhow::ensure!(sidebar.bounds("lyrics-edit").is_some()&&sidebar.bounds("lyrics-change").is_some()
+                    &&sidebar.bounds("lyrics-align").is_none()&&sidebar.bounds("lyrics-precise").is_none(),"Automatic whisper Ready actions do not match source");Ok(())})??;
+            both!("qwen-auto-ready");
+            let epoch=handle.update(cx,|_,_,cx|view.read(cx).native_epoch)?;
+            handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(project.clone(),cx)))?;
+            wait!(90,p,w,app=>!p.loading&&p.native_epoch>epoch&&p.project.as_ref().is_some_and(|s|s.dir==project));
+            wait!(120,p,w,app=>p.karaoke&&p.lyrics_sidebar_pending.is_none()&&state(p,w,app)["status"]=="ready");
+            let published=raw(&lyrics_path)?;
+            if published["source"]=="lrclib" {bypass!(initial.clone(),published.clone(),true,"Live LRCLIB returned a usable hit during reopen recheck");}
+            let final_lines=qwen_auto_lines(&published,duration)?;
+            anyhow::ensure!(published["source"]=="whisper"&&published["engine"]==lyrics_resolution::ENGINE
+                &&published["lookup"].as_u64()==Some(lyrics_resolution::LOOKUP_VERSION)&&published["lrclibPending"].is_boolean()
+                &&final_lines==initial_lines,"Automatic Qwen reload lost published word timings");
+            let final_lookup=if published["lrclibPending"]==true{"down"}else{"miss"};
+            handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let b=view.read(cx).transport.read(cx).bounds("transport-play").ok_or_else(||anyhow::anyhow!("Actual Play missing"))?;click(w,cx,b.center());Ok(())})??;
+            wait!(30,p,w,app=>p.playing&&p.last_playback_status.as_ref().is_some_and(|s|s.playing&&s.audible_current&&s.position>0.02));
+            handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let b=view.read(cx).transport.read(cx).bounds("transport-play").unwrap();click(w,cx,b.center());Ok(())})??;
+            wait!(30,p,w,app=>!p.playing&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
+            both!("qwen-auto-reopened");
+            let final_meta=std::fs::symlink_metadata(&vocal)?;anyhow::ensure!(final_meta.len()==vocal_size&&final_meta.modified()?==vocal_modified,"Automatic Qwen changed its vocal input");
+            let mut result=serde_json::json!({"passed":true,"bypassed":false,"qwenQualified":true,"realInference":true,"fixtureInference":false,
+                "automaticPath":true,"observedSearching":searching,"observedTranscribing":transcribing,"freshHeardCache":true,
+                "automaticPublication":true,"reopenedPlayer":true,"nativePlayback":true,"whisperActions":true,
+                "manualTranscribe":false,"headerSave":false,"editorSave":false,"productionEndpoint":"https://lrclib.net/api"});
+            result.as_object_mut().unwrap().extend(serde_json::json!({"lookupOutcome":lookup,"finalLookupOutcome":final_lookup,"initialPublishedLyrics":initial,"publishedLyrics":published,"heardCache":heard,
+                "project":project,"vocal":vocal,"wordCount":final_lines.iter().map(|line|line.words.len()).sum::<usize>(),
+                "trace":trace,"capturedSearching":captured_searching,"capturedTranscribing":captured_transcribing,
+                "sizes":[[1280,800],[1060,640]],"hidden":true,"muted":true,"scope":"real automatic LRCLIB miss/down then native Qwen transcription/publication, reopen and muted native playback; no forced miss, protocol fixtures or singing-quality claim"}).as_object().unwrap().clone());
+            std::fs::write(out.join("qwen-auto-result.json"),serde_json::to_vec_pretty(&result)?)?;Ok(true)
+        }.await;
+        match result {
+            Ok(true)=>eprintln!("QWEN_AUTO real passed"),Ok(false)=>eprintln!("QWEN_AUTO LRCLIB bypass"),
+            Err(error)=>{eprintln!("QWEN_AUTO real failed: {error:#}");let _=std::fs::create_dir_all(&out);
+                let _=std::fs::write(out.join("qwen-auto-failure.txt"),format!("{error:#}"));
+                let _=handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,"qwen-auto-failure",None));}
+        }
+        let _=cx.update(|cx|cx.quit());
     }).detach();
 }

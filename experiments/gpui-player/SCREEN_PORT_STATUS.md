@@ -6,6 +6,15 @@ controls are implemented as a first slice; see `NATIVE_INTEGRATION.md`. Full vis
 and the remaining backend features remain separate.
 Common native controls live in sibling `singz-ui/gpui`.
 
+Automatic Qwen follow-up (2026-11-09): the real no-lyrics Karaoke path now has
+verified UI coverage: production LRCLIB Miss → local Qwen → automatic publication,
+reopen and native playback, without manual Transcribe or Save. Both sizes and
+actual Searching/Transcribing states pass six inspected captures; all 26 timed
+words survive reopen. Inputs remain unchanged, foreground stable, nine observed
+processes retire and nine app CPU/system-GPU samples have no errors. See
+[Automatic Qwen review](NATIVE_QWEN_AUTO_REVIEW.md). Real Down/Hit UI outcomes,
+full visual parity, live FPS and broader platform/hardware gates remain open.
+
 Native Qwen runtime follow-up (2026-11-09): actual uncached recognition/alignment,
 explicit editor Save, editor/player reopen and native playback pass with packaged
 engines and preinstalled models. Four hidden/muted captures cover 1280×800 and

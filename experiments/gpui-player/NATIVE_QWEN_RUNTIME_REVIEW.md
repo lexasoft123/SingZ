@@ -52,3 +52,6 @@ sidebar transcription with real inference, hardware/OS choosers, current Windows
 and Linux delivery, complete production visual/temporal parity and live FPS remain
 open. The preview is ad-hoc signed, not notarized or release-ready. No glyph renderer
 or font changes were made in this checkpoint.
+
+Subsequent checkpoint: [Automatic Qwen review](NATIVE_QWEN_AUTO_REVIEW.md) qualifies
+the real automatic Miss fallback UI path; the limitation above is historical.
