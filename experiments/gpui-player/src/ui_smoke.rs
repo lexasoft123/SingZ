@@ -339,6 +339,15 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                     position:point(px(300.),px(220.)),delta:ScrollDelta::Pixels(point(px(0.),px(-500.))),..Default::default()
                 }),cx);
                 window.refresh();let _=window.draw(cx);
+                // The production waveform overlay owns wheel navigation. At
+                // full view it consumes this event without scrolling the lanes.
+                anyhow::ensure!(view.read(cx).stem_scroll_handle.offset().y==px(0.),"Timeline wheel leaked into stem scrolling");
+                // Scroll the lane label column, outside that overlay, to test
+                // the independent vertical list rather than timeline panning.
+                window.dispatch_event(PlatformInput::Scroll(ScrollEvent {
+                    position:point(px(100.),px(220.)),delta:ScrollDelta::Pixels(point(px(0.),px(-500.))),..Default::default()
+                }),cx);
+                window.refresh();let _=window.draw(cx);
                 anyhow::ensure!(view.read(cx).stem_scroll_handle.offset().y < px(-100.),"Short-window stems did not scroll: {:?}",view.read(cx).stem_scroll_handle.offset());
                 window.render_to_image()?.save(directory.join("stem-lanes-scrolled-1060.png"))?;
                 view.read(cx).stem_scroll_handle.set_offset(point(px(0.),px(0.)));

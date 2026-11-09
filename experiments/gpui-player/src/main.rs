@@ -16,6 +16,7 @@ mod timeline_host;
 mod ruler_clearance;
 mod restart_cycle;
 mod lyrics_countdown;
+mod lyric_scroll_geometry;
 #[cfg(feature="ui-tests")]
 mod ui_lyrics_countdown;
 mod region_gesture;
@@ -177,6 +178,8 @@ mod ui_library_review;
 mod ui_log_review;
 #[cfg(feature = "ui-tests")]
 mod ui_lyrics_review;
+#[cfg(feature = "ui-tests")]
+mod ui_lyrics_scroll;
 #[cfg(feature = "ui-tests")]
 mod ui_lyrics_editor;
 #[cfg(feature = "ui-tests")]
@@ -684,6 +687,7 @@ struct Player {
     lyric_ai_note_top:Rc<Cell<f32>>,
     lyric_view_height: Rc<Cell<f32>>,
     lyric_horizontal: Rc<Cell<bool>>,
+    lyric_scroll_geometry: Rc<Cell<lyric_scroll_geometry::Geometry>>,
     lyric_scroll_handle: ScrollHandle,
     stem_scroll_handle: ScrollHandle,
     lyric_scroll_active: Rc<Cell<bool>>,
@@ -1235,6 +1239,7 @@ impl Player {
                     this.karaoke = !this.karaoke;
                     this.muted[0] = this.karaoke;
                     this.lyric_horizontal.set(false);
+                    this.lyric_scroll_geometry.set(Default::default());
                     this.lyric_active.set(usize::MAX);
                     this.lyric_scroll.set(0.);
                     this.lyric_scroll_target.set(0.);
@@ -1551,6 +1556,7 @@ impl Player {
             lyric_ai_note_top:Rc::new(Cell::new(-1.)),
             lyric_view_height: Rc::new(Cell::new(0.)),
             lyric_horizontal: Rc::new(Cell::new(false)),
+            lyric_scroll_geometry: Rc::new(Cell::new(Default::default())),
             lyric_scroll_handle: ScrollHandle::new(),
             stem_scroll_handle: ScrollHandle::new(),
             lyric_scroll_active: Rc::new(Cell::new(false)),
@@ -2705,6 +2711,7 @@ impl Player {
                     self.lyric_scroll.set(0.);
                     self.lyric_scroll_target.set(0.);
                     self.lyric_horizontal.set(false);
+                    self.lyric_scroll_geometry.set(Default::default());
                     self.lyric_scroll_handle.set_offset(point(px(0.), px(0.)));
                     let mut envelopes: [Vec<f32>; tracks::LANE_SLOTS] = std::array::from_fn(|_| vec![0.]);
                     for (lane, (i, _)) in project.lanes.iter().enumerate() {
@@ -2910,6 +2917,8 @@ impl Player {
                             if let Some(backend)=&self.backend{backend.cancel_beat_detection();}
                             if let Some(project)=&mut self.project {project.lyrics=Some(document.clone());project.lyrics_error=None;project.lyrics_fingerprint=fingerprint;}
                             self.lyric_document=document;
+                            self.lyric_horizontal.set(false);
+                            self.lyric_scroll_geometry.set(Default::default());
                             self.native_glows.borrow_mut().clear();self.shape_cache.borrow_mut().clear();*self.layout_cache.borrow_mut()=None;
                             self.lyric_active.set(0);self.lyric_scroll.set(0.);self.lyric_scroll_target.set(0.);self.lyric_scroll_handle.set_offset(point(px(0.),px(0.)));
                             self.lyrics_editor.update(cx,|s,cx|s.saved_revision(self.lyrics_editor_save_revision,None,cx));
@@ -4222,6 +4231,9 @@ impl Player {
     fn lyrics(&self, cx: &mut Context<Self>) -> AnyElement {
         if self.lyric_document.lines.is_empty() {
             self.lyric_countdown_clock.borrow_mut().clear();
+            self.lyric_horizontal.set(false);
+            self.lyric_scroll_geometry.set(Default::default());
+            self.lyric_scroll_handle.set_offset(point(px(0.), self.lyric_scroll_handle.offset().y));
             let message = self
                 .project
                 .as_ref()
@@ -4270,6 +4282,7 @@ impl Player {
         let scroll_handle = self.lyric_scroll_handle.clone();
         let horizontal = self.lyric_horizontal.get();
         let horizontal_state = self.lyric_horizontal.clone();
+        let horizontal_geometry = self.lyric_scroll_geometry.clone();
         let owner = cx.entity().downgrade();
         let layout = self.lyric_hits.clone();
         let hits = layout.clone();
@@ -4290,11 +4303,9 @@ impl Player {
                 }
                 let max = (this.lyric_extent.get() - this.lyric_view_height.get()).max(0.);
                 let offset = (this.lyric_scroll.get() - f32::from(delta.y)).clamp(0., max);
-                let x = if this.lyric_horizontal.get() {
-                    (this.lyric_scroll_handle.offset().x + delta.x).clamp(px(-11.), px(0.))
-                } else {
-                    px(0.)
-                };
+                let x = px(this.lyric_scroll_geometry.get().clamp_offset(
+                    f32::from(this.lyric_scroll_handle.offset().x + delta.x),
+                ));
                 this.lyric_scroll.set(offset);
                 this.lyric_scroll_target.set(offset);
                 this.lyric_scroll_handle.set_offset(point(x, px(-offset)));
@@ -4324,14 +4335,12 @@ impl Player {
                     .left_0()
                     .right(px(10.))
                     .bottom(px(if horizontal { 10. } else { 0. }))
-                    .overflow_y_scroll()
-                    .overflow_x_scroll()
+                    // The parent owns wheel deltas. Track geometry without
+                    // GPUI applying the same bubbling wheel event a second time.
+                    .overflow_hidden()
                     .track_scroll(&self.lyric_scroll_handle)
-                    .child(div().h(px(self.lyric_extent.get())).w(px(if horizontal {
-                        360.
-                    } else {
-                        349.
-                    }))),
+                    .child(div().h(px(self.lyric_extent.get()))
+                        .w(px(self.lyric_scroll_geometry.get().content_width))),
             )
             .child(
                 canvas(
@@ -4420,7 +4429,18 @@ impl Player {
                         let (active_top, active_height, _) = &lines[active];
                         let active_top=active_top+if countdown_line.is_some_and(|line|line<active){lyrics_countdown::CUE_HEIGHT}else{0.};
                         let active_height=active_height+if countdown_line==Some(active){lyrics_countdown::CUE_HEIGHT}else{0.};
-                        if !horizontal_state.replace(true) {
+                        // Measure the same shaped rows and active paragraph transform
+                        // used below; the scroll extent must include offscreen long words.
+                        let mut geometry = lyric_scroll_geometry::Geometry::new(f32::from(b.size.width));
+                        for (i, (_, _, words)) in lines.iter().enumerate() {
+                            let scale = if i == active && line_started { 1.03 } else { 1. };
+                            geometry.add_paragraph(scale, words.iter().map(|(_, x, _, width)| (*x, *width)));
+                        }
+                        let geometry_changed = horizontal_geometry.replace(geometry) != geometry;
+                        let horizontal_changed = horizontal_state.replace(geometry.overflows()) != geometry.overflows();
+                        let old_offset = scroll_handle.offset();
+                        scroll_handle.set_offset(point(px(geometry.clamp_offset(f32::from(old_offset.x))), old_offset.y));
+                        if geometry_changed || horizontal_changed {
                             let owner = owner.clone();
                             w.on_next_frame(move |_, cx| {
                                 let _ = owner.update(cx, |_, cx| cx.notify());
@@ -6215,6 +6235,11 @@ fn main() {
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_LYRICS_REVIEW") {
             assert!(background, "Lyrics review requires background mode");
             ui_lyrics_review::run(window_handle, view.clone(), directory.into(), cx);
+        }
+        #[cfg(feature = "ui-tests")]
+        if let Some(directory) = std::env::var_os("SINGZ_GPUI_LYRICS_SCROLL_TEST") {
+            assert!(background && std::env::var("SINGZ_MUTE").as_deref() == Ok("1") && integration::fixture_mode());
+            ui_lyrics_scroll::run(window_handle, view.clone(), directory.into(), cx);
         }
         #[cfg(feature = "ui-tests")]
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_LIBRARY_REVIEW") {

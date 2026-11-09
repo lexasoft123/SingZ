@@ -65,10 +65,12 @@ from production. Node/Electron execution remains excluded by the user's request.
 Matching production captures, long-clock fixtures, other locales, platform
 rendering and live display cadence remain unqualified.
 
-Karaoke captures still expose a horizontal lyrics scrollbar with a white corner
-square. It predates this change: the same corner is visible in the older
-`/tmp/singz-singing-controls-20261109/ui-v5/first/timeline-zoom-controls-1060.png`.
-It remains a separate visual defect. Compact Saved status abbreviation and
+Karaoke captures expose a horizontal lyrics scrollbar with a white corner
+square. Follow-up source/reference investigation corrected its initial defect
+classification: the historical canonical review explicitly included this corner.
+`LYRICS_SCROLL_REVIEW.md` now records measured overflow, fitting-content gutter
+removal and preservation of the active paragraph's canonical presentation.
+Compact Saved status abbreviation and
 entrance-fade captures also remain outside a complete parity verdict. The
 approved native partial-glyph/glow implementation was not changed.
 

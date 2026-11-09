@@ -54,9 +54,12 @@ real account/platform qualification remains open. The separate retirement lifecy
   scope only. Preserve the approved native partial-glyph/glow standard.
   The compact ruler's partially covered final tick now has a scoped native fix
   with same-frame measured clearance and 24 inspected captures; see
-  `RULER_CLEARANCE_REVIEW.md`. The pre-existing lyrics scrollbar white corner,
-  long-clock/localized ruler coverage and production image comparisons remain
-  open. Drive platform observers are prepared but have not run on the targets;
+  `RULER_CLEARANCE_REVIEW.md`. Measured lyric overflow and single-owner wheel
+  input now have 20 native cases and 363 pixel-exact pre/post lyric-panel pairs;
+  see `LYRICS_SCROLL_REVIEW.md`. Its follow-up corrects the scrollbar-corner
+  classification: the canonical reference included the corner. Long-clock/
+  localized ruler coverage and production image comparisons remain open.
+  Drive platform observers are prepared but have not run on the targets;
   see `PLATFORM_DRIVE_QUALIFICATION.md` for the explicit source-transfer blocker.
 - All-locale layout, accessibility and actual live announcements remain open.
   A presentation diagnostic named `announce` is not platform accessibility proof.
