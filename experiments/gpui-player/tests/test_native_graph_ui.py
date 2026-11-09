@@ -1,8 +1,9 @@
 """Hidden native saved-graph open/playback/Save/restart; no global input or Node."""
 import argparse, hashlib, importlib.util, json, math, os, platform, shutil, struct, subprocess, tempfile, time, wave
 from pathlib import Path
-p=argparse.ArgumentParser();p.add_argument('app',type=Path);p.add_argument('out',type=Path);p.add_argument('--karaoke',action='store_true',help='Also prove production Karaoke event mutes native vocals and persists across Save/reopen');p.add_argument('--navigation',action='store_true',help='Also prove Songs/Catalog pause and Training remembered catalog through production header events');p.add_argument('--region',action='store_true',help='Also prove real region gestures, native stop/wrap and selection Save/reopen');p.add_argument('--output',action='store_true',help='Also verify native song output controls');p.add_argument('--catalog',action='store_true',help='Also verify fresh catalog scans and keyboard actions');a=p.parse_args();app=a.app.resolve();out=a.out.resolve();out.mkdir(parents=True,exist_ok=True)
-expected_captures=4+2*int(a.region)+2*int(a.output)+2*int(a.catalog)
+p=argparse.ArgumentParser();p.add_argument('app',type=Path);p.add_argument('out',type=Path);p.add_argument('--karaoke',action='store_true',help='Also prove production Karaoke event mutes native vocals and persists across Save/reopen');p.add_argument('--navigation',action='store_true',help='Also prove Songs/Catalog pause and Training remembered catalog through production header events');p.add_argument('--region',action='store_true',help='Also prove real region gestures, native stop/wrap and selection Save/reopen');p.add_argument('--output',action='store_true',help='Also verify native song output controls');p.add_argument('--catalog',action='store_true',help='Also verify fresh catalog scans and keyboard actions');p.add_argument('--timeline',action='store_true',help='Also verify actual native timeline wheel/pinch/seek/follow');a=p.parse_args();app=a.app.resolve();out=a.out.resolve();out.mkdir(parents=True,exist_ok=True)
+if a.timeline:assert a.karaoke,'--timeline requires the isolated local Karaoke lyrics fixture'
+expected_captures=4+2*int(a.region)+2*int(a.output)+2*int(a.catalog)+4*int(a.timeline)
 sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
 spec=importlib.util.spec_from_file_location('graph_perf',Path(__file__).with_name('interface-perf.py'));perf=importlib.util.module_from_spec(spec);spec.loader.exec_module(perf)
 def front():
@@ -28,6 +29,7 @@ with tempfile.TemporaryDirectory(prefix='singz-native-graph-ui-') as tmp:
  if a.region:env['SINGZ_GPUI_TEST_REGION']='1'
  if a.output:env['SINGZ_GPUI_TEST_OUTPUT']='1'
  if a.catalog:env['SINGZ_GPUI_TEST_CATALOG']='1'
+ if a.timeline:env['SINGZ_GPUI_TEST_TIMELINE']='1'
  for stage in ('first','restart'):
   folder=out/stage;folder.mkdir(exist_ok=True);samples=[];errors=[];previous=None;before=front();started=time.monotonic();next_sample=0;helpers={}
   input_project=json.loads((project/'project.json').read_text());input_guide_muted=input_project['settings']['tracks']['vocals']['muted']
@@ -38,7 +40,7 @@ with tempfile.TemporaryDirectory(prefix='singz-native-graph-ui-') as tmp:
    child=subprocess.Popen([str(app)],env=stage_env,stdout=log,stderr=subprocess.STDOUT)
    try:
     while child.poll() is None:
-     assert time.monotonic()-started<(180 if a.output or a.catalog else 120),'Native saved-graph UI timeout'
+     assert time.monotonic()-started<(240 if a.timeline else 180 if a.output or a.catalog else 120),'Native saved-graph UI timeout'
      if platform.system()=='Darwin' and time.monotonic()>=next_sample:
       next_sample=time.monotonic()+.5
       for value in subprocess.run(['pgrep','-P',str(child.pid)],capture_output=True,text=True,timeout=2).stdout.split():
@@ -102,6 +104,12 @@ with tempfile.TemporaryDirectory(prefix='singz-native-graph-ui-') as tmp:
    assert 'selection' not in saved['settings'] and saved['settings']['loop'] is False
    for width in (1280,1060):
     state=json.loads((folder/f'region-selection-{width}.json').read_text());assert state['selection'] is not None and not state['regionBusy'] and not state['gesture']
+  if a.timeline:
+   assert 'NATIVE_TIMELINE passed:' in text,text[-5000:]
+   proof=json.loads((folder/'timeline.json').read_text())
+   for flag in ('actualZoomButtons','pausedPlayheadAtZoomControlsCaptured','pinchAfterKeyboardSave','cursorCenteredWheelZoom','burstPanAccumulated','pitchWheelPan','pitchPinchZoom','manualViewSavedReopened','actualOffscreenArrowSeekCuts','playingPageTurnHasIntermediateViews','manualPanAwayDoesNotSnapBack','actualRestartCutsBack','restoredBaseline'):assert proof.get(flag) is True,(flag,proof)
+   assert proof['sizes']==[[1280,800],[1060,640]]
+   assert len(proof['follow'])>8 and proof['seekCut']['view'][0]>0,proof
   if a.output:
    assert 'NATIVE_SONG_OUTPUT passed:' in text,text[-5000:]
    proof=json.loads((folder/'output.json').read_text())
@@ -120,4 +128,4 @@ with tempfile.TemporaryDirectory(prefix='singz-native-graph-ui-') as tmp:
    before_preparation=sha(project/'project.json');prepared=json.loads(json.dumps(saved));prepared['settings']['tracks']['vocals']['muted']=False
    (project/'project.json').write_text(json.dumps(prepared));assert sha(source)==source_hash and sha(project/'lyrics.json')==lyrics_hash and (project/'graph.json').read_bytes()==graph.read_bytes()
    (folder/'restart-fixture-preparation.json').write_text(json.dumps({'fixturePreparationOnly':True,'firstStageSavedGuideMuted':saved['settings']['tracks']['vocals']['muted'],'nextLaunchGuideMuted':False,'onlyChangedField':'settings.tracks.vocals.muted','beforeProjectSha256':before_preparation,'afterProjectSha256':sha(project/'project.json'),'graphAudioLyricsUnchanged':True},indent=2))
-(out/'result.json').write_text(json.dumps({'passed':True,'appSha256':sha(app),'helperSha256':sha(app.with_name('singz-gpui-audio.exe' if platform.system()=='Windows' else 'singz-gpui-audio')),'graphSha256':sha(graph),'catalogRefreshAndKeyboardActions':a.catalog,'songOutputControls':a.output,'regionGesturesNativeBoundariesAndPersistence':a.region,'actualGraphAdmission':True,'actualSaveAndRestart':True,'karaokeRestoredOnMutesInitiallyEnabledGuide':a.karaoke,'karaokeEscapePersistsOff':a.karaoke,'karaokePreferencePersistenceAndRelaunch':a.karaoke,'karaokeNativeMuteAndPersistence':a.karaoke,'karaokeScope':'Production native_transport event route; real native vocals lane; Save/reopen/restart; no measured Karaoke button click' if a.karaoke else 'not exercised','navigationNativePauseAndRememberedCatalog':a.navigation,'navigationScope':'Production Header entity events and transport subscription; native pause receipts; no measured header button clicks' if a.navigation else 'not exercised','savedLyricsFixtureSha256':lyrics_hash,'stages':results,'muted':True,'hidden':True,'newProductionParity':'unqualified','liveFps':'unmeasured'},indent=2))
+(out/'result.json').write_text(json.dumps({'passed':True,'appSha256':sha(app),'helperSha256':sha(app.with_name('singz-gpui-audio.exe' if platform.system()=='Windows' else 'singz-gpui-audio')),'graphSha256':sha(graph),'catalogRefreshAndKeyboardActions':a.catalog,'timelineNavigation':a.timeline,'songOutputControls':a.output,'regionGesturesNativeBoundariesAndPersistence':a.region,'actualGraphAdmission':True,'actualSaveAndRestart':True,'karaokeRestoredOnMutesInitiallyEnabledGuide':a.karaoke,'karaokeEscapePersistsOff':a.karaoke,'karaokePreferencePersistenceAndRelaunch':a.karaoke,'karaokeNativeMuteAndPersistence':a.karaoke,'karaokeScope':'Production native_transport event route; real native vocals lane; Save/reopen/restart; no measured Karaoke button click' if a.karaoke else 'not exercised','navigationNativePauseAndRememberedCatalog':a.navigation,'navigationScope':'Production Header entity events and transport subscription; native pause receipts; no measured header button clicks' if a.navigation else 'not exercised','savedLyricsFixtureSha256':lyrics_hash,'stages':results,'muted':True,'hidden':True,'newProductionParity':'unqualified','liveFps':'unmeasured'},indent=2))

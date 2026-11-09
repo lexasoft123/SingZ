@@ -6,6 +6,26 @@ controls are implemented as a first slice; see `NATIVE_INTEGRATION.md`. Full vis
 and the remaining backend features remain separate.
 Common native controls live in sibling `singz-ui/gpui`.
 
+Timeline navigation follow-up (2026-11-09): lanes/ruler and pitch now share
+cursor-centered Ctrl/Cmd-wheel zoom, native pinch, dominant-axis panning and
+accumulated burst input with one invalidation per rendered frame. Zoomed playback
+uses the source 750 ms sine page turn at the rightmost 8%; explicit offscreen
+seeks cut, and manually scrolling away does not snap back. Final-page bounds
+clamp each eased sample, preserving source arrival timing. A vendored pinch
+filter now retains real hit testing/occlusion after keyboard input, fixing the
+actual Cmd-S → pinch failure without manufacturing a mouse move.
+Six pure controller tests, normal host check and UI build pass. The combined hidden/muted
+workflow passes across two independent launches at both sizes: 28 main captures,
+four saved motion frames, and 23 observed viewport samples per page turn.
+Wheel/pitch/pinch routing, saved-view reopening, arrow/Restart cuts, intermediate
+follow states and manual-away playback pass alongside prior desktop controls.
+Actual Full/+/− clicks and paused-playhead captures at both sizes verify the
+zoom cluster remains above the scrub layer, matching source z-order. Panned
+shots capture fresh-reopen entrance states. Foreground identity stayed unchanged,
+31 observed helpers retired and 101 app CPU samples had no sampling errors.
+Evidence is under `/tmp/singz-timeline-20261109/ui-v3`. This establishes source behavior and runtime
+interaction, not matched production pixel parity or live display cadence.
+
 Desktop controls follow-up (2026-11-09): Restart alternates selection/song start,
 retains that cycle through a playing-song rename, and honors a catalog Pause
 during rename. Native callback command tickets now acknowledge actual command

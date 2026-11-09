@@ -9,6 +9,10 @@ mod ui_region;
 mod ui_catalog;
 #[cfg(feature="ui-tests")]
 mod ui_song_output;
+#[cfg(feature="ui-tests")]
+mod ui_timeline;
+mod timeline_viewport;
+mod timeline_host;
 mod restart_cycle;
 mod region_gesture;
 mod region_host;
@@ -665,6 +669,7 @@ struct Player {
     restart_cycle: restart_cycle::RestartCycle,
     view_start: f32,
     view_end: f32,
+    timeline: timeline_viewport::Navigation,
     transpose: i32,
     header_drag: Rc<Cell<bool>>,
     focus_handle: FocusHandle,
@@ -869,12 +874,14 @@ impl Player {
         let pitch_strip = cx.new(|cx| pitch_strip::PitchStrip::new(64., cx));
         let transport = cx.new(|cx| transport::Transport::new(window, cx));
         let pitch_subscription =
-            cx.subscribe(&pitch_strip, |this, _, _: &pitch_strip::PitchEvent, cx| {
-                if this.microphone.is_some() {
-                    this.mic_requested =
-                        !(this.mic_requested && this.mic_view.phase == microphone::Phase::Live);
-                    this.mic_serial += 1;
-                    cx.notify();
+            cx.subscribe(&pitch_strip, |this, _, event: &pitch_strip::PitchEvent, cx| {
+                match event {
+                    pitch_strip::PitchEvent::Viewport(input) => this.timeline_input(*input,cx),
+                    pitch_strip::PitchEvent::ToggleMic if this.microphone.is_some() => {
+                        this.mic_requested = !(this.mic_requested && this.mic_view.phase == microphone::Phase::Live);
+                        this.mic_serial += 1;cx.notify();
+                    }
+                    _ => {},
                 }
             });
         let header = cx.new(|cx| header::Header::new(window, cx));
@@ -1006,7 +1013,7 @@ impl Player {
                 this.song_title = title.clone();
                 this.song_artist = artist.clone();
                 this.position = 0.;
-                this.view_start=0.;this.view_end=1.;
+                this.view_start=0.;this.view_end=1.;this.timeline.reset();
                 this.started = Instant::now();
                 this.playing = false;
                 this.screen = Screen::Player;
@@ -1507,6 +1514,7 @@ impl Player {
             restart_cycle: restart_cycle::RestartCycle::default(),
             view_start: 0.,
             view_end: 1.,
+            timeline: timeline_viewport::Navigation::default(),
             transpose: 0,
             header_drag: Rc::new(Cell::new(false)),
             focus_handle,
@@ -4083,19 +4091,9 @@ impl Player {
         cx.notify();
     }
     fn zoom_by(&mut self, factor: f32, cx: &mut Context<Self>) {
-        if !self.audio_available()||self.duration<=0.{return;}
-        self.region.gesture=None;
-        let old_span = self.view_end - self.view_start;
-        let span = (old_span * factor).clamp((2. / self.duration).min(1.), 1.);
-        let center = (self.position / self.duration).clamp(self.view_start, self.view_end);
-        let ratio = (center - self.view_start) / old_span;
-        self.view_start = (center - span * ratio).clamp(0., 1. - span);
-        self.view_end = self.view_start + span;
-        if self.backend.is_some() {
-            self.edit_seq += 1;
-        }
-        cx.notify();
+        self.timeline_input(timeline_viewport::Input::Zoom{factor:factor as f64,anchor_fraction:None},cx);
     }
+
     fn toggle(&mut self, cx: &mut Context<Self>) {
         if self.position >= self.duration {
             self.position = 0.;
@@ -4765,6 +4763,8 @@ impl Player {
             .child(
                 div()
                     .id(("wave", i))
+                    .on_scroll(cx.listener(|this,event:&ScrollEvent,window,cx| {if let Some(bounds)=this.region.bounds.get(){this.timeline_scroll(event,bounds,window,cx);}}))
+                    .on_pinch(cx.listener(|this,event:&PinchEvent,_,cx| {if let Some(bounds)=this.region.bounds.get(){this.timeline_pinch(event,bounds,cx);}}))
                     .flex_1()
                     .cursor(if self.region.resize_hover {CursorStyle::ResizeLeftRight}else{CursorStyle::IBeam})
                     .on_mouse_down(
@@ -4963,10 +4963,6 @@ impl Render for Player {
                 cx,
             )
         });
-        self.pitch_strip.update(cx, |strip, cx| {
-            strip.set_position(self.position, cx);
-            strip.set_view(self.view_start, self.view_end, cx);
-        });
         let transport_mounted=self.screen==Screen::Player || matches!(self.screen,Screen::Settings|Screen::Log|Screen::Models)&&self.previous_screen==Screen::Player;
         self.restart_cycle.observe_component(transport_mounted);
         self.restart_cycle.observe(self.region_target().selection,self.playing);
@@ -5121,6 +5117,11 @@ impl Render for Player {
             }
             animating = true;
         }
+        animating |= self.advance_timeline(now,self.screen==Screen::Player&&!modal_open);
+        self.pitch_strip.update(cx, |strip, cx| {
+            strip.set_position(self.position, cx);
+            strip.set_view(self.view_start, self.view_end, cx);
+        });
         animating |= self.playing && self.timing_status.as_ref().is_some_and(|status|status.count_in_heard.is_some());
         if animating && self.screen == Screen::Player && !modal_open {
             window.request_animation_frame();
@@ -5175,6 +5176,8 @@ impl Render for Player {
             .top(px(4.))
             .bottom(px(10.))
             .min_h(px(414.))
+            .on_scroll(cx.listener(|this,event:&ScrollEvent,window,cx| {if let Some(bounds)=this.region.bounds.get(){this.timeline_scroll(event,bounds,window,cx);}}))
+            .on_pinch(cx.listener(|this,event:&PinchEvent,_,cx| {if let Some(bounds)=this.region.bounds.get(){this.timeline_pinch(event,bounds,cx);}}))
             .child(
                 canvas(
                     move |bounds, _, _| {
@@ -5270,6 +5273,15 @@ impl Render for Player {
         self.beat_handles.update(cx, |handles, cx| handles.set_context(
             ruler_grid.clone().filter(|_| !modal_open && self.metronome_pending.is_none() && !self.source_blocks_player()),
             ruler_view.0, ruler_view.1, self.duration, cx));
+        // The source zoom cluster is z=6, above the z=5 scrub/playhead layer.
+        // Keep the ruler-relative geometry (4px stack inset + 3px top) while
+        // painting this opaque control group after that layer.
+        let zoom_controls=div().absolute().right(px(22.)).top(px(7.)).pl(px(10.)).bg(rgb(BG)).occlude()
+            .child(singz_uikit::zoom_segment(vec![
+                self.track_probe("zoom-out".into(),singz_uikit::zoom_button("zoom-out","−",false)).on_click(cx.listener(|this,_,_,cx|this.zoom_by(1.4,cx))),
+                self.track_probe("zoom-in".into(),singz_uikit::zoom_button("zoom-in","+",false)).on_click(cx.listener(|this,_,_,cx|this.zoom_by(0.65,cx))),
+                self.track_probe("zoom-fit".into(),singz_uikit::zoom_button("zoom-fit",i18n::t("player.stack.full"),self.view_start==0.&&self.view_end==1.)).on_click(cx.listener(|this,_,_,cx|this.timeline_input(timeline_viewport::Input::Fit,cx))),
+            ]));
         let content = match base_screen {
             Screen::Training => self.training.clone().into_any_element(),
             Screen::Library => self.library.clone().into_any_element(),
@@ -5288,7 +5300,10 @@ impl Render for Player {
                                         }))
                                     }))
                                 )
-                                .child(div().id("time-ruler").relative().flex_1().cursor(if self.region.resize_hover {CursorStyle::ResizeLeftRight}else{CursorStyle::IBeam}).border_b_1().border_color(rgba(0xfff0d614))
+                                .child(div().id("time-ruler").relative().flex_1()
+                                    .on_scroll(cx.listener(|this,event:&ScrollEvent,window,cx| {if let Some(bounds)=this.region.bounds.get(){this.timeline_scroll(event,bounds,window,cx);}}))
+                                    .on_pinch(cx.listener(|this,event:&PinchEvent,_,cx| {if let Some(bounds)=this.region.bounds.get(){this.timeline_pinch(event,bounds,cx);}}))
+                                    .cursor(if self.region.resize_hover {CursorStyle::ResizeLeftRight}else{CursorStyle::IBeam}).border_b_1().border_color(rgba(0xfff0d614))
                                     .on_mouse_down(MouseButton::Left,cx.listener(move |this,event:&MouseDownEvent,_,cx| {
                                         if let Some(bounds)=scrub_hit.get() {
                                             if event.position.x>bounds.right()-px(130.) {return;}
@@ -5298,13 +5313,8 @@ impl Render for Player {
                                     .child(canvas(|b,_,_|b,move|_,b,w,cx|{if let Some(g)=&ruler_grid{beat_grid::paint(&mut ruler_grid_cache.borrow_mut(),g,ruler_view.0,ruler_view.1,b,true,w,cx);}}).absolute().top_0().left_0().size_full())
                                     .children(ticks.into_iter().map(|(tick,fraction)|div().absolute().left(relative(fraction)).ml(px(-30.)).w(px(60.)).top(px(8.)).flex().justify_center().child(singz_uikit::tracked_text(if step<1. {format!("{}.{:01}",clock(tick),((tick.fract()*10.).floor() as i32).clamp(0,9))}else{clock(tick)},"SingZ Mono 400",9.,0.54,FAINT))))
                                     .child(self.beat_handles.clone())
-                                    .child(div().absolute().right_0().top(px(3.)).pl(px(10.)).bg(rgb(BG)).child(singz_uikit::zoom_segment(vec![
-                                        singz_uikit::zoom_button("zoom-out","−",false).on_click(cx.listener(|this,_,_,cx|this.zoom_by(1.4,cx))),
-                                        singz_uikit::zoom_button("zoom-in","+",false).on_click(cx.listener(|this,_,_,cx|this.zoom_by(0.65,cx))),
-                                        singz_uikit::zoom_button("zoom-fit",i18n::t("player.stack.full"),self.view_start==0.&&self.view_end==1.).on_click(cx.listener(|this,_,_,cx|{this.region.gesture=None;this.view_start=0.;this.view_end=1.;if this.backend.is_some(){this.edit_seq+=1;}cx.notify();})),
-                                    ])))
                                 ))
-                            .child(div().id("stem-lane-scroll").track_scroll(&self.stem_scroll_handle).flex().flex_col().flex_1().min_h_0().overflow_y_scroll().children(self.project.as_ref().map(|p|p.lanes.iter().map(|(slot,_)|*slot).collect::<Vec<_>>()).unwrap_or_else(||(0..6).collect()).into_iter().map(|i|self.lane(i,cx)))).when(self.audio_available(),|d|d.child(playhead)))
+                            .child(div().id("stem-lane-scroll").track_scroll(&self.stem_scroll_handle).flex().flex_col().flex_1().min_h_0().overflow_y_scroll().children(self.project.as_ref().map(|p|p.lanes.iter().map(|(slot,_)|*slot).collect::<Vec<_>>()).unwrap_or_else(||(0..6).collect()).into_iter().map(|i|self.lane(i,cx)))).when(self.audio_available(),|d|d.child(playhead)).child(zoom_controls))
                         .when(self.karaoke, |column| column.child(self.pitch_strip.clone())))
                     .when(self.karaoke,|row|row.child(div().w(px(360.)).flex_shrink_0().border_l_1().border_color(rgba(0xfff0d614)).bg(rgba(0x1b181466)).flex().flex_col()
                         .child(div().h(px(53.)).flex_shrink_0().when(true,|d|self.quick_start.read(cx).anchors.track_box(d,"lyrics",[0.,0.,0.,1.])).px(px(18.)).pt(px(14.)).pb(px(12.)).flex().items_center().justify_between().border_b_1().border_color(rgba(0xfff0d614))

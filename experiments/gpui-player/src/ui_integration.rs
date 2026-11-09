@@ -306,6 +306,20 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                 }
                 eprintln!("NATIVE_REGION passed: real gestures, native stop/wrap and selection Some/None persistence");
             }
+            if std::env::var("SINGZ_GPUI_TEST_TIMELINE").as_deref()==Ok("1") {
+                let receiver=handle.update(cx,|_,_,cx|ui_timeline::run(handle,view.clone(),path.clone(),directory.clone(),cx))?;
+                let deadline=Instant::now()+Duration::from_secs(90);
+                loop {
+                    match receiver.try_recv() {
+                        Ok(result)=>{result.map_err(anyhow::Error::msg)?;break;},
+                        Err(std::sync::mpsc::TryRecvError::Disconnected)=>anyhow::bail!("Timeline verification stopped without a result"),
+                        Err(std::sync::mpsc::TryRecvError::Empty)=>{}
+                    }
+                    anyhow::ensure!(Instant::now()<deadline,"Timeline verification timed out");
+                    cx.background_executor().timer(Duration::from_millis(20)).await;
+                }
+                eprintln!("NATIVE_TIMELINE passed: cursor zoom, burst pan, pitch pinch, native seek/follow and saved view");
+            }
             if std::env::var("SINGZ_GPUI_TEST_OUTPUT").as_deref()==Ok("1") {
                 let receiver=handle.update(cx,|_,_,cx|ui_song_output::run(handle,view.clone(),path.clone(),directory.clone(),cx))?;
                 let deadline=Instant::now()+Duration::from_secs(60);

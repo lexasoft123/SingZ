@@ -411,7 +411,12 @@ impl Interactivity {
     pub fn on_pinch(&mut self, listener: impl Fn(&PinchEvent, &mut Window, &mut App) + 'static) {
         self.pinch_listeners
             .push(Box::new(move |event, phase, hitbox, window, cx| {
-                if phase == DispatchPhase::Bubble && hitbox.is_hovered(window) {
+                // A pinch remains direct pointer input after a keyboard shortcut.
+                // Ignore hover-style modality suppression, retaining hit testing
+                // and occlusion rather than requiring an unrelated mouse move.
+                if phase == DispatchPhase::Bubble
+                    && hitbox.id.is_hovered_ignoring_last_input(window)
+                {
                     (listener)(event, window, cx);
                 }
             }));

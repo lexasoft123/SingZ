@@ -7,9 +7,10 @@ use singz_uikit::{
     TransportIcon, colored_icon, small_ghost_pill, tracked_label, tracked_text, zoom_chip,
 };
 use std::sync::{Arc, OnceLock};
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::{Cell, RefCell}, rc::Rc};
 pub enum PitchEvent {
     ToggleMic,
+    Viewport(crate::timeline_viewport::Input),
 }
 impl EventEmitter<PitchEvent> for PitchStrip {}
 #[derive(Clone, Copy)]
@@ -41,6 +42,7 @@ const DURATION: f32 = 192.;
 const MIC_UNAVAILABLE: &str = "Microphone unavailable";
 
 pub struct PitchStrip {
+    timeline_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     #[cfg(feature = "ui-tests")]
     mic_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     microphone: crate::microphone::View,
@@ -61,6 +63,7 @@ pub struct PitchStrip {
 impl PitchStrip {
     pub fn new(position: f32, _: &mut Context<Self>) -> Self {
         Self {
+            timeline_bounds: Default::default(),
             #[cfg(feature = "ui-tests")]
             mic_bounds: Default::default(),
             microphone: Default::default(),
@@ -79,6 +82,8 @@ impl PitchStrip {
             view_end: 1.,
         }
     }
+    #[cfg(feature="ui-tests")]
+    pub fn timeline_bounds(&self) -> Option<Bounds<Pixels>> { self.timeline_bounds.get() }
     pub fn set_beat_progress(&mut self, progress: Option<f32>, cx: &mut Context<Self>) {
         if self.beat_progress != progress {self.beat_progress = progress;cx.notify();}
     }
@@ -318,8 +323,30 @@ impl Render for PitchStrip {
             self.fit,
             self.view_start,
             self.view_end,
+            self.timeline_bounds.clone(),
             window,
         )
+        .id("pitch-strip")
+        .on_scroll(cx.listener(|this,event:&ScrollEvent,window,cx| {
+            if let Some(bounds)=this.timeline_bounds.get() {
+                let width=f32::from(bounds.size.width) as f64;
+                let anchor=(event.position.x>bounds.left()).then(||f32::from(event.position.x-bounds.left()) as f64/width);
+                let delta=event.delta.pixel_delta(window.line_height());
+                if let Some(input)=crate::timeline_viewport::wheel_input(-f32::from(delta.x) as f64,-f32::from(delta.y) as f64,
+                    event.modifiers.control||event.modifiers.platform,anchor,width) {cx.emit(PitchEvent::Viewport(input));}
+                cx.stop_propagation();
+            }
+        }))
+        .on_pinch(cx.listener(|this,event:&PinchEvent,_,cx| {
+            if let Some(bounds)=this.timeline_bounds.get() {
+                let width=f32::from(bounds.size.width) as f64;
+                if width>0. {
+                    let anchor=(event.position.x>bounds.left()).then(||f32::from(event.position.x-bounds.left()) as f64/width);
+                    if let Some(input)=crate::timeline_viewport::pinch_input(event.delta as f64,anchor) {cx.emit(PitchEvent::Viewport(input));}
+                }
+                cx.stop_propagation();
+            }
+        }))
         .child(hud(
             self.beat_progress.filter(|_| self.data.as_ref().is_none_or(|p|p.warning.as_deref() != Some("Analyzing vocals…"))),
             note,
@@ -358,6 +385,7 @@ fn scene(
     fit: bool,
     view_start: f32,
     view_end: f32,
+    timeline_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     window: &Window,
 ) -> Div {
     let key = data
@@ -398,7 +426,10 @@ fn scene(
         .overflow_hidden()
         .child(
             canvas(
-                |b, _, _| b,
+                move |b, _, _| {
+                    timeline_bounds.set(Some(Bounds::new(point(b.left()+px(CONTROLS_W),b.top()),size((b.size.width-px(CONTROLS_W)).max(px(0.)),b.size.height))));
+                    b
+                },
                 move |_, b, w, cx| {
                     paint_roll(
                         b,
