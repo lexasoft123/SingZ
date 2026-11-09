@@ -348,6 +348,34 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                 }
                 eprintln!("NATIVE_CATALOG passed: external rescan, keyboard Open/Delete and removed-row focus recovery");
             }
+            if std::env::var("SINGZ_GPUI_TEST_LYRICS_COUNTDOWN").as_deref()==Ok("1") {
+                let receiver=handle.update(cx,|_,_,cx|ui_lyrics_countdown::run(handle,view.clone(),path.clone(),directory.clone(),cx))?;
+                let deadline=Instant::now()+Duration::from_secs(90);
+                loop {
+                    match receiver.try_recv() {
+                        Ok(result)=>{result.map_err(anyhow::Error::msg)?;break;},
+                        Err(std::sync::mpsc::TryRecvError::Disconnected)=>anyhow::bail!("Lyrics countdown verification stopped without a result"),
+                        Err(std::sync::mpsc::TryRecvError::Empty)=>{}
+                    }
+                    anyhow::ensure!(Instant::now()<deadline,"Lyrics countdown verification timed out");
+                    cx.background_executor().timer(Duration::from_millis(20)).await;
+                }
+                eprintln!("NATIVE_LYRICS_COUNTDOWN passed: native playback gap cues, pause suppression and source pulse");
+            }
+            if std::env::var("SINGZ_GPUI_TEST_KEYBOARD").as_deref()==Ok("1") {
+                let receiver=handle.update(cx,|_,_,cx|ui_desktop_keyboard::run(handle,view.clone(),path.clone(),directory.clone(),cx))?;
+                let deadline=Instant::now()+Duration::from_secs(90);
+                loop {
+                    match receiver.try_recv() {
+                        Ok(result)=>{result.map_err(anyhow::Error::msg)?;break;},
+                        Err(std::sync::mpsc::TryRecvError::Disconnected)=>anyhow::bail!("Desktop keyboard verification stopped without a result"),
+                        Err(std::sync::mpsc::TryRecvError::Empty)=>{}
+                    }
+                    anyhow::ensure!(Instant::now()<deadline,"Desktop keyboard verification timed out");
+                    cx.background_executor().timer(Duration::from_millis(20)).await;
+                }
+                eprintln!("NATIVE_DESKTOP_KEYBOARD passed: focused-button transport, Enter activation and input/dialog ownership");
+            }
             handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(path.join("missing-folder"),cx)))?;
             cx.background_executor().timer(Duration::from_millis(250)).await;
             handle.update(cx,|_,window,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(!p.loading&&!p.playing&&p.project.is_none()&&p.notice.is_some(),"Invalid load failed to stop/release output");snapshot(&view,window,cx,&directory,"native-load-error")?;Ok(())})??;

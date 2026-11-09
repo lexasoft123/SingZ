@@ -6,6 +6,34 @@ controls are implemented as a first slice; see `NATIVE_INTEGRATION.md`. Full vis
 and the remaining backend features remain separate.
 Common native controls live in sibling `singz-ui/gpui`.
 
+Singing controls follow-up (2026-11-09): native lyrics now show source-style
+instrumental-gap seconds and three/two/one dots, with cached stepped pulse sprites
+prepared off the UI thread and bounded CPU/GPU eviction in UIKit. Pre-first-line
+text stays faint until its anticipated start; the approved active glyph paint is
+preserved. Song Space/arrows work while ordinary buttons hold focus; text entries,
+sliders and dialogs retain their own keys, with Enter still activating buttons.
+Stem faders now support actual Tab/pointer focus, accumulating arrow keys and
+Home/End. Real typing exposed unconditional title key suppression; only Escape
+is now consumed, leaving text insertion available to the platform input handler.
+Four countdown, three keyboard-policy and one UIKit range test pass. The final
+combined hidden/muted workflow passes in two independent launches at both sizes:
+40 main captures plus four timeline motion images, 34 observed helpers retired,
+258 app CPU samples without sampling errors, and unchanged foreground identity.
+Both countdown traces observe all nine opacity levels; their sequence pass is
+separate from screenshot readback so capture stalls cannot skip a one-second cue.
+Six new full captures and representative restored glyph frames were inspected.
+All 363 restoration images and all 49 native lyric-region hashes/draw counts
+remain exact. Evidence: `/tmp/singz-singing-controls-20261109`, including the
+explicit key-stamp preparation for a private copy of the older synthetic lyric
+fixture. The original fixture and baselines remain immutable. This qualifies
+these controls and preserved native paint, not full production parity, live FPS,
+physical-device behavior or current Windows/Linux delivery. Mute/Solo button and
+legacy metronome-fader keyboard reachability still need qualification. The normal
+preview passes build/signing/all 39 payload hashes, Drive configuration and
+crispasr startup. Llama-server help repeatedly times out on this host, including
+the previous preview’s byte-identical llama-server binary; this unresolved startup
+gate is preserved.
+
 Timeline navigation follow-up (2026-11-09): lanes/ruler and pitch now share
 cursor-centered Ctrl/Cmd-wheel zoom, native pinch, dominant-axis panning and
 accumulated burst input with one invalidation per rendered frame. Zoomed playback

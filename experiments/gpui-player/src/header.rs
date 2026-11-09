@@ -557,8 +557,8 @@ impl Render for Header {
                                             s.editing = false;
                                             cx.emit(HeaderEvent::TitleClosed);
                                             cx.notify();
+                                            cx.stop_propagation();
                                         }
-                                        cx.stop_propagation();
                                     }))
                                     .child(singz_uikit::title_input(
                                         &self.title_input,

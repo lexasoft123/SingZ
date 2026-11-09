@@ -447,7 +447,6 @@ impl Transport {
         }
         open
     }
-    #[cfg(feature = "ui-tests")]
     pub fn has_popover(&self) -> bool {
         self.split_open || self.output_open
     }

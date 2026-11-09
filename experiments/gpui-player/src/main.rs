@@ -14,12 +14,18 @@ mod ui_timeline;
 mod timeline_viewport;
 mod timeline_host;
 mod restart_cycle;
+mod lyrics_countdown;
+#[cfg(feature="ui-tests")]
+mod ui_lyrics_countdown;
 mod region_gesture;
 mod region_host;
 mod karaoke_host;
 mod analysis_host;
 mod project_key;
 mod desktop_actions;
+mod desktop_keyboard;
+#[cfg(feature="ui-tests")]
+mod ui_desktop_keyboard;
 mod desktop_window_state;
 mod desktop_lifecycle;
 mod native_build_info;
@@ -633,6 +639,7 @@ struct Player {
     lyric_scroll: Rc<Cell<f32>>,
     lyric_scroll_target: Rc<Cell<f32>>,
     lyric_active: Rc<Cell<usize>>,
+    lyric_countdown_clock: Rc<RefCell<lyrics_countdown::PulseClock>>,
     lyric_extent: Rc<Cell<f32>>,
     lyric_ai_note_top:Rc<Cell<f32>>,
     lyric_view_height: Rc<Cell<f32>>,
@@ -656,6 +663,7 @@ struct Player {
     track_focus_removed: Vec<usize>,
     track_focus_after_name: bool,
     track_action_focus: [[FocusHandle;2];tracks::LANE_SLOTS],
+    track_gain_focus: [FocusHandle;tracks::LANE_SLOTS],
     #[cfg(feature="ui-tests")]
     track_bounds: Rc<RefCell<HashMap<String,Bounds<Pixels>>>>,
     #[cfg(feature="ui-tests")]
@@ -1478,6 +1486,7 @@ impl Player {
             lyric_scroll: Rc::new(Cell::new(0.)),
             lyric_scroll_target: Rc::new(Cell::new(0.)),
             lyric_active: Rc::new(Cell::new(usize::MAX)),
+            lyric_countdown_clock: Rc::new(RefCell::new(lyrics_countdown::PulseClock::default())),
             lyric_extent: Rc::new(Cell::new(1280.)),
             lyric_ai_note_top:Rc::new(Cell::new(-1.)),
             lyric_view_height: Rc::new(Cell::new(0.)),
@@ -1501,6 +1510,7 @@ impl Player {
             track_focus_removed: vec![],
             track_focus_after_name: false,
             track_action_focus: std::array::from_fn(|_|std::array::from_fn(|_|cx.focus_handle())),
+            track_gain_focus: std::array::from_fn(|_|cx.focus_handle().tab_stop(true)),
             #[cfg(feature="ui-tests")]
             track_bounds: Default::default(),
             #[cfg(feature="ui-tests")]
@@ -4106,8 +4116,38 @@ impl Player {
         self.last = Instant::now();
         cx.notify();
     }
+    fn lyric_countdown_cue(&self,playing:bool)->Option<lyrics_countdown::Cue> {
+        let position=self.position+0.15;
+        let next=self.lyric_document.lines.partition_point(|line|line.start<=position);
+        let start=self.lyric_document.lines.get(next)?.start;
+        lyrics_countdown::at_target(next,start as f64,next.checked_sub(1).map(|i|self.lyric_document.lines[i].end as f64),position as f64,playing)
+    }
+    fn lyric_countdown_preload(&self)->Option<lyrics_countdown::Cue> {
+        let position=self.position+0.15;
+        let next=self.lyric_document.lines.partition_point(|line|line.start<=position);
+        let start=self.lyric_document.lines.get(next)?.start;
+        let previous_end=next.checked_sub(1).map(|i|self.lyric_document.lines[i].end);
+        // Prepare a gap's first label before the previous line ends. This is
+        // only an asset key: the visible cue still uses the exact source policy.
+        let at=previous_end.map_or(position,|end|position.max(end));
+        lyrics_countdown::at_target(next,start as f64,previous_end.map(|end|end as f64),at as f64,true)
+            .or_else(||(if next==0{start>=1.2}else{start-previous_end.unwrap_or(0.)>=3.})
+                .then_some(lyrics_countdown::Cue{line:next,kind:lyrics_countdown::Kind::Dots(3)}))
+    }
+    #[cfg(feature="ui-tests")]
+    fn lyric_countdown_review_state(&self)->serde_json::Value {
+        let clock=self.lyric_countdown_clock.borrow();
+        let cue=clock.current().map(|(cue,level)|serde_json::json!({"line":cue.line,
+            "kind":if matches!(cue.kind,lyrics_countdown::Kind::Seconds(_)){"seconds"}else{"dots"},
+            "count":match cue.kind{lyrics_countdown::Kind::Seconds(n)=>n,lyrics_countdown::Kind::Dots(n)=>n as u32},
+            "text":cue.kind.text(),"pulseLevel":if cfg!(target_os="windows"){0}else{level}}));
+        serde_json::json!({"cue":cue,"bounds":clock.bounds,"spriteReady":clock.sprite_ready,
+            "position":self.position,"anticipatedPosition":self.position+0.15,"playing":self.playing,"karaoke":self.karaoke,
+            "windowsFrozenPulse":cfg!(target_os="windows")})
+    }
     fn lyrics(&self, cx: &mut Context<Self>) -> AnyElement {
         if self.lyric_document.lines.is_empty() {
+            self.lyric_countdown_clock.borrow_mut().clear();
             let message = self
                 .project
                 .as_ref()
@@ -4125,12 +4165,18 @@ impl Player {
         let position = self.position + 0.15;
         let document = self.lyric_document.clone();
         let active = document.active(position);
+        let line_started = position >= document.lines[0].start;
         let native_glows = self.native_glows.clone();
         let suspended = self.notice.is_some()
             || self.engine_setup.read(cx).is_open()
             || self.whats_new.read(cx).is_open()
             || self.quick_start.read(cx).is_open()
             || matches!(self.screen, Screen::Settings | Screen::Log | Screen::Models);
+        let countdown_clock=self.lyric_countdown_clock.clone();
+        let countdown_suspended=suspended||self.modal_was_open;
+        let countdown=countdown_clock.borrow_mut().observe(self.lyric_countdown_cue(self.playing),Instant::now(),countdown_suspended,self.native_epoch);
+        let countdown_line=countdown.map(|(cue,_)|cue.line);
+        let countdown_preload=if countdown_suspended{countdown.map(|(cue,_)|cue)}else{self.lyric_countdown_preload()};
         let glow_textures = self.glow_textures.clone();
         let glow_bands = self.glow_bands.clone();
         let stats = self.frame_stats.clone();
@@ -4221,6 +4267,15 @@ impl Player {
                             start: Instant::now(),
                             stats: stats.clone(),
                         });
+                        // Warm the next caption and the finite dot vocabulary
+                        // while paused too. UIKit prepares masks off-thread.
+                        if let Some(cue)=countdown_preload {
+                            let _=singz_uikit::request_lyric_countdown_sprite(&cue.kind.text(),cue.kind.tracking(),w,cx);
+                            if let lyrics_countdown::Kind::Seconds(seconds)=cue.kind {
+                                if seconds>4 {let _=singz_uikit::request_lyric_countdown_sprite(&format!("{} s",seconds-1),1.,w,cx);}
+                            }
+                            for text in ["● ● ●","● ●","●"] {let _=singz_uikit::request_lyric_countdown_sprite(text,5.,w,cx);}
+                        }
                         let font = Font {
                             family: "SingZ Display 650".into(),
                             ..Default::default()
@@ -4289,6 +4344,8 @@ impl Player {
                         let base_baseline =
                             w.text_baseline(base_metrics.ascent, base_metrics.descent, px(25.375));
                         let (active_top, active_height, _) = &lines[active];
+                        let active_top=active_top+if countdown_line.is_some_and(|line|line<active){lyrics_countdown::CUE_HEIGHT}else{0.};
+                        let active_height=active_height+if countdown_line==Some(active){lyrics_countdown::CUE_HEIGHT}else{0.};
                         if !horizontal_state.replace(true) {
                             let owner = owner.clone();
                             w.on_next_frame(move |_, cx| {
@@ -4296,7 +4353,7 @@ impl Player {
                             });
                         }
                         if show_ai_note {
-                            let top=lines.last().map(|(top,height,_)|top+height).unwrap_or(0.);
+                            let top=lines.last().map(|(top,height,_)|top+height).unwrap_or(0.)+if countdown.is_some(){lyrics_countdown::CUE_HEIGHT}else{0.};
                             if (ai_note_top.replace(top)-top).abs()>0.5 {
                                 let owner=owner.clone();w.on_next_frame(move|_,cx|{let _=owner.update(cx,|_,cx|cx.notify());});
                             }
@@ -4307,6 +4364,7 @@ impl Player {
                                 .last()
                                 .map(|(top, height, _)| top + height)
                                 .unwrap_or(0.)
+                                + if countdown.is_some(){lyrics_countdown::CUE_HEIGHT}else{0.}
                                 + f32::from(w.viewport_size().height) * 0.4,
                         );
                         let mut previous = scrolling.get();
@@ -4339,24 +4397,34 @@ impl Player {
                         layout.borrow_mut().clear();
                         w.with_content_mask(Some(ContentMask { bounds: b }), |w| {
                             for (i, (top, height, words)) in lines.iter().enumerate() {
-                                let y = b.origin.y + px(top - offset);
+                                let before=if countdown_line.is_some_and(|line|line<i){lyrics_countdown::CUE_HEIGHT}else{0.};
+                                let cue_height=if countdown_line==Some(i){lyrics_countdown::CUE_HEIGHT}else{0.};
+                                let y = b.origin.y + px(top + before - offset);
                                 layout.borrow_mut().push((
                                     i,
                                     Bounds::new(
                                         point(b.origin.x, y),
-                                        size(b.size.width, px(*height)),
+                                        size(b.size.width, px(*height+cue_height)),
                                     ),
                                 ));
-                                if f32::from(y - b.origin.y) + height < 0. || y > b.bottom() {
+                                if f32::from(y - b.origin.y) + height + cue_height < 0. || y > b.bottom() {
                                     continue;
                                 }
                                 if carry_mask.as_ref().is_some_and(|mask|mask.get(i)==Some(&true)) {
-                                    let bounds=Bounds::new(point(b.left()+scroll_handle.offset().x+px(6.),y),size(b.size.width-px(12.),px(*height)));
-                                    w.paint_quad(fill(bounds,rgba(if i==active{0xffa02821}else{0xffa0280d})));
-                                    w.paint_quad(fill(Bounds::new(bounds.origin,size(px(3.),bounds.size.height)),rgba(if i==active{0xffa028ff}else{0xffa02873})));
+                                    let bounds=Bounds::new(point(b.left()+scroll_handle.offset().x+px(6.),y),size(b.size.width-px(12.),px(*height+cue_height)));
+                                    w.paint_quad(fill(bounds,rgba(if i==active&&line_started{0xffa02821}else{0xffa0280d})));
+                                    w.paint_quad(fill(Bounds::new(bounds.origin,size(px(3.),bounds.size.height)),rgba(if i==active&&line_started{0xffa028ff}else{0xffa02873})));
                                 }
-                                let scale = if i == active { 1.03 } else { 1. };
-                                let baseline_adjustment = if i == active {
+                                if let Some((cue,level))=countdown.filter(|(cue,_)|cue.line==i) {
+                                    let origin=point(b.left()+scroll_handle.offset().x+px(20.),y+px(7.));
+                                    let sprite=singz_uikit::request_lyric_countdown_sprite(&cue.kind.text(),cue.kind.tracking(),w,cx);
+                                    let ready=sprite.is_some_and(|sprite|singz_uikit::paint_lyric_countdown(sprite,origin,if cfg!(target_os="windows"){0}else{level},w));
+                                    {let mut clock=countdown_clock.borrow_mut();clock.bounds=Some((f32::from(origin.x),f32::from(origin.y),f32::from(b.size.width)-40.,11.));clock.sprite_ready=ready;}
+                                    if !countdown_suspended&&!cfg!(target_os="windows"){w.request_animation_frame();}
+                                }
+                                let y=y+px(cue_height);
+                                let scale = if i == active && line_started { 1.03 } else { 1. };
+                                let baseline_adjustment = if i == active && line_started {
                                     let metrics = shape(" ", rgb(TEXT).into(), scale, w);
                                     base_baseline * scale
                                         - w.text_baseline(
@@ -4367,7 +4435,7 @@ impl Player {
                                 } else {
                                     px(0.)
                                 };
-                                let color = rgb(if i == active {
+                                let color = rgb(if i == active && line_started {
                                     TEXT
                                 } else if i < active {
                                     DIM
@@ -4387,7 +4455,7 @@ impl Player {
                                     let timing = &document.lines[i].words[j];
                                     let word_start = timing.start;
                                     let word_end = timing.end;
-                                    let native_bands = if i == active
+                                    let native_bands = if i == active && line_started
                                         && position >= word_start
                                         && position < word_end
                                     {
@@ -4398,7 +4466,7 @@ impl Player {
                                     } else {
                                         None
                                     };
-                                    if i == active && position >= word_start && position < word_end
+                                    if i == active && line_started && position >= word_start && position < word_end
                                     {
                                         if let Some(texture) = native_bands
                                             .as_ref()
@@ -4422,7 +4490,7 @@ impl Player {
                                             );
                                         }
                                     }
-                                    if i != active {
+                                    if i != active || !line_started {
                                         let _ = shape(text, color.into(), scale, w).paint(
                                             origin,
                                             px(25.375 * scale),
@@ -4747,7 +4815,7 @@ impl Player {
                                         cx.notify();
                                     })),
                             )
-                            .child(singz_uikit::stem_volume(("gain", i), gain, color, {
+                            .child(self.track_probe(format!("gain-{i}"),singz_uikit::stem_volume_with_focus(("gain", i), gain, color, self.track_gain_focus[i].clone(), {
                                 let entity = cx.entity().downgrade();
                                 move |value, _, cx| {
                                     let _ = entity.update(cx, |this, cx| {
@@ -4757,7 +4825,7 @@ impl Player {
                                         cx.notify();
                                     });
                                 }
-                            })),
+                            }))),
                     ),
             )
             .child(
@@ -4888,7 +4956,7 @@ impl Render for Player {
             self.track_focus_after_name=false;
             if self.track_name_input.read(cx).focus_handle(cx).is_focused(window){self.focus_player=true;}
         }
-        if self.track_focus_removed.drain(..).any(|slot|self.track_action_focus[slot].iter().any(|focus|focus.is_focused(window))){self.focus_player=true;}
+        if self.track_focus_removed.drain(..).any(|slot|self.track_gain_focus[slot].is_focused(window)||self.track_action_focus[slot].iter().any(|focus|focus.is_focused(window))){self.focus_player=true;}
         let save_enabled=!self.loading && !self.saving && !self.source_saving
             && self.source_publication.is_none() && self.audio_recovery.is_none();
         if !save_enabled && self.header.read(cx).save_control_focused(window) {
@@ -4964,6 +5032,7 @@ impl Render for Player {
             )
         });
         let transport_mounted=self.screen==Screen::Player || matches!(self.screen,Screen::Settings|Screen::Log|Screen::Models)&&self.previous_screen==Screen::Player;
+        if !self.karaoke||!transport_mounted {self.lyric_countdown_clock.borrow_mut().clear();}
         self.restart_cycle.observe_component(transport_mounted);
         self.restart_cycle.observe(self.region_target().selection,self.playing);
         let transport_rate = self.requested_rate();
@@ -5342,6 +5411,7 @@ impl Render for Player {
                 }
             }))
             .track_focus(&self.focus_handle)
+            .capture_key_down(cx.listener(|this,event:&KeyDownEvent,window,cx|desktop_keyboard::capture(this,event,window,cx)))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 #[cfg(feature="ui-tests")]
                 if std::env::var_os("SINGZ_GPUI_EMPTY_PROJECT_TEST").is_some()&&event.keystroke.key=="s"&&(event.keystroke.modifiers.platform||event.keystroke.modifiers.control){
@@ -5389,7 +5459,8 @@ impl Render for Player {
                     return;
                 }
                 if this.header.read(cx).is_editing() {
-                    cx.stop_propagation();
+                    // Leave ordinary text keys available to the platform IME.
+                    // The capture guard already excludes title-entry focus.
                     return;
                 }
                 if this.screen == Screen::Models {
