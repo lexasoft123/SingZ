@@ -275,6 +275,56 @@ fn actual_oauth_worker_syncs_and_clean_repeat_publishes_no_payloads() {
         "Clean sync uploaded unchanged bytes"
     );
 }
+
+#[test]
+fn empty_publication_continues_automatically_with_zero_or_remaining_dirty_projects() {
+    for with_other in [false, true] {
+        let f = Fixture::new();
+        let service = f.service();
+        f.login(&service);
+        let previous_sync = service.snapshot().scheduler.last_sync;
+        let root = f.root.canonicalize().unwrap();
+        let ledger = crate::sync_dirty::Store::new(f.config.clone());
+        if with_other {
+            fs::create_dir_all(root.join("Other/stems")).unwrap();
+            fs::write(root.join("Other/project.json"), br#"{"name":"Other","settings":{}}"#).unwrap();
+            fs::write(root.join("Other/stems/vocals.wav"), b"another private audio payload").unwrap();
+            ledger.mark_project(&root.join("Other"), "new ordinary project").unwrap();
+        }
+        fs::write(root.join("Song/project.json"), br#"{"name":"Song","settings":{"nativeEmptyTracks":true,"nativeOriginalDisabled":true,"custom":[]},"stemHashes":{}}"#).unwrap();
+        ledger.mark_project(&root.join("Song"), "saved empty project").unwrap();
+        service.action(Action::SyncNow).unwrap();
+        wait(&service, |s| !s.busy && s.error.is_none()
+            && s.scheduler.phase == Phase::Pending
+            && s.scheduler.last_sync > previous_sync
+            && s.scheduler.dirty == if with_other { 1 } else { 0 });
+        let pending = service.snapshot();
+        assert!(pending.scheduler.run_at.is_some());
+        assert_eq!(pending.progress, "Finishing Drive sync…");
+        assert_eq!(pending.projects.get(&root.join("Song")), Some(&ProjectState::Synced));
+        if with_other {
+            assert_eq!(pending.projects.get(&root.join("Other")), Some(&ProjectState::Pending));
+        }
+        // No second Sync action: the explicit continuation must work even
+        // when the dedicated commit consumed the final dirty project.
+        wait(&service, |s| !s.busy && s.error.is_none()
+            && s.scheduler.phase == Phase::Idle && s.scheduler.dirty == 0);
+        assert!(service.snapshot().scheduler.run_at.is_none());
+        assert!(!ledger.snapshot().unwrap().is_dirty());
+        if with_other {
+            assert_eq!(service.snapshot().projects.get(&root.join("Other")), Some(&ProjectState::Synced));
+        }
+        let state = f.state();
+        let files = state["files"].as_array().unwrap();
+        let song = files.iter().find(|row| row["name"] == "Song" && row["mimeType"] == crate::drive_remote::FOLDER && row["trashed"] == false).unwrap();
+        let active = files.iter().filter(|row| row["trashed"] == false
+            && row["parents"].as_array().is_some_and(|p| p.contains(&song["id"]))).collect::<Vec<_>>();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0]["name"], "project.json");
+        assert_eq!(fs::read(root.join("Song/stems/vocals.wav")).unwrap(), b"native sync fixture encoded bytes");
+        drop(service);
+    }
+}
 #[test]
 fn signout_cancels_native_upload_and_cannot_clear_pending_save_marks() {
     let f = Fixture::new();

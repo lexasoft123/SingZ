@@ -188,7 +188,13 @@ pub fn capture(
     name: &str,
     spool_root: &Path,
     cancel: &impl Fn() -> bool,
-) -> Result<Capture> {
+) -> Result<Capture> {capture_inner(root,name,spool_root,cancel,false)}
+/// A coherent metadata-only export for the dedicated journaled transaction.
+/// Generic writer capture remains guarded until its coordinator is integrated.
+pub fn capture_empty(root:&Path,name:&str,spool_root:&Path,cancel:&impl Fn()->bool)->Result<Capture> {
+    capture_inner(root,name,spool_root,cancel,true)
+}
+fn capture_inner(root:&Path,name:&str,spool_root:&Path,cancel:&impl Fn()->bool,allow_empty:bool)->Result<Capture> {
     check(cancel)?;
     ensure!(
         crate::drive_plan::plain_name(name),
@@ -212,14 +218,13 @@ pub fn capture(
     let parsed = serde_json::from_slice::<Value>(&bytes)
         .ok()
         .filter(Value::is_object);
-    // Explicit native empty documents need a reader-compatible policy. Never
-    // let an empty local folder authorize deleting the remote's last audio.
-    ensure!(
-        !parsed
-            .as_ref()
-            .is_some_and(|doc| doc["settings"]["nativeEmptyTracks"] == true),
-        "Empty native project cannot be published to existing Drive readers yet"
-    );
+    let explicit_empty=parsed.as_ref().is_some_and(|doc|doc["settings"]["nativeEmptyTracks"]==true);
+    ensure!(!explicit_empty||allow_empty,"Empty native project cannot be published to existing Drive readers yet");
+    if allow_empty {
+        let doc=parsed.as_ref().context("Unreadable explicit empty project")?;
+        ensure!(matches!(doc.get("version").filter(|v|!v.is_null()).map_or(Some(1.),Value::as_f64),Some(1.|2.)),"Unsupported explicit empty project version");
+        ensure!(explicit_empty&&doc["settings"]["nativeOriginalDisabled"]==true&&doc["settings"]["custom"].as_array().is_some_and(Vec::is_empty),"Malformed explicit empty project");
+    }
     let mut capture = Capture {
         snapshot: ProjectSnapshot {
             dir: name.into(),
@@ -235,6 +240,14 @@ pub fn capture(
         lease: Some(lease),
     };
     let mut doc = parsed.unwrap_or(Value::Null);
+    if explicit_empty {
+        let object=doc.as_object_mut().context("Invalid empty project document")?;
+        for key in ["songFile","songHash","graphHash"] {object.remove(key);}
+        object.insert("stemHashes".into(),json!({}));
+        let settings=object.get_mut("settings").and_then(Value::as_object_mut).context("Invalid empty project settings")?;
+        for key in ["loop","selection","view"] {settings.remove(key);}
+    }
+    if !explicit_empty {
     let mut hashes = BTreeMap::new();
     match fs::read_dir(source.join("stems")) {
         Ok(items) => {
@@ -346,6 +359,7 @@ pub fn capture(
             "Project has no audio to sync"
         );
         doc["stemHashes"] = serde_json::to_value(hashes)?;
+    }
     }
     match fs::symlink_metadata(source.join("lyrics.json")) {
         Ok(_) => {
@@ -464,3 +478,29 @@ fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
 #[cfg(test)]
 #[path = "drive_snapshot_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod empty_projection_tests {
+    use super::*;
+    #[test]
+    fn dedicated_empty_projection_keeps_local_audio_and_original_save_cas_while_generic_writer_refuses() {
+        let base=std::env::temp_dir().join(format!("singz-empty-projection-{}",crate::drive_http::random_id().unwrap()));let root=base.join("library");let spool=base.join("spool");
+        fs::create_dir_all(root.join("Song/stems")).unwrap();fs::create_dir_all(&spool).unwrap();
+        let doc=br#"{"version":2,"name":"Song","songFile":"original.wav","songHash":{"old":true},"graphHash":{"old":true},"stemHashes":{"vocals.wav":{"old":true}},"foreign":{"keep":19},"settings":{"nativeEmptyTracks":true,"nativeOriginalDisabled":true,"custom":[],"loop":true,"selection":{"s":0,"e":3},"view":{"s":0,"e":3}}}"#;
+        fs::write(root.join("Song/project.json"),doc).unwrap();fs::write(root.join("Song/original.wav"),b"retained original").unwrap();fs::write(root.join("Song/stems/vocals.wav"),b"retained built-in").unwrap();fs::write(root.join("Song/graph.json"),b"retained graph").unwrap();fs::write(root.join("Song/lyrics.json"),b"{\"lines\":[]}").unwrap();
+        assert!(capture(&root,"Song",&spool,&||false).is_err());
+        let export=capture_empty(&root,"Song",&spool,&||false).unwrap();assert_eq!(export.local_document,crate::project_store::fingerprint(doc));assert!(export.snapshot.stems.is_empty());
+        assert_eq!(export.snapshot.top.iter().map(|f|f.name.as_str()).collect::<std::collections::BTreeSet<_>>(),std::collections::BTreeSet::from(["project.json","lyrics.json"]));
+        let remote:Value=serde_json::from_slice(&fs::read(&export.snapshot.top.iter().find(|f|f.name=="project.json").unwrap().path).unwrap()).unwrap();
+        for key in ["songFile","songHash","graphHash"]{assert!(remote.get(key).is_none());}assert_eq!(remote["stemHashes"],json!({}));assert_eq!(remote["foreign"]["keep"],19);
+        for key in ["loop","selection","view"]{assert!(remote["settings"].get(key).is_none());}assert_eq!(remote["lyricsHash"]["md5"],format!("{:x}",Md5::digest(b"{\"lines\":[]}")));
+        assert_eq!(fs::read(root.join("Song/project.json")).unwrap(),doc);assert_eq!(fs::read(root.join("Song/original.wav")).unwrap(),b"retained original");assert_eq!(fs::read(root.join("Song/stems/vocals.wav")).unwrap(),b"retained built-in");assert_eq!(fs::read(root.join("Song/graph.json")).unwrap(),b"retained graph");
+        drop(export);fs::remove_dir_all(base).unwrap();
+    }
+    #[test] fn missing_audio_and_malformed_empty_intent_never_authorize_projection() {
+        let base=std::env::temp_dir().join(format!("singz-empty-invalid-{}",crate::drive_http::random_id().unwrap()));fs::create_dir_all(base.join("Song")).unwrap();fs::create_dir(base.join("spool")).unwrap();
+        for doc in [json!({"settings":{}}),json!({"settings":{"nativeEmptyTracks":"true","nativeOriginalDisabled":true,"custom":[]}}),json!({"settings":{"nativeEmptyTracks":true,"custom":[]}}),json!({"settings":{"nativeEmptyTracks":true,"nativeOriginalDisabled":true,"custom":[{}]}}),json!({"version":3,"settings":{"nativeEmptyTracks":true,"nativeOriginalDisabled":true,"custom":[]}})] {
+            fs::write(base.join("Song/project.json"),serde_json::to_vec(&doc).unwrap()).unwrap();assert!(capture_empty(&base,"Song",&base.join("spool"),&||false).is_err());
+        }fs::remove_dir_all(base).unwrap();
+    }
+}

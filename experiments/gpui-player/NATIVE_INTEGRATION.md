@@ -29,8 +29,10 @@ Save publishes it into the library without overwriting an existing song. Reads a
 on a worker thread. Explicit Save updates known settings in place, preserving unknown
 metadata, source hashes and numeric precision. WAV/FLAC
 stems use the existing native decoders, with FLAC preferred when both exist.
-Source-only projects can use the codecs enabled in this native build (the default
-build does not provision the optional dynamic FFmpeg codec pack).
+Source-only projects can use the codecs enabled in this native build. Default
+helper builds require the pinned FFmpeg SDK; `--basic-only` selects the reduced
+development runtime. See [desktop packaging](DESKTOP_PACKAGING.md) for qualified
+formats and remaining platform delivery work.
 
 Implemented: native prepare, real duration and waveform summaries, Play/Pause,
 seek, saved selection loops, master volume, lane mute/solo/volume, reset, tempo and

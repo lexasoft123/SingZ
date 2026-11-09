@@ -14,6 +14,57 @@ use std::{
 pub const FOLDER: &str = "application/vnd.google-apps.folder";
 const JSON_LIMIT: usize = 16 * 1024 * 1024;
 const FILE_LIMIT: usize = 100_000;
+const METADATA_FIELDS: &str = "id,name,mimeType,md5Checksum,size,parents,appProperties,trashed";
+
+/// Exact-ID observation, including trash state that a folder listing omits.
+/// This is an observed baseline, never a server compare-and-set guarantee.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Metadata {
+    #[serde(flatten)]
+    pub entry: RemoteEntry,
+    pub trashed: bool,
+}
+
+impl Metadata {
+    fn validate(&self, id: &str) -> Result<()> {
+        validate_id(&self.entry.id)?;
+        ensure!(
+            self.entry.id == id,
+            "Drive metadata returned a different ID"
+        );
+        ensure!(
+            !self.entry.name.is_empty() && self.entry.name.len() <= 16_384,
+            "Invalid Drive metadata name"
+        );
+        ensure!(
+            self.entry.parents.len() <= 1,
+            "Drive metadata has ambiguous parents"
+        );
+        for parent in &self.entry.parents {
+            validate_id(parent)?;
+        }
+        if self.entry.mime_type.as_deref() != Some(FOLDER) {
+            ensure!(
+                self.entry
+                    .md5_checksum
+                    .as_ref()
+                    .is_some_and(|s| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+                    && self.entry.size.as_ref().is_some_and(|s| !s.is_empty()
+                        && s.bytes().all(|b| b.is_ascii_digit())
+                        && s.parse::<u64>().is_ok()),
+                "Drive metadata has no bounded content fingerprint"
+            );
+        }
+        ensure!(
+            self.entry
+                .mime_type
+                .as_ref()
+                .is_some_and(|s| !s.is_empty() && s.len() <= 1024),
+            "Drive metadata has no MIME type"
+        );
+        Ok(())
+    }
+}
 
 pub struct Remote {
     pub auth: AuthClient,
@@ -21,6 +72,31 @@ pub struct Remote {
 impl Remote {
     pub fn new(auth: AuthClient) -> Self {
         Self { auth }
+    }
+    /// Durable account binding without writing the raw Drive permission ID to
+    /// journals. Used only by transactions that need cross-process recovery.
+    pub fn account_key(&self, cancel: &impl Fn() -> bool) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        let value = self.json(
+            "GET",
+            "/drive/v3/about?fields=user(permissionId)",
+            None,
+            cancel,
+        )?;
+        let permission = value["user"]["permissionId"]
+            .as_str()
+            .context("Drive account identity is unavailable")?;
+        ensure!(
+            !permission.is_empty()
+                && permission.len() <= 1024
+                && !permission.chars().any(char::is_control),
+            "Invalid Drive account identity"
+        );
+        let digest = Sha256::digest(permission.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        Ok(format!("drive-permission-sha256:{digest}"))
     }
     fn endpoint(&self, path: &str) -> Result<url::Url> {
         ensure!(
@@ -225,6 +301,394 @@ impl Remote {
         )?;
         Ok(())
     }
+    pub fn metadata(&self, id: &str, cancel: &impl Fn() -> bool) -> Result<Metadata> {
+        self.metadata_if_exists(id, cancel)?
+            .context("Drive file metadata is missing")
+    }
+    /// None means exactly HTTP 404. Authorization, transport and malformed
+    /// metadata are errors, never permission to allocate another object ID.
+    pub fn metadata_if_exists(
+        &self,
+        id: &str,
+        cancel: &impl Fn() -> bool,
+    ) -> Result<Option<Metadata>> {
+        validate_id(id)?;
+        let mut url = self.endpoint(&format!("/drive/v3/files/{id}"))?;
+        url.query_pairs_mut().append_pair("fields", METADATA_FIELDS);
+        let response = self.auth.request(
+            Request {
+                method: "GET",
+                url: url.as_str(),
+                headers: &[],
+                body: Body::Empty,
+                destination: Destination::Bytes(JSON_LIMIT),
+                upload: false,
+                allow_loopback_http: self.auth.config.allow_loopback_http(),
+            },
+            cancel,
+        )?;
+        if response.status == 404 {
+            return Ok(None);
+        }
+        ensure!(
+            (200..300).contains(&response.status),
+            "Drive metadata HTTP {}",
+            response.status
+        );
+        let observed: Metadata = serde_json::from_value(response.json()?)?;
+        observed.validate(id)?;
+        Ok(Some(observed))
+    }
+    /// Persist this reserved identity BEFORE any create request. A lost create
+    /// acknowledgement can then only be retried with this same Drive ID.
+    pub fn generate_id(&self, cancel: &impl Fn() -> bool) -> Result<String> {
+        let value = self.json(
+            "GET",
+            "/drive/v3/files/generateIds?count=1&space=drive&type=files",
+            None,
+            cancel,
+        )?;
+        let ids = value["ids"]
+            .as_array()
+            .context("Drive did not return generated IDs")?;
+        ensure!(
+            ids.len() == 1,
+            "Drive returned an unexpected generated-ID count"
+        );
+        let id = ids[0]
+            .as_str()
+            .context("Drive returned an invalid generated ID")?;
+        validate_id(id)?;
+        Ok(id.into())
+    }
+    fn create_reserved(
+        &self,
+        expected: &Metadata,
+        cancel: &impl Fn() -> bool,
+        create: impl FnOnce() -> Result<()>,
+    ) -> Result<Metadata> {
+        expected.validate(&expected.entry.id)?;
+        ensure!(
+            !expected.trashed && expected.entry.parents.len() == 1,
+            "Reserved create requires an exact live parent"
+        );
+        if let Some(current) = self.metadata_if_exists(&expected.entry.id, cancel)? {
+            ensure!(
+                current == *expected,
+                "Reserved Drive ID belongs to different metadata or content"
+            );
+            return Ok(current);
+        }
+        ensure!(!cancel(), "Drive sync cancelled");
+        let acknowledgement = create();
+        ensure!(
+            !cancel(),
+            "Reserved Drive create acknowledgement unknown after cancellation; retain the same ID"
+        );
+        // A successful create, 409, timeout or lost response is resolved by the
+        // same exact-ID observation. A temporary 404 is pending, never a new ID.
+        let current = self
+            .metadata_if_exists(&expected.entry.id, cancel)
+            .context("Reserved Drive create outcome unknown; retain the same ID")?;
+        if let Some(current) = current {
+            ensure!(
+                current == *expected,
+                "Reserved Drive create conflicted; retain transaction intent"
+            );
+            return Ok(current);
+        }
+        match acknowledgement {
+            Err(error) => {
+                Err(error.context("Reserved Drive create not observable; retain the same ID"))
+            }
+            Ok(()) => anyhow::bail!("Reserved Drive create not observable; retain the same ID"),
+        }
+    }
+    pub fn owned_folder_with_id(
+        &self,
+        id: &str,
+        name: &str,
+        parent: &str,
+        properties: &BTreeMap<String, String>,
+        cancel: &impl Fn() -> bool,
+    ) -> Result<Metadata> {
+        let generation = self.auth.store.generation();
+        let original_cancel = cancel;
+        let cancel = &|| original_cancel() || self.auth.store.generation() != generation;
+        validate_id(id)?;
+        validate_id(parent)?;
+        validate_owned_properties(properties)?;
+        ensure!(
+            id != parent && drive_plan::plain_name(name),
+            "Unsafe reserved Drive folder"
+        );
+        let expected = Metadata {
+            entry: RemoteEntry {
+                id: id.into(),
+                name: name.into(),
+                mime_type: Some(FOLDER.into()),
+                parents: vec![parent.into()],
+                app_properties: properties.clone(),
+                ..Default::default()
+            },
+            trashed: false,
+        };
+        self.create_reserved(&expected,cancel,||{
+            self.json("POST","/drive/v3/files?fields=id",Some(&json!({"id":id,"name":name,"parents":[parent],"mimeType":FOLDER,"appProperties":properties})),cancel)?;Ok(())
+        })
+    }
+    pub fn upload_reserved_bytes(
+        &self,
+        id: &str,
+        bytes: &[u8],
+        name: &str,
+        parent: &str,
+        mime: &str,
+        cancel: &impl Fn() -> bool,
+    ) -> Result<Metadata> {
+        use md5::{Digest, Md5};
+        let generation = self.auth.store.generation();
+        let original_cancel = cancel;
+        let cancel = &|| original_cancel() || self.auth.store.generation() != generation;
+        validate_id(id)?;
+        validate_id(parent)?;
+        ensure!(
+            id != parent
+                && drive_plan::plain_name(name)
+                && !mime.is_empty()
+                && mime.len() <= 1024
+                && !mime.chars().any(char::is_control),
+            "Unsafe reserved Drive upload"
+        );
+        let expected = Metadata {
+            entry: RemoteEntry {
+                id: id.into(),
+                name: name.into(),
+                mime_type: Some(mime.into()),
+                parents: vec![parent.into()],
+                md5_checksum: Some(format!("{:x}", Md5::digest(bytes))),
+                size: Some(bytes.len().to_string()),
+                ..Default::default()
+            },
+            trashed: false,
+        };
+        self.create_reserved(&expected, cancel, || {
+            let mut url = url::Url::parse(&format!(
+                "{}/upload/drive/v3/files",
+                self.auth.config.upload_base.trim_end_matches('/')
+            ))?;
+            url.query_pairs_mut().append_pair("uploadType", "resumable");
+            let metadata = serde_json::to_vec(
+                &json!({"id":id,"name":name,"parents":[parent],"mimeType":mime}),
+            )?;
+            let init = self.send(
+                "POST",
+                url.as_str(),
+                Body::Bytes(&metadata),
+                &[("Content-Type", "application/json")],
+                false,
+                cancel,
+            )?;
+            let location = init
+                .header("location")
+                .context("Drive gave no reserved upload session")?;
+            // AuthClient checks the origin before adding credentials.
+            self.send(
+                "PUT",
+                location,
+                Body::Bytes(bytes),
+                &[("Content-Type", mime)],
+                true,
+                cancel,
+            )?;
+            Ok(())
+        })
+    }
+    /// An idempotent single-parent move of the exact captured object. Unknown
+    /// PATCH acknowledgement is resolved by GET, never by uploading another copy.
+    /// Callers must journal intent first and revalidate their complete roster;
+    /// Drive supplies no atomic compare-and-set across this read and mutation.
+    pub fn move_verified(
+        &self,
+        expected: &Metadata,
+        destination: &str,
+        name: Option<&str>,
+        cancel: &impl Fn() -> bool,
+    ) -> Result<Metadata> {
+        let generation = self.auth.store.generation();
+        let original_cancel = cancel;
+        let cancel = &|| original_cancel() || self.auth.store.generation() != generation;
+        expected.validate(&expected.entry.id)?;
+        validate_id(destination)?;
+        ensure!(
+            !expected.trashed && expected.entry.parents.len() == 1,
+            "Drive move requires a live single-parent baseline"
+        );
+        let original = &expected.entry.parents[0];
+        ensure!(
+            original != destination && expected.entry.id != destination,
+            "Drive move destination aliases its source"
+        );
+        if let Some(name) = name {
+            ensure!(drive_plan::plain_name(name), "Unsafe Drive move name");
+        }
+        let mut desired = expected.clone();
+        desired.entry.parents = vec![destination.into()];
+        if let Some(name) = name {
+            desired.entry.name = name.into();
+        }
+        let current = self.metadata(&expected.entry.id, cancel)?;
+        if current == desired {
+            return Ok(current);
+        }
+        ensure!(
+            current == *expected,
+            "Drive move baseline changed; no mutation performed"
+        );
+        ensure!(!cancel(), "Drive sync cancelled");
+        let mut url = self.endpoint(&format!("/drive/v3/files/{}", expected.entry.id))?;
+        url.query_pairs_mut()
+            .append_pair("addParents", destination)
+            .append_pair("removeParents", original)
+            .append_pair("fields", METADATA_FIELDS);
+        let body =
+            serde_json::to_vec(&name.map_or_else(|| json!({}), |name| json!({"name":name})))?;
+        let acknowledgement = self
+            .send(
+                "PATCH",
+                url.as_str(),
+                Body::Bytes(&body),
+                &[("Content-Type", "application/json")],
+                false,
+                cancel,
+            )
+            .and_then(|response| response.json());
+        // A cancelled/auth-retired operation may have applied. Preserve the
+        // caller's durable intent and do not issue cleanup in a cancelled epoch.
+        ensure!(
+            !cancel(),
+            "Drive move acknowledgement unknown after cancellation; retain transaction intent"
+        );
+        let observed = self
+            .metadata(&expected.entry.id, cancel)
+            .context("Drive move outcome unknown; retain transaction intent")?;
+        if observed == desired {
+            return Ok(observed);
+        }
+        if let Err(error) = acknowledgement {
+            return Err(error.context(if observed == *expected {
+                "Drive move was not observed; retain transaction intent"
+            } else {
+                "Drive move conflicted after unknown acknowledgement; retain transaction intent"
+            }));
+        }
+        anyhow::bail!("Drive move verification failed; retain transaction intent")
+    }
+    /// Look up private app-owned storage, never claim an untagged same-name folder.
+    pub fn find_owned_folder(
+        &self,
+        parent: Option<&str>,
+        properties: &BTreeMap<String, String>,
+        cancel: &impl Fn() -> bool,
+    ) -> Result<Option<Metadata>> {
+        let generation = self.auth.store.generation();
+        let original_cancel = cancel;
+        let cancel = &|| original_cancel() || self.auth.store.generation() != generation;
+        validate_owned_properties(properties)?;
+        let mut query = format!("mimeType='{FOLDER}' and trashed=false");
+        if let Some(parent) = parent {
+            validate_id(parent)?;
+            query.push_str(&format!(
+                " and '{}' in parents",
+                drive_plan::escape_query_string(parent)
+            ));
+        }
+        for (key, value) in properties {
+            query.push_str(&format!(
+                " and appProperties has {{ key='{}' and value='{}' }}",
+                drive_plan::escape_query_string(key),
+                drive_plan::escape_query_string(value)
+            ));
+        }
+        let candidates = self.list(&query, cancel)?;
+        ensure!(
+            candidates.len() <= 1,
+            "Drive owned folder identity is ambiguous"
+        );
+        let Some(candidate) = candidates.first() else {
+            return Ok(None);
+        };
+        let observed = self.metadata(&candidate.id, cancel)?;
+        ensure!(
+            !observed.trashed
+                && observed.entry.mime_type.as_deref() == Some(FOLDER)
+                && parent.is_none_or(|p| observed.entry.parents == [p])
+                && properties
+                    .iter()
+                    .all(|(k, v)| observed.entry.app_properties.get(k) == Some(v)),
+            "Drive owned folder changed during observation"
+        );
+        Ok(Some(observed))
+    }
+    pub fn owned_folder(
+        &self,
+        name: &str,
+        parent: Option<&str>,
+        properties: &BTreeMap<String, String>,
+        cancel: &impl Fn() -> bool,
+    ) -> Result<Metadata> {
+        let generation = self.auth.store.generation();
+        let original_cancel = cancel;
+        let cancel = &|| original_cancel() || self.auth.store.generation() != generation;
+        ensure!(
+            drive_plan::plain_name(name),
+            "Unsafe Drive owned folder name"
+        );
+        if let Some(existing) = self.find_owned_folder(parent, properties, cancel)? {
+            ensure!(
+                existing.entry.name == name,
+                "Drive owned folder name changed"
+            );
+            return Ok(existing);
+        }
+        let mut body = json!({"name":name,"mimeType":FOLDER,"appProperties":properties});
+        if let Some(parent) = parent {
+            body["parents"] = json!([parent]);
+        }
+        let acknowledgement = self.json("POST", "/drive/v3/files?fields=id", Some(&body), cancel);
+        ensure!(
+            !cancel(),
+            "Drive owned folder acknowledgement unknown after cancellation; retain transaction intent"
+        );
+        // Even a successful POST must be discovered uniquely by its private
+        // ownership markers; malformed/lost responses never trigger another POST.
+        let observed = self
+            .find_owned_folder(parent, properties, cancel)
+            .context("Drive owned folder outcome unknown; retain transaction intent")?;
+        if let Some(observed) = observed {
+            ensure!(
+                observed.entry.name == name,
+                "Drive owned folder name changed after creation"
+            );
+            if let Ok(reply) = acknowledgement {
+                if let Some(id) = reply["id"].as_str() {
+                    ensure!(
+                        id == observed.entry.id,
+                        "Drive folder receipt differs from owned identity"
+                    );
+                }
+            }
+            return Ok(observed);
+        }
+        match acknowledgement {
+            Err(error) => {
+                Err(error.context("Drive owned folder was not observed; retain transaction intent"))
+            }
+            Ok(_) => anyhow::bail!(
+                "Drive owned folder was not observed after creation; retain transaction intent"
+            ),
+        }
+    }
     pub fn trash(&self, id: &str, cancel: &impl Fn() -> bool) -> Result<()> {
         self.patch(id, &json!({"trashed":true}), cancel)
     }
@@ -362,6 +826,22 @@ pub fn validate_id(id: &str) -> Result<()> {
                 .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
         "Invalid Drive file ID"
     );
+    Ok(())
+}
+fn validate_owned_properties(properties: &BTreeMap<String, String>) -> Result<()> {
+    ensure!(
+        !properties.is_empty() && properties.len() <= 30,
+        "Drive owned folder requires bounded private ownership properties"
+    );
+    for (key, value) in properties {
+        ensure!(
+            !key.is_empty()
+                && !value.is_empty()
+                && key.len() + value.len() <= 124
+                && !key.chars().chain(value.chars()).any(char::is_control),
+            "Invalid private Drive ownership property"
+        );
+    }
     Ok(())
 }
 

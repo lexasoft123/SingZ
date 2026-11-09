@@ -678,8 +678,10 @@ fn worker(
                 let before = read_dirty(&ledger, &config_dir)?;
                 last_dirty = before.clone();
                 let new_marks = before.seq > run.captured_seq;
+                let mut explicit_follow_up = false;
                 let outcome = match result {
                     Ok(report) => {
+                        explicit_follow_up = report.follow_up;
                         ledger.clear(run.captured_seq)?;
                         let mut outstanding = dirty.outside_library(&root);
                         outstanding.extend(report.skipped.iter().cloned());
@@ -716,10 +718,13 @@ fn worker(
                                 "Drive synced, but its status could not be saved: {error}"
                             ));
                         }
-                        let clean = warnings.is_empty() && report.skipped.is_empty();
+                        let clean = warnings.is_empty() && report.skipped.is_empty()
+                            && !explicit_follow_up;
                         publish(shared, |s| {
                             for path in &report.skipped {
-                                s.projects.insert(path.clone(), ProjectState::Blocked);
+                                s.projects.insert(path.clone(), if explicit_follow_up {
+                                    ProjectState::Pending
+                                } else { ProjectState::Blocked });
                             }
                             for path in receipt
                                 .projects
@@ -728,7 +733,9 @@ fn worker(
                             {
                                 s.projects.insert(path.clone(), ProjectState::Synced);
                             }
-                            s.progress = if clean {
+                            s.progress = if explicit_follow_up {
+                                "Finishing Drive sync…".into()
+                            } else if clean {
                                 format!(
                                     "Drive is up to date — {} uploaded, {} unchanged. Your phones see them under Google Drive.",
                                     report.uploaded, report.unchanged
@@ -790,7 +797,7 @@ fn worker(
                     outcome,
                     now(),
                     jitter,
-                    new_marks,
+                    new_marks || explicit_follow_up,
                     post.seq,
                     count(&post),
                 );

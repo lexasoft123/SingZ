@@ -58,7 +58,16 @@ Evidence root: `/tmp/singz-windows-provider-20261109`.
   replays of its exact WAV succeed (real/fake backend, ordinary/extended path),
   isolating the Rust boundary rather than a decoder or file-path failure.
 
-The repaired source still needs the full Dell rebuild/provider/restart journey.
+- Dell `provider5` builds the repaired published source (`14715b4e`) and passes
+  865 Rust tests, zero failures and two ignores. UI binary SHA-256:
+  `d4680362dbfa004a92eedeea7dd35b8c4c3e29b2068ea6d6067090420876f25d`.
+- `windows-ui3-result.json`, `windows-ui3-runner.json` and
+  `windows-ui3-workflow.json` report the actual Windows hidden provider/restart
+  journey passed across two app launches. Foreground remains unchanged; recorded
+  frame observations have equal outer/client sizes and all eight resize hit tests
+  pass. This is scoped interaction/frame evidence, not matched visual parity.
+
+The repaired source's scoped Dell provider gate is passed.
 Windows candidates use an inert public HTTPS configuration and explicit basic-only
 codecs; real Drive consent and the full codec package remain unqualified. ASIO's
 licensed adapter remains unimplemented and disabled. Physical microphone/output

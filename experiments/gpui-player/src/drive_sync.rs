@@ -23,6 +23,9 @@ pub struct Report {
     pub warnings: Vec<String>,
     pub skipped: Vec<PathBuf>,
     pub synced: BTreeMap<PathBuf, String>,
+    /// A dedicated transaction committed; finish ordinary reconciliation from
+    /// a fresh listing in an explicit continuation, even with no dirty rows.
+    pub follow_up: bool,
 }
 struct Spool(PathBuf);
 impl Drop for Spool {
@@ -50,6 +53,27 @@ pub fn run(
     let initial = drive_snapshot::scan(&root, cancel)?;
     let singz = remote.folder("SingZ", None, cancel)?;
     let mut remote_top = remote.children(&singz, cancel)?;
+    let journal_root = temporary_root
+        .parent()
+        .context("Drive spool has no private state parent")?
+        .join("empty-transactions");
+    // A pending retirement precedes adoption and ordinary orphan cleanup.
+    // End this pass after a committed effect: the service explicitly schedules
+    // a fresh continuation instead of overwriting its catalog from old facts.
+    let empty = crate::drive_empty::run(remote, &root, &journal_root, &singz,
+        &remote_top, cancel, progress, capturing)?;
+    if empty.changed {
+        capturing(None);
+        let current = drive_snapshot::scan(&root, cancel)?;
+        let mut skipped = empty.deferred.into_iter().collect::<BTreeSet<_>>();
+        skipped.extend(initial.iter().chain(current.iter()).map(|name| root.join(name))
+            .filter(|path| !empty.synced.contains_key(path)));
+        return Ok(Report {
+            uploaded: empty.uploaded, unchanged: empty.unchanged,
+            projects: current.len(), skipped: skipped.into_iter().collect(),
+            synced: empty.synced, follow_up: true, ..Default::default()
+        });
+    }
     // This guard intentionally precedes adoption. Adopting a single phone song
     // must not authorize removing the rest of an unavailable local library.
     ensure!(
@@ -104,14 +128,24 @@ pub fn run(
     }
     builder.create(&spool.0)?;
     let mut report = Report {
+        unchanged: empty.unchanged,
         projects: dirs.len(),
         adopted: adoption.adopted,
         warnings: adoption.warnings,
+        skipped: empty.deferred,
+        synced: empty.synced,
         ..Default::default()
     };
     let mut catalog = Vec::<Value>::new();
+    let mut ordinary_rows = BTreeMap::new();
     for (index, name) in dirs.iter().enumerate() {
         ensure!(!cancel(), "Drive sync cancelled");
+        if let Some(row) = empty.rows.get(name) {
+            // The dedicated transaction has verified this audio-free row.
+            // Retained local media never enters the generic upload planner.
+            catalog.push(row.clone());
+            continue;
+        }
         progress(
             format!("Syncing {name}…"),
             index as f32 / dirs.len().max(1) as f32,
@@ -159,6 +193,11 @@ pub fn run(
         }
         // From this point on HTTP reads private verified copies, with no
         // project lease held and no dependency on mutable paths in the library.
+        crate::drive_empty::prepare_ordinary_publication(remote, &root, &journal_root,
+            &singz, name, &capture.local_document,
+            capture.snapshot.top.iter().find(|entry| entry.name == "project.json"),
+            theirs.top.iter().find(|entry| entry.name == "project.json").map(|entry| entry.id.as_str()),
+            cancel)?;
         report.unchanged += plan.unchanged;
         let mut fresh = BTreeMap::new();
         if !plan.upload.is_empty() || !plan.trash.is_empty() {
@@ -210,7 +249,9 @@ pub fn run(
         }
         if capture.snapshot.doc_readable {
             let files=plan.rows.iter().map(|row|{let id=fresh.get(&row.name).or(row.id.as_ref()).context("Drive catalog payload has no published ID")?;Ok(json!({"id":id,"name":row.name,"size":row.size,"md5Checksum":row.md5_checksum}))}).collect::<Result<Vec<_>>>()?;
-            catalog.push(json!({"dir":name,"files":files}));
+            let row = json!({"dir":name,"files":files});
+            ordinary_rows.insert(name.clone(), (capture.local_document.clone(), row.clone()));
+            catalog.push(row);
             report
                 .synced
                 .insert(root.join(name), capture.local_document.clone());
@@ -245,7 +286,7 @@ pub fn run(
         "Drive has ambiguous catalogs; sync refused"
     );
     let old = catalogs.first();
-    if old.and_then(|f| f.md5_checksum.as_deref()) != Some(checksum.as_str()) {
+    let catalog_id = if old.and_then(|f| f.md5_checksum.as_deref()) != Some(checksum.as_str()) {
         progress("Updating catalog…".into(), 0.995);
         remote.upload_bytes(
             &manifest,
@@ -254,9 +295,21 @@ pub fn run(
             old.map(|f| f.id.as_str()),
             "application/json",
             cancel,
-        )?;
-    }
+        )?
+    } else {
+        old.context("Unchanged Drive catalog has no identity")?.id.clone()
+    };
     ensure!(!cancel(), "Drive sync cancelled");
+    // A prior empty journal is superseded only by this writer's durably
+    // recorded nonempty intent and verified terminal document/catalog effect.
+    let expected_catalog = RemoteEntry {
+        id: catalog_id, name: "catalog.json".into(),
+        md5_checksum: Some(checksum), size: Some(manifest.len().to_string()),
+        parents: vec![singz.clone()], ..Default::default()
+    };
+    crate::drive_empty::acknowledge_ordinary_publication(remote, &root, &journal_root,
+        &singz, &ordinary_rows, &expected_catalog, cancel)?;
+    report.skipped.retain(|path| !report.synced.contains_key(path));
     progress(
         format!(
             "Done — {} songs, {} uploaded, {} unchanged",

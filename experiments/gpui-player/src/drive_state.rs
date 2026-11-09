@@ -36,6 +36,15 @@ pub struct Snapshot {
     pub error: Option<String>,
     pub projects: BTreeMap<PathBuf, ProjectState>,
 }
+impl Snapshot {
+    pub fn is_up_to_date(&self) -> bool {
+        self.configured && self.signed_in && !self.signing_in && !self.busy
+            && !self.suspended && self.error.is_none()
+            && self.scheduler.phase == crate::sync_scheduler::Phase::Idle
+            && self.scheduler.dirty == 0 && self.scheduler.last_sync.is_some()
+            && self.scheduler.last_error.is_none()
+    }
+}
 impl Default for Snapshot {
     fn default() -> Self {
         Self {
@@ -52,5 +61,31 @@ impl Default for Snapshot {
             error: None,
             projects: BTreeMap::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sync_scheduler::Phase;
+
+    #[test]
+    fn completed_receipt_with_no_dirty_marks_is_not_up_to_date_until_idle() {
+        let mut state = Snapshot { configured: true, signed_in: true, ..Default::default() };
+        state.scheduler.last_sync = Some(100);
+        for phase in [Phase::Off, Phase::Pending, Phase::Syncing, Phase::Retrying, Phase::Blocked] {
+            state.scheduler.phase = phase;
+            assert!(!state.is_up_to_date(), "{phase:?} is still unresolved");
+        }
+        state.scheduler.phase = Phase::Idle;
+        assert!(state.is_up_to_date());
+        state.busy = true;
+        assert!(!state.is_up_to_date(), "Worker receipt publication is unfinished");
+        state.busy = false;
+        state.scheduler.dirty = 1;
+        assert!(!state.is_up_to_date(), "Newer edits remain unsynced");
+        state.scheduler.dirty = 0;
+        state.error = Some("Publication failed".into());
+        assert!(!state.is_up_to_date());
     }
 }

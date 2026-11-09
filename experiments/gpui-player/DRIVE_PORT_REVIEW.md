@@ -76,10 +76,11 @@ Still open:
   browser presentation, Windows/Linux and packaged-app qualification.
 - Matched production screenshots and animation sequences, locale/accessibility,
   and live display FPS. Hidden stepped captures do not prove live smoothness.
-- Explicit native-empty projects are currently refused by cloud publication and
-  shown as blocked; reader compatibility must be implemented before claiming that
-  lifecycle is fully integrated. Missing graphs are also blocked, without a false
-  synced receipt.
+- Explicit native-empty publication now has a dedicated recovery transaction and
+  a verified writer/fresh-reader/offline journey; generic snapshots retain the
+  missing-audio refusal. See [empty publication](EMPTY_DRIVE_REVIEW.md). Authorized
+  folder retirement/name reuse and real account/platform qualification remain open.
+  Missing graphs remain blocked without a false synced receipt.
 - Adoption now receives streaming HTTP byte counts and source-style download
   totals/speed before transfer completion; four held-response/authenticated tests
   preserve cancellation and integrity-gated publication. See the

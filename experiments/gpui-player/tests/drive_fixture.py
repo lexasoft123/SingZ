@@ -6,7 +6,8 @@ Use clientId="fixture-client", clientSecret="fixture-secret" and point authBase,
 apiBase and uploadBase at that base. Sign-in uses the real PKCE callback flow.
 
 POST /control accepts reset, resetAuth, resetLedger, files (or seed), pageSize,
-repeatPageToken, failNext [{method,path,status,count?,truncateBytes?,corruptBytes?,delayMs?}],
+repeatPageToken, permissionId, hideNext {id:{metadata:count,listing:count}},
+failNext [{method,path,status,count?,truncateBytes?,corruptBytes?,delayMs?,afterApply?,disconnect?}],
 gates {upload|download|list|token|download-first|download-second: bool},
 release [gate names], chunkDelayMs, chunkGates [{fileId,gate,afterBytes}].
 Seed files contain id/name/mimeType/parents/appProperties/trashed/contentBase64.
@@ -73,13 +74,15 @@ class State:
         self.cv = threading.Condition(threading.RLock())
         self.stopping = threading.Event()
         self.files, self.sessions, self.codes = {}, {}, {}
+        self.reserved_ids, self.hidden = set(), {}
         self.access, self.refresh = set(), {}
         self.requests, self.counts, self.failures = [], {}, []
         self.sequence, self.next_id = 0, 1
         self.page_size, self.repeat_page_token, self.chunk_delay_ms = 1000, False, 0
         self.oauth = {'authorizations': 0, 'codeExchanges': 0, 'refreshes': 0}
+        self.permission_id = 'fixture-stable-account-1'
         self.gates = {name: {'blocked': False, 'waiting': 0, 'entered': 0}
-                      for name in ('upload', 'download', 'list', 'token', 'download-first', 'download-second')}
+                      for name in ('upload', 'download', 'list', 'token', 'download-first', 'download-second', 'move', 'move-applied', 'metadata', 'upload-applied')}
         self.chunk_gates = []
 
     def begin(self, method, path, query, body_size):
@@ -94,17 +97,26 @@ class State:
                                                        'code_verifier', 'code_challenge')})
             row = {'sequence': self.sequence, 'method': method, 'path': path,
                    'query': safe_query, 'status': None, 'requestBytes': body_size,
-                   'responseBytes': 0, 'operation': None, 'cancelled': False}
+                   'responseBytes': 0, 'operation': None, 'cancelled': False,
+                   'events': [{'phase': 'request-received'}], 'mutationApplied': False}
             self.requests.append(row)
             self.requests = self.requests[-10000:]
             key = method + ' ' + path
             self.counts[key] = self.counts.get(key, 0) + 1
             return row
 
-    def finish(self, row, status, count=0, cancelled=False):
+    def finish(self, row, status, count=0, cancelled=False, phase=None):
         if row is not None:
             with self.cv:
                 row.update(status=status, responseBytes=count, cancelled=cancelled)
+                row['events'].append({'phase': phase or ('response-lost' if cancelled else 'response-sent'), 'status': status, 'bytes': count})
+
+    def mutated(self, row, entry, operation):
+        if row is not None:
+            with self.cv:
+                row['mutationApplied'] = True
+                row['events'].append({'phase': 'mutation-applied', 'operation': operation,
+                                      'file': metadata(entry)})
 
     def gate(self, name, handler, row):
         with self.cv:
@@ -170,7 +182,7 @@ class State:
             # Copy under the lock; callbacks may update their ledger row later.
             return json.loads(json.dumps({'files': [metadata(f, True) for f in self.files.values()],
                 'requests': self.requests, 'counts': self.counts, 'gates': self.gates,
-                'oauth': self.oauth, 'pageSize': self.page_size,
+                'oauth': self.oauth, 'permissionId': self.permission_id, 'pageSize': self.page_size,
                 'repeatPageToken': self.repeat_page_token}))
 
     def control(self, value):
@@ -180,6 +192,8 @@ class State:
             if value.get('reset'):
                 self.files.clear()
                 self.sessions.clear()
+                self.reserved_ids.clear()
+                self.hidden.clear()
                 self.failures.clear()
                 self.next_id = 1
                 self.page_size, self.repeat_page_token, self.chunk_delay_ms = 1000, False, 0
@@ -190,6 +204,21 @@ class State:
                 self.codes.clear()
                 self.access.clear()
                 self.refresh.clear()
+            if 'permissionId' in value:
+                permission = value['permissionId']
+                if not isinstance(permission, str) or not 1 <= len(permission) <= 1024 or any(ord(c) < 32 for c in permission):
+                    raise FixtureError(400, 'Invalid fixture account identity')
+                self.permission_id = permission
+            if 'hideNext' in value:
+                hidden = value['hideNext']
+                if not isinstance(hidden, dict) or len(hidden) > 1024:
+                    raise FixtureError(400, 'Invalid fixture visibility controls')
+                for identity, modes in hidden.items():
+                    if not ID.fullmatch(identity) or not isinstance(modes, dict) or any(
+                            key not in ('metadata', 'listing') or not isinstance(count, int) or not 0 <= count <= 100
+                            for key, count in modes.items()):
+                        raise FixtureError(400, 'Invalid fixture visibility count')
+                    self.hidden[identity] = dict(modes)
             if value.get('resetLedger'):
                 self.requests.clear()
                 self.counts.clear()
@@ -222,7 +251,9 @@ class State:
                 if (not isinstance(failure, dict) or not isinstance(failure.get('path'), str)
                         or not failure['path'].startswith('/') or failure.get('method', 'GET')
                         not in ('GET', 'POST', 'PATCH', 'PUT', 'DELETE')
-                        or not 100 <= int(failure.get('status', 503)) <= 599):
+                        or not 100 <= int(failure.get('status', 503)) <= 599
+                        or failure.get('afterApply') and failure.get('method', 'GET') not in ('POST', 'PATCH', 'PUT', 'DELETE')
+                        or failure.get('disconnect') and not failure.get('afterApply')):
                     raise FixtureError(400, 'Invalid fixture fault')
                 self.failures.append(dict(failure, count=min(100, max(1, int(failure.get('count', 1))))))
             for name, blocked in value.get('gates', {}).items():
@@ -327,6 +358,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return data
 
     def send(self, status, body=b'', headers=None, truncate=None, chunk_delay=0, chunk_gates=()):
+        fault = getattr(self, 'after_fault', None)
+        if fault and self.row and self.row['mutationApplied']:
+            self.after_fault = None
+            if fault.get('delayMs'):
+                self.server.state.stopping.wait(min(30000, max(0, int(fault['delayMs']))) / 1000)
+            if fault.get('disconnect'):
+                self.close_connection = True
+                try:
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                raise Disconnected()
+            if 'truncateBytes' in fault:
+                truncate = int(fault['truncateBytes'])
+            elif 'status' in fault:
+                status = int(fault['status'])
         self.send_response(status)
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Connection', 'close')
@@ -351,7 +398,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 gate_index += 1
             if chunk_delay:
                 self.server.state.stopping.wait(chunk_delay / 1000)
-        self.server.state.finish(self.row, status, len(data))
+        self.server.state.finish(self.row, status, len(data), phase='response-truncated' if len(data) != len(body) else 'response-sent')
 
     def json(self, status, value, headers=None):
         self.send(status, json.dumps(value, separators=(',', ':')).encode(),
@@ -359,6 +406,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def run_request(self):
         self.row = None
+        self.after_fault = None
         try:
             parsed = urllib.parse.urlsplit(self.path)
             if parsed.scheme or parsed.netloc or parsed.fragment or len(self.path) > 65536:
@@ -386,16 +434,36 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not authorized:
                 return self.json(401, {'error': 'fixture_unauthorized'})
             fault = self.server.state.fault(self.command, path)
-            if fault and 'truncateBytes' not in fault and 'corruptBytes' not in fault:
+            self.after_fault = fault if fault and fault.get('afterApply') else None
+            if fault and not fault.get('afterApply') and 'truncateBytes' not in fault and 'corruptBytes' not in fault:
                 if fault.get('delayMs'):
                     self.server.state.stopping.wait(min(30000, int(fault['delayMs'])) / 1000)
                 return self.json(int(fault.get('status', 503)), {'error': 'fixture_fault'})
+            if path == '/drive/v3/about' and self.command == 'GET':
+                return self.json(200, {'user': {'permissionId': self.server.state.permission_id}})
+            if path == '/drive/v3/files/generateIds' and self.command == 'GET':
+                if one(query, 'count') != '1' or one(query, 'space') != 'drive' or one(query, 'type') != 'files':
+                    raise FixtureError(400, 'Unsupported fixture generated-ID request')
+                with self.server.state.cv:
+                    if len(self.server.state.reserved_ids) >= 4096:
+                        raise FixtureError(429, 'Fixture reserved-ID limit')
+                    identity = self.server.state.new_id()
+                    self.server.state.reserved_ids.add(identity)
+                return self.json(200, {'ids': [identity], 'space': 'drive'})
             if path == '/drive/v3/files' and self.command == 'GET':
                 self.server.state.gate('list', self, self.row)
                 return self.list_files(query)
             if path == '/drive/v3/files' and self.command == 'POST':
                 with self.server.state.cv:
-                    entry = self.server.state.put_file(json.loads(data))
+                    document = json.loads(data)
+                    identity = document.get('id') if isinstance(document, dict) else None
+                    if identity is not None:
+                        if identity in self.server.state.files:
+                            raise FixtureError(409, 'Reserved Drive ID already exists')
+                        if identity not in self.server.state.reserved_ids:
+                            raise FixtureError(400, 'File ID was not generated')
+                    entry = self.server.state.put_file(document)
+                    self.server.state.mutated(self.row, entry, 'create')
                     return self.json(200, metadata(entry))
             match = re.fullmatch(r'/drive/v3/files/([A-Za-z0-9_-]+)', path)
             if match:
@@ -489,10 +557,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 filters[key] = decode_literal(match[1])
         parents = [decode_literal(match[1]) for match in re.finditer('(' + QUOTED + r')\s+in\s+parents', expression)]
         trashed = re.search(r'\btrashed\s*=\s*(true|false)\b', expression)
+        properties = [(decode_literal(m[1]), decode_literal(m[2])) for m in re.finditer(
+            r'appProperties\s+has\s*\{\s*key\s*=\s*(' + QUOTED + r')\s+and\s+value\s*=\s*(' + QUOTED + r')\s*\}', expression)]
+        if expression.count('appProperties') != len(properties):
+            raise FixtureError(400, 'Unsupported fixture appProperties query')
         with self.server.state.cv:
+            invisible = set()
+            for identity, modes in self.server.state.hidden.items():
+                if modes.get('listing', 0):
+                    invisible.add(identity)
+                    modes['listing'] -= 1
             files = [f for f in self.server.state.files.values()
-                     if all(f.get(k) == v for k, v in filters.items())
+                     if f['id'] not in invisible
+                     and all(f.get(k) == v for k, v in filters.items())
                      and (not parents or any(parent in f['parents'] for parent in parents))
+                     and all(f['appProperties'].get(key) == value for key, value in properties)
                      and (not trashed or f['trashed'] == (trashed[1] == 'true'))]
             files.sort(key=lambda f: f['id'])
             token = one(query, 'pageToken', '')
@@ -528,26 +607,59 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send(200, content, {'Content-Type': mime},
                              truncate=int(fault['truncateBytes']) if fault and 'truncateBytes' in fault else None, chunk_delay=delay,
                              chunk_gates=gates)
+        if self.command == 'GET':
+            self.server.state.gate('metadata', self, self.row)
+        moving = self.command == 'PATCH' and ('addParents' in query or 'removeParents' in query)
+        if moving:
+            self.server.state.gate('move', self, self.row)
         with self.server.state.cv:
             entry = self.server.state.files.get(file_id)
             if not entry:
                 raise FixtureError(404, 'Fixture file not found')
             if self.command == 'GET':
+                hidden = self.server.state.hidden.get(file_id, {})
+                if hidden.get('metadata', 0):
+                    hidden['metadata'] -= 1
+                    raise FixtureError(404, 'Fixture metadata temporarily not observable')
                 return self.json(200, metadata(entry))
             if self.command == 'PATCH':
                 patch = json.loads(data)
                 if not isinstance(patch, dict):
                     raise FixtureError(400, 'Invalid fixture patch')
+                if 'parents' in patch:
+                    raise FixtureError(400, 'Drive v3 parents must use addParents/removeParents')
                 update = metadata(entry)
-                for key in ('name', 'trashed', 'mimeType', 'parents'):
+                for key in ('name', 'trashed', 'mimeType'):
                     if key in patch:
                         update[key] = patch[key]
+                if moving:
+                    add, remove = one(query, 'addParents', ''), one(query, 'removeParents', '')
+                    if not ID.fullmatch(add) or not ID.fullmatch(remove) or add == remove or add == file_id:
+                        raise FixtureError(400, 'Invalid single-parent move')
+                    if len(entry['parents']) != 1 or entry['parents'] != [remove]:
+                        raise FixtureError(409, 'Move parent baseline differs')
+                    target = self.server.state.files.get(add)
+                    if add != 'root' and (not target or target['trashed'] or target['mimeType'] != FOLDER):
+                        raise FixtureError(404, 'Move destination folder missing')
+                    cursor, seen = add, set()
+                    while cursor in self.server.state.files and cursor not in seen:
+                        if cursor == file_id:
+                            raise FixtureError(400, 'Move would create a folder cycle')
+                        seen.add(cursor)
+                        ancestors = self.server.state.files[cursor]['parents']
+                        cursor = ancestors[0] if len(ancestors) == 1 else ''
+                    update['parents'] = [add]
                 if 'appProperties' in patch:
                     update['appProperties'] = dict(entry['appProperties'])
                     update['appProperties'].update(patch['appProperties'])
                     update['appProperties'] = {k: v for k, v in update['appProperties'].items() if v is not None}
-                return self.json(200, metadata(self.server.state.put_file(update, entry['_content'])))
+                changed = self.server.state.put_file(update, entry['_content'])
+                self.server.state.mutated(self.row, changed, 'move' if moving else 'patch')
+                if moving:
+                    self.server.state.gate('move-applied', self, self.row)
+                return self.json(200, metadata(changed))
             if self.command == 'DELETE':
+                self.server.state.mutated(self.row, entry, 'delete')
                 del self.server.state.files[file_id]
                 return self.send(204)
         raise FixtureError(405, 'Unsupported fixture file method')
@@ -561,8 +673,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         with self.server.state.cv:
             if file_id is not None and file_id not in self.server.state.files:
                 raise FixtureError(404, 'Fixture upload target missing')
+            reserved = document.get('id') if file_id is None else None
+            if reserved is not None:
+                if not isinstance(reserved, str) or not ID.fullmatch(reserved) or reserved not in self.server.state.reserved_ids:
+                    raise FixtureError(400, 'Upload file ID was not generated')
+                if reserved in self.server.state.files:
+                    raise FixtureError(409, 'Reserved Drive ID already exists')
             session = 'session-' + secrets.token_urlsafe(16)
             self.server.state.sessions[session] = {'id': file_id, 'metadata': document,
+                                                  'create': file_id is None, 'reserved': reserved,
                                                   'expires': time.monotonic() + 300}
         self.send(200, headers={'Location': self.server.base + '/upload-session/' + session})
 
@@ -572,11 +691,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             pending = self.server.state.sessions.get(session)
             if not pending or pending['expires'] < time.monotonic():
                 raise FixtureError(404, 'Fixture upload session expired')
+            if pending['create']:
+                created = pending['id'] or pending['reserved']
+                if created is not None and created in self.server.state.files:
+                    raise FixtureError(409, 'Reserved Drive ID already exists')
             document = (metadata(self.server.state.files[pending['id']]) if pending['id'] else {})
             document.update(pending['metadata'])
             document['mimeType'] = self.headers.get('Content-Type', 'application/octet-stream')
             entry = self.server.state.put_file(document, data)
             pending['id'] = entry['id']
+            self.server.state.mutated(self.row, entry, 'upload-complete')
+            self.server.state.gate('upload-applied', self, self.row)
             self.json(200, metadata(entry))
 
 

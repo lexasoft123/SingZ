@@ -42,7 +42,10 @@ impl Player {
             match event {
                 drive_service::Event::OpenUrl(_, url) => {
                     #[cfg(feature = "ui-tests")]
-                    if std::env::var_os("SINGZ_GPUI_DRIVE_TEST").is_some() || std::env::var_os("SINGZ_GPUI_DRIVE_RESTORE_TEST").is_some() {
+                    if std::env::var_os("SINGZ_GPUI_DRIVE_TEST").is_some()
+                        || std::env::var_os("SINGZ_GPUI_DRIVE_RESTORE_TEST").is_some()
+                        || std::env::var_os("SINGZ_GPUI_EMPTY_DRIVE_TEST").is_some()
+                    {
                         self.drive_test_urls.push(url);
                         continue;
                     }

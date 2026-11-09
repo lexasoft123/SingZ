@@ -287,7 +287,7 @@ impl LibraryScreen {
         let handles=self.drive_focus.borrow();
         let focused=enabled.iter().find(|id|handles.get(**id).is_some_and(|focus|focus.is_focused(w))).copied();
         let owns_focus=handles.values().any(|focus|focus.is_focused(w));
-        serde_json::json!({"drive": self.drive,
+        serde_json::json!({"drive": self.drive,"upToDate":self.drive.is_up_to_date(),
             "focusedControl":focused,"enabledControls":enabled,"driveOwnsFocus":owns_focus,"validFocus":!owns_focus||focused.is_some()})
     }
     fn drive_syncing(&self)->bool {
@@ -384,7 +384,9 @@ impl LibraryScreen {
         } else if let Some(error)=&drive.scheduler.last_error {
             let text=if drive.scheduler.phase==Phase::Retrying {tv("library.dropScreen.retryScheduled", &[("error",error.clone())])}else{error.clone()};
             singz_uikit::drive_status_line(text,false,true,false,true,w)
-        } else if drive.signed_in && drive.scheduler.last_sync.is_some() && drive.scheduler.dirty==0 {
+        } else if drive.signed_in && drive.scheduler.phase==Phase::Pending && drive.progress=="Finishing Drive sync…" {
+            singz_uikit::drive_status_line(drive.progress.clone(),true,false,false,true,w)
+        } else if drive.is_up_to_date() {
             let label=drive.scheduler.last_sync.and_then(|time| {
                 let now=chrono::Utc::now().timestamp_millis().max(0) as u64;
                 let minutes=((now.saturating_sub(time)) as f64/60_000.).round() as u64;
