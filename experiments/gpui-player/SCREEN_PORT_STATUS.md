@@ -6,11 +6,22 @@ controls are implemented as a first slice; see `NATIVE_INTEGRATION.md`. Full vis
 and the remaining backend features remain separate.
 Common native controls live in sibling `singz-ui/gpui`.
 
+Training exercise keyboard follow-up (2026-11-09): shared UIKit activation now
+covers native exercise/summary controls and recording; mounted focus survives
+updates and removed answers/Retry recover. Progress has scoped Tab and reading
+keys. The new hidden two-size journey passes 20 checks, 14 captures and 18 native
+receipts across all five Identify answer layouts, Replay/Skip, pause/Continue,
+Exit and actual save-error Retry. Setup and exact-WAV recording regressions pass;
+all 17 static native Training frames and six default sidecars remain exact.
+See [Training exercise keyboard review](TRAINING_RUNNING_KEYBOARD_REVIEW.md)
+for resource measurements, preview qualification and the remaining song-preparation,
+production visual/temporal, hardware, platform and release gates.
+
 Training keyboard follow-up (2026-11-09): Home/setup keyboard navigation, shared
 focusable ranges, sticky-footer autoscroll and adaptive selector placement are
 implemented. Hidden native replay/scoring checks pass both sizes; 17 pointer
-regression frames remain byte-exact. Running response/history keyboard access,
-full production visual parity and release qualification remain open. See
+regression frames remain byte-exact. The later exercise checkpoint above covers
+running responses and history keys; production visual parity and release remain open. See
 [Training keyboard review](TRAINING_KEYBOARD_REVIEW.md) for scope and limits.
 
 Footer keyboard follow-up (2026-11-09): ordinary transport buttons now use shared

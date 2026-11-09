@@ -12,7 +12,6 @@ mod history;
 mod running;
 #[path = "training_song.rs"]
 mod song;
-actions!(singz_training_recording, [ActivateRecording]);
 actions!(singz_training_setup, [NextSelectorFocus, PreviousSelectorFocus]);
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct RecordingView {
@@ -22,6 +21,7 @@ pub struct RecordingView {
     pub has_take: bool,
     pub message: Option<String>,
 }
+#[derive(Clone)]
 pub enum TrainingEvent {
     RecordSample,
     FinishRecording,
@@ -102,7 +102,6 @@ impl Exercise {
 pub struct TrainingScreen {
     pub run: Option<crate::training_run::Snapshot>,
     recording: RecordingView,
-    recording_focus: std::cell::RefCell<std::collections::HashMap<String, FocusHandle>>,
     audio_available: bool,
     pub testing: bool,
     audio_error: Option<String>,
@@ -124,6 +123,7 @@ pub struct TrainingScreen {
     level: Option<usize>,
     path_open: bool,
     scroll: ScrollHandle,
+    summary_scroll: ScrollHandle,
     open: Option<&'static str>,
     keyboard_scope: FocusHandle,
     keyboard_focus: std::cell::RefCell<std::collections::HashMap<String,FocusHandle>>,
@@ -200,13 +200,10 @@ impl TrainingScreen {
             KeyBinding::new("shift-tab",PreviousSelectorFocus,Some("SingZTrainingSetup")),
             KeyBinding::new("tab",NextSelectorFocus,Some("SingZTrainingSelector")),
             KeyBinding::new("shift-tab",PreviousSelectorFocus,Some("SingZTrainingSelector")),
-            KeyBinding::new("enter", ActivateRecording, Some("SingZTrainingRecording")),
-            KeyBinding::new("space", ActivateRecording, Some("SingZTrainingRecording")),
         ]);
         Self {
             run: None,
             recording: RecordingView::default(),
-            recording_focus: Default::default(),
             audio_available: false,
             testing: false,
             audio_error: None,
@@ -228,6 +225,7 @@ impl TrainingScreen {
             level: None,
             path_open: false,
             scroll: ScrollHandle::new(),
+            summary_scroll: ScrollHandle::new(),
             open: None,
             keyboard_scope:cx.focus_handle(),keyboard_focus:Default::default(),keyboard_order:Default::default(),keyboard_bounds:Default::default(),selector_options:Default::default(),menu_index:None,menu_scroll:ScrollHandle::new(),typeahead:String::new(),typeahead_at:None,keyboard_focus_pending:false,
             review: false,
@@ -415,7 +413,7 @@ impl TrainingScreen {
                     self.probe(
                         "training-save-retry",
                         training_primary("training-save-retry", t("training.route.retry"))
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(TrainingEvent::RetrySave))),
+                            .when(true,|d|self.setup_control("training-save-retry",d,true,cx)),
                     ),
                 )
         })
@@ -491,6 +489,9 @@ impl TrainingScreen {
     }
     pub fn set_run(&mut self, view: Option<crate::training_run::Snapshot>, cx: &mut Context<Self>) {
         if self.run != view {
+            if self.run.as_ref().map(|run|run.phase) != view.as_ref().map(|run|run.phase) {
+                self.summary_scroll.set_offset(point(px(0.),px(0.)));
+            }
             self.run = view;
             cx.notify();
         }
@@ -540,7 +541,7 @@ impl TrainingScreen {
         serde_json::json!({"view":self.recording,"visible":self.recording_visible(),
             "recordEnabled":self.recording_visible()&&self.recording_enabled(),
             "saveVisible":self.recording_visible()&&self.recording.has_take,
-            "focusedControl":self.recording_focus.borrow().iter().find(|(_,f)|f.is_focused(w)).map(|(id,_)|id.clone())})
+            "focusedControl":self.focused_control(w).filter(|id|id.starts_with("training-recording-"))})
     }
     pub fn end_run(&mut self, cx: &mut Context<Self>) {
         self.run = None;
@@ -678,6 +679,7 @@ impl TrainingScreen {
             "training-progress"=>{self.navigate(Route::Progress,cx);return;},
             "training-program-path"=>self.path_open=!self.path_open,
             "training-program-start"=>{if let Some(index)=self.program_stages().iter().position(|s|!s.done){self.open_lesson(self.lessons()[index],cx);}return;},
+            "training-save-retry"=>{if self.history.error().is_some(){cx.emit(TrainingEvent::RetrySave);}},
             "training-start"=>{if self.audio_available{cx.emit(TrainingEvent::Start);}},
             "training-test"=>{if self.audio_available{cx.emit(TrainingEvent::Test{sound:self.sound,volume:self.volume});}},
             "training-volume-minus"|"training-volume-plus"=>{self.volume=(self.volume+if id=="training-volume-minus"{-0.1}else{0.1}).clamp(0.2,2.);cx.emit(TrainingEvent::Volume(self.volume));},
@@ -717,8 +719,8 @@ impl TrainingScreen {
     }
     pub fn focused_control(&self,w:&Window)->Option<String>{self.keyboard_focus.borrow().iter().find(|(_,focus)|focus.is_focused(w)).map(|(id,_)|id.clone())}
     pub fn keyboard_state(&self,w:&Window,cx:&App)->serde_json::Value{
-        let focused=self.focused_control(w);let bounds=focused.as_ref().and_then(|id|self.keyboard_bounds.borrow().get(id).copied());let viewport=self.scroll.bounds();let sticky=self.keyboard_bounds.borrow().get("training-footer").copied().filter(|_|self.route==Route::Setup);let body_bottom=sticky.map_or(viewport.bottom(),|footer|footer.top()-px(8.));let popup_bounds=self.open.and_then(|id|self.keyboard_bounds.borrow().get(&format!("training-popup-{id}")).copied());
-        serde_json::json!({"route":format!("{:?}",self.route),"exercise":format!("{:?}",self.exercise),"focusOrder":self.keyboard_order.borrow().clone(),"focusedControl":focused,"focusInside":self.keyboard_scope.contains_focused(w,cx),"focusedBounds":bounds.map(|b|[f32::from(b.left()),f32::from(b.top()),f32::from(b.size.width),f32::from(b.size.height)]),"viewportBounds":[f32::from(viewport.left()),f32::from(viewport.top()),f32::from(viewport.size.width),f32::from((body_bottom-viewport.top()).max(px(0.)))],"scrollViewportBounds":[f32::from(viewport.left()),f32::from(viewport.top()),f32::from(viewport.size.width),f32::from(viewport.size.height)],"stickyFooterBounds":sticky.map(|b|[f32::from(b.left()),f32::from(b.top()),f32::from(b.size.width),f32::from(b.size.height)]),"popupBounds":popup_bounds.map(|b|[f32::from(b.left()),f32::from(b.top()),f32::from(b.size.width),f32::from(b.size.height)]),"scrollOffset":[f32::from(self.scroll.offset().x),f32::from(self.scroll.offset().y)],"popup":self.open,"menuIndex":self.menu_index,"selectorOptions":self.selector_options.borrow().clone(),"menuScrollOffset":[f32::from(self.menu_scroll.offset().x),f32::from(self.menu_scroll.offset().y)],"config":{"tonic":self.tonic,"minor":self.minor,"task":self.task,"direction":self.direction,"low":self.low,"high":self.high,"length":self.length,"sound":self.sound,"volume":self.volume,"tolerance":self.tolerance,"intervals":self.intervals,"degrees":self.degrees,"intervalFocus":self.focus,"level":self.level,"pathOpen":self.path_open},"audioAvailable":self.audio_available,"testing":self.testing})
+        let focused=self.focused_control(w);let bounds=focused.as_ref().and_then(|id|self.keyboard_bounds.borrow().get(id).copied());let viewport=self.keyboard_viewport();let sticky=self.keyboard_bounds.borrow().get("training-footer").copied().filter(|_|self.run.is_none()&&self.route==Route::Setup);let body_bottom=sticky.map_or(viewport.bottom(),|footer|footer.top()-px(8.));let popup_bounds=self.open.and_then(|id|self.keyboard_bounds.borrow().get(&format!("training-popup-{id}")).copied());
+        serde_json::json!({"route":format!("{:?}",self.route),"exercise":format!("{:?}",self.exercise),"focusOrder":self.keyboard_order.borrow().clone(),"focusedControl":focused,"focusInside":self.keyboard_scope.contains_focused(w,cx),"focusedBounds":bounds.map(|b|[f32::from(b.left()),f32::from(b.top()),f32::from(b.size.width),f32::from(b.size.height)]),"viewportBounds":[f32::from(viewport.left()),f32::from(viewport.top()),f32::from(viewport.size.width),f32::from((body_bottom-viewport.top()).max(px(0.)))],"scrollViewportBounds":[f32::from(viewport.left()),f32::from(viewport.top()),f32::from(viewport.size.width),f32::from(viewport.size.height)],"stickyFooterBounds":sticky.map(|b|[f32::from(b.left()),f32::from(b.top()),f32::from(b.size.width),f32::from(b.size.height)]),"popupBounds":popup_bounds.map(|b|[f32::from(b.left()),f32::from(b.top()),f32::from(b.size.width),f32::from(b.size.height)]),"scrollOffset":[f32::from(self.keyboard_scroll().offset().x),f32::from(self.keyboard_scroll().offset().y)],"scrollMaxOffset":[f32::from(self.keyboard_scroll().max_offset().x),f32::from(self.keyboard_scroll().max_offset().y)],"runPhase":self.run.as_ref().map(|run|format!("{:?}",run.phase)),"popup":self.open,"menuIndex":self.menu_index,"selectorOptions":self.selector_options.borrow().clone(),"menuScrollOffset":[f32::from(self.menu_scroll.offset().x),f32::from(self.menu_scroll.offset().y)],"config":{"tonic":self.tonic,"minor":self.minor,"task":self.task,"direction":self.direction,"low":self.low,"high":self.high,"length":self.length,"sound":self.sound,"volume":self.volume,"tolerance":self.tolerance,"intervals":self.intervals,"degrees":self.degrees,"intervalFocus":self.focus,"level":self.level,"pathOpen":self.path_open},"audioAvailable":self.audio_available,"testing":self.testing})
     }
     fn back(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         self.probe(
@@ -1684,14 +1686,18 @@ impl Render for TrainingScreen {
         self.keyboard_order.borrow_mut().clear();self.selector_options.borrow_mut().clear();
         if self.keyboard_focus_pending {self.keyboard_focus_pending=false;self.keyboard_scope.focus(window,cx);}
         if self.run.is_some() {
-            // Start unmounts setup controls. Keep their focus on a live route
-            // container without touching the running screen's owned controls.
-            if self.focused_control(window).is_some(){self.keyboard_scope.focus(window,cx);}
-
             let banner = self.history_banner(cx);
             let running = self.running(window, cx);
+            self.order_running_controls();
+            self.recover_running_focus(window,cx);
             return div()
+                .id("training-run-view")
+                .when(true,|d|self.keyboard_probe("training-run-view",d))
                 .track_focus(&self.keyboard_scope)
+                .key_context("SingZTrainingSetup")
+                .on_action(cx.listener(|s,_:&NextSelectorFocus,w,cx|{s.selector_next(false,w,cx);w.prevent_default();cx.stop_propagation();}))
+                .on_action(cx.listener(|s,_:&PreviousSelectorFocus,w,cx|{s.selector_next(true,w,cx);w.prevent_default();cx.stop_propagation();}))
+                .on_key_down(cx.listener(|s,event,w,cx|s.progress_scroll_key(event,w,cx)))
                 .flex_1()
                 .min_h_0()
                 .flex()
@@ -1766,12 +1772,17 @@ impl Render for TrainingScreen {
                         inner.child(div().h(px(82.)))
                     }),
             );
+        // The banner is painted before page content although its control is
+        // registered afterward. Keep logical boundaries aligned with GPUI's
+        // rendered tab stops so the final action can hand focus to the header.
+        self.keyboard_order.borrow_mut().sort_by_key(|id|id != "training-save-retry");
         let page_width = width.min(if home { 1240. } else { 1040. });
         let view=div()
             .track_focus(&self.keyboard_scope)
-            .when(matches!(self.route,Route::Home|Route::Setup),|d|d.key_context("SingZTrainingSetup")
+            .when(true,|d|d.key_context("SingZTrainingSetup")
                 .on_action(cx.listener(|s,_:&NextSelectorFocus,w,cx|{s.selector_next(false,w,cx);w.prevent_default();cx.stop_propagation();}))
                 .on_action(cx.listener(|s,_:&PreviousSelectorFocus,w,cx|{s.selector_next(true,w,cx);w.prevent_default();cx.stop_propagation();})))
+            .on_key_down(cx.listener(|s,event,w,cx|s.progress_scroll_key(event,w,cx)))
             .relative()
             .flex_1()
             .min_h_0()

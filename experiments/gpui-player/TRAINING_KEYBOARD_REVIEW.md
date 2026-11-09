@@ -13,3 +13,5 @@ Validation on macOS, 2026-11-09:
 Local evidence: `/tmp/singz-training-keys-20261109/ui-v4`, `review-reference`, `review-candidate-v3`, and `comparison-v3-summary.json`. UI binary SHA-256: `958bf17b4e24f83e3f2d3d14f76f798f95a838dc5df80b0b18ae0776b2eb59a9`.
 
 Limits: this is a draft source checkpoint. The previous native build is a regression baseline, not proof of Electron visual parity. Running Identify answers and summary Back use app-local pointer input; their keyboard migration remains open. Live FPS, physical audio, other platforms and release qualification remain open. The packaged normal preview has not been refreshed for this checkpoint. Earlier failed attempts are retained locally, including the selector positioning regression now corrected.
+
+Follow-up: exercise/summary activation and history navigation are implemented and qualified in [Training exercise keyboard review](TRAINING_RUNNING_KEYBOARD_REVIEW.md), which also refreshes the packaged normal preview. The remaining limits there supersede the running-keyboard and preview gaps recorded above.
