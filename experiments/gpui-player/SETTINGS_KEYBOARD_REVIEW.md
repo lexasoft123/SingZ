@@ -57,3 +57,7 @@ synthetic inventory/error states, with capture/sync disabled. Current Windows/Li
 behavior, every hardware state, complete production visual/temporal parity and
 release qualification remain open. Models wizard keyboard access is the next
 concrete gap found in the desktop inventory. The full desktop goal remains active.
+
+Later follow-up: [Models keyboard review](MODELS_KEYBOARD_REVIEW.md) records that
+keyboard implementation and its actual installer/restart checks. Footer transport
+and training setup keyboard access remain concrete gaps.

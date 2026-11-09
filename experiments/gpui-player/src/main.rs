@@ -980,7 +980,7 @@ impl Player {
             }
         });
         let settings = cx.new(|cx| settings::SettingsScreen::new(window, cx));
-        let models = cx.new(|_| models::ModelsScreen::new());
+        let models = cx.new(|cx| models::ModelsScreen::new(cx));
         let models_subscription = cx.subscribe(&models, |this, _, event, cx| {
             match event {
                 models::Event::Close => this.close_models(cx),
