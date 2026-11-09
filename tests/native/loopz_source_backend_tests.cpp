@@ -9,18 +9,33 @@
 using namespace singz;
 struct Renderer {
   std::atomic<uint64_t> calls{0};
-  std::atomic<bool> fail{false};
+  std::atomic<bool> fail{false}, holdNext{false}, blocked{false}, release{false};
+  std::atomic<uint64_t> holdOnCall{6};
   static bool render(void* context, const AudioHostRenderBlock& block) noexcept {
     auto& self = *static_cast<Renderer*>(context);
     // Producer time may not masquerade as physical presentation time.
     CHECK(!block.outputTimestampValid && !block.outputTimestampHardware);
     CHECK(!block.outputClockMaster && block.frames == 256 && block.sampleRate == 48000);
-    self.calls.fetch_add(1);
+    const auto call = self.calls.fetch_add(1) + 1;
+    if (call == self.holdOnCall.load() || self.holdNext.load()) {
+      self.blocked.store(true, std::memory_order_release);
+      while (!self.release.load(std::memory_order_acquire)) std::this_thread::yield();
+      self.blocked.store(false, std::memory_order_release);
+    }
     for (uint32_t ch = 0; ch < 2; ++ch)
       for (uint32_t frame = 0; frame < block.frames; ++frame) block.output[ch][frame] = float(ch + 1) * 0.25f;
     return !self.fail.load();
   }
 };
+template<class Predicate>
+bool waitUntil(Predicate ready, std::chrono::milliseconds timeout = std::chrono::seconds(2)) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (!ready()) {
+    if (std::chrono::steady_clock::now() >= deadline) return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return true;
+}
 int main() {
   auto source = std::make_shared<LoopZSongSource>();
   auto producer = createLoopZSourceBackend(source);
@@ -32,9 +47,23 @@ int main() {
   CHECK(producer->open(config, Renderer::render, &renderer).ok);
   CHECK(!conflicting->open(config, Renderer::render, &renderer).ok);
   CHECK(producer->start().ok);
-  for (unsigned i = 0; i < 200 && renderer.calls.load() < 6; ++i)
-    std::this_thread::sleep_for(std::chrono::milliseconds(2));
-  CHECK(renderer.calls.load() >= 6);
+  CHECK(waitUntil([&] { return renderer.blocked.load(std::memory_order_acquire); }));
+  // Deterministic publication-race negative control: the sixth callback has
+  // entered, but cannot publish until the test releases its renderer gate.
+  CHECK(renderer.calls.load() == 6);
+  const auto publishedSix = [&] {
+    const auto history = source->history->status();
+    return history.online && history.callbacks >= 6;
+  };
+  CHECK(source->history->status().callbacks == 5);
+  CHECK(!waitUntil(publishedSix, std::chrono::milliseconds(20)));
+  renderer.release.store(true, std::memory_order_release);
+  CHECK(waitUntil(publishedSix));
+  // Park the next callback before reading. Wall-clock scheduling may advance
+  // production arbitrarily during this thread's fanout checks otherwise.
+  renderer.release.store(false, std::memory_order_release);
+  renderer.holdNext.store(true, std::memory_order_release);
+  CHECK(waitUntil([&] { return renderer.blocked.load(std::memory_order_acquire); }));
   const auto history = source->history->status();
   CHECK(history.online && history.callbacks >= 6);
   std::array<float, 64> left{}, right{}, secondLeft{}, secondRight{};
@@ -51,15 +80,21 @@ int main() {
   const auto before = renderer.calls.load();
   for (unsigned i = 0; i < 10; ++i)
     source->history->read(at, 48000, {output, 64}, 64, first);
-  CHECK(renderer.calls.load() <= before + 1);
+  CHECK(renderer.calls.load() == before);
+  renderer.holdNext.store(false, std::memory_order_release);
+  renderer.release.store(true, std::memory_order_release);
   producer->stop();
   const auto stoppedCalls = renderer.calls.load();
   std::this_thread::sleep_for(std::chrono::milliseconds(10));
   CHECK(renderer.calls.load() == stoppedCalls);
   CHECK(!source->history->read(at, 48000, {output, 64}, 64, first).online);
   CHECK(conflicting->open(config, Renderer::render, &renderer).ok);
+  const auto beforeRestart = source->history->status().callbacks;
   CHECK(conflicting->start().ok);
-  std::this_thread::sleep_for(std::chrono::milliseconds(8));
+  CHECK(waitUntil([&] {
+    const auto history = source->history->status();
+    return history.online && history.callbacks > beforeRestart;
+  }));
   // Reopening cannot resurrect the old timestamp epoch.
   CHECK(source->history->read(at, 48000, {output, 64}, 64, first).missingFrames == 64);
   conflicting->stop();
@@ -67,8 +102,7 @@ int main() {
   renderer.fail.store(true);
   CHECK(producer->open(config, Renderer::render, &renderer).ok);
   CHECK(producer->start().ok);
-  std::this_thread::sleep_for(std::chrono::milliseconds(12));
-  CHECK(producer->status().renderFailures > 0);
+  CHECK(waitUntil([&] { return producer->status().renderFailures > 0; }));
   CHECK(!source->history->status().online);
   producer->stop();
   std::puts("LoopZ native source fanout/lease/stop/restart passed");
