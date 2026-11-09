@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <numeric>
 
 #if defined(__APPLE__)
 #include <pthread.h>
@@ -258,27 +259,40 @@ bool StreamingLaneGroup::serviceLane(Lane& lane) {
   return true;
 }
 
-// Put the decoder, and the resampler with it, at an OUTPUT frame.
-//
-// The decoder is positioned at the corresponding INPUT frame; a fresh
-// resampler follows, because its history belongs to the audio before the jump.
-// Its priming delay is then dropped so the first frame handed to the ring is
-// the frame that was asked for — every lane computes this the same way from
-// the same rates, so lanes cannot drift apart even where the rounding is not
-// exact to the sample.
+// Restart on the global rational resampling lattice, with enough preceding
+// audio to rebuild the FIR history. Flooring outputFrame * sourceRate /
+// outputRate and resetting phase to zero loses its fractional input position:
+// at 44.1 -> 48 kHz, seeks 256 frames apart can shift lanes by 0.2 input frames.
+// An anchor at a multiple of up has an integral input position and the same
+// polyphase as a continuous decode. Discard its preroll as well as the ordinary
+// latency, so the ring still begins at exactly the requested output frame.
 bool StreamingLaneGroup::seekLane(Lane& lane, uint64_t outputFrame) {
   lane.pending.clear();
   lane.pendingRead = 0;
   lane.dropOutputFrames = 0;
   uint64_t inputFrame = outputFrame;
   if (lane.sourceRate != lane.outputRate) {
-    inputFrame = static_cast<uint64_t>(static_cast<double>(outputFrame) *
-                                       static_cast<double>(lane.sourceRate) /
-                                       static_cast<double>(lane.outputRate));
     lane.resampler = std::make_unique<Resampler>(
         static_cast<int>(lane.sourceRate), static_cast<int>(lane.outputRate),
         static_cast<int>(lane.window.channelCount));
-    lane.dropOutputFrames = lane.resampler->latencyOutFrames();
+    const uint64_t latency =
+        static_cast<uint64_t>(lane.resampler->latencyOutFrames());
+    const uint32_t divisor = std::gcd(lane.sourceRate, lane.outputRate);
+    const uint64_t up = lane.outputRate / divisor;
+    const uint64_t down = lane.sourceRate / divisor;
+    // One latency plus one output frame covers the filter's preceding input
+    // support, including latencyOutFrames' integer truncation. Rounding down
+    // to a lattice anchor adds fewer than up output frames: bounded by one
+    // second for supported 8--192 kHz media, independent of the seek distance.
+    const uint64_t periods = outputFrame > latency + 1
+        ? (outputFrame - latency - 1) / up : 0;
+    if (periods > std::numeric_limits<uint64_t>::max() / down)
+      return false;
+    inputFrame = periods * down;
+    const uint64_t preroll = outputFrame - periods * up;
+    if (preroll > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) - latency)
+      return false;
+    lane.dropOutputFrames = static_cast<int64_t>(latency + preroll);
   }
   if (lane.source->seek(inputFrame) != DecodedAudioStatus::Ok)
     return false;

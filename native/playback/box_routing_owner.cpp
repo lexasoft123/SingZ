@@ -4,6 +4,8 @@
 #include "shared_audio_service.h"
 #include <loopz/runtime/control.hpp>
 #include <filesystem>
+#include <cstdio>
+#include <system_error>
 #include <exception>
 #include <stdexcept>
 #include <array>
@@ -38,12 +40,20 @@ std::atomic<bool> journalCoverageLost{false};
 std::atomic<uint64_t> songWritten{0}, physicalWritten{0}, epoch{1};
 std::atomic<uint64_t> primaryEndpoint{0}, primaryDelay{0};
 std::atomic<bool> mappingKnown{false}, enabled{false};
-std::shared_ptr<LoopZSongSource> song;
-std::unique_ptr<loopz::runtime::Control> control;
-loopz::runtime::AudioRuntime* runtimeView = nullptr;
+// Static destruction runs in reverse declaration order. If the process exits
+// without shutdownBoxRouting(), ~Control destroys InstrumentedHost instances
+// that erase from `endpoints`, so the registry must be declared (constructed)
+// before, and therefore destroyed after, `control`.
 uint64_t endpointSerial = 0;
 struct Endpoint { uint64_t id; std::string uid; };
 std::vector<Endpoint> endpoints;
+std::shared_ptr<LoopZSongSource> song;
+std::unique_ptr<loopz::runtime::Control> control;
+loopz::runtime::AudioRuntime* runtimeView = nullptr;
+std::function<uint64_t()> controlClock;
+bool controlPolled = false;
+uint64_t controlPolledAt = 0;
+std::string stateRecovery;
 uint64_t selectedGeneration = 0, selectedDocumentRevision = 0;
 std::string selectedPrimary;
 uint64_t selectedDelay = 0;
@@ -174,7 +184,20 @@ bool carriesSong(const loopz::RouteDocument& document, size_t bus, size_t depth 
   }
   return false;
 }
-void refreshMapping() {
+void refreshMappingUnchecked();
+// Runs after Control has committed state, so it must not report failure to the
+// caller: a rebuild failure (realistically only allocation) leaves presentation
+// unavailable and forces the next successful selection to open a new epoch.
+void refreshMapping() noexcept {
+  try { refreshMappingUnchecked(); }
+  catch (...) {
+    mappingKnown.store(false, std::memory_order_release);
+    mappingTiming.reset();
+    selectedGeneration = selectedDocumentRevision = 0;
+    selectedPrimary.clear();
+  }
+}
+void refreshMappingUnchecked() {
   mappingKnown.store(false, std::memory_order_release);
   if (!control || !runtimeView) return;
   const auto view = control->routeView();
@@ -249,27 +272,70 @@ bool initializeBoxRoutingWithHost(const std::string& statePath, std::string& err
       return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::steady_clock::now().time_since_epoch()).count());
     };
-    auto runtime = std::make_unique<loopz::runtime::AudioRuntime>(
-        [factory = std::move(factory), inventory] {
-          return std::make_unique<InstrumentedHost>(factory(), inventory);
-        },
-        std::move(inputFactory));
-    auto* nextView = runtime.get();
-    runtime->bindNativeSource("native:singz", std::make_shared<ObservedSongSource>(nextSong->history));
-    // Construction restores only an explicit saved document. An absent state
-    // file leaves the runtime inactive; no default output/mic route is added.
-    auto next = std::make_unique<loopz::runtime::Control>(statePath, std::move(runtime));
+    loopz::runtime::AudioRuntime* nextView = nullptr;
+    const auto build = [&] {
+      auto runtime = std::make_unique<loopz::runtime::AudioRuntime>(
+          [factory, inventory] {
+            return std::make_unique<InstrumentedHost>(factory(), inventory);
+          },
+          inputFactory);
+      nextView = runtime.get();
+      runtime->bindNativeSource("native:singz", std::make_shared<ObservedSongSource>(nextSong->history));
+      // Construction restores only an explicit saved document. An absent state
+      // file leaves the runtime inactive; no default output/mic route is added.
+      return std::make_unique<loopz::runtime::Control>(statePath, std::move(runtime));
+    };
+    auto next = build();
+    std::string recovery;
+    // Control fails closed on a saved document it cannot restore; every edit
+    // then reports storage-unavailable and retry re-reads the same file. With
+    // no keyboard on the Box that is a dead end, so preserve the bytes beside
+    // the state file once and start from no saved routing.
+    const auto initial = next->request({{"version", 1}, {"operation", "state"}});
+    if (initial.at("connection").at("ready") != true) {
+      const auto reason = initial.at("snapshot").at("restoration").at("error").get<std::string>();
+      const auto stamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch()).count();
+      std::error_code status;
+      std::filesystem::path aside;
+      for (unsigned attempt = 0; attempt < 16; ++attempt) {
+        aside = statePath + ".corrupt-" + std::to_string(stamp) +
+                (attempt ? "-" + std::to_string(attempt) : std::string());
+        if (!std::filesystem::exists(std::filesystem::symlink_status(aside, status))) break;
+        aside.clear();
+      }
+      // rename() moves a symlink itself, never its target.
+      if (!aside.empty()) std::filesystem::rename(statePath, aside, status);
+      if (aside.empty() || status) {
+        recovery = "Saved routing could not be restored (" + reason +
+                   ") and could not be moved aside";
+      } else {
+        next.reset(); // Release the first runtime's hosts before rebuilding.
+        next = build();
+        recovery = "Saved routing could not be restored (" + reason + "); moved to " +
+                   aside.string() + " and started without saved routing";
+      }
+      std::fprintf(stderr, "singz box routing: %s\n", recovery.c_str());
+    }
+    auto nextClock = inventory->clock;
     const auto installed = sharedAudioService().configureProvider(
         createLoopZSourceBackend(nextSong), "box-loopz");
     if (!installed.ok) throw std::runtime_error(installed.message);
+    // Nothing below may throw: commit the owner, then publish enablement last.
     song = std::move(nextSong);
     control = std::move(next);
     runtimeView = nextView;
-    enabled.store(true, std::memory_order_release);
+    controlClock = std::move(nextClock);
+    controlPolled = false;
+    controlPolledAt = 0;
+    stateRecovery = std::move(recovery);
     refreshMapping();
+    enabled.store(true, std::memory_order_release);
     return true;
   } catch (const std::exception& ex) { error = ex.what(); return false; }
+  catch (...) { error = "Box routing initialization failed"; return false; }
 }
+std::string boxRoutingStateRecovery() { return stateRecovery; }
 bool boxRoutingInitialized() noexcept { return enabled.load(std::memory_order_acquire); }
 bool boxRoutingTimingCoverageLost() noexcept { return journalCoverageLost.load(std::memory_order_acquire); }
 bool boxRoutingOwnsCapture() noexcept { return enabled.load(std::memory_order_acquire); }
@@ -313,9 +379,24 @@ std::string boxRoutingRequest(const std::string& request) {
   if (!control) throw std::runtime_error("Box routing is not initialized");
   auto response = control->request(loopz::parseControlJSON(request));
   refreshMapping();
-  return response.dump();
+  // Snapshots embed host-provided device and channel labels verbatim. A USB
+  // product string need not be UTF-8; replace invalid bytes instead of failing
+  // every state request with nlohmann's type_error.316.
+  return response.dump(-1, ' ', false, loopz::JSON::error_handler_t::replace);
 }
-void pollBoxRouting() { if (control) { control->poll(); refreshMapping(); } }
+void pollBoxRouting() {
+  if (!control) return;
+  const auto view = control->routeView();
+  const bool pending = view.desired && view.desiredGeneration != view.activeGeneration;
+  const uint64_t now = controlClock();
+  if (box_routing_detail::controlPollDue(controlPolled, controlPolledAt, now, pending)) {
+    // Stamp before polling: a throwing poll must not turn into a retry storm.
+    controlPolled = true;
+    controlPolledAt = now;
+    control->poll();
+  }
+  refreshMapping();
+}
 void shutdownBoxRouting() noexcept {
   // Host must drain shared song renderers before this final process shutdown.
   enabled.store(false, std::memory_order_release);
@@ -325,6 +406,10 @@ void shutdownBoxRouting() noexcept {
   control.reset();
   song.reset();
   runtimeView = nullptr;
+  controlClock = nullptr;
+  controlPolled = false;
+  controlPolledAt = 0;
+  stateRecovery.clear();
   endpoints.clear();
   selectedGeneration = selectedDocumentRevision = 0; selectedPrimary.clear();
   mappingTiming.reset();

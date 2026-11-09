@@ -9,6 +9,9 @@
   color: var(--sz-text);
 }
 
+/* Routing replaces content + action band with one panel: keep the footer in its 24px row. */
+.box-settings[data-routing="open"] { grid-template-rows: 64px minmax(0, 1fr) 24px; }
+
 .settings-heading {
   display: flex;
   align-items: flex-start;

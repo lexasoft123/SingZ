@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <thread>
 #include <stdexcept>
@@ -46,6 +47,7 @@ class FakeHost final : public AudioHostBackend {
 struct DiscoveryProbe {
   unsigned enumerations = 0, opens = 0;
   std::string uid = "before";
+  std::string label = "Discovery fixture";
   bool fail = false;
 };
 class DiscoveryHost final : public AudioHostBackend {
@@ -55,7 +57,7 @@ class DiscoveryHost final : public AudioHostBackend {
     ++probe_->enumerations;
     if (probe_->fail) throw std::runtime_error("Discovery temporarily unavailable");
     AudioHostDeviceInfo device;
-    device.uid = probe_->uid; device.label = "Discovery fixture";
+    device.uid = probe_->uid; device.label = probe_->label;
     device.inputChannels = 2; device.direction = AudioHostEndpointDirection::Input;
     return {{device}, device.uid, {}};
   }
@@ -120,6 +122,137 @@ void inventoryCacheRegression() {
   CHECK(initializeBoxRoutingWithHost(path, error, factory, {}, {}, [&clock] { return clock; }));
   CHECK(probe->enumerations == 5 && inputUid() == "reinitialized");
   CHECK(probe->opens == 0); // Discovery does not prepare routes or open outputs.
+  shutdownBoxRouting();
+}
+// Old pollBoxRouting ran Control::poll on every 25 ms tick: one temporary
+// inventory host per tick, plus a full prepare/open retry while a desired
+// generation was pending. Hosts constructed by the factory count both.
+void controlPollThrottleRegression() {
+  using box_routing_detail::controlPollDue;
+  static_assert(controlPollDue(false, 0, 0, false) && controlPollDue(false, 0, 0, true));
+  static_assert(!controlPollDue(true, 1000, 1000 + 249999999, false));
+  static_assert(controlPollDue(true, 1000, 1000 + 250000000, false));
+  static_assert(!controlPollDue(true, 1000, 1000 + 1999999999, true));
+  static_assert(controlPollDue(true, 1000, 1000 + 2000000000, true));
+  static_assert(controlPollDue(true, 1000, 999, true)); // clock regression
+  const auto path = std::string("/tmp/box-poll-throttle-") + std::to_string(getpid()) + ".json";
+  unlink(path.c_str());
+  auto probe = std::make_shared<DiscoveryProbe>();
+  auto hosts = std::make_shared<unsigned>(0);
+  auto factory = [probe, hosts] { ++*hosts; return std::make_unique<DiscoveryHost>(probe); };
+  uint64_t clock = 10000000000;
+  std::string error;
+  // Steady state (no saved document): Control polls at most every 250 ms.
+  CHECK(initializeBoxRoutingWithHost(path, error, factory, {}, {}, [&clock] { return clock; }));
+  pollBoxRouting(); // first tick after initialization always polls
+  const unsigned steady = *hosts;
+  for (unsigned tick = 1; tick < 10; ++tick) {
+    clock = 10000000000 + uint64_t(tick) * 25000000;
+    pollBoxRouting();
+  }
+  CHECK(*hosts == steady); // old code: one inventory host per 25 ms tick
+  clock = 10250000000;
+  pollBoxRouting();
+  CHECK(*hosts > steady);
+  shutdownBoxRouting();
+  // Pending activation (monitor on an absent output): retry only every 2 s.
+  loopz::VirtualDeviceDefinition bus; bus.id = "song"; bus.name = "Song";
+  loopz::SourceRouting source; source.id = "native"; source.channels = 2;
+  source.connections = {{0, 0, 1}, {1, 1, 1}};
+  bus.routing.sources.push_back(source);
+  bus.bindings.push_back({"native", loopz::SourceKind::Application, "native:singz", true});
+  loopz::MonitorDefinition monitor; monitor.id = "main"; monitor.deviceSelector = "absent";
+  monitor.connections = {{0, 0, 1}, {1, 1, 1}}; bus.monitors.push_back(monitor);
+  loopz::RouteDocument document; document.devices.push_back(bus);
+  std::ofstream(path) << loopz::JSON{{"version", 1}, {"generation", "1"},
+                                    {"document", loopz::encodeDocument(document)}};
+  // With no active scene LoopZ tolerates an output that fails to open, so make
+  // the host factory itself unavailable to keep prepare (activation) failing.
+  auto absent = [hosts]() -> std::unique_ptr<AudioHostBackend> {
+    ++*hosts; throw std::runtime_error("Output hardware is absent");
+  };
+  clock = 20000000000;
+  CHECK(initializeBoxRoutingWithHost(path, error, absent, {}, {}, [&clock] { return clock; }));
+  CHECK(boxRoutingStateRecovery().empty()); // a valid document is never moved aside
+  CHECK(std::filesystem::exists(path));
+  const auto phase = [] {
+    return loopz::parseControlJSON(boxRoutingRequest(R"({"version":1,"operation":"state"})"))
+        .at("snapshot").at("restoration").at("phase");
+  };
+  CHECK(phase() == "retry");
+  pollBoxRouting();
+  const unsigned pending = *hosts;
+  for (unsigned tick = 1; tick < 80; ++tick) {
+    clock = 20000000000 + uint64_t(tick) * 25000000;
+    pollBoxRouting();
+  }
+  CHECK(*hosts == pending); // old code: inventory + prepare/open every tick
+  CHECK(phase() == "retry");
+  clock = 22000000000;
+  pollBoxRouting();
+  CHECK(*hosts > pending);
+  shutdownBoxRouting();
+  unlink(path.c_str());
+}
+std::vector<std::filesystem::path> asideFiles(const std::string& path) {
+  std::vector<std::filesystem::path> result;
+  const auto prefix = std::filesystem::path(path).filename().string() + ".corrupt-";
+  for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::path(path).parent_path()))
+    if (entry.path().filename().string().rfind(prefix, 0) == 0) result.push_back(entry.path());
+  return result;
+}
+// LoopZ Control fails closed on an unrestorable document: every edit returns
+// storage-unavailable and retry re-reads the same file. Old initialization
+// kept that dead end (ready=false, canCreateDocument=false) forever.
+void corruptStateRecoveryRegression() {
+  const auto path = std::string("/tmp/box-corrupt-state-") + std::to_string(getpid()) + ".json";
+  const auto target = path + ".target";
+  auto probe = std::make_shared<DiscoveryProbe>();
+  auto factory = [probe] { return std::make_unique<DiscoveryHost>(probe); };
+  const auto state = [] {
+    return loopz::parseControlJSON(boxRoutingRequest(R"({"version":1,"operation":"state"})"));
+  };
+  for (const bool symlinked : {false, true}) {
+    unlink(path.c_str()); unlink(target.c_str());
+    for (const auto& stale : asideFiles(path)) std::filesystem::remove(stale);
+    if (symlinked) {
+      std::ofstream(target) << loopz::JSON{{"version", 1}, {"generation", "1"},
+                                          {"document", loopz::encodeDocument({})}};
+      CHECK(symlink(target.c_str(), path.c_str()) == 0);
+    } else {
+      std::ofstream(path) << "{\"version\": 1, \"generation\": ";
+    }
+    std::string error;
+    CHECK(initializeBoxRoutingWithHost(path, error, factory));
+    const auto current = state();
+    CHECK(current.at("connection").at("ready") == true);
+    CHECK(current.at("snapshot").at("canCreateDocument") == true);
+    CHECK(!boxRoutingStateRecovery().empty());
+    CHECK(!std::filesystem::exists(std::filesystem::symlink_status(path)));
+    const auto aside = asideFiles(path);
+    CHECK(aside.size() == 1);
+    // The bytes are preserved; a symlink is moved itself, never its target.
+    CHECK(std::filesystem::is_symlink(std::filesystem::symlink_status(aside.front())) == symlinked);
+    if (symlinked) CHECK(std::filesystem::is_regular_file(std::filesystem::symlink_status(target)));
+    shutdownBoxRouting();
+    CHECK(boxRoutingStateRecovery().empty());
+    std::filesystem::remove(aside.front());
+  }
+  unlink(path.c_str()); unlink(target.c_str());
+}
+// Host labels (e.g. a Latin-1 USB product string) are not validated UTF-8.
+// Old boxRoutingRequest used strict dump() and threw type_error.316 on every
+// state request once such a device was enumerated.
+void invalidUtf8LabelRegression() {
+  const auto path = std::string("/tmp/box-utf8-label-") + std::to_string(getpid()) + ".json";
+  unlink(path.c_str());
+  auto probe = std::make_shared<DiscoveryProbe>();
+  probe->label = "Caf\xe9 USB";
+  std::string error;
+  CHECK(initializeBoxRoutingWithHost(path, error, [probe] { return std::make_unique<DiscoveryHost>(probe); }));
+  const auto state = loopz::parseControlJSON(boxRoutingRequest(R"({"version":1,"operation":"state"})"));
+  const auto name = state.at("inventory").at("devices").at(0).at("name").get<std::string>();
+  CHECK(name == "Caf\xef\xbf\xbd USB");
   shutdownBoxRouting();
 }
 void emit(const std::shared_ptr<Probe>& probe, bool timestampValid = true) {
@@ -372,5 +505,8 @@ int main() {
   // cannot replace the history identity assumed by the playback fixture.
   pollingDoesNotDemandMeterPreview();
   inventoryCacheRegression();
+  controlPollThrottleRegression();
+  corruptStateRecoveryRegression();
+  invalidUtf8LabelRegression();
   std::puts("Box routing physical delay/seek/generation/stop regression passed");
 }

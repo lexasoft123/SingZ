@@ -49,7 +49,7 @@ function atPage(page: JourneyState['page'], patch: Partial<JourneyState> = {}): 
   return { ...initialJourney(page), ...patch }
 }
 
-const removeConfirmation: Confirmation = { kind: 'remove-cache', dir: '/cache/song', name: 'Song', requireIdle: false }
+const removeConfirmation: Confirmation = { kind: 'remove-cache', dir: '/cache/song', name: 'Song', bytes: 2048, requireIdle: false }
 const holes = (text: string): string[] => [...text.matchAll(/\{(\w+)\}/g)].map(match => match[1]).sort()
 
 afterEach(() => setLocale('en'))

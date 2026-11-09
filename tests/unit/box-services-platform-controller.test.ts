@@ -164,6 +164,61 @@ describe('Box controller authority', () => {
   })
 })
 
+describe('Box controller command validation', () => {
+  const valid: unknown[] = [
+    { type: 'play-pause' },
+    { type: 'seek', position: 0 }, { type: 'seek', position: 120 },
+    { type: 'volume', target: 'master', value: 0 }, { type: 'volume', target: 'vocals', value: 1 },
+    { type: 'mute', target: 'vocals', value: true }, { type: 'solo', target: 'vocals', value: false },
+    { type: 'select', projectId: 'song1' }, { type: 'queue-add', projectId: 'song1' },
+    { type: 'queue-remove', entryId: 'entry1' },
+    { type: 'queue-move', entryId: 'entry1', delta: -1 }, { type: 'queue-move', entryId: 'entry1', delta: 1 }
+  ]
+  const invalid: unknown[] = [
+    null, 'play-pause', [], {}, { type: 7 }, { type: 'unknown' }, { type: 'stop' },
+    { type: 'play-pause', extra: true },
+    { type: 'seek', position: -0.01 }, { type: 'seek', position: 120.01 }, { type: 'seek', position: Number.NaN },
+    { type: 'seek', position: '1' }, { type: 'seek' }, { type: 'seek', position: 1, extra: 1 },
+    { type: 'volume', target: 'vocals', value: -0.1 }, { type: 'volume', target: 'drums', value: 0.5 },
+    { type: 'volume', target: '../x', value: 0.5 }, { type: 'volume', target: 'master' },
+    { type: 'mute', target: 'vocals', value: 1 }, { type: 'mute', target: 'vocals', value: 'true' },
+    { type: 'solo', target: 'vocals', value: null }, { type: 'mute', target: 'drums', value: true },
+    { type: 'mute', target: 'vocals', value: true, extra: 1 }, { type: 'solo', target: 'master', value: true },
+    { type: 'select', projectId: 'missing' }, { type: 'queue-add', projectId: '' }, { type: 'select', projectId: 'song1', at: 0 },
+    { type: 'queue-remove', entryId: 'missing' }, { type: 'queue-remove', entryId: 'entry1', delta: 1 },
+    { type: 'queue-move', entryId: 'entry1', delta: 0 }, { type: 'queue-move', entryId: 'entry1', delta: 2 },
+    { type: 'queue-move', entryId: 'entry1', delta: -2 }, { type: 'queue-move', entryId: 'entry1', delta: 0.5 },
+    { type: 'queue-move', entryId: 'entry1', delta: '1' }, { type: 'queue-move', entryId: 'missing', delta: 1 },
+    { type: 'queue-move', entryId: 'entry1' }
+  ]
+  const hub = (): { hub: BoxControllerHub; sent: Array<{ id: string; command: unknown }> } => {
+    const value = new BoxControllerHub()
+    const sent: Array<{ id: string; command: unknown }> = []
+    value.setCommandSender(envelope => sent.push(envelope))
+    expect(value.publish(publish()).ok).toBe(true)
+    return { hub: value, sent }
+  }
+  it.each(valid.map(command => [JSON.stringify(command), command]))('forwards valid %s unchanged', async (_label, command) => {
+    const h = hub()
+    const result = h.hub.execute(command)
+    expect(h.sent).toHaveLength(1)
+    expect(h.sent[0].command).toEqual(command)
+    expect(h.hub.respond(h.sent[0].id, { ok: true }).ok).toBe(true)
+    expect(await result).toEqual({ ok: true })
+  })
+  it.each(invalid.map(command => [JSON.stringify(command) ?? String(command), command]))('rejects invalid %s before the TV sees it', async (_label, command) => {
+    const h = hub()
+    expect(await h.hub.execute(command)).toMatchObject({ ok: false })
+    expect(h.sent).toHaveLength(0)
+  })
+  it('rejects play-pause without an active project', async () => {
+    const h = hub()
+    expect(h.hub.publish({ ...publish(), activeProjectId: null }).ok).toBe(true)
+    expect(await h.hub.execute({ type: 'play-pause' })).toMatchObject({ ok: false })
+    expect(h.sent).toHaveLength(0)
+  })
+})
+
 describe('Box platform adapter', () => {
   it('reports honest unavailable capabilities and actual private interfaces without an agent', async () => {
     const service = new BoxPlatformService({ currentVersion: 'app-dev', interfaceSnapshot: interfaces })
@@ -248,11 +303,11 @@ describe('Phone rate windows', () => {
     let now = 0
     const sessions = new BoxPhoneSessions({ now: () => now })
     sessions.start('http://127.0.0.1:1234')
-    expect(sessions.allow('pair', 2, 60_000)).toBe(true)
-    expect(sessions.allow('pair', 2, 60_000)).toBe(true)
-    expect(sessions.allow('command', 1, 1000)).toBe(true)
+    expect(sessions.allow('pair', 'client', 2, 60_000)).toBe(true)
+    expect(sessions.allow('pair', 'client', 2, 60_000)).toBe(true)
+    expect(sessions.allow('command', 'client', 1, 1000)).toBe(true)
     now = 1001
-    expect(sessions.allow('command', 1, 1000)).toBe(true)
-    expect(sessions.allow('pair', 2, 60_000)).toBe(false)
+    expect(sessions.allow('command', 'client', 1, 1000)).toBe(true)
+    expect(sessions.allow('pair', 'client', 2, 60_000)).toBe(false)
   })
 })

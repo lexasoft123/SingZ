@@ -67,8 +67,11 @@ class FakeKernel(cec.Kernel):
         self.events, self.messages = [], []
         self.claim = True
         self.clock = 0
+        self.open_errors, self.caps_errors = {}, {}
 
     def open(self, path):
+        if path in self.open_errors:
+            raise OSError(self.open_errors[path], 'open refused')
         self.opened.append(path)
         return list(self.devices).index(path) + 100
 
@@ -81,6 +84,8 @@ class FakeKernel(cec.Kernel):
     def ioctl_fake(self, fd, operation, buffer, mutate):
         self.operations.append(operation)
         device_caps, physical = list(self.devices.values())[fd - 100]
+        if operation == cec.G_CAPS and fd in self.caps_errors:
+            raise OSError(self.caps_errors[fd], 'capabilities refused')
         if operation == cec.G_CAPS:
             result = device_caps
         elif operation == cec.G_PHYS:
@@ -158,6 +163,28 @@ class CecTests(unittest.TestCase):
             with self.assertRaises(cec.Unavailable):
                 cec.choose_adapter(kernel, paths=list(kernel.devices))
             self.assertEqual(kernel.closed, [100])
+
+    def test_auto_skips_unreadable_adapter_but_explicit_access_error_is_fatal(self):
+        devices = {'/dev/cec0': (caps(), 0x1000), '/dev/cec1': (caps(), 0x2000)}
+        for open_error, caps_error in [({'/dev/cec0': errno.EACCES}, {}), ({}, {100: errno.EACCES})]:
+            kernel = FakeKernel(dict(devices))
+            kernel.open_errors, kernel.caps_errors = open_error, caps_error
+            selected = cec.choose_adapter(kernel, paths=list(kernel.devices))
+            self.assertEqual(selected.path, '/dev/cec1')
+            self.assertEqual(kernel.configurations, [])
+            self.assertEqual(kernel.closed, [100] if caps_error else [])
+            kernel.close(selected.fd)
+        kernel = FakeKernel(dict(devices))
+        kernel.open_errors = {'/dev/cec0': errno.EACCES, '/dev/cec1': errno.EPERM}
+        with self.assertRaises(OSError) as raised:
+            cec.choose_adapter(kernel, paths=list(kernel.devices))
+        self.assertEqual(raised.exception.errno, errno.EACCES)
+        kernel = FakeKernel(dict(devices))
+        kernel.open_errors = {'/dev/cec0': errno.EACCES}
+        with self.assertRaises(OSError) as raised:
+            cec.choose_adapter(kernel, '/dev/cec0')
+        self.assertEqual(raised.exception.errno, errno.EACCES)
+        self.assertEqual(kernel.opened, [])
 
     def test_explicit_auto_uses_same_unique_tx_selection(self):
         kernel = FakeKernel()

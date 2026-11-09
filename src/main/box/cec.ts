@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import { StringDecoder } from 'node:string_decoder'
 import type { KeyboardInputEvent } from 'electron'
 import type { BoxCecStatus, BoxCecTelemetry } from '../../shared/box-contract'
 
@@ -41,8 +42,14 @@ export type CecOptions = {
   helperPath: string
   device?: string
   spawnChild?: typeof spawn
+  /** First reconnect delay; doubles per consecutive failed run up to retryMaxMs. */
   retryMs?: number
+  retryMaxMs?: number
+  /** A run that stayed ready this long resets the reconnect delay. */
+  healthyRunMs?: number
   releaseMs?: number
+  /** Quiet time after which a blocked (held or unreleased) code accepts a fresh press. */
+  blockQuietMs?: number
   now?: () => number
   monotonicNowNs?: () => bigint
 }
@@ -56,7 +63,10 @@ export class BoxCecService {
   private sink: CecInputSink | null = null
   private state: BoxCecStatus
   private held: number | null = null
-  private blocked = new Set<number>()
+  // Code -> last time it was seen pressed while blocked. Held repeats keep it
+  // fresh; TVs that never send User Control Released recover after quiet time.
+  private blocked = new Map<number, number>()
+  private retryAttempt = 0
   private releaseTimer?: ReturnType<typeof setTimeout>
   private retryTimer?: ReturnType<typeof setTimeout>
   private disposed = false
@@ -91,7 +101,7 @@ export class BoxCecService {
     if (this.held !== null) {
       const code = this.held
       this.held = null
-      this.blocked.add(code)
+      this.block(code)
       this.send(code, false, false)
     }
   }
@@ -103,7 +113,20 @@ export class BoxCecService {
       if (pressed && !this.sink.ready()) { this.count('notReadyPresses'); return }
       this.sink.send({ type: pressed ? 'keyDown' : 'keyUp', keyCode, modifiers: repeat ? ['isautorepeat'] : [] })
       this.count('deliveredEvents')
-    } catch { this.blocked.add(code) }
+    } catch { this.block(code) }
+  }
+  private block(code: number): void { this.blocked.set(code, this.now()) }
+  /** True while a press of `code` belongs to a held/unreleased chord. */
+  private stillBlocked(code: number): boolean {
+    const since = this.blocked.get(code)
+    if (since === undefined) return false
+    const now = this.now()
+    if (now - since >= 0 && now - since <= (this.options.blockQuietMs ?? 2500)) {
+      this.blocked.set(code, now)
+      return true
+    }
+    this.blocked.delete(code)
+    return false
   }
   private key(code: number, pressed: boolean): void {
     if (!KEYS.has(code)) return
@@ -113,8 +136,8 @@ export class BoxCecService {
       this.blocked.delete(code)
       return
     }
-    if (this.blocked.has(code)) { this.count('blockedPresses'); return }
-    if (!this.sink?.ready()) { this.count('notReadyPresses'); this.blocked.add(code); return }
+    if (this.stillBlocked(code)) { this.count('blockedPresses'); return }
+    if (!this.sink?.ready()) { this.count('notReadyPresses'); this.block(code); return }
     const repeat = this.held === code
     if (this.held !== null && !repeat) this.releaseKeys()
     this.held = code
@@ -137,6 +160,9 @@ export class BoxCecService {
     this.child = child
     let buffer = ''
     let failed = false
+    let readyAt: number | null = null
+    // Chunk boundaries may split a multibyte UTF-8 sequence.
+    const decoder = new StringDecoder('utf8')
     let faultTimer: ReturnType<typeof setTimeout> | undefined
     const fault = (): void => {
       if (failed || this.child !== child || this.disposed) return
@@ -149,7 +175,7 @@ export class BoxCecService {
     }
     child.stdout?.on('data', (chunk: Buffer) => {
       if (this.child !== child || this.disposed || failed) return
-      buffer += chunk.toString('utf8')
+      buffer += decoder.write(chunk)
       if (Buffer.byteLength(buffer) > 65536) { fault(); return }
       let lines = 0
       for (;;) {
@@ -179,6 +205,7 @@ export class BoxCecService {
           } else if (value.type === 'status' && ['ready', 'unavailable', 'error'].includes(value.state) &&
               typeof value.detail === 'string' && value.detail.length <= 240 && !/[\u0000-\u001f\u007f]/.test(value.detail)) {
             if (value.state !== 'ready') this.releaseKeys()
+            readyAt = value.state === 'ready' ? (readyAt ?? this.now()) : null
             this.state = { ...this.state, state: value.state, detail: value.detail }
           } else throw new Error()
         } catch { fault(); return }
@@ -192,6 +219,7 @@ export class BoxCecService {
       if (this.child !== child) return
       this.child = null
       this.releaseKeys()
+      if (readyAt !== null && this.now() - readyAt >= (this.options.healthyRunMs ?? 60_000)) this.retryAttempt = 0
       if (!this.disposed) {
         if (this.state.state === 'ready' || this.state.state === 'starting') this.failedLaunch()
         else this.retry()
@@ -205,7 +233,10 @@ export class BoxCecService {
   private retry(): void {
     if (this.disposed) return
     clearTimeout(this.retryTimer)
-    this.retryTimer = setTimeout(() => this.launch(), this.options.retryMs ?? 5000)
+    const base = this.options.retryMs ?? 5000
+    const delay = Math.min(this.options.retryMaxMs ?? 60_000, base * 2 ** Math.min(this.retryAttempt, 16))
+    this.retryAttempt++
+    this.retryTimer = setTimeout(() => this.launch(), delay)
     this.retryTimer.unref()
   }
   dispose(): Promise<void> {

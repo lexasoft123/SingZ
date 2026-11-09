@@ -1,4 +1,5 @@
 import { Button } from '@singz/ui'
+import { formatBytes } from './format'
 import { tJourney, type JourneyKey } from './i18n'
 import { confirmationSafeChoice, type PendingConfirmation } from './model'
 
@@ -7,11 +8,13 @@ function copy(confirmation: PendingConfirmation): {
   body: JourneyKey
   action: JourneyKey
   name?: string
+  size?: string
+  cloudNote?: false
 } {
   switch (confirmation.kind) {
     case 'remove-cache': return {
       title: 'journey.dialog.removeTitle', body: 'journey.dialog.removeBody',
-      action: 'journey.dialog.confirmRemove', name: confirmation.name
+      action: 'journey.dialog.confirmRemove', name: confirmation.name, size: formatBytes(confirmation.bytes)
     }
     case 'phone-revoke': return {
       title: 'journey.dialog.revokeTitle', body: 'journey.dialog.revokeBody',
@@ -31,6 +34,9 @@ function copy(confirmation: PendingConfirmation): {
     }
     case 'reboot': return {
       title: 'journey.dialog.rebootTitle', body: 'journey.dialog.rebootBody', action: 'journey.dialog.confirmReboot'
+    }
+    case 'wifi-switch': return {
+      title: 'journey.dialog.wifiTitle', body: 'journey.dialog.wifiBody', action: 'journey.dialog.confirmWifi', cloudNote: false
     }
     case 'factory-reset': return {
       title: 'journey.dialog.resetTitle', body: 'journey.dialog.resetBody', action: 'journey.dialog.confirmReset'
@@ -53,8 +59,8 @@ export function ConfirmationDialog({ confirmation, onCancel, onConfirm }: {
       data-surface="journey-confirmation"
     >
       <h2 id="journey-dialog-title">{tJourney(text.title, { name: text.name ?? '' })}</h2>
-      <p>{tJourney(text.body)}</p>
-      <p className="journey-note">{tJourney('journey.cloudSafe')}</p>
+      <p>{tJourney(text.body, { size: text.size ?? '' })}</p>
+      {text.cloudNote !== false && <p className="journey-note">{tJourney('journey.cloudSafe')}</p>}
       <div className="journey-actions">
         <Button
           autoFocus

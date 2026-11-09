@@ -1,4 +1,7 @@
+import type { BoxQueueRef } from '../../../shared/box-contract'
 import type { ProjectListItem } from '../../../shared/types'
+import { moveQueueViewDir, projectQueue } from './collection/queue'
+import type { CollectionEntry } from './collection/types'
 
 export function queueAdd(items: ProjectListItem[], item: ProjectListItem): ProjectListItem[] {
   return items.some(queued => queued.dir === item.dir) ? items : [...items, item]
@@ -25,4 +28,12 @@ export function queueMove(items: ProjectListItem[], dir: string, delta: number):
 
 export function queueHas(items: ProjectListItem[], dir: string): boolean {
   return items.some(item => item.dir === dir)
+}
+
+/** Phone queue moves address a visible (de-duplicated) row by its ref. Move it
+ * through the same projection the phone sees, so hidden duplicate refs cannot
+ * turn a visible move into a no-op swap. */
+export function moveQueueRefInView(entries: CollectionEntry[], refs: BoxQueueRef[], ref: BoxQueueRef, delta: number): BoxQueueRef[] {
+  const row = projectQueue(entries, refs).find(item => item.ref === ref)
+  return row ? moveQueueViewDir(entries, refs, row.item.dir, delta) : refs
 }

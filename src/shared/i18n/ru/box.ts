@@ -201,5 +201,21 @@ export const box: Record<keyof typeof english | 'box.catalog.songs_few' | 'box.c
   'box.queue.saveError': 'Изменение очереди видно, но не сохранено: {error}',
   'box.details.openGuardFailed': 'SingZ не смог защитить проект от удаления кэша, поэтому он не был открыт. Проверьте хранилище и повторите.',
   'box.account.signOutFailed': 'Не удалось выйти. Повторите попытку.',
-  'box.nativeRequired': 'Нативное воспроизведение недоступно для этого проекта или аудиосистемы.'
+  'box.nativeRequired': 'Нативное воспроизведение недоступно для этого проекта или аудиосистемы.',
+  'box.retained.restoringTitle': 'Восстанавливаем предыдущую песню',
+  'box.retained.restoringBody': 'Восстанавливаем песню и её текст.',
+  'box.retained.dialogLabel': 'Предыдущая песня',
+  'box.retained.playingTitle': 'Музыка всё ещё играет',
+  'box.retained.loadedTitle': 'Предыдущая песня всё ещё загружена',
+  'box.retained.unavailableTitle': 'Состояние звука неизвестно',
+  'box.retained.body': 'Остановите эту песню, прежде чем открывать другую. Её проект и текст не восстановлены.',
+  'box.retained.refresh': 'Обновить',
+  'box.retained.stop': 'Остановить песню',
+  'box.retained.restoreFailed': 'Не удалось восстановить предыдущую песню. Обновите её состояние или остановите её.',
+  'box.retained.restoreUnavailable': 'Восстановить песню невозможно. Обновите её состояние или остановите её.',
+  'box.retained.restoreTimedOut': 'Предыдущая песня восстанавливается слишком долго. Обновите её состояние или остановите её.',
+  'box.retained.statusUnavailable': 'Не удалось получить состояние звука.',
+  'box.retained.songChanged': 'Песня сменилась. Проверьте её состояние, прежде чем останавливать.',
+  'box.retained.releaseUnconfirmed': 'Аудиосервис не подтвердил, что песня остановлена. Обновите состояние и повторите попытку.',
+  'box.retained.stopUncertain': 'Неизвестно, остановилась ли песня. Обновите состояние и повторите попытку.'
 }

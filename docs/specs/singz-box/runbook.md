@@ -69,7 +69,18 @@ Desktop close behavior is unchanged. Non-persistent Box uses the existing
 Box-only normal-close handshake: pause, flush accepted controls and project
 saves, complete bounded native cleanup, then acknowledge close. Renderer cleanup
 is bounded at eight seconds and main has a twelve-second fallback. Application
-quit resumes only after every requested window completes.
+quit resumes once every window still pending has completed or been destroyed
+(windows that already finished their close are not waited for), with a global
+fifteen-second fallback so quit always resumes. Box backend disposal (phone
+service and controller) is bounded at five seconds before `app.quit()`.
+
+An unreadable, corrupt or newer-version `box-state.json` is renamed to
+`box-state.json.corrupt-<ms>` and Box continues from defaults, which can show
+setup again. The bytes are kept, never deleted. Because a platform rollback to
+an older build treats a newer schema the same way, any future `box-state.json`
+schema version must stay readable by the previous version (or keep a
+previous-version copy beside it) if preferences and the queue are to survive a
+rollback.
 
 Persistent Linux Box is opt-in and uses an explicit independent native audio
 host and socket. Native-first background recovery associates the actual project

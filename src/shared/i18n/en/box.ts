@@ -197,5 +197,21 @@ export const box = {
   'box.queue.saveError': 'The queue change is visible but could not be saved: {error}',
   'box.details.openGuardFailed': 'SingZ could not protect this project from cache removal, so it was not opened. Check storage and try again.',
   'box.account.signOutFailed': 'Sign-out could not be completed. Try again.',
-  'box.nativeRequired': 'Native playback is unavailable for this project or audio runtime.'
+  'box.nativeRequired': 'Native playback is unavailable for this project or audio runtime.',
+  'box.retained.restoringTitle': 'Restoring previous song',
+  'box.retained.restoringBody': 'The song and its lyrics are being restored.',
+  'box.retained.dialogLabel': 'Previous song',
+  'box.retained.playingTitle': 'Music is still playing',
+  'box.retained.loadedTitle': 'Previous song is still loaded',
+  'box.retained.unavailableTitle': 'Audio status unavailable',
+  'box.retained.body': 'Stop this song before opening another. Its project and lyrics have not been restored.',
+  'box.retained.refresh': 'Refresh',
+  'box.retained.stop': 'Stop song',
+  'box.retained.restoreFailed': 'The previous song could not be restored. Refresh its status or stop it.',
+  'box.retained.restoreUnavailable': 'Song restoration is unavailable. Refresh its status or stop it.',
+  'box.retained.restoreTimedOut': 'Restoring the previous song took too long. Refresh its status or stop it.',
+  'box.retained.statusUnavailable': 'Audio status is unavailable.',
+  'box.retained.songChanged': 'The song changed. Review its state before stopping.',
+  'box.retained.releaseUnconfirmed': 'The audio host has not confirmed that this song was released. Refresh before retrying.',
+  'box.retained.stopUncertain': 'Song shutdown is uncertain. Refresh before retrying.'
 } as const

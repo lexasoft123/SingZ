@@ -5,6 +5,7 @@
 #include <zcore/device/audio_input.h>
 #include <zcore/device/audio_input_backend.h>
 #include <functional>
+#include <cstdint>
 namespace loopz { class AudioSource; }
 namespace singz {
 struct LoopZSongSource;
@@ -19,12 +20,30 @@ bool initializeBoxRouting(const std::string& statePath, std::string& error);
 // Dependency injection for deterministic integration tests; normal application
 // initialization always selects the platform factory. Inventory discovery is
 // shared across temporary hosts and cached for one monotonic second, including
-// failures. The optional inventory clock is control-owner-only and test-local.
+// failures. The optional inventory clock is control-owner-only and test-local;
+// it also drives the Control::poll throttle below.
 bool initializeBoxRoutingWithHost(const std::string& statePath, std::string& error,
                                   BoxRoutingHostFactory factory,
                                   std::shared_ptr<LoopZSongSource> source = {},
                                   BoxRoutingInputFactory inputFactory = {},
                                   std::function<uint64_t()> inventoryClock = {});
+// Control-owner diagnostic: non-empty after initialization moved an unreadable,
+// invalid, newer or symlinked saved routing document aside (the Box has no
+// keyboard to repair it) and started with no saved routing.
+std::string boxRoutingStateRecovery();
+namespace box_routing_detail {
+// Control::poll() rebuilds a temporary inventory host and, while the desired
+// generation is not active, re-runs a full AudioRuntime::prepare (scene build
+// and device open attempts). The JS owner ticks every 25 ms for mapping
+// freshness; Control itself polls at most every 250 ms, and only every 2 s
+// (LoopZ's own engine cadence) while activation is pending.
+constexpr uint64_t kControlPollNs = 250000000, kPendingActivationPollNs = 2000000000;
+constexpr bool controlPollDue(bool polled, uint64_t lastNs, uint64_t nowNs,
+                              bool activationPending) noexcept {
+  return !polled || nowNs < lastNs ||
+         nowNs - lastNs >= (activationPending ? kPendingActivationPollNs : kControlPollNs);
+}
+} // namespace box_routing_detail
 // Atomic health getters: safe concurrently, including from audio callbacks.
 bool boxRoutingInitialized() noexcept;
 // Telemetry loss never stops routes; projection stays unavailable until a full

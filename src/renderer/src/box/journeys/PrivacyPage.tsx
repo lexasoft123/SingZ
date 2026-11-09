@@ -19,7 +19,7 @@ export function PrivacyPage({ drive, phones, storage, platform, activeProjectDir
   onConnect: () => void
   onSignOut: () => void
   onStopPhones: () => void
-  onRemove: (dir: string, name: string) => void
+  onRemove: (dir: string, name: string, bytes: number) => void
   onReset: () => void
   onBack: () => void
 }) {
@@ -45,7 +45,7 @@ export function PrivacyPage({ drive, phones, storage, platform, activeProjectDir
         const issue = cacheRemovalIssue(project.dir, activeProjectDir, playbackActive, true)
         return <div className="journey-item" key={project.dir}>
           <div><strong>{project.name}</strong><span>{formatBytes(project.bytes)}{project.dir === activeProjectDir ? ` · ${tJourney('journey.storage.active')}` : ''}</span></div>
-          <Button variant="danger" disabled={busy || issue !== null} onClick={() => onRemove(project.dir, project.name)}>{tJourney('journey.storage.remove')}</Button>
+          <Button variant="danger" disabled={busy || issue !== null} onClick={() => onRemove(project.dir, project.name, project.bytes)}>{tJourney('journey.storage.remove')}</Button>
         </div>
       })}</div> : !loading && <EmptyState>{tJourney('journey.storage.empty')}</EmptyState>}
     </section>

@@ -167,13 +167,20 @@ song. Ordinary Box and Desktop close their audio normally. Qualification must
 exercise the real window-close path; a socket-disconnect test alone does not
 exercise renderer transport teardown.
 
-A fresh TV session does not yet reconstruct the retained song's project or
-lyrics. It shows a remote-scoped notice and requires an explicit Stop before
-opening another project. Recovery reads reconcile the authoritative service
-state; Stop is checked against both service epoch and native generation inside
-the host's serialized queue, so a restarted host reusing a counter cannot stop
-a different song. Automatic project/lyrics reattachment remains outside this
-initial implementation.
+After a native prepare succeeds, main validates the project in the background
+and associates a service-lifetime project descriptor with that host epoch and
+generation; a failed association is logged and leaves native playback intact.
+A fresh TV session reads the authoritative reconcile snapshot and, when the
+epoch and generation match a commandable running or paused transport, performs
+a read-only reattach: it restores the real project, synchronized lyrics,
+current native controls and position without open, reprepare, Play or Settings
+replay. Missing or stale metadata, changed project files, invalid lyrics or a
+non-commandable host instead show a remote-scoped notice with Refresh and an
+explicit Stop before another project opens. Stop is checked against both
+service epoch and native generation inside the host's serialized queue, so a
+restarted host reusing a counter cannot stop a different song. Recovery does
+not survive a hard kill, native host restart or power cycle; see
+[runbook.md](runbook.md) and AUDIO-01 in [spec.md](spec.md).
 
 ## Microphone input subscriptions
 

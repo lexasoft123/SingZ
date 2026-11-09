@@ -5,8 +5,11 @@ import { journeyActivity } from './activity'
 import { DiagnosticsPage } from './DiagnosticsPage'
 import { HomePage } from './HomePage'
 import { acquireJourneyFocus } from './focus'
+import { runJourneyConfirmation } from './confirm'
 import { tJourney } from './i18n'
-import { initialJourney, journeyBack, journeyInteractionLocked, journeyReducer, type Confirmation, type JourneyAction } from './model'
+import {
+  initialJourney, journeyBack, journeyInteractionLocked, journeyReducer, wifiStartNeedsConfirmation, type Confirmation, type JourneyAction
+} from './model'
 import { NetworkPage } from './NetworkPage'
 import { PhonesPage } from './PhonesPage'
 import { PrivacyPage } from './PrivacyPage'
@@ -86,6 +89,8 @@ export const JourneyHub = forwardRef<JourneyHubHandle, JourneyHubProps>(function
   useImperativeHandle(ref, () => ({ back, open, isInteractionLocked }), [back, open, isInteractionLocked])
 
   const acquiredFocus = useRef<number | null>(null)
+  // The control that opened a confirmation regains focus when it closes (long Remove/Revoke lists).
+  const confirmationOpener = useRef<Element | null>(null)
   const acquireFocus = useCallback(() => {
     const scope = root.current
     if (!scope || !visible()) {
@@ -93,9 +98,11 @@ export const JourneyHub = forwardRef<JourneyHubHandle, JourneyHubProps>(function
       return
     }
     if (document.hidden) return
+    const opener = state.current.confirmation ? null : confirmationOpener.current
     acquiredFocus.current = acquireJourneyFocus(
-      scope, document.activeElement, document.body, state.current.focusRevision, acquiredFocus.current
+      scope, document.activeElement, document.body, state.current.focusRevision, acquiredFocus.current, opener
     )
+    if (opener && acquiredFocus.current === state.current.focusRevision) confirmationOpener.current = null
   }, [visible])
 
   // Readiness can change without a route revision; repair only missing/invalid focus.
@@ -110,27 +117,29 @@ export const JourneyHub = forwardRef<JourneyHubHandle, JourneyHubProps>(function
   }, [acquireFocus])
 
   const requestConfirmation = useCallback((confirmation: Confirmation) => {
-    if (!isInteractionLocked()) dispatch({ type: 'confirm', confirmation })
+    if (isInteractionLocked()) return
+    confirmationOpener.current = document.activeElement
+    dispatch({ type: 'confirm', confirmation })
   }, [dispatch, isInteractionLocked])
+  const networkCommand = (command: 'wifi-start' | 'wifi-cancel'): void => {
+    if (command === 'wifi-start' && wifiStartNeedsConfirmation(platform.snapshot)) requestConfirmation({ kind: 'wifi-switch' })
+    else void platform.run(command)
+  }
   const confirm = useCallback(async (): Promise<void> => {
     const confirmation = state.current.confirmation
     if (!confirmation || confirmation.pending) return
     dispatch({ type: 'confirm-start' })
     try {
-      switch (confirmation.kind) {
-        case 'remove-cache': await storage.remove(confirmation.dir, confirmation.requireIdle); break
-        case 'phone-revoke': await phones.revoke(confirmation.sessionId); break
-        case 'phone-stop': await phones.revokeAll(); break
-        case 'drive-signout': await inventory.signOut(); break
-        case 'update-install': await platform.run('update-install'); break
-        case 'rollback': await platform.run('rollback'); break
-        case 'reboot': await platform.run('reboot'); break
-        case 'factory-reset': {
-          const reset = await platform.run('reset')
-          if (reset) await Promise.all([preferences.refresh(), inventory.refreshDrive(), storage.refresh(), phones.refresh()])
-          break
-        }
-      }
+      await runJourneyConfirmation(confirmation, {
+        removeCache: storage.remove,
+        revokePhone: phones.revoke,
+        revokeAllPhones: phones.revokeAll,
+        signOut: inventory.signOut,
+        runPlatform: platform.run,
+        refreshAfterReset: () => Promise.all([preferences.refresh(), inventory.refreshDrive(), storage.refresh(), phones.refresh()]),
+        onLibraryChanged: () => latest.current.onLibraryChanged(),
+        onAccountChanged: () => latest.current.onAccountChanged?.()
+      })
     } finally {
       dispatch({ type: 'confirm-finish' })
     }
@@ -172,7 +181,7 @@ export const JourneyHub = forwardRef<JourneyHubHandle, JourneyHubProps>(function
     />}
     {page === 'network' && <NetworkPage
       snapshot={platform.snapshot} loading={platform.loading} error={platform.error} busy={platform.busy} now={now}
-      onRefresh={() => { void platform.refresh() }} onCommand={command => { void platform.run(command) }} onBack={back}
+      onRefresh={() => { void platform.refresh() }} onCommand={networkCommand} onBack={back}
     />}
     {page === 'phones' && <PhonesPage
       state={phones.state} loading={phones.loading} error={phones.error} busy={phones.busy} updated={phones.updated} now={now}
@@ -183,7 +192,7 @@ export const JourneyHub = forwardRef<JourneyHubHandle, JourneyHubProps>(function
     {page === 'storage' && <StoragePage
       snapshot={storage.snapshot} activeProjectDir={props.activeProjectDir} loading={storage.loading} error={storage.error}
       busy={storage.busy} removed={storage.removed} onRefresh={() => { void storage.refresh() }}
-      onRemove={(dir, name) => requestConfirmation({ kind: 'remove-cache', dir, name, requireIdle: false })} onBack={back}
+      onRemove={(dir, name, bytes) => requestConfirmation({ kind: 'remove-cache', dir, name, bytes, requireIdle: false })} onBack={back}
     />}
     {page === 'diagnostics' && <DiagnosticsPage
       diagnostics={diagnostics.diagnostics} loading={diagnostics.loading} error={diagnostics.error}
@@ -202,7 +211,7 @@ export const JourneyHub = forwardRef<JourneyHubHandle, JourneyHubProps>(function
       error={inventory.driveError ?? phones.error ?? storage.error ?? platform.error} busy={inventory.signingOut || phones.busy !== null || storage.busy !== null || platform.busy !== null}
       onConnect={props.onOpenCollection} onSignOut={() => requestConfirmation({ kind: 'drive-signout' })}
       onStopPhones={() => requestConfirmation({ kind: 'phone-stop' })}
-      onRemove={(dir, name) => requestConfirmation({ kind: 'remove-cache', dir, name, requireIdle: true })}
+      onRemove={(dir, name, bytes) => requestConfirmation({ kind: 'remove-cache', dir, name, bytes, requireIdle: true })}
       onReset={() => requestConfirmation({ kind: 'factory-reset' })} onBack={back}
     />}
     </div>

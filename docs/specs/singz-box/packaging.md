@@ -43,6 +43,40 @@ dist/box/SingZ-Box-<version>-linux-<arch>.deb
 
 The configuration extends `electron-builder.yml`, retaining its native resources, file exclusions, Debian dependencies, packaging hooks, and signing behavior. Box overrides identity, launcher metadata, artifact naming, its own config exclusion, and `dist/box` output. The supported `publish: null` setting explicitly disables the inherited Desktop GitHub publishing/update feed, so the Box package has no inherited Desktop update feed. The wrapper still adds `--publish never` when no explicit publish option is present, so an ordinary packaging run does not publish a release.
 
+## Box audio and CEC resources
+
+`resources/linux` ships once, outside the asar, as
+`/opt/singz-box/resources/box-audio` (`extraResources`); the Box config excludes
+it from `app.asar`, and only unpackaged development runs read it from the
+checkout. It contains the CEC helper `cec-input.py` (hence the `python3`
+dependency), the opt-in user unit `singz-box-audio.service`, its launcher
+`singz-box-with-audio` (executable), and `singz-box-rtprio.conf`. The package
+installs nothing outside `/opt`, `/usr/bin` and desktop metadata, and enables no
+service. The installed CI stage (`scripts/ci/linux-package.sh`) asserts these
+files, the launcher mode, the `python3` dependency, and that the installed Box
+`app.asar` holds no `dist/` or `resources/linux` entries.
+
+### Real-time audio priority
+
+zCore's ALSA I/O threads request `SCHED_FIFO` 20 and the Box song producer a
+lower `SCHED_FIFO` priority. The service is a systemd **user** unit. Its
+`LimitRTPRIO=20` raises only the soft limit, and systemd clamps it to the user
+manager's hard limit, which is 0 on a default Debian system. In that case the
+unit still starts; each thread logs one warning and runs at normal priority.
+
+To grant real-time priority with the least privilege, the appliance image
+installs `box-audio/singz-box-rtprio.conf` as
+`/etc/systemd/system/user@<UID>.service.d/singz-box-rtprio.conf` for the single
+appliance user, then runs `systemctl daemon-reload` and restarts that user's
+manager. The drop-in sets `LimitRTPRIO=0:20`: hard limit 20 and soft limit 0, so
+only the service, which raises its own soft limit, runs real-time. The Debian
+package deliberately does not install it. A package-wide `/etc/security/limits.d`
+grant would apply to every login or `audio` group member without consent. Do not
+use rtkit workarounds, root services, or `--no-sandbox`. The kernel's default
+`sched_rt_runtime_us` throttle remains the runaway guard. Qualify the result with
+`journalctl --user -u singz-box-audio`: no `SCHED_FIFO ... request failed`
+warnings, and `chrt -p` on the ALSA worker threads.
+
 ## Product data
 
 Box state is separated from Desktop by product. Preferences, OAuth state, and sessions are stored under `appData/SingZ Box`. Model and accelerator caches are stored under `appData/SingZ Box/models` and `appData/SingZ Box/gpu-splitter`, respectively. Projects are stored under `Documents/SingZ Box`. Desktop preferences, sessions, caches, and project directories remain unchanged.

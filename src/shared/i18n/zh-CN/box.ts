@@ -199,5 +199,21 @@ export const box: Record<keyof typeof english, string> = {
   'box.queue.saveError': '队列更改已显示，但无法保存：{error}',
   'box.details.openGuardFailed': 'SingZ 无法保护此项目免受缓存删除，因此未将其打开。请检查存储后重试。',
   'box.account.signOutFailed': '无法完成退出。请重试。',
-  'box.nativeRequired': '此项目或音频运行时无法使用原生播放。'
+  'box.nativeRequired': '此项目或音频运行时无法使用原生播放。',
+  'box.retained.restoringTitle': '正在恢复上一首歌曲',
+  'box.retained.restoringBody': '正在恢复歌曲及其歌词。',
+  'box.retained.dialogLabel': '上一首歌曲',
+  'box.retained.playingTitle': '音乐仍在播放',
+  'box.retained.loadedTitle': '上一首歌曲仍处于加载状态',
+  'box.retained.unavailableTitle': '无法获取音频状态',
+  'box.retained.body': '请先停止这首歌曲，再打开其他歌曲。它的项目和歌词尚未恢复。',
+  'box.retained.refresh': '刷新',
+  'box.retained.stop': '停止歌曲',
+  'box.retained.restoreFailed': '无法恢复上一首歌曲。请刷新其状态或停止播放。',
+  'box.retained.restoreUnavailable': '无法恢复歌曲。请刷新其状态或停止播放。',
+  'box.retained.restoreTimedOut': '恢复上一首歌曲耗时过长。请刷新其状态或停止播放。',
+  'box.retained.statusUnavailable': '无法获取音频状态。',
+  'box.retained.songChanged': '歌曲已更改。停止前请先查看其状态。',
+  'box.retained.releaseUnconfirmed': '音频服务尚未确认这首歌曲已释放。请先刷新再重试。',
+  'box.retained.stopUncertain': '无法确定歌曲是否已停止。请先刷新再重试。'
 }

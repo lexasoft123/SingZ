@@ -18,12 +18,17 @@ export function acquireJourneyFocus(
   active: Element | null,
   body: HTMLElement,
   revision: number,
-  acquiredRevision: number | null
+  acquiredRevision: number | null,
+  opener: Element | null = null
 ): number | null {
   if (!journeyNeedsFocus(active, body, acquiredRevision !== revision)) return acquiredRevision
-  if (!scope.querySelector('[role="dialog"]') && scope.querySelector('[data-setup-stage="boot"]') &&
+  const dialog = scope.querySelector('[role="dialog"]')
+  if (!dialog && scope.querySelector('[data-setup-stage="boot"]') &&
     !scope.querySelector('[data-journey-primary]:not(:disabled)')) return acquiredRevision
-  const target = findJourneyFocus(scope, true)
+  // A closed confirmation returns to the control that opened it while that control is still usable.
+  const returnTarget = !dialog && opener && scope.contains(opener) && !journeyNeedsFocus(opener, body, false)
+    ? opener as HTMLElement : null
+  const target = returnTarget ?? findJourneyFocus(scope, true)
   if (!target) return acquiredRevision
   target.focus({ preventScroll: true })
   target.scrollIntoView({ block: 'nearest', inline: 'nearest' })

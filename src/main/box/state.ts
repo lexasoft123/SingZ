@@ -1,5 +1,5 @@
 import { constants } from 'node:fs'
-import { chmod, lstat, mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises'
+import { chmod, lstat, mkdir, open, readdir, readFile, rename, rm } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
 import { isAbsolute, join } from 'node:path'
 import type { BoxPreferences, BoxQueueRef, BoxResult, BoxState } from '../../shared/box-contract'
@@ -60,7 +60,7 @@ export class BoxStateService {
   private state: BoxState | null = null
   private operations: Promise<void> = Promise.resolve()
 
-  constructor(readonly userDataDir: string) {
+  constructor(readonly userDataDir: string, private readonly log: (message: string) => void = message => console.warn(message)) {
     this.file = join(userDataDir, 'box-state.json')
   }
 
@@ -122,27 +122,69 @@ export class BoxStateService {
     return result
   }
 
+  /**
+   * Loads once per process. Unreadable content (corrupt, truncated, unsupported
+   * version or keys from a newer build, non-regular file) is quarantined beside
+   * the state as `box-state.json.corrupt-<ms>` and Box continues with defaults,
+   * so preferences and the queue stay writable. Transient I/O errors are not
+   * quarantined and are reported to the caller.
+   */
   private async load(): Promise<BoxResult<BoxState>> {
     if (this.state) return { ok: true, value: this.state }
+    await this.removeOrphanTemporaries()
+    let problem: string
     try {
       const info = await lstat(this.file)
       if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_STATE_BYTES) {
-        return failure('Box state is not a bounded regular file.', 'invalid-state')
+        problem = 'not a bounded regular file'
+      } else {
+        const parsed: unknown = JSON.parse(await readFile(this.file, 'utf8'))
+        if (validState(parsed)) {
+          this.state = cloneState(parsed)
+          return { ok: true, value: this.state }
+        }
+        problem = 'failed schema validation'
       }
-      const parsed: unknown = JSON.parse(await readFile(this.file, 'utf8'))
-      if (!validState(parsed)) return failure('Box state failed schema validation.', 'invalid-state')
-      this.state = cloneState(parsed)
-      return { ok: true, value: this.state }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         this.state = defaultBoxState()
         return { ok: true, value: this.state }
       }
-      if (error instanceof SyntaxError) return failure('Box state is not valid JSON.', 'invalid-state')
-      return failure(`Could not read Box state: ${error instanceof Error ? error.message : String(error)}`, 'read-failed')
+      if (!(error instanceof SyntaxError)) {
+        return failure(`Could not read Box state: ${error instanceof Error ? error.message : String(error)}`, 'read-failed')
+      }
+      problem = 'is not valid JSON'
+    }
+    const quarantine = `${this.file}.corrupt-${Date.now()}`
+    try {
+      await rename(this.file, quarantine)
+    } catch (error) {
+      return failure(`Box state ${problem} and could not be set aside: ${error instanceof Error ? error.message : String(error)}`, 'invalid-state')
+    }
+    this.log(`Box state ${problem}; moved to ${quarantine} and continuing with defaults`)
+    this.state = defaultBoxState()
+    return { ok: true, value: this.state }
+  }
+
+  /** A crash between create and rename leaves a private temporary; none can be in flight here. */
+  private async removeOrphanTemporaries(): Promise<void> {
+    try {
+      for (const name of await readdir(this.userDataDir)) {
+        if (/^box-state\.json\.[0-9]+\.[0-9a-f]{16}\.tmp$/.test(name)) {
+          await rm(join(this.userDataDir, name), { force: true }).catch(() => undefined)
+        }
+      }
+    } catch {
+      // A missing or unreadable directory is handled by the load and write paths.
     }
   }
 
+  /**
+   * The rename is the commit point: once it succeeds the file holds the new
+   * state, memory is updated and the save reports success. The following
+   * directory fsync is best-effort durability hardening; its failure is logged,
+   * never reported as a failed save of bytes that are already in place.
+   */
   private async write(state: BoxState): Promise<BoxResult<null>> {
     if (!validState(state)) return failure('Refused to write invalid Box state.', 'invalid-state')
     const payload = `${JSON.stringify(state)}\n`
@@ -160,16 +202,18 @@ export class BoxStateService {
       handle = null
       await chmod(temporary, 0o600)
       await rename(temporary, this.file)
-      this.state = cloneState(state)
-      await this.syncParentDirectory()
-      const info = await stat(this.file)
-      if (!info.isFile()) return failure('Box state did not persist as a regular file.', 'write-failed')
-      return { ok: true, value: null }
     } catch (error) {
       if (handle) await handle.close().catch(() => undefined)
       await rm(temporary, { force: true }).catch(() => undefined)
       return failure(`Could not write Box state: ${error instanceof Error ? error.message : String(error)}`, 'write-failed')
     }
+    this.state = cloneState(state)
+    try {
+      await this.syncParentDirectory()
+    } catch (error) {
+      this.log(`Box state saved but its directory could not be synced: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    return { ok: true, value: null }
   }
 
   private async syncParentDirectory(): Promise<void> {

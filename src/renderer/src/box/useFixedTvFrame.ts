@@ -1,8 +1,9 @@
-import { useEffect, useState, type RefObject } from 'react'
+import { useLayoutEffect, useState, type RefObject } from 'react'
 
 export function useFixedTvFrame(ref: RefObject<HTMLElement | null>): { scale: number; left: number; top: number } {
   const [frame, setFrame] = useState({ scale: 1, left: 0, top: 0 })
-  useEffect(() => {
+  // Layout effect: measure before first paint so a 4K TV never flashes scale 1 at 0,0.
+  useLayoutEffect(() => {
     const element = ref.current
     if (!element) return
     const update = (): void => {

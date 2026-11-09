@@ -8314,7 +8314,9 @@ NativePlaybackStatus NativePlaybackSession::status() const {
       result.audibleProjectionQuality = projected.available
           ? NativePlaybackAudibleProjectionQuality::Current
           : NativePlaybackAudibleProjectionQuality::Unavailable;
-      if (projected.available) result.audibleProjectFrame = projected.projectFrame;
+      // Never leave the legacy graph-latency projection behind an unavailable
+      // routed clock; the Box output path supersedes it entirely.
+      result.audibleProjectFrame = projected.available ? projected.projectFrame : 0;
       result.devicePresentationLatencyFrames = projected.routeDelayFrames;
       result.totalPresentationLatencyFrames = projected.routeDelayFrames + graphLatency;
       result.presentationLatencyFrames = result.totalPresentationLatencyFrames;

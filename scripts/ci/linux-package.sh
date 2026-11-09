@@ -87,6 +87,22 @@ if [[ $stage == installed-test || $stage == all ]]; then
   }
   compare_installed /opt/SingZ "$desktop_unpacked" singz
   compare_installed /opt/singz-box "$box_unpacked" singz-box
+  # The Box CEC helper and opt-in audio service ship once, outside the asar.
+  box_audio=/opt/singz-box/resources/box-audio
+  for file in cec-input.py singz-box-audio.service singz-box-with-audio singz-box-rtprio.conf; do
+    [[ -f $box_audio/$file ]] || { echo "Missing installed Box resource: $box_audio/$file" >&2; exit 1; }
+    cmp "$box_audio/$file" "resources/linux/$file"
+  done
+  [[ -x $box_audio/singz-box-with-audio ]] || { echo 'Box audio launcher is not executable' >&2; exit 1; }
+  box_depends=$(dpkg-deb -f "${box_packages[0]}" Depends)
+  [[ ", $box_depends," =~ ,\ python3[\ ,] ]] || { echo "Box package does not depend on python3: $box_depends" >&2; exit 1; }
+  # Write the listing first so an asar failure cannot read as an empty match.
+  node_modules/.bin/asar list /opt/singz-box/resources/app.asar > "$report/box-asar-contents.txt"
+  [[ -s $report/box-asar-contents.txt ]] || { echo 'Installed Box app.asar listing is empty' >&2; exit 1; }
+  if grep -E '^/(dist|resources/linux)(/|$)' "$report/box-asar-contents.txt"; then
+    echo 'Installed Box app.asar embeds package output or duplicated Box resources' >&2
+    exit 1
+  fi
   /opt/SingZ/resources/engines/singz-analyze build-info > "$report/analyze-build-info.txt"
   /opt/SingZ/resources/engines/llama-server --version > "$report/llama-version.txt" 2>&1
   /opt/SingZ/resources/engines/crispasr --help > "$report/crispasr-help.txt" 2>&1

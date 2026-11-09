@@ -1,5 +1,11 @@
 export type BoxRoute = 'catalog' | 'details' | 'player' | 'queue' | 'settings' | 'home' | 'account'
 
+/** Back from song details returns where details was entered from. Re-entering
+ * details while already there keeps the original origin. */
+export function detailsReturnRoute(current: BoxRoute, previous: BoxRoute): BoxRoute {
+  return current === 'details' ? previous : current
+}
+
 export interface BoxSettingsNavigationState {
   applyingOutput: boolean
   hasCurrent: boolean

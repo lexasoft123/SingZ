@@ -63,6 +63,27 @@ describe('graceful TV close', () => {
     expect(api.unloadDesktopPlayback).toHaveBeenCalledWith('9')
     expect(restore).toHaveBeenCalledOnce()
   })
+  it('keeps a failed persistent detach retryable in the engine and the native client', async () => {
+    const { engine, client } = fixture(true)
+    const native = vi.spyOn(client, 'detachPersistentPlayback').mockRejectedValueOnce(new Error('detach failed'))
+    await expect(engine.detachPersistentPlayback()).rejects.toThrow('detach failed')
+    await expect(engine.detachPersistentPlayback()).resolves.toBeUndefined()
+    expect(native).toHaveBeenCalledTimes(2)
+    // A success stays the idempotent result.
+    await engine.detachPersistentPlayback()
+    expect(native).toHaveBeenCalledTimes(2)
+    native.mockRestore()
+
+    const fresh = fixture(true).client
+    let reads = 0
+    Object.defineProperty(fresh, 'statusReadTail', {
+      configurable: true,
+      get: () => reads++ === 0 ? Promise.reject(new Error('status read failed')) : Promise.resolve()
+    })
+    await expect(fresh.detachPersistentPlayback()).rejects.toThrow('status read failed')
+    await expect(fresh.detachPersistentPlayback()).resolves.toBeUndefined()
+    expect(fresh.active).toBe(false)
+  })
   it('publishes persistence only for Box with an explicit socket', () => {
     expect(boxAudioPersistentLifetime({ SINGZ_SURFACE: 'desktop', SINGZ_BOX_AUDIO_SOCKET: '/private/socket' })).toBe(false)
     expect(boxAudioPersistentLifetime({ SINGZ_SURFACE: 'box' })).toBe(false)

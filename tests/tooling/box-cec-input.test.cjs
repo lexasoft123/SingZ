@@ -15,7 +15,7 @@ test('kernel CEC follower honors adapter ownership, protocol filtering and shutd
   const result = run()
   assert.equal(result.error, undefined)
   assert.equal(result.status, 0, result.stderr + result.stdout)
-  assert.match(result.stderr, /Ran 26 tests/)
+  assert.match(result.stderr, /Ran 27 tests/)
 })
 test('foreign-initiator negative control is rejected by the behavior suite', unixOnly, () => {
   const result = run(['--negative-control'])

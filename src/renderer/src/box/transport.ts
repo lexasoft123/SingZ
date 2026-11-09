@@ -140,6 +140,7 @@ export class BoxTransport {
   private readonly pollTimer: ReturnType<typeof setInterval> | null
   private snapshot: BoxTransportSnapshot
   private readonly saveDelayMs: number
+  private readonly restoreTimeoutMs: number
   private readonly nativePlaybackEnabled?: boolean
   private browserOutputReconciled = false
   private metronomeOverride: BoxMetronomeOverride = 'song'
@@ -152,9 +153,10 @@ export class BoxTransport {
   constructor(
     private readonly api: SingzApi,
     private readonly engine: BoxEngine,
-    options: { pollMs?: number; saveDelayMs?: number; nativePlaybackEnabled?: boolean } = {}
+    options: { pollMs?: number; saveDelayMs?: number; restoreTimeoutMs?: number; nativePlaybackEnabled?: boolean } = {}
   ) {
     this.saveDelayMs = options.saveDelayMs ?? 600
+    this.restoreTimeoutMs = options.restoreTimeoutMs ?? 8000
     this.nativePlaybackEnabled = options.nativePlaybackEnabled
     this.outputArbiter = new PlaybackOutputArbiter(undefined, {
       setOutput: async sinkId => {
@@ -443,91 +445,123 @@ export class BoxTransport {
       if (!(duration > 0) || !Number.isFinite(duration)) throw new Error('Retained playback has no playable duration.')
       return recovery
     }
+    // A host read, dynamic import or native attach that never settles must not
+    // hold the persistent "Restoring" surface (or the engine queue) forever.
+    // The deadline supersedes this generation, so a late completion is refused
+    // by the same `current(generation)` guards as any other stale restore.
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let timedOut = false
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true
+        reject(new Error(t('box.retained.restoreTimedOut')))
+      }, this.restoreTimeoutMs)
+    })
+    void deadline.catch(() => undefined)
+    const work = this.restoreRetainedWork(expected, generation, validate, deadline)
+    void work.catch(() => undefined)
     try {
-      const result = await this.api.box.restoreRetainedPlayback(expected)
-      if (!this.current(generation)) return false
-      if (!result.ok) throw new Error(result.error)
-      const restore = result.value
-      const recovery = validate(restore)
-      const canonicalIdentity = JSON.stringify(recovery.descriptor.project)
-      let accepted = restore
-      this.loadingName = restore.item.name
-      this.publish()
-      const graph = await import('../audio/desktop-project-graph').then(module =>
-        module.loadDesktopProjectGraph(
-          async () => ({ ok: true, graph: restore.graph }),
-          () => this.current(generation)
-        )
-      )
-      if (!this.current(generation) || !graph.accepted) return false
-      return await this.enqueueEngine(async () => {
-        if (!this.current(generation)) return false
-        if (!this.engine.attachRetained) throw new Error('Retained native attach is unavailable.')
-        let committed = false
-        const attached = await this.engine.attachRetained(
-          graph.graphDocument,
-          async () => {
-            const current = await this.api.box.restoreRetainedPlayback(expected)
-            if (!this.current(generation)) return null
-            if (!current.ok) throw new Error(current.error)
-            const fresh = validate(current.value)
-            if (JSON.stringify(fresh.descriptor.project) !== canonicalIdentity) {
-              throw new Error('Retained playback files or canonical project identity changed before renderer attach.')
-            }
-            accepted = current.value
-            return fresh
-          },
-          () => {
-            const fresh = accepted.recovery
-            const status = fresh.status
-            const sampleRate = status.format.sampleRate
-            const settings = settingsWithTracks(
-              accepted.project.settings,
-              this.engine.getTrackStates(),
-              this.engine.masterVolume,
-              this.engine.transpose,
-              this.engine.tempo
-            )
-            settings.loop = status.loopEnabled
-            if (status.loopEnabled) {
-              settings.selection = {
-                s: Number(status.loopStartFrame) / sampleRate,
-                e: Number(status.loopEndFrame) / sampleRate
-              }
-            }
-            this.active = {
-              item: accepted.item,
-              project: { ...accepted.project, settings },
-              metadata: projectMetadata(accepted.project, Number(status.durationFrames) / sampleRate),
-              lyrics: { status: 'ready', lines: accepted.lyrics }
-            }
-            this.activeGeneration = generation
-            this.loadingName = null
-            this.appliedOutputUid = fresh.descriptor.config.provider === 'alsa'
-              ? fresh.descriptor.config.outputDeviceUid
-              : this.appliedOutputUid
-            this.browserOutputReconciled = true
-            this.routingBlocked = false
-            this.restartRequired = false
-            this.outputError = null
-            committed = true
-          }
-        )
-        return attached && committed
-      })
+      return await Promise.race([work, deadline])
     } catch (error) {
       if (this.current(generation)) {
+        if (timedOut) {
+          this.generation++
+          this.committing = false
+          if (!this.active) this.loadingName = null
+        }
         this.lastError = error instanceof Error ? error.message : String(error)
         this.publish()
       }
       throw error
     } finally {
+      clearTimeout(timer)
       if (this.current(generation)) {
         this.committing = false
         if (!this.active) this.loadingName = null
         this.publish()
       }
     }
+  }
+
+  private async restoreRetainedWork(
+    expected: { epoch: string; generation: string },
+    generation: number,
+    validate: (candidate: BoxRetainedPlaybackRestore) => BoxRetainedPlaybackRecovery,
+    deadline: Promise<never>
+  ): Promise<boolean> {
+    const result = await this.api.box.restoreRetainedPlayback(expected)
+    if (!this.current(generation)) return false
+    if (!result.ok) throw new Error(result.error)
+    const restore = result.value
+    const recovery = validate(restore)
+    const canonicalIdentity = JSON.stringify(recovery.descriptor.project)
+    let accepted = restore
+    this.loadingName = restore.item.name
+    this.publish()
+    const graph = await import('../audio/desktop-project-graph').then(module =>
+      module.loadDesktopProjectGraph(
+        async () => ({ ok: true, graph: restore.graph }),
+        () => this.current(generation)
+      )
+    )
+    if (!this.current(generation) || !graph.accepted) return false
+    // Racing the deadline inside the queued operation releases engineTail
+    // too, so a hung attach cannot block every later open or teardown.
+    return await this.enqueueEngine(() => Promise.race([deadline, (async () => {
+      if (!this.current(generation)) return false
+      if (!this.engine.attachRetained) throw new Error('Retained native attach is unavailable.')
+      let committed = false
+      const attached = await this.engine.attachRetained(
+        graph.graphDocument,
+        async () => {
+          const current = await this.api.box.restoreRetainedPlayback(expected)
+          if (!this.current(generation)) return null
+          if (!current.ok) throw new Error(current.error)
+          const fresh = validate(current.value)
+          if (JSON.stringify(fresh.descriptor.project) !== canonicalIdentity) {
+            throw new Error('Retained playback files or canonical project identity changed before renderer attach.')
+          }
+          accepted = current.value
+          return fresh
+        },
+        () => {
+          const fresh = accepted.recovery
+          const status = fresh.status
+          const sampleRate = status.format.sampleRate
+          const settings = settingsWithTracks(
+            accepted.project.settings,
+            this.engine.getTrackStates(),
+            this.engine.masterVolume,
+            this.engine.transpose,
+            this.engine.tempo
+          )
+          settings.loop = status.loopEnabled
+          if (status.loopEnabled) {
+            settings.selection = {
+              s: Number(status.loopStartFrame) / sampleRate,
+              e: Number(status.loopEndFrame) / sampleRate
+            }
+          }
+          this.active = {
+            item: accepted.item,
+            project: { ...accepted.project, settings },
+            metadata: projectMetadata(accepted.project, Number(status.durationFrames) / sampleRate),
+            lyrics: { status: 'ready', lines: accepted.lyrics }
+          }
+          this.activeGeneration = generation
+          this.loadingName = null
+          this.appliedOutputUid = fresh.descriptor.config.provider === 'alsa'
+            ? fresh.descriptor.config.outputDeviceUid
+            : this.appliedOutputUid
+          this.browserOutputReconciled = true
+          this.routingBlocked = false
+          this.restartRequired = false
+          this.outputError = null
+          committed = true
+        }
+      )
+      return attached && committed
+    })()]))
   }
 
   async open(item: ProjectListItem): Promise<boolean> {

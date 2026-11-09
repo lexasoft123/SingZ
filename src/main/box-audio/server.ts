@@ -48,7 +48,8 @@ async function prepareSocket(path: string): Promise<void> {
   // runtime-directory cleanup; unsupervised recovery requires a stopped owner.
   throw new Error('Box audio socket already exists; stop its owner before recovering the runtime directory')
 }
-export async function startBoxAudioHost(socketPath: string, runtime: BoxAudioHostRuntime): Promise<{ epoch: string; close(): Promise<void> }> {
+export interface BoxAudioHostOptions { shutdownDeadlineMs?: number }
+export async function startBoxAudioHost(socketPath: string, runtime: BoxAudioHostRuntime, options: BoxAudioHostOptions = {}): Promise<{ epoch: string; close(): Promise<void> }> {
   await prepareSocket(socketPath)
   const epoch = randomUUID()
   const clients = new Set<Socket>()
@@ -149,10 +150,22 @@ export async function startBoxAudioHost(socketPath: string, runtime: BoxAudioHos
     retained = { generation: expected.generation, descriptor: { ...descriptor, config: candidate[1].config, lanes: candidate[1].lanes } }
     return { epoch, generation: expected.generation, associated: true }
   }
-  const commandFinished = (args: unknown[], result: unknown): void => {
+  // A refused or failed mutation (an out-of-range seek, a rejected lane change)
+  // leaves the native generation live; recovery projects authoritative native
+  // status on every reconcile, so only a generation that is no longer live
+  // loses its retained/pending association context.
+  const commandFinished = async (args: unknown[], result: unknown): Promise<void> => {
     if (result && typeof result === 'object' && (result as { ok?: unknown }).ok === true) return
-    if (retained && args[1] === retained.generation) retained = null
-    for (const [key, pending] of pendingAssociations) if (pending.generation === args[1]) pendingAssociations.delete(key)
+    const generation = args[1]
+    if (retained?.generation !== generation && ![...pendingAssociations.values()].some(pending => pending.generation === generation)) return
+    let live = false
+    try {
+      const status = await (runtime.owner.playbackStatus as () => DesktopPlaybackStatus | null).call(runtime.owner)
+      live = Boolean(status && status.generation === generation && !['unloaded', 'terminal', 'quarantined'].includes(status.state))
+    } catch { /* Unknown native status keeps context; reconcile revalidates it. */ live = true }
+    if (live) return
+    if (retained && retained.generation === generation) retained = null
+    for (const [key, pending] of pendingAssociations) if (pending.generation === generation) pendingAssociations.delete(key)
   }
   const server = createServer(socket => {
     if (closed || clients.size >= 16) { socket.destroy(); return }
@@ -245,11 +258,11 @@ export async function startBoxAudioHost(socketPath: string, runtime: BoxAudioHos
                 if (typeof method !== 'function') throw new Error('Box audio method unavailable')
                 try {
                   result = await method.apply(runtime.owner, args)
-                  if (playbackMutations.has(request.method)) commandFinished(args, result)
                 } catch (error) {
-                  if (playbackMutations.has(request.method)) commandFinished(args, null)
+                  if (playbackMutations.has(request.method)) await commandFinished(args, null)
                   throw error
                 }
+                if (playbackMutations.has(request.method)) await commandFinished(args, result)
               }
             }
           } else throw new Error('Unknown Box audio command')
@@ -270,9 +283,28 @@ export async function startBoxAudioHost(socketPath: string, runtime: BoxAudioHos
       queue = queue.then(async () => { for (const id of privateIds.values()) await (runtime.owner.rendererDetached as (id: number) => unknown).call(runtime.owner, id) }).catch(() => {})
     })
   })
-  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(socketPath, () => { server.off('error', reject); resolve() }) })
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    // Bind with a private umask so the socket is never briefly group/world
+    // accessible before chmod; a readiness waiter can connect as soon as it exists.
+    let previousUmask: number | undefined
+    try { previousUmask = process.umask(0o077) } catch { /* Worker threads cannot change umask; chmod below still applies. */ }
+    try { server.listen(socketPath, () => { server.off('error', reject); resolve() }) }
+    finally { if (previousUmask !== undefined) process.umask(previousUmask) }
+  })
   await chmod(socketPath, 0o600)
   const owned = await lstat(socketPath)
+  const shutdownDeadlineMs = options.shutdownDeadlineMs ?? 10_000
+  const bounded = async (label: string, work: Promise<unknown>): Promise<void> => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const expired = new Promise<'expired'>(resolve => { timer = setTimeout(() => resolve('expired'), shutdownDeadlineMs) })
+    const observed = work.then(() => 'done' as const)
+    observed.catch(() => {}) // A rejection after the deadline must not become unhandled.
+    try {
+      if (await Promise.race([observed, expired]) === 'expired')
+        console.warn(`Box audio host shutdown: ${label} exceeded ${shutdownDeadlineMs} ms; continuing shutdown`)
+    } finally { clearTimeout(timer) }
+  }
   return { epoch, async close() {
     if (closed) return
     closed = true
@@ -280,8 +312,9 @@ export async function startBoxAudioHost(socketPath: string, runtime: BoxAudioHos
     pendingAssociations.clear()
     for (const socket of clients) socket.destroy()
     await new Promise<void>(resolve => server.close(() => resolve()))
-    await queue
-    await runtime.shutdown()
+    // A wedged native command must not hang SIGTERM past the supervisor's stop timeout.
+    await bounded('draining admitted commands', queue)
+    await bounded('native runtime shutdown', Promise.resolve().then(() => runtime.shutdown()))
     try { const current = await lstat(socketPath); if (current.ino === owned.ino && current.dev === owned.dev) await unlink(socketPath) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
   } }
 }

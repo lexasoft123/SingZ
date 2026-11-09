@@ -236,7 +236,12 @@ AudioInputResult BoxInputCapture::start(const AudioInputConfig &config,
   }
 }
 void BoxInputCapture::stop(bool) {
-  impl_->stopping.store(true, std::memory_order_release);
+  {
+    // The worker checks `stopping` under this mutex before sleeping; storing
+    // it outside the lock could land between that check and the wait.
+    std::lock_guard lock(impl_->mutex);
+    impl_->stopping.store(true, std::memory_order_release);
+  }
   impl_->changed.notify_all();
   if (impl_->worker.joinable())
     impl_->worker.join();

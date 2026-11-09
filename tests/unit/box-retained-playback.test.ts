@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeAll, describe, expect, it, vi } from 'vitest'
+import { prepareBoxLocale } from '../../src/renderer/src/box/i18n'
 import { RetainedPlaybackController, restoreRetainedEntry, routeRestoredPlayback, type RetainedRestore } from '../../src/renderer/src/box/retained-playback'
 import { retainedPlaybackSnapshot } from '../../src/shared/box-retained-playback'
 import type { BoxResult, BoxRetainedPlaybackSnapshot } from '../../src/shared/box-contract'
@@ -30,6 +31,7 @@ function fixture(onRestore?: RetainedRestore, initial = snapshot()) {
   const api = { boxAudioPersistent: true, box: { retainedPlaybackSnapshot: read, stopRetainedPlayback: stop } } as unknown as Pick<SingzApi, 'boxAudioPersistent' | 'box'>
   return { api, read, stop, controller: new RetainedPlaybackController(api, onRestore) }
 }
+beforeAll(async () => { await prepareBoxLocale('en') })
 describe('retained song controls', () => {
   it('rereads exact epoch/generation before explicit Stop and confirms released status before hiding', async () => {
     const { controller, stop } = fixture()
@@ -72,6 +74,7 @@ describe('retained song controls', () => {
     let resolve!: (value: BoxResult<BoxRetainedPlaybackSnapshot>) => void
     read.mockImplementationOnce(() => new Promise(done => { resolve = done }))
     const stopping = controller.stop()
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2))
     controller.dispose(); controller.resume(); resolve(snapshot())
     await stopping
     expect(stop).not.toHaveBeenCalled()
@@ -177,8 +180,7 @@ describe('retained recovery', () => {
     const restore = vi.fn(() => new Promise<boolean>(resolve => { finish = resolve }))
     const { controller, read, stop } = fixture(restore, recoverable())
     const restoring = controller.refresh()
-    await Promise.resolve()
-    expect(restore).toHaveBeenCalledTimes(1)
+    await vi.waitFor(() => expect(restore).toHaveBeenCalledTimes(1))
     expect(controller.getSnapshot()).toMatchObject({ busy: true, restoring: true })
     await controller.refresh(); await controller.stop()
     expect(read).toHaveBeenCalledTimes(1); expect(stop).not.toHaveBeenCalled(); expect(restore).toHaveBeenCalledTimes(1)
@@ -193,7 +195,7 @@ describe('retained recovery', () => {
       .mockResolvedValue(true)
     const { controller } = fixture(restore, recoverable())
     const first = controller.refresh()
-    await Promise.resolve()
+    await vi.waitFor(() => expect(restore).toHaveBeenCalledTimes(1))
     controller.dispose(); controller.resume()
     const listener = vi.fn()
     controller.subscribe(listener)
@@ -236,5 +238,71 @@ describe('restored player routing boundary', () => {
       readActive: () => null, route
     })).toBe(false)
     expect(route).not.toHaveBeenCalled()
+  })
+})
+
+describe('retained controller scheduling and errors', () => {
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+  it('falls back to Refresh/Stop when a restore never settles, and ignores its late completion', async () => {
+    let finish!: (restored: boolean) => void
+    const restore = vi.fn(() => new Promise<boolean>(resolve => { finish = resolve }))
+    const { api, stop } = fixture(restore, recoverable())
+    const controller = new RetainedPlaybackController(api, restore, 30)
+    const listener = vi.fn()
+    controller.subscribe(listener)
+    const refreshing = controller.refresh()
+    await Promise.race([refreshing, sleep(400)])
+    expect(controller.getSnapshot()).toMatchObject({
+      generation: '1', restoring: false, busy: false, error: 'Restoring the previous song took too long. Refresh its status or stop it.'
+    })
+    const publications = listener.mock.calls.length
+    finish(true)
+    await sleep(10)
+    expect(listener).toHaveBeenCalledTimes(publications)
+    expect(controller.getSnapshot().error).toContain('took too long')
+    await controller.stop()
+    expect(stop).toHaveBeenCalledExactlyOnceWith({ epoch: 'epoch-a', generation: '1' })
+  })
+  it('clears a stale status error after a later successful read of the same generation', async () => {
+    const { controller, read } = fixture()
+    await controller.refresh()
+    read.mockResolvedValueOnce({ ok: false, error: 'Audio status is unavailable.' })
+    await controller.refresh()
+    expect(controller.getSnapshot()).toMatchObject({ generation: '1', error: 'Audio status is unavailable.' })
+    await controller.refresh()
+    expect(controller.getSnapshot()).toMatchObject({ generation: '1', error: '' })
+  })
+  it('keeps a restore failure only for the generation it belongs to', async () => {
+    const restore = vi.fn(async () => false)
+    const { controller, read } = fixture(restore, recoverable('1'))
+    await controller.refresh()
+    expect(controller.getSnapshot().error).toContain('could not be restored')
+    read.mockResolvedValueOnce(snapshot('2'))
+    await controller.refresh()
+    expect(controller.getSnapshot()).toMatchObject({ generation: '2', error: '' })
+  })
+  it('never marks the surface busy for a background poll', async () => {
+    const { controller } = fixture()
+    const busy: boolean[] = []
+    controller.subscribe(() => busy.push(controller.getSnapshot().busy))
+    await controller.poll(); await controller.poll()
+    expect(busy.length).toBeGreaterThan(0)
+    expect(busy).not.toContain(true)
+  })
+  it('queues an explicit Stop or Refresh pressed during a background poll instead of dropping it', async () => {
+    const { controller, read, stop } = fixture()
+    await controller.poll()
+    let release!: (value: BoxResult<BoxRetainedPlaybackSnapshot>) => void
+    read.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+    const polling = controller.poll()
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2))
+    const refreshing = controller.refresh()
+    const stopping = controller.stop()
+    expect(controller.getSnapshot().busy).toBe(true)
+    release(snapshot())
+    await Promise.all([polling, refreshing, stopping])
+    expect(read).toHaveBeenCalledTimes(4)
+    expect(stop).toHaveBeenCalledExactlyOnceWith({ epoch: 'epoch-a', generation: '1' })
+    expect(controller.getSnapshot()).toMatchObject({ generation: null, busy: false, error: '' })
   })
 })

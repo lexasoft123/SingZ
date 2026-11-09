@@ -21,6 +21,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <chrono>
+#include <numeric>
 #include <string>
 #include <thread>
 #include <vector>
@@ -181,6 +182,79 @@ void renderBlock(const zdsp::ProcessorHandle& handle, Output* output,
                             1);
 }
 
+// Seeking must select the identical global polyphase as decoding from zero.
+// A fitted single-tone delay would hide this defect; compare the actual samples
+// bit for bit, including the first block after both prime and a real node demand.
+void checkSeekPhase(uint32_t sourceRate, uint32_t outputRate) {
+  const std::string path = encodeFlac(kFrames, sourceRate, 2);
+  check(!path.empty(), "the seek-phase fixture encodes");
+  if (path.empty()) return;
+  singz::DecodedAudioPrepareOptions options;
+  options.requiredSampleRate = outputRate;
+  const auto decoded = singz::prepareDecodedAudio(openRead(path), options);
+  check(decoded.ok(), "the seek-phase reference decodes");
+  if (!decoded.ok()) { std::remove(path.c_str()); return; }
+  const uint64_t up = outputRate / std::gcd(sourceRate, outputRate);
+  const uint64_t total = decoded.audio->frameCount();
+  const std::vector<uint64_t> targets{
+      0, 1, 32, up - 1, up, up + 1, 256, 257,
+      300 * up, 300 * up + 1, 300 * up + 32, 301 * up - 1,
+      301 * up, 301 * up + 1, 300 * up + 256, total - kBlock};
+  singz::StreamingLaneGroup group;
+  singz::StreamingLaneOptions feeding;
+  feeding.windowFrames = 65536;
+  feeding.targetAheadFrames = 16384;
+  feeding.primeFrames = 8192;
+  group.setOptions(feeding);
+  const bool opened = group.addLane(openRead(path), {}, outputRate) ==
+      singz::DecodedAudioStatus::Ok;
+  check(opened, "the seek-phase lane opens");
+  if (!opened) { std::remove(path.c_str()); return; }
+  std::vector<uint8_t> storage(zdsp::streamingWindowSourceStateBytes() + 64);
+  uint8_t* aligned = storage.data() +
+      ((64 - (reinterpret_cast<uintptr_t>(storage.data()) & 63u)) & 63u);
+  const auto node = zdsp::createPositionedStreamingSource(
+      {{1}, group.window(0), 0, 0},
+      {aligned, static_cast<uint32_t>(zdsp::streamingWindowSourceStateBytes())});
+  const bool prepared = node.state != nullptr && prepareSource(node, 2, outputRate);
+  check(prepared, "the seek-phase node prepares");
+  if (prepared) {
+    Output output(2);
+    for (const uint64_t target : targets) {
+      for (const bool demandSeek : {false, true}) {
+        // Start at the opposite end to force the node's published demand out
+        // of residency; merely re-reading a primed ring would miss seekLane.
+        const uint64_t initial = demandSeek
+            ? (target < total / 2 ? total - 20000 : 0) : target;
+        const bool primed = group.prime(initial) == singz::DecodedAudioStatus::Ok;
+        check(primed, "the seek-phase lane primes");
+        if (!primed) continue;
+        const uint64_t seeksBefore = group.stats(0).seeks;
+        if (demandSeek) {
+          renderBlock(node, &output, static_cast<int64_t>(target), outputRate);
+          for (int round = 0; round < 64; ++round) group.serviceOnceForTesting();
+          check(group.stats(0).seeks > seeksBefore,
+                "the seek-phase demand really seeks the decoder");
+        }
+        renderBlock(node, &output, static_cast<int64_t>(target), outputRate);
+        bool equal = true;
+        for (uint32_t channel = 0; channel < 2; ++channel)
+          for (uint32_t frame = 0; frame < kBlock; ++frame)
+            equal &= output.planes[channel][frame] ==
+                decoded.audio->channelData(channel)[target + frame];
+        if (!equal)
+          std::fprintf(stderr, "seek phase %u -> %u target %llu via %s\n",
+              sourceRate, outputRate, static_cast<unsigned long long>(target),
+              demandSeek ? "demand" : "prime");
+        check(equal, "every post-seek sample matches the continuous decoded lattice");
+      }
+    }
+    (void)node.functions->deactivate(node.state);
+  }
+  if (node.state != nullptr) (void)node.functions->destroy(node.state);
+  std::remove(path.c_str());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -299,6 +373,10 @@ int main(int argc, char** argv) {
     group.stop();
     return 0;
   }
+
+  checkSeekPhase(44100, 48000);
+  checkSeekPhase(48000, 44100);
+  checkSeekPhase(44100, 44100);
 
   const std::string wav = tempPath(".wav");
   const std::string flac = encodeFlac(kFrames, kRate, 2);

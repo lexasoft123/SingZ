@@ -1,3 +1,4 @@
+import { useSyncExternalStore } from 'react'
 import { tMicrophone } from './settings-i18n'
 import type { CaptureAnalysisWindow, CaptureInputDevice, CaptureStats, SingzApi } from '../../../shared/types'
 
@@ -16,6 +17,9 @@ export type MicrophoneSnapshot = {
 }
 type Api = Pick<SingzApi, 'captureInputDevices' | 'beginCapture' | 'cancelCapture' | 'captureState' | 'captureStats' | 'onCaptureWindow'> & Partial<Pick<SingzApi, 'askMicAccess'>>
 const MAX = (1n << 64n) - 1n
+/** Owned sessions poll levels at 5 Hz; without a session only capability is read, slowly. */
+export const MICROPHONE_LEVEL_POLL_MS = 200
+export const MICROPHONE_IDLE_POLL_MS = 2000
 let lastGeneration = 0n
 export function microphoneGeneration(): string {
   const candidate = BigInt(Date.now()) * 1000n
@@ -86,6 +90,7 @@ export class BoxMicrophones {
   private disposal?: Promise<void>
   private requested: MicrophoneSelection | null = null
   private initializedSelection = false
+  private lastPollStartedAt = Number.NEGATIVE_INFINITY
   constructor(private readonly api: Api, private readonly now: () => number = Date.now,
     private readonly generation: () => string = microphoneGeneration,
     private readonly storage: MicrophoneChannelStorage | undefined = defaultStorage()) {
@@ -96,6 +101,15 @@ export class BoxMicrophones {
   }
   enabledChannels = (uid: string): number[] => Object.hasOwn(this.value.enabledChannelsByDevice, uid) ? [...this.value.enabledChannelsByDevice[uid]] : []
   setEnabledChannels = (uid: string, channels: number[]): Promise<boolean> => {
+    const device = this.value.devices.find(device => device.uid === uid)
+    // The routing preview can list an interface hot-plugged after the last
+    // capture inventory read. Refresh once before rejecting the toggle.
+    if (!device && !this.disposed && validUid(uid)) {
+      return this.refreshDevices().then(() => this.value.devices.some(row => row.uid === uid) ? this.applyEnabledChannels(uid, channels) : false)
+    }
+    return this.applyEnabledChannels(uid, channels)
+  }
+  private applyEnabledChannels(uid: string, channels: number[]): Promise<boolean> {
     const device = this.value.devices.find(device => device.uid === uid)
     if (!Object.hasOwn(this.value.enabledChannelsByDevice, uid) && Object.keys(this.value.enabledChannelsByDevice).length >= 64) return Promise.resolve(false)
     if (this.disposed || !device || !validUid(uid) || !validChannels(channels) || channels.some(index => index >= device.channels) || this.uncertain) return Promise.resolve(false)
@@ -132,7 +146,10 @@ export class BoxMicrophones {
     this.unsubscribe = this.api.onCaptureWindow(value => {
       if (!this.disposed && this.owned?.generation === value.ownershipGeneration) this.latestWindow = { value, receivedAt: this.now() }
     })
-    this.timer = setInterval(() => { this.expire(); void this.poll() }, 200)
+    this.timer = setInterval(() => {
+      this.expire()
+      if (this.owned || this.now() - this.lastPollStartedAt >= MICROPHONE_IDLE_POLL_MS) void this.poll()
+    }, MICROPHONE_LEVEL_POLL_MS)
     void this.refreshDevices(); void this.poll()
   }
   select = (selection: MicrophoneSelection): void => {
@@ -180,6 +197,7 @@ export class BoxMicrophones {
   private async poll(): Promise<void> {
     if (this.disposed || this.polling || this.transitions > 0 || (this.value.phase === 'error' && this.owned) || this.uncertain) return
     this.polling = true
+    this.lastPollStartedAt = this.now()
     const owned = this.owned
     const intent = this.intent
     const readGeneration = this.readGeneration
@@ -290,7 +308,13 @@ export class BoxMicrophones {
         this.publish({ phase: 'starting' })
         await this.cancelOwned()
         if (this.disposed || intent !== this.intent) return false
-        const device = this.value.devices.find(device => device.uid === selection.uid)
+        let device = this.value.devices.find(device => device.uid === selection.uid)
+        if (!device || selection.channel >= device.channels || this.value.inventoryError) {
+          // Inventory may predate a hot-plugged interface; read it again before failing.
+          await this.refreshDevices()
+          if (this.disposed || intent !== this.intent) return false
+          device = this.value.devices.find(device => device.uid === selection.uid)
+        }
         if (!device || selection.channel >= device.channels || this.value.inventoryError) throw new Error(tMicrophone('box.microphones.selectedUnavailable'))
         if (this.api.askMicAccess && !await this.api.askMicAccess()) throw new Error(tMicrophone('box.microphones.permissionDenied'))
         if (this.disposed || intent !== this.intent) return false
@@ -354,4 +378,15 @@ export function microphoneSlotLevel(snapshot: MicrophoneSnapshot | undefined, sl
   const channel = active?.enabledChannels[slot]
   return active && Number.isInteger(slot) && slot >= 0 && channel !== undefined
     ? microphoneChannelLevel(snapshot, active.uid, channel, now) : null
+}
+
+const noSubscription = (): (() => void) => () => undefined
+const noSnapshot = (): undefined => undefined
+/** Subscribe a leaf surface to live microphone telemetry. An explicit snapshot
+ * (tests, static renders) wins and skips the subscription entirely. */
+export function useMicrophoneSnapshot(source?: Pick<BoxMicrophones, 'subscribe' | 'getSnapshot'>, snapshot?: MicrophoneSnapshot): MicrophoneSnapshot | undefined {
+  const live = snapshot ? undefined : source
+  const getSnapshot = live?.getSnapshot ?? noSnapshot
+  const value = useSyncExternalStore(live?.subscribe ?? noSubscription, getSnapshot, getSnapshot)
+  return snapshot ?? value
 }

@@ -17,7 +17,7 @@ import {
 } from './settings-model'
 import { RoutingSettings } from './RoutingSettings'
 import { physicalInputDevices, physicalChannels, physicalInputLevel, physicalInventoryIssue, selectPhysicalChannel, usePhysicalRoutingPreview, type PhysicalSelection, type RoutingPreview } from './physical-inputs-model'
-import { microphoneChannelLevel, type BoxMicrophones, type MicrophoneSnapshot } from './microphones'
+import { microphoneChannelLevel, useMicrophoneSnapshot, type BoxMicrophones, type MicrophoneSnapshot } from './microphones'
 import './settings.css'
 
 export interface BoxSettingsProps {
@@ -50,7 +50,7 @@ function errorText(error: unknown): string {
 export function Settings({
   metronomeOverride = null, metronomeBusy = false, metronomeError = null, onMetronomeOverride,
   microphones,
-  microphoneSnapshot,
+  microphoneSnapshot: microphoneSnapshotProp,
   inventory,
   loading,
   error,
@@ -63,6 +63,10 @@ export function Settings({
   applyUnavailableReason = null
 }: BoxSettingsProps): React.JSX.Element {
   const [routingOpen, setRoutingOpen] = useState(false)
+  // Subscribe here, not in BoxApp, so 5 Hz level telemetry re-renders only this surface.
+  const microphoneSnapshot = useMicrophoneSnapshot(microphones, microphoneSnapshotProp)
+  // Interfaces plugged in after boot must be known before a channel can be toggled or started.
+  useEffect(() => { void microphones?.refreshDevices() }, [microphones])
   const persistent = typeof window !== 'undefined' && window.singz?.boxAudioPersistent === true
   const physical = usePhysicalRoutingPreview(persistent)
   const [physicalSelection, setPhysicalSelection] = useState<PhysicalSelection>(null)
@@ -155,14 +159,14 @@ export function Settings({
     actionStatus = tSettings('box.settings.draftReady')
   }
 
-  return <main className="box-settings" data-surface="settings" aria-label={tSettings('box.settings.navigation')}>
+  return <main className="box-settings" data-surface="settings" data-routing={routingOpen ? 'open' : 'closed'} aria-label={tSettings('box.settings.navigation')}>
     <div className="settings-heading">
       <div>
         <h1>{tSettings('box.settings.title')}</h1>
         <p>{tSettings('box.settings.subtitle')}</p>
       </div>
       <div className="settings-heading-actions">
-        <Button disabled={pending || !persistent} onClick={() => setRoutingOpen(value => !value)}>{routingOpen ? 'Devices' : 'Routing'}</Button>
+        <Button data-settings-routing disabled={pending || !persistent} onClick={() => setRoutingOpen(value => !value)}>{tSettings(routingOpen ? 'box.settings.devicesView' : 'box.settings.routingView')}</Button>
         <Button data-settings-refresh disabled={routingOpen || pending || loading} onClick={() => { onRefresh(); void microphones?.refreshDevices(); void physical.controller.refresh() }}>
           {loading ? tSettings('box.settings.refreshing') : tSettings('box.settings.refresh')}
         </Button>

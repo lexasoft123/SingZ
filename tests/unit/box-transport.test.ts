@@ -1060,3 +1060,80 @@ describe('explicit preview start', () => {
     expect(engine.playing).toBe(true)
   })
 })
+
+describe('stale open() at every await', () => {
+  const winning = () => ({
+    ok: true, path: '/b/original.wav', name: 'Winning B', size: 0,
+    project: project('/b', { settings: { transpose: 6, tempo: 1.1, masterVolume: 0.4, tracks: {} } })
+  })
+  function expectWinner(transport: BoxTransport, engine: FakeEngine): void {
+    expect(transport.getSnapshot().active?.item.dir).toBe('/b')
+    expect(transport.getSnapshot()).toMatchObject({ loadingName: null, committing: false, lastError: null })
+    expect(engine.loaded).toHaveLength(1)
+    expect(engine.loaded[0].tracks[0].path?.startsWith('/b/')).toBe(true)
+    expect(engine).toMatchObject({ transpose: 6, tempo: 1.1, masterVolume: 0.4 })
+  }
+
+  it('drops an open superseded while its graph and lanes were still being read', async () => {
+    const { api } = host({ b: winning })
+    const stalled = deferred<ArrayBuffer>()
+    vi.mocked(api.readAudio).mockImplementation(async (path: string) => path.startsWith('/a/') ? stalled.promise : new ArrayBuffer(8))
+    const { transport, engine } = makeTransport(api)
+    const first = transport.open(item('/a', 'Stale A'))
+    await vi.waitFor(() => expect(api.readAudio).toHaveBeenCalled())
+    expect(await transport.open(item('/b', 'Winning B'))).toBe(true)
+    stalled.resolve(new ArrayBuffer(8))
+    expect(await first).toBe(false)
+    expect(engine.retireCount).toBe(1)
+    expectWinner(transport, engine)
+  })
+
+  it('drops an open superseded while it flushed the previous song\'s controls', async () => {
+    const { api } = host({ b: winning })
+    const { transport, engine } = makeTransport(api)
+    expect(await transport.open(item('/c', 'Current C'))).toBe(true)
+    const receipt = deferred<void>()
+    vi.spyOn(engine, 'setVolumeAccepted').mockImplementationOnce(() => receipt.promise)
+    transport.setVolume('vocals', 0.3)
+    const transpose = vi.spyOn(engine, 'setTranspose')
+    const first = transport.open(item('/a', 'Stale A'))
+    // A has read every lane and is now waiting on C's pending control receipt.
+    await vi.waitFor(() => expect(vi.mocked(api.readAudio).mock.calls.filter(([path]) => String(path).startsWith('/a/'))).toHaveLength(4))
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(transport.getSnapshot()).toMatchObject({ loadingName: 'Stale A', committing: false })
+    const second = transport.open(item('/b', 'Winning B'))
+    receipt.resolve()
+    expect(await first).toBe(false)
+    expect(await second).toBe(true)
+    expect(transpose.mock.calls).toEqual([[6]])
+    // C's open and B's open each retired once; the stale A never reached the engine.
+    expect(engine.retireCount).toBe(2)
+    expect(transport.getSnapshot().active?.item.dir).toBe('/b')
+    expect(engine.loaded).toHaveLength(2)
+    expect(engine.loaded[1].tracks[0].path?.startsWith('/b/')).toBe(true)
+    expect(engine).toMatchObject({ transpose: 6, tempo: 1.1, masterVolume: 0.4 })
+  })
+
+  const setters = ['setTraining', 'setRegion', 'setBeats', 'setMetronome', 'setTranspose', 'setTempo', 'setMasterVolumeAccepted'] as const
+  for (const [index, stalledSetter] of setters.entries()) {
+    it(`stops a superseded commit stalled in ${stalledSetter} before it touches the winner`, async () => {
+      const { api } = host({ b: winning })
+      const { transport, engine } = makeTransport(api)
+      const original = engine[stalledSetter].bind(engine) as (...args: unknown[]) => Promise<void>
+      const calls = Object.fromEntries(setters.map(name => [name, vi.spyOn(engine, name)])) as Record<typeof setters[number], ReturnType<typeof vi.spyOn>>
+      const gate = deferred<void>()
+      calls[stalledSetter].mockImplementationOnce(async (...args: unknown[]) => { await gate.promise; await original(...args) })
+      const first = transport.open(item('/a', 'Stale A'))
+      await vi.waitFor(() => expect(calls[stalledSetter]).toHaveBeenCalledTimes(1))
+      const second = transport.open(item('/b', 'Winning B'))
+      gate.resolve()
+      expect(await first).toBe(false)
+      expect(await second).toBe(true)
+      // The stale open ran every setter up to the stall and none after it.
+      for (const [position, name] of setters.entries()) {
+        expect(calls[name], name).toHaveBeenCalledTimes(position <= index ? 2 : 1)
+      }
+      expectWinner(transport, engine)
+    })
+  }
+})

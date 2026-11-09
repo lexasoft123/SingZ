@@ -132,6 +132,43 @@ describe('Box HDMI-CEC input', () => {
     expect(f.send.mock.calls.map(([v]) => v.type)).toEqual(['keyDown', 'keyUp'])
     f.child.key(0, false);f.child.key(0);expect(f.send).toHaveBeenCalledTimes(3)
   })
+  it('re-enables a key after quiet time on TVs that never send User Control Released', async () => {
+    vi.useFakeTimers();const f = fixture();f.child.ready();f.child.key(0)
+    await vi.advanceTimersByTimeAsync(101);f.child.key(0) // delayed held repeat stays swallowed
+    await vi.advanceTimersByTimeAsync(2000);f.child.key(0) // repeats keep the chord blocked
+    expect(f.send.mock.calls.map(([v]) => v.type)).toEqual(['keyDown', 'keyUp'])
+    await vi.advanceTimersByTimeAsync(2600);f.child.key(0) // no release ever arrived
+    expect(f.send.mock.calls.map(([v]) => [v.type, v.modifiers])).toEqual([['keyDown', []], ['keyUp', []], ['keyDown', []]])
+  })
+  it('decodes multibyte UTF-8 split across pipe chunks', () => {
+    const f = fixture()
+    const bytes = Buffer.from(JSON.stringify({ type: 'status', state: 'ready', detail: 'Подключено 接続' }) + '\n')
+    const split = bytes.indexOf(Buffer.from('П')) + 1 // inside the two-byte sequence
+    f.child.stdout.write(bytes.subarray(0, split)); f.child.stdout.write(bytes.subarray(split))
+    expect(f.service.snapshot()).toMatchObject({ state: 'ready', detail: 'Подключено 接続' })
+  })
+  it('backs off reconnects exponentially to a cap and resets after a healthy run', async () => {
+    vi.useFakeTimers()
+    const children: Child[] = []
+    const spawnChild = vi.fn(() => { const child = new Child(); children.push(child); return child as unknown as ChildProcess })
+    const service = new BoxCecService({ enabled: true, helperPath: '/helper', spawnChild: spawnChild as unknown as typeof spawn,
+      retryMs: 100, retryMaxMs: 400, healthyRunMs: 1000 })
+    services.push(service); service.start()
+    const delays: number[] = []
+    const failAndMeasure = async (): Promise<void> => {
+      const count = children.length
+      children[count - 1].emit('close', 1)
+      let waited = 0
+      while (children.length === count) { await vi.advanceTimersByTimeAsync(10); waited += 10 }
+      delays.push(waited)
+    }
+    for (let i = 0; i < 4; i++) await failAndMeasure()
+    expect(delays).toEqual([100, 200, 400, 400])
+    children.at(-1)!.ready()
+    await vi.advanceTimersByTimeAsync(1000)
+    await failAndMeasure()
+    expect(delays.at(-1)).toBe(100)
+  })
   it('reconnects without stale frame replay or a held key becoming a fresh action', async () => {
     vi.useFakeTimers();const f = fixture();f.child.ready();f.child.key(0);f.child.emit('close', 1)
     await vi.advanceTimersByTimeAsync(51);const next = f.children[1];next.ready();f.child.key(2);next.key(0)

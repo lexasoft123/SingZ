@@ -127,30 +127,46 @@ def choose_adapter(kernel, device=None, paths=None):
         raise Unavailable("Choose a CEC adapter named /dev/cecN.")
     candidates = []
     opened = []
+    access_error = None
     try:
         for path in ([device] if device is not None else sorted(paths if paths is not None else glob.glob('/dev/cec[0-9]*'))):
             if not re.fullmatch(r"/dev/cec[0-9]+", path):
                 continue
-            fd = kernel.open(path)
-            opened.append(fd)
-            caps = kernel.request(fd, G_CAPS, Caps())
-            identity = (bytes(caps.driver) + b" " + bytes(caps.name)).decode('ascii', 'replace').lower()
-            receiver = any(token in identity for token in ('hdmirx', 'hdmi-rx', 'hdmi_rx', 'hdmi rx', 'receiver'))
+            try:
+                fd = kernel.open(path)
+                opened.append(fd)
+                caps = kernel.request(fd, G_CAPS, Caps())
+                physical = None
+                identity = (bytes(caps.driver) + b" " + bytes(caps.name)).decode('ascii', 'replace').lower()
+                receiver = any(token in identity for token in ('hdmirx', 'hdmi-rx', 'hdmi_rx', 'hdmi rx', 'receiver'))
+                if not receiver and caps.available_log_addrs >= 1 and caps.capabilities & REQUIRED_CAPS == REQUIRED_CAPS:
+                    physical = kernel.request(fd, G_PHYS, C.c_uint16()).value
+            except OSError as error:
+                # Auto discovery must not let one unreadable adapter (EACCES,
+                # vanished node) hide another usable one. An explicit choice
+                # keeps its access error authoritative.
+                if device is not None:
+                    raise
+                access_error = access_error or error
+                continue
             if receiver:
                 if device is not None:
                     raise Unavailable("Selected CEC adapter is an HDMI receiver.")
                 continue
-            if caps.available_log_addrs < 1 or caps.capabilities & REQUIRED_CAPS != REQUIRED_CAPS:
+            if physical is None:
                 if device is not None:
                     raise Unavailable("Selected CEC adapter cannot register a playback follower.")
                 continue
-            physical = kernel.request(fd, G_PHYS, C.c_uint16()).value
             if physical in (0, 0xffff):
                 if device is not None:
                     raise Unavailable("Selected HDMI output is disconnected or is not a transmitter.")
                 continue
             candidates.append(Adapter(fd, path, caps, physical))
         if not candidates:
+            if access_error is not None:
+                # Report the access failure (e.g. missing video-group access)
+                # instead of claiming that no transmitter exists.
+                raise access_error
             raise Unavailable("No connected HDMI CEC transmitter is available.")
         if len(candidates) != 1:
             raise Unavailable("Multiple HDMI CEC outputs are connected; choose one adapter.")

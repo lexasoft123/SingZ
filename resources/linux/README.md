@@ -24,6 +24,15 @@ For manual execution after an abnormal exit, first prove that the previous host
 and all its descendants have stopped, then remove its abandoned socket from the
 private runtime directory before launching again. Do not remove a live socket
 or use socket deletion as an audio-host takeover mechanism.
+zCore's ALSA I/O threads and the song producer request `SCHED_FIFO` (at most
+priority 20). The unit sets `LimitRTPRIO=20`, but a user manager can only raise
+it to its own hard limit, which is 0 by default; the threads then log a warning
+and run at normal priority. On an appliance, copy `singz-box-rtprio.conf` to
+`/etc/systemd/system/user@<UID>.service.d/` for the appliance user only, then
+`systemctl daemon-reload` and restart that user's manager (or reboot). It grants
+a hard limit of 20 with soft limit 0, so nothing else becomes real-time unless
+it asks. Do not use `--no-sandbox`, run the service as root, or grant `@audio`
+system-wide.
 No default route is created: configure and verify the chosen hardware topology
 through trusted TV settings. FLOW 8 hardware monitoring and analog MAIN output
 remain the intended default; HDMI carries video.

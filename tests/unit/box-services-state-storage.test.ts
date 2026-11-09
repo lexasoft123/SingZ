@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module'
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { BoxStateService } from '../../src/main/box/state'
 import { BoxStorageService } from '../../src/main/box/storage'
@@ -85,19 +85,57 @@ describe('Box state', () => {
     expect(await service.setPreferences({ metronomeOverride: 'unknown' as 'off' })).toMatchObject({ ok: false, code: 'invalid-input' })
     expect(await service.getState()).toMatchObject({ ok: true, value: { preferences: { metronomeOverride: 'off' } } })
     await writeFile(file, JSON.stringify({ ...legacy, preferences: { ...legacy.preferences, metronomeOverride: 'unknown' } }))
-    expect(await new BoxStateService(dir).getState()).toMatchObject({ ok: false, code: 'invalid-state' })
+    expect(await new BoxStateService(dir, () => undefined).getState()).toMatchObject({ ok: true, value: { queue: [] } })
+    expect((await readdir(dir)).some(name => name.startsWith('box-state.json.corrupt-'))).toBe(true)
   })
 
-  it('rejects invalid persisted schemas without overwriting their bytes', async () => {
+  it.each([
+    ['schema', JSON.stringify({ version: 1, preferences: { setupComplete: false, safeAreaPercent: 2, language: 'system' }, queue: [] })],
+    ['newer version', JSON.stringify({ version: 2, preferences: { setupComplete: true, safeAreaPercent: 0, language: 'en' }, queue: [] })],
+    ['unknown keys', JSON.stringify({ version: 1, preferences: { setupComplete: true, safeAreaPercent: 0, language: 'en', future: 1 }, queue: [] })],
+    ['truncated', '{"version":1,"prefer'],
+    ['empty', '']
+  ])('quarantines %s state, preserving its bytes, and stays writable with defaults', async (_label, contents) => {
     const dir = await temp()
     const file = join(dir, 'box-state.json')
-    const bytes = Buffer.from(JSON.stringify({
-      version: 1, preferences: { setupComplete: false, safeAreaPercent: 2, language: 'system' }, queue: []
-    }))
+    const bytes = Buffer.from(contents)
     await writeFile(file, bytes)
-    const result = await new BoxStateService(dir).getState()
-    expect(result).toMatchObject({ ok: false, code: 'invalid-state' })
-    expect(await readFile(file)).toEqual(bytes)
+    const logged: string[] = []
+    const service = new BoxStateService(dir, message => logged.push(message))
+    expect(await service.getState()).toMatchObject({ ok: true, value: { preferences: { setupComplete: false }, queue: [] } })
+    const quarantined = (await readdir(dir)).filter(name => name.startsWith('box-state.json.corrupt-'))
+    expect(quarantined).toHaveLength(1)
+    expect(await readFile(join(dir, quarantined[0]))).toEqual(bytes)
+    expect(logged).toHaveLength(1)
+    expect(await service.setPreferences({ setupComplete: true })).toMatchObject({ ok: true })
+    expect(await service.saveQueue([{ kind: 'drive', id: 'after-recovery' }])).toMatchObject({ ok: true })
+    expect(await new BoxStateService(dir).getState()).toMatchObject({ ok: true, value: {
+      preferences: { setupComplete: true }, queue: [{ kind: 'drive', id: 'after-recovery' }]
+    } })
+  })
+
+  it('removes orphaned temporaries from an interrupted save on startup', async () => {
+    const dir = await temp()
+    const orphan = join(dir, 'box-state.json.4242.0123456789abcdef.tmp')
+    const unrelated = join(dir, 'other.tmp')
+    await writeFile(orphan, '{"partial')
+    await writeFile(unrelated, 'keep')
+    expect((await new BoxStateService(dir).getState()).ok).toBe(true)
+    expect((await readdir(dir)).sort()).toEqual(['other.tmp'])
+  })
+
+  it('treats the rename as the commit point and keeps memory consistent with disk', async () => {
+    if (process.platform === 'win32') return
+    const dir = await temp()
+    const logged: string[] = []
+    const service = new BoxStateService(dir, message => logged.push(message))
+    // Directory fsync failure after the replacement must not report a lost save.
+    ;(service as unknown as { syncParentDirectory: () => Promise<void> }).syncParentDirectory =
+      async () => { throw Object.assign(new Error('EIO: sync failed'), { code: 'EIO' }) }
+    expect(await service.setPreferences({ setupComplete: true })).toMatchObject({ ok: true })
+    expect(await service.getState()).toMatchObject({ ok: true, value: { preferences: { setupComplete: true } } })
+    expect(await new BoxStateService(dir).getState()).toMatchObject({ ok: true, value: { preferences: { setupComplete: true } } })
+    expect(logged).toEqual([expect.stringContaining('could not be synced')])
   })
 
   it('reports write failure and never claims an in-memory save succeeded', async () => {
@@ -210,6 +248,46 @@ describe('Box managed cache', () => {
     publish(hub, { openingLocalProjectDir: null })
     expect((await storage.removeCachedProject(project)).ok).toBe(true)
     expect((await stat(join(external, 'project.json'))).isFile()).toBe(true)
+  })
+
+  it('sweeps interrupted removals from dead or idle owners but not a live foreign process', async () => {
+    const userData = await temp()
+    const hub = new BoxControllerHub()
+    const storage = new BoxStorageService(userData, hub)
+    const dead = await marker(storage.cacheRoot, '.singz-removing-999999999-0123456789abcdef')
+    await mkdir(join(dead, 'stems', 'nested'), { recursive: true })
+    await writeFile(join(dead, 'stems', 'nested', 'vocals.wav'), Buffer.alloc(1024))
+    const own = await marker(storage.cacheRoot, `.singz-removing-${process.pid}-fedcba9876543210`)
+    const live = await marker(storage.cacheRoot, `.singz-removing-${process.ppid}-00112233445566aa`)
+    const adopting = await marker(storage.cacheRoot, '.singz-adopting-keep')
+    expect((await storage.snapshot()).ok).toBe(true)
+    const names = (await readdir(storage.cacheRoot)).sort()
+    expect(names).not.toContain(basename(dead))
+    expect(names).not.toContain(basename(own))
+    expect(names).toEqual([basename(live), basename(adopting)].sort())
+  })
+
+  it('restores a project whose removal failed instead of stranding it in quarantine', async () => {
+    const userData = await temp()
+    const hub = new BoxControllerHub()
+    const storage = new BoxStorageService(userData, hub)
+    publish(hub)
+    const project = await marker(storage.cacheRoot, 'too-many-files')
+    await Promise.all(Array.from({ length: 4100 }, (_, index) => writeFile(join(project, `f${index}`), '')))
+    expect(await storage.removeCachedProject(project)).toMatchObject({ ok: false, code: 'storage-write-failed' })
+    expect((await stat(join(project, 'project.json'))).isFile()).toBe(true)
+    expect((await readdir(storage.cacheRoot)).filter(name => name.startsWith('.singz-removing-'))).toEqual([])
+  })
+
+  it('filters internal entries before applying the project listing bound', async () => {
+    const userData = await temp()
+    const storage = new BoxStorageService(userData, new BoxControllerHub())
+    await mkdir(storage.cacheRoot, { recursive: true })
+    await Promise.all(Array.from({ length: 512 }, (_, index) => mkdir(join(storage.cacheRoot, `.singz-adopting-${index}`))))
+    await marker(storage.cacheRoot, 'real-project')
+    const snapshot = await storage.snapshot()
+    expect(snapshot.ok).toBe(true)
+    if (snapshot.ok) expect(snapshot.value.projects.map(project => project.driveId)).toEqual(['real-project'])
   })
 
   it('handles a missing cache root with actual filesystem capacity', async () => {

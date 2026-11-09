@@ -7,6 +7,18 @@ const MAX_PROJECTS = 512
 const MAX_PROJECT_ENTRIES = 4096
 const MAX_PROJECT_DEPTH = 8
 const MAX_DOCUMENT_BYTES = 1024 * 1024
+const REMOVING_PREFIX = '.singz-removing-'
+const REMOVING_NAME = /^\.singz-removing-([0-9]{1,10})-[0-9a-f]{16}$/
+
+const processAlive = (pid: number): boolean => {
+  if (pid === process.pid) return true
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
 
 export type BoxCacheGuard = {
   beginCacheRemoval(dir: string): BoxResult<number>
@@ -19,6 +31,7 @@ const record = (value: unknown): value is Record<string, unknown> =>
 
 export class BoxStorageService {
   readonly cacheRoot: string
+  private removalsInFlight = 0
 
   constructor(
     readonly userDataDir: string,
@@ -32,9 +45,10 @@ export class BoxStorageService {
     try {
       await mkdir(this.userDataDir, { recursive: true, mode: 0o700 })
       const projects: BoxStorageSnapshot['projects'] = []
-      const entries = await this.rootEntries()
+      await this.sweepInterruptedRemovals()
+      const entries = (await this.rootEntries())
+        .filter(entry => entry.isDirectory() && !entry.isSymbolicLink() && !entry.name.startsWith('.singz-'))
       for (const entry of entries.slice(0, MAX_PROJECTS)) {
-        if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name.startsWith('.singz-')) continue
         const dir = join(this.cacheRoot, entry.name)
         const cached = await this.inspectCacheEntry(dir)
         if (!cached) continue
@@ -72,14 +86,63 @@ export class BoxStorageService {
         const result = await this.preRemoveGuard(dir)
         if (!result.ok) return result
       }
-      const quarantine = join(this.cacheRoot, `.singz-removing-${process.pid}-${randomBytes(8).toString('hex')}`)
-      await rename(dir, quarantine)
-      await this.removeTree(quarantine)
+      const quarantine = join(this.cacheRoot, `${REMOVING_PREFIX}${process.pid}-${randomBytes(8).toString('hex')}`)
+      this.removalsInFlight++
+      try {
+        await rename(dir, quarantine)
+        try {
+          await this.removeTree(quarantine)
+        } catch (error) {
+          await this.restoreAfterFailedRemoval(quarantine, dir)
+          throw error
+        }
+      } finally {
+        this.removalsInFlight--
+      }
       return { ok: true, value: null }
     } catch (error) {
       return failure(`Could not remove cached project: ${error instanceof Error ? error.message : String(error)}`, 'storage-write-failed')
     } finally {
       this.guard.endCacheRemoval(reservation.value)
+    }
+  }
+
+  /**
+   * A failed removal leaves the project visible and retryable when it is still
+   * recognizable; a partly deleted remainder stays quarantined for the sweep.
+   */
+  private async restoreAfterFailedRemoval(quarantine: string, dir: string): Promise<void> {
+    try {
+      if (await this.projectMarker(join(quarantine, 'project.json')) === null) return
+      await lstat(dir).then(() => { throw new Error('destination reappeared') }, (error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ENOENT') throw error
+      })
+      await rename(quarantine, dir)
+    } catch {
+      // The sweep reclaims the quarantined bytes later.
+    }
+  }
+
+  /**
+   * Reclaims quarantines left by a crash or failed removal. Only entries whose
+   * creating process is gone, or this process's own while it has no removal in
+   * flight, are touched. Best-effort: failures leave the entry for next time.
+   */
+  private async sweepInterruptedRemovals(): Promise<void> {
+    if (this.removalsInFlight > 0) return
+    let entries: Awaited<ReturnType<BoxStorageService['rootEntries']>>
+    try {
+      entries = await this.rootEntries()
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const match = REMOVING_NAME.exec(entry.name)
+      if (!match || entry.isSymbolicLink()) continue
+      const pid = Number(match[1])
+      if (pid !== process.pid && processAlive(pid)) continue
+      if (this.removalsInFlight > 0) return
+      await this.removeTree(join(this.cacheRoot, entry.name)).catch(() => undefined)
     }
   }
 

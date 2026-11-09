@@ -317,6 +317,42 @@ describe('Electron capture addon build', () => {
     )
     expect(built.status).toBe(0)
     expect(built.stdout.trim()).toBe(captureSourceFingerprint(root, electronVersion))
+    // Builder (explicit target) and loader agree for both the Linux Box build,
+    // which compiles LoopZ routing, and Desktop builds, which do not.
+    const byPlatform = new Map<string, string>()
+    for (const platform of ['linux', 'darwin', 'win32'] as const) {
+      const targeted = spawnSync(
+        process.execPath,
+        [resolve(root, 'scripts/build-capture-addon.cjs'), `${platform}-${process.arch}`, '--print-source-fingerprint'],
+        { cwd: root, encoding: 'utf8' }
+      )
+      expect(targeted.status, targeted.stderr).toBe(0)
+      expect(targeted.stdout.trim()).toBe(captureSourceFingerprint(root, electronVersion, platform))
+      byPlatform.set(platform, targeted.stdout.trim())
+    }
+    expect(byPlatform.get('darwin')).toBe(byPlatform.get('win32'))
+    expect(byPlatform.get('linux')).not.toBe(byPlatform.get('darwin'))
+  })
+
+  it('requires a clean LoopZ checkout only where Box LoopZ routing is compiled', () => {
+    const gitlink = require('../../scripts/zcore-gitlink.cjs') as {
+      boxLoopzRoutingEnabled(platform: string): boolean
+      loopzFingerprintInputs(root: string, platform: string): unknown
+    }
+    // An unrelated empty directory has no LoopZ submodule (nor any Git index).
+    const missing = mkdtempSync(join(tmpdir(), 'singz-no-loopz-'))
+    try {
+      expect(gitlink.boxLoopzRoutingEnabled('linux')).toBe(true)
+      for (const platform of ['darwin', 'win32']) {
+        expect(gitlink.boxLoopzRoutingEnabled(platform)).toBe(false)
+        expect(gitlink.loopzFingerprintInputs(missing, platform)).toBeNull()
+      }
+      expect(() => gitlink.loopzFingerprintInputs(missing, 'linux')).toThrow()
+    } finally {
+      rmSync(missing, { recursive: true, force: true })
+    }
+    expect(read('scripts/build-capture-addon.cjs'))
+      .toContain("-DSINGZ_BOX_LOOPZ_ROUTING=${boxLoopzRoutingEnabled(platform) ? 'ON' : 'OFF'}")
   })
 
   it('invalidates a checksummed artifact after its bytes are corrupted', () => {
