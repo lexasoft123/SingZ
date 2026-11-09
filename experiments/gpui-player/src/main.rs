@@ -5,6 +5,11 @@ mod ui_desktop_lifecycle;
 mod ui_project_key;
 #[cfg(feature="ui-tests")]
 mod ui_region;
+#[cfg(feature="ui-tests")]
+mod ui_catalog;
+#[cfg(feature="ui-tests")]
+mod ui_song_output;
+mod restart_cycle;
 mod region_gesture;
 mod region_host;
 mod karaoke_host;
@@ -328,6 +333,8 @@ enum DeferredAudio {
 }
 #[derive(Clone)]
 struct SourceResume {
+    restart_cycle: restart_cycle::RestartCycle,
+    play_serial: u64,
     position: f32,
     playing: bool,
     mode: Option<source_jobs::Mode>,
@@ -655,6 +662,7 @@ struct Player {
     fade: [f32; tracks::LANE_SLOTS],
     looping: bool,
     region: region_host::State,
+    restart_cycle: restart_cycle::RestartCycle,
     view_start: f32,
     view_end: f32,
     transpose: i32,
@@ -1083,25 +1091,27 @@ impl Player {
                 header::HeaderEvent::TitleClosed => this.focus_after_title=true,
                 header::HeaderEvent::Rename(name) => this.rename_title(name.clone(), cx),
                 header::HeaderEvent::Songs => {
-                    if this.project.is_some() { this.native_command("pause".into(),cx); }
-                    if this.backend.is_none() { this.playing=false; }
-                    if this.screen==Screen::Training {
-                        this.screen=if this.songs_catalog||!this.loaded_song {Screen::Library}else{Screen::Player};
+                    if this.screen==Screen::Training && (this.songs_catalog||!this.loaded_song) {
+                        this.enter_desktop_catalog(cx);
+                    } else {
+                        if this.project.is_some() {this.native_command("pause".into(),cx);}
+                        if this.backend.is_none() {this.playing=false;}
+                        if this.screen==Screen::Training {this.screen=Screen::Player;}
                     }
                 }
                 header::HeaderEvent::Catalog => {
                     if this.loaded_song {
                         let opening=this.screen!=Screen::Library;
                         if opening {
-                            if this.project.is_some() {this.native_command("pause".into(),cx);}
-                            if this.backend.is_none() {this.playing=false;}
+                            this.enter_desktop_catalog(cx);
+                        } else {
+                            this.songs_catalog=false;
+                            this.screen=Screen::Player;
                         }
-                        this.songs_catalog=opening;
-                        this.screen=if opening {Screen::Library}else{Screen::Player};
                     }
                 }
                 header::HeaderEvent::Settings => this.toggle_desktop_settings(window,cx),
-                header::HeaderEvent::Training => {if this.screen!=Screen::Training{this.songs_catalog=this.screen==Screen::Library;}this.training.update(cx,|training,cx|training.on_open(cx));this.screen=Screen::Training;if this.project.is_some()||this.playing{this.native_command("pause".into(),cx);}},
+                header::HeaderEvent::Training => {if this.screen!=Screen::Training{this.songs_catalog=this.screen==Screen::Library;}this.restart_cycle.observe_component(false);this.transport.update(cx,|transport,cx|transport.set_output_mounted(false,this.master_volume,cx));this.training.update(cx,|training,cx|training.on_open(cx));this.screen=Screen::Training;if this.project.is_some()||this.playing{this.native_command("pause".into(),cx);}},
                 header::HeaderEvent::Log => this.open_diagnostics(cx),
                 header::HeaderEvent::Engine => {
                     if this.engine_status.as_ref().is_some_and(|s|!s.ok&&!s.needs_models){this.open_engine_setup(cx);}
@@ -1494,6 +1504,7 @@ impl Player {
             fade: [1.; tracks::LANE_SLOTS],
             looping: false,
             region: region_host::State::default(),
+            restart_cycle: restart_cycle::RestartCycle::default(),
             view_start: 0.,
             view_end: 1.,
             transpose: 0,
@@ -1781,6 +1792,8 @@ impl Player {
             let was_splitting=self.source_split.is_some();
             let resume = self.source_split.and_then(|mode| {
                 self.project.as_ref().map(|project| SourceResume {
+                    restart_cycle:self.restart_cycle.snapshot(self.region_target().selection,self.playing),
+                    play_serial:self.native_play_serial,
                     position: self.position,
                     playing: self.playing,
                     mode: Some(mode),
@@ -1903,8 +1916,17 @@ impl Player {
                 }
             }
         }
-        if resume.playing && seek_queued {
+        // A newer explicit Pause (for example opening Catalog during Rename)
+        // supersedes the playing intent captured before this native handoff.
+        if resume.playing && seek_queued && resume.play_serial==self.native_play_serial {
             self.native_command("play-flat".into(), cx);
+        }
+        if resume.mode.is_none() {
+            // Internal rename/import recovery pauses/reopens the native graph,
+            // while React keeps the same engine, selection and playing state.
+            self.restart_cycle.restore_same_song(resume.restart_cycle,self.region_target().selection,self.playing);
+        } else {
+            self.restart_cycle.reset();
         }
         self.transport.update(cx, |t, cx| {
             t.set_native_mix(self.master_volume, cx);
@@ -1970,6 +1992,8 @@ impl Player {
             .unwrap_or((project.dir.clone(), project.metadata_hash.clone()));
         let active_dir = project.dir.clone();
         let resume = SourceResume {
+            restart_cycle:self.restart_cycle.snapshot(self.region_target().selection,self.playing),
+            play_serial:self.native_play_serial,
             position: self.position,
             playing: self.playing,
             mode: None,
@@ -2023,7 +2047,7 @@ impl Player {
         self.cancel_sidebar_lyrics(cx);self.lyrics_search_pending=None;
         if let Some(backend)=&self.backend{backend.cancel_lyrics_search();}
         let (Some(backend),Some(project),Some(root))=(&self.backend,&self.project,self.library_import_root.clone())else{return;};
-        let resume=SourceResume{position:self.position,playing:self.playing,mode:None,title:None,dirty:self.edit_seq!=self.saved_seq,mix:self.current_mix(project)};
+        let resume=SourceResume{restart_cycle:self.restart_cycle.snapshot(self.region_target().selection,self.playing),play_serial:self.native_play_serial,position:self.position,playing:self.playing,mode:None,title:None,dirty:self.edit_seq!=self.saved_seq,mix:self.current_mix(project)};
         match backend.import_library(project,root,mode){
             Ok(epoch)=>{self.native_epoch=epoch;self.import_pending=Some(ImportPending{epoch,resume,mode});
                 self.beat_job=None;self.beat_result=None;
@@ -2232,7 +2256,11 @@ impl Player {
         if self.defer_metronome_navigation(path.clone(), false, cx) {
             return;
         }
+        let previous_epoch=self.native_epoch;
         self.open_project_now(path, cx);
+        if self.native_epoch!=previous_epoch {
+            self.transport.update(cx,|transport,cx|transport.reset_song_output(cx));
+        }
     }
     fn open_project_now(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
         self.open_project_verified(path,None,cx);
@@ -2622,6 +2650,9 @@ impl Player {
                     else if let Some(error)=self.project.as_ref().and_then(|p|p.lyrics_error.clone()){self.lyrics_sidebar.update(cx,|s,cx|s.failure(error,cx));}
                     else{self.lyrics_sidebar.update(cx,|s,cx|s.idle(cx));}
                     if resume.is_none() {
+                        // Source loadPath clears selection before restoring it,
+                        // even when the new song has identical saved bounds.
+                        self.restart_cycle.reset();
                         self.screen = Screen::Player;
                         self.songs_catalog = false;
                     }
@@ -2677,6 +2708,11 @@ impl Player {
                             self.native_anchor=Some((status.position,status.sampled_at));self.native_graph=status.graph_generation;
                             self.pending_seek=None;self.native_floor=None;
                         }else{
+                            // Source handleImport reanchors song.path; its keyed
+                            // SongOutput remounts before adopting the new mix.
+                            if self.project.as_ref().is_some_and(|project|project.dir!=outcome.dir) {
+                                self.transport.update(cx,|transport,cx|transport.reset_song_output(cx));
+                            }
                             self.open_source_output(source_jobs::Output{publication_hash:None,path:outcome.dir.clone(),working:false,target:None},Some(pending.resume),cx);
                         }
                         if let Some(warning)=outcome.warning {self.notice=Some(warning);}
@@ -2714,6 +2750,11 @@ impl Player {
                         } else {
                             dir
                         };
+                        // A metadata-only working rename leaves song.path
+                        // intact; a successful directory move reanchors it.
+                        if self.project.as_ref().is_some_and(|project|project.dir!=path) {
+                            self.transport.update(cx,|transport,cx|transport.reset_song_output(cx));
+                        }
                         self.open_source_output(
                             source_jobs::Output {
                                 publication_hash: None,
@@ -2904,7 +2945,7 @@ impl Player {
                     self.shape_cache.borrow_mut().clear();
                     *self.layout_cache.borrow_mut() = None;
                     self.lyric_hits.borrow_mut().clear();
-                    self.screen = Screen::Library;
+                    self.enter_desktop_catalog(cx);
                     self.notice = Some(error);
                 }
                 _ => {}
@@ -3277,8 +3318,17 @@ impl Player {
         let play_intent = match command.as_str() {"play"|"play-flat"=>Some(true),"pause"=>Some(false),_=>None};
         if play_intent==Some(false) {self.region.play_requested=false;}
         let serial=self.native_play_serial+1;
+        if play_intent==Some(false) && (self.rename_pending.is_some()
+            || self.import_pending.as_ref().is_some_and(|pending|pending.mode==project_import::Mode::Move)) {
+            // These operations already retire the old helper. Their new epoch
+            // has no playback connection yet, so retain the user's Pause as
+            // semantic intent rather than sending it to an unavailable graph.
+            self.native_play_serial=serial;self.native_play_intent=None;
+            if self.playing {self.restart_cycle.reset();}
+            self.playing=false;self.native_anchor=None;cx.notify();return;
+        }
         if self.defer_monitor(DeferredAudio::Command(command.clone()), cx) {
-            if self.notice.is_none() {if let Some(target)=play_intent {self.native_play_serial=serial;self.native_play_intent=Some((target,serial));self.playing=target;}}
+            if self.notice.is_none() {if let Some(target)=play_intent {self.native_play_serial=serial;self.native_play_intent=Some((target,serial));if self.playing!=target {self.restart_cycle.reset();}self.playing=target;}}
             return;
         }
         if !self.audio_available()&&!command.starts_with("master ")&&!command.starts_with("rate "){return;}
@@ -3294,7 +3344,7 @@ impl Player {
             let result=if play_intent.is_some(){backend.playback(self.native_epoch,serial,command)}else{backend.control(self.native_epoch,command)};
             match result {
                 Ok(()) => {
-                    if let Some(target)=play_intent {self.native_play_serial=serial;self.native_play_intent=Some((target,serial));self.playing=target;}
+                    if let Some(target)=play_intent {self.native_play_serial=serial;self.native_play_intent=Some((target,serial));if self.playing!=target {self.restart_cycle.reset();}self.playing=target;}
                     if edited {
                         self.edit_seq += 1;
                     }
@@ -4004,7 +4054,7 @@ impl Player {
                 self.native_command(if playing { "pause" } else { "play" }.into(), cx);
             }
             Restart => {
-                self.position = 0.;
+                self.position = self.restart_cycle.next(self.region_target().selection,self.playing);
                 self.seek_native(cx);
             }
             Loop => {
@@ -4917,9 +4967,16 @@ impl Render for Player {
             strip.set_position(self.position, cx);
             strip.set_view(self.view_start, self.view_end, cx);
         });
+        let transport_mounted=self.screen==Screen::Player || matches!(self.screen,Screen::Settings|Screen::Log|Screen::Models)&&self.previous_screen==Screen::Player;
+        self.restart_cycle.observe_component(transport_mounted);
+        self.restart_cycle.observe(self.region_target().selection,self.playing);
         let transport_rate = self.requested_rate();
         let region_looping=self.region_target().looping;
+        let output_mounted=(self.screen==Screen::Player
+            ||(matches!(self.screen,Screen::Settings|Screen::Log|Screen::Models)&&self.previous_screen==Screen::Player))
+            &&(!self.loading||self.source_pending.is_some()||self.audio_recovery.is_some());
         self.transport.update(cx, |transport, cx| {
+            transport.set_output_mounted(output_mounted,self.master_volume,cx);
             transport.set_state(
                 self.position,
                 self.playing,
@@ -4929,6 +4986,9 @@ impl Render for Player {
             );
             transport.set_karaoke(self.karaoke, cx);
             transport.set_tempo(transport_rate.0, cx);
+            let (peak,clips)=self.timing_status.as_ref().map(|status|
+                (if self.playing&&status.playing {status.output_peak}else{0.},status.output_clipped_blocks)).unwrap_or((0.,0));
+            transport.set_native_peak(peak,clips,modal_open,cx);
         });
         let base_catalog = self.screen == Screen::Library
             || matches!(self.screen, Screen::Settings | Screen::Log | Screen::Models)
@@ -5365,9 +5425,7 @@ impl Render for Player {
                     return;
                 }
                 if this.backend.is_some() && command && event.keystroke.key == "f" {
-                    if this.project.is_some() {this.native_command("pause".into(),cx);}
-                    this.songs_catalog = true;
-                    this.screen = Screen::Library;
+                    this.enter_desktop_catalog(cx);
                     this.library
                         .update(cx, |library, cx| library.focus_search(window, cx));
                     cx.notify();

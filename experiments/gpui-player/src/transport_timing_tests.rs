@@ -16,6 +16,8 @@ fn grid() -> Beats {
 }
 fn status(seconds: f64, total: usize, per_bar: usize, pre: f64) -> Status {
     Status {
+        output_peak:0.,
+        output_clipped_blocks:0,
         explicit_graph: false,
         graph_nodes: 0,
         graph_connections: 0,

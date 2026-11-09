@@ -170,6 +170,8 @@ impl Player {
                 working: self.source_working,
                 target: self.source_target.clone(),
                 resume: SourceResume {
+                    restart_cycle:self.restart_cycle.snapshot(self.region_target().selection,false),
+                    play_serial:self.native_play_serial,
                     position: self.position,
                     playing: false,
                     mode: None,

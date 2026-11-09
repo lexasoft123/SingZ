@@ -6,6 +6,25 @@ controls are implemented as a first slice; see `NATIVE_INTEGRATION.md`. Full vis
 and the remaining backend features remain separate.
 Common native controls live in sibling `singz-ui/gpui`.
 
+Desktop controls follow-up (2026-11-09): Restart alternates selection/song start,
+retains that cycle through a playing-song rename, and honors a catalog Pause
+during rename. Native callback command tickets now acknowledge actual command
+application, including a one-frame region that starts and finishes in one callback;
+rejected queue admission cannot cancel an accepted request, and cancelled I/O
+failures retire the reply stream. Five focused Rust playback tests, normal host
+check, focused region tests and the full native playback-session suite pass.
+The shared Song output popup adds the source dB range, half-dB steps, mute restore,
+unity reset and native peak/clip telemetry. Catalog entry rescans external changes;
+cards/delete confirmations support Tab/Shift-Tab and Enter, with focus recovery
+when a row disappears. The final combined hidden/muted workflow passes in two
+independent launches at both desktop sizes (20 captures), including Save/reopen,
+region boundaries, Karaoke preferences, output controls and catalog actions.
+Four output/catalog captures were inspected. Foreground identity stayed unchanged;
+25 observed helpers retired and 68 app CPU samples had no sampling errors.
+Evidence: `/tmp/singz-controls-20261109/ui-v3/{source,result}.json` and stage
+receipts/captures. Runtime clipping under a nonzero signal, live FPS, matched
+production visual parity and platform/hardware qualification remain unproven.
+
 Draft follow-up (2026-11-09): the combined hidden graph workflow now passes in
 two independent launches with twelve captures. Karaoke defaults off, persists
 through the existing preference worker, restores on with an initially enabled

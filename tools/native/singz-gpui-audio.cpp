@@ -819,6 +819,9 @@ int run(int argc, char** argv) {
       << ",\"baseHostRenderFailures\":" << baseHost.renderFailures
       << ",\"cueOutputLatencyMs\":" << (baseHost.format.sampleRate>0?(baseHost.latency.outputDeviceFrames+baseHost.latency.bufferFrames+baseHost.latency.externalRouteFrames)*1000./baseHost.format.sampleRate:0)
       << ",\"state\":" << static_cast<unsigned>(s.state)
+      << ",\"transportGeneration\":" << s.transportGeneration
+      << ",\"transportCommandsQueued\":" << s.transportCommandsQueued
+      << ",\"transportCommandsApplied\":" << s.transportCommandsApplied
       << ",\"playing\":" << ((s.transportState == NativePlaybackTransportState::Playing || s.transportState == NativePlaybackTransportState::PreRoll)?"true":"false")
       << ",\"position\":" << std::max(0.,position)
       << ",\"duration\":" << (rate>0 ? s.durationFrames/rate : 0)
@@ -840,7 +843,7 @@ int run(int argc, char** argv) {
       << ",\"countInBeatsPerBar\":" << s.countInBeatsPerBar << ",\"renderedProjectFrame\":" << s.renderedProjectFrame
       << ",\"presentationLatencyFrames\":" << s.totalPresentationLatencyFrames
       << ",\"countingIn\":" << (countingIn?"true":"false")
-      << ",\"outputPeak\":" << s.outputPeak << ",\"referenceGain\":" << s.referenceGain
+      << ",\"outputPeak\":" << s.outputPeak << ",\"outputClippedBlocks\":" << s.outputClippedBlocks << ",\"referenceGain\":" << s.referenceGain
       << ",\"previewClicksEnqueued\":" << s.previewClicksEnqueued << ",\"previewClicksStarted\":" << s.previewClicksStarted
       << ",\"previewClicksCompleted\":" << s.previewClicksCompleted;
     std::cout << ",\"countInHeard\":";

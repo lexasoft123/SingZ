@@ -46,6 +46,9 @@ impl Player {
         let Some(gesture)=self.region.gesture.as_mut() else{return;};
         if gesture.epoch!=self.native_epoch {self.region.gesture=None;return;}
         if let Some(selection)=gesture.moved(x) {
+            // React receives a new selection object for each drag update,
+            // including an update that republishes equal bounds.
+            self.restart_cycle.reset();
             self.request_region(Target{selection:Some(selection),..self.region_target()},cx);
         }
     }

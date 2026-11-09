@@ -5690,6 +5690,31 @@ void preparedStartOverridePreservesRebuildPosition() {
   std::remove(longerWav.c_str());
 }
 
+void resumeTicketAcknowledgesRegionFinishInTheSameCallback() {
+  const std::string wav=writeWav("resume-ticket-region.wav",1,std::vector<float>(256,0.2F));
+  auto backend=std::make_unique<ManualOutputBackend>();auto* fake=backend.get();
+  singz::NativePlaybackSession session(std::move(backend));
+  auto request=config();request.initialTransport.startPaused=true;
+  request.initialTransport.region=singz::NativePlaybackInitialLoop{0,1};
+  std::vector<singz::NativePlaybackLaneSource> lanes;lanes.push_back(lane("song",wav));
+  CHECK(session.prepare(std::move(request),std::move(lanes),85).ok);
+  CHECK(session.openOutput(85).ok && session.start(85).ok && fake->drive(4));
+  const auto paused=session.status();
+  CHECK(paused.transportGeneration==85 && paused.transportState==singz::NativePlaybackTransportState::Paused);
+  CHECK(paused.transportCommandsQueued==paused.transportCommandsApplied);
+  CHECK(session.resume(85).ok);
+  const auto queued=session.status();
+  CHECK(queued.transportGeneration==85 && queued.transportCommandsQueued!=queued.transportCommandsApplied);
+  CHECK(fake->drive(8));
+  const auto completed=session.status();
+  // Resume and the one-frame non-loop region both finish inside this block.
+  // State alone is still Paused; only the ticket proves this Resume ran.
+  CHECK(completed.transportGeneration==85 && completed.transportState==singz::NativePlaybackTransportState::Paused);
+  CHECK(completed.renderedProjectFrame==1);
+  CHECK(completed.transportCommandsApplied==queued.transportCommandsQueued);
+  CHECK(session.unload(85).ok);std::remove(wav.c_str());
+}
+
 void nonLoopRegionsStopOnTheActualSampleBoundary() {
   const std::string wav = writeWav("nonloop-region.wav", 1, std::vector<float>(256, 0.2F));
   auto backend = std::make_unique<ManualOutputBackend>();
@@ -7518,6 +7543,7 @@ void portableGraphDocumentMaterializesActualTopology() {
 
 int main() {
   if (std::getenv("SINGZ_NATIVE_PLAYBACK_REGIONS") != nullptr) {
+    resumeTicketAcknowledgesRegionFinishInTheSameCallback();
     nonLoopRegionsStopOnTheActualSampleBoundary();
     nonLoopRegionSurvivesRateSwapAndRetainedRestore();
     std::puts("native playback region tests: ok");
@@ -7578,6 +7604,7 @@ int main() {
   hostBoundariesWithoutSourceMovementKeepRendering();
   telemetryCollisionPublishesCoherentGeneration();
   preparedStartOverridePreservesRebuildPosition();
+  resumeTicketAcknowledgesRegionFinishInTheSameCallback();
   nonLoopRegionsStopOnTheActualSampleBoundary();
   nonLoopRegionSurvivesRateSwapAndRetainedRestore();
   preparedInitialTransportIsAtomicAtFirstCallback();

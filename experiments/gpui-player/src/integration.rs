@@ -349,6 +349,8 @@ pub fn fixture_mode() -> bool {
 }
 #[derive(Clone, Debug)]
 pub struct Status {
+    pub output_peak:f32,
+    pub output_clipped_blocks:u64,
     pub explicit_graph: bool,
     pub graph_nodes: u64,
     pub graph_connections: u64,
@@ -422,6 +424,11 @@ impl Status {
         let start = number(v.get("loopStart"), 0., 0., 86400. * 365.)?;
         let end = number(v.get("loopEnd"), 0., 0., 86400. * 365.)?;
         Ok(Self {
+            output_peak:number(v.get("outputPeak"),0.,0.,f32::MAX)?,
+            output_clipped_blocks:match v.get("outputClippedBlocks") {
+                None=>0,
+                Some(value)=>value.as_u64().filter(|count|*count<=u32::MAX as u64).context("Invalid native output clip count")?,
+            },
             #[cfg(feature="ui-tests")]
             observed_lanes: v["lanes"].clone(),
             counting_in: v["countingIn"] == true,
@@ -481,6 +488,33 @@ fn publish_playback_receipt(events:&mpsc::Sender<Event>,telemetry:&Mutex<Option<
     *telemetry.lock().unwrap_or_else(|e|e.into_inner())=Some((epoch,status.clone()));
     let _=events.send(Event::Playback(epoch,serial,status));
 }
+#[derive(Debug)]
+enum PlaybackReceipt {Applied(Status),Cancelled}
+fn settle_playback_receipt(
+    mut reply:Value, timeout:Duration,
+    current:impl Fn()->bool, mut poll:impl FnMut()->Result<Value>,
+) -> Result<PlaybackReceipt> {
+    let generation=reply["transportGeneration"].as_u64().filter(|g|*g>0).context("Native playback receipt has no transport generation")?;
+    let ticket=reply["transportCommandsQueued"].as_u64().and_then(|n|u32::try_from(n).ok()).context("Native playback receipt has no command ticket")?;
+    let deadline=Instant::now()+timeout;
+    loop {
+        let status=Status::parse(&reply)?;
+        anyhow::ensure!(reply["transportGeneration"].as_u64()==Some(generation),"Native playback receipt changed generation");
+        let applied=reply["transportCommandsApplied"].as_u64().and_then(|n|u32::try_from(n).ok()).context("Native playback receipt has no callback acknowledgement")?;
+        // At most 64 mailbox entries are outstanding, so a half-range unsigned
+        // comparison is unambiguous even when the u32 cursor wraps. This proves
+        // this Resume ran, including Resume + a region end in one callback.
+        let acknowledged=applied.wrapping_sub(ticket)<(1u32<<31);
+        anyhow::ensure!(acknowledged||Instant::now()<deadline,"Native playback command was not acknowledged before its receipt deadline");
+        // Cancellation is clean only after the preceding reply was fully read
+        // and validated. I/O, parse, and deadline failures remain transport faults.
+        if !current() {return Ok(PlaybackReceipt::Cancelled);}
+        if acknowledged {return Ok(PlaybackReceipt::Applied(status));}
+        thread::sleep(Duration::from_millis(2));
+        reply=poll()?;
+    }
+}
+
 enum RateFailure{Refused(String),Transport(String)}
 fn same_rate_ownership(before:&Value,after:&Value)->Result<()> {
     for key in ["graphGeneration","laneSetRevision","carryRevision","laneIds","lanes","masterGain","referenceGain","outputUid","trainingOnly","emptyProject","duration","looping","loopStart","loopEnd","regionEnabled","regionStart","regionEnd","parked","physicalOutputReleased"]{
@@ -677,7 +711,7 @@ enum Request {
     Open(u64, PathBuf, Option<crate::beat::Metronome>, Option<crate::project_delete::Target>, Option<OpenCustomOverlay>),
     Control(u64, String),
     RestoreSeek(u64,f32),
-    Playback(u64,u64,String),
+    Playback(u64,u64,String,Arc<AtomicBool>),
     Rename(u64, PathBuf, String, String),
     ImportLibrary(u64, crate::project_import::Input),
     Delete(u64, u64, bool, crate::project_delete::Target, Arc<AtomicU8>),
@@ -686,6 +720,7 @@ enum Request {
 pub struct Backend {
     saves: save_worker::Service,
     carry_intent:Arc<AtomicU64>,
+    playback_intent:Arc<AtomicU64>,
     lanes_intent: Arc<AtomicU64>,
     delete_inspect_requests: SyncSender<(PathBuf, PathBuf, u64)>,
     delete_inspect_worker: Option<thread::JoinHandle<()>>,
@@ -760,6 +795,7 @@ impl Backend {
                 }
             }
         });
+        let playback_intent=Arc::new(AtomicU64::new(0));let playback_worker=playback_intent.clone();
         let training_intent = Arc::new(AtomicU64::new(0));
         let intent = training_intent.clone();
         let beat_intent = Arc::new(AtomicU64::new(0));
@@ -769,10 +805,11 @@ impl Backend {
         let lyrics_align_intent=Arc::new(AtomicU64::new(0));let lyrics_align=lyrics_align_intent.clone();
         let lyrics_search_intent=Arc::new(AtomicU64::new(0));let lyrics_search=lyrics_search_intent.clone();
         let copy_handoff=Arc::new(AtomicU64::new(0));let worker_handoff=copy_handoff.clone();
-        let worker = thread::spawn(move || worker(rx, events, e, a, pending, text, intent, beat_cancel, lyrics_preview,lyrics_align,lyrics_search,worker_handoff,save_reanchors));
+        let worker = thread::spawn(move || worker(rx, events, e, a, pending, text, intent, beat_cancel, lyrics_preview,lyrics_align,lyrics_search,worker_handoff,save_reanchors,playback_worker));
         Self {
             saves,
             carry_intent:Arc::new(AtomicU64::new(0)),
+            playback_intent,
             lanes_intent:Arc::new(AtomicU64::new(0)),
             delete_inspect_requests,
             delete_inspect_worker: Some(delete_inspect_worker),
@@ -1017,7 +1054,7 @@ impl Backend {
     pub fn cancel_beat_detection(&self) {self.beat_intent.store(0, Ordering::Release);}
     pub fn playback(&self,epoch:u64,serial:u64,command:String)->Result<()> {
         validate_playback_command(&command)?;
-        self.requests.try_send(Request::Playback(epoch,serial,command)).context("Native command queue is full")
+        admit_playback_request(&self.requests,&self.playback_intent,serial,|armed|Request::Playback(epoch,serial,command,armed))
     }
     pub fn region(&self,epoch:u64,serial:u64,target:crate::region_gesture::Target,duration:f32)->Result<()> {
         self.requests.try_send(Request::Region(epoch,serial,target,duration)).context("Native command queue is full")
@@ -1079,6 +1116,15 @@ fn inspect_delete_requests(requests:Receiver<(PathBuf,PathBuf,u64)>,events:mpsc:
 }
 fn delete_cancelled(was_loaded:bool,epoch:u64,latest:&AtomicU64,alive:&AtomicBool)->bool {
     !alive.load(Ordering::Acquire)||(was_loaded&&latest.load(Ordering::Acquire)!=epoch)
+}
+/// A rejected bounded-queue send cannot revoke an in-flight playback receipt.
+fn admit_playback_request<T>(requests:&SyncSender<T>,intent:&AtomicU64,serial:u64,make:impl FnOnce(Arc<AtomicBool>)->T)->Result<()> {
+    let armed=Arc::new(AtomicBool::new(false));
+    requests.try_send(make(armed.clone())).map_err(|_|anyhow::anyhow!("Native command queue is full"))?;
+    // Publish only after admission: a failed send cannot transiently cancel an
+    // in-flight receipt. The consumer cannot run this packet before publication.
+    intent.fetch_max(serial,Ordering::AcqRel);
+    armed.store(true,Ordering::Release);Ok(())
 }
 /// Admit before revoking playback. A failed bounded-queue send must not expose
 /// even a transient new epoch to the running connection or project workers.
@@ -1847,6 +1893,7 @@ fn worker(
     lyrics_search_intent: Arc<AtomicU64>,
     copy_handoff: Arc<AtomicU64>,
     save_reanchors: save_worker::Reanchors,
+    playback_intent: Arc<AtomicU64>,
 ) {
     let _=events.send(Event::LyricsCapabilities(crate::lyrics_align::capability()));
     let (audio_preferences, prefs_error) = match crate::audio_devices::load() {
@@ -2665,16 +2712,34 @@ fn worker(
                         events.send(Event::MetronomePrefsSaved(epoch, serial, preference_error));
                 }
             }
-            Ok(Request::Playback(epoch,serial,command))=>{
-                if epoch!=latest.load(Ordering::Acquire){continue;}
-                let result=(||->Result<Status>{validate_playback_command(&command)?;connection.as_mut().filter(|child|child.epoch==epoch).context("Native playback project is unavailable")?.command(&command)})();
+            Ok(Request::Playback(epoch,serial,command,armed))=>{
+                while !armed.load(Ordering::Acquire)&&alive.load(Ordering::Acquire){thread::yield_now();}
+                let current=||alive.load(Ordering::Acquire)&&latest.load(Ordering::Acquire)==epoch&&playback_intent.load(Ordering::Acquire)==serial;
+                if !current(){continue;}
+                let result=(||->Result<PlaybackReceipt>{
+                    validate_playback_command(&command)?;
+                    let child=connection.as_mut().filter(|child|child.epoch==epoch).context("Native playback project is unavailable")?;
+                    let reply=child.raw_command_for(&command,Duration::from_secs(10))?;
+                    let receipt=settle_playback_receipt(reply,Duration::from_secs(2),current,
+                        ||child.raw_command_for("status",Duration::from_secs(10)))?;
+                    if let PlaybackReceipt::Applied(status)=&receipt {
+                        admit_lane_revision(&mut child.lane_revision,status)?;
+                        admit_carry_revision(&mut child.carry_revision,status)?;
+                    }
+                    Ok(receipt)
+                })();
                 match result{
-                    Ok(status)=>publish_playback_receipt(&events,&telemetry,epoch,serial,status),
+                    Ok(PlaybackReceipt::Applied(status)) if current()=>publish_playback_receipt(&events,&telemetry,epoch,serial,status),
+                    Ok(_)=>{}, // Fully drained clean cancellation; keep the helper for Pause.
                     Err(error)=>{
+                        // A failed read may leave a late reply in the stream.
+                        // Supersession cannot make that connection safe to reuse.
                         drop(connection.take());
                         training_intent.store(0,Ordering::Release);active_training=None;
                         *telemetry.lock().unwrap_or_else(|e|e.into_inner())=None;
-                        let _=events.send(Event::TransportFailed(epoch,error.to_string()));
+                        if alive.load(Ordering::Acquire)&&epoch==latest.load(Ordering::Acquire) {
+                            let _=events.send(Event::TransportFailed(epoch,error.to_string()));
+                        }
                     }
                 }
             }
@@ -2797,6 +2862,74 @@ mod tests {
     use super::*;
     fn captured_lane_reply()->Value {
         serde_json::from_str(include_str!("../../../tests/shared/gpui-first-lane-default-reply.json")).unwrap()
+    }
+    #[test]
+    fn native_output_meter_admits_real_overload_and_rejects_malformed_telemetry() {
+        let mut packet=captured_lane_reply();
+        packet["outputPeak"]=serde_json::json!(3.25);
+        packet["outputClippedBlocks"]=serde_json::json!(17);
+        let status=Status::parse(&packet).unwrap();
+        assert_eq!(status.output_peak,3.25);
+        assert_eq!(status.output_clipped_blocks,17);
+        for (key,value) in [("outputPeak",serde_json::json!(-1)),("outputPeak",serde_json::json!("loud")),
+            ("outputClippedBlocks",serde_json::json!(-1)),("outputClippedBlocks",serde_json::json!(0.5)),
+            ("outputClippedBlocks",serde_json::json!(4294967296_u64))] {
+            let mut bad=packet.clone();bad[key]=value;assert!(Status::parse(&bad).is_err(),"{key}");
+        }
+    }
+    #[test]
+    fn playback_admission_rejection_cannot_revoke_current_and_armed_packets_publish_intent() {
+        let intent=Arc::new(AtomicU64::new(8));
+        let (sender,requests)=mpsc::sync_channel(1);
+        sender.send(Arc::new(AtomicBool::new(true))).unwrap();
+        assert!(admit_playback_request(&sender,&intent,9,|armed|{
+            assert_eq!(intent.load(Ordering::Acquire),8);armed
+        }).is_err());
+        assert_eq!(intent.load(Ordering::Acquire),8);
+        requests.recv().unwrap();
+        let consumer_intent=intent.clone();
+        let consumer=thread::spawn(move||{
+            let armed=requests.recv_timeout(Duration::from_secs(1)).unwrap();
+            let deadline=Instant::now()+Duration::from_secs(1);
+            while !armed.load(Ordering::Acquire) {
+                assert!(Instant::now()<deadline);thread::yield_now();
+            }
+            assert_eq!(consumer_intent.load(Ordering::Acquire),10);
+        });
+        admit_playback_request(&sender,&intent,10,|armed|armed).unwrap();
+        consumer.join().unwrap();
+    }
+    #[test]
+    fn playback_receipt_requires_own_callback_ticket_including_wrap_and_immediate_completion() {
+        let reply=|queued:u32,applied:u32,playing:bool| {
+            let mut value=captured_lane_reply();value["transportGeneration"]=7.into();
+            value["transportCommandsQueued"]=queued.into();value["transportCommandsApplied"]=applied.into();
+            value["playing"]=playing.into();value
+        };
+        let mut polls=0;
+        let settled=settle_playback_receipt(reply(2,1,false),Duration::from_secs(1),||true,||{polls+=1;Ok(reply(2,2,true))}).unwrap();
+        assert!(matches!(settled,PlaybackReceipt::Applied(status) if status.playing));assert_eq!(polls,1);
+        // Identical paused endpoint is accepted only after THIS Resume ticket.
+        let completed=settle_playback_receipt(reply(4,3,false),Duration::from_secs(1),||true,||Ok(reply(4,4,false))).unwrap();
+        assert!(matches!(completed,PlaybackReceipt::Applied(status) if !status.playing));
+        assert!(settle_playback_receipt(reply(4,3,false),Duration::ZERO,||true,||panic!("Old endpoint is not a receipt")).is_err());
+        assert!(settle_playback_receipt(reply(4,3,false),Duration::ZERO,||false,||panic!("Supersession cannot hide a receipt timeout")).is_err());
+        assert!(matches!(settle_playback_receipt(reply(4,4,true),Duration::from_secs(1),||false,||panic!("Superseded request must not poll")).unwrap(),PlaybackReceipt::Cancelled));
+        let intent=AtomicU64::new(8);
+        assert!(settle_playback_receipt(reply(4,3,false),Duration::from_secs(1),||intent.load(Ordering::Acquire)==8,
+            ||{intent.store(9,Ordering::Release);Ok(reply(4,4,true))}).is_ok_and(|receipt|matches!(receipt,PlaybackReceipt::Cancelled)));
+        intent.store(8,Ordering::Release);
+        assert!(settle_playback_receipt(reply(4,3,false),Duration::from_secs(1),||intent.load(Ordering::Acquire)==8,
+            ||{intent.store(9,Ordering::Release);Err(anyhow::anyhow!("Late read timed out"))}).is_err());
+        intent.store(8,Ordering::Release);
+        assert!(settle_playback_receipt(reply(4,3,false),Duration::from_secs(1),||intent.load(Ordering::Acquire)==8,
+            ||{intent.store(9,Ordering::Release);Ok(serde_json::json!({"protocol":1,"ok":false,"error":"Broken reply"}))}).is_err());
+        assert!(settle_playback_receipt(reply(0,u32::MAX,false),Duration::from_secs(1),||true,||Ok(reply(0,0,false))).is_ok());
+        assert!(settle_playback_receipt(reply(u32::MAX,0,false),Duration::ZERO,||true,||panic!("Wrapped ticket was already applied")).is_ok());
+        let mut missing=reply(1,1,true);missing.as_object_mut().unwrap().remove("transportCommandsApplied");
+        assert!(settle_playback_receipt(missing,Duration::ZERO,||true,||panic!()).is_err());
+        assert!(settle_playback_receipt(captured_lane_reply(),Duration::ZERO,||true,||panic!()).is_err());
+        assert!(settle_playback_receipt(reply(4,3,false),Duration::from_secs(1),||true,||{let mut newer=reply(4,4,true);newer["transportGeneration"]=8.into();Ok(newer)}).is_err());
     }
     #[test]
     fn rejected_output_requires_fresh_proof_that_the_previous_transport_survived() {

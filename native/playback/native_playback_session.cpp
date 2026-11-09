@@ -8479,6 +8479,8 @@ NativePlaybackStatus NativePlaybackSession::status() const {
           NativePlaybackTransportTelemetryQuality::Initial;
     }
     result.transportGeneration = telemetry.generation;
+    result.transportCommandsQueued = transport.commandWrite.load(std::memory_order_acquire);
+    result.transportCommandsApplied = telemetry.commandsApplied;
     result.transportState = telemetry.state;
     result.lastTransportBoundary = nativeBoundaryReason(telemetry.lastBoundary);
     result.renderedProjectFrame = telemetry.projectFrame;

@@ -4,13 +4,13 @@ use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use singz_uikit::tokens::{DIM, FAINT, TEXT};
-use singz_uikit::{catalog_delete, catalog_search, ghost_pill, production_scrollbar, text_link};
+use singz_uikit::{catalog_project_card, catalog_project_delete, catalog_search, ghost_pill, production_scrollbar, text_link};
 use std::{
     sync::{Arc, OnceLock},
     time::Instant,
 };
 
-actions!(singz_library_drive, [ActivateDrive]);
+actions!(singz_library_drive, [ActivateDrive, NextCatalogFocus, PreviousCatalogFocus]);
 
 /// Source-browser rounded bars plus their shadows, before the CSS scaleY.
 /// Kept separately so animation transforms the complete primitive, including
@@ -36,6 +36,7 @@ fn equalizer_primitives() -> &'static [Arc<RenderImage>] {
     })
 }
 
+#[derive(Clone)]
 pub enum LibraryEvent {
     OpenSong {
         title: SharedString,
@@ -153,6 +154,7 @@ pub struct LibraryScreen {
     drive_focus: std::cell::RefCell<std::collections::HashMap<String, FocusHandle>>,
     drive_bounds: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, Bounds<Pixels>>>>,
     drive_keyboard: std::rc::Rc<std::cell::Cell<bool>>,
+    card_focus: std::cell::RefCell<std::collections::HashMap<(std::path::PathBuf,bool),FocusHandle>>,
     search: Entity<InputState>,
     query: String,
     open_song: Option<SharedString>,
@@ -215,6 +217,8 @@ impl LibraryScreen {
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.bind_keys([
+            KeyBinding::new("tab", NextCatalogFocus, Some("SingZLibrary")),
+            KeyBinding::new("shift-tab", PreviousCatalogFocus, Some("SingZLibrary")),
             KeyBinding::new("enter", ActivateDrive, Some("SingZLibraryDrive")),
             KeyBinding::new("space", ActivateDrive, Some("SingZLibraryDrive")),
         ]);
@@ -232,6 +236,7 @@ impl LibraryScreen {
             drive_focus: Default::default(),
             drive_bounds: Default::default(),
             drive_keyboard: Default::default(),
+            card_focus: Default::default(),
             guides: Default::default(),
             page_scroll: ScrollHandle::new(),
             songs: if crate::integration::fixture_mode() {
@@ -410,6 +415,42 @@ impl LibraryScreen {
         let focus = self.search.read(cx).focus_handle(cx);
         focus.focus(window, cx);
     }
+    fn song_key(&self, index:usize)->std::path::PathBuf {
+        self.songs[index].project_dir.clone().unwrap_or_else(||format!("demo-{index}").into())
+    }
+    fn filtered_indices(&self)->Vec<usize> {
+        let query=self.query.trim().to_lowercase();
+        self.songs.iter().enumerate().filter(|(_,song)|query.is_empty()||song.title.to_lowercase().contains(&query)).map(|(i,_)|i).collect()
+    }
+    fn card_focus_handle(&self,key:std::path::PathBuf,delete:bool,cx:&mut Context<Self>)->FocusHandle {
+        self.card_focus.borrow_mut().entry((key,delete)).or_insert_with(||cx.focus_handle().tab_stop(true)).clone()
+    }
+    fn catalog_tab(&mut self,backwards:bool,window:&mut Window,cx:&mut Context<Self>)->bool {
+        let indices=self.filtered_indices();
+        let order=indices.iter().flat_map(|index|[(self.song_key(*index),false),(self.song_key(*index),true)]).collect::<Vec<_>>();
+        let current=self.card_focus.borrow().iter().find(|(_,f)|f.is_focused(window)).map(|(key,_)|key.clone());
+        let search=self.search.read(cx).focus_handle(cx).is_focused(window);
+        let target=if search && !backwards {order.first().cloned()}
+            else if let Some(current)=current {
+                let Some(index)=order.iter().position(|key|key==&current) else{return false;};
+                if backwards {
+                    if index==0 {self.focus_search(window,cx);cx.notify();return true;}
+                    order.get(index-1).cloned()
+                }else{order.get(index+1).cloned()}
+            }else{None};
+        let Some((key,delete))=target else{return false;};
+        let index=indices.iter().position(|i|self.song_key(*i)==key).unwrap();
+        let width=(f32::from(window.viewport_size().width)-80.).min(880.).max(240.);
+        let columns=((width-14.+12.)/252.).floor().max(1.) as usize;
+        self.scroll.scroll_to_item(index/columns);
+        self.reveal_guide(self.scroll.bounds());
+        self.card_focus_handle(key,delete,cx).focus(window,cx);
+        cx.notify();true
+    }
+    #[cfg(feature="ui-tests")]
+    pub fn focused_project(&self,window:&Window)->Option<(std::path::PathBuf,bool)> {
+        self.card_focus.borrow().iter().find(|(_,f)|f.is_focused(window)).map(|(key,_)|key.clone())
+    }
     #[cfg(feature = "ui-tests")]
     pub fn search_focused(&self, window: &Window, cx: &App) -> bool {
         self.search.read(cx).focus_handle(cx).is_focused(window)
@@ -445,21 +486,29 @@ impl LibraryScreen {
         ];
         // Native Project.dir is authoritative even when its playable audio is
         // outside the project or the project contains only stems.
-        let project_path = song.project_dir.clone();
-        let delete_dir = song.project_dir.clone();
-        let delete_title = song.title.clone();
-        let delete = catalog_delete(("library-delete", index))
+        let key=self.song_key(index);
+        let open_focus=self.card_focus_handle(key.clone(),false,cx);
+        let delete_focus=self.card_focus_handle(key.clone(),true,cx);
+        let mouse_open=open_focus.clone();let mouse_delete=delete_focus.clone();
+        let open_event=if let Some(path)=&song.project_dir {LibraryEvent::OpenProject(path.clone())}
+            else{LibraryEvent::OpenSong{title:SONGS[index].title.into(),artist:SONGS[index].artist.into()}};
+        let open_key_event=open_event.clone();
+        let delete_event=if let Some(path)=&song.project_dir {LibraryEvent::DeleteProject(path.clone())}
+            else{LibraryEvent::DeleteSong{title:song.title.clone().into()}};
+        let delete_key_event=delete_event.clone();
+        let delete = catalog_project_delete(format!("library-delete:{key:?}"))
+            .track_focus(&delete_focus).tab_index(0)
             .absolute()
             .right(px(7.))
             .top(px(22.5))
-            .on_click(cx.listener(move |_, _, _, cx| {
-                if let Some(dir) = &delete_dir {
-                    cx.emit(LibraryEvent::DeleteProject(dir.clone()));
-                } else {
-                    cx.emit(LibraryEvent::DeleteSong {
-                        title: delete_title.clone().into(),
-                    });
+            .on_mouse_down(MouseButton::Left,cx.listener(move|_,_,window,cx|mouse_delete.focus(window,cx)))
+            .on_key_down(cx.listener(move|_,event:&KeyDownEvent,_,cx|{
+                if matches!(event.keystroke.key.as_str(),"enter"|"space") {
+                    cx.emit(delete_key_event.clone());cx.stop_propagation();
                 }
+            }))
+            .on_click(cx.listener(move |_, _, _, cx| {
+                cx.emit(delete_event.clone());
                 cx.stop_propagation();
             }));
         #[cfg(feature = "ui-tests")]
@@ -490,31 +539,16 @@ impl LibraryScreen {
             .h(px(68.))
             .flex_shrink_0()
             .child(
-                div()
-                    .id(("library-song", index))
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .pl(px(11.))
-                    .pr(px(38.))
-                    .py(px(11.))
-                    .rounded(px(15.))
-                    .border_1()
-                    .border_color(rgba(0xffffff0d))
-                    .bg(rgba(0xffffff0b))
-                    .cursor_pointer()
-                    .hover(|s| s.border_color(rgb(0xffa028)))
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        if let Some(path) = project_path.clone() {
-                            cx.emit(LibraryEvent::OpenProject(path));
-                            return;
+                catalog_project_card(format!("library-song:{key:?}"))
+                    .track_focus(&open_focus).tab_index(0)
+                    .on_mouse_down(MouseButton::Left,cx.listener(move|_,_,window,cx|mouse_open.focus(window,cx)))
+                    .on_key_down(cx.listener(move|_,event:&KeyDownEvent,_,cx|{
+                        if matches!(event.keystroke.key.as_str(),"enter"|"space") {
+                            cx.emit(open_key_event.clone());cx.stop_propagation();
                         }
-                        let song = &SONGS[index];
-                        cx.emit(LibraryEvent::OpenSong {
-                            title: song.title.into(),
-                            artist: song.artist.into(),
-                        });
+                    }))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(open_event.clone());
                     }))
                     .child(
                         div()
@@ -661,15 +695,15 @@ impl Render for LibraryScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(feature = "ui-tests")]
         self.delete_bounds.borrow_mut().clear();
+        #[cfg(feature = "ui-tests")]
+        self.project_bounds.borrow_mut().clear();
         self.drive_bounds.borrow_mut().clear();
-        let query = self.query.trim().to_lowercase();
-        let indices: Vec<usize> = self
-            .songs
-            .iter()
-            .enumerate()
-            .filter(|(_, song)| query.is_empty() || song.title.to_lowercase().contains(&query))
-            .map(|(index, _)| index)
-            .collect();
+        let indices=self.filtered_indices();
+        let visible=indices.iter().map(|index|self.song_key(*index)).collect::<std::collections::HashSet<_>>();
+        let existing=(0..self.songs.len()).map(|index|self.song_key(index)).collect::<std::collections::HashSet<_>>();
+        let lost_focus=self.card_focus.borrow().iter().any(|((key,_),f)|f.is_focused(window)&&!visible.contains(key));
+        if lost_focus {self.focus_search(window,cx);}
+        self.card_focus.borrow_mut().retain(|(key,_),_|existing.contains(key));
         let width = (f32::from(window.viewport_size().width) - 80.)
             .min(880.)
             .max(240.);
@@ -723,6 +757,22 @@ impl Render for LibraryScreen {
         // not a pixel-parity claim for the broken reference state.
         div()
             .id("library-screen")
+            .key_context("SingZLibrary")
+            .on_action(cx.listener(|this,_:&NextCatalogFocus,window,cx|{
+                if this.catalog_tab(false,window,cx) {cx.stop_propagation();} else {cx.propagate();}
+            }))
+            .on_action(cx.listener(|this,_:&PreviousCatalogFocus,window,cx|{
+                if this.catalog_tab(true,window,cx) {cx.stop_propagation();} else {cx.propagate();}
+            }))
+            // Input's more specific Tab binding dispatches an editing action
+            // before raw key listeners. Own navigation during action capture
+            // so search and cards share the same real keyboard route.
+            .capture_action(cx.listener(|this,_:&gpui_kit::component::input::IndentInline,window,cx|{
+                if this.catalog_tab(false,window,cx) {cx.stop_propagation();} else {cx.propagate();}
+            }))
+            .capture_action(cx.listener(|this,_:&gpui_kit::component::input::OutdentInline,window,cx|{
+                if this.catalog_tab(true,window,cx) {cx.stop_propagation();} else {cx.propagate();}
+            }))
             .track_scroll(&self.page_scroll)
             .w_full()
             .flex_1()

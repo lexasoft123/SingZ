@@ -116,7 +116,9 @@ impl Player {
         }
         self.position = position;
         self.duration = status.duration;
-        self.playing = self.native_play_intent.map_or(status.playing,|(target,_)|target);
+        let playing=self.native_play_intent.map_or(status.playing,|(target,_)|target);
+        if self.playing!=playing {self.restart_cycle.reset();}
+        self.playing = playing;
         self.native_rate = status.rate;
         self.native_seek_count = status.seek_count;
         self.native_loop_count = status.loop_count;

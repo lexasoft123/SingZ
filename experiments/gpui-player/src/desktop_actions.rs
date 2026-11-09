@@ -2,6 +2,17 @@
 use super::*;
 
 impl Player {
+    pub(super) fn enter_desktop_catalog(&mut self, cx:&mut Context<Self>) {
+        self.restart_cycle.observe_component(false);
+        self.transport.update(cx,|transport,cx|transport.set_output_mounted(false,self.master_volume,cx));
+        if self.project.is_some() {self.native_command("pause".into(),cx);}
+        if self.backend.is_none() {self.playing=false;}
+        self.songs_catalog=true;
+        self.screen=Screen::Library;
+        // Retain the current rows until the authoritative worker scan arrives.
+        if let Some(backend)=&self.backend {backend.catalog();}
+        cx.notify();
+    }
     pub(super) fn desktop_woke(&mut self, _cx: &mut Context<Self>) {
         if self.desktop_shutdown_done {
             return;

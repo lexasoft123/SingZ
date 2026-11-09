@@ -1,14 +1,38 @@
 //! Production Transport.tsx composition. State is controlled by the host;
 //! engine-only actions are events, never simulated successful native operations.
 use gpui_kit::component::input::{InputEvent, InputState};
-use gpui_kit::prelude::FluentBuilder;
+use gpui_kit::prelude::*;
 use gpui_kit::*;
 use singz_uikit::tokens::{ACCENT, DIM, FAINT, LINE, TEXT};
 use singz_uikit::{TransportIcon, colored_icon, tracked_label, tracked_text};
 use singz_uikit::{
-    disabled_bpm_field, ghost_pill, karaoke_pill, metronome_button, modal_card, play_button,
-    range_slider, round_button, song_output_trigger, split_pill, transport_badge, transport_chip,
+    disabled_bpm_field, ghost_pill, karaoke_pill, metronome_button, play_button,
+    round_button, split_pill, transport_badge, transport_chip,
 };
+
+fn song_db(gain:f32)->f32 {if gain>0. {20.*gain.log10()}else{f32::NEG_INFINITY}}
+fn song_gain(db:f32)->f32 {if db<=-60. {0.}else{10_f32.powf(db/20.)}}
+fn song_fader_db(gain:f32)->f32 {((song_db(gain).clamp(-60.,12.)*2.).round()/2.).clamp(-60.,12.)}
+fn remember_song_gain(gain:f32,previous:&mut f32){if gain>0. {*previous=gain;}}
+fn muted_song_gain(gain:f32,previous:f32)->f32 {if gain>0. {0.}else{previous}}
+fn song_gain_label(gain:f32)->String {
+    let db=song_db(gain);
+    if !db.is_finite(){"−∞ dB".into()}
+    else {format!("{}{:.1} dB",if db>0.05 {"+"}else{""},if db.abs()<0.05 {0.}else{db})}
+}
+#[derive(Default)]
+struct OutputMeter {held:f32,clipped:bool,previous_count:u64}
+impl OutputMeter {
+    fn sample(&mut self,peak:f32,count:u64,decay:f32){
+        self.held=peak.max(self.held*decay);
+        self.clipped|=count!=self.previous_count&&count>0;
+        self.previous_count=count;
+    }
+    fn reset_clip(&mut self,count:u64){self.clipped=false;self.previous_count=count;}
+}
+fn reset_song_output_memory(previous:&mut f32,meter:&mut OutputMeter){
+    *previous=1.;*meter=OutputMeter::default();
+}
 
 #[derive(Clone, Copy)]
 pub enum TransportEvent {
@@ -55,6 +79,15 @@ pub struct Transport {
     _bpm_focus_subscription: Subscription,
     volume: f32,
     output_open: bool,
+    output_pre_mute:f32,
+    output_focus:FocusHandle,
+    output_control_focus:[FocusHandle;4],
+    output_focus_pending:bool,
+    output_trigger:std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+    output_meter:OutputMeter,
+    output_latest_clips:u64,
+    output_mounted:bool,
+    output_meter_tick:std::time::Instant,
     split_open: bool,
     progress: Option<(String, f32)>,
     progress_started: std::time::Instant,
@@ -130,6 +163,15 @@ impl Transport {
             _bpm_focus_subscription: focus_subscription,
             volume: 1.,
             output_open: false,
+            output_pre_mute:1.,
+            output_focus:cx.focus_handle().tab_stop(true),
+            output_control_focus:std::array::from_fn(|_|cx.focus_handle().tab_stop(true)),
+            output_focus_pending:false,
+            output_trigger:Default::default(),
+            output_meter:OutputMeter::default(),
+            output_latest_clips:0,
+            output_mounted:false,
+            output_meter_tick:std::time::Instant::now(),
             split_open: false,
             progress: None,
             progress_started: std::time::Instant::now(),
@@ -463,6 +505,7 @@ impl Transport {
     }
     pub fn set_native_mix(&mut self, volume: f32, cx: &mut Context<Self>) {
         self.volume = volume;
+        remember_song_gain(volume,&mut self.output_pre_mute);
         cx.notify();
     }
     pub fn set_audio_available(&mut self, available: bool, cx: &mut Context<Self>) {
@@ -522,69 +565,101 @@ impl Transport {
         let tenths = (position.max(0.) * 10.).floor() as u32;
         format!("{}:{:02}.{}", tenths / 600, (tenths / 10) % 60, tenths % 10)
     }
-    fn output(&self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let weak = cx.entity().downgrade();
-        let db = if self.volume <= 0. {
-            "−∞ dB".to_owned()
-        } else {
-            format!("{:.1} dB", 20. * self.volume.log10())
-        };
-        div()
-            .relative()
-            .flex_shrink_0()
-            .child(
-                song_output_trigger("transport-output", db, compact).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.output_open = !this.output_open;
-                        cx.notify();
-                    },
-                )),
-            )
-            .when(self.output_open, |v| {
-                v.child(
-                    deferred(
-                        modal_card()
-                            .absolute()
-                            .bottom_full()
-                            .mb(px(12.))
-                            .left_0()
-                            .w(px(328.))
-                            .p(px(20.))
-                            .rounded(px(14.))
-                            .child(
-                                div()
-                                    .font_family("SingZ Display 600")
-                                    .text_size(px(16.))
-                                    .child("Song volume"),
-                            )
-                            .child(
-                                Self::mono("Saved with this song")
-                                    .mt(px(4.))
-                                    .text_size(px(11.)),
-                            )
-                            .child(div().mt(px(14.)).child(range_slider(
-                                "transport-output-slider",
-                                self.volume,
-                                0.,
-                                4.,
-                                move |value, _, cx| {
-                                    let _ = weak.update(cx, |this, cx| {
-                                        this.volume = value;
-                                        cx.emit(TransportEvent::Volume(value));
-                                        cx.notify();
-                                    });
-                                },
-                            )))
-                            .child(Self::mono("Adjust the song’s output level.").mt(px(12.))),
-                    )
-                    .with_priority(120),
-                )
-            })
+    /// A source Transport/SongOutput unmount discards its local refs. Native
+    /// graph epochs alone do not identify that React component lifetime.
+    pub fn reset_song_output(&mut self,cx:&mut Context<Self>){
+        reset_song_output_memory(&mut self.output_pre_mute,&mut self.output_meter);
+        self.volume=1.;self.output_latest_clips=0;self.output_open=false;
+        self.output_focus_pending=false;self.output_mounted=false;
+        self.output_meter_tick=std::time::Instant::now();cx.notify();
     }
+    pub fn set_output_mounted(&mut self,mounted:bool,gain:f32,cx:&mut Context<Self>){
+        if self.output_mounted!=mounted {
+            self.reset_song_output(cx);self.output_mounted=mounted;
+            if mounted {self.set_native_mix(gain,cx);}
+        }
+    }
+    pub fn set_native_peak(&mut self,peak:f32,clips:u64,covered:bool,cx:&mut Context<Self>) {
+        let now=std::time::Instant::now();
+        self.output_latest_clips=clips;
+        if covered||!self.output_mounted {self.output_meter_tick=now;return;}
+        let elapsed=now.duration_since(self.output_meter_tick).as_secs_f32();
+        if elapsed>=0.05 {
+            let previous=(self.output_meter.held,self.output_meter.clipped);
+            self.output_meter.sample(peak,clips,0.79_f32.powf(elapsed/0.05));
+            self.output_meter_tick=now;
+            if previous!=(self.output_meter.held,self.output_meter.clipped) {cx.notify();}
+        }
+    }
+    fn output_gain(&mut self,gain:f32,cx:&mut Context<Self>){
+        self.volume=gain;
+        remember_song_gain(gain,&mut self.output_pre_mute);
+        cx.emit(TransportEvent::Volume(gain));cx.notify();
+    }
+    fn output_db(&mut self,db:f32,cx:&mut Context<Self>){
+        let db=((db*2.).round()/2.).clamp(-60.,12.);
+        // A range input emits Change only when its stepped value changes.
+        // In particular, touching +12 at saved native gain 4 must not narrow it.
+        if db!=song_fader_db(self.volume) {self.output_gain(song_gain(db),cx);}
+    }
+    #[cfg(feature="ui-tests")]
+    pub fn output_state(&self)->serde_json::Value {
+        serde_json::json!({"open":self.output_open,"gain":self.volume,"previousGain":self.output_pre_mute,
+            "label":song_gain_label(self.volume),"faderDb":song_fader_db(self.volume),
+            "heldNativePeak":self.output_meter.held,"clipped":self.output_meter.clipped,"clipCount":self.output_latest_clips})
+    }
+    fn output(&self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let weak=cx.entity().downgrade();
+        let trigger=self.output_trigger.clone();
+        let label=song_gain_label(self.volume);
+        let trigger_hint=crate::i18n::tv("player.transport.volumeAt",&[("db",label.clone())]);
+        let mute_hint=crate::i18n::t(if self.volume>0. {"player.volume.muteAll"}else{"player.volume.unmute"});
+        let clip_hint=crate::i18n::t("player.volume.peakTitle");
+        let fader=singz_uikit::song_output_fader("transport-output-slider",song_fader_db(self.volume),move|db,_,cx|{
+            let _=weak.update(cx,|s,cx|s.output_db(db,cx));
+        }).track_focus(&self.output_focus).tab_index(0)
+            .on_key_down(cx.listener(|s,event:&KeyDownEvent,_,cx|{
+                let current=song_fader_db(s.volume);
+                let db=match event.keystroke.key.as_str(){"left"|"down"=>Some(current-0.5),"right"|"up"=>Some(current+0.5),"home"=>Some(-60.),"end"=>Some(12.),_=>None};
+                if let Some(db)=db {s.output_db(db,cx);cx.stop_propagation();}
+                else if matches!(event.keystroke.key.as_str(),"space"|"enter") {cx.stop_propagation();}
+            }));
+        let mute=self.probe("transport-output-mute",singz_uikit::song_output_mute("transport-output-mute",self.volume==0.)
+            .tooltip(move|w,cx|gpui_kit::component::tooltip::Tooltip::new(mute_hint.clone()).build(w,cx))
+            .track_focus(&self.output_control_focus[1]).tab_index(0)
+            .on_key_down(cx.listener(|s,e:&KeyDownEvent,_,cx|{if matches!(e.keystroke.key.as_str(),"space"|"enter") {s.output_gain(muted_song_gain(s.volume,s.output_pre_mute),cx);cx.stop_propagation();}}))
+            .on_click(cx.listener(|s,_,_,cx|s.output_gain(muted_song_gain(s.volume,s.output_pre_mute),cx))));
+        let unity=self.probe("transport-output-unity",singz_uikit::song_output_action("transport-output-unity",crate::i18n::t("player.volume.reset"))
+            .track_focus(&self.output_control_focus[2]).tab_index(0)
+            .on_key_down(cx.listener(|s,e:&KeyDownEvent,_,cx|{if matches!(e.keystroke.key.as_str(),"space"|"enter") {s.output_gain(1.,cx);cx.stop_propagation();}}))
+            .on_click(cx.listener(|s,_,_,cx|s.output_gain(1.,cx))));
+        let clip=self.probe("transport-output-clip",singz_uikit::song_output_clip("transport-output-clip",crate::i18n::t("player.volume.clipped"),self.output_meter.clipped)
+            .tooltip(move|w,cx|gpui_kit::component::tooltip::Tooltip::new(clip_hint.clone()).build(w,cx))
+            .track_focus(&self.output_control_focus[3]).tab_index(0)
+            .on_key_down(cx.listener(|s,e:&KeyDownEvent,_,cx|{if matches!(e.keystroke.key.as_str(),"space"|"enter") {s.output_meter.reset_clip(s.output_latest_clips);cx.notify();cx.stop_propagation();}}))
+            .on_click(cx.listener(|s,_,_,cx|{s.output_meter.reset_clip(s.output_latest_clips);cx.notify();})));
+        let panel=singz_uikit::song_output_panel(singz_uikit::SongOutputCopy{
+            title:crate::i18n::t("player.volume.title"),saved:crate::i18n::t("player.volume.saved"),
+            per_song:crate::i18n::t("player.volume.perSong"),peak:crate::i18n::t("player.volume.peak"),caption:crate::i18n::t("player.volume.caption")
+        },label.trim_end_matches(" dB").to_owned(),self.output_meter.held,mute,unity,self.probe("transport-output-slider",fader),clip)
+            .on_mouse_down_out(cx.listener(|s,event:&MouseDownEvent,_,cx|{
+                if !s.output_trigger.get().is_some_and(|b|b.contains(&event.position)){s.output_open=false;cx.notify();}
+            }));
+        div().relative().flex_shrink_0()
+            .child(self.probe("transport-output",singz_uikit::song_output_trigger_meter("transport-output",label,compact,self.volume==0.,self.output_open,self.output_meter.held,self.output_meter.clipped)
+                .tooltip(move|w,cx|gpui_kit::component::tooltip::Tooltip::new(trigger_hint.clone()).build(w,cx))
+                .track_focus(&self.output_control_focus[0]).tab_index(0)
+                .on_key_down(cx.listener(|s,e:&KeyDownEvent,_,cx|{if matches!(e.keystroke.key.as_str(),"space"|"enter") {s.output_open=!s.output_open;s.output_focus_pending=s.output_open;cx.notify();cx.stop_propagation();}}))
+                .on_click(cx.listener(|s,_,_,cx|{s.output_open=!s.output_open;s.output_focus_pending=s.output_open;cx.notify();})))
+                .relative().child(canvas(move|b,_,_|{trigger.set(Some(b));b},|_,_,_,_|{}).absolute().inset_0()))
+            .when(self.output_open,|d|d.child(deferred(panel.absolute().bottom_full().mb(px(12.)).left(px(-8.))).with_priority(120)))
+    }
+
 }
 impl Render for Transport {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.reconcile_focus(window, cx);
+        if self.output_open&&self.output_focus_pending {self.output_focus_pending=false;self.output_focus.focus(window,cx);}
         if self.bpm_refresh_input {
             self.bpm_refresh_input = false;
             if self.bpm_draft.is_none() {
@@ -633,9 +708,9 @@ impl Render for Transport {
                     .min_w(px(if compact { 540.84375 } else { 576.84375 }))
                     .flex_shrink_0()
                     .child(
-                        singz_uikit::audio_control(round_button("transport-restart", false),self.audio_available)
+                        self.probe("transport-restart", singz_uikit::audio_control(round_button("transport-restart", false),self.audio_available)
                             .child(Self::icon("restart", 13.))
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(TransportEvent::Restart))),
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(TransportEvent::Restart)))),
                     )
                     .child(
                         self.probe("transport-play", singz_uikit::audio_control(play_button("transport-play", self.playing),self.audio_available)
@@ -836,5 +911,59 @@ impl Render for Transport {
                         ),
                     ),                    )
             )
+    }
+}
+
+#[cfg(test)]
+mod song_output_tests {
+    use super::{song_gain,song_db,song_gain_label,song_fader_db,remember_song_gain,muted_song_gain,OutputMeter,reset_song_output_memory};
+    #[test]
+    fn db_fader_has_silent_minimum_half_db_steps_and_native_headroom() {
+        assert_eq!(song_gain(-60.),0.);
+        assert_eq!(song_gain(-70.),0.);
+        assert_eq!(song_gain(0.),1.);
+        assert!((song_gain(12.)-3.9810717).abs()<0.00001);
+        for db in [-59.5,-36.,-12.,0.5,12.] {assert!((song_db(song_gain(db))-db).abs()<0.00001);}
+        assert_eq!(song_gain_label(0.),"−∞ dB");
+        assert_eq!(song_gain_label(1.),"0.0 dB");
+        assert_eq!(song_gain_label(4.),"+12.0 dB");
+        assert_eq!(song_fader_db(4.),12.);
+        assert_eq!(song_fader_db(0.0000001),-60.);
+        assert_eq!(song_gain_label(0.0000001),"-140.0 dB");
+    }
+    #[test]
+    fn mute_restores_exact_saved_gain_including_four_and_below_fader_minimum() {
+        for saved in [4.,1.,0.6,0.0000001] {
+            let mut previous=1.;remember_song_gain(saved,&mut previous);
+            assert_eq!(muted_song_gain(saved,previous),0.);
+            remember_song_gain(0.,&mut previous);
+            assert_eq!(muted_song_gain(0.,previous),saved);
+        }
+        let mut previous=0.6;remember_song_gain(1.,&mut previous);
+        assert_eq!(muted_song_gain(0.,previous),1.);
+    }
+    #[test]
+    fn remounted_muted_song_uses_unity_instead_of_previous_songs_gain() {
+        let mut previous=0.6;
+        let mut meter=OutputMeter::default();meter.sample(1.4,2,0.79);
+        meter.sample(0.,0,0.79); // A native counter restart is not a component remount.
+        assert!(meter.clipped);
+        reset_song_output_memory(&mut previous,&mut meter);
+        remember_song_gain(0.,&mut previous); // New song's accepted saved gain.
+        assert_eq!(muted_song_gain(0.,previous),1.);
+        assert_eq!(meter.held,0.);assert!(!meter.clipped);assert_eq!(meter.previous_count,0);
+        remember_song_gain(4.,&mut previous); // Same component still restores 4.
+        remember_song_gain(0.,&mut previous);
+        assert_eq!(muted_song_gain(0.,previous),4.);
+    }
+    #[test]
+    fn native_clip_count_latches_until_reset_and_only_new_clips_rearm() {
+        let mut meter=OutputMeter::default();
+        meter.sample(1.5,3,0.79);assert!(meter.clipped);assert_eq!(meter.held,1.5);
+        meter.reset_clip(3);meter.sample(0.,3,0.79);
+        assert!(!meter.clipped);assert!((meter.held-1.185).abs()<0.000001);
+        meter.sample(0.,4,0.79);assert!(meter.clipped);
+        meter.reset_clip(4);meter.sample(0.,0,0.79);assert!(!meter.clipped);
+        meter.sample(0.,1,0.79);assert!(meter.clipped);
     }
 }

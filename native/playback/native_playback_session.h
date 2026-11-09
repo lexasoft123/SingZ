@@ -583,6 +583,10 @@ struct NativePlaybackStatus {
   uint64_t renderedFrames{0};
   uint64_t audibleFrames{0};
   uint64_t transportGeneration{0};
+  // Generation-scoped mailbox ticket and callback-published receipt. Unsigned
+  // sequence arithmetic permits wrap; at most 64 commands can be outstanding.
+  uint32_t transportCommandsQueued{0};
+  uint32_t transportCommandsApplied{0};
   /* A swap in flight. `swapPendingGeneration` names the generation still
      rendering while `generation` already names its replacement (armed, not
      yet landed); `retiringSwapGeneration` names one that has landed and whose

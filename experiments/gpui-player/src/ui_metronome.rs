@@ -313,7 +313,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
             let handoff_position=handle.update(cx,|_,_,cx|view.update(cx,|p,cx|{
                 let project=p.project.as_ref().unwrap();
                 let position=p.position;
-                let resume=SourceResume{position,playing:true,mode:None,title:None,dirty:p.edit_seq!=p.saved_seq,mix:p.current_mix(project)};
+                let resume=SourceResume{restart_cycle:p.restart_cycle.snapshot(p.region_target().selection,true),play_serial:p.native_play_serial,position,playing:true,mode:None,title:None,dirty:p.edit_seq!=p.saved_seq,mix:p.current_mix(project)};
                 let output=source_jobs::Output{publication_hash:None,path:project.dir.clone(),working:false,target:None};
                 p.open_source_output(output,Some(resume),cx);
                 position

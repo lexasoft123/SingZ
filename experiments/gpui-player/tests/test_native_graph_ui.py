@@ -1,7 +1,8 @@
 """Hidden native saved-graph open/playback/Save/restart; no global input or Node."""
 import argparse, hashlib, importlib.util, json, math, os, platform, shutil, struct, subprocess, tempfile, time, wave
 from pathlib import Path
-p=argparse.ArgumentParser();p.add_argument('app',type=Path);p.add_argument('out',type=Path);p.add_argument('--karaoke',action='store_true',help='Also prove production Karaoke event mutes native vocals and persists across Save/reopen');p.add_argument('--navigation',action='store_true',help='Also prove Songs/Catalog pause and Training remembered catalog through production header events');p.add_argument('--region',action='store_true',help='Also prove real region gestures, native stop/wrap and selection Save/reopen');a=p.parse_args();app=a.app.resolve();out=a.out.resolve();out.mkdir(parents=True,exist_ok=True)
+p=argparse.ArgumentParser();p.add_argument('app',type=Path);p.add_argument('out',type=Path);p.add_argument('--karaoke',action='store_true',help='Also prove production Karaoke event mutes native vocals and persists across Save/reopen');p.add_argument('--navigation',action='store_true',help='Also prove Songs/Catalog pause and Training remembered catalog through production header events');p.add_argument('--region',action='store_true',help='Also prove real region gestures, native stop/wrap and selection Save/reopen');p.add_argument('--output',action='store_true',help='Also verify native song output controls');p.add_argument('--catalog',action='store_true',help='Also verify fresh catalog scans and keyboard actions');a=p.parse_args();app=a.app.resolve();out=a.out.resolve();out.mkdir(parents=True,exist_ok=True)
+expected_captures=4+2*int(a.region)+2*int(a.output)+2*int(a.catalog)
 sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
 spec=importlib.util.spec_from_file_location('graph_perf',Path(__file__).with_name('interface-perf.py'));perf=importlib.util.module_from_spec(spec);spec.loader.exec_module(perf)
 def front():
@@ -25,6 +26,8 @@ with tempfile.TemporaryDirectory(prefix='singz-native-graph-ui-') as tmp:
  if a.karaoke:env['SINGZ_GPUI_TEST_KARAOKE']='1'
  if a.navigation:env['SINGZ_GPUI_TEST_NAVIGATION']='1'
  if a.region:env['SINGZ_GPUI_TEST_REGION']='1'
+ if a.output:env['SINGZ_GPUI_TEST_OUTPUT']='1'
+ if a.catalog:env['SINGZ_GPUI_TEST_CATALOG']='1'
  for stage in ('first','restart'):
   folder=out/stage;folder.mkdir(exist_ok=True);samples=[];errors=[];previous=None;before=front();started=time.monotonic();next_sample=0;helpers={}
   input_project=json.loads((project/'project.json').read_text());input_guide_muted=input_project['settings']['tracks']['vocals']['muted']
@@ -35,7 +38,7 @@ with tempfile.TemporaryDirectory(prefix='singz-native-graph-ui-') as tmp:
    child=subprocess.Popen([str(app)],env=stage_env,stdout=log,stderr=subprocess.STDOUT)
    try:
     while child.poll() is None:
-     assert time.monotonic()-started<120,'Native saved-graph UI timeout'
+     assert time.monotonic()-started<(180 if a.output or a.catalog else 120),'Native saved-graph UI timeout'
      if platform.system()=='Darwin' and time.monotonic()>=next_sample:
       next_sample=time.monotonic()+.5
       for value in subprocess.run(['pgrep','-P',str(child.pid)],capture_output=True,text=True,timeout=2).stdout.split():
@@ -60,10 +63,10 @@ with tempfile.TemporaryDirectory(prefix='singz-native-graph-ui-') as tmp:
     assert remaining!=identity,('Audio helper survived app quit',pid)
   after=front();assert before==after,'Hidden test changed foreground application'
   text=(folder/'app.log').read_text();assert 'NATIVE_INTEGRATION passed:' in text and 'NATIVE_SAVE passed:' in text,text[-5000:]
-  assert len(list(folder.glob('*.png')))==(6 if a.region else 4)
+  assert len(list(folder.glob('*.png')))==expected_captures
   from PIL import Image
   for image in folder.glob('*.png'):
-   state=json.loads(image.with_suffix('.json').read_text());assert state['viewport']==([1060,640] if image.stem=='region-selection-1060' else [1280,800]) and state['hidden'],state
+   state=json.loads(image.with_suffix('.json').read_text());assert state['viewport']==([1060,640] if image.stem.endswith('-1060') else [1280,800]) and state['hidden'],state
    assert Image.open(image).size==tuple(round(value*state['scale']) for value in state['viewport'])
   saved=json.loads((project/'project.json').read_text());assert saved['graphHash']==graph_hash and saved['foreign']==original['foreign'];assert sha(source)==source_hash and (project/'graph.json').read_bytes()==graph.read_bytes()
   assert saved['settings']['tracks']['vocals']['muted']==(True if a.karaoke else stage=='first')
@@ -90,7 +93,7 @@ with tempfile.TemporaryDirectory(prefix='singz-native-graph-ui-') as tmp:
   if a.region:
    assert 'NATIVE_REGION passed:' in text,text[-5000:]
    proof=json.loads((folder/'region.json').read_text())
-   for flag in ('actualWaveDrag','actualRulerDrag','bothEdgeResize','actualClickClear','actualEscapeClear','nativeNonloopEndStop','nativeLoopWrap','savedSelectionReopened','savedNoneReopened','restoredBaseline'):assert proof.get(flag) is True,(flag,proof)
+   for flag in ('actualWaveDrag','actualRulerDrag','bothEdgeResize','actualClickClear','actualEscapeClear','nativeNonloopEndStop','nativeLoopWrap','savedSelectionReopened','savedNoneReopened','restoredBaseline','actualRestartAlternation','restartResetsAfterPlayback','restartResetsAfterReopen','restartWithoutSelection','restartPreservedAcrossPlayingRename','renameCatalogPauseWins','renameOriginalPathRestored'):assert proof.get(flag) is True,(flag,proof)
    assert proof['sizes']==[[1280,800],[1060,640]]
    assert proof['endStop']['native']['playing'] is False and proof['endStop']['native']['loop'] is None
    assert abs(proof['endStop']['native']['position']-proof['endStop']['selection'][1])<.03
@@ -99,12 +102,22 @@ with tempfile.TemporaryDirectory(prefix='singz-native-graph-ui-') as tmp:
    assert 'selection' not in saved['settings'] and saved['settings']['loop'] is False
    for width in (1280,1060):
     state=json.loads((folder/f'region-selection-{width}.json').read_text());assert state['selection'] is not None and not state['regionBusy'] and not state['gesture']
+  if a.output:
+   assert 'NATIVE_SONG_OUTPUT passed:' in text,text[-5000:]
+   proof=json.loads((folder/'output.json').read_text())
+   for flag in ('actualPopupTrigger','actualOuterThumbDrag','actualRangeKeys','silentMinimum','plus12Headroom','halfDbStep','actualMuteRestore','actualUnity','actualClipReset','actualEscapeDismiss','underlyingTransportUnchanged','savedUnityReopened','restoredOriginalGain','savedZeroFreshReopenUnmuteUnity'):assert proof.get(flag) is True,(flag,proof)
+   assert proof['clippingRuntimeQualified'] is False,proof
+   assert abs(saved['settings']['masterVolume']-original['settings']['masterVolume'])<1e-6,saved
+  if a.catalog:
+   assert 'NATIVE_CATALOG passed:' in text,text[-5000:]
+   proof=json.loads((folder/'catalog.json').read_text())
+   for flag in ('externalCreationRescanned','searchShortcut','actualKeyboardOpen','externalRenameRescanned','keyboardDeleteConfirmation','escapePreservesProject','vanishedFocusedCardFallsBackToSearch','externalRemovalRescanned','restoredBaseline'):assert proof.get(flag) is True,(flag,proof)
   (folder/'project-after.json').write_text(json.dumps(saved,indent=2));(folder/'observer.json').write_text(json.dumps({'foregroundUnchanged':before==after,'samples':samples,'errors':errors,'liveFps':'unmeasured','scope':'app CPU/footprint only; helper CPU excluded; GPU system-wide','observedHelpersRetired':list(helpers)},indent=2))
-  results.append({'stage':stage,'captures':6 if a.region else 4,'foregroundUnchanged':before==after,'inputGuideMuted':input_guide_muted})
+  results.append({'stage':stage,'captures':expected_captures,'foregroundUnchanged':before==after,'inputGuideMuted':input_guide_muted})
   if a.karaoke and stage=='first':
    # Controlled next-launch fixture preparation, after the real Save proof
    # above has already been retained in first/project-after.json.
    before_preparation=sha(project/'project.json');prepared=json.loads(json.dumps(saved));prepared['settings']['tracks']['vocals']['muted']=False
    (project/'project.json').write_text(json.dumps(prepared));assert sha(source)==source_hash and sha(project/'lyrics.json')==lyrics_hash and (project/'graph.json').read_bytes()==graph.read_bytes()
    (folder/'restart-fixture-preparation.json').write_text(json.dumps({'fixturePreparationOnly':True,'firstStageSavedGuideMuted':saved['settings']['tracks']['vocals']['muted'],'nextLaunchGuideMuted':False,'onlyChangedField':'settings.tracks.vocals.muted','beforeProjectSha256':before_preparation,'afterProjectSha256':sha(project/'project.json'),'graphAudioLyricsUnchanged':True},indent=2))
-(out/'result.json').write_text(json.dumps({'passed':True,'appSha256':sha(app),'helperSha256':sha(app.with_name('singz-gpui-audio.exe' if platform.system()=='Windows' else 'singz-gpui-audio')),'graphSha256':sha(graph),'regionGesturesNativeBoundariesAndPersistence':a.region,'actualGraphAdmission':True,'actualSaveAndRestart':True,'karaokeRestoredOnMutesInitiallyEnabledGuide':a.karaoke,'karaokeEscapePersistsOff':a.karaoke,'karaokePreferencePersistenceAndRelaunch':a.karaoke,'karaokeNativeMuteAndPersistence':a.karaoke,'karaokeScope':'Production native_transport event route; real native vocals lane; Save/reopen/restart; no measured Karaoke button click' if a.karaoke else 'not exercised','navigationNativePauseAndRememberedCatalog':a.navigation,'navigationScope':'Production Header entity events and transport subscription; native pause receipts; no measured header button clicks' if a.navigation else 'not exercised','savedLyricsFixtureSha256':lyrics_hash,'stages':results,'muted':True,'hidden':True,'newProductionParity':'unqualified','liveFps':'unmeasured'},indent=2))
+(out/'result.json').write_text(json.dumps({'passed':True,'appSha256':sha(app),'helperSha256':sha(app.with_name('singz-gpui-audio.exe' if platform.system()=='Windows' else 'singz-gpui-audio')),'graphSha256':sha(graph),'catalogRefreshAndKeyboardActions':a.catalog,'songOutputControls':a.output,'regionGesturesNativeBoundariesAndPersistence':a.region,'actualGraphAdmission':True,'actualSaveAndRestart':True,'karaokeRestoredOnMutesInitiallyEnabledGuide':a.karaoke,'karaokeEscapePersistsOff':a.karaoke,'karaokePreferencePersistenceAndRelaunch':a.karaoke,'karaokeNativeMuteAndPersistence':a.karaoke,'karaokeScope':'Production native_transport event route; real native vocals lane; Save/reopen/restart; no measured Karaoke button click' if a.karaoke else 'not exercised','navigationNativePauseAndRememberedCatalog':a.navigation,'navigationScope':'Production Header entity events and transport subscription; native pause receipts; no measured header button clicks' if a.navigation else 'not exercised','savedLyricsFixtureSha256':lyrics_hash,'stages':results,'muted':True,'hidden':True,'newProductionParity':'unqualified','liveFps':'unmeasured'},indent=2))

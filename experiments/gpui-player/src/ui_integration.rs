@@ -306,6 +306,34 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                 }
                 eprintln!("NATIVE_REGION passed: real gestures, native stop/wrap and selection Some/None persistence");
             }
+            if std::env::var("SINGZ_GPUI_TEST_OUTPUT").as_deref()==Ok("1") {
+                let receiver=handle.update(cx,|_,_,cx|ui_song_output::run(handle,view.clone(),path.clone(),directory.clone(),cx))?;
+                let deadline=Instant::now()+Duration::from_secs(60);
+                loop {
+                    match receiver.try_recv() {
+                        Ok(result)=>{result.map_err(anyhow::Error::msg)?;break;},
+                        Err(std::sync::mpsc::TryRecvError::Disconnected)=>anyhow::bail!("Output verification stopped without a result"),
+                        Err(std::sync::mpsc::TryRecvError::Empty)=>{}
+                    }
+                    anyhow::ensure!(Instant::now()<deadline,"Output verification timed out");
+                    cx.background_executor().timer(Duration::from_millis(20)).await;
+                }
+                eprintln!("NATIVE_SONG_OUTPUT passed: dB fader, mute restore, unity, native meter receipts and Save/reopen");
+            }
+            if std::env::var("SINGZ_GPUI_TEST_CATALOG").as_deref()==Ok("1") {
+                let receiver=handle.update(cx,|_,_,cx|ui_catalog::run(handle,view.clone(),path.clone(),directory.clone(),cx))?;
+                let deadline=Instant::now()+Duration::from_secs(60);
+                loop {
+                    match receiver.try_recv() {
+                        Ok(result)=>{result.map_err(anyhow::Error::msg)?;break;},
+                        Err(std::sync::mpsc::TryRecvError::Disconnected)=>anyhow::bail!("Catalog verification stopped without a result"),
+                        Err(std::sync::mpsc::TryRecvError::Empty)=>{}
+                    }
+                    anyhow::ensure!(Instant::now()<deadline,"Catalog verification timed out");
+                    cx.background_executor().timer(Duration::from_millis(20)).await;
+                }
+                eprintln!("NATIVE_CATALOG passed: external rescan, keyboard Open/Delete and removed-row focus recovery");
+            }
             handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(path.join("missing-folder"),cx)))?;
             cx.background_executor().timer(Duration::from_millis(250)).await;
             handle.update(cx,|_,window,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(!p.loading&&!p.playing&&p.project.is_none()&&p.notice.is_some(),"Invalid load failed to stop/release output");snapshot(&view,window,cx,&directory,"native-load-error")?;Ok(())})??;
