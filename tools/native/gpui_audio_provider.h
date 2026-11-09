@@ -4,7 +4,7 @@
 // changes the shared DSP or independent microphone backend.
 #include <zcore/device/audio_host.h>
 #if defined(_WIN32)
-#include <zcore/platform/windows/audio_host_windows_provider.h>
+#include "../../zcore/platform/windows/audio_host_windows_provider.h"
 #endif
 #include "json_string.h"
 #include <memory>
