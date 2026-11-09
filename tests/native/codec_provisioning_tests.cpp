@@ -37,6 +37,14 @@ int openRead(const char* path) noexcept {
 #endif
 }
 
+int openWriteOnly(const char* path) noexcept {
+#if defined(_WIN32)
+  return _open(path, _O_WRONLY | _O_BINARY);
+#else
+  return ::open(path, O_WRONLY);
+#endif
+}
+
 bool descriptorOpen(int descriptor) noexcept {
 #if defined(_WIN32)
   errno = 0;
@@ -110,14 +118,16 @@ void decodeOne(const char* path, singz::DecodedAudioSourceFormat format) {
 }
 
 void expectRejected(const char* path, singz::DecodedAudioSourceFormat format,
-                    const char* message) {
+                    const char* message,
+                    singz::DecodedAudioStatus expected =
+                        singz::DecodedAudioStatus::MalformedData) {
   const int descriptor = openRead(path);
   expect(descriptor >= 0, "negative codec fixture opens");
   singz::DecodedAudioPrepareOptions options;
   options.sourceFormat = format;
   const auto result = singz::prepareDecodedAudio(
       singz::OwnedFileDescriptor(descriptor), options);
-  expect(!result.ok() && result.audio == nullptr, message);
+  expect(result.status == expected && result.audio == nullptr, message);
   expect(!descriptorOpen(descriptor),
          "negative extended decode consumes descriptor exactly once");
 }
@@ -248,6 +258,23 @@ int main(int argc, char** argv) {
     std::remove(corrupt.c_str());
   }
 
+  // A real descriptor access error stays IoError even though malformed
+  // container bytes can make a demuxer report its own AVERROR(EIO).
+  const std::string writeOnlyPath = writeMutation(
+      fixturesArgv[7], "write-only-io", std::numeric_limits<size_t>::max(), false);
+  const int writeOnlyDescriptor = openWriteOnly(writeOnlyPath.c_str());
+  expect(writeOnlyDescriptor >= 0, "write-only I/O fixture opens");
+  singz::DecodedAudioPrepareOptions unreadableOptions;
+  unreadableOptions.sourceFormat = singz::DecodedAudioSourceFormat::Aiff;
+  const auto unreadable = singz::prepareDecodedAudio(
+      singz::OwnedFileDescriptor(writeOnlyDescriptor), unreadableOptions);
+  expect(unreadable.status == singz::DecodedAudioStatus::IoError &&
+             unreadable.audio == nullptr && !descriptorOpen(writeOnlyDescriptor),
+         "real descriptor read failure stays I/O error without publication or leak");
+  expect(readBytes(writeOnlyPath.c_str()) == readBytes(fixturesArgv[7]),
+         "failed read does not mutate source bytes");
+  std::remove(writeOnlyPath.c_str());
+
   singz::DecodedAudioPrepareOptions mismatch;
   mismatch.sourceFormat = singz::DecodedAudioSourceFormat::Aiff;
   const auto wrongDeclaration = singz::prepareDecodedAudio(
@@ -318,11 +345,14 @@ int main(int argc, char** argv) {
          "working-byte limit accounts for vector replacement overlap");
 
   expectRejected(fixturesArgv[9], singz::DecodedAudioSourceFormat::M4a,
-                 "additional non-audio stream is rejected");
+                 "additional non-audio stream is rejected",
+                 singz::DecodedAudioStatus::UnsupportedFormat);
   expectRejected(fixturesArgv[10], singz::DecodedAudioSourceFormat::M4a,
-                 "container without an audio stream is rejected");
+                 "container without an audio stream is rejected",
+                 singz::DecodedAudioStatus::UnsupportedFormat);
   expectRejected(fixturesArgv[11], singz::DecodedAudioSourceFormat::Ogg,
-                 "unsupported codec in an allowed container is rejected");
+                 "unsupported codec in an allowed container is rejected",
+                 singz::DecodedAudioStatus::UnsupportedFormat);
 
   std::puts(availableFixtureMode
                 ? "codec provisioning tests: available dynamic matrix ok"

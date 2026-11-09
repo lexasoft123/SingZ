@@ -131,7 +131,11 @@ DecodedAudioStatus statusForError(int error, const FfmpegIo& io,
                                   DecodeCancellation cancellation) noexcept {
   if (cancellation.isRequested() || error == AVERROR_EXIT)
     return DecodedAudioStatus::Cancelled;
-  if (io.ioError || error == AVERROR(EIO)) return DecodedAudioStatus::IoError;
+  // Demuxers also use EIO for missing/truncated container fields. Require
+  // descriptor/stdio failure evidence; fread can flag an error after returning
+  // partial bytes, before readPacket has returned its own EIO.
+  if (io.ioError || (io.file != nullptr && std::ferror(io.file) != 0))
+    return DecodedAudioStatus::IoError;
   if (error == AVERROR(ENOMEM)) return DecodedAudioStatus::ResourceExhausted;
   return DecodedAudioStatus::MalformedData;
 }
@@ -450,7 +454,12 @@ DecodedAudioStatus decodeFfmpeg(
 
     const int channels = codec.value->ch_layout.nb_channels;
     const int sampleRate = codec.value->sample_rate;
-    if (channels <= 0 || channels > static_cast<int>(options.maximumChannels) ||
+    // Probing may succeed without recovering usable parameters from a torn
+    // stream. Missing parameters are malformed data, not a supported stream
+    // whose real channel count or sample rate is outside the product profile.
+    if (channels <= 0 || sampleRate <= 0)
+      return DecodedAudioStatus::MalformedData;
+    if (channels > static_cast<int>(options.maximumChannels) ||
         sampleRate < static_cast<int>(kMinimumSampleRate) ||
         sampleRate > static_cast<int>(kMaximumSampleRate))
       return DecodedAudioStatus::UnsupportedFormat;

@@ -255,6 +255,32 @@ bool trimTailTags(ByteWindow& window, uint64_t begin, uint64_t* end) noexcept {
   }
 }
 
+DecodedAudioStatus validateId3Boundary(const MediaByteSource& source,
+                                       uint64_t begin, uint64_t end) noexcept {
+  // skipId3v2Tags leaves a tag that runs off EOF at `begin`, because the
+  // shared format detector only classifies content. Here that recognized
+  // framing is malformed, rather than evidence of an unsupported profile.
+  unsigned char header[10] = {0};
+  const int64_t got = readFully(source, begin, header, sizeof(header));
+  if (got < 0) return DecodedAudioStatus::IoError;
+  if (got >= 3 && std::memcmp(header, "ID3", 3) == 0) {
+    if (got < 10) return DecodedAudioStatus::MalformedData;
+    if (((header[6] | header[7] | header[8] | header[9]) & 0x80) == 0) {
+      const uint64_t size = (static_cast<uint64_t>(header[6]) << 21) |
+          (static_cast<uint64_t>(header[7]) << 14) |
+          (static_cast<uint64_t>(header[8]) << 7) |
+          static_cast<uint64_t>(header[9]);
+      const uint64_t total = 10 + size + ((header[5] & 0x10) != 0 ? 10 : 0);
+      if (total > source.length - begin) return DecodedAudioStatus::MalformedData;
+    }
+  }
+  // A complete tag needs room for at least an MPEG header afterwards. This
+  // does not turn a free-format or otherwise unsupported stream into a
+  // malformed one: the ordinary frame-chain search still decides those.
+  if (begin != 0 && end - begin < kHeaderBytes) return DecodedAudioStatus::MalformedData;
+  return DecodedAudioStatus::Ok;
+}
+
 struct VbrHeader {
   bool present = false;       // a Xing/Info or VBRI header was found in the first frame
   bool skipFrame = false;     // that frame is a header, not audio (FFmpeg's rule)
@@ -337,6 +363,8 @@ DecodedAudioStatus parseMp3Layout(const MediaByteSource& source, const DecodeCan
     uint64_t end = source.length;
     if (!skipId3v2Tags(source, &begin)) return DecodedAudioStatus::IoError;
     if (!trimTailTags(window, begin, &end)) return DecodedAudioStatus::IoError;
+    const DecodedAudioStatus boundary = validateId3Boundary(source, begin, end);
+    if (boundary != DecodedAudioStatus::Ok) return boundary;
 
     // The first frame: a chain of four, searched for a bounded distance.
     FrameHeader first;

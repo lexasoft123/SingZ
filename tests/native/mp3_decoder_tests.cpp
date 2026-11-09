@@ -199,6 +199,22 @@ std::unique_ptr<singz::StreamingAudioSource> openStream(
   return singz::openStreamingAudioSource(openRead(path), options, status);
 }
 
+void rejectsMp3As(const std::vector<unsigned char>& bytes,
+                  singz::DecodedAudioStatus expected, const std::string& name) {
+  const std::string path = tempPath(".mp3");
+  writeFile(path, bytes);
+  for (const auto format : {singz::DecodedAudioSourceFormat::Auto,
+                            singz::DecodedAudioSourceFormat::Mp3}) {
+    singz::DecodedAudioStatus status = singz::DecodedAudioStatus::Ok;
+    check(decodeWhole(path, format, &status) == nullptr && status == expected,
+          name + ": whole-file refusal has the expected status");
+    status = singz::DecodedAudioStatus::Ok;
+    check(openStream(path, &status, format) == nullptr && status == expected,
+          name + ": streaming refusal has the same status");
+  }
+  std::remove(path.c_str());
+}
+
 // Reads `limit` frames (or to the end) in blocks of `block`.
 Pcm readStream(singz::StreamingAudioSource& source, size_t block, uint64_t limit,
                singz::DecodedAudioStatus* last = nullptr) {
@@ -418,6 +434,97 @@ int main() {
     check(declared == nullptr && st == singz::DecodedAudioStatus::UnsupportedFormat,
           "and a declared MP3 with no Layer III stream is refused as unsupported");
     std::remove(path.c_str());
+
+    const std::vector<unsigned char> emptyTag{'I', 'D', '3', 4, 0, 0, 0, 0, 0, 0};
+    const std::vector<unsigned char> declaredTag{'I', 'D', '3', 4, 0, 0, 0, 0, 0, 35};
+    for (size_t length = 3; length <= declaredTag.size(); ++length) {
+      rejectsMp3As(std::vector<unsigned char>(declaredTag.begin(), declaredTag.begin() + length),
+                   singz::DecodedAudioStatus::MalformedData,
+                   "truncated recognized ID3 header/tag at " + std::to_string(length) + " bytes");
+    }
+    auto corrupt = declaredTag;
+    corrupt.resize(48);
+    for (size_t index = 10; index < corrupt.size(); ++index)
+      corrupt[index] = static_cast<unsigned char>(0xa5 ^ index);
+    rejectsMp3As(corrupt, singz::DecodedAudioStatus::MalformedData,
+                 "the canonical corrupted tag leaves fewer than four audio bytes");
+    for (size_t remaining = 0; remaining < 4; ++remaining) {
+      auto noHeader = emptyTag;
+      noHeader.insert(noHeader.end(), remaining, 0xff);
+      rejectsMp3As(noHeader, singz::DecodedAudioStatus::MalformedData,
+                   "a complete ID3 tag followed by " + std::to_string(remaining) + " header bytes");
+    }
+    auto chained = emptyTag;
+    chained.insert(chained.end(), declaredTag.begin(), declaredTag.end());
+    rejectsMp3As(chained, singz::DecodedAudioStatus::MalformedData,
+                 "a complete ID3 tag does not hide a truncated following tag");
+    auto footer = emptyTag;
+    footer[5] = 0x10;
+    footer.insert(footer.end(), 9, 0);
+    rejectsMp3As(footer, singz::DecodedAudioStatus::MalformedData,
+                 "an ID3 footer must fit inside the encoded source");
+
+    // Metadata alone does not make an unsupported MPEG profile malformed.
+    auto freeFormat = emptyTag;
+    freeFormat.insert(freeFormat.end(), {0xff, 0xfb, 0x00, 0x44});
+    freeFormat.resize(2048, 0);
+    rejectsMp3As(freeFormat, singz::DecodedAudioStatus::UnsupportedFormat,
+                 "ID3-prefixed free-format data remains unsupported");
+    auto changingChannels = readFile(fixture("cbr320-noxing-44k.mp3"));
+    size_t changedFrame = 0;
+    bool initialChain = true;
+    for (size_t frame = 0; frame <= 4; ++frame) {
+      if (changedFrame > changingChannels.size() || changingChannels.size() - changedFrame < 4) {
+        initialChain = false;
+        break;
+      }
+      const unsigned char* header = changingChannels.data() + changedFrame;
+      // Verify this committed fixture's MPEG-1 Layer III, 320 kbps,
+      // 44.1 kHz stereo headers before following their padding-dependent
+      // frame lengths. Mutate the fifth frame, after an intact first chain.
+      const size_t frameBytes = 144u * 320000u / 44100u + ((header[2] >> 1) & 1u);
+      if (header[0] != 0xff || header[1] != 0xfb || (header[2] >> 4) != 14 ||
+          ((header[2] >> 2) & 3u) != 0 || (header[3] >> 6) == 3 ||
+          frameBytes > changingChannels.size() - changedFrame) {
+        initialChain = false;
+        break;
+      }
+      if (frame != 4) changedFrame += frameBytes;
+    }
+    check(initialChain, "channel-change fixture has four intact stereo frames before the mutation");
+    if (initialChain) {
+      changingChannels[changedFrame + 3] =
+          static_cast<unsigned char>((changingChannels[changedFrame + 3] & 0x3f) | 0xc0);
+      rejectsMp3As(changingChannels, singz::DecodedAudioStatus::UnsupportedFormat,
+                   "an established stereo stream changing to mono remains unsupported");
+    }
+
+    // The common detector looks past ID3 before choosing FLAC, not MP3.
+    const auto flacBytes = readFile(fixture("vbr-xing-44k.ref.flac"));
+    auto taggedFlac = emptyTag;
+    taggedFlac.insert(taggedFlac.end(), flacBytes.begin(), flacBytes.end());
+    const std::string taggedFlacPath = tempPath(".bin");
+    writeFile(taggedFlacPath, taggedFlac);
+    const auto flacReference = decodeWhole(fixture("vbr-xing-44k.ref.flac"));
+    const auto flacTagged = decodeWhole(taggedFlacPath);
+    check(flacReference != nullptr && flacTagged != nullptr &&
+              bitEqual(fromDecoded(*flacReference), fromDecoded(*flacTagged)),
+          "ID3-prefixed FLAC still decodes as FLAC, bit for bit");
+    auto flacStream = openStream(taggedFlacPath, &st);
+    check(flacStream != nullptr && st == singz::DecodedAudioStatus::Ok &&
+              flacStream->info().seekCost != singz::SeekCost::RunUp,
+          "ID3-prefixed FLAC still opens its native streaming source");
+    if (flacReference != nullptr && flacStream != nullptr) {
+      const Pcm reference = fromDecoded(*flacReference);
+      check(bitEqual(readStream(*flacStream, 577, UINT64_MAX), reference),
+            "ID3-prefixed FLAC streams the reference samples bit for bit");
+      const uint64_t target = reference.frames() / 2;
+      check(flacStream->seek(target) == singz::DecodedAudioStatus::Ok &&
+                bitEqual(readStream(*flacStream, 32, 32), slice(reference, target, 32)),
+            "ID3-prefixed FLAC still seeks to the same samples");
+    }
+    flacStream.reset();
+    std::remove(taggedFlacPath.c_str());
 
     auto asWav = openStream(fixture("vbr-xing-44k.mp3"), &st, singz::DecodedAudioSourceFormat::Wav);
     check(asWav == nullptr, "an MP3 declared as WAV is refused");

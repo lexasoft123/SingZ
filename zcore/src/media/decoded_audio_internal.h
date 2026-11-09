@@ -142,8 +142,8 @@ struct Mp3Layout {
 };
 
 // Walks every frame header once. UnsupportedFormat for a file with no Layer
-// III stream (or a free-format / channel-changing one), MalformedData for one
-// that has a stream and no frames.
+// III stream (or a free-format / channel-changing one). Recognized truncated
+// ID3 framing, or a stream with no audio frames, is MalformedData.
 [[nodiscard]] DecodedAudioStatus parseMp3Layout(const MediaByteSource& source,
                                                 const DecodeCancellation& cancel,
                                                 Mp3Layout* layout) noexcept;
