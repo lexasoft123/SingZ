@@ -80,7 +80,9 @@ fn capture(
         "editor":state(p,w,cx),"editorOpen":p.lyrics_editor_open,"epoch":p.native_epoch,
         "windowPresented":w.is_visible(),"windowActive":w.is_window_active(),
         "reference":"candidate only; production reference absent; cadence unmeasured",
-        "inference":if std::env::var("SINGZ_GPUI_LYRICS_REAL_UI").as_deref()==Ok("1") {
+        "inference":if std::env::var("SINGZ_GPUI_LYRICS_QWEN_REAL_UI").as_deref()==Ok("1") {
+            "real native Qwen recognition/alignment; preinstalled weights; no external timing-quality ground truth"
+        } else if std::env::var("SINGZ_GPUI_LYRICS_REAL_UI").as_deref()==Ok("1") {
             "real native runtime and optional-model install/inference flow; no external timing-quality ground truth"
         } else {"deterministic protocol fixtures, not neural quality"}}))?,
     )?;
@@ -108,6 +110,10 @@ fn count(root: &Path, log: &str, kind: Option<&str>) -> usize {
 }
 
 pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut App) {
+    if std::env::var("SINGZ_GPUI_LYRICS_QWEN_REAL_UI").as_deref() == Ok("1") {
+        run_qwen_real(handle, view, out, cx);
+        return;
+    }
     if std::env::var("SINGZ_GPUI_LYRICS_REAL_UI").as_deref() == Ok("1") {
         run_real(handle, view, out, cx);
         return;
@@ -552,5 +558,169 @@ fn run_real(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mu
                 let _=handle.update(cx,|_,w,cx|capture(&view,w,cx,&out,"real-failure"));}
         }
         cx.update(|cx|cx.quit());
+    }).detach();
+}
+
+/// Actual shipped Qwen runtimes, isolated from the optional Precise/download case.
+fn run_qwen_real(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut App) {
+    cx.spawn(async move |cx| {
+        let result: anyhow::Result<()> = async {
+            anyhow::ensure!(std::env::var_os("SINGZ_GPUI_BACKGROUND").is_some()
+                &&std::env::var("SINGZ_MUTE").as_deref()==Ok("1")
+                &&std::env::var("SINGZ_NO_SYNC").as_deref()==Ok("1")&&!integration::fixture_mode(),
+                "Real Qwen UI requires hidden/muted native execution");
+            for name in ["SINGZ_GPUI_LYRICS_ALIGN_FIXTURES","SINGZ_GPUI_MODEL_FIXTURE",
+                "SINGZ_GPUI_MODEL_CONTROL","SINGZ_GPUI_SOURCE_CONTROL","SINGZ_GPU_PACK_URL"] {
+                anyhow::ensure!(std::env::var_os(name).is_none(),"Real Qwen UI refuses {name}");
+            }
+            let required = |name:&str|->anyhow::Result<PathBuf> {
+                let path=PathBuf::from(std::env::var_os(name).ok_or_else(||anyhow::anyhow!("Missing {name}"))?);
+                anyhow::ensure!(path.is_absolute(),"{name} requires an absolute path");
+                Ok(path.canonicalize()?)
+            };
+            let project=required("SINGZ_GPUI_LYRICS_REAL_PROJECT")?;
+            let library=required("SINGZ_GPUI_PROJECTS_ROOT")?;
+            let config_dir=required("SINGZ_GPUI_CONFIG_DIR")?;
+            anyhow::ensure!(project.parent()==Some(library.as_path())&&config_dir!=project&&config_dir!=library,
+                "Real Qwen UI needs separate private project/library/config paths");
+            for name in ["SINGZ_LLAMA_SERVER","SINGZ_CRISPASR"] {
+                let path=required(name)?;
+                anyhow::ensure!(std::fs::symlink_metadata(path)?.file_type().is_file(),"{name} requires an ordinary actual executable");
+            }
+            anyhow::ensure!(std::env::var_os("SINGZ_MODELS_DIR").is_some(),"Real Qwen models are required");
+            let config=model_catalog::Config::source();config.validate()?;
+            anyhow::ensure!(lyrics_align::capability().can_align&&lyrics_align::needs_models(lyrics_align::Tier::Align).is_empty(),
+                "Real Qwen UI requires installed speech/aligner weights and native runtimes");
+            std::fs::create_dir_all(&out)?;
+            anyhow::ensure!(out.is_absolute()&&!out.canonicalize()?.starts_with(&project),
+                "Real Qwen capture output must be outside the private project");
+            let lyrics_path=project.join("lyrics.json");
+            let original_lyrics=std::fs::read(&lyrics_path)?;
+            let heard_path=project.join("heard-words.json");
+            anyhow::ensure!(!heard_path.try_exists()?,"Real Qwen UI requires a fresh project heard cache");
+            macro_rules! wait {($seconds:expr,$p:ident,$w:ident,$app:ident => $condition:expr)=>{{
+                let deadline=Instant::now()+Duration::from_secs($seconds);
+                loop {cx.background_executor().timer(Duration::from_millis(40)).await;
+                    if handle.update(cx,|_,$w,$app|->anyhow::Result<bool>{let $p=view.read($app);
+                        anyhow::ensure!(!$w.is_visible()&&!$w.is_window_active()&&$p.notice.is_none(),
+                            "Real Qwen UI changed hidden state or raised {:?}",$p.notice);
+                        Ok($condition)})?? {break;}
+                    anyhow::ensure!(Instant::now()<deadline,"Real Qwen UI timeout: {}",stringify!($condition));
+                }
+            }};}
+            macro_rules! press {($id:expr)=>{handle.update(cx,|_,w,cx|press(&view,w,cx,$id))??;};}
+            macro_rules! both {($name:expr)=>{{for (width,height) in [(1280.,800.),(1060.,640.)] {
+                handle.update(cx,|_,w,_|w.resize(size(px(width),px(height))))?;
+                wait!(30,p,w,app => w.viewport_size()==size(px(width),px(height)));
+                handle.update(cx,|_,w,cx|capture(&view,w,cx,&out,&format!("{}-{}",$name,width as u32)))??;
+            }}};}
+            macro_rules! edit {()=>{{
+                if !handle.update(cx,|_,_,cx|view.read(cx).karaoke)? {
+                    handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);
+                        let b=view.read(cx).transport.read(cx).guides.get("karaoke")
+                            .ok_or_else(||anyhow::anyhow!("Qwen Karaoke control missing"))?;
+                        click(w,cx,b.center());Ok(())})??;
+                    wait!(30,p,w,app => p.karaoke);
+                }
+                wait!(30,p,w,app => p.lyrics_sidebar_pending.is_none()
+                    &&p.lyrics_sidebar.read(app).state(w,app)["status"]=="ready");
+                handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);
+                    let b=view.read(cx).lyrics_sidebar.read(cx).bounds("lyrics-edit")
+                        .ok_or_else(||anyhow::anyhow!("Qwen Edit control missing"))?;
+                    click(w,cx,b.center());Ok(())})??;
+                wait!(30,p,w,app => p.lyrics_editor_open&&!p.lyrics_editor.read(app).rows().is_empty());
+            }};}
+            handle.update(cx,|_,w,cx|{w.resize(size(px(1280.),px(800.)));
+                view.update(cx,|p,cx|p.open_project(project.clone(),cx));})?;
+            wait!(90,p,w,app => !p.loading&&p.project.as_ref().is_some_and(|s|s.dir==project));
+            let (vocal,size,modified)=handle.update(cx,|_,_,cx|->anyhow::Result<_>{let p=view.read(cx);
+                let loaded=p.project.as_ref().unwrap();
+                anyhow::ensure!(loaded.raw.get("songFile").is_none(),"Real Qwen UI refuses legacy original-song heard caches");
+                let vocal=loaded.lanes.iter().find(|(slot,_)|*slot==0)
+                    .ok_or_else(||anyhow::anyhow!("Real Qwen fixture has no vocal lane"))?.1.clone();
+                let meta=std::fs::symlink_metadata(&vocal)?;
+                anyhow::ensure!(meta.file_type().is_file(),"Real Qwen vocal source is not ordinary");
+                Ok((vocal,meta.len(),meta.modified()?))})??;
+            edit!();
+            let before=handle.update(cx,|_,_,cx|rows(&view,cx))?;
+            anyhow::ensure!(!heard_path.try_exists()?,"Opening the editor unexpectedly supplied heard cache");
+            press!("lyed-align");
+            let deadline=Instant::now()+Duration::from_secs(900);
+            let mut saw_inference=false;
+            loop {
+                cx.background_executor().timer(Duration::from_millis(80)).await;
+                let (busy,editor)=handle.update(cx,|_,w,cx|->anyhow::Result<_>{let p=view.read(cx);
+                    anyhow::ensure!(!w.is_visible()&&!w.is_window_active()&&p.notice.is_none(),"Real Qwen inference changed hidden state or raised a notice");
+                    anyhow::ensure!(p.lyrics_download_pending.is_none(),"Preinstalled Qwen flow must not download models");
+                    Ok((p.lyrics_editor.read(cx).busy,state(p,w,cx)))})??;
+                saw_inference|=busy;
+                anyhow::ensure!(!editor["error"].is_string(),"Real Qwen alignment failed: {}",editor["error"]);
+                anyhow::ensure!(editor["consent"].is_null(),"Real Qwen flow requested missing-model consent");
+                if !busy&&editor["check"]["method"]=="qwen" {
+                    anyhow::ensure!(editor["check"]["verdict"]!="mismatch","Real Qwen reported a reference mismatch");break;
+                }
+                anyhow::ensure!(Instant::now()<deadline,"Real Qwen inference timed out");
+            }
+            anyhow::ensure!(saw_inference,"Real Qwen UI never observed inference in progress");
+            let meta=std::fs::symlink_metadata(&heard_path)?;
+            anyhow::ensure!(meta.file_type().is_file()&&meta.len()<=8*1024*1024,"Real Qwen cache must be bounded and ordinary");
+            let heard:serde_json::Value=serde_json::from_slice(&std::fs::read(&heard_path)?)?;
+            let modified_ms=modified.duration_since(std::time::UNIX_EPOCH)?.as_secs_f64()*1000.;
+            anyhow::ensure!(heard["version"]==1&&heard["engine"]=="qwen3-asr-1.7b"
+                &&heard["vocals"]["size"].as_u64()==Some(size)
+                &&heard["vocals"]["mtimeMs"].as_f64().is_some_and(|ms|(ms-modified_ms).abs()<=2.)
+                &&heard["chunks"].as_array().is_some_and(|chunks|chunks.iter().any(|chunk|chunk["text"].as_str().is_some_and(|text|!text.trim().is_empty()))),
+                "Real Qwen did not create source-bound nonempty heard text");
+            let current=std::fs::symlink_metadata(&vocal)?;
+            anyhow::ensure!(current.len()==size&&current.modified()?==modified,"Real Qwen changed its vocal input");
+            let (preview,duration)=handle.update(cx,|_,w,cx|->anyhow::Result<_>{let p=view.read(cx);
+                anyhow::ensure!(state(p,w,cx)["dirty"]==true,"Real Qwen preview was not an unsaved editable draft");
+                let draft=rows(&view,cx);
+                anyhow::ensure!(draft.len()==before.len()&&draft.iter().zip(&before).all(|(a,b)|a.text==b.text),"Real Qwen changed manual reference text");
+                Ok((real_lines(&draft,p.duration as f64)?,p.duration as f64))})??;
+            anyhow::ensure!(std::fs::read(&lyrics_path)?==original_lyrics,"Qwen preview published before explicit Save");
+            both!("qwen-preview");
+            press!("lyed-save");
+            wait!(60,p,w,app => !p.lyrics_editor_open&&p.lyrics_editor_pending.is_none());
+            let saved_bytes=std::fs::read(&lyrics_path)?;
+            let saved:serde_json::Value=serde_json::from_slice(&saved_bytes)?;
+            let persisted:Vec<lyrics_edit::Line>=serde_json::from_value(saved["lines"].clone())?;
+            anyhow::ensure!(saved["source"]=="edited"&&real_same_lines(&preview,&persisted),"Qwen Save changed accepted timings");
+            edit!();
+            let reopened=handle.update(cx,|_,_,cx|real_lines(&rows(&view,cx),duration))??;
+            anyhow::ensure!(real_same_lines(&persisted,&reopened),"Qwen editor reopen lost saved timings");
+            press!("lyed-cancel");wait!(30,p,w,app => !p.lyrics_editor_open);
+            let epoch=handle.update(cx,|_,_,cx|view.read(cx).native_epoch)?;
+            handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(project.clone(),cx)))?;
+            wait!(90,p,w,app => !p.loading&&p.native_epoch>epoch&&p.project.as_ref().is_some_and(|s|s.dir==project));
+            edit!();
+            let reopened=handle.update(cx,|_,_,cx|real_lines(&rows(&view,cx),duration))??;
+            anyhow::ensure!(real_same_lines(&persisted,&reopened)&&std::fs::read(&lyrics_path)?==saved_bytes,"Qwen project reload lost or rewrote saved timings");
+            press!("lyed-cancel");wait!(30,p,w,app => !p.lyrics_editor_open);
+            handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);
+                let b=view.read(cx).transport.read(cx).bounds("transport-play").ok_or_else(||anyhow::anyhow!("Qwen Play control missing"))?;
+                click(w,cx,b.center());Ok(())})??;
+            wait!(30,p,w,app => p.playing&&p.last_playback_status.as_ref().is_some_and(|s|s.playing&&s.audible_current&&s.position>0.02));
+            handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);
+                let b=view.read(cx).transport.read(cx).bounds("transport-play").unwrap();click(w,cx,b.center());Ok(())})??;
+            wait!(30,p,w,app => !p.playing&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
+            both!("qwen-saved-player");
+            let mut receipt=serde_json::json!({"realInference":true,"fixtureInference":false,"engine":"qwen3-asr-1.7b",
+                "qwenPreview":true,"finiteWordTimings":true,"previewDoesNotWrite":true,"explicitSave":true,
+                "reopenedEditor":true,"reopenedPlayer":true,"nativePlayback":true,"freshHeardCache":true,
+                "modelDownload":false,"preciseInference":false,"wordCount":persisted.iter().map(|line|line.words.len()).sum::<usize>(),
+                "sizes":[[1280,800],[1060,640]],"hidden":true,"muted":true});
+            receipt.as_object_mut().unwrap().extend(serde_json::json!({"project":project,"vocal":vocal,"heardCache":heard,
+                "preview":preview,"persisted":persisted,"scope":"real preinstalled Qwen recognition and alignment, explicit Save/reopen/native playback; speech fixture, no singing-quality or live-FPS claim"}).as_object().unwrap().clone());
+            std::fs::write(out.join("qwen-real-result.json"),serde_json::to_vec_pretty(&receipt)?)?;
+            Ok(())
+        }.await;
+        match result {
+            Ok(())=>eprintln!("NATIVE_LYRICS_ALIGN Qwen real passed"),
+            Err(error)=>{eprintln!("NATIVE_LYRICS_ALIGN Qwen real failed: {error:#}");
+                let _=std::fs::create_dir_all(&out);let _=std::fs::write(out.join("qwen-real-failure.txt"),format!("{error:#}"));
+                let _=handle.update(cx,|_,w,cx|capture(&view,w,cx,&out,"qwen-real-failure"));}
+        }
+        let _=cx.update(|cx|cx.quit());
     }).detach();
 }

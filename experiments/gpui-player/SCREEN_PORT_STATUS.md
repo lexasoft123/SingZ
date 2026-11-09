@@ -6,6 +6,17 @@ controls are implemented as a first slice; see `NATIVE_INTEGRATION.md`. Full vis
 and the remaining backend features remain separate.
 Common native controls live in sibling `singz-ui/gpui`.
 
+Native Qwen runtime follow-up (2026-11-09): actual uncached recognition/alignment,
+explicit editor Save, editor/player reopen and native playback pass with packaged
+engines and preinstalled models. Four hidden/muted captures cover 1280×800 and
+1060×640; source files/models/runtimes remain unchanged and observed processes
+retire. The earlier ten-second CLI timeout was observed during Metal compilation;
+a longer attempt completes, and actual app jobs pass within the existing readiness
+budget. This qualifies the current host, not every fresh host. CPU/system-GPU
+observations are recorded; live FPS remains unmeasured. See
+[Native Qwen runtime review](NATIVE_QWEN_RUNTIME_REVIEW.md). Historical startup-gate
+statements below describe their earlier checkpoints.
+
 Mixer keyboard follow-up (2026-11-09): lane M/S, global unmute/unsolo and
 Add/export headers now have persistent keyboard/pointer focus using shared UIKit
 controls. Enter activates once, Space controls the song and arrows seek; disabled
