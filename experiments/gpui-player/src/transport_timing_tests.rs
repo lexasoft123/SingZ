@@ -21,6 +21,10 @@ fn status(seconds: f64, total: usize, per_bar: usize, pre: f64) -> Status {
         explicit_graph: false,
         graph_nodes: 0,
         graph_connections: 0,
+        graph_snapshot: None,
+        graph_error: None,
+        state: 3,
+        transport_state: 2,
         #[cfg(feature="ui-tests")]
         observed_lanes: serde_json::Value::Null,
         #[cfg(feature="ui-tests")]

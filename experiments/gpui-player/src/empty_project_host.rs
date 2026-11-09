@@ -68,6 +68,7 @@ impl Player {
         {
             return;
         }
+        self.settings.update(cx, |settings, cx| settings.set_playback_status(Some(&status), cx));
         self.timing_status=Some(status.clone());
         #[cfg(feature = "ui-tests")]
         {

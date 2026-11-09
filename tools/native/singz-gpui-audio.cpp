@@ -17,6 +17,7 @@
 #include <zcore/media/audio_export.h>
 #include <zcore/device/audio_host_fake.h>
 #include "json_string.h"
+#include "gpui_playback_graph.h"
 #include <cmath>
 #include <algorithm>
 #include <chrono>
@@ -806,8 +807,13 @@ int run(int argc, char** argv) {
       << ",\"parkedLaneBytes\":" << parkedBytes
         << ",\"graphGeneration\":" << generation
         << ",\"explicitGraph\":" << (config.graphDocument.has_value()?"true":"false")
-        << ",\"graphNodeCount\":" << (config.graphDocument?config.graphDocument->nodes.size():0)
-        << ",\"graphConnectionCount\":" << (config.graphDocument?config.graphDocument->connections.size():0)
+        << ",\"graphNodeCount\":" << s.graphNodeCount
+        << ",\"graphConnectionCount\":" << s.graphConnectionCount
+        << ",\"graphLatencyFrames\":" << s.graphLatencyFrames
+        << ",\"latencyCompensatedEdgeCount\":" << s.latencyCompensatedEdgeCount
+        << ",\"graphSnapshot\":";
+    singz::tools::writePlaybackGraphSnapshot(std::cout,s);
+    std::cout
       << ",\"cueGeneration\":" << cueGeneration << ",\"cueStartHostNs\":\"" << cueStart << "\",\"cueEndHostNs\":\"" << cueEnd << '"'
       << ",\"cueGain\":" << cueGain
       << ",\"cueActive\":" << (cueMixer.active(cueGeneration)?"true":"false")
@@ -819,6 +825,7 @@ int run(int argc, char** argv) {
       << ",\"baseHostRenderFailures\":" << baseHost.renderFailures
       << ",\"cueOutputLatencyMs\":" << (baseHost.format.sampleRate>0?(baseHost.latency.outputDeviceFrames+baseHost.latency.bufferFrames+baseHost.latency.externalRouteFrames)*1000./baseHost.format.sampleRate:0)
       << ",\"state\":" << static_cast<unsigned>(s.state)
+      << ",\"transportState\":" << static_cast<unsigned>(s.transportState)
       << ",\"transportGeneration\":" << s.transportGeneration
       << ",\"transportCommandsQueued\":" << s.transportCommandsQueued
       << ",\"transportCommandsApplied\":" << s.transportCommandsApplied

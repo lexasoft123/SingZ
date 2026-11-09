@@ -349,6 +349,10 @@ pub fn fixture_mode() -> bool {
 }
 #[derive(Clone, Debug)]
 pub struct Status {
+    pub graph_snapshot: Option<Arc<crate::playback_graph::Snapshot>>,
+    pub graph_error: Option<String>,
+    pub state: u32,
+    pub transport_state: u32,
     pub output_peak:f32,
     pub output_clipped_blocks:u64,
     pub explicit_graph: bool,
@@ -425,7 +429,31 @@ impl Status {
         if count_in_heard.is_some(){anyhow::ensure!(!empty_project&&v["trainingOnly"]!=true&&v["playing"]==true&&v["countingIn"]==true,"Inconsistent native heard count-in state");}
         let start = number(v.get("loopStart"), 0., 0., 86400. * 365.)?;
         let end = number(v.get("loopEnd"), 0., 0., 86400. * 365.)?;
+        let state = match v.get("state") {
+            None => 0,
+            Some(value) => value.as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(u32::MAX),
+        };
+        let transport_state = match v.get("transportState") {
+            // Older fixture/protocol packets predate the explicit enum. Keep
+            // their existing real transport flags instead of inventing Stop.
+            None if v["countingIn"] == true => 1,
+            None if v["playing"] == true => 2,
+            None => 0,
+            Some(value) => value.as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(u32::MAX),
+        };
+        let (graph_snapshot, graph_error) = if state > 7 || transport_state > 4 {
+            (None, Some("Unavailable runtime graph transport state".into()))
+        } else {
+            match crate::playback_graph::parse_status(v) {
+                Ok(snapshot) => (snapshot.map(Arc::new), None),
+                Err(error) => (None, Some(error.to_string())),
+            }
+        };
         Ok(Self {
+            graph_snapshot,
+            graph_error,
+            state,
+            transport_state,
             output_peak:number(v.get("outputPeak"),0.,0.,f32::MAX)?,
             output_clipped_blocks:match v.get("outputClippedBlocks") {
                 None=>0,
@@ -2866,6 +2894,34 @@ mod tests {
     use super::*;
     fn captured_lane_reply()->Value {
         serde_json::from_str(include_str!("../../../tests/shared/gpui-first-lane-default-reply.json")).unwrap()
+    }
+    #[test]
+    fn invalid_visualization_metadata_does_not_revoke_valid_audio_status() {
+        let mut packet=captured_lane_reply();
+        packet.as_object_mut().unwrap().remove("graphSnapshot");
+        let absent=Status::parse(&packet).unwrap();
+        assert!(absent.graph_snapshot.is_none() && absent.graph_error.is_none());
+        packet["graphSnapshot"]=serde_json::json!({"generation":"999","nodes":[]});
+        let malformed=Status::parse(&packet).unwrap();
+        assert!(malformed.graph_snapshot.is_none() && malformed.graph_error.is_some());
+        assert_eq!(malformed.duration,absent.duration);
+        assert_eq!(malformed.playing,absent.playing);
+        assert_eq!(malformed.graph_generation,absent.graph_generation);
+    }
+    #[test]
+    fn unknown_graph_transport_is_unavailable_without_breaking_playback() {
+        let mut packet=captured_lane_reply();
+        packet["playing"]=serde_json::json!(true);
+        packet.as_object_mut().unwrap().remove("transportState");
+        assert_eq!(Status::parse(&packet).unwrap().transport_state,2);
+        for (key,value) in [("state",serde_json::json!(9)),("transportState",serde_json::json!(5)),
+            ("transportState",serde_json::json!("unknown"))] {
+            let mut bad=packet.clone();bad[key]=value;
+            let parsed=Status::parse(&bad).unwrap();
+            assert!(parsed.graph_snapshot.is_none() && parsed.graph_error.is_some());
+            assert!(parsed.playing);
+            if key=="state" { assert_eq!(parsed.state,9); }
+        }
     }
     #[test]
     fn native_output_meter_admits_real_overload_and_rejects_malformed_telemetry() {

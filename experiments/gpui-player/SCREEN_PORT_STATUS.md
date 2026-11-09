@@ -6,6 +6,15 @@ controls are implemented as a first slice; see `NATIVE_INTEGRATION.md`. Full vis
 and the remaining backend features remain separate.
 Common native controls live in sibling `singz-ui/gpui`.
 
+Settings runtime graph follow-up (2026-11-09): accepted native playback snapshots
+now provide the actual modules, bus connections and latency compensation. Shared
+UIKit renders the source playback view with persistent viewport focus; native
+monitoring remains the fallback when no song graph exists. Ordinary/custom graph
+replacement, keyboard reading and custom Save/reopen pass a focused two-size
+23-capture checkpoint. The existing Settings keyboard regression also passes;
+the normal preview is rebuilt and package-verified. See [playback graph review](PLAYBACK_GRAPH_REVIEW.md) for source
+identities, verified scope and remaining visual/platform/accessibility limits.
+
 Training feedback follow-up (2026-11-09): completed-answer reveal, retained
 acknowledgement and task-specific Summary copy now use native presentation and
 a shared UIKit banner. Hidden EN/RU checks pass at both sizes with real native

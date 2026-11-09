@@ -1,7 +1,7 @@
 //! Settings composition mirrors SettingsModal.tsx; native routes are host-owned.
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use std::{cell::RefCell, collections::HashMap, rc::Rc, time::{Duration, Instant}};
+use std::{cell::{Cell, RefCell}, collections::HashMap, rc::Rc, time::{Duration, Instant}};
 actions!(singz_settings, [NextFocus, PreviousFocus]);
 use singz_uikit::tokens::{ACCENT, DANGER, DIM, FAINT, LINE, LINE_STRONG, PANEL, PANEL_DEEP, TEXT};
 use singz_uikit::{
@@ -19,6 +19,15 @@ pub enum SettingsEvent {
     Monitor,
 }
 impl EventEmitter<SettingsEvent> for SettingsScreen {}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PlaybackGraphView {
+    generation: u64,
+    state: u32,
+    transport_state: u32,
+    graph: Option<std::sync::Arc<crate::playback_graph::Snapshot>>,
+    error: Option<String>,
+}
 
 pub struct SettingsScreen {
     scope: FocusHandle,
@@ -62,6 +71,12 @@ pub struct SettingsScreen {
     review_fixture: bool,
     scroll: ScrollHandle,
     graph_scroll: ScrollHandle,
+    playback_graph: Option<PlaybackGraphView>,
+    graph_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    graph_viewport_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    graph_flow_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    graph_last_node_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    graph_last_connection_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     #[cfg(feature = "ui-tests")]
     gain_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
 }
@@ -123,9 +138,73 @@ impl SettingsScreen {
             review_fixture: false,
             scroll: ScrollHandle::new(),
             graph_scroll: ScrollHandle::new(),
+            playback_graph: None,
+            graph_bounds: Default::default(),
+            graph_viewport_bounds: Default::default(),
+            graph_flow_bounds: Default::default(),
+            graph_last_node_bounds: Default::default(),
+            graph_last_connection_bounds: Default::default(),
             #[cfg(feature = "ui-tests")]
             gain_bounds: Default::default(),
         }
+    }
+    /// Keep only immutable native graph presentation. A rejected/absent graph
+    /// stays unavailable on the playback route, never a fabricated monitor chain.
+    pub fn set_playback_status(&mut self, status: Option<&crate::integration::Status>, cx: &mut Context<Self>) {
+        let next = status.filter(|s| !s.training_only && !s.empty_project && s.graph_generation != 0 && s.state != 0)
+            .map(|s| PlaybackGraphView { generation: s.graph_generation, state: s.state,
+                transport_state: s.transport_state, graph: s.graph_snapshot.clone(), error: s.graph_error.clone() });
+        if self.playback_graph != next {
+            if self.playback_graph.as_ref().map(|s|s.generation) != next.as_ref().map(|s|s.generation) {
+                self.graph_scroll.set_offset(point(px(0.),px(0.)));
+            }
+            self.playback_graph = next;
+            cx.notify();
+        }
+    }
+    fn playback_node_copy(node: &crate::playback_graph::Node) -> (String, String) {
+        let buses = |channels: &[u32]| if channels.is_empty() { "none".into() } else {
+            channels.iter().map(|channels|format!("{channels} ch")).collect::<Vec<_>>().join(" · ")
+        };
+        (format!("{} in ({}) · {} out ({})",node.input_bus_count,buses(&node.input_bus_channels),node.output_bus_count,buses(&node.output_bus_channels)),
+         format!("{} · type {}:{} v{} · latency {} + {} = {} frames",node.role,node.type_high,node.type_low,node.schema_version,node.arrival_latency_frames,node.intrinsic_latency_frames,node.output_latency_frames))
+    }
+    fn playback_connection_copy(graph: &crate::playback_graph::Snapshot, connection: &crate::playback_graph::Connection) -> (String, String) {
+        let label = |id| graph.nodes.iter().find(|node|node.id==id).expect("validated native graph connection").label.as_str();
+        (format!("{} OUT {} ({} ch) → {} IN {} ({} ch)",label(connection.source_node_id),connection.source_bus+1,connection.source_channels,
+            label(connection.destination_node_id),connection.destination_bus+1,connection.destination_channels),
+         format!("{} → {} FRAMES · {} COMPENSATION FRAME{}",connection.source_output_latency_frames,connection.destination_arrival_latency_frames,
+            connection.compensation_frames,if connection.compensation_frames==1{""}else{"S"}))
+    }
+    /// The visible node-row region uses measured flow and viewport bounds;
+    /// connection rows can extend below it without pulling Tab focus past nodes.
+    fn graph_node_viewport(&self) -> Option<Bounds<Pixels>> {
+        let viewport=self.graph_viewport_bounds.get()?;
+        let flow=self.graph_flow_bounds.get()?;
+        Some(Bounds::new(point(viewport.left(),flow.top()),size(viewport.size.width,flow.size.height)))
+    }
+    #[cfg(feature="ui-tests")]
+    pub fn graph_ui_state(&self) -> serde_json::Value {
+        let bounds=|b:Option<Bounds<Pixels>>|b.map(|b|[f32::from(b.left()),f32::from(b.top()),f32::from(b.size.width),f32::from(b.size.height)]);
+        let view=self.playback_graph.as_ref();
+        let graph=view.and_then(|v|v.graph.as_deref());
+        let rendered_nodes:Vec<_>=graph.into_iter().flat_map(|g|&g.nodes).map(|node| {
+            let (value,detail)=Self::playback_node_copy(node);
+            serde_json::json!({"id":node.id.to_string(),"kind":node.kind,"label":node.label,"value":value,"detail":detail})
+        }).collect();
+        let rendered_connections:Vec<_>=graph.into_iter().flat_map(|g|&g.connections).map(|connection| {
+            let (route,latency)=Self::playback_connection_copy(graph.unwrap(),connection);
+            serde_json::json!({"sourceNodeId":connection.source_node_id.to_string(),"destinationNodeId":connection.destination_node_id.to_string(),
+                "sourceBus":connection.source_bus,"destinationBus":connection.destination_bus,"route":route,"latency":latency})
+        }).collect();
+        serde_json::json!({"mode":if view.is_some(){"playback"}else{"monitor"},"available":graph.is_some(),
+            "generation":view.map(|v|v.generation.to_string()),"state":view.map(|v|v.state),"transportState":view.map(|v|v.transport_state),
+            "graph":graph,"error":view.and_then(|v|v.error.as_deref()),"renderedNodes":rendered_nodes,"renderedConnections":rendered_connections,
+            "graphBounds":bounds(self.graph_bounds.get()),"viewportBounds":bounds(self.graph_node_viewport()),
+            "fullViewportBounds":bounds(self.graph_viewport_bounds.get()),"flowBounds":bounds(self.graph_flow_bounds.get()),"lastNodeBounds":bounds(self.graph_last_node_bounds.get()),
+            "lastConnectionBounds":bounds(self.graph_last_connection_bounds.get()),"settingsModalViewportBounds":bounds(Some(self.scroll.bounds())),
+            "graphScrollOffset":[f32::from(self.graph_scroll.offset().x),f32::from(self.graph_scroll.offset().y)],
+            "verticalScrollOffset":[f32::from(self.scroll.offset().x),f32::from(self.scroll.offset().y)]})
     }
     pub fn clear_input_pref_error(&mut self, cx: &mut Context<Self>) {
         self.input_pref_error = None;
@@ -560,7 +639,8 @@ impl SettingsScreen {
     fn focus_control(&self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(focus) = self.controls.borrow().get(id) { focus.focus(window, cx); }
         if !matches!(id, "settings-quick-start" | "settings-tab-audio" | "settings-close") {
-            if let Some(bounds) = self.control_bounds.borrow().get(id) {
+            let bounds = if id == "settings-playback-graph" { self.graph_node_viewport() } else { self.control_bounds.borrow().get(id).copied() };
+            if let Some(bounds) = bounds {
                 let viewport = self.scroll.bounds();
                 let correction = if bounds.top() < viewport.top() + px(4.) {
                     viewport.top() + px(4.) - bounds.top()
@@ -626,6 +706,27 @@ impl SettingsScreen {
             self.menu_index = None; window.prevent_default(); cx.stop_propagation(); return;
         }
         let Some(id) = self.focused_control(window, cx) else { return; };
+        if id == "settings-playback-graph" {
+            let vertical_delta=match key {
+                "up"=>Some(px(40.)),"down"=>Some(px(-40.)),
+                "pageup"=>Some(self.scroll.bounds().size.height*0.9),
+                "pagedown"=>Some(self.scroll.bounds().size.height*-0.9),_=>None,
+            };
+            if let Some(delta)=vertical_delta {
+                let offset=self.scroll.offset();
+                self.scroll.set_offset(point(offset.x,(offset.y+delta).clamp(-self.scroll.max_offset().y,px(0.))));
+                window.prevent_default();cx.stop_propagation();cx.notify();return;
+            }
+            let offset=self.graph_scroll.offset();
+            let end=f32::from(self.graph_scroll.max_offset().x);
+            let next=match key {
+                "left"=>Some((f32::from(offset.x)+40.).min(0.)),
+                "right"=>Some((f32::from(offset.x)-40.).max(-end)),
+                "home"=>Some(0.),"end"=>Some(-end),_=>None,
+            };
+            if let Some(x)=next { self.graph_scroll.set_offset(point(px(x),offset.y)); window.prevent_default(); cx.stop_propagation(); cx.notify(); }
+            return;
+        }
         if !matches!(id, "settings-output" | "settings-input" | "settings-channel" | "settings-monitor-output" | "settings-output-left" | "settings-output-right") { return; }
         if !self.field_enabled(id) { return; }
         let options = self.field_options(id);
@@ -661,7 +762,11 @@ impl SettingsScreen {
     #[cfg(feature = "ui-tests")]
     pub fn keyboard_snapshot(&self, window: &Window, cx: &App) -> serde_json::Value {
         let focused = self.focused_control(window, cx);
-        let bounds = focused.and_then(|id| self.control_bounds.borrow().get(id).copied());
+        let bounds = focused.and_then(|id| if id == "settings-playback-graph" {
+            self.graph_node_viewport()
+        } else {
+            self.control_bounds.borrow().get(id).copied()
+        });
         serde_json::json!({"focusOrder":self.focus_order.borrow().clone(),"focusedControl":focused,
             "openField":self.open_field,"menuIndex":self.menu_index,"focusInside":self.scope.contains_focused(window,cx),
             "scrollOffset":[f32::from(self.scroll.offset().x),f32::from(self.scroll.offset().y)],
@@ -1098,7 +1203,69 @@ impl SettingsScreen {
                 },
             )
     }
-    fn graph(&self) -> impl IntoElement + use<> {
+    fn graph(&self, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(view)=&self.playback_graph { return self.playback_graph(view,cx); }
+        self.monitor_graph().into_any_element()
+    }
+    fn playback_graph(&self, view: &PlaybackGraphView, cx: &mut Context<Self>) -> AnyElement {
+        let graph=view.graph.as_deref();
+        let facts=graph.map_or_else(||vec![crate::i18n::t("player.dspGraph.structuredUnavailable")],|graph|vec![
+            if graph.sample_rate%1000.==0. { format!("{} kHz",graph.sample_rate/1000.) } else { format!("{:.1} kHz",graph.sample_rate/1000.) },
+            crate::i18n::tv("player.dspGraph.framesMaximum",&[("n",graph.maximum_frames.to_string())]),
+            crate::i18n::tv("player.dspGraph.nodesLinks",&[("nodes",graph.nodes.len().to_string()),("links",graph.connections.len().to_string())]),
+        ]);
+        let transport=match view.transport_state {0=>Some("stopped"),1=>Some("pre-roll"),2=>Some("playing"),3=>Some("paused"),4=>Some("completed"),_=>None};
+        let state_label=transport.map_or_else(||crate::i18n::t("player.dspGraph.structuredUnavailable"),|transport|crate::i18n::t(&format!("player.dspGraph.transport.{transport}")));
+        let card=singz_uikit::runtime_graph_card(crate::i18n::t("player.dspGraph.runtimeGraph"),crate::i18n::t("player.dspGraph.songAndReference"),facts,
+            state_label,view.state==4,matches!(view.state,6|7)||view.state>7||transport.is_none());
+        let card=if let Some(graph)=graph {
+            let last_bounds=self.graph_last_node_bounds.clone();
+            let nodes=graph.nodes.iter().enumerate().map(|(index,node)| {
+                let (value,detail)=Self::playback_node_copy(node);
+                let face=singz_uikit::runtime_graph_node(node.kind.clone(),node.label.clone(),value,detail,view.state==4);
+                if index+1==graph.nodes.len() {
+                    let bounds=last_bounds.clone();
+                    face.child(canvas(move|b,_,_|{bounds.set(Some(b));b},|_,_,_,_|{}).absolute().inset_0())
+                } else {face}
+            });
+            let flow_bounds=self.graph_flow_bounds.clone();
+            let flow=div().relative().min_w(px(graph.nodes.len() as f32*114.)).flex().gap(px(10.)).items_stretch().children(nodes)
+                .child(canvas(move|b,_,_|{flow_bounds.set(Some(b));b},|_,_,_,_|{}).absolute().inset_0());
+            let connections=singz_uikit::runtime_graph_connections().children(graph.connections.iter().enumerate().map(|(index,connection)|{
+                let (route,latency)=Self::playback_connection_copy(graph,connection);
+                let row=singz_uikit::runtime_graph_connection(route,latency,index>0);
+                if index+1==graph.connections.len() {
+                    let bounds=self.graph_last_connection_bounds.clone();
+                    row.relative().child(canvas(move|b,_,_|{bounds.set(Some(b));b},|_,_,_,_|{}).absolute().inset_0())
+                } else {row}
+            }));
+            let vertical=self.scroll.clone();let horizontal=self.graph_scroll.clone();
+            let viewport_bounds=self.graph_viewport_bounds.clone();
+            // Scroll transforms every child, including absolute overlays.
+            // Keep the actual viewport measurement and focus outline on a
+            // stationary parent, outside that scrolling content coordinate space.
+            let scroller=div().id("settings-playback-graph-scroll").relative().overflow_x_scroll().restrict_scroll_to_axis().track_scroll(&self.graph_scroll).p(px(12.))
+                .on_scroll(move|event,window,cx|{
+                    let delta=event.delta.pixel_delta(window.line_height());
+                    if delta.y.abs()>delta.x.abs(){
+                        if event.modifiers.shift {let offset=horizontal.offset();horizontal.set_offset(point(offset.x+delta.y,offset.y));}
+                        else {let offset=vertical.offset();vertical.set_offset(point(offset.x,offset.y+delta.y));}
+                        window.refresh();cx.stop_propagation();
+                    }
+                })
+                .child(flow).child(connections);
+            let viewport=div().id("settings-playback-graph").relative().min_w_0()
+                .child(scroller)
+                .child(canvas(move|b,_,_|{viewport_bounds.set(Some(b));b},|_,_,_,_|{}).absolute().inset_0());
+            let focus=self.register_control("settings-playback-graph",true,cx);
+            card.child(singz_uikit::runtime_graph_viewport_focus(viewport,focus))
+        } else {
+            card.child(div().relative().mt(px(10.)).text_color(rgb(DANGER)).text_size(px(11.)).line_height(px(15.4)).child(crate::i18n::t("player.dspGraph.unavailableExplain")))
+        };
+        let bounds=self.graph_bounds.clone();
+        card.child(canvas(move|b,_,_|{bounds.set(Some(b));b},|_,_,_,_|{}).absolute().inset_0()).into_any_element()
+    }
+    fn monitor_graph(&self) -> impl IntoElement + use<> {
         let vertical_scroll = self.scroll.clone();
         let horizontal_scroll = self.graph_scroll.clone();
         let db = |rms: f32| {
@@ -1493,7 +1660,7 @@ impl SettingsScreen {
                     )
                 },
             )
-            .child(self.graph())
+            .child(self.graph(cx))
             .child(
                 div()
                     .mt(px(12.))
@@ -1638,6 +1805,11 @@ impl SettingsScreen {
 impl Render for SettingsScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.focus_order.borrow_mut().clear();
+        self.graph_bounds.set(None);
+        self.graph_viewport_bounds.set(None);
+        self.graph_flow_bounds.set(None);
+        self.graph_last_node_bounds.set(None);
+        self.graph_last_connection_bounds.set(None);
         if self.pending_focus { self.pending_focus = false; self.scope.focus(window, cx); }
         #[cfg(feature = "ui-tests")]
         {

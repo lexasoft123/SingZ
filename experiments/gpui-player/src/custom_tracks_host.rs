@@ -75,6 +75,7 @@ impl Player {
         {
             self.last_playback_status = None;
         }
+        self.settings.update(cx, |settings, cx| settings.set_playback_status(None, cx));
         self.edit_seq += 1;
         waveform::set_project_peaks(std::array::from_fn(|_| vec![0.]));
         self.notice = Some(format!(
@@ -362,6 +363,7 @@ impl Player {
                         .clamp(self.view_start + 0.001, 1.);
                 }
 
+                self.settings.update(cx, |settings, cx| settings.set_playback_status(Some(&status), cx));
                 self.native_graph = status.graph_generation;
                 self.native_lane_revision = status.lane_revision;
                 self.native_carry_revision=status.carry_revision;

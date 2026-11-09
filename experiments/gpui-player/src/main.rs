@@ -49,6 +49,7 @@ mod drive_remote;
 mod drive_snapshot;
 mod drive_graph;
 mod native_graph;
+mod playback_graph;
 mod drive_state;
 mod drive_sync;
 mod drive_adopt;
@@ -224,6 +225,8 @@ mod ui_training_running_keyboard;
 mod ui_training_song_keyboard;
 #[cfg(feature = "ui-tests")]
 mod ui_training_feedback;
+#[cfg(feature="ui-tests")]
+mod ui_playback_graph;
 #[cfg(feature = "ui-tests")]
 mod ui_training_recovery;
 #[cfg(feature = "ui-tests")]
@@ -2337,6 +2340,7 @@ impl Player {
                     self.native_epoch = epoch;
                     self.karaoke=false;
                     self.transport.update(cx,|transport,cx|transport.set_karaoke(false,cx));
+                    self.settings.update(cx, |settings, cx| settings.set_playback_status(None, cx));
                     self.loading = true;
                     self.playing = false;
                     self.native_anchor = None;
@@ -2402,6 +2406,7 @@ impl Player {
                                 });
                             }
                             if let Some(status) = status {
+                                self.settings.update(cx, |settings, cx| settings.set_playback_status(Some(&status), cx));
                                 self.native_graph=status.graph_generation;
                                 self.native_lane_revision=status.lane_revision;
                                 #[cfg(feature="ui-tests")]
@@ -2549,6 +2554,7 @@ impl Player {
                 {
                     diagnostics::event("projects",format!("Loaded {}",project.name),diagnostics::Level::Info);
                     self.track_rename=None;self.tracks_pending=None;self.tracks_audio_failed=false;
+                    self.settings.update(cx, |settings, cx| settings.set_playback_status(Some(&status), cx));
                     self.native_graph=status.graph_generation;self.native_lane_revision=status.lane_revision;
                     #[cfg(feature="ui-tests")]
                     {self.last_playback_status=Some(status.clone());}
@@ -2741,7 +2747,9 @@ impl Player {
                         if let Some(status)=&status{pending.resume.position=status.position;pending.resume.playing=status.playing;}
                         if !outcome.imported&&pending.mode==project_import::Mode::Copy&&status.is_some(){
                             let status=status.unwrap();self.position=status.position;self.playing=status.playing;
-                            self.native_anchor=Some((status.position,status.sampled_at));self.native_graph=status.graph_generation;
+                            self.native_anchor=Some((status.position,status.sampled_at));
+                            self.settings.update(cx, |settings, cx| settings.set_playback_status(Some(&status), cx));
+                            self.native_graph=status.graph_generation;
                             self.pending_seek=None;self.native_floor=None;
                         }else{
                             // Source handleImport reanchors song.path; its keyed
@@ -2976,6 +2984,7 @@ impl Player {
                     self.loaded_song = false;
                     self.stop_training(cx);
                     self.project = None;
+                    self.settings.update(cx, |settings, cx| settings.set_playback_status(None, cx));
                     self.lyric_document = Arc::default();
                     self.native_glows.borrow_mut().clear();
                     self.shape_cache.borrow_mut().clear();
@@ -5943,6 +5952,12 @@ fn main() {
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_TRAINING_REVIEW") {
             assert!(background && std::env::var_os("SINGZ_MUTE").is_some());
             ui_training::run(window_handle, view.clone(), directory.into(), cx);
+        }
+        #[cfg(feature = "ui-tests")]
+        if let Some(directory) = std::env::var_os("SINGZ_GPUI_PLAYBACK_GRAPH_TEST") {
+            assert!(background && std::env::var("SINGZ_MUTE").as_deref()==Ok("1")
+                && std::env::var("SINGZ_GPUI_TEST_NO_CAPTURE").as_deref()==Ok("1"));
+            ui_playback_graph::run(window_handle, view.clone(), directory.into(), cx);
         }
         #[cfg(feature = "ui-tests")]
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_TRAINING_FEEDBACK_TEST") {

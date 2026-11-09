@@ -321,6 +321,7 @@ impl Player {
         self.native_anchor = None;
         self.loaded_song = false;
         self.project = None;
+        self.settings.update(cx, |settings, cx| settings.set_playback_status(None, cx));
         self.lane_entered.clear();
         self.song_title = "".into();
         self.song_artist = "".into();

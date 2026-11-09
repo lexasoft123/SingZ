@@ -67,6 +67,7 @@ impl Player {
         {
             self.last_playback_status = None;
         }
+        self.settings.update(cx, |settings, cx| settings.set_playback_status(None, cx));
         diagnostics::event("audio", error.clone(), diagnostics::Level::Error);
         let message = if exercise_failed {
             if self.project.is_some() {
@@ -175,6 +176,7 @@ impl Player {
                     return;
                 }
                 self.tracks_audio_failed = false;
+                self.settings.update(cx, |settings, cx| settings.set_playback_status(Some(&status), cx));
                 self.native_graph = status.graph_generation;
                 self.native_lane_revision = status.lane_revision;
                 self.native_carry_revision = status.carry_revision;

@@ -200,6 +200,7 @@ impl Player {
         self.native_anchor = None;
         self.pending_seek = None;
         self.tracks_audio_failed = true;
+        self.settings.update(cx, |settings, cx| settings.set_playback_status(None, cx));
         self.notice = Some(format!(
             "{error}{} Retry the output route in Settings before resuming playback.",
             if queued_save { " Queued Save did not run." } else { "" }
