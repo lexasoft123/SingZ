@@ -48,9 +48,21 @@ Evidence: `/tmp/singz-native-decoder-status-20261110/mac-v1` and `mac-v2`, plus
 - Source bytes and the selected SDK remained frozen. No Node, UI window, physical
   microphone or output device was used.
 
-These local checks do not close the strict relocated Linux canonical 34-case
-proof or establish helper/app/package qualification. Those must run from the
-published repaired source, followed by the maintained platform desktop journeys.
+## Published Linux checkpoint
+
+Published app `03c22a6c` with UIKit `6f694bf0` passes all nine phases on VM403:
+native codec assembly, native test configure/build, all seven native suites,
+the strengthened codec provisioning matrix, Rust UI checks and unit tests, and
+both UI-enabled and ordinary application builds. The controller reports
+`sourceFrozen: true` and 175.35 seconds total. Its completed SSH session is
+65428; the retained controller log is
+`/tmp/singz-native-tour-a11y-20261109/linux-decoder-fixed-build.host.log`.
+The target evidence directory is `/lab/checkpoint-711ac271/evidence-v3`.
+
+These checks do not close the separately compiled, relocated canonical 34-case
+proof or the maintained platform desktop journeys. New VM403 SSH connections
+closed before the prepared strict proof could start; no successful canonical
+result is claimed. Windows SDK/helper/app qualification also remains open.
 The separate nonblocking analyzer-provenance diagnostic limitation is tracked in
 `DESKTOP_ACCEPTANCE_GAPS.md`; test byte hashes must not be described as production
 provenance diagnostics or automatic stored-cache invalidation.

@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -21,6 +22,38 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 HELPERS = ('singz-gpui-audio', 'singz-analyze', 'singz-gpui-input')
 RECEIPT = 'codec-runtime-manifest.json'
+
+
+def analyze_source_hash(root: Path = ROOT) -> str:
+    """Use the established analyzer fingerprint, including in source archives."""
+    if os.name == 'nt':
+        # Only this child sees POSIX tools first. MSVC's link.exe must retain
+        # priority in the parent environment used for CMake compilation.
+        command = ['bash', '-c',
+                   'export PATH="/usr/bin:$PATH"; '
+                   'root=$(cygpath -u "$1") || exit; '
+                   'exec bash "$root/scripts/analyze-source-hash.sh" "$root"',
+                   'gpui-analyze-hash', str(root)]
+    else:
+        command = ['bash', str(root / 'scripts/analyze-source-hash.sh'), str(root)]
+    result = subprocess.run(command, check=True, capture_output=True, text=True,
+                            timeout=120)
+    value = result.stdout.strip()
+    if not re.fullmatch('[0-9a-f]{40}', value):
+        raise RuntimeError('Canonical analyzer source hash is not 40 lowercase hex characters')
+    return value
+
+
+def verify_analyzer_source_hash(binary: Path, expected: str) -> None:
+    """Qualify the binary's embedded answer, never a neighboring sidecar."""
+    result = subprocess.run([str(binary), 'build-info'], check=True,
+                            capture_output=True, text=True, timeout=10)
+    try:
+        info = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f'Invalid analyzer build-info from {binary}') from error
+    if not isinstance(info, dict) or info.get('version') != 1 or info.get('sourceHash') != expected:
+        raise RuntimeError(f'Analyzer source provenance mismatch at {binary}; expected {expected}')
 
 
 def load_script(name: str, filename: str):
@@ -139,7 +172,8 @@ def build(output_dir: Path, *, codec_pack: Path | None = None, basic_only: bool 
     directory = Path(build_dir).resolve() if build_dir else ROOT / f'experiments/gpui-player/target/native-{checkout}-{target}-{"basic" if basic_only else "codecs"}'
     configure = [cmake_path(), '-S', str(ROOT), '-B', str(directory),
                  '-DSINGZ_BUILD_HOST_TOOLS=ON', '-DSINGZ_BUILD_ELECTRON_CAPTURE=OFF',
-                 '-DSINGZ_CORE_TESTS=OFF', '-DCMAKE_BUILD_TYPE=Release', *codec_args]
+                 '-DSINGZ_CORE_TESTS=OFF', '-DCMAKE_BUILD_TYPE=Release',
+                 '-DSINGZ_SOURCE_HASH=<computed-under-build-lease>', *codec_args]
     if target.startswith('win32-'):
         configure += ['-G', 'Visual Studio 17 2022', '-A', 'x64']
     compile_command = [configure[0], '--build', str(directory), '--config', 'Release',
@@ -147,10 +181,13 @@ def build(output_dir: Path, *, codec_pack: Path | None = None, basic_only: bool 
     plan = {'target': target, 'buildDir': str(directory), 'outputDir': str(output),
             'codecPack': None if basic_only else str(pack.resolve()),
             'basicOnly': basic_only, 'configure': configure, 'build': compile_command,
-            'audioHelper': str(audio), 'node': False}
+            'audioHelper': str(audio), 'node': False, 'sourceHash': None}
     if print_plan:
         return plan
     with locks.native_build_lock(ROOT, 'gpui-native-helpers:' + target):
+        source_hash = analyze_source_hash(ROOT)
+        configure[configure.index('-DSINGZ_SOURCE_HASH=<computed-under-build-lease>')] = '-DSINGZ_SOURCE_HASH=' + source_hash
+        plan['sourceHash'] = source_hash
         directory.mkdir(parents=True, exist_ok=True)
         output.mkdir(parents=True, exist_ok=True)
         if info:
@@ -163,15 +200,21 @@ def build(output_dir: Path, *, codec_pack: Path | None = None, basic_only: bool 
         subprocess.run(compile_command, check=True, stdout=sys.stderr)
         suffix = '.exe' if target.startswith('win32-') else ''
         binaries = directory / 'Release' if target.startswith('win32-') else directory
+        if analyze_source_hash(ROOT) != source_hash:
+            raise RuntimeError('Analyzer build inputs changed during compilation; helpers were not staged')
+        verify_analyzer_source_hash(binaries / ('singz-analyze' + suffix), source_hash)
         for name in HELPERS:
             source = binaries / (name + suffix)
             destination = audio if name == 'singz-gpui-audio' else output / source.name
             if source.resolve() != destination.resolve():
                 # Preserve a running Unix helper's old inode during rebuilds.
-                with tempfile.NamedTemporaryFile(prefix='.' + source.name + '-', dir=destination.parent, delete=False) as pending:
+                with tempfile.NamedTemporaryFile(prefix='.' + source.name + '-', suffix=suffix,
+                                                 dir=destination.parent, delete=False) as pending:
                     temporary = Path(pending.name)
                 try:
                     shutil.copy2(source, temporary)
+                    if name == 'singz-analyze':
+                        verify_analyzer_source_hash(temporary, source_hash)
                     os.replace(temporary, destination)
                 finally:
                     temporary.unlink(missing_ok=True)
@@ -201,7 +244,7 @@ def main() -> None:
         result = build(args.output_dir, codec_pack=args.codec_pack, basic_only=args.basic_only,
                        jobs=args.jobs, build_dir=args.build_dir, audio_output=args.audio_output,
                        print_plan=args.print_plan)
-    except (OSError, RuntimeError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+    except (OSError, RuntimeError, ValueError, KeyError, subprocess.SubprocessError) as error:
         parser.exit(1, f'Native GPUI helper build failed: {error}\n')
     print(json.dumps(result, indent=2) if args.print_plan else result['audioHelper'])
 
