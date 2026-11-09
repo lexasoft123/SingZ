@@ -35,9 +35,13 @@ open.
 
 - The runtime-graph checkpoint passed 887 Rust tests. Successive Drive reader
   suites passed at 901, 903 and 906 tests. A later suite recorded 908 passed,
-  one engine-probe failure and two explicit installed-model ignores. The current
+  one engine-probe failure and two explicit installed-model ignores. The
   Library focus-repair source passes 909 tests with zero failures and those same
-  two ignores. The historical intermittent two-second engine-probe shell fixture
+  two ignores. The provider-boundary repair's macOS retry passes 922 tests;
+  its preceding run passes 921 with one occurrence of that same engine-probe
+  failure. The earlier Windows provider source passes 863 tests, but the repaired
+  production boundary still needs Windows validation. The historical intermittent
+  two-second engine-probe shell fixture
   remains unresolved; neither an isolated pass nor this full pass closes it. The source
   probe budget is 45 seconds; Qwen health readiness uses a separate 180-second
   budget. No deadline or assertion was relaxed.

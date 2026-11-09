@@ -204,7 +204,9 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                     action!(w,app => library(&view,w,app,&dir,false));
                     wait!(15,p,w,app => !p.loading&&p.notice.is_some());
                     action!(w,app => {let p=view.read(app);anyhow::ensure!(p.project.is_none()&&!p.loaded_song&&p.last_playback_status.is_none()
-                        &&p.audio_provider.as_ref().is_some_and(|s|s.selected==Provider::Asio)&&prefs()?==before,"Unavailable ASIO silently fell back");Ok(())});
+                        &&p.audio_provider.as_ref().is_some_and(|s|s.selected==Provider::Asio)&&prefs()?==before,"Unavailable ASIO silently fell back");
+                        let detail=&p.audio_provider.as_ref().unwrap().availability.as_ref().unwrap().providers.iter().find(|s|s.id==Provider::Asio).unwrap().detail;
+                        anyhow::ensure!(!detail.is_empty()&&p.notice.as_ref().is_some_and(|notice|notice.contains(detail)),"Unavailable Open failed for a different reason: {:?}; expected {detail}",p.notice);Ok(())});
                     shot!(format!("unavailable-open-{width:.0}"));
                     action!(w,app => {key(w,app,"escape");Ok(())});
                     wait!(8,p,w,app => p.notice.is_none());
@@ -214,6 +216,8 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 shot!(format!("{}-{width:.0}",if restart{"restart"}else{"unloaded"}));
                 let same_before=prefs()?;
                 let serial_before=handle.update(cx,|_,_,cx|view.read(cx).audio_provider_serial)?;
+                let previous=handle.update(cx,|_,_,cx|view.read(cx).audio_provider.clone().unwrap())?;
+                let changing=previous.selected!=Provider::Wasapi;
                 action!(w,app => setting(&view,w,app,"settings-provider"));
                 action!(w,app => {
                     draw(w,app);let value=view.read(app).settings.read(app).provider_ui_state(w);
@@ -225,10 +229,11 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 shot!(format!("menu-{width:.0}"));
                 action!(w,app => provider_click(&view,w,app,Some(1)));
                 action!(w,app => {anyhow::ensure!(view.read(app).settings.read(app).provider_ui_state(w)["openField"]=="settings-provider"&&prefs()?==same_before,"Disabled ASIO pointer committed");key(w,app,"enter");Ok(())});
-                wait!(12,p,w,app => p.audio_provider_pending.is_none()&&p.audio_provider.as_ref().is_some_and(|s|s.selected==Provider::Wasapi&&s.error.is_none()));
+                wait!(12,p,w,app => p.audio_provider_pending.is_none()&&p.audio_provider.as_ref().is_some_and(|s|s.selected==Provider::Wasapi&&(!changing||s.error.is_none())));
                 let committed=prefs()?;
                 action!(w,app => {let raw:serde_json::Value=serde_json::from_slice(&committed)?;anyhow::ensure!(raw["nativeAudioProvider"]=="wasapi"&&raw["outputUid"]=="","Provider commit did not clear incompatible output");
-                    if restart||width!=1280. {anyhow::ensure!(committed==same_before&&view.read(app).audio_provider_serial==serial_before,"Same-provider keyboard choice wrote preferences/request");}Ok(())});
+                    if !changing {anyhow::ensure!(committed==same_before&&view.read(app).audio_provider_serial==serial_before
+                        &&view.read(app).audio_provider.as_ref().unwrap().request==previous.request,"Same-provider keyboard choice wrote preferences/request");}Ok(())});
                 let serial=handle.update(cx,|_,_,app|view.read(app).audio_provider_serial)?;
                 action!(w,app => {provider_click(&view,w,app,None)?;provider_click(&view,w,app,Some(0))?;Ok(())});
                 cx.background_executor().timer(Duration::from_millis(250)).await;
@@ -246,6 +251,12 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 let (epoch,generation,start_position)=handle.update(cx,|_,_,app|{let p=view.read(app);(p.native_epoch,p.last_playback_status.as_ref().unwrap().graph_generation,p.position)})?;
                 action!(w,app => {provider_click(&view,w,app,None)?;let v=view.read(app).settings.read(app).provider_ui_state(w);anyhow::ensure!(v["openField"]!="settings-provider"&&v["rendererBusy"]==true&&!view.read(app).audio_provider.as_ref().unwrap().can_change,"Loaded provider control accepted input");Ok(())});
                 shot!(format!("playing-disabled-{width:.0}"));
+                let receiver=handle.update(cx,|_,_,app|view.read(app).backend.as_ref().unwrap().probe_owned_audio(epoch))??;
+                let deadline=Instant::now()+Duration::from_secs(8);
+                let baseline=loop {match receiver.try_recv(){Ok(value)=>break value.map_err(anyhow::Error::msg)?,Err(std::sync::mpsc::TryRecvError::Disconnected)=>anyhow::bail!("Baseline owned audio probe disconnected"),Err(std::sync::mpsc::TryRecvError::Empty)=>{}}
+                    anyhow::ensure!(Instant::now()<deadline,"Baseline owned audio probe timeout");cx.background_executor().timer(Duration::from_millis(20)).await;};
+                assert_native(&baseline.status)?;
+                anyhow::ensure!(baseline.epoch==epoch&&baseline.helper_pid>0&&baseline.status.graph_generation==generation&&baseline.status.playing,"Invalid actual owned baseline");
                 // Explicit negative controls enter the SAME worker with its real
                 // owner state. They never assign Settings/renderer/connection state.
                 for (index,provider) in [Provider::Wasapi,Provider::Asio].into_iter().enumerate() {
@@ -254,7 +265,12 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                         p.backend.as_ref().unwrap().probe_provider_worker(request,s.revision,s.epoch,provider)})??;
                     wait!(12,p,w,app => p.audio_provider.as_ref().is_some_and(|s|s.request==request&&s.error.is_some()));
                     action!(w,app => {let p=view.read(app);anyhow::ensure!(p.audio_provider.as_ref().unwrap().selected==Provider::Wasapi&&p.native_epoch==epoch
-                        &&p.playing&&prefs()?==committed,"Worker refusal changed provider/preferences/transport");assert_native(p.last_playback_status.as_ref().unwrap())});
+                        &&p.playing&&prefs()?==committed,"Worker refusal changed provider/preferences/transport");
+                        let snapshot=p.audio_provider.as_ref().unwrap();let error=snapshot.error.as_deref().unwrap();
+                        let expected=if provider==Provider::Wasapi {"Audio provider eligibility changed before preference publication"}
+                            else {snapshot.availability.as_ref().unwrap().providers.iter().find(|s|s.id==Provider::Asio).unwrap().detail.as_str()};
+                        anyhow::ensure!(!expected.is_empty()&&error.contains(expected),"Worker negative control failed at the wrong gate: {error}; expected {expected}");
+                        assert_native(p.last_playback_status.as_ref().unwrap())});
                     probes.push(handle.update(cx,|_,w,app|state(view.read(app),w,app,&format!("worker-refused-{}",provider.as_str())))?);
                 }
                 let receiver=handle.update(cx,|_,_,app|view.read(app).backend.as_ref().unwrap().probe_owned_audio(epoch))??;
@@ -262,8 +278,11 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
                 let owned=loop {match receiver.try_recv(){Ok(value)=>break value.map_err(anyhow::Error::msg)?,Err(std::sync::mpsc::TryRecvError::Disconnected)=>anyhow::bail!("Owned audio probe disconnected"),Err(std::sync::mpsc::TryRecvError::Empty)=>{}}
                     anyhow::ensure!(Instant::now()<deadline,"Owned audio probe timeout");cx.background_executor().timer(Duration::from_millis(20)).await;};
                 assert_native(&owned.status)?;
-                anyhow::ensure!(owned.epoch==epoch&&owned.helper_pid>0&&!owned.monitor_leased&&owned.active_training.is_none()&&owned.status.graph_generation==generation&&owned.status.playing&&owned.status.position>start_position,"Worker refusal replaced or stopped owned native playback");
-                probes.push(serde_json::json!({"phase":"owned-after-refusals","epoch":owned.epoch,"helperPid":owned.helper_pid,"native":native(&owned.status)}));
+                anyhow::ensure!(owned.epoch==epoch&&owned.helper_pid==baseline.helper_pid&&!owned.monitor_leased&&owned.active_training.is_none()
+                    &&owned.status.graph_generation==generation&&owned.status.playing&&owned.status.position>start_position&&owned.status.position>baseline.status.position
+                    &&owned.status.sampled_at>baseline.status.sampled_at,"Worker refusal replaced or stopped owned native playback");
+                probes.push(serde_json::json!({"phase":"owned-after-refusals","epoch":owned.epoch,"helperPid":owned.helper_pid,"baselineHelperPid":baseline.helper_pid,
+                    "baselineNative":native(&baseline.status),"native":native(&owned.status)}));
                 action!(w,app => setting(&view,w,app,"settings-close"));
                 action!(w,app => transport(&view,w,app));
                 wait!(8,p,w,app => !p.playing&&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));

@@ -1,32 +1,69 @@
 # Windows provider draft checkpoint — 2026-11-09
 
-Settings now exposes the native helper's provider availability, persists explicit
-WASAPI/ASIO intent and refuses unsupported or unavailable selections without
-fallback. Unknown saved values appear unavailable. Playback output identities
-are provider-scoped; independent input and monitor devices retain raw WASAPI
-identities. Existing macOS provider defaults remain unchanged.
+Settings exposes native provider availability, persists explicit WASAPI/ASIO
+intent and refuses unsupported or unavailable selections without fallback.
+Unknown saved values appear unavailable. Playback output identities are scoped
+by provider; independent input and monitor devices retain raw WASAPI identities.
+Existing macOS provider defaults remain unchanged.
 
-Provider changes require an unloaded renderer and no pending, active or retiring
-audio owner. Generation and epoch checks reject stale requests. Preference I/O
-runs outside the UI-acquired gate under a reservation; invalidated commits roll
-back exact prior bytes, and failed rollback quarantines further owner admission.
-Fresh device inventory precedes the accepted provider acknowledgement.
+Changes require an unloaded renderer and no pending, active or retiring audio
+owner. Generation/epoch checks reject stale requests. Durable preference I/O
+runs outside the UI gate under a reservation; invalidated commits roll back
+exact prior bytes, and failed rollback quarantines owner admission. Fresh device
+inventory precedes the accepted provider acknowledgement.
 
-Validation recorded in `/tmp/singz-windows-provider-20261109`:
+## Native receipt repair
 
-- `full-tests-v3.log`: 920 Rust tests passed, zero failed, two installed-model
-  tests ignored. Includes inventory roles, stale generations, slow preference
-  writes, rollback and quarantine. An earlier harness incorrectly disabled sync;
-  its 16 Drive failures are preserved separately in `full-tests-v1.log`.
-- Native macOS helper build and provider CLI checks pass. Normal and UI-feature
-  macOS builds pass (`mac-builds.json`). These builds precede the final small
-  unavailable-label correction; they do not establish final Windows UI behavior.
-- Added a Windows-only hidden two-process provider/restart driver and registered
-  it with the existing resource/focus observer. It has not yet been run on Dell.
+The Dell run exposed a real load failure: Rust reduced a native reply to just
+`deviceInventory`, then required the discarded provider identity on that wrapper.
+The reduced receipt now retains the actual outer provider/backend/fixture fields.
+Current replies are checked before staging or promoting retained facts; copy
+handoffs still transfer inventory facts only. Missing/foreign provenance and
+stale owners remain rejected. Startup source/argument failures in the helper now
+also retain provider attribution instead of masking their underlying error.
 
-This is source integration, not Windows qualification or visual parity. ASIO's
-licensed adapter remains unimplemented and disabled. Actual WASAPI playback,
-disabled-state interactions, restart, process retirement and resource evidence
-still require the Dell run. No new UI screenshots or live FPS claims are made.
-No Node/Electron runtime was used. Temporary source snapshots, credentials,
-compiled binaries and evidence directories are excluded from this commit.
+The Windows adapter additionally distinguishes same-choice acknowledgement from
+a new provider commit, verifies the actual refusal reason and compares native
+helper PID/status before and after negative controls. These are test adapters,
+not assignments to renderer, owner or provider state.
+
+## Evidence and limits
+
+Evidence root: `/tmp/singz-windows-provider-20261109`.
+
+- `mac-boundary-v1`: updated native helper build and provider CLI pass, including
+  invalid-source/argument error provenance. The unchanged full Rust retry passes
+  922 tests, zero failures and two installed-model ignores. Its preceding run
+  passed 921 and hit the historical two-second engine-probe fixture timeout;
+  `unit-tests.log` preserves it. The timeout cause remains unresolved. No deadline
+  or assertion was relaxed.
+- Updated normal/UI macOS builds pass. UI SHA-256:
+  `e84facfefd7d21016704189b7ba8e24ef23a828785433614fd9d1493636bd6f6`;
+  normal: `a5b274fbcffbc333f3860e4a94a876da5dcc12f46e104e9a601d20b2ecb4d738`;
+  helper: `829594dbc82098caba2b6d3896771b2e16a4aedf86b2d4c091838aa6363fd44b`.
+- `mac-boundary-v1/graph-ui`: real native graph Open/Play/output/Save/restart
+  passes across two launches and 12 captures, including output popups at both
+  content sizes. Foreground remains unchanged, all 21 observed process identities
+  retire without forced cleanup, and 27 app CPU/footprint/system-GPU samples have
+  no errors. Helper CPU and live FPS are not measured by this observer.
+- Dell `provider3`: native helper/CLI and optimized normal/UI builds pass. Its
+  Rust suite exposed four raw-Linux-fixture/Windows-route assertions; a test-only
+  correction plus explicit Windows raw-output refusal coverage passes 863 tests,
+  zero failures and two ignores under `provider4`. This precedes the receipt
+  repair above and is not final-source Windows qualification.
+- Dell `provider-ui1` fails the unchanged focus guard on a short-lived PowerShell
+  foreground window whose parent could not be recovered. `provider-ui2` keeps
+  focus unchanged, verifies initial selector actions, then fails Open on the
+  discarded-identity bug. Both failed batches are retained. Four direct native
+  replays of its exact WAV succeed (real/fake backend, ordinary/extended path),
+  isolating the Rust boundary rather than a decoder or file-path failure.
+
+The repaired source still needs the full Dell rebuild/provider/restart journey.
+Windows candidates use an inert public HTTPS configuration and explicit basic-only
+codecs; real Drive consent and the full codec package remain unqualified. ASIO's
+licensed adapter remains unimplemented and disabled. Physical microphone/output
+audibility, complete visual/temporal parity, accessibility, packaged delivery and
+live FPS remain open. Reviewed screenshots are native candidates, not matched
+production reference pairs. No Node/Electron runtime, real credential export or
+OS/global input automation was used. Temporary caches, snapshots, binaries and
+capture archives are excluded from commits.

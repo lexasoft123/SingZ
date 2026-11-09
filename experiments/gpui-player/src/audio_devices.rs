@@ -534,16 +534,28 @@ mod tests {
     }
     #[test]
     fn native_inventory_preserves_opaque_uids_and_checks_direction() {
-        let raw = json!({"protocol":1,"ok":true,"defaultOutputUid":"uid with space —","devices":[{"uid":"uid with space —","label":"Speakers","inputChannels":0,"outputChannels":2},{"uid":"mic","label":"Input","inputChannels":2,"outputChannels":0}]});
+        let uid=if cfg!(windows){"wasapi:uid with space —"}else{"uid with space —"};
+        let raw = json!({"protocol":1,"ok":true,"defaultOutputUid":uid,"devices":[{"uid":uid,"label":"Speakers","inputChannels":0,"outputChannels":2},{"uid":"mic","label":"Input","inputChannels":2,"outputChannels":0}]});
         let inventory = Inventory::parse(&raw).unwrap();
+        assert_eq!(inventory.default_output,uid);assert_eq!(inventory.output("").unwrap().uid,uid);
         assert_eq!(inventory.output("").unwrap().label, "Speakers");
-        assert!(inventory.output("mic").is_err());
-        assert!(inventory.output("missing").is_err());
-        assert_eq!(encode_uid(" A"), "2041");
-        assert_eq!(encode_uid(""), "default");
+        assert!(inventory.output("mic").is_err());assert!(inventory.output("missing").is_err());
+        assert_eq!(encode_uid(" A"), "2041");assert_eq!(encode_uid(""), "default");
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_playback_requires_scoped_outputs_while_raw_rows_remain_monitor_facts() {
+        let inventory=Inventory::parse(&json!({"protocol":1,"ok":true,"defaultOutputUid":"wasapi:output","devices":[
+            {"uid":"output","label":"Independent monitor","inputChannels":0,"outputChannels":2},
+            {"uid":"wasapi:output","label":"Playback","inputChannels":0,"outputChannels":2}]})).unwrap();
+        assert_eq!(inventory.output("").unwrap().uid,"wasapi:output");
+        assert!(inventory.output("output").is_err());
+        assert!(inventory.output("asio:output").is_err());
+        assert_eq!(inventory.monitor_output("output").unwrap().uid,"output");
     }
     #[test]
     fn busy_linux_inventory_uses_proven_facts_without_resurrecting_endpoints() {
+        // Exercise Linux capability retention on every test host.
         let inventory = |rows: Value| Inventory::parse(&json!({"protocol":1,"ok":true,"devices":rows})).unwrap();
         let endpoint = |uid: &str, inputs: usize, outputs: usize, input_busy: bool, output_busy: bool| json!({
             "uid":uid,"label":"Current kernel label","inputChannels":inputs,"outputChannels":outputs,
@@ -554,21 +566,22 @@ mod tests {
         let mut busy = inventory(json!([endpoint("opaque owner UID —",0,0,true,true)]));
         retain_linux_capabilities(&mut busy,&mut cache);
         assert_eq!(busy.devices[0].inputs,8);
-        assert_eq!(busy.output("").unwrap().outputs,2);
+        assert_eq!(busy.default_output,"opaque owner UID —");
+        assert_eq!(busy.devices.iter().find(|d|d.uid==busy.default_output).unwrap().outputs,2);
         let mut ambiguous = inventory(json!([endpoint("opaque owner UID —",0,0,true,true),endpoint("opaque other UID",0,2,false,false)]));
         retain_linux_capabilities(&mut ambiguous,&mut cache);
         assert!(ambiguous.default_output.is_empty());
-        assert!(ambiguous.output("").is_err());
-        assert_eq!(ambiguous.output("opaque owner UID —").unwrap().outputs,2);
+        assert!(!ambiguous.devices.iter().any(|d|d.uid==ambiguous.default_output&&d.outputs>0));
+        assert_eq!(ambiguous.devices.iter().find(|d|d.uid=="opaque owner UID —").unwrap().outputs,2);
         let mut not_busy = inventory(json!([endpoint("opaque owner UID —",0,0,false,false)]));
         retain_linux_capabilities(&mut not_busy,&mut cache);
-        assert!(not_busy.output("opaque owner UID —").is_err());
+        assert!(!not_busy.devices.iter().any(|d|d.uid=="opaque owner UID —"&&d.outputs>0));
         let mut removed = inventory(json!([]));
         retain_linux_capabilities(&mut removed,&mut cache);
         assert!(cache.is_empty());
         let mut reconnected_busy = inventory(json!([endpoint("opaque owner UID —",0,0,true,true)]));
         retain_linux_capabilities(&mut reconnected_busy,&mut cache);
-        assert!(reconnected_busy.output("opaque owner UID —").is_err());
+        assert!(!reconnected_busy.devices.iter().any(|d|d.uid=="opaque owner UID —"&&d.outputs>0));
         assert!(Inventory::parse(&json!({"protocol":1,"ok":true,"devices":[endpoint("duplicate opaque UID",0,2,false,false),endpoint("duplicate opaque UID",0,2,false,false)]})).is_err());
     }
     #[test]

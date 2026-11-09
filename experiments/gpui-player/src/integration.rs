@@ -1793,10 +1793,7 @@ impl Connection {
     }
     fn read(&mut self, timeout: Duration) -> Result<Value> {
         let provider=self.provider;
-        let value=read_inventory_reply(&self.replies,self.epoch,&self.latest,&self.alive,&self.copy_handoff,timeout,&mut self.pending_inventory,|reply,kind,current| {
-            crate::audio_devices::verify_provider_receipt(reply,provider)?;
-            crate::audio_devices::remember_native_inventory(reply,kind,current)
-        })?;
+        let value=read_provider_inventory_reply(&self.replies,self.epoch,&self.latest,&self.alive,&self.copy_handoff,timeout,&mut self.pending_inventory,provider,|reply,kind,current|crate::audio_devices::remember_native_inventory(reply,kind,current))?;
         crate::audio_devices::verify_provider_receipt(&value,self.provider)?;Ok(value)
     }
     fn metronome(&mut self, commands: &[String]) -> Result<Status> {
@@ -1952,13 +1949,25 @@ fn read_connection_reply(replies:&Receiver<Result<Value>>,epoch:u64,latest:&Atom
     }
 }
 fn read_inventory_reply(replies:&Receiver<Result<Value>>,epoch:u64,latest:&AtomicU64,alive:&AtomicBool,handoff:&AtomicU64,timeout:Duration,pending:&mut Option<PendingInventory>,remember:impl FnOnce(&Value,crate::audio_devices::SnapshotKind,&dyn Fn()->bool)->Result<()>)->Result<Value>{
+    read_inventory_reply_checked(replies,epoch,latest,alive,handoff,timeout,pending,|_|Ok(()),remember)
+}
+fn read_provider_inventory_reply(replies:&Receiver<Result<Value>>,epoch:u64,latest:&AtomicU64,alive:&AtomicBool,handoff:&AtomicU64,timeout:Duration,pending:&mut Option<PendingInventory>,provider:crate::audio_devices::Provider,remember:impl FnOnce(&Value,crate::audio_devices::SnapshotKind,&dyn Fn()->bool)->Result<()>)->Result<Value>{
+    read_inventory_reply_checked(replies,epoch,latest,alive,handoff,timeout,pending,
+        |value|crate::audio_devices::verify_provider_receipt(value,provider),
+        |reply,kind,current|{crate::audio_devices::verify_provider_receipt(reply,provider)?;remember(reply,kind,current)})
+}
+fn read_inventory_reply_checked(replies:&Receiver<Result<Value>>,epoch:u64,latest:&AtomicU64,alive:&AtomicBool,handoff:&AtomicU64,timeout:Duration,pending:&mut Option<PendingInventory>,validate:impl FnOnce(&Value)->Result<()>,remember:impl FnOnce(&Value,crate::audio_devices::SnapshotKind,&dyn Fn()->bool)->Result<()>)->Result<Value>{
     let value=read_connection_reply(replies,epoch,latest,alive,handoff,timeout)?;
+    // Reject current provenance before it can stage or promote any older facts.
+    validate(&value)?;
     if value.get("deviceInventory").is_some() && value["ok"]==true {
         Status::parse(&value)?;
         crate::audio_devices::Inventory::parse(&value["deviceInventory"])?;
         *pending=Some(PendingInventory{source_epoch:epoch,
             output_uid:value["outputUid"].as_str().unwrap_or("").to_owned(),
-            reply:serde_json::json!({"deviceInventory":value["deviceInventory"].clone()})});
+            // Keep actual provenance while reducing away graph/project/transport
+            // state. A copy handoff carries facts, never fabricated identity.
+            reply:serde_json::json!({"deviceInventory":value["deviceInventory"].clone(),"provider":value["provider"].clone(),"backendProvider":value["backendProvider"].clone(),"fixture":value["fixture"].clone()})});
     }
     // Copy may transfer this same helper to its successor epoch. Retain an
     // unadmitted receipt locally, then require fresh valid status for the same
@@ -3125,6 +3134,46 @@ mod tests {
             assert!(accepted_output(&before,&changed,"new selected output").is_err(),"Output selection changed {key}");
         }
     }
+    fn provider_inventory_fixture()->Value {
+        let mut value=captured_lane_reply();
+        value["provider"]="wasapi".into();value["backendProvider"]="fake".into();value["fixture"]=true.into();value
+    }
+    #[test]
+    fn connection_provider_boundary_admits_current_and_copy_retained_actual_provenance() {
+        let (send,replies)=mpsc::channel();let latest=AtomicU64::new(7);let alive=AtomicBool::new(true);let handoff=AtomicU64::new(0);let mut pending=None;
+        let value=provider_inventory_fixture();send.send(Ok(value.clone())).unwrap();let mut kinds=vec![];
+        let received=read_provider_inventory_reply(&replies,7,&latest,&alive,&handoff,Duration::from_millis(100),&mut pending,crate::audio_devices::Provider::Wasapi,|facts,kind,current|{
+            assert!(current());assert_eq!(facts.as_object().unwrap().len(),4);
+            assert_eq!(facts["provider"],"wasapi");assert_eq!(facts["backendProvider"],"fake");assert_eq!(facts["fixture"],true);
+            assert_eq!(facts["deviceInventory"],value["deviceInventory"]);kinds.push(kind);Ok(())
+        }).unwrap();assert_eq!(received,value);assert_eq!(kinds,vec![crate::audio_devices::SnapshotKind::Current]);
+        latest.store(8,Ordering::Release);handoff.store(8,Ordering::Release);send.send(Ok(value.clone())).unwrap();
+        read_provider_inventory_reply(&replies,7,&latest,&alive,&handoff,Duration::from_millis(100),&mut pending,crate::audio_devices::Provider::Wasapi,|_,_,_|panic!("Drained owner admitted facts")).unwrap();
+        assert!(pending.is_some());let mut status=value.clone();status.as_object_mut().unwrap().remove("deviceInventory");
+        handoff.store(0,Ordering::Release);send.send(Ok(status)).unwrap();
+        read_provider_inventory_reply(&replies,8,&latest,&alive,&handoff,Duration::from_millis(100),&mut pending,crate::audio_devices::Provider::Wasapi,|facts,kind,current|{
+            assert!(current());assert_eq!(kind,crate::audio_devices::SnapshotKind::Retained);
+            assert_eq!(facts["provider"],"wasapi");assert_eq!(facts["backendProvider"],"fake");assert_eq!(facts["fixture"],true);Ok(())
+        }).unwrap();assert!(pending.is_none());
+    }
+    #[test]
+    fn connection_provider_boundary_refuses_missing_foreign_and_stale_receipts_before_admission() {
+        let latest=AtomicU64::new(7);let alive=AtomicBool::new(true);let handoff=AtomicU64::new(0);
+        for key in ["provider","backendProvider","fixture"] {
+            let (send,replies)=mpsc::channel();let mut value=provider_inventory_fixture();value.as_object_mut().unwrap().remove(key);send.send(Ok(value)).unwrap();let mut pending=None;
+            assert!(read_provider_inventory_reply(&replies,7,&latest,&alive,&handoff,Duration::from_millis(100),&mut pending,crate::audio_devices::Provider::Wasapi,|_,_,_|panic!("Missing identity admitted facts")).is_err());assert!(pending.is_none());
+        }
+        let (send,replies)=mpsc::channel();let mut foreign=provider_inventory_fixture();foreign["provider"]="asio".into();send.send(Ok(foreign)).unwrap();let mut pending=None;
+        assert!(read_provider_inventory_reply(&replies,7,&latest,&alive,&handoff,Duration::from_millis(100),&mut pending,crate::audio_devices::Provider::Wasapi,|_,_,_|panic!("Foreign provider admitted facts")).is_err());assert!(pending.is_none());
+        // A valid retained slot cannot be promoted by a foreign current status.
+        latest.store(8,Ordering::Release);handoff.store(8,Ordering::Release);send.send(Ok(provider_inventory_fixture())).unwrap();
+        read_provider_inventory_reply(&replies,7,&latest,&alive,&handoff,Duration::from_millis(100),&mut pending,crate::audio_devices::Provider::Wasapi,|_,_,_|panic!("Drained owner admitted facts")).unwrap();
+        let mut foreign=provider_inventory_fixture();foreign.as_object_mut().unwrap().remove("deviceInventory");foreign["provider"]="asio".into();handoff.store(0,Ordering::Release);send.send(Ok(foreign)).unwrap();
+        assert!(read_provider_inventory_reply(&replies,8,&latest,&alive,&handoff,Duration::from_millis(100),&mut pending,crate::audio_devices::Provider::Wasapi,|_,_,_|panic!("Foreign status promoted retained facts")).is_err());
+        assert!(pending.is_some());
+        latest.store(9,Ordering::Release);send.send(Ok(provider_inventory_fixture())).unwrap();
+        assert!(read_provider_inventory_reply(&replies,8,&latest,&alive,&handoff,Duration::from_millis(100),&mut pending,crate::audio_devices::Provider::Wasapi,|_,_,_|panic!("Stale owner admitted facts")).is_err());
+    }
     #[test]
     fn copy_handoff_promotes_deferred_facts_only_for_the_retained_helpers_confirmed_output() {
         let (send,replies)=mpsc::channel();let latest=AtomicU64::new(8);let alive=AtomicBool::new(true);let handoff=AtomicU64::new(8);let mut pending=None;
@@ -3137,7 +3186,10 @@ mod tests {
             assert_eq!(kind,crate::audio_devices::SnapshotKind::Retained);assert!(current());
             adopted=Some(crate::audio_devices::Inventory::parse(&reply["deviceInventory"])?);Ok(())
         }).unwrap();
-        assert_eq!(adopted.unwrap().output("").unwrap().uid,"singz:fake-new-default");assert!(pending.is_none());
+        // This recorded Linux/fake reply qualifies retained capability facts,
+        // not Windows provider-scoped playback selection.
+        let adopted=adopted.unwrap();assert_eq!(adopted.default_output,"singz:fake-new-default");
+        assert!(adopted.devices.iter().any(|d|d.uid==adopted.default_output&&d.outputs==8));assert!(pending.is_none());
         send.send(Ok(status.clone())).unwrap();
         read_inventory_reply(&replies,8,&latest,&alive,&handoff,Duration::from_millis(100),&mut pending,|_,_,_|panic!("Ordinary status replayed facts again")).unwrap();
         // A different connection has no authority to borrow another helper's slot.
@@ -3160,8 +3212,10 @@ mod tests {
         }).unwrap();
         assert_eq!(received,value);assert_eq!(received["lanesCommitted"],true);
         let cached=cached.expect("Raw native lane admission discarded its device capabilities");
-        assert_eq!(cached.output("").unwrap().uid,"singz:fake-new-default");
-        assert_eq!(cached.output("").unwrap().outputs,8);
+        // Assert the recorded Linux owner's admitted facts on every host;
+        // Windows routing policy is independently tested with scoped UIDs.
+        assert_eq!(cached.default_output,"singz:fake-new-default");
+        assert_eq!(cached.devices.iter().find(|d|d.uid==cached.default_output).unwrap().outputs,8);
     }
     #[test]
     fn native_inventory_intake_refuses_old_drained_failed_malformed_and_revoked_authority() {

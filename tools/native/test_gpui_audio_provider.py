@@ -31,7 +31,8 @@ def main():
 
     def run(argv, commands=None, ok=True):
         result = subprocess.run([str(helper), *argv], input=commands, text=True,
-                                encoding='utf-8', capture_output=True, timeout=30, env=env)
+                                encoding='utf-8', capture_output=True, timeout=30, env=env,
+                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
         rows = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
         assert rows and all(row['protocol'] == 1 for row in rows), result
         if ok:
@@ -89,6 +90,21 @@ def main():
             audio.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
             audio.writeframes(b''.join(struct.pack('<h', int(8000 * math.sin(i * math.tau * 220 / 16000)))
                                        for i in range(16000)))
+        invalid = root / 'invalid.wav'
+        invalid.write_bytes(b'Not a WAV or any supported audio container')
+        # Startup errors must preserve provider attribution, so a real source
+        # failure is never hidden by Rust's mandatory provenance validation.
+        for source, code, message in [(root / 'missing.wav', 'source-unavailable', 'Cannot open audio source'),
+                                      (invalid, 'invalid-source-duration', 'Cannot determine native lane duration')]:
+            denied = run(['--test-fake-host', *explicit, '--output', inventory['defaultOutputUid'],
+                          'vocals', str(source)], ok=False)[0]
+            assert denied['provider'] == default and denied['fixture'] is True, denied
+            assert denied['backendProvider'] is None and denied['errorCode'] == code and denied['error'] == message, denied
+        denied = run(['--test-fake-host', *explicit, '--tempo', 'invalid', 'vocals', str(pcm)], ok=False)[0]
+        assert denied['provider'] == default and denied['fixture'] is True and denied['errorCode'] == 'invalid-arguments', denied
+        denied = run(['--test-fake-host', *explicit, '--graph-manifest', str(root / 'missing.graph'),
+                      'vocals', str(pcm)], ok=False)[0]
+        assert denied['provider'] == default and denied['fixture'] is True and denied['errorCode'] == 'invalid-graph', denied
         for mode in ('ordinary', '--training-only', '--empty-project'):
             argv = ['--test-fake-host', *explicit]
             if mode != 'ordinary':
@@ -114,7 +130,8 @@ def main():
             # Rejected route commands keep their accepted provider, old route
             # and generation. The helper exits successfully after explicit Quit.
             result = subprocess.run([str(helper), *argv], input=f'output {wrong}\nstatus\nquit\n',
-                                    text=True, encoding='utf-8', capture_output=True, timeout=30, env=env)
+                                    text=True, encoding='utf-8', capture_output=True, timeout=30, env=env,
+                                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
             session = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
             assert result.returncode == 0 and len(session) >= 3, result
             assert session[0]['ok'] is True and session[1]['ok'] is False and session[2]['ok'] is True, session

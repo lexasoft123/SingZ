@@ -9,8 +9,10 @@ Common native controls live in sibling `singz-ui/gpui`.
 Windows provider source checkpoint (2026-11-09): native availability, explicit
 provider preferences, provider-scoped playback outputs and owner-safe switching
 are implemented, with independent WASAPI input/monitor inventory preserved.
-The full Rust suite passes 920 tests; Windows runtime/UI qualification is still
-pending. ASIO remains honestly unavailable. See [provider review](WINDOWS_PROVIDER_REVIEW.md).
+A subsequent receipt-boundary repair passes 922 Rust tests and a real macOS
+graph/output/Save/restart journey. Earlier Windows builds and 863 tests pass,
+but final-source Windows runtime/UI qualification remains pending. ASIO remains
+honestly unavailable. See [provider review](WINDOWS_PROVIDER_REVIEW.md).
 
 Settings runtime graph follow-up (2026-11-09): accepted native playback snapshots
 now provide the actual modules, bus connections and latency compensation. Shared

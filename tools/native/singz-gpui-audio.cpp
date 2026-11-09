@@ -660,12 +660,12 @@ int run(int argc, char** argv) {
     return providerFailure(providerSelection.id,"provider-device-mismatch","Output device identity does not match the selected provider");
   double initialTempo=1.,initialTranspose=0.;
   while(first+1<argc && (std::string(argv[first])=="--tempo" || std::string(argv[first])=="--transpose")) {
-    double value=0.;size_t consumed=0;try{value=std::stod(argv[first+1],&consumed);}catch(...){return 2;}
-    if(consumed!=std::string(argv[first+1]).size()||!std::isfinite(value))return 2;
+    double value=0.;size_t consumed=0;try{value=std::stod(argv[first+1],&consumed);}catch(...){return providerFailure(providerSelection.id,"invalid-arguments","Invalid playback tempo or transpose",2);}
+    if(consumed!=std::string(argv[first+1]).size()||!std::isfinite(value))return providerFailure(providerSelection.id,"invalid-arguments","Invalid playback tempo or transpose",2);
     if(std::string(argv[first])=="--tempo")initialTempo=value;else initialTranspose=value;
     first+=2;
   }
-  if(initialTempo<0.25||initialTempo>4.||initialTranspose<-24.||initialTranspose>24.||std::floor(initialTranspose)!=initialTranspose)return 2;
+  if(initialTempo<0.25||initialTempo>4.||initialTranspose<-24.||initialTranspose>24.||std::floor(initialTranspose)!=initialTranspose)return providerFailure(providerSelection.id,"invalid-arguments","Playback tempo or transpose is out of range",2);
   std::optional<NativePlaybackGraphDocument> graphDocument;
   if(first+1<argc && std::string(argv[first])=="--graph-manifest") {
     NativePlaybackGraphDocument graph;
@@ -674,7 +674,7 @@ int run(int argc, char** argv) {
     }
     graphDocument=std::move(graph);first+=2;
   }
-  if ((trainingOnly || emptyProject) ? argc!=first : ((argc-first)%2 || argc-first < 2 || argc-first > static_cast<int>(kNativePlaybackMaximumLanes*2))) return 2;
+  if ((trainingOnly || emptyProject) ? argc!=first : ((argc-first)%2 || argc-first < 2 || argc-first > static_cast<int>(kNativePlaybackMaximumLanes*2))) return providerFailure(providerSelection.id,"invalid-arguments","Invalid native playback lane arguments",2);
   // One physical owner serves both the song and training PCM. Client unload
   // alone does not close that base output; Park below verifies both layers.
   // Routing is explicit in this helper. Disable the service's automatic route
@@ -755,13 +755,13 @@ int run(int argc, char** argv) {
 #else
     const int fd = ::open(argv[i+1], O_RDONLY);
 #endif
-    if (fd < 0) { std::cout << "{\"protocol\":1,\"ok\":false,\"error\":\"Cannot open audio source\"}\n" << std::flush; return 1; }
+    if (fd < 0) return providerFailure(providerSelection.id,"source-unavailable","Cannot open audio source");
     NativePlaybackLaneSource lane;
     lane.id = argv[i]; lane.descriptor = OwnedFileDescriptor(fd);
     const double duration=nativeLaneDuration(fd,config.decodeOptions);
-    if(!std::isfinite(duration)||duration<=0){std::cout<<"{\"protocol\":1,\"ok\":false,\"error\":\"Cannot determine native lane duration\"}\n"<<std::flush;return 1;}
+    if(!std::isfinite(duration)||duration<=0)return providerFailure(providerSelection.id,"invalid-source-duration","Cannot determine native lane duration");
     laneDurations.push_back(duration);
-    const int copy=duplicateSource(fd);if(copy<0)return 1;
+    const int copy=duplicateSource(fd);if(copy<0)return providerFailure(providerSelection.id,"source-pin-failed","Cannot retain native audio source");
     pinned.emplace_back(copy);lane.sourceKey=std::string(argv[i])+":"+argv[i+1];sourceKeys.push_back(lane.sourceKey);
     ids.push_back(lane.id); lanes.push_back(std::move(lane));
   }
@@ -945,7 +945,7 @@ int run(int argc, char** argv) {
     }
     std::cout << "}\n" << std::flush;
   };
-  if (!trainingOnly && !emptyProject && !engine.claimGeneration(generation)) return 1;
+  if (!trainingOnly && !emptyProject && !engine.claimGeneration(generation)) return providerFailure(providerSelection.id,"generation-rejected","Cannot claim native playback generation");
   auto baseConfig=config;
   NativePlaybackResult result;
   if(trainingOnly || emptyProject)result.ok=true;else result=engine.prepare(config, std::move(lanes), generation);
