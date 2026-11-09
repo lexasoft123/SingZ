@@ -748,7 +748,8 @@ impl Player {
                 },
                 whats_new::Event::External(url)=>{
                     #[cfg(feature="ui-tests")]
-                    if std::env::var_os("SINGZ_GPUI_WHATS_NEW_TEST").is_some(){
+                    if std::env::var_os("SINGZ_GPUI_WHATS_NEW_TEST").is_some()
+            || std::env::var_os("SINGZ_GPUI_SETTINGS_KEYBOARD_TEST").is_some(){
                         this.release_external_urls.push(url.clone());cx.notify();return;
                     }
                     cx.open_url(url);
@@ -5505,6 +5506,13 @@ impl Render for Player {
                     return;
                 }
                 if this.screen == Screen::Models {
+                    cx.stop_propagation();
+                    return;
+                }
+                if this.screen == Screen::Settings {
+                    // Settings owns input even while focus is transitioning or
+                    // a field disappears; application song/file keys stay behind it.
+                    if event.keystroke.key == "escape" { this.dismiss_screen_on_escape(cx); }
                     cx.stop_propagation();
                     return;
                 }

@@ -149,6 +149,32 @@ fn preferences_capture(view: &Entity<Player>, window: &mut Window, cx: &mut App,
     window.render_to_image()?.save(out.join(format!("{name}.png")))?;
     std::fs::write(out.join(format!("{name}.state.json")),serde_json::to_vec_pretty(&state)?)?;Ok(())
 }
+fn preferences_key(window: &mut Window, cx: &mut App, name: &'static str) {
+    let stroke=Keystroke::parse(name).unwrap();window.dispatch_keystroke(stroke.clone(),cx);
+    window.dispatch_event(PlatformInput::KeyUp(KeyUpEvent{keystroke:stroke}),cx);
+}
+fn preferences_tab_to(view:&Entity<Player>,window:&mut Window,cx:&mut App,id:&str)->anyhow::Result<()> {
+    for _ in 0..32 {draw_preferences(window,cx);if view.read(cx).settings.read(cx).focused_control(window,cx)==Some(id){return Ok(());}preferences_key(window,cx,"tab");let _=preferences_keyboard_state(view,window,cx,"Tab traversal")?;}
+    anyhow::bail!("Actual Tab did not reach {id}: {:?}",view.read(cx).settings.read(cx).keyboard_snapshot(window,cx))
+}
+fn preferences_keyboard_state(view:&Entity<Player>,window:&mut Window,cx:&mut App,step:&str)->anyhow::Result<serde_json::Value> {
+    draw_preferences(window,cx);let p=view.read(cx);let settings=p.settings.read(cx);let state=settings.keyboard_snapshot(window,cx);
+    anyhow::ensure!(!p.playing&&!p.monitor_requested&&!p.mic_requested&&!p.mic_permission_requested&&p.native_play_intent.is_none(),"Settings keys escaped to song or hardware at {step}");
+    anyhow::ensure!(!window.is_visible()&&!window.is_window_active(),"Settings keyboard test activated its window");
+    if p.screen==Screen::Settings {
+        anyhow::ensure!(state["focusInside"]==true,"Tab focus escaped Settings at {step}: {state}");
+        if let Some(bounds)=state["focusedBounds"].as_array() {
+            let top=bounds[1].as_f64().unwrap();let bottom=top+bounds[3].as_f64().unwrap();
+            anyhow::ensure!(top>=0.&&bottom<=f32::from(window.viewport_size().height) as f64,"Focused control clipped by window at {step}: {state}");
+            if !matches!(state["focusedControl"].as_str(),Some("settings-quick-start"|"settings-tab-audio"|"settings-close")) {
+                let viewport=state["viewportBounds"].as_array().ok_or_else(||anyhow::anyhow!("Missing Settings scroll viewport"))?;
+                let start=viewport[1].as_f64().unwrap();let end=start+viewport[3].as_f64().unwrap();
+                anyhow::ensure!(top>=start-1.&&bottom<=end+1.,"Tab failed to scroll focused control into view at {step}: {state}");
+            }
+        } else if !matches!(step,"fixture-disabled-focus-recovery"|"fixture-unmounted-focus-recovery")||!state["focusedControl"].is_null() {anyhow::bail!("Focused Settings control has no measured bounds at {step}: {state}");}
+    }
+    Ok(serde_json::json!({"step":step,"fixtureOnlyTransition":matches!(step,"fixture-disabled-focus-recovery"|"fixture-unmounted-focus-recovery"),"keyboard":state,"preferences":p.mic_prefs.patch(),"playing":p.playing,"position":p.position,"monitorRequested":p.monitor_requested,"micRequested":p.mic_requested}))
+}
 fn run_preferences(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut App) {
     cx.spawn(async move|cx|{
         let result:anyhow::Result<()>=async{
@@ -203,6 +229,88 @@ fn run_preferences(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, 
                     settings.update(cx,|s,cx|s.clear_input_pref_error(cx));draw_preferences(window,cx);
                     anyhow::ensure!(settings.read(cx).input_preferences_snapshot().1.is_none()&&settings.read(cx).field_bounds("settings-input-pref-error").is_none(),"Cleared preference failure stayed visible");Ok(())
                 })??;
+            }
+            if std::env::var_os("SINGZ_GPUI_SETTINGS_KEYBOARD_TEST").is_some() {
+                let project=PathBuf::from(std::env::var_os("SINGZ_GPUI_TEST_PROJECT").ok_or_else(||anyhow::anyhow!("Keyboard regression requires private song fixture"))?);
+                handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(project.clone(),cx)))?;
+                let deadline=Instant::now()+Duration::from_secs(15);
+                loop {cx.background_executor().timer(Duration::from_millis(20)).await;if handle.update(cx,|_,_,cx|{let p=view.read(cx);!p.loading&&p.project.as_ref().is_some_and(|v|v.dir==project)&&p.last_playback_status.is_some()})?{break;}anyhow::ensure!(Instant::now()<deadline,"Keyboard song fixture did not load");}
+                for (width,height) in [(1280.,800.),(1060.,640.)] {
+                    handle.update(cx,|_,window,_|window.resize(size(px(width),px(height))))?;
+                    cx.background_executor().timer(Duration::from_millis(40)).await;
+                    macro_rules! open_settings {()=>{{
+                        let revision=handle.update(cx,|_,window,cx|->anyhow::Result<u64>{draw_preferences(window,cx);let p=view.read(cx);let revision=p.settings.read(cx).inventory_revision();let bounds=p.header.read(cx).guides.get("settings").ok_or_else(||anyhow::anyhow!("Header Settings not measured"))?;click(window,cx,f32::from(bounds.center().x),f32::from(bounds.center().y));Ok(revision)})??;
+                        let deadline=Instant::now()+Duration::from_secs(10);
+                        loop {cx.background_executor().timer(Duration::from_millis(20)).await;if handle.update(cx,|_,_,cx|{let p=view.read(cx);p.screen==Screen::Settings&&p.settings.read(cx).inventory_revision()>revision})?{break;}anyhow::ensure!(Instant::now()<deadline,"Settings open inventory did not settle");}
+                        handle.update(cx,|_,_,cx|{let settings=view.read(cx).settings.clone();settings.update(cx,|s,cx|{s.set_inventory(Ok(preferences_inventory()),cx);cx.emit(settings::SettingsEvent::InputPrefs(microphone::Prefs{input:"singz:fake-duplex".into(),monitor_output:"singz:fake-duplex".into(),..Default::default()}));});})?;
+                        cx.background_executor().timer(Duration::from_millis(30)).await;
+                    }};}
+                    open_settings!();
+                    let position=handle.update(cx,|_,_,cx|view.read(cx).position)?;
+                    let mut steps=Vec::new();
+                    macro_rules! key {($name:expr)=>{{handle.update(cx,|_,window,cx|preferences_key(window,cx,$name))?;cx.background_executor().timer(Duration::from_millis(20)).await;steps.push(handle.update(cx,|_,window,cx|preferences_keyboard_state(&view,window,cx,$name))??);}};}
+                    macro_rules! tab {($id:expr)=>{{handle.update(cx,|_,window,cx|preferences_tab_to(&view,window,cx,$id))??;steps.push(handle.update(cx,|_,window,cx|preferences_keyboard_state(&view,window,cx,$id))??);}};}
+                    // Explicit synthetic busy transition: no native route is
+                    // opened. The actual Tab-focused control becomes disabled.
+                    tab!("settings-output");
+                    handle.update(cx,|_,window,cx|->anyhow::Result<()>{let settings=view.read(cx).settings.clone();settings.update(cx,|s,cx|s.route_applying(cx));draw_preferences(window,cx);let state=settings.read(cx).keyboard_snapshot(window,cx);anyhow::ensure!(state["focusInside"]==true&&state["focusedControl"].is_null(),"Disabled output retained dead focus: {state}");Ok(())})??;
+                    steps.push(handle.update(cx,|_,window,cx|preferences_keyboard_state(&view,window,cx,"fixture-disabled-focus-recovery"))??);
+                    key!("tab");
+                    handle.update(cx,|_,window,cx|->anyhow::Result<()>{let settings=view.read(cx).settings.clone();anyhow::ensure!(settings.read(cx).focused_control(window,cx)==Some("settings-quick-start"),"Tab could not recover after output disabled");let uid=settings.read(cx).output_uid();settings.update(cx,|s,cx|s.set_route(uid,None,None,cx));Ok(())})??;
+                    key!("escape");handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).screen==Screen::Player,"Escape unavailable after disabled-focus recovery");Ok(())})??;
+                    open_settings!();
+                    // Explicit inventory fixture transition removes the focused
+                    // channel picker; no input owner or physical device changes.
+                    tab!("settings-channel");
+                    handle.update(cx,|_,window,cx|->anyhow::Result<()>{let settings=view.read(cx).settings.clone();let mut inventory=preferences_inventory();inventory.devices[0].inputs=1;settings.update(cx,|s,cx|s.set_inventory(Ok(inventory),cx));draw_preferences(window,cx);let state=settings.read(cx).keyboard_snapshot(window,cx);anyhow::ensure!(state["focusInside"]==true&&state["focusedControl"].is_null()&&settings.read(cx).field_label("settings-channel").is_none()&&!state["focusOrder"].as_array().unwrap().iter().any(|id|id=="settings-channel"),"Unmounted channel picker retained dead focus: {state}");Ok(())})??;
+                    steps.push(handle.update(cx,|_,window,cx|preferences_keyboard_state(&view,window,cx,"fixture-unmounted-focus-recovery"))??);
+                    key!("tab");handle.update(cx,|_,window,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).settings.read(cx).focused_control(window,cx)==Some("settings-quick-start"),"Tab could not recover after channel picker unmounted");Ok(())})??;
+                    key!("escape");handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).screen==Screen::Player,"Escape unavailable after unmounted-focus recovery");Ok(())})??;
+                    open_settings!();
+                    tab!("settings-monitor-output");
+                    let (unexpected_browse,metadata)=handle.update(cx,|_,_,cx|->anyhow::Result<_>{let p=view.read(cx);anyhow::ensure!(!p.saving,"Initial project Save is still pending");Ok((p.release_unexpected_browse,std::fs::read(project.join("project.json"))?))})??;
+                    for command in if cfg!(target_os="macos") {["cmd-o","cmd-f","cmd-s"]}else{["ctrl-o","ctrl-f","ctrl-s"]} {
+                        key!(command);
+                        handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.screen==Screen::Settings&&p.release_unexpected_browse==unexpected_browse&&!p.saving&&!p.playing&&(p.position-position).abs()<0.001,"Settings leaked {command} into app/song action");anyhow::ensure!(std::fs::read(project.join("project.json"))?==metadata,"Settings {command} changed project metadata");Ok(())})??;
+                    }
+                    key!("tab");
+                    handle.update(cx,|_,window,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).settings.read(cx).focused_control(window,cx)==Some("settings-output-left"),"Tab did not follow monitor output");Ok(())})??;
+                    key!("shift-tab");handle.update(cx,|_,window,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).settings.read(cx).focused_control(window,cx)==Some("settings-monitor-output"),"ShiftTab did not reverse focus");Ok(())})??;
+                    // Typeahead changes highlight only; Escape retains the route.
+                    key!("space");key!("m");
+                    handle.update(cx,|_,window,cx|->anyhow::Result<()>{let s=view.read(cx).settings.read(cx).keyboard_snapshot(window,cx);anyhow::ensure!(s["menuIndex"]==2,"Typeahead did not highlight stereo fixture: {s}");Ok(())})??;
+                    key!("escape");handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).screen==Screen::Settings&&view.read(cx).mic_prefs.monitor_output=="singz:fake-duplex","Escape committed or closed Settings");Ok(())})??;
+                    tab!("settings-channel");key!("enter");key!("end");key!("space");
+                    handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).mic_prefs.channel==7,"End/Space did not select last input channel");Ok(())})??;
+                    key!("space");key!("home");key!("enter");
+                    handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).mic_prefs.channel==0,"Home/Enter did not select first input channel");Ok(())})??;
+                    tab!("settings-output-left");key!("enter");key!("down");
+                    handle.update(cx,|_,window,cx|->anyhow::Result<()>{let s=view.read(cx).settings.read(cx).keyboard_snapshot(window,cx);anyhow::ensure!(s["menuIndex"]==2,"Arrow navigation did not skip duplicate right channel: {s}");Ok(())})??;
+                    key!("up");handle.update(cx,|_,window,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).settings.read(cx).keyboard_snapshot(window,cx)["menuIndex"]==0,"Up did not skip duplicate channel in reverse");Ok(())})??;key!("down");
+                    key!("enter");handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).mic_prefs.outputs==[2,1],"Select commit lost highlighted channel");Ok(())})??;
+                    key!("enter");key!("home");key!("enter");
+                    tab!("settings-monitor-gain");key!("end");
+                    handle.update(cx,|_,window,cx|{for _ in 0..4 {preferences_key(window,cx,"left");}})?;
+                    cx.background_executor().timer(Duration::from_millis(30)).await;
+                    handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).mic_prefs.gain==-4.,"Gain key burst lost increments: {}",view.read(cx).mic_prefs.gain);Ok(())})??;
+                    key!("home");handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).mic_prefs.gain==-60.,"Gain Home failed");Ok(())})??;
+                    key!("end");handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).mic_prefs.gain==0.,"Gain End failed");Ok(())})??;
+                    tab!("settings-headphones");key!("space");
+                    handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).mic_prefs.headphones,"Space did not check headphones");Ok(())})??;
+                    key!("enter");handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!(!view.read(cx).mic_prefs.headphones,"Enter did not uncheck headphones");Ok(())})??;
+                    handle.update(cx,|_,window,cx|->anyhow::Result<()>{let state=view.read(cx).settings.read(cx).keyboard_snapshot(window,cx);anyhow::ensure!(!state["focusOrder"].as_array().unwrap().iter().any(|id|id=="settings-monitor-start"),"Disabled monitor Start remained in Tab order");preferences_capture(&view,window,cx,&out,&format!("keyboard-focused-{}",width as u32))})??;
+                    // Persist actual keyboard changes before exercising modal actions.
+                    let deadline=Instant::now()+Duration::from_secs(5);
+                    loop {cx.background_executor().timer(Duration::from_millis(20)).await;let saved=std::fs::read(config.join("audio.json")).ok().and_then(|b|serde_json::from_slice::<serde_json::Value>(&b).ok());if saved.as_ref().is_some_and(|v|v["inputChannel"]==0&&v["monitorOutputChannels"]==serde_json::json!([0,1])&&v["monitorGainDb"].as_f64()==Some(0.)){break;}anyhow::ensure!(Instant::now()<deadline,"Keyboard preferences were not persisted");}
+                    tab!("settings-close");key!("space");
+                    handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(p.screen==Screen::Player&&!p.playing&&(p.position-position).abs()<0.001,"Close keys leaked into song or did not return to Player");Ok(())})??;
+                    open_settings!();tab!("settings-quick-start");key!("enter");
+                    handle.update(cx,|_,window,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).quick_start.read(cx).is_open(),"Enter did not open Quick start");draw_preferences(window,cx);window.render_to_image()?.save(out.join(format!("keyboard-quick-start-{}.png",width as u32)))?;Ok(())})??;
+                    key!("escape");
+                    handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!(!view.read(cx).quick_start.read(cx).is_open()&&view.read(cx).screen==Screen::Player,"Quick start Escape did not return to Player");Ok(())})??;
+                    std::fs::write(out.join(format!("keyboard-{}.steps.json",width as u32)),serde_json::to_vec_pretty(&steps)?)?;
+                }
+                std::fs::write(out.join("keyboard-result.json"),serde_json::to_vec_pretty(&serde_json::json!({"tabAndShiftTab":true,"selectCommitAndCancel":true,"disabledDuplicateSkipped":true,"typeahead":true,"gainBurstAndLimits":true,"checkbox":true,"close":true,"quickStart":true,"songKeysContained":true,"appCommandsContained":true,"disabledFocusRecovery":true,"unmountedFocusRecovery":true,"focusedControlsVisible":true,"sizes":[[1280,800],[1060,640]],"hardwareActivated":false}))?)?;
             }
             std::fs::write(out.join("result.json"),serde_json::to_vec_pretty(&serde_json::json!({"duplicateRejectedByPointer":true,"escapeDismissesPopup":true,"sameDevicePreservesChannels":true,"changedDeviceResetsChannels":true,"persistedReadback":true,"unavailableSavedChannelsRefused":true,"preferenceFailureVisibleAndClearable":true,"sizes":[[1280,800],[1060,640]],"hardwareCapture":false,"hidden":true,"visualParity":"not measured"}))?)?;Ok(())
         }.await;

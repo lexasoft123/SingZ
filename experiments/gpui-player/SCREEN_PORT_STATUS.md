@@ -6,6 +6,15 @@ controls are implemented as a first slice; see `NATIVE_INTEGRATION.md`. Full vis
 and the remaining backend features remain separate.
 Common native controls live in sibling `singz-ui/gpui`.
 
+Settings keyboard follow-up (2026-11-09): shared UIKit focus/activation and gain
+keys now support modal Tab/Shift-Tab, selector commit/cancel/typeahead, checkboxes,
+Close/Quick Start, automatic focus scrolling and disabled/removed focus recovery.
+Actual hidden keyboard/pointer journey passes both sizes, 90 recorded keyboard
+states and eight captures, with no song/file-key leakage. Four prior native pointer
+images and sidecars remain exact. Normal preview is rebuilt/package-verified. See
+[Settings keyboard review](SETTINGS_KEYBOARD_REVIEW.md). Models wizard keyboard
+access, platform/hardware, full visual/temporal parity and live FPS remain open.
+
 Desktop control fixes (2026-11-09): Settings rejects duplicate output channels,
 resets channel defaults when changing devices and displays save/unavailable-channel
 errors. Tap BPM resets between popup/song sessions; the trigger follows click/grid

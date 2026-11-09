@@ -1,10 +1,12 @@
 //! Settings composition mirrors SettingsModal.tsx; native routes are host-owned.
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use std::{cell::RefCell, collections::HashMap, rc::Rc, time::{Duration, Instant}};
+actions!(singz_settings, [NextFocus, PreviousFocus]);
 use singz_uikit::tokens::{ACCENT, DANGER, DIM, FAINT, LINE, LINE_STRONG, PANEL, PANEL_DEEP, TEXT};
 use singz_uikit::{
     checkbox, disabled_monitor_pill, ghost_pill, modal_card, monitor_badge, nav_tab,
-    production_scrollbar, range_slider, scrolling_select_popup, select_field, select_option,
+    production_scrollbar, scrolling_select_popup, select_field, select_option,
     select_popup,
 };
 
@@ -19,6 +21,15 @@ pub enum SettingsEvent {
 impl EventEmitter<SettingsEvent> for SettingsScreen {}
 
 pub struct SettingsScreen {
+    scope: FocusHandle,
+    controls: RefCell<HashMap<&'static str, FocusHandle>>,
+    focus_order: RefCell<Vec<&'static str>>,
+    control_bounds: Rc<RefCell<HashMap<&'static str, Bounds<Pixels>>>>,
+    pending_focus: bool,
+    menu_index: Option<usize>,
+    menu_scroll: ScrollHandle,
+    typeahead: String,
+    typeahead_at: Option<Instant>,
     #[cfg(feature = "ui-tests")]
     inventory_revision: u64,
     #[cfg(feature = "ui-tests")]
@@ -72,8 +83,15 @@ fn monitor_channel_choice(mut current: [usize; 2], slot: usize, channel: usize) 
 }
 
 impl SettingsScreen {
-    pub fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
+    pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+        cx.bind_keys([
+            KeyBinding::new("tab", NextFocus, Some("SingZSettings")),
+            KeyBinding::new("shift-tab", PreviousFocus, Some("SingZSettings")),
+        ]);
         Self {
+            scope: cx.focus_handle(), controls: Default::default(), focus_order: Default::default(),
+            control_bounds: Default::default(), pending_focus: false, menu_index: None,
+            menu_scroll: ScrollHandle::new(), typeahead: String::new(), typeahead_at: None,
             #[cfg(feature = "ui-tests")]
             inventory_revision: 0,
             #[cfg(feature = "ui-tests")]
@@ -418,12 +436,17 @@ impl SettingsScreen {
             self.input_prefs.headphones = false;
         }
         self.open_field = None;
+        self.menu_index = None;
+        self.typeahead.clear();
+        self.pending_focus = true;
         self.scroll.set_offset(point(px(0.), px(0.)));
         self.graph_scroll.set_offset(point(px(0.), px(0.)));
         cx.notify();
     }
     pub fn dismiss_popup(&mut self, cx: &mut Context<Self>) -> bool {
         if self.open_field.take().is_some() {
+            self.menu_index = None;
+            self.typeahead.clear();
             cx.notify();
             true
         } else {
@@ -464,6 +487,261 @@ impl SettingsScreen {
             .border_color(rgba(LINE))
             .bg(rgb(PANEL_DEEP).alpha(if padding == 12. { 0.84 } else { 0.88 }))
     }
+    fn field_options(&self, id: &'static str) -> Vec<(String, String)> {
+        self.options(id, match id {
+            "settings-output" => OUTPUTS,
+            "settings-input" => INPUTS,
+            "settings-monitor-output" => MONITOR_OUTPUTS,
+            "settings-channel" => &["IN 1", "IN 2"],
+            _ => &["OUT 1", "OUT 2"],
+        })
+    }
+    fn field_enabled(&self, id: &str) -> bool {
+        match id {
+            "settings-output" => !self.native || !self.route_busy,
+            "settings-monitor-output" | "settings-output-left" | "settings-output-right" => !self.native || !self.monitor_busy,
+            _ => true,
+        }
+    }
+    fn option_disabled(&self, id: &str, index: usize) -> bool {
+        match id {
+            "settings-output-left" => monitor_channel_choice(self.output_channels, 0, index).is_none(),
+            "settings-output-right" => monitor_channel_choice(self.output_channels, 1, index).is_none(),
+            _ => false,
+        }
+    }
+    fn selected_option(&self, id: &str, options: &[(String, String)]) -> usize {
+        if self.native {
+            let uid = match id {
+                "settings-output" => Some(&self.output_uid),
+                "settings-input" => Some(&self.input_prefs.input),
+                "settings-monitor-output" => Some(&self.input_prefs.monitor_output),
+                _ => None,
+            };
+            if let Some(uid) = uid { return options.iter().position(|(key, _)| key == uid).unwrap_or(0); }
+        }
+        match id {
+            "settings-output" => self.output,
+            "settings-input" => self.input,
+            "settings-monitor-output" => self.monitor_output,
+            "settings-channel" => self.channel,
+            "settings-output-left" => self.output_channels[0],
+            "settings-output-right" => self.output_channels[1],
+            _ => 0,
+        }
+    }
+    fn register_control(&self, id: &'static str, enabled: bool, cx: &mut Context<Self>) -> FocusHandle {
+        let focus = self.controls.borrow_mut().entry(id).or_insert_with(|| cx.focus_handle()).clone();
+        if enabled { self.focus_order.borrow_mut().push(id); }
+        focus
+    }
+    fn probe_control(&self, id: &'static str, control: Stateful<Div>) -> Stateful<Div> {
+        let bounds = self.control_bounds.clone();
+        #[cfg(feature = "ui-tests")]
+        let fields = self.field_bounds.clone();
+        #[cfg(feature = "ui-tests")]
+        let gain = self.gain_bounds.clone();
+        control.relative().child(canvas(move |b, _, _| {
+            #[cfg(feature = "ui-tests")]
+            { fields.borrow_mut().insert(id, b); if id == "settings-monitor-gain" { gain.set(Some(b)); } }
+            bounds.borrow_mut().insert(id, b); b
+        }, |_, _, _, _| {}).absolute().inset_0())
+    }
+    fn control(&self, id: &'static str, control: Stateful<Div>, enabled: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+        let focus = self.register_control(id, enabled, cx);
+        let weak = cx.entity().downgrade();
+        self.probe_control(id, singz_uikit::settings_control_with_focus(control, focus, enabled, move |w, cx| {
+            let _ = weak.update(cx, |s, cx| s.activate(id, w, cx));
+        }))
+    }
+    pub fn focused_control(&self, window: &Window, _cx: &App) -> Option<&'static str> {
+        self.focus_order.borrow().iter().copied().find(|id| self.controls.borrow().get(id).is_some_and(|focus| focus.is_focused(window)))
+    }
+    fn focus_control(&self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(focus) = self.controls.borrow().get(id) { focus.focus(window, cx); }
+        if !matches!(id, "settings-quick-start" | "settings-tab-audio" | "settings-close") {
+            if let Some(bounds) = self.control_bounds.borrow().get(id) {
+                let viewport = self.scroll.bounds();
+                let correction = if bounds.top() < viewport.top() + px(4.) {
+                    viewport.top() + px(4.) - bounds.top()
+                } else if bounds.bottom() > viewport.bottom() - px(4.) {
+                    viewport.bottom() - px(4.) - bounds.bottom()
+                } else { px(0.) };
+                let offset = self.scroll.offset();
+                self.scroll.set_offset(point(offset.x, offset.y + correction));
+            }
+        }
+    }
+    fn move_focus(&mut self, backwards: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_field = None; self.menu_index = None; self.typeahead.clear();
+        let order = self.focus_order.borrow().clone();
+        if !order.is_empty() {
+            let current = self.focused_control(window, cx).and_then(|id| order.iter().position(|item| *item == id));
+            let next = match current {
+                Some(i) if backwards => (i + order.len() - 1) % order.len(),
+                Some(i) => (i + 1) % order.len(),
+                None if backwards => order.len() - 1,
+                None => 0,
+            };
+            self.focus_control(order[next], window, cx);
+        }
+        cx.notify();
+    }
+    fn activate(&mut self, id: &'static str, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_order.borrow().contains(&id) { return; }
+        match id {
+            "settings-close" => cx.emit(SettingsEvent::Close),
+            "settings-quick-start" => cx.emit(SettingsEvent::QuickStart),
+            "settings-enable-microphone" => cx.emit(SettingsEvent::EnableMicrophone),
+            "settings-monitor-start" => cx.emit(SettingsEvent::Monitor),
+            "settings-retry" => {
+                if !self.route_busy { self.route_busy = true; cx.emit(SettingsEvent::Output(self.output_uid.clone())); }
+            }
+            "settings-native" => self.native_playback = !self.native_playback,
+            "settings-headphones" => {
+                self.headphones = !self.headphones;
+                if self.native { self.input_prefs.headphones = self.headphones; cx.emit(SettingsEvent::InputPrefs(self.input_prefs.clone())); }
+            }
+            "settings-tab-audio" => {}
+            _ => {
+                if self.open_field == Some(id) { self.open_field = None; self.menu_index = None; }
+                else {
+                    let options = self.field_options(id);
+                    self.open_field = Some(id);
+                    let selected = self.selected_option(id, &options);
+                    self.menu_index = (selected < options.len() && !self.option_disabled(id, selected)).then_some(selected)
+                        .or_else(|| (0..options.len()).find(|i| !self.option_disabled(id, *i)));
+                    self.menu_scroll.scroll_to_item(self.menu_index.unwrap_or(0));
+                    self.typeahead.clear();
+                }
+            }
+        }
+        cx.notify();
+    }
+    fn capture_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let key = event.keystroke.key.as_str();
+        if key == "tab" { self.move_focus(event.keystroke.modifiers.shift, window, cx); window.prevent_default(); cx.stop_propagation(); return; }
+        if key == "escape" {
+            if !self.dismiss_popup(cx) { cx.emit(SettingsEvent::Close); }
+            self.menu_index = None; window.prevent_default(); cx.stop_propagation(); return;
+        }
+        let Some(id) = self.focused_control(window, cx) else { return; };
+        if !matches!(id, "settings-output" | "settings-input" | "settings-channel" | "settings-monitor-output" | "settings-output-left" | "settings-output-right") { return; }
+        if !self.field_enabled(id) { return; }
+        let options = self.field_options(id);
+        let indices: Vec<_> = (0..options.len()).filter(|i| !self.option_disabled(id, *i)).collect();
+        if matches!(key, "enter" | "space") {
+            if event.is_held { window.prevent_default(); cx.stop_propagation(); return; }
+            if self.open_field == Some(id) {
+                if let Some(index) = self.menu_index { self.choose_option(id, index, cx); }
+            } else { self.activate(id, window, cx); }
+        } else if matches!(key, "up" | "down" | "left" | "right" | "home" | "end") {
+            if self.open_field != Some(id) { self.activate(id, window, cx); }
+            if !indices.is_empty() {
+                let current = self.menu_index.and_then(|selected| indices.iter().position(|i| *i == selected)).unwrap_or(0);
+                let next = match key {
+                    "home" => 0, "end" => indices.len() - 1,
+                    "up" | "left" => current.saturating_sub(1),
+                    _ => (current + 1).min(indices.len() - 1),
+                };
+                self.menu_index = Some(indices[next]);
+                self.menu_scroll.scroll_to_item(indices[next]);
+            }
+        } else if key.chars().count() == 1 && !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform && !event.keystroke.modifiers.alt {
+            if self.open_field != Some(id) { self.activate(id, window, cx); }
+            let now = Instant::now();
+            if self.typeahead_at.is_none_or(|at| now.duration_since(at) > Duration::from_millis(700)) { self.typeahead.clear(); }
+            self.typeahead.push_str(&key.to_lowercase()); self.typeahead_at = Some(now);
+            if let Some(index) = indices.iter().find(|i| options[**i].1.to_lowercase().starts_with(&self.typeahead)) {
+                self.menu_index = Some(*index); self.menu_scroll.scroll_to_item(*index);
+            }
+        } else { return; }
+        window.prevent_default(); cx.stop_propagation(); cx.notify();
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn keyboard_snapshot(&self, window: &Window, cx: &App) -> serde_json::Value {
+        let focused = self.focused_control(window, cx);
+        let bounds = focused.and_then(|id| self.control_bounds.borrow().get(id).copied());
+        serde_json::json!({"focusOrder":self.focus_order.borrow().clone(),"focusedControl":focused,
+            "openField":self.open_field,"menuIndex":self.menu_index,"focusInside":self.scope.contains_focused(window,cx),
+            "scrollOffset":[f32::from(self.scroll.offset().x),f32::from(self.scroll.offset().y)],
+            "focusedBounds":bounds.map(|b| [f32::from(b.left()),f32::from(b.top()),f32::from(b.size.width),f32::from(b.size.height)]),
+            "viewportBounds":[f32::from(self.scroll.bounds().left()),f32::from(self.scroll.bounds().top()),f32::from(self.scroll.bounds().size.width),f32::from(self.scroll.bounds().size.height)]})
+    }
+    fn choose_option(&mut self, id: &'static str, index: usize, cx: &mut Context<Self>) {
+        if !self.field_enabled(id) || self.option_disabled(id, index) { return; }
+        let options = self.field_options(id);
+        let Some((uid, _)) = options.get(index) else { return; };
+        let uid = uid.clone();
+                                    match id {
+                                        "settings-output" => {
+                                            self.output = index;
+                                            if self.native {
+                                                self.route_busy = true;
+                                                self.route_error = None;
+                                                cx.emit(SettingsEvent::Output(uid.clone()));
+                                            }
+                                        }
+                                        "settings-input" => {
+                                            self.input = index;
+                                            self.channel = 0;
+                                            if self.native {
+                                                self.input_prefs.input = uid.clone();
+                                                self.input_prefs.channel = 0;
+                                                cx.emit(SettingsEvent::InputPrefs(
+                                                    self.input_prefs.clone(),
+                                                ));
+                                            }
+                                        }
+                                        "settings-channel" => {
+                                            self.channel = index;
+                                            if self.native {
+                                                self.input_prefs.channel = index;
+                                                cx.emit(SettingsEvent::InputPrefs(
+                                                    self.input_prefs.clone(),
+                                                ));
+                                            }
+                                        }
+                                        "settings-monitor-output" => {
+                                            let changed = if self.native {
+                                                self.input_prefs.monitor_output != uid
+                                            } else {
+                                                self.monitor_output != index
+                                            };
+                                            self.monitor_output = index;
+                                            if changed {
+                                                self.output_channels = [0, 1];
+                                            }
+                                            if self.native {
+                                                self.input_prefs.monitor_output = uid.clone();
+                                                if changed {
+                                                    self.input_prefs.outputs = [0, 1];
+                                                }
+                                                cx.emit(SettingsEvent::InputPrefs(
+                                                    self.input_prefs.clone(),
+                                                ));
+                                            }
+                                        }
+                                        "settings-output-left" | "settings-output-right" => {
+                                            let slot = if id == "settings-output-left" { 0 } else { 1 };
+                                            let Some(channels) = monitor_channel_choice(self.output_channels, slot, index) else {
+                                                return;
+                                            };
+                                            self.output_channels = channels;
+                                            if self.native {
+                                                self.input_prefs.outputs = channels;
+                                                cx.emit(SettingsEvent::InputPrefs(
+                                                    self.input_prefs.clone(),
+                                                ));
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+        self.open_field = None;
+        self.menu_index = None;
+        self.typeahead.clear();
+        cx.notify();
+    }
     fn field(
         &self,
         id: &'static str,
@@ -496,7 +774,7 @@ impl SettingsScreen {
         };
         let expanded = self.open_field == Some(id);
         let popup = if self.native && options.len() > 8 {
-            scrolling_select_popup(format!("{id}-popup"))
+            scrolling_select_popup(format!("{id}-popup")).track_scroll(&self.menu_scroll)
         } else {
             select_popup().id(format!("{id}-popup"))
         };
@@ -515,23 +793,12 @@ impl SettingsScreen {
             .relative()
             .w_full()
             .child(
-                select_field(id, label)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if this.native && id == "settings-output" && this.route_busy {
-                        return;
-                    }
-                    this.open_field = if this.open_field == Some(id) {
-                        None
-                    } else {
-                        Some(id)
-                    };
-                    cx.notify();
-                })),
+                self.control(id, select_field(id, label), self.field_enabled(id), cx),
             )
             .when(expanded, |v| {
                 v.child(
                     deferred(popup.children(options.into_iter().enumerate().map(
-                        |(index, (uid, option))| {
+                        |(index, (_uid, option))| {
                             let slot = match id {
                                 "settings-output-left" => Some(0),
                                 "settings-output-right" => Some(1),
@@ -539,7 +806,7 @@ impl SettingsScreen {
                             };
                             let disabled = slot.is_some_and(|slot|
                                 monitor_channel_choice(self.output_channels, slot, index).is_none());
-                            let option = select_option((id, index), option, index == selected)
+                            let option = select_option((id, index), option, if expanded { self.menu_index == Some(index) } else { index == selected })
                                 .flex_none()
                                 .when(disabled, |option| option.opacity(0.45).cursor_default())
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -547,72 +814,7 @@ impl SettingsScreen {
                                         cx.stop_propagation();
                                         return;
                                     }
-                                    match id {
-                                        "settings-output" => {
-                                            this.output = index;
-                                            if this.native {
-                                                this.route_busy = true;
-                                                this.route_error = None;
-                                                cx.emit(SettingsEvent::Output(uid.clone()));
-                                            }
-                                        }
-                                        "settings-input" => {
-                                            this.input = index;
-                                            this.channel = 0;
-                                            if this.native {
-                                                this.input_prefs.input = uid.clone();
-                                                this.input_prefs.channel = 0;
-                                                cx.emit(SettingsEvent::InputPrefs(
-                                                    this.input_prefs.clone(),
-                                                ));
-                                            }
-                                        }
-                                        "settings-channel" => {
-                                            this.channel = index;
-                                            if this.native {
-                                                this.input_prefs.channel = index;
-                                                cx.emit(SettingsEvent::InputPrefs(
-                                                    this.input_prefs.clone(),
-                                                ));
-                                            }
-                                        }
-                                        "settings-monitor-output" => {
-                                            let changed = if this.native {
-                                                this.input_prefs.monitor_output != uid
-                                            } else {
-                                                this.monitor_output != index
-                                            };
-                                            this.monitor_output = index;
-                                            if changed {
-                                                this.output_channels = [0, 1];
-                                            }
-                                            if this.native {
-                                                this.input_prefs.monitor_output = uid.clone();
-                                                if changed {
-                                                    this.input_prefs.outputs = [0, 1];
-                                                }
-                                                cx.emit(SettingsEvent::InputPrefs(
-                                                    this.input_prefs.clone(),
-                                                ));
-                                            }
-                                        }
-                                        "settings-output-left" | "settings-output-right" => {
-                                            let slot = if id == "settings-output-left" { 0 } else { 1 };
-                                            let Some(channels) = monitor_channel_choice(this.output_channels, slot, index) else {
-                                                return;
-                                            };
-                                            this.output_channels = channels;
-                                            if this.native {
-                                                this.input_prefs.outputs = channels;
-                                                cx.emit(SettingsEvent::InputPrefs(
-                                                    this.input_prefs.clone(),
-                                                ));
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                    this.open_field = None;
-                                    cx.notify();
+                                    this.choose_option(id, index, cx);
                                 }));
                             #[cfg(feature = "ui-tests")]
                             let option = {
@@ -643,73 +845,15 @@ impl SettingsScreen {
         field
     }
     fn check_row(
-        &self,
-        id: &'static str,
-        label: impl Into<SharedString>,
-        on: bool,
-        cx: &mut Context<Self>,
+        &self, id: &'static str, label: impl Into<SharedString>, on: bool, cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let label:SharedString=label.into();
-        div()
-            .id(format!("{id}-row"))
-            .mt(px(10.))
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .text_color(rgb(DIM))
-            .text_size(px(12.))
-            .line_height(px(15.))
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if this.native && id == "settings-native" {
-                    return;
-                }
-                match id {
-                    "settings-native" => this.native_playback = !this.native_playback,
-                    _ => this.headphones = !this.headphones,
-                }
-                if this.native && id == "settings-headphones" {
-                    this.input_prefs.headphones = this.headphones;
-                    cx.emit(SettingsEvent::InputPrefs(this.input_prefs.clone()));
-                }
-                cx.notify();
-            }))
-            .child(
-                checkbox(id, on).on_click(cx.listener(move |this, _, _, cx| {
-                    if this.native && id == "settings-native" {
-                        cx.stop_propagation();
-                        return;
-                    }
-                    match id {
-                        "settings-native" => this.native_playback = !this.native_playback,
-                        _ => this.headphones = !this.headphones,
-                    }
-                    if this.native && id == "settings-headphones" {
-                        this.input_prefs.headphones = this.headphones;
-                        cx.emit(SettingsEvent::InputPrefs(this.input_prefs.clone()));
-                    }
-                    cx.notify();
-                })),
-            )
-            .child(label)
-            .when(cfg!(feature = "ui-tests"), |row| {
-                #[cfg(feature = "ui-tests")]
-                let row = {
-                    let probe = self.field_bounds.clone();
-                    row.relative().child(
-                        canvas(
-                            move |bounds, _, _| {
-                                probe.borrow_mut().insert(id, bounds);
-                                bounds
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .inset_0(),
-                    )
-                };
-                row
-            })
+        let row = div().id(format!("{id}-row")).mt(px(10.)).flex().items_center().gap(px(8.))
+            .text_color(rgb(DIM)).text_size(px(12.)).line_height(px(15.)).cursor_pointer()
+            .child(checkbox(id, on).on_click(cx.listener(move |s, _, w, cx| {
+                s.activate(id, w, cx); cx.stop_propagation();
+            }))).child(label.into());
+        let enabled = !(self.native && (id == "settings-native" || self.monitor_busy));
+        self.control(id, row, enabled, cx)
     }
     #[cfg(feature = "ui-tests")]
     pub fn monitor_error(&self) -> Option<String> {
@@ -946,18 +1090,10 @@ impl SettingsScreen {
                     ),
                 |view| {
                     view.child(
-                        ghost_pill(
+                        self.control("settings-enable-microphone", ghost_pill(
                             "settings-enable-microphone",
-                            if self.microphone.phase == crate::microphone::Phase::Permission {
-                                "Enable microphone"
-                            } else {
-                                "Retry microphone"
-                            },
-                        )
-                        .mt(px(8.))
-                        .on_click(
-                            cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::EnableMicrophone)),
-                        ),
+                            if self.microphone.phase == crate::microphone::Phase::Permission { "Enable microphone" } else { "Retry microphone" },
+                        ).mt(px(8.)), true, cx),
                     )
                 },
             )
@@ -1238,39 +1374,20 @@ impl SettingsScreen {
                     "Starting monitoring pauses song playback. Stop restores it paused.".into()
                 })
         };
-        let weak = cx.entity().downgrade();
-        let gain_slider = range_slider(
-            "settings-monitor-gain",
-            self.gain,
-            -60.,
-            0.,
-            move |value, _window, cx| {
-                let _ = weak.update(cx, |this, cx| {
-                    this.gain = value.round();
-                    if this.native {
-                        this.input_prefs.gain = this.gain;
-                        cx.emit(SettingsEvent::InputPrefs(this.input_prefs.clone()));
-                    }
-                    cx.notify();
-                });
-            },
-        )
-        .flex_1()
-        .min_w(px(100.));
-        #[cfg(feature = "ui-tests")]
-        let gain_slider = {
-            let probe = self.gain_bounds.clone();
-            gain_slider.child(
-                canvas(
-                    move |bounds, _, _| {
-                        probe.set(Some(bounds));
-                        bounds
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .inset_0(),
-            )
+        let gain_slider = |cx: &mut Context<Self>| {
+            let weak = cx.entity().downgrade();
+            let enabled = !self.native || !self.monitor_busy || self.microphone.phase == crate::microphone::Phase::Monitoring;
+            let focus = self.register_control("settings-monitor-gain", enabled, cx);
+            self.probe_control("settings-monitor-gain", singz_uikit::settings_range_slider_with_focus(
+                "settings-monitor-gain", self.gain, -60., 0., 1., focus, enabled,
+                move |value, _window, cx| {
+                    let _ = weak.update(cx, |this, cx| {
+                        this.gain = value.round();
+                        if this.native { this.input_prefs.gain = this.gain; cx.emit(SettingsEvent::InputPrefs(this.input_prefs.clone())); }
+                        cx.notify();
+                    });
+                },
+            ).flex_1().min_w(px(100.)))
         };
         Self::strip(14.)
             .child(
@@ -1387,7 +1504,7 @@ impl SettingsScreen {
                     .line_height(px(13.))
                     .text_color(rgb(DIM))
                     .child(crate::i18n::t("settings.monitor.gainLabel"))
-                    .child(gain_slider)
+                    .child(gain_slider(cx))
                     .child(
                         Self::mono(format!("{} dB", self.gain as i32))
                             .line_height(px(10.))
@@ -1428,7 +1545,7 @@ impl SettingsScreen {
                                     crate::i18n::t("settings.monitor.startButton")
                                 },
                             )
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::Monitor)))
+
                         } else {
                             disabled_monitor_pill("settings-monitor-start", crate::i18n::t("settings.monitor.startButton"))
                         };
@@ -1447,7 +1564,7 @@ impl SettingsScreen {
                                 .inset_0(),
                             )
                         };
-                        button
+                        self.control("settings-monitor-start", button, self.native && (self.monitor_busy || self.monitor_route().is_ok()), cx)
                     })
                     .child(
                         Self::hint(if self.review_fixture {
@@ -1484,23 +1601,7 @@ impl SettingsScreen {
         }
     }
     fn retry_route(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let control=ghost_pill("settings-retry",crate::i18n::t("settings.output.retryRoute"))
-            .on_click(cx.listener(|this,_,_,cx| {
-                if !this.route_busy {
-                    this.route_busy=true;
-                    cx.emit(SettingsEvent::Output(this.output_uid.clone()));
-                    cx.notify();
-                }
-            }));
-        #[cfg(feature="ui-tests")]
-        {
-            let bounds=self.field_bounds.clone();
-            return control.relative().child(canvas(move |b,_,_| {
-                bounds.borrow_mut().insert("settings-retry".into(),b); b
-            },|_,_,_,_|{}).absolute().inset_0());
-        }
-        #[cfg(not(feature="ui-tests"))]
-        control
+        self.control("settings-retry", ghost_pill("settings-retry", crate::i18n::t("settings.output.retryRoute")), !self.route_busy, cx)
     }
     fn audio(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         div().w_full().child(Self::label(crate::i18n::t("settings.output.label")).mt(px(2.)))
@@ -1535,14 +1636,24 @@ impl SettingsScreen {
     }
 }
 impl Render for SettingsScreen {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.focus_order.borrow_mut().clear();
+        if self.pending_focus { self.pending_focus = false; self.scope.focus(window, cx); }
         #[cfg(feature = "ui-tests")]
         {
             self.option_bounds.borrow_mut().clear();
             self.field_labels.borrow_mut().clear();
             self.field_bounds.borrow_mut().remove("settings-input-pref-error");
         }
-        div()
+        let content = div()
+            .id("settings-keyboard-scope")
+            .key_context("SingZSettings")
+            .track_focus(&self.scope)
+            .on_action(cx.listener(|s, _: &NextFocus, w, cx| { s.move_focus(false, w, cx); cx.stop_propagation(); }))
+            .on_action(cx.listener(|s, _: &PreviousFocus, w, cx| { s.move_focus(true, w, cx); cx.stop_propagation(); }))
+            .capture_key_down(cx.listener(|s, e: &KeyDownEvent, w, cx| s.capture_key(e, w, cx)))
+            .on_key_down(|_, _, cx| cx.stop_propagation())
+            .on_key_up(|_, _, cx| cx.stop_propagation())
             .size_full()
             .p(px(24.))
             .flex()
@@ -1570,13 +1681,8 @@ impl Render for SettingsScreen {
                             .child(crate::i18n::t("settings.title")),
                     )
                     .child(
-                        ghost_pill("settings-quick-start", "Quick start")
-                            .flex_shrink_0()
-                            .w_full()
-                            .justify_start()
-                            .on_click(
-                                cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::QuickStart)),
-                            ),
+                        self.control("settings-quick-start", ghost_pill("settings-quick-start", "Quick start")
+                            .flex_shrink_0().w_full().justify_start(), true, cx),
                     )
                     .child(
                         div()
@@ -1595,7 +1701,7 @@ impl Render for SettingsScreen {
                                     .flex()
                                     .flex_col()
                                     .gap(px(4.))
-                                    .child(nav_tab("settings-tab-audio", crate::i18n::t("settings.tab.audio"), true)),
+                                    .child(self.control("settings-tab-audio", nav_tab("settings-tab-audio", crate::i18n::t("settings.tab.audio"), true), true, cx)),
                             )
                             .child(
                                 div()
@@ -1621,11 +1727,23 @@ impl Render for SettingsScreen {
                             .flex_shrink_0()
                             .flex()
                             .gap(px(10.))
-                            .child(ghost_pill("settings-close", crate::i18n::t("settings.action.close")).on_click(
-                                cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::Close)),
-                            )),
+                            .child(self.control("settings-close", ghost_pill("settings-close", crate::i18n::t("settings.action.close")), true, cx)),
                     ),
-            )
+            );
+        // A route apply can disable a select, or a refreshed mono inventory can
+        // remove its channel picker. Recover before its old focus node leaves
+        // the tree, so the modal keeps receiving Tab and Escape. This is local
+        // to the current render and cannot override a later user focus choice.
+        let lost_control = self.controls.borrow().iter().any(|(id, focus)| {
+            focus.is_focused(window) && !self.focus_order.borrow().contains(id)
+        });
+        if lost_control {
+            if self.open_field.take().is_some() { cx.notify(); }
+            self.menu_index = None;
+            self.typeahead.clear();
+            self.scope.focus(window, cx);
+        }
+        content
     }
 }
 

@@ -2,6 +2,7 @@
 Requires the native helper and a --features ui-tests application build. Never alters
 OS defaults. Every active output is forced muted. Fixtures/preferences are isolated.
 Run: python3 test_native_settings.py /path/to/singz-gpui-player /tmp/evidence
+Use --preferences-only [--keyboard] for isolated synthetic-inventory regressions.
 """
 import json
 import math
@@ -27,11 +28,19 @@ if '--preferences-only' in sys.argv[3:]:
         processes=sibling('settings_processes','test_native_lyrics_live.py')
         foreground=sibling('settings_foreground','test_native_lyrics_real.py').foreground
         perf=sibling('settings_metrics','interface-perf.py')
-        root=Path(folder)
+        root=Path(folder).resolve()
         for name in ('preferences','library','tmp','cache'): (root/name).mkdir()
         helper=os.environ.get('SINGZ_GPUI_AUDIO_HELPER',str(app.with_name('singz-gpui-audio')))
         env={k:v for k,v in os.environ.items() if not k.startswith('SINGZ_')}
         env.update(SINGZ_MUTE='1',SINGZ_NO_SYNC='1',SINGZ_NO_SYSTEM_ENGINES='1',SINGZ_GPUI_TEST_NO_CAPTURE='1',SINGZ_GPUI_BACKGROUND='1',SINGZ_GPUI_CONFIG_DIR=str(root/'preferences'),SINGZ_GPUI_PROJECTS_ROOT=str(root/'library'),SINGZ_GPUI_AUDIO_HELPER=helper,SINGZ_MODELS_DIR=str(root/'missing-models'),SINGZ_PACK_DIR=str(root/'missing-pack'),SINGZ_LLAMA_SERVER=str(root/'missing-llama'),SINGZ_CRISPASR=str(root/'missing-crispasr'),SINGZ_GPUI_AUDIO_SETTINGS=str(out),SINGZ_GPUI_SETTINGS_PREFS_TEST='1',XDG_CACHE_HOME=str(root/'cache'),HF_HOME=str(root/'cache/huggingface'),TORCH_HOME=str(root/'cache/torch'),TMPDIR=str(root/'tmp'),PYTHONDONTWRITEBYTECODE='1')
+        keyboard='--keyboard' in sys.argv[3:]
+        if keyboard:
+            project=root/'library'/'Settings keyboard fixture';(project/'stems').mkdir(parents=True)
+            with wave.open(str(project/'stems/vocals.wav'),'wb') as stream:
+                stream.setparams((1,2,48000,0,'NONE','not compressed'))
+                stream.writeframes(b''.join(struct.pack('<h',int(2000*math.sin(i*math.tau*220/48000))) for i in range(48000*3)))
+            (project/'project.json').write_text(json.dumps({'version':2,'name':'Settings keyboard fixture','settings':{'melody':{'detVersion':4,'hopSec':.025,'f0':' '.join(['2400']*120)}}}))
+            env.update(SINGZ_GPUI_SETTINGS_KEYBOARD_TEST='1',SINGZ_GPUI_TEST_PROJECT=str(project))
         before=foreground();fronts=[];owners={};samples=[];errors=[];rejected=[];terminal_discards=[];started=time.monotonic();previous=None
         with (out/'preferences.log').open('w') as log:
             child=subprocess.Popen([str(app)],env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
@@ -122,7 +131,18 @@ if '--preferences-only' in sys.argv[3:]:
                 assert metadata['viewport']==[width,800 if width==1280 else 640]
                 if state=='unavailable-error':
                     assert metadata['error'] and all(label=='Saved channel · unavailable' for label in metadata['labels'].values())
-        print('PASS: hidden synthetic-inventory Settings controls, duplicate rejection, device reset, persisted preferences and unavailable/error labels at both sizes')
+        if keyboard:
+            keyboard_receipt=json.loads((out/'keyboard-result.json').read_text())
+            for required in ('tabAndShiftTab','selectCommitAndCancel','disabledDuplicateSkipped','typeahead','gainBurstAndLimits','checkbox','close','quickStart','songKeysContained','appCommandsContained','disabledFocusRecovery','unmountedFocusRecovery','focusedControlsVisible'):
+                assert keyboard_receipt[required],required
+            for width in (1280,1060):
+                rows=json.loads((out/f'keyboard-{width}.steps.json').read_text())
+                for transition in ('fixture-disabled-focus-recovery','fixture-unmounted-focus-recovery'):
+                    assert any(row.get('step')==transition and row.get('fixtureOnlyTransition') and row['keyboard']['focusedControl'] is None and row['keyboard']['focusInside'] for row in rows),transition
+                assert rows and all(not row['playing'] and not row['monitorRequested'] and not row['micRequested'] for row in rows)
+                assert (out/f'keyboard-focused-{width}.png').stat().st_size>0
+                assert (out/f'keyboard-quick-start-{width}.png').stat().st_size>0
+        print('PASS: hidden synthetic-inventory Settings controls, duplicate rejection, device reset, persisted preferences and unavailable/error labels at both sizes; keyboard='+str(keyboard))
     raise SystemExit(0)
 with tempfile.TemporaryDirectory(prefix='singz-native-settings-') as folder:
     root=Path(folder);project=root/'Project';(project/'stems').mkdir(parents=True)

@@ -61,3 +61,7 @@ Full Settings keyboard access remains a known migration gap. Complete production
 visual/temporal parity, live FPS, current Windows/Linux delivery, physical devices
 and OS choosers, and release signing remain open. These captures are native
 candidates, not a production parity pass. The full desktop goal remains active.
+
+Subsequent checkpoint: [Settings keyboard review](SETTINGS_KEYBOARD_REVIEW.md)
+implements and qualifies the scoped keyboard journey; the Settings keyboard gap
+above describes this earlier checkpoint.
