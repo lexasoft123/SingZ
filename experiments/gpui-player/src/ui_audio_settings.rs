@@ -32,6 +32,10 @@ fn click(window: &mut Window, cx: &mut App, x: f32, y: f32) {
     );
 }
 pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut App) {
+    if std::env::var_os("SINGZ_GPUI_SETTINGS_PREFS_TEST").is_some() {
+        run_preferences(handle, view, out, cx);
+        return;
+    }
     cx.spawn(async move|cx|{
  let result:anyhow::Result<()>=async{
   std::fs::create_dir_all(&out)?;let config=PathBuf::from(std::env::var_os("SINGZ_GPUI_CONFIG_DIR").ok_or_else(||anyhow::anyhow!("Use an isolated SINGZ_GPUI_CONFIG_DIR"))?);
@@ -107,4 +111,101 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
  }.await;
  match result{Ok(())=>{eprintln!("NATIVE_SETTINGS passed: actual inventory, selector click, browse keeps playing, route pauses/persists, explicit resume, missing route retains playback");let _=cx.update(|cx|cx.quit());},Err(error)=>{let _=handle.update(cx,|_,window,cx|{let _=window.draw(cx);if let Ok(image)=window.render_to_image(){let _=image.save(out.join("native-settings-failure.png"));}});eprintln!("NATIVE_SETTINGS failed: {error:#}");let _=view.update(cx,|p,_|{p.backend.take();});std::process::exit(1);}}
 }).detach();
+}
+
+
+// Synthetic inventory, real Settings controls/subscription/persistence. No capture
+// or monitoring is started; the normal native inventory journey stays separate.
+fn draw_preferences(window: &mut Window, cx: &mut App) {
+    for _ in 0..3 { window.simulate_next_frame(cx); window.refresh(); let _ = window.draw(cx); }
+}
+fn preferences_inventory() -> audio_devices::Inventory {
+    let mut inventory = super::ui_monitor::fixture_inventory();
+    inventory.devices.push(audio_devices::Device { uid: "singz:fake-stereo".into(), label: "Muted stereo fixture".into(), inputs: 2, outputs: 2, input_probe_busy: false, output_probe_busy: false });
+    inventory
+}
+fn preferences_field(view: &Entity<Player>, window: &mut Window, cx: &mut App, id: &'static str) -> anyhow::Result<Bounds<Pixels>> {
+    draw_preferences(window,cx);
+    let bounds=view.read(cx).settings.read(cx).field_bounds(id).ok_or_else(||anyhow::anyhow!("Missing {id}"))?;
+    // Scroll the actual modal until the requested field has room for its menu.
+    window.dispatch_event(PlatformInput::Scroll(ScrollEvent { position: point(px(800.),px(400.)), delta: ScrollDelta::Pixels(point(px(0.),px(210.)-bounds.center().y)), ..Default::default() }),cx);
+    draw_preferences(window,cx);
+    let bounds=view.read(cx).settings.read(cx).field_bounds(id).ok_or_else(||anyhow::anyhow!("Missing scrolled {id}"))?;
+    anyhow::ensure!(bounds.center().y>px(70.)&&bounds.center().y<window.viewport_size().height-px(65.),"{id} is outside modal viewport: {bounds:?}");
+    Ok(bounds)
+}
+fn preferences_choose(view: &Entity<Player>, window: &mut Window, cx: &mut App, id: &'static str, index: usize) -> anyhow::Result<()> {
+    let bounds=preferences_field(view,window,cx,id)?;
+    click(window,cx,f32::from(bounds.center().x),f32::from(bounds.center().y));draw_preferences(window,cx);
+    let option=view.read(cx).settings.read(cx).option_bounds(id,index).ok_or_else(||anyhow::anyhow!("Missing {id} option {index}"))?;
+    anyhow::ensure!(option.center().y<window.viewport_size().height-px(35.),"Option outside viewport");
+    click(window,cx,f32::from(option.center().x),f32::from(option.center().y));draw_preferences(window,cx);Ok(())
+}
+fn preferences_capture(view: &Entity<Player>, window: &mut Window, cx: &mut App, out: &std::path::Path, name: &str) -> anyhow::Result<()> {
+    draw_preferences(window,cx);anyhow::ensure!(!window.is_visible()&&!window.is_window_active(),"Settings test presented or activated a window");
+    let p=view.read(cx);let (prefs,error)=p.settings.read(cx).input_preferences_snapshot();
+    anyhow::ensure!(!p.monitor_requested&&!p.mic_requested&&!p.mic_permission_requested,"Settings regression requested hardware");
+    let state=serde_json::json!({"viewport":[f32::from(window.viewport_size().width),f32::from(window.viewport_size().height)],"preferences":prefs.patch(),"error":error,"labels":{"input":p.settings.read(cx).field_label("settings-channel"),"left":p.settings.read(cx).field_label("settings-output-left"),"right":p.settings.read(cx).field_label("settings-output-right")},"hidden":true,"active":false,"inventory":"synthetic; real Settings controls and persistence","liveFps":"unmeasured: hidden window"});
+    window.render_to_image()?.save(out.join(format!("{name}.png")))?;
+    std::fs::write(out.join(format!("{name}.state.json")),serde_json::to_vec_pretty(&state)?)?;Ok(())
+}
+fn run_preferences(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut App) {
+    cx.spawn(async move|cx|{
+        let result:anyhow::Result<()>=async{
+            anyhow::ensure!(std::env::var_os("SINGZ_GPUI_TEST_NO_CAPTURE").is_some()&&std::env::var_os("SINGZ_GPUI_CONFIG_DIR").is_some(),"Preferences regression requires isolated config and disabled capture");
+            std::fs::create_dir_all(&out)?;
+            let config=PathBuf::from(std::env::var_os("SINGZ_GPUI_CONFIG_DIR").unwrap());
+            let deadline=Instant::now()+Duration::from_secs(10);
+            loop {cx.background_executor().timer(Duration::from_millis(20)).await;if handle.update(cx,|_,_,cx|{let p=view.read(cx);p.mic_prefs_valid&&p.settings.read(cx).inventory_revision()>0})?{break;}anyhow::ensure!(Instant::now()<deadline,"Initial preferences and native inventory did not load");}
+            for (width,height) in [(1280.,800.),(1060.,640.)] {
+                handle.update(cx,|_,window,cx|{window.resize(size(px(width),px(height)));view.update(cx,|p,cx|{
+                    p.screen=Screen::Settings;p.notice=None;
+                    p.settings.update(cx,|s,cx|{s.on_open(cx);s.set_inventory(Ok(preferences_inventory()),cx);cx.emit(settings::SettingsEvent::InputPrefs(microphone::Prefs{input:"singz:fake-duplex".into(),monitor_output:"singz:fake-duplex".into(),..Default::default()}));});
+                });})?;
+                cx.background_executor().timer(Duration::from_millis(60)).await;
+                macro_rules! choose { ($id:expr,$index:expr)=>{{
+                    handle.update(cx,|_,window,cx|preferences_choose(&view,window,cx,$id,$index))??;
+                    cx.background_executor().timer(Duration::from_millis(30)).await;
+                }}; }
+                let sequence=handle.update(cx,|_,_,cx|view.read(cx).mic_pref_seq)?;
+                choose!("settings-output-left",1);
+                handle.update(cx,|_,window,cx|->anyhow::Result<()>{
+                    let p=view.read(cx);let (prefs,_)=p.settings.read(cx).input_preferences_snapshot();
+                    anyhow::ensure!(prefs.outputs==[0,1]&&p.mic_pref_seq==sequence&&p.settings.read(cx).smoke_snapshot().4==Some("settings-output-left"),"Duplicate channel click changed preferences or closed menu");
+                    window.dispatch_event(PlatformInput::KeyDown(KeyDownEvent{keystroke:Keystroke::parse("escape").unwrap(),is_held:false,prefer_character_input:false}),cx);draw_preferences(window,cx);Ok(())
+                })??;
+                cx.background_executor().timer(Duration::from_millis(30)).await;
+                handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).settings.read(cx).smoke_snapshot().4.is_none(),"Escape did not dismiss duplicate channel popup");Ok(())})??;
+                choose!("settings-output-left",6);
+                choose!("settings-output-right",7);
+                choose!("settings-monitor-output",1);
+                handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).mic_prefs.outputs==[6,7],"Reselecting same device reset valid custom channels");Ok(())})??;
+                choose!("settings-monitor-output",2);
+                handle.update(cx,|_,window,cx|->anyhow::Result<()>{
+                    anyhow::ensure!(view.read(cx).mic_prefs.outputs==[0,1]&&view.read(cx).mic_prefs.monitor_output=="singz:fake-stereo","Changing to stereo retained out-of-range channels");
+                    preferences_capture(&view,window,cx,&out,&format!("preferences-device-reset-{}",width as u32))?;Ok(())
+                })??;
+                let deadline=Instant::now()+Duration::from_secs(5);
+                loop {cx.background_executor().timer(Duration::from_millis(20)).await;let saved=std::fs::read(config.join("audio.json")).ok().and_then(|bytes|serde_json::from_slice::<serde_json::Value>(&bytes).ok());if saved.as_ref().is_some_and(|raw|raw["monitorOutputUid"]=="singz:fake-stereo"&&raw["monitorOutputChannels"]==serde_json::json!([0,1])){break;}anyhow::ensure!(Instant::now()<deadline,"Control change was not persisted");}
+                handle.update(cx,|_,window,cx|->anyhow::Result<()>{
+                    let settings=view.read(cx).settings.clone();let mut stale=view.read(cx).mic_prefs.clone();stale.input="singz:fake-stereo".into();stale.outputs=[6,7];stale.channel=0;stale.headphones=true;
+                    settings.update(cx,|s,cx|{s.set_input_prefs(stale,cx);s.input_pref_error("Preferences could not be saved: isolated regression fixture".into(),cx);});
+                    draw_preferences(window,cx);
+                    if cfg!(target_os="macos") {anyhow::ensure!(settings.read(cx).monitor_route().err().is_some_and(|e|e.contains("available playback channels")),"Unavailable saved channels allowed monitoring or failed for the wrong reason");}
+                    for id in ["settings-output-left","settings-output-right"] {anyhow::ensure!(settings.read(cx).field_label(id).as_deref()==Some("Saved channel · unavailable"),"{id} disguised unavailable saved channel");}
+                    let (mut stale,_)=settings.read(cx).input_preferences_snapshot();stale.channel=9;
+                    settings.update(cx,|s,cx|{s.set_input_prefs(stale,cx);s.input_pref_error("Preferences could not be saved: isolated regression fixture".into(),cx);});draw_preferences(window,cx);
+                    anyhow::ensure!(settings.read(cx).field_label("settings-channel").as_deref()==Some("Saved channel · unavailable"),"Unavailable input channel label was clamped");
+                    if cfg!(target_os="macos") {anyhow::ensure!(settings.read(cx).monitor_route().err().is_some_and(|e|e.contains("microphone channel is unavailable")),"Unavailable input channel was not refused");}
+                    let _=preferences_field(&view,window,cx,"settings-input-pref-error")?;
+                    anyhow::ensure!(settings.read(cx).input_preferences_snapshot().1.is_some(),"Preference failure missing from state");
+                    preferences_capture(&view,window,cx,&out,&format!("preferences-unavailable-error-{}",width as u32))?;
+                    settings.update(cx,|s,cx|s.clear_input_pref_error(cx));draw_preferences(window,cx);
+                    anyhow::ensure!(settings.read(cx).input_preferences_snapshot().1.is_none()&&settings.read(cx).field_bounds("settings-input-pref-error").is_none(),"Cleared preference failure stayed visible");Ok(())
+                })??;
+            }
+            std::fs::write(out.join("result.json"),serde_json::to_vec_pretty(&serde_json::json!({"duplicateRejectedByPointer":true,"escapeDismissesPopup":true,"sameDevicePreservesChannels":true,"changedDeviceResetsChannels":true,"persistedReadback":true,"unavailableSavedChannelsRefused":true,"preferenceFailureVisibleAndClearable":true,"sizes":[[1280,800],[1060,640]],"hardwareCapture":false,"hidden":true,"visualParity":"not measured"}))?)?;Ok(())
+        }.await;
+        match result {Ok(())=>{eprintln!("SETTINGS_PREFERENCES passed");let _=cx.update(|cx|cx.quit());},Err(error)=>{let _=handle.update(cx,|_,window,cx|{draw_preferences(window,cx);if let Ok(image)=window.render_to_image(){let _=image.save(out.join("preferences-failure.png"));}let p=view.read(cx);let settings=p.settings.read(cx);let (inventory,uid,busy,route_error)=settings.native_snapshot();let (prefs,pref_error)=settings.input_preferences_snapshot();let state=serde_json::json!({"error":format!("{error:#}"),"viewport":[f32::from(window.viewport_size().width),f32::from(window.viewport_size().height)],"inventoryRevision":settings.inventory_revision(),"inventory":inventory.map(|i|serde_json::json!({"defaultInput":i.default_input,"defaultOutput":i.default_output,"devices":i.devices.iter().map(|d|serde_json::json!({"uid":d.uid,"label":d.label,"inputs":d.inputs,"outputs":d.outputs})).collect::<Vec<_>>()})),"preferences":prefs.patch(),"hostPreferences":p.mic_prefs.patch(),"preferenceError":pref_error,"outputUid":uid,"routeBusy":busy,"routeError":route_error,"openField":settings.smoke_snapshot().4,"labels":{"input":settings.field_label("settings-channel"),"left":settings.field_label("settings-output-left"),"right":settings.field_label("settings-output-right")}});if let Ok(bytes)=serde_json::to_vec_pretty(&state){let _=std::fs::write(out.join("preferences-failure.state.json"),bytes);}});eprintln!("SETTINGS_PREFERENCES failed: {error:#}");let _=view.update(cx,|p,_|{p.microphone.take();p.backend.take();});std::process::exit(1);}}
+    }).detach();
 }

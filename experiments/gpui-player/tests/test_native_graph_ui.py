@@ -138,7 +138,7 @@ with tempfile.TemporaryDirectory(prefix='singz-native-graph-ui-') as tmp:
    assert proof['sizes']==[[1280,800],[1060,640]]
    assert 'NATIVE_METRONOME_KEYBOARD passed:' in text,text[-5000:]
    proof=json.loads((folder/'metronome-keyboard.json').read_text())
-   for flag in ('actualTabAndPointerFocus','bpmTypingOwnsSongKeys','burstRangeKeysAccumulate','homeEndClamp','rangeArrowsDoNotSeek','nonmodalSpaceTogglesSong','rangeSpaceRetainsFocus','buttonSpaceDoesNotActivate','buttonArrowsSeek','enterActivatesAccent','nativeTransactionsAccepted','restoredSavedBaseline','disabledHalfFocusRecoversTransport','boundaryGridRestoredThroughProductionOpen'):assert proof.get(flag) is True,(flag,proof)
+   for flag in ('actualTabAndPointerFocus','bpmTypingOwnsSongKeys','burstRangeKeysAccumulate','homeEndClamp','rangeArrowsDoNotSeek','nonmodalSpaceTogglesSong','rangeSpaceRetainsFocus','buttonSpaceDoesNotActivate','buttonArrowsSeek','enterActivatesAccent','nativeTransactionsAccepted','restoredSavedBaseline','disabledHalfFocusRecoversTransport','boundaryGridRestoredThroughProductionOpen','tapSessionResetOnActualReopen','threeFreshTapsAccepted','gridOnlyTriggerActive','countInOnlyTriggerInactive'):assert proof.get(flag) is True,(flag,proof)
    assert proof['sizes']==[[1280,800],[1060,640]]
   (folder/'project-after.json').write_text(json.dumps(saved,indent=2));(folder/'observer.json').write_text(json.dumps({'foregroundUnchanged':before==after,'samples':samples,'errors':errors,'liveFps':'unmeasured','scope':'app CPU/footprint only; helper CPU excluded; GPU system-wide','observedHelpersRetired':list(helpers)},indent=2))
   results.append({'stage':stage,'captures':expected_captures,'foregroundUnchanged':before==after,'inputGuideMuted':input_guide_muted})

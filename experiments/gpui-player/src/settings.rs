@@ -24,6 +24,10 @@ pub struct SettingsScreen {
     #[cfg(feature = "ui-tests")]
     field_bounds:
         std::rc::Rc<std::cell::RefCell<std::collections::HashMap<&'static str, Bounds<Pixels>>>>,
+    #[cfg(feature = "ui-tests")]
+    option_bounds: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<(&'static str, usize), Bounds<Pixels>>>>,
+    #[cfg(feature = "ui-tests")]
+    field_labels: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<&'static str, String>>>,
     input_prefs: crate::microphone::Prefs,
     microphone: crate::microphone::View,
     input_pref_error: Option<String>,
@@ -58,6 +62,15 @@ const INPUTS: &[&str] = &[
 ];
 const MONITOR_OUTPUTS: &[&str] = &["Choose playback device…", "Studio interface · 2 out · USB"];
 
+/// A playback lane cannot be assigned to both sides of the monitor route.
+fn monitor_channel_choice(mut current: [usize; 2], slot: usize, channel: usize) -> Option<[usize; 2]> {
+    if slot >= current.len() || current[1 - slot] == channel {
+        return None;
+    }
+    current[slot] = channel;
+    Some(current)
+}
+
 impl SettingsScreen {
     pub fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
         Self {
@@ -65,6 +78,10 @@ impl SettingsScreen {
             inventory_revision: 0,
             #[cfg(feature = "ui-tests")]
             field_bounds: Default::default(),
+            #[cfg(feature = "ui-tests")]
+            option_bounds: Default::default(),
+            #[cfg(feature = "ui-tests")]
+            field_labels: Default::default(),
             input_prefs: Default::default(),
             microphone: Default::default(),
             input_pref_error: None,
@@ -174,6 +191,18 @@ impl SettingsScreen {
     #[cfg(feature = "ui-tests")]
     pub fn field_bounds(&self, id: &str) -> Option<Bounds<Pixels>> {
         self.field_bounds.borrow().get(id).copied()
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn option_bounds(&self, id: &'static str, index: usize) -> Option<Bounds<Pixels>> {
+        self.option_bounds.borrow().get(&(id, index)).copied()
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn field_label(&self, id: &str) -> Option<String> {
+        self.field_labels.borrow().get(id).cloned()
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn input_preferences_snapshot(&self) -> (crate::microphone::Prefs, Option<String>) {
+        (self.input_prefs.clone(), self.input_pref_error.clone())
     }
     #[cfg(feature = "ui-tests")]
     pub fn native_snapshot(
@@ -458,6 +487,10 @@ impl SettingsScreen {
                 .iter()
                 .position(|(uid, _)| uid == &self.output_uid)
                 .unwrap_or(0)
+        } else if self.native {
+            // Do not paint the last available lane as if an unavailable saved
+            // channel had already been applied. Only an explicit choice edits it.
+            selected
         } else {
             selected.min(options.len().saturating_sub(1))
         };
@@ -469,17 +502,20 @@ impl SettingsScreen {
         };
         #[cfg(feature = "ui-tests")]
         let bounds = self.field_bounds.clone();
+        let label = options.get(selected).map(|(_, label)| label.clone()).unwrap_or_else(|| {
+            if options.is_empty() {
+                "No channels".into()
+            } else {
+                "Saved channel · unavailable".into()
+            }
+        });
+        #[cfg(feature = "ui-tests")]
+        self.field_labels.borrow_mut().insert(id, label.clone());
         let field = div()
             .relative()
             .w_full()
             .child(
-                select_field(
-                    id,
-                    options
-                        .get(selected)
-                        .map(|(_, label)| label.clone())
-                        .unwrap_or("No channels".into()),
-                )
+                select_field(id, label)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if this.native && id == "settings-output" && this.route_busy {
                         return;
@@ -496,9 +532,21 @@ impl SettingsScreen {
                 v.child(
                     deferred(popup.children(options.into_iter().enumerate().map(
                         |(index, (uid, option))| {
-                            select_option((id, index), option, index == selected)
+                            let slot = match id {
+                                "settings-output-left" => Some(0),
+                                "settings-output-right" => Some(1),
+                                _ => None,
+                            };
+                            let disabled = slot.is_some_and(|slot|
+                                monitor_channel_choice(self.output_channels, slot, index).is_none());
+                            let option = select_option((id, index), option, index == selected)
                                 .flex_none()
+                                .when(disabled, |option| option.opacity(0.45).cursor_default())
                                 .on_click(cx.listener(move |this, _, _, cx| {
+                                    if disabled {
+                                        cx.stop_propagation();
+                                        return;
+                                    }
                                     match id {
                                         "settings-output" => {
                                             this.output = index;
@@ -529,27 +577,33 @@ impl SettingsScreen {
                                             }
                                         }
                                         "settings-monitor-output" => {
+                                            let changed = if this.native {
+                                                this.input_prefs.monitor_output != uid
+                                            } else {
+                                                this.monitor_output != index
+                                            };
                                             this.monitor_output = index;
+                                            if changed {
+                                                this.output_channels = [0, 1];
+                                            }
                                             if this.native {
                                                 this.input_prefs.monitor_output = uid.clone();
+                                                if changed {
+                                                    this.input_prefs.outputs = [0, 1];
+                                                }
                                                 cx.emit(SettingsEvent::InputPrefs(
                                                     this.input_prefs.clone(),
                                                 ));
                                             }
                                         }
-                                        "settings-output-left" => {
-                                            this.output_channels[0] = index;
+                                        "settings-output-left" | "settings-output-right" => {
+                                            let slot = if id == "settings-output-left" { 0 } else { 1 };
+                                            let Some(channels) = monitor_channel_choice(this.output_channels, slot, index) else {
+                                                return;
+                                            };
+                                            this.output_channels = channels;
                                             if this.native {
-                                                this.input_prefs.outputs[0] = index;
-                                                cx.emit(SettingsEvent::InputPrefs(
-                                                    this.input_prefs.clone(),
-                                                ));
-                                            }
-                                        }
-                                        "settings-output-right" => {
-                                            this.output_channels[1] = index;
-                                            if this.native {
-                                                this.input_prefs.outputs[1] = index;
+                                                this.input_prefs.outputs = channels;
                                                 cx.emit(SettingsEvent::InputPrefs(
                                                     this.input_prefs.clone(),
                                                 ));
@@ -559,7 +613,16 @@ impl SettingsScreen {
                                     }
                                     this.open_field = None;
                                     cx.notify();
-                                }))
+                                }));
+                            #[cfg(feature = "ui-tests")]
+                            let option = {
+                                let bounds = self.option_bounds.clone();
+                                option.relative().child(canvas(move |b, _, _| {
+                                    bounds.borrow_mut().insert((id, index), b);
+                                    b
+                                }, |_, _, _, _| {}).absolute().inset_0())
+                            };
+                            option
                         },
                     )))
                     .with_priority(100),
@@ -1455,11 +1518,30 @@ impl SettingsScreen {
                 .when(self.route_busy,|view|view.child(Self::hint("Applying output route… Playback will stay paused.")))
                 .child(div().opacity(0.45).child(self.check_row("settings-native",crate::i18n::t("settings.playback.useNativeLabel"),true,cx)))
                 .child(Self::hint("Native DSP playback is always enabled.")))
-            .child(self.mic(cx)).child(self.monitor(cx))
+            .child(self.mic(cx))
+            .when_some(self.input_pref_error.clone(), |view, error| {
+                let notice = Self::hint(error).text_color(rgb(DANGER)).id("settings-input-pref-error");
+                #[cfg(feature = "ui-tests")]
+                let notice = {
+                    let bounds = self.field_bounds.clone();
+                    notice.relative().child(canvas(move |b, _, _| {
+                        bounds.borrow_mut().insert("settings-input-pref-error", b);
+                        b
+                    }, |_, _, _, _| {}).absolute().inset_0())
+                };
+                view.child(notice)
+            })
+            .child(self.monitor(cx))
     }
 }
 impl Render for SettingsScreen {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "ui-tests")]
+        {
+            self.option_bounds.borrow_mut().clear();
+            self.field_labels.borrow_mut().clear();
+            self.field_bounds.borrow_mut().remove("settings-input-pref-error");
+        }
         div()
             .size_full()
             .p(px(24.))
@@ -1544,5 +1626,20 @@ impl Render for SettingsScreen {
                             )),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::monitor_channel_choice;
+
+    #[test]
+    fn monitor_channel_choices_reject_duplicate_lanes_and_preserve_the_other_side() {
+        assert_eq!(monitor_channel_choice([0, 1], 0, 1), None);
+        assert_eq!(monitor_channel_choice([0, 1], 1, 0), None);
+        assert_eq!(monitor_channel_choice([0, 1], 0, 2), Some([2, 1]));
+        assert_eq!(monitor_channel_choice([2, 1], 1, 3), Some([2, 3]));
+        assert_eq!(monitor_channel_choice([0, 1], 0, 0), Some([0, 1]));
+        assert_eq!(monitor_channel_choice([0, 1], 2, 2), None);
     }
 }

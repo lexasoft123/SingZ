@@ -1163,6 +1163,7 @@ impl Player {
                     this.carry_open=false;
                     this.metronome_open = !this.metronome_open;
                 if this.metronome_open {
+                        this.metronome_ui.update(cx, |s, cx| s.reset_taps(cx));
                         this.transport.update(cx, |t, cx| {
                             t.dismiss_popovers(cx);
                         });
@@ -4956,7 +4957,10 @@ impl Render for Player {
             .map(|_| (self.source_status.label.clone(), self.source_status.percent));
         self.transport
             .update(cx, |t, cx| t.set_progress(progress, cx));
-        let audio_available=self.audio_available();self.transport.update(cx,|t,cx|t.set_audio_available(audio_available,cx));
+        let audio_available=self.audio_available();
+        let can_reveal_stems=self.backend.is_none() || self.project.as_ref().is_some_and(|p|
+            p.lane_id(0)==Some("vocals") && p.lanes.iter().any(|(slot,_)|*slot==0));
+        self.transport.update(cx,|t,cx|{t.set_audio_available(audio_available,cx);t.set_stem_reveal(can_reveal_stems,cx);});
         if self.focus_after_title {
             self.focus_after_title = false;
             if window.focused(cx).is_none() || self.header.read(cx).title_input_focused(window, cx)
@@ -5341,7 +5345,7 @@ impl Render for Player {
         });
         self.pitch_strip.update(cx, |s,cx|s.set_beat_progress(self.beat_job.map(|_|self.beat_progress),cx));
         self.transport.update(cx, |t, cx| {
-            let enabled = self.metronome.click || self.metronome.count_in_bars > 0;
+            let enabled = self.metronome.click || self.metronome.grid;
             if t.met_enabled != enabled {
                 t.met_enabled = enabled;
                 cx.notify();

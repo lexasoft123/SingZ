@@ -62,7 +62,61 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
                 wait!(p,w,app => w.viewport_size()==size(px(width),px(height)));
                 handle.update(cx,|_,w,cx|press(&view,w,cx,"metronome"))??;
                 wait!(p,w,app => p.metronome_open);
-                let (grid_before,seek_before)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.beats.clone(),p.native_seek_count)})?;
+                let grid_before=handle.update(cx,|_,_,cx|view.read(cx).beats.clone())?;
+                // A native popup entity survives dismissal, unlike the source
+                // component. Exercise reopening before its idle timeout so a
+                // stale tap history cannot accidentally pass this regression.
+                handle.update(cx,|_,w,cx|press(&view,w,cx,"met-tap"))??;
+                cx.background_executor().timer(Duration::from_millis(150)).await;
+                let old_tap=Instant::now();
+                handle.update(cx,|_,w,cx|press(&view,w,cx,"met-tap"))??;
+                handle.update(cx,|_,w,cx|->anyhow::Result<()>{let p=view.read(cx);
+                    anyhow::ensure!(p.metronome_ui.read(cx).tap_count()==2&&p.beats==grid_before&&p.metronome_pending.is_none(),"Two initial taps unexpectedly edited the grid");
+                    key(w,cx,"escape");Ok(())})??;
+                wait!(p,w,app => !p.metronome_open);
+                handle.update(cx,|_,w,cx|press(&view,w,cx,"metronome"))??;
+                wait!(p,w,app => p.metronome_open&&p.metronome_ui.read(app).tap_count()==0);
+                handle.update(cx,|_,_,cx|->anyhow::Result<()>{if grid_before.is_none(){
+                    anyhow::ensure!(view.read(cx).metronome_ui.read(cx).caption()!=crate::i18n::t("player.metronome.tapHint"),"Reopen retained the old tap hint");}Ok(())})??;
+                for count in 1..=2 {
+                    cx.background_executor().timer(Duration::from_millis(150)).await;
+                    handle.update(cx,|_,w,cx|press(&view,w,cx,"met-tap"))??;
+                    handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);let popup=p.metronome_ui.read(cx);
+                        anyhow::ensure!(old_tap.elapsed()<Duration::from_millis(2500),"Tap reopen regression exceeded idle timeout and is unqualified");
+                        anyhow::ensure!(popup.tap_count()==count&&p.beats==grid_before&&p.metronome_pending.is_none(),"Reopen reused taps from the dismissed popup");
+                        if grid_before.is_none(){anyhow::ensure!(popup.caption()==crate::i18n::t("player.metronome.tapHint"),"Fresh tap hint is missing");}
+                        Ok(())})??;
+                }
+                let serial=handle.update(cx,|_,_,cx|view.read(cx).metronome_serial)?;
+                cx.background_executor().timer(Duration::from_millis(150)).await;
+                handle.update(cx,|_,w,cx|press(&view,w,cx,"met-tap"))??;
+                wait!(p,w,app => p.metronome_pending.is_none()&&p.metronome_serial>serial
+                    &&p.metronome_ui.read(app).tap_count()==3&&p.beats.as_ref().is_some_and(|g|g.source=="manual"&&g.bpm.is_finite()&&(30. ..=300.).contains(&g.bpm)));
+                // The trigger reports click/grid state, as in Transport.tsx.
+                for id in ["met-click-0","met-count-0","met-grid-1"] {
+                    handle.update(cx,|_,w,cx|press(&view,w,cx,id))??;
+                    wait!(p,w,app => p.metronome_pending.is_none());
+                }
+                wait!(p,w,app => !p.metronome.click&&p.metronome.count_in_bars==0&&p.metronome.grid&&p.transport.read(app).met_enabled);
+                for id in ["met-grid-0","met-count-1"] {
+                    handle.update(cx,|_,w,cx|press(&view,w,cx,id))??;
+                    wait!(p,w,app => p.metronome_pending.is_none());
+                }
+                wait!(p,w,app => !p.metronome.click&&!p.metronome.grid&&p.metronome.count_in_bars==1&&!p.transport.read(app).met_enabled);
+                let restore=[if original.click{"met-click-1"}else{"met-click-0"},
+                    if original.grid{"met-grid-1"}else{"met-grid-0"},
+                    match original.count_in_bars{0=>"met-count-0",1=>"met-count-1",_=>"met-count-2"}];
+                for id in restore {
+                    handle.update(cx,|_,w,cx|press(&view,w,cx,id))??;
+                    wait!(p,w,app => p.metronome_pending.is_none());
+                }
+                let epoch=handle.update(cx,|_,_,cx|view.read(cx).native_epoch)?;
+                handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(project.clone(),cx)))?;
+                wait!(p,w,app => !p.loading&&p.native_epoch>epoch&&p.project.as_ref().is_some_and(|s|s.dir==project)
+                    &&!p.playing&&p.position.abs()<0.03&&p.metronome==original&&p.beats==grid_before);
+                handle.update(cx,|_,w,cx|press(&view,w,cx,"metronome"))??;
+                wait!(p,w,app => p.metronome_open&&p.metronome_ui.read(app).tap_count()==0);
+                let seek_before=handle.update(cx,|_,_,cx|view.read(cx).native_seek_count)?;
                 handle.update(cx,|_,w,cx|tab_to(&view,w,cx,"met-bpm"))??;
                 handle.update(cx,|_,w,cx|{key(w,cx,if cfg!(target_os="macos"){"cmd-a"}else{"ctrl-a"});for text in ["1","2","3"]{key(w,cx,text);}})?;
                 wait!(p,w,app => p.metronome_ui.read(app).input().read(app).value().as_str()=="123"&&!p.playing&&p.native_seek_count==seek_before);
@@ -144,6 +198,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
                 "nonmodalSpaceTogglesSong":true,"rangeSpaceRetainsFocus":true,"buttonSpaceDoesNotActivate":true,
                 "buttonArrowsSeek":true,"enterActivatesAccent":true,"nativeTransactionsAccepted":true,"restoredSavedBaseline":true,
                 "disabledHalfFocusRecoversTransport":true,"boundaryGridRestoredThroughProductionOpen":true,
+                "tapSessionResetOnActualReopen":true,"threeFreshTapsAccepted":true,"gridOnlyTriggerActive":true,"countInOnlyTriggerInactive":true,
                 "cases":cases,"sizes":[[1280,800],[1060,640]],"liveFps":"unmeasured"}))?)?;Ok(())
         }.await;
         let _=tx.send(result.map_err(|e|format!("{e:#}")));

@@ -114,6 +114,10 @@ fn shot(
         "Empty test activated window"
     );
     let p = view.read(cx);
+    if p.screen == Screen::Player {
+        anyhow::ensure!(p.project.as_ref().is_some_and(|s| s.lane_id(0) != Some("vocals")), "Empty/custom fixture unexpectedly gained vocals");
+        anyhow::ensure!(p.transport.read(cx).bounds("transport-stem-files").is_none(), "Stem files remained mounted without a vocal stem to reveal");
+    }
     anyhow::ensure!(
         [p.duration, p.position, p.view_start, p.view_end]
             .iter()
@@ -205,6 +209,14 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
     wait!(p,cx=>!p.loading&&p.project.as_ref().is_some_and(|s|s.has_audio()&&s.custom_tracks().len()==1)&&p.duration>=7.&&!p.playing);
     cx.background_executor().timer(Duration::from_millis(700)).await;
     handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,&format!("saved-readded-{}",width as u32)))??;
+    // Source-only transport offers Split, without the split-only Karaoke or
+    // an inert Stem files action. No OS reveal is invoked by this regression.
+    let original=root.join("source-only");
+    handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.open_project(original.clone(),cx)))?;
+    wait!(p,cx=>!p.loading&&p.project.as_ref().is_some_and(|s|s.dir==original&&s.original));
+    handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);let t=view.read(cx).transport.read(cx);
+        anyhow::ensure!(t.bounds("transport-split").is_some()&&t.bounds("transport-karaoke").is_none()&&t.bounds("transport-stem-files").is_none(),"Unsplit source exposed split-only controls");
+        shot(&view,w,cx,&out,&format!("source-only-{}",width as u32))})??;
    }
   }
   std::fs::write(out.join("result.json"),serde_json::to_vec_pretty(&serde_json::json!({"imports":imported,"phase":phase,"twoSizes":true,"hidden":true,"actualRemoveAddControls":true,"zeroTimelineFinite":true,"durableEmptyOrReadd":true,"lateRealStatusDeliveryFenced":true,"nativeCleanupProofRequired":true,"chooser":"isolated picker return only","liveFps":"unmeasured"}))?)?;Ok(())

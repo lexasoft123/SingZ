@@ -97,6 +97,7 @@ pub struct Transport {
     split: bool,
     can_resplit: bool,
     can_backing: bool,
+    can_reveal_stems: bool,
     #[cfg(feature = "ui-tests")]
     bounds: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, Bounds<Pixels>>>>,
 }
@@ -181,6 +182,7 @@ impl Transport {
             split: true,
             can_resplit: true,
             can_backing: true,
+            can_reveal_stems: true,
             #[cfg(feature = "ui-tests")]
             bounds: Default::default(),
         }
@@ -420,6 +422,12 @@ impl Transport {
         }
         (self.progress_started.elapsed().as_secs_f32() / 1.6).fract()
     }
+    pub fn set_stem_reveal(&mut self, available: bool, cx: &mut Context<Self>) {
+        if self.can_reveal_stems != available {
+            self.can_reveal_stems = available;
+            cx.notify();
+        }
+    }
     pub fn set_split_state(
         &mut self,
         split: bool,
@@ -657,6 +665,8 @@ impl Transport {
 }
 impl Render for Transport {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "ui-tests")]
+        self.bounds.borrow_mut().clear();
         self.reconcile_focus(window, cx);
         if self.output_open&&self.output_focus_pending {self.output_focus_pending=false;self.output_focus.focus(window,cx);}
         if self.bpm_refresh_input {
@@ -874,8 +884,8 @@ impl Render for Transport {
                             .child(self.probe("split-cancel", singz_uikit::split_cancel("split-cancel").on_click(cx.listener(|_, _, _, cx| cx.emit(TransportEvent::CancelSplit))))))
                     ))
                     .when(self.progress.is_none(), |d| d
-                    .child(
-                        singz_uikit::audio_control(karaoke_pill("transport-karaoke", "", self.karaoke),self.audio_available).when(true,|d|self.guides.track_box(d,"karaoke",[1.;4]))
+                    .when(self.split, |d| d.child(
+                        self.probe("transport-karaoke", singz_uikit::audio_control(karaoke_pill("transport-karaoke", "", self.karaoke),self.audio_available).when(true,|d|self.guides.track_box(d,"karaoke",[1.;4]))
                             .child(Self::icon("transport-mic", 13.))
                             .child(tracked_label(crate::i18n::t("player.transport.karaoke"), 0.01))
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -883,8 +893,8 @@ impl Render for Transport {
                                 this.karaoke = !this.karaoke;
                                 cx.emit(TransportEvent::Karaoke);
                                 cx.notify();
-                            })),
-                    )
+                            }))),
+                    ))
                     .child(
                         div()
                             .relative()
@@ -904,11 +914,11 @@ impl Render for Transport {
                                     .with_priority(120))
                             }),
                     )
-                    .child(
-                        singz_uikit::audio_control(ghost_pill("transport-stem-files", crate::i18n::t("player.transport.stemFiles")),self.audio_available).on_click(
+                    .when(self.split && self.can_reveal_stems, |d| d.child(
+                        self.probe("transport-stem-files", singz_uikit::audio_control(ghost_pill("transport-stem-files", crate::i18n::t("player.transport.stemFiles")),self.audio_available).on_click(
                             cx.listener(|_, _, _, cx| cx.emit(TransportEvent::StemFiles)),
-                        ),
-                    ),                    )
+                        )),
+                    )),                    )
             )
     }
 }

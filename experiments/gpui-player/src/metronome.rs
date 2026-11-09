@@ -16,6 +16,28 @@ pub enum Event {
     Close,
     Redetect,
 }
+#[derive(Default)]
+struct TapSession {
+    times: Vec<f64>,
+}
+impl TapSession {
+    fn reset(&mut self) {
+        self.times.clear();
+    }
+    fn collecting(&self) -> bool {
+        !self.times.is_empty() && self.times.len() < 3
+    }
+    fn tap(&mut self, now: f64) -> Option<f64> {
+        if self.times.last().is_some_and(|t| now - t > 2.5) {
+            self.reset();
+        }
+        self.times.push(now);
+        if self.times.len() > 12 {
+            self.times.remove(0);
+        }
+        tap_bpm(&self.times)
+    }
+}
 pub struct MetPopover {
     pub met: Metronome,
     pub grid: Option<Beats>,
@@ -27,7 +49,7 @@ pub struct MetPopover {
     controls: HashMap<&'static str, FocusHandle>,
     draft: bool,
     refresh_input: bool,
-    taps: Vec<f64>,
+    taps: TapSession,
     clock: Instant,
     pub trigger: Option<Bounds<Pixels>>,
     pub bounds: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
@@ -96,7 +118,7 @@ impl MetPopover {
             .collect(),
             draft: false,
             refresh_input: true,
-            taps: vec![],
+            taps: TapSession::default(),
             clock: Instant::now(),
             trigger: None,
             bounds: Default::default(),
@@ -108,6 +130,16 @@ impl MetPopover {
         self.grid = grid;
         self.refresh_input = true;
         cx.notify();
+    }
+    /// Match the source popover's fresh local tap history after remounting.
+    /// Accepted audio updates use `adopt` and must retain the current session.
+    pub fn reset_taps(&mut self, cx: &mut Context<Self>) {
+        self.taps.reset();
+        cx.notify();
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn tap_count(&self) -> usize {
+        self.taps.times.len()
     }
     pub fn focused(&self, w: &Window, cx: &App) -> bool {
         self.input.read(cx).focus_handle(cx).is_focused(w)
@@ -227,7 +259,7 @@ impl MetPopover {
                     ),
                 ],
             )
-        } else if !self.taps.is_empty() && self.taps.len() < 3 {
+        } else if self.taps.collecting() {
             t("player.metronome.tapHint")
         } else {
             t(if self.can_detect {
@@ -380,14 +412,7 @@ impl MetPopover {
         self.finish_draft(w, cx);
         cx.emit(Event::Preview(false));
         let now = self.clock.elapsed().as_secs_f64();
-        if self.taps.last().is_some_and(|t| now - t > 2.5) {
-            self.taps.clear();
-        }
-        self.taps.push(now);
-        if self.taps.len() > 12 {
-            self.taps.remove(0);
-        }
-        if let Some(bpm) = tap_bpm(&self.taps) {
+        if let Some(bpm) = self.taps.tap(now) {
             self.grid = Beats::constant(
                 bpm,
                 self.position,
@@ -398,6 +423,36 @@ impl MetPopover {
             self.emit(cx);
         }
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TapSession;
+
+    #[test]
+    fn reopened_popover_needs_three_fresh_taps() {
+        let mut taps = TapSession::default();
+        assert_eq!(taps.tap(0.), None);
+        assert_eq!(taps.tap(0.5), None);
+        assert!(taps.collecting());
+        taps.reset();
+        assert!(!taps.collecting());
+        // Reopen before the normal 2.5-second timeout. Old taps must not
+        // produce a tempo or skew this new 150 BPM session.
+        assert_eq!(taps.tap(0.8), None);
+        assert_eq!(taps.tap(1.2), None);
+        assert!((taps.tap(1.6).unwrap() - 150.).abs() < 1e-9);
+    }
+
+    #[test]
+    fn idle_tap_starts_a_new_session() {
+        let mut taps = TapSession::default();
+        taps.tap(0.);
+        taps.tap(0.5);
+        assert_eq!(taps.tap(3.1), None);
+        assert!(taps.collecting());
+        assert_eq!(taps.times, vec![3.1]);
     }
 }
 fn enabled_for(key: &str, i: usize, s: &MetPopover) -> bool {

@@ -6,6 +6,16 @@ controls are implemented as a first slice; see `NATIVE_INTEGRATION.md`. Full vis
 and the remaining backend features remain separate.
 Common native controls live in sibling `singz-ui/gpui`.
 
+Desktop control fixes (2026-11-09): Settings rejects duplicate output channels,
+resets channel defaults when changing devices and displays save/unavailable-channel
+errors. Tap BPM resets between popup/song sessions; the trigger follows click/grid
+state. Unsplit source and custom-only projects no longer expose inert Stem files
+controls. Actual hidden settings, combined-player and empty/custom/source journeys
+pass both sizes; all 49 approved native lyric-region records remain exact. The
+normal preview is rebuilt and package-verified. See
+[Desktop controls review](DESKTOP_CONTROLS_REVIEW.md) for precise scope, preserved
+failures and remaining Settings keyboard, platform/hardware and parity gates.
+
 Automatic Qwen follow-up (2026-11-09): the real no-lyrics Karaoke path now has
 verified UI coverage: production LRCLIB Miss → local Qwen → automatic publication,
 reopen and native playback, without manual Transcribe or Save. Both sizes and

@@ -18,6 +18,9 @@ fn snapshot(view:&Entity<Player>,window:&mut Window,cx:&mut App,directory:&std::
     anyhow::ensure!(!window.is_visible()&&!window.is_window_active(),"Integration capture activated the window");
     let _=window.draw(cx);window.render_to_image()?.save(directory.join(format!("{name}.png")))?;
     let p=view.read(cx);let viewport=window.viewport_size();
+    if p.screen==Screen::Player && p.source_split.is_none() && p.project.as_ref().is_some_and(|s| !s.original && s.lane_id(0)==Some("vocals")) {
+        anyhow::ensure!(p.transport.read(cx).bounds("transport-stem-files").is_some(), "Available vocal stem lost its mounted Stem files action");
+    }
     let state=serde_json::json!({"viewport":[f32::from(viewport.width),f32::from(viewport.height)],"scale":window.scale_factor(),"hidden":!window.is_visible()&&!window.is_window_active(),"epoch":p.native_epoch,"playing":p.playing,"position":p.position,"nativeGraph":p.last_playback_status.as_ref().map(|s|serde_json::json!({"explicit":s.explicit_graph,"nodes":s.graph_nodes,"connections":s.graph_connections})),"productionParity":"unqualified native candidate","liveFps":"unmeasured"});
     std::fs::write(directory.join(format!("{name}.json")),serde_json::to_vec_pretty(&state)?)?;Ok(())
 }

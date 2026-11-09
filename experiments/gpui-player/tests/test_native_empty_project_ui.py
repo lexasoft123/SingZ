@@ -21,6 +21,8 @@ with tempfile.TemporaryDirectory(prefix='singz-empty-ui-') as tmp:
  tone(root/'short.wav',0.5,220);tone(root/'new-one.wav',5,330);tone(root/'new-two.wav',7,440);(root/'bad.wav').write_bytes(b'Not an audio stream')
  helper=app.with_name('singz-gpui-audio.exe' if os.name=='nt' else 'singz-gpui-audio')
  subprocess.run([str(helper),'--compact-stem',str(root/'new-two.wav'),str(root/'new-two.flac')],check=True,capture_output=True)
+ original=root/'source-only';original.mkdir();shutil.copyfile(root/'new-one.wav',original/'song.wav')
+ (original/'project.json').write_text(json.dumps({'version':2,'name':'Unsplit source fixture','songFile':'song.wav','settings':{}}))
  final_hash=sha(root/'new-two.flac');before=foreground();all_perf=[]
  base={k:v for k,v in os.environ.items() if not k.startswith('SINGZ_GPUI_') and k not in ['SINGZ_PACK_DIR','SINGZ_MODELS_DIR','SINGZ_DEMUCS']}
  base.update(SINGZ_MUTE='1',SINGZ_NO_SYNC='1',SINGZ_NO_SYSTEM_ENGINES='1',SINGZ_GPUI_BACKGROUND='1',SINGZ_GPUI_CONFIG_DIR=str(root/'preferences'),SINGZ_GPUI_PROJECTS_ROOT=str(library),SINGZ_GPUI_EMPTY_PROJECT_FIXTURES=str(root),SINGZ_PACK_DIR=str(root/'missing-pack'),SINGZ_MODELS_DIR=str(root/'missing-models'))

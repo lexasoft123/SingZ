@@ -30,6 +30,7 @@ impl Player {
     pub(super) fn reset_transport_timing(&mut self, cx: &mut Context<Self>) {
         self.reset_region();
         self.transport.update(cx, |t, cx| t.reset_timing(cx));
+        self.metronome_ui.update(cx, |s, cx| s.reset_taps(cx));
         self.native_rate_pending = None;
         self.native_rate_queued = None;
         self.native_rate_deferred = None;
