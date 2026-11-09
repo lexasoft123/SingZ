@@ -13,6 +13,7 @@ mod running;
 #[path = "training_song.rs"]
 mod song;
 actions!(singz_training_recording, [ActivateRecording]);
+actions!(singz_training_setup, [NextSelectorFocus, PreviousSelectorFocus]);
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct RecordingView {
     pub recording: bool,
@@ -124,6 +125,16 @@ pub struct TrainingScreen {
     path_open: bool,
     scroll: ScrollHandle,
     open: Option<&'static str>,
+    keyboard_scope: FocusHandle,
+    keyboard_focus: std::cell::RefCell<std::collections::HashMap<String,FocusHandle>>,
+    keyboard_order: std::cell::RefCell<Vec<String>>,
+    keyboard_bounds: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String,Bounds<Pixels>>>>,
+    selector_options: std::cell::RefCell<std::collections::HashMap<&'static str,Vec<String>>>,
+    menu_index: Option<usize>,
+    menu_scroll: ScrollHandle,
+    typeahead: String,
+    typeahead_at: Option<std::time::Instant>,
+    keyboard_focus_pending: bool,
     review: bool,
     history: std::sync::Arc<crate::training_store::Snapshot>,
     notation: String,
@@ -185,6 +196,10 @@ impl TrainingScreen {
     }
     pub fn new(_: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.bind_keys([
+            KeyBinding::new("tab",NextSelectorFocus,Some("SingZTrainingSetup")),
+            KeyBinding::new("shift-tab",PreviousSelectorFocus,Some("SingZTrainingSetup")),
+            KeyBinding::new("tab",NextSelectorFocus,Some("SingZTrainingSelector")),
+            KeyBinding::new("shift-tab",PreviousSelectorFocus,Some("SingZTrainingSelector")),
             KeyBinding::new("enter", ActivateRecording, Some("SingZTrainingRecording")),
             KeyBinding::new("space", ActivateRecording, Some("SingZTrainingRecording")),
         ]);
@@ -214,6 +229,7 @@ impl TrainingScreen {
             path_open: false,
             scroll: ScrollHandle::new(),
             open: None,
+            keyboard_scope:cx.focus_handle(),keyboard_focus:Default::default(),keyboard_order:Default::default(),keyboard_bounds:Default::default(),selector_options:Default::default(),menu_index:None,menu_scroll:ScrollHandle::new(),typeahead:String::new(),typeahead_at:None,keyboard_focus_pending:false,
             review: false,
             history: Default::default(),
             notation: "note-names".into(),
@@ -228,6 +244,7 @@ impl TrainingScreen {
         }
     }
     pub fn on_open(&mut self, cx: &mut Context<Self>) {
+        self.keyboard_focus_pending=true;
         self.open = None;
         cx.notify();
     }
@@ -556,6 +573,7 @@ impl TrainingScreen {
     fn navigate(&mut self, route: Route, cx: &mut Context<Self>) {
         cx.emit(TrainingEvent::Stop);
         self.route = route;
+        self.keyboard_focus_pending=true;
         self.open = None;
         self.scroll.set_offset(point(px(0.), px(0.)));
         cx.notify();
@@ -569,7 +587,7 @@ impl TrainingScreen {
     }
     #[cfg(feature = "ui-tests")]
     pub fn bounds(&self, id: &str) -> Option<Bounds<Pixels>> {
-        self.bounds.borrow().get(id).copied()
+        self.bounds.borrow().get(id).copied().or_else(||self.keyboard_bounds.borrow().get(id).copied())
     }
     #[cfg(feature = "ui-tests")]
     pub fn snapshot(&self) -> (Route, Exercise, usize, bool, f32, f32, usize, usize) {
@@ -631,12 +649,83 @@ impl TrainingScreen {
             .mb(px(8.))
             .child(tracked_label(text, 0.04))
     }
+    fn register_keyboard(&self,id:&str,enabled:bool,cx:&mut Context<Self>)->FocusHandle{
+        let focus=self.keyboard_focus.borrow_mut().entry(id.to_owned()).or_insert_with(||cx.focus_handle().tab_stop(true)).clone();
+        if enabled{self.keyboard_order.borrow_mut().push(id.to_owned());}focus
+    }
+    fn keyboard_probe(&self,id:&str,element:Stateful<Div>)->Stateful<Div>{
+        let id=id.to_owned();let bounds=self.keyboard_bounds.clone();
+        element.relative().child(canvas(move|b,_,_|{bounds.borrow_mut().insert(id.clone(),b);b},|_,_,_,_|{}).absolute().inset_0())
+    }
+    fn setup_control(&self,id:impl Into<String>,element:Stateful<Div>,enabled:bool,cx:&mut Context<Self>)->Stateful<Div>{
+        let id=id.into();let focus=self.register_keyboard(&id,enabled,cx);let weak=cx.entity().downgrade();let action=id.clone();
+        self.keyboard_probe(&id,settings_control_with_focus(element,focus,enabled,move|w,cx|{let _=weak.update(cx,|s,cx|s.activate_setup(&action,w,cx));}))
+    }
+    fn activate_setup(&mut self,id:&str,w:&mut Window,cx:&mut Context<Self>){
+        if !self.keyboard_order.borrow().iter().any(|item|item==id){return;}
+        if let Some(index)=id.strip_prefix("training-exercise-").and_then(|v|v.parse::<usize>().ok()).filter(|i|*i<EXERCISES.len()){
+            self.preparation=None;self.preparation_notice=None;self.mixed_kinds=None;self.exercise=EXERCISES[index];if matches!(self.exercise,Exercise::Note|Exercise::Scale){self.task=0;}self.navigate(Route::Setup,cx);return;
+        }
+        if let Some(index)=id.strip_prefix("training-level-").and_then(|v|v.parse::<usize>().ok()).filter(|i|*i<3){self.level=Some(index);self.program_started.get_or_insert_with(crate::training_store::now);}
+        else if let Some(index)=id.strip_prefix("training-path-").and_then(|v|v.parse::<usize>().ok()).filter(|i|*i<self.lessons().len()){self.open_lesson(self.lessons()[index],cx);return;}
+        else if let Some(index)=id.strip_prefix("training-task-").and_then(|v|v.parse::<usize>().ok()).filter(|i|*i<3){if self.exercise!=Exercise::Scale{self.task=index;}}
+        else if let Some(index)=id.strip_prefix("training-direction-").and_then(|v|v.parse::<usize>().ok()).filter(|i|*i<3){self.direction=index;}
+        else if let Some(index)=id.strip_prefix("training-interval-").and_then(|v|v.parse::<usize>().ok()).filter(|i|*i<7){self.intervals[index]=!self.intervals[index];}
+        else if let Some(index)=id.strip_prefix("training-degree-").and_then(|v|v.parse::<usize>().ok()).filter(|i|*i<7){self.degrees[index]=!self.degrees[index];}
+        else if let Some(index)=id.strip_prefix("training-tolerance-").and_then(|v|v.parse::<usize>().ok()).filter(|i|*i<4){self.tolerance=index;}
+        else{match id{
+            "training-back"|"training-progress-start"=>{self.navigate(Route::Home,cx);return;},
+            "training-progress"=>{self.navigate(Route::Progress,cx);return;},
+            "training-program-path"=>self.path_open=!self.path_open,
+            "training-program-start"=>{if let Some(index)=self.program_stages().iter().position(|s|!s.done){self.open_lesson(self.lessons()[index],cx);}return;},
+            "training-start"=>{if self.audio_available{cx.emit(TrainingEvent::Start);}},
+            "training-test"=>{if self.audio_available{cx.emit(TrainingEvent::Test{sound:self.sound,volume:self.volume});}},
+            "training-volume-minus"|"training-volume-plus"=>{self.volume=(self.volume+if id=="training-volume-minus"{-0.1}else{0.1}).clamp(0.2,2.);cx.emit(TrainingEvent::Volume(self.volume));},
+            _=>{let selector=self.selector_options.borrow().keys().copied().find(|key|*key==id);if let Some(selector)=selector{self.activate_selector(selector,w.last_input_was_keyboard(),cx);}},
+        }}cx.notify();
+    }
+    fn selector_selected(&self,id:&str)->usize{match id{"training-key"=>self.tonic,"training-mode"=>usize::from(self.minor),"training-sound"=>self.sound,"training-length"=>self.length_options().iter().position(|n|*n==self.length).unwrap_or(0),"training-interval-focus"=>self.focus,_=>0}}
+    fn activate_selector(&mut self,id:&'static str,keyboard:bool,cx:&mut Context<Self>){
+        if self.open==Some(id){if keyboard{if let Some(index)=self.menu_index{self.choose_selector(id,index,cx);}}else{self.open=None;self.menu_index=None;self.typeahead.clear();}}
+        else{self.open=Some(id);self.menu_index=Some(self.selector_selected(id));self.menu_scroll.set_offset(point(px(0.),px(0.)));self.menu_scroll.scroll_to_item(self.menu_index.unwrap_or(0));self.typeahead.clear();}cx.notify();
+    }
+    fn choose_selector(&mut self,id:&'static str,index:usize,cx:&mut Context<Self>){
+        if !self.selector_options.borrow().get(id).is_some_and(|o|index<o.len()){return;}
+        match id{"training-key"=>self.tonic=index,"training-mode"=>self.minor=index==1,"training-sound"=>{self.sound=index;cx.emit(TrainingEvent::Stop);},"training-length"=>self.length=self.length_options()[index],"training-interval-focus"=>{self.focus=index;if index>0{self.intervals=[true;7];}},_=>{}}
+        self.open=None;self.menu_index=None;self.typeahead.clear();cx.notify();
+    }
+    fn selector_next(&mut self,backwards:bool,w:&mut Window,cx:&mut Context<Self>){self.open=None;self.menu_index=None;self.typeahead.clear();self.move_setup_focus(backwards,w,cx);}
+    fn move_setup_focus(&mut self,backwards:bool,w:&mut Window,cx:&mut Context<Self>){
+        let order=self.keyboard_order.borrow().clone();let focused=self.focused_control(w);let current=focused.as_ref().and_then(|id|order.iter().position(|item|item==id));
+        let next=match current{Some(i)if backwards=>i.checked_sub(1),Some(i)=>(i+1<order.len()).then_some(i+1),None if self.keyboard_scope.is_focused(w)=>if backwards{order.len().checked_sub(1)}else{(!order.is_empty()).then_some(0)},None=>None};
+        if let Some(index)=next{if let Some(focus)=self.keyboard_focus.borrow().get(&order[index]){focus.focus(w,cx);}}
+        else if backwards{w.focus_prev(cx);}else{w.focus_next(cx);}
+        cx.notify();
+    }
+    fn selector_key(&mut self,id:&'static str,e:&KeyDownEvent,w:&mut Window,cx:&mut Context<Self>){
+        let key=e.keystroke.key.as_str();let options=self.selector_options.borrow().get(id).cloned().unwrap_or_default();
+        if key=="tab"{self.selector_next(e.keystroke.modifiers.shift,w,cx);}
+        else if key=="escape"{if self.open!=Some(id){return;}self.open=None;self.menu_index=None;self.typeahead.clear();}
+        else if matches!(key,"enter"|"space"){return;}
+        else if matches!(key,"up"|"down"|"left"|"right"|"home"|"end"){
+            if self.open!=Some(id){self.open=Some(id);self.menu_index=Some(self.selector_selected(id));}
+            if !options.is_empty(){let current=self.menu_index.unwrap_or(0).min(options.len()-1);self.menu_index=Some(match key{"home"=>0,"end"=>options.len()-1,"up"|"left"=>current.saturating_sub(1),_=>(current+1).min(options.len()-1)});}
+        }else if key.chars().count()==1&&!e.keystroke.modifiers.control&&!e.keystroke.modifiers.platform&&!e.keystroke.modifiers.alt{
+            let now=std::time::Instant::now();if self.typeahead_at.is_none_or(|at|now.duration_since(at)>std::time::Duration::from_millis(700)){self.typeahead.clear();}self.typeahead_at=Some(now);self.typeahead.push_str(&key.to_lowercase());self.open=Some(id);if let Some(index)=options.iter().position(|label|label.to_lowercase().starts_with(&self.typeahead)){self.menu_index=Some(index);}
+        }else{return;}
+        if let Some(index)=self.menu_index{self.menu_scroll.scroll_to_item(index);}w.prevent_default();cx.stop_propagation();cx.notify();
+    }
+    pub fn focused_control(&self,w:&Window)->Option<String>{self.keyboard_focus.borrow().iter().find(|(_,focus)|focus.is_focused(w)).map(|(id,_)|id.clone())}
+    pub fn keyboard_state(&self,w:&Window,cx:&App)->serde_json::Value{
+        let focused=self.focused_control(w);let bounds=focused.as_ref().and_then(|id|self.keyboard_bounds.borrow().get(id).copied());let viewport=self.scroll.bounds();let sticky=self.keyboard_bounds.borrow().get("training-footer").copied().filter(|_|self.route==Route::Setup);let body_bottom=sticky.map_or(viewport.bottom(),|footer|footer.top()-px(8.));let popup_bounds=self.open.and_then(|id|self.keyboard_bounds.borrow().get(&format!("training-popup-{id}")).copied());
+        serde_json::json!({"route":format!("{:?}",self.route),"exercise":format!("{:?}",self.exercise),"focusOrder":self.keyboard_order.borrow().clone(),"focusedControl":focused,"focusInside":self.keyboard_scope.contains_focused(w,cx),"focusedBounds":bounds.map(|b|[f32::from(b.left()),f32::from(b.top()),f32::from(b.size.width),f32::from(b.size.height)]),"viewportBounds":[f32::from(viewport.left()),f32::from(viewport.top()),f32::from(viewport.size.width),f32::from((body_bottom-viewport.top()).max(px(0.)))],"scrollViewportBounds":[f32::from(viewport.left()),f32::from(viewport.top()),f32::from(viewport.size.width),f32::from(viewport.size.height)],"stickyFooterBounds":sticky.map(|b|[f32::from(b.left()),f32::from(b.top()),f32::from(b.size.width),f32::from(b.size.height)]),"popupBounds":popup_bounds.map(|b|[f32::from(b.left()),f32::from(b.top()),f32::from(b.size.width),f32::from(b.size.height)]),"scrollOffset":[f32::from(self.scroll.offset().x),f32::from(self.scroll.offset().y)],"popup":self.open,"menuIndex":self.menu_index,"selectorOptions":self.selector_options.borrow().clone(),"menuScrollOffset":[f32::from(self.menu_scroll.offset().x),f32::from(self.menu_scroll.offset().y)],"config":{"tonic":self.tonic,"minor":self.minor,"task":self.task,"direction":self.direction,"low":self.low,"high":self.high,"length":self.length,"sound":self.sound,"volume":self.volume,"tolerance":self.tolerance,"intervals":self.intervals,"degrees":self.degrees,"intervalFocus":self.focus,"level":self.level,"pathOpen":self.path_open},"audioAvailable":self.audio_available,"testing":self.testing})
+    }
     fn back(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         self.probe(
             "training-back",
             training_back_label("training-back", t("training.nav.backToTraining"))
                 .mb(px(18.))
-                .on_click(cx.listener(|this, _, _, cx| this.navigate(Route::Home, cx))),
+                .when(true,|d|self.setup_control("training-back",d,true,cx)),
         )
     }
     fn lessons(&self) -> Vec<(Exercise, usize, usize)> {
@@ -791,12 +880,7 @@ impl TrainingScreen {
                                         .border_color(rgb(ACCENT))
                                         .bg(rgba(ACCENT_SOFT))
                                 })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.level = Some(i);
-                                    this.program_started
-                                        .get_or_insert_with(crate::training_store::now);
-                                    cx.notify();
-                                })),
+                                .when(true,|d|self.setup_control(format!("training-level-{i}"),d,true,cx)),
                         )
                     }),
                 ),
@@ -869,9 +953,7 @@ impl TrainingScreen {
                             t("training.program.start")
                         },
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_lesson(this.lessons()[index], cx);
-                    })),
+                    .when(true,|d|self.setup_control("training-program-start",d,true,cx)),
                 )
             })
             .when(self.level.is_some(), |card| {
@@ -882,10 +964,7 @@ impl TrainingScreen {
                         .cursor_pointer()
                         .font_family(DISPLAY_700)
                         .child(t("training.program.path"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.path_open = !this.path_open;
-                            cx.notify();
-                        })),
+                        .when(true,|d|self.setup_control("training-program-path",d,true,cx)),
                 )
                 .when(self.path_open, |c| {
                     c.children(
@@ -912,9 +991,7 @@ impl TrainingScreen {
                                         12.,
                                         DIM,
                                     ))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.open_lesson(lesson, cx)
-                                    }))
+                                    .when(true,|d|self.setup_control(format!("training-path-{index}"),d,true,cx))
                             }),
                     )
                 })
@@ -991,7 +1068,7 @@ impl TrainingScreen {
                                 )),
                         )
                         .child(Self::text("→", 16., ACCENT))
-                        .on_click(cx.listener(|this, _, _, cx| this.navigate(Route::Progress, cx))),
+                        .when(true,|d|self.setup_control("training-progress",d,true,cx)),
                 ),
             );
         let practice = div()
@@ -1051,16 +1128,7 @@ impl TrainingScreen {
                                     ),
                             )
                             .child(Self::text("→", 20., FAINT).w(px(20.)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.preparation = None;
-                                this.preparation_notice = None;
-                                this.mixed_kinds = None;
-                                this.exercise = exercise;
-                                if matches!(exercise, Exercise::Note | Exercise::Scale) {
-                                    this.task = 0;
-                                }
-                                this.navigate(Route::Setup, cx);
-                            })),
+                            .when(true,|d|self.setup_control(format!("training-exercise-{i}"),d,true,cx)),
                     )
                 }),
             ))
@@ -1073,64 +1141,22 @@ impl TrainingScreen {
             .child(program)
             .child(practice)
     }
-    fn selector(
-        &self,
-        id: &'static str,
-        options: Vec<String>,
-        selected: usize,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let open = self.open == Some(id);
-        div()
-            .relative()
-            .min_w_0()
-            .flex_1()
-            .child(self.probe(
-                id,
-                training_select(id, options.get(selected).cloned().unwrap_or_default()).on_click(
-                    cx.listener(move |this, _, _, cx| {
-                        this.open = if this.open == Some(id) {
-                            None
-                        } else {
-                            Some(id)
-                        };
-                        cx.notify();
-                    }),
-                ),
-            ))
-            .when(open, |d| {
-                d.child(
-                    deferred(scrolling_select_popup(format!("{id}-options")).children(
-                        options.into_iter().enumerate().map(|(index, label)| {
-                            select_option((id, index), label, index == selected)
-                                .flex_none()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    match id {
-                                        "training-key" => this.tonic = index,
-                                        "training-mode" => this.minor = index == 1,
-                                        "training-sound" => {
-                                            this.sound = index;
-                                            cx.emit(TrainingEvent::Stop);
-                                        }
-                                        "training-length" => {
-                                            this.length = this.length_options()[index]
-                                        }
-                                        "training-interval-focus" => {
-                                            this.focus = index;
-                                            if index > 0 {
-                                                this.intervals = [true; 7];
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                    this.open = None;
-                                    cx.notify();
-                                }))
-                        }),
-                    ))
-                    .with_priority(100),
-                )
-            })
+    fn selector(&self,id:&'static str,options:Vec<String>,selected:usize,cx:&mut Context<Self>)->Div{
+        self.selector_options.borrow_mut().insert(id,options.clone());let open=self.open==Some(id);
+        let menu_height=px((options.len() as f32*27.5+10.).min(280.));
+        let above=self.keyboard_bounds.borrow().get(id).is_some_and(|b|b.bottom()+menu_height>self.scroll.bounds().bottom()&&b.top()-self.scroll.bounds().top()>self.scroll.bounds().bottom()-b.bottom());
+        div().relative().min_w_0().flex_1().child(self.probe(id,
+            self.setup_control(id,training_select(id,options.get(selected).cloned().unwrap_or_default()),true,cx)
+                .key_context("SingZTrainingSelector")
+                .on_action(cx.listener(|s,_:&NextSelectorFocus,w,cx|{s.selector_next(false,w,cx);w.prevent_default();cx.stop_propagation();}))
+                .on_action(cx.listener(|s,_:&PreviousSelectorFocus,w,cx|{s.selector_next(true,w,cx);w.prevent_default();cx.stop_propagation();}))
+                .capture_key_down(cx.listener(move|s,e:&KeyDownEvent,w,cx|s.selector_key(id,e,w,cx)))
+        )).when(open,|d|d.child(deferred(self.keyboard_probe(&format!("training-popup-{id}"),scrolling_select_popup(format!("{id}-options")).track_scroll(&self.menu_scroll)
+            .when(above,|popup|popup.top(Length::Auto).bottom_full().mt(px(0.)).mb(px(2.)))
+            .on_mouse_down_out(cx.listener(move|s,event:&MouseDownEvent,_,cx|{if !s.keyboard_bounds.borrow().get(id).is_some_and(|b|b.contains(&event.position)){s.open=None;s.menu_index=None;cx.notify();}}))
+            .children(options.into_iter().enumerate().map(|(index,label)|select_option((id,index),label,index==self.menu_index.unwrap_or(selected)).flex_none()
+                .on_click(cx.listener(move|s,_,w,cx|{s.choose_selector(id,index,cx);if let Some(focus)=s.keyboard_focus.borrow().get(id){focus.focus(w,cx);}}))
+            ))).absolute()).with_priority(100)))
     }
     fn segment(
         &self,
@@ -1146,18 +1172,7 @@ impl TrainingScreen {
                 training_choice((id, i), label.clone(), i == selected)
                     .when(disabled, |choice| choice.opacity(0.35).cursor_default())
                     .when(i > 0, |d| d.border_l_1().border_color(rgba(LINE)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        match id {
-                            "training-task" => {
-                                if this.exercise != Exercise::Scale {
-                                    this.task = i;
-                                }
-                            }
-                            "training-direction" => this.direction = i,
-                            _ => {}
-                        }
-                        cx.notify();
-                    })),
+                    .when(true,|d|self.setup_control(format!("{id}-{i}"),d,!disabled,cx)),
             )
         }))
     }
@@ -1243,11 +1258,12 @@ impl TrainingScreen {
                     ))
             });
         let weak = cx.entity().downgrade();
-        let low = training_range(
+        let low = training_range_with_focus(
             "training-low",
             self.low,
             36.,
             self.high - 1.,
+            1.,self.register_keyboard("training-low",true,cx),true,
             move |v, _, cx| {
                 let _ = weak.update(cx, |s, cx| {
                     s.low = v.round().clamp(36., s.high - 1.);
@@ -1256,11 +1272,12 @@ impl TrainingScreen {
             },
         );
         let weak = cx.entity().downgrade();
-        let high = training_range(
+        let high = training_range_with_focus(
             "training-high",
             self.high,
             self.low + 1.,
             84.,
+            1.,self.register_keyboard("training-high",true,cx),true,
             move |v, _, cx| {
                 let _ = weak.update(cx, |s, cx| {
                     s.high = v.round().clamp(s.low + 1., 84.);
@@ -1268,8 +1285,8 @@ impl TrainingScreen {
                 });
             },
         );
-        let low = self.probe("training-low", low);
-        let high = self.probe("training-high", high);
+        let low = self.probe("training-low", self.keyboard_probe("training-low",low));
+        let high = self.probe("training-high", self.keyboard_probe("training-high",high));
         let range = Self::fieldset(t("training.setup.legend.range"))
             .flex_basis(relative(0.425))
             .min_w(px(280.))
@@ -1387,12 +1404,7 @@ impl TrainingScreen {
                                                 .clone(),
                                             self.intervals[i],
                                         )
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.intervals[i] = !this.intervals[i];
-                                                cx.notify();
-                                            }),
-                                        )
+                                        .when(true,|d|self.setup_control(format!("training-interval-{i}"),d,true,cx))
                                     },
                                 )))
                             },
@@ -1413,12 +1425,7 @@ impl TrainingScreen {
                                 ),
                                 self.degrees[i],
                             )
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    this.degrees[i] = !this.degrees[i];
-                                    cx.notify();
-                                },
-                            ))
+                            .when(true,|d|self.setup_control(format!("training-degree-{i}"),d,true,cx))
                         }))),
                 )
             })
@@ -1484,24 +1491,21 @@ impl TrainingScreen {
                     "training-start",
                     training_primary("training-start", t("training.setup.startPractice"))
                         .opacity(if self.audio_available { 1. } else { 0.45 })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if this.audio_available {
-                                cx.emit(TrainingEvent::Start);
-                            }
-                        })),
+                        .when(true,|d|self.setup_control("training-start",d,self.audio_available,cx)),
                 ),
             );
-        self.probe("training-footer", div().id("training-footer").child(footer))
+        self.probe("training-footer", self.keyboard_probe("training-footer",div().id("training-footer").child(footer)))
     }
     fn practice(&self, cx: &mut Context<Self>) -> Div {
         let weak = cx.entity().downgrade();
-        let volume = training_range("training-volume", self.volume, 0.2, 2., move |v, _, cx| {
+        let volume = training_range_with_focus("training-volume", self.volume, 0.2, 2.,0.05,self.register_keyboard("training-volume",true,cx),true, move |v, _, cx| {
             let _ = weak.update(cx, |s, cx| {
                 s.volume = (v * 20.).round() / 20.;
                 cx.emit(TrainingEvent::Volume(s.volume));
                 cx.notify();
             });
         });
+        let volume=self.probe("training-volume",self.keyboard_probe("training-volume",volume));
         Self::fieldset(t("training.setup.legend.practiceSettings"))
             .child(
                 div()
@@ -1569,16 +1573,7 @@ impl TrainingScreen {
                                             )
                                             .min_w(px(116.))
                                             .opacity(if self.audio_available { 1. } else { 0.45 })
-                                            .on_click(
-                                                cx.listener(|this, _, _, cx| {
-                                                    if this.audio_available {
-                                                        cx.emit(TrainingEvent::Test {
-                                                            sound: this.sound,
-                                                            volume: this.volume,
-                                                        });
-                                                    }
-                                                }),
-                                            ),
+                                            .when(true,|d|self.setup_control("training-test",d,self.audio_available,cx)),
                                         ),
                                     ),
                             )
@@ -1592,11 +1587,7 @@ impl TrainingScreen {
                                         self.probe(
                                             "training-volume-minus",
                                             training_round_button("training-volume-minus", "−")
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.volume = (this.volume - 0.1).max(0.2);
-                                                    cx.emit(TrainingEvent::Volume(this.volume));
-                                                    cx.notify();
-                                                })),
+                                                .when(true,|d|self.setup_control("training-volume-minus",d,true,cx)),
                                         ),
                                     )
                                     .child(volume.flex_1())
@@ -1604,11 +1595,7 @@ impl TrainingScreen {
                                         self.probe(
                                             "training-volume-plus",
                                             training_round_button("training-volume-plus", "+")
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.volume = (this.volume + 0.1).min(2.);
-                                                    cx.emit(TrainingEvent::Volume(this.volume));
-                                                    cx.notify();
-                                                })),
+                                                .when(true,|d|self.setup_control("training-volume-plus",d,true,cx)),
                                         ),
                                     ),
                             )
@@ -1642,12 +1629,7 @@ impl TrainingScreen {
                                 rgba(LINE_STRONG)
                             })
                             .rounded(px(10.))
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    this.tolerance = i;
-                                    cx.notify();
-                                },
-                            ))
+                            .when(true,|d|self.setup_control(format!("training-tolerance-{i}"),d,true,cx))
                         }),
                     ))
                     .child(Self::hint(tv(
@@ -1690,9 +1672,7 @@ impl TrainingScreen {
                                     "training-progress-start",
                                     t("training.progress.empty.cta"),
                                 )
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.navigate(Route::Home, cx)),
-                                ),
+                                .when(true,|d|self.setup_control("training-progress-start",d,true,cx)),
                             ),
                         ),
                 )
@@ -1701,10 +1681,17 @@ impl TrainingScreen {
 }
 impl Render for TrainingScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.keyboard_order.borrow_mut().clear();self.selector_options.borrow_mut().clear();
+        if self.keyboard_focus_pending {self.keyboard_focus_pending=false;self.keyboard_scope.focus(window,cx);}
         if self.run.is_some() {
+            // Start unmounts setup controls. Keep their focus on a live route
+            // container without touching the running screen's owned controls.
+            if self.focused_control(window).is_some(){self.keyboard_scope.focus(window,cx);}
+
             let banner = self.history_banner(cx);
             let running = self.running(window, cx);
             return div()
+                .track_focus(&self.keyboard_scope)
                 .flex_1()
                 .min_h_0()
                 .flex()
@@ -1722,6 +1709,16 @@ impl Render for TrainingScreen {
             Route::Setup => self.setup(cx),
             Route::Progress => self.progress(cx),
         };
+        if self.route==Route::Setup {
+            let mut preferred=vec!["training-back".to_owned(),"training-key".into(),"training-mode".into()];
+            for group in ["training-task","training-direction"]{for i in 0..3{preferred.push(format!("{group}-{i}"));}}
+            preferred.extend(["training-low","training-high","training-interval-focus"].into_iter().map(str::to_owned));
+            for group in ["training-interval","training-degree"]{for i in 0..7{preferred.push(format!("{group}-{i}"));}}
+            preferred.extend(["training-sound","training-test","training-volume-minus","training-volume","training-volume-plus"].into_iter().map(str::to_owned));
+            for i in 0..4{preferred.push(format!("training-tolerance-{i}"));}
+            preferred.extend(["training-length","training-start"].into_iter().map(str::to_owned));
+            let mut order=self.keyboard_order.borrow_mut();order.sort_by_key(|id|preferred.iter().position(|item|item==id).unwrap_or(usize::MAX));
+        }
         let banner = if self.review || self.audio_error.is_none() {
             tv(
                 "settings.monitor.audioSafetyBlocked",
@@ -1770,7 +1767,11 @@ impl Render for TrainingScreen {
                     }),
             );
         let page_width = width.min(if home { 1240. } else { 1040. });
-        div()
+        let view=div()
+            .track_focus(&self.keyboard_scope)
+            .when(matches!(self.route,Route::Home|Route::Setup),|d|d.key_context("SingZTrainingSetup")
+                .on_action(cx.listener(|s,_:&NextSelectorFocus,w,cx|{s.selector_next(false,w,cx);w.prevent_default();cx.stop_propagation();}))
+                .on_action(cx.listener(|s,_:&PreviousSelectorFocus,w,cx|{s.selector_next(true,w,cx);w.prevent_default();cx.stop_propagation();})))
             .relative()
             .flex_1()
             .min_h_0()
@@ -1795,6 +1796,18 @@ impl Render for TrainingScreen {
                         .child(self.footer(cx)),
                 )
             })
-            .into_any_element()
+            .into_any_element();
+        if let Some(id)=self.focused_control(window){
+            if !self.keyboard_order.borrow().contains(&id){
+                self.open=None;self.menu_index=None;self.keyboard_scope.focus(window,cx);cx.notify();
+            }else if !matches!(id.as_str(),"training-length"|"training-start"){
+                if let Some(bounds)=self.keyboard_bounds.borrow().get(&id){
+                    let viewport=self.scroll.bounds();let bottom=if self.route==Route::Setup{self.keyboard_bounds.borrow().get("training-footer").map_or(viewport.bottom()-px(4.),|footer|footer.top()-px(8.))}else{viewport.bottom()-px(4.)};
+                    let correction=if bounds.top()<viewport.top()+px(4.){viewport.top()+px(4.)-bounds.top()}else if bounds.bottom()>bottom{bottom-bounds.bottom()}else{px(0.)};
+                    if correction!=px(0.)&&viewport.size.height>px(0.){let offset=self.scroll.offset();self.scroll.set_offset(point(offset.x,offset.y+correction));cx.notify();}
+                }
+            }
+        }
+        view
     }
 }

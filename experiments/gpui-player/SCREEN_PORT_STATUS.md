@@ -6,6 +6,13 @@ controls are implemented as a first slice; see `NATIVE_INTEGRATION.md`. Full vis
 and the remaining backend features remain separate.
 Common native controls live in sibling `singz-ui/gpui`.
 
+Training keyboard follow-up (2026-11-09): Home/setup keyboard navigation, shared
+focusable ranges, sticky-footer autoscroll and adaptive selector placement are
+implemented. Hidden native replay/scoring checks pass both sizes; 17 pointer
+regression frames remain byte-exact. Running response/history keyboard access,
+full production visual parity and release qualification remain open. See
+[Training keyboard review](TRAINING_KEYBOARD_REVIEW.md) for scope and limits.
+
 Footer keyboard follow-up (2026-11-09): ordinary transport buttons now use shared
 UIKit Enter activation with song Space/arrows preserved. Split has scoped menu
 keys, first-enabled focus and disabled-item recovery; output popup dismissal no
@@ -17,7 +24,7 @@ samples without errors, stable foreground and 50 observed processes retired.
 Two prior native player images and sidecars remain exact. The normal preview is
 rebuilt/package-verified. See [Footer keyboard review](FOOTER_KEYBOARD_REVIEW.md)
 for fixture limits, muted native gain, high capture-run memory and remaining gates.
-Training Home/setup keyboard access remains the next concrete migration gap.
+Training Home/setup keyboard access was completed in the later checkpoint above.
 
 Models keyboard follow-up (2026-11-09): shared UIKit focus/activation now reaches
 Get/Reinstall, GPU/CPU, Retry and Close/Skip, with modal Tab/Shift-Tab, automatic
