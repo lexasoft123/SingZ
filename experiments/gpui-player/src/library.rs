@@ -10,7 +10,7 @@ use std::{
     time::Instant,
 };
 
-actions!(singz_library_drive, [ActivateDrive, NextCatalogFocus, PreviousCatalogFocus]);
+actions!(singz_library_drive, [NextCatalogFocus, PreviousCatalogFocus]);
 
 /// Source-browser rounded bars plus their shadows, before the CSS scaleY.
 /// Kept separately so animation transforms the complete primitive, including
@@ -154,7 +154,6 @@ pub struct LibraryScreen {
     drive: crate::drive_state::Snapshot,
     drive_focus: std::cell::RefCell<std::collections::HashMap<String, FocusHandle>>,
     drive_bounds: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, Bounds<Pixels>>>>,
-    drive_keyboard: std::rc::Rc<std::cell::Cell<bool>>,
     revealed_drive_focus: Option<String>,
     card_focus: std::cell::RefCell<std::collections::HashMap<(std::path::PathBuf,bool),FocusHandle>>,
     search: Entity<InputState>,
@@ -221,8 +220,6 @@ impl LibraryScreen {
         cx.bind_keys([
             KeyBinding::new("tab", NextCatalogFocus, Some("SingZLibrary")),
             KeyBinding::new("shift-tab", PreviousCatalogFocus, Some("SingZLibrary")),
-            KeyBinding::new("enter", ActivateDrive, Some("SingZLibraryDrive")),
-            KeyBinding::new("space", ActivateDrive, Some("SingZLibraryDrive")),
         ]);
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search projects…"));
         let subscription = cx.subscribe_in(&search, window, |this, state, event, _, cx| {
@@ -237,7 +234,6 @@ impl LibraryScreen {
             drive: Default::default(),
             drive_focus: Default::default(),
             drive_bounds: Default::default(),
-            drive_keyboard: Default::default(),
             revealed_drive_focus: None,
             card_focus: Default::default(),
             guides: Default::default(),
@@ -287,39 +283,64 @@ impl LibraryScreen {
         self.drive_bounds.borrow().get(id).copied()
     }
     pub fn drive_state(&self, w: &Window) -> serde_json::Value {
+        let enabled=self.enabled_drive_controls();
+        let handles=self.drive_focus.borrow();
+        let focused=enabled.iter().find(|id|handles.get(**id).is_some_and(|focus|focus.is_focused(w))).copied();
+        let owns_focus=handles.values().any(|focus|focus.is_focused(w));
         serde_json::json!({"drive": self.drive,
-            "focusedControl": self.drive_focus.borrow().iter().find(|(id,f)|self.drive_bounds.borrow().contains_key(*id) && f.is_focused(w)).map(|(id,_)|id.clone())})
+            "focusedControl":focused,"enabledControls":enabled,"driveOwnsFocus":owns_focus,"validFocus":!owns_focus||focused.is_some()})
     }
-    fn drive_action(
-        &self, id: &str, label: &str, action: crate::drive_state::Action,
-        enabled: bool, w: &Window, cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
+    fn drive_syncing(&self)->bool {
+        self.drive.busy || self.drive.scheduler.phase==crate::sync_scheduler::Phase::Syncing
+    }
+    /// Current mounted/enabled actions, independent of the preceding frame's
+    /// bounds. The Drive row only exists for configured native integration.
+    fn drive_control_enabled(&self,id:&str)->bool {
+        if crate::integration::fixture_mode() || !self.drive.configured {return false;}
+        match id {
+            "library-drive-browse"|"library-drive-log"=>self.drive.signed_in,
+            "library-drive-cancel"=>self.drive_syncing(),
+            "library-drive-sync"=>self.drive.signed_in&&!self.drive_syncing()&&!self.drive.signing_in,
+            "library-drive-connect"=>!self.drive.signed_in&&!self.drive_syncing()&&!self.drive.signing_in,
+            _=>false,
+        }
+    }
+    fn enabled_drive_controls(&self)->Vec<&'static str> {
+        ["library-drive-browse","library-drive-log","library-drive-cancel","library-drive-sync","library-drive-connect"]
+            .into_iter().filter(|id|self.drive_control_enabled(id)).collect()
+    }
+    fn drive_handle(&self,id:&str,cx:&mut Context<Self>)->FocusHandle {
         let previous_primary=match id {
             "library-drive-connect"=>self.drive_focus.borrow().get("library-drive-sync").cloned(),
             "library-drive-sync"=>self.drive_focus.borrow().get("library-drive-connect").cloned(),
             _=>None,
         };
-        let focus = self.drive_focus.borrow_mut().entry(id.into())
-            .or_insert_with(||previous_primary.unwrap_or_else(||cx.focus_handle().tab_stop(true))).clone();
+        self.drive_focus.borrow_mut().entry(id.into())
+            .or_insert_with(||previous_primary.unwrap_or_else(||cx.focus_handle().tab_stop(true))).clone()
+    }
+    fn recover_drive_focus(&self,window:&mut Window,cx:&mut Context<Self>) {
+        // An account/busy transition may remove the exact focused action.
+        // Resolve current primary aliases before deciding it vanished: a
+        // Connect handle shared by an enabled Sync control remains valid.
+        if !self.drive_focus.borrow().values().any(|focus|focus.is_focused(window)) {return;}
+        let enabled=self.enabled_drive_controls();
+        if enabled.iter().any(|id|self.drive_handle(id,cx).is_focused(window)) {return;}
+        let target=if self.drive.signed_in {
+            ["library-drive-cancel","library-drive-sync","library-drive-browse"].into_iter().find(|id|self.drive_control_enabled(id))
+        } else if self.drive_control_enabled("library-drive-connect") {Some("library-drive-connect")} else {None};
+        if let Some(id)=target {self.drive_handle(id,cx).focus(window,cx);}
+        else {self.focus_search(window,cx);}
+    }
+    fn drive_action(
+        &self, id: &str, label: &str, action: crate::drive_state::Action,
+        enabled: bool, w: &Window, cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let focus=self.drive_handle(id,cx);
         let bounds=self.drive_bounds.clone(); let probe_id=id.to_owned();
-        let mouse_focus=focus.clone();
-        singz_uikit::drive_library_action(id.to_owned(), label.to_owned(), enabled, w)
-            .key_context("SingZLibraryDrive")
-            .when(enabled, |d|d.track_focus(&focus).child(singz_uikit::guide_focus_ring(focus,self.drive_keyboard.clone(),1.)))
-            .on_mouse_down(MouseButton::Left, cx.listener(move |s,_,w,cx| {
-                s.drive_keyboard.set(false);
-                if enabled { mouse_focus.focus(w,cx); }
-                cx.stop_propagation();
-            }))
-            .on_action(cx.listener(move |s,_:&ActivateDrive,_,cx| {
-                s.drive_keyboard.set(true);
-                if enabled { cx.emit(LibraryEvent::Drive(action)); }
-                cx.stop_propagation();
-            }))
-            .on_click(cx.listener(move |_,_,_,cx| {
-                if enabled { cx.emit(LibraryEvent::Drive(action)); }
-                cx.stop_propagation();
-            }))
+        let weak=cx.entity().downgrade();let current_id=id.to_owned();
+        singz_uikit::settings_control_with_focus(singz_uikit::drive_library_action(id.to_owned(),label.to_owned(),enabled,w),focus,enabled,move|_,cx| {
+            let _=weak.update(cx,|s,cx|if s.drive_control_enabled(&current_id){cx.emit(LibraryEvent::Drive(action));});
+        })
             .relative().child(canvas(move |b,_,_| {bounds.borrow_mut().insert(probe_id.clone(),b);b},|_,_,_,_|{}).absolute().inset_0())
     }
     pub fn focus_drive_browse(&mut self, window:&mut Window, cx:&mut Context<Self>)->bool {
@@ -338,17 +359,17 @@ impl LibraryScreen {
     }
     fn drive_browse(&self, window:&Window, cx:&mut Context<Self>)->Stateful<Div> {
         let id="library-drive-browse";
-        let focus=self.drive_focus.borrow_mut().entry(id.into()).or_insert_with(||cx.focus_handle().tab_stop(true)).clone();
+        let focus=self.drive_handle(id,cx);
         let weak=cx.entity().downgrade();
         let bounds=self.drive_bounds.clone();
         singz_uikit::settings_control_with_focus(singz_uikit::drive_library_action(id,t("library.drive.title"),true,window),focus,true,move|_,cx| {
-            let _=weak.update(cx,|s,cx|if s.drive.signed_in {cx.emit(LibraryEvent::DriveBrowse);});
+            let _=weak.update(cx,|s,cx|if s.drive_control_enabled(id) {cx.emit(LibraryEvent::DriveBrowse);});
         }).relative().child(canvas(move|b,_,_|{bounds.borrow_mut().insert(id.into(),b);b},|_,_,_,_|{}).absolute().inset_0())
     }
     fn drive_row(&self, w: &Window, cx: &mut Context<Self>) -> Div {
         use crate::{drive_state::Action, sync_scheduler::Phase};
         let drive=&self.drive;
-        let syncing=drive.busy || drive.scheduler.phase==Phase::Syncing;
+        let syncing=self.drive_syncing();
         let status=if drive.signing_in {
             singz_uikit::drive_status_line(t("library.common.finishGoogleSignIn"),true,true,false,true,w)
         } else if let Some(error)=&drive.error {
@@ -387,7 +408,7 @@ impl LibraryScreen {
         if syncing { row=row.child(self.drive_action("library-drive-cancel",&t("library.dropScreen.cancelSync"),Action::Cancel,true,w,cx)); }
         let (id,label,action)=if drive.signed_in {("library-drive-sync",t("library.dropScreen.syncNow"),Action::SyncNow)}
             else {("library-drive-connect",t("library.dropScreen.connect"),Action::SignIn)};
-        row.child(self.drive_action(id,&label,action,!syncing && !drive.signing_in,w,cx))
+        row.child(self.drive_action(id,&label,action,self.drive_control_enabled(id),w,cx))
     }
     pub fn set_delete_error(&mut self, error: Option<String>, cx: &mut Context<Self>) {
         if self.delete_error != error {
@@ -724,12 +745,13 @@ impl Render for LibraryScreen {
         self.delete_bounds.borrow_mut().clear();
         #[cfg(feature = "ui-tests")]
         self.project_bounds.borrow_mut().clear();
+        self.recover_drive_focus(window,cx);
         // Native Tab can focus a storage action below the page's fold.
         // Reveal only on an actual Drive focus change, using its last measured
         // bounds before clearing them. Keeping the same focus while wheeling
         // must not pin the page back to that action on every render.
         let drive_focus=self.drive_focus.borrow().iter().find(|(id,focus)|
-            self.drive_bounds.borrow().contains_key(*id)&&focus.is_focused(window)).map(|(id,_)|id.clone());
+            self.drive_control_enabled(id)&&self.drive_bounds.borrow().contains_key(*id)&&focus.is_focused(window)).map(|(id,_)|id.clone());
         if drive_focus!=self.revealed_drive_focus {
             if let Some(id)=drive_focus.as_deref() {
                 if let Some(bounds)=self.drive_bounds(id) {

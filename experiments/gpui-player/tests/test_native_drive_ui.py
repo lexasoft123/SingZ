@@ -316,6 +316,9 @@ with tempfile.TemporaryDirectory(prefix='singz-drive-ui-') as temporary:
             assert proof['tokensPresent'] is (stage == 'exercise')
             if os.name != 'nt':
                 assert (root/'prefs/gdrive/session.json').stat().st_mode & 0o077 == 0
+            stage_result = json.loads((out/stage/'result.json').read_text())
+            if stage == 'exercise':
+                assert stage_result['actualLibraryDriveFocusRecovery'] is True, stage_result
             for width, height in ((1280,800),(1060,640)):
                 names = (f'restored-{width}', f'restored-picker-{width}') if stage == 'restart' else (
                     f'uploading-{width}', f'playing-upload-save-{width}', f'pending-followup-{width}',
@@ -328,9 +331,52 @@ with tempfile.TemporaryDirectory(prefix='singz-drive-ui-') as temporary:
                 if stage == 'exercise':
                     uploading = json.loads((out/stage/f'uploading-{width}.json').read_text())
                     cancelled = json.loads((out/stage/f'cancelled-{width}.json').read_text())
-                    assert uploading['playing'] and uploading['native']['playing'] and uploading['drive']['busy']
-                    assert cancelled['playing'] and cancelled['drive']['scheduler']['dirty'] != 0
-                    assert 'Sync paused' in cancelled['drive']['progress']
+                    # Catalog deliberately pauses the covered transport. The
+                    # adapter separately resumes actual Player playback while
+                    # HTTP is held and after cancellation; those receipts must
+                    # prove both UI and native progress in the same epoch.
+                    for paused in (uploading, cancelled):
+                        assert paused['screen'] == 2 and paused['playing'] is False and paused['native']['playing'] is False, paused
+                        assert paused['drive']['scheduler']['dirty'] != 0, paused
+                    assert uploading['drive']['busy'] is True and uploading['drive']['captureProject'] is None, uploading
+                    assert cancelled['drive']['busy'] is False and 'Sync paused' in cancelled['drive']['progress'], cancelled
+                    held = json.loads((out/stage/f'catalog-paused-held-{width}.json').read_text())
+                    playing_held = json.loads((out/stage/f'playing-held-upload-{width}.json').read_text())
+                    playing_cancelled = json.loads((out/stage/f'playing-after-cancel-{width}.json').read_text())
+                    busy_focus = json.loads((out/stage/f'busy-focus-recovered-{width}.json').read_text())
+                    cancel_focus = json.loads((out/stage/f'cancel-focus-recovered-{width}.json').read_text())
+                    for receipt in (held, playing_held, playing_cancelled, busy_focus, cancel_focus):
+                        assert receipt['viewport'] == [width,height] and receipt['hidden'] is True and receipt['scale'] == 2, receipt
+                    assert held['screen'] == 2 and held['playing'] is False and held['native']['playing'] is False, held
+                    assert held['drive']['busy'] is True and held['drive']['captureProject'] is None and held['drive']['scheduler']['dirty'] != 0, held
+                    assert held['epoch'] == uploading['epoch'] == playing_held['epoch'], playing_held
+                    assert playing_held['screen'] == 1 and playing_held['playing'] is True and playing_held['native']['playing'] is True, playing_held
+                    assert playing_held['position'] > held['position'] + .25 and playing_held['native']['position'] > held['native']['position'], playing_held
+                    assert playing_held['drive']['busy'] is True and playing_held['drive']['captureProject'] is None, playing_held
+                    assert playing_held['drive']['scheduler']['lastSync'] == held['drive']['scheduler']['lastSync'], playing_held
+                    assert playing_cancelled['screen'] == 1 and playing_cancelled['playing'] is True and playing_cancelled['native']['playing'] is True, playing_cancelled
+                    assert playing_cancelled['epoch'] == cancelled['epoch'] == busy_focus['epoch'] == cancel_focus['epoch'], playing_cancelled
+                    assert playing_cancelled['position'] > cancelled['position'] + .25 and playing_cancelled['native']['position'] > cancelled['native']['position'], playing_cancelled
+                    assert playing_cancelled['drive']['busy'] is False and playing_cancelled['drive']['scheduler']['dirty'] != 0, playing_cancelled
+                    assert 'Sync paused' in playing_cancelled['drive']['progress'], playing_cancelled
+                    assert playing_cancelled['drive']['scheduler']['lastSync'] == cancelled['drive']['scheduler']['lastSync'] == busy_focus['drive']['scheduler']['lastSync'], playing_cancelled
+                    for focused in (busy_focus, cancel_focus):
+                        assert focused['screen'] == 2 and focused['playing'] is False and focused['native']['playing'] is False, focused
+                        assert focused['library']['driveOwnsFocus'] is True and focused['library']['validFocus'] is True, focused
+                        assert focused['headerFocused'] is None and focused['searchFocused'] is False, focused
+                        assert focused['library']['focusedControl'] in focused['library']['enabledControls'], focused
+                    assert busy_focus['drive']['signedIn'] is True and busy_focus['drive']['busy'] is True, busy_focus
+                    assert busy_focus['library']['focusedControl'] in ('library-drive-cancel', 'library-drive-browse'), busy_focus
+                    assert 'library-drive-sync' not in busy_focus['library']['enabledControls'], busy_focus
+                    assert cancel_focus['drive']['busy'] is False and cancel_focus['drive']['scheduler']['dirty'] != 0, cancel_focus
+                    assert cancel_focus['library']['focusedControl'] == 'library-drive-sync', cancel_focus
+                    assert 'library-drive-cancel' not in cancel_focus['library']['enabledControls'], cancel_focus
+                    if width == 1280:
+                        signing_in = json.loads((out/stage/'signin-focus-recovered-1280.json').read_text())
+                        assert signing_in['drive']['signingIn'] is True and signing_in['drive']['signedIn'] is False, signing_in
+                        assert signing_in['screen'] == 2 and signing_in['searchFocused'] is True and signing_in['headerFocused'] is None, signing_in
+                        assert signing_in['library']['driveOwnsFocus'] is False and signing_in['library']['validFocus'] is True, signing_in
+                        assert signing_in['library']['focusedControl'] is None and signing_in['epoch'] == held['epoch'], signing_in
         final = server.state.snapshot()
         assert final['oauth']['authorizations'] == 2 and final['oauth']['codeExchanges'] == 2, final['oauth']
         assert remote_document(final)['settings']['tracks']['bass']['muted'] is False
@@ -349,6 +395,7 @@ with tempfile.TemporaryDirectory(prefix='singz-drive-ui-') as temporary:
         assert blocked['drive']['scheduler']['dirty'] != 0
         (out/'result.json').write_text(json.dumps({'actualOAuthCallbacks': 2, 'stages': 2, 'sizesPerStage': 2,
             'realUploadSaveFollowup': True, 'realCancellation': True, 'actualBlockedProjects': True,
+            'catalogPauseAndVisiblePlayerPlayback': True, 'libraryDriveFocusRecovery': True,
             'privateAccountRestoredThenTombstoned': True, 'foreignFilesPreserved': True,
             'foregroundUnchanged': True, 'liveFps': 'unmeasured', 'visualParity': 'unqualified candidate'}, indent=2))
     finally:

@@ -448,6 +448,20 @@ audio, restart discovery, real disk-full/permissions, physical hardware/choosers
 full parity/performance, latest Windows and release qualification remain open.
 The full desktop goal remains active.
 
+Native desktop Drive browse/download/offline-open has a separate verified reader
+cache outside the writer library. The hidden two-size online/fresh-offline
+journey passes 29 captures with actual search, cancellation, hash-corruption
+refusal, Retry and native playback of stem-only/saved-graph copies. Strict empty
+data is a reader fixture; native empty publication remains refused for older
+reader compatibility. The normal macOS preview is refreshed and passes signature,
+39-payload, no-Node and configured-Drive checks. See
+[Drive restore review](DRIVE_RESTORE_REVIEW.md) for binary identities, preserved
+failures and exact scope. The current Library focus-repair source passes 909 Rust
+tests with zero failures and two installed-model ignores. An earlier run had one
+intermittent engine-probe failure; the passing run does not close its cause.
+Production parity, Windows/Linux and
+hardware qualification, accessibility and live FPS remain open.
+
 
 The [native macOS package checkpoint](MACOS_PACKAGE_REVIEW.md) adds a maintained
 standalone `.app` assembler with native dependency/architecture/minimum-OS checks,

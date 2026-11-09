@@ -23,12 +23,22 @@ metadata is validated independently. See `PLAYBACK_GRAPH_REVIEW.md` for exact
 binary and runtime evidence. Full production visual and invalid-metadata renderer
 qualification remain open.
 
+Native desktop Drive browse/download/offline-open now has a separate reader and
+verified cache, including stem-only and saved-graph native playback. Its final
+hidden online/offline journey passes 29 captures with actual search/cancel/retry
+and exact payload checks. See `DRIVE_RESTORE_REVIEW.md`. This supplies the reader
+dependency for empty-project sync; the strict empty reader fixture does not
+qualify publication by the native writer. The compatibility row above remains
+open.
+
 ## Qualification gates
 
-- Current source has a passing normal Rust baseline of 873 tests and, with the
-  Training and runtime-graph presentation additions, 887 tests; two explicit installed-model
-  tests remain ignored. The historical intermittent two-second shell-fixture
-  timeout remains unresolved. Current passing runs do not close it. The source
+- The runtime-graph checkpoint passed 887 Rust tests. Successive Drive reader
+  suites passed at 901, 903 and 906 tests. A later suite recorded 908 passed,
+  one engine-probe failure and two explicit installed-model ignores. The current
+  Library focus-repair source passes 909 tests with zero failures and those same
+  two ignores. The historical intermittent two-second engine-probe shell fixture
+  remains unresolved; neither an isolated pass nor this full pass closes it. The source
   probe budget is 45 seconds; Qwen health readiness uses a separate 180-second
   budget. No deadline or assertion was relaxed.
 - Production visual and temporal parity still needs the complete matching

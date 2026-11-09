@@ -148,7 +148,17 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
    wait!(p,w,app=>!p.loading&&p.project.as_ref().is_some_and(|project|project.dir==target)&&p.screen==Screen::Player&&p.duration>119.&&native_mix(p,offline));
    handle.update(cx,|_,w,cx|->anyhow::Result<()> {
     let p=view.read(cx);
-    anyhow::ensure!(p.karaoke&&p.lyric_document.lines.len()==24&&p.lyric_document.credit=="Phone fixture credit"&&p.project.as_ref().unwrap().lyrics_error.is_none(),"Adopted lyrics were not loaded");
+    anyhow::ensure!(p.project.as_ref().unwrap().lyrics_error.is_none(),"Adopted lyrics were rejected: {:?}",p.project.as_ref().unwrap().lyrics_error);
+    anyhow::ensure!(p.lyric_document.credit=="Phone fixture credit","Adopted lyrics credit was not retained");
+    anyhow::ensure!(p.lyric_document.lines.len()==24,"Adopted lyrics row count is {}, expected 24",p.lyric_document.lines.len());
+    for (index,line) in p.lyric_document.lines.iter().enumerate() {
+     anyhow::ensure!(line.text=="A song brought home"&&line.start==index as f32*5.&&line.end==index as f32*5.+5.&&line.words.len()==4,
+        "Adopted lyrics row {index} lost its fixture text/timing/words");
+    }
+    // Karaoke is a remembered global mode, default off in these private
+    // preferences. Restoring lyrics does not enable it or mute the guide;
+    // this journey qualifies restored data/native mix, not sung highlighting.
+    anyhow::ensure!(!p.karaoke&&!p.karaoke_preferred,"Adopted lyrics changed the private default-off Karaoke preference");
     anyhow::ensure!((p.master_volume-0.61).abs()<0.0001,"Adopted song volume lost");
     draw(w,cx);Ok(())
    })??;

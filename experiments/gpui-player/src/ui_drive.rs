@@ -9,6 +9,7 @@ fn key(w:&mut Window,cx:&mut App,value:&'static str){w.dispatch_keystroke(Keystr
 fn state(view:&Entity<Player>,w:&Window,cx:&App)->serde_json::Value {
     let p=view.read(cx);
     serde_json::json!({"drive":p.drive_snapshot,"library":p.library.read(cx).drive_state(w),
+        "headerFocused":p.header.read(cx).focused_control(w),"searchFocused":p.library.read(cx).search_focused(w,cx),
         "picker":p.project_picker.read(cx).state(w,cx),"pickerOpen":p.project_picker_open,
         "project":p.project.as_ref().map(|p|&p.dir),"projectFingerprint":p.project.as_ref().map(|p|&p.metadata_hash),
         "screen":p.screen as u8,"playing":p.playing,"position":p.position,"epoch":p.native_epoch,
@@ -67,11 +68,17 @@ fn storage(view:&Entity<Player>,w:&mut Window,cx:&mut App)->anyhow::Result<()> {
 }
 fn songs(view:&Entity<Player>,w:&mut Window,cx:&mut App,library:bool)->anyhow::Result<()> {
     if (view.read(cx).screen==Screen::Library)!=library {
-        draw(w,cx);
-        let bounds=view.read(cx).header.read(cx).guides.get("songs")
-            .ok_or_else(||anyhow::anyhow!("Actual Songs header control is not measured"))?;
-        anyhow::ensure!(bounds.top()>=px(0.)&&bounds.bottom()<=w.viewport_size().height&&bounds.left()>=px(0.)&&bounds.right()<=w.viewport_size().width,"Songs header control is outside viewport");
-        click(w,cx,bounds.center());
+        // The explicit Catalog action toggles the loaded player and library.
+        // Exercise its actual mounted keyboard route in both writer/adoption.
+        for _ in 0..192 {
+            draw(w,cx);
+            let activate=view.read(cx).header.read(cx).focused_control(w).as_deref()==Some("header-catalog");
+            let stroke=Keystroke::parse(if activate{"enter"}else{"tab"}).unwrap();
+            w.dispatch_keystroke(stroke.clone(),cx);
+            w.dispatch_event(PlatformInput::KeyUp(KeyUpEvent{keystroke:stroke}),cx);
+            if activate {return Ok(());}
+        }
+        anyhow::bail!("Actual Tab could not reach Header Catalog for Drive navigation");
     }
     Ok(())
 }
@@ -168,7 +175,9 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App) {
      continue;
     }
     handshake!(format!("arm-first-{suffix}"),"arm-upload");
-    // Native playback continues under the library and the real HTTP upload.
+    // Source App.tsx toggleCatalog and enter_desktop_catalog pause transport
+    // when Catalog covers it. Playback-under-upload is exercised explicitly
+    // on Player after confirming that Catalog pause below.
     handle.update(cx,|_,w,cx|songs(&view,w,cx,false))??;wait!(p,w,app=>p.screen==Screen::Player);
     if !handle.update(cx,|_,_,cx|view.read(cx).playing)? {handle.update(cx,|_,w,cx|play(&view,w,cx))??;}
     wait!(p,w,app=>p.playing&&p.position>0.1&&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
@@ -180,10 +189,18 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App) {
       handle.update(cx,|_,w,cx|key(w,cx,if cfg!(target_os="macos"){"cmd-s"}else{"ctrl-s"}))?;saved!();
      }
     }
-    handle.update(cx,|_,w,cx|songs(&view,w,cx,true))??;wait!(p,w,app=>p.screen==Screen::Library);
+    let catalog_epoch=handle.update(cx,|_,_,cx|view.read(cx).native_epoch)?;
+    handle.update(cx,|_,w,cx|songs(&view,w,cx,true))??;
+    wait!(p,w,app=>p.screen==Screen::Library&&!p.playing&&p.native_play_intent.is_none()&&p.native_epoch==catalog_epoch
+        &&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
     if suffix==1280 {
      handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,&format!("connect-{suffix}")))??;
      handle.update(cx,|_,w,cx|library(&view,w,cx,"library-drive-connect"))??;
+     // Actual pointer focus belonged to Connect. Signing in disables that
+     // action before OAuth completes; ordinary search must own a mounted path.
+     wait!(p,w,app=>p.drive_snapshot.signing_in&&!p.drive_snapshot.signed_in
+        &&p.library.read(app).search_focused(w,app)&&p.library.read(app).drive_state(w)["validFocus"]==true);
+     handle.update(cx,|_,w,cx|marker(&out.join(format!("signin-focus-recovered-{suffix}.json")),&state(&view,w,cx)))??;
     } else {
      handle.update(cx,|_,w,cx|storage(&view,w,cx))??;wait!(p,w,app=>p.project_picker_open&&!p.project_picker.read(app).state(w,app)["loading"].as_bool().unwrap());
      handle.update(cx,|_,w,cx|picker(&view,w,cx,"picker-drive-connect"))??;
@@ -196,11 +213,18 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App) {
      handle.update(cx,|_,w,cx|key(w,cx,"escape"))?;wait!(p,w,app=>!p.project_picker_open);
     }
     handshake!(format!("first-held-{suffix}"),"upload-held");
-    wait!(p,w,app=>p.drive_snapshot.busy&&p.drive_snapshot.capture_project.is_none());
-    let (position,epoch)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.position,p.native_epoch)})?;
-    wait!(p,w,app=>p.playing&&p.position>position+0.25&&p.native_epoch==epoch&&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
+    wait!(p,w,app=>p.drive_snapshot.busy&&p.drive_snapshot.capture_project.is_none()&&p.screen==Screen::Library
+        &&!p.playing&&p.native_play_intent.is_none()&&p.native_epoch==catalog_epoch
+        &&p.last_playback_status.as_ref().is_some_and(|s|!s.playing)&&p.library.read(app).drive_state(w)["validFocus"]==true);
+    handle.update(cx,|_,w,cx|marker(&out.join(format!("catalog-paused-held-{suffix}.json")),&state(&view,w,cx)))??;
     handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,&format!("uploading-{suffix}")))??;
+    let (position,epoch)=handle.update(cx,|_,_,cx|{let p=view.read(cx);(p.position,p.native_epoch)})?;
     handle.update(cx,|_,w,cx|songs(&view,w,cx,false))??;wait!(p,w,app=>p.screen==Screen::Player);
+    handle.update(cx,|_,w,cx|play(&view,w,cx))??;
+    wait!(p,w,app=>p.screen==Screen::Player&&p.playing&&p.position>position+0.25&&p.native_epoch==epoch
+        &&p.drive_snapshot.busy&&p.drive_snapshot.capture_project.is_none()
+        &&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
+    handle.update(cx,|_,w,cx|marker(&out.join(format!("playing-held-upload-{suffix}.json")),&state(&view,w,cx)))??;
     handle.update(cx,|_,w,cx|mute(&view,w,cx))??;wait!(p,w,app=>p.edit_seq!=p.saved_seq);
     handle.update(cx,|_,w,cx|{draw(w,cx);key(w,cx,if cfg!(target_os="macos"){"cmd-s"}else{"ctrl-s"});})?;saved!();
     let saved:serde_json::Value=serde_json::from_slice(&std::fs::read(project.join("project.json"))?)?;
@@ -218,19 +242,42 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App) {
     handle.update(cx,|_,_,cx|->anyhow::Result<()>{anyhow::ensure!(view.read(cx).project.as_ref().unwrap().metadata_hash==metadata_hash,"Drive maintenance stranded the loaded project CAS fingerprint");Ok(())})??;
     handshake!(format!("followup-proof-{suffix}"),"remote-proof");
     handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,&format!("synced-{suffix}")))??;
-    // Real cancellation after spooling retains dirty intent and native audio.
+    // Real cancellation retains dirty intent. Catalog is paused by policy;
+    // resuming on Player must still advance the same native session afterward.
     handshake!(format!("arm-cancel-{suffix}"),"arm-upload");
     handle.update(cx,|_,w,cx|songs(&view,w,cx,false))??;wait!(p,w,app=>p.screen==Screen::Player);
     handle.update(cx,|_,w,cx|mute(&view,w,cx))??;wait!(p,w,app=>p.edit_seq!=p.saved_seq);
     handle.update(cx,|_,w,cx|key(w,cx,if cfg!(target_os="macos"){"cmd-s"}else{"ctrl-s"}))?;saved!();
-    handle.update(cx,|_,w,cx|songs(&view,w,cx,true))??;wait!(p,w,app=>p.screen==Screen::Library);
+    let cancel_epoch=handle.update(cx,|_,_,cx|view.read(cx).native_epoch)?;
+    handle.update(cx,|_,w,cx|songs(&view,w,cx,true))??;
+    wait!(p,w,app=>p.screen==Screen::Library&&!p.playing&&p.native_play_intent.is_none()&&p.native_epoch==cancel_epoch
+        &&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
     handle.update(cx,|_,w,cx|library(&view,w,cx,"library-drive-sync"))??;
     handshake!(format!("cancel-held-{suffix}"),"upload-held");
+    // Sync owned actual pointer focus before the worker entered busy state.
+    // The disabled primary must hand it to an enabled mounted Drive action.
+    wait!(p,w,app=>p.drive_snapshot.busy&&p.library.read(app).drive_state(w)["validFocus"]==true
+        &&matches!(p.library.read(app).drive_state(w)["focusedControl"].as_str(),Some("library-drive-cancel"|"library-drive-browse")));
+    handle.update(cx,|_,w,cx|marker(&out.join(format!("busy-focus-recovered-{suffix}.json")),&state(&view,w,cx)))??;
     handle.update(cx,|_,w,cx|library(&view,w,cx,"library-drive-cancel"))??;
-    wait!(p,w,app=>!p.drive_snapshot.busy&&p.drive_snapshot.scheduler.dirty!=0&&p.drive_snapshot.progress.contains("Sync paused")&&p.playing);
+    wait!(p,w,app=>!p.drive_snapshot.busy&&p.drive_snapshot.scheduler.dirty!=0&&p.drive_snapshot.progress.contains("Sync paused")
+        &&p.screen==Screen::Library&&!p.playing&&p.native_play_intent.is_none()&&p.native_epoch==cancel_epoch
+        &&p.last_playback_status.as_ref().is_some_and(|s|!s.playing)
+        &&p.library.read(app).drive_state(w)["validFocus"]==true&&p.library.read(app).drive_state(w)["focusedControl"]=="library-drive-sync");
+    handle.update(cx,|_,w,cx|marker(&out.join(format!("cancel-focus-recovered-{suffix}.json")),&state(&view,w,cx)))??;
     handle.update(cx,|_,w,cx|shot(&view,w,cx,&out,&format!("cancelled-{suffix}")))??;
+    let cancel_position=handle.update(cx,|_,_,cx|view.read(cx).position)?;
+    handle.update(cx,|_,w,cx|songs(&view,w,cx,false))??;wait!(p,w,app=>p.screen==Screen::Player);
+    handle.update(cx,|_,w,cx|play(&view,w,cx))??;
+    wait!(p,w,app=>p.screen==Screen::Player&&p.playing&&p.position>cancel_position+0.25&&p.native_epoch==cancel_epoch
+        &&!p.drive_snapshot.busy&&p.drive_snapshot.scheduler.dirty!=0
+        &&p.last_playback_status.as_ref().is_some_and(|s|s.playing));
+    handle.update(cx,|_,w,cx|marker(&out.join(format!("playing-after-cancel-{suffix}.json")),&state(&view,w,cx)))??;
     handshake!(format!("release-cancel-{suffix}"),"release-upload");
     let cancelled_sync=handle.update(cx,|_,_,cx|view.read(cx).drive_snapshot.scheduler.last_sync)?;
+    handle.update(cx,|_,w,cx|songs(&view,w,cx,true))??;
+    wait!(p,w,app=>p.screen==Screen::Library&&!p.playing&&p.native_play_intent.is_none()&&p.native_epoch==cancel_epoch
+        &&p.last_playback_status.as_ref().is_some_and(|s|!s.playing));
     handle.update(cx,|_,w,cx|library(&view,w,cx,"library-drive-sync"))??;clean!();
     wait!(p,w,app=>p.drive_snapshot.scheduler.last_sync>cancelled_sync);
     clean!();
@@ -269,7 +316,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,out:PathBuf,cx:&mut App) {
     handshake!("blocked-proof".to_string(),"remote-proof");
    }
    std::fs::write(out.join("final-project.json"),std::fs::read(project.join("project.json"))?)?;
-   std::fs::write(out.join("result.json"),serde_json::to_vec_pretty(&serde_json::json!({"stage":stage,"sizes":2,"actualOAuth":stage=="exercise","actualUploadSaveFollowup":stage=="exercise","actualCancel":stage=="exercise","actualKeyboardPicker":stage=="exercise","restoredAccountReceipt":stage=="restart","finalSignout":stage=="restart","hidden":true,"muted":true,"noNode":true,"visualParity":"unqualified candidate"}))?)?;
+   std::fs::write(out.join("result.json"),serde_json::to_vec_pretty(&serde_json::json!({"stage":stage,"sizes":2,"actualOAuth":stage=="exercise","actualUploadSaveFollowup":stage=="exercise","actualCancel":stage=="exercise","actualLibraryDriveFocusRecovery":stage=="exercise","actualKeyboardPicker":stage=="exercise","restoredAccountReceipt":stage=="restart","finalSignout":stage=="restart","hidden":true,"muted":true,"noNode":true,"visualParity":"unqualified candidate"}))?)?;
    Ok(())
   }.await;
   if let Err(error)=result {

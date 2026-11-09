@@ -20,6 +20,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import urllib.parse
 import urllib.request
 import wave
@@ -49,7 +50,7 @@ def fingerprint(content):
     return {'size': len(content), 'md5': hashlib.md5(content).hexdigest(), 'mtimeMs': 0}
 
 
-def seed_projects(fixture):
+def seed_projects(fixture, input_root):
     files = [{'id': 'root-singz', 'name': 'SingZ', 'mimeType': fixture.FOLDER, 'parents': ['root']}]
     expected = {}
     graph = (Path(__file__).resolve().parents[3] / 'tests/shared/native-playback-graph.json').read_bytes()
@@ -70,6 +71,11 @@ def seed_projects(fixture):
             names = ('vocals', 'drums', 'bass', 'other', 'guitar', 'piano') if identifier == 'default' else ('vocals',)
             payload.update({f'stems/{stem}.wav': vocals if stem == 'vocals' else encoded_audio(110 + index * 55)
                             for index, stem in enumerate(names)})
+            # Model an already-analyzed saved project with current key/melody
+            # stamps. Otherwise normal missing-key analysis automatically Saves
+            # the default project after native open, changing its downloaded
+            # document before strict byte validation. Auto-analysis stays enabled.
+            settings['key'] = {'pc': 4, 'minor': True, 'detVersion': 2}
             settings['melody'] = {'detVersion': 4, 'hopSec': .025, 'f0': ' '.join(['5700'] * 480)}
         doc = {'version': 2, 'name': name, 'settings': settings, 'foreign': {'restoreFixture': identifier},
                'stemHashes': {path[6:]: fingerprint(data) for path, data in payload.items()}}
@@ -85,6 +91,9 @@ def seed_projects(fixture):
         if any(path.startswith('stems/') for path in payload):
             files.append({'id': f'stems-{identifier}', 'name': 'stems', 'mimeType': fixture.FOLDER, 'parents': [folder]})
         for path, content in payload.items():
+            original = input_root / folder / path
+            original.parent.mkdir(parents=True, exist_ok=True)
+            original.write_bytes(content)
             remote_id = f'file-{identifier}-{Path(path).stem}'
             parent = f'stems-{identifier}' if path.startswith('stems/') else folder
             files.append({'id': remote_id, 'name': Path(path).name, 'parents': [parent],
@@ -94,6 +103,52 @@ def seed_projects(fixture):
                             'files': {path: {'size': len(content), 'sha256': hashlib.sha256(content).hexdigest()}
                                       for path, content in payload.items()}}
     return files, expected
+
+
+def input_checks(identities):
+    checks = {}
+    for name, (path, expected) in identities.items():
+        record = {'path': str(path), 'expectedSha256': expected}
+        try:
+            record['actualSha256'] = shared.sha(path)
+            record['unchanged'] = record['actualSha256'] == expected
+        except BaseException as error:
+            record.update(unchanged=False, error=repr(error))
+        checks[name] = record
+    return checks
+
+
+def preserve_failure(root, out, server, error, identities):
+    """Capture private state while TemporaryDirectory still owns its paths.
+
+    Preservation errors are recorded without replacing the original assertion.
+    Symlinks are retained as evidence and never followed into external paths.
+    """
+    failure = out / 'failure-evidence'
+    failures = []
+    try:
+        failure.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except BaseException as preserve_error:
+        print(f'Failure evidence directory could not be created: {preserve_error!r}', file=sys.stderr)
+        return
+    for name in ('prefs', 'cache', 'library'):
+        source = root / name
+        try:
+            if source.exists():
+                shutil.copytree(source, failure / name, symlinks=True, dirs_exist_ok=True)
+        except BaseException as preserve_error:
+            failures.append({'operation': 'copy-private-state', 'source': name, 'error': repr(preserve_error)})
+    try:
+        (failure / 'remote.json').write_text(json.dumps(server.state.snapshot(), indent=2))
+    except BaseException as preserve_error:
+        failures.append({'operation': 'capture-remote-state', 'error': repr(preserve_error)})
+    report = {'error': repr(error), 'traceback': ''.join(traceback.format_exception(error)),
+              'temporaryRoot': str(root), 'inputChecks': input_checks(identities),
+              'preservationErrors': failures, 'passed': False}
+    try:
+        (failure / 'failure.json').write_text(json.dumps(report, indent=2))
+    except BaseException as preserve_error:
+        print(f'Failure diagnostic could not be written: {preserve_error!r}', file=sys.stderr)
 
 
 class CallbackOnly(urllib.request.HTTPRedirectHandler):
@@ -336,58 +391,71 @@ def main():
     try:
         with tempfile.TemporaryDirectory(prefix='singz-drive-restore-ui-') as temporary:
             root = Path(temporary).resolve()
-            for name in ('prefs', 'library', 'cache', 'tmp'):
-                (root / name).mkdir()
-            files, expected = seed_projects(fixture)
-            server.state.control({'files': files, 'pageSize': 3})
-            initial = remote_files(server.state.snapshot())
-            (out / 'fixture-input.json').write_text(json.dumps({'projects': expected, 'emptyScope': 'Explicit strict reader fixture; native writer remains refused'}, indent=2))
-            catalog = root / 'models.json'
-            catalog.write_text(json.dumps({'flavor': 'linux', 'entries': []}))
-            catalog_hash = shared.sha(catalog)
-            env = {key: value for key, value in os.environ.items() if not key.startswith('SINGZ_')}
-            env.update(SINGZ_MUTE='1', SINGZ_NO_SYNC='1', SINGZ_NO_SYSTEM_ENGINES='1', SINGZ_GPUI_BACKGROUND='1',
-                       SINGZ_GPUI_TEST_NO_CAPTURE='1', SINGZ_GPUI_CONFIG_DIR=str(root / 'prefs'),
-                       SINGZ_GPUI_PROJECTS_ROOT=str(root / 'library'), SINGZ_GPUI_MODEL_FIXTURE=str(catalog),
-                       SINGZ_PACK_DIR=str(root / 'missing-pack'), SINGZ_MODELS_DIR=str(root / 'missing-models'),
-                       SINGZ_LLAMA_SERVER=str(root / 'missing-llama'), SINGZ_CRISPASR=str(root / 'missing-crispasr'),
-                       SINGZ_GDRIVE_CONFIG=json.dumps({'clientId': 'fixture-client', 'clientSecret': 'fixture-secret',
-                                                     'authBase': server.base, 'apiBase': server.base, 'uploadBase': server.base}),
-                       TMPDIR=str(root / 'tmp'), XDG_CACHE_HOME=str(root / 'cache'), HF_HOME=str(root / 'cache/huggingface'),
-                       TORCH_HOME=str(root / 'cache/torch'), PYTHONDONTWRITEBYTECODE='1')
-            results = []
-            for stage in ('online', 'offline'):
-                folder = out / stage
-                folder.mkdir(); (folder / 'acks').mkdir()
-                errors, stop = [], threading.Event()
-                sidecar = None
-                if stage == 'online':
-                    sidecar = threading.Thread(target=run_sidecar, args=(server, folder, root / 'prefs', initial, stop, errors), daemon=True)
-                    sidecar.start()
-                try:
-                    observation = shared.run_observed(app, folder, {**env, 'SINGZ_GPUI_DRIVE_RESTORE_TEST': str(folder),
-                                                                    'SINGZ_GPUI_DRIVE_RESTORE_STAGE': stage}, args.timeout, expect_input_helper=False)
-                finally:
-                    stop.set()
-                    if sidecar:
-                        sidecar.join(timeout=10)
-                        assert not sidecar.is_alive(), 'Fixture sidecar did not retire'
-                assert not errors, errors
-                result = validate_output(folder, expected, stage == 'offline')
-                results.append({'stage': stage, 'captureCount': result['captureCount'], 'resourceSamples': len(observation['samples'])})
-                if stage == 'online':
-                    remote = server.state.snapshot()
-                    assert_read_only(remote, initial)
-                    (out / 'remote-after-online.json').write_text(json.dumps(remote, indent=2))
-                    server.stop(); worker.join(timeout=5); server.server_close(); server_closed = True
-                    assert not worker.is_alive(), 'Loopback fixture did not retire before offline restart'
-            assert shared.sha(app) == app_hash and shared.sha(app.with_name('singz-gpui-audio')) == helper_hash and shared.sha(catalog) == catalog_hash
-            cache = root / 'prefs/gdrive/downloads'
-            shutil.copytree(cache, out / 'verified-native-cache')
-            (out / 'fixture.json').write_text(json.dumps({'passed': True, 'applicationSha256': app_hash, 'helperSha256': helper_hash,
-                'modelCatalogSha256': catalog_hash, 'stages': results, 'noNode': True, 'physicalInput': False,
-                'remoteReadOnly': True, 'freshProcessOfflineRestart': True, 'liveFps': 'unmeasured',
-                'scope': 'Read-only browser and verified native cache; strict empty is reader fixture, native empty writer remains unqualified; production visual parity unqualified'}, indent=2))
+            identities = {'application': (app, app_hash),
+                          'nativeHelper': (app.with_name('singz-gpui-audio'), helper_hash)}
+            try:
+                for name in ('prefs', 'library', 'cache', 'tmp'):
+                    (root / name).mkdir()
+                files, expected = seed_projects(fixture, out / 'seeded-projects')
+                server.state.control({'files': files, 'pageSize': 3})
+                initial = remote_files(server.state.snapshot())
+                (out / 'fixture-input.json').write_text(json.dumps({'projects': expected, 'emptyScope': 'Explicit strict reader fixture; native writer remains refused'}, indent=2))
+                catalog = root / 'models.json'
+                catalog.write_text(json.dumps({'flavor': 'linux', 'entries': []}))
+                catalog_hash = shared.sha(catalog)
+                identities['modelCatalog'] = (catalog, catalog_hash)
+                for path in sorted((out / 'seeded-projects').rglob('*')):
+                    if path.is_file():
+                        identities['seed/' + path.relative_to(out / 'seeded-projects').as_posix()] = (path, shared.sha(path))
+                (out / 'input-identities.json').write_text(json.dumps(input_checks(identities), indent=2))
+                env = {key: value for key, value in os.environ.items() if not key.startswith('SINGZ_')}
+                env.update(SINGZ_MUTE='1', SINGZ_NO_SYNC='1', SINGZ_NO_SYSTEM_ENGINES='1', SINGZ_GPUI_BACKGROUND='1',
+                           SINGZ_GPUI_TEST_NO_CAPTURE='1', SINGZ_GPUI_CONFIG_DIR=str(root / 'prefs'),
+                           SINGZ_GPUI_PROJECTS_ROOT=str(root / 'library'), SINGZ_GPUI_MODEL_FIXTURE=str(catalog),
+                           SINGZ_PACK_DIR=str(root / 'missing-pack'), SINGZ_MODELS_DIR=str(root / 'missing-models'),
+                           SINGZ_LLAMA_SERVER=str(root / 'missing-llama'), SINGZ_CRISPASR=str(root / 'missing-crispasr'),
+                           SINGZ_GDRIVE_CONFIG=json.dumps({'clientId': 'fixture-client', 'clientSecret': 'fixture-secret',
+                                                         'authBase': server.base, 'apiBase': server.base, 'uploadBase': server.base}),
+                           TMPDIR=str(root / 'tmp'), XDG_CACHE_HOME=str(root / 'cache'), HF_HOME=str(root / 'cache/huggingface'),
+                           TORCH_HOME=str(root / 'cache/torch'), PYTHONDONTWRITEBYTECODE='1')
+                results = []
+                for stage in ('online', 'offline'):
+                    folder = out / stage
+                    folder.mkdir(); (folder / 'acks').mkdir()
+                    errors, stop = [], threading.Event()
+                    sidecar = None
+                    if stage == 'online':
+                        sidecar = threading.Thread(target=run_sidecar, args=(server, folder, root / 'prefs', initial, stop, errors), daemon=True)
+                        sidecar.start()
+                    try:
+                        observation = shared.run_observed(app, folder, {**env, 'SINGZ_GPUI_DRIVE_RESTORE_TEST': str(folder),
+                                                                        'SINGZ_GPUI_DRIVE_RESTORE_STAGE': stage}, args.timeout, expect_input_helper=False)
+                    finally:
+                        stop.set()
+                        if sidecar:
+                            sidecar.join(timeout=10)
+                            assert not sidecar.is_alive(), 'Fixture sidecar did not retire'
+                    assert not errors, errors
+                    result = validate_output(folder, expected, stage == 'offline')
+                    results.append({'stage': stage, 'captureCount': result['captureCount'], 'resourceSamples': len(observation['samples'])})
+                    if stage == 'online':
+                        remote = server.state.snapshot()
+                        assert_read_only(remote, initial)
+                        (out / 'remote-after-online.json').write_text(json.dumps(remote, indent=2))
+                        server.stop(); worker.join(timeout=5); server.server_close(); server_closed = True
+                        assert not worker.is_alive(), 'Loopback fixture did not retire before offline restart'
+                final_checks = input_checks(identities)
+                (out / 'final-input-checks.json').write_text(json.dumps(final_checks, indent=2))
+                assert all(record['unchanged'] for record in final_checks.values()), final_checks
+                cache = root / 'prefs/gdrive/downloads'
+                shutil.copytree(cache, out / 'verified-native-cache')
+                (out / 'fixture.json').write_text(json.dumps({'passed': True, 'applicationSha256': app_hash, 'helperSha256': helper_hash,
+                    'modelCatalogSha256': catalog_hash, 'stages': results, 'noNode': True, 'physicalInput': False,
+                    'remoteReadOnly': True, 'freshProcessOfflineRestart': True, 'liveFps': 'unmeasured',
+                    'scope': 'Read-only browser and verified native cache; strict empty is reader fixture, native empty writer remains unqualified; production visual parity unqualified'}, indent=2))
+            except BaseException as error:
+                preserve_failure(root, out, server, error, identities)
+                raise
     finally:
         if not server_closed:
             server.stop(); worker.join(timeout=5); server.server_close()
