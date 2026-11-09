@@ -19,10 +19,10 @@ export function usePlatform(
   const operation = useRef<PlatformCommand | null>(null)
   const [busy, setBusy] = useState<PlatformCommand | null>(null)
 
-  const refresh = useCallback(async (): Promise<BoxPlatformSnapshot | null> => {
+  const load = useCallback(async (background: boolean): Promise<BoxPlatformSnapshot | null> => {
     if (operation.current) return null
     const current = service.current
-    const token = current.begin()
+    const token = current.begin({ background })
     const api = getBoxApi()
     if (!api) {
       current.fail(token, tJourney('journey.noService'))
@@ -41,15 +41,16 @@ export function usePlatform(
       return null
     }
   }, [])
+  const refresh = useCallback(() => load(false), [load])
 
   useEffect(() => {
     if (!active) return
-    void refresh()
+    void load(false)
     const timer = setInterval(() => {
-      if (visible() && !document.hidden) void refresh()
+      if (visible() && !document.hidden) void load(true)
     }, 3000)
     return () => clearInterval(timer)
-  }, [active, refresh, visible])
+  }, [active, load, visible])
 
   const run = useCallback(async (command: PlatformCommand): Promise<boolean> => {
     if (operation.current) return false

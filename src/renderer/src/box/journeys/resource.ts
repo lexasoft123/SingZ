@@ -8,7 +8,7 @@ export interface Resource<T> {
 }
 
 export type ResourceAction<T> =
-  | { type: 'started'; generation: number }
+  | { type: 'started'; generation: number; background?: boolean }
   | { type: 'succeeded'; generation: number; value: T }
   | { type: 'failed'; generation: number; error: string }
 
@@ -22,7 +22,11 @@ export function resourceReducer<T>(state: Resource<T>, action: ResourceAction<T>
       if (action.generation <= state.generation) return state
       return {
         value: state.value,
-        loading: true,
+        // A background poll never changes `loading`: pages disable controls on
+        // it (Refresh, Retry, language…), and disabling the focused control makes
+        // the remote's focus jump back to the page's primary action every poll —
+        // with data on screen or after a failed first load alike.
+        loading: action.background === true ? state.loading : true,
         error: null,
         generation: action.generation
       }
@@ -55,9 +59,9 @@ export function useJourneyResource<T>() {
 
   return {
     state,
-    begin(): number {
+    begin(options: { background?: boolean } = {}): number {
       const next = ++generation.current
-      dispatch({ type: 'started', generation: next })
+      dispatch({ type: 'started', generation: next, background: options.background })
       return next
     },
     current(token: number): boolean {

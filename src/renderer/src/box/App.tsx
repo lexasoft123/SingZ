@@ -23,6 +23,7 @@ import { t } from './i18n'
 import { tSettings } from './settings-i18n'
 import { BoxSettingsNavigator, type BoxRoute } from './settings-navigation'
 import { SongDetails } from './SongDetails'
+import { StartupOverlay } from './StartupOverlay'
 import { SwitchDialog } from './SwitchDialog'
 import { BoxTransport } from './transport'
 import { cancelPreviewStart } from './preview-start'
@@ -989,10 +990,7 @@ export default function BoxApp(): React.JSX.Element {
           {!queueSnapshot.loaded && !queueSnapshot.loading && <button type="button" onClick={() => { void hydrate(false) }}>{t('app.retry')}</button>}
         </div>}
       </div>
-      {!hydrated && <div className="box-startup" data-surface="startup" role="status" aria-live="polite">
-        <h1>{t('box.catalog.loadingTitle')}</h1>
-        <p>{t('box.catalog.loadingBody')}</p>
-      </div>}
+      <StartupOverlay hydrated={hydrated} failed={metronomeError !== null} />
     </div>
   </div>
 }

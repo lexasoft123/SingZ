@@ -146,6 +146,52 @@ test('Box installation identity rejects the former spaced installation path', as
   )
 })
 
+const { getMainFileMatchers } = require(join(repository, 'node_modules/app-builder-lib/out/fileMatcher.js'))
+
+function appFilter(config) {
+  const info = {
+    config,
+    projectDir: repository,
+    buildResourcesDir: config.directories.buildResources,
+    isPrepackedAppAsar: false,
+    debugLogger: { isEnabled: false }
+  }
+  const [matcher] = getMainFileMatchers(
+    repository, '/app', value => value, config.linux, { info },
+    resolve(repository, config.directories.output), false
+  )
+  const filter = matcher.createFilter()
+  return relative => filter(join(repository, relative), { isDirectory: () => false })
+}
+
+const desktopOutputs = [
+  'dist/SingZ-1.0.0-linux-amd64.deb',
+  'dist/latest-linux.yml',
+  'dist/SHA256SUMS',
+  'dist/linux-unpacked/singz',
+  'dist/linux-arm64-unpacked/resources/app.asar'
+]
+
+function withoutDistRule(config) {
+  return {
+    ...config,
+    files: config.files.map(file => ({ ...file, filter: (file.filter || []).filter(rule => !rule.startsWith('!dist')) }))
+  }
+}
+
+test('neither package embeds Desktop build output left in dist/', async () => {
+  for (const filename of ['electron-builder.box.yml', 'electron-builder.yml']) {
+    const included = appFilter(await loadConfig(filename))
+    for (const output of desktopOutputs) assert.equal(included(output), false, `${filename} packages ${output}`)
+    assert.equal(included('out/main/index.js'), true, `${filename} drops the app bundle`)
+  }
+})
+
+test('Box asar filter rejects a deliberately removed dist exclusion', async () => {
+  const included = appFilter(withoutDistRule(await loadConfig('electron-builder.box.yml')))
+  assert.equal(included('dist/SingZ-1.0.0-linux-amd64.deb'), true)
+})
+
 test('Box audio service and launcher use the lowercase installation directory', () => {
   const service = readFileSync(join(repository, 'resources/linux/singz-box-audio.service'), 'utf8')
   assert.match(service, /^ExecStart=\/opt\/singz-box\/singz-box --box-audio-host --ozone-platform=headless$/m)

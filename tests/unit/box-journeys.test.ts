@@ -151,6 +151,32 @@ describe('JourneyHub stale results and backend data guards', () => {
     expect(resourceReducer(live, { type: 'failed', generation: 1, error: 'stale error' })).toBe(live)
   })
 
+  it('keeps controls enabled during a background poll over existing data so remote focus stays put', () => {
+    const loaded = resourceReducer(
+      resourceReducer(initialResource<string>(), { type: 'started', generation: 1 }),
+      { type: 'succeeded', generation: 1, value: 'snapshot' }
+    )
+    const polling = resourceReducer(loaded, { type: 'started', generation: 2, background: true })
+    expect(polling.loading).toBe(false)
+    expect(polling.value).toBe('snapshot')
+    expect(resourceReducer(polling, { type: 'succeeded', generation: 2, value: 'next' })).toMatchObject({ loading: false, value: 'next' })
+    // An explicit refresh still reports loading.
+    expect(resourceReducer(loaded, { type: 'started', generation: 2 }).loading).toBe(true)
+  })
+
+  it('keeps Retry enabled while background polls retry a failed first load', () => {
+    const failed = resourceReducer(
+      resourceReducer(initialResource<string>(), { type: 'started', generation: 1 }),
+      { type: 'failed', generation: 1, error: 'service unavailable' }
+    )
+    const polling = resourceReducer(failed, { type: 'started', generation: 2, background: true })
+    expect(polling.loading).toBe(false)
+    expect(resourceReducer(polling, { type: 'failed', generation: 2, error: 'still down' }).loading).toBe(false)
+    // A first load that is still in flight keeps reporting loading under a poll.
+    const pending = resourceReducer(initialResource<string>(), { type: 'started', generation: 1 })
+    expect(resourceReducer(pending, { type: 'started', generation: 2, background: true }).loading).toBe(true)
+  })
+
   it('invalidates request epochs explicitly on teardown', () => {
     const epoch = new RequestEpoch()
     const first = epoch.begin()

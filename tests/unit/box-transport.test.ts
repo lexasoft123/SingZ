@@ -418,6 +418,52 @@ describe('BoxTransport ownership and failure regressions', () => {
     expect(engine.playing).toBe(true)
     expect(engine.loaded).toHaveLength(1)
   })
+
+  async function expectActiveSongControllable(transport: BoxTransport, engine: FakeEngine): Promise<void> {
+    Object.assign(engine, { pauseAccepted: async () => { engine.playing = false } })
+    await transport.controllerPlayPause()
+    expect(engine.playing).toBe(false)
+    await transport.controllerPlay('/a')
+    expect(engine.playing).toBe(true)
+    await transport.controllerMix({ type: 'volume', target: 'drums', value: 0.3 })
+    transport.setVolume('bass', 0.2)
+    transport.setMasterVolume(0.6)
+    await transport.flushPersistence()
+    const tracks = transport.getSnapshot().tracks
+    expect(tracks.find(track => track.id === 'drums')?.volume).toBe(0.3)
+    expect(tracks.find(track => track.id === 'bass')?.volume).toBe(0.2)
+    expect(engine.masterVolume).toBe(0.6)
+  }
+
+  it('keeps the still-active song controllable after a replacement open fails', async () => {
+    const { api } = host()
+    vi.mocked(api.getCachedLyrics).mockImplementation(async path => path.startsWith('/b/')
+      ? { ok: true as const, cached: false as const }
+      : lyricResult)
+    const { transport, engine } = makeTransport(api)
+    await transport.open(item('/a', 'Current A'))
+    transport.toggle()
+    expect(await transport.open(item('/b', 'Missing B'))).toBe(false)
+    expect(transport.getSnapshot().active?.item.dir).toBe('/a')
+    await expectActiveSongControllable(transport, engine)
+  })
+
+  it('keeps the still-active song controllable after a replacement open is cancelled', async () => {
+    const slow = deferred<unknown>()
+    const { api } = host({ b: () => slow.promise })
+    const { transport, engine } = makeTransport(api)
+    await transport.open(item('/a', 'Current A'))
+    transport.toggle()
+    const opening = transport.open(item('/b', 'Cancelled B'))
+    expect(transport.cancelOpen()).toBe(true)
+    await expectActiveSongControllable(transport, engine)
+    slow.resolve({ ok: true, path: '/b/original.wav', name: 'Cancelled B', size: 0, project: project('/b') })
+    expect(await opening).toBe(false)
+    expect(transport.getSnapshot().active?.item.dir).toBe('/a')
+    transport.setVolume('other', 0.4)
+    await transport.flushPersistence()
+    expect(transport.getSnapshot().tracks.find(track => track.id === 'other')?.volume).toBe(0.4)
+  })
 })
 
 describe('Box output routing', () => {

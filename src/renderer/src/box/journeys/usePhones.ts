@@ -12,10 +12,10 @@ export function usePhones(active: boolean, visible: () => boolean) {
   const [busy, setBusy] = useState<string | null>(null)
   const [updated, setUpdated] = useState(false)
 
-  const refresh = useCallback(async (): Promise<BoxPhoneState | null> => {
+  const load = useCallback(async (background: boolean): Promise<BoxPhoneState | null> => {
     if (operation.current) return null
     const current = service.current
-    const token = current.begin()
+    const token = current.begin({ background })
     const api = getBoxApi()
     if (!api) {
       current.fail(token, tJourney('journey.noService'))
@@ -34,15 +34,16 @@ export function usePhones(active: boolean, visible: () => boolean) {
       return null
     }
   }, [])
+  const refresh = useCallback(() => load(false), [load])
 
   useEffect(() => {
     if (!active) return
-    void refresh()
+    void load(false)
     const timer = setInterval(() => {
-      if (visible() && !document.hidden) void refresh()
+      if (visible() && !document.hidden) void load(true)
     }, 2500)
     return () => clearInterval(timer)
-  }, [active, refresh, visible])
+  }, [active, load, visible])
 
   const run = useCallback(async (
     label: string,

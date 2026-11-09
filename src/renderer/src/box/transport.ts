@@ -115,6 +115,12 @@ export class BoxTransport {
   private lastError: string | null = null
   private generation = 0
   private activeGeneration = 0
+  /**
+   * The open that currently supersedes the active song's controls. Unlike
+   * `generation`, it is released when that open fails or is cancelled, so the
+   * still-active song becomes controllable again.
+   */
+  private pendingOpen: number | null = null
   private disposed = false
   private tearingDown = false
   private teardownPromise: Promise<void> | null = null
@@ -244,6 +250,11 @@ export class BoxTransport {
 
   private current(generation: number): boolean {
     return !this.disposed && !this.tearingDown && generation === this.generation
+  }
+
+  /** The active song still owns controls: no teardown and no replacement open in flight. */
+  private ownsActive(owner: number): boolean {
+    return !this.disposed && !this.tearingDown && this.pendingOpen === null && this.activeGeneration === owner
   }
 
   private enqueueEngine<T>(operation: () => Promise<T>): Promise<T> {
@@ -402,6 +413,8 @@ export class BoxTransport {
     if (this.api.boxAudioPersistent !== true) throw new Error('Persistent Box audio is not configured.')
     if (this.active) throw new Error('A song already owns this transport.')
     const generation = ++this.generation
+    // Restore supersedes any pending open; its controls must not wait for that open to settle.
+    this.pendingOpen = null
     this.loadingName = null
     this.lastError = null
     this.committing = true
@@ -520,6 +533,7 @@ export class BoxTransport {
   async open(item: ProjectListItem): Promise<boolean> {
     if (this.disposed || this.tearingDown) return false
     const generation = ++this.generation
+    this.pendingOpen = generation
     this.loadingName = item.name
     this.lastError = null
     this.publish()
@@ -647,12 +661,15 @@ export class BoxTransport {
       this.lastError = error instanceof Error ? error.message : String(error)
       this.publish()
       return false
+    } finally {
+      if (this.pendingOpen === generation) this.pendingOpen = null
     }
   }
 
   cancelOpen(): boolean {
     if (this.loadingName === null || this.committing) return false
     this.generation++
+    this.pendingOpen = null
     this.loadingName = null
     this.publish()
     return true
@@ -674,7 +691,7 @@ export class BoxTransport {
     const owner = this.activeGeneration
     const ownsSong = (): boolean => this.activeGeneration === owner && this.active?.item.dir === expectedDir &&
       !this.tearingDown && !this.disposed
-    const current = (): boolean => ownsSong() && this.generation === owner && isCurrent()
+    const current = (): boolean => ownsSong() && this.ownsActive(owner) && isCurrent()
     const ready = (): boolean => this.active?.lyrics.status === 'ready' && this.active.lyrics.lines.length > 0
     if (!current() || !ready()) throw new Error('The preview song changed before playback was started.')
     await this.enqueueEngine(async () => {
@@ -707,13 +724,12 @@ export class BoxTransport {
     if (this.metronomeBlocked) {
       throw new Error('Playback is blocked until the metronome policy is applied.')
     }
-    if (this.tearingDown || this.disposed || this.generation !== owner) {
+    if (!this.ownsActive(owner)) {
       throw new Error('The current song changed before playback was controlled.')
     }
     const dir = active.item.dir
     await this.enqueueEngine(async () => {
-      const ownsEngine = (): boolean => this.activeGeneration === owner && this.active?.item.dir === dir &&
-        !this.tearingDown && !this.disposed && this.generation === owner
+      const ownsEngine = (): boolean => this.ownsActive(owner) && this.active?.item.dir === dir
       if (!ownsEngine()) throw new Error('The current song changed before playback was controlled.')
       if (this.metronomeBlocked) throw new Error('Playback is blocked until the metronome policy is applied.')
       const desiredPlaying = !this.engine.playing
@@ -762,7 +778,7 @@ export class BoxTransport {
 
   async controllerMix(command: { type: 'volume'; target: string; value: number } | { type: 'mute' | 'solo'; target: string; value: boolean }): Promise<void> {
     const active = this.active
-    if (!active || this.tearingDown || this.disposed || this.generation !== this.activeGeneration) {
+    if (!active || !this.ownsActive(this.activeGeneration)) {
       throw new Error('No current song can accept this mixer command.')
     }
     const master = command.target === 'master'
@@ -792,7 +808,7 @@ export class BoxTransport {
   private recordControl(accepted: () => Promise<void>, awaitReceipt = false): Promise<void> {
     const active = this.active
     const owner = this.activeGeneration
-    if (!active || this.tearingDown || this.disposed || this.generation !== owner) {
+    if (!active || !this.ownsActive(owner)) {
       return awaitReceipt ? Promise.reject(new Error('The current song changed before the mixer command ran.')) : Promise.resolve()
     }
     const dir = active.item.dir

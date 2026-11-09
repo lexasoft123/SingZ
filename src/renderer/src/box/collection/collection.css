@@ -1,7 +1,9 @@
 .box-safe-surface { position: absolute; width: 1600px; height: 900px; transform-origin: top left; }
 .box-hub-slot { position: absolute; inset: 64px 0 0; }
 .box-hub-slot[hidden] { display: none; }
-.box-startup { position: absolute; inset: 0; z-index: 100; display: grid; place-content: center; padding: 80px; background: var(--sz-bg); text-align: center; }
+/* Above the policy-startup status (40), below the retained-playback dialog (kit scrim 70).
+   A startup failure unmounts this overlay so its Retry is visible. */
+.box-startup { position: absolute; inset: 0; z-index: 50; display: grid; place-content: center; padding: 80px; background: var(--sz-bg); text-align: center; }
 .box-startup h1 { margin: 0 0 16px; font: 700 32px var(--sz-font-display); }
 .box-startup p { margin: 0; color: var(--sz-dim); font-size: 18px; }
 .box-initial-loading { height: 900px; display: grid; place-content: center; gap: 12px; text-align: center; }
