@@ -6,6 +6,13 @@ controls are implemented as a first slice; see `NATIVE_INTEGRATION.md`. Full vis
 and the remaining backend features remain separate.
 Common native controls live in sibling `singz-ui/gpui`.
 
+Training feedback follow-up (2026-11-09): completed-answer reveal, retained
+acknowledgement and task-specific Summary copy now use native presentation and
+a shared UIKit banner. Hidden EN/RU checks pass at both sizes with real native
+replay/CREPE scoring. Header activation and title-pencil keyboard access are
+covered. See [feedback review](TRAINING_FEEDBACK_REVIEW.md) for exact evidence
+and limits; [acceptance gaps](DESKTOP_ACCEPTANCE_GAPS.md) tracks remaining work.
+
 Song-preparation keyboard follow-up (2026-11-09): all four loaded-song recipe
 choices now use shared UIKit activation and explicit focus order. The hidden
 native two-size journey passes 16 checks, 16 captures and ten lifecycle receipts,

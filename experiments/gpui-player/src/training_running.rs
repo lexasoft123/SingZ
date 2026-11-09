@@ -6,6 +6,24 @@ use crate::{
     training_session::Answer,
 };
 impl TrainingScreen {
+    fn result_acknowledgement(&self, run:&Snapshot, compact:bool) -> Option<Stateful<Div>> {
+        let acknowledgement=run.acknowledgement.as_ref()?;
+        let copy=labels::feedback_copy(&acknowledgement.response);
+        let answer=labels::identify_answer_reveal(&acknowledgement.prompt).map(SharedString::from);
+        Some(self.probe("training-result-ack",training_result_acknowledgement(copy.mark,copy.heading,copy.detail,answer,compact).id("training-result-ack")))
+    }
+    /// Read-only projection of the same presentation helpers used below. It is
+    /// intentionally derived from completed receipts rather than current answers.
+    #[cfg(feature="ui-tests")]
+    pub fn feedback_ui_state(&self)->serde_json::Value {
+        let Some(run)=&self.run else { return serde_json::Value::Null; };
+        let reveal=run.prompt.task!=Task::Identify || run.phase==Phase::Feedback;
+        let acknowledgement=run.acknowledgement.as_ref().map(|ack|{
+            let copy=labels::feedback_copy(&ack.response);
+            serde_json::json!({"promptIndex":ack.prompt.index,"kind":ack.prompt.kind,"heading":copy.heading,"detail":copy.detail,"answer":labels::identify_answer_reveal(&ack.prompt),"mark":copy.mark,"good":copy.good,"announce":run.phase==Phase::Feedback})
+        });
+        serde_json::json!({"phase":format!("{:?}",run.phase),"currentPromptIndex":run.prompt.index,"currentAnswerHidden":run.phase!=Phase::Summary && !reveal,"currentTargetText":(run.phase!=Phase::Summary).then(||if reveal{run.prompt.targets[run.target.min(run.prompt.targets.len()-1)].note_name.clone()}else{"?".into()}),"currentSequenceText":(run.phase!=Phase::Summary && run.prompt.targets.len()>1).then(||run.prompt.targets.iter().map(|target|if reveal{target.note_name.clone()}else{"?".into()}).collect::<Vec<_>>()),"acknowledgement":acknowledgement,"summary":(run.phase==Phase::Summary).then(||{let copy=labels::summary_copy(run);serde_json::json!({"heading":copy.heading,"description":copy.description,"pitchCopy":copy.pitch_copy,"averageSignedCents":run.average_signed_cents})})})
+    }
     fn run_control_enabled(&self, id: &str) -> bool {
         let Some(run) = &self.run else { return false; };
         match id {
@@ -225,7 +243,7 @@ impl TrainingScreen {
             (height * 0.013).clamp(6., 12.)
         };
         if run.phase == Phase::Summary {
-            return self.summary(run, cx);
+            return self.summary(run, compact, cx);
         }
         let interval_sets = run.prompt.kind == Kind::Interval && run.prompt.task == Task::Imitate;
         let progress = if interval_sets {
@@ -313,9 +331,17 @@ impl TrainingScreen {
                 Kind::Mixed => unreachable!(),
             }
         };
-        let target_stage =
-            div()
+        let target_stage = self.probe("training-run-target-stage",
+            div().id("training-run-target-stage")
                 .flex_none()
+                // A retained result adds a real sibling to the live runway.
+                // Let the target's surrounding space consume the remaining
+                // budget before the fixed runway/guidance can reach the dock.
+                // Keep the source normal/compact minimum and all font sizes.
+                .when(run.acknowledgement.is_some() && run.prompt.task != Task::Identify
+                    && matches!(run.phase,Phase::Respond|Phase::Completing), |target| {
+                    target.flex_shrink_1().min_h(px(if compact {138.} else {176.}))
+                })
                 .h(px(if compact {
                     138.
                 } else {
@@ -344,8 +370,8 @@ impl TrainingScreen {
                         )
                         .line_height(size * 0.86),
                     ),
-                );
-        let mut stage = div()
+                ));
+        let mut stage = self.probe("training-run-stage",div().id("training-run-stage"))
             .flex_1()
             .min_h_0()
             .w_full()
@@ -361,7 +387,8 @@ impl TrainingScreen {
             .text_center()
             .flex()
             .flex_col()
-            .child(target_stage);
+            .child(target_stage)
+            .children(self.result_acknowledgement(run,compact));
         stage = match run.phase {
             Phase::Preparing | Phase::Paused => stage.child(
                 div()
@@ -482,7 +509,7 @@ impl TrainingScreen {
                                     window,
                                 )),
                         )
-                        .child(
+                        .child(self.probe("training-run-runway",
                             training_runway(
                                 cents,
                                 run.tolerance as f32,
@@ -492,8 +519,8 @@ impl TrainingScreen {
                                     (height * 0.14).clamp(88., 112.)
                                 },
                             )
-                            .when(compact, |d| d.rounded(px(20.))),
-                        )
+                            .when(compact, |d| d.rounded(px(20.))).id("training-run-runway"),
+                        ))
                         .child(
                             div()
                                 .min_h(px(if compact {
@@ -576,31 +603,7 @@ impl TrainingScreen {
                         ),
                 )
             }
-            Phase::Feedback => stage.child(
-                training_banner()
-                    .mt(px(24.))
-                    .child(Self::heading(
-                        run.outcomes
-                            .last()
-                            .map(|value| outcome(value))
-                            .unwrap_or_default(),
-                        24.,
-                    ))
-                    .child(Self::text(
-                        match run.outcomes.last().map(String::as_str) {
-                            Some("Skipped") => t("training.feedback.skipped.detail"),
-                            Some("Correct") => t("training.feedback.identifyCorrect.detail"),
-                            Some("On target") => t("training.feedback.onTarget.detail"),
-                            Some("Close") => t("training.feedback.close.detail"),
-                            _ if run.prompt.task == Task::Identify => {
-                                t("training.feedback.identifyWrong.detail")
-                            }
-                            _ => t("training.feedback.wrong.detail"),
-                        },
-                        14.,
-                        DIM,
-                    )),
-            ),
+            Phase::Feedback => stage,
             Phase::Summary => unreachable!(),
         };
         div()
@@ -754,7 +757,8 @@ impl TrainingScreen {
             .child(Self::text(t("training.session.identify.legend"), 14., DIM).mb(px(12.)))
             .child(div().flex().flex_wrap().gap(px(7.)).children(buttons))
     }
-    fn summary(&self, run: &Snapshot, cx: &mut Context<Self>) -> AnyElement {
+    fn summary(&self, run: &Snapshot, compact:bool, cx: &mut Context<Self>) -> AnyElement {
+        let copy=labels::summary_copy(run);
         div()
             .id("training-summary-scroll")
             .track_scroll(&self.summary_scroll)
@@ -766,24 +770,18 @@ impl TrainingScreen {
                 div()
                     .max_w(px(1040.))
                     .mx_auto()
-                    .p(px(32.))
-                    .child(training_eyebrow(t("training.summary.eyebrow")))
+                    .px(px(42.))
+                    .pt(px(30.))
+                    .pb(px(42.))
                     .child(
-                        Self::heading(
-                            tv(
-                                "training.summary.headingTemplate",
-                                &[
-                                    ("landed", (run.correct + run.close).to_string()),
-                                    ("attempts", run.attempts.to_string()),
-                                ],
-                            ),
-                            42.,
-                        )
-                        .mt(px(12.)),
+                        div().mb(px(26.))
+                            .child(training_eyebrow(t("training.summary.eyebrow")))
+                            .child(Self::heading(copy.heading,34.).mt(px(5.)).mb(px(6.)))
+                            .child(Self::text(copy.description,15.,DIM).line_height(px(23.25))),
                     )
-                    .child(Self::text("Your completed exercise results", 16., DIM).mt(px(12.)))
+                    .children(self.result_acknowledgement(run,compact))
                     .child(
-                        training_summary_strip().mt(px(28.)).children(
+                        training_summary_strip().children(
                             [
                                 (
                                     t("training.session.pitch.onTarget"),
@@ -818,15 +816,18 @@ impl TrainingScreen {
                     )
                     .child(
                         div()
-                            .mt(px(24.))
+                            .my(px(22.))
+                            .border_t_1()
+                            .border_color(rgba(LINE))
                             .children(run.outcomes.iter().enumerate().map(|(i, outcome)| {
                                 div()
                                     .flex()
-                                    .gap(px(16.))
-                                    .py(px(12.))
+                                    .gap(px(12.))
+                                    .min_h(px(48.))
+                                    .items_center()
                                     .border_b_1()
                                     .border_color(rgba(LINE))
-                                    .child(Self::text((i + 1).to_string(), 14., DIM))
+                                    .child(Self::text((i + 1).to_string(), 12., DIM).font_family(MONO_400).w(px(34.)).flex_none())
                                     .child(
                                         Self::text(
                                             run.outcome_prompts
@@ -838,19 +839,18 @@ impl TrainingScreen {
                                                         &[("n", (i + 1).to_string())],
                                                     )
                                                 }),
-                                            14.,
-                                            TEXT,
+                                            12.,
+                                            DIM,
                                         )
                                         .flex_1(),
                                     )
-                                    .child(Self::text(super::outcome(outcome), 14., ACCENT))
+                                    .child(Self::text(super::outcome(outcome), 12., TEXT).font_family(DISPLAY_650))
                             })),
                     )
                     .child(
                         div()
                             .flex()
-                            .gap(px(12.))
-                            .mt(px(28.))
+                            .gap(px(9.))
                             .child(
                                 self.probe(
                                     "training-run-restart",

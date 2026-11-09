@@ -6,7 +6,7 @@ use gpui_kit::*;
 use singz_uikit::tokens::{ACCENT, DIM, FAINT, TEXT};
 use singz_uikit::{
     glow, persistent_monitor_control, persistent_monitor_status, segmented_nav, segmented_tab,
-    small_ghost_pill_enabled, status_chip, text_link,
+    settings_control_with_focus, small_ghost_pill_enabled, status_chip, text_link,
 };
 
 #[derive(Clone)]
@@ -66,13 +66,13 @@ impl Header {
         });
         Self {
             guides: Default::default(),
-            controls: ["header-language","header-help","header-settings","header-log","header-save","header-import","header-projects","header-catalog","header-songs","header-training","header-version","header-engine"].into_iter().map(|id|(id,cx.focus_handle().tab_stop(true))).collect(),
+            controls: ["header-language","header-help","header-settings","header-log","header-save","header-import","header-projects","header-catalog","header-songs","header-training","header-version","header-engine","header-rename"].into_iter().map(|id|(id,cx.focus_handle().tab_stop(true))).collect(),
             output_label: "System default output".into(),
             monitor_label: None,
             monitor_stopping: false,
             monitor_attention: false,
-            monitor_status_focus: cx.focus_handle(),
-            monitor_stop_focus: cx.focus_handle(),
+            monitor_status_focus: cx.focus_handle().tab_stop(true),
+            monitor_stop_focus: cx.focus_handle().tab_stop(true),
             native_audio_ready: false,
             save_status: 0,
             save_enabled: true,
@@ -142,15 +142,25 @@ impl Header {
         self.title_input.clone()
     }
     fn rename_button(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let button = text_link("header-rename", "✎")
+        let weak=cx.entity().downgrade();
+        let button = settings_control_with_focus(text_link("header-rename", "✎")
             .text_size(px(13.))
             .font_family("SingZ Display 400")
             .line_height(px(13.))
             .px(px(5.))
             .py(px(3.))
             .rounded(px(7.))
-            .text_color(rgb(FAINT))
-            .on_click(cx.listener(|s, _, w, cx| s.begin_title(w, cx)));
+            .text_color(rgb(FAINT)),
+            self.controls["header-rename"].clone(),
+            self.loaded && !self.editing && self.rename_enabled,
+            move|window,cx| {
+                let _=weak.update(cx,|header,cx| {
+                    if header.loaded && !header.editing && header.rename_enabled {
+                        header.begin_title(window,cx);
+                    }
+                });
+            },
+        );
         #[cfg(feature = "ui-tests")]
         {
             let hit = self.rename_bounds.clone();
@@ -175,6 +185,8 @@ impl Header {
     #[cfg(feature="ui-tests")]
     pub fn focused_control(&self, window:&Window)->Option<String> {
         self.controls.iter().find_map(|(id,focus)|focus.is_focused(window).then(||(*id).to_owned()))
+            .or_else(||self.monitor_status_focus.is_focused(window).then(||"header-monitor-status".into()))
+            .or_else(||self.monitor_stop_focus.is_focused(window).then(||"header-monitor-stop".into()))
     }
     pub fn set_engine(&mut self, ready: bool, cx: &mut Context<Self>) {
         if self.engine_ready != ready {
@@ -248,42 +260,9 @@ impl Header {
             self.monitor_attention,
             !self.monitor_stopping,
         );
-        let status = control
-            .status
-            .track_focus(&self.monitor_status_focus)
-            .tab_index(0)
-            .on_click(cx.listener(|_, _, _, cx| {
-                cx.emit(HeaderEvent::Settings);
-                cx.stop_propagation();
-            }))
-            .on_key_down(cx.listener(|_, e: &KeyDownEvent, _, cx| {
-                if e.keystroke.key == "enter" || e.keystroke.key == "space" {
-                    cx.emit(HeaderEvent::Settings);
-                    cx.stop_propagation();
-                }
-            }));
-        let stop = control
-            .stop
-            .when(!self.monitor_stopping, |d| {
-                d.track_focus(&self.monitor_stop_focus).tab_index(0)
-            })
-            .when(true, |d| {
-                self.guides.track_box(d, "monitor-stop", [1., 0., 0., 0.])
-            })
-            .on_click(cx.listener(|s, _, _, cx| {
-                if !s.monitor_stopping && s.monitor_label.is_some() {
-                    cx.emit(HeaderEvent::StopMonitor);
-                }
-                cx.stop_propagation();
-            }))
-            .on_key_down(cx.listener(|s, e: &KeyDownEvent, _, cx| {
-                if e.keystroke.key == "enter" || e.keystroke.key == "space" {
-                    if !s.monitor_stopping && s.monitor_label.is_some() {
-                        cx.emit(HeaderEvent::StopMonitor);
-                    }
-                    cx.stop_propagation();
-                }
-            }));
+        let status = self.action_control("header-monitor-status",control.status,HeaderEvent::Settings,cx);
+        let stop = self.action_control("header-monitor-stop",control.stop,HeaderEvent::StopMonitor,cx)
+            .when(true, |d| self.guides.track_box(d,"monitor-stop",[1.,0.,0.,0.]));
         control
             .shell
             .tab_group()
@@ -332,20 +311,40 @@ impl Header {
         action: HeaderEvent,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let enabled = id != "header-save" || self.save_enabled;
-        let keyboard_action=action.clone();
-        small_ghost_pill_enabled(id, label, enabled)
-            .when(enabled, |button| {
-                button
-                    .track_focus(&self.controls[id])
-                    .tab_index(0)
-                    .on_key_down(cx.listener(move |_,e:&KeyDownEvent,_,cx|{if matches!(e.keystroke.key.as_str(),"enter"|"space"){cx.emit(keyboard_action.clone());cx.stop_propagation();}}))
-            })
-            .line_height(px(14.))
-            .flex_shrink_0()
-            .when(enabled, |button| {
-                button.on_click(cx.listener(move |_, _, _, cx| cx.emit(action.clone())))
-            })
+        self.action_control(
+            id,
+            small_ghost_pill_enabled(id,label,self.action_enabled(id))
+                .line_height(px(14.)).flex_shrink_0(),
+            action,
+            cx,
+        )
+    }
+    fn action_enabled(&self,id:&str)->bool {
+        match id {
+            "header-save"=>self.loaded && self.save_enabled,
+            "header-import"=>self.loaded && (self.review_fixture || self.import_available),
+            "header-projects"=>self.loaded && !self.catalog,
+            "header-catalog"=>self.loaded && !self.training,
+            "header-monitor-status"=>crate::integration::fixture_mode() || self.review_fixture || self.monitor_label.is_some(),
+            "header-monitor-stop"=>!crate::integration::fixture_mode() && !self.review_fixture && self.monitor_label.is_some() && !self.monitor_stopping,
+            _=>true,
+        }
+    }
+    /// Persistent focus and exactly one pointer/keyboard activation path for
+    /// every header action, including its specialized painters.
+    fn action_control(&self,id:&'static str,control:Stateful<Div>,action:HeaderEvent,cx:&mut Context<Self>)->Stateful<Div> {
+        let focus=match id {
+            "header-monitor-status"=>self.monitor_status_focus.clone(),
+            "header-monitor-stop"=>self.monitor_stop_focus.clone(),
+            _=>self.controls[id].clone(),
+        };
+        let weak=cx.entity().downgrade();
+        settings_control_with_focus(control,focus,self.action_enabled(id),move|_,cx| {
+            let _=weak.update(cx,|header,cx| {
+                if header.action_enabled(id) { cx.emit(action.clone()); }
+                if matches!(id,"header-monitor-status"|"header-monitor-stop") { cx.stop_propagation(); }
+            });
+        })
     }
 
     fn right_button(
@@ -409,6 +408,14 @@ impl Header {
 
 impl Render for Header {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Stop may become disabled or the entire monitor control may unmount
+        // on any route. Recover only while that exact disappearing handle
+        // still owns focus; never replace a later pointer/keyboard focus.
+        if self.monitor_stop_focus.is_focused(window) && !self.action_enabled("header-monitor-stop")
+            || self.monitor_status_focus.is_focused(window) && !self.action_enabled("header-monitor-status") {
+            self.controls["header-settings"].focus(window,cx);
+            cx.notify();
+        }
         let available = window.viewport_size().width
             - px(if cfg!(any(target_os = "windows", target_os = "linux")) {
                 134.
@@ -488,7 +495,7 @@ impl Render for Header {
                             .font_family("SingZ Display 500")
                             .text_color(rgb(FAINT))
                             .child(singz_uikit::tracked_label(if self.review_fixture {"dev"} else {crate::release_highlights::CURRENT_VERSION}, 0.04))
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(HeaderEvent::WhatsNew))),
+                            .when(true,|d|self.action_control("header-version",d,HeaderEvent::WhatsNew,cx)),
                     ),
             )
             .child(
@@ -496,16 +503,12 @@ impl Render for Header {
                     .child(
                         segmented_tab("header-songs", t("app.titlebar.songs"), !self.training)
                             .when(true,|d|self.guides.track(d,"songs"))
-                            .track_focus(&self.controls["header-songs"]).tab_index(0)
-                            .on_key_down(cx.listener(|_,e:&KeyDownEvent,_,cx|{if matches!(e.keystroke.key.as_str(),"enter"|"space"){cx.emit(HeaderEvent::Songs);cx.stop_propagation();}}))
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(HeaderEvent::Songs))),
+                            .when(true,|d|self.action_control("header-songs",d,HeaderEvent::Songs,cx)),
                     )
                     .child(
                         segmented_tab("header-training", t("app.titlebar.training"), self.training)
                             .when(true, |d| self.guides.track(d, "training"))
-                            .track_focus(&self.controls["header-training"]).tab_index(0)
-                            .on_key_down(cx.listener(|_,e:&KeyDownEvent,_,cx|{if matches!(e.keystroke.key.as_str(),"enter"|"space"){cx.emit(HeaderEvent::Training);cx.stop_propagation();}}))
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(HeaderEvent::Training))),
+                            .when(true,|d|self.action_control("header-training",d,HeaderEvent::Training,cx)),
                     ),
             )
             .when(self.loaded && !self.training, |d| {
@@ -598,9 +601,7 @@ impl Render for Header {
                                     },
                                     crate::integration::fixture_mode(),
                                 )
-                                .on_click(
-                                    cx.listener(|_, _, _, cx| cx.emit(HeaderEvent::Settings)),
-                                ),
+                                .when(true,|d|self.action_control("header-monitor-status",d,HeaderEvent::Settings,cx)),
                             )
                         },
                     )
@@ -677,8 +678,6 @@ impl Render for Header {
                     ).when(true,|d|self.guides.track_box(d,"log",[1.;4])))
                     .child(
                         status_chip("header-engine", "")
-                            .track_focus(&self.controls["header-engine"]).tab_index(0)
-                            .on_key_down(cx.listener(|_,e:&KeyDownEvent,_,cx|{if matches!(e.keystroke.key.as_str(),"enter"|"space"){cx.emit(HeaderEvent::Engine);cx.stop_propagation();}}))
                             .when(true, |d| self.guides.track_box(d,"engine",[1.;4]))
                             .when(compact, |chip| chip.min_w_0().flex_shrink_1())
                             .child(
@@ -717,7 +716,7 @@ impl Render for Header {
                                         )),
                                 )
                             })
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(HeaderEvent::Engine))),
+                            .when(true,|d|self.action_control("header-engine",d,HeaderEvent::Engine,cx)),
                     )
                     .child(
                         self.button("header-language", "", HeaderEvent::Language, cx)

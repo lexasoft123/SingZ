@@ -12,6 +12,25 @@ fn key(w: &mut Window, cx: &mut App, key: &'static str) {
         cx,
     );
 }
+fn key_with_up(w:&mut Window,cx:&mut App,value:&'static str) {
+    let stroke=Keystroke::parse(value).unwrap();
+    w.dispatch_keystroke(stroke.clone(),cx);
+    w.dispatch_event(PlatformInput::KeyUp(KeyUpEvent{keystroke:stroke}),cx);
+}
+fn open_pencil_by_keyboard(view:&Entity<Player>,w:&mut Window,cx:&mut App)->anyhow::Result<()> {
+    for _ in 0..192 {
+        draw(w,cx);
+        if view.read(cx).header.read(cx).focused_control(w).as_deref()==Some("header-rename") {
+            let b=view.read(cx).header.read(cx).rename_bounds.get()
+                .ok_or_else(||anyhow::anyhow!("Keyboard pencil is not measured"))?;
+            anyhow::ensure!(b.size.width>px(0.)&&b.size.height>px(0.)&&b.top()>=px(0.)&&b.bottom()<=px(52.)
+                &&b.left()>=px(0.)&&b.right()<=w.viewport_size().width,"Keyboard pencil is outside header: {b:?}");
+            key_with_up(w,cx,"enter");return Ok(());
+        }
+        key_with_up(w,cx,"tab");
+    }
+    anyhow::bail!("Actual Tab could not reach header rename pencil")
+}
 fn edit(view: &Entity<Player>, w: &mut Window, cx: &mut App, value: &str) -> anyhow::Result<()> {
     draw(w, cx);
     let header = view.read(cx).header.clone();
@@ -39,7 +58,14 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
   macro_rules! capture {($name:expr)=>{{cx.background_executor().timer(Duration::from_millis(1200)).await;handle.update(cx,|_,w,cx|->anyhow::Result<()>{draw(w,cx);w.render_to_image()?.save(out.join($name))?;Ok(())})??;}};}
   handle.update(cx,|_,w,cx|{w.resize(size(px(1280.),px(800.)));view.update(cx,|p,cx|p.open_project(initial.clone(),cx));})?;
   wait!(|p:&Player|!p.loading&&p.project.is_some());
-  handle.update(cx,|_,w,cx|edit(&view,w,cx,"Cancelled title"))??;
+  handle.update(cx,|_,w,cx|open_pencil_by_keyboard(&view,w,cx))??;
+  let editing_deadline=Instant::now()+Duration::from_secs(8);
+  loop {
+   cx.background_executor().timer(Duration::from_millis(20)).await;
+   if handle.update(cx,|_,w,cx|{draw(w,cx);let header=view.read(cx).header.read(cx);header.is_editing()&&header.title_input_focused(w,cx)})? {break;}
+   anyhow::ensure!(Instant::now()<editing_deadline,"Pencil Enter down/up did not leave the actual title input editing and focused");
+  }
+  handle.update(cx,|_,w,cx|{let state=view.read(cx).header.read(cx).title_state();state.update(cx,|s,cx|s.set_value("Cancelled title",w,cx));})?;
   capture!("editing-1280.png");
   handle.update(cx,|_,w,cx|key(w,cx,"escape"))?;
   handle.update(cx,|_,_,cx|->anyhow::Result<()>{let p=view.read(cx);anyhow::ensure!(!p.header.read(cx).is_editing()&&p.song_title.as_str()=="Original"&&!p.saving&&p.rename_pending.is_none(),"Escape renamed or saved");Ok(())})??;
@@ -85,7 +111,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, out: PathBuf, cx: &mut
   handle.update(cx,|_,_,cx|view.update(cx,|p,cx|p.save_project(cx)))?;
   wait!(|p:&Player|!p.loading&&p.source_job.is_none()&&!p.source_working&&p.song_title.as_str()=="Unsaved named source");
   let imported=handle.update(cx,|_,_,cx|view.read(cx).project.as_ref().unwrap().dir.clone())?;capture!("saved-title-1280.png");
-  std::fs::write(out.join("result.json"),serde_json::to_vec_pretty(&serde_json::json!({"escape":true,"blank":true,"enter":true,"blur":true,"savedFolderRename":saved,"unsavedSavedProject":imported,"collisionRefused":true,"externalEditRefused":true,"mixAndPausedPositionRetained":true,"playingRetained":true,"libraryRouteAndSearchFocusRetained":true,"hidden":true,"muted":true}))?)?;
+  std::fs::write(out.join("result.json"),serde_json::to_vec_pretty(&serde_json::json!({"keyboardPencilOpen":true,"escape":true,"blank":true,"enter":true,"blur":true,"savedFolderRename":saved,"unsavedSavedProject":imported,"collisionRefused":true,"externalEditRefused":true,"mixAndPausedPositionRetained":true,"playingRetained":true,"libraryRouteAndSearchFocusRetained":true,"hidden":true,"muted":true}))?)?;
   Ok(())
  }.await;
  match result {Ok(())=>eprintln!("NATIVE_TITLE passed"),Err(e)=>eprintln!("NATIVE_TITLE failed: {e:#}")};let _=cx.update(|cx|cx.quit());

@@ -22,6 +22,19 @@ pub struct CuePlan {
     pub countdown: f64,
     pub initial: bool,
 }
+/// Immutable presentation of a completed receipt. It never contains an answer
+/// or observations for a future/current unanswered prompt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResultResponse {
+    Skipped,
+    Identify { correct: bool },
+    Vocal(Vec<session::Classification>),
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Acknowledgement {
+    pub prompt: domain::Prompt,
+    pub response: ResultResponse,
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct Snapshot {
     pub phase: Phase,
@@ -38,6 +51,8 @@ pub struct Snapshot {
     pub outcomes: Vec<String>,
     pub outcome_labels: Vec<String>,
     pub outcome_prompts: Vec<domain::Prompt>,
+    pub acknowledgement: Option<Acknowledgement>,
+    pub average_signed_cents: Option<f64>,
     pub average_absolute_cents: Option<f64>,
     pub voiced_ratio: Option<f64>,
     pub stable_ratio: Option<f64>,
@@ -106,6 +121,7 @@ impl Run {
                 }
                 session::Response::Vocal(targets) => {
                     attempts += 1;
+                    if targets.is_empty() { return "No result".into(); }
                     if targets
                         .iter()
                         .all(|t| t.classification == session::Classification::OnTarget)
@@ -121,7 +137,17 @@ impl Run {
                         close += 1;
                         "Close".into()
                     } else {
-                        "Try again".into()
+                        match targets.iter().find(|target|target.classification != session::Classification::OnTarget).map(|target|target.classification) {
+                            Some(session::Classification::Close) => "Close",
+                            Some(session::Classification::WrongNote) => "Wrong note",
+                            Some(session::Classification::WrongOctave) => "Wrong octave",
+                            Some(session::Classification::OtherChordTone) => "Other chord tone",
+                            Some(session::Classification::NonChordTone) => "Non chord tone",
+                            Some(session::Classification::Unstable) => "Unstable",
+                            Some(session::Classification::Unvoiced) => "Unvoiced",
+                            Some(session::Classification::OutOfRange) => "Out of range",
+                            _ => "No result",
+                        }.into()
                     }
                 }
             })
@@ -136,7 +162,7 @@ impl Run {
                         target.classification,
                         session::Classification::OnTarget | session::Classification::Close
                     ) {
-                        cents.extend(target.metrics.median_cents_error.map(f64::abs));
+                        cents.extend(target.metrics.median_cents_error);
                     }
                     voiced.extend(target.metrics.voiced_coverage);
                     stable.extend(target.metrics.stable_hold_ratio);
@@ -171,7 +197,16 @@ impl Run {
                 .iter()
                 .map(|r| self.session.prompts()[r.prompt_index - 1].instruction())
                 .collect(),
-            average_absolute_cents: average(&cents),
+            acknowledgement: self.session.results().last().map(|receipt|Acknowledgement {
+                prompt: self.session.prompts()[receipt.prompt_index - 1].clone(),
+                response: match &receipt.response {
+                    session::Response::Skipped => ResultResponse::Skipped,
+                    session::Response::Identify(_) => ResultResponse::Identify {correct: receipt.correct == Some(true)},
+                    session::Response::Vocal(targets) => ResultResponse::Vocal(targets.iter().map(|target|target.classification).collect()),
+                },
+            }),
+            average_signed_cents: average(&cents),
+            average_absolute_cents: average(&cents.iter().map(|value|value.abs()).collect::<Vec<_>>()),
             voiced_ratio: average(&voiced),
             stable_ratio: average(&stable),
             correct,
@@ -777,4 +812,36 @@ mod tests {
         assert_eq!(run.error.as_deref(), Some("Permission denied"));
         assert!(!run.needs_microphone());
     }
+    #[test]
+    fn acknowledgement_projects_only_the_last_completed_prompt_and_survives_the_next_cue() {
+        let mut config=identify().session.config().clone();config.length=2;
+        let mut run=Run::new(config,0,0.65,10.).unwrap();
+        assert!(run.snapshot().acknowledgement.is_none());
+        run.phase=Phase::Respond;
+        let pc=run.displayed_prompt().targets[0].midi%12;
+        run.answer(session::Answer::Note((pc+1)%12)).unwrap();
+        let acknowledgement=run.snapshot().acknowledgement.unwrap();
+        assert_eq!(acknowledgement.prompt.index,1);
+        assert_eq!(acknowledgement.response,ResultResponse::Identify{correct:false});
+        run.deadline=Some(Instant::now());run.tick(&Default::default()).unwrap();
+        let preparing=run.snapshot();assert_eq!(preparing.prompt.index,2);assert_eq!(preparing.acknowledgement,Some(acknowledgement.clone()));
+        let plan=run.tick(&Default::default()).unwrap().unwrap();run.cue_requested(9,&plan);
+        assert_eq!(run.phase,Phase::Cue);assert_eq!(run.snapshot().acknowledgement,Some(acknowledgement.clone()));
+        run.phase=Phase::Respond;assert_eq!(run.snapshot().acknowledgement,Some(acknowledgement));
+        let answer=session::Answer::Note(run.displayed_prompt().targets[0].midi%12);run.answer(answer).unwrap();
+        let final_ack=run.snapshot().acknowledgement.unwrap();assert_eq!(final_ack.prompt.index,2);assert_eq!(final_ack.response,ResultResponse::Identify{correct:true});
+    }
+    #[test]
+    fn signed_pitch_projection_excludes_note_choice_errors_and_preserves_absolute_error() {
+        let mut run=Run::new(domain::Config{length:3,low:57,high:58,..Default::default()},0,0.65,10.).unwrap();
+        for (index,(classification,cents)) in [(session::Classification::OnTarget,8.),(session::Classification::Close,-18.),(session::Classification::WrongOctave,1200.)].into_iter().enumerate() {
+            run.session.record(index+1,session::Response::Vocal(vec![session::TargetResult{index:0,classification,metrics:session::Metrics{median_cents_error:Some(cents),..Default::default()}}]),None).unwrap();
+        }
+        run.phase=Phase::Summary;
+        let snapshot=run.snapshot();assert_eq!(snapshot.average_signed_cents,Some(-5.));assert_eq!(snapshot.average_absolute_cents,Some(13.));
+        assert_eq!((snapshot.correct,snapshot.close,snapshot.attempts),(1,1,3));
+        assert_eq!(snapshot.outcomes,["On target","Close","Wrong octave"]);
+        assert_eq!(snapshot.acknowledgement.unwrap().response,ResultResponse::Vocal(vec![session::Classification::WrongOctave]));
+    }
+
 }
