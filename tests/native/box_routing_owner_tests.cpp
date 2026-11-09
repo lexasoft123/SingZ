@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <thread>
+#include <stdexcept>
 #include <unistd.h>
 #define CHECK(v) do { if (!(v)) { std::fprintf(stderr, "failed %d: %s\n", __LINE__, #v); std::abort(); } } while (false)
 using namespace singz;
@@ -41,6 +42,85 @@ class FakeHost final : public AudioHostBackend {
   AudioHostStatus status() const noexcept override { auto result = current_; if (probe_) result.latency.bufferFrames = probe_->queue; return result; }
  private: std::shared_ptr<Probes> probes_; std::shared_ptr<Probe> probe_; AudioHostStatus current_; bool opened_{false};
 };
+struct DiscoveryProbe {
+  unsigned enumerations = 0, opens = 0;
+  std::string uid = "before";
+  bool fail = false;
+};
+class DiscoveryHost final : public AudioHostBackend {
+ public:
+  explicit DiscoveryHost(std::shared_ptr<DiscoveryProbe> probe) : probe_(std::move(probe)) {}
+  AudioHostInventory enumerate() const override {
+    ++probe_->enumerations;
+    if (probe_->fail) throw std::runtime_error("Discovery temporarily unavailable");
+    AudioHostDeviceInfo device;
+    device.uid = probe_->uid; device.label = "Discovery fixture";
+    device.inputChannels = 2; device.direction = AudioHostEndpointDirection::Input;
+    return {{device}, device.uid, {}};
+  }
+  AudioHostResult open(const AudioHostConfig&, AudioHostRender, void*) override {
+    ++probe_->opens; return {};
+  }
+  AudioHostResult start() override { return {}; }
+  void stop() noexcept override {}
+  AudioHostStatus status() const noexcept override { return {}; }
+ private:
+  std::shared_ptr<DiscoveryProbe> probe_;
+};
+void inventoryCacheRegression() {
+  const auto path = std::string("/tmp/box-discovery-test-") + std::to_string(getpid()) + ".json";
+  unlink(path.c_str());
+  auto probe = std::make_shared<DiscoveryProbe>();
+  uint64_t clock = 1000000000;
+  auto factory = [probe] { return std::make_unique<DiscoveryHost>(probe); };
+  std::string error;
+  CHECK(initializeBoxRoutingWithHost(path, error, factory, {}, {}, [&clock] { return clock; }));
+  CHECK(probe->enumerations == 1);
+  const auto state = [] {
+    return loopz::parseControlJSON(boxRoutingRequest(R"({"version":1,"operation":"state"})"));
+  };
+  const auto inputUid = [] {
+    const auto devices = boxRoutingInputDevices();
+    CHECK(devices.size() == 1); return devices.front().uid;
+  };
+  CHECK(inputUid() == "before");
+  probe->uid = "after";
+  for (unsigned index = 0; index < 40; ++index) {
+    clock = 1000000000 + uint64_t(index) * 25000000;
+    pollBoxRouting();
+    CHECK(inputUid() == "before"); // Temporary host instances share one cache.
+  }
+  CHECK(probe->enumerations == 1);
+  clock = 2000000000;
+  pollBoxRouting();
+  CHECK(probe->enumerations == 2 && inputUid() == "after");
+  CHECK(state().at("inventory").at("devices").at(0).at("uid") == "after");
+  probe->fail = true;
+  clock = 3000000000;
+  pollBoxRouting();
+  CHECK(probe->enumerations == 3);
+  CHECK(state().at("inventory").at("devicesFresh") == false);
+  for (unsigned index = 0; index < 40; ++index) {
+    clock = 3000000000 + uint64_t(index) * 25000000;
+    pollBoxRouting();
+    bool failed = false;
+    try { (void)boxRoutingInputDevices(); }
+    catch (const std::runtime_error&) { failed = true; }
+    CHECK(failed); // Never disguise a failed refresh as fresh cached devices.
+  }
+  CHECK(probe->enumerations == 3);
+  probe->fail = false; probe->uid = "recovered";
+  clock = 4000000000;
+  pollBoxRouting();
+  CHECK(probe->enumerations == 4 && inputUid() == "recovered");
+  CHECK(state().at("inventory").at("devicesFresh") == true);
+  shutdownBoxRouting();
+  probe->uid = "reinitialized";
+  CHECK(initializeBoxRoutingWithHost(path, error, factory, {}, {}, [&clock] { return clock; }));
+  CHECK(probe->enumerations == 5 && inputUid() == "reinitialized");
+  CHECK(probe->opens == 0); // Discovery does not prepare routes or open outputs.
+  shutdownBoxRouting();
+}
 void emit(const std::shared_ptr<Probe>& probe, bool timestampValid = true) {
   CHECK(probe->running && probe->callback);
   std::array<float, 256> left{}, right{}; float* out[]{left.data(), right.data()};
@@ -230,5 +310,9 @@ int main() {
   shutdownBoxRouting(); CHECK(!probe->running && !auxProbe->running && !boxRoutingOwnsCapture());
   CHECK(!boxRoutingTimingCoverageLost());
   unlink(path.c_str());
+  // SharedAudioService retains its provider backend after shutdown. Run the
+  // discovery-only lifecycle fixture last so its separate synthetic source
+  // cannot replace the history identity assumed by the playback fixture.
+  inventoryCacheRegression();
   std::puts("Box routing physical delay/seek/generation/stop regression passed");
 }

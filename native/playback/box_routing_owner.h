@@ -17,11 +17,14 @@ using BoxRoutingHostFactory = std::function<std::unique_ptr<AudioHostBackend>()>
 using BoxRoutingInputFactory = std::function<std::unique_ptr<AudioInputBackend>()>;
 bool initializeBoxRouting(const std::string& statePath, std::string& error);
 // Dependency injection for deterministic integration tests; normal application
-// initialization always selects the platform factory.
+// initialization always selects the platform factory. Inventory discovery is
+// shared across temporary hosts and cached for one monotonic second, including
+// failures. The optional inventory clock is control-owner-only and test-local.
 bool initializeBoxRoutingWithHost(const std::string& statePath, std::string& error,
                                   BoxRoutingHostFactory factory,
                                   std::shared_ptr<LoopZSongSource> source = {},
-                                  BoxRoutingInputFactory inputFactory = {});
+                                  BoxRoutingInputFactory inputFactory = {},
+                                  std::function<uint64_t()> inventoryClock = {});
 // Atomic health getters: safe concurrently, including from audio callbacks.
 bool boxRoutingInitialized() noexcept;
 // Telemetry loss never stops routes; projection stays unavailable until a full

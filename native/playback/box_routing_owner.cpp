@@ -4,6 +4,7 @@
 #include "shared_audio_service.h"
 #include <loopz/runtime/control.hpp>
 #include <filesystem>
+#include <exception>
 #include <stdexcept>
 #include <array>
 #include <algorithm>
@@ -74,15 +75,38 @@ class ObservedSongSource final : public loopz::AudioSource {
   std::shared_ptr<loopz::AudioHistory> history_;
 };
 
+// All inventory callers are serialized on the routing control owner. Discovery
+// state must outlive temporary hosts constructed by AudioRuntime::inventory().
+struct PhysicalInventoryCache {
+  std::function<uint64_t()> clock;
+  uint64_t attemptedAt = 0;
+  bool attempted = false;
+  AudioHostInventory inventory;
+  std::exception_ptr failure;
+  AudioHostInventory enumerate(const AudioHostBackend& backend) {
+    const auto now = clock();
+    if (!attempted || now < attemptedAt || now - attemptedAt >= kNs) {
+      attempted = true;
+      attemptedAt = now;
+      failure = nullptr;
+      try { inventory = backend.enumerate(); }
+      catch (...) { failure = std::current_exception(); inventory = {}; }
+    }
+    if (failure) std::rethrow_exception(failure);
+    return inventory;
+  }
+};
+
 class InstrumentedHost final : public AudioHostBackend {
  public:
-  explicit InstrumentedHost(std::unique_ptr<AudioHostBackend> backend)
-      : backend_(std::move(backend)), id_(++endpointSerial) {}
+  InstrumentedHost(std::unique_ptr<AudioHostBackend> backend,
+                   std::shared_ptr<PhysicalInventoryCache> inventory)
+      : backend_(std::move(backend)), inventory_(std::move(inventory)), id_(++endpointSerial) {}
   ~InstrumentedHost() override {
     backend_->stop();
     std::erase_if(endpoints, [this](const auto& endpoint) { return endpoint.id == id_; });
   }
-  AudioHostInventory enumerate() const override { return backend_->enumerate(); }
+  AudioHostInventory enumerate() const override { return inventory_->enumerate(*backend_); }
   std::optional<AudioHostDeviceInfo> describeOutputDevice(const std::string& uid) const override {
     return backend_->describeOutputDevice(uid);
   }
@@ -125,6 +149,7 @@ class InstrumentedHost final : public AudioHostBackend {
     return rendered;
   }
   std::unique_ptr<AudioHostBackend> backend_;
+  std::shared_ptr<PhysicalInventoryCache> inventory_;
   uint64_t id_;
   AudioHostRender callback_{};
   void* context_{};
@@ -193,7 +218,8 @@ bool initializeBoxRouting(const std::string& statePath, std::string& error) {
 bool initializeBoxRoutingWithHost(const std::string& statePath, std::string& error,
                                   BoxRoutingHostFactory factory,
                                   std::shared_ptr<LoopZSongSource> source,
-                                  BoxRoutingInputFactory inputFactory) {
+                                  BoxRoutingInputFactory inputFactory,
+                                  std::function<uint64_t()> inventoryClock) {
   if (control) { error = "Box routing is already initialized"; return false; }
   if (statePath.empty() || statePath.find('\0') != std::string::npos || !std::filesystem::path(statePath).is_absolute()) {
     error = "Box routing state path must be absolute"; return false;
@@ -201,8 +227,15 @@ bool initializeBoxRoutingWithHost(const std::string& statePath, std::string& err
   try {
     auto nextSong = source ? std::move(source) : std::make_shared<LoopZSongSource>();
     if (!inputFactory) inputFactory = createPlatformAudioInputBackend;
+    auto inventory = std::make_shared<PhysicalInventoryCache>();
+    inventory->clock = inventoryClock ? std::move(inventoryClock) : [] {
+      return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count());
+    };
     auto runtime = std::make_unique<loopz::runtime::AudioRuntime>(
-        [factory = std::move(factory)] { return std::make_unique<InstrumentedHost>(factory()); },
+        [factory = std::move(factory), inventory] {
+          return std::make_unique<InstrumentedHost>(factory(), inventory);
+        },
         std::move(inputFactory));
     auto* nextView = runtime.get();
     runtime->bindNativeSource("native:singz", std::make_shared<ObservedSongSource>(nextSong->history));
