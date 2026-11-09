@@ -504,6 +504,59 @@ impl Remote {
             Ok(())
         })
     }
+    /// Stream a durable captured payload into a preallocated identity. The
+    /// exact intended object can acknowledge a lost PUT without reopening a
+    /// deleted live source or allocating another file ID.
+    pub fn upload_reserved_file(
+        &self, id:&str, path:&Path, name:&str, parent:&str, mime:&str,
+        expected_md5:&str, expected_size:u64, cancel:&impl Fn()->bool,
+    ) -> Result<Metadata> {
+        let generation=self.auth.store.generation();let original_cancel=cancel;
+        let cancel=&||original_cancel()||self.auth.store.generation()!=generation;
+        validate_id(id)?;validate_id(parent)?;
+        ensure!(id!=parent&&drive_plan::plain_name(name)&&crate::drive_snapshot::valid_md5(expected_md5)
+            &&!mime.is_empty()&&mime.len()<=1024&&!mime.chars().any(char::is_control),"Unsafe reserved streamed upload");
+        let expected=Metadata{entry:RemoteEntry{id:id.into(),name:name.into(),mime_type:Some(mime.into()),parents:vec![parent.into()],md5_checksum:Some(expected_md5.into()),size:Some(expected_size.to_string()),..Default::default()},trashed:false};
+        self.create_reserved(&expected,cancel,||{
+            let digest=crate::drive_snapshot::digest(path,cancel)?;
+            ensure!(digest.md5==expected_md5&&digest.size==expected_size,"Durable streamed publication payload changed");
+            let mut url=url::Url::parse(&format!("{}/upload/drive/v3/files",self.auth.config.upload_base.trim_end_matches('/')))?;
+            url.query_pairs_mut().append_pair("uploadType","resumable");
+            let metadata=serde_json::to_vec(&json!({"id":id,"name":name,"parents":[parent],"mimeType":mime}))?;
+            let init=self.send("POST",url.as_str(),Body::Bytes(&metadata),&[("Content-Type","application/json")],false,cancel)?;
+            let location=init.header("location").context("Drive gave no reserved streamed upload session")?;
+            self.send("PUT",location,Body::File(path),&[("Content-Type",mime)],true,cancel)?;
+            Ok(())
+        })
+    }
+    /// Replace only the observed captured baseline, or recognize its exact
+    /// intended result after an unknown acknowledgement. This is an
+    /// observation fence, not a server-side cross-file compare-and-set.
+    pub fn replace_file_verified(&self,before:&Metadata,desired:&Metadata,path:&Path,cancel:&impl Fn()->bool)->Result<Metadata> {
+        before.validate(&before.entry.id)?;desired.validate(&desired.entry.id)?;
+        ensure!(!before.trashed&&!desired.trashed&&before.entry.id==desired.entry.id
+            &&before.entry.name==desired.entry.name&&before.entry.parents==desired.entry.parents
+            &&before.entry.app_properties==desired.entry.app_properties&&before.entry.parents.len()==1
+            &&before.entry.mime_type.as_deref()!=Some(FOLDER)&&desired.entry.mime_type.as_deref()!=Some(FOLDER),"Unsafe captured Drive replacement");
+        let generation=self.auth.store.generation();let original_cancel=cancel;let cancel=&||original_cancel()||self.auth.store.generation()!=generation;
+        let observed=self.metadata(&before.entry.id,cancel)?;if observed==*desired{return Ok(observed);}
+        ensure!(observed==*before,"Drive replacement baseline changed; preserve publication intent");
+        let digest=crate::drive_snapshot::digest(path,cancel)?;
+        ensure!(desired.entry.md5_checksum.as_deref()==Some(digest.md5.as_str())&&desired.entry.size.as_deref().and_then(|n|n.parse::<u64>().ok())==Some(digest.size),"Durable replacement payload changed");
+        let mime=desired.entry.mime_type.as_deref().context("Replacement has no MIME type")?;
+        let sent=(||->Result<()> {
+            let mut url=url::Url::parse(&format!("{}/upload/drive/v3/files/{}",self.auth.config.upload_base.trim_end_matches('/'),before.entry.id))?;
+            url.query_pairs_mut().append_pair("uploadType","resumable");let metadata=serde_json::to_vec(&json!({"mimeType":mime}))?;
+            let init=self.send("PATCH",url.as_str(),Body::Bytes(&metadata),&[("Content-Type","application/json")],false,cancel)?;
+            let location=init.header("location").context("Drive gave no replacement session")?;
+            self.send("PUT",location,Body::File(path),&[("Content-Type",mime)],true,cancel)?;Ok(())
+        })();
+        ensure!(!cancel(),"Drive replacement acknowledgement unknown after cancellation; retain publication intent");
+        let observed=self.metadata(&desired.entry.id,cancel).context("Drive replacement outcome unknown; retain publication intent")?;
+        if observed==*desired{return Ok(observed);}
+        if let Err(error)=sent{return Err(error.context(if observed==*before{"Drive replacement not observed; retain publication intent"}else{"Drive replacement conflicted; retain publication intent"}));}
+        anyhow::bail!("Drive replacement verification failed; retain publication intent")
+    }
     /// An idempotent single-parent move of the exact captured object. Unknown
     /// PATCH acknowledgement is resolved by GET, never by uploading another copy.
     /// Callers must journal intent first and revalidate their complete roster;

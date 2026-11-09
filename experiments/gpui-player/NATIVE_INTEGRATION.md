@@ -1450,3 +1450,12 @@ Native portable package qualification now covers the new key-analysis path on
 Windows and Linux, plus normal packaged startup and graceful close. See
 [desktop packaging](DESKTOP_PACKAGING.md) for commands, actual platform scope,
 Windows UTF-8/file-permission fixes and remaining release gates.
+
+
+Native Drive retirement/name reuse follow-up (2026-11-09): local operation receipts,
+immutable accepted upload recovery and exact-ID catalog-last retirement now pass
+1,009 Rust tests, both native builds and the actual two-size lifecycle journey
+(two hidden launches, 20 inspected captures). Sole-project Delete, typed Rename,
+same-name replacement admission, retained media and truthful automatic continuation
+are covered. See [retirement review](RETIREMENT_DRIVE_REVIEW.md) for source/binary
+pins, preserved failures and real-account/platform/visual limits.

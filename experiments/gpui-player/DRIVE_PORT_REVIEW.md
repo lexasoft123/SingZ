@@ -79,7 +79,8 @@ Still open:
 - Explicit native-empty publication now has a dedicated recovery transaction and
   a verified writer/fresh-reader/offline journey; generic snapshots retain the
   missing-audio refusal. See [empty publication](EMPTY_DRIVE_REVIEW.md). Authorized
-  folder retirement/name reuse and real account/platform qualification remain open.
+  folder retirement/name reuse now has the local [lifecycle checkpoint](RETIREMENT_DRIVE_REVIEW.md);
+  real account/platform qualification remains open.
   Missing graphs remain blocked without a false synced receipt.
 - Adoption now receives streaming HTTP byte counts and source-style download
   totals/speed before transfer completion; four held-response/authenticated tests

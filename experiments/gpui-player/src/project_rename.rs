@@ -86,15 +86,25 @@ fn rename_with_sync(dir: &Path, expected: &str, name: &str, store: crate::sync_d
         }
     };
     mark("rename");
-    let result = rename_using(dir, expected, name, crate::project_store::commit_locked);
+    let result = rename_using_authorized(dir, expected, name, crate::project_store::commit_locked, Some(&store));
     mark("rename (finished)");
     result
 }
+#[cfg(test)]
 fn rename_using(
     dir: &Path,
     expected: &str,
     name: &str,
     publish: impl FnOnce(&Path, &str, &str, &serde_json::Value) -> Result<String>,
+) -> Result<Outcome> {
+    rename_using_authorized(dir, expected, name, publish, None)
+}
+fn rename_using_authorized(
+    dir: &Path,
+    expected: &str,
+    name: &str,
+    publish: impl FnOnce(&Path, &str, &str, &serde_json::Value) -> Result<String>,
+    ledger: Option<&crate::sync_dirty::Store>,
 ) -> Result<Outcome> {
     ensure!(
         !fs::symlink_metadata(dir)?.file_type().is_symlink(),
@@ -125,8 +135,38 @@ fn rename_using(
         publish(&dir, "project.json", expected, &raw)?;
         return Ok(Outcome { dir, warning: None });
     }
+    let retirement = if let Some(ledger) = ledger {
+        let mut config = crate::project_library::Config::default();
+        config.preferences = ledger.directory().join("library.json");
+        // An unreadable library context is not evidence that this loaded
+        // project is external. Otherwise a selected-library Rename could move
+        // without its retirement receipt and later enter generic orphan cleanup.
+        let selected = crate::project_library::resolved_root(&config)?;
+        let selected = match selected.canonicalize() {
+            Ok(root) => Some(root),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error).context("Cannot verify the library before renaming"),
+        };
+        if selected.as_deref() == Some(parent) {
+            let binding = crate::drive_retirement::active_binding(
+                &ledger.directory().join("gdrive/retirements"), parent)?;
+            Some(crate::drive_local_ops::Store::new(ledger.directory().to_owned()).prepare(
+                crate::drive_local_ops::Kind::Rename, parent, &dir, &next, expected, binding)?)
+        } else { None }
+    } else { None };
+    let commit_retirement = || retirement.as_ref().and_then(|operation| {
+        #[cfg(unix)]
+        if let Err(error) = fs::File::open(parent).and_then(|file| file.sync_all()) {
+            return Some(format!("Project moved, but directory durability and cloud retirement remain unconfirmed: {error}"));
+        }
+        match operation.commit(ledger.expect("Prepared rename has a ledger")) {
+            Ok(committed) => committed.warning,
+            Err(error) => Some(format!("Project moved, but its cloud retirement intent is pending recovery: {error:#}")),
+        }
+    });
     // An exclusive native move also closes the check-to-rename collision race.
     if let Err(error) = exclusive_move(&dir, &next) {
+        if let Some(operation) = &retirement { operation.abort()?; }
         if matches!(
             error.kind(),
             std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty
@@ -139,12 +179,15 @@ fn rename_using(
         // Metadata has not been published on failure. Retain the real path if
         // another writer prevents rollback; never tell the UI it stayed put.
         if exclusive_move(&next, &dir).is_ok() {
+            if let Some(operation) = &retirement { operation.abort()?; }
             return Err(error);
         }
+        let pending = commit_retirement();
         return Ok(Outcome {
             dir: next,
             warning: Some(format!(
-                "Folder moved, but the title could not be saved or the folder restored: {error:#}"
+                "Folder moved, but the title could not be saved or the folder restored: {error:#}{}",
+                pending.map(|warning| format!("; {warning}")).unwrap_or_default()
             )),
         });
     }
@@ -159,7 +202,7 @@ fn rename_using(
     }
     Ok(Outcome {
         dir: next,
-        warning: None,
+        warning: commit_retirement(),
     })
 }
 
@@ -185,6 +228,85 @@ mod tests {
         assert!(remaining.dirs.contains_key(dir.to_str().unwrap()));
         assert!(remaining.dirs.contains_key(result.dir.to_str().unwrap()));
         assert!(!dir.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn selected_library_rename_commits_exact_directory_operation() {
+        let (root, dir, hash) = fixture("selected-operation");
+        let root = root.canonicalize().unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let prefs = root.join("sync-prefs");
+        fs::create_dir_all(&prefs).unwrap();
+        fs::write(prefs.join("library.json"),
+            serde_json::to_vec(&json!({"projectsRoot": root})).unwrap()).unwrap();
+        let identity = crate::directory_identity::read(&dir).unwrap();
+        let store = crate::sync_dirty::Store::new(prefs.clone());
+        let result = rename_with_sync(&dir, &hash, "New", store.clone()).unwrap();
+        assert!(result.warning.is_none());
+        let operations = crate::drive_local_ops::Store::new(prefs).snapshot(&root).unwrap();
+        assert_eq!(operations.entries.len(), 1);
+        let entry = &operations.entries[0];
+        assert_eq!(entry.operation.kind, crate::drive_local_ops::Kind::Rename);
+        assert_eq!(entry.operation.old_path, dir);
+        assert_eq!(entry.operation.destination, result.dir);
+        assert_eq!(entry.operation.local_identity, identity);
+        assert_eq!(entry.operation.local_document, hash);
+        assert_eq!(crate::directory_identity::read(&result.dir).unwrap(), identity);
+        let crate::drive_local_ops::State::Committed(sequence) = entry.state else {
+            panic!("Successful native Rename must commit positive local authority");
+        };
+        assert_eq!(store.snapshot().unwrap().retire_ops.get(&entry.operation.id), Some(&sequence));
+        assert_eq!(crate::project_store::read(&result.dir, "project.json").unwrap().0["name"], "New");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn selected_library_failed_rename_aborts_operation_without_authority() {
+        let (root, dir, hash) = fixture("selected-collision");
+        let root = root.canonicalize().unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let prefs = root.join("sync-prefs");
+        fs::create_dir_all(&prefs).unwrap();
+        fs::write(prefs.join("library.json"),
+            serde_json::to_vec(&json!({"projectsRoot": root})).unwrap()).unwrap();
+        fs::create_dir(root.join("New")).unwrap();
+        fs::write(root.join("New/sentinel"), b"keep").unwrap();
+        let store = crate::sync_dirty::Store::new(prefs.clone());
+        assert!(rename_with_sync(&dir, &hash, "New", store.clone()).is_err());
+        let operations = crate::drive_local_ops::Store::new(prefs).snapshot(&root).unwrap();
+        assert_eq!(operations.entries.len(), 1);
+        assert_eq!(operations.entries[0].state, crate::drive_local_ops::State::Aborted);
+        assert!(store.snapshot().unwrap().retire_ops.is_empty());
+        assert_eq!(crate::project_store::read(&dir, "project.json").unwrap().1, hash);
+        assert_eq!(fs::read(root.join("New/sentinel")).unwrap(), b"keep");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_library_context_cannot_turn_selected_rename_into_external_move() {
+        let (root, dir, hash) = fixture("invalid-library-context");
+        let root = root.canonicalize().unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let prefs = root.join("sync-prefs");
+        fs::create_dir_all(&prefs).unwrap();
+        let store = crate::sync_dirty::Store::new(prefs.clone());
+        for bytes in [b"{".as_slice(), b"[]".as_slice()] {
+            fs::write(prefs.join("library.json"), bytes).unwrap();
+            assert!(rename_with_sync(&dir, &hash, "New", store.clone()).is_err());
+            assert!(dir.is_dir());
+            assert!(!root.join("New").exists());
+            assert_eq!(crate::project_store::read(&dir, "project.json").unwrap().1, hash);
+            assert!(store.snapshot().unwrap().retire_ops.is_empty());
+            assert!(crate::drive_local_ops::Store::new(prefs.clone())
+                .snapshot(&root).unwrap().entries.is_empty());
+        }
+        // A preferences IO failure must preserve the same original path too.
+        fs::remove_file(prefs.join("library.json")).unwrap();
+        fs::create_dir(prefs.join("library.json")).unwrap();
+        assert!(rename_with_sync(&dir, &hash, "New", store).is_err());
+        assert!(dir.is_dir() && !root.join("New").exists());
+        assert_eq!(crate::project_store::read(&dir, "project.json").unwrap().1, hash);
         fs::remove_dir_all(root).unwrap();
     }
 

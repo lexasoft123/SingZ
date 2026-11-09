@@ -14,6 +14,7 @@ use std::{
 const NAME: &str = "sync.json";
 const LIMIT: u64 = 256 * 1024;
 const MAX_DIRS: usize = 100;
+const MAX_RETIRE_OPS: usize = 1024;
 const MAX_SEQ: u64 = (1u64 << 53) - 1;
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
@@ -37,12 +38,15 @@ pub struct Snapshot {
     pub seq: u64,
     pub dirs: BTreeMap<String, u64>,
     pub all_seq: u64,
+    /// Positive local operation references; ordinary cleanup never consumes them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub retire_ops: BTreeMap<String, u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub since: Option<u64>,
 }
 impl Snapshot {
     pub fn is_dirty(&self) -> bool {
-        self.all_seq > 0 || !self.dirs.is_empty()
+        self.all_seq > 0 || !self.dirs.is_empty() || !self.retire_ops.is_empty()
     }
     pub fn outside_library(&self, root: &Path) -> Vec<PathBuf> {
         self.dirs
@@ -52,9 +56,35 @@ impl Snapshot {
             .collect()
     }
 }
+/// Publication became visible, but its directory flush did not confirm durability.
+#[derive(Debug)]
+pub struct PublicationUncertain {cause:anyhow::Error}
+impl std::fmt::Display for PublicationUncertain {
+    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {write!(f,"Published sync intent durability is unknown: {:#}",self.cause)}
+}
+impl std::error::Error for PublicationUncertain {}
+pub fn is_publication_uncertain(error:&anyhow::Error)->bool {
+    error.chain().any(|cause|cause.is::<PublicationUncertain>())
+}
+/// The operation update failed before entering ledger publication. Existing
+/// unreadable bytes are not evidence that this attempt might have committed.
+#[derive(Debug)]
+pub struct PublicationNotAttempted { cause:anyhow::Error }
+impl std::fmt::Display for PublicationNotAttempted {
+    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {
+        write!(f,"Sync intent preparation failed before publication: {:#}",self.cause)
+    }
+}
+impl std::error::Error for PublicationNotAttempted {
+    fn source(&self)->Option<&(dyn std::error::Error+'static)> {Some(self.cause.as_ref())}
+}
+pub fn is_publication_not_attempted(error:&anyhow::Error)->bool {
+    error.chain().any(|cause|cause.is::<PublicationNotAttempted>())
+}
 #[derive(Clone, Debug)]
 pub struct Store {
     directory: PathBuf,
+    #[cfg(test)] fail_publication_flush:bool,
 }
 struct Document {
     raw: Value,
@@ -63,7 +93,14 @@ struct Document {
 }
 impl Store {
     pub fn new(directory: PathBuf) -> Self {
-        Self { directory }
+        Self { directory, #[cfg(test)] fail_publication_flush:false }
+    }
+    #[cfg(test)]
+    pub(crate) fn with_failed_publication_flush(&self)->Self {
+        let mut store=self.clone();store.fail_publication_flush=true;store
+    }
+    pub fn directory(&self) -> &Path {
+        &self.directory
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
         self.snapshot_with_hook(|| {})
@@ -102,6 +139,44 @@ impl Store {
         })?;
         eprintln!("Sync intent marked: {} ({})", key, log_reason(reason));
         Ok(())
+    }
+    /// Atomically make a successful local operation authoritative and dirty.
+    /// The immutable operation body must already be durable before this call.
+    pub fn commit_operation(&self, dirs: &[PathBuf], id: &str, reason: &str) -> Result<u64> {
+        let mut publication_started=false;
+        let result=(||->Result<Snapshot> {
+            ensure!(operation_id_valid(id), "Invalid local operation ID");
+            let keys = dirs.iter().filter(|dir| !self.is_download_cache_project(dir))
+                .map(|dir| {let key=absolute(dir)?;ensure!(key.len()<=16384,"Dirty project path is too long");Ok(key)})
+                .collect::<Result<Vec<_>>>()?;
+            ensure!(!keys.is_empty(), "A cache-only operation cannot authorize library retirement");
+            self.update_with_publication_stage(std::time::Duration::from_secs(2),|state| {
+                if state.retire_ops.contains_key(id) { return Ok(()); }
+                ensure!(state.retire_ops.len()<MAX_RETIRE_OPS,"Too many unacknowledged local operations");
+                bump(state)?;
+                for key in &keys {state.dirs.insert(key.clone(),state.seq);}
+                if state.dirs.len()>MAX_DIRS {state.dirs.clear();state.all_seq=state.seq;}
+                state.retire_ops.insert(id.into(),state.seq);
+                Ok(())
+            },||publication_started=true)
+        })();
+        let state=result.map_err(|cause|if publication_started {cause}
+            else {anyhow::Error::new(PublicationNotAttempted{cause})})?;
+        eprintln!("Sync operation committed: {} ({})",id,log_reason(reason));
+        Ok(state.retire_ops[id])
+    }
+    /// Remove only a verified remote operation receipt, retaining newer edits.
+    pub fn acknowledge_operation(&self, id:&str, expected_sequence:u64)->Result<bool> {
+        ensure!(operation_id_valid(id),"Invalid local operation ID");
+        let mut removed=false;
+        self.update(|state| {
+            if state.retire_ops.get(id)==Some(&expected_sequence) {
+                state.retire_ops.remove(id);removed=true;
+            }
+            if !state.is_dirty(){state.since=None;}
+            Ok(())
+        })?;
+        Ok(removed)
     }
     fn is_download_cache_project(&self, dir: &Path) -> bool {
         let Some(config)=self.directory.canonicalize().ok() else {return false;};
@@ -176,6 +251,14 @@ impl Store {
         timeout: std::time::Duration,
         change: impl FnOnce(&mut Snapshot) -> Result<()>,
     ) -> Result<Snapshot> {
+        self.update_with_publication_stage(timeout,change,||{})
+    }
+    fn update_with_publication_stage(
+        &self,
+        timeout:std::time::Duration,
+        change:impl FnOnce(&mut Snapshot)->Result<()>,
+        before_publish:impl FnOnce(),
+    )->Result<Snapshot> {
         fs::create_dir_all(&self.directory)?;
         let dir = self.directory.canonicalize()?;
         let started = std::time::Instant::now();
@@ -196,6 +279,11 @@ impl Store {
         };
         let mut document = read(&dir)?;
         change(&mut document.state)?;
+        before_publish();
+        #[cfg(test)]
+        if self.fail_publication_flush {
+            return publish_with_flush(&dir,document,|_|anyhow::bail!("Injected directory flush failure after ledger publication"));
+        }
         publish(&dir, document)
     }
 }
@@ -213,6 +301,9 @@ pub fn mark_library(reason: &str) -> Result<()> {
 }
 pub fn clear(up_to: u64) -> Result<Snapshot> {
     Store::new(crate::audio_devices::directory()).clear(up_to)
+}
+pub fn operation_id_valid(id:&str)->bool {
+    !id.is_empty() && id.len()<=128 && id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-')
 }
 fn absolute(path: &Path) -> Result<String> {
     ensure!(path.is_absolute(), "Dirty project path must be absolute");
@@ -334,6 +425,15 @@ fn document(bytes: Option<Vec<u8>>) -> Result<Document> {
                 state.dirs.insert(path.clone(), seq);
             }
         }
+        if let Some(operations)=dirty.get("retireOps").filter(|value|!value.is_null()) {
+            let operations=operations.as_object().context("Invalid local operation references")?;
+            ensure!(operations.len()<=MAX_RETIRE_OPS,"Too many local operation references");
+            for (id,sequence) in operations {
+                ensure!(operation_id_valid(id),"Invalid local operation ID");
+                let sequence=sequence.as_u64().filter(|seq|*seq>0&&*seq<=state.seq).context("Invalid local operation sequence")?;
+                state.retire_ops.insert(id.clone(),sequence);
+            }
+        }
         if let Some(all) = dirty.get("allSeq").filter(|v| !v.is_null()) {
             state.all_seq = all
                 .as_u64()
@@ -382,7 +482,13 @@ fn lease(dir: &Path) -> Result<crate::file_lease::Lease> {
     };
     crate::file_lease::Lease::acquire(file).context("Sync intent is already being updated")
 }
-fn publish(dir: &Path, mut document: Document) -> Result<Snapshot> {
+fn publish(dir: &Path, document: Document) -> Result<Snapshot> {
+    publish_with_flush(dir,document,|dir| {
+        #[cfg(unix)] File::open(dir)?.sync_all().context("Could not flush durable sync intent directory")?;
+        let _=dir;Ok(())
+    })
+}
+fn publish_with_flush(dir: &Path, mut document: Document, flush:impl FnOnce(&Path)->Result<()>) -> Result<Snapshot> {
     let mut dirty = document
         .raw
         .get("gdriveDirty")
@@ -392,6 +498,8 @@ fn publish(dir: &Path, mut document: Document) -> Result<Snapshot> {
     dirty["seq"] = json!(document.state.seq);
     dirty["dirs"] = serde_json::to_value(&document.state.dirs)?;
     dirty["allSeq"] = json!(document.state.all_seq);
+    if document.state.retire_ops.is_empty() {dirty.as_object_mut().unwrap().remove("retireOps");}
+    else {dirty["retireOps"]=serde_json::to_value(&document.state.retire_ops)?;}
     if let Some(since) = document.state.since {
         dirty["since"] = json!(since);
     } else {
@@ -433,10 +541,7 @@ fn publish(dir: &Path, mut document: Document) -> Result<Snapshot> {
         fs::hard_link(&pending.0, dir.join(NAME))
             .context("Sync intent appeared during publication")?;
     }
-    #[cfg(unix)]
-    File::open(dir)?
-        .sync_all()
-        .context("Could not flush durable sync intent directory")?;
+    flush(dir).map_err(|cause|anyhow::Error::new(PublicationUncertain{cause}))?;
     Ok(document.state)
 }
 

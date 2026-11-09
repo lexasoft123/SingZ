@@ -282,7 +282,9 @@ fn verify_receipt(
     Ok(())
 }
 fn count(dirty: &crate::sync_dirty::Snapshot) -> i32 {
-    if dirty.all_seq > 0 {
+    if dirty.all_seq > 0 || !dirty.retire_ops.is_empty() {
+        // Operation receipts can remain after their directory dirty marks are
+        // cleared. They still represent pending library reconciliation.
         -1
     } else {
         dirty.dirs.len().min(i32::MAX as usize) as i32

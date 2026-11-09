@@ -61,9 +61,11 @@ physical microphone, OS chooser or global input was used.
 
 ## Remaining gaps
 
-- Journal-owned folder retirement after Delete/Rename and later name reuse needs
-  explicit exact-ID receipts. An arbitrary replacement is still refused. The
-  empty-library deletion guard remains; missing storage does not authorize deletion.
+- The subsequent [retirement lifecycle checkpoint](RETIREMENT_DRIVE_REVIEW.md) now
+  implements exact-ID Delete/Rename and name reuse locally, with durable ordinary
+  upload recovery before retirement. The older subset-repair protocol above is
+  retained for legacy intents. Arbitrary replacements remain refused and missing
+  storage does not authorize deletion.
 - Live Google consent, real account visibility and Windows/Linux qualification of
   this new transaction remain open. Previously cached old IDs can still read the
   archived audio; refreshed readers determine the bounded new-generation view.

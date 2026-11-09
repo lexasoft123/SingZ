@@ -11,8 +11,10 @@ publication → fresh download/open → offline restart now passes at both sizes
 including truthful Pending status and preserved remote recovery media. The frozen
 suite passes 943 Rust tests; six hidden launches and 14 captures pass with stable
 foreground. Interrupted upload/new-Save recovery is included. See
-[empty Drive review](EMPTY_DRIVE_REVIEW.md); Delete/Rename/name reuse, live Google,
-platform and complete visual/performance qualification remain open.
+[empty Drive review](EMPTY_DRIVE_REVIEW.md). Its lifecycle extension now passes
+1,009 Rust tests and the actual Delete-last/name-reuse/typed-Rename journey at both
+sizes (two launches, 20 inspected captures). See [retirement review](RETIREMENT_DRIVE_REVIEW.md).
+Live Google, platform and complete visual/performance qualification remain open.
 
 Windows provider source checkpoint (2026-11-09): native availability, explicit
 provider preferences, provider-scoped playback outputs and owner-safe switching

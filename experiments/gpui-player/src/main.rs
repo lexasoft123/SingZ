@@ -49,6 +49,11 @@ mod drive_plan;
 mod drive_remote;
 mod drive_snapshot;
 mod drive_empty;
+mod directory_identity;
+mod drive_local_ops;
+mod drive_retirement;
+mod drive_retire_transaction;
+mod drive_publication;
 mod drive_graph;
 mod native_graph;
 mod playback_graph;
@@ -67,6 +72,8 @@ mod ui_drive_restore;
 mod ui_audio_provider;
 #[cfg(feature = "ui-tests")]
 mod ui_empty_drive;
+#[cfg(feature = "ui-tests")]
+mod ui_drive_retirement;
 mod sync_scheduler;
 mod lrclib;
 mod lyrics_resolution;
@@ -6012,6 +6019,12 @@ fn main() {
             assert!(background&&std::env::var("SINGZ_MUTE").as_deref()==Ok("1")
                 &&std::env::var("SINGZ_GPUI_TEST_NO_CAPTURE").as_deref()==Ok("1"));
             ui_empty_drive::run(window_handle,view.clone(),directory.into(),cx);
+        }
+        #[cfg(feature = "ui-tests")]
+        if let Some(directory)=std::env::var_os("SINGZ_GPUI_DRIVE_RETIREMENT_TEST") {
+            assert!(background&&std::env::var("SINGZ_MUTE").as_deref()==Ok("1")
+                &&std::env::var("SINGZ_GPUI_TEST_NO_CAPTURE").as_deref()==Ok("1"));
+            ui_drive_retirement::run(window_handle,view.clone(),directory.into(),cx);
         }
         #[cfg(feature = "ui-tests")]
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_PLAYBACK_GRAPH_TEST") {

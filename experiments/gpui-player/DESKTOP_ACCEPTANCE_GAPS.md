@@ -9,7 +9,7 @@ qualify every route, physical device, platform or production image.
 | Gap | Current evidence | Required implementation and acceptance |
 | --- | --- | --- |
 | Saved empty project → Drive sync — local checkpoint passed | Dedicated publication/recovery and automatic continuation pass 943 Rust tests and the real two-size writer → fresh reader → offline journey (six launches, 14 captures). Pending no longer claims “up to date”. | Local fixture integration is qualified; real Google and Windows/Linux qualification remain open. See `EMPTY_DRIVE_REVIEW.md`. Delete/Rename/name reuse is the separate lifecycle gap below. |
-| Empty-publication history after Delete/Rename and name reuse | Committed recovery journals bind to an exact remote folder lineage. A later same-name project has no durable retirement receipt for that old lineage; accepting an arbitrary replacement would be unsafe. | After the current publication checkpoint, add exact-ID retirement receipts to authorized reconciliation and verify rename/delete → same-name creation. Keep the empty-library deletion guard; an unavailable root is not deletion authority. This remains a subsequent lifecycle gap, not part of the current retry-recovery batch. |
+| Publication history after Delete/Rename and name reuse — local checkpoint passed | Exact local-operation authority, immutable ordinary upload recovery and catalog-last retirement pass 1,009 Rust tests. The actual two-size Delete-last → same-name reuse → typed Rename → same-name reuse journey passes two launches and 20 captures. | Local lifecycle integration is qualified; real Google and Windows/Linux qualification remain open. Preserve recovery archives, replacement admission and the unavailable-library guard. See `RETIREMENT_DRIVE_REVIEW.md`. |
 | Windows audio-provider qualification | Native Settings, preferences and helper now carry explicit provider intent and availability, refuse unavailable providers without fallback, and fence changes against active or retiring audio owners. Independent microphone/monitor inventory stays on WASAPI. | The repaired provider source at `14715b4e` passes Dell build/tests and the hidden native provider/restart journey (`provider5`, `provider-ui3`). Keep broader platform workflows, full codecs and physical audibility separate. ASIO remains unavailable until a licensed adapter and driver are implemented and qualified. See `WINDOWS_PROVIDER_REVIEW.md`; source and macOS checks do not close this platform gate. |
 
 Training's previously missing result reveal, acknowledgement and task-specific
@@ -30,7 +30,7 @@ hidden online/offline journey passes 29 captures with actual search/cancel/retry
 and exact payload checks. See `DRIVE_RESTORE_REVIEW.md`. This supplies the reader
 dependency for empty-project sync; the strict empty reader fixture does not
 qualify publication by the native writer. The publication checkpoint above now verifies the production writer as well;
-real account/platform and the separate retirement lifecycle remain open.
+real account/platform qualification remains open. The separate retirement lifecycle now has the local checkpoint in `RETIREMENT_DRIVE_REVIEW.md`.
 
 ## Qualification gates
 
@@ -43,7 +43,8 @@ real account/platform and the separate retirement lifecycle remain open.
   failure. The repaired Windows provider source passes 865 tests, zero failures and two
   ignores, plus the actual hidden provider/restart journey on the Dell. This
   closes that scoped boundary gate; broader Windows delivery remains open. The empty-publication checkpoint now passes 943 tests, zero failures and two
-  ignores. The historical intermittent
+  ignores. The later retirement/name-reuse snapshot passes 1,009 tests with zero
+  failures and those two ignores. The historical intermittent
   two-second engine-probe shell fixture
   remains unresolved; neither an isolated pass nor this full pass closes it. The source
   probe budget is 45 seconds; Qwen health readiness uses a separate 180-second
@@ -66,8 +67,10 @@ concrete gaps before treating broad historical “remaining work” notes as clo
 
 ## Immediate completion order — 2026-11-09
 
-1. Review and commit the verified empty-publication checkpoint.
-2. Complete exact-ID retirement after authorized Delete/Rename and same-name reuse.
+1. The verified empty-publication checkpoint is committed and pushed as `3ce6fa7e`.
+2. Exact-ID retirement and same-name reuse now pass the local suite and actual
+   two-size UI journey. Preserve immutable upload recovery before retirement.
+   See `RETIREMENT_DRIVE_REVIEW.md` for exact scope and outstanding platform gates.
 3. Finish remaining Windows/Linux codec/configured delivery and the qualification
    gates above. Repeat previously passing matrices when a change affects them or
    a failure requires it.

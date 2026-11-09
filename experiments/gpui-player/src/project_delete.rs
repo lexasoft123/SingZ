@@ -360,7 +360,7 @@ pub fn inspect_cancel(root: &Path, dir: &Path, cancel: &impl Fn() -> bool) -> Re
         tree,
     })
 }
-fn lease(path: &Path, label: &str) -> Result<crate::file_lease::Lease> {
+pub(crate) fn lease(path: &Path, label: &str) -> Result<crate::file_lease::Lease> {
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
     no_follow(&mut options);
@@ -467,7 +467,16 @@ fn delete_with(
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    exclusive_move(&target.dir, &hidden).context("Could not exclusively hide the saved project")?;
+    let local_operations = crate::drive_local_ops::Store::new(configdir.to_owned());
+    let binding = crate::drive_retirement::active_binding(
+        &configdir.join("gdrive/retirements"), &target.root)?;
+    let retirement = local_operations.prepare(crate::drive_local_ops::Kind::Delete,
+        &target.root, &target.dir, &hidden, &target.metadata_hash, binding)?;
+    if let Err(error) = exclusive_move(&target.dir, &hidden) {
+        retirement.abort()?;
+        return Err(error).context("Could not exclusively hide the saved project");
+    }
+    let mut retirement_warning = None;
     let prepared = (|| {
         sync(&target.root)?;
         if let Some(parent) = target.dir.parent() {
@@ -493,9 +502,14 @@ fn delete_with(
         );
         let (tree, _) = scan(&hidden, cancel)?;
         ensure!(tree == target.tree, "Project files changed during deletion");
-        crate::sync_dirty::Store::new(configdir.to_owned()).mark_project(&target.dir, "deleted")
+        retirement_warning = retirement.commit(&crate::sync_dirty::Store::new(configdir.to_owned()))?.warning;
+        Ok::<(), anyhow::Error>(())
     })();
     if let Err(error) = prepared {
+        if crate::drive_local_ops::is_commit_unknown(&error) {
+            return Err(error).with_context(|| format!(
+                "Deletion commit outcome is unknown; project retained at {} without rollback", hidden.display()));
+        }
         let rollback = (|| {
             ensure!(
                 ordinary_dir(&hidden)? == target.project_identity,
@@ -508,18 +522,26 @@ fn delete_with(
                     sync(parent)?;
                 }
             }
+            retirement.abort()?;
             Ok::<(), anyhow::Error>(())
         })();
         return match rollback {
             Ok(()) => Err(error),
+            Err(rollback) if ordinary_dir(&target.dir).is_ok_and(|identity| identity == target.project_identity) =>
+                Err(anyhow::anyhow!("{error:#}; project restored at {}; recovery bookkeeping remains unresolved: {rollback:#}",
+                    target.dir.display())),
             Err(rollback) => Err(anyhow::anyhow!(
-                "{error:#}; deletion did not commit; project retained at {} because rollback refused: {rollback:#}",
-                hidden.display()
+                "{error:#}; deletion did not commit; rollback refused or could not be confirmed. Check {} and {}: {rollback:#}",
+                target.dir.display(), hidden.display()
             )),
         };
     }
     // Durable dirty intent is the commit boundary. Cancellation/navigation after
     // it cannot turn an accepted deletion into a stale/failed receipt.
+    if let Some(warning) = retirement_warning {
+        return Ok(Outcome { dir: target.dir.clone(), name: target.name.clone(),
+            warning: Some(format!("{warning}; hidden cleanup remains at {}", hidden.display())) });
+    }
     let cleanup = (|| {
         hook(Point::AfterMark, &hidden)?;
         check(cancel)?;
@@ -557,7 +579,7 @@ fn sync(path: &Path) -> Result<()> {
     Ok(())
 }
 #[cfg(unix)]
-fn exclusive_move(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn exclusive_move(from: &Path, to: &Path) -> std::io::Result<()> {
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
     let from = CString::new(from.as_os_str().as_bytes())?;
     let to = CString::new(to.as_os_str().as_bytes())?;
@@ -592,7 +614,7 @@ fn exclusive_move(from: &Path, to: &Path) -> std::io::Result<()> {
     }
 }
 #[cfg(windows)]
-fn exclusive_move(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn exclusive_move(from: &Path, to: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
     unsafe extern "system" {

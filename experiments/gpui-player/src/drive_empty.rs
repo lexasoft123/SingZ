@@ -12,7 +12,7 @@ const LIMIT:u64=16*1024*1024;
 #[derive(Clone,Debug)]
 pub struct Request {pub binding:String,pub library_root:PathBuf,pub journal_root:PathBuf,pub singz_root:String,pub project:String}
 #[derive(Clone,Debug)]
-pub struct Receipt {pub project:String,pub local_document:String,pub folder_id:String,pub document_id:String,pub catalog:Value,pub transaction:String,pub repair:bool}
+pub struct Receipt {pub project:String,pub local_document:String,pub folder_id:String,pub document_id:String,pub catalog:Value,pub transaction:String,pub repair:bool,pub publication:Option<crate::drive_retirement::PublicationPlan>}
 fn check(cancel:&impl Fn()->bool)->Result<()> {ensure!(!cancel(),"Empty publication cancelled; recoverable transaction retained");Ok(())}
 fn md5(bytes:&[u8])->String {format!("{:x}",Md5::digest(bytes))}
 fn same_content(a:&Metadata,b:&Metadata)->bool {a.entry.id==b.entry.id&&a.entry.name==b.entry.name&&a.entry.mime_type==b.entry.mime_type&&a.entry.md5_checksum==b.entry.md5_checksum&&a.entry.size==b.entry.size&&a.entry.app_properties==b.entry.app_properties&&!b.trashed}
@@ -26,7 +26,8 @@ fn read_remote(remote:&Remote,store:&Store,entry:&Metadata,cancel:&impl Fn()->bo
     let result=(||->Result<Vec<u8>>{remote.download(&entry.entry.id,&path,LIMIT,cancel)?;let bytes=journal::bounded(&path,LIMIT)?;ensure!(bytes.len()as u64==size&&md5(&bytes)==expected,"Remote transaction document integrity mismatch");Ok(bytes)})();let _=fs::remove_file(path);result
 }
 fn assert_binding(j:&Journal,r:&Request,root:&Path)->Result<()> {ensure!(j.binding==r.binding&&j.local_root==root&&j.singz_root==r.singz_root&&j.project==r.project,"Empty transaction belongs to a different account/root/project");Ok(())}
-fn local_current(j:&Journal)->Result<()> {let bytes=journal::bounded(&j.local_root.join(&j.project).join("project.json"),LIMIT)?;ensure!(crate::project_store::fingerprint(&bytes)==j.local_document,"Local Save changed; empty transaction requires recovery before publishing newer state");Ok(())}
+fn local_current(j:&Journal)->Result<()> {let bytes=journal::bounded(&j.local_root.join(&j.project).join("project.json"),LIMIT)?;ensure!(crate::project_store::fingerprint(&bytes)==j.local_document,"Local Save changed; empty transaction requires recovery before publishing newer state");
+    if let Some(capture)=&j.capture {ensure!(crate::directory_identity::read(&j.local_root)?==capture.root_identity&&crate::directory_identity::read(&j.local_root.join(&j.project))?==capture.local_identity,"Local directory changed; empty transaction requires recovery before publishing a replacement");}Ok(())}
 fn account_binding(remote:&Remote,root:&Path,singz:&str,cancel:&impl Fn()->bool)->Result<String> {
     let account=remote.account_key(cancel)?;
     Ok(crate::project_store::fingerprint(&serde_json::to_vec(&(account,&remote.auth.config.api_base,&remote.auth.config.client_id,singz,root))?))
@@ -111,11 +112,16 @@ fn new_journal(remote:&Remote,store:&Store,r:&Request,root:&Path,cancel:&impl Fn
     let capture_dir=store.path.join(format!("capture-{}",crate::drive_http::random_id()?));let mut builder=fs::DirBuilder::new();#[cfg(unix)] {use std::os::unix::fs::DirBuilderExt;builder.mode(0o700);}builder.create(&capture_dir)?;
     let capture=drive_snapshot::capture_empty(root,&r.project,&capture_dir,cancel)?;
     let mut payloads=vec![];for f in &capture.snapshot.top {let bytes=journal::bounded(&f.path,LIMIT)?;store.write(&f.name,&bytes)?;payloads.push(Payload{name:f.name.clone(),md5:md5(&bytes),size:bytes.len()as u64});}
-    let local_document=capture.local_document.clone();drop(capture);drop(notice);let _=fs::remove_dir(capture_dir);
-    journal_from_payloads(remote,store,r,root,cancel,local_document,payloads,false,&transaction,&[])
+    let local_document=capture.local_document.clone();let captured=capture.publication_capture();drop(capture);drop(notice);let _=fs::remove_dir(capture_dir);
+    let existing=remote.children(&r.singz_root,cancel)?;let admitted=unique(&existing,&r.project)?.map(|row|row.id.clone());
+    let binding=crate::drive_retirement::Binding{key:r.binding.clone(),local_root:root.into(),singz_root:r.singz_root.clone(),root_identity:captured.root_identity.clone()};
+    crate::drive_retire_transaction::admit_destination(remote,&r.journal_root.parent().context("Empty journal has no private namespace")?.join("retirements"),&binding,&r.project,&captured,admitted.as_deref(),cancel)?;
+    let mut journal=journal_from_payloads(remote,store,r,root,cancel,local_document,payloads,false,&transaction,&[],admitted.as_deref())?;
+    journal.capture=Some(captured);Ok(journal)
 }
-fn journal_from_payloads(remote:&Remote,store:&Store,r:&Request,root:&Path,cancel:&impl Fn()->bool,local_document:String,payloads:Vec<Payload>,repair:bool,transaction:&str,additional_top:&[String])->Result<Journal> {
+fn journal_from_payloads(remote:&Remote,store:&Store,r:&Request,root:&Path,cancel:&impl Fn()->bool,local_document:String,payloads:Vec<Payload>,repair:bool,transaction:&str,additional_top:&[String],admitted_id:Option<&str>)->Result<Journal> {
     let children=remote.children(&r.singz_root,cancel)?;
+    ensure!(unique(&children,&r.project)?.map(|row|row.id.as_str())==admitted_id,"Empty destination changed after admission; foreign replacement was preserved");
     let active_properties=BTreeMap::from([("singzEmptyProtocol".into(),"1".into()),("singzEmptyBinding".into(),crate::project_store::fingerprint(r.binding.as_bytes())),("singzEmptyRoot".into(),r.singz_root.clone()),("singzEmptyActive".into(),crate::project_store::fingerprint(r.project.as_bytes()))]);
     let folder_pending=unique(&children,&r.project)?.is_none();
     let folder=if let Some(row)=unique(&children,&r.project)? {ensure!(row.mime_type.as_deref()==Some(FOLDER),"Active project is not a folder");observed(remote,&row.id,cancel)?}
@@ -149,11 +155,18 @@ fn journal_from_payloads(remote:&Remote,store:&Store,r:&Request,root:&Path,cance
     let catalog_id=if old_catalog.is_none(){Some(remote.generate_id(cancel)?)}else{None};
     // GET-only ID allocation is safe before this journal is saved. Every POST
     // later consumes one of these durable identities, never a fresh retry ID.
-    Ok(Journal{version:1,binding:r.binding.clone(),local_root:root.into(),singz_root:r.singz_root.clone(),project:r.project.clone(),transaction:transaction.into(),local_document,phase:Phase::Captured,folder,folder_pending,history_id,history_parent,staged_ids,catalog_id,baseline,moves,old_catalog,history:None,payloads,staged:vec![],installed_catalog:None,ordinary:None,repair,storage_generation:true})
+    Ok(Journal{version:1,binding:r.binding.clone(),local_root:root.into(),singz_root:r.singz_root.clone(),project:r.project.clone(),transaction:transaction.into(),local_document,phase:Phase::Captured,folder,folder_pending,history_id,history_parent,staged_ids,catalog_id,baseline,moves,old_catalog,history:None,payloads,staged:vec![],installed_catalog:None,ordinary:None,repair,storage_generation:true,capture:None})
 }
 fn receipt(j:&Journal,catalog:Value)->Result<Receipt> {
     let doc=j.staged.iter().find(|m|m.entry.name==stage_name("project.json")).context("Missing staged document receipt")?;
-    Ok(Receipt{project:j.project.clone(),local_document:j.local_document.clone(),folder_id:j.folder.entry.id.clone(),document_id:doc.entry.id.clone(),catalog,transaction:j.transaction.clone(),repair:j.repair})
+    let publication=if let Some(capture)=&j.capture {
+        let row=catalog["projects"].as_array().and_then(|rows|rows.iter().find(|row|row["dir"]==j.project)).context("Verified empty catalog omitted project")?.clone();
+        Some(crate::drive_retirement::PublicationPlan{capture:capture.clone(),expected:crate::drive_retirement::ExpectedPublication{
+            folder:j.folder.entry.clone(),members:installed_entries(j)?.into_iter().map(|m|m.entry).collect(),catalog_row:row,
+            catalog:j.installed_catalog.as_ref().context("Missing verified empty catalog identity")?.entry.clone(),
+        }})
+    }else{None};
+    Ok(Receipt{project:j.project.clone(),local_document:j.local_document.clone(),folder_id:j.folder.entry.id.clone(),document_id:doc.entry.id.clone(),catalog,transaction:j.transaction.clone(),repair:j.repair,publication})
 }
 fn installed_entries(j:&Journal)->Result<Vec<Metadata>> {
     j.payloads.iter().map(|p|{let old=j.staged.iter().find(|m|m.entry.name==stage_name(&p.name)).context("Missing staged payload identity")?;Ok(expected_location(old,&j.folder.entry.id,Some(&p.name)))}).collect()
@@ -180,6 +193,11 @@ fn catalog_matches(remote:&Remote,store:&Store,j:&Journal,cancel:&impl Fn()->boo
     if current["format"]!=2||!catalog_row_matches(&current,&intended_doc,&j.project)? {return Ok(None);}
     Ok(Some(meta))
 }
+fn active_namespace(remote:&Remote,j:&Journal,allow_missing:bool,cancel:&impl Fn()->bool)->Result<()> {
+    let root=remote.children(&j.singz_root,cancel)?;let folder=unique(&root,&j.project)?;
+    ensure!(folder.as_ref().is_none_or(|f|f.id==j.folder.entry.id),"A foreign same-name project prevents empty publication");
+    ensure!(allow_missing||folder.is_some(),"Empty publication folder disappeared");Ok(())
+}
 fn complete_proof(remote:&Remote,store:&Store,j:&Journal,cancel:&impl Fn()->bool)->Result<Option<Metadata>> {
     let Some(catalog)=catalog_matches(remote,store,j,cancel)? else{return Ok(None)};
     audio_free(remote,j,cancel,true)?;archive_proof(remote,j,cancel)?;
@@ -188,11 +206,29 @@ fn complete_proof(remote:&Remote,store:&Store,j:&Journal,cancel:&impl Fn()->bool
 }
 #[derive(Clone,Debug,Default)]
 struct Stats {uploaded:usize,unchanged:usize}
+fn capture_legacy_origin(store:&Store,j:&mut Journal,root:&Path,cancel:&impl Fn()->bool,capturing:&impl Fn(Option<PathBuf>))->Result<()> {
+    if j.capture.is_some()||j.repair||j.ordinary.is_some()||matches!(j.phase,Phase::RolledBack|Phase::Superseded|Phase::RollingBack|Phase::Retired){return Ok(());}
+    capturing(Some(root.join(&j.project)));let notice=CaptureNotice(capturing);
+    let scratch=store.path.join(format!("capture-origin-{}",crate::drive_http::random_id()?));let mut builder=fs::DirBuilder::new();
+    #[cfg(unix)]{use std::os::unix::fs::DirBuilderExt;builder.mode(0o700);}builder.create(&scratch)?;
+    let result=(||->Result<()> {
+        let capture=drive_snapshot::capture_empty(root,&j.project,&scratch,cancel).context("Legacy empty publication needs a coherent explicit-empty local capture before lineage can be acknowledged")?;
+        if capture.local_document==j.local_document {
+            let expected=j.payloads.iter().map(|p|(p.name.clone(),(p.md5.clone(),p.size))).collect::<BTreeMap<_,_>>();
+            let current=capture.snapshot.top.iter().map(|p|(p.name.clone(),(p.md5.clone(),p.size))).collect::<BTreeMap<_,_>>();
+            ensure!(current==expected,"Legacy empty payloads changed; save the current arrangement before retrying Drive");
+            j.capture=Some(capture.publication_capture());store.save(j)?;
+        }
+        Ok(())
+    })();drop(notice);let _=fs::remove_dir_all(scratch);result
+}
 fn publish_one(remote:&Remote,r:&Request,cancel:&impl Fn()->bool,progress:&impl Fn(String,f32),capturing:&impl Fn(Option<PathBuf>))->Result<(Receipt,bool,Stats)> {
     let mut stats=Stats::default();
     let root=r.library_root.canonicalize()?;let store=Store::open(&r.journal_root,&r.binding,&root,&r.singz_root,&r.project)?;
     let mut j=match store.read()? {Some(j)=>{assert_binding(&j,r,&root)?;j},None=>{let j=new_journal(remote,&store,r,&root,cancel,capturing)?;store.save(&j)?;j}};
     let mut store=store.for_journal(&j)?;
+    if j.phase==Phase::Retired {store.write(&format!("retired-{}.json",j.transaction),&serde_json::to_vec(&j)?)?;j=new_journal(remote,&store,r,&root,cancel,capturing)?;store.save(&j)?;store=store.for_journal(&j)?;}
+    capture_legacy_origin(&store,&mut j,&root,cancel,capturing)?;
     if j.phase==Phase::Committed&&j.repair {j.repair=false;store.save(&j)?;}
     if let Some(catalog)=complete_proof(remote,&store,&j,cancel)? {
         j.installed_catalog=Some(catalog);let was_committed=j.phase==Phase::Committed;j.phase=Phase::Committed;store.save(&j)?;
@@ -205,11 +241,12 @@ fn publish_one(remote:&Remote,r:&Request,cancel:&impl Fn()->bool,progress:&impl 
     } else {ensure!(j.phase!=Phase::Committed,"Committed empty publication was changed remotely; refresh before writing");}
     if matches!(j.phase,Phase::RolledBack|Phase::Superseded) {store.write(&format!("{}-{}.json",if j.phase==Phase::Superseded{"superseded"}else{"rolledback"},j.transaction),&serde_json::to_vec(&j)?)?;j=new_journal(remote,&store,r,&root,cancel,capturing)?;store.save(&j)?;store=store.for_journal(&j)?;}
     ensure!(j.phase!=Phase::RollingBack,"Empty publication requires explicit recovery resolution");
-    local_authority(&j)?;check(cancel)?;
+    local_authority(&j)?;check(cancel)?;active_namespace(remote,&j,j.folder_pending,cancel)?;
     if j.folder_pending {
         let folder=remote.owned_folder_with_id(&j.folder.entry.id,&j.folder.entry.name,&j.singz_root,&j.folder.entry.app_properties,cancel)?;
         ensure!(exact(&j.folder,&folder),"Reserved active folder identity changed");j.folder_pending=false;store.save(&j)?;
     }
+    active_namespace(remote,&j,false,cancel)?;
     if j.history.is_none() {
         let properties=owned_properties(r,&j.transaction);
         // This generation is outside SingZ, so ordinary folder reconciliation
@@ -242,6 +279,7 @@ fn publish_one(remote:&Remote,r:&Request,cancel:&impl Fn()->bool,progress:&impl 
     ensure!(j.phase==Phase::Installed,"Unsupported pending empty publication state");
     check(cancel)?;local_authority(&j)?;validate_catalog_baseline(remote,&j,cancel)?;archive_proof(remote,&j,cancel)?;audio_free(remote,&j,cancel,true)?;
     let before:Value=serde_json::from_slice(&store.payload("catalog-before.json")?)?;
+    active_namespace(remote,&j,false,cancel)?;
     let catalog=merged_catalog(&before,&j.project,&installed_entries(&j)?)?;let bytes=serde_json::to_vec(&catalog)?;ensure!(bytes.len()as u64<=LIMIT,"Merged catalog exceeds supported size");
     store.write("catalog-after.json",&bytes)?;store.save(&j)?; // Durable intent BEFORE HTTP.
     progress(format!("Publishing empty {}…",j.project),0.9);
@@ -388,13 +426,13 @@ fn begin_ordinary_repair(remote:&Remote,store:&Store,r:&Request,root:&Path,j:&Jo
     let transaction=crate::drive_http::random_id()?;let generation=store.new_generation(&transaction)?;
     for payload in &j.payloads {generation.write(&payload.name,&store.payload(&payload.name)?)?;}
     let allowed=j.ordinary.as_ref().unwrap().expected_top.iter().map(|p|p.name.clone()).collect::<Vec<_>>();
-    let mut next=journal_from_payloads(remote,&generation,r,root,cancel,j.local_document.clone(),j.payloads.clone(),true,&transaction,&allowed)?;
+    let mut next=journal_from_payloads(remote,&generation,r,root,cancel,j.local_document.clone(),j.payloads.clone(),true,&transaction,&allowed,Some(&j.folder.entry.id))?;
     let mut baseline=next.baseline.clone();baseline.sort_by(|a,b|a.entry.id.cmp(&b.entry.id));
     ensure!(baseline==proof.members&&next.old_catalog.as_ref()==Some(&proof.catalog),"Authorized partial publication changed while preparing repair");
     // Recheck exact captured IDs/bytes/catalog before authorizing any retirement.
     for old in &proof.members {ensure!(exact(old,&observed(remote,&old.entry.id,cancel)?),"Partial publication changed before repair intent");}
     ensure!(exact(&proof.catalog,&observed(remote,&proof.catalog.entry.id,cancel)?),"Catalog changed before repair intent");
-    next.repair=true;generation.save(&next)
+    next.repair=true;next.capture=j.capture.clone();generation.save(&next)
 }
 fn declared_member(remote:&Remote,rows:&[RemoteEntry],name:&str,hash:&Value,parent:&str,cancel:&impl Fn()->bool)->Result<Metadata> {
     ensure!(crate::drive_plan::plain_name(name),"Unsafe declared publication member");let row=unique(rows,name)?.context("Declared ordinary payload is missing")?;
@@ -439,10 +477,21 @@ fn mark_superseded(store:&Store,j:&mut Journal)->Result<()> {
 }
 /// Record exact planned ordinary document bytes before any generic upload/trash.
 /// A missing old journal is a no-op and performs no account lookup.
-pub fn prepare_ordinary_publication(remote:&Remote,root:&Path,journal_root:&Path,singz:&str,project:&str,local_document:&str,planned_doc:Option<&crate::drive_plan::LocalEntry>,existing_doc_id:Option<&str>,cancel:&impl Fn()->bool)->Result<()> {
+pub fn prepare_ordinary_publication(remote:&Remote,root:&Path,journal_root:&Path,singz:&str,project:&str,local_document:&str,captured:&crate::drive_retirement::LocalCapture,planned_doc:Option<&crate::drive_plan::LocalEntry>,existing_doc_id:Option<&str>,cancel:&impl Fn()->bool)->Result<()> {
     let root=root.canonicalize()?;let prior=journal::journals(journal_root)?.into_iter().find(|j|j.local_root==root&&j.singz_root==singz&&j.project==project&&j.phase==Phase::Committed);
     let Some(prior)=prior else{return Ok(())};let generation=remote.auth.store.generation();let original_cancel=cancel;let cancel=&||original_cancel()||remote.auth.store.generation()!=generation;let binding=account_binding(remote,&root,singz,cancel)?;ensure!(binding==prior.binding,"Ordinary supersession account changed");
     let store=Store::open(journal_root,&binding,&root,singz,project)?;let mut j=store.read()?.context("Missing prior empty journal")?;let store=store.for_journal(&j)?;
+    ensure!(captured.local_document==local_document,"Ordinary publication capture fingerprint differs from planned source");
+    if let Some(prior)=&j.capture {
+        ensure!(prior.root_identity==captured.root_identity&&prior.local_identity==captured.local_identity,
+            "Committed empty publication belongs to another local directory; retire its lineage before name reuse");
+    }else{
+        // The caller captured these identities under the publication lease before
+        // network; preserve the old empty document fingerprint for repair receipts.
+        // Never call the current same-name directory the origin after an upload.
+        j.capture=Some(crate::drive_retirement::LocalCapture{root_identity:captured.root_identity.clone(),local_identity:captured.local_identity.clone(),local_document:j.local_document.clone()});
+        store.save(&j)?;
+    }
     let id=existing_doc_id.context("Existing committed empty document cannot be replaced by an unreserved new identity")?;
     ensure!(j.staged.iter().any(|m|m.entry.name==stage_name("project.json")&&m.entry.id==id),"Ordinary plan targets a foreign document identity");
     let planned_doc=planned_doc.context("Repair unreadable project metadata before replacing a committed empty generation")?;
@@ -475,8 +524,19 @@ pub fn acknowledge_ordinary_publication(remote:&Remote,root:&Path,journal_root:&
 }
 
 #[derive(Clone,Debug,Default)]
-pub struct Report {pub synced:BTreeMap<PathBuf,String>,pub rows:BTreeMap<String,Value>,pub changed:bool,pub deferred:Vec<PathBuf>,pub uploaded:usize,pub unchanged:usize}
-pub fn has_pending(journal_root:&Path)->Result<bool> {Ok(journal::journals(journal_root)?.iter().any(|j|!matches!(j.phase,Phase::Committed|Phase::Superseded|Phase::RolledBack)))}
+pub struct Report {pub synced:BTreeMap<PathBuf,String>,pub rows:BTreeMap<String,Value>,pub changed:bool,pub deferred:Vec<PathBuf>,pub uploaded:usize,pub unchanged:usize,pub publications:Vec<crate::drive_retirement::PublicationPlan>}
+pub fn has_pending(journal_root:&Path)->Result<bool> {Ok(journal::journals(journal_root)?.iter().any(|j|!matches!(j.phase,Phase::Committed|Phase::Superseded|Phase::RolledBack|Phase::Retired)))}
+/// The caller has already verified terminal retirement of this exact positive
+/// lineage. This only closes its local empty-history pointer; archives remain.
+pub fn retire_verified(journal_root:&Path,source:&crate::drive_retirement::PublicationLineage)->Result<bool> {
+    let prior=journal::journals(journal_root)?.into_iter().find(|j|j.binding==source.binding.key&&j.local_root==source.binding.local_root&&j.singz_root==source.binding.singz_root&&j.project==source.project&&j.folder.entry.id==source.folder.entry.id);
+    let Some(prior)=prior else{return Ok(false)};
+    let base=Store::open(journal_root,&source.binding.key,&source.binding.local_root,&source.binding.singz_root,&source.project)?;let mut j=base.read()?.context("Retired empty history disappeared")?;
+    if j.folder.entry.id!=prior.folder.entry.id{return Ok(false);}
+    ensure!(j.binding==source.binding.key,"Retired empty history changed binding");
+    if j.phase==Phase::Retired{return Ok(false);}let store=base.for_journal(&j)?;
+    j.phase=Phase::Retired;store.write(&format!("retired-{}.json",j.transaction),&serde_json::to_vec(&j)?)?;store.save(&j)?;Ok(true)
+}
 /// Called before adoption/orphan reconciliation. No empty intent and no pending
 /// journal performs no account/Drive request. A changed pass ends reconciliation.
 pub fn run(remote:&Remote,library_root:&Path,journal_root:&Path,singz_id:&str,root_listing:&[RemoteEntry],cancel:&impl Fn()->bool,progress:&impl Fn(String,f32),capturing:&impl Fn(Option<PathBuf>))->Result<Report> {
@@ -485,7 +545,7 @@ pub fn run(remote:&Remote,library_root:&Path,journal_root:&Path,singz_id:&str,ro
     for name in drive_snapshot::scan(&root,cancel)? {let bytes=journal::bounded(&root.join(&name).join("project.json"),LIMIT)?;
         if serde_json::from_slice::<Value>(&bytes).ok().is_some_and(|v|v["settings"]["nativeEmptyTracks"]==true){candidates.insert(name);}
     }
-    let matching=journals.iter().filter(|j|j.singz_root==singz_id&&j.local_root==root&&!matches!(j.phase,Phase::Committed|Phase::Superseded|Phase::RolledBack)).collect::<Vec<_>>();
+    let matching=journals.iter().filter(|j|j.singz_root==singz_id&&j.local_root==root&&!matches!(j.phase,Phase::Committed|Phase::Superseded|Phase::RolledBack|Phase::Retired)).collect::<Vec<_>>();
     let ordinary=journals.iter().filter(|j|j.singz_root==singz_id&&j.local_root==root&&j.phase==Phase::Committed&&j.ordinary.is_some()).collect::<Vec<_>>();
     if candidates.is_empty()&&matching.is_empty()&&ordinary.is_empty(){return Ok(Report::default());}
     let generation=remote.auth.store.generation();let user_cancel=cancel;
@@ -518,6 +578,7 @@ pub fn run(remote:&Remote,library_root:&Path,journal_root:&Path,singz_id:&str,ro
         if repairing {
             progress(format!("Recovering interrupted publication of {}…",prior.project),0.05);
             let (receipt,_,stats)=publish_one(remote,&request,cancel,progress,capturing)?;
+            if let Some(publication)=&receipt.publication {report.publications.push(publication.clone());}
             report.uploaded+=stats.uploaded;report.unchanged+=stats.unchanged;report.changed=true;report.deferred.push(root.join(&prior.project));
             if let Some(row)=receipt.catalog["projects"].as_array().and_then(|rows|rows.iter().find(|r|r["dir"]==prior.project)){report.rows.insert(prior.project.clone(),row.clone());}
             return Ok(report);
@@ -537,10 +598,13 @@ pub fn run(remote:&Remote,library_root:&Path,journal_root:&Path,singz_id:&str,ro
     for name in candidates {
         let request=Request{binding:binding.clone(),library_root:root.clone(),journal_root:journal_root.into(),singz_root:singz_id.into(),project:name.clone()};
         let (receipt,changed,stats)=publish_one(remote,&request,cancel,progress,capturing)?;
+        if let Some(publication)=&receipt.publication {report.publications.push(publication.clone());}
         report.uploaded+=stats.uploaded;report.unchanged+=stats.unchanged;
         let row=receipt.catalog["projects"].as_array().and_then(|rows|rows.iter().find(|r|r["dir"]==name)).context("Verified catalog omitted empty project")?.clone();
         let local_path=root.join(&name);
-        let matches=journal::bounded(&local_path.join("project.json"),LIMIT).ok().is_some_and(|bytes|crate::project_store::fingerprint(&bytes)==receipt.local_document);
+        let matches=journal::bounded(&local_path.join("project.json"),LIMIT).ok().is_some_and(|bytes|crate::project_store::fingerprint(&bytes)==receipt.local_document)
+            &&receipt.publication.as_ref().is_some_and(|p|crate::directory_identity::read(&local_path).ok().as_ref()==Some(&p.capture.local_identity)
+                &&crate::directory_identity::read(&root).ok().as_ref()==Some(&p.capture.root_identity));
         if matches&&!(receipt.repair&&changed) {report.synced.insert(local_path,receipt.local_document);}else{report.deferred.push(local_path);}
         report.rows.insert(name,row);report.changed|=changed;
         if changed {return Ok(report);}
@@ -656,7 +720,43 @@ mod tests {
         assert_eq!(fs::read(f.root.join("Song/project.json")).unwrap(),f.local);assert_eq!(fs::read(f.root.join("Song/stems/custom-a.wav")).unwrap(),b"retained audio");
     }
 
+    fn fixture_origin(f:&Fixture,local_document:&str)->crate::drive_retirement::LocalCapture {
+        let _lease=crate::project_publish::lock(&f.root.join("Song")).unwrap();
+        crate::drive_retirement::LocalCapture{root_identity:crate::directory_identity::read(&f.root).unwrap(),local_identity:crate::directory_identity::read(&f.root.join("Song")).unwrap(),local_document:local_document.into()}
+    }
     fn reserved_fixture(f:&Fixture)->Journal {let all=journal::journals(&f.base.join("journals")).unwrap();assert_eq!(all.len(),1);all.into_iter().next().unwrap()}
+    #[test] fn legacy_committed_empty_origin_is_recaptured_coherently_before_terminal_remote_proof() {
+        let f=Fixture::new();f.run().unwrap();let mut old=reserved_fixture(&f);old.capture=None;
+        {let base=Store::open(&f.base.join("journals"),&old.binding,&f.root,"singz","Song").unwrap();base.save(&old).unwrap();}
+        let report=f.run().unwrap();assert!(!report.changed);assert_eq!(report.publications.len(),1);
+        let captured=&report.publications[0].capture;assert_eq!(captured.local_document,old.local_document);
+        assert_eq!(captured.local_identity,crate::directory_identity::read(&f.root.join("Song")).unwrap());
+        assert_eq!(reserved_fixture(&f).capture.as_ref(),Some(captured));
+    }
+    #[test] fn stable_empty_lineage_uses_current_verified_catalog_after_unrelated_row_changes() {
+        use base64::Engine;
+        let f=Fixture::new();f.run().unwrap();let state=f.state();
+        let bytes=base64::engine::general_purpose::STANDARD.decode(state_file(&state,"catalog")["contentBase64"].as_str().unwrap()).unwrap();
+        let mut document:Value=serde_json::from_slice(&bytes).unwrap();document["foreign"]["keep"]=91.into();document["projects"][0]["unknown"]="unrelated update".into();let bytes=serde_json::to_vec(&document).unwrap();
+        f.remote.upload_bytes(&bytes,"catalog.json","singz",Some("catalog"),"application/json",&||false).unwrap();
+        let report=f.run().unwrap();assert!(!report.changed);let plan=&report.publications[0];
+        assert_eq!(plan.expected.catalog.md5_checksum.as_deref(),Some(md5(&bytes).as_str()));
+        let binding=crate::drive_retirement::bind(&f.remote,&f.base.join("retirements"),&f.root,"singz",&||false).unwrap();
+        crate::drive_retirement::capture_verify_publication(&f.remote,&binding,&plan.capture,&plan.expected,&||false).unwrap();
+    }
+    #[test] fn legacy_empty_ordinary_prepare_saves_the_leased_origin_before_network_publication() {
+        let f=Fixture::new();f.run().unwrap();let mut old=reserved_fixture(&f);old.capture=None;
+        let journals=f.base.join("journals");
+        {let base=Store::open(&journals,&old.binding,&f.root,"singz","Song").unwrap();base.save(&old).unwrap();}
+        f.custom_save("custom-next",b"ordinary saved audio");
+        let mut capture=drive_snapshot::capture(&f.root,"Song",&f.base.join("ordinary-spool"),&||false).unwrap();
+        let origin=capture.publication_capture();let mut plan=crate::drive_plan::plan_project(&capture.snapshot,&crate::drive_plan::RemoteProject::default()).unwrap();capture.spool_uploads(&mut plan,&||false).unwrap();
+        let document=old.staged.iter().find(|m|m.entry.name==stage_name("project.json")).unwrap();
+        prepare_ordinary_publication(&f.remote,&f.root,&journals,"singz","Song",&capture.local_document,&origin,capture.snapshot.top.iter().find(|m|m.name=="project.json"),Some(&document.entry.id),&||false).unwrap();
+        let next=reserved_fixture(&f);let captured=next.capture.unwrap();
+        assert_eq!(captured.root_identity,origin.root_identity);assert_eq!(captured.local_identity,origin.local_identity);
+        assert_eq!(captured.local_document,old.local_document);assert_eq!(next.ordinary.unwrap().local_document,capture.local_document);
+    }
     #[test] fn cancellation_before_new_folder_post_persists_all_creation_ids_for_retry() {
         let f=Fixture::new();fs::rename(f.root.join("Song"),f.root.join("New")).unwrap();let journals=f.base.join("journals");
         let cancel=||journal::journals(&journals).unwrap().iter().any(|j|j.folder_pending);
@@ -698,12 +798,12 @@ mod tests {
 
     #[test] fn unreadable_or_superseding_unapplied_ordinary_intent_cannot_bypass_prior_empty_proof() {
         let f=Fixture::new();assert!(f.run().unwrap().changed);let journals=f.base.join("journals");let committed=reserved_fixture(&f);let id=&committed.staged_ids["project.json"];
-        let before=f.state();assert!(prepare_ordinary_publication(&f.remote,&f.root,&journals,"singz","Song","unused",None,Some(id),&||false).is_err());
+        let before=f.state();assert!(prepare_ordinary_publication(&f.remote,&f.root,&journals,"singz","Song","unused",&fixture_origin(&f,"unused"),None,Some(id),&||false).is_err());
         assert_eq!(f.state()["files"],before["files"]);
         let make=|suffix:&str|{let bytes=serde_json::to_vec(&json!({"version":2,"stemHashes":{(format!("custom-{suffix}.wav")): {"md5":md5(suffix.as_bytes()),"size":suffix.len()}},"settings":{"custom":[{"id":format!("custom-{suffix}"),"file":format!("stems/custom-{suffix}.wav")}],"nativeOriginalDisabled":true}})).unwrap();let path=f.base.join(format!("planned-{suffix}.json"));fs::write(&path,&bytes).unwrap();crate::drive_plan::LocalEntry{name:"project.json".into(),path,mime:"application/json".into(),md5:md5(&bytes),size:bytes.len()as u64}};
         let a=make("a");let b=make("b");let save_a=crate::project_store::fingerprint(b"Save A");let save_b=crate::project_store::fingerprint(b"Save B");
-        prepare_ordinary_publication(&f.remote,&f.root,&journals,"singz","Song",&save_a,Some(&a),Some(id),&||false).unwrap();
-        prepare_ordinary_publication(&f.remote,&f.root,&journals,"singz","Song",&save_b,Some(&b),Some(id),&||false).unwrap();
+        prepare_ordinary_publication(&f.remote,&f.root,&journals,"singz","Song",&save_a,&fixture_origin(&f,&save_a),Some(&a),Some(id),&||false).unwrap();
+        prepare_ordinary_publication(&f.remote,&f.root,&journals,"singz","Song",&save_b,&fixture_origin(&f,&save_b),Some(&b),Some(id),&||false).unwrap();
         let replaced=reserved_fixture(&f);assert_eq!(replaced.ordinary.unwrap().md5,b.md5);assert_eq!(replaced.history_id,committed.history_id);assert_eq!(f.state()["files"],before["files"]);
         // A newer empty Save is also safe when neither prepared ordinary intent
         // wrote anything. It must not be stuck on obsolete A/B fingerprints.
@@ -721,29 +821,33 @@ mod tests {
         let current=reserved_fixture(&f);assert_eq!(current.transaction,original.transaction);let base=Store::open(&f.base.join("journals"),&current.binding,&f.root,"singz","Song").unwrap();let current_store=base.for_journal(&current).unwrap();assert_eq!(current_store.payload("project.json").unwrap(),doc);assert_eq!(current_store.payload("catalog-after.json").unwrap(),catalog);drop(current_store);drop(base);assert_eq!(f.state()["files"],before["files"]);
         assert!(f.run().unwrap().changed);
     }
-    #[test] fn partial_ordinary_media_is_archived_then_latest_nonempty_save_syncs_without_pruned_a() {
+    #[test] fn accepted_partial_ordinary_media_finishes_before_latest_save_without_pruned_a() {
         let f=Fixture::new();assert!(f.sync().unwrap().follow_up);let first=f.sync_journal();let first_archive=f.state();let empty_id=first.staged_ids["project.json"].clone();
         f.custom_save("custom-pending-a",b"A media will be pruned locally");
         f.http("POST","/control",Some(json!({"failNext":[{"method":"PATCH","path":format!("/upload/drive/v3/files/{empty_id}"),"status":503}]})));assert!(f.sync().is_err());
         let active=f.remote.children("project",&||false).unwrap();let stems=active.iter().find(|m|m.name=="stems").unwrap().id.clone();let a=f.remote.children(&stems,&||false).unwrap().remove(0);let a_before=f.state();
         f.custom_save("custom-latest-b",b"latest B audio");assert!(!f.root.join("Song/stems/custom-pending-a.wav").exists());
         let repair=f.sync().unwrap();assert!(repair.follow_up);assert!(!repair.synced.contains_key(&f.root.join("Song")));assert!(repair.skipped.contains(&f.root.join("Song")));
-        let recovered=f.sync_journal();assert!(recovered.repair);assert_eq!(recovered.phase,Phase::Committed);assert_ne!(recovered.history_id,first.history_id);
+        let recovered=f.sync_journal();assert!(!recovered.repair);assert_eq!(recovered.phase,Phase::Superseded);assert_eq!(recovered.history_id,first.history_id);
         let state=f.state();assert_eq!(state_file(&state,&a.id)["contentBase64"],state_file(&a_before,&a.id)["contentBase64"]);assert_eq!(state_file(&state,&a.id)["parents"],json!([stems]));
-        assert_eq!(f.remote.children("project",&||false).unwrap().len(),1);for id in ["old-doc","old-audio","stems",&first.history_id]{assert_eq!(state_file(&state,id),state_file(&first_archive,id));}
+        assert_eq!(f.remote.children("project",&||false).unwrap().len(),2);
+        let completed=f.remote.children("project",&||false).unwrap();let document=completed.iter().find(|m|m.name=="project.json").unwrap();assert_eq!(document.md5_checksum.as_deref(),Some(recovered.ordinary.as_ref().unwrap().md5.as_str()));for id in ["old-doc","old-audio","stems",&first.history_id]{assert_eq!(state_file(&state,id),state_file(&first_archive,id));}
         f.other_local();let latest=f.sync().unwrap();assert!(!latest.follow_up);assert!(latest.synced.contains_key(&f.root.join("Song")));assert_eq!(f.sync_journal().phase,Phase::Superseded);
         let now=f.remote.children("project",&||false).unwrap();let fresh=now.iter().find(|m|m.name=="stems").unwrap();let audio=f.remote.children(&fresh.id,&||false).unwrap();assert_eq!(audio.len(),1);assert_eq!(audio[0].name,"custom-latest-b.wav");
     }
-    #[test] fn partial_document_repair_survives_newer_save_and_interrupted_archive_without_rollback() {
+    #[test] fn accepted_ordinary_catalog_retry_finishes_before_newer_save_without_local_a() {
         let f=Fixture::new();assert!(f.sync().unwrap().follow_up);let first=f.sync_journal();let original=f.state();
         f.custom_save("custom-a",b"A document and audio");f.http("POST","/control",Some(json!({"failNext":[{"method":"PATCH","path":"/upload/drive/v3/files/catalog","status":503}]})));assert!(f.sync().is_err());
-        let pending=f.sync_journal();let a_doc=pending.ordinary.as_ref().unwrap().document_id.clone();assert_eq!(f.remote.metadata(&a_doc,&||false).unwrap().entry.md5_checksum.as_deref(),Some(pending.ordinary.as_ref().unwrap().md5.as_str()));let a_state=f.state();
+        let pending=f.sync_journal();let accepted=pending.ordinary.as_ref().unwrap();let a_doc=accepted.document_id.clone();assert_eq!(f.remote.metadata(&a_doc,&||false).unwrap().entry.md5_checksum.as_deref(),Some(accepted.md5.as_str()));let a_state=f.state();
         let stem=f.remote.children("project",&||false).unwrap().into_iter().find(|m|m.name=="stems").unwrap().id;
-        fs::remove_file(f.root.join("Song/stems/custom-a.wav")).unwrap();fs::write(f.root.join("Song/project.json"),br#"{"version":2,"name":"newer empty B","stemHashes":{},"settings":{"nativeEmptyTracks":true,"nativeOriginalDisabled":true,"custom":[]}}"#).unwrap();
-        let changed=std::cell::Cell::new(false);let progress=|message:String,_:f32|{if message.starts_with("Preparing empty")&&!changed.replace(true){f.custom_save("custom-c",b"newer C while repairing");f.http("POST","/control",Some(json!({"failNext":[{"method":"PATCH","path":format!("/drive/v3/files/{stem}"),"status":503}]})));}};
-        assert!(crate::drive_sync::run(&f.remote,&f.root,&f.base.join("prefs/gdrive/spool"),&||false,&progress,&|_|{}).is_err());let interrupted=f.sync_journal();assert!(interrupted.repair);assert_eq!(interrupted.phase,Phase::Archiving);
-        let complete=f.sync().unwrap();assert!(complete.follow_up);assert!(!complete.synced.contains_key(&f.root.join("Song")));let repaired=f.sync_journal();assert_eq!(repaired.phase,Phase::Committed);assert!(repaired.repair);
-        let after=f.state();assert_eq!(state_file(&after,&a_doc)["contentBase64"],state_file(&a_state,&a_doc)["contentBase64"]);assert_eq!(state_file(&after,&a_doc)["parents"],json!([repaired.history_id]));for id in ["old-doc","old-audio","stems",&first.history_id]{assert_eq!(state_file(&after,id),state_file(&original,id));}
+        let a=f.remote.children(&stem,&||false).unwrap().into_iter().find(|m|m.name=="custom-a.wav").unwrap();
+        f.custom_save("custom-c",b"newer C after interrupted A catalog");assert!(!f.root.join("Song/stems/custom-a.wav").exists());
+        let complete=f.sync().unwrap();assert!(complete.follow_up);assert!(!complete.synced.contains_key(&f.root.join("Song")));let completed=f.sync_journal();assert_eq!(completed.phase,Phase::Superseded);assert!(!completed.repair);
+        let after=f.state();for id in [&a_doc,&a.id]{assert_eq!(state_file(&after,id)["contentBase64"],state_file(&a_state,id)["contentBase64"]);assert_eq!(state_file(&after,id)["trashed"],false);}assert_eq!(state_file(&after,&a_doc)["parents"],json!(["project"]));assert_eq!(state_file(&after,&a.id)["parents"],json!([stem]));
+        for id in ["old-doc","old-audio","stems",&first.history_id]{assert_eq!(state_file(&after,id),state_file(&original,id));}
+        // The terminal A receipt proves its accepted catalog boundary even
+        // though C already replaced the source before recovery began.
+        let storage=f.base.join("prefs/gdrive/retirements");let binding=crate::drive_retirement::bind(&f.remote,&storage,&f.root,"singz",&||false).unwrap();let proofs=crate::drive_retirement::publications(&storage,&binding).unwrap();assert!(proofs.iter().any(|p|p.project=="Song"&&p.capture.local_document==accepted.local_document&&p.members.iter().any(|m|m.entry.id==a.id)));
         f.other_local();let latest=f.sync().unwrap();assert!(!latest.follow_up);assert!(latest.synced.contains_key(&f.root.join("Song")));let active=f.remote.children("project",&||false).unwrap();let stems=active.iter().find(|m|m.name=="stems").unwrap();assert_eq!(f.remote.children(&stems.id,&||false).unwrap()[0].name,"custom-c.wav");
     }
     #[test] fn foreign_partial_ordinary_member_refuses_recovery_without_mutating_present_payloads() {
@@ -757,7 +861,7 @@ mod tests {
         let f=Fixture::new();assert!(f.run().unwrap().changed);let journals=f.base.join("journals");let committed=reserved_fixture(&f);let document=committed.staged_ids["project.json"].clone();
         let planned=|name:&str|{let bytes=serde_json::to_vec(&json!({"version":2,"stemHashes":{(format!("custom-{name}.wav")):{"md5":md5(name.as_bytes()),"size":name.len()}},"settings":{"nativeOriginalDisabled":true,"custom":[{"id":format!("custom-{name}"),"file":format!("stems/custom-{name}.wav")}]}})).unwrap();let path=f.base.join(format!("intent-{name}.json"));fs::write(&path,&bytes).unwrap();crate::drive_plan::LocalEntry{name:"project.json".into(),path,mime:"application/json".into(),md5:md5(&bytes),size:bytes.len()as u64}};
         let a=planned("a");let b=planned("b");let save_a=crate::project_store::fingerprint(b"save A");let save_b=crate::project_store::fingerprint(b"save B");
-        prepare_ordinary_publication(&f.remote,&f.root,&journals,"singz","Song",&save_a,Some(&a),Some(&document),&||false).unwrap();
+        prepare_ordinary_publication(&f.remote,&f.root,&journals,"singz","Song",&save_a,&fixture_origin(&f,&save_a),Some(&a),Some(&document),&||false).unwrap();
         let mut legacy=reserved_fixture(&f);let base=Store::open(&journals,&legacy.binding,&f.root,"singz","Song").unwrap();let store=base.for_journal(&legacy).unwrap();let a_bytes=ordinary_bytes(&store,&legacy,legacy.ordinary.as_ref().unwrap()).unwrap();
         // Emulate a valid pre-upgrade persisted journal. It must remain readable
         // even if the next process stops after fsyncing B but before switching
@@ -766,7 +870,7 @@ mod tests {
         let b_bytes=fs::read(&b.path).unwrap();let b_name=format!("ordinary-{}.json",crate::project_store::fingerprint(&b_bytes));immutable_payload(&store,&b_name,&b_bytes).unwrap();drop(store);drop(base);
         let still_a=reserved_fixture(&f);assert_eq!(still_a.ordinary.as_ref().unwrap().md5,a.md5);assert!(still_a.ordinary.as_ref().unwrap().payload_file.is_none());
         let base=Store::open(&journals,&still_a.binding,&f.root,"singz","Song").unwrap();let store=base.for_journal(&still_a).unwrap();assert_eq!(ordinary_bytes(&store,&still_a,still_a.ordinary.as_ref().unwrap()).unwrap(),a_bytes);assert_eq!(store.payload(&legacy_name).unwrap(),a_bytes);assert_eq!(store.payload(&b_name).unwrap(),b_bytes);drop(store);drop(base);
-        prepare_ordinary_publication(&f.remote,&f.root,&journals,"singz","Song",&save_b,Some(&b),Some(&document),&||false).unwrap();
+        prepare_ordinary_publication(&f.remote,&f.root,&journals,"singz","Song",&save_b,&fixture_origin(&f,&save_b),Some(&b),Some(&document),&||false).unwrap();
         let current=reserved_fixture(&f);let intent=current.ordinary.as_ref().unwrap();assert_eq!(intent.md5,b.md5);assert_eq!(intent.payload_file.as_deref(),Some(b_name.as_str()));
         let base=Store::open(&journals,&current.binding,&f.root,"singz","Song").unwrap();let store=base.for_journal(&current).unwrap();assert_eq!(ordinary_bytes(&store,&current,intent).unwrap(),b_bytes);assert_eq!(store.payload(&legacy_name).unwrap(),a_bytes);
     }

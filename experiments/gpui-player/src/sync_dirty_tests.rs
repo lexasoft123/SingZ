@@ -554,3 +554,27 @@ fn linked_download_cache_does_not_hide_an_external_writer_edit() {
     f.store.mark_project(&path,"outside edit").unwrap();
     assert!(f.store.snapshot().unwrap().dirs.contains_key(path.to_str().unwrap()));
 }
+
+#[test]
+fn local_operation_reference_survives_clear_and_scope_collapse_until_exact_acknowledgement() {
+    let f=Fixture::new();let sequence=f.store.commit_operation(&[f.dir("Old"),f.dir("New")],"rename-accepted","rename").unwrap();
+    let state=f.store.snapshot().unwrap();assert_eq!(state.retire_ops["rename-accepted"],sequence);
+    assert_eq!(state.dirs[f.dir("Old").to_str().unwrap()],sequence);assert_eq!(state.dirs[f.dir("New").to_str().unwrap()],sequence);
+    for i in 0..102 {f.store.mark_project(&f.dir(&format!("Scope {i}")),"other edit").unwrap();}
+    let collapsed=f.store.snapshot().unwrap();assert!(collapsed.all_seq>0);assert_eq!(collapsed.retire_ops["rename-accepted"],sequence);
+    let cleared=f.store.clear(collapsed.seq).unwrap();assert!(cleared.is_dirty());assert!(cleared.dirs.is_empty());assert_eq!(cleared.retire_ops["rename-accepted"],sequence);
+    assert!(!f.store.acknowledge_operation("rename-accepted",sequence+1).unwrap());
+    f.store.mark_project(&f.dir("Newest"),"racing newer Save").unwrap();
+    assert!(f.store.acknowledge_operation("rename-accepted",sequence).unwrap());
+    let retained=f.store.snapshot().unwrap();assert!(retained.retire_ops.is_empty());assert!(retained.dirs.contains_key(f.dir("Newest").to_str().unwrap()));
+}
+#[test]
+fn rejected_operation_reference_publishes_neither_a_mark_nor_authority() {
+    let f=Fixture::new();f.store.mark_project(&f.dir("Before"),"prior").unwrap();let before=fs::read(f.store.directory.join(NAME)).unwrap();
+    assert!(f.store.commit_operation(&[f.dir("After")],"../unsafe","delete").is_err());
+    assert_eq!(fs::read(f.store.directory.join(NAME)).unwrap(),before);
+    assert_eq!(f.store.snapshot().unwrap().retire_ops.len(),0);
+    let sequence=f.store.commit_operation(&[f.dir("Deleted")],"delete-accepted","delete").unwrap();
+    assert_eq!(f.store.commit_operation(&[f.dir("Deleted")],"delete-accepted","retry").unwrap(),sequence);
+    assert_eq!(f.store.snapshot().unwrap().seq,sequence);
+}

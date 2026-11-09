@@ -6,7 +6,7 @@ use std::{fs::{self,File,OpenOptions},io::{Read,Write},path::{Path,PathBuf},sync
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(rename_all="camelCase")]
-pub enum Phase {Captured,Staged,Archiving,Archived,Installed,Committed,Superseded,RollingBack,RolledBack}
+pub enum Phase {Captured,Staged,Archiving,Archived,Installed,Committed,Superseded,RollingBack,RolledBack,Retired}
 #[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]
 pub struct Payload {pub name:String,pub md5:String,pub size:u64}
 #[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]
@@ -31,6 +31,7 @@ pub struct Journal {
     /// or roll back to the incomplete ordinary baseline on a local edit.
     #[serde(default)] pub repair:bool,
     #[serde(default)] pub storage_generation:bool,
+    #[serde(default)] pub capture:Option<crate::drive_retirement::LocalCapture>,
 }
 pub struct Store {pub path:PathBuf,base:PathBuf,_lease:Arc<crate::file_lease::Lease>}
 fn ordinary_directory(path:&Path)->Result<()> {

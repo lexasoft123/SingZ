@@ -26,15 +26,18 @@ pub struct Capture {
     /// Local document fingerprint for UI status; the transported document may
     /// gain hash maintenance fields without mutating the editor's CAS base.
     pub local_document: String,
+    pub root_identity: crate::directory_identity::DirectoryIdentity,
+    pub local_identity: crate::directory_identity::DirectoryIdentity,
     pub warnings: Vec<String>,
     spool: PathBuf,
     source: PathBuf,
     lease: Option<crate::file_lease::Lease>,
+    promoted: bool,
 }
 impl Drop for Capture {
     fn drop(&mut self) {
         self.lease.take();
-        let _ = fs::remove_dir_all(&self.spool);
+        if !self.promoted { let _ = fs::remove_dir_all(&self.spool); }
     }
 }
 fn check(cancel: &impl Fn() -> bool) -> Result<()> {
@@ -211,6 +214,8 @@ fn capture_inner(root:&Path,name:&str,spool_root:&Path,cancel:&impl Fn()->bool,a
     let cancel = &|| user_cancel() || crate::project_publish::write_pending(&source);
     check(cancel)?;
     let lease = crate::project_publish::lock(&source)?;
+    let root_identity = crate::directory_identity::read(&root)?;
+    let local_identity = crate::directory_identity::read(&source)?;
     let spool = spool_root.join(name);
     fs::create_dir_all(&spool)?;
     let bytes = read_bounded(&source.join("project.json"), JSON_LIMIT)?;
@@ -234,10 +239,13 @@ fn capture_inner(root:&Path,name:&str,spool_root:&Path,cancel:&impl Fn()->bool,a
             stems_readable: true,
         },
         local_document,
+        root_identity,
+        local_identity,
         warnings: Vec::new(),
         spool,
         source: source.clone(),
         lease: Some(lease),
+        promoted: false,
     };
     let mut doc = parsed.unwrap_or(Value::Null);
     if explicit_empty {
@@ -391,9 +399,40 @@ fn capture_inner(root:&Path,name:&str,spool_root:&Path,cancel:&impl Fn()->bool,a
             == capture.local_document,
         "Project metadata changed while preparing sync"
     );
+    ensure!(crate::directory_identity::read(&root)?==capture.root_identity
+        && crate::directory_identity::read(&source)?==capture.local_identity,
+        "Project directory changed while preparing sync");
     Ok(capture)
 }
 impl Capture {
+    /// Transfer the changed-only spool into durable transaction storage. No
+    /// unchanged audio is copied and no live project path is read here.
+    pub fn promote_uploads(&mut self,plan:&mut ProjectPlan,destination:&Path)->Result<()> {
+        ensure!(self.lease.is_none(),"Release the publication lease by spooling before promotion");
+        ensure!(!self.promoted&&!destination.exists(),"Publication spool was already promoted");
+        for step in &plan.upload {ensure!(step.path.starts_with(&self.spool),"Publication upload still depends on a live source");}
+        let old=self.spool.clone();let meta=fs::symlink_metadata(&old)?;
+        ensure!(meta.is_dir()&&!meta.file_type().is_symlink(),"Unsafe publication spool");
+        fs::rename(&old,destination).context("Publication spool and durable journal must share their private filesystem")?;
+        self.spool=destination.to_owned();self.promoted=true;
+        for entry in self.snapshot.top.iter_mut().chain(self.snapshot.stems.iter_mut()) {
+            if let Ok(relative)=entry.path.strip_prefix(&old) {entry.path=destination.join(relative);}
+        }
+        for step in &mut plan.upload {let relative=step.path.strip_prefix(&old)?;step.path=destination.join(relative);}
+        #[cfg(not(windows))] {
+            File::open(destination)?.sync_all()?;
+            File::open(destination.parent().context("Promoted spool has no parent")?)?.sync_all()?;
+            File::open(old.parent().context("Capture spool has no parent")?)?.sync_all()?;
+        }
+        Ok(())
+    }
+    pub fn publication_capture(&self) -> crate::drive_retirement::LocalCapture {
+        crate::drive_retirement::LocalCapture {
+            root_identity: self.root_identity.clone(),
+            local_identity: self.local_identity.clone(),
+            local_document: self.local_document.clone(),
+        }
+    }
     fn write_top(&mut self, name: &str, bytes: &[u8], mime: &str) -> Result<()> {
         let path = self.spool.join(name);
         let mut file = crate::drive_http::private_file(&path)?;
@@ -462,6 +501,9 @@ impl Capture {
             output.sync_all()?;
             step.path = target;
         }
+        ensure!(crate::directory_identity::read(self.source.parent().context("Project has no library root")?)?==self.root_identity
+            &&crate::directory_identity::read(&self.source)?==self.local_identity,
+            "Project directory changed while spooling sync");
         self.lease.take();
         Ok(())
     }

@@ -277,6 +277,166 @@ fn actual_oauth_worker_syncs_and_clean_repeat_publishes_no_payloads() {
 }
 
 #[test]
+fn admitted_unmanaged_cloud_subfolders_survive_ordinary_save_and_sync() {
+    let f = Fixture::new();
+    let service = f.service();
+    f.login(&service);
+    drop(service);
+    let config = Config::from_json(&json!({"clientId":"fixture-client",
+        "clientSecret":"fixture-secret","authBase":f.url,"apiBase":f.url,
+        "uploadBase":f.url}).to_string()).unwrap();
+    let remote = crate::drive_remote::Remote::new(AuthClient::new(config,
+        TokenStore::new(&f.config).unwrap()));
+    let root = f.root.canonicalize().unwrap();
+    let singz = remote.folder("SingZ", None, &|| false).unwrap();
+    let song = remote.children(&singz, &|| false).unwrap().into_iter()
+        .find(|entry| entry.name == "Song").unwrap();
+    let stems = remote.children(&song.id, &|| false).unwrap().into_iter()
+        .find(|entry| entry.name == "stems").unwrap();
+    let mut preserved = Vec::new();
+    for (name, parent) in [("notes", &song.id), ("archive", &stems.id),
+        ("project.json", &song.id)] {
+        let folder = remote.folder(name, Some(parent), &|| false).unwrap();
+        let file = remote.upload_bytes(b"unmanaged bytes must survive", "keep.txt",
+            &folder, None, "text/plain", &|| false).unwrap();
+        preserved.push(remote.metadata(&folder, &|| false).unwrap());
+        preserved.push(remote.metadata(&file, &|| false).unwrap());
+    }
+    f.edit(2);
+    let report = crate::drive_sync::run(&remote, &root,
+        &f.config.join("gdrive/spool"), &|| false, &|_, _| {}, &|_| {}).unwrap();
+    let fingerprint = crate::project_store::read(&root.join("Song"), "project.json").unwrap().1;
+    assert_eq!(report.synced.get(&root.join("Song")), Some(&fingerprint));
+    for expected in &preserved {
+        assert_eq!(remote.metadata(&expected.entry.id, &|| false).unwrap(), *expected);
+    }
+    // A second reconciliation must not resume an irrecoverable Prepared
+    // transaction. Retained folders still do not become retirement authority.
+    let again = crate::drive_sync::run(&remote, &root,
+        &f.config.join("gdrive/spool"), &|| false, &|_, _| {}, &|_| {}).unwrap();
+    assert_eq!(again.synced.get(&root.join("Song")), Some(&fingerprint));
+    let binding = crate::drive_retirement::bind(&remote,
+        &f.config.join("gdrive/retirements"), &root, &singz, &|| false).unwrap();
+    let receipt = crate::drive_retirement::publication_candidates(
+        &f.config.join("gdrive/retirements"), &binding.key, &binding.root_identity,
+        "Song", &crate::directory_identity::read(&root.join("Song")).unwrap()).unwrap();
+    assert!(receipt.iter().all(|(_, lineage)| lineage.capture.local_document != fingerprint),
+        "Retained unmanaged folders must remain outside positive ownership");
+}
+
+#[test]
+fn operation_receipts_prevent_clean_status_after_directory_marks_clear() {
+    let mut dirty = crate::sync_dirty::Snapshot::default();
+    assert_eq!(count(&dirty), 0);
+    dirty.retire_ops.insert("captured-operation".into(), 7);
+    assert_eq!(count(&dirty), -1);
+    assert!(dirty.is_dirty());
+}
+
+#[test]
+fn renamed_successor_automatically_continues_to_retire_previous_name() {
+    let f = Fixture::new();
+    let service = f.service();
+    f.login(&service);
+    let root = f.root.canonicalize().unwrap();
+    let old = root.join("Song");
+    let next = root.join("Renamed");
+    let (mut raw, fingerprint) = crate::project_store::read(&old, "project.json").unwrap();
+    let binding = crate::drive_retirement::active_binding(
+        &f.config.join("gdrive/retirements"), &root).unwrap().unwrap();
+    let operation = crate::drive_local_ops::Store::new(f.config.clone()).prepare(
+        crate::drive_local_ops::Kind::Rename, &root, &old, &next,
+        &fingerprint, Some(binding)).unwrap();
+    fs::rename(&old, &next).unwrap();
+    raw["name"] = json!("Renamed");
+    fs::write(next.join("project.json"), serde_json::to_vec(&raw).unwrap()).unwrap();
+    let ledger = crate::sync_dirty::Store::new(f.config.clone());
+    operation.commit(&ledger).unwrap();
+    drop(operation);
+    let previous_sync = service.snapshot().scheduler.last_sync;
+    service.action(Action::SyncNow).unwrap();
+    // No second manual Sync: publication of the waited-for successor must
+    // schedule retirement and then a fresh cleanup pass. Observe each real
+    // boundary with the existing per-phase deadline: two four-second debounce
+    // intervals plus HTTP work must not share a single twelve-second budget.
+    wait(&service, |s| !s.busy && s.scheduler.phase == Phase::Pending
+        && s.scheduler.dirty == -1 && s.scheduler.last_sync > previous_sync);
+    let successor = service.snapshot();
+    assert!(!successor.is_up_to_date());
+    assert_eq!(successor.projects.get(&next), Some(&ProjectState::Synced));
+    assert!(!ledger.snapshot().unwrap().retire_ops.is_empty());
+    wait(&service, |s| !s.busy && s.scheduler.phase == Phase::Pending
+        && s.scheduler.dirty >= 0 && s.scheduler.last_sync > successor.scheduler.last_sync);
+    let retired = service.snapshot();
+    assert!(!retired.is_up_to_date());
+    assert!(ledger.snapshot().unwrap().retire_ops.is_empty());
+    wait(&service, |s| s.is_up_to_date()
+        && s.scheduler.last_sync > retired.scheduler.last_sync);
+    assert!(ledger.snapshot().unwrap().retire_ops.is_empty());
+    assert!(!ledger.snapshot().unwrap().is_dirty());
+    let state = f.state();
+    let files = state["files"].as_array().unwrap();
+    assert!(files.iter().any(|file| file["name"] == "Song"
+        && file["mimeType"] == crate::drive_remote::FOLDER && file["trashed"] == true));
+    assert!(files.iter().any(|file| file["name"] == "Renamed"
+        && file["mimeType"] == crate::drive_remote::FOLDER && file["trashed"] == false));
+    let catalog = files.iter().find(|file| file["name"] == "catalog.json"
+        && file["trashed"] == false).unwrap();
+    use base64::Engine;
+    let body = base64::engine::general_purpose::STANDARD
+        .decode(catalog["contentBase64"].as_str().unwrap()).unwrap();
+    let document: Value = serde_json::from_slice(&body).unwrap();
+    assert!(document["projects"].as_array().unwrap().iter().all(|row| row["dir"] != "Song"));
+    assert!(document["projects"].as_array().unwrap().iter().any(|row| row["dir"] == "Renamed"));
+    drop(service);
+}
+
+#[test]
+fn restored_retired_folder_under_another_name_survives_unrelated_sync() {
+    let f = Fixture::new();
+    let service = f.service();
+    f.login(&service);
+    let root = f.root.canonicalize().unwrap();
+    let old = root.join("Song");
+    let hidden = root.join(".deleted-song");
+    let (_, fingerprint) = crate::project_store::read(&old, "project.json").unwrap();
+    let binding = crate::drive_retirement::active_binding(
+        &f.config.join("gdrive/retirements"), &root).unwrap().unwrap();
+    let operation = crate::drive_local_ops::Store::new(f.config.clone()).prepare(
+        crate::drive_local_ops::Kind::Delete, &root, &old, &hidden,
+        &fingerprint, Some(binding)).unwrap();
+    fs::rename(&old, &hidden).unwrap();
+    let ledger = crate::sync_dirty::Store::new(f.config.clone());
+    operation.commit(&ledger).unwrap();
+    drop(operation);
+    let previous_sync = service.snapshot().scheduler.last_sync;
+    service.action(Action::SyncNow).unwrap();
+    wait(&service, |s| s.is_up_to_date() && s.scheduler.last_sync > previous_sync);
+    let state = f.state();
+    let mut restored = state["files"].as_array().unwrap().iter().find(|file|
+        file["name"] == "Song" && file["mimeType"] == crate::drive_remote::FOLDER).unwrap().clone();
+    assert_eq!(restored["trashed"], true);
+    restored["name"] = json!("Restored elsewhere");
+    restored["trashed"] = json!(false);
+    f.control(json!({"files": [restored.clone()]}));
+    fs::create_dir_all(root.join("Other/stems")).unwrap();
+    fs::write(root.join("Other/project.json"), br#"{"name":"Other","settings":{}}"#).unwrap();
+    fs::write(root.join("Other/stems/vocals.wav"), b"unrelated audio").unwrap();
+    ledger.mark_project(&root.join("Other"), "new unrelated project").unwrap();
+    let previous_sync = service.snapshot().scheduler.last_sync;
+    service.action(Action::SyncNow).unwrap();
+    wait(&service, |s| !s.busy && s.scheduler.last_sync > previous_sync);
+    let after = f.state();
+    let actual = after["files"].as_array().unwrap().iter().find(|file|
+        file["id"] == restored["id"]).unwrap();
+    assert_eq!(actual, &restored, "A previous retirement is not new orphan deletion authority");
+    assert!(after["files"].as_array().unwrap().iter().any(|file|
+        file["name"] == "Other" && file["mimeType"] == crate::drive_remote::FOLDER
+        && file["trashed"] == false));
+    drop(service);
+}
+
+#[test]
 fn empty_publication_continues_automatically_with_zero_or_remaining_dirty_projects() {
     for with_other in [false, true] {
         let f = Fixture::new();

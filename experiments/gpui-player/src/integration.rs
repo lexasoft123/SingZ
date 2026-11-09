@@ -2407,6 +2407,22 @@ fn worker(
                 let alive = alive.clone();
                 thread::spawn(move || {
                     let root = library_root();
+                    // Local crash recovery must also work while Drive is signed
+                    // out. It finishes before enumerating restored/moved rows.
+                    if root.is_dir() {
+                        let config = crate::audio_devices::directory();
+                        let recovery = crate::drive_local_ops::Store::new(config.clone())
+                            .recover_prepared(&root, &crate::sync_dirty::Store::new(config),
+                                |from, to| crate::project_delete::exclusive_move(from, to)
+                                    .map_err(anyhow::Error::from));
+                        match recovery {
+                            Ok(report) => for warning in report.warnings.iter().chain(report.blocked.iter()) {
+                                crate::diagnostics::event("projects", warning.clone(), crate::diagnostics::Level::Warn);
+                            },
+                            Err(error) => crate::diagnostics::event("projects",
+                                format!("Local project recovery remains unresolved: {error:#}"), crate::diagnostics::Level::Warn),
+                        }
+                    }
                     let mut projects = vec![];
                     if let Ok(entries) = fs::read_dir(&root) {
                         for entry in entries.flatten() {
