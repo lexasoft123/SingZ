@@ -23,6 +23,7 @@ mod region_gesture;
 mod region_host;
 mod karaoke_host;
 mod analysis_host;
+mod analyze_provenance;
 mod project_key;
 mod desktop_actions;
 mod desktop_keyboard;

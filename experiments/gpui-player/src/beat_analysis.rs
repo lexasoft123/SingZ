@@ -601,13 +601,7 @@ pub fn run_with_progress(
 ) -> Result<Output> {
     inputs.check(cancel)?;
     progress(0.02);
-    let exe = std::env::var_os("SINGZ_GPUI_ANALYZER")
-        .map(PathBuf::from)
-        .unwrap_or(std::env::current_exe()?.with_file_name(if cfg!(windows) {
-            "singz-analyze.exe"
-        } else {
-            "singz-analyze"
-        }));
+    let exe = crate::analyze_provenance::resolve()?;
     let config = Config::source();
     let scratch = Scratch::new()?;
     let helper = std::env::var_os("SINGZ_GPUI_AUDIO_HELPER")

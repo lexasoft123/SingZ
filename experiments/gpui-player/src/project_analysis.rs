@@ -139,13 +139,7 @@ fn run_melody(
         project.vocal_stamp == Some(before),
         "Vocal source changed after project loading"
     );
-    let exe = std::env::var_os("SINGZ_GPUI_ANALYZER")
-        .map(std::path::PathBuf::from)
-        .unwrap_or(std::env::current_exe()?.with_file_name(if cfg!(windows) {
-            "singz-analyze.exe"
-        } else {
-            "singz-analyze"
-        }));
+    let exe = crate::analyze_provenance::resolve()?;
     let mut command = Command::new(exe);
     command
         .args(["analyze", "--melody", "--vocals"])

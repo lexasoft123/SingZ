@@ -59,10 +59,18 @@ both UI-enabled and ordinary application builds. The controller reports
 `/tmp/singz-native-tour-a11y-20261109/linux-decoder-fixed-build.host.log`.
 The target evidence directory is `/lab/checkpoint-711ac271/evidence-v3`.
 
-These checks do not close the separately compiled, relocated canonical 34-case
-proof or the maintained platform desktop journeys. New VM403 SSH connections
-closed before the prepared strict proof could start; no successful canonical
-result is claimed. Windows SDK/helper/app qualification also remains open.
+The separately compiled, relocated canonical proof subsequently passes all 34
+cases, including eight valid-media decodes, from the same published source.
+Its result reports source/SDK/fixture/runtime bytes frozen and actual mappings
+for all four FFmpeg libraries in the relocated runtime. Binary SHA256 is
+`670c73a67092cb07f7592a8edd0709fa525dc34228a1b0780c36590ecb703c7d`;
+the unchanged canonical contract SHA256 is
+`ae91a6a86c28b027b2bc1e2a09fdb6ddfc304a0e7b189132c81c852e658d2b45`.
+Evidence is `/lab/checkpoint-711ac271/canonical-codec-qualification-v3`, with
+local logs/manifests retained under the scratch directory above. Initial SSH
+connections closed; the successful later attempt is retained without retrying
+or weakening a failed matrix. This is core decoder qualification: target helper/
+app journeys, Windows delivery and package qualification remain open.
 The separate nonblocking analyzer-provenance diagnostic limitation is tracked in
 `DESKTOP_ACCEPTANCE_GAPS.md`; test byte hashes must not be described as production
 provenance diagnostics or automatic stored-cache invalidation.

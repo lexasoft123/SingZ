@@ -623,7 +623,10 @@ struct Running {
     job: Option<windows_job::Job>,
 }
 impl Running {
-    fn spawn(mut cmd: Command, tail_only: bool) -> Result<Self> {
+    fn spawn(cmd: Command, tail_only: bool) -> Result<Self> {
+        Self::spawn_limited(cmd, tail_only, LIMIT)
+    }
+    fn spawn_limited(mut cmd: Command, tail_only: bool, output_limit: usize) -> Result<Self> {
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -672,13 +675,13 @@ impl Running {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             let mut output = bytes.lock().unwrap_or_else(|e| e.into_inner());
-                            if !tail && output.len() + n > LIMIT {
+                            if !tail && output.len() + n > output_limit {
                                 overflow.store(true, Ordering::Release);
                                 break;
                             }
                             output.extend_from_slice(&block[..n]);
-                            if tail && output.len() > 65536 {
-                                let keep = output.len() - 65536;
+                            if tail && output.len() > 65536.min(output_limit) {
+                                let keep = output.len() - 65536.min(output_limit);
                                 output.drain(..keep);
                             }
                         }
@@ -752,8 +755,23 @@ fn command(
     cancel: &impl Fn() -> bool,
     progress: &impl Fn(f32),
 ) -> Result<Vec<u8>> {
+    command_limited(cmd, timeout, LIMIT, cancel, progress)
+}
+
+/// Advisory helper diagnostics reuse the owned child tree and bounded readers.
+pub(crate) fn diagnostic_command(cmd: Command, timeout: Duration, limit: usize) -> Result<Vec<u8>> {
+    ensure!(limit > 0 && limit <= 65536, "Invalid diagnostic output budget");
+    command_limited(cmd, timeout, limit, &|| false, &|_| {})
+}
+fn command_limited(
+    cmd: Command,
+    timeout: Duration,
+    limit: usize,
+    cancel: &impl Fn() -> bool,
+    progress: &impl Fn(f32),
+) -> Result<Vec<u8>> {
     ensure!(!cancel(), "Alignment cancelled");
-    let mut task = Running::spawn(cmd, false)?;
+    let mut task = Running::spawn_limited(cmd, false, limit)?;
     let deadline = Instant::now() + timeout;
     let mut last = None;
     loop {
