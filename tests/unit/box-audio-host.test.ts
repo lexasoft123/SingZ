@@ -299,6 +299,268 @@ describe.skipIf(process.platform === 'win32')('persistent Box audio control', ()
       expect(unloads).toBe(1)
     } finally { await client.shutdown(); await nextHost.close(); await rm(dir, { recursive: true, force: true }) }
   })
+  const retainedFixture = () => {
+    const nativeConfig = { masterGain: 0.8, playback: { transport: { playbackRate: 1, transposeSemitones: 0 } } }
+    const lane = { id: 'vocals', path: '/library/song/stems/vocals.flac', gain: 0.5, muted: false, solo: false }
+    const descriptor = {
+      version: 1,
+      project: {
+        dir: '/library/song', songPath: '/library/song/source.flac', name: 'Song',
+        metadataHash: `sha256:${'0'.repeat(64)}`, lyricsHash: null, graphHash: null,
+        media: [{ id: lane.id, path: lane.path, size: '1', mtimeMs: 1 }]
+      },
+      config: nativeConfig,
+      lanes: [lane]
+    }
+    const status = (generation: string) => ({
+      generation, state: 'running', transportState: 'playing', masterGain: 0.8,
+      playbackRate: 1, transposeSemitones: 0, loopEnabled: false, loopStartFrame: '0', loopEndFrame: '0',
+      lanes: [{ id: lane.id, gain: 0.5, muted: false, solo: false }]
+    })
+    return { nativeConfig, descriptor, status }
+  }
+  it('retains exact generation context and projects only native-acknowledged controls', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'box-retained-controls-'))
+    const path = join(dir, 'audio.sock')
+    const { runtime, calls } = fake()
+    const { nativeConfig, descriptor, status } = retainedFixture()
+    let current: ReturnType<typeof status> | null = null
+    runtime.owner.playbackStatus = () => current
+    runtime.owner.preparePlayback = (id: number, config: unknown, lanes: unknown) => {
+      calls.push(['prepare', id, config, lanes])
+      current = status('7')
+      return { ok: true, generation: '7' }
+    }
+    const host = await startBoxAudioHost(path, runtime)
+    const client = createBoxAudioClient(path)
+    try {
+      const prepared = await client.callStamped('owner', 'preparePlayback', [42, nativeConfig, descriptor.lanes])
+      expect(prepared.epoch).toBe(host.epoch)
+      expect(prepared.value).toMatchObject({ ok: true, generation: '7' })
+      expect(await client.call('service', 'associateRetainedProject', [{
+        expected: { epoch: prepared.epoch, generation: '7' }, descriptor
+      }])).toMatchObject({ associated: true, generation: '7' })
+      calls.length = 0
+      let snapshot = await client.reconcile() as { recovery?: { generation: string; descriptor: typeof descriptor } }
+      expect(snapshot.recovery?.generation).toBe('7')
+      expect(calls).toEqual([])
+
+      runtime.owner.setPlaybackLane = () => { current!.lanes[0] = { id: 'vocals', gain: 0.91, muted: true, solo: false }; return { ok: true } }
+      runtime.owner.setPlaybackMasterGain = () => { current!.masterGain = 0.33; return { ok: true } }
+      runtime.owner.reanchorPlayback = () => { current!.playbackRate = 1.25; current!.transposeSemitones = -2; return { ok: true } }
+      runtime.owner.setPlaybackLoop = () => {
+        current!.loopEnabled = true; current!.loopStartFrame = '12'; current!.loopEndFrame = '120'; return { ok: true }
+      }
+      await client.call('owner', 'setPlaybackLane', [42, '7', 'vocals', 0.2, false, false])
+      await client.call('owner', 'setPlaybackMasterGain', [42, '7', 0.9])
+      await client.call('owner', 'reanchorPlayback', [42, '7'])
+      await client.call('owner', 'setPlaybackLoop', [42, '7', 100, 200])
+      snapshot = await client.reconcile() as { recovery?: { generation: string; descriptor: typeof descriptor } }
+      expect(snapshot.recovery?.descriptor.config.masterGain).toBe(0.33)
+      expect(snapshot.recovery?.descriptor.config.playback.transport).toMatchObject({ playbackRate: 1.25, transposeSemitones: -2 })
+      expect(snapshot.recovery?.descriptor.config).toHaveProperty('initialTransport.loop', { startProjectFrame: 12, endProjectFrame: 120 })
+      expect(snapshot.recovery?.descriptor.lanes[0]).toMatchObject({ gain: 0.91, muted: true })
+      current = { ...current!, state: 'prepared', transportState: 'stopped' }
+      snapshot = await client.reconcile() as { recovery?: { generation: string; descriptor: typeof descriptor } }
+      expect(snapshot.recovery?.descriptor.config).toHaveProperty('initialTransport.state', 'paused')
+      current = { ...current!, state: 'stopped', transportState: 'playing' }
+      snapshot = await client.reconcile() as { recovery?: { generation: string; descriptor: typeof descriptor } }
+      expect(snapshot.recovery?.descriptor.config).toHaveProperty('initialTransport.state', 'paused')
+
+      runtime.owner.setPlaybackMasterGain = () => ({ ok: false })
+      await client.call('owner', 'setPlaybackMasterGain', [42, '7', 0.1])
+      snapshot = await client.reconcile() as { recovery?: { generation: string; descriptor: typeof descriptor } }
+      expect(snapshot.recovery).toBeUndefined()
+    } finally { await client.shutdown(); await host.close(); await rm(dir, { recursive: true, force: true }) }
+  })
+  it('rejects delayed A association after newer B prepare and binds only B', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'box-retained-ab-'))
+    const path = join(dir, 'audio.sock')
+    const { runtime, calls } = fake()
+    const { nativeConfig, descriptor, status } = retainedFixture()
+    let current: ReturnType<typeof status> | null = null
+    let generation = 6
+    runtime.owner.playbackStatus = () => current
+    runtime.owner.preparePlayback = (id: number, config: unknown, lanes: unknown) => {
+      calls.push(['prepare', id, config, lanes]); current = status(String(++generation))
+      return { ok: true, generation: String(generation) }
+    }
+    const host = await startBoxAudioHost(path, runtime)
+    const client = createBoxAudioClient(path)
+    try {
+      const a = await client.callStamped('owner', 'preparePlayback', [42, nativeConfig, descriptor.lanes])
+      const b = await client.callStamped('owner', 'preparePlayback', [42, nativeConfig, descriptor.lanes])
+      expect(a.value).toMatchObject({ generation: '7' })
+      expect(b.value).toMatchObject({ generation: '8' })
+      await expect(client.call('service', 'associateRetainedProject', [{
+        expected: { epoch: a.epoch, generation: '7' }, descriptor
+      }])).rejects.toThrow('prepare changed')
+      await client.call('service', 'associateRetainedProject', [{
+        expected: { epoch: b.epoch, generation: '8' }, descriptor
+      }])
+      const snapshot = await client.reconcile() as { recovery?: { generation: string } }
+      expect(snapshot.recovery?.generation).toBe('8')
+      expect(calls.filter(row => row[0] === 'prepare')).toHaveLength(2)
+    } finally { await client.shutdown(); await host.close(); await rm(dir, { recursive: true, force: true }) }
+  })
+  it('rejects association when unload happens during project validation', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'box-retained-unload-'))
+    const path = join(dir, 'audio.sock')
+    const { runtime } = fake()
+    const { nativeConfig, descriptor, status } = retainedFixture()
+    let current: ReturnType<typeof status> | null = null
+    runtime.owner.playbackStatus = () => current
+    runtime.owner.preparePlayback = () => { current = status('7'); return { ok: true, generation: '7' } }
+    runtime.owner.unloadPlayback = () => { current = null; return { ok: true, cleanupComplete: true } }
+    const host = await startBoxAudioHost(path, runtime)
+    const client = createBoxAudioClient(path)
+    try {
+      const prepared = await client.callStamped('owner', 'preparePlayback', [42, nativeConfig, descriptor.lanes])
+      await client.call('owner', 'unloadPlayback', [42, '7'])
+      await expect(client.call('service', 'associateRetainedProject', [{
+        expected: { epoch: prepared.epoch, generation: '7' }, descriptor
+      }])).rejects.toThrow('prepare changed')
+      const snapshot = await client.reconcile() as { recovery?: unknown }
+      expect(snapshot.recovery).toBeUndefined()
+    } finally { await client.shutdown(); await host.close(); await rm(dir, { recursive: true, force: true }) }
+  })
+  it('rejects an old reply epoch when a replacement host reuses the generation', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'box-retained-restart-'))
+    const path = join(dir, 'audio.sock')
+    const oldRuntime = fake()
+    const { nativeConfig, descriptor, status } = retainedFixture()
+    oldRuntime.runtime.owner.preparePlayback = () => ({ ok: true, generation: '7' })
+    const oldHost = await startBoxAudioHost(path, oldRuntime.runtime)
+    const client = createBoxAudioClient(path)
+    let replacementHost: Awaited<ReturnType<typeof startBoxAudioHost>> | undefined
+    try {
+      const old = await client.callStamped('owner', 'preparePlayback', [42, nativeConfig, descriptor.lanes])
+      await oldHost.close()
+      await new Promise<void>(resolve => setImmediate(resolve))
+      const nextRuntime = fake()
+      let current: ReturnType<typeof status> | null = null
+      nextRuntime.runtime.owner.playbackStatus = () => current
+      nextRuntime.runtime.owner.preparePlayback = () => { current = status('7'); return { ok: true, generation: '7' } }
+      replacementHost = await startBoxAudioHost(path, nextRuntime.runtime)
+      await client.reconcile()
+      const currentPrepare = await client.callStamped('owner', 'preparePlayback', [42, nativeConfig, descriptor.lanes])
+      await expect(client.call('service', 'associateRetainedProject', [{
+        expected: { epoch: old.epoch, generation: '7' }, descriptor
+      }])).rejects.toThrow('service changed')
+      await client.call('service', 'associateRetainedProject', [{
+        expected: { epoch: currentPrepare.epoch, generation: '7' }, descriptor
+      }])
+      const snapshot = await client.reconcile() as { recovery?: { generation: string } }
+      expect(snapshot.recovery?.generation).toBe('7')
+    } finally { await client.shutdown(); await replacementHost?.close(); await oldHost.close(); await rm(dir, { recursive: true, force: true }) }
+  })
+  it('preserves bound recovery across UI reconnect but clears unbound origin context', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'box-retained-reconnect-'))
+    const path = join(dir, 'audio.sock')
+    const { runtime } = fake()
+    const { nativeConfig, descriptor, status } = retainedFixture()
+    let current: ReturnType<typeof status> | null = null
+    let generation = 6
+    runtime.owner.playbackStatus = () => current
+    runtime.owner.preparePlayback = () => { current = status(String(++generation)); return { ok: true, generation: String(generation) } }
+    const host = await startBoxAudioHost(path, runtime)
+    const first = createBoxAudioClient(path)
+    const second = createBoxAudioClient(path)
+    const third = createBoxAudioClient(path)
+    try {
+      const bound = await first.callStamped('owner', 'preparePlayback', [42, nativeConfig, descriptor.lanes])
+      await first.call('service', 'associateRetainedProject', [{
+        expected: { epoch: bound.epoch, generation: '7' }, descriptor
+      }])
+      await first.shutdown()
+      expect(await second.reconcile()).toMatchObject({ recovery: { generation: '7' } })
+      const pending = await second.callStamped('owner', 'preparePlayback', [42, nativeConfig, descriptor.lanes])
+      await second.shutdown()
+      await expect(third.call('service', 'associateRetainedProject', [{
+        expected: { epoch: pending.epoch, generation: '8' }, descriptor
+      }])).rejects.toThrow('prepare changed')
+    } finally {
+      await first.shutdown(); await second.shutdown(); await third.shutdown()
+      await host.close(); await rm(dir, { recursive: true, force: true })
+    }
+  })
+  it('does not let association timeout poison native mutation fencing', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'box-retained-timeout-'))
+    const path = join(dir, 'audio.sock')
+    const { runtime } = fake()
+    const { nativeConfig, descriptor, status } = retainedFixture()
+    let current: ReturnType<typeof status> | null = null
+    runtime.owner.playbackStatus = () => current
+    runtime.owner.preparePlayback = () => { current = status('7'); return { ok: true, generation: '7' } }
+    const host = await startBoxAudioHost(path, runtime)
+    const client = createBoxAudioClient(path, { timeoutMs: 30 })
+    let release!: () => void
+    try {
+      const prepared = await client.callStamped('owner', 'preparePlayback', [42, nativeConfig, descriptor.lanes])
+      runtime.owner.playbackStatus = () => new Promise(resolve => { release = () => resolve(current) })
+      await expect(client.call('service', 'associateRetainedProject', [{
+        expected: { epoch: prepared.epoch, generation: '7' }, descriptor
+      }])).rejects.toThrow('Box audio query timed out')
+      release()
+      await new Promise<void>(resolve => setImmediate(resolve))
+      await expect(client.call('owner', 'startPlayback', [42, '7'])).resolves.toMatchObject({ ok: true })
+    } finally { release?.(); await client.shutdown(); await host.close(); await rm(dir, { recursive: true, force: true }) }
+  })
+  it('rejects mismatched descriptor config without another native prepare', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'box-retained-mismatch-'))
+    const path = join(dir, 'audio.sock')
+    const { runtime, calls } = fake()
+    const { nativeConfig, descriptor, status } = retainedFixture()
+    let current: ReturnType<typeof status> | null = null
+    runtime.owner.playbackStatus = () => current
+    runtime.owner.preparePlayback = (id: number, config: unknown, lanes: unknown) => {
+      calls.push(['prepare', id, config, lanes]); current = status('7'); return { ok: true, generation: '7' }
+    }
+    const host = await startBoxAudioHost(path, runtime)
+    const client = createBoxAudioClient(path)
+    try {
+      const prepared = await client.callStamped('owner', 'preparePlayback', [42, nativeConfig, descriptor.lanes])
+      const changed = { ...descriptor, config: { ...nativeConfig, masterGain: 0.99 } }
+      await expect(client.call('service', 'associateRetainedProject', [{
+        expected: { epoch: prepared.epoch, generation: '7' }, descriptor: changed
+      }])).rejects.toThrow('no longer matches')
+      const snapshot = await client.reconcile() as { recovery?: unknown }
+      expect(snapshot.recovery).toBeUndefined()
+      expect(calls.filter(row => row[0] === 'prepare')).toHaveLength(1)
+      runtime.owner.preparePlayback = () => ({ ok: false, generation: '0', errorCode: 'invalid-configuration' })
+      expect(await client.call('owner', 'preparePlayback', [42, nativeConfig, descriptor.lanes])).toMatchObject({ ok: false })
+    } finally { await client.shutdown(); await host.close(); await rm(dir, { recursive: true, force: true }) }
+  })
+  it('does not clear recovery for private monitor or capture teardown with a coincident generation', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'box-retained-private-'))
+    const path = join(dir, 'audio.sock')
+    const { runtime, calls } = fake()
+    const { nativeConfig, descriptor, status } = retainedFixture()
+    let current: ReturnType<typeof status> | null = null
+    runtime.owner.playbackStatus = () => current
+    runtime.owner.preparePlayback = () => { current = status('7'); return { ok: true, generation: '7' } }
+    runtime.owner.endMonitor = (id: number, generation: string) => {
+      calls.push(['endMonitor', id, generation]); return { ok: false }
+    }
+    runtime.owner.cancel = (id: number, generation: string) => {
+      calls.push(['cancel', id, generation]); return undefined
+    }
+    runtime.owner.unloadPlayback = () => { throw new Error('Private teardown must not unload public playback') }
+    const host = await startBoxAudioHost(path, runtime)
+    const client = createBoxAudioClient(path)
+    try {
+      const prepared = await client.callStamped('owner', 'preparePlayback', [42, nativeConfig, descriptor.lanes])
+      await client.call('service', 'associateRetainedProject', [{
+        expected: { epoch: prepared.epoch, generation: '7' }, descriptor
+      }])
+      await client.call('owner', 'endMonitor', [51, '7'])
+      await client.call('owner', 'cancel', [51, '7'])
+      const snapshot = await client.reconcile() as { recovery?: { generation: string } }
+      expect(snapshot.recovery?.generation).toBe('7')
+      expect(current).toMatchObject({ generation: '7' })
+      expect(calls).toEqual([['endMonitor', 1001, '7'], ['cancel', 1001, '7']])
+    } finally { await client.shutdown(); await host.close(); await rm(dir, { recursive: true, force: true }) }
+  })
   it('rejects oversized incomplete frames, PCM and malformed JSON', () => {
     const parse = boxAudioLines(4, () => {})
     expect(() => parse(Buffer.from('12345'))).toThrow('too large')

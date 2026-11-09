@@ -155,7 +155,41 @@ EOF
     xvfb-run -a -s '-screen 0 1920x1080x24' \
     dbus-run-session -- node tests/e2e/box-package-launch-smoke.cjs \
     2>&1 | tee "$report/box-package-launch-e2e.log"
+  # The development CEC driver needs the lockfile-pinned Electron binary and a
+  # real root-owned sandbox helper. Never disable Chromium's sandbox.
+  env -u ELECTRON_SKIP_BINARY_DOWNLOAD node node_modules/electron/install.js
+  node - <<'NODE'
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const path = require('node:path')
+const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'))
+const expected = lock.packages['node_modules/electron'].version
+const installed = JSON.parse(fs.readFileSync('node_modules/electron/package.json', 'utf8')).version
+const distributed = fs.readFileSync('node_modules/electron/dist/version', 'utf8').trim()
+assert.equal(installed, expected, 'Electron module version must match package-lock')
+assert.equal(distributed, expected, 'Electron dist version must match package-lock')
+const moduleDir = path.resolve('node_modules/electron')
+assert.equal(fs.realpathSync(moduleDir), moduleDir, 'Electron module must stay inside the owned checkout')
+const expectedDist = path.resolve('node_modules/electron/dist')
+const distStat = fs.lstatSync(expectedDist)
+assert.ok(distStat.isDirectory() && !distStat.isSymbolicLink(), 'Electron dist must be a real directory, not a symlink')
+const dist = fs.realpathSync(expectedDist)
+assert.equal(dist, expectedDist, 'Electron dist realpath must stay inside the owned checkout')
+const sandbox = path.join(dist, 'chrome-sandbox')
+const stat = fs.lstatSync(sandbox)
+assert.ok(stat.isFile() && !stat.isSymbolicLink(), 'chrome-sandbox must be a regular non-symlink file')
+assert.equal(stat.nlink, 1, 'chrome-sandbox must have exactly one link')
+assert.equal(fs.realpathSync(sandbox), sandbox, 'chrome-sandbox must stay inside Electron dist')
+NODE
+  electron_sandbox="$PWD/node_modules/electron/dist/chrome-sandbox"
+  sudo chown root:root "$electron_sandbox"
+  sudo chmod 4755 "$electron_sandbox"
   xvfb-run -a -s '-screen 0 1920x1080x24' \
     dbus-run-session -- node_modules/.bin/electron tests/e2e/box-cec-input-smoke.cjs \
     2>&1 | tee "$report/box-cec-input-smoke.log"
+  E2E_PACKAGED=/opt/singz-box/singz-box \
+    SINGZ_BOX_AUDIO_HOST_EXECUTABLE=${SINGZ_BOX_AUDIO_HOST_EXECUTABLE:-/opt/singz-box/singz-box} \
+    xvfb-run -a -s '-screen 0 1920x1080x24' \
+    dbus-run-session -- node tests/e2e/box-retained-recovery.cjs \
+    2>&1 | tee "$report/box-retained-recovery-e2e.log"
 fi

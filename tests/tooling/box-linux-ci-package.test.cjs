@@ -59,6 +59,11 @@ function fixture(t, text = source) {
 printf 'NODE|stage=%s|capture=%s|boxhost=%s|e2e=%s|ozone=%s|mute=%s|nosync=%s|args=%s\\n' \\
   "$SINGZ_CI_STAGE" "$SINGZ_CAPTURE_BUILD_DIR" "$SINGZ_BOX_AUDIO_HOST_EXECUTABLE" \\
   "$E2E_PACKAGED" "$SINGZ_E2E_OZONE" "$SINGZ_MUTE" "$SINGZ_NO_SYNC" "$*" >> "$CI_TEST_LOG"
+if [[ " $* " == *" node_modules/electron/install.js "* ]]; then
+  mkdir -p node_modules/electron/dist
+  printf 'fixture-version\n' > node_modules/electron/dist/version
+  printf 'fixture sandbox\n' > node_modules/electron/dist/chrome-sandbox
+fi
 if [[ " $* " == *" scripts/dist.cjs "* ]]; then
   dir=dist
   artifact=SingZ-0.0.0-linux-amd64.deb
@@ -120,9 +125,14 @@ while [ $# -gt 0 ]; do
   case "$1" in -a) shift;; -s) shift 2;; *) break;; esac
 done
 exec "$@"`)
+  stub('chown', 'printf \'CHOWN|%s\\n\' "$*" >> "$CI_TEST_LOG"')
+  stub('chmod', 'printf \'CHMOD|%s\\n\' "$*" >> "$CI_TEST_LOG"')
   writeExecutable(path.join(root, 'node_modules/.bin/electron'), `#!/bin/sh
 printf 'ELECTRON|mute=%s|nosync=%s|args=%s\\n' "$SINGZ_MUTE" "$SINGZ_NO_SYNC" "$*" >> "$CI_TEST_LOG"
 `)
+  fs.writeFileSync(path.join(root, 'package-lock.json'), JSON.stringify({ packages: { 'node_modules/electron': { version: 'fixture-version' } } }))
+  fs.mkdirSync(path.join(root, 'node_modules/electron'), { recursive: true })
+  fs.writeFileSync(path.join(root, 'node_modules/electron/package.json'), JSON.stringify({ version: 'fixture-version' }))
   writeExecutable(path.join(root, 'scripts/vendor-analyze.sh'), `#!/bin/sh
 printf 'VENDOR_ANALYZE|%s\\n' "$*" >> "$CI_TEST_LOG"
 `)
@@ -224,9 +234,25 @@ function assertInstalled(f, result) {
   const box = nodes.find(line => line.includes('tests/e2e/box-package-launch-smoke.cjs'))
   assert.ok(box?.includes(`e2e=${path.join(f.boxRoot, 'singz-box')}`), 'installed Box must run its normal-launch smoke')
   assert.ok(box && !box.includes('--box'), 'packaged Box must not need a development profile argument')
-  for (const line of [audio, box]) {
+  const recovery = nodes.find(line => line.includes('tests/e2e/box-retained-recovery.cjs'))
+  assert.ok(recovery?.includes(`e2e=${path.join(f.boxRoot, 'singz-box')}`), 'installed Box retained recovery must use the installed UI executable')
+  assert.ok(recovery?.includes(`boxhost=${path.join(f.boxRoot, 'singz-box')}`), 'installed Box retained recovery must use the installed host executable')
+  assert.ok(result.calls.indexOf('tests/e2e/box-retained-recovery.cjs') > result.calls.indexOf('tests/e2e/box-cec-input-smoke.cjs'),
+    'retained recovery qualification must run after the existing CEC step')
+  for (const line of [audio, box, recovery]) {
     assert.ok(line.includes('mute=1') && line.includes('nosync=1'), line)
   }
+  const provision = nodes.find(line => line.includes('node_modules/electron/install.js'))
+  assert.ok(provision, 'Electron sandbox provision must run before CEC')
+  const provisionAt = result.calls.indexOf('node_modules/electron/install.js')
+  const cecAt = result.calls.indexOf('tests/e2e/box-cec-input-smoke.cjs')
+  assert.ok(cecAt >= 0, 'installed Box CEC smoke must run under Electron')
+  assert.ok(provisionAt >= 0 && provisionAt < cecAt, 'Electron install must precede CEC')
+  const sandbox = path.join(f.root, 'node_modules/electron/dist/chrome-sandbox')
+  const chownAt = result.calls.indexOf(`CHOWN|root:root ${sandbox}`)
+  const chmodAt = result.calls.indexOf(`CHMOD|4755 ${sandbox}`)
+  assert.ok(chownAt > provisionAt && chownAt < cecAt, 'root ownership must follow Electron install and precede CEC')
+  assert.ok(chmodAt > chownAt && chmodAt < cecAt, 'sandbox mode must follow ownership and precede CEC')
   assert.ok(/ELECTRON\|mute=1\|nosync=1\|args=tests\/e2e\/box-cec-input-smoke\.cjs/.test(result.calls),
     'installed Box CEC smoke must run under Electron')
   const launchSmoke = fs.readFileSync(path.join(repository, 'tests/e2e/box-package-launch-smoke.cjs'), 'utf8')
@@ -281,7 +307,7 @@ function withoutStatement(text, start, endMarker) {
   return text.slice(0, start) + text.slice(end + endMarker.length)
 }
 
-test('shadow negative controls reject deleted Box dist, launch, audio-host and CEC steps', posixOnly, t => {
+test('shadow negative controls reject deleted Box dist, launch, audio-host, CEC and recovery steps', posixOnly, t => {
   const withoutDist = source.split('\n').filter(line => !line.includes('node scripts/dist.cjs --box --linux')).join('\n')
   assert.notEqual(withoutDist, source)
   const buildFixture = fixture(t, withoutDist)
@@ -303,6 +329,18 @@ test('shadow negative controls reject deleted Box dist, launch, audio-host and C
   const withoutCec = withoutStatement(source, cecStart, '2>&1 | tee "$report/box-cec-input-smoke.log"')
   const cecFixture = fixture(t, withoutCec)
   assert.throws(() => assertInstalled(cecFixture, cecFixture.run('installed-test')), /CEC smoke/)
+
+  const recoveryStart = source.indexOf('  E2E_PACKAGED=/opt/singz-box/singz-box',
+    source.indexOf('tests/e2e/box-cec-input-smoke.cjs'))
+  const withoutRecovery = withoutStatement(source, recoveryStart, '2>&1 | tee "$report/box-retained-recovery-e2e.log"')
+  const recoveryFixture = fixture(t, withoutRecovery)
+  assert.throws(() => assertInstalled(recoveryFixture, recoveryFixture.run('installed-test')), /retained recovery/)
+
+  const withoutProvision = source.split('\n')
+    .filter(line => !line.includes('env -u ELECTRON_SKIP_BINARY_DOWNLOAD node node_modules/electron/install.js')).join('\n')
+  assert.notEqual(withoutProvision, source)
+  const provisionFixture = fixture(t, withoutProvision)
+  assert.throws(() => assertInstalled(provisionFixture, provisionFixture.run('installed-test')), /Electron sandbox provision/)
 })
 
 test('workflow uploads both package sets without inventing Box update metadata', () => {

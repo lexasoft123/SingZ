@@ -17,6 +17,7 @@ import { RemoteKeyGate, scheduleControlsHide } from './remote'
 import { Settings } from './Settings'
 import { applyBoxMetronomePolicy, boxMetronomePreference, MetronomePolicyError } from './metronome-policy'
 import { RetainedPlayback } from './RetainedPlayback'
+import { restoreRetainedEntry, routeRestoredPlayback } from './retained-playback'
 import { closeBoxSession } from './close-session'
 import { t } from './i18n'
 import { tSettings } from './settings-i18n'
@@ -164,6 +165,26 @@ export default function BoxApp(): React.JSX.Element {
   latest.current = { route, mixOpen, pendingSwitch, signOutConfirm, signOutBusy, controlsVisible, snapshot, selectedId, hydrated }
   const latestPhone = useRef({ entries: allEntries, refs: queueRefs, rows: collectionSnapshot.rows, snapshot })
   latestPhone.current = { entries: allEntries, refs: queueRefs, rows: collectionSnapshot.rows, snapshot }
+  const restoreMounted = useRef(false)
+  const restoreRequest = useRef(0)
+  const restoreRetained = useCallback(async (expected: { epoch: string; generation: string }): Promise<boolean> => {
+    const request = ++restoreRequest.current
+    const restored = await restoreRetainedEntry(restoreMounted.current, latest.current.hydrated, () => transport.restoreRetained(expected))
+    return routeRestoredPlayback({
+      restored,
+      mounted: restoreMounted.current,
+      hydrated: latest.current.hydrated,
+      requestCurrent: request === restoreRequest.current,
+      readActive: () => transport.getSnapshot().active,
+      route: () => {
+        setMixOpen(false)
+        setPendingSwitch(null)
+        setRoute('player')
+        setControlsVisible(true)
+        setFocusVersion(version => version + 1)
+      }
+    })
+  }, [transport])
 
   const hubInteractionLocked = useCallback((): boolean => {
     if (latest.current.route !== 'home') return false
@@ -267,6 +288,11 @@ export default function BoxApp(): React.JSX.Element {
     void hydrate(true)
     return () => { hydrationGeneration.current++ }
   }, [hydrate])
+
+  useEffect(() => {
+    restoreMounted.current = true
+    return () => { restoreMounted.current = false; restoreRequest.current++ }
+  }, [])
 
   useEffect(() => {
     if (!hydrated || !collectionReady || !queueSnapshot.loaded) return
@@ -829,7 +855,7 @@ export default function BoxApp(): React.JSX.Element {
         <p role={metronomeError ? 'alert' : 'status'}>{metronomeError ?? tSettings('box.settings.metronomeChecking')}</p>
         {metronomeError && <button className="pill" disabled={metronomeBusy} onClick={() => { void hydrate(false) }}>{tSettings('box.settings.metronomeRetry')}</button>}
       </section>}
-      {!active && window.singz.boxAudioPersistent && <RetainedPlayback />}
+      {!active && window.singz.boxAudioPersistent && <RetainedPlayback onRestore={hydrated ? restoreRetained : undefined} />}
       <div className="box-safe-surface" inert={!hydrated} style={{ transform: `scale(${safeScale})`, left: safeArea * 16, top: safeArea * 9 }}>
         {hydrated && <div className="box-hub-slot" hidden={route !== 'home'} inert={route !== 'home'}>
           <JourneyHub

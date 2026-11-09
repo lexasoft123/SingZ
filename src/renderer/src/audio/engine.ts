@@ -1,4 +1,5 @@
 import { sanitizeSongVolume } from './song-volume'
+import type { BoxRetainedPlaybackRecovery } from '../../../shared/box-contract'
 import { nativeOutputForBrowserLabel } from '../../../shared/output-device-policy'
 import SignalsmithStretch, { type StretchNode } from 'signalsmith-stretch'
 import {
@@ -134,6 +135,7 @@ export class MultitrackEngine {
   /** Full verified JS document. Opaque state remains here; the native facade
    * creates the bounded projection immediately before each prepare/rebuild. */
   private graphDocument: ParsedGraphDocument | null = null
+  private retainedProjectIdentity: { dir: string; songPath: string } | null = null
   private master: GainNode
   private outputBus: GainNode
   // Keep channels separate: a mono analyser would hide opposite-phase peaks.
@@ -258,13 +260,13 @@ export class MultitrackEngine {
     this.emit()
   }
 
-  /** Bumps on every load() and on retireForSongSwitch(). The renderer's
+  /** Bumps on every load(), retained attach and retireForSongSwitch(). The renderer's
    * rollbacks compare it, so a native mutation issued for the song being
    * left can never restore that song's grid, region or training into the
    * next one — the cross-song contamination class docs/PROJECT-RULES.md records. */
   private _songEpoch = 0
-  /** True from retireForSongSwitch() until the next load(): the tracks on
-   *  hand belong to the song being left. See both for why. */
+  /** True from retireForSongSwitch() until the next load() or retained attach:
+   *  the tracks on hand belong to the song being left. See both for why. */
   private betweenSongs = false
   get songEpoch(): number {
     return this._songEpoch
@@ -294,6 +296,81 @@ export class MultitrackEngine {
     if (this.nativePlayback?.active || this.nativePlayback?.preparedAhead) this.beginNativePlaybackUnload()
   }
 
+  setRetainedProjectIdentity(identity: { dir: string; songPath: string } | null): void {
+    this.retainedProjectIdentity = identity ? { ...identity } : null
+  }
+
+  async attachRetained(
+    graphDocument: ParsedGraphDocument | null,
+    confirm: () => Promise<BoxRetainedPlaybackRecovery | null>,
+    commit: () => void
+  ): Promise<boolean> {
+    if (this.teardownStarted) return false
+    if (this.tracks.length > 0 || this._playing || this.pendingPlayRequests.size > 0 ||
+        this.nativePlaybackUnload || this.nativePlayback?.active ||
+        this.nativePlayback?.preparedAhead || this.nativePlayback?.recoveryPending) {
+      throw new Error('Retained playback needs a fresh audio engine.')
+    }
+    const generation = ++this.generation
+    this.playRequestEpoch++
+    this.aheadEpoch++
+    if (this.aheadTimer !== null) clearTimeout(this.aheadTimer)
+    this.aheadTimer = null
+    const module = await this.ensureNativePlayback()
+    if (this.teardownStarted || generation !== this.generation) return false
+    const recovery = await confirm()
+    if (!recovery) return false
+    if (this.teardownStarted || generation !== this.generation) return false
+    const request = module.client.attachRetained(recovery, graphDocument)
+    for (const track of this.tracks) track.gain.disconnect()
+    this.tracks = request.lanes.map(lane => {
+      const gain = this.ctx.createGain()
+      gain.connect(this.master)
+      return {
+        id: lane.id,
+        buffer: null,
+        duration: request.durationSeconds,
+        path: lane.path,
+        gain,
+        volume: lane.gain,
+        muted: lane.muted,
+        solo: lane.solo
+      }
+    })
+    this.duration = request.durationSeconds
+    this.startOffset = request.positionSeconds
+    this.graphDocument = graphDocument
+    this.retainedProjectIdentity = request.retainedProject ?? null
+    this.masterVol = request.masterGain
+    this.semitones = request.transpose
+    this.rate = request.playbackRate
+    this.beatsInfo = request.beat
+    this.met = { ...request.metronome }
+    this.training = request.training
+    this.region = request.loop ? { ...request.loop } : null
+    this.regionLoop = request.loop !== null
+    if (request.browserOutputId !== undefined) {
+      this.desiredOutputId = request.browserOutputId
+      this.confirmedOutputId = request.browserOutputId
+      this.outputRouteVersion++
+    }
+    this.master.gain.value = this.masterVol
+    this.clickGain.gain.value = this.met.volume * this.masterVol
+    this.trainingGain.gain.value = this.masterVol
+    this._playing = recovery.status.transportState === 'playing' || recovery.status.transportState === 'pre-roll'
+    this._songEpoch++
+    this.betweenSongs = false
+    this.ducked.clear()
+    this.clearRequestedPlaybackError()
+    this.applyGains(true)
+    commit()
+    this.syncBoundWatcher()
+    this.syncTrainWatcher()
+    this.trainTick()
+    this.emit()
+    return true
+  }
+
   /** The engine's request for the native graph, as Play builds it. The
    * position is the remembered start unless a caller names another — the
    * count-in restart names the spot the transport is parked at. */
@@ -317,6 +394,7 @@ export class MultitrackEngine {
       loop: this.regionLoop ? this.region : null,
       nativeAudioProvider: this.nativeAudioProvider,
       graphDocument: this.graphDocument,
+      ...(this.retainedProjectIdentity ? { retainedProject: { ...this.retainedProjectIdentity } } : {}),
       nativePlaybackEnabled: this.nativePlaybackPolicy.playback,
       streamLanes: this.nativePlaybackPolicy.streamLanes
     }

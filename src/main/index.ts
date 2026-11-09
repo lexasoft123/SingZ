@@ -70,7 +70,7 @@ import { boxKioskRequested, desktopUpdaterEnabled, developmentRendererUrl, reque
 import { shouldDeferBoxApplicationQuit, shouldResumeBoxApplicationQuit } from './box-close-policy'
 import { registerBoxIpc } from './box/ipc'
 import { BoxCecService, boxCecEnabled } from './box/cec'
-import { boxRoutingRequest, boxRoutingReconcile, boxRetainedPlaybackSnapshot, boxStopRetainedPlayback } from './audio-process'
+import { boxRoutingRequest, boxRoutingReconcile, boxPrepareRetainedPlayback, boxRetainedPlaybackSnapshot, boxStopRetainedPlayback } from './audio-process'
 import { failedPlayback, playbackCodecSupportsPath } from './capture'
 import { createRemoteCaptureOwner } from './audio-process'
 import { describeLaneMeasureBatch, LaneMeasureCache, parseDesktopPlaybackLaneConfigs } from './lane-measure-cache'
@@ -889,7 +889,12 @@ function registerIpc(): void {
       if (!callerIsCurrent())
         return failedPlayback('The audio window changed before playback could start.', 'invalid-generation')
       // Lifecycle is already bound and fenced across capability discovery and seed lookup.
-      const result = await captureOwner.preparePlayback(event.sender.id, config, seeded)
+      const persistentBox = process.env.SINGZ_SURFACE === 'box' && Boolean(process.env.SINGZ_BOX_AUDIO_SOCKET)
+      const result = persistentBox
+        ? await boxPrepareRetainedPlayback(event.sender.id, config, seeded, {
+            libraryRoot: projectsRoot(), driveProjectsRoot: join(app.getPath('userData'), 'drive-projects')
+          })
+        : await captureOwner.preparePlayback(event.sender.id, config, seeded)
       // Both outcomes are logged by the owner, which is where the timing, the
       // seam and the negotiated format are known. Saying it twice here only
       // made the log harder to read.
@@ -1069,6 +1074,16 @@ app.whenReady().then(async () => {
     socketPath: process.env.SINGZ_BOX_PLATFORM_SOCKET,
     retainedPlaybackSnapshot: process.env.SINGZ_BOX_AUDIO_SOCKET ? boxRetainedPlaybackSnapshot : undefined,
     stopRetainedPlayback: process.env.SINGZ_BOX_AUDIO_SOCKET ? boxStopRetainedPlayback : undefined,
+    restoreRetainedPlayback: process.env.SINGZ_BOX_AUDIO_SOCKET ? async (expected) => {
+      const { restoreBoxRetainedPlayback } = await import('./box-audio/retained-recovery')
+      const restored = await restoreBoxRetainedPlayback(expected, {
+        libraryRoot: projectsRoot(),
+        driveProjectsRoot: join(app.getPath('userData'), 'drive-projects'),
+        snapshot: boxRetainedPlaybackSnapshot
+      })
+      allowRoot(restored.project.dir)
+      return restored
+    } : undefined,
     routingRequest: process.env.SINGZ_BOX_AUDIO_SOCKET ? boxRoutingRequest : undefined,
     routingReconcile: process.env.SINGZ_BOX_AUDIO_SOCKET ? boxRoutingReconcile : undefined,
     cecStatus: () => boxCec!.snapshot(),

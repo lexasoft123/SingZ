@@ -22,7 +22,8 @@ export class BoxStorageService {
 
   constructor(
     readonly userDataDir: string,
-    private readonly guard: BoxCacheGuard
+    private readonly guard: BoxCacheGuard,
+    private readonly preRemoveGuard?: (dir: string) => Promise<BoxResult<null>>
   ) {
     this.cacheRoot = join(userDataDir, 'drive-projects')
   }
@@ -66,6 +67,10 @@ export class BoxStorageService {
     try {
       if (!(await this.managedDirectChild(dir))) {
         return failure('Refused to remove an unverified or non-local project.', 'invalid-project')
+      }
+      if (this.preRemoveGuard) {
+        const result = await this.preRemoveGuard(dir)
+        if (!result.ok) return result
       }
       const quarantine = join(this.cacheRoot, `.singz-removing-${process.pid}-${randomBytes(8).toString('hex')}`)
       await rename(dir, quarantine)

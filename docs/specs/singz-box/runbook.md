@@ -65,11 +65,52 @@ silently present a Web Audio fallback as native. A detached browser AudioContext
 avoids claiming the default output before native inventory and route selection.
 The same policy drives lane measurement, prepare-ahead and Play/rebuild.
 
-Normal close has a Box-only handshake: pause, flush accepted controls and project
+Desktop close behavior is unchanged. Non-persistent Box uses the existing
+Box-only normal-close handshake: pause, flush accepted controls and project
 saves, complete bounded native cleanup, then acknowledge close. Renderer cleanup
 is bounded at eight seconds and main has a twelve-second fallback. Application
-quit resumes only after every requested window completes. Hard-kill/crash
-persistence is not promised.
+quit resumes only after every requested window completes.
+
+Persistent Linux Box is opt-in and uses an explicit independent native audio
+host and socket. Native-first background recovery associates the actual project
+through a service-lifetime descriptor; it does not persist native PCM or promise
+recovery after a hard kill, native-service crash/restart or power cycle.
+Graceful UI close drains admitted work and privately detaches without native
+pause, stop, unload, replay or level restoration.
+
+Relaunch performs a read-only reattach only to an already-running native
+session, including paused transport, when the host epoch and generation match
+and the transport is commandable. It restores the real project, synchronized
+lyrics, current native controls and position without normal open, migration,
+reprepare, Play or Settings replay. Explicit Refresh/Stop recovery is required
+when recovery metadata is unavailable, project files or identity changed, the
+host is not commandable, lyrics are missing, empty or invalid, or retained state
+is stale or unsupported. A prepared, never-started output-open session cannot
+resume and uses explicit Stop.
+
+### Retained-session recovery qualification
+
+`node tests/e2e/box-retained-recovery.cjs` is the retained-session qualification
+driver. It generates a 180-second stems-only fixture with synchronized lyrics
+and asserts a non-null project graph. It uses private HOME/XDG/profile roots,
+muted logical routes and a device-free environment, closes the actual
+`BrowserWindow`, then relaunches Box while the independent host remains alive.
+A qualifying run checks the real UI project, lyrics, current controls and
+position, and the same host epoch and generation through close and read-only
+reattach after relaunch. Refresh while retained is safe and preserves that
+identity; explicit Stop is the controlled fallback and must confirm release of
+the reviewed identity. Final end-to-end qualification is still required;
+`tests/e2e/box-audio-host-smoke.cjs` alone covers only the headless host and
+does not verify renderer close/restore.
+
+During close, reattach and fallback, a test-only recorder on the private Unix
+socket observes actual native RPCs. The recorder must reject forbidden automatic
+RPCs while permitting the explicit Stop release. Qualification requires that
+command evidence plus the identity, position and UI evidence above.
+`transportDiscontinuities` is DSP clock-reset/jitter telemetry, not a native
+command counter; do not infer pause, stop, seek, reprepare or level changes from
+it. Telemetry remains diagnostic. FLOW 8 routing, physical microphones, CEC and
+audible latency remain separate hardware gates.
 
 ## Application checks
 

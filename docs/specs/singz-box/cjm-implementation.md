@@ -58,7 +58,7 @@ OS service or a physical hardware route.
 | S16 / A16 | Phone start/state/approve/deny/revoke/stop, backend URL/code/expiry, controller playback/mix/queue commands; no owner account access | Physical handset QR scanning and LAN reachability |
 | S18–S19 / A04 | Real interface/link snapshots, fresh Wi-Fi capability checks, unavailable/offline/Ethernet states and retry; Internet is never inferred from a link | Wi-Fi provisioning, phone credential handoff and recovery network require the OS service |
 | S21 / A11, A18 | Real cache/storage/free-space state; Keep-first confirmation; active-cache protection; completed eviction refreshes the library | Storage and interrupted-download failure injection on supported devices |
-| S22 / A19 | Diagnostics, audio/setup recovery routes, approved boolean audio fields only; no raw object/log/secret serialization or automatic playback | Device-loss recovery and hardware qualification |
+| S22 / A19 | Scoped diagnostics and audio/setup recovery; opt-in persistent Linux Box read-only reattach to the same host epoch/generation restores the actual project, synchronized lyrics and current native controls, with explicit Refresh/Stop fallback; approved boolean audio fields only, no raw object/log/secret serialization | Retained-recovery E2E qualification, device-loss recovery and hardware qualification |
 | S23–S25 / A20–A21 | Platform versions/capabilities, update/reboot/rollback commands, command-time guards and committed-operation locks; unavailable firmware version is labeled Application version | Signed images, staging, boot health and A/B rollback require the OS service |
 | S26 / A22 | Real Drive sign-out, phone-session revocation and scoped cache removal; safe confirmation; capability-gated factory reset | Factory reset remains unavailable without a qualified OS service |
 | Navigation / NAV-01/04/05 | Parent-only input, stable focus markers, confirmation isolation, Back/return context and valid focus restoration | Physical CEC/HID behavior and couch readability |
@@ -76,9 +76,27 @@ Electron drivers exercise actual app and mobile-browser behavior:
 - `tests/e2e/box-cjm-smoke.cjs`: setup, mock-provider Drive approval and verified
   download, phone approval/control/revocation, offline playback after sign-out
   and restart, and safe cache removal.
+- `tests/e2e/box-audio-host-smoke.cjs`: independent headless native host/socket
+  controls, reconnect identity and shutdown. Alone it does not cover renderer
+  close/restore.
+- `tests/e2e/box-retained-recovery.cjs`: generated 180-second stems-only fixture,
+  synchronized lyrics and a non-null project graph; private HOME/XDG/profile
+  roots, muted logical routes and a device-free environment; actual
+  `BrowserWindow.close` and Box relaunch while the independent host stays alive.
+  Qualification requires a commandable running or paused transport, real UI
+  project/lyrics/current controls/position, and the same host epoch and
+  generation through close and read-only reattach after relaunch. Refresh while
+  retained is safe and preserves that identity; explicit Stop is the controlled
+  fallback and must confirm release of the reviewed identity. A test-only
+  private Unix-socket recorder observes actual native RPCs and must reject
+  forbidden automatic RPCs while permitting that explicit release. Final
+  end-to-end qualification remains required.
 
 The mock provider supplies deterministic network outcomes; it is not evidence
 of a live provider authorization. Physical USB/HDMI stream telemetry verifies
 routing and native frame progression, but cannot establish speaker audibility.
 Short playback checks do not establish professional latency or long-run stability.
-Microphone monitoring currently uses the external mixer.
+Microphone monitoring currently uses the external mixer. The retained-recovery
+driver does not qualify FLOW 8 routing, physical microphones, CEC or audible
+latency. Native-service crash/restart and power-cycle persistence are not
+guaranteed.

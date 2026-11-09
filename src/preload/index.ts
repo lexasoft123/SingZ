@@ -22,6 +22,7 @@ const box: BoxAPI = {
   diagnostics: () => ipcRenderer.invoke('box:diagnostics'),
   retainedPlaybackSnapshot: () => ipcRenderer.invoke('box:retained-playback-snapshot'),
   stopRetainedPlayback: expected => ipcRenderer.invoke('box:retained-playback-stop', expected),
+  restoreRetainedPlayback: expected => ipcRenderer.invoke('box:retained-playback-restore', expected),
   routingSnapshot: () => ipcRenderer.invoke('box:routing-snapshot'),
   routingEdit: edit => ipcRenderer.invoke('box:routing-edit', edit),
   phoneStart: () => ipcRenderer.invoke('box:phone-start'),

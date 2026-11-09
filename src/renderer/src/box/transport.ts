@@ -1,4 +1,4 @@
-import type { BoxMetronomeOverride } from '../../../shared/box-contract'
+import type { BoxMetronomeOverride, BoxRetainedPlaybackRecovery, BoxRetainedPlaybackRestore } from '../../../shared/box-contract'
 import { retainedPlaybackSnapshot } from '../../../shared/box-retained-playback'
 import type {
   LyricLine,
@@ -53,6 +53,12 @@ export interface BoxEngine {
   setRegion(region: null, loop: boolean): Promise<void>
   getTrackStates(): TrackState[]
   setLaneReader(read: ((path: string) => Promise<ArrayBuffer>) | null): void
+  setRetainedProjectIdentity?(identity: { dir: string; songPath: string } | null): void
+  attachRetained?(
+    graphDocument: ParsedGraphDocument | null,
+    confirm: () => Promise<BoxRetainedPlaybackRecovery | null>,
+    commit: () => void
+  ): Promise<boolean>
   retireForSongSwitch(): void
   setOutput?(deviceId: string): Promise<void>
   subscribe(listener: () => void): () => void
@@ -391,6 +397,126 @@ export class BoxTransport {
     return tracked
   }
 
+  async restoreRetained(expected: { epoch: string; generation: string }): Promise<boolean> {
+    if (this.disposed || this.tearingDown) return false
+    if (this.api.boxAudioPersistent !== true) throw new Error('Persistent Box audio is not configured.')
+    if (this.active) throw new Error('A song already owns this transport.')
+    const generation = ++this.generation
+    this.loadingName = null
+    this.lastError = null
+    this.committing = true
+    this.publish()
+    const validate = (candidate: BoxRetainedPlaybackRestore): BoxRetainedPlaybackRecovery => {
+      const recovery = candidate.recovery
+      if (!recovery) throw new Error('Retained playback recovery is unavailable.')
+      const identity = recovery.descriptor.project
+      const status = recovery.status
+      if (candidate.epoch !== expected.epoch || recovery.generation !== expected.generation ||
+          status.generation !== expected.generation || identity.dir !== candidate.item.dir ||
+          identity.songPath !== candidate.item.songPath || identity.name !== candidate.item.name ||
+          candidate.project.dir !== identity.dir || candidate.project.name !== identity.name ||
+          (candidate.graph === null || candidate.graph === undefined) !== (identity.graphHash === null)) {
+        throw new Error('Retained playback project identity changed before restore.')
+      }
+      if (candidate.lyrics.length === 0) throw new Error(t('box.player.lyricsRequired'))
+      const transportCommandable = status.transportState === 'playing' || status.transportState === 'pre-roll' ||
+        status.transportState === 'paused' || status.transportState === 'completed'
+      const terminal = status.terminalReason !== 'none' && status.terminalReason !== ''
+      if (status.state !== 'running' || status.hostState !== 'running' || !transportCommandable ||
+          terminal || status.error !== '') {
+        throw new Error('Retained native playback is not commandable; use explicit Stop.')
+      }
+      const duration = Number(status.durationFrames) / status.format.sampleRate
+      if (!(duration > 0) || !Number.isFinite(duration)) throw new Error('Retained playback has no playable duration.')
+      return recovery
+    }
+    try {
+      const result = await this.api.box.restoreRetainedPlayback(expected)
+      if (!this.current(generation)) return false
+      if (!result.ok) throw new Error(result.error)
+      const restore = result.value
+      const recovery = validate(restore)
+      const canonicalIdentity = JSON.stringify(recovery.descriptor.project)
+      let accepted = restore
+      this.loadingName = restore.item.name
+      this.publish()
+      const graph = await import('../audio/desktop-project-graph').then(module =>
+        module.loadDesktopProjectGraph(
+          async () => ({ ok: true, graph: restore.graph }),
+          () => this.current(generation)
+        )
+      )
+      if (!this.current(generation) || !graph.accepted) return false
+      return await this.enqueueEngine(async () => {
+        if (!this.current(generation)) return false
+        if (!this.engine.attachRetained) throw new Error('Retained native attach is unavailable.')
+        let committed = false
+        const attached = await this.engine.attachRetained(
+          graph.graphDocument,
+          async () => {
+            const current = await this.api.box.restoreRetainedPlayback(expected)
+            if (!this.current(generation)) return null
+            if (!current.ok) throw new Error(current.error)
+            const fresh = validate(current.value)
+            if (JSON.stringify(fresh.descriptor.project) !== canonicalIdentity) {
+              throw new Error('Retained playback files or canonical project identity changed before renderer attach.')
+            }
+            accepted = current.value
+            return fresh
+          },
+          () => {
+            const fresh = accepted.recovery
+            const status = fresh.status
+            const sampleRate = status.format.sampleRate
+            const settings = settingsWithTracks(
+              accepted.project.settings,
+              this.engine.getTrackStates(),
+              this.engine.masterVolume,
+              this.engine.transpose,
+              this.engine.tempo
+            )
+            settings.loop = status.loopEnabled
+            if (status.loopEnabled) {
+              settings.selection = {
+                s: Number(status.loopStartFrame) / sampleRate,
+                e: Number(status.loopEndFrame) / sampleRate
+              }
+            }
+            this.active = {
+              item: accepted.item,
+              project: { ...accepted.project, settings },
+              metadata: projectMetadata(accepted.project, Number(status.durationFrames) / sampleRate),
+              lyrics: { status: 'ready', lines: accepted.lyrics }
+            }
+            this.activeGeneration = generation
+            this.loadingName = null
+            this.appliedOutputUid = fresh.descriptor.config.provider === 'alsa'
+              ? fresh.descriptor.config.outputDeviceUid
+              : this.appliedOutputUid
+            this.browserOutputReconciled = true
+            this.routingBlocked = false
+            this.restartRequired = false
+            this.outputError = null
+            committed = true
+          }
+        )
+        return attached && committed
+      })
+    } catch (error) {
+      if (this.current(generation)) {
+        this.lastError = error instanceof Error ? error.message : String(error)
+        this.publish()
+      }
+      throw error
+    } finally {
+      if (this.current(generation)) {
+        this.committing = false
+        if (!this.active) this.loadingName = null
+        this.publish()
+      }
+    }
+  }
+
   async open(item: ProjectListItem): Promise<boolean> {
     if (this.disposed || this.tearingDown) return false
     const generation = ++this.generation
@@ -489,6 +615,9 @@ export class BoxTransport {
           if (!this.current(generation)) return
           await this.engine.setMasterVolumeAccepted(sanitizeSongVolume(project.settings.masterVolume))
           if (!this.current(generation)) return
+          this.engine.setRetainedProjectIdentity?.(this.api.boxAudioPersistent === true
+            ? { dir: item.dir, songPath: item.songPath }
+            : null)
           this.engine.load(lanes.map(lane => {
             const laneRead = read.reads.get(lane.id)!
             return { id: lane.id, buffer: laneRead.buffer, duration: laneRead.duration, path: lane.path }

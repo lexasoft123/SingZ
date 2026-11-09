@@ -1,14 +1,34 @@
 import { describe, expect, it, vi } from 'vitest'
-import { RetainedPlaybackController } from '../../src/renderer/src/box/retained-playback'
+import { RetainedPlaybackController, restoreRetainedEntry, routeRestoredPlayback, type RetainedRestore } from '../../src/renderer/src/box/retained-playback'
 import { retainedPlaybackSnapshot } from '../../src/shared/box-retained-playback'
 import type { BoxResult, BoxRetainedPlaybackSnapshot } from '../../src/shared/box-contract'
 import type { SingzApi } from '../../src/shared/types'
 const snapshot = (generation = '1', epoch = 'epoch-a', playing = true): BoxResult<BoxRetainedPlaybackSnapshot> => ({ ok: true, value: { epoch, playback: { generation, state: generation === '0' ? 'unloaded' : 'running', transportState: playing ? 'playing' : 'paused' } } })
-function fixture() {
-  const read = vi.fn(async () => snapshot())
+const recoverable = (generation = '1', epoch = 'epoch-a'): BoxResult<BoxRetainedPlaybackSnapshot> => {
+  const current = snapshot(generation, epoch)
+  if (!current.ok) throw new Error('unreachable')
+  const status = current.value.playback!
+  const recovery = {
+    generation,
+    descriptor: {
+      version: 1,
+      project: {
+        dir: '/library/song', songPath: '/library/song/source.flac', name: 'Song',
+        metadataHash: `sha256:${'0'.repeat(64)}`, lyricsHash: null, graphHash: null,
+        media: [{ id: 'vocals', path: '/library/song/vocals.flac', size: '1', mtimeMs: 1 }]
+      },
+      config: {},
+      lanes: [{ id: 'vocals', path: '/library/song/vocals.flac', gain: 1, muted: false, solo: false }]
+    },
+    status
+  } as unknown as NonNullable<BoxRetainedPlaybackSnapshot['recovery']>
+  return { ok: true, value: { ...current.value, recovery } }
+}
+function fixture(onRestore?: RetainedRestore, initial = snapshot()) {
+  const read = vi.fn(async () => initial)
   const stop = vi.fn(async () => snapshot('0'))
   const api = { boxAudioPersistent: true, box: { retainedPlaybackSnapshot: read, stopRetainedPlayback: stop } } as unknown as Pick<SingzApi, 'boxAudioPersistent' | 'box'>
-  return { api, read, stop, controller: new RetainedPlaybackController(api) }
+  return { api, read, stop, controller: new RetainedPlaybackController(api, onRestore) }
 }
 describe('retained song controls', () => {
   it('rereads exact epoch/generation before explicit Stop and confirms released status before hiding', async () => {
@@ -57,15 +77,164 @@ describe('retained song controls', () => {
     expect(stop).not.toHaveBeenCalled()
   })
   it('does not query or mutate ordinary Box/Desktop audio', async () => {
-    const { api, read, stop } = fixture()
-    const controller = new RetainedPlaybackController({ ...api, boxAudioPersistent: false })
+    const restore = vi.fn(async () => true)
+    const { api, read, stop } = fixture(restore, recoverable())
+    const controller = new RetainedPlaybackController({ ...api, boxAudioPersistent: false }, restore)
     await controller.refresh(); await controller.stop()
-    expect(read).not.toHaveBeenCalled(); expect(stop).not.toHaveBeenCalled()
+    expect(read).not.toHaveBeenCalled(); expect(stop).not.toHaveBeenCalled(); expect(restore).not.toHaveBeenCalled()
   })
   it('validates retained reply shape and projects only relevant native fields', () => {
     expect(() => retainedPlaybackSnapshot({ epoch: '', playback: null })).toThrow('epoch')
     expect(() => retainedPlaybackSnapshot({ epoch: 'e', playback: { generation: 9007199254740993, state: 'running', transportState: 'playing' } })).toThrow('status')
     expect(() => retainedPlaybackSnapshot({ epoch: 'e', playback: { generation: '1', state: 'bogus', transportState: 'playing' } })).toThrow('status')
     expect(retainedPlaybackSnapshot({ epoch: 'e', playback: { generation: '1', state: 'running', transportState: 'playing', secret: 'ignored' }, routing: 'ignored' })).toEqual({ epoch: 'e', playback: { generation: '1', state: 'running', transportState: 'playing' } })
+  })
+})
+
+describe('retained recovery', () => {
+  it('autoattaches exact identity and routes current active after transport verification', async () => {
+    const active = { lyrics: { status: 'ready', lines: [{ text: 'Singable line' }] } }
+    const transportRestore = vi.fn(async (_expected: { epoch: string; generation: string }) => true)
+    const route = vi.fn()
+    const restore: RetainedRestore = async expected => routeRestoredPlayback({
+      restored: await transportRestore(expected), mounted: true, hydrated: true, requestCurrent: true,
+      readActive: () => active, route
+    })
+    const { controller } = fixture(restore, recoverable('7', 'epoch-r'))
+    await controller.refresh()
+    expect(transportRestore).toHaveBeenCalledExactlyOnceWith({ epoch: 'epoch-r', generation: '7' })
+    expect(route).toHaveBeenCalledExactlyOnceWith(active)
+    expect(controller.getSnapshot()).toMatchObject({ generation: '7', busy: false, restoring: false, error: '' })
+  })
+  it('keeps the retained fallback after backend rejection of missing or empty lyrics', async () => {
+    for (const active of [{ lyrics: { status: 'missing' } }, { lyrics: { status: 'ready', lines: [] } }]) {
+      const transportRestore = vi.fn(async (_expected: { epoch: string; generation: string }) => {
+        throw new Error('No song with ready lyrics can be restored')
+      })
+      const route = vi.fn()
+      const restore: RetainedRestore = async expected => routeRestoredPlayback({
+        restored: await transportRestore(expected), mounted: true, hydrated: true, requestCurrent: true,
+        readActive: () => active, route
+      })
+      const { controller, read, stop } = fixture(restore, recoverable())
+      await controller.refresh()
+      expect(controller.getSnapshot()).toMatchObject({
+        generation: '1', restoring: false, error: 'No song with ready lyrics can be restored'
+      })
+      expect(route).not.toHaveBeenCalled()
+      await controller.refresh()
+      expect(read).toHaveBeenCalledTimes(2)
+      expect(transportRestore).toHaveBeenCalledTimes(1)
+      expect(controller.getSnapshot().error).toBe('No song with ready lyrics can be restored')
+      await controller.stop()
+      expect(stop).toHaveBeenCalledExactlyOnceWith({ epoch: 'epoch-a', generation: '1' })
+    }
+  })
+  it('does not invoke restore without recovery and keeps Stop available before hydration', async () => {
+    const restore = vi.fn(async () => true)
+    const absent = fixture(restore)
+    await absent.controller.refresh()
+    expect(restore).not.toHaveBeenCalled()
+    const waiting = fixture(undefined, recoverable())
+    await waiting.controller.refresh()
+    expect(waiting.controller.getSnapshot()).toMatchObject({ generation: '1', restoring: false, busy: false })
+    await waiting.controller.stop()
+    expect(waiting.stop).toHaveBeenCalledExactlyOnceWith({ epoch: 'epoch-a', generation: '1' })
+  })
+  it('never retries a rejected or false identity even after explicit Refresh, but still permits Stop', async () => {
+    for (const rejected of [false, true]) {
+      const restore = rejected
+        ? vi.fn(async () => { throw new Error('restore rejected') })
+        : vi.fn(async () => false)
+      const { controller, read, stop } = fixture(restore, recoverable())
+      await controller.refresh()
+      const failure = controller.getSnapshot().error
+      expect(failure).not.toBe('')
+      await controller.refresh()
+      expect(read).toHaveBeenCalledTimes(2)
+      expect(restore).toHaveBeenCalledTimes(1)
+      expect(controller.getSnapshot()).toMatchObject({ generation: '1', restoring: false, error: failure })
+      await controller.stop()
+      expect(stop).toHaveBeenCalledTimes(1)
+    }
+  })
+  it('allows one attempt for each new generation or service epoch', async () => {
+    const restore = vi.fn(async (_expected: { epoch: string; generation: string }) => false)
+    const { controller, read } = fixture(restore, recoverable('1', 'epoch-a'))
+    await controller.refresh()
+    read.mockResolvedValueOnce(recoverable('2', 'epoch-a'))
+    await controller.refresh()
+    read.mockResolvedValueOnce(recoverable('2', 'epoch-b'))
+    await controller.refresh()
+    expect(restore.mock.calls.map(([expected]) => expected)).toEqual([
+      { epoch: 'epoch-a', generation: '1' },
+      { epoch: 'epoch-a', generation: '2' },
+      { epoch: 'epoch-b', generation: '2' }
+    ])
+  })
+  it('singleflights reads and Stop behind a deferred restore', async () => {
+    let finish!: (restored: boolean) => void
+    const restore = vi.fn(() => new Promise<boolean>(resolve => { finish = resolve }))
+    const { controller, read, stop } = fixture(restore, recoverable())
+    const restoring = controller.refresh()
+    await Promise.resolve()
+    expect(restore).toHaveBeenCalledTimes(1)
+    expect(controller.getSnapshot()).toMatchObject({ busy: true, restoring: true })
+    await controller.refresh(); await controller.stop()
+    expect(read).toHaveBeenCalledTimes(1); expect(stop).not.toHaveBeenCalled(); expect(restore).toHaveBeenCalledTimes(1)
+    finish(true)
+    await restoring
+    expect(controller.getSnapshot()).toMatchObject({ busy: false, restoring: false })
+  })
+  it('does not duplicate or publish a delayed attempt across dispose and StrictMode resume', async () => {
+    let finish!: (restored: boolean) => void
+    const restore = vi.fn()
+      .mockImplementationOnce(() => new Promise<boolean>(resolve => { finish = resolve }))
+      .mockResolvedValue(true)
+    const { controller } = fixture(restore, recoverable())
+    const first = controller.refresh()
+    await Promise.resolve()
+    controller.dispose(); controller.resume()
+    const listener = vi.fn()
+    controller.subscribe(listener)
+    await controller.refresh()
+    expect(restore).toHaveBeenCalledTimes(1)
+    expect(controller.getSnapshot()).toMatchObject({ generation: '1', busy: false, restoring: false })
+    const publications = listener.mock.calls.length
+    finish(true)
+    await first
+    expect(listener).toHaveBeenCalledTimes(publications)
+    expect(controller.getSnapshot()).toMatchObject({ generation: '1', busy: false, restoring: false, error: '' })
+  })
+})
+
+describe('restored player routing boundary', () => {
+  it('fences transport entry until mounted and hydrated', async () => {
+    for (const [mounted, hydrated] of [[false, false], [false, true], [true, false]] as const) {
+      const restore = vi.fn(async () => true)
+      expect(await restoreRetainedEntry(mounted, hydrated, restore)).toBe(false)
+      expect(restore).not.toHaveBeenCalled()
+    }
+    const restore = vi.fn(async () => true)
+    expect(await restoreRetainedEntry(true, true, restore)).toBe(true)
+    expect(restore).toHaveBeenCalledTimes(1)
+  })
+  it('rejects false, unmounted, unhydrated, stale and missing-current-active completion', () => {
+    const active = { lyrics: { status: 'ready', lines: [{ text: 'Singable line' }] } }
+    for (const override of [{ restored: false }, { mounted: false }, { hydrated: false }, { requestCurrent: false }]) {
+      const readActive = vi.fn(() => active)
+      const route = vi.fn()
+      expect(routeRestoredPlayback({
+        restored: true, mounted: true, hydrated: true, requestCurrent: true,
+        readActive, route, ...override
+      })).toBe(false)
+      expect(readActive).not.toHaveBeenCalled(); expect(route).not.toHaveBeenCalled()
+    }
+    const route = vi.fn()
+    expect(routeRestoredPlayback({
+      restored: true, mounted: true, hydrated: true, requestCurrent: true,
+      readActive: () => null, route
+    })).toBe(false)
+    expect(route).not.toHaveBeenCalled()
   })
 })

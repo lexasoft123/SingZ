@@ -917,6 +917,8 @@ export interface DesktopPlaybackPrepareConfig {
    * prepared ahead. The core resamples into the device rate as it fills and
    * falls back to decoding any lane it cannot stream. Absent = decode. */
   streamLanes?: boolean
+  /** Box-only project hint, stripped before the native owner sees the config. */
+  retainedProject?: { dir: string; songPath: string }
 }
 
 export interface DesktopPlaybackLaneConfig {

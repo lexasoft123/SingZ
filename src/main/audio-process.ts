@@ -248,7 +248,7 @@ export function createRemoteCaptureOwner(): Omit<AsyncCaptureOwner, 'bindRendere
     get(_target, method: string) {
       if (method === 'bindRendererCleanup') return (id: number) => { if (cleanup.has(id)) return false; cleanup.add(id); return true }
       if (method === 'rendererGone' || method === 'rendererDetached') return (id: number) => lifecycle(method, id)
-      if (method === 'stop') return () => desktopAudioProcess.shutdown()
+      if (method === 'stop') return () => { stopBoxRetainedAssociations(); return desktopAudioProcess.shutdown() }
       return async (...args: unknown[]) => {
         try { return await desktopAudioProcess.call('owner', method, args) }
         catch (error) {
@@ -308,4 +308,55 @@ export async function boxStopRetainedPlayback(expected: { epoch: string; generat
   // expected revision. The serialized host rejects stale epochs/generations.
   await boxAudioProcess!.reconcile()
   return retainedPlaybackSnapshot(await boxAudioProcess!.call('service', 'stopRetained', [expected]))
+}
+
+const boxAssociationPending = new Set<Promise<void>>()
+let boxAssociationStopped = false
+
+function stopBoxRetainedAssociations(): void {
+  boxAssociationStopped = true
+  boxAssociationPending.clear()
+}
+
+function scheduleBoxRetainedAssociation(
+  prepared: { epoch: string; generation: string },
+  project: { dir: string; songPath: string },
+  config: import('../shared/types').DesktopPlaybackPrepareConfig,
+  lanes: import('../shared/types').DesktopPlaybackLaneConfig[],
+  roots: { libraryRoot: string; driveProjectsRoot: string }
+): Promise<void> | undefined {
+  if (boxAssociationStopped || boxAssociationPending.size >= 8) return undefined
+  const task = (async (): Promise<void> => {
+    const { validateBoxRetainedProject } = await import('./box-audio/retained-project')
+    const descriptor = await validateBoxRetainedProject({ ...project, ...roots, config, lanes })
+    if (boxAssociationStopped) return
+    await boxAudioProcess!.call('service', 'associateRetainedProject', [{ expected: prepared, descriptor }])
+  })()
+  boxAssociationPending.add(task)
+  return task.catch(() => undefined).finally(() => { boxAssociationPending.delete(task) })
+}
+
+/** Native prepare is authoritative before optional retained-project association. */
+export async function boxPrepareRetainedPlayback(
+  rendererId: number,
+  config: import('../shared/types').DesktopPlaybackPrepareConfig,
+  lanes: import('../shared/types').DesktopPlaybackLaneConfig[],
+  roots: { libraryRoot: string; driveProjectsRoot: string }
+): Promise<import('../shared/types').DesktopPlaybackResult> {
+  requireBoxAudioSocket()
+  const nativeConfig = { ...config }
+  delete nativeConfig.retainedProject
+  const prepared = await boxAudioProcess!.callStamped<import('../shared/types').DesktopPlaybackResult>(
+    'owner', 'preparePlayback', [rendererId, nativeConfig, lanes])
+  const receipt = prepared.value
+  if (config.retainedProject && receipt.ok === true && /^[1-9][0-9]{0,19}$/.test(receipt.generation)) {
+    void scheduleBoxRetainedAssociation(
+      { epoch: prepared.epoch, generation: receipt.generation },
+      config.retainedProject,
+      nativeConfig,
+      lanes,
+      roots
+    )
+  }
+  return receipt
 }

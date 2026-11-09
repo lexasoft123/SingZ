@@ -16,7 +16,7 @@ export interface BoxAudioReply {
 export const boxAudioCounter = (value: unknown): value is string =>
   typeof value === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(value)
 export const boxAudioReadOnly = (target: BoxAudioTarget, method: string): boolean =>
-  target === 'service' && method === 'reconcile' ||
+  target === 'service' && (method === 'reconcile' || method === 'associateRetainedProject') ||
   target === 'routing' && method === 'capabilities' ||
   target === 'owner' && new Set(['devices', 'hostDevices', 'microphoneMixStatus', 'monitorStatus',
     'playbackProviders', 'playbackCapability', 'playbackStatus', 'state', 'stats']).has(method)

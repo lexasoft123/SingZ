@@ -76,10 +76,29 @@ executable to qualify the packaged host. The Linux installed-package lane runs
 this driver after the addon identity check. Use a container without physical
 sound devices for this gate; do not bypass Electron sandboxing.
 
-This driver does not exercise TV renderer shutdown, restored project/lyrics,
-physical microphones, FLOW 8 routing or audible latency. Persistent playback
-changes also need the actual Box window-close/restart path, including the
-retained-song notice and explicit Stop-before-open recovery.
+This headless driver alone does not exercise renderer close/restore or restored
+project/lyrics. For opt-in persistent Linux Box, also run
+`node tests/e2e/box-retained-recovery.cjs`. It uses a generated 180-second
+stems-only fixture with a non-null project graph and synchronized lyrics,
+private HOME/XDG/profile roots, muted logical routes and no physical audio
+device. The driver closes the actual `BrowserWindow`, then relaunches Box while
+the independent native host stays alive. A qualifying run must observe the real
+UI project, synchronized lyrics, current native controls and position, and the
+same host epoch and generation through close and read-only reattach after
+relaunch. Reattachment requires a commandable running or paused transport;
+Refresh while retained is safe and preserves that identity. Explicit Stop is
+the controlled fallback and must confirm release of the reviewed identity.
+Final end-to-end qualification is still required; do not infer a PASS from the
+host smoke or this listing.
+
+For close/recovery/fallback evidence, a test-only recorder on the private Unix
+socket observes actual native RPCs. The recorder must reject forbidden automatic
+RPCs while permitting the explicit Stop release; a PASS also requires the
+identity/position/UI evidence above. `transportDiscontinuities` is DSP
+clock-reset/jitter telemetry, not a native command counter: never use it to
+infer pause, stop, seek, reprepare or level changes. Telemetry remains
+diagnostic. Physical microphones, FLOW 8 routing, CEC and audible latency remain
+separate hardware gates.
 
 ## Box HDMI-CEC input
 

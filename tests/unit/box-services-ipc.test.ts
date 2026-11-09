@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { IpcMainInvokeEvent, WebContents } from 'electron'
+import type { BoxRetainedPlaybackRestore } from '../../src/shared/box-contract'
 
 const ipc = vi.hoisted(() => {
   const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>()
@@ -38,7 +39,7 @@ const originalSurface = process.env.SINGZ_SURFACE
 async function register(
   rendererURL: string,
   surface = 'box',
-  audio: Partial<Pick<Parameters<typeof registerBoxIpc>[0], 'audioInputs' | 'audioHost' | 'cecStatus' | 'retainedPlaybackSnapshot' | 'stopRetainedPlayback'>> = {}
+  audio: Partial<Pick<Parameters<typeof registerBoxIpc>[0], 'audioInputs' | 'audioHost' | 'cecStatus' | 'retainedPlaybackSnapshot' | 'stopRetainedPlayback' | 'restoreRetainedPlayback'>> = {}
 ) {
   process.env.SINGZ_SURFACE = surface
   const userDataDir = await mkdtemp(join(tmpdir(), 'box-ipc-'))
@@ -122,6 +123,53 @@ describe('Box IPC renderer trust', () => {
     expect(await invoke(owner, 'box:retained-playback-stop', owner.mainFrame, { epoch: 'old-e', generation: '1' })).toMatchObject({ ok: false, error: 'Audio service changed. Refresh before stopping the song.' })
     expect(stop).toHaveBeenCalledWith({ epoch: 'old-e', generation: '1' })
   })
+
+  it('restores retained playback only for the trusted TV with exact epoch/generation input', async () => {
+    const url = 'file:///tmp/renderer/box/box.html'
+    const dto = { epoch: 'service-e', cached: { project: true } } as unknown as BoxRetainedPlaybackRestore
+    const restore = vi.fn(async () => dto)
+    const backend = await register(url, 'box', { restoreRetainedPlayback: restore })
+    if (!backend) throw new Error('Box backend was not registered')
+    const owner = new Sender(url)
+    const outsider = new Sender(url)
+    attached(backend, owner)
+    const expected = { epoch: 'service-e', generation: '7' }
+    expect((await invoke(outsider, 'box:retained-playback-restore', outsider.mainFrame, expected)).code).toBe('unauthorized')
+    expect((await invoke(owner, 'box:retained-playback-restore', { url }, expected)).code).toBe('unauthorized')
+    owner.mainFrame.url = `${url}.evil`
+    expect((await invoke(owner, 'box:retained-playback-restore', owner.mainFrame, expected)).code).toBe('unauthorized')
+    owner.mainFrame.url = url
+    expect(restore).not.toHaveBeenCalled()
+    for (const malformed of [
+      null,
+      [],
+      {},
+      { epoch: '', generation: '7' },
+      { epoch: 'service-e', generation: '01' },
+      { ...expected, libraryRoot: '/renderer', driveProjectsRoot: '/renderer', dir: '/renderer/song' }
+    ]) {
+      expect((await invoke(owner, 'box:retained-playback-restore', owner.mainFrame, malformed)).code).toBe('invalid-command')
+    }
+    expect(restore).not.toHaveBeenCalled()
+    expect(await invoke(owner, 'box:retained-playback-restore', owner.mainFrame, expected)).toEqual({ ok: true, value: dto })
+    expect(restore).toHaveBeenCalledExactlyOnceWith(expected)
+    restore.mockRejectedValueOnce(new Error(`Audio service changed. Refresh before restoring. ${'x'.repeat(2500)}`))
+    const stale = await invoke(owner, 'box:retained-playback-restore', owner.mainFrame, expected)
+    expect(stale).toMatchObject({ ok: false, code: 'audio-state' })
+    expect(stale.error).toMatch(/^Audio service changed/)
+    expect(String(stale.error)).toHaveLength(2000)
+  })
+
+  it('reports retained restore as unavailable when persistent audio is not configured', async () => {
+    const url = 'file:///tmp/renderer/box/box.html'
+    const backend = await register(url)
+    if (!backend) throw new Error('Box backend was not registered')
+    const owner = new Sender(url)
+    attached(backend, owner)
+    expect(await invoke(owner, 'box:retained-playback-restore', owner.mainFrame, { epoch: 'service-e', generation: '7' }))
+      .toMatchObject({ ok: false, code: 'unavailable', error: 'Independent audio is not configured.' })
+  })
+
   it('registers no Box handlers for Desktop', async () => {
     expect(await register('file:///tmp/renderer/box/box.html', 'desktop')).toBeNull()
     expect(ipc.handlers.size).toBe(0)

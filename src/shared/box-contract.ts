@@ -1,4 +1,14 @@
-import type { DesktopPlaybackStatus } from './types'
+import type { DesktopPlaybackStatus, LyricLine, ProjectGraphPayload, ProjectInfo, ProjectListItem } from './types'
+
+export type BoxRetainedPlaybackRestore = {
+  epoch: string
+  recovery: BoxRetainedPlaybackRecovery
+  item: ProjectListItem
+  project: ProjectInfo
+  lyrics: LyricLine[]
+  graph: ProjectGraphPayload | null
+}
+
 export type BoxResult<T> = { ok: true; value: T } | { ok: false; error: string; code?: string }
 
 export type BoxMetronomeOverride = 'song' | 'off'
@@ -147,6 +157,7 @@ export type BoxAPI = {
   diagnostics(): Promise<BoxResult<BoxDiagnostics>>
   retainedPlaybackSnapshot(): Promise<BoxResult<BoxRetainedPlaybackSnapshot>>
   stopRetainedPlayback(expected: { epoch: string; generation: string }): Promise<BoxResult<BoxRetainedPlaybackSnapshot>>
+  restoreRetainedPlayback(expected: { epoch: string; generation: string }): Promise<BoxResult<BoxRetainedPlaybackRestore>>
   routingSnapshot(): Promise<BoxResult<BoxRoutingState>>
   routingEdit(edit: { expected: { epoch: string; generation: string }; commands: unknown[] }): Promise<BoxResult<BoxRoutingState>>
   phoneStart(): Promise<BoxResult<BoxPhoneState>>
@@ -199,7 +210,37 @@ export type BoxRoutingState = {
   }
 }
 
+export type BoxRetainedProjectMedia = {
+  id: string
+  path: string
+  size: string
+  mtimeMs: number
+}
+
+export type BoxRetainedProjectDescriptor = {
+  version: 1
+  project: {
+    dir: string
+    songPath: string
+    name: string
+    metadataHash: string
+    lyricsHash: string | null
+    graphHash: string | null
+    media: BoxRetainedProjectMedia[]
+  }
+  config: import('./types').DesktopPlaybackPrepareConfig
+  lanes: import('./types').DesktopPlaybackLaneConfig[]
+}
+
+export type BoxRetainedPlaybackRecovery = {
+  generation: string
+  descriptor: BoxRetainedProjectDescriptor
+  status: DesktopPlaybackStatus
+}
+
 export type BoxRetainedPlaybackSnapshot = {
   epoch: string
   playback: Pick<DesktopPlaybackStatus, 'generation' | 'state' | 'transportState'> | null
+  /** Absent on old hosts and whenever only the explicit Stop fallback is safe. */
+  recovery?: BoxRetainedPlaybackRecovery | null
 }
