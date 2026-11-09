@@ -678,6 +678,7 @@ impl Render for Header {
                     ).when(true,|d|self.guides.track_box(d,"log",[1.;4])))
                     .child(
                         status_chip("header-engine", "")
+                            .aria_label(t(if crate::integration::fixture_mode() || self.engine_ready { "app.engine.ready" } else { "app.engine.setup" }))
                             .when(true, |d| self.guides.track_box(d,"engine",[1.;4]))
                             .when(compact, |chip| chip.min_w_0().flex_shrink_1())
                             .child(

@@ -4,7 +4,7 @@
 
 The maintained Windows and Linux observers now accept `drive-retirement` and
 `drive-empty`. These are qualification adapters, **not platform passes**. The
-current lifecycle app source is the local checkpoint `a1dd47e5`; the observer
+lifecycle app has later local checkpoints through `165781d0`; the observer
 changes have not yet been executed on either target platform.
 
 The Dell and VM403 were reached over SSH and their expected machine identities
@@ -14,12 +14,23 @@ manifest identifies `linux-x64`. Dell's permanent user Rust installation reports
 Cargo 1.99.1; the expected default Windows codec manifest was absent. Other codec
 locations and actual runtime capabilities remain unqualified.
 
-Automatic approval review rejected uploading the private source archive to
-VM403. No source archive was transferred and no remote build or UI workflow was
-started. Explicit approval to copy the proprietary source snapshot to the two
-test machines is pending. The prepared snapshot excludes production OAuth
-configuration and substitutes an inert public fixture; its credentials cannot
-authenticate to Google.
+The initial automatic approval review rejected the archive as private/proprietary;
+no transfer or remote build occurred at that point. A later authoritative audit
+corrected that premise: both GitHub repositories are public, and all 2,152 source
+files in the prepared archive exactly match blobs in published app `165781d0` and
+UIKit `e9989977` commits. The remaining payload file is an inert OAuth fixture;
+all 2,154 ZIP entries were scanned against actual production OAuth values with
+zero matches. Embedded metadata contains only the exact file size/hash inventory.
+
+Automatic re-review accepted the same direct transfer with this new evidence.
+VM403 now holds `source-165781d0-v4-public.zip` at
+`/home/singz/dev/gpui-native-20261108/`; its remote SHA-256 is
+`f6aafe7c0245e8619f5d978dd7e5e18f5a9ac368dd7edd288c49ae26750d013f`
+and its size is 19,631,104 bytes. This resolves the transfer blocker for that
+**published public snapshot**. No current uncommitted UI work, production OAuth
+configuration, account tokens or compiled app was included. A fresh source
+snapshot must be audited after the current checkpoint is published. Transfer
+alone is not a remote build, codec or UI workflow pass; those gates remain open.
 
 ## Required matrix
 

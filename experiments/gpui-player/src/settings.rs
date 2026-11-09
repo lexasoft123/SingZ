@@ -965,20 +965,33 @@ impl SettingsScreen {
         });
         #[cfg(feature = "ui-tests")]
         self.field_labels.borrow_mut().insert(id, label.clone());
+        let accessible_label = match id {
+            "settings-output" => Some("settings.output.label"),
+            "settings-provider" => Some("settings.windows.providerLabel"),
+            "settings-input" => Some("settings.mic.label"),
+            "settings-channel" => Some("settings.mic.channelLabel"),
+            "settings-monitor-output" => Some("settings.monitor.outputLabel"),
+            "settings-output-left" => Some("settings.monitor.playbackLeft"),
+            "settings-output-right" => Some("settings.monitor.playbackRight"),
+            _ => None,
+        }.map(crate::i18n::t).unwrap_or_else(|| label.clone());
         let field = div()
             .relative()
             .w_full()
             .child(
-                self.control(id, select_field(id, label), self.field_enabled(id), cx),
+                self.control(id, select_field(id, label.clone())
+                    .aria_label(accessible_label)
+                    .aria_value(label)
+                    .aria_expanded(expanded), self.field_enabled(id), cx),
             )
             .when(expanded, |v| {
                 v.child(
                     deferred(popup.children(options.into_iter().enumerate().map(
                         |(index, (_uid, option))| {
                             let disabled=self.option_disabled(id,index);
-                            let option = select_option((id, index), option, if expanded { self.menu_index == Some(index) } else { index == selected })
+                            let option = singz_uikit::disabled_control(select_option((id, index), option, if expanded { self.menu_index == Some(index) } else { index == selected })
                                 .flex_none()
-                                .when(disabled, |option| option.opacity(0.45).cursor_default())
+                                .when(disabled, |option| option.opacity(0.45).cursor_default()), !disabled)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if disabled {
                                         cx.stop_propagation();
@@ -1017,11 +1030,14 @@ impl SettingsScreen {
     fn check_row(
         &self, id: &'static str, label: impl Into<SharedString>, on: bool, cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let row = div().id(format!("{id}-row")).mt(px(10.)).flex().items_center().gap(px(8.))
+        let label: SharedString = label.into();
+        let row = div().id(format!("{id}-row")).role(Role::CheckBox).accessibility_id(id)
+            .aria_label(label.clone()).aria_toggled(if on {Toggled::True} else {Toggled::False})
+            .mt(px(10.)).flex().items_center().gap(px(8.))
             .text_color(rgb(DIM)).text_size(px(12.)).line_height(px(15.)).cursor_pointer()
-            .child(checkbox(id, on).on_click(cx.listener(move |s, _, w, cx| {
+            .child(checkbox(id, on).a11y_synthetic_children(|builder| builder.parent_node().set_hidden()).on_click(cx.listener(move |s, _, w, cx| {
                 s.activate(id, w, cx); cx.stop_propagation();
-            }))).child(label.into());
+            }))).child(label);
         let enabled = !(self.native && (id == "settings-native" || self.monitor_busy));
         self.control(id, row, enabled, cx)
     }
@@ -1619,7 +1635,7 @@ impl SettingsScreen {
                         cx.notify();
                     });
                 },
-            ).flex_1().min_w(px(100.)))
+            ).aria_label(crate::i18n::t("settings.monitor.gainLabel")).flex_1().min_w(px(100.)))
         };
         Self::strip(14.)
             .child(

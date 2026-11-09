@@ -86,12 +86,15 @@ still not decoding, helper/app execution or final package qualification.
 
 ## Remaining qualification
 
-The repaired private builder has not been sent to Dell. Automatic approval review
-rejected private-source export to the target machines pending explicit user
-source-transfer authorization. This checkpoint used only already-present tools,
-the existing builder, public dependencies and a public-API diagnostic probe.
+The repaired builder has not yet run on Dell. The original source transfer was
+rejected as private/proprietary, but subsequent GitHub metadata and exact blob
+comparison prove the prepared snapshot contains published public source plus an
+inert OAuth fixture. Automatic re-review accepted that same transfer to VM403;
+see `PLATFORM_DRIVE_QUALIFICATION.md` for hashes and scope. The old private-source
+premise is corrected, rather than bypassed. This codec checkpoint itself used
+only already-present tools, the existing builder and public dependencies.
 
-After authorized source delivery, publish a fresh SDK with the repaired builder,
+After audited source delivery to Dell, publish a fresh SDK with the repaired builder,
 verify its inventory, then build and exercise the codec-enabled native helpers
 and app. Run the complete canonical codec fixture matrix, including failure,
 cancellation, descriptor ownership and Unicode-path cases, followed by relocated

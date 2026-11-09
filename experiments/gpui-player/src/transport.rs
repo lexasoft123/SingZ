@@ -248,6 +248,21 @@ impl Transport {
         self.focus_control_element(id,element,true,cx)
     }
     fn focus_control_element(&self,id:&'static str,element:Stateful<Div>,menu:bool,cx:&mut Context<Self>)->Stateful<Div>{
+        let element = match id {
+            "transport-restart" => element.aria_label(crate::i18n::t("player.transport.backToStart")),
+            "transport-play" => element.aria_label(crate::i18n::t(if self.playing {"player.transport.pause"} else {"player.transport.play"})),
+            "transport-loop" => element.aria_label(crate::i18n::t("player.transport.loopSong")),
+            "transport-met" => element.aria_label(crate::i18n::t("player.transport.metronomeTitle")),
+            "transport-carry" => element.aria_label(crate::i18n::t("player.transport.carryLine")),
+            "transport-transpose-down" | "transport-transpose-up" => element.aria_label(format!("{} {}",crate::i18n::t("player.transport.transposeTitle"),if id.ends_with("down") {"−"} else {"+"})),
+            "transport-transpose-reset" => element.aria_label(crate::i18n::t("player.transport.resetTranspose")),
+            "transport-tempo-down" | "transport-tempo-up" => element.aria_label(format!("{} {}",crate::i18n::t("player.transport.speedTitle"),if id.ends_with("down") {"−"} else {"+"})),
+            "transport-tempo-reset" => element.aria_label(crate::i18n::t("player.transport.resetSpeed")),
+            "transport-bpm-down" | "transport-bpm-up" => element.aria_label(format!("{} {}",crate::i18n::t("player.bpm.setTitle"),if id.ends_with("down") {"−1"} else {"+1"})),
+            "transport-output" => element.aria_label(crate::i18n::tv("player.transport.volumeAt",&[("db",song_gain_label(self.volume))])).aria_expanded(self.output_open),
+            "split-cancel" => element.aria_label(crate::i18n::t("player.transport.cancelSplit")),
+            _ => element,
+        };
         let enabled=self.control_enabled(id);if enabled{if menu{self.split_order.borrow_mut().push(id);}else{self.footer_order.borrow_mut().push(id);}}
         let focus=self.control_focus[id].clone();let weak=cx.entity().downgrade();
         let callback=move|w:&mut Window,cx:&mut App|{let _=weak.update(cx,|s,cx|s.activate_control(id,w,cx));};
@@ -727,16 +742,13 @@ impl Transport {
         let clip_hint=crate::i18n::t("player.volume.peakTitle");
         let fader=singz_uikit::song_output_fader("transport-output-slider",song_fader_db(self.volume),move|db,_,cx|{
             let _=weak.update(cx,|s,cx|s.output_db(db,cx));
-        }).track_focus(&self.output_focus).tab_index(0)
-            .on_key_down(cx.listener(|s,event:&KeyDownEvent,_,cx|{
-                let current=song_fader_db(s.volume);
-                let db=match event.keystroke.key.as_str(){"left"|"down"=>Some(current-0.5),"right"|"up"=>Some(current+0.5),"home"=>Some(-60.),"end"=>Some(12.),_=>None};
-                if let Some(db)=db {s.output_db(db,cx);cx.stop_propagation();}
-                else if matches!(event.keystroke.key.as_str(),"space"|"enter") {cx.stop_propagation();}
-            }));
+        }).aria_label(crate::i18n::t("player.volume.title"))
+            .aria_description(crate::i18n::t("player.volume.sliderTitle"))
+            .track_focus(&self.output_focus).tab_index(0);
         let mute_owner=cx.entity().downgrade();
         let mute=self.probe("transport-output-mute",singz_uikit::settings_control_with_focus(
             singz_uikit::song_output_mute("transport-output-mute",self.volume==0.)
+                .aria_label(mute_hint.clone())
                 .tooltip(move|w,cx|gpui_kit::component::tooltip::Tooltip::new(mute_hint.clone()).build(w,cx)),
             self.output_control_focus[1].clone(),true,move|_,cx|{
                 let _=mute_owner.update(cx,|s,cx|s.output_gain(muted_song_gain(s.volume,s.output_pre_mute),cx));
@@ -750,6 +762,7 @@ impl Transport {
         let clip_owner=cx.entity().downgrade();
         let clip=self.probe("transport-output-clip",singz_uikit::settings_control_with_focus(
             singz_uikit::song_output_clip("transport-output-clip",crate::i18n::t("player.volume.clipped"),self.output_meter.clipped)
+                .aria_label(clip_hint.clone())
                 .tooltip(move|w,cx|gpui_kit::component::tooltip::Tooltip::new(clip_hint.clone()).build(w,cx)),
             self.output_control_focus[3].clone(),true,move|_,cx|{
                 let _=clip_owner.update(cx,|s,cx|{s.output_meter.reset_clip(s.output_latest_clips);cx.notify();});

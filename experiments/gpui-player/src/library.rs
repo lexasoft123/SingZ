@@ -152,6 +152,8 @@ pub struct LibraryScreen {
     native_root: String,
     delete_error: Option<String>,
     drive: crate::drive_state::Snapshot,
+    #[cfg(feature = "ui-tests")]
+    guide_native_fixture: bool,
     drive_focus: std::cell::RefCell<std::collections::HashMap<String, FocusHandle>>,
     drive_bounds: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, Bounds<Pixels>>>>,
     revealed_drive_focus: Option<String>,
@@ -232,6 +234,8 @@ impl LibraryScreen {
             native_root: String::new(),
             delete_error: None,
             drive: Default::default(),
+            #[cfg(feature = "ui-tests")]
+            guide_native_fixture: false,
             drive_focus: Default::default(),
             drive_bounds: Default::default(),
             revealed_drive_focus: None,
@@ -279,6 +283,56 @@ impl LibraryScreen {
             cx.notify();
         }
     }
+    fn native_catalog(&self) -> bool {
+        #[cfg(feature = "ui-tests")]
+        if self.guide_native_fixture { return true; }
+        !crate::integration::fixture_mode()
+    }
+    /// Guide anchors retain historical bounds. Admit this conditional step from
+    /// the currently mounted row, never from a preceding frame's cached anchor.
+    pub fn sync_guide_available(&self) -> bool {
+        self.native_catalog() && self.drive.configured
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn review_guide_drive(&mut self, native: bool, configured: bool, cx: &mut Context<Self>) {
+        // Exercise the real native catalog composition without starting account,
+        // network or audio workers in the isolated demo-mode guide observer.
+        self.guide_native_fixture = native;
+        let root = crate::integration::library_root();
+        self.native_root = root.display().to_string();
+        // Use the real native card composition with enough fictional projects
+        // for a valid scroll-to-bottom state at either desktop viewport. Demo
+        // reset restores its ordinary twelve-song collection, not an empty grid.
+        self.songs = (0..if native { 48 } else { SONGS.len() }).map(|index| {
+            let song = &SONGS[index % SONGS.len()];
+            CatalogSong {
+                title: if native {format!("{} · {}",song.title,index / SONGS.len() + 1)} else {song.title.into()},
+                saved: song.saved.into(),
+                lyrics: song.lyrics,
+                project_dir: native.then(||root.join(format!("guide-project-{index:02}"))),
+                stems: 6,
+            }
+        }).collect();
+        self.drive = crate::drive_state::Snapshot { configured, ..Default::default() };
+        cx.notify();
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn review_guide_page(&self) -> serde_json::Value {
+        let b = self.page_scroll.bounds();
+        serde_json::json!({"nativeCatalog":self.native_catalog(),"configured":self.drive.configured,
+            "syncAvailable":self.sync_guide_available(),"offsetY":f32::from(self.page_scroll.offset().y),
+            "maxOffsetY":f32::from(self.page_scroll.max_offset().y),
+            "projectCount":self.songs.len(),"projects":self.songs.iter().map(|song|serde_json::json!({"title":song.title,"saved":song.saved,"lyrics":song.lyrics,"dir":song.project_dir,"stems":song.stems})).collect::<Vec<_>>(),
+            "viewport":{"left":f32::from(b.left()),"top":f32::from(b.top()),"right":f32::from(b.right()),"bottom":f32::from(b.bottom())}})
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn review_guide_page_top(&self) {
+        self.page_scroll.set_offset(point(px(0.), px(0.)));
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn review_guide_page_bottom(&self) {
+        self.page_scroll.set_offset(point(px(0.), -self.page_scroll.max_offset().y));
+    }
     pub fn drive_bounds(&self, id: &str) -> Option<Bounds<Pixels>> {
         self.drive_bounds.borrow().get(id).copied()
     }
@@ -296,7 +350,7 @@ impl LibraryScreen {
     /// Current mounted/enabled actions, independent of the preceding frame's
     /// bounds. The Drive row only exists for configured native integration.
     fn drive_control_enabled(&self,id:&str)->bool {
-        if crate::integration::fixture_mode() || !self.drive.configured {return false;}
+        if !self.sync_guide_available() {return false;}
         match id {
             "library-drive-browse"|"library-drive-log"=>self.drive.signed_in,
             "library-drive-cancel"=>self.drive_syncing(),
@@ -547,6 +601,7 @@ impl LibraryScreen {
             else{LibraryEvent::DeleteSong{title:song.title.clone().into()}};
         let delete_key_event=delete_event.clone();
         let delete = catalog_project_delete(format!("library-delete:{key:?}"))
+            .aria_label(tv("library.dropScreen.deleteAria", &[("name", song.title.to_string())]))
             .track_focus(&delete_focus).tab_index(0)
             .absolute()
             .right(px(7.))
@@ -808,7 +863,7 @@ impl Render for LibraryScreen {
         if self.animation_time.is_none() && self.suspended_at.is_none() {
             window.request_animation_frame();
         }
-        let native = !crate::integration::fixture_mode();
+        let native = self.native_catalog();
         let description = match self.open_song.as_ref() {
             Some(song)=>tv("library.dropScreen.catalogHint", &[("song",song.to_string())]),
             None=>t("library.dropScreen.dropHintDesc"),
@@ -1023,7 +1078,7 @@ impl Render for LibraryScreen {
                             .when(native && self.drive.configured, |storage| {
                                 singz_uikit::drive_storage_panel()
                                     .child(storage.h(px(51.5)).mb_0().border_0().bg(rgba(0)))
-                                    .child(self.drive_row(window,cx))
+                                    .child(self.guides.track_box(self.drive_row(window,cx), "sync", [0., 1., 0., 0.]))
                             })
                             .when_some(
                                 self.delete_error.clone().filter(|_| native),

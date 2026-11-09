@@ -216,6 +216,8 @@ mod ui_locale;
 mod ui_native_lyrics;
 #[cfg(feature = "ui-tests")]
 mod ui_quick_start;
+#[cfg(all(feature = "ui-tests", target_os = "macos"))]
+mod ui_accessibility;
 #[cfg(feature = "ui-tests")]
 mod ui_review;
 #[cfg(feature = "ui-tests")]
@@ -770,7 +772,7 @@ impl Player {
             match event {
                 quick_start::Event::Target(id) => {
                     if let Some(bounds) = this.quick_start.read(cx).anchors.get(id) {
-                        if matches!(*id, "browse" | "saved") {
+                        if matches!(*id, "browse" | "saved" | "sync") {
                             this.library.read(cx).reveal_guide(bounds);
                         } else if *id == "stems" {
                             this.stem_scroll_handle.set_offset(point(px(0.), px(0.)));
@@ -1665,7 +1667,14 @@ impl Player {
             t.dismiss_popovers(cx);
         });
         let targets = match self.screen {
-            Screen::Library => vec!["browse", "saved", "training", "settings"],
+            Screen::Library => {
+                let mut ids = vec!["browse", "saved", "training"];
+                if self.library.read(cx).sync_guide_available() {
+                    ids.push("sync");
+                }
+                ids.push("settings");
+                ids
+            }
             Screen::Player => {
                 let mut ids = vec![];
                 if self.source_split.is_none() {
@@ -5963,6 +5972,11 @@ fn main() {
         if let Some(directory)=std::env::var_os("SINGZ_GPUI_ENGINE_SETUP_TEST"){
             assert!(background&&std::env::var_os("SINGZ_MUTE").is_some());
             ui_engine_setup::run(window_handle,view.clone(),directory.into(),cx);
+        }
+        #[cfg(all(feature = "ui-tests", target_os = "macos"))]
+        if let Some(directory) = std::env::var_os("SINGZ_GPUI_ACCESSIBILITY_TEST") {
+            assert!(background && std::env::var_os("SINGZ_MUTE").is_some());
+            ui_accessibility::run(window_handle, view.clone(), directory.into(), cx);
         }
         #[cfg(feature = "ui-tests")]
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_GUIDE_TEST") {

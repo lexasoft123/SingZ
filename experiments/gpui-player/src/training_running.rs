@@ -271,6 +271,7 @@ impl TrainingScreen {
                 self.probe(
                     "training-run-exit",
                     training_round_button("training-run-exit", "←")
+                        .aria_label(t("training.session.aria.endSession"))
                         .size(px(44.))
                         .when(true,|d|self.run_control("training-run-exit",d,TrainingEvent::End,cx)),
                 ),
@@ -736,6 +737,7 @@ impl TrainingScreen {
             .enumerate()
             .map(|(index, (label, detail, answer))| {
                 let button = training_answer(("training-answer", index))
+                    .aria_label(if detail.is_empty() {label.clone()} else {format!("{label} · {detail}")})
                     .min_w(px(100.))
                     .flex_1()
                     .child(Self::text(label, 16., TEXT).font_family(DISPLAY_700))

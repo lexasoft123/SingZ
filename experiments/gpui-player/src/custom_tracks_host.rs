@@ -4,6 +4,29 @@ use std::path::PathBuf;
 
 impl Player {
     pub(super) fn track_probe(&self, id: String, d: Stateful<Div>) -> Stateful<Div> {
+        // These are the mounted lane controls' stable action IDs. Their names
+        // use the same localized source copy and current track title as the UI.
+        let mut d = d;
+        if let Some((action, slot)) = id.rsplit_once('-') {
+            if let Ok(slot) = slot.parse::<usize>() {
+                if slot < self.gain.len() {
+                    let track = self.lane_label(slot);
+                    let name = match action {
+                        "mute" => Some(format!("{} · {track}", i18n::t(if self.muted[slot] { "player.lane.unmute" } else { "player.lane.mute" }))),
+                        "solo" => Some(format!("{} · {track}", i18n::t(if self.solo[slot] { "player.lane.unsolo" } else { "player.lane.solo" }))),
+                        "gain" => Some(format!("{} · {track}", i18n::t("player.lane.volume"))),
+                        "edit" => Some(i18n::tv("player.lane.rename", &[("track", track.to_string())])),
+                        "remove" => Some(i18n::tv("player.lane.remove", &[("track", track.to_string())])),
+                        _ => None,
+                    };
+                    if let Some(name) = name { d = d.aria_label(name); }
+                    if matches!(action, "mute" | "solo") {
+                        let on = if action == "mute" { self.muted[slot] } else { self.solo[slot] };
+                        d = d.aria_toggled(if on { Toggled::True } else { Toggled::False });
+                    }
+                }
+            }
+        }
         #[cfg(feature = "ui-tests")]
         {
             let bounds = self.track_bounds.clone();

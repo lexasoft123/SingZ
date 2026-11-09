@@ -300,7 +300,7 @@ impl Dialog {
         let mousefocus = focus.clone();
         self.probe(
             id,
-            d.when(enabled, |d| {
+            ui::disabled_control(d, enabled).when(enabled, |d| {
                 d.track_focus(&focus).child(ui::guide_focus_ring(
                     focus.clone(),
                     self.keyboard.clone(),
@@ -402,6 +402,7 @@ impl Render for Dialog {
                     let enabled = !self.busy;
                     let checkbox =
                         ui::checkbox(format!("{id}-check"), self.selected.contains(&t.id))
+                            .a11y_synthetic_children(|builder| builder.parent_node().set_hidden())
                             .on_click(cx.listener(move |s, _, _, cx| {
                                 if enabled {
                                     s.activate(&check_id, cx);
@@ -409,7 +410,10 @@ impl Render for Dialog {
                                 cx.stop_propagation();
                             }));
                     let d =
-                        ui::stem_export_track(id.clone(), Self::track_label(t), checkbox, enabled);
+                        ui::stem_export_track(id.clone(), Self::track_label(t), checkbox, enabled)
+                            .role(Role::CheckBox).accessibility_id(id.clone())
+                            .aria_label(Self::track_label(t))
+                            .aria_toggled(if self.selected.contains(&t.id) {Toggled::True} else {Toggled::False});
                     line = line.child(self.control(&id, d, enabled, cx));
                 }
                 if chunk.len() == 1 {
@@ -485,7 +489,7 @@ impl Render for Dialog {
                 true,
                 self.can_run(),
                 w,
-            ),
+            ).role(Role::Button).accessibility_id("export-run").aria_label(t("player.stack.exportChoose")),
             self.can_run(),
             cx,
         );
@@ -497,7 +501,7 @@ impl Render for Dialog {
                 false,
                 true,
                 w,
-            ),
+            ).role(Role::Button).accessibility_id("export-cancel").aria_label(t("player.stack.exportCancel")),
             true,
             cx,
         );

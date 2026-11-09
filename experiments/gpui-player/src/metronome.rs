@@ -529,6 +529,8 @@ impl Render for MetPopover {
                                     });
                                 },
                             )
+                            .aria_label(t("player.metronome.loudness"))
+                            .aria_description(t("player.metronome.loudnessTitle"))
                             .on_mouse_up(
                                 MouseButton::Left,
                                 cx.listener(|s, _, _, cx| cx.emit(Event::Preview(s.met.accent))),

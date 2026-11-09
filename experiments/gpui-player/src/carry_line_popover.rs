@@ -352,7 +352,8 @@ impl Popover {
     fn step(&self, id: &str, label: &str, cx: &mut Context<Self>) -> Stateful<Div> {
         self.control(
             id,
-            ui::carry_line_step(id.to_owned(), label.to_owned(), !self.pending),
+            ui::carry_line_step(id.to_owned(), label.to_owned(), !self.pending)
+                .aria_label(format!("{} {label}", t(if id.starts_with("carry-period-") { "player.training.switchEvery" } else if id.starts_with("carry-hear-") { "player.training.hear" } else { "player.training.sing" }))),
             cx,
         )
     }

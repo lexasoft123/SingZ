@@ -1303,8 +1303,8 @@ impl TrainingScreen {
                 });
             },
         );
-        let low = self.probe("training-low", self.keyboard_probe("training-low",low));
-        let high = self.probe("training-high", self.keyboard_probe("training-high",high));
+        let low = self.probe("training-low", self.keyboard_probe("training-low",low.aria_label(t("training.setup.label.lowestNote"))));
+        let high = self.probe("training-high", self.keyboard_probe("training-high",high.aria_label(t("training.setup.label.highestNote"))));
         let range = Self::fieldset(t("training.setup.legend.range"))
             .flex_basis(relative(0.425))
             .min_w(px(280.))
@@ -1523,7 +1523,7 @@ impl TrainingScreen {
                 cx.notify();
             });
         });
-        let volume=self.probe("training-volume",self.keyboard_probe("training-volume",volume));
+        let volume=self.probe("training-volume",self.keyboard_probe("training-volume",volume.aria_label(t("training.setup.ariaLabel.notePlaybackVolume"))));
         Self::fieldset(t("training.setup.legend.practiceSettings"))
             .child(
                 div()
@@ -1605,6 +1605,7 @@ impl TrainingScreen {
                                         self.probe(
                                             "training-volume-minus",
                                             training_round_button("training-volume-minus", "−")
+                                                .aria_label(t("training.setup.ariaLabel.lowerVolume"))
                                                 .when(true,|d|self.setup_control("training-volume-minus",d,true,cx)),
                                         ),
                                     )
@@ -1613,6 +1614,7 @@ impl TrainingScreen {
                                         self.probe(
                                             "training-volume-plus",
                                             training_round_button("training-volume-plus", "+")
+                                                .aria_label(t("training.setup.ariaLabel.raiseVolume"))
                                                 .when(true,|d|self.setup_control("training-volume-plus",d,true,cx)),
                                         ),
                                     ),

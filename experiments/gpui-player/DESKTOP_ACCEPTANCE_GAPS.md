@@ -11,7 +11,7 @@ qualify every route, physical device, platform or production image.
 | Saved empty project → Drive sync — local checkpoint passed | Dedicated publication/recovery and automatic continuation pass 943 Rust tests and the real two-size writer → fresh reader → offline journey (six launches, 14 captures). Pending no longer claims “up to date”. | Local fixture integration is qualified; real Google and Windows/Linux qualification remain open. See `EMPTY_DRIVE_REVIEW.md`. Delete/Rename/name reuse is the separate lifecycle gap below. |
 | Publication history after Delete/Rename and name reuse — local checkpoint passed | Exact local-operation authority, immutable ordinary upload recovery and catalog-last retirement pass 1,009 Rust tests. The actual two-size Delete-last → same-name reuse → typed Rename → same-name reuse journey passes two launches and 20 captures. | Local lifecycle integration is qualified; real Google and Windows/Linux qualification remain open. Preserve recovery archives, replacement admission and the unavailable-library guard. See `RETIREMENT_DRIVE_REVIEW.md`. |
 | Windows audio-provider qualification | Native Settings, preferences and helper now carry explicit provider intent and availability, refuse unavailable providers without fallback, and fence changes against active or retiring audio owners. Independent microphone/monitor inventory stays on WASAPI. | The repaired provider source at `14715b4e` passes Dell build/tests and the hidden native provider/restart journey (`provider5`, `provider-ui3`). Keep broader platform workflows, full codecs and physical audibility separate. ASIO remains unavailable until a licensed adapter and driver are implemented and qualified. See `WINDOWS_PROVIDER_REVIEW.md`; source and macOS checks do not close this platform gate. |
-| Windows full-codec delivery — SDK layout fix | Dell compiled and installed the pinned public FFmpeg source after English MSVC resource installation. A relocated Python-process probe passes DLL versions/licenses/configuration and 20 decoder/five demuxer lookups. The inspector now accepts upstream `bin/component.lib`; nine assembly tests pass. | Fresh SDK publication with the repaired builder, full canonical decoding matrix and relocated codec-enabled helpers/app remain open. No fresh private source was transferred. See `WINDOWS_CODEC_REVIEW.md`. |
+| Windows full-codec delivery — SDK layout fix | Dell compiled and installed the pinned public FFmpeg source after English MSVC resource installation. A relocated Python-process probe passes DLL versions/licenses/configuration and 20 decoder/five demuxer lookups. The inspector now accepts upstream `bin/component.lib`; nine assembly tests pass. | Fresh SDK publication with the repaired builder, full canonical decoding matrix and relocated codec-enabled helpers/app remain open. The older published public source snapshot was audited and transferred to VM403; current UI source still needs publication and a fresh audit. See `WINDOWS_CODEC_REVIEW.md`. |
 
 Training's previously missing result reveal, acknowledgement and task-specific
 Summary copy now have a scoped EN/RU two-size native checkpoint; see
@@ -61,8 +61,12 @@ real account/platform qualification remains open. The separate retirement lifecy
   classification: the canonical reference included the corner. Long-clock/
   localized ruler coverage and production image comparisons remain open.
   Drive platform observers are prepared but have not run on the targets;
-  see `PLATFORM_DRIVE_QUALIFICATION.md` for the explicit source-transfer blocker.
-- All-locale layout, accessibility and actual live announcements remain open.
+  see `PLATFORM_DRIVE_QUALIFICATION.md` for the resolved public-snapshot transfer audit and outstanding target execution.
+- Shared UIKit controls now have a scoped own-process native macOS AX checkpoint,
+  including range actions, disabled refusal and modal isolation; the configured
+  Drive tour now has actual offscreen reveal coverage. See
+  `NATIVE_CONTROLS_GUIDE_REVIEW.md`. Whole-app accessibility, native selector
+  expanded-state bridging, all-locale layout and actual live announcements remain open.
   A presentation diagnostic named `announce` is not platform accessibility proof.
 - Physical microphones, permissions, device hotplug, audible monitoring/output,
   OS chooser presentation, remaining Windows/Linux scenarios and packaged live
