@@ -224,3 +224,31 @@ Concurrent hosts are excluded both by the service profile singleton and the
 private socket. An existing socket is never probed and removed on startup.
 Supervised restarts clean the private runtime directory; manual recovery first
 requires proving that the previous host stopped.
+
+## TODO: capture-clock microphone analysis
+
+- [ ] Replace Box's independent, fixed 48 kHz analysis-grid reads with a
+  frame-based subscription to the original capture samples. Compute peak/RMS
+  and pitch from enabled channels without sinc resampling when the analysis
+  accepts the capture sample rate. This is planned work, not implemented.
+- [ ] Retain LoopZ's single ownership of physical capture; add a bounded,
+  independent source-frame cursor/tap rather than opening another ALSA stream.
+  Preserve sample order, source rate, stream generation and timestamp mapping.
+- [ ] Map capture-frame timestamps to the song/presentation timeline for scoring
+  and display. Handle drift through clock mapping, and use the appropriate
+  source-rate estimate for analysis; equal nominal 48 kHz rates do not establish
+  a shared clock.
+- [ ] Preserve explicit start/stop, enabled-channel selection, unavailable-level
+  semantics, cancellation and teardown. Detect overwritten history, gaps and
+  device restarts, and reset analysis continuity without fabricating samples.
+- [ ] Keep resampling for routes crossing independent device clocks (for example,
+  FLOW 8 capture mixed into HDMI playback) and consumers requiring another rate.
+- [ ] Add regressions for frame continuity, sparse channels, drift/timestamp
+  alignment, overrun/reconnect and lifecycle; prove the native-rate analysis path
+  does not invoke the resampler. Compare pitch/meter accuracy and latency, then
+  measure unprofiled audio-host CPU on the Pi with two enabled FLOW 8 channels
+  under matched workloads. Do not assume CPU savings before measurement.
+
+Recorded 9 November 2026 as a deferred performance task. The fixed-grid behavior
+in the current microphone subscription contract above remains in effect until
+this task is implemented and qualified.
