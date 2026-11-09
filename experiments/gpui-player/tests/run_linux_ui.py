@@ -30,6 +30,8 @@ DRIVERS = {
     'training-input-completing': 'test_native_training_input_recovery.py',
     'source': 'test_native_source.py',
     'drive': 'test_native_drive_ui.py',
+    'drive-retirement': 'test_native_drive_retirement.py',
+    'drive-empty': 'test_native_empty_drive.py',
     'adoption': 'test_native_drive_adoption_ui.py',
     'title': 'test_native_title.py',
     'import': 'test_native_library_import.py',
@@ -96,6 +98,72 @@ server = driver = bus_owner = None
 started = time.monotonic()
 passed, failure, before, after = False, None, None, None
 artifacts = [{'file': p.name, 'sha256': sha(p)} for p in paths if p.is_file()]
+workflow_evidence = []
+
+
+def qualify_drive_workflow():
+    """Tie every nested native run to this independent Linux observation."""
+    workflow = out / 'workflow'
+
+    def receipt(path):
+        value = json.loads(path.read_text())
+        workflow_evidence.append({'file': str(path.relative_to(out)), 'sha256': sha(path)})
+        return value
+
+    result = receipt(workflow / 'result.json')
+    identities = {row['file']: row['sha256'] for row in artifacts}
+    assert result['passed'] and result['noNode']
+    assert result['appSha256'] == identities[app.name]
+    assert result['helperSha256'] == identities['singz-gpui-audio']
+    if args.case == 'drive-retirement':
+        assert result['requestedWidths'] == [1280, 1060]
+        assert [row['width'] for row in result['sizes']] == [1280, 1060]
+        runs = [(width, 'writer') for width in (1280, 1060)]
+    else:
+        runs = [(width, role) for width in (1280, 1060) for role in ('writer', 'reader', 'offline')]
+        assert [(row['width'], row['role']) for row in result['runs']] == runs
+    observed_pids = set()
+    for width, role in runs:
+        case, folder = workflow / str(width), workflow / str(width) / role
+        native = receipt(folder / 'result.json')
+        assert native['passed'] and native['actualControls'] and native['hidden'] and native['muted']
+        assert not native['physicalInput']
+        exit_record = receipt(folder / 'process-exit.json')
+        assert exit_record['terminal'] and exit_record['returncode'] == 0 and not exit_record['forcedStop']
+        assert not exit_record['survivorsBeforeCleanup'] and not exit_record['survivorsAfterCleanup']
+        pid = exit_record['pid']
+        assert pid not in observed_pids, 'Nested runs reused an ambiguous PID'
+        observed_pids.add(pid)
+        owners = [owner for owner in owned.values() if owner['pid'] == pid and owner['role'] == 'ui']
+        assert len(owners) == 1, 'Nested app lacks an exact Linux PID/startTicks observation'
+        owner = owners[0]
+        assert any(sample['pid'] == pid and sample['startTicks'] == owner['startTicks']
+                   and sample['rssBytes'] > 0 and sample['cpuPercentOneCore'] is not None
+                   for sample in samples), 'Nested app lacks Linux CPU/RSS samples'
+        assert any(frame['pid'] == pid and frame['startTicks'] == owner['startTicks']
+                   and frame['width'] > 1 and frame['height'] > 1
+                   for frame in frames.values()), 'Nested app window was not independently observed'
+        captures = list(folder.glob('*.png'))
+        assert captures, f'No captures for {width}/{role}'
+        for png in captures:
+            with Image.open(png) as image:
+                assert image.size == (width * 2, (800 if width == 1280 else 640) * 2), png
+    for width in (1280, 1060):
+        case = workflow / str(width)
+        if args.case == 'drive-retirement':
+            assert receipt(case / 'lineage-proof.json')['passed']
+            receipt(case / 'remote-final.json')
+        else:
+            fixture = receipt(case / 'fixture.json')
+            assert fixture['passed'] and fixture['width'] == width
+            assert fixture['appSha256'] == result['appSha256'] and fixture['helperSha256'] == result['helperSha256']
+            assert fixture['writerSyncDisabled'] is False and fixture['readerSyncDisabled'] is True
+            receipt(case / 'writer/commit-proof.json')
+            receipt(case / 'recovery-journals.json')
+            receipt(case / 'readonly-reader-remote.json')
+    assert not any(owner['executable'] == str(app.with_name('singz-gpui-input')) for owner in owned.values()), 'Drive workflow opened an input helper'
+
+
 with tempfile.TemporaryDirectory(prefix='singz-linux-ui-runtime-') as runtime:
     env = {**os.environ, 'DISPLAY': args.display, 'GPUI_X11_SCALE_FACTOR': '2',
            'XDG_RUNTIME_DIR': runtime, 'LIBGL_ALWAYS_SOFTWARE': '1',
@@ -177,10 +245,14 @@ with tempfile.TemporaryDirectory(prefix='singz-linux-ui-runtime-') as runtime:
                         prop = window.get_full_property(pid_atom, X.AnyPropertyType)
                         if prop is None or not any(k[0] == int(prop.value[0]) for k in owned):
                             continue
+                        window_owner = process(int(prop.value[0]))
+                        if not window_owner or (window_owner['pid'], window_owner['startTicks']) not in owned:
+                            continue
                         assert window.get_attributes().map_state == X.IsUnmapped, 'Native test window became mapped'
                         geometry = window.get_geometry()
                         hints = window.get_full_property(motif_atom, X.AnyPropertyType)
-                        frames[window.id] = {'pid': int(prop.value[0]), 'windowId': window.id,
+                        frames[(window_owner['pid'], window_owner['startTicks'], window.id)] = {
+                            'pid': window_owner['pid'], 'startTicks': window_owner['startTicks'], 'windowId': window.id,
                             'width': geometry.width, 'height': geometry.height, 'mapped': False,
                             'motifHints': list(map(int, hints.value)) if hints is not None else []}
                     except (xerror.BadWindow, xerror.BadDrawable):
@@ -191,7 +263,7 @@ with tempfile.TemporaryDirectory(prefix='singz-linux-ui-runtime-') as runtime:
         after = foreground()
         assert after == before, 'Private display foreground changed at completion'
         app_count = sum(v['role'] == 'ui' for v in owned.values())
-        expected_count = 3 if args.case in ('settings', 'empty', 'recovery', 'publication') else 2 if args.case in ('key', 'graph', 'drive', 'adoption') else 1
+        expected_count = 6 if args.case == 'drive-empty' else 3 if args.case in ('settings', 'empty', 'recovery', 'publication') else 2 if args.case in ('key', 'graph', 'drive', 'adoption', 'drive-retirement') else 1
         assert app_count == expected_count, f'Expected {expected_count} app processes, observed {app_count}'
         assert any(v['width'] > 1 and v['height'] > 1 for v in frames.values()), 'No native client window observed'
         remaining = list(processes())
@@ -200,6 +272,9 @@ with tempfile.TemporaryDirectory(prefix='singz-linux-ui-runtime-') as runtime:
                 'pid': value['pid'], 'startTicks': value['startTicks'],
                 'role': paths[value['executable']], 'executable': str(value['executable'])}
         assert not remaining, 'Native process survived the workflow'
+        assert all(sha(app.with_name(row['file'])) == row['sha256'] for row in artifacts), 'Native binary changed during workflow'
+        if args.case in ('drive-retirement', 'drive-empty'):
+            qualify_drive_workflow()
         captures = []
         for png in sorted((out / 'workflow').rglob('*.png')):
             with Image.open(png) as image:
@@ -246,6 +321,7 @@ with tempfile.TemporaryDirectory(prefix='singz-linux-ui-runtime-') as runtime:
             'privateDisplay': args.display, 'foregroundBefore': before, 'foregroundAfter': after,
             'foregroundSamples': foreground_samples, 'frames': list(frames.values()),
             'ownedProcesses': list(owned.values()), 'samples': samples, 'captures': captures,
+            'workflowEvidence': workflow_evidence,
             'gpu': {'available': False, 'reason': 'Per-process GPU counters not collected',
                     'renderNodes': [str(p) for p in Path('/dev/dri').glob('renderD*')]},
             'liveFps': None, 'performanceScope': 'UI and native C++ helper CPU/RSS; active workflow including readbacks; live display cadence unmeasured',

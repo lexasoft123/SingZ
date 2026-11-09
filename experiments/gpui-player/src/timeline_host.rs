@@ -100,7 +100,7 @@ impl Player {
     #[cfg(feature = "ui-tests")]
     pub(super) fn timeline_review_state(&self) -> serde_json::Value {
         serde_json::json!({"view":[self.view_start*self.duration,self.view_end*self.duration],
-            "followActive":self.timeline.animating(),"manualInputs":self.timeline.applied_inputs(),
+            "ruler":self.ruler_frame.evidence(),"followActive":self.timeline.animating(),"manualInputs":self.timeline.applied_inputs(),
             "position":self.position,"playing":self.playing,"epoch":self.native_epoch})
     }
 }

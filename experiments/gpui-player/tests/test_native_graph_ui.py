@@ -5,7 +5,7 @@ p=argparse.ArgumentParser();p.add_argument('app',type=Path);p.add_argument('out'
 assert not any(out.iterdir()),'Native graph UI tests require a fresh OUT'
 if a.footer_keyboard:assert a.keyboard and a.karaoke,'Footer keys require --keyboard and --karaoke with isolated saved lyrics'
 if a.timeline or a.lyrics_countdown:assert a.karaoke,'Timeline/countdown cases require the isolated local Karaoke lyrics fixture'
-expected_captures=4+2*int(a.region)+2*int(a.output)+2*int(a.catalog)+4*int(a.timeline)+4*int(a.lyrics_countdown)+4*int(a.keyboard)+4*int(a.footer_keyboard)
+expected_captures=4+2*int(a.region)+2*int(a.output)+2*int(a.catalog)+8*int(a.timeline)+4*int(a.lyrics_countdown)+4*int(a.keyboard)+4*int(a.footer_keyboard)
 sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
 sys.dont_write_bytecode=True
 def sibling(name,filename):
@@ -190,8 +190,21 @@ with tempfile.TemporaryDirectory(prefix='singz-native-graph-ui-') as tmp:
   if a.timeline:
    assert 'NATIVE_TIMELINE passed:' in text,text[-5000:]
    proof=json.loads((folder/'timeline.json').read_text())
-   for flag in ('actualZoomButtons','pausedPlayheadAtZoomControlsCaptured','pinchAfterKeyboardSave','cursorCenteredWheelZoom','burstPanAccumulated','pitchWheelPan','pitchPinchZoom','manualViewSavedReopened','actualOffscreenArrowSeekCuts','playingPageTurnHasIntermediateViews','manualPanAwayDoesNotSnapBack','actualRestartCutsBack','restoredBaseline'):assert proof.get(flag) is True,(flag,proof)
+   for flag in ('sameFrameRulerClearance','fitKaraokeOffAndOnCaptured','actualZoomButtons','pausedPlayheadAtZoomControlsCaptured','pinchAfterKeyboardSave','cursorCenteredWheelZoom','burstPanAccumulated','pitchWheelPan','pitchPinchZoom','manualViewSavedReopened','actualOffscreenArrowSeekCuts','playingPageTurnHasIntermediateViews','manualPanAwayDoesNotSnapBack','actualRestartCutsBack','restoredBaseline'):assert proof.get(flag) is True,(flag,proof)
    assert proof['sizes']==[[1280,800],[1060,640]]
+   for width in (1280,1060):
+    for karaoke in (False,True):
+     fit=json.loads((folder/f'timeline-fit-karaoke-{str(karaoke).lower()}-{width}.json').read_text())
+     assert fit['view']==[0.0,1.0] and fit['duration']==12,fit
+     labels=fit['timeline']['ruler']['labels'];assert labels,fit
+     for label in labels:
+      assert label['width']>0 and label['zoomWidth']>0,label
+      left=fit['timeline']['ruler']['zoomGroup']['left']
+      assert abs(left-label['groupLeft'])<.01,label
+      assert label['admitted']==(label['right']<=left),label
+     if width==1060 and not karaoke:
+      ten=[label for label in labels if label['text']=='0:10']
+      assert ten and all(not label['admitted'] for label in ten),labels
    assert len(proof['follow'])>8 and proof['seekCut']['view'][0]>0,proof
   if a.output:
    assert 'NATIVE_SONG_OUTPUT passed:' in text,text[-5000:]

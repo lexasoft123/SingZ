@@ -13,6 +13,7 @@ mod ui_song_output;
 mod ui_timeline;
 mod timeline_viewport;
 mod timeline_host;
+mod ruler_clearance;
 mod restart_cycle;
 mod lyrics_countdown;
 #[cfg(feature="ui-tests")]
@@ -708,6 +709,8 @@ struct Player {
     track_gain_focus: [FocusHandle;tracks::LANE_SLOTS],
     #[cfg(feature="ui-tests")]
     track_bounds: Rc<RefCell<HashMap<String,Bounds<Pixels>>>>,
+    #[cfg(feature="ui-tests")]
+    ruler_frame: Rc<ruler_clearance::Frame>,
     #[cfg(feature="ui-tests")]
     empty_picker_paths: std::collections::VecDeque<Vec<std::path::PathBuf>>,
     muted: [bool; tracks::LANE_SLOTS],
@@ -1573,6 +1576,8 @@ impl Player {
             track_gain_focus: std::array::from_fn(|_|cx.focus_handle().tab_stop(true)),
             #[cfg(feature="ui-tests")]
             track_bounds: Default::default(),
+            #[cfg(feature="ui-tests")]
+            ruler_frame: Default::default(),
             #[cfg(feature="ui-tests")]
             empty_picker_paths: Default::default(),
             muted: [false; tracks::LANE_SLOTS],
@@ -5301,9 +5306,6 @@ impl Render for Player {
         let mut tick = (self.view_start * self.duration / step).ceil() * step;
         while tick < self.view_end * self.duration - step * 0.2 {
             let fraction = (tick - self.view_start * self.duration) / span;
-            if fraction * timeline_width > timeline_width - 130. {
-                break;
-            }
             if tick > 0.000001 {
                 ticks.push((tick, fraction));
             }
@@ -5430,12 +5432,16 @@ impl Render for Player {
         // The source zoom cluster is z=6, above the z=5 scrub/playhead layer.
         // Keep the ruler-relative geometry (4px stack inset + 3px top) while
         // painting this opaque control group after that layer.
-        let zoom_controls=div().absolute().right(px(22.)).top(px(7.)).pl(px(10.)).bg(rgb(BG)).occlude()
+        let ruler_frame=Rc::new(ruler_clearance::Frame::default());
+        #[cfg(feature="ui-tests")]
+        { self.ruler_frame=ruler_frame.clone(); }
+        let ruler_column_right=window.viewport_size().width-if self.karaoke {px(360.)}else{px(0.)};
+        let zoom_controls=ruler_frame.zoom(div().absolute().right(px(22.)).top(px(7.)).pl(px(10.)).bg(rgb(BG)).occlude()
             .child(singz_uikit::zoom_segment(vec![
                 self.track_probe("zoom-out".into(),singz_uikit::zoom_button("zoom-out","−",false)).on_click(cx.listener(|this,_,_,cx|this.zoom_by(1.4,cx))),
                 self.track_probe("zoom-in".into(),singz_uikit::zoom_button("zoom-in","+",false)).on_click(cx.listener(|this,_,_,cx|this.zoom_by(0.65,cx))),
                 self.track_probe("zoom-fit".into(),singz_uikit::zoom_button("zoom-fit",i18n::t("player.stack.full"),self.view_start==0.&&self.view_end==1.)).on_click(cx.listener(|this,_,_,cx|this.timeline_input(timeline_viewport::Input::Fit,cx))),
-            ]));
+            ])));
         let content = match base_screen {
             Screen::Training => self.training.clone().into_any_element(),
             Screen::Library => self.library.clone().into_any_element(),
@@ -5487,7 +5493,11 @@ impl Render for Player {
                                         }
                                     }))
                                     .child(canvas(|b,_,_|b,move|_,b,w,cx|{if let Some(g)=&ruler_grid{beat_grid::paint(&mut ruler_grid_cache.borrow_mut(),g,ruler_view.0,ruler_view.1,b,true,w,cx);}}).absolute().top_0().left_0().size_full())
-                                    .children(ticks.into_iter().map(|(tick,fraction)|div().absolute().left(relative(fraction)).ml(px(-30.)).w(px(60.)).top(px(8.)).flex().justify_center().child(singz_uikit::tracked_text(if step<1. {format!("{}.{:01}",clock(tick),((tick.fract()*10.).floor() as i32).clamp(0,9))}else{clock(tick)},"SingZ Mono 400",9.,0.54,FAINT))))
+                                    .children(ticks.into_iter().map(|(tick,fraction)| {
+                                        let text=if step<1. {format!("{}.{:01}",clock(tick),((tick.fract()*10.).floor() as i32).clamp(0,9))}else{clock(tick)};
+                                        div().absolute().left(relative(fraction)).ml(px(-30.)).w(px(60.)).top(px(8.)).flex().justify_center()
+                                            .child(ruler_frame.label(text.clone(),singz_uikit::tracked_text(text,"SingZ Mono 400",9.,0.54,FAINT),ruler_column_right))
+                                    }))
                                     .child(self.beat_handles.clone())
                                 ))
                             .child(div().id("stem-lane-scroll").track_scroll(&self.stem_scroll_handle).flex().flex_col().flex_1().min_h_0().overflow_y_scroll().children(self.project.as_ref().map(|p|p.lanes.iter().map(|(slot,_)|*slot).collect::<Vec<_>>()).unwrap_or_else(||(0..6).collect()).into_iter().map(|i|self.lane(i,cx)))).when(self.audio_available(),|d|d.child(playhead)).child(zoom_controls))

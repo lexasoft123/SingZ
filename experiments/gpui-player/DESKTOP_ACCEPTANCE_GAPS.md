@@ -52,6 +52,12 @@ real account/platform qualification remains open. The separate retirement lifecy
 - Production visual and temporal parity still needs the complete matching
   fixture/state matrix. Exact native regression images establish regression
   scope only. Preserve the approved native partial-glyph/glow standard.
+  The compact ruler's partially covered final tick now has a scoped native fix
+  with same-frame measured clearance and 24 inspected captures; see
+  `RULER_CLEARANCE_REVIEW.md`. The pre-existing lyrics scrollbar white corner,
+  long-clock/localized ruler coverage and production image comparisons remain
+  open. Drive platform observers are prepared but have not run on the targets;
+  see `PLATFORM_DRIVE_QUALIFICATION.md` for the explicit source-transfer blocker.
 - All-locale layout, accessibility and actual live announcements remain open.
   A presentation diagnostic named `announce` is not platform accessibility proof.
 - Physical microphones, permissions, device hotplug, audible monitoring/output,

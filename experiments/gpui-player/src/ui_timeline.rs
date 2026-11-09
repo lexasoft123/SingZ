@@ -28,6 +28,19 @@ fn key(view:&Entity<Player>,w:&mut Window,cx:&mut App,value:&'static str) {
     view.read(cx).focus_handle.clone().focus(w,cx);
     w.dispatch_keystroke(Keystroke::parse(value).unwrap(),cx);
 }
+fn assert_ruler(p:&Player)->anyhow::Result<()> {
+    let evidence=p.ruler_frame.evidence();
+    let labels=evidence["labels"].as_array().ok_or_else(||anyhow::anyhow!("Ruler geometry missing"))?;
+    anyhow::ensure!(!labels.is_empty(),"Ruler labels were not laid out");
+    for label in labels {
+        let right=label["right"].as_f64().unwrap();
+        let left=evidence["zoomGroup"]["left"].as_f64().ok_or_else(||anyhow::anyhow!("Zoom group was not prepainted: {evidence}"))?;
+        anyhow::ensure!((left-label["groupLeft"].as_f64().unwrap()).abs()<0.01,"Ruler zoom layout and actual origin disagree: {evidence}");
+        anyhow::ensure!(label["width"].as_f64().unwrap()>0.&&label["zoomWidth"].as_f64().unwrap()>0.,"Ruler measured empty geometry: {label}");
+        anyhow::ensure!(label["admitted"].as_bool()==Some(right<=left),"Ruler partial label admission: {label}");
+    }
+    Ok(())
+}
 fn state(p:&Player,w:&Window)->serde_json::Value {
     serde_json::json!({"viewport":[f32::from(w.viewport_size().width),f32::from(w.viewport_size().height)],
         "scale":w.scale_factor(),"hidden":!w.is_visible()&&!w.is_window_active(),
@@ -92,11 +105,25 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
             for (width,height) in [(1280.,800.),(1060.,640.)] {
                 handle.update(cx,|_,w,_|w.resize(size(px(width),px(height))))?;
                 wait!(p,w,app => w.viewport_size()==size(px(width),px(height)));
-                fit!();zoom!(0.);
+                fit!();
+                for karaoke in [false,true] {
+                    if handle.update(cx,|_,_,cx|view.read(cx).karaoke)?!=karaoke {
+                        handle.update(cx,|_,w,cx|press(&view,w,cx,"karaoke"))??;
+                    }
+                    wait!(p,w,app => p.karaoke==karaoke);
+                    handle.update(cx,|_,w,cx|->anyhow::Result<()>{
+                        super::ui_training_run::draw(w,cx);let p=view.read(cx);assert_ruler(p)?;
+                        let value=state(p,w);let name=format!("timeline-fit-karaoke-{}-{}",karaoke,width as u32);
+                        w.render_to_image()?.save(out.join(format!("{name}.png")))?;
+                        std::fs::write(out.join(format!("{name}.json")),serde_json::to_vec_pretty(&value)?)?;
+                        cases.push(value);Ok(())
+                    })??;
+                }
+                zoom!(0.);
                 handle.update(cx,|_,w,cx|seek_visible(&view,w,cx,0.94))??;
                 wait!(p,w,app => !p.playing&&p.pending_seek.is_none()&&near(p.position/p.duration,0.343*0.94));
                 handle.update(cx,|_,w,cx|->anyhow::Result<()>{
-                    super::ui_training_run::draw(w,cx);let value=state(view.read(cx),w);
+                    super::ui_training_run::draw(w,cx);assert_ruler(view.read(cx))?;let value=state(view.read(cx),w);
                     let name=format!("timeline-zoom-controls-{}",width as u32);
                     w.render_to_image()?.save(out.join(format!("{name}.png")))?;
                     std::fs::write(out.join(format!("{name}.json")),serde_json::to_vec_pretty(&value)?)?;Ok(())
@@ -137,7 +164,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
                 save!();reopen!();
                 wait!(p,w,app => near(p.view_start,saved_view.0)&&near(p.view_end,saved_view.1));
                 handle.update(cx,|_,w,cx|->anyhow::Result<()>{
-                    super::ui_training_run::draw(w,cx);let value=state(view.read(cx),w);
+                    super::ui_training_run::draw(w,cx);assert_ruler(view.read(cx))?;let value=state(view.read(cx),w);
                     let name=format!("timeline-pan-{}",width as u32);w.render_to_image()?.save(out.join(format!("{name}.png")))?;
                     std::fs::write(out.join(format!("{name}.json")),serde_json::to_vec_pretty(&value)?)?;cases.push(value);Ok(())
                 })??;
@@ -196,7 +223,7 @@ pub fn run(handle:AnyWindowHandle,view:Entity<Player>,project:PathBuf,out:PathBu
             wait!(p,w,app => w.viewport_size()==size(px(1280.),px(800.)));
             std::fs::write(out.join("timeline.json"),serde_json::to_vec_pretty(&serde_json::json!({
                 "cursorCenteredWheelZoom":true,"burstPanAccumulated":true,"pitchWheelPan":true,"pitchPinchZoom":true,
-                "actualZoomButtons":true,"pausedPlayheadAtZoomControlsCaptured":true,"pinchAfterKeyboardSave":true,
+                "actualZoomButtons":true,"pausedPlayheadAtZoomControlsCaptured":true,"sameFrameRulerClearance":true,"fitKaraokeOffAndOnCaptured":true,"pinchAfterKeyboardSave":true,
                 "manualViewSavedReopened":true,"actualOffscreenArrowSeekCuts":true,"playingPageTurnHasIntermediateViews":true,
                 "manualPanAwayDoesNotSnapBack":true,"actualRestartCutsBack":true,"restoredBaseline":true,
                 "cases":cases,"seekCut":seek_cut,"follow":follow,"sizes":[[1280,800],[1060,640]],

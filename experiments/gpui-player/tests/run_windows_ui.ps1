@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory=$true)][string]$Python,
     [Parameter(Mandatory=$true)][string]$App,
     [Parameter(Mandatory=$true)][string]$Out,
-    [ValidateSet('key','graph','drive','adoption','provider','title','import','delete','recording',
+    [ValidateSet('key','graph','drive','drive-retirement','drive-empty','adoption','provider','title','import','delete','recording',
         'recording-publication','recording-publication-helper','recording-recovery',
         'training-input-cue','training-input-completing','training-output',
         'training-output-standalone','training-output-song','training-run')][string]$Case = 'graph'
@@ -63,6 +63,8 @@ $driverName=switch($Case){
  'key'{'test_native_project_key_ui.py'}
  'graph'{'test_native_graph_ui.py'}
  'drive'{'test_native_drive_ui.py'}
+ 'drive-retirement'{'test_native_drive_retirement.py'}
+ 'drive-empty'{'test_native_empty_drive.py'}
  'adoption'{'test_native_drive_adoption_ui.py'}
  'provider'{'test_native_audio_provider_ui.py'}
  'title'{'test_native_title.py'}
@@ -81,6 +83,59 @@ $driverName=switch($Case){
 }
 $driver=Join-Path $PSScriptRoot $driverName
 $driverOut=Join-Path $Out 'workflow'
+# Each driver runs its maintained default matrix. Allow each app its own
+# driver's timeout plus bounded fixture/sidecar shutdown overhead.
+$workflowDeadline= switch($Case){'drive-retirement'{660};'drive-empty'{1500};default{300}}
+$expectedProcesses= switch($Case){'drive-empty'{6};'drive-retirement'{2};default{if($Case-in@('key','graph','drive','adoption','provider')){2}else{1}}}
+$driverResult=$null
+$driveObservedPids=@{}
+function Read-NativeDriveResult([string]$Folder,[int]$Width,[string]$Role) {
+ $value=Get-Content -LiteralPath (Join-Path $Folder 'result.json') -Raw|ConvertFrom-Json
+ if($value.passed-ne$true -or $value.actualControls-ne$true -or $value.hidden-ne$true -or $value.muted-ne$true -or $value.physicalInput-ne$false -or $value.width-ne$Width -or $value.liveFps-ne'unmeasured'){throw "Invalid native Drive result scope: $Folder"}
+ if($Role -and $value.role-ne$Role){throw "Unexpected native Drive role: $Folder"}
+ $exitRecord=Get-Content -LiteralPath (Join-Path $Folder 'process-exit.json') -Raw|ConvertFrom-Json
+ if($exitRecord.terminal-ne$true -or $exitRecord.returncode-ne0 -or $exitRecord.forcedStop-ne$false -or @($exitRecord.survivorsBeforeCleanup).Count-ne0 -or @($exitRecord.survivorsAfterCleanup).Count-ne0){throw "Native Drive process did not retire naturally: $Folder"}
+ $nativePid=[int]$exitRecord.pid
+ if($driveObservedPids.ContainsKey($nativePid)){throw "Nested Drive runs reused an ambiguous PID: $nativePid"}
+ $driveObservedPids[$nativePid]=$true
+ $owners=@($owned.Values|Where-Object{$_.pid-eq$nativePid -and $_.path-eq$App})
+ if($owners.Count-ne1){throw "Native Drive run lacks an exact observed process identity: $Folder"}
+ $owner=$owners[0]
+ $ownerKey="$($owner.pid):$(([DateTime]::Parse($owner.started)).ToUniversalTime().Ticks)"
+ if(!$frames.ContainsKey($ownerKey)){throw "Native Drive run lacks an independently observed window: $Folder"}
+ $resourceSamples=@($samples|Where-Object{$_.pid-eq$nativePid -and $_.started-eq$owner.started -and $_.role-eq'ui' -and $_.rssBytes-gt0 -and $null-ne$_.cpuPercentOneCore})
+ if($resourceSamples.Count-eq0){throw "Native Drive run lacks CPU/RSS samples: $Folder"}
+ if(@($value.steps).Count-eq0){throw "Missing native Drive captures: $Folder"}
+ foreach($step in $value.steps){
+  if($step.phase-notmatch'^[a-z0-9-]+$'){throw "Invalid native Drive capture phase: $Folder"}
+  $state=Get-Content -LiteralPath (Join-Path $Folder ($step.phase+'.state.json')) -Raw|ConvertFrom-Json
+  $height=if($Width-eq1280){800}else{640}
+  if($state.phase-ne$step.phase -or $state.hidden-ne$true -or $state.active-ne$false -or $state.physicalInput-ne$false -or $state.micOwner-ne0 -or @($state.viewport).Count-ne2 -or $state.viewport[0]-ne$Width -or $state.viewport[1]-ne$height){throw "Invalid native Drive capture scope: $Folder/$($step.phase)"}
+  if((Get-Item -LiteralPath (Join-Path $Folder ($step.phase+'.png'))).Length-le0){throw "Empty native Drive capture: $Folder/$($step.phase)"}
+ }
+}
+function Read-DriveWorkflowResult {
+ $inputHelper=Join-Path (Split-Path -Parent $App) 'singz-gpui-input.exe'
+ if(@($owned.Values|Where-Object{$_.path-eq$inputHelper}).Count-ne0){throw 'Drive workflow opened an input helper'}
+ $value=Get-Content -LiteralPath (Join-Path $driverOut 'result.json') -Raw|ConvertFrom-Json
+ if($value.passed-ne$true -or $value.noNode-ne$true -or $value.liveFps-ne'unmeasured' -or $value.appSha256-ne(Get-FileHash -Algorithm SHA256 $App).Hash.ToLowerInvariant()){throw 'Invalid Drive workflow result scope or app identity'}
+ $audioHelper=Join-Path (Split-Path -Parent $App) 'singz-gpui-audio.exe'
+ if($value.helperSha256-ne(Get-FileHash -Algorithm SHA256 $audioHelper).Hash.ToLowerInvariant()){throw 'Invalid Drive workflow audio helper identity'}
+ if($Case-eq'drive-retirement'){
+  if($value.hardwareInput-ne$false -or (@($value.requestedWidths)-join',')-ne'1280,1060' -or @($value.sizes).Count-ne2 -or (@($value.sizes|ForEach-Object{$_.width})-join',')-ne'1280,1060'){throw 'Drive retirement did not cover the default two-size matrix'}
+  foreach($width in @(1280,1060)){Read-NativeDriveResult (Join-Path $driverOut "$width/writer") $width ''}
+ }else{
+  if($value.physicalInput-ne$false -or @($value.runs).Count-ne6){throw 'Empty Drive did not cover six native app runs'}
+  $index=0
+  foreach($width in @(1280,1060)){foreach($role in @('writer','reader','offline')){
+   $entry=$value.runs[$index];$index++
+   $folder=Join-Path $driverOut "$width/$role"
+   if($entry.width-ne$width -or $entry.role-ne$role -or [IO.Path]::GetFullPath($entry.result)-ne[IO.Path]::GetFullPath((Join-Path $folder 'result.json'))){throw 'Unexpected empty Drive result matrix or artifact path'}
+   Read-NativeDriveResult $folder $width $role
+  }}
+ }
+ return $value
+}
 $arguments=@(('"'+$driver+'"'),('"'+$App+'"'),('"'+$driverOut+'"'))+@($driverExtraArguments)
 $run=$null;$stdout=$null;$stderr=$null
 $clock=[Diagnostics.Stopwatch]::StartNew();$owned=@{};$previous=@{};$frames=@{};$frameHistory=@();$resizingSamples=@();$samples=@();$foregroundSamples=@();$failure=$null
@@ -152,16 +207,16 @@ try {
   }
   $current=[NativeGpuiProbe]::GetForegroundWindow().ToInt64();$foregroundSamples+=$current
   if($current-ne$before){$foregroundFailure=ForegroundIdentity;throw 'Foreground window changed during verification'}
-  if($clock.Elapsed.TotalSeconds-gt300){throw 'Owned UI workflow exceeded its deadline'}
+  if($clock.Elapsed.TotalSeconds-gt$workflowDeadline){throw 'Owned UI workflow exceeded its deadline'}
   Start-Sleep -Milliseconds 250;$run.Refresh()
  }
  $run.WaitForExit()
  if($run.ExitCode-ne0){throw "Native UI driver failed: $($run.ExitCode)"}
- $expectedProcesses=if($Case-in@('key','graph','drive','adoption','provider')){2}else{1}
  if($frames.Count-ne$expectedProcesses){throw "Expected $expectedProcesses native app processes for $Case; observed $($frames.Count)"}
  if([NativeGpuiProbe]::GetForegroundWindow().ToInt64()-ne$before){throw 'Foreground window changed during verification'}
  $remaining=@(Processes)
  if($remaining.Count-gt0){throw 'An owned native process survived the workflow'}
+ if($Case-in@('drive-retirement','drive-empty')){$driverResult=Read-DriveWorkflowResult}
 } catch {
  $failure=$_|Out-String
  if($run -and !$run.HasExited){Stop-Process -Id $run.Id -Force;$run.WaitForExit()}
@@ -180,8 +235,22 @@ try {
  if($stdout -and $stderr){[IO.File]::WriteAllText((Join-Path $Out 'driver.stdout.log'),$stdout.GetAwaiter().GetResult(),[Text.Encoding]::UTF8);[IO.File]::WriteAllText((Join-Path $Out 'driver.stderr.log'),$stderr.GetAwaiter().GetResult(),[Text.Encoding]::UTF8)}
  $helperArtifacts=@()
  foreach($path in $paths){if($path-ne$App -and (Test-Path -LiteralPath $path)){$helperArtifacts+=[pscustomobject]@{file=[IO.Path]::GetFileName($path);sha256=(Get-FileHash -Algorithm SHA256 $path).Hash.ToLowerInvariant()}}}
+ # Enumerate only the known capture directories; private fixture/journal trees
+ # can exceed WinPS 5.1 path limits and are not native capture artifacts.
+ $workflowArtifacts=@()
+ if($Case-in@('drive-retirement','drive-empty')){
+  $captureFolders=@($driverOut)
+  $roles=if($Case-eq'drive-empty'){@('writer','reader','offline')}else{@('writer')}
+  foreach($width in @(1280,1060)){foreach($role in $roles){$captureFolders+=Join-Path $driverOut "$width/$role"}}
+  foreach($captureFolder in $captureFolders){
+   if(!(Test-Path -LiteralPath $captureFolder)){continue}
+   foreach($artifact in (Get-ChildItem -LiteralPath $captureFolder -File|Where-Object{$_.Name-eq'result.json' -or $_.Name-like'*.state.json' -or $_.Extension-eq'.png'}|Sort-Object FullName)){
+    $workflowArtifacts+=[pscustomobject]@{file=$artifact.FullName.Substring($Out.Length+1).Replace('\','/');bytes=$artifact.Length;sha256=(Get-FileHash -Algorithm SHA256 $artifact.FullName).Hash.ToLowerInvariant()}
+   }
+  }
+ }
  $after=[NativeGpuiProbe]::GetForegroundWindow().ToInt64()
  [NativeGpuiProbe]::SetThreadDpiAwarenessContext($oldDpi)|Out-Null
- [pscustomobject]@{passed=($null-eq$failure);case=$Case;driverName=$driverName;driverExtraArguments=@($driverExtraArguments);failure=$failure;driverExitCode=$run.ExitCode;foregroundBefore=$before;foregroundAfter=$after;foregroundUnchanged=($before-eq$after);foregroundSamples=$foregroundSamples;foregroundBeforeOwner=$foregroundBefore;foregroundFailureOwner=$foregroundFailure;frameHistory=$frameHistory;resizingSamples=$resizingSamples;frames=@($frames.Values);ownedProcesses=@($owned.Values);samples=$samples;gpuSamplesFile='gpu.jsonl';liveFps=$null;performanceScope='UI/helper CPU and RSS separated by role; GPU-engine sum per app process; live display FPS unmeasured';helperArtifacts=$helperArtifacts;runnerSha256=(Get-FileHash -Algorithm SHA256 $PSCommandPath).Hash.ToLowerInvariant();driverSha256=(Get-FileHash -Algorithm SHA256 $driver).Hash.ToLowerInvariant();appSha256=(Get-FileHash -Algorithm SHA256 $App).Hash.ToLowerInvariant()}|ConvertTo-Json -Depth 8|Set-Content (Join-Path $Out 'runner.json') -Encoding UTF8
+ [pscustomobject]@{passed=($null-eq$failure);case=$Case;driverName=$driverName;driverExtraArguments=@($driverExtraArguments);expectedAppProcesses=$expectedProcesses;workflowDeadlineSeconds=$workflowDeadline;driverResult=$driverResult;workflowArtifacts=$workflowArtifacts;failure=$failure;driverExitCode=$run.ExitCode;foregroundBefore=$before;foregroundAfter=$after;foregroundUnchanged=($before-eq$after);foregroundSamples=$foregroundSamples;foregroundBeforeOwner=$foregroundBefore;foregroundFailureOwner=$foregroundFailure;frameHistory=$frameHistory;resizingSamples=$resizingSamples;frames=@($frames.Values);ownedProcesses=@($owned.Values);samples=$samples;gpuSamplesFile='gpu.jsonl';liveFps=$null;performanceScope='UI/helper CPU and RSS separated by role; GPU-engine sum per app process; live display FPS unmeasured';helperArtifacts=$helperArtifacts;runnerSha256=(Get-FileHash -Algorithm SHA256 $PSCommandPath).Hash.ToLowerInvariant();driverSha256=(Get-FileHash -Algorithm SHA256 $driver).Hash.ToLowerInvariant();appSha256=(Get-FileHash -Algorithm SHA256 $App).Hash.ToLowerInvariant()}|ConvertTo-Json -Depth 12|Set-Content (Join-Path $Out 'runner.json') -Encoding UTF8
 }
 if($failure){throw $failure}
