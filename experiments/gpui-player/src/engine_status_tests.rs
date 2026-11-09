@@ -259,19 +259,62 @@ fn cancelling_a_running_probe_reaps_owned_process_tree_instead_of_falling_back()
     let fixture = Fixture::new();
     let config = fixture.config(Flavor::AppleSilicon);
     let script = fixture.0.join("slow");
-    fixture.script(&script, "/bin/sleep 30 & wait");
+    let receipt = fixture.0.join("started");
+    fixture.script(
+        &script,
+        r#"/bin/sleep 30 & child=$!; printf '%s %s\n' "$$" "$child" > "$1"; wait"#,
+    );
     let mut env = fixture.environment();
     env.timeout = Duration::from_secs(40);
-    env.fixture_candidates = Some(vec![vec![script.into_os_string()]]);
+    // Execute the stable interpreter, not a newly written executable that can
+    // encounter ETXTBSY when another test's fork inherits its writable FD.
+    env.fixture_candidates = Some(vec![vec![
+        OsString::from("/bin/sh"),
+        script.into_os_string(),
+        receipt.clone().into_os_string(),
+    ]]);
     let serial = Arc::new(AtomicU64::new(1));
     let cancel = serial.clone();
     let thread = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(80));
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(2) {
+            if let Ok(text) = fs::read_to_string(&receipt) {
+                if let Ok(pids) = text.split_whitespace().map(str::parse::<libc::pid_t>)
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                {
+                    if pids.len() == 2 && pids[0] != pids[1] && pids.iter().all(|pid| *pid > 1) {
+                        let running = pids.iter().all(|pid| unsafe {
+                            libc::kill(*pid, 0) == 0 && libc::getpgid(*pid) == pids[0]
+                        });
+                        cancel.store(2, Ordering::Release);
+                        return Some((pids, running));
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        // Also retire an invocation whose startup failed to produce evidence.
         cancel.store(2, Ordering::Release);
+        None
     });
     let started = Instant::now();
-    assert!(discover_in(&config, &env, &serial, 1).is_err());
-    thread.join().unwrap();
+    let result = discover_in(&config, &env, &serial, 1);
+    let (pids, running) = thread.join().unwrap().expect("Probe did not publish its startup receipt");
+    assert!(running, "Probe and background descendant must run before cancellation");
+    assert!(result.unwrap_err().to_string().contains("cancelled"));
+    loop {
+        let stopped = pids.iter().all(|pid| {
+            let output = Command::new("/bin/ps").args(["-p", &pid.to_string(), "-o", "stat="])
+                .output().unwrap();
+            let state = String::from_utf8_lossy(&output.stdout);
+            // Container init may retain orphan zombies, which execute no code
+            // and hold no output descriptors. Never signal a reaped PID here.
+            !output.status.success() || state.trim().is_empty() || state.trim().starts_with('Z')
+        });
+        if stopped { break; }
+        assert!(started.elapsed() < Duration::from_secs(3), "Owned probe tree still runs");
+        thread::sleep(Duration::from_millis(10));
+    }
     assert!(started.elapsed() < Duration::from_secs(3));
 }
 #[cfg(unix)]

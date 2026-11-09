@@ -32,6 +32,64 @@ configuration, account tokens or compiled app was included. A fresh source
 snapshot must be audited after the current checkpoint is published. Transfer
 alone is not a remote build, codec or UI workflow pass; those gates remain open.
 
+## Current public-checkpoint follow-up
+
+Published app `711ac271` and UIKit `6f694bf` were transferred to both VM403 and
+Dell as `source-711ac271-public.zip`: SHA-256
+`d358d03bf1ae4ffa08af00f530b193289bf503e7674f2885afc3715ee24ba2bd`,
+19,661,559 bytes. All 2,158 source files match exact published Git blobs; an
+inert OAuth override and inventory complete the archive. All 2,160 entries were
+scanned with zero production credential matches. Both targets verified the ZIP
+hash; Dell also verified every payload hash. No private working source was sent.
+
+VM403's native helpers build with the pinned full-codec SDK and its UI-enabled
+Rust check pass. The first full Rust suite is **rejected**: 1,011 passed, two
+failed, two installed-model tests ignored. The pipeline stopped before app builds
+or UI journeys. These are not new platform workflow passes.
+
+One failure was transport metadata: the ZIP preserved bytes but discarded Git's
+executable modes. The committed `tests/shared/native-measure-fixture.sh` is
+`100755`, while the ZIP stored `0600`; the test correctly rejected it before
+spawn. Authoritative modes were restored only after the build was confirmed
+terminal, all 2,158 Git blobs and every payload byte were reverified, and the
+**unchanged** custom-track validation test then passed on VM403. This repairs
+source delivery rather than weakening the executable-mode assertion.
+
+The mode-aware archive/export check now records Git modes in the inventory and
+ZIP attributes; extraction verifies bytes, hashes, safe ordinary paths and exact
+permissions. Its published-711ac271 archive SHA-256 is
+`d721953e6cf2970cb84eac9d27700fe872f0b93a0620336b656c6cf3419c2a16`.
+A fresh local extraction verifies all 2,159 payload files and 20 executables,
+including the stable helper at `0755`. Future snapshots must preserve and verify
+modes as well as bytes; ordinary Python ZIP extraction alone is insufficient.
+
+The other failure occurred before a probe started: the freshly written test
+script returned `ETXTBSY`, so discovery completed before its fixed 80 ms
+cancellation. The cancellation fixture now invokes stable `/bin/sh`, waits for
+actual parent/child startup evidence in their owned process group, then cancels
+and verifies both stopped. It retains the 40-second probe timeout and original
+less-than-three-second total assertion. This is a test-only correction; it does
+not change production spawning, fallback or deadlines and does not close the
+separate historical two-second probe-timeout gate.
+
+
+Local validation of the strengthened probe test passed, and the normal executable
+remains byte-identical to the reviewed UI checkpoint (SHA-256
+`726a7e3df4f2f47f765169c20f1e44c2687a3aae0be754a1a16bf9339fe7b499`).
+The full local suite is also **rejected**: 1,012 passed, one separate Drive
+upload-followup test timed out, two installed-model tests ignored. Its final
+snapshot is busy at `Uploading project.json`; that alone does not distinguish
+initial upload from continuation because login performs an earlier sync.
+The request ledger/gate state was lost during fixture cleanup, so the cause is
+unproven. A bounded external observer is being prepared to retain `/state` during
+an unchanged test invocation; no production or test deadline has been relaxed.
+This failed suite is retained rather than summarized as a successful checkpoint.
+
+The canonical 12-file committed codec corpus and a reviewed Python/C++ harness
+are ready for actual decoder qualification after successful builds. They are
+not decoder passes yet. Full Drive journeys, shown native frame, real Google,
+physical hardware, production parity and live FPS remain unqualified.
+
 ## Required matrix
 
 | Case | Native app runs | Viewports | Required lifecycle |
