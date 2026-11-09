@@ -523,3 +523,34 @@ fn concurrent_snapshots_and_atomic_marks_preserve_coherent_monotonic_highwaters(
     assert_eq!(final_state.seq, 65);
     assert_eq!(final_state.all_seq, 65);
 }
+
+
+#[test]
+fn downloaded_copy_edits_and_removal_do_not_enqueue_the_writer() {
+    let f=Fixture::new();
+    let cache=f.store.directory.join("gdrive/downloads");
+    let copy=cache.join("project-copy");fs::create_dir_all(&copy).unwrap();
+    fs::write(copy.join("project.json"),br#"{"version":2,"name":"Local copy"}"#).unwrap();
+    f.store.mark_project(&copy,"saved").unwrap();
+    f.store.mark_file(&copy.join("project.json"),"metadata").unwrap();
+    let renamed=cache.join("My edited offline song");fs::rename(&copy,&renamed).unwrap();
+    f.store.mark_project(&copy,"rename old edge").unwrap();
+    f.store.mark_project(&renamed,"rename new edge").unwrap();
+    assert_eq!(f.store.snapshot().unwrap(),Snapshot::default());
+    assert!(!f.store.directory.join(NAME).exists());
+    let owned=f.dir("Writer song");f.store.mark_project(&owned,"saved").unwrap();
+    assert!(f.store.snapshot().unwrap().dirs.contains_key(owned.to_str().unwrap()));
+}
+
+#[test]
+#[cfg(unix)]
+fn linked_download_cache_does_not_hide_an_external_writer_edit() {
+    use std::os::unix::fs::symlink;
+    let f=Fixture::new();let outside=f.root.join("outside");
+    fs::create_dir_all(outside.join("Song")).unwrap();
+    fs::create_dir_all(f.store.directory.join("gdrive")).unwrap();
+    symlink(&outside,f.store.directory.join("gdrive/downloads")).unwrap();
+    let path=f.store.directory.join("gdrive/downloads/Song");
+    f.store.mark_project(&path,"outside edit").unwrap();
+    assert!(f.store.snapshot().unwrap().dirs.contains_key(path.to_str().unwrap()));
+}

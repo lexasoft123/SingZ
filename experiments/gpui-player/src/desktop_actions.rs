@@ -44,6 +44,7 @@ impl Player {
             || self.project_delete.read(cx).is_open()
             || self.lyrics_editor_open
             || self.project_picker_open
+            || self.drive_projects_open
             || self.library_import_open
             || self.stem_export_open
             || self.engine_setup.read(cx).is_open()
@@ -108,6 +109,7 @@ impl Player {
         self.model_service.take();
         self.source_service.take();
         self.engine_setup_checker.take();
+        self.drive_restore_service.take();
         self.drive_service.take();
         self.project_library_service.take();
         self.release_service.take();

@@ -143,12 +143,12 @@ fn identity(path: &Path, meta: &Metadata) -> Result<Identity> {
         })
     }
 }
-struct Directory {
+pub(crate) struct Directory {
     path: PathBuf,
     id: Identity,
 }
 impl Directory {
-    fn capture(path: PathBuf) -> Result<Self> {
+    pub(crate) fn capture(path: PathBuf) -> Result<Self> {
         let m = fs::symlink_metadata(&path)?;
         ensure!(
             m.file_type().is_dir() && path.canonicalize()? == path,
@@ -157,7 +157,7 @@ impl Directory {
         let id = identity(&path, &m)?;
         Ok(Self { path, id })
     }
-    fn verify(&self) -> Result<()> {
+    pub(crate) fn verify(&self) -> Result<()> {
         let m = fs::symlink_metadata(&self.path)?;
         ensure!(
             m.file_type().is_dir()
@@ -232,7 +232,7 @@ fn mkdir(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn remove_member(path: &Path) -> Result<()> {
+pub(crate) fn remove_member(path: &Path) -> Result<()> {
     let m = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -248,7 +248,7 @@ fn remove_member(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn remove_stage(stage: &Directory) {
+pub(crate) fn remove_stage(stage: &Directory) {
     if stage.verify().is_ok() {
         let _ = remove_member(&stage.path);
     }
@@ -545,6 +545,20 @@ fn download_to(
     }
     unreachable!()
 }
+/// Read-only desktop restore reuses the adoption downloader's private partials,
+/// bounded retries, cancellation and checksum verification. Unlike legacy phone
+/// adoption, desktop restore requires both listing checksum and exact size.
+pub(crate) fn restore_download(
+    remote: &Remote,
+    file: &RemoteEntry,
+    out: &Path,
+    limit: u64,
+    cancel: &impl Fn() -> bool,
+    progress: &impl Fn(String, f32),
+) -> Result<Fingerprint> {
+    listing_hash(file)?.context("Drive restore requires file size and checksum")?;
+    download_to(remote, file, out, limit, cancel, progress, "Drive cache", 1, 1, Duration::from_millis(200))
+}
 fn hash_matches(rel: &str, hash: &Value, got: &HashMap<String, Fingerprint>) -> bool {
     got.get(rel).is_some_and(|f| {
         hash["md5"].as_str() == Some(&f.md5)
@@ -583,7 +597,7 @@ fn check_adoptable(doc: &Value, got: &HashMap<String, Fingerprint>) -> Result<()
     }
     Ok(())
 }
-fn stamp_mtimes(root: &Path, doc: &Value, got: &HashMap<String, Fingerprint>) {
+pub(crate) fn stamp_mtimes(root: &Path, doc: &Value, got: &HashMap<String, Fingerprint>) {
     let mut hashes = vec![];
     if let Some(stems) = doc["stemHashes"].as_object() {
         for (name, hash) in stems {

@@ -86,6 +86,11 @@ impl Store {
     pub fn mark_project(&self, dir: &Path, reason: &str) -> Result<()> {
         let key = absolute(dir)?;
         ensure!(key.len() <= 16384, "Dirty project path is too long");
+        // Downloaded projects are local offline copies, outside writer authority.
+        // A title rename retains their cache parent; deleted cache copies must
+        // not enqueue a writer run either. Linked cache roots confer no exemption.
+        if self.is_download_cache_project(dir) { return Ok(()); }
+
         self.update(|state| {
             bump(state)?;
             state.dirs.insert(key.clone(), state.seq);
@@ -97,6 +102,16 @@ impl Store {
         })?;
         eprintln!("Sync intent marked: {} ({})", key, log_reason(reason));
         Ok(())
+    }
+    fn is_download_cache_project(&self, dir: &Path) -> bool {
+        let Some(config)=self.directory.canonicalize().ok() else {return false;};
+        let gdrive=config.join("gdrive");
+        let cache=gdrive.join("downloads");
+        let ordinary_dir=|path:&Path|fs::symlink_metadata(path).is_ok_and(|m|m.is_dir()&&!m.file_type().is_symlink());
+        if !ordinary_dir(&gdrive)||!ordinary_dir(&cache) {return false;}
+        if fs::symlink_metadata(dir).is_ok_and(|m|m.file_type().is_symlink()) {return false;}
+        dir.parent().and_then(|p|p.canonicalize().ok())
+            .zip(cache.canonicalize().ok()).is_some_and(|(parent,cache)|parent==cache)
     }
     /// Cache-only lyrics are not projects. Do not create a ledger entry until
     /// the surrounding project.json exists, matching source markFileDirty.

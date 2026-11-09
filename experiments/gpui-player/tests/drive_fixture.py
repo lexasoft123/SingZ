@@ -6,7 +6,7 @@ Use clientId="fixture-client", clientSecret="fixture-secret" and point authBase,
 apiBase and uploadBase at that base. Sign-in uses the real PKCE callback flow.
 
 POST /control accepts reset, resetAuth, resetLedger, files (or seed), pageSize,
-repeatPageToken, failNext [{method,path,status,count?,truncateBytes?,delayMs?}],
+repeatPageToken, failNext [{method,path,status,count?,truncateBytes?,corruptBytes?,delayMs?}],
 gates {upload|download|list|token|download-first|download-second: bool},
 release [gate names], chunkDelayMs, chunkGates [{fileId,gate,afterBytes}].
 Seed files contain id/name/mimeType/parents/appProperties/trashed/contentBase64.
@@ -386,7 +386,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not authorized:
                 return self.json(401, {'error': 'fixture_unauthorized'})
             fault = self.server.state.fault(self.command, path)
-            if fault and 'truncateBytes' not in fault:
+            if fault and 'truncateBytes' not in fault and 'corruptBytes' not in fault:
                 if fault.get('delayMs'):
                     self.server.state.stopping.wait(min(30000, int(fault['delayMs'])) / 1000)
                 return self.json(int(fault.get('status', 503)), {'error': 'fixture_fault'})
@@ -520,8 +520,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 content, mime = entry['_content'], entry['mimeType']
                 delay = self.server.state.chunk_delay_ms
                 gates = [g for g in self.server.state.chunk_gates if g['fileId'] == file_id]
+            if fault and fault.get('corruptBytes') and content:
+                # Integrity failure with a complete HTTP response: preserve
+                # listing size/checksum and body length while changing one byte.
+                # The stored remote payload is never changed by this fault.
+                content = bytes([content[0] ^ 1]) + content[1:]
             return self.send(200, content, {'Content-Type': mime},
-                             truncate=int(fault['truncateBytes']) if fault else None, chunk_delay=delay,
+                             truncate=int(fault['truncateBytes']) if fault and 'truncateBytes' in fault else None, chunk_delay=delay,
                              chunk_gates=gates)
         with self.server.state.cv:
             entry = self.server.state.files.get(file_id)

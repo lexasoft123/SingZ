@@ -20,6 +20,7 @@ pub enum Event {
     ChooseRoot,
     SetRoot(Option<PathBuf>),
     Drive(crate::drive_state::Action),
+    DriveBrowse,
 }
 enum StorageMessage {
     SwitchFailed(String),
@@ -166,6 +167,7 @@ impl Picker {
         match id {
             "picker-close" => cx.emit(Event::Close),
             "picker-browse" => cx.emit(Event::Browse),
+            "picker-drive-browse" if self.drive.signed_in => cx.emit(Event::DriveBrowse),
             "picker-drive-connect"
                 if !self.moving
                     && self.drive.configured
@@ -242,6 +244,12 @@ impl Picker {
             f.focus(w, cx);
         }
     }
+    pub fn focus_drive_browse(&self, window:&mut Window, cx:&mut Context<Self>)->bool {
+        if self.drive.signed_in && self.order.borrow().iter().any(|id|id=="picker-drive-browse") {
+            self.focus("picker-drive-browse",window,cx);return true;
+        }
+        false
+    }
     fn move_focus(&mut self, backwards: bool, w: &mut Window, cx: &mut Context<Self>) {
         self.keyboard.set(true);
         let order = self.order.borrow().clone();
@@ -292,6 +300,7 @@ impl Picker {
                     })
                     .cloned();
                 if let Some(id) = focused {
+                    if id=="picker-drive-browse" {w.prevent_default();if e.is_held{return;}}
                     self.activate(&id, cx);
                 }
                 cx.stop_propagation();
@@ -519,6 +528,10 @@ impl Render for Picker {
                     cx,
                 ));
             }
+        }
+        if self.drive.signed_in {
+            actions=actions.child(self.control("picker-drive-browse".into(),
+                ui::drive_library_action("picker-drive-browse",t("library.drive.title"),true,w),true,cx));
         }
         if self.drive.configured {
             let (id, label) = if self.drive.signed_in {

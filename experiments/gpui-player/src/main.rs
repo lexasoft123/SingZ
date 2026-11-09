@@ -55,6 +55,12 @@ mod drive_sync;
 mod drive_adopt;
 mod drive_service;
 mod drive_host;
+mod drive_restore;
+mod drive_restore_service;
+mod drive_restore_host;
+mod drive_projects;
+#[cfg(feature="ui-tests")]
+mod ui_drive_restore;
 mod sync_scheduler;
 mod lrclib;
 mod lyrics_resolution;
@@ -485,6 +491,10 @@ struct Player {
     language_state: Option<i18n::LocaleState>,
     language_menu: Entity<language_menu::LanguageMenu>,
     drive_service: Option<drive_service::Service>,
+    drive_restore_service: Option<drive_restore_service::Service>,
+    drive_restore_snapshot: drive_restore_service::Snapshot,
+    drive_projects: Entity<drive_projects::Dialog>,
+    drive_projects_open: bool,
     drive_snapshot: drive_state::Snapshot,
     drive_root_waiting: Option<Option<std::path::PathBuf>>,
     #[cfg(feature="ui-tests")]
@@ -809,7 +819,7 @@ impl Player {
             }
         });
         let project_picker = cx.new(|cx|project_picker::Picker::new(window,cx));
-        let project_picker_subscription=cx.subscribe(&project_picker,|this,_,event,cx|{
+        let project_picker_subscription=cx.subscribe_in(&project_picker,window,|this,_,event,w,cx|{
             match event {
                 project_picker::Event::Open(path)=>{this.close_project_picker(cx);this.open_project(path.clone(),cx);},
                 project_picker::Event::Browse=>{this.close_project_picker(cx);this.browse(cx);},
@@ -817,9 +827,12 @@ impl Player {
                 project_picker::Event::ChooseRoot=>this.prompt_project_root(cx),
                 project_picker::Event::SetRoot(path)=>this.choose_project_root(path.clone(),cx),
                 project_picker::Event::Drive(action)=>this.drive_action(*action,cx),
+                project_picker::Event::DriveBrowse=>this.open_drive_projects(w,cx),
             }
             cx.notify();
         });
+        let drive_projects=cx.new(|cx|drive_projects::Dialog::new(window,cx));
+        let drive_projects_subscription=cx.subscribe_in(&drive_projects,window,|this,_,event,w,cx|this.drive_projects_event(event,w,cx));
         let lyrics_sidebar=cx.new(|cx|lyrics_sidebar::Sidebar::new(window,cx));
         let sidebar_subscription=cx.subscribe_in(&lyrics_sidebar,window,|this,_,event,w,cx|{
             use lyrics_sidebar::Event::*;
@@ -1029,8 +1042,9 @@ impl Player {
             }
             cx.notify();
         });
-        let library_subscription = cx.subscribe(&library, |this, _, event, cx| match event {
+        let library_subscription = cx.subscribe_in(&library,window, |this, _, event, w, cx| match event {
             library::LibraryEvent::Drive(action)=>this.drive_action(*action,cx),
+            library::LibraryEvent::DriveBrowse=>this.open_drive_projects(w,cx),
             library::LibraryEvent::OpenProject(path) => this.open_project(path.clone(), cx),
             library::LibraryEvent::OpenSong { title, artist } => {
                 this.loaded_song = true;
@@ -1251,6 +1265,7 @@ impl Player {
         let source_service = backend.as_ref().map(|_| source_jobs::Service::new());
         let project_library_service=backend.as_ref().map(|_|project_library::Service::new(project_library::Config::default()));
         let drive_service=backend.as_ref().map(|_|drive_service::Service::new(audio_devices::directory(),integration::library_root()));
+        let drive_restore_service=backend.as_ref().map(|_|drive_restore_service::Service::new(audio_devices::directory()));
         if let Some(backend) = &backend {
             backend.catalog();
             backend.inventory();
@@ -1284,6 +1299,7 @@ impl Player {
             desktop_shutdown_done:false,desktop_window_state:None,
             locale_service:locale_service::Service::new(audio_devices::directory()),locale_revision:0,language_state:None,language_menu,
             drive_service,drive_snapshot:Default::default(),drive_root_waiting:None,
+            drive_restore_service,drive_restore_snapshot:Default::default(),drive_projects,drive_projects_open:false,
             #[cfg(feature="ui-tests")]
             drive_test_urls:vec![],
             #[cfg(feature="ui-tests")]
@@ -1476,6 +1492,7 @@ impl Player {
                 lyrics_editor_subscription,
                 sidebar_subscription,
                 project_picker_subscription,
+                drive_projects_subscription,
                 stem_export_subscription,
                 carry_subscription,
                 library_import_subscription,
@@ -1567,7 +1584,7 @@ impl Player {
     fn release_surface_available(&self,cx:&App)->bool {
         if self.project_delete.read(cx).is_open() || self.delete_inspect_pending.is_some() { return false; }
         !self.engine_setup.read(cx).is_open() && !matches!(self.screen,Screen::Settings|Screen::Log|Screen::Models)
-            && self.notice.is_none() && !self.lyrics_editor_open && !self.project_picker_open
+            && self.notice.is_none() && !self.lyrics_editor_open && !self.project_picker_open && !self.drive_projects_open
             && !self.library_import_open && !self.stem_export_open && !self.loading
             && !(self.source_job.is_some() && self.source_split.is_none())
             && !self.quick_start.read(cx).is_open()
@@ -2153,7 +2170,7 @@ impl Player {
         }).detach();
     }
     fn choose_project_root(&mut self,path:Option<std::path::PathBuf>,cx:&mut Context<Self>){
-        if !self.project_picker_open||self.project_library_moving||self.project_picker_prompt.is_some(){return;}
+        if !self.project_picker_open||self.drive_projects_open||self.project_library_moving||self.project_picker_prompt.is_some(){return;}
         if self.saving||self.loading||self.source_job.is_some()||self.rename_pending.is_some()
             ||self.metronome_pending.is_some()||self.metronome_save_requested||self.metronome_save_waiting{
             self.project_picker.update(cx,|s,cx|s.failure("Wait for the current project operation to finish before changing the library folder.".into(),cx));return;
@@ -3125,7 +3142,7 @@ impl Player {
             && !matches!(self.screen, Screen::Models | Screen::Settings | Screen::Log)
             && self.notice.is_none()
             && !self.lyrics_editor_open
-            && !self.project_picker_open
+            && !self.project_picker_open && !self.drive_projects_open
             && !self.library_import_open && !self.stem_export_open
             && !self.engine_setup.read(cx).is_open()
             && !self.loading
@@ -5016,7 +5033,7 @@ impl Render for Player {
             || matches!(self.screen, Screen::Settings | Screen::Log | Screen::Models)
             || self.project_delete.read(cx).is_open()
             || self.lyrics_editor_open
-            || self.project_picker_open
+            || self.project_picker_open || self.drive_projects_open
             || self.library_import_open || self.stem_export_open
             || self.notice.is_some()
             || self.engine_setup.read(cx).is_open()
@@ -5063,7 +5080,7 @@ impl Render for Player {
                 matches!(self.screen, Screen::Settings | Screen::Log | Screen::Models)
                     || self.project_delete.read(cx).is_open()
                     || self.notice.is_some()
-                    || self.project_picker_open
+                    || self.project_picker_open || self.drive_projects_open
                     || self.library_import_open || self.stem_export_open
                     || self.lyrics_editor_open
                     || self.engine_setup.read(cx).is_open()
@@ -5155,7 +5172,7 @@ impl Render for Player {
         if matches!(self.screen, Screen::Settings | Screen::Log | Screen::Models)
             || self.project_delete.read(cx).is_open()
             || self.lyrics_editor_open
-            || self.project_picker_open
+            || self.project_picker_open || self.drive_projects_open
             || self.library_import_open || self.stem_export_open
             || self.engine_setup.read(cx).is_open()
             || self.whats_new.read(cx).is_open()
@@ -5501,7 +5518,8 @@ impl Render for Player {
                 if event.keystroke.key=="escape" { this.cancel_delete_inspection(); }
                 if this.backend.is_some()&&this.karaoke&&this.lyrics_sidebar.read(cx).input_focused(window,cx){return;}
                 if this.lyrics_editor_open&&this.lyrics_editor.read(cx).text_input_focused(window,cx){return;}
-                if this.lyrics_editor_open||this.project_picker_open||this.library_import_open||this.stem_export_open||this.engine_setup.read(cx).is_open()||this.whats_new.read(cx).is_open() {cx.stop_propagation();return;}
+                if this.drive_projects_open&&this.drive_projects.read(cx).text_input_focused(window,cx){return;}
+                if this.lyrics_editor_open||this.project_picker_open||this.drive_projects_open||this.library_import_open||this.stem_export_open||this.engine_setup.read(cx).is_open()||this.whats_new.read(cx).is_open() {cx.stop_propagation();return;}
                 if this.carry_open {cx.stop_propagation();return;}
                 if this.metronome_open {
                     if event.keystroke.key == "escape" {
@@ -5685,6 +5703,10 @@ impl Render for Player {
             .when(self.project_picker_open, |root| {
                 root.when_some(self.backdrop.clone(),|root,image|root.child(div().absolute().inset_0().child(img(image).size_full())))
                     .child(self.project_picker.clone())
+            })
+            .when(self.drive_projects_open, |root| {
+                root.when_some(self.backdrop.clone(),|root,image|root.child(div().absolute().inset_0().child(img(image).size_full())))
+                    .child(self.drive_projects.clone())
             })
             .when(self.project_delete.read(cx).is_open(), |root| {
                 root.when_some(self.backdrop.clone(),|root,image|root.child(div().absolute().inset_0().child(img(image).size_full())))
@@ -5952,6 +5974,12 @@ fn main() {
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_TRAINING_REVIEW") {
             assert!(background && std::env::var_os("SINGZ_MUTE").is_some());
             ui_training::run(window_handle, view.clone(), directory.into(), cx);
+        }
+        #[cfg(feature = "ui-tests")]
+        if let Some(directory)=std::env::var_os("SINGZ_GPUI_DRIVE_RESTORE_TEST") {
+            assert!(background && std::env::var("SINGZ_MUTE").as_deref()==Ok("1")
+                && std::env::var("SINGZ_GPUI_TEST_NO_CAPTURE").as_deref()==Ok("1"));
+            ui_drive_restore::run(window_handle,view.clone(),directory.into(),cx);
         }
         #[cfg(feature = "ui-tests")]
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_PLAYBACK_GRAPH_TEST") {

@@ -45,6 +45,7 @@ pub(super) fn capture(
         || p.project_delete.read(cx).is_open()
         || p.lyrics_editor_open
         || p.project_picker_open
+        || p.drive_projects_open
         || p.library_import_open
         || p.stem_export_open
         || p.engine_setup.read(cx).is_open()

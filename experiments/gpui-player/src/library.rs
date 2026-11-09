@@ -46,6 +46,7 @@ pub enum LibraryEvent {
     Browse,
     ManageStorage,
     Drive(crate::drive_state::Action),
+    DriveBrowse,
     DeleteSong {
         title: SharedString,
     },
@@ -154,6 +155,7 @@ pub struct LibraryScreen {
     drive_focus: std::cell::RefCell<std::collections::HashMap<String, FocusHandle>>,
     drive_bounds: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, Bounds<Pixels>>>>,
     drive_keyboard: std::rc::Rc<std::cell::Cell<bool>>,
+    revealed_drive_focus: Option<String>,
     card_focus: std::cell::RefCell<std::collections::HashMap<(std::path::PathBuf,bool),FocusHandle>>,
     search: Entity<InputState>,
     query: String,
@@ -236,6 +238,7 @@ impl LibraryScreen {
             drive_focus: Default::default(),
             drive_bounds: Default::default(),
             drive_keyboard: Default::default(),
+            revealed_drive_focus: None,
             card_focus: Default::default(),
             guides: Default::default(),
             page_scroll: ScrollHandle::new(),
@@ -319,6 +322,29 @@ impl LibraryScreen {
             }))
             .relative().child(canvas(move |b,_,_| {bounds.borrow_mut().insert(probe_id.clone(),b);b},|_,_,_,_|{}).absolute().inset_0())
     }
+    pub fn focus_drive_browse(&mut self, window:&mut Window, cx:&mut Context<Self>)->bool {
+        if self.drive.signed_in && self.drive_bounds.borrow().contains_key("library-drive-browse") {
+            let focus=self.drive_focus.borrow().get("library-drive-browse").cloned();
+            if let Some(focus)=focus {
+                focus.focus(window,cx);
+                if let Some(bounds)=self.drive_bounds("library-drive-browse") {
+                    self.reveal_guide(bounds);
+                    self.revealed_drive_focus=Some("library-drive-browse".into());
+                }
+                return true;
+            }
+        }
+        false
+    }
+    fn drive_browse(&self, window:&Window, cx:&mut Context<Self>)->Stateful<Div> {
+        let id="library-drive-browse";
+        let focus=self.drive_focus.borrow_mut().entry(id.into()).or_insert_with(||cx.focus_handle().tab_stop(true)).clone();
+        let weak=cx.entity().downgrade();
+        let bounds=self.drive_bounds.clone();
+        singz_uikit::settings_control_with_focus(singz_uikit::drive_library_action(id,t("library.drive.title"),true,window),focus,true,move|_,cx| {
+            let _=weak.update(cx,|s,cx|if s.drive.signed_in {cx.emit(LibraryEvent::DriveBrowse);});
+        }).relative().child(canvas(move|b,_,_|{bounds.borrow_mut().insert(id.into(),b);b},|_,_,_,_|{}).absolute().inset_0())
+    }
     fn drive_row(&self, w: &Window, cx: &mut Context<Self>) -> Div {
         use crate::{drive_state::Action, sync_scheduler::Phase};
         let drive=&self.drive;
@@ -356,6 +382,7 @@ impl LibraryScreen {
             singz_uikit::drive_status_line(t("library.dropScreen.keepCopyHint"),true,false,true,false,w)
         };
         let mut row=singz_uikit::drive_storage_subrow().child(singz_uikit::drive_status_body().child(status));
+        if drive.signed_in { row=row.child(self.drive_browse(w,cx)); }
         if drive.signed_in { row=row.child(self.drive_action("library-drive-log",&t("library.dropScreen.syncLog"),Action::ShowLog,true,w,cx)); }
         if syncing { row=row.child(self.drive_action("library-drive-cancel",&t("library.dropScreen.cancelSync"),Action::Cancel,true,w,cx)); }
         let (id,label,action)=if drive.signed_in {("library-drive-sync",t("library.dropScreen.syncNow"),Action::SyncNow)}
@@ -697,6 +724,20 @@ impl Render for LibraryScreen {
         self.delete_bounds.borrow_mut().clear();
         #[cfg(feature = "ui-tests")]
         self.project_bounds.borrow_mut().clear();
+        // Native Tab can focus a storage action below the page's fold.
+        // Reveal only on an actual Drive focus change, using its last measured
+        // bounds before clearing them. Keeping the same focus while wheeling
+        // must not pin the page back to that action on every render.
+        let drive_focus=self.drive_focus.borrow().iter().find(|(id,focus)|
+            self.drive_bounds.borrow().contains_key(*id)&&focus.is_focused(window)).map(|(id,_)|id.clone());
+        if drive_focus!=self.revealed_drive_focus {
+            if let Some(id)=drive_focus.as_deref() {
+                if let Some(bounds)=self.drive_bounds(id) {
+                    self.reveal_guide(bounds);
+                    self.revealed_drive_focus=drive_focus;
+                }
+            } else {self.revealed_drive_focus=None;}
+        }
         self.drive_bounds.borrow_mut().clear();
         let indices=self.filtered_indices();
         let visible=indices.iter().map(|index|self.song_key(*index)).collect::<std::collections::HashSet<_>>();

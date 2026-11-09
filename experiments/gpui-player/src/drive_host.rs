@@ -17,6 +17,10 @@ impl Player {
             self.open_diagnostics(cx);
             return;
         }
+        if matches!(action,drive_state::Action::SignOut|drive_state::Action::SignIn) {
+            if let Some(service)=&self.drive_restore_service {let _=service.cancel();}
+            self.drive_projects_open=false;
+        }
         if self.project_library_moving {
             return;
         }
@@ -28,6 +32,7 @@ impl Player {
         cx.notify();
     }
     pub(super) fn poll_drive(&mut self, cx: &mut Context<Self>) {
+        self.poll_drive_restore(cx);
         let Some(service) = &self.drive_service else {
             return;
         };
@@ -37,7 +42,7 @@ impl Player {
             match event {
                 drive_service::Event::OpenUrl(_, url) => {
                     #[cfg(feature = "ui-tests")]
-                    if std::env::var_os("SINGZ_GPUI_DRIVE_TEST").is_some() {
+                    if std::env::var_os("SINGZ_GPUI_DRIVE_TEST").is_some() || std::env::var_os("SINGZ_GPUI_DRIVE_RESTORE_TEST").is_some() {
                         self.drive_test_urls.push(url);
                         continue;
                     }
