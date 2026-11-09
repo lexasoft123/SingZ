@@ -23,6 +23,8 @@ pub struct MetPopover {
     duration: f64,
     can_detect: bool,
     input: Entity<InputState>,
+    focus_handle: FocusHandle,
+    controls: HashMap<&'static str, FocusHandle>,
     draft: bool,
     refresh_input: bool,
     taps: Vec<f64>,
@@ -65,6 +67,33 @@ impl MetPopover {
             duration: 0.,
             can_detect: false,
             input,
+            focus_handle: cx.focus_handle(),
+            controls: [
+                "met-click-0",
+                "met-click-1",
+                "met-volume",
+                "met-accent-0",
+                "met-accent-1",
+                "met-grid-0",
+                "met-grid-1",
+                "met-count-0",
+                "met-count-1",
+                "met-count-2",
+                "met-tap",
+                "met-half",
+                "met-double",
+                "met-meter-0",
+                "met-meter-1",
+                "met-meter-2",
+                "met-meter-3",
+                "met-earlier",
+                "met-later",
+                "met-rotate",
+                "met-redetect",
+            ]
+            .into_iter()
+            .map(|id| (id, cx.focus_handle().tab_stop(true)))
+            .collect(),
             draft: false,
             refresh_input: true,
             taps: vec![],
@@ -82,6 +111,78 @@ impl MetPopover {
     }
     pub fn focused(&self, w: &Window, cx: &App) -> bool {
         self.input.read(cx).focus_handle(cx).is_focused(w)
+    }
+    pub fn volume_focused(&self, w: &Window) -> bool {
+        self.controls["met-volume"].is_focused(w)
+    }
+    fn control_available(&self, id: &str) -> bool {
+        match id {
+            "met-half" => self.grid.as_ref().is_some_and(|g| g.bpm / 2. >= 30.),
+            "met-double" => self.grid.as_ref().is_some_and(|g| g.bpm * 2. <= 300.),
+            "met-redetect" => self.can_detect,
+            "met-click-1" | "met-grid-1" | "met-earlier" | "met-later" | "met-rotate"
+            | "met-meter-0" | "met-meter-1" | "met-meter-2" | "met-meter-3" => self.grid.is_some(),
+            _ => true,
+        }
+    }
+    fn recover_removed_focus(&self, w: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .controls
+            .iter()
+            .any(|(id, focus)| !self.control_available(id) && focus.is_focused(w))
+        {
+            // Keep a mounted dispatch path synchronously, including between
+            // rapid keys before repaint. This non-tab-stop popup root retains
+            // the player's capture/bubble ancestors without stealing focus
+            // later from a control reached by a subsequent Tab.
+            self.focus_handle.focus(w, cx);
+        }
+    }
+    #[cfg(feature = "ui-tests")]
+    pub fn focused_control(&self, w: &Window, cx: &App) -> Option<String> {
+        if self.focused(w, cx) {
+            return Some("met-bpm".into());
+        }
+        self.controls
+            .iter()
+            .find(|(_, handle)| handle.is_focused(w))
+            .map(|(id, _)| (*id).into())
+    }
+    /// Controls keep the shared UIKit geometry/ring. This adapter binds the
+    /// same metronome action to pointer and keyboard activation.
+    fn button(
+        &self,
+        id: &str,
+        enabled: bool,
+        control: Stateful<Div>,
+        action: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let handle = self.controls[id].clone();
+        let pointer = handle.clone();
+        let action = Rc::new(action);
+        let click = action.clone();
+        self.probe(id, control)
+            .when(enabled, |control| {
+                ui::lyrics_sidebar_focus(control, handle.clone())
+                    .track_focus(&handle)
+                    .tab_index(0)
+                    .on_mouse_down(MouseButton::Left, move |_, w, cx| pointer.focus(w, cx))
+            })
+            .on_click(cx.listener(move |s, _, w, cx| {
+                if enabled {
+                    click(s, w, cx);
+                    s.recover_removed_focus(w, cx);
+                }
+            }))
+            .capture_key_down(cx.listener(move |s, event: &KeyDownEvent, w, cx| {
+                if enabled && matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    w.prevent_default();
+                    action(s, w, cx);
+                    s.recover_removed_focus(w, cx);
+                    cx.stop_propagation();
+                }
+            }))
     }
     pub fn set(
         &mut self,
@@ -219,25 +320,29 @@ impl MetPopover {
         cx: &mut Context<Self>,
     ) -> Div {
         ui::mode_group().children(labels.iter().enumerate().map(|(i, label)| {
-            self.probe(
-                &format!("met-{key}-{i}"),
+            let id = format!("met-{key}-{i}");
+            self.button(
+                &id,
+                enabled[i],
                 ui::mode_option(
-                    format!("met-{key}-{i}"),
+                    id.clone(),
                     (*label).to_owned(),
                     selected == i,
                     enabled[i],
                     i == 0,
                     i + 1 == labels.len(),
-                )
-                .on_click(cx.listener(move |s, _, w, cx| {
+                ),
+                move |s, w, cx| {
                     s.finish_draft(w, cx);
                     if enabled_for(key, i, s) {
                         s.choose(key, i, cx);
                     }
-                })),
+                },
+                cx,
             )
         }))
     }
+
     fn chip(
         &self,
         id: &'static str,
@@ -245,14 +350,19 @@ impl MetPopover {
         enabled: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        self.probe(
+        self.button(
             id,
-            ui::metronome_chip(id, label, enabled).on_click(cx.listener(move |s, _, w, cx| {
-                if !enabled {
-                    return;
-                }
+            enabled,
+            ui::metronome_chip(id, label, enabled),
+            move |s, w, cx| {
                 s.finish_draft(w, cx);
                 if let Some(g) = &s.grid {
+                    // Recheck dynamic bounds for repeated keys before repaint.
+                    if id == "met-half" && g.bpm / 2. < 30.
+                        || id == "met-double" && g.bpm * 2. > 300.
+                    {
+                        return;
+                    }
                     s.grid = Some(match id {
                         "met-half" => g.half(),
                         "met-double" => g.double(),
@@ -262,8 +372,32 @@ impl MetPopover {
                     });
                     s.emit(cx);
                 }
-            })),
+            },
+            cx,
         )
+    }
+    fn tap(&mut self, w: &mut Window, cx: &mut Context<Self>) {
+        self.finish_draft(w, cx);
+        cx.emit(Event::Preview(false));
+        let now = self.clock.elapsed().as_secs_f64();
+        if self.taps.last().is_some_and(|t| now - t > 2.5) {
+            self.taps.clear();
+        }
+        self.taps.push(now);
+        if self.taps.len() > 12 {
+            self.taps.remove(0);
+        }
+        if let Some(bpm) = tap_bpm(&self.taps) {
+            self.grid = Beats::constant(
+                bpm,
+                self.position,
+                self.duration,
+                self.grid.as_ref().map_or(4, |g| g.beats_per_bar),
+            )
+            .ok();
+            self.emit(cx);
+        }
+        cx.notify();
     }
 }
 fn enabled_for(key: &str, i: usize, s: &MetPopover) -> bool {
@@ -282,6 +416,7 @@ fn version() -> f64 {
 }
 impl Render for MetPopover {
     fn render(&mut self, w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.recover_removed_focus(w, cx);
         if self.refresh_input && !self.focused(w, cx) {
             self.reset_input(w, cx);
             self.refresh_input = false;
@@ -291,6 +426,7 @@ impl Render for MetPopover {
         let weak = cx.weak_entity();
         ui::transport_popover()
             .id("metronome-popover")
+            .track_focus(&self.focus_handle)
             .w(px(324.))
             .font_family(DISPLAY_400)
             .text_color(rgb(TEXT))
@@ -324,21 +460,25 @@ impl Render for MetPopover {
                 ui::transport_setting_row(t("player.metronome.loudness")).child(
                     self.probe(
                         "met-volume",
-                        ui::stem_volume(
-                            "met-volume",
-                            self.met.volume as f32,
-                            ACCENT,
-                            move |n, w, cx| {
-                                let _ = weak.update(cx, |s, cx| {
-                                    s.finish_draft(w, cx);
-                                    s.met.volume = (n as f64 * 100.).round() / 100.;
-                                    s.emit(cx);
-                                });
-                            },
-                        )
-                        .on_mouse_up(
-                            MouseButton::Left,
-                            cx.listener(|s, _, _, cx| cx.emit(Event::Preview(s.met.accent))),
+                        ui::lyrics_sidebar_focus(
+                            ui::stem_volume_with_focus(
+                                "met-volume",
+                                self.met.volume as f32,
+                                ACCENT,
+                                self.controls["met-volume"].clone(),
+                                move |n, w, cx| {
+                                    let _ = weak.update(cx, |s, cx| {
+                                        s.finish_draft(w, cx);
+                                        s.met.volume = (n as f64 * 100.).round() / 100.;
+                                        s.emit(cx);
+                                    });
+                                },
+                            )
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|s, _, _, cx| cx.emit(Event::Preview(s.met.accent))),
+                            ),
+                            self.controls["met-volume"].clone(),
                         ),
                     )
                     .flex_1(),
@@ -419,33 +559,12 @@ impl Render for MetPopover {
             .child(
                 ui::transport_setting_row(t("player.metronome.tempo"))
                     .child(ui::metronome_bpm_input(&self.input))
-                    .child(self.probe(
+                    .child(self.button(
                         "met-tap",
-                        ui::small_ghost_pill("met-tap", t("player.metronome.tap")).on_click(
-                            cx.listener(|s, _, w, cx| {
-                                s.finish_draft(w, cx);
-                                cx.emit(Event::Preview(false));
-                                let now = s.clock.elapsed().as_secs_f64();
-                                if s.taps.last().is_some_and(|t| now - t > 2.5) {
-                                    s.taps.clear();
-                                }
-                                s.taps.push(now);
-                                if s.taps.len() > 12 {
-                                    s.taps.remove(0);
-                                }
-                                if let Some(bpm) = tap_bpm(&s.taps) {
-                                    s.grid = Beats::constant(
-                                        bpm,
-                                        s.position,
-                                        s.duration,
-                                        s.grid.as_ref().map_or(4, |g| g.beats_per_bar),
-                                    )
-                                    .ok();
-                                    s.emit(cx);
-                                }
-                                cx.notify();
-                            }),
-                        ),
+                        true,
+                        ui::small_ghost_pill("met-tap", t("player.metronome.tap")),
+                        |s, w, cx| s.tap(w, cx),
+                        cx,
                     ))
                     .child(self.chip(
                         "met-half",
@@ -480,21 +599,18 @@ impl Render for MetPopover {
                     .child(self.chip("met-later", "+10", has, cx))
                     .child(self.chip("met-rotate", "1→", has, cx))
                     .when(self.can_detect, |d| {
-                        d.child(
-                            self.probe(
-                                "met-redetect",
-                                ui::small_ghost_pill(
-                                    "met-redetect",
-                                    t("player.metronome.redetect"),
-                                )
-                                .on_click(cx.listener(
-                                    |s, _, w, cx| {
-                                        s.finish_draft(w, cx);
-                                        cx.emit(Event::Redetect);
-                                    },
-                                )),
-                            ),
-                        )
+                        d.child(self.button(
+                            "met-redetect",
+                            true,
+                            ui::small_ghost_pill("met-redetect", t("player.metronome.redetect")),
+                            |s, w, cx| {
+                                if s.can_detect {
+                                    s.finish_draft(w, cx);
+                                    cx.emit(Event::Redetect);
+                                }
+                            },
+                            cx,
+                        ))
                     }),
             )
             .child(

@@ -6,6 +6,25 @@ controls are implemented as a first slice; see `NATIVE_INTEGRATION.md`. Full vis
 and the remaining backend features remain separate.
 Common native controls live in sibling `singz-ui/gpui`.
 
+Mixer keyboard follow-up (2026-11-09): lane M/S, global unmute/unsolo and
+Add/export headers now have persistent keyboard/pointer focus using shared UIKit
+controls. Enter activates once, Space controls the song and arrows seek; disabled
+resets and removed tracks recover focus. Metronome controls use persistent focus
+and the shared range. Its source popup is nonmodal: Space still plays/pauses, BPM
+typing owns text keys and range arrows change loudness. Half/Double limits and
+unavailable controls retain a mounted focus target, preserving Space/Escape.
+Actual tests exposed/fixed Enter's duplicate automatic keyup click, swallowed BPM
+text and focus loss at Half's 30 BPM boundary. Final two-launch hidden/muted
+combined workflow passes 44 main captures plus four timeline-motion images at
+both sizes, with 36 observed helpers retired, 442 app CPU samples without errors
+and unchanged foreground. Two static player frames remain pixel-identical to the
+previous native checkpoint; all 49 native lyric-region records remain exact.
+Normal check, UI build and focused policy/range tests pass. See
+[Mixer keyboard review](MIXER_KEYBOARD_REVIEW.md). Add chooser activation, every
+metronome action/state, hardware/platform and complete visual/performance
+qualification remain outside this checkpoint; the native-engine startup gate
+from the previous package remains unresolved.
+
 Singing controls follow-up (2026-11-09): native lyrics now show source-style
 instrumental-gap seconds and three/two/one dots, with cached stepped pulse sprites
 prepared off the UI thread and bounded CPU/GPU eviction in UIKit. Pre-first-line

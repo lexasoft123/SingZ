@@ -51,19 +51,20 @@ pub(super) fn capture(
         || p.whats_new.read(cx).is_open()
         || p.quick_start.read(cx).is_open()
         || p.carry_open
-        || p.metronome_open
         || p.transport.read(cx).has_popover();
     let text = p.track_rename.is_some()
         || p.header.read(cx).is_editing()
         || p.header.read(cx).title_input_focused(w, cx)
         || p.track_name_input.read(cx).focus_handle(cx).is_focused(w)
         || p.transport.read(cx).bpm_focused(w, cx)
+        || p.metronome_open && p.metronome_ui.read(cx).focused(w, cx)
         || p.karaoke && p.lyrics_sidebar.read(cx).input_focused(w, cx);
     let owner = if dialog {
         Owner::Dialog
     } else if text {
         Owner::TextEntry
-    } else if p.track_gain_focus.iter().any(|focus| focus.is_focused(w)) {
+    } else if p.track_gain_focus.iter().any(|focus| focus.is_focused(w))
+        || p.metronome_open && p.metronome_ui.read(cx).volume_focused(w) {
         Owner::Slider
     } else {
         Owner::Song

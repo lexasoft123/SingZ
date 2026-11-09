@@ -26,6 +26,8 @@ mod desktop_actions;
 mod desktop_keyboard;
 #[cfg(feature="ui-tests")]
 mod ui_desktop_keyboard;
+#[cfg(feature="ui-tests")]
+mod ui_metronome_keyboard;
 mod desktop_window_state;
 mod desktop_lifecycle;
 mod native_build_info;
@@ -663,6 +665,9 @@ struct Player {
     track_focus_removed: Vec<usize>,
     track_focus_after_name: bool,
     track_action_focus: [[FocusHandle;2];tracks::LANE_SLOTS],
+    track_mix_focus: [[FocusHandle;2];tracks::LANE_SLOTS],
+    track_reset_focus: [FocusHandle;2],
+    track_header_focus: [FocusHandle;2],
     track_gain_focus: [FocusHandle;tracks::LANE_SLOTS],
     #[cfg(feature="ui-tests")]
     track_bounds: Rc<RefCell<HashMap<String,Bounds<Pixels>>>>,
@@ -1510,6 +1515,9 @@ impl Player {
             track_focus_removed: vec![],
             track_focus_after_name: false,
             track_action_focus: std::array::from_fn(|_|std::array::from_fn(|_|cx.focus_handle())),
+            track_mix_focus: std::array::from_fn(|_|std::array::from_fn(|_|cx.focus_handle().tab_stop(true))),
+            track_reset_focus: std::array::from_fn(|_|cx.focus_handle().tab_stop(true)),
+            track_header_focus: std::array::from_fn(|_|cx.focus_handle().tab_stop(true)),
             track_gain_focus: std::array::from_fn(|_|cx.focus_handle().tab_stop(true)),
             #[cfg(feature="ui-tests")]
             track_bounds: Default::default(),
@@ -4798,22 +4806,26 @@ impl Player {
                             .gap(px(6.))
                             .items_center()
                             .child(
-                                self.track_probe(format!("mute-{i}"),singz_uikit::stem_chip(("m", i), "M", self.muted[i], color))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                self.track_probe(format!("mute-{i}"),singz_uikit::stem_chip_with_focus(("m", i), "M", self.muted[i], color, self.track_mix_focus[i][0].clone(), {
+                                    let entity=cx.entity().downgrade();
+                                    move |_,cx| {let _=entity.update(cx,|this,cx| {
                                         if (this.tracks_pending.is_some()||this.carry_pending.is_some()){return;}
                                         this.muted[i] = !this.muted[i];
                                         this.sync_lane(i, cx);
                                         cx.notify();
-                                    })),
+                                    });}
+                                })),
                             )
                             .child(
-                                singz_uikit::stem_chip(("s", i), "S", self.solo[i], ACCENT)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                self.track_probe(format!("solo-{i}"),singz_uikit::stem_chip_with_focus(("s", i), "S", self.solo[i], ACCENT, self.track_mix_focus[i][1].clone(), {
+                                    let entity=cx.entity().downgrade();
+                                    move |_,cx| {let _=entity.update(cx,|this,cx| {
                                         if (this.tracks_pending.is_some()||this.carry_pending.is_some()){return;}
                                         this.solo[i] = !this.solo[i];
                                         this.sync_lane(i, cx);
                                         cx.notify();
-                                    })),
+                                    });}
+                                })),
                             )
                             .child(self.track_probe(format!("gain-{i}"),singz_uikit::stem_volume_with_focus(("gain", i), gain, color, self.track_gain_focus[i].clone(), {
                                 let entity = cx.entity().downgrade();
@@ -4956,7 +4968,11 @@ impl Render for Player {
             self.track_focus_after_name=false;
             if self.track_name_input.read(cx).focus_handle(cx).is_focused(window){self.focus_player=true;}
         }
-        if self.track_focus_removed.drain(..).any(|slot|self.track_gain_focus[slot].is_focused(window)||self.track_action_focus[slot].iter().any(|focus|focus.is_focused(window))){self.focus_player=true;}
+        if self.track_focus_removed.drain(..).any(|slot|self.track_gain_focus[slot].is_focused(window)||self.track_mix_focus[slot].iter().any(|focus|focus.is_focused(window))||self.track_action_focus[slot].iter().any(|focus|focus.is_focused(window))){self.focus_player=true;}
+        for (index,enabled) in [self.muted.iter().any(|value|*value),self.solo.iter().any(|value|*value)].into_iter().enumerate() {
+            if !enabled&&self.track_reset_focus[index].is_focused(window){self.focus_player=true;}
+        }
+        if self.backend.is_some()&&!self.audio_available()&&self.track_header_focus[1].is_focused(window){self.focus_player=true;}
         let save_enabled=!self.loading && !self.saving && !self.source_saving
             && self.source_publication.is_none() && self.audio_recovery.is_none();
         if !save_enabled && self.header.read(cx).save_control_focused(window) {
@@ -5361,12 +5377,34 @@ impl Render for Player {
                         .child(div().relative().flex_1().min_h_0().overflow_hidden().pl(px(10.)).pr(px(22.)).pt(px(4.)).pb(px(10.)).flex().flex_col()
                             .child(div().h(px(30.)).flex_shrink_0().flex()
                                 .child(div().w(px(228.)).pl(px(14.)).flex().gap(px(5.)).items_center()
-                                    .child(self.track_probe("add".into(),singz_uikit::ruler_button("add-track",i18n::t("player.stack.addTrack"),false,false)).on_click(cx.listener(|this,_,_,cx| { this.browse_custom_tracks(cx); })))
+                                    .child(singz_uikit::song_button_with_focus(self.track_probe("add".into(),singz_uikit::ruler_button("add-track",i18n::t("player.stack.addTrack"),false,false)),self.track_header_focus[0].clone(),true,{
+                                        let entity=cx.entity().downgrade();
+                                        move|w,cx| {let _=entity.update(cx,|this,cx| {
+                                            // Source Add blurs before invoking its chooser.
+                                            this.focus_handle.focus(w,cx);this.browse_custom_tracks(cx);
+                                        });}
+                                    }))
                                     .children(["M","S","↓"].into_iter().enumerate().map(|(i,label)| {
                                         let disabled=match i {0=>!self.muted.iter().any(|value|*value),1=>!self.solo.iter().any(|value|*value),_=>self.backend.is_some()&&!self.audio_available()};
-                                        self.track_probe(if i==2{"export".into()}else{format!("all-track-{i}")},singz_uikit::ruler_button(("all-track",i),label,true,disabled)).on_click(cx.listener(move |this,_,_,cx| {
-                                            if disabled||(this.tracks_pending.is_some()||this.carry_pending.is_some())||this.tracks_audio_failed{return;} match i {0=>this.muted=[false;tracks::LANE_SLOTS],1=>this.solo=[false;tracks::LANE_SLOTS],_=>this.open_stem_export(cx)};if i<2 {for lane in 0..tracks::LANE_SLOTS{this.sync_lane(lane,cx);}}cx.notify();
-                                        }))
+                                        let button=self.track_probe(if i==2{"export".into()}else{format!("all-track-{i}")},singz_uikit::ruler_button(("all-track",i),label,true,disabled));
+                                        if i<2 {
+                                            let entity=cx.entity().downgrade();
+                                            singz_uikit::song_button_with_focus(button,self.track_reset_focus[i].clone(),!disabled,move|_,cx| {
+                                                let _=entity.update(cx,|this,cx| {
+                                                    if (this.tracks_pending.is_some()||this.carry_pending.is_some())||this.tracks_audio_failed{return;}
+                                                    if i==0 {this.muted=[false;tracks::LANE_SLOTS];}else{this.solo=[false;tracks::LANE_SLOTS];}
+                                                    for lane in 0..tracks::LANE_SLOTS{this.sync_lane(lane,cx);}cx.notify();
+                                                });
+                                            })
+                                        }else{
+                                            let entity=cx.entity().downgrade();
+                                            singz_uikit::song_button_with_focus(button,self.track_header_focus[1].clone(),!disabled,move|_,cx| {
+                                                let _=entity.update(cx,|this,cx| {
+                                                    if (this.tracks_pending.is_some()||this.carry_pending.is_some())||this.tracks_audio_failed{return;}
+                                                    this.open_stem_export(cx);cx.notify();
+                                                });
+                                            })
+                                        }
                                     }))
                                 )
                                 .child(div().id("time-ruler").relative().flex_1()
@@ -5450,7 +5488,6 @@ impl Render for Player {
                         return;
                     }
                     if this.metronome_ui.read(cx).focused(window, cx) {
-                        cx.stop_propagation();
                         return;
                     }
                 }
