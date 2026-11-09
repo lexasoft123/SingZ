@@ -11,6 +11,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock
 
 from PIL import Image
 
@@ -20,6 +21,67 @@ tree = ast.parse(RUNNER.read_text())
 validator = next(node for node in tree.body
                  if isinstance(node, ast.FunctionDef) and node.name == 'qualify_drive_workflow')
 CODE = compile(ast.Module(body=[validator], type_ignores=[]), str(RUNNER), 'exec')
+PROCESS_CODE = compile(ast.Module(body=[node for node in tree.body
+    if isinstance(node, ast.FunctionDef) and node.name in
+    ('process', 'processes', 'same_live', 'stop_owned')], type_ignores=[]), str(RUNNER), 'exec')
+
+
+class ProcessObserverTests(unittest.TestCase):
+    def setUp(self):
+        self.path = Mock()
+        self.context = dict(Path=self.path, page=4096, owned={}, paths={Path('/app/player'): 'ui'},
+                            os=Mock(), signal=Mock())
+        exec(PROCESS_CODE, self.context)
+        self.owner = dict(pid=22, startTicks='100', executable=Path('/app/player'))
+
+    def inventory(self, *pids):
+        self.path.return_value.iterdir.return_value = [SimpleNamespace(name=str(pid)) for pid in pids]
+
+    def test_inaccessible_foreign_process_does_not_hide_observable_app(self):
+        self.inventory(1, 22)
+        self.context['process'] = Mock(side_effect=[PermissionError('/proc/1/exe'), self.owner])
+        self.assertEqual(list(self.context['processes']()), [self.owner])
+
+    def test_inaccessible_previously_owned_pid_is_not_reported_absent(self):
+        self.inventory(22)
+        self.context['owned'][(22, '100')] = self.owner
+        self.context['process'] = Mock(side_effect=PermissionError('/proc/22/exe'))
+        with self.assertRaises(PermissionError):
+            list(self.context['processes']())
+
+    def test_direct_identity_and_owned_liveness_keep_permission_failure(self):
+        self.path.return_value.read_text.side_effect = PermissionError('/proc/22/stat')
+        with self.assertRaises(PermissionError):
+            self.context['process'](22)
+        with self.assertRaises(PermissionError):
+            self.context['same_live'](self.owner)
+
+    def test_readable_stat_does_not_turn_denied_executable_into_absence(self):
+        fields = ['S'] + ['0'] * 21
+        fields[19], fields[21] = '100', '1'
+        self.path.return_value.read_text.return_value = '22 (native player) ' + ' '.join(fields)
+        self.path.return_value.resolve.side_effect = PermissionError('/proc/22/exe')
+        with self.assertRaises(PermissionError):
+            self.context['process'](22)
+
+    def test_cleanup_closes_pidfd_but_never_signals_unverified_identity(self):
+        self.context['os'].pidfd_open.return_value = 71
+        self.context['process'] = Mock(side_effect=PermissionError('/proc/22/exe'))
+        with self.assertRaises(PermissionError):
+            self.context['stop_owned'](self.owner, 15)
+        self.context['os'].close.assert_called_once_with(71)
+        self.context['signal'].pidfd_send_signal.assert_not_called()
+
+    def test_recycled_pid_still_cannot_receive_cleanup_signal(self):
+        self.context['os'].pidfd_open.return_value = 71
+        self.context['process'] = Mock(return_value={**self.owner, 'startTicks': '101', 'state': 'S'})
+        self.context['stop_owned'](self.owner, 15)
+        self.context['signal'].pidfd_send_signal.assert_not_called()
+        self.context['os'].close.assert_called_once_with(71)
+
+    def test_disappeared_process_remains_distinct_from_inaccessible(self):
+        self.path.return_value.read_text.side_effect = FileNotFoundError('/proc/22/stat')
+        self.assertIsNone(self.context['process'](22))
 
 
 class DriveObserverTests(unittest.TestCase):

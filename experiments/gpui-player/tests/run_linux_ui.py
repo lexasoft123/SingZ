@@ -74,7 +74,16 @@ def same_live(owner):
 def processes():
     for path in Path('/proc').iterdir():
         if path.name.isdigit():
-            value = process(int(path.name))
+            pid = int(path.name)
+            try:
+                value = process(pid)
+            except PermissionError:
+                # Rootless containers cannot inspect some foreign executables
+                # (including PID 1). Never turn loss of an owned identity into
+                # evidence that its process exited, even during cleanup.
+                if any(owner['pid'] == pid for owner in owned.values()):
+                    raise
+                continue
             if value and value['executable'] in paths:
                 yield value
 
@@ -91,8 +100,9 @@ def stop_owned(owner, sig):
         os.close(descriptor)
 
 
+owned = {}
 assert not list(processes()), 'A native process from this app directory is already running'
-services, owned, samples, frames, previous = [], {}, [], {}, {}
+services, samples, frames, previous = [], [], {}, {}
 foreground_samples = []
 server = driver = bus_owner = None
 started = time.monotonic()
