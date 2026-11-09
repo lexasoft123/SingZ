@@ -325,7 +325,11 @@ function scheduleBoxRetainedAssociation(
   lanes: import('../shared/types').DesktopPlaybackLaneConfig[],
   roots: { libraryRoot: string; driveProjectsRoot: string }
 ): Promise<void> | undefined {
-  if (boxAssociationStopped || boxAssociationPending.size >= 8) return undefined
+  if (boxAssociationStopped) return undefined
+  if (boxAssociationPending.size >= 8) {
+    log('box-audio', `retained project association skipped · generation ${prepared.generation} · too many pending associations; relaunch recovery will require Stop`, 'warn')
+    return undefined
+  }
   const task = (async (): Promise<void> => {
     const { validateBoxRetainedProject } = await import('./box-audio/retained-project')
     const descriptor = await validateBoxRetainedProject({ ...project, ...roots, config, lanes })
@@ -333,7 +337,12 @@ function scheduleBoxRetainedAssociation(
     await boxAudioProcess!.call('service', 'associateRetainedProject', [{ expected: prepared, descriptor }])
   })()
   boxAssociationPending.add(task)
-  return task.catch(() => undefined).finally(() => { boxAssociationPending.delete(task) })
+  // Native playback stays valid without association, but relaunch recovery then
+  // falls back to explicit Stop; record why (outside the libraries, changed
+  // files, a descriptor over the control frame limit, a superseded prepare).
+  return task.catch(error => {
+    log('box-audio', `retained project association failed · generation ${prepared.generation} · ${error instanceof Error ? error.message : String(error)}; relaunch recovery will require Stop`, 'warn')
+  }).finally(() => { boxAssociationPending.delete(task) })
 }
 
 /** Native prepare is authoritative before optional retained-project association. */

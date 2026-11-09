@@ -6,10 +6,11 @@ import { timeText } from './metadata'
 import { PlayerLyrics } from './PlayerLyrics'
 import type { BoxTransportSnapshot } from './transport'
 import { tSettings, tMicrophone } from './settings-i18n'
-import { microphoneSlotLevel, type MicrophoneSnapshot } from './microphones'
+import { microphoneSlotLevel, useMicrophoneSnapshot, type BoxMicrophones, type MicrophoneSnapshot } from './microphones'
 
 export function Player({
   snapshot,
+  microphones,
   microphoneSnapshot,
   controlsVisible,
   onLibrary,
@@ -21,6 +22,7 @@ export function Player({
   onSeekBy
 }: {
   snapshot: BoxTransportSnapshot
+  microphones?: BoxMicrophones
   microphoneSnapshot?: MicrophoneSnapshot
   controlsVisible: boolean
   onLibrary: () => void
@@ -87,7 +89,7 @@ export function Player({
             <Button aria-label={t('box.player.forward5')} data-control="next" disabled={!canPlay} onClick={() => onSeekBy(5)}><Icon name="skip" size={23} /></Button>
           </div>
           <div className="player-tools"><Button data-control="mix" onClick={onMix}>{t('box.player.mix')}</Button><Button data-control="queue" onClick={onQueue}>{t('box.navigation.queue')}</Button></div>
-          <PlayerMicrophoneMeters snapshot={microphoneSnapshot} />
+          <PlayerMicrophoneMeters microphones={microphones} snapshot={microphoneSnapshot} />
           <span className="player-time player-duration">{timeText(snapshot.duration)}</span>
         </div>
         <div className="player-hints"><span>← → {t('box.hints.move')} <b>OK</b> {t('box.hints.select')} <b>Back</b> {t('box.navigation.catalog')}</span><span>{snapshot.restartRequired ? `${tSettings('box.settings.restartRequired')}${snapshot.outputError ? ` — ${snapshot.outputError}` : ''}` : snapshot.routingBlocked ? `${tSettings('box.settings.routingPaused')}${snapshot.outputError ? ` — ${snapshot.outputError}` : ''}` : snapshot.saveError ?? snapshot.outputError ?? snapshot.playbackError?.message ?? (ended ? t('box.player.ended') : snapshot.playing ? t('box.player.hideHint') : t('box.player.paused'))}</span></div>
@@ -97,7 +99,9 @@ export function Player({
   </section>
 }
 
-export function PlayerMicrophoneMeters({ snapshot }: { snapshot?: MicrophoneSnapshot }): React.JSX.Element {
+/** Leaf subscriber: live levels re-render only these meters, never the player. */
+export function PlayerMicrophoneMeters({ microphones, snapshot: snapshotProp }: { microphones?: BoxMicrophones; snapshot?: MicrophoneSnapshot }): React.JSX.Element {
+  const snapshot = useMicrophoneSnapshot(microphones, snapshotProp)
   return <div className="player-meters" aria-label={tMicrophone('box.microphones.levels')}>
     {[0, 1].map(channel => {
       const level = microphoneSlotLevel(snapshot, channel)

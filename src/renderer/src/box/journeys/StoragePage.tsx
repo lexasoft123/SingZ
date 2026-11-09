@@ -12,7 +12,7 @@ export function StoragePage({ snapshot, activeProjectDir, loading, error, busy, 
   busy: string | null
   removed: boolean
   onRefresh: () => void
-  onRemove: (dir: string, name: string) => void
+  onRemove: (dir: string, name: string, bytes: number) => void
   onBack: () => void
 }) {
   return <PageFrame title={tJourney('journey.storage.title')} subtitle={tJourney('journey.storage.subtitle')} onBack={onBack}>
@@ -30,7 +30,7 @@ export function StoragePage({ snapshot, activeProjectDir, loading, error, busy, 
         const active = project.dir === activeProjectDir
         return <div className="journey-item" key={project.dir}>
           <div><strong>{project.name}</strong><span>{formatBytes(project.bytes)}{active ? ` · ${tJourney('journey.storage.active')}` : ''}</span></div>
-          <Button variant="danger" disabled={active || busy !== null} title={active ? tJourney('journey.storage.active') : undefined} onClick={() => onRemove(project.dir, project.name)}>
+          <Button variant="danger" disabled={active || busy !== null} title={active ? tJourney('journey.storage.active') : undefined} onClick={() => onRemove(project.dir, project.name, project.bytes)}>
             {tJourney('journey.storage.remove')}
           </Button>
         </div>

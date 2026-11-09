@@ -1,12 +1,14 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdtemp, stat, rm, writeFile } from 'node:fs/promises'
+import { connect, type Socket } from 'node:net'
+import { chmod, mkdtemp, stat, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { startBoxAudioHost, type BoxAudioHostRuntime } from '../../src/main/box-audio/server'
 import { createBoxAudioClient } from '../../src/main/box-audio/client'
 import { boxAudioLines, boxAudioEncode } from '../../src/main/box-audio/wire'
+import { BOX_AUDIO_PENDING, BOX_AUDIO_REQUEST_BYTES } from '../../src/shared/box-audio'
 
 function fake() {
   const calls: unknown[][] = []
@@ -367,8 +369,22 @@ describe.skipIf(process.platform === 'win32')('persistent Box audio control', ()
       snapshot = await client.reconcile() as { recovery?: { generation: string; descriptor: typeof descriptor } }
       expect(snapshot.recovery?.descriptor.config).toHaveProperty('initialTransport.state', 'paused')
 
+      // A benign refusal or a thrown mutation leaves the generation live, so
+      // recovery stays and keeps projecting the unchanged native controls.
       runtime.owner.setPlaybackMasterGain = () => ({ ok: false })
       await client.call('owner', 'setPlaybackMasterGain', [42, '7', 0.1])
+      runtime.owner.seekPlayback = () => { throw new Error('Seek target is outside the song') }
+      await expect(client.call('owner', 'seekPlayback', [42, '7', 1e12])).rejects.toThrow('outside the song')
+      runtime.owner.setPlaybackLane = () => ({ ok: false, error: 'unknown lane' })
+      await client.call('owner', 'setPlaybackLane', [42, '7', 'missing', 0.2, false, false])
+      snapshot = await client.reconcile() as { recovery?: { generation: string; descriptor: typeof descriptor } }
+      expect(snapshot.recovery?.generation).toBe('7')
+      expect(snapshot.recovery?.descriptor.config.masterGain).toBe(0.33)
+
+      // A failed mutation whose generation is no longer live drops recovery.
+      runtime.owner.startPlayback = () => { current = { ...current!, state: 'terminal' }; return { ok: false } }
+      await client.call('owner', 'startPlayback', [42, '7'])
+      current = { ...current!, state: 'running' }
       snapshot = await client.reconcile() as { recovery?: { generation: string; descriptor: typeof descriptor } }
       expect(snapshot.recovery).toBeUndefined()
     } finally { await client.shutdown(); await host.close(); await rm(dir, { recursive: true, force: true }) }
@@ -566,5 +582,166 @@ describe.skipIf(process.platform === 'win32')('persistent Box audio control', ()
     expect(() => parse(Buffer.from('12345'))).toThrow('too large')
     expect(() => boxAudioEncode([new Float32Array(1)])).toThrow('PCM')
     expect(() => boxAudioLines(10, () => {})(Buffer.from('{bad}\n'))).toThrow()
+  })
+})
+
+/** A raw protocol peer: lets tests send malformed, partial and replayed frames. */
+async function rawPeer(path: string) {
+  const socket: Socket = connect(path)
+  const lines: { type: string; epoch: string; id?: string; ok?: boolean; error?: string }[] = []
+  let buffered = ''
+  let closed = false
+  socket.on('error', () => {})
+  socket.on('close', () => { closed = true })
+  socket.on('data', chunk => {
+    buffered += chunk.toString('utf8')
+    for (let end = buffered.indexOf('\n'); end >= 0; end = buffered.indexOf('\n')) {
+      lines.push(JSON.parse(buffered.slice(0, end))); buffered = buffered.slice(end + 1)
+    }
+  })
+  await vi.waitFor(() => { expect(closed || lines[0]?.type === 'ready').toBe(true) }, { timeout: 2000, interval: 2 })
+  const epoch = lines[0]?.epoch ?? ''
+  return {
+    socket, lines, epoch, closed: () => closed,
+    frame: (id: number | string, method = 'playbackStatus', args: unknown[] = []) =>
+      JSON.stringify({ version: 1, type: 'request', epoch, id: String(id), target: 'owner', method, args }) + '\n',
+    reply: (id: number | string) => lines.find(line => line.type === 'reply' && line.id === String(id)),
+    waitReply: (id: number | string) => vi.waitFor(() => {
+      const found = lines.find(line => line.type === 'reply' && line.id === String(id))
+      expect(found).toBeDefined()
+      return found!
+    }, { timeout: 2000, interval: 2 }),
+    waitClosed: () => vi.waitFor(() => { expect(closed).toBe(true) }, { timeout: 2000, interval: 2 })
+  }
+}
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks() })
+describe.skipIf(process.platform === 'win32')('Box audio host framing and admission over a real socket', () => {
+  const withHost = async (body: (path: string, runtime: BoxAudioHostRuntime, dir: string) => Promise<void>,
+    setup: (runtime: BoxAudioHostRuntime) => void = () => {}) => {
+    const dir = await mkdtemp(join(tmpdir(), 'box-audio-wire-'))
+    const path = join(dir, 'audio.sock')
+    const { runtime } = fake()
+    setup(runtime)
+    const host = await startBoxAudioHost(path, runtime)
+    try { await body(path, runtime, dir) } finally { vi.useRealTimers(); await host.close(); await rm(dir, { recursive: true, force: true }) }
+  }
+  it('destroys a connection whose line exceeds the request bound', () => withHost(async path => {
+    const peer = await rawPeer(path)
+    const control = await rawPeer(path)
+    peer.socket.write(Buffer.alloc(BOX_AUDIO_REQUEST_BYTES + 1, 0x20))
+    await peer.waitClosed()
+    control.socket.write(control.frame(1))
+    expect((await control.waitReply(1)).ok).toBe(true)
+    control.socket.destroy()
+  }))
+  it('closes a stalled partial frame after two seconds', () => withHost(async path => {
+    const peer = await rawPeer(path)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const partial = peer.frame(2)
+    peer.socket.write(peer.frame(1) + partial.slice(0, 20))
+    await peer.waitReply(1) // The server parsed this chunk and armed its frame deadline.
+    vi.advanceTimersByTime(1999)
+    await new Promise(resolve => setImmediate(resolve))
+    expect(peer.closed()).toBe(false)
+    vi.advanceTimersByTime(2)
+    await peer.waitClosed()
+  }))
+  it('restarts the frame deadline for each completed frame followed by another partial', () => withHost(async path => {
+    const peer = await rawPeer(path)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const second = peer.frame(2)
+    const third = peer.frame(3)
+    peer.socket.write(peer.frame(1) + second.slice(0, 20))
+    await peer.waitReply(1)
+    vi.advanceTimersByTime(1500)
+    peer.socket.write(second.slice(20) + third.slice(0, 20))
+    await peer.waitReply(2)
+    vi.advanceTimersByTime(1500) // 3 s since the first partial, 1.5 s since the current one.
+    await new Promise(resolve => setImmediate(resolve))
+    expect(peer.closed()).toBe(false)
+    peer.socket.write(third.slice(20))
+    expect((await peer.waitReply(3)).ok).toBe(true)
+    expect(peer.closed()).toBe(false)
+    peer.socket.destroy()
+  }))
+  it('admits at most sixteen concurrent clients', () => withHost(async path => {
+    const peers = []
+    for (let index = 0; index < 16; ++index) peers.push(await rawPeer(path))
+    expect(peers.every(peer => !peer.closed() && peer.lines[0]?.type === 'ready')).toBe(true)
+    const rejected = await rawPeer(path)
+    await rejected.waitClosed()
+    expect(rejected.lines).toEqual([])
+    peers[0].socket.destroy()
+    await peers[0].waitClosed()
+    await new Promise(resolve => setTimeout(resolve, 20))
+    const admitted = await rawPeer(path)
+    expect(admitted.lines[0]?.type).toBe('ready')
+    for (const peer of [...peers, admitted]) peer.socket.destroy()
+  }))
+  it.each([['replayed', 5, 5], ['decreasing', 5, 4]])('closes a connection that sends a %s request id', (_label, first, second) => withHost(async path => {
+    const peer = await rawPeer(path)
+    peer.socket.write(peer.frame(first))
+    expect((await peer.waitReply(first)).ok).toBe(true)
+    peer.socket.write(peer.frame(second))
+    await peer.waitClosed()
+    expect(peer.lines.filter(line => line.type === 'reply')).toHaveLength(1)
+  }))
+  it('rejects a connection that overflows the shared command queue', async () => {
+    let release!: () => void
+    const blocked = new Promise<void>(resolve => { release = resolve })
+    await withHost(async path => {
+      const filler = await rawPeer(path)
+      const overflow = await rawPeer(path)
+      let frames = ''
+      for (let id = 1; id <= BOX_AUDIO_PENDING; ++id) frames += filler.frame(id, 'startPlayback', [1, '1'])
+      filler.socket.write(frames)
+      await new Promise(resolve => setTimeout(resolve, 50))
+      overflow.socket.write(overflow.frame(1))
+      await overflow.waitClosed()
+      expect(overflow.reply(1)).toBeUndefined()
+      expect(filler.closed()).toBe(false)
+      release()
+      await vi.waitFor(() => { expect(filler.lines.filter(line => line.type === 'reply')).toHaveLength(BOX_AUDIO_PENDING) }, { timeout: 2000, interval: 5 })
+      filler.socket.destroy()
+    }, runtime => { runtime.owner.startPlayback = async () => { await blocked; return { ok: true } } })
+  })
+  it('rejects a group-accessible socket directory for both host and client', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'box-audio-perm-'))
+    const path = join(dir, 'audio.sock')
+    try {
+      await chmod(dir, 0o755)
+      await expect(startBoxAudioHost(path, fake().runtime)).rejects.toThrow('must be private')
+      await chmod(dir, 0o700)
+      const host = await startBoxAudioHost(path, fake().runtime)
+      const client = createBoxAudioClient(path)
+      try {
+        await chmod(dir, 0o755)
+        await expect(client.call('owner', 'playbackStatus', [])).rejects.toThrow('Untrusted Box audio socket')
+        await chmod(dir, 0o700)
+        await expect(client.call('owner', 'playbackStatus', [])).resolves.toMatchObject({ state: 'playing' })
+      } finally { await client.shutdown(); await chmod(dir, 0o700); await host.close() }
+    } finally { await rm(dir, { recursive: true, force: true }) }
+  })
+  it('bounds close when an admitted native command never settles', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'box-audio-wedged-'))
+    const path = join(dir, 'audio.sock')
+    const { runtime, calls } = fake()
+    let started!: () => void
+    const entered = new Promise<void>(resolve => { started = resolve })
+    runtime.owner.startPlayback = () => { started(); return new Promise(() => {}) }
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const host = await startBoxAudioHost(path, runtime, { shutdownDeadlineMs: 50 })
+    const client = createBoxAudioClient(path, { timeoutMs: 5000 })
+    try {
+      const wedged = client.call('owner', 'startPlayback', [1, '1']).catch(error => error)
+      await entered
+      const outcome = await Promise.race([host.close().then(() => 'closed'),
+        new Promise(resolve => setTimeout(() => resolve('hung'), 3000))])
+      expect(outcome).toBe('closed')
+      expect(calls.at(-1)).toEqual(['shutdown'])
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('draining admitted commands exceeded 50 ms'))
+      await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' })
+      await wedged
+    } finally { await client.shutdown(); await rm(dir, { recursive: true, force: true }) }
   })
 })

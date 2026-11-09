@@ -25,7 +25,9 @@ bool argument(napi_env env, napi_callback_info info, std::string& value) {
 napi_value empty(napi_env env) { napi_value value; napi_get_undefined(env, &value); return value; }
 napi_value initialize(napi_env env, napi_callback_info info) {
   std::string path; if (!argument(env, info, path)) return nullptr;
-  std::string error; const bool ok = initializeBoxRouting(path, error);
+  std::string error; bool ok = false;
+  try { ok = initializeBoxRouting(path, error); }
+  catch (...) { ok = false; error = "Box routing initialization failed"; }
   napi_value result; napi_create_object(env, &result);
   napi_set_named_property(env, result, "ok", boolean(env, ok));
   if (!ok) napi_set_named_property(env, result, "error", text(env, error));
@@ -35,10 +37,12 @@ napi_value request(napi_env env, napi_callback_info info) {
   std::string bytes; if (!argument(env, info, bytes)) return nullptr;
   try { return text(env, boxRoutingRequest(bytes)); }
   catch (const std::exception& ex) { napi_throw_error(env, nullptr, ex.what()); return nullptr; }
+  catch (...) { napi_throw_error(env, nullptr, "Box routing request failed"); return nullptr; }
 }
 napi_value poll(napi_env env, napi_callback_info) {
   try { pollBoxRouting(); return empty(env); }
   catch (const std::exception& ex) { napi_throw_error(env, nullptr, ex.what()); return nullptr; }
+  catch (...) { napi_throw_error(env, nullptr, "Box routing poll failed"); return nullptr; }
 }
 napi_value shutdown(napi_env env, napi_callback_info) { shutdownBoxRouting(); return empty(env); }
 napi_value capabilities(napi_env env, napi_callback_info) {
@@ -49,6 +53,11 @@ napi_value capabilities(napi_env env, napi_callback_info) {
   napi_set_named_property(env, result, "audibleClockSupported", boolean(env, true));
   napi_set_named_property(env, result, "timingCoverageLost", boolean(env, boxRoutingTimingCoverageLost()));
   napi_set_named_property(env, result, "timestampQuality", text(env, "estimated-software-presentation"));
+  // Set when initialization moved an unrestorable routing.json aside.
+  try {
+    const auto recovery = boxRoutingStateRecovery();
+    if (!recovery.empty()) napi_set_named_property(env, result, "stateRecovery", text(env, recovery));
+  } catch (...) {}
   return result;
 }
 }

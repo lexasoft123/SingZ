@@ -2178,7 +2178,7 @@ export class DesktopNativePlaybackClient {
     if (window.singz.boxAudioPersistent !== true) return Promise.reject(new Error('Persistent Box audio is not configured.'))
     if (this.detachPending) return this.detachPending
     this.stopPolling()
-    return this.detachPending = this.serialize(async () => {
+    const operation = this.serialize(async () => {
       this.stopPolling()
       await this.statusReadTail
       this.detachedPersistentHost = true
@@ -2192,6 +2192,12 @@ export class DesktopNativePlaybackClient {
       this.forgetTransport()
       this.stopPolling()
     })
+    this.detachPending = operation
+    // A failed detach stays retryable instead of replaying its rejection forever.
+    void operation.catch(() => {
+      if (this.detachPending === operation) this.detachPending = null
+    })
+    return operation
   }
 
   async unload(): Promise<void> {

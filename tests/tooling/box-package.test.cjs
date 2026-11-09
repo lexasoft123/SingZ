@@ -192,6 +192,48 @@ test('Box asar filter rejects a deliberately removed dist exclusion', async () =
   assert.equal(included('dist/SingZ-1.0.0-linux-amd64.deb'), true)
 })
 
+const boxAudioSources = [
+  'resources/linux/cec-input.py',
+  'resources/linux/singz-box-audio.service',
+  'resources/linux/singz-box-with-audio',
+  'resources/linux/README.md',
+  'resources/linux/singz-box-rtprio.conf'
+]
+
+test('Box ships its CEC/audio support files once, outside the asar', async () => {
+  const box = await loadConfig('electron-builder.box.yml')
+  const included = appFilter(box)
+  for (const source of boxAudioSources) assert.equal(included(source), false, `Box asar packages ${source}`)
+  assert.ok(box.extraResources.some(resource => resource.from === 'resources/linux' && resource.to === 'box-audio'))
+  assert.equal(included('out/main/index.js'), true)
+  // Packaged Box reads only resources/box-audio; the asar path is development-only.
+  const main = readFileSync(join(repository, 'src/main/index.ts'), 'utf8')
+  assert.match(main, /app\.isPackaged \? join\(process\.resourcesPath, 'box-audio\/cec-input\.py'\)/)
+})
+
+test('Box asar filter rejects a deliberately removed resources/linux exclusion', async () => {
+  const box = await loadConfig('electron-builder.box.yml')
+  const included = appFilter({
+    ...box,
+    files: box.files.map(file => ({ ...file, filter: (file.filter || []).filter(rule => !rule.startsWith('!resources/linux')) }))
+  })
+  assert.equal(included('resources/linux/cec-input.py'), true)
+})
+
+test('Box audio service requests real-time priority only up to an opt-in per-user hard limit', () => {
+  const service = readFileSync(join(repository, 'resources/linux/singz-box-audio.service'), 'utf8')
+  // zCore ALSA workers request SCHED_FIFO 20; nothing in the Box requests more.
+  const alsa = readFileSync(join(repository, 'third_party/zcore/zcore/platform/linux/alsa_worker.h'), 'utf8')
+  assert.match(alsa, /SCHED_FIFO priority 20 request failed/)
+  assert.match(service, /^LimitRTPRIO=20$/m)
+  // The sandbox and unprivileged identity stay intact.
+  assert.doesNotMatch(service, /no-sandbox|^User=|^AmbientCapabilities=|^CPUSchedulingPolicy=/m)
+  const dropIn = readFileSync(join(repository, 'resources/linux/singz-box-rtprio.conf'), 'utf8')
+  assert.match(dropIn, /^\[Service\]$/m)
+  assert.match(dropIn, /^LimitRTPRIO=0:20$/m)
+  assert.match(dropIn, /user@1000\.service\.d\/singz-box-rtprio\.conf/)
+})
+
 test('Box audio service and launcher use the lowercase installation directory', () => {
   const service = readFileSync(join(repository, 'resources/linux/singz-box-audio.service'), 'utf8')
   assert.match(service, /^ExecStart=\/opt\/singz-box\/singz-box --box-audio-host --ozone-platform=headless$/m)

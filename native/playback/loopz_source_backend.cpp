@@ -8,12 +8,37 @@
 #include <thread>
 #if defined(__linux__)
 #include <pthread.h>
+#include <sched.h>
+#include <cstdio>
 #endif
 
 namespace singz {
 namespace {
 constexpr uint32_t kFrames = 256;
 constexpr double kRate = 48000;
+#if defined(__linux__)
+// The producer runs the full native song graph (stems, effects, convolution).
+// Its scratch use is unmeasured, so keep glibc-default-sized headroom rather
+// than a tight explicit limit; the reservation is virtual until touched.
+constexpr size_t kProducerStackBytes = 4 * 1024 * 1024;
+// zCore's ALSA I/O workers request SCHED_FIFO 20 and read this history about
+// one block later. Run just below them so ordinary desktop load cannot starve
+// the song render while the physical I/O threads still preempt it.
+constexpr int kProducerFifoPriority = 18;
+void prepareProducerThread() noexcept {
+  const int nameError = pthread_setname_np(pthread_self(), "singz-box-song");
+  sched_param parameters{};
+  parameters.sched_priority = kProducerFifoPriority;
+  const int schedulingError = pthread_setschedparam(pthread_self(), SCHED_FIFO, &parameters);
+  if (schedulingError != 0) {
+    std::fprintf(stderr,
+        "singz: Box song producer SCHED_FIFO priority %d request failed (error %d); "
+        "retaining inherited scheduling\n", kProducerFifoPriority, schedulingError);
+  } else if (nameError != 0) {
+    std::fprintf(stderr, "singz: Box song producer thread naming failed (error %d)\n", nameError);
+  }
+}
+#endif
 using Clock = std::chrono::steady_clock;
 uint64_t ns(Clock::time_point time) noexcept {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch()).count();
@@ -66,7 +91,7 @@ class SourceBackend final : public AudioHostBackend {
     pthread_attr_t attributes;
     int error = pthread_attr_init(&attributes);
     if (error == 0) {
-      error = pthread_attr_setstacksize(&attributes, 1024 * 1024);
+      error = pthread_attr_setstacksize(&attributes, kProducerStackBytes);
       if (error == 0) error = pthread_create(&worker_, &attributes,
           [](void* context) -> void* { static_cast<SourceBackend*>(context)->run(); return nullptr; }, this);
       pthread_attr_destroy(&attributes);
@@ -113,9 +138,13 @@ class SourceBackend final : public AudioHostBackend {
   static AudioHostFormat format() noexcept { return {kRate, kFrames, kFrames, 0, 2, true, false, AudioHostAccessMode::Exclusive}; }
   AudioHostResult result() const { return {true, AudioHostError::None, state_, format(), {}, {}}; }
   void run() noexcept {
-    // Linux reserves an explicit 1 MiB stack for native graph/convolution scratch.
+    // Linux reserves an explicit stack for native graph/convolution scratch and
+    // requests realtime priority below the ALSA I/O workers (non-fatal).
     // All buffers are allocated before callbacks. Waiting and clock sampling are
     // scheduler work, outside the render/history append realtime section.
+#if defined(__linux__)
+    prepareProducerThread();
+#endif
     auto anchor = Clock::now();
     uint64_t anchorFrame = 0;
     uint64_t frame = 0;
@@ -158,9 +187,10 @@ class SourceBackend final : public AudioHostBackend {
         std::fill(left_.begin(), left_.end(), 0);
         std::fill(right_.begin(), right_.end(), 0);
       }
-      // A failed block is a real hole. The authoritative source-frame gap
-      // forces AudioHistory to reset on the next good append, preventing
-      // interpolation across failed PCM.
+      // A false render leaves a source-frame gap that forces AudioHistory to
+      // reset on the next good append, preventing interpolation across it. The
+      // shared song service never returns false (it silences failed songs and
+      // marks them via recordBoxSongFailure); this guards direct providers.
       if (rendered) source_->history->append({input_, kFrames}, kFrames, host, kRate, double(frame), true);
       frame += kFrames;
       frames_.store(frame, std::memory_order_relaxed);

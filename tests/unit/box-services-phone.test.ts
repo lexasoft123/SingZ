@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { runInNewContext } from 'node:vm'
+import { connect, createServer as createTcpServer, type Socket } from 'node:net'
 import { BoxControllerHub } from '../../src/main/box/controller'
-import { BoxPhoneService } from '../../src/main/box/phone'
+import { BoxPhoneService, MAX_PHONE_CONNECTIONS_PER_ADDRESS, type BoxPhoneOptions } from '../../src/main/box/phone'
 import type { BoxControllerEnvelope, BoxControllerPublish } from '../../src/shared/box-contract'
 
 const fixtures: Array<{ phone: BoxPhoneService; hub: BoxControllerHub }> = []
@@ -15,7 +16,7 @@ const publish: BoxControllerPublish = {
   activeLocalProjectDir: '/private/source/active-project',
   openingLocalProjectDir: '/private/source/opening-project'
 }
-async function fixture(commandTimeoutMs = 1000) {
+async function fixture(commandTimeoutMs = 1000, extra: Partial<BoxPhoneOptions> = {}) {
   const hub = new BoxControllerHub({ commandTimeoutMs })
   expect(hub.publish(publish).ok).toBe(true)
   const envelopes: BoxControllerEnvelope[] = []
@@ -23,7 +24,7 @@ async function fixture(commandTimeoutMs = 1000) {
   let now = 1_000_000
   const phone = new BoxPhoneService({
     controller: hub, host: '127.0.0.1', port: 0,
-    now: () => now, pendingTtlMs: 1000, sessionTtlMs: 1000
+    now: () => now, pendingTtlMs: 1000, sessionTtlMs: 1000, ...extra
   })
   fixtures.push({ phone, hub })
   const started = await phone.start()
@@ -40,11 +41,12 @@ async function post(
   base: string,
   path: string,
   body: string | unknown,
-  options: { nonce?: string; token?: string; origin?: string } = {}
+  options: { nonce?: string; token?: string; origin?: string; headers?: Record<string, string> } = {}
 ): Promise<Response> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    Origin: options.origin ?? base
+    Origin: options.origin ?? base,
+    ...options.headers
   }
   if (options.nonce) headers['X-SingZ-CSRF'] = options.nonce
   if (options.token) headers.Authorization = `Bearer ${options.token}`
@@ -108,6 +110,38 @@ async function approved(base: string, code: string, phone: BoxPhoneService) {
 const getState = (base: string, token?: string): Promise<Response> => fetch(`${base}/api/state`, {
   headers: token ? { Authorization: `Bearer ${token}` } : {}
 })
+function rawSocket(base: string): Promise<Socket> {
+  const url = new URL(base)
+  return new Promise((resolve, reject) => {
+    const socket = connect({ host: url.hostname.replace(/^\[|\]$/g, ''), port: Number(url.port) }, () => resolve(socket))
+    socket.once('error', reject)
+  })
+}
+async function rawStatus(base: string, text: string): Promise<number> {
+  const socket = await rawSocket(base)
+  return new Promise((resolve) => {
+    let reply = ''
+    socket.on('data', (chunk) => {
+      reply += chunk.toString('latin1')
+      const match = /^HTTP\/1\.1 (\d{3})/.exec(reply)
+      if (match) { socket.destroy(); resolve(Number(match[1])) }
+    })
+    socket.once('close', () => resolve(0))
+    socket.write(text)
+  })
+}
+const closedWithin = (socket: Socket, ms: number): Promise<boolean> => new Promise((resolve) => {
+  if (socket.destroyed) return resolve(true)
+  const timer = setTimeout(() => resolve(false), ms)
+  socket.once('close', () => { clearTimeout(timer); resolve(true) })
+})
+async function ipv6LoopbackAvailable(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = createTcpServer()
+    server.once('error', () => resolve(false))
+    server.listen(0, '::1', () => server.close(() => resolve(true)))
+  })
+}
 
 afterEach(async () => {
   for (const { phone, hub } of fixtures.splice(0).reverse()) {
@@ -194,7 +228,8 @@ describe('Box phone HTTP', () => {
     expect(hub.respond(envelopes[0].id, { ok: true }).ok).toBe(false)
     expect((await pending).status).toBe(401)
     expect((await getState(base, auth.sessionToken)).status).toBe(401)
-    const second = await approved(base, code, phone)
+    expect(phone.state().code).not.toBe(code)
+    const second = await approved(base, phone.state().code as string, phone)
     advance(1001)
     expect((await getState(base, second.sessionToken)).status).toBe(401)
     expect(phone.state().sessions).toEqual([])
@@ -271,5 +306,121 @@ describe('Box phone HTTP', () => {
     fixtures.push({ phone, hub })
     expect((await phone.start())).toMatchObject({ ok: false, code: 'unavailable' })
     expect(phone.state().running).toBe(false)
+  })
+
+  it('rate-limits pairing attempts per address after rejecting wrong invitation codes', async () => {
+    const { base } = await fixture()
+    const { nonce } = await pageNonce(base)
+    for (let attempt = 0; attempt < 10; attempt++) {
+      expect((await post(base, '/api/pair', { invitation: 'WRONGCODE', name: 'Guest' }, { nonce })).status).toBe(403)
+    }
+    expect((await post(base, '/api/pair', { invitation: 'WRONGCODE', name: 'Guest' }, { nonce })).status).toBe(429)
+  })
+
+  it('rate-limits page loads per address', async () => {
+    const { base } = await fixture()
+    for (let load = 0; load < 20; load++) expect((await fetch(`${base}/`)).status).toBe(200)
+    expect((await fetch(`${base}/`)).status).toBe(429)
+  })
+
+  it('rejects commands without Bearer, nonce, own-session nonce or same-origin fetch, and rate-limits bursts', async () => {
+    const { phone, hub, base, code } = await fixture()
+    hub.setCommandSender((envelope) => setTimeout(() => hub.respond(envelope.id, { ok: true }), 0))
+    const first = await approved(base, code, phone)
+    const second = await approved(base, phone.state().code as string, phone)
+    const command = { type: 'play-pause' }
+    expect((await post(base, '/api/command', command, { nonce: first.nonce })).status).toBe(401)
+    expect((await post(base, '/api/command', command, { token: first.sessionToken })).status).toBe(403)
+    expect((await post(base, '/api/command', command, { token: first.sessionToken, nonce: second.nonce })).status).toBe(403)
+    expect((await post(base, '/api/command', command, {
+      token: first.sessionToken, nonce: first.nonce, headers: { 'Sec-Fetch-Site': 'cross-site' }
+    })).status).toBe(403)
+    for (let index = 0; index < 20; index++) {
+      const response = await post(base, '/api/command', command, { token: first.sessionToken, nonce: first.nonce })
+      expect(response.status).toBe(200)
+    }
+    expect((await post(base, '/api/command', command, { token: first.sessionToken, nonce: first.nonce })).status).toBe(429)
+    expect((await post(base, '/api/command', command, { token: second.sessionToken, nonce: second.nonce })).status).toBe(200)
+  })
+
+  it('re-delivers the same token to a retried poll and rotates the invitation after approval', async () => {
+    const { phone, base, code } = await fixture()
+    const auth = await approved(base, code, phone)
+    const again = await post(base, '/api/pair-status', { requestId: auth.requestId, pollSecret: auth.pollSecret }, { nonce: auth.nonce })
+    const body = await again.json() as { status?: string; sessionToken?: string }
+    expect(body.status).toBe('approved')
+    expect(body.sessionToken).toBe(auth.sessionToken)
+    const { nonce } = await pageNonce(base)
+    expect((await post(base, '/api/pair', { invitation: code, name: 'Late' }, { nonce })).status).toBe(403)
+  })
+
+  it('caps pending requests per address and strips bidi controls from names', async () => {
+    const { phone, base, code } = await fixture()
+    const { nonce } = await pageNonce(base)
+    expect((await post(base, '/api/pair', { invitation: code, name: '\u202eA\u2066' }, { nonce })).status).toBe(202)
+    expect((await post(base, '/api/pair', { invitation: code, name: 'B' }, { nonce })).status).toBe(202)
+    expect((await post(base, '/api/pair', { invitation: code, name: 'C' }, { nonce })).status).toBe(429)
+    expect(phone.state().pending.map((item) => item.name)).toEqual(['A', 'B'])
+  })
+
+  it('rejects request targets that are not origin-form paths', async () => {
+    const { base } = await fixture()
+    const host = new URL(base).host
+    expect(await rawStatus(base, `GET / HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`)).toBe(200)
+    expect(await rawStatus(base, `GET http://${host}/ HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`)).toBe(400)
+    expect(await rawStatus(base, `GET //${host}/ HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`)).toBe(400)
+  })
+
+  it('caps concurrent connections per remote address', async () => {
+    const { base } = await fixture()
+    const sockets: Socket[] = []
+    try {
+      for (let index = 0; index < MAX_PHONE_CONNECTIONS_PER_ADDRESS; index++) sockets.push(await rawSocket(base))
+      const extra = await rawSocket(base)
+      sockets.push(extra)
+      expect(await closedWithin(extra, 1000)).toBe(true)
+      expect(sockets.slice(0, -1).some((socket) => socket.destroyed)).toBe(false)
+    } finally {
+      for (const socket of sockets) socket.destroy()
+    }
+  })
+
+  it('stops within its deadline while keep-alive and half-sent requests hold sockets open', async () => {
+    const { phone, base } = await fixture()
+    const host = new URL(base).host
+    const keepAlive = await rawSocket(base)
+    await new Promise<void>((resolve) => {
+      keepAlive.once('data', () => resolve())
+      keepAlive.write(`GET / HTTP/1.1\r\nHost: ${host}\r\nConnection: keep-alive\r\n\r\n`)
+    })
+    const partial = await rawSocket(base)
+    partial.write(`POST /api/pair HTTP/1.1\r\nHost: ${host}\r\n`)
+    const idle = await rawSocket(base)
+    await delay(20)
+    const started = Date.now()
+    const stopped = await Promise.race([phone.stop(), delay(1500).then(() => 'timeout' as const)])
+    expect(stopped).not.toBe('timeout')
+    expect(Date.now() - started).toBeLessThan(1500)
+    expect(await closedWithin(keepAlive, 500)).toBe(true)
+    expect(await closedWithin(partial, 500)).toBe(true)
+    expect(await closedWithin(idle, 500)).toBe(true)
+  })
+
+  it('rebinds when the selected host changes so the URL and Host check follow it', async (context) => {
+    if (!await ipv6LoopbackAvailable()) return context.skip()
+    const hub = new BoxControllerHub()
+    const options: BoxPhoneOptions = { controller: hub, host: '127.0.0.1', port: 0 }
+    const phone = new BoxPhoneService(options)
+    fixtures.push({ phone, hub })
+    const first = await phone.start()
+    if (!first.ok) throw new Error('Phone did not start')
+    expect(first.value.url).toContain('127.0.0.1')
+    options.host = '::1'
+    const second = await phone.start()
+    if (!second.ok) throw new Error('Phone did not rebind')
+    expect(second.value.url).toContain('[::1]')
+    const base = new URL(second.value.url as string).origin
+    expect((await fetch(`${base}/`)).status).toBe(200)
+    await expect(fetch(`${new URL(first.value.url as string).origin}/`)).rejects.toThrow()
   })
 })

@@ -37,6 +37,11 @@ start it automatically; hidden automated app runs disable hardware input.
 one connected HDMI **transmitter** is required. Receiver adapters such as
 `snps_hdmirx` are rejected even when explicitly configured; an HDMI input cannot
 receive the remote for the TV's HDMI output.
+During automatic discovery an adapter that cannot be opened or queried (for
+example `EACCES`) is skipped so another usable transmitter is still found; if
+no candidate remains, the first access error is reported (`unavailable` with
+its errno) rather than "no transmitter". An explicitly selected adapter's access
+error is always reported.
 
 The appliance launcher must opt in and expose the CEC character device to its
 unprivileged UI container, with appropriate video-group access. New USB devices
@@ -45,10 +50,16 @@ on Python 3 and ships `resources/box-audio/cec-input.py`. Infrastructure device
 exposure and kernel backport instructions belong in the `singz-box` repository.
 
 Settings → Diagnostics reports disabled/starting/connected/unavailable/error
-and the latest recognized input time. Discovery/receive failures retry with a
-bounded delay. Reload, focus loss and disconnect release browser-held keys;
-held repeats are blocked until a real release. A missing release is recovered
-without allowing a delayed held wake press to act. No buffered input is replayed
+and the latest recognized input time. Discovery/receive failures reconnect the
+helper after 5 s, doubling per consecutive failed run up to 60 s; a run that
+stayed ready for 60 s resets the delay. Helper output is decoded as streamed
+UTF-8, so a chunk boundary cannot split a multibyte character. Reload, focus
+loss and disconnect release browser-held keys. A key code blocked as a held
+repeat, or because it arrived on blur or before the window was ready, stays
+blocked until a real release or until 2.5 s pass with no press of that code
+(each further press restarts the quiet window). Some TVs never send CEC 0x45
+User Control Released, so this keeps the key usable. A missing release is
+recovered without allowing a delayed held wake press to act. No buffered input is replayed
 into a reloaded or replacement window. Shutdown terminates the child with a
 bounded fallback and releases only the helper's own logical-address claim.
 Address registrations can survive a killed process. On restart, after acquiring

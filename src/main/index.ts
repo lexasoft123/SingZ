@@ -68,7 +68,8 @@ import { registerDesktopAudioInput, stopDesktopAudioInput } from './audio-input'
 import { askMicrophoneAccess } from './mic-access'
 import { cancelBeatsMl, registerBeatsIpc } from './beats-ml'
 import { boxKioskRequested, desktopUpdaterEnabled, developmentRendererUrl, requestedRendererSurface } from './launch-surface'
-import { shouldDeferBoxApplicationQuit, shouldResumeBoxApplicationQuit } from './box-close-policy'
+import { shouldDeferBoxApplicationQuit } from './box-close-policy'
+import { BoxQuitCoordinator, fromOwnMainFrame, settleWithin } from './box-quit-coordinator'
 import { registerBoxIpc } from './box/ipc'
 import { BoxCecService, boxCecEnabled } from './box/cec'
 import { boxRoutingRequest, boxRoutingReconcile, boxPrepareRetainedPlayback, boxRetainedPlaybackSnapshot, boxStopRetainedPlayback } from './audio-process'
@@ -100,37 +101,16 @@ const laneMeasureCache = new LaneMeasureCache({
 let boxBackend: ReturnType<typeof registerBoxIpc> = null
 let boxBackendDisposeStarted = false
 let boxCec: BoxCecService | null = null
-const boxCloseCompletions = new WeakSet<WebContents>()
-const boxCloseTimers = new WeakMap<WebContents, ReturnType<typeof setTimeout>>()
-let boxApplicationQuitRequested = false
-let boxCleanupFinished = false
-let boxQuitWindowCount = 0
-let boxCompletedWindowCount = 0
-
-function finishBoxClose(win: BrowserWindow): void {
-  if (boxCloseCompletions.has(win.webContents)) return
-  const timer = boxCloseTimers.get(win.webContents)
-  if (timer) clearTimeout(timer)
-  boxCloseTimers.delete(win.webContents)
-  boxCloseCompletions.add(win.webContents)
-  boxCompletedWindowCount++
-  win.close()
-  if (shouldResumeBoxApplicationQuit(boxApplicationQuitRequested, boxCompletedWindowCount, boxQuitWindowCount)) {
-    boxCleanupFinished = true
-    app.quit()
-  }
-}
-
-function requestBoxClose(win: BrowserWindow): void {
-  if (boxCloseCompletions.has(win.webContents) || boxCloseTimers.has(win.webContents)) return
-  const timer = setTimeout(() => {
-    log('app', 'Box close cleanup exceeded 12 seconds; closing with pending recovery work', 'warn')
-    finishBoxClose(win)
-  }, 12000)
-  timer.unref()
-  boxCloseTimers.set(win.webContents, timer)
-  win.webContents.send('box:close-request')
-}
+// Box close/quit handshake bookkeeping lives in a tested pure module. Windows
+// are keyed by BrowserWindow, never webContents: a destroyed window's
+// webContents getter throws, and the fallback timers can outlive the window.
+const boxQuit = new BoxQuitCoordinator<BrowserWindow>({
+  isDestroyed: win => win.isDestroyed(),
+  requestRendererClose: win => win.webContents.send('box:close-request'),
+  closeWindow: win => win.close(),
+  resumeQuit: () => app.quit(),
+  warn: message => log('app', message, 'warn')
+})
 
 /** Every window hears about Drive: progress while a sync runs, and the state
  *  the badges read. One helper, because three copies of this loop drifted. */
@@ -250,7 +230,7 @@ function createWindow(): void {
     let loaded = false
     const cec = boxCec
     cec.attach({
-      ready: () => loaded && !win.isDestroyed() && win.isFocused() && !boxCloseTimers.has(win.webContents),
+      ready: () => loaded && !win.isDestroyed() && win.isFocused() && !boxQuit.isClosing(win),
       send: input => { if (!win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.sendInputEvent(input) }
     })
     win.webContents.on('did-start-navigation', (_event, _url, _inPlace, mainFrame) => {
@@ -262,12 +242,14 @@ function createWindow(): void {
     win.once('closed', () => cec.detach())
   }
   if (surface === 'desktop') trackWindowState(win)
-  win.on('close', (event) => {
-    if (surface !== 'box' || boxCloseCompletions.has(win.webContents)) return
-    event.preventDefault()
-    boxCec?.releaseKeys()
-    requestBoxClose(win)
-  })
+  if (surface === 'box') {
+    win.on('close', (event) => {
+      if (!boxQuit.interceptClose(win)) return
+      event.preventDefault()
+      boxCec?.releaseKeys()
+    })
+    win.once('closed', () => boxQuit.windowClosed(win))
+  }
   win.on('maximize', () => win.webContents.send('win:maximized', true))
   win.on('unmaximize', () => win.webContents.send('win:maximized', false))
   win.on('ready-to-show', () => {
@@ -337,7 +319,8 @@ function registerIpc(): void {
   ipcMain.on('win:close', (e) => BrowserWindow.fromWebContents(e.sender)?.close())
   ipcMain.on('box:close-ready', (e) => {
     const win = BrowserWindow.fromWebContents(e.sender)
-    if (win) finishBoxClose(win)
+    if (!win || win.isDestroyed() || !fromOwnMainFrame(e, win.webContents)) return
+    boxQuit.acknowledge(win)
   })
   ipcMain.handle('win:is-maximized', (e) => BrowserWindow.fromWebContents(e.sender)?.isMaximized() ?? false)
   ipcMain.handle('update:state', () => updateState())
@@ -1068,6 +1051,7 @@ app.whenReady().then(async () => {
   boxCec.start()
   boxBackend = registerBoxIpc({
     userDataDir: app.getPath('userData'),
+    log: message => log('box', message, 'warn'),
     appVersion: app.isPackaged ? app.getVersion() : 'dev',
     rendererURL: process.env.ELECTRON_RENDERER_URL
       ? developmentRendererUrl(process.env.ELECTRON_RENDERER_URL, 'box')
@@ -1115,24 +1099,18 @@ let audioQuitComplete = false
 app.on('before-quit', event => {
   void boxCec?.dispose()
   if (audioQuitComplete) return
-  if (shouldDeferBoxApplicationQuit(requestedRendererSurface(process.argv), boxCleanupFinished)) {
+  if (shouldDeferBoxApplicationQuit(requestedRendererSurface(process.argv), boxQuit.cleanupFinished) &&
+      boxQuit.beforeQuit(BrowserWindow.getAllWindows())) {
     event.preventDefault()
-    boxApplicationQuitRequested = true
-    boxQuitWindowCount = BrowserWindow.getAllWindows().length
-    boxCompletedWindowCount = 0
-    if (boxQuitWindowCount === 0) {
-      boxCleanupFinished = true
-      app.quit()
-      return
-    }
-    for (const win of BrowserWindow.getAllWindows()) requestBoxClose(win)
     return
   }
   if (boxBackend && !boxBackendDisposeStarted) {
     event.preventDefault()
     boxBackendDisposeStarted = true
     const backend = boxBackend
-    void backend.dispose().catch(() => undefined).finally(() => {
+    // A hung phone server or controller cannot hold the appliance open.
+    const disposal = backend.dispose().catch(error => log('app', `Box backend shutdown failed · ${String(error)}`, 'warn'))
+    void settleWithin(disposal, 5000, () => log('app', 'Box backend shutdown exceeded 5 seconds; quitting', 'warn')).finally(() => {
       boxBackend = null
       app.quit()
     })

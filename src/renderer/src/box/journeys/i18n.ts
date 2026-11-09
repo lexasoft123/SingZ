@@ -8,6 +8,8 @@ const en = {
   'journey.backSettings': 'Back to settings',
   'journey.move': 'Move',
   'journey.select': 'Select',
+  'journey.key.ok': 'OK',
+  'journey.key.back': 'Back',
   'journey.refresh': 'Refresh',
   'journey.retry': 'Retry',
   'journey.cancel': 'Cancel',
@@ -188,7 +190,7 @@ const en = {
   'journey.privacy.resetHelp': 'Reset options depend on this device',
   'journey.privacy.connect': 'Connect collection',
   'journey.dialog.removeTitle': 'Remove “{name}” from this Box?',
-  'journey.dialog.removeBody': 'Remove this downloaded copy from the Box. The cloud project and other devices are unchanged.',
+  'journey.dialog.removeBody': 'Frees {size} on this Box by removing the downloaded copy. The cloud project and other devices are unchanged.',
   'journey.dialog.revokeTitle': 'Revoke “{name}”?',
   'journey.dialog.revokeBody': 'This phone will lose control of the Box. Google Drive stays signed in.',
   'journey.dialog.stopTitle': 'Disconnect phone controllers?',
@@ -202,7 +204,9 @@ const en = {
   'journey.dialog.rebootTitle': 'Restart this Box?',
   'journey.dialog.rebootBody': 'Restart this Box after stopping playback.',
   'journey.dialog.resetTitle': 'Factory reset this Box?',
-  'journey.dialog.resetBody': 'Reset this Box when supported by this device. Cloud projects are not deleted.',
+  'journey.dialog.resetBody': 'Erases this Box’s preferences and all downloaded songs. Installed software stays as it is, and cloud projects are not deleted.',
+  'journey.dialog.wifiTitle': 'Switch Wi-Fi?',
+  'journey.dialog.wifiBody': 'This Box is connected now. The current connection stays until the new Wi-Fi works, then downloads and phones may need to reconnect. Downloaded songs keep playing.',
   'journey.dialog.confirmRemove': 'Remove local copy',
   'journey.dialog.confirmRevoke': 'Revoke phone',
   'journey.dialog.confirmStop': 'Disconnect phones',
@@ -210,12 +214,13 @@ const en = {
   'journey.dialog.confirmInstall': 'Install and restart',
   'journey.dialog.confirmRollback': 'Roll back',
   'journey.dialog.confirmReboot': 'Restart',
-  'journey.dialog.confirmReset': 'Reset Box'
+  'journey.dialog.confirmReset': 'Reset Box',
+  'journey.dialog.confirmWifi': 'Set up new Wi-Fi'
 } as const
 
 const ru: Record<keyof typeof en, string> = {
   'journey.settings': 'Настройки', 'journey.subtitle': 'Настройка, восстановление и обслуживание Box',
-  'journey.back': 'Назад', 'journey.backSettings': 'Назад к настройкам', 'journey.move': 'Переход', 'journey.select': 'Выбрать',
+  'journey.back': 'Назад', 'journey.backSettings': 'Назад к настройкам', 'journey.move': 'Переход', 'journey.select': 'Выбрать', 'journey.key.ok': 'OK', 'journey.key.back': 'Назад',
   'journey.refresh': 'Обновить', 'journey.retry': 'Повторить', 'journey.cancel': 'Отмена', 'journey.keep': 'Оставить',
   'journey.continue': 'Продолжить', 'journey.continueOffline': 'Продолжить офлайн', 'journey.done': 'Готово',
   'journey.loading': 'Читаем текущее состояние…', 'journey.unavailable': 'Недоступно', 'journey.notReported': 'Не сообщается',
@@ -282,15 +287,16 @@ const ru: Record<keyof typeof en, string> = {
   'journey.privacy.title': 'Владение и конфиденциальность', 'journey.privacy.subtitle': 'Выберите минимальное действие: аккаунт, телефоны и кэш независимы', 'journey.privacy.signout': 'Выйти из Google Drive', 'journey.privacy.signoutHelp': 'Сохранить загруженные проекты и телефоны',
   'journey.privacy.stopPhones': 'Отключить телефоны и остановить подключение', 'journey.privacy.stopPhonesHelp': 'Отключите все телефоны, сохранив аккаунт Drive и песни', 'journey.privacy.cache': 'Удалить проект из кэша', 'journey.privacy.cacheHelp': 'Выберите загруженную песню для удаления; текущая песня защищена',
   'journey.privacy.reset': 'Сброс до заводских настроек', 'journey.privacy.resetHelp': 'Возможности сброса зависят от устройства', 'journey.privacy.connect': 'Подключить коллекцию',
-  'journey.dialog.removeTitle': 'Удалить «{name}» с этого Box?', 'journey.dialog.removeBody': 'Удалите загруженную копию с Box. Облачный проект и другие устройства не изменятся.', 'journey.dialog.revokeTitle': 'Отозвать доступ «{name}»?', 'journey.dialog.revokeBody': 'Этот телефон потеряет управление Box. Аккаунт Google Drive останется подключённым.',
+  'journey.dialog.removeTitle': 'Удалить «{name}» с этого Box?', 'journey.dialog.removeBody': 'Освободит {size} на этом Box: загруженная копия будет удалена. Облачный проект и другие устройства не изменятся.', 'journey.dialog.revokeTitle': 'Отозвать доступ «{name}»?', 'journey.dialog.revokeBody': 'Этот телефон потеряет управление Box. Аккаунт Google Drive останется подключённым.',
   'journey.dialog.stopTitle': 'Отключить телефоны-пульты?', 'journey.dialog.stopBody': 'Отключите все телефоны и остановите новые подключения. Drive и загруженные проекты не изменятся.', 'journey.dialog.signoutTitle': 'Выйти из Google Drive?', 'journey.dialog.signoutBody': 'Авторизация Drive удаляется только на этом Box. Загруженные песни и телефоны сохранятся.',
   'journey.dialog.installTitle': 'Установить обновление и перезапустить?', 'journey.dialog.installBody': 'Сначала остановите воспроизведение. Установка может перезапустить Box; управление заблокировано до завершения.', 'journey.dialog.rollbackTitle': 'Откатить систему?', 'journey.dialog.rollbackBody': 'Восстановите предыдущую систему, если восстановление доступно. Сначала остановите воспроизведение; Box может перезапуститься.',
-  'journey.dialog.rebootTitle': 'Перезапустить Box?', 'journey.dialog.rebootBody': 'Перезапустите Box после остановки воспроизведения.', 'journey.dialog.resetTitle': 'Сбросить Box до заводских настроек?', 'journey.dialog.resetBody': 'Сбросьте Box, если устройство поддерживает сброс. Облачные проекты не удаляются.',
-  'journey.dialog.confirmRemove': 'Удалить локальную копию', 'journey.dialog.confirmRevoke': 'Отозвать доступ телефона', 'journey.dialog.confirmStop': 'Отключить телефоны', 'journey.dialog.confirmSignout': 'Выйти', 'journey.dialog.confirmInstall': 'Установить и перезапустить', 'journey.dialog.confirmRollback': 'Откатить', 'journey.dialog.confirmReboot': 'Перезапустить', 'journey.dialog.confirmReset': 'Сбросить Box'
+  'journey.dialog.rebootTitle': 'Перезапустить Box?', 'journey.dialog.rebootBody': 'Перезапустите Box после остановки воспроизведения.', 'journey.dialog.resetTitle': 'Сбросить Box до заводских настроек?', 'journey.dialog.resetBody': 'Будут стёрты настройки этого Box и все загруженные песни. Установленное ПО не изменится, облачные проекты не удаляются.',
+  'journey.dialog.wifiTitle': 'Сменить Wi-Fi?', 'journey.dialog.wifiBody': 'Этот Box сейчас подключён. Текущее подключение сохранится, пока новый Wi-Fi не заработает; затем загрузкам и телефонам может понадобиться переподключение. Загруженные песни продолжат играть.',
+  'journey.dialog.confirmRemove': 'Удалить локальную копию', 'journey.dialog.confirmRevoke': 'Отозвать доступ телефона', 'journey.dialog.confirmStop': 'Отключить телефоны', 'journey.dialog.confirmSignout': 'Выйти', 'journey.dialog.confirmInstall': 'Установить и перезапустить', 'journey.dialog.confirmRollback': 'Откатить', 'journey.dialog.confirmReboot': 'Перезапустить', 'journey.dialog.confirmReset': 'Сбросить Box', 'journey.dialog.confirmWifi': 'Настроить новый Wi-Fi'
 }
 
 const zh: Record<keyof typeof en, string> = {
-  'journey.settings': '设置', 'journey.subtitle': '设置、恢复并管理此 Box', 'journey.back': '返回', 'journey.backSettings': '返回设置', 'journey.move': '移动', 'journey.select': '选择',
+  'journey.settings': '设置', 'journey.subtitle': '设置、恢复并管理此 Box', 'journey.back': '返回', 'journey.backSettings': '返回设置', 'journey.move': '移动', 'journey.select': '选择', 'journey.key.ok': '确定', 'journey.key.back': '返回',
   'journey.refresh': '刷新', 'journey.retry': '重试', 'journey.cancel': '取消', 'journey.keep': '保留', 'journey.continue': '继续', 'journey.continueOffline': '离线继续', 'journey.done': '完成',
   'journey.loading': '正在读取当前状态…', 'journey.unavailable': '不可用', 'journey.notReported': '未报告', 'journey.noService': '此设备上的 Box 服务不可用。', 'journey.noUrl': '暂无可用的设置地址，请重试。',
   'journey.expired': '已过期', 'journey.expires': '剩余 {seconds} 秒', 'journey.playbackActive': '正在播放。请先停止歌曲。', 'journey.cloudSafe': '此操作仅影响此 Box，绝不删除云端项目。', 'journey.open': '打开', 'journey.manage': '管理',
@@ -331,10 +337,11 @@ const zh: Record<keyof typeof en, string> = {
   'journey.system.playbackGuard': '安装、恢复或重启前请停止播放。', 'journey.system.committed': '系统正在更改，请等待操作完成。', 'journey.system.globalGuard': '完成前播放和导航将保持锁定。',
   'journey.privacy.title': '所有权和隐私', 'journey.privacy.subtitle': '选择最小改动；账户、手机和缓存相互独立', 'journey.privacy.signout': '退出 Google Drive', 'journey.privacy.signoutHelp': '保留已下载项目和已配对手机', 'journey.privacy.stopPhones': '撤销手机并停止配对', 'journey.privacy.stopPhonesHelp': '断开所有手机，保留 Drive 账户和歌曲',
   'journey.privacy.cache': '移除缓存项目', 'journey.privacy.cacheHelp': '选择要移除的已下载歌曲，当前歌曲会受到保护', 'journey.privacy.reset': '恢复出厂设置', 'journey.privacy.resetHelp': '重置选项取决于此设备', 'journey.privacy.connect': '连接曲库',
-  'journey.dialog.removeTitle': '从此 Box 移除“{name}”？', 'journey.dialog.removeBody': '移除此 Box 上的已下载副本，云端项目和其他设备不变。', 'journey.dialog.revokeTitle': '撤销“{name}”？', 'journey.dialog.revokeBody': '此手机将无法控制 Box，Google Drive 会保持登录。', 'journey.dialog.stopTitle': '断开手机控制器？', 'journey.dialog.stopBody': '断开所有手机并停止新配对，Drive 和已下载项目不变。',
+  'journey.dialog.removeTitle': '从此 Box 移除“{name}”？', 'journey.dialog.removeBody': '移除已下载副本，将在此 Box 上释放 {size}。云端项目和其他设备不变。', 'journey.dialog.revokeTitle': '撤销“{name}”？', 'journey.dialog.revokeBody': '此手机将无法控制 Box，Google Drive 会保持登录。', 'journey.dialog.stopTitle': '断开手机控制器？', 'journey.dialog.stopBody': '断开所有手机并停止新配对，Drive 和已下载项目不变。',
   'journey.dialog.signoutTitle': '退出 Google Drive？', 'journey.dialog.signoutBody': '仅移除此 Box 上的 Drive 授权，已下载歌曲和已配对手机保留。', 'journey.dialog.installTitle': '安装已暂存的更新并重启？', 'journey.dialog.installBody': '请先停止播放。安装可能重启 Box，完成前控制将保持锁定。',
-  'journey.dialog.rollbackTitle': '回滚系统？', 'journey.dialog.rollbackBody': '恢复可用时可还原到先前系统。请先停止播放，Box 可能会重启。', 'journey.dialog.rebootTitle': '重启此 Box？', 'journey.dialog.rebootBody': '停止播放后重启此 Box。', 'journey.dialog.resetTitle': '将此 Box 恢复出厂设置？', 'journey.dialog.resetBody': '此设备支持时可重置 Box，云端项目不会被删除。',
-  'journey.dialog.confirmRemove': '移除本地副本', 'journey.dialog.confirmRevoke': '撤销手机', 'journey.dialog.confirmStop': '断开手机', 'journey.dialog.confirmSignout': '退出', 'journey.dialog.confirmInstall': '安装并重启', 'journey.dialog.confirmRollback': '回滚', 'journey.dialog.confirmReboot': '重启', 'journey.dialog.confirmReset': '重置 Box'
+  'journey.dialog.rollbackTitle': '回滚系统？', 'journey.dialog.rollbackBody': '恢复可用时可还原到先前系统。请先停止播放，Box 可能会重启。', 'journey.dialog.rebootTitle': '重启此 Box？', 'journey.dialog.rebootBody': '停止播放后重启此 Box。', 'journey.dialog.resetTitle': '将此 Box 恢复出厂设置？', 'journey.dialog.resetBody': '将清除此 Box 的偏好设置和所有已下载歌曲。已安装的软件保持不变，云端项目不会被删除。',
+  'journey.dialog.wifiTitle': '切换 Wi-Fi？', 'journey.dialog.wifiBody': '此 Box 当前已连接。新 Wi-Fi 可用前会保留当前连接，之后下载和手机可能需要重新连接。已下载歌曲会继续播放。',
+  'journey.dialog.confirmRemove': '移除本地副本', 'journey.dialog.confirmRevoke': '撤销手机', 'journey.dialog.confirmStop': '断开手机', 'journey.dialog.confirmSignout': '退出', 'journey.dialog.confirmInstall': '安装并重启', 'journey.dialog.confirmRollback': '回滚', 'journey.dialog.confirmReboot': '重启', 'journey.dialog.confirmReset': '重置 Box', 'journey.dialog.confirmWifi': '设置新 Wi-Fi'
 }
 
 register('en', en)

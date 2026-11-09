@@ -78,4 +78,16 @@ function loopzBuildInputs(root) {
   return { revision, files }
 }
 
-module.exports = { zcoreGitlinkRevision, loopzBuildInputs }
+// LoopZ routing is compiled into the capture addon only for Linux (the Box
+// target). Desktop macOS/Windows builds configure SINGZ_BOX_LOOPZ_ROUTING=OFF,
+// so their builder and development loader must neither fingerprint nor require
+// a clean LoopZ checkout. Both sides use this one gate so stamps still agree.
+function boxLoopzRoutingEnabled(platform) {
+  return platform === 'linux'
+}
+
+function loopzFingerprintInputs(root, platform) {
+  return boxLoopzRoutingEnabled(platform) ? loopzBuildInputs(root) : null
+}
+
+module.exports = { zcoreGitlinkRevision, loopzBuildInputs, boxLoopzRoutingEnabled, loopzFingerprintInputs }

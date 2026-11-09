@@ -1,5 +1,6 @@
 import { Button } from '@singz/ui'
 import type { BoxDiagnostics } from '../../../../shared/box-contract'
+import { getLocale } from '../../../../shared/i18n/core'
 import { summarizeAudio } from './format'
 import { tJourney } from './i18n'
 import { ErrorNotice, LoadingNotice, PageFrame } from './ui'
@@ -34,7 +35,7 @@ export function DiagnosticsPage({ diagnostics, loading, error, onRefresh, onAudi
       <h2>{tJourney('journey.diagnostics.cec')}</h2>
       <p>{tJourney(`journey.diagnostics.cec.${diagnostics.cec.state}`)}</p>
       {diagnostics.cec.detail && <p>{diagnostics.cec.detail}</p>}
-      <p>{tJourney('journey.diagnostics.cec.lastInput')}: {diagnostics.cec.lastInputAt === null ? '—' : new Date(diagnostics.cec.lastInputAt).toLocaleTimeString()}</p>
+      <p>{tJourney('journey.diagnostics.cec.lastInput')}: {diagnostics.cec.lastInputAt === null ? '—' : new Date(diagnostics.cec.lastInputAt).toLocaleTimeString(getLocale())}</p>
     </section>}
     <p className="journey-note">{tJourney('journey.diagnostics.noResume')}</p>
     <div className="journey-actions">

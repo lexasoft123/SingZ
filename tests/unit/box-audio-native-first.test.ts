@@ -101,4 +101,28 @@ describe('native-first retained prepare', () => {
       await preparation
     }
   })
+
+  it.each([
+    ['a validation', 'The retained project is outside the configured libraries.'],
+    ['an oversized association', 'Box audio frame too large']
+  ])('logs %s failure without changing the native receipt', async (stage, reason) => {
+    vi.stubEnv('SINGZ_SURFACE', 'box')
+    vi.stubEnv('SINGZ_BOX_AUDIO_SOCKET', '/tmp/native-first-test.sock')
+    const receipt = { ok: true, generation: '7' } as DesktopPlaybackResult
+    const validate = stage === 'a validation'
+      ? vi.fn().mockRejectedValue(new Error(reason))
+      : vi.fn().mockResolvedValue({ oversized: true })
+    vi.doMock('../../src/main/box-audio/retained-project', () => ({ validateBoxRetainedProject: validate }))
+    rpc.callStamped.mockResolvedValue({ epoch: 'epoch-A', value: receipt })
+    rpc.call.mockRejectedValue(new Error(reason))
+    const { log } = await import('../../src/main/log')
+    const { boxPrepareRetainedPlayback } = await import('../../src/main/audio-process')
+    await expect(boxPrepareRetainedPlayback(42, config(), lanes, {
+      libraryRoot: '/missing/library', driveProjectsRoot: '/missing/drive'
+    })).resolves.toBe(receipt)
+    await vi.waitFor(() => {
+      expect(log).toHaveBeenCalledWith('box-audio', expect.stringMatching(
+        new RegExp(`retained project association failed · generation 7 · ${reason.replace('.', '\\.')}`)), 'warn')
+    }, { timeout: 500, interval: 5 })
+  })
 })

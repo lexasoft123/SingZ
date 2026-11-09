@@ -21,8 +21,8 @@ export function PageFrame({ title, subtitle, children, onBack, backDisabled = fa
     <div className="journey-content">{children}</div>
     <footer className="journey-footer">
       <span className="box-key">↑ ↓ ← →</span><span>{tJourney('journey.move')}</span>
-      <span className="box-key">OK</span><span>{tJourney('journey.select')}</span>
-      <span className="box-key">Back</span><span>{tJourney('journey.back')}</span>
+      <span className="box-key">{tJourney('journey.key.ok')}</span><span>{tJourney('journey.select')}</span>
+      <span className="box-key">{tJourney('journey.key.back')}</span><span>{tJourney('journey.back')}</span>
     </footer>
   </>
 }

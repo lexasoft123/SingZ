@@ -1,14 +1,14 @@
 import type { BoxControllerCommand, BoxControllerSnapshot, BoxQueueRef } from '../../../../shared/box-contract'
 import { sanitizeSongVolume, SONG_VOLUME_MAX_DB } from '../../audio/song-volume'
+import { stemLabel } from '../../model'
+import { t } from '../i18n'
 import type { BoxTransportSnapshot } from '../transport'
 import { entriesWithQueueRefs, projectQueue, queueRefKey } from './queue'
 import { localEntryId, type CollectionEntry, type CollectionInspectionRow } from './types'
 
 const MASTER_GAIN_MAX = 10 ** (SONG_VOLUME_MAX_DB / 20)
-const STEM_LABELS: Record<string, string> = {
-  vocals: 'Vocals', leadVocal: 'Lead vocal', backingVocals: 'Backing vocals',
-  drums: 'Drums', bass: 'Bass', guitar: 'Guitar', piano: 'Piano', other: 'Other'
-}
+/** Phones show the same stem names as the TV mixer, in the Box's language. */
+const stemPhoneLabel = (id: string): string => stemLabel(id) ?? t('player.track.untitled')
 
 function finite(value: number, fallback = 0): number {
   return Number.isFinite(value) ? value : fallback
@@ -135,7 +135,7 @@ export class BoxPhoneProjection {
       }
       return {
         id,
-        label: STEM_LABELS[track.id] ?? 'Track',
+        label: stemPhoneLabel(track.id),
         volume: clamp(track.volume, 0, 1),
         muted: track.muted === true,
         solo: track.solo === true

@@ -11,6 +11,23 @@ interface NativeBoxRouting {
   boxRoutingCapabilities(): unknown
   boxRoutingShutdown(): void
 }
+/** A native poll failure must not become an uncaught exception in the headless
+ *  host. Keep polling (native code throttles its own retries) and log at most
+ *  one report per interval, counting suppressed repeats. */
+export function boxRoutingPollTick(poll: () => void, warn: (message: string) => void = console.warn,
+  now: () => number = Date.now, intervalMs = 10_000): () => void {
+  let lastReport = -Infinity
+  let suppressed = 0
+  return () => {
+    try { poll() } catch (error) {
+      const time = now()
+      if (time - lastReport < intervalMs) { ++suppressed; return }
+      warn(`Box routing poll failed: ${String(error).slice(0, 500)}${suppressed ? ` (${suppressed} similar failures suppressed)` : ''}`)
+      lastReport = time
+      suppressed = 0
+    }
+  }
+}
 export async function runBoxAudioHost(authority: BoxAudioHostAuthority): Promise<void> {
   await app.whenReady()
   const socketPath = process.env.SINGZ_BOX_AUDIO_SOCKET
@@ -39,7 +56,7 @@ export async function runBoxAudioHost(authority: BoxAudioHostAuthority): Promise
   })
   try {
     initialize()
-    poll = setInterval(() => routing!.boxRoutingPoll(), 25)
+    poll = setInterval(boxRoutingPollTick(() => routing!.boxRoutingPoll()), 25)
   } catch (error) { await host.close(); throw error }
   let stopping = false
   const stop = (): void => { if (stopping) return; stopping = true; void host.close().finally(() => app.exit(0)) }

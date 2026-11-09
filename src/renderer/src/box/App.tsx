@@ -21,7 +21,7 @@ import { restoreRetainedEntry, routeRestoredPlayback } from './retained-playback
 import { closeBoxSession } from './close-session'
 import { t } from './i18n'
 import { tSettings } from './settings-i18n'
-import { BoxSettingsNavigator, type BoxRoute } from './settings-navigation'
+import { BoxSettingsNavigator, detailsReturnRoute, type BoxRoute } from './settings-navigation'
 import { SongDetails } from './SongDetails'
 import { StartupOverlay } from './StartupOverlay'
 import { SwitchDialog } from './SwitchDialog'
@@ -37,6 +37,7 @@ import {
   addQueueEntry, BOX_QUEUE_LIMIT, boxCloseWork, BoxQueueStore, entriesWithQueueRefs, moveQueueViewDir,
   projectQueue, queueEntryForViewDir, queueHasEntry, queueRefForEntry, removeQueueViewDir
 } from './collection/queue'
+import { moveQueueRefInView } from './queue-model'
 import { resolveCollectionSelection, type CollectionEntry } from './collection/types'
 import { hydrateBoxLocally } from './collection/startup'
 import './collection/collection.css'
@@ -57,7 +58,8 @@ export default function BoxApp(): React.JSX.Element {
   }
   const transport = transportRef.current
   const microphones = useMemo(() => new BoxMicrophones(window.singz), [])
-  const microphoneSnapshot = useSyncExternalStore(microphones.subscribe, microphones.getSnapshot)
+  // Live microphone telemetry is subscribed by leaf surfaces (Player meters,
+  // Mixer rows, Settings) so 5 Hz levels never re-render the whole BoxApp.
   useEffect(() => {
     microphones.connect()
     return () => { void microphones.dispose().catch(() => undefined) }
@@ -428,7 +430,7 @@ export default function BoxApp(): React.JSX.Element {
 
   const openDetails = useCallback((entry: CollectionEntry): boolean => {
     if (!cancelOpenForNavigation()) return false
-    detailsReturn.current = latest.current.route === 'details' ? detailsReturn.current : latest.current.route
+    detailsReturn.current = detailsReturnRoute(latest.current.route, detailsReturn.current)
     setSelectedId(entry.id)
     setActionError(null)
     setMixOpen(false)
@@ -461,6 +463,8 @@ export default function BoxApp(): React.JSX.Element {
     setPendingSwitch(null)
     setSelectedId(entry.id)
     setActionError(null)
+    // A failed open lands on details; Back must return to where it started (e.g. the queue).
+    detailsReturn.current = detailsReturnRoute(latest.current.route, detailsReturn.current)
     setRoute('details')
     try {
       if (!await publishPhoneSnapshot()) throw new Error(t('box.details.openGuardFailed'))
@@ -791,16 +795,9 @@ export default function BoxApp(): React.JSX.Element {
         const refs = queueStore.getRefs()
         const ref = phoneProjection.queueRefForId(refs, command.entryId)
         if (ref) {
-          const index = refs.indexOf(ref)
-          let next: BoxQueueRef[] = refs
-          if (command.type === 'queue-remove') next = refs.filter(candidate => candidate !== ref)
-          else {
-            const to = index + command.delta
-            if (index >= 0 && to >= 0 && to < refs.length) {
-              next = [...refs]
-              ;[next[index], next[to]] = [next[to], next[index]]
-            }
-          }
+          const next = command.type === 'queue-remove'
+            ? refs.filter(candidate => candidate !== ref)
+            : moveQueueRefInView(latestPhone.current.entries, refs, ref, command.delta)
           response = next !== refs && await commitQueue(next) ? { ok: true } : response
         }
       } else if (command.type === 'play-pause') {
@@ -874,6 +871,7 @@ export default function BoxApp(): React.JSX.Element {
             }}
             onOpenCollection={() => goAccount('home')}
             onLibraryChanged={() => { void collection.refreshLocal().catch(() => undefined) }}
+            onAccountChanged={() => { void collection.refreshAccount().catch(() => undefined) }}
             onSafeAreaChange={setSafeArea}
           />
         </div>}
@@ -949,7 +947,6 @@ export default function BoxApp(): React.JSX.Element {
           metronomeError={metronomeError}
           onMetronomeOverride={changeMetronome}
           microphones={microphones}
-          microphoneSnapshot={microphoneSnapshot}
           inventory={settingsInventory}
           loading={settingsInventoryLoading}
           error={settingsError}
@@ -961,7 +958,7 @@ export default function BoxApp(): React.JSX.Element {
           canApplyOutput={canApplyOutput}
           applyUnavailableReason={applyUnavailableReason}
         />}
-        {route === 'player' && <Player snapshot={snapshot} microphoneSnapshot={microphoneSnapshot} controlsVisible={controlsVisible} onLibrary={goCatalog} onMix={() => { setMixOpen(true); setControlsVisible(true); noteInput() }} onQueue={goQueue} onSettings={() => goHub('home')} onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }} onSeek={position => transport.seek(position)} onSeekBy={delta => transport.seekBy(delta)} />}
+        {route === 'player' && <Player snapshot={snapshot} microphones={microphones} controlsVisible={controlsVisible} onLibrary={goCatalog} onMix={() => { setMixOpen(true); setControlsVisible(true); noteInput() }} onQueue={goQueue} onSettings={() => goHub('home')} onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }} onSeek={position => transport.seek(position)} onSeekBy={delta => transport.seekBy(delta)} />}
         {route === 'queue' && <Queue
           items={queueItems}
           rows={queueRows}
@@ -983,7 +980,7 @@ export default function BoxApp(): React.JSX.Element {
           onClose={active ? goCurrent : goCatalog}
           onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }}
         />}
-        {route === 'player' && mixOpen && <Mixer microphoneSnapshot={microphoneSnapshot} tab={mixTab} tracks={snapshot.tracks} masterVolume={snapshot.masterVolume} playing={snapshot.playing} canPlay={active?.lyrics.status === 'ready' && canPlay} onTab={setMixTab} onVolume={(id, volume) => transport.setVolume(id, volume)} onMuted={(id, muted) => transport.setMuted(id, muted)} onSolo={(id, solo) => transport.setSolo(id, solo)} onMasterVolume={volume => transport.setMasterVolume(volume)} onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }} onClose={closeMix} />}
+        {route === 'player' && mixOpen && <Mixer microphones={microphones} tab={mixTab} tracks={snapshot.tracks} masterVolume={snapshot.masterVolume} playing={snapshot.playing} canPlay={active?.lyrics.status === 'ready' && canPlay} onTab={setMixTab} onVolume={(id, volume) => transport.setVolume(id, volume)} onMuted={(id, muted) => transport.setMuted(id, muted)} onSolo={(id, solo) => transport.setSolo(id, solo)} onMasterVolume={volume => transport.setMasterVolume(volume)} onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }} onClose={closeMix} />}
         {pendingSwitch?.local && <SwitchDialog active={active} target={pendingSwitch.local} onCancel={() => setPendingSwitch(null)} onConfirm={() => void openNow(pendingSwitch, pendingSwitchStart.current)} />}
         {(queueError || queueSnapshot.loading) && route !== 'player' && route !== 'home' && <div className="box-state-toast" role="alert">
           <span>{queueSnapshot.loading ? t('box.queue.loading') : queueError}</span>

@@ -18,6 +18,8 @@ export interface JourneyHubProps {
   onOpenCollection: () => void
   onSignOut?: () => Promise<boolean>
   onLibraryChanged: () => void
+  /** Drive authorization may have changed outside the collection owner (factory reset). */
+  onAccountChanged?: () => void
   activeProjectDir: string | null
   playbackActive: boolean
   onSafeAreaChange: (percent: SafeAreaPercent) => void

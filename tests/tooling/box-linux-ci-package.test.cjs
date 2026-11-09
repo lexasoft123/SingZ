@@ -83,7 +83,7 @@ for file do printf 'fixture-sha256  %s\\n' "$file"; done`)
 printf 'DPKG_DEB|%s\\n' "$*" >> "$CI_TEST_LOG"
 if [ "$1" = -f ]; then
   case "$2" in *SingZ-Box*) package=singz-box;; *) package=singz;; esac
-  case "$3" in Package) printf '%s\\n' "$package";; Architecture) echo amd64;; Depends) echo 'python3, fonts-noto-cjk';; *) exit 1;; esac
+  case "$3" in Package) printf '%s\\n' "$package";; Architecture) echo amd64;; Depends) printf '%s\\n' "\${CI_TEST_BOX_DEPENDS-libgtk-3-0, python3, fonts-noto-cjk}";; *) exit 1;; esac
 fi`)
   stub('dpkg-query', `
 printf 'DPKG_QUERY|%s\\n' "$*" >> "$CI_TEST_LOG"
@@ -133,6 +133,20 @@ printf 'ELECTRON|mute=%s|nosync=%s|args=%s\\n' "$SINGZ_MUTE" "$SINGZ_NO_SYNC" "$
   fs.writeFileSync(path.join(root, 'package-lock.json'), JSON.stringify({ packages: { 'node_modules/electron': { version: 'fixture-version' } } }))
   fs.mkdirSync(path.join(root, 'node_modules/electron'), { recursive: true })
   fs.writeFileSync(path.join(root, 'node_modules/electron/package.json'), JSON.stringify({ version: 'fixture-version' }))
+  writeExecutable(path.join(root, 'node_modules/.bin/asar'), `#!/bin/sh
+printf 'ASAR|%s\\n' "$*" >> "$CI_TEST_LOG"
+[ "$1" = list ] || exit 1
+printf '%s' "\${CI_TEST_ASAR_LIST-/out/main/index.js
+/package.json
+}"
+`)
+  for (const [file, executable] of [['cec-input.py', false], ['singz-box-audio.service', false], ['singz-box-with-audio', true], ['singz-box-rtprio.conf', false]]) {
+    for (const directory of [path.join(root, 'resources/linux'), path.join(boxRoot, 'resources/box-audio')]) {
+      fs.mkdirSync(directory, { recursive: true })
+      fs.writeFileSync(path.join(directory, file), `box audio ${file}\n`)
+      if (executable) fs.chmodSync(path.join(directory, file), 0o755)
+    }
+  }
   writeExecutable(path.join(root, 'scripts/vendor-analyze.sh'), `#!/bin/sh
 printf 'VENDOR_ANALYZE|%s\\n' "$*" >> "$CI_TEST_LOG"
 `)
@@ -167,7 +181,7 @@ echo '${product} ${tool} fixture'
   fs.writeFileSync(path.join(root, 'dist/SingZ-0.0.0-linux-amd64.deb'), 'desktop deb\n')
   fs.writeFileSync(path.join(root, 'dist/box/SingZ-Box-0.0.0-linux-amd64.deb'), 'box deb\n')
 
-  function run(stage) {
+  function run(stage, extraEnv = {}) {
     const env = {
       ...process.env,
       PATH: `${bin}${path.delimiter}${process.env.PATH}`,
@@ -177,7 +191,8 @@ echo '${product} ${tool} fixture'
       CI_TEST_BOX_ROOT: boxRoot,
       TMPDIR: path.join(root, 'tmp'),
       SINGZ_CI_STAGE: stage,
-      SINGZ_E2E_PACKAGED: path.join(desktopRoot, 'singz')
+      SINGZ_E2E_PACKAGED: path.join(desktopRoot, 'singz'),
+      ...extraEnv
     }
     delete env.E2E_PACKAGED
     delete env.SINGZ_BOX_AUDIO_HOST_EXECUTABLE
@@ -224,6 +239,13 @@ function assertInstalled(f, result) {
     assert.ok(result.calls.includes(`CMP|${root}/resources/app.asar ${unpacked}/resources/app.asar`), result.calls)
     assert.ok(result.calls.includes(`CMP|${root}/resources/engines/singz-capture.node ${unpacked}/resources/engines/singz-capture.node`), result.calls)
   }
+  for (const file of ['cec-input.py', 'singz-box-audio.service', 'singz-box-with-audio', 'singz-box-rtprio.conf']) {
+    assert.ok(result.calls.includes(`CMP|${f.boxRoot}/resources/box-audio/${file} resources/linux/${file}`),
+      `installed Box resource ${file} must be verified`)
+  }
+  assert.ok(result.calls.includes(`DPKG_DEB|-f ${path.join(f.root, 'dist/box/SingZ-Box-0.0.0-linux-amd64.deb')} Depends`),
+    'Box Depends must be checked')
+  assert.ok(result.calls.includes(`ASAR|list ${f.boxRoot}/resources/app.asar`), 'installed Box asar must be listed')
   const nodes = result.calls.split('\n').filter(line => line.startsWith('NODE|'))
   const desktopUi = nodes.filter(line => line.includes('tests/e2e/linux/package-smoke.cjs'))
   assert.equal(desktopUi.length, 2, 'both existing Desktop display qualifications must remain')
@@ -299,6 +321,44 @@ test('co-install cannot mask a Box payload overwritten by different bytes', posi
   assert.notEqual(result.status, 0)
   assert.ok(result.calls.includes(`${f.boxRoot}/resources/app.asar`), result.calls)
   assert.doesNotMatch(result.calls, /tests\/e2e\/box-package-launch-smoke\.cjs/)
+})
+
+test('installed stage rejects missing Box audio resources and a non-executable launcher', posixOnly, t => {
+  const missing = fixture(t)
+  fs.rmSync(path.join(missing.boxRoot, 'resources/box-audio/cec-input.py'))
+  const missingResult = missing.run('installed-test')
+  assert.notEqual(missingResult.status, 0)
+  assert.match(missingResult.stderr, /Missing installed Box resource: .*cec-input\.py/)
+  assert.doesNotMatch(missingResult.calls, /tests\/e2e\/box-package-launch-smoke\.cjs/)
+
+  const plain = fixture(t)
+  fs.chmodSync(path.join(plain.boxRoot, 'resources/box-audio/singz-box-with-audio'), 0o644)
+  const plainResult = plain.run('installed-test')
+  assert.notEqual(plainResult.status, 0)
+  assert.match(plainResult.stderr, /Box audio launcher is not executable/)
+})
+
+test('installed stage rejects a Box package without its python3 dependency', posixOnly, t => {
+  for (const depends of ['libgtk-3-0, fonts-noto-cjk', 'libgtk-3-0, python3-minimal, fonts-noto-cjk']) {
+    const f = fixture(t)
+    const result = f.run('installed-test', { CI_TEST_BOX_DEPENDS: depends })
+    assert.notEqual(result.status, 0, depends)
+    assert.match(result.stderr, /Box package does not depend on python3/)
+  }
+})
+
+test('installed stage rejects a Box asar embedding dist/ or resources/linux, and an unreadable asar', posixOnly, t => {
+  for (const entry of ['/dist/SingZ-0.0.0-linux-amd64.deb', '/dist', '/resources/linux/cec-input.py']) {
+    const f = fixture(t)
+    const result = f.run('installed-test', { CI_TEST_ASAR_LIST: `/out/main/index.js\n${entry}\n` })
+    assert.notEqual(result.status, 0, entry)
+    assert.match(result.stderr, /embeds package output or duplicated Box resources/)
+    assert.doesNotMatch(result.calls, /tests\/e2e\/box-package-launch-smoke\.cjs/)
+  }
+  const empty = fixture(t)
+  const result = empty.run('installed-test', { CI_TEST_ASAR_LIST: '' })
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /listing is empty/)
 })
 
 function withoutStatement(text, start, endMarker) {

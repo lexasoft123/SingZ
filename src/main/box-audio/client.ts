@@ -27,11 +27,20 @@ export function createBoxAudioClient(socketPath: string, options: BoxAudioClient
   let captureId = 0n
   let uncertain = false
   let closed = false
-  const sinks = new Map<string, { renderer: unknown; generation: string; requestId: bigint; acknowledged: boolean; emit(value: unknown): void }>()
-  const pending = new Map<string, { resolve(value: unknown, epoch: string): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout>; mutation: boolean }>()
-  const fail = (error: Error): void => {
-    for (const item of pending.values()) { clearTimeout(item.timer); if (item.mutation) uncertain = true; item.reject(item.mutation ? new BoxAudioUncertainError(error.message) : error) }
-    pending.clear(); sinks.clear(); epoch = ''
+  let connection = 0
+  const sinks = new Map<string, { renderer: unknown; generation: string; requestId: bigint; acknowledged: boolean; connection: number; emit(value: unknown): void }>()
+  const pending = new Map<string, { resolve(value: unknown, epoch: string): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout>; mutation: boolean; connection: number }>()
+  /** Fails one connection's work, or everything when `only` is omitted. A late
+   *  close of a replaced socket must not clear a newer connection's state. */
+  const fail = (error: Error, only?: number): void => {
+    for (const [id, item] of pending) {
+      if (only !== undefined && item.connection !== only) continue
+      pending.delete(id); clearTimeout(item.timer)
+      if (item.mutation) uncertain = true
+      item.reject(item.mutation ? new BoxAudioUncertainError(error.message) : error)
+    }
+    for (const [key, sink] of sinks) if (only === undefined || sink.connection === only) sinks.delete(key)
+    if (only === undefined || only === connection) epoch = ''
   }
   const ensure = (): Promise<void> => {
     if (closed) return Promise.reject(new Error('Box audio client disconnected'))
@@ -42,10 +51,13 @@ export function createBoxAudioClient(socketPath: string, options: BoxAudioClient
       if (!directory.isDirectory() || directory.isSymbolicLink() || directory.uid !== process.getuid?.() || (directory.mode & 0o077) ||
           !endpoint.isSocket() || endpoint.uid !== process.getuid?.() || (endpoint.mode & 0o077)) throw new Error('Untrusted Box audio socket')
       await new Promise<void>((resolve, reject) => {
+      const id = ++connection
+      epoch = '' // A destroyed predecessor may not have emitted close yet.
       const current = socket = connect(socketPath)
       const timer = setTimeout(() => { current.destroy(new Error('Box audio handshake timeout')) }, options.timeoutMs ?? 120_000)
       const parse = boxAudioLines(BOX_AUDIO_REPLY_BYTES, raw => {
         const value = raw as { version: number; type: string; epoch: string; id: string; ok: boolean; error?: string; key?: string; value?: unknown }
+        if (id !== connection) throw new Error('Stale Box audio connection')
         if (!value || value.version !== BOX_AUDIO_VERSION || typeof value.epoch !== 'string' || value.epoch.length > 128) throw new Error('Invalid Box audio reply')
         if (value.type === 'ready') {
           if (epoch) throw new Error('Duplicate Box audio handshake')
@@ -63,8 +75,8 @@ export function createBoxAudioClient(socketPath: string, options: BoxAudioClient
         else item.reject(new Error(typeof value.error === 'string' ? value.error : 'Box audio command rejected'))
       })
       current.on('data', chunk => { try { parse(typeof chunk === 'string' ? Buffer.from(chunk) : chunk) } catch (error) { current.destroy(error as Error) } })
-      current.once('error', error => { clearTimeout(timer); reject(error); fail(error) })
-      current.once('close', () => { clearTimeout(timer); reject(new Error('Box audio connection closed')); fail(new Error('Box audio connection lost')); if (socket === current) socket = undefined })
+      current.once('error', error => { clearTimeout(timer); reject(error); fail(error, id) })
+      current.once('close', () => { clearTimeout(timer); reject(new Error('Box audio connection closed')); fail(new Error('Box audio connection lost'), id); if (socket === current) socket = undefined })
       })
     })().finally(() => { connecting = undefined })
     return connecting
@@ -81,7 +93,7 @@ export function createBoxAudioClient(socketPath: string, options: BoxAudioClient
       if (typeof emit !== 'function') throw new Error('Missing private capture callback')
       key = (++captureId).toString()
       sinks.set(key, { renderer: original[0], generation: String(original[2]), requestId: nextId + 1n,
-        acknowledged: false, emit: emit as (value: unknown) => void })
+        acknowledged: false, connection, emit: emit as (value: unknown) => void })
       args.push(key)
     }
     // JSON turns array omissions into null; leave trailing optional arguments absent.
@@ -105,7 +117,7 @@ export function createBoxAudioClient(socketPath: string, options: BoxAudioClient
             if (target === 'service' && method === 'reconcile') uncertain = false
             resolve({ epoch: replyEpoch, value: decoded as T })
           } catch (error) { reject(error instanceof Error ? error : new Error(String(error))) }
-        }, reject, timer, mutation: !readOnly })
+        }, reject, timer, mutation: !readOnly, connection })
         socket!.write(frame, error => { if (error) socket?.destroy(error) })
       })
       const result = receipt.value

@@ -23,6 +23,7 @@ type BoxIpcOptions = {
   restoreRetainedPlayback?: (expected: { epoch: string; generation: string }) => Promise<BoxRetainedPlaybackRestore>
   routingRequest?: (json: string) => Promise<string>
   routingReconcile?: () => Promise<unknown>
+  log?: (message: string) => void
 }
 type Handler = (event: IpcMainInvokeEvent, args: unknown[]) => unknown | Promise<unknown>
 const failure = (error: string, code: string): BoxResult<never> => ({ ok: false, error, code })
@@ -47,7 +48,7 @@ const retainedCacheRemovalGuard = async (
 export function registerBoxIpc(options: BoxIpcOptions) {
   if (process.env.SINGZ_SURFACE !== 'box') return null
   const controller = new BoxControllerHub()
-  const state = new BoxStateService(options.userDataDir)
+  const state = new BoxStateService(options.userDataDir, options.log)
   const storage = new BoxStorageService(options.userDataDir, controller, options.retainedPlaybackSnapshot
     ? (dir) => retainedCacheRemovalGuard(dir, options.retainedPlaybackSnapshot!)
     : undefined)

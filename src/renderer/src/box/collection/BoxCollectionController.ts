@@ -2,6 +2,7 @@ import type { DriveDeviceChallenge } from '../../../../shared/drive-device'
 import type { ProjectListItem } from '../../../../shared/types'
 import type { SingzApi } from '../../../../shared/types'
 import { inspectBoxProject, projectMetadata, type BoxProjectInspection } from '../project'
+import { tCollection } from './i18n'
 import {
   driveEntryId,
   localEntryId,
@@ -74,18 +75,20 @@ export class BoxCollectionController {
     }))
     const byPath = new Map(this.localItems.map(item => [item.songPath, item]))
     const matched = new Set<string>()
-    for (const remote of this.remoteItems) {
-      const local = this.localItems.find(item => this.cachedDriveIds.get(item.dir) === remote.id) ??
-        (remote.songPath ? byPath.get(remote.songPath) : undefined)
-      if (local) {
-        const entry = entries.find(candidate => candidate.id === localEntryId(local.dir))
-        if (entry && !matched.has(entry.id)) {
-          entry.remoteId = remote.id
-          matched.add(entry.id)
-        }
-      } else {
-        entries.push({ id: driveEntryId(remote.id), remoteId: remote.id, name: remote.name, local: null })
-      }
+    const claim = (local: ProjectListItem | undefined, remoteId: string): boolean => {
+      const entry = local && entries.find(candidate => candidate.id === localEntryId(local.dir))
+      if (!entry || matched.has(entry.id)) return false
+      entry.remoteId = remoteId
+      matched.add(entry.id)
+      return true
+    }
+    // Exact cache identities claim local copies before weaker song-path matches.
+    const unclaimed = this.remoteItems.filter(remote =>
+      !claim(this.localItems.find(item => this.cachedDriveIds.get(item.dir) === remote.id), remote.id))
+    for (const remote of unclaimed) {
+      if (claim(remote.songPath ? byPath.get(remote.songPath) : undefined, remote.id)) continue
+      // A Drive project that cannot own a local copy stays visible as its own row.
+      entries.push({ id: driveEntryId(remote.id), remoteId: remote.id, name: remote.name, local: null })
     }
     return entries
   }
@@ -180,7 +183,7 @@ export class BoxCollectionController {
       if (!result.ok) {
         this.publish({
           remoteStatus: 'error',
-          remoteError: result.error ?? 'Google Drive projects could not be read.'
+          remoteError: result.error ?? tCollection('collection.driveReadFailed')
         })
         return
       }
@@ -239,22 +242,22 @@ export class BoxCollectionController {
 
   async verifyCached(entryId: string): Promise<CollectionPrepareResult> {
     const entry = this.entryForId(entryId)
-    if (!entry?.local || !entry.local.songPath) return { ok: false, error: 'A resolved local project is required.' }
+    if (!entry?.local || !entry.local.songPath) return { ok: false, error: tCollection('collection.noLocalCopy') }
     const inspection = await this.inspectLocal(entry.local)
-    if (!inspection) return { ok: false, error: 'Project inspection was superseded.' }
+    if (!inspection) return { ok: false, error: tCollection('collection.superseded') }
     return { ok: inspection.readiness === 'ready', inspection }
   }
 
   async prepare(entryId: string): Promise<CollectionPrepareResult> {
     const entry = this.entryForId(entryId)
-    if (!entry) return { ok: false, error: 'This project is no longer in the collection.' }
+    if (!entry) return { ok: false, error: tCollection('collection.missing') }
     if (entry.local) return this.verifyCached(entry.id)
-    if (!entry.remoteId) return { ok: false, error: 'This project is unavailable.' }
+    if (!entry.remoteId) return { ok: false, error: tCollection('collection.unavailable') }
     if (this.downloadJob) {
       if (this.downloadJob.remoteId === entry.remoteId) return this.downloadJob.promise
-      return { ok: false, error: 'Another download is still settling. Cancel it and wait before retrying.' }
+      return { ok: false, error: tCollection('collection.downloadBusy') }
     }
-    if (!this.snapshot.auth.signedIn) return { ok: false, error: 'Sign in to Google Drive before downloading.' }
+    if (!this.snapshot.auth.signedIn) return { ok: false, error: tCollection('collection.signInFirst') }
 
     const epoch = ++this.downloadGeneration
     let settle!: () => void
@@ -296,7 +299,7 @@ export class BoxCollectionController {
         if (!result.ok || result.cancelled) {
           return { ok: false, cancelled: result.cancelled, error: result.error }
         }
-        if (!result.songPath) return { ok: false, error: 'The download returned no local project.' }
+        if (!result.songPath) return { ok: false, error: tCollection('collection.noDownloadResult') }
         const songPath = result.songPath
         this.remoteItems = this.remoteItems.map(item => item.id === job.remoteId ? { ...item, songPath } : item)
         this.publish()
@@ -308,11 +311,11 @@ export class BoxCollectionController {
         }
         if (!isCurrent()) return { ok: false, cancelled: true }
         const local = projects.find(item => item.songPath === songPath)
-        if (!local) return { ok: false, error: 'The downloaded project was not returned by the local library.' }
+        if (!local) return { ok: false, error: tCollection('collection.notInLibrary') }
         const id = localEntryId(local.dir)
         const inspection = await this.inspectLocal(local, isCurrent)
         if (!isCurrent()) return { ok: false, cancelled: true }
-        if (!inspection) return { ok: false, error: 'Project inspection was superseded.' }
+        if (!inspection) return { ok: false, error: tCollection('collection.superseded') }
         return {
           ok: inspection.readiness === 'ready',
           inspection: this.snapshot.rows[id]?.inspection ?? inspection
@@ -494,10 +497,16 @@ export class BoxCollectionController {
       ++this.downloadGeneration
       this.publish({ download: { ...this.snapshot.download!, phase: 'cancelling' } })
     }
+    let signedOut = false
     try {
       const result = await this.api.gdriveSignOut()
       if (job) await job.settled
-      if (!result.ok || this.disposed) return false
+      if (this.disposed) return false
+      if (!result.ok) {
+        await this.restoreAfterFailedSignOut()
+        return false
+      }
+      signedOut = true
       this.remoteItems = []
       this.publish({
         remoteStatus: 'idle',
@@ -506,8 +515,15 @@ export class BoxCollectionController {
       })
       return true
     } catch {
+      if (!signedOut && !this.disposed) await this.restoreAfterFailedSignOut()
       return false
     }
+  }
+
+  /** Sign-out invalidated in-flight auth/remote reads up front; re-read the truth so nothing stays 'loading'. */
+  private async restoreAfterFailedSignOut(): Promise<void> {
+    if (this.snapshot.remoteStatus === 'loading') this.publish({ remoteStatus: 'idle' })
+    await this.refreshAccount()
   }
 
   recordOpened(item: ProjectListItem, inspection: BoxProjectInspection, metadata: CollectionSnapshot['rows'][string]['metadata']): void {

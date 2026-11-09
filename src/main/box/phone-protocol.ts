@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { BoxControllerHub } from './controller'
-import type { BoxPhoneSessions, PhoneSession } from './phone-sessions'
+import { normalizeAddress, type BoxPhoneSessions, type PhoneSession } from './phone-sessions'
 import { phoneControllerPage } from './phone-page'
 
 const BODY_LIMIT = 16 * 1024
@@ -23,6 +23,7 @@ const json = (res: ServerResponse, status: number, value: unknown): void => {
   res.end(body)
 }
 const error = (res: ServerResponse, status: number, message: string): void => json(res, status, { ok: false, error: message })
+const remote = (req: IncomingMessage): string => normalizeAddress(req.socket.remoteAddress)
 
 type ProtocolOptions = {
   sessions: BoxPhoneSessions
@@ -39,9 +40,14 @@ export class BoxPhoneProtocol {
       if (!this.options.running()) return error(res, 503, 'Phone controller is unavailable.')
       const base = this.options.baseUrl()
       if (!base || header(req, 'host') !== new URL(base).host) return error(res, 403, 'The request host is invalid.')
-      const url = new URL(req.url ?? '/', base)
+      const path = req.url ?? ''
+      if (!path.startsWith('/') || path.startsWith('//')) return error(res, 400, 'The request path is invalid.')
+      const url = new URL(path, base)
       if (url.search) return error(res, 400, 'Query parameters are not accepted.')
-      if (req.method === 'GET' && url.pathname === '/') return this.page(res)
+      if (req.method === 'GET' && url.pathname === '/') {
+        if (!this.options.sessions.allow('page', remote(req), 20, 60_000)) return error(res, 429, 'Too many page loads; try again later.')
+        return this.page(res, remote(req))
+      }
       if (req.method === 'GET' && url.pathname === '/api/state') {
         const session = this.authenticate(req, res)
         if (!session) return
@@ -56,7 +62,7 @@ export class BoxPhoneProtocol {
       }
       if (url.pathname === '/api/pair' || url.pathname === '/api/pair-status') {
         const nonce = header(req, 'x-singz-csrf')
-        if (!nonce || !this.options.sessions.validNonce(nonce)) return error(res, 403, 'The pairing page expired; reload it.')
+        if (!nonce || !this.options.sessions.validNonce(nonce, remote(req))) return error(res, 403, 'The pairing page expired; reload it.')
       }
       if (url.pathname === '/api/pair') return await this.pair(req, res)
       if (url.pathname === '/api/pair-status') return await this.pairStatus(req, res)
@@ -67,8 +73,8 @@ export class BoxPhoneProtocol {
     }
   }
 
-  private page(res: ServerResponse): void {
-    const nonce = this.options.sessions.issueNonce()
+  private page(res: ServerResponse, address: string): void {
+    const nonce = this.options.sessions.issueNonce(address)
     const body = phoneControllerPage(nonce)
     res.writeHead(200, {
       'Content-Type': 'text/html; charset=utf-8', 'Content-Length': Buffer.byteLength(body),
@@ -88,7 +94,7 @@ export class BoxPhoneProtocol {
   private authenticate(req: IncomingMessage, res: ServerResponse): PhoneSession | null {
     const authorization = header(req, 'authorization')
     const token = authorization?.startsWith('Bearer ') ? authorization.slice(7) : ''
-    const session = token.length <= 128 ? this.options.sessions.authenticate(token) : null
+    const session = token.length <= 128 ? this.options.sessions.authenticate(token, remote(req)) : null
     if (!session) {
       error(res, 401, 'Phone authorization expired or was revoked. Pair again.')
       return null
@@ -97,13 +103,13 @@ export class BoxPhoneProtocol {
   }
 
   private async pair(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (!this.options.sessions.allow(`pair:${req.socket.remoteAddress ?? 'unknown'}`, 10, 60_000)) {
+    if (!this.options.sessions.allow('pair', remote(req), 10, 60_000)) {
       return error(res, 429, 'Too many pairing attempts; try again later.')
     }
     const body = await readJson(req)
     if (!body.ok) return error(res, body.status, body.error)
     if (!record(body.value) || !keys(body.value, ['invitation', 'name'])) return error(res, 400, 'The pairing request is invalid.')
-    const result = this.options.sessions.pair(body.value.invitation, body.value.name, header(req, 'x-singz-csrf') ?? '')
+    const result = this.options.sessions.pair(body.value.invitation, body.value.name, header(req, 'x-singz-csrf') ?? '', remote(req))
     if (!result.ok) {
       const status = result.code === 'rate-limited' ? 429 : result.code === 'unavailable' ? 503 : 403
       return error(res, status, result.code === 'rate-limited' ? 'Too many phones are waiting.' : 'The invitation or pairing request is invalid or expired.')
@@ -117,7 +123,7 @@ export class BoxPhoneProtocol {
     if (!record(body.value) || !keys(body.value, ['requestId', 'pollSecret'])) {
       return json(res, 401, { status: 'denied', error: 'Pairing is no longer authorized.' })
     }
-    const result = this.options.sessions.pairStatus(body.value.requestId, body.value.pollSecret)
+    const result = this.options.sessions.pairStatus(body.value.requestId, body.value.pollSecret, remote(req))
     if (!result.ok) return json(res, 401, { status: 'denied', error: 'Pairing is no longer authorized.' })
     return json(res, 200, result.value)
   }
@@ -129,7 +135,7 @@ export class BoxPhoneProtocol {
     if (!nonce || !this.options.sessions.validSessionNonce(session, nonce)) {
       return error(res, 403, 'The phone session needs a fresh pairing page.')
     }
-    if (!this.options.sessions.allow(`command:${session.sessionId}`, 20, 10_000)) {
+    if (!this.options.sessions.allow('command', session.sessionId, 20, 10_000)) {
       return error(res, 429, 'Too many commands; wait a moment and try again.')
     }
     const body = await readJson(req)

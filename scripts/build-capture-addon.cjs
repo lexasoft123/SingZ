@@ -18,7 +18,7 @@ const { createHash } = require('node:crypto')
 const { get } = require('node:https')
 const { basename, dirname, isAbsolute, join, relative, resolve, sep } = require('node:path')
 const { spawnSync } = require('node:child_process')
-const { zcoreGitlinkRevision, loopzBuildInputs } = require('./zcore-gitlink.cjs')
+const { zcoreGitlinkRevision, boxLoopzRoutingEnabled, loopzFingerprintInputs } = require('./zcore-gitlink.cjs')
 const {
   assertHostCanBuildTarget,
   assertSourceFingerprintUnchanged,
@@ -248,9 +248,9 @@ function extractHeaders(archivePath, cwd, extract = run) {
 // One fingerprint drives the immutable runtime path and the addon's compiled
 // identity. Keep this byte-for-byte equivalent to captureSourceFingerprint()
 // in src/main/capture.ts; a unit test compares both implementations.
-function sourceFingerprint() {
+function sourceFingerprint(targetPlatform = platform) {
   const zcoreRevision = zcoreGitlinkRevision(root)
-  const loopz = loopzBuildInputs(root)
+  const loopz = loopzFingerprintInputs(root, targetPlatform)
   const files = []
   const walk = (dir) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -271,12 +271,12 @@ function sourceFingerprint() {
     join(root, 'scripts', 'zcore-gitlink.cjs'),
     join(root, 'scripts/ccache-launcher.sh'),
     join(root, 'scripts/ccache-launcher.ps1'), __filename)
-  files.push(...loopz.files)
+  if (loopz) files.push(...loopz.files)
   files.sort()
   const hash = createHash('sha1')
   hash.update(`electron ${electronVersion}\n`)
   hash.update(`third_party/zcore.gitlink ${zcoreRevision}\n`)
-  hash.update(`third_party/loopz.gitlink ${loopz.revision}\n`)
+  if (loopz) hash.update(`third_party/loopz.gitlink ${loopz.revision}\n`)
   for (const file of files) {
     hash.update(`${relative(root, file)} ${statSync(file).size} `)
     hash.update(createHash('sha1').update(readFileSync(file)).digest('hex'))
@@ -755,7 +755,7 @@ async function main() {
       '-DSINGZ_BUILD_HOST_TOOLS=OFF',
       '-DSINGZ_CORE_TESTS=OFF',
       '-DSINGZ_BUILD_ELECTRON_CAPTURE=ON',
-      `-DSINGZ_BOX_LOOPZ_ROUTING=${platform === 'linux' ? 'ON' : 'OFF'}`,
+      `-DSINGZ_BOX_LOOPZ_ROUTING=${boxLoopzRoutingEnabled(platform) ? 'ON' : 'OFF'}`,
       '-DCMAKE_BUILD_TYPE=Release',
       `-DSINGZ_NODE_INCLUDE_DIR=${includeDir}`,
       `-DSINGZ_CAPTURE_ELECTRON=${electronVersion}`,

@@ -628,7 +628,13 @@ export class MultitrackEngine {
       this.stopTransportForTeardown()
       this.listeners.clear()
     })()
-    return this.teardownPending = operation
+    this.teardownPending = operation
+    // As in teardown(): a failed detach must stay retryable rather than make
+    // every later detach or teardown replay the same rejection.
+    void operation.catch(() => {
+      if (this.teardownPending === operation) this.teardownPending = null
+    })
+    return operation
   }
 
   subscribe(fn: () => void): () => void {

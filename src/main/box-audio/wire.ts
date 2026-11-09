@@ -11,6 +11,9 @@ export function boxAudioLines(limit: number, accept: (value: unknown) => void, p
       if (end > limit) throw new Error('Box audio frame too large')
       const line = pending.subarray(0, end).toString('utf8')
       pending = pending.subarray(end + 1)
+      // A completed frame is progress: restart any incomplete-frame deadline
+      // before a following partial frame in the same chunk arms a fresh one.
+      progress(false)
       accept(JSON.parse(line))
     }
   }

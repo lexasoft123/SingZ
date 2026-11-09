@@ -3,7 +3,7 @@ import type { TrackState } from '../audio/engine'
 import { formatSongVolume, songVolumeFromDb, songVolumeToDb } from '../../../shared/song-volume'
 import { laneLabel, stemLabel, TRACK_META } from '../model'
 import { t } from './i18n'
-import { microphoneSlotLevel, type MicrophoneSnapshot } from './microphones'
+import { microphoneSlotLevel, useMicrophoneSnapshot, type BoxMicrophones, type MicrophoneSnapshot } from './microphones'
 import { tMicrophone } from './settings-i18n'
 
 export type MixerTab = 'main' | 'stems'
@@ -34,6 +34,7 @@ function Level({ id, label, volume, master, onChange }: {
 }
 
 export function Mixer({
+  microphones,
   microphoneSnapshot,
   tab,
   tracks,
@@ -48,6 +49,7 @@ export function Mixer({
   onToggle,
   onClose
 }: {
+  microphones?: BoxMicrophones
   microphoneSnapshot?: MicrophoneSnapshot
   tab: MixerTab
   tracks: TrackState[]
@@ -76,7 +78,7 @@ export function Mixer({
       <div className="mixer-column-labels"><span>{t('box.mix.channel')}</span><span>{t('box.mix.level')}</span><span>{t('box.mix.muteSolo')}</span><span>{t('box.mix.state')}</span></div>
       <div className="mixer-rows" data-count={ids.length}>{ids.map(id => {
         if (id === 'mic1' || id === 'mic2') {
-          return <MixerMicrophoneRow id={id} snapshot={microphoneSnapshot} key={id} />
+          return <MixerMicrophoneRow id={id} microphones={microphones} snapshot={microphoneSnapshot} key={id} />
         }
         const track = tracks.find(candidate => candidate.id === id)
         const label = id === 'master' ? t('box.mix.master') : id === 'vocals' && tab === 'main' ? t('box.mix.lead') : track ? laneLabel({ id, label: stemLabel(id) ?? id }) : stemLabel(id) ?? id
@@ -104,7 +106,8 @@ export function Mixer({
 }
 
 /** Input observation only: private analysis does not control monitor gain/mute. */
-export function MixerMicrophoneRow({ id, snapshot }: { id: 'mic1' | 'mic2'; snapshot?: MicrophoneSnapshot }): React.JSX.Element {
+export function MixerMicrophoneRow({ id, microphones, snapshot: snapshotProp }: { id: 'mic1' | 'mic2'; microphones?: BoxMicrophones; snapshot?: MicrophoneSnapshot }): React.JSX.Element {
+  const snapshot = useMicrophoneSnapshot(microphones, snapshotProp)
   const channel = id === 'mic1' ? 0 : 1
   const level = microphoneSlotLevel(snapshot, channel)
   const label = t(channel === 0 ? 'box.player.mic1' : 'box.player.mic2')

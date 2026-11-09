@@ -10,6 +10,10 @@ directories:
   output: dist/box
 files:
   - '!electron-builder.box.yml'
+  # The Box CEC/audio support files ship once, outside the asar, as
+  # resources/box-audio (extraResources below). Only unpackaged development
+  # runs read resources/linux from the checkout.
+  - '!resources/linux{,/**/*}'
 artifactName: SingZ-Box-${version}-linux-${arch}.${ext}
 extraResources:
   - from: resources/linux

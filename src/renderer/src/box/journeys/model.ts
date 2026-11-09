@@ -3,9 +3,9 @@ import type { JourneyPage } from './types'
 
 export type SetupStage = 'boot' | 'welcome' | 'remote' | 'network' | 'audio' | 'account' | 'done'
 export type Confirmation =
-  | { kind: 'remove-cache'; dir: string; name: string; requireIdle: boolean }
+  | { kind: 'remove-cache'; dir: string; name: string; bytes: number; requireIdle: boolean }
   | { kind: 'phone-revoke'; sessionId: string; name: string }
-  | { kind: 'phone-stop' | 'drive-signout' | 'update-install' | 'rollback' | 'reboot' | 'factory-reset' }
+  | { kind: 'phone-stop' | 'drive-signout' | 'update-install' | 'rollback' | 'reboot' | 'factory-reset' | 'wifi-switch' }
 export type PendingConfirmation = Confirmation & { pending: boolean }
 export const confirmationSafeChoice = (confirmation: Confirmation): 'keep' | 'cancel' =>
   confirmation.kind === 'remove-cache' ? 'keep' : 'cancel'
@@ -89,6 +89,11 @@ export function journeyInteractionLocked(state: JourneyState, busy: {
   return state.confirmation !== null || state.committed !== null ||
     snapshot?.update.state === 'installing' || snapshot?.update.state === 'rollback' ||
     busy.preferences || busy.platform || busy.phones || busy.storage || busy.drive
+}
+
+/** S18: starting Wi-Fi setup while a network is connected is a disruptive switch. */
+export function wifiStartNeedsConfirmation(snapshot: BoxPlatformSnapshot | null): boolean {
+  return snapshot?.network.state === 'connected'
 }
 
 export type SystemCommand = 'update-check' | 'update-stage' | 'update-install' | 'rollback' | 'reboot' | 'reset'

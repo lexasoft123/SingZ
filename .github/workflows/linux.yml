@@ -103,6 +103,10 @@ jobs:
           # carries the arch so one leg can never restore the other's cached
           # binaries (a cache hit must never launder an x64 helper into an
           # arm64 package or vice versa).
+          # third_party/loopz is deliberately absent: LoopZ links only into the
+          # capture addon (SINGZ_BOX_LOOPZ_ROUTING), which is rebuilt every run
+          # and is not under these cached paths. Add it if a cached engine or
+          # vendor-analyze.sh ever configures LoopZ routing.
           key: linux-${{ matrix.arch }}-engines-debian13-clang21-v1-${{ hashFiles('package-lock.json', 'scripts/**', '!scripts/ci/**', 'CMakeLists.txt', '.gitmodules', 'scripts/verify-zcore-submodule.py', 'scripts/zcore-gitlink.cjs', 'cmake/**', 'native/**', 'zcore/**', 'zdsp/**', 'tools/native/**', 'third_party/native/**', 'third_party/zcore/**') }}-${{ steps.zcore.outputs.revision }}
 
       - name: Restore compiler objects

@@ -1,5 +1,6 @@
 import type { BoxAPI, BoxQueueRef, BoxState } from '../../../../shared/box-contract'
 import type { ProjectListItem } from '../../../../shared/types'
+import { tCollection } from './i18n'
 import { collectionEntryByViewDir, driveEntryId, localEntryId, queueViewItem, type CollectionEntry } from './types'
 
 export function queueRefKey(ref: BoxQueueRef): string {
@@ -24,8 +25,8 @@ export function entriesWithQueueRefs(entries: CollectionEntry[], refs: BoxQueueR
   for (const ref of refs) {
     if (entryForQueueRef(next, ref)) continue
     next.push(ref.kind === 'local'
-      ? { id: localEntryId(ref.dir), remoteId: null, name: 'Unavailable project', local: null, unavailable: true }
-      : { id: driveEntryId(ref.id), remoteId: ref.id, name: 'Unavailable Drive project', local: null, unavailable: true })
+      ? { id: localEntryId(ref.dir), remoteId: null, name: tCollection('collection.unavailableProject'), local: null, unavailable: true }
+      : { id: driveEntryId(ref.id), remoteId: ref.id, name: tCollection('collection.unavailableDriveProject'), local: null, unavailable: true })
   }
   return next
 }

@@ -171,7 +171,8 @@ body { font-family: var(--sz-font-display); -webkit-font-smoothing: antialiased;
 .mixer-play-state { margin-left: auto; font-size: 16px; color: var(--sz-dim); }
 .mixer-column-labels, .mixer-row { display: grid; grid-template-columns: 260px minmax(0, 1fr) 118px 160px; gap: 28px; align-items: center; padding: 0 12px; }
 .mixer-column-labels { font-size: 13px; color: var(--sz-dim); }
-.mixer-rows { display: flex; flex-direction: column; justify-content: center; min-height: 0; overflow-y: auto; }
+/* `safe` falls back to start when 7+ stems overflow, so the first rows stay scrollable. */
+.mixer-rows { display: flex; flex-direction: column; justify-content: safe center; min-height: 0; overflow-y: auto; }
 .mixer-row { height: 48px; min-height: 48px; border-bottom: 1px solid var(--sz-line); border-radius: 6px; }
 .mixer-rows[data-count="4"] .mixer-row { height: 70px; min-height: 70px; }
 .mixer-row:focus-within { outline: 2px solid var(--sz-accent); outline-offset: 0; background: var(--sz-accent-soft); }

@@ -169,15 +169,20 @@ export function resolveCaptureAddonPath(runtime: CaptureAddonRuntime): string {
 }
 
 /** Same native-input fingerprint as scripts/build-capture-addon.cjs. */
-export function captureSourceFingerprint(root: string, electronVersion: string): string {
+export function captureSourceFingerprint(
+  root: string,
+  electronVersion: string,
+  platform: NodeJS.Platform = process.platform
+): string {
   // Source fingerprints run only for development checkouts. Packaged apps do
   // not ship build scripts, so loading this helper must stay inside this path.
-  const { zcoreGitlinkRevision, loopzBuildInputs } = require(join(root, 'scripts', 'zcore-gitlink.cjs')) as {
+  const { zcoreGitlinkRevision, loopzFingerprintInputs } = require(join(root, 'scripts', 'zcore-gitlink.cjs')) as {
     zcoreGitlinkRevision(root: string): string
-    loopzBuildInputs(root: string): { revision: string; files: string[] }
+    loopzFingerprintInputs(root: string, platform: string): { revision: string; files: string[] } | null
   }
   const zcoreRevision = zcoreGitlinkRevision(root)
-  const loopz = loopzBuildInputs(root)
+  // LoopZ is part of the addon only where Box routing is built (Linux).
+  const loopz = loopzFingerprintInputs(root, platform)
   const files: string[] = []
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -199,12 +204,12 @@ export function captureSourceFingerprint(root: string, electronVersion: string):
     join(root, 'scripts', 'ccache-launcher.sh'),
     join(root, 'scripts', 'ccache-launcher.ps1'),
     join(root, 'scripts', 'build-capture-addon.cjs'))
-  files.push(...loopz.files)
+  if (loopz) files.push(...loopz.files)
   files.sort()
   const hash = createHash('sha1')
   hash.update(`electron ${electronVersion}\n`)
   hash.update(`third_party/zcore.gitlink ${zcoreRevision}\n`)
-  hash.update(`third_party/loopz.gitlink ${loopz.revision}\n`)
+  if (loopz) hash.update(`third_party/loopz.gitlink ${loopz.revision}\n`)
   for (const file of files) {
     hash.update(`${relative(root, file)} ${statSync(file).size} `)
     hash.update(createHash('sha1').update(readFileSync(file)).digest('hex'))
