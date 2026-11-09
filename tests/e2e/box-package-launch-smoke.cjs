@@ -32,7 +32,7 @@ const inheritedOverrides = [
   'SINGZ_BOX_PLATFORM_SOCKET', 'SINGZ_MODELS_DIR', 'SINGZ_PACK_DIR', 'SINGZ_PROJECTS_ROOT',
   'SINGZ_CAPTURE_ADDON', 'SINGZ_GDRIVE_CONFIG', 'SINGZ_E2E_HOOKS', 'SINGZ_E2E_OZONE',
   'SINGZ_E2E_X11_SMOKE', 'SINGZ_BOX_AUDIO_HOST_EXECUTABLE', 'ELECTRON_RUN_AS_NODE',
-  'E2E_PACKAGED', 'SINGZ_E2E_PACKAGED'
+  'E2E_PACKAGED', 'SINGZ_E2E_PACKAGED', 'SINGZ_E2E_HIDDEN'
 ]
 
 function launchEnvironment() {
@@ -44,8 +44,7 @@ function launchEnvironment() {
     XDG_CACHE_HOME: cacheHome,
     SINGZ_MUTE: '1',
     SINGZ_NO_SYNC: '1',
-    SINGZ_NO_SYSTEM_ENGINES: '1',
-    SINGZ_E2E_HIDDEN: '1'
+    SINGZ_NO_SYSTEM_ENGINES: '1'
   }
   for (const key of inheritedOverrides) delete env[key]
   delete env.SINGZ_LANG
@@ -166,6 +165,9 @@ async function run() {
     await page.waitForFunction(() => document.activeElement?.getAttribute('data-focus') === 'journey-network')
     const focus = await page.evaluate(() => document.activeElement?.getAttribute('data-focus'))
     assert.equal(focus, 'journey-network', 'remote ArrowDown must move focus off Audio to Network')
+    const window = await app.browserWindow(page)
+    assert.equal(await window.evaluate(browserWindow => browserWindow.isVisible()), true,
+      'the current Box BrowserWindow must be visible before its screenshot')
     await page.screenshot({ path: path.join(evidence, 'box-settings-remote-focus.png') })
 
     await audio.focus()

@@ -4,8 +4,10 @@ const { spawnSync } = require('node:child_process')
 const fs = require('node:fs')
 const path = require('node:path')
 const { test } = require('node:test')
+const vm = require('node:vm')
 
 const repository = path.resolve(__dirname, '../..')
+const launchSmokePath = path.join(repository, 'tests/e2e/box-package-launch-smoke.cjs')
 const scriptSource = process.env.SINGZ_TEST_LINUX_PACKAGE_SCRIPT ||
   path.join(repository, 'scripts/ci/linux-package.sh')
 const source = fs.readFileSync(scriptSource, 'utf8')
@@ -311,4 +313,150 @@ test('workflow uploads both package sets without inventing Box update metadata',
   assert.doesNotMatch(workflow, /dist\/box\/latest-linux/)
   assert.match(workflow, /SINGZ_CI_STAGE: installed-test/)
   assert.match(workflow, /SINGZ_E2E_PACKAGED: \/opt\/SingZ\/singz/)
+})
+
+function loadLaunchFixture(t, text = fs.readFileSync(launchSmokePath, 'utf8')) {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join('/tmp/', 'sz-box-launch-')))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(root, 'tmp'))
+  const processEnv = {
+    ...process.env,
+    HOME: path.join(root, 'inherited-home'),
+    XDG_CONFIG_HOME: path.join(root, 'inherited-config'),
+    XDG_DATA_HOME: path.join(root, 'inherited-data'),
+    XDG_CACHE_HOME: path.join(root, 'inherited-cache'),
+    SINGZ_E2E_RESULTS: path.join(root, 'evidence')
+  }
+  const launches = []
+  const page = {}
+  const instrumented = text.replace(/\nrun\(\)\s*$/,
+    '\nmodule.exports = { inheritedOverrides, launch, launchEnvironment, scratch }\n')
+  assert.notEqual(instrumented, text, 'the fixture entry point must be replaced with bounded exports')
+  const fixtureModule = { exports: {} }
+  const fixtureRequire = id => {
+    if (id === '../shared/watchdog.cjs') return { arm: () => ({}) }
+    if (id === 'node:os') return { ...require(id), tmpdir: () => path.join(root, 'tmp') }
+    if (id === 'playwright-core') {
+      return {
+        _electron: {
+          launch: async options => {
+            launches.push(options)
+            return { firstWindow: async () => page }
+          }
+        }
+      }
+    }
+    return require(id)
+  }
+  vm.runInNewContext(instrumented, {
+    __dirname: path.dirname(launchSmokePath),
+    __filename: launchSmokePath,
+    module: fixtureModule,
+    exports: fixtureModule.exports,
+    process: { env: processEnv },
+    require: fixtureRequire,
+    console
+  }, { filename: launchSmokePath })
+  for (const key of fixtureModule.exports.inheritedOverrides) processEnv[key] = 'inherited'
+  processEnv.SINGZ_E2E_HIDDEN = '1'
+  processEnv.SINGZ_LANG = 'inherited'
+  return { ...fixtureModule.exports, launches, page, processEnv }
+}
+
+async function assertLaunchEnvironment(f) {
+  const page = await f.launch(process.execPath)
+  assert.equal(page, f.page)
+  assert.equal(f.launches.length, 1)
+  const [options] = f.launches
+  assert.equal(options.executablePath, process.execPath)
+  assert.deepEqual(Array.from(options.args), [])
+  const env = options.env
+  assert.equal(env.SINGZ_E2E_HIDDEN, undefined,
+    'SINGZ_E2E_HIDDEN must be absent from the visible Box package launch')
+  assert.equal(Object.hasOwn(env, 'SINGZ_E2E_HIDDEN'), false)
+  for (const key of f.inheritedOverrides) assert.equal(env[key], undefined, key)
+  assert.equal(env.SINGZ_LANG, undefined)
+  for (const [key, directory] of [
+    ['HOME', 'home'],
+    ['XDG_CONFIG_HOME', 'config'],
+    ['XDG_DATA_HOME', 'data'],
+    ['XDG_CACHE_HOME', 'cache']
+  ]) {
+    const expected = path.join(f.scratch, directory)
+    assert.equal(env[key], expected, key)
+    assert.equal(fs.statSync(expected).mode & 0o777, 0o700, key)
+  }
+  assert.equal(env.SINGZ_MUTE, '1')
+  assert.equal(env.SINGZ_NO_SYNC, '1')
+  assert.equal(env.SINGZ_NO_SYSTEM_ENGINES, '1')
+}
+
+async function assertVisibilityGuard(text, visible) {
+  const start = text.indexOf('    const window = await app.browserWindow(page)')
+  const screenshotStatement =
+    "    await page.screenshot({ path: path.join(evidence, 'box-settings-remote-focus.png') })"
+  const end = text.indexOf(screenshotStatement, start)
+  assert.ok(start >= 0 && end >= 0, 'the actual current-page visibility guard and screenshot must be present')
+  const page = { screenshot: async () => { screenshotCount++ } }
+  const browserWindow = { isVisible: () => { visibilityChecks++; return visible } }
+  const app = {
+    browserWindow: async value => {
+      selectedPage = value
+      return { evaluate: async callback => callback(browserWindow) }
+    }
+  }
+  let selectedPage
+  let visibilityChecks = 0
+  let screenshotCount = 0
+  let failure
+  try {
+    await vm.runInNewContext(`(async () => {\n${text.slice(start, end + screenshotStatement.length)}\n})()`, {
+      app, page, assert, path, evidence: '/tmp/box-visibility-evidence'
+    })
+  } catch (error) {
+    failure = error
+  }
+  assert.equal(selectedPage, page, 'the guard must resolve the BrowserWindow for the current page')
+  assert.equal(visibilityChecks, 1, 'the guard must evaluate isVisible on that BrowserWindow')
+  if (visible) {
+    assert.ifError(failure)
+    assert.equal(screenshotCount, 1)
+  } else {
+    assert.ok(failure instanceof assert.AssertionError)
+    assert.equal(failure.actual, false)
+    assert.equal(failure.expected, true)
+    assert.equal(screenshotCount, 0, 'a hidden current window must fail before screenshot')
+  }
+}
+
+test('Box launch executes with sanitized hidden mode, private roots and no arguments', async t => {
+  await assertLaunchEnvironment(loadLaunchFixture(t))
+})
+
+test('Box launch negative control rejects in-memory restored forced HIDDEN', async t => {
+  const source = fs.readFileSync(launchSmokePath, 'utf8')
+  const withoutHiddenOverride = source.replace(
+    "  'E2E_PACKAGED', 'SINGZ_E2E_PACKAGED', 'SINGZ_E2E_HIDDEN'\n]",
+    "  'E2E_PACKAGED', 'SINGZ_E2E_PACKAGED'\n]"
+  )
+  assert.notEqual(withoutHiddenOverride, source, 'old source must not sanitize inherited HIDDEN')
+  const restoredHidden = withoutHiddenOverride.replace(
+    "    SINGZ_NO_SYSTEM_ENGINES: '1'\n",
+    "    SINGZ_NO_SYSTEM_ENGINES: '1',\n    SINGZ_E2E_HIDDEN: '1'\n"
+  )
+  assert.notEqual(restoredHidden, withoutHiddenOverride, 'old source must force HIDDEN')
+  await assert.rejects(assertLaunchEnvironment(loadLaunchFixture(t, restoredHidden)), error => {
+    assert.equal(error.code, 'ERR_ASSERTION')
+    assert.equal(error.actual, '1')
+    assert.equal(error.expected, undefined)
+    assert.match(error.message, /SINGZ_E2E_HIDDEN must be absent/)
+    console.log(`Negative control rejected restored forced HIDDEN: ${error.message}`)
+    return true
+  })
+})
+
+test('Box screenshot guard checks the current page BrowserWindow and rejects hidden windows', async () => {
+  const text = fs.readFileSync(launchSmokePath, 'utf8')
+  await assertVisibilityGuard(text, true)
+  await assertVisibilityGuard(text, false)
 })
