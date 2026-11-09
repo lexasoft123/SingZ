@@ -8,9 +8,9 @@ import type { MicrophoneSnapshot } from '../../src/renderer/src/box/microphones'
 
 function snapshot(): MicrophoneSnapshot {
   return { phase: 'running', capability: 'available', devices: [], inventoryError: null, error: null,
-    selection: { uid: 'alsa:flow8', channel: 7 },
-    active: { uid: 'alsa:flow8', channel: 7, channels: 10, generation: '11', label: 'FLOW 8' },
-    levels: { generation: '11', receivedAt: Date.now(), peak: [0.25, 0.5, ...Array(8).fill(0.9)], rms: Array(10).fill(0.1) }, pitch: null }
+    selection: { uid: 'alsa:flow8', channel: 7 }, enabledChannelsByDevice: { 'alsa:flow8': Array.from({ length: 10 }, (_, i) => i) },
+    active: { uid: 'alsa:flow8', channel: 7, channels: 10, generation: '11', label: 'FLOW 8', enabledChannels: Array.from({ length: 10 }, (_, i) => i) },
+    levels: { generation: '11', receivedAt: Date.now(), channelIndices: Array.from({ length: 10 }, (_, i) => i), peak: [0.25, 0.5, ...Array(8).fill(0.9)], rms: Array(10).fill(0.1) }, pitch: null }
 }
 const row = (value: MicrophoneSnapshot | undefined, id: 'mic1' | 'mic2' = 'mic1'): string => renderToStaticMarkup(createElement(MixerMicrophoneRow, { id, snapshot: value }))
 beforeEach(async () => { vi.useFakeTimers(); vi.setSystemTime(1000); await prepareBoxLocale('en') })
@@ -25,6 +25,17 @@ describe('mixer private microphone input observation', () => {
     expect(html).toContain('aria-valuenow="0.25"'); expect(html).toContain('aria-valuenow="0.5"')
     expect(html).not.toContain('aria-valuenow="0.9"')
     expect(noop).not.toHaveBeenCalled()
+  })
+  it('maps the TV microphone slots to the selected noncontiguous physical inputs', () => {
+    const value = snapshot()
+    value.active!.channels = 10
+    value.active!.enabledChannels = [2, 7]
+    value.enabledChannelsByDevice[value.active!.uid] = [2, 7]
+    value.levels!.channelIndices = [2, 7]
+    value.levels!.peak = [0.25, 0.5]
+    value.levels!.rms = [0.1, 0.2]
+    expect(row(value, 'mic1')).toContain('aria-valuenow="0.25"')
+    expect(row(value, 'mic2')).toContain('aria-valuenow="0.5"')
   })
   it('keeps mic gain/mute/solo unavailable while clearly labeling real analysis input levels', () => {
     const html = row(snapshot())

@@ -568,6 +568,14 @@ export interface CaptureAnalysisWindow {
   dbfs: number
 }
 
+export interface CaptureStartConfig {
+  deviceUid?: string
+  inputChannel: number
+  ringBlocks?: number
+  /** Box private reader: unique increasing physical channels, including inputChannel. */
+  enabledChannels?: number[]
+}
+
 export interface CaptureStartResult {
   ok: boolean
   state: CaptureStateName
@@ -585,7 +593,7 @@ export interface CaptureStartResult {
 
 export interface CaptureStats {
   /** Native scalar levels from a private LoopZ history reader, never PCM. */
-  microphoneLevels?: { valid: boolean; channels: number; ownershipGeneration: string; peak: number[]; rms: number[] }
+  microphoneLevels?: { valid: boolean; channels: number; ownershipGeneration: string; channelIndices?: number[]; peak: number[]; rms: number[] }
   deliveredBlocks: string
   deliveredFrames: string
   overruns: string
@@ -1534,7 +1542,7 @@ export interface SingzApi {
     { ok: true; devices: CaptureInputDevice[] } | { ok: false; devices: []; error: string }
   >
   beginCapture(
-    config: { deviceUid?: string; inputChannel: number; ringBlocks?: number },
+    config: CaptureStartConfig,
     ownershipGeneration: string
   ): Promise<CaptureStartResult>
   cancelCapture(

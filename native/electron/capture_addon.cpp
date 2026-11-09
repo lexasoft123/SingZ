@@ -5,6 +5,8 @@
 #include "../playback/box_input_capture.h"
 #endif
 #include <node_api.h>
+#include <span>
+#include <algorithm>
 
 #include "audio_monitor_session.h"
 #include "native_audio_ownership.h"
@@ -65,11 +67,12 @@ struct EventBridge {
 class CaptureInput {
  public:
   singz::AudioInputResult start(const singz::AudioInputConfig& config,
-      singz::AudioInputSink sink, const std::vector<singz::AudioInputDevice>* inventory) {
+      singz::AudioInputSink sink, const std::vector<singz::AudioInputDevice>* inventory,
+      std::span<const uint32_t> enabledChannels = {}) {
 #if defined(SINGZ_BOX_LOOPZ_ROUTING)
     if (singz::boxRoutingOwnsCapture()) {
       if (!box_) box_ = std::make_unique<singz::BoxInputCapture>();
-      return box_->start(config, std::move(sink), inventory);
+      return box_->start(config, std::move(sink), inventory, enabledChannels);
     }
 #endif
     if (!normal_) normal_ = std::make_unique<singz::AudioInput>();
@@ -559,6 +562,36 @@ napi_value beginImpl(napi_env env, napi_callback_info info) {
                           "capture channels and ring blocks must be exact bounded integers");
     return undefined(env);
   }
+  std::vector<uint32_t> enabledChannels;
+  bool explicitChannels = false;
+  napi_has_named_property(env, argv[0], "enabledChannels", &explicitChannels);
+  if (explicitChannels) {
+    napi_value value;
+    napi_valuetype type;
+    if (napi_get_named_property(env, argv[0], "enabledChannels", &value) == napi_ok &&
+        napi_typeof(env, value, &type) == napi_ok && type == napi_undefined)
+      explicitChannels = false;
+  }
+  if (explicitChannels) {
+    bool supported = false;
+#if defined(SINGZ_BOX_LOOPZ_ROUTING)
+    supported = singz::boxRoutingOwnsCapture();
+#endif
+    if (!supported || !getExactU32Array(env, argv[0], "enabledChannels", &enabledChannels) ||
+        !std::is_sorted(enabledChannels.begin(), enabledChannels.end()) ||
+        std::adjacent_find(enabledChannels.begin(), enabledChannels.end()) != enabledChannels.end() ||
+        !std::binary_search(enabledChannels.begin(), enabledChannels.end(), config.channel)) {
+      napi_throw_type_error(env, nullptr, "enabledChannels requires Box and sorted unique physical channels including inputChannel");
+      return undefined(env);
+    }
+    const auto inventory = captureInputDevices();
+    const auto device = std::find_if(inventory.begin(), inventory.end(),
+        [&](const auto& row) { return row.uid == config.deviceUid; });
+    if (device == inventory.end() || enabledChannels.back() >= device->channels) {
+      napi_throw_type_error(env, nullptr, "enabledChannels contains an unavailable physical channel");
+      return undefined(env);
+    }
+  }
   const singz::NativeAudioAcquireResult acquired =
       nativeAudioOwnership.acquire(singz::NativeAudioOwnerKind::Capture,
                                    generation);
@@ -616,7 +649,7 @@ napi_value beginImpl(napi_env env, napi_callback_info info) {
     analyzer->push(block, [analyzer](const AnalysisWindow& window) {
       if (owner.bridge) publishLatest(owner.bridge, window, *analyzer);
     });
-  }, &inventory);
+  }, &inventory, enabledChannels);
   owner.lastState = result.state;
   owner.lastError = result.error;
   if (!result.ok) stopLocked(generation, true);
@@ -729,6 +762,13 @@ napi_value stats(napi_env env, napi_callback_info) {
     for (uint32_t channel = 0; channel < levels.channels; ++channel) {
       napi_set_element(env, peak, channel, numberValue(env, levels.peak[channel]));
       napi_set_element(env, rms, channel, numberValue(env, levels.rms[channel]));
+    }
+    if (levels.channels) {
+      napi_value indices;
+      napi_create_array_with_length(env, levels.channels, &indices);
+      for (uint32_t channel = 0; channel < levels.channels; ++channel)
+        napi_set_element(env, indices, channel, uintValue(env, levels.channelIndices[channel]));
+      set(env, meter, "channelIndices", indices);
     }
     set(env, meter, "peak", peak); set(env, meter, "rms", rms);
     set(env, result, "microphoneLevels", meter);

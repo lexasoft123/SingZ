@@ -12,6 +12,13 @@
 #include <thread>
 
 namespace singz {
+std::optional<loopz::AudioReadResult> box_input_detail::readEnabledChannels(
+    const loopz::AudioSource& source, uint64_t host, double rate,
+    loopz::RoutingOutput output, uint32_t frames, loopz::AudioReadCursor& cursor,
+    std::span<const uint32_t> enabledChannels) noexcept {
+  return source.readChannels(host, rate, output, frames, cursor, enabledChannels,
+                             std::nullopt);
+}
 namespace {
 constexpr uint32_t frames = BoxInputReadSchedule::blockFrames,
                    rate = BoxInputReadSchedule::sampleRate;
@@ -23,6 +30,8 @@ uint64_t nowNs() {
 } // namespace
 struct BoxInputCapture::Impl {
   BoxInputTap tap;
+  std::array<uint32_t, 64> enabledChannels{};
+  uint32_t enabledCount = 0, analysisIndex = 0;
   std::thread worker;
   std::atomic<bool> stopping{false};
   std::atomic<AudioInputState> state{AudioInputState::Idle};
@@ -36,11 +45,11 @@ struct BoxInputCapture::Impl {
     std::lock_guard lock(mutex);
     error = std::move(text);
   }
-  void run(uint32_t channel, AudioInputSink sink) noexcept {
+  void run(AudioInputSink sink) noexcept {
     try {
       std::array<std::array<float, frames>, 64> pcm{};
       std::array<float *, 64> planes{};
-      for (uint32_t c = 0; c < tap.device.channels; ++c)
+      for (uint32_t c = 0; c < enabledCount; ++c)
         planes[c] = pcm[c].data();
       loopz::AudioReadCursor cursor;
       uint64_t sequence = 0, generation = 1;
@@ -63,21 +72,22 @@ struct BoxInputCapture::Impl {
           const uint64_t current = nowNs();
           const uint64_t host = batch.sampleHostTimeNs(index);
           const uint64_t previousGeneration = cursor.generation;
-          const auto read = tap.source->read(
-              host, rate,
-              {std::span<float *const>(planes.data(), tap.device.channels),
-               frames},
-              frames, cursor);
+          const auto read = box_input_detail::readEnabledChannels(
+              *tap.source, host, rate,
+              {std::span<float *const>(planes.data(), enabledCount), frames},
+              frames, cursor,
+              std::span<const uint32_t>(enabledChannels.data(), enabledCount));
+          if (!read) throw std::runtime_error("Microphone source does not support enabled-channel reads");
           wakeups.fetch_add(1, std::memory_order_relaxed);
-          if (read.online && !read.missingFrames) {
-            for (uint32_t c = 0; c < tap.device.channels; ++c)
+          if (read->online && !read->missingFrames) {
+            for (uint32_t c = 0; c < enabledCount; ++c)
               for (float value : pcm[c])
                 if (!std::isfinite(value))
                   throw std::runtime_error(
                       "Microphone history contains non-finite samples");
             meterSequence.fetch_add(1, std::memory_order_acq_rel);
             std::atomic_thread_fence(std::memory_order_release);
-            for (uint32_t c = 0; c < tap.device.channels; ++c) {
+            for (uint32_t c = 0; c < enabledCount; ++c) {
               float high = 0;
               double sum = 0;
               for (float value : pcm[c]) {
@@ -119,7 +129,7 @@ struct BoxInputCapture::Impl {
             block.timestampQuality =
                 AudioInputTimestampQuality::CallbackEstimate;
             block.sampleRate = rate;
-            block.mono = pcm[channel].data();
+            block.mono = pcm[analysisIndex].data();
             block.frames = frames;
             state.store(AudioInputState::Running, std::memory_order_release);
             if (gap)
@@ -160,11 +170,38 @@ BoxInputCapture::BoxInputCapture() : impl_(std::make_unique<Impl>()) {}
 BoxInputCapture::~BoxInputCapture() { stop(); }
 AudioInputResult BoxInputCapture::start(const AudioInputConfig &config,
                                         AudioInputSink sink,
-                                        const std::vector<AudioInputDevice> *) {
+                                        const std::vector<AudioInputDevice> *,
+                                        std::span<const uint32_t> enabledChannels) {
+  std::array<uint32_t, 64> selected{};
+  const uint32_t count = enabledChannels.empty() ? 1 : uint32_t(enabledChannels.size());
+  uint32_t analysisIndex = 0;
+  // Reject invalid selections before draining a valid existing reader or
+  // acquiring a physical lease. Empty native span means selected-channel-only.
+  try {
+    if (!sink || enabledChannels.size() > selected.size() || config.channel >= 64)
+      throw std::runtime_error("Invalid enabled microphone channels");
+    if (enabledChannels.empty()) selected[0] = config.channel;
+    else std::copy(enabledChannels.begin(), enabledChannels.end(), selected.begin());
+    const auto inventory = boxRoutingInputDevices();
+    const auto device = std::find_if(inventory.begin(), inventory.end(),
+        [&](const auto& row) { return row.uid == config.deviceUid; });
+    if (device == inventory.end()) throw std::runtime_error("Microphone input is unavailable");
+    bool containsAnalysis = false;
+    for (uint32_t index = 0; index < count; ++index) {
+      if (selected[index] >= device->channels || selected[index] >= 64 ||
+          (index && selected[index] <= selected[index - 1]))
+        throw std::runtime_error("Enabled microphone channels must be sorted, unique and available");
+      if (selected[index] == config.channel) { containsAnalysis = true; analysisIndex = index; }
+    }
+    if (!containsAnalysis) throw std::runtime_error("Enabled microphone channels must include the analysis channel");
+  } catch (const std::exception& e) {
+    return AudioInputResult::failure(AudioInputState::Error, e.what(), config.channel);
+  }
   stop();
   try {
-    if (!sink)
-      throw std::runtime_error("Missing microphone analysis consumer");
+    impl_->enabledChannels = selected;
+    impl_->enabledCount = count;
+    impl_->analysisIndex = analysisIndex;
     impl_->tap = acquireBoxInputTap(config.deviceUid, config.channel);
     impl_->blocks = 0;
     impl_->delivered = 0;
@@ -184,8 +221,8 @@ AudioInputResult BoxInputCapture::start(const AudioInputConfig &config,
     // Finish allocating the response before publishing the borrowed source to
     // its worker; a preparation exception can then release the lease safely.
     impl_->worker = std::thread(
-        [this, channel = config.channel, sink = std::move(sink)]() mutable {
-          impl_->run(channel, std::move(sink));
+        [this, sink = std::move(sink)]() mutable {
+          impl_->run(std::move(sink));
         });
     return result;
   } catch (const std::exception &e) {
@@ -223,8 +260,9 @@ BoxInputMeter BoxInputCapture::meter() const {
     if (sequence & 1)
       continue;
     const auto updated = impl_->meterAt.load(std::memory_order_relaxed);
-    result.channels = impl_->tap.device.channels;
+    result.channels = impl_->enabledCount;
     for (uint32_t c = 0; c < result.channels; ++c) {
+      result.channelIndices[c] = impl_->enabledChannels[c];
       result.peak[c] = impl_->peak[c].load(std::memory_order_relaxed);
       result.rms[c] = impl_->rms[c].load(std::memory_order_relaxed);
     }

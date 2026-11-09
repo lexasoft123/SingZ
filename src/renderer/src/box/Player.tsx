@@ -6,7 +6,7 @@ import { timeText } from './metadata'
 import { PlayerLyrics } from './PlayerLyrics'
 import type { BoxTransportSnapshot } from './transport'
 import { tSettings, tMicrophone } from './settings-i18n'
-import { microphoneChannelLevel, type MicrophoneSnapshot } from './microphones'
+import { microphoneSlotLevel, type MicrophoneSnapshot } from './microphones'
 
 export function Player({
   snapshot,
@@ -100,7 +100,7 @@ export function Player({
 export function PlayerMicrophoneMeters({ snapshot }: { snapshot?: MicrophoneSnapshot }): React.JSX.Element {
   return <div className="player-meters" aria-label={tMicrophone('box.microphones.levels')}>
     {[0, 1].map(channel => {
-      const level = microphoneChannelLevel(snapshot, snapshot?.active?.uid ?? '', channel)
+      const level = microphoneSlotLevel(snapshot, channel)
       return <span className="player-microphone-row" key={channel}>
         <span>{t(channel === 0 ? 'box.player.mic1' : 'box.player.mic2')}</span>
         {level === null ? <small>{t('box.player.unavailable')}</small> : <span className="player-microphone-level" role="meter"

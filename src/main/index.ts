@@ -4,6 +4,7 @@ import { readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type {
+  CaptureStartConfig,
   DesktopMonitorConfig,
   DesktopPlaybackLaneMeasureRequest,
   DesktopPlaybackLaneMeasureResult,
@@ -736,7 +737,7 @@ function registerIpc(): void {
   }
   ipcMain.handle(
     'capture:begin',
-    async (e, config: { deviceUid?: string; inputChannel: number; ringBlocks?: number }, generation: string) => {
+    async (e, config: CaptureStartConfig, generation: string) => {
       try {
         bindNativeAudioCleanup(e.sender)
         const result = await captureOwner.begin(e.sender.id, config, String(generation), (window) => {

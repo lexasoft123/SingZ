@@ -98,6 +98,23 @@ ready.then(async () => {
   assert.equal(typeof stats.overwrittenWindows, 'string')
   const expectedProvider = process.platform === 'darwin' ? 'coreaudio' : process.platform === 'linux' ? 'alsa' : 'wasapi'
   // Playback requires provider-scoped device identities (notably wasapi: on Windows).
+  // A UID absent from inventory tests admission without opening hardware.
+  const missingMic = 'smoke:never-opened:optional-enabled-channels'
+  assert.ok(!devices.devices.some(device => device.uid === missingMic))
+  for (const [config, generation] of [
+    [{ deviceUid: missingMic, inputChannel: 0 }, 101n],
+    [{ deviceUid: missingMic, inputChannel: 0, enabledChannels: undefined }, 102n]
+  ]) {
+    let result
+    assert.doesNotThrow(() => { result = addon.beginCapture(config, generation, () => {}) })
+    assert.equal(result.ok, false, 'unavailable UID must not fall back to hardware')
+    assert.equal(addon.cancelCapture(generation).cancelled, false, 'failed admission releases ownership')
+  }
+  for (const enabledChannels of [null, [], [0, 0], [0, 64]]) {
+    assert.throws(() => addon.beginCapture({ deviceUid: missingMic, inputChannel: 0, enabledChannels }, 103n, () => {}))
+    assert.equal(addon.cancelCapture(103n).cancelled, false)
+  }
+  console.log('PASS optional enabled-channel admission and ownership release without hardware')
   const hostDevices = addon.audioHostDevices(expectedProvider)
   assert.equal(hostDevices.ok, true)
   assert.equal(hostDevices.provider, expectedProvider)

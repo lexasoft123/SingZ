@@ -3,7 +3,7 @@ import type { TrackState } from '../audio/engine'
 import { formatSongVolume, songVolumeFromDb, songVolumeToDb } from '../../../shared/song-volume'
 import { laneLabel, stemLabel, TRACK_META } from '../model'
 import { t } from './i18n'
-import { microphoneChannelLevel, type MicrophoneSnapshot } from './microphones'
+import { microphoneSlotLevel, type MicrophoneSnapshot } from './microphones'
 import { tMicrophone } from './settings-i18n'
 
 export type MixerTab = 'main' | 'stems'
@@ -106,7 +106,7 @@ export function Mixer({
 /** Input observation only: private analysis does not control monitor gain/mute. */
 export function MixerMicrophoneRow({ id, snapshot }: { id: 'mic1' | 'mic2'; snapshot?: MicrophoneSnapshot }): React.JSX.Element {
   const channel = id === 'mic1' ? 0 : 1
-  const level = microphoneChannelLevel(snapshot, snapshot?.active?.uid ?? '', channel)
+  const level = microphoneSlotLevel(snapshot, channel)
   const label = t(channel === 0 ? 'box.player.mic1' : 'box.player.mic2')
   return <div className={`mixer-row${level === null ? ' unavailable' : ''}`} data-mix-row={id}>
     <div className="mixer-channel"><i /><div><strong>{label}</strong><small>{t('box.mix.micBody')}</small></div></div>

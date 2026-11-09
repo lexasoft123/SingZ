@@ -178,3 +178,8 @@
 .settings-global-overrides [aria-checked="true"] { border-color: var(--sz-accent); background: var(--sz-accent-soft); }
 .settings-global-overrides [role="alert"] { color: var(--sz-danger); }
 .box-policy-startup { position: absolute; inset: 0; z-index: 40; display: grid; place-content: center; gap: 20px; padding: 120px; background: var(--sz-bg); font-size: var(--box-label-size); }
+
+/* Channel admission and analysis selection are independent remote targets. */
+.settings-physical-channel-row { display: flex; align-items: stretch; gap: 8px; }
+.settings-physical-channel-row .settings-physical-channel { flex: 1; min-width: 0; }
+.settings-channel-enable.pill { flex: 0 0 52px; margin-top: 4px; font-size: 24px; padding: 8px; }

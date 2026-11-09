@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { setLocale } from '../../src/shared/i18n/core'
-import { createElement } from 'react'
+import { Children, createElement, isValidElement, type ReactNode } from 'react'
+import { moveSpatialFocus, remoteTargets } from '../../src/renderer/src/box/focus'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { CaptureAnalysisWindow, CaptureStartResult, CaptureStats } from '../../src/shared/types'
 import { BoxMicrophones, microphoneChannelLevel, microphoneGeneration } from '../../src/renderer/src/box/microphones'
@@ -19,7 +20,11 @@ function deferred<T>() {
   const promise = new Promise<T>(accept => { resolve = accept })
   return { promise, resolve }
 }
-function fixture() {
+function memoryStorage() {
+  const data = new Map<string, string>()
+  return { getItem: (key: string) => data.get(key) ?? null, setItem: (key: string, value: string) => { data.set(key, value) } }
+}
+function fixture(storage = memoryStorage()) {
   vi.useFakeTimers()
   let native = { generation: '0', running: false }
   let event!: (value: CaptureAnalysisWindow) => void
@@ -42,12 +47,13 @@ function fixture() {
     }),
     onCaptureWindow: vi.fn((callback: (value: CaptureAnalysisWindow) => void) => { event = callback; return vi.fn() })
   }
-  const controller = new BoxMicrophones(api, () => Date.now(), () => String(++counter))
+  const controller = new BoxMicrophones(api, () => Date.now(), () => String(++counter), storage)
   return { api, controller, levels, setNative: (value: typeof native) => { native = value },
     emit: (generation: string, frequency = 220) => event({ ownershipGeneration: generation, frequency, clarity: 0.9, peak: 0.4, rms: 0.2, dbfs: -12 } as CaptureAnalysisWindow) }
 }
 async function ready(f: ReturnType<typeof fixture>): Promise<void> {
   f.controller.connect(); await vi.advanceTimersByTimeAsync(0)
+  await f.controller.setEnabledChannels(device.uid, Array.from({ length: 10 }, (_, index) => index))
   f.controller.select({ uid: device.uid, channel: 2 })
 }
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); setLocale('en') })
@@ -170,7 +176,7 @@ describe('app-owned private microphone analysis', () => {
   it('starts only the explicitly selected channel and cancels old ownership before switching', async () => {
     const f = fixture(); await ready(f)
     expect(await f.controller.start()).toBe(true)
-    expect(f.api.beginCapture).toHaveBeenLastCalledWith({ deviceUid: device.uid, inputChannel: 2 }, '11')
+    expect(f.api.beginCapture).toHaveBeenLastCalledWith({ deviceUid: device.uid, inputChannel: 2, enabledChannels: Array.from({ length: 10 }, (_, index) => index) }, '11')
     f.controller.select({ uid: device.uid, channel: 1 })
     expect(f.api.cancelCapture).not.toHaveBeenCalled()
     expect(await f.controller.start()).toBe(true)
@@ -322,7 +328,7 @@ describe('app-owned private microphone analysis', () => {
     const current = f.controller.getSnapshot()
     const html = renderToStaticMarkup(createElement(PlayerMicrophoneMeters, { snapshot: current }))
     expect(html.match(/role="meter"/g)).toHaveLength(2)
-    const mono = { ...current, active: { ...current.active!, channels: 1 }, levels: { ...current.levels!, peak: [0.5], rms: [0.2] } }
+    const mono = { ...current, active: { ...current.active!, channels: 1, enabledChannels: [0] }, levels: { ...current.levels!, channelIndices: [0], peak: [0.5], rms: [0.2] } }
     const monoHtml = renderToStaticMarkup(createElement(PlayerMicrophoneMeters, { snapshot: mono }))
     expect(monoHtml.match(/role="meter"/g)).toHaveLength(1)
     const stale = { ...current, levels: { ...current.levels!, receivedAt: Date.now() - 1000 } }
@@ -383,5 +389,164 @@ describe('Home physical input count without fabricated playback devices', () => 
     api.captureInputDevices.mockClear()
     expect(await readJourneyAudioInventory(api, false)).toBe(virtual)
     expect(api.captureInputDevices).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('Box enabled microphone channels', () => {
+  it('defaults to the first two channels without starting capture and refuses disabled analysis', async () => {
+    const f = fixture(); f.controller.connect(); await vi.advanceTimersByTimeAsync(0)
+    expect(f.controller.getSnapshot().enabledChannelsByDevice[device.uid]).toEqual([0, 1])
+    f.controller.select({ uid: device.uid, channel: 7 })
+    expect(f.controller.getSnapshot().selection).toBeNull()
+    expect(await f.controller.start()).toBe(false)
+    expect(f.api.beginCapture).not.toHaveBeenCalled(); await f.controller.dispose()
+  })
+  it('persists a noncontiguous pair and explicit all-off across controller recreation without auto-start', async () => {
+    const storage = memoryStorage()
+    const a = fixture(storage); a.controller.connect(); await vi.advanceTimersByTimeAsync(0)
+    await a.controller.setEnabledChannels(device.uid, [7, 2]); await a.controller.dispose()
+    const b = fixture(storage); b.controller.connect(); await vi.advanceTimersByTimeAsync(0)
+    expect(b.controller.getSnapshot().enabledChannelsByDevice[device.uid]).toEqual([2, 7])
+    expect(b.api.beginCapture).not.toHaveBeenCalled()
+    await b.controller.setEnabledChannels(device.uid, []); await b.controller.dispose()
+    const c = fixture(storage); c.controller.connect(); await vi.advanceTimersByTimeAsync(0)
+    expect(c.controller.getSnapshot().enabledChannelsByDevice[device.uid]).toEqual([])
+    expect(c.api.beginCapture).not.toHaveBeenCalled(); await c.controller.dispose()
+  })
+  it('restarts only its active reader with exact sorted channels and selects an enabled analysis channel', async () => {
+    const f = fixture(); f.controller.connect(); await vi.advanceTimersByTimeAsync(0)
+    f.controller.select({ uid: device.uid, channel: 1 }); await f.controller.start()
+    expect(await f.controller.setEnabledChannels(device.uid, [7, 2])).toBe(true)
+    expect(f.api.cancelCapture).toHaveBeenCalledWith('11')
+    expect(f.api.beginCapture).toHaveBeenLastCalledWith({ deviceUid: device.uid, inputChannel: 2, enabledChannels: [2, 7] }, '12')
+    expect(f.controller.getSnapshot().active?.enabledChannels).toEqual([2, 7])
+    expect(await f.controller.setEnabledChannels(device.uid, [])).toBe(true)
+    expect(f.api.cancelCapture).toHaveBeenLastCalledWith('12')
+    expect(f.controller.getSnapshot().phase).toBe('idle')
+    await f.controller.setEnabledChannels(device.uid, [4, 5])
+    expect(f.api.beginCapture).toHaveBeenCalledTimes(2); await f.controller.dispose()
+  })
+  it('coalesces rapid channel changes behind acknowledged cancellation and ignores stale levels', async () => {
+    const f = fixture(); f.controller.connect(); await vi.advanceTimersByTimeAsync(0)
+    f.controller.select({ uid: device.uid, channel: 0 }); await f.controller.start()
+    const cancel = deferred<{ ok: true; cancelled: boolean }>()
+    f.api.cancelCapture.mockImplementationOnce(() => cancel.promise)
+    const first = f.controller.setEnabledChannels(device.uid, [0, 4])
+    await vi.advanceTimersByTimeAsync(0)
+    const second = f.controller.setEnabledChannels(device.uid, [2, 7])
+    cancel.resolve({ ok: true, cancelled: true })
+    expect(await first).toBe(false); expect(await second).toBe(true)
+    expect(f.api.beginCapture).toHaveBeenCalledTimes(2)
+    expect(f.api.beginCapture).toHaveBeenLastCalledWith({ deviceUid: device.uid, inputChannel: 2, enabledChannels: [2, 7] }, '12')
+    f.api.captureStats.mockResolvedValue({ ...f.levels(), microphoneLevels: { valid: true, channels: 2, channelIndices: [2, 7], ownershipGeneration: '11', peak: [0.2, 0.7], rms: [0.1, 0.1] } })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(f.controller.getSnapshot().levels).toBeNull(); await f.controller.dispose()
+  })
+  it('maps dense telemetry to physical channels and rejects ambiguous legacy compact telemetry', async () => {
+    const f = fixture(); f.controller.connect(); await vi.advanceTimersByTimeAsync(0)
+    await f.controller.setEnabledChannels(device.uid, [2, 7]); f.controller.select({ uid: device.uid, channel: 2 }); await f.controller.start()
+    f.api.captureStats.mockResolvedValue({ ...f.levels(), microphoneLevels: { valid: true, channels: 2, channelIndices: [7, 2], ownershipGeneration: '11', peak: [0.7, 0.2], rms: [0.1, 0.1] } })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(microphoneChannelLevel(f.controller.getSnapshot(), device.uid, 7)).toBe(0.7)
+    expect(microphoneChannelLevel(f.controller.getSnapshot(), device.uid, 2)).toBe(0.2)
+    expect(microphoneChannelLevel(f.controller.getSnapshot(), device.uid, 0)).toBeNull()
+    f.api.captureStats.mockResolvedValue({ ...f.levels(), microphoneLevels: { valid: true, channels: 2, ownershipGeneration: '11', peak: [0.7, 0.2], rms: [0.1, 0.1] } })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(f.controller.getSnapshot().levels).toBeNull(); await f.controller.dispose()
+  })
+  it('ignores invalid preferences and keeps working when storage access fails', async () => {
+    const bad = memoryStorage(); bad.setItem('singz-box.microphone-channels.v1', JSON.stringify({ version: 1, devices: [[device.uid, [99]]] }))
+    const f = fixture(bad); f.controller.connect(); await vi.advanceTimersByTimeAsync(0)
+    expect(f.controller.enabledChannels(device.uid)).toEqual([0, 1]); await f.controller.dispose()
+    const g = fixture({ getItem: () => { throw new Error('blocked') }, setItem: () => { throw new Error('blocked') } })
+    g.controller.connect(); await vi.advanceTimersByTimeAsync(0)
+    expect(await g.controller.setEnabledChannels(device.uid, [2, 7])).toBe(true)
+    expect(g.controller.enabledChannels(device.uid)).toEqual([2, 7]); await g.controller.dispose()
+  })
+  it('renders independent remote checkbox and radio buttons; disabled channels have no unavailable meter', async () => {
+    const f = fixture(); f.controller.connect(); await vi.advanceTimersByTimeAsync(0)
+    const routing = { version: 1 as const, inventory: { devicesFresh: true, devices: [{ uid: device.uid, name: device.label, inputChannels: 10, outputChannels: 4 }] }, snapshot: { revision: { epoch: 'e', generation: '0' }, document: null, restoration: { phase: 'no-document', error: '', desiredGeneration: '0', activeGeneration: '0' }, runtime: { metersFresh: false, monitors: [] } } }
+    const html = renderToStaticMarkup(createElement(PhysicalInputsPanel, { preview: { state: routing, error: '', pending: false, receivedAt: Date.now() }, selection: null, onSelect: vi.fn(), microphones: f.controller, microphoneSnapshot: f.controller.getSnapshot() }))
+    expect(html.match(/role="checkbox"/g)).toHaveLength(10)
+    expect(html.match(/role="radio"/g)).toHaveLength(10)
+    expect(html.match(/>Disabled</g)).toHaveLength(8)
+    expect(html.match(/>Level unavailable</g)).toHaveLength(2)
+    expect(html).not.toMatch(/<button[^>]*>(?:(?!<\/button>)[\s\S])*<button/)
+    await f.controller.dispose()
+  })
+})
+
+
+describe('Settings channel remote targets', () => {
+  it('navigates actual panel button props and keeps enabling separate from selecting analysis', async () => {
+    const f = fixture(); f.controller.connect(); await vi.advanceTimersByTimeAsync(0)
+    let active: Target | null = null
+    type Props = { role?: string; disabled?: boolean; children?: ReactNode; onClick?: () => void; 'data-input-channel'?: number; 'data-microphone-channel-enable'?: number }
+    class Target {
+      constructor(readonly props: Props) {}
+      matches(selector: string): boolean { return selector === ':disabled' && !!this.props.disabled }
+      closest(): null { return null }
+      getClientRects(): object[] { return [{}] }
+      getBoundingClientRect(): { left: number; top: number; width: number; height: number } {
+        return { left: this.props.role === 'checkbox' ? 0 : 100, top: Number(this.props['data-input-channel'] ?? this.props['data-microphone-channel-enable']) * 60, width: 50, height: 40 }
+      }
+      focus(): void { active = this }
+      scrollIntoView(): void {}
+      click(): void { if (!this.props.disabled) this.props.onClick?.() }
+    }
+    vi.stubGlobal('HTMLElement', Target)
+    vi.stubGlobal('document', { get activeElement() { return active } })
+    const routing = { version: 1 as const, inventory: { devicesFresh: true, devices: [{ uid: device.uid, name: device.label, inputChannels: 10, outputChannels: 4 }] }, snapshot: { revision: { epoch: 'e', generation: '0' }, document: null, restoration: { phase: 'no-document', error: '', desiredGeneration: '0', activeGeneration: '0' }, runtime: { metersFresh: false, monitors: [] } } }
+    const targets = (): Target[] => {
+      const found: Target[] = []
+      const visit = (value: ReactNode): void => Children.forEach(value, element => {
+        if (!isValidElement<Props>(element)) return
+        if (element.props.role === 'radio' || element.props.role === 'checkbox') found.push(new Target(element.props))
+        visit(element.props.children)
+      })
+      visit(PhysicalInputsPanel({ preview: { state: routing, error: '', pending: false, receivedAt: Date.now() }, selection: f.controller.getSnapshot().selection,
+        onSelect: (uid, channel) => f.controller.select({ uid, channel }), microphones: f.controller, microphoneSnapshot: f.controller.getSnapshot() }))
+      return found
+    }
+    try {
+      let buttons = targets()
+      const scope = { dataset: { surface: 'settings' }, querySelectorAll: () => buttons } as unknown as HTMLElement
+      expect(remoteTargets(scope)).toHaveLength(12) // ten enable targets, two admitted analysis targets
+      active = buttons[0]
+      expect(moveSpatialFocus(scope, 'ArrowRight')).toBe(true)
+      expect(active).toBe(buttons[1]); (active as Target | null)?.click()
+      expect(f.controller.getSnapshot().selection?.channel).toBe(0)
+      expect(moveSpatialFocus(scope, 'ArrowLeft')).toBe(true)
+      expect(active).toBe(buttons[0])
+      expect(moveSpatialFocus(scope, 'ArrowDown')).toBe(true)
+      expect(active).toBe(buttons[2])
+      buttons[4].click() // enable physical input 3, without selecting it or starting capture
+      expect(f.controller.getSnapshot().selection?.channel).toBe(0)
+      buttons = targets(); expect(remoteTargets(scope)).toHaveLength(13)
+      active = buttons[4]; moveSpatialFocus(scope, 'ArrowRight'); expect(active).toBe(buttons[5])
+      ;(active as Target | null)?.click(); expect(f.controller.getSnapshot().selection?.channel).toBe(2)
+      expect(f.api.beginCapture).not.toHaveBeenCalled()
+    } finally { vi.unstubAllGlobals(); await f.controller.dispose() }
+  })
+})
+
+
+describe('dense microphone channel arrays', () => {
+  it('rejects a sparse enabled selection before persistence or native admission', async () => {
+    const f = fixture(); f.controller.connect(); await vi.advanceTimersByTimeAsync(0)
+    const sparse = [0, 1, 7]; delete sparse[1]
+    expect(await f.controller.setEnabledChannels(device.uid, sparse)).toBe(false)
+    expect(f.controller.enabledChannels(device.uid)).toEqual([0, 1])
+    expect(f.api.beginCapture).not.toHaveBeenCalled(); await f.controller.dispose()
+  })
+  it('rejects sparse physical channel mappings instead of publishing partially attributed levels', async () => {
+    const f = fixture(); f.controller.connect(); await vi.advanceTimersByTimeAsync(0)
+    await f.controller.setEnabledChannels(device.uid, [0, 1, 7]); f.controller.select({ uid: device.uid, channel: 0 }); await f.controller.start()
+    const sparse = [0, 1, 7]; delete sparse[1]
+    f.api.captureStats.mockResolvedValue({ ...f.levels(), microphoneLevels: { valid: true, channels: 3, channelIndices: sparse, ownershipGeneration: '11', peak: [0.1, 0.2, 0.7], rms: [0.1, 0.1, 0.1] } })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(f.controller.getSnapshot().levels).toBeNull()
+    expect(microphoneChannelLevel(f.controller.getSnapshot(), device.uid, 7)).toBeNull(); await f.controller.dispose()
   })
 })

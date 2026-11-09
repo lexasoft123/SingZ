@@ -12,10 +12,30 @@
 #include <filesystem>
 #include <loopz/document_json.hpp>
 #include <memory>
+#include <new>
+#include <limits>
 #include <string>
 #include <thread>
 #include <unistd.h>
 #include <zcore/device/audio_input_backend.h>
+
+namespace {
+thread_local bool trackSparseHeap = false;
+thread_local uint64_t sparseHeapEvents = 0;
+}
+void* operator new(std::size_t bytes) {
+  if (trackSparseHeap) ++sparseHeapEvents;
+  if (auto* value = std::malloc(bytes ? bytes : 1)) return value;
+  throw std::bad_alloc();
+}
+void* operator new[](std::size_t bytes) { return ::operator new(bytes); }
+void operator delete(void* value) noexcept {
+  if (trackSparseHeap && value) ++sparseHeapEvents;
+  std::free(value);
+}
+void operator delete[](void* value) noexcept { ::operator delete(value); }
+void operator delete(void* value, std::size_t) noexcept { ::operator delete(value); }
+void operator delete[](void* value, std::size_t) noexcept { ::operator delete(value); }
 
 #define CHECK(v)                                                               \
   do {                                                                         \
@@ -86,6 +106,58 @@ void scheduleRecoversJitterWithoutReset() {
   consume(catchupB);
   CHECK(catchupB.plan.blocks == 4 && !catchupB.discontinuity());
   CHECK(reanchors == 1);
+}
+void sparseReadsNeverProcessDisabledChannels() {
+  struct Spy final : loopz::AudioSource {
+    mutable unsigned fullReads = 0, sparseReads = 0;
+    bool supported = true, missing = false;
+    std::array<float, 64> physical{};
+    uint32_t channels() const noexcept override { return kChannels; }
+    loopz::AudioReadResult read(uint64_t, double, loopz::RoutingOutput,
+        uint32_t count, loopz::AudioReadCursor&) const noexcept override {
+      ++fullReads; return {count, false};
+    }
+    std::optional<loopz::AudioReadResult> readChannels(uint64_t host, double rate,
+        loopz::RoutingOutput output, uint32_t count, loopz::AudioReadCursor& cursor,
+        std::span<const uint32_t> indices,
+        std::optional<loopz::ResamplingFilter> filter) const noexcept override {
+      ++sparseReads;
+      CHECK(host == 1234 && rate == kRate && !filter);
+      CHECK(indices.size() == output.channels.size() && count == kFrames);
+      if (!supported) return std::nullopt;
+      for (size_t dense = 0; dense < indices.size(); ++dense)
+        std::fill_n(output.channels[dense], count, physical[indices[dense]]);
+      cursor.generation = 3;
+      return loopz::AudioReadResult{missing ? count : 0, true};
+    }
+  } spy;
+  std::array<std::array<float, kFrames>, 2> pcm{};
+  std::array<float*, 2> planes{pcm[0].data(), pcm[1].data()};
+  for (const std::array<uint32_t, 2> indices : {std::array<uint32_t, 2>{0, 1},
+                                               std::array<uint32_t, 2>{1, 7}}) {
+    spy.physical.fill(std::numeric_limits<float>::quiet_NaN());
+    spy.physical[indices[0]] = .2f; spy.physical[indices[1]] = .7f;
+    loopz::AudioReadCursor cursor;
+    const auto before = sparseHeapEvents;
+    trackSparseHeap = true;
+    const auto read = box_input_detail::readEnabledChannels(
+        spy, 1234, kRate, {planes, kFrames}, kFrames, cursor, indices);
+    trackSparseHeap = false;
+    CHECK(sparseHeapEvents == before);
+    CHECK(read && read->online && read->missingFrames == 0 && cursor.generation == 3);
+    for (uint32_t frame = 0; frame < kFrames; ++frame)
+      CHECK(pcm[0][frame] == .2f && pcm[1][frame] == .7f);
+  }
+  const std::array<uint32_t, 2> indices{1, 7};
+  loopz::AudioReadCursor cursor;
+  spy.missing = true;
+  const auto missing = box_input_detail::readEnabledChannels(
+      spy, 1234, kRate, {planes, kFrames}, kFrames, cursor, indices);
+  CHECK(missing && missing->missingFrames == kFrames);
+  spy.supported = false;
+  CHECK(!box_input_detail::readEnabledChannels(
+      spy, 1234, kRate, {planes, kFrames}, kFrames, cursor, indices));
+  CHECK(spy.fullReads == 0 && spy.sparseReads == 4);
 }
 struct Hardware {
   std::atomic<unsigned> opens{0}, stops{0}, live{0}, maximumLive{0},
@@ -195,6 +267,7 @@ private:
               float(0.1 * std::sin(2 * 3.141592653589793 * 220 * time));
           for (uint32_t channel = 2; channel < kChannels; ++channel)
             pcm[channel][sample] = 0;
+          pcm[7][sample] = float(0.15 * std::sin(2 * 3.141592653589793 * 330 * time));
         }
         AudioInputBusBlock block;
         block.planes = planes.data();
@@ -300,6 +373,7 @@ void edit(const char *operation, loopz::JSON commands) {
 }
 } // namespace
 int main() {
+  sparseReadsNeverProcessDisabledChannels();
   scheduleRecoversJitterWithoutReset();
   char pattern[] = "/tmp/singz-box-input-XXXXXX";
   const char *scratch = mkdtemp(pattern);
@@ -321,8 +395,9 @@ int main() {
   config.deviceUid = "fixture:microphone";
   config.channel = 1;
   Sink first;
+  const std::array<uint32_t, 2> enabled{0, 1};
   const auto started = capture.start(
-      config, [&](const auto &block) { first.accept(block); }, &devices);
+      config, [&](const auto &block) { first.accept(block); }, &devices, enabled);
   CHECK(started.ok && started.deviceChannels == kChannels &&
         started.sampleRate == kRate);
   CHECK(started.sharingMode == "loopz-shared" &&
@@ -333,16 +408,25 @@ int main() {
            capture.meter().valid;
   });
   const auto levels = capture.meter();
-  CHECK(levels.valid && levels.channels == kChannels);
-  for (uint32_t channel = 0; channel < kChannels; ++channel)
+  CHECK(levels.valid && levels.channels == 2 &&
+        levels.channelIndices[0] == 0 && levels.channelIndices[1] == 1);
+  for (uint32_t channel = 0; channel < levels.channels; ++channel)
     CHECK(std::isfinite(levels.peak[channel]) &&
           std::isfinite(levels.rms[channel]));
   CHECK(levels.peak[0] > 0.18f && levels.peak[0] < 0.22f);
   CHECK(levels.peak[1] > 0.08f && levels.peak[1] < 0.12f);
   CHECK(levels.rms[0] > 0.11f && levels.rms[0] < 0.17f);
   CHECK(levels.rms[1] > 0.05f && levels.rms[1] < 0.09f);
-  for (uint32_t channel = 2; channel < kChannels; ++channel)
-    CHECK(levels.peak[channel] == 0 && levels.rms[channel] == 0);
+  const auto opensBeforeInvalid = hardware->opens.load();
+  const auto stopsBeforeInvalid = hardware->stops.load();
+  for (const auto invalid : {std::vector<uint32_t>{1, 1}, {1, 0}, {0}, {1, 10}, {1, 64}}) {
+    CHECK(!capture.start(config, [&](const auto& block) { first.accept(block); },
+                         &devices, invalid).ok);
+    CHECK(capture.state() == AudioInputState::Running && capture.meter().valid);
+  }
+  const auto deliveredBeforeInvalid = first.blocks.load();
+  eventually([&] { return first.blocks.load() > deliveredBeforeInvalid; });
+  CHECK(hardware->opens == opensBeforeInvalid && hardware->stops == stopsBeforeInvalid);
   CHECK(boxRoutingInputDevices()[0].channels ==
         kChannels); // owned prefix survives EBUSY
   const auto stats = capture.stats();
@@ -395,18 +479,26 @@ int main() {
             .ok);
   eventually(
       [&] { return second.blocks.load(std::memory_order_acquire) >= 24; });
+  CHECK(capture.meter().valid && capture.meter().channels == 1 &&
+        capture.meter().channelIndices[0] == 0);
   capture.stop(true);
   checkSignal(second, 440, 0.2);
   CHECK(hardware->opens == opensBeforePrivate && hardware->live == 1);
   CHECK(state()["snapshot"]["document"] == publicDocument);
   Sink third;
-  config.channel = 1;
-  CHECK(capture.start(config, [&](const auto &block) { third.accept(block); })
-            .ok);
+  config.channel = 7;
+  const std::array<uint32_t, 2> noncontiguous{1, 7};
+  CHECK(capture.start(config, [&](const auto &block) { third.accept(block); },
+                      nullptr, noncontiguous).ok);
   eventually(
       [&] { return third.blocks.load(std::memory_order_acquire) >= 24; });
+  const auto sparseLevels = capture.meter();
+  CHECK(sparseLevels.valid && sparseLevels.channels == 2 &&
+        sparseLevels.channelIndices[0] == 1 && sparseLevels.channelIndices[1] == 7);
+  CHECK(sparseLevels.peak[0] > .08f && sparseLevels.peak[0] < .12f &&
+        sparseLevels.peak[1] > .13f && sparseLevels.peak[1] < .17f);
   capture.stop();
-  checkSignal(third, 220, 0.1);
+  checkSignal(third, 330, 0.15);
   CHECK(hardware->opens == opensBeforePrivate && hardware->maximumLive == 1 &&
         hardware->live == 1);
   CHECK(state()["snapshot"]["document"] == publicDocument);

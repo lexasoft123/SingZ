@@ -8,8 +8,9 @@ export type MicrophoneSnapshot = {
   devices: CaptureInputDevice[]
   inventoryError: string | null
   selection: MicrophoneSelection | null
-  active: (MicrophoneSelection & { generation: string; label: string; channels: number }) | null
-  levels: { generation: string; receivedAt: number; peak: number[]; rms: number[] } | null
+  enabledChannelsByDevice: Record<string, number[]>
+  active: (MicrophoneSelection & { generation: string; label: string; channels: number; enabledChannels: number[] }) | null
+  levels: { generation: string; receivedAt: number; channelIndices: number[]; peak: number[]; rms: number[] } | null
   pitch: { frequency: number; clarity: number; receivedAt: number } | null
   error: string | null
 }
@@ -28,8 +29,35 @@ function scalarCapability(value: CaptureStats['microphoneLevels']): value is Non
     Array.isArray(value.peak) && Array.isArray(value.rms) && value.peak.length === value.channels && value.rms.length === value.channels &&
     [...value.peak, ...value.rms].every(level => Number.isFinite(level) && level >= 0)
 }
-function validLevels(value: CaptureStats['microphoneLevels'], generation: string, channels: number): boolean {
-  return scalarCapability(value) && value.valid && value.ownershipGeneration === generation && value.channels === channels && channels > 0
+function levelIndices(value: CaptureStats['microphoneLevels'], generation: string, physicalChannels: number, enabled: number[]): number[] | null {
+  if (!scalarCapability(value) || !value.valid || value.ownershipGeneration !== generation || !value.channels) return null
+  // Old telemetry is physical-width only. Never infer physical positions from a compact array.
+  const indices = value.channelIndices ?? (value.channels === physicalChannels ? Array.from({ length: physicalChannels }, (_, i) => i) : null)
+  if (!Array.isArray(indices) || indices.length !== value.channels || new Set(indices).size !== indices.length ||
+      Array.from(indices).some(index => !Number.isInteger(index) || index < 0 || index >= physicalChannels)) return null
+  if (value.channelIndices && (indices.length !== enabled.length || indices.some(index => !enabled.includes(index)))) return null
+  return [...indices]
+}
+export type MicrophoneChannelStorage = Pick<Storage, 'getItem' | 'setItem'>
+const CHANNEL_KEY = 'singz-box.microphone-channels.v1'
+function validUid(uid: unknown): uid is string { return typeof uid === 'string' && uid.length > 0 && uid.length <= 4096 && !uid.includes('\0') }
+function validChannels(value: unknown): value is number[] {
+  return Array.isArray(value) && value.length <= 64 && Array.from(value).every(index => Number.isInteger(index) && index >= 0 && index < 64) && new Set(value).size === value.length
+}
+function defaultStorage(): MicrophoneChannelStorage | undefined { try { return globalThis.localStorage } catch { return undefined } }
+function readChannels(storage?: MicrophoneChannelStorage): Record<string, number[]> {
+  const result: Record<string, number[]> = Object.create(null)
+  try {
+    const raw = storage?.getItem(CHANNEL_KEY)
+    if (!raw || raw.length > 300000) return result
+    const value: unknown = JSON.parse(raw)
+    if (!value || typeof value !== 'object' || !('version' in value) || value.version !== 1 || !('devices' in value) || !Array.isArray(value.devices) || value.devices.length > 64) return result
+    for (const entry of value.devices) {
+      if (!Array.isArray(entry) || entry.length !== 2 || !validUid(entry[0]) || !validChannels(entry[1]) || Object.hasOwn(result, entry[0])) return Object.create(null)
+      result[entry[0]] = [...entry[1]].sort((a, b) => a - b)
+    }
+  } catch { /* Storage is optional; private in-memory preferences remain usable. */ }
+  return result
 }
 async function deadline<T>(operation: Promise<T>, milliseconds: number, message: () => string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -40,7 +68,7 @@ async function deadline<T>(operation: Promise<T>, milliseconds: number, message:
 /** App-lifetime private scalar reader. No transport, speaker-route or PCM API. */
 export class BoxMicrophones {
   private value: MicrophoneSnapshot = { phase: 'idle', capability: 'unknown', devices: [], inventoryError: null,
-    selection: null, active: null, levels: null, pitch: null, error: null }
+    selection: null, enabledChannelsByDevice: Object.create(null), active: null, levels: null, pitch: null, error: null }
   private listeners = new Set<() => void>()
   private tail: Promise<void> = Promise.resolve()
   private intent = 0
@@ -56,8 +84,35 @@ export class BoxMicrophones {
   private inventory: Promise<void> | null = null
   private latestWindow: { value: CaptureAnalysisWindow; receivedAt: number } | null = null
   private disposal?: Promise<void>
+  private requested: MicrophoneSelection | null = null
   constructor(private readonly api: Api, private readonly now: () => number = Date.now,
-    private readonly generation: () => string = microphoneGeneration) {}
+    private readonly generation: () => string = microphoneGeneration,
+    private readonly storage: MicrophoneChannelStorage | undefined = defaultStorage()) {
+    this.value.enabledChannelsByDevice = readChannels(storage)
+  }
+  private persistChannels(): void {
+    try { this.storage?.setItem(CHANNEL_KEY, JSON.stringify({ version: 1, devices: Object.entries(this.value.enabledChannelsByDevice).slice(0, 64) })) } catch { /* safe in-memory fallback */ }
+  }
+  enabledChannels = (uid: string): number[] => Object.hasOwn(this.value.enabledChannelsByDevice, uid) ? [...this.value.enabledChannelsByDevice[uid]] : []
+  setEnabledChannels = (uid: string, channels: number[]): Promise<boolean> => {
+    const device = this.value.devices.find(device => device.uid === uid)
+    if (!Object.hasOwn(this.value.enabledChannelsByDevice, uid) && Object.keys(this.value.enabledChannelsByDevice).length >= 64) return Promise.resolve(false)
+    if (this.disposed || !device || !validUid(uid) || !validChannels(channels) || channels.some(index => index >= device.channels) || this.uncertain) return Promise.resolve(false)
+    const enabled = [...channels].sort((a, b) => a - b)
+    if (JSON.stringify(enabled) === JSON.stringify(this.value.enabledChannelsByDevice[uid])) return Promise.resolve(true)
+    const requested = this.requested?.uid === uid ? this.requested : null
+    let selection = this.value.selection
+    if (selection?.uid === uid && !enabled.includes(selection.channel)) selection = enabled.length ? { uid, channel: enabled[0] } : null
+    this.publish({ enabledChannelsByDevice: { ...this.value.enabledChannelsByDevice, [uid]: enabled }, selection, levels: requested ? null : this.value.levels })
+    this.persistChannels()
+    if (!requested) return Promise.resolve(true)
+    if (!enabled.length) return this.stop()
+    return this.startSelection({ uid, channel: enabled.includes(requested.channel) ? requested.channel : enabled[0] })
+  }
+  toggleChannel = (uid: string, channel: number): Promise<boolean> => {
+    const enabled = this.enabledChannels(uid)
+    return this.setEnabledChannels(uid, enabled.includes(channel) ? enabled.filter(index => index !== channel) : [...enabled, channel])
+  }
   getSnapshot = (): MicrophoneSnapshot => this.value
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   private publish(patch: Partial<MicrophoneSnapshot>): void {
@@ -81,7 +136,7 @@ export class BoxMicrophones {
   select = (selection: MicrophoneSelection): void => {
     if (this.disposed || !selection.uid || selection.uid.includes('\0') || selection.uid.length > 4096 ||
       !Number.isInteger(selection.channel) || selection.channel < 0 || selection.channel >= 64) return
-    this.publish({ selection: { ...selection } })
+    if (this.enabledChannels(selection.uid).includes(selection.channel)) this.publish({ selection: { ...selection } })
   }
   refreshDevices = (): Promise<void> => {
     if (this.disposed || this.inventory) return this.inventory ?? Promise.resolve()
@@ -89,7 +144,17 @@ export class BoxMicrophones {
       try {
         const result = await this.api.captureInputDevices()
         if (this.disposed) return
-        if (result.ok) this.publish({ devices: result.devices, inventoryError: null })
+        if (result.ok) {
+          const enabled = { ...this.value.enabledChannelsByDevice }
+          for (const device of result.devices) {
+            if (!validUid(device.uid) || !Number.isInteger(device.channels) || device.channels < 1 || device.channels > 64) continue
+            if (!Object.hasOwn(enabled, device.uid)) {
+              if (Object.keys(enabled).length < 64) enabled[device.uid] = Array.from({ length: Math.min(2, device.channels) }, (_, index) => index)
+            } else enabled[device.uid] = enabled[device.uid].filter(index => index < device.channels)
+          }
+          this.publish({ devices: result.devices, inventoryError: null, enabledChannelsByDevice: enabled })
+          this.persistChannels()
+        }
         else this.publish({ inventoryError: tMicrophone('box.microphones.inventoryFailed', { detail: result.error }) })
       } catch (error) { if (!this.disposed) this.publish({ inventoryError: tMicrophone('box.microphones.inventoryFailed', { detail: String(error) }) }) }
     })()
@@ -136,8 +201,8 @@ export class BoxMicrophones {
       }
       this.clearRecovery()
       const time = this.now()
-      const levels = validLevels(stats.microphoneLevels, owned.generation, this.value.active.channels)
-        ? { generation: owned.generation, receivedAt: time, peak: [...stats.microphoneLevels!.peak], rms: [...stats.microphoneLevels!.rms] } : null
+      const indices = levelIndices(stats.microphoneLevels, owned.generation, this.value.active.channels, this.value.active.enabledChannels)
+      const levels = indices ? { generation: owned.generation, receivedAt: time, channelIndices: indices, peak: [...stats.microphoneLevels!.peak], rms: [...stats.microphoneLevels!.rms] } : null
       const event = this.latestWindow
       const pitch = event && event.value.ownershipGeneration === owned.generation && time - event.receivedAt <= 750 &&
         Number.isFinite(event.value.frequency) && event.value.frequency > 0 && event.value.frequency < 5000 &&
@@ -150,6 +215,7 @@ export class BoxMicrophones {
   }
   private clearRecovery(): void { clearTimeout(this.recoveryTimer); this.recoveryTimer = undefined }
   private failSession(owned: NonNullable<BoxMicrophones['owned']>, detail: string): void {
+    this.requested = null
     this.clearRecovery(); this.readGeneration++
     const intent = this.intent
     this.publish({ phase: 'error', levels: null, pitch: null, error: detail })
@@ -202,9 +268,11 @@ export class BoxMicrophones {
     const active = this.value.active
     this.publish({ selection: active ? { uid: active.uid, channel: active.channel } : null })
   }
-  start = (): Promise<boolean> => {
-    const selection = this.value.selection
-    if (this.disposed || !selection || this.value.capability !== 'available' || this.uncertain) return Promise.resolve(false)
+  start = (): Promise<boolean> => this.startSelection(this.value.selection)
+  private startSelection(selection: MicrophoneSelection | null): Promise<boolean> {
+    const enabledChannels = selection ? this.enabledChannels(selection.uid) : []
+    if (this.disposed || !selection || !enabledChannels.includes(selection.channel) || this.value.capability !== 'available' || this.uncertain) return Promise.resolve(false)
+    this.requested = { ...selection }
     const intent = ++this.intent
     this.clearRecovery(); this.transitions++
     this.publish({ phase: 'starting', levels: null, pitch: null, error: null })
@@ -221,15 +289,16 @@ export class BoxMicrophones {
         const generation = this.generation()
         if (!/^[1-9][0-9]{0,19}$/.test(generation) || BigInt(generation) > MAX) throw new Error(tMicrophone('box.microphones.invalidSession'))
         this.owned = { generation, selection }
-        const result = await this.api.beginCapture({ deviceUid: selection.uid, inputChannel: selection.channel }, generation)
+        const result = await this.api.beginCapture({ deviceUid: selection.uid, inputChannel: selection.channel, enabledChannels }, generation)
         if (this.disposed || intent !== this.intent) { await this.cancelOwned(); return false }
         if (!result.ok) {
+          this.requested = null
           await this.cancelOwned()
           this.publish({ phase: 'error', capability: result.state === 'unsupported' ? 'unavailable' : this.value.capability, error: tMicrophone('box.microphones.startFailed', { detail: result.error ?? '' }) }); return false
         }
         if (!['starting', 'running'].includes(result.state) || result.deviceUid !== selection.uid || result.inputChannel !== selection.channel ||
-          !Number.isInteger(result.deviceChannels) || result.deviceChannels <= selection.channel || result.deviceChannels > 64) throw new Error(tMicrophone('box.microphones.unexpectedSession'))
-        this.publish({ phase: 'starting', active: { ...selection, generation, label: result.deviceLabel, channels: result.deviceChannels }, levels: null, pitch: null, error: null })
+          !Number.isInteger(result.deviceChannels) || result.deviceChannels <= selection.channel || result.deviceChannels > 64 || enabledChannels.some(index => index >= result.deviceChannels)) throw new Error(tMicrophone('box.microphones.unexpectedSession'))
+        this.publish({ phase: 'starting', active: { ...selection, generation, label: result.deviceLabel, channels: result.deviceChannels, enabledChannels }, levels: null, pitch: null, error: null })
         if (result.state === 'starting' && !await this.awaitRunning(this.owned!, intent)) { await this.cancelOwned(); return false }
         if (this.disposed || intent !== this.intent) { await this.cancelOwned(); return false }
         this.publish({ phase: 'running', error: null })
@@ -238,12 +307,13 @@ export class BoxMicrophones {
       } catch (error) {
         if (this.uncertain) return false
         try { await this.cancelOwned() } catch { return false }
-        if (!this.disposed && intent === this.intent) this.publish({ phase: 'error', levels: null, pitch: null, error: tMicrophone('box.microphones.startFailed', { detail: String(error) }) })
+        if (!this.disposed && intent === this.intent) { this.requested = null; this.publish({ phase: 'error', levels: null, pitch: null, error: tMicrophone('box.microphones.startFailed', { detail: String(error) }) }) }
         return false
       }
     }).finally(() => { this.transitions--; if (!this.transitions && this.value.phase === 'running') void this.poll() })
   }
   stop = (): Promise<boolean> => {
+    this.requested = null
     if (this.disposed) return this.disposal?.then(() => true, () => false) ?? Promise.resolve(false)
     const intent = ++this.intent
     this.clearRecovery(); this.transitions++
@@ -255,6 +325,7 @@ export class BoxMicrophones {
   }
   dispose = (): Promise<void> => {
     if (this.disposal) return this.disposal
+    this.requested = null
     this.disposed = true; ++this.intent; this.clearRecovery()
     clearInterval(this.timer); this.unsubscribe?.(); this.unsubscribe = undefined
     this.publish({ levels: null, pitch: null })
@@ -264,6 +335,15 @@ export class BoxMicrophones {
 }
 export function microphoneChannelLevel(snapshot: MicrophoneSnapshot | undefined, uid: string, channel: number, now = Date.now()): number | null {
   const value = snapshot?.levels
-  return snapshot?.phase === 'running' && snapshot.active?.uid === uid && Number.isInteger(channel) && channel >= 0 && channel < snapshot.active.channels && value?.generation === snapshot.active.generation &&
-    now >= value.receivedAt && now - value.receivedAt <= 750 && Number.isFinite(value.peak[channel]) && value.peak[channel] >= 0 ? value.peak[channel] : null
+  const index = value?.channelIndices.indexOf(channel) ?? -1
+  return snapshot?.phase === 'running' && snapshot.active?.uid === uid && snapshot.active.enabledChannels.includes(channel) && index >= 0 && Number.isInteger(channel) && channel >= 0 && channel < snapshot.active.channels && value?.generation === snapshot.active.generation &&
+    now >= value.receivedAt && now - value.receivedAt <= 750 && Number.isFinite(value.peak[index]) && value.peak[index] >= 0 ? value.peak[index] : null
+}
+
+/** TV Mic 1/2 are logical slots in the enabled physical-channel selection. */
+export function microphoneSlotLevel(snapshot: MicrophoneSnapshot | undefined, slot: number, now = Date.now()): number | null {
+  const active = snapshot?.active
+  const channel = active?.enabledChannels[slot]
+  return active && Number.isInteger(slot) && slot >= 0 && channel !== undefined
+    ? microphoneChannelLevel(snapshot, active.uid, channel, now) : null
 }

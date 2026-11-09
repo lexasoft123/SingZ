@@ -361,21 +361,28 @@ export function PhysicalInputsPanel({ preview, selection, onSelect, microphones,
         </div>
         <div role="radiogroup" aria-label={tMicrophone('box.microphones.deviceChannelGroup', { device: device.name })}>
           {physicalChannels(device).map(({ channel, name }) => {
+            const enabled = !microphones || !!microphoneSnapshot?.enabledChannelsByDevice[device.uid]?.includes(channel)
             const privateLevel = microphoneChannelLevel(microphoneSnapshot, device.uid, channel)
             const level = active?.uid === device.uid
               ? privateLevel === null ? null : { peak: privateLevel, rms: privateLevel }
               : physicalInputLevel(preview, device.uid, channel)
             const selected = selection?.uid === device.uid && selection.channel === channel
-            return <Button key={channel} className="settings-physical-channel" role="radio" aria-checked={selected}
-              disabled={!!issue || preview.pending || microphonePending} data-settings-input={device.uid} data-input-channel={channel} data-remote-focus
+            return <div key={channel} className="settings-physical-channel-row">
+              {microphones && <Button role="checkbox" aria-checked={enabled} aria-label={tMicrophone('box.microphones.enableChannel', { name })}
+                className="settings-channel-enable" data-microphone-channel-enable={channel} data-remote-focus
+                disabled={!!issue || preview.pending || microphoneSnapshot?.phase === 'uncertain'}
+                onClick={() => { void microphones.toggleChannel(device.uid, channel) }}>{enabled ? '☑' : '☐'}</Button>}
+              <Button className="settings-physical-channel" role="radio" aria-checked={selected}
+              disabled={!enabled || !!issue || preview.pending || microphonePending} data-settings-input={device.uid} data-input-channel={channel} data-remote-focus
               onClick={() => onSelect(device.uid, channel)}>
               <span className="settings-channel-name">{channel + 1}. {name}</span>
-              {level ? <span className="settings-input-meter" role="meter" aria-label={tMicrophone('box.microphones.namedLevel', { name })}
+              {!enabled ? <span className="settings-channel-unavailable">{tMicrophone('box.microphones.disabled')}</span> : level ? <span className="settings-input-meter" role="meter" aria-label={tMicrophone('box.microphones.namedLevel', { name })}
                 aria-valuemin={0} aria-valuemax={1} aria-valuenow={Math.min(1, level.peak)}
                 aria-valuetext={level.peak > 1 ? tMicrophone('box.microphones.clipping') : tMicrophone('box.microphones.percent', { value: Math.round(level.peak * 100) })}>
                 <span style={{ transform: `scaleX(${Math.min(1, level.peak)})` }} />
               </span> : <span className="settings-channel-unavailable">{tMicrophone('box.microphones.levelUnavailable')}</span>}
-            </Button>
+              </Button>
+            </div>
           })}
         </div>
         {device.inputChannels > 64 && <p className="settings-input-status">{tMicrophone('box.microphones.limit64')}</p>}
