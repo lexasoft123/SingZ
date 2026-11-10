@@ -130,6 +130,11 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+      # zcore_device carries the Linux ALSA backend (find_package(ALSA) and
+      # libudev for hotplug, both REQUIRED), and every preset here configures
+      # zcore — so the dev headers are owed before the first `cmake --preset`.
+      - name: ALSA and udev headers
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libasound2-dev libudev-dev
       - name: Strict Release and sanitizer graph gates
         run: bash zdsp/run-sanitizer-gates.sh
 
@@ -153,9 +158,12 @@ jobs:
           cache: npm
 
       # melody-parity renders the sample's stems to WAV, and make-sample.js
-      # synthesizes the sample itself, if this checkout has not got one.
-      - name: ffmpeg
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      # synthesizes the sample itself, if this checkout has not got one. The
+      # parity gates configure the root CMake, whose zcore_device REQUIRES the
+      # ALSA and libudev dev headers on Linux — without them the configure
+      # stops before singz-analyze is built and all seven gates go red.
+      - name: ffmpeg, ALSA and udev headers
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg libasound2-dev libudev-dev
 
       # The root postinstall generates the gdrive-config modules. Without the
       # secret they come out EMPTY, which is what the unit tests want — nothing

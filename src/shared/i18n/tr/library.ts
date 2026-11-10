@@ -3,16 +3,15 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
-  // Source Drive picker English fallback; no locale translation is supplied.
-  "library.drive.title": "Google Drive projects",
-  "library.drive.hint": "Download songs for offline playback. These local copies do not change your Drive library.",
-  "library.drive.search": "Search Drive projects",
-  "library.drive.downloading": "Downloading project\u2026",
-  "library.drive.cancelled": "Download paused. Verified files are kept. Choose the song to continue.",
-  "library.drive.loading": "Loading your Drive projects\u2026",
-  "library.drive.open": "Open",
-  "library.drive.download": "Download and open",
-  "library.drive.empty": "No SingZ projects found in Google Drive.",
+  "library.drive.title": "Google Drive projeleri",
+  "library.drive.hint": "Şarkıları çevrimdışı çalmak için indirin. Bu yerel kopyalar Drive kitaplığınızı değiştirmez.",
+  "library.drive.search": "Drive projelerinde ara",
+  "library.drive.downloading": "Proje indiriliyor…",
+  "library.drive.cancelled": "İndirme duraklatıldı. Doğrulanmış dosyalar saklanır. Devam etmek için şarkıyı seçin.",
+  "library.drive.loading": "Drive projeleriniz yükleniyor…",
+  "library.drive.open": "Aç",
+  "library.drive.download": "İndir ve aç",
+  "library.drive.empty": "Google Drive'da SingZ projesi bulunamadı.",
 
   "library.dropScreen.syncProgress": "Google Drive ile senkronize oluyor… {msg}",
   "library.dropScreen.cancelSync": "İptal",

@@ -7763,8 +7763,12 @@ NativePlaybackResult NativePlaybackSession::setLoop(uint64_t generation,
   if (!impl_->currentForCommand(generation))
     return failure(NativePlaybackError::InvalidGeneration, generation,
                    impl_->state, "The playback generation is stale");
-  if (impl_->state != NativePlaybackState::Running || startFrame < 0 ||
-      endFrame <= startFrame ||
+  // Transport state first, and as InvalidState — the same answer clearLoop
+  // gives — so a caller can tell "not running yet" from "bad frames".
+  if (impl_->state != NativePlaybackState::Running)
+    return failure(NativePlaybackError::InvalidState, generation, impl_->state,
+                   "Native playback output is not running");
+  if (startFrame < 0 || endFrame <= startFrame ||
       static_cast<uint64_t>(endFrame) > impl_->prepared->durationFrames) {
     return failure(NativePlaybackError::InvalidConfiguration, generation,
                    impl_->state, "The playback loop region is invalid");
@@ -7803,7 +7807,10 @@ NativePlaybackResult NativePlaybackSession::setRegion(uint64_t generation,
   if (!impl_->currentForCommand(generation))
     return failure(NativePlaybackError::InvalidGeneration, generation, impl_->state,
                    "The playback generation is stale");
-  if (impl_->state != NativePlaybackState::Running || startFrame < 0 || endFrame <= startFrame ||
+  if (impl_->state != NativePlaybackState::Running)
+    return failure(NativePlaybackError::InvalidState, generation, impl_->state,
+                   "Native playback output is not running");
+  if (startFrame < 0 || endFrame <= startFrame ||
       static_cast<uint64_t>(endFrame) > impl_->prepared->durationFrames)
     return failure(NativePlaybackError::InvalidConfiguration, generation, impl_->state,
                    "The playback region is invalid");

@@ -1,12 +1,12 @@
 #include <zcore/media/flac_io.h>
 #include <zcore/base/file_compat.h>
+#include <zcore/base/utf8_file.h>
 
 #include <FLAC/stream_decoder.h>
 #include <FLAC/stream_encoder.h>
 
 #include <cstdio>
 #include <cstring>
-#include <sys/stat.h>
 #include <vector>
 
 namespace singz {
@@ -68,10 +68,18 @@ MonoWav readFlacMono(const std::string& path) {
     out.error = "FLAC decoder unavailable";
     return out;
   }
+  // libFLAC's init_FILE only asserts the FILE is non-null, so a failed open
+  // must be caught here; once init has it, the decoder owns and closes it.
+  std::FILE* f = openUtf8(path, "rb");
+  if (f == nullptr) {
+    out.error = "cannot open FLAC file";
+    FLAC__stream_decoder_delete(d);
+    return out;
+  }
   DecCtx ctx;
   ctx.out = &out;
   const FLAC__StreamDecoderInitStatus init =
-      FLAC__stream_decoder_init_file(d, path.c_str(), onWrite, onMeta, onError, &ctx);
+      FLAC__stream_decoder_init_FILE(d, f, onWrite, onMeta, onError, &ctx);
   if (init != FLAC__STREAM_DECODER_INIT_STATUS_OK) {
     out.error = FLAC__StreamDecoderInitStatusString[init];
     FLAC__stream_decoder_delete(d);
@@ -104,8 +112,14 @@ WavInfo readFlacInfo(const std::string& path) {
   DecCtx ctx;
   ctx.out = &probe;
   int64_t total = 0;
+  std::FILE* f = openUtf8(path, "rb");  // null-checked: see readFlacMono
+  if (f == nullptr) {
+    out.error = "cannot open FLAC file";
+    FLAC__stream_decoder_delete(d);
+    return out;
+  }
   const FLAC__StreamDecoderInitStatus init =
-      FLAC__stream_decoder_init_file(d, path.c_str(), onWrite, onMeta, onError, &ctx);
+      FLAC__stream_decoder_init_FILE(d, f, onWrite, onMeta, onError, &ctx);
   if (init == FLAC__STREAM_DECODER_INIT_STATUS_OK &&
       FLAC__stream_decoder_process_until_end_of_metadata(d)) {
     total = static_cast<int64_t>(FLAC__stream_decoder_get_total_samples(d));
@@ -131,12 +145,7 @@ WavInfo readFlacInfo(const std::string& path) {
 
 namespace {
 
-bool fileExists(const std::string& p, int64_t* size = nullptr) {
-  struct stat st;
-  if (::stat(p.c_str(), &st) != 0) return false;
-  if (size != nullptr) *size = static_cast<int64_t>(st.st_size);
-  return true;
-}
+bool fileExists(const std::string& p, int64_t* size = nullptr) { return statUtf8(p, size); }
 
 uint32_t rdLe32(const unsigned char* p) {
   return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
@@ -229,14 +238,14 @@ CompactResult compactStem(const std::string& wavPath, const std::string& flacPat
   // flacPath is a verified encode by construction.
   int64_t flacSize = 0;
   if (fileExists(flacPath, &flacSize)) {
-    std::remove(wavPath.c_str());  // absent is fine — remove() failing changes nothing
+    removeUtf8(wavPath);  // absent is fine — remove() failing changes nothing
     out.ok = true;
     out.skipped = true;
     out.bytes = flacSize;
     return out;
   }
 
-  std::FILE* f = std::fopen(wavPath.c_str(), "rb");
+  std::FILE* f = openUtf8(wavPath, "rb");
   if (f == nullptr) {
     out.error = "no wav and no flac for this stem";
     return out;
@@ -265,12 +274,12 @@ CompactResult compactStem(const std::string& wavPath, const std::string& flacPat
                    FLAC__stream_encoder_set_compression_level(e, 5) &&
                    FLAC__stream_encoder_set_total_samples_estimate(e, static_cast<FLAC__uint64>(frames)) &&
                    FLAC__stream_encoder_set_verify(e, true);
-  if (!set || FLAC__stream_encoder_init_file(e, part.c_str(), nullptr, nullptr) !=
+  if (!set || FLAC__stream_encoder_init_FILE(e, openUtf8(part, "w+b"), nullptr, nullptr) !=
                   FLAC__STREAM_ENCODER_INIT_STATUS_OK) {
     out.error = "FLAC encoder init failed";
     FLAC__stream_encoder_delete(e);
     std::fclose(f);
-    std::remove(part.c_str());
+    removeUtf8(part);
     return out;
   }
 
@@ -304,15 +313,15 @@ CompactResult compactStem(const std::string& wavPath, const std::string& flacPat
   }
   FLAC__stream_encoder_delete(e);
   if (!wrote) {
-    std::remove(part.c_str());  // the wav is untouched; the project stays v1
+    removeUtf8(part);  // the wav is untouched; the project stays v1
     return out;
   }
-  if (std::rename(part.c_str(), flacPath.c_str()) != 0) {
+  if (renameUtf8(part, flacPath) != 0) {
     out.error = "rename .part failed";
-    std::remove(part.c_str());
+    removeUtf8(part);
     return out;
   }
-  std::remove(wavPath.c_str());
+  removeUtf8(wavPath);
   fileExists(flacPath, &out.bytes);
   out.ok = true;
   return out;

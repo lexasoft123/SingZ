@@ -29,9 +29,19 @@ const family = (path: string): string => path.split('?')[0].replace(/^\/get\/\d+
 const SOFT_FAILURE_MS = 300_000
 const BUSY_FAILURE_MS = 30_000
 const MAX_WAIT_MS = 2000
+/** A TIMEOUT says the host is unreachable (blackholed, captive portal), not
+ * that one endpoint is unhappy, so it holds every endpoint off: otherwise each
+ * rung of the ladder (/get, /search, /get/:id) waits out its own 10 s and an
+ * outage costs every song load 20-30 s instead of 10. */
+const HOST_TIMEOUT_MS = 60_000
+/** A manual retry may not clear a host timeout younger than this — the phone's
+ * add flow retries per song, and a batch of adds during an outage must not pay
+ * the full timeout once per song. */
+const MANUAL_RETRY_FLOOR_MS = 15_000
 /** One sequential transport for both hosts. Endpoint failures cannot suppress
- * a healthy search fallback; server Retry-After is global and cannot be cleared
- * by a manual retry. Short overload replies get at most two automatic retries. */
+ * a healthy search fallback — except a timeout, which is the host's and holds
+ * every endpoint off; server Retry-After is global and cannot be cleared by a
+ * manual retry. Short overload replies get at most two automatic retries. */
 export function createLrclibTransport(options: Options): {
   request(path: string): Promise<ApiAnswer>
   retryNow(): void
@@ -43,17 +53,36 @@ export function createLrclibTransport(options: Options): {
   let serverUntil = 0,
     serverReason = '',
     lastFinished = 0,
-    lastReason = ''
+    lastReason = '',
+    hostUntil = 0,
+    hostSince = 0,
+    hostReason = ''
   let serial: Promise<unknown> = Promise.resolve()
   const retryNow = (): void => {
     serial = serial.then(() => {
       if (failures.size) options.log(`LRCLIB manual retry: clearing cooldown after ${lastReason}`)
       failures.clear()
+      if (now() >= hostUntil) return
+      if (now() - hostSince >= MANUAL_RETRY_FLOOR_MS) {
+        options.log(`LRCLIB manual retry: clearing host cooldown after ${hostReason}`)
+        hostUntil = 0
+      } else {
+        options.log(
+          `LRCLIB manual retry: keeping host cooldown, ${hostReason} was ${Math.ceil((now() - hostSince) / 1000)}s ago`
+        )
+      }
     })
   }
   async function request(path: string): Promise<ApiAnswer> {
     const url = options.baseURL + path,
       key = family(path)
+    if (now() < hostUntil) {
+      options.log(
+        `LRCLIB skipped ${url}: host cooldown ${Math.ceil((hostUntil - now()) / 1000)}s remaining after ${hostReason}`,
+        'warn'
+      )
+      return 'down'
+    }
     const previous = failures.get(key)
     if (previous && now() < previous.until) {
       options.log(
@@ -79,9 +108,14 @@ export function createLrclibTransport(options: Options): {
       const start = now(),
         ac = new AbortController()
       const timer = setTimeout(() => ac.abort(), 10_000)
-      const failed = (reason: string, ttl = SOFT_FAILURE_MS): ApiAnswer => {
+      const failed = (reason: string, ttl = SOFT_FAILURE_MS, host = false): ApiAnswer => {
         lastReason = reason
         failures.set(key, { until: now() + ttl, reason })
+        if (host) {
+          hostSince = now()
+          hostUntil = Math.max(hostUntil, hostSince + HOST_TIMEOUT_MS)
+          hostReason = reason
+        }
         options.log(
           `LRCLIB ${url}: ${reason} (${now() - start}ms); endpoint cooldown ${Math.ceil(ttl / 1000)}s`,
           'warn'
@@ -116,17 +150,19 @@ export function createLrclibTransport(options: Options): {
         try {
           return { json: await response.json() }
         } catch {
-          return failed(
-            ac.signal.aborted
-              ? 'timeout after 10000ms while reading response'
-              : `invalid JSON response (content-type ${response.headers?.get('content-type') ?? 'unknown'})`
-          )
+          return ac.signal.aborted
+            ? failed('timeout after 10000ms while reading response', SOFT_FAILURE_MS, true)
+            : failed(
+                `invalid JSON response (content-type ${response.headers?.get('content-type') ?? 'unknown'})`
+              )
         }
       } catch (error) {
         const detail = String(error instanceof Error ? `${error.name}: ${error.message}` : error)
           .replace(/[\r\n\t]+/g, ' ')
           .slice(0, 300)
-        return failed(ac.signal.aborted ? 'timeout after 10000ms' : `network failure: ${detail}`)
+        return ac.signal.aborted
+          ? failed('timeout after 10000ms', SOFT_FAILURE_MS, true)
+          : failed(`network failure: ${detail}`)
       } finally {
         clearTimeout(timer)
         lastFinished = now()

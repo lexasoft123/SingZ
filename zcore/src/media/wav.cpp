@@ -1,5 +1,6 @@
 #include <zcore/media/wav.h>
 #include <zcore/base/file_compat.h>
+#include <zcore/base/utf8_file.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -8,45 +9,8 @@
 #include <limits>
 #include <vector>
 
-#if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#endif
-
 namespace singz {
 namespace {
-
-// Public native paths are UTF-8. The Windows CRT's narrow fopen uses the
-// process ACP, so translate strictly at this file boundary rather than changing
-// the process-wide code page (which would also affect unrelated libraries).
-static std::FILE* openUtf8(const std::string& path, const char* mode) {
-#if defined(_WIN32)
-  if (path.empty() || path.find('\0') != std::string::npos ||
-      path.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
-    errno = EINVAL;
-    return nullptr;
-  }
-  const int bytes = static_cast<int>(path.size());
-  const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-                                       path.data(), bytes, nullptr, 0);
-  if (count <= 0) { errno = EINVAL; return nullptr; }
-  std::wstring wide(static_cast<size_t>(count), L'\0');
-  if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.data(), bytes,
-                          wide.data(), count) != count) {
-    errno = EINVAL;
-    return nullptr;
-  }
-  const std::wstring wideMode(mode, mode + std::strlen(mode));
-  return _wfopen(wide.c_str(), wideMode.c_str());
-#else
-  return std::fopen(path.c_str(), mode);
-#endif
-}
 
 void putU32(uint8_t* p, uint32_t v) {
   p[0] = v & 0xff;

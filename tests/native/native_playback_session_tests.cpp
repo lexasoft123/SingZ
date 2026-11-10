@@ -1142,6 +1142,16 @@ void compositionAndLifetime() {
         fake->enumerations == 1 && fake->opens == 1 && fake->starts == 0);
   CHECK(fake->lastConfig.inputDeviceUid.empty() &&
         fake->lastConfig.inputChannels.empty());
+  // Output open but not started: every region/loop command answers with the
+  // TRANSPORT's state, never as though the (valid) frames were wrong.
+  CHECK(session.setRegion(10, 0, 32, false).error ==
+        singz::NativePlaybackError::InvalidState);
+  CHECK(session.setRegion(10, 0, 32, true).error ==
+        singz::NativePlaybackError::InvalidState);
+  CHECK(session.setLoop(10, 0, 32).error ==
+        singz::NativePlaybackError::InvalidState);
+  CHECK(session.clearRegion(10).error ==
+        singz::NativePlaybackError::InvalidState);
   CHECK(session.start(10).ok);
   status = session.status();
   CHECK(status.state == singz::NativePlaybackState::Running &&

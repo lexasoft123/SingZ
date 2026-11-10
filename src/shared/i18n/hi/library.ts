@@ -3,16 +3,15 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
-  // Source Drive picker English fallback; no locale translation is supplied.
-  "library.drive.title": "Google Drive projects",
-  "library.drive.hint": "Download songs for offline playback. These local copies do not change your Drive library.",
-  "library.drive.search": "Search Drive projects",
-  "library.drive.downloading": "Downloading project\u2026",
-  "library.drive.cancelled": "Download paused. Verified files are kept. Choose the song to continue.",
-  "library.drive.loading": "Loading your Drive projects\u2026",
-  "library.drive.open": "Open",
-  "library.drive.download": "Download and open",
-  "library.drive.empty": "No SingZ projects found in Google Drive.",
+  "library.drive.title": "Google Drive प्रोजेक्ट",
+  "library.drive.hint": "ऑफ़लाइन चलाने के लिए गाने डाउनलोड करें। ये लोकल कॉपी आपकी Drive लाइब्रेरी को नहीं बदलतीं।",
+  "library.drive.search": "Drive प्रोजेक्ट खोजें",
+  "library.drive.downloading": "प्रोजेक्ट डाउनलोड हो रहा है…",
+  "library.drive.cancelled": "डाउनलोड रोका गया। जाँची गई फ़ाइलें रखी गई हैं। जारी रखने के लिए गाना चुनें।",
+  "library.drive.loading": "आपके Drive प्रोजेक्ट लोड हो रहे हैं…",
+  "library.drive.open": "खोलें",
+  "library.drive.download": "डाउनलोड करें और खोलें",
+  "library.drive.empty": "Google Drive में कोई SingZ प्रोजेक्ट नहीं मिला।",
 
   "library.dropScreen.syncProgress": "Google Drive से सिंक हो रहा है… {msg}",
   "library.dropScreen.cancelSync": "रद्द करें",

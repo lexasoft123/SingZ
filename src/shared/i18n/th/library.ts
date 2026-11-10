@@ -3,16 +3,15 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
-  // Source Drive picker English fallback; no locale translation is supplied.
-  "library.drive.title": "Google Drive projects",
-  "library.drive.hint": "Download songs for offline playback. These local copies do not change your Drive library.",
-  "library.drive.search": "Search Drive projects",
-  "library.drive.downloading": "Downloading project\u2026",
-  "library.drive.cancelled": "Download paused. Verified files are kept. Choose the song to continue.",
-  "library.drive.loading": "Loading your Drive projects\u2026",
-  "library.drive.open": "Open",
-  "library.drive.download": "Download and open",
-  "library.drive.empty": "No SingZ projects found in Google Drive.",
+  "library.drive.title": "โปรเจกต์ใน Google ไดรฟ์",
+  "library.drive.hint": "ดาวน์โหลดเพลงเพื่อเล่นแบบออฟไลน์ สำเนาในเครื่องจะไม่เปลี่ยนคลังใน Drive ของคุณ",
+  "library.drive.search": "ค้นหาโปรเจกต์ใน Drive",
+  "library.drive.downloading": "กำลังดาวน์โหลดโปรเจกต์…",
+  "library.drive.cancelled": "หยุดดาวน์โหลดชั่วคราว ไฟล์ที่ตรวจสอบแล้วยังเก็บไว้ เลือกเพลงเพื่อดำเนินการต่อ",
+  "library.drive.loading": "กำลังโหลดโปรเจกต์ใน Drive ของคุณ…",
+  "library.drive.open": "เปิด",
+  "library.drive.download": "ดาวน์โหลดและเปิด",
+  "library.drive.empty": "ไม่พบโปรเจกต์ SingZ ใน Google ไดรฟ์",
 
   "library.dropScreen.syncProgress": "กำลังซิงค์กับ Google Drive… {msg}",
   "library.dropScreen.cancelSync": "ยกเลิก",

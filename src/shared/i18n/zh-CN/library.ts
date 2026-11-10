@@ -3,16 +3,15 @@ import type { library as en } from '../en/library'
 import type { Translation } from '../types'
 
 export const library: Translation<typeof en> = {
-  // Source Drive picker English fallback; no locale translation is supplied.
-  "library.drive.title": "Google Drive projects",
-  "library.drive.hint": "Download songs for offline playback. These local copies do not change your Drive library.",
-  "library.drive.search": "Search Drive projects",
-  "library.drive.downloading": "Downloading project\u2026",
-  "library.drive.cancelled": "Download paused. Verified files are kept. Choose the song to continue.",
-  "library.drive.loading": "Loading your Drive projects\u2026",
-  "library.drive.open": "Open",
-  "library.drive.download": "Download and open",
-  "library.drive.empty": "No SingZ projects found in Google Drive.",
+  "library.drive.title": "Google Drive 项目",
+  "library.drive.hint": "下载歌曲以便离线播放。这些本地副本不会更改你的 Drive 资料库。",
+  "library.drive.search": "搜索 Drive 项目",
+  "library.drive.downloading": "正在下载项目…",
+  "library.drive.cancelled": "下载已暂停。已校验的文件会保留。选择这首歌即可继续。",
+  "library.drive.loading": "正在加载你的 Drive 项目…",
+  "library.drive.open": "打开",
+  "library.drive.download": "下载并打开",
+  "library.drive.empty": "Google Drive 中没有找到 SingZ 项目。",
 
   "library.dropScreen.syncProgress": "正在与 Google Drive 同步… {msg}",
   "library.dropScreen.cancelSync": "取消",

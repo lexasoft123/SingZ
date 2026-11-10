@@ -26,6 +26,11 @@ files:
   # CI ships. CI only escapes because its desktop job never pod-installs, so
   # this was a landmine rather than a current break.
   - '!mobile/*'
+  # Same reason: experiments/ is the native GPUI desktop (Rust, vendored GPUI
+  # sources, review notes) and grows a multi-GB cargo `target/` once built;
+  # .agents/ is agent configuration. Neither is a runtime asset.
+  - '!experiments/*'
+  - '!.agents/*'
   # Shared pitch weights are copied to resources/pitch below.
   - '!assets/pitch/*'
   # Output of the iOS pipeline (fastlane's export dir): .ipa plus a ~38 MB
