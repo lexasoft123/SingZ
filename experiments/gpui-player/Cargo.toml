@@ -11,7 +11,7 @@ ui-tests = ["dep:gpui_linux_capture"]
 gpui-kit = "=0.9.0"
 # Enable native offscreen rendering without gpui-kit optional fast-backend features.
 gpui-test-platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["test-support"] }
-singz-uikit = { path = "../../../singz-ui/gpui" }
+singz-uikit = { git = "https://github.com/lexasoft123/singz-ui.git", rev = "1c1081adc21975a346faeed1b48ebff20348935f" }
 anyhow = "1"
 base64 = "=0.22.1"
 getrandom = "=0.3.4"
@@ -37,6 +37,13 @@ url = "2.5"
 [profile.dev]
 debug = 0
 opt-level = 2
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+debug = "line-tables-only"
+strip = "symbols"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSDictionary", "NSObject", "NSString", "NSUserDefaults", "NSValue"] }

@@ -22,6 +22,20 @@ FONT_LICENSES = ('Bricolage-OFL.txt', 'MartianMono-OFL.txt')
 class PackageError(RuntimeError):
     pass
 
+UI_TESTS_MARKER = b'SINGZ_GPUI_UI_TESTS_BUILD_MARKER'
+
+def validate_runtime_profile(runtime: Path, allow_debug: bool) -> None:
+    profile = runtime.resolve().name
+    if profile == 'release' or (profile == 'debug' and allow_debug):
+        return
+    if profile == 'debug':
+        raise PackageError('Refusing debug profile; pass --allow-debug only for local qualification')
+    raise PackageError('Cannot determine build profile from runtime path; expected target/release or target/debug')
+
+def reject_ui_tests_binary(path: Path) -> None:
+    if UI_TESTS_MARKER in path.read_bytes():
+        raise PackageError(f'Refusing ui-tests binary: {path}')
+
 
 def native_build_info(path: Path | None, executable: Path, platform: str, required: bool) -> dict | None:
     """Validate supplied CLI metadata against copied, unsigned UI bytes; never execute it.
@@ -432,6 +446,8 @@ def assemble(platform: str, runtime: Path, output: Path, *, uikit_dir: Path | No
     suffix = '.exe' if platform == 'windows' else ''
     for executable in EXECUTABLES:
         name = executable + suffix
+        if executable == 'singz-gpui-player':
+            reject_ui_tests_binary(runtime / name)
         selected.append((runtime / name, Path(name), 'native-executable', True))
     for directory, names in (('pitch', ('crepe-tiny.bin', 'torchcrepe-LICENSE.txt')), ('training-sounds', SAMPLES)):
         ordinary(runtime / directory, True)
@@ -503,8 +519,10 @@ def main() -> None:
     parser.add_argument('--uikit-dir', type=Path, help='Existing singz-ui repository or gpui crate root; fonts are already embedded')
     parser.add_argument('--require-drive-config', action='store_true', help='Require configured baked Drive metadata bound to the unsigned source UI hash')
     parser.add_argument('--build-info-file', type=Path, help='Safe JSON previously emitted by the source UI --native-build-info; assembler never runs it')
+    parser.add_argument('--allow-debug', action='store_true', help='Allow packaging a target/debug build for local qualification')
     args = parser.parse_args()
     try:
+        validate_runtime_profile(args.runtime_dir, args.allow_debug)
         manifest = assemble(args.platform, args.runtime_dir, args.output_dir, uikit_dir=args.uikit_dir, require_drive_config=args.require_drive_config, build_info_file=args.build_info_file)
     except (PackageError, OSError, ValueError) as error:
         parser.exit(1, f'Packaging failed: {error}\n')

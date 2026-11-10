@@ -11,13 +11,16 @@ This is a local preview checkpoint, not release or full desktop completion.
 From the checkout, build the Rust app and three native helpers first:
 
 ```sh
-cargo build --locked --manifest-path experiments/gpui-player/Cargo.toml
-bash scripts/build-gpui-audio.sh
+cargo build --release --locked --manifest-path experiments/gpui-player/Cargo.toml
+python3 scripts/build-gpui-native.py
 python3 scripts/package-gpui-macos.py \
-  --runtime-dir experiments/gpui-player/target/debug \
+  --runtime-dir experiments/gpui-player/target/release \
   --output '/tmp/new-native-preview/SingZ Preview.app' \
   --version 0.26.5 --icon build/icon.icns --ad-hoc-sign
 ```
+
+`build-gpui-native.py` writes all three helpers to `target/release` by default.
+The packager refuses `target/debug` unless `--allow-debug` is passed.
 
 Create the output parent first. An existing bundle or adjacent manifest is refused.
 The manifest records every final signed file's bytes/SHA-256 and actual Mach-O

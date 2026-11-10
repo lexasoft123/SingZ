@@ -1,4 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+#[cfg(feature = "ui-tests")]
+#[used]
+static SINGZ_GPUI_UI_TESTS_BUILD_MARKER: &[u8] = b"SINGZ_GPUI_UI_TESTS_BUILD_MARKER";
 #[cfg(all(feature="ui-tests",target_os="macos"))]
 mod ui_desktop_lifecycle;
 #[cfg(feature="ui-tests")]
@@ -6152,6 +6155,9 @@ impl AssetSource for Assets {
 }
 
 fn main() {
+    // Keep the ui-tests marker referenced so ELF/MSVC linkers cannot discard it.
+    #[cfg(feature = "ui-tests")]
+    std::hint::black_box(SINGZ_GPUI_UI_TESTS_BUILD_MARKER);
     if std::env::args_os().nth(1).as_deref()==Some(std::ffi::OsStr::new("--native-build-info")) {
         if native_build_info::print().is_err() {
             eprintln!("Cannot read native build metadata");std::process::exit(1);

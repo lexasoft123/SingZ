@@ -530,7 +530,9 @@ python3 experiments/gpui-player/tests/test_native_beat_detection.py experiments/
 
 The real installed-model check is opt-in. It requires a percussion project with
 a drums lane, its original duration, a fresh output directory, and real native
-tool paths. `SINGZ_PACK_DIR` may select an existing pack; otherwise the normal
+tool paths. The helpers below are debug builds: build them with
+`python3 scripts/build-gpui-native.py --output-dir experiments/gpui-player/target/debug`,
+because that script now defaults to `target/release`. `SINGZ_PACK_DIR` may select an existing pack; otherwise the normal
 installed cache is used. This example expects a 32-second project:
 
 ```sh

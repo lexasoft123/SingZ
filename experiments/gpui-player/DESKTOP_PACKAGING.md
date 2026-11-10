@@ -4,15 +4,23 @@ The native runtime uses Rust/GPUI and three standalone C++ tools. Packaging runs
 without Node or Electron, and copies an already-built runtime. Shared UI fonts
 are embedded by UIKit; both OFL notices travel with the package.
 
+The crate release profile uses `opt-level = 3`, thin LTO, 16 codegen units,
+line-table-only debug information, and symbol stripping: this favours runtime
+speed while keeping link time reasonable and preserving release diagnostics.
+The `ui-tests` feature emits the `SINGZ_GPUI_UI_TESTS_BUILD_MARKER` byte marker;
+both packagers reject a player binary containing it. Packagers accept only a
+`target/release` runtime by default; `target/debug` requires `--allow-debug`,
+and any other profile path is refused as unknowable.
+
 From the checkout root:
 
 ```sh
 python3 scripts/package-gpui-desktop.py --platform linux \
-  --runtime-dir experiments/gpui-player/target/debug --output-dir /tmp/SingZ-Linux
+  --runtime-dir experiments/gpui-player/target/release --output-dir /tmp/SingZ-Linux
 python3 scripts/package-gpui-desktop.py --platform windows \
-  --runtime-dir experiments/gpui-player/target/debug --output-dir /tmp/SingZ-Windows
+  --runtime-dir experiments/gpui-player/target/release --output-dir /tmp/SingZ-Windows
 python3 scripts/package-gpui-macos.py \
-  --runtime-dir experiments/gpui-player/target/debug \
+  --runtime-dir experiments/gpui-player/target/release \
   --output '/tmp/SingZ Preview.app' --version 0.26.5 --ad-hoc-sign
 ```
 

@@ -232,7 +232,7 @@ def build(output_dir: Path, *, codec_pack: Path | None = None, basic_only: bool 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--output-dir', type=Path, default=ROOT / 'experiments/gpui-player/target/debug')
+    parser.add_argument('--output-dir', type=Path, default=ROOT / 'experiments/gpui-player/target/release')
     parser.add_argument('--audio-output', type=Path, help='Preserve the shell wrapper\'s optional audio-helper filename')
     parser.add_argument('--codec-pack', type=Path)
     parser.add_argument('--basic-only', action='store_true', help='Explicit WAV/FLAC/MP3-only development build')
