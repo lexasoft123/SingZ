@@ -1,4 +1,5 @@
 //! Native device inventory and app-owned preferences; no Electron configuration.
+use crate::file_lease::Lease;
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{
@@ -279,15 +280,15 @@ pub fn raw_monitor_uid(uid:&str)->String {
 /// Holds the preference file lease through publication and any rollback.
 /// Its filesystem operations must never run under the UI admission gate.
 pub(crate) struct ProviderPreference {
-    dir:PathBuf, _lease:File, previous:Option<Vec<u8>>, next:Vec<u8>, published:bool,
+    dir:PathBuf, _lease:Lease, previous:Option<Vec<u8>>, next:Vec<u8>, published:bool,
 }
 impl ProviderPreference {
     pub(crate) fn prepare(selected:Provider)->Result<Self> {Self::prepare_at(&directory(),selected)}
     fn prepare_at(dir:&Path,selected:Provider)->Result<Self> {
         ensure!(matches!(selected,Provider::Wasapi|Provider::Asio),"Invalid saved Windows audio provider");
         fs::create_dir_all(dir)?;
-        let lease=OpenOptions::new().create(true).truncate(false).read(true).write(true).open(dir.join(".audio.lock"))?;
-        lease.try_lock().context("Audio preferences are being changed by another app")?;
+        let lease_file=OpenOptions::new().create(true).truncate(false).read(true).write(true).open(dir.join(".audio.lock"))?;
+        let lease=Lease::acquire(lease_file).context("Audio preferences are being changed by another app")?;
         let previous=match File::open(dir.join("audio.json")){Ok(file)=>{let mut bytes=vec![];file.take(65537).read_to_end(&mut bytes)?;ensure!(bytes.len()<=65536,"Audio preferences are too large");Some(bytes)},Err(e) if e.kind()==std::io::ErrorKind::NotFound=>None,Err(e)=>return Err(e.into())};
         let mut raw=load_at(dir)?;raw["nativeAudioProvider"]=selected.as_str().into();raw["outputUid"]="".into();
         Ok(Self{dir:dir.into(),_lease:lease,previous,next:serde_json::to_vec_pretty(&raw)?,published:false})
@@ -406,13 +407,13 @@ pub(crate) fn save_karaoke_at(directory: &Path, enabled: bool) -> Result<Value> 
 }
 fn patch_at(dir: &Path, patch: Value) -> Result<Value> {
     fs::create_dir_all(dir)?;
-    let lock = OpenOptions::new()
+    let lock_file = OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
         .open(dir.join(".audio.lock"))?;
-    lock.try_lock()
+    let _lock = Lease::acquire(lock_file)
         .context("Audio preferences are being changed by another app")?;
     let mut raw = load_at(dir)?;
     for (key, value) in patch
@@ -447,6 +448,29 @@ fn patch_at(dir: &Path, patch: Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn preference_lease_unlocks_before_a_forked_child_drops_its_descriptor() {
+        let dir = std::env::temp_dir().join(format!("singz-audio-lease-fork-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&dir.join("audio.json"), br#"{"outputUid":"keep"}"#).unwrap();
+        let tx = ProviderPreference::prepare_at(&dir, Provider::Asio).unwrap();
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0, "fork failed: {}", std::io::Error::last_os_error());
+        if child == 0 {
+            unsafe {
+                libc::usleep(200_000);
+                libc::_exit(0);
+            }
+        }
+        drop(tx);
+        patch_at(&dir, json!({"karaoke":true}))
+            .expect("parent must unlock before the forked child exits");
+        unsafe { libc::waitpid(child, std::ptr::null_mut(), 0); }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn provider_preference_rollback_preserves_exact_bytes_and_retains_file_lease() {
         let dir=std::env::temp_dir().join(format!("singz-provider-transaction-{}",std::process::id()));fs::create_dir_all(&dir).unwrap();
