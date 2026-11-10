@@ -68,6 +68,8 @@ mod native_graph;
 mod playback_graph;
 mod drive_state;
 mod drive_sync;
+#[cfg(test)]
+mod drive_sync_tests;
 mod drive_adopt;
 mod drive_service;
 mod drive_host;
