@@ -3,6 +3,10 @@ import type { lyrics as en } from '../en/lyrics'
 import type { Translation } from '../types'
 
 export const lyrics: Translation<typeof en> = {
+  'lyrics.editor.skippedRows': "Mga nilaktawang linya: {n}. Ang mga linyang ipinapakita lang ang mananatili kapag nag-save.",
+  'lyrics.editor.backupFailed': "Hindi na-back up ang orihinal na liriko. Hindi binago ang file ng liriko.",
+  'lyrics.panel.autoPreservedEdited': "Itinigil ang awtomatikong paghahanap upang mapanatili ang na-edit mong liriko. Gamitin ang Palitan… o I-edit upang palitan ito.",
+  'lyrics.panel.autoPreservedUnreadable': "Itinigil ang awtomatikong paghahanap dahil hindi mabasa ang naka-save na liriko. Hindi binago ang file; gamitin ang I-edit upang ayusin ito.",
   "lyrics.check.preciseSuffix": "· tumpak",
   "lyrics.state.noWordsDetected": "Walang mga salita ang nadiskubre sa mga boses.",
   "lyrics.check.mismatchPrecise": "{pct}% lamang ng mga salitang ito ang narinig sa mga vocal  suriin ang teksto, o subukan ang Precise.",

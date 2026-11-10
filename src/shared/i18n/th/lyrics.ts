@@ -3,6 +3,10 @@ import type { lyrics as en } from '../en/lyrics'
 import type { Translation } from '../types'
 
 export const lyrics: Translation<typeof en> = {
+  'lyrics.editor.skippedRows': "ข้ามไป {n} บรรทัด เมื่อบันทึกจะเก็บเฉพาะบรรทัดที่แสดงอยู่",
+  'lyrics.editor.backupFailed': "สำรองเนื้อเพลงต้นฉบับไม่ได้ ไฟล์เนื้อเพลงยังไม่ถูกเปลี่ยนแปลง",
+  'lyrics.panel.autoPreservedEdited': "หยุดค้นหาอัตโนมัติเพื่อเก็บเนื้อเพลงที่คุณแก้ไขไว้ ใช้ เปลี่ยน… หรือ แก้ไข เพื่อแทนที่",
+  'lyrics.panel.autoPreservedUnreadable': "หยุดค้นหาอัตโนมัติเพราะอ่านเนื้อเพลงที่บันทึกไว้ไม่ได้ ไฟล์ยังไม่ถูกเปลี่ยนแปลง ใช้ แก้ไข เพื่อซ่อมแซม",
   "lyrics.check.preciseSuffix": "· ความแม่นยํา",
   "lyrics.state.noWordsDetected": "ไม่มีคําใดถูกพบในเสียงร้อง",
   "lyrics.check.mismatchPrecise": "เพียง {pct}% ของคําเหล่านี้ ได้ยินในเสียงเสียง  ตรวจสอบข้อความ, หรือลอง Precise.",

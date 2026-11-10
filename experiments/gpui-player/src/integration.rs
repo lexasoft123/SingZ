@@ -640,6 +640,8 @@ fn publish_resolved_lyrics(project:&Project,mut proposal:crate::lyrics_resolutio
         anyhow::ensure!(crate::lyrics_store::identity(&project.dir)?==project.lyrics_fingerprint,"Lyrics changed outside this app. Reopen the song before continuing.");
         anyhow::ensure!(!cancel(),"Lyrics request cancelled");
         let fingerprint=if proposal.write {
+            crate::lyrics_store::backup_before_replace_locked(&project.dir,project.lyrics_fingerprint.as_deref(),true)?;
+            anyhow::ensure!(!cancel(),"Lyrics request cancelled");
             let hash=crate::project_store::commit_expected_locked(&project.dir,"lyrics.json",project.lyrics_fingerprint.as_deref(),&proposal.raw)?;
             if let Err(e)=crate::sync_dirty::mark_file(&project.dir.join("lyrics.json"),"lyrics") {proposal.warnings.push(format!("Lyrics were saved, but the pending-sync record could not be written: {e:#}. Save again to retry."));}
             Some(hash)
@@ -3035,6 +3037,163 @@ mod deletion_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn lyrics_review_project(root:&Path, bytes:&[u8]) -> Project {
+        fs::create_dir_all(root.join("stems")).unwrap();
+        fs::write(root.join("stems/vocals.wav"), b"wav").unwrap();
+        fs::write(root.join("project.json"), br#"{"version":2,"name":"Review lyrics","settings":{}}"#).unwrap();
+        fs::write(root.join("lyrics.json"), bytes).unwrap();
+        let mut project = read_project(root).unwrap();
+        project.lyrics_fingerprint = crate::lyrics_store::identity(&project.dir).unwrap();
+        project.lyrics_raw = serde_json::from_slice(bytes).ok();
+        project
+    }
+    fn isolated_publication_test(name:&str, body:impl FnOnce()) {
+        if std::env::var("SINGZ_C10_PUBLICATION_TEST").as_deref()==Ok(name) {body();return;}
+        let root=fixture(&format!("publication-config-{name}"));
+        let output=fs::File::create(root.join("child.log")).unwrap();
+        let mut child=Command::new(std::env::current_exe().unwrap())
+            .args(["--exact",&format!("integration::tests::{name}"),"--nocapture"])
+            .env("SINGZ_C10_PUBLICATION_TEST",name).env("SINGZ_GPUI_CONFIG_DIR",&root).env("SINGZ_MUTE","1")
+            .stdout(output.try_clone().unwrap()).stderr(output).spawn().unwrap();
+        let deadline=Instant::now()+Duration::from_secs(30);
+        loop {
+            if let Some(status)=child.try_wait().unwrap() {
+                let log=fs::read_to_string(root.join("child.log")).unwrap();
+                fs::remove_dir_all(root).unwrap();
+                assert!(status.success(),"{log}");return;
+            }
+            if Instant::now()>=deadline {let _=child.kill();let _=child.wait();panic!("publication test exceeded 30 seconds");}
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    fn replacement_proposal(source:&str)->crate::lyrics_resolution::Proposal {
+        crate::lyrics_resolution::Proposal {
+            raw:serde_json::json!({"source":source,"lines":[{"start":1,"end":2,"text":"Replacement lyrics"}]}),
+            write:true,cached:false,check:None,warnings:vec![],
+        }
+    }
+    fn assert_lookup_publication_backup(source:&str) {
+        let cx=gpui_kit::TestAppContext::build(gpui_kit::TestDispatcher::new(102),None);
+        for (case,bytes) in [("broken",b"{broken".as_slice()),("edited",br#"{"source":"edited","lines":[{"start":1,"end":2,"text":"My original words"}]}"#)] {
+            let root=fixture(&format!("lyrics-backup-{source}-{case}"));
+            let project=lyrics_review_project(&root,bytes);
+            let result=publish_resolved_lyrics(&project,replacement_proposal(source),cx.text_system(),&||false).unwrap();
+            assert!(result.written);
+            assert_eq!(result.raw["source"],source);
+            assert_eq!(fs::read(root.join("lyrics.json.bak")).unwrap(),bytes);
+            assert_ne!(fs::read(root.join("lyrics.json")).unwrap(),bytes);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+    #[test]
+    fn transcribe_publication_backs_up_unreadable_and_edited_lyrics() {
+        isolated_publication_test("transcribe_publication_backs_up_unreadable_and_edited_lyrics",||{
+        assert_lookup_publication_backup("whisper");
+        });
+    }
+    #[test]
+    fn candidate_publication_backs_up_unreadable_and_edited_lyrics() {
+        isolated_publication_test("candidate_publication_backs_up_unreadable_and_edited_lyrics",||{
+        assert_lookup_publication_backup("lrclib");
+        });
+    }
+    #[cfg(unix)]
+    #[test]
+    fn lookup_publication_backup_failure_blocks_both_replacements() {
+        isolated_publication_test("lookup_publication_backup_failure_blocks_both_replacements",||{
+        let cx=gpui_kit::TestAppContext::build(gpui_kit::TestDispatcher::new(103),None);
+        for source in ["whisper","lrclib"] {
+            let root=fixture(&format!("lyrics-backup-refusal-{source}"));
+            let project=lyrics_review_project(&root,b"{broken");
+            // Unusable backup names are skipped for the next one, so force the backup
+            // step itself to fail (this test runs in its own isolated process).
+            use std::sync::atomic::Ordering::SeqCst;
+            crate::lyrics_store::FAIL_BACKUP_FOR_TESTS.store(true,SeqCst);
+            let result=publish_resolved_lyrics(&project,replacement_proposal(source),cx.text_system(),&||false);
+            crate::lyrics_store::FAIL_BACKUP_FOR_TESTS.store(false,SeqCst);
+            let error=format!("{:#}",result.expect_err("a failed backup must block publication"));
+            assert!(error.contains(&crate::i18n::t("lyrics.editor.backupFailed")),"{source}: not the backup failure: {error}");
+            assert_eq!(fs::read(root.join("lyrics.json")).unwrap(),b"{broken");
+            assert!(!root.join("lyrics.json.bak").exists());
+            fs::remove_dir_all(root).unwrap();
+        }
+        });
+    }
+    #[test]
+    fn lyrics_review_real_run_and_publication_preserve_healthy_and_unreadable_files() {
+        let cx = gpui_kit::TestAppContext::build(gpui_kit::TestDispatcher::new(100), None);
+        let root = fixture("lyrics-review-real-run");
+        let raw = serde_json::json!({"source":"edited","lines":[{"start":1,"end":2,"text":"  Keep my words  "}],"foreign":true});
+        let bytes = serde_json::to_vec_pretty(&raw).unwrap();
+        let project = lyrics_review_project(&root, &bytes);
+        let result = crate::lyrics_resolution::run(&project, crate::lyrics_resolution::Intent::Auto,
+            &crate::lrclib::Client::with_base_url("http://127.0.0.1:9").unwrap(), &||false, &|_|{})
+            .and_then(|proposal| publish_resolved_lyrics(&project, proposal, cx.text_system(), &||false)).unwrap();
+        assert!(!result.written && result.cached);
+        assert_eq!(result.raw, raw);
+        assert_eq!(result.warnings, vec![crate::i18n::t("lyrics.panel.autoPreservedEdited")]);
+        assert_eq!(fs::read(root.join("lyrics.json")).unwrap(), bytes);
+        for bytes in [b"{broken".as_slice(), b"[]", b"{\"lines\":[]}"] {
+            let project = lyrics_review_project(&root, bytes);
+            let result = crate::lyrics_resolution::run(&project, crate::lyrics_resolution::Intent::Auto,
+                &crate::lrclib::Client::with_base_url("http://127.0.0.1:9").unwrap(), &||false, &|_|{})
+                .and_then(|proposal| publish_resolved_lyrics(&project, proposal, cx.text_system(), &||false));
+            assert_eq!(result.unwrap_err().to_string(),crate::i18n::t("lyrics.panel.autoPreservedUnreadable"));
+            assert_eq!(fs::read(root.join("lyrics.json")).unwrap(), bytes);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn lyrics_review_editor_seed_survives_error_sidebar_and_auto_stays_ready() {
+        // Isolate constructor preferences/demo mode without mutating the test
+        // process environment or starting real backend services.
+        if std::env::var_os("SINGZ_C10_REVIEW_CHILD").is_none() {
+            let root = fixture("lyrics-review-ui-config");
+            let output = fs::File::create(root.join("child.log")).unwrap();
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "integration::tests::lyrics_review_editor_seed_survives_error_sidebar_and_auto_stays_ready", "--nocapture"])
+                .env("SINGZ_C10_REVIEW_CHILD", "1").env("SINGZ_GPUI_DEMO", "1")
+                .env("SINGZ_GPUI_CONFIG_DIR", &root).env("SINGZ_MUTE", "1")
+                .stdout(output.try_clone().unwrap()).stderr(output).spawn().unwrap();
+            let deadline = Instant::now()+Duration::from_secs(30);
+            loop {
+                if let Some(status)=child.try_wait().unwrap() {
+                    let log=fs::read_to_string(root.join("child.log")).unwrap();
+                    fs::remove_dir_all(&root).unwrap();
+                    assert!(status.success(), "{log}");break;
+                }
+                if Instant::now()>=deadline {let _=child.kill();let _=child.wait();panic!("lyrics UI child exceeded 30 seconds");}
+                thread::sleep(Duration::from_millis(10));
+            }
+            return;
+        }
+        let mut cx=gpui_kit::TestAppContext::build(gpui_kit::TestDispatcher::new(101),None);
+        cx.update(gpui_kit::init);
+        let root=fixture("lyrics-review-ui-project");
+        let raw=serde_json::json!({"source":"edited","credit":"Singer","lines":[
+            {"start":1,"end":2,"text":"  Keep my words  "},{"start":-1,"text":"skipped"}]});
+        let project=lyrics_review_project(&root,&serde_json::to_vec(&raw).unwrap());
+        let window=cx.add_window(crate::Player::new);
+        window.update(&mut cx,|player,_,cx|{
+            player.loading=false;
+            player.lyric_document=Arc::new(crate::project_lyrics::from_value(&raw).unwrap().unwrap());
+            player.project=Some(project.clone());
+            player.lyrics_sidebar.update(cx,|s,cx|s.failure("fixture failure".into(),cx));
+            player.open_lyrics_editor_intent(cx);
+            assert_eq!(player.lyrics_editor.read(cx).rows()[0].text,"  Keep my words  ");
+            assert_eq!(player.lyrics_editor_credit.as_deref(),Some("Singer"));
+            assert_eq!(player.lyrics_editor.read(cx).notice.as_deref(),Some(crate::i18n::tv("lyrics.editor.skippedRows",&[("n","1".into())]).as_str()));
+            let proposal=crate::lyrics_resolution::run(&project,crate::lyrics_resolution::Intent::Auto,
+                &crate::lrclib::Client::with_base_url("http://127.0.0.1:9").unwrap(),&||false,&|_|{}).unwrap();
+            let result=publish_resolved_lyrics(&project,proposal,cx.text_system(),&||false).unwrap();
+            player.sidebar_resolved(Ok(result),cx);
+            assert!(player.lyrics_sidebar.read(cx).is_ready());
+            assert_eq!(player.notice.as_deref(),Some(crate::i18n::t("lyrics.panel.autoPreservedEdited").as_str()));
+            player.open_lyrics_editor_intent(cx);
+            assert_eq!(player.lyrics_editor.read(cx).rows()[0].text,"  Keep my words  ");
+        }).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
     fn captured_lane_reply()->Value {
         serde_json::from_str(include_str!("../../../tests/shared/gpui-first-lane-default-reply.json")).unwrap()
     }

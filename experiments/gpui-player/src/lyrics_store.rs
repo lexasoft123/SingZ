@@ -53,6 +53,25 @@ pub fn edited_value(
             .is_some_and(|s| !crate::lyrics_edit::trim_text(s).is_empty())),
         "Edited lyric lines cannot be empty"
     );
+    // Tolerant disk loading must not silently admit malformed editor output.
+    for row in rows {
+        let timing = |v: &Value| v.as_f64().filter(|n| n.is_finite() && *n >= 0.);
+        let start = timing(&row["start"]).context("Invalid lyrics timing")?;
+        let end = timing(&row["end"]).context("Invalid lyrics timing")?;
+        ensure!(end > start, "Lyrics line ends before it starts");
+        if let Some(words) = row["words"].as_array() {
+            for word in words {
+                let text = word["w"].as_str().context("Invalid lyric word")?;
+                let text = crate::lyrics_edit::trim_text(text);
+                if text.is_empty() { continue; }
+                ensure!(text.chars().count() <= 1024 && !text.contains(['\n', '\r']),
+                    "Invalid lyric word length or newline");
+                let start = timing(&word["s"]).context("Invalid lyrics timing")?;
+                let end = timing(&word["e"]).context("Invalid lyrics timing")?;
+                ensure!(end >= start, "Lyrics word ends before it starts");
+            }
+        }
+    }
     let mut raw = previous
         .filter(|v| v.is_object())
         .cloned()
@@ -87,6 +106,64 @@ pub fn edited_value(
     Ok((raw, document))
 }
 
+/// Preserve original bytes without replacing or following an occupied backup
+/// path. Reuse identical regular files; otherwise take the next free suffix.
+/// Test-only fault injection: unusable backup names are skipped, so a test cannot
+/// otherwise make the backup itself fail without also breaking earlier steps.
+#[cfg(test)]
+pub(crate) static FAIL_BACKUP_FOR_TESTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn backup_bytes(dir: &Path, bytes: &[u8]) -> Result<()> {
+    use std::{fs::{self, OpenOptions}, io::{Read, Write}};
+    #[cfg(test)]
+    if FAIL_BACKUP_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
+        anyhow::bail!("injected backup failure");
+    }
+    for suffix in 0..=u32::MAX {
+        let path=dir.join(if suffix==0 {"lyrics.json.bak".into()}else{format!("lyrics.json.bak.{suffix}")});
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file)=>{file.write_all(bytes)?;file.sync_all()?;},
+            Err(error) if error.kind()==std::io::ErrorKind::AlreadyExists=>{
+                let meta=fs::symlink_metadata(&path)?;
+                if !meta.is_file()||meta.file_type().is_symlink()||meta.len()!=bytes.len() as u64 {continue;}
+                let mut options=OpenOptions::new();options.read(true).write(true);
+                #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.custom_flags(libc::O_NOFOLLOW);}
+                #[cfg(windows)] {use std::os::windows::fs::OpenOptionsExt;options.custom_flags(0x00200000);}
+                // A candidate we cannot open (read-only, locked) is not ours to reuse:
+                // move on to the next name rather than block the save on it.
+                let Ok(mut file)=options.open(&path) else {continue;};
+                let opened=file.metadata()?;
+                if !opened.is_file()||opened.file_type().is_symlink()||opened.len()!=bytes.len() as u64 {continue;}
+                let mut saved=vec![];(&mut file).take(bytes.len() as u64+1).read_to_end(&mut saved)?;
+                if saved!=bytes {continue;}
+                file.sync_all()?;
+            },
+            Err(error)=>return Err(error.into()),
+        }
+        #[cfg(unix)] {fs::File::open(dir)?.sync_all()?;}
+        return Ok(());
+    }
+    anyhow::bail!("{}",crate::i18n::t("lyrics.editor.backupFailed"))
+}
+
+/// Caller holds the project publication lease. Read the actual replacement
+/// target and check its captured identity again before preserving its bytes.
+/// Explicit model/candidate replacements also protect healthy edited lyrics;
+/// ordinary editor saves need backups only when repairing unreadable content.
+pub(crate) fn backup_before_replace_locked(dir:&Path, expected:Option<&str>, include_edited:bool)->Result<()> {
+    let previous=crate::project_store::member_bytes(dir,"lyrics.json")?;
+    let identity=previous.as_ref().map(|bytes|crate::project_store::fingerprint(bytes));
+    ensure!(identity.as_deref()==expected,"Lyrics changed outside this app. Reopen the editor before saving.");
+    if let Some(bytes)=previous {
+        let raw=serde_json::from_slice::<Value>(&bytes).ok();
+        let unreadable=raw.as_ref().and_then(|value|crate::project_lyrics::from_value(value).ok().flatten()).is_none();
+        if unreadable||(include_edited&&raw.as_ref().is_some_and(|value|value["source"]=="edited")) {
+            backup_bytes(dir,&bytes).context(crate::i18n::t("lyrics.editor.backupFailed"))?;
+        }
+    }
+    Ok(())
+}
+
 pub fn save(
     dir: &Path,
     expected: Option<&str>,
@@ -110,6 +187,7 @@ pub fn save(
         .as_deref()
         .and_then(|bytes| serde_json::from_slice(bytes).ok());
     let (raw, document) = edited_value(old.as_ref(), lines, credit)?;
+    backup_before_replace_locked(&dir,expected,false)?;
     let fingerprint =
         crate::project_store::commit_expected_locked(&dir, "lyrics.json", expected, &raw)?;
     Ok(Snapshot {
@@ -149,6 +227,64 @@ mod tests {
         json!([{"start":0.25,"end":2.5,"text":text,"words":[{"w":"Hello,","s":0.25,"e":1.1},{"w":"世界!","s":1.1,"e":2.5}]}])
     }
     #[test]
+    fn repair_preserves_original_bytes_in_one_durable_backup() {
+        let f = Fixture::new();
+        for bytes in [b"{broken".as_slice(), b"{\"lines\":[]}"] {
+            fs::write(f.0.join("lyrics.json"), bytes).unwrap();
+            let before = identity(&f.0).unwrap().unwrap();
+            let first = save(&f.0, Some(&before), &lines("Repaired"), None).unwrap();
+            assert_eq!(fs::read(f.0.join("lyrics.json.bak")).unwrap(), bytes);
+            save(&f.0, first.fingerprint.as_deref(), &lines("Another edit"), None).unwrap();
+            assert_eq!(fs::read(f.0.join("lyrics.json.bak")).unwrap(), bytes);
+            fs::remove_file(f.0.join("lyrics.json.bak")).unwrap();
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn repair_skips_an_unopenable_backup_of_the_same_length() {
+        use std::os::unix::fs::PermissionsExt;
+        let f=Fixture::new();
+        fs::write(f.0.join("lyrics.json"),b"{broken").unwrap();
+        // Same length as the original, so only the open decides; read-only so it fails.
+        fs::write(f.0.join("lyrics.json.bak"),b"{brokeX").unwrap();
+        fs::set_permissions(f.0.join("lyrics.json.bak"),fs::Permissions::from_mode(0o444)).unwrap();
+        let before=identity(&f.0).unwrap().unwrap();
+        save(&f.0,Some(&before),&lines("Repaired"),None).unwrap();
+        assert_eq!(fs::read(f.0.join("lyrics.json.bak.1")).unwrap(),b"{broken");
+        assert_eq!(fs::read(f.0.join("lyrics.json.bak")).unwrap(),b"{brokeX");
+        fs::set_permissions(f.0.join("lyrics.json.bak"),fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    #[test]
+    fn repair_skips_foreign_and_linked_backups_without_modifying_them() {
+        #[cfg(unix)] let variants=[false,true];
+        #[cfg(not(unix))] let variants=[false];
+        for linked in variants {
+            let f=Fixture::new();
+            fs::write(f.0.join("lyrics.json"),b"{broken").unwrap();
+            if linked {
+                #[cfg(unix)] {
+                    fs::write(f.0.join("target"),b"{broken").unwrap();
+                    std::os::unix::fs::symlink(f.0.join("target"),f.0.join("lyrics.json.bak")).unwrap();
+                }
+            } else {fs::write(f.0.join("lyrics.json.bak"),b"foreign backup").unwrap();}
+            // Also exercise the search beyond a second occupied name.
+            fs::write(f.0.join("lyrics.json.bak.1"),b"second backup").unwrap();
+            let before=identity(&f.0).unwrap().unwrap();
+            let first=save(&f.0,Some(&before),&lines("Repaired"),None).unwrap();
+            assert_eq!(fs::read(f.0.join("lyrics.json.bak.2")).unwrap(),b"{broken");
+            assert_eq!(fs::read(f.0.join("lyrics.json.bak.1")).unwrap(),b"second backup");
+            assert_eq!(fs::read(f.0.join("lyrics.json.bak")).unwrap(),if linked{b"{broken".as_slice()}else{b"foreign backup"});
+            if linked {assert!(fs::symlink_metadata(f.0.join("lyrics.json.bak")).unwrap().file_type().is_symlink());}
+            // A later repair with the same original bytes reuses the identical
+            // backup rather than creating another suffix.
+            fs::write(f.0.join("lyrics.json"),b"{broken").unwrap();
+            let expected=identity(&f.0).unwrap().unwrap();
+            save(&f.0,Some(&expected),&lines("Retry repair"),None).unwrap();
+            assert!(!f.0.join("lyrics.json.bak.3").exists());
+            assert_ne!(first.fingerprint,Some(expected));
+        }
+    }
+    #[test]
     fn editor_save_clears_old_alignment_and_lookup_derivatives_but_preserves_foreign_fields() {
         let f = Fixture::new();
         let raw = json!({"source":"whisper","credit":"Singer","lines":[],"aligned":true,"check":{"verdict":"match"},"base":[{"text":"stale words"}],"engine":"old","lrclibPending":true,"lookup":2,"future":{"keep":true}});
@@ -184,7 +320,8 @@ mod tests {
         assert!(read(&f.0).unwrap().fingerprint.is_none());
         let original = "  Hello,   世界!  ";
         let first = save(&f.0, None, &lines(original), Some("Singer")).unwrap();
-        assert_eq!(first.document.as_ref().unwrap().lines[0].text, original);
+        assert_eq!(first.document.as_ref().unwrap().lines[0].text, original.trim());
+        assert_eq!(crate::project_lyrics::editor_lines(first.raw.as_ref().unwrap()).unwrap()[0].text, original);
         assert_eq!(first.raw.as_ref().unwrap()["source"], "edited");
         let mut raw = first.raw.unwrap();
         raw["future"] = json!({"large":1234567890123456789u64});
@@ -244,8 +381,11 @@ mod tests {
         let saved = save(&f.0, None, &rows, None).unwrap();
         assert_eq!(saved.raw.as_ref().unwrap()["lines"][0]["text"], text);
         let reread = read(&f.0).unwrap().document.unwrap();
-        assert_eq!(reread.lines[0].text, text);
-        assert_eq!(reread.lines[0].words[0].text, "\u{0085}");
+        assert_eq!(reread.lines[0].text, crate::lyrics_edit::trim_text(text));
+        assert!(reread.lines[0].words.is_empty());
+        let editor = crate::project_lyrics::editor_lines(saved.raw.as_ref().unwrap()).unwrap();
+        assert_eq!(editor[0].text, text);
+        assert_eq!(editor[0].words[0].w, "\u{0085}");
     }
     #[test]
     fn malformed_existing_file_has_an_identity_and_requires_explicit_repair_cas() {
@@ -269,7 +409,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert!(read(&f.0).is_err());
+        assert!(read(&f.0).unwrap().document.is_none());
         let expected = identity(&f.0).unwrap().unwrap();
         let saved = save(&f.0, Some(&expected), &lines("Repaired"), None).unwrap();
         let document = saved.document.unwrap();

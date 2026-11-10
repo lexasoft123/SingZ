@@ -121,7 +121,7 @@ impl Player {
         match result {
             Ok(result)=>{
                 let changed=self.project.as_ref().and_then(|p|p.lyrics_raw.as_ref()).is_none_or(|old|old["lines"]!=result.raw["lines"]);
-                for warning in &result.warnings{eprintln!("Lyrics: {warning}");if warning.starts_with("Lyrics were saved, but"){self.notice=Some(warning.clone());}}
+                for warning in &result.warnings{eprintln!("Lyrics: {warning}");if warning.starts_with("Lyrics were saved, but")||warning==&i18n::t("lyrics.panel.autoPreservedEdited"){self.notice=Some(warning.clone());}}
                 if let Some(project)=&mut self.project{project.lyrics=Some(result.document.clone());project.lyrics_raw=Some(result.raw);project.lyrics_fingerprint=result.fingerprint;project.lyrics_error=None;project.has_lyrics=true;}
                 self.lyric_document=result.document;
                 if changed{

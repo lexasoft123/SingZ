@@ -3,6 +3,10 @@ import type { lyrics as en } from '../en/lyrics'
 import type { Translation } from '../types'
 
 export const lyrics: Translation<typeof en> = {
+  'lyrics.editor.skippedRows': "スキップした行数：{n}。保存すると、表示されている行だけが残ります。",
+  'lyrics.editor.backupFailed': "元の歌詞をバックアップできませんでした。歌詞ファイルは変更されていません。",
+  'lyrics.panel.autoPreservedEdited': "編集した歌詞を保護するため、自動検索を停止しました。置き換えるには「変更…」または「編集」を使ってください。",
+  'lyrics.panel.autoPreservedUnreadable': "保存した歌詞を読み込めないため、自動検索を停止しました。ファイルは変更されていません。「編集」で修復してください。",
   "lyrics.check.preciseSuffix": "· 精密",
   "lyrics.state.noWordsDetected": "声声には言葉が見つかりませんでした",
   "lyrics.check.mismatchPrecise": "歌声で確認できた単語は{pct}%です。歌詞を確認するか、精密な位置合わせを試してください。",

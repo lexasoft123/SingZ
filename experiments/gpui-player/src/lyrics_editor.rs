@@ -66,7 +66,7 @@ impl Render for StripPlayhead {
 pub struct Editor {
     rows: Vec<DraftRow>, inputs: HashMap<u64, RowInput>, history: edit::History,
     input_copy: Option<(crate::i18n::Locale, usize)>,
-    revision:u64, pending_control:Option<String>, pub dirty: bool, pub saving: bool, pub busy: bool, pub error: Option<String>,
+    revision:u64, pending_control:Option<String>, pub dirty: bool, pub saving: bool, pub busy: bool, pub error: Option<String>, pub notice: Option<String>,
     pub help: bool, pub replace: bool, pub discard: bool, pub strip: Option<StripWindow>,
     name: String, position: f64, duration: f64, playing: bool, precise: bool,
     playhead: Entity<StripPlayhead>,
@@ -84,7 +84,7 @@ impl Editor {
         cx.bind_keys([KeyBinding::new("tab",NextFocus,Some("SingZLyricsEditor")),KeyBinding::new("shift-tab",PreviousFocus,Some("SingZLyricsEditor"))]);
         let playhead=cx.new(|_|StripPlayhead {clock:DisplayClock {position:0.,duration:0.,playing:false,anchor:None,rate:1.,loop_range:None},strip:None,frame_pending:false});
         Self { input_copy:None, playhead, rows: vec![edit::empty_row()], inputs: HashMap::new(), history: Default::default(),
-            revision:0,pending_control:None,dirty:false,saving:false,busy:false,error:None,help:false,replace:false,discard:false,strip:None,
+            revision:0,pending_control:None,dirty:false,saving:false,busy:false,error:None,notice:None,help:false,replace:false,discard:false,strip:None,
             name:String::new(),position:0.,duration:0.,playing:false,precise:false,progress:None,consent:None,check:None,
             coarse:None,fine:None,replacement:cx.new(|cx|TextareaState::new(w,cx)),pending_replacement:None,
             scope:cx.focus_handle(),focused_row:None,pending_focus:None,text_group:None,
@@ -94,12 +94,13 @@ impl Editor {
     pub fn open(&mut self, name:String, lines:Vec<Line>, duration:f64, precise:bool, cx:&mut Context<Self>) {
         self.rows=edit::rows_from_lines(&lines);if self.rows.is_empty(){self.rows.push(edit::empty_row());}
         self.name=name;self.duration=duration;self.precise=precise;self.inputs.clear();self.input_copy=None;self.history=Default::default();
-        self.revision=0;self.pending_control=None;self.dirty=false;self.saving=false;self.busy=false;self.error=None;self.help=false;self.replace=false;
+        self.revision=0;self.pending_control=None;self.dirty=false;self.saving=false;self.busy=false;self.error=None;self.notice=None;self.help=false;self.replace=false;
         self.discard=false;self.strip=None;self.drag=None;self.progress=None;self.consent=None;self.check=None;
         self.coarse=None;self.fine=None;self.text_group=None;self.focused_row=None;
         self.pending_focus=Some(edit::FocusTarget{id:self.rows[0].id,caret_utf16:None});
         self.scroll.set_offset(point(px(0.),px(0.)));cx.notify();
     }
+    pub fn set_notice(&mut self, notice:Option<String>, cx:&mut Context<Self>){self.notice=notice;cx.notify();}
     pub fn context(&mut self, position:f64, duration:f64, playing:bool, cx:&mut Context<Self>) {
         self.context_playback(position,duration,playing,None,1.,None,cx);
     }
@@ -426,6 +427,7 @@ impl Render for Editor {
                 .when(!silent.is_empty(),|d|d.child(self.button("lyed-drop-silent".into(),ui::lyrics_editor_tool("lyed-drop-silent",crate::i18n::tn("lyrics.editor.tools.silentLines",silent.len() as f64,&[]),!blocked,true),!blocked,true,cx)))
                 .child(div().flex_1())
                 .child(self.button("lyed-undo".into(),ui::lyrics_editor_linkish("lyed-undo",copy("undo"),self.history.can_undo()),self.history.can_undo(),true,cx)));
+        if let Some(notice)=&self.notice {card=card.child(ui::lyrics_editor_status(notice.clone(),true));}
         if self.replace {
             self.order.borrow_mut().push("replacement".into());
             card=card.child(div().flex().flex_col().flex_1().min_h_0().gap(px(8.))

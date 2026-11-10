@@ -3,6 +3,10 @@ import type { lyrics as en } from '../en/lyrics'
 import type { Translation } from '../types'
 
 export const lyrics: Translation<typeof en> = {
+  'lyrics.editor.skippedRows': "Baris dilewati: {n}. Saat disimpan, hanya baris yang ditampilkan yang dipertahankan.",
+  'lyrics.editor.backupFailed': "Lirik asli tidak dapat dicadangkan. File lirik tidak diubah.",
+  'lyrics.panel.autoPreservedEdited': "Pencarian otomatis dihentikan untuk mempertahankan lirik yang Anda edit. Gunakan Ubah… atau Edit untuk menggantinya.",
+  'lyrics.panel.autoPreservedUnreadable': "Pencarian otomatis dihentikan karena lirik tersimpan tidak dapat dibaca. File tidak diubah; gunakan Edit untuk memperbaikinya.",
   "lyrics.check.preciseSuffix": "· tepat",
   "lyrics.state.noWordsDetected": "Tidak ada kata yang terdeteksi dalam vokal.",
   "lyrics.check.mismatchPrecise": "Hanya {pct}% dari kata-kata ini yang didengar dalam vokal  memeriksa teks, atau coba Precise.",

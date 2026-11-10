@@ -92,6 +92,21 @@ fn resolve(project:&Project,previous:Option<&Value>,intent:Intent,meta:&lrclib::
 fn resolve_inner(project:&Project,previous:Option<&Value>,mut intent:Intent,meta:&lrclib::TrackMeta,filename:&lrclib::TrackMeta,ops:&impl Operations,cancel:&dyn Fn()->bool,progress:&dyn Fn(Progress))->std::result::Result<Proposal,Failure>{
     active(cancel)?;progress(Progress{stage:"preparing".into(),percent:0.});
     let cache=previous.and_then(valid_cache);
+    // An invalid cache is still an existing file. Only an explicit action may
+    // replace it; source=edited is protected even when all its rows are invalid.
+    if intent==Intent::Auto || (matches!(intent,Intent::Align|Intent::Precise)&&cache.is_none()) {
+        if previous.is_some_and(|raw|raw["source"]=="edited") {
+            if let Some(raw)=cache.as_ref() {
+                let mut proposal=cached(raw.clone())?;
+                proposal.warnings.push(crate::i18n::t("lyrics.panel.autoPreservedEdited"));
+                return Ok(proposal);
+            }
+            return Err(failed(crate::i18n::t("lyrics.panel.autoPreservedUnreadable")));
+        }
+        if cache.is_none()&&(previous.is_some()||project.lyrics_fingerprint.is_some()) {
+            return Err(failed(crate::i18n::t("lyrics.panel.autoPreservedUnreadable")));
+        }
+    }
     if let Intent::Candidate(id)=intent{
         let selected=ops.candidate(id,project.pitch.duration as f64,cancel)?;active(cancel)?;
         return hit(previous,selected.ok_or_else(||failed("This entry has no usable synced lyrics."))?);
@@ -137,7 +152,9 @@ pub fn read_raw(project:&Project)->Result<Option<Value>>{
     let bytes=crate::project_store::member_bytes(&project.dir,"lyrics.json")?;
     let identity=bytes.as_ref().map(|b|crate::project_store::fingerprint(b));
     ensure!(identity==project.lyrics_fingerprint,"Lyrics changed outside this app. Reopen the song before continuing.");
-    Ok(bytes.and_then(|b|serde_json::from_slice::<Value>(&b).ok()).filter(|v|v.is_object()))
+    // Preserve presence even for malformed JSON. Explicit user actions can
+    // repair it; Auto must never interpret these bytes as a missing file.
+    Ok(bytes.map(|b|serde_json::from_slice::<Value>(&b).unwrap_or(Value::Null)))
 }
 fn track_meta(project:&Project,cancel:&impl Fn()->bool)->Result<(lrclib::TrackMeta,lrclib::TrackMeta)>{
     ensure!(!cancel(),"Lyrics lookup cancelled");

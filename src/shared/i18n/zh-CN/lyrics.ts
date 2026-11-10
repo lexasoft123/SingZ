@@ -3,6 +3,10 @@ import type { lyrics as en } from '../en/lyrics'
 import type { Translation } from '../types'
 
 export const lyrics: Translation<typeof en> = {
+  'lyrics.editor.skippedRows': "已跳过 {n} 行。保存时仅保留显示的行。",
+  'lyrics.editor.backupFailed': "无法备份原始歌词。歌词文件未作更改。",
+  'lyrics.panel.autoPreservedEdited': "为保留您编辑的歌词，已停止自动搜索。请使用“更改…”或“编辑”来替换歌词。",
+  'lyrics.panel.autoPreservedUnreadable': "无法读取已保存的歌词，已停止自动搜索。文件未作更改，请使用“编辑”修复。",
   // ── shared badges/suffixes (used by both the check-verdict text and the panel) ──
   // trailing badge appended when the check ran the precise (CTC) method, e.g. "…heard · precise"
   'lyrics.check.preciseSuffix': ' · 精确',

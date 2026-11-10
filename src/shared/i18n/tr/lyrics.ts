@@ -3,6 +3,10 @@ import type { lyrics as en } from '../en/lyrics'
 import type { Translation } from '../types'
 
 export const lyrics: Translation<typeof en> = {
+  'lyrics.editor.skippedRows': "Atlanan satırlar: {n}. Kaydederken yalnızca gösterilen satırlar korunur.",
+  'lyrics.editor.backupFailed': "Özgün şarkı sözleri yedeklenemedi. Şarkı sözü dosyası değiştirilmedi.",
+  'lyrics.panel.autoPreservedEdited': "Düzenlediğiniz şarkı sözlerini korumak için otomatik arama durduruldu. Değiştirmek için Değiştir… veya Düzenle seçeneğini kullanın.",
+  'lyrics.panel.autoPreservedUnreadable': "Kayıtlı şarkı sözleri okunamadığı için otomatik arama durduruldu. Dosya değiştirilmedi; onarmak için Düzenle seçeneğini kullanın.",
   "lyrics.check.preciseSuffix": " · hassas",
   "lyrics.state.noWordsDetected": "Vokalda herhangi bir söz tespit edilmedi.",
   "lyrics.check.mismatchPrecise": "Sadece {pct}%’i bu kelimeler vokallerde duyuldu — metni kontrol edin veya Precise’i deneyin.",

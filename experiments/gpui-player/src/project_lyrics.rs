@@ -1,5 +1,5 @@
 //! Read-only saved lyrics and native glyph halos. No network, Node, or frame-time blur.
-use crate::lyrics_edit::{js_whitespace, trim_text};
+use crate::lyrics_edit::trim_text;
 use anyhow::{Context, Result, bail};
 use gpui_kit::{
     Font, RenderGlyphParams, RenderImage, TextRun, TextSystem, WindowTextSystem, point, px, white,
@@ -15,8 +15,7 @@ pub struct Word {
 }
 #[derive(Clone, Debug)]
 pub struct Line {
-    /// Preserve the editor's exact line spelling and spacing independently of
-    /// tokenized words used by the player.
+    /// Trimmed playback text. The editor keeps exact saved spelling separately.
     pub text: String,
     pub start: f32,
     pub end: f32,
@@ -39,12 +38,8 @@ impl Document {
         self.lines.get(index).map_or(0., |line| line.start)
     }
 }
-fn time(v: &Value) -> Result<f32> {
-    let n = v.as_f64().context("Lyrics timing is missing")? as f32;
-    if !n.is_finite() || !(0. ..=86400. * 365.).contains(&n) {
-        bail!("Invalid lyrics timing")
-    }
-    Ok(n)
+fn time(v: &Value) -> Option<f64> {
+    v.as_f64().filter(|n| n.is_finite() && *n >= 0.)
 }
 pub fn read(dir: &Path) -> Result<Option<Document>> {
     let dir = dir.canonicalize()?;
@@ -63,128 +58,76 @@ pub fn read(dir: &Path) -> Result<Option<Document>> {
     let raw: Value = serde_json::from_reader(file).context("Invalid lyrics.json")?;
     from_value(&raw)
 }
+/// Normalize saved lyrics with Box's `parseStrictLyricsCache` policy. Keep
+/// f64 until the rendering boundary so reopening the editor loses no precision.
+fn normalized_lines(raw: &Value) -> Result<Vec<(usize, crate::lyrics_edit::Line)>> {
+    use crate::lyrics_edit::{Line, Word};
+    let lines = raw["lines"].as_array().context("Lyrics lines are missing")?;
+    if raw.get("source").is_some_and(|source|
+        !matches!(source.as_str(), Some("edited" | "lrclib" | "whisper"))) {
+        bail!("Invalid lyrics.json");
+    }
+    let mut candidates: Vec<_> = lines.iter().enumerate().filter_map(|(i, line)| {
+        let start = time(&line["start"])?;
+        let text = trim_text(line["text"].as_str()?);
+        (!text.is_empty()).then_some((i, start, text, line))
+    }).collect();
+    candidates.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let mut result = vec![];
+    let mut count = 0;
+    for (position, &(index, start, text, line)) in candidates.iter().enumerate() {
+        let mut words: Vec<Word> = line["words"].as_array().into_iter().flatten()
+            .filter_map(|word| {
+                let text = trim_text(word["w"].as_str()?);
+                if text.is_empty() { return None; }
+                Some(Word { w: text.into(), s: time(&word["s"])? , e: time(&word["e"])? })
+            }).collect();
+        let end = time(&line["end"]).filter(|end| *end > start).unwrap_or_else(|| {
+            candidates[position + 1..].iter().find(|next| next.1 > start)
+                .map(|next| next.1)
+                .unwrap_or_else(|| words.iter().fold(start, |end, word| end.max(word.e)))
+        });
+        if end <= start { continue; }
+        let mut previous = start;
+        for word in &mut words {
+            word.s = previous.max(word.s.max(start).min(end));
+            word.e = word.s.max(word.e.max(start).min(end));
+            previous = word.s;
+        }
+        count += words.len();
+        if count > 30000 { bail!("Too many lyric words"); }
+        result.push((index, Line { text: text.into(), start, end, words }));
+        if result.len() > 10000 { bail!("Too many lyric lines"); }
+    }
+    Ok(result)
+}
+
 /// Parse an in-memory saved document before publishing it or preparing glyphs.
 pub fn from_value(raw: &Value) -> Result<Option<Document>> {
-    let lines = raw["lines"]
-        .as_array()
-        .context("Lyrics lines are missing")?;
-    if lines.len() > 10000 {
-        bail!("Too many lyric lines")
-    }
-    let mut doc = Document {
+    let lines = normalized_lines(raw)?.into_iter().map(|(_, line)| Line {
+        text: line.text, start: line.start as f32, end: line.end as f32,
+        words: line.words.into_iter().map(|word| Word {
+            text: word.w, start: word.s as f32, end: word.e as f32,
+        }).collect(),
+    }).collect::<Vec<_>>();
+    Ok((!lines.is_empty()).then(|| Document {
+        lines,
         source: raw["source"].as_str().unwrap_or("whisper").into(),
         credit: raw["credit"].as_str().unwrap_or("").into(),
         ..Default::default()
-    };
-    let mut count = 0;
-    for line in lines {
-        let text = trim_text(line["text"].as_str().unwrap_or(""));
-        if text.is_empty() {
-            continue;
-        }
-        let start = time(&line["start"])?;
-        let end = time(&line["end"])?;
-        if end < start {
-            bail!("Lyrics line ends before it starts")
-        }
-        let mut words = vec![];
-        if let Some(values) = line["words"].as_array() {
-            for value in values {
-                let text = trim_text(value["w"].as_str().context("Invalid lyric word")?);
-                if text.is_empty() {
-                    continue;
-                }
-                if text.chars().count() > 1024 || text.contains(['\n', '\r']) {
-                    bail!("Invalid lyric word length or newline")
-                }
-                let s = time(&value["s"])?;
-                let e = time(&value["e"])?;
-                if e < s {
-                    bail!("Lyrics word ends before it starts")
-                }
-                words.push(Word {
-                    text: text.into(),
-                    start: s,
-                    end: e,
-                });
-            }
-        }
-        if words.is_empty() {
-            // Match the production editor's normalization of text-only saved lines.
-            let total = text
-                .split(js_whitespace)
-                .filter(|part| !part.is_empty())
-                .map(|p| p.encode_utf16().count() + 1)
-                .sum::<usize>() as f32;
-            let mut cursor = start;
-            for part in text.split(js_whitespace).filter(|part| !part.is_empty()) {
-                if part.chars().count() > 1024 {
-                    bail!("Lyric word is too long")
-                }
-                let duration = (end - start) * (part.encode_utf16().count() + 1) as f32 / total;
-                words.push(Word {
-                    text: part.into(),
-                    start: cursor,
-                    end: cursor + duration,
-                });
-                cursor += duration;
-            }
-        }
-        count += words.len();
-        if count > 30000 {
-            bail!("Too many lyric words")
-        }
-        doc.lines.push(Line {
-            text: line["text"].as_str().unwrap_or("").into(),
-            start,
-            end,
-            words,
-        });
-    }
-    doc.lines.sort_by(|a, b| a.start.total_cmp(&b.start));
-    Ok((!doc.lines.is_empty()).then_some(doc))
+    }))
 }
 
-/// Seed the editor from the project's accepted in-memory JSON, retaining its
-/// f64 timestamps. `Document` intentionally narrows times for player rendering;
-/// widening those f32 values again would change saved word timings on reopen.
+/// Editing retains the exact saved spelling and f64 timestamps. Text-only rows
+/// gain draft word spans here, while the tolerant playback reader keeps none.
 pub fn editor_lines(raw: &Value) -> Result<Vec<crate::lyrics_edit::Line>> {
-    // Keep the existing document parser authoritative for limits, malformed
-    // words, skipped empty text and all other saved-document admission rules.
-    if from_value(raw)?.is_none() {
-        return Ok(vec![]);
-    }
-    let mut lines = vec![];
-    for line in raw["lines"].as_array().context("Lyrics lines are missing")? {
-        let text = line["text"].as_str().unwrap_or("");
-        if trim_text(text).is_empty() {
-            continue;
+    Ok(normalized_lines(raw)?.into_iter().map(|(index, mut line)| {
+        line.text = raw["lines"][index]["text"].as_str().unwrap().into();
+        if line.words.is_empty() {
+            line.words = crate::lyrics_edit::distribute_row_words(trim_text(&line.text), line.start, line.end);
         }
-        let start = line["start"].as_f64().context("Lyrics timing is missing")?;
-        let end = line["end"].as_f64().context("Lyrics timing is missing")?;
-        let mut words = vec![];
-        if let Some(values) = line["words"].as_array() {
-            for value in values {
-                let word = trim_text(value["w"].as_str().context("Invalid lyric word")?);
-                if word.is_empty() {
-                    continue;
-                }
-                words.push(crate::lyrics_edit::Word {
-                    w: word.into(),
-                    s: value["s"].as_f64().context("Lyrics timing is missing")?,
-                    e: value["e"].as_f64().context("Lyrics timing is missing")?,
-                });
-            }
-        }
-        if words.is_empty() {
-            words = crate::lyrics_edit::distribute_row_words(trim_text(text), start, end);
-        }
-        lines.push(crate::lyrics_edit::Line { start, end, text: text.into(), words });
-    }
-    // Match Document's stable ordering, including ties at its playback precision,
-    // while retaining every original f64 time in the editor-owned values.
-    lines.sort_by(|a, b| (a.start as f32).total_cmp(&(b.start as f32)));
-    Ok(lines)
+        line
+    }).collect())
 }
 pub fn fixture() -> Document {
     let mut doc = Document::default();
@@ -365,6 +308,14 @@ mod tests {
         result
     }
     #[test]
+    fn line_limit_counts_usable_rows_after_filtering() {
+        let mut lines = vec![serde_json::json!({"text":"bad","start":-1}); 10001];
+        lines.push(serde_json::json!({"start":1,"end":2,"text":"kept"}));
+        let doc = from_value(&serde_json::json!({"lines":lines})).unwrap().unwrap();
+        assert_eq!(doc.lines.len(), 1);
+        assert_eq!(doc.lines[0].text, "kept");
+    }
+    #[test]
     fn saved_words_keep_precise_timing_unicode_and_line_gaps() {
         let doc=read_value("timed",r#"{"source":"edited","credit":"A singer","lines":[{"start":12,"end":13,"text":"Привет world","words":[{"w":"Привет","s":12.123,"e":12.7},{"w":"world","s":12.8,"e":13}]}]}"#).unwrap().unwrap();
         assert_eq!(doc.lines[0].words[0].text, "Привет");
@@ -374,16 +325,19 @@ mod tests {
         assert_eq!(doc.credit, "A singer");
     }
     #[test]
-    fn text_only_saved_lines_use_the_editors_span_normalization() {
+    fn text_only_saved_lines_keep_no_words_until_opened_in_editor() {
         let doc = read_value(
             "plain",
             r#"{"lines":[{"start":2,"end":6,"text":"One two"}]}"#,
         )
         .unwrap()
         .unwrap();
-        assert_eq!(doc.lines[0].words.len(), 2);
-        assert_eq!(doc.lines[0].words[0].end, 4.);
-        assert_eq!(doc.lines[0].words[1].end, 6.);
+        assert!(doc.lines[0].words.is_empty());
+        let raw = serde_json::json!({"lines":[{"start":2,"end":6,"text":"One two"}]});
+        let editor = editor_lines(&raw).unwrap();
+        assert_eq!(editor[0].words.len(), 2);
+        assert_eq!(editor[0].words[0].e, 4.);
+        assert_eq!(editor[0].words[1].e, 6.);
     }
     #[test]
     fn saved_line_and_word_trimming_matches_javascript_bom_and_nel() {
@@ -405,24 +359,29 @@ mod tests {
         let original = "\u{feff}One\u{0085}two\u{feff}\u{feff}界\u{feff}";
         let raw = serde_json::json!({"lines":[{"start":0,"end":10,"text":original}]});
         let doc = from_value(&raw).unwrap().unwrap();
-        let line = &doc.lines[0];
+        assert_eq!(doc.lines[0].text, trim_text(original));
+        assert!(doc.lines[0].words.is_empty());
+        let editor = editor_lines(&raw).unwrap();
+        let line = &editor[0];
         assert_eq!(line.text, original);
         assert_eq!(line.words.len(), 2);
-        assert_eq!(line.words[0].text, "One\u{0085}two");
-        assert_eq!(line.words[0].end, 8.);
-        assert_eq!(line.words[1].text, "界");
-        assert_eq!(line.words[1].start, 8.);
-        assert_eq!(line.words[1].end, 10.);
+        assert_eq!(line.words[0].w, "One\u{0085}two");
+        assert_eq!(line.words[0].e, 8.);
+        assert_eq!(line.words[1].w, "界");
+        assert_eq!(line.words[1].s, 8.);
+        assert_eq!(line.words[1].e, 10.);
     }
     #[test]
-    fn invalid_timing_and_control_characters_are_rejected() {
-        for value in [
-            r#"{"lines":[{"start":2,"end":1,"text":"No"}]}"#,
-            r#"{"lines":[{"start":0,"end":2,"text":"No","words":[{"w":"No","s":1,"e":0}]}]}"#,
-            r#"{"lines":[{"start":0,"end":2,"text":"No","words":[{"w":"bad\nword","s":0,"e":1}]}]}"#,
-        ] {
-            assert!(read_value("invalid", value).is_err());
-        }
+    fn backward_words_are_clamped_and_unusable_line_is_dropped() {
+        let raw = serde_json::json!({"lines":[
+            {"start":-1,"end":1,"text":"bad"},
+            {"start":0,"end":2,"text":"kept","words":[{"w":"kept","s":1,"e":0}]}
+        ]});
+        let doc = from_value(&raw).unwrap().unwrap();
+        assert_eq!(doc.lines.len(), 1);
+        assert_eq!(doc.lines[0].text, "kept");
+        assert_eq!(doc.lines[0].words[0].start, 1.);
+        assert_eq!(doc.lines[0].words[0].end, 1.);
     }
     #[test]
     fn editor_reopen_retains_raw_f64_line_and_word_times_after_two_minutes() {
@@ -463,7 +422,8 @@ mod tests {
             assert_eq!(line.words[1].s, line.words[0].e);
             assert!((line.words[1].e - line.end).abs() < 1e-12);
             let doc = from_value(&raw).unwrap().unwrap();
-            assert_eq!(doc.lines[0].words.iter().map(|w|w.text.as_str()).collect::<Vec<_>>(), vec!["A😀", "界\u{0085}B"]);
+            assert!(doc.lines[0].words.is_empty());
+            assert_eq!(doc.lines[0].text, trim_text(text));
         }
         assert!(editor_lines(&serde_json::json!({"lines":[{"text":" \u{feff}"}]})).unwrap().is_empty());
     }
@@ -480,22 +440,40 @@ mod tests {
         assert_eq!(lines.iter().map(|l|l.text.as_str()).collect::<Vec<_>>(),
             doc.lines.iter().map(|l|l.text.as_str()).collect::<Vec<_>>());
         assert_eq!(lines[0].text, "early");
-        assert_eq!(lines[1].start, 130.0000002);
-        assert_eq!(lines[2].start, 130.0000001);
-        assert_eq!(lines[1].words.iter().map(|w|w.w.as_str()).collect::<Vec<_>>(), vec!["first", "second"]);
+        assert_eq!(lines[1].start, 130.0000001);
+        assert_eq!(lines[2].start, 130.0000002);
+        assert_eq!(lines[2].words.iter().map(|w|w.w.as_str()).collect::<Vec<_>>(), vec!["first", "second"]);
+        assert_eq!(lines[2].words[1].s, 131.);
+        assert_eq!(lines[2].words[1].e, 131.);
     }
     #[test]
-    fn editor_seed_cannot_bypass_saved_document_admission() {
-        for raw in [
-            serde_json::json!({}),
-            serde_json::json!({"lines":[{"start":2.,"end":1.,"text":"No"}]}),
-            serde_json::json!({"lines":[{"start":0.,"end":1.,"text":"No","words":[{"w":7,"s":0.,"e":1.}]}]}),
-            serde_json::json!({"lines":[{"start":0.,"end":2.,"text":"No","words":[{"w":"No","s":1.,"e":0.}]}]}),
-            serde_json::json!({"lines":[{"start":0.,"end":2.,"text":"No","words":[{"w":"bad\nword","s":0.,"e":1.}]}]}),
-            serde_json::json!({"lines":[{"start":-1.,"end":2.,"text":"No"}]}),
-        ] {
-            assert!(from_value(&raw).is_err());
-            assert!(editor_lines(&raw).is_err());
+    fn editor_seed_uses_the_same_tolerant_admission_and_clamping() {
+        let table: Vec<Value> = serde_json::from_str(include_str!("../../../tests/shared/lyrics-tolerance-cases.json")).unwrap();
+        for case in table {
+            let raw = &case["input"];
+            let doc = from_value(raw);
+            let editor = editor_lines(raw);
+            match doc {
+                Err(_) => assert!(editor.is_err(), "{}", case["name"]),
+                Ok(None) => assert!(editor.unwrap().is_empty(), "{}", case["name"]),
+                Ok(Some(doc)) => {
+                    let editor = editor.unwrap();
+                    assert_eq!(doc.lines.len(), editor.len(), "{}", case["name"]);
+                    for (line, draft) in doc.lines.iter().zip(editor) {
+                        assert_eq!(line.start, draft.start as f32);
+                        assert_eq!(line.end, draft.end as f32);
+                        assert_eq!(line.text, trim_text(&draft.text));
+                        if !line.words.is_empty() {
+                            assert_eq!(line.words.len(), draft.words.len());
+                            for (word, draft) in line.words.iter().zip(draft.words) {
+                                assert_eq!(word.text, draft.w);
+                                assert_eq!(word.start, draft.s as f32);
+                                assert_eq!(word.end, draft.e as f32);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     #[test]

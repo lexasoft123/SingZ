@@ -3963,19 +3963,19 @@ impl Player {
         self.cancel_sidebar_lyrics(cx);self.cancel_lyrics_alignment(cx);self.lyrics_editor_generation+=1;
         self.lyrics_editor_epoch=self.native_epoch;
         let project=self.project.as_ref().unwrap();
-        let ready=self.lyrics_sidebar.read(cx).is_ready();
-        self.lyrics_editor_credit=if ready{project.lyrics_raw.as_ref().and_then(|r|r["credit"].as_str()).map(str::to_owned)}else{None};
-        let lines=if ready {
-            if let Some(raw)=project.lyrics_raw.as_ref() {
-                match project_lyrics::editor_lines(raw) {
-                    Ok(lines)=>lines,
-                    Err(error)=>{self.notice=Some(format!("Could not open saved lyrics: {error}"));cx.notify();return;}
-                }
-            } else {
-                self.lyric_document.lines.iter().map(|l|lyrics_edit::Line{start:l.start as f64,end:l.end as f64,text:l.text.clone(),words:l.words.iter().map(|w|lyrics_edit::Word{w:w.text.clone(),s:w.start as f64,e:w.end as f64}).collect()}).collect()
+        // Saved content belongs to the project, independently of sidebar status.
+        self.lyrics_editor_credit=project.lyrics_raw.as_ref().and_then(|r|r["credit"].as_str()).map(str::to_owned);
+        let lines=if let Some(raw)=project.lyrics_raw.as_ref() {
+            match project_lyrics::editor_lines(raw) {
+                Ok(lines)=>lines,
+                Err(error)=>{self.notice=Some(format!("Could not open saved lyrics: {error}"));cx.notify();return;}
             }
-        } else {vec![]};
-        self.lyrics_editor.update(cx,|s,cx|{s.open(project.name.clone(),lines,self.duration as f64,self.lyrics_precise_cap,cx);s.context_playback(self.position as f64,self.duration as f64,self.playing,if self.backend.is_some()&&!self.counting_in&&self.pending_seek.is_none()&&self.capture_file.is_none(){self.native_anchor.map(|(p,t)|(p as f64,t))}else{None},self.native_rate as f64,self.native_loop.map(|(s,e)|(s as f64,e as f64)),cx);});
+        } else {
+            self.lyric_document.lines.iter().map(|l|lyrics_edit::Line{start:l.start as f64,end:l.end as f64,text:l.text.clone(),words:l.words.iter().map(|w|lyrics_edit::Word{w:w.text.clone(),s:w.start as f64,e:w.end as f64}).collect()}).collect()
+        };
+        let skipped=project.lyrics_raw.as_ref().and_then(|r|r["lines"].as_array()).map_or(0,|rows|rows.len().saturating_sub(lines.len()));
+        let notice=(skipped>0).then(||i18n::tv("lyrics.editor.skippedRows",&[("n",skipped.to_string())]));
+        self.lyrics_editor.update(cx,|s,cx|{s.open(project.name.clone(),lines,self.duration as f64,self.lyrics_precise_cap,cx);s.set_notice(notice,cx);s.context_playback(self.position as f64,self.duration as f64,self.playing,if self.backend.is_some()&&!self.counting_in&&self.pending_seek.is_none()&&self.capture_file.is_none(){self.native_anchor.map(|(p,t)|(p as f64,t))}else{None},self.native_rate as f64,self.native_loop.map(|(s,e)|(s as f64,e as f64)),cx);});
         self.lyrics_editor_open=true;self.metronome_open=false;self.transport.update(cx,|t,cx|{t.dismiss_popovers(cx);});
         if let Some((_,source))=project.lanes.iter().find(|(i,_)|*i==0){
             if let Some(cache)=self.lyrics_envelope_cache.as_ref().filter(|c|c.source==*source&&Some(c.stamp)==project.vocal_stamp) {

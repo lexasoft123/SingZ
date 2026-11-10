@@ -253,22 +253,20 @@ fn derived_fields_absent(raw: &Value) {
 }
 
 #[test]
-fn automatic_online_and_edited_caches_are_sticky_without_network_or_models() -> Result<()> {
+fn automatic_online_cache_is_sticky_without_network_or_models() -> Result<()> {
     let fixture = Fixture::new()?;
     let project = fixture.project()?;
-    for source in ["edited", "lrclib"] {
-        let mut original = saved(source);
-        original["lrclibPending"] = json!(true);
-        original["lookup"] = json!(0);
-        original["aligned"] = json!(true);
-        original["check"] = json!(check("qwen", "match"));
-        let ops = FakeOps::default();
-        let proposal = run_policy(&project, Some(&original), Intent::Auto, &ops)?;
-        assert_eq!(proposal.raw, original);
-        assert!(!proposal.write && proposal.cached);
-        assert_eq!(proposal.check.unwrap().median_shift, 1.25);
-        assert!(ops.calls.borrow().is_empty());
-    }
+    let mut original = saved("lrclib");
+    original["lrclibPending"] = json!(true);
+    original["lookup"] = json!(0);
+    original["aligned"] = json!(true);
+    original["check"] = json!(check("qwen", "match"));
+    let ops = FakeOps::default();
+    let proposal = run_policy(&project, Some(&original), Intent::Auto, &ops)?;
+    assert_eq!(proposal.raw, original);
+    assert!(!proposal.write && proposal.cached);
+    assert_eq!(proposal.check.unwrap().median_shift, 1.25);
+    assert!(ops.calls.borrow().is_empty());
     Ok(())
 }
 #[test]
@@ -872,5 +870,54 @@ fn original_source_filename_keeps_lookup_identity_after_project_display_rename()
     assert_eq!(metadata_filename(&project), "My renamed practice session");
     project.raw["sourceFileName"] = json!("");
     assert_eq!(metadata_filename(&project), "My renamed practice session");
+    Ok(())
+}
+
+
+// Exercise the actual read/policy/CAS publication path without fonts or network.
+fn auto_preserves_bytes(bytes: &[u8], key: &str) -> Result<()> {
+    let fixture = Fixture::new()?;
+    fs::write(fixture.0.join("lyrics.json"), bytes)?;
+    let mut project = fixture.project()?;
+    // The open worker captures identity independently of parse success.
+    project.lyrics_fingerprint = crate::lyrics_store::identity(&project.dir)?;
+    let ops = FakeOps::default();
+    ops.lookup_answer(online_hit());
+    let result = read_raw(&project).map_err(failed).and_then(|raw|
+        run_policy(&project, raw.as_ref(), Intent::Auto, &ops));
+    if let Ok(proposal) = &result {
+        if proposal.write {
+            crate::project_store::commit_expected(&project.dir, "lyrics.json",
+                project.lyrics_fingerprint.as_deref(), &proposal.raw)?;
+        }
+    }
+    assert_eq!(fs::read(fixture.0.join("lyrics.json"))?, bytes);
+    assert!(ops.calls.borrow().is_empty());
+    if key=="lyrics.panel.autoPreservedEdited" {
+        let proposal=result.expect("healthy edited cache must remain usable");
+        assert!(proposal.cached&&!proposal.write);
+        assert_eq!(proposal.warnings,vec![crate::i18n::t(key)]);
+    } else {
+        let error=result.expect_err("unreadable lyrics must stop automatic lookup");
+        assert_eq!(error.to_string(),crate::i18n::t(key));
+    }
+    Ok(())
+}
+#[test]
+fn automatic_lookup_preserves_edited_file_bytes_and_explains_protection() -> Result<()> {
+    // A usable edited cache and an edited document with no usable rows both
+    // retain their exact bytes, including formatting and unknown fields.
+    for raw in [json!({"source":"edited","lines":[],"foreign":true}), saved("edited")] {
+        let key=if raw["lines"].as_array().unwrap().is_empty(){"lyrics.panel.autoPreservedUnreadable"}else{"lyrics.panel.autoPreservedEdited"};
+        auto_preserves_bytes(&serde_json::to_vec_pretty(&raw)?, key)?;
+    }
+    Ok(())
+}
+#[test]
+fn automatic_lookup_preserves_unparsable_file_bytes_and_explains_protection() -> Result<()> {
+    for bytes in [b"{broken".as_slice(), b"[]", b"{\"source\":\"whisper\",\"lines\":\"broken\"}",
+        b"{\"source\":\"whisper\",\"lines\":[]}"] {
+        auto_preserves_bytes(bytes, "lyrics.panel.autoPreservedUnreadable")?;
+    }
     Ok(())
 }
