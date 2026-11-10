@@ -106,8 +106,8 @@ export function setLyricSinging(element: Pick<HTMLElement, 'dataset'>, singing: 
   if (element.dataset.singing !== active) element.dataset.singing = active
 }
 
-/** Context rows stay nearly full size so the TV track reads as a flat slide. */
-export const LYRIC_ROW_SCALE = .94
+/** Context rows render at the earlier 52px against the 68px current row. */
+export const LYRIC_ROW_SCALE = 52 / 68
 
 /** Cached masks: only the current row’s edge/pen properties change during playback. */
 export function lyricHighlightMasks(): { amber: string; core: string; glow: string } {

@@ -673,14 +673,18 @@ export default function BoxApp(): React.JSX.Element {
       noteInput()
       setFocusVersion(version => version + 1)
     }
+    // Mouse use counts as activity, so visible controls do not hide under the pointer.
+    const pointerDown = (): void => noteInput()
     window.addEventListener('keydown', keyDown, true)
     window.addEventListener('keyup', keyUp, true)
+    window.addEventListener('pointerdown', pointerDown, true)
     window.addEventListener('blur', recover)
     window.addEventListener('focus', recover)
     document.addEventListener('visibilitychange', recover)
     return () => {
       window.removeEventListener('keydown', keyDown, true)
       window.removeEventListener('keyup', keyUp, true)
+      window.removeEventListener('pointerdown', pointerDown, true)
       window.removeEventListener('blur', recover)
       window.removeEventListener('focus', recover)
       document.removeEventListener('visibilitychange', recover)
@@ -958,7 +962,7 @@ export default function BoxApp(): React.JSX.Element {
           canApplyOutput={canApplyOutput}
           applyUnavailableReason={applyUnavailableReason}
         />}
-        {route === 'player' && <Player snapshot={snapshot} microphones={microphones} controlsVisible={controlsVisible} onLibrary={goCatalog} onMix={() => { setMixOpen(true); setControlsVisible(true); noteInput() }} onQueue={goQueue} onSettings={() => goHub('home')} onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }} onSeek={position => transport.seek(position)} onSeekBy={delta => transport.seekBy(delta)} />}
+        {route === 'player' && <Player snapshot={snapshot} microphones={microphones} controlsVisible={controlsVisible} onLibrary={goCatalog} onMix={() => { setMixOpen(true); setControlsVisible(true); noteInput() }} onQueue={goQueue} onSettings={() => goHub('home')} onToggle={() => { if (!metronomeBlocked.current) transport.toggle() }} onSeek={position => transport.seek(position)} onSeekBy={delta => transport.seekBy(delta)} onWake={() => { setControlsVisible(true); noteInput(); setFocusVersion(version => version + 1) }} />}
         {route === 'queue' && <Queue
           items={queueItems}
           rows={queueRows}
