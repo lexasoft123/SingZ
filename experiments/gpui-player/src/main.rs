@@ -107,6 +107,8 @@ mod locale_host;
 mod language_menu;
 #[cfg(test)]
 mod native_line_break_tests;
+#[cfg(test)]
+mod core_case_tables_tests;
 mod integration;
 mod tracks;
 mod custom_tracks_host;

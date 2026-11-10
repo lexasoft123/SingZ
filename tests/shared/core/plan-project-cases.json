@@ -1,0 +1,869 @@
+[
+  {
+    "name": "a new project uploads everything and creates no ids",
+    "local": {
+      "dir": "Song",
+      "top": [
+        {
+          "name": "project.json",
+          "md5": "p1",
+          "size": 100,
+          "path": "/library/Song/project.json",
+          "mime": "application/json"
+        },
+        {
+          "name": "lyrics.json",
+          "md5": "l1",
+          "size": 100,
+          "path": "/library/Song/lyrics.json",
+          "mime": "application/json"
+        }
+      ],
+      "stems": [
+        {
+          "name": "vocals.wav",
+          "md5": "v1",
+          "size": 5000,
+          "path": "/library/Song/stems/vocals.wav",
+          "mime": "audio/wav"
+        },
+        {
+          "name": "drums.wav",
+          "md5": "d1",
+          "size": 5000,
+          "path": "/library/Song/stems/drums.wav",
+          "mime": "audio/wav"
+        }
+      ]
+    },
+    "remote": {
+      "top": [],
+      "stems": []
+    },
+    "expected": {
+      "dir": "Song",
+      "upload": [
+        {
+          "name": "project.json",
+          "where": "top",
+          "path": "/library/Song/project.json",
+          "mime": "application/json"
+        },
+        {
+          "name": "lyrics.json",
+          "where": "top",
+          "path": "/library/Song/lyrics.json",
+          "mime": "application/json"
+        },
+        {
+          "name": "vocals.wav",
+          "where": "stems",
+          "path": "/library/Song/stems/vocals.wav",
+          "mime": "audio/wav"
+        },
+        {
+          "name": "drums.wav",
+          "where": "stems",
+          "path": "/library/Song/stems/drums.wav",
+          "mime": "audio/wav"
+        }
+      ],
+      "unchanged": 0,
+      "trash": [],
+      "rows": [
+        {
+          "name": "project.json",
+          "size": "100",
+          "md5Checksum": "p1"
+        },
+        {
+          "name": "lyrics.json",
+          "size": "100",
+          "md5Checksum": "l1"
+        }
+      ]
+    }
+  },
+  {
+    "name": "a clean project uploads nothing and counts every file unchanged",
+    "local": {
+      "dir": "Song",
+      "top": [
+        {
+          "name": "project.json",
+          "md5": "p1",
+          "size": 100,
+          "path": "/library/Song/project.json",
+          "mime": "application/json"
+        },
+        {
+          "name": "lyrics.json",
+          "md5": "l1",
+          "size": 100,
+          "path": "/library/Song/lyrics.json",
+          "mime": "application/json"
+        }
+      ],
+      "stems": [
+        {
+          "name": "vocals.wav",
+          "md5": "v1",
+          "size": 5000,
+          "path": "/library/Song/stems/vocals.wav",
+          "mime": "audio/wav"
+        }
+      ]
+    },
+    "remote": {
+      "folderId": "folder-id",
+      "stemsId": "stems-id",
+      "top": [
+        {
+          "id": "r1",
+          "name": "project.json",
+          "md5Checksum": "p1"
+        },
+        {
+          "id": "r2",
+          "name": "lyrics.json",
+          "md5Checksum": "l1"
+        },
+        {
+          "id": "stems-id",
+          "name": "stems",
+          "mimeType": "application/vnd.google-apps.folder"
+        }
+      ],
+      "stems": [
+        {
+          "id": "r3",
+          "name": "vocals.wav",
+          "md5Checksum": "v1"
+        }
+      ]
+    },
+    "expected": {
+      "dir": "Song",
+      "upload": [],
+      "unchanged": 3,
+      "trash": [],
+      "rows": [
+        {
+          "name": "project.json",
+          "size": "100",
+          "md5Checksum": "p1",
+          "id": "r1"
+        },
+        {
+          "name": "lyrics.json",
+          "size": "100",
+          "md5Checksum": "l1",
+          "id": "r2"
+        }
+      ]
+    }
+  },
+  {
+    "name": "a changed stem is replaced in place using the remote id",
+    "local": {
+      "dir": "Song",
+      "top": [
+        {
+          "name": "project.json",
+          "md5": "p1",
+          "size": 100,
+          "path": "/library/Song/project.json",
+          "mime": "application/json"
+        }
+      ],
+      "stems": [
+        {
+          "name": "vocals.wav",
+          "md5": "v2",
+          "size": 5000,
+          "path": "/library/Song/stems/vocals.wav",
+          "mime": "audio/wav"
+        },
+        {
+          "name": "drums.wav",
+          "md5": "d1",
+          "size": 5000,
+          "path": "/library/Song/stems/drums.wav",
+          "mime": "audio/wav"
+        }
+      ]
+    },
+    "remote": {
+      "folderId": "folder-id",
+      "stemsId": "stems-id",
+      "top": [
+        {
+          "id": "r1",
+          "name": "project.json",
+          "md5Checksum": "p1"
+        },
+        {
+          "id": "stems-id",
+          "name": "stems",
+          "mimeType": "application/vnd.google-apps.folder"
+        }
+      ],
+      "stems": [
+        {
+          "id": "r3",
+          "name": "vocals.wav",
+          "md5Checksum": "v1"
+        },
+        {
+          "id": "r4",
+          "name": "drums.wav",
+          "md5Checksum": "d1"
+        }
+      ]
+    },
+    "expected": {
+      "dir": "Song",
+      "upload": [
+        {
+          "name": "vocals.wav",
+          "where": "stems",
+          "path": "/library/Song/stems/vocals.wav",
+          "mime": "audio/wav",
+          "existingId": "r3"
+        }
+      ],
+      "unchanged": 2,
+      "trash": [],
+      "rows": [
+        {
+          "name": "project.json",
+          "size": "100",
+          "md5Checksum": "p1",
+          "id": "r1"
+        }
+      ]
+    }
+  },
+  {
+    "name": "a remote file with no checksum counts as changed",
+    "local": {
+      "dir": "Song",
+      "top": [
+        {
+          "name": "project.json",
+          "md5": "p1",
+          "size": 100,
+          "path": "/library/Song/project.json",
+          "mime": "application/json"
+        }
+      ],
+      "stems": []
+    },
+    "remote": {
+      "folderId": "folder-id",
+      "stemsId": "stems-id",
+      "top": [
+        {
+          "id": "r1",
+          "name": "project.json"
+        },
+        {
+          "id": "stems-id",
+          "name": "stems",
+          "mimeType": "application/vnd.google-apps.folder"
+        }
+      ],
+      "stems": []
+    },
+    "expected": {
+      "dir": "Song",
+      "upload": [
+        {
+          "name": "project.json",
+          "where": "top",
+          "path": "/library/Song/project.json",
+          "mime": "application/json",
+          "existingId": "r1"
+        }
+      ],
+      "unchanged": 0,
+      "trash": [],
+      "rows": [
+        {
+          "name": "project.json",
+          "size": "100",
+          "md5Checksum": "p1",
+          "id": "r1"
+        }
+      ]
+    }
+  },
+  {
+    "name": "a stem the project no longer has is trashed",
+    "local": {
+      "dir": "Song",
+      "top": [
+        {
+          "name": "project.json",
+          "md5": "p1",
+          "size": 100,
+          "path": "/library/Song/project.json",
+          "mime": "application/json"
+        }
+      ],
+      "stems": [
+        {
+          "name": "vocals.wav",
+          "md5": "v1",
+          "size": 5000,
+          "path": "/library/Song/stems/vocals.wav",
+          "mime": "audio/wav"
+        }
+      ]
+    },
+    "remote": {
+      "folderId": "folder-id",
+      "stemsId": "stems-id",
+      "top": [
+        {
+          "id": "r1",
+          "name": "project.json",
+          "md5Checksum": "p1"
+        },
+        {
+          "id": "stems-id",
+          "name": "stems",
+          "mimeType": "application/vnd.google-apps.folder"
+        }
+      ],
+      "stems": [
+        {
+          "id": "r3",
+          "name": "vocals.wav",
+          "md5Checksum": "v1"
+        },
+        {
+          "id": "r5",
+          "name": "old-lane.wav",
+          "md5Checksum": "x9"
+        }
+      ]
+    },
+    "expected": {
+      "dir": "Song",
+      "upload": [],
+      "unchanged": 2,
+      "trash": [
+        {
+          "entry": {
+            "id": "r5",
+            "name": "old-lane.wav",
+            "md5Checksum": "x9"
+          },
+          "where": "stems"
+        }
+      ],
+      "rows": [
+        {
+          "name": "project.json",
+          "size": "100",
+          "md5Checksum": "p1",
+          "id": "r1"
+        }
+      ]
+    }
+  },
+  {
+    "name": "every remote stem is trashed when the project has no stems",
+    "local": {
+      "dir": "Song",
+      "top": [
+        {
+          "name": "project.json",
+          "md5": "p1",
+          "size": 100,
+          "path": "/library/Song/project.json",
+          "mime": "application/json"
+        }
+      ],
+      "stems": []
+    },
+    "remote": {
+      "folderId": "folder-id",
+      "stemsId": "stems-id",
+      "top": [
+        {
+          "id": "r1",
+          "name": "project.json",
+          "md5Checksum": "p1"
+        },
+        {
+          "id": "stems-id",
+          "name": "stems",
+          "mimeType": "application/vnd.google-apps.folder"
+        }
+      ],
+      "stems": [
+        {
+          "id": "r3",
+          "name": "vocals.wav",
+          "md5Checksum": "v1"
+        }
+      ]
+    },
+    "expected": {
+      "dir": "Song",
+      "upload": [],
+      "unchanged": 1,
+      "trash": [
+        {
+          "entry": {
+            "id": "r3",
+            "name": "vocals.wav",
+            "md5Checksum": "v1"
+          },
+          "where": "stems"
+        }
+      ],
+      "rows": [
+        {
+          "name": "project.json",
+          "size": "100",
+          "md5Checksum": "p1",
+          "id": "r1"
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown top-level files on Drive belong to the singer and stay",
+    "local": {
+      "dir": "Song",
+      "top": [
+        {
+          "name": "project.json",
+          "md5": "p1",
+          "size": 100,
+          "path": "/library/Song/project.json",
+          "mime": "application/json"
+        }
+      ],
+      "stems": []
+    },
+    "remote": {
+      "folderId": "folder-id",
+      "stemsId": "stems-id",
+      "top": [
+        {
+          "id": "r1",
+          "name": "project.json",
+          "md5Checksum": "p1"
+        },
+        {
+          "id": "r6",
+          "name": "notes.txt",
+          "md5Checksum": "n1"
+        },
+        {
+          "id": "stems-id",
+          "name": "stems",
+          "mimeType": "application/vnd.google-apps.folder"
+        }
+      ],
+      "stems": []
+    },
+    "expected": {
+      "dir": "Song",
+      "upload": [],
+      "unchanged": 1,
+      "trash": [],
+      "rows": [
+        {
+          "name": "project.json",
+          "size": "100",
+          "md5Checksum": "p1",
+          "id": "r1"
+        }
+      ]
+    }
+  },
+  {
+    "name": "an unreferenced graph.json on Drive is trashed",
+    "local": {
+      "dir": "Song",
+      "top": [
+        {
+          "name": "project.json",
+          "md5": "p1",
+          "size": 100,
+          "path": "/library/Song/project.json",
+          "mime": "application/json"
+        }
+      ],
+      "stems": []
+    },
+    "remote": {
+      "folderId": "folder-id",
+      "stemsId": "stems-id",
+      "top": [
+        {
+          "id": "r1",
+          "name": "project.json",
+          "md5Checksum": "p1"
+        },
+        {
+          "id": "r7",
+          "name": "graph.json",
+          "md5Checksum": "g1"
+        },
+        {
+          "id": "stems-id",
+          "name": "stems",
+          "mimeType": "application/vnd.google-apps.folder"
+        }
+      ],
+      "stems": []
+    },
+    "expected": {
+      "dir": "Song",
+      "upload": [],
+      "unchanged": 1,
+      "trash": [
+        {
+          "entry": {
+            "id": "r7",
+            "name": "graph.json",
+            "md5Checksum": "g1"
+          },
+          "where": "top"
+        }
+      ],
+      "rows": [
+        {
+          "name": "project.json",
+          "size": "100",
+          "md5Checksum": "p1",
+          "id": "r1"
+        }
+      ]
+    }
+  },
+  {
+    "name": "graph.json is left alone when project.json could not be read",
+    "local": {
+      "dir": "Song",
+      "top": [],
+      "stems": [],
+      "docReadable": false
+    },
+    "remote": {
+      "folderId": "folder-id",
+      "stemsId": "stems-id",
+      "top": [
+        {
+          "id": "r1",
+          "name": "project.json",
+          "md5Checksum": "p1"
+        },
+        {
+          "id": "r7",
+          "name": "graph.json",
+          "md5Checksum": "g1"
+        },
+        {
+          "id": "stems-id",
+          "name": "stems",
+          "mimeType": "application/vnd.google-apps.folder"
+        }
+      ],
+      "stems": []
+    },
+    "expected": {
+      "dir": "Song",
+      "upload": [],
+      "unchanged": 0,
+      "trash": [],
+      "rows": []
+    }
+  },
+  {
+    "name": "a referenced graph.json is compared like any other file",
+    "local": {
+      "dir": "Song",
+      "top": [
+        {
+          "name": "project.json",
+          "md5": "p1",
+          "size": 100,
+          "path": "/library/Song/project.json",
+          "mime": "application/json"
+        },
+        {
+          "name": "graph.json",
+          "md5": "g2",
+          "size": 100,
+          "path": "/library/Song/graph.json",
+          "mime": "application/json"
+        }
+      ],
+      "stems": []
+    },
+    "remote": {
+      "folderId": "folder-id",
+      "stemsId": "stems-id",
+      "top": [
+        {
+          "id": "r1",
+          "name": "project.json",
+          "md5Checksum": "p1"
+        },
+        {
+          "id": "r7",
+          "name": "graph.json",
+          "md5Checksum": "g1"
+        },
+        {
+          "id": "stems-id",
+          "name": "stems",
+          "mimeType": "application/vnd.google-apps.folder"
+        }
+      ],
+      "stems": []
+    },
+    "expected": {
+      "dir": "Song",
+      "upload": [
+        {
+          "name": "graph.json",
+          "where": "top",
+          "path": "/library/Song/graph.json",
+          "mime": "application/json",
+          "existingId": "r7"
+        }
+      ],
+      "unchanged": 1,
+      "trash": [],
+      "rows": [
+        {
+          "name": "project.json",
+          "size": "100",
+          "md5Checksum": "p1",
+          "id": "r1"
+        },
+        {
+          "name": "graph.json",
+          "size": "100",
+          "md5Checksum": "g2",
+          "id": "r7"
+        }
+      ]
+    }
+  },
+  {
+    "name": "uploads keep the order top-level files then stems",
+    "local": {
+      "dir": "Song",
+      "top": [
+        {
+          "name": "project.json",
+          "md5": "p2",
+          "size": 100,
+          "path": "/library/Song/project.json",
+          "mime": "application/json"
+        },
+        {
+          "name": "lyrics.json",
+          "md5": "l2",
+          "size": 100,
+          "path": "/library/Song/lyrics.json",
+          "mime": "application/json"
+        }
+      ],
+      "stems": [
+        {
+          "name": "vocals.wav",
+          "md5": "v2",
+          "size": 5000,
+          "path": "/library/Song/stems/vocals.wav",
+          "mime": "audio/wav"
+        }
+      ]
+    },
+    "remote": {
+      "folderId": "folder-id",
+      "stemsId": "stems-id",
+      "top": [
+        {
+          "id": "r1",
+          "name": "project.json",
+          "md5Checksum": "p1"
+        },
+        {
+          "id": "r2",
+          "name": "lyrics.json",
+          "md5Checksum": "l1"
+        },
+        {
+          "id": "stems-id",
+          "name": "stems",
+          "mimeType": "application/vnd.google-apps.folder"
+        }
+      ],
+      "stems": [
+        {
+          "id": "r3",
+          "name": "vocals.wav",
+          "md5Checksum": "v1"
+        }
+      ]
+    },
+    "expected": {
+      "dir": "Song",
+      "upload": [
+        {
+          "name": "project.json",
+          "where": "top",
+          "path": "/library/Song/project.json",
+          "mime": "application/json",
+          "existingId": "r1"
+        },
+        {
+          "name": "lyrics.json",
+          "where": "top",
+          "path": "/library/Song/lyrics.json",
+          "mime": "application/json",
+          "existingId": "r2"
+        },
+        {
+          "name": "vocals.wav",
+          "where": "stems",
+          "path": "/library/Song/stems/vocals.wav",
+          "mime": "audio/wav",
+          "existingId": "r3"
+        }
+      ],
+      "unchanged": 0,
+      "trash": [],
+      "rows": [
+        {
+          "name": "project.json",
+          "size": "100",
+          "md5Checksum": "p2",
+          "id": "r1"
+        },
+        {
+          "name": "lyrics.json",
+          "size": "100",
+          "md5Checksum": "l2",
+          "id": "r2"
+        }
+      ]
+    }
+  },
+  {
+    "name": "catalog rows describe the top-level files and carry known remote ids",
+    "local": {
+      "dir": "Song",
+      "top": [
+        {
+          "name": "project.json",
+          "md5": "p2",
+          "size": 1234,
+          "path": "/library/Song/project.json",
+          "mime": "application/json"
+        },
+        {
+          "name": "lyrics.json",
+          "md5": "l1",
+          "size": 77,
+          "path": "/library/Song/lyrics.json",
+          "mime": "application/json"
+        }
+      ],
+      "stems": [
+        {
+          "name": "vocals.wav",
+          "md5": "v1",
+          "size": 5000,
+          "path": "/library/Song/stems/vocals.wav",
+          "mime": "audio/wav"
+        }
+      ]
+    },
+    "remote": {
+      "folderId": "folder-id",
+      "stemsId": "stems-id",
+      "top": [
+        {
+          "id": "r1",
+          "name": "project.json",
+          "md5Checksum": "p1"
+        },
+        {
+          "id": "stems-id",
+          "name": "stems",
+          "mimeType": "application/vnd.google-apps.folder"
+        }
+      ],
+      "stems": [
+        {
+          "id": "r3",
+          "name": "vocals.wav",
+          "md5Checksum": "v1"
+        }
+      ]
+    },
+    "expected": {
+      "dir": "Song",
+      "upload": [
+        {
+          "name": "project.json",
+          "where": "top",
+          "path": "/library/Song/project.json",
+          "mime": "application/json",
+          "existingId": "r1"
+        },
+        {
+          "name": "lyrics.json",
+          "where": "top",
+          "path": "/library/Song/lyrics.json",
+          "mime": "application/json"
+        }
+      ],
+      "unchanged": 1,
+      "trash": [],
+      "rows": [
+        {
+          "name": "project.json",
+          "size": "1234",
+          "md5Checksum": "p2",
+          "id": "r1"
+        },
+        {
+          "name": "lyrics.json",
+          "size": "77",
+          "md5Checksum": "l1"
+        }
+      ]
+    }
+  },
+  {
+    "name": "a project that was never uploaded with no files plans nothing",
+    "local": {
+      "dir": "Song",
+      "top": [],
+      "stems": []
+    },
+    "remote": {
+      "top": [],
+      "stems": []
+    },
+    "expected": {
+      "dir": "Song",
+      "upload": [],
+      "unchanged": 0,
+      "trash": [],
+      "rows": []
+    }
+  }
+]

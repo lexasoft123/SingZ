@@ -1,0 +1,871 @@
+[
+  {
+    "name": "one stamped line",
+    "lrc": "[00:05.00]Hello world",
+    "duration": 30,
+    "lines": [
+      {
+        "start": 5,
+        "end": 6.2,
+        "text": "Hello world",
+        "words": [
+          {
+            "w": "Hello",
+            "s": 5,
+            "e": 5.6
+          },
+          {
+            "w": "world",
+            "s": 5.6,
+            "e": 6.2
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "two lines, the first ends before the second starts",
+    "lrc": "[00:01.00]First line here\n[00:06.50]Second line",
+    "duration": 30,
+    "lines": [
+      {
+        "start": 1,
+        "end": 2.25,
+        "text": "First line here",
+        "words": [
+          {
+            "w": "First",
+            "s": 1,
+            "e": 1.469
+          },
+          {
+            "w": "line",
+            "s": 1.469,
+            "e": 1.859
+          },
+          {
+            "w": "here",
+            "s": 1.859,
+            "e": 2.25
+          }
+        ]
+      },
+      {
+        "start": 6.5,
+        "end": 7.7,
+        "text": "Second line",
+        "words": [
+          {
+            "w": "Second",
+            "s": 6.5,
+            "e": 7.2
+          },
+          {
+            "w": "line",
+            "s": 7.2,
+            "e": 7.7
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "several stamps share one text",
+    "lrc": "[00:10.00][00:30.00]Chorus line\n[00:20.00]Verse line",
+    "duration": 60,
+    "lines": [
+      {
+        "start": 10,
+        "end": 11.2,
+        "text": "Chorus line",
+        "words": [
+          {
+            "w": "Chorus",
+            "s": 10,
+            "e": 10.7
+          },
+          {
+            "w": "line",
+            "s": 10.7,
+            "e": 11.2
+          }
+        ]
+      },
+      {
+        "start": 20,
+        "end": 21.2,
+        "text": "Verse line",
+        "words": [
+          {
+            "w": "Verse",
+            "s": 20,
+            "e": 20.655
+          },
+          {
+            "w": "line",
+            "s": 20.655,
+            "e": 21.2
+          }
+        ]
+      },
+      {
+        "start": 30,
+        "end": 31.2,
+        "text": "Chorus line",
+        "words": [
+          {
+            "w": "Chorus",
+            "s": 30,
+            "e": 30.7
+          },
+          {
+            "w": "line",
+            "s": 30.7,
+            "e": 31.2
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "colon fraction separator",
+    "lrc": "[01:02:50]Colon fraction",
+    "duration": 90,
+    "lines": [
+      {
+        "start": 62.5,
+        "end": 63.7,
+        "text": "Colon fraction",
+        "words": [
+          {
+            "w": "Colon",
+            "s": 62.5,
+            "e": 62.98
+          },
+          {
+            "w": "fraction",
+            "s": 62.98,
+            "e": 63.7
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "one-digit and three-digit fractions",
+    "lrc": "[00:01.5]Tenths\n[00:05.125]Thousandths",
+    "duration": 20,
+    "lines": [
+      {
+        "start": 1.5,
+        "end": 2.7,
+        "text": "Tenths",
+        "words": [
+          {
+            "w": "Tenths",
+            "s": 1.5,
+            "e": 2.7
+          }
+        ]
+      },
+      {
+        "start": 5.125,
+        "end": 6.325,
+        "text": "Thousandths",
+        "words": [
+          {
+            "w": "Thousandths",
+            "s": 5.125,
+            "e": 6.325
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "no fraction",
+    "lrc": "[02:03]No fraction",
+    "duration": 200,
+    "lines": [
+      {
+        "start": 123,
+        "end": 124.2,
+        "text": "No fraction",
+        "words": [
+          {
+            "w": "No",
+            "s": 123,
+            "e": 123.3
+          },
+          {
+            "w": "fraction",
+            "s": 123.3,
+            "e": 124.2
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "empty stamp bounds the previous line but is not a line",
+    "lrc": "[00:01.00]Sung words\n[00:02.00]\n[00:08.00]Next",
+    "duration": 20,
+    "lines": [
+      {
+        "start": 1,
+        "end": 1.95,
+        "text": "Sung words",
+        "words": [
+          {
+            "w": "Sung",
+            "s": 1,
+            "e": 1.432
+          },
+          {
+            "w": "words",
+            "s": 1.432,
+            "e": 1.95
+          }
+        ]
+      },
+      {
+        "start": 8,
+        "end": 9.2,
+        "text": "Next",
+        "words": [
+          {
+            "w": "Next",
+            "s": 8,
+            "e": 9.2
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "unsorted stamps are sorted",
+    "lrc": "[00:09.00]Later\n[00:02.00]Earlier",
+    "duration": 20,
+    "lines": [
+      {
+        "start": 2,
+        "end": 3.2,
+        "text": "Earlier",
+        "words": [
+          {
+            "w": "Earlier",
+            "s": 2,
+            "e": 3.2
+          }
+        ]
+      },
+      {
+        "start": 9,
+        "end": 10.2,
+        "text": "Later",
+        "words": [
+          {
+            "w": "Later",
+            "s": 9,
+            "e": 10.2
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "metadata tags and unstamped text are ignored",
+    "lrc": "[ar:Artist]\n[ti:Title]\nplain text\n[00:03.00]Only line",
+    "duration": 12,
+    "lines": [
+      {
+        "start": 3,
+        "end": 4.2,
+        "text": "Only line",
+        "words": [
+          {
+            "w": "Only",
+            "s": 3,
+            "e": 3.6
+          },
+          {
+            "w": "line",
+            "s": 3.6,
+            "e": 4.2
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "inline tags are stripped from the text",
+    "lrc": "[00:03.00]Hello <00:03.50>[bg: oh] world",
+    "duration": 12,
+    "lines": [
+      {
+        "start": 3,
+        "end": 4.833333333333333,
+        "text": "Hello <00:03.50> world",
+        "words": [
+          {
+            "w": "Hello",
+            "s": 3,
+            "e": 3.478
+          },
+          {
+            "w": "<00:03.50>",
+            "s": 3.478,
+            "e": 4.355
+          },
+          {
+            "w": "world",
+            "s": 4.355,
+            "e": 4.833
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "CRLF line endings",
+    "lrc": "[00:01.00]One\r\n[00:04.00]Two\r\n",
+    "duration": 10,
+    "lines": [
+      {
+        "start": 1,
+        "end": 2.2,
+        "text": "One",
+        "words": [
+          {
+            "w": "One",
+            "s": 1,
+            "e": 2.2
+          }
+        ]
+      },
+      {
+        "start": 4,
+        "end": 5.2,
+        "text": "Two",
+        "words": [
+          {
+            "w": "Two",
+            "s": 4,
+            "e": 5.2
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "last line is capped by its own length, not by the song duration",
+    "lrc": "[00:10.00]Short",
+    "duration": 100,
+    "lines": [
+      {
+        "start": 10,
+        "end": 11.2,
+        "text": "Short",
+        "words": [
+          {
+            "w": "Short",
+            "s": 10,
+            "e": 11.2
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "last line with a duration shorter than the stamp",
+    "lrc": "[00:10.00]Tail",
+    "duration": 5,
+    "lines": [
+      {
+        "start": 10,
+        "end": 10.95,
+        "text": "Tail",
+        "words": [
+          {
+            "w": "Tail",
+            "s": 10,
+            "e": 10.95
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "a long line is capped at nine sung seconds",
+    "lrc": "[00:00.00]long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long\n[01:00.00]Later",
+    "duration": 120,
+    "lines": [
+      {
+        "start": 0,
+        "end": 9,
+        "text": "long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long",
+        "words": [
+          {
+            "w": "long",
+            "s": 0,
+            "e": 0.225
+          },
+          {
+            "w": "long",
+            "s": 0.225,
+            "e": 0.45
+          },
+          {
+            "w": "long",
+            "s": 0.45,
+            "e": 0.675
+          },
+          {
+            "w": "long",
+            "s": 0.675,
+            "e": 0.9
+          },
+          {
+            "w": "long",
+            "s": 0.9,
+            "e": 1.125
+          },
+          {
+            "w": "long",
+            "s": 1.125,
+            "e": 1.35
+          },
+          {
+            "w": "long",
+            "s": 1.35,
+            "e": 1.575
+          },
+          {
+            "w": "long",
+            "s": 1.575,
+            "e": 1.8
+          },
+          {
+            "w": "long",
+            "s": 1.8,
+            "e": 2.025
+          },
+          {
+            "w": "long",
+            "s": 2.025,
+            "e": 2.25
+          },
+          {
+            "w": "long",
+            "s": 2.25,
+            "e": 2.475
+          },
+          {
+            "w": "long",
+            "s": 2.475,
+            "e": 2.7
+          },
+          {
+            "w": "long",
+            "s": 2.7,
+            "e": 2.925
+          },
+          {
+            "w": "long",
+            "s": 2.925,
+            "e": 3.15
+          },
+          {
+            "w": "long",
+            "s": 3.15,
+            "e": 3.375
+          },
+          {
+            "w": "long",
+            "s": 3.375,
+            "e": 3.6
+          },
+          {
+            "w": "long",
+            "s": 3.6,
+            "e": 3.825
+          },
+          {
+            "w": "long",
+            "s": 3.825,
+            "e": 4.05
+          },
+          {
+            "w": "long",
+            "s": 4.05,
+            "e": 4.275
+          },
+          {
+            "w": "long",
+            "s": 4.275,
+            "e": 4.5
+          },
+          {
+            "w": "long",
+            "s": 4.5,
+            "e": 4.725
+          },
+          {
+            "w": "long",
+            "s": 4.725,
+            "e": 4.95
+          },
+          {
+            "w": "long",
+            "s": 4.95,
+            "e": 5.175
+          },
+          {
+            "w": "long",
+            "s": 5.175,
+            "e": 5.4
+          },
+          {
+            "w": "long",
+            "s": 5.4,
+            "e": 5.625
+          },
+          {
+            "w": "long",
+            "s": 5.625,
+            "e": 5.85
+          },
+          {
+            "w": "long",
+            "s": 5.85,
+            "e": 6.075
+          },
+          {
+            "w": "long",
+            "s": 6.075,
+            "e": 6.3
+          },
+          {
+            "w": "long",
+            "s": 6.3,
+            "e": 6.525
+          },
+          {
+            "w": "long",
+            "s": 6.525,
+            "e": 6.75
+          },
+          {
+            "w": "long",
+            "s": 6.75,
+            "e": 6.975
+          },
+          {
+            "w": "long",
+            "s": 6.975,
+            "e": 7.2
+          },
+          {
+            "w": "long",
+            "s": 7.2,
+            "e": 7.425
+          },
+          {
+            "w": "long",
+            "s": 7.425,
+            "e": 7.65
+          },
+          {
+            "w": "long",
+            "s": 7.65,
+            "e": 7.875
+          },
+          {
+            "w": "long",
+            "s": 7.875,
+            "e": 8.1
+          },
+          {
+            "w": "long",
+            "s": 8.1,
+            "e": 8.325
+          },
+          {
+            "w": "long",
+            "s": 8.325,
+            "e": 8.55
+          },
+          {
+            "w": "long",
+            "s": 8.55,
+            "e": 8.775
+          },
+          {
+            "w": "long",
+            "s": 8.775,
+            "e": 9
+          }
+        ]
+      },
+      {
+        "start": 60,
+        "end": 61.2,
+        "text": "Later",
+        "words": [
+          {
+            "w": "Later",
+            "s": 60,
+            "e": 61.2
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "a close next line still gets the 0.8 s minimum",
+    "lrc": "[00:01.00]Close\n[00:01.30]Next",
+    "duration": 10,
+    "lines": [
+      {
+        "start": 1,
+        "end": 1.8,
+        "text": "Close",
+        "words": [
+          {
+            "w": "Close",
+            "s": 1,
+            "e": 1.8
+          }
+        ]
+      },
+      {
+        "start": 1.3,
+        "end": 2.5,
+        "text": "Next",
+        "words": [
+          {
+            "w": "Next",
+            "s": 1.3,
+            "e": 2.5
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "words are weighted by UTF-16 length",
+    "lrc": "[00:01.00]😀 a bb ccc",
+    "duration": 10,
+    "lines": [
+      {
+        "start": 1,
+        "end": 2.2,
+        "text": "😀 a bb ccc",
+        "words": [
+          {
+            "w": "😀",
+            "s": 1,
+            "e": 1.3
+          },
+          {
+            "w": "a",
+            "s": 1.3,
+            "e": 1.5
+          },
+          {
+            "w": "bb",
+            "s": 1.5,
+            "e": 1.8
+          },
+          {
+            "w": "ccc",
+            "s": 1.8,
+            "e": 2.2
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "CJK words weigh one UTF-16 unit each",
+    "lrc": "[00:02.00]你好 世界",
+    "duration": 10,
+    "lines": [
+      {
+        "start": 2,
+        "end": 3.2,
+        "text": "你好 世界",
+        "words": [
+          {
+            "w": "你好",
+            "s": 2,
+            "e": 2.6
+          },
+          {
+            "w": "世界",
+            "s": 2.6,
+            "e": 3.2
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "tabs and repeated spaces split words",
+    "lrc": "[00:01.00]one\t two   three",
+    "duration": 10,
+    "lines": [
+      {
+        "start": 1,
+        "end": 2.333333333333333,
+        "text": "one\t two   three",
+        "words": [
+          {
+            "w": "one",
+            "s": 1,
+            "e": 1.381
+          },
+          {
+            "w": "two",
+            "s": 1.381,
+            "e": 1.762
+          },
+          {
+            "w": "three",
+            "s": 1.762,
+            "e": 2.333
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "non-breaking space and BOM split or trim like JavaScript",
+    "lrc": "[00:01.00] left right﻿",
+    "duration": 10,
+    "lines": [
+      {
+        "start": 1,
+        "end": 2.2,
+        "text": "left right",
+        "words": [
+          {
+            "w": "left",
+            "s": 1,
+            "e": 1.545
+          },
+          {
+            "w": "right",
+            "s": 1.545,
+            "e": 2.2
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "text is trimmed",
+    "lrc": "[00:01.00]   padded   ",
+    "duration": 10,
+    "lines": [
+      {
+        "start": 1,
+        "end": 2.2,
+        "text": "padded",
+        "words": [
+          {
+            "w": "padded",
+            "s": 1,
+            "e": 2.2
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "stamps with three-digit minutes are not stamps",
+    "lrc": "[100:00.00]Too long\n[00:01.00]Ok",
+    "duration": 10,
+    "lines": [
+      {
+        "start": 1,
+        "end": 2.2,
+        "text": "Ok",
+        "words": [
+          {
+            "w": "Ok",
+            "s": 1,
+            "e": 2.2
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "identical stamps keep both lines",
+    "lrc": "[00:02.00]Alpha\n[00:02.00]Beta",
+    "duration": 10,
+    "lines": [
+      {
+        "start": 2,
+        "end": 2.8,
+        "text": "Alpha",
+        "words": [
+          {
+            "w": "Alpha",
+            "s": 2,
+            "e": 2.8
+          }
+        ]
+      },
+      {
+        "start": 2,
+        "end": 3.2,
+        "text": "Beta",
+        "words": [
+          {
+            "w": "Beta",
+            "s": 2,
+            "e": 3.2
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "no stamps at all",
+    "lrc": "just words\nmore words",
+    "duration": 10,
+    "lines": []
+  },
+  {
+    "name": "empty input",
+    "lrc": "",
+    "duration": 10,
+    "lines": []
+  },
+  {
+    "name": "zero duration still parses",
+    "lrc": "[00:02.00]Zero duration",
+    "duration": 0,
+    "lines": [
+      {
+        "start": 2,
+        "end": 2.95,
+        "text": "Zero duration",
+        "words": [
+          {
+            "w": "Zero",
+            "s": 2,
+            "e": 2.339
+          },
+          {
+            "w": "duration",
+            "s": 2.339,
+            "e": 2.95
+          }
+        ]
+      }
+    ]
+  }
+]
