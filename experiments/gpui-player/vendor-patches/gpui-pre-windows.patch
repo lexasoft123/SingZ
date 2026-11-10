@@ -1,0 +1,112 @@
+diff --git a/BACKGROUND_RESIZE.md b/BACKGROUND_RESIZE.md
+new file mode 100644
+index 0000000..e0a20cf
+--- /dev/null
++++ b/BACKGROUND_RESIZE.md
+@@ -0,0 +1,17 @@
++# Non-activating resize
++
++Pinned published gpui-pre-windows 0.3.11, Cargo checksum
++`5141a3db59bab761a16ab19529fe4117a86e91922e8fc00af6dfc4829cb1744d`.
++
++`WindowsWindow::resize` retains position/z-order and
++pass `SWP_NOACTIVATE` to SetWindowPos. Resizing a hidden review window must not
++activate it or change the user's foreground window. Visible callers can still
++request activation explicitly through the separate activation API. Renderer,
++font selection and normal painting remain the published implementation.
++
++For transparent titlebars, `events.rs` also gives the entire frame to the
++client in `WM_NCCALCSIZE`. Maximized windows retain the invisible resize
++insets outside the monitor work area. `WM_NCHITTEST` explicitly covers all
++four edges and four corners because the native non-client border is gone.
++The host draws the shared UIKit window controls in its header. Opaque/native
++titlebars keep the original non-client path.
+diff --git a/src/events.rs b/src/events.rs
+index 4dd0c38..3d11cdd 100644
+--- a/src/events.rs
++++ b/src/events.rs
+@@ -784,14 +784,18 @@ impl WindowsWindowInner {
+ 
+         unsafe {
+             let params = lparam.0 as *mut NCCALCSIZE_PARAMS;
+-            let saved_top = (*params).rgrc[0].top;
+-            let result = DefWindowProcW(handle, WM_NCCALCSIZE, wparam, lparam);
+-            (*params).rgrc[0].top = saved_top;
++            // Client-drawn chrome owns the complete frame. Keep only the
++            // invisible resize margin outside the work area when maximized.
+             if self.state.is_maximized() {
+                 let dpi = GetDpiForWindow(handle);
+-                (*params).rgrc[0].top += get_frame_thicknessx(dpi);
++                let x = get_frame_thicknessx(dpi);
++                let y = get_frame_thicknessy(dpi);
++                (*params).rgrc[0].left += x;
++                (*params).rgrc[0].right -= x;
++                (*params).rgrc[0].top += y;
++                (*params).rgrc[0].bottom -= y;
+             }
+-            Some(result.0 as isize)
++            Some(0)
+         }
+     }
+ 
+@@ -1006,26 +1010,25 @@ impl WindowsWindowInner {
+         };
+ 
+         unsafe { ScreenToClient(handle, &mut cursor_point).ok().log_err() };
+-        if self.is_resizable
+-            && !self.state.is_maximized()
+-            && 0 <= cursor_point.y
+-            && cursor_point.y <= frame_y
+-        {
+-            // x-axis actually goes from -frame_x to 0
+-            return Some(if cursor_point.x <= 0 {
+-                HTTOPLEFT
+-            } else {
+-                let mut rect = Default::default();
+-                unsafe { GetWindowRect(handle, &mut rect) }.log_err();
+-                // right and bottom bounds of RECT are exclusive, thus `-1`
+-                let right = rect.right - rect.left - 1;
+-                // the bounds include the padding frames, so accommodate for both of them
+-                if right - 2 * frame_x <= cursor_point.x {
+-                    HTTOPRIGHT
+-                } else {
+-                    HTTOP
+-                }
+-            } as _);
++        if self.is_resizable && !self.state.is_maximized() {
++            let mut rect = Default::default();
++            unsafe { GetClientRect(handle, &mut rect) }.log_err();
++            let left = cursor_point.x < frame_x;
++            let right = cursor_point.x >= rect.right - frame_x;
++            let top = cursor_point.y < frame_y;
++            let bottom = cursor_point.y >= rect.bottom - frame_y;
++            let edge = match (left, right, top, bottom) {
++                (true, _, true, _) => Some(HTTOPLEFT),
++                (_, true, true, _) => Some(HTTOPRIGHT),
++                (true, _, _, true) => Some(HTBOTTOMLEFT),
++                (_, true, _, true) => Some(HTBOTTOMRIGHT),
++                (true, _, _, _) => Some(HTLEFT),
++                (_, true, _, _) => Some(HTRIGHT),
++                (_, _, true, _) => Some(HTTOP),
++                (_, _, _, true) => Some(HTBOTTOM),
++                _ => None,
++            };
++            if let Some(edge) = edge { return Some(edge as _); }
+         }
+ 
+         drag_area
+diff --git a/src/window.rs b/src/window.rs
+index 5d8415a..f4584c2 100644
+--- a/src/window.rs
++++ b/src/window.rs
+@@ -670,7 +670,9 @@ impl PlatformWindow for WindowsWindow {
+                         bounds.origin.y.0,
+                         rect.right - rect.left,
+                         rect.bottom - rect.top,
+-                        SWP_NOMOVE,
++                        // Resizing is not an activation or z-order request, including
++                        // hidden/offscreen windows used for interface verification.
++                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                     )
+                     .context("unable to set window content size")
+                     .log_err();

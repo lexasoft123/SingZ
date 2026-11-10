@@ -77,6 +77,10 @@ reboots, credential access or external publication.
   Share npm/CocoaPods/compiler caches. Reuse third-party binaries only as local
   snapshots with matching revision, target, producer, and checksum receipts;
   never write through or execute mutable sibling artifact links.
+- The GPUI crates in `experiments/gpui-player/vendor/` are not committed: they come
+  from `scripts/gpui-vendor.py`, which worktree setup runs. Edit a vendored crate in
+  `vendor/<crate>`, then run `scripts/gpui-vendor.py --update-patch <crate>` and commit
+  the patch and `vendor.lock`; never commit `vendor/` or hand-edit a `.patch`.
 - Serialize native builds/bootstrap across worktrees: use self-locking producers
   or `node scripts/with-native-build-lock.mjs --owner <task> -- <command> <args>`.
   Never forge tokens or split lock identity with task temp directories. Stop

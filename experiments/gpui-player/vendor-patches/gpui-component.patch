@@ -1,0 +1,94 @@
+diff --git a/APP_FRAME.md b/APP_FRAME.md
+new file mode 100644
+index 0000000..2258029
+--- /dev/null
++++ b/APP_FRAME.md
+@@ -0,0 +1,15 @@
++# App-owned Linux frame
++
++Pinned `gpui-component` 0.9.0, published archive SHA-256:
++`45bbfdba0efa392190f2fd446ec311325302eb047d5ce45dc1bcf189cb18f5eb`.
++
++The optional application global `WindowFrameStyle` overrides the generic
++client-frame shadow and border sizes. Without it, the published defaults and
++explicit `WindowBorder` builder settings remain unchanged. The SingZ prototype
++sets both sizes to zero on Linux, because its own header and resize grips own
++the frame and its layouts use the complete client viewport.
++
++This avoids the generic 20px Linux shadow padding shifting the application's
++controls and dialogs. No component theme, text rasterization or other control
++behavior changes. The native Linux backend still removes server decorations;
++this setting controls only the component root's extra client frame.
+diff --git a/src/lib.rs b/src/lib.rs
+index 6e935d6..b520a98 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -119,7 +119,7 @@ pub use theme::*;
+ pub use time::{calendar, date_picker, time_field};
+ pub use title_bar::*;
+ pub use virtual_list::{VirtualList, VirtualListScrollHandle, h_virtual_list, v_virtual_list};
+-pub use window_border::{WindowBorder, window_border, window_paddings};
++pub use window_border::{WindowFrameStyle, WindowBorder, window_border, window_paddings};
+ pub use window_ext::WindowExt;
+ 
+ rust_i18n::i18n!("locales", fallback = "en");
+diff --git a/src/window_border.rs b/src/window_border.rs
+index 2e950d6..1467847 100644
+--- a/src/window_border.rs
++++ b/src/window_border.rs
+@@ -21,6 +21,15 @@ const RESIZE_HIT_SIZE: Pixels = px(4.0);
+ /// corners, so keep the generic window wrapper square until rounded content masks exist.
+ pub(crate) const BORDER_RADIUS: Pixels = px(0.0);
+ 
++/// Application-owned chrome may opt out of the generic Linux frame. The
++/// default remains unchanged for every other consumer.
++#[derive(Clone, Copy)]
++pub struct WindowFrameStyle {
++    pub shadow_size: Pixels,
++    pub border_size: Pixels,
++}
++impl gpui::Global for WindowFrameStyle {}
++
+ /// Create a new window border.
+ pub fn window_border() -> WindowBorder {
+     WindowBorder::new()
+@@ -143,6 +152,10 @@ impl ParentElement for WindowBorder {
+ 
+ impl RenderOnce for WindowBorder {
+     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
++        let frame = cx.try_global::<WindowFrameStyle>().copied().unwrap_or(WindowFrameStyle {
++            shadow_size: self.shadow_size,
++            border_size: BORDER_SIZE,
++        });
+         let decorations = window.window_decorations();
+         let mut children = self.children;
+         if !uses_client_border(decorations) {
+@@ -159,11 +172,11 @@ impl RenderOnce for WindowBorder {
+         // shadow padding, but `set_client_inset` must still use the full shadow size. Clearing it
+         // makes the first resize after restore double-count the shadow in `compute_outer_size`, and
+         // the window jumps larger.
+-        let platform_inset = self.shadow_size;
++        let platform_inset = frame.shadow_size;
+         let visual_shadow = if tiling.top && tiling.bottom && tiling.left && tiling.right {
+             px(0.0)
+         } else {
+-            self.shadow_size
++            frame.shadow_size
+         };
+         let resize_hit_size = self.resize_hit_size;
+         window.set_client_inset(platform_inset);
+@@ -235,10 +248,10 @@ impl RenderOnce for WindowBorder {
+                         div.rounded_tl(BORDER_RADIUS)
+                     })
+                     .border_color(border_color)
+-                    .when(!tiling.top, |div| div.border_t(BORDER_SIZE))
+-                    .when(!tiling.bottom, |div| div.border_b(BORDER_SIZE))
+-                    .when(!tiling.left, |div| div.border_l(BORDER_SIZE))
+-                    .when(!tiling.right, |div| div.border_r(BORDER_SIZE))
++                    .when(!tiling.top, |div| div.border_t(frame.border_size))
++                    .when(!tiling.bottom, |div| div.border_b(frame.border_size))
++                    .when(!tiling.left, |div| div.border_l(frame.border_size))
++                    .when(!tiling.right, |div| div.border_r(frame.border_size))
+                     .when(!tiling.is_tiled(), |div| {
+                         let opacity = if is_window_active { 1.0 } else { 0.7 };
+                         div.shadow(vec![

@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "registry": "https://static.crates.io/crates",
+  "crates": [
+    {
+      "name": "gpui-pre",
+      "version": "0.3.11",
+      "archive_sha256": "9303c771abf2acff2a96d706f69d9a82088c4770173a07cce88f0002431d887d",
+      "patch": "gpui-pre.patch",
+      "patch_sha256": "248d1a91a5f3c2cb4f4d582e7a58362440460efceeb641a61f2faff59f6611cb"
+    },
+    {
+      "name": "gpui-pre-apple",
+      "version": "0.3.11",
+      "archive_sha256": "8c0bea8ffa563d3a1ada533e148bb55be7fb873c178979e889a3d1204f8e1b91",
+      "patch": "gpui-pre-apple.patch",
+      "patch_sha256": "12693a4397def51d04869fce3a3cf63a2a79dc5b146b9042a27cb3aef9374286"
+    },
+    {
+      "name": "gpui-pre-linux",
+      "version": "0.3.11",
+      "archive_sha256": "79cac5cbd3485c1e3db8eafd5dc69019188f5cb0a39846946af772efa386f624",
+      "patch": "gpui-pre-linux.patch",
+      "patch_sha256": "04059c3323daf2dc0f20382d2e87f733e1ce28f9bda9006f353cd1923cbfea3d"
+    },
+    {
+      "name": "gpui-pre-wgpu",
+      "version": "0.3.11",
+      "archive_sha256": "211cf352de1a0b0c9bea3f105df5572ce1d2c899389b924a888e5af36b50f93d",
+      "patch": "gpui-pre-wgpu.patch",
+      "patch_sha256": "5d95657326756611bd275096df9a7412bb5433e143a487c83fb7b7ebde76777b"
+    },
+    {
+      "name": "gpui-pre-windows",
+      "version": "0.3.11",
+      "archive_sha256": "5141a3db59bab761a16ab19529fe4117a86e91922e8fc00af6dfc4829cb1744d",
+      "patch": "gpui-pre-windows.patch",
+      "patch_sha256": "ad700d269a28694e29bbd9623df885de25bc8091080c83f63f2fc69c7670d009"
+    },
+    {
+      "name": "gpui-component",
+      "version": "0.9.0",
+      "archive_sha256": "45bbfdba0efa392190f2fd446ec311325302eb047d5ce45dc1bcf189cb18f5eb",
+      "patch": "gpui-component.patch",
+      "patch_sha256": "4e1ef4f06716ba089c6122323138eebfbf42f6732aff90bcd06eb61711b9e669"
+    }
+  ]
+}

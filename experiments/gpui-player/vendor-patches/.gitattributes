@@ -1,0 +1,2 @@
+# Patches must stay byte-exact: vendor.lock pins their SHA256 and `git apply` rejects CRLF.
+* -text

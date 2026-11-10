@@ -7,6 +7,7 @@ Electron, N-API or web renderer in this path. The dedicated build uses
 Cargo, CMake, a C++ compiler and a shell wrapper; npm is not required.
 
 ```sh
+python3 scripts/gpui-vendor.py
 bash scripts/build-gpui-audio.sh
 cargo build --locked --manifest-path experiments/gpui-player/Cargo.toml
 experiments/gpui-player/target/debug/singz-gpui-player

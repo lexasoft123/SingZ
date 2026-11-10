@@ -28,10 +28,12 @@ route is no longer shown as a monitoring owner. Active-monitor/narrow header
 titles and physical microphone/audible monitoring still need qualification.
 
 Requires Rust and GPUI Kit's native platform prerequisites (macOS 15+ for this Mac setup).
-Keep the sibling UIKit checkout at `../singz-ui`: Cargo resolves `singz-uikit` from its
-`gpui` directory.
+Cargo fetches `singz-uikit` at the revision pinned in `Cargo.toml`. The patched GPUI crates
+are not committed: `scripts/worktree-setup.sh` materializes them into `vendor/`, or run
+`scripts/gpui-vendor.py` yourself (see `vendor-patches/README.md`).
 
 ```sh
+python3 scripts/gpui-vendor.py
 bash scripts/build-gpui-audio.sh
 cargo run --manifest-path experiments/gpui-player/Cargo.toml
 ```

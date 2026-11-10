@@ -1,0 +1,921 @@
+diff --git a/GRAIN_EXTENSION.md b/GRAIN_EXTENSION.md
+new file mode 100644
+index 0000000..9761ffe
+--- /dev/null
++++ b/GRAIN_EXTENSION.md
+@@ -0,0 +1,47 @@
++# Optional GPU scene grain extension
++
++This directory vendors the unmodified published `gpui-pre-apple 0.3.11` baseline
++(zed snapshot `f816e1f9263e3a8ef63c4baaa02e1441ce1c6038`), with the following
++local extension. Original Apache-2.0 license and vendored build inputs are retained.
++
++```rust
++gpui_apple::configure_grain_effect(tile_rgba, width, height, 0.05)?;
++// Request a host redraw. Later:
++gpui_apple::clear_grain_effect();
++```
++
++The optional material is disabled by default. Configuration is process-local and
++applies to every Apple renderer; this prototype has one window. Tile input is
++straight-alpha sRGB **RGBA**, one texel per physical pixel, and repeats from the
++viewport origin. Configure a tile rasterized at the current device scale. Reapply
++on scale changes. The setter validates dimensions, length and opacity and changes
++no windows or operating-system state.
++
++When enabled, the existing scene renderer draws into a cached GPU-only BGRA scene
++target. A single fullscreen-triangle pass applies CSS overlay blend followed by
++source-over, sampling the scene and repeating noise by exact integer pixel index.
++This executes inside `render_frame`, shared by visible presentation, hidden
++`render_to_image`, offscreen `render_scene_to_image` and benchmark rendering. There
++is **no CPU scene readback or per-frame image upload**. The tile and pipeline are
++cached until configuration changes; the scene target is recreated on resize.
++Opacity zero and `clear_grain_effect` restore the original target path.
++
++The normal Metal build script compiles the additional functions with the existing
++shader library. It still requires Xcode's `xcrun metal` and `xcrun metallib` (macOS
++12 minimum). `runtime_shaders` uses the same functions in the stitched shader
++source and requires the Metal runtime compiler. No additional Rust dependency or
++shader-binding struct is needed. This extension changes only the Apple renderer;
++other backends retain their original rendering.
++
++The shader handles destination alpha using the W3C blend/source-over equations;
++for an opaque application this reduces to:
++
++```
++a = noise.a * opacity
++B(d, s) = d <= .5 ? 2*d*s : 1 - 2*(1-d)*(1-s)
++out.rgb = mix(scene.rgb, B(scene.rgb, noise.rgb), a)
++out.a = 1
++```
++
++Verification must compare opt-in live and hidden output against the same source
++tile and pixel contract, and confirm clear/zero-opacity paths remain unchanged.
+diff --git a/src/gpui_apple.rs b/src/gpui_apple.rs
+index 4ce5848..7bdf427 100644
+--- a/src/gpui_apple.rs
++++ b/src/gpui_apple.rs
+@@ -6,6 +6,10 @@
+ //! while leaving application lifecycle, windowing, and input to each platform backend.
+ 
+ mod dispatcher;
++mod grain_effect;
++pub use grain_effect::{
++    clear_grain_effect, clear_scene_backdrop, configure_grain_effect, configure_scene_backdrop,
++};
+ pub mod display_link;
+ pub mod keychain;
+ mod metal_atlas;
+diff --git a/src/grain_effect.rs b/src/grain_effect.rs
+new file mode 100644
+index 0000000..e0c58b8
+--- /dev/null
++++ b/src/grain_effect.rs
+@@ -0,0 +1,110 @@
++//! Opt-in process-local scene grain. The default is disabled.
++//!
++//! Configuration applies to every Apple renderer in this process. This small
++//! extension targets a single-window host; applications needing different
++//! materials per window should move this state to their window/renderer API.
++//! Tile pixels are straight-alpha sRGB RGBA, at device-pixel resolution. The
++//! tile repeats from the viewport origin without filtering or rescaling.
++use parking_lot::Mutex;
++use std::sync::{Arc, OnceLock};
++
++#[derive(Clone)]
++pub(crate) struct GrainEffect {
++    pub version: u64,
++    pub pixels: Arc<[u8]>,
++    pub width: u32,
++    pub height: u32,
++    pub opacity: f32,
++}
++
++#[derive(Default)]
++struct Configuration {
++    version: u64,
++    effect: Option<GrainEffect>,
++    backdrop: Option<SceneBackdrop>,
++}
++fn configuration() -> &'static Mutex<Configuration> {
++    static CONFIG: OnceLock<Mutex<Configuration>> = OnceLock::new();
++    CONFIG.get_or_init(|| Mutex::new(Configuration::default()))
++}
++
++/// Configure an overlay-blended repeating grain tile. Existing GPU resources
++/// are invalidated on the next rendered frame. No window is invalidated here;
++/// the host should request a redraw after changing this setting.
++pub fn configure_grain_effect(
++    tile_rgba: Vec<u8>,
++    width: u32,
++    height: u32,
++    opacity: f32,
++) -> Result<(), String> {
++    let expected = (width as usize)
++        .checked_mul(height as usize)
++        .and_then(|n| n.checked_mul(4));
++    if width == 0 || height == 0 || expected != Some(tile_rgba.len()) {
++        return Err("Grain tile must contain width × height × 4 RGBA bytes".into());
++    }
++    if !opacity.is_finite() || !(0. ..=1.).contains(&opacity) {
++        return Err("Grain opacity must be finite and between zero and one".into());
++    }
++    let mut state = configuration().lock();
++    state.version = state.version.wrapping_add(1);
++    state.effect = Some(GrainEffect {
++        version: state.version,
++        pixels: tile_rgba.into(),
++        width,
++        height,
++        opacity,
++    });
++    Ok(())
++}
++
++/// Restore the unmodified GPUI scene renderer on the next redraw.
++pub fn clear_grain_effect() {
++    let mut state = configuration().lock();
++    state.version = state.version.wrapping_add(1);
++    state.effect = None;
++}
++
++pub(crate) fn current() -> Option<GrainEffect> {
++    configuration().lock().effect.clone()
++}
++
++/// A device-resolution straight-alpha RGBA backdrop, composed behind the
++/// quantized premultiplied UI surface before grain. Independent of grain state.
++#[derive(Clone)]
++pub(crate) struct SceneBackdrop {
++    pub version: u64,
++    pub pixels: Arc<[u8]>,
++    pub width: u32,
++    pub height: u32,
++}
++
++/// Configure a full-viewport ambient layer. Dimensions must match the physical
++/// viewport; no filtering, stretching or UI readback is performed. The host must
++/// omit its opaque background quad and request redraw after configuration.
++pub fn configure_scene_backdrop(rgba: Vec<u8>, width: u32, height: u32) -> Result<(), String> {
++    let expected = (width as usize)
++        .checked_mul(height as usize)
++        .and_then(|n| n.checked_mul(4));
++    if width == 0 || height == 0 || expected != Some(rgba.len()) {
++        return Err("Scene backdrop must contain width × height × 4 RGBA bytes".into());
++    }
++    let mut state = configuration().lock();
++    state.version = state.version.wrapping_add(1);
++    state.backdrop = Some(SceneBackdrop {
++        version: state.version,
++        pixels: rgba.into(),
++        width,
++        height,
++    });
++    Ok(())
++}
++
++/// Disable only the ambient layer; any configured grain remains enabled.
++pub fn clear_scene_backdrop() {
++    configuration().lock().backdrop = None;
++}
++
++pub(crate) fn backdrop() -> Option<SceneBackdrop> {
++    configuration().lock().backdrop.clone()
++}
+diff --git a/src/metal_renderer.rs b/src/metal_renderer.rs
+index 9b98a23..c747e67 100644
+--- a/src/metal_renderer.rs
++++ b/src/metal_renderer.rs
+@@ -16,18 +16,18 @@ use objc2_core_video::{
+     CVPixelBufferGetWidthOfPlane, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, kCVReturnSuccess,
+ };
+ use objc2_foundation::{NSRange, NSString};
++#[cfg(any(test, feature = "bench-support", feature = "test-support"))]
++use objc2_metal::MTLBlitCommandEncoder;
+ #[cfg(target_os = "macos")]
+ use objc2_metal::MTLCopyAllDevices;
+ use objc2_metal::{
+     MTLBlendFactor, MTLBlendOperation, MTLBuffer, MTLClearColor, MTLCommandBuffer,
+     MTLCommandEncoder, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLDrawable,
+-    MTLGPUFamily, MTLLibrary, MTLLoadAction, MTLPixelFormat, MTLPrimitiveType,
+-    MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineDescriptor,
+-    MTLRenderPipelineState, MTLResourceOptions, MTLStorageMode, MTLStoreAction, MTLTexture,
+-    MTLTextureDescriptor, MTLTextureType, MTLTextureUsage, MTLViewport,
++    MTLGPUFamily, MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType,
++    MTLRegion, MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineDescriptor,
++    MTLRenderPipelineState, MTLResourceOptions, MTLSize, MTLStorageMode, MTLStoreAction,
++    MTLTexture, MTLTextureDescriptor, MTLTextureType, MTLTextureUsage, MTLViewport,
+ };
+-#[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+-use objc2_metal::{MTLBlitCommandEncoder, MTLOrigin, MTLRegion, MTLSize};
+ use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
+ use parking_lot::Mutex;
+ 
+@@ -125,6 +125,16 @@ enum DisplayLinkMode {
+     },
+ }
+ 
++struct GrainResources {
++    version: u64,
++    opacity: f32,
++    backdrop_version: Option<u64>,
++    backdrop: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
++    scene: Retained<ProtocolObject<dyn MTLTexture>>,
++    tile: Retained<ProtocolObject<dyn MTLTexture>>,
++    pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
++}
++
+ pub struct MetalRenderer {
+     device: Retained<ProtocolObject<dyn MTLDevice>>,
+     layer: Option<Retained<CAMetalLayer>>,
+@@ -150,6 +160,7 @@ pub struct MetalRenderer {
+     path_intermediate_texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
+     path_intermediate_msaa_texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
+     path_sample_count: u32,
++    grain: Option<GrainResources>,
+     /// Offscreen render target reused across `render_scene` calls when
+     /// rendering headlessly without reading pixels back.
+     #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+@@ -438,6 +449,7 @@ impl MetalRenderer {
+             path_intermediate_texture: None,
+             path_intermediate_msaa_texture: None,
+             path_sample_count: PATH_SAMPLE_COUNT,
++            grain: None,
+             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+             headless_render_target: None,
+         })
+@@ -672,16 +684,22 @@ impl MetalRenderer {
+                 scene.surfaces.len(),
+             )
+         })?;
++        let grain_target = self.prepare_grain(viewport_size)?;
++        let scene_target = grain_target.as_deref().unwrap_or(texture);
+         let mut surface_textures = Vec::new();
+         let command_buffer = self.draw_primitives_to_texture(
+             scene,
+             &instance_bindings,
+             &mut writer,
+-            texture,
++            scene_target,
+             viewport_size,
+             &mut surface_textures,
+         )?;
+ 
++        if grain_target.is_some() {
++            self.encode_grain(&command_buffer, texture, viewport_size)?;
++        }
++
+         let instance_buffer_pool = self.instance_buffer_pool.clone();
+         let frame_resources = Cell::new(Some((writer.finish(), surface_textures)));
+         let block = RcBlock::new(
+@@ -854,7 +872,8 @@ impl MetalRenderer {
+         let command_buffer = command_queue
+             .commandBuffer()
+             .context("creating command buffer")?;
+-        let alpha = if self.opaque { 1. } else { 0. };
++        let isolated_ui = self.grain.as_ref().is_some_and(|g| g.backdrop.is_some());
++        let alpha = if self.opaque && !isolated_ui { 1. } else { 0. };
+ 
+         let mut command_encoder = new_command_encoder_for_texture(
+             &command_buffer,
+@@ -2142,3 +2161,253 @@ mod tests {
+         assert_eq!(read_texture_to_image(&target_texture).unwrap(), image);
+     }
+ }
++
++impl MetalRenderer {
++    /// Select a cached UI target only while a host enables grain or a backdrop.
++    /// Every frame then remains entirely on the GPU, including screenshot frames.
++    fn prepare_grain(
++        &mut self,
++        viewport: Size<DevicePixels>,
++    ) -> Result<Option<Retained<ProtocolObject<dyn MTLTexture>>>> {
++        let backdrop = crate::grain_effect::backdrop();
++        let configured_grain = crate::grain_effect::current().filter(|c| c.opacity > 0.);
++        if configured_grain.is_none() && backdrop.is_none() {
++            self.grain = None;
++            return Ok(None);
++        }
++        if let Some(background) = &backdrop {
++            anyhow::ensure!(
++                background.width == viewport.width.0 as u32
++                    && background.height == viewport.height.0 as u32,
++                "scene backdrop must match the physical viewport"
++            );
++        }
++        let config = configured_grain.unwrap_or_else(|| crate::grain_effect::GrainEffect {
++            version: 0,
++            pixels: vec![0, 0, 0, 0].into(),
++            width: 1,
++            height: 1,
++            opacity: 0.,
++        });
++        let backdrop_version = backdrop.as_ref().map(|b| b.version);
++        anyhow::ensure!(
++            viewport.width.0 > 0 && viewport.height.0 > 0,
++            "grain viewport must be positive"
++        );
++        if let Some(grain) = self.grain.as_mut().filter(|g| g.version == config.version) {
++            // A viewport resize changes the ambient raster, not its shader or
++            // repeating grain. Retain the compiled pipeline and noise texture.
++            if grain.backdrop_version != backdrop_version {
++                grain.backdrop = backdrop
++                    .as_ref()
++                    .map(|b| {
++                        upload_rgba_texture(
++                            &self.device,
++                            &b.pixels,
++                            b.width,
++                            b.height,
++                            self.is_apple_gpu,
++                        )
++                    })
++                    .transpose()?;
++                grain.backdrop_version = backdrop_version;
++            }
++            if grain.scene.width() != viewport.width.0 as usize
++                || grain.scene.height() != viewport.height.0 as usize
++            {
++                grain.scene = grain_scene_texture(&self.device, viewport)?;
++            }
++            return Ok(Some(grain.scene.clone()));
++        }
++        let pipeline = if let Some(grain) = &self.grain {
++            // Grain pixels/opacity and ambient dimensions do not alter MSL.
++            grain.pipeline.clone()
++        } else {
++            #[cfg(feature = "runtime_shaders")]
++            let library = self
++                .device
++                .newLibraryWithSource_options_error(
++                    &NSString::from_str(SHADERS_SOURCE_FILE),
++                    Some(&objc2_metal::MTLCompileOptions::new()),
++                )
++                .context("building grain shader library")?;
++            #[cfg(not(feature = "runtime_shaders"))]
++            let library = self
++                .device
++                .newLibraryWithData_error(&dispatch2::DispatchData::from_static_bytes(
++                    SHADERS_METALLIB,
++                ))
++                .context("loading grain shader library")?;
++            let vertex = library
++                .newFunctionWithName(&NSString::from_str("grain_vertex"))
++                .context("grain vertex shader")?;
++            let fragment = library
++                .newFunctionWithName(&NSString::from_str("grain_fragment"))
++                .context("grain fragment shader")?;
++            let descriptor = MTLRenderPipelineDescriptor::new();
++            descriptor.setLabel(Some(&NSString::from_str("scene grain overlay")));
++            descriptor.setVertexFunction(Some(vertex.as_ref()));
++            descriptor.setFragmentFunction(Some(fragment.as_ref()));
++            // SAFETY: Attachment zero exists on every Metal render pipeline descriptor.
++            let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
++            attachment.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
++            // The shader implements CSS compositing itself; a second fixed-function
++            // source-over blend would apply the alpha twice.
++            attachment.setBlendingEnabled(false);
++            self.device
++                .newRenderPipelineStateWithDescriptor_error(&descriptor)
++                .context("creating grain pipeline")?
++        };
++        let tile_descriptor = MTLTextureDescriptor::new();
++        // SAFETY: The public setter checked non-zero dimensions and byte length.
++        unsafe {
++            tile_descriptor.setWidth(config.width as usize);
++            tile_descriptor.setHeight(config.height as usize);
++        }
++        tile_descriptor.setPixelFormat(MTLPixelFormat::RGBA8Unorm);
++        tile_descriptor.setStorageMode(if cfg!(target_os = "ios") || self.is_apple_gpu {
++            MTLStorageMode::Shared
++        } else {
++            MTLStorageMode::Managed
++        });
++        tile_descriptor.setUsage(MTLTextureUsage::ShaderRead);
++        let tile = self
++            .device
++            .newTextureWithDescriptor(&tile_descriptor)
++            .context("allocating grain tile")?;
++        // SAFETY: Setter validation guarantees this CPU-accessible texture region
++        // is covered by the immutable, live source bytes. Upload copies them now.
++        unsafe {
++            tile.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
++                MTLRegion {
++                    origin: MTLOrigin { x: 0, y: 0, z: 0 },
++                    size: MTLSize {
++                        width: config.width as usize,
++                        height: config.height as usize,
++                        depth: 1,
++                    },
++                },
++                0,
++                ptr::NonNull::from(config.pixels.as_ref()).cast(),
++                config.width as usize * 4,
++            );
++        }
++        let backdrop_texture = backdrop
++            .as_ref()
++            .map(|b| {
++                upload_rgba_texture(
++                    &self.device,
++                    &b.pixels,
++                    b.width,
++                    b.height,
++                    self.is_apple_gpu,
++                )
++            })
++            .transpose()?;
++        let scene = grain_scene_texture(&self.device, viewport)?;
++        self.grain = Some(GrainResources {
++            version: config.version,
++            opacity: config.opacity,
++            backdrop_version,
++            backdrop: backdrop_texture,
++            scene: scene.clone(),
++            tile,
++            pipeline,
++        });
++        Ok(Some(scene))
++    }
++
++    fn encode_grain(
++        &self,
++        buffer: &ProtocolObject<dyn MTLCommandBuffer>,
++        destination: &ProtocolObject<dyn MTLTexture>,
++        viewport: Size<DevicePixels>,
++    ) -> Result<()> {
++        let grain = self.grain.as_ref().context("grain resources missing")?;
++        let encoder = new_command_encoder_for_texture(buffer, destination, viewport, None)?;
++        encoder.setRenderPipelineState(&grain.pipeline);
++        // SAFETY: Texture slots, opacity and presence flag match grain_fragment.
++        // The encoder retains textures; Metal copies the live uniform bytes.
++        unsafe {
++            encoder.setFragmentTexture_atIndex(Some(&grain.scene), 0);
++            encoder.setFragmentTexture_atIndex(Some(&grain.tile), 1);
++            encoder.setFragmentTexture_atIndex(
++                Some(grain.backdrop.as_deref().unwrap_or(&grain.tile)),
++                2,
++            );
++            let has_backdrop = u32::from(grain.backdrop.is_some());
++            encoder.setFragmentBytes_length_atIndex(
++                ptr::NonNull::from(&has_backdrop).cast(),
++                mem::size_of::<u32>(),
++                1,
++            );
++            encoder.setFragmentBytes_length_atIndex(
++                ptr::NonNull::from(&grain.opacity).cast(),
++                mem::size_of::<f32>(),
++                0,
++            );
++            encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3);
++        }
++        encoder.endEncoding();
++        Ok(())
++    }
++}
++
++fn grain_scene_texture(
++    device: &ProtocolObject<dyn MTLDevice>,
++    viewport: Size<DevicePixels>,
++) -> Result<Retained<ProtocolObject<dyn MTLTexture>>> {
++    let descriptor = MTLTextureDescriptor::new();
++    // SAFETY: Caller checked positive viewport dimensions.
++    unsafe {
++        descriptor.setWidth(viewport.width.0 as usize);
++        descriptor.setHeight(viewport.height.0 as usize);
++    }
++    descriptor.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
++    descriptor.setStorageMode(MTLStorageMode::Private);
++    descriptor.setUsage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
++    device
++        .newTextureWithDescriptor(&descriptor)
++        .context("allocating grain scene target")
++}
++
++fn upload_rgba_texture(
++    device: &ProtocolObject<dyn MTLDevice>,
++    pixels: &[u8],
++    width: u32,
++    height: u32,
++    apple_gpu: bool,
++) -> Result<Retained<ProtocolObject<dyn MTLTexture>>> {
++    let descriptor = MTLTextureDescriptor::new();
++    unsafe {
++        descriptor.setWidth(width as usize);
++        descriptor.setHeight(height as usize);
++    }
++    descriptor.setPixelFormat(MTLPixelFormat::RGBA8Unorm);
++    descriptor.setStorageMode(if cfg!(target_os = "ios") || apple_gpu {
++        MTLStorageMode::Shared
++    } else {
++        MTLStorageMode::Managed
++    });
++    descriptor.setUsage(MTLTextureUsage::ShaderRead);
++    let texture = device
++        .newTextureWithDescriptor(&descriptor)
++        .context("allocating scene backdrop")?;
++    // Validated immutable RGBA bytes cover the complete uploaded device texture.
++    unsafe {
++        texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
++            MTLRegion {
++                origin: MTLOrigin { x: 0, y: 0, z: 0 },
++                size: MTLSize {
++                    width: width as usize,
++                    height: height as usize,
++                    depth: 1,
++                },
++            },
++            0,
++            ptr::NonNull::from(pixels).cast(),
++            width as usize * 4,
++        );
++    }
++    Ok(texture)
++}
+diff --git a/src/shaders.metal b/src/shaders.metal
+index 2b52bb9..837e3f3 100644
+--- a/src/shaders.metal
++++ b/src/shaders.metal
+@@ -1277,3 +1277,39 @@ float4 fill_color(Background background,
+ 
+   return color;
+ }
++
++// Optional process-local scene postprocess. Neither scene pixels nor noise
++// are resampled: input.position addresses their exact device-pixel centres.
++struct GrainVertexOutput { float4 position [[position]]; };
++vertex GrainVertexOutput grain_vertex(uint id [[vertex_id]]) {
++  const float2 vertices[3] = {float2(-1.0,-1.0),float2(3.0,-1.0),float2(-1.0,3.0)};
++  return {float4(vertices[id],0.0,1.0)};
++}
++fragment float4 grain_fragment(float4 position [[position]],
++    texture2d<float, access::read> scene [[texture(0)]],
++    texture2d<float, access::read> tile [[texture(1)]],
++    texture2d<float, access::read> ambient [[texture(2)]],
++    constant float &opacity [[buffer(0)]],
++    constant uint &has_backdrop [[buffer(1)]]) {
++  uint2 pixel=uint2(position.xy);
++  float4 destination=scene.read(pixel);
++  if (has_backdrop != 0) {
++    // scene is already premultiplied RGBA8; ambient upload is straight RGBA.
++    // Quantization happens in the UI target, before this source-over step.
++    float4 background=ambient.read(pixel);
++    destination=float4(destination.rgb + background.rgb*background.a*(1.0-destination.a),
++        destination.a + background.a*(1.0-destination.a));
++  }
++  float4 source=tile.read(pixel % uint2(tile.get_width(),tile.get_height()));
++  float source_alpha=source.a*opacity;
++  float3 backdrop=destination.a>0.0 ? destination.rgb/destination.a : float3(0.0);
++  float3 multiply=2.0*backdrop*source.rgb;
++  float3 screen=1.0-2.0*(1.0-backdrop)*(1.0-source.rgb);
++  float3 blend=select(multiply,screen,backdrop>0.5);
++  // W3C blend+source-over in premultiplied destination storage. The host's
++  // opaque scene reduces this to mix(backdrop,overlay,.05*noiseAlpha).
++  float3 output=(1.0-source_alpha)*destination.rgb + source_alpha*
++      ((1.0-destination.a)*source.rgb+destination.a*blend);
++  float alpha=source_alpha+destination.a*(1.0-source_alpha);
++  return float4(output,alpha);
++}
+diff --git a/src/text_system.rs b/src/text_system.rs
+index 74cd7cc..4a226d3 100644
+--- a/src/text_system.rs
++++ b/src/text_system.rs
+@@ -4,6 +4,7 @@ use core_foundation::{
+     array::{CFArray, CFArrayRef},
+     attributed_string::CFMutableAttributedString,
+     base::{CFRange, TCFType},
++    dictionary::CFDictionary,
+     number::CFNumber,
+     string::CFString,
+ };
+@@ -11,7 +12,7 @@ use core_graphics::{
+     base::{CGFloat, CGGlyph, kCGImageAlphaPremultipliedLast},
+     color_space::CGColorSpace,
+     context::{CGContext, CGTextDrawingMode},
+-    geometry::CGPoint,
++    geometry::{CGPoint, CGSize},
+ };
+ use core_text::{
+     font::CTFont,
+@@ -59,6 +60,61 @@ use crate::open_type::apply_features_and_fallbacks;
+ #[allow(non_upper_case_globals)]
+ const kCGImageAlphaOnly: u32 = 7;
+ 
++/// Match Skia's color bitmap policy: request a device-sized CTFont, disable
++/// CoreText's extra tracking, and leave the CGContext scale at one. At small
++/// logical sizes CoreText chooses an oversized bitmap strike before applying
++/// the context transform, so logical-size fonts cannot be scaled up faithfully.
++fn css_device_font(font: &CTFont, logical_size: f32, scale: f32) -> CTFont {
++    let attrs = CFDictionary::from_CFType_pairs(&[
++        (
++            CFString::new("NSCTFontUnscaledTrackingAttribute"),
++            CFNumber::from(0_i32).as_CFType(),
++        ),
++        (
++            CFString::new("NSCTFontOpticalSizeAttribute"),
++            CFNumber::from(logical_size as f64).as_CFType(),
++        ),
++    ]);
++    let descriptor = core_text::font_descriptor::new_from_attributes(&attrs);
++    unsafe {
++        let generated = &*font.as_concrete_TypeRef().cast::<objc2_core_text::CTFont>();
++        let descriptor = &*descriptor
++            .as_concrete_TypeRef()
++            .cast::<objc2_core_text::CTFontDescriptor>();
++        let copy = generated.copy_with_attributes(
++            (logical_size * scale) as f64,
++            std::ptr::null(),
++            Some(descriptor),
++        );
++        CTFont::wrap_under_create_rule(
++            objc2_core_foundation::CFRetained::into_raw(copy)
++                .as_ptr()
++                .cast(),
++        )
++    }
++}
++
++/// HarfBuzz uses the OpenType advance, not CoreText's bitmap-strike advance.
++/// Apple Color Emoji has static hmtx metrics, so reading those preserves one-em
++/// advances even at DPR 1, where CT's smallest bitmap strike is oversized.
++fn css_emoji_advance(font: &CTFont, glyph: CGGlyph, logical_size: f32) -> Option<f64> {
++    let hhea = font.get_font_table(u32::from_be_bytes(*b"hhea"))?;
++    let hmtx = font.get_font_table(u32::from_be_bytes(*b"hmtx"))?;
++    let head = font.get_font_table(u32::from_be_bytes(*b"head"))?;
++    let read_u16 = |data: &[u8], offset: usize| -> Option<u16> {
++        Some(u16::from_be_bytes(
++            data.get(offset..offset + 2)?.try_into().ok()?,
++        ))
++    };
++    let count = read_u16(hhea.bytes(), 34)? as usize;
++    let units = read_u16(head.bytes(), 18)?;
++    if count == 0 || units == 0 {
++        return None;
++    }
++    let advance = read_u16(hmtx.bytes(), (glyph as usize).min(count - 1) * 4)?;
++    Some(advance as f64 * logical_size as f64 / units as f64)
++}
++
+ /// Apple text system using CoreText for font shaping.
+ pub struct AppleTextSystem(RwLock<AppleTextSystemState>);
+ 
+@@ -213,6 +269,18 @@ impl PlatformTextSystem for AppleTextSystem {
+         self.0.write().layout_line(text, font_size, font_runs)
+     }
+ 
++    fn layout_line_with_css_scale(
++        &self,
++        text: &str,
++        font_size: Pixels,
++        font_runs: &[FontRun],
++        css_scale: Option<f32>,
++    ) -> LineLayout {
++        self.0
++            .write()
++            .layout_line_with_css_scale(text, font_size, font_runs, css_scale)
++    }
++
+     fn recommended_rendering_mode(
+         &self,
+         _font_id: FontId,
+@@ -428,6 +496,26 @@ impl AppleTextSystemState {
+ 
+     fn raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
+         let font = &self.fonts[params.font_id.0];
++        if params.is_emoji && params.css_rasterization {
++            let font = css_device_font(
++                &font.native_font(),
++                f32::from(params.font_size),
++                params.scale_factor,
++            );
++            let bounds = font.get_bounding_rects_for_glyphs(
++                core_text::font_descriptor::kCTFontOrientationHorizontal,
++                &[params.glyph_id.0 as CGGlyph],
++            );
++            let left = bounds.origin.x.floor() as i32;
++            let top = (-bounds.origin.y - bounds.size.height).floor() as i32;
++            let right = (bounds.origin.x + bounds.size.width).ceil() as i32;
++            let bottom = (-bounds.origin.y).ceil() as i32;
++            return Ok(Bounds::new(
++                point(DevicePixels(left), DevicePixels(top)),
++                size(DevicePixels(right - left), DevicePixels(bottom - top)),
++            )
++            .dilate(DevicePixels(1)));
++        }
+         let scale = Transform2F::from_scale(params.scale_factor);
+         let bounds: Bounds<DevicePixels> = bounds_from_rect_i(font.raster_bounds(
+             params.glyph_id.0,
+@@ -489,12 +577,14 @@ impl AppleTextSystemState {
+             // makes drawing text consistent with the font-kit's raster_bounds.
+             cx.translate(
+                 -glyph_bounds.origin.x.0 as CGFloat,
+-                (glyph_bounds.origin.y.0 + glyph_bounds.size.height.0) as CGFloat,
+-            );
+-            cx.scale(
+-                params.scale_factor as CGFloat,
+-                params.scale_factor as CGFloat,
++                // Quartz is Y-up. Use the enlarged bitmap height so its extra
++                // antialiasing row stays below a downward fractional baseline.
++                // Variant zero has the original height and remains unchanged.
++                (glyph_bounds.origin.y.0 + bitmap_size.height.0) as CGFloat,
+             );
++            let css_emoji = params.is_emoji && params.css_rasterization;
++            let drawing_scale = if css_emoji { 1. } else { params.scale_factor };
++            cx.scale(drawing_scale as CGFloat, drawing_scale as CGFloat);
+ 
+             let subpixel_shift = params
+                 .subpixel_variant
+@@ -512,19 +602,31 @@ impl AppleTextSystemState {
+                 cx.set_should_smooth_fonts(true);
+                 cx.set_gray_fill_color(luminance, 1.0);
+             } else {
++                if params.css_rasterization && !params.is_emoji {
++                    cx.set_should_smooth_fonts(false);
++                }
+                 cx.set_gray_fill_color(0.0, 1.0);
+             }
+-            self.fonts[params.font_id.0]
+-                .native_font()
+-                .clone_with_font_size(f32::from(params.font_size) as CGFloat)
+-                .draw_glyphs(
+-                    &[params.glyph_id.0 as CGGlyph],
+-                    &[CGPoint::new(
+-                        (subpixel_shift.x / params.scale_factor) as CGFloat,
+-                        (subpixel_shift.y / params.scale_factor) as CGFloat,
+-                    )],
+-                    cx,
+-                );
++            let native_font = self.fonts[params.font_id.0].native_font();
++            let drawing_font = if css_emoji {
++                css_device_font(
++                    &native_font,
++                    f32::from(params.font_size),
++                    params.scale_factor,
++                )
++            } else {
++                native_font.clone_with_font_size(f32::from(params.font_size) as CGFloat)
++            };
++            drawing_font.draw_glyphs(
++                &[params.glyph_id.0 as CGGlyph],
++                &[CGPoint::new(
++                    (subpixel_shift.x / drawing_scale) as CGFloat,
++                    // A positive device Y phase moves down on screen, the
++                    // opposite direction from the Quartz text coordinate.
++                    (-subpixel_shift.y / drawing_scale) as CGFloat,
++                )],
++                cx,
++            );
+ 
+             if params.is_emoji {
+                 // Convert from RGBA with premultiplied alpha to BGRA with straight alpha.
+@@ -538,6 +640,16 @@ impl AppleTextSystemState {
+     }
+ 
+     fn layout_line(&mut self, text: &str, font_size: Pixels, font_runs: &[FontRun]) -> LineLayout {
++        self.layout_line_with_css_scale(text, font_size, font_runs, None)
++    }
++
++    fn layout_line_with_css_scale(
++        &mut self,
++        text: &str,
++        font_size: Pixels,
++        font_runs: &[FontRun],
++        css_scale: Option<f32>,
++    ) -> LineLayout {
+         // Construct the attributed string, converting UTF8 ranges to UTF16 ranges.
+         let mut string = CFMutableAttributedString::new();
+         let mut max_ascent = 0.0f32;
+@@ -589,6 +701,62 @@ impl AppleTextSystemState {
+         // Retrieve the glyphs from the shaped line, converting UTF16 offsets to UTF8 offsets.
+         let line = CTLine::new_with_attributed_string(string.as_concrete_TypeRef());
+         let glyph_runs = line.glyph_runs();
++        // CoreText lays out small color emoji with native tracking and bitmap
++        // strike metrics. Replace only those advances with device-font metrics;
++        // keep the primary font's optical size, glyph IDs and UTF-16 mapping.
++        // Corrections are keyed by visual X, so subsequent runs (including
++        // right-to-left text) shift by the width changes to their visual left.
++        let mut emoji_widths = Vec::new();
++        if let Some(scale) = css_scale {
++            for run in glyph_runs.clone().into_iter() {
++                let attrs = run.attributes().unwrap();
++                let font = unsafe {
++                    attrs
++                        .get(kCTFontAttributeName)
++                        .downcast::<CTFont>()
++                        .unwrap()
++                };
++                let id = self.id_for_native_font(font.clone());
++                if !self.is_emoji(id) || run.glyph_count() == 0 {
++                    continue;
++                }
++                let glyphs = run.glyphs();
++                let device_font = css_device_font(&font, f32::from(font_size), scale);
++                let mut advances = vec![CGSize::new(0., 0.); glyphs.len()];
++                unsafe {
++                    device_font.get_advances_for_glyphs(
++                        core_text::font_descriptor::kCTFontOrientationHorizontal,
++                        glyphs.as_ptr(),
++                        advances.as_mut_ptr(),
++                        glyphs.len() as isize,
++                    );
++                }
++                let left = run
++                    .positions()
++                    .iter()
++                    .map(|p| p.x)
++                    .fold(f64::INFINITY, f64::min);
++                let old_width = run.get_typographic_bounds().width;
++                let new_width = glyphs
++                    .iter()
++                    .zip(&advances)
++                    .map(|(&glyph, advance)| {
++                        css_emoji_advance(&font, glyph, f32::from(font_size))
++                            .unwrap_or(advance.width / scale as f64)
++                    })
++                    .sum::<f64>();
++                if old_width > 0. {
++                    emoji_widths.push((left, old_width, new_width));
++                }
++            }
++        }
++        let shift_at = |x: f64| -> f64 {
++            emoji_widths
++                .iter()
++                .filter(|(left, old, _)| left + old <= x + 0.000001)
++                .map(|(_, old, new)| new - old)
++                .sum()
++        };
+         let mut runs = <Vec<ShapedRun>>::with_capacity(glyph_runs.len() as usize);
+         let mut ix_converter = StringIndexConverter::new(text);
+         for run in glyph_runs.into_iter() {
+@@ -600,6 +768,15 @@ impl AppleTextSystemState {
+                     .unwrap()
+             };
+             let font_id = self.id_for_native_font(font);
++            let run_left = run
++                .positions()
++                .iter()
++                .map(|p| p.x)
++                .fold(f64::INFINITY, f64::min);
++            let emoji_width = self
++                .is_emoji(font_id)
++                .then(|| emoji_widths.iter().find(|(left, _, _)| *left == run_left))
++                .flatten();
+ 
+             let glyphs = match runs.last_mut() {
+                 Some(run) if run.font_id == font_id => &mut run.glyphs,
+@@ -625,7 +802,15 @@ impl AppleTextSystemState {
+                 ix_converter.advance_to_utf16_ix(glyph_utf16_ix);
+                 glyphs.push(ShapedGlyph {
+                     id: GlyphId(glyph_id as u32),
+-                    position: point(position.x as f32, position.y as f32).map(px),
++                    position: point(
++                        if let Some((left, old, new)) = emoji_width {
++                            (left + shift_at(*left) + (position.x - left) * new / old) as f32
++                        } else {
++                            (position.x + shift_at(position.x)) as f32
++                        },
++                        position.y as f32,
++                    )
++                    .map(px),
+                     index: ix_converter.utf8_ix,
+                     is_emoji: self.is_emoji(font_id),
+                 });
+@@ -635,7 +820,12 @@ impl AppleTextSystemState {
+         LineLayout {
+             runs,
+             font_size,
+-            width: typographic_bounds.width.into(),
++            width: (typographic_bounds.width
++                + emoji_widths
++                    .iter()
++                    .map(|(_, old, new)| new - old)
++                    .sum::<f64>())
++            .into(),
+             ascent: max_ascent.into(),
+             descent: max_descent.into(),
+             len: text.len(),
+@@ -787,6 +977,23 @@ mod tests {
+     };
+     use std::sync::Arc;
+ 
++    #[test]
++    fn css_color_emoji_advance_is_one_em_at_both_device_scales() {
++        let fonts = AppleTextSystem::new();
++        let id = fonts.font_id(&font("Helvetica")).unwrap();
++        let runs = [FontRun {
++            len: "📁".len(),
++            font_id: id,
++        }];
++        let legacy = fonts.layout_line("📁", px(12.5), &runs);
++        for scale in [1., 2.] {
++            let css = fonts.layout_line_with_css_scale("📁", px(12.5), &runs, Some(scale));
++            assert_eq!(css.width, px(12.5));
++            assert!(css.runs.iter().flat_map(|r| &r.glyphs).any(|g| g.is_emoji));
++        }
++        assert_eq!(fonts.layout_line("📁", px(12.5), &runs).width, legacy.width);
++    }
++
+     #[test]
+     fn test_reload_family_with_features_and_fallbacks() {
+         let fonts = AppleTextSystem::new();

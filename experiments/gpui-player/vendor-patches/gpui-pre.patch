@@ -1,0 +1,1422 @@
+diff --git a/FRACTIONAL_LAYOUT.md b/FRACTIONAL_LAYOUT.md
+new file mode 100644
+index 0000000..5cd1911
+--- /dev/null
++++ b/FRACTIONAL_LAYOUT.md
+@@ -0,0 +1,58 @@
++# Opt-in CSS coordinate precision
++
++This directory preserves the published `gpui-pre 0.3.11` source and license.
++Original archive SHA256:
++`9303c771abf2acff2a96d706f69d9a82088c4770173a07cce88f0002431d887d`.
++Local changes are confined to `src/layout_precision.rs`, `src/taffy.rs`,
++`src/window.rs`, `src/elements/text.rs`, `src/elements/div.rs`, `src/text_system/line.rs`,
++`src/text_system.rs`, `src/text_system/line_layout.rs`, `src/platform.rs`, and the
++public export in `src/gpui.rs`.
++
++```rust
++window.set_layout_precision(gpui::LayoutPrecision::CssPixels);
++```
++
++Set the policy before the window's first layout. Existing windows default to
++`DevicePixels`, retaining the published behavior. The setting belongs to the
++window and its layout engine, not a global, thread-local switch or preference.
++
++CSS mode retains geometry at 1/64 scaled layout units instead of snapping it
++to whole physical pixels. At device scale 2 this is 1/128 logical-pixel precision. This covers authored absolute lengths and borders, intrinsic
++text measurements, absolute layout edges, element offsets, normal text line
++heights, recomputed scroll padding, and painted quad/underline bounds/strokes. For example, a 20.5px line centered in
++a 51px header keeps its 15.25px origin at 2x scale; a measured 38.658px advance
++becomes the CSS layout unit 38.65625px rather than the legacy ceiling of 39px.
++A 57.4140625px box remains exact at 2x rather than being rounded to 57.421875px.
++
++CSS text baselines use independently rounded scaled ascent/descent and the floored
++upper half-leading: `(round(ascent*DSF) + floor((L-A-D)/2)) / DSF`, with `L` in
++1/64 scaled units. `Window::text_baseline(ascent, descent, line_height)` and
++`LayoutPrecision::text_baseline(...)` expose this rule for custom text. Default
++windows retain the original raw-ascent/descent baseline. Supplied explicit line
++heights are respected; the policy does not change unspecified line-height defaults.
++
++The explicit `Window::pixel_snap*` APIs continue to mean physical-pixel snapping.
++Applications should use them for moving one-pixel indicators and change-gate
++updates themselves, as they do in the production interface. Image/rectangle
++captures are not rescaled, aligned, blurred, or otherwise modified by this policy.
++
++Ordinary CSS text snaps its raster baseline to the nearest physical pixel,
++matching Skia axis-aligned masks. On macOS, explicit manual painting of transformed
++text can use `window.with_fractional_glyph_baselines(|window| { ... })` to retain
++four glyph Y phases. This nested drawing scope restores the previous policy.
++The Apple rasterizer supports those phases and padding for fractional Y.
++Unconfigured windows and other backends retain their one-phase Y contract.
++X precision is unchanged. Negative fractional glyph origins are decomposed into
++floor + positive phase in CSS mode; default glyph placement remains unchanged.
++
++Tests in `layout_precision.rs` verify the legacy edge/measurement/stroke policy,
++the CSS values, and policy independence. Taffy regressions in `taffy.rs` verify
++actual centered layout with separate default/CSS/default engines and 1x/2x units. Integrated
++hidden captures and interaction/performance verification remain mandatory; these
++unit cases do not establish visual parity.
++
++CSS rasterization is keyed per glyph alongside the window policy. Apple uses
++explicitly unsmoothed monochrome masks when dilation is zero, device-sized
++CoreText fonts for color emoji bitmaps, and OpenType hmtx emoji advances. Per-window
++text layout caches clear on policy or device-scale changes and reject old layout
++indices. Existing platform shaping APIs retain their default implementations.
+diff --git a/src/elements/div.rs b/src/elements/div.rs
+index 9b34aa2..33e5c66 100644
+--- a/src/elements/div.rs
++++ b/src/elements/div.rs
+@@ -411,7 +411,12 @@ impl Interactivity {
+     pub fn on_pinch(&mut self, listener: impl Fn(&PinchEvent, &mut Window, &mut App) + 'static) {
+         self.pinch_listeners
+             .push(Box::new(move |event, phase, hitbox, window, cx| {
+-                if phase == DispatchPhase::Bubble && hitbox.is_hovered(window) {
++                // A pinch remains direct pointer input after a keyboard shortcut.
++                // Ignore hover-style modality suppression, retaining hit testing
++                // and occlusion rather than requiring an unrelated mouse move.
++                if phase == DispatchPhase::Bubble
++                    && hitbox.id.is_hovered_ignoring_last_input(window)
++                {
+                     (listener)(event, window, cx);
+                 }
+             }));
+@@ -2509,14 +2514,13 @@ impl Interactivity {
+             }
+ 
+             let rem_size = window.rem_size();
+-            // Taffy lays the box out with the padding snapped to the device pixel
+-            // grid (`to_taffy`); recomputed unsnapped, e.g. py_1 at a fractional
+-            // rem size, it exceeds `bounds` and leaves the box scrollable by the
+-            // sub-pixel difference.
++            // Match the window's layout precision when recomputing padding.
++            // Default windows use device pixels; CSS windows retain logical
++            // fractions, avoiding a different scroll extent from their layout.
+             let padding = style
+                 .padding
+                 .to_pixels(bounds.size.into(), rem_size)
+-                .map(|edge| window.pixel_snap(*edge));
++                .map(|edge| window.snap_layout_value(*edge));
+             let padding_size = size(padding.left + padding.right, padding.top + padding.bottom);
+             // The floating point values produced by Taffy and ours often vary
+             // slightly after ~5 decimal places. This can lead to cases where after
+diff --git a/src/elements/text.rs b/src/elements/text.rs
+index ed64384..6898335 100644
+--- a/src/elements/text.rs
++++ b/src/elements/text.rs
+@@ -640,7 +640,7 @@ impl TextLayout {
+     ) -> LayoutId {
+         let text_style = window.text_style();
+         let font_size = text_style.font_size.to_pixels(window.rem_size());
+-        let line_height = window.pixel_snap(
++        let line_height = window.snap_layout_value(
+             text_style
+                 .line_height
+                 .to_pixels(font_size.into(), window.rem_size()),
+diff --git a/src/gpui.rs b/src/gpui.rs
+index 5b31a35..7630b17 100644
+--- a/src/gpui.rs
++++ b/src/gpui.rs
+@@ -55,6 +55,7 @@ mod subscription;
+ mod svg_renderer;
+ mod tab_stop;
+ mod taffy;
++mod layout_precision;
+ mod text_system;
+ mod util;
+ mod view;
+@@ -145,6 +146,7 @@ pub use styled::*;
+ pub use subscription::*;
+ pub use svg_renderer::*;
+ pub use taffy::{AvailableSpace, LayoutId};
++pub use layout_precision::LayoutPrecision;
+ pub use text_system::*;
+ pub use util::{FutureExt, Timeout};
+ pub use view::*;
+diff --git a/src/layout_precision.rs b/src/layout_precision.rs
+new file mode 100644
+index 0000000..406f8e3
+--- /dev/null
++++ b/src/layout_precision.rs
+@@ -0,0 +1,200 @@
++//! Opt-in logical layout precision for interfaces shared with CSS renderers.
++use crate::{
++    SUBPIXEL_VARIANTS_Y,
++    util::{
++        ceil_to_device_pixel, round_half_toward_zero, round_stroke_to_device_pixel,
++        round_to_device_pixel,
++    },
++};
++
++/// Coordinate policy for a window's layout and drawing.
++///
++/// The default preserves GPUI's original device-pixel layout and text behavior.
++/// `CssPixels` retains 1/64 scaled layout units (1/(64*DSF) logical pixels);
++/// callers should still explicitly snap moving one-pixel indicators when desired.
++#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
++pub enum LayoutPrecision {
++    /// Snap geometry to physical pixels, including ceiling measured text sizes.
++    #[default]
++    DevicePixels,
++    /// Retain fractional geometry on a 1/64 scaled-layout-pixel grid.
++    CssPixels,
++}
++
++impl LayoutPrecision {
++    #[inline]
++    pub(crate) fn glyph_x_position(self, value: f32) -> f32 {
++        match self {
++            Self::CssPixels => (value * 4. + 0.5).floor() / 4.,
++            Self::DevicePixels => round_half_toward_zero(value * 4.) / 4.,
++        }
++    }
++
++    #[inline]
++    pub(crate) fn css_value(value: f32) -> f32 {
++        (value * 64.).round() / 64.
++    }
++
++    /// Convert a logical length to the layout engine's scaled coordinate space.
++    #[inline]
++    pub(crate) fn scaled_value(self, value: f32, scale: f32) -> f32 {
++        match self {
++            Self::DevicePixels => round_to_device_pixel(value, scale),
++            Self::CssPixels => Self::css_value(value * scale),
++        }
++    }
++
++    #[inline]
++    pub(crate) fn measured_value(self, value: f32, scale: f32) -> f32 {
++        match self {
++            Self::DevicePixels => ceil_to_device_pixel(value.max(0.), scale),
++            Self::CssPixels => Self::css_value(value.max(0.) * scale),
++        }
++    }
++
++    #[inline]
++    pub(crate) fn scaled_edge(self, value: f32, _scale: f32) -> f32 {
++        match self {
++            Self::DevicePixels => round_half_toward_zero(value),
++            Self::CssPixels => Self::css_value(value),
++        }
++    }
++
++    #[inline]
++    pub(crate) fn logical_value(self, value: f32, scale: f32) -> f32 {
++        self.scaled_value(value, scale) / scale
++    }
++
++    #[inline]
++    pub(crate) fn scaled_stroke(self, value: f32, scale: f32) -> f32 {
++        match self {
++            Self::DevicePixels => round_stroke_to_device_pixel(value, scale),
++            Self::CssPixels => Self::css_value(value.max(0.) * scale),
++        }
++    }
++
++    /// Resolve a line's baseline from raw logical font metrics and line height.
++    ///
++    /// CSS text uses integer font ascent/descent in scaled layout coordinates,
++    /// with the leading's odd fraction assigned below the alphabetic baseline.
++    /// The default policy preserves GPUI's original raw-metric centering.
++    /// `scale` is the window's positive device scale factor.
++    pub fn text_baseline(self, ascent: f32, descent: f32, line_height: f32, scale: f32) -> f32 {
++        match self {
++            Self::DevicePixels => (line_height - ascent - descent) / 2. + ascent,
++            Self::CssPixels => {
++                let ascent = (ascent * scale).round();
++                let descent = (descent * scale).round();
++                let line_height = Self::css_value(line_height * scale);
++                (ascent + ((line_height - ascent - descent) / 2.).floor()) / scale
++            }
++        }
++    }
++
++    #[inline]
++    pub(crate) fn glyph_y_variants(self, fractional: bool) -> u8 {
++        // Apple's rasterizer already supports four Y phases (it uses the
++        // four-phase X denominator for both coordinates). Other backends keep
++        // their original raster contract until they implement fractional Y.
++        if cfg!(target_os = "macos") && self == Self::CssPixels && fractional {
++            4
++        } else {
++            SUBPIXEL_VARIANTS_Y
++        }
++    }
++
++    #[inline]
++    pub(crate) fn glyph_y_position(self, value: f32, fractional: bool) -> f32 {
++        if self == Self::CssPixels && !fractional {
++            // Skia's axis-aligned text mask snaps Y to the nearest physical
++            // pixel, with positive halfway positions choosing the next row.
++            (value + 0.5).floor()
++        } else {
++            let variants = self.glyph_y_variants(fractional) as f32;
++            round_half_toward_zero(value * variants) / variants
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn css_glyph_x_rounds_to_nearest_quarter_with_ties_up_and_integer_carry() {
++        for (input, expected) in [
++            (10.0625, 10.),
++            (10.125, 10.25),
++            (10.375, 10.5),
++            (10.875, 11.),
++            (-0.125, 0.),
++            (-0.875, -0.75),
++        ] {
++            assert_eq!(LayoutPrecision::CssPixels.glyph_x_position(input), expected);
++        }
++        // Existing windows keep their published half-toward-zero quantization.
++        assert_eq!(LayoutPrecision::default().glyph_x_position(10.125), 10.);
++        assert_eq!(LayoutPrecision::default().glyph_x_position(-0.125), 0.);
++    }
++    #[test]
++    fn css_static_baselines_snap_while_explicit_transformed_baselines_retain_phase() {
++        let css = LayoutPrecision::CssPixels;
++        for (phase, expected) in [(0., 50.), (0.25, 50.), (0.5, 51.), (0.75, 51.), (1., 51.)] {
++            assert_eq!(css.glyph_y_position(50. + phase, false), expected);
++            if cfg!(target_os = "macos") {
++                assert_eq!(css.glyph_y_position(50. + phase, true), 50. + phase);
++            }
++        }
++        assert_eq!(
++            LayoutPrecision::default().glyph_y_position(50.5, false),
++            50.
++        );
++        assert_eq!(LayoutPrecision::default().glyph_y_position(50.5, true), 50.);
++    }
++    #[test]
++    fn default_keeps_device_edges_and_measured_ceiling() {
++        let precision = LayoutPrecision::default();
++        assert_eq!(precision.scaled_edge(30.5, 2.) / 2., 15.);
++        assert_eq!(precision.measured_value(38.658, 2.) / 2., 39.);
++        assert_eq!(precision.scaled_stroke(0.1, 2.), 1.);
++    }
++    #[test]
++    fn css_keeps_fractional_baselines_and_text_advance() {
++        let precision = LayoutPrecision::CssPixels;
++        assert_eq!(precision.scaled_edge(30.5, 2.) / 2., 15.25);
++        assert_eq!(precision.measured_value(38.658, 2.) / 2., 38.65625);
++        assert_eq!(precision.measured_value(57.4140625, 2.) / 2., 57.4140625);
++        assert_eq!(precision.logical_value(280.6640625, 2.), 280.6640625);
++        assert_eq!(precision.logical_value(0.25, 2.), 0.25);
++        assert_eq!(precision.scaled_stroke(0.25, 2.), 0.5);
++    }
++    #[test]
++    fn css_baselines_use_scaled_integer_font_metrics() {
++        // Independently measured Chromium DOM fixtures for the bundled display
++        // face, covering positive/negative leading and both device scales.
++        for (ascent, descent, line_height, scale, baseline) in [
++            (15.81, 4.59, 20.5, 2., 16.),
++            (9.765, 2.835, 12.5, 2., 9.5),
++            (16.275, 4.725, 25.375, 2., 18.5),
++            (15.81, 4.59, 20.5, 1., 15.),
++        ] {
++            assert_eq!(
++                LayoutPrecision::CssPixels.text_baseline(ascent, descent, line_height, scale),
++                baseline
++            );
++        }
++    }
++
++    #[test]
++    fn default_baseline_keeps_raw_font_metrics() {
++        let baseline = LayoutPrecision::default().text_baseline(15.81, 4.59, 20.5, 2.);
++        assert!((baseline - 15.86).abs() < 0.00001);
++    }
++
++    #[test]
++    fn precision_values_do_not_share_mutable_state() {
++        let css = LayoutPrecision::CssPixels;
++        let device = LayoutPrecision::DevicePixels;
++        assert_ne!(css.scaled_value(15.25, 2.), device.scaled_value(15.25, 2.));
++        assert_eq!(device, LayoutPrecision::default());
++    }
++}
+diff --git a/src/platform.rs b/src/platform.rs
+index 6ddbac4..a52070f 100644
+--- a/src/platform.rs
++++ b/src/platform.rs
+@@ -1573,6 +1573,18 @@ pub trait PlatformTextSystem: Send + Sync {
+     ) -> Result<(Size<DevicePixels>, Vec<u8>)>;
+     /// Layout a line of text with the given font runs.
+     fn layout_line(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout;
++
++    /// Shape with an optional CSS device scale. The default preserves the
++    /// platform's existing shaping policy; backends may specialize emoji sizing.
++    fn layout_line_with_css_scale(
++        &self,
++        text: &str,
++        font_size: Pixels,
++        runs: &[FontRun],
++        _css_scale: Option<f32>,
++    ) -> LineLayout {
++        self.layout_line(text, font_size, runs)
++    }
+     /// Returns the recommended text rendering mode for the given font and size.
+     fn recommended_rendering_mode(&self, _font_id: FontId, _font_size: Pixels)
+     -> TextRenderingMode;
+diff --git a/src/scene.rs b/src/scene.rs
+index a4116aa..e876377 100644
+--- a/src/scene.rs
++++ b/src/scene.rs
+@@ -148,6 +148,19 @@ impl Scene {
+         }
+     }
+ 
++    /// Copy the operations painted so far without changing this scene. A paint
++    /// callback can run inside an open opacity layer; close only the copy's
++    /// layers before handing it to an offscreen renderer.
++    pub(crate) fn painted_prefix(&self) -> Self {
++        let mut prefix = Self::default();
++        prefix.replay(0..self.len(), self);
++        while !prefix.layer_stack.is_empty() {
++            prefix.pop_layer();
++        }
++        prefix.finish();
++        prefix
++    }
++
+     pub fn finish(&mut self) {
+         self.shadows.sort_by_key(|shadow| shadow.order);
+         self.quads.sort_by_key(|quad| quad.order);
+@@ -947,3 +960,29 @@ impl PathVertex<Pixels> {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod prefix_snapshot_tests {
++    use super::*;
++    #[test]
++    fn paint_prefix_balances_only_its_copy_and_excludes_later_overlay() {
++        let bounds = Bounds::new(point(ScaledPixels(0.), ScaledPixels(0.)),
++            Size::new(ScaledPixels(120.), ScaledPixels(80.)));
++        let mut scene = Scene::default();
++        scene.push_layer(bounds);
++        scene.insert_primitive(Quad { bounds, content_mask: ContentMask { bounds },
++            background: crate::rgb(0xff0000).into(), ..Default::default() });
++        let operations = scene.len();
++        let prefix = scene.painted_prefix();
++        assert_eq!(prefix.quads.len(), 1);
++        assert!(prefix.layer_stack.is_empty());
++        assert_eq!(scene.layer_stack.len(), 1);
++        assert_eq!(scene.len(), operations);
++        scene.insert_primitive(Quad { bounds, content_mask: ContentMask { bounds },
++            background: crate::rgb(0x0000ff).into(), ..Default::default() });
++        scene.pop_layer();
++        scene.finish();
++        assert_eq!(scene.quads.len(), 2);
++        assert_eq!(prefix.quads.len(), 1);
++    }
++}
+diff --git a/src/taffy.rs b/src/taffy.rs
+index 7c12b5c..f6b3647 100644
+--- a/src/taffy.rs
++++ b/src/taffy.rs
+@@ -1,10 +1,6 @@
+ use crate::{
+-    AbsoluteLength, App, Bounds, DefiniteLength, Edges, GridTemplate, Length, Pixels, Point, Size,
+-    Style, Window, size,
+-    util::{
+-        ceil_to_device_pixel, round_half_toward_zero, round_stroke_to_device_pixel,
+-        round_to_device_pixel,
+-    },
++    AbsoluteLength, App, Bounds, DefiniteLength, Edges, GridTemplate, LayoutPrecision, Length,
++    Pixels, Point, Size, Style, Window, size,
+ };
+ use collections::{FxHashMap, FxHashSet};
+ use std::{fmt::Debug, ops::Range};
+@@ -30,6 +26,7 @@ struct NodeContext {
+ }
+ pub struct TaffyLayoutEngine {
+     taffy: TaffyTree<NodeContext>,
++    precision: LayoutPrecision,
+     absolute_layout_bounds: FxHashMap<LayoutId, Bounds<Pixels>>,
+     /// Unrounded absolute border-box top-left per-node coordinate in device pixels.
+     absolute_outer_origins: FxHashMap<LayoutId, Point<f32>>,
+@@ -45,6 +42,7 @@ impl TaffyLayoutEngine {
+         taffy.disable_rounding();
+         TaffyLayoutEngine {
+             taffy,
++            precision: LayoutPrecision::default(),
+             absolute_layout_bounds: FxHashMap::default(),
+             absolute_outer_origins: FxHashMap::default(),
+             computed_layouts: FxHashSet::default(),
+@@ -52,6 +50,12 @@ impl TaffyLayoutEngine {
+         }
+     }
+ 
++    pub fn set_layout_precision(&mut self, precision: LayoutPrecision) {
++        self.precision = precision;
++        self.absolute_layout_bounds.clear();
++        self.computed_layouts.clear();
++    }
++
+     pub fn clear(&mut self) {
+         self.taffy.clear();
+         self.absolute_layout_bounds.clear();
+@@ -66,7 +70,7 @@ impl TaffyLayoutEngine {
+         scale_factor: f32,
+         children: &[LayoutId],
+     ) -> LayoutId {
+-        let taffy_style = style.to_taffy(rem_size, scale_factor);
++        let taffy_style = style.to_taffy(rem_size, scale_factor, self.precision);
+ 
+         if children.is_empty() {
+             self.taffy
+@@ -95,7 +99,7 @@ impl TaffyLayoutEngine {
+         ) -> Size<Pixels>
+         + 'static,
+     ) -> LayoutId {
+-        let taffy_style = style.to_taffy(rem_size, scale_factor);
++        let taffy_style = style.to_taffy(rem_size, scale_factor, self.precision);
+         let measure = Box::new(measure) as Box<MeasureFn>;
+         #[cfg(feature = "stacker")]
+         let measure = StackSafe::new(measure);
+@@ -126,12 +130,14 @@ impl TaffyLayoutEngine {
+         }
+         let mut style = style.clone();
+         if stretch_width {
+-            style.size.width =
+-                taffy::style::Dimension::length(round_to_device_pixel(size.width.0, scale_factor));
++            style.size.width = taffy::style::Dimension::length(
++                self.precision.scaled_value(size.width.0, scale_factor),
++            );
+         }
+         if stretch_height {
+-            style.size.height =
+-                taffy::style::Dimension::length(round_to_device_pixel(size.height.0, scale_factor));
++            style.size.height = taffy::style::Dimension::length(
++                self.precision.scaled_value(size.height.0, scale_factor),
++            );
+         }
+         self.taffy.set_style(id.0, style).expect(EXPECT_MESSAGE);
+     }
+@@ -219,6 +225,7 @@ impl TaffyLayoutEngine {
+         }
+ 
+         let scale_factor = window.scale_factor();
++        let precision = self.precision;
+ 
+         let transform = |v: AvailableSpace| match v {
+             AvailableSpace::Definite(pixels) => {
+@@ -270,7 +277,11 @@ impl TaffyLayoutEngine {
+                                 window,
+                                 cx,
+                             );
+-                            snap_measured_size_to_device_pixels(measured_size, scale_factor).into()
++                            measured_size
++                                .map(|dimension| {
++                                    precision.measured_value(dimension.0, scale_factor)
++                                })
++                                .into()
+                         },
+                     )
+                 },
+@@ -380,8 +391,8 @@ impl TaffyLayoutEngine {
+ 
+         let absolute_far = absolute_outer_origin + Point::from(Size::from(layout_size));
+         let snapped_bounds = Bounds::from_corners(
+-            absolute_outer_origin.map(round_half_toward_zero),
+-            absolute_far.map(round_half_toward_zero),
++            absolute_outer_origin.map(|value| self.precision.scaled_edge(value, scale_factor)),
++            absolute_far.map(|value| self.precision.scaled_edge(value, scale_factor)),
+         );
+ 
+         let bounds = (snapped_bounds / scale_factor).map(Pixels);
+@@ -420,20 +431,16 @@ impl From<LayoutId> for NodeId {
+     }
+ }
+ 
+-fn snap_measured_size_to_device_pixels(size: Size<Pixels>, scale_factor: f32) -> Size<f32> {
+-    size.map(|d| ceil_to_device_pixel(d.0.max(0.0), scale_factor))
+-}
+-
+ fn border_widths_to_taffy(
+     widths: &Edges<AbsoluteLength>,
+     rem_size: Pixels,
+     scale_factor: f32,
++    precision: LayoutPrecision,
+ ) -> TaffyRect<taffy::style::LengthPercentage> {
+     let snap = |w: &AbsoluteLength| {
+-        taffy::style::LengthPercentage::length(round_stroke_to_device_pixel(
+-            w.to_pixels(rem_size).0,
+-            scale_factor,
+-        ))
++        taffy::style::LengthPercentage::length(
++            precision.scaled_stroke(w.to_pixels(rem_size).0, scale_factor),
++        )
+     };
+     TaffyRect {
+         top: snap(&widths.top),
+@@ -444,11 +451,16 @@ fn border_widths_to_taffy(
+ }
+ 
+ trait ToTaffy<Output> {
+-    fn to_taffy(&self, rem_size: Pixels, scale_factor: f32) -> Output;
++    fn to_taffy(&self, rem_size: Pixels, scale_factor: f32, precision: LayoutPrecision) -> Output;
+ }
+ 
+ impl ToTaffy<taffy::style::Style> for Style {
+-    fn to_taffy(&self, rem_size: Pixels, scale_factor: f32) -> taffy::style::Style {
++    fn to_taffy(
++        &self,
++        rem_size: Pixels,
++        scale_factor: f32,
++        precision: LayoutPrecision,
++    ) -> taffy::style::Style {
+         use taffy::style_helpers::{fr, length, minmax, repeat};
+ 
+         fn to_grid_line(
+@@ -494,24 +506,26 @@ impl ToTaffy<taffy::style::Style> for Style {
+         taffy::style::Style {
+             display: self.display.into(),
+             overflow: self.overflow.into(),
+-            scrollbar_width: self.scrollbar_width.to_taffy(rem_size, scale_factor),
++            scrollbar_width: self
++                .scrollbar_width
++                .to_taffy(rem_size, scale_factor, precision),
+             position: self.position.into(),
+-            inset: self.inset.to_taffy(rem_size, scale_factor),
+-            size: self.size.to_taffy(rem_size, scale_factor),
+-            min_size: self.min_size.to_taffy(rem_size, scale_factor),
+-            max_size: self.max_size.to_taffy(rem_size, scale_factor),
++            inset: self.inset.to_taffy(rem_size, scale_factor, precision),
++            size: self.size.to_taffy(rem_size, scale_factor, precision),
++            min_size: self.min_size.to_taffy(rem_size, scale_factor, precision),
++            max_size: self.max_size.to_taffy(rem_size, scale_factor, precision),
+             aspect_ratio: self.aspect_ratio,
+-            margin: self.margin.to_taffy(rem_size, scale_factor),
+-            padding: self.padding.to_taffy(rem_size, scale_factor),
+-            border: border_widths_to_taffy(&self.border_widths, rem_size, scale_factor),
++            margin: self.margin.to_taffy(rem_size, scale_factor, precision),
++            padding: self.padding.to_taffy(rem_size, scale_factor, precision),
++            border: border_widths_to_taffy(&self.border_widths, rem_size, scale_factor, precision),
+             align_items: self.align_items.map(Into::into).unwrap_or_default(),
+             align_self: self.align_self.map(|x| x.into()),
+             align_content: self.align_content.map(Into::into).unwrap_or_default(),
+             justify_content: self.justify_content.map(Into::into).unwrap_or_default(),
+-            gap: self.gap.to_taffy(rem_size, scale_factor),
++            gap: self.gap.to_taffy(rem_size, scale_factor, precision),
+             flex_direction: self.flex_direction.into(),
+             flex_wrap: self.flex_wrap.into(),
+-            flex_basis: self.flex_basis.to_taffy(rem_size, scale_factor),
++            flex_basis: self.flex_basis.to_taffy(rem_size, scale_factor, precision),
+             flex_grow: self.flex_grow,
+             flex_shrink: self.flex_shrink,
+             grid_template_rows: to_grid_repeat(&self.grid_rows),
+@@ -532,8 +546,8 @@ impl ToTaffy<taffy::style::Style> for Style {
+ }
+ 
+ impl ToTaffy<f32> for AbsoluteLength {
+-    fn to_taffy(&self, rem_size: Pixels, scale_factor: f32) -> f32 {
+-        round_to_device_pixel(self.to_pixels(rem_size).0, scale_factor)
++    fn to_taffy(&self, rem_size: Pixels, scale_factor: f32, precision: LayoutPrecision) -> f32 {
++        precision.scaled_value(self.to_pixels(rem_size).0, scale_factor)
+     }
+ }
+ 
+@@ -542,27 +556,38 @@ impl ToTaffy<taffy::style::LengthPercentageAuto> for Length {
+         &self,
+         rem_size: Pixels,
+         scale_factor: f32,
++        precision: LayoutPrecision,
+     ) -> taffy::prelude::LengthPercentageAuto {
+         match self {
+-            Length::Definite(length) => length.to_taffy(rem_size, scale_factor),
++            Length::Definite(length) => length.to_taffy(rem_size, scale_factor, precision),
+             Length::Auto => taffy::prelude::LengthPercentageAuto::auto(),
+         }
+     }
+ }
+ 
+ impl ToTaffy<taffy::style::Dimension> for Length {
+-    fn to_taffy(&self, rem_size: Pixels, scale_factor: f32) -> taffy::prelude::Dimension {
++    fn to_taffy(
++        &self,
++        rem_size: Pixels,
++        scale_factor: f32,
++        precision: LayoutPrecision,
++    ) -> taffy::prelude::Dimension {
+         match self {
+-            Length::Definite(length) => length.to_taffy(rem_size, scale_factor),
++            Length::Definite(length) => length.to_taffy(rem_size, scale_factor, precision),
+             Length::Auto => taffy::prelude::Dimension::auto(),
+         }
+     }
+ }
+ 
+ impl ToTaffy<taffy::style::LengthPercentage> for DefiniteLength {
+-    fn to_taffy(&self, rem_size: Pixels, scale_factor: f32) -> taffy::style::LengthPercentage {
++    fn to_taffy(
++        &self,
++        rem_size: Pixels,
++        scale_factor: f32,
++        precision: LayoutPrecision,
++    ) -> taffy::style::LengthPercentage {
+         match self {
+-            DefiniteLength::Absolute(length) => length.to_taffy(rem_size, scale_factor),
++            DefiniteLength::Absolute(length) => length.to_taffy(rem_size, scale_factor, precision),
+             DefiniteLength::Fraction(fraction) => {
+                 taffy::style::LengthPercentage::percent(*fraction)
+             }
+@@ -571,9 +596,14 @@ impl ToTaffy<taffy::style::LengthPercentage> for DefiniteLength {
+ }
+ 
+ impl ToTaffy<taffy::style::LengthPercentageAuto> for DefiniteLength {
+-    fn to_taffy(&self, rem_size: Pixels, scale_factor: f32) -> taffy::style::LengthPercentageAuto {
++    fn to_taffy(
++        &self,
++        rem_size: Pixels,
++        scale_factor: f32,
++        precision: LayoutPrecision,
++    ) -> taffy::style::LengthPercentageAuto {
+         match self {
+-            DefiniteLength::Absolute(length) => length.to_taffy(rem_size, scale_factor),
++            DefiniteLength::Absolute(length) => length.to_taffy(rem_size, scale_factor, precision),
+             DefiniteLength::Fraction(fraction) => {
+                 taffy::style::LengthPercentageAuto::percent(*fraction)
+             }
+@@ -582,29 +612,49 @@ impl ToTaffy<taffy::style::LengthPercentageAuto> for DefiniteLength {
+ }
+ 
+ impl ToTaffy<taffy::style::Dimension> for DefiniteLength {
+-    fn to_taffy(&self, rem_size: Pixels, scale_factor: f32) -> taffy::style::Dimension {
++    fn to_taffy(
++        &self,
++        rem_size: Pixels,
++        scale_factor: f32,
++        precision: LayoutPrecision,
++    ) -> taffy::style::Dimension {
+         match self {
+-            DefiniteLength::Absolute(length) => length.to_taffy(rem_size, scale_factor),
++            DefiniteLength::Absolute(length) => length.to_taffy(rem_size, scale_factor, precision),
+             DefiniteLength::Fraction(fraction) => taffy::style::Dimension::percent(*fraction),
+         }
+     }
+ }
+ 
+ impl ToTaffy<taffy::style::LengthPercentage> for AbsoluteLength {
+-    fn to_taffy(&self, rem_size: Pixels, scale_factor: f32) -> taffy::style::LengthPercentage {
+-        taffy::style::LengthPercentage::length(self.to_taffy(rem_size, scale_factor))
++    fn to_taffy(
++        &self,
++        rem_size: Pixels,
++        scale_factor: f32,
++        precision: LayoutPrecision,
++    ) -> taffy::style::LengthPercentage {
++        taffy::style::LengthPercentage::length(self.to_taffy(rem_size, scale_factor, precision))
+     }
+ }
+ 
+ impl ToTaffy<taffy::style::LengthPercentageAuto> for AbsoluteLength {
+-    fn to_taffy(&self, rem_size: Pixels, scale_factor: f32) -> taffy::style::LengthPercentageAuto {
+-        taffy::style::LengthPercentageAuto::length(self.to_taffy(rem_size, scale_factor))
++    fn to_taffy(
++        &self,
++        rem_size: Pixels,
++        scale_factor: f32,
++        precision: LayoutPrecision,
++    ) -> taffy::style::LengthPercentageAuto {
++        taffy::style::LengthPercentageAuto::length(self.to_taffy(rem_size, scale_factor, precision))
+     }
+ }
+ 
+ impl ToTaffy<taffy::style::Dimension> for AbsoluteLength {
+-    fn to_taffy(&self, rem_size: Pixels, scale_factor: f32) -> taffy::style::Dimension {
+-        taffy::style::Dimension::length(self.to_taffy(rem_size, scale_factor))
++    fn to_taffy(
++        &self,
++        rem_size: Pixels,
++        scale_factor: f32,
++        precision: LayoutPrecision,
++    ) -> taffy::style::Dimension {
++        taffy::style::Dimension::length(self.to_taffy(rem_size, scale_factor, precision))
+     }
+ }
+ 
+@@ -637,10 +687,15 @@ impl<T, U> ToTaffy<TaffySize<U>> for Size<T>
+ where
+     T: ToTaffy<U> + Clone + Debug + Default + PartialEq,
+ {
+-    fn to_taffy(&self, rem_size: Pixels, scale_factor: f32) -> TaffySize<U> {
++    fn to_taffy(
++        &self,
++        rem_size: Pixels,
++        scale_factor: f32,
++        precision: LayoutPrecision,
++    ) -> TaffySize<U> {
+         TaffySize {
+-            width: self.width.to_taffy(rem_size, scale_factor),
+-            height: self.height.to_taffy(rem_size, scale_factor),
++            width: self.width.to_taffy(rem_size, scale_factor, precision),
++            height: self.height.to_taffy(rem_size, scale_factor, precision),
+         }
+     }
+ }
+@@ -649,12 +704,17 @@ impl<T, U> ToTaffy<TaffyRect<U>> for Edges<T>
+ where
+     T: ToTaffy<U> + Clone + Debug + Default + PartialEq,
+ {
+-    fn to_taffy(&self, rem_size: Pixels, scale_factor: f32) -> TaffyRect<U> {
++    fn to_taffy(
++        &self,
++        rem_size: Pixels,
++        scale_factor: f32,
++        precision: LayoutPrecision,
++    ) -> TaffyRect<U> {
+         TaffyRect {
+-            top: self.top.to_taffy(rem_size, scale_factor),
+-            right: self.right.to_taffy(rem_size, scale_factor),
+-            bottom: self.bottom.to_taffy(rem_size, scale_factor),
+-            left: self.left.to_taffy(rem_size, scale_factor),
++            top: self.top.to_taffy(rem_size, scale_factor, precision),
++            right: self.right.to_taffy(rem_size, scale_factor, precision),
++            bottom: self.bottom.to_taffy(rem_size, scale_factor, precision),
++            left: self.left.to_taffy(rem_size, scale_factor, precision),
+         }
+     }
+ }
+@@ -757,6 +817,72 @@ impl From<Size<Pixels>> for Size<AvailableSpace> {
+ mod tests {
+     use super::*;
+ 
++    fn centered_child_bounds(precision: LayoutPrecision, width: f32, scale: f32) -> Bounds<Pixels> {
++        let mut engine = TaffyLayoutEngine::new();
++        engine.set_layout_precision(precision);
++        let child = engine.request_layout(
++            Style {
++                size: size(Pixels(width).into(), Pixels(20.5).into()),
++                flex_shrink: 0.,
++                ..Default::default()
++            },
++            Pixels(16.),
++            scale,
++            &[],
++        );
++        let root = engine.request_layout(
++            Style {
++                display: crate::Display::Flex,
++                size: size(Pixels(100.).into(), Pixels(51.).into()),
++                align_items: Some(crate::AlignItems::Center),
++                ..Default::default()
++            },
++            Pixels(16.),
++            scale,
++            &[child],
++        );
++        engine
++            .taffy
++            .compute_layout(
++                root.into(),
++                TaffySize {
++                    width: TaffyAvailableSpace::Definite(100. * scale),
++                    height: TaffyAvailableSpace::Definite(51. * scale),
++                },
++            )
++            .unwrap();
++        engine.layout_bounds(child, scale)
++    }
++
++    #[test]
++    fn fractional_centering_is_opt_in_and_isolated_between_engines() {
++        let legacy = centered_child_bounds(LayoutPrecision::DevicePixels, 38.658, 2.);
++        let css = centered_child_bounds(LayoutPrecision::CssPixels, 38.658, 2.);
++        assert_eq!(legacy.origin.y, Pixels(15.));
++        assert_eq!(legacy.size.width, Pixels(38.5));
++        assert_eq!(css.origin.y, Pixels(15.25));
++        assert_eq!(css.size.width, Pixels(38.65625));
++        assert_eq!(
++            centered_child_bounds(LayoutPrecision::DevicePixels, 38.658, 2.),
++            legacy
++        );
++    }
++
++    #[test]
++    fn css_layout_precision_tracks_device_scale() {
++        let width = 57.4140625;
++        let double = centered_child_bounds(LayoutPrecision::CssPixels, width, 2.);
++        let single = centered_child_bounds(LayoutPrecision::CssPixels, width, 1.);
++        assert_eq!(double.size.width, Pixels(57.4140625));
++        assert_eq!(single.size.width, Pixels(57.421875));
++        assert_eq!(
++            centered_child_bounds(LayoutPrecision::DevicePixels, width, 2.)
++                .size
++                .width,
++            Pixels(57.5)
++        );
++    }
++
+     #[test]
+     fn border_widths_to_taffy_use_stroke_snapping() {
+         let border_widths = Edges {
+@@ -765,7 +891,12 @@ mod tests {
+             bottom: Pixels(0.5).into(),
+             left: Pixels(1.6).into(),
+         };
+-        let taffy_border = border_widths_to_taffy(&border_widths, Pixels(16.0), 1.0);
++        let taffy_border = border_widths_to_taffy(
++            &border_widths,
++            Pixels(16.0),
++            1.0,
++            LayoutPrecision::DevicePixels,
++        );
+ 
+         assert_eq!(
+             taffy_border.top,
+diff --git a/src/text_system/line.rs b/src/text_system/line.rs
+index 5691782..e284b42 100644
+--- a/src/text_system/line.rs
++++ b/src/text_system/line.rs
+@@ -545,8 +545,10 @@ fn paint_line(
+         wrap_boundaries,
+     );
+     window.paint_layer(line_bounds, |window| {
+-        let padding_top = (line_height - layout.ascent - layout.descent) / 2.;
+-        let baseline_offset = point(px(0.), padding_top + layout.ascent);
++        let baseline_offset = point(
++            px(0.),
++            window.text_baseline(layout.ascent, layout.descent, line_height),
++        );
+         let underline_y_offset = underline_y_offset(line_height, layout.ascent, layout.descent);
+         let mut decoration_runs = decoration_runs.iter();
+         let mut wraps = wrap_boundaries.iter().peekable();
+diff --git a/src/text_system/line_layout.rs b/src/text_system/line_layout.rs
+index bfccb8b..77553c9 100644
+--- a/src/text_system/line_layout.rs
++++ b/src/text_system/line_layout.rs
+@@ -4,7 +4,7 @@ use itertools::Itertools;
+ use smallvec::SmallVec;
+ use std::{
+     borrow::Borrow,
+-    cell::RefCell,
++    cell::{Cell, RefCell},
+     hash::{Hash, Hasher},
+     ops::Range,
+     sync::{
+@@ -476,6 +476,8 @@ impl WrappedLineLayout {
+ }
+ 
+ pub(crate) struct LineLayoutCache {
++    css_scale: Cell<Option<f32>>,
++    configuration_generation: Cell<usize>,
+     state: RefCell<LineLayoutCacheState>,
+     wrap_scratch: RefCell<WrapScratch>,
+     platform_text_system: Arc<dyn PlatformTextSystem>,
+@@ -507,18 +509,30 @@ struct FrameCache {
+ 
+ #[derive(Clone, Default)]
+ pub(crate) struct LineLayoutIndex {
++    configuration_generation: usize,
+     font_generation: usize,
+     lines_index: usize,
+     wrapped_lines_index: usize,
+ }
+ 
+ impl LineLayoutCache {
++    pub(crate) fn set_css_scale(&self, scale: Option<f32>) {
++        if self.css_scale.get() != scale {
++            self.css_scale.set(scale);
++            self.configuration_generation
++                .set(self.configuration_generation.get().wrapping_add(1));
++            *self.state.borrow_mut() = LineLayoutCacheState::default();
++        }
++    }
++
+     pub fn new(
+         platform_text_system: Arc<dyn PlatformTextSystem>,
+         font_generation: Arc<AtomicUsize>,
+     ) -> Self {
+         let cached_font_generation = font_generation.load(Ordering::Acquire);
+         Self {
++            css_scale: Cell::new(None),
++            configuration_generation: Cell::new(0),
+             state: RefCell::default(),
+             wrap_scratch: RefCell::default(),
+             platform_text_system,
+@@ -532,6 +546,7 @@ impl LineLayoutCache {
+         let state = self.state.borrow();
+         let frame = &state.current_frame;
+         LineLayoutIndex {
++            configuration_generation: self.configuration_generation.get(),
+             font_generation,
+             lines_index: frame.used_lines.len(),
+             wrapped_lines_index: frame.used_wrapped_lines.len(),
+@@ -542,6 +557,8 @@ impl LineLayoutCache {
+         let font_generation = self.clear_if_font_generation_changed();
+         if range.start.font_generation != font_generation
+             || range.end.font_generation != font_generation
++            || range.start.configuration_generation != self.configuration_generation.get()
++            || range.end.configuration_generation != self.configuration_generation.get()
+         {
+             return;
+         }
+@@ -570,7 +587,9 @@ impl LineLayoutCache {
+ 
+     pub fn truncate_layouts(&self, index: LineLayoutIndex) {
+         let font_generation = self.clear_if_font_generation_changed();
+-        if index.font_generation != font_generation {
++        if index.font_generation != font_generation
++            || index.configuration_generation != self.configuration_generation.get()
++        {
+             return;
+         }
+         let mut state = self.state.borrow_mut();
+@@ -705,9 +724,12 @@ impl LineLayoutCache {
+             layout
+         } else {
+             let text = SharedString::from(text);
+-            let mut layout = self
+-                .platform_text_system
+-                .layout_line(&text, font_size, runs);
++            let mut layout = self.platform_text_system.layout_line_with_css_scale(
++                &text,
++                font_size,
++                runs,
++                self.css_scale.get(),
++            );
+ 
+             if let Some(force_width) = force_width {
+                 apply_force_width_to_layout(&mut layout, force_width);
+@@ -860,6 +882,51 @@ mod tests {
+     use super::*;
+     use crate::GlyphId;
+ 
++    #[test]
++    fn css_scale_invalidates_both_frames_and_stale_layout_indices() {
++        let cache = LineLayoutCache::new(
++            Arc::new(crate::NoopTextSystem::new()),
++            Arc::new(AtomicUsize::new(0)),
++        );
++        let old_start = cache.layout_index();
++        let legacy = cache.layout_line("abc", px(12.5), &[], None);
++        let old_end = cache.layout_index();
++        cache.finish_frame();
++        cache.set_css_scale(Some(2.));
++        cache.reuse_layouts(old_start..old_end);
++        assert!(cache.state.borrow().current_frame.lines.is_empty());
++        assert!(cache.state.borrow().previous_frame.lines.is_empty());
++        let css_two = cache.layout_line("abc", px(12.5), &[], None);
++        assert!(!Arc::ptr_eq(&legacy, &css_two));
++        cache.set_css_scale(Some(2.));
++        assert!(Arc::ptr_eq(
++            &css_two,
++            &cache.layout_line("abc", px(12.5), &[], None)
++        ));
++        cache.set_css_scale(Some(1.));
++        let css_one = cache.layout_line("abc", px(12.5), &[], None);
++        assert!(!Arc::ptr_eq(&css_two, &css_one));
++        cache.set_css_scale(None);
++        let legacy_again = cache.layout_line("abc", px(12.5), &[], None);
++        assert!(!Arc::ptr_eq(&css_one, &legacy_again));
++        assert_eq!(legacy.width, legacy_again.width);
++    }
++
++    #[test]
++    fn css_scale_configuration_is_local_to_each_window_cache() {
++        let system = Arc::new(crate::NoopTextSystem::new());
++        let generation = Arc::new(AtomicUsize::new(0));
++        let first = LineLayoutCache::new(system.clone(), generation.clone());
++        let second = LineLayoutCache::new(system, generation);
++        let default_line = second.layout_line("abc", px(12.5), &[], None);
++        first.set_css_scale(Some(2.));
++        assert_eq!(second.css_scale.get(), None);
++        assert!(Arc::ptr_eq(
++            &default_line,
++            &second.layout_line("abc", px(12.5), &[], None)
++        ));
++    }
++
+     fn glyph_at(x: f32, index: usize) -> ShapedGlyph {
+         ShapedGlyph {
+             id: GlyphId(0),
+diff --git a/src/text_system/line_wrapper.rs b/src/text_system/line_wrapper.rs
+index fea2c79..730c5b8 100644
+--- a/src/text_system/line_wrapper.rs
++++ b/src/text_system/line_wrapper.rs
+@@ -541,9 +541,11 @@ impl LineWrapper {
+         (text, Cow::Borrowed(runs))
+     }
+ 
+-    /// The byte offsets in `text` at which a line break is allowed.
+-    pub(crate) fn break_indices(text: &str) -> impl Iterator<Item = usize> {
+-        icu_segmenter::LineSegmenter::new_for_non_complex_scripts(Default::default())
++    /// Unicode line-break opportunities as UTF-8 byte offsets. This pure
++    /// segmentation API uses the same compiled script dictionaries as native
++    /// wrapping and truncation, without requiring fonts or a window.
++    pub fn break_indices(text: &str) -> impl Iterator<Item = usize> {
++        icu_segmenter::LineSegmenter::new_dictionary(Default::default())
+             .segment_str(text)
+     }
+ 
+@@ -1109,6 +1111,34 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn test_line_break_dictionary_thai_and_mixed_scripts() {
++        // ICU's Thai word-break vector: no whitespace separates these words.
++        // Exercise the exact production factory used by wrap and truncation.
++        let thai = "ภาษาไทยภาษาไทย";
++        assert_eq!(
++            LineWrapper::break_indices(thai).collect::<Vec<_>>(),
++            [0, 12, 21, 33, 42]
++        );
++        for text in ["abc ภาษาไทย xyz", "เก้าเก้า ภาษาไทย e\u{301} 你好！"] {
++            let breaks = LineWrapper::break_indices(text).collect::<Vec<_>>();
++            let mut clusters: Vec<_> = text.grapheme_indices(true).map(|(index, _)| index).collect();
++            clusters.push(text.len());
++            assert_eq!(breaks.first(), Some(&0));
++            assert_eq!(breaks.last(), Some(&text.len()));
++            assert!(breaks.windows(2).all(|pair| pair[0] < pair[1]));
++            assert!(breaks.iter().all(|index| clusters.contains(index)), "Split a grapheme: {text:?} {breaks:?}");
++            let word_end = text.find("ภาษา").unwrap() + "ภาษา".len();
++            assert!(breaks.contains(&word_end), "Lost Thai word boundary: {text:?} {breaks:?}");
++        }
++        // Loading SEA dictionaries must preserve ordinary Unicode line rules.
++        for text in ["hello world! 你好！", "Русский текст — SingZ", "हिन्दी भाषा", "one\u{a0}two / three"] {
++            let prior = icu_segmenter::LineSegmenter::new_for_non_complex_scripts(Default::default())
++                .segment_str(text).collect::<Vec<_>>();
++            assert_eq!(LineWrapper::break_indices(text).collect::<Vec<_>>(), prior);
++        }
++    }
++
+     #[test]
+     fn test_wrap_line_break_opportunities() {
+         let mut wrapper = build_wrapper();
+diff --git a/src/text_system.rs b/src/text_system.rs
+index 1eea420..84798c6 100644
+--- a/src/text_system.rs
++++ b/src/text_system.rs
+@@ -541,6 +541,15 @@ impl TextSystem {
+         }
+     }
+ 
++    /// Rasterize an owned glyph mask for background image effects. Uses the
++    /// same platform font fallback and raster policy as ordinary glyph paint.
++    /// Callers own the returned bytes; this does not touch a window or its atlas.
++    pub fn glyph_image_mask(&self, params: &RenderGlyphParams) -> Result<(Bounds<DevicePixels>, Vec<u8>)> {
++        let bounds = self.raster_bounds(params)?;
++        let (_, bytes) = self.rasterize_glyph(params)?;
++        Ok((bounds, bytes))
++    }
++
+     pub(crate) fn rasterize_glyph(
+         &self,
+         params: &RenderGlyphParams,
+@@ -639,6 +648,10 @@ pub struct WindowTextSystem {
+ }
+ 
+ impl WindowTextSystem {
++    pub(crate) fn set_css_scale(&self, scale: Option<f32>) {
++        self.line_layout_cache.set_css_scale(scale);
++    }
++
+     /// Create a new WindowTextSystem with the given TextSystem.
+     pub fn new(text_system: Arc<TextSystem>) -> Self {
+         Self {
+@@ -1110,6 +1123,8 @@ pub struct RenderGlyphParams {
+     pub subpixel_variant: Point<u8>,
+     pub scale_factor: f32,
+     pub is_emoji: bool,
++    /// Use CSS rasterization policy for this window.
++    pub css_rasterization: bool,
+     pub subpixel_rendering: bool,
+     pub dilation: u8,
+ }
+@@ -1124,6 +1139,7 @@ impl Hash for RenderGlyphParams {
+         self.subpixel_variant.hash(state);
+         self.scale_factor.to_bits().hash(state);
+         self.is_emoji.hash(state);
++        self.css_rasterization.hash(state);
+         self.subpixel_rendering.hash(state);
+         self.dilation.hash(state);
+     }
+diff --git a/src/window.rs b/src/window.rs
+index c2ba13d..8f2f7ca 100644
+--- a/src/window.rs
++++ b/src/window.rs
+@@ -13,13 +13,13 @@ use crate::{
+     DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
+     EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
+     Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
+-    Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
+-    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels,
+-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
+-    PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
+-    RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
+-    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
+-    StrikethroughStyle, Style, SubpixelSprite, Subscription, SystemWindowTab,
++    Keystroke, KeystrokeEvent, LayoutId, LayoutPrecision, LineLayoutIndex, Modifiers,
++    ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent,
++    Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
++    PlatformWindow, Point, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render,
++    RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge,
++    SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow,
++    SharedString, Size, StrikethroughStyle, Style, SubpixelSprite, Subscription, SystemWindowTab,
+     SystemWindowTabController, TabStopMap, Task, TextInputConfiguration, TextInputStateChange,
+     TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
+     Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
+@@ -77,7 +77,7 @@ use self::a11y::A11y;
+ use self::a11y::ROOT_NODE_ID;
+ use crate::util::{
+     atomic_incr_if_not_zero, ceil_to_device_pixel, floor_to_device_pixel, round_half_toward_zero,
+-    round_half_toward_zero_f64, round_stroke_to_device_pixel, round_to_device_pixel,
++    round_half_toward_zero_f64, round_to_device_pixel,
+ };
+ pub use prompts::*;
+ 
+@@ -1234,6 +1234,8 @@ pub struct Window {
+     rem_size_override_stack: SmallVec<[Pixels; 8]>,
+     pub(crate) viewport_size: Size<Pixels>,
+     layout_engine: Option<TaffyLayoutEngine>,
++    layout_precision: LayoutPrecision,
++    fractional_glyph_baselines: bool,
+     pub(crate) root: Option<AnyView>,
+     pub(crate) element_id_stack: ElementIdStack,
+     pub(crate) text_style_stack: Vec<TextStyleRefinement>,
+@@ -2361,6 +2363,8 @@ impl Window {
+             rem_size_override_stack: SmallVec::new(),
+             viewport_size: content_size,
+             layout_engine: Some(TaffyLayoutEngine::new()),
++            layout_precision: LayoutPrecision::default(),
++            fractional_glyph_baselines: false,
+             root: None,
+             element_id_stack: ElementIdStack::default(),
+             text_style_stack: Vec::new(),
+@@ -2672,6 +2676,9 @@ impl Window {
+ 
+     /// Accessor for the text system.
+     pub fn text_system(&self) -> &Rc<WindowTextSystem> {
++        self.text_system.set_css_scale(
++            (self.layout_precision == LayoutPrecision::CssPixels).then(|| self.scale_factor()),
++        );
+         &self.text_system
+     }
+ 
+@@ -3094,6 +3101,20 @@ impl Window {
+             .render_to_image(&self.rendered_frame.scene)
+     }
+ 
++    /// Capture only primitives already painted in this frame, without presenting
++    /// them or recursing through layout/draw. Call from a canvas paint callback
++    /// placed before overlays that must be excluded (for example a modal).
++    /// Deferred draws not painted yet are deliberately not included.
++    #[cfg(any(test, feature = "test-support"))]
++    pub fn render_painted_prefix_to_image(&self) -> anyhow::Result<image::RgbaImage> {
++        anyhow::ensure!(
++            self.invalidator.inner.borrow().draw_phase == DrawPhase::Paint,
++            "Paint-prefix capture is only available during paint"
++        );
++        self.platform_window
++            .render_to_image(&self.next_frame.scene.painted_prefix())
++    }
++
+     /// Returns the quads in the most recently rendered frame's scene, so tests can assert on
+     /// painted output without rasterizing the frame. Quad bounds are in scaled pixels and are
+     /// not clipped; each quad carries the content mask it will be clipped to when drawn. Quads
+@@ -3394,6 +3415,55 @@ impl Window {
+         self.text_style().line_height_in_pixels(self.rem_size())
+     }
+ 
++    /// Returns this window's coordinate precision policy.
++    pub fn layout_precision(&self) -> LayoutPrecision {
++        self.layout_precision
++    }
++
++    /// Selects layout/paint precision for this window only. Device-pixel rounding
++    /// remains the default. Set this before the first draw when porting CSS UI.
++    /// Explicit `pixel_snap` APIs retain their device-pixel meaning in either mode.
++    pub fn set_layout_precision(&mut self, precision: LayoutPrecision) {
++        if self.layout_precision != precision {
++            self.layout_precision = precision;
++            if let Some(engine) = self.layout_engine.as_mut() {
++                engine.set_layout_precision(precision);
++            }
++            self.refresh();
++        }
++    }
++
++    /// Retain quarter-device-pixel glyph baselines while manually painting a
++    /// transformed CSS text layer. Ordinary CSS text snaps its raster baseline
++    /// to a physical pixel. Nested scopes restore the previous drawing policy;
++    /// unconfigured windows retain their original raster behavior.
++    pub fn with_fractional_glyph_baselines<R>(&mut self, paint: impl FnOnce(&mut Self) -> R) -> R {
++        self.invalidator.debug_assert_paint();
++        let previous = std::mem::replace(&mut self.fractional_glyph_baselines, true);
++        let result = paint(self);
++        self.fractional_glyph_baselines = previous;
++        result
++    }
++
++    /// Applies the window's layout policy to a logical scalar.
++    pub(crate) fn snap_layout_value(&self, value: Pixels) -> Pixels {
++        px(self
++            .layout_precision
++            .logical_value(value.0, self.scale_factor()))
++    }
++
++    /// Returns the baseline offset within a line box under this window's text
++    /// policy. Inputs are raw logical font ascent/descent and explicit line
++    /// height; the CSS policy resolves them in scaled layout coordinates.
++    pub fn text_baseline(&self, ascent: Pixels, descent: Pixels, line_height: Pixels) -> Pixels {
++        px(self.layout_precision.text_baseline(
++            ascent.0,
++            descent.0,
++            line_height.0,
++            self.scale_factor(),
++        ))
++    }
++
+     /// Rounds a logical value to the nearest device pixel.
+     #[inline]
+     pub fn pixel_snap(&self, value: Pixels) -> Pixels {
+@@ -3434,7 +3504,8 @@ impl Window {
+             thickness
+         };
+         Bounds {
+-            origin: origin.map(|c| ScaledPixels(round_to_device_pixel(c.0, scale_factor))),
++            origin: origin
++                .map(|c| ScaledPixels(self.layout_precision.scaled_value(c.0, scale_factor))),
+             size: size(self.snap_stroke(width), height),
+         }
+     }
+@@ -3514,10 +3585,20 @@ impl Window {
+     #[inline]
+     fn snap_bounds(&self, bounds: Bounds<Pixels>) -> Bounds<ScaledPixels> {
+         let scale_factor = self.scale_factor();
+-        let left = round_to_device_pixel(bounds.left().0, scale_factor);
+-        let top = round_to_device_pixel(bounds.top().0, scale_factor);
+-        let right = round_to_device_pixel(bounds.right().0, scale_factor).max(left);
+-        let bottom = round_to_device_pixel(bounds.bottom().0, scale_factor).max(top);
++        let left = self
++            .layout_precision
++            .scaled_value(bounds.left().0, scale_factor);
++        let top = self
++            .layout_precision
++            .scaled_value(bounds.top().0, scale_factor);
++        let right = self
++            .layout_precision
++            .scaled_value(bounds.right().0, scale_factor)
++            .max(left);
++        let bottom = self
++            .layout_precision
++            .scaled_value(bounds.bottom().0, scale_factor)
++            .max(top);
+         Bounds::from_corners(
+             point(ScaledPixels(left), ScaledPixels(top)),
+             point(ScaledPixels(right), ScaledPixels(bottom)),
+@@ -3527,7 +3608,10 @@ impl Window {
+     /// Rounds half-to-zero but clamps any non-zero input up to 1 dp so thin strokes do not disappear.
+     #[inline]
+     fn snap_stroke(&self, value: Pixels) -> ScaledPixels {
+-        ScaledPixels(round_stroke_to_device_pixel(value.0, self.scale_factor()))
++        ScaledPixels(
++            self.layout_precision
++                .scaled_stroke(value.0, self.scale_factor()),
++        )
+     }
+ 
+     #[inline]
+@@ -5021,7 +5105,8 @@ impl Window {
+         let scale_factor = self.scale_factor();
+         let height = style.thickness;
+         let bounds = Bounds {
+-            origin: origin.map(|c| ScaledPixels(round_to_device_pixel(c.0, scale_factor))),
++            origin: origin
++                .map(|c| ScaledPixels(self.layout_precision.scaled_value(c.0, scale_factor))),
+             size: size(self.snap_stroke(width), self.snap_stroke(height)),
+         };
+         let opacity = self.element_opacity();
+@@ -5059,17 +5144,33 @@ impl Window {
+         let scale_factor = self.scale_factor();
+         let glyph_origin = origin.scale(scale_factor);
+ 
++        let y_variants = self
++            .layout_precision
++            .glyph_y_variants(self.fractional_glyph_baselines);
+         let quantized_origin = Point::new(
+-            round_half_toward_zero(glyph_origin.x.0 * SUBPIXEL_VARIANTS_X as f32)
+-                / SUBPIXEL_VARIANTS_X as f32,
+-            round_half_toward_zero(glyph_origin.y.0 * SUBPIXEL_VARIANTS_Y as f32)
+-                / SUBPIXEL_VARIANTS_Y as f32,
+-        );
+-        let subpixel_variant = Point::new(
+-            (quantized_origin.x.fract() * SUBPIXEL_VARIANTS_X as f32) as u8,
+-            (quantized_origin.y.fract() * SUBPIXEL_VARIANTS_Y as f32) as u8,
++            self.layout_precision.glyph_x_position(glyph_origin.x.0),
++            self.layout_precision
++                .glyph_y_position(glyph_origin.y.0, self.fractional_glyph_baselines),
+         );
+-        let integer_origin = quantized_origin.map(|c| ScaledPixels(c.trunc()));
++        let integer_origin = quantized_origin.map(|coordinate| {
++            ScaledPixels(if self.layout_precision == LayoutPrecision::CssPixels {
++                coordinate.floor()
++            } else {
++                coordinate.trunc()
++            })
++        });
++        let subpixel_variant = if self.layout_precision == LayoutPrecision::CssPixels {
++            Point::new(
++                ((quantized_origin.x - integer_origin.x.0) * SUBPIXEL_VARIANTS_X as f32).round()
++                    as u8,
++                ((quantized_origin.y - integer_origin.y.0) * y_variants as f32).round() as u8,
++            )
++        } else {
++            Point::new(
++                (quantized_origin.x.fract() * SUBPIXEL_VARIANTS_X as f32) as u8,
++                (quantized_origin.y.fract() * SUBPIXEL_VARIANTS_Y as f32) as u8,
++            )
++        };
+         let subpixel_rendering = self.should_use_subpixel_rendering(font_id, font_size);
+         let dilation = self.text_system().glyph_dilation_for_color(color);
+         let params = RenderGlyphParams {
+@@ -5079,6 +5180,7 @@ impl Window {
+             subpixel_variant,
+             scale_factor,
+             is_emoji: false,
++            css_rasterization: self.layout_precision == LayoutPrecision::CssPixels,
+             subpixel_rendering,
+             dilation,
+         };
+@@ -5169,6 +5271,7 @@ impl Window {
+             subpixel_variant: Default::default(),
+             scale_factor,
+             is_emoji: true,
++            css_rasterization: self.layout_precision == LayoutPrecision::CssPixels,
+             subpixel_rendering: false,
+             dilation: 0,
+         };
+@@ -5509,7 +5612,9 @@ impl Window {
+             .unwrap()
+             .layout_bounds(layout_id, scale_factor)
+             .map(Into::into);
+-        let snapped_offset = self.pixel_snap_point(self.element_offset());
++        let snapped_offset = self
++            .element_offset()
++            .map(|value| self.snap_layout_value(value));
+         bounds.origin += snapped_offset;
+         bounds
+     }
+@@ -7297,6 +7402,15 @@ impl Window {
+             .push((action, Box::new(listener)));
+     }
+ 
++    /// Dispatch an accessibility request through the real framework handler.
++    ///
++    /// This test-support seam permits deterministic input bursts within one
++    /// update without pretending to exercise a platform adapter's event queue.
++    #[cfg(all(any(test, feature = "test-support"), not(target_family = "wasm")))]
++    pub fn dispatch_accessibility_action(&mut self, request: accesskit::ActionRequest, cx: &mut App) {
++        self.handle_a11y_action(request, cx);
++    }
++
+     #[cfg(not(target_family = "wasm"))]
+     pub(crate) fn handle_a11y_action(&mut self, request: accesskit::ActionRequest, cx: &mut App) {
+         // Take listeners out temporarily so the closures can borrow Window

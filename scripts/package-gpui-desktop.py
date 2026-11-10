@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import stat
+import subprocess
 import struct
 import sys
 import tempfile
@@ -23,6 +24,13 @@ class PackageError(RuntimeError):
     pass
 
 UI_TESTS_MARKER = b'SINGZ_GPUI_UI_TESTS_BUILD_MARKER'
+
+def require_fresh_vendor() -> None:
+    """Refuse to package from a stale or hand-edited GPUI vendor tree (never downloads)."""
+    check = subprocess.run([sys.executable, str(ROOT / 'scripts/gpui-vendor.py'), '--check'], capture_output=True, text=True)
+    if check.returncode != 0:
+        raise PackageError('GPUI vendor tree is missing, stale or edited; run scripts/gpui-vendor.py (or --update-patch): ' + check.stdout.strip())
+
 
 def validate_runtime_profile(runtime: Path, allow_debug: bool) -> None:
     profile = runtime.resolve().name
@@ -522,6 +530,7 @@ def main() -> None:
     parser.add_argument('--allow-debug', action='store_true', help='Allow packaging a target/debug build for local qualification')
     args = parser.parse_args()
     try:
+        require_fresh_vendor()
         validate_runtime_profile(args.runtime_dir, args.allow_debug)
         manifest = assemble(args.platform, args.runtime_dir, args.output_dir, uikit_dir=args.uikit_dir, require_drive_config=args.require_drive_config, build_info_file=args.build_info_file)
     except (PackageError, OSError, ValueError) as error:
