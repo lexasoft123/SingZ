@@ -3,7 +3,7 @@ import { chmod, lstat, mkdir, unlink } from 'node:fs/promises'
 import { dirname, isAbsolute } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { audioMethodAllowed } from '../audio-process-rpc'
-import { BOX_AUDIO_VERSION, BOX_AUDIO_REQUEST_BYTES, BOX_AUDIO_PENDING, boxAudioCounter, boxAudioMeasurementMethod, type BoxAudioCommand } from '../../shared/box-audio'
+import { BOX_AUDIO_VERSION, BOX_AUDIO_REQUEST_BYTES, BOX_AUDIO_PENDING, boxAudioCounter, boxAudioMeasurementMethod, type BoxAudioCommand, type BoxMicrophoneSelectionEdit, type BoxMicrophoneSelectionResult, type BoxMicrophoneSnapshot } from '../../shared/box-audio'
 import type { BoxRetainedProjectDescriptor } from '../../shared/box-contract'
 import { retainedProjectDescriptor } from '../../shared/box-retained-playback'
 import type { DesktopPlaybackLaneConfig, DesktopPlaybackPrepareConfig, DesktopPlaybackResult, DesktopPlaybackStatus } from '../../shared/types'
@@ -14,13 +14,14 @@ export interface BoxAudioHostRuntime {
   binding: Record<string, unknown>
   routingRequest(json: string): string
   routingCapabilities(): unknown
+  microphones?: { snapshot(): Promise<BoxMicrophoneSnapshot>; setSelection(edit: BoxMicrophoneSelectionEdit): Promise<BoxMicrophoneSelectionResult> }
   shutdown(): void | Promise<void>
 }
 const PUBLIC_OWNER = 1
 const publicMethods = new Set(['configureMicrophoneMix', 'stopMicrophoneMix', 'preparePlayback',
   'openPlayback', 'startPlayback', 'pausePlayback', 'resumePlayback', 'stopPlayback', 'seekPlayback',
   'setPlaybackLoop', 'clearPlaybackLoop', 'reanchorPlayback', 'setPlaybackLane', 'setPlaybackMasterGain', 'unloadPlayback'])
-const privateMethods = new Set(['begin', 'cancel', 'beginMonitor', 'endMonitor', 'setMonitorGain'])
+const privateMethods = new Set(['beginMonitor', 'endMonitor', 'setMonitorGain'])
 const playbackMutations = new Set(['openPlayback', 'startPlayback', 'pausePlayback', 'resumePlayback', 'stopPlayback',
   'seekPlayback', 'reanchorPlayback', 'setPlaybackLoop', 'clearPlaybackLoop', 'setPlaybackLane', 'setPlaybackMasterGain', 'unloadPlayback'])
 function validatePaths(value: unknown, depth = 0): void {
@@ -195,7 +196,16 @@ export async function startBoxAudioHost(socketPath: string, runtime: BoxAudioHos
           validatePaths(request.args)
           let result: unknown
           const args = [...request.args]
-          if (request.target === 'service' && request.method === 'reconcile') {
+          if (request.target === 'owner' && ['begin', 'cancel'].includes(request.method)) {
+            throw new Error('Microphone analysis is owned by the audio host')
+          } else if (request.target === 'service' && request.method === 'microphones' && args.length === 0) {
+            if (!runtime.microphones) throw new Error('Microphone supervisor unavailable')
+            result = { ...await runtime.microphones.snapshot(), epoch }
+          } else if (request.target === 'service' && request.method === 'setMicrophoneSelection' && args.length === 1) {
+            if (!runtime.microphones) throw new Error('Microphone supervisor unavailable')
+            const receipt = await runtime.microphones.setSelection(args[0] as BoxMicrophoneSelectionEdit)
+            result = { ...receipt, snapshot: receipt.snapshot ? { ...receipt.snapshot, epoch } : null }
+          } else if (request.target === 'service' && request.method === 'reconcile') {
             const playback = await (runtime.owner.playbackStatus as () => DesktopPlaybackStatus | null).call(runtime.owner)
             result = { epoch, idle: true, playback, ...retainedRecovery(playback), routing: runtime.routingRequest('{"version":1,"operation":"state"}') }
           } else if (request.target === 'service' && request.method === 'associateRetainedProject') {
@@ -245,11 +255,6 @@ export async function startBoxAudioHost(socketPath: string, runtime: BoxAudioHos
                 let id = privateIds.get(renderer as number)
                 if (id === undefined) { id = ++nextPrivate; privateIds.set(renderer as number, id) }
                 args[0] = id
-              }
-              if (request.method === 'begin') {
-                const key = args.pop()
-                if (!boxAudioCounter(key)) throw new Error('Missing private capture subscription')
-                args.push((value: unknown) => send({ version: 1, type: 'capture', epoch, key, value }))
               }
               if (request.method === 'preparePlayback') result = await prepare(args, socket, connectionId, Number(request.args[0]))
               else {

@@ -12,7 +12,7 @@ const forbiddenOwner = new Set([
 const allowedOwner = new Set([
   'devices', 'hostDevices', 'microphoneMixStatus', 'monitorStatus', 'playbackProviders',
   'playbackCapability', 'playbackStatus', 'state', 'stats', 'measurePlaybackLanes',
-  'rendererDetached', 'rendererGone', 'cancel', 'endMonitor'
+  'rendererDetached', 'rendererGone', 'endMonitor'
 ])
 
 async function startBoxHostRecorder({ socketPath, realSocketPath, maxFrameBytes = REQUEST_FRAME_BYTES, maxRecords = 64 }) {
@@ -74,7 +74,7 @@ async function startBoxHostRecorder({ socketPath, realSocketPath, maxFrameBytes 
       if (typeof operation !== 'string' || operation.length > 64) throw new Error('Recorder rejected routing operation')
     }
     const allowed = request.target === 'owner' ? allowedOwner.has(request.method) && !forbiddenOwner.has(request.method)
-      : request.target === 'service' ? request.method === 'reconcile'
+      : request.target === 'service' ? (request.method === 'reconcile' || request.method === 'microphones')
         : request.target === 'routing' ? request.method === 'capabilities' || (request.method === 'request' && operation === 'state')
           : request.target === 'binding' ? request.method === 'inputDevices' || request.method === 'initializeSharedAudio' : false
     const forbidden = forbiddenOwner.has(request.method) ||

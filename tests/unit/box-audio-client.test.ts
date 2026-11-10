@@ -88,3 +88,38 @@ describe('Box audio client connection ownership', () => {
     await client.shutdown()
   })
 })
+
+describe('host microphone client protocol', () => {
+  it('reads microphone state while uncertain and reconciles a new epoch before selection CAS', async () => {
+    net.sockets.length = 0
+    const client = createBoxAudioClient('/private/box/audio.sock', { timeoutMs: 2000 })
+    const initial = client.call('service', 'microphones', [])
+    await vi.waitFor(() => expect(sockets()).toHaveLength(1), { interval: 1 })
+    const old = sockets()[0]
+    old.send({ version: 1, type: 'ready', epoch: 'old' })
+    const first = await request(old, 0)
+    old.send({ version: 1, type: 'reply', epoch: 'old', id: first.id, ok: true, value: { generation: '1' } })
+    await initial
+    old.destroyed = true; old.emit('close')
+    const read = client.call('service', 'microphones', [])
+    await vi.waitFor(() => expect(sockets()).toHaveLength(2), { interval: 1 })
+    const socket = sockets()[1]
+    socket.send({ version: 1, type: 'ready', epoch: 'new' })
+    const query = await request(socket, 0)
+    expect(query.method).toBe('microphones')
+    socket.send({ version: 1, type: 'reply', epoch: 'new', id: query.id, ok: true, value: { revision: '7' } })
+    await expect(read).resolves.toEqual({ revision: '7' })
+    const edit = { expectedRevision: '7', device: null, channels: {} }
+    const write = client.call('service', 'setMicrophoneSelection', [edit])
+    const barrier = await request(socket, 1)
+    expect(barrier.method).toBe('reconcile')
+    socket.send({ version: 1, type: 'reply', epoch: 'new', id: barrier.id, ok: true, value: {} })
+    const command = await request(socket, 2)
+    expect(command.method).toBe('setMicrophoneSelection')
+    expect(JSON.parse(socket.written[2]).args).toEqual([edit])
+    socket.send({ version: 1, type: 'reply', epoch: 'new', id: command.id, ok: true, value: { ok: false, code: 'stale' } })
+    await expect(write).resolves.toEqual({ ok: false, code: 'stale' })
+    expect(socket.written).toHaveLength(3)
+    await client.shutdown()
+  })
+})

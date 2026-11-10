@@ -243,7 +243,10 @@ public:
       opened_ = false;
     }
   }
-  bool takeFailure(std::string &) override { return false; }
+  bool takeFailure(std::string &error) override {
+    if (opened_ && hardware_->offline.load()) { error = "Fixture unplugged"; return true; }
+    return false;
+  }
 
 private:
   void pushTones() {
@@ -256,7 +259,7 @@ private:
     while (!stopping_.load()) {
       const auto current = nowNs();
       for (unsigned budget = 0;
-           hardware_->supply.load() && budget < 32 &&
+           hardware_->supply.load() && !hardware_->offline.load() && budget < 32 &&
            origin + frameNs(frame + kFrames) <= current && !stopping_.load();
            ++budget) {
         for (uint32_t sample = 0; sample < kFrames; ++sample) {
@@ -306,8 +309,10 @@ struct Sink {
   std::atomic<double> squares{0};
   std::atomic<float> peak{0};
   std::atomic<bool> badMetadata{false};
+  std::atomic<uint64_t> discontinuities{0};
   float last{0}; // one joined analysis reader owns this field
   void accept(const AudioInputBlockView &block) {
+    if (block.capture.discontinuity == AudioInputDiscontinuityReason::StreamGenerationChanged) ++discontinuities;
     if (block.frames != kFrames || block.sampleRate != kRate || !block.mono ||
         block.timestampQuality !=
             AudioInputTimestampQuality::CallbackEstimate ||
@@ -417,6 +422,21 @@ int main() {
   CHECK(levels.peak[1] > 0.08f && levels.peak[1] < 0.12f);
   CHECK(levels.rms[0] > 0.11f && levels.rms[0] < 0.17f);
   CHECK(levels.rms[1] > 0.05f && levels.rms[1] < 0.09f);
+  // A private subscription must survive a physical failure: LoopZ reopens
+  // underneath the held reader, which publishes no fabricated offline levels.
+  const auto opensBeforeLoss = hardware->opens.load();
+  const auto boundariesBeforeLoss = first.discontinuities.load();
+  hardware->offline.store(true);
+  eventually([&] { return hardware->live == 0 &&
+      capture.state() == AudioInputState::Starting && !capture.meter().valid; });
+  const auto blocksWhileOffline = first.blocks.load();
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  CHECK(first.blocks.load() == blocksWhileOffline && !capture.meter().valid);
+  hardware->offline.store(false);
+  eventually([&] { return hardware->opens > opensBeforeLoss && hardware->live == 1 &&
+      capture.state() == AudioInputState::Running && capture.meter().valid &&
+      first.discontinuities > boundariesBeforeLoss; }, 5);
+  CHECK(hardware->maximumLive == 1 && hardware->outputOpens == 0);
   const auto opensBeforeInvalid = hardware->opens.load();
   const auto stopsBeforeInvalid = hardware->stops.load();
   for (const auto invalid : {std::vector<uint32_t>{1, 1}, {1, 0}, {0}, {1, 10}, {1, 64}}) {
@@ -508,6 +528,24 @@ int main() {
                                     {"controls", {{"enabled", false}}}}}));
   eventually([&] { return hardware->live == 0; });
 
+  // Stop while offline must join before releasing the last private tap. A
+  // later poll/device return must not revive a cancelled analysis worker.
+  Sink offlineStop;
+  config.channel = 1;
+  CHECK(capture.start(config, [&](const auto &block) { offlineStop.accept(block); }).ok);
+  eventually([&] { return offlineStop.blocks >= 24 && capture.meter().valid; });
+  hardware->offline.store(true);
+  eventually([&] { return hardware->live == 0 && capture.state() == AudioInputState::Starting; });
+  capture.stop();
+  const auto joinedOffline = offlineStop.blocks.load();
+  const auto opensAfterOfflineStop = hardware->opens.load();
+  hardware->offline.store(false);
+  for (unsigned i = 0; i < 210; ++i) {
+    pollBoxRouting();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  CHECK(offlineStop.blocks == joinedOffline && !capture.meter().valid &&
+      hardware->live == 0 && hardware->opens == opensAfterOfflineStop);
   const auto beforeInvalid = hardware->opens.load();
   config.deviceUid = "missing";
   CHECK(!capture.start(config, [&](const auto &block) { third.accept(block); })

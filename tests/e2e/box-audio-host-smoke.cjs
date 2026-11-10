@@ -99,6 +99,11 @@ async function run() {
   const packaged = process.env.SINGZ_BOX_AUDIO_HOST_EXECUTABLE || process.env.SINGZ_E2E_PACKAGED
   if (packaged) assert.ok(path.isAbsolute(packaged), 'packaged executable must be absolute')
   const executable = packaged || require('electron')
+  // Host analysis is on by default and would open the machine's first capture
+  // device. Persist an absent input so this smoke stays device-free everywhere.
+  fs.mkdirSync(path.join(scratch, 'profile'), { mode: 0o700 })
+  fs.writeFileSync(path.join(scratch, 'profile', 'microphones.json'), JSON.stringify({ version: 1, revision: '1', origin: 'user',
+    device: 'fixture:absent', channels: { 'fixture:absent': [0, 1] } }), { mode: 0o600 })
   const env = { ...process.env, SINGZ_BOX_AUDIO_SOCKET: socketPath, SINGZ_BOX_AUDIO_DATA_DIR: path.join(scratch, 'profile'), SINGZ_MUTE: '1', SINGZ_NO_SYNC: '1' }
   delete env.ELECTRON_RUN_AS_NODE
   delete env.SINGZ_CAPTURE_ADDON
@@ -127,19 +132,20 @@ async function run() {
     assert.deepEqual(routing.snapshot.runtime.monitors, [])
     assert.ok(routing.snapshot.document.devices.every(device => device.monitors.length === 0))
   }
-  await watchdog.run('private microphone capability starts idle without a physical route', 10, async () => {
-    const stats = await client.call('owner', 'stats')
-    assert.deepEqual(stats.microphoneLevels, {
-      valid: false, channels: 0, ownershipGeneration: '0', peak: [], rms: []
-    })
+  await watchdog.run('host microphone analysis waits without a device or audible route', 10, async () => {
+    const microphones = await eventually('host analysis settles', () => client.call('service', 'microphones'), value => value.phase !== 'starting')
+    assert.equal(microphones.phase, 'waiting')
+    assert.equal(microphones.reason, 'no-device')
+    assert.equal(microphones.levels, null)
     const inputs = await client.call('binding', 'inputDevices')
     assert.equal(inputs.ok, true)
     assert.ok(Array.isArray(inputs.devices))
     const idle = await state()
     assert.deepEqual(idle.snapshot.runtime.inputs, [])
     assert.deepEqual(idle.snapshot.runtime.outputs, [])
+    assert.deepEqual(idle.snapshot.runtime.monitors, [])
     assert.equal(idle.snapshot.document, null)
-    console.log('PASS private microphone capability is available but idle, with no implicit capture or output')
+    console.log('PASS host analysis waits for input with no audible route')
   })
   let document, generation, prepareSong
   await watchdog.run('create only logical native-source fanout', 10, async () => {

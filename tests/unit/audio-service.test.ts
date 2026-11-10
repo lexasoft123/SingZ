@@ -4,7 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const fake = vi.hoisted(() => ({
   sink: undefined as undefined | ((value: unknown) => void),
   begin: vi.fn(), stop: vi.fn(), prepare: vi.fn(), unload: vi.fn(),
-  binding: { inputDevices: vi.fn(() => ({ ok: true, devices: [] })) }
+  binding: { inputDevices: vi.fn(() => ({ ok: true, devices: [] })),
+    boxRoutingInitialize: vi.fn(() => ({ ok: true })), boxRoutingPoll: vi.fn(), boxRoutingShutdown: vi.fn() }
 }))
 vi.mock('../../src/main/capture', () => ({
   CaptureOwner: class {
@@ -92,4 +93,21 @@ describe('audio helper control dispatcher', () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(port.postMessage.mock.calls.map(([message]) => message).find(message => message.id === 1)).toMatchObject({ ok: true, value: { ok: false } })
   })
+})
+
+it('initializes and polls routing only for local Box and shuts it down after the capture owner', async () => {
+  vi.resetModules(); vi.stubEnv('SINGZ_SURFACE', 'box'); vi.stubEnv('SINGZ_AUDIO_BOX_DATA_DIR', '/fake/box-profile')
+  port.removeAllListeners('message')
+  vi.clearAllTimers()
+  await import('../../src/main/audio-service')
+  request(1, 'inputDevices', [], 'binding')
+  await vi.advanceTimersByTimeAsync(0)
+  expect(fake.binding.boxRoutingInitialize).toHaveBeenCalledWith('/fake/box-profile/routing.json')
+  await vi.advanceTimersByTimeAsync(100)
+  expect(fake.binding.boxRoutingPoll).toHaveBeenCalledTimes(4)
+  const exit = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+  port.emit('message', { data: { type: 'shutdown', epoch: 'service-test' } })
+  expect(fake.stop.mock.invocationCallOrder[0]).toBeLessThan(fake.binding.boxRoutingShutdown.mock.invocationCallOrder[0])
+  expect(vi.getTimerCount()).toBe(0)
+  exit.mockRestore()
 })

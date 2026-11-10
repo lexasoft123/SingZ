@@ -89,6 +89,14 @@ recovery after a hard kill, native-service crash/restart or power cycle.
 Graceful UI close drains admitted work and privately detaches without native
 pause, stop, unload, replay or level restoration.
 
+Microphone analysis is owned by the audio host, not the UI. It reads its saved
+selection (`microphones.json` in the audio profile; a corrupt or newer file is
+renamed `microphones.json.corrupt-<ms>` and the default is used) and starts at
+host launch. Closing or restarting the display never stops it; the TV stripe
+shows Off (all inputs off), Starting…, No input (interface missing; it retries
+by itself) or Unavailable (a real fault). The old per-browser channel choice is
+imported once, only while the host still holds its default selection.
+
 Relaunch performs a read-only reattach only to an already-running native
 session, including paused transport, when the host epoch and generation match
 and the transport is commandable. It restores the real project, synchronized
@@ -166,7 +174,9 @@ master gain readback, and return from each mixer tab. Pair a handset, approve it
 mixing and queue changes, and revoke it. Confirm QR scanning and audible output
 with a person; telemetry alone cannot establish either.
 
-Qualify microphone routing/monitoring, USB reconnect/device-loss recovery,
+Qualify always-on microphone analysis (meters live after a display restart,
+service restart and reboot with no remote input; unplug/replug recovery; All
+inputs off persists), microphone routing/monitoring, USB reconnect/device-loss,
 long-run playback, latency and physical CEC/HID behavior separately. Network
 provisioning, signed image installation, boot health and rollback need real
 OS-service and failure-injection tests; the screen contract alone is insufficient.

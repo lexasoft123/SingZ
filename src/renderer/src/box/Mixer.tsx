@@ -3,7 +3,7 @@ import type { TrackState } from '../audio/engine'
 import { formatSongVolume, songVolumeFromDb, songVolumeToDb } from '../../../shared/song-volume'
 import { laneLabel, stemLabel, TRACK_META } from '../model'
 import { t } from './i18n'
-import { microphoneSlotLevel, useMicrophoneSnapshot, type BoxMicrophones, type MicrophoneSnapshot } from './microphones'
+import { microphoneSlotStatus, microphoneStatusKey, useMicrophoneSnapshot, type BoxMicrophones, type MicrophoneSnapshot } from './microphones'
 import { tMicrophone } from './settings-i18n'
 
 export type MixerTab = 'main' | 'stems'
@@ -109,11 +109,12 @@ export function Mixer({
 export function MixerMicrophoneRow({ id, microphones, snapshot: snapshotProp }: { id: 'mic1' | 'mic2'; microphones?: BoxMicrophones; snapshot?: MicrophoneSnapshot }): React.JSX.Element {
   const snapshot = useMicrophoneSnapshot(microphones, snapshotProp)
   const channel = id === 'mic1' ? 0 : 1
-  const level = microphoneSlotLevel(snapshot, channel)
+  const status = microphoneSlotStatus(snapshot, channel)
+  const level = status.kind === 'level' ? status.level : null
   const label = t(channel === 0 ? 'box.player.mic1' : 'box.player.mic2')
   return <div className={`mixer-row${level === null ? ' unavailable' : ''}`} data-mix-row={id}>
     <div className="mixer-channel"><i /><div><strong>{label}</strong><small>{t('box.mix.micBody')}</small></div></div>
-    {level === null ? <span className="mixer-unavailable">{t('box.player.unavailable')}</span> : <div className="mixer-level">
+    {level === null ? <span className="mixer-unavailable" data-mic-status={status.kind}>{t(microphoneStatusKey(status))}</span> : <div className="mixer-level">
       <span className="settings-input-meter" data-mix-meter={id} role="meter"
         aria-label={tMicrophone('box.microphones.channelLevel', { channel: channel + 1 })}
         aria-valuemin={0} aria-valuemax={1} aria-valuenow={Math.min(1, level)}
