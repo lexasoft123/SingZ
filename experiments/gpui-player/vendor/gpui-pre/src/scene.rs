@@ -148,6 +148,19 @@ impl Scene {
         }
     }
 
+    /// Copy the operations painted so far without changing this scene. A paint
+    /// callback can run inside an open opacity layer; close only the copy's
+    /// layers before handing it to an offscreen renderer.
+    pub(crate) fn painted_prefix(&self) -> Self {
+        let mut prefix = Self::default();
+        prefix.replay(0..self.len(), self);
+        while !prefix.layer_stack.is_empty() {
+            prefix.pop_layer();
+        }
+        prefix.finish();
+        prefix
+    }
+
     pub fn finish(&mut self) {
         self.shadows.sort_by_key(|shadow| shadow.order);
         self.quads.sort_by_key(|quad| quad.order);
@@ -945,5 +958,31 @@ impl PathVertex<Pixels> {
             st_position: self.st_position,
             content_mask: self.content_mask.scale(factor),
         }
+    }
+}
+
+#[cfg(test)]
+mod prefix_snapshot_tests {
+    use super::*;
+    #[test]
+    fn paint_prefix_balances_only_its_copy_and_excludes_later_overlay() {
+        let bounds = Bounds::new(point(ScaledPixels(0.), ScaledPixels(0.)),
+            Size::new(ScaledPixels(120.), ScaledPixels(80.)));
+        let mut scene = Scene::default();
+        scene.push_layer(bounds);
+        scene.insert_primitive(Quad { bounds, content_mask: ContentMask { bounds },
+            background: crate::rgb(0xff0000).into(), ..Default::default() });
+        let operations = scene.len();
+        let prefix = scene.painted_prefix();
+        assert_eq!(prefix.quads.len(), 1);
+        assert!(prefix.layer_stack.is_empty());
+        assert_eq!(scene.layer_stack.len(), 1);
+        assert_eq!(scene.len(), operations);
+        scene.insert_primitive(Quad { bounds, content_mask: ContentMask { bounds },
+            background: crate::rgb(0x0000ff).into(), ..Default::default() });
+        scene.pop_layer();
+        scene.finish();
+        assert_eq!(scene.quads.len(), 2);
+        assert_eq!(prefix.quads.len(), 1);
     }
 }

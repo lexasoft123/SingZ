@@ -2550,6 +2550,11 @@ fn worker(
                     let met_commands =
                         crate::beat::commands(&project.metronome, project.beat.as_ref())?;
 
+                    #[cfg(feature="ui-tests")]
+                    if overlay.as_ref().is_some_and(|overlay| overlay.preserve_generated) {
+                        crate::project_import::test_gate("SINGZ_GPUI_SPLIT_LOAD_GATE", &||
+                            !alive.load(Ordering::Acquire) || latest.load(Ordering::Acquire) != epoch)?;
+                    }
                     // Validate before retiring the previous output. Kill/wait proves the old process can no longer own a device.
                     if let Some(target)=confirmed.as_ref(){verify_delete_recovery_path(&path,target)?;}
                     drop(connection.take());

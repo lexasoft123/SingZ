@@ -8,8 +8,10 @@ from pathlib import Path
 p=argparse.ArgumentParser()
 p.add_argument('app',type=Path);p.add_argument('out',type=Path)
 p.add_argument('--real',action='store_true')
+p.add_argument('--phase-parity',action='store_true',help='Run isolated split-stage, cancellation and native-load ownership faults')
 p.add_argument('--fresh-models',action='store_true',help='With --real, install the actual released host splitter pack into private empty caches before splitting')
 args=p.parse_args()
+if args.phase_parity and (args.real or args.fresh_models):p.error('--phase-parity uses only the explicit fault-injection fixture')
 if args.fresh_models and not args.real:p.error('--fresh-models requires --real; fixture installs cannot qualify released models')
 app=args.app.resolve();out=args.out.resolve();out.mkdir(parents=True,exist_ok=True);(out/'result.json').unlink(missing_ok=True)
 if args.fresh_models:(out/'migration-models.json').unlink(missing_ok=True)
@@ -34,6 +36,7 @@ with tempfile.TemporaryDirectory(prefix='singz-native-source-') as temp:
  bad=root/'bad.wav';bad.write_bytes(b'not audio');r=subprocess.run([str(helper),'--render-input',str(bad),str(root/'bad-output.wav')],capture_output=True,timeout=30);assert r.returncode!=0 and not (root/'bad-output.wav').exists()
  env={k:v for k,v in os.environ.items() if not k.startswith('SINGZ_GPUI_') and k not in ['SINGZ_PACK_DIR','SINGZ_MODELS_DIR']}
  env.update(SINGZ_MUTE='1',SINGZ_GPUI_BACKGROUND='1',SINGZ_GPUI_TEST_NO_CAPTURE='1',SINGZ_GPUI_CONFIG_DIR=str(root/'prefs'),SINGZ_GPUI_PROJECTS_ROOT=str(root/'library'),SINGZ_GPUI_SOURCE_FILE=str(source),SINGZ_GPUI_SOURCE_TEST=str(out))
+ if args.phase_parity:env.update(SINGZ_GPUI_SOURCE_PHASE_PARITY_TEST='1',SINGZ_GPUI_SPLIT_LOAD_GATE=str(root/'split-load-gate'))
  pack_fixture=None
  if args.fresh_models:
   pack=root/'fresh-pack';models=root/'fresh-models';prefs=root/'prefs';library=root/'library'
@@ -71,6 +74,15 @@ elif len(args)==7 and args[0].endswith('vocal-runner.py') and args[1]=='--model'
  kind='uvr';source=Path(args[4]);output=Path(args[6])
 else:
  print('fixture interpreter: unsupported command: '+repr(args),file=sys.stderr);sys.exit(2)
+if kind=='uvr' and mode=='fail-vocals':
+ print('fixture vocal separation failure',file=sys.stderr);sys.exit(3)
+if kind=='uvr' and mode=='hold-vocals':
+ child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)']);control.with_suffix('.pid').write_text(str(child.pid))
+ owner={'pid':child.pid}
+ if sys.platform.startswith('linux'):owner['startTicks']=Path(f'/proc/{child.pid}/stat').read_text().rsplit(') ',1)[1].split()[19]
+ else:owner['identity']=subprocess.check_output(['ps','-p',str(child.pid),'-o','lstart=,comm='],text=True).strip()
+ control.with_suffix('.owner.json').write_text(json.dumps(owner));print('{"percent":33}',flush=True)
+ while control.read_text()=='hold-vocals':time.sleep(.03)
 if mode=='hold':
  print('chunk 1/3: fixture',flush=True)
  while control.read_text()=='hold':time.sleep(.03)
@@ -142,7 +154,21 @@ else:
   result=child
  (out/'performance.json').write_text(json.dumps({'scope':'main GPUI process; excludes separate inference/helper CPU','wallSeconds':time.monotonic()-started,'wallScope':'workflow including screenshot settlement; not inference benchmark','samples':resources,'liveFps':{'available':False,'reason':'not measured in this hidden event-driven workflow; stepped captures do not establish live display cadence'},'inferenceCpu':{'available':False,'reason':'separate workers not sampled'}},indent=2))
  assert result.returncode==0 and (out/'result.json').is_file(),(out/'source.log').read_text()
- result=json.loads((out/'result.json').read_text());assert all(result[k] for k in ['nativeFileDrop','unsavedOriginal','splitSevenLanes','leadBacking','saveOnlyPublishesOnRequest','seventhLaneMixRestored','nativePlayback','hidden','muted'])
+ result=json.loads((out/'result.json').read_text())
+ if args.phase_parity:
+  assert all(result.get(key) is True for key in ('phaseParity','readinessDuringInference','cancelUntilRetirement','vocalFailureKeepsAcceptedStems','vocalCancelKeepsAcceptedStems','loadingCancelRestoresOriginal','loadingErrorPreservesOriginal','newerOpenRejectsLateHandoff','hidden','muted')),result
+  assert result.get('realModels') is False and sha(source)==original and not list((root/'library').glob('*/project.json'))
+  owner=json.loads(control.with_suffix('.owner.json').read_text());pid=owner['pid']
+  if sys.platform.startswith('linux'):
+   proc=Path(f'/proc/{pid}/stat')
+   fields=proc.read_text().rsplit(') ',1)[1].split() if proc.exists() else None
+   assert fields is None or fields[19]!=owner['startTicks'] or fields[0]=='Z','Owned vocal descendant survived quit'
+  else:
+   current=subprocess.run(['ps','-p',str(pid),'-o','lstart=,comm='],capture_output=True,text=True)
+   assert current.returncode!=0 or current.stdout.strip()!=owner['identity'],'Owned vocal descendant survived quit'
+  print('PASS: split phases, live readiness, accepted stems retention and epoch-fenced loading rollback')
+  sys.exit(0)
+ assert all(result[k] for k in ['nativeFileDrop','unsavedOriginal','splitSevenLanes','leadBacking','saveOnlyPublishesOnRequest','seventhLaneMixRestored','nativePlayback','hidden','muted'])
  model_install=None
  if args.fresh_models:
   proof=out/'migration-models.json';assert proof.is_file(),'Fresh run reached no released-model installation receipt'

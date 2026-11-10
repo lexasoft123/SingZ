@@ -63,7 +63,7 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                 cx.background_executor().timer(Duration::from_millis(100)).await;
                 for rows in [false, true] {
                     handle.update(cx, |_, w, cx| -> anyhow::Result<()> {
-                        view.update(cx, |this, cx| { this.screen = Screen::Library; this.backdrop = None; cx.notify(); });
+                        view.update(cx, |this, cx| { this.screen = Screen::Library; this.backdrop.borrow_mut().clear(w, cx); cx.notify(); });
                         w.refresh(); let _ = w.draw(cx);
                         view.update(cx, |this, cx| {
                             this.log_panel.update(cx, |log, cx| log.set_fixture(rows, false, cx));

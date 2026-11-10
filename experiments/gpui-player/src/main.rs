@@ -23,6 +23,9 @@ mod region_gesture;
 mod region_host;
 mod karaoke_host;
 mod analysis_host;
+mod backdrop_clock;
+#[cfg(feature="ui-tests")]
+mod ui_modal_backdrop;
 mod analyze_provenance;
 mod project_key;
 mod desktop_actions;
@@ -575,7 +578,8 @@ struct Player {
     previous_screen: Screen,
     songs_catalog: bool,
     header: Entity<header::Header>,
-    backdrop: Option<Arc<RenderImage>>,
+    backdrop: Rc<RefCell<singz_uikit::ModalBackdropCache>>,
+    backdrop_clock: backdrop_clock::Clock,
     background: background::Background,
     transport: Entity<transport::Transport>,
     pitch_strip: Entity<pitch_strip::PitchStrip>,
@@ -654,6 +658,10 @@ struct Player {
     source_job: Option<u64>,
     source_saving: bool,
     source_split: Option<source_jobs::Mode>,
+    source_split_combined: bool,
+    source_combined_next: Option<(u64, u64)>,
+    source_cancelling: Option<u64>,
+    source_split_handoff: Option<source_jobs::SplitHandoff<(source_jobs::Output, SourceResume)>>,
     source_lyrics_fingerprint: Option<Option<String>>,
     rename_pending: Option<RenamePending>,
     focus_after_title: bool,
@@ -1430,7 +1438,8 @@ impl Player {
             previous_screen: Screen::Library,
             songs_catalog: true,
             header,
-            backdrop: None,
+            backdrop: Default::default(),
+            backdrop_clock: Default::default(),
             background: background::Background::new(),
             transport,
             pitch_strip,
@@ -1503,6 +1512,10 @@ impl Player {
             source_job: None,
             source_saving: false,
             source_split: None,
+            source_split_combined: false,
+            source_combined_next: None,
+            source_cancelling: None,
+            source_split_handoff: None,
             source_lyrics_fingerprint: None,
             rename_pending: None,
             focus_after_title: false,
@@ -1698,6 +1711,13 @@ impl Player {
         cx.notify();
     }
     fn start_source(&mut self, job: source_jobs::Job, cx: &mut Context<Self>) {
+        // A newer Open supersedes a pending split load immediately. Restoring
+        // its original epoch first prevents the old load from being adopted
+        // while the new source's private decode is still running.
+        if matches!(&job, source_jobs::Job::Open(_)) && self.source_split_loading() {
+            self.cancel_source(cx);
+        }
+        let combined = matches!(&job, source_jobs::Job::RefreshLyrics { .. }) && self.source_split_combined;
         let saving=matches!(&job,source_jobs::Job::Save{..});
         self.pause_practice(cx);
         let split = match &job {
@@ -1719,6 +1739,10 @@ impl Player {
                     self.source_saving=saving;
                     if saving { self.source_save_seq=self.edit_seq; }
                     self.source_split = split;
+                    self.source_split_combined = combined;
+                    self.source_combined_next = None;
+                    self.source_cancelling = None;
+                    self.source_split_handoff = None;
                     self.notice = None;
                     self.source_status = Arc::new(source_jobs::Snapshot {
                         generation: id,
@@ -1750,7 +1774,48 @@ impl Player {
         self.reset_transport_timing(cx);
         self.start_source(source_jobs::Job::Open(path), cx);
     }
+    fn source_split_loading(&self) -> bool {
+        self.source_split_handoff.as_ref().is_some_and(|handoff| handoff.epoch == self.native_epoch)
+    }
     fn cancel_source(&mut self, cx: &mut Context<Self>) {
+        if self.source_combined_next.is_some_and(|(epoch, _)| epoch == self.native_epoch) {
+            self.source_combined_next = None;
+            self.source_job = None;
+            self.source_split = None;
+            self.source_split_combined = false;
+            self.transport.update(cx, |t, cx| t.set_progress(None, cx));
+            self.start_beat_detection(false, cx);
+            cx.notify();
+            return;
+        }
+        if self.source_split_loading() {
+            let mut handoff = self.source_split_handoff.take().unwrap();
+            let Some((output, resume)) = handoff.cancel(self.native_epoch) else {
+                self.source_split_handoff = Some(handoff);
+                return;
+            };
+            self.monitor_actions.retain(|a| !matches!(a, DeferredAudio::SourceOutput(_, _, _)));
+            // Reopening the retained original revokes the pending candidate's
+            // native epoch. Its late Opened/Error cannot replace this rollback.
+            self.open_source_output(output, Some(resume), cx);
+            handoff.epoch = self.native_epoch;
+            self.source_split_handoff = Some(handoff);
+            cx.notify();
+            return;
+        }
+        if let (Some(id), Some(_)) = (self.source_job, self.source_split) {
+            if self.source_cancelling == Some(id) { return; }
+            diagnostics::event("projects", "Project operation cancellation requested.", diagnostics::Level::Warn);
+            if let Some(service) = &self.source_service { service.cancel(); }
+            self.source_cancelling = Some(id);
+            // Keep the pill and owner until the worker has actually retired
+            // its child tree. The result remains disowned even if it won a race.
+            cx.notify();
+            return;
+        }
+        self.disown_source(cx);
+    }
+    fn disown_source(&mut self, cx: &mut Context<Self>) {
         if self.source_job.is_some(){diagnostics::event("projects","Project operation cancelled.",diagnostics::Level::Warn);}
         if self.metronome_save_waiting && self.source_job.is_some() {
             self.metronome_save_waiting = false;
@@ -1763,6 +1828,10 @@ impl Player {
         self.cancel_source_publication(cx);
         self.source_saving=false;
         self.source_split = None;
+        self.source_split_combined = false;
+        self.source_combined_next = None;
+        self.source_cancelling = None;
+        self.source_split_handoff = None;
         self.transport.update(cx, |t, cx| t.set_progress(None, cx));
         self.monitor_actions
             .retain(|a| !matches!(a, DeferredAudio::SourceOutput(_, _, _)));
@@ -1795,13 +1864,16 @@ impl Player {
         }
     }
     fn split_source(&mut self, mode: source_jobs::Mode, cx: &mut Context<Self>) {
+        self.start_split_stage(mode, false, cx);
+    }
+    fn start_split_stage(&mut self, mode: source_jobs::Mode, continuation: bool, cx: &mut Context<Self>) {
         if (self.tracks_pending.is_some()||self.carry_pending.is_some()||self.rate_busy())||!self.audio_available(){return;}
         if self.lyrics_sidebar_editor_after||self.lyrics_sidebar_rename_after.is_some()||self.lyrics_sidebar_import_after.is_some(){return;}
         if self.metronome_pending.is_some()
-            || self.metronome_save_requested
-            || self.metronome_save_waiting
+            || (!continuation && (self.metronome_save_requested || self.metronome_save_waiting))
             || self.counting_in
         {
+            if continuation { return; }
             self.notice = Some(
                 "Wait for count-in and the pending metronome changes or Save to finish.".into(),
             );
@@ -1831,18 +1903,63 @@ impl Player {
                 lyrics_fingerprint: project.lyrics_fingerprint.clone(),
             })
         };
+        let combined = mode == source_jobs::Mode::Combined || continuation;
+        let execution_mode = if mode == source_jobs::Mode::Combined { source_jobs::Mode::Stems } else { mode };
         self.start_source(
             source_jobs::Job::Split {
                 dir: project.dir.clone(),
                 custom: project.lane_specs.iter().filter(|lane|lane.custom).cloned().collect(),
                 raw,
-                mode,
+                mode: execution_mode,
+                require_vocals: mode != source_jobs::Mode::Stems,
                 target,
             },
             cx,
         );
+        if self.source_job.is_some() && self.source_split == Some(execution_mode) {
+            self.source_split_combined = combined;
+        }
     }
     fn poll_sources(&mut self, cx: &mut Context<Self>) {
+        if let Some((epoch, retired_job)) = self.source_combined_next {
+            if epoch != self.native_epoch {
+                self.source_combined_next = None;
+                if self.source_job == Some(retired_job) {
+                    self.source_job = None;
+                    self.source_split = None;
+                    self.source_split_combined = false;
+                }
+            } else if self.source_job == Some(retired_job) {
+                // The first stage is accepted. Keep its composite request while
+                // native restore/control acknowledgements temporarily defer UVR.
+                self.source_job = None;
+                self.start_split_stage(source_jobs::Mode::Vocals, true, cx);
+                if self.source_job.is_some() {
+                    self.source_split_combined = true;
+                    self.source_combined_next = None;
+                } else if self.notice.is_some() {
+                    self.source_combined_next = None;
+                    self.source_split = None;
+                    self.source_split_combined = false;
+                } else {
+                    self.source_job = Some(retired_job);
+                }
+            }
+        }
+        if self.source_job.is_some_and(|id| self.source_cancelling == Some(id)
+            && self.source_service.as_ref().is_some_and(|service| service.retired(id)))
+        {
+            let accepted_stems = self.source_split_combined && self.source_split == Some(source_jobs::Mode::Vocals);
+            self.source_job = None;
+            self.source_split = None;
+            self.source_split_combined = false;
+            self.source_cancelling = None;
+            self.source_saving = false;
+            self.transport.update(cx, |t, cx| t.set_progress(None, cx));
+            if accepted_stems { self.start_beat_detection(false, cx); }
+            cx.notify();
+            return;
+        }
         let Some(service) = &self.source_service else {
             return;
         };
@@ -1880,6 +1997,18 @@ impl Player {
             }
         }
         if self.source_job == Some(snapshot.generation) && !snapshot.busy {
+            if self.source_cancelling == Some(snapshot.generation) {
+                let accepted_stems = self.source_split_combined && self.source_split == Some(source_jobs::Mode::Vocals);
+                self.source_job = None;
+                self.source_split = None;
+                self.source_split_combined = false;
+                self.source_cancelling = None;
+                self.source_saving = false;
+                self.transport.update(cx, |t, cx| t.set_progress(None, cx));
+                if accepted_stems { self.start_beat_detection(false, cx); }
+                cx.notify();
+                return;
+            }
             if let (Some(output),Some(project))=(&snapshot.result,&self.project) {
                 if output.working && self.source_split.is_some() && Some(project.lyrics_fingerprint.clone())!=self.source_lyrics_fingerprint {
                     let job=source_jobs::Job::RefreshLyrics {source_dir:project.dir.clone(),expected:project.lyrics_fingerprint.clone(),output:output.clone()};
@@ -1889,6 +2018,7 @@ impl Player {
                 }
             }
             let was_splitting=self.source_split.is_some();
+            let accepted_stems = self.source_split_combined && self.source_split == Some(source_jobs::Mode::Vocals);
             let resume = self.source_split.and_then(|mode| {
                 self.project.as_ref().map(|project| SourceResume {
                     restart_cycle:self.restart_cycle.snapshot(self.region_target().selection,self.playing),
@@ -1904,6 +2034,8 @@ impl Player {
             self.source_job = None;
         self.source_saving=false;
             self.source_split = None;
+            self.source_cancelling = None;
+            if snapshot.result.is_none() { self.source_split_combined = false; }
             if let Some(output) = &snapshot.result {
                 if output.publication_hash.is_some() {
                     self.adopt_source_publication(output, !self.tracks_audio_failed, cx);
@@ -1925,6 +2057,11 @@ impl Player {
                 } else {
                     self.notice = Some(error.clone());
                 }
+                if accepted_stems {
+                    let notice = self.notice.clone();
+                    self.start_beat_detection(false, cx);
+                    if notice.is_some() { self.notice = notice; }
+                }
             }
             if snapshot.engine_revision==0&&self.source_job.is_none(){
                 // Both successful and failed Open can supersede the startup
@@ -1940,6 +2077,32 @@ impl Player {
         resume: Option<SourceResume>,
         cx: &mut Context<Self>,
     ) {
+        let handoff = if let Some(mode) = resume.as_ref().and_then(|resume| resume.mode) {
+            self.project.as_ref().map(|project| {
+                let rollback = source_jobs::Output {
+                    publication_hash: None,
+                    path: project.dir.clone(),
+                    working: self.source_working,
+                    target: self.source_target.clone(),
+                };
+                let rollback_resume = SourceResume {
+                    restart_cycle: self.restart_cycle.snapshot(self.region_target().selection, self.playing),
+                    play_serial: self.native_play_serial,
+                    position: self.position,
+                    playing: self.playing,
+                    mode: None,
+                    title: None,
+                    dirty: self.edit_seq > self.saved_seq,
+                    mix: self.current_mix(project),
+                };
+                source_jobs::SplitHandoff::new(self.native_epoch, self.source_status.generation,
+                    mode, self.source_split_combined, (rollback, rollback_resume))
+            })
+        } else {
+            // A delayed monitor-cleanup rollback retains its cancellation owner.
+            self.source_split_handoff.clone().filter(|handoff| handoff.cancelling && handoff.epoch == self.native_epoch)
+        };
+        if let Some(handoff) = handoff.clone() { self.source_split_handoff = Some(handoff); }
         if self.defer_monitor(
             DeferredAudio::SourceOutput(output.clone(), resume.clone(), self.native_epoch),
             cx,
@@ -1957,6 +2120,10 @@ impl Player {
         self.native_rate_save_requested=rate_save;
         if self.native_epoch != epoch {
             self.source_pending = Some((self.native_epoch, output.working, output.target, resume));
+            if let Some(mut handoff) = handoff {
+                handoff.epoch = self.native_epoch;
+                self.source_split_handoff = Some(handoff);
+            }
         }
     }
     fn resume_project_audio(&mut self, resume: SourceResume, cx: &mut Context<Self>) {
@@ -2384,7 +2551,7 @@ impl Player {
         if let Some(backend)=&self.backend{backend.cancel_lyrics_search();}
         self.cancel_lyrics_alignment(cx);
         self.header.update(cx, |h, cx| h.cancel_title(cx));
-        self.cancel_source(cx);
+        self.disown_source(cx);
         self.source_pending = None;
         self.rename_pending = None;
         self.stop_training(cx);
@@ -2614,6 +2781,9 @@ impl Player {
                 integration::Event::Opened(epoch, project, status, peaks)
                     if epoch == self.native_epoch =>
                 {
+                    let split_handoff = if self.source_split_handoff.as_ref().is_some_and(|handoff| handoff.epoch == epoch) {
+                        self.source_split_handoff.take()
+                    } else { None };
                     diagnostics::event("projects",format!("Loaded {}",project.name),diagnostics::Level::Info);
                     self.track_rename=None;self.tracks_pending=None;self.tracks_audio_failed=false;
                     self.settings.update(cx, |settings, cx| settings.set_playback_status(Some(&status), cx));
@@ -2771,7 +2941,17 @@ impl Player {
                     // deletion recovery keeps its restored mixer, including a
                     // guide the user deliberately unmuted while Karaoke was on.
                     self.restore_karaoke(mute_karaoke_guide,cx);
-                    self.start_beat_detection(false, cx);
+                    if let Some(handoff) = split_handoff.filter(|handoff| handoff.continue_after_acceptance(epoch))
+                    {
+                        // The six lanes are now accepted and remain useful even
+                        // if the subsequent vocal separation fails or is cancelled.
+                        self.source_job = Some(handoff.retired_job);
+                        self.source_split = Some(source_jobs::Mode::Stems);
+                        self.source_split_combined = true;
+                        self.source_combined_next = Some((epoch, handoff.retired_job));
+                    } else {
+                        self.start_beat_detection(false, cx);
+                    }
                 }
                 integration::Event::Status(epoch,status)=>self.playback_status(epoch,status,cx),
                 integration::Event::Metronome(epoch, serial, met, beat, result)
@@ -3009,6 +3189,17 @@ impl Player {
                     });
                 }
                 integration::Event::Error(epoch, error) if epoch == self.native_epoch => {
+                    if self.source_split_handoff.as_ref().is_some_and(|handoff| handoff.epoch == epoch && !handoff.cancelling) {
+                        diagnostics::event("audio", error.clone(), diagnostics::Level::Error);
+                        self.cancel_source(cx);
+                        self.notice = Some(error);
+                        cx.notify();
+                        continue;
+                    }
+                    if self.source_split_handoff.as_ref().is_some_and(|handoff| handoff.epoch == epoch) {
+                        self.source_split_handoff = None;
+                    }
+                    if self.source_combined_next.is_some_and(|(owner, _)| owner == epoch) { self.source_combined_next = None; }
                     let rate_save_failed=self.native_rate_save_requested;
                     let rate_navigation=self.native_rate_navigation.take();
                     self.reset_transport_timing(cx);
@@ -4210,13 +4401,13 @@ impl Player {
         cx.notify();
     }
     fn lyric_countdown_cue(&self,playing:bool)->Option<lyrics_countdown::Cue> {
-        let position=self.position+0.15;
+        let position=self.display_position()+0.15;
         let next=self.lyric_document.lines.partition_point(|line|line.start<=position);
         let start=self.lyric_document.lines.get(next)?.start;
         lyrics_countdown::at_target(next,start as f64,next.checked_sub(1).map(|i|self.lyric_document.lines[i].end as f64),position as f64,playing)
     }
     fn lyric_countdown_preload(&self)->Option<lyrics_countdown::Cue> {
-        let position=self.position+0.15;
+        let position=self.display_position()+0.15;
         let next=self.lyric_document.lines.partition_point(|line|line.start<=position);
         let start=self.lyric_document.lines.get(next)?.start;
         let previous_end=next.checked_sub(1).map(|i|self.lyric_document.lines[i].end);
@@ -4258,7 +4449,7 @@ impl Player {
                 .child(message)
                 .into_any_element();
         }
-        let position = self.position + 0.15;
+        let position = self.display_position() + 0.15;
         let document = self.lyric_document.clone();
         let active = document.active(position);
         let line_started = position >= document.lines[0].start;
@@ -4819,7 +5010,7 @@ impl Player {
         let label=self.lane_label(i);
         let grid = self.paint_beats.clone().filter(|_| self.metronome.grid);
         let beat_cache = self.beat_cache.clone();
-        let position = self.position;
+        let position = self.display_position();
         let duration = self.duration;
         let view_start = self.view_start;
         let view_end = self.view_end;
@@ -5006,7 +5197,7 @@ impl Player {
     fn cancel_source_from_escape(&mut self, cx: &mut Context<Self>) {
         // Escape has no Save-cancel action in the current interface. A writer
         // may already have committed before its result reaches the next frame.
-        if self.source_job.is_some() && !self.source_saving {
+        if (self.source_job.is_some() && !self.source_saving) || self.source_split_loading() {
             self.cancel_source(cx);
         }
     }
@@ -5038,6 +5229,46 @@ impl Player {
     }
 
 }
+impl Player {
+    fn blurred_modal_open(&self, cx: &App) -> bool {
+        matches!(self.screen, Screen::Settings | Screen::Log | Screen::Models)
+            || self.project_delete.read(cx).is_open() || self.lyrics_editor_open
+            || self.project_picker_open || self.drive_projects_open
+            || self.library_import_open || self.stem_export_open
+            || self.engine_setup.read(cx).is_open() || self.whats_new.read(cx).is_open()
+    }
+    fn display_position(&self) -> f32 {
+        self.backdrop_clock.position(self.native_epoch, self.position)
+    }
+    fn backdrop_content_revision(&self, cx: &App) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        let base = if matches!(self.screen, Screen::Settings | Screen::Log | Screen::Models) {
+            self.previous_screen
+        } else { self.screen };
+        (base as u8, self.native_epoch, self.native_lane_revision, self.native_carry_revision,
+            self.locale_revision, self.edit_seq, self.saved_seq).hash(&mut hash);
+        if base == Screen::Training {
+            // Loaded history/profile and persistence error changes share this
+            // store revision, including updates accepted behind a modal.
+            self.training_store_revision.hash(&mut hash);
+        }
+        self.library.read(cx).backdrop_revision().hash(&mut hash);
+        self.header.read(cx).backdrop_fingerprint(cx).hash(&mut hash);
+        (self.loaded_song, self.karaoke, self.duration.to_bits(),
+            self.view_start.to_bits(), self.view_end.to_bits()).hash(&mut hash);
+        self.gain.hash(&mut hash); self.muted.hash(&mut hash); self.solo.hash(&mut hash);
+        self.song_title.hash(&mut hash);
+        (Arc::as_ptr(&self.lyric_document) as usize).hash(&mut hash);
+        if let Some(project) = &self.project {
+            project.dir.hash(&mut hash); project.metadata_hash.hash(&mut hash);
+            (Arc::as_ptr(&project.pitch) as usize).hash(&mut hash);
+        }
+        if let Some(grid) = &self.paint_beats { (Rc::as_ptr(grid) as usize).hash(&mut hash); }
+        hash.finish()
+    }
+}
+
 impl Render for Player {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_audio_provider(cx);
@@ -5048,12 +5279,15 @@ impl Render for Player {
         self.sync_audio_provider(cx);
         if self.screen!=Screen::Player {self.carry_open=false;}
         self.refresh_carry_widget(cx);
-        let progress = self
-            .source_split
-            .filter(|_| self.source_job.is_some())
-            .map(|_| (self.source_status.label.clone(), self.source_status.percent));
+        let progress = self.source_split_handoff.as_ref()
+            .and_then(|handoff| handoff.progress(self.native_epoch))
+            .or_else(|| self.source_combined_next.filter(|(epoch, _)| *epoch == self.native_epoch)
+                .map(|_| source_jobs::SplitProgress::stage("Loading stems…", 99., source_jobs::Mode::Stems, true, false)))
+            .or_else(|| self.source_split.filter(|_| self.source_job.is_some()).map(|mode|
+                source_jobs::SplitProgress::stage(&self.source_status.label, self.source_status.percent,
+                    mode, self.source_split_combined, self.source_cancelling == self.source_job)));
         self.transport
-            .update(cx, |t, cx| t.set_progress(progress, cx));
+            .update(cx, |t, cx| t.set_split_progress(progress, cx));
         let audio_available=self.audio_available();
         let can_reveal_stems=self.backend.is_none() || self.project.as_ref().is_some_and(|p|
             p.lane_id(0)==Some("vocals") && p.lanes.iter().any(|(slot,_)|*slot==0));
@@ -5091,7 +5325,7 @@ impl Render for Player {
         // Capture before the outer modal transition moves focus to the root.
         // A notice can also appear above an already-open editor or Settings.
         let notice_focus=if notice_open&&!self.notice_was_open {window.focused(cx)}else{None};
-        let modal_open = self.loading || (self.source_job.is_some() && self.source_split.is_none())
+        let modal_open = (self.loading && !self.source_split_loading()) || (self.source_job.is_some() && self.source_split.is_none())
             || matches!(self.screen, Screen::Settings | Screen::Log | Screen::Models)
             || self.project_delete.read(cx).is_open()
             || self.lyrics_editor_open
@@ -5101,6 +5335,18 @@ impl Render for Player {
             || self.engine_setup.read(cx).is_open()
             || self.whats_new.read(cx).is_open()
             || self.quick_start.read(cx).is_open();
+        let backdrop_open = self.blurred_modal_open(cx);
+        if backdrop_open && !self.backdrop_clock.is_open() {
+            // Underlay popovers are deferred by GPUI and paint after the root.
+            // Close them before a dialog opens rather than capture them late or
+            // let an underlay menu paint above its modal.
+            self.carry_open = false;
+            self.metronome_open = false;
+            self.transport.update(cx, |transport, cx| { transport.dismiss_popovers(cx); });
+            self.language_menu.update(cx, |menu, cx| menu.close(window, cx));
+            self.training.update(cx, |training, cx| { training.dismiss_popup(cx); });
+        }
+        self.backdrop_clock.observe(backdrop_open, self.native_epoch, self.position);
         if modal_open != self.modal_was_open {
             // Resume from now, excluding time spent behind a modal.
             self.last = Instant::now();
@@ -5163,7 +5409,7 @@ impl Render for Player {
         self.transport.update(cx, |transport, cx| {
             transport.set_output_mounted(output_mounted,self.master_volume,cx);
             transport.set_state(
-                self.position,
+                self.display_position(),
                 self.playing,
                 transport_rate.1,
                 region_looping,
@@ -5231,26 +5477,7 @@ impl Render for Player {
                 cx,
             )
         });
-        if matches!(self.screen, Screen::Settings | Screen::Log | Screen::Models)
-            || self.project_delete.read(cx).is_open()
-            || self.lyrics_editor_open
-            || self.project_picker_open || self.drive_projects_open
-            || self.library_import_open || self.stem_export_open
-            || self.engine_setup.read(cx).is_open()
-            || self.whats_new.read(cx).is_open()
-        {
-            if self.backdrop.is_none() {
-                self.backdrop = window.render_to_image().ok().map(|image| {
-                    let mut blurred = image::imageops::blur(&image, 8. * window.scale_factor());
-                    for pixel in blurred.pixels_mut() {
-                        pixel.0.swap(0, 2);
-                    }
-                    Arc::new(RenderImage::new(vec![image::Frame::new(blurred)]))
-                });
-            }
-        } else {
-            self.backdrop = None;
-        }
+        if !backdrop_open { self.backdrop.borrow_mut().clear(window, cx); }
         let now = Instant::now();
         let dt = now.duration_since(self.last).as_secs_f32();
         self.last = now;
@@ -5308,7 +5535,7 @@ impl Render for Player {
         }
         animating |= self.advance_timeline(now,self.screen==Screen::Player&&!modal_open);
         self.pitch_strip.update(cx, |strip, cx| {
-            strip.set_position(self.position, cx);
+            strip.set_position(self.display_position(), cx);
             strip.set_view(self.view_start, self.view_end, cx);
         });
         animating |= self.playing && self.timing_status.as_ref().is_some_and(|status|status.count_in_heard.is_some());
@@ -5344,7 +5571,7 @@ impl Render for Player {
         let scrub_bounds = self.region.bounds.clone();
         let scrub_hit = scrub_bounds.clone();
         let head =
-            if self.duration>0.&&self.view_end>self.view_start{(self.position/self.duration-self.view_start)/(self.view_end-self.view_start)}else{-1.};
+            if self.duration>0.&&self.view_end>self.view_start{(self.display_position()/self.duration-self.view_start)/(self.view_end-self.view_start)}else{-1.};
         let head_pixels =
             (head * timeline_width * window.scale_factor()).round() / window.scale_factor();
         let region_owner=cx.entity().downgrade();
@@ -5448,7 +5675,7 @@ impl Render for Player {
                 cx.notify();
             }
         });
-        self.refresh_transport_timing(cx);
+        if !backdrop_open { self.refresh_transport_timing(cx); }
         self.transport.update(cx,|t,cx|t.reconcile_focus(window,cx));
         let ruler_grid = self.paint_beats.clone().filter(|_| self.metronome.grid);
         let ruler_grid_cache = self.beat_cache.clone();
@@ -5472,6 +5699,10 @@ impl Render for Player {
                 self.track_probe("zoom-in".into(),singz_uikit::zoom_button("zoom-in","+",false)).on_click(cx.listener(|this,_,_,cx|this.zoom_by(0.65,cx))),
                 self.track_probe("zoom-fit".into(),singz_uikit::zoom_button("zoom-fit",i18n::t("player.stack.full"),self.view_start==0.&&self.view_end==1.)).on_click(cx.listener(|this,_,_,cx|this.timeline_input(timeline_viewport::Input::Fit,cx))),
             ])));
+        self.backdrop_clock.painted(self.native_epoch, self.position);
+        let backdrop_key = singz_uikit::ModalBackdropKey::new(
+            window.viewport_size(), window.scale_factor(), self.backdrop_content_revision(cx));
+        let backdrop = self.backdrop.clone();
         let content = match base_screen {
             Screen::Training => self.training.clone().into_any_element(),
             Screen::Library => self.library.clone().into_any_element(),
@@ -5751,45 +5982,44 @@ impl Render for Player {
                 }
             })
             .when(self.notice.is_none(),|root|root.child(self.success_toast.clone()))
+            .when(backdrop_open, |root| root.child(
+                canvas(|bounds, _, _| bounds, move |bounds, _, window, cx| {
+                    if let Err(error) = backdrop.borrow_mut().paint(
+                        backdrop_key, bounds, window, cx,
+                        |window| window.render_painted_prefix_to_image(),
+                    ) {
+                        diagnostics::log("ui", &format!("Modal backdrop capture failed: {error:#}"), diagnostics::Level::Warn);
+                    }
+                }).absolute().inset_0()
+            ))
             .when(self.whats_new.read(cx).is_open() && self.release_surface_available(cx),|root|{
-                root.when_some(self.backdrop.clone(),|root,image|root.child(div().absolute().inset_0().child(img(image).size_full())))
-                    .child(self.whats_new.clone())
+                root.child(self.whats_new.clone())
             })
             .when(self.engine_setup.read(cx).is_open(),|root|{
-                root.when_some(self.backdrop.clone(),|root,image|root.child(div().absolute().inset_0().child(img(image).size_full())))
-                    .child(self.engine_setup.clone())
+                root.child(self.engine_setup.clone())
             })
             .when(self.stem_export_open, |root| {
-                root.when_some(self.backdrop.clone(),|root,image|root.child(div().absolute().inset_0().child(img(image).size_full())))
-                    .child(self.stem_export_dialog.clone())
+                root.child(self.stem_export_dialog.clone())
             })
             .when(self.library_import_open, |root| {
-                root.when_some(self.backdrop.clone(),|root,image|root.child(div().absolute().inset_0().child(img(image).size_full())))
-                    .child(self.library_import.clone())
+                root.child(self.library_import.clone())
             })
             .when(self.project_picker_open, |root| {
-                root.when_some(self.backdrop.clone(),|root,image|root.child(div().absolute().inset_0().child(img(image).size_full())))
-                    .child(self.project_picker.clone())
+                root.child(self.project_picker.clone())
             })
             .when(self.drive_projects_open, |root| {
-                root.when_some(self.backdrop.clone(),|root,image|root.child(div().absolute().inset_0().child(img(image).size_full())))
-                    .child(self.drive_projects.clone())
+                root.child(self.drive_projects.clone())
             })
             .when(self.project_delete.read(cx).is_open(), |root| {
-                root.when_some(self.backdrop.clone(),|root,image|root.child(div().absolute().inset_0().child(img(image).size_full())))
-                    .child(self.project_delete.clone())
+                root.child(self.project_delete.clone())
             })
             .when(self.lyrics_editor_open, |root| {
-                root.when_some(self.backdrop.clone(),|root,image|root.child(div().absolute().inset_0().child(img(image).size_full())))
-                    .child(singz_uikit::modal_scrim().absolute().inset_0().on_mouse_down(MouseButton::Left,cx.listener(|s,_,_,cx|{
+                root.child(singz_uikit::modal_scrim().absolute().inset_0().on_mouse_down(MouseButton::Left,cx.listener(|s,_,_,cx|{
                         s.lyrics_editor.update(cx,|editor,cx|editor.request_close(cx));cx.stop_propagation();
                     })).child(self.lyrics_editor.clone()))
             })
             .when(self.screen == Screen::Settings, |root| {
-                root.when_some(self.backdrop.clone(), |root, image| {
-                    root.child(div().absolute().inset_0().child(img(image).size_full()))
-                })
-                .child(
+                root.child(
                     singz_uikit::modal_scrim()
                         .id("settings-scrim")
                         .on_mouse_down(
@@ -5814,22 +6044,16 @@ impl Render for Player {
                 )
             })
             .when(self.screen == Screen::Log, |root| {
-                root.when_some(self.backdrop.clone(), |root, image| {
-                    root.child(div().absolute().inset_0().child(img(image).size_full()))
-                })
-                .child(self.log_panel.clone())
+                root.child(self.log_panel.clone())
             })
             .when(self.screen == Screen::Models, |root| {
-                root.when_some(self.backdrop.clone(), |root, image| {
-                    root.child(div().absolute().inset_0().child(img(image).size_full()))
-                })
-                .child(self.models.clone())
+                root.child(self.models.clone())
             });
         #[cfg(feature = "ui-tests")]
         let root = root.when(self.text_phase_check, |root| {
             root.child(ui_text_phase::overlay())
         });
-        let root = root.when(self.loading, |root| {
+        let root = root.when(self.loading && !self.source_split_loading(), |root| {
             root.child(
                 singz_uikit::modal_scrim().child(
                     singz_uikit::modal_card()
@@ -6225,6 +6449,11 @@ fn main() {
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_NATIVE_LYRICS") {
             assert!(background && std::env::var_os("SINGZ_MUTE").is_some());
             ui_native_lyrics::run(window_handle, view.clone(), directory.into(), cx);
+        }
+        #[cfg(feature = "ui-tests")]
+        if let Some(directory) = std::env::var_os("SINGZ_GPUI_MODAL_BACKDROP_REVIEW") {
+            assert!(background && std::env::var("SINGZ_MUTE").as_deref()==Ok("1"));
+            ui_modal_backdrop::run(window_handle, view.clone(), directory.into(), cx);
         }
         #[cfg(feature = "ui-tests")]
         if let Some(directory) = std::env::var_os("SINGZ_GPUI_INTEGRATION_TEST") {

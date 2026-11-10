@@ -8,6 +8,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{
+    cell::RefCell,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -25,6 +26,88 @@ pub enum Mode {
     Stems,
     Combined,
     Vocals,
+}
+/// The footer keeps progress through owned inference and native lane loading.
+/// Cancellation admission is typed, never inferred from translated copy.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SplitProgress {
+    pub label: String,
+    pub percent: f32,
+    pub cancellable: bool,
+}
+impl SplitProgress {
+    pub fn running(label: &str, percent: f32, cancelling: bool) -> Self {
+        Self {
+            label: if cancelling { "Cancelling…".into() } else { split_label(label) },
+            percent,
+            cancellable: !cancelling,
+        }
+    }
+    pub fn stage(label: &str, percent: f32, mode: Mode, combined: bool, cancelling: bool) -> Self {
+        let label = if mode == Mode::Vocals && label != "Loading vocals…" { "Separating vocals" } else { label };
+        if !combined || mode == Mode::Combined { return Self::running(label, percent, cancelling); }
+        let step = if mode == Mode::Stems { 1 } else { 2 };
+        let mut progress = Self::running(label, ((step - 1) as f32 * 100. + percent) / 2., cancelling);
+        if !cancelling {
+            progress.label = crate::i18n::tv("library.splitWorkflow.combinedLabel", &[("step", step.to_string()), ("label", progress.label)]);
+        }
+        progress
+    }
+}
+fn split_label(label: &str) -> String {
+    let (step, label) = if let Some(label) = label.strip_prefix("1/2 · ") {
+        (Some(1), label)
+    } else if let Some(label) = label.strip_prefix("2/2 · ") {
+        (Some(2), label)
+    } else { (None, label) };
+    let key = match label {
+        "Preparing…" | "Checking splitter…" | "Preparing audio…" => "warmingUp",
+        "Splitting stems" => "splittingStems",
+        "Separating vocals" => "separatingVocals",
+        "Loading stems…" => "loadingStems",
+        "Loading vocals…" => "loadingVocals",
+        _ => return label.to_owned(),
+    };
+    let label = crate::i18n::t(&format!("library.splitWorkflow.{key}"));
+    step.map_or_else(|| label.clone(), |step| crate::i18n::tv(
+        "library.splitWorkflow.combinedLabel", &[("step", step.to_string()), ("label", label.clone())]))
+}
+fn loading_stage(mode: Mode, vocals: bool) -> (&'static str, f32) {
+    match (mode, vocals) {
+        (Mode::Combined, false) => ("1/2 · Loading stems…", 49.5),
+        (Mode::Combined, true) => ("2/2 · Loading vocals…", 99.5),
+        (Mode::Vocals, _) => ("Loading vocals…", 99.),
+        _ => ("Loading stems…", 99.),
+    }
+}
+/// Rollback data is captured before replacing the original graph, and can only
+/// be requested once by the owner of this exact native load epoch.
+#[derive(Clone)]
+pub struct SplitHandoff<T> {
+    pub epoch: u64,
+    pub retired_job: u64,
+    pub mode: Mode,
+    pub combined: bool,
+    pub rollback: T,
+    pub cancelling: bool,
+}
+impl<T: Clone> SplitHandoff<T> {
+    pub fn new(epoch: u64, retired_job: u64, mode: Mode, combined: bool, rollback: T) -> Self {
+        Self { epoch, retired_job, mode, combined, rollback, cancelling: false }
+    }
+    pub fn cancel(&mut self, epoch: u64) -> Option<T> {
+        if self.epoch != epoch || self.cancelling { return None; }
+        self.cancelling = true;
+        Some(self.rollback.clone())
+    }
+    pub fn continue_after_acceptance(&self, epoch: u64) -> bool {
+        self.epoch == epoch && self.combined && self.mode == Mode::Stems && !self.cancelling
+    }
+    pub fn progress(&self, epoch: u64) -> Option<SplitProgress> {
+        if self.epoch != epoch { return None; }
+        let (label, percent) = loading_stage(if self.combined { Mode::Combined } else { self.mode }, self.mode != Mode::Stems);
+        Some(SplitProgress::running(label, percent, self.cancelling))
+    }
 }
 #[derive(Clone, Debug)]
 pub struct Target {
@@ -56,6 +139,8 @@ pub enum Job {
         raw: Value,
         custom: Vec<crate::tracks::Lane>,
         mode: Mode,
+        /// Combined UI stage one must validate the vocal model before inference.
+        require_vocals: bool,
         target: Option<Target>,
     },
     Save {
@@ -88,6 +173,7 @@ enum Request {
 }
 pub struct Service {
     serial: Arc<AtomicU64>,
+    retired: Arc<AtomicU64>,
     tx: SyncSender<Request>,
     view: Arc<Mutex<Arc<Snapshot>>>,
     worker: Option<thread::JoinHandle<()>>,
@@ -100,12 +186,18 @@ impl Service {
     }
     /// A separate instance lets dialog rechecks avoid cancelling active source jobs.
     pub fn new_unchecked() -> Self {
+        Self::new_with_start_hook(|| {})
+    }
+    fn new_with_start_hook(start: impl FnOnce() + Send + 'static) -> Self {
         let (tx, rx) = mpsc::sync_channel(8);
         let serial = Arc::new(AtomicU64::new(1));
         let generation = serial.clone();
         let view = Arc::new(Mutex::new(Arc::new(Snapshot::default())));
         let output = view.clone();
+        let retired = Arc::new(AtomicU64::new(0));
+        let worker_retired = retired.clone();
         let worker = thread::spawn(move || {
+            start();
             let config = Config::source();
             let mut state = Snapshot::default();
             while let Ok(req) = rx.recv() {
@@ -115,7 +207,7 @@ impl Service {
                         state.result = None;
                         let started = Instant::now();
                         match crate::engine_status::discover(&config, &generation, id) {
-                            Ok(status) => {
+                            Ok(status) if cancelled(&generation, id).is_ok() => {
                                 state.ready = status.ok;
                                 state.engine_status = status;
                                 state.error = None;
@@ -135,13 +227,14 @@ impl Service {
                                 state.engine_revision += 1;
                                 publish(&mut state, &output);
                             }
-                            Err(_) => {}
+                            Ok(_) | Err(_) => {}
                         }
                     }
                     continue;
                 }
                 let Request::Run(id, job) = req else { break };
                 if cancelled(&generation, id).is_err() {
+                    worker_retired.fetch_max(id, Ordering::Release);
                     continue;
                 }
                 state.generation = id;
@@ -173,6 +266,7 @@ impl Service {
                     )),
                     _ => None,
                 };
+                let state_updates = RefCell::new(&mut state);
                 let result = execute_with_engine(
                     &config,
                     job,
@@ -181,7 +275,13 @@ impl Service {
                     &mut engine_status,
                     &mut engine_revision,
                     &mut engine_probe_started,
+                    |status, revision, started| {
+                        let mut state = state_updates.borrow_mut();
+                        publish_discovery(&mut state, &output, &generation, id, status, revision, started);
+                    },
                     |label, percent| {
+                        if generation.load(Ordering::Acquire) != id { return; }
+                        let mut state = state_updates.borrow_mut();
                         if label != last_stage {
                             crate::diagnostics::event(
                                 "splitter",
@@ -195,6 +295,7 @@ impl Service {
                         publish(&mut state, &output)
                     },
                 );
+                drop(state_updates);
                 if let Some(sync_save) = sync_save {
                     sync_save.finished(result.as_ref().ok().map(|output| output.path.as_path()));
                 }
@@ -224,10 +325,12 @@ impl Service {
                     }
                 }
                 publish(&mut state, &output);
+                worker_retired.fetch_max(id, Ordering::Release);
             }
         });
         let service = Self {
             serial,
+            retired,
             tx,
             view,
             worker: Some(worker),
@@ -254,6 +357,9 @@ impl Service {
     pub fn snapshot(&self) -> Arc<Snapshot> {
         self.view.lock().unwrap().clone()
     }
+    pub fn retired(&self, id: u64) -> bool {
+        self.retired.load(Ordering::Acquire) >= id
+    }
 }
 impl Drop for Service {
     fn drop(&mut self) {
@@ -267,6 +373,23 @@ impl Drop for Service {
 fn publish(s: &mut Snapshot, view: &Mutex<Arc<Snapshot>>) {
     s.revision += 1;
     *view.lock().unwrap() = Arc::new(s.clone());
+}
+fn publish_discovery(
+    state: &mut Snapshot,
+    view: &Mutex<Arc<Snapshot>>,
+    serial: &AtomicU64,
+    id: u64,
+    status: &crate::engine_status::EngineStatus,
+    revision: u64,
+    started: Option<Instant>,
+) -> bool {
+    if state.generation != id || serial.load(Ordering::Acquire) != id { return false; }
+    state.ready = status.ok;
+    state.engine_status = status.clone();
+    state.engine_revision = revision;
+    state.engine_probe_started = started;
+    publish(state, view);
+    true
 }
 fn cache() -> PathBuf {
     crate::audio_devices::directory().join("source-work")
@@ -1002,6 +1125,7 @@ fn execute(
         &mut status,
         &mut 0,
         &mut None,
+        |_, _, _| {},
         progress,
     );
     *ready = status.ok;
@@ -1015,6 +1139,7 @@ fn execute_with_engine(
     engine_status: &mut crate::engine_status::EngineStatus,
     engine_revision: &mut u64,
     engine_probe_started: &mut Option<Instant>,
+    mut engine_changed: impl FnMut(&crate::engine_status::EngineStatus, u64, Option<Instant>),
     mut progress: impl FnMut(&str, f32),
 ) -> Result<Output> {
     cancelled(serial, id)?;
@@ -1109,6 +1234,7 @@ fn execute_with_engine(
             mut raw,
             custom,
             mode,
+            require_vocals,
             mut target,
         } => {
             progress("Checking splitter…", 0.);
@@ -1125,9 +1251,11 @@ fn execute_with_engine(
                         message: Some(format!("{error:#}")),
                         ..Default::default()
                     };
+                    engine_changed(engine_status, *engine_revision, *engine_probe_started);
                     return Err(error);
                 }
             }
+            engine_changed(engine_status, *engine_revision, *engine_probe_started);
             ensure!(
                 engine_status.ok,
                 "{}",
@@ -1140,7 +1268,7 @@ fn execute_with_engine(
                 .resolved
                 .as_ref()
                 .context("The splitter has no validated execution command")?;
-            if mode != Mode::Stems {
+            if mode != Mode::Stems || require_vocals {
                 ensure!(
                     crate::engine_status::validated_pack(config),
                     "Backing-vocal separation requires the installed splitter pack. Download or reinstall it in AI models."
@@ -1212,6 +1340,8 @@ fn execute_with_engine(
                     &mut progress,
                     mode == Mode::Combined,
                 )?;
+                let (label, percent) = loading_stage(mode, false);
+                progress(label, percent);
                 if engine.needs_pcm() {
                     fs::remove_file(input)?;
                 }
@@ -1237,6 +1367,8 @@ fn execute_with_engine(
                     mode == Mode::Combined,
                     &backing_name,
                 )?;
+                let (label, percent) = loading_stage(mode, true);
+                progress(label, percent);
                 raw["settings"]["leadVocalSeparated"] = json!(true);
                 let mut entries = raw["settings"]["custom"]
                     .as_array()
@@ -1457,6 +1589,107 @@ mod tests {
         let captured = store.snapshot().unwrap().seq;
         target.finished(None); // Failed/cancelled attempt still gets finally mark.
         assert!(store.clear(captured).unwrap().dirs.contains_key(destination.to_str().unwrap()));
+    }
+
+    #[test]
+    fn queued_cancel_retires_without_first_snapshot_and_next_job_still_runs() {
+        let (release, blocked) = mpsc::channel();
+        let service = Service::new_with_start_hook(move || { blocked.recv().unwrap(); });
+        // Hold startup discovery and queue a split behind it. No Run snapshot
+        // has ever existed when the UI requests cancellation.
+        service.check().unwrap();
+        let id = service.start(Job::Split { dir: PathBuf::from("missing-queued-source"),
+            raw: json!({}), custom: vec![], mode: Mode::Stems, require_vocals: false, target: None }).unwrap();
+        service.cancel();
+        let ready = Snapshot { ready: true, engine_revision: 7, ..Default::default() };
+        *service.view.lock().unwrap() = Arc::new(ready);
+        assert!(!service.retired(id));
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !service.retired(id) {
+            assert!(Instant::now() < deadline, "Queued cancellation never retired");
+            thread::sleep(Duration::from_millis(2));
+        }
+        let observed = service.snapshot();
+        assert_eq!(observed.generation, 0);
+        assert!(observed.ready);
+        assert_eq!(observed.engine_revision, 7);
+        // A stale retirement receipt must not clear the next owned request.
+        let next = service.start(Job::Open(PathBuf::from("missing-next-source.wav"))).unwrap();
+        assert!(next > id);
+        assert!(!service.retired(next));
+        while !service.retired(next) {
+            assert!(Instant::now() < deadline, "Next source request did not run");
+            thread::sleep(Duration::from_millis(2));
+        }
+        let observed = service.snapshot();
+        assert_eq!(observed.generation, next);
+        assert!(!observed.busy && observed.error.is_some());
+    }
+    #[test]
+    fn discovery_is_visible_while_inference_is_still_busy() {
+        let serial = AtomicU64::new(9);
+        let mut state = Snapshot { generation: 9, busy: true, label: "Preparing audio…".into(), percent: 0., ..Default::default() };
+        let view = Mutex::new(Arc::new(state.clone()));
+        let status = crate::engine_status::EngineStatus { ok: true, ..Default::default() };
+        let started = Instant::now();
+        assert!(publish_discovery(&mut state, &view, &serial, 9, &status, 4, Some(started)));
+        let observed = view.lock().unwrap().clone();
+        assert!(observed.busy && observed.ready && observed.result.is_none());
+        assert_eq!(observed.engine_revision, 4);
+        assert_eq!(observed.engine_probe_started, Some(started));
+        // Later progress must not restore the old "not ready" snapshot.
+        state.label = "Splitting stems".into(); state.percent = 33.;
+        publish(&mut state, &view);
+        assert!(view.lock().unwrap().ready);
+    }
+    #[test]
+    fn stale_discovery_cannot_overwrite_a_newer_request_or_cancel() {
+        for (generation, serial) in [(8, 9), (9, 10)] {
+            let mut state = Snapshot { generation, busy: true, ..Default::default() };
+            let view = Mutex::new(Arc::new(state.clone()));
+            assert!(!publish_discovery(&mut state, &view, &AtomicU64::new(serial), 9,
+                &crate::engine_status::EngineStatus { ok: true, ..Default::default() }, 1, Some(Instant::now())));
+            assert_eq!(state.revision, 0);
+            assert!(!view.lock().unwrap().ready);
+        }
+    }
+    #[test]
+    fn loading_reserves_the_source_final_percent_in_each_stage() {
+        assert_eq!(loading_stage(Mode::Stems, false), ("Loading stems…", 99.));
+        assert_eq!(loading_stage(Mode::Vocals, true), ("Loading vocals…", 99.));
+        assert_eq!(loading_stage(Mode::Combined, false), ("1/2 · Loading stems…", 49.5));
+        assert_eq!(loading_stage(Mode::Combined, true), ("2/2 · Loading vocals…", 99.5));
+        assert!(!SplitProgress::running("Loading stems…", 99., true).cancellable);
+        assert_eq!(SplitProgress::stage("Splitting stems", 98., Mode::Stems, true, false).percent, 49.);
+        assert_eq!(SplitProgress::stage("Separating vocals", 98., Mode::Vocals, true, false).percent, 99.);
+    }
+    #[test]
+    fn handoff_cancel_is_epoch_owned_and_retains_captured_rollback() {
+        let original = ("original-project", "accepted-mix-and-dirty-state");
+        let mut handoff = SplitHandoff::new(40, 7, Mode::Stems, true, original);
+        assert!(handoff.progress(39).is_none());
+        assert!(handoff.cancel(39).is_none());
+        assert!(handoff.continue_after_acceptance(40));
+        assert_eq!(handoff.cancel(40), Some(original));
+        assert!(handoff.cancel(40).is_none());
+        assert!(!handoff.progress(40).unwrap().cancellable);
+        assert!(!handoff.continue_after_acceptance(40));
+        handoff.epoch = 41; // Native rollback supersedes the rejected candidate.
+        assert!(handoff.progress(40).is_none());
+        assert_eq!(handoff.rollback, original);
+        assert!(handoff.progress(41).is_some());
+    }
+    #[test]
+    fn combined_continuation_requires_accepted_current_stems() {
+        let stems = SplitHandoff::new(10, 4, Mode::Stems, true, "original");
+        assert!(!stems.continue_after_acceptance(11));
+        assert!(stems.continue_after_acceptance(10));
+        // Stage two captures the accepted six-lane project, never the original.
+        let mut vocals = SplitHandoff::new(11, 5, Mode::Vocals, true, "accepted-six-lanes");
+        assert!(!vocals.continue_after_acceptance(11));
+        assert_eq!(vocals.cancel(11), Some("accepted-six-lanes"));
+        assert!(!SplitHandoff::new(10, 4, Mode::Stems, false, "original").continue_after_acceptance(10));
     }
 
     struct Fixture(PathBuf);

@@ -101,7 +101,7 @@ pub struct Transport {
     focus_player_pending: bool,
     #[cfg(feature = "ui-tests")]
     last_focus_recovery_scope_owned: Option<bool>,
-    progress: Option<(String, f32)>,
+    progress: Option<crate::source_jobs::SplitProgress>,
     progress_started: std::time::Instant,
     #[cfg(feature = "ui-tests")]
     pub progress_phase: Option<f32>,
@@ -215,7 +215,7 @@ impl Transport {
             "transport-output"=>true,
             "transport-transpose-down"|"transport-transpose-reset"|"transport-transpose-up"|"transport-tempo-down"|"transport-tempo-reset"|"transport-tempo-up"=>self.audio_available&&self.duration>0.,
             "transport-bpm-down"|"transport-bpm-up"=>self.bpm_enabled(),
-            "split-cancel"=>self.progress.is_some(),
+            "split-cancel"=>self.progress.as_ref().is_some_and(|progress|progress.cancellable),
             "transport-karaoke"=>self.audio_available&&self.split&&self.progress.is_none(),
             "transport-split"=>self.audio_available&&self.progress.is_none(),
             "transport-stem-files"=>self.audio_available&&self.split&&self.can_reveal_stems&&self.progress.is_none(),
@@ -522,6 +522,9 @@ impl Transport {
     }
 
     pub fn set_progress(&mut self, progress: Option<(String, f32)>, cx: &mut Context<Self>) {
+        self.set_split_progress(progress.map(|(label, percent)| crate::source_jobs::SplitProgress { label, percent, cancellable: true }), cx);
+    }
+    pub fn set_split_progress(&mut self, progress: Option<crate::source_jobs::SplitProgress>, cx: &mut Context<Self>) {
         if self.progress != progress {
             if self.progress.is_none() {
                 self.progress_started = std::time::Instant::now();
@@ -981,9 +984,9 @@ impl Render for Transport {
                             .child(self.bpm_field(window,cx))
                             .child(self.bpm_step("transport-bpm-up","+",1.,cx)),
                     )
-                    .when_some(self.progress.clone(), |d, (label, percent)| d.child(
-                        self.probe("split-progress", singz_uikit::split_progress(label, percent, self.progress_phase()).id("split-progress")
-                            .child(self.probe("split-cancel", self.footer_control("split-cancel",singz_uikit::split_cancel("split-cancel"),cx))))
+                    .when_some(self.progress.clone(), |d, progress| d.child(
+                        self.probe("split-progress", singz_uikit::split_progress(progress.label, progress.percent, self.progress_phase()).id("split-progress")
+                            .when(progress.cancellable, |pill| pill.child(self.probe("split-cancel", self.footer_control("split-cancel",singz_uikit::split_cancel("split-cancel"),cx)))))
                     ))
                     .when(self.progress.is_none(), |d| d
                     .when(self.split, |d| d.child(

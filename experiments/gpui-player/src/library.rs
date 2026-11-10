@@ -136,7 +136,7 @@ const SONGS: [DemoSong; 12] = [
     },
 ];
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct CatalogSong {
     title: String,
     saved: String,
@@ -146,6 +146,7 @@ struct CatalogSong {
 }
 
 pub struct LibraryScreen {
+    backdrop_revision: u64,
     pub guides: singz_uikit::GuideAnchors,
     page_scroll: ScrollHandle,
     songs: Vec<CatalogSong>,
@@ -200,6 +201,7 @@ fn catalog_date(date: &str) -> String {
 impl EventEmitter<LibraryEvent> for LibraryScreen {}
 
 impl LibraryScreen {
+    pub fn backdrop_revision(&self) -> u64 { self.backdrop_revision }
     pub fn refresh_locale(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search.update(cx, |input, cx| input.set_placeholder(crate::i18n::t("library.dropScreen.searchPlaceholder"), window, cx));
         cx.notify();
@@ -226,11 +228,16 @@ impl LibraryScreen {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search projects…"));
         let subscription = cx.subscribe_in(&search, window, |this, state, event, _, cx| {
             if matches!(event, InputEvent::Change) {
-                this.query = state.read(cx).value().to_string();
+                let query = state.read(cx).value().to_string();
+                if this.query != query {
+                    this.query = query;
+                    this.backdrop_revision = this.backdrop_revision.wrapping_add(1);
+                }
                 cx.notify();
             }
         });
         Self {
+            backdrop_revision: 0,
             native_root: String::new(),
             delete_error: None,
             drive: Default::default(),
@@ -274,12 +281,14 @@ impl LibraryScreen {
     pub fn set_root(&mut self, root: String, cx: &mut Context<Self>) {
         if self.native_root != root {
             self.native_root = root;
+            self.backdrop_revision = self.backdrop_revision.wrapping_add(1);
             cx.notify();
         }
     }
     pub fn set_drive(&mut self, drive: crate::drive_state::Snapshot, cx: &mut Context<Self>) {
         if !crate::integration::fixture_mode() && self.drive != drive {
             self.drive = drive;
+            self.backdrop_revision = self.backdrop_revision.wrapping_add(1);
             cx.notify();
         }
     }
@@ -469,6 +478,7 @@ impl LibraryScreen {
     pub fn set_delete_error(&mut self, error: Option<String>, cx: &mut Context<Self>) {
         if self.delete_error != error {
             self.delete_error = error;
+            self.backdrop_revision = self.backdrop_revision.wrapping_add(1);
             cx.notify();
         }
     }
@@ -481,7 +491,7 @@ impl LibraryScreen {
         projects: Vec<crate::integration::Project>,
         cx: &mut Context<Self>,
     ) {
-        self.songs = projects
+        let songs = projects
             .into_iter()
             .map(|p| CatalogSong {
                 title: p.name,
@@ -490,8 +500,12 @@ impl LibraryScreen {
                 project_dir: Some(p.dir),
                 stems: p.lanes.len(),
             })
-            .collect();
-        cx.notify();
+            .collect::<Vec<_>>();
+        if self.songs != songs {
+            self.songs = songs;
+            self.backdrop_revision = self.backdrop_revision.wrapping_add(1);
+            cx.notify();
+        }
     }
     #[cfg(feature = "ui-tests")]
     pub fn project_delete_bounds(&self, dir: &std::path::Path) -> Option<Bounds<Pixels>> {
@@ -560,8 +574,11 @@ impl LibraryScreen {
         self.search.read(cx).focus_handle(cx).is_focused(window)
     }
     pub fn set_open_song(&mut self, title: Option<SharedString>, cx: &mut Context<Self>) {
-        self.open_song = title;
-        cx.notify();
+        if self.open_song != title {
+            self.open_song = title;
+            self.backdrop_revision = self.backdrop_revision.wrapping_add(1);
+            cx.notify();
+        }
     }
 
     /// Match the reference's paused CSS animation clock in hidden captures.

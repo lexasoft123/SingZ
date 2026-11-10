@@ -12,8 +12,8 @@ pub fn run(handle: AnyWindowHandle, view: Entity<Player>, directory: PathBuf, cx
                 let mut states = vec![("library".to_owned(),Screen::Library,64.),("settings".to_owned(),Screen::Settings,64.),("player".to_owned(),Screen::Player,64.)];
                 if width == 1280. { for (index,position) in [64.25,64.2666667,64.2833333,64.3,64.3166667,64.3333333,71.9833333,72.,72.0166667,71.8333333,71.85,71.8666667].into_iter().enumerate() { states.push((format!("lyrics-frame-{index:02}"),Screen::Player,position)); } }
                 for (name, screen, position) in states {
-                    handle.update(cx, |_, _, cx| view.update(cx, |this, cx| {
-                        this.backdrop = None;
+                    handle.update(cx, |_, window, cx| view.update(cx, |this, cx| {
+                        this.backdrop.borrow_mut().clear(window, cx);
                         this.screen = screen;
                         this.loaded_song = screen == Screen::Player;
                         this.library.update(cx, |library,cx| { library.set_open_song(None,cx); library.set_animation_time(1.,cx); });

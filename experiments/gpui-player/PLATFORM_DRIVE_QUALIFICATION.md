@@ -2,26 +2,39 @@
 
 ## Current state — 2026-11-10
 
-VM403 now passes both complete native Drive journeys from published app
-`03c22a6c` / UIKit `6f694bf0`, using observer `36c2ea5d` in a separate directory:
+VM403 passes both complete native Drive journeys from published app
+`391d46d51823308a86e8b9069555973f5fb34630` / UIKit
+`a954c8405f9577deb2a891683cb45733bd1819dc`, using the separately pinned
+observer `36c2ea5d`:
 
 | Journey | Actual app runs | Captures | Result |
 | --- | --- | --- | --- |
 | `drive-retirement` | 2 | 20 | Both sizes pass Delete-last, name reuse, typed Rename and separate-lineage retirement proofs. |
 | `drive-empty` | 6 | 14 | Both sizes pass writer publication, fresh download/open and server-stopped offline reopen. |
 
-All 34 full screenshots and their hashes/state metadata received independent
-visual review. Pending status remains pending until the final sync settles;
-fresh and offline empty-player images match exactly at each size. One visual
-defect remains: the library's literal folder emoji renders as a missing-glyph
-box in 12 retirement and four empty-publication captures. No additional button/
-message overlap or clipped rename/delete controls was observed. These are native
-state/regression results, not matched production visual parity.
+All 34 current full screenshots, 34 capture hashes, 30 linked workflow-proof
+hashes and state/geometry metadata received independent review. All eight app
+runs exit naturally with code 0, no forced stop and no app survivors. Pending
+status remains pending until the final sync settles. The folder-glyph defect is
+fixed in all 16 affected Library captures: a complete yellow folder has clear
+spacing from the path/subtitle. No additional button/message overlap or clipped
+rename/delete controls was observed. These are native state/regression results,
+not matched production visual parity. The older and current fixtures differ in
+paths, dates and animation phase, so no full-frame pixel-equivalence claim is made.
 
-The observers retain 815 retirement and 303 empty-journey CPU/RSS samples,
-actual per-run process/window identities, natural exits and unchanged private-
-display foreground. No input helper was observed. Live FPS is null; per-process
-GPU counters and a shown native frame remain unqualified.
+UIKit owns the Linux-only 2,880-byte U+1F4C1 Noto color-font subset and its
+metadata/license in both native assets and `dist/fonts`; the existing production
+`📁` glyph is preserved. All 78 pre-existing font binaries retain identical Git
+blobs. This verifies font distribution and the scoped visible fix, not complete
+production typography parity. Current local split/backdrop work is excluded
+from this published runtime.
+
+The independent Linux observers retain 799 retirement and 298 empty-journey
+CPU/RSS samples (UI/helper: 446/353 and 206/92), actual per-run process/window
+identities, and 454/221 unchanged private-display foreground observations. Every
+capture is hidden/inactive at 2× and every observed X client is unmapped. No
+input helper was observed. Live FPS is null; per-process GPU counters and a
+shown native frame remain unqualified.
 
 The dedicated rootless container `singz-gpui-loopback-36c2ea5d` exposes only
 `/dev/snd/controlC2` and the unused virtual playback endpoint
@@ -33,13 +46,21 @@ foreign permission denials while preserving owned identity/cleanup failures.
 The next attempt correctly failed because the original container exposed no
 audio devices. Both rejected runs are retained.
 
-Evidence is under `/tmp/singz-native-tour-a11y-20261109/`:
-`linux-drive-retirement-03c22a6c-v3`, `linux-drive-empty-03c22a6c-v1`, and their
-`linux-drive-*-visual-review-v1.md` reports. Target originals remain in
-`/lab/checkpoint-711ac271/`. Compiled source/runtime stayed frozen; the observer
-bundle is separately pinned. The nine-stage Linux build/test pipeline and
-34-case relocated canonical decoder matrix pass; see
-`NATIVE_CODEC_STATUS_REVIEW.md`.
+Current evidence is under `/tmp/singz-native-tour-a11y-20261109/`:
+`linux-drive-retirement-font-v1`, `linux-drive-empty-font-v1` and
+`linux-font-full-visual-review-v1.md` (34 per-file verdicts). Target build
+originals remain in `/lab/checkpoint-391d46d5-a954c840/evidence-v4/`: all nine
+build/test stages pass with source and SDK verification. Both capture manifests
+pin app SHA-256
+`b79715a9b74c06359b589a65907e14bc2eeb55c458b7d32ed96f80c46e62aecb`.
+The relocated 34-case canonical decoder matrix also passed on the earlier
+`03c22a6c` checkpoint; see `NATIVE_CODEC_STATUS_REVIEW.md` for its exact scope.
+
+The earlier `03c22a6c` / UIKit `6f694bf0` functional passes remain historical
+evidence in `linux-drive-retirement-03c22a6c-v3`,
+`linux-drive-empty-03c22a6c-v1` and their
+`linux-drive-*-visual-review-v1.md` reports. Their 16 missing-folder glyphs are
+retained as the pre-fix visual failure, not the current acceptance status.
 
 Dell now has the exact public `39ba720e` / UIKit `6f694bf0` source and a
 successfully published pinned codec SDK. Windows helper/app and Drive journey

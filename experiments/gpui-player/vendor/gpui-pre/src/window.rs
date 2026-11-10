@@ -3101,6 +3101,20 @@ impl Window {
             .render_to_image(&self.rendered_frame.scene)
     }
 
+    /// Capture only primitives already painted in this frame, without presenting
+    /// them or recursing through layout/draw. Call from a canvas paint callback
+    /// placed before overlays that must be excluded (for example a modal).
+    /// Deferred draws not painted yet are deliberately not included.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn render_painted_prefix_to_image(&self) -> anyhow::Result<image::RgbaImage> {
+        anyhow::ensure!(
+            self.invalidator.inner.borrow().draw_phase == DrawPhase::Paint,
+            "Paint-prefix capture is only available during paint"
+        );
+        self.platform_window
+            .render_to_image(&self.next_frame.scene.painted_prefix())
+    }
+
     /// Returns the quads in the most recently rendered frame's scene, so tests can assert on
     /// painted output without rasterizing the frame. Quad bounds are in scaled pixels and are
     /// not clipped; each quad carries the content mask it will be clipped to when drawn. Quads

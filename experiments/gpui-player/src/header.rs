@@ -57,6 +57,21 @@ pub struct Header {
 impl EventEmitter<HeaderEvent> for Header {}
 
 impl Header {
+    /// Visible values only: redundant host setters, hover and modal typing do
+    /// not cause a full-window backdrop readback.
+    pub fn backdrop_fingerprint(&self, cx: &App) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut state = std::collections::hash_map::DefaultHasher::new();
+        self.output_label.hash(&mut state);
+        self.monitor_label.hash(&mut state);
+        (self.monitor_stopping, self.monitor_attention, self.save_status,
+            self.save_enabled, self.native_audio_ready, self.training,
+            self.loaded, self.catalog, self.import_available, self.engine_ready,
+            self.editing, self.rename_enabled).hash(&mut state);
+        self.title.hash(&mut state);
+        if self.editing { self.title_input.read(cx).value().hash(&mut state); }
+        state.finish()
+    }
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx));
         let subscription = cx.subscribe_in(&input, window, |this, _, event, _, cx| {
